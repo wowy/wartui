@@ -26,9 +26,16 @@ pub const SCAN_CHANNELS: [u8; 40] = [
 /// `NUM_SCAN_CHANNELS`, `src/WiFiOps.cpp:66`.
 pub const NUM_SCAN_CHANNELS: u8 = 40;
 
-/// `MAX_NODES`, `src/WiFiOps.h:56`. The firmware's node table is this big, so
-/// there is no point planning for more.
-pub const MAX_NODES: usize = 24;
+/// The largest fleet wartui supports.
+///
+/// Twenty, because that is how many peers an ESP-NOW radio can hold and a node
+/// this host cannot address is not a node it can drive. The vendor firmware's
+/// own table is twenty-four (`src/WiFiOps.h:56`), but the four it has spare are
+/// unreachable from here: the bridge would refuse to register them, every
+/// assignment to them would be refused, and the planner would be partitioning
+/// the channel pool among nodes that never hear the result. Anything above
+/// twenty is unsupported rather than degraded.
+pub const MAX_NODES: usize = 20;
 
 /// `NODE_STAGGER_WINDOW_MS`, `src/WiFiOps.h:59`.
 pub const NODE_STAGGER_WINDOW_MS: u32 = 120;

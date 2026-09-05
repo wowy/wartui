@@ -402,12 +402,25 @@ fn transmit(
         }
         match manager.add_peer(peer(dst)) {
             Ok(()) => {}
-            // The radio's table holds twenty and the vendor firmware's node
-            // table holds twenty-four, so a large fleet can reach this. Which
-            // peer to give up is a policy question, and policy lives on the
-            // host: it can free a slot with `RemovePeer` and try again.
+            // The radio's table holds twenty entries in total, and one of them
+            // is the broadcast peer `esp-radio` registers at init
+            // (`esp_now/mod.rs:726`). That slot is worth more to a twentieth
+            // node than it is to us: this bridge only ever *receives*
+            // broadcasts, nodes send them, and ESP-NOW delivers a received
+            // frame whether or not its sender is a peer. So give it up and try
+            // once more. A second refusal means a fleet above the twenty
+            // `MAX_NODES` wartui supports, which the host reports as such.
             Err(EspNowError::Error(esp_radio::esp_now::Error::PeerListFull)) => {
-                return SendStatus::PeerTableFull;
+                if manager.remove_peer(&BROADCAST).is_err() {
+                    return SendStatus::PeerTableFull;
+                }
+                match manager.add_peer(peer(dst)) {
+                    Ok(()) | Err(EspNowError::Error(esp_radio::esp_now::Error::PeerExists)) => {}
+                    Err(EspNowError::Error(esp_radio::esp_now::Error::PeerListFull)) => {
+                        return SendStatus::PeerTableFull;
+                    }
+                    Err(_) => return SendStatus::Rejected,
+                }
             }
             Err(EspNowError::Error(esp_radio::esp_now::Error::PeerExists)) => {}
             Err(_) => return SendStatus::Rejected,

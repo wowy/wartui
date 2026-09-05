@@ -20,9 +20,12 @@ figure, taken from unacknowledged sends where the callback waits out the radio's
 whole retry chain. A dumb bridge has an order of magnitude in hand.
 
 Peers are added on demand (`ensure_peer`) and never removed as a side effect of
-sending. When the radio's twenty-entry peer table fills, the bridge says
-`PeerTableFull` and leaves the choice of who to evict to the host, where a
-policy can be tested.
+sending. The radio's table holds twenty entries in total, one of which
+`esp-radio` spends on the broadcast peer at init; since this bridge only ever
+receives broadcasts and ESP-NOW delivers a received frame whether or not its
+sender is a peer, that slot is given up to make room for a twentieth node.
+A refusal after that is a genuine `PeerTableFull`, and means a fleet above the
+twenty nodes wartui supports.
 
 ## Building and flashing
 
