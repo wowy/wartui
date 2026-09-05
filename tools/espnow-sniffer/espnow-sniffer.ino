@@ -123,6 +123,12 @@ static void noteAck(const uint8_t *receiver) {
   }
 }
 
+// Total acknowledgements seen, whoever they were for. This is the control
+// that makes a zero per-transmitter count meaningful: without it, "nobody
+// acknowledged" and "no acknowledgement ever reached this callback" are the
+// same reading, and the second is far more likely to be a mistake of mine.
+static volatile uint32_t ack_frames = 0;
+
 static volatile uint32_t espnow_frames = 0;
 static volatile uint32_t promisc_frames = 0;
 static volatile uint32_t foreign_action = 0;
@@ -184,7 +190,10 @@ static void onPromiscuous(void *buf, wifi_promiscuous_pkt_type_t type) {
   // of the station being acknowledged. Counted, never queued -- a busy channel
   // produces far too many to print.
   if (type == WIFI_PKT_CTRL) {
-    if (len >= 10 && p[0] == 0xD4) noteAck(&p[4]);
+    if (len >= 10 && p[0] == 0xD4) {
+      ack_frames++;
+      noteAck(&p[4]);
+    }
     return;
   }
   if (type != WIFI_PKT_MGMT) return;
@@ -244,11 +253,16 @@ static void drainQueue() {
 }
 
 static void report(uint8_t channel) {
-  Serial.printf("# alive: ch=%u  esp-now=%lu  promiscuous=%lu  other-action=%lu  dropped=%lu  "
-                "uptime=%lus\n",
+  Serial.printf("# alive: ch=%u  esp-now=%lu  promiscuous=%lu  other-action=%lu  acks=%lu  "
+                "dropped=%lu  uptime=%lus\n",
                 channel, (unsigned long)espnow_frames, (unsigned long)promisc_frames,
-                (unsigned long)foreign_action, (unsigned long)dropped,
-                (unsigned long)(millis() / 1000));
+                (unsigned long)foreign_action, (unsigned long)ack_frames,
+                (unsigned long)dropped, (unsigned long)(millis() / 1000));
+
+  if (ack_frames == 0) {
+    Serial.println("#   NO acknowledgements captured at all, so the per-transmitter counts "
+                   "below mean nothing -- control-frame capture is not working");
+  }
 
   for (uint8_t i = 0; i < MAX_TALKERS; i++) {
     if (!talkers[i].used) continue;
@@ -288,6 +302,14 @@ void setup() {
   // Action frames carry ESP-NOW; control frames carry the acknowledgements.
   filter.filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT | WIFI_PROMIS_FILTER_MASK_CTRL;
   esp_wifi_set_promiscuous_filter(&filter);
+
+  // Control frames are gated a second time by their own subtype filter, and
+  // setting only the mask above delivers none of them. Missing this made an
+  // earlier capture report zero acknowledgements from an instrument that was
+  // never switched on.
+  wifi_promiscuous_filter_t ctrl_filter = {};
+  ctrl_filter.filter_mask = WIFI_PROMIS_CTRL_FILTER_MASK_ACK;
+  esp_wifi_set_promiscuous_ctrl_filter(&ctrl_filter);
   esp_wifi_set_promiscuous_rx_cb(onPromiscuous);
   setFixedChannel(MESH_CHANNEL);
 
