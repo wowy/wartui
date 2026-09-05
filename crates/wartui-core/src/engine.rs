@@ -8,21 +8,24 @@
 //! in microseconds against a clock a test invents, and what makes it
 //! impossible for this code to block the link by accident.
 //!
-//! This build is receive-only: [`ActionBatch::urgent`] is always empty because
-//! nothing here transmits yet. The channel is there because Phase 4's
-//! assignments go down it, and because leaving the shape right costs nothing
-//! now and a refactor later.
+//! From Phase 4 it transmits, and the whole of that lives here as well:
+//! allocating an epoch, waiting for the heartbeat that opens a node's 300 ms
+//! admin window, putting the assignment down [`ActionBatch::urgent`], and
+//! believing it landed only when the bridge reports a MAC-layer acknowledgement
+//! — never when it reports a successful enqueue.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use wartui_bridge::{BridgeInfo, LinkEvent};
-use wartui_proto::air::{Frame, MsgType, RecordKind, WardriveLine};
-use wartui_proto::link::{BridgeToHost, Mac};
-use wartui_proto::plan::ChannelPool;
+use wartui_proto::air::{AdminMsg, Frame, MsgType, RecordKind, WardriveLine, wire_version};
+use wartui_proto::link::{BridgeToHost, EspNowPayload, HostToBridge, Mac, SendStatus};
+use wartui_proto::plan::{ChannelPool, IndexRun};
 
 use crate::position::PositionChain;
-use crate::record::{Heartbeat, NodeSeen, Observation, RawFrame, Record};
+use crate::record::{
+    AdminOutcome, AssignmentSent, Heartbeat, NodeSeen, Observation, RawFrame, Record,
+};
 
 /// The time, in both of the forms this code needs.
 ///
@@ -50,6 +53,29 @@ pub enum Event {
     Link(LinkEvent),
     /// The periodic tick. Drives liveness ageing and the status poll.
     Tick,
+    /// Something the operator asked for.
+    Command(Command),
+}
+
+/// An operator's instruction to the fleet.
+///
+/// Deliberately an event like any other rather than a method on the engine: a
+/// keypress and a heartbeat have to be ordered against each other, and routing
+/// both through [`FleetEngine::handle`] is what makes that ordering testable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Command {
+    /// Give one node a contiguous range of scan-channel indices.
+    ///
+    /// Nothing goes out immediately. A node only listens for an assignment in
+    /// the 300 ms it holds open after a heartbeat (`src/WiFiOps.cpp:718-739`);
+    /// the rest of the time its radio is away scanning some other channel. So
+    /// this marks the node dirty and the frame goes on the next heartbeat.
+    Assign {
+        /// Which node.
+        mac: Mac,
+        /// The range it should scan.
+        range: IndexRun,
+    },
 }
 
 /// What the engine wants done as a result.
@@ -59,8 +85,9 @@ pub struct ActionBatch {
     pub records: Vec<Record>,
     /// Commands that can wait behind anything else.
     pub bulk: Vec<wartui_proto::link::HostToBridge>,
-    /// Commands racing a node's 300 ms admin window. Always empty until
-    /// Phase 4 enables transmit.
+    /// Commands racing a node's 300 ms admin window, sent ahead of anything
+    /// in `bulk`. In practice: assignments, and only ever in the moment after
+    /// a heartbeat.
     pub urgent: Vec<wartui_proto::link::HostToBridge>,
 }
 
@@ -90,6 +117,18 @@ pub struct EngineConfig {
     pub record_raw: bool,
     /// Where the host believes it is.
     pub position: PositionChain,
+    /// How long to wait for a bridge to report what became of an assignment
+    /// before writing it down as unanswered. Generous: the bridge blocks on
+    /// the transmit callback, and a busy radio can take tens of milliseconds.
+    pub admin_timeout: Duration,
+    /// The last assignment epoch any wartui is known to have used against this
+    /// database, from [`crate::Store::assignment_base`]. Epochs are allocated
+    /// from `base + 1` upwards.
+    ///
+    /// Divergence 4: the vendor core keeps this counter in RAM and resets it
+    /// to 1 every boot (`src/WiFiOps.h:218`), so a restarted core that
+    /// recomputes an assignment a node already holds is silently ignored.
+    pub assignment_base: u64,
 }
 
 impl Default for EngineConfig {
@@ -101,6 +140,8 @@ impl Default for EngineConfig {
             tail_len: 200,
             record_raw: false,
             position: PositionChain::empty(),
+            admin_timeout: Duration::from_secs(2),
+            assignment_base: 0,
         }
     }
 }
@@ -139,10 +180,53 @@ pub struct NodeState {
     /// The node sent a core-protocol frame, which only an encrypted node does.
     /// wartui cannot talk to it until encryption is turned off in its web UI.
     pub encrypted: bool,
+    /// What this host wants the node to be scanning.
+    pub desired: Option<Assignment>,
+    /// What the node acknowledged, which is a different thing. Cleared when it
+    /// reboots, because a reboot means it has forgotten.
+    pub confirmed: Option<Assignment>,
+    /// Whether [`Self::desired`] still needs to be delivered. Set when the
+    /// operator asks and when the node reboots; cleared only on an
+    /// acknowledgement, never on a successful enqueue.
+    pub dirty: bool,
+    /// How many times an assignment has been put on the air for this node.
+    pub admin_attempts: u32,
+    /// What happened to the most recent attempt.
+    pub last_outcome: Option<AdminOutcome>,
+    /// Heartbeat-to-transmit-callback microseconds of the most recent
+    /// acknowledged assignment, as the bridge measured it.
+    pub last_latency_us: Option<u32>,
+    /// Bridge-local microsecond stamp of the most recent heartbeat, which is
+    /// the near end of that measurement.
+    last_heartbeat_rx_us: Option<u32>,
+    /// Gaps between recent heartbeats, in milliseconds, newest last.
+    beat_gaps: VecDeque<u32>,
+}
+
+/// A channel range, and the fleet arithmetic it was computed against.
+///
+/// The index and count travel with the range rather than being read live at
+/// send time. Divergence 7: the vendor core reads `node_count` at the moment it
+/// transmits (`src/WiFiOps.cpp:651`) while the ranges came from an earlier
+/// recalculation, so a node that joins in between is told a fleet size that
+/// disagrees with the partition its own range was cut from — and computes the
+/// wrong transmit stagger slot from it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Assignment {
+    /// The inclusive run of [`wartui_proto::plan::SCAN_CHANNELS`] indices.
+    pub range: IndexRun,
+    /// This node's slot in the fleet-wide stagger order.
+    pub node_index: u8,
+    /// Fleet size as of this assignment.
+    pub node_count: u8,
+    /// The persisted monotonic epoch it was allocated from.
+    pub counter: u64,
 }
 
 impl NodeState {
-    fn new(mac: Mac, now: Now) -> Self {
+    /// A node that has just been heard from for the first time.
+    #[must_use]
+    pub fn new(mac: Mac, now: Now) -> Self {
         Self {
             mac,
             first_seen_ms: now.unix_ms,
@@ -155,9 +239,52 @@ impl NodeState {
             observations: 0,
             link_rssi: None,
             encrypted: false,
+            desired: None,
+            confirmed: None,
+            dirty: false,
+            admin_attempts: 0,
+            last_outcome: None,
+            last_latency_us: None,
+            last_heartbeat_rx_us: None,
+            beat_gaps: VecDeque::new(),
+        }
+    }
+
+    /// How long this node is taking between heartbeats, in milliseconds.
+    ///
+    /// The median of the last few gaps rather than the last one. A node
+    /// heartbeats once per completed sweep, so this is proportional to how many
+    /// channels it is scanning — which is the whole proof that an assignment
+    /// landed, visible without serial access to the node. The median is what
+    /// keeps one lost heartbeat, which doubles a single gap, from reading as a
+    /// range twice the size.
+    #[must_use]
+    pub fn beat_period_ms(&self) -> Option<u32> {
+        if self.beat_gaps.is_empty() {
+            return None;
+        }
+        let mut gaps: Vec<u32> = self.beat_gaps.iter().copied().collect();
+        gaps.sort_unstable();
+        Some(gaps[gaps.len() / 2])
+    }
+
+    fn note_beat_gap(&mut self, now: Now) {
+        if let Some(previous) = self.last_heartbeat {
+            let gap = now.mono.duration_since(previous).as_millis();
+            if self.beat_gaps.len() >= BEAT_WINDOW {
+                self.beat_gaps.pop_front();
+            }
+            self.beat_gaps.push_back(u32::try_from(gap).unwrap_or(u32::MAX));
         }
     }
 }
+
+/// How many heartbeat gaps to keep per node.
+///
+/// Five: enough for the median to survive one lost heartbeat, few enough that
+/// the figure follows a new assignment within three sweeps rather than
+/// averaging the old range in for a minute.
+const BEAT_WINDOW: usize = 5;
 
 /// Running totals, all of them since the engine started.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -180,6 +307,13 @@ pub struct Counters {
     pub foreign_admin: u64,
     /// USB frames that failed their checksum.
     pub garbled: u64,
+    /// Assignments this host has put on the air.
+    pub admin_sent: u64,
+    /// Assignments a node's radio acknowledged.
+    pub admin_acked: u64,
+    /// Assignments that went out and were not acknowledged, were refused by
+    /// the bridge, or were never answered for.
+    pub admin_failed: u64,
 }
 
 /// Counters the store keeps, folded into the snapshot for display.
@@ -299,6 +433,26 @@ pub struct FleetEngine {
     dropped_baseline: Option<u32>,
     last_status_poll: Option<Instant>,
     started_at_ms: i64,
+    /// Assignments on the air, keyed by the id the bridge will echo back.
+    pending: BTreeMap<u16, PendingAdmin>,
+    /// Wraps, and harmlessly: an id only has to be unique among the handful of
+    /// assignments outstanding at once, not for the life of the session.
+    next_send_id: u16,
+    /// The last epoch handed out. Starts at the store's persisted base.
+    last_counter: u64,
+}
+
+/// One assignment in flight.
+#[derive(Debug, Clone, Copy)]
+struct PendingAdmin {
+    mac: Mac,
+    assignment: Assignment,
+    sent_mono: Instant,
+    sent_ms: i64,
+    /// The bridge's own microsecond stamp on the heartbeat that opened this
+    /// node's admin window, so the latency is measured entirely on the bridge's
+    /// clock and never picks up the host's scheduling noise.
+    heartbeat_rx_us: Option<u32>,
 }
 
 impl FleetEngine {
@@ -306,7 +460,6 @@ impl FleetEngine {
     #[must_use]
     pub fn new(config: EngineConfig, now: Now) -> Self {
         Self {
-            config,
             nodes: BTreeMap::new(),
             bridge: None,
             link_up: false,
@@ -317,6 +470,10 @@ impl FleetEngine {
             dropped_baseline: None,
             last_status_poll: None,
             started_at_ms: now.unix_ms,
+            pending: BTreeMap::new(),
+            next_send_id: 1,
+            last_counter: config.assignment_base,
+            config,
         }
     }
 
@@ -326,6 +483,7 @@ impl FleetEngine {
         let mut batch = ActionBatch::default();
         match event {
             Event::Tick => self.on_tick(now, &mut batch),
+            Event::Command(command) => self.on_command(command, now),
             Event::Link(LinkEvent::Connected(info)) => {
                 batch.records.push(Record::Bridge(crate::record::BridgeSeen {
                     mac: info.mac,
@@ -355,6 +513,7 @@ impl FleetEngine {
     }
 
     fn on_tick(&mut self, now: Now, batch: &mut ActionBatch) {
+        self.expire_pending(now, batch);
         let due = self
             .last_status_poll
             .is_none_or(|last| now.mono.duration_since(last) >= self.config.status_interval);
@@ -366,8 +525,11 @@ impl FleetEngine {
 
     fn on_message(&mut self, msg: &BridgeToHost, now: Now, batch: &mut ActionBatch) {
         match msg {
-            BridgeToHost::Rx { src, dst, rssi, channel, payload, .. } => {
-                self.on_rx(*src, *dst, *rssi, *channel, payload, now, batch);
+            BridgeToHost::Rx { src, dst, rssi, channel, rx_us, payload } => {
+                self.on_rx(*src, *dst, *rssi, *channel, *rx_us, payload, now, batch);
+            }
+            BridgeToHost::SendResult { id, status, tx_us } => {
+                self.on_send_result(*id, *status, *tx_us, now, batch);
             }
             BridgeToHost::Status { channel, peer_count, rx_count, dropped_tx, uptime_ms } => {
                 // A count below the baseline means the bridge restarted and
@@ -386,12 +548,10 @@ impl FleetEngine {
                     uptime_ms: *uptime_ms,
                 });
             }
-            // Nothing here transmits yet, and the bridge's own diagnostics are
-            // the operator's business rather than the engine's.
-            BridgeToHost::Ready { .. }
-            | BridgeToHost::SendResult { .. }
-            | BridgeToHost::Log { .. }
-            | BridgeToHost::Error { .. } => {}
+            // `Ready` reaches the engine as `LinkEvent::Connected`, and the
+            // bridge's own diagnostics are the operator's business rather than
+            // the engine's.
+            BridgeToHost::Ready { .. } | BridgeToHost::Log { .. } | BridgeToHost::Error { .. } => {}
         }
     }
 
@@ -405,6 +565,7 @@ impl FleetEngine {
         dst: Mac,
         rssi: i8,
         channel: u8,
+        rx_us: u32,
         payload: &[u8],
         now: Now,
         batch: &mut ActionBatch,
@@ -462,11 +623,19 @@ impl FleetEngine {
                 // forgotten whatever range it was assigned. The vendor core
                 // has no equivalent check and simply carries on believing
                 // its own assignment table.
-                if node.counter.is_some_and(|previous| text.counter < previous) {
+                let rebooted = node.counter.is_some_and(|previous| text.counter < previous);
+                if rebooted {
                     node.reboots += 1;
+                    // It has forgotten whatever range it held, and its own
+                    // version field went back to its boot value with it. So
+                    // the belief goes, and the range is re-issued under a
+                    // fresh epoch rather than one the node might now match.
+                    node.confirmed = None;
                 }
+                node.note_beat_gap(now);
                 node.counter = Some(text.counter);
                 node.last_heartbeat = Some(now.mono);
+                node.last_heartbeat_rx_us = Some(rx_us);
                 node.heartbeats += 1;
                 batch.records.push(Record::Heartbeat(Heartbeat {
                     node_mac: src,
@@ -474,6 +643,14 @@ impl FleetEngine {
                     counter: text.counter,
                     link_rssi: Some(rssi),
                 }));
+
+                if rebooted && node.desired.is_some() {
+                    self.reissue(src);
+                }
+                // The node is holding its admin window open for the next
+                // 300 ms and its radio will be gone after that, so this is
+                // the only moment in the sweep worth transmitting in.
+                self.send_admin(src, now, batch);
             }
             MsgType::Text => {
                 let Ok(line) = WardriveLine::parse(text.text) else {
@@ -515,6 +692,190 @@ impl FleetEngine {
             // so a future change to that dispatch cannot lose frames silently.
             MsgType::Admin => self.counters.foreign_admin += 1,
         }
+    }
+
+    /// Take an operator's instruction. Nothing goes out from here.
+    fn on_command(&mut self, command: Command, now: Now) {
+        let Command::Assign { mac, range } = command;
+        // Index and count over every node this session has seen, ordered by
+        // MAC. Deterministic, and it does not shuffle the fleet's stagger slots
+        // every time one node misses a heartbeat. Phase 5's planner replaces
+        // this with a real partition of the channel pool.
+        let node_count = u8::try_from(self.nodes.len()).unwrap_or(u8::MAX);
+        let Some(node_index) = self.nodes.keys().position(|k| *k == mac) else { return };
+        let node_index = u8::try_from(node_index).unwrap_or(u8::MAX);
+
+        // A fresh epoch even when the range is unchanged. A node adopts on
+        // `!=`, so re-sending an epoch it already holds is a frame it will
+        // acknowledge and then discard — which would look exactly like success.
+        self.last_counter += 1;
+        let assignment = Assignment { range, node_index, node_count, counter: self.last_counter };
+
+        let Some(node) = self.nodes.get_mut(&mac) else { return };
+        node.desired = Some(assignment);
+        node.dirty = true;
+        let _ = now;
+    }
+
+    /// Re-mark a node's assignment for delivery under a new epoch.
+    fn reissue(&mut self, mac: Mac) {
+        self.last_counter += 1;
+        let counter = self.last_counter;
+        if let Some(node) = self.nodes.get_mut(&mac)
+            && let Some(desired) = node.desired.as_mut()
+        {
+            desired.counter = counter;
+            node.dirty = true;
+        }
+    }
+
+    /// Put a dirty node's assignment on the air, if it has one.
+    ///
+    /// Only ever called straight off a heartbeat: that is the one moment the
+    /// node's radio is on the control channel and listening.
+    fn send_admin(&mut self, mac: Mac, now: Now, batch: &mut ActionBatch) {
+        let id = self.next_send_id;
+        self.next_send_id = self.next_send_id.wrapping_add(1).max(1);
+
+        let Some(node) = self.nodes.get_mut(&mac) else { return };
+        if !node.dirty {
+            return;
+        }
+        let Some(assignment) = node.desired else { return };
+        node.admin_attempts += 1;
+        let heartbeat_rx_us = node.last_heartbeat_rx_us;
+
+        let msg = AdminMsg {
+            assignment_version: wire_version(assignment.counter),
+            node_index: assignment.node_index,
+            node_count: assignment.node_count,
+            start_channel_idx: assignment.range.start,
+            end_channel_idx: assignment.range.end,
+        };
+        // Ten bytes into a 250-byte buffer, so this cannot fail; the encoder
+        // returns a fixed-size array precisely so the padding is structural.
+        let payload = EspNowPayload::from_slice(&msg.encode()).unwrap_or_default();
+
+        self.pending.insert(
+            id,
+            PendingAdmin {
+                mac,
+                assignment,
+                sent_mono: now.mono,
+                sent_ms: now.unix_ms,
+                heartbeat_rx_us,
+            },
+        );
+        self.counters.admin_sent += 1;
+        batch.urgent.push(HostToBridge::SendEspNow {
+            id,
+            dst: mac,
+            // Divergence 6: add if absent and never remove. The vendor core
+            // deletes the peer as a side effect of sending
+            // (`src/WiFiOps.cpp:672,676`), which is wasteful and races the
+            // transmit callback it then ignores anyway.
+            ensure_peer: true,
+            payload,
+        });
+    }
+
+    /// The bridge said what became of an assignment.
+    fn on_send_result(
+        &mut self,
+        id: u16,
+        status: SendStatus,
+        tx_us: u32,
+        now: Now,
+        batch: &mut ActionBatch,
+    ) {
+        // An id we do not know is one of ours from before a reconnect, or a
+        // reply to something else entirely. Either way there is no assignment
+        // to resolve and nothing to write down.
+        let Some(pending) = self.pending.remove(&id) else { return };
+
+        let outcome = match status {
+            SendStatus::AckOk => AdminOutcome::Acked,
+            SendStatus::AckFail => AdminOutcome::Unacked,
+            // Broadcast is never acknowledged, and an assignment is always
+            // unicast, so this is the bridge telling us the address was wrong.
+            SendStatus::Broadcast
+            | SendStatus::NoPeer
+            | SendStatus::PeerTableFull
+            | SendStatus::Rejected => AdminOutcome::Refused,
+        };
+
+        // Both stamps are the bridge's own microsecond clock, which wraps
+        // about every 71 minutes; a wrapping subtraction is correct across it.
+        let latency_us = pending.heartbeat_rx_us.map(|rx_us| tx_us.wrapping_sub(rx_us));
+
+        self.resolve(&pending, outcome, latency_us, now, batch);
+    }
+
+    /// Give up on assignments the bridge never answered for.
+    fn expire_pending(&mut self, now: Now, batch: &mut ActionBatch) {
+        let timeout = self.config.admin_timeout;
+        let stale: Vec<u16> = self
+            .pending
+            .iter()
+            .filter(|(_, p)| now.mono.duration_since(p.sent_mono) >= timeout)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in stale {
+            if let Some(pending) = self.pending.remove(&id) {
+                self.resolve(&pending, AdminOutcome::Silent, None, now, batch);
+            }
+        }
+    }
+
+    /// Record one assignment attempt's outcome, and update what we believe the
+    /// node holds.
+    fn resolve(
+        &mut self,
+        pending: &PendingAdmin,
+        outcome: AdminOutcome,
+        latency_us: Option<u32>,
+        now: Now,
+        batch: &mut ActionBatch,
+    ) {
+        let acked = outcome == AdminOutcome::Acked;
+        if acked {
+            self.counters.admin_acked += 1;
+        } else {
+            self.counters.admin_failed += 1;
+        }
+
+        if let Some(node) = self.nodes.get_mut(&pending.mac) {
+            node.last_outcome = Some(outcome);
+            if acked {
+                node.last_latency_us = latency_us;
+                // Divergence 3: cleared on the MAC-layer acknowledgement, not
+                // on a successful enqueue. Unicast ESP-NOW is acknowledged by
+                // the receiver's own hardware, so this is the difference
+                // between knowing the node has the assignment and hoping.
+                //
+                // Only if the node still wants what was sent: an operator who
+                // changed their mind while this was in flight has already
+                // marked it dirty again with a newer epoch.
+                if node.desired.is_some_and(|d| d.counter == pending.assignment.counter) {
+                    node.confirmed = Some(pending.assignment);
+                    node.dirty = false;
+                }
+            }
+        }
+
+        batch.records.push(Record::Assignment(AssignmentSent {
+            node_mac: pending.mac,
+            counter: pending.assignment.counter,
+            wire_version: wire_version(pending.assignment.counter),
+            node_index: pending.assignment.node_index,
+            node_count: pending.assignment.node_count,
+            start_idx: pending.assignment.range.start,
+            end_idx: pending.assignment.range.end,
+            created_at_ms: pending.sent_ms,
+            delivered_at_ms: Some(now.unix_ms),
+            outcome,
+            latency_us,
+        }));
     }
 
     fn push_tail(&mut self, observation: &Observation) {

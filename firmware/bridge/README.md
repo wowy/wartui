@@ -8,9 +8,21 @@ what an `ENOW` frame is, what a heartbeat means, or how channels are assigned �
 all of that lives on the host, where it is unit-testable and a fix costs a
 `cargo run` rather than a reflash.
 
-**This build is receive-only.** `SendEspNow` and the peer commands are answered
-and refused, so the bridge cannot transmit and therefore cannot disturb a live
-fleet. Transmit arrives in Phase 4.
+It transmits, and answers with the **transmit-callback** status rather than the
+enqueue result. That distinction is the point: unicast ESP-NOW is acknowledged
+by the receiver's own MAC hardware, so `AckOk` means a node really has the
+frame. The vendor core clears its dirty flag from `esp_now_send`'s return value
+(`src/WiFiOps.cpp:679`) and so believes every assignment it *queued* arrived.
+
+Measured on a C6: 28-35 ms from the heartbeat that opens a node's admin window
+to the transmit callback, against a 300 ms window — and that is the pessimistic
+figure, taken from unacknowledged sends where the callback waits out the radio's
+whole retry chain. A dumb bridge has an order of magnitude in hand.
+
+Peers are added on demand (`ensure_peer`) and never removed as a side effect of
+sending. When the radio's twenty-entry peer table fills, the bridge says
+`PeerTableFull` and leaves the choice of who to evict to the host, where a
+policy can be tested.
 
 ## Building and flashing
 
@@ -37,9 +49,20 @@ wartui sniff      # every frame, decoded
 bridge that answers is listening, and `received 0 frames` then points at the
 nodes rather than at the link.
 
+To check transmit, run `wartui run`, select a node and press `a`. Its `beat`
+column should fall from seconds to a fraction of one within three sweeps — a
+node heartbeats once per completed sweep, so that is the only evidence
+available that an assignment was adopted rather than merely acknowledged.
+
 ## The two things that are easy to get wrong
 
-**Never block on the USB endpoint.** `UsbSerialJtag` stops accepting bytes as
+**Never block on the USB endpoint.** (The one deliberate exception is the wait
+for a transmit callback in `transmit`, which is milliseconds against a 300 ms
+admin window and is what makes `AckOk` mean anything. `esp-radio`'s `SendWaiter`
+busy-waits in `Drop` as well as in `wait`, so there is no way to start a send
+and walk away.)
+
+ `UsbSerialJtag` stops accepting bytes as
 soon as its FIFO fills, and nothing drains that FIFO unless a host is reading.
 A blocking write from the receive path would stall the radio for as long as the
 TUI is wedged or the cable is out. Everything outbound goes through the rings in

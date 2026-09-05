@@ -165,14 +165,19 @@ async fn connect(
     let stop = Arc::new(AtomicBool::new(false));
     let announced = Arc::new(AtomicBool::new(false));
     let (dead_tx, mut dead_rx) = mpsc::channel::<String>(1);
-    // Unbounded, and deliberately so for now. It means the biased select below
-    // arbitrates only at the moment a command is taken, not at the moment it
-    // reaches the wire: a burst of bulk commands drains straight into this
-    // queue and an ADMIN behind them inherits their latency. Nothing sends bulk
-    // in volume yet — `GetStatus`, one at a time — and Phase 4 measures
-    // `admin_latency_us` precisely so this can be settled with a number rather
-    // than a guess. If it needs fixing, the fix is two bounded channels and a
-    // condvar in `write_loop`, not a deeper queue here.
+    // Unbounded, and now deliberately so rather than provisionally. The biased
+    // select below arbitrates at the moment a command is taken rather than the
+    // moment it reaches the wire, so a burst of bulk commands drains straight
+    // into this queue and an assignment behind them inherits their latency.
+    //
+    // Phase 4 measured what that costs. On a C6 bridge, heartbeat-to-transmit-
+    // callback came out at 28-35 ms against a node's 300 ms admin window —
+    // about a tenth of the budget, and that figure is the pessimistic one,
+    // taken from *unacknowledged* sends where the callback fires only after the
+    // radio exhausts its retry chain. A successful send is far quicker. There
+    // is no case for two bounded channels and a condvar in `write_loop` at
+    // those numbers; if the fleet ever grows enough bulk traffic to change
+    // them, that is the fix, and `assignment.latency_us` is where it shows up.
     let (write_tx, write_rx) = std::sync::mpsc::channel::<HostToBridge>();
 
     let reader = std::thread::Builder::new()

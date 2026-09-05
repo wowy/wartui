@@ -1,18 +1,18 @@
 //! `wartui run` — capture a fleet into the store and watch it happen.
 //!
-//! This is the whole of the tool at this phase: it listens, it writes rows, and
-//! it draws what it heard. It cannot transmit, so it can be pointed at a fleet
-//! that is already doing something useful without changing what that is.
+//! It listens, it writes rows, and it draws what it heard. It also transmits,
+//! but only when asked: `a` and `A` in the view assign the selected node a
+//! channel range, and nothing else this command does reaches the air.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use clap::{Args as ClapArgs, ValueEnum};
-use tokio::sync::{oneshot, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 use wartui_core::engine::{EngineConfig, FleetEngine, StoreStats};
 use wartui_core::position::PositionChain;
-use wartui_core::runtime::{drive, now};
+use wartui_core::runtime::{COMMAND_QUEUE, drive, now};
 use wartui_core::store::{SessionInfo, Store, StoreConfig};
 use wartui_proto::plan::ChannelPool;
 
@@ -51,8 +51,8 @@ pub struct Args {
     #[arg(long, value_name = "PATH", default_value = "wartui.db")]
     db: PathBuf,
 
-    /// Which channels the fleet should scan. Recorded now; enforced from
-    /// Phase 4, when wartui is allowed to transmit.
+    /// Which channels the fleet should scan. Recorded with the session, and
+    /// the set the view's assignment keys choose from.
     #[arg(long, value_enum, default_value_t = PoolArg::Us)]
     pool: PoolArg,
 
@@ -98,15 +98,25 @@ pub async fn run(args: Args) -> Result<()> {
     let store = Store::open(&StoreConfig::new(&args.db), &session, started.unix_ms)
         .with_context(|| format!("opening {}", args.db.display()))?;
 
-    let config = EngineConfig { pool, record_raw: args.record_raw, position, ..Default::default() };
+    let config = EngineConfig {
+        pool,
+        record_raw: args.record_raw,
+        position,
+        // Epochs continue from wherever this database left off. Reusing one a
+        // node already holds would be ignored on the air and acknowledged
+        // anyway, which is indistinguishable from success.
+        assignment_base: store.assignment_base(),
+        ..Default::default()
+    };
     let engine = FleetEngine::new(config, started);
 
     let (snapshot_tx, snapshot_rx) =
         watch::channel(Arc::new(engine.snapshot(started, StoreStats::default())));
     let (stop_tx, stop_rx) = oneshot::channel();
+    let (command_tx, command_rx) = mpsc::channel(COMMAND_QUEUE);
 
-    let capture = tokio::spawn(drive(link, store, engine, snapshot_tx, stop_rx));
-    let outcome = tui::run(snapshot_rx, stop_tx).await;
+    let capture = tokio::spawn(drive(link, store, engine, snapshot_tx, command_rx, stop_rx));
+    let outcome = tui::run(snapshot_rx, command_tx, stop_tx).await;
     // Always waited on, even when the view failed: this is what commits the
     // last batch and writes the session's end time.
     capture.await.context("the capture task panicked")?;

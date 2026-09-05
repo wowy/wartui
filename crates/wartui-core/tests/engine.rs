@@ -8,11 +8,14 @@
 use std::time::{Duration, Instant};
 
 use wartui_bridge::{BridgeInfo, LinkEvent};
-use wartui_core::engine::{Counters, EngineConfig, Event, FleetEngine, Now, StoreStats};
+use wartui_core::engine::{Command, Counters, EngineConfig, Event, FleetEngine, Now, StoreStats};
 use wartui_core::position::{PositionChain, PositionSource};
-use wartui_core::record::Record;
-use wartui_proto::air::{MsgType, TextMsg};
-use wartui_proto::link::{BROADCAST, BridgeToHost, Chip, EspNowPayload, Mac};
+use wartui_core::record::{AdminOutcome, Record};
+use wartui_proto::air::{AdminMsg, MsgType, TextMsg};
+use wartui_proto::link::{
+    BROADCAST, BridgeToHost, Chip, EspNowPayload, HostToBridge, Mac, SendStatus,
+};
+use wartui_proto::plan::IndexRun;
 
 const NODE: Mac = [0x38, 0x44, 0xBE, 0x1F, 0x57, 0x84];
 const OTHER: Mac = [0x38, 0x44, 0xBE, 0x1F, 0x57, 0x85];
@@ -41,15 +44,43 @@ fn engine(config: EngineConfig, clock: &Clock) -> FleetEngine {
 }
 
 fn rx(src: Mac, msg_type: MsgType, counter: u32, text: &[u8]) -> Event {
+    rx_at(src, msg_type, counter, text, 0)
+}
+
+/// A frame carrying the bridge's own microsecond stamp, which is the near end
+/// of every assignment-latency measurement.
+fn rx_at(src: Mac, msg_type: MsgType, counter: u32, text: &[u8], rx_us: u32) -> Event {
     let frame = TextMsg::new(msg_type, counter, text).expect("fits").encode();
     Event::Link(LinkEvent::Message(BridgeToHost::Rx {
         src,
         dst: BROADCAST,
         rssi: -41,
         channel: 6,
-        rx_us: 0,
+        rx_us,
         payload: EspNowPayload::from_slice(&frame).expect("fits"),
     }))
+}
+
+fn heartbeat(src: Mac, counter: u32) -> Event {
+    rx(src, MsgType::Heartbeat, counter, b"")
+}
+
+fn send_result(id: u16, status: SendStatus, tx_us: u32) -> Event {
+    Event::Link(LinkEvent::Message(BridgeToHost::SendResult { id, status, tx_us }))
+}
+
+/// The one assignment in a batch, decoded back off the wire.
+fn sent_admin(batch: &wartui_core::ActionBatch) -> (u16, Mac, AdminMsg) {
+    assert_eq!(batch.urgent.len(), 1, "exactly one assignment");
+    let HostToBridge::SendEspNow { id, dst, ensure_peer, payload } = &batch.urgent[0] else {
+        panic!("expected a SendEspNow")
+    };
+    assert!(ensure_peer, "divergence 6: peers are added on demand and never deleted");
+    (*id, *dst, AdminMsg::decode(payload).expect("a valid admin frame"))
+}
+
+fn assign(mac: Mac, start: u8, end: u8) -> Event {
+    Event::Command(Command::Assign { mac, range: IndexRun::new(start, end) })
 }
 
 fn observation(src: Mac, bssid: &str, rssi: i16) -> Event {
@@ -388,4 +419,262 @@ fn bridge_drops_are_counted_from_the_moment_this_host_attached() {
     assert_eq!(seen(&engine).dropped_since_attach, 0);
     engine.handle(status(9), clock.at(9));
     assert_eq!(seen(&engine).dropped_since_attach, 7);
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4: assignment
+// ---------------------------------------------------------------------------
+
+#[test]
+fn an_assignment_waits_for_the_heartbeat_that_opens_the_window() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(heartbeat(NODE, 1), clock.at(1));
+
+    // Nothing goes out at the moment the operator asks. A node's radio is away
+    // scanning some other channel for all but the 300 ms after its own
+    // heartbeat, so a frame sent now would be transmitted into silence.
+    let asked = engine.handle(assign(NODE, 5, 5), clock.at(2));
+    assert!(asked.urgent.is_empty(), "nothing is sent until the window opens");
+
+    let opened = engine.handle(heartbeat(NODE, 2), clock.at(6));
+    let (_, dst, admin) = sent_admin(&opened);
+    assert_eq!(dst, NODE);
+    assert_eq!((admin.start_channel_idx, admin.end_channel_idx), (5, 5));
+    assert_eq!(admin.assignment_version, 1, "the first epoch of a fresh database");
+    assert_eq!(counters(&engine).admin_sent, 1);
+}
+
+#[test]
+fn an_assignment_is_believed_only_once_the_node_radio_acknowledges_it() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(heartbeat(NODE, 1), clock.at(1));
+    engine.handle(assign(NODE, 0, 10), clock.at(2));
+    let (id, _, _) = sent_admin(&engine.handle(heartbeat(NODE, 2), clock.at(6)));
+
+    // Divergence 3. The vendor core clears its dirty flag from the
+    // `esp_now_send` return value, so an enqueue that nothing received still
+    // counts as an assignment delivered.
+    let batch = engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(6));
+    let node = engine.nodes().next().expect("the node");
+    assert!(!node.dirty, "acknowledged, so there is nothing left to deliver");
+    assert_eq!(node.confirmed.expect("confirmed").range, IndexRun::new(0, 10));
+    assert_eq!(counters(&engine).admin_acked, 1);
+
+    let Some(Record::Assignment(row)) = batch.records.first() else {
+        panic!("every attempt is written down")
+    };
+    assert_eq!(row.outcome, AdminOutcome::Acked);
+    assert_eq!((row.start_idx, row.end_idx), (0, 10));
+
+    // And a later heartbeat sends nothing, because there is nothing to send.
+    assert!(engine.handle(heartbeat(NODE, 3), clock.at(10)).urgent.is_empty());
+}
+
+#[test]
+fn an_unacknowledged_assignment_is_retried_on_the_next_heartbeat() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(heartbeat(NODE, 1), clock.at(1));
+    engine.handle(assign(NODE, 3, 3), clock.at(2));
+    let (id, _, first) = sent_admin(&engine.handle(heartbeat(NODE, 2), clock.at(6)));
+
+    // The observed cause is BLE coexistence on the node: NimBLE holds the one
+    // 2.4 GHz antenna through exactly the window the assignment arrives in, so
+    // the node's MAC never acknowledges. A miss costs one sweep, not the whole
+    // capture.
+    let batch = engine.handle(send_result(id, SendStatus::AckFail, 900), clock.at(6));
+    let Some(Record::Assignment(row)) = batch.records.first() else { panic!("a row") };
+    assert_eq!(row.outcome, AdminOutcome::Unacked);
+    assert!(engine.nodes().next().expect("the node").dirty, "still owed");
+
+    let (_, _, retry) = sent_admin(&engine.handle(heartbeat(NODE, 3), clock.at(10)));
+    assert_eq!(
+        retry.assignment_version, first.assignment_version,
+        "a retry of the same assignment keeps its epoch; the node never saw it"
+    );
+    assert_eq!(counters(&engine).admin_failed, 1);
+}
+
+#[test]
+fn an_assignment_the_bridge_never_answers_for_is_written_down_as_unknown() {
+    let clock = Clock::new();
+    let config = EngineConfig { admin_timeout: Duration::from_secs(2), ..Default::default() };
+    let mut engine = engine(config, &clock);
+    engine.handle(heartbeat(NODE, 1), clock.at(1));
+    engine.handle(assign(NODE, 3, 3), clock.at(2));
+    sent_admin(&engine.handle(heartbeat(NODE, 2), clock.at(6)));
+
+    assert!(engine.handle(Event::Tick, clock.at(7)).records.is_empty(), "still in flight");
+
+    let batch = engine.handle(Event::Tick, clock.at(9));
+    let Some(Record::Assignment(row)) = batch.records.first() else { panic!("a row") };
+    // Distinct from `Unacked`, where the radio did report back. Here the bridge
+    // itself went quiet, and the difference points at different hardware.
+    assert_eq!(row.outcome, AdminOutcome::Silent);
+    assert_eq!(row.latency_us, None);
+    assert!(engine.nodes().next().expect("the node").dirty);
+}
+
+#[test]
+fn the_assignment_latency_is_measured_end_to_end_on_the_bridge_clock() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(heartbeat(NODE, 1), clock.at(1));
+    engine.handle(assign(NODE, 7, 7), clock.at(2));
+
+    // The heartbeat is stamped by the bridge at 1_000_000 µs of its own uptime
+    // and the transmit callback at 1_004_500: 4.5 ms from "the node is
+    // listening" to "its radio says it has the frame", with none of the host's
+    // scheduling in between.
+    let opened = engine.handle(rx_at(NODE, MsgType::Heartbeat, 2, b"", 1_000_000), clock.at(6));
+    let (id, _, _) = sent_admin(&opened);
+    let batch = engine.handle(send_result(id, SendStatus::AckOk, 1_004_500), clock.at(6));
+
+    let Some(Record::Assignment(row)) = batch.records.first() else { panic!("a row") };
+    assert_eq!(row.latency_us, Some(4_500));
+    assert_eq!(engine.nodes().next().expect("the node").last_latency_us, Some(4_500));
+}
+
+#[test]
+fn a_latency_measured_across_the_bridge_counter_wrapping_is_still_right() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(heartbeat(NODE, 1), clock.at(1));
+    engine.handle(assign(NODE, 7, 7), clock.at(2));
+
+    // The bridge's stamp is a `u32` of microseconds and so wraps every 71
+    // minutes or so. A heartbeat 1 ms before the wrap and a callback 3.5 ms
+    // after it are 4.5 ms apart, and a wrapping subtraction says so.
+    let opened =
+        engine.handle(rx_at(NODE, MsgType::Heartbeat, 2, b"", u32::MAX - 999), clock.at(6));
+    let (id, _, _) = sent_admin(&opened);
+    let batch = engine.handle(send_result(id, SendStatus::AckOk, 3_500), clock.at(6));
+
+    let Some(Record::Assignment(row)) = batch.records.first() else { panic!("a row") };
+    assert_eq!(row.latency_us, Some(4_500));
+}
+
+#[test]
+fn a_reboot_re_issues_the_assignment_under_a_fresh_epoch() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(heartbeat(NODE, 40), clock.at(1));
+    engine.handle(assign(NODE, 2, 4), clock.at(2));
+    let (id, _, first) = sent_admin(&engine.handle(heartbeat(NODE, 41), clock.at(6)));
+    engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(6));
+    assert!(engine.nodes().next().expect("the node").confirmed.is_some());
+
+    // Divergence 5: the counter runs from the node's boot, so a value below the
+    // last one means it restarted and has forgotten its range. Its own version
+    // field went back to a boot value with it, and since a node adopts on `!=`
+    // rather than `>`, re-sending the old epoch could match what it now holds
+    // and be discarded — while still being acknowledged.
+    let batch = engine.handle(heartbeat(NODE, 1), clock.at(10));
+    let (_, _, reissued) = sent_admin(&batch);
+    assert_ne!(reissued.assignment_version, first.assignment_version);
+    assert_eq!((reissued.start_channel_idx, reissued.end_channel_idx), (2, 4));
+
+    let node = engine.nodes().next().expect("the node");
+    assert_eq!(node.reboots, 1);
+    assert!(node.confirmed.is_none(), "what it held is no longer believed");
+}
+
+#[test]
+fn epochs_carry_on_from_where_the_database_left_off() {
+    let clock = Clock::new();
+    // Divergence 4. The vendor core keeps this counter in RAM and resets it to
+    // 1 at boot, so a restarted core that recomputes an assignment a node
+    // already holds is ignored — and if the topology changed while it was
+    // down, the two views never reconcile.
+    let config = EngineConfig { assignment_base: 300, ..Default::default() };
+    let mut engine = engine(config, &clock);
+    engine.handle(heartbeat(NODE, 1), clock.at(1));
+    engine.handle(assign(NODE, 1, 1), clock.at(2));
+
+    let (_, _, admin) = sent_admin(&engine.handle(heartbeat(NODE, 2), clock.at(6)));
+    // 301 narrowed to a byte that skips zero, which the firmware never sends.
+    assert_eq!(admin.assignment_version, 46);
+}
+
+#[test]
+fn the_fleet_arithmetic_travels_with_the_assignment_rather_than_being_read_at_send_time() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(heartbeat(NODE, 1), clock.at(1));
+    engine.handle(assign(NODE, 0, 10), clock.at(2));
+
+    // Divergence 7: a node joining between the plan and the send must not
+    // change the count the earlier node is told, or that node computes its
+    // transmit stagger slot against a fleet size its own range never came from.
+    engine.handle(heartbeat(OTHER, 1), clock.at(3));
+
+    let (_, _, admin) = sent_admin(&engine.handle(heartbeat(NODE, 2), clock.at(6)));
+    assert_eq!(admin.node_count, 1, "the fleet as it was when the range was cut");
+    assert_eq!(admin.node_index, 0);
+}
+
+#[test]
+fn a_node_that_has_never_been_heard_from_cannot_be_assigned() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+
+    let batch = engine.handle(assign(NODE, 0, 0), clock.at(1));
+
+    assert!(batch.urgent.is_empty());
+    assert_eq!(engine.nodes().count(), 0, "asking about a node does not invent one");
+}
+
+#[test]
+fn the_heartbeat_period_is_the_median_of_recent_sweeps() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+
+    // Four-second sweeps, which is what a node scanning all forty channels
+    // does, with one heartbeat lost in the middle. The median is what keeps
+    // that lost beat from reading as a range twice the size.
+    for (n, at) in [1u64, 5, 9, 17, 21, 25].into_iter().enumerate() {
+        engine.handle(heartbeat(NODE, n as u32 + 1), clock.at(at));
+    }
+
+    let node = engine.nodes().next().expect("the node");
+    assert_eq!(node.beat_period_ms(), Some(4_000));
+}
+
+#[test]
+fn a_bridge_that_cannot_transmit_at_all_is_a_failure_not_a_delivery() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(heartbeat(NODE, 1), clock.at(1));
+    engine.handle(assign(NODE, 0, 0), clock.at(2));
+    let (id, _, _) = sent_admin(&engine.handle(heartbeat(NODE, 2), clock.at(6)));
+
+    let batch = engine.handle(send_result(id, SendStatus::PeerTableFull, 900), clock.at(6));
+
+    let Some(Record::Assignment(row)) = batch.records.first() else { panic!("a row") };
+    assert_eq!(row.outcome, AdminOutcome::Refused);
+    assert!(engine.nodes().next().expect("the node").dirty);
+    assert_eq!(counters(&engine).admin_acked, 0);
+}
+
+#[test]
+fn an_acknowledgement_for_an_assignment_the_operator_has_already_replaced_is_not_believed() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(heartbeat(NODE, 1), clock.at(1));
+    engine.handle(assign(NODE, 0, 0), clock.at(2));
+    let (id, _, _) = sent_admin(&engine.handle(heartbeat(NODE, 2), clock.at(6)));
+
+    // The operator changed their mind while the first frame was in flight. The
+    // ack that arrives afterwards is for a range nobody wants any more, and
+    // treating it as current would leave the fleet table describing an
+    // assignment that was superseded before it landed.
+    engine.handle(assign(NODE, 5, 9), clock.at(6));
+    engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(7));
+
+    let node = engine.nodes().next().expect("the node");
+    assert!(node.dirty, "the newer assignment is still owed");
+    assert!(node.confirmed.is_none());
+    assert_eq!(node.desired.expect("desired").range, IndexRun::new(5, 9));
 }

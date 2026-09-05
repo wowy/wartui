@@ -41,7 +41,8 @@ async fn a_simulated_fleet_becomes_a_database_and_then_a_wigle_file() {
         watch::channel(Arc::new(engine.snapshot(started, StoreStats::default())));
     let (stop_tx, stop_rx) = oneshot::channel();
 
-    let capture = tokio::spawn(drive(link, store, engine, snapshot_tx, stop_rx));
+    let (_command_tx, command_rx) = tokio::sync::mpsc::channel(4);
+    let capture = tokio::spawn(drive(link, store, engine, snapshot_tx, command_rx, stop_rx));
     tokio::time::sleep(Duration::from_secs(2)).await;
     stop_tx.send(()).expect("the capture is still running");
     capture.await.expect("the capture task should not panic");

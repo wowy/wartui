@@ -251,6 +251,25 @@ impl AdminMsg {
     }
 }
 
+/// Turn a host-side monotonic assignment counter into the byte the wire carries.
+///
+/// Divergence 4. The vendor core keeps `current_assignment_version` in RAM and
+/// resets it to 1 at every boot (`src/WiFiOps.h:218`), while nodes adopt an
+/// assignment only when the byte *differs* from the one they hold (`!=`, not
+/// `>`, `src/WiFiOps.cpp:1198`). Between them those two facts mean a core that
+/// restarts and recomputes the same assignment is silently ignored by every
+/// node that already holds it — and if the topology changed while the core was
+/// down, the two views diverge permanently with nothing to say so.
+///
+/// wartui persists a `u64` instead and narrows it here. Zero is skipped
+/// because the firmware never puts it on the wire, so a node holding a
+/// freshly-zeroed field cannot be mistaken for one holding an assignment.
+#[must_use]
+pub const fn wire_version(counter: u64) -> u8 {
+    // `% 255` lands in 0..=254; the offset moves that to 1..=255.
+    ((counter.wrapping_sub(1) % 255) as u8) + 1
+}
+
 /// Either kind of frame, dispatched on the type byte.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Frame<'a> {
