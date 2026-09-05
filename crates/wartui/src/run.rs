@@ -82,16 +82,6 @@ pub struct Args {
 }
 
 pub async fn run(args: Args) -> Result<()> {
-    if args.lat.is_none() {
-        // Said once, up front, rather than discovered at export time when the
-        // capture is over and the chance to fix it has gone.
-        eprintln!(
-            "No position given, so observations will be recorded without one and \
-             WiGLE will not accept them. Pass --lat and --lon, or wait for the GPS \
-             chain in Phase 6."
-        );
-    }
-
     let position = match (args.lat, args.lon) {
         (Some(lat), Some(lon)) => PositionChain::fixed(lat, lon, args.alt),
         (None, None) => PositionChain::empty(),
@@ -104,12 +94,7 @@ pub async fn run(args: Args) -> Result<()> {
     let link = crate::open(args.port.as_deref(), args.sim)?;
 
     let started = now();
-    let session = SessionInfo {
-        espnow_channel: args.channel,
-        pool,
-        notes: args.notes.clone(),
-        ..Default::default()
-    };
+    let session = SessionInfo { espnow_channel: args.channel, pool, notes: args.notes.clone() };
     let store = Store::open(&StoreConfig::new(&args.db), &session, started.unix_ms)
         .with_context(|| format!("opening {}", args.db.display()))?;
 
@@ -128,6 +113,15 @@ pub async fn run(args: Args) -> Result<()> {
 
     outcome?;
     println!("Capture written to {}", args.db.display());
+    if args.lat.is_none() {
+        // The view says so throughout the run as well; this is for the case
+        // where the terminal never came up, and so that the last thing on
+        // screen is the reason the export will be empty.
+        println!(
+            "No position was given, so nothing in it can go to WiGLE. Run again with \n\
+             --lat and --lon, or wait for the GPS chain in Phase 6."
+        );
+    }
     println!("Export it with: wartui export --db {} --wigle out.csv", args.db.display());
     Ok(())
 }

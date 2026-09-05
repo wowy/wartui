@@ -218,6 +218,49 @@ fn an_admin_frame_from_elsewhere_means_a_rival_core_is_powered_up() {
     engine.handle(event, clock.at(1));
 
     assert_eq!(counters(&engine).foreign_admin, 1);
+    // But it is not one of ours. Admitting it would leave a rival core sitting
+    // in the fleet table forever as `no heartbeat`, inflating the denominator
+    // of "n of m alive" and leaving a `node` row that outlives the session.
+    assert_eq!(engine.nodes().count(), 0);
+}
+
+#[test]
+fn a_sender_whose_frames_do_not_decode_does_not_join_the_fleet() {
+    // Channel 6 carries whatever else is nearby. A transmitter we cannot
+    // understand is counted, not adopted.
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+
+    let event = Event::Link(LinkEvent::Message(BridgeToHost::Rx {
+        src: OTHER,
+        dst: BROADCAST,
+        rssi: -41,
+        channel: 6,
+        rx_us: 0,
+        payload: EspNowPayload::from_slice(b"not an ENOW frame").expect("fits"),
+    }));
+    let batch = engine.handle(event, clock.at(1));
+
+    assert_eq!(counters(&engine).undecodable, 1);
+    assert_eq!(engine.nodes().count(), 0);
+    assert!(batch.records.is_empty());
+}
+
+#[test]
+fn the_bridge_is_recorded_when_it_announces_itself() {
+    // The session row is written before any bridge has announced, so this is
+    // the only chance to say which dongle produced the capture.
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+
+    let batch = engine.handle(connected(), clock.at(1));
+
+    let Some(Record::Bridge(bridge)) = batch.records.first() else {
+        panic!("expected a bridge record, got {:?}", batch.records)
+    };
+    assert_eq!(bridge.mac, [0x98, 0xA3, 0x16, 0x8E, 0x9D, 0x24]);
+    assert_eq!(bridge.chip, "Esp32C6");
+    assert_eq!(bridge.fw_version, "0.1.0");
 }
 
 #[test]

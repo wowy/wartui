@@ -257,6 +257,8 @@ pub struct Snapshot {
     pub started_at_ms: i64,
     /// Unix milliseconds this snapshot was taken.
     pub now_ms: i64,
+    /// Where the host believes it is, resolved as of this snapshot.
+    pub position: crate::position::Fix,
 }
 
 /// The bridge's self-report.
@@ -325,6 +327,11 @@ impl FleetEngine {
         match event {
             Event::Tick => self.on_tick(now, &mut batch),
             Event::Link(LinkEvent::Connected(info)) => {
+                batch.records.push(Record::Bridge(crate::record::BridgeSeen {
+                    mac: info.mac,
+                    chip: format!("{:?}", info.chip),
+                    fw_version: info.fw_version.clone(),
+                }));
                 self.bridge = Some(info);
                 self.link_up = true;
                 self.link_error = None;
@@ -415,6 +422,27 @@ impl FleetEngine {
             }));
         }
 
+        let Ok(frame) = Frame::decode(payload) else {
+            self.counters.undecodable += 1;
+            return;
+        };
+
+        // Decode before admitting anyone to the fleet. Channel 6 carries
+        // whatever else is nearby, and a sender whose frames are not ours is
+        // not a node: a vendor core assigning our nodes channels would
+        // otherwise sit in the table forever as `no heartbeat`, inflate the
+        // "n of m alive" denominator, and leave a `node` row outliving the
+        // session it was seen in.
+        let text = match frame {
+            Frame::Admin(_) => {
+                // Nothing to do about it from here, but an operator chasing a
+                // fleet that keeps changing its mind needs to know.
+                self.counters.foreign_admin += 1;
+                return;
+            }
+            Frame::Text(text) => text,
+        };
+
         let node = self.nodes.entry(src).or_insert_with(|| NodeState::new(src, now));
         node.last_seen = now.mono;
         node.last_seen_ms = now.unix_ms;
@@ -425,77 +453,67 @@ impl FleetEngine {
             last_seen_ms: now.unix_ms,
         }));
 
-        let Ok(frame) = Frame::decode(payload) else {
-            self.counters.undecodable += 1;
-            return;
-        };
-
-        match frame {
-            Frame::Admin(_) => {
-                // Somebody else's core is on the air assigning our nodes
-                // channels. Nothing to do about it from here, but an operator
-                // chasing a fleet that keeps changing its mind needs to know.
-                self.counters.foreign_admin += 1;
+        match text.msg_type {
+            MsgType::Heartbeat => {
+                self.counters.heartbeats += 1;
+                let node = self.nodes.entry(src).or_insert_with(|| NodeState::new(src, now));
+                // Divergence 5: the counter runs from the node's boot, so a
+                // value below the last one means it restarted and has
+                // forgotten whatever range it was assigned. The vendor core
+                // has no equivalent check and simply carries on believing
+                // its own assignment table.
+                if node.counter.is_some_and(|previous| text.counter < previous) {
+                    node.reboots += 1;
+                }
+                node.counter = Some(text.counter);
+                node.last_heartbeat = Some(now.mono);
+                node.heartbeats += 1;
+                batch.records.push(Record::Heartbeat(Heartbeat {
+                    node_mac: src,
+                    rx_at_ms: now.unix_ms,
+                    counter: text.counter,
+                    link_rssi: Some(rssi),
+                }));
             }
-            Frame::Text(text) => match text.msg_type {
-                MsgType::Heartbeat => {
-                    self.counters.heartbeats += 1;
-                    let node = self.nodes.entry(src).or_insert_with(|| NodeState::new(src, now));
-                    // Divergence 5: the counter runs from the node's boot, so a
-                    // value below the last one means it restarted and has
-                    // forgotten whatever range it was assigned. The vendor core
-                    // has no equivalent check and simply carries on believing
-                    // its own assignment table.
-                    if node.counter.is_some_and(|previous| text.counter < previous) {
-                        node.reboots += 1;
-                    }
-                    node.counter = Some(text.counter);
-                    node.last_heartbeat = Some(now.mono);
-                    node.heartbeats += 1;
-                    batch.records.push(Record::Heartbeat(Heartbeat {
-                        node_mac: src,
-                        rx_at_ms: now.unix_ms,
-                        counter: text.counter,
-                        link_rssi: Some(rssi),
-                    }));
+            MsgType::Text => {
+                let Ok(line) = WardriveLine::parse(text.text) else {
+                    self.counters.unparsed += 1;
+                    return;
+                };
+                self.counters.observations += 1;
+                if let Some(node) = self.nodes.get_mut(&src) {
+                    node.observations += 1;
                 }
-                MsgType::Text => {
-                    let Ok(line) = WardriveLine::parse(text.text) else {
-                        self.counters.unparsed += 1;
-                        return;
-                    };
-                    self.counters.observations += 1;
-                    if let Some(node) = self.nodes.get_mut(&src) {
-                        node.observations += 1;
-                    }
-                    let observation = Observation {
-                        node_mac: src,
-                        rx_at_ms: now.unix_ms,
-                        link_rssi: Some(rssi),
-                        bssid: line.bssid,
-                        ssid: line.ssid.to_vec(),
-                        security: String::from_utf8_lossy(line.security.as_bytes()).into_owned(),
-                        channel: line.channel,
-                        rssi: line.rssi,
-                        kind: line.kind,
-                        fix: self.config.position.resolve(),
-                        raw_text: text.text.to_vec(),
-                    };
-                    self.push_tail(&observation);
-                    batch.records.push(Record::Observation(observation));
+                let observation = Observation {
+                    node_mac: src,
+                    rx_at_ms: now.unix_ms,
+                    link_rssi: Some(rssi),
+                    bssid: line.bssid,
+                    ssid: line.ssid.to_vec(),
+                    security: String::from_utf8_lossy(line.security.as_bytes()).into_owned(),
+                    channel: line.channel,
+                    rssi: line.rssi,
+                    kind: line.kind,
+                    fix: self.config.position.resolve(),
+                    raw_text: text.text.to_vec(),
+                };
+                self.push_tail(&observation);
+                batch.records.push(Record::Observation(observation));
+            }
+            MsgType::CoreRequest | MsgType::CoreReply => {
+                // Only an encrypted node ever sends these, and wartui does
+                // not speak encrypted ESP-NOW. Marking the node is what
+                // lets the UI say which one to go and reconfigure instead
+                // of leaving the operator with an unexplained silence.
+                self.counters.core_frames += 1;
+                if let Some(node) = self.nodes.get_mut(&src) {
+                    node.encrypted = true;
                 }
-                MsgType::CoreRequest | MsgType::CoreReply => {
-                    // Only an encrypted node ever sends these, and wartui does
-                    // not speak encrypted ESP-NOW. Marking the node is what
-                    // lets the UI say which one to go and reconfigure instead
-                    // of leaving the operator with an unexplained silence.
-                    self.counters.core_frames += 1;
-                    if let Some(node) = self.nodes.get_mut(&src) {
-                        node.encrypted = true;
-                    }
-                }
-                MsgType::Admin => self.counters.foreign_admin += 1,
-            },
+            }
+            // Unreachable: `Frame::decode` routes this type byte to
+            // `AdminMsg`, which is handled above. Counted rather than ignored
+            // so a future change to that dispatch cannot lose frames silently.
+            MsgType::Admin => self.counters.foreign_admin += 1,
         }
     }
 
@@ -551,6 +569,7 @@ impl FleetEngine {
             bridge_status: self.bridge_status,
             started_at_ms: self.started_at_ms,
             now_ms: now.unix_ms,
+            position: self.config.position.resolve(),
         }
     }
 

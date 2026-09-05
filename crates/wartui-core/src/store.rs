@@ -171,14 +171,12 @@ impl StoreConfig {
 }
 
 /// What to record about the session being opened.
+///
+/// The bridge's own identity is deliberately absent: a session is opened before
+/// any bridge has announced itself, so it arrives later as a
+/// [`Record::Bridge`].
 #[derive(Debug, Clone, Default)]
 pub struct SessionInfo {
-    /// The bridge's MAC, once known.
-    pub bridge_mac: Option<Vec<u8>>,
-    /// Which chip it is.
-    pub bridge_chip: Option<String>,
-    /// Its firmware version.
-    pub bridge_fw: Option<String>,
     /// The ESP-NOW control channel.
     pub espnow_channel: u8,
     /// Which channels the fleet was told to scan.
@@ -215,6 +213,12 @@ impl Store {
     ) -> Result<Self, StoreError> {
         let mut conn = Connection::open(&config.path)?;
         prepare(&conn)?;
+        // Before the schema, not after. `CREATE TABLE IF NOT EXISTS` no-ops
+        // against a newer file's tables rather than failing, so an older build
+        // would append v1-shaped rows into a v2 database and then stamp the
+        // version marker back down to 1 — leaving neither build able to tell
+        // that it had happened.
+        check_version(&conn)?;
         conn.execute_batch(SCHEMA)?;
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
 
@@ -307,11 +311,19 @@ pub fn open_readonly(path: &Path) -> Result<Connection, StoreError> {
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
     )?;
     conn.busy_timeout(Duration::from_secs(5))?;
+    check_version(&conn)?;
+    Ok(conn)
+}
+
+/// Refuse a database written by a newer wartui.
+///
+/// A fresh file reads 0, which is older than anything and therefore fine.
+fn check_version(conn: &Connection) -> Result<(), StoreError> {
     let found: i32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
     if found > SCHEMA_VERSION {
         return Err(StoreError::SchemaTooNew { found, ours: SCHEMA_VERSION });
     }
-    Ok(conn)
+    Ok(())
 }
 
 fn prepare(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -332,18 +344,9 @@ fn insert_session(
     started_at_ms: i64,
 ) -> Result<i64, rusqlite::Error> {
     conn.execute(
-        "INSERT INTO session
-           (started_at, bridge_mac, bridge_chip, bridge_fw, espnow_channel, channel_pool, notes)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![
-            started_at_ms,
-            session.bridge_mac,
-            session.bridge_chip,
-            session.bridge_fw,
-            session.espnow_channel,
-            pool_name(session.pool),
-            session.notes,
-        ],
+        "INSERT INTO session (started_at, espnow_channel, channel_pool, notes)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![started_at_ms, session.espnow_channel, pool_name(session.pool), session.notes,],
     )?;
     Ok(conn.last_insert_rowid())
 }
@@ -481,6 +484,21 @@ fn write_batch(
                     obs.fix.source.as_str(),
                     obs.fix.at_ms,
                     obs.raw_text,
+                ])?;
+            }
+            Record::Bridge(bridge) => {
+                // Which dongle produced this capture. Written when the bridge
+                // announces itself, which is always after the session row
+                // exists, and rewritten if it announces again.
+                tx.prepare_cached(
+                    "UPDATE session SET bridge_mac = ?2, bridge_chip = ?3, bridge_fw = ?4
+                     WHERE id = ?1",
+                )?
+                .execute(params![
+                    session_id,
+                    &bridge.mac[..],
+                    bridge.chip.as_str(),
+                    bridge.fw_version.as_str()
                 ])?;
             }
             Record::Raw(raw) => {

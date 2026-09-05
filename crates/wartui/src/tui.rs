@@ -165,14 +165,34 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot) {
         first.push(Span::styled(format!("  ({error})"), Style::new().fg(Color::Red)));
     }
 
-    let second = format!(
-        "pool {:?}  session {}{radio}",
+    let mut second = vec![Span::raw(format!(
+        "pool {:?}  session {}{radio}  ",
         snapshot.pool,
         elapsed(snapshot.now_ms - snapshot.started_at_ms),
-    );
+    ))];
+    second.push(position(snapshot));
 
     let body = vec![Line::from(first), Line::from(second)];
     frame.render_widget(Paragraph::new(body).block(Block::bordered().title(" wartui ")), area);
+}
+
+/// Where the host believes it is, said plainly and continuously.
+///
+/// The warning `wartui run` prints before starting is on screen for about one
+/// frame before the alternate screen swallows it, which is no use to someone
+/// who then watches a night of observations accumulate and only finds out at
+/// export time that none of them can be uploaded. So it lives here instead,
+/// where it is visible for the whole capture.
+fn position(snapshot: &Snapshot) -> Span<'static> {
+    match (snapshot.position.lat, snapshot.position.lon) {
+        (Some(lat), Some(lon)) => {
+            Span::raw(format!("pos {lat:.5},{lon:.5} ({})", snapshot.position.source.as_str()))
+        }
+        _ => Span::styled(
+            "pos none — these observations cannot be uploaded",
+            Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ),
+    }
 }
 
 fn draw_fleet(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot) {
@@ -364,6 +384,7 @@ mod tests {
     use ratatui::backend::TestBackend;
     use wartui_bridge::BridgeInfo;
     use wartui_core::engine::{BridgeStatus, Counters, NodeState, StoreStats};
+    use wartui_core::position::{Fix, PositionSource};
     use wartui_proto::link::Chip;
     use wartui_proto::plan::ChannelPool;
 
@@ -437,6 +458,14 @@ mod tests {
             }),
             started_at_ms: EPOCH_MS,
             now_ms: EPOCH_MS + 60_000,
+            position: Fix {
+                lat: Some(37.7749),
+                lon: Some(-122.4194),
+                alt: Some(16.0),
+                accuracy: None,
+                source: PositionSource::Static,
+                at_ms: None,
+            },
         }
     }
 
@@ -451,6 +480,7 @@ mod tests {
             counters: Counters::default(),
             store: StoreStats::default(),
             bridge_status: None,
+            position: Fix::none(),
             ..busy()
         }
     }
@@ -504,6 +534,17 @@ mod tests {
 
         assert!(rendered.contains("waiting for a bridge"));
         assert!(rendered.contains("no bridge found"));
+    }
+
+    #[test]
+    fn an_unpositioned_capture_says_so_for_the_whole_run() {
+        let mut positioned = Terminal::new(TestBackend::new(150, 20)).expect("test backend");
+        positioned.draw(|frame| draw(frame, &busy())).expect("drawing");
+        assert!(positioned.backend().to_string().contains("pos 37.77490,-122.41940 (static)"));
+
+        let mut without = Terminal::new(TestBackend::new(150, 20)).expect("test backend");
+        without.draw(|frame| draw(frame, &empty())).expect("drawing");
+        assert!(without.backend().to_string().contains("pos none"));
     }
 
     #[test]
