@@ -178,7 +178,9 @@ impl<'a> TextMsg<'a> {
 /// `esp_now_send` return value (`src/WiFiOps.cpp:679`) and moved on believing
 /// the node had been assigned. Broadcast heartbeats and observations from the
 /// same node in the same capture each carried their own sequence number and
-/// were never retried, so the retries are specific to unicast.
+/// were never retried, so the retries are specific to unicast. Acknowledgements
+/// were then captured directly: of 9505 seen on the channel, none named the
+/// core, so the node genuinely never answered.
 ///
 /// This is why wartui clears an assignment only on the transmit callback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
