@@ -239,7 +239,14 @@ fn drain_radio(esp_now: &EspNow<'_>, bridge: &mut Bridge) -> bool {
             src: received.info.src_address,
             dst: received.info.dst_address,
             // The only receive-control field every supported chip agrees on.
-            rssi: received.info.rx_control.rssi.clamp(-128, 127) as i8,
+            //
+            // It arrives unsigned. `wifi_pkt_rx_ctrl_t.rssi` is a signed 8-bit
+            // bitfield, but the generated accessor extracts the bits unsigned
+            // and transmutes, so -62 dBm reaches us as 194 and any clamp to
+            // `i8` saturates every frame to 127. Reinterpreting the low byte
+            // recovers the value, and keeps working unchanged if the binding is
+            // ever fixed to sign-extend.
+            rssi: (received.info.rx_control.rssi as u8) as i8,
             // Reported from our own state, not the frame: the per-chip
             // receive-control structs do not all carry a channel.
             channel: bridge.channel,
