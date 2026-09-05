@@ -155,3 +155,34 @@ fn oversized_text_length_is_rejected() {
     let too_long = [b'x'; 201];
     assert_eq!(TextMsg::new(MsgType::Text, 0, &too_long), Err(DecodeError::TextTooLong(201)));
 }
+
+#[test]
+fn captured_observation_payloads_parse_as_wardrive_lines() {
+    // The round-trip test proves the frame layout survives; this proves the
+    // payload format does. They fail independently: the firmware could change
+    // its comma-separated line without touching the struct around it.
+    use wartui_proto::air::{RecordKind, WardriveLine};
+
+    let mut parsed = 0;
+    for line in GOLDEN.lines().filter(|l| !l.trim().is_empty() && !l.starts_with('#')) {
+        let name = line.split_whitespace().next().expect("name");
+        let bytes = vector(name);
+        let Ok(Frame::Text(msg)) = Frame::decode(&bytes) else { continue };
+        // Heartbeats and pairing requests carry no payload.
+        if msg.msg_type != MsgType::Text || msg.text.is_empty() {
+            continue;
+        }
+        let record = WardriveLine::parse(msg.text)
+            .unwrap_or_else(|e| panic!("{name}: {e} in {:?}", String::from_utf8_lossy(msg.text)));
+        match record.kind {
+            RecordKind::Ble => {
+                assert_eq!(record.channel, 0, "{name}: BLE records carry channel 0");
+                assert!(record.ssid.is_empty(), "{name}: BLE records carry no SSID");
+            }
+            RecordKind::Wifi => assert!(record.channel > 0, "{name}: Wi-Fi needs a real channel"),
+        }
+        assert!(record.rssi < 0, "{name}: RSSI should be negative dBm");
+        parsed += 1;
+    }
+    assert!(parsed >= 3, "expected several observation payloads, parsed {parsed}");
+}
