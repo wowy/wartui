@@ -1,0 +1,7 @@
+# One `BridgeToHost` is 276 bytes: the enum inlines a 250-byte ESP-NOW payload
+# because boxing it would put an allocator on the receive path, which is exactly
+# what `wartui-proto` exists to avoid. A function that builds two of them is
+# therefore normally over 1KB and says nothing interesting. The threshold is set
+# above that but well under the main task's stack, which the linker sizes at
+# 216KB, so anything this still catches is worth reading.
+stack-size-threshold = 2048

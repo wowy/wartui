@@ -1,0 +1,21 @@
+[package]
+name = "wartui"
+description = "Terminal fleet controller for ESP32-C5 wardriving nodes."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "wartui"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.100"
+clap = { version = "4.5.51", features = ["derive"] }
+tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "signal"] }
+wartui-bridge = { path = "../wartui-bridge" }
+wartui-proto = { path = "../wartui-proto" }

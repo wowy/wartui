@@ -19,7 +19,11 @@ use heapless::{String, Vec};
 use serde::{Serialize, de::DeserializeOwned};
 
 /// Bumped whenever the message enums change shape. Host and bridge must agree.
-pub const LINK_PROTO_VERSION: u8 = 1;
+///
+/// v2 added [`HostToBridge::Identify`], because v1 announced the bridge only at
+/// boot and so a host that attached to an already-running dongle waited for a
+/// [`BridgeToHost::Ready`] that had been sent minutes earlier.
+pub const LINK_PROTO_VERSION: u8 = 2;
 
 /// ESP-NOW's own payload ceiling. The 212-byte wardriver frames fit inside it.
 pub const MAX_ESPNOW_PAYLOAD: usize = 250;
@@ -99,6 +103,13 @@ pub enum SendStatus {
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub enum HostToBridge {
+    /// Ask the bridge to announce itself with [`BridgeToHost::Ready`].
+    ///
+    /// The host sends this the moment it opens the port. Without it the only
+    /// announcement is the one at boot, so restarting the TUI without also
+    /// unplugging the dongle would leave the host waiting forever for a frame
+    /// that had already been sent and read.
+    Identify,
     /// Park the radio on an ESP-NOW channel. The stock mesh uses 6.
     SetChannel {
         /// Wi-Fi channel number.
@@ -140,8 +151,9 @@ pub enum HostToBridge {
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub enum BridgeToHost {
-    /// Sent once at startup. The host checks `proto_version` and refuses to
-    /// continue against a bridge it does not understand.
+    /// Sent at startup and in answer to [`HostToBridge::Identify`]. The host
+    /// checks `proto_version` and refuses to continue against a bridge it does
+    /// not understand.
     Ready {
         /// Which chip this is.
         chip: Chip,

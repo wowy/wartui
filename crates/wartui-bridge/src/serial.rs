@@ -28,6 +28,10 @@ const BAUD: u32 = 921_600;
 /// Long enough not to spin, short enough that shutdown feels immediate.
 const READ_TIMEOUT: Duration = Duration::from_millis(50);
 
+/// How often to re-ask a silent bridge to identify itself. The first tick of a
+/// tokio interval fires immediately, so the usual case costs one frame.
+const IDENTIFY_INTERVAL: Duration = Duration::from_millis(500);
+
 /// A serial port that might be a bridge.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PortCandidate {
@@ -159,6 +163,7 @@ async fn connect(
     let writer = port.try_clone().map_err(|e| format!("could not split {path}: {e}"))?;
 
     let stop = Arc::new(AtomicBool::new(false));
+    let announced = Arc::new(AtomicBool::new(false));
     let (dead_tx, mut dead_rx) = mpsc::channel::<String>(1);
     let (write_tx, write_rx) = std::sync::mpsc::channel::<HostToBridge>();
 
@@ -167,8 +172,9 @@ async fn connect(
         .spawn({
             let events = plumbing.events.clone();
             let stop = Arc::clone(&stop);
+            let announced = Arc::clone(&announced);
             move || {
-                let reason = read_loop(port, &events, &stop);
+                let reason = read_loop(port, &events, &stop, &announced);
                 let _ = dead_tx.blocking_send(reason);
             }
         })
@@ -182,6 +188,12 @@ async fn connect(
         })
         .map_err(|e| format!("could not start writer thread: {e}"))?;
 
+    // A bridge announces itself at boot, and the host is rarely watching at
+    // that moment: unplugging the dongle is not part of restarting the TUI.
+    // So we ask, and keep asking until it answers, because the request can
+    // land while the radio is still coming up.
+    let mut identify = tokio::time::interval(IDENTIFY_INTERVAL);
+
     // Forward commands, preserving the urgent-first bias, until either the
     // reader dies or the engine drops its handle.
     let outcome = loop {
@@ -189,6 +201,11 @@ async fn connect(
             biased;
             reason = dead_rx.recv() => {
                 break Err(reason.unwrap_or_else(|| "reader stopped".to_owned()));
+            }
+            _ = identify.tick(), if !announced.load(Ordering::Relaxed) => {
+                if write_tx.send(HostToBridge::Identify).is_err() {
+                    break Err("writer stopped".to_owned());
+                }
             }
             cmd = plumbing.commands.recv() => match cmd {
                 Some(cmd) => {
@@ -213,10 +230,10 @@ fn read_loop(
     mut port: Box<dyn serialport::SerialPort>,
     events: &mpsc::Sender<LinkEvent>,
     stop: &AtomicBool,
+    announced: &AtomicBool,
 ) -> String {
     let mut acc = FrameAccumulator::<MAX_FRAME>::new();
     let mut buf = [0u8; 1024];
-    let mut announced = false;
 
     while !stop.load(Ordering::Relaxed) {
         let read = match port.read(&mut buf) {
@@ -242,7 +259,14 @@ fn read_loop(
                     .to_string();
                 }
                 Ok(BridgeToHost::Ready { chip, mac, fw_version, .. }) => {
-                    announced = true;
+                    // A reboot re-enumerates the USB device and so ends this
+                    // connection outright; a second `Ready` inside one can only
+                    // be the answer to an `Identify` we sent before the first
+                    // answer arrived. Reporting it again would look like a
+                    // reconnect that never happened.
+                    if announced.swap(true, Ordering::Relaxed) {
+                        continue;
+                    }
                     LinkEvent::Connected(BridgeInfo {
                         chip,
                         mac,
@@ -259,7 +283,11 @@ fn read_loop(
             }
         }
     }
-    if announced { "link closed".to_owned() } else { "bridge never announced itself".to_owned() }
+    if announced.load(Ordering::Relaxed) {
+        "link closed".to_owned()
+    } else {
+        "bridge never announced itself".to_owned()
+    }
 }
 
 /// Blocking write loop.

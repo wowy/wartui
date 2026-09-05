@@ -126,6 +126,10 @@ async fn run_bridge(
 
     while let Some(cmd) = plumbing.commands.recv().await {
         let reply = match cmd {
+            // The real bridge replies with `Ready`; the simulator has already
+            // reported `Connected` above, so re-announcing would only confuse a
+            // host that is counting connections.
+            HostToBridge::Identify => None,
             HostToBridge::SetChannel { channel: ch } => {
                 channel = ch;
                 None

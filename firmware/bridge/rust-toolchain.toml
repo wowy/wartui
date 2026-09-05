@@ -1,0 +1,7 @@
+# Both supported chips are RISC-V, so stable is enough. This is the reason the
+# Xtensa ESP32-S3 is not a supported bridge: it would need the espup nightly
+# fork for `feature(c_variadic)`.
+[toolchain]
+channel = "stable"
+components = ["rust-src"]
+targets = ["riscv32imac-unknown-none-elf"]
