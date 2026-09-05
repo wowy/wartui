@@ -42,8 +42,16 @@ static const uint8_t ESPRESSIF_OUI[3] = {0x18, 0xFE, 0x34};
 //   24  MAC header
 //    1  category (127, vendor specific)
 //    3  OUI
+//    4  random values
 //    1  element ID (221)   1  length   3  OUI   1  type (4)   1  version
-static const int ESPNOW_BODY_OFFSET = 35;
+//
+// The 4-byte random-values field is easy to miss. Omitting it put this at 35,
+// which shifted every promiscuous capture by four bytes so the "ENOW" check
+// failed on frames that were in fact plaintext -- making the encrypted-versus-
+// absent diagnostic report "encrypted" for everything. Caught by comparing the
+// two receive paths on real hardware: promiscuous said 216 bytes where the
+// ESP-NOW callback said 212.
+static const int ESPNOW_BODY_OFFSET = 39;
 static const int FCS_LEN = 4;
 
 // Give up on the mesh channel after this long and go looking.
