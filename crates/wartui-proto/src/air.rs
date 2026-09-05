@@ -182,7 +182,19 @@ impl<'a> TextMsg<'a> {
 /// were then captured directly: of 9505 seen on the channel, none named the
 /// core, so the node genuinely never answered.
 ///
-/// This is why wartui clears an assignment only on the transmit callback.
+/// A later capture found the cause. With two nodes differing only in whether
+/// BLE was enabled, the BLE-off node acknowledged both assignments it was sent,
+/// each transmitted once with no retry, and adopted them; the BLE-on node
+/// acknowledged none of its 32 and kept scanning outside its range. An 802.11
+/// acknowledgement comes from the receiver's MAC hardware, so its absence means
+/// the radio was not on the channel — NimBLE shares the one 2.4 GHz antenna and
+/// the admin window is precisely when the node is otherwise idle.
+///
+/// This is why wartui clears an assignment only on the transmit callback, why
+/// it retries on the next heartbeat rather than trusting the radio's own
+/// retries (all 31 of which fell inside the one failing window), and why a
+/// persistently unacknowledged node should be reported to the operator as
+/// likely BLE coexistence rather than as a mystery.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AdminMsg {
     /// Epoch counter. A node adopts the assignment only when this *differs*
