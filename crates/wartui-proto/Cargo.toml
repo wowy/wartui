@@ -8,3 +8,12 @@ repository.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+cobs = { version = "0.5.1", default-features = false }
+heapless = { version = "0.9.3", default-features = false, features = ["serde"] }
+postcard = { version = "1", default-features = false }
+serde = { version = "1", default-features = false, features = ["derive"] }
+
+[dev-dependencies]
+cobs = { version = "0.5.1", default-features = false }

@@ -11,7 +11,9 @@
 #![no_std]
 
 pub mod air;
+pub mod link;
 pub mod plan;
 
 pub use air::{AdminMsg, DecodeError, Frame, MsgType, TextMsg, WardriveLine};
+pub use link::{BridgeToHost, HostToBridge, LinkError, SendStatus};
 pub use plan::{ChannelPool, SCAN_CHANNELS};
