@@ -51,8 +51,11 @@ broadcast or to us. An encrypted fleet unicasts node to core, so the core works
 perfectly while a sniffer sees absolute silence. Promiscuous mode sees those
 frames anyway, which is what makes the two cases distinguishable.
 
-If nothing turns up on channel 6 for 20 seconds it sweeps channels 1-13 and
-reports where the traffic actually is.
+The sniffer stays parked on channel 6 and never hops. The firmware hard-codes
+`ESPNOW_CHANNEL = 6` (`src/WiFiOps.cpp:15`), identical on `main` and
+`feat/node-interference-mitigation`, so there is nowhere else for the traffic
+to be -- and leaving the channel, even briefly, risks missing the burst a node
+emits in its first sweep after boot.
 
 ## What you are checking
 
