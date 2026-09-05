@@ -13,18 +13,29 @@ use wartui_bridge::sim::{SimConfig, SimTransport};
 use wartui_bridge::{LinkEvent, LinkHandle};
 use wartui_proto::link::Mac;
 
+mod export;
+mod run;
 mod sniff;
 mod status;
+mod tui;
 
 #[derive(Parser)]
 #[command(name = "wartui", version, about = "Fleet controller for ESP32-C5 wardriving nodes")]
 struct Cli {
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
+
+    /// With no subcommand, these are `run`'s arguments.
+    #[command(flatten)]
+    run: run::Args,
 }
 
 #[derive(Subcommand)]
 enum Command {
+    /// Capture a fleet into the store and watch it live. The default.
+    Run(run::Args),
+    /// Write a WiGLE CSV from a capture.
+    Export(export::Args),
     /// Print every frame the bridge hears.
     Sniff(sniff::Args),
     /// Ask the bridge for its channel, counters and uptime.
@@ -35,10 +46,14 @@ enum Command {
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> Result<()> {
-    match Cli::parse().command {
-        Command::Sniff(args) => sniff::run(args).await,
-        Command::Status(args) => status::run(args).await,
-        Command::Ports => ports(),
+    let cli = Cli::parse();
+    match cli.command {
+        None => run::run(cli.run).await,
+        Some(Command::Run(args)) => run::run(args).await,
+        Some(Command::Export(args)) => export::run(args),
+        Some(Command::Sniff(args)) => sniff::run(args).await,
+        Some(Command::Status(args)) => status::run(args).await,
+        Some(Command::Ports) => ports(),
     }
 }
 

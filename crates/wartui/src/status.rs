@@ -63,7 +63,16 @@ pub async fn run(args: Args) -> Result<()> {
     println!("uptime     {}", human_uptime(uptime_ms));
 
     if dropped_tx > 0 {
-        println!("\nThe bridge discarded frames because this host was not reading fast enough.");
+        // Cumulative since the bridge booted, and a bridge left powered with
+        // nothing attached drops everything it hears. Saying so here stops a
+        // large number on a long-running dongle reading as a fault.
+        println!(
+            "\n{dropped_tx} frames were discarded over those {}, whenever no host was \n\
+             reading fast enough. That includes any time the bridge spent powered \n\
+             with nothing attached. `wartui run` reports drops from the moment it \n\
+             connects, which is the number that says whether a capture lost data.",
+            human_uptime(uptime_ms)
+        );
     }
     if rx_count == 0 {
         println!(

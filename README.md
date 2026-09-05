@@ -50,7 +50,7 @@ never lets an assignment straddle the gap.
 No hardware needed — the simulator runs a fake fleet on a fake clock:
 
 ```sh
-cargo run -p wartui -- sniff --sim 3
+cargo run -p wartui -- --sim 3 --lat 37.7749 --lon -122.4194
 ```
 
 With a bridge plugged in:
@@ -62,6 +62,54 @@ cargo run -p wartui -- sniff      # every frame the fleet sends, decoded
 ```
 
 Flashing the bridge itself is in `firmware/bridge/README.md`.
+
+## Capturing
+
+`wartui run` — the default, so the subcommand can be left off — listens, writes
+every observation to SQLite, and draws the fleet while it does. **It never
+transmits**, so it can be pointed at a fleet that is already doing something
+useful without changing what that is.
+
+```sh
+wartui run --db tonight.db --lat 37.7749 --lon -122.4194
+wartui export --db tonight.db --wigle tonight.csv
+```
+
+Press `q` to stop; the last batch is committed and the session closed out before
+it exits.
+
+The store is the system of record and the CSV is a view of it, not the other way
+round: an export can be re-run after a decoder fix, run against a session that
+ended last week, or run against one that is still going.
+
+### Positions
+
+Every observation is stamped with the best position available, resolved fresh
+each time: host GPS, then a static `--lat`/`--lon`, then nothing. A record is
+never dropped for want of a position — but **WiGLE will not accept a row without
+coordinates**, so a capture with no position given exports nothing and says how
+many networks it left out. The GPS tier arrives in Phase 6.
+
+### What the fleet table is telling you
+
+| State | Meaning |
+| --- | --- |
+| `alive` | Heartbeating, so it can be given a channel range |
+| `stale` | Still being heard, but not heartbeating — most often BLE coexistence on the node holding the radio through its admin window |
+| `no heartbeat` | Seen, but has never completed a sweep |
+| `rebooted xN` | Its heartbeat counter went backwards, so it has forgotten any assignment |
+| `encrypted` | It is sending core-protocol frames. wartui cannot talk to it; turn encryption off in that node's web UI |
+
+`stale` and `no heartbeat` are deliberately distinct from silence. The vendor
+firmware refreshes liveness only on a heartbeat, so a node streaming
+observations whose heartbeats are lost would age out and churn the whole fleet's
+topology — wartui keeps two clocks so the difference is visible rather than
+fatal.
+
+The footer only shows faults once they have happened, so a clean run reads as a
+clean footer. `bridge dropped` there counts frames lost since this host
+attached; `wartui status` reports the bridge's own total since it booted, which
+on a dongle left powered with nothing listening is large and not a fault.
 
 ## Development
 
