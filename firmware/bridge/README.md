@@ -43,10 +43,15 @@ nodes rather than at the link.
 soon as its FIFO fills, and nothing drains that FIFO unless a host is reading.
 A blocking write from the receive path would stall the radio for as long as the
 TUI is wedged or the cable is out. Everything outbound goes through the rings in
-`src/outbox.rs`, which are drained by whatever the FIFO will take and never
-waited on. `Rx` and `Log` are dropped oldest-first under pressure and counted
-into `Status.dropped_tx`; `Ready`, `SendResult`, `Status` and `Error` are not
-dropped to make room.
+`wartui_proto::outbox`, which are drained by whatever the FIFO will take and
+never waited on. Both rings evict oldest-first under pressure and count it into
+`Status.dropped_tx`; priority frames (`Ready`, `SendResult`, `Status`, `Error`)
+are only ever served ahead of `Rx` and `Log`, never given an unbounded queue.
+
+That module lives in `wartui-proto` rather than here so its eviction and
+resynchronisation rules can be unit-tested on the host — a `no_std` binary for
+`riscv32imac` cannot run a test, and this is the only real logic on this side of
+the wire.
 
 **Never link `esp-println` with `jtag-serial`.** It writes to the same USB
 endpoint and would interleave into the COBS stream. Diagnostics go through the

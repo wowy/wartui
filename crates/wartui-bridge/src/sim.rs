@@ -373,12 +373,17 @@ fn scaled(millis: u64, speed: f64) -> Duration {
     Duration::from_secs_f64(scaled / 1000.0)
 }
 
+/// The firmware's counters are `u32` and wrap at 2^32, not at `u32::MAX`.
+/// Simulating the wrong modulus would drift the simulated clock a microsecond
+/// per wrap away from the one host code actually has to cope with.
+const WRAP: u128 = 1 << 32;
+
 fn elapsed_us(started: Instant) -> u32 {
-    u32::try_from(started.elapsed().as_micros() % u128::from(u32::MAX)).unwrap_or(0)
+    u32::try_from(started.elapsed().as_micros() % WRAP).unwrap_or(0)
 }
 
 fn elapsed_ms(started: Instant) -> u32 {
-    u32::try_from(started.elapsed().as_millis() % u128::from(u32::MAX)).unwrap_or(0)
+    u32::try_from(started.elapsed().as_millis() % WRAP).unwrap_or(0)
 }
 
 /// A fake neighbourhood, generated once and shared by every node — so two nodes

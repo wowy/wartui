@@ -12,6 +12,7 @@
 
 pub mod air;
 pub mod link;
+pub mod outbox;
 pub mod plan;
 
 /// Re-exported so consumers can build link payloads without depending on
@@ -20,4 +21,5 @@ pub use heapless;
 
 pub use air::{AdminMsg, DecodeError, Frame, MsgType, TextMsg, WardriveLine};
 pub use link::{BridgeToHost, HostToBridge, LinkError, SendStatus};
+pub use outbox::{ByteSink, Outbox};
 pub use plan::{ChannelPool, SCAN_CHANNELS};

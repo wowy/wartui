@@ -85,6 +85,14 @@ const US_RUNS: [IndexRun; 2] = [
 
 const ALL_RUNS: [IndexRun; 1] = [IndexRun::new(0, NUM_SCAN_CHANNELS - 1)];
 
+// `apportion` and `plan` index fixed-size arrays by run, so a pool with more
+// runs than `MAX_RUNS` would panic at assignment time rather than fail to
+// build. A new pool must be added here as well as to `ChannelPool::runs`.
+const _: () = assert!(
+    US_RUNS.len() <= MAX_RUNS && ALL_RUNS.len() <= MAX_RUNS,
+    "a channel pool has more runs than MAX_RUNS; raise it"
+);
+
 /// Which channels the fleet is allowed to scan.
 ///
 /// This constrains where nodes *transmit*, not merely where they listen: every

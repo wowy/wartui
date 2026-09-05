@@ -1470,6 +1470,7 @@ version = "0.1.0"
 dependencies = [
  "cobs 0.5.1",
  "heapless 0.9.3",
+ "nb 1.1.0",
  "postcard",
  "serde",
 ]
