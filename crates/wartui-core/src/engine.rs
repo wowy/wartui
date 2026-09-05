@@ -845,8 +845,17 @@ impl FleetEngine {
         }
 
         if let Some(node) = self.nodes.get_mut(&pending.mac) {
-            node.last_outcome = Some(outcome);
+            // Attempts resolve in the order they complete, not the order they
+            // went out. A `SendResult` lost to a garbled frame expires a couple
+            // of seconds later — by which time the retry it provoked may
+            // already have been acknowledged — so a failure from an attempt the
+            // node has moved past says nothing about where the node is now. It
+            // still gets its row, because that attempt really did fail; it just
+            // does not get to overwrite what landed afterwards.
+            let superseded =
+                node.confirmed.is_some_and(|c| c.counter >= pending.assignment.counter);
             if acked {
+                node.last_outcome = Some(outcome);
                 node.last_latency_us = latency_us;
                 // Divergence 3: cleared on the MAC-layer acknowledgement, not
                 // on a successful enqueue. Unicast ESP-NOW is acknowledged by
@@ -860,6 +869,8 @@ impl FleetEngine {
                     node.confirmed = Some(pending.assignment);
                     node.dirty = false;
                 }
+            } else if !superseded {
+                node.last_outcome = Some(outcome);
             }
         }
 
@@ -872,7 +883,10 @@ impl FleetEngine {
             start_idx: pending.assignment.range.start,
             end_idx: pending.assignment.range.end,
             created_at_ms: pending.sent_ms,
-            delivered_at_ms: Some(now.unix_ms),
+            // `Silent` is the case where nothing came back at all, so there
+            // is no delivery to stamp: a time here would only be the timeout's
+            // own length wearing the look of an answer.
+            delivered_at_ms: (outcome != AdminOutcome::Silent).then_some(now.unix_ms),
             outcome,
             latency_us,
         }));

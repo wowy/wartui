@@ -514,7 +514,43 @@ fn an_assignment_the_bridge_never_answers_for_is_written_down_as_unknown() {
     // itself went quiet, and the difference points at different hardware.
     assert_eq!(row.outcome, AdminOutcome::Silent);
     assert_eq!(row.latency_us, None);
+    // Nothing arrived, so there is no delivery time. Stamping one would record
+    // the timeout's own length dressed up as an answer.
+    assert_eq!(row.delivered_at_ms, None);
     assert!(engine.nodes().next().expect("the node").dirty);
+}
+
+#[test]
+fn a_lost_answer_expiring_late_does_not_unpick_an_assignment_that_has_since_landed() {
+    let clock = Clock::new();
+    let config = EngineConfig { admin_timeout: Duration::from_secs(2), ..Default::default() };
+    let mut engine = engine(config, &clock);
+    engine.handle(heartbeat(NODE, 1), clock.at(1));
+    engine.handle(assign(NODE, 5, 5), clock.at(2));
+
+    // The first attempt's answer is lost on the way back — a garbled USB frame,
+    // which the live capture logged happening.
+    let (first, ..) = sent_admin(&engine.handle(heartbeat(NODE, 2), clock.at(3)));
+    // So the node is still dirty on its next heartbeat and the retry goes out,
+    // under the same epoch, and this one is acknowledged.
+    let (second, ..) = sent_admin(&engine.handle(heartbeat(NODE, 3), clock.at(4)));
+    assert_ne!(first, second);
+    engine.handle(send_result(second, SendStatus::AckOk, 4_000), clock.at(4));
+
+    let node = engine.nodes().next().expect("the node").clone();
+    assert_eq!(node.confirmed.expect("confirmed").range, IndexRun::new(5, 5));
+
+    // Now the stranded first attempt times out. It earns its row — that attempt
+    // really did go unanswered — but the node is demonstrably holding the
+    // range, and the view must not start claiming otherwise.
+    let batch = engine.handle(Event::Tick, clock.at(5));
+    let Some(Record::Assignment(row)) = batch.records.first() else { panic!("a row") };
+    assert_eq!(row.outcome, AdminOutcome::Silent);
+
+    let node = engine.nodes().next().expect("the node");
+    assert_eq!(node.last_outcome, Some(AdminOutcome::Acked));
+    assert_eq!(node.confirmed.expect("still confirmed").range, IndexRun::new(5, 5));
+    assert!(!node.dirty, "nothing is owed: the node acknowledged this epoch");
 }
 
 #[test]

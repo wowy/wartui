@@ -108,12 +108,15 @@ impl Ui {
     }
 
     fn on_key(&mut self, key: KeyEvent, snapshot: &Snapshot, commands: &mpsc::Sender<Command>) {
-        self.notice = None;
         match key.code {
             KeyCode::Down | KeyCode::Char('j') => {
+                self.notice = None;
                 self.selected = (self.selected + 1).min(snapshot.nodes.len().saturating_sub(1));
             }
-            KeyCode::Up | KeyCode::Char('k') => self.selected = self.selected.saturating_sub(1),
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.notice = None;
+                self.selected = self.selected.saturating_sub(1);
+            }
             // One channel, and the whole pool. The pair is the Phase 4 proof:
             // a node heartbeats once per completed sweep, so narrowing it to a
             // single channel should collapse its beat period from seconds to
@@ -121,6 +124,9 @@ impl Ui {
             // Nothing else in the protocol reports what a node is scanning.
             KeyCode::Char('a') => self.assign(narrow(snapshot), snapshot, commands),
             KeyCode::Char('A') => self.assign(widest(snapshot), snapshot, commands),
+            // Anything else leaves the notice alone. A refused assignment is
+            // the one message the operator has to read to know why nothing
+            // happened, and a key bound to nothing should not take it away.
             _ => {}
         }
     }

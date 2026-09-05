@@ -57,7 +57,6 @@ use wartui_proto::link::{
 };
 use wartui_proto::outbox::{ByteSink, Outbox};
 
-
 // This creates the app descriptor the esp-idf bootloader expects.
 esp_bootloader_esp_idf::esp_app_desc!();
 
@@ -352,6 +351,13 @@ fn handle(
 
         HostToBridge::RemovePeer { mac } => match manager.remove_peer(&mac) {
             Ok(()) => bridge.log(LogLevel::Debug, "peer removed"),
+            // Symmetric with `AddPeer` swallowing `PeerExists`: gone is the
+            // outcome the host asked for. Freeing a slot is precisely the
+            // idempotent path a full peer table sends the host down, and it
+            // should not have to remember which peers it already gave up.
+            Err(EspNowError::Error(esp_radio::esp_now::Error::NotFound)) => {
+                bridge.log(LogLevel::Debug, "peer was already gone");
+            }
             Err(_) => bridge.error("could not remove that peer"),
         },
     }
