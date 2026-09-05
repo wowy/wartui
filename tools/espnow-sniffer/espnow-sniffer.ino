@@ -17,9 +17,6 @@
 //                                      out of range, or nothing transmitting
 //   both > 0                        -> plaintext fleet, working as wartui needs
 //
-// If nothing shows up on the mesh channel it sweeps 2.4 GHz looking for where
-// the traffic actually is.
-//
 // Capture with:
 //   pio device monitor -b 115200 | tee /tmp/capture.txt
 // then append the `capture_*` lines to
@@ -54,11 +51,6 @@ static const uint8_t ESPRESSIF_OUI[3] = {0x18, 0xFE, 0x34};
 static const int ESPNOW_BODY_OFFSET = 39;
 static const int FCS_LEN = 4;
 
-// Give up on the mesh channel after this long and go looking.
-static const uint32_t SCAN_AFTER_MS = 20000;
-static const uint32_t SCAN_DWELL_MS = 800;
-static const uint8_t SCAN_LAST_CHANNEL = 13;
-
 struct Capture {
   uint8_t src[6];
   uint8_t dst[6];
@@ -87,7 +79,6 @@ static volatile uint32_t espnow_frames = 0;
 static volatile uint32_t promisc_frames = 0;
 static volatile uint32_t foreign_action = 0;
 static uint32_t capture_seq = 0;
-static uint32_t last_espnow_ms = 0;
 
 // Park the radio the way the firmware does (src/WiFiOps.cpp:586-620).
 static void setFixedChannel(uint8_t ch) {
@@ -125,7 +116,6 @@ static void enqueue(const uint8_t *src, const uint8_t *dst, int8_t rssi, uint8_t
 // What the wartui bridge will see: broadcast, or addressed to us.
 static void onEspNowRecv(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
   espnow_frames++;
-  last_espnow_ms = millis();
   const int8_t rssi = (info && info->rx_ctrl) ? (int8_t)info->rx_ctrl->rssi : 0;
   uint8_t channel = 0;
   wifi_second_chan_t second;
@@ -193,47 +183,13 @@ static void report(uint8_t channel) {
                 (unsigned long)(millis() / 1000));
 
   if (promisc_frames == 0) {
-    Serial.println("#   nothing on this channel yet: wrong channel, out of range (nodes "
-                   "transmit at 2 dBm), or nothing is running");
+    Serial.println("#   nothing on channel 6 yet: nothing is transmitting, or out of "
+                   "range (nodes drop to 2 dBm while wardriving)");
   } else if (espnow_frames == 0) {
     Serial.println("#   ESP-NOW traffic IS present but the receive callback never fired, so "
                    "it is unicast: the fleet has encryption ENABLED, which wartui does not "
                    "support. Turn it off in each node's web UI.");
   }
-}
-
-// Sweep 2.4 GHz looking for the traffic, then settle back.
-static void scanForTraffic() {
-  Serial.println("# no ESP-NOW traffic on the mesh channel; sweeping 1-13");
-  uint8_t best_channel = MESH_CHANNEL;
-  uint32_t best_count = 0;
-
-  for (uint8_t ch = 1; ch <= SCAN_LAST_CHANNEL; ch++) {
-    const uint32_t before = promisc_frames;
-    setFixedChannel(ch);
-    const uint32_t until = millis() + SCAN_DWELL_MS;
-    while (millis() < until) {
-      drainQueue();
-      delay(10);
-    }
-    const uint32_t seen = promisc_frames - before;
-    Serial.printf("#   channel %2u: %lu ESP-NOW frames\n", ch, (unsigned long)seen);
-    if (seen > best_count) {
-      best_count = seen;
-      best_channel = ch;
-    }
-  }
-
-  if (best_count > 0) {
-    Serial.printf("# found traffic on channel %u; the firmware hard-codes %u, so something "
-                  "is out of step\n",
-                  best_channel, MESH_CHANNEL);
-  } else {
-    Serial.println("# no ESP-NOW traffic on any 2.4 GHz channel: check the devices are "
-                   "powered and within a metre or so");
-  }
-  setFixedChannel(best_count > 0 ? best_channel : MESH_CHANNEL);
-  last_espnow_ms = millis();
 }
 
 void setup() {
@@ -264,7 +220,6 @@ void setup() {
   formatMac(mac, self);
   Serial.printf("# sniffer MAC %s on channel %u\n", self, MESH_CHANNEL);
   Serial.println("# ready");
-  last_espnow_ms = millis();
 }
 
 void loop() {
@@ -279,8 +234,5 @@ void loop() {
     report(channel);
   }
 
-  if (millis() - last_espnow_ms > SCAN_AFTER_MS && promisc_frames == 0) {
-    scanForTraffic();
-  }
   delay(1);
 }
