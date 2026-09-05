@@ -73,7 +73,11 @@ struct Capture {
 // Single producer (the Wi-Fi task) and single consumer (loop), so volatile
 // indices are enough. Printing from the radio callback risks tripping the
 // watchdog, so captures are queued and drained from loop() instead.
-static const uint8_t QUEUE_LEN = 12;
+// Deep enough for the burst a node emits in its first sweep after boot, when
+// nothing is in its dedup ring yet and every access point on a channel is
+// reported back to back. A trickle-sized queue drops exactly the frames worth
+// capturing; `dropped` in the alive line says if this is still too small.
+static const uint8_t QUEUE_LEN = 48;
 static Capture queue[QUEUE_LEN];
 static volatile uint8_t q_head = 0;
 static volatile uint8_t q_tail = 0;
@@ -278,5 +282,5 @@ void loop() {
   if (millis() - last_espnow_ms > SCAN_AFTER_MS && promisc_frames == 0) {
     scanForTraffic();
   }
-  delay(5);
+  delay(1);
 }
