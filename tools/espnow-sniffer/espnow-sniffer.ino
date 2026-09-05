@@ -81,6 +81,48 @@ static volatile uint8_t q_head = 0;
 static volatile uint8_t q_tail = 0;
 static volatile uint32_t dropped = 0;
 
+// Who is transmitting ESP-NOW, and whether anything acknowledges them.
+//
+// An 802.11 ACK names only the station being acknowledged, so an ACK whose
+// receiver address is the core's MAC means the node did answer the core's
+// unicast. That separates "nobody received it" from "it was received but the
+// acknowledgement never got back", which look identical from the retry bit
+// alone and have very different consequences.
+struct Talker {
+  uint8_t mac[6];
+  uint32_t frames;
+  uint32_t acks;
+  bool used;
+};
+static const uint8_t MAX_TALKERS = 8;
+static Talker talkers[MAX_TALKERS];
+
+static void noteTalker(const uint8_t *mac) {
+  for (uint8_t i = 0; i < MAX_TALKERS; i++) {
+    if (talkers[i].used && memcmp(talkers[i].mac, mac, 6) == 0) {
+      talkers[i].frames++;
+      return;
+    }
+  }
+  for (uint8_t i = 0; i < MAX_TALKERS; i++) {
+    if (!talkers[i].used) {
+      memcpy(talkers[i].mac, mac, 6);
+      talkers[i].frames = 1;
+      talkers[i].used = true;
+      return;
+    }
+  }
+}
+
+static void noteAck(const uint8_t *receiver) {
+  for (uint8_t i = 0; i < MAX_TALKERS; i++) {
+    if (talkers[i].used && memcmp(talkers[i].mac, receiver, 6) == 0) {
+      talkers[i].acks++;
+      return;
+    }
+  }
+}
+
 static volatile uint32_t espnow_frames = 0;
 static volatile uint32_t promisc_frames = 0;
 static volatile uint32_t foreign_action = 0;
@@ -134,11 +176,18 @@ static void onEspNowRecv(const esp_now_recv_info_t *info, const uint8_t *data, i
 
 // Everything on the air, whoever it is addressed to.
 static void onPromiscuous(void *buf, wifi_promiscuous_pkt_type_t type) {
-  if (type != WIFI_PKT_MGMT) return;
-
   const wifi_promiscuous_pkt_t *pkt = (const wifi_promiscuous_pkt_t *)buf;
   const uint8_t *p = pkt->payload;
   const int len = pkt->rx_ctrl.sig_len;
+
+  // Acknowledgement: subtype 13 of the control type, carrying only the address
+  // of the station being acknowledged. Counted, never queued -- a busy channel
+  // produces far too many to print.
+  if (type == WIFI_PKT_CTRL) {
+    if (len >= 10 && p[0] == 0xD4) noteAck(&p[4]);
+    return;
+  }
+  if (type != WIFI_PKT_MGMT) return;
 
   // Action frame: protocol version 0, type management, subtype 13.
   if (len < ESPNOW_BODY_OFFSET + FCS_LEN || p[0] != 0xD0) return;
@@ -150,6 +199,7 @@ static void onPromiscuous(void *buf, wifi_promiscuous_pkt_type_t type) {
   }
 
   promisc_frames++;
+  noteTalker(&p[10]);
   const int body_len = len - ESPNOW_BODY_OFFSET - FCS_LEN;
   // Frame Control bit 11 is Retry; sequence control sits at bytes 22-23 with
   // the sequence number in the top 12 bits.
@@ -200,6 +250,14 @@ static void report(uint8_t channel) {
                 (unsigned long)foreign_action, (unsigned long)dropped,
                 (unsigned long)(millis() / 1000));
 
+  for (uint8_t i = 0; i < MAX_TALKERS; i++) {
+    if (!talkers[i].used) continue;
+    char mac[18];
+    formatMac(talkers[i].mac, mac);
+    Serial.printf("#   %s sent %lu ESP-NOW frames, acknowledged %lu times\n", mac,
+                  (unsigned long)talkers[i].frames, (unsigned long)talkers[i].acks);
+  }
+
   if (promisc_frames == 0) {
     Serial.println("#   nothing on channel 6 yet: nothing is transmitting, or out of "
                    "range (nodes drop to 2 dBm while wardriving)");
@@ -227,7 +285,8 @@ void setup() {
   esp_now_register_recv_cb(onEspNowRecv);
 
   wifi_promiscuous_filter_t filter = {};
-  filter.filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT;  // action frames live here
+  // Action frames carry ESP-NOW; control frames carry the acknowledgements.
+  filter.filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT | WIFI_PROMIS_FILTER_MASK_CTRL;
   esp_wifi_set_promiscuous_filter(&filter);
   esp_wifi_set_promiscuous_rx_cb(onPromiscuous);
   setFixedChannel(MESH_CHANNEL);

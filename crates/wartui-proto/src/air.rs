@@ -170,6 +170,17 @@ impl<'a> TextMsg<'a> {
 }
 
 /// A decoded `enow_admin_msg_t` — a channel-range assignment.
+///
+/// Observed on real hardware: a vendor core's assignment to its single node
+/// went out once and was retransmitted 31 times by the radio, all 32 frames
+/// sharing one 802.11 sequence number with the retry bit set on all but the
+/// first. Nothing acknowledged it, yet the core cleared its dirty flag from the
+/// `esp_now_send` return value (`src/WiFiOps.cpp:679`) and moved on believing
+/// the node had been assigned. Broadcast heartbeats and observations from the
+/// same node in the same capture each carried their own sequence number and
+/// were never retried, so the retries are specific to unicast.
+///
+/// This is why wartui clears an assignment only on the transmit callback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AdminMsg {
     /// Epoch counter. A node adopts the assignment only when this *differs*
