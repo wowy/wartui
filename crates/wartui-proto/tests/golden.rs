@@ -186,3 +186,32 @@ fn captured_observation_payloads_parse_as_wardrive_lines() {
     }
     assert!(parsed >= 3, "expected several observation payloads, parsed {parsed}");
 }
+
+#[test]
+fn the_real_cores_assignment_matches_what_our_planner_produces() {
+    // The captured MSG_ADMIN frames come from the vendor core assigning its one
+    // node. Reproducing them exactly is the whole contract wartui has to meet
+    // when it takes that core's place, and it is checked here against the
+    // core's actual bytes rather than against my reading of its source.
+    use wartui_proto::plan::{ChannelPool, plan};
+
+    let mut checked = 0;
+    for line in GOLDEN.lines().filter(|l| !l.trim().is_empty() && !l.starts_with('#')) {
+        let name = line.split_whitespace().next().expect("name");
+        let bytes = vector(name);
+        let Ok(Frame::Admin(observed)) = Frame::decode(&bytes) else { continue };
+
+        // Stock nodes are assigned across the whole table, which is the `All`
+        // pool. This covers the one-node capture from hardware and the
+        // five-node split from the generated vector alike.
+        let ours = plan(ChannelPool::All, observed.node_count)
+            .expect("one node is a valid fleet")
+            .admin_for(observed.node_index, 0, observed.assignment_version)
+            .expect("node 0 is assigned");
+
+        assert_eq!(ours, observed, "{name}: our assignment differs from the real core's");
+        assert_eq!(ours.encode(), bytes.as_slice(), "{name}: our encoding differs byte-for-byte");
+        checked += 1;
+    }
+    assert!(checked > 0, "no MSG_ADMIN frames in the fixture");
+}

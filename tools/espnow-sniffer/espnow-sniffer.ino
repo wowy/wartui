@@ -60,6 +60,12 @@ struct Capture {
   uint8_t body[256];
   bool has_magic;
   bool via_espnow;  // false means only promiscuous mode saw it
+  // 802.11 retry flag and sequence number, promiscuous captures only. A run of
+  // frames sharing one sequence number with the retry bit set is one logical
+  // transmission the radio kept resending because nothing acknowledged it --
+  // which is very different from the sender having looped.
+  bool retry;
+  uint16_t seq;
 };
 
 // Single producer (the Wi-Fi task) and single consumer (loop), so volatile
@@ -89,7 +95,8 @@ static void setFixedChannel(uint8_t ch) {
 }
 
 static void enqueue(const uint8_t *src, const uint8_t *dst, int8_t rssi, uint8_t channel,
-                    const uint8_t *body, int body_len, bool via_espnow) {
+                    const uint8_t *body, int body_len, bool via_espnow, bool retry,
+                    uint16_t seq) {
   uint8_t next = (uint8_t)((q_head + 1) % QUEUE_LEN);
   if (next == q_tail) {
     dropped++;
@@ -110,6 +117,8 @@ static void enqueue(const uint8_t *src, const uint8_t *dst, int8_t rssi, uint8_t
   memcpy(c.body, body, c.body_len);
   c.has_magic = (c.body_len >= 4) && (memcmp(c.body, MAGIC, 4) == 0);
   c.via_espnow = via_espnow;
+  c.retry = retry;
+  c.seq = seq;
   q_head = next;
 }
 
@@ -120,7 +129,7 @@ static void onEspNowRecv(const esp_now_recv_info_t *info, const uint8_t *data, i
   uint8_t channel = 0;
   wifi_second_chan_t second;
   esp_wifi_get_channel(&channel, &second);
-  enqueue(info->src_addr, info->des_addr, rssi, channel, data, len, true);
+  enqueue(info->src_addr, info->des_addr, rssi, channel, data, len, true, false, 0);
 }
 
 // Everything on the air, whoever it is addressed to.
@@ -142,8 +151,12 @@ static void onPromiscuous(void *buf, wifi_promiscuous_pkt_type_t type) {
 
   promisc_frames++;
   const int body_len = len - ESPNOW_BODY_OFFSET - FCS_LEN;
+  // Frame Control bit 11 is Retry; sequence control sits at bytes 22-23 with
+  // the sequence number in the top 12 bits.
+  const bool retry = (p[1] & 0x08) != 0;
+  const uint16_t seq = (uint16_t)((p[22] | (p[23] << 8)) >> 4);
   enqueue(&p[10], &p[4], (int8_t)pkt->rx_ctrl.rssi, pkt->rx_ctrl.channel,
-          &p[ESPNOW_BODY_OFFSET], body_len, false);
+          &p[ESPNOW_BODY_OFFSET], body_len, false, retry, seq);
 }
 
 static void formatMac(const uint8_t *m, char *out) {
@@ -158,9 +171,14 @@ static void drainQueue() {
     formatMac(c.dst, dst);
 
     const bool broadcast = (memcmp(c.dst, "\xFF\xFF\xFF\xFF\xFF\xFF", 6) == 0);
-    Serial.printf("# from=%s to=%s%s rssi=%d ch=%u len=%u via=%s\n", src, dst,
-                  broadcast ? " (broadcast)" : " (unicast)", c.rssi, c.channel, c.body_len,
-                  c.via_espnow ? "esp-now" : "promiscuous");
+    if (c.via_espnow) {
+      Serial.printf("# from=%s to=%s%s rssi=%d ch=%u len=%u via=esp-now\n", src, dst,
+                    broadcast ? " (broadcast)" : " (unicast)", c.rssi, c.channel, c.body_len);
+    } else {
+      Serial.printf("# from=%s to=%s%s rssi=%d ch=%u len=%u via=promiscuous seq=%u%s\n", src,
+                    dst, broadcast ? " (broadcast)" : " (unicast)", c.rssi, c.channel,
+                    c.body_len, c.seq, c.retry ? " RETRY" : "");
+    }
 
     if (c.has_magic) {
       Serial.printf("#   type=%u\n", c.body_len > 4 ? c.body[4] : 0);
