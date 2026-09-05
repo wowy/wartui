@@ -74,18 +74,58 @@ Two things follow:
   assignment — so it is only ever correct for a single-node fleet, and is not a
   general fix.
 
-### Not yet known
+### Confirmed with two nodes: the split never happens
+
+Running a second node made the consequence visible. The core computed and sent
+the split correctly — version 3, index 0 of 2 on indices 0..19, index 1 of 2 on
+20..39, byte for byte what `wartui-proto`'s planner produces — and each
+assignment was again retried 31 times with no acknowledgement.
+
+Neither node adopted it. The decisive evidence is which channels each node
+reported networks on afterwards, since a node can only report an access point
+on a channel it actually scanned:
+
+| Node | Assigned indices | Assigned channels | Reported on | Outside its range |
+| --- | --- | --- | --- | --- |
+| `…57:84` | 20..39 | 60–177 | channel 6 ×16, 149 ×2 | **16 of 18** |
+| `…59:50` | 0..19 | 1–56 | channel 6 ×12, 48 ×2 | 0 of 14 |
+
+Node `…57:84` was assigned the 5 GHz upper half and spent its time on channel
+6, which is index 5. Both nodes are still sweeping the whole table, duplicating
+each other's work — precisely what the channel assignment exists to prevent.
+
+So the vendor firmware's fleet coordination does not function here. A wartui
+bridge that retries an assignment until the radio confirms delivery is not a
+refinement on the existing behaviour; it is the difference between the feature
+working and not working.
+
+### A correction to the Phase 4 milestone
+
+The plan proposed confirming an assignment by watching a node's heartbeat
+period collapse when narrowed to one channel. That signal is weaker than it
+looked. Measured here, a 40-channel sweep takes about 6.7 s, of which only
+3.2 s is channel dwell (40 × `CHANNEL_TIMER` 80 ms); the rest is the per-sweep
+BLE scan plus the 300 ms admin window, and that overhead is fixed. Halving the
+channel count moved the period from 6.7 s to — nothing, because the assignment
+never arrived, but even had it arrived the expectation was 5.1 s, not 3.4 s.
+
+**Use channel membership instead.** Check that every Wi-Fi observation a node
+reports names a channel inside its assigned range. It is unambiguous, needs no
+timing, and it is what actually caught this. Heartbeat period remains a useful
+secondary signal at a one-channel assignment, where the predicted period is
+about 3.6 s against 6.7 s.
+
+### Still not known
 
 Why the node does not acknowledge. Candidates worth ruling out: BLE
-coexistence taking the radio during the admin window, an asynchronous Wi-Fi
-scan still owning it, or `setFixedChannel` leaving the interface in promiscuous
-mode on its error path (`WiFiOps.cpp:608-612` returns without restoring it).
+coexistence taking the radio during the admin window — plausible given the BLE
+scan accounts for roughly half of each sweep — an asynchronous Wi-Fi scan still
+owning it, or `setFixedChannel` leaving the interface in promiscuous mode on
+its error path (`WiFiOps.cpp:608-612` returns without restoring it).
 
-The decisive test is behavioural rather than forensic: **run two nodes.** The
-core then splits the table 0–19 and 20–39, and each node's heartbeat period
-should halve from roughly 5 s to 2.5 s, because sweep length is proportional to
-the assigned range. If the periods do not change, assignments are never
-adopted. That is the same signal the plan's Phase 4 milestone relies on.
+This matters for wartui only if the cause also blocks a bridge from reaching
+the nodes. Phase 4 will find out directly, and its `SendResult` will say so
+rather than leaving it to be inferred.
 
 ## Node-side deduplication is as aggressive as expected
 
