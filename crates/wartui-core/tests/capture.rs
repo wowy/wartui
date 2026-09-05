@@ -1,0 +1,83 @@
+//! The whole chain, with a simulated fleet standing in for hardware.
+//!
+//! Every piece below is covered on its own elsewhere. This is the test that the
+//! pieces are actually connected: that a frame arriving on the link becomes a
+//! row in SQLite becomes a line in a file WiGLE would accept, without anyone
+//! having to plug anything in.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use tokio::sync::{oneshot, watch};
+use wartui_bridge::sim::{SimConfig, SimTransport};
+use wartui_core::engine::{EngineConfig, FleetEngine, StoreStats};
+use wartui_core::export::{ExportFilter, wigle_csv};
+use wartui_core::position::PositionChain;
+use wartui_core::runtime::{drive, now};
+use wartui_core::store::{SessionInfo, Store, StoreConfig, open_readonly};
+use wartui_proto::plan::ChannelPool;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_simulated_fleet_becomes_a_database_and_then_a_wigle_file() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("wartui.db");
+
+    // Fast-forwarded, or the test would have to sit through a real sweep.
+    let link = SimTransport::new(SimConfig { node_count: 3, speed: 60.0, ..Default::default() })
+        .start()
+        .expect("starting the simulator");
+
+    let started = now();
+    let session = SessionInfo { espnow_channel: 6, pool: ChannelPool::Us, ..Default::default() };
+    let store = Store::open(&StoreConfig::new(&path), &session, started.unix_ms)
+        .expect("opening the store");
+
+    let config = EngineConfig {
+        position: PositionChain::fixed(37.7749, -122.4194, Some(16.0)),
+        ..Default::default()
+    };
+    let engine = FleetEngine::new(config, started);
+    let (snapshot_tx, snapshot_rx) =
+        watch::channel(Arc::new(engine.snapshot(started, StoreStats::default())));
+    let (stop_tx, stop_rx) = oneshot::channel();
+
+    let capture = tokio::spawn(drive(link, store, engine, snapshot_tx, stop_rx));
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    stop_tx.send(()).expect("the capture is still running");
+    capture.await.expect("the capture task should not panic");
+
+    // The snapshot the UI would have been drawing.
+    let snapshot = snapshot_rx.borrow().clone();
+    assert_eq!(snapshot.nodes.len(), 3, "every simulated node should have been seen");
+    assert!(snapshot.counters.observations > 0, "and should have reported something");
+    assert_eq!(snapshot.counters.undecodable, 0, "the decoder agrees with the simulator");
+    assert_eq!(snapshot.counters.unparsed, 0);
+    assert_eq!(snapshot.store.dropped, 0, "nothing should be dropped at this rate");
+
+    let conn = open_readonly(&path).expect("reopening the capture");
+    let stored: i64 =
+        conn.query_row("SELECT COUNT(*) FROM observation", [], |r| r.get(0)).expect("counting");
+    assert!(stored > 0, "observations should have reached the disk");
+
+    let ended: Option<i64> =
+        conn.query_row("SELECT ended_at FROM session", [], |r| r.get(0)).expect("session row");
+    assert!(ended.is_some(), "a stopped capture should close its session out");
+
+    let mut csv = Vec::new();
+    let summary = wigle_csv(&conn, ExportFilter::default(), &mut csv, "0.1.0").expect("exporting");
+    let csv = String::from_utf8(csv).expect("the CSV is UTF-8");
+
+    assert!(summary.networks > 0);
+    assert_eq!(summary.unpositioned, 0, "a static position covers every row");
+    assert_eq!(
+        csv.lines().count() as u64,
+        summary.networks + 2,
+        "two header lines and one row per network"
+    );
+    for row in csv.lines().skip(2) {
+        let fields: Vec<&str> = row.split(',').collect();
+        assert_eq!(fields.len(), 11, "WiGLE v1.4 has eleven columns: {row}");
+        assert!(matches!(fields[10], "WIFI" | "BLE"), "{row}");
+        assert_eq!(fields[6], "37.7749", "{row}");
+    }
+}
