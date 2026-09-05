@@ -30,7 +30,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use rusqlite::{Connection, OpenFlags, params};
+use rusqlite::{Connection, OpenFlags, TransactionBehavior, params};
 use wartui_proto::air::RecordKind;
 use wartui_proto::plan::ChannelPool;
 
@@ -238,7 +238,7 @@ impl Store {
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
 
         let session_id = insert_session(&mut conn, session, started_at_ms)?;
-        let assignment_base = reserve_versions(&conn)?;
+        let assignment_base = reserve_versions(&mut conn)?;
 
         let (tx, rx) = sync_channel(config.queue_depth);
         let stats = Arc::new(Stats::default());
@@ -379,22 +379,36 @@ fn migrate(conn: &Connection, found: i32) -> Result<(), StoreError> {
 /// believes an assignment landed that the node discarded. Writing the counter
 /// forward before issuing anything means a crash can only ever skip epochs,
 /// never repeat one. Skipping is free; repeating is the bug.
+///
+/// Sixty-four holds as long as one assignment row in every sixty-four survives
+/// the store's lossy queue, since each one re-books the block from its own
+/// counter. Assignments are written at operator-keypress rate and are a few
+/// dozen bytes, so losing sixty-four consecutively means the queue has been
+/// full for the whole capture — a state the view is already shouting about.
 const VERSION_RESERVATION: u64 = 64;
 
 /// Read the persisted assignment epoch and immediately book a block of them.
-fn reserve_versions(conn: &Connection) -> Result<u64, StoreError> {
-    let base: u64 = conn
+///
+/// Under `BEGIN IMMEDIATE`, so the read and the write cannot interleave with
+/// another wartui opening the same file. Two processes that both read the same
+/// base would both book the same block and then hand the same epoch to the same
+/// node — a frame the node discards on its `!=` and acknowledges anyway, which
+/// is the one failure this whole mechanism exists to prevent.
+fn reserve_versions(conn: &mut Connection) -> Result<u64, StoreError> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let base: u64 = tx
         .query_row("SELECT v FROM kv WHERE k = 'assignment_version_counter'", [], |row| {
             row.get::<_, String>(0)
         })
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
-    conn.execute(
+    tx.execute(
         "INSERT INTO kv (k, v) VALUES ('assignment_version_counter', ?1)
          ON CONFLICT(k) DO UPDATE SET v = excluded.v",
         params![(base + VERSION_RESERVATION).to_string()],
     )?;
+    tx.commit()?;
     Ok(base)
 }
 
