@@ -314,6 +314,9 @@ pub struct Counters {
     /// Assignments that went out and were not acknowledged, were refused by
     /// the bridge, or were never answered for.
     pub admin_failed: u64,
+    /// Assignments refused because the bridge's peer table was full, which
+    /// means the fleet is larger than the twenty nodes wartui supports.
+    pub peer_table_full: u64,
 }
 
 /// Counters the store keeps, folded into the snapshot for display.
@@ -803,6 +806,19 @@ impl FleetEngine {
             | SendStatus::PeerTableFull
             | SendStatus::Rejected => AdminOutcome::Refused,
         };
+
+        // A full peer table is terminal, not a miss. The radio holds twenty
+        // peers and twenty nodes is the entire supported fleet, so there is no
+        // later heartbeat at which this becomes possible — retrying would only
+        // spend the rest of the capture writing failure rows at heartbeat rate.
+        // Give up on what was wanted, and let the view say why.
+        if matches!(status, SendStatus::PeerTableFull) {
+            self.counters.peer_table_full += 1;
+            if let Some(node) = self.nodes.get_mut(&pending.mac) {
+                node.dirty = false;
+                node.desired = None;
+            }
+        }
 
         // Both stamps are the bridge's own microsecond clock, which wraps
         // about every 71 minutes; a wrapping subtraction is correct across it.

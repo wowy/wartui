@@ -686,12 +686,37 @@ fn a_bridge_that_cannot_transmit_at_all_is_a_failure_not_a_delivery() {
     engine.handle(assign(NODE, 0, 0), clock.at(2));
     let (id, _, _) = sent_admin(&engine.handle(heartbeat(NODE, 2), clock.at(6)));
 
-    let batch = engine.handle(send_result(id, SendStatus::PeerTableFull, 900), clock.at(6));
+    let batch = engine.handle(send_result(id, SendStatus::Rejected, 900), clock.at(6));
 
     let Some(Record::Assignment(row)) = batch.records.first() else { panic!("a row") };
     assert_eq!(row.outcome, AdminOutcome::Refused);
+    // Still owed: a bridge that refused one frame may take the next one.
     assert!(engine.nodes().next().expect("the node").dirty);
     assert_eq!(counters(&engine).admin_acked, 0);
+}
+
+#[test]
+fn a_fleet_too_big_for_the_radio_is_told_so_once_rather_than_retried_forever() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(heartbeat(NODE, 1), clock.at(1));
+    engine.handle(assign(NODE, 0, 0), clock.at(2));
+    let (id, _, _) = sent_admin(&engine.handle(heartbeat(NODE, 2), clock.at(6)));
+
+    let batch = engine.handle(send_result(id, SendStatus::PeerTableFull, 900), clock.at(6));
+    let Some(Record::Assignment(row)) = batch.records.first() else { panic!("a row") };
+    assert_eq!(row.outcome, AdminOutcome::Refused);
+
+    // Twenty peers is the radio's whole table and twenty nodes is the whole
+    // supported fleet, so no later heartbeat makes this possible. Retrying
+    // would write one failure row per sweep for the rest of the capture.
+    let node = engine.nodes().next().expect("the node");
+    assert!(!node.dirty, "nothing is owed to a node the bridge cannot address");
+    assert!(node.desired.is_none(), "and nothing is still wanted");
+    assert_eq!(counters(&engine).peer_table_full, 1);
+
+    let next = engine.handle(heartbeat(NODE, 3), clock.at(10));
+    assert!(next.urgent.is_empty(), "and the next sweep does not try again");
 }
 
 #[test]

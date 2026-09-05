@@ -29,7 +29,7 @@ use wartui_core::engine::{Command, NodeView, Snapshot, TailEntry};
 use wartui_core::record::AdminOutcome;
 use wartui_proto::air::RecordKind;
 use wartui_proto::link::Mac;
-use wartui_proto::plan::{IndexRun, SCAN_CHANNELS};
+use wartui_proto::plan::{IndexRun, MAX_NODES, SCAN_CHANNELS};
 
 /// How long the input thread waits for a keypress before checking whether it
 /// should stop. Long enough not to spin, short enough that quitting is instant.
@@ -133,6 +133,19 @@ impl Ui {
 
     fn assign(&mut self, range: IndexRun, snapshot: &Snapshot, commands: &mpsc::Sender<Command>) {
         let Some(node) = snapshot.nodes.get(self.selected) else { return };
+        // Twenty is the radio's peer table and therefore the fleet. Past it the
+        // stagger arithmetic is describing a fleet the bridge cannot address,
+        // so saying no here beats sending frames that will be refused.
+        if snapshot.nodes.len() > MAX_NODES {
+            self.say(
+                format!(
+                    "{} nodes: wartui supports {MAX_NODES}, so nothing can be assigned",
+                    snapshot.nodes.len()
+                ),
+                snapshot,
+            );
+            return;
+        }
         // A node that is not heartbeating never opens an admin window, so the
         // assignment would sit dirty forever with nothing to say why. Refusing
         // it up front, with the reason, beats a queue that never drains.
@@ -424,6 +437,11 @@ fn node_state(node: &NodeView) -> (String, Style) {
     if matches!(state.last_outcome, Some(AdminOutcome::Unacked | AdminOutcome::Silent)) {
         return ("no admin ack".to_owned(), Style::new().fg(Color::Red));
     }
+    // The bridge would not put it on the air at all. Nearly always a peer table
+    // with no room in it, which means the fleet is over twenty nodes.
+    if state.last_outcome == Some(AdminOutcome::Refused) {
+        return ("refused".to_owned(), Style::new().fg(Color::Red));
+    }
     if state.reboots > 0 {
         return (format!("rebooted x{}", state.reboots), Style::new().fg(Color::Cyan));
     }
@@ -528,6 +546,9 @@ fn faults(snapshot: &Snapshot) -> Vec<String> {
     }
     if c.admin_failed > 0 {
         faults.push(format!("{} assignments unacknowledged", c.admin_failed));
+    }
+    if c.peer_table_full > 0 {
+        faults.push(format!("peer table full: more than {MAX_NODES} nodes"));
     }
     if c.unparsed > 0 {
         faults.push(format!("unparsed {}", c.unparsed));
@@ -685,6 +706,7 @@ mod tests {
                 admin_sent: 3,
                 admin_acked: 2,
                 admin_failed: 1,
+                peer_table_full: 0,
             },
             store: StoreStats { written: 800, dropped: 7 },
             bridge_status: Some(BridgeStatus {

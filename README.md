@@ -32,6 +32,15 @@ wartui speaks **plaintext ESP-NOW only**; nodes must have encryption turned off
 in their web UI. A `MSG_CORE_REQUEST` arriving from a node means that node still
 has it on.
 
+**Twenty nodes is the maximum, and anything above it is unsupported.** That is
+how many peers an ESP-NOW radio can hold, so a twenty-first node is one the
+bridge cannot address: its assignments would be refused, and a planner
+partitioning the channel pool among nodes that never hear the result would be
+describing a fleet that does not exist. The vendor firmware's own table is
+twenty-four; the four it has spare are unreachable from here. Over twenty,
+wartui keeps capturing everything every node reports — nothing is dropped — but
+refuses to assign, and says so.
+
 wartui is not a companion to a vendor core — it *replaces* one. If a real core
 is powered up on the same channel it will fight for the same fleet, and the
 footer says so (`admin frames from another core`).
@@ -135,6 +144,7 @@ many networks it left out. The GPS tier arrives in Phase 6.
 | `stale` | Still being heard, but not heartbeating — most often BLE coexistence on the node holding the radio through its admin window |
 | `no heartbeat` | Seen, but has never completed a sweep |
 | `no admin ack` | An assignment went out and its radio did not answer — nearly always BLE, see [Assigning channels](#assigning-channels) |
+| `refused` | The bridge would not transmit it. Nearly always a full peer table, which means the fleet is over twenty nodes |
 | `rebooted xN` | Its heartbeat counter went backwards, so it has forgotten any assignment; wartui re-issues under a fresh epoch |
 | `encrypted` | It is sending core-protocol frames. wartui cannot talk to it; turn encryption off in that node's web UI |
 
