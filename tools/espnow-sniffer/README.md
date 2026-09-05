@@ -15,6 +15,25 @@ pio device monitor -b 115200 | tee /tmp/capture.txt
 Power up a node with `use_encryption` off. Within a few seconds you should see
 `type=3` (heartbeat) and `type=4` (observation) frames.
 
+## If you see no output at all
+
+These devkits have **two USB sockets** and they do different things. Flashing
+works over either, so a silent monitor does not mean a broken board.
+
+- **Native USB Serial/JTAG** — shows up as `/dev/cu.usbmodem*`. This is what
+  `platformio.ini` is configured for.
+- **UART bridge** (CP2102N or similar) — shows up as `/dev/cu.usbserial-*` or
+  `/dev/cu.SLAB_USBtoUART`.
+
+Arduino's `Serial` goes to UART0 by default, because `HardwareSerial.h` leaves
+`ARDUINO_USB_CDC_ON_BOOT` at 0 and then does `#define Serial Serial0`. That
+sends every print out the UART socket. `platformio.ini` overrides it with
+`-DARDUINO_USB_MODE=1 -DARDUINO_USB_CDC_ON_BOOT=1` so `Serial` is the native
+USB CDC instead. **If you are plugged into the UART socket, drop that second
+flag and monitor `/dev/cu.usbserial-*`.**
+
+Check which you have with `pio device list`, or `ls /dev/cu.*`.
+
 ## Reading the output
 
 The sniffer listens two ways at once, and comparing the counters in the
