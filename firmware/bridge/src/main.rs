@@ -50,10 +50,8 @@ use wartui_proto::link::{
     BridgeToHost, Chip, FrameAccumulator, HostToBridge, LINK_PROTO_VERSION, LogLevel, LogStr,
     MAX_FRAME, Mac, SendStatus, ShortStr, decode_frame,
 };
+use wartui_proto::outbox::{ByteSink, Outbox};
 
-use crate::outbox::{ByteSink, Outbox};
-
-mod outbox;
 
 // This creates the app descriptor the esp-idf bootloader expects.
 esp_bootloader_esp_idf::esp_app_desc!();

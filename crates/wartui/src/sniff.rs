@@ -8,7 +8,7 @@
 use anyhow::Result;
 use clap::Args as ClapArgs;
 use wartui_bridge::LinkEvent;
-use wartui_proto::air::{Frame, RecordKind, WardriveLine};
+use wartui_proto::air::{Frame, MsgType, RecordKind, WardriveLine};
 use wartui_proto::link::{BROADCAST, BridgeToHost};
 
 use super::mac;
@@ -52,9 +52,16 @@ pub async fn run(args: Args) -> Result<()> {
     }
 
     println!(
-        "\n# {} frames: {} text, {} heartbeat, {} admin, {} undecodable",
-        counts.total, counts.text, counts.heartbeat, counts.admin, counts.undecodable
+        "\n# {} frames: {} text, {} heartbeat, {} admin, {} other, {} undecodable",
+        counts.total, counts.text, counts.heartbeat, counts.admin, counts.other, counts.undecodable
     );
+    if counts.other > 0 {
+        println!(
+            "# {} core-protocol frames arrived, which only encrypted nodes send. \
+             Turn encryption off in those nodes' web UI.",
+            counts.other
+        );
+    }
     Ok(())
 }
 
@@ -64,6 +71,9 @@ struct Counts {
     text: u64,
     heartbeat: u64,
     admin: u64,
+    /// `CoreRequest` and `CoreReply`: not expected in a plaintext fleet, and
+    /// worth a line of their own rather than being folded into a total.
+    other: u64,
     undecodable: u64,
 }
 
@@ -82,25 +92,29 @@ fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
             let head = format!("{:>10}us  {}  {rssi:>4}dBm  {addressing:>7}", rx_us, mac(src));
 
             match Frame::decode(payload) {
+                // Every one of these shares the 212-byte text layout; what the
+                // payload means is the type's business. Classifying by whether
+                // the text parses as an observation would file a node emitting
+                // malformed lines under "heartbeat", which is precisely the
+                // case this summary would be read to diagnose.
                 Ok(Frame::Text(text)) => {
-                    let line = WardriveLine::parse(text.text);
-                    match line {
-                        Ok(observation) => {
-                            counts.text += 1;
+                    match text.msg_type {
+                        MsgType::Heartbeat => counts.heartbeat += 1,
+                        MsgType::Text => counts.text += 1,
+                        _ => counts.other += 1,
+                    }
+                    match WardriveLine::parse(text.text) {
+                        Ok(observation) if text.msg_type == MsgType::Text => {
                             println!("{head}  {}", render(&observation));
                         }
-                        Err(_) => {
-                            // A `MSG_HEARTBEAT` carries a counter and no text,
-                            // so failing to parse the payload as an observation
-                            // is the normal case rather than a problem.
-                            counts.heartbeat += 1;
-                            println!(
-                                "{head}  {:?} #{}  {}",
-                                text.msg_type,
-                                text.counter,
-                                String::from_utf8_lossy(text.text)
-                            );
-                        }
+                        // A heartbeat carries a counter and no text, so an
+                        // unparseable body is the normal case for it.
+                        _ => println!(
+                            "{head}  {:?} #{}  {}",
+                            text.msg_type,
+                            text.counter,
+                            String::from_utf8_lossy(text.text)
+                        ),
                     }
                 }
                 Ok(Frame::Admin(admin)) => {

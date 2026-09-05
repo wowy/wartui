@@ -12,6 +12,7 @@ workspace = true
 [dependencies]
 cobs = { version = "0.5.1", default-features = false }
 heapless = { version = "0.9.3", default-features = false, features = ["serde"] }
+nb = "1.1.0"
 postcard = { version = "1", default-features = false }
 serde = { version = "1", default-features = false, features = ["derive"] }
 
