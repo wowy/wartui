@@ -89,9 +89,26 @@ pub struct RawFrame {
     pub bytes: Vec<u8>,
 }
 
+/// Which bridge this capture came through.
+///
+/// Separate from [`crate::store::SessionInfo`] because a session is opened
+/// before any bridge has announced itself: the store cannot wait for one, and a
+/// capture that never finds a dongle still deserves a session row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BridgeSeen {
+    /// The bridge's own MAC, which nodes see as the core's address.
+    pub mac: Mac,
+    /// Which chip it is.
+    pub chip: String,
+    /// Its firmware version.
+    pub fw_version: String,
+}
+
 /// Anything the engine wants written down.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Record {
+    /// Record which bridge this session is running through.
+    Bridge(BridgeSeen),
     /// Insert or refresh a node row.
     Node(NodeSeen),
     /// Append a heartbeat.

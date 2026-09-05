@@ -85,7 +85,18 @@ pub fn wigle_csv<W: Write>(
 }
 
 /// One row per BSSID: the strongest positioned sighting, with `FirstSeen` taken
-/// from the earliest sighting of that BSSID rather than from the chosen row.
+/// from the earliest sighting of that BSSID — positioned or not.
+///
+/// Both halves of that need the window to run over the *unfiltered* set. If the
+/// position filter were applied first, `FirstSeen` would report the earliest
+/// sighting that happened to have coordinates, so an unpositioned session at
+/// 20:00 followed by a positioned one at 23:00 would submit 23:00 and hide
+/// three hours of evidence that the network was already there.
+///
+/// Ordering positioned rows ahead of unpositioned ones in `ROW_NUMBER` is what
+/// lets the outer filter be safe: without it the strongest sighting could be an
+/// unpositioned one, win rn = 1, and then be filtered out — losing a network
+/// that had a perfectly good weaker sighting to submit.
 ///
 /// The `?1 IS NULL OR session_id = ?1` shape lets one statement serve both the
 /// filtered and unfiltered cases without building SQL by hand.
@@ -95,12 +106,14 @@ FROM (
   SELECT
     o.bssid, o.ssid, o.security, o.channel, o.rssi, o.lat, o.lon, o.alt, o.accuracy, o.kind,
     MIN(o.rx_at) OVER (PARTITION BY o.bssid) AS first_seen,
-    ROW_NUMBER() OVER (PARTITION BY o.bssid ORDER BY o.rssi DESC, o.rx_at ASC) AS rn
+    ROW_NUMBER() OVER (
+      PARTITION BY o.bssid
+      ORDER BY (o.lat IS NOT NULL AND o.lon IS NOT NULL) DESC, o.rssi DESC, o.rx_at ASC
+    ) AS rn
   FROM observation o
-  WHERE o.lat IS NOT NULL AND o.lon IS NOT NULL
-    AND (?1 IS NULL OR o.session_id = ?1)
+  WHERE ?1 IS NULL OR o.session_id = ?1
 )
-WHERE rn = 1
+WHERE rn = 1 AND lat IS NOT NULL AND lon IS NOT NULL
 ORDER BY first_seen
 ";
 

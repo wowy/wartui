@@ -59,9 +59,11 @@ async fn a_simulated_fleet_becomes_a_database_and_then_a_wigle_file() {
         conn.query_row("SELECT COUNT(*) FROM observation", [], |r| r.get(0)).expect("counting");
     assert!(stored > 0, "observations should have reached the disk");
 
-    let ended: Option<i64> =
-        conn.query_row("SELECT ended_at FROM session", [], |r| r.get(0)).expect("session row");
+    let (ended, bridge): (Option<i64>, Option<Vec<u8>>) = conn
+        .query_row("SELECT ended_at, bridge_mac FROM session", [], |r| Ok((r.get(0)?, r.get(1)?)))
+        .expect("session row");
     assert!(ended.is_some(), "a stopped capture should close its session out");
+    assert!(bridge.is_some(), "and should say which bridge it came through");
 
     let mut csv = Vec::new();
     let summary = wigle_csv(&conn, ExportFilter::default(), &mut csv, "0.1.0").expect("exporting");

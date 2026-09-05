@@ -10,7 +10,7 @@ use std::time::Duration;
 use rusqlite::Connection;
 use wartui_core::export::{ExportFilter, wigle_csv};
 use wartui_core::position::{Fix, PositionSource};
-use wartui_core::record::{Heartbeat, NodeSeen, Observation, Record};
+use wartui_core::record::{BridgeSeen, Heartbeat, NodeSeen, Observation, Record};
 use wartui_core::store::{SessionInfo, Store, StoreConfig, open_readonly};
 use wartui_proto::air::RecordKind;
 use wartui_proto::link::Mac;
@@ -53,7 +53,7 @@ fn store(dir: &tempfile::TempDir) -> Store {
     // Small and quick, so a test does not sit waiting for a batch window.
     config.batch_rows = 8;
     config.batch_interval = Duration::from_millis(10);
-    let session = SessionInfo { espnow_channel: 6, pool: ChannelPool::Us, ..Default::default() };
+    let session = SessionInfo { espnow_channel: 6, pool: ChannelPool::Us, notes: None };
     Store::open(&config, &session, EPOCH_MS).expect("opening the store")
 }
 
@@ -262,7 +262,7 @@ fn a_full_queue_drops_and_counts_rather_than_blocking_the_engine() {
     config.queue_depth = 1;
     config.batch_rows = 1024;
     config.batch_interval = Duration::from_secs(3600);
-    let session = SessionInfo { espnow_channel: 6, pool: ChannelPool::Us, ..Default::default() };
+    let session = SessionInfo { espnow_channel: 6, pool: ChannelPool::Us, notes: None };
     let store = Store::open(&config, &session, EPOCH_MS).expect("opening the store");
 
     let flood: Vec<Record> =
@@ -271,4 +271,75 @@ fn a_full_queue_drops_and_counts_rather_than_blocking_the_engine() {
 
     assert!(dropped > 0, "a depth-1 queue and no draining should overflow");
     assert_eq!(store.stats().dropped, dropped as u64, "and say so in the stats");
+}
+
+#[test]
+fn first_seen_comes_from_the_earliest_sighting_even_if_it_had_no_position() {
+    // A capture run without --lat, then a positioned one hours later, is a
+    // normal way to end up with both in one file. Reporting the later time
+    // would hide the evidence that the network was already there.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let conn = write(
+        &dir,
+        vec![
+            observation(NODE, [0xAA; 6], -60, EPOCH_MS, Fix::none()),
+            observation(NODE, [0xAA; 6], -60, EPOCH_MS + 10_800_000, fixed(37.0, -122.0)),
+        ],
+    );
+
+    let (csv, summary) = export(&conn);
+    assert_eq!(summary.networks, 1);
+    assert!(
+        csv.lines().nth(2).expect("a row").contains("2026-05-01 13:34:37"),
+        "the earliest sighting's time, not the earliest positioned one: {csv}"
+    );
+}
+
+#[test]
+fn a_database_from_a_newer_wartui_is_refused_rather_than_written_into() {
+    // `CREATE TABLE IF NOT EXISTS` no-ops against a newer file's tables instead
+    // of failing, so without this check an older build would append rows of the
+    // wrong shape and then stamp the version marker back down, leaving neither
+    // build able to tell it had happened.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("wartui.db");
+    let future = Connection::open(&path).expect("creating");
+    future.pragma_update(None, "user_version", 99).expect("stamping");
+    drop(future);
+
+    let session = SessionInfo { espnow_channel: 6, pool: ChannelPool::Us, notes: None };
+    let opened = Store::open(&StoreConfig::new(&path), &session, EPOCH_MS);
+    assert!(
+        matches!(opened, Err(wartui_core::store::StoreError::SchemaTooNew { found: 99, .. })),
+        "expected a refusal, got {opened:?}"
+    );
+
+    let still: i32 = Connection::open(&path)
+        .expect("reopening")
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .expect("reading the version");
+    assert_eq!(still, 99, "and the marker must be left alone");
+}
+
+#[test]
+fn the_bridge_that_produced_a_capture_is_recorded_against_the_session() {
+    // A file with several sessions from two different dongles has to be able to
+    // say which produced which.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let conn = write(
+        &dir,
+        vec![Record::Bridge(BridgeSeen {
+            mac: [0x98, 0xA3, 0x16, 0x8E, 0x9D, 0x24],
+            chip: "Esp32C6".to_owned(),
+            fw_version: "0.1.0".to_owned(),
+        })],
+    );
+
+    let (mac, chip, fw): (Vec<u8>, String, String) = conn
+        .query_row("SELECT bridge_mac, bridge_chip, bridge_fw FROM session", [], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })
+        .expect("the session row");
+    assert_eq!(mac, vec![0x98, 0xA3, 0x16, 0x8E, 0x9D, 0x24]);
+    assert_eq!((chip.as_str(), fw.as_str()), ("Esp32C6", "0.1.0"));
 }
