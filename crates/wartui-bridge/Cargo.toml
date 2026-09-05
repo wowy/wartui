@@ -1,0 +1,20 @@
+[package]
+name = "wartui-bridge"
+description = "Host-side link to the USB ESP-NOW bridge dongle, plus a node simulator."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serialport = "4.10.0"
+thiserror = "2.0.20"
+tokio = { version = "1.53.1", features = ["rt", "sync", "time", "macros", "rt-multi-thread"] }
+tracing = "0.1.44"
+wartui-proto = { path = "../wartui-proto" }
+
+[dev-dependencies]
+tokio = { version = "1.53.1", features = ["test-util", "macros", "rt-multi-thread"] }
