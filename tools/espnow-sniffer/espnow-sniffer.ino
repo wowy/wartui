@@ -1,13 +1,24 @@
-// Phase 0 sniffer: prove the fleet is audible before writing any Rust.
+// Phase 0 sniffer: prove the fleet is audible, and diagnose it when it is not.
 //
-// Parks an ESP32 on the mesh's ESP-NOW channel and dumps every frame it hears
-// as a golden-vector line. Purely passive — it registers no peers and transmits
-// nothing, so it cannot disturb a running fleet.
+// Listens two ways at once, which is the point:
 //
-// It answers two questions at once:
-//   1. Can a dongle on your desk actually hear nodes transmitting at 2 dBm?
-//      (`resolveTxPowerDbm` drops NODE and CORE to 2 dBm while wardriving.)
-//   2. Do real frames match the byte layout wartui-proto encodes?
+//   1. The ESP-NOW receive callback — exactly what the wartui bridge will get.
+//      The radio only delivers frames addressed to us or to broadcast, so an
+//      encrypted fleet (which unicasts node -> core) is invisible here.
+//
+//   2. Promiscuous mode — every 802.11 frame on the channel regardless of who
+//      it is addressed to. This sees the encrypted fleet's traffic too.
+//
+// Comparing the two counters tells you which situation you are in without
+// having to go and read the node's settings:
+//
+//   promiscuous > 0, esp-now == 0   -> traffic is unicast: encryption is ON
+//   promiscuous == 0                -> nothing on this channel: wrong channel,
+//                                      out of range, or nothing transmitting
+//   both > 0                        -> plaintext fleet, working as wartui needs
+//
+// If nothing shows up on the mesh channel it sweeps 2.4 GHz looking for where
+// the traffic actually is.
 //
 // Capture with:
 //   pio device monitor -b 115200 | tee /tmp/capture.txt
@@ -19,78 +30,245 @@
 #include <esp_wifi.h>
 
 // `static constexpr uint8_t ESPNOW_CHANNEL = 6;` — src/WiFiOps.cpp:15.
-static const uint8_t ESPNOW_CHANNEL = 6;
+// Identical on main and feat/node-interference-mitigation.
+static const uint8_t MESH_CHANNEL = 6;
 
 static const char MAGIC[4] = {'E', 'N', 'O', 'W'};
 
-static uint32_t frame_count = 0;
-static uint32_t foreign_count = 0;
+// Espressif's OUI, which tags an action frame as ESP-NOW.
+static const uint8_t ESPRESSIF_OUI[3] = {0x18, 0xFE, 0x34};
 
-// Park the radio the same way the firmware does (src/WiFiOps.cpp:586-620):
-// promiscuous on, set channel, promiscuous off, power save disabled.
+// 802.11 management/action frame layout, ahead of the ESP-NOW body:
+//   24  MAC header
+//    1  category (127, vendor specific)
+//    3  OUI
+//    1  element ID (221)   1  length   3  OUI   1  type (4)   1  version
+static const int ESPNOW_BODY_OFFSET = 35;
+static const int FCS_LEN = 4;
+
+// Give up on the mesh channel after this long and go looking.
+static const uint32_t SCAN_AFTER_MS = 20000;
+static const uint32_t SCAN_DWELL_MS = 800;
+static const uint8_t SCAN_LAST_CHANNEL = 13;
+
+struct Capture {
+  uint8_t src[6];
+  uint8_t dst[6];
+  int8_t rssi;
+  uint8_t channel;
+  uint16_t body_len;
+  uint8_t body[256];
+  bool has_magic;
+  bool via_espnow;  // false means only promiscuous mode saw it
+};
+
+// Single producer (the Wi-Fi task) and single consumer (loop), so volatile
+// indices are enough. Printing from the radio callback risks tripping the
+// watchdog, so captures are queued and drained from loop() instead.
+static const uint8_t QUEUE_LEN = 12;
+static Capture queue[QUEUE_LEN];
+static volatile uint8_t q_head = 0;
+static volatile uint8_t q_tail = 0;
+static volatile uint32_t dropped = 0;
+
+static volatile uint32_t espnow_frames = 0;
+static volatile uint32_t promisc_frames = 0;
+static volatile uint32_t foreign_action = 0;
+static uint32_t capture_seq = 0;
+static uint32_t last_espnow_ms = 0;
+
+// Park the radio the way the firmware does (src/WiFiOps.cpp:586-620).
 static void setFixedChannel(uint8_t ch) {
   esp_wifi_set_ps(WIFI_PS_NONE);
-  esp_wifi_set_promiscuous(true);
-  esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
   esp_wifi_set_promiscuous(false);
+  esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
+  esp_wifi_set_promiscuous(true);
 }
 
-static void onRecv(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
-  const int rssi = (info && info->rx_ctrl) ? info->rx_ctrl->rssi : 0;
+static void enqueue(const uint8_t *src, const uint8_t *dst, int8_t rssi, uint8_t channel,
+                    const uint8_t *body, int body_len, bool via_espnow) {
+  uint8_t next = (uint8_t)((q_head + 1) % QUEUE_LEN);
+  if (next == q_tail) {
+    dropped++;
+    return;
+  }
+  Capture &c = queue[q_head];
+  memcpy(c.src, src, 6);
+  if (dst) {
+    memcpy(c.dst, dst, 6);
+  } else {
+    memset(c.dst, 0, 6);
+  }
+  c.rssi = rssi;
+  c.channel = channel;
+  if (body_len < 0) body_len = 0;
+  if (body_len > (int)sizeof(c.body)) body_len = sizeof(c.body);
+  c.body_len = (uint16_t)body_len;
+  memcpy(c.body, body, c.body_len);
+  c.has_magic = (c.body_len >= 4) && (memcmp(c.body, MAGIC, 4) == 0);
+  c.via_espnow = via_espnow;
+  q_head = next;
+}
 
-  char src[18];
-  snprintf(src, sizeof(src), "%02X:%02X:%02X:%02X:%02X:%02X", info->src_addr[0],
-           info->src_addr[1], info->src_addr[2], info->src_addr[3], info->src_addr[4],
-           info->src_addr[5]);
+// What the wartui bridge will see: broadcast, or addressed to us.
+static void onEspNowRecv(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
+  espnow_frames++;
+  last_espnow_ms = millis();
+  const int8_t rssi = (info && info->rx_ctrl) ? (int8_t)info->rx_ctrl->rssi : 0;
+  uint8_t channel = 0;
+  wifi_second_chan_t second;
+  esp_wifi_get_channel(&channel, &second);
+  enqueue(info->src_addr, info->des_addr, rssi, channel, data, len, true);
+}
 
-  // Anything without the preamble belongs to some other ESP-NOW user nearby.
-  if (len < 5 || memcmp(data, MAGIC, 4) != 0) {
-    foreign_count++;
-    Serial.printf("# non-ENOW frame from %s rssi=%d len=%d\n", src, rssi, len);
+// Everything on the air, whoever it is addressed to.
+static void onPromiscuous(void *buf, wifi_promiscuous_pkt_type_t type) {
+  if (type != WIFI_PKT_MGMT) return;
+
+  const wifi_promiscuous_pkt_t *pkt = (const wifi_promiscuous_pkt_t *)buf;
+  const uint8_t *p = pkt->payload;
+  const int len = pkt->rx_ctrl.sig_len;
+
+  // Action frame: protocol version 0, type management, subtype 13.
+  if (len < ESPNOW_BODY_OFFSET + FCS_LEN || p[0] != 0xD0) return;
+
+  // Category 127 (vendor specific) followed by Espressif's OUI.
+  if (p[24] != 127 || memcmp(&p[25], ESPRESSIF_OUI, 3) != 0) {
+    foreign_action++;
     return;
   }
 
-  frame_count++;
-  Serial.printf("# from=%s rssi=%d type=%u len=%d\n", src, rssi, data[4], len);
-  Serial.printf("capture_%04lu %d ", (unsigned long)frame_count, len);
-  for (int i = 0; i < len; i++) {
-    Serial.printf("%02x", data[i]);
+  promisc_frames++;
+  const int body_len = len - ESPNOW_BODY_OFFSET - FCS_LEN;
+  enqueue(&p[10], &p[4], (int8_t)pkt->rx_ctrl.rssi, pkt->rx_ctrl.channel,
+          &p[ESPNOW_BODY_OFFSET], body_len, false);
+}
+
+static void formatMac(const uint8_t *m, char *out) {
+  snprintf(out, 18, "%02X:%02X:%02X:%02X:%02X:%02X", m[0], m[1], m[2], m[3], m[4], m[5]);
+}
+
+static void drainQueue() {
+  while (q_tail != q_head) {
+    const Capture &c = queue[q_tail];
+    char src[18], dst[18];
+    formatMac(c.src, src);
+    formatMac(c.dst, dst);
+
+    const bool broadcast = (memcmp(c.dst, "\xFF\xFF\xFF\xFF\xFF\xFF", 6) == 0);
+    Serial.printf("# from=%s to=%s%s rssi=%d ch=%u len=%u via=%s\n", src, dst,
+                  broadcast ? " (broadcast)" : " (unicast)", c.rssi, c.channel, c.body_len,
+                  c.via_espnow ? "esp-now" : "promiscuous");
+
+    if (c.has_magic) {
+      Serial.printf("#   type=%u\n", c.body_len > 4 ? c.body[4] : 0);
+      Serial.printf("capture_%04lu %u ", (unsigned long)++capture_seq, c.body_len);
+      for (uint16_t i = 0; i < c.body_len; i++) Serial.printf("%02x", c.body[i]);
+      Serial.println();
+    } else {
+      Serial.println("#   body does not start with \"ENOW\" -- encrypted payload, or "
+                     "another ESP-NOW application nearby");
+    }
+    q_tail = (uint8_t)((q_tail + 1) % QUEUE_LEN);
   }
-  Serial.println();
+}
+
+static void report(uint8_t channel) {
+  Serial.printf("# alive: ch=%u  esp-now=%lu  promiscuous=%lu  other-action=%lu  dropped=%lu  "
+                "uptime=%lus\n",
+                channel, (unsigned long)espnow_frames, (unsigned long)promisc_frames,
+                (unsigned long)foreign_action, (unsigned long)dropped,
+                (unsigned long)(millis() / 1000));
+
+  if (promisc_frames == 0) {
+    Serial.println("#   nothing on this channel yet: wrong channel, out of range (nodes "
+                   "transmit at 2 dBm), or nothing is running");
+  } else if (espnow_frames == 0) {
+    Serial.println("#   ESP-NOW traffic IS present but the receive callback never fired, so "
+                   "it is unicast: the fleet has encryption ENABLED, which wartui does not "
+                   "support. Turn it off in each node's web UI.");
+  }
+}
+
+// Sweep 2.4 GHz looking for the traffic, then settle back.
+static void scanForTraffic() {
+  Serial.println("# no ESP-NOW traffic on the mesh channel; sweeping 1-13");
+  uint8_t best_channel = MESH_CHANNEL;
+  uint32_t best_count = 0;
+
+  for (uint8_t ch = 1; ch <= SCAN_LAST_CHANNEL; ch++) {
+    const uint32_t before = promisc_frames;
+    setFixedChannel(ch);
+    const uint32_t until = millis() + SCAN_DWELL_MS;
+    while (millis() < until) {
+      drainQueue();
+      delay(10);
+    }
+    const uint32_t seen = promisc_frames - before;
+    Serial.printf("#   channel %2u: %lu ESP-NOW frames\n", ch, (unsigned long)seen);
+    if (seen > best_count) {
+      best_count = seen;
+      best_channel = ch;
+    }
+  }
+
+  if (best_count > 0) {
+    Serial.printf("# found traffic on channel %u; the firmware hard-codes %u, so something "
+                  "is out of step\n",
+                  best_channel, MESH_CHANNEL);
+  } else {
+    Serial.println("# no ESP-NOW traffic on any 2.4 GHz channel: check the devices are "
+                   "powered and within a metre or so");
+  }
+  setFixedChannel(best_count > 0 ? best_channel : MESH_CHANNEL);
+  last_espnow_ms = millis();
 }
 
 void setup() {
   Serial.begin(115200);
-  delay(2000);  // Give the USB CDC host time to attach without blocking on it.
+  delay(2000);  // Let the USB CDC host attach, without blocking on it.
 
   Serial.println("# wartui Phase 0 ESP-NOW sniffer");
-  Serial.printf("# listening on channel %u, transmitting nothing\n", ESPNOW_CHANNEL);
+  Serial.println("# listening only; it registers no peers and transmits nothing");
 
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
-  setFixedChannel(ESPNOW_CHANNEL);
 
   if (esp_now_init() != ESP_OK) {
     Serial.println("# FATAL: esp_now_init failed");
     return;
   }
-  esp_now_register_recv_cb(onRecv);
+  esp_now_register_recv_cb(onEspNowRecv);
+
+  wifi_promiscuous_filter_t filter = {};
+  filter.filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT;  // action frames live here
+  esp_wifi_set_promiscuous_filter(&filter);
+  esp_wifi_set_promiscuous_rx_cb(onPromiscuous);
+  setFixedChannel(MESH_CHANNEL);
 
   uint8_t mac[6] = {0};
   esp_wifi_get_mac(WIFI_IF_STA, mac);
-  Serial.printf("# sniffer MAC %02X:%02X:%02X:%02X:%02X:%02X\n", mac[0], mac[1], mac[2], mac[3],
-                mac[4], mac[5]);
+  char self[18];
+  formatMac(mac, self);
+  Serial.printf("# sniffer MAC %s on channel %u\n", self, MESH_CHANNEL);
   Serial.println("# ready");
+  last_espnow_ms = millis();
 }
 
 void loop() {
-  // A heartbeat of our own, so silence is distinguishable from a hung sketch.
-  static uint32_t last = 0;
-  if (millis() - last > 10000) {
-    last = millis();
-    Serial.printf("# alive: %lu ENOW frames, %lu foreign, uptime %lus\n",
-                  (unsigned long)frame_count, (unsigned long)foreign_count,
-                  (unsigned long)(millis() / 1000));
+  drainQueue();
+
+  static uint32_t last_report = 0;
+  if (millis() - last_report > 10000) {
+    last_report = millis();
+    uint8_t channel = 0;
+    wifi_second_chan_t second;
+    esp_wifi_get_channel(&channel, &second);
+    report(channel);
   }
-  delay(10);
+
+  if (millis() - last_espnow_ms > SCAN_AFTER_MS && promisc_frames == 0) {
+    scanForTraffic();
+  }
+  delay(5);
 }
