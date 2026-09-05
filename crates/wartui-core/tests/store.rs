@@ -10,7 +10,9 @@ use std::time::Duration;
 use rusqlite::Connection;
 use wartui_core::export::{ExportFilter, wigle_csv};
 use wartui_core::position::{Fix, PositionSource};
-use wartui_core::record::{BridgeSeen, Heartbeat, NodeSeen, Observation, Record};
+use wartui_core::record::{
+    AdminOutcome, AssignmentSent, BridgeSeen, Heartbeat, NodeSeen, Observation, Record,
+};
 use wartui_core::store::{SessionInfo, Store, StoreConfig, open_readonly};
 use wartui_proto::air::RecordKind;
 use wartui_proto::link::Mac;
@@ -49,7 +51,12 @@ fn observation(node: Mac, bssid: [u8; 6], rssi: i16, at_ms: i64, fix: Fix) -> Re
 
 /// A store on a fresh temporary database, plus the directory keeping it alive.
 fn store(dir: &tempfile::TempDir) -> Store {
-    let mut config = StoreConfig::new(dir.path().join("wartui.db"));
+    open_at(&dir.path().join("wartui.db"))
+}
+
+/// A store on one named path, so a test can reopen the same database.
+fn open_at(path: &std::path::Path) -> Store {
+    let mut config = StoreConfig::new(path);
     // Small and quick, so a test does not sit waiting for a batch window.
     config.batch_rows = 8;
     config.batch_interval = Duration::from_millis(10);
@@ -342,4 +349,113 @@ fn the_bridge_that_produced_a_capture_is_recorded_against_the_session() {
         .expect("the session row");
     assert_eq!(mac, vec![0x98, 0xA3, 0x16, 0x8E, 0x9D, 0x24]);
     assert_eq!((chip.as_str(), fw.as_str()), ("Esp32C6", "0.1.0"));
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4: assignment
+// ---------------------------------------------------------------------------
+
+fn assignment(counter: u64, outcome: AdminOutcome, latency_us: Option<u32>) -> Record {
+    Record::Assignment(AssignmentSent {
+        node_mac: NODE,
+        counter,
+        wire_version: wartui_proto::air::wire_version(counter),
+        node_index: 0,
+        node_count: 2,
+        start_idx: 5,
+        end_idx: 5,
+        created_at_ms: EPOCH_MS,
+        delivered_at_ms: Some(EPOCH_MS + 5),
+        outcome,
+        latency_us,
+    })
+}
+
+#[test]
+fn every_assignment_attempt_gets_a_row_whether_or_not_it_landed() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("wartui.db");
+    let store = open_at(&path);
+    // The vendor core keeps no record at all of what became of an assignment,
+    // which is why "the fleet keeps drifting off its channels" is a story
+    // rather than a query there.
+    store.submit(vec![
+        assignment(1, AdminOutcome::Unacked, None),
+        assignment(1, AdminOutcome::Acked, Some(4_500)),
+    ]);
+    store.close();
+
+    let conn = open_readonly(&path).expect("reopening");
+    let rows: Vec<(String, Option<u32>, u8)> = conn
+        .prepare("SELECT outcome, latency_us, wire_version FROM assignment ORDER BY id")
+        .expect("preparing")
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .expect("querying")
+        .map(|r| r.expect("row"))
+        .collect();
+
+    assert_eq!(
+        rows,
+        vec![("unacked".to_owned(), None, 1), ("acked".to_owned(), Some(4_500), 1)],
+        "a retry is a second row, not an update: the table is append-only"
+    );
+}
+
+#[test]
+fn the_assignment_epoch_is_moved_forward_before_anything_can_be_sent() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("wartui.db");
+
+    // Divergence 4 again, from the other side. Persisting the counter only
+    // after an assignment goes out would let a crash in between hand the next
+    // run an epoch a node already holds — which the node ignores while its
+    // radio acknowledges anyway, so the host cannot tell.
+    let first = open_at(&path);
+    assert_eq!(first.assignment_base(), 0, "a fresh database starts from nothing");
+    first.close();
+
+    let second = open_at(&path);
+    assert!(
+        second.assignment_base() >= 64,
+        "opening books a block of epochs, so a crash can only skip them"
+    );
+    let base = second.assignment_base();
+    second.submit(vec![assignment(base + 1, AdminOutcome::Acked, Some(1_000))]);
+    second.close();
+
+    let third = open_at(&path);
+    assert!(
+        third.assignment_base() > base + 1,
+        "and spending one moves the reservation along with it"
+    );
+}
+
+#[test]
+fn a_database_from_the_previous_wartui_is_brought_forward_rather_than_refused() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("wartui.db");
+
+    // v1's `assignment` table has no `outcome`, `latency_us` or `counter`, and
+    // `CREATE TABLE IF NOT EXISTS` will not widen a table that already exists.
+    let old = Connection::open(&path).expect("creating");
+    old.execute_batch(
+        "CREATE TABLE assignment (
+           id INTEGER PRIMARY KEY, session_id INTEGER NOT NULL, node_mac BLOB NOT NULL,
+           wire_version INTEGER NOT NULL, node_index INTEGER NOT NULL,
+           node_count INTEGER NOT NULL, start_idx INTEGER NOT NULL, end_idx INTEGER NOT NULL,
+           created_at INTEGER NOT NULL, delivered_at INTEGER)",
+    )
+    .expect("v1 table");
+    old.pragma_update(None, "user_version", 1).expect("stamping");
+    drop(old);
+
+    let store = open_at(&path);
+    store.submit(vec![assignment(1, AdminOutcome::Acked, Some(2_000))]);
+    store.close();
+
+    let conn = open_readonly(&path).expect("reopening");
+    let outcome: String = conn
+        .query_row("SELECT outcome FROM assignment", [], |row| row.get(0))
+        .expect("the row the migrated table can hold");
+    assert_eq!(outcome, "acked");
 }

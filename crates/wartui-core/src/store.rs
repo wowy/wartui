@@ -38,7 +38,11 @@ use crate::engine::StoreStats;
 use crate::record::Record;
 
 /// Bumped whenever the schema changes shape.
-pub const SCHEMA_VERSION: i32 = 1;
+///
+/// v2 added `assignment.outcome` and `assignment.latency_us`, because Phase 4
+/// transmits and an assignment that was sent is not the same thing as one that
+/// landed.
+pub const SCHEMA_VERSION: i32 = 2;
 
 /// The schema, applied to any database that does not already have it.
 const SCHEMA: &str = r"
@@ -75,19 +79,28 @@ CREATE TABLE IF NOT EXISTS heartbeat (
   admin_latency_us INTEGER
 );
 
+-- One row per transmitted MSG_ADMIN, written when its outcome is known, so
+-- the table is append-only and a retry is a second row rather than an update.
+-- `counter` is the persisted monotonic epoch and `wire_version` the byte that
+-- actually went out; they differ because the wire field is one byte wide.
 CREATE TABLE IF NOT EXISTS assignment (
   id INTEGER PRIMARY KEY,
   session_id INTEGER NOT NULL REFERENCES session(id),
   node_mac BLOB NOT NULL,
+  counter INTEGER NOT NULL,
   wire_version INTEGER NOT NULL,
   node_index INTEGER NOT NULL,
   node_count INTEGER NOT NULL,
   start_idx INTEGER NOT NULL,
   end_idx INTEGER NOT NULL,
   created_at INTEGER NOT NULL,
-  delivered_at INTEGER
+  delivered_at INTEGER,
+  outcome TEXT,
+  latency_us INTEGER
 );
+CREATE INDEX IF NOT EXISTS assign_node ON assignment(node_mac, created_at);
 
+-- Holds `assignment_version_counter`, the monotonic epoch of divergence 4.
 CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT NOT NULL);
 
 CREATE TABLE IF NOT EXISTS observation (
@@ -198,6 +211,7 @@ pub struct Store {
     stats: Arc<Stats>,
     join: Option<JoinHandle<()>>,
     session_id: i64,
+    assignment_base: u64,
 }
 
 impl Store {
@@ -218,11 +232,13 @@ impl Store {
         // would append v1-shaped rows into a v2 database and then stamp the
         // version marker back down to 1 — leaving neither build able to tell
         // that it had happened.
-        check_version(&conn)?;
+        let found = check_version(&conn)?;
+        migrate(&conn, found)?;
         conn.execute_batch(SCHEMA)?;
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
 
         let session_id = insert_session(&mut conn, session, started_at_ms)?;
+        let assignment_base = reserve_versions(&conn)?;
 
         let (tx, rx) = sync_channel(config.queue_depth);
         let stats = Arc::new(Stats::default());
@@ -236,13 +252,20 @@ impl Store {
             })
             .map_err(StoreError::Spawn)?;
 
-        Ok(Self { tx: Some(tx), stats, join: Some(join), session_id })
+        Ok(Self { tx: Some(tx), stats, join: Some(join), session_id, assignment_base })
     }
 
     /// The session rows will be attributed to.
     #[must_use]
     pub const fn session_id(&self) -> i64 {
         self.session_id
+    }
+
+    /// The last assignment epoch any wartui is known to have used against this
+    /// database. The engine allocates from `base + 1` upwards.
+    #[must_use]
+    pub const fn assignment_base(&self) -> u64 {
+        self.assignment_base
     }
 
     /// Queue records, dropping any that do not fit rather than waiting.
@@ -315,15 +338,64 @@ pub fn open_readonly(path: &Path) -> Result<Connection, StoreError> {
     Ok(conn)
 }
 
-/// Refuse a database written by a newer wartui.
+/// Refuse a database written by a newer wartui, and report what this one is.
 ///
 /// A fresh file reads 0, which is older than anything and therefore fine.
-fn check_version(conn: &Connection) -> Result<(), StoreError> {
+fn check_version(conn: &Connection) -> Result<i32, StoreError> {
     let found: i32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
     if found > SCHEMA_VERSION {
         return Err(StoreError::SchemaTooNew { found, ours: SCHEMA_VERSION });
     }
+    Ok(found)
+}
+
+/// Bring an older database up to the current shape.
+///
+/// Only ever called after [`check_version`] has ruled out a newer file, and
+/// before [`SCHEMA`] is applied — `CREATE TABLE IF NOT EXISTS` will not widen a
+/// table that already exists, so anything structural has to happen here.
+fn migrate(conn: &Connection, found: i32) -> Result<(), StoreError> {
+    let has_assignment: bool = conn.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'assignment'",
+        [],
+        |row| row.get::<_, i32>(0),
+    )? > 0;
+
+    // v1 declared this table but nothing in a v1 build could ever write to it:
+    // that release could not transmit, and an assignment row is only written
+    // for a frame that went out. So it is provably empty and dropping it loses
+    // nothing, which is a great deal simpler than three `ALTER TABLE`s.
+    if found == 1 && has_assignment {
+        conn.execute_batch("DROP TABLE assignment")?;
+    }
     Ok(())
+}
+
+/// How far ahead of the last used epoch to move the persisted counter at open.
+///
+/// Divergence 4 exists because a node adopts an assignment only when its
+/// version *differs* from the one it holds, so re-using an epoch after a
+/// restart is silently ignored — and worse, the ack still arrives, so the host
+/// believes an assignment landed that the node discarded. Writing the counter
+/// forward before issuing anything means a crash can only ever skip epochs,
+/// never repeat one. Skipping is free; repeating is the bug.
+const VERSION_RESERVATION: u64 = 64;
+
+/// Read the persisted assignment epoch and immediately book a block of them.
+fn reserve_versions(conn: &Connection) -> Result<u64, StoreError> {
+    let base: u64 = conn
+        .query_row("SELECT v FROM kv WHERE k = 'assignment_version_counter'", [], |row| {
+            row.get::<_, String>(0)
+        })
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    conn.execute(
+        "INSERT INTO kv (k, v) VALUES ('assignment_version_counter', ?1)
+         ON CONFLICT(k) DO UPDATE SET v = excluded.v",
+        params![(base + VERSION_RESERVATION).to_string()],
+    )?;
+    Ok(base)
 }
 
 fn prepare(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -500,6 +572,39 @@ fn write_batch(
                     bridge.chip.as_str(),
                     bridge.fw_version.as_str()
                 ])?;
+            }
+            Record::Assignment(a) => {
+                tx.prepare_cached(
+                    "INSERT INTO assignment
+                       (session_id, node_mac, counter, wire_version, node_index, node_count,
+                        start_idx, end_idx, created_at, delivered_at, outcome, latency_us)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+                )?
+                .execute(params![
+                    session_id,
+                    &a.node_mac[..],
+                    a.counter,
+                    a.wire_version,
+                    a.node_index,
+                    a.node_count,
+                    a.start_idx,
+                    a.end_idx,
+                    a.created_at_ms,
+                    a.delivered_at_ms,
+                    a.outcome.as_str(),
+                    a.latency_us,
+                ])?;
+                // Keep the persisted epoch ahead of what has actually been
+                // used, so the reservation taken at open is refreshed as the
+                // session spends it. `max` rather than a plain write: rows
+                // reach the writer in order, but a batch that partly failed
+                // must never walk the counter backwards.
+                tx.prepare_cached(
+                    "INSERT INTO kv (k, v) VALUES ('assignment_version_counter', ?1)
+                     ON CONFLICT(k) DO UPDATE SET
+                       v = CAST(max(CAST(v AS INTEGER), CAST(excluded.v AS INTEGER)) AS TEXT)",
+                )?
+                .execute(params![(a.counter + VERSION_RESERVATION).to_string()])?;
             }
             Record::Raw(raw) => {
                 tx.prepare_cached(

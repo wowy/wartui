@@ -104,6 +104,74 @@ pub struct BridgeSeen {
     pub fw_version: String,
 }
 
+/// What became of one `MSG_ADMIN` this host put on the air.
+///
+/// The vendor core has no equivalent: it clears its dirty flag from the
+/// `esp_now_send` return value and keeps no record of whether anything
+/// arrived. Every attempt gets a row here, successful or not, which is what
+/// turns "the fleet keeps drifting off its channels" into a query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdminOutcome {
+    /// The node's radio acknowledged the frame at the MAC layer.
+    Acked,
+    /// It went out and nothing came back. Usually BLE coexistence on the node:
+    /// NimBLE and Wi-Fi share the one 2.4 GHz antenna, and the admin window is
+    /// precisely when the node would otherwise be idle.
+    Unacked,
+    /// The bridge could not transmit it at all.
+    Refused,
+    /// No answer came back from the bridge inside the timeout, so we do not
+    /// know. Distinct from `Unacked`, where the radio did report.
+    Silent,
+}
+
+impl AdminOutcome {
+    /// The token stored in the database.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Acked => "acked",
+            Self::Unacked => "unacked",
+            Self::Refused => "refused",
+            Self::Silent => "silent",
+        }
+    }
+}
+
+/// One assignment this host transmitted, and what came of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AssignmentSent {
+    /// Which node it was addressed to.
+    pub node_mac: Mac,
+    /// The persisted monotonic counter this assignment was allocated from.
+    /// Divergence 4: the vendor core keeps this in RAM and resets it at boot.
+    pub counter: u64,
+    /// The byte that actually went on the wire, `wire_version(counter)`.
+    pub wire_version: u8,
+    /// The node's slot in the fleet-wide stagger order.
+    pub node_index: u8,
+    /// Fleet size as of the assignment, not as of the send. Divergence 7: the
+    /// vendor core reads it live (`src/WiFiOps.cpp:651`), so a node joining
+    /// between planning and sending gets a count that disagrees with the
+    /// partition its range came from.
+    pub node_count: u8,
+    /// First `SCAN_CHANNELS` index, inclusive.
+    pub start_idx: u8,
+    /// Last `SCAN_CHANNELS` index, inclusive.
+    pub end_idx: u8,
+    /// Unix milliseconds the frame was handed to the link.
+    pub created_at_ms: i64,
+    /// Unix milliseconds the outcome arrived, if one did.
+    pub delivered_at_ms: Option<i64>,
+    /// What the radio said.
+    pub outcome: AdminOutcome,
+    /// Bridge-measured microseconds from the heartbeat that opened the node's
+    /// admin window to the transmit callback. The whole reason the bridge
+    /// stamps both ends itself: the host's own scheduling noise never enters
+    /// the number.
+    pub latency_us: Option<u32>,
+}
+
 /// Anything the engine wants written down.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Record {
@@ -117,4 +185,6 @@ pub enum Record {
     Observation(Observation),
     /// Append an undecoded frame.
     Raw(RawFrame),
+    /// Append an assignment this host transmitted.
+    Assignment(AssignmentSent),
 }

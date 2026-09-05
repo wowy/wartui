@@ -8,10 +8,10 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::sync::{oneshot, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 use wartui_bridge::LinkHandle;
 
-use crate::engine::{Event, FleetEngine, Now, Snapshot};
+use crate::engine::{Command, Event, FleetEngine, Now, Snapshot};
 use crate::store::Store;
 
 /// How often the engine ages liveness and republishes the snapshot.
@@ -27,6 +27,13 @@ pub fn now() -> Now {
     Now { mono: Instant::now(), unix_ms: chrono::Utc::now().timestamp_millis() }
 }
 
+/// How many operator instructions may be waiting at once.
+///
+/// Small on purpose. These come from keystrokes, and a queue deeper than the
+/// operator's patience would replay a burst of assignments minutes after they
+/// stopped pressing the key.
+pub const COMMAND_QUEUE: usize = 8;
+
 /// Run the fleet until the link closes or `stop` fires.
 ///
 /// Consumes the store so the last batch is committed and the session's
@@ -37,15 +44,31 @@ pub async fn drive(
     store: Store,
     mut engine: FleetEngine,
     snapshot: watch::Sender<Arc<Snapshot>>,
+    mut commands: mpsc::Receiver<Command>,
     mut stop: oneshot::Receiver<()>,
 ) {
     let mut ticker = tokio::time::interval(TICK);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Once the UI is gone this branch is disabled rather than polled. A closed
+    // receiver is permanently ready, so leaving it in the `select!` would spin
+    // the loop as fast as the scheduler allows for the rest of the capture.
+    let mut steerable = true;
 
     loop {
         let event = tokio::select! {
             biased;
             _ = &mut stop => break,
+            // Ahead of the ticker, so pressing a key does not wait out a tick
+            // and then miss the heartbeat it was meant to catch.
+            command = commands.recv(), if steerable => match command {
+                Some(command) => Event::Command(command),
+                // The UI has gone. The capture carries on to the end of its
+                // batch; there is simply nobody left to steer it.
+                None => {
+                    steerable = false;
+                    continue;
+                }
+            },
             _ = ticker.tick() => Event::Tick,
             event = link.recv() => match event {
                 Some(event) => Event::Link(event),
@@ -59,6 +82,7 @@ pub async fn drive(
         let publish = matches!(
             event,
             Event::Tick
+                | Event::Command(_)
                 | Event::Link(
                     wartui_bridge::LinkEvent::Connected(_)
                         | wartui_bridge::LinkEvent::Disconnected { .. }

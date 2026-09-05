@@ -32,6 +32,10 @@ wartui speaks **plaintext ESP-NOW only**; nodes must have encryption turned off
 in their web UI. A `MSG_CORE_REQUEST` arriving from a node means that node still
 has it on.
 
+wartui is not a companion to a vendor core — it *replaces* one. If a real core
+is powered up on the same channel it will fight for the same fleet, and the
+footer says so (`admin frames from another core`).
+
 ## Channel pools
 
 Which channels the fleet scans is selectable, because every scan the firmware
@@ -53,6 +57,11 @@ No hardware needed — the simulator runs a fake fleet on a fake clock:
 cargo run -p wartui -- --sim 3 --lat 37.7749 --lon -122.4194
 ```
 
+The simulated nodes model the parts of the firmware that matter: they adopt an
+assignment only when its version differs, they dedup against a 200-entry ring,
+and their sweep — and so their heartbeat period — is proportional to the range
+they hold. Pressing `a` on one does what it would do to real hardware.
+
 With a bridge plugged in:
 
 ```sh
@@ -66,9 +75,9 @@ Flashing the bridge itself is in `firmware/bridge/README.md`.
 ## Capturing
 
 `wartui run` — the default, so the subcommand can be left off — listens, writes
-every observation to SQLite, and draws the fleet while it does. **It never
-transmits**, so it can be pointed at a fleet that is already doing something
-useful without changing what that is.
+every observation to SQLite, and draws the fleet while it does. It transmits
+only when asked: `a` and `A` assign the selected node a channel range, and
+nothing else reaches the air.
 
 ```sh
 wartui run --db tonight.db --lat 37.7749 --lon -122.4194
@@ -77,6 +86,34 @@ wartui export --db tonight.db --wigle tonight.csv
 
 Press `q` to stop; the last batch is committed and the session closed out before
 it exits.
+
+### Assigning channels
+
+| Key | What it does |
+| --- | --- |
+| `↑` `↓` / `k` `j` | Move the cursor down the fleet table |
+| `a` | Give the selected node a range of exactly **one** channel |
+| `A` | Give it the widest run in the pool |
+
+Nothing goes out at the moment the key is pressed. A node's radio is away
+scanning some other channel for all but the 300 ms it holds open after its own
+heartbeat, so the assignment waits for that window — the `range` column reads
+`1…` until it lands, then drops the ellipsis. On a full sweep that is up to four
+seconds. That delay is the protocol, not lag.
+
+An assignment is believed only when the node's own radio acknowledges it at the
+MAC layer, never when the bridge reports a successful enqueue. The vendor core
+cannot tell those apart, which is why it can sit with a node it believes is
+assigned and is not.
+
+`a` is also the Phase 4 proof that any of this works. A node heartbeats once per
+completed sweep and reports nothing about what it is scanning, so watch the
+`beat` column: narrowing a node from forty channels to one should collapse it
+from seconds to a fraction of one within three sweeps. `A` puts it back.
+
+If a node keeps showing `no admin ack`, the cause is nearly always BLE: NimBLE
+and Wi-Fi share the one 2.4 GHz antenna, and the admin window is precisely when
+the node would otherwise be idle. Turn BLE off in that node's web UI.
 
 The store is the system of record and the CSV is a view of it, not the other way
 round: an export can be re-run after a decoder fix, run against a session that
@@ -97,7 +134,8 @@ many networks it left out. The GPS tier arrives in Phase 6.
 | `alive` | Heartbeating, so it can be given a channel range |
 | `stale` | Still being heard, but not heartbeating — most often BLE coexistence on the node holding the radio through its admin window |
 | `no heartbeat` | Seen, but has never completed a sweep |
-| `rebooted xN` | Its heartbeat counter went backwards, so it has forgotten any assignment |
+| `no admin ack` | An assignment went out and its radio did not answer — nearly always BLE, see [Assigning channels](#assigning-channels) |
+| `rebooted xN` | Its heartbeat counter went backwards, so it has forgotten any assignment; wartui re-issues under a fresh epoch |
 | `encrypted` | It is sending core-protocol frames. wartui cannot talk to it; turn encryption off in that node's web UI |
 
 `stale` and `no heartbeat` are deliberately distinct from silence. The vendor

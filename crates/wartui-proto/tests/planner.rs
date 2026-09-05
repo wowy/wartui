@@ -225,3 +225,25 @@ fn stagger_matches_the_firmware_helper() {
         }
     }
 }
+
+#[test]
+fn the_wire_epoch_cycles_through_every_value_the_firmware_will_accept() {
+    use wartui_proto::air::wire_version;
+
+    // Divergence 4. The host persists a `u64`; the wire field is one byte and
+    // the firmware never puts 0 in it, so a node holding a freshly-zeroed field
+    // must not be mistaken for one holding an assignment.
+    assert_eq!(wire_version(1), 1);
+    assert_eq!(wire_version(255), 255);
+    assert_eq!(wire_version(256), 1, "255 distinct values, then round again");
+
+    let seen: std::collections::BTreeSet<u8> = (1..=255).map(wire_version).collect();
+    assert_eq!(seen.len(), 255);
+    assert!(!seen.contains(&0), "zero is never sent");
+
+    // And consecutive epochs always differ, which is the only property the
+    // node actually checks: it adopts on `!=`, not on `>`.
+    for counter in 1..1_000u64 {
+        assert_ne!(wire_version(counter), wire_version(counter + 1));
+    }
+}

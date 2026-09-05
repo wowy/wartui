@@ -1,10 +1,11 @@
 //! wartui's command line.
 //!
-//! At this stage there is no TUI yet — `sniff` is the whole of it, and it
-//! exists to prove the chain end to end: a real node's radio, the bridge's
-//! radio, the USB link, the framing, and the `ENOW` decoder, with the result on
-//! your terminal. Everything downstream of here is built on the assumption that
-//! this works, so it is worth being able to watch it directly.
+//! `run` is the tool; everything else is a way of checking one link in the
+//! chain when `run` is not showing what it should. `sniff` proves the whole
+//! path — a node's radio, the bridge's radio, the USB link, the framing and the
+//! `ENOW` decoder — with nothing in between to be wrong. `status` and `ports`
+//! answer the two questions that come before it: is a dongle attached, and is
+//! it listening.
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
