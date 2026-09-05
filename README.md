@@ -15,7 +15,7 @@ issues channel assignments, and collects every observation the fleet produces.
 | `crates/wartui-proto` | `no_std` wire formats, shared by the host and the bridge firmware |
 | `crates/wartui-bridge` | Host-side link to the dongle: transport, port discovery, simulator |
 | `crates/wartui-core` | Headless fleet engine, SQLite store, position, WiGLE export |
-| `crates/wartui` | The TUI binary |
+| `crates/wartui` | The TUI binary, and the `sniff` / `status` / `ports` commands |
 | `firmware/bridge` | Rust firmware for the dongle (own workspace, own target) |
 | `tools/espnow-sniffer` | Passive Arduino sniffer for bring-up and frame capture |
 | `tools/golden` | Emits ground-truth struct layouts using the firmware's own typedefs |
@@ -45,13 +45,38 @@ assigned.
 with a gap at channels 12–14, so the planner distributes nodes across runs and
 never lets an assignment straddle the gap.
 
+## Trying it
+
+No hardware needed — the simulator runs a fake fleet on a fake clock:
+
+```sh
+cargo run -p wartui -- sniff --sim 3
+```
+
+With a bridge plugged in:
+
+```sh
+cargo run -p wartui -- ports      # which device is it
+cargo run -p wartui -- status     # is the link alive, is anything being dropped
+cargo run -p wartui -- sniff      # every frame the fleet sends, decoded
+```
+
+Flashing the bridge itself is in `firmware/bridge/README.md`.
+
 ## Development
 
 ```sh
 cargo test --workspace
 cargo clippy --workspace --all-targets
 cargo fmt --check
+
+cd firmware/bridge
+cargo clippy --release --features esp32c6   # and --features esp32c5
 ```
+
+`firmware/` is excluded from the workspace: a different target, its own
+toolchain pin and its own lockfile. It takes a path dependency up into
+`crates/wartui-proto`, which is why those wire types are `no_std`.
 
 The wire codec is tested byte-for-byte against layouts produced by a real C++
 compiler; see `tools/golden`. Frames captured off the air by

@@ -1,0 +1,66 @@
+# Its own workspace: a different target, a different toolchain pin and a
+# lockfile that must not be resolved together with the host crates. The path
+# dependency on wartui-proto reaches up into the other workspace, which is the
+# whole reason those wire types are `no_std`.
+[workspace]
+
+[package]
+name = "wartui-bridge-fw"
+description = "USB ESP-NOW bridge firmware for wartui. Framing and radio calls, no protocol knowledge."
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/wowy/wartui"
+
+[[bin]]
+name = "wartui-bridge-fw"
+path = "src/main.rs"
+
+[features]
+# Exactly one must be selected; src/main.rs enforces it with compile_error!.
+esp32c5 = [
+  "esp-alloc/esp32c5",
+  "esp-bootloader-esp-idf/esp32c5",
+  "esp-hal/esp32c5",
+  "esp-radio/esp32c5",
+  "esp-rtos/esp32c5",
+]
+esp32c6 = [
+  "esp-alloc/esp32c6",
+  "esp-bootloader-esp-idf/esp32c6",
+  "esp-hal/esp32c6",
+  "esp-radio/esp32c6",
+  "esp-rtos/esp32c6",
+]
+
+[dependencies]
+esp-alloc = "0.10.0"
+esp-bootloader-esp-idf = "0.5.0"
+esp-hal = { version = "1.1.2", features = ["unstable"] }
+esp-radio = { version = "1.0.0-beta.0", default-features = false, features = [
+  "esp-alloc",
+  "esp-now",
+  "unstable",
+  "wifi",
+] }
+esp-rtos = { version = "0.3.0", features = ["esp-alloc", "esp-radio"] }
+nb = "1.1.0"
+static_cell = "2.1.1"
+wartui-proto = { path = "../../crates/wartui-proto" }
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+
+[profile.dev]
+# The default debug profile is too slow and too big for a device with this much
+# RAM, and the radio blobs misbehave below opt-level 2 regardless.
+opt-level = "s"
+
+[profile.dev.package.esp-radio]
+opt-level = 3
+
+[profile.release]
+codegen-units = 1
+debug = 2
+lto = "fat"
+opt-level = "s"

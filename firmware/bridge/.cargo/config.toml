@@ -1,0 +1,10 @@
+[build]
+target = "riscv32imac-unknown-none-elf"
+rustflags = [
+  # Needed for usable backtraces out of a debugger.
+  "-C", "force-frame-pointers",
+]
+
+[target.riscv32imac-unknown-none-elf]
+# No --chip: espflash detects it, so the same runner serves both features.
+runner = "espflash flash --monitor"
