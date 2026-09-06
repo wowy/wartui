@@ -5,11 +5,13 @@
 //! together — sixteen sweeps against nine over the same 170 seconds — and, far
 //! worse, a node with BLE on acknowledged none of the thirty-two channel
 //! assignments sent to it while a node without BLE acknowledged both of its
-//! two. Both figures are measured; see `docs/phase-0-findings.md`, and note
-//! that they are still the only figures — Phase 1 was brought up with BLE not
-//! compiled in, so nothing in `docs/phase-1-findings.md` tests any of what
-//! follows. An 802.11 acknowledgement comes from the receiver's MAC hardware,
-//! so its absence means the radio was simply not on the channel: NimBLE and
+//! two. Both figures are measured; see `docs/phase-0-findings.md`. This code has
+//! since been run against the same board on the same bench: it acknowledged its
+//! assignment in under six milliseconds and cost 10% of its sweep period rather
+//! than the vendor's ~78%, which `docs/phase-1-findings.md` records along with
+//! the caveat that the run varies none of the three measures individually. An
+//! 802.11 acknowledgement comes from the receiver's MAC hardware, so its
+//! absence means the radio was simply not on the channel: NimBLE and
 //! Wi-Fi share the one 2.4 GHz antenna, and the admin window is precisely when
 //! the node is otherwise idle and the Bluetooth controller is free to take it.
 //!

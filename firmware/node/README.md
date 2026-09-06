@@ -119,8 +119,13 @@ every 125 ms, and "once per sweep" would have put a 500 ms scan against nearly
 every admin window it has. Narrowing a node to one channel is a supported thing
 to do, so that case has to be the safe one.
 
-Whether all of that is enough is a hardware question, and it is the one the
-Phase 1 bring-up is for.
+That was a hardware question and it now has a hardware answer: on the very board
+that acknowledged none of its thirty-two assignments under vendor firmware, this
+one acknowledged in 5.8 ms and ran 10% slower than its BLE-off twin rather than
+the vendor's ~78%. `docs/phase-1-findings.md` has the run, including the bug that
+made the first attempt of it meaningless — a scan that is enabled, answered
+`status 0`, and reports nothing, because the controller's event mask hides the
+one event it exists to produce.
 
 There is no host stack. `esp-radio` exposes the controller as a raw HCI pipe and
 all this firmware wants is an address and a signal strength, so the three

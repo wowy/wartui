@@ -6,8 +6,9 @@ begins with one undecodable frame" used one ESP32-C6 node
 (`A0:F2:62:87:00:08`, `esp32c6` feature); the 5 GHz section that follows used
 one ESP32-C5 (`38:44:BE:1F:57:84`, `esp32c5` feature) in its place — one node at
 a time, so none of that is a two-node result. "Two nodes split the pool" is, and
-used two C5s at once: `38:44:BE:1F:4F:98` alongside that same board. BLE was not
-compiled into any of them. Plaintext, control channel 6.
+used two C5s at once: `38:44:BE:1F:4F:98` alongside that same board, as does
+"BLE coexists", which is the only run with Bluetooth compiled in — and then into
+`57:84` only. Plaintext, control channel 6.
 
 Access point addresses and names are left out deliberately: these were real
 captures of a real neighbourhood, and a BSSID is exactly what a geolocation
@@ -344,16 +345,82 @@ and a broadcast heartbeat is unacknowledged by design, so a lost one leaves no
 trace on either end. Three in 190 s is consistent with ordinary broadcast loss,
 and this run cannot distinguish that from contention with the other node.
 
+## BLE coexists, once the controller is allowed to say anything
+
+Added 2026-09-06 with `38:44:BE:1F:57:84` rebuilt `esp32c5,ble` and
+`38:44:BE:1F:4F:98` left BLE-off — Phase 0's experiment on our own firmware, and
+on the same physical board that under vendor firmware acknowledged **0 of 32**
+assignments. Both were hand-assigned the *same* 23-channel range, so neither the
+sweep comparison nor the stagger is confounded by one node having more to do.
+
+### First, a bug that made the first attempt meaningless
+
+The first run of this checkpoint reported no Bluetooth at all: no advertisers, no
+BLE records, across a 215 s run. The scan was enabled, was answered `status 0`,
+waited its 500 ms and heard nothing.
+
+Instrumenting the HCI boundary settled it in one line — **zero packets** read
+from the connector during the scan window. Not reports that failed to parse, not
+reports discarded by the RSSI filter: nothing arrived, while every command still
+got its Command Complete back through that same queue. An advertising report is
+an LE Meta Event, gated by bit 61 of the controller's event mask, and the
+specification's default mask leaves that bit clear. `HCI_Reset` restores the
+default, and `Scanner::new` sent the reset and then only the scan commands. The
+controller was filtering out the one event the scan exists for. Command Complete
+is not maskable, which is exactly why every layer looked healthy.
+
+`SET_EVENT_MASK` fixes it. On the same board, same assignment, same 500 ms
+window:
+
+| | Packets read | Advertisers kept |
+| --- | --- | --- |
+| Before | 0 | 0 |
+| After | 92–131 | 43–55 |
+
+**Anything measured about BLE before that fix is void**, including a sweep
+penalty recorded here in an earlier draft: the node was spending its 500 ms
+polling an empty queue rather than scanning.
+
+### The coexistence result
+
+Re-measured with BLE genuinely scanning, both nodes on indices 14..=36:
+
+| Node | BLE | Assignment acked | Sweep period |
+| --- | --- | --- | --- |
+| `4F:98` | off | 6900 µs | 3.299 s |
+| `57:84` | **on** | **5800 µs** | 3.628 s |
+
+Against Phase 0, where the BLE-on node acknowledged none of 32 admin frames and
+completed nine sweeps to the BLE-off node's sixteen in the same 170 s:
+
+- **It acknowledges.** First attempt, in less than six milliseconds, on the board
+  that never once managed it under vendor firmware.
+- **The penalty is 10.0%**, not the ~78% Phase 0 measured. The `4F:98` figure of
+  3.299 s also matches the 3.298 s the pool's 5 GHz run gave a lone node, so the
+  baseline is not drifting.
+- The cost is almost exactly the scan window itself. Fixing the event mask
+  changed the penalty by 0.2 points (9.8% to 10.0%) while taking the node from
+  zero advertisers to fifty-odd per scan, so parsing, dedup and broadcast are
+  nearly free next to the 500 ms of listening.
+
+Over 27 scans the node heard a mean of 52 advertisers and a maximum of 60,
+reported 90 distinct ones to the host, and dropped none. The dedup ring is
+visible in the sequence: 54 new on the first scan, then 7, then 3, then zeroes.
+
+**`REPORTS` is 64 and the maximum held in one scan was 60.** Nothing was dropped
+here, but four slots of margin in an ordinary room is not margin. A denser one
+would silently lose advertisers to the newest-dropped rule, and `Scanner::dropped`
+is the only place that would say so — it is not on the wire and no host sees it.
+
 ## Not measured
 
-One checkpoint item still has no hardware answer, and two are partial:
+Every checkpoint item now has a hardware answer. What is left is narrower:
 
 - **DFS above 100 on a C5.** Unreachable rather than unmeasured, per the section
   above. DFS 52–64 is confirmed working.
 - **What the transmit stagger actually prevents.** The two-node section above
   exercised it, but could not measure it; a run with two equal-sized assignments,
   so both nodes reach a sweep boundary together, is what would.
-- **BLE**, which was not compiled in. Whether the three coexistence measures —
-  the two in `firmware/node/src/ble.rs` and the rate limit that is
-  `BLE_INTERVAL_MS` in `main.rs` — are enough to keep a node acknowledging is the
-  question Phase 2 is for, and Phase 0's table is still the only data on it.
+- **Which of the three coexistence measures is doing the work.** The section
+  above shows the combination succeeding where the vendor firmware failed, but it
+  varies none of them, so their individual contributions are unmeasured.
