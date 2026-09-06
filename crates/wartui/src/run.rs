@@ -170,14 +170,26 @@ pub async fn run(args: Args) -> Result<()> {
 
     outcome?;
     println!("Capture written to {}", args.db.display());
-    if args.lat.is_none() && args.gps.is_none() {
+    // A receiver that was asked for and never answered leaves exactly as
+    // unusable a capture as no position at all, so what matters is whether a
+    // fix ever landed, not whether one was configured.
+    let fixes = gps.as_ref().map_or(0, |gps| gps.view().counters.fixes);
+    if args.lat.is_none() && fixes == 0 {
         // The view says so throughout the run as well; this is for the case
         // where the terminal never came up, and so that the last thing on
         // screen is the reason the export will be empty.
-        println!(
-            "No position was given, so nothing in it can go to WiGLE. Run again with \n\
-             --gps /dev/cu.your-receiver, or with --lat and --lon."
-        );
+        if args.gps.is_some() {
+            println!(
+                "The GPS never reported a fix, so nothing in this capture can go to WiGLE.\n\
+                 Check --gps-baud, that the receiver can see the sky, and run \n\
+                 with --lat and --lon as well so a run like this still has a position."
+            );
+        } else {
+            println!(
+                "No position was given, so nothing in it can go to WiGLE. Run again with \n\
+                 --gps /dev/cu.your-receiver, or with --lat and --lon."
+            );
+        }
     }
     println!("Export it with: wartui export --db {} --wigle out.csv", args.db.display());
     Ok(())

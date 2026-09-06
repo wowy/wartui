@@ -74,6 +74,11 @@ pub fn accuracy_from_hdop(hdop: f64) -> f64 {
     hdop * 5.0
 }
 
+/// Milliseconds in a day, and in the half day that separates "the clock has
+/// wrapped past midnight" from "this receiver is confused".
+const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+const HALF_DAY_MS: i64 = DAY_MS / 2;
+
 /// A running parse of one receiver's output.
 ///
 /// Holds only the date, which arrives in `RMC` and is needed to stamp the `GGA`
@@ -81,13 +86,14 @@ pub fn accuracy_from_hdop(hdop: f64) -> f64 {
 #[derive(Debug, Clone, Default)]
 pub struct Nmea {
     date: Option<NaiveDate>,
+    last_stamp_ms: Option<i64>,
 }
 
 impl Nmea {
     /// A parser that has not yet seen a date.
     #[must_use]
     pub const fn new() -> Self {
-        Self { date: None }
+        Self { date: None, last_stamp_ms: None }
     }
 
     /// Parse one line.
@@ -113,6 +119,7 @@ impl Nmea {
 
     /// `$--GGA,time,lat,N,lon,E,quality,sats,hdop,alt,M,…`
     fn gga(&mut self, f: &[&str]) -> Result<Report, NmeaError> {
+        let time = field(f, 0);
         // Quality 0 is "fix not available"; 1 is GPS, 2 differential, and the
         // higher values are RTK and dead reckoning. Anything non-zero is a
         // position the receiver stands behind.
@@ -128,12 +135,13 @@ impl Nmea {
             alt: number(field(f, 8))?,
             accuracy: number(field(f, 7))?.map(accuracy_from_hdop),
             satellites: integer(field(f, 6))?,
-            at_ms: self.stamp(field(f, 0)),
+            at_ms: self.stamp(time),
         }))
     }
 
     /// `$--RMC,time,status,lat,N,lon,E,speed,track,date,…`
     fn rmc(&mut self, f: &[&str]) -> Result<Report, NmeaError> {
+        let time = field(f, 0);
         // The date is worth keeping even from a sentence that carries no fix:
         // a receiver with the time but not yet a position is the normal state
         // for the first half-minute after a cold start.
@@ -152,12 +160,12 @@ impl Nmea {
             alt: None,
             accuracy: None,
             satellites: None,
-            at_ms: self.stamp(field(f, 0)),
+            at_ms: self.stamp(time),
         }))
     }
 
     /// Combine the date carried from the last `RMC` with a sentence's time.
-    fn stamp(&self, time: &str) -> Option<i64> {
+    fn stamp(&mut self, time: &str) -> Option<i64> {
         let date = self.date?;
         let hour: u32 = time.get(0..2)?.parse().ok()?;
         let minute: u32 = time.get(2..4)?.parse().ok()?;
@@ -167,7 +175,18 @@ impl Nmea {
         // more than a thousand milliseconds rather than as a sixtieth second.
         let (secs, millis) =
             if milli >= 60_000 { (59, milli - 59_000) } else { (milli / 1000, milli % 1000) };
-        Some(date.and_hms_milli_opt(hour, minute, secs, millis)?.and_utc().timestamp_millis())
+        let at_ms =
+            date.and_hms_milli_opt(hour, minute, secs, millis)?.and_utc().timestamp_millis();
+        // A `GGA` borrows the date from the `RMC` before it, so the sentences
+        // between midnight and that cycle's `RMC` borrow yesterday's and land a
+        // day in the past. Time only ever runs backwards by hours for that one
+        // reason; a receiver does not otherwise revisit this morning.
+        let at_ms = match self.last_stamp_ms {
+            Some(last) if at_ms < last - HALF_DAY_MS => at_ms + DAY_MS,
+            _ => at_ms,
+        };
+        self.last_stamp_ms = Some(at_ms);
+        Some(at_ms)
     }
 }
 
@@ -329,6 +348,21 @@ mod tests {
         let Ok(Report::Fix(after)) = nmea.parse(GGA) else { panic!("a fix") };
         // 2026-09-05T12:35:19Z.
         assert_eq!(after.at_ms, Some(1_788_611_719_000));
+    }
+
+    #[test]
+    fn a_position_taken_after_midnight_is_not_stamped_with_yesterday() {
+        // GGA has a time and no date, so for the fraction of a second between
+        // midnight and that cycle's RMC it borrows a date that has just
+        // expired. Left alone the fix would claim to be a day old, which is
+        // exactly the staleness this field exists to expose.
+        let mut nmea = Nmea::new();
+        let before = b"$GNRMC,235959.00,A,4807.038,N,01131.000,E,0.06,31.66,050926,,,A*7F";
+        let after = b"$GPGGA,000001.00,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*65";
+        let Ok(Report::Fix(_)) = nmea.parse(before) else { panic!("a fix") };
+        let Ok(Report::Fix(fix)) = nmea.parse(after) else { panic!("a fix") };
+        // 2026-09-06T00:00:01Z — the next day, not the previous one.
+        assert_eq!(fix.at_ms, Some(1_788_652_801_000));
     }
 
     #[test]

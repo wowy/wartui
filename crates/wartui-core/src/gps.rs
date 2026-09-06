@@ -12,7 +12,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::nmea::{Nmea, NmeaError, Report};
 use crate::position::{Fix, PositionSource};
@@ -31,6 +31,14 @@ const MIN_BACKOFF: Duration = Duration::from_millis(250);
 /// Slowest retry. A GPS puck that has been unplugged is worth checking for
 /// every few seconds; more often than that is just noise in the log.
 const MAX_BACKOFF: Duration = Duration::from_secs(5);
+
+/// How long a port has to stay readable before the backoff is forgiven.
+///
+/// Opening is not the same as working: a device node left behind after an
+/// unplug opens and then fails on the first read, and resetting the delay on
+/// the open alone would retry that four times a second for the rest of the
+/// capture.
+const HEALTHY: Duration = Duration::from_secs(2);
 
 /// Which port to read, and how fast.
 #[derive(Debug, Clone)]
@@ -168,17 +176,30 @@ impl Gps {
     pub fn feed(&self, line: &[u8], now_ms: i64) {
         let mut inner = self.lock();
         match inner.nmea.parse(line) {
-            Ok(Report::Fix(fix)) => {
+            Ok(Report::Fix(new)) => {
                 inner.counters.sentences += 1;
                 inner.counters.fixes += 1;
-                inner.status = GpsStatus::Fixed { satellites: fix.satellites };
+                // A cycle is two sentences describing the same instant a few
+                // milliseconds apart, and only GGA carries the altitude, the
+                // satellite count and the dilution of precision. Letting the
+                // RMC that follows it overwrite those with nothing would mean
+                // the fix spends almost its whole life missing three of the
+                // things it was read for. So the position is replaced and the
+                // rest is carried: what a sentence does not mention, it is not
+                // contradicting.
+                let previous = inner.fix;
+                let satellites = new.satellites.or(match inner.status {
+                    GpsStatus::Fixed { satellites } => satellites,
+                    _ => None,
+                });
+                inner.status = GpsStatus::Fixed { satellites };
                 inner.fix = Some(Fix {
-                    lat: Some(fix.lat),
-                    lon: Some(fix.lon),
-                    alt: fix.alt,
-                    accuracy: fix.accuracy,
+                    lat: Some(new.lat),
+                    lon: Some(new.lon),
+                    alt: new.alt.or_else(|| previous.and_then(|fix| fix.alt)),
+                    accuracy: new.accuracy.or_else(|| previous.and_then(|fix| fix.accuracy)),
                     source: PositionSource::Gps,
-                    at_ms: fix.at_ms,
+                    at_ms: new.at_ms,
                 });
                 inner.received_at_ms = Some(now_ms);
             }
@@ -215,13 +236,16 @@ impl Gps {
         while !self.stop.load(Ordering::Relaxed) {
             match serialport::new(&config.port, config.baud).timeout(READ_TIMEOUT).open() {
                 Ok(port) => {
-                    backoff = MIN_BACKOFF;
                     if !matches!(self.view().status, GpsStatus::Fixed { .. }) {
                         self.set_status(GpsStatus::Searching);
                     }
+                    let opened = Instant::now();
                     let reason = self.read_port(port);
                     if self.stop.load(Ordering::Relaxed) {
                         return;
+                    }
+                    if opened.elapsed() >= HEALTHY {
+                        backoff = MIN_BACKOFF;
                     }
                     self.set_status(GpsStatus::Failed(reason));
                 }
@@ -310,6 +334,21 @@ mod tests {
         assert_eq!(at, 5_000);
         assert_eq!(fix.source, PositionSource::Gps);
         assert_eq!(fix.at_ms, Some(1_788_611_719_000));
+    }
+
+    #[test]
+    fn the_altitude_and_accuracy_survive_the_sentence_that_does_not_carry_them() {
+        // Receivers emit GGA and RMC every cycle, RMC normally last, so
+        // whatever the RMC does not carry is what the fix spends its life as.
+        // Only GGA has an altitude or an HDOP, and both have a column waiting
+        // for them in the export.
+        let gps = Gps::detached();
+        gps.feed(GGA, 1_000);
+        gps.feed(b"$GNRMC,123519.00,A,4807.038,N,01131.000,E,0.06,31.66,050926,,,A*73", 1_100);
+        let (fix, _) = gps.latest().expect("a fix");
+        assert_eq!(fix.alt, Some(545.4));
+        assert_eq!(fix.accuracy, Some(4.5));
+        assert_eq!(gps.view().status, GpsStatus::Fixed { satellites: Some(8) });
     }
 
     #[test]
