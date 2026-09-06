@@ -422,15 +422,83 @@ at 96 entries an `esp32c5,ble` build trips `clippy::large_stack_frames`, and the
 C5 is the binding target — a C6 reaches 112. A ring bigger than that wants the
 reports in a `static`, as `sniff` already keeps its sightings.
 
-And every count in this section is a floor. A review after the run found that
-`sweep` enabled its scan through the same helper the setup commands use, which
-drains the controller's queue until two reads come back empty — so it was
-discarding whatever advertising reports arrived while it waited for the
-acknowledgement of the command that started the scan. That is up to 64 ms of the
-500 ms window, and it takes more of it the busier the room, because a busy room
-is precisely what keeps the queue from going quiet. The fix writes the command
-and lets the collect loop absorb the completion. It is unmeasured: the boards
-were off the bench when it was made.
+A review after the run found that `sweep` enabled its scan through the same
+helper the setup commands use, which drains the controller's queue until two
+reads come back empty — so it was discarding whatever advertising reports
+arrived while it waited for the acknowledgement of the command that started the
+scan. The fix writes the command and lets the collect loop absorb the completion
+instead. The section below is what that changed, which is less than this
+paragraph originally predicted.
+
+### The drain fix changed nothing measurable, and that is the result
+
+Re-run on the bench after the fix. The first run compared two boards
+simultaneously; `4F:98` would not answer `espflash` this time (see below), so
+this is the same board, `57:84`, measured twice a few minutes apart with the same
+`A` assignment of indices 14..=36. Same board is the better control for the
+penalty and the worse one for the room, so `4F:98` — still sweeping on its old
+flash — is carried as an environment check.
+
+| | Before the fix | After the fix |
+| --- | --- | --- |
+| Advertisers per scan, mean | 52.4 | 51.8 |
+| Advertisers per scan, min–max | 47–60 | 45–61 |
+| Distinct advertisers to the host | 90 | 91 |
+| Dropped to a full ring | 0 | 0 |
+| Scans | 27 | 28 |
+
+**The prediction written here was that the re-run would report more advertisers
+per sweep. It does not.** The counts are the same to within the noise of two
+runs minutes apart, and the honest reading is that the drain was costing almost
+nothing in this room. The worst case reasoned about — 64 ms of the window — needs
+the queue to stay busy enough that two consecutive 2 ms reads never both come
+back empty. At the ~50 advertisers per 500 ms this room actually produces, a
+report arrives about every 10 ms, so a 4 ms gap turns up almost immediately and
+the drain exits after one or two reports rather than after hundreds.
+
+That does not make the fix wrong: the failure it removes is real, and it is
+load-dependent in the direction that matters, since the denser the room the more
+it takes. It does mean the counts recorded above were never depressed in any
+measurable way, and the word "floor" has been removed rather than left to imply
+a correction that did not happen.
+
+The sweep penalty survives the change of method:
+
+| | BLE off | BLE on | Penalty |
+| --- | --- | --- | --- |
+| First run, two boards at once | 3.299 s (`4F:98`) | 3.628 s (`57:84`) | 10.0% |
+| Re-run, one board twice | 3.358 s | 3.612 s | **7.6%** |
+
+`4F:98` held 3.042 s and then 2.990 s across the two halves of the re-run, a 1.7%
+drift, so the 7.6% is `57:84`'s own and not the room moving. The assignment was
+acknowledged in 5909 µs with BLE off and 6550 µs with it on — both first attempt,
+both on the board that managed none of thirty-two under vendor firmware. Whether
+the true figure is 7.6% or 10.0% is not settled by two runs; what both say is
+that it is under ten percent and nothing like Phase 0's ~78%.
+
+`REPORTS` was raised to 80 before this run. The maximum held in one scan was 61,
+one more than the 60 that prompted the change, so the old ceiling of 64 now looks
+closer than it did rather than further away.
+
+### One board will not answer, and it is not dead
+
+`4F:98` refuses `espflash` on every strategy offered — `usb-reset`, `no-reset`,
+`no-reset-no-sync` with the chip named, a lower baud, `board-info`, `reset` and
+`monitor` all fail at `Connecting...`, with nothing holding the port and the
+device enumerating normally on USB with the right serial number.
+
+It is nonetheless running: it heartbeats, holds an assignment, acknowledges one
+in 6146 µs and reports observations throughout both halves of the re-run. So the
+wedge is in the USB-serial-JTAG endpoint and not in the chip, which is worth
+recording because the symptom reads exactly like a dead board and is not one. The
+same symptom on `57:84` in the previous session cleared on a physical replug.
+
+Its sweep period while wedged is unexplained. On indices 14..=36 it holds
+2.99–3.04 s, where 23 dwells at 125 ms plus the 300 ms admin window is at least
+3.17 s, and where it measured 3.299 s in the first run. Something is skipping
+roughly two channels, and its observations cover 36–56 and 149–161 with nothing
+between 100 and 144. That is consistent with an older flash on that board, and it
+cannot be checked without the console, which is the thing that is wedged.
 
 ## Not measured
 
@@ -444,8 +512,10 @@ Every checkpoint item now has a hardware answer. What is left is narrower:
 - **Which of the three coexistence measures is doing the work.** The section
   above shows the combination succeeding where the vendor firmware failed, but it
   varies none of them, so their individual contributions are unmeasured.
-- **The scan-enable drain fix, and `REPORTS` at 80.** Both were made after the
-  boards came off the bench, in response to a review of the run above. A re-run
-  should report more advertisers per sweep than the figures recorded here, and
-  the sweep penalty should be unchanged — the discarded time was inside the
-  500 ms window, not added to it.
+- **What the scan-enable drain cost in a dense room.** The re-run shows it cost
+  nothing measurable in an ordinary one, which is the opposite of what was
+  predicted and is not the same as showing the bug was harmless. A room dense
+  enough to keep the controller's queue from going quiet for 4 ms at a time is
+  what would separate them, and this bench cannot produce one.
+- **Why `4F:98` sweeps 23 channels in under 3.05 s.** Recorded above. Needs its
+  console back, which needs a physical replug.
