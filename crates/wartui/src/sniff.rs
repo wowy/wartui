@@ -38,9 +38,23 @@ pub async fn run(args: Args) -> Result<()> {
 
     let mut counts = Counts::default();
 
+    // Said once, and only into the silence it describes. `sniff` keeps waiting
+    // afterwards rather than exiting, because it is the command left running
+    // while a bridge is plugged in — but waiting without saying anything is how
+    // a wedged dongle passes for a quiet fleet.
+    let mut spoken = false;
+    let notice = tokio::time::sleep(super::CONNECT_NOTICE_AFTER);
+    tokio::pin!(notice);
+
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => break,
+            () = &mut notice, if !spoken => {
+                spoken = true;
+                if counts.link_events == 0 {
+                    eprintln!("\n{}\n", super::no_bridge_notice(args.port.as_deref()));
+                }
+            }
             event = link.recv() => match event {
                 Some(event) => handle(event, &args, &mut counts),
                 None => {
@@ -67,6 +81,10 @@ pub async fn run(args: Args) -> Result<()> {
 
 #[derive(Default)]
 struct Counts {
+    /// Anything the link itself has said — an announcement, or a reason it is
+    /// down. Nonzero means the user already has a diagnosis and does not need
+    /// the notice, whose whole subject is having heard nothing at all.
+    link_events: u64,
     total: u64,
     text: u64,
     heartbeat: u64,
@@ -79,6 +97,7 @@ struct Counts {
 
 fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
     let LinkEvent::Message(message) = &event else {
+        counts.link_events += 1;
         if let Some(line) = super::describe(&event) {
             println!("# {line}");
         }
