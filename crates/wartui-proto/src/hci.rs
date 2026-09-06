@@ -8,15 +8,15 @@
 //! enormous amount of code to be wrong in.
 //!
 //! `esp-radio` hands out the controller as a raw HCI packet pipe
-//! (`BleConnector`), so three commands and one event are the whole of it. That
+//! (`BleConnector`), so four commands and one event are the whole of it. That
 //! is what this module is: the byte layouts, and nothing that talks to
 //! hardware. Packets are built and parsed here, on the host side of the path
 //! dependency, so `cargo test` reaches them.
 //!
 //! Layouts are Bluetooth Core Specification v5.3, Vol 4 Part E — the H4
-//! transport in §2, `HCI_Reset` in §7.3.2, `HCI_LE_Set_Scan_Parameters` in
-//! §7.8.10, `HCI_LE_Set_Scan_Enable` in §7.8.11 and the LE Advertising Report
-//! in §7.7.65.2.
+//! transport in §2, `HCI_Reset` in §7.3.2, `HCI_Set_Event_Mask` in §7.3.1,
+//! `HCI_LE_Set_Scan_Parameters` in §7.8.10, `HCI_LE_Set_Scan_Enable` in §7.8.11
+//! and the LE Advertising Report in §7.7.65.2.
 
 use crate::air::{RecordKind, Security, WardriveLine};
 

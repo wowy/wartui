@@ -53,8 +53,21 @@ pub const SCAN_MS: u32 = 500;
 /// Distinct advertisers one sweep will hold.
 ///
 /// Addresses rotate for privacy, so unlike access points these rarely repeat
-/// and the ring behind them never suppresses much. Sixty-four is a busy room.
-const REPORTS: usize = 64;
+/// and the ring behind them never suppresses much. Sixty-four was a guess at a
+/// busy room, and then an ordinary room filled 60 of it
+/// (`docs/phase-1-findings.md`). The ring drops the *newest* advertiser once it
+/// is full and records that only on a counter no host reads, which makes
+/// overflow the one failure here that nothing would notice — so the number is
+/// set well clear of the measurement rather than just above it.
+///
+/// Eighty and not more because `Scanner` is built by value, so the ring is on
+/// the stack of `Scanner::new` and then of `main`: at 96 entries a `esp32c5,ble`
+/// build trips `clippy::large_stack_frames`, which `main.rs` denies. The C5 is
+/// the binding one — a C6 gets as far as 112 — and the margin here is deliberate
+/// so a dependency bump does not land on the limit. Wanting a ring bigger than
+/// this is a reason to move the reports into a `static`, the way `sniff` holds
+/// its sightings, not a reason to raise the threshold.
+const REPORTS: usize = 80;
 
 /// Listen continuously while enabled: interval and window equal, at 30 ms.
 const SCAN_WINDOW: u16 = (30_000 / SCAN_UNIT_US) as u16;
@@ -99,7 +112,16 @@ impl<'d> Scanner<'d> {
     /// belongs on the wire.
     pub fn sweep(&mut self) -> &[AdvReport] {
         self.len = 0;
-        if self.command(&set_scan_enable(true)).is_none() {
+        // Written directly rather than through `command`, because from this
+        // point onwards the queue is what the sweep is for. `command` drains
+        // until two consecutive reads come back empty, and a room delivering a
+        // packet every few milliseconds can hold it there for its whole
+        // 32-iteration budget — discarding every advertising report that
+        // arrives in it, and losing more of them the busier the room is. The
+        // collect loop below absorbs the Command Complete instead, at no cost:
+        // `adv_reports` yields nothing for a packet that is not an LE Meta
+        // advertising report.
+        if self.connector.write(&set_scan_enable(true)).is_err() {
             return &[];
         }
 
@@ -130,8 +152,11 @@ impl<'d> Scanner<'d> {
     ///
     /// The completion event is not inspected. There is nothing useful to do
     /// with a controller that refuses `HCI_Reset`, and reading the queue is
-    /// what stops a stale completion arriving in the middle of a scan and being
-    /// mistaken for an advertising report.
+    /// what stops a stale completion occupying it across a scan. It could not
+    /// be *mistaken* for an advertising report — `adv_reports` yields nothing
+    /// for a packet that is not one — so this is about the controller's queue
+    /// space and not about misparsing, which is why `sweep` starts its scan
+    /// without coming through here.
     ///
     /// Draining means draining. A command can be answered with both a Command
     /// Status and a Command Complete, so stopping at the first packet leaves

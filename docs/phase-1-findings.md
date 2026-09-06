@@ -377,9 +377,13 @@ window:
 | Before | 0 | 0 |
 | After | 92–131 | 43–55 |
 
-**Anything measured about BLE before that fix is void**, including a sweep
-penalty recorded here in an earlier draft: the node was spending its 500 ms
-polling an empty queue rather than scanning.
+A sweep penalty recorded here in an earlier draft was taken before that fix, and
+is retracted below rather than carried forward. It is worth being exact about
+what was wrong with it, because the obvious reading is wrong: the scan really was
+running — `HCI_LE_Set_Scan_Enable` succeeded and the controller was holding the
+antenna for its 500 ms — and only the delivery of the reports was masked. The
+airtime that measurement recorded was therefore real, which is why the corrected
+figure lands within 0.2 points of it rather than somewhere else entirely.
 
 ### The coexistence result
 
@@ -407,10 +411,26 @@ Over 27 scans the node heard a mean of 52 advertisers and a maximum of 60,
 reported 90 distinct ones to the host, and dropped none. The dedup ring is
 visible in the sequence: 54 new on the first scan, then 7, then 3, then zeroes.
 
-**`REPORTS` is 64 and the maximum held in one scan was 60.** Nothing was dropped
+**`REPORTS` was 64 and the maximum held in one scan was 60.** Nothing was dropped
 here, but four slots of margin in an ordinary room is not margin. A denser one
 would silently lose advertisers to the newest-dropped rule, and `Scanner::dropped`
 is the only place that would say so — it is not on the wire and no host sees it.
+`REPORTS` is now 80. The counter is still unread by every host, which is the
+part that makes overflow worth avoiding outright rather than detecting. It is not
+higher because `Scanner` is constructed by value, so the ring lands on the stack:
+at 96 entries an `esp32c5,ble` build trips `clippy::large_stack_frames`, and the
+C5 is the binding target — a C6 reaches 112. A ring bigger than that wants the
+reports in a `static`, as `sniff` already keeps its sightings.
+
+And every count in this section is a floor. A review after the run found that
+`sweep` enabled its scan through the same helper the setup commands use, which
+drains the controller's queue until two reads come back empty — so it was
+discarding whatever advertising reports arrived while it waited for the
+acknowledgement of the command that started the scan. That is up to 64 ms of the
+500 ms window, and it takes more of it the busier the room, because a busy room
+is precisely what keeps the queue from going quiet. The fix writes the command
+and lets the collect loop absorb the completion. It is unmeasured: the boards
+were off the bench when it was made.
 
 ## Not measured
 
@@ -424,3 +444,8 @@ Every checkpoint item now has a hardware answer. What is left is narrower:
 - **Which of the three coexistence measures is doing the work.** The section
   above shows the combination succeeding where the vendor firmware failed, but it
   varies none of them, so their individual contributions are unmeasured.
+- **The scan-enable drain fix, and `REPORTS` at 80.** Both were made after the
+  boards came off the bench, in response to a review of the run above. A re-run
+  should report more advertisers per sweep than the figures recorded here, and
+  the sweep penalty should be unchanged — the discarded time was inside the
+  500 ms window, not added to it.

@@ -65,7 +65,7 @@ Four host crates, strictly layered, plus firmware that shares the bottom one.
 
 - **`crates/wartui-proto`** — `no_std`, allocation-free wire formats and the parsing that goes
   with them. `air` (the vendor's packed ESP-NOW structs, and the wardrive-line reader/writer),
-  `beacon` (802.11 management frames and RSN/WPA elements to a `Sighting`), `hci` (the three
+  `beacon` (802.11 management frames and RSN/WPA elements to a `Sighting`), `hci` (the four
   Bluetooth commands and one event a scan needs), `dedup` (the node's oldest-out MAC ring),
   `link` (our own COBS/postcard/CRC USB protocol), `outbox` (the bridge's bounded TX rings),
   `plan` (channel pools, timings and the partitioning planner). Compiled into *both* the host

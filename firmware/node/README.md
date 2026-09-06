@@ -128,7 +128,7 @@ made the first attempt of it meaningless — a scan that is enabled, answered
 one event it exists to produce.
 
 There is no host stack. `esp-radio` exposes the controller as a raw HCI pipe and
-all this firmware wants is an address and a signal strength, so the three
+all this firmware wants is an address and a signal strength, so the four
 commands and one event live in `wartui_proto::hci` where they are unit-tested,
 and `src/ble.rs` is only the conversation.
 
