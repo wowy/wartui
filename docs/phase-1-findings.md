@@ -17,7 +17,8 @@ The design's largest open risk — that promiscuous mode would starve the ESP-NO
 receive path, and that the whole `sniffer()`/`esp_now()` shared-borrow shape
 would have to be abandoned for `scan_async` — did not materialise. A node
 holding both for the life of the program reported observations and acknowledged
-assignments in the same sweep, repeatedly, across three sessions.
+assignments in the same sweep, repeatedly, across three captures — one `sniff`
+and the two `run` sessions the rest of this document draws on.
 
 ## An unassigned node parks and waits, as designed
 
@@ -43,7 +44,7 @@ comes from the receiver's MAC hardware either way.
 
 Delivery, measured host-side from `created_at` to the transmit callback, was
 2–11 ms. The two assignments with no queue behind them — the first hand
-assignment, and the re-issue after a reboot — measured 5908 µs and 6141 µs
+assignment, and the re-issue after a reboot — measured 6141 µs and 5908 µs
 heartbeat-to-callback on the bridge's own clock, against a 300 ms admin window.
 
 **Six identical assignments went out in one 9 ms burst at connect.** This is
@@ -51,23 +52,39 @@ host behaviour, not node behaviour, and it is benign: a bridge left powered
 buffers heartbeats, so `run` attaching to one that has been up for half an hour
 processes a backlog of them before any acknowledgement can return, and emits an
 assignment per heartbeat. All six carried epoch 1, the node adopted the first
-and discarded five on the `!=` rule, and all six were acknowledged — which is
-also an incidental confirmation of the firmware's central claim, since a stock
-node is only listening for 300 ms per sweep and could not have heard six frames
-sent inside 9 ms. Their `latency_us` reads 7.4–9.6 s because the paired
+and discarded five on the `!=` rule, and all six were acknowledged.
+
+That last part proves less than it looks like it does, and the first draft of
+this document claimed otherwise: it argued no stock node could have heard six
+frames sent inside 9 ms. It could have. A 9 ms burst is far more likely to fall
+wholly inside a 300 ms window than to straddle it, so a stock node would hear
+all six or none — the burst separates nothing. And epoch 1 is by definition the
+first assignment, so the node was still unassigned and parked on the control
+channel, listening continuously for reasons that have nothing to do with the
+sniffing design. The evidence for that claim is the sustained observe-and-
+acknowledge behaviour above, not this.
+
+The six frames' `latency_us` reads 7.4–9.6 s because the paired
 heartbeats genuinely were that old; the metric is correct and the backlog is
 what it is measuring. It is bounded by the bridge's ring and does not recur in
 steady state.
 
 ## Sweep period, with the caveat that makes it not a fair fight
 
-Phase 0 predicted about 3.6 s per sweep for a vendor node holding one channel,
-against 6.7 s measured for eleven. This firmware beat every 1.7 s across
-channels 1–11 and every ~430 ms on a single channel.
+This firmware beat every 1.7 s across channels 1–11, and every ~430 ms on a
+single channel.
 
-That is not a like-for-like win. The vendor figure carries a BLE scan this
-build does not compile in, and Phase 0 is explicit that the overhead is fixed
-rather than proportional. What the numbers do establish is that the 300 ms
+There is no vendor number to set either against. Phase 0 measured 6.7 s for a
+**forty**-channel sweep and predicted about 3.6 s for one channel; it never
+measured eleven, because the run that would have — the halved channel count —
+produced nothing at all, the assignment having never arrived
+(`docs/phase-0-findings.md:106-114`). So the only honest comparison is the
+one-channel pair, ~430 ms against a predicted 3.6 s, and even that is not
+like-for-like: the vendor figure carries a per-sweep BLE scan this build does
+not compile in, and Phase 0 is explicit that the overhead is fixed rather than
+proportional to channel count.
+
+What the numbers do establish without a comparison is that the 300 ms
 admin window is being honoured and is the dominant cost at a narrow
 assignment — 125 ms of dwell against 300 ms of listening — which is the shape
 the design intends and the reason a one-channel node is the case the BLE rate
@@ -77,7 +94,7 @@ limit had to be safe for.
 
 The check `docs/phase-0-findings.md:116-118` recommends over heartbeat period.
 Every observation named a channel inside the range the node had been assigned,
-in both sessions and with nothing outside:
+in both `run` sessions and with nothing outside:
 
 | Session | Assigned | Channels observed |
 | --- | --- | --- |
@@ -99,8 +116,14 @@ all of which it had already sent before the reset. That is the intended cost of 
 
 ## Every connection begins with one undecodable frame
 
-`sniff` and `run` both reported `garbled 1` in every session. It is always the
-same thing, and it is always immediate:
+Every session saw exactly one. `run` counts it in the fault box as `garbled 1`
+(`tui.rs`, fed by the engine's `LinkEvent::Garbled` tally); `sniff` prints it as
+a `# undecodable frame: …` line and does **not** count it in its own summary,
+whose `undecodable` column is a different measurement — `Frame::decode`
+failures on the ESP-NOW payload inside a frame the link decoded perfectly well,
+which is the encrypted-node symptom rather than link resync. The two are worth
+keeping apart; a session can and did read `0 undecodable` while printing one
+undecodable-frame line. It is always the same thing, and always immediate:
 
 ```
 18:51:18.402464Z DEBUG undecodable frame error=checksum mismatch: expected 0xa62c, got 0x4634
@@ -133,6 +156,7 @@ Three checkpoint items had no hardware to run on and are still open:
 - **A two-node split**, where the plan is cut in half and each node stays inside
   its own range. Everything above is one node, so `node_index`/`node_count` have
   only ever been 0 and 1, and the transmit stagger has never been exercised.
-- **BLE**, which was not compiled in. Whether the three coexistence measures in
-  `firmware/node/src/ble.rs` are enough to keep a node acknowledging is the
+- **BLE**, which was not compiled in. Whether the three coexistence measures —
+  the two in `firmware/node/src/ble.rs` and the rate limit that is
+  `BLE_INTERVAL_MS` in `main.rs` — are enough to keep a node acknowledging is the
   question Phase 2 is for, and Phase 0's table is still the only data on it.
