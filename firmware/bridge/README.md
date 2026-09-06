@@ -52,6 +52,16 @@ wartui sniff      # every frame, decoded
 bridge that answers is listening, and `received 0 frames` then points at the
 nodes rather than at the link.
 
+A bridge that does *not* answer gets a named diagnosis rather than a wait, after
+five seconds, because the three things it can be need three different actions
+and they produce an identical symptom: the wrong firmware on the board, another
+program holding the port, or a bridge that has stopped answering while still
+enumerating as a USB device. That last one has been seen on a dongle left
+powered for a long time — the port opens, writes succeed, nothing comes back,
+and `espflash reset --port <path>` clears it. What causes it is not yet known,
+so if it happens again the reset banner's `Saved PC` is worth capturing before
+reflashing.
+
 To check transmit, run `wartui run`, select a node and press `a`. Its `beat`
 column should fall from seconds to a fraction of one within three sweeps — a
 node heartbeats once per completed sweep, so that is the only evidence
