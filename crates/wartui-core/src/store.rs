@@ -437,6 +437,8 @@ fn insert_session(
     Ok(conn.last_insert_rowid())
 }
 
+/// The pool's name as stored, which is not its name on screen: `ChannelPool`'s
+/// `Display` says "US", and captures already on disk say "us". Leave these.
 const fn pool_name(pool: ChannelPool) -> &'static str {
     match pool {
         ChannelPool::Us => "us",
