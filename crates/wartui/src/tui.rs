@@ -430,6 +430,13 @@ fn position(snapshot: &Snapshot) -> Vec<Span<'static>> {
 /// they simply carry the position from before the drive started. So the note
 /// stays on screen until the receiver is what the chain is using.
 fn receiver(gps: &GpsView, source: PositionSource) -> Span<'static> {
+    // Checked before the source, because a fix stays usable for `max_age`
+    // after the puck is unplugged: for those few seconds the rows really are
+    // coming from the GPS and the port really is dead, and the footer is
+    // already saying so.
+    if let GpsStatus::Failed(reason) = &gps.status {
+        return Span::styled(format!("  gps: {reason}"), Style::new().fg(Color::Yellow));
+    }
     if source == PositionSource::Gps {
         let sats = match gps.status {
             GpsStatus::Fixed { satellites: Some(n) } => format!(", {n} sats"),
@@ -438,12 +445,14 @@ fn receiver(gps: &GpsView, source: PositionSource) -> Span<'static> {
         return Span::styled(format!("  gps ok{sats}"), Style::new().fg(Color::Green));
     }
     let text = match &gps.status {
-        GpsStatus::Connecting => "  gps connecting".to_owned(),
-        GpsStatus::Searching => "  gps searching".to_owned(),
+        GpsStatus::Connecting => "  gps connecting",
+        GpsStatus::Searching => "  gps searching",
         // Talking, has had a fix, and the chain has stopped believing it.
-        GpsStatus::Fixed { .. } => "  gps fix is stale".to_owned(),
-        GpsStatus::Failed(reason) => format!("  gps: {reason}"),
+        GpsStatus::Fixed { .. } => "  gps fix is stale",
+        // Handled above, before the source is looked at.
+        GpsStatus::Failed(_) => "  gps unreadable",
     };
+    let text = text.to_owned();
     Span::styled(text, Style::new().fg(Color::Yellow))
 }
 
@@ -1007,6 +1016,21 @@ mod tests {
         // Most captures are static, and a permanent "gps: none" would be noise
         // on the one line that has to stay readable.
         assert!(!rendered(&busy()).contains("gps"));
+    }
+
+    #[test]
+    fn a_receiver_that_has_died_does_not_read_as_healthy_while_its_fix_lasts() {
+        // The seconds after the puck falls out: the rows are still the GPS's,
+        // and the port is gone. Saying "gps ok" here would contradict the
+        // fault the footer is showing at the same moment.
+        let unplugged = with_gps(
+            GpsStatus::Failed("/dev/cu.gps: Device not configured".to_owned()),
+            GpsCounters { sentences: 400, fixes: 200, rejected: 0 },
+            PositionSource::Gps,
+        );
+        let screen = rendered(&unplugged);
+        assert!(screen.contains("Device not configured"), "{screen}");
+        assert!(!screen.contains("gps ok"), "{screen}");
     }
 
     #[test]
