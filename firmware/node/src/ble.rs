@@ -41,7 +41,8 @@ use esp_radio::ble::Config;
 use esp_radio::ble::controller::BleConnector;
 use esp_rtos::CurrentThreadHandle;
 use wartui_proto::hci::{
-    AdvReport, PACKET_MAX, RESET, SCAN_UNIT_US, adv_reports, set_scan_enable, set_scan_parameters,
+    AdvReport, PACKET_MAX, RESET, SCAN_UNIT_US, SET_EVENT_MASK, adv_reports, set_scan_enable,
+    set_scan_parameters,
 };
 
 /// How long one sweep listens. `BLE_SCAN_DURATION`, `src/configs.h:72`.
@@ -82,6 +83,9 @@ impl<'d> Scanner<'d> {
         // run left it in and enabling a scan twice is an error rather than a
         // no-op.
         scanner.command(&RESET)?;
+        // After the reset, because the reset restores the default mask that
+        // hides advertising reports. See `SET_EVENT_MASK`.
+        scanner.command(&SET_EVENT_MASK)?;
         scanner.command(&set_scan_parameters(SCAN_WINDOW, SCAN_WINDOW))?;
         Some(scanner)
     }

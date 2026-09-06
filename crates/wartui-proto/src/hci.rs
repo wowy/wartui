@@ -48,6 +48,22 @@ pub const SCAN_UNIT_US: u32 = 625;
 /// the last run left it and a scan enabled twice is an error.
 pub const RESET: [u8; 4] = [CMD, 0x03, 0x0C, 0x00];
 
+/// `HCI_Set_Event_Mask`, with the LE Meta Event bit set.
+///
+/// Without this a scan is enabled, is acknowledged, and reports nothing. An
+/// advertising report arrives as an LE Meta Event, which is bit 61 of the event
+/// mask, and the Core Specification's default mask is `0x00001FFF_FFFFFFFF` —
+/// bit 61 clear. [`RESET`] restores that default, so sending a reset and then
+/// only the scan commands leaves the controller filtering out the one event the
+/// scan exists to produce. Command Complete is not maskable, which is why every
+/// command still answers `status 0` while nothing else ever arrives.
+///
+/// The value is the specification's default with bit 61 added, rather than all
+/// ones: the events this firmware does not read cost queue space in the host
+/// controller and there is nothing here that would drain them.
+pub const SET_EVENT_MASK: [u8; 12] =
+    [CMD, 0x01, 0x0C, 0x08, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x1F, 0x00, 0x20];
+
 /// `HCI_LE_Set_Scan_Parameters`, passive.
 ///
 /// Passive rather than the vendor's `setActiveScan(true)`
