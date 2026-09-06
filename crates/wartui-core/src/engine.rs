@@ -13,6 +13,13 @@
 //! admin window, putting the assignment down [`ActionBatch::urgent`], and
 //! believing it landed only when the bridge reports a MAC-layer acknowledgement
 //! — never when it reports a successful enqueue.
+//!
+//! From Phase 5 it does that on its own. With auto-assignment on, the engine
+//! holds a partition of the channel pool across every node that is currently
+//! heartbeating, re-partitions when that set changes, and — where the pool has
+//! more runs than there are nodes to hold them — rotates one node between them
+//! on a dwell timer. That is the whole of what replacing the vendor core means:
+//! owning the node table and deciding what each node scans.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
@@ -20,7 +27,7 @@ use std::time::{Duration, Instant};
 use wartui_bridge::{BridgeInfo, LinkEvent};
 use wartui_proto::air::{AdminMsg, Frame, MsgType, RecordKind, WardriveLine, wire_version};
 use wartui_proto::link::{BridgeToHost, EspNowPayload, HostToBridge, Mac, SendStatus};
-use wartui_proto::plan::{ChannelPool, IndexRun};
+use wartui_proto::plan::{self, ChannelPool, IndexRun, Plan};
 
 use crate::position::PositionChain;
 use crate::record::{
@@ -70,12 +77,24 @@ pub enum Command {
     /// the 300 ms it holds open after a heartbeat (`src/WiFiOps.cpp:718-739`);
     /// the rest of the time its radio is away scanning some other channel. So
     /// this marks the node dirty and the frame goes on the next heartbeat.
+    ///
+    /// Honoured whether or not auto-assignment is on: the engine is the
+    /// mechanism and the view is the policy. The next re-partition will take
+    /// the node back, so the view refuses the key rather than letting an
+    /// operator wonder why their range lasted until the fleet next changed.
     Assign {
         /// Which node.
         mac: Mac,
         /// The range it should scan.
         range: IndexRun,
     },
+    /// Turn auto-assignment on or off.
+    ///
+    /// Switching it on re-partitions immediately. Switching it off leaves the
+    /// fleet holding whatever it holds — nothing is recalled, because there is
+    /// no frame that says "scan nothing" and a node left with no assignment
+    /// would carry on with its old one regardless.
+    SetAuto(bool),
 }
 
 /// What the engine wants done as a result.
@@ -102,10 +121,22 @@ impl ActionBatch {
 /// How the engine should behave.
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
-    /// Which channels the fleet is meant to scan. Recorded in the session and
-    /// shown in the UI; not yet enforced, because enforcing it means
-    /// transmitting.
+    /// Which channels the fleet is meant to scan. Recorded in the session,
+    /// shown in the UI, and — with [`Self::auto`] on — the set the engine
+    /// partitions across the fleet.
     pub pool: ChannelPool,
+    /// Hold the whole fleet on a partition of [`Self::pool`], re-issued
+    /// whenever the set of heartbeating nodes changes.
+    ///
+    /// Off by default. On, wartui transmits without being asked: this is the
+    /// difference between a monitor that can assign and a core replacement.
+    pub auto: bool,
+    /// How long a node holds one phase of a rotating plan.
+    ///
+    /// Only reached when the pool has more runs than the fleet has nodes to
+    /// hold them — one node on [`ChannelPool::Us`], in practice. Coverage is
+    /// then intermittent rather than incorrect, and this is the period.
+    pub rotation_dwell: Duration,
     /// How long a node may go without a heartbeat before it stops counting
     /// towards topology. Matches the firmware's own 60 s node timeout.
     pub topology_timeout: Duration,
@@ -135,6 +166,8 @@ impl Default for EngineConfig {
     fn default() -> Self {
         Self {
             pool: ChannelPool::Us,
+            auto: false,
+            rotation_dwell: Duration::from_secs(60),
             topology_timeout: Duration::from_secs(60),
             status_interval: Duration::from_secs(5),
             tail_len: 200,
@@ -180,6 +213,12 @@ pub struct NodeState {
     /// The node sent a core-protocol frame, which only an encrypted node does.
     /// wartui cannot talk to it until encryption is turned off in its web UI.
     pub encrypted: bool,
+    /// The bridge's peer table had no room for this node.
+    ///
+    /// It cannot be transmitted to at all until a slot frees up, so it is no
+    /// use to a plan: a share of the pool cut for it is a share nobody scans.
+    /// Cleared when a bridge announces itself, since its table starts empty.
+    pub peer_refused: bool,
     /// What this host wants the node to be scanning.
     pub desired: Option<Assignment>,
     /// What the node acknowledged, which is a different thing. Cleared when it
@@ -239,6 +278,7 @@ impl NodeState {
             observations: 0,
             link_rssi: None,
             encrypted: false,
+            peer_refused: false,
             desired: None,
             confirmed: None,
             dirty: false,
@@ -317,6 +357,10 @@ pub struct Counters {
     /// Assignments refused because the bridge's peer table was full, which
     /// means the fleet is larger than the twenty nodes wartui supports.
     pub peer_table_full: u64,
+    /// How many times the pool has been re-partitioned across the fleet. A
+    /// number that keeps climbing on a fleet that is not changing size means
+    /// nodes are ageing in and out of topology, which is a fault worth seeing.
+    pub replans: u64,
 }
 
 /// Counters the store keeps, folded into the snapshot for display.
@@ -378,6 +422,14 @@ pub struct Snapshot {
     pub link_error: Option<String>,
     /// The configured channel pool.
     pub pool: ChannelPool,
+    /// Whether the engine is holding the fleet on a partition of that pool.
+    pub auto: bool,
+    /// The partition in force, when there is one. `None` with auto off, with
+    /// nothing heartbeating, or with more nodes alive than wartui supports.
+    pub plan: Option<Plan>,
+    /// Which phase of a rotating plan the fleet is in. Always 0 when the plan
+    /// does not rotate.
+    pub phase: u8,
     /// Every node, ordered by MAC so the table does not reshuffle itself.
     pub nodes: Vec<NodeView>,
     /// How many of them can still be given a channel range.
@@ -443,6 +495,18 @@ pub struct FleetEngine {
     next_send_id: u16,
     /// The last epoch handed out. Starts at the store's persisted base.
     last_counter: u64,
+    /// Whether the engine partitions the pool across the fleet by itself.
+    auto: bool,
+    /// The partition in force.
+    plan: Option<Plan>,
+    /// The members that plan was built for, in the order that gave them their
+    /// `node_index`. Compared against the live membership to decide whether
+    /// anything needs re-partitioning at all.
+    plan_members: Vec<Mac>,
+    /// Which phase of a rotating plan the fleet is in.
+    phase: u8,
+    /// When the fleet entered that phase, for the dwell timer.
+    phase_since: Option<Instant>,
 }
 
 /// One assignment in flight.
@@ -476,6 +540,11 @@ impl FleetEngine {
             pending: BTreeMap::new(),
             next_send_id: 1,
             last_counter: config.assignment_base,
+            auto: config.auto,
+            plan: None,
+            plan_members: Vec::new(),
+            phase: 0,
+            phase_since: None,
             config,
         }
     }
@@ -496,6 +565,12 @@ impl FleetEngine {
                 self.bridge = Some(info);
                 self.link_up = true;
                 self.link_error = None;
+                // Its peer table starts empty, whether this is a new bridge or
+                // the same one rebooted, so a node it had no room for before
+                // may fit now.
+                for node in self.nodes.values_mut() {
+                    node.peer_refused = false;
+                }
                 // A new connection means a new baseline, whether or not the
                 // bridge itself rebooted.
                 self.dropped_baseline = None;
@@ -517,6 +592,10 @@ impl FleetEngine {
 
     fn on_tick(&mut self, now: Now, batch: &mut ActionBatch) {
         self.expire_pending(now, batch);
+        // Where a node ageing out of topology is noticed, and where a rotating
+        // plan's dwell runs out. Both are the passage of time rather than
+        // anything arriving, so the tick is the only thing that can see them.
+        self.replan(now);
         let due = self
             .last_status_poll
             .is_none_or(|last| now.mono.duration_since(last) >= self.config.status_interval);
@@ -650,6 +729,12 @@ impl FleetEngine {
                 if rebooted && node.desired.is_some() {
                     self.reissue(src);
                 }
+                // A node's first heartbeat is the moment it joins the fleet,
+                // and every other node's range depends on how many there are.
+                // Re-partitioning here rather than waiting for the next tick is
+                // what lets this node take its share inside the window it has
+                // just opened, instead of a whole sweep later.
+                self.replan(now);
                 // The node is holding its admin window open for the next
                 // 300 ms and its radio will be gone after that, so this is
                 // the only moment in the sweep worth transmitting in.
@@ -699,14 +784,43 @@ impl FleetEngine {
 
     /// Take an operator's instruction. Nothing goes out from here.
     fn on_command(&mut self, command: Command, now: Now) {
-        let Command::Assign { mac, range } = command;
-        // Index and count over every node this session has seen, ordered by
-        // MAC. Deterministic, and it does not shuffle the fleet's stagger slots
-        // every time one node misses a heartbeat. Phase 5's planner replaces
-        // this with a real partition of the channel pool.
-        let node_count = u8::try_from(self.nodes.len()).unwrap_or(u8::MAX);
-        let Some(node_index) = self.nodes.keys().position(|k| *k == mac) else { return };
-        let node_index = u8::try_from(node_index).unwrap_or(u8::MAX);
+        match command {
+            Command::Assign { mac, range } => self.on_assign(mac, range),
+            Command::SetAuto(on) => {
+                self.auto = on;
+                // Forget what the last plan was built for, so switching back on
+                // re-partitions rather than waiting for the fleet to change.
+                self.plan_members.clear();
+                if !on {
+                    self.plan = None;
+                    self.phase = 0;
+                    self.phase_since = None;
+                }
+                self.replan(now);
+            }
+        }
+    }
+
+    /// Give one node a range, by hand.
+    fn on_assign(&mut self, mac: Mac, range: IndexRun) {
+        // Under a plan the node keeps the index and count the plan gave it: a
+        // hand-assigned range changes what one node scans, not where in the
+        // stagger window it keys up, and those two fields are what the fleet
+        // agrees its slots from. Without one, they are taken over every node
+        // this session has seen, ordered by MAC — deterministic, and it does
+        // not reshuffle the slots every time one node misses a heartbeat.
+        let planned = self
+            .plan
+            .zip(self.plan_members.iter().position(|m| *m == mac))
+            .map(|(plan, index)| (u8::try_from(index).unwrap_or(u8::MAX), plan.node_count()));
+        let (node_index, node_count) = match planned {
+            Some(pair) => pair,
+            None => {
+                let count = u8::try_from(self.nodes.len()).unwrap_or(u8::MAX);
+                let Some(index) = self.nodes.keys().position(|k| *k == mac) else { return };
+                (u8::try_from(index).unwrap_or(u8::MAX), count)
+            }
+        };
 
         // A fresh epoch even when the range is unchanged. A node adopts on
         // `!=`, so re-sending an epoch it already holds is a frame it will
@@ -717,7 +831,6 @@ impl FleetEngine {
         let Some(node) = self.nodes.get_mut(&mac) else { return };
         node.desired = Some(assignment);
         node.dirty = true;
-        let _ = now;
     }
 
     /// Re-mark a node's assignment for delivery under a new epoch.
@@ -730,6 +843,116 @@ impl FleetEngine {
             desired.counter = counter;
             node.dirty = true;
         }
+    }
+
+    /// Hold the fleet on a partition of the pool, re-cutting it when the fleet
+    /// changes or a rotating plan's dwell runs out.
+    ///
+    /// Membership is every node that is currently heartbeating: a node that is
+    /// not heartbeating never opens an admin window, so a range given to it
+    /// would sit undelivered while the rest of the fleet was partitioned around
+    /// a node that is not scanning it. Nodes are ordered by MAC, which is the
+    /// order that gives them their `node_index`, so the numbering is a function
+    /// of who is present rather than of the order they turned up in.
+    ///
+    /// Cheap on the common path: an unchanged membership with time left on the
+    /// dwell returns without touching anything, which is what keeps this off
+    /// the critical path of a heartbeat.
+    fn replan(&mut self, now: Now) {
+        if !self.auto {
+            return;
+        }
+        let members: Vec<Mac> = self
+            .nodes
+            .values()
+            // An encrypted node cannot be reached at all, and its heartbeats
+            // are not even decodable from here — so it can never be alive. The
+            // clause is here because a node that is silently planned around is
+            // a worse failure than one that is explicitly left out.
+            .filter(|node| self.is_alive(node, now) && !node.encrypted && !node.peer_refused)
+            .map(|node| node.mac)
+            .collect();
+
+        let rotation_due = self.plan.is_some_and(|plan| plan.rotates())
+            && self
+                .phase_since
+                .is_some_and(|since| now.mono.duration_since(since) >= self.config.rotation_dwell);
+        if members == self.plan_members && !rotation_due {
+            return;
+        }
+
+        // Whatever a departed node was owed was computed for a fleet that no
+        // longer exists, and there is nothing to replace it with. Dropping it
+        // beats leaving an assignment queued against a node that has stopped
+        // opening windows to receive it. What it last acknowledged stays, since
+        // that is still the best guess at what it is scanning.
+        let departed = std::mem::replace(&mut self.plan_members, members.clone());
+        for mac in departed.iter().filter(|mac| !members.contains(mac)) {
+            if let Some(node) = self.nodes.get_mut(mac) {
+                node.desired = None;
+                node.dirty = false;
+            }
+        }
+
+        let count = u8::try_from(members.len()).unwrap_or(u8::MAX);
+        let Some(plan) = plan::plan(self.config.pool, count) else {
+            // Nothing heartbeating, or more nodes than the radio's peer table
+            // can hold. Either way there is no partition to be in, and the
+            // fleet keeps whatever it already had rather than being told
+            // something the bridge could not deliver anyway.
+            self.plan = None;
+            self.phase = 0;
+            self.phase_since = None;
+            return;
+        };
+        self.counters.replans += 1;
+        // A membership change restarts the rotation rather than resuming it:
+        // these are the phases of a different plan.
+        self.phase = if rotation_due && members == departed {
+            (self.phase + 1) % plan.phase_count()
+        } else {
+            0
+        };
+        self.phase_since = Some(now.mono);
+        self.plan = Some(plan);
+
+        // One epoch per node that actually needs telling. Held locally because
+        // the decision needs the node in hand, and `self` is borrowed for it.
+        let mut counter = self.last_counter;
+        for (index, mac) in members.iter().enumerate() {
+            let index = u8::try_from(index).unwrap_or(u8::MAX);
+            // No range this phase: reachable only when a rotation's runs do not
+            // divide evenly among the nodes. There is no frame meaning "scan
+            // nothing", so the node keeps what it has for a phase.
+            let Some(range) = plan.range_for(index, self.phase) else { continue };
+            let Some(node) = self.nodes.get_mut(mac) else { continue };
+
+            let wanted =
+                |a: Assignment| a.range == range && a.node_index == index && a.node_count == count;
+            // Already scanning exactly this, or already queued to. Re-issuing
+            // either would burn an epoch to tell a node what it already knows.
+            if node.dirty {
+                if node.desired.is_some_and(wanted) {
+                    continue;
+                }
+            } else if node.confirmed.is_some_and(wanted) {
+                // Nothing goes out, but what the plan wants and what the node
+                // holds are now the same thing and have to be recorded as such.
+                // A node that rejoins a plan it already satisfies would
+                // otherwise be left with nothing wanted of it at all — and a
+                // reboot re-issues what is wanted, so there would be nothing to
+                // re-issue. It would drop back to scanning all forty channels,
+                // transmitting on the six the pool exists to keep it off.
+                node.desired = node.confirmed;
+                continue;
+            }
+
+            counter += 1;
+            node.desired =
+                Some(Assignment { range, node_index: index, node_count: count, counter });
+            node.dirty = true;
+        }
+        self.last_counter = counter;
     }
 
     /// Put a dirty node's assignment on the air, if it has one.
@@ -817,6 +1040,12 @@ impl FleetEngine {
             if let Some(node) = self.nodes.get_mut(&pending.mac) {
                 node.dirty = false;
                 node.desired = None;
+                // And it leaves the plan, so the next re-cut spreads the pool
+                // over the nodes that can actually be reached. Left in, its
+                // share would be a hole in the fleet's coverage for the rest of
+                // the capture, with nothing on screen to say the pool was not
+                // being covered.
+                node.peer_refused = true;
             }
         }
 
@@ -952,6 +1181,9 @@ impl FleetEngine {
             link_up: self.link_up,
             link_error: self.link_error.clone(),
             pool: self.config.pool,
+            auto: self.auto,
+            plan: self.plan,
+            phase: self.phase,
             nodes,
             alive,
             tail: self.tail.iter().cloned().collect(),
