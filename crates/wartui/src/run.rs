@@ -1,6 +1,8 @@
 //! `wartui run` — capture a fleet into the store and watch it happen.
 //!
-//! It listens, it writes rows, and it draws what it heard. It also transmits,
+//! It listens, it writes rows, and it draws what it heard — each row stamped
+//! with wherever the host believed it was at that moment: a GPS on
+//! `--gps`, else `--lat`/`--lon`, else nothing. It also transmits,
 //! but only when asked: `a` and `A` in the view assign the selected node a
 //! channel range, `p` hands the fleet to the auto-assignment planner, and
 //! nothing else this command does reaches the air. `--auto` starts with the
@@ -9,11 +11,13 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::{Args as ClapArgs, ValueEnum};
 use tokio::sync::{mpsc, oneshot, watch};
 use wartui_core::engine::{EngineConfig, FleetEngine, StoreStats};
+use wartui_core::gps::{Gps, GpsConfig};
 use wartui_core::position::PositionChain;
 use wartui_core::runtime::{COMMAND_QUEUE, drive, now};
 use wartui_core::store::{SessionInfo, Store, StoreConfig};
@@ -69,6 +73,20 @@ pub struct Args {
     #[arg(long, default_value_t = 6)]
     channel: u8,
 
+    /// Serial port of an NMEA GPS, read continuously and preferred over
+    /// `--lat`/`--lon` whenever it has a recent fix.
+    #[arg(long, value_name = "PATH")]
+    gps: Option<String>,
+
+    /// Line rate of the GPS. Most receivers ship at 9600; u-blox modules are
+    /// often 38400.
+    #[arg(long, value_name = "BAUD", default_value_t = 9600)]
+    gps_baud: u32,
+
+    /// How old a GPS fix may be before the position falls back to `--lat`.
+    #[arg(long, value_name = "SECONDS", default_value_t = 5)]
+    gps_max_age: u64,
+
     /// Latitude to record against every observation.
     #[arg(long, requires = "lon", allow_hyphen_values = true)]
     lat: Option<f64>,
@@ -97,6 +115,18 @@ pub async fn run(args: Args) -> Result<()> {
         // `requires` should have caught this, but a position half-given is
         // worse than none: it would silently record a wrong place.
         _ => bail!("--lat and --lon must be given together"),
+    };
+
+    // The receiver is started before the link so that the first observations
+    // of the capture have a chance of being positioned; it takes a few seconds
+    // to answer, and nothing waits for it either way.
+    let gps = args
+        .gps
+        .as_ref()
+        .map(|port| Gps::spawn(GpsConfig { port: port.clone(), baud: args.gps_baud }));
+    let position = match &gps {
+        Some(gps) => position.with_gps(gps.clone(), Duration::from_secs(args.gps_max_age)),
+        None => position,
     };
 
     let pool: ChannelPool = args.pool.into();
@@ -130,17 +160,36 @@ pub async fn run(args: Args) -> Result<()> {
     // Always waited on, even when the view failed: this is what commits the
     // last batch and writes the session's end time.
     capture.await.context("the capture task panicked")?;
+    if let Some(gps) = &gps {
+        // The reader is blocked on a serial read with a short timeout, so this
+        // is the difference between exiting now and exiting a fifth of a
+        // second later. Worth having anyway: a thread left reading a port the
+        // next run wants to open is a confusing failure.
+        gps.stop();
+    }
 
     outcome?;
     println!("Capture written to {}", args.db.display());
-    if args.lat.is_none() {
+    // A receiver that was asked for and never answered leaves exactly as
+    // unusable a capture as no position at all, so what matters is whether a
+    // fix ever landed, not whether one was configured.
+    let fixes = gps.as_ref().map_or(0, |gps| gps.view().counters.fixes);
+    if args.lat.is_none() && fixes == 0 {
         // The view says so throughout the run as well; this is for the case
         // where the terminal never came up, and so that the last thing on
         // screen is the reason the export will be empty.
-        println!(
-            "No position was given, so nothing in it can go to WiGLE. Run again with \n\
-             --lat and --lon, or wait for the GPS chain in Phase 6."
-        );
+        if args.gps.is_some() {
+            println!(
+                "The GPS never reported a fix, so nothing in this capture can go to WiGLE.\n\
+                 Check --gps-baud, that the receiver can see the sky, and run \n\
+                 with --lat and --lon as well so a run like this still has a position."
+            );
+        } else {
+            println!(
+                "No position was given, so nothing in it can go to WiGLE. Run again with \n\
+                 --gps /dev/cu.your-receiver, or with --lat and --lon."
+            );
+        }
     }
     println!("Export it with: wartui export --db {} --wigle out.csv", args.db.display());
     Ok(())

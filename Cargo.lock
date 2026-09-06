@@ -2002,6 +2002,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "rusqlite",
+ "serialport",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
