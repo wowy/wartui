@@ -1,6 +1,6 @@
 //! Parsing the `MSG_TEXT` payload.
 
-use wartui_proto::air::{LineError, RecordKind, Security, WardriveLine};
+use wartui_proto::air::{LineError, RecordKind, Security, WARDRIVE_LINE_MAX, WardriveLine};
 
 #[test]
 fn parses_a_wifi_line() {
@@ -127,4 +127,130 @@ fn empty_numeric_fields_are_rejected_rather_than_defaulted() {
     );
     assert_eq!(WardriveLine::parse(b"AA:BB:CC:DD:EE:FF,x,[OPEN],6,,W"), Err(LineError::BadRssi));
     assert_eq!(WardriveLine::parse(b"AA:BB:CC:DD:EE:FF,x,[OPEN],6,-,W"), Err(LineError::BadRssi));
+}
+
+#[test]
+fn writing_a_line_produces_what_parsing_it_would_consume() {
+    let line = WardriveLine {
+        bssid: [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF],
+        ssid: b"My Net",
+        security: Security::Wpa2Psk,
+        channel: 11,
+        rssi: -42,
+        kind: RecordKind::Wifi,
+    };
+    let mut buf = [0u8; WARDRIVE_LINE_MAX];
+    let len = line.write_into(&mut buf).expect("fits");
+    assert_eq!(&buf[..len], b"AA:BB:CC:DD:EE:FF,My Net,[WPA2_PSK],11,-42,W");
+    assert_eq!(WardriveLine::parse(&buf[..len]), Ok(line));
+}
+
+#[test]
+fn the_ble_path_writes_a_lowercase_mac_an_empty_ssid_and_channel_zero() {
+    // `src/WiFiOps.cpp:144`. The case difference between the two paths is not a
+    // choice; it is `WiFi.BSSIDstr()` against NimBLE's `toString()`.
+    let line = WardriveLine {
+        bssid: [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF],
+        ssid: b"",
+        security: Security::Ble,
+        channel: 0,
+        rssi: -70,
+        kind: RecordKind::Ble,
+    };
+    let mut buf = [0u8; WARDRIVE_LINE_MAX];
+    let len = line.write_into(&mut buf).expect("fits");
+    assert_eq!(&buf[..len], b"aa:bb:cc:dd:ee:ff,,[BLE],0,-70,B");
+}
+
+#[test]
+fn a_comma_in_an_ssid_is_written_as_an_underscore() {
+    // Otherwise the record grows a seventh field and the core drops it whole
+    // (`parseWardriveLine`, `src/WiFiOps.cpp:952-981`).
+    let line = WardriveLine {
+        bssid: [1, 2, 3, 4, 5, 6],
+        ssid: b"cafe,bar",
+        security: Security::Open,
+        channel: 6,
+        rssi: -55,
+        kind: RecordKind::Wifi,
+    };
+    let mut buf = [0u8; WARDRIVE_LINE_MAX];
+    let len = line.write_into(&mut buf).expect("fits");
+    assert_eq!(&buf[..len], b"01:02:03:04:05:06,cafe_bar,[OPEN],6,-55,W");
+    assert_eq!(WardriveLine::parse(&buf[..len]).expect("valid").ssid, b"cafe_bar");
+}
+
+#[test]
+fn the_longest_plausible_line_fits_the_advertised_buffer() {
+    // Every field at its widest, including `[WPA2_WPA3_PSK]` — the longest
+    // token `Security::as_bytes` can return, and one byte longer than
+    // `[WPA_WPA2_PSK]`. Picking the second-longest here is what let
+    // `WARDRIVE_LINE_MAX` sit one byte short of its own contract.
+    let line = WardriveLine {
+        bssid: [0xFF; 6],
+        ssid: &[b'x'; 32],
+        security: Security::Wpa2Wpa3Psk,
+        channel: u16::MAX,
+        rssi: i16::MIN,
+        kind: RecordKind::Wifi,
+    };
+    let mut buf = [0u8; WARDRIVE_LINE_MAX];
+    let len = line.write_into(&mut buf).expect("WARDRIVE_LINE_MAX is too small");
+    // Exactly, not merely within: a buffer larger than the worst case is a
+    // constant nobody has recomputed, and this is the assertion that says so.
+    assert_eq!(len, WARDRIVE_LINE_MAX);
+}
+
+#[test]
+fn no_security_token_is_longer_than_the_one_the_buffer_is_sized_for() {
+    let longest = [
+        Security::Open,
+        Security::Wep,
+        Security::WpaPsk,
+        Security::Wpa2Psk,
+        Security::WpaWpa2Psk,
+        Security::Wpa2Enterprise,
+        Security::Wpa3Psk,
+        Security::Wpa2Wpa3Psk,
+        Security::WapiPsk,
+        Security::Undefined,
+        Security::Ble,
+    ]
+    .iter()
+    .map(|s| s.as_bytes().len())
+    .max()
+    .expect("not empty");
+    assert_eq!(longest, Security::Wpa2Wpa3Psk.as_bytes().len());
+}
+
+#[test]
+fn a_line_that_does_not_fit_is_refused_rather_than_truncated() {
+    // A half-written line would parse as a different network, which is worse
+    // than no line at all.
+    let line = WardriveLine {
+        bssid: [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF],
+        ssid: b"x",
+        security: Security::Open,
+        channel: 6,
+        rssi: -55,
+        kind: RecordKind::Wifi,
+    };
+    let mut buf = [0u8; WARDRIVE_LINE_MAX];
+    let len = line.write_into(&mut buf).expect("fits in full");
+    for short in 0..len {
+        assert!(line.write_into(&mut buf[..short]).is_none(), "{short} bytes should not suffice");
+    }
+}
+
+#[test]
+fn an_unrecognised_token_is_written_back_exactly_as_it_arrived() {
+    // `Security::Other` carries a token this firmware version did not have.
+    // Round-tripping it keeps a future auth mode flowing through to the WiGLE
+    // column rather than being flattened on the way past.
+    let raw = b"01:02:03:04:05:06,n,[WPA3_ENTERPRISE_192],36,-60,W";
+    let line = WardriveLine::parse(raw).expect("valid");
+    assert!(matches!(line.security, Security::Other(b"[WPA3_ENTERPRISE_192]")));
+    let mut buf = [0u8; WARDRIVE_LINE_MAX];
+    let len = line.write_into(&mut buf).expect("fits");
+    assert_eq!(&buf[..len], raw);
 }

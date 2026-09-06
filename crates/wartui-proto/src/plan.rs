@@ -40,6 +40,35 @@ pub const MAX_NODES: usize = 20;
 /// `NODE_STAGGER_WINDOW_MS`, `src/WiFiOps.h:59`.
 pub const NODE_STAGGER_WINDOW_MS: u32 = 120;
 
+/// The channel every node returns to in order to speak to the controller.
+///
+/// `ESPNOW_CHANNEL`, `src/WiFiOps.cpp:15`. Nothing negotiates this: a node that
+/// picked a different one would be transmitting into an empty room.
+pub const CONTROL_CHANNEL: u8 = 6;
+
+/// How long a node listens on one channel before moving on.
+///
+/// The vendor's `CHANNEL_TIMER` is 80 ms (`src/configs.h:159`), which is a
+/// scan's dwell budget. wartui's node sniffs instead of scanning, so the figure
+/// it needs is a beacon interval rather than a probe round-trip: the default
+/// interval is 102.4 ms, and anything shorter than that can miss an access
+/// point entirely rather than merely hearing it less often.
+pub const CHANNEL_DWELL_MS: u32 = 125;
+
+/// How long a node holds the control channel after its heartbeat.
+///
+/// `ADMIN_WAIT_MS`, `src/WiFiOps.h:58`. This is the window an assignment has to
+/// land inside, and the reason the host sends one only in the moment after a
+/// heartbeat.
+pub const ADMIN_WAIT_MS: u32 = 300;
+
+/// How many recently-reported BSSIDs a node suppresses.
+///
+/// `mac_history_len`, `src/configs.h:158`. Shared between the Wi-Fi and BLE
+/// paths, oldest evicted first, and never cleared at runtime — which is why a
+/// long-running node's observation stream goes quiet rather than repeating.
+pub const DEDUP_RING: usize = 200;
+
 /// Upper bound on runs in any pool. Two today; the headroom is for a
 /// "US non-DFS" pool, which would be three.
 const MAX_RUNS: usize = 4;
@@ -102,17 +131,22 @@ const _: () = assert!(
 
 /// Which channels the fleet is allowed to scan.
 ///
-/// This constrains where nodes *transmit*, not merely where they listen: every
-/// `WiFi.scanNetworks` call in the firmware passes `passive = false`
-/// (`src/WiFiOps.cpp:745,755,779,3311`), so a node sends probe requests on each
-/// channel it is assigned.
+/// For a wartui node this bounds where the radio *listens*: it parks and reads
+/// beacons rather than probing, so a restricted pool is a choice about coverage
+/// rather than about legality.
+///
+/// For a stock node it bounds where the node *transmits*. Every
+/// `WiFi.scanNetworks` call in the vendor firmware passes `passive = false`
+/// (`src/WiFiOps.cpp:745,755,779,3311`), so it sends a probe request on each
+/// channel it is assigned — and the host cannot change that from here, which is
+/// why the pool exists at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ChannelPool {
     /// FCC-permitted unlicensed WLAN channels: 2.4 GHz 1-11 and 5 GHz 36-165.
     ///
     /// Note that 5 GHz 52-144 are DFS channels, where the rules require passive
-    /// scanning; the node firmware always scans actively and we cannot change
-    /// that from the host.
+    /// scanning. A wartui node always listens and so is welcome there; a stock
+    /// node always scans actively, and the host cannot change that.
     #[default]
     Us,
     /// Every channel the firmware knows, matching stock node behaviour.

@@ -1,12 +1,17 @@
 # wartui
 
-A terminal UI for managing a cluster of wardriving ESP32-C5 nodes.
+A terminal UI for managing a cluster of wardriving ESP32-C5 and ESP32-C6 nodes.
 
-The nodes run [ESP32DualBandWardriver](https://github.com/justcallmekoko/ESP32DualBandWardriver)
-firmware and talk [ESP-NOW](https://www.espressif.com/en/solutions/low-power-solutions/esp-now),
+The nodes talk [ESP-NOW](https://www.espressif.com/en/solutions/low-power-solutions/esp-now),
 which a laptop cannot speak. wartui drives a USB-attached ESP32 as a radio
 bridge and **takes the place of the mesh's CORE node**: it owns the node table,
 issues channel assignments, and collects every observation the fleet produces.
+
+The nodes run `firmware/node`, wartui's own firmware, which is why the fleet is
+C6 as well as C5. It speaks the wire format of
+[ESP32DualBandWardriver](https://github.com/justcallmekoko/ESP32DualBandWardriver)
+— the firmware this project grew up against, and still the reference for
+everything on the air — so a stock node also works, with the caveats below.
 
 ## Layout
 
@@ -17,8 +22,10 @@ issues channel assignments, and collects every observation the fleet produces.
 | `crates/wartui-core` | Headless fleet engine, SQLite store, position, WiGLE export |
 | `crates/wartui` | The TUI binary, and the `sniff` / `status` / `ports` commands |
 | `firmware/bridge` | Rust firmware for the dongle (own workspace, own target) |
+| `firmware/node` | Rust firmware for the nodes: sniffs, reports, takes assignments |
 | `tools/espnow-sniffer` | Passive Arduino sniffer for bring-up and frame capture |
 | `tools/golden` | Emits ground-truth struct layouts using the firmware's own typedefs |
+| `tools/beacons` | Turns a monitor-mode capture into fixtures for the beacon parser |
 
 ## Scope
 
@@ -26,7 +33,8 @@ Nodes accept exactly one command over the air — `MSG_ADMIN`, a contiguous rang
 of channel indices to scan. There is no start/stop, config, reboot or query
 message, and node serial is output-only. So wartui monitors the fleet, collects
 and exports observations, and controls channel assignment. Anything else would
-need changes to the node firmware.
+need changes to the node firmware — which, now that the node firmware is in this
+repository, is a thing that can happen.
 
 wartui speaks **plaintext ESP-NOW only**; nodes must have encryption turned off
 in their web UI. A `MSG_CORE_REQUEST` arriving from a node means that node still
@@ -47,9 +55,12 @@ footer says so (`admin frames from another core`).
 
 ## Channel pools
 
-Which channels the fleet scans is selectable, because every scan the firmware
-performs is *active* — nodes transmit probe requests on each channel they are
-assigned.
+Which channels the fleet scans is selectable. A wartui node never transmits
+while it is looking: it parks its radio and reads beacons, so the pool bounds
+where it *listens*. A stock node does transmit — every `WiFi.scanNetworks` in
+the vendor firmware passes `passive = false` — and sends a probe request on each
+channel it is assigned, including the DFS channels where the rules say
+otherwise. On a stock fleet the pool is what keeps that in check.
 
 - **US** (`--pool us`, the default) — 2.4 GHz 1–11 and 5 GHz 36–165.
 - **All** (`--pool all`) — every channel the firmware knows, matching stock behaviour.
@@ -136,9 +147,12 @@ scanning, so watch the `beat` column: narrowing a node from forty channels to
 one should collapse it from seconds to a fraction of one within three sweeps.
 `A` puts it back.
 
-If a node keeps showing `no admin ack`, the cause is nearly always BLE: NimBLE
-and Wi-Fi share the one 2.4 GHz antenna, and the admin window is precisely when
-the node would otherwise be idle. Turn BLE off in that node's web UI.
+If a node keeps showing `no admin ack`, the cause is nearly always BLE: the
+Bluetooth and Wi-Fi radios share the one 2.4 GHz antenna, and the admin window
+is precisely when the node would otherwise be idle. On a stock node, turn BLE
+off in its web UI. A wartui node is built without it unless `--features ble` was
+asked for, and switches its scan off between sweeps rather than leaving a stack
+running — see `firmware/node/README.md`.
 
 ### Letting wartui assign them
 
@@ -227,7 +241,7 @@ says what it is doing on the header line — `gps searching`, `gps ok, 8 sats`,
 | `no admin ack` | An assignment went out and its radio did not answer — nearly always BLE, see [Assigning channels](#assigning-channels) |
 | `refused` | The bridge would not transmit it. Nearly always a full peer table, which means the fleet is over twenty nodes |
 | `rebooted xN` | Its heartbeat counter went backwards, so it has forgotten any assignment; wartui re-issues under a fresh epoch |
-| `encrypted` | It is sending core-protocol frames. wartui cannot talk to it; turn encryption off in that node's web UI |
+| `encrypted` | It is sending core-protocol frames. wartui cannot talk to it; turn encryption off in that node's web UI. A wartui node never sends these |
 
 A node that is `stale` is also out of the plan, for the same reason it cannot be
 assigned by hand: no heartbeat, no window.
@@ -276,15 +290,21 @@ cargo test --workspace
 cargo clippy --workspace --all-targets
 cargo fmt --check
 
-cd firmware/bridge
-cargo clippy --release --features esp32c6   # and --features esp32c5
+cd firmware/bridge && cargo clippy --release --features esp32c6   # and esp32c5
+cd firmware/node   && cargo clippy --release --features esp32c6   # and with ,ble
 ```
 
-`firmware/` is excluded from the workspace: a different target, its own
-toolchain pin and its own lockfile. It takes a path dependency up into
-`crates/wartui-proto`, which is why those wire types are `no_std`.
+Each firmware is excluded from the workspace and is its own: a different target,
+its own toolchain pin and its own lockfile. Both take a path dependency up into
+`crates/wartui-proto`, which is why those wire types are `no_std` — and why the
+node's beacon parser, dedup ring and HCI packets live there too, where
+`cargo test` reaches them and a fix costs a `cargo run` rather than a reflash.
 
 The wire codec is tested byte-for-byte against layouts produced by a real C++
 compiler; see `tools/golden`. Frames captured off the air by
 `tools/espnow-sniffer` can be pasted into
-`crates/wartui-proto/tests/golden_vectors.txt` to become regression tests.
+`crates/wartui-proto/tests/golden_vectors.txt` to become regression tests, and
+802.11 beacons pulled out of a monitor-mode capture by `tools/beacons` go into
+`tests/beacon_vectors.txt` the same way — scrubbed of addresses and network
+names on the way, because a capture of the air around you locates you as surely
+as anything this project collects on purpose.

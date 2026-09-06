@@ -22,3 +22,7 @@ target
 
 # PlatformIO build output (tools/espnow-sniffer)
 .pio/
+
+# Python bytecode (tools/beacons)
+__pycache__/
+*.py[cod]

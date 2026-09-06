@@ -56,6 +56,12 @@ use wartui_proto::link::{
     LogStr, MAX_FRAME, Mac, SendStatus, ShortStr, decode_frame,
 };
 use wartui_proto::outbox::{ByteSink, Outbox};
+/// Where the stock mesh lives (`src/WiFiOps.cpp:15`). Shared with the node
+/// firmware and the host planner rather than spelled again here: nothing on the
+/// air negotiates this number, so the only thing keeping the three ends on the
+/// same channel is that they read it from the same place. The host can move
+/// this bridge with [`HostToBridge::SetChannel`], but nothing else will follow.
+use wartui_proto::plan::CONTROL_CHANNEL as DEFAULT_CHANNEL;
 
 // This creates the app descriptor the esp-idf bootloader expects.
 esp_bootloader_esp_idf::esp_app_desc!();
@@ -71,10 +77,6 @@ compile_error!("select exactly one chip: esp32c5 and esp32c6 are mutually exclus
 const CHIP: Chip = Chip::Esp32C5;
 #[cfg(feature = "esp32c6")]
 const CHIP: Chip = Chip::Esp32C6;
-
-/// Where the stock mesh lives (`src/WiFiOps.cpp:15`). The host can move us with
-/// [`HostToBridge::SetChannel`], but nothing else will follow.
-const DEFAULT_CHANNEL: u8 = 6;
 
 /// Bytes to take from the USB endpoint in one pass.
 ///
