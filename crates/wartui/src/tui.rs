@@ -356,7 +356,7 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot) {
     let first = vec![Span::raw(link)];
 
     let mut second = vec![
-        Span::raw(format!("pool {:?}  ", snapshot.pool)),
+        Span::raw(format!("pool {}  ", snapshot.pool)),
         planning(snapshot),
         Span::raw(format!(
             "  session {}{radio}  ",
@@ -1153,6 +1153,19 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(200, 40)).expect("test backend");
         terminal.draw(|frame| draw(frame, snapshot, &Ui::default())).expect("drawing");
         terminal.backend().to_string()
+    }
+
+    #[test]
+    fn the_header_names_the_pool_the_way_the_readme_does() {
+        // The header is the only place the pool is named on screen, and it
+        // used to name it by the variant's spelling. Every line of prose about
+        // it — README, doc comments — says "the US pool".
+        let mut snapshot = busy();
+        snapshot.pool = ChannelPool::Us;
+        assert!(rendered(&snapshot).contains("pool US"));
+
+        snapshot.pool = ChannelPool::All;
+        assert!(rendered(&snapshot).contains("pool All"));
     }
 
     #[test]
