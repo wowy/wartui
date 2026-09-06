@@ -259,9 +259,11 @@ cargo run -p wartui -- --log-file wartui.log run
 
 `--log-file` is the only way to see the transport's own account of a run: the
 view owns the terminal, so without it nothing is logged anywhere. It records
-which port was resolved, whether it opened, every reconnect and its reason, and
-the same for the GPS reader thread. `RUST_LOG` sets the level (`info` by
-default), so `RUST_LOG=debug` adds the dropped-command detail.
+which port was resolved, whether it opened, and the reason a link went down —
+once per reason rather than once per retry, since a port that is somebody else's
+is retried every 750 ms for as long as the capture runs. The GPS reader thread
+reports itself the same way. `RUST_LOG=debug` adds each individual retry, every
+frame that would not decode, and dropped bulk commands.
 
 If the same port keeps being the wrong device — a C5 node plugged in by USB
 looks identical to the bridge, same vendor and product ID — pin it with
