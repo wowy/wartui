@@ -190,8 +190,21 @@ fn main() -> ! {
     let software_interrupt = SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
     esp_rtos::start(timg0.timer0, software_interrupt.software_interrupt0);
 
-    let controller = esp_radio::wifi::WifiController::new(peripherals.WIFI, Default::default())
-        .expect("Wi-Fi controller");
+    // `Default::default()` would be China, which is `esp-radio`'s default and
+    // not a neutral one: it is applied under `WIFI_COUNTRY_POLICY_MANUAL`, and
+    // it refuses 5 GHz 100-144 outright. The bridge sits on channel 6 and would
+    // never notice — but `--channel` is a plain `u8` the operator can point
+    // anywhere, and a fleet moved to a channel this domain forbids would stop
+    // here while the nodes, which set `US`, were perfectly willing to go. Unlike
+    // a node, this end does say so: `SetChannel` answers a refusal with an
+    // `Error` frame the host prints. The reason to set it anyway is that two
+    // halves of one fleet disagreeing about what is legal is a trap even when
+    // one half can describe it.
+    let controller = esp_radio::wifi::WifiController::new(
+        peripherals.WIFI,
+        esp_radio::wifi::ControllerConfig::default().with_country_info(*b"US"),
+    )
+    .expect("Wi-Fi controller");
     // Split rather than kept whole: `EspNowSender::send` needs `&mut`, and
     // holding the manager and receiver separately means a transmit does not
     // have to borrow the parts that answer `GetStatus` and drain the radio.

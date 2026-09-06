@@ -65,6 +65,25 @@ compile time. The C5 is dual band and gets `BandMode::Auto`; the C6 is 2.4 GHz
 only and has no band mode to set, so half the channel pool is simply refused
 there. Both parts are RISC-V and build on stable.
 
+## The regulatory domain is set here, and it is not a preference
+
+`esp-radio` defaults `country_info` to **China** and applies it under
+`WIFI_COUNTRY_POLICY_MANUAL`, so nothing on the air ever overrides it. China's
+5 GHz allocation excludes 5470–5725, and the driver refuses those channels
+outright: a C5 left on the default silently loses 100–144, every sweep, and the
+host cannot tell that from a node whose radio did not tune. `src/main.rs` passes
+`US` for that reason and `firmware/bridge` does the same.
+
+Channel limits otherwise belong to the controller, not here — the node parks and
+listens, transmitting only on the control channel, so where it dwells is a
+coverage decision rather than a legal one. On a C5 the firmware permits 39 of the
+40 channels in `SCAN_CHANNELS` and lets the host choose among them; on a C6 it is
+the 13 that are 2.4 GHz, for the reason above — that part has no 5 GHz radio, and
+its refusals are not a regulatory matter at all. The one channel a C5 will not
+take is **channel 14**, which `esp-radio` refuses through a hardcoded
+`nchan: 13` that no setting it exposes can reach; `docs/phase-1-findings.md` has
+the measurements and why it was left alone rather than worked around.
+
 The cargo runner is `espflash flash --monitor` with no `--chip`, so espflash
 detects the part. Unlike the bridge, the monitor is worth watching: nothing but
 diagnostics goes down that pipe.
