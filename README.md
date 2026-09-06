@@ -84,14 +84,15 @@ Flashing the bridge itself is in `firmware/bridge/README.md`.
 ## Capturing
 
 `wartui run` — the default, so the subcommand can be left off — listens, writes
-every observation to SQLite, and draws the fleet while it does. It transmits
-only when asked: `a` and `A` assign the selected node a channel range, `p` hands
-the whole fleet to the planner, and nothing else reaches the air. `--auto`
-starts with the planner already running.
+every observation to SQLite, and draws the fleet while it does. It also
+partitions the pool across the fleet without being asked, which is the core's
+job and the reason this exists; `p` takes that back and `a`/`A` then assign the
+selected node a range by hand. `--manual` starts with the planner off, and
+nothing reaches the air until a key is pressed.
 
 ```sh
 wartui run --db tonight.db --lat 37.7749 --lon -122.4194
-wartui run --db tonight.db --auto --gps /dev/cu.usbserial-1420
+wartui run --db tonight.db --manual --gps /dev/cu.usbserial-1420
 wartui export --db tonight.db --wigle tonight.csv
 ```
 
@@ -109,10 +110,13 @@ ended last week, or run against one that is still going.
 | `↑` `↓` / `k` `j` | Move the cursor down the fleet table |
 | `a` | Give the selected node a range of exactly **one** channel |
 | `A` | Give it the widest run in the pool |
-| `p` | Hand the whole fleet to the planner, or take it back |
+| `p` | Take the fleet back from the planner, or hand it over again |
 
 The header says which of you is deciding: `manual`, or `auto — 4 of 5` for four
-heartbeating nodes out of five seen.
+heartbeating nodes out of five seen. It starts on `auto`, so **`a` and `A` are
+refused until you press `p`** (or started with `--manual`) — the planner would
+honour a hand-assigned range and then take it back at the next re-cut, which
+reads as the key having been ignored.
 
 Nothing goes out at the moment the key is pressed. A node's radio is away
 scanning some other channel for all but the 300 ms it holds open after its own
@@ -125,10 +129,12 @@ MAC layer, never when the bridge reports a successful enqueue. The vendor core
 cannot tell those apart, which is why it can sit with a node it believes is
 assigned and is not.
 
-`a` is also the Phase 4 proof that any of this works. A node heartbeats once per
-completed sweep and reports nothing about what it is scanning, so watch the
-`beat` column: narrowing a node from forty channels to one should collapse it
-from seconds to a fraction of one within three sweeps. `A` puts it back.
+`a` is also the Phase 4 proof that any of this works. Take the fleet back with
+`p` first, or start with `--manual` so nothing has been assigned yet. A node
+heartbeats once per completed sweep and reports nothing about what it is
+scanning, so watch the `beat` column: narrowing a node from forty channels to
+one should collapse it from seconds to a fraction of one within three sweeps.
+`A` puts it back.
 
 If a node keeps showing `no admin ack`, the cause is nearly always BLE: NimBLE
 and Wi-Fi share the one 2.4 GHz antenna, and the admin window is precisely when
@@ -136,8 +142,9 @@ the node would otherwise be idle. Turn BLE off in that node's web UI.
 
 ### Letting wartui assign them
 
-`p`, or `--auto`, is wartui doing the core's whole job: it cuts the pool into
-one contiguous range per node and re-cuts it whenever the fleet changes shape.
+This is on by default, and it is wartui doing the core's whole job: it cuts the
+pool into one contiguous range per node and re-cuts it whenever the fleet
+changes shape. `--manual` starts without it; `p` toggles it either way.
 
 A node is in the plan while it is **heartbeating**. Not while it is merely being
 heard — a node that has stopped heartbeating never opens an admin window, so a
@@ -172,7 +179,8 @@ itself, since that table starts empty.
 
 Assigning by hand while the planner is running is refused — it would be honoured
 and then taken back at the next re-cut, which reads as the range having been
-ignored. Press `p` first.
+ignored. Press `p` first; since the planner is what wartui starts with, that is
+the normal way round.
 
 ### Positions
 

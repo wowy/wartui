@@ -58,6 +58,10 @@ async fn narrowing_a_node_to_one_channel_collapses_its_heartbeat_period() {
     let config = EngineConfig {
         pool: ChannelPool::All,
         assignment_base: store.assignment_base(),
+        // The planner off, because this is the by-hand path: with it on, the
+        // node would be given the whole pool before the operator says anything
+        // and there would be no wide baseline to narrow from.
+        auto: false,
         ..Default::default()
     };
     let engine = FleetEngine::new(config, started);

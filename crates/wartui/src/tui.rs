@@ -2,7 +2,8 @@
 //!
 //! Three keys here reach the air: `a` and `A` on the selected node, which ask
 //! the engine for a channel-range assignment, and `p`, which hands the whole
-//! fleet to the engine to partition on its own. Nothing goes out at the moment
+//! fleet to the engine to partition on its own — where it starts, so `p` is
+//! usually the key that takes the fleet *back*. Nothing goes out at the moment
 //! a key is pressed — a node only listens in the 300 ms after its own heartbeat
 //! — so the effect of a keystroke is a row that says `pending` until the next
 //! sweep completes. That delay is the protocol, not lag, and the view says so
