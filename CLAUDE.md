@@ -4,11 +4,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A terminal fleet controller for ESP32-C5 wardriving nodes running the vendor
-[ESP32DualBandWardriver](https://github.com/justcallmekoko/ESP32DualBandWardriver)
-firmware. wartui does not assist a vendor CORE node — it **replaces** one: it owns the node
-table, issues channel assignments and collects every observation, speaking ESP-NOW through a
-USB-attached ESP32 dongle running our own Rust bridge firmware.
+A terminal fleet controller for ESP32-C5 and ESP32-C6 wardriving nodes. wartui does not
+assist a vendor CORE node — it **replaces** one: it owns the node table, issues channel
+assignments and collects every observation, speaking ESP-NOW through a USB-attached ESP32
+dongle running our own Rust bridge firmware. The nodes run our own firmware too
+(`firmware/node`), which speaks the wire format of the vendor
+[ESP32DualBandWardriver](https://github.com/justcallmekoko/ESP32DualBandWardriver) —
+still the reference for everything on the air, checked out at
+`/Users/wowy/code/ESP32DualBandWardriver` on `feat/node-interference-mitigation`.
 
 `README.md` is the operator's manual and is unusually complete — read it before changing
 behaviour, and keep it true when behaviour changes. `docs/phase-0-findings.md` records what was
@@ -33,13 +36,16 @@ cargo run -p wartui -- ports | status | sniff        # with a bridge plugged in
 cargo run -p wartui -- --log-file wartui.log run     # the only way to see transport logs
 ```
 
-The bridge firmware is a **separate workspace** (`exclude = ["firmware"]`): different target,
-own toolchain pin, own lockfile. `cargo test --workspace` never touches it.
+Each firmware is a **separate workspace** (`exclude = ["firmware"]`): different target, own
+toolchain pin, own lockfile. `cargo test --workspace` never touches them.
 
 ```sh
 cd firmware/bridge
 cargo clippy --release --features esp32c6     # and --features esp32c5; exactly one is required
 cargo run --release --features esp32c6        # runner is `espflash flash --monitor`
+
+cd firmware/node
+cargo clippy --release --features esp32c6     # and esp32c5, and each with ,ble
 ```
 
 Regenerating the wire golden vectors (only when the C++ typedefs in `tools/golden/gen_golden.cpp`
@@ -54,16 +60,25 @@ c++ -std=c++17 -Wall -Wextra -o /tmp/gen_golden tools/golden/gen_golden.cpp
 
 Four host crates, strictly layered, plus firmware that shares the bottom one.
 
-- **`crates/wartui-proto`** — `no_std`, allocation-free wire formats. `air` (the vendor's packed
-  ESP-NOW structs), `link` (our own COBS/postcard/CRC USB protocol), `outbox` (the firmware's
-  bounded TX rings), `plan` (channel pools and the partitioning planner). Compiled into *both* the
-  host and the firmware by path dependency, which is the only thing keeping the two ends in step.
+- **`crates/wartui-proto`** — `no_std`, allocation-free wire formats and the parsing that goes
+  with them. `air` (the vendor's packed ESP-NOW structs, and the wardrive-line reader/writer),
+  `beacon` (802.11 management frames and RSN/WPA elements to a `Sighting`), `hci` (the three
+  Bluetooth commands and one event a scan needs), `dedup` (the node's oldest-out MAC ring),
+  `link` (our own COBS/postcard/CRC USB protocol), `outbox` (the bridge's bounded TX rings),
+  `plan` (channel pools, timings and the partitioning planner). Compiled into *both* the host
+  and the firmware by path dependency, which is the only thing keeping the ends in step — and
+  the reason a node's parsers are testable with `cargo test` rather than a reflash.
 - **`crates/wartui-bridge`** — host side of the USB link. Everything above talks to a `LinkHandle`
   and cannot tell a real dongle (`serial`) from the fake fleet (`sim`).
 - **`crates/wartui-core`** — the headless half. Draws nothing, parses no arguments.
 - **`crates/wartui`** — clap CLI (`run`/`export`/`sniff`/`status`/`ports`) and the ratatui view.
 - **`firmware/bridge`** — dumb radio bridge: COBS framing and `esp-radio` calls, no protocol
   knowledge. Fixes there cost a reflash, so logic belongs on the host.
+- **`firmware/node`** — the nodes. Sniffs rather than scans, so it never transmits while
+  looking and can hold `sniffer()` and `esp_now()` at once (both borrow the controller
+  immutably; `scan_async` wants `&mut`). Returns to the control channel after every dwell,
+  and parks there doing nothing when it holds no assignment. Same rule as the bridge: the
+  logic lives in `wartui-proto`, and this crate is the conversation with the radio.
 
 ### The engine/runtime split is load-bearing
 
@@ -111,10 +126,23 @@ Positions resolve fresh per record through `PositionChain`: GPS (`--gps`, NMEA o
 - **Only heartbeating nodes are assignable or in the plan** — a node that is merely being heard
   never opens an admin window. `stale`, `no heartbeat` and silence are deliberately distinct
   states; `SCAN_CHANNELS` order is load-bearing and must not be sorted or deduplicated.
-- **The firmware must never block on the USB endpoint** (the one exception is the millisecond wait
-  for a transmit callback). Everything outbound goes through `wartui_proto::outbox`'s rings, which
-  evict oldest-first and write a lone `0x00` behind a truncated frame so COBS can resynchronise.
-  Never link `esp-println` with `jtag-serial`; diagnostics go out as `Log` frames.
+- **Neither firmware may block on the USB endpoint.** `UsbSerialJtag` stops accepting bytes when
+  its FIFO fills and nothing drains it unless a host is reading, so a blocking write stalls the
+  radio in the field and nowhere else. The bridge sends everything through `wartui_proto::outbox`'s
+  rings, which evict oldest-first and write a lone `0x00` behind a truncated frame so COBS can
+  resynchronise. Never link `esp-println` with `jtag-serial` in the *bridge* — its link protocol
+  shares that endpoint and diagnostics go out as `Log` frames. A node has the endpoint to itself
+  and does use `esp-println`, whose serial-JTAG writer waits a bounded number of iterations and
+  then remembers that nobody is reading.
+- **Setting a node's channel is not `set_channel` alone.** On an unassociated station interface it
+  does not stick unless promiscuous mode is on across the change, which is the whole of the
+  vendor's `setFixedChannel` (`src/WiFiOps.cpp:600-618`) and of `radio::park`. A node whose channel
+  silently did not change reports the right networks against the wrong frequency and hears no
+  assignment, which reads as a dead node rather than a bug.
+- **A node's promiscuous callback runs in the Wi-Fi task, on a buffer that dies when it returns.**
+  It cannot capture state and must not block: reject, parse into a fixed-size `Sighting`, leave it
+  in a `static` ring, return. Anything that could grow — allocation, a lock held across work, a
+  transmit — belongs in the main loop.
 - `unsafe_code` is **forbidden** and `clippy::all` is **denied** workspace-wide.
 
 ## Conventions

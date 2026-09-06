@@ -1,0 +1,90 @@
+# Its own workspace, for the same reasons as `firmware/bridge`: a different
+# target, a different toolchain pin and a lockfile that must not be resolved
+# together with the host crates. The path dependency on wartui-proto reaches up
+# into the other workspace, which is why the wire types — and now the beacon
+# parser and the dedup ring — are `no_std`.
+[workspace]
+
+[package]
+name = "wartui-node-fw"
+description = "Wardriving node firmware for wartui. Sniffs, reports, and takes channel assignments."
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/wowy/wartui"
+
+[[bin]]
+name = "wartui-node-fw"
+path = "src/main.rs"
+
+[features]
+default = ["log"]
+
+# Exactly one chip must be selected; src/main.rs enforces it with compile_error!.
+esp32c5 = [
+  "esp-alloc/esp32c5",
+  "esp-bootloader-esp-idf/esp32c5",
+  "esp-hal/esp32c5",
+  "esp-radio/esp32c5",
+  "esp-rtos/esp32c5",
+  "esp-println?/esp32c5",
+]
+esp32c6 = [
+  "esp-alloc/esp32c6",
+  "esp-bootloader-esp-idf/esp32c6",
+  "esp-hal/esp32c6",
+  "esp-radio/esp32c6",
+  "esp-rtos/esp32c6",
+  "esp-println?/esp32c6",
+]
+
+# Bluetooth scanning. Off by default: it costs a second radio, a coexistence
+# arbiter and roughly as much airtime per sweep as every channel dwell put
+# together (`docs/phase-0-findings.md`). Turn it on for the one node in a fleet
+# that should be collecting BLE.
+ble = ["esp-radio/ble", "esp-radio/coex"]
+
+# Diagnostics on the USB serial port. Unlike the bridge, a node has no link
+# protocol sharing that endpoint, so printing to it is free and is the only
+# window into a device with no display.
+log = ["dep:esp-println"]
+
+[dependencies]
+esp-alloc = "0.10.0"
+esp-bootloader-esp-idf = "0.5.0"
+esp-hal = { version = "1.1.2", features = ["unstable"] }
+# `jtag-serial` rather than `auto`, because these boards are USB and the
+# alternative costs a runtime probe per line. `critical-section` is left off: it
+# is the only feature that pulls `esp-sync`, which would land a second copy
+# beside the one `esp-hal` uses, and nothing here prints from more than one task.
+esp-println = { version = "0.18.0", default-features = false, features = [
+  "jtag-serial",
+], optional = true }
+esp-radio = { version = "1.0.0-beta.0", default-features = false, features = [
+  "esp-alloc",
+  "esp-now",
+  "sniffer",
+  "unstable",
+  "wifi",
+] }
+esp-rtos = { version = "0.3.0", features = ["esp-alloc", "esp-radio"] }
+esp-sync = "0.2.1"
+static_cell = "2.1.1"
+wartui-proto = { path = "../../crates/wartui-proto" }
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+
+[profile.dev]
+# The default debug profile is too slow and too big for a device with this much
+# RAM, and the radio blobs misbehave below opt-level 2 regardless.
+opt-level = "s"
+
+[profile.dev.package.esp-radio]
+opt-level = 3
+
+[profile.release]
+codegen-units = 1
+debug = 2
+lto = "fat"
+opt-level = "s"
