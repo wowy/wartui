@@ -48,6 +48,12 @@ nb = "1.1.0"
 static_cell = "2.1.1"
 wartui-proto = { path = "../../crates/wartui-proto" }
 
+[lints.rust]
+# Stated in CLAUDE.md as a project-wide rule, but the root workspace excludes
+# `firmware`, so until this line existed the firmwares were covered by the
+# documentation and not by the compiler.
+unsafe_code = "forbid"
+
 [lints.clippy]
 all = { level = "deny", priority = -1 }
 

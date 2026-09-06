@@ -64,7 +64,7 @@ use esp_hal::interrupt::software::SoftwareInterruptControl;
 use esp_hal::time::{Duration, Instant};
 use esp_hal::timer::timg::TimerGroup;
 use esp_radio::esp_now::{EspNowReceiver, EspNowSender};
-use esp_radio::wifi::WifiController;
+use esp_radio::wifi::{ControllerConfig, WifiController};
 use esp_rtos::CurrentThreadHandle;
 use static_cell::StaticCell;
 use wartui_proto::air::{AdminMsg, Frame, MsgType, TextMsg, WARDRIVE_LINE_MAX};
@@ -267,9 +267,19 @@ fn main() -> ! {
     // program. That is the whole reason this node sniffs rather than scans:
     // `scan_async` also wants `&mut`, and holding it alongside ESP-NOW is not
     // expressible.
+    // `Default::default()` would be China. `esp-radio` defaults `country_info`
+    // to `CN` and sets `WIFI_COUNTRY_POLICY_MANUAL`, so the blob applies China's
+    // 5 GHz allocation and nothing later overrides it: 36-64 and 149-165 are
+    // permitted and the whole of 100-144 is refused. That is exactly the ten
+    // channels the C5 refused on the bench, and it is not a DFS rule — 52-64 are
+    // DFS too and they work. `US` is the regulatory domain this fleet operates
+    // in, and it is the pool the planner already defaults to.
     #[allow(unused_mut, reason = "only the C5 has a band mode to set")]
-    let mut controller =
-        WifiController::new(peripherals.WIFI, Default::default()).expect("Wi-Fi controller");
+    let mut controller = WifiController::new(
+        peripherals.WIFI,
+        ControllerConfig::default().with_country_info(*b"US"),
+    )
+    .expect("Wi-Fi controller");
 
     // The C6 is 2.4 GHz only and has no `BandMode::Auto` to select. On the C5,
     // without this, every 5 GHz channel in the pool is refused.

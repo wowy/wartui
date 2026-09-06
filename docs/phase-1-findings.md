@@ -148,7 +148,7 @@ and was re-verified against a bridge held in its bootloader with
 `espflash board-info --after no-reset`, where it fires at five seconds with the
 garbled frame present.
 
-## The C5 does 5 GHz, and refuses ten channels of it
+## The C5 does 5 GHz, and refused ten channels of it until it was told where it was
 
 Added 2026-09-06 with an ESP32-C5 (`38:44:BE:1F:57:84`, the BLE-on node from
 Phase 0, reflashed) as the only node, assigned the US pool's 5 GHz run — indices
@@ -175,9 +175,7 @@ the window come to, and thirteen is exactly what is left after ten refusals.
 Three things follow, in descending order of how much they matter:
 
 - **Ten of the US pool's twenty-three 5 GHz channels cannot be covered by a C5
-  on this `esp-radio`.** Whether that is a regulatory-domain default that can be
-  configured or a hard limit of the driver is not established here, and it is
-  worth finding out before Phase 2 reshapes assignments around a channel mask.
+  on this `esp-radio`.** Resolved the same day; see the section below.
 - **The host cannot see it.** The planner assigns those indices freely, and a
   node given only 100–144 would sit there `alive`, heartbeating, reporting
   nothing — indistinguishable from a node whose radio silently did not tune,
@@ -188,6 +186,63 @@ Three things follow, in descending order of how much they matter:
   a deliberate choice under review. A refused hop still calls `advance()`, so the
   cursor is never stranded on a channel the radio will not take, and nothing is
   transmitted or counted for a channel that was never reached.
+
+### The cause was the regulatory domain, and the default is China
+
+`EspNowManager::set_channel` is a bare passthrough to `esp_wifi_set_channel`, so
+the refusal comes from the blob, which decides from `wifi_country_t`.
+`esp-radio 1.0.0-beta.0` fills that in inside `WifiController::new` from
+`ControllerConfig::country_info`, whose default is `CountryInfo::from(*b"CN")`
+under `WIFI_COUNTRY_POLICY_MANUAL` — so nothing on the air ever overrides it,
+and both firmwares were passing `Default::default()`.
+
+China's 5 GHz allocation is 5150–5350 and 5725–5850. The 5470–5725 band is not
+in it, and 5470–5725 is channels 100–144: exactly the ten refused, exactly the
+ten not. It was never a DFS rule — 52–64 are DFS too, and channel 56 was one of
+the channels that worked.
+
+Both firmwares now pass `US`. Re-measured on the same C5, same hand assignment,
+same 130 s capture:
+
+| | Sweep period | Implied dwells | `radio refused` |
+| --- | --- | --- | --- |
+| `CN` | 2.031 s | 13 | 640 |
+| `US` | 3.298 s | 23 | 0 |
+
+The difference is 1.267 s, which is 10.1 dwells at `CHANNEL_DWELL_MS`. Both
+figures reconcile against the 300 ms admin window: (2.031 − 0.3) / 0.125 ≈ 13.8
+and (3.298 − 0.3) / 0.125 ≈ 24.0. **No observations came back on 100–144** —
+nothing in this neighbourhood beacons on UNII-2C — so the evidence that those
+channels are now dwelt on is the timing and the silent log, not a sighting.
+
+### One channel is still refused, and the country code cannot reach it
+
+A second run assigned all forty indices (`0..=39`, channels 1–177; acked in
+5.8 ms, sweep period 5.351 s ≈ 39 dwells). Under `US` the C5 accepts every
+channel in `SCAN_CHANNELS` including the UNII-4 channels 169, 173 and 177 — and
+refuses **channel 14**, once per sweep, every sweep.
+
+That one is not the country code. `CountryInfo::into_blob` hardcodes
+`schan: 1, nchan: 13` and `wifi_5g_channel_mask: 0`, and exposes neither; the
+mask is the field the blob's own header says overrides the country's table
+outright when the policy is manual, which it already is. Checked against both
+the pinned 1.0.0-beta.0 and upstream `esp-hal` `main`: both still hardcode all
+three, and there is no `esp-config` knob. Reaching them needs
+`esp_wifi_set_country` called directly, which means `unsafe` and a direct
+`esp-wifi-sys` dependency — declined, and `unsafe_code = "forbid"` was added to
+both firmware crates instead, which the root workspace's `exclude = ["firmware"]`
+had left to documentation alone.
+
+So the firmware is permissive on 39 of 40 channels and the pool is otherwise
+entirely the host's business. Channel 14 is index 13, is Japan-only and
+802.11b-only, and is outside the default `us` pool; `--pool all` is the only way
+to reach it, and the cost is one refused hop per sweep with the cursor advancing
+correctly. It is deliberately **not** removed from `ChannelPool::All`: that pool
+is one contiguous run today, and splitting it around index 13 would make a lone
+node rotate between two runs on the 60 s dwell timer — halving what it watches
+at any instant, for a channel nobody uses. Phase 2 replaces runs with a 40-bit
+mask, where excluding one index costs one bit and no rotation. That is where it
+belongs.
 
 ### Probe requests: argued, not captured
 
