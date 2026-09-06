@@ -501,7 +501,7 @@ fn bridge_drops_are_counted_from_the_moment_this_host_attached() {
 #[test]
 fn an_assignment_waits_for_the_heartbeat_that_opens_the_window() {
     let clock = Clock::new();
-    let mut engine = engine(EngineConfig::default(), &clock);
+    let mut engine = engine(manual(), &clock);
     engine.handle(heartbeat(NODE, 1), clock.at(1));
 
     // Nothing goes out at the moment the operator asks. A node's radio is away
@@ -521,7 +521,7 @@ fn an_assignment_waits_for_the_heartbeat_that_opens_the_window() {
 #[test]
 fn an_assignment_is_believed_only_once_the_node_radio_acknowledges_it() {
     let clock = Clock::new();
-    let mut engine = engine(EngineConfig::default(), &clock);
+    let mut engine = engine(manual(), &clock);
     engine.handle(heartbeat(NODE, 1), clock.at(1));
     engine.handle(assign(NODE, 0, 10), clock.at(2));
     let (id, _, _) = sent_admin(&engine.handle(heartbeat(NODE, 2), clock.at(6)));
@@ -573,7 +573,7 @@ fn an_unacknowledged_assignment_is_retried_on_the_next_heartbeat() {
 #[test]
 fn an_assignment_the_bridge_never_answers_for_is_written_down_as_unknown() {
     let clock = Clock::new();
-    let config = EngineConfig { admin_timeout: Duration::from_secs(2), ..Default::default() };
+    let config = EngineConfig { admin_timeout: Duration::from_secs(2), ..manual() };
     let mut engine = engine(config, &clock);
     engine.handle(heartbeat(NODE, 1), clock.at(1));
     engine.handle(assign(NODE, 3, 3), clock.at(2));
@@ -697,7 +697,7 @@ fn epochs_carry_on_from_where_the_database_left_off() {
     // 1 at boot, so a restarted core that recomputes an assignment a node
     // already holds is ignored — and if the topology changed while it was
     // down, the two views never reconcile.
-    let config = EngineConfig { assignment_base: 300, ..Default::default() };
+    let config = EngineConfig { assignment_base: 300, ..manual() };
     let mut engine = engine(config, &clock);
     engine.handle(heartbeat(NODE, 1), clock.at(1));
     engine.handle(assign(NODE, 1, 1), clock.at(2));
@@ -710,7 +710,7 @@ fn epochs_carry_on_from_where_the_database_left_off() {
 #[test]
 fn the_fleet_arithmetic_travels_with_the_assignment_rather_than_being_read_at_send_time() {
     let clock = Clock::new();
-    let mut engine = engine(EngineConfig::default(), &clock);
+    let mut engine = engine(manual(), &clock);
     engine.handle(heartbeat(NODE, 1), clock.at(1));
     engine.handle(assign(NODE, 0, 10), clock.at(2));
 
@@ -828,6 +828,13 @@ fn auto() -> EngineConfig {
     EngineConfig { auto: true, ..Default::default() }
 }
 
+/// The planner switched off, which is what every test of the by-hand path
+/// wants: with it on, the plan is a second author of assignments and the test
+/// would be asserting against both at once.
+fn manual() -> EngineConfig {
+    EngineConfig { auto: false, ..Default::default() }
+}
+
 /// Every index a set of ranges covers, sorted. Comparing this against the
 /// pool's own indices proves coverage and disjointness at once: a gap makes it
 /// short, an overlap makes it long, and a straddled run puts an index in it
@@ -874,18 +881,30 @@ fn auto_assignment_cuts_the_pool_into_one_contiguous_range_per_node() {
 }
 
 #[test]
-fn nothing_is_partitioned_until_the_operator_asks_for_it() {
+fn a_fleet_is_partitioned_without_being_asked_and_stops_when_told() {
+    // The default, and the difference between wartui and a monitor: a fleet
+    // nobody has partitioned is a fleet of nodes all sweeping the same
+    // channels, which is the thing this whole program exists to stop.
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
     for n in 0..3 {
         let batch = engine.handle(heartbeat(peer(n), 1), clock.at(1));
-        assert!(batch.urgent.is_empty(), "a capture transmits only when asked to");
+        assert!(!batch.urgent.is_empty(), "a node's share goes out in its own window");
     }
-    assert!(engine.nodes().all(|node| node.desired.is_none()));
+    assert_eq!(covered(&wanted(&engine)), pool_indices(ChannelPool::Us));
 
-    // And switching it on partitions what is already there rather than waiting
-    // for the fleet to change shape first.
-    engine.handle(Event::Command(Command::SetAuto(true)), clock.at(2));
+    // Switching it off hands the fleet back: what is already out there stays
+    // out there, and the change that would have re-cut the pool a moment ago —
+    // a node joining — now goes unanswered.
+    engine.handle(Event::Command(Command::SetAuto(false)), clock.at(2));
+    engine.handle(heartbeat(peer(3), 1), clock.at(3));
+    let joined = engine.nodes().find(|node| node.mac == peer(3)).expect("the new node");
+    assert!(joined.desired.is_none(), "the planner has stopped cutting");
+    assert!(engine.snapshot(clock.at(3), StoreStats::default()).plan.is_none());
+
+    // And switching it back on partitions what is already there rather than
+    // waiting for the fleet to change shape first.
+    engine.handle(Event::Command(Command::SetAuto(true)), clock.at(4));
     assert_eq!(covered(&wanted(&engine)), pool_indices(ChannelPool::Us));
 }
 

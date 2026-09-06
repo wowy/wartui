@@ -128,8 +128,10 @@ pub struct EngineConfig {
     /// Hold the whole fleet on a partition of [`Self::pool`], re-issued
     /// whenever the set of heartbeating nodes changes.
     ///
-    /// Off by default. On, wartui transmits without being asked: this is the
-    /// difference between a monitor that can assign and a core replacement.
+    /// On by default, which is wartui doing the core's whole job: it transmits
+    /// without being asked, because a fleet nobody has partitioned is a fleet
+    /// of nodes all sweeping the same channels. Off, it is a monitor that can
+    /// assign when told to.
     pub auto: bool,
     /// How long a node holds one phase of a rotating plan.
     ///
@@ -166,7 +168,7 @@ impl Default for EngineConfig {
     fn default() -> Self {
         Self {
             pool: ChannelPool::Us,
-            auto: false,
+            auto: true,
             rotation_dwell: Duration::from_secs(60),
             topology_timeout: Duration::from_secs(60),
             status_interval: Duration::from_secs(5),
