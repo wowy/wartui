@@ -20,6 +20,8 @@ use wartui_proto::plan::{ChannelPool, IndexRun};
 
 const NODE: Mac = [0x38, 0x44, 0xBE, 0x1F, 0x57, 0x84];
 const OTHER: Mac = [0x38, 0x44, 0xBE, 0x1F, 0x57, 0x85];
+/// Sorts before every `peer(n)`, so counting it would shift all their indices.
+const GONE: Mac = [0x00, 0x00, 0x00, 0x00, 0x00, 0x01];
 const EPOCH_MS: i64 = 1_777_642_477_000;
 
 /// A clock the test drives by hand.
@@ -104,7 +106,7 @@ fn counters(engine: &FleetEngine) -> Counters {
 #[test]
 fn an_observation_produces_a_node_row_and_an_observation_row() {
     let clock = Clock::new();
-    let mut engine = engine(EngineConfig::default(), &clock);
+    let mut engine = engine(manual(), &clock);
 
     let batch = engine.handle(observation(NODE, "AA:BB:CC:DD:EE:FF", -60), clock.at(1));
 
@@ -125,7 +127,7 @@ fn the_raw_line_is_kept_alongside_the_parsed_one() {
     // this decoder turns out to be wrong, the raw text is what lets the fix be
     // applied to history rather than only to what arrives afterwards.
     let clock = Clock::new();
-    let mut engine = engine(EngineConfig::default(), &clock);
+    let mut engine = engine(manual(), &clock);
 
     let batch = engine.handle(observation(NODE, "AA:BB:CC:DD:EE:FF", -60), clock.at(1));
     let Record::Observation(obs) = &batch.records[1] else { panic!("expected an observation") };
@@ -138,7 +140,7 @@ fn a_heartbeat_counter_going_backwards_counts_a_reboot() {
     // Divergence 5. The counter runs from the node's boot, so a regression
     // means it restarted and has forgotten whatever range it was assigned.
     let clock = Clock::new();
-    let mut engine = engine(EngineConfig::default(), &clock);
+    let mut engine = engine(manual(), &clock);
 
     engine.handle(rx(NODE, MsgType::Heartbeat, 174, b""), clock.at(1));
     engine.handle(rx(NODE, MsgType::Heartbeat, 175, b""), clock.at(2));
@@ -159,7 +161,7 @@ fn observations_keep_a_node_visible_but_only_heartbeats_keep_it_assignable() {
     // topology. Two clocks, because they answer different questions: is this
     // node there, and can it still be given a channel range.
     let clock = Clock::new();
-    let config = EngineConfig { topology_timeout: Duration::from_secs(60), ..Default::default() };
+    let config = EngineConfig { topology_timeout: Duration::from_secs(60), ..manual() };
     let mut engine = engine(config, &clock);
 
     engine.handle(rx(NODE, MsgType::Heartbeat, 1, b""), clock.at(1));
@@ -182,7 +184,7 @@ fn a_malformed_line_is_counted_rather_than_stored() {
     // A node emitting these is broken in a way silence would not distinguish,
     // and writing the rubbish into the store would corrupt the export.
     let clock = Clock::new();
-    let mut engine = engine(EngineConfig::default(), &clock);
+    let mut engine = engine(manual(), &clock);
 
     let batch = engine.handle(rx(NODE, MsgType::Text, 0, b"not,enough,fields"), clock.at(1));
 
@@ -197,7 +199,7 @@ fn a_malformed_line_is_counted_rather_than_stored() {
 #[test]
 fn a_frame_that_is_not_enow_at_all_is_counted_as_undecodable() {
     let clock = Clock::new();
-    let mut engine = engine(EngineConfig::default(), &clock);
+    let mut engine = engine(manual(), &clock);
 
     let event = Event::Link(LinkEvent::Message(BridgeToHost::Rx {
         src: NODE,
@@ -218,7 +220,7 @@ fn a_core_frame_marks_the_node_as_still_encrypted() {
     // wartui does not speak encrypted ESP-NOW at all. Naming the node is what
     // turns an unexplained silence into "turn encryption off on this one".
     let clock = Clock::new();
-    let mut engine = engine(EngineConfig::default(), &clock);
+    let mut engine = engine(manual(), &clock);
 
     engine.handle(rx(NODE, MsgType::CoreRequest, 0, b""), clock.at(1));
 
@@ -229,7 +231,7 @@ fn a_core_frame_marks_the_node_as_still_encrypted() {
 #[test]
 fn an_admin_frame_from_elsewhere_means_a_rival_core_is_powered_up() {
     let clock = Clock::new();
-    let mut engine = engine(EngineConfig::default(), &clock);
+    let mut engine = engine(manual(), &clock);
 
     let admin = wartui_proto::air::AdminMsg {
         assignment_version: 3,
@@ -261,7 +263,7 @@ fn a_sender_whose_frames_do_not_decode_does_not_join_the_fleet() {
     // Channel 6 carries whatever else is nearby. A transmitter we cannot
     // understand is counted, not adopted.
     let clock = Clock::new();
-    let mut engine = engine(EngineConfig::default(), &clock);
+    let mut engine = engine(manual(), &clock);
 
     let event = Event::Link(LinkEvent::Message(BridgeToHost::Rx {
         src: OTHER,
@@ -283,7 +285,7 @@ fn the_bridge_is_recorded_when_it_announces_itself() {
     // The session row is written before any bridge has announced, so this is
     // the only chance to say which dongle produced the capture.
     let clock = Clock::new();
-    let mut engine = engine(EngineConfig::default(), &clock);
+    let mut engine = engine(manual(), &clock);
 
     let batch = engine.handle(connected(), clock.at(1));
 
@@ -298,7 +300,7 @@ fn the_bridge_is_recorded_when_it_announces_itself() {
 #[test]
 fn the_bridge_is_asked_for_its_counters_on_connect_and_then_on_the_interval() {
     let clock = Clock::new();
-    let config = EngineConfig { status_interval: Duration::from_secs(5), ..Default::default() };
+    let config = EngineConfig { status_interval: Duration::from_secs(5), ..manual() };
     let mut engine = engine(config, &clock);
 
     let batch = engine.handle(connected(), clock.at(1));
@@ -318,7 +320,7 @@ fn a_disconnected_bridge_is_not_polled() {
     // on reconnect, and a `dropping a bulk command` log line for the operator
     // to wonder about.
     let clock = Clock::new();
-    let mut engine = engine(EngineConfig::default(), &clock);
+    let mut engine = engine(manual(), &clock);
 
     engine.handle(connected(), clock.at(1));
     engine.handle(Event::Link(LinkEvent::Disconnected { reason: "cable".to_owned() }), clock.at(2));
@@ -329,7 +331,7 @@ fn a_disconnected_bridge_is_not_polled() {
 #[test]
 fn the_tail_keeps_the_newest_observations_and_no_more() {
     let clock = Clock::new();
-    let config = EngineConfig { tail_len: 4, ..Default::default() };
+    let config = EngineConfig { tail_len: 4, ..manual() };
     let mut engine = engine(config, &clock);
 
     for n in 0..10u8 {
@@ -346,10 +348,8 @@ fn the_tail_keeps_the_newest_observations_and_no_more() {
 #[test]
 fn every_observation_carries_the_position_the_host_believed_in() {
     let clock = Clock::new();
-    let config = EngineConfig {
-        position: PositionChain::fixed(37.7749, -122.4194, Some(16.0)),
-        ..Default::default()
-    };
+    let config =
+        EngineConfig { position: PositionChain::fixed(37.7749, -122.4194, Some(16.0)), ..manual() };
     let mut engine = engine(config, &clock);
 
     let batch = engine.handle(observation(NODE, "AA:BB:CC:DD:EE:FF", -60), clock.at(1));
@@ -384,7 +384,7 @@ fn a_drive_that_gets_a_fix_partway_through_says_where_each_row_actually_was() {
     let config = EngineConfig {
         position: PositionChain::fixed(37.7749, -122.4194, Some(16.0))
             .with_gps(gps.clone(), DEFAULT_MAX_AGE),
-        ..Default::default()
+        ..manual()
     };
     let mut engine = engine(config, &clock);
 
@@ -410,7 +410,7 @@ fn a_receiver_that_goes_quiet_hands_the_rows_back_to_the_static_position() {
     let config = EngineConfig {
         position: PositionChain::fixed(37.7749, -122.4194, Some(16.0))
             .with_gps(gps.clone(), DEFAULT_MAX_AGE),
-        ..Default::default()
+        ..manual()
     };
     let mut engine = engine(config, &clock);
     gps.feed(GGA, clock.at(10).unix_ms);
@@ -434,8 +434,8 @@ fn a_receiver_that_goes_quiet_hands_the_rows_back_to_the_static_position() {
 #[test]
 fn raw_frames_are_only_kept_when_asked_for() {
     let clock = Clock::new();
-    let mut off = engine(EngineConfig::default(), &clock);
-    let mut on = engine(EngineConfig { record_raw: true, ..Default::default() }, &clock);
+    let mut off = engine(manual(), &clock);
+    let mut on = engine(EngineConfig { record_raw: true, ..manual() }, &clock);
 
     let has_raw = |batch: &wartui_core::ActionBatch| {
         batch.records.iter().any(|r| matches!(r, Record::Raw(_)))
@@ -447,7 +447,7 @@ fn raw_frames_are_only_kept_when_asked_for() {
 #[test]
 fn nodes_are_ordered_by_mac_so_the_table_does_not_reshuffle() {
     let clock = Clock::new();
-    let mut engine = engine(EngineConfig::default(), &clock);
+    let mut engine = engine(manual(), &clock);
 
     engine.handle(rx(OTHER, MsgType::Heartbeat, 1, b""), clock.at(1));
     engine.handle(rx(NODE, MsgType::Heartbeat, 1, b""), clock.at(2));
@@ -464,7 +464,7 @@ fn bridge_drops_are_counted_from_the_moment_this_host_attached() {
     // so its own counter is dominated by history the operator cannot act on.
     // What matters is whether *this* capture lost anything.
     let clock = Clock::new();
-    let mut engine = engine(EngineConfig::default(), &clock);
+    let mut engine = engine(manual(), &clock);
     let status = |dropped_tx| {
         Event::Link(LinkEvent::Message(BridgeToHost::Status {
             channel: 6,
@@ -548,7 +548,7 @@ fn an_assignment_is_believed_only_once_the_node_radio_acknowledges_it() {
 #[test]
 fn an_unacknowledged_assignment_is_retried_on_the_next_heartbeat() {
     let clock = Clock::new();
-    let mut engine = engine(EngineConfig::default(), &clock);
+    let mut engine = engine(manual(), &clock);
     engine.handle(heartbeat(NODE, 1), clock.at(1));
     engine.handle(assign(NODE, 3, 3), clock.at(2));
     let (id, _, first) = sent_admin(&engine.handle(heartbeat(NODE, 2), clock.at(6)));
@@ -596,7 +596,7 @@ fn an_assignment_the_bridge_never_answers_for_is_written_down_as_unknown() {
 #[test]
 fn a_lost_answer_expiring_late_does_not_unpick_an_assignment_that_has_since_landed() {
     let clock = Clock::new();
-    let config = EngineConfig { admin_timeout: Duration::from_secs(2), ..Default::default() };
+    let config = EngineConfig { admin_timeout: Duration::from_secs(2), ..manual() };
     let mut engine = engine(config, &clock);
     engine.handle(heartbeat(NODE, 1), clock.at(1));
     engine.handle(assign(NODE, 5, 5), clock.at(2));
@@ -629,7 +629,7 @@ fn a_lost_answer_expiring_late_does_not_unpick_an_assignment_that_has_since_land
 #[test]
 fn the_assignment_latency_is_measured_end_to_end_on_the_bridge_clock() {
     let clock = Clock::new();
-    let mut engine = engine(EngineConfig::default(), &clock);
+    let mut engine = engine(manual(), &clock);
     engine.handle(heartbeat(NODE, 1), clock.at(1));
     engine.handle(assign(NODE, 7, 7), clock.at(2));
 
@@ -649,7 +649,7 @@ fn the_assignment_latency_is_measured_end_to_end_on_the_bridge_clock() {
 #[test]
 fn a_latency_measured_across_the_bridge_counter_wrapping_is_still_right() {
     let clock = Clock::new();
-    let mut engine = engine(EngineConfig::default(), &clock);
+    let mut engine = engine(manual(), &clock);
     engine.handle(heartbeat(NODE, 1), clock.at(1));
     engine.handle(assign(NODE, 7, 7), clock.at(2));
 
@@ -668,7 +668,7 @@ fn a_latency_measured_across_the_bridge_counter_wrapping_is_still_right() {
 #[test]
 fn a_reboot_re_issues_the_assignment_under_a_fresh_epoch() {
     let clock = Clock::new();
-    let mut engine = engine(EngineConfig::default(), &clock);
+    let mut engine = engine(manual(), &clock);
     engine.handle(heartbeat(NODE, 40), clock.at(1));
     engine.handle(assign(NODE, 2, 4), clock.at(2));
     let (id, _, first) = sent_admin(&engine.handle(heartbeat(NODE, 41), clock.at(6)));
@@ -727,7 +727,7 @@ fn the_fleet_arithmetic_travels_with_the_assignment_rather_than_being_read_at_se
 #[test]
 fn a_node_that_has_never_been_heard_from_cannot_be_assigned() {
     let clock = Clock::new();
-    let mut engine = engine(EngineConfig::default(), &clock);
+    let mut engine = engine(manual(), &clock);
 
     let batch = engine.handle(assign(NODE, 0, 0), clock.at(1));
 
@@ -738,7 +738,7 @@ fn a_node_that_has_never_been_heard_from_cannot_be_assigned() {
 #[test]
 fn the_heartbeat_period_is_the_median_of_recent_sweeps() {
     let clock = Clock::new();
-    let mut engine = engine(EngineConfig::default(), &clock);
+    let mut engine = engine(manual(), &clock);
 
     // Four-second sweeps, which is what a node scanning all forty channels
     // does, with one heartbeat lost in the middle. The median is what keeps
@@ -754,7 +754,7 @@ fn the_heartbeat_period_is_the_median_of_recent_sweeps() {
 #[test]
 fn a_bridge_that_cannot_transmit_at_all_is_a_failure_not_a_delivery() {
     let clock = Clock::new();
-    let mut engine = engine(EngineConfig::default(), &clock);
+    let mut engine = engine(manual(), &clock);
     engine.handle(heartbeat(NODE, 1), clock.at(1));
     engine.handle(assign(NODE, 0, 0), clock.at(2));
     let (id, _, _) = sent_admin(&engine.handle(heartbeat(NODE, 2), clock.at(6)));
@@ -771,7 +771,7 @@ fn a_bridge_that_cannot_transmit_at_all_is_a_failure_not_a_delivery() {
 #[test]
 fn a_fleet_too_big_for_the_radio_is_told_so_once_rather_than_retried_forever() {
     let clock = Clock::new();
-    let mut engine = engine(EngineConfig::default(), &clock);
+    let mut engine = engine(manual(), &clock);
     engine.handle(heartbeat(NODE, 1), clock.at(1));
     engine.handle(assign(NODE, 0, 0), clock.at(2));
     let (id, _, _) = sent_admin(&engine.handle(heartbeat(NODE, 2), clock.at(6)));
@@ -795,7 +795,7 @@ fn a_fleet_too_big_for_the_radio_is_told_so_once_rather_than_retried_forever() {
 #[test]
 fn an_acknowledgement_for_an_assignment_the_operator_has_already_replaced_is_not_believed() {
     let clock = Clock::new();
-    let mut engine = engine(EngineConfig::default(), &clock);
+    let mut engine = engine(manual(), &clock);
     engine.handle(heartbeat(NODE, 1), clock.at(1));
     engine.handle(assign(NODE, 0, 0), clock.at(2));
     let (id, _, _) = sent_admin(&engine.handle(heartbeat(NODE, 2), clock.at(6)));
@@ -828,9 +828,11 @@ fn auto() -> EngineConfig {
     EngineConfig { auto: true, ..Default::default() }
 }
 
-/// The planner switched off, which is what every test of the by-hand path
-/// wants: with it on, the plan is a second author of assignments and the test
-/// would be asserting against both at once.
+/// The planner switched off, which is what every test here but one wants: with
+/// it on, the plan is a second author of assignments and of the rows that
+/// resolve them, so a test about anything else would be asserting against both
+/// at once. What the default actually is belongs in one test, not in all of
+/// them.
 fn manual() -> EngineConfig {
     EngineConfig { auto: false, ..Default::default() }
 }
@@ -884,7 +886,9 @@ fn auto_assignment_cuts_the_pool_into_one_contiguous_range_per_node() {
 fn a_fleet_is_partitioned_without_being_asked_and_stops_when_told() {
     // The default, and the difference between wartui and a monitor: a fleet
     // nobody has partitioned is a fleet of nodes all sweeping the same
-    // channels, which is the thing this whole program exists to stop.
+    // channels, which is the thing this whole program exists to stop. The one
+    // test in this file built on `EngineConfig::default()`, so that the day
+    // the default changes it is this that fails rather than everything else.
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
     for n in 0..3 {
@@ -1032,6 +1036,46 @@ fn a_fleet_larger_than_the_radio_can_address_stops_being_re_partitioned() {
         engine.nodes().filter(|node| node.desired.is_some()).count(),
         wartui_proto::plan::MAX_NODES,
         "and the twenty already placed keep the ranges they were given"
+    );
+}
+
+#[test]
+fn taking_the_fleet_back_by_hand_numbers_it_the_way_the_plan_did() {
+    // The path this is on: the planner runs by default, so `p` then `a` is how
+    // anyone assigns anything. If the hand-assigned node counted the fleet
+    // differently from the plan the others are still holding, it would compute
+    // its transmit stagger against a fleet size nobody else agrees with — and
+    // a node that went quiet an hour ago would be enough to cause it.
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    for n in 0..3 {
+        engine.handle(heartbeat(peer(n), 1), clock.at(1));
+    }
+    // A fourth node, heard from once long enough ago to have aged out of the
+    // plan. It still has a row, and it sorts before the others by MAC.
+    engine.handle(heartbeat(GONE, 1), clock.at(1));
+    engine.handle(heartbeat(peer(0), 2), clock.at(120));
+    engine.handle(heartbeat(peer(1), 2), clock.at(120));
+    engine.handle(heartbeat(peer(2), 2), clock.at(120));
+    let planned = engine
+        .nodes()
+        .find(|node| node.mac == peer(1))
+        .and_then(|node| node.desired)
+        .expect("the plan gave it a range");
+
+    engine.handle(Event::Command(Command::SetAuto(false)), clock.at(121));
+    engine.handle(assign(peer(1), 4, 4), clock.at(122));
+    let by_hand = engine
+        .nodes()
+        .find(|node| node.mac == peer(1))
+        .and_then(|node| node.desired)
+        .expect("the hand assignment");
+
+    assert_eq!(by_hand.range, IndexRun::new(4, 4), "the range is the operator\'s");
+    assert_eq!(
+        (by_hand.node_index, by_hand.node_count),
+        (planned.node_index, planned.node_count),
+        "but the stagger slot is the fleet\'s"
     );
 }
 

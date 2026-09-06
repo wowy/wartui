@@ -71,6 +71,11 @@ pub struct Args {
     #[arg(long, alias = "no-auto")]
     manual: bool,
 
+    /// Accepted and ignored: partitioning the pool is what wartui does unless
+    /// `--manual` says otherwise. Kept because it used to be how you asked.
+    #[arg(long, hide = true, conflicts_with = "manual")]
+    auto: bool,
+
     /// The mesh's ESP-NOW control channel.
     #[arg(long, default_value_t = 6)]
     channel: u8,
