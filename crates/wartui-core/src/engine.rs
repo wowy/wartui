@@ -448,6 +448,10 @@ pub struct Snapshot {
     pub now_ms: i64,
     /// Where the host believes it is, resolved as of this snapshot.
     pub position: crate::position::Fix,
+    /// What the GPS is doing, when one is configured. Separate from
+    /// [`Self::position`] because "no fix" and "no receiver" look identical in
+    /// a row and are completely different problems to the person watching.
+    pub gps: Option<crate::gps::GpsView>,
 }
 
 /// The bridge's self-report.
@@ -759,7 +763,7 @@ impl FleetEngine {
                     channel: line.channel,
                     rssi: line.rssi,
                     kind: line.kind,
-                    fix: self.config.position.resolve(),
+                    fix: self.config.position.resolve(now.unix_ms),
                     raw_text: text.text.to_vec(),
                 };
                 self.push_tail(&observation);
@@ -1192,7 +1196,8 @@ impl FleetEngine {
             bridge_status: self.bridge_status,
             started_at_ms: self.started_at_ms,
             now_ms: now.unix_ms,
-            position: self.config.position.resolve(),
+            position: self.config.position.resolve(now.unix_ms),
+            gps: self.config.position.gps().map(crate::gps::Gps::view),
         }
     }
 

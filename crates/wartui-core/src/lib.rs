@@ -18,6 +18,8 @@
 
 pub mod engine;
 pub mod export;
+pub mod gps;
+pub mod nmea;
 pub mod position;
 pub mod record;
 pub mod runtime;
@@ -26,6 +28,7 @@ pub mod store;
 pub use engine::{
     ActionBatch, Assignment, Command, Counters, Event, FleetEngine, NodeState, Now, Snapshot,
 };
+pub use gps::{Gps, GpsConfig, GpsStatus, GpsView};
 pub use position::{Fix, PositionChain, PositionSource};
 pub use record::{AdminOutcome, Record};
 pub use store::{SessionInfo, Store, StoreConfig, StoreError};
