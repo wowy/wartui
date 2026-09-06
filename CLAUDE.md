@@ -15,7 +15,10 @@ still the reference for everything on the air, checked out at
 
 `README.md` is the operator's manual and is unusually complete — read it before changing
 behaviour, and keep it true when behaviour changes. `docs/phase-0-findings.md` records what was
-measured on real hardware and is why several of the invariants below exist.
+measured on the vendor fleet and is why several of the invariants below exist;
+`docs/phase-1-findings.md` records what our own node firmware then did on the
+same bench, including which of those invariants it has actually been checked
+against and which are still only reasoning.
 
 ## Commands
 
