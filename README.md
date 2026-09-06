@@ -263,8 +263,10 @@ The header says `waiting for a bridge to announce itself` for two quite
 different reasons, and the fault box says which: `link down: could not open …`
 means the port is not ours — nearly always another `wartui`, a `screen` session
 or an IDE's serial monitor still holding it — while no fault at all means the
-port opened and the dongle is not answering. In that second case reset it: unplug
-and replug, or `espflash board-info --port …`, and try again.
+port opened and the dongle is not answering. In that second case reset it with
+`espflash reset --port …`, which is what `sniff` and `status` print after
+five seconds of silence; unplugging and replugging does the same thing more
+bluntly.
 
 ```sh
 cargo run -p wartui -- status                  # exits in 5 s with the reason

@@ -16,8 +16,9 @@ use wartui_bridge::LinkEvent;
 use wartui_proto::link::{BridgeToHost, HostToBridge};
 
 /// Generous enough for a bridge that is busy forwarding a fleet, short enough
-/// that a wedged one is reported rather than waited on.
-const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
+/// that a wedged one is reported rather than waited on. The same figure the
+/// notice quotes, so the two cannot disagree about how long was waited.
+const REPLY_TIMEOUT: Duration = super::CONNECT_NOTICE_AFTER;
 
 #[derive(ClapArgs)]
 pub struct Args {
@@ -35,9 +36,14 @@ pub async fn run(args: Args) -> Result<()> {
 
     // The bridge announces itself on connect; waiting for that first means a
     // status request cannot be sent into a port nobody is listening on yet.
-    let info = tokio::time::timeout(REPLY_TIMEOUT, wait_for_ready(&mut link))
-        .await
-        .context("no bridge announced itself; is one plugged in and flashed?")??;
+    //
+    // This is the command an operator reaches for when frames are not arriving,
+    // so the timeout is the answer rather than an apology for not having one:
+    // it names the port and what to do about each of the three things it can be.
+    let info = match tokio::time::timeout(REPLY_TIMEOUT, wait_for_ready(&mut link)).await {
+        Ok(ready) => ready?,
+        Err(_) => bail!("{}", super::no_bridge_notice(args.port.as_deref())),
+    };
     println!(
         "bridge     {} on {:?}, firmware {}",
         super::mac(&info.mac),
