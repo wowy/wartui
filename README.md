@@ -51,8 +51,8 @@ Which channels the fleet scans is selectable, because every scan the firmware
 performs is *active* — nodes transmit probe requests on each channel they are
 assigned.
 
-- **`Us`** (default) — 2.4 GHz 1–11 and 5 GHz 36–165.
-- **`All`** — every channel the firmware knows, matching stock behaviour.
+- **US** (`--pool us`, the default) — 2.4 GHz 1–11 and 5 GHz 36–165.
+- **All** (`--pool all`) — every channel the firmware knows, matching stock behaviour.
 
 `MSG_ADMIN` can only express one contiguous range, and the US pool is two runs
 with a gap at channels 12–14, so the planner distributes nodes across runs and
