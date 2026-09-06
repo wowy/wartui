@@ -23,6 +23,19 @@ pub const TEXT_MSG_LEN: usize = 212;
 /// `sizeof(enow_admin_msg_t)`. `src/WiFiOps.cpp:1194`.
 pub const ADMIN_MSG_LEN: usize = 10;
 
+/// Buffer size [`WardriveLine::write_into`] can always finish in.
+///
+/// 17 for the BSSID, 32 for the longest SSID 802.11 allows, 15 for
+/// `[WPA2_WPA3_PSK]`, 5 for a `u16` channel, 6 for an `i16` RSSI, one for the
+/// kind and five separating commas. Comfortably inside [`ENOW_TEXT_MAX`], which
+/// is what actually bounds the frame.
+///
+/// The channel and RSSI widths are the parsed ones, not the node's. A node
+/// encodes a `u8` channel and an `i8` RSSI and cannot reach 77 bytes; a host
+/// re-encoding a line it read off the wire can, and a buffer sized for the node
+/// would drop those records silently rather than truncate them.
+pub const WARDRIVE_LINE_MAX: usize = 81;
+
 const OFF_TYPE: usize = 4;
 const OFF_COUNTER: usize = 5;
 const OFF_LEN: usize = 9;
@@ -463,6 +476,109 @@ impl<'a> WardriveLine<'a> {
             rssi: parse_i16(fields[4]).ok_or(LineError::BadRssi)?,
             kind,
         })
+    }
+
+    /// Write the payload a node transmits, returning how many bytes it took.
+    ///
+    /// The inverse of [`Self::parse`], and the half the host never needed:
+    /// wartui only ever read these lines until a node of our own had to emit
+    /// them. [`WARDRIVE_LINE_MAX`] is a buffer this can always finish in;
+    /// anything smaller may return `None`, and nothing is written when it does.
+    ///
+    /// Two details are the firmware's rather than ours. Commas inside the SSID
+    /// become underscores, because the core splits on `,` and counts six fields
+    /// (`ssid.replace(",","_")`, `src/WiFiOps.cpp:1768`) — an SSID containing
+    /// one would otherwise take the record apart. And the BSSID is uppercase
+    /// hex for Wi-Fi and lowercase for BLE, which is not a choice so much as
+    /// the two paths having been written by different hands
+    /// (`WiFi.BSSIDstr()` at `src/WiFiOps.cpp:1777` against NimBLE's
+    /// `toString()` at `:144`); [`Self::parse`] normalises it away again.
+    #[must_use]
+    pub fn write_into(&self, out: &mut [u8]) -> Option<usize> {
+        let mut w = Writer { out, at: 0 };
+        w.mac(&self.bssid, self.kind == RecordKind::Wifi)?;
+        w.byte(b',')?;
+        for &b in self.ssid {
+            w.byte(if b == b',' { b'_' } else { b })?;
+        }
+        w.byte(b',')?;
+        w.bytes(self.security.as_bytes())?;
+        w.byte(b',')?;
+        w.u16(self.channel)?;
+        w.byte(b',')?;
+        w.i16(self.rssi)?;
+        w.byte(b',')?;
+        w.bytes(match self.kind {
+            RecordKind::Wifi => b"W",
+            RecordKind::Ble => b"B",
+        })?;
+        Some(w.at)
+    }
+}
+
+/// A cursor over the caller's buffer, so a line that does not fit stops at the
+/// first byte that would not rather than being written half-formed.
+struct Writer<'b> {
+    out: &'b mut [u8],
+    at: usize,
+}
+
+impl Writer<'_> {
+    fn byte(&mut self, b: u8) -> Option<()> {
+        *self.out.get_mut(self.at)? = b;
+        self.at += 1;
+        Some(())
+    }
+
+    fn bytes(&mut self, bytes: &[u8]) -> Option<()> {
+        for &b in bytes {
+            self.byte(b)?;
+        }
+        Some(())
+    }
+
+    fn mac(&mut self, mac: &[u8; 6], upper: bool) -> Option<()> {
+        const UPPER: &[u8; 16] = b"0123456789ABCDEF";
+        const LOWER: &[u8; 16] = b"0123456789abcdef";
+        let digits = if upper { UPPER } else { LOWER };
+        for (i, &octet) in mac.iter().enumerate() {
+            if i > 0 {
+                self.byte(b':')?;
+            }
+            self.byte(digits[usize::from(octet >> 4)])?;
+            self.byte(digits[usize::from(octet & 0x0F)])?;
+        }
+        Some(())
+    }
+
+    fn u16(&mut self, mut value: u16) -> Option<()> {
+        let mut digits = [0u8; 5];
+        let mut n = 0;
+        loop {
+            // Cast is safe: a decimal digit is 0..=9.
+            #[allow(clippy::cast_possible_truncation)]
+            {
+                digits[n] = b'0' + (value % 10) as u8;
+            }
+            n += 1;
+            value /= 10;
+            if value == 0 {
+                break;
+            }
+        }
+        for &d in digits[..n].iter().rev() {
+            self.byte(d)?;
+        }
+        Some(())
+    }
+
+    fn i16(&mut self, value: i16) -> Option<()> {
+        if value < 0 {
+            self.byte(b'-')?;
+        }
+        // Through `u16` rather than `-value`, so `i16::MIN` is not a panic
+        // waiting for a receiver with an implausible reading.
+        self.u16(value.unsigned_abs())
     }
 }
 

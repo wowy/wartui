@@ -87,7 +87,13 @@ re-announcing itself, which the host is already listening for.
 
 ## Dependency versions
 
-`esp-radio 1.0.0-beta.0` pins `esp-hal ~1.1`, which in turn fixes `esp-rtos` at
-0.3 and `esp-alloc` at 0.10 — a newer `esp-hal` will not resolve. `esp-generate`
-is a version behind this set; its scaffolding (`build.rs`, `.cargo/config.toml`)
-is what was taken from it, not its dependency list.
+`esp-radio 1.0.0-beta.0` requires `esp-hal = "~1.1.0"`, which is
+`>=1.1.0, <1.2.0`. `esp-hal 1.2.0` is published and will not resolve, and behind
+it sit `esp-rtos 0.4` (which wants `esp-hal ~1.2.0-rc.0`), `esp-alloc 0.11` and
+`esp-sync 0.3`. `cargo update` reports all of them as available and moves none
+of them; it will keep doing that until `esp-radio` publishes again. Both
+firmwares are held at the same set by the same dependency, which is worth
+keeping true — they share `wartui-proto`.
+
+`esp-generate` is a version behind this set; its scaffolding (`build.rs`,
+`.cargo/config.toml`) is what was taken from it, not its dependency list.
