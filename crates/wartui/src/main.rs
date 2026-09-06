@@ -33,9 +33,10 @@ struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
 
-    /// Append this run's diagnostics to a file: ports opened, frames that would
-    /// not decode, commands dropped. `RUST_LOG` sets the level, `info` by
-    /// default. Without this, nothing is logged anywhere — the view cannot
+    /// Append this run's diagnostics to a file: which port was opened, why a
+    /// link went down, commands that would not fit. `RUST_LOG` sets the level,
+    /// `info` by default; `debug` adds every retry and every frame that would
+    /// not decode. Without this, nothing is logged anywhere — the view cannot
     /// share a terminal with a log.
     #[arg(long, value_name = "PATH", global = true)]
     log_file: Option<PathBuf>,

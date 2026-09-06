@@ -636,31 +636,56 @@ fn fault_lines(faults: &[String], width: u16) -> Vec<String> {
     // A width this small is not a terminal anyone is reading, but the
     // arithmetic below still has to terminate.
     let width = usize::from(width).max(8);
+    let (mut lines, ends) = pack(faults, width);
+    if lines.len() <= MAX_FAULT_LINES {
+        return lines;
+    }
+    // Something has to give, and it is a whole line rather than the tail of one.
+    // Gluing "+2 more" onto half of "Permission denied (os error 13)" leaves a
+    // message that looks complete and says something else.
+    let kept = MAX_FAULT_LINES - 1;
+    // A fault the cut lands in the middle of is not being shown either, so it
+    // counts. Otherwise the notice claims nothing is missing while the line
+    // above it stops mid-word.
+    let hidden = ends.iter().filter(|end| **end >= kept).count();
+    lines.truncate(kept);
+    lines.push(marker(hidden, width));
+    lines
+}
+
+/// Lay the faults out, in however many lines that takes.
+///
+/// Returns the lines, and for each fault the last line it reaches — which is
+/// what tells the caller what a cut would cost.
+fn pack(faults: &[String], width: usize) -> (Vec<String>, Vec<usize>) {
     let mut lines: Vec<String> = Vec::new();
-    for (index, fault) in faults.iter().enumerate() {
+    let mut ends = Vec::with_capacity(faults.len());
+    for fault in faults {
         let room = |line: &String| line.chars().count() + 2 + fault.chars().count() <= width;
         if lines.last().is_some_and(room) {
             if let Some(line) = lines.last_mut() {
                 line.push_str("  ");
                 line.push_str(fault);
             }
-        } else if lines.len() < MAX_FAULT_LINES {
-            lines.extend(chunks(fault, width));
-            lines.truncate(MAX_FAULT_LINES);
         } else {
-            // Out of room. Say how much is not being shown rather than leaving
-            // the operator to wonder whether that was all of it.
-            let marker = format!("  +{} more", faults.len() - index);
-            if let Some(line) = lines.last_mut() {
-                while line.chars().count() + marker.chars().count() > width && line.pop().is_some()
-                {
-                }
-                line.push_str(&marker);
-            }
-            break;
+            lines.extend(chunks(fault, width));
+        }
+        ends.push(lines.len().saturating_sub(1));
+    }
+    (lines, ends)
+}
+
+/// How much is not on screen, in the widest wording that fits.
+fn marker(hidden: usize, width: usize) -> String {
+    let count = format!("+{hidden}");
+    for wording in [format!("  +{hidden} more"), format!("+{hidden} more"), count.clone()] {
+        if wording.chars().count() <= width {
+            return wording;
         }
     }
-    lines
+    // Narrower than "+1" is not a terminal either, but the notice that something
+    // is missing must not itself become the thing that gets clipped.
+    count.chars().take(width).collect()
 }
 
 /// One fault, split across as many lines as its own length needs.
@@ -1031,6 +1056,51 @@ mod tests {
         assert!(lines.iter().all(|l| l.chars().count() <= 40), "{lines:?}");
         let last = lines.last().expect("a line");
         assert!(last.contains("more"), "how many are not shown: {last}");
+    }
+
+    #[test]
+    fn a_fault_too_long_for_the_box_says_how_much_is_missing() {
+        // Three lines of a twenty-column terminal cannot hold this, and the
+        // half that names what to do about it — "Device or resource busy" — is
+        // the half that goes. Cutting it silently is the bug the fault box
+        // exists to fix, just at a narrower width.
+        let fault = format!("link down: {BUSY}");
+        let lines = fault_lines(std::slice::from_ref(&fault), 20);
+        assert_eq!(lines.len(), MAX_FAULT_LINES, "{lines:?}");
+        let last = lines.last().expect("a line");
+        assert_eq!(last, "  +1 more", "the operator is told the reason is cut short");
+        let shown: String = lines[..MAX_FAULT_LINES - 1].iter().map(|l| l.trim_start()).collect();
+        assert!(fault.starts_with(&shown), "what is shown is really the start of it: {shown}");
+    }
+
+    #[test]
+    fn the_notice_does_not_eat_the_message_above_it() {
+        // It used to take its room out of the last line, so the reason ended
+        // "n denied (os error   +1 more": a sentence that reads as complete and
+        // says something the operating system never said.
+        let faults = [format!("link down: {BUSY}"), "store dropped 4".to_owned()];
+        let lines = fault_lines(&faults, 30);
+        let last = lines.last().expect("a line");
+        assert_eq!(last, "  +2 more", "both faults are cut, and it says so: {lines:?}");
+        assert!(
+            lines[..MAX_FAULT_LINES - 1].iter().all(|l| !l.contains('+')),
+            "no fault shares a line with the notice: {lines:?}"
+        );
+        let shown: String = lines[..MAX_FAULT_LINES - 1].iter().map(|l| l.trim_start()).collect();
+        assert!(faults[0].starts_with(&shown), "{shown}");
+    }
+
+    #[test]
+    fn the_notice_itself_is_never_the_thing_that_gets_clipped() {
+        // Not a terminal anyone uses, but the guarantee the footer relies on is
+        // that nothing it draws is wider than the frame.
+        let faults: Vec<String> = (0..2000).map(|n| format!("fault {n}")).collect();
+        for width in [1_u16, 8, 12] {
+            let lines = fault_lines(&faults, width);
+            let room = usize::from(width).max(8);
+            assert!(lines.iter().all(|l| l.chars().count() <= room), "at {width}: {lines:?}");
+            assert!(lines.last().expect("a line").contains('+'), "at {width}: {lines:?}");
+        }
     }
 
     #[test]
