@@ -243,6 +243,32 @@ clean footer. `bridge dropped` there counts frames lost since this host
 attached; `wartui status` reports the bridge's own total since it booted, which
 on a dongle left powered with nothing listening is large and not a fault.
 
+### When nothing arrives
+
+The header says `waiting for a bridge to announce itself` for two quite
+different reasons, and the fault box says which: `link down: could not open …`
+means the port is not ours — nearly always another `wartui`, a `screen` session
+or an IDE's serial monitor still holding it — while no fault at all means the
+port opened and the dongle is not answering. In that second case reset it: unplug
+and replug, or `espflash board-info --port …`, and try again.
+
+```sh
+cargo run -p wartui -- status                  # exits in 5 s with the reason
+cargo run -p wartui -- --log-file wartui.log run
+```
+
+`--log-file` is the only way to see the transport's own account of a run: the
+view owns the terminal, so without it nothing is logged anywhere. It records
+which port was resolved, whether it opened, and the reason a link went down —
+once per reason rather than once per retry, since a port that is somebody else's
+is retried every 750 ms for as long as the capture runs. The GPS reader thread
+reports itself the same way. `RUST_LOG=debug` adds each individual retry, every
+frame that would not decode, and dropped bulk commands.
+
+If the same port keeps being the wrong device — a C5 node plugged in by USB
+looks identical to the bridge, same vendor and product ID — pin it with
+`--port`. `wartui ports` lists the candidates.
+
 ## Development
 
 ```sh

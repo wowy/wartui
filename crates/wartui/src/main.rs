@@ -6,6 +6,13 @@
 //! `ENOW` decoder — with nothing in between to be wrong. `status` and `ports`
 //! answer the two questions that come before it: is a dongle attached, and is
 //! it listening.
+//!
+//! `--log-file` is the fourth answer. The TUI owns the terminal, so a link that
+//! is failing has nowhere to say so except the one header line it shares with
+//! everything else; with a log file the transport's own account of what it
+//! tried and what the OS said goes somewhere it can be read afterwards.
+
+use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -25,6 +32,14 @@ mod tui;
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
+
+    /// Append this run's diagnostics to a file: which port was opened, why a
+    /// link went down, commands that would not fit. `RUST_LOG` sets the level,
+    /// `info` by default; `debug` adds every retry and every frame that would
+    /// not decode. Without this, nothing is logged anywhere — the view cannot
+    /// share a terminal with a log.
+    #[arg(long, value_name = "PATH", global = true)]
+    log_file: Option<PathBuf>,
 
     /// With no subcommand, these are `run`'s arguments.
     #[command(flatten)]
@@ -48,6 +63,9 @@ enum Command {
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    // Held for the whole process: dropping the guard stops the writer thread,
+    // and the last thing logged before an exit is usually the interesting one.
+    let _log = logging(cli.log_file.as_deref())?;
     match cli.command {
         None => run::run(cli.run).await,
         Some(Command::Run(args)) => run::run(args).await,
@@ -56,6 +74,33 @@ async fn main() -> Result<()> {
         Some(Command::Status(args)) => status::run(args).await,
         Some(Command::Ports) => ports(),
     }
+}
+
+/// Send `tracing` output to `path`, if one was given.
+///
+/// Non-blocking, because the engine is on the other end of some of these
+/// events and a log write must never be what delays an assignment. Returns the
+/// worker guard, which flushes what is queued when it is dropped.
+fn logging(
+    path: Option<&std::path::Path>,
+) -> Result<Option<tracing_appender::non_blocking::WorkerGuard>> {
+    let Some(path) = path else { return Ok(None) };
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("opening the log file {}", path.display()))?;
+    let (writer, guard) = tracing_appender::non_blocking(file);
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        // A log file is read with `tail`, and escape codes in one are noise.
+        .with_ansi(false)
+        .with_writer(writer)
+        .init();
+    tracing::info!(version = env!("CARGO_PKG_VERSION"), "wartui starting");
+    Ok(Some(guard))
 }
 
 fn ports() -> Result<()> {
