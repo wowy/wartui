@@ -15,7 +15,7 @@ use wartui_proto::air::{AdminMsg, MsgType, TextMsg};
 use wartui_proto::link::{
     BROADCAST, BridgeToHost, Chip, EspNowPayload, HostToBridge, Mac, SendStatus,
 };
-use wartui_proto::plan::IndexRun;
+use wartui_proto::plan::{ChannelPool, IndexRun};
 
 const NODE: Mac = [0x38, 0x44, 0xBE, 0x1F, 0x57, 0x84];
 const OTHER: Mac = [0x38, 0x44, 0xBE, 0x1F, 0x57, 0x85];
@@ -738,4 +738,225 @@ fn an_acknowledgement_for_an_assignment_the_operator_has_already_replaced_is_not
     assert!(node.dirty, "the newer assignment is still owed");
     assert!(node.confirmed.is_none());
     assert_eq!(node.desired.expect("desired").range, IndexRun::new(5, 9));
+}
+
+// ---------------------------------------------------------------------------
+// Auto-assignment: the engine holding the whole fleet on a partition of the
+// pool, which is what "replaces the core" means rather than "watches it".
+// ---------------------------------------------------------------------------
+
+/// The `n`th node of a fake fleet. Ordered by MAC, which is the order the
+/// planner numbers them in.
+fn peer(n: u8) -> Mac {
+    [0x38, 0x44, 0xBE, 0x1F, 0x57, n]
+}
+
+fn auto() -> EngineConfig {
+    EngineConfig { auto: true, ..Default::default() }
+}
+
+/// Every index a set of ranges covers, sorted. Comparing this against the
+/// pool's own indices proves coverage and disjointness at once: a gap makes it
+/// short, an overlap makes it long, and a straddled run puts an index in it
+/// that the pool does not have.
+fn covered(ranges: &[IndexRun]) -> Vec<u8> {
+    let mut all: Vec<u8> = ranges.iter().flat_map(|r| r.start..=r.end).collect();
+    all.sort_unstable();
+    all
+}
+
+fn pool_indices(pool: ChannelPool) -> Vec<u8> {
+    pool.runs().iter().flat_map(|r| r.start..=r.end).collect()
+}
+
+/// What each node has been told to scan, whether or not it has answered yet.
+fn wanted(engine: &FleetEngine) -> Vec<IndexRun> {
+    engine.nodes().filter_map(|node| node.desired).map(|a| a.range).collect()
+}
+
+#[test]
+fn auto_assignment_cuts_the_pool_into_one_contiguous_range_per_node() {
+    let clock = Clock::new();
+    let mut engine = engine(auto(), &clock);
+    for n in 0..3 {
+        engine.handle(heartbeat(peer(n), 1), clock.at(1));
+    }
+
+    // `MSG_ADMIN` carries one contiguous run of indices and the US pool has a
+    // gap at 11-13, so a partition that covers the pool exactly is also proof
+    // that no node was given a range straddling the gap.
+    assert_eq!(covered(&wanted(&engine)), pool_indices(ChannelPool::Us));
+
+    // `node_index` and `node_count` drive the transmit stagger
+    // (`src/RadioTuning.cpp:3-13`), so they have to agree fleet-wide: unique
+    // indices over one shared count, not a numbering restarted per run.
+    let indices: Vec<(u8, u8)> = engine
+        .nodes()
+        .map(|node| {
+            let a = node.desired.expect("every member of the plan has a range");
+            (a.node_index, a.node_count)
+        })
+        .collect();
+    assert_eq!(indices, vec![(0, 3), (1, 3), (2, 3)]);
+}
+
+#[test]
+fn nothing_is_partitioned_until_the_operator_asks_for_it() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    for n in 0..3 {
+        let batch = engine.handle(heartbeat(peer(n), 1), clock.at(1));
+        assert!(batch.urgent.is_empty(), "a capture transmits only when asked to");
+    }
+    assert!(engine.nodes().all(|node| node.desired.is_none()));
+
+    // And switching it on partitions what is already there rather than waiting
+    // for the fleet to change shape first.
+    engine.handle(Event::Command(Command::SetAuto(true)), clock.at(2));
+    assert_eq!(covered(&wanted(&engine)), pool_indices(ChannelPool::Us));
+}
+
+#[test]
+fn a_node_joining_re_cuts_the_pool_for_the_whole_fleet() {
+    let clock = Clock::new();
+    let mut engine = engine(auto(), &clock);
+    // A node's own first heartbeat is what admits it, and the window it has
+    // just opened is the one its share goes out in — not the next one.
+    let (id, dst, first) = sent_admin(&engine.handle(heartbeat(peer(0), 1), clock.at(1)));
+    assert_eq!(dst, peer(0));
+    assert_eq!(first.node_count, 1);
+    engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(1));
+
+    let (_, _, second) = sent_admin(&engine.handle(heartbeat(peer(1), 1), clock.at(2)));
+    assert_eq!(second.node_count, 2, "the fleet the range was cut for");
+
+    // The node that was already settled is owed a new range as well: its own
+    // stagger slot is computed from a count that has just changed, and a fleet
+    // whose members disagree about the count keys up on top of itself.
+    let settled = engine.nodes().next().expect("the first node");
+    assert!(settled.dirty, "re-issued, though it was acknowledged a moment ago");
+    assert_eq!(settled.desired.expect("a new range").node_count, 2);
+    assert_eq!(settled.confirmed.expect("what it still holds").node_count, 1);
+
+    let (_, dst, third) = sent_admin(&engine.handle(heartbeat(peer(0), 2), clock.at(6)));
+    assert_eq!(dst, peer(0), "and it goes out in that node's own next window");
+    assert_ne!(third.assignment_version, first.assignment_version, "under a fresh epoch");
+    assert_eq!(counters(&engine).replans, 2);
+}
+
+#[test]
+fn a_node_that_stops_heartbeating_leaves_the_plan_and_the_rest_take_its_channels() {
+    let clock = Clock::new();
+    let mut engine = engine(auto(), &clock);
+    engine.handle(heartbeat(peer(0), 1), clock.at(1));
+    engine.handle(heartbeat(peer(1), 1), clock.at(2));
+    assert_eq!(covered(&wanted(&engine)), pool_indices(ChannelPool::Us));
+
+    // Divergence 2: topology is driven by heartbeats alone. A node that is not
+    // heartbeating never opens an admin window, so a range held open for it is
+    // a share of the pool nobody is scanning.
+    engine.handle(heartbeat(peer(1), 2), clock.at(70));
+
+    let departed = engine.nodes().next().expect("the node that went quiet");
+    assert!(departed.desired.is_none(), "nothing is owed to a node that cannot receive it");
+    assert!(!departed.dirty);
+    let survivor = engine.nodes().nth(1).expect("the node still beating");
+    assert_eq!(survivor.desired.expect("a range").node_count, 1);
+}
+
+#[test]
+fn one_node_on_a_two_run_pool_covers_the_runs_in_turn() {
+    let clock = Clock::new();
+    let config = EngineConfig { rotation_dwell: Duration::from_secs(30), ..auto() };
+    let mut engine = engine(config, &clock);
+
+    // `MSG_ADMIN` cannot express two runs, and the US pool is two. With only
+    // one node the choice is between covering half the pool forever and
+    // covering all of it intermittently.
+    let (id, _, first) = sent_admin(&engine.handle(heartbeat(peer(0), 1), clock.at(1)));
+    assert_eq!((first.start_channel_idx, first.end_channel_idx), (0, 10), "the 2.4 GHz run");
+    engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(1));
+
+    assert!(
+        engine.handle(Event::Tick, clock.at(10)).urgent.is_empty(),
+        "the dwell has not run out"
+    );
+    engine.handle(Event::Tick, clock.at(40));
+    let (_, _, second) = sent_admin(&engine.handle(heartbeat(peer(0), 2), clock.at(41)));
+    assert_eq!((second.start_channel_idx, second.end_channel_idx), (14, 36), "the 5 GHz run");
+    assert_ne!(second.assignment_version, first.assignment_version);
+
+    // And round again, rather than stopping at the last run.
+    engine.handle(Event::Tick, clock.at(80));
+    let (_, _, third) = sent_admin(&engine.handle(heartbeat(peer(0), 3), clock.at(81)));
+    assert_eq!((third.start_channel_idx, third.end_channel_idx), (0, 10));
+}
+
+#[test]
+fn a_settled_fleet_is_left_alone_rather_than_re_issued_every_tick() {
+    let clock = Clock::new();
+    let mut engine = engine(auto(), &clock);
+    for n in 0..3 {
+        engine.handle(heartbeat(peer(n), 1), clock.at(1));
+    }
+    // Acknowledge each node's range, which takes the fleet to the state it
+    // spends the whole capture in.
+    for n in 0..3 {
+        let (id, _, _) = sent_admin(&engine.handle(heartbeat(peer(n), 2), clock.at(5)));
+        engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(5));
+    }
+    let settled = counters(&engine).admin_sent;
+
+    // A node adopts on `!=`, so an epoch it already holds is a frame it
+    // acknowledges and discards. Re-cutting an unchanged fleet would spend the
+    // rest of the capture doing exactly that at heartbeat rate.
+    for beat in 3..6u32 {
+        let at = clock.at(u64::from(10 + beat));
+        engine.handle(Event::Tick, at);
+        for n in 0..3 {
+            let batch = engine.handle(heartbeat(peer(n), beat), at);
+            assert!(batch.urgent.is_empty(), "nothing left to say");
+        }
+    }
+    assert_eq!(counters(&engine).admin_sent, settled);
+    assert_eq!(counters(&engine).replans, 3, "once per node that joined, and no more");
+}
+
+#[test]
+fn a_fleet_larger_than_the_radio_can_address_stops_being_re_partitioned() {
+    let clock = Clock::new();
+    let mut engine = engine(auto(), &clock);
+    for n in 0..=u8::try_from(wartui_proto::plan::MAX_NODES).expect("twenty fits") {
+        engine.handle(heartbeat(peer(n), 1), clock.at(1));
+    }
+
+    // Twenty peers is the radio's whole table, so the twenty-first node is one
+    // the bridge cannot address. Partitioning the pool across it anyway would
+    // hand the other twenty ranges cut for a fleet that includes a node which
+    // never hears the result.
+    let last = engine.nodes().last().expect("the twenty-first node");
+    assert!(last.desired.is_none(), "the node past the limit is given nothing");
+    assert_eq!(
+        engine.nodes().filter(|node| node.desired.is_some()).count(),
+        wartui_proto::plan::MAX_NODES,
+        "and the twenty already placed keep the ranges they were given"
+    );
+}
+
+#[test]
+fn a_range_given_by_hand_keeps_the_stagger_slot_the_plan_gave_the_node() {
+    let clock = Clock::new();
+    let mut engine = engine(auto(), &clock);
+    for n in 0..3 {
+        engine.handle(heartbeat(peer(n), 1), clock.at(1));
+    }
+
+    // An operator narrowing one node is changing what it scans, not where in
+    // the 120 ms stagger window it keys up. Renumbering it would put it on top
+    // of another node's slot for as long as the override lasted.
+    engine.handle(assign(peer(2), 20, 22), clock.at(2));
+    let node = engine.nodes().nth(2).expect("the third node");
+    let desired = node.desired.expect("the hand-given range");
+    assert_eq!(desired.range, IndexRun::new(20, 22));
+    assert_eq!((desired.node_index, desired.node_count), (2, 3));
 }
