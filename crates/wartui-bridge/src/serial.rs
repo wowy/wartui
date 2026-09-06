@@ -135,10 +135,32 @@ impl SerialTransport {
 
 /// Keep a link up: open, pump, report the failure, wait, try again.
 async fn supervise(transport: SerialTransport, mut plumbing: crate::LinkPlumbing) {
+    // A link that keeps failing the same way is one event, not thousands. Only
+    // a change of reason earns a line at `warn`: a capture left running against
+    // a port that is somebody else's retries every `reconnect_delay` for as long
+    // as it runs, and the log file the README sends operators to would be those
+    // same few lines a hundred thousand times over.
+    let mut previous: Option<String> = None;
+    let mut repeats = 0_u32;
     loop {
-        match connect(&transport, &mut plumbing).await {
+        match connect(&transport, &mut plumbing, previous.is_none()).await {
             Ok(()) => return, // The handle was dropped; nobody is listening.
             Err(reason) => {
+                if previous.as_deref() == Some(reason.as_str()) {
+                    repeats = repeats.saturating_add(1);
+                    tracing::debug!(reason = %reason, repeats, "link still down");
+                } else {
+                    // The view has one line to say this on and shares it with
+                    // everything else, so a log file is where a link that keeps
+                    // failing the same way becomes obvious.
+                    tracing::warn!(
+                        reason = %reason,
+                        retry_in = ?transport.reconnect_delay,
+                        "link down"
+                    );
+                    previous = Some(reason.clone());
+                    repeats = 0;
+                }
                 let event = LinkEvent::Disconnected { reason };
                 if plumbing.events.send(event).await.is_err() {
                     return;
@@ -153,13 +175,26 @@ async fn supervise(transport: SerialTransport, mut plumbing: crate::LinkPlumbing
 async fn connect(
     transport: &SerialTransport,
     plumbing: &mut crate::LinkPlumbing,
+    unreported: bool,
 ) -> Result<(), String> {
+    // An attempt that is retrying a failure already reported is not news, and
+    // there is one of them every `reconnect_delay`. `RUST_LOG=debug` keeps them.
+    macro_rules! progress {
+        ($($arg:tt)*) => {
+            if unreported { tracing::info!($($arg)*) } else { tracing::debug!($($arg)*) }
+        };
+    }
     let path = transport.resolve_port().map_err(|e| e.to_string())?;
+    progress!(port = %path, "opening the bridge");
 
     let port = serialport::new(&path, BAUD)
         .timeout(READ_TIMEOUT)
         .open()
         .map_err(|e| format!("could not open {path}: {e}"))?;
+    // Distinct from being connected: the port is ours, and whether anything is
+    // listening on the other end is the next question. Which of these two lines
+    // is the last one in the log is the whole diagnosis.
+    progress!(port = %path, "port open; asking the bridge to identify itself");
     let writer = port.try_clone().map_err(|e| format!("could not split {path}: {e}"))?;
 
     let stop = Arc::new(AtomicBool::new(false));
@@ -280,6 +315,17 @@ fn read_loop(
                     if announced.swap(true, Ordering::Relaxed) {
                         continue;
                     }
+                    // The success this whole sequence is about. Without it a log
+                    // of a link that dropped and came back would end at
+                    // "opening the bridge", which is what a link that never
+                    // came back looks like too.
+                    let hex = mac.map(|byte| format!("{byte:02X}")).join(":");
+                    tracing::info!(
+                        chip = ?chip,
+                        mac = %hex,
+                        fw = %fw_version.as_str(),
+                        "the bridge announced itself"
+                    );
                     LinkEvent::Connected(BridgeInfo {
                         chip,
                         mac,
@@ -289,7 +335,13 @@ fn read_loop(
                 Ok(msg) => LinkEvent::Message(msg),
                 // Reset banners and half-frames land here; the framing has
                 // already resynchronised, so this is a counter, not a fault.
-                Err(e) => LinkEvent::Garbled(e),
+                // Logged at `debug` because a cable bad enough to garble every
+                // frame would otherwise write the log file as fast as the bridge
+                // can talk.
+                Err(e) => {
+                    tracing::debug!(error = %e, "undecodable frame");
+                    LinkEvent::Garbled(e)
+                }
             };
             if events.blocking_send(event).is_err() {
                 return "engine stopped listening".to_owned();

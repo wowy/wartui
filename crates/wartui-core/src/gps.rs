@@ -221,6 +221,14 @@ impl Gps {
     }
 
     fn set_status(&self, status: GpsStatus) {
+        // A reader thread nobody is watching is the most invisible thing in
+        // the program: the rows keep being written, they just stop being where
+        // the host is. The header says which state it is in; the log says when
+        // it changed and how often.
+        match &status {
+            GpsStatus::Failed(reason) => tracing::warn!(reason = %reason, "gps unreadable"),
+            other => tracing::info!(status = ?other, "gps"),
+        }
         self.lock().status = status;
     }
 
