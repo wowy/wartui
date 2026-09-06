@@ -480,25 +480,72 @@ that it is under ten percent and nothing like Phase 0's ~78%.
 one more than the 60 that prompted the change, so the old ceiling of 64 now looks
 closer than it did rather than further away.
 
-### One board will not answer, and it is not dead
+### A board that would not flash, and a sweep that was too fast
 
-`4F:98` refuses `espflash` on every strategy offered — `usb-reset`, `no-reset`,
+`4F:98` refused `espflash` on every strategy offered — `usb-reset`, `no-reset`,
 `no-reset-no-sync` with the chip named, a lower baud, `board-info`, `reset` and
-`monitor` all fail at `Connecting...`, with nothing holding the port and the
-device enumerating normally on USB with the right serial number.
+`monitor` all failing at `Connecting...`, with nothing holding the port and the
+device enumerating normally with the right serial number. It ran throughout:
+heartbeating, holding an assignment, acknowledging one in 6146 µs.
 
-It is nonetheless running: it heartbeats, holds an assignment, acknowledges one
-in 6146 µs and reports observations throughout both halves of the re-run. So the
-wedge is in the USB-serial-JTAG endpoint and not in the chip, which is worth
-recording because the symptom reads exactly like a dead board and is not one. The
-same symptom on `57:84` in the previous session cleared on a physical replug.
+**It was the computer's USB port.** Moving the same board, on the same cable, to
+a different port on the host made it answer on the first attempt. Two things are
+worth keeping from the hour that took, because both were wrong in the same
+direction — blaming the far end:
 
-Its sweep period while wedged is unexplained. On indices 14..=36 it holds
-2.99–3.04 s, where 23 dwells at 125 ms plus the 300 ms admin window is at least
-3.17 s, and where it measured 3.299 s in the first run. Something is skipping
-roughly two channels, and its observations cover 36–56 and 149–161 with nothing
-between 100 and 144. That is consistent with an older flash on that board, and it
-cannot be checked without the console, which is the thing that is wedged.
+- `espflash` reports *"Secure Download Mode is enabled on this chip"* on the
+  `no-reset-no-sync` path. It is not. `esptool` on the same board says
+  *"No serial data received"*, which is the truth: espflash infers the mode from
+  silence. A second implementation was what distinguished them.
+- A replug, a different cable, and a BOOT-strapped power-on all failed, and the
+  BOOT strap demonstrably worked — the heartbeats stopped, so the chip was in the
+  ROM with no application to blame. That looked conclusive for a dead peripheral
+  and was not, because every one of those tests held the host port constant.
+
+The too-fast sweep resolved with the reflash. On indices 14..=36 the old flash
+held 2.99–3.04 s, where 23 dwells at 125 ms plus the 300 ms admin window is at
+least 3.17 s. Reflashed with the current build the same board on the same
+assignment gives 3.298 s, against the 3.299 s it gave in the first run. It was an
+older flash, as suspected, and it is no longer on the board.
+
+### Three runs, and what they agree on
+
+| Run | Method | BLE off | BLE on | Penalty |
+| --- | --- | --- | --- | --- |
+| First | two boards at once | 3.299 s | 3.628 s | 10.0% |
+| Re-run | one board, twice | 3.358 s | 3.612 s | 7.6% |
+| Third | two boards at once | 3.298 s | 3.616 s | **9.6%** |
+
+The two-board runs agree to within 0.4 points, and their BLE-off halves agree to
+1 ms — 3.299 s and 3.298 s, on different boards, weeks of bench time apart. The
+same-board run is the odd one, and it is its *BLE-off* half that is odd: 3.358 s
+where every other measurement of that quantity is 3.298–3.299 s. So the penalty
+is about 9.6–10.0%, and the 7.6% is best read as a baseline that drifted high
+rather than as a scan that got cheaper.
+
+Assignments were acknowledged in 5822 µs and 5798 µs, both first attempt, on
+nodes holding identical 23-channel ranges. Advertisers came in at a mean of 43.8
+per scan over 27 scans, min 30, max 50, none dropped, 98 distinct reaching the
+host. That mean is below the 51.8 and 52.4 of the earlier runs; the room is the
+same room several hours later, and nothing in the firmware changed between them.
+
+### The stagger, with the run it asked for
+
+This is the run the "Not measured" list has been asking for: two nodes, *equal*
+assignments — both indices 14..=36 — so their sweep boundaries coincide instead
+of drifting past each other. `node_count` 2 with indices 0 and 1 puts the
+transmit stagger at 0 ms and 60 ms.
+
+**Every heartbeat arrived.** 60 of 60 from `4F:98` and 53 of 53 from `57:84`,
+counter spans with no gaps, where the earlier unequal-assignment run lost 3 of 65
+on one node. That is the condition the stagger exists for, and nothing was lost
+in it.
+
+It is one run and it has no control: the stagger cannot be switched off from the
+host, so this does not separate "the stagger prevented collisions" from "there
+were no collisions to prevent". What it does retire is the possibility that
+coinciding boundaries are lossy *with* the stagger in place, which is what the
+earlier run left open.
 
 ## Not measured
 
@@ -506,9 +553,11 @@ Every checkpoint item now has a hardware answer. What is left is narrower:
 
 - **DFS above 100 on a C5.** Unreachable rather than unmeasured, per the section
   above. DFS 52–64 is confirmed working.
-- **What the transmit stagger actually prevents.** The two-node section above
-  exercised it, but could not measure it; a run with two equal-sized assignments,
-  so both nodes reach a sweep boundary together, is what would.
+- **What the transmit stagger actually prevents.** The equal-assignment run above
+  is the one this asked for, and it lost no heartbeats at all. It still has no
+  control, because the stagger cannot be disabled from the host; separating "it
+  worked" from "there was nothing to prevent" needs a firmware build that omits
+  it.
 - **Which of the three coexistence measures is doing the work.** The section
   above shows the combination succeeding where the vendor firmware failed, but it
   varies none of them, so their individual contributions are unmeasured.
@@ -517,5 +566,6 @@ Every checkpoint item now has a hardware answer. What is left is narrower:
   predicted and is not the same as showing the bug was harmless. A room dense
   enough to keep the controller's queue from going quiet for 4 ms at a time is
   what would separate them, and this bench cannot produce one.
-- **Why `4F:98` sweeps 23 channels in under 3.05 s.** Recorded above. Needs its
-  console back, which needs a physical replug.
+- **Whether the advertiser count moves with the room.** Three runs give means of
+  52.4, 51.8 and 43.8 per scan with identical firmware in the third, so the count
+  is dominated by something the bench does not control.

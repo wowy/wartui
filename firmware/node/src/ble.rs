@@ -6,12 +6,12 @@
 //! worse, a node with BLE on acknowledged none of the thirty-two channel
 //! assignments sent to it while a node without BLE acknowledged both of its
 //! two. Both figures are measured; see `docs/phase-0-findings.md`. This code has
-//! since been run twice against that same board on the same bench: it
-//! acknowledged its assignment in 5.8 ms and then 6.6 ms, first attempt both
-//! times, and cost 10.0% of its sweep period by one method and 7.6% by the
-//! other, rather than the vendor's ~78%. Which of those two is the truer figure
-//! is unsettled; that it is under ten percent is not. `docs/phase-1-findings.md`
-//! records both, along with the caveat that neither run varies the three
+//! since been run three times against that same board on the same bench: it
+//! acknowledged its assignment every time on the first attempt, in 5.8 ms, then
+//! 6.6 ms, then 5.8 ms, and cost 10.0%, 7.6% and 9.6% of its sweep period rather
+//! than the vendor's ~78%. The two runs that measured it against a second board
+//! at the same moment are the 10.0% and the 9.6%. `docs/phase-1-findings.md`
+//! records all three, along with the caveat that none of them varies the three
 //! measures individually. An
 //! 802.11 acknowledgement comes from the receiver's MAC hardware, so its
 //! absence means the radio was simply not on the channel: NimBLE and
