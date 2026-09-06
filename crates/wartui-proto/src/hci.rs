@@ -1,0 +1,164 @@
+//! Enough of the Bluetooth host-controller interface to run a scan.
+//!
+//! The vendor node reports BLE through NimBLE (`initBLE`,
+//! `src/WiFiOps.cpp:2031-2051`), which is a full host stack brought in to
+//! answer one question: what addresses are advertising, and how strongly. All
+//! it ever emits is `address,,[BLE],0,rssi,B` (`src/WiFiOps.cpp:144`) — no
+//! name, no services, no manufacturer data — and for that a host stack is an
+//! enormous amount of code to be wrong in.
+//!
+//! `esp-radio` hands out the controller as a raw HCI packet pipe
+//! (`BleConnector`), so three commands and one event are the whole of it. That
+//! is what this module is: the byte layouts, and nothing that talks to
+//! hardware. Packets are built and parsed here, on the host side of the path
+//! dependency, so `cargo test` reaches them.
+//!
+//! Layouts are Bluetooth Core Specification v5.3, Vol 4 Part E — the H4
+//! transport in §2, `HCI_Reset` in §7.3.2, `HCI_LE_Set_Scan_Parameters` in
+//! §7.8.10, `HCI_LE_Set_Scan_Enable` in §7.8.11 and the LE Advertising Report
+//! in §7.7.65.2.
+
+use crate::air::{RecordKind, Security, WardriveLine};
+
+/// Largest HCI packet, so a read buffer can never be short.
+///
+/// One H4 type byte, a two-byte event header and up to 255 bytes of parameters.
+/// `esp-radio`'s `BleConnector::next` copies a whole queued packet into the
+/// buffer it is given without checking that it fits, so this is a floor rather
+/// than a suggestion.
+pub const PACKET_MAX: usize = 258;
+
+const _: () = assert!(
+    PACKET_MAX >= 1 + 2 + 255,
+    "an HCI read buffer shorter than the largest event is a panic, not a truncation"
+);
+
+/// H4 packet types.
+const CMD: u8 = 0x01;
+const EVT: u8 = 0x04;
+
+/// `HCI_LE_Meta` event, and the advertising-report subevent inside it.
+const LE_META: u8 = 0x3E;
+const ADV_REPORT: u8 = 0x02;
+
+/// Scan interval and window are counted in units of 625 microseconds.
+pub const SCAN_UNIT_US: u32 = 625;
+
+/// `HCI_Reset`. Sent once, because the controller comes up in whatever state
+/// the last run left it and a scan enabled twice is an error.
+pub const RESET: [u8; 4] = [CMD, 0x03, 0x0C, 0x00];
+
+/// `HCI_LE_Set_Scan_Parameters`, passive.
+///
+/// Passive rather than the vendor's `setActiveScan(true)`
+/// (`src/WiFiOps.cpp:2040`). An active scan transmits a scan request to pull
+/// back a scan response, and everything a scan response carries — the device
+/// name, most of all — is thrown away before it reaches the wire. So the
+/// transmission buys nothing, and not transmitting is the point of the whole
+/// firmware.
+///
+/// `interval` and `window` are in [`SCAN_UNIT_US`] units; equal values mean the
+/// radio listens continuously while scanning is enabled.
+#[must_use]
+pub const fn set_scan_parameters(interval: u16, window: u16) -> [u8; 11] {
+    let [ilo, ihi] = interval.to_le_bytes();
+    let [wlo, whi] = window.to_le_bytes();
+    [
+        CMD, 0x0B, 0x20, 0x07, // opcode 0x200B, seven parameter bytes
+        0x00, // scan type: passive
+        ilo, ihi, wlo, whi,  //
+        0x00, // own address type: public
+        0x00, // filter policy: accept everything
+    ]
+}
+
+/// `HCI_LE_Set_Scan_Enable`.
+///
+/// Duplicate filtering is left off, matching `setDuplicateFilter(false)`
+/// (`src/WiFiOps.cpp:2041`). The controller's filter is a small fixed table
+/// that would silently compete with [`crate::dedup::MacRing`] for the same job,
+/// and the ring is the one whose behaviour is understood and tested.
+#[must_use]
+pub const fn set_scan_enable(enable: bool) -> [u8; 6] {
+    [CMD, 0x0C, 0x20, 0x02, enable as u8, 0x00]
+}
+
+/// One advertiser, heard once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdvReport {
+    /// The advertiser's address, in the order it is written and displayed.
+    /// HCI carries it least-significant byte first; this is reversed already.
+    pub address: [u8; 6],
+    /// Signal strength in dBm. `127` means the controller had no reading, which
+    /// the Core Specification defines and which is not a plausible dBm value.
+    pub rssi: i8,
+}
+
+impl AdvReport {
+    /// The observation in the shape the wire carries.
+    ///
+    /// BLE records have no SSID and no channel; the firmware writes an empty
+    /// field and a literal zero (`src/WiFiOps.cpp:144`), and the exporter
+    /// depends on both.
+    #[must_use]
+    pub const fn as_line(&self) -> WardriveLine<'static> {
+        WardriveLine {
+            bssid: self.address,
+            ssid: b"",
+            security: Security::Ble,
+            channel: 0,
+            rssi: self.rssi as i16,
+            kind: RecordKind::Ble,
+        }
+    }
+
+    /// Whether the controller declined to report a signal strength.
+    #[must_use]
+    pub const fn has_rssi(&self) -> bool {
+        self.rssi != 127
+    }
+}
+
+/// Walk the advertising reports in one HCI packet.
+///
+/// Yields nothing for any other packet, so a caller can hand it everything the
+/// controller says — command completions, unknown events, the lot.
+#[must_use]
+pub fn adv_reports(packet: &[u8]) -> AdvReports<'_> {
+    let empty = AdvReports { rest: &[], remaining: 0 };
+    // H4 type, event code, parameter length, subevent, report count.
+    let Some(&[EVT, LE_META, _plen, ADV_REPORT, count]) = packet.get(..5) else { return empty };
+    AdvReports { rest: &packet[5..], remaining: count }
+}
+
+/// The iterator [`adv_reports`] returns.
+#[derive(Debug, Clone)]
+pub struct AdvReports<'a> {
+    rest: &'a [u8],
+    remaining: u8,
+}
+
+impl Iterator for AdvReports<'_> {
+    type Item = AdvReport;
+
+    fn next(&mut self) -> Option<AdvReport> {
+        if self.remaining == 0 {
+            return None;
+        }
+        self.remaining -= 1;
+
+        // Event type, address type, address, then the advertising data whose
+        // length is declared inline, then RSSI.
+        //
+        // Reports are laid out one after another rather than as parallel arrays
+        // per parameter. The specification's parameter table reads either way;
+        // every controller and every host stack agrees on this reading, and in
+        // practice a controller sends one report per event anyway.
+        let mut address = *self.rest.get(2..8)?.first_chunk::<6>()?;
+        address.reverse();
+        let data_len = usize::from(*self.rest.get(8)?);
+        let rssi = *self.rest.get(9 + data_len)? as i8;
+        self.rest = self.rest.get(10 + data_len..)?;
+        Some(AdvReport { address, rssi })
+    }
+}

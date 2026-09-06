@@ -215,3 +215,31 @@ fn the_real_cores_assignment_matches_what_our_planner_produces() {
     }
     assert!(checked > 0, "no MSG_ADMIN frames in the fixture");
 }
+
+#[test]
+fn captured_payloads_re_encode_byte_for_byte() {
+    // The node firmware writes these lines; the vendor's node wrote the ones in
+    // this fixture. Reproducing them exactly — MAC case, empty fields, sign —
+    // is what makes a wartui node's output indistinguishable downstream.
+    use wartui_proto::air::{WARDRIVE_LINE_MAX, WardriveLine};
+
+    let mut checked = 0;
+    for line in GOLDEN.lines().filter(|l| !l.trim().is_empty() && !l.starts_with('#')) {
+        let name = line.split_whitespace().next().expect("name");
+        let bytes = vector(name);
+        let Ok(Frame::Text(msg)) = Frame::decode(&bytes) else { continue };
+        if msg.msg_type != MsgType::Text || msg.text.is_empty() {
+            continue;
+        }
+        let record = WardriveLine::parse(msg.text).expect("a valid payload");
+        let mut buf = [0u8; WARDRIVE_LINE_MAX];
+        let len = record.write_into(&mut buf).expect("a captured line fits");
+        assert_eq!(
+            &buf[..len],
+            msg.text,
+            "{name}: re-encoded payload differs from what the node sent"
+        );
+        checked += 1;
+    }
+    assert!(checked >= 3, "expected several observation payloads, checked {checked}");
+}

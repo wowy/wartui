@@ -18,18 +18,12 @@ use wartui_proto::air::{AdminMsg, Frame, MsgType, TextMsg};
 use wartui_proto::link::{
     BROADCAST, BridgeToHost, Chip, EspNowPayload, HostToBridge, LogLevel, LogStr, Mac, SendStatus,
 };
-use wartui_proto::plan::{NODE_STAGGER_WINDOW_MS, NUM_SCAN_CHANNELS, SCAN_CHANNELS};
+use wartui_proto::plan::{
+    ADMIN_WAIT_MS, CHANNEL_DWELL_MS, DEDUP_RING, NODE_STAGGER_WINDOW_MS, NUM_SCAN_CHANNELS,
+    SCAN_CHANNELS,
+};
 
 use crate::{BridgeInfo, LinkEvent, LinkHandle, TransportError, link_pair};
-
-/// `CHANNEL_TIMER`, `src/configs.h:159` — how long a node dwells per channel.
-const CHANNEL_DWELL_MS: u64 = 80;
-
-/// `ADMIN_WAIT_MS`, `src/WiFiOps.h:58`.
-const ADMIN_WAIT_MS: u64 = 300;
-
-/// `mac_history_len`, `src/configs.h:158`.
-const DEDUP_RING: usize = 200;
 
 /// How the simulated fleet should behave.
 #[derive(Debug, Clone)]
@@ -264,7 +258,7 @@ async fn run_node(
     speed: f64,
     started: Instant,
 ) {
-    let dwell = scaled(CHANNEL_DWELL_MS, speed);
+    let dwell = scaled(u64::from(CHANNEL_DWELL_MS), speed);
     loop {
         // A node walks its assigned range one channel per step
         // (`startNextNodeAssignedScan`, `src/WiFiOps.cpp:741-760`), so the
@@ -310,7 +304,7 @@ async fn run_node(
             return;
         }
 
-        if nap(scaled(ADMIN_WAIT_MS, speed), &mut admin_rx, &mut node).await.is_break() {
+        if nap(scaled(u64::from(ADMIN_WAIT_MS), speed), &mut admin_rx, &mut node).await.is_break() {
             return;
         }
     }

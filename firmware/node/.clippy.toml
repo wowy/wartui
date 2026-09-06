@@ -1,0 +1,6 @@
+# A `Sighting` is around sixty bytes and the pending ring holds forty-eight of
+# them, so anything that touches the ring by value is over 1KB and says nothing
+# interesting. The threshold is set above that but well under the main task's
+# stack, which the linker sizes at 216KB, so what this still catches is worth
+# reading.
+stack-size-threshold = 4096

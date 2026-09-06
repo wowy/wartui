@@ -11,6 +11,9 @@
 #![no_std]
 
 pub mod air;
+pub mod beacon;
+pub mod dedup;
+pub mod hci;
 pub mod link;
 pub mod outbox;
 pub mod plan;
@@ -20,6 +23,9 @@ pub mod plan;
 pub use heapless;
 
 pub use air::{AdminMsg, DecodeError, Frame, MsgType, TextMsg, WardriveLine};
+pub use beacon::{Sighting, parse_mgmt};
+pub use dedup::MacRing;
+pub use hci::AdvReport;
 pub use link::{BridgeToHost, HostToBridge, LinkError, SendStatus};
 pub use outbox::{ByteSink, Outbox};
 pub use plan::{ChannelPool, SCAN_CHANNELS};
