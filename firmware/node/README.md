@@ -119,10 +119,11 @@ every 125 ms, and "once per sweep" would have put a 500 ms scan against nearly
 every admin window it has. Narrowing a node to one channel is a supported thing
 to do, so that case has to be the safe one.
 
-That was a hardware question and it now has a hardware answer: on the very board
-that acknowledged none of its thirty-two assignments under vendor firmware, this
-one acknowledged in 5.8 ms and ran 10% slower than its BLE-off twin rather than
-the vendor's ~78%. `docs/phase-1-findings.md` has the run, including the bug that
+That was a hardware question and it now has a hardware answer, twice: on the very
+board that acknowledged none of its thirty-two assignments under vendor firmware,
+this one acknowledged in 5.8 ms against a twin board and 6.6 ms against itself,
+first attempt both times, and ran 10.0% and then 7.6% slower with BLE on rather
+than the vendor's ~78%. `docs/phase-1-findings.md` has the run, including the bug that
 made the first attempt of it meaningless — a scan that is enabled, answered
 `status 0`, and reports nothing, because the controller's event mask hides the
 one event it exists to produce.

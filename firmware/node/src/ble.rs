@@ -6,10 +6,13 @@
 //! worse, a node with BLE on acknowledged none of the thirty-two channel
 //! assignments sent to it while a node without BLE acknowledged both of its
 //! two. Both figures are measured; see `docs/phase-0-findings.md`. This code has
-//! since been run against the same board on the same bench: it acknowledged its
-//! assignment in under six milliseconds and cost 10% of its sweep period rather
-//! than the vendor's ~78%, which `docs/phase-1-findings.md` records along with
-//! the caveat that the run varies none of the three measures individually. An
+//! since been run twice against that same board on the same bench: it
+//! acknowledged its assignment in 5.8 ms and then 6.6 ms, first attempt both
+//! times, and cost 10.0% of its sweep period by one method and 7.6% by the
+//! other, rather than the vendor's ~78%. Which of those two is the truer figure
+//! is unsettled; that it is under ten percent is not. `docs/phase-1-findings.md`
+//! records both, along with the caveat that neither run varies the three
+//! measures individually. An
 //! 802.11 acknowledgement comes from the receiver's MAC hardware, so its
 //! absence means the radio was simply not on the channel: NimBLE and
 //! Wi-Fi share the one 2.4 GHz antenna, and the admin window is precisely when
@@ -54,11 +57,19 @@ pub const SCAN_MS: u32 = 500;
 ///
 /// Addresses rotate for privacy, so unlike access points these rarely repeat
 /// and the ring behind them never suppresses much. Sixty-four was a guess at a
-/// busy room, and then an ordinary room filled 60 of it
+/// busy room, and then an ordinary room filled 60 of it and, on the re-run, 61
 /// (`docs/phase-1-findings.md`). The ring drops the *newest* advertiser once it
 /// is full and records that only on a counter no host reads, which makes
 /// overflow the one failure here that nothing would notice — so the number is
 /// set well clear of the measurement rather than just above it.
+///
+/// It is also the ceiling on something else, which is the reason not to make it
+/// enormous: `report_ble` broadcasts one frame per *new* advertiser, and it runs
+/// immediately before the stagger, the heartbeat and the admin window. Addresses
+/// rotate, so "new" is most of a sweep — 54 of the first scan's 54. This number
+/// is therefore the worst-case burst standing between the last dwell and the
+/// window this node has to be listening in, which is the delay the whole module
+/// is arranged to avoid.
 ///
 /// Eighty and not more because `Scanner` is built by value, so the ring is on
 /// the stack of `Scanner::new` and then of `main`: at 96 entries a `esp32c5,ble`
@@ -110,6 +121,15 @@ impl<'d> Scanner<'d> {
     /// Distinct addresses only, keeping the strongest reading for each: the
     /// same advertiser is heard several times a second and only one of those
     /// belongs on the wire.
+    ///
+    /// "Heard" is per call and not quite per window. The disable at the end
+    /// drains on a budget, so in a room busy enough to exhaust it a few reports
+    /// from one scan are still queued when the next begins, and this one no
+    /// longer drains before enabling — it counts them. Dedup absorbs the
+    /// repeats, so what this costs is the precision of the `heard` figure in the
+    /// console line, in exactly the busy case where it is least precise anyway.
+    /// Draining first would cost whole reports instead, which is the trade the
+    /// scan-enable path was changed to stop making.
     pub fn sweep(&mut self) -> &[AdvReport] {
         self.len = 0;
         // Written directly rather than through `command`, because from this
