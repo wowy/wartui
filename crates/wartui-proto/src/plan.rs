@@ -150,6 +150,15 @@ pub enum ChannelPool {
     #[default]
     Us,
     /// Every channel the firmware knows, matching stock node behaviour.
+    ///
+    /// Index 13 — channel 14 — is in this pool and a node will refuse it, one
+    /// hop per sweep. That is `esp-radio` hardcoding `nchan: 13` in the country
+    /// blob, not a rule this host chose, and it is reachable through no setting
+    /// the crate exposes (`docs/phase-1-findings.md`). It is left in rather than
+    /// carved out because this pool is one contiguous run, and splitting it
+    /// around one index would make a lone node rotate between two runs on the
+    /// dwell timer — a real cost, for a channel that is Japan-only and
+    /// 802.11b-only. Phase 2's channel mask can exclude it for one bit.
     All,
 }
 

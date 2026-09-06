@@ -23,9 +23,13 @@ use wartui_proto::link::BROADCAST;
 /// without it, and a node whose channel silently did not change would transmit
 /// its observations into the wrong room and hear no assignment at all.
 ///
-/// A refusal is worth reporting rather than retrying: on the C5 it means the
-/// band mode was not set and a 5 GHz channel was asked for, which no amount of
-/// trying again will fix.
+/// A refusal is worth reporting rather than retrying. It is the blob declining
+/// a channel outright, and both known causes are settled before the first sweep
+/// and unchanged by trying again: the band mode was not set and a 5 GHz channel
+/// was asked for, or the channel is outside the configured regulatory domain.
+/// The second cost a bench session — `esp-radio` defaults `country_info` to
+/// `CN` under a manual policy, which permits 36-64 and 149-165 and refuses the
+/// whole of 100-144. `main` sets `US` for that reason.
 pub fn park(manager: &EspNowManager<'_>, sniffer: &Sniffer<'_>, channel: u8, listen: bool) -> bool {
     let _ = sniffer.set_promiscuous_mode(true);
     let parked = manager.set_channel(channel).is_ok();
