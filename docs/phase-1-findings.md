@@ -1,10 +1,12 @@
 # Phase 1 — what the node firmware actually does
 
-Measured on 2026-09-06 with one ESP32-C6 running `firmware/bridge`
-(`98:A3:16:8E:9D:24`, USB) and one ESP32-C6 running `firmware/node`
-(`A0:F2:62:87:00:08`, `esp32c6` feature, BLE not compiled in). Both plaintext,
-control channel 6. No C5 was attached, so nothing here is a 5 GHz or DFS
-result.
+Measured on 2026-09-06. The bridge throughout is an ESP32-C6 running
+`firmware/bridge` (`98:A3:16:8E:9D:24`, USB). Everything up to "Every connection
+begins with one undecodable frame" used one ESP32-C6 node
+(`A0:F2:62:87:00:08`, `esp32c6` feature); the 5 GHz section that follows used
+one ESP32-C5 (`38:44:BE:1F:57:84`, `esp32c5` feature) in its place. Never both
+at once, so nothing here is a two-node result. BLE was not compiled into either.
+Plaintext, control channel 6.
 
 Access point addresses and names are left out deliberately: these were real
 captures of a real neighbourhood, and a BSSID is exactly what a geolocation
@@ -146,13 +148,64 @@ and was re-verified against a bridge held in its bootloader with
 `espflash board-info --after no-reset`, where it fires at five seconds with the
 garbled frame present.
 
+## The C5 does 5 GHz, and refuses ten channels of it
+
+Added 2026-09-06 with an ESP32-C5 (`38:44:BE:1F:57:84`, the BLE-on node from
+Phase 0, reflashed) as the only node, assigned the US pool's 5 GHz run — indices
+14–36, channels 36–165 — by hand with `A`. The assignment was acknowledged in
+6.7 ms and observations came back on channels 36, 44, 48, 56, 149 and 161. The
+`BandMode::Auto` path had never been executed before; it works.
+
+**Channel 56 is a DFS channel and it produced six observations.** That is the
+result the sniffing design exists for: a node listening where a stock node would
+have transmitted a probe request.
+
+**Channels 100–144 are refused by the radio outright.** Over a 130 s capture the
+node logged `radio refused channel N` sixty-four times each for 100, 112, 116,
+120, 124, 128, 132, 136, 140 and 144 — every channel of UNII-2 Extended in the
+scan table, every sweep, without exception, while every other 5 GHz channel
+parked normally. `radio::park` reports this when `EspNowManager::set_channel`
+returns `Err`, so the refusal is the driver's and happens before any dwell.
+
+The sweep period corroborates it independently. Twenty-three assigned channels
+at 125 ms would dwell for 2.9 s, and with the 300 ms admin window the beat
+should have read about 3.2 s. It read 2.0 s — which is what thirteen dwells plus
+the window come to, and thirteen is exactly what is left after ten refusals.
+
+Three things follow, in descending order of how much they matter:
+
+- **Ten of the US pool's twenty-three 5 GHz channels cannot be covered by a C5
+  on this `esp-radio`.** Whether that is a regulatory-domain default that can be
+  configured or a hard limit of the driver is not established here, and it is
+  worth finding out before Phase 2 reshapes assignments around a channel mask.
+- **The host cannot see it.** The planner assigns those indices freely, and a
+  node given only 100–144 would sit there `alive`, heartbeating, reporting
+  nothing — indistinguishable from a node whose radio silently did not tune,
+  which is the failure `docs/phase-0-findings.md` warns reads as a dead node.
+  The node knows and says so on its own serial console, where the host is not
+  listening.
+- **The firmware handles it correctly**, which is worth recording because it was
+  a deliberate choice under review. A refused hop still calls `advance()`, so the
+  cursor is never stranded on a channel the radio will not take, and nothing is
+  transmitted or counted for a channel that was never reached.
+
+### Probe requests: argued, not captured
+
+The claim that a listening node transmits nothing on a DFS channel is *not*
+verified by a monitor-mode capture here. It is verified by construction: every
+transmit in the sweep — `report` and the heartbeat both — is gated on
+`on_control`, the return of the park back to channel 6, and there is no other
+transmit path in the loop. The node cannot send on a dwell channel because no
+code does. What a capture would still add is whether the driver itself emits
+anything while parked, which this does not answer.
+
 ## Not measured
 
-Three checkpoint items had no hardware to run on and are still open:
+Two checkpoint items had no hardware to run on and are still open, and one is
+now half-answered:
 
-- **5 GHz and DFS on a C5**, including the claim that a listening node
-  transmits no probe requests on channels 52–144. This is the strongest reason
-  the firmware sniffs rather than scans and it is entirely unverified.
+- **DFS above 100 on a C5.** Unreachable rather than unmeasured, per the section
+  above. DFS 52–64 is confirmed working.
 - **A two-node split**, where the plan is cut in half and each node stays inside
   its own range. Everything above is one node, so `node_index`/`node_count` have
   only ever been 0 and 1, and the transmit stagger has never been exercised.
