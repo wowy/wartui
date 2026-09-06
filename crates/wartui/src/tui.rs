@@ -307,8 +307,8 @@ fn draw(frame: &mut Frame<'_>, snapshot: &Snapshot, ui: &Ui) {
     // footer with the counters meant that a run with several faults at once —
     // exactly the run where they matter — pushed the last of them off the end
     // of the terminal.
-    let faults = faults(snapshot);
-    let footer_height = if faults.is_empty() { 1 } else { 2 };
+    let faults = fault_lines(&faults(snapshot), frame.area().width);
+    let footer_height = 1 + u16::try_from(faults.len()).unwrap_or(u16::MAX);
     let [header, body, footer] = Layout::vertical([
         Constraint::Length(4),
         Constraint::Min(6),
@@ -349,12 +349,11 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot) {
         |s| format!("  channel {}  peers {}  bridge rx {}", s.channel, s.peer_count, s.rx_count),
     );
 
-    let mut first = vec![Span::raw(link)];
-    if let Some(error) = &snapshot.link_error
-        && !snapshot.link_up
-    {
-        first.push(Span::styled(format!("  ({error})"), Style::new().fg(Color::Red)));
-    }
+    // The reason a link is down used to be appended here, on the one line that
+    // shares its width with the bridge's identity — so on a narrow terminal the
+    // single most useful thing on screen was the part that got clipped. It
+    // lives in the fault box now, which is vertical and wraps.
+    let first = vec![Span::raw(link)];
 
     let mut second = vec![
         Span::raw(format!("pool {:?}  ", snapshot.pool)),
@@ -622,6 +621,61 @@ fn observation_row(entry: &TailEntry) -> Row<'static> {
     ])
 }
 
+/// How many lines of faults the footer may take before it starts summarising.
+///
+/// The fleet table has to keep some of the terminal.
+const MAX_FAULT_LINES: usize = 3;
+
+/// Fit the faults into lines no wider than the terminal.
+///
+/// Joining them all with two spaces and letting the terminal clip the overflow
+/// is how the most important fault ends up invisible — and the most important
+/// fault is usually the longest, because it carries an error string from the
+/// operating system.
+fn fault_lines(faults: &[String], width: u16) -> Vec<String> {
+    // A width this small is not a terminal anyone is reading, but the
+    // arithmetic below still has to terminate.
+    let width = usize::from(width).max(8);
+    let mut lines: Vec<String> = Vec::new();
+    for (index, fault) in faults.iter().enumerate() {
+        let room = |line: &String| line.chars().count() + 2 + fault.chars().count() <= width;
+        if lines.last().is_some_and(room) {
+            if let Some(line) = lines.last_mut() {
+                line.push_str("  ");
+                line.push_str(fault);
+            }
+        } else if lines.len() < MAX_FAULT_LINES {
+            lines.extend(chunks(fault, width));
+            lines.truncate(MAX_FAULT_LINES);
+        } else {
+            // Out of room. Say how much is not being shown rather than leaving
+            // the operator to wonder whether that was all of it.
+            let marker = format!("  +{} more", faults.len() - index);
+            if let Some(line) = lines.last_mut() {
+                while line.chars().count() + marker.chars().count() > width && line.pop().is_some()
+                {
+                }
+                line.push_str(&marker);
+            }
+            break;
+        }
+    }
+    lines
+}
+
+/// One fault, split across as many lines as its own length needs.
+fn chunks(fault: &str, width: usize) -> Vec<String> {
+    let room = width.saturating_sub(2).max(1);
+    let mut out = Vec::new();
+    let mut rest: Vec<char> = fault.chars().collect();
+    while !rest.is_empty() {
+        let take = rest.len().min(room);
+        let line: String = rest.drain(..take).collect();
+        out.push(format!("  {line}"));
+    }
+    out
+}
+
 fn draw_footer(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot, ui: &Ui, faults: &[String]) {
     let c = snapshot.counters;
     let mut lines = Vec::new();
@@ -650,11 +704,10 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot, ui: &Ui, 
         lines.push(Line::from(spans));
     }
 
-    if !faults.is_empty() {
-        lines.push(Line::from(Span::styled(
-            format!("  {}", faults.join("  ")),
-            Style::new().fg(Color::Yellow),
-        )));
+    // Already fitted to the width by `fault_lines`, so nothing here can be
+    // clipped and no fault can push another one off the end.
+    for fault in faults {
+        lines.push(Line::from(Span::styled(fault.clone(), Style::new().fg(Color::Yellow))));
     }
 
     frame.render_widget(Paragraph::new(lines).dim(), area);
@@ -666,6 +719,13 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot, ui: &Ui, 
 fn faults(snapshot: &Snapshot) -> Vec<String> {
     let c = snapshot.counters;
     let mut faults = Vec::new();
+    // First, because when the link is down nothing else in this list is being
+    // updated and the reason is the only thing worth reading.
+    if let Some(error) = &snapshot.link_error
+        && !snapshot.link_up
+    {
+        faults.push(format!("link down: {error}"));
+    }
     if snapshot.store.dropped > 0 {
         faults.push(format!("store dropped {}", snapshot.store.dropped));
     }
@@ -940,6 +1000,50 @@ mod tests {
         let rendered = faulty.backend().to_string();
         assert!(rendered.contains("store dropped 7"));
         assert!(rendered.contains("admin frames from another core"));
+    }
+
+    const BUSY: &str = "could not open /dev/cu.usbmodem101: Device or resource busy";
+
+    #[test]
+    fn one_long_fault_is_broken_up_rather_than_cut_off() {
+        // The bug this replaced: the reason a link was down was appended to the
+        // header, unwrapped, so on a narrow terminal the operator saw
+        // "waiting for a bridge to announce itself" and nothing else.
+        let fault = format!("link down: {BUSY}");
+        let lines = fault_lines(std::slice::from_ref(&fault), 40);
+        assert!(lines.len() > 1, "it does not fit on one line: {lines:?}");
+        assert!(lines.iter().all(|l| l.chars().count() <= 40), "{lines:?}");
+        let rejoined: String = lines.iter().map(|l| l.trim_start()).collect();
+        assert_eq!(rejoined, fault, "every character of it is on screen somewhere");
+    }
+
+    #[test]
+    fn faults_that_fit_still_share_one_line() {
+        let faults = ["store dropped 7".to_owned(), "unparsed 3".to_owned()];
+        assert_eq!(fault_lines(&faults, 200), vec!["  store dropped 7  unparsed 3".to_owned()]);
+    }
+
+    #[test]
+    fn more_faults_than_the_footer_can_hold_are_counted_rather_than_dropped() {
+        let faults: Vec<String> = (0..12).map(|n| format!("fault number {n} of twelve")).collect();
+        let lines = fault_lines(&faults, 40);
+        assert_eq!(lines.len(), MAX_FAULT_LINES, "the fleet table keeps the rest of the screen");
+        assert!(lines.iter().all(|l| l.chars().count() <= 40), "{lines:?}");
+        let last = lines.last().expect("a line");
+        assert!(last.contains("more"), "how many are not shown: {last}");
+    }
+
+    #[test]
+    fn the_reason_a_link_is_down_reaches_a_narrow_terminal() {
+        let mut snapshot = empty();
+        snapshot.link_error = Some(BUSY.to_owned());
+        let mut terminal = Terminal::new(TestBackend::new(60, 24)).expect("test backend");
+        terminal.draw(|frame| draw(frame, &snapshot, &Ui::default())).expect("drawing");
+        let screen = terminal.backend().to_string();
+        assert!(screen.contains("link down"), "{screen}");
+        // The tail of the reason is the part that used to be lost, and it is
+        // the part that names what to do about it.
+        assert!(screen.contains("busy"), "{screen}");
     }
 
     #[test]
