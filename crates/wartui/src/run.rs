@@ -2,7 +2,10 @@
 //!
 //! It listens, it writes rows, and it draws what it heard. It also transmits,
 //! but only when asked: `a` and `A` in the view assign the selected node a
-//! channel range, and nothing else this command does reaches the air.
+//! channel range, `p` hands the fleet to the auto-assignment planner, and
+//! nothing else this command does reaches the air. `--auto` starts with the
+//! planner already running, which is wartui at its full job of replacing the
+//! mesh's core.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -56,6 +59,12 @@ pub struct Args {
     #[arg(long, value_enum, default_value_t = PoolArg::Us)]
     pool: PoolArg,
 
+    /// Partition the pool across the fleet without being asked, re-cutting it
+    /// whenever the set of heartbeating nodes changes. Toggled in the view
+    /// with `p`.
+    #[arg(long)]
+    auto: bool,
+
     /// The mesh's ESP-NOW control channel.
     #[arg(long, default_value_t = 6)]
     channel: u8,
@@ -100,6 +109,7 @@ pub async fn run(args: Args) -> Result<()> {
 
     let config = EngineConfig {
         pool,
+        auto: args.auto,
         record_raw: args.record_raw,
         position,
         // Epochs continue from wherever this database left off. Reusing one a

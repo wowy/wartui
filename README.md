@@ -85,16 +85,22 @@ Flashing the bridge itself is in `firmware/bridge/README.md`.
 
 `wartui run` — the default, so the subcommand can be left off — listens, writes
 every observation to SQLite, and draws the fleet while it does. It transmits
-only when asked: `a` and `A` assign the selected node a channel range, and
-nothing else reaches the air.
+only when asked: `a` and `A` assign the selected node a channel range, `p` hands
+the whole fleet to the planner, and nothing else reaches the air. `--auto`
+starts with the planner already running.
 
 ```sh
 wartui run --db tonight.db --lat 37.7749 --lon -122.4194
+wartui run --db tonight.db --auto --lat 37.7749 --lon -122.4194
 wartui export --db tonight.db --wigle tonight.csv
 ```
 
 Press `q` to stop; the last batch is committed and the session closed out before
 it exits.
+
+The store is the system of record and the CSV is a view of it, not the other way
+round: an export can be re-run after a decoder fix, run against a session that
+ended last week, or run against one that is still going.
 
 ### Assigning channels
 
@@ -103,6 +109,10 @@ it exits.
 | `↑` `↓` / `k` `j` | Move the cursor down the fleet table |
 | `a` | Give the selected node a range of exactly **one** channel |
 | `A` | Give it the widest run in the pool |
+| `p` | Hand the whole fleet to the planner, or take it back |
+
+The header says which of you is deciding: `manual`, or `auto — 4 of 5` for four
+heartbeating nodes out of five seen.
 
 Nothing goes out at the moment the key is pressed. A node's radio is away
 scanning some other channel for all but the 300 ms it holds open after its own
@@ -124,9 +134,41 @@ If a node keeps showing `no admin ack`, the cause is nearly always BLE: NimBLE
 and Wi-Fi share the one 2.4 GHz antenna, and the admin window is precisely when
 the node would otherwise be idle. Turn BLE off in that node's web UI.
 
-The store is the system of record and the CSV is a view of it, not the other way
-round: an export can be re-run after a decoder fix, run against a session that
-ended last week, or run against one that is still going.
+### Letting wartui assign them
+
+`p`, or `--auto`, is wartui doing the core's whole job: it cuts the pool into
+one contiguous range per node and re-cuts it whenever the fleet changes shape.
+
+A node is in the plan while it is **heartbeating**. Not while it is merely being
+heard — a node that has stopped heartbeating never opens an admin window, so a
+share of the pool held open for it is a share nobody is scanning. It drops out
+after the same 60 s the firmware uses, and whatever it was owed is dropped with
+it.
+
+Every change re-cuts the pool for the *whole* fleet, not just the node that
+joined or left. `node_index` and `node_count` travel in every assignment and are
+what each node computes its transmit stagger from (`src/RadioTuning.cpp:3-13`),
+so a fleet whose members disagree about the count keys up on top of itself. Each
+node takes its new range in its own next admin window, so a fleet converges in
+about one sweep.
+
+An unchanged fleet is left alone. A node adopts an assignment only when the
+epoch differs from the one it holds, so re-sending one it already has is a frame
+it acknowledges and then discards — indistinguishable from success. The planner
+only speaks when it has something new to say.
+
+**One node on the US pool rotates.** `MSG_ADMIN` carries a single contiguous
+range and the US pool is two runs, so a lone node cannot hold both at once; it
+covers them in turn, 60 s each, and the header says which phase it is on.
+Coverage becomes intermittent rather than incorrect.
+
+Over twenty nodes the planner stops re-cutting rather than partitioning among
+nodes the bridge cannot address. Whatever is already assigned stays assigned,
+capture is unaffected, and the footer says so.
+
+Assigning by hand while the planner is running is refused — it would be honoured
+and then taken back at the next re-cut, which reads as the range having been
+ignored. Press `p` first.
 
 ### Positions
 
@@ -147,6 +189,9 @@ many networks it left out. The GPS tier arrives in Phase 6.
 | `refused` | The bridge would not transmit it. Nearly always a full peer table, which means the fleet is over twenty nodes |
 | `rebooted xN` | Its heartbeat counter went backwards, so it has forgotten any assignment; wartui re-issues under a fresh epoch |
 | `encrypted` | It is sending core-protocol frames. wartui cannot talk to it; turn encryption off in that node's web UI |
+
+A node that is `stale` is also out of the plan, for the same reason it cannot be
+assigned by hand: no heartbeat, no window.
 
 `stale` and `no heartbeat` are deliberately distinct from silence. The vendor
 firmware refreshes liveness only on a heartbeat, so a node streaming
