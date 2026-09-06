@@ -84,14 +84,15 @@ Flashing the bridge itself is in `firmware/bridge/README.md`.
 ## Capturing
 
 `wartui run` — the default, so the subcommand can be left off — listens, writes
-every observation to SQLite, and draws the fleet while it does. It transmits
-only when asked: `a` and `A` assign the selected node a channel range, `p` hands
-the whole fleet to the planner, and nothing else reaches the air. `--auto`
-starts with the planner already running.
+every observation to SQLite, and draws the fleet while it does. It also
+partitions the pool across the fleet without being asked, which is the core's
+job and the reason this exists; `p` takes that back and `a`/`A` then assign the
+selected node a range by hand. `--manual` starts with the planner off, and
+nothing reaches the air until a key is pressed.
 
 ```sh
 wartui run --db tonight.db --lat 37.7749 --lon -122.4194
-wartui run --db tonight.db --auto --gps /dev/cu.usbserial-1420
+wartui run --db tonight.db --manual --gps /dev/cu.usbserial-1420
 wartui export --db tonight.db --wigle tonight.csv
 ```
 
@@ -136,8 +137,9 @@ the node would otherwise be idle. Turn BLE off in that node's web UI.
 
 ### Letting wartui assign them
 
-`p`, or `--auto`, is wartui doing the core's whole job: it cuts the pool into
-one contiguous range per node and re-cuts it whenever the fleet changes shape.
+This is on by default, and it is wartui doing the core's whole job: it cuts the
+pool into one contiguous range per node and re-cuts it whenever the fleet
+changes shape. `--manual` starts without it; `p` toggles it either way.
 
 A node is in the plan while it is **heartbeating**. Not while it is merely being
 heard — a node that has stopped heartbeating never opens an admin window, so a

@@ -2,12 +2,14 @@
 //!
 //! It listens, it writes rows, and it draws what it heard — each row stamped
 //! with wherever the host believed it was at that moment: a GPS on
-//! `--gps`, else `--lat`/`--lon`, else nothing. It also transmits,
-//! but only when asked: `a` and `A` in the view assign the selected node a
-//! channel range, `p` hands the fleet to the auto-assignment planner, and
-//! nothing else this command does reaches the air. `--auto` starts with the
-//! planner already running, which is wartui at its full job of replacing the
-//! mesh's core.
+//! `--gps`, else `--lat`/`--lon`, else nothing.
+//!
+//! It also transmits, and by default without being asked: the planner
+//! partitions the pool across the fleet and re-cuts it as the fleet changes,
+//! which is wartui at its full job of replacing the mesh's core. `p` takes
+//! that back and `a`/`A` then assign the selected node a range by hand.
+//! `--manual` starts with the planner off, and nothing reaches the air until a
+//! key is pressed.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -63,11 +65,11 @@ pub struct Args {
     #[arg(long, value_enum, default_value_t = PoolArg::Us)]
     pool: PoolArg,
 
-    /// Partition the pool across the fleet without being asked, re-cutting it
-    /// whenever the set of heartbeating nodes changes. Toggled in the view
-    /// with `p`.
-    #[arg(long)]
-    auto: bool,
+    /// Do not partition the pool across the fleet. Channel ranges are then
+    /// only what `a` and `A` assign by hand, and nothing goes out unasked.
+    /// Toggled in the view either way with `p`.
+    #[arg(long, alias = "no-auto")]
+    manual: bool,
 
     /// The mesh's ESP-NOW control channel.
     #[arg(long, default_value_t = 6)]
@@ -139,7 +141,7 @@ pub async fn run(args: Args) -> Result<()> {
 
     let config = EngineConfig {
         pool,
-        auto: args.auto,
+        auto: !args.manual,
         record_raw: args.record_raw,
         position,
         // Epochs continue from wherever this database left off. Reusing one a
