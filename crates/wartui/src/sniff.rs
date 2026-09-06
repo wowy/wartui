@@ -51,7 +51,7 @@ pub async fn run(args: Args) -> Result<()> {
             _ = tokio::signal::ctrl_c() => break,
             () = &mut notice, if !spoken => {
                 spoken = true;
-                if counts.link_events == 0 {
+                if !counts.heard_a_bridge {
                     eprintln!("\n{}\n", super::no_bridge_notice(args.port.as_deref()));
                 }
             }
@@ -81,10 +81,12 @@ pub async fn run(args: Args) -> Result<()> {
 
 #[derive(Default)]
 struct Counts {
-    /// Anything the link itself has said — an announcement, or a reason it is
-    /// down. Nonzero means the user already has a diagnosis and does not need
-    /// the notice, whose whole subject is having heard nothing at all.
-    link_events: u64,
+    /// Whether anything behind the port has behaved like a bridge: an
+    /// announcement, a decoded message of any kind, or the transport saying why
+    /// the link is down. Any of those leaves the operator better informed than
+    /// the notice would, whose whole subject is having heard nothing at all.
+    /// An undecodable frame is not one of them — see [`handle`].
+    heard_a_bridge: bool,
     total: u64,
     text: u64,
     heartbeat: u64,
@@ -97,12 +99,28 @@ struct Counts {
 
 fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
     let LinkEvent::Message(message) = &event else {
-        counts.link_events += 1;
+        // `Garbled` deliberately does not count. Undecodable bytes are the
+        // loudest symptom of the thing the notice exists to explain — a board
+        // running node firmware talks constantly and none of it is a frame,
+        // and any `0x00` in that stream terminates a partial frame and lands
+        // here. Treating one as proof a bridge answered would silence the
+        // notice in exactly the case it was written for.
+        if !matches!(event, LinkEvent::Garbled(_)) {
+            counts.heard_a_bridge = true;
+        }
         if let Some(line) = super::describe(&event) {
             println!("# {line}");
         }
         return;
     };
+
+    // Any decoded message, not just `Connected`. The transport re-sends
+    // `Identify` until it is answered, but the bridge's transmit rings evict
+    // oldest-first, so a busy fleet can cost it every `Ready` it sends while
+    // its observations arrive perfectly well. Accusing a bridge of not
+    // speaking the link protocol underneath a screenful of frames it decoded
+    // is the one output worse than saying nothing.
+    counts.heard_a_bridge = true;
 
     match message {
         BridgeToHost::Rx { src, dst, rssi, rx_us, payload, .. } => {
@@ -213,4 +231,47 @@ fn render(line: &WardriveLine<'_>) -> String {
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join("")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wartui_proto::link::LinkError;
+
+    fn args() -> Args {
+        Args { port: None, sim: None, raw: false, verbose: false }
+    }
+
+    fn heard(event: LinkEvent) -> bool {
+        let mut counts = Counts::default();
+        handle(event, &args(), &mut counts);
+        counts.heard_a_bridge
+    }
+
+    #[test]
+    fn an_undecodable_frame_is_not_a_bridge_answering() {
+        // The board that produces these fastest is one running node firmware,
+        // which is the first cause the notice names. Counting a garbled frame
+        // as contact would suppress the notice permanently after one of them.
+        assert!(!heard(LinkEvent::Garbled(LinkError::Corrupt)));
+    }
+
+    #[test]
+    fn a_decoded_message_counts_even_without_an_announcement() {
+        // `Ready` can be lost to the bridge's transmit rings while everything
+        // else it sends arrives; frames on screen must not be contradicted.
+        let status = BridgeToHost::Status {
+            channel: 6,
+            peer_count: 0,
+            rx_count: 0,
+            dropped_tx: 0,
+            uptime_ms: 1_000,
+        };
+        assert!(heard(LinkEvent::Message(status)));
+    }
+
+    #[test]
+    fn a_reason_the_link_is_down_counts_because_it_is_the_better_diagnosis() {
+        assert!(heard(LinkEvent::Disconnected { reason: "could not open".to_owned() }));
+    }
 }
