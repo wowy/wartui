@@ -9,7 +9,8 @@ use std::time::{Duration, Instant};
 
 use wartui_bridge::{BridgeInfo, LinkEvent};
 use wartui_core::engine::{Command, Counters, EngineConfig, Event, FleetEngine, Now, StoreStats};
-use wartui_core::position::{PositionChain, PositionSource};
+use wartui_core::gps::Gps;
+use wartui_core::position::{DEFAULT_MAX_AGE, PositionChain, PositionSource};
 use wartui_core::record::{AdminOutcome, Record};
 use wartui_proto::air::{AdminMsg, MsgType, TextMsg};
 use wartui_proto::link::{
@@ -356,6 +357,78 @@ fn every_observation_carries_the_position_the_host_believed_in() {
 
     assert_eq!(obs.fix.source, PositionSource::Static);
     assert_eq!(obs.fix.lat, Some(37.7749));
+}
+
+/// A GGA fix at 48.1173N, 11.5167E — somewhere very much not San Francisco,
+/// so which tier answered is visible in the coordinates alone.
+const GGA: &[u8] = b"$GPGGA,123519.00,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*69";
+
+/// The observation in a batch, wherever the node-seen row landed relative to it.
+fn observed(batch: &wartui_core::ActionBatch) -> &wartui_core::record::Observation {
+    batch
+        .records
+        .iter()
+        .find_map(|r| match r {
+            Record::Observation(obs) => Some(obs),
+            _ => None,
+        })
+        .expect("an observation")
+}
+
+#[test]
+fn a_drive_that_gets_a_fix_partway_through_says_where_each_row_actually_was() {
+    // The reason the source is a column and not a session-wide setting: a
+    // capture that starts in a garage and ends on a road is one capture.
+    let clock = Clock::new();
+    let gps = Gps::detached();
+    let config = EngineConfig {
+        position: PositionChain::fixed(37.7749, -122.4194, Some(16.0))
+            .with_gps(gps.clone(), DEFAULT_MAX_AGE),
+        ..Default::default()
+    };
+    let mut engine = engine(config, &clock);
+
+    let indoors = engine.handle(observation(NODE, "AA:BB:CC:DD:EE:01", -60), clock.at(1));
+    let indoors = observed(&indoors);
+    assert_eq!(indoors.fix.source, PositionSource::Static);
+
+    gps.feed(GGA, clock.at(10).unix_ms);
+    let outdoors = engine.handle(observation(NODE, "AA:BB:CC:DD:EE:02", -60), clock.at(11));
+    let outdoors = observed(&outdoors);
+    assert_eq!(outdoors.fix.source, PositionSource::Gps);
+    assert_eq!(outdoors.fix.accuracy, Some(4.5));
+    assert!((outdoors.fix.lat.expect("a latitude") - 48.1173).abs() < 1e-4);
+}
+
+#[test]
+fn a_receiver_that_goes_quiet_hands_the_rows_back_to_the_static_position() {
+    // Not "keeps the last fix forever": at driving speed a minute-old position
+    // is a different street, and a row that claims it is worse than one that
+    // admits to the operator's typed-in guess.
+    let clock = Clock::new();
+    let gps = Gps::detached();
+    let config = EngineConfig {
+        position: PositionChain::fixed(37.7749, -122.4194, Some(16.0))
+            .with_gps(gps.clone(), DEFAULT_MAX_AGE),
+        ..Default::default()
+    };
+    let mut engine = engine(config, &clock);
+    gps.feed(GGA, clock.at(10).unix_ms);
+
+    let fresh = engine.handle(observation(NODE, "AA:BB:CC:DD:EE:03", -60), clock.at(12));
+    let fresh = observed(&fresh);
+    assert_eq!(fresh.fix.source, PositionSource::Gps);
+
+    let stale = engine.handle(observation(NODE, "AA:BB:CC:DD:EE:04", -60), clock.at(60));
+    let stale = observed(&stale);
+    assert_eq!(stale.fix.source, PositionSource::Static);
+    assert_eq!(stale.fix.lat, Some(37.7749));
+
+    // And the snapshot the operator is watching says the same thing, so the
+    // header and the rows can never disagree about where the fleet thinks it is.
+    let snapshot = engine.snapshot(clock.at(60), StoreStats::default());
+    assert_eq!(snapshot.position.source, PositionSource::Static);
+    assert!(snapshot.gps.is_some(), "the receiver is still configured, just not believed");
 }
 
 #[test]

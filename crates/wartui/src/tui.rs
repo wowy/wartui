@@ -27,6 +27,8 @@ use ratatui::widgets::{Block, Cell, Paragraph, Row, Table};
 use ratatui::{DefaultTerminal, Frame};
 use tokio::sync::{mpsc, oneshot, watch};
 use wartui_core::engine::{Command, NodeView, Snapshot, TailEntry};
+use wartui_core::gps::{GpsStatus, GpsView};
+use wartui_core::position::PositionSource;
 use wartui_core::record::AdminOutcome;
 use wartui_proto::air::RecordKind;
 use wartui_proto::link::Mac;
@@ -361,7 +363,7 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot) {
             elapsed(snapshot.now_ms - snapshot.started_at_ms),
         )),
     ];
-    second.push(position(snapshot));
+    second.extend(position(snapshot));
 
     let body = vec![Line::from(first), Line::from(second)];
     frame.render_widget(Paragraph::new(body).block(Block::bordered().title(" wartui ")), area);
@@ -404,8 +406,8 @@ fn planning(snapshot: &Snapshot) -> Span<'static> {
 /// who then watches a night of observations accumulate and only finds out at
 /// export time that none of them can be uploaded. So it lives here instead,
 /// where it is visible for the whole capture.
-fn position(snapshot: &Snapshot) -> Span<'static> {
-    match (snapshot.position.lat, snapshot.position.lon) {
+fn position(snapshot: &Snapshot) -> Vec<Span<'static>> {
+    let fix = match (snapshot.position.lat, snapshot.position.lon) {
         (Some(lat), Some(lon)) => {
             Span::raw(format!("pos {lat:.5},{lon:.5} ({})", snapshot.position.source.as_str()))
         }
@@ -413,7 +415,45 @@ fn position(snapshot: &Snapshot) -> Span<'static> {
             "pos none — these observations cannot be uploaded",
             Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
         ),
+    };
+    let mut spans = vec![fix];
+    if let Some(gps) = &snapshot.gps {
+        spans.push(receiver(gps, snapshot.position.source));
     }
+    spans
+}
+
+/// What the receiver is doing, said only when it is not the thing answering.
+///
+/// A configured GPS that is not producing the rows' positions is the failure
+/// this whole tier can have, and it is silent otherwise: the rows keep coming,
+/// they simply carry the position from before the drive started. So the note
+/// stays on screen until the receiver is what the chain is using.
+fn receiver(gps: &GpsView, source: PositionSource) -> Span<'static> {
+    // Checked before the source, because a fix stays usable for `max_age`
+    // after the puck is unplugged: for those few seconds the rows really are
+    // coming from the GPS and the port really is dead, and the footer is
+    // already saying so.
+    if let GpsStatus::Failed(reason) = &gps.status {
+        return Span::styled(format!("  gps: {reason}"), Style::new().fg(Color::Yellow));
+    }
+    if source == PositionSource::Gps {
+        let sats = match gps.status {
+            GpsStatus::Fixed { satellites: Some(n) } => format!(", {n} sats"),
+            _ => String::new(),
+        };
+        return Span::styled(format!("  gps ok{sats}"), Style::new().fg(Color::Green));
+    }
+    let text = match &gps.status {
+        GpsStatus::Connecting => "  gps connecting",
+        GpsStatus::Searching => "  gps searching",
+        // Talking, has had a fix, and the chain has stopped believing it.
+        GpsStatus::Fixed { .. } => "  gps fix is stale",
+        // Handled above, before the source is looked at.
+        GpsStatus::Failed(_) => "  gps unreadable",
+    };
+    let text = text.to_owned();
+    Span::styled(text, Style::new().fg(Color::Yellow))
 }
 
 fn draw_fleet(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot, ui: &Ui) {
@@ -644,6 +684,20 @@ fn faults(snapshot: &Snapshot) -> Vec<String> {
             snapshot.alive
         ));
     }
+    if let Some(gps) = &snapshot.gps {
+        if let GpsStatus::Failed(reason) = &gps.status {
+            faults.push(format!("gps unreadable: {reason}"));
+        }
+        // A receiver whose every line fails the checksum is talking at a rate
+        // nobody is listening at. Silence and gibberish look the same in the
+        // header, and only one of them is fixed with --gps-baud.
+        if gps.counters.fixes == 0 && gps.counters.rejected > 20 {
+            faults.push(format!(
+                "gps: {} unreadable lines and no fix — wrong --gps-baud?",
+                gps.counters.rejected
+            ));
+        }
+    }
     if c.unparsed > 0 {
         faults.push(format!("unparsed {}", c.unparsed));
     }
@@ -699,7 +753,8 @@ mod tests {
     use ratatui::backend::TestBackend;
     use wartui_bridge::BridgeInfo;
     use wartui_core::engine::{Assignment, BridgeStatus, Counters, NodeState, Now, StoreStats};
-    use wartui_core::position::{Fix, PositionSource};
+    use wartui_core::gps::GpsCounters;
+    use wartui_core::position::Fix;
     use wartui_proto::link::Chip;
     use wartui_proto::plan::{ChannelPool, plan};
 
@@ -825,6 +880,7 @@ mod tests {
                 source: PositionSource::Static,
                 at_ms: None,
             },
+            gps: None,
         }
     }
 
@@ -904,6 +960,96 @@ mod tests {
         let mut without = Terminal::new(TestBackend::new(150, 20)).expect("test backend");
         without.draw(|frame| draw(frame, &empty(), &Ui::default())).expect("drawing");
         assert!(without.backend().to_string().contains("pos none"));
+    }
+
+    /// A capture with a receiver attached, in whatever state it is in.
+    fn with_gps(status: GpsStatus, counters: GpsCounters, source: PositionSource) -> Snapshot {
+        let mut snapshot = busy();
+        snapshot.position.source = source;
+        if source == PositionSource::Gps {
+            snapshot.position.lat = Some(48.1173);
+            snapshot.position.lon = Some(11.5167);
+        }
+        snapshot.gps = Some(GpsView { status, counters, last_fix_ms: Some(EPOCH_MS) });
+        snapshot
+    }
+
+    fn rendered(snapshot: &Snapshot) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(200, 40)).expect("test backend");
+        terminal.draw(|frame| draw(frame, snapshot, &Ui::default())).expect("drawing");
+        terminal.backend().to_string()
+    }
+
+    #[test]
+    fn a_receiver_that_is_not_the_one_answering_says_why() {
+        // The failure this tier has is silent: rows keep being written, they
+        // just carry the position from wherever the drive started. So a GPS
+        // that is not producing the rows' positions has to say so.
+        let searching =
+            with_gps(GpsStatus::Searching, GpsCounters::default(), PositionSource::Static);
+        assert!(rendered(&searching).contains("gps searching"));
+
+        let stale = with_gps(
+            GpsStatus::Fixed { satellites: Some(8) },
+            GpsCounters::default(),
+            PositionSource::Static,
+        );
+        // Talking, has had a fix, and the chain has stopped believing it —
+        // which looks identical to a healthy receiver anywhere else on screen.
+        assert!(rendered(&stale).contains("gps fix is stale"));
+    }
+
+    #[test]
+    fn a_receiver_the_rows_are_using_is_named_with_its_satellite_count() {
+        let fixed = with_gps(
+            GpsStatus::Fixed { satellites: Some(8) },
+            GpsCounters { sentences: 400, fixes: 200, rejected: 1 },
+            PositionSource::Gps,
+        );
+        let screen = rendered(&fixed);
+        assert!(screen.contains("pos 48.11730,11.51670 (gps)"), "{screen}");
+        assert!(screen.contains("gps ok, 8 sats"));
+    }
+
+    #[test]
+    fn a_capture_with_no_receiver_says_nothing_at_all_about_one() {
+        // Most captures are static, and a permanent "gps: none" would be noise
+        // on the one line that has to stay readable.
+        assert!(!rendered(&busy()).contains("gps"));
+    }
+
+    #[test]
+    fn a_receiver_that_has_died_does_not_read_as_healthy_while_its_fix_lasts() {
+        // The seconds after the puck falls out: the rows are still the GPS's,
+        // and the port is gone. Saying "gps ok" here would contradict the
+        // fault the footer is showing at the same moment.
+        let unplugged = with_gps(
+            GpsStatus::Failed("/dev/cu.gps: Device not configured".to_owned()),
+            GpsCounters { sentences: 400, fixes: 200, rejected: 0 },
+            PositionSource::Gps,
+        );
+        let screen = rendered(&unplugged);
+        assert!(screen.contains("Device not configured"), "{screen}");
+        assert!(!screen.contains("gps ok"), "{screen}");
+    }
+
+    #[test]
+    fn a_receiver_that_cannot_be_read_is_a_fault_rather_than_a_silence() {
+        let failed = with_gps(
+            GpsStatus::Failed("/dev/cu.gps: No such file or directory".to_owned()),
+            GpsCounters::default(),
+            PositionSource::Static,
+        );
+        assert!(rendered(&failed).contains("gps unreadable"));
+
+        // Gibberish at the wrong baud rate looks exactly like silence in the
+        // header, and only one of the two has a fix the operator can apply.
+        let mistuned = with_gps(
+            GpsStatus::Searching,
+            GpsCounters { sentences: 0, fixes: 0, rejected: 300 },
+            PositionSource::Static,
+        );
+        assert!(rendered(&mistuned).contains("wrong --gps-baud"));
     }
 
     #[test]
