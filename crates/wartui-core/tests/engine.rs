@@ -960,3 +960,70 @@ fn a_range_given_by_hand_keeps_the_stagger_slot_the_plan_gave_the_node() {
     assert_eq!(desired.range, IndexRun::new(20, 22));
     assert_eq!((desired.node_index, desired.node_count), (2, 3));
 }
+
+#[test]
+fn a_node_that_rejoins_holding_the_right_range_is_still_re_issued_when_it_reboots() {
+    let clock = Clock::new();
+    let mut engine = engine(auto(), &clock);
+    let (first, _, _) = sent_admin(&engine.handle(heartbeat(peer(0), 1), clock.at(1)));
+    engine.handle(send_result(first, SendStatus::AckOk, 900), clock.at(1));
+    let (second, _, _) = sent_admin(&engine.handle(heartbeat(peer(1), 1), clock.at(2)));
+    engine.handle(send_result(second, SendStatus::AckOk, 900), clock.at(2));
+    let (recut, _, _) = sent_admin(&engine.handle(heartbeat(peer(0), 2), clock.at(3)));
+    engine.handle(send_result(recut, SendStatus::AckOk, 900), clock.at(3));
+
+    // It goes quiet long enough to leave the plan, then comes back — and the
+    // re-cut gives it the very range it is already holding, so there is nothing
+    // to send it.
+    engine.handle(heartbeat(peer(1), 2), clock.at(70));
+    engine.handle(heartbeat(peer(0), 3), clock.at(71));
+    assert!(
+        engine.handle(heartbeat(peer(0), 4), clock.at(75)).urgent.is_empty(),
+        "a node already scanning its share is not told so again"
+    );
+
+    // A reboot forgets the range and the node's own version byte with it, so
+    // the range has to be said again under a fresh epoch. Saying it needs
+    // wartui to still know what the node was holding — and a node that rejoined
+    // a plan without being sent anything is exactly the case where it might
+    // not. Getting this wrong drops the node back to scanning all forty
+    // channels, transmitting on the six the US pool exists to exclude.
+    let batch = engine.handle(heartbeat(peer(0), 1), clock.at(80));
+    let (_, dst, admin) = sent_admin(&batch);
+    assert_eq!(dst, peer(0));
+    assert_eq!((admin.start_channel_idx, admin.end_channel_idx), (0, 10));
+    assert_eq!(admin.node_count, 2);
+}
+
+#[test]
+fn a_node_the_bridge_cannot_peer_with_leaves_the_plan_so_the_rest_still_cover_the_pool() {
+    let clock = Clock::new();
+    let mut engine = engine(auto(), &clock);
+    for n in 0..3 {
+        engine.handle(heartbeat(peer(n), 1), clock.at(1));
+    }
+    let (id, dst, _) = sent_admin(&engine.handle(heartbeat(peer(2), 2), clock.at(5)));
+    assert_eq!(dst, peer(2));
+
+    // Peers are never removed, so a session that has churned through twenty
+    // nodes fills the table even though far fewer are alive at once. A node the
+    // bridge cannot address is no use to a partition: its share would go
+    // unscanned for the rest of the capture, and the pool would quietly not be
+    // covered while the view said it was.
+    engine.handle(send_result(id, SendStatus::PeerTableFull, 900), clock.at(5));
+    engine.handle(Event::Tick, clock.at(6));
+
+    assert!(engine.nodes().nth(2).expect("the refused node").desired.is_none());
+    assert_eq!(covered(&wanted(&engine)), pool_indices(ChannelPool::Us));
+    assert_eq!(
+        engine.nodes().filter(|node| node.desired.is_some()).count(),
+        2,
+        "the two the bridge can reach hold the whole pool between them"
+    );
+
+    // A bridge announcing itself has an empty peer table, so the node is worth
+    // trying again.
+    engine.handle(connected(), clock.at(7));
+    engine.handle(Event::Tick, clock.at(8));
+    assert!(engine.nodes().nth(2).expect("the refused node").desired.is_some());
+}

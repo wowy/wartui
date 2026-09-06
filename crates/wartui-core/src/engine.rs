@@ -213,6 +213,12 @@ pub struct NodeState {
     /// The node sent a core-protocol frame, which only an encrypted node does.
     /// wartui cannot talk to it until encryption is turned off in its web UI.
     pub encrypted: bool,
+    /// The bridge's peer table had no room for this node.
+    ///
+    /// It cannot be transmitted to at all until a slot frees up, so it is no
+    /// use to a plan: a share of the pool cut for it is a share nobody scans.
+    /// Cleared when a bridge announces itself, since its table starts empty.
+    pub peer_refused: bool,
     /// What this host wants the node to be scanning.
     pub desired: Option<Assignment>,
     /// What the node acknowledged, which is a different thing. Cleared when it
@@ -272,6 +278,7 @@ impl NodeState {
             observations: 0,
             link_rssi: None,
             encrypted: false,
+            peer_refused: false,
             desired: None,
             confirmed: None,
             dirty: false,
@@ -558,6 +565,12 @@ impl FleetEngine {
                 self.bridge = Some(info);
                 self.link_up = true;
                 self.link_error = None;
+                // Its peer table starts empty, whether this is a new bridge or
+                // the same one rebooted, so a node it had no room for before
+                // may fit now.
+                for node in self.nodes.values_mut() {
+                    node.peer_refused = false;
+                }
                 // A new connection means a new baseline, whether or not the
                 // bridge itself rebooted.
                 self.dropped_baseline = None;
@@ -856,7 +869,7 @@ impl FleetEngine {
             // are not even decodable from here — so it can never be alive. The
             // clause is here because a node that is silently planned around is
             // a worse failure than one that is explicitly left out.
-            .filter(|node| self.is_alive(node, now) && !node.encrypted)
+            .filter(|node| self.is_alive(node, now) && !node.encrypted && !node.peer_refused)
             .map(|node| node.mac)
             .collect();
 
@@ -923,6 +936,14 @@ impl FleetEngine {
                     continue;
                 }
             } else if node.confirmed.is_some_and(wanted) {
+                // Nothing goes out, but what the plan wants and what the node
+                // holds are now the same thing and have to be recorded as such.
+                // A node that rejoins a plan it already satisfies would
+                // otherwise be left with nothing wanted of it at all — and a
+                // reboot re-issues what is wanted, so there would be nothing to
+                // re-issue. It would drop back to scanning all forty channels,
+                // transmitting on the six the pool exists to keep it off.
+                node.desired = node.confirmed;
                 continue;
             }
 
@@ -1019,6 +1040,12 @@ impl FleetEngine {
             if let Some(node) = self.nodes.get_mut(&pending.mac) {
                 node.dirty = false;
                 node.desired = None;
+                // And it leaves the plan, so the next re-cut spreads the pool
+                // over the nodes that can actually be reached. Left in, its
+                // share would be a hole in the fleet's coverage for the rest of
+                // the capture, with nothing on screen to say the pool was not
+                // being covered.
+                node.peer_refused = true;
             }
         }
 

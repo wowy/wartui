@@ -164,7 +164,11 @@ Coverage becomes intermittent rather than incorrect.
 
 Over twenty nodes the planner stops re-cutting rather than partitioning among
 nodes the bridge cannot address. Whatever is already assigned stays assigned,
-capture is unaffected, and the footer says so.
+capture is unaffected, and the footer says so. A single node the bridge has no
+peer slot for — peers are never removed, so a long session can fill the table
+with nodes that have since gone — leaves the plan the same way, and the rest
+re-cut to cover its share. It is tried again the next time a bridge announces
+itself, since that table starts empty.
 
 Assigning by hand while the planner is running is refused — it would be honoured
 and then taken back at the next re-cut, which reads as the range having been

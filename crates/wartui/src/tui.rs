@@ -153,15 +153,23 @@ impl Ui {
         let on = !self.auto(snapshot);
         let said = match commands.try_send(Command::SetAuto(on)) {
             Ok(()) if on => {
+                // Only once it is really on its way. Remembering a request the
+                // engine never received would latch the view into a state
+                // nothing can ever agree with: the header would say one thing,
+                // `a` would be refused for the other, and `p` would flip
+                // between two states the fleet is in neither of.
+                self.auto_wanted = Some(on);
                 "auto-assignment on: the pool is split across every heartbeating node".to_owned()
             }
             // Nothing is recalled, because there is no frame that says "scan
             // nothing" — a node keeps its last range until something replaces
             // it. Saying so beats letting an operator believe they stopped it.
-            Ok(()) => "auto-assignment off: each node keeps the range it holds".to_owned(),
+            Ok(()) => {
+                self.auto_wanted = Some(on);
+                "auto-assignment off: each node keeps the range it holds".to_owned()
+            }
             Err(_) => "the engine is not accepting commands".to_owned(),
         };
-        self.auto_wanted = Some(on);
         self.say(said, snapshot);
     }
 
@@ -380,6 +388,10 @@ fn planning(snapshot: &Snapshot) -> Span<'static> {
         ),
         Some(plan) => format!("auto — {} of {}", plan.node_count(), snapshot.nodes.len()),
         None if snapshot.alive > MAX_NODES => "auto — too many nodes".to_owned(),
+        // Heartbeating is not on its own enough to be in a plan: an encrypted
+        // node cannot be told anything, and one the bridge has no peer slot for
+        // cannot be reached. The state column says which, per node.
+        None if snapshot.alive > 0 => "auto — no node it can drive".to_owned(),
         None => "auto — nothing heartbeating yet".to_owned(),
     };
     Span::styled(text, Style::new().fg(Color::Green))
@@ -1008,6 +1020,22 @@ mod tests {
         // read `auto: false` and both ask for the same thing.
         ui.on_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE), &snapshot, &tx);
         assert_eq!(rx.try_recv().expect("a command"), Command::SetAuto(false));
+    }
+
+    #[test]
+    fn a_toggle_the_engine_never_received_does_not_latch_the_view() {
+        let snapshot = busy();
+        // A command channel with no room in it, which is what a wedged engine
+        // looks like from here.
+        let (tx, _rx) = mpsc::channel(1);
+        tx.try_send(Command::SetAuto(true)).expect("filling the queue");
+        let mut ui = Ui::default();
+        ui.on_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE), &snapshot, &tx);
+
+        assert!(ui.notice(snapshot.now_ms).expect("a reason").contains("not accepting"));
+        // Remembering it would leave the header saying `manual` while `a` was
+        // refused for being on auto, with no way back.
+        assert!(!ui.auto(&snapshot), "the fleet is where the engine says it is");
     }
 
     #[test]
