@@ -110,10 +110,13 @@ ended last week, or run against one that is still going.
 | `↑` `↓` / `k` `j` | Move the cursor down the fleet table |
 | `a` | Give the selected node a range of exactly **one** channel |
 | `A` | Give it the widest run in the pool |
-| `p` | Hand the whole fleet to the planner, or take it back |
+| `p` | Take the fleet back from the planner, or hand it over again |
 
 The header says which of you is deciding: `manual`, or `auto — 4 of 5` for four
-heartbeating nodes out of five seen.
+heartbeating nodes out of five seen. It starts on `auto`, so **`a` and `A` are
+refused until you press `p`** (or started with `--manual`) — the planner would
+honour a hand-assigned range and then take it back at the next re-cut, which
+reads as the key having been ignored.
 
 Nothing goes out at the moment the key is pressed. A node's radio is away
 scanning some other channel for all but the 300 ms it holds open after its own
@@ -126,10 +129,12 @@ MAC layer, never when the bridge reports a successful enqueue. The vendor core
 cannot tell those apart, which is why it can sit with a node it believes is
 assigned and is not.
 
-`a` is also the Phase 4 proof that any of this works. A node heartbeats once per
-completed sweep and reports nothing about what it is scanning, so watch the
-`beat` column: narrowing a node from forty channels to one should collapse it
-from seconds to a fraction of one within three sweeps. `A` puts it back.
+`a` is also the Phase 4 proof that any of this works. Take the fleet back with
+`p` first, or start with `--manual` so nothing has been assigned yet. A node
+heartbeats once per completed sweep and reports nothing about what it is
+scanning, so watch the `beat` column: narrowing a node from forty channels to
+one should collapse it from seconds to a fraction of one within three sweeps.
+`A` puts it back.
 
 If a node keeps showing `no admin ack`, the cause is nearly always BLE: NimBLE
 and Wi-Fi share the one 2.4 GHz antenna, and the admin window is precisely when
@@ -174,7 +179,8 @@ itself, since that table starts empty.
 
 Assigning by hand while the planner is running is refused — it would be honoured
 and then taken back at the next re-cut, which reads as the range having been
-ignored. Press `p` first.
+ignored. Press `p` first; since the planner is what wartui starts with, that is
+the normal way round.
 
 ### Positions
 

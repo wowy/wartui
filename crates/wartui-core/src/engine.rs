@@ -791,7 +791,7 @@ impl FleetEngine {
     /// Take an operator's instruction. Nothing goes out from here.
     fn on_command(&mut self, command: Command, now: Now) {
         match command {
-            Command::Assign { mac, range } => self.on_assign(mac, range),
+            Command::Assign { mac, range } => self.on_assign(mac, range, now),
             Command::SetAuto(on) => {
                 self.auto = on;
                 // Forget what the last plan was built for, so switching back on
@@ -808,13 +808,18 @@ impl FleetEngine {
     }
 
     /// Give one node a range, by hand.
-    fn on_assign(&mut self, mac: Mac, range: IndexRun) {
+    fn on_assign(&mut self, mac: Mac, range: IndexRun, now: Now) {
         // Under a plan the node keeps the index and count the plan gave it: a
         // hand-assigned range changes what one node scans, not where in the
         // stagger window it keys up, and those two fields are what the fleet
-        // agrees its slots from. Without one, they are taken over every node
-        // this session has seen, ordered by MAC — deterministic, and it does
-        // not reshuffle the slots every time one node misses a heartbeat.
+        // agrees its slots from.
+        //
+        // Without a plan they are taken over the nodes that are heartbeating,
+        // ordered by MAC — the same numbering the planner uses, so taking the
+        // fleet back by hand does not renumber one node against a fleet still
+        // holding the plan's arithmetic. Counting every node ever seen would:
+        // one that went quiet an hour ago would still be inflating the count
+        // and shifting the indices of everything after it.
         let planned = self
             .plan
             .zip(self.plan_members.iter().position(|m| *m == mac))
@@ -822,9 +827,19 @@ impl FleetEngine {
         let (node_index, node_count) = match planned {
             Some(pair) => pair,
             None => {
-                let count = u8::try_from(self.nodes.len()).unwrap_or(u8::MAX);
-                let Some(index) = self.nodes.keys().position(|k| *k == mac) else { return };
-                (u8::try_from(index).unwrap_or(u8::MAX), count)
+                let living: Vec<Mac> = self
+                    .nodes
+                    .values()
+                    .filter(|node| self.is_alive(node, now))
+                    .map(|node| node.mac)
+                    .collect();
+                // Not heartbeating, so it will never open the window this would
+                // go out in. The view refuses this before the engine sees it.
+                let Some(index) = living.iter().position(|m| *m == mac) else { return };
+                (
+                    u8::try_from(index).unwrap_or(u8::MAX),
+                    u8::try_from(living.len()).unwrap_or(u8::MAX),
+                )
             }
         };
 
