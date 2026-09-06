@@ -139,6 +139,10 @@ async fn supervise(transport: SerialTransport, mut plumbing: crate::LinkPlumbing
         match connect(&transport, &mut plumbing).await {
             Ok(()) => return, // The handle was dropped; nobody is listening.
             Err(reason) => {
+                // The view has one line to say this on and shares it with
+                // everything else, so a log file is where a link that keeps
+                // failing the same way becomes obvious.
+                tracing::warn!(reason = %reason, retry_in = ?transport.reconnect_delay, "link down");
                 let event = LinkEvent::Disconnected { reason };
                 if plumbing.events.send(event).await.is_err() {
                     return;
@@ -155,11 +159,16 @@ async fn connect(
     plumbing: &mut crate::LinkPlumbing,
 ) -> Result<(), String> {
     let path = transport.resolve_port().map_err(|e| e.to_string())?;
+    tracing::info!(port = %path, "opening the bridge");
 
     let port = serialport::new(&path, BAUD)
         .timeout(READ_TIMEOUT)
         .open()
         .map_err(|e| format!("could not open {path}: {e}"))?;
+    // Distinct from being connected: the port is ours, and whether anything is
+    // listening on the other end is the next question. Which of these two lines
+    // is the last one in the log is the whole diagnosis.
+    tracing::info!(port = %path, "port open; asking the bridge to identify itself");
     let writer = port.try_clone().map_err(|e| format!("could not split {path}: {e}"))?;
 
     let stop = Arc::new(AtomicBool::new(false));
