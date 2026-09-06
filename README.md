@@ -91,7 +91,7 @@ starts with the planner already running.
 
 ```sh
 wartui run --db tonight.db --lat 37.7749 --lon -122.4194
-wartui run --db tonight.db --auto --lat 37.7749 --lon -122.4194
+wartui run --db tonight.db --auto --gps /dev/cu.usbserial-1420
 wartui export --db tonight.db --wigle tonight.csv
 ```
 
@@ -177,10 +177,37 @@ ignored. Press `p` first.
 ### Positions
 
 Every observation is stamped with the best position available, resolved fresh
-each time: host GPS, then a static `--lat`/`--lon`, then nothing. A record is
-never dropped for want of a position — but **WiGLE will not accept a row without
-coordinates**, so a capture with no position given exports nothing and says how
-many networks it left out. The GPS tier arrives in Phase 6.
+each time: a GPS on `--gps`, then a static `--lat`/`--lon`, then nothing. A
+record is never dropped for want of a position — but **WiGLE will not accept a
+row without coordinates**, so a capture with no position given exports nothing
+and says how many networks it left out.
+
+```sh
+wartui run --db drive.db --gps /dev/cu.usbserial-1420 --lat 37.7749 --lon -122.4194
+```
+
+Giving both is the useful combination: the rows carry satellite positions
+whenever the receiver has one, and the typed-in position the rest of the time,
+rather than nothing at all while the receiver is still finding itself.
+
+`--gps` takes any receiver that speaks NMEA 0183 over a serial port. `GGA` and
+`RMC` are read and everything else is ignored; the altitude, the satellite count
+and an accuracy estimated from the reported HDOP all reach the WiGLE export.
+`--gps-baud` defaults to 9600, which is what most receivers ship at — u-blox
+modules are often 38400, and the wrong rate shows up in the footer as unreadable
+lines with no fix rather than as silence.
+
+**A fix has to be recent to be used.** Past `--gps-max-age` seconds (5 by
+default) the position falls back to the tier below and the header says
+`gps fix is stale`, because at driving speed a minute-old fix is a different
+neighbourhood, and a row that quietly claimed it would be worse than one
+admitting to the static position. Which tier answered is recorded per row, so a
+capture that starts in a garage and ends on a road is honest about both halves.
+
+The receiver runs on its own thread and nothing waits for it: a capture starts
+immediately, reconnects on its own if the puck is unplugged and put back, and
+says what it is doing on the header line — `gps searching`, `gps ok, 8 sats`,
+`gps fix is stale`, or the error from the port.
 
 ### What the fleet table is telling you
 
