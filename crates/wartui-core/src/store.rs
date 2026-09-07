@@ -46,7 +46,7 @@ use crate::record::Record;
 /// v3 replaced `assignment.start_idx`/`end_idx` with a `channels` bitmask and
 /// added `ble`, because an assignment stopped being a contiguous range. A v2
 /// row's bounds convert into a mask exactly, so the migration is lossless.
-pub const SCHEMA_VERSION: i32 = 3;
+pub const SCHEMA_VERSION: i32 = 4;
 
 /// The schema, applied to any database that does not already have it.
 const SCHEMA: &str = r"
@@ -62,12 +62,17 @@ CREATE TABLE IF NOT EXISTS session (
   notes TEXT
 );
 
+-- `capabilities` is the token from the node's most recent heartbeat, verbatim.
+-- Null means it never sent one, which is what a stock node and any wartui node
+-- built before Phase 2 both look like — and is why such a node has heartbeats
+-- here and no assignment rows at all.
 CREATE TABLE IF NOT EXISTS node (
   mac BLOB PRIMARY KEY,
   label TEXT,
   first_seen INTEGER NOT NULL,
   last_seen INTEGER NOT NULL,
-  pinned_channels INTEGER
+  pinned_channels INTEGER,
+  capabilities TEXT
 );
 
 CREATE TABLE IF NOT EXISTS heartbeat (
@@ -373,11 +378,7 @@ fn check_version(conn: &Connection) -> Result<i32, StoreError> {
 /// before [`SCHEMA`] is applied — `CREATE TABLE IF NOT EXISTS` will not widen a
 /// table that already exists, so anything structural has to happen here.
 fn migrate(conn: &Connection, found: i32) -> Result<(), StoreError> {
-    let has_assignment: bool = conn.query_row(
-        "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'assignment'",
-        [],
-        |row| row.get::<_, i32>(0),
-    )? > 0;
+    let has_assignment = has_table(conn, "assignment")?;
 
     // v1 declared this table but nothing in a v1 build could ever write to it:
     // that release could not transmit, and an assignment row is only written
@@ -427,6 +428,15 @@ fn migrate(conn: &Connection, found: i32) -> Result<(), StoreError> {
     // Never written by anything, in any version: a v2 build declared them and
     // no code read or set them. Replaced rather than kept so the node table
     // does not carry a shape the rest of the schema stopped using.
+    // Added in v4. Every row already in the file predates the token, so null
+    // is the truthful value for all of them: those nodes were never asked.
+    if (1..=3).contains(&found)
+        && has_table(conn, "node")?
+        && !has_column(conn, "node", "capabilities")?
+    {
+        conn.execute_batch("ALTER TABLE node ADD COLUMN capabilities TEXT")?;
+    }
+
     if (1..=2).contains(&found) && has_column(conn, "node", "pinned_start_idx")? {
         conn.execute_batch(
             "ALTER TABLE node DROP COLUMN pinned_start_idx;
@@ -435,6 +445,14 @@ fn migrate(conn: &Connection, found: i32) -> Result<(), StoreError> {
         )?;
     }
     Ok(())
+}
+
+/// Whether the file has this table at all. A v1 database predates most of them,
+/// and `ALTER TABLE` on one that is not there aborts the whole migration.
+fn has_table(conn: &Connection, table: &str) -> Result<bool, StoreError> {
+    let mut stmt =
+        conn.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1")?;
+    Ok(stmt.exists(params![table])?)
 }
 
 /// Whether a table already has a column, so a migration can be run once.
@@ -596,13 +614,20 @@ fn write_batch(
         match record {
             Record::Node(node) => {
                 tx.prepare_cached(
-                    "INSERT INTO node (mac, first_seen, last_seen) VALUES (?1, ?2, ?3)
-                     ON CONFLICT(mac) DO UPDATE SET last_seen = excluded.last_seen",
+                    "INSERT INTO node (mac, first_seen, last_seen, capabilities)
+                       VALUES (?1, ?2, ?3, ?4)
+                     ON CONFLICT(mac) DO UPDATE SET
+                       last_seen = excluded.last_seen,
+                       -- Most frames are observations and carry no token, so
+                       -- writing `excluded` straight in would erase what the
+                       -- last heartbeat said on the very next line collected.
+                       capabilities = coalesce(excluded.capabilities, node.capabilities)",
                 )?
                 .execute(params![
                     &node.mac[..],
                     node.first_seen_ms,
-                    node.last_seen_ms
+                    node.last_seen_ms,
+                    node.capabilities
                 ])?;
             }
             Record::Heartbeat(hb) => {

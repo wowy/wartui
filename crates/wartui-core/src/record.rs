@@ -23,6 +23,15 @@ pub struct NodeSeen {
     pub first_seen_ms: i64,
     /// Unix milliseconds of the most recent frame of any kind.
     pub last_seen_ms: i64,
+    /// The capability token from this node's most recent heartbeat, verbatim,
+    /// or `None` for a frame that carried none.
+    ///
+    /// Kept as the text that was on the wire rather than as the parsed value,
+    /// so a capture can still answer "what did this node say it was" for a
+    /// version this build did not understand. It is also the only record of
+    /// *why* a node was never assigned anything: a node row with heartbeats,
+    /// no token and no assignments is the whole diagnosis.
+    pub capabilities: Option<String>,
 }
 
 /// A node completed a sweep and announced it.

@@ -316,9 +316,30 @@ says what it is doing on the header line — `gps searching`, `gps ok, 8 sats`,
 | `refused` | The bridge would not transmit it. Nearly always a full peer table, which means the fleet is over twenty nodes |
 | `rebooted xN` | Its heartbeat counter went backwards, so it has forgotten any assignment; wartui re-issues under a fresh epoch |
 | `encrypted` | It is sending core-protocol frames. wartui cannot talk to it; turn encryption off in that node's web UI. A wartui node never sends these |
+| `not wartui` | Heartbeating, and it never said it is one of ours. Flash it with `firmware/node`, or leave it be — either way wartui will not plan for it |
 
-A node that is `stale` is also out of the plan, for the same reason it cannot be
-assigned by hand: no heartbeat, no window.
+A node that is `stale`, `encrypted` or `not wartui` is also out of the plan, and
+for the same reason it cannot be assigned by hand: nothing wartui sends it would
+be adopted, so a share of the pool cut for it is a share nobody scans. Pressing
+`a`, `A` or `b` on one says which of the three it is.
+
+`not wartui` is the one that needs saying out loud, because it is the one that
+looks like nothing being wrong. Every node reports its channels, its counter and
+its RSSI in the same bytes a stock node does — that is deliberate, and it is what
+lets vendor captures keep testing this code — so the only way to tell the two
+apart is to ask, and the only place a node can answer is the text field of its
+own heartbeat. A wartui node fills it with `wartui/0.1;ble,5g`: the protocol
+version, then what it can do. A stock node leaves it empty, and so does any
+wartui node built before this existed.
+
+Without that, a stranger in the fleet costs more than it contributes. It
+heartbeats, so it is planned for; its radio acknowledges the assignment, so the
+host believes it landed; its firmware cannot decode the frame, so it keeps
+scanning everything and nothing scans the share it was given. On a bench, two
+nodes and a stranger covered less of the pool than the two nodes alone
+(`docs/phase-2-findings.md`). **So flashing a host without flashing its nodes
+leaves a fleet that does nothing** — visibly, in the state column, rather than
+silently.
 
 `stale` and `no heartbeat` are deliberately distinct from silence. The vendor
 firmware refreshes liveness only on a heartbeat, so a node streaming
