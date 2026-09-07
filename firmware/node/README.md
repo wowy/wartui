@@ -71,6 +71,15 @@ goes unscanned. Every heartbeat carries the token rather than only the first,
 because one sent once is one lost to a dropped frame — and because a board
 reflashed with something else should stop claiming to be this.
 
+Both feature words are acted on, not merely recorded. A build without `5g` is
+dealt no 5 GHz channel, because it would adopt the share, acknowledge it and
+scan the part it could reach — the same hole as a stranger's, opened by a node
+that really is ours. A build without `ble` is refused the Bluetooth scan, in the
+view and again in the host's engine, and loses it if it was already holding one
+when it announced itself. Neither refusal needs anything of this firmware: the
+token is the whole of what the host has to go on, so getting it wrong here is
+indistinguishable from lying about it.
+
 ## Building and flashing
 
 ```sh

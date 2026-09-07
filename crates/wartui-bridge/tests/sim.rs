@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use tokio::time::Instant;
 use wartui_bridge::sim::{SimConfig, SimTransport};
 use wartui_bridge::{LinkEvent, LinkHandle};
-use wartui_proto::air::{AdminMsg, Frame, MsgType, WardriveLine};
+use wartui_proto::air::{AdminMsg, Capabilities, Frame, MsgType, WardriveLine};
 use wartui_proto::link::{BridgeToHost, EspNowPayload, HostToBridge, Mac, SendStatus};
 use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun};
 
@@ -378,6 +378,32 @@ async fn only_the_node_given_the_bluetooth_assignment_reports_any() {
     }
     assert!(ble_by_node[&SimTransport::node_mac(0)] > 5, "the node that was asked");
     assert_eq!(ble_by_node.get(&SimTransport::node_mac(1)), None, "and only that node");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_simulated_c6_says_it_has_no_five_ghz_radio() {
+    // The only way to put a mixed fleet in front of the planner without two
+    // kinds of board on the desk. It is the token that carries this, so a
+    // simulator that claimed 5 GHz for every node would be one where the
+    // planner's whole reason to treat nodes differently never arises.
+    let config = SimConfig { node_count: 3, c6_nodes: 1, ble_chance: 0.0, ..SimConfig::default() };
+    let mut link = SimTransport::new(config).start().expect("starts");
+
+    let mut bands: HashMap<Mac, bool> = HashMap::new();
+    while bands.len() < 3 {
+        let (src, kind, text) = next_frame(&mut link).await;
+        if kind != MsgType::Heartbeat {
+            continue;
+        }
+        let capabilities = Capabilities::parse(&text).expect("a simulated node is one of ours");
+        bands.insert(src, capabilities.five_ghz);
+    }
+
+    // Counted from the end, so the indices below the count keep their radios as
+    // the fleet grows.
+    assert!(bands[&SimTransport::node_mac(0)]);
+    assert!(bands[&SimTransport::node_mac(1)]);
+    assert!(!bands[&SimTransport::node_mac(2)], "the last one is the C6");
 }
 
 #[tokio::test(start_paused = true)]

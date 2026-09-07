@@ -41,6 +41,27 @@ cargo run -p wartui -- ports | status | sniff        # with a bridge plugged in
 cargo run -p wartui -- --log-file wartui.log run     # the only way to see transport logs
 ```
 
+### Telling the boards apart without opening a port
+
+`wartui ports` prints one identical `USB JTAG/serial debug unit` line per attached board and
+says nothing about which is the bridge. Do not find out by probing: `wartui status` on a node blocks for ever —
+a node does not speak the link protocol — and killing it leaves a process wedged in exit with
+the port still held.
+
+The USB serial number *is* the device's MAC, so `ioreg` answers it for free, with no esp tool,
+no reflash and without opening anything:
+
+```sh
+ioreg -l -w0 | grep -E '"USB Serial Number"|"IOCalloutDevice"' | sed 's/^ *[|+ -]*//' \
+  | grep -A1 "Serial Number" | grep -v '^--' | paste - - | grep usbmodem
+```
+
+Each line pairs a `/dev/cu.usbmodem*` path with the MAC of the board behind it — in either
+order, since `ioreg` emits the two properties per device in whatever order it stored them. The bridge is
+then the one whose address the fleet table shows as the bridge, and a node is the one whose
+heartbeats `wartui sniff` attributes to that address. The OUI also separates board generations
+where they differ. Refer to the results by their last two octets, per the global rule.
+
 Each firmware is a **separate workspace** (`exclude = ["firmware"]`): different target, own
 toolchain pin, own lockfile. `cargo test --workspace` never touches them.
 
@@ -140,11 +161,29 @@ Positions resolve fresh per record through `PositionChain`: GPS (`--gps`, NMEA o
   bands. `IndexRun` still describes a *pool* and must not come back as the shape of an assignment.
   The plan has no phases and no timer; it changes when fleet membership changes and at no other
   time.
+- **The planner deals only channels a node's own radio can tune.** `plan::plan_for` takes the
+  fleet's `Radio`s, read out of the capability tokens, and an ESP32-C6 is dealt no 5 GHz index:
+  a share it cannot tune is a share nobody scans, which is the failure the token exists to
+  prevent, arriving through a node that is genuinely ours. A mixed fleet is dealt the constrained
+  half first — in pool order the dual-band nodes take their 2.4 GHz share and then all of 5 GHz on
+  top, which is the block split this planner was written to avoid — and shares then differ by more
+  than one, which is unavoidable and is why `plan_for` minimises the largest rather than
+  equalising. A uniform fleet has no constrained channels, so its plan is byte-identical to what
+  `plan` has always produced, and `plan` is now that special case. Channels no radio present can
+  reach come back in `Plan::unreachable` and are said in the footer rather than dealt. An
+  assignment made by hand goes through `Radio::tunable` for the same reason and is the quieter
+  case: nothing re-partitions afterwards to correct it and `Plan::unreachable` never sees it.
 - **At most one node scans Bluetooth, and by default none does.** `ADMIN_FLAG_BLE` is a per-node
   decision the operator makes (`Command::AssignBle`, `b` in the view), not a property of the
   firmware that was flashed: the `ble` cargo feature decides whether the code exists and the flag
   decides whether it runs, off at every boot. The cost is measured — every assignment lost on a
-  stock node, ~10% of the sweep period on ours — and is worth paying on one node, not on all.
+  stock node, ~10% of the sweep period on ours — and is worth paying on one node, not on all. A
+  node whose token says the feature is absent is refused the scan in both the view and the engine,
+  and one already holding it loses it on the tick that learns so: it would adopt the flag,
+  acknowledge, and scan nothing, so `ble_node` would name a holder that is not one. Losing it
+  means an assignment re-issued without the flag, not just `ble_node` cleared — the flag lives in
+  the frame, and the fleet table reads it off the frame — so `reissue` is the one funnel that
+  refreshes it and refuses to set it for a node whose token says no.
 - **An assignment is believed only on a MAC-layer ack** (`SendStatus::AckOk` from the transmit
   callback), never on a successful enqueue. The vendor core conflates the two, which is the bug
   this project exists downstream of.
