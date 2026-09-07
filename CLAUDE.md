@@ -18,7 +18,9 @@ behaviour, and keep it true when behaviour changes. `docs/phase-0-findings.md` r
 measured on the vendor fleet and is why several of the invariants below exist;
 `docs/phase-1-findings.md` records what our own node firmware then did on the
 same bench, including which of those invariants it has actually been checked
-against and which are still only reasoning.
+against and which are still only reasoning; `docs/phase-2-findings.md` does the
+same for channel masks and Bluetooth-by-assignment, and is where the measured
+cost of the Bluetooth scan comes from.
 
 ## Commands
 
@@ -120,6 +122,15 @@ Positions resolve fresh per record through `PositionChain`: GPS (`--gps`, NMEA o
   vendor's ten-byte one does not decode; `air::is_legacy_admin` recognises it without obeying it,
   so a stock core powered up nearby is reported rather than counted as line noise. Nothing is done
   to keep a mixed fleet working — the vendor node is the thing being replaced.
+- **A node is only in the plan if it says it is one of ours.** Node → core is byte-identical, so
+  a stock node heartbeats like ours and its radio acknowledges an assignment its application
+  cannot decode — it then scans all forty channels while the share cut for it goes uncovered.
+  Measured: two nodes and a stranger covered less of the pool than the two alone
+  (`docs/phase-2-findings.md`). So every heartbeat carries `air::Capabilities`, an ASCII token
+  in the text field a stock node leaves empty, and `FleetEngine::is_assignable` refuses anything
+  without one — the same rule that already excluded encrypted and peer-refused nodes, for the
+  same reason. The consequence to keep in mind when flashing: **a node running firmware older
+  than the token is ignored**, and the fleet table says `not wartui` rather than pretending.
 - **Twenty nodes is the hard maximum** (`plan::MAX_NODES`) — an ESP-NOW radio's peer table. Above
   it, capture continues and the planner refuses to re-cut rather than partitioning among nodes the
   bridge cannot address.

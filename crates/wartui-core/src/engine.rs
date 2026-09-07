@@ -40,7 +40,7 @@ use std::time::{Duration, Instant};
 
 use wartui_bridge::{BridgeInfo, LinkEvent};
 use wartui_proto::air::{
-    AdminMsg, Frame, MsgType, RecordKind, WardriveLine, is_legacy_admin, wire_version,
+    AdminMsg, Capabilities, Frame, MsgType, RecordKind, WardriveLine, is_legacy_admin, wire_version,
 };
 use wartui_proto::link::{BridgeToHost, EspNowPayload, HostToBridge, Mac, SendStatus};
 use wartui_proto::plan::{self, ChannelPool, ChannelSet, Plan};
@@ -244,6 +244,27 @@ pub struct NodeState {
     pub observations: u64,
     /// Most recent link RSSI, as the bridge measured it.
     pub link_rssi: Option<i8>,
+    /// What the node said it is, from the token in its most recent heartbeat.
+    ///
+    /// `None` means it has never announced itself, which is what a stock node
+    /// and any wartui node built before Phase 2's token both look like. Such a
+    /// node is left out of the plan for the same reason [`Self::peer_refused`]
+    /// is: it will not adopt anything sent to it, so a share cut for it is a
+    /// share nobody scans — and unlike a peer refusal, its radio acknowledges
+    /// the frame, so nothing else anywhere would say so.
+    ///
+    /// Taken from every heartbeat rather than remembered from the first, so a
+    /// node reflashed with something else stops claiming to be one of ours.
+    ///
+    /// There is no hysteresis on that, and one heartbeat whose text does not
+    /// parse therefore drops the node out of `plan_members` — which re-cuts the
+    /// whole fleet, since every node's `node_index`/`node_count` moves with the
+    /// membership, and the next good heartbeat re-cuts it back. Liveness is
+    /// aged over a timeout for exactly this reason; identity is not. Left as it
+    /// is because both the USB link and ESP-NOW carry their own checksums, so a
+    /// heartbeat that arrives with a mangled token is close to unreachable —
+    /// but if one is ever seen, this is the thing to fix.
+    pub capabilities: Option<Capabilities>,
     /// The node sent a core-protocol frame, which only an encrypted node does.
     /// wartui cannot talk to it until encryption is turned off in its web UI.
     pub encrypted: bool,
@@ -320,6 +341,7 @@ impl NodeState {
             observations: 0,
             link_rssi: None,
             encrypted: false,
+            capabilities: None,
             peer_refused: false,
             desired: None,
             confirmed: None,
@@ -473,8 +495,19 @@ pub struct Snapshot {
     pub ble_node: Option<Mac>,
     /// Every node, ordered by MAC so the table does not reshuffle itself.
     pub nodes: Vec<NodeView>,
-    /// How many of them can still be given an assignment.
+    /// How many are heartbeating inside the topology timeout.
+    ///
+    /// Deliberately not the same number as [`Self::assignable`]. A fleet can be
+    /// entirely alive and entirely undrivable — three stock nodes heartbeat
+    /// exactly like ours — and one count for both made that case unsayable:
+    /// the header would report nothing heartbeating while the table showed
+    /// three nodes doing it.
     pub alive: usize,
+    /// How many of those can actually be given an assignment.
+    ///
+    /// The planner partitions over exactly this set, so this is the number the
+    /// header and the too-many-nodes notice are about.
+    pub assignable: usize,
     /// The most recent observations, newest last.
     pub tail: Vec<TailEntry>,
     /// Engine totals.
@@ -757,6 +790,12 @@ impl FleetEngine {
             mac: src,
             first_seen_ms: node.first_seen_ms,
             last_seen_ms: now.unix_ms,
+            // Only a heartbeat carries one, and only a well-formed one is worth
+            // keeping: an observation's text field is a wardrive line, and
+            // storing that here would file a network as a node's identity.
+            capabilities: (text.msg_type == MsgType::Heartbeat
+                && Capabilities::parse(text.text).is_some())
+            .then(|| String::from_utf8_lossy(text.text).into_owned()),
         }));
 
         match text.msg_type {
@@ -777,6 +816,7 @@ impl FleetEngine {
                     // fresh epoch rather than one the node might now match.
                     node.confirmed = None;
                 }
+                node.capabilities = Capabilities::parse(text.text);
                 node.note_beat_gap(now);
                 node.counter = Some(text.counter);
                 node.last_heartbeat = Some(now.mono);
@@ -897,11 +937,15 @@ impl FleetEngine {
                 let living: Vec<Mac> = self
                     .nodes
                     .values()
-                    .filter(|node| self.is_alive(node, now))
+                    .filter(|node| self.is_assignable(node, now))
                     .map(|node| node.mac)
                     .collect();
-                // Not heartbeating, so it will never open the window this would
-                // go out in. The view refuses this before the engine sees it.
+                // Not heartbeating, or not a node this host can drive at all.
+                // Either way it will never adopt what this would send, and the
+                // same filter the planner uses is what numbers the fleet — so
+                // taking it back by hand cannot renumber one node against a
+                // fleet still holding the plan's arithmetic. The view refuses
+                // this before the engine sees it.
                 let Some(index) = living.iter().position(|m| *m == mac) else { return };
                 (
                     u8::try_from(index).unwrap_or(u8::MAX),
@@ -999,7 +1043,7 @@ impl FleetEngine {
             // are not even decodable from here — so it can never be alive. The
             // clause is here because a node that is silently planned around is
             // a worse failure than one that is explicitly left out.
-            .filter(|node| self.is_alive(node, now) && !node.encrypted && !node.peer_refused)
+            .filter(|node| self.is_assignable(node, now))
             .map(|node| node.mac)
             .collect();
 
@@ -1287,6 +1331,27 @@ impl FleetEngine {
             .is_some_and(|last| now.mono.duration_since(last) < self.config.topology_timeout)
     }
 
+    /// Whether a node can be given channels at all.
+    ///
+    /// Alive is necessary and not sufficient. Three kinds of node heartbeat
+    /// perfectly well and will still never scan what they are sent: one whose
+    /// firmware is not ours and cannot decode the frame, one the bridge has no
+    /// peer slot for, and an encrypted one this host cannot address in
+    /// plaintext. Each of them acknowledges nothing useful, or worse
+    /// acknowledges at the MAC layer while the application discards the bytes,
+    /// so the only place the distinction can be made is here.
+    ///
+    /// A share cut for any of them is a share nobody scans, which is worse than
+    /// having one node fewer: the fleet covers less of the pool than it would
+    /// have without the node present at all.
+    #[must_use]
+    pub fn is_assignable(&self, node: &NodeState, now: Now) -> bool {
+        self.is_alive(node, now)
+            && node.capabilities.is_some()
+            && !node.encrypted
+            && !node.peer_refused
+    }
+
     /// Build the view the UI renders.
     ///
     /// Taken on a tick rather than per event: the terminal cannot show more
@@ -1297,9 +1362,13 @@ impl FleetEngine {
         let nodes: Vec<NodeView> = self
             .nodes
             .values()
-            .map(|state| NodeView { assignable: self.is_alive(state, now), state: state.clone() })
+            .map(|state| NodeView {
+                assignable: self.is_assignable(state, now),
+                state: state.clone(),
+            })
             .collect();
-        let alive = nodes.iter().filter(|n| n.assignable).count();
+        let alive = nodes.iter().filter(|n| self.is_alive(&n.state, now)).count();
+        let assignable = nodes.iter().filter(|n| n.assignable).count();
         Snapshot {
             bridge: self.bridge.clone(),
             link_up: self.link_up,
@@ -1310,6 +1379,7 @@ impl FleetEngine {
             ble_node: self.ble_node,
             nodes,
             alive,
+            assignable,
             tail: self.tail.iter().cloned().collect(),
             counters: self.counters,
             store,

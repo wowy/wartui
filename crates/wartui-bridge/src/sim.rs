@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
-use wartui_proto::air::{AdminMsg, Frame, MsgType, TextMsg};
+use wartui_proto::air::{AdminMsg, CAPABILITY_MAX, Capabilities, Frame, MsgType, TextMsg};
 use wartui_proto::link::{
     BROADCAST, BridgeToHost, Chip, EspNowPayload, HostToBridge, LogLevel, LogStr, Mac, SendStatus,
 };
@@ -428,8 +428,16 @@ async fn beat(
     started: Instant,
 ) -> Result<(), ()> {
     node.hb_counter = node.hb_counter.wrapping_add(1);
-    let msg = TextMsg::new(MsgType::Heartbeat, node.hb_counter, b"")
-        .expect("an empty heartbeat payload always fits");
+    // The token is what tells the host this is a node it can drive, so a
+    // simulated fleet that left it out would be a fleet the planner ignores.
+    // Both features are claimed: the simulator has no chip and models a node
+    // built with everything, which is the case the view has most to render.
+    let mut token = [0u8; CAPABILITY_MAX];
+    let len = Capabilities::here(true, true)
+        .write_into(&mut token)
+        .expect("CAPABILITY_MAX is sized for this");
+    let msg = TextMsg::new(MsgType::Heartbeat, node.hb_counter, &token[..len])
+        .expect("a heartbeat payload this short always fits");
     send_frame(events, node.mac, &msg.encode(), started).await
 }
 

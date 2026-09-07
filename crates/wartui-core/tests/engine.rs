@@ -12,7 +12,7 @@ use wartui_core::engine::{Command, Counters, EngineConfig, Event, FleetEngine, N
 use wartui_core::gps::Gps;
 use wartui_core::position::{DEFAULT_MAX_AGE, PositionChain, PositionSource};
 use wartui_core::record::{AdminOutcome, Record};
-use wartui_proto::air::{AdminMsg, MsgType, TextMsg};
+use wartui_proto::air::{AdminMsg, CAPABILITY_MAX, Capabilities, MsgType, TextMsg};
 use wartui_proto::link::{
     BROADCAST, BridgeToHost, Chip, EspNowPayload, HostToBridge, Mac, SendStatus,
 };
@@ -20,6 +20,7 @@ use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun, plan};
 
 const NODE: Mac = [0x02, 0x00, 0x5E, 0x10, 0x57, 0x84];
 const OTHER: Mac = [0x02, 0x00, 0x5E, 0x10, 0x57, 0x85];
+const THIRD: Mac = [0x02, 0x00, 0x5E, 0x10, 0x57, 0x86];
 /// Sorts before every `peer(n)`, so counting it would shift all their indices.
 const GONE: Mac = [0x00, 0x00, 0x00, 0x00, 0x00, 0x01];
 const EPOCH_MS: i64 = 1_777_642_477_000;
@@ -64,7 +65,21 @@ fn rx_at(src: Mac, msg_type: MsgType, counter: u32, text: &[u8], rx_us: u32) -> 
     }))
 }
 
+/// A heartbeat from one of ours, which is what the token in the text field
+/// means. Almost every test below wants this one: a node that has not
+/// announced itself is not assignable, so a fleet built out of tokenless
+/// heartbeats would be a fleet the planner never touches.
 fn heartbeat(src: Mac, counter: u32) -> Event {
+    let mut token = [0u8; CAPABILITY_MAX];
+    let len = Capabilities::here(true, true).write_into(&mut token).expect("sized for it");
+    rx(src, MsgType::Heartbeat, counter, &token[..len])
+}
+
+/// A heartbeat from something that is not one of ours: a stock node, or a
+/// wartui node built before the token existed. Byte-identical to the above
+/// apart from the empty text field, which is the whole point — nothing else
+/// distinguishes them.
+fn foreign_heartbeat(src: Mac, counter: u32) -> Event {
     rx(src, MsgType::Heartbeat, counter, b"")
 }
 
@@ -456,8 +471,8 @@ fn nodes_are_ordered_by_mac_so_the_table_does_not_reshuffle() {
     let clock = Clock::new();
     let mut engine = engine(manual(), &clock);
 
-    engine.handle(rx(OTHER, MsgType::Heartbeat, 1, b""), clock.at(1));
-    engine.handle(rx(NODE, MsgType::Heartbeat, 1, b""), clock.at(2));
+    engine.handle(heartbeat(OTHER, 1), clock.at(1));
+    engine.handle(heartbeat(NODE, 1), clock.at(2));
 
     let snapshot = engine.snapshot(clock.at(3), StoreStats::default());
     let macs: Vec<Mac> = snapshot.nodes.iter().map(|n| n.state.mac).collect();
@@ -523,6 +538,64 @@ fn an_assignment_waits_for_the_heartbeat_that_opens_the_window() {
     assert_eq!(admin.channels, run(5, 5));
     assert_eq!(admin.assignment_version, 1, "the first epoch of a fresh database");
     assert_eq!(counters(&engine).admin_sent, 1);
+}
+
+#[test]
+fn a_node_that_never_said_what_it_is_gets_nothing_and_costs_the_fleet_nothing() {
+    // Node to core is byte-identical to a stock node's, so this heartbeat is
+    // indistinguishable from one of ours apart from the empty text field. That
+    // is the whole reason the token exists: measured on a bench, a stock node
+    // in the fleet took a third of the pool with it, because its radio
+    // acknowledges an assignment its application cannot decode and nothing
+    // anywhere then says the channels are going unscanned.
+    let clock = Clock::new();
+    let mut engine = engine(manual(), &clock);
+    engine.handle(foreign_heartbeat(NODE, 1), clock.at(1));
+
+    let asked = engine.handle(assign(NODE, 0, 10), clock.at(2));
+    assert!(asked.urgent.is_empty());
+    let opened = engine.handle(foreign_heartbeat(NODE, 2), clock.at(6));
+    assert!(opened.urgent.is_empty(), "a window opens and nothing is put through it");
+    assert_eq!(counters(&engine).admin_sent, 0);
+
+    let node = engine.nodes().next().expect("it is still in the table");
+    assert!(node.last_heartbeat.is_some(), "and still visibly heartbeating");
+    assert!(node.desired.is_none(), "but nothing is queued against it");
+}
+
+#[test]
+fn a_stranger_in_the_fleet_does_not_take_a_share_of_the_pool() {
+    // The failure this exists to prevent, in the smallest form that shows it:
+    // two nodes plus a stranger must partition the pool two ways, not three.
+    // Three ways would leave a third of the pool assigned to a node that will
+    // never scan it, so the fleet would cover less than the two would alone.
+    let clock = Clock::new();
+    let mut engine = engine(auto(), &clock);
+    engine.handle(heartbeat(NODE, 1), clock.at(1));
+    engine.handle(heartbeat(OTHER, 1), clock.at(1));
+    engine.handle(foreign_heartbeat(THIRD, 1), clock.at(1));
+    engine.handle(Event::Tick, clock.at(2));
+
+    let snapshot = engine.snapshot(clock.at(3), StoreStats::default());
+    let plan = snapshot.plan.expect("a plan");
+    assert_eq!(plan.node_count(), 2, "the stranger is not one of the two");
+    // Counted apart, because the view has to be able to say "three nodes are
+    // heartbeating and only two of them can be driven". One number for both
+    // would make a fleet of nothing but strangers indistinguishable from a
+    // fleet that has not started yet.
+    assert_eq!(snapshot.alive, 3, "the stranger is heartbeating like the rest");
+    assert_eq!(snapshot.assignable, 2, "and is still not one this host can drive");
+
+    let held: Vec<ChannelSet> =
+        engine.nodes().filter_map(|node| node.desired.map(|a| a.channels)).collect();
+    assert_eq!(held.len(), 2, "only the two get channels");
+    let union = held.iter().fold(ChannelSet::empty(), |mut acc, set| {
+        for idx in set.indices() {
+            acc.insert(idx);
+        }
+        acc
+    });
+    assert_eq!(union, ChannelPool::Us.channels(), "and between them they hold all of it");
 }
 
 #[test]

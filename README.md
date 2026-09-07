@@ -201,9 +201,11 @@ It is a per-node choice rather than a build flag because the cost is real and
 was measured on both firmwares. A stock node with BLE on acknowledged **none**
 of the thirty-two assignments sent to it, while an identical node with it off
 acknowledged both of its two (`docs/phase-0-findings.md`). A wartui node
-acknowledged every time on the same board and ran about 10% slower per sweep
-(`docs/phase-1-findings.md`) — a cost worth paying on one node for Bluetooth
-coverage, and not worth paying on all of them.
+acknowledged every time on the same board — including the frame that took the
+scan away, mid-scan, in 5.8 ms — and ran 10.9% slower per sweep while it held it
+(`docs/phase-2-findings.md`): 5.221 s against 4.709 s either side, on the same
+thirty-four channels. A cost worth paying on one node for Bluetooth coverage,
+and not worth paying on all of them.
 
 The `ble` cargo feature decides whether the code is in the binary at all; the
 assignment decides whether it runs, and it is off at every boot regardless of
@@ -240,6 +242,20 @@ contiguous range and the US pool is two runs, so a single node covered them in
 turn on a 60-second dwell and half the pool went unscanned at any instant. The
 channel mask says both runs in one frame, and the rotation — with its timer, its
 phase in the header, and the fresh epoch it spent every minute — is gone.
+
+**A node can report a channel that is not in its share.** The deal interleaves
+2.4 GHz channels between nodes — one takes 1, 3, 5, the next 2, 4, 6 — and
+2.4 GHz channels are 5 MHz apart but 20 MHz wide, so a node parked on 2 hears
+beacons transmitted on 1 and 3 — and, more faintly, on 4. It reports the channel
+the beacon itself names, which is the access point's real one; the alternative
+would be filing a real network under the wrong frequency. How much a given node
+does this is decided by where the room's access points sit: a node dealt channel
+6 in a room that clusters on 1, 6 and 11 barely does it at all, and the nodes
+either side of it do it constantly. What stays put is the fleet-wide figure —
+about a quarter of access points found by more than one node, unchanged from two
+nodes to three (`docs/phase-2-findings.md`). `export` picks one row per network,
+so this costs store rows and nothing else. 5 GHz channels here do not overlap
+and do not do it.
 
 Over twenty nodes the planner stops re-cutting rather than partitioning among
 nodes the bridge cannot address. Whatever is already assigned stays assigned,
@@ -297,12 +313,40 @@ says what it is doing on the header line — `gps searching`, `gps ok, 8 sats`,
 | `stale` | Still being heard, but not heartbeating — most often BLE coexistence on the node holding the radio through its admin window |
 | `no heartbeat` | Seen, but has never completed a sweep |
 | `no admin ack` | An assignment went out and its radio did not answer — nearly always BLE, see [Assigning channels](#assigning-channels) |
-| `refused` | The bridge would not transmit it. Nearly always a full peer table, which means the fleet is over twenty nodes |
+| `refused` | The bridge would not transmit it — nearly always a full peer table, which means the fleet is over twenty nodes. Its heartbeats are still arriving; what is missing is a slot to address it through |
 | `rebooted xN` | Its heartbeat counter went backwards, so it has forgotten any assignment; wartui re-issues under a fresh epoch |
 | `encrypted` | It is sending core-protocol frames. wartui cannot talk to it; turn encryption off in that node's web UI. A wartui node never sends these |
+| `not wartui` | Heartbeating, and it never said it is one of ours. Flash it with `firmware/node`, or leave it be — either way wartui will not plan for it |
 
-A node that is `stale` is also out of the plan, for the same reason it cannot be
-assigned by hand: no heartbeat, no window.
+A node that is `stale`, `refused`, `encrypted` or `not wartui` is also out of the
+plan, and for the same reason it cannot be assigned by hand: nothing wartui sends
+it would be adopted — or, for `refused`, would reach it at all — so a share of
+the pool cut for it is a share nobody scans. Pressing `a`, `A` or `b` on one says
+which of the four it is, because the next move is different for each: turn
+encryption off in that node's web UI, flash it with `firmware/node`, run a
+smaller fleet, or go and find out why its heartbeats stopped.
+
+When every node is in one of those states the header says `auto — no node it can
+drive`, which is a different thing from `auto — nothing heartbeating yet` and is
+what a fleet of unflashed nodes looks like.
+
+`not wartui` is the one that needs saying out loud, because it is the one that
+looks like nothing being wrong. Every node reports its channels, its counter and
+its RSSI in the same bytes a stock node does — that is deliberate, and it is what
+lets vendor captures keep testing this code — so the only way to tell the two
+apart is to ask, and the only place a node can answer is the text field of its
+own heartbeat. A wartui node fills it with `wartui/0.1;ble,5g`: the protocol
+version, then what it can do. A stock node leaves it empty, and so does any
+wartui node built before this existed.
+
+Without that, a stranger in the fleet costs more than it contributes. It
+heartbeats, so it is planned for; its radio acknowledges the assignment, so the
+host believes it landed; its firmware cannot decode the frame, so it keeps
+scanning everything and nothing scans the share it was given. On a bench, two
+nodes and a stranger covered less of the pool than the two nodes alone
+(`docs/phase-2-findings.md`). **So flashing a host without flashing its nodes
+leaves a fleet that does nothing** — visibly, in the state column, rather than
+silently.
 
 `stale` and `no heartbeat` are deliberately distinct from silence. The vendor
 firmware refreshes liveness only on a heartbeat, so a node streaming

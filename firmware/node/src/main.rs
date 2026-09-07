@@ -67,11 +67,13 @@ use esp_radio::esp_now::{EspNowReceiver, EspNowSender};
 use esp_radio::wifi::{ControllerConfig, WifiController};
 use esp_rtos::CurrentThreadHandle;
 use static_cell::StaticCell;
-use wartui_proto::air::{AdminMsg, Frame, MsgType, TextMsg, WARDRIVE_LINE_MAX};
+use wartui_proto::air::{
+    AdminMsg, CAPABILITY_MAX, Capabilities, Frame, MsgType, TextMsg, WARDRIVE_LINE_MAX,
+};
 use wartui_proto::dedup::MacRing;
 use wartui_proto::plan::{
     ADMIN_WAIT_MS, CHANNEL_DWELL_MS, CONTROL_CHANNEL, ChannelSet, DEDUP_RING, IDLE_BEAT_MS,
-    NODE_STAGGER_WINDOW_MS, NUM_SCAN_CHANNELS, SCAN_CHANNELS, stagger_offset_ms,
+    NODE_STAGGER_WINDOW_MS, NUM_SCAN_CHANNELS, SCAN_CHANNELS, SweepCursor, stagger_offset_ms,
 };
 
 #[cfg(feature = "ble")]
@@ -171,8 +173,8 @@ struct Node {
     channels: ChannelSet,
     /// Whether the core asked this node to scan Bluetooth as well.
     ble: bool,
-    /// Which of those indices the sweep is on.
-    cursor: u8,
+    /// Where the sweep has got to in those indices.
+    cursor: SweepCursor,
     /// Monotonic from boot. Its going backwards is how the host notices a node
     /// has restarted and forgotten its assignment.
     counter: u32,
@@ -188,7 +190,7 @@ impl Node {
             node_count: 1,
             channels: ChannelSet::empty(),
             ble: false,
-            cursor: 0,
+            cursor: SweepCursor::new(),
             counter: 1,
             seen: MacRing::new(),
             reported: 0,
@@ -228,29 +230,32 @@ impl Node {
         self.node_count = admin.node_count;
         self.channels = admin.channels;
         self.ble = admin.scan_ble();
-        self.cursor = self.channels.first().unwrap_or(0);
+        self.cursor = SweepCursor::new();
         true
     }
 
     /// Step to the next assigned channel, saying whether that completed a sweep.
     fn advance(&mut self) -> bool {
-        match self.channels.indices().find(|idx| *idx > self.cursor) {
-            Some(next) => {
-                self.cursor = next;
-                false
-            }
-            None => {
-                self.cursor = self.channels.first().unwrap_or(0);
-                true
-            }
-        }
+        self.cursor.advance(self.channels)
     }
 
-    /// The channel the cursor is on.
-    fn channel(&self) -> u8 {
-        SCAN_CHANNELS[usize::from(self.cursor.min(NUM_SCAN_CHANNELS - 1))]
+    /// The channel the cursor is on, or `None` when an assignment has been
+    /// adopted and its sweep has not started.
+    fn channel(&self) -> Option<u8> {
+        self.cursor
+            .index()
+            .map(|idx| SCAN_CHANNELS[usize::from(idx.min(NUM_SCAN_CHANNELS - 1))])
     }
 }
+
+/// What this build is, as every heartbeat says it.
+///
+/// `ble` is whether the code is compiled in, not whether it is running: the
+/// scan is the core's decision and is off at every boot. `5g` is the chip —
+/// the C5 has a 5 GHz radio and the C6 does not, so a share of 5 GHz channels
+/// dealt to a C6 is a share nobody scans.
+const CAPABILITIES: Capabilities =
+    Capabilities::here(cfg!(feature = "ble"), cfg!(feature = "esp32c5"));
 
 static NODE: StaticCell<Node> = StaticCell::new();
 
@@ -350,7 +355,15 @@ fn main() -> ! {
         // inside it belongs to neither channel; a refusal means the radio never
         // arrived, and collecting then would file this channel's name on
         // whatever the radio is actually still tuned to.
-        let channel = node.channel();
+        let Some(channel) = node.channel() else {
+            // An assignment adopted while parked, whose sweep has not begun.
+            // Step onto its lowest channel and dwell there next time round,
+            // rather than on whichever index the cursor happened to hold when
+            // the frame arrived — which would be a channel this node is no
+            // longer assigned.
+            node.advance();
+            continue;
+        };
         if radio::park(&manager, &sniffer, channel, true) {
             sniff::arm(channel);
             CurrentThreadHandle::get().delay(Duration::from_millis(u64::from(CHANNEL_DWELL_MS)));
@@ -406,7 +419,15 @@ fn main() -> ! {
 /// carrying, and treats sixty seconds of silence as a node that has left the
 /// fleet.
 fn heartbeat(sender: &mut EspNowSender<'_>, node: &mut Node) {
-    let Ok(msg) = TextMsg::new(MsgType::Heartbeat, node.counter, b"") else { return };
+    // Every heartbeat carries the token, not just the first. The host has no
+    // other way to tell this node from a stock one — node to core is
+    // byte-identical by design — and a token sent once would be a token lost
+    // to a dropped frame, or stale after this board is reflashed with
+    // something else. It is twenty-odd bytes of a field that is padded to two
+    // hundred either way, so repeating it costs nothing on the air.
+    let mut token = [0u8; CAPABILITY_MAX];
+    let Some(len) = CAPABILITIES.write_into(&mut token) else { return };
+    let Ok(msg) = TextMsg::new(MsgType::Heartbeat, node.counter, &token[..len]) else { return };
     if radio::broadcast(sender, &msg.encode()) {
         node.counter = node.counter.wrapping_add(1).max(1);
     }
