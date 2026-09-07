@@ -42,7 +42,11 @@ use crate::record::Record;
 /// v2 added `assignment.outcome` and `assignment.latency_us`, because Phase 4
 /// transmits and an assignment that was sent is not the same thing as one that
 /// landed.
-pub const SCHEMA_VERSION: i32 = 2;
+///
+/// v3 replaced `assignment.start_idx`/`end_idx` with a `channels` bitmask and
+/// added `ble`, because an assignment stopped being a contiguous range. A v2
+/// row's bounds convert into a mask exactly, so the migration is lossless.
+pub const SCHEMA_VERSION: i32 = 3;
 
 /// The schema, applied to any database that does not already have it.
 const SCHEMA: &str = r"
@@ -63,8 +67,7 @@ CREATE TABLE IF NOT EXISTS node (
   label TEXT,
   first_seen INTEGER NOT NULL,
   last_seen INTEGER NOT NULL,
-  pinned_start_idx INTEGER,
-  pinned_end_idx INTEGER
+  pinned_channels INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS heartbeat (
@@ -83,6 +86,10 @@ CREATE TABLE IF NOT EXISTS heartbeat (
 -- the table is append-only and a retry is a second row rather than an update.
 -- `counter` is the persisted monotonic epoch and `wire_version` the byte that
 -- actually went out; they differ because the wire field is one byte wide.
+-- `channels` is the forty-bit SCAN_CHANNELS mask the frame carried, stored as
+-- the integer it is rather than as a rendered channel list: the indices are
+-- what the wire said, and turning them into channel numbers is the reader's
+-- job and depends on a table that could change.
 CREATE TABLE IF NOT EXISTS assignment (
   id INTEGER PRIMARY KEY,
   session_id INTEGER NOT NULL REFERENCES session(id),
@@ -91,8 +98,8 @@ CREATE TABLE IF NOT EXISTS assignment (
   wire_version INTEGER NOT NULL,
   node_index INTEGER NOT NULL,
   node_count INTEGER NOT NULL,
-  start_idx INTEGER NOT NULL,
-  end_idx INTEGER NOT NULL,
+  channels INTEGER NOT NULL,
+  ble INTEGER NOT NULL,
   created_at INTEGER NOT NULL,
   delivered_at INTEGER,
   outcome TEXT,
@@ -233,9 +240,20 @@ impl Store {
         // version marker back down to 1 — leaving neither build able to tell
         // that it had happened.
         let found = check_version(&conn)?;
-        migrate(&conn, found)?;
-        conn.execute_batch(SCHEMA)?;
-        conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        // All of it or none of it, version marker included. A migration is
+        // several statements that only make sense together — v2's assignment
+        // rebuild renames the old table before it has written the new one —
+        // and the marker is what decides whether they run again. Committed
+        // piecemeal, a failure part way through would leave a file that is
+        // neither shape and still stamped with the old version, so every later
+        // open would re-enter the migration and die on the rename against a
+        // table that is already there. A rollback leaves the file exactly as it
+        // was found, which the next open can migrate again.
+        let tx = conn.transaction()?;
+        migrate(&tx, found)?;
+        tx.execute_batch(SCHEMA)?;
+        tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        tx.commit()?;
 
         let session_id = insert_session(&mut conn, session, started_at_ms)?;
         let assignment_base = reserve_versions(&mut conn)?;
@@ -368,7 +386,61 @@ fn migrate(conn: &Connection, found: i32) -> Result<(), StoreError> {
     if found == 1 && has_assignment {
         conn.execute_batch("DROP TABLE assignment")?;
     }
+
+    // v2 rows are real and worth keeping. Their `start_idx`/`end_idx` name a
+    // contiguous run, which is exactly what a mask can say, so the bounds
+    // convert rather than being thrown away: bits `start..=end` set, which for
+    // a 40-bit field is `((1 << (end - start + 1)) - 1) << start`. `ble` is 0
+    // because no v2 build could ask for it.
+    //
+    // Rebuilt rather than `ALTER TABLE`d, because leaving the old columns in
+    // place would mean every later reader deciding which pair to believe.
+    if found == 2 && has_assignment {
+        conn.execute_batch(
+            "ALTER TABLE assignment RENAME TO assignment_v2;
+             CREATE TABLE assignment (
+               id INTEGER PRIMARY KEY,
+               session_id INTEGER NOT NULL REFERENCES session(id),
+               node_mac BLOB NOT NULL,
+               counter INTEGER NOT NULL,
+               wire_version INTEGER NOT NULL,
+               node_index INTEGER NOT NULL,
+               node_count INTEGER NOT NULL,
+               channels INTEGER NOT NULL,
+               ble INTEGER NOT NULL,
+               created_at INTEGER NOT NULL,
+               delivered_at INTEGER,
+               outcome TEXT,
+               latency_us INTEGER
+             );
+             INSERT INTO assignment
+               (id, session_id, node_mac, counter, wire_version, node_index, node_count,
+                channels, ble, created_at, delivered_at, outcome, latency_us)
+             SELECT id, session_id, node_mac, counter, wire_version, node_index, node_count,
+                    ((1 << (end_idx - start_idx + 1)) - 1) << start_idx, 0,
+                    created_at, delivered_at, outcome, latency_us
+             FROM assignment_v2;
+             DROP TABLE assignment_v2;",
+        )?;
+    }
+
+    // Never written by anything, in any version: a v2 build declared them and
+    // no code read or set them. Replaced rather than kept so the node table
+    // does not carry a shape the rest of the schema stopped using.
+    if (1..=2).contains(&found) && has_column(conn, "node", "pinned_start_idx")? {
+        conn.execute_batch(
+            "ALTER TABLE node DROP COLUMN pinned_start_idx;
+             ALTER TABLE node DROP COLUMN pinned_end_idx;
+             ALTER TABLE node ADD COLUMN pinned_channels INTEGER;",
+        )?;
+    }
     Ok(())
+}
+
+/// Whether a table already has a column, so a migration can be run once.
+fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, StoreError> {
+    let mut stmt = conn.prepare("SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2")?;
+    Ok(stmt.exists(params![table, column])?)
 }
 
 /// How far ahead of the last used epoch to move the persisted counter at open.
@@ -593,7 +665,7 @@ fn write_batch(
                 tx.prepare_cached(
                     "INSERT INTO assignment
                        (session_id, node_mac, counter, wire_version, node_index, node_count,
-                        start_idx, end_idx, created_at, delivered_at, outcome, latency_us)
+                        channels, ble, created_at, delivered_at, outcome, latency_us)
                      VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
                 )?
                 .execute(params![
@@ -603,8 +675,8 @@ fn write_batch(
                     a.wire_version,
                     a.node_index,
                     a.node_count,
-                    a.start_idx,
-                    a.end_idx,
+                    i64::try_from(a.channels.bits()).unwrap_or(0),
+                    a.ble,
                     a.created_at_ms,
                     a.delivered_at_ms,
                     a.outcome.as_str(),

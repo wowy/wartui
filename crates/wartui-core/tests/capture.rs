@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use tokio::sync::{oneshot, watch};
 use wartui_bridge::sim::{SimConfig, SimTransport};
-use wartui_core::engine::{EngineConfig, FleetEngine, StoreStats};
+use wartui_core::engine::{Command, EngineConfig, FleetEngine, StoreStats};
 use wartui_core::export::{ExportFilter, wigle_csv};
 use wartui_core::gps::Gps;
 use wartui_core::position::PositionChain;
@@ -122,9 +122,18 @@ async fn a_moving_capture_writes_where_the_receiver_was_for_each_row() {
     let (snapshot_tx, _snapshot_rx) =
         watch::channel(Arc::new(engine.snapshot(started, StoreStats::default())));
     let (stop_tx, stop_rx) = oneshot::channel();
-    let (_command_tx, command_rx) = tokio::sync::mpsc::channel(4);
+    let (command_tx, command_rx) = tokio::sync::mpsc::channel(4);
 
     let capture = tokio::spawn(drive(link, store, engine, snapshot_tx, command_rx, stop_rx));
+    // One node scans Bluetooth, which is what keeps observations arriving for
+    // the whole drive: advertisers rotate their addresses, so they never fall
+    // into a node's dedup ring, while the fake neighbourhood's access points
+    // are all reported in the first sweep and then suppressed. Without a live
+    // stream there is nothing for the second fix to be attached to.
+    command_tx
+        .send(Command::AssignBle { mac: Some(SimTransport::node_mac(0)) })
+        .await
+        .expect("the engine is listening");
     tokio::time::sleep(Duration::from_millis(700)).await;
     gps.feed(SECOND, now().unix_ms);
     tokio::time::sleep(Duration::from_millis(700)).await;

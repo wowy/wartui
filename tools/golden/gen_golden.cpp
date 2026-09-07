@@ -84,7 +84,12 @@ int main() {
     m.type = 1;              // MSG_CORE_REQUEST
     emit("core_request", &m, sizeof(m));
   }
-  // Mirrors WiFiOps.cpp:646-653 (sendAdminToNodeSlot).
+  // Mirrors WiFiOps.cpp:646-653 (sendAdminToNodeSlot). Named `legacy_` because
+  // wartui stopped speaking this shape in Phase 2: its own MSG_ADMIN is
+  // fourteen bytes and carries a channel mask. The vector stays because the
+  // frame is still out there — a stock core in the same room emits it, and
+  // `air::is_legacy_admin` has to recognise it off real bytes rather than off
+  // a reading of the header.
   {
     enow_admin_msg_t m = {};
     memcpy(m.magic, MAGIC, 4);
@@ -94,7 +99,7 @@ int main() {
     m.node_count = 5;
     m.start_channel_idx = 16;
     m.end_channel_idx = 23;
-    emit("admin", &m, sizeof(m));
+    emit("legacy_admin", &m, sizeof(m));
   }
   return 0;
 }

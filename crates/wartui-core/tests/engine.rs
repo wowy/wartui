@@ -16,7 +16,7 @@ use wartui_proto::air::{AdminMsg, MsgType, TextMsg};
 use wartui_proto::link::{
     BROADCAST, BridgeToHost, Chip, EspNowPayload, HostToBridge, Mac, SendStatus,
 };
-use wartui_proto::plan::{ChannelPool, IndexRun};
+use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun, plan};
 
 const NODE: Mac = [0x02, 0x00, 0x5E, 0x10, 0x57, 0x84];
 const OTHER: Mac = [0x02, 0x00, 0x5E, 0x10, 0x57, 0x85];
@@ -83,7 +83,14 @@ fn sent_admin(batch: &wartui_core::ActionBatch) -> (u16, Mac, AdminMsg) {
 }
 
 fn assign(mac: Mac, start: u8, end: u8) -> Event {
-    Event::Command(Command::Assign { mac, range: IndexRun::new(start, end) })
+    Event::Command(Command::Assign { mac, channels: run(start, end) })
+}
+
+/// The channels of an inclusive index run, which is what most of these tests
+/// want: a set says more than a range can, but a range still reads better in a
+/// test that is not about the difference.
+fn run(start: u8, end: u8) -> ChannelSet {
+    ChannelSet::from_run(IndexRun::new(start, end))
 }
 
 fn observation(src: Mac, bssid: &str, rssi: i16) -> Event {
@@ -237,8 +244,8 @@ fn an_admin_frame_from_elsewhere_means_a_rival_core_is_powered_up() {
         assignment_version: 3,
         node_index: 0,
         node_count: 2,
-        start_channel_idx: 0,
-        end_channel_idx: 19,
+        flags: 0,
+        channels: run(0, 19),
     }
     .encode();
     let event = Event::Link(LinkEvent::Message(BridgeToHost::Rx {
@@ -513,9 +520,40 @@ fn an_assignment_waits_for_the_heartbeat_that_opens_the_window() {
     let opened = engine.handle(heartbeat(NODE, 2), clock.at(6));
     let (_, dst, admin) = sent_admin(&opened);
     assert_eq!(dst, NODE);
-    assert_eq!((admin.start_channel_idx, admin.end_channel_idx), (5, 5));
+    assert_eq!(admin.channels, run(5, 5));
     assert_eq!(admin.assignment_version, 1, "the first epoch of a fresh database");
     assert_eq!(counters(&engine).admin_sent, 1);
+}
+
+#[test]
+fn an_empty_set_is_not_an_assignment_and_never_reaches_a_node() {
+    let clock = Clock::new();
+    let mut engine = engine(manual(), &clock);
+    engine.handle(heartbeat(NODE, 1), clock.at(1));
+
+    // There is no frame meaning "scan nothing". A node that adopted one would
+    // park on the control channel and collect nothing, while the host had a
+    // MAC-layer acknowledgement for it and so read the row as confirmed at
+    // `0: none` — a node doing nothing that looks exactly like a node doing as
+    // it was told. `replan` already skips a node it has nothing for.
+    let empty = Event::Command(Command::Assign { mac: NODE, channels: ChannelSet::empty() });
+    engine.handle(empty, clock.at(2));
+    assert!(engine.handle(heartbeat(NODE, 2), clock.at(6)).urgent.is_empty());
+    assert_eq!(counters(&engine).admin_sent, 0);
+
+    // And it does not take away what a node already holds, which is the shape
+    // this would arrive in: a set narrowed one channel at a time until there is
+    // nothing left of it.
+    engine.handle(assign(NODE, 0, 10), clock.at(7));
+    let (id, _, _) = sent_admin(&engine.handle(heartbeat(NODE, 3), clock.at(11)));
+    engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(11));
+
+    let empty = Event::Command(Command::Assign { mac: NODE, channels: ChannelSet::empty() });
+    engine.handle(empty, clock.at(12));
+    assert!(engine.handle(heartbeat(NODE, 4), clock.at(16)).urgent.is_empty());
+    let node = engine.nodes().next().expect("the node");
+    assert!(!node.dirty, "nothing was asked for, so there is nothing pending");
+    assert_eq!(node.confirmed.expect("still assigned").channels, run(0, 10));
 }
 
 #[test]
@@ -532,14 +570,15 @@ fn an_assignment_is_believed_only_once_the_node_radio_acknowledges_it() {
     let batch = engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(6));
     let node = engine.nodes().next().expect("the node");
     assert!(!node.dirty, "acknowledged, so there is nothing left to deliver");
-    assert_eq!(node.confirmed.expect("confirmed").range, IndexRun::new(0, 10));
+    assert_eq!(node.confirmed.expect("confirmed").channels, run(0, 10));
     assert_eq!(counters(&engine).admin_acked, 1);
 
     let Some(Record::Assignment(row)) = batch.records.first() else {
         panic!("every attempt is written down")
     };
     assert_eq!(row.outcome, AdminOutcome::Acked);
-    assert_eq!((row.start_idx, row.end_idx), (0, 10));
+    assert_eq!(row.channels, run(0, 10));
+    assert!(!row.ble);
 
     // And a later heartbeat sends nothing, because there is nothing to send.
     assert!(engine.handle(heartbeat(NODE, 3), clock.at(10)).urgent.is_empty());
@@ -611,7 +650,7 @@ fn a_lost_answer_expiring_late_does_not_unpick_an_assignment_that_has_since_land
     engine.handle(send_result(second, SendStatus::AckOk, 4_000), clock.at(4));
 
     let node = engine.nodes().next().expect("the node").clone();
-    assert_eq!(node.confirmed.expect("confirmed").range, IndexRun::new(5, 5));
+    assert_eq!(node.confirmed.expect("confirmed").channels, run(5, 5));
 
     // Now the stranded first attempt times out. It earns its row — that attempt
     // really did go unanswered — but the node is demonstrably holding the
@@ -622,7 +661,7 @@ fn a_lost_answer_expiring_late_does_not_unpick_an_assignment_that_has_since_land
 
     let node = engine.nodes().next().expect("the node");
     assert_eq!(node.last_outcome, Some(AdminOutcome::Acked));
-    assert_eq!(node.confirmed.expect("still confirmed").range, IndexRun::new(5, 5));
+    assert_eq!(node.confirmed.expect("still confirmed").channels, run(5, 5));
     assert!(!node.dirty, "nothing is owed: the node acknowledged this epoch");
 }
 
@@ -683,7 +722,7 @@ fn a_reboot_re_issues_the_assignment_under_a_fresh_epoch() {
     let batch = engine.handle(heartbeat(NODE, 1), clock.at(10));
     let (_, _, reissued) = sent_admin(&batch);
     assert_ne!(reissued.assignment_version, first.assignment_version);
-    assert_eq!((reissued.start_channel_idx, reissued.end_channel_idx), (2, 4));
+    assert_eq!(reissued.channels, run(2, 4));
 
     let node = engine.nodes().next().expect("the node");
     assert_eq!(node.reboots, 1);
@@ -740,9 +779,9 @@ fn the_heartbeat_period_is_the_median_of_recent_sweeps() {
     let clock = Clock::new();
     let mut engine = engine(manual(), &clock);
 
-    // Four-second sweeps, which is what a node scanning all forty channels
+    // Four-second sweeps, which is about what a node holding the whole US pool
     // does, with one heartbeat lost in the middle. The median is what keeps
-    // that lost beat from reading as a range twice the size.
+    // that lost beat from reading as an assignment twice the size.
     for (n, at) in [1u64, 5, 9, 17, 21, 25].into_iter().enumerate() {
         engine.handle(heartbeat(NODE, n as u32 + 1), clock.at(at));
     }
@@ -810,7 +849,7 @@ fn an_acknowledgement_for_an_assignment_the_operator_has_already_replaced_is_not
     let node = engine.nodes().next().expect("the node");
     assert!(node.dirty, "the newer assignment is still owed");
     assert!(node.confirmed.is_none());
-    assert_eq!(node.desired.expect("desired").range, IndexRun::new(5, 9));
+    assert_eq!(node.desired.expect("desired").channels, run(5, 9));
 }
 
 // ---------------------------------------------------------------------------
@@ -837,12 +876,12 @@ fn manual() -> EngineConfig {
     EngineConfig { auto: false, ..Default::default() }
 }
 
-/// Every index a set of ranges covers, sorted. Comparing this against the
-/// pool's own indices proves coverage and disjointness at once: a gap makes it
-/// short, an overlap makes it long, and a straddled run puts an index in it
-/// that the pool does not have.
-fn covered(ranges: &[IndexRun]) -> Vec<u8> {
-    let mut all: Vec<u8> = ranges.iter().flat_map(|r| r.start..=r.end).collect();
+/// Every index a collection of channel sets covers, sorted. Comparing this
+/// against the pool's own indices proves coverage and disjointness at once: a
+/// gap makes it short, an overlap makes it long, and a channel from outside the
+/// pool puts an index in it that the pool does not have.
+fn covered(sets: &[ChannelSet]) -> Vec<u8> {
+    let mut all: Vec<u8> = sets.iter().flat_map(|set| set.indices()).collect();
     all.sort_unstable();
     all
 }
@@ -852,22 +891,33 @@ fn pool_indices(pool: ChannelPool) -> Vec<u8> {
 }
 
 /// What each node has been told to scan, whether or not it has answered yet.
-fn wanted(engine: &FleetEngine) -> Vec<IndexRun> {
-    engine.nodes().filter_map(|node| node.desired).map(|a| a.range).collect()
+fn wanted(engine: &FleetEngine) -> Vec<ChannelSet> {
+    engine.nodes().filter_map(|node| node.desired).map(|a| a.channels).collect()
 }
 
 #[test]
-fn auto_assignment_cuts_the_pool_into_one_contiguous_range_per_node() {
+fn auto_assignment_deals_the_whole_pool_out_across_the_fleet() {
     let clock = Clock::new();
     let mut engine = engine(auto(), &clock);
     for n in 0..3 {
         engine.handle(heartbeat(peer(n), 1), clock.at(1));
     }
 
-    // `MSG_ADMIN` carries one contiguous run of indices and the US pool has a
-    // gap at 11-13, so a partition that covers the pool exactly is also proof
-    // that no node was given a range straddling the gap.
+    // Covering the pool exactly is coverage and disjointness in one assertion.
     assert_eq!(covered(&wanted(&engine)), pool_indices(ChannelPool::Us));
+
+    // And every node holds some of both bands, which is what dealing buys over
+    // block-splitting: one node dropping out thins the fleet's coverage rather
+    // than blinding it to 2.4 GHz until the next re-cut lands.
+    for node in engine.nodes() {
+        let set = node.desired.expect("every member of the plan has channels").channels;
+        for band in ChannelPool::Us.runs() {
+            assert!(
+                (band.start..=band.end).any(|idx| set.contains(idx)),
+                "node got nothing from {band:?}"
+            );
+        }
+    }
 
     // `node_index` and `node_count` drive the transmit stagger
     // (`src/RadioTuning.cpp:3-13`), so they have to agree fleet-wide: unique
@@ -875,7 +925,7 @@ fn auto_assignment_cuts_the_pool_into_one_contiguous_range_per_node() {
     let indices: Vec<(u8, u8)> = engine
         .nodes()
         .map(|node| {
-            let a = node.desired.expect("every member of the plan has a range");
+            let a = node.desired.expect("every member of the plan has channels");
             (a.node_index, a.node_count)
         })
         .collect();
@@ -961,31 +1011,82 @@ fn a_node_that_stops_heartbeating_leaves_the_plan_and_the_rest_take_its_channels
 }
 
 #[test]
-fn one_node_on_a_two_run_pool_covers_the_runs_in_turn() {
+fn one_node_on_a_two_run_pool_gets_all_of_it_in_one_frame() {
     let clock = Clock::new();
-    let config = EngineConfig { rotation_dwell: Duration::from_secs(30), ..auto() };
-    let mut engine = engine(config, &clock);
+    let mut engine = engine(auto(), &clock);
 
-    // `MSG_ADMIN` cannot express two runs, and the US pool is two. With only
-    // one node the choice is between covering half the pool forever and
-    // covering all of it intermittently.
+    // This is where the rotation used to be. `MSG_ADMIN` carried one contiguous
+    // range and the US pool is two runs, so a lone node was given them in turn
+    // on a sixty-second dwell: half the pool unscanned at any instant, and a
+    // fresh epoch spent every minute for as long as the fleet stayed at one.
+    // A channel mask says both runs at once.
     let (id, _, first) = sent_admin(&engine.handle(heartbeat(peer(0), 1), clock.at(1)));
-    assert_eq!((first.start_channel_idx, first.end_channel_idx), (0, 10), "the 2.4 GHz run");
+    assert_eq!(first.channels, ChannelPool::Us.channels());
+    assert_eq!(first.channels.len(), 34, "eleven 2.4 GHz channels and twenty-three 5 GHz");
     engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(1));
 
-    assert!(
-        engine.handle(Event::Tick, clock.at(10)).urgent.is_empty(),
-        "the dwell has not run out"
-    );
-    engine.handle(Event::Tick, clock.at(40));
-    let (_, _, second) = sent_admin(&engine.handle(heartbeat(peer(0), 2), clock.at(41)));
-    assert_eq!((second.start_channel_idx, second.end_channel_idx), (14, 36), "the 5 GHz run");
-    assert_ne!(second.assignment_version, first.assignment_version);
+    // And nothing re-issues it. Ticks are what the dwell timer used to fire on,
+    // so a plan that is still holding after several minutes of them is the
+    // whole of the change.
+    for minute in 1..=5 {
+        let batch = engine.handle(Event::Tick, clock.at(60 * minute));
+        assert!(batch.urgent.is_empty(), "nothing is owed at minute {minute}");
+    }
+    assert_eq!(counters(&engine).replans, 1, "one plan, once");
+}
 
-    // And round again, rather than stopping at the last run.
-    engine.handle(Event::Tick, clock.at(80));
-    let (_, _, third) = sent_admin(&engine.handle(heartbeat(peer(0), 3), clock.at(81)));
-    assert_eq!((third.start_channel_idx, third.end_channel_idx), (0, 10));
+#[test]
+fn bluetooth_goes_to_one_node_at_a_time_and_moving_it_tells_both() {
+    let clock = Clock::new();
+    let mut engine = engine(auto(), &clock);
+    // Both join, then both settle: the second node's arrival re-cuts the pool,
+    // so the shares that stick are the ones sent on the second heartbeat.
+    for n in 0..2 {
+        engine.handle(heartbeat(peer(n), 1), clock.at(1));
+    }
+    for n in 0..2 {
+        let (id, ..) = sent_admin(&engine.handle(heartbeat(peer(n), 2), clock.at(2)));
+        engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(2));
+    }
+    // Nobody scans Bluetooth unless asked. The cost is measured and real —
+    // ~10% of the sweep period on our own firmware, and every assignment lost
+    // on the vendor's — so it is not a fleet-wide default.
+    assert!(engine.nodes().all(|node| !node.confirmed.expect("planned").ble));
+    assert_eq!(engine.snapshot(clock.at(2), StoreStats::default()).ble_node, None);
+
+    let held = engine.nodes().next().expect("the node").confirmed.expect("planned").channels;
+    engine.handle(Event::Command(Command::AssignBle { mac: Some(peer(0)) }), clock.at(3));
+    let (id, dst, admin) = sent_admin(&engine.handle(heartbeat(peer(0), 3), clock.at(4)));
+    assert_eq!(dst, peer(0));
+    assert!(admin.scan_ble(), "the flag rides on that node's own next assignment");
+    assert_eq!(admin.channels, held, "and changes nothing else about the assignment");
+    assert_ne!(admin.assignment_version, 0, "under an epoch the node will adopt");
+    engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(4));
+
+    // Moving it is two frames: the node giving it up has to be told as well,
+    // or the fleet would briefly have two nodes holding the shared antenna.
+    engine.handle(Event::Command(Command::AssignBle { mac: Some(peer(1)) }), clock.at(5));
+    let (_, _, gave_up) = sent_admin(&engine.handle(heartbeat(peer(0), 4), clock.at(6)));
+    assert!(!gave_up.scan_ble());
+    let (_, _, took_it) = sent_admin(&engine.handle(heartbeat(peer(1), 3), clock.at(7)));
+    assert!(took_it.scan_ble());
+}
+
+#[test]
+fn the_bluetooth_assignment_does_not_outlive_the_node_holding_it() {
+    let clock = Clock::new();
+    let mut engine = engine(auto(), &clock);
+    engine.handle(heartbeat(peer(0), 1), clock.at(1));
+    engine.handle(heartbeat(peer(1), 1), clock.at(1));
+    engine.handle(Event::Command(Command::AssignBle { mac: Some(peer(0)) }), clock.at(2));
+    assert_eq!(engine.snapshot(clock.at(2), StoreStats::default()).ble_node, Some(peer(0)));
+
+    // It ages out with the node. Leaving it named would have the view claiming
+    // the fleet has Bluetooth coverage that nothing is providing — and the
+    // flag would silently come back if that MAC ever reappeared.
+    engine.handle(heartbeat(peer(1), 2), clock.at(70));
+    engine.handle(Event::Tick, clock.at(70));
+    assert_eq!(engine.snapshot(clock.at(70), StoreStats::default()).ble_node, None);
 }
 
 #[test]
@@ -1061,7 +1162,7 @@ fn taking_the_fleet_back_by_hand_numbers_it_the_way_the_plan_did() {
         .nodes()
         .find(|node| node.mac == peer(1))
         .and_then(|node| node.desired)
-        .expect("the plan gave it a range");
+        .expect("the plan gave it channels");
 
     engine.handle(Event::Command(Command::SetAuto(false)), clock.at(121));
     engine.handle(assign(peer(1), 4, 4), clock.at(122));
@@ -1071,7 +1172,7 @@ fn taking_the_fleet_back_by_hand_numbers_it_the_way_the_plan_did() {
         .and_then(|node| node.desired)
         .expect("the hand assignment");
 
-    assert_eq!(by_hand.range, IndexRun::new(4, 4), "the range is the operator\'s");
+    assert_eq!(by_hand.channels, run(4, 4), "the channels are the operator\'s");
     assert_eq!(
         (by_hand.node_index, by_hand.node_count),
         (planned.node_index, planned.node_count),
@@ -1080,7 +1181,7 @@ fn taking_the_fleet_back_by_hand_numbers_it_the_way_the_plan_did() {
 }
 
 #[test]
-fn a_range_given_by_hand_keeps_the_stagger_slot_the_plan_gave_the_node() {
+fn channels_given_by_hand_keep_the_stagger_slot_the_plan_gave_the_node() {
     let clock = Clock::new();
     let mut engine = engine(auto(), &clock);
     for n in 0..3 {
@@ -1092,13 +1193,13 @@ fn a_range_given_by_hand_keeps_the_stagger_slot_the_plan_gave_the_node() {
     // of another node's slot for as long as the override lasted.
     engine.handle(assign(peer(2), 20, 22), clock.at(2));
     let node = engine.nodes().nth(2).expect("the third node");
-    let desired = node.desired.expect("the hand-given range");
-    assert_eq!(desired.range, IndexRun::new(20, 22));
+    let desired = node.desired.expect("the hand-given channels");
+    assert_eq!(desired.channels, run(20, 22));
     assert_eq!((desired.node_index, desired.node_count), (2, 3));
 }
 
 #[test]
-fn a_node_that_rejoins_holding_the_right_range_is_still_re_issued_when_it_reboots() {
+fn a_node_that_rejoins_holding_the_right_channels_is_still_re_issued_when_it_reboots() {
     let clock = Clock::new();
     let mut engine = engine(auto(), &clock);
     let (first, _, _) = sent_admin(&engine.handle(heartbeat(peer(0), 1), clock.at(1)));
@@ -1109,8 +1210,8 @@ fn a_node_that_rejoins_holding_the_right_range_is_still_re_issued_when_it_reboot
     engine.handle(send_result(recut, SendStatus::AckOk, 900), clock.at(3));
 
     // It goes quiet long enough to leave the plan, then comes back — and the
-    // re-cut gives it the very range it is already holding, so there is nothing
-    // to send it.
+    // re-cut gives it the very channels it is already holding, so there is
+    // nothing to send it.
     engine.handle(heartbeat(peer(1), 2), clock.at(70));
     engine.handle(heartbeat(peer(0), 3), clock.at(71));
     assert!(
@@ -1119,15 +1220,18 @@ fn a_node_that_rejoins_holding_the_right_range_is_still_re_issued_when_it_reboot
     );
 
     // A reboot forgets the range and the node's own version byte with it, so
-    // the range has to be said again under a fresh epoch. Saying it needs
+    // its share has to be said again under a fresh epoch. Saying it needs
     // wartui to still know what the node was holding — and a node that rejoined
     // a plan without being sent anything is exactly the case where it might
-    // not. Getting this wrong drops the node back to scanning all forty
-    // channels, transmitting on the six the US pool exists to exclude.
+    // not. Getting this wrong leaves the node parked on the control channel
+    // collecting nothing, which is silent rather than merely wrong.
     let batch = engine.handle(heartbeat(peer(0), 1), clock.at(80));
     let (_, dst, admin) = sent_admin(&batch);
     assert_eq!(dst, peer(0));
-    assert_eq!((admin.start_channel_idx, admin.end_channel_idx), (0, 10));
+    assert_eq!(
+        admin.channels,
+        plan(ChannelPool::Us, 2).expect("two nodes").channels_for(0).expect("assigned")
+    );
     assert_eq!(admin.node_count, 2);
 }
 
