@@ -8,7 +8,7 @@
 use anyhow::Result;
 use clap::Args as ClapArgs;
 use wartui_bridge::LinkEvent;
-use wartui_proto::air::{Frame, MsgType, RecordKind, WardriveLine, is_legacy_admin};
+use wartui_proto::air::{Capabilities, Frame, MsgType, RecordKind, WardriveLine, is_legacy_admin};
 use wartui_proto::link::{BROADCAST, BridgeToHost};
 
 use super::mac;
@@ -83,6 +83,14 @@ pub async fn run(args: Args) -> Result<()> {
             counts.legacy_admin
         );
     }
+    if counts.unannounced_heartbeat > 0 {
+        println!(
+            "# {} of {} heartbeats carried no wartui token. `run` will not plan for \
+             those nodes: they acknowledge an assignment and then discard it, so a \
+             share cut for one is a share nobody scans. Flash them with firmware/node.",
+            counts.unannounced_heartbeat, counts.heartbeat
+        );
+    }
     Ok(())
 }
 
@@ -97,6 +105,10 @@ struct Counts {
     total: u64,
     text: u64,
     heartbeat: u64,
+    /// Heartbeats whose text field carried no wartui token. `run` will not
+    /// plan for the nodes that send these, so a fleet that is being ignored
+    /// looks exactly like this and nothing else would say why.
+    unannounced_heartbeat: u64,
     admin: u64,
     /// The vendor core's ten-byte assignment. Counted apart from `admin`
     /// because seeing any at all means something else is driving this fleet.
@@ -146,7 +158,12 @@ fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
                 // case this summary would be read to diagnose.
                 Ok(Frame::Text(text)) => {
                     match text.msg_type {
-                        MsgType::Heartbeat => counts.heartbeat += 1,
+                        MsgType::Heartbeat => {
+                            counts.heartbeat += 1;
+                            if Capabilities::parse(text.text).is_none() {
+                                counts.unannounced_heartbeat += 1;
+                            }
+                        }
                         MsgType::Text => counts.text += 1,
                         _ => counts.other += 1,
                     }
@@ -154,8 +171,11 @@ fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
                         Ok(observation) if text.msg_type == MsgType::Text => {
                             println!("{head}  {}", render(&observation));
                         }
-                        // A heartbeat carries a counter and no text, so an
-                        // unparseable body is the normal case for it.
+                        // A heartbeat's text is its capability token, which is
+                        // not a wardrive line, so failing to parse as one is
+                        // the normal case here. Printed raw: `wartui/0.1;ble,5g`
+                        // is meant to be read, and an empty one is the whole
+                        // diagnosis for a node the planner will not touch.
                         _ => println!(
                             "{head}  {:?} #{}  {}",
                             text.msg_type,

@@ -67,7 +67,9 @@ use esp_radio::esp_now::{EspNowReceiver, EspNowSender};
 use esp_radio::wifi::{ControllerConfig, WifiController};
 use esp_rtos::CurrentThreadHandle;
 use static_cell::StaticCell;
-use wartui_proto::air::{AdminMsg, Frame, MsgType, TextMsg, WARDRIVE_LINE_MAX};
+use wartui_proto::air::{
+    AdminMsg, CAPABILITY_MAX, Capabilities, Frame, MsgType, TextMsg, WARDRIVE_LINE_MAX,
+};
 use wartui_proto::dedup::MacRing;
 use wartui_proto::plan::{
     ADMIN_WAIT_MS, CHANNEL_DWELL_MS, CONTROL_CHANNEL, ChannelSet, DEDUP_RING, IDLE_BEAT_MS,
@@ -246,6 +248,15 @@ impl Node {
     }
 }
 
+/// What this build is, as every heartbeat says it.
+///
+/// `ble` is whether the code is compiled in, not whether it is running: the
+/// scan is the core's decision and is off at every boot. `5g` is the chip —
+/// the C5 has a 5 GHz radio and the C6 does not, so a share of 5 GHz channels
+/// dealt to a C6 is a share nobody scans.
+const CAPABILITIES: Capabilities =
+    Capabilities::here(cfg!(feature = "ble"), cfg!(feature = "esp32c5"));
+
 static NODE: StaticCell<Node> = StaticCell::new();
 
 #[cfg(feature = "ble")]
@@ -408,7 +419,15 @@ fn main() -> ! {
 /// carrying, and treats sixty seconds of silence as a node that has left the
 /// fleet.
 fn heartbeat(sender: &mut EspNowSender<'_>, node: &mut Node) {
-    let Ok(msg) = TextMsg::new(MsgType::Heartbeat, node.counter, b"") else { return };
+    // Every heartbeat carries the token, not just the first. The host has no
+    // other way to tell this node from a stock one — node to core is
+    // byte-identical by design — and a token sent once would be a token lost
+    // to a dropped frame, or stale after this board is reflashed with
+    // something else. It is twenty-odd bytes of a field that is padded to two
+    // hundred either way, so repeating it costs nothing on the air.
+    let mut token = [0u8; CAPABILITY_MAX];
+    let Some(len) = CAPABILITIES.write_into(&mut token) else { return };
+    let Ok(msg) = TextMsg::new(MsgType::Heartbeat, node.counter, &token[..len]) else { return };
     if radio::broadcast(sender, &msg.encode()) {
         node.counter = node.counter.wrapping_add(1).max(1);
     }

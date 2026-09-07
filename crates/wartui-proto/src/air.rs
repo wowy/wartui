@@ -221,6 +221,160 @@ impl<'a> TextMsg<'a> {
     }
 }
 
+/// What a node says it is, in the text field of every heartbeat it sends.
+///
+/// Node → core is byte-identical to a stock node's, which is what lets vendor
+/// golden vectors keep testing this code — and it is also why the host cannot
+/// otherwise tell one firmware from the other. A stock node heartbeats like
+/// ours, is planned for like ours, and its radio acknowledges an assignment its
+/// application cannot decode; it then keeps scanning all forty channels while
+/// the share cut for it goes uncovered. Measured on a bench in
+/// `docs/phase-2-findings.md`: two nodes and a stranger covered less of the
+/// pool than the two nodes would have covered alone.
+///
+/// The heartbeat's text field is the place for the answer because it costs
+/// nothing. It is already on the wire, a stock node leaves it empty
+/// (`src/WiFiOps.cpp:1456-1457`), and every heartbeat carries it — so the host
+/// learns what a node is from the first frame it could act on, before it has
+/// to choose anything, and relearns it if the node is reflashed with something
+/// else. No handshake, no request, nothing to lose.
+///
+/// The token is ASCII, `wartui/<major>.<minor>` followed by an optional `;` and
+/// a comma-separated feature list: `wartui/0.1;ble,5g`. Unknown features are
+/// ignored rather than refused, because a node from a later build must not stop
+/// being a node just because it can do something new.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Capabilities {
+    /// Bumped when node → core changes shape. Nothing gates on it yet — no such
+    /// change has happened — but it is the lever available when one does, and a
+    /// version that is on the wire from the start is one that need not be
+    /// retrofitted to a fleet already in the field.
+    pub major: u8,
+    /// Bumped for additions a older host can ignore, such as a new feature
+    /// token.
+    pub minor: u8,
+    /// Built with the `ble` cargo feature, so the Bluetooth scan is code this
+    /// node actually has. Says nothing about whether it is running: that is the
+    /// assignment's [`ADMIN_FLAG_BLE`], and it is off at every boot.
+    pub ble: bool,
+    /// The radio reaches 5 GHz. False on an ESP32-C6, which is 2.4 GHz only, so
+    /// a share of 5 GHz channels dealt to one is a share nobody scans.
+    pub five_ghz: bool,
+}
+
+/// The node protocol version this build speaks, written into every heartbeat.
+pub const CAPABILITY_MAJOR: u8 = 0;
+/// See [`CAPABILITY_MAJOR`].
+pub const CAPABILITY_MINOR: u8 = 1;
+
+/// Longest token [`Capabilities::write_into`] can produce, for sizing a buffer.
+///
+/// `wartui/255.255;ble,5g` is 21; the room above it is for one more feature
+/// name without every caller having to be found again.
+pub const CAPABILITY_MAX: usize = 32;
+
+const CAPABILITY_PREFIX: &[u8] = b"wartui/";
+
+impl Capabilities {
+    /// What this build is, for a node to announce.
+    #[must_use]
+    pub const fn here(ble: bool, five_ghz: bool) -> Self {
+        Self { major: CAPABILITY_MAJOR, minor: CAPABILITY_MINOR, ble, five_ghz }
+    }
+
+    /// Read the token out of a heartbeat's text field.
+    ///
+    /// `None` for anything that is not one, which is the ordinary case for a
+    /// stock node and for any wartui node built before this existed. It is a
+    /// deliberate silence rather than an error: nothing is wrong with such a
+    /// node, the host simply cannot use it.
+    #[must_use]
+    pub fn parse(text: &[u8]) -> Option<Self> {
+        let rest = text.strip_prefix(CAPABILITY_PREFIX)?;
+        // Split the version from the features first, so a malformed feature
+        // list cannot make a well-formed version unreadable.
+        let (version, features) = match rest.iter().position(|b| *b == b';') {
+            Some(at) => (&rest[..at], &rest[at + 1..]),
+            None => (rest, &rest[rest.len()..]),
+        };
+        let dot = version.iter().position(|b| *b == b'.')?;
+        let major = ascii_u8(&version[..dot])?;
+        let minor = ascii_u8(&version[dot + 1..])?;
+
+        let mut out = Self { major, minor, ble: false, five_ghz: false };
+        for feature in features.split(|b| *b == b',') {
+            match feature {
+                b"ble" => out.ble = true,
+                b"5g" => out.five_ghz = true,
+                // Something a later build knows about. Carrying on is the whole
+                // point of a feature list: a node is not disqualified by having
+                // grown a capability this host has never heard of.
+                _ => {}
+            }
+        }
+        Some(out)
+    }
+
+    /// Write the token into `out`, returning how many bytes it used.
+    ///
+    /// `None` if `out` is shorter than the token needs; [`CAPABILITY_MAX`] is
+    /// always enough.
+    pub fn write_into(&self, out: &mut [u8]) -> Option<usize> {
+        let mut at = 0usize;
+        let mut push = |bytes: &[u8], at: &mut usize| -> Option<()> {
+            out.get_mut(*at..*at + bytes.len())?.copy_from_slice(bytes);
+            *at += bytes.len();
+            Some(())
+        };
+        push(CAPABILITY_PREFIX, &mut at)?;
+        let mut digits = [0u8; 3];
+        push(u8_ascii(self.major, &mut digits), &mut at)?;
+        push(b".", &mut at)?;
+        let mut digits = [0u8; 3];
+        push(u8_ascii(self.minor, &mut digits), &mut at)?;
+
+        let mut first = true;
+        for (present, name) in [(self.ble, &b"ble"[..]), (self.five_ghz, &b"5g"[..])] {
+            if !present {
+                continue;
+            }
+            push(if first { b";" } else { b"," }, &mut at)?;
+            push(name, &mut at)?;
+            first = false;
+        }
+        Some(at)
+    }
+}
+
+/// Parse ASCII decimal digits, rejecting anything else. `no_std`, so this is
+/// written out rather than reached for.
+fn ascii_u8(bytes: &[u8]) -> Option<u8> {
+    if bytes.is_empty() || bytes.len() > 3 {
+        return None;
+    }
+    let mut value: u16 = 0;
+    for b in bytes {
+        let digit = b.checked_sub(b'0').filter(|d| *d <= 9)?;
+        value = value * 10 + u16::from(digit);
+    }
+    u8::try_from(value).ok()
+}
+
+/// The other direction, into a caller-owned buffer.
+fn u8_ascii(value: u8, out: &mut [u8; 3]) -> &[u8] {
+    let mut at = out.len();
+    let mut left = value;
+    loop {
+        at -= 1;
+        out[at] = b'0' + left % 10;
+        left /= 10;
+        if left == 0 {
+            break;
+        }
+    }
+    &out[at..]
+}
+
 /// wartui's channel assignment — the one frame a node accepts.
 ///
 /// Fourteen bytes: magic, type 5, `assignment_version`, `node_index`,

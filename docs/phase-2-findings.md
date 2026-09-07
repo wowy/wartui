@@ -24,6 +24,7 @@ after it was flashed by hand. Same room throughout.
 | E | `esp32c5,ble` | 240 s | two nodes, the dealt partition, one Bluetooth scan |
 | F | `esp32c5,ble` ×2 | 135 s | three nodes, one of which is not ours |
 | G | `esp32c5,ble` ×3 | 250 s | three nodes, all three of them ours |
+| H | `esp32c5,ble` + one older | 115 s | the capability token, against a genuinely mixed fleet |
 
 ## One assignment covers both runs of the pool, and nothing rotates
 
@@ -340,9 +341,9 @@ pool than two nodes alone.
 This is the hazard the Phase 2 plan's capability token was for — a short ASCII
 token in the heartbeat's text field, `wartui/0.1;ble,5g`, so the host learns
 what a node is from its first heartbeat and before it has to choose anything.
-It was specified in the plan and not built, and nothing else can distinguish the
-two firmwares: node to core is byte-identical by design, which is exactly what
-lets vendor golden vectors keep testing this code.
+Nothing else can distinguish the two firmwares: node to core is byte-identical
+by design, which is exactly what lets vendor golden vectors keep testing this
+code. **It is built now, and the section below has the run.**
 
 ## What the bleed rate actually depends on, and it is not node count
 
@@ -394,6 +395,65 @@ it. Runs E and F happening to show only ±1 was the room, not a rule. Nothing
 was seen at ±3 or beyond, and no 5 GHz observation has landed outside a mask in
 any of the six captures.
 
+## The capability token, and a fleet that is half strangers
+
+Run F found a stock node in the fleet by accident and showed what it costs: it
+acknowledged an assignment it could not decode, kept scanning all forty
+channels, and took eleven channels of the pool out of coverage while the fleet
+table said it held them. The remedy was specified in the Phase 2 plan and had
+not been built. It is built now.
+
+Every heartbeat carries an ASCII token in the text field a stock node leaves
+empty (`src/WiFiOps.cpp:1456-1457`): `wartui/0.1;ble,5g` — protocol version,
+then what the build can do. `FleetEngine::is_assignable` refuses a node without
+one, alongside the encrypted and peer-refused cases that were already there for
+the same reason.
+
+Run H is the mixed fleet, which the bench produced without being asked: `57:84`
+carries the token and `59:50` is still on the build before it, sending the empty
+text field that is byte-for-byte a stock node's.
+
+```
+pool US  auto — 1 of 2  session 00:01:49  channel 6  peers 4
+
+node              rssi beats obs  last beat  ble  channels          state
+38:44:BE:1F:57:84 -39  35    96   1s   4.7s       34: 1-11,36-165   rebooted x1
+38:44:BE:1F:59:50 -52  67    0    0s   1.8s       unassigned        not wartui
+```
+
+**`auto — 1 of 2`.** The pool was cut for one node, and that node holds all
+thirty-four channels. Before the token this fleet would have been cut in two and
+half the pool would have gone unscanned, with nothing anywhere saying so; the
+run F measurement is exactly that failure. The stranger is in the table, named,
+with its heartbeats counted — ignored is not the same as hidden.
+
+The store agrees, and now records what each node said it was:
+
+| node | token | heartbeats | assignments | observations |
+| --- | --- | --- | --- | --- |
+| `57:84` | `wartui/0.1;ble,5g` | 36 | 3 | 97 |
+| `59:50` | none | 70 | **0** | 0 |
+
+Seventy heartbeats and not one assignment, which is the whole intent. A node row
+with heartbeats, no token and no assignments is a complete diagnosis months
+later, which is what the store is for.
+
+`wartui sniff` says it without a capture at all:
+
+```
+ 350005505us  38:44:BE:1F:57:84  -39dBm  bcast  Heartbeat #37  wartui/0.1;ble,5g
+ 351334537us  38:44:BE:1F:59:50  -53dBm  bcast  Heartbeat #890
+# 17 frames: 0 text, 17 heartbeat, 0 admin, 0 other, 0 undecodable
+# 12 of 17 heartbeats carried no wartui token. `run` will not plan for those
+# nodes: they acknowledge an assignment and then discard it, so a share cut for
+# one is a share nobody scans. Flash them with firmware/node.
+```
+
+**The cost of this is that flashing a host without flashing its nodes leaves a
+fleet that does nothing.** That is the intended trade — a fleet that visibly
+does nothing beats one that silently covers half of what it claims — but it is
+a real operational edge and both READMEs say so.
+
 ## Still not measured
 
 - **More than three nodes**, and any count where two nodes take the remainder
@@ -414,11 +474,17 @@ any of the six captures.
   the argument that it should — an access point is heard by whoever holds its
   channel and whoever holds the neighbours, which is two or three nodes however
   many there are — is reasoning, not a measurement.
-- **What to do about a foreign node.** The capability token specified in the
-  Phase 2 plan is not built, so wartui cannot tell a stock node from one of its
-  own and cuts it a share regardless. What the host should then *do* — refuse to
-  plan for it, plan around it, or only say so in the fleet table — is a decision
-  nobody has taken.
+- **Whether a version mismatch should be a refusal.** The token carries a major
+  and a minor and nothing gates on either, because no incompatible change has
+  happened yet. When one does, a major bump is the lever available; what the
+  host should do when it sees a major it does not know is undecided, and
+  guessing now would be inventing policy for a situation that does not exist.
+- **Acting on the feature flags.** `5g` is parsed, stored and displayed and
+  nothing uses it, so the planner still deals 5 GHz channels to an ESP32-C6 that
+  cannot tune them — a share nobody scans, of exactly the kind the token was
+  built to stop. Per-node channel eligibility is the fix and is a bigger change
+  than this one. `ble` is in the same position: pressing `b` on a node built
+  without the feature is still accepted and still does nothing.
 - **A dense room.** The Bluetooth penalty was measured where about fifty
   advertisers answered each scan. Whether it stays near a tenth of a sweep where
   five hundred do is unknown, and this bench cannot produce that.
