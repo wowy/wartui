@@ -246,13 +246,16 @@ phase in the header, and the fresh epoch it spent every minute — is gone.
 **A node can report a channel that is not in its share.** The deal interleaves
 2.4 GHz channels between nodes — one takes 1, 3, 5, the next 2, 4, 6 — and
 2.4 GHz channels are 5 MHz apart but 20 MHz wide, so a node parked on 2 hears
-beacons transmitted on 1 and 3. It reports the channel the beacon itself names,
-which is the access point's real one; the alternative would be filing a real
-network under the wrong frequency. Measured at two nodes on the US pool, about a
-fifth of the access points were found by both
-(`docs/phase-2-findings.md`). `export` picks one row per network, so this costs
-store rows and nothing else. 5 GHz channels here do not overlap and do not do
-it.
+beacons transmitted on 1 and 3 — and, more faintly, on 4. It reports the channel
+the beacon itself names, which is the access point's real one; the alternative
+would be filing a real network under the wrong frequency. How much a given node
+does this is decided by where the room's access points sit: a node dealt channel
+6 in a room that clusters on 1, 6 and 11 barely does it at all, and the nodes
+either side of it do it constantly. What stays put is the fleet-wide figure —
+about a quarter of access points found by more than one node, unchanged from two
+nodes to three (`docs/phase-2-findings.md`). `export` picks one row per network,
+so this costs store rows and nothing else. 5 GHz channels here do not overlap
+and do not do it.
 
 Over twenty nodes the planner stops re-cutting rather than partitioning among
 nodes the bridge cannot address. Whatever is already assigned stays assigned,
