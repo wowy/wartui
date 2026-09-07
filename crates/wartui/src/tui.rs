@@ -627,11 +627,16 @@ fn channels_cell(node: &NodeView) -> Span<'static> {
     {
         // One character of the column is spent on the ellipsis, which is the
         // pending marker as well as the truncation marker — they cannot be
-        // confused, because a pending cell is the yellow one.
-        return Span::styled(
-            format!("{}…", channel_cell(desired.channels, usize::from(CHANNELS_WIDTH) - 1)),
-            Style::new().fg(Color::Yellow),
-        );
+        // confused, because a pending cell is the yellow one. A cut-short list
+        // ends in one already and it does both jobs at once; appending a second
+        // would be the ordinary rendering rather than the rare one, because a
+        // round-robin share is scattered enough to overflow the column nearly
+        // always.
+        let mut cell = channel_cell(desired.channels, usize::from(CHANNELS_WIDTH) - 1);
+        if !cell.ends_with('…') {
+            cell.push('…');
+        }
+        return Span::styled(cell, Style::new().fg(Color::Yellow));
     }
     state.confirmed.map_or_else(
         || Span::styled("unassigned", Style::new().fg(Color::DarkGray)),
@@ -1429,6 +1434,27 @@ mod tests {
         assert_eq!(channel_cell(us, 40), "34: 1-11,36-165");
         assert_eq!(channel_cell(us, 10), "34: 1-11…", "and never cut mid-separator");
         assert_eq!(channel_cell(us, 8), "34: …", "rather than an invented range like 1-1");
+    }
+
+    #[test]
+    fn a_pending_cell_carries_one_ellipsis_however_long_its_list_is() {
+        // The marker for "asked for, not yet acknowledged" and the marker for
+        // "there was more than fitted" are the same character, and a cut-short
+        // list already ends in one. Two in a row is not a different meaning,
+        // just a worse-looking cell — and it would be the ordinary rendering,
+        // because a round-robin share overflows this column nearly always.
+        let mut view = pending(0x11);
+        assert_eq!(channels_cell(&view).content, "23: 36-165…");
+
+        let mut comb = ChannelSet::empty();
+        for idx in [0, 3, 6, 9, 12, 15, 18, 21] {
+            comb.insert(idx);
+        }
+        view.state.desired.as_mut().expect("pending node has a desired assignment").channels = comb;
+        let cell = channels_cell(&view).content;
+        assert!(!cell.ends_with("……"), "one marker, not two: {cell}");
+        assert!(cell.ends_with('…'), "still says it is pending: {cell}");
+        assert!(cell.chars().count() <= usize::from(CHANNELS_WIDTH), "and still fits: {cell}");
     }
 
     #[test]

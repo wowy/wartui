@@ -526,6 +526,37 @@ fn an_assignment_waits_for_the_heartbeat_that_opens_the_window() {
 }
 
 #[test]
+fn an_empty_set_is_not_an_assignment_and_never_reaches_a_node() {
+    let clock = Clock::new();
+    let mut engine = engine(manual(), &clock);
+    engine.handle(heartbeat(NODE, 1), clock.at(1));
+
+    // There is no frame meaning "scan nothing". A node that adopted one would
+    // park on the control channel and collect nothing, while the host had a
+    // MAC-layer acknowledgement for it and so read the row as confirmed at
+    // `0: none` — a node doing nothing that looks exactly like a node doing as
+    // it was told. `replan` already skips a node it has nothing for.
+    let empty = Event::Command(Command::Assign { mac: NODE, channels: ChannelSet::empty() });
+    engine.handle(empty, clock.at(2));
+    assert!(engine.handle(heartbeat(NODE, 2), clock.at(6)).urgent.is_empty());
+    assert_eq!(counters(&engine).admin_sent, 0);
+
+    // And it does not take away what a node already holds, which is the shape
+    // this would arrive in: a set narrowed one channel at a time until there is
+    // nothing left of it.
+    engine.handle(assign(NODE, 0, 10), clock.at(7));
+    let (id, _, _) = sent_admin(&engine.handle(heartbeat(NODE, 3), clock.at(11)));
+    engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(11));
+
+    let empty = Event::Command(Command::Assign { mac: NODE, channels: ChannelSet::empty() });
+    engine.handle(empty, clock.at(12));
+    assert!(engine.handle(heartbeat(NODE, 4), clock.at(16)).urgent.is_empty());
+    let node = engine.nodes().next().expect("the node");
+    assert!(!node.dirty, "nothing was asked for, so there is nothing pending");
+    assert_eq!(node.confirmed.expect("still assigned").channels, run(0, 10));
+}
+
+#[test]
 fn an_assignment_is_believed_only_once_the_node_radio_acknowledges_it() {
     let clock = Clock::new();
     let mut engine = engine(manual(), &clock);

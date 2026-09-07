@@ -240,9 +240,20 @@ impl Store {
         // version marker back down to 1 — leaving neither build able to tell
         // that it had happened.
         let found = check_version(&conn)?;
-        migrate(&conn, found)?;
-        conn.execute_batch(SCHEMA)?;
-        conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        // All of it or none of it, version marker included. A migration is
+        // several statements that only make sense together — v2's assignment
+        // rebuild renames the old table before it has written the new one —
+        // and the marker is what decides whether they run again. Committed
+        // piecemeal, a failure part way through would leave a file that is
+        // neither shape and still stamped with the old version, so every later
+        // open would re-enter the migration and die on the rename against a
+        // table that is already there. A rollback leaves the file exactly as it
+        // was found, which the next open can migrate again.
+        let tx = conn.transaction()?;
+        migrate(&tx, found)?;
+        tx.execute_batch(SCHEMA)?;
+        tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        tx.commit()?;
 
         let session_id = insert_session(&mut conn, session, started_at_ms)?;
         let assignment_base = reserve_versions(&mut conn)?;

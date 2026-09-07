@@ -532,3 +532,64 @@ fn a_v2_assignment_row_keeps_its_channels_when_they_become_a_mask() {
         .collect();
     assert_eq!(pinned, vec!["pinned_channels".to_owned()]);
 }
+
+#[test]
+fn a_migration_that_fails_part_way_leaves_the_file_exactly_as_it_was() {
+    // The v2 rebuild renames the old table before it has written the new one,
+    // and the version marker is what decides whether it runs again. Committed
+    // statement by statement, a failure in the middle would leave a file that
+    // is neither shape and still stamped v2 — so every later open would
+    // re-enter the migration and die on the rename against a table already
+    // there. That is a capture that can never be opened again, which is worse
+    // than a capture that cannot be migrated today.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("wartui.db");
+
+    // A v2 file whose `counter` is nullable, holding one row that is null
+    // there. v3 declares that column NOT NULL, so the rebuild fails on its
+    // INSERT — after the rename has already happened.
+    let old = Connection::open(&path).expect("creating");
+    old.execute_batch(
+        "CREATE TABLE assignment (
+           id INTEGER PRIMARY KEY, session_id INTEGER NOT NULL, node_mac BLOB NOT NULL,
+           counter INTEGER, wire_version INTEGER NOT NULL,
+           node_index INTEGER NOT NULL, node_count INTEGER NOT NULL,
+           start_idx INTEGER NOT NULL, end_idx INTEGER NOT NULL,
+           created_at INTEGER NOT NULL, delivered_at INTEGER, outcome TEXT, latency_us INTEGER);
+         INSERT INTO assignment
+           (session_id, node_mac, counter, wire_version, node_index, node_count,
+            start_idx, end_idx, created_at)
+         VALUES (1, x'0200005E1057', NULL, 4, 0, 2, 14, 36, 1);",
+    )
+    .expect("v2 tables");
+    old.pragma_update(None, "user_version", 2).expect("stamping");
+    drop(old);
+
+    let session = SessionInfo { espnow_channel: 6, pool: ChannelPool::Us, notes: None };
+    let opened = Store::open(&StoreConfig::new(&path), &session, EPOCH_MS);
+    assert!(opened.is_err(), "the migration cannot succeed, so the open must not: {opened:?}");
+
+    let conn = Connection::open(&path).expect("reopening");
+    let version: i32 = conn
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .expect("reading the version");
+    assert_eq!(version, 2, "still v2, so a later build can still try");
+
+    let tables: Vec<String> = conn
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+        .expect("preparing")
+        .query_map([], |row| row.get(0))
+        .expect("querying")
+        .map(|r| r.expect("row"))
+        .collect();
+    assert_eq!(tables, vec!["assignment".to_owned()], "no half-renamed table left behind");
+
+    let columns: Vec<String> = conn
+        .prepare("SELECT name FROM pragma_table_info('assignment') WHERE name LIKE '%_idx'")
+        .expect("preparing")
+        .query_map([], |row| row.get(0))
+        .expect("querying")
+        .map(|r| r.expect("row"))
+        .collect();
+    assert_eq!(columns, vec!["start_idx".to_owned(), "end_idx".to_owned()], "and v2 rows intact");
+}

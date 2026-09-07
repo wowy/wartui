@@ -98,6 +98,10 @@ pub enum Command {
     /// mechanism and the view is the policy. The next re-partition will take
     /// the node back, so the view refuses the key rather than letting an
     /// operator wonder why their set lasted until the fleet next changed.
+    ///
+    /// An empty set is ignored rather than sent. There is no frame meaning
+    /// "scan nothing", so it would read as an assignment the node adopted and
+    /// then obeyed by doing nothing at all.
     Assign {
         /// Which node.
         mac: Mac,
@@ -861,6 +865,17 @@ impl FleetEngine {
 
     /// Give one node a set of channels, by hand.
     fn on_assign(&mut self, mac: Mac, channels: ChannelSet, now: Now) {
+        // No frame means "scan nothing". A node that adopted an empty set would
+        // park on the control channel and collect nothing, while the host had a
+        // MAC-layer acknowledgement for it and so showed the row as confirmed,
+        // reading `0: none` rather than `unassigned` — a node doing nothing
+        // that looks like a node doing as it was told. `replan` already skips a
+        // node it has nothing for; the same rule belongs on the hand path,
+        // where it is the invariant rather than the caller that holds it.
+        if channels.is_empty() {
+            return;
+        }
+
         // Under a plan the node keeps the index and count the plan gave it: a
         // hand-assigned set changes what one node scans, not where in the
         // stagger window it keys up, and those two fields are what the fleet
@@ -928,9 +943,14 @@ impl FleetEngine {
             return;
         }
         let previous = std::mem::replace(&mut self.ble_node, target);
-        // Both ends of the move, and in this order so that a fleet watched from
-        // outside never has two nodes believing they hold the scan: the node
-        // giving it up is told first.
+        // Both ends of the move, the node giving it up first — which is the
+        // best this can do rather than a guarantee that the scan is never in
+        // two places. Neither frame goes out from here: each waits on its own
+        // node's next heartbeat to open a window, so a new holder that
+        // heartbeats first adopts the flag while the old one is still scanning
+        // and both hold it until the old one's window comes round. The overlap
+        // is bounded by a heartbeat, not excluded, and "at most one node scans
+        // Bluetooth" is a statement about what the host asks for.
         for mac in previous.into_iter().chain(target) {
             self.reissue(mac);
         }
