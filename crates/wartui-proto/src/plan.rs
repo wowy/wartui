@@ -280,7 +280,35 @@ const US_RUNS: [IndexRun; 2] = [
     IndexRun::new(14, 36),
 ];
 
-const ALL_RUNS: [IndexRun; 1] = [IndexRun::new(0, NUM_SCAN_CHANNELS - 1)];
+const ALL_RUNS: [IndexRun; 2] = [
+    // Everything below channel 14.
+    IndexRun::new(0, 12),
+    // Everything above it, to the end of the table.
+    IndexRun::new(14, NUM_SCAN_CHANNELS - 1),
+];
+
+/// Channel 14, which no pool contains and no node can tune.
+///
+/// `esp-radio` hardcodes `schan: 1, nchan: 13` in the country blob and exposes
+/// neither, so a node handed this index refuses the hop — once per sweep, every
+/// sweep, for the life of the assignment. Reaching the field needs
+/// `esp_wifi_set_country` called directly, which means `unsafe` in a crate that
+/// forbids it. `docs/phase-1-findings.md` has the measurement and the reading of
+/// the driver.
+///
+/// So it is unsupported rather than merely unused, and it is excluded here
+/// rather than left for the operator to avoid: a pool that contains a channel
+/// the fleet cannot tune spends a dwell of every sweep on nothing and reports
+/// the refusal only to a serial console nobody is watching. It stays in
+/// [`SCAN_CHANNELS`] because that table's indices are the wire format and
+/// removing an entry would repoint every assignment in flight and every stored
+/// row.
+pub const UNSUPPORTED_INDEX: u8 = 13;
+
+const _: () = assert!(
+    SCAN_CHANNELS[UNSUPPORTED_INDEX as usize] == 14,
+    "UNSUPPORTED_INDEX must still be channel 14"
+);
 
 // `MAX_RUNS` bounds nothing the planner indexes any more — it deals out of a
 // flattened iterator — but it still records what a pool is allowed to look
@@ -311,17 +339,16 @@ pub enum ChannelPool {
     /// node always scans actively, and the host cannot change that.
     #[default]
     Us,
-    /// Every channel the firmware knows, matching stock node behaviour.
+    /// Every channel a node can actually tune: 2.4 GHz 1-13 and all of 5 GHz.
     ///
-    /// Index 13 — channel 14 — is in this pool and a node will refuse it, one
-    /// hop per sweep. That is `esp-radio` hardcoding `nchan: 13` in the country
-    /// blob, not a rule this host chose, and it is reachable through no setting
-    /// the crate exposes (`docs/phase-1-findings.md`). A [`ChannelSet`] could
-    /// now drop it for one bit, where the old contiguous range could not — and
-    /// it is still left in, for a different reason than before: this pool means
-    /// *all*, and is what a fleet is put on to behave the way a stock one does.
-    /// A pool of that name quietly omitting a channel would be a worse surprise
-    /// than a node saying it refused one. [`Self::Us`] does not contain it.
+    /// The unrestricted pool, and the one to put a fleet on to sweep as widely
+    /// as the hardware allows — including the UNII-4 channels 169, 173 and 177
+    /// that [`Self::Us`] leaves out.
+    ///
+    /// It is 39 channels and not 40. Channel 14 is unsupported: see
+    /// [`UNSUPPORTED_INDEX`]. That makes this pool two runs rather than one,
+    /// which before the channel mask would have cost a lone node a rotation and
+    /// is now one clear bit.
     All,
 }
 

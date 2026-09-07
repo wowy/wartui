@@ -301,7 +301,7 @@ async fn a_repeated_assignment_version_is_ignored_by_the_node() {
     assert!(
         period > tokio::time::Duration::from_millis(2000),
         "epoch 7 is what the node already holds, so it should still be sweeping \
-         all 40 channels, but the period was {period:?}"
+         the whole pool, but the period was {period:?}"
     );
 }
 

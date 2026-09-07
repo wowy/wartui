@@ -237,14 +237,23 @@ had left to documentation alone.
 
 So the firmware is permissive on 39 of 40 channels and the pool is otherwise
 entirely the host's business. Channel 14 is index 13, is Japan-only and
-802.11b-only, and is outside the default `us` pool; `--pool all` is the only way
-to reach it, and the cost is one refused hop per sweep with the cursor advancing
-correctly. It is deliberately **not** removed from `ChannelPool::All`: that pool
-is one contiguous run today, and splitting it around index 13 would make a lone
-node rotate between two runs on the 60 s dwell timer — halving what it watches
-at any instant, for a channel nobody uses. Phase 2 replaces runs with a 40-bit
-mask, where excluding one index costs one bit and no rotation. That is where it
-belongs.
+802.11b-only, and was outside the default `us` pool already; `--pool all` was
+the only way to reach it, and the cost was one refused hop per sweep with the
+cursor advancing correctly.
+
+It was left in `ChannelPool::All` at the time, because that pool was one
+contiguous run and splitting it around index 13 would have made a lone node
+rotate between two runs on the 60 s dwell timer — halving what it watched at any
+instant, for a channel nobody uses. **Phase 2 removed it.** The channel mask
+made the exclusion cost one clear bit rather than a rotation, so `All` is now
+two runs and 39 channels, and no pool offers index 13 at all
+(`plan::UNSUPPORTED_INDEX`). The reason to take it out rather than leave it as
+an operator's problem is what this section measured: the refusal is reported
+only on a serial console, so a fleet on `--pool all` was spending a dwell of
+every sweep on nothing and nothing in the host said so.
+
+It stays in `SCAN_CHANNELS`. That table's indices *are* the wire format, and
+removing an entry would repoint every assignment in flight and every stored row.
 
 ### Probe requests: argued, not captured
 

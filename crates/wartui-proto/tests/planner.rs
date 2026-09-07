@@ -12,7 +12,7 @@ use std::collections::BTreeSet;
 
 use wartui_proto::plan::{
     ChannelPool, IndexRun, MAX_NODES, NODE_STAGGER_WINDOW_MS, NUM_SCAN_CHANNELS, SCAN_CHANNELS,
-    plan, stagger_offset_ms,
+    UNSUPPORTED_INDEX, plan, stagger_offset_ms,
 };
 
 const POOLS: [ChannelPool; 2] = [ChannelPool::Us, ChannelPool::All];
@@ -46,13 +46,29 @@ fn us_pool_excludes_exactly_the_channels_it_should() {
         );
     }
     assert_eq!(ChannelPool::Us.channel_count(), 34);
-    assert_eq!(ChannelPool::All.channel_count(), 40);
+    assert_eq!(ChannelPool::All.channel_count(), 39, "39 and not 40: channel 14 is unsupported");
 }
 
 #[test]
-fn us_pool_is_two_runs_and_all_is_one() {
+fn no_pool_offers_the_one_channel_a_node_cannot_tune() {
+    // `esp-radio` hardcodes `nchan: 13` in the country blob and exposes no way
+    // to reach it, so a node handed index 13 refuses the hop once per sweep for
+    // the life of the assignment and says so only on a serial console nobody is
+    // watching. A pool containing it spends a dwell of every sweep on nothing.
+    assert_eq!(SCAN_CHANNELS[usize::from(UNSUPPORTED_INDEX)], 14);
+    for pool in POOLS {
+        assert!(!pool.contains(UNSUPPORTED_INDEX), "{pool:?} offers channel 14");
+        assert!(!pool.channels().contains(UNSUPPORTED_INDEX), "{pool:?} offers channel 14");
+    }
+    // Still in the table, because its indices are the wire format: removing an
+    // entry would repoint every assignment in flight and every stored row.
+    assert_eq!(SCAN_CHANNELS.len(), usize::from(NUM_SCAN_CHANNELS));
+}
+
+#[test]
+fn both_pools_are_two_runs_because_both_have_a_hole_in_them() {
     assert_eq!(ChannelPool::Us.runs().len(), 2, "the gap at channels 12-14 splits the US pool");
-    assert_eq!(ChannelPool::All.runs().len(), 1);
+    assert_eq!(ChannelPool::All.runs().len(), 2, "and channel 14 alone splits the All pool");
 }
 
 #[test]
@@ -124,13 +140,17 @@ fn a_lone_node_holds_the_whole_pool_at_once() {
 }
 
 #[test]
-fn all_pool_with_one_node_reproduces_the_stock_assignment() {
-    // A single node on the full table should get exactly what unassigned stock
-    // firmware defaults to: every index.
+fn all_pool_with_one_node_is_every_channel_that_node_can_tune() {
+    // Not quite the whole table: stock firmware defaults to all forty indices
+    // (`src/WiFiOps.cpp:77-80`), and one of them is a channel the radio refuses.
     let p = plan(ChannelPool::All, 1).expect("valid");
     let set = p.channels_for(0).expect("assigned");
     for idx in 0..NUM_SCAN_CHANNELS {
-        assert!(set.contains(idx), "index {idx} missing from a lone node's whole-table assignment");
+        assert_eq!(
+            set.contains(idx),
+            idx != UNSUPPORTED_INDEX,
+            "index {idx} is on the wrong side of a lone node's whole-pool assignment"
+        );
     }
 }
 

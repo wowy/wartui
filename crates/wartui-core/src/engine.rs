@@ -1042,8 +1042,10 @@ impl FleetEngine {
                 // A node that rejoins a plan it already satisfies would
                 // otherwise be left with nothing wanted of it at all — and a
                 // reboot re-issues what is wanted, so there would be nothing to
-                // re-issue. It would drop back to scanning all forty channels,
-                // transmitting on the six the pool exists to keep it off.
+                // re-issue — and a wartui node that has forgotten its
+                // assignment parks on the control channel and collects
+                // nothing. It would go silently blind rather than noisily
+                // wrong, which is the harder failure to notice.
                 node.desired = node.confirmed;
                 continue;
             }

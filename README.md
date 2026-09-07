@@ -71,7 +71,16 @@ channel it is assigned, including the DFS channels where the rules say
 otherwise. On a stock fleet the pool is what keeps that in check.
 
 - **US** (`--pool us`, the default) — 2.4 GHz 1–11 and 5 GHz 36–165.
-- **All** (`--pool all`) — every channel the firmware knows, matching stock behaviour.
+- **All** (`--pool all`) — every channel a node can tune: 2.4 GHz 1–13 and all of
+  5 GHz, including the UNII-4 channels 169, 173 and 177 that `us` leaves out.
+
+**Channel 14 is unsupported and is in neither pool.** `esp-radio` hardcodes the
+country blob's `nchan: 13` and exposes no way to reach it, so a node handed that
+channel refuses the hop — once per sweep, every sweep, for as long as it holds
+the assignment, and it says so only on a serial console nobody is watching.
+`docs/phase-1-findings.md` has the measurement and the reading of the driver.
+It stays in the node's scan table because that table's indices are the wire
+format; it is simply never dealt.
 
 `MSG_ADMIN` carries a forty-bit channel mask, so an assignment can name any
 subset of the pool and the gap at channels 12–14 is not something the planner
