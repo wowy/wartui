@@ -124,9 +124,10 @@ fn ports() -> Result<()> {
 }
 
 /// Open whichever transport the arguments called for.
-fn open(port: Option<&str>, sim: Option<u8>) -> Result<LinkHandle> {
+fn open(port: Option<&str>, sim: Option<u8>, sim_c6: u8) -> Result<LinkHandle> {
     if let Some(node_count) = sim {
-        let config = SimConfig { node_count, ..SimConfig::default() };
+        let config =
+            SimConfig { node_count, c6_nodes: sim_c6.min(node_count), ..SimConfig::default() };
         return SimTransport::new(config).start().context("starting the simulator");
     }
     match port {

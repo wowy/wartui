@@ -33,7 +33,7 @@ pub struct Args {
 }
 
 pub async fn run(args: Args) -> Result<()> {
-    let mut link = super::open(args.port.as_deref(), args.sim)?;
+    let mut link = super::open(args.port.as_deref(), args.sim, 0)?;
     println!("# waiting for the bridge; ctrl-c to stop");
 
     let mut counts = Counts::default();

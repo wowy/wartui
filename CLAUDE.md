@@ -140,11 +140,24 @@ Positions resolve fresh per record through `PositionChain`: GPS (`--gps`, NMEA o
   bands. `IndexRun` still describes a *pool* and must not come back as the shape of an assignment.
   The plan has no phases and no timer; it changes when fleet membership changes and at no other
   time.
+- **The planner deals only channels a node's own radio can tune.** `plan::plan_for` takes the
+  fleet's `Radio`s, read out of the capability tokens, and an ESP32-C6 is dealt no 5 GHz index:
+  a share it cannot tune is a share nobody scans, which is the failure the token exists to
+  prevent, arriving through a node that is genuinely ours. A mixed fleet is dealt the constrained
+  half first — in pool order the dual-band nodes take their 2.4 GHz share and then all of 5 GHz on
+  top, which is the block split this planner was written to avoid — and shares then differ by more
+  than one, which is unavoidable and is why `plan_for` minimises the largest rather than
+  equalising. A uniform fleet has no constrained channels, so its plan is byte-identical to what
+  `plan` has always produced, and `plan` is now that special case. Channels no radio present can
+  reach come back in `Plan::unreachable` and are said in the footer rather than dealt.
 - **At most one node scans Bluetooth, and by default none does.** `ADMIN_FLAG_BLE` is a per-node
   decision the operator makes (`Command::AssignBle`, `b` in the view), not a property of the
   firmware that was flashed: the `ble` cargo feature decides whether the code exists and the flag
   decides whether it runs, off at every boot. The cost is measured — every assignment lost on a
-  stock node, ~10% of the sweep period on ours — and is worth paying on one node, not on all.
+  stock node, ~10% of the sweep period on ours — and is worth paying on one node, not on all. A
+  node whose token says the feature is absent is refused the scan in both the view and the engine,
+  and one already holding it loses it on the tick that learns so: it would adopt the flag,
+  acknowledge, and scan nothing, so `ble_node` would name a holder that is not one.
 - **An assignment is believed only on a MAC-layer ack** (`SendStatus::AckOk` from the transmit
   callback), never on a successful enqueue. The vendor core conflates the two, which is the bug
   this project exists downstream of.
