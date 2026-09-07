@@ -121,7 +121,12 @@ Positions resolve fresh per record through `PositionChain`: GPS (`--gps`, NMEA o
   fourteen-byte frame: version, index, count, a flags byte and a forty-bit `ChannelSet`. The
   vendor's ten-byte one does not decode; `air::is_legacy_admin` recognises it without obeying it,
   so a stock core powered up nearby is reported rather than counted as line noise. Nothing is done
-  to keep a mixed fleet working — the vendor node is the thing being replaced.
+  to keep a mixed fleet working — the vendor node is the thing being replaced. A stock *node* in
+  range is worse than useless and the host cannot see it: node → core is byte-identical, so it
+  heartbeats like one of ours, is planned for like one of ours, and its radio acknowledges an
+  assignment its application cannot decode. It then keeps scanning all forty channels while the
+  share cut for it goes uncovered (`docs/phase-2-findings.md`). The plan's capability token in
+  the heartbeat text field is the intended fix and is not built.
 - **Twenty nodes is the hard maximum** (`plan::MAX_NODES`) — an ESP-NOW radio's peer table. Above
   it, capture continues and the planner refuses to re-cut rather than partitioning among nodes the
   bridge cannot address.
