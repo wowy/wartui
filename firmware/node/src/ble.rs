@@ -5,11 +5,16 @@
 //! together — sixteen sweeps against nine over the same 170 seconds — and, far
 //! worse, a node with BLE on acknowledged none of the thirty-two channel
 //! assignments sent to it while a node without BLE acknowledged both of its
-//! two. Both figures are measured; see `docs/phase-0-findings.md`, and note
-//! that they are still the only figures — Phase 1 was brought up with BLE not
-//! compiled in, so nothing in `docs/phase-1-findings.md` tests any of what
-//! follows. An 802.11 acknowledgement comes from the receiver's MAC hardware,
-//! so its absence means the radio was simply not on the channel: NimBLE and
+//! two. Both figures are measured; see `docs/phase-0-findings.md`. This code has
+//! since been run three times against that same board on the same bench: it
+//! acknowledged its assignment every time on the first attempt, in 5.8 ms, then
+//! 6.6 ms, then 5.8 ms, and cost 10.0%, 7.6% and 9.6% of its sweep period rather
+//! than the vendor's ~78%. The two runs that measured it against a second board
+//! at the same moment are the 10.0% and the 9.6%. `docs/phase-1-findings.md`
+//! records all three, along with the caveat that none of them varies the three
+//! measures individually. An
+//! 802.11 acknowledgement comes from the receiver's MAC hardware, so its
+//! absence means the radio was simply not on the channel: NimBLE and
 //! Wi-Fi share the one 2.4 GHz antenna, and the admin window is precisely when
 //! the node is otherwise idle and the Bluetooth controller is free to take it.
 //!
@@ -41,7 +46,8 @@ use esp_radio::ble::Config;
 use esp_radio::ble::controller::BleConnector;
 use esp_rtos::CurrentThreadHandle;
 use wartui_proto::hci::{
-    AdvReport, PACKET_MAX, RESET, SCAN_UNIT_US, adv_reports, set_scan_enable, set_scan_parameters,
+    AdvReport, PACKET_MAX, RESET, SCAN_UNIT_US, SET_EVENT_MASK, adv_reports, set_scan_enable,
+    set_scan_parameters,
 };
 
 /// How long one sweep listens. `BLE_SCAN_DURATION`, `src/configs.h:72`.
@@ -50,8 +56,29 @@ pub const SCAN_MS: u32 = 500;
 /// Distinct advertisers one sweep will hold.
 ///
 /// Addresses rotate for privacy, so unlike access points these rarely repeat
-/// and the ring behind them never suppresses much. Sixty-four is a busy room.
-const REPORTS: usize = 64;
+/// and the ring behind them never suppresses much. Sixty-four was a guess at a
+/// busy room, and then an ordinary room filled 60 of it and, on the re-run, 61
+/// (`docs/phase-1-findings.md`). The ring drops the *newest* advertiser once it
+/// is full and records that only on a counter no host reads, which makes
+/// overflow the one failure here that nothing would notice — so the number is
+/// set well clear of the measurement rather than just above it.
+///
+/// It is also the ceiling on something else, which is the reason not to make it
+/// enormous: `report_ble` broadcasts one frame per *new* advertiser, and it runs
+/// immediately before the stagger, the heartbeat and the admin window. Addresses
+/// rotate, so "new" is most of a sweep — 54 of the first scan's 54. This number
+/// is therefore the worst-case burst standing between the last dwell and the
+/// window this node has to be listening in, which is the delay the whole module
+/// is arranged to avoid.
+///
+/// Eighty and not more because `Scanner` is built by value, so the ring is on
+/// the stack of `Scanner::new` and then of `main`: at 96 entries a `esp32c5,ble`
+/// build trips `clippy::large_stack_frames`, which `main.rs` denies. The C5 is
+/// the binding one — a C6 gets as far as 112 — and the margin here is deliberate
+/// so a dependency bump does not land on the limit. Wanting a ring bigger than
+/// this is a reason to move the reports into a `static`, the way `sniff` holds
+/// its sightings, not a reason to raise the threshold.
+const REPORTS: usize = 80;
 
 /// Listen continuously while enabled: interval and window equal, at 30 ms.
 const SCAN_WINDOW: u16 = (30_000 / SCAN_UNIT_US) as u16;
@@ -82,6 +109,9 @@ impl<'d> Scanner<'d> {
         // run left it in and enabling a scan twice is an error rather than a
         // no-op.
         scanner.command(&RESET)?;
+        // After the reset, because the reset restores the default mask that
+        // hides advertising reports. See `SET_EVENT_MASK`.
+        scanner.command(&SET_EVENT_MASK)?;
         scanner.command(&set_scan_parameters(SCAN_WINDOW, SCAN_WINDOW))?;
         Some(scanner)
     }
@@ -91,9 +121,27 @@ impl<'d> Scanner<'d> {
     /// Distinct addresses only, keeping the strongest reading for each: the
     /// same advertiser is heard several times a second and only one of those
     /// belongs on the wire.
+    ///
+    /// "Heard" is per call and not quite per window. The disable at the end
+    /// drains on a budget, so in a room busy enough to exhaust it a few reports
+    /// from one scan are still queued when the next begins, and this one no
+    /// longer drains before enabling — it counts them. Dedup absorbs the
+    /// repeats, so what this costs is the precision of the `heard` figure in the
+    /// console line, in exactly the busy case where it is least precise anyway.
+    /// Draining first would cost whole reports instead, which is the trade the
+    /// scan-enable path was changed to stop making.
     pub fn sweep(&mut self) -> &[AdvReport] {
         self.len = 0;
-        if self.command(&set_scan_enable(true)).is_none() {
+        // Written directly rather than through `command`, because from this
+        // point onwards the queue is what the sweep is for. `command` drains
+        // until two consecutive reads come back empty, and a room delivering a
+        // packet every few milliseconds can hold it there for its whole
+        // 32-iteration budget — discarding every advertising report that
+        // arrives in it, and losing more of them the busier the room is. The
+        // collect loop below absorbs the Command Complete instead, at no cost:
+        // `adv_reports` yields nothing for a packet that is not an LE Meta
+        // advertising report.
+        if self.connector.write(&set_scan_enable(true)).is_err() {
             return &[];
         }
 
@@ -124,8 +172,11 @@ impl<'d> Scanner<'d> {
     ///
     /// The completion event is not inspected. There is nothing useful to do
     /// with a controller that refuses `HCI_Reset`, and reading the queue is
-    /// what stops a stale completion arriving in the middle of a scan and being
-    /// mistaken for an advertising report.
+    /// what stops a stale completion occupying it across a scan. It could not
+    /// be *mistaken* for an advertising report — `adv_reports` yields nothing
+    /// for a packet that is not one — so this is about the controller's queue
+    /// space and not about misparsing, which is why `sweep` starts its scan
+    /// without coming through here.
     ///
     /// Draining means draining. A command can be answered with both a Command
     /// Status and a Command Complete, so stopping at the first packet leaves

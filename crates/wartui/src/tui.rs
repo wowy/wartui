@@ -850,7 +850,7 @@ mod tests {
 
     fn node(last: u8, encrypted: bool, reboots: u32, assignable: bool) -> NodeView {
         let now = Now { mono: Instant::now(), unix_ms: EPOCH_MS };
-        let mut state = NodeState::new([0x38, 0x44, 0xBE, 0x1F, 0x57, last], now);
+        let mut state = NodeState::new([0x02, 0x00, 0x5E, 0x10, 0x57, last], now);
         state.last_seen_ms = EPOCH_MS + 60_000;
         state.last_heartbeat = Some(now.mono);
         state.counter = Some(174);
@@ -922,7 +922,7 @@ mod tests {
             alive: 4,
             tail: (0..40)
                 .map(|n| TailEntry {
-                    node_mac: [0x38, 0x44, 0xBE, 0x1F, 0x57, 0x84],
+                    node_mac: [0x02, 0x00, 0x5E, 0x10, 0x57, 0x84],
                     rx_at_ms: EPOCH_MS + i64::from(n) * 1000,
                     bssid: [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, n],
                     ssid: if n % 3 == 0 { String::new() } else { format!("network {n}") },
@@ -1008,7 +1008,7 @@ mod tests {
         terminal.draw(|frame| draw(frame, &busy(), &Ui::default())).expect("drawing");
         let rendered = terminal.backend().to_string();
 
-        assert!(rendered.contains("38:44:BE:1F:57:84"), "the fleet table");
+        assert!(rendered.contains("02:00:5E:10:57:84"), "the fleet table");
         assert!(rendered.contains("AA:BB:CC:DD:EE"), "and the observation stream");
         assert!(rendered.contains("4 of 5 alive"));
         assert!(rendered.contains("encrypted"), "the one node wartui cannot talk to");
@@ -1306,7 +1306,7 @@ mod tests {
         assert_eq!(
             rx.try_recv().expect("a command"),
             Command::Assign {
-                mac: [0x38, 0x44, 0xBE, 0x1F, 0x57, 0x84],
+                mac: [0x02, 0x00, 0x5E, 0x10, 0x57, 0x84],
                 range: IndexRun::new(0, 0)
             }
         );
