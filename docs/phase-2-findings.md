@@ -1,17 +1,17 @@
 # Phase 2 — what channel masks and Bluetooth-by-assignment actually do
 
 Measured on 2026-09-07. The bridge throughout is an ESP32-C6 running
-`firmware/bridge` (`9D:24`, USB). The node is one ESP32-C5 (`57:84`) on
-`--features esp32c5,ble` unless a section says otherwise; the second C5
-(`4F:98`) is flashed with the same build but contributed nothing, for the reason
-in "Still not measured". Pool `us`, plaintext, control channel 6.
+`firmware/bridge` (`9D:24`, USB). The nodes are two ESP32-C5s (`57:84` and `4F:98`) on `--features esp32c5,ble`
+unless a section says otherwise. Runs A to D are one node; run E is both. Pool
+`us`, plaintext, control channel 6.
 
 Access point addresses and names are left out deliberately, as in Phase 1:
 these were real captures of a real neighbourhood, and a BSSID is exactly what a
 geolocation database is built from. Counts and channels carry none of that and
 are the whole of what was being checked.
 
-Four captures, all on the same board and the same room within half an hour:
+Five captures. A to D are one board within half an hour; E is both boards, the
+next morning, in the same room.
 
 | | build | duration | what it was for |
 | --- | --- | --- | --- |
@@ -19,6 +19,7 @@ Four captures, all on the same board and the same room within half an hour:
 | B | `esp32c5,ble` | 270 s | Bluetooth given and taken away again |
 | C | `esp32c5` | 155 s | the control for the Bluetooth controller |
 | D | `esp32c5,ble` | 240 s | B again, after a reflash, on the auto planner |
+| E | `esp32c5,ble` | 240 s | two nodes, the dealt partition, one Bluetooth scan |
 
 ## One assignment covers both runs of the pool, and nothing rotates
 
@@ -34,12 +35,15 @@ could say only one of them at a time; `Plan::phase_count`, `MAX_PHASES`,
 second timer. A forty-bit mask says both at once, so a lone node now holds the
 entire pool continuously rather than half of it at a time.
 
-## Every observation lands inside the mask
+## Channel membership holds, for a node holding the pool
 
-Across runs A, B and D, every Wi-Fi observation named a channel inside the mask
-that node had acknowledged — 70, 86 and 68 of them, on 13 to 14 distinct
-channels, with **none outside**. The mask is non-contiguous, so this is the
-membership check of Phase 2's item 2 in its two-run form.
+Across runs A, B and D — one node holding the whole pool — every Wi-Fi
+observation named a channel inside the mask that node had acknowledged: 70, 86
+and 68 of them, on 13 to 14 distinct channels, with **none outside**. The mask
+is non-contiguous, so this is the membership check of Phase 2's item 2 in its
+two-run form. Run E, where two nodes hold interleaved combs, is where this stops
+being the whole story — see "Adjacent channels bleed, and the deal is what
+exposes it".
 
 Around twenty assigned channels were silent in each run. Those are the DFS
 channels above 100 and the empty 2.4 GHz ones; Phase 1 established that a C5
@@ -174,18 +178,102 @@ that is not the cause: restricted to the sweeps after it went quiet, run A still
 measures 4.764 s. Whatever moves it is not the Bluetooth feature, since it moves
 between two runs that share it.
 
+## Two nodes are dealt a partition, and it is exact
+
+Run E, on the auto planner. The second node joined a fleet where the first held
+the whole pool, and the re-cut landed on both:
+
+| node | index | channels |
+| --- | --- | --- |
+| `4F:98` | 0 of 2 | `1,3,5,7,9,11,40,48,56,64,112,120,128,136,144,153,161` |
+| `57:84` | 1 of 2 | `2,4,6,8,10,36,44,52,60,100,116,124,132,140,149,157,165` |
+
+Seventeen each, **no overlap**, and the union is exactly the thirty-four
+channels of the US pool. Shares differ by zero. That is the round-robin deal
+working as designed: index `k` of the flattened pool to node `k mod 2`, so each
+node carries part of 2.4 GHz *and* part of 5 GHz rather than one taking each
+band. It is also a shape the vendor's contiguous `start`/`end` pair could not
+have expressed at all — not as one frame, and not as any number of them.
+
+Sweep periods track the halved shares: 2.51 s and 2.56 s against seventeen
+dwells at 125 ms plus the 300 ms admin window, or 2.425 s of arithmetic.
+
+## Adjacent channels bleed, and the deal is what exposes it
+
+Run E is the first capture where a node reported a channel it had not been
+assigned. `57:84`, holding the even 2.4 GHz channels, reported 16 observations
+on 1, 3, 5, 9 and 11; `4F:98`, holding the odd ones, reported 7 on 6 and 8.
+
+**Every one of them is exactly one channel away from a channel that node did
+hold, and every one is 2.4 GHz.** Not a single 5 GHz observation landed outside
+a mask in any run.
+
+That is adjacent-channel capture, and it is correct behaviour rather than a
+sweep escaping its assignment. 2.4 GHz channels are 5 MHz apart and 20 MHz
+wide, so a radio parked on channel 2 hears beacons transmitted on 1 and 3; the
+node then reads the transmitting channel out of the beacon's own DS Parameter
+Set (tag 3) and reports *that*, which is the truth about the access point. The
+alternative — labelling it with the parked channel — would be the bug Phase 1's
+narrow-assignment check exists to catch. 5 GHz channels in this pool are 20 MHz
+apart and do not overlap, which is why the effect is one-sided.
+
+Phase 1 saw none of this because its two-node split was contiguous: `4F:98` took
+all of 2.4 GHz and `57:84` all of 5 GHz, so there was no 2.4 GHz neighbour in
+anyone else's share to bleed from. The round-robin deal interleaves adjacent
+2.4 GHz channels *between* nodes, which is the arrangement that maximises it.
+
+The cost is duplication, not error: **23 of 101 distinct access points were
+reported by both nodes**, and all 23 sit on 2.4 GHz channels. The dedup ring is
+per-node, so neither node repeats itself and neither knows what the other heard.
+`export` already picks one row per network, so a WiGLE file is unaffected; what
+grows is the store, by about a fifth of the 2.4 GHz rows in a two-node fleet.
+
+This is a consequence of the deal that the plan did not anticipate. It does not
+change the argument for round-robin — every node still gets both bands, which
+is what block-splitting cannot give — but "channel membership" now needs saying
+carefully: a node *dwells* only where it was assigned, and the channel on an
+observation is the access point's, not the dwell's.
+
+**Nothing is being changed for it.** Dropping a sighting whose DS Parameter Set
+names a channel outside the assignment would throw away a real access point,
+found on a frequency the node was legitimately listening to, and would make the
+node's report agree with the plan by deleting evidence. The duplication it
+avoids is a fifth of the 2.4 GHz rows in a two-node fleet, which the export
+already collapses.
+
+## Only the assigned node scans Bluetooth
+
+Run E gave the scan to `4F:98` while `57:84` ran the identical binary, `ble`
+feature and all. `4F:98` produced 81 Bluetooth observations; `57:84` produced
+**none at all**, at any point in the capture. Zero arrived before the enabling
+acknowledgement or after the revoking one, on either node.
+
+Both frames were acknowledged — 5852 µs to turn the scan on and 5831 µs to turn
+it off, the latter sent while the node was scanning. That is the same result as
+runs B and D on a second board.
+
+The fleet table at t+140 s, with the scan held:
+
+```
+node              rssi beats obs  last beat  ble  channels            state
+38:44:BE:1F:4F:98 -39  61    138  1s   3.0s  ble  17: 1,3,5,7,9,11…   alive
+38:44:BE:1F:57:84 -57  64    56   0s   2.6s       17: 2,4,6,8,10,36…  alive
+```
+
+Which is also the first hardware sighting of the scattered channel cell: the
+count leads, the list is cut at a comma rather than mid-range, and there is one
+ellipsis rather than two. No frame in any of the five captures rendered `……`.
+
 ## Still not measured
 
-- **Two nodes.** Every result above is one node. The dealt partition — the
-  planner flattening the pool and giving index `k` to node `k mod node_count`,
-  so each node gets a comb of both bands — has never been on hardware, and
-  neither has "no *other* node emits Bluetooth". A comb is also the only shape
-  that exercises the scattered rendering in the fleet table and the mask
-  arithmetic at its widest.
-  `4F:98` was reflashed with the current build but came up
-  `boot:0x8 (DOWNLOAD(UART0/USB))` and sat in the ROM waiting for a download,
-  so it never ran the application. That is a strap held low, which no amount of
-  `espflash reset` will clear.
+- **More than two nodes.** The deal is checked at `node_count 2`, where every
+  node gets every other index. Three or more is where the shares stop being
+  symmetric and where `shares differ by at most one` starts doing work, and that
+  has not been on hardware.
+- **Whether the bleed changes with node count.** At two nodes each 2.4 GHz
+  channel has a neighbour in the other node's share. At three, a node's
+  neighbours are split between two others, and whether that raises the
+  duplication rate or leaves it alone is unmeasured.
 - **The stagger, again.** Unchanged from Phase 1: it cannot be disabled from the
   host, so "it worked" and "there was nothing to prevent" remain inseparable
   without a firmware build that omits it.
