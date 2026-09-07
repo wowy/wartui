@@ -433,6 +433,37 @@ If the same port keeps being the wrong device — a C5 node plugged in by USB
 looks identical to the bridge, same vendor and product ID — pin it with
 `--port`. `wartui ports` lists the candidates.
 
+Probing to find out is worse than not knowing: `wartui status` pointed at a node
+blocks for ever — a node does not speak the link protocol — and killing it
+leaves a process wedged in exit with the port still held. Ask the USB tree
+instead. An ESP32's serial number *is* its MAC, so on macOS `ioreg` pairs every
+port with the board behind it without opening anything, with no esp tool and no
+reflash:
+
+```sh
+ioreg -l -w0 | LC_ALL=C awk -F'"' '
+  BEGIN { printf "%-24s %s\n", "PORT", "ADDRESS" }
+  /USB Serial Number/ && $4 ~ /^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$/ { mac = $4 }
+  /IOCalloutDevice/ && $4 ~ /usbmodem/ { dev = $4 }
+  mac != "" && dev != "" { printf "%-24s %s\n", dev, mac; mac = dev = "" }
+'
+```
+
+```
+PORT                     ADDRESS
+/dev/cu.usbmodem2101     02:00:5E:10:9D:24
+/dev/cu.usbmodem142201   02:00:5E:10:4F:98
+```
+
+The address shape is what picks the ESP32s out: everything else on the bus
+carries a manufacturing serial, and only these carry something a MAC could be.
+The two properties sit on different nodes of the tree — the address on the USB
+device, the path on the serial client beneath it — and come out in either order,
+so they are paired as they arrive rather than assumed adjacent. The bridge is
+then the row whose address the fleet table shows as the bridge's, and a node the
+row whose heartbeats `wartui sniff` attributes to that address; where the board
+generations differ, the OUI separates them too.
+
 ## Development
 
 ```sh
