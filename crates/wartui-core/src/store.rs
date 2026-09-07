@@ -425,11 +425,9 @@ fn migrate(conn: &Connection, found: i32) -> Result<(), StoreError> {
         )?;
     }
 
-    // Never written by anything, in any version: a v2 build declared them and
-    // no code read or set them. Replaced rather than kept so the node table
-    // does not carry a shape the rest of the schema stopped using.
-    // Added in v4. Every row already in the file predates the token, so null
-    // is the truthful value for all of them: those nodes were never asked.
+    // Added in v4. Every row already in the file predates the token, so null is
+    // the truthful value for all of them: those nodes were never asked. The
+    // `has_table` guard is for a v1 file, which has no `node` table at all.
     if (1..=3).contains(&found)
         && has_table(conn, "node")?
         && !has_column(conn, "node", "capabilities")?
@@ -437,6 +435,9 @@ fn migrate(conn: &Connection, found: i32) -> Result<(), StoreError> {
         conn.execute_batch("ALTER TABLE node ADD COLUMN capabilities TEXT")?;
     }
 
+    // Never written by anything, in any version: a v2 build declared them and
+    // no code read or set them. Replaced rather than kept so the node table
+    // does not carry a shape the rest of the schema stopped using.
     if (1..=2).contains(&found) && has_column(conn, "node", "pinned_start_idx")? {
         conn.execute_batch(
             "ALTER TABLE node DROP COLUMN pinned_start_idx;
@@ -621,6 +622,11 @@ fn write_batch(
                        -- Most frames are observations and carry no token, so
                        -- writing `excluded` straight in would erase what the
                        -- last heartbeat said on the very next line collected.
+                       -- The column is therefore the last token ever seen from
+                       -- this node rather than the last one it sent: a board
+                       -- reflashed to stock keeps it here for the rest of the
+                       -- capture, while the engine, which re-reads it from
+                       -- every heartbeat, correctly stops believing it.
                        capabilities = coalesce(excluded.capabilities, node.capabilities)",
                 )?
                 .execute(params![

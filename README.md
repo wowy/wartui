@@ -313,15 +313,22 @@ says what it is doing on the header line — `gps searching`, `gps ok, 8 sats`,
 | `stale` | Still being heard, but not heartbeating — most often BLE coexistence on the node holding the radio through its admin window |
 | `no heartbeat` | Seen, but has never completed a sweep |
 | `no admin ack` | An assignment went out and its radio did not answer — nearly always BLE, see [Assigning channels](#assigning-channels) |
-| `refused` | The bridge would not transmit it. Nearly always a full peer table, which means the fleet is over twenty nodes |
+| `refused` | The bridge would not transmit it — nearly always a full peer table, which means the fleet is over twenty nodes. Its heartbeats are still arriving; what is missing is a slot to address it through |
 | `rebooted xN` | Its heartbeat counter went backwards, so it has forgotten any assignment; wartui re-issues under a fresh epoch |
 | `encrypted` | It is sending core-protocol frames. wartui cannot talk to it; turn encryption off in that node's web UI. A wartui node never sends these |
 | `not wartui` | Heartbeating, and it never said it is one of ours. Flash it with `firmware/node`, or leave it be — either way wartui will not plan for it |
 
-A node that is `stale`, `encrypted` or `not wartui` is also out of the plan, and
-for the same reason it cannot be assigned by hand: nothing wartui sends it would
-be adopted, so a share of the pool cut for it is a share nobody scans. Pressing
-`a`, `A` or `b` on one says which of the three it is.
+A node that is `stale`, `refused`, `encrypted` or `not wartui` is also out of the
+plan, and for the same reason it cannot be assigned by hand: nothing wartui sends
+it would be adopted — or, for `refused`, would reach it at all — so a share of
+the pool cut for it is a share nobody scans. Pressing `a`, `A` or `b` on one says
+which of the four it is, because the next move is different for each: turn
+encryption off in that node's web UI, flash it with `firmware/node`, run a
+smaller fleet, or go and find out why its heartbeats stopped.
+
+When every node is in one of those states the header says `auto — no node it can
+drive`, which is a different thing from `auto — nothing heartbeating yet` and is
+what a fleet of unflashed nodes looks like.
 
 `not wartui` is the one that needs saying out loud, because it is the one that
 looks like nothing being wrong. Every node reports its channels, its counter and

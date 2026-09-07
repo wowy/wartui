@@ -255,6 +255,15 @@ pub struct NodeState {
     ///
     /// Taken from every heartbeat rather than remembered from the first, so a
     /// node reflashed with something else stops claiming to be one of ours.
+    ///
+    /// There is no hysteresis on that, and one heartbeat whose text does not
+    /// parse therefore drops the node out of `plan_members` — which re-cuts the
+    /// whole fleet, since every node's `node_index`/`node_count` moves with the
+    /// membership, and the next good heartbeat re-cuts it back. Liveness is
+    /// aged over a timeout for exactly this reason; identity is not. Left as it
+    /// is because both the USB link and ESP-NOW carry their own checksums, so a
+    /// heartbeat that arrives with a mangled token is close to unreachable —
+    /// but if one is ever seen, this is the thing to fix.
     pub capabilities: Option<Capabilities>,
     /// The node sent a core-protocol frame, which only an encrypted node does.
     /// wartui cannot talk to it until encryption is turned off in its web UI.
@@ -486,8 +495,19 @@ pub struct Snapshot {
     pub ble_node: Option<Mac>,
     /// Every node, ordered by MAC so the table does not reshuffle itself.
     pub nodes: Vec<NodeView>,
-    /// How many of them can still be given an assignment.
+    /// How many are heartbeating inside the topology timeout.
+    ///
+    /// Deliberately not the same number as [`Self::assignable`]. A fleet can be
+    /// entirely alive and entirely undrivable — three stock nodes heartbeat
+    /// exactly like ours — and one count for both made that case unsayable:
+    /// the header would report nothing heartbeating while the table showed
+    /// three nodes doing it.
     pub alive: usize,
+    /// How many of those can actually be given an assignment.
+    ///
+    /// The planner partitions over exactly this set, so this is the number the
+    /// header and the too-many-nodes notice are about.
+    pub assignable: usize,
     /// The most recent observations, newest last.
     pub tail: Vec<TailEntry>,
     /// Engine totals.
@@ -1347,7 +1367,8 @@ impl FleetEngine {
                 state: state.clone(),
             })
             .collect();
-        let alive = nodes.iter().filter(|n| n.assignable).count();
+        let alive = nodes.iter().filter(|n| self.is_alive(&n.state, now)).count();
+        let assignable = nodes.iter().filter(|n| n.assignable).count();
         Snapshot {
             bridge: self.bridge.clone(),
             link_up: self.link_up,
@@ -1358,6 +1379,7 @@ impl FleetEngine {
             ble_node: self.ble_node,
             nodes,
             alive,
+            assignable,
             tail: self.tail.iter().cloned().collect(),
             counters: self.counters,
             store,
