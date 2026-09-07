@@ -1,12 +1,28 @@
 //! The on-air ESP-NOW frames.
 //!
-//! Two packed little-endian structs, no CRC, no protocol version field. See
-//! `src/WiFiOps.h:66-82`. Encoding and decoding are written out by hand rather
-//! than transmuting a `#[repr(packed)]` struct: the byte layout is a contract
-//! with a separately-compiled C++ program, so it deserves to be spelled out and
-//! tested against real bytes.
+//! Little-endian, no CRC, no protocol version field. See `src/WiFiOps.h:66-82`.
+//! Encoding and decoding are written out by hand rather than transmuting a
+//! `#[repr(packed)]` struct: the byte layout is a contract with a separately
+//! compiled program, so it deserves to be spelled out and tested against real
+//! bytes.
+//!
+//! Node → core is still the vendor's format exactly, and is meant to stay that
+//! way: a heartbeat and an observation from a wartui node are byte-identical to
+//! a stock one's, which is what lets the golden vectors captured off a vendor
+//! fleet keep testing this code.
+//!
+//! Core → node is not, from Phase 2. [`AdminMsg`] is wartui's own fourteen-byte
+//! frame and the vendor's ten-byte one no longer decodes: a channel *set*
+//! replaces the pair of bounds, and a flags byte says whether the node should
+//! scan Bluetooth. Nothing is done to keep a mixed fleet working, because a
+//! mixed fleet was never the point — the vendor node is the thing being
+//! replaced. What survives is [`is_legacy_admin`], which recognises the old
+//! shape without decoding it, so a stock core powered up nearby is reported as
+//! the operational hazard it is rather than counted as line noise.
 
 use core::fmt;
+
+use crate::plan::{CHANNEL_SET_BYTES, ChannelSet};
 
 /// Frame preamble, `"ENOW"`. Four raw bytes, not a NUL-terminated string.
 /// `src/WiFiOps.cpp:13`.
@@ -20,8 +36,25 @@ pub const ENOW_TEXT_MAX: usize = 200;
 /// shorter, so encoders must pad to exactly this. `src/WiFiOps.cpp:1004`.
 pub const TEXT_MSG_LEN: usize = 212;
 
-/// `sizeof(enow_admin_msg_t)`. `src/WiFiOps.cpp:1194`.
-pub const ADMIN_MSG_LEN: usize = 10;
+/// Length of wartui's [`AdminMsg`] on the wire.
+///
+/// Four bytes of magic, the type byte, version, index, count, flags, and five
+/// bytes of channel mask.
+pub const ADMIN_MSG_LEN: usize = 9 + CHANNEL_SET_BYTES;
+
+/// `sizeof(enow_admin_msg_t)`, the vendor core's assignment
+/// (`src/WiFiOps.cpp:1194`). Nothing decodes it any more; it is here so
+/// [`is_legacy_admin`] can name the shape it is looking for.
+pub const LEGACY_ADMIN_MSG_LEN: usize = 10;
+
+/// [`AdminMsg::flags`] bit 0: scan Bluetooth as well as Wi-Fi.
+///
+/// Off is the safe default and the one a node boots into whatever its build
+/// says, because the coexistence cost is real and measured
+/// (`docs/phase-0-findings.md`): on a stock node BLE cost every one of the
+/// thirty-two assignments sent to it. The `ble` cargo feature decides only
+/// whether the code is compiled in; this bit decides whether it runs.
+pub const ADMIN_FLAG_BLE: u8 = 1 << 0;
 
 /// Buffer size [`WardriveLine::write_into`] can always finish in.
 ///
@@ -40,6 +73,12 @@ const OFF_TYPE: usize = 4;
 const OFF_COUNTER: usize = 5;
 const OFF_LEN: usize = 9;
 const OFF_TEXT: usize = 11;
+
+const OFF_VERSION: usize = 5;
+const OFF_NODE_INDEX: usize = 6;
+const OFF_NODE_COUNT: usize = 7;
+const OFF_FLAGS: usize = 8;
+const OFF_CHANNELS: usize = 9;
 
 /// `enum MsgType : uint8_t`, `src/WiFiOps.cpp:88-94`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -182,7 +221,22 @@ impl<'a> TextMsg<'a> {
     }
 }
 
-/// A decoded `enow_admin_msg_t` — a channel-range assignment.
+/// wartui's channel assignment — the one frame a node accepts.
+///
+/// Fourteen bytes: magic, type 5, `assignment_version`, `node_index`,
+/// `node_count`, [`flags`](Self::flags), then five bytes of [`ChannelSet`].
+///
+/// It replaced the vendor's ten-byte `enow_admin_msg_t` in Phase 2 and is not
+/// compatible with it; [`is_legacy_admin`] is all that remains of that shape.
+/// The pair of `SCAN_CHANNELS` bounds became a forty-bit mask because a run
+/// cannot describe a restricted pool: the US pool is 2.4 GHz 1-11 and 5 GHz
+/// 36-165 with a gap between, so a node holding it needed two assignments in
+/// sequence, on a dwell timer, with coverage intermittent in between. A mask
+/// says it in one frame, and lets the planner deal channels round-robin so
+/// every node carries some of both bands.
+///
+/// Everything below is why the *delivery* of this frame is shaped the way it
+/// is, and none of it changed with the layout.
 ///
 /// Observed on real hardware: a vendor core's assignment to its single node
 /// went out once and was retransmitted 31 times by the radio, all 32 frames
@@ -201,7 +255,9 @@ impl<'a> TextMsg<'a> {
 /// acknowledged none of its 32 and kept scanning outside its range. An 802.11
 /// acknowledgement comes from the receiver's MAC hardware, so its absence means
 /// the radio was not on the channel — NimBLE shares the one 2.4 GHz antenna and
-/// the admin window is precisely when the node is otherwise idle.
+/// the admin window is precisely when the node is otherwise idle. That is the
+/// measurement behind [`ADMIN_FLAG_BLE`] being a per-node decision the operator
+/// makes rather than something every node does.
 ///
 /// This is why wartui clears an assignment only on the transmit callback, why
 /// it retries on the next heartbeat rather than trusting the radio's own
@@ -218,13 +274,29 @@ pub struct AdminMsg {
     pub node_index: u8,
     /// Fleet size the stagger is computed against.
     pub node_count: u8,
-    /// First index into [`SCAN_CHANNELS`](crate::plan::SCAN_CHANNELS), inclusive.
-    pub start_channel_idx: u8,
-    /// Last index into [`SCAN_CHANNELS`](crate::plan::SCAN_CHANNELS), inclusive.
-    pub end_channel_idx: u8,
+    /// Per-node switches. [`ADMIN_FLAG_BLE`] is the only one defined.
+    ///
+    /// Carried whole rather than unpacked into `bool`s so an unknown bit set by
+    /// a newer host survives a decode and re-encode instead of being quietly
+    /// dropped — the same reason [`Security::Other`] exists.
+    pub flags: u8,
+    /// Which [`SCAN_CHANNELS`](crate::plan::SCAN_CHANNELS) indices to dwell on.
+    pub channels: ChannelSet,
 }
 
 impl AdminMsg {
+    /// Whether this assignment asks the node to scan Bluetooth.
+    #[must_use]
+    pub const fn scan_ble(&self) -> bool {
+        self.flags & ADMIN_FLAG_BLE != 0
+    }
+
+    /// The flags byte for a node that should or should not scan Bluetooth.
+    #[must_use]
+    pub const fn flags_for(scan_ble: bool) -> u8 {
+        if scan_ble { ADMIN_FLAG_BLE } else { 0 }
+    }
+
     /// Decode from a received frame.
     ///
     /// # Errors
@@ -240,28 +312,49 @@ impl AdminMsg {
             MsgType::Admin => {}
             other => return Err(DecodeError::UnknownType(other.as_u8())),
         }
+        let mut channels = [0u8; CHANNEL_SET_BYTES];
+        channels.copy_from_slice(&buf[OFF_CHANNELS..OFF_CHANNELS + CHANNEL_SET_BYTES]);
         Ok(Self {
-            assignment_version: buf[5],
-            node_index: buf[6],
-            node_count: buf[7],
-            start_channel_idx: buf[8],
-            end_channel_idx: buf[9],
+            assignment_version: buf[OFF_VERSION],
+            node_index: buf[OFF_NODE_INDEX],
+            node_count: buf[OFF_NODE_COUNT],
+            flags: buf[OFF_FLAGS],
+            channels: ChannelSet::from_bytes(channels),
         })
     }
 
-    /// Encode to the 10 bytes the firmware expects.
+    /// Encode to the 14 bytes a wartui node expects.
     #[must_use]
     pub fn encode(&self) -> [u8; ADMIN_MSG_LEN] {
         let mut out = [0u8; ADMIN_MSG_LEN];
         out[..4].copy_from_slice(&MAGIC);
         out[OFF_TYPE] = MsgType::Admin.as_u8();
-        out[5] = self.assignment_version;
-        out[6] = self.node_index;
-        out[7] = self.node_count;
-        out[8] = self.start_channel_idx;
-        out[9] = self.end_channel_idx;
+        out[OFF_VERSION] = self.assignment_version;
+        out[OFF_NODE_INDEX] = self.node_index;
+        out[OFF_NODE_COUNT] = self.node_count;
+        out[OFF_FLAGS] = self.flags;
+        out[OFF_CHANNELS..].copy_from_slice(&self.channels.to_bytes());
         out
     }
+}
+
+/// Whether `buf` is the vendor core's ten-byte assignment.
+///
+/// Nothing here decodes one — the fields are not ours any more and acting on
+/// them would be adopting another core's idea of the fleet. It is recognised
+/// because it has to be *reported*: a stock core powered up in the same room
+/// is assigning wartui's nodes channels wartui did not choose, and the symptom
+/// is a fleet that keeps changing its mind for no reason this host can see.
+/// Counting it as line noise would hide the one clue.
+///
+/// Deliberately exact on length. ESP-NOW delivers a frame at the length it was
+/// sent, so a ten-byte type-5 frame is the vendor's and a fourteen-byte one is
+/// [`AdminMsg`]; nothing has to guess.
+#[must_use]
+pub fn is_legacy_admin(buf: &[u8]) -> bool {
+    buf.len() == LEGACY_ADMIN_MSG_LEN
+        && buf[..4] == MAGIC
+        && buf[OFF_TYPE] == MsgType::Admin.as_u8()
 }
 
 /// Turn a host-side monotonic assignment counter into the byte the wire carries.
@@ -288,7 +381,8 @@ pub const fn wire_version(counter: u64) -> u8 {
 pub enum Frame<'a> {
     /// A 212-byte text-shaped frame.
     Text(TextMsg<'a>),
-    /// A 10-byte assignment.
+    /// A 14-byte assignment. The vendor's ten-byte one is not one of these;
+    /// see [`is_legacy_admin`].
     Admin(AdminMsg),
 }
 

@@ -1,6 +1,9 @@
-//! Bluetooth scanning, when this build was asked for it.
+//! Bluetooth scanning, when this build was asked for it and the core asked for
+//! it too.
 //!
-//! Off unless `--features ble`, and off for good reason. On a stock node the
+//! Compiled in only under `--features ble`, and *run* only while the core has
+//! set `ADMIN_FLAG_BLE` for this node — at most one node in a fleet, and none
+//! by default. Both halves are off for good reason. On a stock node the
 //! per-sweep BLE scan costs roughly as much airtime as every channel dwell put
 //! together — sixteen sweeps against nine over the same 170 seconds — and, far
 //! worse, a node with BLE on acknowledged none of the thirty-two channel

@@ -16,7 +16,7 @@ use wartui_core::record::{
 use wartui_core::store::{SessionInfo, Store, StoreConfig, open_readonly};
 use wartui_proto::air::RecordKind;
 use wartui_proto::link::Mac;
-use wartui_proto::plan::ChannelPool;
+use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun};
 
 const NODE: Mac = [0x02, 0x00, 0x5E, 0x10, 0x57, 0x84];
 const OTHER: Mac = [0x02, 0x00, 0x5E, 0x10, 0x57, 0x85];
@@ -362,8 +362,8 @@ fn assignment(counter: u64, outcome: AdminOutcome, latency_us: Option<u32>) -> R
         wire_version: wartui_proto::air::wire_version(counter),
         node_index: 0,
         node_count: 2,
-        start_idx: 5,
-        end_idx: 5,
+        channels: wartui_proto::plan::ChannelSet::from_run(wartui_proto::plan::IndexRun::new(5, 5)),
+        ble: false,
         created_at_ms: EPOCH_MS,
         delivered_at_ms: Some(EPOCH_MS + 5),
         outcome,
@@ -458,4 +458,138 @@ fn a_database_from_the_previous_wartui_is_brought_forward_rather_than_refused() 
         .query_row("SELECT outcome FROM assignment", [], |row| row.get(0))
         .expect("the row the migrated table can hold");
     assert_eq!(outcome, "acked");
+}
+
+#[test]
+fn a_v2_assignment_row_keeps_its_channels_when_they_become_a_mask() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("wartui.db");
+
+    // v2 stored a contiguous run as a pair of bounds, because that was all an
+    // assignment could be. A run is expressible as a mask, so the rows convert
+    // exactly rather than being dropped — and unlike v1's table, these are real
+    // rows: a v2 build could transmit and did write them.
+    let old = Connection::open(&path).expect("creating");
+    old.execute_batch(
+        "CREATE TABLE session (
+           id INTEGER PRIMARY KEY, started_at INTEGER NOT NULL, ended_at INTEGER,
+           bridge_mac BLOB, bridge_chip TEXT, bridge_fw TEXT,
+           espnow_channel INTEGER NOT NULL, channel_pool TEXT NOT NULL, notes TEXT);
+         INSERT INTO session (id, started_at, espnow_channel, channel_pool)
+           VALUES (1, 0, 6, 'us');
+         CREATE TABLE node (
+           mac BLOB PRIMARY KEY, label TEXT, first_seen INTEGER NOT NULL,
+           last_seen INTEGER NOT NULL, pinned_start_idx INTEGER, pinned_end_idx INTEGER);
+         CREATE TABLE assignment (
+           id INTEGER PRIMARY KEY, session_id INTEGER NOT NULL, node_mac BLOB NOT NULL,
+           counter INTEGER NOT NULL, wire_version INTEGER NOT NULL,
+           node_index INTEGER NOT NULL, node_count INTEGER NOT NULL,
+           start_idx INTEGER NOT NULL, end_idx INTEGER NOT NULL,
+           created_at INTEGER NOT NULL, delivered_at INTEGER, outcome TEXT, latency_us INTEGER);
+         INSERT INTO assignment
+           (session_id, node_mac, counter, wire_version, node_index, node_count,
+            start_idx, end_idx, created_at, delivered_at, outcome, latency_us)
+         VALUES (1, x'0200005E1057', 4, 4, 0, 2, 14, 36, 1, 2, 'acked', 4500),
+                (1, x'0200005E1057', 5, 5, 1, 2, 0, 0, 3, 4, 'unacked', NULL);",
+    )
+    .expect("v2 tables");
+    old.pragma_update(None, "user_version", 2).expect("stamping");
+    drop(old);
+
+    let store = open_at(&path);
+    store.close();
+
+    let conn = open_readonly(&path).expect("reopening");
+    let rows: Vec<(i64, bool, String)> = conn
+        .prepare("SELECT channels, ble, outcome FROM assignment ORDER BY id")
+        .expect("preparing")
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .expect("querying")
+        .map(|r| r.expect("row"))
+        .collect();
+
+    let expect = |start, end| {
+        i64::try_from(ChannelSet::from_run(IndexRun::new(start, end)).bits())
+            .expect("a 40-bit mask")
+    };
+    assert_eq!(
+        rows,
+        vec![
+            (expect(14, 36), false, "acked".to_owned()),
+            (expect(0, 0), false, "unacked".to_owned()),
+        ],
+        "the bounds became the mask that says the same thing, and no v2 row could have had BLE"
+    );
+
+    // And the node table stops carrying a shape nothing else uses. Nothing ever
+    // wrote these, in any version, so there is nothing to preserve.
+    let pinned: Vec<String> = conn
+        .prepare("SELECT name FROM pragma_table_info('node') WHERE name LIKE 'pinned%'")
+        .expect("preparing")
+        .query_map([], |row| row.get(0))
+        .expect("querying")
+        .map(|r| r.expect("row"))
+        .collect();
+    assert_eq!(pinned, vec!["pinned_channels".to_owned()]);
+}
+
+#[test]
+fn a_migration_that_fails_part_way_leaves_the_file_exactly_as_it_was() {
+    // The v2 rebuild renames the old table before it has written the new one,
+    // and the version marker is what decides whether it runs again. Committed
+    // statement by statement, a failure in the middle would leave a file that
+    // is neither shape and still stamped v2 — so every later open would
+    // re-enter the migration and die on the rename against a table already
+    // there. That is a capture that can never be opened again, which is worse
+    // than a capture that cannot be migrated today.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("wartui.db");
+
+    // A v2 file whose `counter` is nullable, holding one row that is null
+    // there. v3 declares that column NOT NULL, so the rebuild fails on its
+    // INSERT — after the rename has already happened.
+    let old = Connection::open(&path).expect("creating");
+    old.execute_batch(
+        "CREATE TABLE assignment (
+           id INTEGER PRIMARY KEY, session_id INTEGER NOT NULL, node_mac BLOB NOT NULL,
+           counter INTEGER, wire_version INTEGER NOT NULL,
+           node_index INTEGER NOT NULL, node_count INTEGER NOT NULL,
+           start_idx INTEGER NOT NULL, end_idx INTEGER NOT NULL,
+           created_at INTEGER NOT NULL, delivered_at INTEGER, outcome TEXT, latency_us INTEGER);
+         INSERT INTO assignment
+           (session_id, node_mac, counter, wire_version, node_index, node_count,
+            start_idx, end_idx, created_at)
+         VALUES (1, x'0200005E1057', NULL, 4, 0, 2, 14, 36, 1);",
+    )
+    .expect("v2 tables");
+    old.pragma_update(None, "user_version", 2).expect("stamping");
+    drop(old);
+
+    let session = SessionInfo { espnow_channel: 6, pool: ChannelPool::Us, notes: None };
+    let opened = Store::open(&StoreConfig::new(&path), &session, EPOCH_MS);
+    assert!(opened.is_err(), "the migration cannot succeed, so the open must not: {opened:?}");
+
+    let conn = Connection::open(&path).expect("reopening");
+    let version: i32 = conn
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .expect("reading the version");
+    assert_eq!(version, 2, "still v2, so a later build can still try");
+
+    let tables: Vec<String> = conn
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+        .expect("preparing")
+        .query_map([], |row| row.get(0))
+        .expect("querying")
+        .map(|r| r.expect("row"))
+        .collect();
+    assert_eq!(tables, vec!["assignment".to_owned()], "no half-renamed table left behind");
+
+    let columns: Vec<String> = conn
+        .prepare("SELECT name FROM pragma_table_info('assignment') WHERE name LIKE '%_idx'")
+        .expect("preparing")
+        .query_map([], |row| row.get(0))
+        .expect("querying")
+        .map(|r| r.expect("row"))
+        .collect();
+    assert_eq!(columns, vec!["start_idx".to_owned(), "end_idx".to_owned()], "and v2 rows intact");
 }
