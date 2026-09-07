@@ -748,9 +748,9 @@ fn the_heartbeat_period_is_the_median_of_recent_sweeps() {
     let clock = Clock::new();
     let mut engine = engine(manual(), &clock);
 
-    // Four-second sweeps, which is what a node scanning all forty channels
+    // Four-second sweeps, which is about what a node holding the whole US pool
     // does, with one heartbeat lost in the middle. The median is what keeps
-    // that lost beat from reading as a range twice the size.
+    // that lost beat from reading as an assignment twice the size.
     for (n, at) in [1u64, 5, 9, 17, 21, 25].into_iter().enumerate() {
         engine.handle(heartbeat(NODE, n as u32 + 1), clock.at(at));
     }
@@ -1192,8 +1192,8 @@ fn a_node_that_rejoins_holding_the_right_channels_is_still_re_issued_when_it_reb
     // its share has to be said again under a fresh epoch. Saying it needs
     // wartui to still know what the node was holding — and a node that rejoined
     // a plan without being sent anything is exactly the case where it might
-    // not. Getting this wrong drops the node back to scanning all forty
-    // channels, transmitting on the six the US pool exists to exclude.
+    // not. Getting this wrong leaves the node parked on the control channel
+    // collecting nothing, which is silent rather than merely wrong.
     let batch = engine.handle(heartbeat(peer(0), 1), clock.at(80));
     let (_, dst, admin) = sent_admin(&batch);
     assert_eq!(dst, peer(0));

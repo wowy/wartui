@@ -82,7 +82,14 @@ the 13 that are 2.4 GHz, for the reason above — that part has no 5 GHz radio, 
 its refusals are not a regulatory matter at all. The one channel a C5 will not
 take is **channel 14**, which `esp-radio` refuses through a hardcoded
 `nchan: 13` that no setting it exposes can reach; `docs/phase-1-findings.md` has
-the measurements and why it was left alone rather than worked around.
+the measurements and the reading of the driver.
+
+This firmware still permits it — the refusal is the driver's, not a rule made
+here — but **no channel pool contains it**, so a wartui core never assigns it.
+That is deliberate: the node reports the refusal by printing a line to a serial
+console nobody is watching, so a fleet given channel 14 spends a dwell of every
+sweep on nothing and the host has no way to notice. It is unsupported rather
+than merely unused.
 
 The cargo runner is `espflash flash --monitor` with no `--chip`, so espflash
 detects the part. Unlike the bridge, the monitor is worth watching: nothing but
