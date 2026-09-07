@@ -202,6 +202,22 @@ impl Ui {
             self.say(format!("{} {why}", mac(&target)), snapshot);
             return;
         }
+        // And one refusal that is only about Bluetooth. The `ble` cargo feature
+        // decides whether the scan code exists in the build at all; the flag
+        // decides whether it runs. A node built without it adopts the flag,
+        // acknowledges the frame and scans nothing, so the fleet table would
+        // show a holder and the export would have no BLE rows in it — the exact
+        // silent acknowledgement the capability token was added to end.
+        if !holds && node.state.capabilities.is_some_and(|capabilities| !capabilities.ble) {
+            self.say(
+                format!(
+                    "{} was built without the ble feature, so it has no bluetooth scan to run",
+                    mac(&target)
+                ),
+                snapshot,
+            );
+            return;
+        }
         let said = match commands
             .try_send(Command::AssignBle { mac: if holds { None } else { Some(target) } })
         {
@@ -952,6 +968,21 @@ fn faults(snapshot: &Snapshot) -> Vec<String> {
             snapshot.assignable
         ));
     }
+    // Channels in the pool that no node present has the radio for. The planner
+    // leaves them out of every share rather than handing 5 GHz to an ESP32-C6
+    // that would acknowledge it and scan 2.4 — which is the right thing to do
+    // and completely invisible, since what is left is a perfectly ordinary
+    // partition of the part the fleet can reach.
+    if let Some(plan) = snapshot.plan
+        && !plan.unreachable().is_empty()
+    {
+        faults.push(format!(
+            "{} channels of the {} pool are 5 GHz and no node in this fleet has a 5 GHz radio, \
+             so they are not being scanned",
+            plan.unreachable().len(),
+            snapshot.pool
+        ));
+    }
     if let Some(gps) = &snapshot.gps {
         if let GpsStatus::Failed(reason) = &gps.status {
             faults.push(format!("gps unreadable: {reason}"));
@@ -1025,7 +1056,7 @@ mod tests {
     use wartui_core::position::Fix;
     use wartui_proto::air::Capabilities;
     use wartui_proto::link::Chip;
-    use wartui_proto::plan::{ChannelPool, IndexRun, plan};
+    use wartui_proto::plan::{ChannelPool, IndexRun, Radio, plan, plan_for};
 
     use super::*;
 
@@ -1054,6 +1085,14 @@ mod tests {
     fn foreign(last: u8) -> NodeView {
         let mut view = node(last, false, 0, false);
         view.state.capabilities = None;
+        view
+    }
+
+    /// A node whose token says 2.4 GHz only and no Bluetooth code: an ESP32-C6
+    /// built without the `ble` feature.
+    fn narrowband(last: u8) -> NodeView {
+        let mut view = node(last, false, 0, true);
+        view.state.capabilities = Some(Capabilities::here(false, false));
         view
     }
 
@@ -1606,6 +1645,50 @@ mod tests {
         let rendered = terminal.backend().to_string();
         assert!(rendered.contains("no node it can drive"), "got {rendered}");
         assert!(!rendered.contains("nothing heartbeating"), "they are all heartbeating");
+    }
+
+    #[test]
+    fn b_is_refused_on_a_node_whose_build_has_no_bluetooth_in_it() {
+        // It would take the flag, acknowledge the frame and scan nothing, while
+        // the fleet table showed a holder and the export had no BLE rows — so
+        // "at most one node scans Bluetooth" would read as "one does".
+        let mut snapshot = busy();
+        snapshot.nodes.push(narrowband(0x21));
+        snapshot.nodes.sort_by_key(|n| n.state.mac);
+        let row = snapshot
+            .nodes
+            .iter()
+            .position(|n| n.state.mac[5] == 0x21)
+            .expect("the narrowband node");
+
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut ui = Ui { selected: row, ..Default::default() };
+        ui.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE), &snapshot, &tx);
+        assert!(rx.try_recv().is_err(), "nothing was queued");
+        let notice = ui.notice(snapshot.now_ms).expect("a reason");
+        assert!(notice.contains("without the ble feature"), "got {notice}");
+
+        // And taking it back off that node is still allowed, because the flag
+        // has to be able to leave wherever it ended up.
+        let mut holding = snapshot.clone();
+        holding.ble_node = Some(holding.nodes[row].state.mac);
+        ui.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE), &holding, &tx);
+        assert_eq!(rx.try_recv().expect("a command"), Command::AssignBle { mac: None });
+    }
+
+    #[test]
+    fn a_fleet_with_no_five_ghz_radio_says_the_pool_is_not_being_covered() {
+        // The planner leaves those channels out of every share rather than
+        // giving them to a node that would acknowledge and ignore them, which
+        // is right and completely invisible: what is left looks like an
+        // ordinary partition of an ordinary pool.
+        let mut snapshot = busy();
+        snapshot.auto = true;
+        snapshot.plan = plan_for(ChannelPool::Us, &[Radio::TwoPointFour; 2]);
+        let mut terminal = Terminal::new(TestBackend::new(200, 40)).expect("test backend");
+        terminal.draw(|frame| draw(frame, &snapshot, &Ui::default())).expect("drawing");
+        let rendered = terminal.backend().to_string();
+        assert!(rendered.contains("no node in this fleet has a 5 GHz radio"), "got {rendered}");
     }
 
     #[test]

@@ -454,6 +454,30 @@ fleet that does nothing.** That is the intended trade — a fleet that visibly
 does nothing beats one that silently covers half of what it claims — but it is
 a real operational edge and both READMEs say so.
 
+### What the two feature words now do
+
+They were parsed and displayed and nothing else when the run above was taken.
+Both are acted on now, and neither has been on a bench, because every board in
+this document is an ESP32-C5 — see "Still not measured".
+
+`5g` gates the planner. A node without it is dealt no 5 GHz index, because the
+alternative is the run F failure reached through a node that is genuinely ours:
+it adopts the share, acknowledges it, and scans the part it can tune while the
+rest goes uncovered. A mixed fleet is dealt the 5 GHz half first, which is not
+cosmetic — in pool order one C5 and one C6 on the US pool split 29/5, and
+dealing the constrained channels first gives 23/11 for the same coverage. When
+no node present has a 5 GHz radio, those channels are named in the footer rather
+than dealt to somebody who would ignore them.
+
+`ble` gates the keypress. `b` on a node built without the feature is refused in
+the view and again in the engine, and a node already named as the holder loses
+it on the tick that learns it cannot scan — the flag would otherwise be adopted
+and acknowledged by a build with no scan code in it, so the `ble` column would
+name a holder while the export had no Bluetooth rows.
+
+Neither was reachable without a second kind of board until now:
+`--sim-c6 N` makes that many simulated nodes ESP32-C6s.
+
 ## Still not measured
 
 - **More than three nodes**, and any count where two nodes take the remainder
@@ -479,12 +503,15 @@ a real operational edge and both READMEs say so.
   happened yet. When one does, a major bump is the lever available; what the
   host should do when it sees a major it does not know is undecided, and
   guessing now would be inventing policy for a situation that does not exist.
-- **Acting on the feature flags.** `5g` is parsed, stored and displayed and
-  nothing uses it, so the planner still deals 5 GHz channels to an ESP32-C6 that
-  cannot tune them — a share nobody scans, of exactly the kind the token was
-  built to stop. Per-node channel eligibility is the fix and is a bigger change
-  than this one. `ble` is in the same position: pressing `b` on a node built
-  without the feature is still accepted and still does nothing.
+- **A mixed-band fleet on hardware.** The planner now deals no 5 GHz channel to a
+  node whose token lacks `5g`, and refuses the Bluetooth scan to one that lacks
+  `ble`. Both are covered by tests and by the simulator (`--sim-c6`), and
+  neither has been run on a bench: every board used in this document is an
+  ESP32-C5, so the mixed case has never been on the air. What a run would have
+  to show is a C6 holding only 2.4 GHz indices, a C5 beside it holding the
+  whole 5 GHz half, and the two of them between them covering the pool — and,
+  separately, that a C6-only fleet reports the 5 GHz shortfall in the footer
+  rather than quietly not scanning it.
 - **What one mangled heartbeat would cost.** A node's token is re-read from
   every heartbeat and nothing smooths that, so a single heartbeat whose text did
   not parse would take the node out of the plan, re-cut and re-epoch the entire

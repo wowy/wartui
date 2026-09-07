@@ -56,6 +56,11 @@ pub struct Args {
     #[arg(long, value_name = "NODES", num_args = 0..=1, default_missing_value = "3")]
     sim: Option<u8>,
 
+    /// Make this many of the simulated nodes ESP32-C6s, which have no 5 GHz
+    /// radio. Counted from the end of the fleet.
+    #[arg(long, value_name = "NODES", default_value_t = 0, requires = "sim")]
+    sim_c6: u8,
+
     /// Where to keep the capture.
     #[arg(long, value_name = "PATH", default_value = "wartui.db")]
     db: PathBuf,
@@ -137,7 +142,7 @@ pub async fn run(args: Args) -> Result<()> {
     };
 
     let pool: ChannelPool = args.pool.into();
-    let link = crate::open(args.port.as_deref(), args.sim)?;
+    let link = crate::open(args.port.as_deref(), args.sim, args.sim_c6)?;
 
     let started = now();
     let session = SessionInfo { espnow_channel: args.channel, pool, notes: args.notes.clone() };

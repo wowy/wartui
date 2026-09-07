@@ -11,8 +11,8 @@
 use std::collections::BTreeSet;
 
 use wartui_proto::plan::{
-    ChannelPool, IndexRun, MAX_NODES, NODE_STAGGER_WINDOW_MS, NUM_SCAN_CHANNELS, SCAN_CHANNELS,
-    UNSUPPORTED_INDEX, plan, stagger_offset_ms,
+    ChannelPool, IndexRun, MAX_NODES, NODE_STAGGER_WINDOW_MS, NUM_SCAN_CHANNELS, Radio,
+    SCAN_CHANNELS, UNSUPPORTED_INDEX, is_five_ghz, plan, plan_for, stagger_offset_ms,
 };
 
 const POOLS: [ChannelPool; 2] = [ChannelPool::Us, ChannelPool::All];
@@ -235,9 +235,96 @@ fn admin_messages_carry_the_snapshot_node_count() {
 }
 
 #[test]
+fn a_uniform_fleet_gets_the_same_plan_by_either_route() {
+    // `plan` is `plan_for` with every radio dual-band, and a fleet that is all
+    // one thing has no constrained channels — so the mixed-fleet machinery must
+    // be invisible to it. Every stored assignment and every fleet on a bench
+    // today is one of these.
+    for pool in POOLS {
+        for nodes in FLEET_SIZES {
+            let radios = vec![Radio::DualBand; usize::from(nodes)];
+            assert_eq!(plan(pool, nodes), plan_for(pool, &radios), "{pool:?}/{nodes}");
+        }
+    }
+}
+
+#[test]
+fn a_two_point_four_radio_is_never_dealt_a_channel_it_cannot_tune() {
+    // The whole point. An ESP32-C6 adopts a 5 GHz share and acknowledges it,
+    // then scans the part it can reach — so the rest of that share is a hole in
+    // the fleet's coverage with an assignment sitting on top of it, which is
+    // the failure the capability token exists to prevent arriving by a
+    // different route.
+    for pool in POOLS {
+        for dual in 0..4u8 {
+            for narrow in 1..4u8 {
+                let radios: Vec<Radio> = core::iter::repeat_n(Radio::DualBand, usize::from(dual))
+                    .chain(core::iter::repeat_n(Radio::TwoPointFour, usize::from(narrow)))
+                    .collect();
+                let p = plan_for(pool, &radios).expect("a valid fleet");
+                for (node, radio) in radios.iter().enumerate() {
+                    let node = u8::try_from(node).expect("small fleet");
+                    let Some(set) = p.channels_for(node) else { continue };
+                    for idx in set.indices() {
+                        assert!(
+                            radio.can_tune(idx),
+                            "{pool:?}: node {node} ({radio:?}) was given index {idx}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn channels_no_radio_present_can_tune_are_named_rather_than_dealt() {
+    // A fleet of nothing but C6s on the US pool covers eleven of thirty-four
+    // channels. That is not a fault the planner can fix and not one it should
+    // hide: the alternative is handing 5 GHz to a node that will ignore it,
+    // which looks identical on screen and is worse in the data.
+    let radios = [Radio::TwoPointFour; 3];
+    let p = plan_for(ChannelPool::Us, &radios).expect("a valid fleet");
+    let unreachable: BTreeSet<u8> = p.unreachable().indices().collect();
+    assert!(unreachable.iter().all(|idx| is_five_ghz(*idx)), "only 5 GHz is out of reach");
+    assert_eq!(unreachable.len(), 23, "every 5 GHz channel in the US pool");
+
+    let dealt: BTreeSet<u8> = covered(&p).into_iter().collect();
+    assert!(dealt.is_disjoint(&unreachable), "nothing unreachable was dealt anyway");
+    assert_eq!(dealt.len() + unreachable.len(), usize::from(ChannelPool::Us.channel_count()));
+
+    // And with one C5 among them there is no hole at all.
+    let mixed = [Radio::DualBand, Radio::TwoPointFour, Radio::TwoPointFour];
+    let p = plan_for(ChannelPool::Us, &mixed).expect("a valid fleet");
+    assert_eq!(p.unreachable(), wartui_proto::plan::ChannelSet::empty());
+}
+
+#[test]
+fn a_mixed_fleet_is_dealt_to_keep_the_slowest_node_as_fast_as_it_can_be() {
+    // Dealt in pool order, the C5 would take its half of 2.4 GHz and then all
+    // of 5 GHz on top: 29 channels against the C6's 5, which is the block split
+    // this planner was written to avoid. Dealing the constrained channels first
+    // costs nothing and gets the largest share down to 23.
+    let p = plan_for(ChannelPool::Us, &[Radio::DualBand, Radio::TwoPointFour]).expect("valid");
+    let c5 = p.channels_for(0).expect("assigned").len();
+    let c6 = p.channels_for(1).expect("assigned").len();
+    assert_eq!((c5, c6), (23, 11), "the C5 takes 5 GHz and the C6 takes 2.4");
+    assert_eq!(c5 + c6, u32::from(ChannelPool::Us.channel_count()), "and between them, all of it");
+
+    // Two C5s and a C6: the twenty-three 5 GHz channels go 12/11 to the C5s,
+    // and the C6 is far enough behind to take the whole of 2.4 GHz.
+    let three = [Radio::DualBand, Radio::DualBand, Radio::TwoPointFour];
+    let p = plan_for(ChannelPool::Us, &three).expect("valid");
+    let sizes: Vec<u32> = (0..3).map(|n| p.channels_for(n).expect("assigned").len()).collect();
+    assert_eq!(sizes, vec![12, 11, 11]);
+}
+
+#[test]
 fn impossible_fleet_sizes_are_rejected() {
     assert!(plan(ChannelPool::Us, 0).is_none());
     assert!(plan(ChannelPool::Us, u8::try_from(MAX_NODES).expect("fits") + 1).is_none());
+    assert!(plan_for(ChannelPool::Us, &[]).is_none());
+    assert!(plan_for(ChannelPool::Us, &[Radio::DualBand; MAX_NODES + 1]).is_none());
 }
 
 #[test]

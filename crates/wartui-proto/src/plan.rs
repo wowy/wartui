@@ -367,6 +367,54 @@ const _: () = assert!(
     "UNSUPPORTED_INDEX must still be channel 14"
 );
 
+/// The first [`SCAN_CHANNELS`] entry that needs a 5 GHz radio.
+///
+/// The table is 2.4 GHz then 5 GHz, so band membership is a comparison rather
+/// than a lookup — but only because the order is what it is, which is why this
+/// is asserted against the table below rather than written down as 14.
+pub const FIRST_FIVE_GHZ_INDEX: u8 = 14;
+
+const _: () = assert!(
+    SCAN_CHANNELS[FIRST_FIVE_GHZ_INDEX as usize - 1] == 14
+        && SCAN_CHANNELS[FIRST_FIVE_GHZ_INDEX as usize] == 36,
+    "SCAN_CHANNELS is no longer 2.4 GHz followed by 5 GHz"
+);
+
+/// Whether tuning `idx` needs a 5 GHz radio.
+#[must_use]
+pub const fn is_five_ghz(idx: u8) -> bool {
+    idx >= FIRST_FIVE_GHZ_INDEX
+}
+
+/// What a node's radio can reach.
+///
+/// The only part of a node's capability token the planner is entitled to look
+/// at, and deliberately not [`crate::air::Capabilities`] itself: a plan is
+/// about which channels can be tuned, and nothing else a node announces about
+/// itself should be able to change one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Radio {
+    /// 2.4 and 5 GHz — an ESP32-C5.
+    #[default]
+    DualBand,
+    /// 2.4 GHz only — an ESP32-C6.
+    TwoPointFour,
+}
+
+impl Radio {
+    /// Whether this radio can tune `idx`.
+    #[must_use]
+    pub const fn can_tune(self, idx: u8) -> bool {
+        matches!(self, Self::DualBand) || !is_five_ghz(idx)
+    }
+}
+
+impl From<crate::air::Capabilities> for Radio {
+    fn from(capabilities: crate::air::Capabilities) -> Self {
+        if capabilities.five_ghz { Self::DualBand } else { Self::TwoPointFour }
+    }
+}
+
 // `MAX_RUNS` bounds nothing the planner indexes any more — it deals out of a
 // flattened iterator — but it still records what a pool is allowed to look
 // like, and a pool exceeding it is a pool nobody thought about. A new one must
@@ -468,6 +516,7 @@ impl core::fmt::Display for ChannelPool {
 pub struct Plan {
     node_count: u8,
     slots: [ChannelSet; MAX_NODES],
+    unreachable: ChannelSet,
 }
 
 impl Plan {
@@ -487,6 +536,18 @@ impl Plan {
     pub fn channels_for(&self, node_index: u8) -> Option<ChannelSet> {
         let set = *self.slots.get(usize::from(node_index))?;
         (node_index < self.node_count && !set.is_empty()).then_some(set)
+    }
+
+    /// Channels in the pool that no node in this fleet has the radio for.
+    ///
+    /// Empty for any fleet with an ESP32-C5 in it. Non-empty means the pool
+    /// asks for 5 GHz and nothing present can tune it, so those channels are
+    /// simply not being scanned — which is worth saying out loud, because it is
+    /// the one hole in coverage that no amount of waiting will fill and nothing
+    /// else on screen would name.
+    #[must_use]
+    pub const fn unreachable(&self) -> ChannelSet {
+        self.unreachable
     }
 
     /// The `MSG_ADMIN` to send to `node_index`.
@@ -522,21 +583,94 @@ impl Plan {
 /// `0..node_count` numbering because it drives the transmit stagger slot
 /// ([`stagger_offset_ms`]), which has to be unique across the whole fleet.
 ///
+/// Every node is taken to be dual-band. For a fleet that is not, use
+/// [`plan_for`] — an ESP32-C6 dealt a 5 GHz channel is a channel nobody scans.
+///
 /// Returns `None` for zero nodes, or for more than [`MAX_NODES`].
 #[must_use]
 pub fn plan(pool: ChannelPool, node_count: u8) -> Option<Plan> {
-    if node_count == 0 || usize::from(node_count) > MAX_NODES {
+    let radios = [Radio::DualBand; MAX_NODES];
+    plan_for(pool, radios.get(..usize::from(node_count))?)
+}
+
+/// Build a plan distributing `pool` across a fleet of known radios.
+///
+/// The same deal as [`plan`], with one node excluded from each channel it
+/// cannot tune. A share of 5 GHz cut for an ESP32-C6 is a share nobody scans —
+/// the same failure the capability token exists to prevent for a node that is
+/// not ours at all, arriving by a different route: the node adopts the
+/// assignment, acknowledges it, and then sits on the channels it can reach
+/// while the rest of its share goes uncovered.
+///
+/// Two things fall out of that and are worth stating, because neither is
+/// obvious and both are deliberate:
+///
+/// **The 5 GHz half is dealt first when the fleet is mixed.** Dealt in pool
+/// order, the dual-band nodes would take their share of 2.4 GHz and then the
+/// whole of 5 GHz on top, which on the US pool with one C5 and one C6 is a
+/// 29/5 split — the block-splitting this planner was written to avoid, arrived
+/// at sideways. Dealing the constrained channels first leaves the nodes that
+/// had to sit them out as the lightest when the rest is handed round, and the
+/// same fleet splits 23/11. A fleet whose radios are all alike has no
+/// constrained channels, so the order is the pool's own and the plan is
+/// byte-identical to what [`plan`] has always produced.
+///
+/// **Shares are then no longer within one of each other**, and cannot be: a
+/// C6 in a fleet holding 5 GHz channels sweeps faster than the C5 beside it
+/// however the rest is dealt. What is minimised is the largest share, which is
+/// what sets how stale the slowest node's observations get.
+///
+/// Channels no radio present can tune are left out of every share and reported
+/// by [`Plan::unreachable`] rather than being given to a node that would ignore
+/// them.
+///
+/// Returns `None` for an empty fleet, or for more than [`MAX_NODES`].
+#[must_use]
+pub fn plan_for(pool: ChannelPool, radios: &[Radio]) -> Option<Plan> {
+    let node_count = u8::try_from(radios.len()).ok()?;
+    if node_count == 0 || radios.len() > MAX_NODES {
         return None;
     }
     let mut slots = [ChannelSet::empty(); MAX_NODES];
-    let mut dealt = 0usize;
-    for run in pool.runs() {
-        for idx in run.start..=run.end {
-            slots[dealt % usize::from(node_count)].insert(idx);
-            dealt += 1;
+    let mut unreachable = ChannelSet::empty();
+    // Ties go to the node after the last one dealt to. With a uniform fleet
+    // every node is always tied, so this alone is the round-robin: index `k`
+    // to node `k % node_count`, exactly as before.
+    let mut cursor = 0usize;
+    let mixed = radios.contains(&Radio::TwoPointFour) && radios.contains(&Radio::DualBand);
+
+    for pass in 0..2 {
+        for run in pool.runs() {
+            for idx in run.start..=run.end {
+                // One pass over the pool unless the fleet is mixed, in which
+                // case 5 GHz goes round before the part everyone can take.
+                if mixed && is_five_ghz(idx) != (pass == 0) {
+                    continue;
+                }
+                if !mixed && pass == 1 {
+                    continue;
+                }
+                // Least-loaded first, so a node that sat out the 5 GHz pass is
+                // ahead of one that did not; ties in fleet order from `cursor`.
+                let winner = (0..usize::from(node_count))
+                    .map(|step| (cursor + step) % usize::from(node_count))
+                    .filter(|node| radios[*node].can_tune(idx))
+                    .min_by_key(|node| slots[*node].len());
+                match winner {
+                    Some(node) => {
+                        slots[node].insert(idx);
+                        cursor = (node + 1) % usize::from(node_count);
+                    }
+                    // No radio in this fleet reaches it. Left out of every
+                    // share: telling a node to dwell where it cannot tune would
+                    // cost it a dwell of every sweep and report the refusal
+                    // only to a serial console nobody is watching.
+                    None => unreachable.insert(idx),
+                }
+            }
         }
     }
-    Some(Plan { node_count, slots })
+    Some(Plan { node_count, slots, unreachable })
 }
 
 /// How long node `node_index` waits before transmitting its heartbeat.

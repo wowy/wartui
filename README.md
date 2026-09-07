@@ -90,6 +90,30 @@ Block-splitting would put one node on the whole of 2.4 GHz and another on the
 whole of 5 GHz, and losing that node would blind the fleet to a band until the
 next re-cut landed.
 
+**An ESP32-C6 is never dealt a 5 GHz channel.** It has no radio for one, and it
+says so in its capability token — so a share of 5 GHz cut for it would be a
+share nobody scans, with an assignment sitting on top of it and nothing on
+screen to say the pool was not being covered. That is the same failure the token
+exists to prevent for a node that is not ours at all, reaching the fleet through
+a node that is.
+
+A mixed fleet is dealt the 5 GHz half first for that reason. In pool order the
+C5s would take their share of 2.4 GHz and then all of 5 GHz on top of it, which
+for one C5 and one C6 on the US pool is a 29/5 split — the block-splitting above,
+arrived at sideways. Dealing the constrained channels first leaves the C6 as the
+lightest node when the rest is handed round, and the same fleet splits 23/11. A
+fleet whose radios are all alike has no constrained channels and is dealt exactly
+as it always was.
+
+Shares are then no longer within one channel of each other, and cannot be: a C6
+beside a C5 that is holding 5 GHz sweeps faster however the rest is dealt. What
+the deal minimises is the *largest* share, which is what sets how stale the
+slowest node's observations get.
+
+If no node in the fleet has a 5 GHz radio at all, those channels are left out of
+every assignment rather than given to a node that would ignore them, and the
+footer says how many of the pool are going unscanned.
+
 ## Trying it
 
 No hardware needed — the simulator runs a fake fleet on a fake clock:
@@ -97,6 +121,10 @@ No hardware needed — the simulator runs a fake fleet on a fake clock:
 ```sh
 cargo run -p wartui -- --sim 3 --lat 37.7749 --lon -122.4194
 ```
+
+`--sim-c6 N` makes that many of them ESP32-C6s, counting from the end of the
+fleet, which is the only way to put a mixed fleet in front of the planner
+without two kinds of board on the desk.
 
 The simulated nodes model the parts of the firmware that matter: they park doing
 nothing until they are assigned, they adopt an assignment only when its version
@@ -211,6 +239,12 @@ The `ble` cargo feature decides whether the code is in the binary at all; the
 assignment decides whether it runs, and it is off at every boot regardless of
 the build. A node whose firmware was compiled with Bluetooth is not a node that
 is scanning it.
+
+**`b` is refused on a node built without the feature**, which its capability
+token says. Nothing about the frame would fail: it adopts the flag,
+acknowledges, and scans nothing — so the `ble` column would name a holder, the
+export would have no Bluetooth rows in it, and "at most one node scans
+Bluetooth" would read as "one does".
 
 ### Letting wartui assign them
 

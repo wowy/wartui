@@ -83,6 +83,14 @@ fn foreign_heartbeat(src: Mac, counter: u32) -> Event {
     rx(src, MsgType::Heartbeat, counter, b"")
 }
 
+/// A heartbeat from a node that is one of ours and cannot do either of the
+/// things a token can claim: an ESP32-C6 built without the `ble` feature.
+fn narrowband_heartbeat(src: Mac, counter: u32) -> Event {
+    let mut token = [0u8; CAPABILITY_MAX];
+    let len = Capabilities::here(false, false).write_into(&mut token).expect("sized for it");
+    rx(src, MsgType::Heartbeat, counter, &token[..len])
+}
+
 fn send_result(id: u16, status: SendStatus, tx_us: u32) -> Event {
     Event::Link(LinkEvent::Message(BridgeToHost::SendResult { id, status, tx_us }))
 }
@@ -596,6 +604,68 @@ fn a_stranger_in_the_fleet_does_not_take_a_share_of_the_pool() {
         acc
     });
     assert_eq!(union, ChannelPool::Us.channels(), "and between them they hold all of it");
+}
+
+#[test]
+fn a_two_point_four_node_is_never_dealt_a_channel_it_cannot_tune() {
+    // A C6 adopts a 5 GHz share and acknowledges it, then scans the part it can
+    // reach — so the rest is a hole in the fleet's coverage with an assignment
+    // sitting on top of it, and nothing on screen would say so. This is the
+    // same failure the capability token prevents for a node that is not ours at
+    // all, arriving through a node that is.
+    let clock = Clock::new();
+    let mut engine = engine(auto(), &clock);
+    engine.handle(heartbeat(NODE, 1), clock.at(1));
+    engine.handle(narrowband_heartbeat(OTHER, 1), clock.at(1));
+    engine.handle(Event::Tick, clock.at(2));
+
+    let held: Vec<(Mac, ChannelSet)> =
+        engine.nodes().filter_map(|node| node.desired.map(|a| (node.mac, a.channels))).collect();
+    assert_eq!(held.len(), 2, "both are ours and both are planned for");
+    for (mac, channels) in &held {
+        if *mac == OTHER {
+            assert!(
+                channels.indices().all(|idx| !wartui_proto::plan::is_five_ghz(idx)),
+                "the 2.4 GHz node was given 5 GHz channels"
+            );
+        }
+    }
+    // And between them they still cover the pool, because the C5 takes what the
+    // C6 cannot: the fleet is not made worse by the C6 being in it.
+    let union = held.iter().fold(ChannelSet::empty(), |mut acc, (_, set)| {
+        for idx in set.indices() {
+            acc.insert(idx);
+        }
+        acc
+    });
+    assert_eq!(union, ChannelPool::Us.channels());
+}
+
+#[test]
+fn the_bluetooth_scan_is_not_given_to_a_node_that_has_no_bluetooth_in_it() {
+    // The `ble` cargo feature decides whether the scan code exists; the flag
+    // decides whether it runs. A node built without the feature would adopt the
+    // flag, acknowledge the frame and scan nothing, and `ble_node` — the only
+    // record of who was asked — would name it for the rest of the capture.
+    let clock = Clock::new();
+    let mut known = engine(manual(), &clock);
+    known.handle(narrowband_heartbeat(NODE, 1), clock.at(1));
+    known.handle(Event::Command(Command::AssignBle { mac: Some(NODE) }), clock.at(2));
+    assert_eq!(known.snapshot(clock.at(3), StoreStats::default()).ble_node, None);
+
+    // Naming a node before it has been heard from is allowed — an operator or a
+    // script may know its address first — and taken back on the tick that finds
+    // out what it is, rather than being refused on a guess.
+    let mut later = engine(manual(), &clock);
+    later.handle(Event::Command(Command::AssignBle { mac: Some(NODE) }), clock.at(1));
+    assert_eq!(later.snapshot(clock.at(2), StoreStats::default()).ble_node, Some(NODE));
+    later.handle(narrowband_heartbeat(NODE, 1), clock.at(3));
+    later.handle(Event::Tick, clock.at(4));
+    assert_eq!(
+        later.snapshot(clock.at(5), StoreStats::default()).ble_node,
+        None,
+        "taken back once the node said it cannot run one"
+    );
 }
 
 #[test]
