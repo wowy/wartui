@@ -12,7 +12,8 @@ are the whole of what was being checked.
 
 Six captures. A to D are one board within half an hour; E is both boards, nine
 hours later; F adds a third board, `59:50`, which turned out not to be running
-this firmware at all — see "A node that is not ours". Same room throughout.
+this firmware at all — see "A node that is not ours" — and G is the same three
+after it was flashed by hand. Same room throughout.
 
 | | build | duration | what it was for |
 | --- | --- | --- | --- |
@@ -22,6 +23,7 @@ this firmware at all — see "A node that is not ours". Same room throughout.
 | D | `esp32c5,ble` | 240 s | B again, after a reflash, on the auto planner |
 | E | `esp32c5,ble` | 240 s | two nodes, the dealt partition, one Bluetooth scan |
 | F | `esp32c5,ble` ×2 | 135 s | three nodes, one of which is not ours |
+| G | `esp32c5,ble` ×3 | 250 s | three nodes, all three of them ours |
 
 ## One assignment covers both runs of the pool, and nothing rotates
 
@@ -208,7 +210,8 @@ on 1, 3, 5, 9 and 11; `4F:98`, holding the odd ones, reported 7 on 6 and 8.
 
 **Every one of them is exactly one channel away from a channel that node did
 hold, and every one is 2.4 GHz.** Not a single 5 GHz observation landed outside
-a mask in any run.
+a mask in any run. (Run G later produced one stray at *two* channels out, which
+the geometry also allows — see "What the bleed rate actually depends on".)
 
 That is adjacent-channel capture, and it is correct behaviour rather than a
 sweep escaping its assignment. 2.4 GHz channels are 5 MHz apart and 20 MHz
@@ -264,17 +267,20 @@ node              rssi beats obs  last beat  ble  channels            state
 
 Which is also the first hardware sighting of the scattered channel cell: the
 count leads, the list is cut at a comma rather than mid-range, and there is one
-ellipsis rather than two. No frame in any of the five captures rendered `……`.
+ellipsis rather than two. No frame in any of the six captures rendered `……`.
 
 ## Three nodes, and the shares differ by one
 
-Run F put three nodes in front of the planner. The deal:
+Runs F and G put three nodes in front of the planner and got the same deal both
+times, which is what a planner with no clock should do — the cut depends on the
+fleet and nothing else. Run G is the one where all three nodes were ours:
 
 | node | index | channels |
 | --- | --- | --- |
 | `4F:98` | 0 of 3 | 12: `1,4,7,10,40,52,64,116,128,140,153,165` |
 | `57:84` | 1 of 3 | 11: `2,5,8,11,44,56,100,120,132,144,157` |
 | `59:50` | 2 of 3 | 11: `3,6,9,36,48,60,112,124,136,149,161` |
+
 
 Twelve, eleven and eleven. Pairwise overlap is zero in all three pairs and the
 union is exactly the thirty-four channels of the US pool, so `shares differ by
@@ -285,10 +291,16 @@ and the remainder lands on the lowest index.
 Sweep periods follow the shares closely enough to predict from the count. Taking
 129.7 ms per channel from the earlier runs and adding the 300 ms admin window:
 
-| node | channels | predicted | measured |
-| --- | --- | --- | --- |
-| `4F:98` | 12 | 1.86 s | 1.86 s |
-| `57:84` | 11 | 1.73 s | 1.77 s |
+| node | channels | predicted | measured (F) | measured (G) |
+| --- | --- | --- | --- | --- |
+| `4F:98` | 12 | 1.86 s | 1.86 s | 1.86 s |
+| `57:84` | 11 | 1.73 s | 1.77 s | 1.77 s |
+| `59:50` | 11 | 1.73 s | — | 1.82 s |
+
+Run G also settles the Bluetooth question at three nodes: `4F:98` produced 84
+advertiser records and `57:84` and `59:50` produced **none at all**, on the same
+binary with the same feature compiled in. Its two frames were acknowledged in
+5837 µs and 5871 µs, the second while it was scanning.
 
 ## A node that is not ours acknowledges, and does not adopt
 
@@ -332,35 +344,76 @@ It was specified in the plan and not built, and nothing else can distinguish the
 two firmwares: node to core is byte-identical by design, which is exactly what
 lets vendor golden vectors keep testing this code.
 
-## The bleed does not obviously grow with node count
+## What the bleed rate actually depends on, and it is not node count
 
-At three nodes each 2.4 GHz channel has both of its neighbours in other nodes'
-shares, where at two it had one. The rate did not clearly move:
+Run G has all three dedup rings empty at the start, so it is the first capture
+where the bleed can be read cleanly. Counting only 2.4 GHz rows, which are the
+only ones that ever bleed:
 
-| | 2 nodes (run E) | 3 nodes (run F) |
+| node | its 2.4 GHz share | rows outside it |
 | --- | --- | --- |
-| `4F:98` | 7/61 — 11% | 8/45 — 18% |
-| `57:84` | 16/63 — 25% | 5/60 — 8% |
+| `4F:98` | 1, 4, 7, 10 | 15/35 — **43%** |
+| `57:84` | 2, 5, 8, 11 | 17/33 — **52%** |
+| `59:50` | 3, 6, 9 | 1/28 — **4%** |
 
-Every observation outside a mask was again exactly one channel from one the node
-held, and again every one was 2.4 GHz. The two runs bracket each other rather
-than separating, and forty to sixty observations per node is too few to call a
-difference of this size, so the honest reading is that both are the same
-order and this bench cannot resolve better than that.
+A spread of 4% to 52% inside one capture, on one fleet, in one room. Node count
+does not explain that, and neither does anything about the firmware. **Where the
+room's access points sit does.** The distinct access points this room offers,
+by channel:
+
+```
+ch  1: 17     ch  6: 21     ch 11: 10
+ch  3:  3     ch  7:  2     ch  5: 2, ch 8: 7, ch 9: 3, ch 10: 1
+```
+
+They cluster on 1, 6 and 11, as 2.4 GHz deployments do — those are the three
+that do not overlap each other. `59:50` was dealt 3, 6 and 9, so it holds the
+busiest channel in the room outright: 21 of its 28 rows are channel 6 and
+legitimately its own. The other two hold the channels *either side* of 6 and
+pick it up as bleed. Whether a node looks disciplined or leaky is decided by
+whether the deal happened to give it 1, 6 or 11.
+
+So the per-node figure is not a property worth tracking. The fleet-level one is,
+because it is the one that costs anything:
+
+| | access points found by more than one node |
+| --- | --- |
+| Run E, 2 nodes | 23 of 101 — 23% |
+| Run G, 3 nodes | 22 of 95 — **23%** |
+
+Unchanged from two nodes to three. A third node splits the same overlap three
+ways rather than adding more of it, which makes sense: an access point on
+channel 6 is heard by whoever holds 6 and by whoever holds its neighbours, and
+that is two or three nodes either way.
+
+**One stray was two channels out**, not one — `59:50` reporting a channel 11
+access point while parked on 9. That is the geometry rather than an exception:
+2.4 GHz channels are 5 MHz apart and 20 MHz wide, so a channel occupies roughly
+±2 channels of spectrum and a receiver two channels away still overlaps half of
+it. Runs E and F happening to show only ±1 was the room, not a rule. Nothing
+was seen at ±3 or beyond, and no 5 GHz observation has landed outside a mask in
+any of the six captures.
 
 ## Still not measured
 
 - **More than three nodes**, and any count where two nodes take the remainder
   rather than one. Three is the first count at which the shares are uneven and
   it works; four, where thirty-four splits 9/9/8/8, is untested.
-- **A three-node fleet that is actually three of ours.** The deal, the sweep
-  periods and the bleed above are sound — the planner's arithmetic does not care
-  what adopts it — but only two of the three nodes were running this firmware,
-  so "no *other* node scans Bluetooth" is still checked at two nodes rather than
-  three, and the third share was never actually swept.
+- **Boards that stay up.** Two of the three refused `espflash` at some point in
+  this session and one had to be flashed by hand; a `reset` immediately followed
+  by a `monitor` left another answering `MemData command / Other (0x1)` and it
+  missed a whole capture. Phase 1 blamed a host USB port for the same symptom,
+  which was true of that instance and is not the general rule — these boards are
+  simply not reliable about it. Nothing here is a firmware result, but it is why
+  a run should check that every node it expects actually booted.
 - **The stagger, again.** Unchanged from Phase 1: it cannot be disabled from the
   host, so "it worked" and "there was nothing to prevent" remain inseparable
   without a firmware build that omits it.
+- **Duplication beyond three nodes.** It is 23% at two and 23% at three, which
+  is the number that costs store rows. Whether it stays flat at ten is a guess:
+  the argument that it should — an access point is heard by whoever holds its
+  channel and whoever holds the neighbours, which is two or three nodes however
+  many there are — is reasoning, not a measurement.
 - **What to do about a foreign node.** The capability token specified in the
   Phase 2 plan is not built, so wartui cannot tell a stock node from one of its
   own and cuts it a share regardless. What the host should then *do* — refuse to
