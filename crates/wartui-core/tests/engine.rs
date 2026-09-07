@@ -579,6 +579,12 @@ fn a_stranger_in_the_fleet_does_not_take_a_share_of_the_pool() {
     let snapshot = engine.snapshot(clock.at(3), StoreStats::default());
     let plan = snapshot.plan.expect("a plan");
     assert_eq!(plan.node_count(), 2, "the stranger is not one of the two");
+    // Counted apart, because the view has to be able to say "three nodes are
+    // heartbeating and only two of them can be driven". One number for both
+    // would make a fleet of nothing but strangers indistinguishable from a
+    // fleet that has not started yet.
+    assert_eq!(snapshot.alive, 3, "the stranger is heartbeating like the rest");
+    assert_eq!(snapshot.assignable, 2, "and is still not one this host can drive");
 
     let held: Vec<ChannelSet> =
         engine.nodes().filter_map(|node| node.desired.map(|a| a.channels)).collect();

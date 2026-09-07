@@ -487,11 +487,17 @@ fn planning(snapshot: &Snapshot) -> Span<'static> {
     }
     let text = match snapshot.plan {
         Some(plan) => format!("auto — {} of {}", plan.node_count(), snapshot.nodes.len()),
-        None if snapshot.alive > MAX_NODES => "auto — too many nodes".to_owned(),
+        None if snapshot.assignable > MAX_NODES => "auto — too many nodes".to_owned(),
         // Heartbeating is not on its own enough to be in a plan: a node that
         // never said it is a wartui node will not adopt what it is sent, an
         // encrypted node cannot be told anything, and one the bridge has no
         // peer slot for cannot be reached. The state column says which.
+        //
+        // This arm is why `alive` and `assignable` are counted apart. Against
+        // one number it could never fire — the planner's own filter is the
+        // assignable one, so a positive count always has a plan — and a fleet
+        // of nothing but stock nodes fell through to "nothing heartbeating
+        // yet" while the table showed them all heartbeating.
         None if snapshot.alive > 0 => "auto — no node it can drive".to_owned(),
         None => "auto — nothing heartbeating yet".to_owned(),
     };
@@ -678,6 +684,9 @@ fn why_not_assignable(node: &NodeView) -> Option<&'static str> {
     if state.capabilities.is_none() {
         return Some("has not said it is a wartui node, so it would not adopt this");
     }
+    if state.peer_refused {
+        return Some("has no slot in the bridge's peer table, so it cannot be reached");
+    }
     if !node.assignable {
         return Some("is not heartbeating, so it cannot be assigned");
     }
@@ -711,6 +720,13 @@ fn node_state(node: &NodeView) -> (String, Style) {
     if state.capabilities.is_none() {
         return ("not wartui".to_owned(), Style::new().fg(Color::Magenta));
     }
+    // Ahead of `stale`, because a peer refusal makes a node unassignable while
+    // its heartbeats keep arriving. Behind the fall-through it read as "stale",
+    // which says the heartbeats stopped — they have not, and the fix is not on
+    // the node at all but on a fleet that has outgrown the peer table.
+    if state.peer_refused {
+        return ("refused".to_owned(), Style::new().fg(Color::Red));
+    }
     if !node.assignable {
         return ("stale".to_owned(), Style::new().fg(Color::Yellow));
     }
@@ -721,8 +737,10 @@ fn node_state(node: &NodeView) -> (String, Style) {
     if matches!(state.last_outcome, Some(AdminOutcome::Unacked | AdminOutcome::Silent)) {
         return ("no admin ack".to_owned(), Style::new().fg(Color::Red));
     }
-    // The bridge would not put it on the air at all. Nearly always a peer table
-    // with no room in it, which means the fleet is over twenty nodes.
+    // The bridge would not put it on the air at all, and not because of the
+    // peer table — that case is caught above and is terminal. What is left is
+    // `NoPeer` or a rejected frame, which a reconnect can clear, so the node is
+    // still assignable and still says what happened to its last attempt.
     if state.last_outcome == Some(AdminOutcome::Refused) {
         return ("refused".to_owned(), Style::new().fg(Color::Red));
     }
@@ -923,11 +941,15 @@ fn faults(snapshot: &Snapshot) -> Vec<String> {
     // The planner gives up on a fleet it cannot address rather than cutting the
     // pool among nodes that will never hear the result. What is already out
     // there stays out there; it simply stops being re-cut.
-    if snapshot.auto && snapshot.plan.is_none() && snapshot.alive > MAX_NODES {
+    // Counted against `assignable`, because that is the list the planner is
+    // handed: a fleet of thirty nodes of which nineteen are ours is partitioned
+    // perfectly well, and saying otherwise would send the operator unplugging
+    // hardware that was not the problem.
+    if snapshot.auto && snapshot.plan.is_none() && snapshot.assignable > MAX_NODES {
         faults.push(format!(
             "{} nodes alive: over the {MAX_NODES} wartui supports, so the fleet is no longer \
              being partitioned",
-            snapshot.alive
+            snapshot.assignable
         ));
     }
     if let Some(gps) = &snapshot.gps {
@@ -1035,6 +1057,21 @@ mod tests {
         view
     }
 
+    /// Heartbeating stopped and nothing else is wrong. The only one of the
+    /// four refusals whose cause is on the node rather than in this host.
+    fn stale_node(last: u8) -> NodeView {
+        node(last, false, 0, false)
+    }
+
+    /// Heartbeating perfectly well, with nowhere in the bridge's peer table to
+    /// put it.
+    fn refused(last: u8) -> NodeView {
+        let mut view = node(last, false, 0, false);
+        view.state.peer_refused = true;
+        view.state.last_outcome = Some(AdminOutcome::Refused);
+        view
+    }
+
     /// A node that has been given channels and has acknowledged them.
     fn assigned(last: u8) -> NodeView {
         let mut view = node(last, false, 0, true);
@@ -1095,6 +1132,7 @@ mod tests {
                 unacked(0x88),
             ],
             alive: 4,
+            assignable: 4,
             tail: (0..40)
                 .map(|n| TailEntry {
                     node_mac: [0x02, 0x00, 0x5E, 0x10, 0x57, 0x84],
@@ -1152,6 +1190,7 @@ mod tests {
             link_error: Some("no bridge found".to_owned()),
             nodes: Vec::new(),
             alive: 0,
+            assignable: 0,
             tail: Vec::new(),
             counters: Counters::default(),
             store: StoreStats::default(),
@@ -1511,20 +1550,33 @@ mod tests {
         // heartbeats stopped. A single "not heartbeating" for all three sent
         // two of them looking in the wrong place.
         let mut snapshot = busy();
-        // Row 1 of `busy` is the encrypted node.
+        // Row 1 of `busy` is the encrypted node; the other three are pushed,
+        // because `busy` is the ordinary fleet and has none of them.
         snapshot.nodes.push(foreign(0x21));
+        snapshot.nodes.push(stale_node(0x22));
+        snapshot.nodes.push(refused(0x23));
         snapshot.nodes.sort_by_key(|n| n.state.mac);
-        let stale = snapshot
-            .nodes
-            .iter()
-            .position(|n| !n.assignable && !n.state.encrypted && n.state.capabilities.is_some());
+        // `expect`, not a skip. Written as `let Some(row) = row else
+        // { continue }` the "not heartbeating" case matched no row in `busy`
+        // and was silently never asserted, which is how the fourth reason
+        // below came to be missing from the function under test.
+        let row = |mac_suffix: u8| {
+            snapshot
+                .nodes
+                .iter()
+                .position(|n| n.state.mac[5] == mac_suffix)
+                .expect("a row for every reason")
+        };
 
         for (row, want) in [
-            (snapshot.nodes.iter().position(|n| n.state.encrypted), "encrypted"),
-            (snapshot.nodes.iter().position(|n| n.state.capabilities.is_none()), "wartui node"),
-            (stale, "not heartbeating"),
+            (
+                snapshot.nodes.iter().position(|n| n.state.encrypted).expect("the encrypted node"),
+                "encrypted",
+            ),
+            (row(0x21), "wartui node"),
+            (row(0x22), "not heartbeating"),
+            (row(0x23), "peer table"),
         ] {
-            let Some(row) = row else { continue };
             let (tx, mut rx) = mpsc::channel(4);
             let mut ui = Ui { selected: row, ..Default::default() };
             ui.on_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE), &snapshot, &tx);
@@ -1532,6 +1584,38 @@ mod tests {
             let notice = ui.notice(snapshot.now_ms).expect("a reason");
             assert!(notice.contains(want), "row {row}: wanted {want:?}, got {notice}");
         }
+    }
+
+    #[test]
+    fn a_fleet_of_strangers_is_told_it_cannot_be_driven_not_that_it_is_silent() {
+        // Every node heartbeating, none of them ours. The planner has nothing
+        // to partition, so `plan` is None — and against a single count of
+        // "alive" this fell through to "nothing heartbeating yet" while the
+        // table below it showed three nodes heartbeating. That is the exact
+        // fleet the capability token was added for, so it is the one case the
+        // header must not get wrong.
+        let mut snapshot = busy();
+        snapshot.auto = true;
+        snapshot.plan = None;
+        snapshot.nodes = vec![foreign(0x21), foreign(0x22), foreign(0x23)];
+        snapshot.alive = 3;
+        snapshot.assignable = 0;
+
+        let mut terminal = Terminal::new(TestBackend::new(200, 40)).expect("test backend");
+        terminal.draw(|frame| draw(frame, &snapshot, &Ui::default())).expect("drawing");
+        let rendered = terminal.backend().to_string();
+        assert!(rendered.contains("no node it can drive"), "got {rendered}");
+        assert!(!rendered.contains("nothing heartbeating"), "they are all heartbeating");
+    }
+
+    #[test]
+    fn a_node_with_no_peer_slot_says_it_was_refused_rather_than_that_it_went_quiet() {
+        // Its heartbeats are arriving; what is missing is room in the bridge's
+        // peer table, and the fix is a smaller fleet rather than a look at that
+        // node's radio. Reading as "stale" sent the operator to the wrong one.
+        let view = refused(0x21);
+        let (label, _) = node_state(&view);
+        assert_eq!(label, "refused");
     }
 
     #[test]
@@ -1692,7 +1776,7 @@ mod tests {
         let mut snapshot = busy();
         snapshot.auto = true;
         snapshot.plan = None;
-        snapshot.alive = MAX_NODES + 1;
+        snapshot.assignable = MAX_NODES + 1;
         let mut terminal = Terminal::new(TestBackend::new(200, 40)).expect("test backend");
         terminal.draw(|frame| draw(frame, &snapshot, &Ui::default())).expect("drawing");
         assert!(terminal.backend().to_string().contains("no longer"));

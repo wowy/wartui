@@ -485,6 +485,13 @@ a real operational edge and both READMEs say so.
   built to stop. Per-node channel eligibility is the fix and is a bigger change
   than this one. `ble` is in the same position: pressing `b` on a node built
   without the feature is still accepted and still does nothing.
+- **What one mangled heartbeat would cost.** A node's token is re-read from
+  every heartbeat and nothing smooths that, so a single heartbeat whose text did
+  not parse would take the node out of the plan, re-cut and re-epoch the entire
+  fleet, and be undone by the next one. Two checksums stand between the air and
+  that text, so it has never been seen and may not be reachable; it is written
+  down because the failure would look like an unexplained fleet-wide re-cut
+  rather than like a bad frame.
 - **A dense room.** The Bluetooth penalty was measured where about fifty
   advertisers answered each scan. Whether it stays near a tenth of a sweep where
   five hundred do is unknown, and this bench cannot produce that.

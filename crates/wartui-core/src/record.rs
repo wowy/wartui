@@ -31,6 +31,13 @@ pub struct NodeSeen {
     /// version this build did not understand. It is also the only record of
     /// *why* a node was never assigned anything: a node row with heartbeats,
     /// no token and no assignments is the whole diagnosis.
+    ///
+    /// `None` here does not erase what an earlier heartbeat said. Most frames
+    /// are observations and carry no token, so the store coalesces rather than
+    /// overwriting — which means the stored column is the last token *ever*
+    /// seen from this node, not the last one it sent. A board reflashed to
+    /// something else mid-capture keeps its old token in the file while the
+    /// engine and the fleet table correctly stop believing it.
     pub capabilities: Option<String>,
 }
 
