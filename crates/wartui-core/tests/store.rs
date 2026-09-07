@@ -84,7 +84,12 @@ fn every_kind_of_record_round_trips() {
     let conn = write(
         &dir,
         vec![
-            Record::Node(NodeSeen { mac: NODE, first_seen_ms: EPOCH_MS, last_seen_ms: EPOCH_MS }),
+            Record::Node(NodeSeen {
+                mac: NODE,
+                first_seen_ms: EPOCH_MS,
+                last_seen_ms: EPOCH_MS,
+                capabilities: Some("wartui/0.1;ble,5g".to_owned()),
+            }),
             Record::Heartbeat(Heartbeat {
                 node_mac: NODE,
                 rx_at_ms: EPOCH_MS,
@@ -115,19 +120,31 @@ fn seeing_a_node_again_updates_last_seen_without_moving_first_seen() {
     let conn = write(
         &dir,
         vec![
-            Record::Node(NodeSeen { mac: NODE, first_seen_ms: EPOCH_MS, last_seen_ms: EPOCH_MS }),
+            Record::Node(NodeSeen {
+                mac: NODE,
+                first_seen_ms: EPOCH_MS,
+                last_seen_ms: EPOCH_MS,
+                capabilities: Some("wartui/0.1;ble,5g".to_owned()),
+            }),
+            // An observation carries no token, and most frames are
+            // observations — so this is the row that would erase the identity
+            // if the upsert wrote `excluded.capabilities` straight in.
             Record::Node(NodeSeen {
                 mac: NODE,
                 first_seen_ms: EPOCH_MS,
                 last_seen_ms: EPOCH_MS + 60_000,
+                capabilities: None,
             }),
         ],
     );
 
-    let (first, last): (i64, i64) = conn
-        .query_row("SELECT first_seen, last_seen FROM node", [], |r| Ok((r.get(0)?, r.get(1)?)))
+    let (first, last, caps): (i64, i64, Option<String>) = conn
+        .query_row("SELECT first_seen, last_seen, capabilities FROM node", [], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })
         .unwrap();
     assert_eq!((first, last), (EPOCH_MS, EPOCH_MS + 60_000));
+    assert_eq!(caps.as_deref(), Some("wartui/0.1;ble,5g"), "what it last said it was, kept");
 }
 
 #[test]

@@ -198,11 +198,8 @@ impl Ui {
         // Same rule as an assignment, for the same reason: the flag travels in
         // the admin frame, and only a heartbeat opens the window that frame
         // needs. Refusing here beats a request that sits undelivered.
-        if !holds && !node.assignable {
-            self.say(
-                format!("{} is not heartbeating, so it cannot be assigned", mac(&target)),
-                snapshot,
-            );
+        if !holds && let Some(why) = why_not_assignable(node) {
+            self.say(format!("{} {why}", mac(&target)), snapshot);
             return;
         }
         let said = match commands
@@ -252,14 +249,12 @@ impl Ui {
             );
             return;
         }
-        // A node that is not heartbeating never opens an admin window, so the
-        // assignment would sit dirty forever with nothing to say why. Refusing
-        // it up front, with the reason, beats a queue that never drains.
-        if !node.assignable {
-            self.say(
-                format!("{} is not heartbeating, so it cannot be assigned", mac(&node.state.mac)),
-                snapshot,
-            );
+        // A node that will not adopt this never opens a window it can arrive
+        // through, so the assignment would sit dirty for ever with nothing to
+        // say why. Refusing it up front, with the reason, beats a queue that
+        // never drains.
+        if let Some(why) = why_not_assignable(node) {
+            self.say(format!("{} {why}", mac(&node.state.mac)), snapshot);
             return;
         }
         let command = Command::Assign { mac: node.state.mac, channels };
@@ -492,10 +487,17 @@ fn planning(snapshot: &Snapshot) -> Span<'static> {
     }
     let text = match snapshot.plan {
         Some(plan) => format!("auto — {} of {}", plan.node_count(), snapshot.nodes.len()),
-        None if snapshot.alive > MAX_NODES => "auto — too many nodes".to_owned(),
-        // Heartbeating is not on its own enough to be in a plan: an encrypted
-        // node cannot be told anything, and one the bridge has no peer slot for
-        // cannot be reached. The state column says which, per node.
+        None if snapshot.assignable > MAX_NODES => "auto — too many nodes".to_owned(),
+        // Heartbeating is not on its own enough to be in a plan: a node that
+        // never said it is a wartui node will not adopt what it is sent, an
+        // encrypted node cannot be told anything, and one the bridge has no
+        // peer slot for cannot be reached. The state column says which.
+        //
+        // This arm is why `alive` and `assignable` are counted apart. Against
+        // one number it could never fire — the planner's own filter is the
+        // assignable one, so a positive count always has a plan — and a fleet
+        // of nothing but stock nodes fell through to "nothing heartbeating
+        // yet" while the table showed them all heartbeating.
         None if snapshot.alive > 0 => "auto — no node it can drive".to_owned(),
         None => "auto — nothing heartbeating yet".to_owned(),
     };
@@ -670,6 +672,27 @@ fn period(ms: u32) -> String {
     if ms < 1000 { format!("{ms}ms") } else { format!("{:.1}s", f64::from(ms) / 1000.0) }
 }
 
+/// Why a node cannot be given an assignment, or `None` if it can.
+///
+/// The wording is the message the operator sees on the refused keypress, so it
+/// says what is wrong rather than naming a state.
+fn why_not_assignable(node: &NodeView) -> Option<&'static str> {
+    let state = &node.state;
+    if state.encrypted {
+        return Some("is encrypted, so this host cannot address it");
+    }
+    if state.capabilities.is_none() {
+        return Some("has not said it is a wartui node, so it would not adopt this");
+    }
+    if state.peer_refused {
+        return Some("has no slot in the bridge's peer table, so it cannot be reached");
+    }
+    if !node.assignable {
+        return Some("is not heartbeating, so it cannot be assigned");
+    }
+    None
+}
+
 /// What the operator most needs to know about a node, in one column.
 ///
 /// Encryption comes first because it is the only state wartui cannot do
@@ -689,6 +712,21 @@ fn node_state(node: &NodeView) -> (String, Style) {
     if state.last_heartbeat.is_none() {
         return ("no heartbeat".to_owned(), Style::new().fg(Color::Yellow));
     }
+    // Heartbeating perfectly well, and not something this host can drive.
+    // Nothing else in this table would say so: node → core is byte-identical
+    // by design, so a stock node looks exactly like one of ours right up until
+    // it is asked what it is. Magenta with `encrypted`, because it is the same
+    // kind of fact — a node wartui cannot do anything about from here.
+    if state.capabilities.is_none() {
+        return ("not wartui".to_owned(), Style::new().fg(Color::Magenta));
+    }
+    // Ahead of `stale`, because a peer refusal makes a node unassignable while
+    // its heartbeats keep arriving. Behind the fall-through it read as "stale",
+    // which says the heartbeats stopped — they have not, and the fix is not on
+    // the node at all but on a fleet that has outgrown the peer table.
+    if state.peer_refused {
+        return ("refused".to_owned(), Style::new().fg(Color::Red));
+    }
     if !node.assignable {
         return ("stale".to_owned(), Style::new().fg(Color::Yellow));
     }
@@ -699,8 +737,10 @@ fn node_state(node: &NodeView) -> (String, Style) {
     if matches!(state.last_outcome, Some(AdminOutcome::Unacked | AdminOutcome::Silent)) {
         return ("no admin ack".to_owned(), Style::new().fg(Color::Red));
     }
-    // The bridge would not put it on the air at all. Nearly always a peer table
-    // with no room in it, which means the fleet is over twenty nodes.
+    // The bridge would not put it on the air at all, and not because of the
+    // peer table — that case is caught above and is terminal. What is left is
+    // `NoPeer` or a rejected frame, which a reconnect can clear, so the node is
+    // still assignable and still says what happened to its last attempt.
     if state.last_outcome == Some(AdminOutcome::Refused) {
         return ("refused".to_owned(), Style::new().fg(Color::Red));
     }
@@ -901,11 +941,15 @@ fn faults(snapshot: &Snapshot) -> Vec<String> {
     // The planner gives up on a fleet it cannot address rather than cutting the
     // pool among nodes that will never hear the result. What is already out
     // there stays out there; it simply stops being re-cut.
-    if snapshot.auto && snapshot.plan.is_none() && snapshot.alive > MAX_NODES {
+    // Counted against `assignable`, because that is the list the planner is
+    // handed: a fleet of thirty nodes of which nineteen are ours is partitioned
+    // perfectly well, and saying otherwise would send the operator unplugging
+    // hardware that was not the problem.
+    if snapshot.auto && snapshot.plan.is_none() && snapshot.assignable > MAX_NODES {
         faults.push(format!(
             "{} nodes alive: over the {MAX_NODES} wartui supports, so the fleet is no longer \
              being partitioned",
-            snapshot.alive
+            snapshot.assignable
         ));
     }
     if let Some(gps) = &snapshot.gps {
@@ -979,6 +1023,7 @@ mod tests {
     use wartui_core::engine::{Assignment, BridgeStatus, Counters, NodeState, Now, StoreStats};
     use wartui_core::gps::GpsCounters;
     use wartui_core::position::Fix;
+    use wartui_proto::air::Capabilities;
     use wartui_proto::link::Chip;
     use wartui_proto::plan::{ChannelPool, IndexRun, plan};
 
@@ -997,7 +1042,34 @@ mod tests {
         state.observations = 340;
         state.link_rssi = Some(-41);
         state.encrypted = encrypted;
+        // One of ours unless a test says otherwise. A node with no token is
+        // not assignable at all, so building the ordinary case without one
+        // would make every assignment test below a test of the refusal.
+        state.capabilities = Some(Capabilities::here(true, true));
         NodeView { state, assignable }
+    }
+
+    /// A node heartbeating perfectly well that never said what it is: a stock
+    /// node, or one of ours from before the token existed.
+    fn foreign(last: u8) -> NodeView {
+        let mut view = node(last, false, 0, false);
+        view.state.capabilities = None;
+        view
+    }
+
+    /// Heartbeating stopped and nothing else is wrong. The only one of the
+    /// four refusals whose cause is on the node rather than in this host.
+    fn stale_node(last: u8) -> NodeView {
+        node(last, false, 0, false)
+    }
+
+    /// Heartbeating perfectly well, with nowhere in the bridge's peer table to
+    /// put it.
+    fn refused(last: u8) -> NodeView {
+        let mut view = node(last, false, 0, false);
+        view.state.peer_refused = true;
+        view.state.last_outcome = Some(AdminOutcome::Refused);
+        view
     }
 
     /// A node that has been given channels and has acknowledged them.
@@ -1060,6 +1132,7 @@ mod tests {
                 unacked(0x88),
             ],
             alive: 4,
+            assignable: 4,
             tail: (0..40)
                 .map(|n| TailEntry {
                     node_mac: [0x02, 0x00, 0x5E, 0x10, 0x57, 0x84],
@@ -1117,6 +1190,7 @@ mod tests {
             link_error: Some("no bridge found".to_owned()),
             nodes: Vec::new(),
             alive: 0,
+            assignable: 0,
             tail: Vec::new(),
             counters: Counters::default(),
             store: StoreStats::default(),
@@ -1469,18 +1543,91 @@ mod tests {
     }
 
     #[test]
-    fn a_node_that_is_not_heartbeating_is_refused_with_the_reason() {
-        let snapshot = busy();
-        let (tx, mut rx) = mpsc::channel(4);
-        // The encrypted node, which is not assignable. An assignment queued
-        // against it would sit dirty forever, because only a heartbeat opens
-        // the window it needs.
-        let mut ui = Ui { selected: 1, ..Default::default() };
-        ui.on_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE), &snapshot, &tx);
+    fn a_node_that_cannot_be_assigned_says_which_of_the_reasons_it_is() {
+        // Three different faults all end in a refused keypress, and the
+        // operator's next move is different for each: turn encryption off in
+        // that node's web UI, flash it with this firmware, or find out why its
+        // heartbeats stopped. A single "not heartbeating" for all three sent
+        // two of them looking in the wrong place.
+        let mut snapshot = busy();
+        // Row 1 of `busy` is the encrypted node; the other three are pushed,
+        // because `busy` is the ordinary fleet and has none of them.
+        snapshot.nodes.push(foreign(0x21));
+        snapshot.nodes.push(stale_node(0x22));
+        snapshot.nodes.push(refused(0x23));
+        snapshot.nodes.sort_by_key(|n| n.state.mac);
+        // `expect`, not a skip. Written as `let Some(row) = row else
+        // { continue }` the "not heartbeating" case matched no row in `busy`
+        // and was silently never asserted, which is how the fourth reason
+        // below came to be missing from the function under test.
+        let row = |mac_suffix: u8| {
+            snapshot
+                .nodes
+                .iter()
+                .position(|n| n.state.mac[5] == mac_suffix)
+                .expect("a row for every reason")
+        };
 
-        assert!(rx.try_recv().is_err(), "nothing was queued");
-        let notice = ui.notice(snapshot.now_ms).expect("a reason");
-        assert!(notice.contains("not heartbeating"), "got {notice}");
+        for (row, want) in [
+            (
+                snapshot.nodes.iter().position(|n| n.state.encrypted).expect("the encrypted node"),
+                "encrypted",
+            ),
+            (row(0x21), "wartui node"),
+            (row(0x22), "not heartbeating"),
+            (row(0x23), "peer table"),
+        ] {
+            let (tx, mut rx) = mpsc::channel(4);
+            let mut ui = Ui { selected: row, ..Default::default() };
+            ui.on_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE), &snapshot, &tx);
+            assert!(rx.try_recv().is_err(), "row {row} queued something");
+            let notice = ui.notice(snapshot.now_ms).expect("a reason");
+            assert!(notice.contains(want), "row {row}: wanted {want:?}, got {notice}");
+        }
+    }
+
+    #[test]
+    fn a_fleet_of_strangers_is_told_it_cannot_be_driven_not_that_it_is_silent() {
+        // Every node heartbeating, none of them ours. The planner has nothing
+        // to partition, so `plan` is None — and against a single count of
+        // "alive" this fell through to "nothing heartbeating yet" while the
+        // table below it showed three nodes heartbeating. That is the exact
+        // fleet the capability token was added for, so it is the one case the
+        // header must not get wrong.
+        let mut snapshot = busy();
+        snapshot.auto = true;
+        snapshot.plan = None;
+        snapshot.nodes = vec![foreign(0x21), foreign(0x22), foreign(0x23)];
+        snapshot.alive = 3;
+        snapshot.assignable = 0;
+
+        let mut terminal = Terminal::new(TestBackend::new(200, 40)).expect("test backend");
+        terminal.draw(|frame| draw(frame, &snapshot, &Ui::default())).expect("drawing");
+        let rendered = terminal.backend().to_string();
+        assert!(rendered.contains("no node it can drive"), "got {rendered}");
+        assert!(!rendered.contains("nothing heartbeating"), "they are all heartbeating");
+    }
+
+    #[test]
+    fn a_node_with_no_peer_slot_says_it_was_refused_rather_than_that_it_went_quiet() {
+        // Its heartbeats are arriving; what is missing is room in the bridge's
+        // peer table, and the fix is a smaller fleet rather than a look at that
+        // node's radio. Reading as "stale" sent the operator to the wrong one.
+        let view = refused(0x21);
+        let (label, _) = node_state(&view);
+        assert_eq!(label, "refused");
+    }
+
+    #[test]
+    fn a_node_that_never_said_what_it_is_reads_as_such_rather_than_as_stale() {
+        // It is heartbeating perfectly well. Calling it stale would send the
+        // operator looking for a radio fault that is not there, when what is
+        // actually true is that this board is running somebody else's firmware
+        // and will acknowledge an assignment it cannot decode.
+        let view = foreign(0x21);
+        let (label, _) = node_state(&view);
+        assert_eq!(label, "not wartui");
+        assert!(view.state.last_heartbeat.is_some(), "and it is not silent");
     }
 
     #[test]
@@ -1629,7 +1776,7 @@ mod tests {
         let mut snapshot = busy();
         snapshot.auto = true;
         snapshot.plan = None;
-        snapshot.alive = MAX_NODES + 1;
+        snapshot.assignable = MAX_NODES + 1;
         let mut terminal = Terminal::new(TestBackend::new(200, 40)).expect("test backend");
         terminal.draw(|frame| draw(frame, &snapshot, &Ui::default())).expect("drawing");
         assert!(terminal.backend().to_string().contains("no longer"));

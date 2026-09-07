@@ -17,7 +17,7 @@ Phase 1 speaks the vendor's wire format exactly, so `wartui run` drives it with
 no host change: broadcast `MSG_HEARTBEAT` once per completed sweep, broadcast
 `MSG_TEXT` per newly-seen BSSID, and accept the ten-byte unicast `MSG_ADMIN`.
 
-## Three deliberate differences
+## Four deliberate differences
 
 **It listens instead of scanning.** Every `WiFi.scanNetworks` in the vendor tree
 passes `passive = false` (`src/WiFiOps.cpp:745,755,779`), so a stock node
@@ -47,6 +47,29 @@ every second until it is told what to scan. Under wartui's planner that lasts a
 single heartbeat. Under `--manual` it lasts until a key is pressed, and **the
 node collects nothing until then** — which is the intended trade and worth
 knowing before wondering where the observations went.
+
+**It says what it is, in every heartbeat.** Node to core is byte-identical to a
+stock node's, which is what lets golden vectors captured off a vendor fleet keep
+testing this tree — and it is also why the host cannot otherwise tell the two
+apart. So the heartbeat's text field, which a stock node leaves empty
+(`src/WiFiOps.cpp:1456-1457`), carries an ASCII token:
+
+```
+wartui/0.1;ble,5g
+```
+
+The protocol version, then what this build can do: `ble` if the cargo feature is
+compiled in, `5g` if the chip has the radio for it — a C5 does, a C6 does not.
+`ble` says the code exists, not that it is running; that is still the core's
+decision and is off at every boot.
+
+The host refuses to plan for a node that sends no token, which is the point.
+Without it, a stranger in the fleet is worse than an absent one: it heartbeats
+so it is planned for, its radio acknowledges the assignment so the host believes
+it landed, and its firmware cannot decode the frame so the share it was given
+goes unscanned. Every heartbeat carries the token rather than only the first,
+because one sent once is one lost to a dropped frame — and because a board
+reflashed with something else should stop claiming to be this.
 
 ## Building and flashing
 
