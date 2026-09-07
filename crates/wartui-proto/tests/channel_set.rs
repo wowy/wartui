@@ -7,6 +7,7 @@
 
 use wartui_proto::plan::{
     CHANNEL_SET_BYTES, ChannelPool, ChannelSet, IndexRun, NUM_SCAN_CHANNELS, SCAN_CHANNELS,
+    SweepCursor,
 };
 
 #[test]
@@ -113,4 +114,71 @@ fn a_pool_as_a_set_holds_exactly_what_the_pool_contains() {
     // one of them.
     assert_eq!(ChannelPool::Us.channels().len(), 34);
     assert!(!ChannelPool::Us.channels().contains(11), "the gap at channels 12-14");
+}
+
+/// The seam between adopting an assignment and dwelling on it.
+///
+/// A node advances at the foot of every pass, after the dwell and the report.
+/// A cursor that began life on the lowest assigned index would therefore be
+/// stepped past before that channel was ever listened to.
+#[test]
+fn a_fresh_cursor_lands_on_the_first_channel_rather_than_stepping_over_it() {
+    let mut set = ChannelSet::empty();
+    for idx in [3, 9, 20] {
+        set.insert(idx);
+    }
+
+    let mut cursor = SweepCursor::new();
+    assert_eq!(cursor.index(), None, "nothing has been dwelt on yet");
+    assert!(!cursor.advance(set), "the first step is not a completed sweep");
+    assert_eq!(cursor.index(), Some(3), "the lowest assigned index, not the one after it");
+}
+
+#[test]
+fn a_sweep_visits_every_assigned_channel_once_before_it_says_it_wrapped() {
+    let mut set = ChannelSet::empty();
+    for idx in [3, 9, 20] {
+        set.insert(idx);
+    }
+
+    let mut cursor = SweepCursor::new();
+    let mut visited = Vec::new();
+    let mut wraps = 0;
+    for _ in 0..7 {
+        if cursor.advance(set) {
+            wraps += 1;
+        }
+        visited.push(cursor.index().expect("a step always lands somewhere"));
+    }
+    assert_eq!(visited, vec![3, 9, 20, 3, 9, 20, 3]);
+    assert_eq!(wraps, 2, "once at the end of each completed pass, and not before");
+}
+
+#[test]
+fn a_single_channel_wraps_on_every_step_but_the_first() {
+    // The narrowest assignment the view can make, and the one whose heartbeat
+    // period the assignment test measures.
+    let set = ChannelSet::from_run(IndexRun::new(5, 5));
+    let mut cursor = SweepCursor::new();
+    assert!(!cursor.advance(set));
+    assert_eq!(cursor.index(), Some(5));
+    assert!(cursor.advance(set), "one channel is a whole sweep");
+    assert_eq!(cursor.index(), Some(5));
+}
+
+#[test]
+fn re_assigning_a_node_starts_its_sweep_over_rather_than_where_it_left_off() {
+    // Adoption replaces the set and resets the cursor together. Carrying the
+    // old position across would skip every newly assigned index below it — and
+    // a re-cut moves a node's whole share, so that is most of them.
+    let old = ChannelSet::from_run(IndexRun::new(20, 25));
+    let mut cursor = SweepCursor::new();
+    while cursor.index() != Some(24) {
+        cursor.advance(old);
+    }
+
+    let new = ChannelSet::from_run(IndexRun::new(0, 3));
+    cursor = SweepCursor::new();
+    assert!(!cursor.advance(new));
+    assert_eq!(cursor.index(), Some(0), "the whole of the new set, from its lowest index");
 }
