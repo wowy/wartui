@@ -159,7 +159,8 @@ const CHANNEL_SET_MASK: u64 = (1u64 << NUM_SCAN_CHANNELS) - 1;
 
 impl ChannelSet {
     /// The empty set. A node is never *sent* one: there is no frame meaning
-    /// "scan nothing", so the planner skips a node it has nothing for.
+    /// "scan nothing", so the planner skips a node it has nothing for and the
+    /// engine ignores a hand-assignment of one.
     #[must_use]
     pub const fn empty() -> Self {
         Self(0)
