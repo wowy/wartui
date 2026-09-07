@@ -1,7 +1,7 @@
 # Phase 0 — what the hardware actually does
 
-Measured on 2026-09-05 with a JCMK C5 wardriver as CORE (`10:BD:A3:D7:92:E8`),
-one ESP32-C5 as NODE (`38:44:BE:1F:59:50`), and an ESP32-C6 running
+Measured on 2026-09-05 with a JCMK C5 wardriver as CORE (`92:E8`),
+one ESP32-C5 as NODE (`59:50`), and an ESP32-C6 running
 `tools/espnow-sniffer` on channel 6. Encryption off on both devices.
 
 ## The mesh is plaintext, and easily audible

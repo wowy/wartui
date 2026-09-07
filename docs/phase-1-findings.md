@@ -1,12 +1,12 @@
 # Phase 1 — what the node firmware actually does
 
 Measured on 2026-09-06. The bridge throughout is an ESP32-C6 running
-`firmware/bridge` (`98:A3:16:8E:9D:24`, USB). Everything up to "Every connection
+`firmware/bridge` (`9D:24`, USB). Everything up to "Every connection
 begins with one undecodable frame" used one ESP32-C6 node
-(`A0:F2:62:87:00:08`, `esp32c6` feature); the 5 GHz section that follows used
-one ESP32-C5 (`38:44:BE:1F:57:84`, `esp32c5` feature) in its place — one node at
+(`00:08`, `esp32c6` feature); the 5 GHz section that follows used
+one ESP32-C5 (`57:84`, `esp32c5` feature) in its place — one node at
 a time, so none of that is a two-node result. "Two nodes split the pool" is, and
-used two C5s at once: `38:44:BE:1F:4F:98` alongside that same board, as does
+used two C5s at once: `4F:98` alongside that same board, as does
 "BLE coexists", which is the only run with Bluetooth compiled in — and then into
 `57:84` only. Plaintext, control channel 6.
 
@@ -152,7 +152,7 @@ garbled frame present.
 
 ## The C5 does 5 GHz, and refused ten channels of it until it was told where it was
 
-Added 2026-09-06 with an ESP32-C5 (`38:44:BE:1F:57:84`, the BLE-on node from
+Added 2026-09-06 with an ESP32-C5 (`57:84`, the BLE-on node from
 Phase 0, reflashed) as the only node, assigned the US pool's 5 GHz run — indices
 14–36, channels 36–165 — by hand with `A`. The assignment was acknowledged in
 6.7 ms and observations came back on channels 36, 44, 48, 56, 149 and 161. The
@@ -258,8 +258,8 @@ anything while parked, which this does not answer.
 
 ## Two nodes split the pool, and each stays inside its half
 
-Added 2026-09-06 with two ESP32-C5 nodes attached at once — `38:44:BE:1F:4F:98`
-and `38:44:BE:1F:57:84` — and the planner left on, so wartui cut the pool itself
+Added 2026-09-06 with two ESP32-C5 nodes attached at once — `4F:98`
+and `57:84` — and the planner left on, so wartui cut the pool itself
 rather than being told what to do. This is the first run in which
 `node_index`/`node_count` were anything but 0 and 1.
 
@@ -347,8 +347,8 @@ and this run cannot distinguish that from contention with the other node.
 
 ## BLE coexists, once the controller is allowed to say anything
 
-Added 2026-09-06 with `38:44:BE:1F:57:84` rebuilt `esp32c5,ble` and
-`38:44:BE:1F:4F:98` left BLE-off — Phase 0's experiment on our own firmware, and
+Added 2026-09-06 with `57:84` rebuilt `esp32c5,ble` and
+`4F:98` left BLE-off — Phase 0's experiment on our own firmware, and
 on the same physical board that under vendor firmware acknowledged **0 of 32**
 assignments. Both were hand-assigned the *same* 23-channel range, so neither the
 sweep comparison nor the stagger is confounded by one node having more to do.

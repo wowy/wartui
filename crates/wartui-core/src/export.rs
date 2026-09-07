@@ -207,6 +207,6 @@ mod tests {
 
     #[test]
     fn macs_are_uppercase_and_colon_separated() {
-        assert_eq!(mac(&[0x38, 0x44, 0xbe, 0x1f, 0x57, 0x84]), "38:44:BE:1F:57:84");
+        assert_eq!(mac(&[0x02, 0x00, 0x5e, 0x10, 0x57, 0x84]), "02:00:5E:10:57:84");
     }
 }
