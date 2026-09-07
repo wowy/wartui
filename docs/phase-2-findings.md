@@ -10,10 +10,16 @@ these were real captures of a real neighbourhood, and a BSSID is exactly what a
 geolocation database is built from. Counts and channels carry none of that and
 are the whole of what was being checked.
 
-Six captures. A to D are one board within half an hour; E is both boards, nine
+Eleven captures. A to D are one board within half an hour; E is both boards, nine
 hours later; F adds a third board, `59:50`, which turned out not to be running
 this firmware at all — see "A node that is not ours" — and G is the same three
 after it was flashed by hand. Same room throughout.
+
+Runs I to K are a second bench later the same day, and the first with two kinds
+of board on it: three ESP32-C5s (`4F:08`, `C5:B8`, `4F:98`) and two ESP32-C6s
+(`75:40`, `00:08`), every one on a build with `ble` compiled in, same bridge and
+same room. Only `4F:98` is carried over — `57:84` and `59:50` were off the bench
+by then — so nothing in runs A to H should be read as continuous with these.
 
 | | build | duration | what it was for |
 | --- | --- | --- | --- |
@@ -25,6 +31,9 @@ after it was flashed by hand. Same room throughout.
 | F | `esp32c5,ble` ×2 | 135 s | three nodes, one of which is not ours |
 | G | `esp32c5,ble` ×3 | 250 s | three nodes, all three of them ours |
 | H | `esp32c5,ble` + one older | 115 s | the capability token, against a genuinely mixed fleet |
+| I | `esp32c5,ble` ×2, `esp32c6,ble` | 120 s | a mixed fleet, and the deal by band |
+| J | five boards, both chips | 240 s | five nodes, then four |
+| K | `esp32c6,ble` then `esp32c6` | 282 s | the Bluetooth flag withdrawn by reflash |
 
 ## One assignment covers both runs of the pool, and nothing rotates
 
@@ -457,8 +466,8 @@ a real operational edge and both READMEs say so.
 ### What the two feature words now do
 
 They were parsed and displayed and nothing else when the run above was taken.
-Both are acted on now, and neither has been on a bench, because every board in
-this document is an ESP32-C5 — see "Still not measured".
+Both are acted on now, and both have since been run on a bench — see "A mixed
+fleet is dealt by band" and "Losing the feature is a withdrawal".
 
 `5g` gates the planner. A node without it is dealt no 5 GHz index, because the
 alternative is the run F failure reached through a node that is genuinely ours:
@@ -480,21 +489,203 @@ only the record would leave a node showing `ble` that `b` could no longer turn
 off. Reflashing a node is the way to reach this, and a reflash is a reboot, so
 the withdrawal rides in the frame the reboot re-issue was sending anyway.
 
-Neither was reachable without a second kind of board until now:
-`--sim-c6 N` makes that many simulated nodes ESP32-C6s.
+Neither was reachable without a second kind of board, and there was not one on
+the bench until runs I to K: `--sim-c6 N` makes that many simulated nodes
+ESP32-C6s.
+
+## A mixed fleet is dealt by band, and the C6 takes none of 5 GHz
+
+Runs I to K are the first with two kinds of board in front of the planner. The
+capability token is the whole of how the host tells them apart, and it says so
+in plain text before anything has been planned:
+
+```
+   2515249us  02:00:5E:10:00:08  -46dBm  bcast  Heartbeat #884  wartui/0.1;ble
+   2956346us  02:00:5E:10:C5:B8  -37dBm  bcast  Heartbeat #965  wartui/0.1;ble,5g
+```
+
+Run I is three nodes, one C6 and two C5s:
+
+| node | radio | index | channels |
+| --- | --- | --- | --- |
+| `4F:98` | C5 | 0 of 3 | 12: `36,44,52,60,100,116,124,132,140,149,157,165` |
+| `4F:08` | C5 | 1 of 3 | 11: `40,48,56,64,112,120,128,136,144,153,161` |
+| `00:08` | C6 | 2 of 3 | 11: `1,2,3,4,5,6,7,8,9,10,11` |
+
+The C6 is dealt the 2.4 GHz half entire and not one 5 GHz index; the two C5s
+interleave the twenty-three 5 GHz channels between them. Pairwise overlap is
+zero and the union is exactly the thirty-four of the US pool. Dealing the
+constrained half first is what produces this. A naive pass in pool order would
+hand the C6 every third index, most of them 5 GHz channels it cannot tune, and
+the part it could not reach would be a share nobody swept — the failure the
+token exists to prevent, arriving through a node that is genuinely ours.
+
+This is also the first confirmation that a C5 hears 5 GHz here at all. The fleet
+reported on 36, 40, 44, 48, 56, 116, 149, 157 and 161, which includes **DFS 56
+and 116** — a node that only ever listens is welcome on those, and the stock
+firmware's active scan is why the host could never make that true before.
+
+Eighteen of the thirty-four assigned channels produced nothing. That is the
+room: most of 5 GHz is empty here, and an assigned channel with no access point
+on it is indistinguishable from one nobody swept until the membership check
+below says which.
+
+## Five nodes, four nodes, and a re-cut that touches everybody
+
+Run J put all five on the air at once — the first fleet here above three, and
+the first whose shares cannot come out within one of each other.
+
+| node | radio | index | channels |
+| --- | --- | --- | --- |
+| `4F:98` | C5 | 0 of 5 | 8: `36,48,60,112,124,136,149,161` |
+| `4F:08` | C5 | 1 of 5 | 8: `40,52,64,116,128,140,153,165` |
+| `C5:B8` | C5 | 2 of 5 | 7: `44,56,100,120,132,144,157` |
+| `75:40` | C6 | 3 of 5 | 6: `1,3,5,7,9,11` |
+| `00:08` | C6 | 4 of 5 | 5: `2,4,6,8,10` |
+
+Eight, eight, seven, six, five. The union is the pool and the overlap is zero,
+but the shares differ by three rather than by one: two C6s have eleven channels
+to divide and three C5s have twenty-three, and no arrangement makes those equal.
+`plan_for` minimises the largest share instead of equalising them, and this is
+the first fleet on which those two rules would have given different answers.
+
+Pulling `C5:B8` off the bench mid-capture re-cut the plan:
+
+| node | index | channels |
+| --- | --- | --- |
+| `4F:98` | 0 of 4 | 12: `36,44,52,60,100,116,124,132,140,149,157,165` |
+| `4F:08` | 1 of 4 | 11: `40,48,56,64,112,120,128,136,144,153,161` |
+| `75:40` | 2 of 4 | 6: `1,3,5,7,9,11` |
+| `00:08` | 3 of 4 | 5: `2,4,6,8,10` |
+
+All four took a fresh epoch, **including the two C6s whose channel sets did not
+change at all**. `node_index` and `node_count` travel in every assignment and
+drive each node's transmit stagger, so a fleet change re-cuts the whole plan
+rather than patching the hole it left. That had only ever been a host test.
+
+The re-cut fired 52.4 s after the unplugging was noted at the keyboard, against
+a 60 s `topology_timeout`. The shortfall is the note, not the engine — the board
+was pulled by hand and the time written down afterwards — so this run is
+consistent with the timeout and does not measure it.
+
+Sweep periods track the shares across both halves of the run, on the same boards
+either side of the re-cut:
+
+| node | 5-node | measured | 4-node | measured |
+| --- | --- | --- | --- | --- |
+| `4F:98` | 8 ch | 1.363 s | 12 ch | 1.891 s |
+| `4F:08` | 8 ch | 1.386 s | 11 ch | 1.789 s |
+| `75:40` | 6 ch | 1.134 s | 6 ch | 1.122 s |
+| `00:08` | 5 ch | 1.032 s | 5 ch | 1.026 s |
+
+Four more channels cost `4F:98` 0.528 s against the 0.500 s four dwells predict;
+three cost `4F:08` 0.403 s against 0.375 s. The two C6s, whose shares did not
+move, did not move. Every figure sits 0.08 to 0.11 s above
+`channels x 125 ms + 300 ms`, which is the hop back to the control channel and
+the report after each dwell.
+
+## Membership holds across a re-cut, once the question is asked correctly
+
+Runs I and J produced 108 observations between them and not one names a channel
+outside the share the reporting node held **at the moment it reported**. The
+qualifier is the whole of it. Comparing each row against its node's *final*
+share instead flags three innocent ones in run J — `4F:98` reporting 48 and 161,
+`4F:08` reporting 116 — all of them channels from the five-node deal, held
+legitimately until the re-cut took them away. A membership check that ignores
+time will manufacture faults on any run where the plan changed.
+
+Four rows in run J name channel 6, which no node held. Those are the bleed of
+"Adjacent channels bleed, and the deal is what exposes it": the channel written
+down is the beacon's own DS Parameter Set, and a node dwelling on 5 or 7 hears a
+channel 6 access point through the overlap.
+
+Run I came out with duplication at zero — 67 records, 67 distinct BSSIDs —
+against the 23% measured at two and three nodes above. That is structural and
+agrees with what the bleed section concluded: overlap lives in 2.4 GHz, and in
+run I the whole 2.4 GHz half sits on one C6, so no second node is positioned to
+hear it twice. Run J was also zero, at 41 records, but that one proves nothing:
+three of its four nodes had been assigned in run I already and were reporting
+through a `MacRing` that still held everything they had seen.
+
+## Losing the feature is a withdrawal, not a forgotten name
+
+Run K is the case the `ble` gate was written for, and the one that needed a
+second kind of board to reach: a node holding the Bluetooth scan whose next
+heartbeat says it has no code for it.
+
+`00:08` was given the scan by hand and took it — flag set, acknowledged, 67
+advertiser records within two seconds. It was then reflashed mid-capture with
+`ble` left out of the features, which is the only way a token loses a word.
+
+```
+t= 14.3s  00:08  epoch 4  ble=1  acked
+t= 88.8s  00:08  epoch 5  ble=0  acked
+t= 88.8s  heartbeat counter 787 -> 1   (reboot)
+```
+
+One epoch, at the moment the reboot was detected, carrying the flag cleared. Not
+a re-issue at the old flag followed by a second epoch taking it away: the
+withdrawal rode in the frame the reboot re-issue was sending anyway, which is
+what the host test asserts by checking the node is not left dirty afterwards.
+
+That the flag byte changed is not by itself proof the scan stopped, and the
+advertiser stream cannot supply it — those records had already decayed to
+nothing at t=62.8 s, twenty-six seconds before the reflash, because `MacRing` is
+shared with Wi-Fi and never cleared. The reboot is what makes the question
+answerable, because a reboot empties that ring. The Wi-Fi stream shows it
+emptying: twenty-six records in the ten seconds after the reboot against one to
+four in every neighbouring bucket, the node re-reporting a neighbourhood it had
+already reported once. Bluetooth records in that same window: none, and none in
+the remaining 190 s. A node still scanning would have re-reported all
+sixty-seven.
+
+## The Bluetooth cost is the same tenth, and the median can hide it
+
+`00:08` held eleven channels throughout run K, so the same node on the same
+share can be compared with the scan running and with it compiled out.
+
+| | sweeps | mean | median | p90 | max |
+| --- | --- | --- | --- | --- | --- |
+| scan on | 29 | **1.914 s** | 1.754 s | 2.277 s | 2.279 s |
+| no `ble` build | 107 | **1.751 s** | 1.750 s | 1.753 s | 1.762 s |
+
+**+9.35% by mean**, which agrees with the +10.9% measured on a C5 above. By
+median it is +0.2% — and the median is what that earlier measurement used.
+
+It was the right statistic there and the wrong one here, for a reason worth
+writing down. `BLE_INTERVAL_MS` is `NUM_SCAN_CHANNELS * CHANNEL_DWELL_MS`, five
+seconds, and it does not shrink with a node's share. The C5 in run B held all
+thirty-four channels and swept in 5.2 s, so a scan landed on essentially every
+sweep and every sweep carried the cost. `00:08` holds eleven and sweeps in
+1.75 s, so a scan lands on about every third one: nine of twenty-nine sweeps ran
+around 2.28 s and the other twenty were untouched. Nine sweeps 0.53 s longer
+across 55.5 s is the 9.35%.
+
+So the cost is about a tenth of a node's sweeping whatever its share, but on a
+small share it arrives as periodic sweeps a third longer rather than as a
+uniformly slower one. The `beat` column shows that as jitter, and any summary
+taking the middle of the distribution reports no cost at all. The separation
+itself is not marginal: the loaded p90 is 2.277 s and the unloaded **maximum**
+over 107 sweeps is 1.762 s.
 
 ## Still not measured
 
-- **More than three nodes**, and any count where two nodes take the remainder
-  rather than one. Three is the first count at which the shares are uneven and
-  it works; four, where thirty-four splits 9/9/8/8, is untested.
+- **A uniform fleet above three nodes.** Run J reached five nodes and then
+  four, but both fleets were mixed, so the shares were forced by the radios
+  rather than by the arithmetic. The case where thirty-four splits 9/9/8/8 — four nodes that
+  can all tune everything, two of them taking the remainder — needs four C5s,
+  and this bench has three.
 - **Boards that stay up.** Two of the three refused `espflash` at some point in
   this session and one had to be flashed by hand; a `reset` immediately followed
   by a `monitor` left another answering `MemData command / Other (0x1)` and it
   missed a whole capture. Phase 1 blamed a host USB port for the same symptom,
   which was true of that instance and is not the general rule — these boards are
-  simply not reliable about it. Nothing here is a firmware result, but it is why
-  a run should check that every node it expects actually booted.
+  simply not reliable about it. The second bench added a case: the bridge came
+  up silent, answering nothing on the link protocol and emitting not one byte —
+  not even the undecodable stream a board running node firmware produces — and
+  one `espflash reset` fixed it. Nothing here is a firmware result, but it is
+  why a run should check that every board it expects actually booted, the
+  bridge included.
 - **The stagger, again.** Unchanged from Phase 1: it cannot be disabled from the
   host, so "it worked" and "there was nothing to prevent" remain inseparable
   without a firmware build that omits it.
@@ -502,21 +693,20 @@ Neither was reachable without a second kind of board until now:
   is the number that costs store rows. Whether it stays flat at ten is a guess:
   the argument that it should — an access point is heard by whoever holds its
   channel and whoever holds the neighbours, which is two or three nodes however
-  many there are — is reasoning, not a measurement.
+  many there are — is reasoning, not a measurement. Run I's zero neither
+  contradicts nor extends it: a mixed fleet small enough to put all of 2.4 GHz
+  on one node has no second node positioned to hear the bleed, which is a
+  property of that shape rather than of the node count.
 - **Whether a version mismatch should be a refusal.** The token carries a major
   and a minor and nothing gates on either, because no incompatible change has
   happened yet. When one does, a major bump is the lever available; what the
   host should do when it sees a major it does not know is undecided, and
   guessing now would be inventing policy for a situation that does not exist.
-- **A mixed-band fleet on hardware.** The planner now deals no 5 GHz channel to a
-  node whose token lacks `5g`, and refuses the Bluetooth scan to one that lacks
-  `ble`. Both are covered by tests and by the simulator (`--sim-c6`), and
-  neither has been run on a bench: every board used in this document is an
-  ESP32-C5, so the mixed case has never been on the air. What a run would have
-  to show is a C6 holding only 2.4 GHz indices, a C5 beside it holding the
-  whole 5 GHz half, and the two of them between them covering the pool — and,
-  separately, that a C6-only fleet reports the 5 GHz shortfall in the footer
-  rather than quietly not scanning it.
+- **A C6-only fleet, and the shortfall in the footer.** The mixed case is now
+  measured (runs I to K), but a fleet with no 5 GHz radio in it at all is not.
+  What should happen is that the twenty-three unreachable channels come back in
+  `Plan::unreachable` and are said in the footer rather than dealt to somebody
+  who would ignore them. Every run here had at least one C5 in it.
 - **A fleet with more nodes than it has channels it can reach.** Twelve C6s on
   the US pool have 11 dealable channels between them, so at least one node is
   dealt nothing — and there is no frame meaning "scan nothing", so it keeps
