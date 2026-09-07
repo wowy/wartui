@@ -10,8 +10,9 @@ these were real captures of a real neighbourhood, and a BSSID is exactly what a
 geolocation database is built from. Counts and channels carry none of that and
 are the whole of what was being checked.
 
-Five captures. A to D are one board within half an hour; E is both boards, nine
-hours later, in the same room.
+Six captures. A to D are one board within half an hour; E is both boards, nine
+hours later; F adds a third board, `59:50`, which turned out not to be running
+this firmware at all — see "A node that is not ours". Same room throughout.
 
 | | build | duration | what it was for |
 | --- | --- | --- | --- |
@@ -20,6 +21,7 @@ hours later, in the same room.
 | C | `esp32c5` | 155 s | the control for the Bluetooth controller |
 | D | `esp32c5,ble` | 240 s | B again, after a reflash, on the auto planner |
 | E | `esp32c5,ble` | 240 s | two nodes, the dealt partition, one Bluetooth scan |
+| F | `esp32c5,ble` ×2 | 135 s | three nodes, one of which is not ours |
 
 ## One assignment covers both runs of the pool, and nothing rotates
 
@@ -264,19 +266,106 @@ Which is also the first hardware sighting of the scattered channel cell: the
 count leads, the list is cut at a comma rather than mid-range, and there is one
 ellipsis rather than two. No frame in any of the five captures rendered `……`.
 
+## Three nodes, and the shares differ by one
+
+Run F put three nodes in front of the planner. The deal:
+
+| node | index | channels |
+| --- | --- | --- |
+| `4F:98` | 0 of 3 | 12: `1,4,7,10,40,52,64,116,128,140,153,165` |
+| `57:84` | 1 of 3 | 11: `2,5,8,11,44,56,100,120,132,144,157` |
+| `59:50` | 2 of 3 | 11: `3,6,9,36,48,60,112,124,136,149,161` |
+
+Twelve, eleven and eleven. Pairwise overlap is zero in all three pairs and the
+union is exactly the thirty-four channels of the US pool, so `shares differ by
+at most one` — which had only ever been a host test — holds on hardware at the
+first node count where it does any work. Thirty-four does not divide by three,
+and the remainder lands on the lowest index.
+
+Sweep periods follow the shares closely enough to predict from the count. Taking
+129.7 ms per channel from the earlier runs and adding the 300 ms admin window:
+
+| node | channels | predicted | measured |
+| --- | --- | --- | --- |
+| `4F:98` | 12 | 1.86 s | 1.86 s |
+| `57:84` | 11 | 1.73 s | 1.77 s |
+
+## A node that is not ours acknowledges, and does not adopt
+
+The third board never ran this firmware. It could not be flashed — its port
+gives the `Secure Download Mode is enabled on this chip` that Phase 1 identified
+as espflash inferring the mode from silence — and it was already on the air
+behaving like a stock node: heartbeating every 6.47 s and reporting access
+points *with no assignment at all*, where an unassigned wartui node parks on the
+control channel at 1 s and collects nothing. All forty channels by default is
+`WiFiOps.cpp:77-80`.
+
+So run F is an accidental but exact test of an invariant that had never been on
+hardware. Core to node is wartui's own fourteen-byte frame; the vendor's ten-byte
+one does not decode, and nothing is done to keep the two working together.
+
+The host sent `59:50` eleven channels and the frame was **acknowledged in
+5920 µs** — its radio acknowledges at the MAC layer whatever the application
+then does with the bytes. It did nothing with them:
+
+| | told to hold | that predicts | measured |
+| --- | --- | --- | --- |
+| `4F:98` | 12 channels | 1.86 s | 1.86 s |
+| `57:84` | 11 channels | 1.73 s | 1.77 s |
+| **`59:50`** | 11 channels | 1.73 s | **6.25 s** |
+
+6.25 s against 6.47 s before the assignment: unchanged, and three and a half
+times what its share predicts. It also reported channel 5, which is in nobody's
+share but its own reading of the whole band. The host, meanwhile, recorded the
+assignment as `acked` and showed the node holding eleven channels.
+
+**The cost is not that the foreign node is useless. It is that it takes a third
+of the pool with it.** Eleven channels were cut out of the plan for a node that
+was never going to scan them, so those channels went uncovered by the fleet
+while the fleet table said otherwise. Two nodes and a stranger cover less of the
+pool than two nodes alone.
+
+This is the hazard the Phase 2 plan's capability token was for — a short ASCII
+token in the heartbeat's text field, `wartui/0.1;ble,5g`, so the host learns
+what a node is from its first heartbeat and before it has to choose anything.
+It was specified in the plan and not built, and nothing else can distinguish the
+two firmwares: node to core is byte-identical by design, which is exactly what
+lets vendor golden vectors keep testing this code.
+
+## The bleed does not obviously grow with node count
+
+At three nodes each 2.4 GHz channel has both of its neighbours in other nodes'
+shares, where at two it had one. The rate did not clearly move:
+
+| | 2 nodes (run E) | 3 nodes (run F) |
+| --- | --- | --- |
+| `4F:98` | 7/61 — 11% | 8/45 — 18% |
+| `57:84` | 16/63 — 25% | 5/60 — 8% |
+
+Every observation outside a mask was again exactly one channel from one the node
+held, and again every one was 2.4 GHz. The two runs bracket each other rather
+than separating, and forty to sixty observations per node is too few to call a
+difference of this size, so the honest reading is that both are the same
+order and this bench cannot resolve better than that.
+
 ## Still not measured
 
-- **More than two nodes.** The deal is checked at `node_count 2`, where every
-  node gets every other index. Three or more is where the shares stop being
-  symmetric and where `shares differ by at most one` starts doing work, and that
-  has not been on hardware.
-- **Whether the bleed changes with node count.** At two nodes each 2.4 GHz
-  channel has a neighbour in the other node's share. At three, a node's
-  neighbours are split between two others, and whether that raises the
-  duplication rate or leaves it alone is unmeasured.
+- **More than three nodes**, and any count where two nodes take the remainder
+  rather than one. Three is the first count at which the shares are uneven and
+  it works; four, where thirty-four splits 9/9/8/8, is untested.
+- **A three-node fleet that is actually three of ours.** The deal, the sweep
+  periods and the bleed above are sound — the planner's arithmetic does not care
+  what adopts it — but only two of the three nodes were running this firmware,
+  so "no *other* node scans Bluetooth" is still checked at two nodes rather than
+  three, and the third share was never actually swept.
 - **The stagger, again.** Unchanged from Phase 1: it cannot be disabled from the
   host, so "it worked" and "there was nothing to prevent" remain inseparable
   without a firmware build that omits it.
+- **What to do about a foreign node.** The capability token specified in the
+  Phase 2 plan is not built, so wartui cannot tell a stock node from one of its
+  own and cuts it a share regardless. What the host should then *do* — refuse to
+  plan for it, plan around it, or only say so in the fleet table — is a decision
+  nobody has taken.
 - **A dense room.** The Bluetooth penalty was measured where about fifty
   advertisers answered each scan. Whether it stays near a tenth of a sweep where
   five hundred do is unknown, and this bench cannot produce that.
