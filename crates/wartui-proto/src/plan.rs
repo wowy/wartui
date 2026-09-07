@@ -274,6 +274,62 @@ impl Iterator for ChannelSetIter {
 
 impl ExactSizeIterator for ChannelSetIter {}
 
+/// Where a node is in its sweep of the set it was assigned.
+///
+/// Arithmetic rather than radio, so it lives here and is checked by
+/// `cargo test` rather than by a reflash. The thing it exists to get right is
+/// the seam between adopting an assignment and dwelling on it: a node steps
+/// this at the foot of every pass, *after* the dwell and the report, so a
+/// cursor that started life sitting on the lowest index would be stepped past
+/// before that channel was ever listened to. The lowest channel of every fresh
+/// assignment would then go uncollected until the sweep came round — a hole
+/// that reports as nothing at all, on the one channel most likely to be busy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SweepCursor {
+    at: Option<u8>,
+}
+
+impl SweepCursor {
+    /// A cursor that has not begun, which is not the same as one on the first
+    /// index. This is the state to put it in when an assignment is adopted.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { at: None }
+    }
+
+    /// The [`SCAN_CHANNELS`] index being dwelt on, or `None` before the first
+    /// step of a sweep.
+    #[must_use]
+    pub const fn index(self) -> Option<u8> {
+        self.at
+    }
+
+    /// Step to the next index of `channels`, in ascending order, saying whether
+    /// that wrapped — which is what a node counts as a completed sweep and
+    /// answers with a heartbeat.
+    ///
+    /// The set is passed in rather than held because it is the assignment that
+    /// owns it: re-assigning a node replaces the set and resets the cursor, and
+    /// keeping one copy means the two can never disagree about which indices
+    /// exist.
+    pub fn advance(&mut self, channels: ChannelSet) -> bool {
+        let next = match self.at {
+            Some(at) => channels.indices().find(|idx| *idx > at),
+            None => channels.first(),
+        };
+        match next {
+            Some(idx) => {
+                self.at = Some(idx);
+                false
+            }
+            None => {
+                self.at = channels.first();
+                true
+            }
+        }
+    }
+}
+
 const US_RUNS: [IndexRun; 2] = [
     // 2.4 GHz channels 1-11. Excludes 12, 13 and 14.
     IndexRun::new(0, 10),
