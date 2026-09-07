@@ -34,10 +34,11 @@ const IDENTIFY_INTERVAL: Duration = Duration::from_millis(500);
 
 /// How many unanswered `Identify` frames before this is called not a bridge.
 ///
-/// Deliberately one interval past the CLI's five-second "nothing has identified
-/// itself" notice, so the operator still gets the long form — which names the
-/// three things it usually is — before the transport gives up and the one-line
-/// reason lands under it.
+/// Twelve go out at 0.0 s to 5.5 s — `interval`'s first tick is immediate — and
+/// the thirteenth tick, at 6.0 s, is the one that gives up. That is a second
+/// past the CLI's five-second "nothing has identified itself" notice, so the
+/// operator still gets the long form, which names the three things it usually
+/// is, before the one-line reason lands under it.
 ///
 /// It is bounded at all because asking forever wedges the process, and pointing
 /// `wartui` at a node instead of the bridge is all it takes to get there. Node
@@ -222,6 +223,16 @@ async fn connect(
 
     let stop = Arc::new(AtomicBool::new(false));
     let announced = Arc::new(AtomicBool::new(false));
+    // Distinct from `announced`, and the distinction is load-bearing. A bridge
+    // whose fleet is busy can lose every `Ready` it sends to its own transmit
+    // rings, which evict oldest-first, while its observations arrive perfectly
+    // well — `sniff` says the same thing where it decides whether to accuse a
+    // port of not being a bridge. Giving up on `announced` alone would tear
+    // down a link that is working and delivering, every few seconds, which is
+    // worse than the wedge this bound exists to prevent. A frame that would not
+    // decode does not count: a board running node firmware talks constantly and
+    // none of it is a frame.
+    let decoded = Arc::new(AtomicBool::new(false));
     let (dead_tx, mut dead_rx) = mpsc::channel::<String>(1);
     // Unbounded, and now deliberately so rather than provisionally. The biased
     // select below arbitrates at the moment a command is taken rather than the
@@ -244,12 +255,18 @@ async fn connect(
             let events = plumbing.events.clone();
             let stop = Arc::clone(&stop);
             let announced = Arc::clone(&announced);
+            let decoded = Arc::clone(&decoded);
             move || {
-                let reason = read_loop(port, &events, &stop, &announced);
+                let reason = read_loop(port, &events, &stop, &announced, &decoded);
                 let _ = dead_tx.blocking_send(reason);
             }
         })
         .map_err(|e| format!("could not start reader thread: {e}"))?;
+
+    // Before the second spawn, not after both: a `?` there would otherwise
+    // return with the reader thread still running on a port nobody will ever
+    // stop, while `supervise` reopens the same path every `reconnect_delay`.
+    let shutdown = Shutdown { stop: Arc::clone(&stop), port: flush };
 
     let writer_thread = std::thread::Builder::new()
         .name(format!("wartui-serial-tx {path}"))
@@ -258,10 +275,6 @@ async fn connect(
             move || write_loop(writer, &write_rx, &stop)
         })
         .map_err(|e| format!("could not start writer thread: {e}"))?;
-
-    // From here on the connection cleans up after itself whatever happens to
-    // this task, including being dropped between two awaits.
-    let shutdown = Shutdown { stop: Arc::clone(&stop), port: flush };
 
     // A bridge announces itself at boot, and the host is rarely watching at
     // that moment: unplugging the dongle is not part of restarting the TUI.
@@ -279,7 +292,7 @@ async fn connect(
                 break Err(reason.unwrap_or_else(|| "reader stopped".to_owned()));
             }
             _ = identify.tick(), if !announced.load(Ordering::Relaxed) => {
-                if asked >= IDENTIFY_ATTEMPTS {
+                if asked >= IDENTIFY_ATTEMPTS && !decoded.load(Ordering::Relaxed) {
                     break Err(format!(
                         "nothing on {path} answered the link protocol; it is not a bridge"
                     ));
@@ -343,6 +356,7 @@ fn read_loop(
     events: &mpsc::Sender<LinkEvent>,
     stop: &AtomicBool,
     announced: &AtomicBool,
+    decoded: &AtomicBool,
 ) -> String {
     let mut acc = FrameAccumulator::<MAX_FRAME>::new();
     let mut buf = [0u8; 1024];
@@ -371,6 +385,7 @@ fn read_loop(
                     .to_string();
                 }
                 Ok(BridgeToHost::Ready { chip, mac, fw_version, .. }) => {
+                    decoded.store(true, Ordering::Relaxed);
                     // A reboot re-enumerates the USB device and so ends this
                     // connection outright; a second `Ready` inside one can only
                     // be the answer to an `Identify` we sent before the first
@@ -396,7 +411,10 @@ fn read_loop(
                         fw_version: fw_version.as_str().to_owned(),
                     })
                 }
-                Ok(msg) => LinkEvent::Message(msg),
+                Ok(msg) => {
+                    decoded.store(true, Ordering::Relaxed);
+                    LinkEvent::Message(msg)
+                }
                 // Reset banners and half-frames land here; the framing has
                 // already resynchronised, so this is a counter, not a fault.
                 // Logged at `debug` because a cable bad enough to garble every
@@ -436,9 +454,30 @@ fn write_loop(
             tracing::error!("command did not fit in a frame; dropping it");
             continue;
         };
-        if let Err(e) = port.write_all(&buf[..n]) {
-            tracing::warn!("serial write failed: {e}");
-            return;
+        // Not `write_all`, which cannot be told to stop. Emptying the output
+        // queue is what releases a write blocked against a device that is not
+        // reading, and `write_all` would answer that by writing the rest of the
+        // frame straight back into the queue it was just cleared from — after
+        // the flush, and on the path where this thread is never joined there is
+        // no second one. So the frame is abandoned instead: nobody is reading
+        // it, and the connection it belonged to is over.
+        let mut sent = 0;
+        while sent < n {
+            if stop.load(Ordering::Relaxed) {
+                return;
+            }
+            match port.write(&buf[sent..n]) {
+                Ok(0) => return,
+                Ok(written) => sent += written,
+                // A write timeout is the port being slow, not shut: the loop
+                // re-checks `stop` and tries again, which is also what makes
+                // this thread notice a shutdown while the fleet is quiet.
+                Err(e) if matches!(e.kind(), ErrorKind::TimedOut | ErrorKind::Interrupted) => {}
+                Err(e) => {
+                    tracing::warn!("serial write failed: {e}");
+                    return;
+                }
+            }
         }
     }
 }
