@@ -262,8 +262,8 @@ The fleet table at t+140 s, with the scan held:
 
 ```
 node              rssi beats obs  last beat  ble  channels            state
-38:44:BE:1F:4F:98 -39  61    138  1s   3.0s  ble  17: 1,3,5,7,9,11…   alive
-38:44:BE:1F:57:84 -57  64    56   0s   2.6s       17: 2,4,6,8,10,36…  alive
+02:00:5E:10:4F:98 -39  61    138  1s   3.0s  ble  17: 1,3,5,7,9,11…   alive
+02:00:5E:10:57:84 -57  64    56   0s   2.6s       17: 2,4,6,8,10,36…  alive
 ```
 
 Which is also the first hardware sighting of the scattered channel cell: the
@@ -417,8 +417,8 @@ text field that is byte-for-byte a stock node's.
 pool US  auto — 1 of 2  session 00:01:49  channel 6  peers 4
 
 node              rssi beats obs  last beat  ble  channels          state
-38:44:BE:1F:57:84 -39  35    96   1s   4.7s       34: 1-11,36-165   rebooted x1
-38:44:BE:1F:59:50 -52  67    0    0s   1.8s       unassigned        not wartui
+02:00:5E:10:57:84 -39  35    96   1s   4.7s       34: 1-11,36-165   rebooted x1
+02:00:5E:10:59:50 -52  67    0    0s   1.8s       unassigned        not wartui
 ```
 
 **`auto — 1 of 2`.** The pool was cut for one node, and that node holds all
@@ -441,8 +441,8 @@ later, which is what the store is for.
 `wartui sniff` says it without a capture at all:
 
 ```
- 350005505us  38:44:BE:1F:57:84  -39dBm  bcast  Heartbeat #37  wartui/0.1;ble,5g
- 351334537us  38:44:BE:1F:59:50  -53dBm  bcast  Heartbeat #890
+ 350005505us  02:00:5E:10:57:84  -39dBm  bcast  Heartbeat #37  wartui/0.1;ble,5g
+ 351334537us  02:00:5E:10:59:50  -53dBm  bcast  Heartbeat #890
 # 17 frames: 0 text, 17 heartbeat, 0 admin, 0 other, 0 undecodable
 # 12 of 17 heartbeats carried no wartui token. `run` will not plan for those
 # nodes: they acknowledge an assignment and then discard it, so a share cut for
