@@ -1,7 +1,7 @@
-//! The three commands and one event a BLE scan is made of.
+//! The four commands and one event a BLE scan is made of.
 
 use wartui_proto::air::{RecordKind, Security, WARDRIVE_LINE_MAX, WardriveLine};
-use wartui_proto::hci::{RESET, adv_reports, set_scan_enable, set_scan_parameters};
+use wartui_proto::hci::{RESET, SET_EVENT_MASK, adv_reports, set_scan_enable, set_scan_parameters};
 
 /// An LE Advertising Report event carrying `reports` of `(address, data, rssi)`.
 ///
@@ -29,6 +29,21 @@ const ADDR: [u8; 6] = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF];
 fn the_reset_command_is_the_one_the_specification_names() {
     // H4 command, opcode 0x0C03 little-endian, no parameters.
     assert_eq!(RESET, [0x01, 0x03, 0x0C, 0x00]);
+}
+
+#[test]
+fn the_event_mask_unhides_the_one_event_a_scan_exists_to_produce() {
+    // Measured on hardware: without this the controller accepts every command
+    // with `status 0` and delivers not one advertising report, because a reset
+    // restores the specification's default mask and an advertising report is an
+    // LE Meta Event -- bit 61, which that default leaves clear.
+    assert_eq!(SET_EVENT_MASK[..4], [0x01, 0x01, 0x0C, 0x08], "opcode 0x0C01, eight bytes");
+
+    let mask = u64::from_le_bytes(SET_EVENT_MASK[4..].try_into().expect("eight bytes"));
+    assert_ne!(mask & (1 << 61), 0, "LE Meta Event is what the whole command is for");
+    // The specification's own default, kept rather than replaced with all ones:
+    // events nothing here reads would sit in the controller's queue unread.
+    assert_eq!(mask & 0x0000_1FFF_FFFF_FFFF, 0x0000_1FFF_FFFF_FFFF);
 }
 
 #[test]

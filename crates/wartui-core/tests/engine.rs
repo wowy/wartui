@@ -18,8 +18,8 @@ use wartui_proto::link::{
 };
 use wartui_proto::plan::{ChannelPool, IndexRun};
 
-const NODE: Mac = [0x38, 0x44, 0xBE, 0x1F, 0x57, 0x84];
-const OTHER: Mac = [0x38, 0x44, 0xBE, 0x1F, 0x57, 0x85];
+const NODE: Mac = [0x02, 0x00, 0x5E, 0x10, 0x57, 0x84];
+const OTHER: Mac = [0x02, 0x00, 0x5E, 0x10, 0x57, 0x85];
 /// Sorts before every `peer(n)`, so counting it would shift all their indices.
 const GONE: Mac = [0x00, 0x00, 0x00, 0x00, 0x00, 0x01];
 const EPOCH_MS: i64 = 1_777_642_477_000;
@@ -821,7 +821,7 @@ fn an_acknowledgement_for_an_assignment_the_operator_has_already_replaced_is_not
 /// The `n`th node of a fake fleet. Ordered by MAC, which is the order the
 /// planner numbers them in.
 fn peer(n: u8) -> Mac {
-    [0x38, 0x44, 0xBE, 0x1F, 0x57, n]
+    [0x02, 0x00, 0x5E, 0x10, 0x57, n]
 }
 
 fn auto() -> EngineConfig {
