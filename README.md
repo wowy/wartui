@@ -201,9 +201,11 @@ It is a per-node choice rather than a build flag because the cost is real and
 was measured on both firmwares. A stock node with BLE on acknowledged **none**
 of the thirty-two assignments sent to it, while an identical node with it off
 acknowledged both of its two (`docs/phase-0-findings.md`). A wartui node
-acknowledged every time on the same board and ran about 10% slower per sweep
-(`docs/phase-1-findings.md`) — a cost worth paying on one node for Bluetooth
-coverage, and not worth paying on all of them.
+acknowledged every time on the same board — including the frame that took the
+scan away, mid-scan, in 5.8 ms — and ran 10.9% slower per sweep while it held it
+(`docs/phase-2-findings.md`): 5.221 s against 4.709 s either side, on the same
+thirty-four channels. A cost worth paying on one node for Bluetooth coverage,
+and not worth paying on all of them.
 
 The `ble` cargo feature decides whether the code is in the binary at all; the
 assignment decides whether it runs, and it is off at every boot regardless of

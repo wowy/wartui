@@ -18,7 +18,9 @@ behaviour, and keep it true when behaviour changes. `docs/phase-0-findings.md` r
 measured on the vendor fleet and is why several of the invariants below exist;
 `docs/phase-1-findings.md` records what our own node firmware then did on the
 same bench, including which of those invariants it has actually been checked
-against and which are still only reasoning.
+against and which are still only reasoning; `docs/phase-2-findings.md` does the
+same for channel masks and Bluetooth-by-assignment, and is where the measured
+cost of the Bluetooth scan comes from.
 
 ## Commands
 
