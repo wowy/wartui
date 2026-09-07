@@ -11,8 +11,9 @@
 use std::collections::BTreeSet;
 
 use wartui_proto::plan::{
-    ChannelPool, IndexRun, MAX_NODES, NODE_STAGGER_WINDOW_MS, NUM_SCAN_CHANNELS, Radio,
-    SCAN_CHANNELS, UNSUPPORTED_INDEX, is_five_ghz, plan, plan_for, stagger_offset_ms,
+    ChannelPool, ChannelSet, FIRST_FIVE_GHZ_INDEX, IndexRun, MAX_NODES, NODE_STAGGER_WINDOW_MS,
+    NUM_SCAN_CHANNELS, Radio, SCAN_CHANNELS, UNSUPPORTED_INDEX, is_five_ghz, plan, plan_for,
+    stagger_offset_ms,
 };
 
 const POOLS: [ChannelPool; 2] = [ChannelPool::Us, ChannelPool::All];
@@ -365,4 +366,29 @@ fn the_wire_epoch_cycles_through_every_value_the_firmware_will_accept() {
     for counter in 1..1_000u64 {
         assert_ne!(wire_version(counter), wire_version(counter + 1));
     }
+}
+
+#[test]
+fn a_radio_keeps_only_the_part_of_a_set_it_can_tune() {
+    // `plan_for` never deals an unreachable index, so this exists for the
+    // paths that do not go through it — an assignment made by hand, which is
+    // otherwise a way to hand one node exactly the share nobody scans.
+    for pool in POOLS {
+        let whole = pool.channels();
+        assert_eq!(Radio::DualBand.tunable(whole), whole, "a C5 loses nothing");
+
+        let narrowed = Radio::TwoPointFour.tunable(whole);
+        assert!(!narrowed.is_empty(), "both pools start in 2.4 GHz");
+        for idx in whole.indices() {
+            assert_eq!(narrowed.contains(idx), !is_five_ghz(idx), "index {idx} of the {pool} pool");
+        }
+    }
+
+    // Nothing but 5 GHz leaves nothing at all, which is the case the callers
+    // have to treat as "no assignment" rather than as a narrower one.
+    let mut five = ChannelSet::empty();
+    five.insert(FIRST_FIVE_GHZ_INDEX);
+    five.insert(NUM_SCAN_CHANNELS - 1);
+    assert_eq!(Radio::DualBand.tunable(five), five);
+    assert!(Radio::TwoPointFour.tunable(five).is_empty());
 }

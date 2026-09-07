@@ -114,6 +114,18 @@ If no node in the fleet has a 5 GHz radio at all, those channels are left out of
 every assignment rather than given to a node that would ignore them, and the
 footer says how many of the pool are going unscanned.
 
+Assigning by hand is cut down the same way. `A` offers the whole pool, so on a
+C6 it would otherwise deal 23 channels the node cannot tune — and with the
+planner off nothing re-partitions afterwards to notice. The set is narrowed to
+what the node's own token says it can reach, and the notice names the narrowed
+set rather than what was asked for.
+
+One consequence to know about a fleet with no 5 GHz radio in it: the pool it can
+actually cover is 11 channels on `us`, so from twelve such nodes onward there are
+more nodes than channels to give them. The surplus nodes keep whatever they last
+held rather than being told to scan nothing — there is no frame that means that —
+so their shares double up with someone else's.
+
 ## Trying it
 
 No hardware needed — the simulator runs a fake fleet on a fake clock:

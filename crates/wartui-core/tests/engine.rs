@@ -16,7 +16,9 @@ use wartui_proto::air::{AdminMsg, CAPABILITY_MAX, Capabilities, MsgType, TextMsg
 use wartui_proto::link::{
     BROADCAST, BridgeToHost, Chip, EspNowPayload, HostToBridge, Mac, SendStatus,
 };
-use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun, plan};
+use wartui_proto::plan::{
+    ChannelPool, ChannelSet, FIRST_FIVE_GHZ_INDEX, IndexRun, is_five_ghz, plan,
+};
 
 const NODE: Mac = [0x02, 0x00, 0x5E, 0x10, 0x57, 0x84];
 const OTHER: Mac = [0x02, 0x00, 0x5E, 0x10, 0x57, 0x85];
@@ -666,6 +668,68 @@ fn the_bluetooth_scan_is_not_given_to_a_node_that_has_no_bluetooth_in_it() {
         None,
         "taken back once the node said it cannot run one"
     );
+}
+
+#[test]
+fn a_node_that_stops_claiming_bluetooth_is_told_to_stop_rather_than_merely_forgotten() {
+    // Forgetting who held the scan is not the same as taking it off them. The
+    // flag rides in the assignment frame, so a node still holding one goes on
+    // being shown as a holder — the fleet table reads the flag off the
+    // assignment, not off `ble_node` — and `b` could not clear it either,
+    // because it asks `ble_node` whether the node holds anything and would
+    // offer to turn Bluetooth *on*, only to be refused for a build without it.
+    let clock = Clock::new();
+    let mut engine = engine(manual(), &clock);
+    engine.handle(heartbeat(NODE, 5), clock.at(1));
+    engine.handle(assign(NODE, 0, 10), clock.at(2));
+    engine.handle(Event::Command(Command::AssignBle { mac: Some(NODE) }), clock.at(3));
+    let (id, _, admin) = sent_admin(&engine.handle(heartbeat(NODE, 6), clock.at(4)));
+    assert!(admin.scan_ble(), "it holds the scan to begin with");
+    engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(4));
+
+    // The same board reflashed without the `ble` feature: a counter that went
+    // backwards, and a token that no longer claims a scan.
+    let batch = engine.handle(narrowband_heartbeat(NODE, 1), clock.at(10));
+    let (id, _, admin) = sent_admin(&batch);
+    assert!(!admin.scan_ble(), "the withdrawal rides in the frame the reboot was sending anyway");
+    engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(10));
+
+    engine.handle(Event::Tick, clock.at(11));
+    assert_eq!(engine.snapshot(clock.at(11), StoreStats::default()).ble_node, None);
+    let node = engine.nodes().next().expect("the node");
+    assert!(!node.confirmed.expect("still assigned").ble, "and the node is not still holding it");
+    assert!(!node.dirty, "one epoch was enough; the tick does not spend a second");
+}
+
+#[test]
+fn a_hand_assignment_is_cut_down_to_what_the_node_can_actually_tune() {
+    // `A` offers the whole pool, and the planner is not involved in a fleet
+    // driven by hand — so without this the exact failure the capability token
+    // exists to prevent is one keypress away, and a quieter one: nothing
+    // re-partitions afterwards to correct it and `Plan::unreachable` never sees
+    // a hand assignment.
+    let clock = Clock::new();
+    let mut engine = engine(manual(), &clock);
+    engine.handle(narrowband_heartbeat(NODE, 1), clock.at(1));
+    let whole_pool =
+        Event::Command(Command::Assign { mac: NODE, channels: ChannelPool::Us.channels() });
+    engine.handle(whole_pool, clock.at(2));
+
+    let (id, _, admin) = sent_admin(&engine.handle(narrowband_heartbeat(NODE, 2), clock.at(6)));
+    engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(6));
+    assert_eq!(admin.channels, run(0, 10), "2.4 GHz only, and nothing said it would be more");
+    for idx in admin.channels.indices() {
+        assert!(!is_five_ghz(idx), "index {idx} needs a radio this node does not have");
+    }
+
+    // And a set with nothing in it the node can reach is no assignment at all,
+    // which is the empty-set rule arriving by a different road.
+    let mut five = ChannelSet::empty();
+    five.insert(FIRST_FIVE_GHZ_INDEX);
+    engine.handle(Event::Command(Command::Assign { mac: NODE, channels: five }), clock.at(7));
+    assert!(engine.handle(narrowband_heartbeat(NODE, 3), clock.at(11)).urgent.is_empty());
+    let node = engine.nodes().next().expect("the node");
+    assert_eq!(node.confirmed.or(node.desired).expect("still assigned").channels, run(0, 10));
 }
 
 #[test]
