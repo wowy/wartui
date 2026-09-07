@@ -70,6 +70,18 @@ pub struct SimConfig {
     /// holding the antenna, and nothing after it is. The operator cannot take
     /// the assignment back.
     pub ble_coexistence_failure: bool,
+    /// How many of the fleet are ESP32-C6s, counting from the last index.
+    ///
+    /// A C6 has no 5 GHz radio, says so in its capability token, and must
+    /// therefore be dealt no 5 GHz channel — a share it cannot tune is a share
+    /// nobody scans. Zero by default: the simulator otherwise models a fleet of
+    /// C5s, which is the case with the most to render.
+    ///
+    /// This is the only way to see a mixed fleet without two kinds of board on
+    /// the desk, and the failure it guards against is invisible without one:
+    /// dealt 5 GHz, a C6 acknowledges the assignment and scans the part it can
+    /// reach, so the plan looks healthy and a third of the pool is uncovered.
+    pub c6_nodes: u8,
 }
 
 impl Default for SimConfig {
@@ -81,6 +93,7 @@ impl Default for SimConfig {
             wifi_networks: 120,
             ble_chance: 0.15,
             ble_coexistence_failure: false,
+            c6_nodes: 0,
         }
     }
 }
@@ -134,7 +147,10 @@ impl SimTransport {
             // that nothing arrives to be inferred from.
             let holds_ble = Arc::new(AtomicBool::new(false));
             admin_txs.push((Self::node_mac(index), admin_tx, Arc::clone(&holds_ble)));
-            fleet.push((SimNode::new(index, holds_ble), admin_rx));
+            // Counted from the end, so the nodes below the count keep their
+            // radios as the fleet grows.
+            let five_ghz = self.config.node_count - index > self.config.c6_nodes;
+            fleet.push((SimNode::new(index, holds_ble, five_ghz), admin_rx));
         }
 
         let events = plumbing.events.clone();
@@ -279,15 +295,19 @@ struct SimNode {
     /// Whether this node was asked to scan Bluetooth, mirrored where the
     /// bridge can read it.
     holds_ble: Arc<AtomicBool>,
+    /// Whether its radio reaches 5 GHz. Announced in every heartbeat, and the
+    /// planner's only reason to treat one node differently from another.
+    five_ghz: bool,
     hb_counter: u32,
     seen: VecDeque<Mac>,
     rng: Xorshift,
 }
 
 impl SimNode {
-    fn new(index: u8, holds_ble: Arc<AtomicBool>) -> Self {
+    fn new(index: u8, holds_ble: Arc<AtomicBool>, five_ghz: bool) -> Self {
         Self {
             mac: SimTransport::node_mac(index),
+            five_ghz,
             assignment_version: 0,
             node_index: 0,
             node_count: 1,
@@ -430,10 +450,12 @@ async fn beat(
     node.hb_counter = node.hb_counter.wrapping_add(1);
     // The token is what tells the host this is a node it can drive, so a
     // simulated fleet that left it out would be a fleet the planner ignores.
-    // Both features are claimed: the simulator has no chip and models a node
-    // built with everything, which is the case the view has most to render.
+    // Bluetooth is always claimed — the simulator has no chip and models a node
+    // built with everything — but the band is not, because a fleet where every
+    // node reaches 5 GHz is a fleet where the planner never has to leave one
+    // out of a channel, which is the half of it worth being able to see.
     let mut token = [0u8; CAPABILITY_MAX];
-    let len = Capabilities::here(true, true)
+    let len = Capabilities::here(true, node.five_ghz)
         .write_into(&mut token)
         .expect("CAPABILITY_MAX is sized for this");
     let msg = TextMsg::new(MsgType::Heartbeat, node.hb_counter, &token[..len])

@@ -43,7 +43,7 @@ use wartui_proto::air::{
     AdminMsg, Capabilities, Frame, MsgType, RecordKind, WardriveLine, is_legacy_admin, wire_version,
 };
 use wartui_proto::link::{BridgeToHost, EspNowPayload, HostToBridge, Mac, SendStatus};
-use wartui_proto::plan::{self, ChannelPool, ChannelSet, Plan};
+use wartui_proto::plan::{self, ChannelPool, ChannelSet, Plan, Radio};
 
 use crate::position::PositionChain;
 use crate::record::{
@@ -578,9 +578,12 @@ pub struct FleetEngine {
     /// The partition in force.
     plan: Option<Plan>,
     /// The members that plan was built for, in the order that gave them their
-    /// `node_index`. Compared against the live membership to decide whether
-    /// anything needs re-partitioning at all.
-    plan_members: Vec<Mac>,
+    /// `node_index`, each with the radio it was cut a share for. Compared
+    /// against the live membership to decide whether anything needs
+    /// re-partitioning at all — radio included, because a node whose token
+    /// changed band is one whose share is now the wrong shape while the
+    /// membership is unchanged.
+    plan_members: Vec<(Mac, Radio)>,
     /// The one node asked to scan Bluetooth, if any. Not part of the plan: the
     /// plan is a function of who is present, and this is an operator's choice
     /// that survives re-partitioning.
@@ -676,11 +679,40 @@ impl FleetEngine {
         // — a node that has left the fleet is not scanning anything for us,
         // and leaving it named here would have the view reporting BLE coverage
         // the fleet does not have.
-        let ble_gone = self
-            .ble_node
-            .is_some_and(|mac| !self.nodes.get(&mac).is_some_and(|node| self.is_alive(node, now)));
-        if ble_gone {
-            self.ble_node = None;
+        //
+        // A node that announces itself without the `ble` feature loses it here
+        // for the same reason and on the same tick: it has no scan code in it,
+        // so it would adopt the flag, acknowledge, and scan nothing.
+        let ble_gone = self.ble_node.is_some_and(|mac| {
+            self.nodes.get(&mac).is_none_or(|node| {
+                !self.is_alive(node, now)
+                    || node.capabilities.is_some_and(|capabilities| !capabilities.ble)
+            })
+        });
+        if let Some(mac) = self.ble_node.take_if(|_| ble_gone) {
+            // Forgetting who held the scan is not the same as taking it off
+            // them. The flag travels in the assignment frame, so a node still
+            // holding one goes on scanning — or, on a build with no scan code
+            // in it, goes on being *shown* as a holder, since the fleet table
+            // reads the flag off the assignment rather than off `ble_node`.
+            // And it could not be cleared by hand either: `b` decides a node
+            // holds nothing by asking `ble_node`, so it would offer to turn
+            // Bluetooth on and be refused for a feature the build lacks.
+            //
+            // Re-issuing under a fresh epoch is the only way to withdraw it.
+            // For a node that has merely gone quiet this is a frame that waits
+            // on a heartbeat that may never come, which is the right outcome:
+            // if it does come back, it comes back without the scan.
+            //
+            // Only if the flag is really out there. A node that lost the scan
+            // by changing its own token has already had it taken off its
+            // assignment by the reboot re-issue, and burning a second epoch to
+            // tell it the same thing would have it re-adopt an assignment it
+            // already holds.
+            let holds = self.nodes.get(&mac).and_then(|node| node.desired.or(node.confirmed));
+            if holds.is_some_and(|assignment| assignment.ble) {
+                self.reissue(mac);
+            }
         }
         self.replan(now);
         let due = self
@@ -905,6 +937,20 @@ impl FleetEngine {
 
     /// Give one node a set of channels, by hand.
     fn on_assign(&mut self, mac: Mac, channels: ChannelSet, now: Now) {
+        // A share of 5 GHz cut for a node with no 5 GHz radio is a share
+        // nobody scans. `plan_for` refuses to deal one; so must this, or the
+        // failure the capability token exists to prevent is still one keypress
+        // away — and a quieter one, because nothing re-partitions afterwards to
+        // correct it and `Plan::unreachable` never sees a hand assignment.
+        //
+        // A node with no token is left alone here: it is not assignable at all,
+        // and the checks below turn it away for that rather than for a radio
+        // this host has never been told about.
+        let channels = match self.nodes.get(&mac).and_then(|node| node.capabilities) {
+            Some(capabilities) => Radio::from(capabilities).tunable(channels),
+            None => channels,
+        };
+
         // No frame means "scan nothing". A node that adopted an empty set would
         // park on the control channel and collect nothing, while the host had a
         // MAC-layer acknowledgement for it and so showed the row as confirmed,
@@ -912,6 +958,9 @@ impl FleetEngine {
         // that looks like a node doing as it was told. `replan` already skips a
         // node it has nothing for; the same rule belongs on the hand path,
         // where it is the invariant rather than the caller that holds it.
+        //
+        // It also catches what the mask above can leave behind: a node handed
+        // nothing but 5 GHz that has no radio for any of it.
         if channels.is_empty() {
             return;
         }
@@ -929,7 +978,7 @@ impl FleetEngine {
         // and shifting the indices of everything after it.
         let planned = self
             .plan
-            .zip(self.plan_members.iter().position(|m| *m == mac))
+            .zip(self.plan_members.iter().position(|(m, _)| *m == mac))
             .map(|(plan, index)| (u8::try_from(index).unwrap_or(u8::MAX), plan.node_count()));
         let (node_index, node_count) = match planned {
             Some(pair) => pair,
@@ -983,6 +1032,25 @@ impl FleetEngine {
     /// with whatever assignment reaches it next, which under auto is its next
     /// re-partition and by hand is the operator's next key.
     fn on_assign_ble(&mut self, target: Option<Mac>) {
+        // A node built without the `ble` cargo feature has no Bluetooth code in
+        // it at all. It would adopt the flag, acknowledge the assignment and
+        // scan nothing, while this host recorded a holder and the fleet table
+        // showed one — so "at most one node scans Bluetooth" would read as "one
+        // does". The view refuses the keypress before the engine sees it; the
+        // check is here as well because `ble_node` is the only record of who
+        // was asked, and it must not name a node that cannot answer.
+        //
+        // A node this host has not heard from is not refused: naming one before
+        // it appears is a legitimate thing to do, and the tick below takes the
+        // scan back the moment its token says it cannot run one.
+        if let Some(mac) = target
+            && self
+                .nodes
+                .get(&mac)
+                .is_some_and(|node| node.capabilities.is_some_and(|capabilities| !capabilities.ble))
+        {
+            return;
+        }
         if self.ble_node == target {
             return;
         }
@@ -1005,7 +1073,11 @@ impl FleetEngine {
     /// Refreshes the Bluetooth flag on the way past, because this is the only
     /// path by which a node that already holds the right channels is told about
     /// a change to that flag — and because a reboot re-issue must not put back
-    /// an assignment naming a scan the fleet has since moved elsewhere.
+    /// an assignment naming a scan the fleet has since moved elsewhere, or one
+    /// the node has since said it has no code for. A reflash is exactly a
+    /// reboot whose token has changed, and the capabilities are read off the
+    /// heartbeat before this runs, so the withdrawal can travel in the frame
+    /// the reboot was going to send anyway rather than in one of its own.
     fn reissue(&mut self, mac: Mac) {
         self.last_counter += 1;
         let counter = self.last_counter;
@@ -1014,7 +1086,7 @@ impl FleetEngine {
             && let Some(desired) = node.desired.as_mut()
         {
             desired.counter = counter;
-            desired.ble = ble;
+            desired.ble = ble && node.capabilities.is_none_or(|capabilities| capabilities.ble);
             node.dirty = true;
         }
     }
@@ -1036,15 +1108,22 @@ impl FleetEngine {
         if !self.auto {
             return;
         }
-        let members: Vec<Mac> = self
+        let members: Vec<(Mac, Radio)> = self
             .nodes
             .values()
             // An encrypted node cannot be reached at all, and its heartbeats
             // are not even decodable from here — so it can never be alive. The
             // clause is here because a node that is silently planned around is
             // a worse failure than one that is explicitly left out.
-            .filter(|node| self.is_assignable(node, now))
-            .map(|node| node.mac)
+            //
+            // The radio comes out of the same token `is_assignable` insisted
+            // on, taken here rather than defaulted, so there is no path by
+            // which a node reaches the planner with a band it did not claim.
+            .filter_map(|node| {
+                node.capabilities
+                    .filter(|_| self.is_assignable(node, now))
+                    .map(|capabilities| (node.mac, Radio::from(capabilities)))
+            })
             .collect();
 
         if members == self.plan_members {
@@ -1057,7 +1136,7 @@ impl FleetEngine {
         // opening windows to receive it. What it last acknowledged stays, since
         // that is still the best guess at what it is scanning.
         let departed = std::mem::replace(&mut self.plan_members, members.clone());
-        for mac in departed.iter().filter(|mac| !members.contains(mac)) {
+        for (mac, _) in departed.iter().filter(|(mac, _)| !members.iter().any(|(m, _)| m == mac)) {
             if let Some(node) = self.nodes.get_mut(mac) {
                 node.desired = None;
                 node.dirty = false;
@@ -1065,7 +1144,11 @@ impl FleetEngine {
         }
 
         let count = u8::try_from(members.len()).unwrap_or(u8::MAX);
-        let Some(plan) = plan::plan(self.config.pool, count) else {
+        let radios: Vec<Radio> = members.iter().map(|(_, radio)| *radio).collect();
+        // Not `plan`: a share of 5 GHz cut for an ESP32-C6 is a share nobody
+        // scans, which is the failure the capability token exists to prevent,
+        // reached by a node that is genuinely one of ours.
+        let Some(plan) = plan::plan_for(self.config.pool, &radios) else {
             // Nothing heartbeating, or more nodes than the radio's peer table
             // can hold. Either way there is no partition to be in, and the
             // fleet keeps whatever it already had rather than being told
@@ -1079,11 +1162,17 @@ impl FleetEngine {
         // One epoch per node that actually needs telling. Held locally because
         // the decision needs the node in hand, and `self` is borrowed for it.
         let mut counter = self.last_counter;
-        for (index, mac) in members.iter().enumerate() {
+        for (index, (mac, _)) in members.iter().enumerate() {
             let index = u8::try_from(index).unwrap_or(u8::MAX);
-            // Nothing for this node: reachable only with more nodes than the
-            // pool has channels. There is no frame meaning "scan nothing", so
-            // the node keeps whatever it already holds.
+            // Nothing for this node: more nodes than the pool has channels
+            // *this fleet* can reach. That used to mean more than 34 on the US
+            // pool and so more than `MAX_NODES` could ever be; with the radios
+            // read out of the tokens it means twelve nodes with no 5 GHz
+            // between them, which is well inside a fleet the bridge can
+            // address. There is no frame meaning "scan nothing", so the node
+            // keeps whatever it already holds — duplicating another node's
+            // share rather than leaving a gap — and the footer's unreachable
+            // line is what says the fleet is short of the pool.
             let Some(channels) = plan.channels_for(index) else { continue };
             let ble = self.ble_node == Some(*mac);
             let Some(node) = self.nodes.get_mut(mac) else { continue };
