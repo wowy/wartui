@@ -1,24 +1,29 @@
 //! The channel-pool planner.
 //!
 //! The properties here are what stop a node being told to scan a channel the
-//! operator excluded, or being handed a range that spans the gap between two
-//! runs — which `MSG_ADMIN` cannot express.
+//! operator excluded, or two nodes being given the same one while a third
+//! covers nothing. They are properties rather than a comparison against another
+//! implementation, and that is a deliberate loss: until Phase 2 the assignment
+//! shape was the vendor core's, so `tests/golden.rs` could check the planner
+//! against frames sniffed off a real one. It is wartui's own frame now, and
+//! there is no second implementation left to disagree with.
 
 use std::collections::BTreeSet;
 
 use wartui_proto::plan::{
-    ChannelPool, MAX_NODES, NODE_STAGGER_WINDOW_MS, NUM_SCAN_CHANNELS, SCAN_CHANNELS, plan,
-    stagger_offset_ms,
+    ChannelPool, IndexRun, MAX_NODES, NODE_STAGGER_WINDOW_MS, NUM_SCAN_CHANNELS, SCAN_CHANNELS,
+    plan, stagger_offset_ms,
 };
 
 const POOLS: [ChannelPool; 2] = [ChannelPool::Us, ChannelPool::All];
 
-/// Every index a plan hands out during one phase.
-fn covered(p: &wartui_proto::plan::Plan, phase: u8) -> Vec<u8> {
-    (0..p.node_count())
-        .filter_map(|n| p.range_for(n, phase))
-        .flat_map(|r| r.start..=r.end)
-        .collect()
+const FLEET_SIZES: std::ops::RangeInclusive<u8> = 1..=20;
+
+const _: () = assert!(*FLEET_SIZES.end() as usize == MAX_NODES);
+
+/// Every index the plan hands to anybody, with repeats kept so overlap shows.
+fn covered(p: &wartui_proto::plan::Plan) -> Vec<u8> {
+    (0..p.node_count()).filter_map(|n| p.channels_for(n)).flat_map(|set| set.indices()).collect()
 }
 
 #[test]
@@ -51,61 +56,32 @@ fn us_pool_is_two_runs_and_all_is_one() {
 }
 
 #[test]
-fn no_assigned_range_ever_straddles_a_gap() {
-    for pool in POOLS {
-        for nodes in 1..=u8::try_from(MAX_NODES).expect("fits") {
-            let p = plan(pool, nodes).expect("valid fleet size");
-            for phase in 0..p.phase_count() {
-                for node in 0..nodes {
-                    let Some(range) = p.range_for(node, phase) else { continue };
-                    let within_one_run = pool
-                        .runs()
-                        .iter()
-                        .any(|run| run.contains(range.start) && run.contains(range.end));
-                    assert!(
-                        within_one_run,
-                        "{pool:?}/{nodes} nodes/phase {phase}: node {node} got {range:?}, \
-                         which MSG_ADMIN cannot express"
-                    );
-                }
-            }
-        }
-    }
-}
-
-#[test]
-fn a_full_rotation_covers_the_pool_and_nothing_else() {
+fn one_plan_covers_the_pool_and_nothing_else() {
+    // No phases: what the fleet holds at any moment is the whole pool. Before
+    // the channel mask this could only be true after a full rotation, and a
+    // lone node on the US pool was scanning half the pool at any instant.
     for pool in POOLS {
         let allowed: BTreeSet<u8> = pool.runs().iter().flat_map(|r| r.start..=r.end).collect();
-        for nodes in 1..=u8::try_from(MAX_NODES).expect("fits") {
+        for nodes in FLEET_SIZES {
             let p = plan(pool, nodes).expect("valid fleet size");
-            let seen: BTreeSet<u8> = (0..p.phase_count()).flat_map(|ph| covered(&p, ph)).collect();
-            assert_eq!(
-                seen,
-                allowed,
-                "{pool:?} with {nodes} nodes did not cover the pool exactly over \
-                 {} phase(s)",
-                p.phase_count()
-            );
+            let seen: BTreeSet<u8> = covered(&p).into_iter().collect();
+            assert_eq!(seen, allowed, "{pool:?} with {nodes} nodes did not cover the pool exactly");
         }
     }
 }
 
 #[test]
-fn within_a_phase_nodes_do_not_overlap() {
+fn no_two_nodes_are_given_the_same_channel() {
     for pool in POOLS {
-        for nodes in 1..=u8::try_from(MAX_NODES).expect("fits") {
+        for nodes in FLEET_SIZES {
             let p = plan(pool, nodes).expect("valid fleet size");
-            for phase in 0..p.phase_count() {
-                let indices = covered(&p, phase);
-                let unique: BTreeSet<u8> = indices.iter().copied().collect();
-                assert_eq!(
-                    indices.len(),
-                    unique.len(),
-                    "{pool:?}/{nodes} nodes/phase {phase}: two nodes were given the \
-                     same channel"
-                );
-            }
+            let indices = covered(&p);
+            let unique: BTreeSet<u8> = indices.iter().copied().collect();
+            assert_eq!(
+                indices.len(),
+                unique.len(),
+                "{pool:?}/{nodes} nodes: two nodes were given the same channel"
+            );
         }
     }
 }
@@ -115,76 +91,110 @@ fn node_indices_are_unique_and_fleet_wide() {
     // node_index drives the transmit stagger slot, so it must not restart per
     // run — two nodes sharing an index would key up simultaneously.
     for pool in POOLS {
-        for nodes in 1..=u8::try_from(MAX_NODES).expect("fits") {
+        for nodes in FLEET_SIZES {
             let p = plan(pool, nodes).expect("valid fleet size");
-            let assigned: Vec<u8> = (0..nodes).filter(|&n| p.range_for(n, 0).is_some()).collect();
+            let assigned: Vec<u8> = (0..nodes).filter(|&n| p.channels_for(n).is_some()).collect();
             assert_eq!(
                 assigned,
                 (0..nodes).collect::<Vec<_>>(),
                 "{pool:?} with {nodes} nodes left a gap in the index numbering"
             );
             assert_eq!(p.node_count(), nodes);
+            assert_eq!(p.channels_for(nodes), None, "an index outside the fleet holds nothing");
         }
     }
 }
 
 #[test]
-fn only_a_lone_node_on_a_multi_run_pool_has_to_rotate() {
-    for nodes in 1..=u8::try_from(MAX_NODES).expect("fits") {
-        assert!(!plan(ChannelPool::All, nodes).expect("valid").rotates());
-    }
-    let lone = plan(ChannelPool::Us, 1).expect("valid");
-    assert!(lone.rotates(), "one node cannot hold both US runs at once");
-    assert_eq!(lone.phase_count(), 2);
-    assert_eq!(lone.range_for(0, 0), Some(ChannelPool::Us.runs()[0]));
-    assert_eq!(lone.range_for(0, 1), Some(ChannelPool::Us.runs()[1]));
-    // Phases wrap, so a dwell timer can just keep incrementing.
-    assert_eq!(lone.range_for(0, 2), lone.range_for(0, 0));
-
-    for nodes in 2..=u8::try_from(MAX_NODES).expect("fits") {
-        assert!(!plan(ChannelPool::Us, nodes).expect("valid").rotates(), "{nodes} nodes");
+fn a_lone_node_holds_the_whole_pool_at_once() {
+    // The property Phase 2 exists for. `MSG_ADMIN` used to carry one contiguous
+    // range, so one node could not express the US pool's two runs together and
+    // the plan rotated it between them on a sixty-second dwell — leaving half
+    // the pool unscanned at every instant, and re-issuing an assignment (and
+    // spending an epoch) every minute for as long as the fleet stayed at one.
+    for pool in POOLS {
+        let lone = plan(pool, 1).expect("one node is a valid fleet");
+        assert_eq!(lone.channels_for(0), Some(pool.channels()));
+        assert_eq!(
+            lone.channels_for(0).expect("assigned").len(),
+            u32::from(pool.channel_count()),
+            "{pool:?}"
+        );
     }
 }
 
 #[test]
 fn all_pool_with_one_node_reproduces_the_stock_assignment() {
     // A single node on the full table should get exactly what unassigned stock
-    // firmware defaults to: 0..=39.
+    // firmware defaults to: every index.
     let p = plan(ChannelPool::All, 1).expect("valid");
-    let range = p.range_for(0, 0).expect("assigned");
-    assert_eq!((range.start, range.end), (0, NUM_SCAN_CHANNELS - 1));
+    let set = p.channels_for(0).expect("assigned");
+    for idx in 0..NUM_SCAN_CHANNELS {
+        assert!(set.contains(idx), "index {idx} missing from a lone node's whole-table assignment");
+    }
 }
 
 #[test]
-fn all_pool_splits_match_the_firmware_arithmetic() {
-    // The vendor split is start=(n*40)/count, end=((n+1)*40)/count-1
-    // (`src/WiFiOps.cpp:507-508`). With a single run the planner must agree.
-    for nodes in 1..=u8::try_from(MAX_NODES).expect("fits") {
-        let p = plan(ChannelPool::All, nodes).expect("valid");
-        for n in 0..nodes {
-            let range = p.range_for(n, 0).expect("assigned");
-            let count = u16::from(nodes);
-            let total = u16::from(NUM_SCAN_CHANNELS);
-            let expected_start = (u16::from(n) * total) / count;
-            let expected_end = ((u16::from(n) + 1) * total) / count - 1;
-            assert_eq!(
-                (u16::from(range.start), u16::from(range.end)),
-                (expected_start, expected_end),
-                "{nodes} nodes, node {n}"
-            );
+fn the_deal_is_round_robin_in_scan_channels_order() {
+    // Index k of the pool's flattened order goes to node k % node_count. Said
+    // out longhand here because everything below is a consequence of it, and a
+    // planner that satisfied the consequences by some other means would be a
+    // different planner with the same tests passing.
+    for pool in POOLS {
+        for nodes in FLEET_SIZES {
+            let p = plan(pool, nodes).expect("valid fleet size");
+            let flattened: Vec<u8> = pool.runs().iter().flat_map(|r| r.start..=r.end).collect();
+            for (k, idx) in flattened.into_iter().enumerate() {
+                let owner = u8::try_from(k % usize::from(nodes)).expect("below node_count");
+                assert!(
+                    p.channels_for(owner).expect("assigned").contains(idx),
+                    "{pool:?}/{nodes} nodes: index {idx} should have gone to node {owner}"
+                );
+            }
         }
     }
 }
 
 #[test]
-fn us_pool_apportions_nodes_in_proportion_to_run_length() {
-    // 11 channels in the 2.4 GHz run, 23 in the 5 GHz run. Six nodes should
-    // land 2/4, not 3/3.
-    let p = plan(ChannelPool::Us, 6).expect("valid");
-    let low = (0..6)
-        .filter(|&n| ChannelPool::Us.runs()[0].contains(p.range_for(n, 0).expect("assigned").start))
-        .count();
-    assert_eq!(low, 2, "6 nodes over 11+23 channels should put 2 on the 2.4 GHz run");
+fn shares_differ_by_at_most_one_channel() {
+    // A node's sweep period is proportional to how many channels it holds, so
+    // an uneven deal shows up as one node heartbeating visibly slower than the
+    // rest — and as that node's observations being the stalest in the export.
+    for pool in POOLS {
+        for nodes in FLEET_SIZES {
+            let p = plan(pool, nodes).expect("valid fleet size");
+            let sizes: Vec<u32> =
+                (0..nodes).map(|n| p.channels_for(n).expect("assigned").len()).collect();
+            let (low, high) = (
+                *sizes.iter().min().expect("a fleet has nodes"),
+                *sizes.iter().max().expect("a fleet has nodes"),
+            );
+            assert!(high - low <= 1, "{pool:?}/{nodes} nodes: shares ran {low}..={high}");
+        }
+    }
+}
+
+#[test]
+fn every_node_gets_some_of_every_run_while_there_are_enough_channels() {
+    // The reason for dealing rather than block-splitting. Eleven 2.4 GHz
+    // channels and twenty-three 5 GHz ones would have gone to disjoint sets of
+    // nodes under the old apportionment, so a node dropping out took a whole
+    // band with it until the next re-cut landed.
+    for pool in POOLS {
+        let shortest = pool.runs().iter().map(IndexRun::len).min().expect("a pool has runs");
+        for nodes in 1..=shortest.min(20) {
+            let p = plan(pool, nodes).expect("valid fleet size");
+            for n in 0..nodes {
+                let set = p.channels_for(n).expect("assigned");
+                for run in pool.runs() {
+                    assert!(
+                        (run.start..=run.end).any(|idx| set.contains(idx)),
+                        "{pool:?}/{nodes} nodes: node {n} got nothing from {run:?}"
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[test]
@@ -193,12 +203,14 @@ fn admin_messages_carry_the_snapshot_node_count() {
     // `src/WiFiOps.cpp:651`; the count must match the partition it came from.
     let p = plan(ChannelPool::Us, 5).expect("valid");
     for n in 0..5 {
-        let admin = p.admin_for(n, 0, 9).expect("assigned");
+        let admin = p.admin_for(n, 9, wartui_proto::air::ADMIN_FLAG_BLE).expect("assigned");
         assert_eq!(admin.node_count, 5);
         assert_eq!(admin.node_index, n);
         assert_eq!(admin.assignment_version, 9);
-        let range = p.range_for(n, 0).expect("assigned");
-        assert_eq!((admin.start_channel_idx, admin.end_channel_idx), (range.start, range.end));
+        assert_eq!(admin.channels, p.channels_for(n).expect("assigned"));
+        // Flags are the caller's: which node scans Bluetooth is a decision
+        // about one node, and the plan is a decision about the fleet.
+        assert!(admin.scan_ble());
     }
 }
 

@@ -23,7 +23,7 @@ use wartui_core::engine::{EngineConfig, FleetEngine, Snapshot, StoreStats};
 use wartui_core::runtime::{drive, now};
 use wartui_core::store::{SessionInfo, Store, StoreConfig, open_readonly};
 use wartui_proto::air::RecordKind;
-use wartui_proto::plan::{ChannelPool, IndexRun, SCAN_CHANNELS};
+use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun, SCAN_CHANNELS};
 
 const NODES: usize = 6;
 
@@ -44,9 +44,16 @@ async fn until(
     }
 }
 
-/// Every index a set of ranges covers, sorted.
-fn covered(ranges: &[IndexRun]) -> Vec<u8> {
-    let mut all: Vec<u8> = ranges.iter().flat_map(|r| r.start..=r.end).collect();
+/// Every index a collection of channel sets covers, sorted.
+fn covered(sets: &[ChannelSet]) -> Vec<u8> {
+    let mut all: Vec<u8> = sets.iter().flat_map(|set| set.indices()).collect();
+    all.sort_unstable();
+    all
+}
+
+/// The same, for the runs that describe a pool.
+fn covered_runs(runs: &[IndexRun]) -> Vec<u8> {
+    let mut all: Vec<u8> = runs.iter().flat_map(|r| r.start..=r.end).collect();
     all.sort_unstable();
     all
 }
@@ -56,10 +63,10 @@ async fn a_fleet_left_to_itself_converges_on_a_partition_of_the_us_pool() {
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().join("wartui.db");
 
-    // A busy neighbourhood: BLE advertisers rotate their addresses, so they
-    // never dedup, and they are what pushes Wi-Fi networks back out of each
-    // node's 200-entry ring to be reported again. Without them a fleet goes
-    // quiet after its first sweep and there is nothing left to check.
+    // `ble_chance` is set high and nothing is ever given the Bluetooth
+    // assignment, which is the point: at most one node in a fleet scans BLE and
+    // by default none does, so a busy room full of advertisers should produce
+    // no BLE rows at all. Checked at the bottom.
     let link = SimTransport::new(SimConfig {
         node_count: u8::try_from(NODES).expect("six fits"),
         speed: 60.0,
@@ -102,14 +109,12 @@ async fn a_fleet_left_to_itself_converges_on_a_partition_of_the_us_pool() {
 
     let plan = settled.plan.expect("a partition is in force");
     assert_eq!(plan.node_count(), 6);
-    assert!(!plan.rotates(), "six nodes hold both runs at once");
 
-    let ranges: Vec<IndexRun> =
-        settled.nodes.iter().map(|n| n.state.confirmed.expect("confirmed").range).collect();
-    // Exact equality proves three things at once: the pool is covered, no two
-    // nodes overlap, and no range straddles the gap at indices 11-13 — which
-    // `MSG_ADMIN` could not express in the first place.
-    assert_eq!(covered(&ranges), covered(ChannelPool::Us.runs()));
+    let held: Vec<ChannelSet> =
+        settled.nodes.iter().map(|n| n.state.confirmed.expect("confirmed").channels).collect();
+    // Exact equality proves both things at once: the pool is covered, and no
+    // two nodes overlap.
+    assert_eq!(covered(&held), covered_runs(ChannelPool::Us.runs()));
 
     let mut slots: Vec<(u8, u8)> = settled
         .nodes
@@ -128,29 +133,25 @@ async fn a_fleet_left_to_itself_converges_on_a_partition_of_the_us_pool() {
     // give every one of them a couple of clear sweeps before believing that
     // what it reports is what it was assigned.
     let beats: Vec<u64> = settled.nodes.iter().map(|n| n.state.heartbeats).collect();
-    let clear = until(&snapshot_rx, "two clear sweeps on the new ranges", |s| {
+    until(&snapshot_rx, "two clear sweeps on the new assignments", |s| {
         s.nodes.iter().zip(&beats).all(|(n, before)| n.state.heartbeats >= before + 3)
-    })
-    .await;
-    let mark = clear.now_ms;
-
-    // And wait until the fleet is actually reporting Wi-Fi again: a node that
-    // has gone quiet because everything is in its dedup ring would satisfy any
-    // assertion about what it reports.
-    until(&snapshot_rx, "wi-fi to be reported from the assigned ranges", |s| {
-        s.tail.iter().filter(|e| e.kind == RecordKind::Wifi && e.rx_at_ms > mark).count() >= 20
+            && s.tail.iter().filter(|e| e.kind == RecordKind::Wifi).count() >= 20
     })
     .await;
 
     stop_tx.send(()).expect("the capture is still running");
     capture.await.expect("the capture task should not panic");
 
+    // Every row in the session, with no cut-off. There is nothing to exclude:
+    // a wartui node parks and collects nothing until it is assigned, so unlike
+    // a stock fleet there is no burst of all-forty-channel observations from
+    // before the plan landed.
     let conn = open_readonly(&path).expect("reopening the capture");
     let mut query = conn
-        .prepare("SELECT DISTINCT channel FROM observation WHERE kind = 'wifi' AND rx_at > ?1")
+        .prepare("SELECT DISTINCT channel FROM observation WHERE kind = 'wifi'")
         .expect("a valid query");
     let channels: Vec<u16> = query
-        .query_map([mark], |row| row.get(0))
+        .query_map([], |row| row.get(0))
         .expect("running the query")
         .collect::<Result<_, _>>()
         .expect("reading the rows");
@@ -167,11 +168,20 @@ async fn a_fleet_left_to_itself_converges_on_a_partition_of_the_us_pool() {
     }
     // Stronger, and it costs nothing: every channel reported is one the pool
     // actually contains.
-    let allowed: Vec<u16> = covered(ChannelPool::Us.runs())
+    let allowed: Vec<u16> = covered_runs(ChannelPool::Us.runs())
         .iter()
         .map(|i| u16::from(SCAN_CHANNELS[usize::from(*i)]))
         .collect();
     for channel in &channels {
         assert!(allowed.contains(channel), "channel {channel} is not in the US pool");
     }
+
+    // Nobody was given the Bluetooth assignment, so nobody scanned Bluetooth —
+    // in a simulated room where an advertiser turns up on four dwells in five.
+    // A node that scanned BLE because its firmware was built with it would show
+    // up here, which is the failure the flag exists to make impossible.
+    let ble: i64 = conn
+        .query_row("SELECT count(*) FROM observation WHERE kind = 'ble'", [], |row| row.get(0))
+        .expect("counting BLE rows");
+    assert_eq!(ble, 0, "no node was asked to scan Bluetooth");
 }

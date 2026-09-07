@@ -93,7 +93,10 @@ diagnostics goes down that pipe.
 | `esp32c6` | 512 KB |
 | `esp32c6,ble` | 760 KB |
 
-## Bluetooth is off by default, and that is not timidity
+A `ble` build is not a node that scans Bluetooth. It is a node that *can*, if
+the core sets the flag.
+
+## Bluetooth runs only when the core asks, and that is not timidity
 
 Measured on real hardware and written up in `docs/phase-0-findings.md`: two
 nodes differing only in whether BLE was enabled, both sent assignments inside
@@ -108,6 +111,21 @@ An 802.11 acknowledgement comes from the receiver's MAC hardware, so its absence
 means the radio was not on the channel. NimBLE shares the one 2.4 GHz antenna
 and the admin window is precisely when the node is otherwise idle. In the same
 170 seconds the BLE-off node completed sixteen sweeps and the BLE-on node nine.
+
+**The core decides which node scans, and the answer is at most one.** Bit 0 of
+`MSG_ADMIN`'s flags byte carries it, and it is clear at every boot regardless of
+how the firmware was built — the `ble` cargo feature decides whether any of this
+is compiled in, and the flag decides whether it runs. That shape is the measured
+cost showing through: it is worth paying on one node for Bluetooth coverage and
+not worth paying on all of them, and which node is an operator's decision rather
+than a property of whatever binary happens to be on the board.
+
+The Bluetooth controller is still brought up at boot on a `ble` build, because
+initialising a radio between a dwell and an admin window is exactly the kind of
+surprise this firmware exists to avoid. It is initialised and never enabled —
+`HCI_LE_Set_Scan_Enable` is only ever sent from inside a sweep. Whether an
+initialised-but-disabled controller costs anything has not been measured;
+`docs/phase-1-findings.md` lists it among the things that have not.
 
 This firmware tries to avoid repeating that in three ways. The controller is
 told `HCI_LE_Set_Scan_Enable(0)` at the end of every sweep rather than merely

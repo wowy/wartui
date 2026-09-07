@@ -29,12 +29,20 @@ everything on the air — so a stock node also works, with the caveats below.
 
 ## Scope
 
-Nodes accept exactly one command over the air — `MSG_ADMIN`, a contiguous range
-of channel indices to scan. There is no start/stop, config, reboot or query
-message, and node serial is output-only. So wartui monitors the fleet, collects
-and exports observations, and controls channel assignment. Anything else would
-need changes to the node firmware — which, now that the node firmware is in this
-repository, is a thing that can happen.
+Nodes accept exactly one command over the air — `MSG_ADMIN`, which says which
+channels to scan and whether to scan Bluetooth. There is no start/stop, config,
+reboot or query message, and node serial is output-only. So wartui monitors the
+fleet, collects and exports observations, and controls channel and Bluetooth
+assignment. Anything else would need changes to the node firmware — which, now
+that the node firmware is in this repository, is a thing that can happen.
+
+That frame is **wartui's own**, and has been since Phase 2. It is fourteen bytes
+carrying a forty-bit channel mask; the vendor core's ten-byte version, which
+carried a pair of bounds, is no longer spoken. A stock node will not understand
+wartui and wartui will not drive one. If a stock core is powered up nearby it is
+still recognised — `sniff` names its frames and the fleet view counts them —
+because a second core assigning these nodes channels is an operational hazard
+whether or not the two interoperate.
 
 wartui speaks **plaintext ESP-NOW only**; nodes must have encryption turned off
 in their web UI. A `MSG_CORE_REQUEST` arriving from a node means that node still
@@ -65,9 +73,13 @@ otherwise. On a stock fleet the pool is what keeps that in check.
 - **US** (`--pool us`, the default) — 2.4 GHz 1–11 and 5 GHz 36–165.
 - **All** (`--pool all`) — every channel the firmware knows, matching stock behaviour.
 
-`MSG_ADMIN` can only express one contiguous range, and the US pool is two runs
-with a gap at channels 12–14, so the planner distributes nodes across runs and
-never lets an assignment straddle the gap.
+`MSG_ADMIN` carries a forty-bit channel mask, so an assignment can name any
+subset of the pool and the gap at channels 12–14 is not something the planner
+has to steer around. It deals the pool out round-robin instead: index *k* of the
+pool goes to node *k mod n*, so every node carries some 2.4 GHz and some 5 GHz.
+Block-splitting would put one node on the whole of 2.4 GHz and another on the
+whole of 5 GHz, and losing that node would blind the fleet to a band until the
+next re-cut landed.
 
 ## Trying it
 
@@ -77,10 +89,18 @@ No hardware needed — the simulator runs a fake fleet on a fake clock:
 cargo run -p wartui -- --sim 3 --lat 37.7749 --lon -122.4194
 ```
 
-The simulated nodes model the parts of the firmware that matter: they adopt an
-assignment only when its version differs, they dedup against a 200-entry ring,
-and their sweep — and so their heartbeat period — is proportional to the range
-they hold. Pressing `a` on one does what it would do to real hardware.
+The simulated nodes model the parts of the firmware that matter: they park doing
+nothing until they are assigned, they adopt an assignment only when its version
+differs, they dedup against a 200-entry ring, only the node given the Bluetooth
+assignment reports any, and their sweep — and so their heartbeat period — is
+proportional to how many channels they hold. Pressing `a` or `b` on one does
+what it would do to real hardware.
+
+The fake neighbourhood does not move, so the observation stream goes quiet once
+every node has reported everything on its own channels — a real fleet parked in
+one room does the same, and the dedup ring is why. Press `b` on a node to give
+it the Bluetooth scan: advertisers rotate their addresses, so they never dedup
+and the stream stays alive.
 
 With a bridge plugged in:
 
@@ -98,7 +118,7 @@ Flashing the bridge itself is in `firmware/bridge/README.md`.
 every observation to SQLite, and draws the fleet while it does. It also
 partitions the pool across the fleet without being asked, which is the core's
 job and the reason this exists; `p` takes that back and `a`/`A` then assign the
-selected node a range by hand. `--manual` starts with the planner off, and
+selected node channels by hand. `--manual` starts with the planner off, and
 nothing reaches the air until a key is pressed.
 
 ```sh
@@ -119,21 +139,29 @@ ended last week, or run against one that is still going.
 | Key | What it does |
 | --- | --- |
 | `↑` `↓` / `k` `j` | Move the cursor down the fleet table |
-| `a` | Give the selected node a range of exactly **one** channel |
-| `A` | Give it the widest run in the pool |
+| `a` | Give the selected node exactly **one** channel |
+| `A` | Give it the whole pool |
+| `b` | Move the Bluetooth scan to it, or take it off the fleet |
 | `p` | Take the fleet back from the planner, or hand it over again |
 
 The header says which of you is deciding: `manual`, or `auto — 4 of 5` for four
 heartbeating nodes out of five seen. It starts on `auto`, so **`a` and `A` are
 refused until you press `p`** (or started with `--manual`) — the planner would
-honour a hand-assigned range and then take it back at the next re-cut, which
-reads as the key having been ignored.
+honour a hand-assigned set and then take it back at the next re-cut, which reads
+as the key having been ignored. `b` is not refused: the planner partitions
+channels and has no opinion about Bluetooth, so there is nothing for it to take
+back.
 
 Nothing goes out at the moment the key is pressed. A node's radio is away
 scanning some other channel for all but the 300 ms it holds open after its own
-heartbeat, so the assignment waits for that window — the `range` column reads
-`1…` until it lands, then drops the ellipsis. On a full sweep that is up to four
-seconds. That delay is the protocol, not lag.
+heartbeat, so the assignment waits for that window — the `channels` column reads
+`1: 1…` until it lands, then drops the ellipsis. On a full sweep that is up to
+four seconds. That delay is the protocol, not lag.
+
+That column leads with a count because a share dealt round-robin is a dozen
+scattered channels and no sane column is wide enough for all of them. The count
+is the useful half anyway: it is what the `beat` column should be proportional
+to.
 
 An assignment is believed only when the node's own radio acknowledges it at the
 MAC layer, never when the bridge reports a successful enqueue. The vendor core
@@ -143,22 +171,42 @@ assigned and is not.
 `a` is also the Phase 4 proof that any of this works. Take the fleet back with
 `p` first, or start with `--manual` so nothing has been assigned yet. A node
 heartbeats once per completed sweep and reports nothing about what it is
-scanning, so watch the `beat` column: narrowing a node from forty channels to
-one should collapse it from seconds to a fraction of one within three sweeps.
-`A` puts it back.
+scanning, so watch the `beat` column: narrowing a node from the whole pool to
+one channel should collapse it from seconds to a fraction of one within three
+sweeps. `A` puts it back.
 
 If a node keeps showing `no admin ack`, the cause is nearly always BLE: the
 Bluetooth and Wi-Fi radios share the one 2.4 GHz antenna, and the admin window
 is precisely when the node would otherwise be idle. On a stock node, turn BLE
-off in its web UI. A wartui node is built without it unless `--features ble` was
-asked for, and switches its scan off between sweeps rather than leaving a stack
-running — see `firmware/node/README.md`.
+off in its web UI. On a wartui node, press `b` on it — see below.
+
+### Bluetooth
+
+**At most one node scans Bluetooth, and by default none does.** `b` on the
+selected node moves the scan to it; `b` again on the node that holds it takes it
+off the fleet. The `ble` column says who has it, and reads `on…` or `off…` while
+a change is waiting for that node's next admin window, the same way the
+`channels` column does.
+
+It is a per-node choice rather than a build flag because the cost is real and
+was measured on both firmwares. A stock node with BLE on acknowledged **none**
+of the thirty-two assignments sent to it, while an identical node with it off
+acknowledged both of its two (`docs/phase-0-findings.md`). A wartui node
+acknowledged every time on the same board and ran about 10% slower per sweep
+(`docs/phase-1-findings.md`) — a cost worth paying on one node for Bluetooth
+coverage, and not worth paying on all of them.
+
+The `ble` cargo feature decides whether the code is in the binary at all; the
+assignment decides whether it runs, and it is off at every boot regardless of
+the build. A node whose firmware was compiled with Bluetooth is not a node that
+is scanning it.
 
 ### Letting wartui assign them
 
-This is on by default, and it is wartui doing the core's whole job: it cuts the
-pool into one contiguous range per node and re-cuts it whenever the fleet
-changes shape. `--manual` starts without it; `p` toggles it either way.
+This is on by default, and it is wartui doing the core's whole job: it deals the
+pool out across the fleet and re-cuts it whenever the fleet changes shape.
+`--manual` starts without it; `p` toggles it either way. It partitions channels
+and nothing else — the Bluetooth assignment is yours, and survives a re-cut.
 
 A node is in the plan while it is **heartbeating**. Not while it is merely being
 heard — a node that has stopped heartbeating never opens an admin window, so a
@@ -170,7 +218,7 @@ Every change re-cuts the pool for the *whole* fleet, not just the node that
 joined or left. `node_index` and `node_count` travel in every assignment and are
 what each node computes its transmit stagger from (`src/RadioTuning.cpp:3-13`),
 so a fleet whose members disagree about the count keys up on top of itself. Each
-node takes its new range in its own next admin window, so a fleet converges in
+node takes its new share in its own next admin window, so a fleet converges in
 about one sweep.
 
 An unchanged fleet is left alone. A node adopts an assignment only when the
@@ -178,10 +226,11 @@ epoch differs from the one it holds, so re-sending one it already has is a frame
 it acknowledges and then discards — indistinguishable from success. The planner
 only speaks when it has something new to say.
 
-**One node on the US pool rotates.** `MSG_ADMIN` carries a single contiguous
-range and the US pool is two runs, so a lone node cannot hold both at once; it
-covers them in turn, 60 s each, and the header says which phase it is on.
-Coverage becomes intermittent rather than incorrect.
+**A lone node holds the whole pool.** It used not to: `MSG_ADMIN` carried one
+contiguous range and the US pool is two runs, so a single node covered them in
+turn on a 60-second dwell and half the pool went unscanned at any instant. The
+channel mask says both runs in one frame, and the rotation — with its timer, its
+phase in the header, and the fresh epoch it spent every minute — is gone.
 
 Over twenty nodes the planner stops re-cutting rather than partitioning among
 nodes the bridge cannot address. Whatever is already assigned stays assigned,
@@ -191,9 +240,9 @@ with nodes that have since gone — leaves the plan the same way, and the rest
 re-cut to cover its share. It is tried again the next time a bridge announces
 itself, since that table starts empty.
 
-Assigning by hand while the planner is running is refused — it would be honoured
-and then taken back at the next re-cut, which reads as the range having been
-ignored. Press `p` first; since the planner is what wartui starts with, that is
+Assigning channels by hand while the planner is running is refused — it would be
+honoured and then taken back at the next re-cut, which reads as the key having
+been ignored. Press `p` first; since the planner is what wartui starts with, that is
 the normal way round.
 
 ### Positions
@@ -235,7 +284,7 @@ says what it is doing on the header line — `gps searching`, `gps ok, 8 sats`,
 
 | State | Meaning |
 | --- | --- |
-| `alive` | Heartbeating, so it can be given a channel range |
+| `alive` | Heartbeating, so it can be given channels |
 | `stale` | Still being heard, but not heartbeating — most often BLE coexistence on the node holding the radio through its admin window |
 | `no heartbeat` | Seen, but has never completed a sweep |
 | `no admin ack` | An assignment went out and its radio did not answer — nearly always BLE, see [Assigning channels](#assigning-channels) |

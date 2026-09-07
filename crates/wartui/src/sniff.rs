@@ -8,7 +8,7 @@
 use anyhow::Result;
 use clap::Args as ClapArgs;
 use wartui_bridge::LinkEvent;
-use wartui_proto::air::{Frame, MsgType, RecordKind, WardriveLine};
+use wartui_proto::air::{Frame, MsgType, RecordKind, WardriveLine, is_legacy_admin};
 use wartui_proto::link::{BROADCAST, BridgeToHost};
 
 use super::mac;
@@ -76,6 +76,13 @@ pub async fn run(args: Args) -> Result<()> {
             counts.other
         );
     }
+    if counts.legacy_admin > 0 {
+        println!(
+            "# {} assignments arrived in the vendor core's 10-byte format. Something \
+             other than this host is telling these nodes what to scan.",
+            counts.legacy_admin
+        );
+    }
     Ok(())
 }
 
@@ -91,6 +98,9 @@ struct Counts {
     text: u64,
     heartbeat: u64,
     admin: u64,
+    /// The vendor core's ten-byte assignment. Counted apart from `admin`
+    /// because seeing any at all means something else is driving this fleet.
+    legacy_admin: u64,
     /// `CoreRequest` and `CoreReply`: not expected in a plaintext fleet, and
     /// worth a line of their own rather than being folded into a total.
     other: u64,
@@ -156,15 +166,24 @@ fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
                 }
                 Ok(Frame::Admin(admin)) => {
                     counts.admin += 1;
+                    let indices: Vec<String> =
+                        admin.channels.indices().map(|idx| idx.to_string()).collect();
                     println!(
-                        "{head}  ADMIN v{} node {}/{} channel idx {}..{}  -> {}",
+                        "{head}  ADMIN v{} node {}/{}{} channel idx {}  -> {}",
                         admin.assignment_version,
                         admin.node_index,
                         admin.node_count,
-                        admin.start_channel_idx,
-                        admin.end_channel_idx,
+                        if admin.scan_ble() { " +ble" } else { "" },
+                        indices.join(","),
                         mac(dst),
                     );
+                }
+                // Named rather than left as "undecodable", because it is the
+                // one undecodable frame with a meaning: a stock core in the
+                // same room is assigning channels this host did not choose.
+                Err(_) if is_legacy_admin(payload) => {
+                    counts.legacy_admin += 1;
+                    println!("{head}  ADMIN from a vendor core (10-byte)  -> {}", mac(dst));
                 }
                 Err(err) => {
                     counts.undecodable += 1;

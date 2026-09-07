@@ -1,7 +1,8 @@
 //! The fleet view.
 //!
-//! Three keys here reach the air: `a` and `A` on the selected node, which ask
-//! the engine for a channel-range assignment, and `p`, which hands the whole
+//! Four keys here reach the air: `a` and `A` on the selected node, which ask
+//! the engine for a channel assignment; `b`, which moves the Bluetooth scan to
+//! the selected node or takes it off the fleet; and `p`, which hands the whole
 //! fleet to the engine to partition on its own — where it starts, so `p` is
 //! usually the key that takes the fleet *back*. Nothing goes out at the moment
 //! a key is pressed — a node only listens in the 300 ms after its own heartbeat
@@ -33,7 +34,7 @@ use wartui_core::position::PositionSource;
 use wartui_core::record::AdminOutcome;
 use wartui_proto::air::RecordKind;
 use wartui_proto::link::Mac;
-use wartui_proto::plan::{IndexRun, MAX_NODES, SCAN_CHANNELS};
+use wartui_proto::plan::{ChannelSet, MAX_NODES, SCAN_CHANNELS};
 
 /// How long the input thread waits for a keypress before checking whether it
 /// should stop. Long enough not to spin, short enough that quitting is instant.
@@ -130,8 +131,17 @@ impl Ui {
             // single channel should collapse its beat period from seconds to
             // about half of one, and widening it again should put it back.
             // Nothing else in the protocol reports what a node is scanning.
+            //
+            // `A` really is the whole pool now. Until the channel mask it was
+            // the pool's *longest run*, because one assignment could not
+            // straddle the gap at channels 12-14.
             KeyCode::Char('a') => self.assign(narrow(snapshot), snapshot, commands),
             KeyCode::Char('A') => self.assign(widest(snapshot), snapshot, commands),
+            // Bluetooth, which at most one node in the fleet scans. Unlike the
+            // assignment keys this is honoured with auto-assignment on: the
+            // planner partitions channels and has no opinion about BLE, so
+            // there is nothing here for it to take back.
+            KeyCode::Char('b') => self.toggle_ble(snapshot, commands),
             // The fleet, rather than one node. On, the engine cuts the pool
             // into as many ranges as there are heartbeating nodes and re-cuts
             // it whenever that number changes.
@@ -176,7 +186,49 @@ impl Ui {
         self.say(said, snapshot);
     }
 
-    fn assign(&mut self, range: IndexRun, snapshot: &Snapshot, commands: &mpsc::Sender<Command>) {
+    /// Move the Bluetooth scan onto the selected node, or off it.
+    ///
+    /// One node at a time, because that is what the engine holds. Pressing `b`
+    /// on the node that already has it takes it off the fleet entirely, which
+    /// is the only way back to no-BLE-anywhere.
+    fn toggle_ble(&mut self, snapshot: &Snapshot, commands: &mpsc::Sender<Command>) {
+        let Some(node) = snapshot.nodes.get(self.selected) else { return };
+        let target = node.state.mac;
+        let holds = snapshot.ble_node == Some(target);
+        // Same rule as an assignment, for the same reason: the flag travels in
+        // the admin frame, and only a heartbeat opens the window that frame
+        // needs. Refusing here beats a request that sits undelivered.
+        if !holds && !node.assignable {
+            self.say(
+                format!("{} is not heartbeating, so it cannot be assigned", mac(&target)),
+                snapshot,
+            );
+            return;
+        }
+        let said = match commands
+            .try_send(Command::AssignBle { mac: if holds { None } else { Some(target) } })
+        {
+            Ok(()) if holds => format!("{}: bluetooth off on its next heartbeat", mac(&target)),
+            // The flag rides in the assignment frame, so a node that has not
+            // been given one has nothing for it to ride on. Saying "on its next
+            // heartbeat" there would promise something that never arrives:
+            // under `--manual` with nothing assigned, nothing ever will until
+            // `a` or `A` is pressed.
+            Ok(()) if node.state.desired.is_none() && node.state.confirmed.is_none() => {
+                format!("{}: bluetooth, once it has been given channels", mac(&target))
+            }
+            Ok(()) => format!("{}: bluetooth on its next heartbeat", mac(&target)),
+            Err(_) => "the engine is not accepting commands".to_owned(),
+        };
+        self.say(said, snapshot);
+    }
+
+    fn assign(
+        &mut self,
+        channels: ChannelSet,
+        snapshot: &Snapshot,
+        commands: &mpsc::Sender<Command>,
+    ) {
         let Some(node) = snapshot.nodes.get(self.selected) else { return };
         // The engine would honour it and then take it back at the next
         // re-partition, which is a worse answer than refusing outright.
@@ -210,12 +262,12 @@ impl Ui {
             );
             return;
         }
-        let command = Command::Assign { mac: node.state.mac, range };
+        let command = Command::Assign { mac: node.state.mac, channels };
         let said = match commands.try_send(command) {
             Ok(()) => format!(
                 "{} → channel {} on its next heartbeat",
                 mac(&node.state.mac),
-                channels(range)
+                channel_list(channels)
             ),
             Err(_) => "the engine is not accepting commands".to_owned(),
         };
@@ -236,30 +288,90 @@ impl Ui {
     }
 }
 
-/// The first channel of the configured pool, as a range of exactly one.
-fn narrow(snapshot: &Snapshot) -> IndexRun {
-    let start = snapshot.pool.runs().first().map_or(0, |run| run.start);
-    IndexRun::new(start, start)
+/// The first channel of the configured pool, as a set of exactly one.
+fn narrow(snapshot: &Snapshot) -> ChannelSet {
+    let mut set = ChannelSet::empty();
+    set.insert(snapshot.pool.runs().first().map_or(0, |run| run.start));
+    set
 }
 
-/// The longest run in the pool — as much as a single assignment can express,
-/// since `MSG_ADMIN` carries one contiguous range and the US pool has a gap.
-fn widest(snapshot: &Snapshot) -> IndexRun {
-    snapshot
-        .pool
-        .runs()
-        .iter()
-        .copied()
-        .max_by_key(IndexRun::len)
-        .unwrap_or_else(|| IndexRun::new(0, 0))
+/// The whole pool, which one assignment can now say.
+///
+/// It used to be the pool's *longest run*: `MSG_ADMIN` carried one contiguous
+/// range, and the US pool's gap at channels 12-14 meant `A` could offer at most
+/// 5 GHz or at most 2.4 GHz, never both.
+fn widest(snapshot: &Snapshot) -> ChannelSet {
+    snapshot.pool.channels()
 }
 
-/// A range of indices, said in channel numbers, which is what is written on the
+/// A set of indices, said in channel numbers, which is what is written on the
 /// node's own web UI and on every other tool the operator owns.
-fn channels(range: IndexRun) -> String {
-    let first = SCAN_CHANNELS.get(usize::from(range.start)).copied().unwrap_or(0);
-    let last = SCAN_CHANNELS.get(usize::from(range.end)).copied().unwrap_or(0);
-    if first == last { first.to_string() } else { format!("{first}-{last}") }
+///
+/// Consecutive indices collapse into `first-last`, so a contiguous assignment
+/// still reads as `1-11` and only a genuinely scattered one costs the space.
+/// The planner deals round-robin, so scattered is the ordinary case for a fleet
+/// of more than one — which is why [`channel_cell`] leads with the count.
+fn channel_list(set: ChannelSet) -> String {
+    let mut out = String::new();
+    let mut run: Option<(u8, u8)> = None;
+    for idx in set.indices() {
+        match run {
+            Some((start, end)) if idx == end + 1 => run = Some((start, idx)),
+            Some((start, end)) => {
+                push_run(&mut out, start, end);
+                run = Some((idx, idx));
+            }
+            None => run = Some((idx, idx)),
+        }
+    }
+    if let Some((start, end)) = run {
+        push_run(&mut out, start, end);
+    }
+    if out.is_empty() { "none".to_owned() } else { out }
+}
+
+fn push_run(out: &mut String, start: u8, end: u8) {
+    use core::fmt::Write as _;
+    let first = SCAN_CHANNELS.get(usize::from(start)).copied().unwrap_or(0);
+    let last = SCAN_CHANNELS.get(usize::from(end)).copied().unwrap_or(0);
+    if !out.is_empty() {
+        out.push(',');
+    }
+    // Writing into a `String` cannot fail.
+    let _ = if first == last { write!(out, "{first}") } else { write!(out, "{first}-{last}") };
+}
+
+/// The channel set as it goes in a fixed-width table cell.
+///
+/// The count comes first because it is the fact that always fits and is the one
+/// cross-check available from here: a node heartbeats once per completed sweep,
+/// so the beat column two along should be roughly this many dwells long. The
+/// list after it is whatever is left of the column, truncated rather than
+/// wrapped — a round-robin share of the US pool is a dozen scattered channels
+/// and no sane column is wide enough for all of them.
+fn channel_cell(set: ChannelSet, width: usize) -> String {
+    let head = format!("{}: ", set.len());
+    let list = channel_list(set);
+    if head.len() + list.len() <= width {
+        return head + &list;
+    }
+    // Cut at a comma rather than at a character. `1-11,36-165` truncated by
+    // width alone can end `1-1`, which is a channel range that does not exist
+    // — a worse answer than showing one group fewer. Every character here is
+    // ASCII, so byte lengths and column widths are the same thing.
+    let budget = width.saturating_sub(head.len() + 1);
+    let mut kept = String::new();
+    for group in list.split(',') {
+        let with_group = if kept.is_empty() { group.len() } else { kept.len() + 1 + group.len() };
+        if with_group > budget {
+            break;
+        }
+        if !kept.is_empty() {
+            kept.push(',');
+        }
+        kept.push_str(group);
+    }
+    format!("{head}{kept}…")
 }
 
 /// Keys are read on their own thread rather than through an async stream: a
@@ -319,10 +431,10 @@ fn draw(frame: &mut Frame<'_>, snapshot: &Snapshot, ui: &Ui) {
     draw_header(frame, header, snapshot);
 
     // Side by side when there is room for both, stacked when there is not: the
-    // fleet table needs 76 columns before it starts eliding MACs, which is the
+    // fleet table needs 88 columns before it starts eliding MACs, which is the
     // one thing in it that cannot be guessed from context.
-    let [fleet, stream] = if body.width >= 134 {
-        Layout::horizontal([Constraint::Length(76), Constraint::Min(40)]).areas(body)
+    let [fleet, stream] = if body.width >= 128 {
+        Layout::horizontal([Constraint::Length(88), Constraint::Min(40)]).areas(body)
     } else {
         Layout::vertical([Constraint::Percentage(45), Constraint::Percentage(55)]).areas(body)
     };
@@ -379,15 +491,6 @@ fn planning(snapshot: &Snapshot) -> Span<'static> {
         return Span::styled("manual", Style::new().fg(Color::DarkGray));
     }
     let text = match snapshot.plan {
-        // Fewer nodes than the pool has runs, so one node covers them in turn
-        // and coverage is intermittent rather than incorrect.
-        Some(plan) if plan.rotates() => format!(
-            "auto — {} of {}, rotating {}/{}",
-            plan.node_count(),
-            snapshot.nodes.len(),
-            snapshot.phase + 1,
-            plan.phase_count()
-        ),
         Some(plan) => format!("auto — {} of {}", plan.node_count(), snapshot.nodes.len()),
         None if snapshot.alive > MAX_NODES => "auto — too many nodes".to_owned(),
         // Heartbeating is not on its own enough to be in a plan: an encrypted
@@ -457,8 +560,9 @@ fn receiver(gps: &GpsView, source: PositionSource) -> Span<'static> {
 }
 
 fn draw_fleet(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot, ui: &Ui) {
-    let header = Row::new(["node", "rssi", "beats", "obs", "last", "beat", "range", "state"])
-        .style(Style::new().add_modifier(Modifier::BOLD));
+    let header =
+        Row::new(["node", "rssi", "beats", "obs", "last", "beat", "ble", "channels", "state"])
+            .style(Style::new().add_modifier(Modifier::BOLD));
 
     let rows: Vec<Row<'_>> = snapshot
         .nodes
@@ -477,7 +581,8 @@ fn draw_fleet(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot, ui: &Ui) {
                 // here that an assignment was actually adopted rather than
                 // merely acknowledged.
                 Cell::from(node.state.beat_period_ms().map_or_else(|| "—".to_owned(), period)),
-                Cell::from(range_cell(node)),
+                Cell::from(ble_cell(node)),
+                Cell::from(channels_cell(node)),
                 Cell::from(state).style(style),
             ]);
             if i == ui.selected {
@@ -495,7 +600,8 @@ fn draw_fleet(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot, ui: &Ui) {
         Constraint::Length(6),
         Constraint::Length(5),
         Constraint::Length(6),
-        Constraint::Length(11),
+        Constraint::Length(4),
+        Constraint::Length(CHANNELS_WIDTH),
         Constraint::Min(12),
     ];
     let title = format!(" fleet — {} of {} alive ", snapshot.alive, snapshot.nodes.len());
@@ -505,26 +611,53 @@ fn draw_fleet(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot, ui: &Ui) {
     );
 }
 
+/// How wide the channels column is, and therefore how much of the list fits.
+const CHANNELS_WIDTH: u16 = 18;
+
 /// What the node is scanning, and whether that is known or merely wanted.
 ///
-/// The distinction is the whole of divergence 3. A confirmed range was
+/// The distinction is the whole of divergence 3. A confirmed set was
 /// acknowledged by the node's own radio; a pending one has been asked for and
 /// is waiting on a heartbeat to open the window. The vendor core cannot tell
 /// these apart, because it clears its dirty flag from the enqueue result.
-fn range_cell(node: &NodeView) -> Span<'static> {
+fn channels_cell(node: &NodeView) -> Span<'static> {
     let state = &node.state;
     if state.dirty
         && let Some(desired) = state.desired
     {
+        // One character of the column is spent on the ellipsis, which is the
+        // pending marker as well as the truncation marker — they cannot be
+        // confused, because a pending cell is the yellow one.
         return Span::styled(
-            format!("{}…", channels(desired.range)),
+            format!("{}…", channel_cell(desired.channels, usize::from(CHANNELS_WIDTH) - 1)),
             Style::new().fg(Color::Yellow),
         );
     }
     state.confirmed.map_or_else(
         || Span::styled("unassigned", Style::new().fg(Color::DarkGray)),
-        |confirmed| Span::raw(channels(confirmed.range)),
+        |confirmed| Span::raw(channel_cell(confirmed.channels, usize::from(CHANNELS_WIDTH))),
     )
+}
+
+/// Whether this node is the one carrying the Bluetooth scan.
+///
+/// Read off the assignment rather than off the snapshot's `ble_node`, so it
+/// says what the *node* is doing rather than what the host has decided: the two
+/// differ for exactly as long as it takes an assignment to be acknowledged, and
+/// that gap is where a coexistence failure lives.
+fn ble_cell(node: &NodeView) -> Span<'static> {
+    let state = &node.state;
+    if state.dirty
+        && let Some(desired) = state.desired
+        && desired.ble != state.confirmed.is_some_and(|c| c.ble)
+    {
+        let label = if desired.ble { "on…" } else { "off…" };
+        return Span::styled(label, Style::new().fg(Color::Yellow));
+    }
+    if state.confirmed.is_some_and(|c| c.ble) {
+        return Span::styled("ble", Style::new().fg(Color::Cyan));
+    }
+    Span::raw("")
 }
 
 /// A sweep period, in whichever unit reads at a glance.
@@ -842,7 +975,7 @@ mod tests {
     use wartui_core::gps::GpsCounters;
     use wartui_core::position::Fix;
     use wartui_proto::link::Chip;
-    use wartui_proto::plan::{ChannelPool, plan};
+    use wartui_proto::plan::{ChannelPool, IndexRun, plan};
 
     use super::*;
 
@@ -862,11 +995,12 @@ mod tests {
         NodeView { state, assignable }
     }
 
-    /// A node that has been given a range and has acknowledged it.
+    /// A node that has been given channels and has acknowledged them.
     fn assigned(last: u8) -> NodeView {
         let mut view = node(last, false, 0, true);
         view.state.confirmed = Some(Assignment {
-            range: IndexRun::new(0, 0),
+            channels: ChannelSet::from_run(IndexRun::new(0, 0)),
+            ble: false,
             node_index: 0,
             node_count: 1,
             counter: 9,
@@ -885,12 +1019,13 @@ mod tests {
         view
     }
 
-    /// A node that has been given a range and has not yet had the chance to
-    /// take it: the window only opens on its next heartbeat.
+    /// A node that has been given channels and has not yet had the chance to
+    /// take them: the window only opens on its next heartbeat.
     fn pending(last: u8) -> NodeView {
         let mut view = node(last, false, 0, true);
         view.state.desired = Some(Assignment {
-            range: IndexRun::new(14, 36),
+            channels: ChannelSet::from_run(IndexRun::new(14, 36)),
+            ble: false,
             node_index: 0,
             node_count: 1,
             counter: 10,
@@ -911,7 +1046,7 @@ mod tests {
             pool: ChannelPool::Us,
             auto: false,
             plan: None,
-            phase: 0,
+            ble_node: None,
             nodes: vec![
                 assigned(0x84),
                 node(0x85, true, 0, false),
@@ -1259,26 +1394,52 @@ mod tests {
         // a heartbeat to open the 300 ms window. The vendor core cannot tell
         // these apart, because it clears its dirty flag from the enqueue.
         assert!(rendered.contains("unassigned"), "a node nobody has assigned");
-        assert!(rendered.contains("36-165…"), "asked for, not yet acknowledged");
+        assert!(rendered.contains("23: 36-165…"), "asked for, not yet acknowledged");
         assert!(rendered.contains("no admin ack"), "sent, and the node never answered");
     }
 
     #[test]
-    fn ranges_are_shown_as_channel_numbers_rather_than_table_indices() {
+    fn channels_are_shown_as_channel_numbers_rather_than_table_indices() {
         // Indices into SCAN_CHANNELS are an artefact of the wire format. The
         // number written on the node's own web UI is the channel.
-        assert_eq!(channels(IndexRun::new(0, 0)), "1");
-        assert_eq!(channels(IndexRun::new(0, 10)), "1-11");
-        assert_eq!(channels(IndexRun::new(14, 36)), "36-165");
+        assert_eq!(channel_list(ChannelSet::from_run(IndexRun::new(0, 0))), "1");
+        assert_eq!(channel_list(ChannelSet::from_run(IndexRun::new(0, 10))), "1-11");
+        assert_eq!(channel_list(ChannelSet::from_run(IndexRun::new(14, 36))), "36-165");
     }
 
     #[test]
-    fn the_assignment_keys_pick_one_channel_and_the_widest_run_in_the_pool() {
+    fn a_scattered_assignment_is_said_as_runs_rather_than_as_a_span() {
+        // The planner deals round-robin, so this is the ordinary shape of a
+        // share, and rendering it as `1-165` would say the node is scanning
+        // everything between.
+        assert_eq!(channel_list(ChannelPool::Us.channels()), "1-11,36-165");
+        let mut comb = ChannelSet::empty();
+        for idx in [0, 2, 4, 14, 15] {
+            comb.insert(idx);
+        }
+        assert_eq!(channel_list(comb), "1,3,5,36-40");
+        assert_eq!(channel_list(ChannelSet::empty()), "none");
+    }
+
+    #[test]
+    fn a_channel_cell_leads_with_the_count_and_truncates_the_rest() {
+        // The count always fits and is the one cross-check available from the
+        // table: it should match how many dwells the beat column implies.
+        let us = ChannelPool::Us.channels();
+        assert_eq!(channel_cell(us, 40), "34: 1-11,36-165");
+        assert_eq!(channel_cell(us, 10), "34: 1-11…", "and never cut mid-separator");
+        assert_eq!(channel_cell(us, 8), "34: …", "rather than an invented range like 1-1");
+    }
+
+    #[test]
+    fn the_assignment_keys_pick_one_channel_and_the_whole_pool() {
         let us = busy();
-        assert_eq!(narrow(&us), IndexRun::new(0, 0), "channel 1 alone");
-        // `MSG_ADMIN` carries one contiguous range, and the US pool has a gap
-        // at indices 11-13, so the widest a single assignment can be is one run.
-        assert_eq!(widest(&us), IndexRun::new(14, 36));
+        assert_eq!(narrow(&us), ChannelSet::from_run(IndexRun::new(0, 0)), "channel 1 alone");
+        // `A` used to be the pool's longest *run*: one assignment was a
+        // contiguous range and the US pool has a gap at indices 11-13, so it
+        // could offer 5 GHz or 2.4 GHz but never both. A mask can say both.
+        assert_eq!(widest(&us), ChannelPool::Us.channels());
+        assert_eq!(widest(&us).len(), 34);
     }
 
     #[test]
@@ -1307,7 +1468,7 @@ mod tests {
             rx.try_recv().expect("a command"),
             Command::Assign {
                 mac: [0x02, 0x00, 0x5E, 0x10, 0x57, 0x84],
-                range: IndexRun::new(0, 0)
+                channels: ChannelSet::from_run(IndexRun::new(0, 0))
             }
         );
         let notice = ui.notice(snapshot.now_ms).expect("a notice");
@@ -1330,15 +1491,64 @@ mod tests {
         terminal.draw(|frame| draw(frame, &auto, &Ui::default())).expect("drawing");
         assert!(terminal.backend().to_string().contains("auto — 4 of 5"));
 
-        // One node cannot hold both runs of the US pool at once, so it covers
-        // them in turn and the view says which one it is on.
-        let mut rotating = busy();
-        rotating.auto = true;
-        rotating.plan = plan(ChannelPool::Us, 1);
-        rotating.phase = 1;
+        // A lone node holds the whole pool, and the header has nothing extra to
+        // say about it. Until the channel mask this read `rotating 1/2`,
+        // because one assignment could not express both of the US pool's runs.
+        let mut lone = busy();
+        lone.auto = true;
+        lone.plan = plan(ChannelPool::Us, 1);
         let mut terminal = Terminal::new(TestBackend::new(150, 20)).expect("test backend");
-        terminal.draw(|frame| draw(frame, &rotating, &Ui::default())).expect("drawing");
-        assert!(terminal.backend().to_string().contains("rotating 2/2"));
+        terminal.draw(|frame| draw(frame, &lone, &Ui::default())).expect("drawing");
+        let rendered = terminal.backend().to_string();
+        assert!(rendered.contains("auto — 1 of 5"));
+        assert!(!rendered.contains("rotating"));
+    }
+
+    #[test]
+    fn b_moves_the_bluetooth_scan_and_a_second_press_takes_it_off_the_fleet() {
+        let snapshot = busy();
+        let node = snapshot.nodes[0].state.mac;
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+        ui.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE), &snapshot, &tx);
+        assert_eq!(rx.try_recv().expect("a command"), Command::AssignBle { mac: Some(node) });
+
+        // Unlike `a`, this is not refused while the planner owns the fleet: the
+        // planner partitions channels and has no opinion about Bluetooth, so
+        // there is nothing for it to take back.
+        let mut auto = busy();
+        auto.auto = true;
+        ui.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE), &auto, &tx);
+        assert_eq!(rx.try_recv().expect("a command"), Command::AssignBle { mac: Some(node) });
+
+        // And pressing it on the node that already holds it is how it comes off
+        // the fleet, which is the only route back to nobody scanning.
+        let mut holding = busy();
+        holding.ble_node = Some(node);
+        ui.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE), &holding, &tx);
+        assert_eq!(rx.try_recv().expect("a command"), Command::AssignBle { mac: None });
+        assert!(ui.notice(holding.now_ms).expect("a notice").contains("bluetooth off"));
+    }
+
+    #[test]
+    fn the_fleet_table_says_who_holds_the_bluetooth_scan_and_who_is_about_to() {
+        let mut snapshot = busy();
+        // Read off the assignment, not off the host's intent: the two differ
+        // for exactly as long as it takes a node to acknowledge, and that gap
+        // is where a coexistence failure lives.
+        snapshot.ble_node = Some(snapshot.nodes[0].state.mac);
+        if let Some(confirmed) = snapshot.nodes[0].state.confirmed.as_mut() {
+            confirmed.ble = true;
+        }
+        if let Some(desired) = snapshot.nodes[3].state.desired.as_mut() {
+            desired.ble = true;
+        }
+
+        let mut terminal = Terminal::new(TestBackend::new(160, 20)).expect("test backend");
+        terminal.draw(|frame| draw(frame, &snapshot, &Ui::default())).expect("drawing");
+        let rendered = terminal.backend().to_string();
+        assert!(rendered.contains(" ble "), "the node whose radio confirmed it");
+        assert!(rendered.contains("on…"), "and the node still waiting on its window");
     }
 
     #[test]

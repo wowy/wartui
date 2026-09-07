@@ -11,10 +11,26 @@
 //!
 //! Frames captured off the air by the Phase 0 sniffer can be appended to the
 //! same file in the same `name len hex` format and will be exercised too.
+//!
+//! The `admin*` vectors are the one thing in there that no compiler wrote:
+//! from Phase 2 the core → node frame is wartui's own and has no C++ typedef
+//! to be authoritative against. They are hand-written and checked here in both
+//! directions, which is the most that can be said for a format with only one
+//! implementation of each end.
+//!
+//! Something was given up to get there, and it is worth naming. Until Phase 2
+//! this file also proved that wartui's planner reproduced a real vendor core's
+//! assignment byte for byte, against frames sniffed off that core — the
+//! strongest evidence available that wartui could take its place. Our
+//! assignment is a different frame now, so there is nothing left to compare it
+//! against: what the planner does is checked in `tests/planner.rs` against
+//! properties rather than against another implementation.
 
 use wartui_proto::air::{
-    ADMIN_MSG_LEN, AdminMsg, DecodeError, Frame, MsgType, TEXT_MSG_LEN, TextMsg,
+    ADMIN_FLAG_BLE, ADMIN_MSG_LEN, AdminMsg, DecodeError, Frame, LEGACY_ADMIN_MSG_LEN, MsgType,
+    TEXT_MSG_LEN, TextMsg, is_legacy_admin,
 };
+use wartui_proto::plan::{ChannelSet, IndexRun};
 
 const GOLDEN: &str = include_str!("golden_vectors.txt");
 
@@ -39,6 +55,9 @@ fn vector(name: &str) -> Vec<u8> {
 #[test]
 fn struct_sizes_match_the_compiler() {
     assert_eq!(vector("heartbeat").len(), TEXT_MSG_LEN);
+    assert_eq!(vector("legacy_admin").len(), LEGACY_ADMIN_MSG_LEN);
+    // Not the compiler's, but the same contract: everything that builds one of
+    // these writes exactly this many bytes.
     assert_eq!(vector("admin").len(), ADMIN_MSG_LEN);
 }
 
@@ -70,14 +89,65 @@ fn core_request_encodes_byte_for_byte() {
 
 #[test]
 fn admin_encodes_byte_for_byte() {
+    // The same assignment the vendor core's `legacy_admin` vector carries —
+    // version 7, node 2 of 5, indices 16..=23 — said with a mask.
     let msg = AdminMsg {
         assignment_version: 7,
         node_index: 2,
         node_count: 5,
-        start_channel_idx: 16,
-        end_channel_idx: 23,
+        flags: 0,
+        channels: ChannelSet::from_run(IndexRun::new(16, 23)),
     };
     assert_eq!(msg.encode().as_slice(), vector("admin").as_slice());
+}
+
+#[test]
+fn the_channel_mask_goes_out_least_significant_byte_first() {
+    // Four indices chosen to straddle byte boundaries and to reach the top of
+    // the forty, so a mask written big-endian — or in four bytes rather than
+    // five — cannot produce these bytes.
+    let mut channels = ChannelSet::empty();
+    for idx in [0, 6, 13, 39] {
+        channels.insert(idx);
+    }
+    let msg = AdminMsg {
+        assignment_version: 200,
+        node_index: 0,
+        node_count: 1,
+        flags: ADMIN_FLAG_BLE,
+        channels,
+    };
+    assert_eq!(msg.encode().as_slice(), vector("admin_ble").as_slice());
+
+    let back = AdminMsg::decode(&vector("admin_ble")).expect("valid admin");
+    assert_eq!(back.channels.indices().collect::<Vec<_>>(), vec![0, 6, 13, 39]);
+    assert!(back.scan_ble());
+}
+
+#[test]
+fn the_vendors_assignment_is_recognised_without_being_obeyed() {
+    // A stock core in the same room assigns wartui's nodes channels wartui did
+    // not choose. Nothing decodes the frame — its fields are that core's idea
+    // of the fleet — but it has to be told apart from line noise, because it is
+    // the only visible cause of a fleet that keeps changing its mind.
+    let legacy = vector("legacy_admin");
+    assert!(is_legacy_admin(&legacy));
+    assert!(matches!(
+        AdminMsg::decode(&legacy),
+        Err(DecodeError::TooShort { need: ADMIN_MSG_LEN, got: LEGACY_ADMIN_MSG_LEN })
+    ));
+
+    // Captured off the air: a real vendor core's assignment to its one node.
+    assert!(is_legacy_admin(&vector("hw2_0071")));
+
+    // And nothing else is mistaken for one. The length is exact because
+    // ESP-NOW delivers a frame at the length it was sent.
+    assert!(!is_legacy_admin(&vector("admin")), "ours is fourteen bytes");
+    assert!(!is_legacy_admin(&vector("heartbeat")), "wrong type byte");
+    assert!(!is_legacy_admin(&legacy[..9]), "truncated is not the vendor's shape");
+    let mut wrong_magic = legacy.clone();
+    wrong_magic[0] = b'X';
+    assert!(!is_legacy_admin(&wrong_magic));
 }
 
 #[test]
@@ -87,6 +157,11 @@ fn every_golden_vector_round_trips() {
     for line in GOLDEN.lines().filter(|l| !l.trim().is_empty() && !l.starts_with('#')) {
         let name = line.split_whitespace().next().expect("name");
         let bytes = vector(name);
+        // The vendor's ten-byte assignment is deliberately not decodable; the
+        // test above is the one that covers it.
+        if is_legacy_admin(&bytes) {
+            continue;
+        }
         let frame = Frame::decode(&bytes).unwrap_or_else(|e| panic!("{name}: decode failed: {e}"));
         let reencoded = match frame {
             Frame::Text(m) => m.encode().to_vec(),
@@ -113,8 +188,8 @@ fn decoded_fields_match_what_the_generator_wrote() {
     assert_eq!(msg.assignment_version, 7);
     assert_eq!(msg.node_index, 2);
     assert_eq!(msg.node_count, 5);
-    assert_eq!(msg.start_channel_idx, 16);
-    assert_eq!(msg.end_channel_idx, 23);
+    assert!(!msg.scan_ble());
+    assert_eq!(msg.channels.indices().collect::<Vec<_>>(), (16..=23).collect::<Vec<_>>());
 }
 
 #[test]
@@ -185,35 +260,6 @@ fn captured_observation_payloads_parse_as_wardrive_lines() {
         parsed += 1;
     }
     assert!(parsed >= 3, "expected several observation payloads, parsed {parsed}");
-}
-
-#[test]
-fn the_real_cores_assignment_matches_what_our_planner_produces() {
-    // The captured MSG_ADMIN frames come from the vendor core assigning its one
-    // node. Reproducing them exactly is the whole contract wartui has to meet
-    // when it takes that core's place, and it is checked here against the
-    // core's actual bytes rather than against my reading of its source.
-    use wartui_proto::plan::{ChannelPool, plan};
-
-    let mut checked = 0;
-    for line in GOLDEN.lines().filter(|l| !l.trim().is_empty() && !l.starts_with('#')) {
-        let name = line.split_whitespace().next().expect("name");
-        let bytes = vector(name);
-        let Ok(Frame::Admin(observed)) = Frame::decode(&bytes) else { continue };
-
-        // Stock nodes are assigned across the whole table, which is the `All`
-        // pool. This covers the one-node capture from hardware and the
-        // five-node split from the generated vector alike.
-        let ours = plan(ChannelPool::All, observed.node_count)
-            .expect("one node is a valid fleet")
-            .admin_for(observed.node_index, 0, observed.assignment_version)
-            .expect("node 0 is assigned");
-
-        assert_eq!(ours, observed, "{name}: our assignment differs from the real core's");
-        assert_eq!(ours.encode(), bytes.as_slice(), "{name}: our encoding differs byte-for-byte");
-        checked += 1;
-    }
-    assert!(checked > 0, "no MSG_ADMIN frames in the fixture");
 }
 
 #[test]

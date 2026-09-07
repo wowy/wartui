@@ -569,3 +569,13 @@ Every checkpoint item now has a hardware answer. What is left is narrower:
 - **Whether the advertiser count moves with the room.** Three runs give means of
   52.4, 51.8 and 43.8 per scan with identical firmware in the third, so the count
   is dominated by something the bench does not control.
+- **What an initialised-but-disabled Bluetooth controller costs.** Phase 2 makes
+  the scan a per-node assignment rather than a build flag, so a `ble` build
+  ordinarily runs with `BleConnector::new` done and `HCI_LE_Set_Scan_Enable`
+  never sent. Every measurement above had scanning *on*, so this state has never
+  been on a bench. The Phase 0 failure was blamed on an initialised NimBLE stack
+  keeping the radio, which is uncomfortably close to the same shape; the
+  difference is that nothing here has a host stack and no scan is enabled. A
+  `ble` build with no BLE assignment, against a plain build, on the same board,
+  would settle it — and if it costs anything, the controller should be brought
+  up on the first assignment instead of at boot.
