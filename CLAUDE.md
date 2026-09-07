@@ -41,6 +41,27 @@ cargo run -p wartui -- ports | status | sniff        # with a bridge plugged in
 cargo run -p wartui -- --log-file wartui.log run     # the only way to see transport logs
 ```
 
+### Telling the boards apart without opening a port
+
+`wartui ports` prints one identical `USB JTAG/serial debug unit` line per attached board and
+says nothing about which is the bridge. Do not find out by probing: `wartui status` on a node blocks for ever —
+a node does not speak the link protocol — and killing it leaves a process wedged in exit with
+the port still held.
+
+The USB serial number *is* the device's MAC, so `ioreg` answers it for free, with no esp tool,
+no reflash and without opening anything:
+
+```sh
+ioreg -l -w0 | grep -E '"USB Serial Number"|"IOCalloutDevice"' | sed 's/^ *[|+ -]*//' \
+  | grep -A1 "Serial Number" | grep -v '^--' | paste - - | grep usbmodem
+```
+
+Each line pairs a `/dev/cu.usbmodem*` path with the MAC of the board behind it — in either
+order, since `ioreg` emits the two properties per device in whatever order it stored them. The bridge is
+then the one whose address the fleet table shows as the bridge, and a node is the one whose
+heartbeats `wartui sniff` attributes to that address. The OUI also separates board generations
+where they differ. Refer to the results by their last two octets, per the global rule.
+
 Each firmware is a **separate workspace** (`exclude = ["firmware"]`): different target, own
 toolchain pin, own lockfile. `cargo test --workspace` never touches them.
 

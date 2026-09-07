@@ -353,7 +353,7 @@ fn the_bridge_that_produced_a_capture_is_recorded_against_the_session() {
     let conn = write(
         &dir,
         vec![Record::Bridge(BridgeSeen {
-            mac: [0x98, 0xA3, 0x16, 0x8E, 0x9D, 0x24],
+            mac: [0x02, 0x00, 0x5E, 0x10, 0x9D, 0x24],
             chip: "Esp32C6".to_owned(),
             fw_version: "0.1.0".to_owned(),
         })],
@@ -364,7 +364,7 @@ fn the_bridge_that_produced_a_capture_is_recorded_against_the_session() {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?))
         })
         .expect("the session row");
-    assert_eq!(mac, vec![0x98, 0xA3, 0x16, 0x8E, 0x9D, 0x24]);
+    assert_eq!(mac, vec![0x02, 0x00, 0x5E, 0x10, 0x9D, 0x24]);
     assert_eq!((chip.as_str(), fw.as_str()), ("Esp32C6", "0.1.0"));
 }
 

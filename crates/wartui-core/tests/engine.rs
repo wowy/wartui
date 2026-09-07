@@ -126,7 +126,7 @@ fn observation(src: Mac, bssid: &str, rssi: i16) -> Event {
 fn connected() -> Event {
     Event::Link(LinkEvent::Connected(BridgeInfo {
         chip: Chip::Esp32C6,
-        mac: [0x98, 0xA3, 0x16, 0x8E, 0x9D, 0x24],
+        mac: [0x02, 0x00, 0x5E, 0x10, 0x9D, 0x24],
         fw_version: "0.1.0".to_owned(),
     }))
 }
@@ -324,7 +324,7 @@ fn the_bridge_is_recorded_when_it_announces_itself() {
     let Some(Record::Bridge(bridge)) = batch.records.first() else {
         panic!("expected a bridge record, got {:?}", batch.records)
     };
-    assert_eq!(bridge.mac, [0x98, 0xA3, 0x16, 0x8E, 0x9D, 0x24]);
+    assert_eq!(bridge.mac, [0x02, 0x00, 0x5E, 0x10, 0x9D, 0x24]);
     assert_eq!(bridge.chip, "Esp32C6");
     assert_eq!(bridge.fw_version, "0.1.0");
 }

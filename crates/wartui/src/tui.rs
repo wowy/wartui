@@ -1163,7 +1163,7 @@ mod tests {
         Snapshot {
             bridge: Some(BridgeInfo {
                 chip: Chip::Esp32C6,
-                mac: [0x98, 0xA3, 0x16, 0x8E, 0x9D, 0x24],
+                mac: [0x02, 0x00, 0x5E, 0x10, 0x9D, 0x24],
                 fw_version: "0.1.0".to_owned(),
             }),
             link_up: true,
