@@ -1,17 +1,17 @@
 # Phase 2 — what channel masks and Bluetooth-by-assignment actually do
 
 Measured on 2026-09-07. The bridge throughout is an ESP32-C6 running
-`firmware/bridge` (`9D:24`, USB). The nodes are two ESP32-C5s (`57:84` and `4F:98`) on `--features esp32c5,ble`
-unless a section says otherwise. Runs A to D are one node; run E is both. Pool
-`us`, plaintext, control channel 6.
+`firmware/bridge` (`9D:24`, USB). The nodes are two ESP32-C5s (`57:84` and
+`4F:98`) on `--features esp32c5,ble` unless a section says otherwise. Runs A to
+D are one node; run E is both. Pool `us`, plaintext, control channel 6.
 
 Access point addresses and names are left out deliberately, as in Phase 1:
 these were real captures of a real neighbourhood, and a BSSID is exactly what a
 geolocation database is built from. Counts and channels carry none of that and
 are the whole of what was being checked.
 
-Five captures. A to D are one board within half an hour; E is both boards, the
-next morning, in the same room.
+Five captures. A to D are one board within half an hour; E is both boards, nine
+hours later, in the same room.
 
 | | build | duration | what it was for |
 | --- | --- | --- | --- |
