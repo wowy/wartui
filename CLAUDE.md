@@ -44,9 +44,9 @@ cargo run -p wartui -- --log-file wartui.log run     # the only way to see trans
 ### Telling the boards apart without opening a port
 
 `wartui ports` prints one identical `USB JTAG/serial debug unit` line per attached board and
-says nothing about which is the bridge. Do not find out by probing: `wartui status` on a node blocks for ever —
-a node does not speak the link protocol — and killing it leaves a process wedged in exit with
-the port still held.
+says nothing about which is the bridge. Probing for it is slow and answers one port at a time:
+`wartui status` on a node waits six seconds for a protocol the node does not speak, then says
+only that this one is not the bridge.
 
 The USB serial number *is* the device's MAC, so `ioreg` answers it for free, with no esp tool,
 no reflash and without opening anything:
