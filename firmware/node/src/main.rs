@@ -70,8 +70,8 @@ use static_cell::StaticCell;
 use wartui_proto::air::{AdminMsg, Frame, MsgType, TextMsg, WARDRIVE_LINE_MAX};
 use wartui_proto::dedup::MacRing;
 use wartui_proto::plan::{
-    ADMIN_WAIT_MS, CHANNEL_DWELL_MS, CONTROL_CHANNEL, DEDUP_RING, NODE_STAGGER_WINDOW_MS,
-    NUM_SCAN_CHANNELS, SCAN_CHANNELS, stagger_offset_ms,
+    ADMIN_WAIT_MS, CHANNEL_DWELL_MS, CONTROL_CHANNEL, ChannelSet, DEDUP_RING, IDLE_BEAT_MS,
+    NODE_STAGGER_WINDOW_MS, NUM_SCAN_CHANNELS, SCAN_CHANNELS, stagger_offset_ms,
 };
 
 #[cfg(feature = "ble")]
@@ -116,19 +116,14 @@ macro_rules! note {
     }};
 }
 
-/// How long an unassigned node listens between heartbeats.
-///
-/// Comfortably longer than [`ADMIN_WAIT_MS`], because a parked node has nothing
-/// else to do: the window is the whole of its cycle rather than a slice of it.
-/// Short enough that joining a fleet is a second rather than a sweep.
-const IDLE_BEAT_MS: u32 = 1000;
-
-const _: () = assert!(
-    IDLE_BEAT_MS >= ADMIN_WAIT_MS,
-    "a parked node must hold the control channel for at least a full admin window"
-);
-
 /// Shortest gap between Bluetooth sweeps.
+///
+/// Only reached at all when the core has set `ADMIN_FLAG_BLE` for this node.
+/// The `ble` cargo feature decides whether any of this is compiled in; the
+/// flag decides whether it runs, and it is off at boot regardless of the build.
+/// That is the shape it is because the cost is per node and measured: at most
+/// one node in a fleet should be paying it, and which one is the operator's
+/// decision rather than a property of the firmware someone happened to flash.
 ///
 /// A sweep is nominally once per completed pass over the assigned channels, but
 /// an assignment can be a single channel — with a full fleet on the 34-channel
@@ -172,10 +167,11 @@ struct Node {
     node_index: u8,
     /// Fleet size the stagger is computed against.
     node_count: u8,
-    /// First and last [`SCAN_CHANNELS`] index to sweep, inclusive.
-    start: u8,
-    end: u8,
-    /// Where in that range the sweep has got to.
+    /// Which [`SCAN_CHANNELS`] indices to dwell on, in ascending order.
+    channels: ChannelSet,
+    /// Whether the core asked this node to scan Bluetooth as well.
+    ble: bool,
+    /// Which of those indices the sweep is on.
     cursor: u8,
     /// Monotonic from boot. Its going backwards is how the host notices a node
     /// has restarted and forgotten its assignment.
@@ -190,8 +186,8 @@ impl Node {
             version: 0,
             node_index: 0,
             node_count: 1,
-            start: 0,
-            end: NUM_SCAN_CHANNELS - 1,
+            channels: ChannelSet::empty(),
+            ble: false,
             cursor: 0,
             counter: 1,
             seen: MacRing::new(),
@@ -199,9 +195,15 @@ impl Node {
         }
     }
 
-    /// Whether the node has been told what to scan.
+    /// Whether the node has anything to sweep.
+    ///
+    /// An empty mask counts as nothing, not as an error. There is no frame
+    /// meaning "scan nothing" and the core does not send one, so this is
+    /// reachable only from a host that is confused — and parking is the same
+    /// answer as never having been told anything, which is a state this
+    /// firmware already handles and the host already reads correctly.
     const fn assigned(&self) -> bool {
-        self.version != 0
+        self.version != 0 && !self.channels.is_empty()
     }
 
     /// Take an assignment, if it is not the one already held.
@@ -210,6 +212,13 @@ impl Node {
     /// That is what lets a host which has restarted and gone back to epoch 1
     /// still be believed, and it is why re-sending an identical assignment is
     /// acknowledged and then silently discarded.
+    ///
+    /// Nothing is rejected. `ChannelSet` drops bits above [`NUM_SCAN_CHANNELS`]
+    /// on the way in rather than refusing the frame, for the same reason the
+    /// old contiguous range was clamped rather than refused: the host has
+    /// already had a MAC-layer acknowledgement from the radio and believes the
+    /// assignment landed, so a node that quietly declined it would leave the
+    /// two sides disagreeing with nothing anywhere to say so.
     fn adopt(&mut self, admin: &AdminMsg) -> bool {
         if admin.assignment_version == self.version {
             return false;
@@ -217,24 +226,24 @@ impl Node {
         self.version = admin.assignment_version;
         self.node_index = admin.node_index;
         self.node_count = admin.node_count;
-        // Clamped rather than rejected. A range this node cannot walk would
-        // strand it: the host has already had a MAC-layer acknowledgement from
-        // the radio and believes the assignment landed, so refusing it here
-        // would leave the two sides disagreeing with nothing to say so.
-        self.end = admin.end_channel_idx.min(NUM_SCAN_CHANNELS - 1);
-        self.start = admin.start_channel_idx.min(self.end);
-        self.cursor = self.start;
+        self.channels = admin.channels;
+        self.ble = admin.scan_ble();
+        self.cursor = self.channels.first().unwrap_or(0);
         true
     }
 
-    /// Step to the next channel, saying whether that completed a sweep.
+    /// Step to the next assigned channel, saying whether that completed a sweep.
     fn advance(&mut self) -> bool {
-        if self.cursor >= self.end {
-            self.cursor = self.start;
-            return true;
+        match self.channels.indices().find(|idx| *idx > self.cursor) {
+            Some(next) => {
+                self.cursor = next;
+                false
+            }
+            None => {
+                self.cursor = self.channels.first().unwrap_or(0);
+                true
+            }
         }
-        self.cursor += 1;
-        false
     }
 
     /// The channel the cursor is on.
@@ -372,7 +381,7 @@ fn main() -> ! {
         // report of a radio that will not tune.
         if node.advance() && on_control {
             #[cfg(feature = "ble")]
-            if Instant::now() >= ble_due {
+            if node.ble && Instant::now() >= ble_due {
                 ble_due = Instant::now() + Duration::from_millis(BLE_INTERVAL_MS);
                 if let Some(scanner) = scanner.as_deref_mut() {
                     report_ble(&mut sender, node, scanner);
@@ -485,16 +494,34 @@ fn drain_admin(receiver: &EspNowReceiver<'_>, node: &mut Node) {
         let Ok(Frame::Admin(admin)) = Frame::decode(received.data()) else { continue };
         if node.adopt(&admin) {
             note!(
-                "assigned v{}: indices {}..={} ({}..={}), node {} of {}",
+                "assigned v{}: {} channels ({}), ble {}, node {} of {}",
                 node.version,
-                node.start,
-                node.end,
-                SCAN_CHANNELS[usize::from(node.start)],
-                SCAN_CHANNELS[usize::from(node.end)],
+                node.channels.len(),
+                Channels(node.channels),
+                if node.ble { "on" } else { "off" },
                 node.node_index,
                 node.node_count
             );
         }
+    }
+}
+
+/// A channel set, said in channel numbers rather than table indices.
+///
+/// The indices are what the wire carries, but the number written on every other
+/// tool the operator owns is the channel — and the one line this prints is read
+/// beside `wartui`'s own fleet table, which says channels too.
+struct Channels(ChannelSet);
+
+impl core::fmt::Display for Channels {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        for (n, idx) in self.0.indices().enumerate() {
+            if n > 0 {
+                f.write_str(",")?;
+            }
+            write!(f, "{}", SCAN_CHANNELS[usize::from(idx)])?;
+        }
+        Ok(())
     }
 }
 

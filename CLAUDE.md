@@ -108,17 +108,32 @@ Positions resolve fresh per record through `PositionChain`: GPS (`--gps`, NMEA o
 
 ## Invariants that are easy to break
 
-- **The on-air format is a contract with a separately compiled C++ program.** Encode/decode is
-  written out by hand, never by transmuting a packed struct, and is checked byte-for-byte against
-  `tests/golden_vectors.txt`. Frames captured by `tools/espnow-sniffer` can be pasted into that
-  file (`name len hex`) to become regression tests. Doc comments cite `file:line` into the vendor
-  firmware repo; keep those references when touching the code they annotate.
+- **Node → core is a contract with a separately compiled C++ program.** Heartbeats and
+  observations are byte-identical to a stock node's, which is what lets golden vectors captured off
+  a vendor fleet keep testing this code. Encode/decode is written out by hand, never by transmuting
+  a packed struct, and is checked byte-for-byte against `tests/golden_vectors.txt`. Frames captured
+  by `tools/espnow-sniffer` can be pasted into that file (`name len hex`) to become regression
+  tests. Doc comments cite `file:line` into the vendor firmware repo; keep those references when
+  touching the code they annotate.
+- **Core → node is ours, and deliberately incompatible.** From Phase 2 `MSG_ADMIN` is wartui's own
+  fourteen-byte frame: version, index, count, a flags byte and a forty-bit `ChannelSet`. The
+  vendor's ten-byte one does not decode; `air::is_legacy_admin` recognises it without obeying it,
+  so a stock core powered up nearby is reported rather than counted as line noise. Nothing is done
+  to keep a mixed fleet working — the vendor node is the thing being replaced.
 - **Twenty nodes is the hard maximum** (`plan::MAX_NODES`) — an ESP-NOW radio's peer table. Above
   it, capture continues and the planner refuses to re-cut rather than partitioning among nodes the
   bridge cannot address.
-- **`MSG_ADMIN` expresses exactly one contiguous run of `SCAN_CHANNELS` indices.** The US pool is
-  two runs with a gap at 12–14, so an assignment must never straddle it; a lone node rotates
-  between runs on a dwell timer instead.
+- **An assignment is a `ChannelSet`, and a pool is still runs.** The mask can name any subset of
+  `SCAN_CHANNELS`, so a run boundary is not something the planner steers around: it flattens the
+  pool and deals round-robin, index `k` to node `k % node_count`, giving every node some of both
+  bands. `IndexRun` still describes a *pool* and must not come back as the shape of an assignment.
+  The plan has no phases and no timer; it changes when fleet membership changes and at no other
+  time.
+- **At most one node scans Bluetooth, and by default none does.** `ADMIN_FLAG_BLE` is a per-node
+  decision the operator makes (`Command::AssignBle`, `b` in the view), not a property of the
+  firmware that was flashed: the `ble` cargo feature decides whether the code exists and the flag
+  decides whether it runs, off at every boot. The cost is measured — every assignment lost on a
+  stock node, ~10% of the sweep period on ours — and is worth paying on one node, not on all.
 - **An assignment is believed only on a MAC-layer ack** (`SendStatus::AckOk` from the transmit
   callback), never on a successful enqueue. The vendor core conflates the two, which is the bug
   this project exists downstream of.

@@ -18,7 +18,7 @@ use wartui_core::engine::{Command, EngineConfig, FleetEngine, Snapshot, StoreSta
 use wartui_core::record::AdminOutcome;
 use wartui_core::runtime::{drive, now};
 use wartui_core::store::{SessionInfo, Store, StoreConfig, open_readonly};
-use wartui_proto::plan::{ChannelPool, IndexRun, NUM_SCAN_CHANNELS};
+use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun, NUM_SCAN_CHANNELS};
 
 /// Wait for something to become true of the published snapshot, or give up.
 ///
@@ -72,32 +72,50 @@ async fn narrowing_a_node_to_one_channel_collapses_its_heartbeat_period() {
     let (command_tx, command_rx) = mpsc::channel(4);
     let capture = tokio::spawn(drive(link, store, engine, snapshot_tx, command_rx, stop_rx));
 
-    // A node that has never heard a core scans all forty channels
-    // (`src/WiFiOps.cpp:77-80`), so this is the wide baseline.
-    let wide = until(&snapshot_rx, "a settled heartbeat period", |s| {
-        s.nodes.first().is_some_and(|n| n.state.heartbeats >= 4)
+    // The wide baseline has to be asked for. A wartui node that has never
+    // heard a core parks on the control channel and collects nothing, rather
+    // than defaulting to all forty channels the way the vendor firmware does
+    // (`src/WiFiOps.cpp:77-80`) — so an unassigned node's heartbeat period says
+    // nothing about sweeping at all.
+    let joined = until(&snapshot_rx, "the node to turn up", |s| {
+        s.nodes.first().is_some_and(|n| n.state.heartbeats >= 1)
+    })
+    .await;
+    let mac = joined.nodes[0].state.mac;
+    assert!(joined.nodes[0].state.confirmed.is_none(), "nothing has assigned it yet");
+
+    command_tx
+        .send(Command::Assign { mac, channels: ChannelPool::All.channels() })
+        .await
+        .expect("the engine is listening");
+    let wide = until(&snapshot_rx, "four sweeps of the whole table", |s| {
+        s.nodes.first().is_some_and(|n| {
+            n.state.confirmed.is_some_and(|c| c.channels == ChannelPool::All.channels())
+                && n.state.heartbeats >= 5
+        })
     })
     .await;
     let wide_period = wide.nodes[0].state.beat_period_ms().expect("a measured period");
-    let mac = wide.nodes[0].state.mac;
-    assert!(wide.nodes[0].state.confirmed.is_none(), "nothing has assigned it yet");
 
     command_tx
-        .send(Command::Assign { mac, range: IndexRun::new(5, 5) })
+        .send(Command::Assign { mac, channels: ChannelSet::from_run(IndexRun::new(5, 5)) })
         .await
         .expect("the engine is listening");
 
     // Nothing goes out until the node's next heartbeat opens its admin window,
-    // and the node adopts the range only because the epoch differs from the 0
-    // it booted with — the `!=` at `src/WiFiOps.cpp:1198`.
-    let acked = until(&snapshot_rx, "the assignment to be acknowledged", |s| {
-        s.nodes.first().is_some_and(|n| n.state.confirmed.is_some())
+    // and the node adopts the channels only because the epoch differs from the
+    // 0 it booted with — the `!=` at `src/WiFiOps.cpp:1198`.
+    let acked = until(&snapshot_rx, "the narrow assignment to be acknowledged", |s| {
+        s.nodes.first().is_some_and(|n| n.state.confirmed.is_some_and(|c| c.channels.len() == 1))
     })
     .await;
     let node = &acked.nodes[0];
-    assert_eq!(node.state.confirmed.expect("confirmed").range, IndexRun::new(5, 5));
+    assert_eq!(
+        node.state.confirmed.expect("confirmed").channels,
+        ChannelSet::from_run(IndexRun::new(5, 5))
+    );
     assert!(!node.state.dirty, "acknowledged, so nothing is owed");
-    assert_eq!(acked.counters.admin_acked, 1);
+    assert_eq!(acked.counters.admin_acked, 2, "the wide assignment, then the narrow one");
     assert_eq!(acked.counters.admin_failed, 0);
 
     // Three more sweeps for the median to have forgotten the wide ones. This is
@@ -120,15 +138,21 @@ async fn narrowing_a_node_to_one_channel_collapses_its_heartbeat_period() {
     capture.await.expect("the capture task should not panic");
 
     let conn = open_readonly(&path).expect("reopening the capture");
-    let (outcome, start_idx, end_idx, latency): (String, u8, u8, Option<i64>) = conn
+    let (outcome, channels, ble, latency): (String, i64, bool, Option<i64>) = conn
         .query_row(
-            "SELECT outcome, start_idx, end_idx, latency_us FROM assignment ORDER BY id DESC",
+            "SELECT outcome, channels, ble, latency_us FROM assignment ORDER BY id DESC",
             [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .expect("an assignment row");
     assert_eq!(outcome, AdminOutcome::Acked.as_str());
-    assert_eq!((start_idx, end_idx), (5, 5));
+    // Stored as the mask that went on the wire, so the row says what the node
+    // was told rather than an interpretation of it.
+    assert_eq!(
+        ChannelSet::from_bits(u64::try_from(channels).expect("a 40-bit mask")),
+        ChannelSet::from_run(IndexRun::new(5, 5))
+    );
+    assert!(!ble);
     // The number that settles whether a bridge this dumb can hit a 300 ms
     // window. Measured on the bridge's own clock, from the heartbeat that
     // opened the window to the transmit callback.

@@ -1,16 +1,26 @@
 //! A simulated fleet, so the engine and the TUI can be built without hardware.
 //!
 //! The fake nodes behave the way the real firmware does, including the parts
-//! that are inconvenient: they heartbeat once per completed sweep rather than
-//! on a timer, they stagger their transmissions, they adopt an assignment only
-//! when its version *differs* from the one they hold, and they suppress a BSSID
-//! they have already reported until it falls out of a 200-entry ring. Modelling
-//! that last one matters — it is why a real fleet's observation stream goes
-//! quiet after the first pass, and a simulator that streamed endlessly would
-//! teach the wrong lesson.
+//! that are inconvenient: they park doing nothing until they are told what to
+//! scan, they heartbeat once per completed sweep rather than on a timer, they
+//! stagger their transmissions, they adopt an assignment only when its version
+//! *differs* from the one they hold, and they suppress a BSSID they have
+//! already reported until it falls out of a 200-entry ring. Modelling that last
+//! one matters — it is why a real fleet's observation stream goes quiet after
+//! the first pass, and a simulator that streamed endlessly would teach the
+//! wrong lesson.
+//!
+//! Two things here are models of a *failure* rather than of correct behaviour,
+//! and both are off unless asked for. [`SimConfig::ble_coexistence_failure`]
+//! reproduces what a stock node did on the bench — hold the shared antenna
+//! through its own admin window and acknowledge nothing — which is the only way
+//! to exercise the host's `no admin ack` path without a second radio and a
+//! reflash. It is off by default because it is *not* what wartui's own node
+//! firmware measured: that one acknowledged every time with BLE on.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
@@ -19,8 +29,8 @@ use wartui_proto::link::{
     BROADCAST, BridgeToHost, Chip, EspNowPayload, HostToBridge, LogLevel, LogStr, Mac, SendStatus,
 };
 use wartui_proto::plan::{
-    ADMIN_WAIT_MS, CHANNEL_DWELL_MS, DEDUP_RING, NODE_STAGGER_WINDOW_MS, NUM_SCAN_CHANNELS,
-    SCAN_CHANNELS,
+    ADMIN_WAIT_MS, CHANNEL_DWELL_MS, ChannelSet, DEDUP_RING, IDLE_BEAT_MS, NODE_STAGGER_WINDOW_MS,
+    NUM_SCAN_CHANNELS, SCAN_CHANNELS,
 };
 
 use crate::{BridgeInfo, LinkEvent, LinkHandle, TransportError, link_pair};
@@ -37,14 +47,41 @@ pub struct SimConfig {
     pub seed: u64,
     /// Size of the imaginary neighbourhood.
     pub wifi_networks: u16,
-    /// Chance per channel dwell that a BLE advertiser shows up. BLE addresses
-    /// rotate for privacy, so these never dedup and keep the stream alive.
+    /// Chance per channel dwell that a BLE advertiser shows up, for the one
+    /// node holding the Bluetooth assignment. BLE addresses rotate for privacy,
+    /// so these never dedup and keep the stream alive.
+    ///
+    /// A rate rather than a model: the real firmware runs one bounded scan
+    /// every few seconds and reports what it heard in a burst. What is faithful
+    /// here is *who* emits these — only the node the host gave the flag to, so
+    /// a fleet where nobody was asked reports no Bluetooth at all.
     pub ble_chance: f64,
+    /// Make the node holding the Bluetooth assignment miss its admin window.
+    ///
+    /// The Phase 0 failure, reproducible without hardware: a node whose radio
+    /// is away on the shared 2.4 GHz antenna acknowledges nothing, so the
+    /// bridge reports `AckFail` and the host shows `no admin ack`. Off by
+    /// default, because wartui's own node firmware does not do this — it bounds
+    /// the scan, switches the controller off, and acknowledged every assignment
+    /// on the bench (`docs/phase-1-findings.md`).
+    ///
+    /// Note that it is self-latching, exactly as it was on the bench: the frame
+    /// that turns Bluetooth on is acknowledged, because the node was not yet
+    /// holding the antenna, and nothing after it is. The operator cannot take
+    /// the assignment back.
+    pub ble_coexistence_failure: bool,
 }
 
 impl Default for SimConfig {
     fn default() -> Self {
-        Self { node_count: 3, speed: 1.0, seed: 0x5EED, wifi_networks: 120, ble_chance: 0.15 }
+        Self {
+            node_count: 3,
+            speed: 1.0,
+            seed: 0x5EED,
+            wifi_networks: 120,
+            ble_chance: 0.15,
+            ble_coexistence_failure: false,
+        }
     }
 }
 
@@ -80,21 +117,46 @@ impl SimTransport {
         let world = Arc::new(World::new(&self.config));
         let started = Instant::now();
 
+        // Nothing a node says is observable until the dongle is attached and
+        // has announced itself, so the fake fleet waits for that rather than
+        // racing it. Without the gate a parked node — which heartbeats the
+        // moment it starts — can put a frame on the link ahead of `Connected`,
+        // and a host that has not seen a bridge yet has nowhere to file it.
+        let (attached_tx, attached_rx) = tokio::sync::watch::channel(false);
+
         let mut admin_txs = Vec::new();
+        let mut fleet = Vec::new();
         for index in 0..self.config.node_count {
             let (admin_tx, admin_rx) = mpsc::channel(8);
-            admin_txs.push((Self::node_mac(index), admin_tx));
+            // Shared with the bridge rather than inferred from the frames it
+            // routes, because the bridge has to know the node is deaf *before*
+            // it decides what to report — the whole point of the failure is
+            // that nothing arrives to be inferred from.
+            let holds_ble = Arc::new(AtomicBool::new(false));
+            admin_txs.push((Self::node_mac(index), admin_tx, Arc::clone(&holds_ble)));
+            fleet.push((SimNode::new(index, holds_ble), admin_rx));
+        }
+
+        let events = plumbing.events.clone();
+        tokio::spawn(run_bridge(
+            plumbing,
+            admin_txs,
+            started,
+            self.config.node_count,
+            self.config.ble_coexistence_failure,
+            attached_tx,
+        ));
+        for (node, admin_rx) in fleet {
             tokio::spawn(run_node(
-                SimNode::new(index),
+                node,
                 Arc::clone(&world),
-                plumbing.events.clone(),
+                events.clone(),
                 admin_rx,
                 self.config.speed,
                 started,
+                attached_rx.clone(),
             ));
         }
-
-        tokio::spawn(run_bridge(plumbing, admin_txs, started, self.config.node_count));
         Ok(handle)
     }
 }
@@ -102,9 +164,11 @@ impl SimTransport {
 /// The dongle half: announces itself, routes admin frames, answers status.
 async fn run_bridge(
     mut plumbing: crate::LinkPlumbing,
-    admin_txs: Vec<(Mac, mpsc::Sender<AdminMsg>)>,
+    admin_txs: Vec<(Mac, mpsc::Sender<AdminMsg>, Arc<AtomicBool>)>,
     started: Instant,
     node_count: u8,
+    ble_coexistence_failure: bool,
+    attached: tokio::sync::watch::Sender<bool>,
 ) {
     let info = BridgeInfo {
         chip: Chip::Esp32C6,
@@ -114,6 +178,8 @@ async fn run_bridge(
     if plumbing.events.send(LinkEvent::Connected(info)).await.is_err() {
         return;
     }
+    // Only now is there anything for the fleet to be heard by.
+    let _ = attached.send(true);
 
     let mut channel = 6u8;
     let mut peers: Vec<Mac> = Vec::new();
@@ -153,7 +219,8 @@ async fn run_bridge(
                 if ensure_peer && !peers.contains(&dst) {
                     peers.push(dst);
                 }
-                let status = deliver(&admin_txs, dst, &payload, &peers).await;
+                let status =
+                    deliver(&admin_txs, dst, &payload, &peers, ble_coexistence_failure).await;
                 Some(BridgeToHost::SendResult { id, status, tx_us: elapsed_us(started) })
             }
         };
@@ -168,10 +235,11 @@ async fn run_bridge(
 
 /// Hand a transmitted frame to whichever simulated node it is addressed to.
 async fn deliver(
-    admin_txs: &[(Mac, mpsc::Sender<AdminMsg>)],
+    admin_txs: &[(Mac, mpsc::Sender<AdminMsg>, Arc<AtomicBool>)],
     dst: Mac,
     payload: &[u8],
     peers: &[Mac],
+    ble_coexistence_failure: bool,
 ) -> SendStatus {
     if dst == BROADCAST {
         return SendStatus::Broadcast;
@@ -183,8 +251,16 @@ async fn deliver(
         // The real radio would happily transmit it; nobody is listening.
         return SendStatus::AckOk;
     };
-    match admin_txs.iter().find(|(mac, _)| *mac == dst) {
-        Some((_, tx)) if tx.send(admin).await.is_ok() => SendStatus::AckOk,
+    match admin_txs.iter().find(|(mac, _, _)| *mac == dst) {
+        // The radio is away on the Bluetooth antenna. An 802.11 acknowledgement
+        // comes from the receiver's MAC hardware, so this is indistinguishable
+        // from a node that is not there — and the frame is genuinely dropped,
+        // not merely unreported, which is why the node can never be told to
+        // stop scanning.
+        Some((_, _, holds_ble)) if ble_coexistence_failure && holds_ble.load(Ordering::Relaxed) => {
+            SendStatus::AckFail
+        }
+        Some((_, tx, _)) if tx.send(admin).await.is_ok() => SendStatus::AckOk,
         // Addressed to a node that is not out there, so nothing acknowledges.
         _ => SendStatus::AckFail,
     }
@@ -199,28 +275,38 @@ struct SimNode {
     assignment_version: u8,
     node_index: u8,
     node_count: u8,
-    start_idx: u8,
-    end_idx: u8,
+    channels: ChannelSet,
+    /// Whether this node was asked to scan Bluetooth, mirrored where the
+    /// bridge can read it.
+    holds_ble: Arc<AtomicBool>,
     hb_counter: u32,
     seen: VecDeque<Mac>,
     rng: Xorshift,
 }
 
 impl SimNode {
-    fn new(index: u8) -> Self {
+    fn new(index: u8, holds_ble: Arc<AtomicBool>) -> Self {
         Self {
             mac: SimTransport::node_mac(index),
             assignment_version: 0,
             node_index: 0,
             node_count: 1,
-            // A node that has never heard a core scans everything
-            // (`src/WiFiOps.cpp:77-80`).
-            start_idx: 0,
-            end_idx: NUM_SCAN_CHANNELS - 1,
+            // Nothing until it is told. The vendor default is all forty
+            // channels (`src/WiFiOps.cpp:77-80`); wartui's node parks on the
+            // control channel and collects nothing, so that a node which has
+            // never heard a core is not quietly duplicating the fleet's work
+            // and transmitting where the pool exists to keep it off.
+            channels: ChannelSet::empty(),
+            holds_ble,
             hb_counter: 0,
             seen: VecDeque::with_capacity(DEDUP_RING),
             rng: Xorshift::new(0xA5A5_0000 ^ u64::from(index).wrapping_mul(0x9E37_79B9)),
         }
+    }
+
+    /// Whether the node has been told what to scan.
+    const fn assigned(&self) -> bool {
+        self.assignment_version != 0
     }
 
     /// Apply an assignment, but only when its version differs — the same `!=`
@@ -232,8 +318,13 @@ impl SimNode {
         self.assignment_version = admin.assignment_version;
         self.node_index = admin.node_index;
         self.node_count = admin.node_count;
-        self.start_idx = admin.start_channel_idx;
-        self.end_idx = admin.end_channel_idx;
+        self.channels = admin.channels;
+        self.holds_ble.store(admin.scan_ble(), Ordering::Relaxed);
+    }
+
+    /// Whether this node is the one scanning Bluetooth.
+    fn scanning_ble(&self) -> bool {
+        self.holds_ble.load(Ordering::Relaxed)
     }
 
     /// The firmware's 200-entry insertion-order ring (`src/WiFiOps.cpp:1803`).
@@ -257,15 +348,35 @@ async fn run_node(
     mut admin_rx: mpsc::Receiver<AdminMsg>,
     speed: f64,
     started: Instant,
+    mut attached: tokio::sync::watch::Receiver<bool>,
 ) {
+    if attached.wait_for(|up| *up).await.is_err() {
+        return;
+    }
     let dwell = scaled(u64::from(CHANNEL_DWELL_MS), speed);
     loop {
-        // A node walks its assigned range one channel per step
+        if !node.assigned() {
+            // Parked on the control channel, reachable the whole time and
+            // collecting nothing. Heartbeat first and listen afterwards,
+            // because the host only ever transmits an assignment in answer to
+            // one — so this is how long joining a fleet takes.
+            if beat(&events, &mut node, started).await.is_err() {
+                return;
+            }
+            if nap(scaled(u64::from(IDLE_BEAT_MS), speed), &mut admin_rx, &mut node)
+                .await
+                .is_break()
+            {
+                return;
+            }
+            continue;
+        }
+
+        // A node walks its assigned channels one per step
         // (`startNextNodeAssignedScan`, `src/WiFiOps.cpp:741-760`), so the
         // sweep — and therefore the heartbeat period — is proportional to how
         // many channels it was given.
-        let (start, end) = (node.start_idx, node.end_idx.max(node.start_idx));
-        for idx in start..=end.min(NUM_SCAN_CHANNELS - 1) {
+        for idx in node.channels.indices() {
             if nap(dwell, &mut admin_rx, &mut node).await.is_break() {
                 return;
             }
@@ -277,7 +388,10 @@ async fn run_node(
                     return;
                 }
             }
-            if node.rng.next_f64() < world.ble_chance {
+            // Only the node that was given the Bluetooth assignment, which is
+            // the fleet-wide property worth being able to see in the simulator:
+            // revoking it should stop these arriving.
+            if node.scanning_ble() && node.rng.next_f64() < world.ble_chance {
                 let ble = world.ble_sighting(&mut node.rng);
                 if node.first_sighting(ble.bssid)
                     && emit(&events, &node, &ble.line(), started).await.is_err()
@@ -297,10 +411,7 @@ async fn run_node(
             return;
         }
 
-        node.hb_counter = node.hb_counter.wrapping_add(1);
-        let beat = TextMsg::new(MsgType::Heartbeat, node.hb_counter, b"")
-            .expect("an empty heartbeat payload always fits");
-        if send_frame(&events, node.mac, &beat.encode(), started).await.is_err() {
+        if beat(&events, &mut node, started).await.is_err() {
             return;
         }
 
@@ -308,6 +419,18 @@ async fn run_node(
             return;
         }
     }
+}
+
+/// Broadcast one heartbeat and advance the counter.
+async fn beat(
+    events: &mpsc::Sender<LinkEvent>,
+    node: &mut SimNode,
+    started: Instant,
+) -> Result<(), ()> {
+    node.hb_counter = node.hb_counter.wrapping_add(1);
+    let msg = TextMsg::new(MsgType::Heartbeat, node.hb_counter, b"")
+        .expect("an empty heartbeat payload always fits");
+    send_frame(events, node.mac, &msg.encode(), started).await
 }
 
 /// Sleep, adopting any assignment that arrives meanwhile.

@@ -6,6 +6,7 @@
 
 use wartui_proto::air::RecordKind;
 use wartui_proto::link::Mac;
+use wartui_proto::plan::ChannelSet;
 
 use crate::position::Fix;
 
@@ -153,12 +154,12 @@ pub struct AssignmentSent {
     /// Fleet size as of the assignment, not as of the send. Divergence 7: the
     /// vendor core reads it live (`src/WiFiOps.cpp:651`), so a node joining
     /// between planning and sending gets a count that disagrees with the
-    /// partition its range came from.
+    /// partition its share came from.
     pub node_count: u8,
-    /// First `SCAN_CHANNELS` index, inclusive.
-    pub start_idx: u8,
-    /// Last `SCAN_CHANNELS` index, inclusive.
-    pub end_idx: u8,
+    /// Which `SCAN_CHANNELS` indices the node was told to dwell on.
+    pub channels: ChannelSet,
+    /// Whether it was also told to scan Bluetooth.
+    pub ble: bool,
     /// Unix milliseconds the frame was handed to the link.
     pub created_at_ms: i64,
     /// Unix milliseconds the outcome arrived, if one did.

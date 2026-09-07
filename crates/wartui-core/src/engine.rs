@@ -16,18 +16,34 @@
 //!
 //! From Phase 5 it does that on its own. With auto-assignment on, the engine
 //! holds a partition of the channel pool across every node that is currently
-//! heartbeating, re-partitions when that set changes, and — where the pool has
-//! more runs than there are nodes to hold them — rotates one node between them
-//! on a dwell timer. That is the whole of what replacing the vendor core means:
-//! owning the node table and deciding what each node scans.
+//! heartbeating and re-partitions when that set changes. That is the whole of
+//! what replacing the vendor core means: owning the node table and deciding
+//! what each node scans.
+//!
+//! Phase 2 of the node firmware took a timer out of here. An assignment used to
+//! be a contiguous range, which could not express the US pool's two runs at
+//! once, so a lone node was given them in turn on a sixty-second dwell and this
+//! module carried the phase, the phase clock and the re-issue that went with
+//! them. A forty-bit channel mask says it in one frame, so a plan is now a
+//! thing the fleet is simply *in* — it changes when membership changes and at
+//! no other time.
+//!
+//! What replaced it is smaller and is an operator's decision rather than a
+//! timer: [`Command::AssignBle`] moves the Bluetooth scan between nodes, at
+//! most one at a time. It lives here rather than in the view because it is the
+//! same kind of fact as a channel assignment — something one node holds, that
+//! has to be delivered inside that node's own admin window, and that is only
+//! believed on an acknowledgement.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use wartui_bridge::{BridgeInfo, LinkEvent};
-use wartui_proto::air::{AdminMsg, Frame, MsgType, RecordKind, WardriveLine, wire_version};
+use wartui_proto::air::{
+    AdminMsg, Frame, MsgType, RecordKind, WardriveLine, is_legacy_admin, wire_version,
+};
 use wartui_proto::link::{BridgeToHost, EspNowPayload, HostToBridge, Mac, SendStatus};
-use wartui_proto::plan::{self, ChannelPool, IndexRun, Plan};
+use wartui_proto::plan::{self, ChannelPool, ChannelSet, Plan};
 
 use crate::position::PositionChain;
 use crate::record::{
@@ -71,7 +87,7 @@ pub enum Event {
 /// both through [`FleetEngine::handle`] is what makes that ordering testable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
-    /// Give one node a contiguous range of scan-channel indices.
+    /// Give one node a set of scan-channel indices.
     ///
     /// Nothing goes out immediately. A node only listens for an assignment in
     /// the 300 ms it holds open after a heartbeat (`src/WiFiOps.cpp:718-739`);
@@ -81,12 +97,31 @@ pub enum Command {
     /// Honoured whether or not auto-assignment is on: the engine is the
     /// mechanism and the view is the policy. The next re-partition will take
     /// the node back, so the view refuses the key rather than letting an
-    /// operator wonder why their range lasted until the fleet next changed.
+    /// operator wonder why their set lasted until the fleet next changed.
     Assign {
         /// Which node.
         mac: Mac,
-        /// The range it should scan.
-        range: IndexRun,
+        /// The channels it should dwell on.
+        channels: ChannelSet,
+    },
+    /// Move the Bluetooth scan to one node, or take it away from the fleet.
+    ///
+    /// At most one node scans BLE, and by default none does. That is not
+    /// timidity: a stock node with BLE on acknowledged none of the thirty-two
+    /// assignments sent to it, because NimBLE holds the one 2.4 GHz antenna
+    /// through exactly the window the node has to be listening in
+    /// (`docs/phase-0-findings.md`). wartui's own node firmware bounds the scan
+    /// and switches the controller off, and on the same board acknowledged
+    /// every time at a ~10% sweep-period cost (`docs/phase-1-findings.md`) — so
+    /// this is a cost the operator chooses to pay on one node, not one the
+    /// fleet pays everywhere.
+    ///
+    /// Like [`Self::Assign`], nothing goes out now: the flag rides on that
+    /// node's next assignment, which needs its next heartbeat. Moving it costs
+    /// two frames, because the node giving it up has to be told as well.
+    AssignBle {
+        /// Which node, or `None` to stop scanning BLE anywhere.
+        mac: Option<Mac>,
     },
     /// Turn auto-assignment on or off.
     ///
@@ -133,12 +168,6 @@ pub struct EngineConfig {
     /// of nodes all sweeping the same channels. Off, it is a monitor that can
     /// assign when told to.
     pub auto: bool,
-    /// How long a node holds one phase of a rotating plan.
-    ///
-    /// Only reached when the pool has more runs than the fleet has nodes to
-    /// hold them — one node on [`ChannelPool::Us`], in practice. Coverage is
-    /// then intermittent rather than incorrect, and this is the period.
-    pub rotation_dwell: Duration,
     /// How long a node may go without a heartbeat before it stops counting
     /// towards topology. Matches the firmware's own 60 s node timeout.
     pub topology_timeout: Duration,
@@ -169,7 +198,6 @@ impl Default for EngineConfig {
         Self {
             pool: ChannelPool::Us,
             auto: true,
-            rotation_dwell: Duration::from_secs(60),
             topology_timeout: Duration::from_secs(60),
             status_interval: Duration::from_secs(5),
             tail_len: 200,
@@ -199,7 +227,7 @@ pub struct NodeState {
     /// topology. Two clocks, because they answer different questions.
     pub last_seen: Instant,
     /// Monotonic time of the most recent heartbeat, which is what decides
-    /// whether this node can still be given a channel range.
+    /// whether this node can still be given a channel assignment.
     pub last_heartbeat: Option<Instant>,
     /// The node's most recent heartbeat counter.
     pub counter: Option<u32>,
@@ -244,18 +272,26 @@ pub struct NodeState {
     beat_gaps: VecDeque<u32>,
 }
 
-/// A channel range, and the fleet arithmetic it was computed against.
+/// What one node was told to do, and the fleet arithmetic it was computed
+/// against.
 ///
-/// The index and count travel with the range rather than being read live at
+/// The index and count travel with the channels rather than being read live at
 /// send time. Divergence 7: the vendor core reads `node_count` at the moment it
 /// transmits (`src/WiFiOps.cpp:651`) while the ranges came from an earlier
 /// recalculation, so a node that joins in between is told a fleet size that
-/// disagrees with the partition its own range was cut from — and computes the
+/// disagrees with the partition its own share was cut from — and computes the
 /// wrong transmit stagger slot from it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Assignment {
-    /// The inclusive run of [`wartui_proto::plan::SCAN_CHANNELS`] indices.
-    pub range: IndexRun,
+    /// Which [`wartui_proto::plan::SCAN_CHANNELS`] indices to dwell on.
+    pub channels: ChannelSet,
+    /// Whether this node is the one scanning Bluetooth.
+    ///
+    /// Part of the assignment rather than beside it, because it travels in the
+    /// same frame and is adopted by the same epoch comparison. A node cannot
+    /// be told about one without the other, and treating them separately would
+    /// make "acknowledged" ambiguous.
+    pub ble: bool,
     /// This node's slot in the fleet-wide stagger order.
     pub node_index: u8,
     /// Fleet size as of this assignment.
@@ -379,7 +415,7 @@ pub struct StoreStats {
 ///
 /// `assignable` is carried rather than left for the UI to re-derive, because
 /// the rule is not the obvious one: a node can be plainly present — streaming
-/// observations, RSSI healthy — and still be unable to accept a channel range,
+/// observations, RSSI healthy — and still be unable to accept an assignment,
 /// because only heartbeats open its admin window. A UI that inferred liveness
 /// from the last frame of any kind would show a green light next to a node
 /// nothing can be assigned to.
@@ -429,12 +465,11 @@ pub struct Snapshot {
     /// The partition in force, when there is one. `None` with auto off, with
     /// nothing heartbeating, or with more nodes alive than wartui supports.
     pub plan: Option<Plan>,
-    /// Which phase of a rotating plan the fleet is in. Always 0 when the plan
-    /// does not rotate.
-    pub phase: u8,
+    /// Which node is scanning Bluetooth, if any.
+    pub ble_node: Option<Mac>,
     /// Every node, ordered by MAC so the table does not reshuffle itself.
     pub nodes: Vec<NodeView>,
-    /// How many of them can still be given a channel range.
+    /// How many of them can still be given an assignment.
     pub alive: usize,
     /// The most recent observations, newest last.
     pub tail: Vec<TailEntry>,
@@ -509,10 +544,10 @@ pub struct FleetEngine {
     /// `node_index`. Compared against the live membership to decide whether
     /// anything needs re-partitioning at all.
     plan_members: Vec<Mac>,
-    /// Which phase of a rotating plan the fleet is in.
-    phase: u8,
-    /// When the fleet entered that phase, for the dwell timer.
-    phase_since: Option<Instant>,
+    /// The one node asked to scan Bluetooth, if any. Not part of the plan: the
+    /// plan is a function of who is present, and this is an operator's choice
+    /// that survives re-partitioning.
+    ble_node: Option<Mac>,
 }
 
 /// One assignment in flight.
@@ -549,8 +584,7 @@ impl FleetEngine {
             auto: config.auto,
             plan: None,
             plan_members: Vec::new(),
-            phase: 0,
-            phase_since: None,
+            ble_node: None,
             config,
         }
     }
@@ -598,9 +632,19 @@ impl FleetEngine {
 
     fn on_tick(&mut self, now: Now, batch: &mut ActionBatch) {
         self.expire_pending(now, batch);
-        // Where a node ageing out of topology is noticed, and where a rotating
-        // plan's dwell runs out. Both are the passage of time rather than
-        // anything arriving, so the tick is the only thing that can see them.
+        // A node ageing out of topology is the passage of time rather than
+        // anything arriving, so the tick is the only thing that can see it.
+        // Checked before `replan` and outside it, because `replan` returns
+        // early with auto off and the Bluetooth assignment is not the planner's
+        // — a node that has left the fleet is not scanning anything for us,
+        // and leaving it named here would have the view reporting BLE coverage
+        // the fleet does not have.
+        let ble_gone = self
+            .ble_node
+            .is_some_and(|mac| !self.nodes.get(&mac).is_some_and(|node| self.is_alive(node, now)));
+        if ble_gone {
+            self.ble_node = None;
+        }
         self.replan(now);
         let due = self
             .last_status_poll
@@ -672,7 +716,16 @@ impl FleetEngine {
         }
 
         let Ok(frame) = Frame::decode(payload) else {
-            self.counters.undecodable += 1;
+            // A stock core in the same room still assigns in the vendor's
+            // ten-byte shape, which stopped decoding in Phase 2. It is the one
+            // undecodable frame with an operational meaning — someone else is
+            // telling this fleet what to scan — so it is counted where an
+            // operator will look for it rather than as line noise.
+            if is_legacy_admin(payload) {
+                self.counters.foreign_admin += 1;
+            } else {
+                self.counters.undecodable += 1;
+            }
             return;
         };
 
@@ -716,7 +769,7 @@ impl FleetEngine {
                     node.reboots += 1;
                     // It has forgotten whatever range it held, and its own
                     // version field went back to its boot value with it. So
-                    // the belief goes, and the range is re-issued under a
+                    // the belief goes, and the assignment is re-issued under a
                     // fresh epoch rather than one the node might now match.
                     node.confirmed = None;
                 }
@@ -791,7 +844,8 @@ impl FleetEngine {
     /// Take an operator's instruction. Nothing goes out from here.
     fn on_command(&mut self, command: Command, now: Now) {
         match command {
-            Command::Assign { mac, range } => self.on_assign(mac, range, now),
+            Command::Assign { mac, channels } => self.on_assign(mac, channels, now),
+            Command::AssignBle { mac } => self.on_assign_ble(mac),
             Command::SetAuto(on) => {
                 self.auto = on;
                 // Forget what the last plan was built for, so switching back on
@@ -799,18 +853,16 @@ impl FleetEngine {
                 self.plan_members.clear();
                 if !on {
                     self.plan = None;
-                    self.phase = 0;
-                    self.phase_since = None;
                 }
                 self.replan(now);
             }
         }
     }
 
-    /// Give one node a range, by hand.
-    fn on_assign(&mut self, mac: Mac, range: IndexRun, now: Now) {
+    /// Give one node a set of channels, by hand.
+    fn on_assign(&mut self, mac: Mac, channels: ChannelSet, now: Now) {
         // Under a plan the node keeps the index and count the plan gave it: a
-        // hand-assigned range changes what one node scans, not where in the
+        // hand-assigned set changes what one node scans, not where in the
         // stagger window it keys up, and those two fields are what the fleet
         // agrees its slots from.
         //
@@ -843,42 +895,79 @@ impl FleetEngine {
             }
         };
 
-        // A fresh epoch even when the range is unchanged. A node adopts on
-        // `!=`, so re-sending an epoch it already holds is a frame it will
+        // A fresh epoch even when the set is unchanged. A node adopts on `!=`,
+        // so re-sending an epoch it already holds is a frame it will
         // acknowledge and then discard — which would look exactly like success.
         self.last_counter += 1;
-        let assignment = Assignment { range, node_index, node_count, counter: self.last_counter };
+        // The Bluetooth flag is not the operator's to set here. It rides in the
+        // same frame, so every assignment has to carry the fleet's current
+        // answer to "who scans BLE" or a hand-assigned node would silently drop
+        // or acquire the scan as a side effect of being given channels.
+        let assignment = Assignment {
+            channels,
+            ble: self.ble_node == Some(mac),
+            node_index,
+            node_count,
+            counter: self.last_counter,
+        };
 
         let Some(node) = self.nodes.get_mut(&mac) else { return };
         node.desired = Some(assignment);
         node.dirty = true;
     }
 
+    /// Move the Bluetooth scan, or take it off the fleet entirely.
+    ///
+    /// Nothing is sent from here. The flag lives in the assignment frame, so
+    /// telling a node about it means re-issuing what it already holds under a
+    /// fresh epoch — and a node with nothing to re-issue simply gets the flag
+    /// with whatever assignment reaches it next, which under auto is its next
+    /// re-partition and by hand is the operator's next key.
+    fn on_assign_ble(&mut self, target: Option<Mac>) {
+        if self.ble_node == target {
+            return;
+        }
+        let previous = std::mem::replace(&mut self.ble_node, target);
+        // Both ends of the move, and in this order so that a fleet watched from
+        // outside never has two nodes believing they hold the scan: the node
+        // giving it up is told first.
+        for mac in previous.into_iter().chain(target) {
+            self.reissue(mac);
+        }
+    }
+
     /// Re-mark a node's assignment for delivery under a new epoch.
+    ///
+    /// Refreshes the Bluetooth flag on the way past, because this is the only
+    /// path by which a node that already holds the right channels is told about
+    /// a change to that flag — and because a reboot re-issue must not put back
+    /// an assignment naming a scan the fleet has since moved elsewhere.
     fn reissue(&mut self, mac: Mac) {
         self.last_counter += 1;
         let counter = self.last_counter;
+        let ble = self.ble_node == Some(mac);
         if let Some(node) = self.nodes.get_mut(&mac)
             && let Some(desired) = node.desired.as_mut()
         {
             desired.counter = counter;
+            desired.ble = ble;
             node.dirty = true;
         }
     }
 
-    /// Hold the fleet on a partition of the pool, re-cutting it when the fleet
-    /// changes or a rotating plan's dwell runs out.
+    /// Hold the fleet on a partition of the pool, re-cutting it when the set of
+    /// nodes changes and at no other time.
     ///
     /// Membership is every node that is currently heartbeating: a node that is
-    /// not heartbeating never opens an admin window, so a range given to it
+    /// not heartbeating never opens an admin window, so a share given to it
     /// would sit undelivered while the rest of the fleet was partitioned around
     /// a node that is not scanning it. Nodes are ordered by MAC, which is the
     /// order that gives them their `node_index`, so the numbering is a function
     /// of who is present rather than of the order they turned up in.
     ///
-    /// Cheap on the common path: an unchanged membership with time left on the
-    /// dwell returns without touching anything, which is what keeps this off
-    /// the critical path of a heartbeat.
+    /// Cheap on the common path: an unchanged membership returns without
+    /// touching anything, which is what keeps this off the critical path of a
+    /// heartbeat. It is called from every tick, so that has to stay true.
     fn replan(&mut self, now: Now) {
         if !self.auto {
             return;
@@ -894,11 +983,7 @@ impl FleetEngine {
             .map(|node| node.mac)
             .collect();
 
-        let rotation_due = self.plan.is_some_and(|plan| plan.rotates())
-            && self
-                .phase_since
-                .is_some_and(|since| now.mono.duration_since(since) >= self.config.rotation_dwell);
-        if members == self.plan_members && !rotation_due {
+        if members == self.plan_members {
             return;
         }
 
@@ -922,19 +1007,9 @@ impl FleetEngine {
             // fleet keeps whatever it already had rather than being told
             // something the bridge could not deliver anyway.
             self.plan = None;
-            self.phase = 0;
-            self.phase_since = None;
             return;
         };
         self.counters.replans += 1;
-        // A membership change restarts the rotation rather than resuming it:
-        // these are the phases of a different plan.
-        self.phase = if rotation_due && members == departed {
-            (self.phase + 1) % plan.phase_count()
-        } else {
-            0
-        };
-        self.phase_since = Some(now.mono);
         self.plan = Some(plan);
 
         // One epoch per node that actually needs telling. Held locally because
@@ -942,14 +1017,19 @@ impl FleetEngine {
         let mut counter = self.last_counter;
         for (index, mac) in members.iter().enumerate() {
             let index = u8::try_from(index).unwrap_or(u8::MAX);
-            // No range this phase: reachable only when a rotation's runs do not
-            // divide evenly among the nodes. There is no frame meaning "scan
-            // nothing", so the node keeps what it has for a phase.
-            let Some(range) = plan.range_for(index, self.phase) else { continue };
+            // Nothing for this node: reachable only with more nodes than the
+            // pool has channels. There is no frame meaning "scan nothing", so
+            // the node keeps whatever it already holds.
+            let Some(channels) = plan.channels_for(index) else { continue };
+            let ble = self.ble_node == Some(*mac);
             let Some(node) = self.nodes.get_mut(mac) else { continue };
 
-            let wanted =
-                |a: Assignment| a.range == range && a.node_index == index && a.node_count == count;
+            let wanted = |a: Assignment| {
+                a.channels == channels
+                    && a.ble == ble
+                    && a.node_index == index
+                    && a.node_count == count
+            };
             // Already scanning exactly this, or already queued to. Re-issuing
             // either would burn an epoch to tell a node what it already knows.
             if node.dirty {
@@ -970,7 +1050,7 @@ impl FleetEngine {
 
             counter += 1;
             node.desired =
-                Some(Assignment { range, node_index: index, node_count: count, counter });
+                Some(Assignment { channels, ble, node_index: index, node_count: count, counter });
             node.dirty = true;
         }
         self.last_counter = counter;
@@ -996,11 +1076,12 @@ impl FleetEngine {
             assignment_version: wire_version(assignment.counter),
             node_index: assignment.node_index,
             node_count: assignment.node_count,
-            start_channel_idx: assignment.range.start,
-            end_channel_idx: assignment.range.end,
+            flags: AdminMsg::flags_for(assignment.ble),
+            channels: assignment.channels,
         };
-        // Ten bytes into a 250-byte buffer, so this cannot fail; the encoder
-        // returns a fixed-size array precisely so the padding is structural.
+        // Fourteen bytes into a 250-byte buffer, so this cannot fail; the
+        // encoder returns a fixed-size array precisely so the length is
+        // structural.
         let payload = EspNowPayload::from_slice(&msg.encode()).unwrap_or_default();
 
         self.pending.insert(
@@ -1146,8 +1227,8 @@ impl FleetEngine {
             wire_version: wire_version(pending.assignment.counter),
             node_index: pending.assignment.node_index,
             node_count: pending.assignment.node_count,
-            start_idx: pending.assignment.range.start,
-            end_idx: pending.assignment.range.end,
+            channels: pending.assignment.channels,
+            ble: pending.assignment.ble,
             created_at_ms: pending.sent_ms,
             // `Silent` is the case where nothing came back at all, so there
             // is no delivery to stamp: a time here would only be the timeout's
@@ -1177,7 +1258,7 @@ impl FleetEngine {
         });
     }
 
-    /// Whether a node has heartbeated recently enough to hold a channel range.
+    /// Whether a node has heartbeated recently enough to hold an assignment.
     #[must_use]
     pub fn is_alive(&self, node: &NodeState, now: Now) -> bool {
         node.last_heartbeat
@@ -1204,7 +1285,7 @@ impl FleetEngine {
             pool: self.config.pool,
             auto: self.auto,
             plan: self.plan,
-            phase: self.phase,
+            ble_node: self.ble_node,
             nodes,
             alive,
             tail: self.tail.iter().cloned().collect(),

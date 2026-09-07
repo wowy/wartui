@@ -1,18 +1,31 @@
 //! Channel pools and the assignment planner.
 //!
-//! `MSG_ADMIN` can express only a single *contiguous* run of indices into
-//! [`SCAN_CHANNELS`]. That is fine for the stock firmware, which always splits
-//! all 40 entries, but a restricted pool such as [`ChannelPool::Us`] is two
-//! runs with a gap in the middle. So the planner works in runs and never lets a
-//! node's range straddle one.
+//! A *pool* is still described in runs — [`ChannelPool::Us`] is two of them,
+//! with a gap at indices 11-13 — because that is the shape the regulatory
+//! picture has. An *assignment* is not. `MSG_ADMIN` carries a forty-bit
+//! [`ChannelSet`], one bit per [`SCAN_CHANNELS`] entry, so a node can hold any
+//! subset of the pool and a run boundary stops being something the planner has
+//! to steer around. Before that it was the central constraint here: a lone node
+//! on a two-run pool could not express both runs at once and had to rotate
+//! between them on a dwell timer, and every node's share had to be carved out
+//! of one run rather than out of the pool.
+//!
+//! With the mask, the split is a round-robin deal: index `k` of the pool's
+//! flattened order goes to node `k % node_count`. Block-splitting would give
+//! one node the whole of 2.4 GHz and another the whole of 5 GHz for the same
+//! arithmetic, which is the worse partition — dealing gives every node some of
+//! both bands, so a node dropping out thins the fleet's coverage evenly rather
+//! than blinding it to a band until the next re-cut lands.
 
 use crate::air::AdminMsg;
 
 /// The node's scan order, verbatim from `src/WiFiOps.cpp:53-64`.
 ///
-/// Indices 0..=13 are the 2.4 GHz channels 1..=14; 14..=39 are 5 GHz. Every
-/// `start_channel_idx` / `end_channel_idx` on the wire indexes this table, so
-/// its order is load-bearing and must not be sorted or deduplicated.
+/// Indices 0..=13 are the 2.4 GHz channels 1..=14; 14..=39 are 5 GHz. Every bit
+/// of the [`ChannelSet`] on the wire indexes this table, and a node sweeps in
+/// index order, so the order here is load-bearing and must not be sorted or
+/// deduplicated — reordering it would silently repoint every assignment in
+/// flight and every stored row.
 pub const SCAN_CHANNELS: [u8; 40] = [
     // 2.4 GHz
     1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, //
@@ -62,6 +75,20 @@ pub const CHANNEL_DWELL_MS: u32 = 125;
 /// heartbeat.
 pub const ADMIN_WAIT_MS: u32 = 300;
 
+/// How long an unassigned node waits between heartbeats.
+///
+/// A node that has been told nothing parks on the control channel and collects
+/// nothing, so this is the whole of its cycle rather than a slice of it — which
+/// is why it is comfortably longer than [`ADMIN_WAIT_MS`] and still short
+/// enough that joining a fleet costs a second rather than a sweep. Shared with
+/// the simulator so a parked fake node is parked the same way.
+pub const IDLE_BEAT_MS: u32 = 1000;
+
+const _: () = assert!(
+    IDLE_BEAT_MS >= ADMIN_WAIT_MS,
+    "a parked node must hold the control channel for at least a full admin window"
+);
+
 /// How many recently-reported BSSIDs a node suppresses.
 ///
 /// `mac_history_len`, `src/configs.h:158`. Shared between the Wi-Fi and BLE
@@ -72,9 +99,6 @@ pub const DEDUP_RING: usize = 200;
 /// Upper bound on runs in any pool. Two today; the headroom is for a
 /// "US non-DFS" pool, which would be three.
 const MAX_RUNS: usize = 4;
-
-/// Upper bound on rotation phases, reached when one node must cover every run.
-const MAX_PHASES: usize = MAX_RUNS;
 
 /// An inclusive run of [`SCAN_CHANNELS`] indices.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,6 +136,143 @@ impl IndexRun {
     }
 }
 
+/// A set of [`SCAN_CHANNELS`] indices — the forty bits `MSG_ADMIN` carries.
+///
+/// One bit per entry of the table, index `i` in bit `i`, so the set is exactly
+/// as expressive as the wire field and a node can be given any subset of the
+/// pool. That is the whole of what Phase 2 changed: an assignment used to be a
+/// pair of bounds, which could not describe the US pool's two runs at once and
+/// so made a lone node rotate between them.
+///
+/// Bits at or above [`NUM_SCAN_CHANNELS`] are not representable and are dropped
+/// on the way in rather than rejected. A frame carrying one came from something
+/// that knows about channels this build does not, and the indices it *does*
+/// share are still the right ones to scan; refusing the whole assignment would
+/// strand the node on whatever it held.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+pub struct ChannelSet(u64);
+
+/// Bytes a [`ChannelSet`] occupies on the wire. Forty bits, little-endian.
+pub const CHANNEL_SET_BYTES: usize = 5;
+
+const CHANNEL_SET_MASK: u64 = (1u64 << NUM_SCAN_CHANNELS) - 1;
+
+impl ChannelSet {
+    /// The empty set. A node is never *sent* one: there is no frame meaning
+    /// "scan nothing", so the planner skips a node it has nothing for.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self(0)
+    }
+
+    /// Every index in `run`.
+    #[must_use]
+    pub const fn from_run(run: IndexRun) -> Self {
+        // `run.len()` is at least 1, so the shift is at most 40 and the
+        // subtraction cannot underflow.
+        let width = run.len() as u32;
+        let bits = if width >= 64 { u64::MAX } else { (1u64 << width) - 1 };
+        Self((bits << run.start) & CHANNEL_SET_MASK)
+    }
+
+    /// The raw bits, index `i` in bit `i`.
+    #[must_use]
+    pub const fn bits(self) -> u64 {
+        self.0
+    }
+
+    /// A set from raw bits, discarding anything this build cannot scan.
+    #[must_use]
+    pub const fn from_bits(bits: u64) -> Self {
+        Self(bits & CHANNEL_SET_MASK)
+    }
+
+    /// Add one index. Out of range is a no-op, for the reason on the type.
+    pub const fn insert(&mut self, idx: u8) {
+        if idx < NUM_SCAN_CHANNELS {
+            self.0 |= 1u64 << idx;
+        }
+    }
+
+    /// Whether the set holds `idx`.
+    #[must_use]
+    pub const fn contains(self, idx: u8) -> bool {
+        idx < NUM_SCAN_CHANNELS && (self.0 >> idx) & 1 == 1
+    }
+
+    /// How many channels the node holding this would dwell on per sweep.
+    #[must_use]
+    pub const fn len(self) -> u32 {
+        self.0.count_ones()
+    }
+
+    /// Whether there is nothing to scan.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// The indices, ascending, which is [`SCAN_CHANNELS`] order and therefore
+    /// the order a node sweeps them in.
+    #[must_use]
+    pub const fn indices(self) -> ChannelSetIter {
+        ChannelSetIter(self.0)
+    }
+
+    /// The lowest index in the set, if any.
+    #[must_use]
+    pub const fn first(self) -> Option<u8> {
+        if self.0 == 0 {
+            return None;
+        }
+        // At most 39: the mask keeps every set bit below NUM_SCAN_CHANNELS.
+        #[allow(clippy::cast_possible_truncation)]
+        Some(self.0.trailing_zeros() as u8)
+    }
+
+    /// The five wire bytes, little-endian.
+    #[must_use]
+    pub const fn to_bytes(self) -> [u8; CHANNEL_SET_BYTES] {
+        let all = self.0.to_le_bytes();
+        [all[0], all[1], all[2], all[3], all[4]]
+    }
+
+    /// A set from the five wire bytes.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; CHANNEL_SET_BYTES]) -> Self {
+        Self::from_bits(u64::from_le_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], 0, 0, 0,
+        ]))
+    }
+}
+
+/// The indices of a [`ChannelSet`], ascending.
+#[derive(Debug, Clone, Copy)]
+pub struct ChannelSetIter(u64);
+
+impl Iterator for ChannelSetIter {
+    type Item = u8;
+
+    fn next(&mut self) -> Option<u8> {
+        if self.0 == 0 {
+            return None;
+        }
+        // Below NUM_SCAN_CHANNELS by construction, so the cast is lossless.
+        #[allow(clippy::cast_possible_truncation)]
+        let idx = self.0.trailing_zeros() as u8;
+        // Clear the lowest set bit.
+        self.0 &= self.0 - 1;
+        Some(idx)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let n = self.0.count_ones() as usize;
+        (n, Some(n))
+    }
+}
+
+impl ExactSizeIterator for ChannelSetIter {}
+
 const US_RUNS: [IndexRun; 2] = [
     // 2.4 GHz channels 1-11. Excludes 12, 13 and 14.
     IndexRun::new(0, 10),
@@ -121,9 +282,10 @@ const US_RUNS: [IndexRun; 2] = [
 
 const ALL_RUNS: [IndexRun; 1] = [IndexRun::new(0, NUM_SCAN_CHANNELS - 1)];
 
-// `apportion` and `plan` index fixed-size arrays by run, so a pool with more
-// runs than `MAX_RUNS` would panic at assignment time rather than fail to
-// build. A new pool must be added here as well as to `ChannelPool::runs`.
+// `MAX_RUNS` bounds nothing the planner indexes any more — it deals out of a
+// flattened iterator — but it still records what a pool is allowed to look
+// like, and a pool exceeding it is a pool nobody thought about. A new one must
+// be added here as well as to `ChannelPool::runs`.
 const _: () = assert!(
     US_RUNS.len() <= MAX_RUNS && ALL_RUNS.len() <= MAX_RUNS,
     "a channel pool has more runs than MAX_RUNS; raise it"
@@ -154,11 +316,12 @@ pub enum ChannelPool {
     /// Index 13 — channel 14 — is in this pool and a node will refuse it, one
     /// hop per sweep. That is `esp-radio` hardcoding `nchan: 13` in the country
     /// blob, not a rule this host chose, and it is reachable through no setting
-    /// the crate exposes (`docs/phase-1-findings.md`). It is left in rather than
-    /// carved out because this pool is one contiguous run, and splitting it
-    /// around one index would make a lone node rotate between two runs on the
-    /// dwell timer — a real cost, for a channel that is Japan-only and
-    /// 802.11b-only. Phase 2's channel mask can exclude it for one bit.
+    /// the crate exposes (`docs/phase-1-findings.md`). A [`ChannelSet`] could
+    /// now drop it for one bit, where the old contiguous range could not — and
+    /// it is still left in, for a different reason than before: this pool means
+    /// *all*, and is what a fleet is put on to behave the way a stock one does.
+    /// A pool of that name quietly omitting a channel would be a worse surprise
+    /// than a node saying it refused one. [`Self::Us`] does not contain it.
     All,
 }
 
@@ -183,6 +346,16 @@ impl ChannelPool {
     pub fn contains(self, idx: u8) -> bool {
         self.runs().iter().any(|r| r.contains(idx))
     }
+
+    /// The whole pool as one set — every channel a single node could be told
+    /// to hold, which before the mask was not something one assignment could
+    /// say.
+    #[must_use]
+    pub fn channels(self) -> ChannelSet {
+        self.runs().iter().fold(ChannelSet::empty(), |set, run| {
+            ChannelSet::from_bits(set.bits() | ChannelSet::from_run(*run).bits())
+        })
+    }
 }
 
 /// How the pool is named on screen and in prose — "US", not the variant's `Us`.
@@ -199,18 +372,18 @@ impl core::fmt::Display for ChannelPool {
     }
 }
 
-/// A fleet-wide assignment, possibly rotating.
+/// A fleet-wide assignment: one [`ChannelSet`] per node.
 ///
-/// When there are at least as many nodes as runs, there is a single phase and
-/// every node holds a fixed range. When nodes are scarcer than runs — reachable
-/// only with one node on a multi-run pool — the plan has several phases and the
-/// caller steps through them on a dwell timer, re-issuing `MSG_ADMIN` each time.
-/// Coverage then becomes intermittent rather than incorrect.
+/// There is exactly one of these per fleet membership. It has no phases and no
+/// timer behind it, because a mask can say everything a node needs to hold —
+/// which is the difference Phase 2 made. The plan before it could not give a
+/// lone node both of the US pool's runs at once, so it described a *rotation*
+/// and the caller had to step through it, re-issuing `MSG_ADMIN` on a dwell
+/// timer and accepting that coverage was intermittent in between.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Plan {
     node_count: u8,
-    phase_count: u8,
-    slots: [[Option<IndexRun>; MAX_NODES]; MAX_PHASES],
+    slots: [ChannelSet; MAX_NODES],
 }
 
 impl Plan {
@@ -220,50 +393,50 @@ impl Plan {
         self.node_count
     }
 
-    /// How many phases a full rotation takes. 1 means no rotation.
+    /// What `node_index` should scan, if anything.
+    ///
+    /// `None` for an index outside the fleet, and for the empty set — which is
+    /// reachable only with more nodes than the pool has channels. There is no
+    /// frame meaning "scan nothing", so a caller that gets `None` leaves the
+    /// node holding whatever it already has rather than inventing one.
     #[must_use]
-    pub const fn phase_count(&self) -> u8 {
-        self.phase_count
+    pub fn channels_for(&self, node_index: u8) -> Option<ChannelSet> {
+        let set = *self.slots.get(usize::from(node_index))?;
+        (node_index < self.node_count && !set.is_empty()).then_some(set)
     }
 
-    /// Whether the plan rotates, so callers know to run a dwell timer.
-    #[must_use]
-    pub const fn rotates(&self) -> bool {
-        self.phase_count > 1
-    }
-
-    /// The range assigned to `node_index` during `phase`, if any.
-    #[must_use]
-    pub fn range_for(&self, node_index: u8, phase: u8) -> Option<IndexRun> {
-        let phase = usize::from(phase % self.phase_count.max(1));
-        self.slots.get(phase)?.get(usize::from(node_index)).copied().flatten()
-    }
-
-    /// The `MSG_ADMIN` to send to `node_index` for `phase`.
+    /// The `MSG_ADMIN` to send to `node_index`.
     ///
     /// `assignment_version` is the caller's persisted epoch byte; a node adopts
-    /// the assignment only when it differs from the one it holds.
+    /// the assignment only when it differs from the one it holds. `flags` is
+    /// the caller's, not the planner's: which node scans Bluetooth is an
+    /// operator's decision about one node, and partitioning channels is a
+    /// decision about the fleet.
     #[must_use]
-    pub fn admin_for(&self, node_index: u8, phase: u8, assignment_version: u8) -> Option<AdminMsg> {
-        let run = self.range_for(node_index, phase)?;
+    pub fn admin_for(&self, node_index: u8, assignment_version: u8, flags: u8) -> Option<AdminMsg> {
         Some(AdminMsg {
             assignment_version,
             node_index,
             node_count: self.node_count,
-            start_channel_idx: run.start,
-            end_channel_idx: run.end,
+            flags,
+            channels: self.channels_for(node_index)?,
         })
     }
 }
 
 /// Build a plan distributing `pool` across `node_count` nodes.
 ///
-/// Nodes are apportioned to runs in proportion to run length, every run getting
-/// at least one, and each run is then subdivided with the same integer
-/// arithmetic the firmware uses (`src/WiFiOps.cpp:507-508`). `node_index` stays
-/// a single fleet-wide `0..node_count` numbering rather than restarting per
-/// run, because it drives the transmit stagger slot
-/// ([`stagger_offset_ms`]) which has to stay unique across the whole fleet.
+/// The pool's runs are flattened into one ascending list of indices and dealt
+/// round-robin: index `k` goes to node `k % node_count`. Every node therefore
+/// gets a share of every run — some 2.4 GHz and some 5 GHz on the US pool —
+/// rather than a block, which for the same arithmetic would have put one node
+/// on 2.4 GHz alone and left the fleet blind to a whole band the moment that
+/// node dropped out.
+///
+/// Shares differ by at most one channel, so heartbeat periods across the fleet
+/// stay within one dwell of each other. `node_index` is a single fleet-wide
+/// `0..node_count` numbering because it drives the transmit stagger slot
+/// ([`stagger_offset_ms`]), which has to be unique across the whole fleet.
 ///
 /// Returns `None` for zero nodes, or for more than [`MAX_NODES`].
 #[must_use]
@@ -271,88 +444,15 @@ pub fn plan(pool: ChannelPool, node_count: u8) -> Option<Plan> {
     if node_count == 0 || usize::from(node_count) > MAX_NODES {
         return None;
     }
-    let runs = pool.runs();
-    let mut slots = [[None; MAX_NODES]; MAX_PHASES];
-
-    if usize::from(node_count) < runs.len() {
-        // Too few nodes to hold every run at once: rotate whole runs.
-        let phase_count = runs.len().div_ceil(usize::from(node_count));
-        for (phase, slot_row) in slots.iter_mut().enumerate().take(phase_count) {
-            let base = phase * usize::from(node_count);
-            for (node, slot) in slot_row.iter_mut().enumerate().take(usize::from(node_count)) {
-                // Runs run out on the last phase when the count does not divide
-                // evenly; those nodes simply idle for that phase.
-                *slot = runs.get(base + node).copied();
-            }
-        }
-        // Cast is safe: phase_count <= runs.len() <= MAX_RUNS.
-        #[allow(clippy::cast_possible_truncation)]
-        return Some(Plan { node_count, phase_count: phase_count as u8, slots });
-    }
-
-    let alloc = apportion(runs, node_count);
-    let mut next_index = 0usize;
-    for (run_idx, run) in runs.iter().enumerate() {
-        let k = alloc[run_idx];
-        for n in 0..k {
-            slots[0][next_index] = Some(subdivide(*run, n, k));
-            next_index += 1;
+    let mut slots = [ChannelSet::empty(); MAX_NODES];
+    let mut dealt = 0usize;
+    for run in pool.runs() {
+        for idx in run.start..=run.end {
+            slots[dealt % usize::from(node_count)].insert(idx);
+            dealt += 1;
         }
     }
-    Some(Plan { node_count, phase_count: 1, slots })
-}
-
-/// Spread `node_count` nodes over `runs` proportionally to run length, giving
-/// every run at least one node. Largest-remainder apportionment.
-fn apportion(runs: &[IndexRun], node_count: u8) -> [u8; MAX_RUNS] {
-    let mut alloc = [0u8; MAX_RUNS];
-    for slot in alloc.iter_mut().take(runs.len()) {
-        *slot = 1;
-    }
-    // `plan` guarantees node_count >= runs.len(), so this cannot underflow.
-    let mut spare = u32::from(node_count) - runs.len() as u32;
-    if spare == 0 {
-        return alloc;
-    }
-
-    let total: u32 = runs.iter().map(|r| u32::from(r.len())).sum();
-    // Snapshot the base: `spare` is drawn down as shares are handed out, and
-    // weighing a later run against the reduced figure would skew the split.
-    let base = spare;
-    let mut remainders = [(0u32, 0usize); MAX_RUNS];
-    for (i, run) in runs.iter().enumerate() {
-        let weighted = base * u32::from(run.len());
-        // Cast is safe: the floor share is at most `spare`, itself < MAX_NODES.
-        #[allow(clippy::cast_possible_truncation)]
-        let share = (weighted / total) as u8;
-        alloc[i] += share;
-        spare -= u32::from(share);
-        remainders[i] = (weighted % total, i);
-    }
-
-    // Hand out what integer division left over, biggest remainder first,
-    // breaking ties towards the earlier run so the result is deterministic.
-    remainders[..runs.len()].sort_unstable_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-    for &(_, run_idx) in remainders[..runs.len()].iter().cycle().take(spare as usize) {
-        alloc[run_idx] += 1;
-    }
-    alloc
-}
-
-/// Carve the `n`th of `k` slices out of `run`, mirroring the firmware's split.
-///
-/// When nodes outnumber the run's channels the vendor arithmetic would compute
-/// an end before the start and underflow its `uint8_t`; we clamp to a single
-/// channel instead, so surplus nodes overlap rather than idle.
-fn subdivide(run: IndexRun, n: u8, k: u8) -> IndexRun {
-    let len = u16::from(run.len());
-    let (n, k) = (u16::from(n), u16::from(k));
-    // Cast is safe: both quotients are < len <= NUM_SCAN_CHANNELS.
-    #[allow(clippy::cast_possible_truncation)]
-    let start = ((n * len) / k) as u8;
-    #[allow(clippy::cast_possible_truncation)]
-    let end = (((n + 1) * len) / k).saturating_sub(1) as u8;
-    IndexRun::new(run.start + start, run.start + end.max(start))
+    Some(Plan { node_count, slots })
 }
 
 /// How long node `node_index` waits before transmitting its heartbeat.
