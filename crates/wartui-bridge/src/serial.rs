@@ -32,6 +32,27 @@ const READ_TIMEOUT: Duration = Duration::from_millis(50);
 /// tokio interval fires immediately, so the usual case costs one frame.
 const IDENTIFY_INTERVAL: Duration = Duration::from_millis(500);
 
+/// How many unanswered `Identify` frames before this is called not a bridge.
+///
+/// Twelve go out at 0.0 s to 5.5 s — `interval`'s first tick is immediate — and
+/// the thirteenth tick, at 6.0 s, is the one that gives up. That is a second
+/// past the CLI's five-second "nothing has identified itself" notice, so the
+/// operator still gets the long form, which names the three things it usually
+/// is, before the one-line reason lands under it.
+///
+/// It is bounded at all because asking forever wedges the process, and pointing
+/// `wartui` at a node instead of the bridge is all it takes to get there. Node
+/// firmware never reads the USB endpoint the host writes to, so frames sent to
+/// one pile up in the kernel's output queue for that tty. The fd is blocking —
+/// `serialport` clears `O_NONBLOCK` once the port is open — and closing a tty
+/// waits for its output queue to drain, against a device that will never take
+/// it. That wait is inside the driver, so the process survives `SIGKILL` and
+/// keeps the port held: the operator's only way out is unplugging the board.
+/// Giving up early enough that nothing is left queued is what prevents it, and
+/// [`supervise`] retries on its own cadence afterwards, so a dongle that is
+/// merely slow to boot still gets found.
+const IDENTIFY_ATTEMPTS: u32 = 12;
+
 /// A serial port that might be a bridge.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PortCandidate {
@@ -196,9 +217,22 @@ async fn connect(
     // is the last one in the log is the whole diagnosis.
     progress!(port = %path, "port open; asking the bridge to identify itself");
     let writer = port.try_clone().map_err(|e| format!("could not split {path}: {e}"))?;
+    // A third handle, given to the guard below so that the cleanup it does is
+    // owned by a value rather than by a code path.
+    let flush = port.try_clone().map_err(|e| format!("could not split {path}: {e}"))?;
 
     let stop = Arc::new(AtomicBool::new(false));
     let announced = Arc::new(AtomicBool::new(false));
+    // Distinct from `announced`, and the distinction is load-bearing. A bridge
+    // whose fleet is busy can lose every `Ready` it sends to its own transmit
+    // rings, which evict oldest-first, while its observations arrive perfectly
+    // well — `sniff` says the same thing where it decides whether to accuse a
+    // port of not being a bridge. Giving up on `announced` alone would tear
+    // down a link that is working and delivering, every few seconds, which is
+    // worse than the wedge this bound exists to prevent. A frame that would not
+    // decode does not count: a board running node firmware talks constantly and
+    // none of it is a frame.
+    let decoded = Arc::new(AtomicBool::new(false));
     let (dead_tx, mut dead_rx) = mpsc::channel::<String>(1);
     // Unbounded, and now deliberately so rather than provisionally. The biased
     // select below arbitrates at the moment a command is taken rather than the
@@ -221,12 +255,18 @@ async fn connect(
             let events = plumbing.events.clone();
             let stop = Arc::clone(&stop);
             let announced = Arc::clone(&announced);
+            let decoded = Arc::clone(&decoded);
             move || {
-                let reason = read_loop(port, &events, &stop, &announced);
+                let reason = read_loop(port, &events, &stop, &announced, &decoded);
                 let _ = dead_tx.blocking_send(reason);
             }
         })
         .map_err(|e| format!("could not start reader thread: {e}"))?;
+
+    // Before the second spawn, not after both: a `?` there would otherwise
+    // return with the reader thread still running on a port nobody will ever
+    // stop, while `supervise` reopens the same path every `reconnect_delay`.
+    let shutdown = Shutdown { stop: Arc::clone(&stop), port: flush };
 
     let writer_thread = std::thread::Builder::new()
         .name(format!("wartui-serial-tx {path}"))
@@ -238,9 +278,10 @@ async fn connect(
 
     // A bridge announces itself at boot, and the host is rarely watching at
     // that moment: unplugging the dongle is not part of restarting the TUI.
-    // So we ask, and keep asking until it answers, because the request can
-    // land while the radio is still coming up.
+    // So we ask, and go on asking while the radio could still be coming up —
+    // but not for ever, which is what [`IDENTIFY_ATTEMPTS`] bounds.
     let mut identify = tokio::time::interval(IDENTIFY_INTERVAL);
+    let mut asked = 0_u32;
 
     // Forward commands, preserving the urgent-first bias, until either the
     // reader dies or the engine drops its handle.
@@ -251,6 +292,12 @@ async fn connect(
                 break Err(reason.unwrap_or_else(|| "reader stopped".to_owned()));
             }
             _ = identify.tick(), if !announced.load(Ordering::Relaxed) => {
+                if asked >= IDENTIFY_ATTEMPTS && !decoded.load(Ordering::Relaxed) {
+                    break Err(format!(
+                        "nothing on {path} answered the link protocol; it is not a bridge"
+                    ));
+                }
+                asked += 1;
                 if write_tx.send(HostToBridge::Identify).is_err() {
                     break Err("writer stopped".to_owned());
                 }
@@ -266,11 +313,41 @@ async fn connect(
         }
     };
 
-    stop.store(true, Ordering::Relaxed);
+    // Explicitly, because the joins below wait on threads that only stop once
+    // it has run. On the path where this task is dropped instead, the same work
+    // happens without this line being reached at all.
+    drop(shutdown);
     drop(write_tx);
     let _ = reader.join();
     let _ = writer_thread.join();
     outcome
+}
+
+/// Stops the port's threads and empties its output queue, however the
+/// connection ends.
+///
+/// This is a `Drop` and not a few lines at the end of [`connect`] because the
+/// end that matters does not run those lines. `connect` is an async fn, and
+/// quitting a capture drops the task running it: the runtime stops it at an
+/// await and everything after the select loop is simply skipped. The reader and
+/// writer threads then keep their handles on the port, and whatever is queued
+/// for a device that is not reading goes with them into a `close` that waits
+/// for that device to take it — which is the wedge, reached by the one path
+/// that had no cleanup on it.
+///
+/// Clearing the queue is also what releases a writer already blocked inside a
+/// write: the handles share one open file description, so the discard reaches
+/// the queue that thread is stuck on.
+struct Shutdown {
+    stop: Arc<AtomicBool>,
+    port: Box<dyn serialport::SerialPort>,
+}
+
+impl Drop for Shutdown {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        let _ = self.port.clear(serialport::ClearBuffer::Output);
+    }
 }
 
 /// Blocking read loop. Returns the reason it stopped.
@@ -279,6 +356,7 @@ fn read_loop(
     events: &mpsc::Sender<LinkEvent>,
     stop: &AtomicBool,
     announced: &AtomicBool,
+    decoded: &AtomicBool,
 ) -> String {
     let mut acc = FrameAccumulator::<MAX_FRAME>::new();
     let mut buf = [0u8; 1024];
@@ -307,6 +385,7 @@ fn read_loop(
                     .to_string();
                 }
                 Ok(BridgeToHost::Ready { chip, mac, fw_version, .. }) => {
+                    decoded.store(true, Ordering::Relaxed);
                     // A reboot re-enumerates the USB device and so ends this
                     // connection outright; a second `Ready` inside one can only
                     // be the answer to an `Identify` we sent before the first
@@ -332,7 +411,10 @@ fn read_loop(
                         fw_version: fw_version.as_str().to_owned(),
                     })
                 }
-                Ok(msg) => LinkEvent::Message(msg),
+                Ok(msg) => {
+                    decoded.store(true, Ordering::Relaxed);
+                    LinkEvent::Message(msg)
+                }
                 // Reset banners and half-frames land here; the framing has
                 // already resynchronised, so this is a counter, not a fault.
                 // Logged at `debug` because a cable bad enough to garble every
@@ -372,9 +454,30 @@ fn write_loop(
             tracing::error!("command did not fit in a frame; dropping it");
             continue;
         };
-        if let Err(e) = port.write_all(&buf[..n]) {
-            tracing::warn!("serial write failed: {e}");
-            return;
+        // Not `write_all`, which cannot be told to stop. Emptying the output
+        // queue is what releases a write blocked against a device that is not
+        // reading, and `write_all` would answer that by writing the rest of the
+        // frame straight back into the queue it was just cleared from — after
+        // the flush, and on the path where this thread is never joined there is
+        // no second one. So the frame is abandoned instead: nobody is reading
+        // it, and the connection it belonged to is over.
+        let mut sent = 0;
+        while sent < n {
+            if stop.load(Ordering::Relaxed) {
+                return;
+            }
+            match port.write(&buf[sent..n]) {
+                Ok(0) => return,
+                Ok(written) => sent += written,
+                // A write timeout is the port being slow, not shut: the loop
+                // re-checks `stop` and tries again, which is also what makes
+                // this thread notice a shutdown while the fleet is quiet.
+                Err(e) if matches!(e.kind(), ErrorKind::TimedOut | ErrorKind::Interrupted) => {}
+                Err(e) => {
+                    tracing::warn!("serial write failed: {e}");
+                    return;
+                }
+            }
         }
     }
 }

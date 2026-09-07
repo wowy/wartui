@@ -433,12 +433,13 @@ If the same port keeps being the wrong device — a C5 node plugged in by USB
 looks identical to the bridge, same vendor and product ID — pin it with
 `--port`. `wartui ports` lists the candidates.
 
-Probing to find out is worse than not knowing: `wartui status` pointed at a node
-blocks for ever — a node does not speak the link protocol — and killing it
-leaves a process wedged in exit with the port still held. Ask the USB tree
-instead. An ESP32's serial number *is* its MAC, so on macOS `ioreg` pairs every
-port with the board behind it without opening anything, with no esp tool and no
-reflash:
+Probing answers one port at a time and answers it slowly: pointed at a node,
+`wartui status` opens the port, waits six seconds for a link protocol the node
+does not speak, and tells you only that this one is not the bridge — and there
+are as many of those as there are boards. Ask the USB tree instead: it names
+every board at once, and the bridge among them. An ESP32's serial number *is*
+its MAC, so on macOS `ioreg` pairs every port with the board behind it without
+opening anything, with no esp tool and no reflash:
 
 ```sh
 ioreg -l -w0 | LC_ALL=C awk -F'"' '
