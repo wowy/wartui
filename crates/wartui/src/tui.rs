@@ -34,7 +34,7 @@ use wartui_core::position::PositionSource;
 use wartui_core::record::AdminOutcome;
 use wartui_proto::air::RecordKind;
 use wartui_proto::link::Mac;
-use wartui_proto::plan::{ChannelSet, MAX_NODES, SCAN_CHANNELS};
+use wartui_proto::plan::{ChannelSet, MAX_NODES, Radio, SCAN_CHANNELS};
 
 /// How long the input thread waits for a keypress before checking whether it
 /// should stop. Long enough not to spin, short enough that quitting is instant.
@@ -273,6 +273,15 @@ impl Ui {
             self.say(format!("{} {why}", mac(&node.state.mac)), snapshot);
             return;
         }
+        // The engine masks this as well — a share a node's radio cannot tune
+        // is a share nobody scans, and that has to hold however the assignment
+        // was made — but the notice has to say what will really go out rather
+        // than what was asked for. Both pools start in 2.4 GHz and both keys
+        // derive their set from the pool, so what is left is never empty.
+        let channels = match node.state.capabilities {
+            Some(capabilities) => Radio::from(capabilities).tunable(channels),
+            None => channels,
+        };
         let command = Command::Assign { mac: node.state.mac, channels };
         let said = match commands.try_send(command) {
             Ok(()) => format!(
@@ -1711,6 +1720,28 @@ mod tests {
         let (label, _) = node_state(&view);
         assert_eq!(label, "not wartui");
         assert!(view.state.last_heartbeat.is_some(), "and it is not silent");
+    }
+
+    #[test]
+    fn assigning_the_whole_pool_by_hand_promises_only_what_the_node_can_tune() {
+        // `A` offers the pool, and under `--manual` nothing re-partitions
+        // afterwards to correct it — so a C6 given all 34 US channels would
+        // read as 34 confirmed while scanning 11, which is the silent
+        // half-coverage the capability token exists to end. The engine cuts it
+        // down; this has to say the same number the engine will send.
+        let mut snapshot = busy();
+        snapshot.nodes = vec![narrowband(0x84)];
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+        ui.on_key(KeyEvent::new(KeyCode::Char('A'), KeyModifiers::NONE), &snapshot, &tx);
+
+        let Command::Assign { channels, .. } = rx.try_recv().expect("a command") else {
+            panic!("expected an assignment")
+        };
+        assert_eq!(channels, Radio::TwoPointFour.tunable(ChannelPool::Us.channels()));
+        let notice = ui.notice(snapshot.now_ms).expect("a notice");
+        assert!(notice.contains("1-11"), "got {notice}");
+        assert!(!notice.contains("36"), "the 5 GHz half is not promised: got {notice}");
     }
 
     #[test]

@@ -473,7 +473,12 @@ than dealt to somebody who would ignore them.
 the view and again in the engine, and a node already named as the holder loses
 it on the tick that learns it cannot scan — the flag would otherwise be adopted
 and acknowledged by a build with no scan code in it, so the `ble` column would
-name a holder while the export had no Bluetooth rows.
+name a holder while the export had no Bluetooth rows. Losing it is an
+assignment re-issued without the flag rather than a host-side record cleared:
+the flag lives in the frame and the fleet table reads it there, so clearing
+only the record would leave a node showing `ble` that `b` could no longer turn
+off. Reflashing a node is the way to reach this, and a reflash is a reboot, so
+the withdrawal rides in the frame the reboot re-issue was sending anyway.
 
 Neither was reachable without a second kind of board until now:
 `--sim-c6 N` makes that many simulated nodes ESP32-C6s.
@@ -512,6 +517,15 @@ Neither was reachable without a second kind of board until now:
   whole 5 GHz half, and the two of them between them covering the pool — and,
   separately, that a C6-only fleet reports the 5 GHz shortfall in the footer
   rather than quietly not scanning it.
+- **A fleet with more nodes than it has channels it can reach.** Twelve C6s on
+  the US pool have 11 dealable channels between them, so at least one node is
+  dealt nothing — and there is no frame meaning "scan nothing", so it keeps
+  whatever it last held and doubles up on somebody else's share. That used to
+  need more than 34 nodes and so more than the peer table allows; with the
+  radios read out of the tokens it is inside a fleet the bridge can address.
+  Nothing on screen says which node it is: the footer names the unscanned
+  channels, not the duplicated ones. Whether that is worth a fault line is
+  undecided, and the fleet it needs has never existed here.
 - **What one mangled heartbeat would cost.** A node's token is re-read from
   every heartbeat and nothing smooths that, so a single heartbeat whose text did
   not parse would take the node out of the plan, re-cut and re-epoch the entire

@@ -407,6 +407,26 @@ impl Radio {
     pub const fn can_tune(self, idx: u8) -> bool {
         matches!(self, Self::DualBand) || !is_five_ghz(idx)
     }
+
+    /// The part of `set` this radio can actually tune.
+    ///
+    /// [`plan_for`] never deals an unreachable index in the first place, so
+    /// this is for the paths that do not go through it — an assignment made by
+    /// hand, which is otherwise a way to hand a node exactly the share nobody
+    /// scans that the capability token exists to prevent. Kept here rather than
+    /// at those call sites so that which indices are 5 GHz stays said once.
+    #[must_use]
+    pub const fn tunable(self, set: ChannelSet) -> ChannelSet {
+        match self {
+            Self::DualBand => set,
+            // Indices are one ascending bit each and 5 GHz is the whole tail
+            // above `FIRST_FIVE_GHZ_INDEX`, so what is left is the bits below
+            // it.
+            Self::TwoPointFour => {
+                ChannelSet::from_bits(set.bits() & ((1u64 << FIRST_FIVE_GHZ_INDEX) - 1))
+            }
+        }
+    }
 }
 
 impl From<crate::air::Capabilities> for Radio {

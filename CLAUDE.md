@@ -149,7 +149,9 @@ Positions resolve fresh per record through `PositionChain`: GPS (`--gps`, NMEA o
   than one, which is unavoidable and is why `plan_for` minimises the largest rather than
   equalising. A uniform fleet has no constrained channels, so its plan is byte-identical to what
   `plan` has always produced, and `plan` is now that special case. Channels no radio present can
-  reach come back in `Plan::unreachable` and are said in the footer rather than dealt.
+  reach come back in `Plan::unreachable` and are said in the footer rather than dealt. An
+  assignment made by hand goes through `Radio::tunable` for the same reason and is the quieter
+  case: nothing re-partitions afterwards to correct it and `Plan::unreachable` never sees it.
 - **At most one node scans Bluetooth, and by default none does.** `ADMIN_FLAG_BLE` is a per-node
   decision the operator makes (`Command::AssignBle`, `b` in the view), not a property of the
   firmware that was flashed: the `ble` cargo feature decides whether the code exists and the flag
@@ -157,7 +159,10 @@ Positions resolve fresh per record through `PositionChain`: GPS (`--gps`, NMEA o
   stock node, ~10% of the sweep period on ours — and is worth paying on one node, not on all. A
   node whose token says the feature is absent is refused the scan in both the view and the engine,
   and one already holding it loses it on the tick that learns so: it would adopt the flag,
-  acknowledge, and scan nothing, so `ble_node` would name a holder that is not one.
+  acknowledge, and scan nothing, so `ble_node` would name a holder that is not one. Losing it
+  means an assignment re-issued without the flag, not just `ble_node` cleared — the flag lives in
+  the frame, and the fleet table reads it off the frame — so `reissue` is the one funnel that
+  refreshes it and refuses to set it for a node whose token says no.
 - **An assignment is believed only on a MAC-layer ack** (`SendStatus::AckOk` from the transmit
   callback), never on a successful enqueue. The vendor core conflates the two, which is the bug
   this project exists downstream of.
