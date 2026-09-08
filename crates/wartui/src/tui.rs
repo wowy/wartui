@@ -794,7 +794,10 @@ fn draw_stream(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot) {
         Constraint::Length(5),
         Constraint::Min(10),
     ];
-    let title = format!(" observations — {} kept ", snapshot.counters.observations);
+    let title = format!(
+        " unique APs {} — unique BLE {} ({} total records) ",
+        snapshot.unique_wifi_aps, snapshot.unique_ble_aps, snapshot.counters.observations
+    );
     frame.render_widget(
         Table::new(rows, widths).header(header).block(Block::bordered().title(title)),
         area,
@@ -1193,6 +1196,8 @@ mod tests {
                     kind: if n % 5 == 0 { RecordKind::Ble } else { RecordKind::Wifi },
                 })
                 .collect(),
+            unique_wifi_aps: 32,
+            unique_ble_aps: 8,
             counters: Counters {
                 frames: 900,
                 observations: 800,
@@ -1240,6 +1245,8 @@ mod tests {
             alive: 0,
             assignable: 0,
             tail: Vec::new(),
+            unique_wifi_aps: 0,
+            unique_ble_aps: 0,
             counters: Counters::default(),
             store: StoreStats::default(),
             bridge_status: None,
