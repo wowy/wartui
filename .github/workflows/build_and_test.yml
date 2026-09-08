@@ -32,3 +32,50 @@ jobs:
 
     - name: Run tests
       run: cargo test --all-targets --all-features --locked --verbose
+
+  firmware:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v7
+    - uses: dtolnay/rust-toolchain@stable
+
+    - name: Install dependencies
+      run: sudo apt-get update && sudo apt-get install -y libudev-dev
+
+    - name: Install Rust target for ESP32C5
+      run: rustup target add xtensa-esp32-none-elf
+
+    - name: Install Rust target for ESP32C6
+      run: rustup target add riscv32imc-esp-espidf
+
+    - name: Lint bridge firmware
+      run: |
+        pushd firmware/bridge
+        cargo fmt --all -- --check
+        popd
+
+    - name: Lint device firmware
+      run: |
+        pushd firmware/device
+        cargo fmt --all -- --check
+        popd
+
+    - name: Build bridge firmware
+      run: |
+        pushd firmware/bridge
+        cargo build --release --features esp32c5 --locked --verbose
+        cargo build --release --features esp32c6 --locked --verbose
+        cargo clippy --all-targets --features esp32c5 --locked -- -D warnings
+        cargo clippy --all-targets --features esp32c6 --locked -- -D warnings
+        popd
+
+    - name: Build device firmware
+      run: |
+        pushd firmware/device
+        cargo build --release --features esp32c5 --locked --verbose
+        cargo build --release --features esp32c6 --locked --verbose
+        cargo clippy --release --all-targets --features esp32c5 --locked -- -D warnings
+        cargo clippy --release --all-targets --features esp32c6 --locked -- -D warnings
+        popd
