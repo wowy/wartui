@@ -39,6 +39,11 @@ jobs:
         run: cargo test --all-targets --all-features --locked --verbose
 
   firmware:
+    strategy:
+      matrix:
+        target: [esp32c5, esp32c6]
+        firmware_type: [bridge, node]
+
     runs-on: ubuntu-latest
 
     steps:
@@ -48,44 +53,20 @@ jobs:
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y libudev-dev
 
-      - name: Lint bridge firmware
+      - name: Lint
         run: |
-          pushd firmware/bridge
+          pushd firmware/${{matrix.firmware_type}}
           cargo fmt --all -- --check
           popd
 
-      - name: Lint node firmware
+      - name: Build
         run: |
-          pushd firmware/node
-          cargo fmt --all -- --check
+          pushd firmware/${{matrix.firmware_type}}
+          cargo build --release --features ${{matrix.target}} --locked --verbose
           popd
 
-      - name: Build bridge firmware
+      - name: Clippy
         run: |
-          pushd firmware/bridge
-          cargo build --release --features esp32c5 --locked --verbose
-          cargo build --release --features esp32c6 --locked --verbose
-          popd
-
-      - name: Build node firmware
-        run: |
-          pushd firmware/node
-          cargo build --release --features esp32c5 --locked --verbose
-          cargo build --release --features esp32c6 --locked --verbose
-          cargo clippy --release --features esp32c5 --locked -- -D warnings
-          cargo clippy --release --features esp32c6 --locked -- -D warnings
-          popd
-
-      - name: Clippy (bridge)
-        run: |
-          pushd firmware/bridge
-          cargo clippy --release --features esp32c5 --locked -- -D warnings
-          cargo clippy --release --features esp32c6 --locked -- -D warnings
-          popd
-
-      - name: Clippy (node)
-        run: |
-          pushd firmware/node
-          cargo clippy --release --features esp32c5 --locked -- -D warnings
-          cargo clippy --release --features esp32c6 --locked -- -D warnings
+          pushd firmware/${{matrix.firmware_type}}
+          cargo clippy --release --features ${{matrix.target}} --locked -- -D warnings
           popd
