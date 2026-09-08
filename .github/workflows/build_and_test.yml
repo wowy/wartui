@@ -44,12 +44,6 @@ jobs:
     - name: Install dependencies
       run: sudo apt-get update && sudo apt-get install -y libudev-dev
 
-    - name: Install Rust target for ESP32C5
-      run: rustup target add xtensa-esp32-none-elf
-
-    - name: Install Rust target for ESP32C6
-      run: rustup target add riscv32imc-esp-espidf
-
     - name: Lint bridge firmware
       run: |
         pushd firmware/bridge
