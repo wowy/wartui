@@ -1509,6 +1509,33 @@ mod tests {
         assert!(rendered(&mistuned).contains("wrong --gps-baud"));
     }
 
+    /// A capture whose only fault is the bridge dropping frames.
+    ///
+    /// The other counters are cleared deliberately. The bridge's fault is
+    /// pushed last and the footer summarises everything past
+    /// `MAX_FAULT_LINES`, so a fixture carrying `busy()`'s other seven faults
+    /// would be testing the packing rather than the branch.
+    fn with_bridge_drops(dropped_since_attach: u32) -> Snapshot {
+        let mut snapshot = busy();
+        snapshot.counters = Counters::default();
+        snapshot.store.dropped = 0;
+        snapshot.bridge_status.as_mut().expect("busy() has a bridge").dropped_since_attach =
+            dropped_since_attach;
+        snapshot
+    }
+
+    #[test]
+    fn frames_dropped_during_this_capture_are_a_fault_but_the_bridges_own_history_is_not() {
+        let screen = rendered(&with_bridge_drops(5));
+        assert!(screen.contains("bridge dropped 5"), "{screen}");
+
+        // `busy()`'s bridge dropped 1300 frames before this host attached — a
+        // dongle left powered with nothing listening, which is neither this
+        // capture's loss nor anything the operator can act on.
+        let screen = rendered(&busy());
+        assert!(!screen.contains("bridge dropped"), "{screen}");
+    }
+
     #[test]
     fn q_escape_and_ctrl_c_all_quit() {
         assert!(quits(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)));
