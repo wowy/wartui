@@ -242,9 +242,7 @@ impl Node {
     /// The channel the cursor is on, or `None` when an assignment has been
     /// adopted and its sweep has not started.
     fn channel(&self) -> Option<u8> {
-        self.cursor
-            .index()
-            .map(|idx| SCAN_CHANNELS[usize::from(idx.min(NUM_SCAN_CHANNELS - 1))])
+        self.cursor.index().map(|idx| SCAN_CHANNELS[usize::from(idx.min(NUM_SCAN_CHANNELS - 1))])
     }
 }
 
