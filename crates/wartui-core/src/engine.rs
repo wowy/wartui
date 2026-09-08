@@ -35,7 +35,7 @@
 //! has to be delivered inside that node's own admin window, and that is only
 //! believed on an acknowledgement.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use wartui_bridge::{BridgeInfo, LinkEvent};
@@ -510,6 +510,10 @@ pub struct Snapshot {
     pub assignable: usize,
     /// The most recent observations, newest last.
     pub tail: Vec<TailEntry>,
+    /// Distinct Wi-Fi BSSIDs seen this session.
+    pub unique_wifi_aps: usize,
+    /// Distinct BLE BSSIDs seen this session.
+    pub unique_ble_aps: usize,
     /// Engine totals.
     pub counters: Counters,
     /// Store totals.
@@ -560,6 +564,8 @@ pub struct FleetEngine {
     link_error: Option<String>,
     counters: Counters,
     tail: VecDeque<TailEntry>,
+    unique_wifi: HashSet<Mac>,
+    unique_ble: HashSet<Mac>,
     bridge_status: Option<BridgeStatus>,
     /// The bridge's drop count when this host attached, subtracted from every
     /// later reading. `None` until the first status of a connection arrives.
@@ -614,6 +620,8 @@ impl FleetEngine {
             link_error: None,
             counters: Counters::default(),
             tail: VecDeque::new(),
+            unique_wifi: HashSet::new(),
+            unique_ble: HashSet::new(),
             bridge_status: None,
             dropped_baseline: None,
             last_status_poll: None,
@@ -881,6 +889,14 @@ impl FleetEngine {
                     return;
                 };
                 self.counters.observations += 1;
+                match line.kind {
+                    RecordKind::Wifi => {
+                        self.unique_wifi.insert(line.bssid);
+                    }
+                    RecordKind::Ble => {
+                        self.unique_ble.insert(line.bssid);
+                    }
+                }
                 if let Some(node) = self.nodes.get_mut(&src) {
                     node.observations += 1;
                 }
@@ -1470,6 +1486,8 @@ impl FleetEngine {
             alive,
             assignable,
             tail: self.tail.iter().cloned().collect(),
+            unique_wifi_aps: self.unique_wifi.len(),
+            unique_ble_aps: self.unique_ble.len(),
             counters: self.counters,
             store,
             bridge_status: self.bridge_status,
