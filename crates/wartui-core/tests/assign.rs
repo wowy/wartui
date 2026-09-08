@@ -8,17 +8,34 @@
 //!
 //! This is the same check to make against real hardware, at real speed, with
 //! `a` in the fleet view. The simulator makes it a test rather than an evening.
+//!
+//! The period is a median over the last [`BEAT_WINDOW`] gaps and is not reset
+//! when a node adopts a new range, so each measurement here waits out a whole
+//! window of beats *counted from the assignment it is measuring*. Waiting for an
+//! absolute number of heartbeats instead would measure whatever mixture of ranges
+//! the node happened to have beaten at — including the idle beat it parks on
+//! before it is assigned anything, which at this speed is shorter than either
+//! sweep and would read as a node scanning faster than it can.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::{mpsc, oneshot, watch};
 use wartui_bridge::sim::{SimConfig, SimTransport};
-use wartui_core::engine::{Command, EngineConfig, FleetEngine, Snapshot, StoreStats};
+use wartui_core::engine::{BEAT_WINDOW, Command, EngineConfig, FleetEngine, Snapshot, StoreStats};
 use wartui_core::record::AdminOutcome;
 use wartui_core::runtime::{drive, now};
 use wartui_core::store::{SessionInfo, Store, StoreConfig, open_readonly};
-use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun, NUM_SCAN_CHANNELS};
+use wartui_proto::plan::{CHANNEL_DWELL_MS, ChannelPool, ChannelSet, IndexRun, NUM_SCAN_CHANNELS};
+
+/// How much faster than real time the fake fleet runs.
+///
+/// Named because the periods being measured are derived from it: at 60 the
+/// node's idle beat is 17 ms, its sweep of the whole table 88 ms and its sweep
+/// of one channel 7 ms. All three are far shorter than the 250 ms
+/// [`wartui_core::runtime::TICK`] the snapshot is republished on, which is why
+/// nothing below infers anything from *when* a snapshot was seen.
+const SPEED: u32 = 60;
 
 /// Wait for something to become true of the published snapshot, or give up.
 ///
@@ -47,9 +64,13 @@ async fn narrowing_a_node_to_one_channel_collapses_its_heartbeat_period() {
 
     // One node, fast-forwarded. One because the point of the test is a single
     // node's sweep time, and a second node would only add stagger.
-    let link = SimTransport::new(SimConfig { node_count: 1, speed: 60.0, ..Default::default() })
-        .start()
-        .expect("starting the simulator");
+    let link = SimTransport::new(SimConfig {
+        node_count: 1,
+        speed: f64::from(SPEED),
+        ..Default::default()
+    })
+    .start()
+    .expect("starting the simulator");
 
     let started = now();
     let session = SessionInfo { espnow_channel: 6, pool: ChannelPool::All, ..Default::default() };
@@ -88,14 +109,37 @@ async fn narrowing_a_node_to_one_channel_collapses_its_heartbeat_period() {
         .send(Command::Assign { mac, channels: ChannelPool::All.channels() })
         .await
         .expect("the engine is listening");
-    let wide = until(&snapshot_rx, "four sweeps of the whole table", |s| {
+    let wide_acked = until(&snapshot_rx, "the whole table to be acknowledged", |s| {
         s.nodes.first().is_some_and(|n| {
             n.state.confirmed.is_some_and(|c| c.channels == ChannelPool::All.channels())
-                && n.state.heartbeats >= 5
         })
     })
     .await;
+
+    // A whole window of sweeps, counted from the beat that opened the admin
+    // window rather than from the start of the capture. Every beat before this
+    // one was an idle beat — a wartui node parks until it is told what to scan —
+    // and the period is a median over the last [`BEAT_WINDOW`] gaps, so a window
+    // with any of them left in it reports the parked node's 17 ms rather than the
+    // sweep. How many there were is not a fixed number to skip: nothing goes on
+    // the air until a heartbeat opens a window, so any delay in handling the
+    // operator's command adds another, and the snapshot is only republished every
+    // 250 ms in any case.
+    let window = u64::try_from(BEAT_WINDOW).expect("a five-deep window fits in a u64");
+    let idle_beats = wide_acked.nodes[0].state.heartbeats;
+    let wide = until(&snapshot_rx, "a full window of sweeps of the whole table", |s| {
+        s.nodes.first().is_some_and(|n| n.state.heartbeats >= idle_beats + window)
+    })
+    .await;
     let wide_period = wide.nodes[0].state.beat_period_ms().expect("a measured period");
+    // Half a sweep of the whole table, which is still several times the idle
+    // beat. Asserting it here says which number was wrong when it is wrong,
+    // rather than leaving the ratio below to fail for either reason.
+    let half_a_sweep = u32::from(NUM_SCAN_CHANNELS) * CHANNEL_DWELL_MS / SPEED / 2;
+    assert!(
+        wide_period > half_a_sweep,
+        "the whole table should take at least {half_a_sweep} ms, not the idle beat: {wide_period} ms"
+    );
 
     command_tx
         .send(Command::Assign { mac, channels: ChannelSet::from_run(IndexRun::new(5, 5)) })
@@ -118,12 +162,13 @@ async fn narrowing_a_node_to_one_channel_collapses_its_heartbeat_period() {
     assert_eq!(acked.counters.admin_acked, 2, "the wide assignment, then the narrow one");
     assert_eq!(acked.counters.admin_failed, 0);
 
-    // Three more sweeps for the median to have forgotten the wide ones. This is
-    // the whole milestone: one channel instead of forty, so about a fortieth of
-    // the sweep, observable without any access to the node beyond its radio.
+    // A full window again, so not one gap from the wide range is left in the
+    // median. This is the whole milestone: one channel instead of forty, so about
+    // a fortieth of the sweep, observable without any access to the node beyond
+    // its radio.
     let beats_before = node.state.heartbeats;
-    let narrow = until(&snapshot_rx, "three sweeps at the new range", |s| {
-        s.nodes.first().is_some_and(|n| n.state.heartbeats >= beats_before + 4)
+    let narrow = until(&snapshot_rx, "a full window of sweeps at the new range", |s| {
+        s.nodes.first().is_some_and(|n| n.state.heartbeats >= beats_before + window)
     })
     .await;
     let narrow_period = narrow.nodes[0].state.beat_period_ms().expect("a measured period");
