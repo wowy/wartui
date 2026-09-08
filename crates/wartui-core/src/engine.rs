@@ -388,7 +388,13 @@ impl NodeState {
 /// Five: enough for the median to survive one lost heartbeat, few enough that
 /// the figure follows a new assignment within three sweeps rather than
 /// averaging the old range in for a minute.
-const BEAT_WINDOW: usize = 5;
+///
+/// Public because it is also the answer to "how long until
+/// [`NodeState::beat_period_ms`] describes only the range this node holds
+/// now?" — this many heartbeats, after which no gap from the previous
+/// assignment is left in the window. Anything measuring a period across a
+/// change of range has to wait that out.
+pub const BEAT_WINDOW: usize = 5;
 
 /// Running totals, all of them since the engine started.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
