@@ -795,7 +795,7 @@ fn draw_stream(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot) {
         Constraint::Min(10),
     ];
     let title = format!(
-        " unique APs {} - unique BLE {} ({} total records) ",
+        " unique APs {} — unique BLE {} ({} total records) ",
         snapshot.unique_wifi_aps, snapshot.unique_ble_aps, snapshot.counters.observations
     );
     frame.render_widget(
