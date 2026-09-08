@@ -46,19 +46,19 @@ jobs:
 
     - name: Lint bridge firmware
       run: |
-        pushd firmware/bridge || exit 1
+        pushd firmware/bridge
         cargo fmt --all -- --check
         popd
 
     - name: Lint node firmware
       run: |
-        pushd firmware/node || exit 1
+        pushd firmware/node
         cargo fmt --all -- --check
         popd
 
     - name: Build bridge firmware
       run: |
-        pushd firmware/bridge || exit 1
+        pushd firmware/bridge
         cargo build --release --features esp32c5 --locked --verbose
         cargo build --release --features esp32c6 --locked --verbose
         cargo clippy --all-targets --features esp32c5 --locked -- -D warnings
@@ -67,7 +67,7 @@ jobs:
 
     - name: Build node firmware
       run: |
-        pushd firmware/node || exit 1
+        pushd firmware/node
         cargo build --release --features esp32c5 --locked --verbose
         cargo build --release --features esp32c6 --locked --verbose
         cargo clippy --release --all-targets --features esp32c5 --locked -- -D warnings
