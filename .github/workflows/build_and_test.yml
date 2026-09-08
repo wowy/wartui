@@ -24,11 +24,11 @@ jobs:
     - name: Lint
       run: cargo fmt --all -- --check
 
-    - name: Clippy
-      run: cargo clippy --all-targets --all-features -- -D warnings
-
     - name: Build
-      run: cargo build --verbose
+      run: cargo build --all-targets --all-features --locked --verbose
+
+    - name: Clippy
+      run: cargo clippy --all-targets --all-features --locked -- -D warnings
 
     - name: Run tests
-      run: cargo test --verbose
+      run: cargo test --all-targets --all-features --locked --verbose
