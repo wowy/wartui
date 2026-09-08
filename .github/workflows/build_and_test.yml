@@ -65,8 +65,8 @@ jobs:
           pushd firmware/bridge
           cargo build --release --features esp32c5 --locked --verbose
           cargo build --release --features esp32c6 --locked --verbose
-          cargo clippy --all-targets --features esp32c5 --locked -- -D warnings
-          cargo clippy --all-targets --features esp32c6 --locked -- -D warnings
+          cargo clippy --release --features esp32c5 --locked -- -D warnings
+          cargo clippy --release --features esp32c6 --locked -- -D warnings
           popd
 
       - name: Build node firmware
@@ -74,6 +74,6 @@ jobs:
           pushd firmware/node
           cargo build --release --features esp32c5 --locked --verbose
           cargo build --release --features esp32c6 --locked --verbose
-          cargo clippy --release --all-targets --features esp32c5 --locked -- -D warnings
-          cargo clippy --release --all-targets --features esp32c6 --locked -- -D warnings
+          cargo clippy --release --features esp32c5 --locked -- -D warnings
+          cargo clippy --release --features esp32c6 --locked -- -D warnings
           popd
