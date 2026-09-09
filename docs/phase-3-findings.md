@@ -159,6 +159,34 @@ Measured on the fixed build, with the endpoint wedged on command:
 The middle row is the guard that keeps a bench bridge with no host quiet for
 ever. The last row is the false positive the first version had.
 
+### Re-measured, against the finished detector
+
+Those three rows were taken before the fourth clause existed and before the rule
+moved into `wartui_proto::stall`. They were argued to be unaffected by both,
+which is not the same thing as having been run again, so they were run again —
+same board, two nodes transmitting, a host polling `GetStatus` twice a second,
+and a build whose `UsbSink::write_byte` returns `WouldBlock` 200 ms after a
+marker frame that gives the bench a timestamp for the wedge itself.
+
+| scenario | re-measured |
+| --- | --- |
+| wedged, host polling throughout | ROM banner 3.10 s after the endpoint died |
+| wedged, ~10 s of total silence across the wedge, then the host returns | not one byte while silent; ROM banner at +13.16 s |
+| main loop blocked 8 s — *not* a wedge — then the host returns | **no reset**; traffic resumed 8.00 s later and the run went on to 40 s |
+
+The tenths are the ROM banner rather than the detector: the reset itself lands at
+`TX_STALL_TIMEOUT` to the millisecond the loop can measure, and the banner is
+what the host sees. Row two is worth reading twice. The host's last frame was at
+20.0 s and the endpoint died at 20.3 s, so the stall armed immediately and then
+sat there for ten seconds with a host it had every reason to believe in — and
+said nothing, because that host had not spoken *since*. Presence lapsed at 30.0 s,
+the clock was dropped, the host came back at 30.5 s, and the reset came three
+seconds after that and not three seconds after the wedge.
+
+Row three is the false positive the first version had, and it survives the move:
+during the eight seconds the loop is blocked the detector is not consulted at
+all, and the pass that follows moves bytes, which is what clears the clock.
+
 ## The RTC watchdog does not work here, and was removed
 
 A watchdog was the obvious companion fix: `esp_hal::init` disables every
