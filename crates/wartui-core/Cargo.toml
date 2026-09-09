@@ -10,9 +10,9 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
-chrono = { version = "0.4.42", default-features = false, features = ["std", "clock"] }
+chrono = { version = "0.4.45", default-features = false, features = ["std", "clock"] }
 rusqlite = { version = "0.37.0", features = ["bundled"] }
-serialport = "4.10.0"
+serialport = "4.10.1"
 thiserror = "2.0.20"
 tokio = { version = "1.53.1", features = ["rt", "sync", "time", "macros"] }
 tracing = "0.1.44"
@@ -20,5 +20,5 @@ wartui-bridge = { path = "../wartui-bridge" }
 wartui-proto = { path = "../wartui-proto" }
 
 [dev-dependencies]
-tempfile = "3.24.0"
+tempfile = "3.27.0"
 tokio = { version = "1.53.1", features = ["test-util", "macros", "rt-multi-thread"] }
