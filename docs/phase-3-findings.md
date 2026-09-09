@@ -349,6 +349,13 @@ clock restarts when the host returns exactly as it did before. The third row
 never reaches `note_tx` at all. The clause only bites where the host goes quiet
 *without* the window expiring, which is the disconnect and nothing else.
 
+The hostless measurement in the section above predates this clause, so it was
+taken again against the final code: 3 m 43 s uptime and 411 frames dropped, then
+100 s later 5 m 23 s and 607 dropped. The full hundred seconds, no reset, and the
+drop counter climbing throughout — the failing condition present the whole time
+and correctly ignored, with the reset cause still the espflash flash that started
+the life.
+
 Which leaves `HOST_PRESENT_WINDOW` doing a different job from the one it looks
 like it is doing, and it is still load-bearing: it is what stops `stall_since`
 starting before there is any host to be contradicted by, so a bridge that filled
