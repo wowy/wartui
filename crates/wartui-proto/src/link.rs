@@ -32,7 +32,18 @@ use serde::{Serialize, de::DeserializeOwned};
 /// what lets the host tell that story apart from a duplicate answer to its own
 /// [`HostToBridge::Identify`], which is the only other way two `Ready` frames
 /// arrive on one connection.
-pub const LINK_PROTO_VERSION: u8 = 3;
+///
+/// v4 added [`ResetCause::Lockup`]. The C5 is the only part in the fleet whose
+/// silicon reports a CPU that stopped making sense, and it is the only signal
+/// either firmware has for the hang class at all — there is no working
+/// watchdog on these parts (`docs/phase-3-findings.md`). Reporting it as
+/// [`ResetCause::Unknown`], which is what a C5 build did until this version,
+/// throws away the one thing that would ever say so. The bump is what keeps an
+/// older host from meeting the new variant and failing to decode the `Ready`
+/// carrying it, which would read to the operator as a bridge that answered
+/// nothing — the exact misdiagnosis this protocol's error reporting exists to
+/// avoid.
+pub const LINK_PROTO_VERSION: u8 = 4;
 
 /// ESP-NOW's own payload ceiling. The 212-byte wardriver frames fit inside it.
 pub const MAX_ESPNOW_PAYLOAD: usize = 250;
@@ -88,6 +99,14 @@ pub enum ResetCause {
     Software,
     /// A watchdog fired, so the main loop stopped turning over.
     Watchdog,
+    /// The CPU locked up and the silicon reset it.
+    ///
+    /// Reported by the C5 and not by the C6, which has no such detector. It is
+    /// distinct from [`ResetCause::Watchdog`] and must not be folded into it:
+    /// no watchdog on either part actually fires (`docs/phase-3-findings.md`),
+    /// so a `Watchdog` here would name a mechanism that is known not to work
+    /// and send whoever read it looking in the wrong place.
+    Lockup,
     /// The supply sagged. Usually a hub or a cable rather than the board.
     Brownout,
     /// A reset the firmware did not ask for and cannot attribute, which
