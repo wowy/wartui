@@ -20,7 +20,7 @@ everything on the air — so a stock node also works, with the caveats below.
 | `crates/wartui-proto` | `no_std` wire formats, shared by the host and the bridge firmware |
 | `crates/wartui-bridge` | Host-side link to the dongle: transport, port discovery, simulator |
 | `crates/wartui-core` | Headless fleet engine, SQLite store, position, WiGLE export |
-| `crates/wartui` | The TUI binary, and the `sniff` / `status` / `ports` commands |
+| `crates/wartui` | The TUI binary, and the `sniff` / `status` / `reset` / `ports` commands |
 | `firmware/bridge` | Rust firmware for the dongle (own workspace, own target) |
 | `firmware/node` | Rust firmware for the nodes: sniffs, reports, takes assignments |
 | `tools/espnow-sniffer` | Passive Arduino sniffer for bring-up and frame capture |
@@ -411,13 +411,22 @@ The header says `waiting for a bridge to announce itself` for two quite
 different reasons, and the fault box says which: `link down: could not open …`
 means the port is not ours — nearly always another `wartui`, a `screen` session
 or an IDE's serial monitor still holding it — while no fault at all means the
-port opened and the dongle is not answering. In that second case reset it with
-`espflash reset --port …`, which is what `sniff` and `status` print after
-five seconds of silence; unplugging and replugging does the same thing more
-bluntly.
+port opened and the dongle is not answering.
+
+In that second case the bridge is usually not dead but deaf in one direction:
+its USB transmit endpoint has stopped draining while it goes on reading every
+frame you send it. The firmware notices that within three seconds and reboots
+itself, so this should now clear on its own and show up afterwards as
+`bridge rebooted itself: USB transmit had stalled` in the fault box. If it does
+not, `wartui reset` asks it to reboot, which works because the receive path is
+the half that still runs — and keeps the device path, where `espflash reset
+--port …` re-enumerates the board and can move `ttyACM0` to `ttyACM1` under a
+script that named it. `espflash` is the fallback for a bridge that answers
+nothing at all, and unplugging is the last resort.
 
 ```sh
 cargo run -p wartui -- status                  # exits in 5 s with the reason
+cargo run -p wartui -- reset                   # reboot a bridge that stopped answering
 cargo run -p wartui -- --log-file wartui.log run
 ```
 
