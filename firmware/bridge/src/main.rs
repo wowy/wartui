@@ -180,9 +180,18 @@ fn boot_phase(cause: ResetCause) -> LoopPhase {
 
 /// Flatten the chip's reset reason into the handful of stories worth telling.
 ///
-/// `SocResetReason` names silicon blocks and differs between the C5 and the
-/// C6, so only variants both chips define are matched here; the rest fall
-/// through to [`ResetCause::Unknown`] rather than costing a `cfg` apiece.
+/// `SocResetReason` names silicon blocks rather than causes, and the C5 and C6
+/// spellings differ. Matching only the variants *both* chips define was the
+/// first version of this and it silently cost the C5 its two: `PowerGlitch` and
+/// `CpuLockup` exist on that part alone and fell through to
+/// [`ResetCause::Unknown`], which on a chip nothing has ever been bench-tested
+/// on is the worst place to lose a signal. They are matched behind a `cfg`
+/// now — one `cfg`, for the one chip that has them.
+///
+/// What is left unmapped is deliberate. `CoreDeepSleep` cannot happen: nothing
+/// here sleeps. `CoreSDIO` (C6) and `CoreEfuseCrc` (both) are real but say
+/// nothing an operator could act on beyond "this board is unwell", which
+/// [`ResetCause::Unknown`] already says.
 fn reset_cause() -> ResetCause {
     let Some(reason) = esp_hal::system::reset_reason() else {
         return ResetCause::Unknown;
@@ -201,6 +210,15 @@ fn reset_cause() -> ResetCause {
         | SocResetReason::Cpu0RtcWdt
         | SocResetReason::SysRtcWdt
         | SocResetReason::SysSuperWdt => ResetCause::Watchdog,
+        // A glitch on the supply rail is a brownout as far as anyone holding
+        // the board is concerned, and the remedy printed for it — check the
+        // cable and the hub — is the right one.
+        #[cfg(feature = "esp32c5")]
+        SocResetReason::PowerGlitch => ResetCause::Brownout,
+        // The only signal either part gives for the hang class, and only this
+        // one gives it. There is no working watchdog behind it to fall back on.
+        #[cfg(feature = "esp32c5")]
+        SocResetReason::CpuLockup => ResetCause::Lockup,
         SocResetReason::SysBrownOut => ResetCause::Brownout,
         // `espflash reset` drives this pair over DTR/RTS, so an operator who
         // reached for the tool sees that they did.
