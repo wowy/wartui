@@ -75,7 +75,7 @@ accord.
 ## What was built, and what it does on the bench
 
 Since the state is unambiguous locally, the bridge now detects it. Four facts
-have to hold together (`Bridge::note_tx`): something is queued, a host frame
+have to hold together (`StallWatch::note_tx`): something is queued, a host frame
 decoded recently, another decoded since the stall began, and the endpoint has
 refused every byte for three seconds since all of that first became true. The
 host-present half is what keeps a bridge sitting on a bench with nothing attached
@@ -141,7 +141,7 @@ that recovered was reset on the next host frame, with a perfectly good endpoint.
 
 What is actually being measured is how long the endpoint has refused bytes
 *while somebody was waiting for them*, and that clock can only start once both
-halves are true. `Bridge::note_tx` keeps a `stall_since: Option<Instant>`,
+halves are true. `StallWatch` keeps a `stall_since: Option<u64>`,
 cleared whenever a byte moves or whenever nothing is waiting. It also needs
 `HOST_PRESENT_WINDOW` (10 s) to be longer than the host's own five-second
 `status_interval`: set it shorter and an established capture reads as an absent
@@ -158,6 +158,34 @@ Measured on the fixed build, with the endpoint wedged on command:
 
 The middle row is the guard that keeps a bench bridge with no host quiet for
 ever. The last row is the false positive the first version had.
+
+### Re-measured, against the finished detector
+
+Those three rows were taken before the fourth clause existed and before the rule
+moved into `wartui_proto::stall`. They were argued to be unaffected by both,
+which is not the same thing as having been run again, so they were run again —
+same board, two nodes transmitting, a host polling `GetStatus` twice a second,
+and a build whose `UsbSink::write_byte` returns `WouldBlock` 200 ms after a
+marker frame that gives the bench a timestamp for the wedge itself.
+
+| scenario | re-measured |
+| --- | --- |
+| wedged, host polling throughout | ROM banner 3.10 s after the endpoint died |
+| wedged, ~10 s of total silence across the wedge, then the host returns | not one byte while silent; ROM banner at +13.16 s |
+| main loop blocked 8 s — *not* a wedge — then the host returns | **no reset**; traffic resumed 8.00 s later and the run went on to 40 s |
+
+The tenths are the ROM banner rather than the detector: the reset itself lands at
+`TX_STALL_TIMEOUT` to the millisecond the loop can measure, and the banner is
+what the host sees. Row two is worth reading twice. The host's last frame was at
+20.0 s and the endpoint died at 20.3 s, so the stall armed immediately and then
+sat there for ten seconds with a host it had every reason to believe in — and
+said nothing, because that host had not spoken *since*. Presence lapsed at 30.0 s,
+the clock was dropped, the host came back at 30.5 s, and the reset came three
+seconds after that and not three seconds after the wedge.
+
+Row three is the false positive the first version had, and it survives the move:
+during the eight seconds the loop is blocked the detector is not consulted at
+all, and the pass that follows moves bytes, which is what clears the clock.
 
 ## The RTC watchdog does not work here, and was removed
 
@@ -363,3 +391,81 @@ its rings over hours alone is not reset the instant one attaches. It must stay
 longer than the host's `status_interval` for the same reason as before — the
 stall clock has to survive the gaps between polls — and the new clause is what
 stops it also meaning "for ten seconds after the last operator went home".
+
+## The rule moved to where a test can reach it
+
+Two defects, both in four lines of arithmetic against a clock, and neither found
+by review, by reading, or by `cargo test`. The first took a bridge left on a
+bench beside a talking fleet. The second took an operator quitting a session and
+watching the board reset three seconds later. Both were in `firmware/bridge`,
+where the only way to run them is to reflash a board and wait.
+
+That is the same argument `wartui_proto::outbox`'s module docs already make — a
+`no_std` binary built for `riscv32imac` cannot run a test — so the rule now lives
+next to it as `wartui_proto::stall::StallWatch`, keeping millisecond timestamps
+instead of `esp_hal::Instant`s. The firmware feeds it one observation per pass of
+the loop and acts on the answer; it decides nothing itself.
+
+Eight tests, and each of the four clauses is load-bearing under mutation:
+
+| break this | and this fails |
+| --- | --- |
+| `at > since` becomes `>=` | `a_host_that_quits_is_not_a_host_that_is_waiting` |
+| drop the host-present clause | `the_clock_starts_when_the_host_arrives_and_not_when_the_rings_filled` |
+| drop the queued clause | `an_empty_outbox_is_not_a_stall` |
+| ignore the timeout | `a_wedged_endpoint_with_the_host_still_asking_is_reset_at_the_timeout` |
+| arm the clock on every pass instead of the first | `the_clock_starts_when_the_host_arrives_and_not_when_the_rings_filled` |
+
+The first two rows are the two defects. Both now cost microseconds to catch
+rather than a reflash, two nodes and ninety seconds.
+
+The strictness of `at > since` is the one that looks like a typo and is not. A
+host whose last frame lands in the same millisecond the stall arms has not asked
+for anything *since*, and `>=` there restores the disconnect bug exactly.
+
+The refactored firmware was then put back on the same board and left alone with
+the two nodes for a hundred seconds with nothing reading the port: uptime 25 s
+and 21 frames dropped, then 2 m 5 s and 218 dropped. A hundred seconds to the
+second, no reset, and the drop counter climbing throughout — the failing
+condition present the whole time and correctly ignored.
+
+## The C5 was losing two of its reset reasons
+
+`wartui reset` and the fault box have only ever been exercised on a C6. The C5
+path is compile-checked in CI and has never been on a bench, so the mapping from
+`esp_hal`'s `SocResetReason` was read against both chips' definitions instead.
+
+The two enums are nearly identical, and the differences are all on the side that
+had never been tested. `CoreSDIO` (0x06) is C6-only and uninteresting — nothing
+here uses SDIO. But the C5 defines two the C6 does not:
+
+| variant | C5 | C6 | was reported as |
+| --- | --- | --- | --- |
+| `PowerGlitch` (0x19) | yes | — | `Unknown` |
+| `CpuLockup` (0x1A) | yes | — | `Unknown` |
+
+`reset_cause` matched only variants both chips define, deliberately, to avoid a
+`cfg` per chip — and so threw both away. A power glitch is a supply problem and
+now reports as `Brownout`, whose printed advice (check the cable and the hub) is
+the right advice for it.
+
+`CpuLockup` is the one worth having. There is no working watchdog on these parts
+(above), so the hang class has nothing behind it at all — and on the C5 the
+silicon's lockup detector is the only mechanism that would ever say a hang
+happened. Reporting it as `Unknown` throws away the single signal available for
+the one failure mode this document admits it cannot catch. It gets its own
+`ResetCause::Lockup` rather than being folded into `Watchdog`, which would name a
+mechanism known not to fire and send the next person looking in the wrong place.
+
+That is a wire change, so `LINK_PROTO_VERSION` goes to 4. Without the bump an
+older host would meet the new variant, fail to decode the `Ready` carrying it,
+and report a bridge that answered nothing — which is precisely the misdiagnosis
+this protocol's version byte exists to prevent.
+
+What stays unmapped is deliberate: `CoreDeepSleep` cannot happen because nothing
+here sleeps, and `CoreEfuseCrc` says nothing an operator can act on that
+`Unknown` does not already say.
+
+**Still not done:** none of this has been run on a C5. It is an audit of the
+mapping, not a bench test of it, and the gap it closes is the one the audit could
+see. Reflashing a node as a bridge would answer it; no C5 was attached.

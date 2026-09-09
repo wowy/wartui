@@ -93,7 +93,8 @@ Four host crates, strictly layered, plus firmware that shares the bottom one.
   `beacon` (802.11 management frames and RSN/WPA elements to a `Sighting`), `hci` (the four
   Bluetooth commands and one event a scan needs), `dedup` (the node's oldest-out MAC ring),
   `link` (our own COBS/postcard/CRC USB protocol), `outbox` (the bridge's bounded TX rings),
-  `plan` (channel pools, timings and the partitioning planner). Compiled into *both* the host
+  `stall` (when that endpoint has stopped draining), `plan` (channel pools, timings and the
+  partitioning planner). Compiled into *both* the host
   and the firmware by path dependency, which is the only thing keeping the ends in step — and
   the reason a node's parsers are testable with `cargo test` rather than a reflash.
 - **`crates/wartui-bridge`** — host side of the USB link. Everything above talks to a `LinkHandle`
@@ -202,21 +203,24 @@ Positions resolve fresh per record through `PositionChain`: GPS (`--gps`, NMEA o
   host reads the FIFO; if that read never lands, nothing on the device can clear it. The receive
   endpoint is unaffected, so the bridge goes on decoding and executing commands it cannot answer —
   which from the host is indistinguishable from a dead board, and is the failure that used to send
-  operators to `espflash`. `Bridge::note_tx` times how long the endpoint has refused bytes *while
-  somebody was waiting for them*, from when that contradiction started and never from the last byte
-  written. Both halves are load-bearing. Time it from the last byte and a bridge left powered beside
-  a fleet, with nobody reading for hours, reboots the moment `wartui` says hello; drop the
-  host-present half and a bridge on a bench with nothing attached reboots for ever. For the same
-  reason `last_host` starts at `None` and never at the boot instant: seeded with a time, it reads
-  as a host present for the first `HOST_PRESENT_WINDOW` of *every* life, and a bridge powered
-  beside a talking fleet resets, boots into the same window, and does it again for ever.
-  And a host that has *quit* is not a host that is waiting: it satisfies "spoke inside the window"
-  for a further `HOST_PRESENT_WINDOW`, while its quitting is exactly what stopped the endpoint
-  draining, so the detector also needs a frame decoded *since the stall began* — without it every
-  session ends in a reboot and the next `run` opens with a fault box blaming a wedge that was an
-  operator closing a window. `HOST_PRESENT_WINDOW` must also stay longer than the host's
-  `status_interval`, or a live capture reads as an absent host between polls and a real wedge is
-  never noticed. Measured in
+  operators to `espflash`. `wartui_proto::stall::StallWatch` times how long the endpoint has refused
+  bytes *while somebody was waiting for them*, from when that contradiction started and never from
+  the last byte written. It lives in `wartui-proto` and not in the firmware because it shipped two
+  defects that only a bench found; every clause below is now a test, and a mutation of each one
+  fails a named test rather than a board. Both halves are load-bearing. Time it from the last byte
+  and a bridge left powered beside a fleet, with nobody reading for hours, reboots the moment
+  `wartui` says hello; drop the host-present half and a bridge on a bench with nothing attached
+  reboots for ever. For the same reason `last_host` starts at `None` and never at the boot instant:
+  seeded with a time, it reads as a host present for the first `HOST_PRESENT_WINDOW_MS` of *every*
+  life, and a bridge powered beside a talking fleet resets, boots into the same window, and does it
+  again for ever. And a host that has *quit* is not a host that is waiting: it satisfies "spoke
+  inside the window" for a further `HOST_PRESENT_WINDOW_MS`, while its quitting is exactly what
+  stopped the endpoint draining, so the detector also needs a frame decoded *since the stall began*
+  — strictly after it, since a host whose last frame lands in the same millisecond has not asked
+  since. Without that clause every session ends in a reboot and the next `run` opens with a fault
+  box blaming a wedge that was an operator closing a window. `HOST_PRESENT_WINDOW_MS` must also stay
+  longer than the host's `status_interval`, or a live capture reads as an absent host between polls
+  and a real wedge is never noticed. Measured in
   `docs/phase-3-findings.md`, along with why there is no watchdog behind the *hang* case: one was
   built, and esp-hal 1.1.2's RWDT never resets these parts — it counts, unfed, but its reset does
   not reach the CPU and `WDT_PROCPU_RESET_EN` will not be written.

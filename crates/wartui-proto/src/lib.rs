@@ -17,6 +17,7 @@ pub mod hci;
 pub mod link;
 pub mod outbox;
 pub mod plan;
+pub mod stall;
 
 /// Re-exported so consumers can build link payloads without depending on
 /// `heapless` themselves, and can never end up on a mismatched version.
@@ -29,3 +30,4 @@ pub use hci::AdvReport;
 pub use link::{BridgeToHost, HostToBridge, LinkError, SendStatus};
 pub use outbox::{ByteSink, Outbox};
 pub use plan::{ChannelPool, SCAN_CHANNELS};
+pub use stall::StallWatch;

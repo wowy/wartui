@@ -1063,6 +1063,7 @@ fn restart_fault(bridge: &BridgeInfo) -> Option<String> {
         ResetCause::PowerOn => None,
         ResetCause::Software => Some("bridge rebooted (firmware reset)".to_owned()),
         ResetCause::Watchdog => Some("bridge rebooted (watchdog)".to_owned()),
+        ResetCause::Lockup => Some("bridge rebooted (CPU lockup)".to_owned()),
         ResetCause::Brownout => Some("bridge rebooted (brownout)".to_owned()),
         ResetCause::External => Some("bridge rebooted (reset over USB)".to_owned()),
         ResetCause::Unknown => Some("bridge rebooted (cause unknown)".to_owned()),
