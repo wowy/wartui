@@ -67,14 +67,21 @@ decides it — `SERIAL_IN_EP_DATA_FREE`, which `WR_DONE` clears and which,
 per the TRM, comes back only when the USB host reads the FIFO. If that read
 never lands, nothing this end can do will clear it.
 
-So the firmware now notices and reboots itself. [`Bridge::note_tx`] times how
-long the endpoint has refused bytes *while somebody was waiting for them* — from
-when that contradiction started, never from the last byte written, which would
-count the hours a bridge spent powered with nobody reading against a transmit
-path with nothing wrong with it. It also needs the host to have spoken recently,
-which is what keeps a bridge on a bench with no host attached quiet for ever. The reset *is* the message — every
-way of explaining would go out through the path that is broken — and the `Ready`
-behind it says `TxStalled`.
+So the firmware now notices and reboots itself. `wartui_proto::stall::StallWatch`
+times how long the endpoint has refused bytes *while somebody was waiting for
+them* — from when that contradiction started, never from the last byte written,
+which would count the hours a bridge spent powered with nobody reading against a
+transmit path with nothing wrong with it. It also needs the host to have spoken
+recently, and to have spoken since the stall began, which is what keeps a bridge
+on a bench with no host attached quiet for ever and keeps it from resetting every
+time an operator closes a window. The reset *is* the message — every way of
+explaining would go out through the path that is broken — and the `Ready` behind
+it says `TxStalled`.
+
+The rule is in `wartui-proto` rather than this crate on purpose. It is four lines
+of arithmetic against a clock, it has been wrong twice, and neither time was
+caught by anything but a board on a bench; there it is eight tests that run in
+microseconds.
 
 Reach for `wartui reset --port <path>` first, not `espflash`: the receive path
 is alive in this state, so it reboots on being asked, and a software reset keeps

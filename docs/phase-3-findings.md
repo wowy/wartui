@@ -75,7 +75,7 @@ accord.
 ## What was built, and what it does on the bench
 
 Since the state is unambiguous locally, the bridge now detects it. Four facts
-have to hold together (`Bridge::note_tx`): something is queued, a host frame
+have to hold together (`StallWatch::note_tx`): something is queued, a host frame
 decoded recently, another decoded since the stall began, and the endpoint has
 refused every byte for three seconds since all of that first became true. The
 host-present half is what keeps a bridge sitting on a bench with nothing attached
@@ -141,7 +141,7 @@ that recovered was reset on the next host frame, with a perfectly good endpoint.
 
 What is actually being measured is how long the endpoint has refused bytes
 *while somebody was waiting for them*, and that clock can only start once both
-halves are true. `Bridge::note_tx` keeps a `stall_since: Option<Instant>`,
+halves are true. `StallWatch` keeps a `stall_since: Option<u64>`,
 cleared whenever a byte moves or whenever nothing is waiting. It also needs
 `HOST_PRESENT_WINDOW` (10 s) to be longer than the host's own five-second
 `status_interval`: set it shorter and an established capture reads as an absent
@@ -363,3 +363,40 @@ its rings over hours alone is not reset the instant one attaches. It must stay
 longer than the host's `status_interval` for the same reason as before — the
 stall clock has to survive the gaps between polls — and the new clause is what
 stops it also meaning "for ten seconds after the last operator went home".
+
+## The rule moved to where a test can reach it
+
+Two defects, both in four lines of arithmetic against a clock, and neither found
+by review, by reading, or by `cargo test`. The first took a bridge left on a
+bench beside a talking fleet. The second took an operator quitting a session and
+watching the board reset three seconds later. Both were in `firmware/bridge`,
+where the only way to run them is to reflash a board and wait.
+
+That is the same argument `wartui_proto::outbox`'s module docs already make — a
+`no_std` binary built for `riscv32imac` cannot run a test — so the rule now lives
+next to it as `wartui_proto::stall::StallWatch`, keeping millisecond timestamps
+instead of `esp_hal::Instant`s. The firmware feeds it one observation per pass of
+the loop and acts on the answer; it decides nothing itself.
+
+Eight tests, and each of the four clauses is load-bearing under mutation:
+
+| break this | and this fails |
+| --- | --- |
+| `at > since` becomes `>=` | `a_host_that_quits_is_not_a_host_that_is_waiting` |
+| drop the host-present clause | `the_clock_starts_when_the_host_arrives_and_not_when_the_rings_filled` |
+| drop the queued clause | `an_empty_outbox_is_not_a_stall` |
+| ignore the timeout | `a_wedged_endpoint_with_the_host_still_asking_is_reset_at_the_timeout` |
+| arm the clock on every pass instead of the first | `the_clock_starts_when_the_host_arrives_and_not_when_the_rings_filled` |
+
+The first two rows are the two defects. Both now cost microseconds to catch
+rather than a reflash, two nodes and ninety seconds.
+
+The strictness of `at > since` is the one that looks like a typo and is not. A
+host whose last frame lands in the same millisecond the stall arms has not asked
+for anything *since*, and `>=` there restores the disconnect bug exactly.
+
+The refactored firmware was then put back on the same board and left alone with
+the two nodes for a hundred seconds with nothing reading the port: uptime 25 s
+and 21 frames dropped, then 2 m 5 s and 218 dropped. A hundred seconds to the
+second, no reset, and the drop counter climbing throughout — the failing
+condition present the whole time and correctly ignored.
