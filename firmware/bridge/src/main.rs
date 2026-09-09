@@ -42,6 +42,7 @@
 use esp_hal::Blocking;
 use esp_hal::clock::CpuClock;
 use esp_hal::interrupt::software::SoftwareInterruptControl;
+use esp_hal::rtc_cntl::SocResetReason;
 use esp_hal::time::{Duration, Instant};
 use esp_hal::timer::timg::TimerGroup;
 use esp_hal::usb_serial_jtag::{UsbSerialJtag, UsbSerialJtagRx, UsbSerialJtagTx};
@@ -49,11 +50,12 @@ use esp_radio::esp_now::{
     EspNowError, EspNowManager, EspNowReceiver, EspNowSender, EspNowWifiInterface, PeerInfo,
 };
 use esp_rtos::CurrentThreadHandle;
+use portable_atomic::{AtomicU8, AtomicU32, Ordering};
 use static_cell::StaticCell;
 use wartui_proto::heapless::Vec;
 use wartui_proto::link::{
     BROADCAST, BridgeToHost, Chip, FrameAccumulator, HostToBridge, LINK_PROTO_VERSION, LogLevel,
-    LogStr, MAX_FRAME, Mac, SendStatus, ShortStr, decode_frame,
+    LogStr, LoopPhase, MAX_FRAME, Mac, ResetCause, SendStatus, ShortStr, decode_frame,
 };
 use wartui_proto::outbox::{ByteSink, Outbox};
 /// Where the stock mesh lives (`src/WiFiOps.cpp:15`). Shared with the node
@@ -91,6 +93,139 @@ const USB_READ_BUDGET: usize = 256;
 /// three hundred times finer than the 300 ms admin window that any of this has
 /// to hit.
 const IDLE_SLEEP: Duration = Duration::from_millis(1);
+
+/// How long the transmit path may refuse every byte while a host waits.
+///
+/// See [`Bridge::note_tx`] for what this actually detects. Three seconds is
+/// chosen against the host's clock rather than the bridge's: `wartui` sends
+/// `Identify` every 500 ms and gives up after twelve of them, at six seconds
+/// (`crates/wartui-bridge/src/serial.rs:32-54`). Resetting at three leaves room
+/// for the reboot and a fresh `Ready` to land inside that window, so the
+/// operator sees a bridge that hesitated rather than one that was not there.
+/// It is also far longer than any legitimate gap: a host that is merely slow
+/// still empties a sixty-four byte packet in microseconds, and the test is for
+/// *no* progress at all rather than for slow progress.
+const TX_STALL_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// How recently the host must have spoken to count as still being there.
+///
+/// Deliberately longer than the host's own five-second `status_interval`
+/// (`crates/wartui-core/src/engine.rs`), because a connected host with a quiet
+/// fleet says nothing in between. Set this below that interval and an
+/// established capture reads as an absent host for two seconds in every five,
+/// which is exactly long enough to keep resetting the stall clock and never
+/// notice a real wedge.
+const HOST_PRESENT_WINDOW: Duration = Duration::from_secs(10);
+
+// There is no watchdog here, having built one and measured that it does not
+// work. `esp_hal::init` disables every watchdog on the chip
+// (`esp-hal-1.1.2/src/lib.rs:751-761`), so a genuine hang in the loop below has
+// nothing behind it and the board has to be unplugged — a real gap, left
+// deliberately open. The RWDT that would close it never fires on these parts
+// with esp-hal 1.1.2: enabled at five seconds, tried both before `esp_hal::init`
+// and after the radio was up, with `enable()` called first so that its wholesale
+// write of `wdtconfig0` could not undo the rest, a build spinning in `loop {}`
+// was never reset in any arrangement. Nothing in `esp-rtos` or `esp-radio`
+// mentions the RWDT, so nothing is feeding it; the remaining suspicion is the
+// C6's LP_WDT clock not being ungated by `Rtc::new`, which would send every one
+// of those register writes nowhere — measured false: the registers read back
+// exactly as configured, seconds later. It counts, unfed, and its reset never
+// reaches the CPU. `WDT_PROCPU_RESET_EN` is the one enable that will not be
+// written. `docs/phase-3-findings.md` has the register dumps.
+//
+// A safety net that provably catches nothing is worse than an absent one,
+// because it will be trusted. The failure this project has actually seen was
+// never a hang, and [`TX_STALL_TIMEOUT`] is what guards it.
+
+/// Where the loop was when it last stopped making progress.
+///
+/// In RTC fast memory and marked persistent, so it survives the resets that
+/// matter — the panic handler's, the watchdog's, and the one [`stalled`]
+/// asks for — and is read back by the next life. A power-on leaves it
+/// undefined, which is why [`boot_phase`] only believes it when the reset
+/// reason says the RTC domain was not reset.
+///
+/// An `AtomicU8` rather than a `u8` because `unsafe_code` is forbidden here
+/// and a plain `static mut` cannot be written without it. It is never
+/// contended: only the main task touches it.
+#[esp_hal::ram(unstable(rtc_fast, persistent))]
+static PHASE: AtomicU8 = AtomicU8::new(0);
+
+/// Says that [`PHASE`] was written by a build that writes it.
+///
+/// Persistent RTC memory holds whatever the last thing to use it left there,
+/// which after a reflash is the previous firmware's data and after a power-on
+/// is nothing in particular. Neither is a phase, and both would be reported as
+/// one with a straight face — the first board flashed with this firmware
+/// claimed it had stopped at `Boot`, which was a bit pattern rather than an
+/// observation. A word that this build alone writes is what separates a marker
+/// from a coincidence.
+#[esp_hal::ram(unstable(rtc_fast, persistent))]
+static PHASE_VALID: AtomicU32 = AtomicU32::new(0);
+
+/// Arbitrary, and only has to be unlikely. Reads as `war1` in a memory dump.
+const PHASE_MAGIC: u32 = 0x7761_7231;
+
+/// Record where the loop is, for the next life to report.
+fn mark(phase: LoopPhase) {
+    PHASE.store(phase as u8, Ordering::Relaxed);
+}
+
+/// What the marker said, if this reset is one that preserved it.
+///
+/// A power-on gives uninitialised RTC memory, and reporting whatever bit
+/// pattern it held would put a confident and invented phase in front of an
+/// operator. Anything else reached us through a reset that left the RTC domain
+/// alone, so the marker is real.
+fn boot_phase(cause: ResetCause) -> LoopPhase {
+    if matches!(cause, ResetCause::PowerOn) || PHASE_VALID.load(Ordering::Relaxed) != PHASE_MAGIC {
+        return LoopPhase::Unknown;
+    }
+    match PHASE.load(Ordering::Relaxed) {
+        1 => LoopPhase::Boot,
+        2 => LoopPhase::DrainRadio,
+        3 => LoopPhase::DrainLink,
+        4 => LoopPhase::Command,
+        5 => LoopPhase::Transmit,
+        6 => LoopPhase::Pump,
+        7 => LoopPhase::Idle,
+        8 => LoopPhase::TxStalled,
+        _ => LoopPhase::Unknown,
+    }
+}
+
+/// Flatten the chip's reset reason into the handful of stories worth telling.
+///
+/// `SocResetReason` names silicon blocks and differs between the C5 and the
+/// C6, so only variants both chips define are matched here; the rest fall
+/// through to [`ResetCause::Unknown`] rather than costing a `cfg` apiece.
+fn reset_cause() -> ResetCause {
+    let Some(reason) = esp_hal::system::reset_reason() else {
+        return ResetCause::Unknown;
+    };
+    match reason {
+        SocResetReason::ChipPowerOn => ResetCause::PowerOn,
+        // Both the panic handler and `HostToBridge::Reset` arrive here, and so
+        // does the reset `stalled` asks for. Which of the three it was is what
+        // the phase marker is for.
+        SocResetReason::CoreSw | SocResetReason::Cpu0Sw => ResetCause::Software,
+        SocResetReason::CoreMwdt0
+        | SocResetReason::CoreMwdt1
+        | SocResetReason::CoreRtcWdt
+        | SocResetReason::Cpu0Mwdt0
+        | SocResetReason::Cpu0Mwdt1
+        | SocResetReason::Cpu0RtcWdt
+        | SocResetReason::SysRtcWdt
+        | SocResetReason::SysSuperWdt => ResetCause::Watchdog,
+        SocResetReason::SysBrownOut => ResetCause::Brownout,
+        // `espflash reset` drives this pair over DTR/RTS, so an operator who
+        // reached for the tool sees that they did.
+        SocResetReason::CoreUsbUart | SocResetReason::CoreUsbJtag | SocResetReason::Cpu0JtagCpu => {
+            ResetCause::External
+        }
+        _ => ResetCause::Unknown,
+    }
+}
 
 /// Resets rather than hanging.
 ///
@@ -136,6 +271,20 @@ struct Bridge {
     channel: u8,
     rx_count: u32,
     boot: Instant,
+    /// Why this life started, and where the last one stopped. Fixed at boot
+    /// and repeated in every `Ready`, because the host is usually not watching
+    /// at the moment a bridge restarts underneath it.
+    cause: ResetCause,
+    phase: LoopPhase,
+    /// When the transmit path first started refusing bytes with a host
+    /// waiting, or `None` if it is not refusing them now.
+    stall_since: Option<Instant>,
+    /// When a frame from the host last decoded, or `None` if none ever has.
+    ///
+    /// `None` rather than the boot instant, and the difference decides whether
+    /// a bridge with no host attached survives its own first ten seconds. See
+    /// [`Bridge::note_tx`].
+    last_host: Option<Instant>,
 }
 
 impl Bridge {
@@ -159,7 +308,104 @@ impl Bridge {
             mac,
             fw_version: ShortStr::try_from(env!("CARGO_PKG_VERSION")).unwrap_or_default(),
             proto_version: LINK_PROTO_VERSION,
+            reset_cause: self.cause,
+            last_phase: self.phase,
+            // Saturating rather than wrapping: the heaps here total 100 KiB,
+            // so the cast cannot lose anything, but a `as` that silently could
+            // is not worth leaving in a frame the host draws conclusions from.
+            heap_free: u32::try_from(esp_alloc::HEAP.free()).unwrap_or(u32::MAX),
+            // The host's only way to tell this frame from a second answer to
+            // an `Identify` it sent twice, both of which arrive on the same
+            // connection because a software reset keeps the USB device.
+            uptime_ms: self.boot.elapsed().as_millis() as u32,
         });
+    }
+
+    /// Account for one pass of the outbox, and say whether to give up.
+    ///
+    /// The clock runs from when the *contradiction* started, not from the last
+    /// byte ever written, and that distinction is the whole of this method.
+    /// Timing it from the last byte looks equivalent and is not: a bridge left
+    /// powered beside a talkative fleet fills its rings and its endpoint with
+    /// nobody reading, so by the time an operator finally attaches, the last
+    /// byte moved hours ago. Every one of those hours would count against a
+    /// transmit path with nothing wrong with it, and the bridge would reset
+    /// itself the moment `wartui` said hello — every time. The same mistake
+    /// punishes any long blocking call inside one iteration. What is actually
+    /// being measured is how long the endpoint has refused bytes *while
+    /// somebody was waiting for them*, and that clock can only start once both
+    /// halves are true.
+    ///
+    /// The rest is as before: something has to be queued, so silence is not
+    /// simply having nothing to say, and the host has to have spoken inside
+    /// [`HOST_PRESENT_WINDOW`], so a bridge sitting on a bench with nothing
+    /// attached stays quiet for ever rather than rebooting in a loop.
+    ///
+    /// This is the failure that sent an operator looking for `espflash`. The
+    /// USB Serial/JTAG IN endpoint answers every write with "not now" and never
+    /// stops: `SERIAL_IN_EP_DATA_FREE` goes to zero when `WR_DONE` is set and,
+    /// per the TRM, comes back only "until data in UART Tx FIFO is read by USB
+    /// Host". If that read never lands the flag never clears, and this end has
+    /// no way to make it. The receive path is untouched by any of it, so the
+    /// bridge goes on reading commands it cannot answer — which is exactly how
+    /// it looks from the host: a port that opens, writes that succeed, and
+    /// silence. Measured on a wedged board: twelve `Identify` frames and a
+    /// `GetStatus` decoded and executed, not one byte back, and a `Reset` frame
+    /// hand-fed down the same wire rebooted it instantly.
+    ///
+    /// Three facts have to hold together, and no two of them are enough:
+    ///
+    /// - there is something queued, so silence is not simply having nothing
+    ///   to say;
+    /// - nothing has moved for [`TX_STALL_TIMEOUT`], so the endpoint is not
+    ///   merely slow;
+    /// - a host frame decoded inside that same window, so there is a host at
+    ///   all;
+    /// - and one decoded *since the stall began*, so that host is still there
+    ///   now rather than having been there a moment ago.
+    ///
+    /// A bridge sitting on a bench with no host attached fails the third and
+    /// fourth and stays quiet for ever, which is the case that must never be
+    /// reset.
+    ///
+    /// The fourth is not a refinement of the third, and leaving it out cost a
+    /// reset after every session an operator ever ran. A host that has *quit*
+    /// satisfies "spoke inside the window" for a further
+    /// [`HOST_PRESENT_WINDOW`], and quitting is exactly what stops the endpoint
+    /// draining — so with a fleet in earshot the rings fill the moment it lets
+    /// go, and because [`TX_STALL_TIMEOUT`] is the shorter of the two the reset
+    /// always won the race. Measured: `wartui status`, and three seconds later
+    /// a bridge reporting that its transmit path had stopped draining, every
+    /// time. A host that is genuinely waiting keeps asking — `run` polls for
+    /// status, `supervise` re-sends `Identify` — so requiring a frame decoded
+    /// after the stall started is what separates the two, and it costs the real
+    /// case nothing.
+    ///
+    /// Which is why `last_host` starts at `None` and not at the boot instant.
+    /// Seeded with the boot instant it reads as a host present for the first
+    /// [`HOST_PRESENT_WINDOW`] of *every* life, and a bridge powered beside a
+    /// talking fleet with nothing attached would fill its rings against an
+    /// endpoint no host is draining, reset at [`TX_STALL_TIMEOUT`], and come
+    /// back into the same ten-second window — for ever, on a board with
+    /// nothing whatever wrong with it. Presence is something the host
+    /// demonstrates by sending a frame, and there is no such thing as a
+    /// default.
+    fn note_tx(&mut self, moved: bool, now: Instant) -> bool {
+        let host_here = self.last_host.is_some_and(|at| at.elapsed() < HOST_PRESENT_WINDOW);
+        let waiting = !self.outbox.is_empty() && host_here;
+        if moved || !waiting {
+            self.stall_since = None;
+            return false;
+        }
+        // Started when the contradiction did, so that a bridge which filled its
+        // rings over hours with nobody attached is not reset the instant one
+        // arrives; the host-present test above is what holds this back until
+        // there is a host to be contradicted by.
+        let since = *self.stall_since.get_or_insert(now);
+        // And still talking, not merely seen lately. This is the clause that
+        // tells a wedged endpoint from an operator who has just pressed `q`.
+        let still_asking = self.last_host.is_some_and(|at| at > since);
+        still_asking && now - since >= TX_STALL_TIMEOUT
     }
 
     fn log(&mut self, level: LogLevel, message: &str) {
@@ -176,6 +422,16 @@ impl Bridge {
 #[esp_hal::main]
 fn main() -> ! {
     let peripherals = esp_hal::init(esp_hal::Config::default().with_cpu_clock(CpuClock::max()));
+
+    // Read before anything else writes it: this is the marker the *previous*
+    // life left behind, and `esp_hal::init` has already latched the reset
+    // reason it has to be interpreted against.
+    let cause = reset_cause();
+    let phase = boot_phase(cause);
+    mark(LoopPhase::Boot);
+    // Claimed only after the previous life's marker has been read, so a reset
+    // between the two cannot make the next boot trust a phase nobody wrote.
+    PHASE_VALID.store(PHASE_MAGIC, Ordering::Relaxed);
 
     // The radio blobs allocate; nothing in wartui's own code does.
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 64 * 1024);
@@ -210,12 +466,17 @@ fn main() -> ! {
     // have to borrow the parts that answer `GetStatus` and drain the radio.
     let (manager, mut sender, receiver) = controller.esp_now().split();
 
+    let now = Instant::now();
     let mut bridge = Bridge {
         outbox: OUTBOX.init_with(Outbox::new),
         accumulator: FrameAccumulator::new(),
         channel: DEFAULT_CHANNEL,
         rx_count: 0,
-        boot: Instant::now(),
+        boot: now,
+        cause,
+        phase,
+        stall_since: None,
+        last_host: None,
     };
 
     match manager.set_channel(DEFAULT_CHANNEL) {
@@ -228,11 +489,27 @@ fn main() -> ! {
 
     loop {
         let mut worked = false;
+        mark(LoopPhase::DrainRadio);
         worked |= drain_radio(&receiver, &mut bridge);
+        mark(LoopPhase::DrainLink);
         worked |= drain_link(&mut usb_rx, &manager, &mut sender, &mut bridge, mac);
-        worked |= bridge.outbox.pump(&mut sink);
+
+        mark(LoopPhase::Pump);
+        let moved = bridge.outbox.pump(&mut sink);
+        worked |= moved;
+
+        // Nothing subtler is available. The endpoint cannot be re-armed from
+        // this end, and every way of telling the host would go out through the
+        // path that is broken — so the reset *is* the message: the host sees
+        // the link drop and come back, and the `Ready` behind it says
+        // `TxStalled`, which is the whole diagnosis in one frame.
+        if bridge.note_tx(moved, Instant::now()) {
+            mark(LoopPhase::TxStalled);
+            esp_hal::system::software_reset();
+        }
 
         if !worked {
+            mark(LoopPhase::Idle);
             CurrentThreadHandle::get().delay(IDLE_SLEEP);
         }
     }
@@ -293,7 +570,15 @@ fn drain_link(
 
         let Some(frame) = bridge.accumulator.push(byte) else { continue };
         match decode_frame::<HostToBridge>(frame) {
-            Ok(command) => handle(command, manager, sender, bridge, mac),
+            Ok(command) => {
+                // Proof of a host: something on the other end of this cable
+                // speaks the link protocol and is asking us for things. Only a
+                // frame that decoded counts — a board running node firmware
+                // talks constantly and none of it is a frame, and `note_tx`
+                // must not read that as somebody waiting on an answer.
+                bridge.last_host = Some(Instant::now());
+                handle(command, manager, sender, bridge, mac);
+            }
             Err(err) => {
                 // Expected after a reset, when the ROM bootloader's banner
                 // arrives down the same pipe. Reported at debug so a genuine
@@ -317,6 +602,7 @@ fn handle(
     bridge: &mut Bridge,
     mac: Mac,
 ) {
+    mark(LoopPhase::Command);
     match command {
         HostToBridge::Identify => bridge.announce(mac),
 
@@ -346,6 +632,11 @@ fn handle(
         HostToBridge::Reset => esp_hal::system::software_reset(),
 
         HostToBridge::SendEspNow { id, dst, ensure_peer, payload } => {
+            // Named separately from `Command` because it is the one place the
+            // loop can block for an unbounded time: `SendWaiter` busy-waits on
+            // a callback with no timeout of its own, so a phase of `Transmit`
+            // behind a watchdog reset says which call did not come back.
+            mark(LoopPhase::Transmit);
             let status = transmit(manager, sender, &dst, ensure_peer, &payload);
             // Stamped *after* the transmit callback, not before the send.
             // Subtracted from the `rx_us` of the heartbeat that opened the

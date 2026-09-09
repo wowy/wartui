@@ -28,12 +28,13 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Cell, Paragraph, Row, Table};
 use ratatui::{DefaultTerminal, Frame};
 use tokio::sync::{mpsc, oneshot, watch};
+use wartui_bridge::BridgeInfo;
 use wartui_core::engine::{Command, NodeView, Snapshot, TailEntry};
 use wartui_core::gps::{GpsStatus, GpsView};
 use wartui_core::position::PositionSource;
 use wartui_core::record::AdminOutcome;
 use wartui_proto::air::RecordKind;
-use wartui_proto::link::Mac;
+use wartui_proto::link::{LoopPhase, Mac, ResetCause};
 use wartui_proto::plan::{ChannelSet, MAX_NODES, Radio, SCAN_CHANNELS};
 
 /// How long the input thread waits for a keypress before checking whether it
@@ -67,6 +68,8 @@ async fn view(
     let (keys, running) = spawn_input();
     let mut keys = keys;
     let mut ui = Ui::default();
+    // Built before the loop, not inside the arm below: see `crate::Terminate`.
+    let mut terminate = crate::Terminate::new();
     let outcome = loop {
         let current = snapshot.borrow_and_update().clone();
         ui.clamp(current.nodes.len());
@@ -87,6 +90,10 @@ async fn view(
                     break Ok(());   // The engine stopped.
                 }
             }
+            // Deliberately the same exit as `q`: the terminal is restored, the
+            // engine is told to stop, the last batch is committed and the port
+            // is released. See `crate::Terminate`.
+            () = terminate.recv() => break Ok(()),
         }
     };
     running.store(false, Ordering::Relaxed);
@@ -1032,7 +1039,34 @@ fn faults(snapshot: &Snapshot) -> Vec<String> {
     {
         faults.push(format!("bridge dropped {}", status.dropped_since_attach));
     }
+    // A bridge that restarted underneath a running capture is a fault even
+    // though nothing about it is failing now: it came back on the control
+    // channel with an empty peer table, and the gap is in the data. A
+    // power-on is not one — that is just how a capture starts.
+    if let Some(bridge) = &snapshot.bridge
+        && let Some(reason) = restart_fault(bridge)
+    {
+        faults.push(reason);
+    }
     faults
+}
+
+/// How to name a bridge restart in the fault box, or `None` for the one that
+/// is not a fault.
+fn restart_fault(bridge: &BridgeInfo) -> Option<String> {
+    // Reported ahead of the cause because it is the more specific statement:
+    // the bridge reset itself deliberately, and said why.
+    if matches!(bridge.last_phase, LoopPhase::TxStalled) {
+        return Some("bridge rebooted itself: USB transmit had stalled".to_owned());
+    }
+    match bridge.reset_cause {
+        ResetCause::PowerOn => None,
+        ResetCause::Software => Some("bridge rebooted (firmware reset)".to_owned()),
+        ResetCause::Watchdog => Some("bridge rebooted (watchdog)".to_owned()),
+        ResetCause::Brownout => Some("bridge rebooted (brownout)".to_owned()),
+        ResetCause::External => Some("bridge rebooted (reset over USB)".to_owned()),
+        ResetCause::Unknown => Some("bridge rebooted (cause unknown)".to_owned()),
+    }
 }
 
 fn mac(mac: &Mac) -> String {
@@ -1168,6 +1202,10 @@ mod tests {
                 chip: Chip::Esp32C6,
                 mac: [0x02, 0x00, 0x5E, 0x10, 0x9D, 0x24],
                 fw_version: "0.1.0".to_owned(),
+                reset_cause: ResetCause::PowerOn,
+                last_phase: LoopPhase::Unknown,
+                heap_free: 65_536,
+                uptime_ms: 1_000,
             }),
             link_up: true,
             link_error: None,
@@ -1534,6 +1572,42 @@ mod tests {
         // capture's loss nor anything the operator can act on.
         let screen = rendered(&busy());
         assert!(!screen.contains("bridge dropped"), "{screen}");
+    }
+
+    /// A capture whose only fault is that the bridge restarted underneath it.
+    fn with_restart(reset_cause: ResetCause, last_phase: LoopPhase) -> Snapshot {
+        let mut snapshot = busy();
+        snapshot.counters = Counters::default();
+        snapshot.store.dropped = 0;
+        snapshot.bridge_status.as_mut().expect("busy() has a bridge").dropped_since_attach = 0;
+        let bridge = snapshot.bridge.as_mut().expect("busy() has a bridge");
+        bridge.reset_cause = reset_cause;
+        bridge.last_phase = last_phase;
+        snapshot
+    }
+
+    #[test]
+    fn a_bridge_that_restarted_is_a_fault_but_one_that_was_switched_on_is_not() {
+        // The bridge came back on the control channel with an empty peer table
+        // and a gap in the data, and nothing else on screen would say so.
+        let screen = rendered(&with_restart(ResetCause::Watchdog, LoopPhase::Transmit));
+        assert!(screen.contains("watchdog"), "{screen}");
+
+        // Every capture starts with a bridge that was powered on, so saying so
+        // would put a permanent fault in front of every operator. Matched on
+        // the full phrase: nodes have their own `rebooted` column, and the
+        // bare word is true of a healthy fleet.
+        let screen = rendered(&with_restart(ResetCause::PowerOn, LoopPhase::Unknown));
+        assert!(!screen.contains("bridge rebooted"), "{screen}");
+    }
+
+    #[test]
+    fn a_stalled_transmit_path_is_named_rather_than_called_a_firmware_reset() {
+        // The bridge reset itself and said exactly why, which is more specific
+        // than the `Software` cause that reset arrives under. Reporting the
+        // cause here would throw away the only part worth reading.
+        let screen = rendered(&with_restart(ResetCause::Software, LoopPhase::TxStalled));
+        assert!(screen.contains("USB transmit had stalled"), "{screen}");
     }
 
     #[test]

@@ -50,6 +50,7 @@ pub async fn run(args: Args) -> Result<()> {
         info.chip,
         info.fw_version
     );
+    println!("{}", super::last_reset_line(&info));
 
     link.send_bulk(HostToBridge::GetStatus).context("queueing the status request")?;
 
@@ -67,6 +68,10 @@ pub async fn run(args: Args) -> Result<()> {
     println!("received   {rx_count} frames");
     println!("dropped    {dropped_tx} frames");
     println!("uptime     {}", human_uptime(uptime_ms));
+    // Read at the moment the bridge announced rather than now, which is close
+    // enough: nothing wartui writes allocates, so this moves only when the
+    // radio blobs move it, and what matters is the trend across captures.
+    println!("heap free  {} bytes", info.heap_free);
 
     if dropped_tx > 0 {
         // Cumulative since the bridge booted, and a bridge left powered with
