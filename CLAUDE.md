@@ -206,12 +206,24 @@ Positions resolve fresh per record through `PositionChain`: GPS (`--gps`, NMEA o
   somebody was waiting for them*, from when that contradiction started and never from the last byte
   written. Both halves are load-bearing. Time it from the last byte and a bridge left powered beside
   a fleet, with nobody reading for hours, reboots the moment `wartui` says hello; drop the
-  host-present half and a bridge on a bench with nothing attached reboots for ever.
+  host-present half and a bridge on a bench with nothing attached reboots for ever. For the same
+  reason `last_host` starts at `None` and never at the boot instant: seeded with a time, it reads
+  as a host present for the first `HOST_PRESENT_WINDOW` of *every* life, and a bridge powered
+  beside a talking fleet resets, boots into the same window, and does it again for ever.
   `HOST_PRESENT_WINDOW` must also stay longer than the host's `status_interval`, or a live capture
   reads as an absent host between polls and a real wedge is never noticed. Measured in
   `docs/phase-3-findings.md`, along with why there is no watchdog behind the *hang* case: one was
   built, and esp-hal 1.1.2's RWDT never resets these parts — it counts, unfed, but its reset does
   not reach the CPU and `WDT_PROCPU_RESET_EN` will not be written.
+- **A bridge reboot is invisible unless the host compares uptimes.** A software reset — the stall
+  detector, the panic handler, `wartui reset` — does **not** re-enumerate the USB device: the
+  host's file descriptor reads straight through it, measured. So the second `Ready` arrives on the
+  connection the first one did, and it looks exactly like the other reason two announcements land
+  together, which is a duplicate answer to an `Identify` that was already in flight. Nothing else
+  in the frame separates them — two consecutive `wartui reset`s produce byte-identical `Ready`s —
+  so `Ready` carries `uptime_ms` and a clock that went backwards is what says "new life". Suppress
+  that and the reboot is silent in the worst way: the engine keeps the dead life's `BridgeInfo`,
+  goes on believing in a peer table the reboot emptied, and the fault box never says a word.
 - **Neither firmware may block on the USB endpoint.** `UsbSerialJtag` stops accepting bytes when
   its FIFO fills and nothing drains it unless a host is reading, so a blocking write stalls the
   radio in the field and nowhere else. The bridge sends everything through `wartui_proto::outbox`'s

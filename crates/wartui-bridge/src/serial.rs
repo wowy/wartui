@@ -370,6 +370,10 @@ fn read_loop(
 ) -> String {
     let mut acc = FrameAccumulator::<MAX_FRAME>::new();
     let mut buf = [0u8; 1024];
+    // The uptime carried by the last `Ready` seen on this connection. Local
+    // rather than shared: only this loop ever needs it, and it is a property
+    // of one connection rather than of the link.
+    let mut last_uptime: Option<u32> = None;
 
     while !stop.load(Ordering::Relaxed) {
         let read = match port.read(&mut buf) {
@@ -401,15 +405,28 @@ fn read_loop(
                     reset_cause,
                     last_phase,
                     heap_free,
+                    uptime_ms,
                     ..
                 }) => {
                     decoded.store(true, Ordering::Relaxed);
-                    // A reboot re-enumerates the USB device and so ends this
-                    // connection outright; a second `Ready` inside one can only
-                    // be the answer to an `Identify` we sent before the first
-                    // answer arrived. Reporting it again would look like a
-                    // reconnect that never happened.
-                    if announced.swap(true, Ordering::Relaxed) {
+                    announced.store(true, Ordering::Relaxed);
+                    // Two `Ready` frames can arrive on one connection for two
+                    // very different reasons, and the uptime is what separates
+                    // them. One is a second answer to an `Identify` we sent
+                    // before the first answer came back: same life, uptime a
+                    // few milliseconds further on, and reporting it would look
+                    // like a reconnect that never happened. The other is a
+                    // bridge that rebooted underneath us — a software reset
+                    // does not re-enumerate the USB device, measured, so this
+                    // file descriptor reads straight through it — and that one
+                    // has to be reported or the whole restart is invisible:
+                    // the engine would keep the dead life's `BridgeInfo`, go
+                    // on believing in a peer table the reboot emptied, and
+                    // never say a word about it. An uptime that went backwards
+                    // is the second case and cannot be the first.
+                    let fresh_life = is_a_new_life(uptime_ms, last_uptime);
+                    last_uptime = Some(uptime_ms);
+                    if !fresh_life {
                         continue;
                     }
                     // The success this whole sequence is about. Without it a log
@@ -424,6 +441,7 @@ fn read_loop(
                         reset = ?reset_cause,
                         phase = ?last_phase,
                         heap_free,
+                        uptime_ms,
                         "the bridge announced itself"
                     );
                     LinkEvent::Connected(BridgeInfo {
@@ -433,6 +451,7 @@ fn read_loop(
                         reset_cause,
                         last_phase,
                         heap_free,
+                        uptime_ms,
                     })
                 }
                 Ok(msg) => {
@@ -503,5 +522,44 @@ fn write_loop(
                 }
             }
         }
+    }
+}
+
+/// Whether a `Ready` came from a life that started after the last one seen.
+///
+/// The first is always a new life. After that the only thing that separates a
+/// reboot from a second answer to an `Identify` already in flight is that the
+/// reboot's clock started again, so an uptime that went backwards is the test.
+/// See the call site for why both arrive on one connection.
+fn is_a_new_life(uptime_ms: u32, last_seen: Option<u32>) -> bool {
+    last_seen.is_none_or(|previous| uptime_ms < previous)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_a_new_life;
+
+    #[test]
+    fn the_first_ready_on_a_connection_is_always_the_bridge_arriving() {
+        assert!(is_a_new_life(0, None));
+        assert!(is_a_new_life(10_800_000, None), "attaching to one already up for hours");
+    }
+
+    #[test]
+    fn a_second_answer_to_an_identify_is_not_a_reconnect() {
+        // Two `Identify` frames in flight, answered two milliseconds apart.
+        // Reporting the second would look like a reconnect that never
+        // happened, and would clear engine state nothing had disturbed.
+        assert!(!is_a_new_life(1_202, Some(1_200)));
+        assert!(!is_a_new_life(1_200, Some(1_200)), "the same millisecond counts as the same life");
+    }
+
+    #[test]
+    fn a_bridge_that_rebooted_underneath_the_host_is_reported() {
+        // The case a software reset produces: the USB device is not
+        // re-enumerated, so this arrives on the connection the old life was
+        // announced on, and the clock starting again is the only sign of it.
+        assert!(is_a_new_life(180, Some(10_800_000)), "a stall reset after hours of service");
+        assert!(is_a_new_life(0, Some(3_100)), "and one only seconds into a life");
     }
 }

@@ -199,6 +199,9 @@ async fn run_bridge(
         // Not modelled: nothing in the simulator allocates on a device heap,
         // and a made-up figure would be read as a measurement.
         heap_free: 0,
+        // Announced the instant it came up, and it never reboots, so this is
+        // the only honest figure and it never changes.
+        uptime_ms: 0,
     };
     if plumbing.events.send(LinkEvent::Connected(info)).await.is_err() {
         return;

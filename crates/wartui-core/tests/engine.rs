@@ -135,6 +135,7 @@ fn connected() -> Event {
         reset_cause: ResetCause::PowerOn,
         last_phase: LoopPhase::Unknown,
         heap_free: 65_536,
+        uptime_ms: 1_000,
     }))
 }
 
