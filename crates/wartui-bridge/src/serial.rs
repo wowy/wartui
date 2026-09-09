@@ -32,7 +32,7 @@ const READ_TIMEOUT: Duration = Duration::from_millis(50);
 /// tokio interval fires immediately, so the usual case costs one frame.
 const IDENTIFY_INTERVAL: Duration = Duration::from_millis(500);
 
-/// How many unanswered `Identify` frames before this is called not a bridge.
+/// How many unanswered `Identify` frames before the attempt is abandoned.
 ///
 /// Twelve go out at 0.0 s to 5.5 s — `interval`'s first tick is immediate — and
 /// the thirteenth tick, at 6.0 s, is the one that gives up. That is a second
@@ -293,8 +293,18 @@ async fn connect(
             }
             _ = identify.tick(), if !announced.load(Ordering::Relaxed) => {
                 if asked >= IDENTIFY_ATTEMPTS && !decoded.load(Ordering::Relaxed) {
+                    // Says what was observed, and stops short of the conclusion
+                    // it used to draw. "It is not a bridge" is false in the case
+                    // an operator actually hits: it *is* the bridge, its
+                    // transmit endpoint has stopped draining, and it is still
+                    // reading every frame sent to it — which is why the remedy
+                    // named here is a command rather than a shrug.
+                    let seconds =
+                        IDENTIFY_INTERVAL.as_millis() * u128::from(IDENTIFY_ATTEMPTS) / 1000;
                     break Err(format!(
-                        "nothing on {path} answered the link protocol; it is not a bridge"
+                        "nothing on {path} answered the link protocol in {seconds}s; \
+                         if it is the bridge, `wartui reset` reboots one that has \
+                         stopped answering"
                     ));
                 }
                 asked += 1;
@@ -360,6 +370,10 @@ fn read_loop(
 ) -> String {
     let mut acc = FrameAccumulator::<MAX_FRAME>::new();
     let mut buf = [0u8; 1024];
+    // The uptime carried by the last `Ready` seen on this connection. Local
+    // rather than shared: only this loop ever needs it, and it is a property
+    // of one connection rather than of the link.
+    let mut last_uptime: Option<u32> = None;
 
     while !stop.load(Ordering::Relaxed) {
         let read = match port.read(&mut buf) {
@@ -374,7 +388,7 @@ fn read_loop(
         for &byte in &buf[..read] {
             let Some(frame) = acc.push(byte) else { continue };
             let event = match decode_frame::<BridgeToHost>(frame) {
-                Ok(BridgeToHost::Ready { chip, mac, fw_version, proto_version })
+                Ok(BridgeToHost::Ready { chip, mac, fw_version, proto_version, .. })
                     if proto_version != LINK_PROTO_VERSION =>
                 {
                     let _ = (chip, mac, fw_version);
@@ -384,14 +398,35 @@ fn read_loop(
                     }
                     .to_string();
                 }
-                Ok(BridgeToHost::Ready { chip, mac, fw_version, .. }) => {
+                Ok(BridgeToHost::Ready {
+                    chip,
+                    mac,
+                    fw_version,
+                    reset_cause,
+                    last_phase,
+                    heap_free,
+                    uptime_ms,
+                    ..
+                }) => {
                     decoded.store(true, Ordering::Relaxed);
-                    // A reboot re-enumerates the USB device and so ends this
-                    // connection outright; a second `Ready` inside one can only
-                    // be the answer to an `Identify` we sent before the first
-                    // answer arrived. Reporting it again would look like a
-                    // reconnect that never happened.
-                    if announced.swap(true, Ordering::Relaxed) {
+                    announced.store(true, Ordering::Relaxed);
+                    // Two `Ready` frames can arrive on one connection for two
+                    // very different reasons, and the uptime is what separates
+                    // them. One is a second answer to an `Identify` we sent
+                    // before the first answer came back: same life, uptime a
+                    // few milliseconds further on, and reporting it would look
+                    // like a reconnect that never happened. The other is a
+                    // bridge that rebooted underneath us — a software reset
+                    // does not re-enumerate the USB device, measured, so this
+                    // file descriptor reads straight through it — and that one
+                    // has to be reported or the whole restart is invisible:
+                    // the engine would keep the dead life's `BridgeInfo`, go
+                    // on believing in a peer table the reboot emptied, and
+                    // never say a word about it. An uptime that went backwards
+                    // is the second case and cannot be the first.
+                    let fresh_life = is_a_new_life(uptime_ms, last_uptime);
+                    last_uptime = Some(uptime_ms);
+                    if !fresh_life {
                         continue;
                     }
                     // The success this whole sequence is about. Without it a log
@@ -403,12 +438,20 @@ fn read_loop(
                         chip = ?chip,
                         mac = %hex,
                         fw = %fw_version.as_str(),
+                        reset = ?reset_cause,
+                        phase = ?last_phase,
+                        heap_free,
+                        uptime_ms,
                         "the bridge announced itself"
                     );
                     LinkEvent::Connected(BridgeInfo {
                         chip,
                         mac,
                         fw_version: fw_version.as_str().to_owned(),
+                        reset_cause,
+                        last_phase,
+                        heap_free,
+                        uptime_ms,
                     })
                 }
                 Ok(msg) => {
@@ -479,5 +522,44 @@ fn write_loop(
                 }
             }
         }
+    }
+}
+
+/// Whether a `Ready` came from a life that started after the last one seen.
+///
+/// The first is always a new life. After that the only thing that separates a
+/// reboot from a second answer to an `Identify` already in flight is that the
+/// reboot's clock started again, so an uptime that went backwards is the test.
+/// See the call site for why both arrive on one connection.
+fn is_a_new_life(uptime_ms: u32, last_seen: Option<u32>) -> bool {
+    last_seen.is_none_or(|previous| uptime_ms < previous)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_a_new_life;
+
+    #[test]
+    fn the_first_ready_on_a_connection_is_always_the_bridge_arriving() {
+        assert!(is_a_new_life(0, None));
+        assert!(is_a_new_life(10_800_000, None), "attaching to one already up for hours");
+    }
+
+    #[test]
+    fn a_second_answer_to_an_identify_is_not_a_reconnect() {
+        // Two `Identify` frames in flight, answered two milliseconds apart.
+        // Reporting the second would look like a reconnect that never
+        // happened, and would clear engine state nothing had disturbed.
+        assert!(!is_a_new_life(1_202, Some(1_200)));
+        assert!(!is_a_new_life(1_200, Some(1_200)), "the same millisecond counts as the same life");
+    }
+
+    #[test]
+    fn a_bridge_that_rebooted_underneath_the_host_is_reported() {
+        // The case a software reset produces: the USB device is not
+        // re-enumerated, so this arrives on the connection the old life was
+        // announced on, and the clock starting again is the only sign of it.
+        assert!(is_a_new_life(180, Some(10_800_000)), "a stall reset after hours of service");
+        assert!(is_a_new_life(0, Some(3_100)), "and one only seconds into a life");
     }
 }

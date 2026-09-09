@@ -20,7 +20,9 @@ measured on the vendor fleet and is why several of the invariants below exist;
 same bench, including which of those invariants it has actually been checked
 against and which are still only reasoning; `docs/phase-2-findings.md` does the
 same for channel masks and Bluetooth-by-assignment, and is where the measured
-cost of the Bluetooth scan comes from.
+cost of the Bluetooth scan comes from; `docs/phase-3-findings.md` is the USB
+link — what the long-standing "bridge stops answering" wedge turned out to be,
+and what does and does not recover from it.
 
 ## Commands
 
@@ -97,7 +99,8 @@ Four host crates, strictly layered, plus firmware that shares the bottom one.
 - **`crates/wartui-bridge`** — host side of the USB link. Everything above talks to a `LinkHandle`
   and cannot tell a real dongle (`serial`) from the fake fleet (`sim`).
 - **`crates/wartui-core`** — the headless half. Draws nothing, parses no arguments.
-- **`crates/wartui`** — clap CLI (`run`/`export`/`sniff`/`status`/`ports`) and the ratatui view.
+- **`crates/wartui`** — clap CLI (`run`/`export`/`sniff`/`status`/`reset`/`ports`) and the ratatui
+  view.
 - **`firmware/bridge`** — dumb radio bridge: COBS framing and `esp-radio` calls, no protocol
   knowledge. Fixes there cost a reflash, so logic belongs on the host.
 - **`firmware/node`** — the nodes. Sniffs rather than scans, so it never transmits while
@@ -194,6 +197,38 @@ Positions resolve fresh per record through `PositionChain`: GPS (`--gps`, NMEA o
 - **Only heartbeating nodes are assignable or in the plan** — a node that is merely being heard
   never opens an admin window. `stale`, `no heartbeat` and silence are deliberately distinct
   states; `SCAN_CHANNELS` order is load-bearing and must not be sorted or deduplicated.
+- **The bridge's USB transmit endpoint can die on its own, and the bridge reboots when it does.**
+  `SERIAL_IN_EP_DATA_FREE` goes to zero when `WR_DONE` is set and comes back only when the USB
+  host reads the FIFO; if that read never lands, nothing on the device can clear it. The receive
+  endpoint is unaffected, so the bridge goes on decoding and executing commands it cannot answer —
+  which from the host is indistinguishable from a dead board, and is the failure that used to send
+  operators to `espflash`. `Bridge::note_tx` times how long the endpoint has refused bytes *while
+  somebody was waiting for them*, from when that contradiction started and never from the last byte
+  written. Both halves are load-bearing. Time it from the last byte and a bridge left powered beside
+  a fleet, with nobody reading for hours, reboots the moment `wartui` says hello; drop the
+  host-present half and a bridge on a bench with nothing attached reboots for ever. For the same
+  reason `last_host` starts at `None` and never at the boot instant: seeded with a time, it reads
+  as a host present for the first `HOST_PRESENT_WINDOW` of *every* life, and a bridge powered
+  beside a talking fleet resets, boots into the same window, and does it again for ever.
+  And a host that has *quit* is not a host that is waiting: it satisfies "spoke inside the window"
+  for a further `HOST_PRESENT_WINDOW`, while its quitting is exactly what stopped the endpoint
+  draining, so the detector also needs a frame decoded *since the stall began* — without it every
+  session ends in a reboot and the next `run` opens with a fault box blaming a wedge that was an
+  operator closing a window. `HOST_PRESENT_WINDOW` must also stay longer than the host's
+  `status_interval`, or a live capture reads as an absent host between polls and a real wedge is
+  never noticed. Measured in
+  `docs/phase-3-findings.md`, along with why there is no watchdog behind the *hang* case: one was
+  built, and esp-hal 1.1.2's RWDT never resets these parts — it counts, unfed, but its reset does
+  not reach the CPU and `WDT_PROCPU_RESET_EN` will not be written.
+- **A bridge reboot is invisible unless the host compares uptimes.** A software reset — the stall
+  detector, the panic handler, `wartui reset` — does **not** re-enumerate the USB device: the
+  host's file descriptor reads straight through it, measured. So the second `Ready` arrives on the
+  connection the first one did, and it looks exactly like the other reason two announcements land
+  together, which is a duplicate answer to an `Identify` that was already in flight. Nothing else
+  in the frame separates them — two consecutive `wartui reset`s produce byte-identical `Ready`s —
+  so `Ready` carries `uptime_ms` and a clock that went backwards is what says "new life". Suppress
+  that and the reboot is silent in the worst way: the engine keeps the dead life's `BridgeInfo`,
+  goes on believing in a peer table the reboot emptied, and the fault box never says a word.
 - **Neither firmware may block on the USB endpoint.** `UsbSerialJtag` stops accepting bytes when
   its FIFO fills and nothing drains it unless a host is reading, so a blocking write stalls the
   radio in the field and nowhere else. The bridge sends everything through `wartui_proto::outbox`'s

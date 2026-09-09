@@ -56,11 +56,33 @@ A bridge that does *not* answer gets a named diagnosis rather than a wait, after
 five seconds, because the three things it can be need three different actions
 and they produce an identical symptom: the wrong firmware on the board, another
 program holding the port, or a bridge that has stopped answering while still
-enumerating as a USB device. That last one has been seen on a dongle left
-powered for a long time — the port opens, writes succeed, nothing comes back,
-and `espflash reset --port <path>` clears it. What causes it is not yet known,
-so if it happens again the reset banner's `Saved PC` is worth capturing before
-reflashing.
+enumerating as a USB device.
+
+That last one is no longer a mystery. It is not a hung bridge — it is a bridge
+whose USB *transmit* endpoint has stopped draining while its receive endpoint
+carries on. Measured in Phase 3 on a board in that state: twelve `Identify`
+frames and a `GetStatus` were decoded and acted on while not one byte came back,
+and a single `Reset` frame down the same wire rebooted it immediately. One flag
+decides it — `SERIAL_IN_EP_DATA_FREE`, which `WR_DONE` clears and which,
+per the TRM, comes back only when the USB host reads the FIFO. If that read
+never lands, nothing this end can do will clear it.
+
+So the firmware now notices and reboots itself. [`Bridge::note_tx`] times how
+long the endpoint has refused bytes *while somebody was waiting for them* — from
+when that contradiction started, never from the last byte written, which would
+count the hours a bridge spent powered with nobody reading against a transmit
+path with nothing wrong with it. It also needs the host to have spoken recently,
+which is what keeps a bridge on a bench with no host attached quiet for ever. The reset *is* the message — every
+way of explaining would go out through the path that is broken — and the `Ready`
+behind it says `TxStalled`.
+
+Reach for `wartui reset --port <path>` first, not `espflash`: the receive path
+is alive in this state, so it reboots on being asked, and a software reset keeps
+the device path where an `espflash` reset re-enumerates it and can move
+`ttyACM0` to `ttyACM1` underneath a script. `espflash reset --port <path>` is
+the fallback for when even that goes unanswered, which means the firmware really
+is hung. `docs/phase-3-findings.md` has the measurements, including why there is
+no watchdog behind that last case.
 
 To check transmit, run `wartui run`, select a node and press `a`. Its `beat`
 column should fall from seconds to a fraction of one within three sweeps — a

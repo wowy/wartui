@@ -19,10 +19,11 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use wartui_bridge::serial::{SerialTransport, discover_ports};
 use wartui_bridge::sim::{SimConfig, SimTransport};
-use wartui_bridge::{LinkEvent, LinkHandle};
-use wartui_proto::link::Mac;
+use wartui_bridge::{BridgeInfo, LinkEvent, LinkHandle};
+use wartui_proto::link::{LoopPhase, Mac, ResetCause};
 
 mod export;
+mod reset;
 mod run;
 mod sniff;
 mod status;
@@ -57,6 +58,8 @@ enum Command {
     Sniff(sniff::Args),
     /// Ask the bridge for its channel, counters and uptime.
     Status(status::Args),
+    /// Reboot the bridge, for when it has stopped answering.
+    Reset(reset::Args),
     /// List serial ports that look like an Espressif device.
     Ports,
 }
@@ -73,6 +76,7 @@ async fn main() -> Result<()> {
         Some(Command::Export(args)) => export::run(args),
         Some(Command::Sniff(args)) => sniff::run(args).await,
         Some(Command::Status(args)) => status::run(args).await,
+        Some(Command::Reset(args)) => reset::run(args).await,
         Some(Command::Ports) => ports(),
     }
 }
@@ -162,6 +166,121 @@ pub fn mac(mac: &Mac) -> String {
     mac.iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(":")
 }
 
+/// One line saying how the bridge came to be running this life.
+///
+/// Every command that has a [`BridgeInfo`] prints this, because a bridge that
+/// restarted is a bridge that lost its channel and its peer table, and until
+/// v3 of the link protocol the only trace of that was a counter going
+/// backwards. [`ResetCause::PowerOn`] is the ordinary case and says so
+/// plainly rather than being hidden, so that the absence of a line never has
+/// to be interpreted.
+#[must_use]
+pub fn last_reset_line(info: &BridgeInfo) -> String {
+    let cause = match info.reset_cause {
+        ResetCause::PowerOn => "powered on",
+        ResetCause::Software => "reset by its own firmware, a panic or a reset command",
+        ResetCause::Watchdog => "reset by its watchdog, so its main loop had stopped",
+        ResetCause::Brownout => "reset by a brownout, so check the cable and the hub",
+        ResetCause::External => "reset over USB, by espflash or a replug",
+        ResetCause::Unknown => "reset for a reason it could not name",
+    };
+    // The phase is only ever a hint, and a misleading one on its own: the loop
+    // visits most of them every millisecond, so naming one is worth doing only
+    // where it points at a specific blocking call.
+    let phase = match info.last_phase {
+        LoopPhase::TxStalled => Some("its transmit path had stopped draining"),
+        LoopPhase::Transmit => Some("it was inside an ESP-NOW send"),
+        LoopPhase::Command => Some("it was carrying out a host command"),
+        LoopPhase::DrainRadio => Some("it was draining the radio"),
+        LoopPhase::DrainLink => Some("it was reading host commands"),
+        LoopPhase::Pump => Some("it was writing to the USB endpoint"),
+        LoopPhase::Boot => Some("it had not reached its main loop"),
+        LoopPhase::Idle | LoopPhase::Unknown => None,
+    };
+    match phase {
+        Some(phase) => format!("last reset  {cause}; {phase}"),
+        None => format!("last reset  {cause}"),
+    }
+}
+
+/// Listens for the process being asked to stop by a signal rather than a key.
+///
+/// `q` and ctrl-c already reach the orderly exit; `SIGTERM` and `SIGHUP` did
+/// not, and the difference is not cosmetic. Leaving by a route that skips the
+/// transport's `Shutdown` guard leaves whatever was queued for the bridge
+/// sitting in the tty's output queue, and closing a tty waits for that queue to
+/// drain — against a device that may not be reading. That wait is inside the
+/// driver, so the process survives `SIGKILL` still holding the port, and the
+/// only way out is unplugging the board. A window that closes, a `kill`, or a
+/// logout are all ordinary ways to end a capture and none of them should be
+/// able to cost the operator a replug.
+///
+/// Built **once**, before the loop that selects on it, and this is the whole
+/// reason it is a value rather than an `async fn` called in the arm. Asking
+/// tokio for a signal stream installs a process-wide handler that replaces the
+/// default disposition — after the first call, a `SIGTERM` no longer kills the
+/// process by itself — and a stream subscribes from the moment it is created,
+/// so one delivered between a stream being dropped at the end of a select and
+/// the next one being built is seen by nobody. The default action is gone and
+/// nothing replaced it: the capture carries on, deaf, and the operator is left
+/// with `kill -9`, which is exactly the replug this exists to prevent.
+///
+/// Never fires if the handlers cannot be installed. A future that fired
+/// spuriously here would quit a capture for no reason at all.
+#[cfg(unix)]
+pub struct Terminate {
+    // `Option` because a failure to install is not a failure to run: a process
+    // that cannot watch for `SIGTERM` still has a `q` key.
+    term: Option<tokio::signal::unix::Signal>,
+    hup: Option<tokio::signal::unix::Signal>,
+}
+
+#[cfg(unix)]
+impl Terminate {
+    pub fn new() -> Self {
+        use tokio::signal::unix::{SignalKind, signal};
+        Self { term: signal(SignalKind::terminate()).ok(), hup: signal(SignalKind::hangup()).ok() }
+    }
+
+    /// Resolves when one of them arrives. Cancel-safe, as `Signal::recv` is,
+    /// so losing the race in a `select!` drops nothing.
+    pub async fn recv(&mut self) {
+        match (&mut self.term, &mut self.hup) {
+            (Some(term), Some(hup)) => {
+                tokio::select! {
+                    _ = term.recv() => {}
+                    _ = hup.recv() => {}
+                }
+            }
+            (Some(only), None) | (None, Some(only)) => {
+                only.recv().await;
+            }
+            (None, None) => std::future::pending().await,
+        }
+    }
+}
+
+/// No `SIGTERM` to catch, so this simply never fires.
+#[cfg(not(unix))]
+pub struct Terminate;
+
+#[cfg(not(unix))]
+impl Terminate {
+    pub fn new() -> Self {
+        Self
+    }
+
+    pub async fn recv(&mut self) {
+        std::future::pending().await
+    }
+}
+
+impl Default for Terminate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// How long to wait for a bridge to identify itself before saying nothing has.
 ///
 /// The bridge answers in about two milliseconds when it is well, so this is not
@@ -184,9 +303,17 @@ pub const CONNECT_NOTICE_AFTER: Duration = Duration::from_secs(5);
 /// from the host except by trying.
 pub fn no_bridge_notice(port: Option<&str>) -> String {
     let seconds = CONNECT_NOTICE_AFTER.as_secs();
-    let (where_, reset) = match port {
-        Some(path) => (format!("on {path}"), format!("espflash reset --port {path}")),
-        None => ("on the port that was discovered".to_owned(), "espflash reset".to_owned()),
+    let (where_, reset, wartui_reset) = match port {
+        Some(path) => (
+            format!("on {path}"),
+            format!("espflash reset --port {path}"),
+            format!("wartui reset --port {path}"),
+        ),
+        None => (
+            "on the port that was discovered".to_owned(),
+            "espflash reset".to_owned(),
+            "wartui reset".to_owned(),
+        ),
     };
     // Assembled a line at a time rather than as one continued literal: the
     // wrapped form puts the source's own indentation inside the string, and
@@ -197,10 +324,16 @@ pub fn no_bridge_notice(port: Option<&str>) -> String {
             .to_owned(),
         "Usually one of:".to_owned(),
         "  - it is running node firmware rather than bridge firmware".to_owned(),
-        format!("  - the bridge is wedged, which a reset clears: {reset}"),
+        format!("  - the bridge is wedged, which a reboot clears: {wartui_reset}"),
         "  - another program is holding the port".to_owned(),
         "`wartui ports` lists what is attached; `--log-file` records what the transport tried."
             .to_owned(),
+        // The fallback rather than the first suggestion, now that the first one
+        // is known to work: a wedged bridge reads its receive endpoint
+        // perfectly well, so it reboots on being asked. `espflash` drives
+        // DTR/RTS and needs no firmware at all, which is what is left when even
+        // the asking goes unanswered.
+        format!("If that goes unanswered too, reset it over USB instead: {reset}"),
     ]
     .join("\n")
 }

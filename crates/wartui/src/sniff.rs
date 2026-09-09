@@ -43,12 +43,17 @@ pub async fn run(args: Args) -> Result<()> {
     // while a bridge is plugged in — but waiting without saying anything is how
     // a wedged dongle passes for a quiet fleet.
     let mut spoken = false;
+    // Built before the loop, not inside the arm below: see `crate::Terminate`.
+    let mut terminate = crate::Terminate::new();
     let notice = tokio::time::sleep(super::CONNECT_NOTICE_AFTER);
     tokio::pin!(notice);
 
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => break,
+            // Same reasoning as the view's: leaving without releasing the port
+            // is what costs a replug. See `crate::Terminate`.
+            () = terminate.recv() => break,
             () = &mut notice, if !spoken => {
                 spoken = true;
                 if !counts.heard_a_bridge {
@@ -133,6 +138,19 @@ fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
         if let Some(line) = super::describe(&event) {
             println!("# {line}");
         }
+        // Printed here rather than under `Ready`, because `Ready` is what the
+        // transport turns into this event and no `Ready` ever reaches the arm
+        // below. A bridge that reboots mid-capture announces itself again on
+        // the same connection and arrives here a second time, which in a
+        // sniff log is the interesting one: `sniff` is the raw view, so the
+        // fields go out as the bridge sent them rather than through the prose
+        // `last_reset_line` writes for the commands that show one line.
+        if let LinkEvent::Connected(info) = &event {
+            println!(
+                "#   reset {:?}, last phase {:?}, {} bytes of heap free, up {}ms",
+                info.reset_cause, info.last_phase, info.heap_free, info.uptime_ms
+            );
+        }
         return;
     };
 
@@ -216,7 +234,11 @@ fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
             }
         }
 
-        BridgeToHost::Ready { chip, mac: bridge_mac, fw_version, proto_version } => {
+        BridgeToHost::Ready { chip, mac: bridge_mac, fw_version, proto_version, .. } => {
+            // Unreachable as the transport stands: every `Ready` it decodes
+            // becomes a `LinkEvent::Connected`, handled above, and none is
+            // forwarded as a message. Kept because the match is exhaustive
+            // over the wire format rather than over what happens to arrive.
             println!(
                 "# bridge ready: {chip:?} {} firmware {fw_version} link v{proto_version}",
                 mac(bridge_mac)

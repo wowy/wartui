@@ -14,7 +14,8 @@ use wartui_core::position::{DEFAULT_MAX_AGE, PositionChain, PositionSource};
 use wartui_core::record::{AdminOutcome, Record};
 use wartui_proto::air::{AdminMsg, CAPABILITY_MAX, Capabilities, MsgType, TextMsg};
 use wartui_proto::link::{
-    BROADCAST, BridgeToHost, Chip, EspNowPayload, HostToBridge, Mac, SendStatus,
+    BROADCAST, BridgeToHost, Chip, EspNowPayload, HostToBridge, LoopPhase, Mac, ResetCause,
+    SendStatus,
 };
 use wartui_proto::plan::{
     ChannelPool, ChannelSet, FIRST_FIVE_GHZ_INDEX, IndexRun, is_five_ghz, plan,
@@ -128,6 +129,13 @@ fn connected() -> Event {
         chip: Chip::Esp32C6,
         mac: [0x02, 0x00, 0x5E, 0x10, 0x9D, 0x24],
         fw_version: "0.1.0".to_owned(),
+        // An ordinary connect. The engine draws no conclusions from these —
+        // they are the view's business — but a fixture that said otherwise
+        // would be describing a fleet that had just lost its bridge.
+        reset_cause: ResetCause::PowerOn,
+        last_phase: LoopPhase::Unknown,
+        heap_free: 65_536,
+        uptime_ms: 1_000,
     }))
 }
 
