@@ -74,12 +74,14 @@ accord.
 
 ## What was built, and what it does on the bench
 
-Since the state is unambiguous locally, the bridge now detects it. Three facts
+Since the state is unambiguous locally, the bridge now detects it. Four facts
 have to hold together (`Bridge::note_tx`): something is queued, a host frame
-decoded recently, and the endpoint has refused every byte for three seconds since
-both of those first became true. The host-present half is what keeps a bridge
-sitting on a bench with nothing attached quiet for ever, which is the case that
-must never be reset; the section below is about the clock.
+decoded recently, another decoded since the stall began, and the endpoint has
+refused every byte for three seconds since all of that first became true. The
+host-present half is what keeps a bridge sitting on a bench with nothing attached
+quiet for ever, which is the case that must never be reset; the fourth fact is
+what keeps it quiet after an operator quits, which cost a section of its own
+below; and the section immediately after this one is about the clock.
 
 Verified with a build whose `UsbSink::write_byte` returns `WouldBlock` from a
 command onwards — a stand-in for the endpoint that has stopped draining — while
@@ -303,3 +305,54 @@ by nobody, and the default that would have killed the process is gone. The
 capture carries on, deaf, and the operator reaches for `kill -9` — which is the
 replug this was written to prevent. The streams are now built once, before the
 loop.
+
+## A host that quits looks exactly like a host that is waiting
+
+Found by bringing the two nodes up, which is the whole argument for having done
+so: the reproduction above cleared the fault it was aimed at and immediately
+exposed a second one in the half of `note_tx` that had not been touched.
+
+`wartui status`, then eight seconds later another. The bridge reported an uptime
+of four seconds and `its transmit path had stopped draining`. Again, and again —
+every host command that exits leaves a bridge that reboots about three seconds
+later, as long as a fleet is in earshot.
+
+The test was `last_host.elapsed() < HOST_PRESENT_WINDOW`, read as "a host is
+here and waiting on us". It is not what that measures. A host that has **quit**
+goes on satisfying it for a further `HOST_PRESENT_WINDOW`, and quitting is
+precisely what stops the endpoint draining: the port closes, `cdc_acm` stops
+submitting reads, the FIFO stops emptying, and a fleet beating once a second
+fills the rings within a second of the operator letting go. Because
+`TX_STALL_TIMEOUT` (3 s) is the shorter of the two intervals, the reset always
+won that race. Every session ended with a reboot nobody asked for, and the
+following `wartui run` opened with `bridge rebooted itself: USB transmit had
+stalled` in the fault box — a false alarm, reporting a fault that was the
+operator closing a window.
+
+A host that is genuinely waiting keeps asking: `run` polls for status every
+`status_interval`, and `supervise` re-sends `Identify` twice a second until
+something answers. So the detector now needs a host frame decoded *since the
+stall began*, not merely one decoded lately, and that single clause separates the
+two cases. It costs the real wedge nothing:
+
+| | before | after |
+|---|---|---|
+| `status` ×3, eight seconds apart | 51 s → 4 s → 4 s | 6 s → 14 s → 22 s |
+| last reset reported | software; transmit path stopped draining | over USB, by espflash |
+
+None of the three measurements in "what it does on the bench" move, which is
+worth saying because it is not obvious. In the `+3.00 s` row the host is polling
+twice a second, so it satisfies the new clause almost immediately. In the
+`+13.01 s` row the host's ten-second silence outlasts `HOST_PRESENT_WINDOW`, so
+`stall_since` is already cleared before the new clause could matter, and the
+clock restarts when the host returns exactly as it did before. The third row
+never reaches `note_tx` at all. The clause only bites where the host goes quiet
+*without* the window expiring, which is the disconnect and nothing else.
+
+Which leaves `HOST_PRESENT_WINDOW` doing a different job from the one it looks
+like it is doing, and it is still load-bearing: it is what stops `stall_since`
+starting before there is any host to be contradicted by, so a bridge that filled
+its rings over hours alone is not reset the instant one attaches. It must stay
+longer than the host's `status_interval` for the same reason as before — the
+stall clock has to survive the gaps between polls — and the new clause is what
+stops it also meaning "for ten seconds after the last operator went home".
