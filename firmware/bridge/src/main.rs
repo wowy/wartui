@@ -359,11 +359,27 @@ impl Bridge {
     ///   to say;
     /// - nothing has moved for [`TX_STALL_TIMEOUT`], so the endpoint is not
     ///   merely slow;
-    /// - a host frame decoded inside that same window, so there is a host, it
-    ///   is reading its end of the wire, and it is waiting on us.
+    /// - a host frame decoded inside that same window, so there is a host at
+    ///   all;
+    /// - and one decoded *since the stall began*, so that host is still there
+    ///   now rather than having been there a moment ago.
     ///
     /// A bridge sitting on a bench with no host attached fails the third and
-    /// stays quiet for ever, which is the case that must never be reset.
+    /// fourth and stays quiet for ever, which is the case that must never be
+    /// reset.
+    ///
+    /// The fourth is not a refinement of the third, and leaving it out cost a
+    /// reset after every session an operator ever ran. A host that has *quit*
+    /// satisfies "spoke inside the window" for a further
+    /// [`HOST_PRESENT_WINDOW`], and quitting is exactly what stops the endpoint
+    /// draining — so with a fleet in earshot the rings fill the moment it lets
+    /// go, and because [`TX_STALL_TIMEOUT`] is the shorter of the two the reset
+    /// always won the race. Measured: `wartui status`, and three seconds later
+    /// a bridge reporting that its transmit path had stopped draining, every
+    /// time. A host that is genuinely waiting keeps asking — `run` polls for
+    /// status, `supervise` re-sends `Identify` — so requiring a frame decoded
+    /// after the stall started is what separates the two, and it costs the real
+    /// case nothing.
     ///
     /// Which is why `last_host` starts at `None` and not at the boot instant.
     /// Seeded with the boot instant it reads as a host present for the first
@@ -381,8 +397,15 @@ impl Bridge {
             self.stall_since = None;
             return false;
         }
+        // Started when the contradiction did, so that a bridge which filled its
+        // rings over hours with nobody attached is not reset the instant one
+        // arrives; the host-present test above is what holds this back until
+        // there is a host to be contradicted by.
         let since = *self.stall_since.get_or_insert(now);
-        now - since >= TX_STALL_TIMEOUT
+        // And still talking, not merely seen lately. This is the clause that
+        // tells a wedged endpoint from an operator who has just pressed `q`.
+        let still_asking = self.last_host.is_some_and(|at| at > since);
+        still_asking && now - since >= TX_STALL_TIMEOUT
     }
 
     fn log(&mut self, level: LogLevel, message: &str) {
