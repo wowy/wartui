@@ -32,7 +32,7 @@ const READ_TIMEOUT: Duration = Duration::from_millis(50);
 /// tokio interval fires immediately, so the usual case costs one frame.
 const IDENTIFY_INTERVAL: Duration = Duration::from_millis(500);
 
-/// How many unanswered `Identify` frames before this is called not a bridge.
+/// How many unanswered `Identify` frames before the attempt is abandoned.
 ///
 /// Twelve go out at 0.0 s to 5.5 s — `interval`'s first tick is immediate — and
 /// the thirteenth tick, at 6.0 s, is the one that gives up. That is a second
@@ -293,8 +293,18 @@ async fn connect(
             }
             _ = identify.tick(), if !announced.load(Ordering::Relaxed) => {
                 if asked >= IDENTIFY_ATTEMPTS && !decoded.load(Ordering::Relaxed) {
+                    // Says what was observed, and stops short of the conclusion
+                    // it used to draw. "It is not a bridge" is false in the case
+                    // an operator actually hits: it *is* the bridge, its
+                    // transmit endpoint has stopped draining, and it is still
+                    // reading every frame sent to it — which is why the remedy
+                    // named here is a command rather than a shrug.
+                    let seconds =
+                        IDENTIFY_INTERVAL.as_millis() * u128::from(IDENTIFY_ATTEMPTS) / 1000;
                     break Err(format!(
-                        "nothing on {path} answered the link protocol; it is not a bridge"
+                        "nothing on {path} answered the link protocol in {seconds}s; \
+                         if it is the bridge, `wartui reset` reboots one that has \
+                         stopped answering"
                     ));
                 }
                 asked += 1;
@@ -374,7 +384,7 @@ fn read_loop(
         for &byte in &buf[..read] {
             let Some(frame) = acc.push(byte) else { continue };
             let event = match decode_frame::<BridgeToHost>(frame) {
-                Ok(BridgeToHost::Ready { chip, mac, fw_version, proto_version })
+                Ok(BridgeToHost::Ready { chip, mac, fw_version, proto_version, .. })
                     if proto_version != LINK_PROTO_VERSION =>
                 {
                     let _ = (chip, mac, fw_version);
@@ -384,7 +394,15 @@ fn read_loop(
                     }
                     .to_string();
                 }
-                Ok(BridgeToHost::Ready { chip, mac, fw_version, .. }) => {
+                Ok(BridgeToHost::Ready {
+                    chip,
+                    mac,
+                    fw_version,
+                    reset_cause,
+                    last_phase,
+                    heap_free,
+                    ..
+                }) => {
                     decoded.store(true, Ordering::Relaxed);
                     // A reboot re-enumerates the USB device and so ends this
                     // connection outright; a second `Ready` inside one can only
@@ -403,12 +421,18 @@ fn read_loop(
                         chip = ?chip,
                         mac = %hex,
                         fw = %fw_version.as_str(),
+                        reset = ?reset_cause,
+                        phase = ?last_phase,
+                        heap_free,
                         "the bridge announced itself"
                     );
                     LinkEvent::Connected(BridgeInfo {
                         chip,
                         mac,
                         fw_version: fw_version.as_str().to_owned(),
+                        reset_cause,
+                        last_phase,
+                        heap_free,
                     })
                 }
                 Ok(msg) => {

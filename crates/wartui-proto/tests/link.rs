@@ -4,7 +4,7 @@ use heapless::{String, Vec};
 use wartui_proto::air::{MsgType, TextMsg};
 use wartui_proto::link::{
     BROADCAST, BridgeToHost, Chip, FrameAccumulator, HostToBridge, LINK_PROTO_VERSION, LinkError,
-    LogLevel, MAX_FRAME, SendStatus, crc16, decode_frame, encode_frame,
+    LogLevel, LoopPhase, MAX_FRAME, ResetCause, SendStatus, crc16, decode_frame, encode_frame,
 };
 
 fn sample_commands() -> Vec<HostToBridge, 8> {
@@ -40,6 +40,11 @@ fn sample_events() -> Vec<BridgeToHost, 8> {
         mac: [0x10, 0x20, 0x30, 0x40, 0x50, 0x60],
         fw_version: String::try_from("0.1.0").expect("short"),
         proto_version: LINK_PROTO_VERSION,
+        // Not the defaults: a round trip that only ever carried the zero
+        // variant of an enum would pass just as well with the field dropped.
+        reset_cause: ResetCause::Watchdog,
+        last_phase: LoopPhase::TxStalled,
+        heap_free: 61_234,
     })
     .ok();
     v.push(BridgeToHost::Rx {

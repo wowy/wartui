@@ -10,7 +10,7 @@ pub mod sim;
 
 use thiserror::Error;
 use tokio::sync::mpsc;
-use wartui_proto::link::{BridgeToHost, Chip, HostToBridge, LinkError, Mac};
+use wartui_proto::link::{BridgeToHost, Chip, HostToBridge, LinkError, LoopPhase, Mac, ResetCause};
 
 /// Inbound event queue depth.
 ///
@@ -36,6 +36,14 @@ pub struct BridgeInfo {
     pub mac: Mac,
     /// Bridge firmware version.
     pub fw_version: String,
+    /// Why the bridge is running this life rather than the last one. Carried
+    /// up here rather than logged and dropped, because a bridge that restarts
+    /// mid-capture restarts underneath a host that has no other way to tell.
+    pub reset_cause: ResetCause,
+    /// Where the previous life stopped, when the reset preserved it.
+    pub last_phase: LoopPhase,
+    /// Bytes free in the radio blobs' heap at the moment it announced.
+    pub heap_free: u32,
 }
 
 /// Something that happened on the link.
