@@ -44,6 +44,12 @@ pub struct BridgeInfo {
     pub last_phase: LoopPhase,
     /// Bytes free in the radio blobs' heap at the moment it announced.
     pub heap_free: u32,
+    /// How long the bridge had been up when it announced itself.
+    ///
+    /// Small means this connection is talking to a bridge that has just
+    /// restarted — which, since a software reset keeps the USB device, is
+    /// something the host would otherwise have no way to notice.
+    pub uptime_ms: u32,
 }
 
 /// Something that happened on the link.

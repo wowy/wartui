@@ -24,11 +24,14 @@ use serde::{Serialize, de::DeserializeOwned};
 /// boot and so a host that attached to an already-running dongle waited for a
 /// [`BridgeToHost::Ready`] that had been sent minutes earlier.
 ///
-/// v3 added [`ResetCause`], [`LoopPhase`] and `heap_free` to
+/// v3 added [`ResetCause`], [`LoopPhase`], `heap_free` and `uptime_ms` to
 /// [`BridgeToHost::Ready`]. A bridge that reboots is no longer a bridge whose
 /// last life is a mystery: it now says whether it was powered on, panicked,
 /// was asked to reset, or gave up on a transmit path that had stopped
-/// draining — and where in its loop it was when that happened.
+/// draining — and where in its loop it was when that happened. The uptime is
+/// what lets the host tell that story apart from a duplicate answer to its own
+/// [`HostToBridge::Identify`], which is the only other way two `Ready` frames
+/// arrive on one connection.
 pub const LINK_PROTO_VERSION: u8 = 3;
 
 /// ESP-NOW's own payload ceiling. The 212-byte wardriver frames fit inside it.
@@ -235,6 +238,17 @@ pub enum BridgeToHost {
         /// allocates, so a figure that falls across a long capture is the
         /// blobs leaking and is worth knowing before the allocation fails.
         heap_free: u32,
+        /// Milliseconds since this life started, at the moment of announcing.
+        ///
+        /// Carried so the host can tell a *new* life from a second answer to
+        /// an [`HostToBridge::Identify`] it sent twice. Both arrive on the
+        /// same connection — a software reset does not re-enumerate the USB
+        /// device, so the host's file descriptor reads straight through the
+        /// reboot — and nothing else in this frame separates them: two
+        /// consecutive `wartui reset`s produce byte-identical `Ready`s. An
+        /// uptime that went *backwards* is a reboot and cannot be anything
+        /// else.
+        uptime_ms: u32,
     },
     /// An ESP-NOW frame arrived.
     Rx {

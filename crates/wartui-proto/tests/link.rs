@@ -45,6 +45,7 @@ fn sample_events() -> Vec<BridgeToHost, 8> {
         reset_cause: ResetCause::Watchdog,
         last_phase: LoopPhase::TxStalled,
         heap_free: 61_234,
+        uptime_ms: 8_675_309,
     })
     .ok();
     v.push(BridgeToHost::Rx {

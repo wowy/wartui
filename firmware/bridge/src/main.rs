@@ -279,8 +279,12 @@ struct Bridge {
     /// When the transmit path first started refusing bytes with a host
     /// waiting, or `None` if it is not refusing them now.
     stall_since: Option<Instant>,
-    /// When a frame from the host last decoded.
-    last_host: Instant,
+    /// When a frame from the host last decoded, or `None` if none ever has.
+    ///
+    /// `None` rather than the boot instant, and the difference decides whether
+    /// a bridge with no host attached survives its own first ten seconds. See
+    /// [`Bridge::note_tx`].
+    last_host: Option<Instant>,
 }
 
 impl Bridge {
@@ -310,6 +314,10 @@ impl Bridge {
             // so the cast cannot lose anything, but a `as` that silently could
             // is not worth leaving in a frame the host draws conclusions from.
             heap_free: u32::try_from(esp_alloc::HEAP.free()).unwrap_or(u32::MAX),
+            // The host's only way to tell this frame from a second answer to
+            // an `Identify` it sent twice, both of which arrive on the same
+            // connection because a software reset keeps the USB device.
+            uptime_ms: self.boot.elapsed().as_millis() as u32,
         });
     }
 
@@ -356,8 +364,19 @@ impl Bridge {
     ///
     /// A bridge sitting on a bench with no host attached fails the third and
     /// stays quiet for ever, which is the case that must never be reset.
+    ///
+    /// Which is why `last_host` starts at `None` and not at the boot instant.
+    /// Seeded with the boot instant it reads as a host present for the first
+    /// [`HOST_PRESENT_WINDOW`] of *every* life, and a bridge powered beside a
+    /// talking fleet with nothing attached would fill its rings against an
+    /// endpoint no host is draining, reset at [`TX_STALL_TIMEOUT`], and come
+    /// back into the same ten-second window — for ever, on a board with
+    /// nothing whatever wrong with it. Presence is something the host
+    /// demonstrates by sending a frame, and there is no such thing as a
+    /// default.
     fn note_tx(&mut self, moved: bool, now: Instant) -> bool {
-        let waiting = !self.outbox.is_empty() && self.last_host.elapsed() < HOST_PRESENT_WINDOW;
+        let host_here = self.last_host.is_some_and(|at| at.elapsed() < HOST_PRESENT_WINDOW);
+        let waiting = !self.outbox.is_empty() && host_here;
         if moved || !waiting {
             self.stall_since = None;
             return false;
@@ -434,7 +453,7 @@ fn main() -> ! {
         cause,
         phase,
         stall_since: None,
-        last_host: now,
+        last_host: None,
     };
 
     match manager.set_channel(DEFAULT_CHANNEL) {
@@ -534,7 +553,7 @@ fn drain_link(
                 // frame that decoded counts — a board running node firmware
                 // talks constantly and none of it is a frame, and `note_tx`
                 // must not read that as somebody waiting on an answer.
-                bridge.last_host = Instant::now();
+                bridge.last_host = Some(Instant::now());
                 handle(command, manager, sender, bridge, mac);
             }
             Err(err) => {

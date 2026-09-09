@@ -15,11 +15,17 @@
 //! receive path was never the problem. So this is the first thing to reach for,
 //! and `espflash` is what is left when even this does not answer.
 //!
-//! Rebooting is confirmed by uptime rather than by the announcement. A bridge
-//! that was well announces itself *before* the reset as well as after, and the
-//! transport reports only the first of those (`serial.rs:387-396`), so a
-//! `Ready` is no proof at all that anything happened. A `Status` whose uptime
-//! is a second old is.
+//! Rebooting is confirmed by uptime, and by uptime alone. A bridge that was
+//! well announces itself *before* the reset as well as after, so the mere
+//! arrival of a `Ready` proves nothing whatever — and since a software reset
+//! keeps the USB device, both announcements land on one connection. What
+//! separates them is that the second one's clock starts again. Every uptime
+//! this command sees, from an announcement or from a status, is measured
+//! against the highest it saw before: one that went backwards is the reboot,
+//! and nothing else is. Only when the bridge was wedged and never spoke at all
+//! is there no earlier figure to compare against, and there the fallback is
+//! [`FRESH_UPTIME_MS`] — a bridge that answers at all is one that has just
+//! restarted.
 
 use std::time::Duration;
 
@@ -38,8 +44,11 @@ const RECOVERY_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// An uptime at or below this is a bridge that has just restarted.
 ///
-/// Slack for the reboot, the radio coming up and the round trip. Any real
-/// uptime is minutes or hours, so there is no ambiguity to resolve here.
+/// Slack for the reboot, the radio coming up and the round trip. Only ever
+/// consulted when nothing was heard from the bridge before the reset, which is
+/// the wedged case this command is mostly for; whenever the previous life did
+/// answer, [`rebooted`] compares the two uptimes instead and needs no
+/// threshold at all.
 const FRESH_UPTIME_MS: u32 = 10_000;
 
 /// How often to re-ask for a status while waiting for it to come back.
@@ -81,15 +90,19 @@ pub async fn run(args: Args) -> Result<()> {
     }
 }
 
-/// Poll for a status until one comes back reporting a fresh uptime.
+/// Poll for a status until one comes back reporting a bridge that restarted.
 ///
-/// The `Connected` seen along the way is kept for its diagnostics but is not
-/// what is being waited for; see the module docs.
+/// The `Connected` from the life being *replaced* is not what is wanted and is
+/// not kept: it carries the old life's reset cause, and printing that under
+/// "back up" would answer the question this command exists to ask with the
+/// answer to the previous one.
 async fn wait_for_reboot(
     link: &mut wartui_bridge::LinkHandle,
 ) -> Result<(Option<BridgeInfo>, u32)> {
     let mut seen: Option<BridgeInfo> = None;
     let mut proof: Option<u32> = None;
+    // The highest uptime seen from the life that is being replaced.
+    let mut before: Option<u32> = None;
     let mut poll = tokio::time::interval(POLL);
     let grace = tokio::time::sleep(Duration::MAX);
     tokio::pin!(grace);
@@ -101,24 +114,34 @@ async fn wait_for_reboot(
                 // is what this loop is waiting out.
                 let _ = link.send_bulk(HostToBridge::GetStatus);
             }
-            // Armed only once the reboot is proven; until then it is a sleep
-            // that never finishes.
+            // Armed once, when the reboot is proven, and never re-armed; until
+            // then it is a sleep that never finishes. Re-arming it on each
+            // status would make it unreachable, because the poll interval is
+            // shorter than the grace and a bridge answers in milliseconds.
             () = &mut grace => return Ok((seen, proof.unwrap_or_default())),
             event = link.recv() => match event {
                 Some(LinkEvent::Connected(info)) => {
+                    if !rebooted(info.uptime_ms, before) {
+                        before = before.max(Some(info.uptime_ms));
+                        continue;
+                    }
                     seen = Some(info);
                     if proof.is_some() {
                         return Ok((seen, proof.unwrap_or_default()));
                     }
                 }
-                Some(LinkEvent::Message(BridgeToHost::Status { uptime_ms, .. }))
-                    if uptime_ms <= FRESH_UPTIME_MS =>
-                {
+                Some(LinkEvent::Message(BridgeToHost::Status { uptime_ms, .. })) => {
+                    if !rebooted(uptime_ms, before) {
+                        before = before.max(Some(uptime_ms));
+                        continue;
+                    }
                     if seen.is_some() {
                         return Ok((seen, uptime_ms));
                     }
+                    if proof.is_none() {
+                        grace.as_mut().reset(tokio::time::Instant::now() + ANNOUNCE_GRACE);
+                    }
                     proof = Some(uptime_ms);
-                    grace.as_mut().reset(tokio::time::Instant::now() + ANNOUNCE_GRACE);
                 }
                 // A disconnect is not a failure here. The reset may have taken
                 // the port with it, and the transport reopens on its own.
@@ -126,6 +149,19 @@ async fn wait_for_reboot(
                 None => bail!("the link closed"),
             },
         }
+    }
+}
+
+/// Whether an uptime belongs to a life that started after the one before it.
+///
+/// A clock that went backwards is a reboot and cannot be anything else, which
+/// is the whole test whenever the previous life was heard from. When it was
+/// not — the wedged bridge that answered nothing until the reset landed — there
+/// is nothing to compare against and freshness is the only evidence available.
+fn rebooted(uptime_ms: u32, before: Option<u32>) -> bool {
+    match before {
+        Some(previous) => uptime_ms < previous,
+        None => uptime_ms <= FRESH_UPTIME_MS,
     }
 }
 
@@ -168,7 +204,28 @@ fn unreachable_notice(port: Option<&str>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::unreachable_notice;
+    use super::{FRESH_UPTIME_MS, rebooted, unreachable_notice};
+
+    #[test]
+    fn a_clock_that_went_backwards_is_the_reboot() {
+        // The ordinary case: the bridge answered before the reset, so the
+        // comparison needs no threshold and no bridge is too young for it.
+        assert!(rebooted(200, Some(10_800_000)), "hours of uptime replaced by a fresh life");
+        assert!(!rebooted(10_800_050, Some(10_800_000)), "the same life, fifty ms later");
+        // A bridge switched on moments ago is the case a bare freshness test
+        // gets wrong, and this one does not: it answered, so it is compared.
+        assert!(!rebooted(2_100, Some(2_000)), "young, but still the same life");
+        assert!(rebooted(150, Some(2_000)), "young, and then younger still");
+    }
+
+    #[test]
+    fn a_bridge_that_never_spoke_falls_back_to_freshness() {
+        // The wedged case. Nothing was heard from the old life, so there is
+        // nothing to compare against and a fresh uptime is the only evidence.
+        assert!(rebooted(0, None));
+        assert!(rebooted(FRESH_UPTIME_MS, None));
+        assert!(!rebooted(FRESH_UPTIME_MS + 1, None));
+    }
 
     #[test]
     fn the_notice_names_the_port_and_a_remedy_that_needs_no_firmware() {

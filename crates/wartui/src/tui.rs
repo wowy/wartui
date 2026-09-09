@@ -68,6 +68,8 @@ async fn view(
     let (keys, running) = spawn_input();
     let mut keys = keys;
     let mut ui = Ui::default();
+    // Built before the loop, not inside the arm below: see `crate::Terminate`.
+    let mut terminate = crate::Terminate::new();
     let outcome = loop {
         let current = snapshot.borrow_and_update().clone();
         ui.clamp(current.nodes.len());
@@ -90,8 +92,8 @@ async fn view(
             }
             // Deliberately the same exit as `q`: the terminal is restored, the
             // engine is told to stop, the last batch is committed and the port
-            // is released. See `crate::terminated`.
-            () = crate::terminated() => break Ok(()),
+            // is released. See `crate::Terminate`.
+            () = terminate.recv() => break Ok(()),
         }
     };
     running.store(false, Ordering::Relaxed);
@@ -1203,6 +1205,7 @@ mod tests {
                 reset_cause: ResetCause::PowerOn,
                 last_phase: LoopPhase::Unknown,
                 heap_free: 65_536,
+                uptime_ms: 1_000,
             }),
             link_up: true,
             link_error: None,

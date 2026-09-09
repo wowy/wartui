@@ -203,7 +203,7 @@ pub fn last_reset_line(info: &BridgeInfo) -> String {
     }
 }
 
-/// Resolves when the process is asked to stop by a signal rather than a key.
+/// Listens for the process being asked to stop by a signal rather than a key.
 ///
 /// `q` and ctrl-c already reach the orderly exit; `SIGTERM` and `SIGHUP` did
 /// not, and the difference is not cosmetic. Leaving by a route that skips the
@@ -215,28 +215,70 @@ pub fn last_reset_line(info: &BridgeInfo) -> String {
 /// logout are all ordinary ways to end a capture and none of them should be
 /// able to cost the operator a replug.
 ///
-/// Never resolves if the handlers cannot be installed: a future that fires
+/// Built **once**, before the loop that selects on it, and this is the whole
+/// reason it is a value rather than an `async fn` called in the arm. Asking
+/// tokio for a signal stream installs a process-wide handler that replaces the
+/// default disposition — after the first call, a `SIGTERM` no longer kills the
+/// process by itself — and a stream subscribes from the moment it is created,
+/// so one delivered between a stream being dropped at the end of a select and
+/// the next one being built is seen by nobody. The default action is gone and
+/// nothing replaced it: the capture carries on, deaf, and the operator is left
+/// with `kill -9`, which is exactly the replug this exists to prevent.
+///
+/// Never fires if the handlers cannot be installed. A future that fired
 /// spuriously here would quit a capture for no reason at all.
 #[cfg(unix)]
-pub async fn terminated() {
-    use tokio::signal::unix::{SignalKind, signal};
+pub struct Terminate {
+    // `Option` because a failure to install is not a failure to run: a process
+    // that cannot watch for `SIGTERM` still has a `q` key.
+    term: Option<tokio::signal::unix::Signal>,
+    hup: Option<tokio::signal::unix::Signal>,
+}
 
-    let (Ok(mut term), Ok(mut hup)) =
-        (signal(SignalKind::terminate()), signal(SignalKind::hangup()))
-    else {
-        std::future::pending::<()>().await;
-        return;
-    };
-    tokio::select! {
-        _ = term.recv() => {}
-        _ = hup.recv() => {}
+#[cfg(unix)]
+impl Terminate {
+    pub fn new() -> Self {
+        use tokio::signal::unix::{SignalKind, signal};
+        Self { term: signal(SignalKind::terminate()).ok(), hup: signal(SignalKind::hangup()).ok() }
+    }
+
+    /// Resolves when one of them arrives. Cancel-safe, as `Signal::recv` is,
+    /// so losing the race in a `select!` drops nothing.
+    pub async fn recv(&mut self) {
+        match (&mut self.term, &mut self.hup) {
+            (Some(term), Some(hup)) => {
+                tokio::select! {
+                    _ = term.recv() => {}
+                    _ = hup.recv() => {}
+                }
+            }
+            (Some(only), None) | (None, Some(only)) => {
+                only.recv().await;
+            }
+            (None, None) => std::future::pending().await,
+        }
     }
 }
 
 /// No `SIGTERM` to catch, so this simply never fires.
 #[cfg(not(unix))]
-pub async fn terminated() {
-    std::future::pending::<()>().await;
+pub struct Terminate;
+
+#[cfg(not(unix))]
+impl Terminate {
+    pub fn new() -> Self {
+        Self
+    }
+
+    pub async fn recv(&mut self) {
+        std::future::pending().await
+    }
+}
+
+impl Default for Terminate {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// How long to wait for a bridge to identify itself before saying nothing has.

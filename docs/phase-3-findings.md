@@ -215,3 +215,64 @@ device" on every attempt, on a board still enumerating with the right serial
 number. Only a physical replug brought it back — which is exactly the symptom
 `docs/phase-1-findings.md:492-513` chased and blamed on a host USB port. It is
 worth knowing that a hung CPU produces it too.
+
+## Three things the first version of this fix got wrong
+
+Found by review, before any of it merged. All three are recorded because each
+one is a case the bench did not cover and would not have covered — the bench had
+no nodes on it, and every run started from a host that was already attached.
+
+**The stall detector rebooted a healthy hostless bridge for ever.** `last_host`
+was seeded with the boot instant rather than with "nothing has been heard".
+`note_tx` reads presence as `last_host.elapsed() < HOST_PRESENT_WINDOW`, so
+every life believed a host was there for its first ten seconds. Put that bridge
+on a battery beside a running fleet: `drain_radio` fills the bulk ring, the IN
+endpoint is draining to nobody, `pump` moves nothing, and at 3.1 s it resets —
+into another ten-second window, and another reset, for ever. The bench never saw
+it because the bench had no fleet: with nothing being received the outbox stays
+empty and the first of the three conditions never holds. It is now
+`Option<Instant>`, and presence is something a host demonstrates rather than
+something a fresh boot assumes.
+
+**The host threw away the announcement that says the bridge rebooted.** The
+transport reported only the first `Ready` per connection, on the reasoning that
+"a reboot re-enumerates the USB device and so ends this connection outright" —
+which is contradicted by the measurement three sections up in this same
+document. A software reset keeps the file descriptor, so the post-reboot `Ready`
+arrived on the same connection and was dropped as a duplicate. The whole
+observability half of this work was therefore invisible in exactly the case it
+was built for: the fault box stayed empty, `snapshot.bridge` kept the dead
+life's info, and the engine went on believing in a peer table the reboot had
+emptied.
+
+Fixing it needed something in the frame, because nothing already there
+distinguishes the two ways a second `Ready` arrives. A duplicate answer to an
+`Identify` already in flight and a bridge that has just rebooted are otherwise
+identical — two consecutive `wartui reset`s produce byte-identical `Ready`s, so
+comparing `reset_cause` and `last_phase` does not separate them, and no time
+threshold does either: the duplicate arrives milliseconds later and a reboot
+completes in about 300 ms. So `Ready` now carries `uptime_ms`, and a clock that
+went backwards is the test. It is unambiguous, it needs no constant, and it is
+the same evidence `wartui reset` was already using from `Status`.
+
+**`wartui reset` reported the previous life's reset cause.** Two faults, one
+consequence. It kept the `Connected` it saw on the way in — which on a healthy
+bridge is the life about to be replaced — and its announcement grace timer was
+750 ms while the status poll was 500 ms, so a fresh status re-armed it before it
+could ever fire. It now arms once, and every uptime it sees is measured against
+the highest it saw before, so the old life cannot be mistaken for the new one.
+`FRESH_UPTIME_MS` survives only for the wedged case, where nothing was heard
+before the reset and there is nothing to compare against.
+
+## `SIGTERM` was being caught and then dropped on the floor
+
+Not this bug, but next to it, and worse than the gap it filled. The signal
+future was built inside the `select!` arm, so a fresh `tokio::signal` stream was
+created and dropped on every iteration of the view's loop. The first one
+installs a process-wide handler and permanently replaces `SIGTERM`'s default
+action; a stream subscribes only from the moment it exists. A signal delivered
+in the gap between one being dropped and the next being built is therefore seen
+by nobody, and the default that would have killed the process is gone. The
+capture carries on, deaf, and the operator reaches for `kill -9` — which is the
+replug this was written to prevent. The streams are now built once, before the
+loop.
