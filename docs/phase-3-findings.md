@@ -428,3 +428,44 @@ the two nodes for a hundred seconds with nothing reading the port: uptime 25 s
 and 21 frames dropped, then 2 m 5 s and 218 dropped. A hundred seconds to the
 second, no reset, and the drop counter climbing throughout — the failing
 condition present the whole time and correctly ignored.
+
+## The C5 was losing two of its reset reasons
+
+`wartui reset` and the fault box have only ever been exercised on a C6. The C5
+path is compile-checked in CI and has never been on a bench, so the mapping from
+`esp_hal`'s `SocResetReason` was read against both chips' definitions instead.
+
+The two enums are nearly identical, and the differences are all on the side that
+had never been tested. `CoreSDIO` (0x06) is C6-only and uninteresting — nothing
+here uses SDIO. But the C5 defines two the C6 does not:
+
+| variant | C5 | C6 | was reported as |
+| --- | --- | --- | --- |
+| `PowerGlitch` (0x19) | yes | — | `Unknown` |
+| `CpuLockup` (0x1A) | yes | — | `Unknown` |
+
+`reset_cause` matched only variants both chips define, deliberately, to avoid a
+`cfg` per chip — and so threw both away. A power glitch is a supply problem and
+now reports as `Brownout`, whose printed advice (check the cable and the hub) is
+the right advice for it.
+
+`CpuLockup` is the one worth having. There is no working watchdog on these parts
+(above), so the hang class has nothing behind it at all — and on the C5 the
+silicon's lockup detector is the only mechanism that would ever say a hang
+happened. Reporting it as `Unknown` throws away the single signal available for
+the one failure mode this document admits it cannot catch. It gets its own
+`ResetCause::Lockup` rather than being folded into `Watchdog`, which would name a
+mechanism known not to fire and send the next person looking in the wrong place.
+
+That is a wire change, so `LINK_PROTO_VERSION` goes to 4. Without the bump an
+older host would meet the new variant, fail to decode the `Ready` carrying it,
+and report a bridge that answered nothing — which is precisely the misdiagnosis
+this protocol's version byte exists to prevent.
+
+What stays unmapped is deliberate: `CoreDeepSleep` cannot happen because nothing
+here sleeps, and `CoreEfuseCrc` says nothing an operator can act on that
+`Unknown` does not already say.
+
+**Still not done:** none of this has been run on a C5. It is an audit of the
+mapping, not a bench test of it, and the gap it closes is the one the audit could
+see. Reflashing a node as a bridge would answer it; no C5 was attached.
