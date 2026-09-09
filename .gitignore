@@ -40,3 +40,6 @@ __pycache__/
 *.db-shm
 *.pcap
 /*.csv
+
+# macOS
+.DS_Store
