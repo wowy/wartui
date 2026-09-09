@@ -26,7 +26,8 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use wartui_proto::air::{AdminMsg, CAPABILITY_MAX, Capabilities, Frame, MsgType, TextMsg};
 use wartui_proto::link::{
-    BROADCAST, BridgeToHost, Chip, EspNowPayload, HostToBridge, LogLevel, LogStr, Mac, SendStatus,
+    BROADCAST, BridgeToHost, Chip, EspNowPayload, HostToBridge, LogLevel, LogStr, LoopPhase, Mac,
+    ResetCause, SendStatus,
 };
 use wartui_proto::plan::{
     ADMIN_WAIT_MS, CHANNEL_DWELL_MS, ChannelSet, DEDUP_RING, IDLE_BEAT_MS, NODE_STAGGER_WINDOW_MS,
@@ -190,6 +191,14 @@ async fn run_bridge(
         chip: Chip::Esp32C6,
         mac: [0x02, 0x00, 0x00, 0x00, 0xBB, 0x01],
         fw_version: format!("{}-sim", env!("CARGO_PKG_VERSION")),
+        // A simulated dongle has only ever just been switched on, and has no
+        // previous life to have stopped anywhere. Reporting anything else here
+        // would put a fault on screen that no amount of looking could explain.
+        reset_cause: ResetCause::PowerOn,
+        last_phase: LoopPhase::Unknown,
+        // Not modelled: nothing in the simulator allocates on a device heap,
+        // and a made-up figure would be read as a measurement.
+        heap_free: 0,
     };
     if plumbing.events.send(LinkEvent::Connected(info)).await.is_err() {
         return;

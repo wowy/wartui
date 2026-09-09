@@ -1460,6 +1460,7 @@ dependencies = [
  "esp-radio",
  "esp-rtos",
  "nb 1.1.0",
+ "portable-atomic",
  "static_cell",
  "wartui-proto",
 ]

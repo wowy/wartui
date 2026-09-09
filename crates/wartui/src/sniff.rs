@@ -49,6 +49,9 @@ pub async fn run(args: Args) -> Result<()> {
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => break,
+            // Same reasoning as the view's: leaving without releasing the port
+            // is what costs a replug. See `crate::terminated`.
+            () = crate::terminated() => break,
             () = &mut notice, if !spoken => {
                 spoken = true;
                 if !counts.heard_a_bridge {
@@ -216,10 +219,26 @@ fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
             }
         }
 
-        BridgeToHost::Ready { chip, mac: bridge_mac, fw_version, proto_version } => {
+        BridgeToHost::Ready {
+            chip,
+            mac: bridge_mac,
+            fw_version,
+            proto_version,
+            reset_cause,
+            last_phase,
+            heap_free,
+        } => {
             println!(
                 "# bridge ready: {chip:?} {} firmware {fw_version} link v{proto_version}",
                 mac(bridge_mac)
+            );
+            // Every `Ready` and not only the first: a bridge that reboots
+            // mid-capture sends another one, and in a sniff log the second is
+            // the interesting one. `sniff` is the raw view, so the fields go
+            // out as the bridge sent them rather than through the prose
+            // `last_reset_line` writes for the commands that show one line.
+            println!(
+                "#   reset {reset_cause:?}, last phase {last_phase:?}, {heap_free} bytes of heap free"
             );
         }
 

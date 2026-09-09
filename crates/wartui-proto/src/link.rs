@@ -23,7 +23,13 @@ use serde::{Serialize, de::DeserializeOwned};
 /// v2 added [`HostToBridge::Identify`], because v1 announced the bridge only at
 /// boot and so a host that attached to an already-running dongle waited for a
 /// [`BridgeToHost::Ready`] that had been sent minutes earlier.
-pub const LINK_PROTO_VERSION: u8 = 2;
+///
+/// v3 added [`ResetCause`], [`LoopPhase`] and `heap_free` to
+/// [`BridgeToHost::Ready`]. A bridge that reboots is no longer a bridge whose
+/// last life is a mystery: it now says whether it was powered on, panicked,
+/// was asked to reset, or gave up on a transmit path that had stopped
+/// draining — and where in its loop it was when that happened.
+pub const LINK_PROTO_VERSION: u8 = 3;
 
 /// ESP-NOW's own payload ceiling. The 212-byte wardriver frames fit inside it.
 pub const MAX_ESPNOW_PAYLOAD: usize = 250;
@@ -61,6 +67,63 @@ pub enum Chip {
     Esp32C5,
     /// 2.4 GHz only, which is all ESP-NOW needs at the default channel.
     Esp32C6,
+}
+
+/// Why the bridge is running this life rather than the last one.
+///
+/// A flattening of `esp_hal`'s per-chip `SocResetReason`, which has a dozen
+/// variants that differ between the C5 and the C6 and name silicon blocks
+/// rather than causes. What an operator needs is which of a small number of
+/// stories this was, and the ones that matter are the ones that are not
+/// [`Self::PowerOn`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub enum ResetCause {
+    /// The board was plugged in, or the button was pressed.
+    PowerOn,
+    /// The firmware reset itself: the panic handler, or a
+    /// [`HostToBridge::Reset`].
+    Software,
+    /// A watchdog fired, so the main loop stopped turning over.
+    Watchdog,
+    /// The supply sagged. Usually a hub or a cable rather than the board.
+    Brownout,
+    /// A reset the firmware did not ask for and cannot attribute, which
+    /// includes the one `espflash` drives over DTR/RTS.
+    External,
+    /// The chip reported something this build does not have a name for.
+    Unknown,
+}
+
+/// Where the bridge's main loop was when it last stopped making progress.
+///
+/// Carried across a reset in RTC memory and reported in
+/// [`BridgeToHost::Ready`], because the interesting resets are the ones nobody
+/// was watching. On its own it is a hint rather than a diagnosis — the loop
+/// visits most of these every millisecond — but paired with a
+/// [`ResetCause::Watchdog`] or [`ResetCause::Software`] it says which of the
+/// blocking calls in the loop was the one that did not come back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub enum LoopPhase {
+    /// Nothing to report: a power-on, or a reset that did not preserve the
+    /// marker.
+    Unknown,
+    /// Still in `main` before the loop started.
+    Boot,
+    /// Draining the radio's receive queue.
+    DrainRadio,
+    /// Reading and decoding host commands.
+    DrainLink,
+    /// Carrying out a host command other than a transmit.
+    Command,
+    /// Inside an ESP-NOW send, waiting on the transmit callback.
+    Transmit,
+    /// Writing queued frames to the USB endpoint.
+    Pump,
+    /// Idle, with neither radio nor link asking for anything.
+    Idle,
+    /// The transmit path stopped draining while the host was still talking, so
+    /// the bridge reset itself. See [`BridgeToHost::Ready`].
+    TxStalled,
 }
 
 /// Severity of a [`BridgeToHost::Log`] line.
@@ -163,6 +226,15 @@ pub enum BridgeToHost {
         fw_version: ShortStr,
         /// Always [`LINK_PROTO_VERSION`] as the firmware was built with.
         proto_version: u8,
+        /// Why this life started. Anything but [`ResetCause::PowerOn`] means
+        /// the bridge restarted underneath a host that may not have noticed.
+        reset_cause: ResetCause,
+        /// Where the previous life stopped, when the reset preserved it.
+        last_phase: LoopPhase,
+        /// Bytes free in the radio blobs' heap. Nothing wartui writes
+        /// allocates, so a figure that falls across a long capture is the
+        /// blobs leaking and is worth knowing before the allocation fails.
+        heap_free: u32,
     },
     /// An ESP-NOW frame arrived.
     Rx {

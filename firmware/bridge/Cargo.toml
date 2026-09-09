@@ -45,6 +45,7 @@ esp-radio = { version = "1.0.0-beta.0", default-features = false, features = [
 ] }
 esp-rtos = { version = "0.3.0", features = ["esp-alloc", "esp-radio"] }
 nb = "1.1.0"
+portable-atomic = { version = "1.15.0", default-features = false }
 static_cell = "2.1.1"
 wartui-proto = { path = "../../crates/wartui-proto" }
 

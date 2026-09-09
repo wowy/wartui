@@ -156,6 +156,15 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     esp_hal::system::software_reset()
 }
 
+// There is deliberately no watchdog here either, for the reason the bridge
+// gives at length: `esp_hal::init` disables every one on the chip, and the RWDT
+// that would put one back does not fire on these parts with esp-hal 1.1.2. See
+// `firmware/bridge/src/main.rs` and `docs/phase-3-findings.md`. The gap is worth
+// more here than it is there — a hung node reads as `no heartbeat`, which is
+// also what a node out of range and a node with a flat battery read as, so the
+// operator goes looking for the wrong thing — and it is still better left open
+// and written down than papered over with something that does not fire.
+
 /// Everything that changes while the node runs.
 ///
 /// Boxed into `.bss` through a [`StaticCell`] rather than built on the stack:

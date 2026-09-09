@@ -185,6 +185,17 @@ impl Outbox {
         self.dropped
     }
 
+    /// Whether there is anything the host has not been told yet.
+    ///
+    /// The bridge uses this to tell two silences apart. Nothing queued and
+    /// nothing moving is a quiet fleet. Something queued and nothing moving,
+    /// while the host is still sending commands, is a transmit path that has
+    /// stopped draining — which is not a state this end can talk its way out
+    /// of, since talking is the part that is broken.
+    pub const fn is_empty(&self) -> bool {
+        self.priority.is_empty() && self.bulk.is_empty() && self.current.is_none() && !self.orphan
+    }
+
     /// Queue `msg`, evicting an older bulk frame if that is what it takes.
     ///
     /// Returns whether it was queued. Callers generally ignore the result: the
@@ -341,7 +352,8 @@ mod tests {
 
     use super::{BULK_DEPTH, ByteSink, Outbox, PRIORITY_DEPTH};
     use crate::link::{
-        BridgeToHost, Chip, FrameAccumulator, LogLevel, LogStr, ShortStr, decode_frame,
+        BridgeToHost, Chip, FrameAccumulator, LINK_PROTO_VERSION, LogLevel, LogStr, LoopPhase,
+        ResetCause, ShortStr, decode_frame,
     };
 
     /// A sink with a settable ceiling, so a wedged host can be simulated by
@@ -391,7 +403,10 @@ mod tests {
             chip: Chip::Esp32C6,
             mac: [1, 2, 3, 4, 5, 6],
             fw_version: ShortStr::new(),
-            proto_version: 2,
+            proto_version: LINK_PROTO_VERSION,
+            reset_cause: ResetCause::PowerOn,
+            last_phase: LoopPhase::Unknown,
+            heap_free: 0,
         }
     }
 
@@ -506,6 +521,30 @@ mod tests {
         // the frame after it and cost two.
         let expected: Vec<u8> = (1..=BULK_DEPTH as u8).map(|n| b'a' + n).collect();
         assert_eq!(bodies(&received(&sink.out)), expected);
+    }
+
+    #[test]
+    fn is_empty_tracks_a_frame_all_the_way_off_the_wire() {
+        // The bridge resets itself when this says there is something to send
+        // and nothing has moved for three seconds, so a frame that is half
+        // written must still count as pending. Reporting empty at any point
+        // between `send` and the last byte would make a wedged endpoint look
+        // like a quiet one, which is the state that must never be reset.
+        let mut outbox = Outbox::new();
+        assert!(outbox.is_empty(), "a fresh outbox has nothing to say");
+
+        outbox.send(&ready());
+        assert!(!outbox.is_empty(), "queued but not yet written");
+
+        // One byte through a sink that will take no more: the frame is now
+        // half on the wire, which is the case the naive check gets wrong.
+        let mut trickle = Fake::new(1);
+        outbox.pump(&mut trickle);
+        assert!(!outbox.is_empty(), "part written is still pending");
+
+        let mut open = Fake::open();
+        outbox.pump(&mut open);
+        assert!(outbox.is_empty(), "fully written is finally empty");
     }
 
     #[test]
