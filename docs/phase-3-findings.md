@@ -219,8 +219,9 @@ worth knowing that a hung CPU produces it too.
 ## Three things the first version of this fix got wrong
 
 Found by review, before any of it merged. All three are recorded because each
-one is a case the bench did not cover and would not have covered — the bench had
-no nodes on it, and every run started from a host that was already attached.
+one is a case the bench did not cover — the bench had no nodes on it, and every
+run started from a host that was already attached. The first of them has since
+been reproduced, and the measurement is under it.
 
 **The stall detector rebooted a healthy hostless bridge for ever.** `last_host`
 was seeded with the boot instant rather than with "nothing has been heard".
@@ -233,6 +234,32 @@ it because the bench had no fleet: with nothing being received the outbox stays
 empty and the first of the three conditions never holds. It is now
 `Option<Instant>`, and presence is something a host demonstrates rather than
 something a fresh boot assumes.
+
+That paragraph was written from reasoning. Two parked nodes make it
+reproducible in ninety seconds, so it is no longer reasoning. The A/B is a
+one-line change — `last_host: Some(now)` against `last_host: None`, nothing
+else in the tree touched, both builds carrying the `uptime_ms` the host needs
+to read the result. Same protocol for each: flash, leave the board powered
+beside the two nodes with **nothing reading the port** for 90 s, then attach
+and ask for status. Attaching unwedges the endpoint, but the uptime and the
+reset cause in that first `Ready` are the evidence and they survive being read.
+
+| after 90 s | `last_host: Some(now)` | `last_host: None` |
+|---|---|---|
+| uptime | **0 s** | **1 m 29 s** |
+| last reset | software; *its transmit path had stopped draining* | over USB, by espflash |
+| received | 2 frames | 178 frames |
+| dropped | 0 frames | 154 frames |
+
+The drop counters are the part worth reading twice. The fix does not work by
+avoiding the condition: the healthy bridge sat in it for the whole 89 s, heard
+178 frames and threw 154 of them away because nothing was draining the
+endpoint — outbox non-empty, every byte refused, continuously — and stayed
+quiet, because no host had ever spoken to it. The faulted build never lived
+long enough to discard anything. Its two received frames are one node beat and
+a bit, which is all a four-second life has time for: parked nodes beat at
+`IDLE_BEAT_MS`, one second, so every life got a frame well inside its
+ten-second window, and every life ended three seconds later.
 
 **The host threw away the announcement that says the bridge rebooted.** The
 transport reported only the first `Ready` per connection, on the reasoning that
