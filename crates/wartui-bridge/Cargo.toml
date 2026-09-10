@@ -10,7 +10,7 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
-serialport = "4.10.0"
+serialport = "4.10.1"
 thiserror = "2.0.20"
 tokio = { version = "1.53.1", features = ["rt", "sync", "time", "macros", "rt-multi-thread"] }
 tracing = "0.1.44"
