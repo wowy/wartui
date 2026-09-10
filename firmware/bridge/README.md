@@ -31,11 +31,33 @@ twenty nodes wartui supports.
 
 ```sh
 cargo run --release --features esp32c6    # or --features esp32c5
+cargo +esp run --release --features esp32s3 --target xtensa-esp32s3-none-elf
 ```
 
-Exactly one chip feature is required; `src/main.rs` rejects zero or both at
-compile time. Both parts are RISC-V and build on stable — an ESP32-S3 bridge
-would need the `espup` nightly fork, which is why it is not supported.
+Exactly one chip feature is required.
+
+The first line is the whole story for the RISC-V parts: stable, one flag, and
+`rust-toolchain.toml` pins it so nobody needs a second toolchain to flash a C6.
+
+The S3 is Xtensa and needs `espup` — `cargo install espup && espup install`,
+then `. ~/export-esp.sh` in any shell that will link one, which is what puts
+`xtensa-esp32s3-elf-gcc` on `PATH`. `+esp` overrides the pin; `--target` is
+needed because `[build] target` in `.cargo/config.toml` names the RISC-V triple.
+Everything else the S3 needs — its runner, `build-std`, and the linker flags —
+is in that file and is inert on stable, so the C5 and C6 commands are unchanged.
+
+What makes the S3 different is not the chip. `esp-hal` has supported it all
+along; the cost is that `xtensa-lx-rt` still requires
+`#![feature(asm_experimental_arch)]` and no channel ships a prebuilt `core` for
+the target, so it needs a nightly-flavoured toolchain and a `core` built from
+source. That is structural rather than a version lag — the newest
+`xtensa-lx-rt` is no different, and `esp-radio` pins the older one regardless.
+
+Why put a bridge on it at all: the bridge is the one board in the fleet whose
+radio never needs 5 GHz. It parks on the control channel and stays there, so
+2.4-GHz-only costs it nothing, and S3 devkits are cheap and come with hardware —
+screens, SD slots — that no RISC-V board here does. The *nodes* are still C5 and
+C6, and that is not a detail: they are the parts that have to reach both bands.
 
 The cargo runner is `espflash flash --monitor` with no `--chip`, so espflash
 detects the part. `--monitor` renders the framed link bytes as text and looks
@@ -135,4 +157,14 @@ firmwares are held at the same set by the same dependency, which is worth
 keeping true — they share `wartui-proto`.
 
 `esp-generate` is a version behind this set; its scaffolding (`build.rs`,
-`.cargo/config.toml`) is what was taken from it, not its dependency list.
+`.cargo/config.toml`) is what was taken from it, not its dependency list. One
+piece of that scaffolding does not survive contact with the S3: `build.rs`'s
+`linker_be_nice` registers itself with `--error-handling-script`, which is an
+LLD option, and the S3 links with `xtensa-esp32s3-elf-gcc`. Left on, the hook
+whose job is to explain link errors becomes the link error, on every build. It
+is skipped for `target_arch = "xtensa"` rather than rewritten, so the function
+stays diffable against upstream.
+
+Adding the S3 pulled `xtensa-lx`, `xtensa-lx-rt`, the `esp32s3` PAC and the USB
+OTG crates `esp-hal` enables with it into this lockfile. Nothing already pinned
+moved, which is the property the paragraph above is protecting.
