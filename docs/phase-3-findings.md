@@ -501,9 +501,33 @@ SD slot are simply never initialised:
 | phase marker across that reset | survived — `it was carrying out a host command`, so `rtc_fast, persistent` holds on this part |
 | image size | 387,088 bytes, 2.36% of flash |
 
-That covers announce, both link directions, two of the reset causes and the RTC
-marker. It does not cover the radio: no nodes were powered, so `received 0
-frames` is all `drain_radio` and `transmit` have been asked for.
+Then against three C6 nodes (`…9A:24`, `…75:40`, `…00:08`, all
+`wartui/0.1;ble`):
+
+| what | result |
+| --- | --- |
+| receive | 1542 frames in 1h41m; heartbeats, capability tokens and wardrive lines all decode |
+| `RxControlInfo` | RSSI reads correctly, −48 to −62 dBm for the fleet and −78 to −97 for the APs it reported |
+| transmit | five assignments, every one `acked` — the transmit-callback status, not the enqueue result |
+| admin latency | 5.5–7.8 ms from the heartbeat that opened the window to the callback, against a 300 ms window |
+| planning | re-cut on each join (`node_count` 1→2→3) and dealt 2.4 GHz only, since no node claimed `5g` |
+
+The RSSI row is the one that could have gone wrong quietly. The S3 is
+`wifi_mac_version = "1"` where the C5 and C6 are "2" and "3", so its
+`RxControlInfo` is a different struct; `drain_radio` already read nothing from it
+but `rssi`, which all three layouts carry, and that narrowing turns out to be
+exactly what made the port free.
+
+The latency row needs one caveat, because the first run measured 5.1–6.0
+*seconds* and that is not what it looks like. `latency_us` is
+`tx_us - rx_us` on the bridge's own clock, so it counts however long a heartbeat
+sat in the outbox ring before a host read it — and that bridge had been powered
+for 1h41m with nobody attached, dropping 1518 frames. Every assignment in a
+session is issued in its first few milliseconds, so all of them inherit that
+backlog. Reset the bridge first and the same five assignments measure 5.5–7.8 ms.
+Worth knowing before reading the figure as a blown window: it is an artifact of
+attaching to a long-idle bridge, it is not specific to this chip, and the
+wall-clock round trip in that first run was 5–7 ms throughout.
 
 **Does not carry over: the reset reasons.** The S3's `SocResetReason` is not a
 superset of the C6's, which is the trap `03de799` fell into from the other side.
@@ -525,9 +549,7 @@ position the C6 has always been in; it is not a new hole, but adding a chip was
 a chance to close it and did not.
 
 **Still not done on the S3:** it has never been wedged on purpose, so the
-detector this document is about is the one thing the bench above did not test.
-Nor has it heard a node — `drain_radio`, `transmit` and the `AckOk` path are
-still only compile-checked, and the `RxControlInfo` layout differs there
-(`wifi_mac_version = "1"` against the C5's and C6's "2"/"3"), even though the
-one field read out of it, `rssi`, is present in all three. `PowerOn` is
-unverified because that needs a replug. The C5 remains unbenched entirely.
+detector this document is about is the one thing the bench did not test — the
+radio and link paths around it are now exercised, but the stall itself is still
+reasoning. `PowerOn` is unverified because that needs a replug, and no C6 or S3
+can report the hang class at all. The C5 remains unbenched entirely.
