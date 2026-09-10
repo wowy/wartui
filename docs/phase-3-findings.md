@@ -538,9 +538,13 @@ Its differences are *renames* — `Cpu0Sw`, `Cpu0Mwdt0`, `Cpu0Mwdt1` and
 has two cores and neither is privileged — so unlike the C5's missing variants
 these are compile errors rather than silence, and the build says so immediately.
 The numeric codes are identical on all three parts; only the Rust spellings
-differ. Two variants are genuinely new, `SysClkGlitch` (0x13) and `CorePwrGlitch`
-(0x17), and both map to `Brownout` by the same argument the C5's `PowerGlitch`
-did. One is genuinely absent: `Cpu0JtagCpu`, so an `espflash reset` on an S3
+differ. Two variants are genuinely new, and they are *not* the same story told
+twice: esp-hal names `CorePwrGlitch` (0x17) "glitch on power" and `SysClkGlitch`
+(0x13) "glitch on clock". Only the first is a brownout by another name and takes
+the C5's `PowerGlitch` mapping; the second got its own `ResetCause::ClockGlitch`,
+because the host prints "check the cable and the hub" for a brownout and that is
+the wrong errand for a clock fault. Folding them together is the mistake
+`03de799` made from the other direction, and it survived first review here. One is genuinely absent: `Cpu0JtagCpu`, so an `espflash reset` on an S3
 should report `External` via `CoreUsbJtag` alone — unverified.
 
 **The gap the S3 does not close.** It has no `CpuLockup`. The C5 remains the only

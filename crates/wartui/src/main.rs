@@ -182,6 +182,7 @@ pub fn last_reset_line(info: &BridgeInfo) -> String {
         ResetCause::Watchdog => "reset by its watchdog, so its main loop had stopped",
         ResetCause::Lockup => "reset by the chip after the CPU locked up",
         ResetCause::Brownout => "reset by a brownout, so check the cable and the hub",
+        ResetCause::ClockGlitch => "reset by its clock-glitch detector, which is not the supply",
         ResetCause::External => "reset over USB, by espflash or a replug",
         ResetCause::Unknown => "reset for a reason it could not name",
     };
