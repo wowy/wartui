@@ -470,23 +470,24 @@ here sleeps, and `CoreEfuseCrc` says nothing an operator can act on that
 mapping, not a bench test of it, and the gap it closes is the one the audit could
 see. Reflashing a node as a bridge would answer it; no C5 was attached.
 
-## The S3 inherits the detector unmeasured
+## The S3 inherits the detector, and it was measured there too
 
 The bridge now builds for the ESP32-S3, which puts a third chip behind
 everything above. What carries over and what does not is worth separating,
 because the whole point of this document is that the transmit-stall rule was
 wrong twice and only a bench caught it.
 
-**Carried over on the strength of the silicon, not a measurement.** The S3 has
+**The premise carries over on the strength of the silicon, not a measurement.** The S3 has
 the same `USB_SERIAL_JTAG` block, with the same `EP1_CONF` register: `WR_DONE`
 clears `SERIAL_IN_EP_DATA_FREE`, and the TRM says it comes back only when the
 USB host reads the FIFO. That is the entire premise of the wedge, so the wedge
 should exist there in the same shape. The firmware side is unchanged — the same
 `write_byte_nb` / `flush_tx_nb` pair through `wartui_proto::outbox` — and the
 arithmetic is `wartui_proto::stall::StallWatch`, which is host-tested and does
-not know what a chip is. **None of it has been run on an S3 in the wedged
-state.** The Phase 3 register dumps are all C6. Treat the S3 rows of every table
-above as reasoning until somebody reproduces the bench.
+not know what a chip is. The Phase 3 *register* dumps remain all C6, so the
+silicon premise above is still read out of one part's TRM and confirmed on the
+other's; what has now been run on an S3 is the detector, which is the half that
+was wrong twice.
 
 **Measured on a Waveshare ESP32-S3-LCD-1.47** (S3 rev v0.2, 16 MB flash, MAC
 `…6A:4C`), flashed with the generic bridge firmware — the board's screen, LED and
@@ -553,8 +554,48 @@ Every reset cause the S3 can be made to report has now been seen on hardware:
 `PowerOn`, `Software` and `External`. `Brownout` needs a bad supply and `Lockup`
 does not exist on this part, so neither is reachable on demand.
 
-**Still not done on the S3:** it has never been wedged on purpose, so the
-detector this document is about is the one thing the bench did not test — the
-radio, link and reset paths around it are now exercised, but the stall itself is
-still reasoning. No C6 or S3 can report the hang class at all. The C5 remains
-unbenched entirely.
+### The three wedge rows, re-measured on the S3
+
+The one thing the first S3 bench did not test was the detector this document is
+about, so it was run again on the S3 with the same method the C6 rows used: a
+build whose `UsbSink` refuses every byte from a fixed uptime onwards, standing in
+for an endpoint that has stopped draining, with a marker `Log` frame 200 ms
+before it so the host has a timestamp for the wedge itself. Three C6 nodes
+transmitting throughout, so the outbox always had something queued, and a host
+polling `GetStatus` twice a second — the same shape as the C6 run, on the same
+fleet the rest of this section was measured against.
+
+| scenario | C6 | S3 |
+| --- | --- | --- |
+| wedged, host polling throughout | ROM banner 3.10 s after the endpoint died | banner at +3.03 s |
+| wedged, ~10 s of total silence across the wedge, then the host returns | not one byte while silent; banner at +13.16 s | not one byte for 13.24 s; banner at +13.05 s, which is 3.0 s after the host came back |
+| main loop blocked 8 s — *not* a wedge — then the host returns | **no reset**; traffic resumed 8.00 s later | **no reset**; traffic resumed 8.00 s later and one continuous life ran to 44.2 s across 90 status frames |
+
+Row one's reset announced itself correctly: `wartui status` on the next life
+reported `its transmit path had stopped draining`, so the `TxStalled` cause
+survives the reboot on this part too and the operator gets the diagnosis rather
+than a bridge that merely hesitated.
+
+Row two is the row worth reading twice, and the S3 puts the same numbers in the
+same places. The host's last frame was at 20.0 s and the endpoint died at 20.5 s,
+so the stall armed at once, against a host it had every reason to believe in —
+and said nothing for thirteen seconds, because that host had not spoken *since*.
+Presence lapsed at 30.0 s, the clock was dropped, the host came back at 30.5 s,
+and the reset landed three seconds after that. This is the fourth clause and the
+host-present window doing their jobs on silicon neither was written against.
+
+Row three is the false positive the first version of the rule had. During the
+eight blocked seconds the detector is not consulted, and the pass that follows
+moves bytes, which clears the clock; the 90 status frames afterwards never once
+showed the uptime going backwards.
+
+One caveat on method, unchanged from the C6: `UsbSink` returning `WouldBlock` is
+a stand-in, not the silicon. It exercises every clause of the rule and the reset
+behind it, and it cannot exercise the claim that `SERIAL_IN_EP_DATA_FREE` gets
+stuck in the first place — which is read out of the TRM for both parts and has
+only ever been *observed* on a C6, because the state cannot be provoked from the
+device end.
+
+**Still not done on the S3:** nothing in this document, now. No C6 or S3 can
+report the hang class at all, which is a gap in the firmware rather than in the
+bench. The C5 remains unbenched entirely.
