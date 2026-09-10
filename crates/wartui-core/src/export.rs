@@ -13,11 +13,21 @@
 //! must be zero-padded (`2026-05-01 13:34:37`, where the node firmware emits
 //! `2026-5-1 13:34:37`), and the SSID must be RFC-4180 quoted, since an SSID
 //! may contain a comma or a quote and is not required to be text at all.
+//!
+//! A third is here because the store is not rewritten. A cloaked access point
+//! may beacon its SSID element at the name's real length with every byte zero,
+//! and until `beacon::visible_ssid` existed those NULs were recorded verbatim
+//! and written straight into this column — valid UTF-8, so a lossy decode kept
+//! them, and free of the four characters `quote` reacts to, so they went out
+//! bare. Applying the same rule here is what lets a capture taken before that
+//! fix export correctly, which is the whole promise of the export being a view
+//! over the store rather than a thing produced once at capture time.
 
 use std::io::Write;
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use rusqlite::{Connection, Row};
+use wartui_proto::beacon::visible_ssid;
 
 /// The pre-header WiGLE reads for provenance, then the column header.
 const COLUMNS: &str = "MAC,SSID,AuthMode,FirstSeen,Channel,RSSI,\
@@ -148,7 +158,7 @@ fn write_row<W: Write>(row: &Row<'_>, out: &mut W) -> Result<(), ExportError> {
         out,
         "{},{},{},{},{channel},{rssi},{lat},{lon},{},{},{}",
         mac(&bssid),
-        quote(&String::from_utf8_lossy(ssid.as_deref().unwrap_or_default())),
+        quote(&ssid_field(ssid.as_deref().unwrap_or_default())),
         quote(&security),
         timestamp(first_seen),
         alt.unwrap_or(0.0),
@@ -156,6 +166,18 @@ fn write_row<W: Write>(row: &Row<'_>, out: &mut W) -> Result<(), ExportError> {
         if kind == "ble" { "BLE" } else { "WIFI" },
     )?;
     Ok(())
+}
+
+/// The `SSID` column.
+///
+/// A cloaked network's padding is stripped by the same rule the parser applies,
+/// because this runs over captures recorded before it did. Any NUL still
+/// standing is an interior one, which is not padding; it gets what
+/// `from_utf8_lossy` already gives a byte it cannot represent, because WiGLE's
+/// parser has no more use for a raw NUL in a text column than a reader does.
+fn ssid_field(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(visible_ssid(bytes));
+    if text.contains('\0') { text.replace('\0', "\u{FFFD}") } else { text.into_owned() }
 }
 
 /// Uppercase colon-separated, which is what WiGLE and the node firmware's own
@@ -203,6 +225,21 @@ mod tests {
         assert_eq!(quote("has,comma"), "\"has,comma\"");
         assert_eq!(quote("say \"hi\""), "\"say \"\"hi\"\"\"");
         assert_eq!(quote(""), "");
+    }
+
+    #[test]
+    fn a_cloaked_ssid_is_stripped_back_to_a_hidden_network() {
+        assert_eq!(ssid_field(&[0u8; 8]), "");
+        assert_eq!(ssid_field(b"Home\0\0\0"), "Home");
+        assert_eq!(ssid_field(b""), "");
+        assert_eq!(ssid_field(b"plain"), "plain");
+    }
+
+    #[test]
+    fn a_nul_that_is_not_padding_still_never_reaches_the_file() {
+        // An interior NUL is left alone by the trim, so this is the last thing
+        // standing between it and a text column WiGLE has to parse.
+        assert_eq!(ssid_field(b"a\0b"), "a\u{FFFD}b");
     }
 
     #[test]

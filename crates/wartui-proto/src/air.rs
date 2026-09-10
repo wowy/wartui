@@ -480,6 +480,11 @@ pub struct SightingMsg<'a> {
     /// Raw SSID bytes, at most [`SSID_MAX`]. Empty for a hidden network and
     /// always empty for BLE; not necessarily UTF-8, because an SSID is whatever
     /// the access point beaconed.
+    ///
+    /// This layer is byte-transparent in both directions and does no trimming
+    /// of its own — a cloaked access point's zero padding is stripped where the
+    /// beacon is parsed (`beacon::visible_ssid`), so that it never reaches the
+    /// wire at all rather than being tidied up at each end.
     pub ssid: &'a [u8],
 }
 
