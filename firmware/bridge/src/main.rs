@@ -254,12 +254,16 @@ fn reset_cause() -> ResetCause {
         }
         // A glitch on the supply rail is a brownout as far as anyone holding
         // the board is concerned, and the remedy printed for it — check the
-        // cable and the hub — is the right one. The S3 splits the same story
-        // across two detectors and names neither of them the way the C5 does.
+        // cable and the hub — is the right one.
         #[cfg(feature = "esp32c5")]
         SocResetReason::PowerGlitch => ResetCause::Brownout,
         #[cfg(feature = "esp32s3")]
-        SocResetReason::SysClkGlitch | SocResetReason::CorePwrGlitch => ResetCause::Brownout,
+        SocResetReason::CorePwrGlitch => ResetCause::Brownout,
+        // The S3's *other* glitch detector, which is not the same story told
+        // twice: esp-hal names 0x17 "glitch on power" and 0x13 "glitch on
+        // clock", and only the first one is answered by a different cable.
+        #[cfg(feature = "esp32s3")]
+        SocResetReason::SysClkGlitch => ResetCause::ClockGlitch,
         // The only signal any of these parts gives for the hang class, and only
         // the C5 gives it. There is no working watchdog behind it to fall back
         // on, so on a C6 or an S3 the hang class is simply unreported.

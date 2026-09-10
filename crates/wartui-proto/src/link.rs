@@ -53,6 +53,12 @@ use serde::{Serialize, de::DeserializeOwned};
 /// v4 — postcard writes an enum variant as its index, so a third `Chip` is a
 /// byte an older host has no case for, and it would meet it inside the very
 /// frame that is supposed to introduce the bridge.
+///
+/// v5 also added [`ResetCause::ClockGlitch`], which arrived in the same version
+/// because the S3 is the only part that reports it and it came in with the S3.
+/// It sits between `Brownout` and `External`, so both of those move by an index
+/// — harmless only because no v5 bridge had shipped when it was added, and the
+/// reason to note it here is that the next such insertion will not be.
 pub const LINK_PROTO_VERSION: u8 = 5;
 
 /// ESP-NOW's own payload ceiling. The 212-byte wardriver frames fit inside it.
@@ -132,6 +138,19 @@ pub enum ResetCause {
     Lockup,
     /// The supply sagged. Usually a hub or a cable rather than the board.
     Brownout,
+    /// The clock-glitch detector fired.
+    ///
+    /// Reported by the S3 alone, and deliberately not folded into
+    /// [`ResetCause::Brownout`] even though both are electrical and both are
+    /// rare. The S3 has two glitch detectors and they watch different things —
+    /// `CorePwrGlitch` (0x17) the supply, which *is* a brownout by another
+    /// name, and `SysClkGlitch` (0x13) the clock. Only the first is answered by
+    /// checking the cable and the hub, which is what the host prints for a
+    /// brownout; a clock glitch sends whoever read it to swap perfectly good
+    /// cables. This is the same rule [`ResetCause::Lockup`] states from the
+    /// other side: a distinct detector must not borrow a remedy that does not
+    /// fit it.
+    ClockGlitch,
     /// A reset the firmware did not ask for and cannot attribute, which
     /// includes the one `espflash` drives over DTR/RTS.
     External,
