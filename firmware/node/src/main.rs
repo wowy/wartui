@@ -158,6 +158,28 @@ const BLE_INTERVAL_MS: u64 = NUM_SCAN_CHANNELS as u64 * CHANNEL_DWELL_MS as u64;
 /// meaningfully shortened, coarse enough not to spin the core.
 const POLL_MS: u64 = 2;
 
+/// Reset the chip, undoing first what the C5's ROM leaves behind.
+///
+/// The same funnel the bridge has, for the same reason and with the same one
+/// register in it: a C5 that takes a bare `software_reset()` does not come back
+/// until it loses power, because it boots with
+/// `PCR.RESET_EVENT_BYPASS.reset_event_bypass` set and the ROM's MSPI core
+/// reset then leaves the system bus frozen for the next boot to hang on.
+/// `firmware/bridge/src/main.rs` carries the long version, including why the
+/// fix is written out here rather than taken from `esp-hal` 1.2.
+///
+/// The exposure is quieter on this end than on that one — a node that never
+/// comes back reads as `no heartbeat`, which is also what a node out of range
+/// reads as — and quieter is exactly why it would go unexplained for longer.
+fn reboot() -> ! {
+    #[cfg(feature = "esp32c5")]
+    esp_hal::peripherals::PCR::regs()
+        .reset_event_bypass()
+        .modify(|_, w| w.reset_event_bypass().clear_bit());
+
+    esp_hal::system::software_reset()
+}
+
 /// Resets rather than hanging, for the same reason the bridge does: a node that
 /// has stopped is indistinguishable from one out of range, and a reset at least
 /// restarts the heartbeat counter, which the host reads as `rebooted` and
@@ -165,7 +187,7 @@ const POLL_MS: u64 = 2;
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
     note!("panic: {}", info);
-    esp_hal::system::software_reset()
+    reboot()
 }
 
 // There is deliberately no watchdog here either, for the reason the bridge
