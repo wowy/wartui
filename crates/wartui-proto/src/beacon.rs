@@ -196,10 +196,12 @@ impl Elements {
                 // SSID. Longer than 32 bytes is not a legal SSID; keep what
                 // fits rather than dropping the access point over it.
                 //
-                // Clamp first and trim second: a 40-byte element of zeros is
-                // cut to 32 and then found to be nothing but padding, whereas
-                // trimming first would hand the clamp an empty slice and reach
-                // the same answer by luck rather than by rule.
+                // Clamp first and trim second, which is not the same as the
+                // other way round. An element claiming forty bytes whose only
+                // non-zero byte is past the thirty-second trims to thirty-nine
+                // and then clamps to thirty-two bytes of nothing but padding —
+                // a network named after it, which is what is being fixed here.
+                // Clamped first, the same element is a hidden network.
                 0 => {
                     let take = visible_ssid(&data[..len.min(SSID_MAX)]).len();
                     self.ssid[..take].copy_from_slice(&data[..take]);

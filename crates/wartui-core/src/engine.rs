@@ -47,7 +47,7 @@ use wartui_proto::plan::{self, ChannelPool, ChannelSet, Plan, Radio};
 
 use crate::position::PositionChain;
 use crate::record::{
-    AdminOutcome, AssignmentSent, Heartbeat, NodeSeen, Observation, RawFrame, Record,
+    AdminOutcome, AssignmentSent, Heartbeat, NodeSeen, Observation, RawFrame, Record, ssid_text,
 };
 
 /// The time, in both of the forms this code needs.
@@ -466,8 +466,9 @@ pub struct TailEntry {
     pub rx_at_ms: i64,
     /// The observed BSSID.
     pub bssid: [u8; 6],
-    /// SSID, lossily decoded — this one is for human eyes, and the store keeps
-    /// the original bytes.
+    /// SSID as [`ssid_text`] renders it — this one is for human eyes, and the
+    /// store keeps the original bytes. Empty means hidden, which the view says
+    /// so, and is why the padding has to be gone before it gets here.
     pub ssid: String,
     /// The `AuthMode` token.
     pub security: String,
@@ -1529,7 +1530,7 @@ impl FleetEngine {
             node_mac: observation.node_mac,
             rx_at_ms: observation.rx_at_ms,
             bssid: observation.bssid,
-            ssid: String::from_utf8_lossy(&observation.ssid).into_owned(),
+            ssid: ssid_text(&observation.ssid),
             security: observation.security.clone(),
             channel: observation.channel,
             rssi: observation.rssi,
