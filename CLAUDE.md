@@ -265,6 +265,15 @@ Positions resolve fresh per record through `PositionChain`: GPS (`--gps`, NMEA o
   `docs/phase-3-findings.md`, along with why there is no watchdog behind the *hang* case: one was
   built, and esp-hal 1.1.2's RWDT never resets these parts — it counts, unfed, but its reset does
   not reach the CPU and `WDT_PROCPU_RESET_EN` will not be written.
+- **Every reset goes through `reboot()`, and on a C5 that funnel is the reset.** Both firmwares
+  reach `esp_hal::system::software_reset()` through one function that first clears
+  `PCR.RESET_EVENT_BYPASS.reset_event_bypass` on the C5. Call `software_reset()` directly there
+  and the board does not reboot, it stops: the ROM leaves the system bus frozen across a core
+  reset, the next boot hangs before it can read flash, and neither `wartui reset` nor `espflash
+  reset` nor a full reflash brings it back — only pulling the cable does, all four measured. The
+  worst caller is the stall detector, whose whole job is unattended recovery. It is a `#[cfg]`
+  for the C5 alone, it stays safe code, and it comes out when `esp-radio` lets the firmwares onto
+  `esp-hal` 1.2, which has it in `pre_init` (esp-rs/esp-hal#5703; our issue #16).
 - **A bridge reboot is invisible unless the host compares uptimes.** A software reset — the stall
   detector, the panic handler, `wartui reset` — does **not** re-enumerate the USB device: the
   host's file descriptor reads straight through it, measured. So the second `Ready` arrives on the
