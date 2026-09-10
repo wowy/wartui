@@ -158,6 +158,41 @@ fn a_hidden_network_still_yields_a_bssid() {
 }
 
 #[test]
+fn an_ssid_of_nothing_but_zero_bytes_is_a_hidden_network() {
+    // The other way of cloaking: the element carries the name's real length
+    // with every byte zeroed. This is the exact shape that reached a WiGLE
+    // export as eight NULs in the SSID column.
+    let ap = parse_mgmt(&beacon(&ie(0, &[0u8; 8])), -70, 11).expect("a beacon");
+    assert!(ap.ssid().is_empty());
+    assert_eq!(ap.bssid, BSSID);
+}
+
+#[test]
+fn a_zero_padded_ssid_keeps_the_name_and_loses_the_padding() {
+    let ap = parse_mgmt(&beacon(&ie(0, b"Home\0\0\0")), -70, 11).expect("a beacon");
+    assert_eq!(ap.ssid(), b"Home");
+}
+
+#[test]
+fn an_interior_zero_byte_is_not_padding_and_is_kept() {
+    // The guard against over-trimming. Nothing here knows what a NUL in the
+    // middle of a name was meant to be, so nothing here decides.
+    let ap = parse_mgmt(&beacon(&ie(0, b"a\0b")), -70, 11).expect("a beacon");
+    assert_eq!(ap.ssid(), b"a\0b");
+    // And a name ending in a byte that is not zero is untouched.
+    let ap = parse_mgmt(&beacon(&ie(0, b"plain")), -70, 11).expect("a beacon");
+    assert_eq!(ap.ssid(), b"plain");
+}
+
+#[test]
+fn an_over_long_ssid_of_zeros_is_clamped_and_then_trimmed_away() {
+    // Pins the order of the two operations. Trimming first would hand the
+    // clamp an empty slice and reach the same answer by luck.
+    let ap = parse_mgmt(&beacon(&ie(0, &[0u8; 40])), -50, 6).expect("a beacon");
+    assert!(ap.ssid().is_empty());
+}
+
+#[test]
 fn the_channel_comes_from_the_element_that_carries_it() {
     // DS Parameter Set on 2.4 GHz.
     let mut ies = ie(0, b"n");
