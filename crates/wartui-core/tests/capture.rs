@@ -53,7 +53,7 @@ async fn a_simulated_fleet_becomes_a_database_and_then_a_wigle_file() {
     assert_eq!(snapshot.nodes.len(), 3, "every simulated node should have been seen");
     assert!(snapshot.counters.observations > 0, "and should have reported something");
     assert_eq!(snapshot.counters.undecodable, 0, "the decoder agrees with the simulator");
-    assert_eq!(snapshot.counters.unparsed, 0);
+    assert_eq!(snapshot.counters.undecodable, 0);
     assert_eq!(snapshot.store.dropped, 0, "nothing should be dropped at this rate");
 
     let conn = open_readonly(&path).expect("reopening the capture");

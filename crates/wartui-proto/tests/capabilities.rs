@@ -1,92 +1,50 @@
-//! The token a node puts in every heartbeat to say what it is.
+//! What a node says it is, in every heartbeat it sends.
 //!
-//! It is the only thing separating one of ours from a stock node, because node
-//! to core is byte-identical by design. So the parser has to be strict about
-//! what counts as one of ours and forgiving about everything else: a node from
-//! a later build that has grown a feature this host never heard of is still a
-//! node, and must not be dropped out of the fleet for it.
+//! Three bytes now rather than an ASCII token in a field the vendor left empty.
+//! The magic separates one of ours from anything else, so what is left here is
+//! a version and two feature bits — and the rule that mattered most survives
+//! the change: a node from a later build announcing something this host has
+//! never heard of is still a node, and must not be dropped out of the fleet
+//! for it.
 
-use wartui_proto::air::{CAPABILITY_MAJOR, CAPABILITY_MAX, CAPABILITY_MINOR, Capabilities};
+use wartui_proto::air::{
+    CAP_FLAG_5G, CAP_FLAG_BLE, CAPABILITY_MAJOR, CAPABILITY_MINOR, Capabilities, HeartbeatMsg,
+};
 
-fn token(caps: &Capabilities) -> String {
-    let mut buf = [0u8; CAPABILITY_MAX];
-    let len = caps.write_into(&mut buf).expect("CAPABILITY_MAX is always enough");
-    String::from_utf8(buf[..len].to_vec()).expect("the token is ASCII")
+fn round_trip(caps: Capabilities) -> Capabilities {
+    let frame = HeartbeatMsg { counter: 0, capabilities: caps }.encode();
+    HeartbeatMsg::decode(&frame).expect("we just encoded it").capabilities
 }
 
 #[test]
-fn a_token_round_trips_through_the_text_field() {
+fn capabilities_round_trip_through_a_heartbeat() {
     for (ble, five) in [(false, false), (true, false), (false, true), (true, true)] {
         let caps = Capabilities::here(ble, five);
-        let text = token(&caps);
-        assert_eq!(Capabilities::parse(text.as_bytes()), Some(caps), "{text}");
+        assert_eq!(round_trip(caps), caps, "{caps}");
     }
 }
 
 #[test]
-fn the_token_reads_the_way_the_plan_wrote_it() {
-    // Written out rather than derived, because this string is a wire format:
-    // a node in the field speaks it and a host that changed its mind about the
-    // spelling would stop recognising that node.
-    assert_eq!(
-        token(&Capabilities { major: 0, minor: 1, ble: true, five_ghz: true }),
-        "wartui/0.1;ble,5g"
-    );
-    assert_eq!(
-        token(&Capabilities { major: 0, minor: 1, ble: true, five_ghz: false }),
-        "wartui/0.1;ble"
-    );
-    assert_eq!(
-        token(&Capabilities { major: 0, minor: 1, ble: false, five_ghz: true }),
-        "wartui/0.1;5g"
-    );
-    assert_eq!(
-        token(&Capabilities { major: 0, minor: 1, ble: false, five_ghz: false }),
-        "wartui/0.1"
-    );
-}
-
-#[test]
-fn a_heartbeat_from_anything_else_is_simply_not_one_of_ours() {
-    // A stock node leaves the text field empty. None of these is an error
-    // worth reporting — the host just cannot use the node.
-    for text in [
-        &b""[..],
-        b"wartui",
-        b"wartui/",
-        b"wartui/0",
-        b"wartui/x.1",
-        b"wartui/0.",
-        b"wartui/.1",
-        b"wartui/0.1.2",
-        b"wartui/999.1",
-        b"WARTUI/0.1",
-        b" wartui/0.1",
-        b"33:44:55:66:77:88,net,[WPA2_PSK],6,-40,W",
-    ] {
-        assert_eq!(Capabilities::parse(text), None, "{:?}", core::str::from_utf8(text));
-    }
+fn the_feature_bits_are_the_ones_the_plan_named() {
+    // Written out rather than derived, because these are wire values: a node in
+    // the field sets them and a host that changed its mind would misread it.
+    assert_eq!(Capabilities::here(false, false).flags(), 0);
+    assert_eq!(Capabilities::here(true, false).flags(), CAP_FLAG_BLE);
+    assert_eq!(Capabilities::here(false, true).flags(), CAP_FLAG_5G);
+    assert_eq!(Capabilities::here(true, true).flags(), 0b11);
 }
 
 #[test]
 fn a_feature_this_host_has_never_heard_of_does_not_disqualify_a_node() {
-    // The whole reason the list is a list. A node from a later build announcing
-    // something new is still a node, and dropping it would take its share of
-    // the pool out of the fleet.
-    let caps = Capabilities::parse(b"wartui/0.9;ble,lora,5g,gps").expect("still one of ours");
-    assert_eq!((caps.major, caps.minor), (0, 9));
+    // The whole reason unknown bits are ignored. A node from a later build
+    // announcing something new is still a node, and dropping it would take its
+    // share of the pool out of the fleet.
+    let caps = Capabilities::from_parts(1, 9, 0b1111_1111);
+    assert_eq!((caps.major, caps.minor), (1, 9));
     assert!(caps.ble && caps.five_ghz, "and the ones it does know still read");
 
-    let bare = Capabilities::parse(b"wartui/1.0;quantum").expect("still one of ours");
+    let bare = Capabilities::from_parts(2, 0, 0b1000_0000);
     assert!(!bare.ble && !bare.five_ghz);
-}
-
-#[test]
-fn a_malformed_feature_list_does_not_cost_the_version() {
-    // Version first, features second, so garbage after the semicolon cannot
-    // make a well-formed node unreadable.
-    let caps = Capabilities::parse(b"wartui/0.1;,,,ble,,").expect("one of ours");
-    assert_eq!((caps.major, caps.minor, caps.ble), (0, 1, true));
 }
 
 #[test]
@@ -96,13 +54,24 @@ fn this_build_announces_the_version_it_speaks() {
 }
 
 #[test]
-fn the_longest_token_fits_the_buffer_that_is_sized_for_it() {
-    let widest = Capabilities { major: 255, minor: 255, ble: true, five_ghz: true };
-    let mut buf = [0u8; CAPABILITY_MAX];
-    let len = widest.write_into(&mut buf).expect("that is what the constant is for");
-    assert_eq!(&buf[..len], b"wartui/255.255;ble,5g");
-    assert!(len <= CAPABILITY_MAX);
-
-    let mut cramped = [0u8; 8];
-    assert_eq!(widest.write_into(&mut cramped), None, "and it refuses rather than truncating");
+fn capabilities_are_shown_the_way_the_old_token_was_spelled() {
+    // The fleet table and the store column both read this. It is no longer a
+    // wire format, but an operator who has seen one fleet table should be able
+    // to read the next one.
+    assert_eq!(
+        Capabilities { major: 1, minor: 0, ble: true, five_ghz: true }.to_string(),
+        "wartui/1.0;ble,5g"
+    );
+    assert_eq!(
+        Capabilities { major: 1, minor: 0, ble: true, five_ghz: false }.to_string(),
+        "wartui/1.0;ble"
+    );
+    assert_eq!(
+        Capabilities { major: 1, minor: 0, ble: false, five_ghz: true }.to_string(),
+        "wartui/1.0;5g"
+    );
+    assert_eq!(
+        Capabilities { major: 255, minor: 255, ble: false, five_ghz: false }.to_string(),
+        "wartui/255.255"
+    );
 }

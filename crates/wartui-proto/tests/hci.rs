@@ -1,6 +1,6 @@
 //! The four commands and one event a BLE scan is made of.
 
-use wartui_proto::air::{RecordKind, Security, WARDRIVE_LINE_MAX, WardriveLine};
+use wartui_proto::air::{RecordKind, SIGHTING_MSG_MAX, Security, SightingMsg};
 use wartui_proto::hci::{RESET, SET_EVENT_MASK, adv_reports, set_scan_enable, set_scan_parameters};
 
 /// An LE Advertising Report event carrying `reports` of `(address, data, rssi)`.
@@ -124,15 +124,16 @@ fn a_report_that_claims_more_devices_than_it_carries_is_survivable() {
 }
 
 #[test]
-fn a_report_becomes_the_line_the_firmware_would_have_written() {
+fn a_report_becomes_the_frame_a_node_broadcasts() {
     let packet = event(&[(ADDR, &[], -70)]);
-    let line = adv_reports(&packet).next().expect("one report").as_line();
-    assert_eq!(line.kind, RecordKind::Ble);
-    assert_eq!(line.security, Security::Ble);
-    assert_eq!(line.channel, 0);
+    let msg = adv_reports(&packet).next().expect("one report").as_msg();
+    assert_eq!(msg.kind, RecordKind::Ble);
+    assert_eq!(msg.security, Security::Ble);
+    assert_eq!(msg.channel, 0, "BLE has no channel, and the exporter depends on the zero");
+    assert!(msg.ssid.is_empty(), "and no SSID");
 
-    let mut buf = [0u8; WARDRIVE_LINE_MAX];
-    let len = line.write_into(&mut buf).expect("fits");
-    assert_eq!(&buf[..len], b"aa:bb:cc:dd:ee:ff,,[BLE],0,-70,B");
-    assert_eq!(WardriveLine::parse(&buf[..len]).expect("valid").bssid, ADDR);
+    let mut buf = [0u8; SIGHTING_MSG_MAX];
+    let len = msg.encode_into(&mut buf).expect("fits");
+    assert_eq!(SightingMsg::decode(&buf[..len]).expect("valid"), msg);
+    assert_eq!(SightingMsg::decode(&buf[..len]).expect("valid").bssid, ADDR);
 }

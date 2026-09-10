@@ -40,7 +40,7 @@ use std::time::{Duration, Instant};
 
 use wartui_bridge::{BridgeInfo, LinkEvent};
 use wartui_proto::air::{
-    AdminMsg, Capabilities, Frame, MsgType, RecordKind, WardriveLine, is_legacy_admin, wire_version,
+    AdminMsg, Capabilities, DecodeError, Frame, RecordKind, foreign, wire_epoch,
 };
 use wartui_proto::link::{BridgeToHost, EspNowPayload, HostToBridge, Mac, SendStatus};
 use wartui_proto::plan::{self, ChannelPool, ChannelSet, Plan, Radio};
@@ -244,30 +244,19 @@ pub struct NodeState {
     pub observations: u64,
     /// Most recent link RSSI, as the bridge measured it.
     pub link_rssi: Option<i8>,
-    /// What the node said it is, from the token in its most recent heartbeat.
+    /// What the node said it is, from its most recent heartbeat.
     ///
-    /// `None` means it has never announced itself, which is what a stock node
-    /// and any wartui node built before Phase 2's token both look like. Such a
-    /// node is left out of the plan for the same reason [`Self::peer_refused`]
-    /// is: it will not adopt anything sent to it, so a share cut for it is a
-    /// share nobody scans — and unlike a peer refusal, its radio acknowledges
-    /// the frame, so nothing else anywhere would say so.
+    /// Every heartbeat carries this, so `None` means only that nothing but a
+    /// sighting has been heard from this address yet — a node reports what it
+    /// found on a channel before it gets back to the control channel to
+    /// heartbeat. Such a node is left out of the plan for the same reason
+    /// [`Self::peer_refused`] is: nothing yet says which band its radio
+    /// reaches, and a share of 5 GHz cut for a C6 is a share nobody scans.
     ///
     /// Taken from every heartbeat rather than remembered from the first, so a
-    /// node reflashed with something else stops claiming to be one of ours.
-    ///
-    /// There is no hysteresis on that, and one heartbeat whose text does not
-    /// parse therefore drops the node out of `plan_members` — which re-cuts the
-    /// whole fleet, since every node's `node_index`/`node_count` moves with the
-    /// membership, and the next good heartbeat re-cuts it back. Liveness is
-    /// aged over a timeout for exactly this reason; identity is not. Left as it
-    /// is because both the USB link and ESP-NOW carry their own checksums, so a
-    /// heartbeat that arrives with a mangled token is close to unreachable —
-    /// but if one is ever seen, this is the thing to fix.
+    /// node reflashed with a different build stops claiming the old one's
+    /// features.
     pub capabilities: Option<Capabilities>,
-    /// The node sent a core-protocol frame, which only an encrypted node does.
-    /// wartui cannot talk to it until encryption is turned off in its web UI.
-    pub encrypted: bool,
     /// The bridge's peer table had no room for this node.
     ///
     /// It cannot be transmitted to at all until a slot frees up, so it is no
@@ -340,7 +329,6 @@ impl NodeState {
             heartbeats: 0,
             observations: 0,
             link_rssi: None,
-            encrypted: false,
             capabilities: None,
             peer_refused: false,
             desired: None,
@@ -405,18 +393,25 @@ pub struct Counters {
     pub observations: u64,
     /// Frames that parsed as heartbeats.
     pub heartbeats: u64,
-    /// Frames whose ENOW header would not decode at all.
+    /// Frames that were not ours and were not the vendor's either.
     pub undecodable: u64,
-    /// Text frames whose body was not a valid wardrive line. A node emitting
-    /// these is broken in a way silence would not distinguish.
-    pub unparsed: u64,
-    /// Core-protocol frames, which only an encrypted node sends.
-    pub core_frames: u64,
-    /// Assignments seen on the air that this host did not send — a vendor core
-    /// is powered up and fighting us for the fleet.
+    /// Frames of ours from a build speaking a wire version this one does not.
+    /// A half-flashed fleet looks like this and nothing else would say so.
+    pub incompatible: u64,
+    /// Vendor heartbeats and observations: another fleet is on this channel,
+    /// transmitting where these nodes are listening.
+    pub foreign_fleet: u64,
+    /// Assignments seen on the air that this host did not send — another core
+    /// is powered up and driving a fleet nearby.
     pub foreign_admin: u64,
     /// USB frames that failed their checksum.
     pub garbled: u64,
+    /// Admin windows this host declined to transmit into because the
+    /// heartbeat that opened them was replayed out of the bridge's backlog
+    /// rather than heard live. Ordinary on a fresh connection to a bridge that
+    /// has been powered beside a fleet; a number that keeps climbing during a
+    /// capture means the host is not keeping up with the link.
+    pub admin_windows_missed: u64,
     /// Assignments this host has put on the air.
     pub admin_sent: u64,
     /// Assignments a node's radio acknowledged.
@@ -504,10 +499,10 @@ pub struct Snapshot {
     /// How many are heartbeating inside the topology timeout.
     ///
     /// Deliberately not the same number as [`Self::assignable`]. A fleet can be
-    /// entirely alive and entirely undrivable — three stock nodes heartbeat
-    /// exactly like ours — and one count for both made that case unsayable:
-    /// the header would report nothing heartbeating while the table showed
-    /// three nodes doing it.
+    /// entirely alive and entirely undrivable — a fleet that has outgrown the
+    /// bridge's twenty peer slots is heartbeating and unreachable — and one
+    /// count for both made that case unsayable: the header would report nothing
+    /// heartbeating while the table showed every node doing it.
     pub alive: usize,
     /// How many of those can actually be given an assignment.
     ///
@@ -600,7 +595,21 @@ pub struct FleetEngine {
     /// plan is a function of who is present, and this is an operator's choice
     /// that survives re-partitioning.
     ble_node: Option<Mac>,
+    /// The previous frame's bridge stamp and the host instant it was handled
+    /// on, which together say whether this host is reading the link in real
+    /// time or working through a backlog. See [`FleetEngine::note_arrival`].
+    last_arrival: Option<(u32, Instant)>,
+    /// How far behind the air this host currently is, in microseconds.
+    ///
+    /// Zero whenever the link is being read live, which is almost always. It
+    /// climbs only while frames are arriving faster than wall-clock time can
+    /// account for, which is what a buffered backlog looks like from here.
+    backlog_lag_us: u64,
 }
+
+/// A lag large enough that [`FleetEngine::air_is_live`] says no, used as the
+/// starting assumption on a connection whose backlog has not been seen yet.
+const BEHIND_THE_AIR: u64 = plan::ADMIN_WAIT_MS as u64 * 1_000;
 
 /// One assignment in flight.
 #[derive(Debug, Clone, Copy)]
@@ -639,6 +648,8 @@ impl FleetEngine {
             plan: None,
             plan_members: Vec::new(),
             ble_node: None,
+            last_arrival: None,
+            backlog_lag_us: 0,
             config,
         }
     }
@@ -659,6 +670,14 @@ impl FleetEngine {
                 self.bridge = Some(info);
                 self.link_up = true;
                 self.link_error = None;
+                // Whatever the bridge has been holding arrives now, so this
+                // host is behind the air until a frame turns up that it had to
+                // wait for. Starting pessimistic costs at most one admin
+                // window on a quiet fleet — the next heartbeat is a second
+                // away — and is what keeps the first frame of a long backlog
+                // from being the one stale window this cannot recognise.
+                self.last_arrival = None;
+                self.backlog_lag_us = BEHIND_THE_AIR;
                 // Its peer table starts empty, whether this is a new bridge or
                 // the same one rebooted, so a node it had no room for before
                 // may fit now.
@@ -677,6 +696,8 @@ impl FleetEngine {
             Event::Link(LinkEvent::Disconnected { reason }) => {
                 self.link_up = false;
                 self.link_error = Some(reason);
+                self.last_arrival = None;
+                self.backlog_lag_us = BEHIND_THE_AIR;
             }
             Event::Link(LinkEvent::Garbled(_)) => self.counters.garbled += 1,
             Event::Link(LinkEvent::Message(msg)) => self.on_message(&msg, now, &mut batch),
@@ -741,6 +762,7 @@ impl FleetEngine {
     fn on_message(&mut self, msg: &BridgeToHost, now: Now, batch: &mut ActionBatch) {
         match msg {
             BridgeToHost::Rx { src, dst, rssi, channel, rx_us, payload } => {
+                self.note_arrival(*rx_us, now);
                 self.on_rx(*src, *dst, *rssi, *channel, *rx_us, payload, now, batch);
             }
             BridgeToHost::SendResult { id, status, tx_us } => {
@@ -798,54 +820,49 @@ impl FleetEngine {
             }));
         }
 
-        let Ok(frame) = Frame::decode(payload) else {
-            // A stock core in the same room still assigns in the vendor's
-            // ten-byte shape, which stopped decoding in Phase 2. It is the one
-            // undecodable frame with an operational meaning — someone else is
-            // telling this fleet what to scan — so it is counted where an
+        let frame = match Frame::decode(payload) {
+            Ok(frame) => frame,
+            // Not ours at all. A vendor fleet on this channel is the one
+            // undecodable thing with an operational meaning — it is
+            // transmitting where these nodes are listening, and on a stock
+            // fleet every scan is an active one — so it is counted where an
             // operator will look for it rather than as line noise.
-            if is_legacy_admin(payload) {
-                self.counters.foreign_admin += 1;
-            } else {
-                self.counters.undecodable += 1;
+            Err(DecodeError::BadMagic) => {
+                match foreign::classify(payload) {
+                    Some(foreign::Foreign::Admin) => self.counters.foreign_admin += 1,
+                    Some(foreign::Foreign::Node) => self.counters.foreign_fleet += 1,
+                    None => self.counters.undecodable += 1,
+                }
+                return;
             }
-            return;
+            // Ours, from a build this one cannot read. Named rather than
+            // guessed at, and named rather than silently dropped: a fleet
+            // half-way through a reflash looks exactly like this, and the
+            // header carries a version so that it can say so.
+            Err(DecodeError::BadVersion(_)) => {
+                self.counters.incompatible += 1;
+                return;
+            }
+            Err(_) => {
+                self.counters.undecodable += 1;
+                return;
+            }
         };
 
         // Decode before admitting anyone to the fleet. Channel 6 carries
         // whatever else is nearby, and a sender whose frames are not ours is
-        // not a node: a vendor core assigning our nodes channels would
-        // otherwise sit in the table forever as `no heartbeat`, inflate the
-        // "n of m alive" denominator, and leave a `node` row outliving the
-        // session it was seen in.
-        let text = match frame {
+        // not a node: another core assigning channels would otherwise sit in
+        // the table forever as `no heartbeat`, inflate the "n of m alive"
+        // denominator, and leave a `node` row outliving the session it was
+        // seen in.
+        match frame {
             Frame::Admin(_) => {
                 // Nothing to do about it from here, but an operator chasing a
                 // fleet that keeps changing its mind needs to know.
                 self.counters.foreign_admin += 1;
-                return;
             }
-            Frame::Text(text) => text,
-        };
-
-        let node = self.nodes.entry(src).or_insert_with(|| NodeState::new(src, now));
-        node.last_seen = now.mono;
-        node.last_seen_ms = now.unix_ms;
-        node.link_rssi = Some(rssi);
-        batch.records.push(Record::Node(NodeSeen {
-            mac: src,
-            first_seen_ms: node.first_seen_ms,
-            last_seen_ms: now.unix_ms,
-            // Only a heartbeat carries one, and only a well-formed one is worth
-            // keeping: an observation's text field is a wardrive line, and
-            // storing that here would file a network as a node's identity.
-            capabilities: (text.msg_type == MsgType::Heartbeat
-                && Capabilities::parse(text.text).is_some())
-            .then(|| String::from_utf8_lossy(text.text).into_owned()),
-        }));
-
-        match text.msg_type {
-            MsgType::Heartbeat => {
+            Frame::Heartbeat(heartbeat) => {
+                self.see_node(src, now, rssi, Some(heartbeat.capabilities), batch);
                 self.counters.heartbeats += 1;
                 let node = self.nodes.entry(src).or_insert_with(|| NodeState::new(src, now));
                 // Divergence 5: the counter runs from the node's boot, so a
@@ -853,25 +870,25 @@ impl FleetEngine {
                 // forgotten whatever range it was assigned. The vendor core
                 // has no equivalent check and simply carries on believing
                 // its own assignment table.
-                let rebooted = node.counter.is_some_and(|previous| text.counter < previous);
+                let rebooted = node.counter.is_some_and(|previous| heartbeat.counter < previous);
                 if rebooted {
                     node.reboots += 1;
                     // It has forgotten whatever range it held, and its own
-                    // version field went back to its boot value with it. So
-                    // the belief goes, and the assignment is re-issued under a
+                    // epoch field went back to its boot value with it. So the
+                    // belief goes, and the assignment is re-issued under a
                     // fresh epoch rather than one the node might now match.
                     node.confirmed = None;
                 }
-                node.capabilities = Capabilities::parse(text.text);
+                node.capabilities = Some(heartbeat.capabilities);
                 node.note_beat_gap(now);
-                node.counter = Some(text.counter);
+                node.counter = Some(heartbeat.counter);
                 node.last_heartbeat = Some(now.mono);
                 node.last_heartbeat_rx_us = Some(rx_us);
                 node.heartbeats += 1;
                 batch.records.push(Record::Heartbeat(Heartbeat {
                     node_mac: src,
                     rx_at_ms: now.unix_ms,
-                    counter: text.counter,
+                    counter: heartbeat.counter,
                     link_rssi: Some(rssi),
                 }));
 
@@ -886,21 +903,27 @@ impl FleetEngine {
                 self.replan(now);
                 // The node is holding its admin window open for the next
                 // 300 ms and its radio will be gone after that, so this is
-                // the only moment in the sweep worth transmitting in.
-                self.send_admin(src, now, batch);
+                // the only moment in the sweep worth transmitting in — as
+                // long as this heartbeat is news. Replayed out of the
+                // bridge's backlog it is a window that shut minutes ago, and
+                // the node it names is off sweeping a channel that cannot
+                // hear us. The next live heartbeat is along in about a
+                // second and opens a real one.
+                if self.air_is_live() {
+                    self.send_admin(src, now, batch);
+                } else {
+                    self.counters.admin_windows_missed += 1;
+                }
             }
-            MsgType::Text => {
-                let Ok(line) = WardriveLine::parse(text.text) else {
-                    self.counters.unparsed += 1;
-                    return;
-                };
+            Frame::Sighting(sighting) => {
+                self.see_node(src, now, rssi, None, batch);
                 self.counters.observations += 1;
-                match line.kind {
+                match sighting.kind {
                     RecordKind::Wifi => {
-                        self.unique_wifi.insert(line.bssid);
+                        self.unique_wifi.insert(sighting.bssid);
                     }
                     RecordKind::Ble => {
-                        self.unique_ble.insert(line.bssid);
+                        self.unique_ble.insert(sighting.bssid);
                     }
                 }
                 if let Some(node) = self.nodes.get_mut(&src) {
@@ -910,33 +933,46 @@ impl FleetEngine {
                     node_mac: src,
                     rx_at_ms: now.unix_ms,
                     link_rssi: Some(rssi),
-                    bssid: line.bssid,
-                    ssid: line.ssid.to_vec(),
-                    security: String::from_utf8_lossy(line.security.as_bytes()).into_owned(),
-                    channel: line.channel,
-                    rssi: line.rssi,
-                    kind: line.kind,
+                    bssid: sighting.bssid,
+                    ssid: sighting.ssid.to_vec(),
+                    security: sighting.security.to_string(),
+                    channel: u16::from(sighting.channel),
+                    rssi: i16::from(sighting.rssi),
+                    kind: sighting.kind,
                     fix: self.config.position.resolve(now.unix_ms),
-                    raw_text: text.text.to_vec(),
+                    raw_body: payload.to_vec(),
                 };
                 self.push_tail(&observation);
                 batch.records.push(Record::Observation(observation));
             }
-            MsgType::CoreRequest | MsgType::CoreReply => {
-                // Only an encrypted node ever sends these, and wartui does
-                // not speak encrypted ESP-NOW. Marking the node is what
-                // lets the UI say which one to go and reconfigure instead
-                // of leaving the operator with an unexplained silence.
-                self.counters.core_frames += 1;
-                if let Some(node) = self.nodes.get_mut(&src) {
-                    node.encrypted = true;
-                }
-            }
-            // Unreachable: `Frame::decode` routes this type byte to
-            // `AdminMsg`, which is handled above. Counted rather than ignored
-            // so a future change to that dispatch cannot lose frames silently.
-            MsgType::Admin => self.counters.foreign_admin += 1,
         }
+    }
+
+    /// Refresh what is known about the node at `src`, and file the row that
+    /// says it was here.
+    ///
+    /// Split out because a heartbeat and a sighting both prove a node exists
+    /// but only one of them says what it is: an observation's payload is a
+    /// network, and filing that as a node's identity would name a node after
+    /// something it merely heard.
+    fn see_node(
+        &mut self,
+        src: Mac,
+        now: Now,
+        rssi: i8,
+        capabilities: Option<Capabilities>,
+        batch: &mut ActionBatch,
+    ) {
+        let node = self.nodes.entry(src).or_insert_with(|| NodeState::new(src, now));
+        node.last_seen = now.mono;
+        node.last_seen_ms = now.unix_ms;
+        node.link_rssi = Some(rssi);
+        batch.records.push(Record::Node(NodeSeen {
+            mac: src,
+            first_seen_ms: node.first_seen_ms,
+            last_seen_ms: now.unix_ms,
+            capabilities: capabilities.map(|caps| caps.to_string()),
+        }));
     }
 
     /// Take an operator's instruction. Nothing goes out from here.
@@ -1133,14 +1169,10 @@ impl FleetEngine {
         let members: Vec<(Mac, Radio)> = self
             .nodes
             .values()
-            // An encrypted node cannot be reached at all, and its heartbeats
-            // are not even decodable from here — so it can never be alive. The
-            // clause is here because a node that is silently planned around is
-            // a worse failure than one that is explicitly left out.
-            //
-            // The radio comes out of the same token `is_assignable` insisted
-            // on, taken here rather than defaulted, so there is no path by
-            // which a node reaches the planner with a band it did not claim.
+            // The radio comes out of the same capabilities `is_assignable`
+            // insisted on, taken here rather than defaulted, so there is no
+            // path by which a node reaches the planner with a band it did not
+            // claim.
             .filter_map(|node| {
                 node.capabilities
                     .filter(|_| self.is_assignable(node, now))
@@ -1233,6 +1265,53 @@ impl FleetEngine {
         self.last_counter = counter;
     }
 
+    /// Track whether this host is reading the link in real time.
+    ///
+    /// The bridge buffers what it hears while nothing is attached — its outbox
+    /// rings are the whole reason a frame is not lost the moment the host is
+    /// slow — so the first thing a fresh connection receives is a ring's worth
+    /// of the recent past, delivered as fast as USB will carry it. Measured on
+    /// this bench: twenty-five frames spanning eight and a half minutes of
+    /// bridge time arrived inside seventeen milliseconds of host time, the
+    /// oldest of them 532 seconds stale.
+    ///
+    /// Nothing in a frame says how old it is. But the bridge stamps every one
+    /// with its own clock, and the two clocks tick at the same rate, so the
+    /// comparison is available for free: while the link is being read live the
+    /// bridge's stamps advance in step with the host's own, and while a
+    /// backlog is draining they run far ahead of it. The gap between the two
+    /// accumulates into [`Self::backlog_lag_us`], and resets the moment the
+    /// host spends longer waiting for a frame than the bridge spent producing
+    /// one — which can only happen when there is nothing queued.
+    ///
+    /// This is deliberately an estimate rather than a clock synchronisation.
+    /// It has one job: to keep [`Self::send_admin`] from mistaking the past
+    /// for the present.
+    fn note_arrival(&mut self, rx_us: u32, now: Now) {
+        if let Some((last_rx_us, last_mono)) = self.last_arrival {
+            let bridge_delta = u64::from(rx_us.wrapping_sub(last_rx_us));
+            let host_delta = now.mono.saturating_duration_since(last_mono).as_micros() as u64;
+            if host_delta >= bridge_delta {
+                // The host out-waited the air, so there is nothing queued
+                // behind this frame and it is as current as a frame can be.
+                self.backlog_lag_us = 0;
+            } else {
+                self.backlog_lag_us = self.backlog_lag_us.saturating_add(bridge_delta - host_delta);
+            }
+        }
+        self.last_arrival = Some((rx_us, now.mono));
+    }
+
+    /// Whether a frame being handled now is recent enough to act on.
+    ///
+    /// Only assignments care. A stale heartbeat is still a heartbeat — it says
+    /// the node was alive and what its radio is, and both remain true — but
+    /// the 300 ms window it opened closed long ago, so transmitting into it is
+    /// a frame on the control channel that nothing is listening for.
+    fn air_is_live(&self) -> bool {
+        self.backlog_lag_us < BEHIND_THE_AIR
+    }
+
     /// Put a dirty node's assignment on the air, if it has one.
     ///
     /// Only ever called straight off a heartbeat: that is the one moment the
@@ -1250,7 +1329,7 @@ impl FleetEngine {
         let heartbeat_rx_us = node.last_heartbeat_rx_us;
 
         let msg = AdminMsg {
-            assignment_version: wire_version(assignment.counter),
+            epoch: wire_epoch(assignment.counter),
             node_index: assignment.node_index,
             node_count: assignment.node_count,
             flags: AdminMsg::flags_for(assignment.ble),
@@ -1330,7 +1409,21 @@ impl FleetEngine {
 
         // Both stamps are the bridge's own microsecond clock, which wraps
         // about every 71 minutes; a wrapping subtraction is correct across it.
-        let latency_us = pending.heartbeat_rx_us.map(|rx_us| tx_us.wrapping_sub(rx_us));
+        //
+        // The column means one specific thing — how long the assignment took
+        // to land inside the window a heartbeat opened — so a figure larger
+        // than the window is not that measurement and is not written down as
+        // though it were. It happens when the heartbeat was replayed out of a
+        // backlog, where the difference is real arithmetic on two honest
+        // stamps and still says nothing about how quickly the bridge answered:
+        // this bench recorded 80 seconds that way. `air_is_live` now stops
+        // most of those from being sent at all, and this stops any that get
+        // through from being recorded as a latency. `None` is the truthful
+        // answer, and the outcome is recorded either way.
+        let latency_us = pending
+            .heartbeat_rx_us
+            .map(|rx_us| tx_us.wrapping_sub(rx_us))
+            .filter(|us| *us <= plan::ADMIN_WAIT_MS * 1_000);
 
         self.resolve(&pending, outcome, latency_us, now, batch);
     }
@@ -1401,7 +1494,7 @@ impl FleetEngine {
         batch.records.push(Record::Assignment(AssignmentSent {
             node_mac: pending.mac,
             counter: pending.assignment.counter,
-            wire_version: wire_version(pending.assignment.counter),
+            wire_version: wire_epoch(pending.assignment.counter),
             node_index: pending.assignment.node_index,
             node_count: pending.assignment.node_count,
             channels: pending.assignment.channels,
@@ -1444,23 +1537,18 @@ impl FleetEngine {
 
     /// Whether a node can be given channels at all.
     ///
-    /// Alive is necessary and not sufficient. Three kinds of node heartbeat
-    /// perfectly well and will still never scan what they are sent: one whose
-    /// firmware is not ours and cannot decode the frame, one the bridge has no
-    /// peer slot for, and an encrypted one this host cannot address in
-    /// plaintext. Each of them acknowledges nothing useful, or worse
-    /// acknowledges at the MAC layer while the application discards the bytes,
-    /// so the only place the distinction can be made is here.
+    /// Alive is necessary and not sufficient. Two kinds of node heartbeat
+    /// perfectly well and will still never scan what they are sent: one the
+    /// bridge has no peer slot for, and one this host has not yet heard
+    /// declare which band its radio reaches. Neither acknowledges anything
+    /// useful, so the only place the distinction can be made is here.
     ///
-    /// A share cut for any of them is a share nobody scans, which is worse than
+    /// A share cut for either is a share nobody scans, which is worse than
     /// having one node fewer: the fleet covers less of the pool than it would
     /// have without the node present at all.
     #[must_use]
     pub fn is_assignable(&self, node: &NodeState, now: Now) -> bool {
-        self.is_alive(node, now)
-            && node.capabilities.is_some()
-            && !node.encrypted
-            && !node.peer_refused
+        self.is_alive(node, now) && node.capabilities.is_some() && !node.peer_refused
     }
 
     /// Build the view the UI renders.

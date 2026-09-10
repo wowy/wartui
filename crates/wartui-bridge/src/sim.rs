@@ -24,7 +24,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
-use wartui_proto::air::{AdminMsg, CAPABILITY_MAX, Capabilities, Frame, MsgType, TextMsg};
+use wartui_proto::air::{
+    AdminMsg, Capabilities, Frame, HeartbeatMsg, RecordKind, SIGHTING_MSG_MAX, Security,
+    SightingMsg,
+};
 use wartui_proto::link::{
     BROADCAST, BridgeToHost, Chip, EspNowPayload, HostToBridge, LogLevel, LogStr, LoopPhase, Mac,
     ResetCause, SendStatus,
@@ -298,9 +301,9 @@ async fn deliver(
 #[derive(Debug)]
 struct SimNode {
     mac: Mac,
-    /// `assignment_version` starts at 0 on a fresh node (`src/WiFiOps.cpp:81`),
-    /// so the first ADMIN of any version always takes.
-    assignment_version: u8,
+    /// The epoch starts at 0 on a fresh node, so the first assignment of any
+    /// epoch always takes.
+    epoch: u8,
     node_index: u8,
     node_count: u8,
     channels: ChannelSet,
@@ -320,7 +323,7 @@ impl SimNode {
         Self {
             mac: SimTransport::node_mac(index),
             five_ghz,
-            assignment_version: 0,
+            epoch: 0,
             node_index: 0,
             node_count: 1,
             // Nothing until it is told. The vendor default is all forty
@@ -338,16 +341,16 @@ impl SimNode {
 
     /// Whether the node has been told what to scan.
     const fn assigned(&self) -> bool {
-        self.assignment_version != 0
+        self.epoch != 0
     }
 
-    /// Apply an assignment, but only when its version differs — the same `!=`
-    /// comparison the firmware makes at `src/WiFiOps.cpp:1198`.
+    /// Apply an assignment, but only when its epoch differs — the same `!=`
+    /// comparison the node firmware makes.
     fn apply(&mut self, admin: AdminMsg) {
-        if admin.assignment_version == self.assignment_version {
+        if admin.epoch == self.epoch {
             return;
         }
-        self.assignment_version = admin.assignment_version;
+        self.epoch = admin.epoch;
         self.node_index = admin.node_index;
         self.node_count = admin.node_count;
         self.channels = admin.channels;
@@ -415,7 +418,7 @@ async fn run_node(
             let channel = SCAN_CHANNELS[usize::from(idx)];
             for net in world.on_channel(channel) {
                 if node.first_sighting(net.bssid)
-                    && emit(&events, &node, &net.line(), started).await.is_err()
+                    && emit(&events, &node, net, started).await.is_err()
                 {
                     return;
                 }
@@ -426,7 +429,7 @@ async fn run_node(
             if node.scanning_ble() && node.rng.next_f64() < world.ble_chance {
                 let ble = world.ble_sighting(&mut node.rng);
                 if node.first_sighting(ble.bssid)
-                    && emit(&events, &node, &ble.line(), started).await.is_err()
+                    && emit(&events, &node, &ble, started).await.is_err()
                 {
                     return;
                 }
@@ -460,18 +463,16 @@ async fn beat(
     started: Instant,
 ) -> Result<(), ()> {
     node.hb_counter = node.hb_counter.wrapping_add(1);
-    // The token is what tells the host this is a node it can drive, so a
-    // simulated fleet that left it out would be a fleet the planner ignores.
+    // Capabilities are what tell the host this is a node it can drive, so a
+    // simulated fleet that left them out would be a fleet the planner ignores.
     // Bluetooth is always claimed — the simulator has no chip and models a node
     // built with everything — but the band is not, because a fleet where every
     // node reaches 5 GHz is a fleet where the planner never has to leave one
     // out of a channel, which is the half of it worth being able to see.
-    let mut token = [0u8; CAPABILITY_MAX];
-    let len = Capabilities::here(true, node.five_ghz)
-        .write_into(&mut token)
-        .expect("CAPABILITY_MAX is sized for this");
-    let msg = TextMsg::new(MsgType::Heartbeat, node.hb_counter, &token[..len])
-        .expect("a heartbeat payload this short always fits");
+    let msg = HeartbeatMsg {
+        counter: node.hb_counter,
+        capabilities: Capabilities::here(true, node.five_ghz),
+    };
     send_frame(events, node.mac, &msg.encode(), started).await
 }
 
@@ -499,12 +500,15 @@ async fn nap(
 async fn emit(
     events: &mpsc::Sender<LinkEvent>,
     node: &SimNode,
-    line: &str,
+    network: &Network,
     started: Instant,
 ) -> Result<(), ()> {
-    let msg = TextMsg::new(MsgType::Text, 0, line.as_bytes())
-        .expect("generated lines are well under the payload limit");
-    send_frame(events, node.mac, &msg.encode(), started).await
+    let mut frame = [0u8; SIGHTING_MSG_MAX];
+    let len = network
+        .as_msg()
+        .encode_into(&mut frame)
+        .expect("SIGHTING_MSG_MAX is sized for the longest SSID there is");
+    send_frame(events, node.mac, &frame[..len], started).await
 }
 
 async fn send_frame(
@@ -557,8 +561,13 @@ struct World {
 impl World {
     fn new(config: &SimConfig) -> Self {
         let mut rng = Xorshift::new(config.seed);
-        let securities =
-            ["[OPEN]", "[WPA2_PSK]", "[WPA_WPA2_PSK]", "[WPA3_PSK]", "[WPA2_WPA3_PSK]"];
+        let securities = [
+            Security::Open,
+            Security::Wpa2Psk,
+            Security::WpaWpa2Psk,
+            Security::Wpa3Psk,
+            Security::Wpa2Wpa3Psk,
+        ];
         let networks = (0..config.wifi_networks)
             .map(|i| {
                 let channel = SCAN_CHANNELS[rng.below(NUM_SCAN_CHANNELS.into())];
@@ -567,7 +576,7 @@ impl World {
                     ssid: format!("net-{i:03}"),
                     security: securities[rng.below(securities.len())],
                     channel,
-                    rssi: -30 - i16::try_from(rng.below(60)).unwrap_or(0),
+                    rssi: -30 - i8::try_from(rng.below(60)).unwrap_or(0),
                 }
             })
             .collect();
@@ -584,9 +593,9 @@ impl World {
         Network {
             bssid: rng.mac(),
             ssid: String::new(),
-            security: "[BLE]",
+            security: Security::Ble,
             channel: 0,
-            rssi: -40 - i16::try_from(rng.below(50)).unwrap_or(0),
+            rssi: -40 - i8::try_from(rng.below(50)).unwrap_or(0),
         }
     }
 }
@@ -595,23 +604,22 @@ impl World {
 struct Network {
     bssid: Mac,
     ssid: String,
-    security: &'static str,
+    security: Security,
     channel: u8,
-    rssi: i16,
+    rssi: i8,
 }
 
 impl Network {
-    /// The six-field payload a node transmits (`src/WiFiOps.cpp:1777`, `:144`).
-    /// Wi-Fi MACs are uppercase and BLE lowercase, matching the two code paths.
-    fn line(&self) -> String {
-        let b = self.bssid;
-        let kind = if self.channel == 0 { 'B' } else { 'W' };
-        let mac = if kind == 'B' {
-            format!("{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}", b[0], b[1], b[2], b[3], b[4], b[5])
-        } else {
-            format!("{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}", b[0], b[1], b[2], b[3], b[4], b[5])
-        };
-        format!("{mac},{},{},{},{},{kind}", self.ssid, self.security, self.channel, self.rssi)
+    /// The observation a node would broadcast about it.
+    fn as_msg(&self) -> SightingMsg<'_> {
+        SightingMsg {
+            kind: if self.channel == 0 { RecordKind::Ble } else { RecordKind::Wifi },
+            bssid: self.bssid,
+            channel: self.channel,
+            rssi: self.rssi,
+            security: self.security,
+            ssid: self.ssid.as_bytes(),
+        }
     }
 }
 

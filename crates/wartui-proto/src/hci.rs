@@ -18,7 +18,7 @@
 //! `HCI_LE_Set_Scan_Parameters` in §7.8.10, `HCI_LE_Set_Scan_Enable` in §7.8.11
 //! and the LE Advertising Report in §7.7.65.2.
 
-use crate::air::{RecordKind, Security, WardriveLine};
+use crate::air::{RecordKind, Security, SightingMsg};
 
 /// Largest HCI packet, so a read buffer can never be short.
 ///
@@ -113,18 +113,17 @@ pub struct AdvReport {
 impl AdvReport {
     /// The observation in the shape the wire carries.
     ///
-    /// BLE records have no SSID and no channel; the firmware writes an empty
-    /// field and a literal zero (`src/WiFiOps.cpp:144`), and the exporter
-    /// depends on both.
+    /// BLE records have no SSID and no channel, and the exporter depends on
+    /// both being empty and zero rather than absent.
     #[must_use]
-    pub const fn as_line(&self) -> WardriveLine<'static> {
-        WardriveLine {
-            bssid: self.address,
-            ssid: b"",
-            security: Security::Ble,
-            channel: 0,
-            rssi: self.rssi as i16,
+    pub const fn as_msg(&self) -> SightingMsg<'static> {
+        SightingMsg {
             kind: RecordKind::Ble,
+            bssid: self.address,
+            channel: 0,
+            rssi: self.rssi,
+            security: Security::Ble,
+            ssid: b"",
         }
     }
 

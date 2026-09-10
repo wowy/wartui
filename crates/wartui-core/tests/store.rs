@@ -45,7 +45,7 @@ fn observation(node: Mac, bssid: [u8; 6], rssi: i16, at_ms: i64, fix: Fix) -> Re
         rssi,
         kind: RecordKind::Wifi,
         fix,
-        raw_text: b"raw".to_vec(),
+        raw_body: b"raw".to_vec(),
     })
 }
 
@@ -376,7 +376,7 @@ fn assignment(counter: u64, outcome: AdminOutcome, latency_us: Option<u32>) -> R
     Record::Assignment(AssignmentSent {
         node_mac: NODE,
         counter,
-        wire_version: wartui_proto::air::wire_version(counter),
+        wire_version: wartui_proto::air::wire_epoch(counter),
         node_index: 0,
         node_count: 2,
         channels: wartui_proto::plan::ChannelSet::from_run(wartui_proto::plan::IndexRun::new(5, 5)),

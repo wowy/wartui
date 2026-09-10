@@ -46,7 +46,14 @@ use crate::record::Record;
 /// v3 replaced `assignment.start_idx`/`end_idx` with a `channels` bitmask and
 /// added `ble`, because an assignment stopped being a contiguous range. A v2
 /// row's bounds convert into a mask exactly, so the migration is lossless.
-pub const SCHEMA_VERSION: i32 = 4;
+///
+/// v5 renamed `observation.raw_text` to `raw_body`, because the frame it keeps
+/// stopped being text. Older rows hold the comma-separated line a node used to
+/// broadcast and newer ones hold the binary frame; both are the observation
+/// exactly as it arrived, which is all the column ever promised, and the new
+/// frames carry a version byte in their first six so a file spanning the change
+/// is still readable row by row.
+pub const SCHEMA_VERSION: i32 = 5;
 
 /// The schema, applied to any database that does not already have it.
 const SCHEMA: &str = r"
@@ -62,10 +69,11 @@ CREATE TABLE IF NOT EXISTS session (
   notes TEXT
 );
 
--- `capabilities` is the token from the node's most recent heartbeat, verbatim.
--- Null means it never sent one, which is what a stock node and any wartui node
--- built before Phase 2 both look like — and is why such a node has heartbeats
--- here and no assignment rows at all.
+-- `capabilities` is what the node's most recent heartbeat said it is, rendered
+-- the way the fleet table shows it (`wartui/1.0;ble,5g`). Null means nothing but
+-- an observation has been heard from that address yet — a node reports what it
+-- found on a channel before it gets back to the control channel to heartbeat —
+-- and is why such a row can exist with no assignment rows against it.
 CREATE TABLE IF NOT EXISTS node (
   mac BLOB PRIMARY KEY,
   label TEXT,
@@ -87,7 +95,7 @@ CREATE TABLE IF NOT EXISTS heartbeat (
   admin_latency_us INTEGER
 );
 
--- One row per transmitted MSG_ADMIN, written when its outcome is known, so
+-- One row per transmitted assignment, written when its outcome is known, so
 -- the table is append-only and a retry is a second row rather than an update.
 -- `counter` is the persisted monotonic epoch and `wire_version` the byte that
 -- actually went out; they differ because the wire field is one byte wide.
@@ -130,7 +138,7 @@ CREATE TABLE IF NOT EXISTS observation (
   lat REAL, lon REAL, alt REAL, accuracy REAL,
   pos_source TEXT NOT NULL,
   pos_at INTEGER,
-  raw_text BLOB
+  raw_body BLOB
 );
 -- Deliberately no unique constraint on bssid: every sighting is kept, with the
 -- node that made it and the signal it saw. Deduplication is an export-time
@@ -445,6 +453,20 @@ fn migrate(conn: &Connection, found: i32) -> Result<(), StoreError> {
              ALTER TABLE node ADD COLUMN pinned_channels INTEGER;",
         )?;
     }
+
+    // v5. The column keeps the observation exactly as it arrived, and what
+    // arrives stopped being text: an older file's rows hold a comma-separated
+    // line and a newer file's hold the frame. Renamed rather than dropped
+    // because the old rows are still the truest record of what those nodes
+    // sent, and renamed rather than left alone because a column called
+    // `raw_text` holding binary is the kind of thing that gets read wrong once
+    // and quietly.
+    if (1..=4).contains(&found)
+        && has_table(conn, "observation")?
+        && has_column(conn, "observation", "raw_text")?
+    {
+        conn.execute_batch("ALTER TABLE observation RENAME COLUMN raw_text TO raw_body")?;
+    }
     Ok(())
 }
 
@@ -654,7 +676,7 @@ fn write_batch(
                     "INSERT INTO observation
                        (session_id, node_mac, rx_at, link_rssi, bssid, ssid, security,
                         channel, rssi, kind, lat, lon, alt, accuracy, pos_source, pos_at,
-                        raw_text)
+                        raw_body)
                      VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
                 )?
                 .execute(params![
@@ -674,7 +696,7 @@ fn write_batch(
                     obs.fix.accuracy,
                     obs.fix.source.as_str(),
                     obs.fix.at_ms,
-                    obs.raw_text,
+                    obs.raw_body,
                 ])?;
             }
             Record::Bridge(bridge) => {

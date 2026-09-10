@@ -5,8 +5,8 @@
 //! capture is least likely to contain. Real frames go in `beacon_vectors.txt`
 //! and are exercised by `every_captured_beacon_yields_a_usable_observation`.
 
-use wartui_proto::air::{Security, WardriveLine};
-use wartui_proto::beacon::{SSID_MAX, parse_mgmt};
+use wartui_proto::air::{SIGHTING_MSG_MAX, SSID_MAX, Security, SightingMsg};
+use wartui_proto::beacon::parse_mgmt;
 
 /// One `tag, len, data` element.
 fn ie(tag: u8, data: &[u8]) -> Vec<u8> {
@@ -65,7 +65,7 @@ fn beacon(ies: &[u8]) -> Vec<u8> {
     mgmt(8, 0x0011, ies)
 }
 
-fn security_of(ies: &[u8]) -> Security<'static> {
+fn security_of(ies: &[u8]) -> Security {
     parse_mgmt(&beacon(ies), -50, 6).expect("a beacon").security
 }
 
@@ -237,21 +237,24 @@ fn an_over_long_ssid_is_kept_to_what_the_standard_allows() {
 #[test]
 fn a_sighting_round_trips_through_the_wire_format() {
     // The point of the whole module: what the radio heard has to survive being
-    // written into `MSG_TEXT` and read back by the host.
+    // broadcast and read back by the host. The SSID here has a comma in it,
+    // which the format this replaced could not carry — the sender rewrote it
+    // as an underscore and the real name was gone.
     let mut ies = ie(0, b"My,Net");
     ies.extend_from_slice(&ie(3, &[11]));
     ies.extend_from_slice(&ie(48, &rsn(&[2])));
     let ap = parse_mgmt(&beacon(&ies), -42, 11).expect("a beacon");
 
-    let mut buf = [0u8; wartui_proto::air::WARDRIVE_LINE_MAX];
-    let len = ap.as_line().write_into(&mut buf).expect("the line fits");
-    assert_eq!(&buf[..len], b"AA:BB:CC:DD:EE:FF,My_Net,[WPA2_PSK],11,-42,W");
+    let mut buf = [0u8; SIGHTING_MSG_MAX];
+    let len = ap.as_msg().encode_into(&mut buf).expect("the frame fits");
 
-    let back = WardriveLine::parse(&buf[..len]).expect("valid line");
+    let back = SightingMsg::decode(&buf[..len]).expect("valid frame");
     assert_eq!(back.bssid, ap.bssid);
+    assert_eq!(back.ssid, b"My,Net");
     assert_eq!(back.security, ap.security);
-    assert_eq!(back.channel, u16::from(ap.channel));
-    assert_eq!(back.rssi, i16::from(ap.rssi));
+    assert_eq!(back.security.token(), Some("[WPA2_PSK]"));
+    assert_eq!(back.channel, ap.channel);
+    assert_eq!(back.rssi, ap.rssi);
 }
 
 /// Real frames, appended by `tools/beacons/extract.py`.
@@ -286,15 +289,15 @@ fn every_captured_beacon_yields_a_usable_observation() {
 
         // The payload has to survive the wire, which is the only reason any of
         // this is parsed at all.
-        let mut buf = [0u8; wartui_proto::air::WARDRIVE_LINE_MAX];
+        let mut buf = [0u8; SIGHTING_MSG_MAX];
         let written = ap
-            .as_line()
-            .write_into(&mut buf)
-            .unwrap_or_else(|| panic!("{name}: line did not fit WARDRIVE_LINE_MAX"));
-        WardriveLine::parse(&buf[..written])
-            .unwrap_or_else(|e| panic!("{name}: {e} in {:?}", String::from_utf8_lossy(&buf)));
+            .as_msg()
+            .encode_into(&mut buf)
+            .unwrap_or_else(|| panic!("{name}: frame did not fit SIGHTING_MSG_MAX"));
+        let back = SightingMsg::decode(&buf[..written]).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(back.ssid, ap.ssid(), "{name}: SSID did not survive the wire");
 
-        tokens.insert(ap.security.as_bytes());
+        tokens.insert(ap.security.to_string());
         hidden += usize::from(ap.ssid().is_empty());
         checked += 1;
     }

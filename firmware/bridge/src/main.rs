@@ -7,7 +7,7 @@
 //!
 //! It is deliberately dumb. It understands COBS framing and it understands
 //! `esp-radio`, and nothing whatsoever about what the bytes mean: not the
-//! `ENOW` header, not heartbeats, not channel assignments. Every rule that
+//! air header, not heartbeats, not channel assignments. Every rule that
 //! could turn out to be wrong lives on the host, where it is unit-testable and
 //! a fix costs a `cargo run` rather than a reflash. The interesting property is
 //! not that the bridge is simple, it is that the bridge is *finished* — the

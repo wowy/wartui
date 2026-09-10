@@ -80,13 +80,14 @@ pub struct Observation {
     pub kind: RecordKind,
     /// Where the host believed it was when this arrived.
     pub fix: Fix,
-    /// The line as it came off the air.
+    /// The frame exactly as it came off the air, header and all.
     ///
-    /// About eighty bytes a row, and the reason a parser fix can be applied to
-    /// history rather than only to what arrives afterwards. The wire format is
-    /// undocumented and read out of someone else's C++; assuming this decoder
-    /// is right forever would be optimistic.
-    pub raw_text: Vec<u8>,
+    /// A couple of dozen bytes a row, and the reason a decoder fix can be
+    /// applied to history rather than only to what arrives afterwards. The
+    /// format is ours and documented now, which makes this cheaper insurance
+    /// than it was rather than unnecessary: the header says which version wrote
+    /// the row, so a file spanning a format change is still readable.
+    pub raw_body: Vec<u8>,
 }
 
 /// A frame exactly as it arrived, kept only when `--record-raw` is on.
@@ -121,7 +122,7 @@ pub struct BridgeSeen {
     pub fw_version: String,
 }
 
-/// What became of one `MSG_ADMIN` this host put on the air.
+/// What became of one assignment this host put on the air.
 ///
 /// The vendor core has no equivalent: it clears its dirty flag from the
 /// `esp_now_send` return value and keeps no record of whether anything
@@ -163,7 +164,8 @@ pub struct AssignmentSent {
     /// The persisted monotonic counter this assignment was allocated from.
     /// Divergence 4: the vendor core keeps this in RAM and resets it at boot.
     pub counter: u64,
-    /// The byte that actually went on the wire, `wire_version(counter)`.
+    /// The byte that actually went on the wire, `air::wire_epoch(counter)`.
+    /// The column keeps its older name; what it holds has not changed.
     pub wire_version: u8,
     /// The node's slot in the fleet-wide stagger order.
     pub node_index: u8,
@@ -186,6 +188,13 @@ pub struct AssignmentSent {
     /// admin window to the transmit callback. The whole reason the bridge
     /// stamps both ends itself: the host's own scheduling noise never enters
     /// the number.
+    ///
+    /// `None` when there is no such measurement to make — no heartbeat stamp
+    /// yet, or a difference longer than the window the node was holding open,
+    /// which means the heartbeat it was measured from was not the one that
+    /// opened a window at all. The outcome is recorded either way; it is only
+    /// the timing that goes missing, and a missing number is the honest answer
+    /// where the alternative was an 80-second "latency".
     pub latency_us: Option<u32>,
 }
 
