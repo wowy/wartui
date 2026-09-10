@@ -469,3 +469,65 @@ here sleeps, and `CoreEfuseCrc` says nothing an operator can act on that
 **Still not done:** none of this has been run on a C5. It is an audit of the
 mapping, not a bench test of it, and the gap it closes is the one the audit could
 see. Reflashing a node as a bridge would answer it; no C5 was attached.
+
+## The S3 inherits the detector unmeasured
+
+The bridge now builds for the ESP32-S3, which puts a third chip behind
+everything above. What carries over and what does not is worth separating,
+because the whole point of this document is that the transmit-stall rule was
+wrong twice and only a bench caught it.
+
+**Carried over on the strength of the silicon, not a measurement.** The S3 has
+the same `USB_SERIAL_JTAG` block, with the same `EP1_CONF` register: `WR_DONE`
+clears `SERIAL_IN_EP_DATA_FREE`, and the TRM says it comes back only when the
+USB host reads the FIFO. That is the entire premise of the wedge, so the wedge
+should exist there in the same shape. The firmware side is unchanged — the same
+`write_byte_nb` / `flush_tx_nb` pair through `wartui_proto::outbox` — and the
+arithmetic is `wartui_proto::stall::StallWatch`, which is host-tested and does
+not know what a chip is. **None of it has been run on an S3 in the wedged
+state.** The Phase 3 register dumps are all C6. Treat the S3 rows of every table
+above as reasoning until somebody reproduces the bench.
+
+**Measured on a Waveshare ESP32-S3-LCD-1.47** (S3 rev v0.2, 16 MB flash, MAC
+`…6A:4C`), flashed with the generic bridge firmware — the board's screen, LED and
+SD slot are simply never initialised:
+
+| what | result |
+| --- | --- |
+| `wartui status` | `44:1B:F6:85:6A:4C on Esp32S3, firmware 0.1.0`, channel 6, heap free 55764 |
+| link round trip | works; a `GetStatus` is answered, so the USB-C really is the native USB Serial/JTAG |
+| reset cause after `espflash flash` | `External` — and via `CoreUsbJtag`, since the S3 has no `Cpu0JtagCpu` |
+| `wartui reset` | `Software`, `uptime 1ms, so it did reboot` |
+| phase marker across that reset | survived — `it was carrying out a host command`, so `rtc_fast, persistent` holds on this part |
+| image size | 387,088 bytes, 2.36% of flash |
+
+That covers announce, both link directions, two of the reset causes and the RTC
+marker. It does not cover the radio: no nodes were powered, so `received 0
+frames` is all `drain_radio` and `transmit` have been asked for.
+
+**Does not carry over: the reset reasons.** The S3's `SocResetReason` is not a
+superset of the C6's, which is the trap `03de799` fell into from the other side.
+Its differences are *renames* — `Cpu0Sw`, `Cpu0Mwdt0`, `Cpu0Mwdt1` and
+`Cpu0RtcWdt` are `CpuSw`, `CpuMwdt0`, `CpuMwdt1` and `CpuRtcWdt`, because the S3
+has two cores and neither is privileged — so unlike the C5's missing variants
+these are compile errors rather than silence, and the build says so immediately.
+The numeric codes are identical on all three parts; only the Rust spellings
+differ. Two variants are genuinely new, `SysClkGlitch` (0x13) and `CorePwrGlitch`
+(0x17), and both map to `Brownout` by the same argument the C5's `PowerGlitch`
+did. One is genuinely absent: `Cpu0JtagCpu`, so an `espflash reset` on an S3
+should report `External` via `CoreUsbJtag` alone — unverified.
+
+**The gap the S3 does not close.** It has no `CpuLockup`. The C5 remains the only
+part in the fleet whose silicon reports a hang, and since no watchdog on any of
+these parts fires (above), an S3 bridge that stops turning its loop over has to
+be unplugged, with nothing in the `Ready` behind it to say why. That is the same
+position the C6 has always been in; it is not a new hole, but adding a chip was
+a chance to close it and did not.
+
+**Still not done on the S3:** it has never been wedged on purpose, so the
+detector this document is about is the one thing the bench above did not test.
+Nor has it heard a node — `drain_radio`, `transmit` and the `AckOk` path are
+still only compile-checked, and the `RxControlInfo` layout differs there
+(`wifi_mac_version = "1"` against the C5's and C6's "2"/"3"), even though the
+one field read out of it, `rssi`, is present in all three. `PowerOn` is
+unverified because that needs a replug. The C5 remains unbenched entirely.

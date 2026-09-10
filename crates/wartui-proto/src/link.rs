@@ -43,7 +43,17 @@ use serde::{Serialize, de::DeserializeOwned};
 /// carrying it, which would read to the operator as a bridge that answered
 /// nothing — the exact misdiagnosis this protocol's error reporting exists to
 /// avoid.
-pub const LINK_PROTO_VERSION: u8 = 4;
+///
+/// v5 added [`Chip::Esp32S3`]. The bridge is the one board in the fleet whose
+/// radio never needs 5 GHz — it parks on [`crate::plan::CONTROL_CHANNEL`] and
+/// stays there — so a 2.4 GHz-only Xtensa part does the job, and the S3 is the
+/// cheap and plentiful one. Nothing about the *fleet* changed: the nodes are
+/// still the parts that have to reach both bands, and they still say so with a
+/// capability token rather than a chip name. The bump is for the same reason as
+/// v4 — postcard writes an enum variant as its index, so a third `Chip` is a
+/// byte an older host has no case for, and it would meet it inside the very
+/// frame that is supposed to introduce the bridge.
+pub const LINK_PROTO_VERSION: u8 = 5;
 
 /// ESP-NOW's own payload ceiling. The 212-byte wardriver frames fit inside it.
 pub const MAX_ESPNOW_PAYLOAD: usize = 250;
@@ -81,14 +91,21 @@ pub enum Chip {
     Esp32C5,
     /// 2.4 GHz only, which is all ESP-NOW needs at the default channel.
     Esp32C6,
+    /// 2.4 GHz only, like the C6, and the only Xtensa part wartui builds for.
+    ///
+    /// Being Xtensa is invisible on the wire and expensive everywhere else: it
+    /// is why `firmware/bridge` needs a second toolchain. It buys a bridge that
+    /// can be had for the price of a devkit with a screen on it, which no
+    /// RISC-V part in this fleet comes as.
+    Esp32S3,
 }
 
 /// Why the bridge is running this life rather than the last one.
 ///
 /// A flattening of `esp_hal`'s per-chip `SocResetReason`, which has a dozen
-/// variants that differ between the C5 and the C6 and name silicon blocks
-/// rather than causes. What an operator needs is which of a small number of
-/// stories this was, and the ones that matter are the ones that are not
+/// variants that differ between all three supported parts and name silicon
+/// blocks rather than causes. What an operator needs is which of a small number
+/// of stories this was, and the ones that matter are the ones that are not
 /// [`Self::PowerOn`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub enum ResetCause {
@@ -101,11 +118,17 @@ pub enum ResetCause {
     Watchdog,
     /// The CPU locked up and the silicon reset it.
     ///
-    /// Reported by the C5 and not by the C6, which has no such detector. It is
-    /// distinct from [`ResetCause::Watchdog`] and must not be folded into it:
-    /// no watchdog on either part actually fires (`docs/phase-3-findings.md`),
-    /// so a `Watchdog` here would name a mechanism that is known not to work
-    /// and send whoever read it looking in the wrong place.
+    /// Reported by the C5 alone: neither the C6 nor the S3 has the detector.
+    /// It is distinct from [`ResetCause::Watchdog`] and must not be folded into
+    /// it: no watchdog on any of these parts actually fires
+    /// (`docs/phase-3-findings.md`), so a `Watchdog` here would name a
+    /// mechanism that is known not to work and send whoever read it looking in
+    /// the wrong place.
+    ///
+    /// The corollary is worth stating where it will be read: on a C6 or an S3
+    /// the hang class has *no* signal at all, and a bridge that stops turning
+    /// its loop over has to be unplugged. That is a real gap, and the C5 is the
+    /// only part that narrows it.
     Lockup,
     /// The supply sagged. Usually a hub or a cable rather than the board.
     Brownout,

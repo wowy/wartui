@@ -70,3 +70,49 @@ jobs:
           pushd firmware/${{matrix.firmware_type}}
           cargo clippy --release --features ${{matrix.target}} --locked -- -D warnings
           popd
+
+  # The S3 bridge, which cannot join the matrix above: it is Xtensa, so it needs
+  # espup's toolchain rather than stable and an explicit `--target`, and there is
+  # no S3 node to pair it with. Compile-checked and nothing more — but that is
+  # the point. The C5's reset-reason mapping was wrong for months because it was
+  # reasoned about rather than built, and the S3 renames the very variants that
+  # mapping matches.
+  firmware-s3-bridge:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+      - uses: esp-rs/xtensa-toolchain@v1.7
+        with:
+          buildtargets: esp32s3
+          # Installs as the `esp` toolchain without becoming the default or
+          # setting a directory override, so `rust-toolchain.toml` still selects
+          # stable for everything and only the explicit `+esp` below gets Xtensa.
+          default: false
+          override: false
+          # `std` only; this firmware is `no_std`.
+          ldproxy: false
+          # Leave this on: it is what puts `xtensa-esp32s3-elf-gcc` on PATH, and
+          # without the linker the build gets all the way to the link and stops.
+          export: true
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+
+      - name: Lint
+        run: |
+          pushd firmware/bridge
+          cargo +esp fmt --all -- --check
+          popd
+
+      - name: Build
+        run: |
+          pushd firmware/bridge
+          cargo +esp build --release --features esp32s3 --target xtensa-esp32s3-none-elf --locked --verbose
+          popd
+
+      - name: Clippy
+        run: |
+          pushd firmware/bridge
+          cargo +esp clippy --release --features esp32s3 --target xtensa-esp32s3-none-elf --locked -- -D warnings
+          popd

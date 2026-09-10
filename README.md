@@ -7,6 +7,11 @@ which a laptop cannot speak. wartui drives a USB-attached ESP32 as a radio
 bridge and **takes the place of the mesh's CORE node**: it owns the node table,
 issues channel assignments, and collects every observation the fleet produces.
 
+The bridge can be a C5, a C6 or an ESP32-S3. It is the one board here whose
+radio never needs 5 GHz — it parks on the control channel and stays there — so
+2.4-GHz-only costs it nothing. The *nodes* are the parts that have to reach both
+bands, and they are still C5 and C6.
+
 The nodes run `firmware/node`, wartui's own firmware, which is why the fleet is
 C6 as well as C5. It speaks the wire format of
 [ESP32DualBandWardriver](https://github.com/justcallmekoko/ESP32DualBandWardriver)
@@ -472,7 +477,9 @@ device, the path on the serial client beneath it — and come out in either orde
 so they are paired as they arrive rather than assumed adjacent. The bridge is
 then the row whose address the fleet table shows as the bridge's, and a node the
 row whose heartbeats `wartui sniff` attributes to that address; where the board
-generations differ, the OUI separates them too.
+generations differ, the OUI separates them too. An S3 in the list is a bridge
+and never a node — nothing here flashes a node with S3 firmware, because a
+2.4-GHz-only node is what a C6 already is.
 
 ## Development
 
@@ -483,6 +490,10 @@ cargo fmt --check
 
 cd firmware/bridge && cargo clippy --release --features esp32c6   # and esp32c5
 cd firmware/node   && cargo clippy --release --features esp32c6   # and with ,ble
+
+# The S3 bridge is Xtensa: espup's toolchain, and its own target.
+cd firmware/bridge && cargo +esp clippy --release --features esp32s3 \
+  --target xtensa-esp32s3-none-elf
 ```
 
 Each firmware is excluded from the workspace and is its own: a different target,
