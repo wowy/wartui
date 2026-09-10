@@ -156,6 +156,16 @@ of them; it will keep doing that until `esp-radio` publishes again. Both
 firmwares are held at the same set by the same dependency, which is worth
 keeping true — they share `wartui-proto`.
 
+That pin has stopped being free. The ESP32-C5 fix for a software reset that left
+the board unbootable until it lost power is upstream in `esp-hal` from
+1.2.0-rc.0 (esp-rs/esp-hal#5703, fixed by #5745), and being unable to take it is
+why `reboot()` writes that one register out by hand on the C5. Nor can cargo be
+talked round it: `SoftwareInterruptControl` is gone in 1.2.1, so `esp-rtos 0.3.0`
+and this firmware's `esp_rtos::start` would both stop compiling against a version
+faked into range. Issue #16 has the shape of the real upgrade — `[patch.crates-io]`
+across the whole family at one monorepo rev — and what to delete when it lands.
+`docs/phase-3-findings.md` has what the C5 does without it.
+
 `esp-generate` is a version behind this set; its scaffolding (`build.rs`,
 `.cargo/config.toml`) is what was taken from it, not its dependency list. One
 piece of that scaffolding does not survive contact with the S3: `build.rs`'s

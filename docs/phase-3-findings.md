@@ -470,6 +470,11 @@ here sleeps, and `CoreEfuseCrc` says nothing an operator can act on that
 mapping, not a bench test of it, and the gap it closes is the one the audit could
 see. Reflashing a node as a bridge would answer it; no C5 was attached.
 
+*Partly answered since, by the last section of this document.* A C5 bridge has
+now reported `Software` and `External`, and the phase marker behind them, on
+hardware. `PowerGlitch` and `CpuLockup` — the two this audit was about — remain
+unseen, which is in the nature of both: nothing provokes them on demand.
+
 ## The S3 inherits the detector, and it was measured there too
 
 The bridge now builds for the ESP32-S3, which puts a third chip behind
@@ -602,4 +607,90 @@ device end.
 
 **Still not done on the S3:** nothing in this document, now. No C6 or S3 can
 report the hang class at all, which is a gap in the firmware rather than in the
-bench. The C5 remains unbenched entirely.
+bench. The C5 remained unbenched entirely — the section below is why, and it is
+no longer true.
+
+## The C5's software reset was ending the board, not restarting it
+
+Measured on 2026-09-10 on Linux (Fedora, kernel 7.2.4), against the ESP32-C5
+bridge `4F:08` on `/dev/ttyACM0` — a *different* board from the `C5:B8` that
+issue #12 was written against, which is the first thing this bench established:
+the fault is the part, not that board.
+
+Everything above this section was measured on a C6 or an S3. The C5 had never
+been on a bench, and the reason turned out to be that it could not survive being
+put on one. `esp_hal::system::software_reset()` — the call behind `wartui reset`,
+the panic handlers and the stall detector's own recovery — does not reboot a C5.
+It ends it.
+
+| step | result |
+| --- | --- |
+| `wartui status`, bridge up 18 m 43 s | healthy, `Esp32C5`, `powered on` |
+| **one** `wartui reset` | `the bridge did not come back within 10s` |
+| `wartui status` after | nothing answers |
+| `espflash reset` | **does not recover it** |
+| `espflash flash` — connects, erases, writes, verifies, "Flashing has completed!" | **does not recover it either** |
+| boot log | `ESP-ROM:esp32c5-eco2-20250121`, `rst:0x15 (USB_UART_HPSYS)`, `Core0 Saved PC:0x40800c2e`, then nothing |
+| physical replug | back, instantly, running whatever was flashed |
+
+The last two rows are the ones that matter. `SPI mode:`, `load:` and `entry`
+never print, and those are the first things the ROM does that need flash — so
+the board is not failing to *run* its firmware, it is failing to *read* it. And
+because a full reflash lands perfectly and changes nothing, "reflash it" is not
+a recovery either. Only power is. That narrows what
+`firmware/bridge/README.md` says about `espflash reset` being the fallback for a
+bridge that answers nothing: for this failure it was not a fallback at all.
+
+**Why.** The C5 and the C61 boot with `PCR.RESET_EVENT_BYPASS.reset_event_bypass`
+set — its reset value is `0x02` — and that bit keeps a core reset from also
+resetting the system bus. The ROM's own MSPI core reset then leaves the AXI bus
+frozen, and the next boot hangs on its first flash read. This is not our finding:
+it is esp-rs/esp-hal#5703, fixed by #5745, and it mirrors what ESP-IDF has always
+done in `bootloader_hardware_init` (`axi_icm_ll_reset_with_core_reset(true)`).
+esp-hal clears the bit in the C5's `pre_init` from 1.2.0-rc.0 onwards.
+
+**Why it is written out by hand here.** `esp-radio 1.0.0-beta.0` requires
+`esp-hal = "~1.1.0"`, so 1.2 will not resolve — the standoff the dependency
+section of `firmware/bridge/README.md` already describes. Lying to cargo about
+the version does not work either: `SoftwareInterruptControl` is gone in 1.2.1,
+and `esp-rtos 0.3.0` and this firmware's own `esp_rtos::start` are written
+against it. Issue #16 carries what the real upgrade needs and what to delete
+when it lands. The write itself is one safe `modify` on a named field, so
+`unsafe_code = "forbid"` is untouched.
+
+It lives in a `reboot()` funnel in each firmware rather than at the top of
+`main`, where upstream puts it. A panic can land before `main` reaches any line
+of its own — and the panic handler is one of the four callers.
+
+**After the fix, same board, same session:**
+
+| step | result |
+| --- | --- |
+| `wartui reset` ×3 | back in 0.82 s, 0.83 s, 0.83 s; `uptime 2ms, so it did reboot` each time |
+| reset cause afterwards | `Software`, and the phase marker survived: `it was carrying out a host command` |
+| device path | `/dev/ttyACM0` throughout — a software reset does not re-enumerate on this part either |
+
+So two things measured on the C6 hold on the C5 as well, and were unmeasurable
+there until now: `rtc_fast, persistent` survives a software reset, and the port
+does not move under a script.
+
+**The stall detector, which is the caller that mattered.** The same `WouldBlock`
+stand-in used for the C6 and the S3 above, wedging the transmit path after the
+fifth decoded command so each life answers a few frames before dying: the board
+detected the stall, reset itself, came back announcing `Ready`, and did it again
+— ten cycles in twenty seconds, every one of them reporting
+`its transmit path had stopped draining`. On the firmware this section replaces,
+the first of those ten would have been the last thing the board ever did. A
+recovery that is worse than the failure is the reason this was worth a bench
+rather than a `#[cfg]` that skips the reset on a C5.
+
+**The C6 did not move.** Reflashed from the same tree and reset twice: back in
+0.35 s and 0.30 s. The workaround is `#[cfg(feature = "esp32c5")]`, so it cannot
+compile into a C6 or an S3 build, and this is a habit-check rather than a risk.
+
+**Not exercised.** The two panic handlers, on either chip: both reach `reboot()`
+by the same call the other three callers use, and provoking one costs another
+temporary build per firmware. The node's `reboot()` is compile-checked for both
+its chips and has not been run on hardware — a node that fails to come back
+reads as `no heartbeat`, which is also what a node out of range reads as, so it
+is the quietest of the four and the one most worth remembering is untested.
