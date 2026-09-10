@@ -5,14 +5,18 @@
 //! is acting as the mesh's core — which, for this fleet, is a laptop running
 //! `wartui` behind a USB bridge.
 //!
-//! It is a rewrite rather than a port. The scanning and the ESP-NOW comms come
-//! from the vendor firmware at `ESP32DualBandWardriver`, cited throughout by
-//! `file:line`; the web interface, SD card, display, buttons, fuel gauge, GPS,
-//! geofencing, uploads and dock mode do not, because a node in this fleet has
-//! no use for any of them and every kilobyte of them is a kilobyte that can go
-//! wrong somewhere a reflash is the only way to find out.
+//! It is a rewrite rather than a port. The scanning and the ESP-NOW comms were
+//! learned from the vendor firmware at
+//! <https://github.com/wowy/ESP32DualBandWardriver>, branch
+//! `feat/node-interference-mitigation`, and the `file:line` citations
+//! throughout point there as the record of a measured behaviour rather than as
+//! a specification to match. The web interface, SD card, display, buttons, fuel
+//! gauge, GPS, geofencing, uploads and dock mode did not come across at all,
+//! because a node in this fleet has no use for any of them and every kilobyte
+//! of them is a kilobyte that can go wrong somewhere a reflash is the only way
+//! to find out.
 //!
-//! Three things are deliberately different from the firmware it replaces, and
+//! Four things are deliberately different from the firmware it replaces, and
 //! each of them is a fix rather than a preference.
 //!
 //! **It listens instead of scanning.** `WiFi.scanNetworks` is called with
@@ -31,6 +35,14 @@
 //! and an assignment sent at any of those moments lands. The 300 ms window is
 //! still honoured, so the host's timing model is unchanged; it simply stops
 //! being the only chance.
+//!
+//! **It shares no wire format with it.** Every frame here carries wartui's own
+//! magic, so a vendor core cannot admit this node to its table and cut its plan
+//! around a node that will never obey it — and a vendor node cannot read an
+//! assignment out of one of ours, which it did, because its receive handlers
+//! test `if (len < sizeof(...)) return;` and our longer frame cleared the
+//! check. Neither fleet can now interfere with the other's assignment, in
+//! either direction.
 //!
 //! **An unassigned node waits rather than sweeping.** The vendor default is all
 //! forty channels (`src/WiFiOps.cpp:77-80`), which means a node that has never
@@ -68,7 +80,7 @@ use esp_radio::wifi::{ControllerConfig, WifiController};
 use esp_rtos::CurrentThreadHandle;
 use static_cell::StaticCell;
 use wartui_proto::air::{
-    AdminMsg, CAPABILITY_MAX, Capabilities, Frame, MsgType, TextMsg, WARDRIVE_LINE_MAX,
+    AdminMsg, Capabilities, DecodeError, Frame, HeartbeatMsg, SIGHTING_MSG_MAX,
 };
 use wartui_proto::dedup::MacRing;
 use wartui_proto::plan::{
@@ -219,8 +231,8 @@ impl Node {
 
     /// Take an assignment, if it is not the one already held.
     ///
-    /// The test is `!=` rather than `>`, verbatim from `src/WiFiOps.cpp:1198`.
-    /// That is what lets a host which has restarted and gone back to epoch 1
+    /// The test is `!=` rather than `>`, which is what lets a host that has
+    /// restarted and gone back to epoch 1
     /// still be believed, and it is why re-sending an identical assignment is
     /// acknowledged and then silently discarded.
     ///
@@ -231,10 +243,10 @@ impl Node {
     /// assignment landed, so a node that quietly declined it would leave the
     /// two sides disagreeing with nothing anywhere to say so.
     fn adopt(&mut self, admin: &AdminMsg) -> bool {
-        if admin.assignment_version == self.version {
+        if admin.epoch == self.version {
             return false;
         }
-        self.version = admin.assignment_version;
+        self.version = admin.epoch;
         self.node_index = admin.node_index;
         self.node_count = admin.node_count;
         self.channels = admin.channels;
@@ -426,15 +438,11 @@ fn main() -> ! {
 /// carrying, and treats sixty seconds of silence as a node that has left the
 /// fleet.
 fn heartbeat(sender: &mut EspNowSender<'_>, node: &mut Node) {
-    // Every heartbeat carries the token, not just the first. The host has no
-    // other way to tell this node from a stock one — node to core is
-    // byte-identical by design — and a token sent once would be a token lost
-    // to a dropped frame, or stale after this board is reflashed with
-    // something else. It is twenty-odd bytes of a field that is padded to two
-    // hundred either way, so repeating it costs nothing on the air.
-    let mut token = [0u8; CAPABILITY_MAX];
-    let Some(len) = CAPABILITIES.write_into(&mut token) else { return };
-    let Ok(msg) = TextMsg::new(MsgType::Heartbeat, node.counter, &token[..len]) else { return };
+    // Every heartbeat carries the capabilities, not just the first. Sent once
+    // they would be lost to a dropped frame, or stale after this board is
+    // reflashed with something else — and they are three bytes of a
+    // thirteen-byte frame, so repeating them costs almost nothing on the air.
+    let msg = HeartbeatMsg { counter: node.counter, capabilities: CAPABILITIES };
     if radio::broadcast(sender, &msg.encode()) {
         node.counter = node.counter.wrapping_add(1).max(1);
     }
@@ -447,14 +455,13 @@ fn report(sender: &mut EspNowSender<'_>, node: &mut Node, channel: u8) {
         if node.seen.contains(&sighting.bssid) {
             continue;
         }
-        let mut line = [0u8; WARDRIVE_LINE_MAX];
-        let Some(len) = sighting.as_line().write_into(&mut line) else { continue };
-        let Ok(msg) = TextMsg::new(MsgType::Text, 0, &line[..len]) else { continue };
+        let mut frame = [0u8; SIGHTING_MSG_MAX];
+        let Some(len) = sighting.as_msg().encode_into(&mut frame) else { continue };
         // Recorded only once it is on the air. Suppression is what the ring is
         // for, and suppressing an access point the host never received would
         // hide it for the next two hundred addresses — minutes of a node's
         // life, with nothing anywhere saying why.
-        if radio::broadcast(sender, &msg.encode()) {
+        if radio::broadcast(sender, &frame[..len]) {
             node.seen.insert(sighting.bssid);
             sent += 1;
         }
@@ -485,11 +492,10 @@ fn report_ble(sender: &mut EspNowSender<'_>, node: &mut Node, scanner: &mut ble:
         if node.seen.contains(&report.address) {
             continue;
         }
-        let mut line = [0u8; WARDRIVE_LINE_MAX];
-        let Some(len) = report.as_line().write_into(&mut line) else { continue };
-        let Ok(msg) = TextMsg::new(MsgType::Text, 0, &line[..len]) else { continue };
+        let mut frame = [0u8; SIGHTING_MSG_MAX];
+        let Some(len) = report.as_msg().encode_into(&mut frame) else { continue };
         // After the broadcast, for the reason `report` gives.
-        if radio::broadcast(sender, &msg.encode()) {
+        if radio::broadcast(sender, &frame[..len]) {
             node.seen.insert(report.address);
             lines += 1;
         }
@@ -519,7 +525,21 @@ fn listen(receiver: &EspNowReceiver<'_>, node: &mut Node, ms: u32) {
 /// Take whatever the radio has queued and adopt any assignment in it.
 fn drain_admin(receiver: &EspNowReceiver<'_>, node: &mut Node) {
     while let Some(received) = receiver.receive() {
-        let Ok(Frame::Admin(admin)) = Frame::decode(received.data()) else { continue };
+        let admin = match Frame::decode(received.data()) {
+            Ok(Frame::Admin(admin)) => admin,
+            // A host speaking a wire version this build does not. Said out
+            // loud rather than dropped with everything else: it is the whole
+            // diagnosis for a node that is being talked to and never answers,
+            // and the version byte exists so that it can be said.
+            Err(DecodeError::BadVersion(version)) => {
+                note!("ignoring a frame at wire version {}; reflash this node", version);
+                continue;
+            }
+            // Everything else on this channel: our own broadcasts coming back,
+            // the rest of the fleet's, and whatever else is nearby. A vendor
+            // fleet's frames fail the magic and land here, which is the point.
+            _ => continue,
+        };
         if node.adopt(&admin) {
             note!(
                 "assigned v{}: {} channels ({}), ble {}, node {} of {}",

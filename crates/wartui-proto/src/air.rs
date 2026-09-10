@@ -1,51 +1,68 @@
 //! The on-air ESP-NOW frames.
 //!
-//! Little-endian, no CRC, no protocol version field. See `src/WiFiOps.h:66-82`.
-//! Encoding and decoding are written out by hand rather than transmuting a
-//! `#[repr(packed)]` struct: the byte layout is a contract with a separately
-//! compiled program, so it deserves to be spelled out and tested against real
-//! bytes.
+//! Little-endian, no CRC. Encoding and decoding are written out by hand rather
+//! than transmuting a `#[repr(packed)]` struct: the byte layout is a contract
+//! between two separately compiled programs, so it deserves to be spelled out
+//! and tested against real bytes.
 //!
-//! Node → core is still the vendor's format exactly, and is meant to stay that
-//! way: a heartbeat and an observation from a wartui node are byte-identical to
-//! a stock one's, which is what lets the golden vectors captured off a vendor
-//! fleet keep testing this code.
+//! Every frame in both directions is wartui's own, and is deliberately
+//! unrecognisable to the vendor firmware this project grew up against. That is
+//! not tidiness. ESP-NOW has no addressing above the MAC layer and a node
+//! broadcasts to `FF:FF:FF:FF:FF:FF`, so anything speaking the vendor's format
+//! on the control channel is in everybody's conversation at once:
 //!
-//! Core → node is not, from Phase 2. [`AdminMsg`] is wartui's own fourteen-byte
-//! frame and the vendor's ten-byte one no longer decodes: a channel *set*
-//! replaces the pair of bounds, and a flags byte says whether the node should
-//! scan Bluetooth. Nothing is done to keep a mixed fleet working, because a
-//! mixed fleet was never the point — the vendor node is the thing being
-//! replaced. What survives is [`is_legacy_admin`], which recognises the old
-//! shape without decoding it, so a stock core powered up nearby is reported as
-//! the operational hazard it is rather than counted as line noise.
+//! * A vendor core hearing vendor-shaped heartbeats from our nodes admits them
+//!   to its own table and cuts its plan for nodes that will never obey it —
+//!   which is the "two nodes and a stranger cover less of the pool than the two
+//!   alone" failure measured in `docs/phase-2-findings.md`, inflicted on
+//!   somebody else's fleet.
+//! * Worse in the other direction: the vendor's receive handlers test
+//!   `if (len < sizeof(...)) return;` rather than for equality, so wartui's
+//!   assignment cleared a stock node's length check and its leading bytes
+//!   decoded as `enow_admin_msg_t` — epoch, index and count landing correctly
+//!   and then the flags byte read as `start_channel_idx`. A stock node in range
+//!   adopted a garbage channel range from us.
+//!
+//! A magic of our own closes both. It is checked before anything else on both
+//! ends, so a vendor frame costs one `memcmp` here and ours costs one there.
+//! [`foreign`] is what remains of vendor awareness: it recognises `ENOW` in
+//! order to *report* it, because another fleet on the control channel is worth
+//! saying out loud, and never decodes a byte of it.
+//!
+//! The header carries a version, which the vendor's did not. It is the lever
+//! for the next incompatible change: a node speaking a version this host does
+//! not know is counted and named rather than half-decoded, which is precisely
+//! the failure described above.
 
 use core::fmt;
 
 use crate::plan::{CHANNEL_SET_BYTES, ChannelSet};
 
-/// Frame preamble, `"ENOW"`. Four raw bytes, not a NUL-terminated string.
-/// `src/WiFiOps.cpp:13`.
-pub const MAGIC: [u8; 4] = *b"ENOW";
+/// Frame preamble, `"WTUI"`. Four raw bytes, not a NUL-terminated string.
+pub const MAGIC: [u8; 4] = *b"WTUI";
 
-/// Largest text payload a node will emit. `src/configs.h:53`.
-pub const ENOW_TEXT_MAX: usize = 200;
-
-/// `sizeof(enow_text_msg_t)`. Every send transmits the whole struct regardless
-/// of how much text it carries, and every receive handler drops anything
-/// shorter, so encoders must pad to exactly this. `src/WiFiOps.cpp:1004`.
-pub const TEXT_MSG_LEN: usize = 212;
-
-/// Length of wartui's [`AdminMsg`] on the wire.
+/// The frame version this build speaks and the only one it decodes.
 ///
-/// Four bytes of magic, the type byte, version, index, count, flags, and five
-/// bytes of channel mask.
-pub const ADMIN_MSG_LEN: usize = 9 + CHANNEL_SET_BYTES;
+/// Bumped when any layout below changes shape. Anything else is reported as
+/// incompatible rather than guessed at — see the module docs.
+pub const WIRE_VERSION: u8 = 1;
 
-/// `sizeof(enow_admin_msg_t)`, the vendor core's assignment
-/// (`src/WiFiOps.cpp:1194`). Nothing decodes it any more; it is here so
-/// [`is_legacy_admin`] can name the shape it is looking for.
-pub const LEGACY_ADMIN_MSG_LEN: usize = 10;
+/// Longest SSID 802.11 allows, and so the most a sighting carries.
+pub const SSID_MAX: usize = 32;
+
+/// Length of [`HeartbeatMsg`] on the wire.
+pub const HEARTBEAT_MSG_LEN: usize = OFF_BODY + 7;
+
+/// Length of [`AdminMsg`] on the wire.
+pub const ADMIN_MSG_LEN: usize = OFF_BODY + 4 + CHANNEL_SET_BYTES;
+
+/// Length of a [`SightingMsg`] carrying no SSID — the floor a decoder needs
+/// before it can read `ssid_len` and find out how much more there is.
+pub const SIGHTING_MSG_MIN: usize = OFF_BODY + 11;
+
+/// Length of a [`SightingMsg`] carrying the longest SSID there is, and so a
+/// buffer [`SightingMsg::encode_into`] can always finish in.
+pub const SIGHTING_MSG_MAX: usize = SIGHTING_MSG_MIN + SSID_MAX;
 
 /// [`AdminMsg::flags`] bit 0: scan Bluetooth as well as Wi-Fi.
 ///
@@ -56,46 +73,32 @@ pub const LEGACY_ADMIN_MSG_LEN: usize = 10;
 /// whether the code is compiled in; this bit decides whether it runs.
 pub const ADMIN_FLAG_BLE: u8 = 1 << 0;
 
-/// Buffer size [`WardriveLine::write_into`] can always finish in.
-///
-/// 17 for the BSSID, 32 for the longest SSID 802.11 allows, 15 for
-/// `[WPA2_WPA3_PSK]`, 5 for a `u16` channel, 6 for an `i16` RSSI, one for the
-/// kind and five separating commas. Comfortably inside [`ENOW_TEXT_MAX`], which
-/// is what actually bounds the frame.
-///
-/// The channel and RSSI widths are the parsed ones, not the node's. A node
-/// encodes a `u8` channel and an `i8` RSSI and cannot reach 77 bytes; a host
-/// re-encoding a line it read off the wire can, and a buffer sized for the node
-/// would drop those records silently rather than truncate them.
-pub const WARDRIVE_LINE_MAX: usize = 81;
+/// [`Capabilities::flags`] bit 0: this build has the Bluetooth scan compiled in.
+pub const CAP_FLAG_BLE: u8 = 1 << 0;
 
-const OFF_TYPE: usize = 4;
-const OFF_COUNTER: usize = 5;
-const OFF_LEN: usize = 9;
-const OFF_TEXT: usize = 11;
+/// [`Capabilities::flags`] bit 1: this radio reaches 5 GHz.
+pub const CAP_FLAG_5G: u8 = 1 << 1;
 
-const OFF_VERSION: usize = 5;
-const OFF_NODE_INDEX: usize = 6;
-const OFF_NODE_COUNT: usize = 7;
-const OFF_FLAGS: usize = 8;
-const OFF_CHANNELS: usize = 9;
+const OFF_VERSION: usize = 4;
+const OFF_TYPE: usize = 5;
+const OFF_BODY: usize = 6;
 
-/// `enum MsgType : uint8_t`, `src/WiFiOps.cpp:88-94`.
+/// The header alone: enough to know whether a frame is ours and what shape it
+/// claims to be.
+const HEADER_LEN: usize = OFF_BODY;
+
+/// What a frame is. Deliberately not the vendor's `1..=5`, and with the
+/// direction in the high bit so a misrouted frame is a decode error rather than
+/// a plausible one of something else.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum MsgType {
-    /// Node → core. Broadcast, encrypted sessions only. wartui runs plaintext,
-    /// so receiving one means that node has encryption switched on.
-    CoreRequest = 1,
-    /// Core → node, plaintext unicast, so the node learns the core's MAC.
-    CoreReply = 2,
-    /// Node → core, once per completed channel sweep. `counter` is monotonic
-    /// from node boot.
-    Heartbeat = 3,
-    /// Node → core, one per newly-seen BSSID. Carries a [`WardriveLine`].
-    Text = 4,
-    /// Core → node. The only command a node accepts.
-    Admin = 5,
+    /// Node → core, once per completed channel sweep.
+    Heartbeat = 0x01,
+    /// Node → core, one per newly-seen BSSID.
+    Sighting = 0x02,
+    /// Core → node. The only frame a node acts on.
+    Admin = 0x81,
 }
 
 impl MsgType {
@@ -111,11 +114,9 @@ impl TryFrom<u8> for MsgType {
 
     fn try_from(v: u8) -> Result<Self, Self::Error> {
         match v {
-            1 => Ok(Self::CoreRequest),
-            2 => Ok(Self::CoreReply),
-            3 => Ok(Self::Heartbeat),
-            4 => Ok(Self::Text),
-            5 => Ok(Self::Admin),
+            0x01 => Ok(Self::Heartbeat),
+            0x02 => Ok(Self::Sighting),
+            0x81 => Ok(Self::Admin),
             other => Err(DecodeError::UnknownType(other)),
         }
     }
@@ -124,156 +125,96 @@ impl TryFrom<u8> for MsgType {
 /// Why a byte slice was not a valid frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecodeError {
-    /// Fewer bytes than the message type requires. The firmware drops these
-    /// silently; we report them so the bridge can count truncation.
+    /// Fewer bytes than the message type requires.
     TooShort {
         /// Bytes required for this message type.
         need: usize,
         /// Bytes actually present.
         got: usize,
     },
-    /// First four bytes were not `"ENOW"`.
+    /// First four bytes were not [`MAGIC`].
     BadMagic,
-    /// Type byte outside 1..=5.
+    /// A frame of ours, from a build speaking a version this one does not.
+    /// Reported rather than guessed at: the whole point of the version byte is
+    /// that a layout change must not decode as a plausible older frame.
+    BadVersion(u8),
+    /// Type byte named no frame this build knows.
     UnknownType(u8),
-    /// `len` exceeded [`ENOW_TEXT_MAX`]. The firmware logs and drops these
-    /// (`src/WiFiOps.cpp:1149`).
-    TextTooLong(u16),
+    /// `ssid_len` exceeded [`SSID_MAX`], which 802.11 makes impossible, so the
+    /// frame is malformed rather than merely unusual.
+    SsidTooLong(u8),
 }
 
 impl fmt::Display for DecodeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::TooShort { need, got } => write!(f, "frame too short: need {need}, got {got}"),
-            Self::BadMagic => f.write_str("bad magic, expected \"ENOW\""),
-            Self::UnknownType(t) => write!(f, "unknown message type {t}"),
-            Self::TextTooLong(n) => write!(f, "text length {n} exceeds {ENOW_TEXT_MAX}"),
+            Self::BadMagic => f.write_str("bad magic, expected \"WTUI\""),
+            Self::BadVersion(v) => write!(f, "wire version {v}, expected {WIRE_VERSION}"),
+            Self::UnknownType(t) => write!(f, "unknown message type {t:#04x}"),
+            Self::SsidTooLong(n) => write!(f, "ssid length {n} exceeds {SSID_MAX}"),
         }
     }
 }
 
 impl core::error::Error for DecodeError {}
 
-/// A decoded `enow_text_msg_t`, borrowing its payload from the input buffer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TextMsg<'a> {
-    /// One of `CoreRequest`, `CoreReply`, `Heartbeat` or `Text`.
-    pub msg_type: MsgType,
-    /// Heartbeat counter, monotonic from node boot. Meaningful only for
-    /// [`MsgType::Heartbeat`]; a regression means the node rebooted.
-    pub counter: u32,
-    /// The `len` bytes of payload, without the trailing NUL or the zero padding.
-    pub text: &'a [u8],
+/// Check the header and return the type it names.
+///
+/// Every decoder starts here, so magic, version and type are rejected in the
+/// same order and with the same errors wherever a frame arrives.
+fn header(buf: &[u8]) -> Result<MsgType, DecodeError> {
+    if buf.len() < HEADER_LEN {
+        return Err(DecodeError::TooShort { need: HEADER_LEN, got: buf.len() });
+    }
+    if buf[..4] != MAGIC {
+        return Err(DecodeError::BadMagic);
+    }
+    if buf[OFF_VERSION] != WIRE_VERSION {
+        return Err(DecodeError::BadVersion(buf[OFF_VERSION]));
+    }
+    MsgType::try_from(buf[OFF_TYPE])
 }
 
-impl<'a> TextMsg<'a> {
-    /// A text frame carrying `text`.
-    ///
-    /// # Errors
-    /// [`DecodeError::TextTooLong`] if `text` exceeds [`ENOW_TEXT_MAX`].
-    pub fn new(msg_type: MsgType, counter: u32, text: &'a [u8]) -> Result<Self, DecodeError> {
-        if text.len() > ENOW_TEXT_MAX {
-            // Cast is safe: the length is at most ENOW_TEXT_MAX + 1 here in
-            // practice, and any larger value still reports usefully.
-            return Err(DecodeError::TextTooLong(u16::try_from(text.len()).unwrap_or(u16::MAX)));
-        }
-        Ok(Self { msg_type, counter, text })
-    }
-
-    /// Decode from a received frame.
-    ///
-    /// # Errors
-    /// See [`DecodeError`].
-    pub fn decode(buf: &'a [u8]) -> Result<Self, DecodeError> {
-        if buf.len() < TEXT_MSG_LEN {
-            return Err(DecodeError::TooShort { need: TEXT_MSG_LEN, got: buf.len() });
-        }
-        if buf[..4] != MAGIC {
-            return Err(DecodeError::BadMagic);
-        }
-        let msg_type = MsgType::try_from(buf[OFF_TYPE])?;
-        let counter = u32::from_le_bytes([
-            buf[OFF_COUNTER],
-            buf[OFF_COUNTER + 1],
-            buf[OFF_COUNTER + 2],
-            buf[OFF_COUNTER + 3],
-        ]);
-        let len = u16::from_le_bytes([buf[OFF_LEN], buf[OFF_LEN + 1]]);
-        if usize::from(len) > ENOW_TEXT_MAX {
-            return Err(DecodeError::TextTooLong(len));
-        }
-        Ok(Self { msg_type, counter, text: &buf[OFF_TEXT..OFF_TEXT + usize::from(len)] })
-    }
-
-    /// Encode to the full padded 212 bytes the firmware expects.
-    #[must_use]
-    pub fn encode(&self) -> [u8; TEXT_MSG_LEN] {
-        let mut out = [0u8; TEXT_MSG_LEN];
-        out[..4].copy_from_slice(&MAGIC);
-        out[OFF_TYPE] = self.msg_type.as_u8();
-        out[OFF_COUNTER..OFF_COUNTER + 4].copy_from_slice(&self.counter.to_le_bytes());
-        // `new` and `decode` both bound this, so the cast cannot lose data.
-        let len = self.text.len().min(ENOW_TEXT_MAX);
-        #[allow(clippy::cast_possible_truncation)]
-        out[OFF_LEN..OFF_LEN + 2].copy_from_slice(&(len as u16).to_le_bytes());
-        out[OFF_TEXT..OFF_TEXT + len].copy_from_slice(&self.text[..len]);
-        out
-    }
+/// Write the header for `msg_type` into the front of `out`.
+fn write_header(out: &mut [u8], msg_type: MsgType) {
+    out[..4].copy_from_slice(&MAGIC);
+    out[OFF_VERSION] = WIRE_VERSION;
+    out[OFF_TYPE] = msg_type.as_u8();
 }
 
-/// What a node says it is, in the text field of every heartbeat it sends.
+/// What a node says it is, in every heartbeat it sends.
 ///
-/// Node → core is byte-identical to a stock node's, which is what lets vendor
-/// golden vectors keep testing this code — and it is also why the host cannot
-/// otherwise tell one firmware from the other. A stock node heartbeats like
-/// ours, is planned for like ours, and its radio acknowledges an assignment its
-/// application cannot decode; it then keeps scanning all forty channels while
-/// the share cut for it goes uncovered. Measured on a bench in
-/// `docs/phase-2-findings.md`: two nodes and a stranger covered less of the
-/// pool than the two nodes would have covered alone.
+/// This used to be an ASCII token squeezed into the vendor's text field,
+/// because that field was the only unused space on the wire and the only way to
+/// tell one of ours from a stock node whose bytes were otherwise identical. The
+/// magic answers that question now, so what is left is the part that was always
+/// load-bearing: a version, and which of two optional capabilities this
+/// particular board has.
 ///
-/// The heartbeat's text field is the place for the answer because it costs
-/// nothing. It is already on the wire, a stock node leaves it empty
-/// (`src/WiFiOps.cpp:1456-1457`), and every heartbeat carries it — so the host
-/// learns what a node is from the first frame it could act on, before it has
-/// to choose anything, and relearns it if the node is reflashed with something
-/// else. No handshake, no request, nothing to lose.
-///
-/// The token is ASCII, `wartui/<major>.<minor>` followed by an optional `;` and
-/// a comma-separated feature list: `wartui/0.1;ble,5g`. Unknown features are
-/// ignored rather than refused, because a node from a later build must not stop
-/// being a node just because it can do something new.
+/// Both features are refusals rather than requests. A node without `ble` is
+/// never handed [`ADMIN_FLAG_BLE`], because it would acknowledge the assignment
+/// and scan nothing; a node without `five_ghz` is never dealt a 5 GHz index,
+/// because a share it cannot tune is a share nobody scans.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Capabilities {
-    /// Bumped when node → core changes shape. Nothing gates on it yet — no such
-    /// change has happened — but it is the lever available when one does, and a
-    /// version that is on the wire from the start is one that need not be
-    /// retrofitted to a fleet already in the field.
+    /// Bumped when node → core changes shape in a way an older host cannot
+    /// read. Distinct from [`WIRE_VERSION`], which covers the frame around it.
     pub major: u8,
-    /// Bumped for additions a older host can ignore, such as a new feature
-    /// token.
+    /// Bumped for additions an older host can ignore.
     pub minor: u8,
     /// Built with the `ble` cargo feature, so the Bluetooth scan is code this
     /// node actually has. Says nothing about whether it is running: that is the
     /// assignment's [`ADMIN_FLAG_BLE`], and it is off at every boot.
     pub ble: bool,
-    /// The radio reaches 5 GHz. False on an ESP32-C6, which is 2.4 GHz only, so
-    /// a share of 5 GHz channels dealt to one is a share nobody scans.
+    /// The radio reaches 5 GHz. False on an ESP32-C6, which is 2.4 GHz only.
     pub five_ghz: bool,
 }
 
 /// The node protocol version this build speaks, written into every heartbeat.
-pub const CAPABILITY_MAJOR: u8 = 0;
+pub const CAPABILITY_MAJOR: u8 = 1;
 /// See [`CAPABILITY_MAJOR`].
-pub const CAPABILITY_MINOR: u8 = 1;
-
-/// Longest token [`Capabilities::write_into`] can produce, for sizing a buffer.
-///
-/// `wartui/255.255;ble,5g` is 21; the room above it is for one more feature
-/// name without every caller having to be found again.
-pub const CAPABILITY_MAX: usize = 32;
-
-const CAPABILITY_PREFIX: &[u8] = b"wartui/";
+pub const CAPABILITY_MINOR: u8 = 0;
 
 impl Capabilities {
     /// What this build is, for a node to announce.
@@ -282,126 +223,357 @@ impl Capabilities {
         Self { major: CAPABILITY_MAJOR, minor: CAPABILITY_MINOR, ble, five_ghz }
     }
 
-    /// Read the token out of a heartbeat's text field.
-    ///
-    /// `None` for anything that is not one, which is the ordinary case for a
-    /// stock node and for any wartui node built before this existed. It is a
-    /// deliberate silence rather than an error: nothing is wrong with such a
-    /// node, the host simply cannot use it.
+    /// The feature bits as the wire carries them.
     #[must_use]
-    pub fn parse(text: &[u8]) -> Option<Self> {
-        let rest = text.strip_prefix(CAPABILITY_PREFIX)?;
-        // Split the version from the features first, so a malformed feature
-        // list cannot make a well-formed version unreadable.
-        let (version, features) = match rest.iter().position(|b| *b == b';') {
-            Some(at) => (&rest[..at], &rest[at + 1..]),
-            None => (rest, &rest[rest.len()..]),
-        };
-        let dot = version.iter().position(|b| *b == b'.')?;
-        let major = ascii_u8(&version[..dot])?;
-        let minor = ascii_u8(&version[dot + 1..])?;
-
-        let mut out = Self { major, minor, ble: false, five_ghz: false };
-        for feature in features.split(|b| *b == b',') {
-            match feature {
-                b"ble" => out.ble = true,
-                b"5g" => out.five_ghz = true,
-                // Something a later build knows about. Carrying on is the whole
-                // point of a feature list: a node is not disqualified by having
-                // grown a capability this host has never heard of.
-                _ => {}
-            }
+    pub const fn flags(&self) -> u8 {
+        let mut flags = 0;
+        if self.ble {
+            flags |= CAP_FLAG_BLE;
         }
-        Some(out)
+        if self.five_ghz {
+            flags |= CAP_FLAG_5G;
+        }
+        flags
     }
 
-    /// Write the token into `out`, returning how many bytes it used.
+    /// Rebuild from the three bytes a heartbeat carries.
     ///
-    /// `None` if `out` is shorter than the token needs; [`CAPABILITY_MAX`] is
-    /// always enough.
-    pub fn write_into(&self, out: &mut [u8]) -> Option<usize> {
-        let mut at = 0usize;
-        let mut push = |bytes: &[u8], at: &mut usize| -> Option<()> {
-            out.get_mut(*at..*at + bytes.len())?.copy_from_slice(bytes);
-            *at += bytes.len();
-            Some(())
-        };
-        push(CAPABILITY_PREFIX, &mut at)?;
-        let mut digits = [0u8; 3];
-        push(u8_ascii(self.major, &mut digits), &mut at)?;
-        push(b".", &mut at)?;
-        let mut digits = [0u8; 3];
-        push(u8_ascii(self.minor, &mut digits), &mut at)?;
+    /// Unknown flag bits are ignored rather than refused, because a node from a
+    /// later build must not stop being a node just because it can do something
+    /// this host has never heard of.
+    #[must_use]
+    pub const fn from_parts(major: u8, minor: u8, flags: u8) -> Self {
+        Self { major, minor, ble: flags & CAP_FLAG_BLE != 0, five_ghz: flags & CAP_FLAG_5G != 0 }
+    }
+}
 
+/// The form the fleet table and the store column show, and the one the old
+/// ASCII token had: `wartui/1.0;ble,5g`.
+impl fmt::Display for Capabilities {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "wartui/{}.{}", self.major, self.minor)?;
         let mut first = true;
-        for (present, name) in [(self.ble, &b"ble"[..]), (self.five_ghz, &b"5g"[..])] {
+        for (present, name) in [(self.ble, "ble"), (self.five_ghz, "5g")] {
             if !present {
                 continue;
             }
-            push(if first { b";" } else { b"," }, &mut at)?;
-            push(name, &mut at)?;
+            f.write_str(if first { ";" } else { "," })?;
+            f.write_str(name)?;
             first = false;
         }
-        Some(at)
+        Ok(())
     }
 }
 
-/// Parse ASCII decimal digits, rejecting anything else. `no_std`, so this is
-/// written out rather than reached for.
-fn ascii_u8(bytes: &[u8]) -> Option<u8> {
-    if bytes.is_empty() || bytes.len() > 3 {
-        return None;
-    }
-    let mut value: u16 = 0;
-    for b in bytes {
-        let digit = b.checked_sub(b'0').filter(|d| *d <= 9)?;
-        value = value * 10 + u16::from(digit);
-    }
-    u8::try_from(value).ok()
+/// Node → core, once per completed channel sweep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeartbeatMsg {
+    /// Monotonic from node boot, so a value below the last one means the node
+    /// restarted and has forgotten whatever assignment it held.
+    pub counter: u32,
+    /// What that node is.
+    pub capabilities: Capabilities,
 }
 
-/// The other direction, into a caller-owned buffer.
-fn u8_ascii(value: u8, out: &mut [u8; 3]) -> &[u8] {
-    let mut at = out.len();
-    let mut left = value;
-    loop {
-        at -= 1;
-        out[at] = b'0' + left % 10;
-        left /= 10;
-        if left == 0 {
-            break;
+impl HeartbeatMsg {
+    /// Decode from a received frame.
+    ///
+    /// # Errors
+    /// See [`DecodeError`].
+    pub fn decode(buf: &[u8]) -> Result<Self, DecodeError> {
+        match header(buf)? {
+            MsgType::Heartbeat => {}
+            other => return Err(DecodeError::UnknownType(other.as_u8())),
+        }
+        if buf.len() < HEARTBEAT_MSG_LEN {
+            return Err(DecodeError::TooShort { need: HEARTBEAT_MSG_LEN, got: buf.len() });
+        }
+        let counter = u32::from_le_bytes([
+            buf[OFF_BODY],
+            buf[OFF_BODY + 1],
+            buf[OFF_BODY + 2],
+            buf[OFF_BODY + 3],
+        ]);
+        Ok(Self {
+            counter,
+            capabilities: Capabilities::from_parts(
+                buf[OFF_BODY + 4],
+                buf[OFF_BODY + 5],
+                buf[OFF_BODY + 6],
+            ),
+        })
+    }
+
+    /// Encode to the thirteen bytes a heartbeat is.
+    #[must_use]
+    pub fn encode(&self) -> [u8; HEARTBEAT_MSG_LEN] {
+        let mut out = [0u8; HEARTBEAT_MSG_LEN];
+        write_header(&mut out, MsgType::Heartbeat);
+        out[OFF_BODY..OFF_BODY + 4].copy_from_slice(&self.counter.to_le_bytes());
+        out[OFF_BODY + 4] = self.capabilities.major;
+        out[OFF_BODY + 5] = self.capabilities.minor;
+        out[OFF_BODY + 6] = self.capabilities.flags();
+        out
+    }
+}
+
+/// What a [`SightingMsg`] observed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum RecordKind {
+    /// A Wi-Fi access point.
+    Wifi = 0,
+    /// A BLE advertiser.
+    Ble = 1,
+}
+
+impl RecordKind {
+    /// The discriminant as it appears on the wire.
+    #[must_use]
+    pub const fn as_u8(self) -> u8 {
+        self as u8
+    }
+}
+
+impl TryFrom<u8> for RecordKind {
+    type Error = DecodeError;
+
+    fn try_from(v: u8) -> Result<Self, Self::Error> {
+        match v {
+            0 => Ok(Self::Wifi),
+            1 => Ok(Self::Ble),
+            other => Err(DecodeError::UnknownType(other)),
         }
     }
-    &out[at..]
 }
 
-/// wartui's channel assignment — the one frame a node accepts.
+/// What a network's information elements amount to.
 ///
-/// Fourteen bytes: magic, type 5, `assignment_version`, `node_index`,
-/// `node_count`, [`flags`](Self::flags), then five bytes of [`ChannelSet`].
+/// One byte on the wire, and the WiGLE `AuthMode` spelling only at the edge
+/// where WiGLE wants it — [`Display`](fmt::Display), which the store row and
+/// the exported column both go through. The vendor put the spelling on the
+/// wire, which cost seventy bytes a record to carry a closed set of eleven
+/// values and made the parser on this end a string comparison.
 ///
-/// It replaced the vendor's ten-byte `enow_admin_msg_t` in Phase 2 and is not
-/// compatible with it; [`is_legacy_admin`] is all that remains of that shape.
-/// The pair of `SCAN_CHANNELS` bounds became a forty-bit mask because a run
-/// cannot describe a restricted pool: the US pool is 2.4 GHz 1-11 and 5 GHz
-/// 36-165 with a gap between, so a node holding it needed two assignments in
-/// sequence, on a dwell timer, with coverage intermittent in between. A mask
-/// says it in one frame, and lets the planner deal channels round-robin so
-/// every node carries some of both bands.
+/// The set is open-ended, so a discriminant this build does not know is carried
+/// through as [`Security::Unknown`] rather than failing the frame: a node from
+/// a later build must not lose an observation to a security mode this host has
+/// never heard of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(missing_docs)]
+pub enum Security {
+    Open,
+    Wep,
+    WpaPsk,
+    Wpa2Psk,
+    WpaWpa2Psk,
+    /// `[WPA2]`, which is `WIFI_AUTH_WPA2_ENTERPRISE` despite the name.
+    Wpa2Enterprise,
+    Wpa3Psk,
+    Wpa2Wpa3Psk,
+    WapiPsk,
+    Undefined,
+    /// The placeholder the BLE path reports.
+    Ble,
+    /// A discriminant this build did not have when it was written.
+    Unknown(u8),
+}
+
+impl Security {
+    /// The discriminant as it appears on the wire.
+    #[must_use]
+    pub const fn as_u8(self) -> u8 {
+        match self {
+            Self::Open => 0,
+            Self::Wep => 1,
+            Self::WpaPsk => 2,
+            Self::Wpa2Psk => 3,
+            Self::WpaWpa2Psk => 4,
+            Self::Wpa2Enterprise => 5,
+            Self::Wpa3Psk => 6,
+            Self::Wpa2Wpa3Psk => 7,
+            Self::WapiPsk => 8,
+            Self::Undefined => 9,
+            Self::Ble => 10,
+            Self::Unknown(raw) => raw,
+        }
+    }
+
+    /// The inverse. Never yields [`Security::Unknown`] holding a value one of
+    /// the named variants already has, so `as_u8` and `from_u8` round-trip.
+    #[must_use]
+    pub const fn from_u8(raw: u8) -> Self {
+        match raw {
+            0 => Self::Open,
+            1 => Self::Wep,
+            2 => Self::WpaPsk,
+            3 => Self::Wpa2Psk,
+            4 => Self::WpaWpa2Psk,
+            5 => Self::Wpa2Enterprise,
+            6 => Self::Wpa3Psk,
+            7 => Self::Wpa2Wpa3Psk,
+            8 => Self::WapiPsk,
+            9 => Self::Undefined,
+            10 => Self::Ble,
+            other => Self::Unknown(other),
+        }
+    }
+
+    /// The WiGLE `AuthMode` token, for everything but [`Security::Unknown`].
+    #[must_use]
+    pub const fn token(self) -> Option<&'static str> {
+        Some(match self {
+            Self::Open => "[OPEN]",
+            Self::Wep => "[WEP]",
+            Self::WpaPsk => "[WPA_PSK]",
+            Self::Wpa2Psk => "[WPA2_PSK]",
+            Self::WpaWpa2Psk => "[WPA_WPA2_PSK]",
+            Self::Wpa2Enterprise => "[WPA2]",
+            Self::Wpa3Psk => "[WPA3_PSK]",
+            Self::Wpa2Wpa3Psk => "[WPA2_WPA3_PSK]",
+            Self::WapiPsk => "[WAPI_PSK]",
+            Self::Undefined => "[UNDEFINED]",
+            Self::Ble => "[BLE]",
+            Self::Unknown(_) => return None,
+        })
+    }
+}
+
+impl fmt::Display for Security {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.token() {
+            Some(token) => f.write_str(token),
+            // Said in a shape that still reads as an AuthMode token and still
+            // says which one, so an export from an older host is a lead rather
+            // than a shrug.
+            None => write!(f, "[UNKNOWN:{}]", self.as_u8()),
+        }
+    }
+}
+
+/// Node → core, one per newly-seen BSSID.
+///
+/// Seventeen bytes plus the SSID, against the vendor's fixed 212 — a
+/// comma-separated line in a frame padded to `sizeof` whatever the sender's
+/// compiler laid out, whether it carried two hundred bytes or thirty. That
+/// padding was paid on the control channel every node shares, once per access
+/// point, for a format neither end wanted.
+///
+/// The SSID is length-prefixed, which is the other thing that changes here. The
+/// vendor line was split on commas, so a comma inside an SSID took the record
+/// apart and the sender rewrote it as an underscore before transmitting — the
+/// real name lost at the one point in the path where it still existed. A length
+/// needs no escaping, and the CSV quoting the exporter already does is enough
+/// at the only boundary that is actually CSV.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SightingMsg<'a> {
+    /// Wi-Fi or BLE.
+    pub kind: RecordKind,
+    /// The observed BSSID or advertiser address, six raw bytes.
+    pub bssid: [u8; 6],
+    /// Wi-Fi channel number, or 0 for BLE.
+    pub channel: u8,
+    /// Signal strength in dBm, as the node measured it.
+    pub rssi: i8,
+    /// What its information elements amounted to.
+    pub security: Security,
+    /// Raw SSID bytes, at most [`SSID_MAX`]. Empty for a hidden network and
+    /// always empty for BLE; not necessarily UTF-8, because an SSID is whatever
+    /// the access point beaconed.
+    pub ssid: &'a [u8],
+}
+
+impl<'a> SightingMsg<'a> {
+    /// Decode from a received frame, borrowing the SSID from it.
+    ///
+    /// # Errors
+    /// See [`DecodeError`].
+    pub fn decode(buf: &'a [u8]) -> Result<Self, DecodeError> {
+        match header(buf)? {
+            MsgType::Sighting => {}
+            other => return Err(DecodeError::UnknownType(other.as_u8())),
+        }
+        if buf.len() < SIGHTING_MSG_MIN {
+            return Err(DecodeError::TooShort { need: SIGHTING_MSG_MIN, got: buf.len() });
+        }
+        let ssid_len = buf[OFF_BODY + 10];
+        if usize::from(ssid_len) > SSID_MAX {
+            return Err(DecodeError::SsidTooLong(ssid_len));
+        }
+        let need = SIGHTING_MSG_MIN + usize::from(ssid_len);
+        if buf.len() < need {
+            return Err(DecodeError::TooShort { need, got: buf.len() });
+        }
+        let mut bssid = [0u8; 6];
+        bssid.copy_from_slice(&buf[OFF_BODY + 1..OFF_BODY + 7]);
+        Ok(Self {
+            kind: RecordKind::try_from(buf[OFF_BODY])?,
+            bssid,
+            channel: buf[OFF_BODY + 7],
+            // Two's complement, so the cast is the reinterpretation we want.
+            #[allow(clippy::cast_possible_wrap)]
+            rssi: buf[OFF_BODY + 8] as i8,
+            security: Security::from_u8(buf[OFF_BODY + 9]),
+            ssid: &buf[SIGHTING_MSG_MIN..need],
+        })
+    }
+
+    /// Write the frame into `out`, returning how many bytes it took.
+    ///
+    /// `None` if `out` is too small or the SSID is longer than [`SSID_MAX`];
+    /// [`SIGHTING_MSG_MAX`] is always enough. Nothing is written when it fails,
+    /// so a caller cannot broadcast a half-formed frame.
+    #[must_use]
+    pub fn encode_into(&self, out: &mut [u8]) -> Option<usize> {
+        if self.ssid.len() > SSID_MAX {
+            return None;
+        }
+        let len = SIGHTING_MSG_MIN + self.ssid.len();
+        let out = out.get_mut(..len)?;
+        write_header(out, MsgType::Sighting);
+        out[OFF_BODY] = self.kind.as_u8();
+        out[OFF_BODY + 1..OFF_BODY + 7].copy_from_slice(&self.bssid);
+        out[OFF_BODY + 7] = self.channel;
+        // Two's complement again; `to_le_bytes` on an `i8` is the same byte.
+        out[OFF_BODY + 8] = self.rssi.to_le_bytes()[0];
+        out[OFF_BODY + 9] = self.security.as_u8();
+        // The cast cannot lose data: bounded by SSID_MAX, which is 32.
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            out[OFF_BODY + 10] = self.ssid.len() as u8;
+        }
+        out[SIGHTING_MSG_MIN..len].copy_from_slice(self.ssid);
+        Some(len)
+    }
+}
+
+/// wartui's channel assignment — the one frame a node acts on.
+///
+/// Fifteen bytes: the header, then [`epoch`](Self::epoch), `node_index`,
+/// `node_count`, [`flags`](Self::flags) and five bytes of [`ChannelSet`].
+///
+/// The mask is why this is not a pair of bounds. A run cannot describe a
+/// restricted pool: the US pool is 2.4 GHz 1-11 and 5 GHz 36-165 with a gap
+/// between, so a node holding it needed two assignments in sequence, on a dwell
+/// timer, with coverage intermittent in between. A mask says it in one frame,
+/// and lets the planner deal channels round-robin so every node carries some of
+/// both bands.
 ///
 /// Everything below is why the *delivery* of this frame is shaped the way it
-/// is, and none of it changed with the layout.
+/// is, and none of it changed with the layout. It is measured vendor behaviour,
+/// kept because it is the reason for a design decision rather than because
+/// anything here still interoperates.
 ///
 /// Observed on real hardware: a vendor core's assignment to its single node
 /// went out once and was retransmitted 31 times by the radio, all 32 frames
 /// sharing one 802.11 sequence number with the retry bit set on all but the
 /// first. Nothing acknowledged it, yet the core cleared its dirty flag from the
-/// `esp_now_send` return value (`src/WiFiOps.cpp:679`) and moved on believing
-/// the node had been assigned. Broadcast heartbeats and observations from the
-/// same node in the same capture each carried their own sequence number and
-/// were never retried, so the retries are specific to unicast. Acknowledgements
-/// were then captured directly: of 9505 seen on the channel, none named the
-/// core, so the node genuinely never answered.
+/// `esp_now_send` return value and moved on believing the node had been
+/// assigned. Broadcast heartbeats and observations from the same node in the
+/// same capture each carried their own sequence number and were never retried,
+/// so the retries are specific to unicast. Acknowledgements were then captured
+/// directly: of 9505 seen on the channel, none named the core, so the node
+/// genuinely never answered.
 ///
 /// A later capture found the cause. With two nodes differing only in whether
 /// BLE was enabled, the BLE-off node acknowledged both assignments it was sent,
@@ -421,9 +593,11 @@ fn u8_ascii(value: u8, out: &mut [u8; 3]) -> &[u8] {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AdminMsg {
     /// Epoch counter. A node adopts the assignment only when this *differs*
-    /// from the one it currently holds (`!=`, not `>`, `src/WiFiOps.cpp:1198`),
-    /// and never uses 0 on the wire.
-    pub assignment_version: u8,
+    /// from the one it currently holds, and never uses 0 on the wire.
+    ///
+    /// Distinct from the header's [`WIRE_VERSION`], which is the shape of the
+    /// frame rather than the generation of the plan inside it.
+    pub epoch: u8,
     /// This node's slot in the fleet-wide staggering order.
     pub node_index: u8,
     /// Fleet size the stagger is computed against.
@@ -432,7 +606,7 @@ pub struct AdminMsg {
     ///
     /// Carried whole rather than unpacked into `bool`s so an unknown bit set by
     /// a newer host survives a decode and re-encode instead of being quietly
-    /// dropped — the same reason [`Security::Other`] exists.
+    /// dropped — the same reason [`Security::Unknown`] exists.
     pub flags: u8,
     /// Which [`SCAN_CHANNELS`](crate::plan::SCAN_CHANNELS) indices to dwell on.
     pub channels: ChannelSet,
@@ -456,87 +630,65 @@ impl AdminMsg {
     /// # Errors
     /// See [`DecodeError`].
     pub fn decode(buf: &[u8]) -> Result<Self, DecodeError> {
-        if buf.len() < ADMIN_MSG_LEN {
-            return Err(DecodeError::TooShort { need: ADMIN_MSG_LEN, got: buf.len() });
-        }
-        if buf[..4] != MAGIC {
-            return Err(DecodeError::BadMagic);
-        }
-        match MsgType::try_from(buf[OFF_TYPE])? {
+        match header(buf)? {
             MsgType::Admin => {}
             other => return Err(DecodeError::UnknownType(other.as_u8())),
         }
+        if buf.len() < ADMIN_MSG_LEN {
+            return Err(DecodeError::TooShort { need: ADMIN_MSG_LEN, got: buf.len() });
+        }
         let mut channels = [0u8; CHANNEL_SET_BYTES];
-        channels.copy_from_slice(&buf[OFF_CHANNELS..OFF_CHANNELS + CHANNEL_SET_BYTES]);
+        channels.copy_from_slice(&buf[OFF_BODY + 4..OFF_BODY + 4 + CHANNEL_SET_BYTES]);
         Ok(Self {
-            assignment_version: buf[OFF_VERSION],
-            node_index: buf[OFF_NODE_INDEX],
-            node_count: buf[OFF_NODE_COUNT],
-            flags: buf[OFF_FLAGS],
+            epoch: buf[OFF_BODY],
+            node_index: buf[OFF_BODY + 1],
+            node_count: buf[OFF_BODY + 2],
+            flags: buf[OFF_BODY + 3],
             channels: ChannelSet::from_bytes(channels),
         })
     }
 
-    /// Encode to the 14 bytes a wartui node expects.
+    /// Encode to the fifteen bytes a wartui node expects.
     #[must_use]
     pub fn encode(&self) -> [u8; ADMIN_MSG_LEN] {
         let mut out = [0u8; ADMIN_MSG_LEN];
-        out[..4].copy_from_slice(&MAGIC);
-        out[OFF_TYPE] = MsgType::Admin.as_u8();
-        out[OFF_VERSION] = self.assignment_version;
-        out[OFF_NODE_INDEX] = self.node_index;
-        out[OFF_NODE_COUNT] = self.node_count;
-        out[OFF_FLAGS] = self.flags;
-        out[OFF_CHANNELS..].copy_from_slice(&self.channels.to_bytes());
+        write_header(&mut out, MsgType::Admin);
+        out[OFF_BODY] = self.epoch;
+        out[OFF_BODY + 1] = self.node_index;
+        out[OFF_BODY + 2] = self.node_count;
+        out[OFF_BODY + 3] = self.flags;
+        out[OFF_BODY + 4..].copy_from_slice(&self.channels.to_bytes());
         out
     }
 }
 
-/// Whether `buf` is the vendor core's ten-byte assignment.
-///
-/// Nothing here decodes one — the fields are not ours any more and acting on
-/// them would be adopting another core's idea of the fleet. It is recognised
-/// because it has to be *reported*: a stock core powered up in the same room
-/// is assigning wartui's nodes channels wartui did not choose, and the symptom
-/// is a fleet that keeps changing its mind for no reason this host can see.
-/// Counting it as line noise would hide the one clue.
-///
-/// Deliberately exact on length. ESP-NOW delivers a frame at the length it was
-/// sent, so a ten-byte type-5 frame is the vendor's and a fourteen-byte one is
-/// [`AdminMsg`]; nothing has to guess.
-#[must_use]
-pub fn is_legacy_admin(buf: &[u8]) -> bool {
-    buf.len() == LEGACY_ADMIN_MSG_LEN
-        && buf[..4] == MAGIC
-        && buf[OFF_TYPE] == MsgType::Admin.as_u8()
-}
-
 /// Turn a host-side monotonic assignment counter into the byte the wire carries.
 ///
-/// Divergence 4. The vendor core keeps `current_assignment_version` in RAM and
-/// resets it to 1 at every boot (`src/WiFiOps.h:218`), while nodes adopt an
-/// assignment only when the byte *differs* from the one they hold (`!=`, not
-/// `>`, `src/WiFiOps.cpp:1198`). Between them those two facts mean a core that
-/// restarts and recomputes the same assignment is silently ignored by every
-/// node that already holds it — and if the topology changed while the core was
-/// down, the two views diverge permanently with nothing to say so.
+/// The vendor core kept its equivalent in RAM and reset it to 1 at every boot,
+/// while nodes adopt an assignment only when the byte *differs* from the one
+/// they hold. Between them those two facts mean a core that restarts and
+/// recomputes the same assignment is silently ignored by every node that
+/// already holds it — and if the topology changed while the core was down, the
+/// two views diverge permanently with nothing to say so.
 ///
-/// wartui persists a `u64` instead and narrows it here. Zero is skipped
-/// because the firmware never puts it on the wire, so a node holding a
-/// freshly-zeroed field cannot be mistaken for one holding an assignment.
+/// wartui persists a `u64` instead and narrows it here. Zero is skipped so a
+/// node holding a freshly-zeroed field cannot be mistaken for one holding an
+/// assignment.
 #[must_use]
-pub const fn wire_version(counter: u64) -> u8 {
+pub const fn wire_epoch(counter: u64) -> u8 {
     // `% 255` lands in 0..=254; the offset moves that to 1..=255.
     ((counter.wrapping_sub(1) % 255) as u8) + 1
 }
 
-/// Either kind of frame, dispatched on the type byte.
+/// Any frame, dispatched on the type byte.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Frame<'a> {
-    /// A 212-byte text-shaped frame.
-    Text(TextMsg<'a>),
-    /// A 14-byte assignment. The vendor's ten-byte one is not one of these;
-    /// see [`is_legacy_admin`].
+    /// Node → core.
+    Heartbeat(HeartbeatMsg),
+    /// Node → core.
+    Sighting(SightingMsg<'a>),
+    /// Core → node. Seeing one this host did not send means another core is
+    /// driving this fleet.
     Admin(AdminMsg),
 }
 
@@ -546,340 +698,54 @@ impl<'a> Frame<'a> {
     /// # Errors
     /// See [`DecodeError`].
     pub fn decode(buf: &'a [u8]) -> Result<Self, DecodeError> {
-        // Magic plus the type byte is the least that lets us pick a layout;
-        // the firmware applies the same floor at `src/WiFiOps.cpp:990`.
-        if buf.len() < 5 {
-            return Err(DecodeError::TooShort { need: 5, got: buf.len() });
-        }
-        if buf[..4] != MAGIC {
-            return Err(DecodeError::BadMagic);
-        }
-        match MsgType::try_from(buf[OFF_TYPE])? {
+        match header(buf)? {
+            MsgType::Heartbeat => HeartbeatMsg::decode(buf).map(Frame::Heartbeat),
+            MsgType::Sighting => SightingMsg::decode(buf).map(Frame::Sighting),
             MsgType::Admin => AdminMsg::decode(buf).map(Frame::Admin),
-            _ => TextMsg::decode(buf).map(Frame::Text),
         }
     }
 }
 
-/// What a [`WardriveLine`] observed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum RecordKind {
-    /// A Wi-Fi access point. Trailing field `W`.
-    Wifi,
-    /// A BLE advertiser. Trailing field `B`.
-    Ble,
-}
-
-/// The `AuthMode` token, as produced by `security_int_to_string`
-/// (`src/WiFiOps.cpp:1833-1878`).
+/// Recognising the vendor's traffic, in order to report it.
 ///
-/// The firmware maps only nine `wifi_auth_mode_t` values and collapses
-/// everything else — WPA3-Enterprise, OWE, WPA3-192 — into `[UNDEFINED]`. The
-/// set is open-ended, so an unrecognised token is carried through as
-/// [`Security::Other`] rather than failing the parse.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(missing_docs)]
-pub enum Security<'a> {
-    Open,
-    Wep,
-    WpaPsk,
-    Wpa2Psk,
-    WpaWpa2Psk,
-    /// `[WPA2]`, which is `WIFI_AUTH_WPA2_ENTERPRISE` despite the name.
-    Wpa2Enterprise,
-    Wpa3Psk,
-    Wpa2Wpa3Psk,
-    WapiPsk,
-    Undefined,
-    /// `[BLE]`, the placeholder the BLE path emits.
-    Ble,
-    /// A token this firmware version did not have when wartui was written.
-    Other(&'a [u8]),
-}
-
-impl<'a> Security<'a> {
-    fn parse(raw: &'a [u8]) -> Self {
-        match raw {
-            b"[OPEN]" => Self::Open,
-            b"[WEP]" => Self::Wep,
-            b"[WPA_PSK]" => Self::WpaPsk,
-            b"[WPA2_PSK]" => Self::Wpa2Psk,
-            b"[WPA_WPA2_PSK]" => Self::WpaWpa2Psk,
-            b"[WPA2]" => Self::Wpa2Enterprise,
-            b"[WPA3_PSK]" => Self::Wpa3Psk,
-            b"[WPA2_WPA3_PSK]" => Self::Wpa2Wpa3Psk,
-            b"[WAPI_PSK]" => Self::WapiPsk,
-            b"[UNDEFINED]" => Self::Undefined,
-            b"[BLE]" => Self::Ble,
-            other => Self::Other(other),
-        }
-    }
-
-    /// The token exactly as it appeared on the wire, for round-tripping into
-    /// the WiGLE `AuthMode` column.
-    #[must_use]
-    pub const fn as_bytes(&self) -> &'a [u8] {
-        match self {
-            Self::Open => b"[OPEN]",
-            Self::Wep => b"[WEP]",
-            Self::WpaPsk => b"[WPA_PSK]",
-            Self::Wpa2Psk => b"[WPA2_PSK]",
-            Self::WpaWpa2Psk => b"[WPA_WPA2_PSK]",
-            Self::Wpa2Enterprise => b"[WPA2]",
-            Self::Wpa3Psk => b"[WPA3_PSK]",
-            Self::Wpa2Wpa3Psk => b"[WPA2_WPA3_PSK]",
-            Self::WapiPsk => b"[WAPI_PSK]",
-            Self::Undefined => b"[UNDEFINED]",
-            Self::Ble => b"[BLE]",
-            Self::Other(raw) => raw,
-        }
-    }
-}
-
-/// Why a [`MsgType::Text`] payload was not a valid wardrive line.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LineError {
-    /// Not exactly six comma-separated fields. `parseWardriveLine` applies the
-    /// same rule (`src/WiFiOps.cpp:952-981`).
-    FieldCount(usize),
-    /// The BSSID was not 17 characters of colon-separated hex.
-    BadBssid,
-    /// The channel field was not a number.
-    BadChannel,
-    /// The RSSI field was not a number.
-    BadRssi,
-    /// The trailing field was neither `W` nor `B`.
-    BadKind,
-}
-
-impl fmt::Display for LineError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::FieldCount(n) => write!(f, "expected 6 comma-separated fields, got {n}"),
-            Self::BadBssid => f.write_str("malformed BSSID"),
-            Self::BadChannel => f.write_str("malformed channel"),
-            Self::BadRssi => f.write_str("malformed RSSI"),
-            Self::BadKind => f.write_str("record kind was neither W nor B"),
-        }
-    }
-}
-
-impl core::error::Error for LineError {}
-
-/// One observation, parsed from a [`MsgType::Text`] payload.
+/// Nothing here decodes a byte. The fields are another fleet's idea of another
+/// fleet and acting on them would be adopting it. But a vendor core or node on
+/// the control channel is an operational fact — it is transmitting where these
+/// nodes are listening, and on a stock fleet the probe requests are active
+/// scans — so counting it as line noise would hide the one clue an operator has
+/// for a channel that is busier than the fleet can explain.
 ///
-/// The payload is `bssid,essid,security,channel,rssi,type`
-/// (`src/WiFiOps.cpp:1777` and `:144`). It is deliberately parsed from bytes
-/// rather than `str`: the SSID is whatever the access point beaconed, so it may
-/// be invalid UTF-8. The firmware replaces commas in it with underscores
-/// (`ssid.replace(",","_")`), which is what makes splitting on `,` safe.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct WardriveLine<'a> {
-    /// Six raw bytes. Normalised here because the Wi-Fi path emits uppercase
-    /// hex and the BLE path lowercase, and treating those as different keys
-    /// would double-count.
-    pub bssid: [u8; 6],
-    /// Raw SSID bytes, possibly empty (always empty for BLE) and possibly not
-    /// UTF-8.
-    pub ssid: &'a [u8],
-    /// The `AuthMode` token.
-    pub security: Security<'a>,
-    /// Wi-Fi channel number, or 0 for BLE.
-    pub channel: u16,
-    /// Signal strength in dBm, as the node measured it.
-    pub rssi: i16,
-    /// Wi-Fi or BLE.
-    pub kind: RecordKind,
-}
+/// The vendor magic is all that is matched. Since wartui's own frames no longer
+/// carry it, anything that does belongs to somebody else by definition.
+pub mod foreign {
+    /// The vendor's frame preamble.
+    pub const VENDOR_MAGIC: [u8; 4] = *b"ENOW";
 
-impl<'a> WardriveLine<'a> {
-    /// Parse a text payload.
-    ///
-    /// # Errors
-    /// See [`LineError`].
-    pub fn parse(raw: &'a [u8]) -> Result<Self, LineError> {
-        let mut fields = [&[][..]; 6];
-        let mut count = 0usize;
-        for field in raw.split(|&b| b == b',') {
-            if count < fields.len() {
-                fields[count] = field;
-            }
-            count += 1;
-        }
-        if count != 6 {
-            return Err(LineError::FieldCount(count));
-        }
+    /// The vendor's `MSG_ADMIN` type byte.
+    const VENDOR_ADMIN: u8 = 5;
 
-        let kind = match fields[5] {
-            b"W" => RecordKind::Wifi,
-            b"B" => RecordKind::Ble,
-            _ => return Err(LineError::BadKind),
-        };
+    /// Offset of the type byte in a vendor frame.
+    const VENDOR_OFF_TYPE: usize = 4;
 
-        Ok(Self {
-            bssid: parse_mac(fields[0]).ok_or(LineError::BadBssid)?,
-            ssid: fields[1],
-            security: Security::parse(fields[2]),
-            channel: parse_u16(fields[3]).ok_or(LineError::BadChannel)?,
-            rssi: parse_i16(fields[4]).ok_or(LineError::BadRssi)?,
-            kind,
-        })
+    /// What kind of vendor frame this is, to the small extent it matters.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Foreign {
+        /// Another core is assigning channels nearby. Worth its own count: it
+        /// is the difference between a neighbouring fleet and a second core
+        /// contending for this one.
+        Admin,
+        /// A vendor node's heartbeat or observation, or the encrypted-pairing
+        /// frames only a node with encryption switched on ever sends.
+        Node,
     }
 
-    /// Write the payload a node transmits, returning how many bytes it took.
-    ///
-    /// The inverse of [`Self::parse`], and the half the host never needed:
-    /// wartui only ever read these lines until a node of our own had to emit
-    /// them. [`WARDRIVE_LINE_MAX`] is a buffer this can always finish in;
-    /// anything smaller may return `None`, and nothing is written when it does.
-    ///
-    /// Two details are the firmware's rather than ours. Commas inside the SSID
-    /// become underscores, because the core splits on `,` and counts six fields
-    /// (`ssid.replace(",","_")`, `src/WiFiOps.cpp:1768`) — an SSID containing
-    /// one would otherwise take the record apart. And the BSSID is uppercase
-    /// hex for Wi-Fi and lowercase for BLE, which is not a choice so much as
-    /// the two paths having been written by different hands
-    /// (`WiFi.BSSIDstr()` at `src/WiFiOps.cpp:1777` against NimBLE's
-    /// `toString()` at `:144`); [`Self::parse`] normalises it away again.
+    /// Classify a frame that is not ours, or `None` if it is not the vendor's
+    /// either.
     #[must_use]
-    pub fn write_into(&self, out: &mut [u8]) -> Option<usize> {
-        let mut w = Writer { out, at: 0 };
-        w.mac(&self.bssid, self.kind == RecordKind::Wifi)?;
-        w.byte(b',')?;
-        for &b in self.ssid {
-            w.byte(if b == b',' { b'_' } else { b })?;
-        }
-        w.byte(b',')?;
-        w.bytes(self.security.as_bytes())?;
-        w.byte(b',')?;
-        w.u16(self.channel)?;
-        w.byte(b',')?;
-        w.i16(self.rssi)?;
-        w.byte(b',')?;
-        w.bytes(match self.kind {
-            RecordKind::Wifi => b"W",
-            RecordKind::Ble => b"B",
-        })?;
-        Some(w.at)
-    }
-}
-
-/// A cursor over the caller's buffer, so a line that does not fit stops at the
-/// first byte that would not rather than being written half-formed.
-struct Writer<'b> {
-    out: &'b mut [u8],
-    at: usize,
-}
-
-impl Writer<'_> {
-    fn byte(&mut self, b: u8) -> Option<()> {
-        *self.out.get_mut(self.at)? = b;
-        self.at += 1;
-        Some(())
-    }
-
-    fn bytes(&mut self, bytes: &[u8]) -> Option<()> {
-        for &b in bytes {
-            self.byte(b)?;
-        }
-        Some(())
-    }
-
-    fn mac(&mut self, mac: &[u8; 6], upper: bool) -> Option<()> {
-        const UPPER: &[u8; 16] = b"0123456789ABCDEF";
-        const LOWER: &[u8; 16] = b"0123456789abcdef";
-        let digits = if upper { UPPER } else { LOWER };
-        for (i, &octet) in mac.iter().enumerate() {
-            if i > 0 {
-                self.byte(b':')?;
-            }
-            self.byte(digits[usize::from(octet >> 4)])?;
-            self.byte(digits[usize::from(octet & 0x0F)])?;
-        }
-        Some(())
-    }
-
-    fn u16(&mut self, mut value: u16) -> Option<()> {
-        let mut digits = [0u8; 5];
-        let mut n = 0;
-        loop {
-            // Cast is safe: a decimal digit is 0..=9.
-            #[allow(clippy::cast_possible_truncation)]
-            {
-                digits[n] = b'0' + (value % 10) as u8;
-            }
-            n += 1;
-            value /= 10;
-            if value == 0 {
-                break;
-            }
-        }
-        for &d in digits[..n].iter().rev() {
-            self.byte(d)?;
-        }
-        Some(())
-    }
-
-    fn i16(&mut self, value: i16) -> Option<()> {
-        if value < 0 {
-            self.byte(b'-')?;
-        }
-        // Through `u16` rather than `-value`, so `i16::MIN` is not a panic
-        // waiting for a receiver with an implausible reading.
-        self.u16(value.unsigned_abs())
-    }
-}
-
-/// `AA:BB:CC:DD:EE:FF` in either case to six bytes.
-fn parse_mac(raw: &[u8]) -> Option<[u8; 6]> {
-    if raw.len() != 17 {
-        return None;
-    }
-    let mut out = [0u8; 6];
-    for (i, byte) in out.iter_mut().enumerate() {
-        let at = i * 3;
-        if i > 0 && raw[at - 1] != b':' {
+    pub fn classify(buf: &[u8]) -> Option<Foreign> {
+        if buf.len() <= VENDOR_OFF_TYPE || buf[..4] != VENDOR_MAGIC {
             return None;
         }
-        *byte = (hex_nibble(raw[at])? << 4) | hex_nibble(raw[at + 1])?;
+        Some(if buf[VENDOR_OFF_TYPE] == VENDOR_ADMIN { Foreign::Admin } else { Foreign::Node })
     }
-    Some(out)
-}
-
-fn hex_nibble(c: u8) -> Option<u8> {
-    match c {
-        b'0'..=b'9' => Some(c - b'0'),
-        b'a'..=b'f' => Some(c - b'a' + 10),
-        b'A'..=b'F' => Some(c - b'A' + 10),
-        _ => None,
-    }
-}
-
-fn parse_u16(raw: &[u8]) -> Option<u16> {
-    if raw.is_empty() {
-        return None;
-    }
-    let mut acc: u16 = 0;
-    for &c in raw {
-        let d = c.checked_sub(b'0').filter(|d| *d <= 9)?;
-        acc = acc.checked_mul(10)?.checked_add(u16::from(d))?;
-    }
-    Some(acc)
-}
-
-fn parse_i16(raw: &[u8]) -> Option<i16> {
-    let (negative, digits) = match raw.split_first() {
-        Some((b'-', rest)) => (true, rest),
-        Some((b'+', rest)) => (false, rest),
-        _ => (false, raw),
-    };
-    if digits.is_empty() {
-        return None;
-    }
-    let mut acc: i16 = 0;
-    for &c in digits {
-        let d = c.checked_sub(b'0').filter(|d| *d <= 9)?;
-        acc = acc.checked_mul(10)?.checked_sub(i16::from(d))?;
-    }
-    if negative { Some(acc) } else { acc.checked_neg() }
 }

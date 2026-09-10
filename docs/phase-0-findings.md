@@ -16,6 +16,15 @@ them at all.
 
 ## The wire format matches, byte for byte
 
+> **Superseded, 2026-09-10.** True of the fleet measured here and of wartui at
+> the time. It is no longer true of wartui in either direction: every frame now
+> carries wartui's own magic, and the vendor vectors and the C++ generator that
+> produced them have been deleted along with `tools/golden`. The reason is in
+> `crates/wartui-proto/src/air.rs` and comes straight out of this document's own
+> measurements — two fleets that share a format share one conversation. What
+> survives here is the record of what the vendor firmware puts on the air, which
+> is what `air::foreign` recognises in order to report it.
+
 129 captured frames decode and re-encode identically, and are checked in as
 golden vectors in `crates/wartui-proto/tests/golden_vectors.txt`. They confirm
 212-byte text frames and 10-byte admin frames, `ENOW` magic, little-endian
@@ -78,8 +87,11 @@ Two things follow:
 
 Running a second node made the consequence visible. The core computed and sent
 the split correctly — version 3, index 0 of 2 on indices 0..19, index 1 of 2 on
-20..39, byte for byte what `wartui-proto`'s planner produces — and each
-assignment was again retried 31 times with no acknowledgement.
+20..39, byte for byte what `wartui-proto`'s planner produced at the time — and
+each assignment was again retried 31 times with no acknowledgement. (That last
+comparison stopped being possible in Phase 2, when the assignment became
+wartui's own frame; the planner is checked against properties now, in
+`crates/wartui-proto/tests/planner.rs`.)
 
 Neither node adopted it. The decisive evidence is which channels each node
 reported networks on afterwards, since a node can only report an access point
@@ -186,4 +198,6 @@ minute, not a firehose.
 Confirmed directly: 147–151 before a power cycle, 1–6 after. This is the signal
 behind divergence 5, which lets the host notice a node has rebooted and re-send
 its assignment. The vendor core does not do this, so a rebooted node under a
-stable topology keeps the 40-channel default indefinitely.
+stable topology keeps the 40-channel default indefinitely. The counter itself
+carried across into wartui's own heartbeat unchanged, so the divergence and its
+reasoning outlived the frame they were measured in.

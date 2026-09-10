@@ -8,29 +8,48 @@ use std::collections::{HashMap, HashSet};
 use tokio::time::Instant;
 use wartui_bridge::sim::{SimConfig, SimTransport};
 use wartui_bridge::{LinkEvent, LinkHandle};
-use wartui_proto::air::{AdminMsg, Capabilities, Frame, MsgType, WardriveLine};
+use wartui_proto::air::{AdminMsg, Frame, HeartbeatMsg, RecordKind, SightingMsg};
 use wartui_proto::link::{BridgeToHost, EspNowPayload, HostToBridge, Mac, SendStatus};
 use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun};
 
-/// The next frame from any node, as (source, decoded).
-async fn next_frame(link: &mut LinkHandle) -> (Mac, MsgType, Vec<u8>) {
+/// The next node → core frame, as (source, the bytes it arrived as).
+///
+/// Handed back raw rather than decoded because a `SightingMsg` borrows its
+/// SSID from the frame, so the caller has to own the bytes to hold one.
+async fn next_frame(link: &mut LinkHandle) -> (Mac, Vec<u8>) {
     loop {
         match link.recv().await.expect("simulator keeps running") {
             LinkEvent::Message(BridgeToHost::Rx { src, payload, .. }) => {
                 let frame = Frame::decode(&payload).expect("simulator emits valid frames");
-                let Frame::Text(text) = frame else { continue };
-                return (src, text.msg_type, text.text.to_vec());
+                if matches!(frame, Frame::Admin(_)) {
+                    continue;
+                }
+                return (src, payload.to_vec());
             }
             _ => continue,
         }
     }
 }
 
+fn heartbeat_of(raw: &[u8]) -> Option<HeartbeatMsg> {
+    match Frame::decode(raw) {
+        Ok(Frame::Heartbeat(heartbeat)) => Some(heartbeat),
+        _ => None,
+    }
+}
+
+fn sighting_of(raw: &[u8]) -> Option<SightingMsg<'_>> {
+    match Frame::decode(raw) {
+        Ok(Frame::Sighting(sighting)) => Some(sighting),
+        _ => None,
+    }
+}
+
 /// Wait for the next heartbeat from `want`, returning when it arrived.
 async fn next_heartbeat_from(link: &mut LinkHandle, want: Mac) -> Instant {
     loop {
-        let (src, kind, _) = next_frame(link).await;
-        if src == want && kind == MsgType::Heartbeat {
+        let (src, raw) = next_frame(link).await;
+        if src == want && heartbeat_of(&raw).is_some() {
             return Instant::now();
         }
     }
@@ -38,7 +57,7 @@ async fn next_heartbeat_from(link: &mut LinkHandle, want: Mac) -> Instant {
 
 fn admin_command(dst: Mac, admin: AdminMsg) -> HostToBridge {
     let mut payload = EspNowPayload::new();
-    payload.extend_from_slice(&admin.encode()).expect("fourteen bytes fits");
+    payload.extend_from_slice(&admin.encode()).expect("an assignment fits");
     HostToBridge::SendEspNow { id: 1, dst, ensure_peer: true, payload }
 }
 
@@ -52,7 +71,7 @@ fn assign(link: &LinkHandle, version: u8, channels: ChannelSet, ble: bool) {
     link.send_urgent(admin_command(
         SimTransport::node_mac(0),
         AdminMsg {
-            assignment_version: version,
+            epoch: version,
             node_index: 0,
             node_count: 1,
             flags: AdminMsg::flags_for(ble),
@@ -96,8 +115,8 @@ async fn every_node_eventually_heartbeats() {
 
     let mut seen: HashSet<Mac> = HashSet::new();
     while seen.len() < 4 {
-        let (src, kind, _) = next_frame(&mut link).await;
-        if kind == MsgType::Heartbeat {
+        let (src, raw) = next_frame(&mut link).await;
+        if heartbeat_of(&raw).is_some() {
             seen.insert(src);
         }
     }
@@ -114,29 +133,25 @@ async fn heartbeat_counters_increase_monotonically() {
     while counters.len() < 3 {
         if let LinkEvent::Message(BridgeToHost::Rx { payload, .. }) =
             link.recv().await.expect("running")
-            && let Ok(Frame::Text(t)) = Frame::decode(&payload)
-            && t.msg_type == MsgType::Heartbeat
+            && let Ok(Frame::Heartbeat(heartbeat)) = Frame::decode(&payload)
         {
-            counters.push(t.counter);
+            counters.push(heartbeat.counter);
         }
     }
     assert_eq!(counters, vec![1, 2, 3], "a fresh node counts up from its boot");
 }
 
 #[tokio::test(start_paused = true)]
-async fn observations_parse_as_wardrive_lines() {
+async fn observations_decode_as_sightings() {
     let config = SimConfig { node_count: 1, ..SimConfig::default() };
     let mut link = SimTransport::new(config).start().expect("starts");
     assign(&link, 1, everything(), true);
 
     let mut checked = 0;
     while checked < 20 {
-        let (_, kind, text) = next_frame(&mut link).await;
-        if kind != MsgType::Text {
-            continue;
-        }
-        let line = WardriveLine::parse(&text).expect("simulator emits parseable lines");
-        assert!(line.rssi < 0, "signal strengths are negative dBm");
+        let (_, raw) = next_frame(&mut link).await;
+        let Some(sighting) = sighting_of(&raw) else { continue };
+        assert!(sighting.rssi < 0, "signal strengths are negative dBm");
         checked += 1;
     }
 }
@@ -154,13 +169,10 @@ async fn a_node_reports_each_wifi_network_only_once() {
     let mut counts: HashMap<[u8; 6], usize> = HashMap::new();
     let mut sweeps = 0;
     while sweeps < 3 {
-        let (_, kind, text) = next_frame(&mut link).await;
-        match kind {
-            MsgType::Heartbeat => sweeps += 1,
-            MsgType::Text => {
-                let line = WardriveLine::parse(&text).expect("parseable");
-                *counts.entry(line.bssid).or_default() += 1;
-            }
+        let (_, raw) = next_frame(&mut link).await;
+        match Frame::decode(&raw) {
+            Ok(Frame::Heartbeat(_)) => sweeps += 1,
+            Ok(Frame::Sighting(sighting)) => *counts.entry(sighting.bssid).or_default() += 1,
             _ => {}
         }
     }
@@ -178,14 +190,11 @@ async fn ble_sightings_keep_arriving_because_their_addresses_rotate() {
     let mut ble = HashSet::new();
     let mut sweeps = 0;
     while sweeps < 3 {
-        let (_, kind, text) = next_frame(&mut link).await;
-        match kind {
-            MsgType::Heartbeat => sweeps += 1,
-            MsgType::Text => {
-                let line = WardriveLine::parse(&text).expect("parseable");
-                if line.kind == wartui_proto::air::RecordKind::Ble {
-                    ble.insert(line.bssid);
-                }
+        let (_, raw) = next_frame(&mut link).await;
+        match Frame::decode(&raw) {
+            Ok(Frame::Heartbeat(_)) => sweeps += 1,
+            Ok(Frame::Sighting(sighting)) if sighting.kind == RecordKind::Ble => {
+                ble.insert(sighting.bssid);
             }
             _ => {}
         }
@@ -256,7 +265,7 @@ async fn sending_to_an_absent_node_is_not_acknowledged() {
     link.send_urgent(admin_command(
         [0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01],
         AdminMsg {
-            assignment_version: 1,
+            epoch: 1,
             node_index: 0,
             node_count: 1,
             flags: 0,
@@ -323,22 +332,22 @@ async fn a_status_request_is_answered() {
 
 #[tokio::test(start_paused = true)]
 async fn a_seeded_run_is_reproducible() {
-    async fn first_lines(seed: u64) -> Vec<Vec<u8>> {
+    async fn first_sightings(seed: u64) -> Vec<Vec<u8>> {
         let config = SimConfig { node_count: 1, seed, ..SimConfig::default() };
         let mut link = SimTransport::new(config).start().expect("starts");
         assign(&link, 1, everything(), true);
-        let mut lines = Vec::new();
-        while lines.len() < 10 {
-            let (_, kind, text) = next_frame(&mut link).await;
-            if kind == MsgType::Text {
-                lines.push(text);
+        let mut frames = Vec::new();
+        while frames.len() < 10 {
+            let (_, raw) = next_frame(&mut link).await;
+            if sighting_of(&raw).is_some() {
+                frames.push(raw);
             }
         }
-        lines
+        frames
     }
 
-    assert_eq!(first_lines(1234).await, first_lines(1234).await);
-    assert_ne!(first_lines(1234).await, first_lines(9999).await);
+    assert_eq!(first_sightings(1234).await, first_sightings(1234).await);
+    assert_ne!(first_sightings(1234).await, first_sightings(9999).await);
 }
 
 #[tokio::test(start_paused = true)]
@@ -349,13 +358,7 @@ async fn only_the_node_given_the_bluetooth_assignment_reports_any() {
     // Node 1 gets the same channels and no Bluetooth.
     link.send_urgent(admin_command(
         SimTransport::node_mac(1),
-        AdminMsg {
-            assignment_version: 1,
-            node_index: 1,
-            node_count: 2,
-            flags: 0,
-            channels: everything(),
-        },
+        AdminMsg { epoch: 1, node_index: 1, node_count: 2, flags: 0, channels: everything() },
     ))
     .expect("queued");
 
@@ -364,14 +367,11 @@ async fn only_the_node_given_the_bluetooth_assignment_reports_any() {
     let mut ble_by_node: HashMap<Mac, usize> = HashMap::new();
     let mut sweeps = 0;
     while sweeps < 3 {
-        let (src, kind, text) = next_frame(&mut link).await;
-        match kind {
-            MsgType::Heartbeat if src == SimTransport::node_mac(1) => sweeps += 1,
-            MsgType::Text => {
-                let line = WardriveLine::parse(&text).expect("parseable");
-                if line.kind == wartui_proto::air::RecordKind::Ble {
-                    *ble_by_node.entry(src).or_default() += 1;
-                }
+        let (src, raw) = next_frame(&mut link).await;
+        match Frame::decode(&raw) {
+            Ok(Frame::Heartbeat(_)) if src == SimTransport::node_mac(1) => sweeps += 1,
+            Ok(Frame::Sighting(sighting)) if sighting.kind == RecordKind::Ble => {
+                *ble_by_node.entry(src).or_default() += 1;
             }
             _ => {}
         }
@@ -383,7 +383,7 @@ async fn only_the_node_given_the_bluetooth_assignment_reports_any() {
 #[tokio::test(start_paused = true)]
 async fn a_simulated_c6_says_it_has_no_five_ghz_radio() {
     // The only way to put a mixed fleet in front of the planner without two
-    // kinds of board on the desk. It is the token that carries this, so a
+    // kinds of board on the desk. It is the heartbeat that carries this, so a
     // simulator that claimed 5 GHz for every node would be one where the
     // planner's whole reason to treat nodes differently never arises.
     let config = SimConfig { node_count: 3, c6_nodes: 1, ble_chance: 0.0, ..SimConfig::default() };
@@ -391,12 +391,9 @@ async fn a_simulated_c6_says_it_has_no_five_ghz_radio() {
 
     let mut bands: HashMap<Mac, bool> = HashMap::new();
     while bands.len() < 3 {
-        let (src, kind, text) = next_frame(&mut link).await;
-        if kind != MsgType::Heartbeat {
-            continue;
-        }
-        let capabilities = Capabilities::parse(&text).expect("a simulated node is one of ours");
-        bands.insert(src, capabilities.five_ghz);
+        let (src, raw) = next_frame(&mut link).await;
+        let Some(heartbeat) = heartbeat_of(&raw) else { continue };
+        bands.insert(src, heartbeat.capabilities.five_ghz);
     }
 
     // Counted from the end, so the indices below the count keep their radios as

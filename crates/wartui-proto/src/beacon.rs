@@ -13,18 +13,15 @@
 //! sniffing path was never finished. This module is a port of it, and of the
 //! `wifi_auth_mode_t` table it feeds (`security_int_to_string`,
 //! `src/WiFiOps.cpp:1833-1878`), collapsed into one pass that yields a
-//! [`Security`] token directly. The tokens have to stay byte-identical: they
-//! travel unaltered through `MSG_TEXT` into the store and out into the WiGLE
-//! `AuthMode` column.
+//! [`Security`] directly. The set of values has to stay faithful to that table
+//! even though the spelling no longer travels on the wire: it is what the
+//! exported WiGLE `AuthMode` column ends up saying.
 //!
 //! Parsing lives here, on the host side of the path dependency, because that is
 //! where `cargo test` can reach it. A misread information element that only the
 //! firmware knew about would cost a reflash to find and another to fix.
 
-use crate::air::{RecordKind, Security, WardriveLine};
-
-/// Longest SSID 802.11 allows, and so the most a [`Sighting`] will keep.
-pub const SSID_MAX: usize = 32;
+use crate::air::{RecordKind, SSID_MAX, Security, SightingMsg};
 
 /// 802.11 MAC header length for a management frame: no QoS, no HT control.
 const HDR_LEN: usize = 24;
@@ -48,7 +45,7 @@ pub struct Sighting {
     ssid: [u8; SSID_MAX],
     ssid_len: u8,
     /// The `AuthMode` token this frame's elements amount to.
-    pub security: Security<'static>,
+    pub security: Security,
     /// The channel the access point says it is on, or the one we were parked on.
     pub channel: u8,
     /// Signal strength in dBm, as the receiver reported it.
@@ -65,14 +62,14 @@ impl Sighting {
 
     /// The same observation in the shape the wire carries.
     #[must_use]
-    pub fn as_line(&self) -> WardriveLine<'_> {
-        WardriveLine {
-            bssid: self.bssid,
-            ssid: self.ssid(),
-            security: self.security,
-            channel: u16::from(self.channel),
-            rssi: i16::from(self.rssi),
+    pub fn as_msg(&self) -> SightingMsg<'_> {
+        SightingMsg {
             kind: RecordKind::Wifi,
+            bssid: self.bssid,
+            channel: self.channel,
+            rssi: self.rssi,
+            security: self.security,
+            ssid: self.ssid(),
         }
     }
 }
@@ -245,7 +242,7 @@ impl Elements {
     /// for `WIFI_AUTH_OWE`, and none for WPA3-Enterprise, so both reach the
     /// WiGLE column as `[UNDEFINED]`. Reproducing that is deliberate — the
     /// column is a contract with an exporter, not a description of the network.
-    fn classify(&self) -> Security<'static> {
+    fn classify(&self) -> Security {
         if self.has_wapi {
             return Security::WapiPsk;
         }

@@ -8,7 +8,7 @@
 use anyhow::Result;
 use clap::Args as ClapArgs;
 use wartui_bridge::LinkEvent;
-use wartui_proto::air::{Capabilities, Frame, MsgType, RecordKind, WardriveLine, is_legacy_admin};
+use wartui_proto::air::{DecodeError, Frame, RecordKind, SightingMsg, foreign};
 use wartui_proto::link::{BROADCAST, BridgeToHost};
 
 use super::mac;
@@ -71,29 +71,50 @@ pub async fn run(args: Args) -> Result<()> {
     }
 
     println!(
-        "\n# {} frames: {} text, {} heartbeat, {} admin, {} other, {} undecodable",
-        counts.total, counts.text, counts.heartbeat, counts.admin, counts.other, counts.undecodable
+        "\n# {} frames: {} sighting, {} heartbeat, {} admin, {} not ours, {} undecodable",
+        counts.total,
+        counts.sighting,
+        counts.heartbeat,
+        counts.admin,
+        counts.foreign_fleet + counts.foreign_admin,
+        counts.undecodable
     );
-    if counts.other > 0 {
+    if counts.foreign_fleet > 0 {
         println!(
-            "# {} core-protocol frames arrived, which only encrypted nodes send. \
-             Turn encryption off in those nodes' web UI.",
-            counts.other
+            "# {} frames came from a fleet running the vendor firmware. It is not ours \
+             and cannot be driven from here, but it is transmitting on the channel these \
+             nodes listen on.",
+            counts.foreign_fleet
         );
     }
-    if counts.legacy_admin > 0 {
+    // Every assignment on the air during a sniff came from somewhere else:
+    // this command holds the port, so `run` is not transmitting through it,
+    // and a radio does not hear its own frames. One in wartui's own format is
+    // the harder of the two to notice any other way — a vendor core's
+    // assignments are ignored by our nodes, while a second wartui core's are
+    // obeyed, and the fleet table cannot show the difference because both
+    // cores' assignments are acknowledged.
+    if counts.admin > 0 {
         println!(
-            "# {} assignments arrived in the vendor core's 10-byte format. Something \
-             other than this host is telling these nodes what to scan.",
-            counts.legacy_admin
+            "# {} assignments arrived in wartui's own wire format, and this host sent \
+             none of them. A second wartui core is driving these nodes, and they are \
+             taking assignments from both.",
+            counts.admin
         );
     }
-    if counts.unannounced_heartbeat > 0 {
+    if counts.foreign_admin > 0 {
         println!(
-            "# {} of {} heartbeats carried no wartui token. `run` will not plan for \
-             those nodes: they acknowledge an assignment and then discard it, so a \
-             share cut for one is a share nobody scans. Flash them with firmware/node.",
-            counts.unannounced_heartbeat, counts.heartbeat
+            "# {} assignments arrived from a vendor core. Something other than this host \
+             is telling a fleet nearby what to scan.",
+            counts.foreign_admin
+        );
+    }
+    if counts.incompatible > 0 {
+        println!(
+            "# {} frames were ours but from a build speaking a wire version this one \
+             does not. Those nodes are invisible to `run` until they are reflashed \
+             with firmware/node.",
+            counts.incompatible
         );
     }
     Ok(())
@@ -108,19 +129,19 @@ struct Counts {
     /// An undecodable frame is not one of them — see [`handle`].
     heard_a_bridge: bool,
     total: u64,
-    text: u64,
+    sighting: u64,
     heartbeat: u64,
-    /// Heartbeats whose text field carried no wartui token. `run` will not
-    /// plan for the nodes that send these, so a fleet that is being ignored
-    /// looks exactly like this and nothing else would say why.
-    unannounced_heartbeat: u64,
     admin: u64,
-    /// The vendor core's ten-byte assignment. Counted apart from `admin`
-    /// because seeing any at all means something else is driving this fleet.
-    legacy_admin: u64,
-    /// `CoreRequest` and `CoreReply`: not expected in a plaintext fleet, and
-    /// worth a line of their own rather than being folded into a total.
-    other: u64,
+    /// Vendor heartbeats and observations. Another fleet is on this channel,
+    /// transmitting where these nodes are listening.
+    foreign_fleet: u64,
+    /// Another core's assignment. Counted apart from `foreign_fleet` because
+    /// seeing any at all means something else is driving a fleet nearby.
+    foreign_admin: u64,
+    /// Frames of ours from a build speaking a wire version this one does not.
+    /// A fleet half-way through a reflash looks exactly like this, and nothing
+    /// else would say why `run` cannot see it.
+    incompatible: u64,
     undecodable: u64,
 }
 
@@ -169,46 +190,24 @@ fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
             let head = format!("{:>10}us  {}  {rssi:>4}dBm  {addressing:>7}", rx_us, mac(src));
 
             match Frame::decode(payload) {
-                // Every one of these shares the 212-byte text layout; what the
-                // payload means is the type's business. Classifying by whether
-                // the text parses as an observation would file a node emitting
-                // malformed lines under "heartbeat", which is precisely the
-                // case this summary would be read to diagnose.
-                Ok(Frame::Text(text)) => {
-                    match text.msg_type {
-                        MsgType::Heartbeat => {
-                            counts.heartbeat += 1;
-                            if Capabilities::parse(text.text).is_none() {
-                                counts.unannounced_heartbeat += 1;
-                            }
-                        }
-                        MsgType::Text => counts.text += 1,
-                        _ => counts.other += 1,
-                    }
-                    match WardriveLine::parse(text.text) {
-                        Ok(observation) if text.msg_type == MsgType::Text => {
-                            println!("{head}  {}", render(&observation));
-                        }
-                        // A heartbeat's text is its capability token, which is
-                        // not a wardrive line, so failing to parse as one is
-                        // the normal case here. Printed raw: `wartui/0.1;ble,5g`
-                        // is meant to be read, and an empty one is the whole
-                        // diagnosis for a node the planner will not touch.
-                        _ => println!(
-                            "{head}  {:?} #{}  {}",
-                            text.msg_type,
-                            text.counter,
-                            String::from_utf8_lossy(text.text)
-                        ),
-                    }
+                Ok(Frame::Heartbeat(heartbeat)) => {
+                    counts.heartbeat += 1;
+                    println!(
+                        "{head}  HEARTBEAT #{}  {}",
+                        heartbeat.counter, heartbeat.capabilities
+                    );
+                }
+                Ok(Frame::Sighting(sighting)) => {
+                    counts.sighting += 1;
+                    println!("{head}  {}", render(&sighting));
                 }
                 Ok(Frame::Admin(admin)) => {
                     counts.admin += 1;
                     let indices: Vec<String> =
                         admin.channels.indices().map(|idx| idx.to_string()).collect();
                     println!(
-                        "{head}  ADMIN v{} node {}/{}{} channel idx {}  -> {}",
-                        admin.assignment_version,
+                        "{head}  ADMIN e{} node {}/{}{} channel idx {}  -> {}",
+                        admin.epoch,
                         admin.node_index,
                         admin.node_count,
                         if admin.scan_ble() { " +ble" } else { "" },
@@ -216,13 +215,29 @@ fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
                         mac(dst),
                     );
                 }
-                // Named rather than left as "undecodable", because it is the
-                // one undecodable frame with a meaning: a stock core in the
-                // same room is assigning channels this host did not choose.
-                Err(_) if is_legacy_admin(payload) => {
-                    counts.legacy_admin += 1;
-                    println!("{head}  ADMIN from a vendor core (10-byte)  -> {}", mac(dst));
+                // Named rather than left as "undecodable", because a fleet
+                // half-way through a reflash is exactly what this looks like
+                // and nothing else would say so.
+                Err(DecodeError::BadVersion(version)) => {
+                    counts.incompatible += 1;
+                    println!("{head}  wire version {version}, which this build does not speak");
                 }
+                // Also named: another fleet on this channel is transmitting
+                // where these nodes are listening.
+                Err(DecodeError::BadMagic) => match foreign::classify(payload) {
+                    Some(foreign::Foreign::Admin) => {
+                        counts.foreign_admin += 1;
+                        println!("{head}  ADMIN from a vendor core  -> {}", mac(dst));
+                    }
+                    Some(foreign::Foreign::Node) => {
+                        counts.foreign_fleet += 1;
+                        println!("{head}  a vendor node's frame");
+                    }
+                    None => {
+                        counts.undecodable += 1;
+                        println!("{head}  undecodable: not ESP-NOW wardriving traffic");
+                    }
+                },
                 Err(err) => {
                     counts.undecodable += 1;
                     println!("{head}  undecodable: {err:?}");
@@ -269,23 +284,23 @@ fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
 }
 
 /// One observation, in the order the firmware wrote it.
-fn render(line: &WardriveLine<'_>) -> String {
-    let kind = match line.kind {
+fn render(sighting: &SightingMsg<'_>) -> String {
+    let kind = match sighting.kind {
         RecordKind::Wifi => "wifi",
         RecordKind::Ble => "ble ",
     };
     format!(
         "{kind}  {}  ch {:>3}  {:>4}dBm  {:<16}  {}",
-        mac(&line.bssid),
-        line.channel,
-        line.rssi,
-        String::from_utf8_lossy(line.security.as_bytes()),
+        mac(&sighting.bssid),
+        sighting.channel,
+        sighting.rssi,
+        sighting.security.to_string(),
         // SSIDs are whatever the access point beaconed, not text, and hidden
         // networks beacon an empty one.
-        if line.ssid.is_empty() {
+        if sighting.ssid.is_empty() {
             "<hidden>".to_string()
         } else {
-            format!("{:?}", String::from_utf8_lossy(line.ssid))
+            format!("{:?}", String::from_utf8_lossy(sighting.ssid))
         }
     )
 }
