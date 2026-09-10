@@ -280,6 +280,37 @@ fn reset_cause() -> ResetCause {
     }
 }
 
+/// Reset the chip, undoing first what the C5's ROM leaves behind.
+///
+/// Every reset this firmware takes comes through here — the panic handler, the
+/// stall detector and [`HostToBridge::Reset`] — because on one of the three
+/// parts a bare `software_reset()` does not reboot the board, it ends it. The
+/// C5 (and the C61) come up with `PCR.RESET_EVENT_BYPASS.reset_event_bypass`
+/// set, which keeps a core reset from also resetting the system bus; the ROM's
+/// own MSPI core reset then leaves the AXI bus frozen, and the next boot hangs
+/// on the first thing it does that needs flash. The ROM banner prints,
+/// `SPI mode:` never does, and nothing recovers the board — not `wartui reset`,
+/// not `espflash reset`, both measured — until it loses power. On a bridge that
+/// is strictly worse than the wedge the stall detector exists to clear, which
+/// is why it cannot be left to an operator to remember.
+///
+/// Clearing the bit is what ESP-IDF's `bootloader_hardware_init` does on every
+/// boot, and what `esp-hal` does in its C5 `pre_init` from 1.2 onwards
+/// (esp-rs/esp-hal#5703, fixed by #5745). We cannot have that fix by upgrading:
+/// `esp-radio 1.0.0-beta.0` requires `esp-hal = "~1.1.0"`, which
+/// `firmware/bridge/README.md` sets out at length. It is written here rather
+/// than at the top of [`main`] because a panic can land before `main` reaches
+/// any line of its own, and one funnel is one place to delete when that pin
+/// finally moves — issue #16 carries what that upgrade needs.
+fn reboot() -> ! {
+    #[cfg(feature = "esp32c5")]
+    esp_hal::peripherals::PCR::regs()
+        .reset_event_bypass()
+        .modify(|_, w| w.reset_event_bypass().clear_bit());
+
+    esp_hal::system::software_reset()
+}
+
 /// Resets rather than hanging.
 ///
 /// A halted bridge is invisible: the port stays open, no frames arrive, and the
@@ -290,7 +321,7 @@ fn reset_cause() -> ResetCause {
 /// runs over.
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
-    esp_hal::system::software_reset()
+    reboot()
 }
 
 /// The USB endpoint, as somewhere to put bytes.
@@ -478,7 +509,7 @@ fn main() -> ! {
         let queued = !bridge.outbox.is_empty();
         if bridge.stall.note_tx(moved, queued, bridge.now_ms()) {
             mark(LoopPhase::TxStalled);
-            esp_hal::system::software_reset();
+            reboot();
         }
 
         if !worked {
@@ -603,7 +634,7 @@ fn handle(
             });
         }
 
-        HostToBridge::Reset => esp_hal::system::software_reset(),
+        HostToBridge::Reset => reboot(),
 
         HostToBridge::SendEspNow { id, dst, ensure_peer, payload } => {
             // Named separately from `Command` because it is the one place the
