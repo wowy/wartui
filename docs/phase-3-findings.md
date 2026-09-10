@@ -498,6 +498,7 @@ SD slot are simply never initialised:
 | link round trip | works; a `GetStatus` is answered, so the USB-C really is the native USB Serial/JTAG |
 | reset cause after `espflash flash` | `External` — and via `CoreUsbJtag`, since the S3 has no `Cpu0JtagCpu` |
 | `wartui reset` | `Software`, `uptime 1ms, so it did reboot` |
+| unplug and replug | `powered on`, at 16s uptime, so `ChipPowerOn` and this life rather than a stale reading |
 | phase marker across that reset | survived — `it was carrying out a host command`, so `rtc_fast, persistent` holds on this part |
 | image size | 387,088 bytes, 2.36% of flash |
 
@@ -548,8 +549,12 @@ be unplugged, with nothing in the `Ready` behind it to say why. That is the same
 position the C6 has always been in; it is not a new hole, but adding a chip was
 a chance to close it and did not.
 
+Every reset cause the S3 can be made to report has now been seen on hardware:
+`PowerOn`, `Software` and `External`. `Brownout` needs a bad supply and `Lockup`
+does not exist on this part, so neither is reachable on demand.
+
 **Still not done on the S3:** it has never been wedged on purpose, so the
 detector this document is about is the one thing the bench did not test — the
-radio and link paths around it are now exercised, but the stall itself is still
-reasoning. `PowerOn` is unverified because that needs a replug, and no C6 or S3
-can report the hang class at all. The C5 remains unbenched entirely.
+radio, link and reset paths around it are now exercised, but the stall itself is
+still reasoning. No C6 or S3 can report the hang class at all. The C5 remains
+unbenched entirely.
