@@ -3,7 +3,7 @@
 //! `run` is the tool; everything else is a way of checking one link in the
 //! chain when `run` is not showing what it should. `sniff` proves the whole
 //! path — a node's radio, the bridge's radio, the USB link, the framing and the
-//! `ENOW` decoder — with nothing in between to be wrong. `status` and `ports`
+//! frame decoder — with nothing in between to be wrong. `status` and `ports`
 //! answer the two questions that come before it: is a dongle attached, and is
 //! it listening.
 //!

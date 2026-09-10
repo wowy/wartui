@@ -12,7 +12,9 @@ use wartui_core::engine::{Command, Counters, EngineConfig, Event, FleetEngine, N
 use wartui_core::gps::Gps;
 use wartui_core::position::{DEFAULT_MAX_AGE, PositionChain, PositionSource};
 use wartui_core::record::{AdminOutcome, Record};
-use wartui_proto::air::{AdminMsg, CAPABILITY_MAX, Capabilities, MsgType, TextMsg};
+use wartui_proto::air::{
+    AdminMsg, Capabilities, HeartbeatMsg, RecordKind, SIGHTING_MSG_MAX, Security, SightingMsg,
+};
 use wartui_proto::link::{
     BROADCAST, BridgeToHost, Chip, EspNowPayload, HostToBridge, LoopPhase, Mac, ResetCause,
     SendStatus,
@@ -39,9 +41,15 @@ impl Clock {
     }
 
     fn at(&self, secs: u64) -> Now {
+        self.at_ms(secs * 1000)
+    }
+
+    /// Millisecond resolution, for the tests that care how fast the host is
+    /// reading the link rather than how much time has passed.
+    fn at_ms(&self, ms: u64) -> Now {
         Now {
-            mono: self.base + Duration::from_secs(secs),
-            unix_ms: EPOCH_MS + i64::try_from(secs).expect("test clock fits") * 1000,
+            mono: self.base + Duration::from_millis(ms),
+            unix_ms: EPOCH_MS + i64::try_from(ms).expect("test clock fits"),
         }
     }
 }
@@ -50,48 +58,38 @@ fn engine(config: EngineConfig, clock: &Clock) -> FleetEngine {
     FleetEngine::new(config, clock.at(0))
 }
 
-fn rx(src: Mac, msg_type: MsgType, counter: u32, text: &[u8]) -> Event {
-    rx_at(src, msg_type, counter, text, 0)
+/// Whatever `frame` is, arriving from `src`.
+fn rx(src: Mac, frame: &[u8]) -> Event {
+    rx_at(src, frame, 0)
 }
 
 /// A frame carrying the bridge's own microsecond stamp, which is the near end
 /// of every assignment-latency measurement.
-fn rx_at(src: Mac, msg_type: MsgType, counter: u32, text: &[u8], rx_us: u32) -> Event {
-    let frame = TextMsg::new(msg_type, counter, text).expect("fits").encode();
+fn rx_at(src: Mac, frame: &[u8], rx_us: u32) -> Event {
     Event::Link(LinkEvent::Message(BridgeToHost::Rx {
         src,
         dst: BROADCAST,
         rssi: -41,
         channel: 6,
         rx_us,
-        payload: EspNowPayload::from_slice(&frame).expect("fits"),
+        payload: EspNowPayload::from_slice(frame).expect("fits"),
     }))
 }
 
-/// A heartbeat from one of ours, which is what the token in the text field
-/// means. Almost every test below wants this one: a node that has not
-/// announced itself is not assignable, so a fleet built out of tokenless
-/// heartbeats would be a fleet the planner never touches.
+/// A heartbeat from a node with everything: both features, both bands. Almost
+/// every test below wants this one.
 fn heartbeat(src: Mac, counter: u32) -> Event {
-    let mut token = [0u8; CAPABILITY_MAX];
-    let len = Capabilities::here(true, true).write_into(&mut token).expect("sized for it");
-    rx(src, MsgType::Heartbeat, counter, &token[..len])
+    beat_at(src, counter, Capabilities::here(true, true), 0)
 }
 
-/// A heartbeat from something that is not one of ours: a stock node, or a
-/// wartui node built before the token existed. Byte-identical to the above
-/// apart from the empty text field, which is the whole point — nothing else
-/// distinguishes them.
-fn foreign_heartbeat(src: Mac, counter: u32) -> Event {
-    rx(src, MsgType::Heartbeat, counter, b"")
-}
-
-/// A heartbeat from a node that is one of ours and cannot do either of the
-/// things a token can claim: an ESP32-C6 built without the `ble` feature.
+/// A heartbeat from a node that can do neither of the things capabilities can
+/// claim: an ESP32-C6 built without the `ble` feature.
 fn narrowband_heartbeat(src: Mac, counter: u32) -> Event {
-    let mut token = [0u8; CAPABILITY_MAX];
-    let len = Capabilities::here(false, false).write_into(&mut token).expect("sized for it");
-    rx(src, MsgType::Heartbeat, counter, &token[..len])
+    beat_at(src, counter, Capabilities::here(false, false), 0)
+}
+
+fn beat_at(src: Mac, counter: u32, capabilities: Capabilities, rx_us: u32) -> Event {
+    rx_at(src, &HeartbeatMsg { counter, capabilities }.encode(), rx_us)
 }
 
 fn send_result(id: u16, status: SendStatus, tx_us: u32) -> Event {
@@ -119,9 +117,23 @@ fn run(start: u8, end: u8) -> ChannelSet {
     ChannelSet::from_run(IndexRun::new(start, end))
 }
 
-fn observation(src: Mac, bssid: &str, rssi: i16) -> Event {
-    let line = format!("{bssid},example,[WPA2_PSK],6,{rssi},W");
-    rx(src, MsgType::Text, 0, line.as_bytes())
+fn observation(src: Mac, bssid: &str, rssi: i8) -> Event {
+    let mut raw = [0u8; 6];
+    for (byte, hex) in raw.iter_mut().zip(bssid.split(':')) {
+        *byte = u8::from_str_radix(hex, 16).expect("a hex octet");
+    }
+    let mut frame = [0u8; SIGHTING_MSG_MAX];
+    let len = SightingMsg {
+        kind: RecordKind::Wifi,
+        bssid: raw,
+        channel: 6,
+        rssi,
+        security: Security::Wpa2Psk,
+        ssid: b"example",
+    }
+    .encode_into(&mut frame)
+    .expect("fits");
+    rx(src, &frame[..len])
 }
 
 fn connected() -> Event {
@@ -162,17 +174,22 @@ fn an_observation_produces_a_node_row_and_an_observation_row() {
 }
 
 #[test]
-fn the_raw_line_is_kept_alongside_the_parsed_one() {
-    // The wire format is undocumented and read out of someone else's C++. If
-    // this decoder turns out to be wrong, the raw text is what lets the fix be
-    // applied to history rather than only to what arrives afterwards.
+fn the_raw_frame_is_kept_alongside_the_parsed_one() {
+    // If this decoder turns out to be wrong, the frame as it arrived is what
+    // lets the fix be applied to history rather than only to what comes
+    // afterwards. It carries its own version byte, so a file spanning a format
+    // change stays readable row by row.
     let clock = Clock::new();
     let mut engine = engine(manual(), &clock);
 
     let batch = engine.handle(observation(NODE, "AA:BB:CC:DD:EE:FF", -60), clock.at(1));
     let Record::Observation(obs) = &batch.records[1] else { panic!("expected an observation") };
 
-    assert_eq!(obs.raw_text, b"AA:BB:CC:DD:EE:FF,example,[WPA2_PSK],6,-60,W");
+    assert_eq!(&obs.raw_body[..4], b"WTUI");
+    assert_eq!(
+        wartui_proto::air::SightingMsg::decode(&obs.raw_body).expect("valid").ssid,
+        b"example"
+    );
 }
 
 #[test]
@@ -182,11 +199,11 @@ fn a_heartbeat_counter_going_backwards_counts_a_reboot() {
     let clock = Clock::new();
     let mut engine = engine(manual(), &clock);
 
-    engine.handle(rx(NODE, MsgType::Heartbeat, 174, b""), clock.at(1));
-    engine.handle(rx(NODE, MsgType::Heartbeat, 175, b""), clock.at(2));
+    engine.handle(heartbeat(NODE, 174), clock.at(1));
+    engine.handle(heartbeat(NODE, 175), clock.at(2));
     assert_eq!(engine.nodes().next().expect("a node").reboots, 0);
 
-    engine.handle(rx(NODE, MsgType::Heartbeat, 2, b""), clock.at(3));
+    engine.handle(heartbeat(NODE, 2), clock.at(3));
 
     let node = engine.nodes().next().expect("a node");
     assert_eq!(node.reboots, 1);
@@ -204,7 +221,7 @@ fn observations_keep_a_node_visible_but_only_heartbeats_keep_it_assignable() {
     let config = EngineConfig { topology_timeout: Duration::from_secs(60), ..manual() };
     let mut engine = engine(config, &clock);
 
-    engine.handle(rx(NODE, MsgType::Heartbeat, 1, b""), clock.at(1));
+    engine.handle(heartbeat(NODE, 1), clock.at(1));
     for second in 2..120 {
         engine.handle(observation(NODE, "AA:BB:CC:DD:EE:FF", -60), clock.at(second));
     }
@@ -214,30 +231,33 @@ fn observations_keep_a_node_visible_but_only_heartbeats_keep_it_assignable() {
     assert_eq!(node.last_seen_ms, EPOCH_MS + 119_000, "still being heard");
     assert!(!engine.is_alive(&node, now), "but not heartbeating, so not assignable");
 
-    engine.handle(rx(NODE, MsgType::Heartbeat, 2, b""), clock.at(121));
+    engine.handle(heartbeat(NODE, 2), clock.at(121));
     let node = engine.nodes().next().expect("a node").clone();
     assert!(engine.is_alive(&node, clock.at(122)));
 }
 
 #[test]
-fn a_malformed_line_is_counted_rather_than_stored() {
-    // A node emitting these is broken in a way silence would not distinguish,
-    // and writing the rubbish into the store would corrupt the export.
+fn a_truncated_sighting_is_counted_rather_than_stored() {
+    // A frame that arrives short is not an observation of anything, and
+    // writing what did arrive would file an access point under a name it
+    // never had.
     let clock = Clock::new();
     let mut engine = engine(manual(), &clock);
 
-    let batch = engine.handle(rx(NODE, MsgType::Text, 0, b"not,enough,fields"), clock.at(1));
+    let Event::Link(LinkEvent::Message(BridgeToHost::Rx { payload, .. })) =
+        observation(NODE, "AA:BB:CC:DD:EE:FF", -60)
+    else {
+        panic!("an Rx event")
+    };
+    let batch = engine.handle(rx(NODE, &payload[..payload.len() - 1]), clock.at(1));
 
-    assert_eq!(counters(&engine).unparsed, 1);
+    assert_eq!(counters(&engine).undecodable, 1);
     assert_eq!(counters(&engine).observations, 0);
-    assert!(
-        batch.records.iter().all(|r| matches!(r, Record::Node(_))),
-        "the node was still heard from, but nothing was recorded as an observation"
-    );
+    assert!(batch.records.is_empty(), "and nothing was recorded at all");
 }
 
 #[test]
-fn a_frame_that_is_not_enow_at_all_is_counted_as_undecodable() {
+fn a_frame_that_is_not_ours_at_all_is_counted_as_undecodable() {
     let clock = Clock::new();
     let mut engine = engine(manual(), &clock);
 
@@ -247,7 +267,7 @@ fn a_frame_that_is_not_enow_at_all_is_counted_as_undecodable() {
         rssi: -41,
         channel: 6,
         rx_us: 0,
-        payload: EspNowPayload::from_slice(b"not an ENOW frame").expect("fits"),
+        payload: EspNowPayload::from_slice(b"not a wartui frame").expect("fits"),
     }));
     engine.handle(event, clock.at(1));
 
@@ -256,16 +276,43 @@ fn a_frame_that_is_not_enow_at_all_is_counted_as_undecodable() {
 }
 
 #[test]
-fn a_core_frame_marks_the_node_as_still_encrypted() {
-    // wartui does not speak encrypted ESP-NOW at all. Naming the node is what
-    // turns an unexplained silence into "turn encryption off on this one".
+fn a_vendor_fleet_nearby_is_counted_and_never_joins_this_one() {
+    // The whole reason wartui stopped speaking the vendor's format. A stock
+    // node broadcasts on this channel and used to be indistinguishable from
+    // one of ours right up until it was asked what it was; now its frames do
+    // not decode here at all, and ours do not decode there — so neither fleet
+    // can be planned around the other. It is still counted, because a second
+    // fleet transmitting where these nodes listen is worth saying out loud.
     let clock = Clock::new();
     let mut engine = engine(manual(), &clock);
 
-    engine.handle(rx(NODE, MsgType::CoreRequest, 0, b""), clock.at(1));
+    // A stock node's heartbeat, counter 147, exactly as one came off the air.
+    let vendor = [0x45, 0x4E, 0x4F, 0x57, 0x03, 0x93, 0x00, 0x00, 0x00];
+    let batch = engine.handle(rx(OTHER, &vendor), clock.at(1));
 
-    assert!(engine.nodes().next().expect("a node").encrypted);
-    assert_eq!(counters(&engine).core_frames, 1);
+    assert_eq!(counters(&engine).foreign_fleet, 1);
+    assert_eq!(counters(&engine).undecodable, 0, "it is not line noise");
+    assert_eq!(engine.nodes().count(), 0, "and it is not a node of ours");
+    assert!(batch.records.is_empty());
+}
+
+#[test]
+fn a_node_on_older_firmware_is_named_rather_than_left_as_noise() {
+    // A fleet half-way through a reflash looks like this and nothing else
+    // would say so: the frames are ours, from a build speaking a wire version
+    // this host does not. The header carries a version precisely so that this
+    // is a sentence in the fault box rather than a fleet that went quiet.
+    let clock = Clock::new();
+    let mut engine = engine(manual(), &clock);
+
+    let mut frame =
+        HeartbeatMsg { counter: 1, capabilities: Capabilities::here(true, true) }.encode().to_vec();
+    frame[4] = frame[4].wrapping_add(1);
+    engine.handle(rx(NODE, &frame), clock.at(1));
+
+    assert_eq!(counters(&engine).incompatible, 1);
+    assert_eq!(counters(&engine).undecodable, 0);
+    assert_eq!(engine.nodes().count(), 0, "it cannot be driven, so it is not in the table");
 }
 
 #[test]
@@ -274,7 +321,7 @@ fn an_admin_frame_from_elsewhere_means_a_rival_core_is_powered_up() {
     let mut engine = engine(manual(), &clock);
 
     let admin = wartui_proto::air::AdminMsg {
-        assignment_version: 3,
+        epoch: 3,
         node_index: 0,
         node_count: 2,
         flags: 0,
@@ -554,31 +601,28 @@ fn an_assignment_waits_for_the_heartbeat_that_opens_the_window() {
     let (_, dst, admin) = sent_admin(&opened);
     assert_eq!(dst, NODE);
     assert_eq!(admin.channels, run(5, 5));
-    assert_eq!(admin.assignment_version, 1, "the first epoch of a fresh database");
+    assert_eq!(admin.epoch, 1, "the first epoch of a fresh database");
     assert_eq!(counters(&engine).admin_sent, 1);
 }
 
 #[test]
-fn a_node_that_never_said_what_it_is_gets_nothing_and_costs_the_fleet_nothing() {
-    // Node to core is byte-identical to a stock node's, so this heartbeat is
-    // indistinguishable from one of ours apart from the empty text field. That
-    // is the whole reason the token exists: measured on a bench, a stock node
-    // in the fleet took a third of the pool with it, because its radio
-    // acknowledges an assignment its application cannot decode and nothing
-    // anywhere then says the channels are going unscanned.
+fn a_node_heard_only_through_its_observations_gets_nothing_yet() {
+    // A node reports what it found on a channel before it gets back to the
+    // control channel to heartbeat, so this is an ordinary few seconds in the
+    // life of a node that is about to be perfectly drivable. Until the
+    // heartbeat arrives nothing says which band its radio reaches, and a share
+    // of 5 GHz cut for a C6 is a share nobody scans.
     let clock = Clock::new();
     let mut engine = engine(manual(), &clock);
-    engine.handle(foreign_heartbeat(NODE, 1), clock.at(1));
+    engine.handle(observation(NODE, "AA:BB:CC:DD:EE:FF", -60), clock.at(1));
 
     let asked = engine.handle(assign(NODE, 0, 10), clock.at(2));
     assert!(asked.urgent.is_empty());
-    let opened = engine.handle(foreign_heartbeat(NODE, 2), clock.at(6));
-    assert!(opened.urgent.is_empty(), "a window opens and nothing is put through it");
     assert_eq!(counters(&engine).admin_sent, 0);
 
     let node = engine.nodes().next().expect("it is still in the table");
-    assert!(node.last_heartbeat.is_some(), "and still visibly heartbeating");
-    assert!(node.desired.is_none(), "but nothing is queued against it");
+    assert!(node.last_heartbeat.is_none(), "nothing has opened a window yet");
+    assert!(node.desired.is_none(), "and nothing is queued against it");
 }
 
 #[test]
@@ -587,22 +631,23 @@ fn a_stranger_in_the_fleet_does_not_take_a_share_of_the_pool() {
     // two nodes plus a stranger must partition the pool two ways, not three.
     // Three ways would leave a third of the pool assigned to a node that will
     // never scan it, so the fleet would cover less than the two would alone.
+    //
+    // It used to be the capability token that caught this, because a stock
+    // node's heartbeat was byte-identical to ours. The magic catches it a
+    // layer earlier now: the stranger never reaches the fleet table at all.
     let clock = Clock::new();
     let mut engine = engine(auto(), &clock);
     engine.handle(heartbeat(NODE, 1), clock.at(1));
     engine.handle(heartbeat(OTHER, 1), clock.at(1));
-    engine.handle(foreign_heartbeat(THIRD, 1), clock.at(1));
+    engine.handle(rx(THIRD, &[0x45, 0x4E, 0x4F, 0x57, 0x03, 0x93, 0x00, 0x00, 0x00]), clock.at(1));
     engine.handle(Event::Tick, clock.at(2));
 
     let snapshot = engine.snapshot(clock.at(3), StoreStats::default());
     let plan = snapshot.plan.expect("a plan");
     assert_eq!(plan.node_count(), 2, "the stranger is not one of the two");
-    // Counted apart, because the view has to be able to say "three nodes are
-    // heartbeating and only two of them can be driven". One number for both
-    // would make a fleet of nothing but strangers indistinguishable from a
-    // fleet that has not started yet.
-    assert_eq!(snapshot.alive, 3, "the stranger is heartbeating like the rest");
-    assert_eq!(snapshot.assignable, 2, "and is still not one this host can drive");
+    assert_eq!(snapshot.alive, 2, "and is not in the table to be counted alive");
+    assert_eq!(snapshot.assignable, 2);
+    assert_eq!(counters(&engine).foreign_fleet, 1, "but it was heard, and it is said so");
 
     let held: Vec<ChannelSet> =
         engine.nodes().filter_map(|node| node.desired.map(|a| a.channels)).collect();
@@ -818,7 +863,7 @@ fn an_unacknowledged_assignment_is_retried_on_the_next_heartbeat() {
 
     let (_, _, retry) = sent_admin(&engine.handle(heartbeat(NODE, 3), clock.at(10)));
     assert_eq!(
-        retry.assignment_version, first.assignment_version,
+        retry.epoch, first.epoch,
         "a retry of the same assignment keeps its epoch; the node never saw it"
     );
     assert_eq!(counters(&engine).admin_failed, 1);
@@ -891,7 +936,8 @@ fn the_assignment_latency_is_measured_end_to_end_on_the_bridge_clock() {
     // and the transmit callback at 1_004_500: 4.5 ms from "the node is
     // listening" to "its radio says it has the frame", with none of the host's
     // scheduling in between.
-    let opened = engine.handle(rx_at(NODE, MsgType::Heartbeat, 2, b"", 1_000_000), clock.at(6));
+    let opened =
+        engine.handle(beat_at(NODE, 2, Capabilities::here(true, true), 1_000_000), clock.at(6));
     let (id, _, _) = sent_admin(&opened);
     let batch = engine.handle(send_result(id, SendStatus::AckOk, 1_004_500), clock.at(6));
 
@@ -904,14 +950,16 @@ fn the_assignment_latency_is_measured_end_to_end_on_the_bridge_clock() {
 fn a_latency_measured_across_the_bridge_counter_wrapping_is_still_right() {
     let clock = Clock::new();
     let mut engine = engine(manual(), &clock);
-    engine.handle(heartbeat(NODE, 1), clock.at(1));
+    // Both heartbeats are stamped just short of the wrap, a millisecond apart,
+    // which is what a bridge approaching 71 minutes of uptime actually emits.
+    engine.handle(beat_at(NODE, 1, Capabilities::here(true, true), u32::MAX - 2_000), clock.at(1));
     engine.handle(assign(NODE, 7, 7), clock.at(2));
 
     // The bridge's stamp is a `u32` of microseconds and so wraps every 71
     // minutes or so. A heartbeat 1 ms before the wrap and a callback 3.5 ms
     // after it are 4.5 ms apart, and a wrapping subtraction says so.
-    let opened =
-        engine.handle(rx_at(NODE, MsgType::Heartbeat, 2, b"", u32::MAX - 999), clock.at(6));
+    let opened = engine
+        .handle(beat_at(NODE, 2, Capabilities::here(true, true), u32::MAX - 999), clock.at(6));
     let (id, _, _) = sent_admin(&opened);
     let batch = engine.handle(send_result(id, SendStatus::AckOk, 3_500), clock.at(6));
 
@@ -936,7 +984,7 @@ fn a_reboot_re_issues_the_assignment_under_a_fresh_epoch() {
     // and be discarded — while still being acknowledged.
     let batch = engine.handle(heartbeat(NODE, 1), clock.at(10));
     let (_, _, reissued) = sent_admin(&batch);
-    assert_ne!(reissued.assignment_version, first.assignment_version);
+    assert_ne!(reissued.epoch, first.epoch);
     assert_eq!(reissued.channels, run(2, 4));
 
     let node = engine.nodes().next().expect("the node");
@@ -958,7 +1006,7 @@ fn epochs_carry_on_from_where_the_database_left_off() {
 
     let (_, _, admin) = sent_admin(&engine.handle(heartbeat(NODE, 2), clock.at(6)));
     // 301 narrowed to a byte that skips zero, which the firmware never sends.
-    assert_eq!(admin.assignment_version, 46);
+    assert_eq!(admin.epoch, 46);
 }
 
 #[test]
@@ -1201,7 +1249,7 @@ fn a_node_joining_re_cuts_the_pool_for_the_whole_fleet() {
 
     let (_, dst, third) = sent_admin(&engine.handle(heartbeat(peer(0), 2), clock.at(6)));
     assert_eq!(dst, peer(0), "and it goes out in that node's own next window");
-    assert_ne!(third.assignment_version, first.assignment_version, "under a fresh epoch");
+    assert_ne!(third.epoch, first.epoch, "under a fresh epoch");
     assert_eq!(counters(&engine).replans, 2);
 }
 
@@ -1230,7 +1278,7 @@ fn one_node_on_a_two_run_pool_gets_all_of_it_in_one_frame() {
     let clock = Clock::new();
     let mut engine = engine(auto(), &clock);
 
-    // This is where the rotation used to be. `MSG_ADMIN` carried one contiguous
+    // This is where the rotation used to be. An assignment carried one contiguous
     // range and the US pool is two runs, so a lone node was given them in turn
     // on a sixty-second dwell: half the pool unscanned at any instant, and a
     // fresh epoch spent every minute for as long as the fleet stayed at one.
@@ -1275,7 +1323,7 @@ fn bluetooth_goes_to_one_node_at_a_time_and_moving_it_tells_both() {
     assert_eq!(dst, peer(0));
     assert!(admin.scan_ble(), "the flag rides on that node's own next assignment");
     assert_eq!(admin.channels, held, "and changes nothing else about the assignment");
-    assert_ne!(admin.assignment_version, 0, "under an epoch the node will adopt");
+    assert_ne!(admin.epoch, 0, "under an epoch the node will adopt");
     engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(4));
 
     // Moving it is two frames: the node giving it up has to be told as well,
@@ -1481,4 +1529,121 @@ fn a_node_the_bridge_cannot_peer_with_leaves_the_plan_so_the_rest_still_cover_th
     engine.handle(connected(), clock.at(7));
     engine.handle(Event::Tick, clock.at(8));
     assert!(engine.nodes().nth(2).expect("the refused node").desired.is_some());
+}
+
+/// The bridge holds what it hears while no host is attached, so the first
+/// thing a fresh connection receives is a ring's worth of the recent past
+/// delivered as fast as USB will carry it. Measured on the bench behind
+/// `docs/phase-4-findings.md`: twenty-five frames spanning eight and a half
+/// minutes of bridge time inside seventeen milliseconds of host time.
+///
+/// Every one of those heartbeats names an admin window that shut long ago.
+/// Transmitting into them put nine assignments on the control channel in a
+/// quarter of a second, eight of them unacknowledged, aimed at a node that was
+/// off sweeping a channel where it could not hear any of them.
+#[test]
+fn heartbeats_replayed_out_of_the_bridges_backlog_do_not_open_admin_windows() {
+    let clock = Clock::new();
+    let mut engine = engine(manual(), &clock);
+    engine.handle(connected(), clock.at_ms(0));
+
+    // Nine heartbeats a second apart on the bridge's clock, handed to the
+    // engine two milliseconds apart on the host's. Only one of those can be
+    // real time.
+    let mut sent = 0;
+    for beat in 0..9u32 {
+        let batch = engine.handle(
+            beat_at(NODE, beat + 1, Capabilities::here(true, true), 1_000_000 + beat * 1_000_000),
+            clock.at_ms(u64::from(beat) * 2),
+        );
+        sent += batch.urgent.len();
+        // Owed from the first heartbeat on, so every window after this one is
+        // a window the engine had something to say in and declined to.
+        if beat == 0 {
+            engine.handle(assign(NODE, 7, 7), clock.at_ms(1));
+            assert!(engine.nodes().next().expect("the node").dirty, "an assignment is owed");
+        }
+    }
+
+    assert_eq!(sent, 0, "not one assignment fired into a window that had already closed");
+    assert_eq!(
+        engine.counters().admin_windows_missed,
+        8,
+        "eight of the nine: the first arrived before the assignment was made, and a window \
+         that owed nothing is not one this host held anything back from"
+    );
+    assert!(engine.nodes().next().expect("the node").dirty, "still owed, and still not sent");
+    assert_eq!(engine.counters().admin_sent, 0);
+    // The node is admitted regardless: a stale heartbeat still says it was
+    // alive and what its radio is, and both are still true.
+    assert_eq!(engine.nodes().count(), 1);
+}
+
+/// The other half of the same rule: once the host is reading the link live,
+/// every heartbeat opens a window again. Without this the fix would be a way
+/// of never assigning anything.
+#[test]
+fn a_heartbeat_heard_live_opens_an_admin_window_again() {
+    let clock = Clock::new();
+    let mut engine = engine(manual(), &clock);
+    engine.handle(connected(), clock.at_ms(0));
+
+    // A backlog, then the host catches up: it waits a full second of its own
+    // clock for a frame the bridge stamped a second later, which is what being
+    // caught up looks like from here.
+    for beat in 0..4u32 {
+        engine.handle(
+            beat_at(NODE, beat + 1, Capabilities::here(true, true), 1_000_000 + beat * 1_000_000),
+            clock.at_ms(u64::from(beat) * 2),
+        );
+    }
+    engine.handle(assign(NODE, 7, 7), clock.at_ms(10));
+
+    let live = engine
+        .handle(beat_at(NODE, 5, Capabilities::here(true, true), 5_000_000), clock.at_ms(1_010));
+    let (_, dst, _) = sent_admin(&live);
+    assert_eq!(dst, NODE, "the window this heartbeat opened is the live one");
+}
+
+/// A latency is a measurement of one specific thing — how long an assignment
+/// took to land inside the window a heartbeat opened — and a figure larger
+/// than the window is not that measurement. The bench recorded 80 seconds this
+/// way, off a heartbeat replayed out of the backlog: real arithmetic on two
+/// honest stamps, saying nothing about how quickly the bridge answered.
+#[test]
+fn a_latency_longer_than_the_admin_window_is_not_recorded_as_one() {
+    let clock = Clock::new();
+    let mut engine = engine(manual(), &clock);
+    engine.handle(beat_at(NODE, 1, Capabilities::here(true, true), 1_000_000), clock.at(1));
+    engine.handle(assign(NODE, 7, 7), clock.at(2));
+
+    let opened =
+        engine.handle(beat_at(NODE, 2, Capabilities::here(true, true), 2_000_000), clock.at(6));
+    let (id, _, _) = sent_admin(&opened);
+    // The callback comes back a full second after the heartbeat, which is more
+    // than three times the window the node was holding open.
+    let batch = engine.handle(send_result(id, SendStatus::AckOk, 3_000_000), clock.at(6));
+
+    let Some(Record::Assignment(row)) = batch.records.first() else { panic!("a row") };
+    assert_eq!(row.latency_us, None, "no number is better than a wrong one");
+    assert_eq!(row.outcome, AdminOutcome::Acked, "the outcome is still recorded");
+    assert_eq!(engine.nodes().next().expect("the node").last_latency_us, None);
+}
+
+/// A latency exactly at the window is still a latency: the node was listening
+/// for that whole 300 ms, so the boundary belongs inside.
+#[test]
+fn a_latency_at_the_edge_of_the_admin_window_is_still_recorded() {
+    let clock = Clock::new();
+    let mut engine = engine(manual(), &clock);
+    engine.handle(beat_at(NODE, 1, Capabilities::here(true, true), 1_000_000), clock.at(1));
+    engine.handle(assign(NODE, 7, 7), clock.at(2));
+
+    let opened =
+        engine.handle(beat_at(NODE, 2, Capabilities::here(true, true), 2_000_000), clock.at(6));
+    let (id, _, _) = sent_admin(&opened);
+    let batch = engine.handle(send_result(id, SendStatus::AckOk, 2_300_000), clock.at(6));
+
+    let Some(Record::Assignment(row)) = batch.records.first() else { panic!("a row") };
+    assert_eq!(row.latency_us, Some(300_000));
 }

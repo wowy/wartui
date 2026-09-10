@@ -6,18 +6,21 @@ whatever is acting as the mesh's core — for this fleet, `wartui` on a laptop
 behind the bridge.
 
 It replaces the vendor firmware at
-[ESP32DualBandWardriver](https://github.com/justcallmekoko/ESP32DualBandWardriver)
-rather than porting it. The scanning and the ESP-NOW comms come from there and
-are cited `file:line` throughout the source; the web interface, SD card,
-display, buttons, fuel gauge, GPS, geofencing, uploads and dock mode do not,
-because a node in this fleet has no use for any of them and each is a kilobyte
-that can go wrong somewhere only a reflash reaches.
+[ESP32DualBandWardriver](https://github.com/wowy/ESP32DualBandWardriver)
+rather than porting it. The scanning and the ESP-NOW comms were learned there and
+are cited `file:line` throughout the source, as the record of a measured
+behaviour rather than as a specification to match; the web interface, SD card,
+display, buttons, fuel gauge, GPS, geofencing, uploads and dock mode did not come
+across at all, because a node in this fleet has no use for any of them and each
+is a kilobyte that can go wrong somewhere only a reflash reaches.
 
-Phase 1 speaks the vendor's wire format exactly, so `wartui run` drives it with
-no host change: broadcast `MSG_HEARTBEAT` once per completed sweep, broadcast
-`MSG_TEXT` per newly-seen BSSID, and accept the ten-byte unicast `MSG_ADMIN`.
+It shares no wire format with it either. A node broadcasts a 13-byte heartbeat
+once per completed sweep and a 17-plus-SSID sighting per newly-seen BSSID, and
+accepts a 15-byte unicast assignment — all of them behind wartui's own `WTUI`
+magic and a wire version byte, none of them anything the vendor firmware
+recognises.
 
-## Four deliberate differences
+## Five deliberate differences
 
 **It listens instead of scanning.** Every `WiFi.scanNetworks` in the vendor tree
 passes `passive = false` (`src/WiFiOps.cpp:745,755,779`), so a stock node
@@ -48,14 +51,11 @@ single heartbeat. Under `--manual` it lasts until a key is pressed, and **the
 node collects nothing until then** — which is the intended trade and worth
 knowing before wondering where the observations went.
 
-**It says what it is, in every heartbeat.** Node to core is byte-identical to a
-stock node's, which is what lets golden vectors captured off a vendor fleet keep
-testing this tree — and it is also why the host cannot otherwise tell the two
-apart. So the heartbeat's text field, which a stock node leaves empty
-(`src/WiFiOps.cpp:1456-1457`), carries an ASCII token:
+**It says what it is, in every heartbeat.** Three of a heartbeat's thirteen bytes
+are a version and a feature byte, shown by the host as:
 
 ```
-wartui/0.1;ble,5g
+wartui/1.0;ble,5g
 ```
 
 The protocol version, then what this build can do: `ble` if the cargo feature is
@@ -63,22 +63,31 @@ compiled in, `5g` if the chip has the radio for it — a C5 does, a C6 does not.
 `ble` says the code exists, not that it is running; that is still the core's
 decision and is off at every boot.
 
-The host refuses to plan for a node that sends no token, which is the point.
-Without it, a stranger in the fleet is worse than an absent one: it heartbeats
-so it is planned for, its radio acknowledges the assignment so the host believes
-it landed, and its firmware cannot decode the frame so the share it was given
-goes unscanned. Every heartbeat carries the token rather than only the first,
-because one sent once is one lost to a dropped frame — and because a board
-reflashed with something else should stop claiming to be this.
+The host will not deal channels to a node until it has heard this, which is the
+point: a share of 5 GHz cut for a C6 is a share nobody scans, with an assignment
+sitting on top of it and nothing to say the pool is not being covered. Every
+heartbeat carries it rather than only the first, because one sent once is one
+lost to a dropped frame — and because a board reflashed with something else
+should stop claiming the old build's features.
 
-Both feature words are acted on, not merely recorded. A build without `5g` is
+**Its frames are unrecognisable to the firmware it replaces.** This used to be
+the opposite: node to core was byte-identical to a stock node's, and that was
+the whole reason the host could not otherwise tell the two apart. It also meant
+each fleet corrupted the other. A vendor core hearing these heartbeats put the
+node in its own table and cut its plan around a node that would never obey it;
+and because the vendor's receive handlers test `if (len < sizeof(...)) return;`
+rather than for equality, a stock node in range read wartui's longer assignment
+as its own struct and **adopted a garbage channel range from it**. Every frame
+here now starts `WTUI` and a wire version byte, checked before anything else, so
+neither fleet can reach the other at all.
+
+Both feature bits are acted on, not merely recorded. A build without `5g` is
 dealt no 5 GHz channel, because it would adopt the share, acknowledge it and
-scan the part it could reach — the same hole as a stranger's, opened by a node
-that really is ours. A build without `ble` is refused the Bluetooth scan, in the
-view and again in the host's engine, and loses it if it was already holding one
-when it announced itself. Neither refusal needs anything of this firmware: the
-token is the whole of what the host has to go on, so getting it wrong here is
-indistinguishable from lying about it.
+scan only the part it could reach. A build without `ble` is refused the
+Bluetooth scan, in the view and again in the host's engine, and loses it if it
+was already holding one when it announced itself. Neither refusal needs anything
+of this firmware: these three bytes are the whole of what the host has to go on,
+so getting them wrong here is indistinguishable from lying about it.
 
 ## Building and flashing
 
@@ -141,7 +150,7 @@ Measured on real hardware and written up in `docs/phase-0-findings.md`: two
 nodes differing only in whether BLE was enabled, both sent assignments inside
 their own admin windows, frames 1 dB apart at the sniffer.
 
-| Node | BLE | `MSG_ADMIN` sent to it | Acknowledged |
+| Node | BLE | Assignments sent to it | Acknowledged |
 | --- | --- | --- | --- |
 | `…59:50` | off | 2, each transmitted once, no retry | **2 of 2** |
 | `…57:84` | on | 32, one sequence number, retry bit on 31 | **0 of 32** |
@@ -152,7 +161,7 @@ and the admin window is precisely when the node is otherwise idle. In the same
 170 seconds the BLE-off node completed sixteen sweeps and the BLE-on node nine.
 
 **The core decides which node scans, and the answer is at most one.** Bit 0 of
-`MSG_ADMIN`'s flags byte carries it, and it is clear at every boot regardless of
+the assignment's flags byte carries it, and it is clear at every boot regardless of
 how the firmware was built — the `ble` cargo feature decides whether any of this
 is compiled in, and the flag decides whether it runs. That shape is the measured
 cost showing through: it is worth paying on one node for Bluetooth coverage and
@@ -193,7 +202,7 @@ and `src/ble.rs` is only the conversation.
 ## What is testable, and where
 
 Almost none of the interesting logic is in this crate. The 802.11 beacon and
-RSN/WPA element parser, the wardrive-line writer, the dedup ring and the HCI
+RSN/WPA element parser, the sighting encoder, the dedup ring and the HCI
 packets all live in `wartui-proto`, on the other side of the path dependency,
 because a `no_std` binary for `riscv32imac` cannot run a test and a misread
 information element found by reflashing is found expensively.

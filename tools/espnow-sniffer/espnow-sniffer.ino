@@ -19,8 +19,12 @@
 //
 // Capture with:
 //   pio device monitor -b 115200 | tee /tmp/capture.txt
-// then append the `capture_*` lines to
-// crates/wartui-proto/tests/golden_vectors.txt and re-run `cargo test`.
+//
+// `capture_*` lines are wartui's own frames and `vendor_*` lines are somebody
+// else's, both as `<name> <length> <hex>`. There is no golden-vector fixture to
+// paste them into any more -- the wire format has one implementation of each
+// end, so `crates/wartui-proto/tests/wire.rs` writes its vectors out by hand --
+// but the hex is still the fastest way to see what a fleet is actually saying.
 
 #include <WiFi.h>
 #include <esp_now.h>
@@ -30,7 +34,11 @@
 // Identical on main and feat/node-interference-mitigation.
 static const uint8_t MESH_CHANNEL = 6;
 
-static const char MAGIC[4] = {'E', 'N', 'O', 'W'};
+// wartui's own frames, and the vendor's. Both are recognised because both are
+// worth capturing: one is the fleet under test and the other is whatever else
+// is on the channel it has to share.
+static const char WARTUI_MAGIC[4] = {'W', 'T', 'U', 'I'};
+static const char VENDOR_MAGIC[4] = {'E', 'N', 'O', 'W'};
 
 // Espressif's OUI, which tags an action frame as ESP-NOW.
 static const uint8_t ESPRESSIF_OUI[3] = {0x18, 0xFE, 0x34};
@@ -43,7 +51,7 @@ static const uint8_t ESPRESSIF_OUI[3] = {0x18, 0xFE, 0x34};
 //    1  element ID (221)   1  length   3  OUI   1  type (4)   1  version
 //
 // The 4-byte random-values field is easy to miss. Omitting it put this at 35,
-// which shifted every promiscuous capture by four bytes so the "ENOW" check
+// which shifted every promiscuous capture by four bytes so the magic check
 // failed on frames that were in fact plaintext -- making the encrypted-versus-
 // absent diagnostic report "encrypted" for everything. Caught by comparing the
 // two receive paths on real hardware: promiscuous said 216 bytes where the
@@ -58,7 +66,8 @@ struct Capture {
   uint8_t channel;
   uint16_t body_len;
   uint8_t body[256];
-  bool has_magic;
+  // 'w' for one of ours, 'v' for the vendor's, 0 for neither.
+  char fleet;
   bool via_espnow;  // false means only promiscuous mode saw it
   // 802.11 retry flag and sequence number, promiscuous captures only. A run of
   // frames sharing one sequence number with the retry bit set is one logical
@@ -163,7 +172,14 @@ static void enqueue(const uint8_t *src, const uint8_t *dst, int8_t rssi, uint8_t
   if (body_len > (int)sizeof(c.body)) body_len = sizeof(c.body);
   c.body_len = (uint16_t)body_len;
   memcpy(c.body, body, c.body_len);
-  c.has_magic = (c.body_len >= 4) && (memcmp(c.body, MAGIC, 4) == 0);
+  c.fleet = 0;
+  if (c.body_len >= 4) {
+    if (memcmp(c.body, WARTUI_MAGIC, 4) == 0) {
+      c.fleet = 'w';
+    } else if (memcmp(c.body, VENDOR_MAGIC, 4) == 0) {
+      c.fleet = 'v';
+    }
+  }
   c.via_espnow = via_espnow;
   c.retry = retry;
   c.seq = seq;
@@ -239,14 +255,22 @@ static void drainQueue() {
                     c.body_len, c.seq, c.retry ? " RETRY" : "");
     }
 
-    if (c.has_magic) {
-      Serial.printf("#   type=%u\n", c.body_len > 4 ? c.body[4] : 0);
+    if (c.fleet == 'w') {
+      // wartui: magic, wire version, type, then the body.
+      Serial.printf("#   wartui v%u type=0x%02x\n", c.body_len > 4 ? c.body[4] : 0,
+                    c.body_len > 5 ? c.body[5] : 0);
       Serial.printf("capture_%04lu %u ", (unsigned long)++capture_seq, c.body_len);
       for (uint16_t i = 0; i < c.body_len; i++) Serial.printf("%02x", c.body[i]);
       Serial.println();
+    } else if (c.fleet == 'v') {
+      // The vendor's, whose type byte sits where our version byte does.
+      Serial.printf("#   vendor type=%u\n", c.body_len > 4 ? c.body[4] : 0);
+      Serial.printf("vendor_%04lu %u ", (unsigned long)++capture_seq, c.body_len);
+      for (uint16_t i = 0; i < c.body_len; i++) Serial.printf("%02x", c.body[i]);
+      Serial.println();
     } else {
-      Serial.println("#   body does not start with \"ENOW\" -- encrypted payload, or "
-                     "another ESP-NOW application nearby");
+      Serial.println("#   body starts with neither \"WTUI\" nor \"ENOW\" -- an encrypted "
+                     "payload, or another ESP-NOW application nearby");
     }
     q_tail = (uint8_t)((q_tail + 1) % QUEUE_LEN);
   }

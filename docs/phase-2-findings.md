@@ -354,6 +354,18 @@ Nothing else can distinguish the two firmwares: node to core is byte-identical
 by design, which is exactly what lets vendor golden vectors keep testing this
 code. **It is built now, and the section below has the run.**
 
+> **The stated cause stopped being true on 2026-09-10.** The measurement stands:
+> a stranger in the fleet cost more than it contributed, and two nodes and a
+> stranger covered less than the two alone. What changed is *why* the two
+> firmwares were hard to tell apart. Node to core is no longer byte-identical —
+> every frame carries wartui's own magic — so a stranger's heartbeat does not
+> decode here at all and never reaches the fleet table. The reasoning above is
+> what drove that: this run is a vendor node being mis-planned by wartui, and
+> the same argument read in the other direction is wartui mis-planning a vendor
+> core's fleet, which is what these nodes were doing to anyone in range. The
+> capability bits survive the change, for the part that was always about our own
+> nodes: which band a radio reaches, and whether the Bluetooth code is on it.
+
 ## What the bleed rate actually depends on, and it is not node count
 
 Run G has all three dedup rings empty at the start, so it is the first capture
@@ -420,7 +432,11 @@ the same reason.
 
 Run H is the mixed fleet, which the bench produced without being asked: `57:84`
 carries the token and `59:50` is still on the build before it, sending the empty
-text field that is byte-for-byte a stock node's.
+text field that is byte-for-byte a stock node's. (Since 2026-09-10 an older
+build is not byte-for-byte anything: it is recognised by its wire version and
+counted as `incompatible`, which is a fault-box line rather than a table row.
+The shape of the failure — flash the host, forget the nodes, get a fleet that
+does nothing — is unchanged, and so is the reason it has to be visible.)
 
 ```
 pool US  auto — 1 of 2  session 00:01:49  channel 6  peers 4
@@ -697,11 +713,13 @@ over 107 sweeps is 1.762 s.
   contradicts nor extends it: a mixed fleet small enough to put all of 2.4 GHz
   on one node has no second node positioned to hear the bleed, which is a
   property of that shape rather than of the node count.
-- **Whether a version mismatch should be a refusal.** The token carries a major
-  and a minor and nothing gates on either, because no incompatible change has
-  happened yet. When one does, a major bump is the lever available; what the
-  host should do when it sees a major it does not know is undecided, and
-  guessing now would be inventing policy for a situation that does not exist.
+- ~~**Whether a version mismatch should be a refusal.**~~ *Answered 2026-09-10.*
+  The incompatible change happened, and the answer is that it is neither obeyed
+  nor ignored: the frame header carries a wire version byte of its own, and one
+  this build does not know is counted as `incompatible`, kept out of the fleet
+  table, and named in the footer as `N frames from an older firmware — reflash`.
+  A half-flashed fleet is the situation that policy exists for, and it is the one
+  case where saying nothing would look exactly like a fleet that had gone quiet.
 - **A C6-only fleet, and the shortfall in the footer.** The mixed case is now
   measured (runs I to K), but a fleet with no 5 GHz radio in it at all is not.
   What should happen is that the twenty-three unreachable channels come back in

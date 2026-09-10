@@ -2,7 +2,8 @@
 //!
 //! A *pool* is still described in runs — [`ChannelPool::Us`] is two of them,
 //! with a gap at indices 11-13 — because that is the shape the regulatory
-//! picture has. An *assignment* is not. `MSG_ADMIN` carries a forty-bit
+//! picture has. An *assignment* is not. [`AdminMsg`](crate::air::AdminMsg)
+//! carries a forty-bit
 //! [`ChannelSet`], one bit per [`SCAN_CHANNELS`] entry, so a node can hold any
 //! subset of the pool and a run boundary stops being something the planner has
 //! to steer around. Before that it was the central constraint here: a lone node
@@ -136,7 +137,7 @@ impl IndexRun {
     }
 }
 
-/// A set of [`SCAN_CHANNELS`] indices — the forty bits `MSG_ADMIN` carries.
+/// A set of [`SCAN_CHANNELS`] indices — the forty bits an assignment carries.
 ///
 /// One bit per entry of the table, index `i` in bit `i`, so the set is exactly
 /// as expressive as the wire field and a node can be given any subset of the
@@ -450,11 +451,13 @@ const _: () = assert!(
 /// beacons rather than probing, so a restricted pool is a choice about coverage
 /// rather than about legality.
 ///
-/// For a stock node it bounds where the node *transmits*. Every
+/// That is a deliberate divergence, and the reason it is one: every
 /// `WiFi.scanNetworks` call in the vendor firmware passes `passive = false`
-/// (`src/WiFiOps.cpp:745,755,779,3311`), so it sends a probe request on each
-/// channel it is assigned — and the host cannot change that from here, which is
-/// why the pool exists at all.
+/// (`src/WiFiOps.cpp:745,755,779,3311`), so a stock node sends a probe request
+/// on each channel it is assigned — including the DFS channels, where the rules
+/// say listen and do not speak. A pool cannot make a node quiet; only the node's
+/// own firmware can, which is why that half of this project is in
+/// `firmware/node` rather than here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ChannelPool {
     /// FCC-permitted unlicensed WLAN channels: 2.4 GHz 1-11 and 5 GHz 36-165.
@@ -530,7 +533,7 @@ impl core::fmt::Display for ChannelPool {
 /// timer behind it, because a mask can say everything a node needs to hold —
 /// which is the difference Phase 2 made. The plan before it could not give a
 /// lone node both of the US pool's runs at once, so it described a *rotation*
-/// and the caller had to step through it, re-issuing `MSG_ADMIN` on a dwell
+/// and the caller had to step through it, re-issuing the assignment on a dwell
 /// timer and accepting that coverage was intermittent in between.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Plan {
@@ -570,17 +573,17 @@ impl Plan {
         self.unreachable
     }
 
-    /// The `MSG_ADMIN` to send to `node_index`.
+    /// The assignment to send to `node_index`.
     ///
-    /// `assignment_version` is the caller's persisted epoch byte; a node adopts
-    /// the assignment only when it differs from the one it holds. `flags` is
-    /// the caller's, not the planner's: which node scans Bluetooth is an
-    /// operator's decision about one node, and partitioning channels is a
-    /// decision about the fleet.
+    /// `epoch` is the caller's persisted epoch byte; a node adopts the
+    /// assignment only when it differs from the one it holds. `flags` is the
+    /// caller's, not the planner's: which node scans Bluetooth is an operator's
+    /// decision about one node, and partitioning channels is a decision about
+    /// the fleet.
     #[must_use]
-    pub fn admin_for(&self, node_index: u8, assignment_version: u8, flags: u8) -> Option<AdminMsg> {
+    pub fn admin_for(&self, node_index: u8, epoch: u8, flags: u8) -> Option<AdminMsg> {
         Some(AdminMsg {
-            assignment_version,
+            epoch,
             node_index,
             node_count: self.node_count,
             flags,
