@@ -1,6 +1,11 @@
-# Both supported chips are RISC-V, so stable is enough. This is the reason the
-# Xtensa ESP32-S3 is not a supported bridge: it would need the espup nightly
-# fork for `feature(c_variadic)`.
+# Both node chips are RISC-V, so stable is enough.
+#
+# Unlike `firmware/bridge`, that is a property of the fleet and not just of the
+# toolchain: a node is the thing that has to reach 5 GHz, and the Xtensa part
+# wartui supports as a bridge — the ESP32-S3 — is 2.4 GHz only, which is what a
+# C6 already is. An S3 node would buy no coverage and would drag this crate onto
+# `espup`'s toolchain to do it. The bridge is the board where that trade goes
+# the other way, because a bridge never leaves the control channel.
 [toolchain]
 channel = "stable"
 components = ["rust-src"]

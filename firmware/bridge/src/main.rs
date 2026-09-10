@@ -30,11 +30,17 @@
 //!
 //! ```bash
 //! cargo run --release --features esp32c6   # or --features esp32c5
+//! cargo +esp run --release --features esp32s3 --target xtensa-esp32s3-none-elf
 //! ```
 //!
 //! The runner is `espflash flash --monitor` with no `--chip`, so it detects the
 //! part itself. Note that `--monitor` prints the framed link bytes as text and
 //! will look like noise; use `wartui sniff` instead.
+//!
+//! The S3 is the odd one out because it is Xtensa: it needs `espup`'s `esp`
+//! toolchain and a `core` built from source, neither of which the RISC-V parts
+//! want. The `+esp` override beats `rust-toolchain.toml`, which stays on
+//! stable so that a C5 or a C6 costs nobody a second toolchain.
 
 #![no_std]
 #![no_main]
@@ -77,15 +83,31 @@ esp_bootloader_esp_idf::esp_app_desc!();
 
 extern crate alloc;
 
-#[cfg(not(any(feature = "esp32c5", feature = "esp32c6")))]
-compile_error!("select a chip: --features esp32c5 or --features esp32c6");
-#[cfg(all(feature = "esp32c5", feature = "esp32c6"))]
-compile_error!("select exactly one chip: esp32c5 and esp32c6 are mutually exclusive");
+#[cfg(not(any(feature = "esp32c5", feature = "esp32c6", feature = "esp32s3")))]
+compile_error!("select a chip: --features esp32c5, esp32c6 or esp32s3");
+
+/// Counted rather than checked pairwise.
+///
+/// With two chips `all(a, b)` was the whole of the rule; with three it says
+/// nothing about `a + c` or `b + c`, and the next chip would need three more
+/// clauses. Counting cannot rot that way.
+///
+/// Both this and the `compile_error!` above are backstops that in practice
+/// never get to speak: selecting two chips, or none, makes `esp-hal`'s own
+/// macros fail first and loudly. They are here to state the rule where someone
+/// reading this file will find it, and to keep holding if that ever changes —
+/// not because they are the message an operator sees.
+const CHIPS_SELECTED: usize = cfg!(feature = "esp32c5") as usize
+    + cfg!(feature = "esp32c6") as usize
+    + cfg!(feature = "esp32s3") as usize;
+const _: () = assert!(CHIPS_SELECTED <= 1, "select exactly one chip feature, not several");
 
 #[cfg(feature = "esp32c5")]
 const CHIP: Chip = Chip::Esp32C5;
 #[cfg(feature = "esp32c6")]
 const CHIP: Chip = Chip::Esp32C6;
+#[cfg(feature = "esp32s3")]
+const CHIP: Chip = Chip::Esp32S3;
 
 /// Bytes to take from the USB endpoint in one pass.
 ///
@@ -180,16 +202,27 @@ fn boot_phase(cause: ResetCause) -> LoopPhase {
 
 /// Flatten the chip's reset reason into the handful of stories worth telling.
 ///
-/// `SocResetReason` names silicon blocks rather than causes, and the C5 and C6
-/// spellings differ. Matching only the variants *both* chips define was the
-/// first version of this and it silently cost the C5 its two: `PowerGlitch` and
-/// `CpuLockup` exist on that part alone and fell through to
-/// [`ResetCause::Unknown`], which on a chip nothing has ever been bench-tested
-/// on is the worst place to lose a signal. They are matched behind a `cfg`
-/// now — one `cfg`, for the one chip that has them.
+/// `SocResetReason` names silicon blocks rather than causes, and the three
+/// chips disagree about both which blocks exist and what to call them. Matching
+/// only the variants every chip defines was the first version of this and it
+/// silently cost the C5 its two: `PowerGlitch` and `CpuLockup` exist on that
+/// part alone and fell through to [`ResetCause::Unknown`], which on a chip
+/// nothing has ever been bench-tested on is the worst place to lose a signal.
+///
+/// The S3 makes the same trap worse, because its differences are *renames*
+/// rather than additions and so they are compile errors rather than silence:
+/// the CPU-scoped variants the RISC-V parts spell `Cpu0Sw`, `Cpu0Mwdt0`,
+/// `Cpu0Mwdt1` and `Cpu0RtcWdt` are `CpuSw`, `CpuMwdt0`, `CpuMwdt1` and
+/// `CpuRtcWdt` there, for the good reason that the S3 has two cores and neither
+/// is privileged. The *numeric* codes behind those names are identical on all
+/// three parts — 0x0C is a software CPU reset everywhere — which is exactly why
+/// this is worth a comment: nothing about a build failing here means the chips
+/// actually behave differently, and the temptation to match on `reason as u8`
+/// and be done should be resisted, because the enum is the only thing that
+/// makes the next chip's differences visible at all.
 ///
 /// What is left unmapped is deliberate. `CoreDeepSleep` cannot happen: nothing
-/// here sleeps. `CoreSDIO` (C6) and `CoreEfuseCrc` (both) are real but say
+/// here sleeps. `CoreSDIO` (C6) and `CoreEfuseCrc` (all three) are real but say
 /// nothing an operator could act on beyond "this board is unwell", which
 /// [`ResetCause::Unknown`] already says.
 fn reset_cause() -> ResetCause {
@@ -201,30 +234,48 @@ fn reset_cause() -> ResetCause {
         // Both the panic handler and `HostToBridge::Reset` arrive here, and so
         // does the reset `StallWatch` asks for. Which of the three it was is
         // what the phase marker is for.
-        SocResetReason::CoreSw | SocResetReason::Cpu0Sw => ResetCause::Software,
+        SocResetReason::CoreSw => ResetCause::Software,
+        #[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
+        SocResetReason::Cpu0Sw => ResetCause::Software,
+        #[cfg(feature = "esp32s3")]
+        SocResetReason::CpuSw => ResetCause::Software,
         SocResetReason::CoreMwdt0
         | SocResetReason::CoreMwdt1
         | SocResetReason::CoreRtcWdt
-        | SocResetReason::Cpu0Mwdt0
-        | SocResetReason::Cpu0Mwdt1
-        | SocResetReason::Cpu0RtcWdt
         | SocResetReason::SysRtcWdt
         | SocResetReason::SysSuperWdt => ResetCause::Watchdog,
+        #[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
+        SocResetReason::Cpu0Mwdt0 | SocResetReason::Cpu0Mwdt1 | SocResetReason::Cpu0RtcWdt => {
+            ResetCause::Watchdog
+        }
+        #[cfg(feature = "esp32s3")]
+        SocResetReason::CpuMwdt0 | SocResetReason::CpuMwdt1 | SocResetReason::CpuRtcWdt => {
+            ResetCause::Watchdog
+        }
         // A glitch on the supply rail is a brownout as far as anyone holding
         // the board is concerned, and the remedy printed for it — check the
         // cable and the hub — is the right one.
         #[cfg(feature = "esp32c5")]
         SocResetReason::PowerGlitch => ResetCause::Brownout,
-        // The only signal either part gives for the hang class, and only this
-        // one gives it. There is no working watchdog behind it to fall back on.
+        #[cfg(feature = "esp32s3")]
+        SocResetReason::CorePwrGlitch => ResetCause::Brownout,
+        // The S3's *other* glitch detector, which is not the same story told
+        // twice: esp-hal names 0x17 "glitch on power" and 0x13 "glitch on
+        // clock", and only the first one is answered by a different cable.
+        #[cfg(feature = "esp32s3")]
+        SocResetReason::SysClkGlitch => ResetCause::ClockGlitch,
+        // The only signal any of these parts gives for the hang class, and only
+        // the C5 gives it. There is no working watchdog behind it to fall back
+        // on, so on a C6 or an S3 the hang class is simply unreported.
         #[cfg(feature = "esp32c5")]
         SocResetReason::CpuLockup => ResetCause::Lockup,
         SocResetReason::SysBrownOut => ResetCause::Brownout,
         // `espflash reset` drives this pair over DTR/RTS, so an operator who
-        // reached for the tool sees that they did.
-        SocResetReason::CoreUsbUart | SocResetReason::CoreUsbJtag | SocResetReason::Cpu0JtagCpu => {
-            ResetCause::External
-        }
+        // reached for the tool sees that they did. The S3 has no `Cpu0JtagCpu`
+        // and reports the same act as `CoreUsbJtag`.
+        SocResetReason::CoreUsbUart | SocResetReason::CoreUsbJtag => ResetCause::External,
+        #[cfg(any(feature = "esp32c5", feature = "esp32c6"))]
+        SocResetReason::Cpu0JtagCpu => ResetCause::External,
         _ => ResetCause::Unknown,
     }
 }
