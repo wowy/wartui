@@ -118,6 +118,10 @@ fn run(start: u8, end: u8) -> ChannelSet {
 }
 
 fn observation(src: Mac, bssid: &str, rssi: i8) -> Event {
+    named_observation(src, bssid, rssi, b"example")
+}
+
+fn named_observation(src: Mac, bssid: &str, rssi: i8, ssid: &[u8]) -> Event {
     let mut raw = [0u8; 6];
     for (byte, hex) in raw.iter_mut().zip(bssid.split(':')) {
         *byte = u8::from_str_radix(hex, 16).expect("a hex octet");
@@ -129,7 +133,7 @@ fn observation(src: Mac, bssid: &str, rssi: i8) -> Event {
         channel: 6,
         rssi,
         security: Security::Wpa2Psk,
-        ssid: b"example",
+        ssid,
     }
     .encode_into(&mut frame)
     .expect("fits");
@@ -430,6 +434,24 @@ fn the_tail_keeps_the_newest_observations_and_no_more() {
     assert_eq!(snapshot.tail.len(), 4);
     assert_eq!(snapshot.tail[0].bssid[5], 6, "oldest kept");
     assert_eq!(snapshot.tail[3].bssid[5], 9, "newest last");
+}
+
+#[test]
+fn the_tail_shows_a_hidden_network_as_hidden_and_never_a_raw_nul() {
+    // A node flashed before the parser trimmed padding still reports it, and
+    // the view decides "hidden" by asking whether this string is empty. The
+    // interior NUL is the other half: it is not padding, it survives the trim,
+    // and a terminal handed one silently shows a shorter name than the one on
+    // the air.
+    let clock = Clock::new();
+    let mut engine = engine(manual(), &clock);
+
+    engine.handle(named_observation(NODE, "AA:BB:CC:DD:EE:01", -60, &[0u8; 8]), clock.at(1));
+    engine.handle(named_observation(NODE, "AA:BB:CC:DD:EE:02", -60, b"a\0b"), clock.at(2));
+
+    let snapshot = engine.snapshot(clock.at(3), StoreStats::default());
+    assert_eq!(snapshot.tail[0].ssid, "", "nothing but padding is a hidden network");
+    assert_eq!(snapshot.tail[1].ssid, "a\u{FFFD}b");
 }
 
 #[test]

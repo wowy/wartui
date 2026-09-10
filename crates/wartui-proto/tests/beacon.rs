@@ -185,11 +185,21 @@ fn an_interior_zero_byte_is_not_padding_and_is_kept() {
 }
 
 #[test]
-fn an_over_long_ssid_of_zeros_is_clamped_and_then_trimmed_away() {
-    // Pins the order of the two operations. Trimming first would hand the
-    // clamp an empty slice and reach the same answer by luck.
+fn an_over_long_ssid_of_nothing_but_zeros_is_a_hidden_network() {
     let ap = parse_mgmt(&beacon(&ie(0, &[0u8; 40])), -50, 6).expect("a beacon");
     assert!(ap.ssid().is_empty());
+}
+
+#[test]
+fn a_name_past_the_legal_length_does_not_rescue_the_padding_in_front_of_it() {
+    // The input that separates clamping first from trimming first, and so the
+    // reason the parser does them in that order: trimmed first this keeps
+    // thirty-nine bytes, and the clamp then yields thirty-two zeros — a
+    // network named after its own padding.
+    let mut ssid = [0u8; 40];
+    ssid[39] = b'X';
+    let ap = parse_mgmt(&beacon(&ie(0, &ssid)), -50, 6).expect("a beacon");
+    assert!(ap.ssid().is_empty(), "clamped to padding, and padding is a hidden network");
 }
 
 #[test]

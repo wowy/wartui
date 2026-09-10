@@ -3,12 +3,37 @@
 //! Plain owned data with no database types in it, so the engine stays free of
 //! `rusqlite` and can be tested without one. The store's job is to turn these
 //! into rows; deciding what is worth recording is the engine's.
+//!
+//! [`ssid_text`] lives here rather than beside either of its callers because
+//! both of them read this module's bytes, and when the rule was written out
+//! twice the two answers drifted apart.
 
 use wartui_proto::air::RecordKind;
+use wartui_proto::beacon::visible_ssid;
 use wartui_proto::link::Mac;
 use wartui_proto::plan::ChannelSet;
 
 use crate::position::Fix;
+
+/// Raw SSID bytes as text, for anything that has to show them to a person or
+/// write them into a column that has to be parsed as text.
+///
+/// One rule in one place, because the view and the export were quietly
+/// disagreeing about the same bytes. A cloaked access point's zero padding is
+/// stripped by [`visible_ssid`], which is the same rule the parser applies and
+/// is repeated here because captures recorded before it exists are still read
+/// back through this. Any NUL left standing is an interior one, which is not
+/// padding and gets what `from_utf8_lossy` already gives a byte it cannot
+/// represent: a raw NUL is worth no more to a terminal than to WiGLE's parser,
+/// and a pane that emits one shows a name most terminals silently shorten.
+///
+/// The store keeps whatever arrived either way. This is only how it is read
+/// back out.
+#[must_use]
+pub fn ssid_text(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(visible_ssid(bytes));
+    if text.contains('\0') { text.replace('\0', "\u{FFFD}") } else { text.into_owned() }
+}
 
 /// A node was heard from, which is enough to keep its row current.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,6 +94,8 @@ pub struct Observation {
     pub bssid: [u8; 6],
     /// Raw SSID bytes. Not a `String`: an SSID is whatever the access point
     /// beaconed, and forcing it through UTF-8 here would lose the original.
+    /// [`ssid_text`] is how it becomes text again, wherever something has to
+    /// show it or write it down.
     pub ssid: Vec<u8>,
     /// The `AuthMode` token exactly as the node wrote it.
     pub security: String,
@@ -213,4 +240,25 @@ pub enum Record {
     Raw(RawFrame),
     /// Append an assignment this host transmitted.
     Assignment(AssignmentSent),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ssid_text;
+
+    #[test]
+    fn a_cloaked_ssid_is_stripped_back_to_a_hidden_network() {
+        assert_eq!(ssid_text(&[0u8; 8]), "");
+        assert_eq!(ssid_text(b"Home\0\0\0"), "Home");
+        assert_eq!(ssid_text(b""), "");
+        assert_eq!(ssid_text(b"plain"), "plain");
+    }
+
+    #[test]
+    fn a_nul_that_is_not_padding_reaches_neither_the_file_nor_the_terminal() {
+        // An interior NUL is left alone by the trim, so this is the last thing
+        // standing between it and a column WiGLE has to parse, or a terminal
+        // that would swallow it and show a shorter name than the one on air.
+        assert_eq!(ssid_text(b"a\0b"), "a\u{FFFD}b");
+    }
 }
