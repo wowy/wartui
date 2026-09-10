@@ -1,7 +1,9 @@
 //! The host-to-bridge USB framing.
 
 use heapless::{String, Vec};
-use wartui_proto::air::{MsgType, TextMsg};
+use wartui_proto::air::{
+    Capabilities, HeartbeatMsg, RecordKind, SIGHTING_MSG_MAX, Security, SightingMsg,
+};
 use wartui_proto::link::{
     BROADCAST, BridgeToHost, Chip, FrameAccumulator, HostToBridge, LINK_PROTO_VERSION, LinkError,
     LogLevel, LoopPhase, MAX_FRAME, ResetCause, SendStatus, crc16, decode_frame, encode_frame,
@@ -10,7 +12,9 @@ use wartui_proto::link::{
 fn sample_commands() -> Vec<HostToBridge, 8> {
     let mut payload = Vec::new();
     payload
-        .extend_from_slice(&TextMsg::new(MsgType::Heartbeat, 42, b"").expect("fits").encode())
+        .extend_from_slice(
+            &HeartbeatMsg { counter: 42, capabilities: Capabilities::here(true, true) }.encode(),
+        )
         .expect("212 fits in 250");
 
     let mut v = Vec::new();
@@ -25,14 +29,19 @@ fn sample_commands() -> Vec<HostToBridge, 8> {
 }
 
 fn sample_events() -> Vec<BridgeToHost, 8> {
+    let mut frame = [0u8; SIGHTING_MSG_MAX];
+    let len = SightingMsg {
+        kind: RecordKind::Wifi,
+        bssid: [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF],
+        channel: 6,
+        rssi: -50,
+        security: Security::Wpa2Psk,
+        ssid: b"net",
+    }
+    .encode_into(&mut frame)
+    .expect("fits");
     let mut payload = Vec::new();
-    payload
-        .extend_from_slice(
-            &TextMsg::new(MsgType::Text, 0, b"AA:BB:CC:DD:EE:FF,net,[WPA2_PSK],6,-50,W")
-                .expect("fits")
-                .encode(),
-        )
-        .expect("212 fits in 250");
+    payload.extend_from_slice(&frame[..len]).expect("a sighting fits in 250");
 
     let mut v = Vec::new();
     v.push(BridgeToHost::Ready {

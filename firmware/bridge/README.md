@@ -4,7 +4,7 @@ The dongle. It parks an ESP32 radio on the mesh's ESP-NOW channel and forwards
 every frame it hears up a USB link to `wartui` on the host.
 
 It knows about COBS framing and it knows about `esp-radio`. It does not know
-what an `ENOW` frame is, what a heartbeat means, or how channels are assigned —
+what an air frame is, what a heartbeat means, or how channels are assigned —
 all of that lives on the host, where it is unit-testable and a fix costs a
 `cargo run` rather than a reflash.
 

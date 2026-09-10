@@ -4,9 +4,10 @@
 //! operator excluded, or two nodes being given the same one while a third
 //! covers nothing. They are properties rather than a comparison against another
 //! implementation, and that is a deliberate loss: until Phase 2 the assignment
-//! shape was the vendor core's, so `tests/golden.rs` could check the planner
-//! against frames sniffed off a real one. It is wartui's own frame now, and
-//! there is no second implementation left to disagree with.
+//! shape was the vendor core's, and a golden-vector fixture could check this
+//! planner against frames sniffed off a real one. Every frame is wartui's own
+//! now, in both directions, and there is no second implementation left to
+//! disagree with.
 
 use std::collections::BTreeSet;
 
@@ -124,7 +125,7 @@ fn node_indices_are_unique_and_fleet_wide() {
 
 #[test]
 fn a_lone_node_holds_the_whole_pool_at_once() {
-    // The property Phase 2 exists for. `MSG_ADMIN` used to carry one contiguous
+    // The property Phase 2 exists for. An assignment used to carry one contiguous
     // range, so one node could not express the US pool's two runs together and
     // the plan rotated it between them on a sixty-second dwell — leaving half
     // the pool unscanned at every instant, and re-issuing an assignment (and
@@ -227,7 +228,7 @@ fn admin_messages_carry_the_snapshot_node_count() {
         let admin = p.admin_for(n, 9, wartui_proto::air::ADMIN_FLAG_BLE).expect("assigned");
         assert_eq!(admin.node_count, 5);
         assert_eq!(admin.node_index, n);
-        assert_eq!(admin.assignment_version, 9);
+        assert_eq!(admin.epoch, 9);
         assert_eq!(admin.channels, p.channels_for(n).expect("assigned"));
         // Flags are the caller's: which node scans Bluetooth is a decision
         // about one node, and the plan is a decision about the fleet.
@@ -348,23 +349,23 @@ fn stagger_matches_the_firmware_helper() {
 
 #[test]
 fn the_wire_epoch_cycles_through_every_value_the_firmware_will_accept() {
-    use wartui_proto::air::wire_version;
+    use wartui_proto::air::wire_epoch;
 
     // Divergence 4. The host persists a `u64`; the wire field is one byte and
     // the firmware never puts 0 in it, so a node holding a freshly-zeroed field
     // must not be mistaken for one holding an assignment.
-    assert_eq!(wire_version(1), 1);
-    assert_eq!(wire_version(255), 255);
-    assert_eq!(wire_version(256), 1, "255 distinct values, then round again");
+    assert_eq!(wire_epoch(1), 1);
+    assert_eq!(wire_epoch(255), 255);
+    assert_eq!(wire_epoch(256), 1, "255 distinct values, then round again");
 
-    let seen: std::collections::BTreeSet<u8> = (1..=255).map(wire_version).collect();
+    let seen: std::collections::BTreeSet<u8> = (1..=255).map(wire_epoch).collect();
     assert_eq!(seen.len(), 255);
     assert!(!seen.contains(&0), "zero is never sent");
 
     // And consecutive epochs always differ, which is the only property the
     // node actually checks: it adopts on `!=`, not on `>`.
     for counter in 1..1_000u64 {
-        assert_ne!(wire_version(counter), wire_version(counter + 1));
+        assert_ne!(wire_epoch(counter), wire_epoch(counter + 1));
     }
 }
 
