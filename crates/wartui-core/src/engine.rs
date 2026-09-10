@@ -406,11 +406,14 @@ pub struct Counters {
     pub foreign_admin: u64,
     /// USB frames that failed their checksum.
     pub garbled: u64,
-    /// Admin windows this host declined to transmit into because the
-    /// heartbeat that opened them was replayed out of the bridge's backlog
-    /// rather than heard live. Ordinary on a fresh connection to a bridge that
-    /// has been powered beside a fleet; a number that keeps climbing during a
-    /// capture means the host is not keeping up with the link.
+    /// Assignments held back because the heartbeat that would have carried
+    /// them was replayed out of the bridge's backlog rather than heard live,
+    /// naming a window that shut before this host was listening. Counted only
+    /// where one was actually owed, so the figure is transmits deferred to the
+    /// next live heartbeat and not one per stale frame. Ordinary on a fresh
+    /// connection to a bridge that has been powered beside a fleet; a number
+    /// that keeps climbing through a capture means the host is not keeping up
+    /// with the link.
     pub admin_windows_missed: u64,
     /// Assignments this host has put on the air.
     pub admin_sent: u64,
@@ -907,13 +910,10 @@ impl FleetEngine {
                 // long as this heartbeat is news. Replayed out of the
                 // bridge's backlog it is a window that shut minutes ago, and
                 // the node it names is off sweeping a channel that cannot
-                // hear us. The next live heartbeat is along in about a
-                // second and opens a real one.
-                if self.air_is_live() {
-                    self.send_admin(src, now, batch);
-                } else {
-                    self.counters.admin_windows_missed += 1;
-                }
+                // hear us; `send_admin` checks that for itself and holds the
+                // assignment back. The next live heartbeat is along in about
+                // a second and opens a real one.
+                self.send_admin(src, now, batch);
             }
             Frame::Sighting(sighting) => {
                 self.see_node(src, now, rssi, None, batch);
@@ -1320,11 +1320,20 @@ impl FleetEngine {
         let id = self.next_send_id;
         self.next_send_id = self.next_send_id.wrapping_add(1).max(1);
 
+        // Read before the node is borrowed, and acted on after: a window that
+        // owed nothing has cost the fleet nothing, and counting those would
+        // bury the ones that mattered under one line per replayed heartbeat.
+        let live = self.air_is_live();
+
         let Some(node) = self.nodes.get_mut(&mac) else { return };
         if !node.dirty {
             return;
         }
         let Some(assignment) = node.desired else { return };
+        if !live {
+            self.counters.admin_windows_missed += 1;
+            return;
+        }
         node.admin_attempts += 1;
         let heartbeat_rx_us = node.last_heartbeat_rx_us;
 

@@ -236,8 +236,11 @@ Measured on the same bench, connecting to a bridge that had been buffering for
 A second connection straight afterwards reported `admin 4/4` with no
 unacknowledged assignments at all, and latencies of 3647, 2201 and 4203 µs —
 the same order as the 5832 µs Phase 2 measured, and for the first time a number
-that means what the column says it does. The skipped windows are counted as
-`admin_windows_missed`.
+that means what the column says it does. Assignments held back for a live window are counted as
+`admin_windows_missed` and said in the footer beside the admin totals — only
+where one was actually owed, so the figure is transmits deferred rather than
+one per stale frame, and it is the answer to the question a fresh connection
+otherwise raises: why nothing has been assigned yet.
 
 ## Still not measured
 

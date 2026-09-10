@@ -1566,7 +1566,12 @@ fn heartbeats_replayed_out_of_the_bridges_backlog_do_not_open_admin_windows() {
     }
 
     assert_eq!(sent, 0, "not one assignment fired into a window that had already closed");
-    assert_eq!(engine.counters().admin_windows_missed, 9);
+    assert_eq!(
+        engine.counters().admin_windows_missed,
+        8,
+        "eight of the nine: the first arrived before the assignment was made, and a window \
+         that owed nothing is not one this host held anything back from"
+    );
     assert!(engine.nodes().next().expect("the node").dirty, "still owed, and still not sent");
     assert_eq!(engine.counters().admin_sent, 0);
     // The node is admitted regardless: a stale heartbeat still says it was
