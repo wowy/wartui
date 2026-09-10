@@ -920,6 +920,15 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot, ui: &Ui, 
         if c.admin_sent > 0 {
             spans.push(Span::raw(format!("  admin {}/{}", c.admin_acked, c.admin_sent)));
         }
+        // Beside the totals rather than in the fault box: connecting to a
+        // bridge that has been buffering beside a fleet produces these as a
+        // matter of course, and a line in the fault box would make the
+        // ordinary case look like a broken one. It still shows before the
+        // first assignment goes out, because that is the case where it is the
+        // whole answer to "why has nothing been assigned yet".
+        if c.admin_windows_missed > 0 {
+            spans.push(Span::raw(format!("  {} held for a live window", c.admin_windows_missed)));
+        }
         lines.push(Line::from(spans));
     }
 

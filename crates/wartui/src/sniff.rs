@@ -87,9 +87,24 @@ pub async fn run(args: Args) -> Result<()> {
             counts.foreign_fleet
         );
     }
+    // Every assignment on the air during a sniff came from somewhere else:
+    // this command holds the port, so `run` is not transmitting through it,
+    // and a radio does not hear its own frames. One in wartui's own format is
+    // the harder of the two to notice any other way — a vendor core's
+    // assignments are ignored by our nodes, while a second wartui core's are
+    // obeyed, and the fleet table cannot show the difference because both
+    // cores' assignments are acknowledged.
+    if counts.admin > 0 {
+        println!(
+            "# {} assignments arrived in wartui's own wire format, and this host sent \
+             none of them. A second wartui core is driving these nodes, and they are \
+             taking assignments from both.",
+            counts.admin
+        );
+    }
     if counts.foreign_admin > 0 {
         println!(
-            "# {} assignments arrived from another core. Something other than this host \
+            "# {} assignments arrived from a vendor core. Something other than this host \
              is telling a fleet nearby what to scan.",
             counts.foreign_admin
         );
