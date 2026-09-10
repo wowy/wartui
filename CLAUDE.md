@@ -7,7 +7,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 A terminal fleet controller for ESP32-C5 and ESP32-C6 wardriving nodes. wartui does not
 assist a vendor CORE node — it **replaces** one: it owns the node table, issues channel
 assignments and collects every observation, speaking ESP-NOW through a USB-attached ESP32
-dongle running our own Rust bridge firmware. The nodes run our own firmware too
+dongle running our own Rust bridge firmware. That dongle may be a C5, a C6 or an ESP32-S3;
+the nodes are C5 and C6 only, because a node is the thing that has to reach 5 GHz and a
+bridge never leaves the control channel. The nodes run our own firmware too
 (`firmware/node`), which speaks the wire format of the vendor
 [ESP32DualBandWardriver](https://github.com/justcallmekoko/ESP32DualBandWardriver) —
 still the reference for everything on the air, checked out at
@@ -71,6 +73,10 @@ toolchain pin, own lockfile. `cargo test --workspace` never touches them.
 cd firmware/bridge
 cargo clippy --release --features esp32c6     # and --features esp32c5; exactly one is required
 cargo run --release --features esp32c6        # runner is `espflash flash --monitor`
+
+# The S3 bridge is Xtensa: espup's `esp` toolchain, its own target, and
+# `. ~/export-esp.sh` in the shell so the GCC linker is on PATH.
+cargo +esp build --release --features esp32s3 --target xtensa-esp32s3-none-elf
 
 cd firmware/node
 cargo clippy --release --features esp32c6     # and esp32c5, and each with ,ble

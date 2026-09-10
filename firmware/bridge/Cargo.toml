@@ -17,7 +17,10 @@ name = "wartui-bridge-fw"
 path = "src/main.rs"
 
 [features]
-# Exactly one must be selected; src/main.rs enforces it with compile_error!.
+# Exactly one must be selected; src/main.rs enforces it.
+#
+# The S3 is Xtensa, so it needs `--target xtensa-esp32s3-none-elf` and the
+# `esp` toolchain on top of the feature. See `rust-toolchain.toml`.
 esp32c5 = [
   "esp-alloc/esp32c5",
   "esp-bootloader-esp-idf/esp32c5",
@@ -31,6 +34,13 @@ esp32c6 = [
   "esp-hal/esp32c6",
   "esp-radio/esp32c6",
   "esp-rtos/esp32c6",
+]
+esp32s3 = [
+  "esp-alloc/esp32s3",
+  "esp-bootloader-esp-idf/esp32s3",
+  "esp-hal/esp32s3",
+  "esp-radio/esp32s3",
+  "esp-rtos/esp32s3",
 ]
 
 [dependencies]

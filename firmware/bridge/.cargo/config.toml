@@ -8,3 +8,33 @@ rustflags = [
 [target.riscv32imac-unknown-none-elf]
 # No --chip: espflash detects it, so the same runner serves both features.
 runner = "espflash flash --monitor"
+
+[target.xtensa-esp32s3-none-elf]
+# The S3 is not `[build] target`, so it is reached with an explicit `--target`
+# and needs its own runner block or `cargo run` would have none. Same command:
+# espflash detects the part, so this serves all three chips.
+runner = "espflash flash --monitor"
+# A `[target]` block *replaces* `[build] rustflags` rather than adding to it,
+# so the frame-pointer flag above has to be repeated here to keep applying.
+#
+# The extra one silences a GNU ld warning on every single link: esp-hal's
+# Xtensa memory map puts IRAM in a segment that is both writable and
+# executable, which is how the part works and not something this crate can fix.
+# It is suppressed by name rather than by muting `linker_messages` wholesale,
+# which would take real link diagnostics down with it.
+rustflags = [
+  "-C", "force-frame-pointers",
+  "-C", "link-arg=-Wl,--no-warn-rwx-segments",
+]
+
+# For the S3 only, and inert for the other two.
+#
+# `espup` stopped shipping a prebuilt `core` for the Xtensa targets, so the S3
+# has to build one from source; `rustc` says as much when it cannot find the
+# crate. This is a `[unstable]` table, which cargo only honours on a nightly
+# channel — the `esp` toolchain is one, and `stable` silently ignores the whole
+# block, which is what keeps the C5 and C6 builds byte-for-byte what they were.
+# It lives here rather than on the command line so that the one command anybody
+# types for an S3 cannot be missing it.
+[unstable]
+build-std = ["core", "alloc"]

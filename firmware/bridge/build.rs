@@ -4,7 +4,20 @@
 // diff against upstream.
 
 fn main() {
-    linker_be_nice();
+    // `linker_be_nice` registers itself with `--error-handling-script`, which is
+    // an LLD option. The RISC-V parts link with `rust-lld` and get the nicer
+    // messages; the S3 links with `xtensa-esp32s3-elf-gcc`, which rejects the
+    // flag outright — so a hook whose whole job is to explain link errors would
+    // instead *be* the link error, on every build, saying nothing about the
+    // program. Skipped there rather than rewritten, so the function below stays
+    // diffable against `esp-generate`.
+    //
+    // The variable is also absent when the linker invokes this binary as the
+    // script rather than cargo invoking it as a build script; that reads as
+    // "not xtensa" and calls through, which is what that path needs.
+    if std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() != Ok("xtensa") {
+        linker_be_nice();
+    }
     // make sure linkall.x is the last linker script (otherwise might cause problems with flip-link)
     println!("cargo:rustc-link-arg=-Tlinkall.x");
 }
