@@ -260,6 +260,24 @@ fn an_ssid_with_a_comma_or_a_quote_is_rfc_4180_quoted() {
 }
 
 #[test]
+fn a_cloaked_ssid_recorded_before_the_parser_trimmed_it_still_exports_clean() {
+    // The store is not rewritten, so this row is what a node flashed before
+    // `beacon::visible_ssid` existed put in the file: the name's real length,
+    // every byte zero. NUL is valid UTF-8 and is none of the four characters
+    // RFC 4180 quotes on, so it used to go into the column bare.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut cloaked = observation(NODE, [0xAA; 6], -60, EPOCH_MS, fixed(37.0, -122.0));
+    let Record::Observation(obs) = &mut cloaked else { unreachable!() };
+    obs.ssid = vec![0u8; 8];
+    let conn = write(&dir, vec![cloaked]);
+
+    let (csv, _) = export(&conn);
+    let row = csv.lines().nth(2).expect("a row");
+    assert!(row.contains("AA:AA:AA:AA:AA:AA,,["), "a cloaked SSID exports as hidden: {row:?}");
+    assert!(!csv.contains('\0'), "no NUL may reach the file: {csv:?}");
+}
+
+#[test]
 fn a_ble_record_exports_with_the_type_wigle_expects() {
     let dir = tempfile::tempdir().expect("temp dir");
     let mut ble = observation(NODE, [0xAA; 6], -60, EPOCH_MS, fixed(37.0, -122.0));
