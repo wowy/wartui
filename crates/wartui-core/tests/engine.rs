@@ -743,6 +743,63 @@ fn the_bluetooth_scan_is_not_given_to_a_node_that_has_no_bluetooth_in_it() {
         None,
         "taken back once the node said it cannot run one"
     );
+
+    // And a tick before it appears must not do the taking back. This assertion
+    // used to hold only because nothing ticked in between.
+    let mut waiting = engine(manual(), &clock);
+    waiting.handle(Event::Command(Command::AssignBle { mac: Some(NODE) }), clock.at(1));
+    waiting.handle(Event::Tick, clock.at(2));
+    assert_eq!(
+        waiting.snapshot(clock.at(3), StoreStats::default()).ble_node,
+        Some(NODE),
+        "a node that has not been heard from has not left the fleet"
+    );
+}
+
+#[test]
+fn the_bluetooth_scan_waits_for_a_node_that_has_not_arrived_yet_however_long_that_takes() {
+    // Nothing is ever removed from the node table, so a MAC that is absent from
+    // it has never been heard rather than having gone away. Reading absence as
+    // departure took the scan back on the first tick after the command — before
+    // the node's own first heartbeat could possibly have arrived — so whether an
+    // assignment made up front survived was a race against the tick interval.
+    // A capture that asks for the scan as it starts lost it about one run in
+    // five, and a fleet whose access points are all reported in the first sweep
+    // then has nothing left to report: the Bluetooth stream is what keeps
+    // observations arriving, because advertisers rotate their addresses and
+    // never fall into a node's dedup ring.
+    let clock = Clock::new();
+    let mut engine = engine(manual(), &clock);
+    engine.handle(Event::Command(Command::AssignBle { mac: Some(NODE) }), clock.at(1));
+    for tick in 2..12 {
+        engine.handle(Event::Tick, clock.at(tick));
+    }
+    assert_eq!(
+        engine.snapshot(clock.at(12), StoreStats::default()).ble_node,
+        Some(NODE),
+        "ten ticks with no word from the node change nothing"
+    );
+
+    // A sighting is not arrival either. It puts the node in the table with no
+    // heartbeat behind it, which is the ordinary few seconds of a node that
+    // reports what it found on a channel before it gets back to the control
+    // channel — and, across a `wartui` restart, of a node still sweeping an
+    // assignment the previous host gave it, which can be a whole sweep of
+    // sightings before its next heartbeat.
+    engine.handle(observation(NODE, "aa:bb:cc:dd:ee:ff", -50), clock.at(12));
+    engine.handle(Event::Tick, clock.at(12));
+    assert_eq!(
+        engine.snapshot(clock.at(12), StoreStats::default()).ble_node,
+        Some(NODE),
+        "a node that has only been overheard has not gone quiet — it has not spoken yet"
+    );
+
+    // And when it does turn up, the flag is on the frame it is sent.
+    engine.handle(heartbeat(NODE, 1), clock.at(13));
+    engine.handle(assign(NODE, 0, 10), clock.at(14));
+    let (_, dst, admin) = sent_admin(&engine.handle(heartbeat(NODE, 2), clock.at(15)));
+    assert_eq!(dst, NODE);
+    assert!(admin.scan_ble(), "the scan asked for before it arrived is the scan it is given");
 }
 
 #[test]
