@@ -58,7 +58,9 @@ a run.
 
 The header says which of you is deciding: `manual`, or `auto — 4 of 5` for four
 heartbeating nodes out of five seen. It starts on `auto`, so **`a` and `A` are
-refused until you press `p`** — the planner would honour a hand-assigned set and
+refused until you press `p`** (or started the capture with `--manual`, in which case
+`p` would hand the fleet *to* the planner rather than take it back — it is a toggle
+against whatever the header says). The planner would honour a hand-assigned set and
 then take it back at the next re-cut, which reads as the key having been ignored.
 `b` is not refused: the planner partitions channels and has no opinion about
 Bluetooth.
@@ -203,16 +205,23 @@ says what it is doing on the header — `gps searching`, `gps ok, 8 sats`,
 | `stale` | Still being heard, but not heartbeating — most often Bluetooth coexistence on the node holding the radio through its admin window |
 | `no heartbeat` | Seen, but has never completed a sweep |
 | `no admin ack` | An assignment went out and its radio did not answer — nearly always Bluetooth, see [Assigning channels](#assigning-channels) |
-| `refused` | The bridge would not transmit it — nearly always a full peer table, so the fleet is over twenty nodes. Its heartbeats are still arriving; what is missing is a slot to address it through |
+| `refused` | The bridge would not transmit it — nearly always a full peer table. Its heartbeats are still arriving; what is missing is a slot to address it through |
 | `rebooted xN` | Its heartbeat counter went backwards, so it has forgotten any assignment; wartui re-issues under a fresh epoch |
 
 A node that is `stale`, `refused` or `no heartbeat` is out of the plan, and for
 the same reason it cannot be assigned by hand: nothing wartui sends it would
 reach it, or nothing yet says which band its radio can tune — so a share of the
 pool cut for it is a share that may be nobody's. Pressing `a`, `A` or `b` on one
-says which of the three it is, because the next move differs for each: wait for
-the first heartbeat, run a smaller fleet, or go and find out why the heartbeats
-stopped.
+says which of the three it is, because the next move differs for each: wait for the
+first heartbeat, clear the peer table, or go and find out why the heartbeats stopped.
+
+**`refused` is usually not a fleet above twenty nodes.** The bridge never removes a
+peer, so a long session accumulates slots for nodes that have since gone, and a
+fleet of three can run out of room. The table starts empty on every boot, so the
+host clears the refusal whenever a bridge announces itself: `wartui reset` — or
+replugging — is what to try before counting nodes. The rest of the fleet is re-cut
+to cover a refused node's share in the meantime, and over twenty nodes the planner
+stops re-cutting altogether and the header says `auto — too many nodes`.
 
 `stale` and `no heartbeat` are deliberately distinct from silence, and from each
 other. A node streaming observations whose heartbeats are lost would otherwise
@@ -273,9 +282,9 @@ frame that would not decode, and dropped bulk commands.
 If the same port keeps being the wrong device — a node plugged in by USB looks
 identical to the bridge, same vendor and product ID — pin it with `--port`.
 `wartui ports` lists the candidates but cannot say which is which, and probing
-answers one port at a time and slowly: pointed at a node, `wartui status` waits
-six seconds for a link protocol the node does not speak and tells you only that
-this one is not the bridge.
+answers one port at a time and slowly: pointed at a node, `wartui status` waits five
+seconds for a link protocol the node does not speak and tells you only that this one
+is not the bridge.
 
 Ask the USB tree instead. An ESP32's serial number *is* its MAC, so the OS
 already knows, with no esp tool, no reflash and without opening anything. On
