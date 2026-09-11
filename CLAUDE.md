@@ -22,8 +22,12 @@ still the record of measured *behaviour* — the enqueue-versus-ack bug, BLE coe
 tree point at it for that reason and no other. It is not a specification anything here
 matches, and there is no checkout of it on this machine.
 
-`README.md` is the operator's manual and is unusually complete — read it before changing
-behaviour, and keep it true when behaviour changes. `docs/phase-0-findings.md` records what was
+`README.md` is the front door and stays short — an overview, how to launch it, the subproject
+listing, and the handful of facts an operator needs before reaching for a second page.
+`crates/wartui/README.md` is the operator's manual: keys, fleet states, channel pools, GPS and
+troubleshooting. Read it before changing view or CLI behaviour, and keep it true when behaviour
+changes. Neither describes what a phase proved — that is what `docs/` is for.
+`docs/phase-0-findings.md` records what was
 measured on the vendor fleet and is why several of the invariants below exist;
 `docs/phase-1-findings.md` records what our own node firmware then did on the
 same bench, including which of those invariants it has actually been checked
@@ -239,6 +243,13 @@ Positions resolve fresh per record through `PositionChain`: GPS (`--gps`, NMEA o
 - **Only heartbeating nodes are assignable or in the plan** — a node that is merely being heard
   never opens an admin window. `stale`, `no heartbeat` and silence are deliberately distinct
   states; `SCAN_CHANNELS` order is load-bearing and must not be sorted or deduplicated.
+- **Channel 14 is in no pool and is never dealt.** `esp-radio` hardcodes the country blob's
+  `nchan: 13` and exposes no way to reach it, so a node handed that channel refuses the hop —
+  once per sweep, for as long as it holds the assignment, and it says so only on a serial console
+  nobody is watching (`docs/phase-1-findings.md`). It stays in the node's scan table anyway,
+  because that table's indices *are* the wire format.
+- **The air is plaintext ESP-NOW in both directions.** There is no pairing handshake and no key:
+  encryption was a vendor node's web-UI setting, and a wartui node has no web UI to set it in.
 - **The bridge's USB transmit endpoint can die on its own, and the bridge reboots when it does.**
   `SERIAL_IN_EP_DATA_FREE` goes to zero when `WR_DONE` is set and comes back only when the USB
   host reads the FIFO; if that read never lands, nothing on the device can clear it. The receive
