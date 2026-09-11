@@ -3,10 +3,9 @@
 A terminal fleet controller for ESP32-C5 and ESP32-C6 wardriving nodes.
 
 The nodes talk [ESP-NOW](https://www.espressif.com/en/solutions/low-power-solutions/esp-now),
-which a laptop cannot speak, so wartui drives a USB-attached ESP32 as a radio
-bridge. It does not assist the mesh's CORE node — it **replaces** one: it owns
-the node table, issues channel assignments, and collects every observation the
-fleet produces.
+which a laptop (generally) cannot speak, so wartui drives a USB-attached ESP32
+as a radio bridge. It owns the node table, issues channel assignments, and
+collects every observation the fleet produces.
 
 The nodes run `firmware/node` and the dongle runs `firmware/bridge`, both in this
 repository, and every frame on the air is wartui's own in either direction. The
