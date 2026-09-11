@@ -10,17 +10,24 @@ rather than a reflash.
 
 It transmits, and answers with the **transmit-callback** status rather than the
 enqueue result. Unicast ESP-NOW is acknowledged by the receiver's own MAC
-hardware, so `AckOk` means a node really has the frame. The callback arrives in
-28–35 ms against the node's 300 ms admin window
-([`docs/phase-3-findings.md`](../../docs/phase-3-findings.md)), so a dumb bridge
-has an order of magnitude in hand.
+hardware, so `AckOk` means a node really has the frame. The callback comes back in
+2–4 ms against the node's 300 ms admin window, and in 28–35 ms even in the
+pessimistic case — an *unacknowledged* send, where it fires only once the radio has
+exhausted its retry chain
+([`docs/phase-4-findings.md`](../../docs/phase-4-findings.md)). A dumb bridge has
+two orders of magnitude in hand.
 
 Peers are added on demand (`ensure_peer`) and never removed as a side effect of
 sending. The radio's table holds twenty entries, one of which `esp-radio` spends
 on the broadcast peer at init; since this bridge only ever *receives* broadcasts
 and ESP-NOW delivers a received frame whether or not its sender is a peer, that
-slot is given up to make room for a twentieth node. A refusal after that is a
-genuine `PeerTableFull` and means a fleet above the twenty nodes wartui supports.
+slot is given up to make room for a twentieth node.
+
+A `PeerTableFull` after that is genuine, but it does not have to mean a fleet above
+twenty. Nothing removes a peer, so a long session accumulates slots for nodes that
+have since gone and can fill the table with a handful still on the air. The table
+starts empty on every boot, which is why the host clears the refusal on each
+bridge announcement and why `wartui reset` is the cheap thing to try first.
 
 ## Building and flashing
 

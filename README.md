@@ -29,6 +29,13 @@ many channels they hold. `--sim-c6 N` makes that many of them ESP32-C6s, countin
 from the end of the fleet, which is how to put a mixed fleet in front of the
 planner without two kinds of board on the desk.
 
+For a capture, install it so the binary is on `PATH` — every command below, and in
+the other READMEs, is written as if it is:
+
+```sh
+cargo install --path crates/wartui     # or `cargo build --release` and use target/release/wartui
+```
+
 With a bridge plugged in, `run` is the default and the subcommand can be left off:
 
 ```sh
