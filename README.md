@@ -33,7 +33,7 @@ For a capture, install it so the binary is on `PATH` — every command below, an
 the other READMEs, is written as if it is:
 
 ```sh
-cargo install --path crates/wartui     # or `cargo build --release` and use target/release/wartui
+cargo install --path crates/wartui
 ```
 
 With a bridge plugged in, `run` is the default and the subcommand can be left off:
