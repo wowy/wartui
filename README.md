@@ -60,7 +60,7 @@ wartui reset      # reboot a bridge that has stopped answering
 
 | Path | What it is |
 | --- | --- |
-| [`crates/wartui`](crates/wartui/README.md) | The clap CLI and the ratatui view — **the operator's manual** |
+| [`crates/wartui`](crates/wartui/README.md) | The CLI and the [ratatui](https://ratatui.rs/) UI — **view the linked README for the full operator's manual** |
 | `crates/wartui-core` | Headless fleet engine, SQLite store, position, WiGLE export |
 | `crates/wartui-bridge` | Host-side link to the dongle: transport, port discovery, simulator |
 | `crates/wartui-proto` | `no_std` wire formats and parsers, shared with both firmwares |
@@ -86,8 +86,7 @@ crates have no README of their own; their `//!` module docs are the detail.
 
 wartui partitions the channel pool across the fleet without being asked, which is
 the core's job and the reason this exists. `p` takes that back and `--manual`
-starts without it; **`a` and `A` are refused until one of them does**, because the
-planner would honour a hand-assigned set and then take it back at the next re-cut.
+starts without it; **`a` and `A` are refused until one of them does**.
 
 Nothing goes out at the moment a key is pressed. A node's radio is away scanning
 for all but the 300 ms it holds open after its own heartbeat, so the assignment
@@ -111,7 +110,7 @@ At most one node scans Bluetooth, and by default none does. `b` moves it.
 - **An ESP32-C6 is never dealt a 5 GHz channel.** It has no radio for one, and a
   share cut for it would be a share nobody scans.
 - **Channel 14 is in neither pool** and is never dealt; `esp-radio` exposes no way
-  to reach it.
+  to reach it. It's Japan-only 802.11b, so should be extremely rare.
 - **Plaintext ESP-NOW only**, in both directions. There is no pairing handshake
   and no key.
 - **Nothing is compatible with an earlier wartui, and that is the policy until
