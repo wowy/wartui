@@ -22,8 +22,12 @@ still the record of measured *behaviour* — the enqueue-versus-ack bug, BLE coe
 tree point at it for that reason and no other. It is not a specification anything here
 matches, and there is no checkout of it on this machine.
 
-`README.md` is the operator's manual and is unusually complete — read it before changing
-behaviour, and keep it true when behaviour changes. `docs/phase-0-findings.md` records what was
+`README.md` is the front door and stays short — an overview, how to launch it, the subproject
+listing, and the handful of facts an operator needs before reaching for a second page.
+`crates/wartui/README.md` is the operator's manual: keys, fleet states, channel pools, GPS and
+troubleshooting. Read it before changing view or CLI behaviour, and keep it true when behaviour
+changes. Neither describes what a phase proved — that is what `docs/` is for.
+`docs/phase-0-findings.md` records what was
 measured on the vendor fleet and is why several of the invariants below exist;
 `docs/phase-1-findings.md` records what our own node firmware then did on the
 same bench, including which of those invariants it has actually been checked
@@ -58,7 +62,7 @@ cargo run -p wartui -- --log-file wartui.log run     # the only way to see trans
 
 `wartui ports` prints one identical `USB JTAG/serial debug unit` line per attached board and
 says nothing about which is the bridge. Probing for it is slow and answers one port at a time:
-`wartui status` on a node waits six seconds for a protocol the node does not speak, then says
+`wartui status` on a node waits five seconds for a protocol the node does not speak, then says
 only that this one is not the bridge.
 
 The USB serial number *is* the device's MAC, so the OS answers it for free, with no esp tool,
@@ -239,6 +243,13 @@ Positions resolve fresh per record through `PositionChain`: GPS (`--gps`, NMEA o
 - **Only heartbeating nodes are assignable or in the plan** — a node that is merely being heard
   never opens an admin window. `stale`, `no heartbeat` and silence are deliberately distinct
   states; `SCAN_CHANNELS` order is load-bearing and must not be sorted or deduplicated.
+- **Channel 14 is in no pool and is never dealt.** `esp-radio` hardcodes the country blob's
+  `nchan: 13` and exposes no way to reach it, so a node handed that channel refuses the hop —
+  once per sweep, for as long as it holds the assignment, and it says so only on a serial console
+  nobody is watching (`docs/phase-1-findings.md`). It stays in the node's scan table anyway,
+  because that table's indices *are* the wire format.
+- **The air is plaintext ESP-NOW in both directions.** There is no pairing handshake and no key:
+  encryption was a vendor node's web-UI setting, and a wartui node has no web UI to set it in.
 - **The bridge's USB transmit endpoint can die on its own, and the bridge reboots when it does.**
   `SERIAL_IN_EP_DATA_FREE` goes to zero when `WR_DONE` is set and comes back only when the USB
   host reads the FIFO; if that read never lands, nothing on the device can clear it. The receive
@@ -291,6 +302,20 @@ Positions resolve fresh per record through `PositionChain`: GPS (`--gps`, NMEA o
   shares that endpoint and diagnostics go out as `Log` frames. A node has the endpoint to itself
   and does use `esp-println`, whose serial-JTAG writer waits a bounded number of iterations and
   then remembers that nobody is reading.
+- **Both firmwares pass `US` for the regulatory domain, and that is not a preference.**
+  `esp-radio` defaults `country_info` to **China** and applies it under
+  `WIFI_COUNTRY_POLICY_MANUAL`, so nothing on the air overrides it. China's 5 GHz allocation
+  excludes 5470–5725 and the driver refuses those channels outright, so a C5 left on the default
+  silently loses 100–144 on every sweep and the host cannot tell that from a node whose radio did
+  not tune.
+- **`esp-radio 1.0.0-beta.0` requires `esp-hal ~1.1.0`, and that one requirement pins the whole
+  family.** `esp-hal 1.2.0`, `esp-rtos 0.4`, `esp-alloc 0.11` and `esp-sync 0.3` are published and
+  none will resolve; `cargo update` lists them and moves nothing, and will until `esp-radio`
+  publishes again. Do not try to force it — `SoftwareInterruptControl` is gone in 1.2.1, so
+  `esp-rtos 0.3.0` and `esp_rtos::start` both stop compiling against a version faked into range;
+  issue #16 has the real upgrade. `esp-println` is the one crate outside the wall, and stays there
+  only while its `critical-section` feature is off: turn it on and a second `esp-sync` enters the
+  node's tree (`cargo tree -e normal --features esp32c6 | grep esp-sync` must show 0.2.1 alone).
 - **Setting a node's channel is not `set_channel` alone.** On an unassociated station interface it
   does not stick unless promiscuous mode is on across the change, which is the whole of the
   vendor's `setFixedChannel` (`src/WiFiOps.cpp:600-618`) and of `radio::park`. A node whose channel
