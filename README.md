@@ -1,152 +1,21 @@
 # wartui
 
-A terminal UI for managing a cluster of wardriving ESP32-C5 and ESP32-C6 nodes.
+A terminal fleet controller for ESP32-C5 and ESP32-C6 wardriving nodes.
 
 The nodes talk [ESP-NOW](https://www.espressif.com/en/solutions/low-power-solutions/esp-now),
-which a laptop cannot speak. wartui drives a USB-attached ESP32 as a radio
-bridge and **takes the place of the mesh's CORE node**: it owns the node table,
-issues channel assignments, and collects every observation the fleet produces.
+which a laptop (generally) cannot speak, so wartui drives a USB-attached ESP32
+as a radio bridge. It owns the node table, issues channel assignments, and
+collects every observation the fleet produces.
 
-The bridge can be a C5, a C6 or an ESP32-S3. It is the one board here whose
-radio never needs 5 GHz — it parks on the control channel and stays there — so
-2.4-GHz-only costs it nothing. The *nodes* are the parts that have to reach both
-bands, and they are still C5 and C6.
+The nodes run `firmware/node` and the dongle runs `firmware/bridge`, both in this
+repository, and every frame on the air is wartui's own in either direction. The
+bridge may be a C5, a C6 or an ESP32-S3 — it parks on the control channel and
+never needs 5 GHz. The nodes are C5 and C6, because a node is the thing that has
+to reach both bands.
 
-The nodes run `firmware/node`, wartui's own firmware, which is why the fleet is
-C6 as well as C5. Every frame on the air is wartui's own too, and is deliberately
-unrecognisable to
-[ESP32DualBandWardriver](https://github.com/wowy/ESP32DualBandWardriver) — the
-firmware this project grew up against, and still the record of the measured
-behaviour several decisions here answer. A stock node cannot be driven by wartui
-and a stock core cannot drive a wartui node, in either direction and on purpose;
-see below.
+## Running it
 
-## Layout
-
-| Path | What it is |
-| --- | --- |
-| `crates/wartui-proto` | `no_std` wire formats, shared by the host and the bridge firmware |
-| `crates/wartui-bridge` | Host-side link to the dongle: transport, port discovery, simulator |
-| `crates/wartui-core` | Headless fleet engine, SQLite store, position, WiGLE export |
-| `crates/wartui` | The TUI binary, and the `sniff` / `status` / `reset` / `ports` commands |
-| `firmware/bridge` | Rust firmware for the dongle (own workspace, own target) |
-| `firmware/node` | Rust firmware for the nodes: sniffs, reports, takes assignments |
-| `tools/espnow-sniffer` | Passive Arduino sniffer for bring-up and frame capture |
-| `tools/beacons` | Turns a monitor-mode capture into fixtures for the beacon parser |
-
-## Scope
-
-Nodes accept exactly one command over the air — the assignment, which says which
-channels to scan and whether to scan Bluetooth. There is no start/stop, config,
-reboot or query message, and node serial is output-only. So wartui monitors the
-fleet, collects and exports observations, and controls channel and Bluetooth
-assignment. Anything else would need changes to the node firmware — which, now
-that the node firmware is in this repository, is a thing that can happen.
-
-**Every frame is wartui's own.** Each one starts `WTUI`, a wire version byte and
-a type byte: a heartbeat is 13 bytes, an assignment 15, and an observation 17
-plus its SSID. None of them is anything the vendor firmware recognises, and none
-of its frames decodes here.
-
-That separation is the point, and it runs both ways. ESP-NOW has no addressing
-above the MAC layer and a node broadcasts, so two fleets sharing a format share
-one conversation. A vendor core hearing vendor-shaped heartbeats from these nodes
-put them in *its* table and cut *its* plan around nodes that would never obey it.
-And in the other direction it was worse: the vendor's receive handlers test
-`if (len < sizeof(...)) return;` rather than for equality, so wartui's longer
-assignment cleared a stock node's length check and its leading bytes decoded as
-that firmware's own struct — **a stock node in range adopted a garbage channel
-range from us**. Neither can happen now.
-
-A vendor fleet nearby is still recognised, because it is still transmitting where
-these nodes listen: `sniff` names its frames and the fleet view counts them, as
-`N frames from a vendor fleet` and `N admin frames from another core`. Nothing
-decodes them, and nothing is done to keep a mixed fleet working — the vendor node
-is the thing being replaced.
-
-wartui speaks **plaintext ESP-NOW only**, and so does `firmware/node`. There is
-no pairing handshake and no key: encryption was a vendor node's web-UI setting,
-and a wartui node has no web UI to set it in.
-
-**Twenty nodes is the maximum, and anything above it is unsupported.** That is
-how many peers an ESP-NOW radio can hold, so a twenty-first node is one the
-bridge cannot address: its assignments would be refused, and a planner
-partitioning the channel pool among nodes that never hear the result would be
-describing a fleet that does not exist. Over twenty,
-wartui keeps capturing everything every node reports — nothing is dropped — but
-refuses to assign, and says so.
-
-wartui is not a companion to a vendor core — it *replaces* one. A real core
-powered up on the same channel can no longer take this fleet away, because
-nothing it says decodes here or on these nodes; it is still contending for the
-air, and the footer says so (`admin frames from another core`).
-
-## Channel pools
-
-Which channels the fleet scans is selectable. A wartui node never transmits
-while it is looking: it parks its radio and reads beacons, so the pool bounds
-where it *listens*. That is a deliberate divergence: every `WiFi.scanNetworks`
-in the vendor firmware passes `passive = false`, so a stock node sends a probe
-request on each channel it is assigned, including the DFS channels where the
-rules say otherwise. Nothing wartui puts on the air does that, whatever pool is
-selected — the pool bounds where these nodes listen rather than restraining what
-they transmit.
-
-- **US** (`--pool us`, the default) — 2.4 GHz 1–11 and 5 GHz 36–165.
-- **All** (`--pool all`) — every channel a node can tune: 2.4 GHz 1–13 and all of
-  5 GHz, including the UNII-4 channels 169, 173 and 177 that `us` leaves out.
-
-**Channel 14 is unsupported and is in neither pool.** `esp-radio` hardcodes the
-country blob's `nchan: 13` and exposes no way to reach it, so a node handed that
-channel refuses the hop — once per sweep, every sweep, for as long as it holds
-the assignment, and it says so only on a serial console nobody is watching.
-`docs/phase-1-findings.md` has the measurement and the reading of the driver.
-It stays in the node's scan table because that table's indices are the wire
-format; it is simply never dealt.
-
-An assignment carries a forty-bit channel mask, so it can name any
-subset of the pool and the gap at channels 12–14 is not something the planner
-has to steer around. It deals the pool out round-robin instead: index *k* of the
-pool goes to node *k mod n*, so every node carries some 2.4 GHz and some 5 GHz.
-Block-splitting would put one node on the whole of 2.4 GHz and another on the
-whole of 5 GHz, and losing that node would blind the fleet to a band until the
-next re-cut landed.
-
-**An ESP32-C6 is never dealt a 5 GHz channel.** It has no radio for one, and it
-says so in every heartbeat — so a share of 5 GHz cut for it would be a share
-nobody scans, with an assignment sitting on top of it and nothing on screen to
-say the pool was not being covered.
-
-A mixed fleet is dealt the 5 GHz half first for that reason. In pool order the
-C5s would take their share of 2.4 GHz and then all of 5 GHz on top of it, which
-for one C5 and one C6 on the US pool is a 29/5 split — the block-splitting above,
-arrived at sideways. Dealing the constrained channels first leaves the C6 as the
-lightest node when the rest is handed round, and the same fleet splits 23/11. A
-fleet whose radios are all alike has no constrained channels and is dealt exactly
-as it always was.
-
-Shares are then no longer within one channel of each other, and cannot be: a C6
-beside a C5 that is holding 5 GHz sweeps faster however the rest is dealt. What
-the deal minimises is the *largest* share, which is what sets how stale the
-slowest node's observations get.
-
-If no node in the fleet has a 5 GHz radio at all, those channels are left out of
-every assignment rather than given to a node that would ignore them, and the
-footer says how many of the pool are going unscanned.
-
-Assigning by hand is cut down the same way. `A` offers the whole pool, so on a
-C6 it would otherwise deal 23 channels the node cannot tune — and with the
-planner off nothing re-partitions afterwards to notice. The set is narrowed to
-what that node's heartbeat says its radio can reach, and the notice names the
-narrowed set rather than what was asked for.
-
-One consequence to know about a fleet with no 5 GHz radio in it: the pool it can
-actually cover is 11 channels on `us`, so from twelve such nodes onward there are
-more nodes than channels to give them. The surplus nodes keep whatever they last
-held rather than being told to scan nothing — there is no frame that means that —
-so their shares double up with someone else's.
-
-## Trying it
+### Simulated
 
 No hardware needed — the simulator runs a fake fleet on a fake clock:
 
@@ -154,354 +23,101 @@ No hardware needed — the simulator runs a fake fleet on a fake clock:
 cargo run -p wartui -- --sim 3 --lat 37.7749 --lon -122.4194
 ```
 
-`--sim-c6 N` makes that many of them ESP32-C6s, counting from the end of the
-fleet, which is the only way to put a mixed fleet in front of the planner
-without two kinds of board on the desk.
-
 The simulated nodes model the parts of the firmware that matter: they park doing
-nothing until they are assigned, they adopt an assignment only when its version
-differs, they dedup against a 200-entry ring, only the node given the Bluetooth
-assignment reports any, and their sweep — and so their heartbeat period — is
-proportional to how many channels they hold. Pressing `a` or `b` on one does
-what it would do to real hardware.
+nothing until assigned, adopt an assignment only when its epoch differs, dedup
+against a 200-entry ring, and sweep — and so heartbeat — proportionally to how
+many channels they hold. `--sim-c6 N` makes that many of them ESP32-C6s, counting
+from the end of the fleet, which is how to put a mixed fleet in front of the
+planner without two kinds of board on the desk.
 
-The fake neighbourhood does not move, so the observation stream goes quiet once
-every node has reported everything on its own channels — a real fleet parked in
-one room does the same, and the dedup ring is why. Press `b` on a node to give
-it the Bluetooth scan: advertisers rotate their addresses, so they never dedup
-and the stream stays alive.
+### On real hardware
 
-With a bridge plugged in:
+To use wartui, install it so the binary is on `PATH`:
 
 ```sh
-cargo run -p wartui -- ports      # which device is it
-cargo run -p wartui -- status     # is the link alive, is anything being dropped
-cargo run -p wartui -- sniff      # every frame the fleet sends, decoded
+cargo install --path crates/wartui
 ```
 
-Flashing the bridge itself is in `firmware/bridge/README.md`.
-
-## Capturing
-
-`wartui run` — the default, so the subcommand can be left off — listens, writes
-every observation to SQLite, and draws the fleet while it does. It also
-partitions the pool across the fleet without being asked, which is the core's
-job and the reason this exists; `p` takes that back and `a`/`A` then assign the
-selected node channels by hand. `--manual` starts with the planner off, and
-nothing reaches the air until a key is pressed.
+With a bridge plugged in, `run` is the default and the subcommand can be left off:
 
 ```sh
 wartui run --db tonight.db --lat 37.7749 --lon -122.4194
-wartui run --db tonight.db --manual --gps /dev/cu.usbserial-1420
 wartui export --db tonight.db --wigle tonight.csv
 ```
 
-Press `q` to stop; the last batch is committed and the session closed out before
-it exits.
+`q` stops a capture, committing the last batch and closing out the session. The
+store is the system of record and the CSV is a view over it, re-runnable against a
+finished session or one still going.
 
-The store is the system of record and the CSV is a view of it, not the other way
-round: an export can be re-run after a decoder fix, run against a session that
-ended last week, or run against one that is still going.
+```sh
+wartui ports      # which serial devices look like an Espressif board
+wartui status     # is the link alive, is anything being dropped
+wartui sniff      # every frame the fleet sends, decoded
+wartui reset      # reboot a bridge that has stopped answering
+```
 
-### Assigning channels
+## Subprojects
+
+| Path | What it is |
+| --- | --- |
+| [`crates/wartui`](crates/wartui/README.md) | The clap CLI and the ratatui view — **the operator's manual** |
+| `crates/wartui-core` | Headless fleet engine, SQLite store, position, WiGLE export |
+| `crates/wartui-bridge` | Host-side link to the dongle: transport, port discovery, simulator |
+| `crates/wartui-proto` | `no_std` wire formats and parsers, shared with both firmwares |
+| [`firmware/bridge`](firmware/bridge/README.md) | The dongle: COBS framing and `esp-radio` calls, no protocol knowledge |
+| [`firmware/node`](firmware/node/README.md) | The nodes: sniffs, reports, takes assignments |
+| [`tools/espnow-sniffer`](tools/espnow-sniffer/README.md) | Passive Arduino sniffer for bring-up and frame capture |
+| `tools/beacons` | Turns a monitor-mode capture into fixtures for the beacon parser |
+
+Each firmware is its own workspace — a different target, its own toolchain pin and
+its own lockfile — and both take a path dependency up into `crates/wartui-proto`,
+which is the only thing keeping the two ends of the wire in step. The library
+crates have no README of their own; their `//!` module docs are the detail.
+
+## At the keyboard
 
 | Key | What it does |
 | --- | --- |
 | `↑` `↓` / `k` `j` | Move the cursor down the fleet table |
-| `a` | Give the selected node exactly **one** channel |
-| `A` | Give it the whole pool |
+| `a` / `A` | Give the selected node one channel / the whole pool |
 | `b` | Move the Bluetooth scan to it, or take it off the fleet |
 | `p` | Take the fleet back from the planner, or hand it over again |
+| `q` | Stop, committing the last batch |
 
-The header says which of you is deciding: `manual`, or `auto — 4 of 5` for four
-heartbeating nodes out of five seen. It starts on `auto`, so **`a` and `A` are
-refused until you press `p`** (or started with `--manual`) — the planner would
-honour a hand-assigned set and then take it back at the next re-cut, which reads
-as the key having been ignored. `b` is not refused: the planner partitions
-channels and has no opinion about Bluetooth, so there is nothing for it to take
-back.
+wartui partitions the channel pool across the fleet without being asked, which is
+the core's job and the reason this exists. `p` takes that back and `--manual`
+starts without it; **`a` and `A` are refused until one of them does**, because the
+planner would honour a hand-assigned set and then take it back at the next re-cut.
 
-Nothing goes out at the moment the key is pressed. A node's radio is away
-scanning some other channel for all but the 300 ms it holds open after its own
-heartbeat, so the assignment waits for that window — the `channels` column reads
-`1: 1…` until it lands, then drops the ellipsis. On a full sweep that is up to
-four seconds. That delay is the protocol, not lag.
+Nothing goes out at the moment a key is pressed. A node's radio is away scanning
+for all but the 300 ms it holds open after its own heartbeat, so the assignment
+waits for that window — up to about four seconds on a full sweep. The `channels`
+column reads `1: 1…` until it lands.
 
-That column leads with a count because a share dealt round-robin is a dozen
-scattered channels and no sane column is wide enough for all of them. The count
-is the useful half anyway: it is what the `beat` column should be proportional
-to.
+`--pool us` is the default: 2.4 GHz 1–11 and 5 GHz 36–165. `--pool all` is every
+channel a node can tune, 2.4 GHz 1–13 and all of 5 GHz.
 
-An assignment is believed only when the node's own radio acknowledges it at the
-MAC layer, never when the bridge reports a successful enqueue. The vendor core
-cannot tell those apart, which is why it can sit with a node it believes is
-assigned and is not.
+At most one node scans Bluetooth, and by default none does. `b` moves it.
 
-`a` is also the Phase 4 proof that any of this works. Take the fleet back with
-`p` first, or start with `--manual` so nothing has been assigned yet. A node
-heartbeats once per completed sweep and reports nothing about what it is
-scanning, so watch the `beat` column: narrowing a node from the whole pool to
-one channel should collapse it from seconds to a fraction of one within three
-sweeps. `A` puts it back.
+**Fleet states, GPS, channel-pool detail and troubleshooting are in
+[`crates/wartui/README.md`](crates/wartui/README.md).**
 
-If a node keeps showing `no admin ack`, the cause is nearly always BLE: the
-Bluetooth and Wi-Fi radios share the one 2.4 GHz antenna, and the admin window
-is precisely when the node would otherwise be idle. On a stock node, turn BLE
-off in its web UI. On a wartui node, press `b` on it — see below.
+## Limits
 
-### Bluetooth
-
-**At most one node scans Bluetooth, and by default none does.** `b` on the
-selected node moves the scan to it; `b` again on the node that holds it takes it
-off the fleet. The `ble` column says who has it, and reads `on…` or `off…` while
-a change is waiting for that node's next admin window, the same way the
-`channels` column does.
-
-It is a per-node choice rather than a build flag because the cost is real and
-was measured on both firmwares. A stock node with BLE on acknowledged **none**
-of the thirty-two assignments sent to it, while an identical node with it off
-acknowledged both of its two (`docs/phase-0-findings.md`). A wartui node
-acknowledged every time on the same board — including the frame that took the
-scan away, mid-scan, in 5.8 ms — and ran 10.9% slower per sweep while it held it
-(`docs/phase-2-findings.md`): 5.221 s against 4.709 s either side, on the same
-thirty-four channels. A cost worth paying on one node for Bluetooth coverage,
-and not worth paying on all of them.
-
-The `ble` cargo feature decides whether the code is in the binary at all; the
-assignment decides whether it runs, and it is off at every boot regardless of
-the build. A node whose firmware was compiled with Bluetooth is not a node that
-is scanning it.
-
-**`b` is refused on a node built without the feature**, which its heartbeat says.
-Nothing about the frame would fail: it adopts the flag,
-acknowledges, and scans nothing — so the `ble` column would name a holder, the
-export would have no Bluetooth rows in it, and "at most one node scans
-Bluetooth" would read as "one does".
-
-### Letting wartui assign them
-
-This is on by default, and it is wartui doing the core's whole job: it deals the
-pool out across the fleet and re-cuts it whenever the fleet changes shape.
-`--manual` starts without it; `p` toggles it either way. It partitions channels
-and nothing else — the Bluetooth assignment is yours, and survives a re-cut.
-
-A node is in the plan while it is **heartbeating**. Not while it is merely being
-heard — a node that has stopped heartbeating never opens an admin window, so a
-share of the pool held open for it is a share nobody is scanning. It drops out
-after the same 60 s the firmware uses, and whatever it was owed is dropped with
-it.
-
-Every change re-cuts the pool for the *whole* fleet, not just the node that
-joined or left. `node_index` and `node_count` travel in every assignment and are
-what each node computes its transmit stagger from (`src/RadioTuning.cpp:3-13`),
-so a fleet whose members disagree about the count keys up on top of itself. Each
-node takes its new share in its own next admin window, so a fleet converges in
-about one sweep.
-
-An unchanged fleet is left alone. A node adopts an assignment only when the
-epoch differs from the one it holds, so re-sending one it already has is a frame
-it acknowledges and then discards — indistinguishable from success. The planner
-only speaks when it has something new to say.
-
-**A lone node holds the whole pool.** It used not to: the assignment carried one
-contiguous range and the US pool is two runs, so a single node covered them in
-turn on a 60-second dwell and half the pool went unscanned at any instant. The
-channel mask says both runs in one frame, and the rotation — with its timer, its
-phase in the header, and the fresh epoch it spent every minute — is gone.
-
-**A node can report a channel that is not in its share.** The deal interleaves
-2.4 GHz channels between nodes — one takes 1, 3, 5, the next 2, 4, 6 — and
-2.4 GHz channels are 5 MHz apart but 20 MHz wide, so a node parked on 2 hears
-beacons transmitted on 1 and 3 — and, more faintly, on 4. It reports the channel
-the beacon itself names, which is the access point's real one; the alternative
-would be filing a real network under the wrong frequency. How much a given node
-does this is decided by where the room's access points sit: a node dealt channel
-6 in a room that clusters on 1, 6 and 11 barely does it at all, and the nodes
-either side of it do it constantly. What stays put is the fleet-wide figure —
-about a quarter of access points found by more than one node, unchanged from two
-nodes to three (`docs/phase-2-findings.md`). `export` picks one row per network,
-so this costs store rows and nothing else. 5 GHz channels here do not overlap
-and do not do it.
-
-Over twenty nodes the planner stops re-cutting rather than partitioning among
-nodes the bridge cannot address. Whatever is already assigned stays assigned,
-capture is unaffected, and the footer says so. A single node the bridge has no
-peer slot for — peers are never removed, so a long session can fill the table
-with nodes that have since gone — leaves the plan the same way, and the rest
-re-cut to cover its share. It is tried again the next time a bridge announces
-itself, since that table starts empty.
-
-Assigning channels by hand while the planner is running is refused — it would be
-honoured and then taken back at the next re-cut, which reads as the key having
-been ignored. Press `p` first; since the planner is what wartui starts with, that is
-the normal way round.
-
-### Positions
-
-Every observation is stamped with the best position available, resolved fresh
-each time: a GPS on `--gps`, then a static `--lat`/`--lon`, then nothing. A
-record is never dropped for want of a position — but **WiGLE will not accept a
-row without coordinates**, so a capture with no position given exports nothing
-and says how many networks it left out.
-
-```sh
-wartui run --db drive.db --gps /dev/cu.usbserial-1420 --lat 37.7749 --lon -122.4194
-```
-
-Giving both is the useful combination: the rows carry satellite positions
-whenever the receiver has one, and the typed-in position the rest of the time,
-rather than nothing at all while the receiver is still finding itself.
-
-`--gps` takes any receiver that speaks NMEA 0183 over a serial port. `GGA` and
-`RMC` are read and everything else is ignored; the altitude, the satellite count
-and an accuracy estimated from the reported HDOP all reach the WiGLE export.
-`--gps-baud` defaults to 9600, which is what most receivers ship at — u-blox
-modules are often 38400, and the wrong rate shows up in the footer as unreadable
-lines with no fix rather than as silence.
-
-**A fix has to be recent to be used.** Past `--gps-max-age` seconds (5 by
-default) the position falls back to the tier below and the header says
-`gps fix is stale`, because at driving speed a minute-old fix is a different
-neighbourhood, and a row that quietly claimed it would be worse than one
-admitting to the static position. Which tier answered is recorded per row, so a
-capture that starts in a garage and ends on a road is honest about both halves.
-
-The receiver runs on its own thread and nothing waits for it: a capture starts
-immediately, reconnects on its own if the puck is unplugged and put back, and
-says what it is doing on the header line — `gps searching`, `gps ok, 8 sats`,
-`gps fix is stale`, or the error from the port.
-
-### What the fleet table is telling you
-
-| State | Meaning |
-| --- | --- |
-| `alive` | Heartbeating, so it can be given channels |
-| `stale` | Still being heard, but not heartbeating — most often BLE coexistence on the node holding the radio through its admin window |
-| `no heartbeat` | Seen, but has never completed a sweep |
-| `no admin ack` | An assignment went out and its radio did not answer — nearly always BLE, see [Assigning channels](#assigning-channels) |
-| `refused` | The bridge would not transmit it — nearly always a full peer table, which means the fleet is over twenty nodes. Its heartbeats are still arriving; what is missing is a slot to address it through |
-| `rebooted xN` | Its heartbeat counter went backwards, so it has forgotten any assignment; wartui re-issues under a fresh epoch |
-
-A node that is `stale`, `refused` or `no heartbeat` is also out of the plan, and
-for the same reason it cannot be assigned by hand: nothing wartui sends it would
-reach it, or nothing yet says which band its radio can tune — so a share of the
-pool cut for it is a share that may be nobody's. Pressing `a`, `A` or `b` on one
-says which of the three it is, because the next move is different for each: wait
-for the first heartbeat, run a smaller fleet, or go and find out why the
-heartbeats stopped.
-
-When every node is in one of those states the header says `auto — no node it can
-drive`, which is a different thing from `auto — nothing heartbeating yet`.
-
-There used to be a `not wartui` row here, and it is worth knowing why there is
-not one any more. Node → core was byte-identical to a stock node's, so a stranger
-heartbeated exactly like one of ours, was planned for, acknowledged its
-assignment at the MAC layer, discarded it in the application and went on scanning
-everything — and nothing scanned the share it had been given. On a bench, two
-nodes and a stranger covered less of the pool than the two nodes alone
-(`docs/phase-2-findings.md`). The only way to tell them apart was to ask, in the
-one field a stock node left empty.
-
-The magic answers it a layer earlier now: a stranger's frames do not decode here
-at all, so it never reaches the fleet table, and the footer counts it as a vendor
-fleet instead. What survives is the half that was always about *our* nodes — every
-heartbeat still carries `wartui/1.0;ble,5g`, a version and what that board can do,
-because the planner needs to know which band a radio reaches before it deals it a
-channel.
-
-**A fleet part-way through a reflash is the case to watch when upgrading.** Those
-nodes speak a wire format this host does not, so they are invisible in the table
-above — the footer is the only place they are mentioned, as
-`N frames from an older firmware — reflash`.
-
-Before 1.0 there is no compatibility with an earlier wartui at all, and nothing
-is built to soften that: a node on a previous build is simply traffic this host
-cannot read, and one from before the magic changed is not even distinguishable
-from a neighbour's equipment. `wartui-proto` is compiled into the host and both
-firmwares, so flash the fleet together; the bridge is format-blind and does not
-need it.
-
-`stale` and `no heartbeat` are deliberately distinct from silence. The vendor
-firmware refreshes liveness only on a heartbeat, so a node streaming
-observations whose heartbeats are lost would age out and churn the whole fleet's
-topology — wartui keeps two clocks so the difference is visible rather than
-fatal.
-
-The footer only shows faults once they have happened, so a clean run reads as a
-clean footer. `bridge dropped` there counts frames lost since this host
-attached; `wartui status` reports the bridge's own total since it booted, which
-on a dongle left powered with nothing listening is large and not a fault.
-
-### When nothing arrives
-
-The header says `waiting for a bridge to announce itself` for two quite
-different reasons, and the fault box says which: `link down: could not open …`
-means the port is not ours — nearly always another `wartui`, a `screen` session
-or an IDE's serial monitor still holding it — while no fault at all means the
-port opened and the dongle is not answering.
-
-In that second case the bridge is usually not dead but deaf in one direction:
-its USB transmit endpoint has stopped draining while it goes on reading every
-frame you send it. The firmware notices that within three seconds and reboots
-itself, so this should now clear on its own and show up afterwards as
-`bridge rebooted itself: USB transmit had stalled` in the fault box. If it does
-not, `wartui reset` asks it to reboot, which works because the receive path is
-the half that still runs — and keeps the device path, where `espflash reset
---port …` re-enumerates the board and can move `ttyACM0` to `ttyACM1` under a
-script that named it. `espflash` is the fallback for a bridge that answers
-nothing at all, and unplugging is the last resort.
-
-```sh
-cargo run -p wartui -- status                  # exits in 5 s with the reason
-cargo run -p wartui -- reset                   # reboot a bridge that stopped answering
-cargo run -p wartui -- --log-file wartui.log run
-```
-
-`--log-file` is the only way to see the transport's own account of a run: the
-view owns the terminal, so without it nothing is logged anywhere. It records
-which port was resolved, whether it opened, and the reason a link went down —
-once per reason rather than once per retry, since a port that is somebody else's
-is retried every 750 ms for as long as the capture runs. The GPS reader thread
-reports itself the same way. `RUST_LOG=debug` adds each individual retry, every
-frame that would not decode, and dropped bulk commands.
-
-If the same port keeps being the wrong device — a C5 node plugged in by USB
-looks identical to the bridge, same vendor and product ID — pin it with
-`--port`. `wartui ports` lists the candidates.
-
-Probing answers one port at a time and answers it slowly: pointed at a node,
-`wartui status` opens the port, waits six seconds for a link protocol the node
-does not speak, and tells you only that this one is not the bridge — and there
-are as many of those as there are boards. Ask the USB tree instead: it names
-every board at once, and the bridge among them. An ESP32's serial number *is*
-its MAC, so on macOS `ioreg` pairs every port with the board behind it without
-opening anything, with no esp tool and no reflash:
-
-```sh
-ioreg -l -w0 | LC_ALL=C awk -F'"' '
-  BEGIN { printf "%-24s %s\n", "PORT", "ADDRESS" }
-  /USB Serial Number/ && $4 ~ /^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$/ { mac = $4 }
-  /IOCalloutDevice/ && $4 ~ /usbmodem/ { dev = $4 }
-  mac != "" && dev != "" { printf "%-24s %s\n", dev, mac; mac = dev = "" }
-'
-```
-
-```
-PORT                     ADDRESS
-/dev/cu.usbmodem2101     02:00:5E:10:9D:24
-/dev/cu.usbmodem142201   02:00:5E:10:4F:98
-```
-
-The address shape is what picks the ESP32s out: everything else on the bus
-carries a manufacturing serial, and only these carry something a MAC could be.
-The two properties sit on different nodes of the tree — the address on the USB
-device, the path on the serial client beneath it — and come out in either order,
-so they are paired as they arrive rather than assumed adjacent. The bridge is
-then the row whose address the fleet table shows as the bridge's, and a node the
-row whose heartbeats `wartui sniff` attributes to that address; where the board
-generations differ, the OUI separates them too. An S3 in the list is a bridge
-and never a node — nothing here flashes a node with S3 firmware, because a
-2.4-GHz-only node is what a C6 already is.
+- **Twenty nodes is the maximum** (`plan::MAX_NODES`) — that is how many peers an
+  ESP-NOW radio holds, so a twenty-first is one the bridge cannot address. Above
+  it, capture continues and nothing is dropped, but the planner stops re-cutting
+  and says so.
+- **An ESP32-C6 is never dealt a 5 GHz channel.** It has no radio for one, and a
+  share cut for it would be a share nobody scans.
+- **Channel 14 is in neither pool** and is never dealt; `esp-radio` exposes no way
+  to reach it.
+- **Plaintext ESP-NOW only**, in both directions. There is no pairing handshake
+  and no key.
+- **Nothing is compatible with an earlier wartui, and that is the policy until
+  1.0.** `wartui-proto` is compiled into the host and both firmwares, so flash the
+  fleet together; a node on a previous build is traffic this host cannot read. The
+  bridge is format-blind and does not need reflashing for a wire change.
 
 ## Development
 
@@ -509,6 +125,9 @@ and never a node — nothing here flashes a node with S3 firmware, because a
 cargo test --workspace
 cargo clippy --workspace --all-targets
 cargo fmt --check
+
+cargo test -p wartui-core --test engine                     # one test binary
+cargo test -p wartui-core --test engine a_heartbeat_counter # one test by name
 
 cd firmware/bridge && cargo clippy --release --features esp32c6   # and esp32c5
 cd firmware/node   && cargo clippy --release --features esp32c6   # and with ,ble
@@ -518,20 +137,12 @@ cd firmware/bridge && cargo +esp clippy --release --features esp32s3 \
   --target xtensa-esp32s3-none-elf
 ```
 
-Each firmware is excluded from the workspace and is its own: a different target,
-its own toolchain pin and its own lockfile. Both take a path dependency up into
-`crates/wartui-proto`, which is why those wire types are `no_std` — and why the
-node's beacon parser, dedup ring and HCI packets live there too, where
-`cargo test` reaches them and a fix costs a `cargo run` rather than a reflash.
+`wartui-proto` is `no_std` because it is compiled into the firmwares as well as
+the host — which is also why the node's beacon parser, dedup ring and HCI packets
+live there, where `cargo test` reaches them and a fix costs a `cargo run` rather
+than a reflash. The wire codec is pinned byte-for-byte in
+`crates/wartui-proto/tests/wire.rs` against hand-written vectors, since there is
+no second implementation of either end to check against.
 
-The wire codec is pinned byte-for-byte in `crates/wartui-proto/tests/wire.rs`,
-against vectors written out by hand. That is the most that can be said for a
-format with one implementation of each end: there is no second opinion to check
-against, so every vector spells out what it pins — the header, the field order,
-the endianness of the two multi-byte fields, the sign of an RSSI.
-`tools/espnow-sniffer` still dumps frames off the air in the same
-`<name> <length> <hex>` shape, which is the fastest way to see what a fleet is
-actually saying. 802.11 beacons pulled out of a monitor-mode capture by
-`tools/beacons` do go into `tests/beacon_vectors.txt` as fixtures — scrubbed of
-addresses and network names on the way, because a capture of the air around you
-locates you as surely as anything this project collects on purpose.
+`--log-file` is the only way to see transport logs: the view owns the terminal, so
+without it nothing is logged anywhere.
