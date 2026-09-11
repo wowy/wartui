@@ -722,8 +722,19 @@ impl FleetEngine {
         // A node that announces itself without the `ble` feature loses it here
         // for the same reason and on the same tick: it has no scan code in it,
         // so it would adopt the flag, acknowledge, and scan nothing.
+        //
+        // A node that is not in the table at all is neither of those. Nothing
+        // is ever removed from `self.nodes`, so absence means this host has
+        // never heard the address rather than that it has left — which is the
+        // case `on_assign_ble` deliberately allows, naming a node before it
+        // appears. Treating absence as gone took the scan back on the first
+        // tick after the command and before the node's first heartbeat, so
+        // whether the assignment survived was a race with the tick interval:
+        // `capture.rs`'s moving-GPS test asks for the scan the moment the
+        // capture starts and lost it about one run in five, leaving a fleet
+        // that reported its access points once and then went silent.
         let ble_gone = self.ble_node.is_some_and(|mac| {
-            self.nodes.get(&mac).is_none_or(|node| {
+            self.nodes.get(&mac).is_some_and(|node| {
                 !self.is_alive(node, now)
                     || node.capabilities.is_some_and(|capabilities| !capabilities.ble)
             })
