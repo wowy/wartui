@@ -216,19 +216,26 @@ edit stops; follow the pointer before changing the rule.
   → `crates/wartui-proto/src/stall.rs` `//!`, `docs/phase-3-findings.md`
 - **Every reset goes through `reboot()`, and on a C5 that funnel *is* the reset.** Call
   `software_reset()` directly there and the board does not reboot, it stops — unrecoverable until
-  the cable is pulled, measured four ways. → `firmware/bridge/src/main.rs`, `fn reboot`
+  the cable is pulled, measured four ways. Each firmware has its own copy of the funnel, so the
+  esp-hal 1.2 cleanup (issue #16) has to remove both.
+  → `firmware/bridge/src/main.rs` and `firmware/node/src/main.rs`, `fn reboot`
 - **A bridge reboot is invisible unless the host compares uptimes.** A software reset does not
   re-enumerate the USB device, so the second `Ready` arrives on the same connection and looks
   exactly like a duplicate answer to an in-flight `Identify`. `uptime_ms` going backwards is the
   only thing that separates them. → `crates/wartui-bridge/src/serial.rs`, `is_a_new_life`
 - **Neither firmware may block on the USB endpoint.** The bridge sends everything through
   `wartui_proto::outbox`'s rings, which evict oldest-first and write a lone `0x00` behind a
-  truncated frame so COBS can resynchronise. → `crates/wartui-proto/src/outbox.rs` `//!`
+  truncated frame so COBS can resynchronise. A node has the endpoint to itself and uses
+  `esp-println`, whose writer gives the FIFO a bounded number of attempts and then remembers that
+  nobody is reading — losing a line is correct, losing the sweep is not.
+  → `crates/wartui-proto/src/outbox.rs` `//!`, `firmware/node/src/main.rs`
 - **Never link `esp-println` with `jtag-serial` in the *bridge*** — its link protocol shares that
   endpoint, and diagnostics go out as `Log` frames instead. → `firmware/bridge/README.md`
 - **Both firmwares pass `US` for the regulatory domain, and that is not a preference.**
   `esp-radio` defaults to China under `WIFI_COUNTRY_POLICY_MANUAL`, which silently costs a C5
-  channels 100–144 on every sweep. → `firmware/node/src/radio.rs`, `firmware/node/README.md`
+  channels 100–144 on every sweep, and two halves of one fleet disagreeing about what is legal is
+  a trap even where the bridge can describe the refusal.
+  → `firmware/node/src/radio.rs`, `firmware/bridge/src/main.rs`, `firmware/node/README.md`
 - **`esp-radio 1.0.0-beta.0` requires `esp-hal ~1.1.0`, and that pins the whole family.** Do not
   try to force it; `cargo update` lists newer versions and moves nothing. `esp-println` is the one
   crate outside the wall, and only while its `critical-section` feature is off — `cargo tree -e
@@ -249,8 +256,7 @@ edit stops; follow the pointer before changing the rule.
 
 - Module-level `//!` docs explain *why* the design is the way it is, not what the code does; the
   reasoning in them is often the only record of a hardware constraint. Match that register, and
-  update the reasoning when the decision changes. Keep these docs small and focused; no extended
-  prose.
+  update the reasoning when the decision changes.
 - Rustfmt is configured with `max_width = 100` and `use_small_heuristics = "Max"`.
 - Tests are mostly integration tests under `crates/*/tests/` with full-sentence names
   (`observations_keep_a_node_visible_but_only_heartbeats_keep_it_assignable`); `#[cfg(test)]`
