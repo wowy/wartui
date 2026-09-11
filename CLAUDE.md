@@ -4,40 +4,34 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A terminal fleet controller for ESP32-C5 and ESP32-C6 wardriving nodes. wartui does not
-assist a vendor CORE node — it **replaces** one: it owns the node table, issues channel
-assignments and collects every observation, speaking ESP-NOW through a USB-attached ESP32
-dongle running our own Rust bridge firmware. That dongle may be a C5, a C6 or an ESP32-S3;
-the nodes are C5 and C6 only, because a node is the thing that has to reach 5 GHz and a
-bridge never leaves the control channel. The nodes run our own firmware too
-(`firmware/node`).
+A terminal fleet controller for ESP32-C5 and ESP32-C6 wardriving nodes. wartui owns the
+node table, issues channel assignments and collects every observation, speaking ESP-NOW
+through a USB-attached ESP32 dongle. That dongle may be a C5, a C6 or an ESP32-S3; the
+nodes are C5 and C6 only, because a node is the thing that has to reach 5 GHz and a bridge
+never leaves the control channel. Both firmwares are ours (`firmware/bridge`, `firmware/node`),
+and every frame on the air is wartui's own in both directions.
 
-**Every frame on the air is wartui's own**, in both directions, and is deliberately
-unrecognisable to the firmware this project grew up against —
+The `src/*.cpp:NNN` citations throughout this tree point at
 [wowy/ESP32DualBandWardriver](https://github.com/wowy/ESP32DualBandWardriver) on
-`feat/node-interference-mitigation`, a fork of
-[justcallmekoko's](https://github.com/justcallmekoko/ESP32DualBandWardriver). That repo is
-still the record of measured *behaviour* — the enqueue-versus-ack bug, BLE coexistence,
-`passive = false`, `setFixedChannel` — and the `src/*.cpp:NNN` citations throughout this
-tree point at it for that reason and no other. It is not a specification anything here
-matches, and there is no checkout of it on this machine.
+`feat/node-interference-mitigation`, the firmware this project grew up against. It is the
+record of measured *behaviour* and nothing else — not a specification anything here
+matches — and a checkout is not needed.
 
-`README.md` is the front door and stays short — an overview, how to launch it, the subproject
-listing, and the handful of facts an operator needs before reaching for a second page.
-`crates/wartui/README.md` is the operator's manual: keys, fleet states, channel pools, GPS and
-troubleshooting. Read it before changing view or CLI behaviour, and keep it true when behaviour
-changes. Neither describes what a phase proved — that is what `docs/` is for.
-`docs/phase-0-findings.md` records what was
-measured on the vendor fleet and is why several of the invariants below exist;
-`docs/phase-1-findings.md` records what our own node firmware then did on the
-same bench, including which of those invariants it has actually been checked
-against and which are still only reasoning; `docs/phase-2-findings.md` does the
-same for channel masks and Bluetooth-by-assignment, and is where the measured
-cost of the Bluetooth scan comes from; `docs/phase-3-findings.md` is the USB
-link — what the long-standing "bridge stops answering" wedge turned out to be,
-and what does and does not recover from it. `docs/phase-4-findings.md` is the
-wire becoming wartui's own in both directions; unlike the others it is written
-ahead of the bench rather than after it, and says so.
+Where the prose lives:
+
+- `README.md` — the front door, and stays short.
+- `crates/wartui/README.md` — the operator's manual: keys, fleet states, channel pools,
+  GPS, troubleshooting. Read it before changing view or CLI behaviour, and **keep it true
+  when that behaviour changes.**
+- `firmware/*/README.md` — each firmware's own constraints, including the esp-hal version
+  wall (`firmware/bridge/README.md`).
+- `docs/phase-N-findings.md` — what each bench actually measured, and why several
+  invariants below exist. Phase 0 is the vendor fleet; 1 is our node firmware; 2 is channel
+  masks and Bluetooth; 3 is the USB link and the wedge; 4 is the wire becoming ours, and is
+  the one written ahead of the bench rather than after it.
+
+Module-level `//!` docs carry the reasoning behind the invariants below. They are the
+record; this file is the index.
 
 ## Commands
 
@@ -58,35 +52,10 @@ cargo run -p wartui -- ports | status | sniff        # with a bridge plugged in
 cargo run -p wartui -- --log-file wartui.log run     # the only way to see transport logs
 ```
 
-### Telling the boards apart without opening a port
-
-`wartui ports` prints one identical `USB JTAG/serial debug unit` line per attached board and
-says nothing about which is the bridge. Probing for it is slow and answers one port at a time:
-`wartui status` on a node waits five seconds for a protocol the node does not speak, then says
-only that this one is not the bridge.
-
-The USB serial number *is* the device's MAC, so the OS answers it for free, with no esp tool,
-no reflash and without opening anything. On Linux, udev has already paired the two:
-
-```sh
-for l in /dev/serial/by-id/usb-Espressif_*; do
-  mac=${l##*unit_}; printf '%s\t%s\n' "$(readlink -f "$l")" "${mac%-if00}"
-done
-```
-
-On macOS the same fact comes out of `ioreg`:
-
-```sh
-ioreg -l -w0 | grep -E '"USB Serial Number"|"IOCalloutDevice"' | sed 's/^ *[|+ -]*//' \
-  | grep -A1 "Serial Number" | grep -v '^--' | paste - - | grep usbmodem
-```
-
-Each line pairs a device path with the MAC of the board behind it — in either order for
-`ioreg`, since it emits the two properties per device in whatever order it stored them. The
-bridge is then the one whose address the fleet table shows as the bridge, and a node is the one
-whose heartbeats `wartui sniff` attributes to that address. The OUI also separates board
-generations where they differ. Refer to the results by their last two octets, per the global
-rule.
+`wartui ports` cannot say which attached board is the bridge, and probing is slow. The USB
+serial number *is* the device's MAC, so the OS answers for free: `crates/wartui/README.md`
+§ "Telling the boards apart" has the Linux and macOS one-liners. Refer to the results by
+their last two octets, per the global rule.
 
 Each firmware is a **separate workspace** (`exclude = ["firmware"]`): different target, own
 toolchain pin, own lockfile. `cargo test --workspace` never touches them.
@@ -155,177 +124,133 @@ Positions resolve fresh per record through `PositionChain`: GPS (`--gps`, NMEA o
 
 ## Invariants that are easy to break
 
+These bite from a distance — from a file other than the one that owns them — so the reasoning
+is here rather than only in a `//!`.
+
 - **The wire is ours, in both directions, and shares nothing with the vendor's.** Every frame is
   `WTUI`, a wire version byte, a type byte and a body: `HeartbeatMsg` (13 bytes), `SightingMsg`
-  (17 plus the SSID) and `AdminMsg` (15). This is not tidiness. ESP-NOW has no addressing above
-  the MAC layer and a node broadcasts, so a shared format is a shared conversation: a vendor core
-  hearing vendor-shaped heartbeats from our nodes cut *its* plan around nodes that would never
-  obey it, and — worse, because the vendor's handlers test `if (len < sizeof(...)) return;` rather
-  than for equality — a stock node in range **adopted a garbage channel range out of wartui's
-  longer assignment frame**. The magic is checked before anything else at both ends, so each
-  costs the other one `memcmp`. Encode/decode is written out by hand, never by transmuting a
-  packed struct, and pinned byte-for-byte in `crates/wartui-proto/tests/wire.rs` — hand-written
-  vectors, because there is no second implementation of either end left to check against.
-- **Somebody else's fleet is recognised in order to be reported.** `air::foreign::classify` matches
-  `ENOW` and nothing more: no decode, no fields, no fixture. A vendor core's assignment counts as
-  `foreign_admin` and its nodes' traffic as `foreign_fleet`, both said in the footer, because
-  another fleet transmitting on the channel these nodes listen on is an operational fact. Nothing
-  is done to keep a mixed fleet working — the vendor node is the thing being replaced.
-- **The version byte is how a half-flashed fleet says so.** A frame carrying our magic and a
-  version this build does not know is counted as `incompatible` and named in the footer
-  (`N frames from an older firmware — reflash`), never admitted to the node table and never
-  half-decoded. The consequence to keep in mind when flashing: **`wartui-proto` is a path
-  dependency of both firmwares, so a wire change means reflashing every node at once.** The bridge
-  is format-blind and does not need it.
+  (17 plus the SSID) and `AdminMsg` (15). ESP-NOW has no addressing above the MAC layer and a
+  node broadcasts, so a shared format is a shared conversation, in both directions and to
+  everyone's cost — `crates/wartui-proto/src/air.rs` has the two measured failures. The magic is
+  checked before anything else at both ends. Encode/decode is written out by hand, never by
+  transmuting a packed struct, and pinned byte-for-byte in `crates/wartui-proto/tests/wire.rs` —
+  hand-written vectors, because there is no second implementation of either end left to check
+  against.
+- **A wire change means reflashing every node at once.** `wartui-proto` is a path dependency of
+  both firmwares. A frame carrying our magic and an unknown version byte is counted as
+  `incompatible` and named in the footer (`N frames from an older firmware — reflash`), never
+  admitted to the node table and never half-decoded. The bridge is format-blind and does not
+  need the reflash.
 - **Nothing here is compatible with an earlier wartui, and that is the policy until 1.0.** No
   migration path is built for a fleet mid-upgrade and no code reads an older wire format to be
   helpful about it; a node on a previous build is somebody else's traffic as far as this host is
   concerned. Flash the fleet together. The one thing that does survive a shape change is the
   store, which migrates (`store::SCHEMA_VERSION`) because a capture is data rather than a
   deployment.
-- **A node is only in the plan once it has said what its radio is.** Every heartbeat carries
-  `air::Capabilities` — major, minor, and a flags byte for `ble` and `5g` — and
-  `FleetEngine::is_assignable` refuses a node that has none, alongside one the bridge has no peer
-  slot for. `None` now means only that nothing but a sighting has been heard from that address
-  yet, which is an ordinary few seconds in the life of a node about to be perfectly drivable: a
-  node reports what it found on a channel before it gets back to the control channel to heartbeat.
-  A share cut for a node whose band nothing has confirmed is a share that may be nobody's.
+- **Only heartbeating nodes are assignable or in the plan** — a node that is merely being heard
+  never opens an admin window. `stale`, `no heartbeat` and silence are deliberately distinct
+  states, and `SCAN_CHANNELS` order is load-bearing: never sort or deduplicate it, because those
+  indices *are* the wire format.
+- **A node is only in the plan once it has said what its radio is.** `FleetEngine::is_assignable`
+  refuses a node whose heartbeats carry no `air::Capabilities`, alongside one the bridge has no
+  peer slot for. `None` means only that nothing but a sighting has been heard from that address
+  yet — an ordinary few seconds in the life of a node about to be perfectly drivable. A share cut
+  for a node whose band nothing has confirmed is a share that may be nobody's.
 - **Twenty nodes is the hard maximum** (`plan::MAX_NODES`) — an ESP-NOW radio's peer table. Above
   it, capture continues and the planner refuses to re-cut rather than partitioning among nodes the
   bridge cannot address.
-- **An assignment is a `ChannelSet`, and a pool is still runs.** The mask can name any subset of
-  `SCAN_CHANNELS`, so a run boundary is not something the planner steers around: it flattens the
-  pool and deals round-robin, index `k` to node `k % node_count`, giving every node some of both
-  bands. `IndexRun` still describes a *pool* and must not come back as the shape of an assignment.
-  The plan has no phases and no timer; it changes when fleet membership changes and at no other
-  time.
-- **The planner deals only channels a node's own radio can tune.** `plan::plan_for` takes the
-  fleet's `Radio`s, read out of the heartbeats' capabilities, and an ESP32-C6 is dealt no 5 GHz
-  index: a share it cannot tune is a share nobody scans. A mixed fleet is dealt the constrained
-  half first — in pool order the dual-band nodes take their 2.4 GHz share and then all of 5 GHz on
-  top, which is the block split this planner was written to avoid — and shares then differ by more
-  than one, which is unavoidable and is why `plan_for` minimises the largest rather than
-  equalising. A uniform fleet has no constrained channels, so its plan is byte-identical to what
-  `plan` has always produced, and `plan` is now that special case. Channels no radio present can
-  reach come back in `Plan::unreachable` and are said in the footer rather than dealt. An
-  assignment made by hand goes through `Radio::tunable` for the same reason and is the quieter
-  case: nothing re-partitions afterwards to correct it and `Plan::unreachable` never sees it.
-- **At most one node scans Bluetooth, and by default none does.** `ADMIN_FLAG_BLE` is a per-node
-  decision the operator makes (`Command::AssignBle`, `b` in the view), not a property of the
-  firmware that was flashed: the `ble` cargo feature decides whether the code exists and the flag
-  decides whether it runs, off at every boot. The cost is measured — every assignment lost on a
-  stock node, ~10% of the sweep period on ours — and is worth paying on one node, not on all. A
-  node whose capabilities say the feature is absent is refused the scan in both the view and the
-  engine, and one already holding it loses it on the tick that learns so: it would adopt the flag,
-  acknowledge, and scan nothing, so `ble_node` would name a holder that is not one. Losing it
-  means an assignment re-issued without the flag, not just `ble_node` cleared — the flag lives in
-  the frame, and the fleet table reads it off the frame — so `reissue` is the one funnel that
-  refreshes it and refuses to set it for a node whose capabilities say no.
 - **An assignment is believed only on a MAC-layer ack** (`SendStatus::AckOk` from the transmit
-  callback), never on a successful enqueue. The vendor core conflates the two, which is the bug
-  this project exists downstream of.
-- **A heartbeat replayed out of the bridge's backlog is not an admin window.** The bridge buffers
-  what it hears while no host is attached, so a fresh connection is handed a ring's worth of the
-  recent past as fast as USB will carry it — measured at 8.5 minutes of bridge time inside 17 ms
-  of host time, the oldest frame 532 seconds stale. Those heartbeats are still heartbeats and
-  still admit their nodes, but the 300 ms windows they name shut long ago. `note_arrival` compares
-  the bridge's own stamp against the host's clock — the two tick at the same rate, so a backlog
-  is visible as the bridge running ahead — and `air_is_live` gates `send_admin` on the result; a
-  connection assumes it is behind until a frame arrives that it had to wait for, because the first
-  frame of a backlog is the one no comparison can catch. Delete either half and the symptom is not
-  an error but a plausible-looking lie: nine assignments in a quarter of a second, eight
-  unacknowledged, and an `assignment.latency_us` of eighty seconds. That column is `None` rather
-  than a fabricated number when the figure exceeds the window it claims to measure.
+  callback), never on a successful enqueue.
 - **A node adopts an assignment only when the epoch/version differs** from the one it holds, so
   re-sending an identical one is acknowledged and silently discarded. `node_index`/`node_count`
   travel in every assignment and drive each node's transmit stagger, so every fleet change re-cuts
   the whole plan, not just the affected node.
-- **Only heartbeating nodes are assignable or in the plan** — a node that is merely being heard
-  never opens an admin window. `stale`, `no heartbeat` and silence are deliberately distinct
-  states; `SCAN_CHANNELS` order is load-bearing and must not be sorted or deduplicated.
-- **Channel 14 is in no pool and is never dealt.** `esp-radio` hardcodes the country blob's
-  `nchan: 13` and exposes no way to reach it, so a node handed that channel refuses the hop —
-  once per sweep, for as long as it holds the assignment, and it says so only on a serial console
-  nobody is watching (`docs/phase-1-findings.md`). It stays in the node's scan table anyway,
-  because that table's indices *are* the wire format.
-- **The air is plaintext ESP-NOW in both directions.** There is no pairing handshake and no key:
-  encryption was a vendor node's web-UI setting, and a wartui node has no web UI to set it in.
+- **`IndexRun` describes a *pool*, never the shape of an assignment.** An assignment is a
+  `ChannelSet` naming any subset of `SCAN_CHANNELS`, so the planner flattens the pool and deals
+  round-robin rather than steering around run boundaries. The plan has no phases and no timer; it
+  changes when fleet membership changes and at no other time.
+- **`unsafe_code` is forbidden and `clippy::all` is denied** workspace-wide, in both firmwares too.
+
+### Load-bearing, and reasoned where they live
+
+Each of these is enforced in one place and explained there at length. The claim is here so an
+edit stops; follow the pointer before changing the rule.
+
+- **Somebody else's fleet is recognised in order to be reported, never to be accommodated.**
+  `air::foreign::classify` matches `ENOW` and nothing more — no decode, no fields. `foreign_admin`
+  and `foreign_fleet` are said in the footer because another fleet on the control channel is an
+  operational fact. Nothing keeps a mixed fleet working; the vendor node is what is being
+  replaced. → `crates/wartui-proto/src/air.rs` `//!`
+- **The planner deals only channels a node's own radio can tune.** A C6 is dealt no 5 GHz index;
+  constrained channels go first; `plan_for` minimises the largest share rather than equalising, so
+  a mixed fleet's shares differ by more than one. Channels no radio can reach come back in
+  `Plan::unreachable` and are said in the footer. A hand-made assignment goes through
+  `Radio::tunable` and nothing re-partitions afterwards to correct it.
+  → `crates/wartui-proto/src/plan.rs`, `plan_for`
+- **Channel 14 is in no pool and is never dealt** — `esp-radio` hardcodes `nchan: 13`, so a node
+  handed it refuses the hop, once per sweep, silently. It stays in the scan table because that
+  table's indices are the wire format. → `crates/wartui-proto/src/plan.rs`, `UNSUPPORTED_INDEX`
+- **At most one node scans Bluetooth, and by default none does.** `ADMIN_FLAG_BLE` is an
+  operator's decision (`Command::AssignBle`, `b` in the view), not a property of the flashed
+  firmware: the `ble` cargo feature decides whether the code exists, the flag whether it runs, off
+  at every boot. A node whose capabilities say the feature is absent is refused it in both view
+  and engine, and one already holding it loses it on the tick that learns so. Losing it means an
+  assignment **re-issued** without the flag — the fleet table reads the flag off the frame — so
+  `reissue` is the one funnel.
+  → `crates/wartui-proto/src/air.rs` `ADMIN_FLAG_BLE`, `crates/wartui-core/src/engine.rs` `//!`,
+  `docs/phase-2-findings.md`
+- **A heartbeat replayed out of the bridge's backlog is not an admin window.** Backlogged
+  heartbeats still admit their nodes, but the 300 ms windows they name shut long ago.
+  `note_arrival` compares the bridge's stamp against the host's clock and `air_is_live` gates
+  `send_admin`; a connection assumes it is behind until a frame arrives that it had to wait for.
+  Delete either half and the symptom is a plausible-looking lie rather than an error.
+  `assignment.latency_us` is `None` rather than a fabricated number when the figure exceeds the
+  window it claims to measure.
+  → `crates/wartui-core/src/engine.rs`, `note_arrival` / `BEHIND_THE_AIR`
 - **The bridge's USB transmit endpoint can die on its own, and the bridge reboots when it does.**
-  `SERIAL_IN_EP_DATA_FREE` goes to zero when `WR_DONE` is set and comes back only when the USB
-  host reads the FIFO; if that read never lands, nothing on the device can clear it. The receive
-  endpoint is unaffected, so the bridge goes on decoding and executing commands it cannot answer —
-  which from the host is indistinguishable from a dead board, and is the failure that used to send
-  operators to `espflash`. `wartui_proto::stall::StallWatch` times how long the endpoint has refused
-  bytes *while somebody was waiting for them*, from when that contradiction started and never from
-  the last byte written. It lives in `wartui-proto` and not in the firmware because it shipped two
-  defects that only a bench found; every clause below is now a test, and a mutation of each one
-  fails a named test rather than a board. Both halves are load-bearing. Time it from the last byte
-  and a bridge left powered beside a fleet, with nobody reading for hours, reboots the moment
-  `wartui` says hello; drop the host-present half and a bridge on a bench with nothing attached
-  reboots for ever. For the same reason `last_host` starts at `None` and never at the boot instant:
-  seeded with a time, it reads as a host present for the first `HOST_PRESENT_WINDOW_MS` of *every*
-  life, and a bridge powered beside a talking fleet resets, boots into the same window, and does it
-  again for ever. And a host that has *quit* is not a host that is waiting: it satisfies "spoke
-  inside the window" for a further `HOST_PRESENT_WINDOW_MS`, while its quitting is exactly what
-  stopped the endpoint draining, so the detector also needs a frame decoded *since the stall began*
-  — strictly after it, since a host whose last frame lands in the same millisecond has not asked
-  since. Without that clause every session ends in a reboot and the next `run` opens with a fault
-  box blaming a wedge that was an operator closing a window. `HOST_PRESENT_WINDOW_MS` must also stay
-  longer than the host's `status_interval`, or a live capture reads as an absent host between polls
-  and a real wedge is never noticed. Measured in
-  `docs/phase-3-findings.md`, along with why there is no watchdog behind the *hang* case: one was
-  built, and esp-hal 1.1.2's RWDT never resets these parts — it counts, unfed, but its reset does
-  not reach the CPU and `WDT_PROCPU_RESET_EN` will not be written.
-- **Every reset goes through `reboot()`, and on a C5 that funnel is the reset.** Both firmwares
-  reach `esp_hal::system::software_reset()` through one function that first clears
-  `PCR.RESET_EVENT_BYPASS.reset_event_bypass` on the C5. Call `software_reset()` directly there
-  and the board does not reboot, it stops: the ROM leaves the system bus frozen across a core
-  reset, the next boot hangs before it can read flash, and neither `wartui reset` nor `espflash
-  reset` nor a full reflash brings it back — only pulling the cable does, all four measured. The
-  worst caller is the stall detector, whose whole job is unattended recovery. It is a `#[cfg]`
-  for the C5 alone, it stays safe code, and it comes out when `esp-radio` lets the firmwares onto
-  `esp-hal` 1.2, which has it in `pre_init` (esp-rs/esp-hal#5703; our issue #16).
-- **A bridge reboot is invisible unless the host compares uptimes.** A software reset — the stall
-  detector, the panic handler, `wartui reset` — does **not** re-enumerate the USB device: the
-  host's file descriptor reads straight through it, measured. So the second `Ready` arrives on the
-  connection the first one did, and it looks exactly like the other reason two announcements land
-  together, which is a duplicate answer to an `Identify` that was already in flight. Nothing else
-  in the frame separates them — two consecutive `wartui reset`s produce byte-identical `Ready`s —
-  so `Ready` carries `uptime_ms` and a clock that went backwards is what says "new life". Suppress
-  that and the reboot is silent in the worst way: the engine keeps the dead life's `BridgeInfo`,
-  goes on believing in a peer table the reboot emptied, and the fault box never says a word.
-- **Neither firmware may block on the USB endpoint.** `UsbSerialJtag` stops accepting bytes when
-  its FIFO fills and nothing drains it unless a host is reading, so a blocking write stalls the
-  radio in the field and nowhere else. The bridge sends everything through `wartui_proto::outbox`'s
-  rings, which evict oldest-first and write a lone `0x00` behind a truncated frame so COBS can
-  resynchronise. Never link `esp-println` with `jtag-serial` in the *bridge* — its link protocol
-  shares that endpoint and diagnostics go out as `Log` frames. A node has the endpoint to itself
-  and does use `esp-println`, whose serial-JTAG writer waits a bounded number of iterations and
-  then remembers that nobody is reading.
+  `StallWatch` times the *contradiction* — a host demonstrably asking, the endpoint demonstrably
+  refusing — and **every clause is load-bearing**: the host-present half, `last_host` starting at
+  `None`, the frame decoded strictly *after* the stall began, and `HOST_PRESENT_WINDOW_MS` staying
+  longer than the host's `status_interval`. Delete any one and a bridge reboots for ever, or never.
+  There is no watchdog behind the hang case; esp-hal 1.1.2's RWDT does not reset these parts.
+  → `crates/wartui-proto/src/stall.rs` `//!`, `docs/phase-3-findings.md`
+- **Every reset goes through `reboot()`, and on a C5 that funnel *is* the reset.** Call
+  `software_reset()` directly there and the board does not reboot, it stops — unrecoverable until
+  the cable is pulled, measured four ways. Each firmware has its own copy of the funnel, so the
+  esp-hal 1.2 cleanup (issue #16) has to remove both.
+  → `firmware/bridge/src/main.rs` and `firmware/node/src/main.rs`, `fn reboot`
+- **A bridge reboot is invisible unless the host compares uptimes.** A software reset does not
+  re-enumerate the USB device, so the second `Ready` arrives on the same connection and looks
+  exactly like a duplicate answer to an in-flight `Identify`. `uptime_ms` going backwards is the
+  only thing that separates them. → `crates/wartui-bridge/src/serial.rs`, `is_a_new_life`
+- **Neither firmware may block on the USB endpoint.** The bridge sends everything through
+  `wartui_proto::outbox`'s rings, which evict oldest-first and write a lone `0x00` behind a
+  truncated frame so COBS can resynchronise. A node has the endpoint to itself and uses
+  `esp-println`, whose writer gives the FIFO a bounded number of attempts and then remembers that
+  nobody is reading — losing a line is correct, losing the sweep is not.
+  → `crates/wartui-proto/src/outbox.rs` `//!`, `firmware/node/src/main.rs`
+- **Never link `esp-println` with `jtag-serial` in the *bridge*** — its link protocol shares that
+  endpoint, and diagnostics go out as `Log` frames instead. → `firmware/bridge/README.md`
 - **Both firmwares pass `US` for the regulatory domain, and that is not a preference.**
-  `esp-radio` defaults `country_info` to **China** and applies it under
-  `WIFI_COUNTRY_POLICY_MANUAL`, so nothing on the air overrides it. China's 5 GHz allocation
-  excludes 5470–5725 and the driver refuses those channels outright, so a C5 left on the default
-  silently loses 100–144 on every sweep and the host cannot tell that from a node whose radio did
-  not tune.
-- **`esp-radio 1.0.0-beta.0` requires `esp-hal ~1.1.0`, and that one requirement pins the whole
-  family.** `esp-hal 1.2.0`, `esp-rtos 0.4`, `esp-alloc 0.11` and `esp-sync 0.3` are published and
-  none will resolve; `cargo update` lists them and moves nothing, and will until `esp-radio`
-  publishes again. Do not try to force it — `SoftwareInterruptControl` is gone in 1.2.1, so
-  `esp-rtos 0.3.0` and `esp_rtos::start` both stop compiling against a version faked into range;
-  issue #16 has the real upgrade. `esp-println` is the one crate outside the wall, and stays there
-  only while its `critical-section` feature is off: turn it on and a second `esp-sync` enters the
-  node's tree (`cargo tree -e normal --features esp32c6 | grep esp-sync` must show 0.2.1 alone).
-- **Setting a node's channel is not `set_channel` alone.** On an unassociated station interface it
-  does not stick unless promiscuous mode is on across the change, which is the whole of the
-  vendor's `setFixedChannel` (`src/WiFiOps.cpp:600-618`) and of `radio::park`. A node whose channel
-  silently did not change reports the right networks against the wrong frequency and hears no
-  assignment, which reads as a dead node rather than a bug.
+  `esp-radio` defaults to China under `WIFI_COUNTRY_POLICY_MANUAL`, which silently costs a C5
+  channels 100–144 on every sweep, and two halves of one fleet disagreeing about what is legal is
+  a trap even where the bridge can describe the refusal.
+  → `firmware/node/src/radio.rs`, `firmware/bridge/src/main.rs`, `firmware/node/README.md`
+- **`esp-radio 1.0.0-beta.0` requires `esp-hal ~1.1.0`, and that pins the whole family.** Do not
+  try to force it; `cargo update` lists newer versions and moves nothing. `esp-println` is the one
+  crate outside the wall, and only while its `critical-section` feature is off — `cargo tree -e
+  normal --features esp32c6 | grep esp-sync` must show 0.2.1 alone. Issue #16 is the real upgrade.
+  → `firmware/bridge/README.md`
+- **The air is plaintext ESP-NOW in both directions** — no pairing handshake and no key.
+  → `firmware/bridge/src/main.rs`, peer registration
+- **Setting a node's channel is not `set_channel` alone** — on an unassociated station interface
+  it does not stick unless promiscuous mode is on across the change. A node whose channel silently
+  did not change reports the right networks against the wrong frequency and hears no assignment,
+  which reads as a dead node rather than a bug. → `firmware/node/src/radio.rs` `//!`
 - **A node's promiscuous callback runs in the Wi-Fi task, on a buffer that dies when it returns.**
   It cannot capture state and must not block: reject, parse into a fixed-size `Sighting`, leave it
-  in a `static` ring, return. Anything that could grow — allocation, a lock held across work, a
-  transmit — belongs in the main loop.
-- `unsafe_code` is **forbidden** and `clippy::all` is **denied** workspace-wide.
+  in a `static` ring, return. Anything that could grow belongs in the main loop.
+  → `firmware/node/src/sniff.rs` `//!`
 
 ## Conventions
 
