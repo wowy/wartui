@@ -723,19 +723,28 @@ impl FleetEngine {
         // for the same reason and on the same tick: it has no scan code in it,
         // so it would adopt the flag, acknowledge, and scan nothing.
         //
-        // A node that is not in the table at all is neither of those. Nothing
-        // is ever removed from `self.nodes`, so absence means this host has
-        // never heard the address rather than that it has left — which is the
-        // case `on_assign_ble` deliberately allows, naming a node before it
-        // appears. Treating absence as gone took the scan back on the first
-        // tick after the command and before the node's first heartbeat, so
-        // whether the assignment survived was a race with the tick interval:
-        // `capture.rs`'s moving-GPS test asks for the scan the moment the
-        // capture starts and lost it about one run in five, leaving a fleet
+        // A node that has never heartbeated is neither of those, and this is the
+        // clause's whole subtlety: both real cases are about a node that has
+        // *spoken*. Nothing is ever removed from `self.nodes`, so absence means
+        // this host has never heard the address; and a node put in the table by a
+        // sighting alone sits there with no heartbeat behind it, which is the
+        // ordinary few seconds of a node reporting what it found on a channel
+        // before it gets back to the control channel. Across a restart it is
+        // longer: a node still sweeping an assignment the previous host gave it
+        // can be heard for a whole sweep before its next heartbeat.
+        //
+        // Reading either as "gone" takes the scan back on the first tick after
+        // the command, before the node has had any chance to answer, so whether
+        // an assignment made up front survived was a race with the tick
+        // interval. `capture.rs`'s moving-GPS test asks for the scan the moment
+        // the capture starts and lost it about one run in five, leaving a fleet
         // that reported its access points once and then went silent.
+        //
+        // Only `!is_alive` needs the guard. Capabilities arrive in heartbeats, so
+        // a node with `Some` capabilities has one by construction.
         let ble_gone = self.ble_node.is_some_and(|mac| {
             self.nodes.get(&mac).is_some_and(|node| {
-                !self.is_alive(node, now)
+                (node.last_heartbeat.is_some() && !self.is_alive(node, now))
                     || node.capabilities.is_some_and(|capabilities| !capabilities.ble)
             })
         });

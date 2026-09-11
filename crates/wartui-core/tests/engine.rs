@@ -780,6 +780,20 @@ fn the_bluetooth_scan_waits_for_a_node_that_has_not_arrived_yet_however_long_tha
         "ten ticks with no word from the node change nothing"
     );
 
+    // A sighting is not arrival either. It puts the node in the table with no
+    // heartbeat behind it, which is the ordinary few seconds of a node that
+    // reports what it found on a channel before it gets back to the control
+    // channel — and, across a `wartui` restart, of a node still sweeping an
+    // assignment the previous host gave it, which can be a whole sweep of
+    // sightings before its next heartbeat.
+    engine.handle(observation(NODE, "aa:bb:cc:dd:ee:ff", -50), clock.at(12));
+    engine.handle(Event::Tick, clock.at(12));
+    assert_eq!(
+        engine.snapshot(clock.at(12), StoreStats::default()).ble_node,
+        Some(NODE),
+        "a node that has only been overheard has not gone quiet — it has not spoken yet"
+    );
+
     // And when it does turn up, the flag is on the frame it is sent.
     engine.handle(heartbeat(NODE, 1), clock.at(13));
     engine.handle(assign(NODE, 0, 10), clock.at(14));
