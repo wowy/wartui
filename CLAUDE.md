@@ -302,6 +302,20 @@ Positions resolve fresh per record through `PositionChain`: GPS (`--gps`, NMEA o
   shares that endpoint and diagnostics go out as `Log` frames. A node has the endpoint to itself
   and does use `esp-println`, whose serial-JTAG writer waits a bounded number of iterations and
   then remembers that nobody is reading.
+- **Both firmwares pass `US` for the regulatory domain, and that is not a preference.**
+  `esp-radio` defaults `country_info` to **China** and applies it under
+  `WIFI_COUNTRY_POLICY_MANUAL`, so nothing on the air overrides it. China's 5 GHz allocation
+  excludes 5470–5725 and the driver refuses those channels outright, so a C5 left on the default
+  silently loses 100–144 on every sweep and the host cannot tell that from a node whose radio did
+  not tune.
+- **`esp-radio 1.0.0-beta.0` requires `esp-hal ~1.1.0`, and that one requirement pins the whole
+  family.** `esp-hal 1.2.0`, `esp-rtos 0.4`, `esp-alloc 0.11` and `esp-sync 0.3` are published and
+  none will resolve; `cargo update` lists them and moves nothing, and will until `esp-radio`
+  publishes again. Do not try to force it — `SoftwareInterruptControl` is gone in 1.2.1, so
+  `esp-rtos 0.3.0` and `esp_rtos::start` both stop compiling against a version faked into range;
+  issue #16 has the real upgrade. `esp-println` is the one crate outside the wall, and stays there
+  only while its `critical-section` feature is off: turn it on and a second `esp-sync` enters the
+  node's tree (`cargo tree -e normal --features esp32c6 | grep esp-sync` must show 0.2.1 alone).
 - **Setting a node's channel is not `set_channel` alone.** On an unassociated station interface it
   does not stick unless promiscuous mode is on across the change, which is the whole of the
   vendor's `setFixedChannel` (`src/WiFiOps.cpp:600-618`) and of `radio::park`. A node whose channel
