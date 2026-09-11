@@ -4,19 +4,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A terminal fleet controller for ESP32-C5 and ESP32-C6 wardriving nodes. wartui does not
-assist a vendor CORE node — it **replaces** one: it owns the node table, issues channel
-assignments and collects every observation, speaking ESP-NOW through a USB-attached ESP32
-dongle. That dongle may be a C5, a C6 or an ESP32-S3; the nodes are C5 and C6 only,
-because a node is the thing that has to reach 5 GHz and a bridge never leaves the control
-channel. Both firmwares are ours (`firmware/bridge`, `firmware/node`), and every frame on
-the air is wartui's own in both directions.
+A terminal fleet controller for ESP32-C5 and ESP32-C6 wardriving nodes. wartui owns the
+node table, issues channel assignments and collects every observation, speaking ESP-NOW
+through a USB-attached ESP32 dongle. That dongle may be a C5, a C6 or an ESP32-S3; the
+nodes are C5 and C6 only, because a node is the thing that has to reach 5 GHz and a bridge
+never leaves the control channel. Both firmwares are ours (`firmware/bridge`, `firmware/node`),
+and every frame on the air is wartui's own in both directions.
 
 The `src/*.cpp:NNN` citations throughout this tree point at
 [wowy/ESP32DualBandWardriver](https://github.com/wowy/ESP32DualBandWardriver) on
 `feat/node-interference-mitigation`, the firmware this project grew up against. It is the
 record of measured *behaviour* and nothing else — not a specification anything here
-matches — and there is no checkout of it on this machine.
+matches — and a checkout is not needed.
 
 Where the prose lives:
 
@@ -161,8 +160,7 @@ is here rather than only in a `//!`.
   it, capture continues and the planner refuses to re-cut rather than partitioning among nodes the
   bridge cannot address.
 - **An assignment is believed only on a MAC-layer ack** (`SendStatus::AckOk` from the transmit
-  callback), never on a successful enqueue. The vendor core conflates the two, which is the bug
-  this project exists downstream of.
+  callback), never on a successful enqueue.
 - **A node adopts an assignment only when the epoch/version differs** from the one it holds, so
   re-sending an identical one is acknowledged and silently discarded. `node_index`/`node_count`
   travel in every assignment and drive each node's transmit stagger, so every fleet change re-cuts
@@ -251,7 +249,8 @@ edit stops; follow the pointer before changing the rule.
 
 - Module-level `//!` docs explain *why* the design is the way it is, not what the code does; the
   reasoning in them is often the only record of a hardware constraint. Match that register, and
-  update the reasoning when the decision changes.
+  update the reasoning when the decision changes. Keep these docs small and focused; no extended
+  prose.
 - Rustfmt is configured with `max_width = 100` and `use_small_heuristics = "Max"`.
 - Tests are mostly integration tests under `crates/*/tests/` with full-sentence names
   (`observations_keep_a_node_visible_but_only_heartbeats_keep_it_assignable`); `#[cfg(test)]`
