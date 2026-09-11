@@ -13,11 +13,24 @@
 //! must be zero-padded (`2026-05-01 13:34:37`, where the node firmware emits
 //! `2026-5-1 13:34:37`), and the SSID must be RFC-4180 quoted, since an SSID
 //! may contain a comma or a quote and is not required to be text at all.
+//!
+//! A third is here because the store is not rewritten. A cloaked access point
+//! may beacon its SSID element at the name's real length with every byte zero,
+//! and until `beacon::visible_ssid` existed those NULs were recorded verbatim
+//! and written straight into this column — valid UTF-8, so a lossy decode kept
+//! them, and free of the four characters `quote` reacts to, so they went out
+//! bare. [`record::ssid_text`](crate::record::ssid_text) is what lets a capture
+//! taken before that fix export correctly, which is the whole promise of the
+//! export being a view over the store rather than a thing produced once at
+//! capture time. It is shared with the view for the same reason WiGLE wants it
+//! here: a raw NUL is no more use to a reader than to a parser.
 
 use std::io::Write;
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use rusqlite::{Connection, Row};
+
+use crate::record::ssid_text;
 
 /// The pre-header WiGLE reads for provenance, then the column header.
 const COLUMNS: &str = "MAC,SSID,AuthMode,FirstSeen,Channel,RSSI,\
@@ -148,7 +161,7 @@ fn write_row<W: Write>(row: &Row<'_>, out: &mut W) -> Result<(), ExportError> {
         out,
         "{},{},{},{},{channel},{rssi},{lat},{lon},{},{},{}",
         mac(&bssid),
-        quote(&String::from_utf8_lossy(ssid.as_deref().unwrap_or_default())),
+        quote(&ssid_text(ssid.as_deref().unwrap_or_default())),
         quote(&security),
         timestamp(first_seen),
         alt.unwrap_or(0.0),

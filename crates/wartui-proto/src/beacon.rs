@@ -20,6 +20,18 @@
 //! Parsing lives here, on the host side of the path dependency, because that is
 //! where `cargo test` can reach it. A misread information element that only the
 //! firmware knew about would cost a reflash to find and another to fix.
+//!
+//! One thing the scan API was also buying is the reason [`visible_ssid`] exists.
+//! An access point hides its name in either of two ways, and only one of them
+//! looks hidden: it can beacon an SSID element of length zero, or it can beacon
+//! the element at the name's real length with every byte set to zero. Copied
+//! verbatim, the second form is a perfectly well-formed SSID made of NULs, and
+//! it survives everything downstream — `air` is byte-transparent by design, the
+//! store keeps what arrived, and NUL is valid UTF-8, so even a lossy decode
+//! passes it through. It reached a WiGLE export as a column of NULs, which is a
+//! network named after its own padding. Stripping it here rather than at each
+//! place that shows an SSID is what makes `ssid_len == 0` mean hidden, which is
+//! what every reader already assumed it meant.
 
 use crate::air::{RecordKind, SSID_MAX, Security, SightingMsg};
 
@@ -54,7 +66,8 @@ pub struct Sighting {
 
 impl Sighting {
     /// The SSID bytes, which are whatever the access point beaconed and so may
-    /// not be UTF-8. Empty for a hidden network.
+    /// not be UTF-8. Empty for a hidden network, in either of the two ways an
+    /// access point has of being one — see [`visible_ssid`].
     #[must_use]
     pub fn ssid(&self) -> &[u8] {
         &self.ssid[..usize::from(self.ssid_len)]
@@ -71,6 +84,22 @@ impl Sighting {
             security: self.security,
             ssid: self.ssid(),
         }
+    }
+}
+
+/// The name an access point actually beaconed, with a cloaked one's zero
+/// padding stripped, and empty if there was nothing but padding.
+///
+/// Trailing zeros are padding and nothing else: a name ending in a NUL is not a
+/// thing an access point means to advertise, and the form that carries the real
+/// length with every byte zeroed is the common way of hiding. An *interior* NUL
+/// is left alone — it is not padding, and there is nothing here to say what it
+/// was meant to be.
+#[must_use]
+pub fn visible_ssid(bytes: &[u8]) -> &[u8] {
+    match bytes.iter().rposition(|&b| b != 0) {
+        Some(last) => &bytes[..=last],
+        None => &[],
     }
 }
 
@@ -166,8 +195,15 @@ impl Elements {
             match id {
                 // SSID. Longer than 32 bytes is not a legal SSID; keep what
                 // fits rather than dropping the access point over it.
+                //
+                // Clamp first and trim second, which is not the same as the
+                // other way round. An element claiming forty bytes whose only
+                // non-zero byte is past the thirty-second trims to thirty-nine
+                // and then clamps to thirty-two bytes of nothing but padding —
+                // a network named after it, which is what is being fixed here.
+                // Clamped first, the same element is a hidden network.
                 0 => {
-                    let take = len.min(SSID_MAX);
+                    let take = visible_ssid(&data[..len.min(SSID_MAX)]).len();
                     self.ssid[..take].copy_from_slice(&data[..take]);
                     // Cast is safe: `take` is at most SSID_MAX, which is 32.
                     #[allow(clippy::cast_possible_truncation)]
