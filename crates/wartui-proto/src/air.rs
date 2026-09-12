@@ -8,7 +8,7 @@
 //! Every frame in both directions is wartui's own, and is deliberately
 //! unrecognisable to the vendor firmware this project grew up against. ESP-NOW
 //! has no addressing above the MAC layer and a node broadcasts to
-//! `FF:FF:FF:FF:FF:FF`, so anything speaking the vendor's format  on the
+//! `FF:FF:FF:FF:FF:FF`, so anything speaking the vendor's format on the
 //! control channel is in everybody's conversation at once.
 //!
 //! A magic of our own solves it. It is checked before anything else on both
@@ -18,7 +18,7 @@
 //!
 //! The header carries a version, which the vendor's did not. It is the lever
 //! for the next incompatible change: a node speaking a version this host does
-//! not know is counted and named rather than half-decoded
+//! not know is counted and named rather than half-decoded.
 
 use core::fmt;
 
