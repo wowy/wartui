@@ -35,8 +35,7 @@ pub enum Report {
     /// The receiver reported a position.
     Fix(GpsFix),
     /// A positional sentence saying the receiver has no fix yet. Distinct from
-    /// [`Report::Other`] because it is the difference between "the GPS is
-    /// searching" and "the GPS is talking about satellites".
+    /// [`Report::Other`]: "searching" rather than "talking about satellites".
     NoFix,
     /// A valid sentence this parser has no use for.
     Other,
@@ -57,18 +56,16 @@ pub struct GpsFix {
     pub satellites: Option<u8>,
     /// UTC of the fix in Unix milliseconds, when the date is known.
     ///
-    /// `GGA` carries a time but no date, so this stays `None` until an `RMC`
-    /// has been seen. A fix is perfectly usable without it — this is what makes
-    /// the receiver's own clock visible rather than silently replaced by the
-    /// host's.
+    /// `GGA` carries a time but no date, so this stays `None` until an `RMC` has been
+    /// seen. A fix is usable without it, and this is what keeps the receiver's own
+    /// clock visible rather than silently replaced by the host's.
     pub at_ms: Option<i64>,
 }
 
-/// Horizontal dilution of precision is a multiplier, not a distance: it says
-/// how much the satellite geometry amplifies ranging error. Multiplying by a
-/// nominal 5 m user-equivalent range error is the usual way to get metres out
-/// of it, and it is an estimate — WiGLE's `AccuracyMeters` column wants a
-/// number, and an honest estimate beats the 0 that means "unknown".
+/// Horizontal dilution of precision is a multiplier rather than a distance: how much
+/// the satellite geometry amplifies ranging error. Multiplying by a nominal 5 m
+/// user-equivalent range error is the usual way to get metres out of it, and WiGLE's
+/// `AccuracyMeters` column wants a number — an honest estimate beats a 0.
 #[must_use]
 pub fn accuracy_from_hdop(hdop: f64) -> f64 {
     hdop * 5.0
@@ -105,9 +102,8 @@ impl Nmea {
         let body = checked_body(line)?;
         let mut fields = body.split(',');
         let id = fields.next().ok_or(NmeaError::NotASentence)?;
-        // Talker IDs vary by constellation — GP, GN, GL, BD — and a receiver
-        // changes its own as satellites come and go, so only the last three
-        // characters decide what a sentence is.
+        // Talker IDs vary by constellation and a receiver changes its own as
+        // satellites come and go, so only the last three characters decide.
         let kind = id.get(id.len().saturating_sub(3)..).ok_or(NmeaError::NotASentence)?;
         let fields: Vec<&str> = fields.collect();
         match kind {
@@ -120,9 +116,8 @@ impl Nmea {
     /// `$--GGA,time,lat,N,lon,E,quality,sats,hdop,alt,M,…`
     fn gga(&mut self, f: &[&str]) -> Result<Report, NmeaError> {
         let time = field(f, 0);
-        // Quality 0 is "fix not available"; 1 is GPS, 2 differential, and the
-        // higher values are RTK and dead reckoning. Anything non-zero is a
-        // position the receiver stands behind.
+        // Quality 0 is "fix not available"; anything non-zero is a position the
+        // receiver stands behind.
         if integer(field(f, 5))?.unwrap_or(0) == 0 {
             return Ok(Report::NoFix);
         }
@@ -142,9 +137,8 @@ impl Nmea {
     /// `$--RMC,time,status,lat,N,lon,E,speed,track,date,…`
     fn rmc(&mut self, f: &[&str]) -> Result<Report, NmeaError> {
         let time = field(f, 0);
-        // The date is worth keeping even from a sentence that carries no fix:
-        // a receiver with the time but not yet a position is the normal state
-        // for the first half-minute after a cold start.
+        // Worth keeping even from a sentence with no fix: time but no position is
+        // the normal state for the first half-minute after a cold start.
         if let Some(date) = date(field(f, 8))? {
             self.date = Some(date);
         }
@@ -177,10 +171,9 @@ impl Nmea {
             if milli >= 60_000 { (59, milli - 59_000) } else { (milli / 1000, milli % 1000) };
         let at_ms =
             date.and_hms_milli_opt(hour, minute, secs, millis)?.and_utc().timestamp_millis();
-        // A `GGA` borrows the date from the `RMC` before it, so the sentences
-        // between midnight and that cycle's `RMC` borrow yesterday's and land a
-        // day in the past. Time only ever runs backwards by hours for that one
-        // reason; a receiver does not otherwise revisit this morning.
+        // A `GGA` borrows the date from the `RMC` before it, so sentences between
+        // midnight and that cycle's `RMC` land a day in the past. Time only runs
+        // backwards by hours for that reason.
         let at_ms = match self.last_stamp_ms {
             Some(last) if at_ms < last - HALF_DAY_MS => at_ms + DAY_MS,
             _ => at_ms,
