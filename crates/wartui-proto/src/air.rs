@@ -536,8 +536,8 @@ impl<'a> SightingMsg<'a> {
 /// both bands.
 ///
 /// How this frame is *delivered* is shaped by measured vendor behaviour rather
-/// than by the layout. An unacknowledged unicast is retried by the radio, all of
-/// it inside the one window the node was listening in, and an 802.11
+/// than by the layout. An unacknowledged unicast is retried by the radio, all 31
+/// retries falling inside the one window that failed, and an 802.11
 /// acknowledgement comes from the receiver's MAC hardware — so its absence means
 /// the radio was not on the channel at all, which on a stock node was NimBLE
 /// holding the shared antenna (`docs/phase-0-findings.md`).

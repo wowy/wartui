@@ -1197,7 +1197,7 @@ impl FleetEngine {
             flags: AdminMsg::flags_for(assignment.ble),
             channels: assignment.channels,
         };
-        // Fourteen bytes into a 250-byte buffer, so this cannot fail.
+        // Fifteen bytes into a 250-byte buffer, so this cannot fail.
         let payload = EspNowPayload::from_slice(&msg.encode()).unwrap_or_default();
 
         self.pending.insert(

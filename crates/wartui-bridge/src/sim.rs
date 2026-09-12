@@ -7,8 +7,10 @@
 //! fleet's observation stream goes quiet after the first pass, and a simulator that
 //! streamed endlessly would teach the wrong lesson.
 //!
-//! [`SimConfig::ble_coexistence_failure`] and [`SimConfig::c6_nodes`] model
-//! *failures* rather than correct behaviour, and both are off unless asked for.
+//! [`SimConfig::ble_coexistence_failure`] models a *failure* — what a stock node did
+//! on the bench, and the only way to exercise the host's `no admin ack` path without
+//! a second radio — and [`SimConfig::c6_nodes`] a mixed fleet. Both are off unless
+//! asked for.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
