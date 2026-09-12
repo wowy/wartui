@@ -38,6 +38,8 @@ use esp_hal::timer::timg::TimerGroup;
 use esp_radio::esp_now::{EspNowReceiver, EspNowSender};
 use esp_radio::wifi::{ControllerConfig, WifiController};
 use esp_rtos::CurrentThreadHandle;
+use static_cell::ConstStaticCell;
+#[cfg(feature = "ble")]
 use static_cell::StaticCell;
 use wartui_proto::air::{
     AdminMsg, Capabilities, DecodeError, Frame, HeartbeatMsg, SIGHTING_MSG_MAX,
@@ -138,8 +140,9 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 
 /// Everything that changes while the node runs.
 ///
-/// Boxed into `.bss` through a [`StaticCell`] rather than built on the stack:
-/// the dedup ring alone is twelve hundred bytes.
+/// Built at compile time into a [`ConstStaticCell`] rather than on the stack:
+/// the dedup ring alone is two and a half kilobytes, and `StaticCell::init_with`
+/// would still construct it in a frame before moving it.
 struct Node {
     /// The epoch of the assignment held. Zero means none has ever arrived, which
     /// the core never puts on the wire.
@@ -162,6 +165,9 @@ struct Node {
 }
 
 impl Node {
+    // Only ever evaluated at compile time, into `NODE`, so the frame this lint
+    // measures is never on a stack.
+    #[allow(clippy::large_stack_frames)]
     const fn new() -> Self {
         Self {
             version: 0,
@@ -228,7 +234,7 @@ impl Node {
 const CAPABILITIES: Capabilities =
     Capabilities::here(cfg!(feature = "ble"), cfg!(feature = "esp32c5"));
 
-static NODE: StaticCell<Node> = StaticCell::new();
+static NODE: ConstStaticCell<Node> = ConstStaticCell::new(Node::new());
 
 #[cfg(feature = "ble")]
 static SCANNER: StaticCell<ble::Scanner<'static>> = StaticCell::new();
@@ -312,7 +318,7 @@ fn main() -> ! {
         }
     };
 
-    let node = NODE.init_with(Node::new);
+    let node = NODE.take();
     let mac = esp_radio::wifi::Interface::station().mac_address();
     note!(
         "wartui node {} v{}, control channel {}",
@@ -397,6 +403,13 @@ fn main() -> ! {
     }
 }
 
+/// Milliseconds since boot, as the dedup ring counts them. Truncation is the ring's
+/// own wrap.
+#[allow(clippy::cast_possible_truncation)]
+fn now_ms() -> u32 {
+    Instant::now().duration_since_epoch().as_millis() as u32
+}
+
 /// Broadcast one heartbeat, which is also the whole of this node's liveness.
 ///
 /// Once per completed sweep, not on a timer. The
@@ -416,16 +429,18 @@ fn heartbeat(sender: &mut EspNowSender<'_>, node: &mut Node) {
 /// Report everything heard on `channel` that has not been reported lately.
 fn report(sender: &mut EspNowSender<'_>, node: &mut Node, channel: u8) {
     let mut sent = 0u32;
+    let now = now_ms();
     while let Some(sighting) = sniff::take() {
-        if node.seen.contains(&sighting.bssid) {
+        let rssi = Some(sighting.rssi);
+        if !node.seen.is_due(&sighting.bssid, rssi, now) {
             continue;
         }
         let mut frame = [0u8; SIGHTING_MSG_MAX];
         let Some(len) = sighting.as_msg().encode_into(&mut frame) else { continue };
         // Recorded only once it is on the air: suppressing an access point the host
-        // never received would hide it for the next two hundred addresses.
+        // never received would hide it until the refresh.
         if radio::broadcast(sender, &frame[..len]) {
-            node.seen.insert(sighting.bssid);
+            node.seen.record(sighting.bssid, rssi, now);
             sent += 1;
         }
     }
@@ -450,16 +465,18 @@ fn report(sender: &mut EspNowSender<'_>, node: &mut Node, channel: u8) {
 fn report_ble(sender: &mut EspNowSender<'_>, node: &mut Node, scanner: &mut ble::Scanner<'_>) {
     let mut lines = 0u32;
     let mut heard = 0u32;
+    let now = now_ms();
     for report in scanner.sweep() {
         heard += 1;
-        if node.seen.contains(&report.address) {
+        let rssi = report.has_rssi().then_some(report.rssi);
+        if !node.seen.is_due(&report.address, rssi, now) {
             continue;
         }
         let mut frame = [0u8; SIGHTING_MSG_MAX];
         let Some(len) = report.as_msg().encode_into(&mut frame) else { continue };
         // After the broadcast, for the reason `report` gives.
         if radio::broadcast(sender, &frame[..len]) {
-            node.seen.insert(report.address);
+            node.seen.record(report.address, rssi, now);
             lines += 1;
         }
     }
