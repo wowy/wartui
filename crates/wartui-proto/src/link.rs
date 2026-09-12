@@ -20,45 +20,19 @@ use serde::{Serialize, de::DeserializeOwned};
 
 /// Bumped whenever the message enums change shape. Host and bridge must agree.
 ///
-/// v2 added [`HostToBridge::Identify`], because v1 announced the bridge only at
-/// boot and so a host that attached to an already-running dongle waited for a
-/// [`BridgeToHost::Ready`] that had been sent minutes earlier.
+/// - v2: [`HostToBridge::Identify`], so a host attaching to an already-running
+///   dongle need not wait for a [`BridgeToHost::Ready`] sent minutes earlier.
+/// - v3: [`ResetCause`], [`LoopPhase`], `heap_free` and `uptime_ms` on `Ready`, so
+///   a bridge that reboots says why and where it was.
+/// - v4: [`ResetCause::Lockup`].
+/// - v5: [`Chip::Esp32S3`] and [`ResetCause::ClockGlitch`].
 ///
-/// v3 added [`ResetCause`], [`LoopPhase`], `heap_free` and `uptime_ms` to
-/// [`BridgeToHost::Ready`]. A bridge that reboots is no longer a bridge whose
-/// last life is a mystery: it now says whether it was powered on, panicked,
-/// was asked to reset, or gave up on a transmit path that had stopped
-/// draining — and where in its loop it was when that happened. The uptime is
-/// what lets the host tell that story apart from a duplicate answer to its own
-/// [`HostToBridge::Identify`], which is the only other way two `Ready` frames
-/// arrive on one connection.
-///
-/// v4 added [`ResetCause::Lockup`]. The C5 is the only part in the fleet whose
-/// silicon reports a CPU that stopped making sense, and it is the only signal
-/// either firmware has for the hang class at all — there is no working
-/// watchdog on these parts (`docs/phase-3-findings.md`). Reporting it as
-/// [`ResetCause::Unknown`], which is what a C5 build did until this version,
-/// throws away the one thing that would ever say so. The bump is what keeps an
-/// older host from meeting the new variant and failing to decode the `Ready`
-/// carrying it, which would read to the operator as a bridge that answered
-/// nothing — the exact misdiagnosis this protocol's error reporting exists to
-/// avoid.
-///
-/// v5 added [`Chip::Esp32S3`]. The bridge is the one board in the fleet whose
-/// radio never needs 5 GHz — it parks on [`crate::plan::CONTROL_CHANNEL`] and
-/// stays there — so a 2.4 GHz-only Xtensa part does the job, and the S3 is the
-/// cheap and plentiful one. Nothing about the *fleet* changed: the nodes are
-/// still the parts that have to reach both bands, and they still say so with a
-/// capability token rather than a chip name. The bump is for the same reason as
-/// v4 — postcard writes an enum variant as its index, so a third `Chip` is a
-/// byte an older host has no case for, and it would meet it inside the very
-/// frame that is supposed to introduce the bridge.
-///
-/// v5 also added [`ResetCause::ClockGlitch`], which arrived in the same version
-/// because the S3 is the only part that reports it and it came in with the S3.
-/// It sits between `Brownout` and `External`, so both of those move by an index
-/// — harmless only because no v5 bridge had shipped when it was added, and the
-/// reason to note it here is that the next such insertion will not be.
+/// Each bump is for the same reason: postcard writes an enum variant as its index,
+/// so a new variant is a byte an older host has no case for — met inside the very
+/// frame meant to introduce the bridge, which reads as a bridge that answered
+/// nothing. `ClockGlitch` also *moved* `Brownout` and `External` by an index, which
+/// was harmless only because no v5 bridge had shipped. The next such insertion will
+/// not be.
 pub const LINK_PROTO_VERSION: u8 = 5;
 
 /// ESP-NOW's own payload ceiling. The 212-byte wardriver frames fit inside it.
@@ -83,10 +57,9 @@ pub type LogStr = String<96>;
 /// mode, so the bridge hears them without any peer registration.
 pub const BROADCAST: Mac = [0xFF; 6];
 
-// A frame is the version byte, the payload, and the CRC, then COBS overhead of
-// one byte per 254 plus a leading marker, plus the terminator. Checking it here
-// means a payload that outgrew the buffer is a build error, not a silent
-// truncation on the wire at three in the morning.
+// A frame is the version byte, the payload and the CRC, then COBS overhead of one
+// byte per 254 plus a leading marker, plus the terminator. Checked here so a
+// payload that outgrew the buffer is a build error rather than a silent truncation.
 const MAX_BODY: usize = MAX_FRAME - 8;
 const _: () = assert!(MAX_ESPNOW_PAYLOAD + 32 < MAX_BODY);
 
@@ -99,20 +72,16 @@ pub enum Chip {
     Esp32C6,
     /// 2.4 GHz only, like the C6, and the only Xtensa part wartui builds for.
     ///
-    /// Being Xtensa is invisible on the wire and expensive everywhere else: it
-    /// is why `firmware/bridge` needs a second toolchain. It buys a bridge that
-    /// can be had for the price of a devkit with a screen on it, which no
-    /// RISC-V part in this fleet comes as.
+    /// Being Xtensa is invisible on the wire and expensive everywhere else: it is
+    /// why `firmware/bridge` needs a second toolchain.
     Esp32S3,
 }
 
 /// Why the bridge is running this life rather than the last one.
 ///
-/// A flattening of `esp_hal`'s per-chip `SocResetReason`, which has a dozen
-/// variants that differ between all three supported parts and name silicon
-/// blocks rather than causes. What an operator needs is which of a small number
-/// of stories this was, and the ones that matter are the ones that are not
-/// [`Self::PowerOn`].
+/// A flattening of `esp_hal`'s per-chip `SocResetReason`, which names silicon
+/// blocks rather than causes and differs between all three parts. What an operator
+/// needs is which story this was, and the ones that matter are not [`Self::PowerOn`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub enum ResetCause {
     /// The board was plugged in, or the button was pressed.
@@ -124,32 +93,23 @@ pub enum ResetCause {
     Watchdog,
     /// The CPU locked up and the silicon reset it.
     ///
-    /// Reported by the C5 alone: neither the C6 nor the S3 has the detector.
-    /// It is distinct from [`ResetCause::Watchdog`] and must not be folded into
-    /// it: no watchdog on any of these parts actually fires
-    /// (`docs/phase-3-findings.md`), so a `Watchdog` here would name a
-    /// mechanism that is known not to work and send whoever read it looking in
-    /// the wrong place.
-    ///
-    /// The corollary is worth stating where it will be read: on a C6 or an S3
-    /// the hang class has *no* signal at all, and a bridge that stops turning
-    /// its loop over has to be unplugged. That is a real gap, and the C5 is the
-    /// only part that narrows it.
+    /// Reported by the C5 alone, and not to be folded into
+    /// [`ResetCause::Watchdog`]: no watchdog on any of these parts actually fires
+    /// (`docs/phase-3-findings.md`), so `Watchdog` here would name a mechanism
+    /// known not to work. The corollary, worth stating where it will be read: on a
+    /// C6 or an S3 the hang class has *no* signal and the board has to be
+    /// unplugged.
     Lockup,
     /// The supply sagged. Usually a hub or a cable rather than the board.
     Brownout,
     /// The clock-glitch detector fired.
     ///
-    /// Reported by the S3 alone, and deliberately not folded into
-    /// [`ResetCause::Brownout`] even though both are electrical and both are
-    /// rare. The S3 has two glitch detectors and they watch different things —
-    /// `CorePwrGlitch` (0x17) the supply, which *is* a brownout by another
+    /// Reported by the S3 alone, which has two glitch detectors watching different
+    /// things: `CorePwrGlitch` (0x17) the supply, which *is* a brownout by another
     /// name, and `SysClkGlitch` (0x13) the clock. Only the first is answered by
-    /// checking the cable and the hub, which is what the host prints for a
-    /// brownout; a clock glitch sends whoever read it to swap perfectly good
-    /// cables. This is the same rule [`ResetCause::Lockup`] states from the
-    /// other side: a distinct detector must not borrow a remedy that does not
-    /// fit it.
+    /// checking the cable, so folding them together sends whoever read it to swap
+    /// perfectly good ones — the rule [`ResetCause::Lockup`] states from the other
+    /// side.
     ClockGlitch,
     /// A reset the firmware did not ask for and cannot attribute, which
     /// includes the one `espflash` drives over DTR/RTS.
@@ -203,9 +163,8 @@ pub enum LogLevel {
 /// What became of a [`HostToBridge::SendEspNow`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub enum SendStatus {
-    /// The radio confirmed delivery. Unicast ESP-NOW is MAC-acknowledged, so
-    /// this is real delivery, not just a successful enqueue — which is what
-    /// lets the host clear an assignment's dirty flag honestly.
+    /// The radio confirmed delivery. Unicast ESP-NOW is MAC-acknowledged, so this
+    /// is real delivery rather than a successful enqueue.
     AckOk,
     /// The frame went out but no acknowledgement came back.
     AckFail,
@@ -221,9 +180,8 @@ pub enum SendStatus {
 
 /// Commands the host sends to the bridge.
 ///
-/// The bridge understands framing and the radio, and nothing about what the
-/// bytes mean. Every rule that could be wrong lives on the host, where it is
-/// unit-testable and does not need a reflash to change.
+/// The bridge understands framing and the radio, and nothing about what the bytes
+/// mean; see `firmware/bridge/src/main.rs`.
 // The payload variants dwarf the rest, but boxing them would mean an allocator
 // in the bridge firmware, which is exactly what this crate avoids. These values
 // are transient — built, serialized and dropped — never stored in bulk.
@@ -232,10 +190,9 @@ pub enum SendStatus {
 pub enum HostToBridge {
     /// Ask the bridge to announce itself with [`BridgeToHost::Ready`].
     ///
-    /// The host sends this the moment it opens the port. Without it the only
-    /// announcement is the one at boot, so restarting the TUI without also
-    /// unplugging the dongle would leave the host waiting forever for a frame
-    /// that had already been sent and read.
+    /// Sent the moment the host opens the port: without it the only announcement
+    /// is the one at boot, so restarting the TUI without unplugging the dongle
+    /// would wait forever for a frame already sent.
     Identify,
     /// Park the radio on an ESP-NOW channel. The stock mesh uses 6.
     SetChannel {
@@ -272,9 +229,7 @@ pub enum HostToBridge {
 }
 
 /// Events and replies the bridge sends to the host.
-// The payload variants dwarf the rest, but boxing them would mean an allocator
-// in the bridge firmware, which is exactly what this crate avoids. These values
-// are transient — built, serialized and dropped — never stored in bulk.
+// Unboxed for the reason `HostToBridge` gives.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub enum BridgeToHost {
@@ -295,20 +250,16 @@ pub enum BridgeToHost {
         reset_cause: ResetCause,
         /// Where the previous life stopped, when the reset preserved it.
         last_phase: LoopPhase,
-        /// Bytes free in the radio blobs' heap. Nothing wartui writes
-        /// allocates, so a figure that falls across a long capture is the
-        /// blobs leaking and is worth knowing before the allocation fails.
+        /// Bytes free in the radio blobs' heap. Nothing wartui writes allocates, so
+        /// a figure that falls across a long capture is the blobs leaking.
         heap_free: u32,
         /// Milliseconds since this life started, at the moment of announcing.
         ///
-        /// Carried so the host can tell a *new* life from a second answer to
-        /// an [`HostToBridge::Identify`] it sent twice. Both arrive on the
-        /// same connection — a software reset does not re-enumerate the USB
-        /// device, so the host's file descriptor reads straight through the
-        /// reboot — and nothing else in this frame separates them: two
-        /// consecutive `wartui reset`s produce byte-identical `Ready`s. An
-        /// uptime that went *backwards* is a reboot and cannot be anything
-        /// else.
+        /// Carried so the host can tell a *new* life from a second answer to an
+        /// [`HostToBridge::Identify`] it sent twice: a software reset does not
+        /// re-enumerate the USB device, so both arrive on one connection and
+        /// nothing else in the frame separates them. See
+        /// `crates/wartui-bridge/src/serial.rs`.
         uptime_ms: u32,
     },
     /// An ESP-NOW frame arrived.
@@ -321,9 +272,9 @@ pub enum BridgeToHost {
         rssi: i8,
         /// Channel the radio was parked on.
         channel: u8,
-        /// Bridge-local microsecond timestamp. Paired with the one on
-        /// [`Self::SendResult`], this measures the heartbeat-to-assignment
-        /// latency without the host's own scheduling noise confusing matters.
+        /// Bridge-local microsecond timestamp. Against the one on
+        /// [`Self::SendResult`] this measures the heartbeat-to-assignment latency
+        /// without the host's own scheduling noise.
         rx_us: u32,
         /// The frame.
         payload: EspNowPayload,
@@ -351,9 +302,8 @@ pub enum BridgeToHost {
         /// Bridge uptime.
         uptime_ms: u32,
     },
-    /// Diagnostics. Routed through the link rather than printed, because
-    /// `esp-println` would interleave into the same USB endpoint and corrupt
-    /// the framing.
+    /// Diagnostics, routed through the link rather than printed: `esp-println`
+    /// would interleave into the same endpoint and corrupt the framing.
     Log {
         /// Severity.
         level: LogLevel,
