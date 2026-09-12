@@ -165,12 +165,8 @@ fn write_header(out: &mut [u8], msg_type: MsgType) {
 
 /// What a node says it is, in every heartbeat it sends.
 ///
-/// This used to be an ASCII token squeezed into the vendor's text field,
-/// because that field was the only unused space on the wire and the only way to
-/// tell one of ours from a stock node whose bytes were otherwise identical. The
-/// magic answers that question now, so what is left is the part that was always
-/// load-bearing: a version, and which of two optional capabilities this
-/// particular board has.
+/// A version, and which of two optional capabilities this particular board has;
+/// the magic is what separates one of ours from a stock node.
 ///
 /// Both features are refusals rather than requests. A node without `ble` is
 /// never handed [`ADMIN_FLAG_BLE`], because it would acknowledge the assignment
@@ -433,18 +429,13 @@ impl fmt::Display for Security {
 
 /// Node → core, one per newly-seen BSSID.
 ///
-/// Seventeen bytes plus the SSID, against the vendor's fixed 212 — a
-/// comma-separated line in a frame padded to `sizeof` whatever the sender's
-/// compiler laid out, whether it carried two hundred bytes or thirty. That
-/// padding was paid on the control channel every node shares, once per access
-/// point, for a format neither end wanted.
+/// Seventeen bytes plus the SSID, against the vendor's fixed 212 — padding paid on
+/// the control channel every node shares, once per access point.
 ///
-/// The SSID is length-prefixed, which is the other thing that changes here. The
-/// vendor line was split on commas, so a comma inside an SSID took the record
-/// apart and the sender rewrote it as an underscore before transmitting — the
-/// real name lost at the one point in the path where it still existed. A length
-/// needs no escaping, and the CSV quoting the exporter already does is enough
-/// at the only boundary that is actually CSV.
+/// The SSID is length-prefixed. The vendor line was split on commas, so a comma
+/// inside an SSID took the record apart and the sender rewrote it as an underscore
+/// before transmitting, losing the real name at the one point in the path where it
+/// still existed. A length needs no escaping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SightingMsg<'a> {
     /// Wi-Fi or BLE.
@@ -544,37 +535,17 @@ impl<'a> SightingMsg<'a> {
 /// and lets the planner deal channels round-robin so every node carries some of
 /// both bands.
 ///
-/// Everything below is why the *delivery* of this frame is shaped the way it
-/// is, and none of it changed with the layout. It is measured vendor behaviour,
-/// kept because it is the reason for a design decision rather than because
-/// anything here still interoperates.
+/// How this frame is *delivered* is shaped by measured vendor behaviour rather
+/// than by the layout. An unacknowledged unicast is retried by the radio, all of
+/// it inside the one window the node was listening in, and an 802.11
+/// acknowledgement comes from the receiver's MAC hardware — so its absence means
+/// the radio was not on the channel at all, which on a stock node was NimBLE
+/// holding the shared antenna (`docs/phase-0-findings.md`).
 ///
-/// Observed on real hardware: a vendor core's assignment to its single node
-/// went out once and was retransmitted 31 times by the radio, all 32 frames
-/// sharing one 802.11 sequence number with the retry bit set on all but the
-/// first. Nothing acknowledged it, yet the core cleared its dirty flag from the
-/// `esp_now_send` return value and moved on believing the node had been
-/// assigned. Broadcast heartbeats and observations from the same node in the
-/// same capture each carried their own sequence number and were never retried,
-/// so the retries are specific to unicast. Acknowledgements were then captured
-/// directly: of 9505 seen on the channel, none named the core, so the node
-/// genuinely never answered.
-///
-/// A later capture found the cause. With two nodes differing only in whether
-/// BLE was enabled, the BLE-off node acknowledged both assignments it was sent,
-/// each transmitted once with no retry, and adopted them; the BLE-on node
-/// acknowledged none of its 32 and kept scanning outside its range. An 802.11
-/// acknowledgement comes from the receiver's MAC hardware, so its absence means
-/// the radio was not on the channel — NimBLE shares the one 2.4 GHz antenna and
-/// the admin window is precisely when the node is otherwise idle. That is the
-/// measurement behind [`ADMIN_FLAG_BLE`] being a per-node decision the operator
-/// makes rather than something every node does.
-///
-/// This is why wartui clears an assignment only on the transmit callback, why
-/// it retries on the next heartbeat rather than trusting the radio's own
-/// retries (all 31 of which fell inside the one failing window), and why a
-/// persistently unacknowledged node should be reported to the operator as
-/// likely BLE coexistence rather than as a mystery.
+/// Hence three rules: an assignment is cleared only on the transmit callback,
+/// retried on the next heartbeat rather than by trusting the radio's own
+/// retries, and a persistently unacknowledged node is reported to the operator
+/// as likely BLE coexistence rather than as a mystery.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AdminMsg {
     /// Epoch counter. A node adopts the assignment only when this *differs*
@@ -649,15 +620,10 @@ impl AdminMsg {
 
 /// Turn a host-side monotonic assignment counter into the byte the wire carries.
 ///
-/// The vendor core kept its equivalent in RAM and reset it to 1 at every boot,
-/// while nodes adopt an assignment only when the byte *differs* from the one
-/// they hold. Between them those two facts mean a core that restarts and
-/// recomputes the same assignment is silently ignored by every node that
-/// already holds it — and if the topology changed while the core was down, the
-/// two views diverge permanently with nothing to say so.
-///
-/// wartui persists a `u64` instead and narrows it here. Zero is skipped so a
-/// node holding a freshly-zeroed field cannot be mistaken for one holding an
+/// A node adopts an assignment only when this byte *differs* from the one it holds,
+/// so an epoch that is re-used after a restart is silently discarded —
+/// divergence 4. wartui persists a `u64` and narrows it here, skipping zero so a
+/// node holding a freshly-zeroed field is not mistaken for one holding an
 /// assignment.
 #[must_use]
 pub const fn wire_epoch(counter: u64) -> u8 {
