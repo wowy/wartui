@@ -15,7 +15,8 @@ hardware, so `AckOk` means a node really has the frame. The callback comes back 
 pessimistic case — an *unacknowledged* send, where it fires only once the radio has
 exhausted its retry chain
 ([`docs/phase-4-findings.md`](../../docs/phase-4-findings.md)). A dumb bridge has
-more than an order of magnitude in hand.
+more than an order of magnitude in hand when a send is acknowledged, and under
+three times when an assignment queues behind one that is not.
 
 Peers are added on demand (`ensure_peer`) and never removed as a side effect of
 sending. The radio's table holds twenty entries, one of which `esp-radio` spends

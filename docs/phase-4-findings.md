@@ -266,7 +266,12 @@ of heartbeats and sightings was followed by the burst a backlog delivers.
 
 So the host answered within about 21 ms all hour, against a 300 ms window. 100 ms
 keeps roughly five times that, and about twice the 55 ms startup burst measured
-above. `BEHIND_THE_AIR` is derived from the window and shrinks with it. A window
+above. The tight case is one this capture never produced: an assignment queued
+behind another node's unacknowledged send inherits its 28–35 ms retry chain
+(`crates/wartui-bridge/src/serial.rs`), and on top of a worst host stall that is
+about 55 ms — still inside the window, at about twice the margin rather than five.
+It takes a re-cut landing while one node is not acknowledging, which is most
+likely the node holding Bluetooth. `BEHIND_THE_AIR` is derived from the window and shrinks with it. A window
 missed anyway costs one sweep: the node stays dirty and its next heartbeat re-sends.
 
 The same capture sizes the saving. Each node held six or seven channels and beat
