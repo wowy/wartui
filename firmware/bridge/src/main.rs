@@ -424,6 +424,20 @@ fn main() -> ! {
         Err(_) => bridge.error("could not park the radio on the default channel"),
     }
 
+    // ESP-NOW otherwise transmits at 802.11b 1 Mbps with a long preamble: about
+    // 910 µs for a 90-byte frame, against about 50 µs at 802.11g 24 Mbps. Every frame
+    // on the control channel is that short, so the preamble and the rate are the whole
+    // cost, and a node's 6 ms stagger slot in a twenty-node fleet is mostly empty air
+    // at 24 Mbps rather than mostly one heartbeat. Not 802.11ax: the S3 cannot decode
+    // it, and for frames this short an HE preamble costs more than it saves.
+    //
+    // The price is sensitivity — 24 Mbps wants roughly 10 dB more signal than 1 Mbps —
+    // which a fleet sharing a car has to spare. Receivers need nothing: any 802.11b/g
+    // rate decodes without being told. `firmware/node/src/main.rs` sets the same rate.
+    if manager.set_rate(esp_radio::esp_now::WifiPhyRate::Rate24m).is_err() {
+        bridge.error("could not set the ESP-NOW rate; transmitting at 1 Mbps");
+    }
+
     let mac = esp_radio::wifi::Interface::station().mac_address();
     bridge.announce(mac);
 

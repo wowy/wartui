@@ -268,6 +268,12 @@ fn main() -> ! {
     let mut sniffer = controller.sniffer();
     sniffer.set_receive_cb(sniff::on_frame);
     let (manager, mut sender, receiver) = controller.esp_now().split();
+    // 24 Mbps rather than ESP-NOW's 1 Mbps default, for airtime on the control
+    // channel — `firmware/bridge/src/main.rs` has the reasoning and the cost.
+    match manager.set_rate(esp_radio::esp_now::WifiPhyRate::Rate24m) {
+        Ok(()) => {}
+        Err(err) => note!("could not set the ESP-NOW rate, transmitting at 1 Mbps: {:?}", err),
+    }
 
     // Brought up before the loop rather than on demand: initialising a radio
     // between a dwell and an admin window is the kind of surprise to avoid.
