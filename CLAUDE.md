@@ -130,12 +130,10 @@ is here rather than only in a `//!`.
 - **The wire is ours, in both directions, and shares nothing with the vendor's.** Every frame is
   `WTUI`, a wire version byte, a type byte and a body: `HeartbeatMsg` (13 bytes), `SightingMsg`
   (17 plus the SSID) and `AdminMsg` (15). ESP-NOW has no addressing above the MAC layer and a
-  node broadcasts, so a shared format is a shared conversation, in both directions and to
-  everyone's cost — `crates/wartui-proto/src/air.rs` has the two measured failures. The magic is
-  checked before anything else at both ends. Encode/decode is written out by hand, never by
-  transmuting a packed struct, and pinned byte-for-byte in `crates/wartui-proto/tests/wire.rs` —
-  hand-written vectors, because there is no second implementation of either end left to check
-  against.
+  node broadcasts, so a shared format is a shared conversation. The magic is checked before
+  anything else at both ends. Encode/decode is written out by hand, never by transmuting a
+  packed struct, and pinned byte-for-byte in `crates/wartui-proto/tests/wire.rs` — hand-written
+  vectors, because there is no second implementation of either end left to check against.
 - **A wire change means reflashing every node at once.** `wartui-proto` is a path dependency of
   both firmwares. A frame carrying our magic and an unknown version byte is counted as
   `incompatible` and named in the footer (`N frames from an older firmware — reflash`), never
@@ -197,8 +195,7 @@ edit stops; follow the pointer before changing the rule.
   and engine, and one already holding it loses it on the tick that learns so. Losing it means an
   assignment **re-issued** without the flag — the fleet table reads the flag off the frame — so
   `reissue` is the one funnel.
-  → `crates/wartui-proto/src/air.rs` `ADMIN_FLAG_BLE`, `crates/wartui-core/src/engine.rs` `//!`,
-  `docs/phase-2-findings.md`
+  → `crates/wartui-core/src/engine.rs` `//!`, `docs/phase-2-findings.md`
 - **A heartbeat replayed out of the bridge's backlog is not an admin window.** Backlogged
   heartbeats still admit their nodes, but the 300 ms windows they name shut long ago.
   `note_arrival` compares the bridge's stamp against the host's clock and `air_is_live` gates
