@@ -40,7 +40,7 @@ const IDENTIFY_INTERVAL: Duration = Duration::from_millis(500);
 /// Bounded at all because asking forever wedges the process, and pointing `wartui`
 /// at a node rather than the bridge is all it takes: frames pile up in that tty's
 /// output queue, which closing the port waits on and `SIGKILL` cannot interrupt
-/// (`crates/wartui/src/main.rs`, `terminate`). Giving up before anything is left
+/// (`crates/wartui/src/main.rs`, `Terminate`). Giving up before anything is left
 /// queued is what prevents it, and [`supervise`] retries on its own cadence.
 const IDENTIFY_ATTEMPTS: u32 = 12;
 
@@ -224,10 +224,10 @@ async fn connect(
     // Unbounded, and deliberately so. The biased select below arbitrates when a
     // command is taken rather than when it reaches the wire, so a burst of bulk
     // commands drains into this queue and an assignment behind them inherits the
-    // latency — which the bench measured at two orders of magnitude inside the
-    // 300 ms window (`docs/phase-4-findings.md`). Two bounded channels and a condvar
-    // in `write_loop` is the fix if that ever changes, and `assignment.latency_us`
-    // is where it would show.
+    // latency — 28-35 ms against a node's 300 ms admin window, and that is the
+    // pessimistic figure, taken from unacknowledged sends (`docs/phase-4-findings.md`).
+    // Two bounded channels and a condvar in `write_loop` is the fix if that ever
+    // changes, and `assignment.latency_us` is where it would show.
     let (write_tx, write_rx) = std::sync::mpsc::channel::<HostToBridge>();
 
     let reader = std::thread::Builder::new()

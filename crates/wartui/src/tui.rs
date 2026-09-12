@@ -128,9 +128,10 @@ impl Ui {
                 self.notice = None;
                 self.selected = self.selected.saturating_sub(1);
             }
-            // One channel, and the whole pool: a node heartbeats once per
-            // completed sweep, so the pair is the only thing in the protocol
-            // that reports what a node is scanning.
+            // One channel, and the whole pool. A node heartbeats once per
+            // completed sweep, so narrowing it collapses the beat period and
+            // widening it restores it — nothing else in the protocol reports
+            // what a node is scanning.
             KeyCode::Char('a') => self.assign(narrow(snapshot), snapshot, commands),
             KeyCode::Char('A') => self.assign(widest(snapshot), snapshot, commands),
             // Honoured with auto-assignment on, unlike the assignment keys: the

@@ -27,9 +27,10 @@ use serde::{Serialize, de::DeserializeOwned};
 /// - v4: [`ResetCause::Lockup`].
 /// - v5: [`Chip::Esp32S3`] and [`ResetCause::ClockGlitch`].
 ///
-/// Each bump is for the same reason: postcard writes an enum variant as its index,
-/// so a new variant is a byte an older host has no case for — met inside the very
-/// frame meant to introduce the bridge, which reads as a bridge that answered
+/// Every bump is a decode failure waiting for an older host: postcard writes an enum
+/// variant as its index and a struct's fields in order, so a new variant is a byte
+/// with no case and a new field on `Ready` shifts everything after it — met inside the
+/// very frame meant to introduce the bridge, which reads as a bridge that answered
 /// nothing. `ClockGlitch` also *moved* `Brownout` and `External` by an index, which
 /// was harmless only because no v5 bridge had shipped. The next such insertion will
 /// not be.

@@ -124,6 +124,7 @@ impl AdvReport {
 #[must_use]
 pub fn adv_reports(packet: &[u8]) -> AdvReports<'_> {
     let empty = AdvReports { rest: &[], remaining: 0 };
+    // H4 type, event code, parameter length, subevent, report count.
     let Some(&[EVT, LE_META, _plen, ADV_REPORT, count]) = packet.get(..5) else { return empty };
     AdvReports { rest: &packet[5..], remaining: count }
 }

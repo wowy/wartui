@@ -2,7 +2,7 @@
 //!
 //! A *pool* is described in runs — [`ChannelPool::Us`] is two of them, with a gap
 //! at indices 11-13 — because that is the shape the regulatory picture has. An
-//! *assignment* is not: [`AdminMsg`](crate::air::AdminMsg) carries a forty-bit
+//! *assignment* is not: [`crate::air::AdminMsg`] carries a forty-bit
 //! [`ChannelSet`], one bit per [`SCAN_CHANNELS`] entry, so a node can hold any
 //! subset and a run boundary is nothing the planner steers around. Before the
 //! mask a lone node on a two-run pool had to rotate between them on a timer.
