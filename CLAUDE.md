@@ -221,5 +221,7 @@ edit stops; follow the pointer before changing the rule.
 - Tests are mostly integration tests under `crates/*/tests/` with full-sentence names
   (`observations_keep_a_node_visible_but_only_heartbeats_keep_it_assignable`); `#[cfg(test)]`
   modules are used for parsing/formatting units (`nmea`, `position`, `export`, `outbox`).
+- All work happens on a branch and lands through a pull request; nothing is committed directly to
+  `main`.
 - Commit messages are clear and concise: an imperative one-line subject, then a paragraph explaining
   what was wrong and why the fix is shaped as it is.
