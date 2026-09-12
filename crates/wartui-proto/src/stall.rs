@@ -1,59 +1,44 @@
 //! Deciding when the bridge's USB transmit endpoint has stopped draining.
 //!
-//! Only the firmware acts on this, and it lives here for the same reason
-//! [`crate::outbox`] does: a `no_std` binary built for `riscv32imac` cannot run
-//! a test, and this is decision logic rather than a conversation with a
-//! peripheral. That distinction earned its place the hard way. The rule below
-//! shipped with two defects, one after the other, and neither was found by
-//! review or by reading — the first took a bridge on a bench beside a talking
-//! fleet, and the second took an operator quitting a session and watching the
-//! board reset three seconds later. Both are single lines of arithmetic against
-//! a clock, and both are now tests a few microseconds long.
+//! Only the firmware acts on this, and it lives here for the reason
+//! [`crate::outbox`] does: a `no_std` binary cannot run a test. The rule below
+//! shipped two defects, neither found by review — the first took a bridge on a
+//! bench beside a talking fleet, the second an operator quitting a session and
+//! watching the board reset three seconds later. Both are one line of arithmetic
+//! against a clock, and both are now tests a few microseconds long.
 //!
 //! ## The failure this exists for
 //!
 //! The USB Serial/JTAG IN endpoint answers every write with "not now" and never
-//! stops: `SERIAL_IN_EP_DATA_FREE` goes to zero when `WR_DONE` is set and, per
-//! the TRM, comes back only "until data in UART Tx FIFO is read by USB Host".
-//! If that read never lands the flag never clears, and the device end has no
-//! way to make it. The receive path is untouched by any of it, so the bridge
-//! goes on decoding and executing commands it cannot answer — which is exactly
-//! how it looks from the host: a port that opens, writes that succeed, and
-//! silence. Measured on a wedged board: twelve `Identify` frames and a
-//! `GetStatus` decoded and executed, not one byte back, and a `Reset` frame
-//! hand-fed down the same wire rebooted it instantly.
-//!
-//! Nothing subtler than a reset is available. The endpoint cannot be re-armed
-//! from this end, and every way of telling the host would go out through the
-//! path that is broken.
+//! stops: `SERIAL_IN_EP_DATA_FREE` goes to zero when `WR_DONE` is set and, per the
+//! TRM, comes back only "until data in UART Tx FIFO is read by USB Host". If that
+//! read never lands the flag never clears and the device end cannot make it. The
+//! receive path is untouched, so the bridge goes on decoding and executing
+//! commands it cannot answer — from the host, a port that opens, writes that
+//! succeed, and silence. Nothing subtler than a reset is available.
 //!
 //! ## What is actually being measured
 //!
-//! Not "how long since a byte moved". The clock runs from when the
-//! *contradiction* started — a host demonstrably asking and a transmit path
-//! demonstrably refusing — and that distinction is the whole of this module.
-//! `docs/phase-3-findings.md` has the bench measurements behind each clause.
+//! Not "how long since a byte moved", but how long the *contradiction* has lasted:
+//! a host demonstrably asking and a transmit path demonstrably refusing. That
+//! distinction is the whole of this module, and `docs/phase-3-findings.md` has the
+//! bench measurement behind each clause.
 
 /// How long the transmit path may refuse every byte while a host waits.
 ///
-/// Chosen against the host's clock rather than the bridge's: `wartui` sends
-/// `Identify` every 500 ms and gives up after twelve of them, at six seconds
-/// (`crates/wartui-bridge/src/serial.rs`). Resetting at three leaves room for
-/// the reboot and a fresh `Ready` to land inside that window, so the operator
-/// sees a bridge that hesitated rather than one that was not there. It is also
-/// far longer than any legitimate gap: a host that is merely slow still empties
-/// a sixty-four byte packet in microseconds, and the test is for *no* progress
-/// at all rather than for slow progress.
+/// Chosen against the host's clock rather than the bridge's: `wartui` gives up
+/// after six seconds (`crates/wartui-bridge/src/serial.rs`), so resetting at three
+/// leaves room for the reboot and a fresh `Ready` to land inside that window. Also
+/// far longer than any legitimate gap — the test is for *no* progress at all.
 pub const TX_STALL_TIMEOUT_MS: u64 = 3_000;
 
 /// How recently the host must have spoken to count as still being there.
 ///
 /// Deliberately longer than the host's own five-second `status_interval`
 /// (`crates/wartui-core/src/engine.rs`), because a connected host with a quiet
-/// fleet says nothing in between. Set this below that interval and an
-/// established capture reads as an absent host for two seconds in every five,
-/// which is exactly long enough to keep resetting the stall clock and never
-/// notice a real wedge.
+/// fleet says nothing in between. Below that interval, an established capture
+/// reads as an absent host for two seconds in every five and no wedge is ever
+/// noticed.
 pub const HOST_PRESENT_WINDOW_MS: u64 = 10_000;
 
 /// Whether the transmit endpoint has stopped draining while a host waited.
@@ -73,43 +58,29 @@ pub const HOST_PRESENT_WINDOW_MS: u64 = 10_000;
 /// # Why the clock starts at the contradiction
 ///
 /// Timing from the last byte written looks equivalent and is not. A bridge left
-/// powered beside a talkative fleet fills its rings and its endpoint with
-/// nobody reading, so by the time an operator finally attaches, the last byte
-/// moved *hours* ago. Every one of those hours would count against a transmit
-/// path with nothing whatever wrong with it, and the bridge would reset itself
-/// the moment `wartui` said hello — every time, on a healthy board. The same
-/// arithmetic punishes any long blocking call inside one iteration. So
-/// [`StallWatch::stall_since`] is set when the contradiction begins and not
-/// before, which the host-present clause is what holds back.
+/// powered beside a talkative fleet fills its rings with nobody reading, so by the
+/// time an operator attaches the last byte moved *hours* ago — and all of it would
+/// count against a transmit path with nothing wrong with it. The clock is set when
+/// the contradiction begins, which the host-present clause is what holds back.
 ///
 /// # Why the fourth clause is not a refinement of the third
 ///
-/// Leaving it out cost a reset after every session an operator ever ran. A host
-/// that has *quit* satisfies "spoke inside the window" for a further
+/// A host that has *quit* satisfies "spoke inside the window" for a further
 /// [`HOST_PRESENT_WINDOW_MS`], and quitting is exactly what stops the endpoint
-/// draining — so with a fleet in earshot the rings fill the moment it lets go,
-/// and because [`TX_STALL_TIMEOUT_MS`] is the shorter of the two, the reset
-/// always won the race. Measured: `wartui status`, and three seconds later a
-/// bridge reporting that its transmit path had stopped draining, every time.
-///
-/// A host that is genuinely waiting keeps asking — `run` polls for status,
-/// `supervise` re-sends `Identify` — so requiring a frame decoded *after* the
-/// stall started is what separates the two, and it costs the real case nothing.
-/// The comparison is strictly greater than for that reason: a host whose last
-/// frame lands in the same millisecond the stall arms has not asked since, and
-/// a `>=` here restores the whole bug.
+/// draining — so with a fleet in earshot the rings fill the moment it lets go, and
+/// since [`TX_STALL_TIMEOUT_MS`] is the shorter of the two the reset always won
+/// that race. A host genuinely waiting keeps asking, so requiring a frame decoded
+/// *after* the stall began separates the two at no cost to the real case. Strictly
+/// greater than, for the same reason: a host whose last frame lands in the
+/// millisecond the stall arms has not asked since, and `>=` restores the bug.
 ///
 /// # Why there is no default host
 ///
-/// [`Default`] leaves [`StallWatch::last_host`] as `None`, and the difference
-/// between that and the boot instant decides whether a bridge with no host
-/// attached survives its own first ten seconds. Seeded with a time it reads as
-/// a host present for the first [`HOST_PRESENT_WINDOW_MS`] of *every* life, so
-/// a bridge powered beside a talking fleet with nothing attached would fill its
-/// rings against an endpoint no host is draining, reset at
-/// [`TX_STALL_TIMEOUT_MS`], and come back into the same window — for ever, on a
-/// board with nothing whatever wrong with it. Presence is something the host
-/// demonstrates by sending a frame, and there is no such thing as a default.
+/// Seeded with a time instead of `None`, this reads as a host present for the first
+/// [`HOST_PRESENT_WINDOW_MS`] of *every* life — so a bridge powered beside a
+/// talking fleet with nothing attached fills its rings, resets, and comes back into
+/// the same window for ever. Presence is something a host demonstrates by sending a
+/// frame, and there is no such thing as a default.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct StallWatch {
     /// When the transmit path first refused a byte with a host waiting, or
@@ -128,10 +99,8 @@ impl StallWatch {
 
     /// Record proof of a host: a frame that decoded, at `now_ms`.
     ///
-    /// Only a frame that *decoded* may be reported. A board running node
-    /// firmware talks constantly down the same wire and none of it is a frame,
-    /// and reading that as somebody waiting on an answer is how a bench bridge
-    /// starts rebooting in a loop.
+    /// Only a frame that *decoded* may be reported: a board running node firmware
+    /// talks constantly down the same wire and none of it is a frame.
     pub const fn note_host(&mut self, now_ms: u64) {
         self.last_host = Some(now_ms);
     }
@@ -143,9 +112,8 @@ impl StallWatch {
     /// hold and the only remedy left is a reset.
     ///
     /// `now_ms` must never go backwards. The firmware reads it from the boot
-    /// [`Instant`](https://docs.rs/esp-hal), which cannot, and a caller that
-    /// breaks the rule is caught by the subtraction below rather than quietly
-    /// mistaken for a host that is present.
+    /// instant, which cannot, and a caller that breaks the rule is caught by the
+    /// subtraction below rather than mistaken for a host that is present.
     pub fn note_tx(&mut self, moved: bool, queued: bool, now_ms: u64) -> bool {
         let host_here = self.last_host.is_some_and(|at| now_ms - at < HOST_PRESENT_WINDOW_MS);
         if moved || !queued || !host_here {
@@ -175,7 +143,7 @@ mod tests {
     fn a_bridge_nobody_has_ever_spoken_to_is_never_reset() {
         let mut watch = StallWatch::new();
         // A bench bridge beside a talking fleet: rings full, endpoint refusing,
-        // for an hour. This is the case the first version got wrong.
+        // for an hour.
         for second in 0..3_600 {
             assert!(!watch.note_tx(false, true, second * 1_000));
         }
