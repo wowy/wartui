@@ -48,6 +48,21 @@ pub const NODE_STAGGER_WINDOW_MS: u32 = 120;
 /// picked a different one would be transmitting into an empty room.
 pub const CONTROL_CHANNEL: u8 = 6;
 
+/// The transmit power every bridge and node is capped at, in `esp-radio`'s quarter-dBm
+/// units: 8 is 2 dBm, the lowest `set_max_tx_power` accepts.
+///
+/// The operator's policy for the whole fleet, not a per-board tuning knob. A fleet rides
+/// in one vehicle with its bridge, so the 20 dBm default buys range nothing here needs
+/// and puts a node beside its bridge far above the level a receiver is designed for: on
+/// the bench a C6 at the default arrived at −21 dBm from a few centimetres away. The cost
+/// is range, and it is paid first by heartbeats from a node carried farther off.
+pub const TX_POWER_QUARTER_DBM: i8 = 8;
+
+const _: () = assert!(
+    TX_POWER_QUARTER_DBM >= 8 && TX_POWER_QUARTER_DBM <= 84,
+    "esp-radio's set_max_tx_power accepts 8 to 84 quarter-dBm"
+);
+
 /// How long a node listens on one channel before moving on.
 ///
 /// A sniffing node needs a beacon interval rather than a scan's dwell budget: the
