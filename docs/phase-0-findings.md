@@ -11,7 +11,7 @@ bench. The ESP-NOW receive callback and promiscuous capture agree frame for
 frame, which is what a bridge needs.
 
 This settles the project's largest open risk. Nodes drop to 2 dBm while
-wardriving and it was not obvious a dongle would hear
+wardriving (`RadioTuning.cpp:15-23`) and it was not obvious a dongle would hear
 them at all.
 
 ## The wire format matches, byte for byte
@@ -57,8 +57,8 @@ Acknowledgements were then captured directly: of 9505 seen on the channel,
 **none** named the core. So two independent receivers agree — the core's own
 radio, which retried, and the sniffer.
 
-Meanwhile the core clears its dirty flag from the `esp_now_send` return value,
-which reports only that the frame was queued, and moves on
+Meanwhile the core clears its dirty flag from the `esp_now_send` return value
+(`WiFiOps.cpp:679`), which reports only that the frame was queued, and moves on
 believing the node was assigned. The node's local `assignment_version` stays at
 0 and it keeps scanning all 40 channels.
 
@@ -78,7 +78,7 @@ Two things follow:
 - An unacknowledged assignment must be retried on the node's next heartbeat.
   Heartbeats arrive every few seconds, so a retry costs one sweep.
 - `MSG_ADMIN` carries no destination field, and the node's handler
-  does not check who a frame was addressed to. Broadcasting
+  (`WiFiOps.cpp:1193`) does not check who a frame was addressed to. Broadcasting
   it would therefore be delivered reliably, but every node would adopt the same
   assignment — so it is only ever correct for a single-node fleet, and is not a
   general fix.
@@ -167,9 +167,10 @@ is index 5.
 
 Three consequences for wartui:
 
-- **Clearing on the acknowledgement is now load-bearing, not prudent.** Clearing the dirty flag on
-  the transmit callback rather than the `esp_now_send` return value is the whole
-  difference between retrying into the next admin window and believing a lie.
+- **Clearing on the acknowledgement is now load-bearing, not prudent.** Clearing
+  the dirty flag on the transmit callback rather than the `esp_now_send` return
+  value is the whole difference between retrying into the next admin window and
+  believing a lie.
 - **Retry across windows, not within one.** The radio's own 31 retries all fell
   inside a single window and all failed together. The useful retry is the next
   heartbeat, which is what the dirty flag already gives us.
@@ -180,14 +181,15 @@ Three consequences for wartui:
 
 Not ruled out, and not needed for the above: whether an asynchronous Wi-Fi scan
 also holds the radio, and whether `setFixedChannel` leaves the interface
-promiscuous on its error path (it returns without restoring
+promiscuous on its error path (`WiFiOps.cpp:608-612` returns without restoring
 it).
 
 ## Node-side deduplication is as aggressive as expected
 
 A node reports a BSSID once and then suppresses it until 200 further unique
-MACs push it out of the ring, and nothing
-clears that ring at runtime — `clearMacHistory()` is defined and never called. A capture taken twelve minutes into a run
+MACs push it out of the ring (`WiFiOps.cpp:1699`, `configs.h:158`), and nothing
+clears that ring at runtime — `clearMacHistory()` is defined at
+`WiFiOps.cpp:1882` and never called. A capture taken twelve minutes into a run
 contained only BLE sightings, whose addresses rotate; power-cycling the node
 produced 44 Wi-Fi records in its first sweeps. Observation rates are tens per
 minute, not a firehose.

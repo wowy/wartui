@@ -319,8 +319,8 @@ gives the `Secure Download Mode is enabled on this chip` that Phase 1 identified
 as espflash inferring the mode from silence — and it was already on the air
 behaving like a stock node: heartbeating every 6.47 s and reporting access
 points *with no assignment at all*, where an unassigned wartui node parks on the
-control channel at 1 s and collects nothing. All forty channels is the vendor
-default.
+control channel at 1 s and collects nothing. All forty channels by default is
+`WiFiOps.cpp:77-80`.
 
 So run F is an accidental but exact test of an invariant that had never been on
 hardware. Core to node is wartui's own fourteen-byte frame; the vendor's ten-byte
@@ -425,7 +425,7 @@ table said it held them. The remedy was specified in the Phase 2 plan and had
 not been built. It is built now.
 
 Every heartbeat carries an ASCII token in the text field a stock node leaves
-empty: `wartui/0.1;ble,5g` — protocol version,
+empty (`src/WiFiOps.cpp:1456-1457`): `wartui/0.1;ble,5g` — protocol version,
 then what the build can do. `FleetEngine::is_assignable` refuses a node without
 one, alongside the encrypted and peer-refused cases that were already there for
 the same reason.
