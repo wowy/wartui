@@ -40,9 +40,7 @@ pub fn ssid_text(bytes: &[u8]) -> String {
 pub struct NodeSeen {
     /// The node's full six-byte MAC.
     ///
-    /// Divergence 1: the vendor core keys nodes on a two-byte suffix
-    /// (`src/WiFiOps.cpp:410-419`), which collides across a large enough fleet
-    /// and silently merges two nodes' data.
+    /// Divergence 1.
     pub mac: Mac,
     /// Unix milliseconds when this host first saw the node in this session.
     pub first_seen_ms: i64,
@@ -196,10 +194,7 @@ pub struct AssignmentSent {
     pub wire_version: u8,
     /// The node's slot in the fleet-wide stagger order.
     pub node_index: u8,
-    /// Fleet size as of the assignment, not as of the send. Divergence 7: the
-    /// vendor core reads it live (`src/WiFiOps.cpp:651`), so a node joining
-    /// between planning and sending gets a count that disagrees with the
-    /// partition its share came from.
+    /// Fleet size as of the assignment, not as of the send — divergence 7.
     pub node_count: u8,
     /// Which `SCAN_CHANNELS` indices the node was told to dwell on.
     pub channels: ChannelSet,

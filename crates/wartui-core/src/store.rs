@@ -486,10 +486,9 @@ fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, Stor
 
 /// How far ahead of the last used epoch to move the persisted counter at open.
 ///
-/// Divergence 4 exists because a node adopts an assignment only when its
-/// version *differs* from the one it holds, so re-using an epoch after a
-/// restart is silently ignored — and worse, the ack still arrives, so the host
-/// believes an assignment landed that the node discarded. Writing the counter
+/// Divergence 4, and worse than the table says: a re-used epoch is not only
+/// ignored but still acknowledged, so the host believes an assignment landed
+/// that the node discarded. Writing the counter
 /// forward before issuing anything means a crash can only ever skip epochs,
 /// never repeat one. Skipping is free; repeating is the bug.
 ///

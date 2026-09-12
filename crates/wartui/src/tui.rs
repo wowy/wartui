@@ -649,10 +649,9 @@ const CHANNELS_WIDTH: u16 = 18;
 
 /// What the node is scanning, and whether that is known or merely wanted.
 ///
-/// The distinction is the whole of divergence 3. A confirmed set was
-/// acknowledged by the node's own radio; a pending one has been asked for and
-/// is waiting on a heartbeat to open the window. The vendor core cannot tell
-/// these apart, because it clears its dirty flag from the enqueue result.
+/// The distinction is the whole of divergence 3: a confirmed set was
+/// acknowledged by the node's own radio, a pending one is waiting on a
+/// heartbeat to open the window.
 fn channels_cell(node: &NodeView) -> Span<'static> {
     let state = &node.state;
     if state.dirty
