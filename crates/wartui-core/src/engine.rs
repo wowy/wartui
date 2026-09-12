@@ -7,7 +7,7 @@
 //! fleet's behaviour is testable against a clock a test invents.
 //!
 //! Transmitting lives here as well: allocating an epoch, waiting for the
-//! heartbeat that opens a node's 300 ms admin window, and believing the
+//! heartbeat that opens a node's 100 ms admin window, and believing the
 //! assignment landed only on a MAC-layer acknowledgement. With auto-assignment
 //! on, the engine holds a partition of the pool across every heartbeating node
 //! and re-cuts it when that set changes.
@@ -69,7 +69,7 @@ pub enum Event {
 pub enum Command {
     /// Give one node a set of scan-channel indices.
     ///
-    /// Nothing goes out immediately: a node only listens in the 300 ms it holds
+    /// Nothing goes out immediately: a node only listens in the 100 ms it holds
     /// open after a heartbeat, so this marks it dirty and the frame goes on the
     /// next one. Honoured whether or not auto-assignment is on — the engine is
     /// the mechanism, the view is the policy.
@@ -110,7 +110,7 @@ pub struct ActionBatch {
     pub records: Vec<Record>,
     /// Commands that can wait behind anything else.
     pub bulk: Vec<wartui_proto::link::HostToBridge>,
-    /// Commands racing a node's 300 ms admin window, sent ahead of anything
+    /// Commands racing a node's 100 ms admin window, sent ahead of anything
     /// in `bulk`. In practice: assignments, and only ever in the moment after
     /// a heartbeat.
     pub urgent: Vec<wartui_proto::link::HostToBridge>,
@@ -817,7 +817,7 @@ impl FleetEngine {
                 // Re-partitioning here rather than on the next tick is what lets
                 // it take its share inside the window it has just opened.
                 self.replan(now);
-                // The node holds its window open for 300 ms and its radio is gone
+                // The node holds its window open for 100 ms and its radio is gone
                 // after that, so this is the only moment in the sweep worth
                 // transmitting in — as long as the heartbeat is news.
                 // `send_admin` checks that for itself.
@@ -1162,7 +1162,7 @@ impl FleetEngine {
     /// Whether a frame being handled now is recent enough to act on.
     ///
     /// Only assignments care. A stale heartbeat is still a heartbeat — the node
-    /// was alive and its radio is what it said — but the 300 ms window it opened
+    /// was alive and its radio is what it said — but the 100 ms window it opened
     /// shut long ago, so transmitting into it reaches nothing.
     fn air_is_live(&self) -> bool {
         self.backlog_lag_us < BEHIND_THE_AIR

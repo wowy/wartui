@@ -89,7 +89,7 @@ the core's job and the reason this exists. `p` takes that back and `--manual`
 starts without it; **`a` and `A` are refused until one of them does**.
 
 Nothing goes out at the moment a key is pressed. A node's radio is away scanning
-for all but the 300 ms it holds open after its own heartbeat, so the assignment
+for all but the 100 ms it holds open after its own heartbeat, so the assignment
 waits for that window — up to about four seconds on a full sweep. The `channels`
 column reads `1: 1…` until it lands.
 

@@ -584,7 +584,7 @@ fn an_assignment_waits_for_the_heartbeat_that_opens_the_window() {
     engine.handle(heartbeat(NODE, 1), clock.at(1));
 
     // Nothing goes out when the operator asks: a node's radio is away for all but
-    // the 300 ms after its own heartbeat.
+    // the 100 ms after its own heartbeat.
     let asked = engine.handle(assign(NODE, 5, 5), clock.at(2));
     assert!(asked.urgent.is_empty(), "nothing is sent until the window opens");
 
@@ -1567,8 +1567,8 @@ fn a_latency_longer_than_the_admin_window_is_not_recorded_as_one() {
     let opened =
         engine.handle(beat_at(NODE, 2, Capabilities::here(true, true), 2_000_000), clock.at(6));
     let (id, _, _) = sent_admin(&opened);
-    // The callback comes back a full second after the heartbeat, more than
-    // three times the window the node was holding open.
+    // The callback comes back a full second after the heartbeat, ten times the
+    // window the node was holding open.
     let batch = engine.handle(send_result(id, SendStatus::AckOk, 3_000_000), clock.at(6));
 
     let Some(Record::Assignment(row)) = batch.records.first() else { panic!("a row") };
@@ -1578,7 +1578,7 @@ fn a_latency_longer_than_the_admin_window_is_not_recorded_as_one() {
 }
 
 // A latency exactly at the window is still a latency: the node was listening for
-// that whole 300 ms, so the boundary belongs inside.
+// that whole 100 ms, so the boundary belongs inside.
 #[test]
 fn a_latency_at_the_edge_of_the_admin_window_is_still_recorded() {
     let clock = Clock::new();
@@ -1589,8 +1589,8 @@ fn a_latency_at_the_edge_of_the_admin_window_is_still_recorded() {
     let opened =
         engine.handle(beat_at(NODE, 2, Capabilities::here(true, true), 2_000_000), clock.at(6));
     let (id, _, _) = sent_admin(&opened);
-    let batch = engine.handle(send_result(id, SendStatus::AckOk, 2_300_000), clock.at(6));
+    let batch = engine.handle(send_result(id, SendStatus::AckOk, 2_100_000), clock.at(6));
 
     let Some(Record::Assignment(row)) = batch.records.first() else { panic!("a row") };
-    assert_eq!(row.latency_us, Some(300_000));
+    assert_eq!(row.latency_us, Some(100_000));
 }

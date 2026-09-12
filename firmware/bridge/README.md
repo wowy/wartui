@@ -11,11 +11,11 @@ rather than a reflash.
 It transmits, and answers with the **transmit-callback** status rather than the
 enqueue result. Unicast ESP-NOW is acknowledged by the receiver's own MAC
 hardware, so `AckOk` means a node really has the frame. The callback comes back in
-2–4 ms against the node's 300 ms admin window, and in 28–35 ms even in the
+2–4 ms against the node's 100 ms admin window, and in 28–35 ms even in the
 pessimistic case — an *unacknowledged* send, where it fires only once the radio has
 exhausted its retry chain
 ([`docs/phase-4-findings.md`](../../docs/phase-4-findings.md)). A dumb bridge has
-two orders of magnitude in hand.
+more than an order of magnitude in hand.
 
 Peers are added on demand (`ensure_peer`) and never removed as a side effect of
 sending. The radio's table holds twenty entries, one of which `esp-radio` spends
@@ -113,7 +113,7 @@ waited on: both evict oldest-first under pressure and count it into
 That module is in `wartui-proto` so those rules are unit-testable on the host.
 
 The one deliberate exception is the wait for a transmit callback in `transmit`,
-which is milliseconds against a 300 ms window and is what makes `AckOk` mean
+which is milliseconds against a 100 ms window and is what makes `AckOk` mean
 anything. `esp-radio`'s `SendWaiter` busy-waits in `Drop` as well as in `wait`, so
 there is no way to start a send and walk away.
 

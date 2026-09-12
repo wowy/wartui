@@ -2,7 +2,7 @@
 //!
 //! Four keys reach the air — `a`, `A`, `b` and `p`, which the operator's manual
 //! lists (`crates/wartui/README.md`). None of them transmits when pressed: a
-//! node only listens in the 300 ms after its own heartbeat, so a keystroke's
+//! node only listens in the 100 ms after its own heartbeat, so a keystroke's
 //! effect is a row reading `pending` until the next sweep completes. That delay
 //! is the protocol rather than lag, and the view says so.
 //!
