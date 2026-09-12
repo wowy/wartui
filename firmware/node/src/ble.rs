@@ -1,47 +1,33 @@
 //! Bluetooth scanning, when this build was asked for it and the core asked for
 //! it too.
 //!
-//! Compiled in only under `--features ble`, and *run* only while the core has
-//! set `ADMIN_FLAG_BLE` for this node — at most one node in a fleet, and none
-//! by default. Both halves are off for good reason. On a stock node the
-//! per-sweep BLE scan costs roughly as much airtime as every channel dwell put
-//! together — sixteen sweeps against nine over the same 170 seconds — and, far
-//! worse, a node with BLE on acknowledged none of the thirty-two channel
-//! assignments sent to it while a node without BLE acknowledged both of its
-//! two. Both figures are measured; see `docs/phase-0-findings.md`. This code has
-//! since been run three times against that same board on the same bench: it
-//! acknowledged its assignment every time on the first attempt, in 5.8 ms, then
-//! 6.6 ms, then 5.8 ms, and cost 10.0%, 7.6% and 9.6% of its sweep period rather
-//! than the vendor's ~78%. The two runs that measured it against a second board
-//! at the same moment are the 10.0% and the 9.6%. `docs/phase-1-findings.md`
-//! records all three, along with the caveat that none of them varies the three
-//! measures individually. An
-//! 802.11 acknowledgement comes from the receiver's MAC hardware, so its
-//! absence means the radio was simply not on the channel: NimBLE and
-//! Wi-Fi share the one 2.4 GHz antenna, and the admin window is precisely when
-//! the node is otherwise idle and the Bluetooth controller is free to take it.
+//! Compiled in only under `--features ble`, and *run* only while the core has set
+//! `ADMIN_FLAG_BLE` for this node — at most one node in a fleet, and none by
+//! default. On a stock node BLE cost it every channel assignment sent to it,
+//! because an 802.11 acknowledgement comes from the receiver's MAC hardware and
+//! its absence means the radio was simply not on the channel: NimBLE and Wi-Fi
+//! share the one 2.4 GHz antenna, and the admin window is precisely when the node
+//! is otherwise idle and the controller is free to take it. This firmware
+//! acknowledged every time at around a tenth of its sweep period
+//! (`docs/phase-0-findings.md`, `docs/phase-1-findings.md`).
 //!
-//! Two things here are meant to avoid repeating that.
+//! Two things here are what avoid repeating that.
 //!
-//! The scan is **bounded and switched off**, not left running. `HCI_LE_Set_Scan_
-//! Enable(0)` stops the controller taking the antenna at all, which is stronger
-//! than the vendor's `while (pBLEScan->isScanning()) delay(1)`
-//! (`src/WiFiOps.cpp:1452-1453`): that waits for a scan to finish while leaving
-//! an initialised NimBLE stack behind it, and the measurements say something in
-//! that stack keeps the radio.
+//! The scan is **bounded and switched off** rather than left running.
+//! `HCI_LE_Set_Scan_Enable(0)` stops the controller taking the antenna at all,
+//! which is stronger than the vendor's
+//! `while (pBLEScan->isScanning()) delay(1)` (`src/WiFiOps.cpp:1452-1453`): that
+//! waits for a scan to finish while leaving an initialised NimBLE stack behind it,
+//! and something in that stack keeps the radio.
 //!
-//! And it runs **at the far end of the sweep from the admin window** — reported
-//! and finished before the heartbeat goes out, never overlapping the 300 ms the
-//! node has to be listening in. That is a claim about wall-clock distance, not
-//! about position in the loop, so the caller also rate-limits it: a node
-//! assigned a single channel completes a sweep every 125 ms, and "once per
-//! sweep" would put a 500 ms scan against nearly every admin window it has.
-//! `BLE_INTERVAL_MS` in `main.rs` is what keeps the two apart.
+//! And it runs **at the far end of the sweep from the admin window**, finished
+//! before the heartbeat goes out. That is a claim about wall-clock distance rather
+//! than position in the loop, so the caller rate-limits it too — see
+//! `BLE_INTERVAL_MS` in `main.rs`.
 //!
-//! There is no host stack here. `esp-radio` exposes the controller as a raw HCI
-//! pipe and all this firmware wants from Bluetooth is an address and a signal
-//! strength, so the packets are built and read by `wartui_proto::hci` and the
-//! only thing in this file is the conversation.
+//! There is no host stack. `esp-radio` exposes the controller as a raw HCI pipe and
+//! all this firmware wants is an address and a signal strength, so the packets are
+//! built and read by `wartui_proto::hci` and this file is only the conversation.
 
 use esp_hal::peripherals::BT;
 use esp_hal::time::{Duration, Instant};
@@ -58,29 +44,23 @@ pub const SCAN_MS: u32 = 500;
 
 /// Distinct advertisers one sweep will hold.
 ///
-/// Addresses rotate for privacy, so unlike access points these rarely repeat
-/// and the ring behind them never suppresses much. Sixty-four was a guess at a
-/// busy room, and then an ordinary room filled 60 of it and, on the re-run, 61
-/// (`docs/phase-1-findings.md`). The ring drops the *newest* advertiser once it
-/// is full and records that only on a counter no host reads, which makes
-/// overflow the one failure here that nothing would notice — so the number is
-/// set well clear of the measurement rather than just above it.
+/// Addresses rotate for privacy, so these rarely repeat and the ring behind them
+/// suppresses little. An ordinary room filled about 60 of it
+/// (`docs/phase-1-findings.md`), and overflow drops the *newest* advertiser against
+/// a counter no host reads — the one failure here nothing would notice — so the
+/// number sits well clear of the measurement rather than just above it.
 ///
-/// It is also the ceiling on something else, which is the reason not to make it
-/// enormous: `report_ble` broadcasts one frame per *new* advertiser, and it runs
-/// immediately before the stagger, the heartbeat and the admin window. Addresses
-/// rotate, so "new" is most of a sweep — 54 of the first scan's 54. This number
-/// is therefore the worst-case burst standing between the last dwell and the
-/// window this node has to be listening in, which is the delay the whole module
-/// is arranged to avoid.
+/// It is also the ceiling on the burst: `report_ble` broadcasts one frame per *new*
+/// advertiser, immediately before the stagger, the heartbeat and the admin window,
+/// and "new" is most of a sweep. So this is the worst-case delay standing between
+/// the last dwell and the window the node has to be listening in.
 ///
-/// Eighty and not more because `Scanner` is built by value, so the ring is on
-/// the stack of `Scanner::new` and then of `main`: at 96 entries a `esp32c5,ble`
-/// build trips `clippy::large_stack_frames`, which `main.rs` denies. The C5 is
-/// the binding one — a C6 gets as far as 112 — and the margin here is deliberate
-/// so a dependency bump does not land on the limit. Wanting a ring bigger than
-/// this is a reason to move the reports into a `static`, the way `sniff` holds
-/// its sightings, not a reason to raise the threshold.
+/// Eighty and not more because `Scanner` is built by value, so the ring is on the
+/// stack of `Scanner::new` and then of `main`: at 96 entries an `esp32c5,ble` build
+/// trips `clippy::large_stack_frames`, which `main.rs` denies. The C5 binds first —
+/// a C6 reaches 112 — and the margin is deliberate so a dependency bump does not
+/// land on the limit. Wanting a bigger ring is a reason to move the reports into a
+/// `static`, the way `sniff` holds its sightings.
 const REPORTS: usize = 80;
 
 /// Listen continuously while enabled: interval and window equal, at 30 ms.
@@ -108,9 +88,8 @@ impl<'d> Scanner<'d> {
             len: 0,
             dropped: 0,
         };
-        // A reset first, because the controller keeps whatever state the last
-        // run left it in and enabling a scan twice is an error rather than a
-        // no-op.
+        // A reset first: the controller keeps whatever state the last run left it
+        // in, and enabling a scan twice is an error rather than a no-op.
         scanner.command(&RESET)?;
         // After the reset, because the reset restores the default mask that
         // hides advertising reports. See `SET_EVENT_MASK`.
@@ -121,29 +100,21 @@ impl<'d> Scanner<'d> {
 
     /// Listen for `SCAN_MS`, then stop, and return what was heard.
     ///
-    /// Distinct addresses only, keeping the strongest reading for each: the
-    /// same advertiser is heard several times a second and only one of those
-    /// belongs on the wire.
+    /// Distinct addresses only, keeping the strongest reading for each: the same
+    /// advertiser is heard several times a second and only one belongs on the wire.
     ///
-    /// "Heard" is per call and not quite per window. The disable at the end
-    /// drains on a budget, so in a room busy enough to exhaust it a few reports
-    /// from one scan are still queued when the next begins, and this one no
-    /// longer drains before enabling — it counts them. Dedup absorbs the
-    /// repeats, so what this costs is the precision of the `heard` figure in the
-    /// console line, in exactly the busy case where it is least precise anyway.
-    /// Draining first would cost whole reports instead, which is the trade the
-    /// scan-enable path was changed to stop making.
+    /// "Heard" is per call and not quite per window, because the disable at the end
+    /// drains on a budget and a busy room leaves a few reports queued for the next
+    /// scan to count. Dedup absorbs the repeats, so the cost is the precision of a
+    /// console figure; draining first would cost whole reports instead.
     pub fn sweep(&mut self) -> &[AdvReport] {
         self.len = 0;
-        // Written directly rather than through `command`, because from this
-        // point onwards the queue is what the sweep is for. `command` drains
-        // until two consecutive reads come back empty, and a room delivering a
-        // packet every few milliseconds can hold it there for its whole
-        // 32-iteration budget — discarding every advertising report that
-        // arrives in it, and losing more of them the busier the room is. The
-        // collect loop below absorbs the Command Complete instead, at no cost:
-        // `adv_reports` yields nothing for a packet that is not an LE Meta
-        // advertising report.
+        // Written directly rather than through `command`, because from here on the
+        // queue is what the sweep is for: `command` drains until two reads come
+        // back empty, and a busy room can hold it there for its whole budget,
+        // discarding every advertising report that arrives in it. The collect loop
+        // below absorbs the Command Complete at no cost, since `adv_reports` yields
+        // nothing for a packet that is not one.
         if self.connector.write(&set_scan_enable(true)).is_err() {
             return &[];
         }
@@ -173,19 +144,16 @@ impl<'d> Scanner<'d> {
 
     /// Send one command and drain whatever the controller says back.
     ///
-    /// The completion event is not inspected. There is nothing useful to do
-    /// with a controller that refuses `HCI_Reset`, and reading the queue is
-    /// what stops a stale completion occupying it across a scan. It could not
-    /// be *mistaken* for an advertising report — `adv_reports` yields nothing
-    /// for a packet that is not one — so this is about the controller's queue
-    /// space and not about misparsing, which is why `sweep` starts its scan
-    /// without coming through here.
+    /// The completion event is not inspected: there is nothing useful to do with a
+    /// controller that refuses `HCI_Reset`, and reading the queue is what stops a
+    /// stale completion occupying it across a scan. This is about queue space, not
+    /// misparsing — `adv_reports` yields nothing for a packet that is not a report —
+    /// which is why `sweep` starts its scan without coming through here.
     ///
-    /// Draining means draining. A command can be answered with both a Command
-    /// Status and a Command Complete, so stopping at the first packet leaves
-    /// one behind for the next `sweep` to read — which is the situation this
-    /// function exists to prevent. It ends on a quiet queue, or on a budget:
-    /// a controller that will not stop talking must not hold the sweep.
+    /// A command can be answered with both a Command Status and a Command Complete,
+    /// so stopping at the first packet leaves one behind for the next `sweep`. It
+    /// ends on a quiet queue or on a budget: a controller that will not stop talking
+    /// must not hold the sweep.
     fn command(&mut self, bytes: &[u8]) -> Option<()> {
         self.connector.write(bytes).ok()?;
         let mut quiet = 0;
