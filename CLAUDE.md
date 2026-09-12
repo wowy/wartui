@@ -257,9 +257,10 @@ edit stops; follow the pointer before changing the rule.
 - Module-level `//!` docs explain *why* the design is the way it is, not what the code does; the
   reasoning in them is often the only record of a hardware constraint. Match that register, and
   update the reasoning when the decision changes.
+- Documentation should be clear and concise. Link documents when necessary, do not repeat.
 - Rustfmt is configured with `max_width = 100` and `use_small_heuristics = "Max"`.
 - Tests are mostly integration tests under `crates/*/tests/` with full-sentence names
   (`observations_keep_a_node_visible_but_only_heartbeats_keep_it_assignable`); `#[cfg(test)]`
   modules are used for parsing/formatting units (`nmea`, `position`, `export`, `outbox`).
-- Commit messages are prose: an imperative one-line subject, then paragraphs explaining what was
-  wrong and why the fix is shaped as it is — including what was deliberately *not* changed.
+- Commit messages are clear and concise: an imperative one-line subject, then a paragraph explaining
+  what was wrong and why the fix is shaped as it is.

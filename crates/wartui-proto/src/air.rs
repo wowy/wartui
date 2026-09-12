@@ -14,8 +14,7 @@
 //! A magic of our own solves it. It is checked before anything else on both
 //! ends, so a vendor frame costs one `memcmp` here and ours costs one there.
 //! [`foreign`] is what remains of vendor awareness: it recognises `ENOW` in
-//! order to *report* it, because another fleet on the control channel is worth
-//! saying out loud, and never decodes a byte of it.
+//! order to *report* it.
 //!
 //! The header carries a version, which the vendor's did not. It is the lever
 //! for the next incompatible change: a node speaking a version this host does
@@ -52,12 +51,6 @@ pub const SIGHTING_MSG_MIN: usize = OFF_BODY + 11;
 pub const SIGHTING_MSG_MAX: usize = SIGHTING_MSG_MIN + SSID_MAX;
 
 /// [`AdminMsg::flags`] bit 0: scan Bluetooth as well as Wi-Fi.
-///
-/// Off is the safe default and the one a node boots into whatever its build
-/// says, because the coexistence cost is real and measured
-/// (`docs/phase-0-findings.md`): on a stock node BLE cost every one of the
-/// thirty-two assignments sent to it. The `ble` cargo feature decides only
-/// whether the code is compiled in; this bit decides whether it runs.
 pub const ADMIN_FLAG_BLE: u8 = 1 << 0;
 
 /// [`Capabilities::flags`] bit 0: this build has the Bluetooth scan compiled in.
