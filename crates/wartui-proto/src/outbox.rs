@@ -1,10 +1,9 @@
 //! Bounded outbound queues for the bridge's USB link.
 //!
-//! Only the firmware instantiates this, but it lives here rather than in
-//! `firmware/bridge` because it is the one piece of real logic on that side
-//! of the wire — and a `no_std` binary built for `riscv32imac` cannot run a
-//! test. Here it is host-testable, which is where the eviction and
-//! resynchronisation rules below get to be checked rather than assumed.
+//! Only the firmware instantiates this, but it lives here because a `no_std` binary
+//! built for `riscv32imac` cannot run a test, and decision logic belongs where
+//! `cargo test` reaches it. That is why the other `no_std` modules in this crate are
+//! here too, and they point at this paragraph rather than repeating it.
 //!
 //! `UsbSerialJtag` stops accepting bytes the moment its endpoint FIFO fills,
 //! and nothing drains that FIFO unless a host is reading. A blocking write from
@@ -23,20 +22,17 @@
 //! - **bulk** — [`BridgeToHost::Rx`] and [`BridgeToHost::Log`]. A host that has
 //!   fallen behind is better served by the newest observations than the oldest.
 //!
-//! Both rings evict their oldest rather than refuse their newest. A backlog in
-//! the priority ring means the host is not reading at all — and a host that
-//! stops reading while still sending goes on being answered, so eight stale
-//! `Ready` frames would otherwise sit in front of the `Status` that finally
-//! matters. Whichever end is dropped, the frame is gone; the newest is the one
-//! worth keeping.
+//! Both rings evict their oldest rather than refuse their newest: whichever end is
+//! dropped the frame is gone, and a host that stopped reading while still sending
+//! would otherwise be answered from behind eight stale `Ready` frames.
 //!
 //! Evicting a frame already part-way onto the wire leaves a truncated prefix
 //! there, so a lone `0x00` is written behind it. COBS resynchronises at a
 //! terminator and only at a terminator: without one the host would glue the
 //! fragment to the whole of the next frame and fail the checksum on both.
 //!
-//! The count surfaces in [`BridgeToHost::Status`] as `dropped_tx`. A non-zero
-//! value means the host, not the bridge, is the bottleneck.
+//! The count surfaces in [`BridgeToHost::Status`] as `dropped_tx`, where a non-zero
+//! value means the host rather than the bridge is the bottleneck.
 
 use crate::link::{BridgeToHost, MAX_FRAME, encode_frame};
 
@@ -47,8 +43,7 @@ use crate::link::{BridgeToHost, MAX_FRAME, encode_frame};
 /// its oldest, so the useful buffering has to live here.
 const BULK_DEPTH: usize = 24;
 
-/// Frames that answer a host request. Short: the host asks for one status at a
-/// time, and a backlog here means it is not reading at all.
+/// Frames that answer a host request. Short, because the host asks for one at a time.
 const PRIORITY_DEPTH: usize = 8;
 
 /// Somewhere to put bytes that may refuse them.
@@ -155,12 +150,10 @@ pub struct Outbox {
 }
 
 impl Outbox {
-    /// The rings are sixteen kilobytes, so on RISC-V this returns through a
-    /// hidden out-pointer rather than by value — that is the ABI, not an
-    /// optimisation. The only caller passes it to `StaticCell::init_with`, so
-    /// the pointer is into `.bss` and nothing touches the stack. Clippy reads
-    /// the signature rather than the calling convention and sees two copies of
-    /// a large value; there are none.
+    /// The rings are sixteen kilobytes, so on RISC-V this returns through a hidden
+    /// out-pointer by ABI rather than by optimisation, and the only caller passes it
+    /// to `StaticCell::init_with` — so the pointer is into `.bss`. Clippy reads the
+    /// signature rather than the calling convention.
     #[allow(clippy::large_stack_frames, reason = "returned indirectly, straight into .bss")]
     #[allow(
         clippy::new_without_default,
@@ -285,7 +278,6 @@ impl Outbox {
             };
 
             let Some(byte) = byte else {
-                // Frame complete.
                 self.finish(source);
                 continue;
             };
@@ -298,9 +290,8 @@ impl Outbox {
                 }
                 Err(nb::Error::WouldBlock) => break,
                 Err(nb::Error::Other(())) => {
-                    // The endpoint refused the byte outright, so this frame is
-                    // already truncated on the wire. Abandon it and let the
-                    // host resynchronise rather than emit the rest as garbage.
+                    // Refused outright, so this frame is already truncated on the
+                    // wire: abandon it and let the host resynchronise.
                     self.discard_front(source);
                 }
             }
@@ -517,20 +508,18 @@ mod tests {
         sink.capacity = usize::MAX;
         outbox.pump(&mut sink);
 
-        // The truncated head is discarded on its own, and every frame queued
-        // behind it decodes. Without the terminator the fragment would swallow
-        // the frame after it and cost two.
+        // The truncated head is discarded on its own and everything behind it
+        // decodes; without the terminator the fragment would cost two frames.
         let expected: Vec<u8> = (1..=BULK_DEPTH as u8).map(|n| b'a' + n).collect();
         assert_eq!(bodies(&received(&sink.out)), expected);
     }
 
     #[test]
     fn is_empty_tracks_a_frame_all_the_way_off_the_wire() {
-        // The bridge resets itself when this says there is something to send
-        // and nothing has moved for three seconds, so a frame that is half
-        // written must still count as pending. Reporting empty at any point
-        // between `send` and the last byte would make a wedged endpoint look
-        // like a quiet one, which is the state that must never be reset.
+        // The bridge resets itself when this says there is something to send and
+        // nothing has moved for three seconds, so a half-written frame must count as
+        // pending: reporting empty between `send` and the last byte makes a wedged
+        // endpoint look like a quiet one.
         let mut outbox = Outbox::new();
         assert!(outbox.is_empty(), "a fresh outbox has nothing to say");
 
