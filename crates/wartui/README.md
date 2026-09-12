@@ -228,6 +228,14 @@ other. A node streaming observations whose heartbeats are lost would otherwise
 age out and churn the whole fleet's topology; wartui keeps two clocks so the
 difference is visible rather than fatal.
 
+An `alive` node that has stopped reporting is usually not broken: a node reports
+an address once and then holds it back, so a node that is standing still goes quiet
+once it has reported everything in range. That memory is on the node, not the host,
+so it carries over into your next session. A held address is reported again five
+minutes after it was last reported, or sooner if the node hears it at least 10 dB
+louder than it has reported it before. Rebooting a node clears the memory
+(`crates/wartui-proto/src/dedup.rs` explains why it works this way).
+
 The header has three ways of saying it has nothing to drive:
 `auto — nothing heartbeating yet`, `auto — no node it can drive` (nodes are
 alive but none is assignable), and `auto — too many nodes` (over twenty, so the

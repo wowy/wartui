@@ -25,7 +25,7 @@ cargo run -p wartui -- --sim 3 --lat 37.7749 --lon -122.4194
 
 The simulated nodes model the parts of the firmware that matter: they park doing
 nothing until assigned, adopt an assignment only when its epoch differs, dedup
-against a 200-entry ring, and sweep — and so heartbeat — proportionally to how
+through the firmware's own ring, and sweep — and so heartbeat — proportionally to how
 many channels they hold. `--sim-c6 N` makes that many of them ESP32-C6s, counting
 from the end of the fleet, which is how to put a mixed fleet in front of the
 planner without two kinds of board on the desk.
