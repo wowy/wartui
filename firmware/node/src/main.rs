@@ -1,67 +1,25 @@
 //! wartui's wardriving node firmware.
 //!
-//! A node listens on one channel at a time, reports every access point it has
-//! not reported lately, and takes its share of the channel pool from whatever
-//! is acting as the mesh's core — which, for this fleet, is a laptop running
-//! `wartui` behind a USB bridge.
+//! A node listens on one channel at a time, reports every access point it has not
+//! reported lately, and takes its share of the channel pool from whatever is
+//! acting as the mesh's core — for this fleet, a laptop running `wartui` behind a
+//! USB bridge.
 //!
-//! It is a rewrite rather than a port. The scanning and the ESP-NOW comms were
-//! learned from the vendor firmware at
-//! <https://github.com/wowy/ESP32DualBandWardriver>, branch
-//! `feat/node-interference-mitigation`, and the `file:line` citations
-//! throughout point there as the record of a measured behaviour rather than as
-//! a specification to match. The web interface, SD card, display, buttons, fuel
-//! gauge, GPS, geofencing, uploads and dock mode did not come across at all,
-//! because a node in this fleet has no use for any of them and every kilobyte
-//! of them is a kilobyte that can go wrong somewhere a reflash is the only way
-//! to find out.
+//! A rewrite rather than a port: the web interface, SD card, display, buttons,
+//! fuel gauge, GPS, geofencing, uploads and dock mode did not come across, because
+//! every kilobyte of them is a kilobyte that can go wrong where a reflash is the
+//! only way to find out.
 //!
 //! Four things are deliberately different from the firmware it replaces, and
-//! each of them is a fix rather than a preference.
+//! `README.md` § "What it does differently" is the account of why. In short: it
+//! *listens* rather than scanning, so it never transmits on a DFS channel and can
+//! hold `sniffer()` and `esp_now()` at once; it returns to the control channel
+//! after every dwell rather than once a sweep; it shares no wire format with the
+//! vendor's, in either direction; and an unassigned node parks rather than
+//! sweeping all forty channels.
 //!
-//! **It listens instead of scanning.** `WiFi.scanNetworks` is called with
-//! `passive = false` throughout the vendor tree (`src/WiFiOps.cpp:745,755,779`),
-//! so a stock node transmits a probe request on every channel it is assigned,
-//! including the DFS channels where the rules say listen and do not speak. This
-//! one parks the radio and reads the beacons, which is quieter, legal on 52-144,
-//! and — because `WifiController::sniffer()` and `::esp_now()` both borrow the
-//! controller immutably — able to coexist with ESP-NOW rather than tearing it
-//! down and rebuilding it around every scan.
-//!
-//! **It is on the control channel far more often.** A stock node is deaf to its
-//! core for all but the 300 ms it holds open once per sweep, because the scan
-//! owns the radio for everything else. Here nothing owns the radio: the node
-//! returns to the control channel after *every* dwell to report what it heard,
-//! and an assignment sent at any of those moments lands. The 300 ms window is
-//! still honoured, so the host's timing model is unchanged; it simply stops
-//! being the only chance.
-//!
-//! **It shares no wire format with it.** Every frame here carries wartui's own
-//! magic, so a vendor core cannot admit this node to its table and cut its plan
-//! around a node that will never obey it — and a vendor node cannot read an
-//! assignment out of one of ours, which it did, because its receive handlers
-//! test `if (len < sizeof(...)) return;` and our longer frame cleared the
-//! check. Neither fleet can now interfere with the other's assignment, in
-//! either direction.
-//!
-//! **An unassigned node waits rather than sweeping.** The vendor default is all
-//! forty channels (`src/WiFiOps.cpp:77-80`), which means a node that has never
-//! heard a core duplicates whatever the rest of the fleet is doing and is
-//! addressable for 300 ms per sweep while it does. This one parks on the
-//! control channel and heartbeats until it is told what to scan. With wartui's
-//! planner running that lasts a single heartbeat; under `--manual` it lasts
-//! until a key is pressed, and the node collects nothing until then.
-//!
-//! ## Flashing
-//!
-//! ```bash
-//! cargo run --release --features esp32c6   # or --features esp32c5
-//! ```
-//!
-//! The runner is `espflash flash --monitor` with no `--chip`, so it detects the
-//! part itself. Unlike the bridge, the monitor is worth watching: a node's USB
-//! endpoint carries nothing but diagnostics.
-
+//! The runner is `espflash flash --monitor`, and unlike the bridge the monitor is
+//! worth watching: a node's USB endpoint carries nothing but diagnostics.
 #![no_std]
 #![no_main]
 #![deny(
@@ -105,20 +63,14 @@ compile_error!("select exactly one chip: esp32c5 and esp32c6 are mutually exclus
 
 /// Say something on the USB endpoint, if this build has anywhere to say it.
 ///
-/// The bridge is forbidden from printing, because its link protocol runs over
-/// the same endpoint and a stray line would corrupt the framing. A node has that
-/// pipe to itself — the vendor firmware's serial is output-only for the same
-/// reason — so this is the one window into a device with no display, no buttons
-/// and no web interface.
+/// The bridge is forbidden from printing — its link protocol runs over the same
+/// endpoint — but a node has that pipe to itself, so this is the one window into a
+/// device with no display, no buttons and no web interface.
 ///
-/// `esp-println`'s serial-JTAG writer gives the FIFO a bounded number of
-/// attempts and then remembers that nobody is draining it, so a node with no
-/// monitor attached drops its diagnostics rather than stalling mid-sweep. That
-/// is the property that matters here: losing a line is correct, losing the
-/// sweep is not.
-///
-/// The arguments are type-checked either way, so a `log`-less build cannot rot
-/// a format string nobody compiled.
+/// `esp-println`'s serial-JTAG writer gives the FIFO a bounded number of attempts
+/// and then remembers that nobody is draining it: losing a line is correct, losing
+/// the sweep is not. The arguments are type-checked either way, so a `log`-less
+/// build cannot rot a format string nobody compiled.
 macro_rules! note {
     ($($arg:tt)*) => {{
         #[cfg(feature = "log")]
@@ -132,25 +84,17 @@ macro_rules! note {
 
 /// Shortest gap between Bluetooth sweeps.
 ///
-/// Only reached at all when the core has set `ADMIN_FLAG_BLE` for this node.
-/// The `ble` cargo feature decides whether any of this is compiled in; the
-/// flag decides whether it runs, and it is off at boot regardless of the build.
-/// That is the shape it is because the cost is per node and measured: at most
-/// one node in a fleet should be paying it, and which one is the operator's
-/// decision rather than a property of the firmware someone happened to flash.
+/// Only reached when the core has set `ADMIN_FLAG_BLE` for this node; `README.md`
+/// § "Bluetooth runs only when the core asks" has why that is an operator's
+/// decision rather than a property of the flashed build.
 ///
-/// A sweep is nominally once per completed pass over the assigned channels, but
-/// an assignment can be a single channel — with a full fleet on the 34-channel
-/// US pool that is the ordinary outcome of the planner, and narrowing a node by
-/// hand is a documented workflow. Such a node completes a pass every 125 ms, so
-/// tying the Bluetooth scan to the pass would have it hold the shared 2.4 GHz
-/// antenna for four fifths of its life, immediately before every admin window
-/// it has to answer in — which is exactly the failure `docs/phase-0-findings.md`
-/// measured on a stock node and the reason this firmware exists.
-///
-/// So the sweep is rate-limited to what a node carrying the whole pool would
-/// reach anyway. A node on one channel then scans Bluetooth no more often than
-/// a node on forty, and no assignment size makes it the dominant cost.
+/// A sweep is nominally one completed pass over the assigned channels, but an
+/// assignment can be a single channel — the planner's ordinary outcome on a full
+/// fleet. Such a node passes every 125 ms, so tying the scan to the pass would
+/// have it hold the shared 2.4 GHz antenna for four fifths of its life,
+/// immediately before every admin window it has to answer in. Rate-limiting to
+/// what a node carrying the whole pool would reach anyway means no assignment size
+/// makes Bluetooth the dominant cost.
 #[cfg(feature = "ble")]
 const BLE_INTERVAL_MS: u64 = NUM_SCAN_CHANNELS as u64 * CHANNEL_DWELL_MS as u64;
 
@@ -160,17 +104,11 @@ const POLL_MS: u64 = 2;
 
 /// Reset the chip, undoing first what the C5's ROM leaves behind.
 ///
-/// The same funnel the bridge has, for the same reason and with the same one
-/// register in it: a C5 that takes a bare `software_reset()` does not come back
-/// until it loses power, because it boots with
-/// `PCR.RESET_EVENT_BYPASS.reset_event_bypass` set and the ROM's MSPI core
-/// reset then leaves the system bus frozen for the next boot to hang on.
-/// `firmware/bridge/src/main.rs` carries the long version, including why the
-/// fix is written out here rather than taken from `esp-hal` 1.2.
-///
-/// The exposure is quieter on this end than on that one — a node that never
-/// comes back reads as `no heartbeat`, which is also what a node out of range
-/// reads as — and quieter is exactly why it would go unexplained for longer.
+/// The same funnel the bridge has, with the same one register in it;
+/// `firmware/bridge/src/main.rs` carries the reasoning. The exposure is quieter on
+/// this end — a node that never comes back reads as `no heartbeat`, which is also
+/// what a node out of range reads as — and quieter is why it would go unexplained
+/// for longer.
 fn reboot() -> ! {
     #[cfg(feature = "esp32c5")]
     esp_hal::peripherals::PCR::regs()
@@ -190,23 +128,17 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     reboot()
 }
 
-// There is deliberately no watchdog here either, for the reason the bridge
-// gives at length: `esp_hal::init` disables every one on the chip, and the RWDT
-// that would put one back does not fire on these parts with esp-hal 1.1.2. See
-// `firmware/bridge/src/main.rs` and `docs/phase-3-findings.md`. The gap is worth
-// more here than it is there — a hung node reads as `no heartbeat`, which is
-// also what a node out of range and a node with a flat battery read as, so the
-// operator goes looking for the wrong thing — and it is still better left open
-// and written down than papered over with something that does not fire.
+// No watchdog here either; `firmware/bridge/src/main.rs` gives the reason. The gap
+// costs more on this end, because a hung node reads as `no heartbeat` and so does
+// one out of range or with a flat battery.
 
 /// Everything that changes while the node runs.
 ///
 /// Boxed into `.bss` through a [`StaticCell`] rather than built on the stack:
 /// the dedup ring alone is twelve hundred bytes.
 struct Node {
-    /// The epoch of the assignment held. Zero means none has ever arrived,
-    /// which the vendor firmware also uses as its starting value
-    /// (`src/WiFiOps.cpp:81`) and which the core never puts on the wire.
+    /// The epoch of the assignment held. Zero means none has ever arrived, which
+    /// the core never puts on the wire.
     version: u8,
     /// Slot in the fleet-wide staggering order.
     node_index: u8,
@@ -242,28 +174,23 @@ impl Node {
 
     /// Whether the node has anything to sweep.
     ///
-    /// An empty mask counts as nothing, not as an error. There is no frame
-    /// meaning "scan nothing" and the core does not send one, so this is
-    /// reachable only from a host that is confused — and parking is the same
-    /// answer as never having been told anything, which is a state this
-    /// firmware already handles and the host already reads correctly.
+    /// An empty mask counts as nothing rather than as an error: no frame means
+    /// "scan nothing", so this needs a confused host, and parking is the same
+    /// answer as never having been told anything.
     const fn assigned(&self) -> bool {
         self.version != 0 && !self.channels.is_empty()
     }
 
     /// Take an assignment, if it is not the one already held.
     ///
-    /// The test is `!=` rather than `>`, which is what lets a host that has
-    /// restarted and gone back to epoch 1
-    /// still be believed, and it is why re-sending an identical assignment is
-    /// acknowledged and then silently discarded.
+    /// The test is `!=` rather than `>`, so a host that restarted and went back to
+    /// epoch 1 is still believed — and so re-sending an identical assignment is
+    /// acknowledged and silently discarded.
     ///
-    /// Nothing is rejected. `ChannelSet` drops bits above [`NUM_SCAN_CHANNELS`]
-    /// on the way in rather than refusing the frame, for the same reason the
-    /// old contiguous range was clamped rather than refused: the host has
-    /// already had a MAC-layer acknowledgement from the radio and believes the
-    /// assignment landed, so a node that quietly declined it would leave the
-    /// two sides disagreeing with nothing anywhere to say so.
+    /// Nothing is rejected: `ChannelSet` drops bits above [`NUM_SCAN_CHANNELS`]
+    /// rather than refusing the frame, because the radio has already
+    /// MAC-acknowledged it and a node that quietly declined would leave the two
+    /// sides disagreeing with nothing to say so.
     fn adopt(&mut self, admin: &AdminMsg) -> bool {
         if admin.epoch == self.version {
             return false;
@@ -291,10 +218,9 @@ impl Node {
 
 /// What this build is, as every heartbeat says it.
 ///
-/// `ble` is whether the code is compiled in, not whether it is running: the
-/// scan is the core's decision and is off at every boot. `5g` is the chip —
-/// the C5 has a 5 GHz radio and the C6 does not, so a share of 5 GHz channels
-/// dealt to a C6 is a share nobody scans.
+/// `ble` is whether the code is compiled in, not whether it is running: the scan is
+/// the core's decision and is off at every boot. `5g` is the chip, and is what
+/// keeps the planner from dealing a C6 a share nobody scans.
 const CAPABILITIES: Capabilities =
     Capabilities::here(cfg!(feature = "ble"), cfg!(feature = "esp32c5"));
 
@@ -316,19 +242,14 @@ fn main() -> ! {
     let software_interrupt = SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
     esp_rtos::start(timg0.timer0, software_interrupt.software_interrupt0);
 
-    // Order matters. Configuring the controller needs `&mut`, while `sniffer()`
-    // and `esp_now()` each borrow it for as long as they live — so everything
-    // mutable happens first and then both handles are held for the rest of the
-    // program. That is the whole reason this node sniffs rather than scans:
-    // `scan_async` also wants `&mut`, and holding it alongside ESP-NOW is not
-    // expressible.
-    // `Default::default()` would be China. `esp-radio` defaults `country_info`
-    // to `CN` and sets `WIFI_COUNTRY_POLICY_MANUAL`, so the blob applies China's
-    // 5 GHz allocation and nothing later overrides it: 36-64 and 149-165 are
-    // permitted and the whole of 100-144 is refused. That is exactly the ten
-    // channels the C5 refused on the bench, and it is not a DFS rule — 52-64 are
-    // DFS too and they work. `US` is the regulatory domain this fleet operates
-    // in, and it is the pool the planner already defaults to.
+    // Order matters. Configuring the controller needs `&mut`, while `sniffer()` and
+    // `esp_now()` each borrow it for as long as they live — so everything mutable
+    // happens first and both handles are then held for the rest of the program.
+    // That is the whole reason this node sniffs rather than scans: `scan_async`
+    // also wants `&mut`, and holding it alongside ESP-NOW is not expressible.
+    //
+    // `US` rather than `esp-radio`'s default, which silently costs a C5 channels
+    // 100-144 — `firmware/bridge/src/main.rs` has the detail.
     #[allow(unused_mut, reason = "only the C5 has a band mode to set")]
     let mut controller = WifiController::new(
         peripherals.WIFI,
@@ -349,8 +270,7 @@ fn main() -> ! {
     let (manager, mut sender, receiver) = controller.esp_now().split();
 
     // Brought up before the loop rather than on demand: initialising a radio
-    // between a dwell and an admin window is exactly the kind of surprise this
-    // firmware exists to avoid.
+    // between a dwell and an admin window is the kind of surprise to avoid.
     #[cfg(feature = "ble")]
     let mut ble_due = Instant::now();
     #[cfg(feature = "ble")]
@@ -378,10 +298,9 @@ fn main() -> ! {
             // an assignment in answer to one — so this is how long joining a
             // fleet takes, and there is nothing to be gained by waiting first.
             //
-            // Only heartbeat if the radio actually got there, for the reason
-            // the sweep gives below. The listen runs either way: it is what
-            // keeps this loop from spinning, and a node that cannot tune should
-            // still be draining whatever does reach it.
+            // Only heartbeat if the radio got there, for the reason the sweep
+            // gives below. The listen runs either way: it is what keeps this
+            // loop from spinning.
             if radio::park(&manager, &sniffer, CONTROL_CHANNEL, false) {
                 heartbeat(&mut sender, node);
             } else {
@@ -392,16 +311,14 @@ fn main() -> ! {
         }
 
         // Arm after the hop, disarm before the next one. `radio::park` has
-        // promiscuous mode on across the channel change, so anything heard
-        // inside it belongs to neither channel; a refusal means the radio never
-        // arrived, and collecting then would file this channel's name on
-        // whatever the radio is actually still tuned to.
+        // promiscuous mode on across the channel change, so anything heard inside
+        // it belongs to neither channel — and a refusal means the radio never
+        // arrived, so collecting then would file this channel's name on whatever
+        // it is still tuned to.
         let Some(channel) = node.channel() else {
-            // An assignment adopted while parked, whose sweep has not begun.
-            // Step onto its lowest channel and dwell there next time round,
-            // rather than on whichever index the cursor happened to hold when
-            // the frame arrived — which would be a channel this node is no
-            // longer assigned.
+            // An assignment adopted while parked, whose sweep has not begun: step
+            // onto its lowest channel rather than whichever index the cursor held
+            // when the frame arrived, which may no longer be assigned.
             node.advance();
             continue;
         };
@@ -413,10 +330,9 @@ fn main() -> ! {
             note!("radio refused channel {}", channel);
         }
 
-        // Back where the fleet can be heard, for as long as it takes to say
-        // what was on that channel. Reporting from anywhere else would be
-        // shouting into the room the node was just listening to, so a refusal
-        // here costs the observations rather than misdirecting them.
+        // Back where the fleet can be heard, for as long as it takes to say what
+        // was on that channel. A refusal here costs the observations rather than
+        // misdirecting them.
         let on_control = radio::park(&manager, &sniffer, CONTROL_CHANNEL, false);
         if on_control {
             report(&mut sender, node, channel);
@@ -425,14 +341,12 @@ fn main() -> ! {
             note!("radio would not return to channel {}", CONTROL_CHANNEL);
         }
 
-        // `advance` runs either way — a radio that refused one hop must not
-        // leave the node dwelling on that channel for ever — but everything
-        // else here needs the control channel. A heartbeat sent from a dwell
-        // channel is not heard, and worse, it is *counted*: the local transmit
-        // succeeds, the counter climbs, and when the node does come back the
-        // host sees an unbroken sequence rather than the reboot-shaped gap that
-        // would make it re-issue under a fresh epoch. Silence is the honest
-        // report of a radio that will not tune.
+        // `advance` runs either way, so a radio that refused one hop does not leave
+        // the node dwelling there for ever. Everything else needs the control
+        // channel: a heartbeat sent from a dwell channel is not heard and, worse,
+        // is *counted* — the local transmit succeeds and the counter climbs, so the
+        // host sees an unbroken sequence instead of the reboot-shaped gap that
+        // would make it re-issue. Silence is the honest report.
         if node.advance() && on_control {
             #[cfg(feature = "ble")]
             if node.ble && Instant::now() >= ble_due {
@@ -460,10 +374,9 @@ fn main() -> ! {
 /// carrying, and treats sixty seconds of silence as a node that has left the
 /// fleet.
 fn heartbeat(sender: &mut EspNowSender<'_>, node: &mut Node) {
-    // Every heartbeat carries the capabilities, not just the first. Sent once
-    // they would be lost to a dropped frame, or stale after this board is
-    // reflashed with something else — and they are three bytes of a
-    // thirteen-byte frame, so repeating them costs almost nothing on the air.
+    // Every heartbeat carries the capabilities, not just the first: sent once they
+    // would be lost to a dropped frame or stale after a reflash, and they are three
+    // bytes of thirteen.
     let msg = HeartbeatMsg { counter: node.counter, capabilities: CAPABILITIES };
     if radio::broadcast(sender, &msg.encode()) {
         node.counter = node.counter.wrapping_add(1).max(1);
@@ -479,10 +392,8 @@ fn report(sender: &mut EspNowSender<'_>, node: &mut Node, channel: u8) {
         }
         let mut frame = [0u8; SIGHTING_MSG_MAX];
         let Some(len) = sighting.as_msg().encode_into(&mut frame) else { continue };
-        // Recorded only once it is on the air. Suppression is what the ring is
-        // for, and suppressing an access point the host never received would
-        // hide it for the next two hundred addresses — minutes of a node's
-        // life, with nothing anywhere saying why.
+        // Recorded only once it is on the air: suppressing an access point the host
+        // never received would hide it for the next two hundred addresses.
         if radio::broadcast(sender, &frame[..len]) {
             node.seen.insert(sighting.bssid);
             sent += 1;
@@ -502,9 +413,9 @@ fn report(sender: &mut EspNowSender<'_>, node: &mut Node, channel: u8) {
 
 /// Listen for advertisers once per sweep and report the new ones.
 ///
-/// Deliberately here — after the last channel of the sweep, before the
-/// heartbeat — so the Bluetooth radio is switched off again well ahead of the
-/// window in which this node has to answer an assignment.
+/// Deliberately after the last channel of the sweep and before the heartbeat, so
+/// the Bluetooth radio is off again well ahead of the window this node has to
+/// answer an assignment in.
 #[cfg(feature = "ble")]
 fn report_ble(sender: &mut EspNowSender<'_>, node: &mut Node, scanner: &mut ble::Scanner<'_>) {
     let mut lines = 0u32;
@@ -531,8 +442,7 @@ fn report_ble(sender: &mut EspNowSender<'_>, node: &mut Node, scanner: &mut ble:
 /// Hold the control channel for `ms`, acting on anything that arrives.
 ///
 /// This is the admin window. The radio acknowledges a unicast assignment in
-/// hardware whether or not this loop is running, but adopting one needs the
-/// frame, and the frame is only read here.
+/// hardware either way, but adopting one needs the frame, read only here.
 fn listen(receiver: &EspNowReceiver<'_>, node: &mut Node, ms: u32) {
     let until = Instant::now() + Duration::from_millis(u64::from(ms));
     loop {
@@ -549,17 +459,16 @@ fn drain_admin(receiver: &EspNowReceiver<'_>, node: &mut Node) {
     while let Some(received) = receiver.receive() {
         let admin = match Frame::decode(received.data()) {
             Ok(Frame::Admin(admin)) => admin,
-            // A host speaking a wire version this build does not. Said out
-            // loud rather than dropped with everything else: it is the whole
-            // diagnosis for a node that is being talked to and never answers,
-            // and the version byte exists so that it can be said.
+            // A host speaking a wire version this build does not. Said out loud
+            // rather than dropped with everything else: it is the whole diagnosis
+            // for a node that is talked to and never answers.
             Err(DecodeError::BadVersion(version)) => {
                 note!("ignoring a frame at wire version {}; reflash this node", version);
                 continue;
             }
-            // Everything else on this channel: our own broadcasts coming back,
-            // the rest of the fleet's, and whatever else is nearby. A vendor
-            // fleet's frames fail the magic and land here, which is the point.
+            // Everything else on this channel: our own broadcasts coming back, the
+            // rest of the fleet's, and whatever else is nearby — a vendor fleet's
+            // frames fail the magic and land here, which is the point.
             _ => continue,
         };
         if node.adopt(&admin) {
