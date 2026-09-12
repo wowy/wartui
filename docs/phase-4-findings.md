@@ -61,7 +61,7 @@ Two things fall out that are worth measuring for their own sake:
 
 - **SSIDs stop being mangled.** The vendor line was split on commas, so the
   sender rewrote a comma inside an SSID as an underscore before transmitting
-  and the real name was lost at the one point in the
+  (`src/WiFiOps.cpp:1768`) and the real name was lost at the one point in the
   path where it still existed. The SSID is length-prefixed now, and `export`
   already quotes CSV correctly at the only boundary that is actually CSV.
 - **A half-flashed fleet says so.** `wartui-proto` is compiled into the host and
