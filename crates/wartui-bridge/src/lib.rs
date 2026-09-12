@@ -36,9 +36,9 @@ pub struct BridgeInfo {
     pub mac: Mac,
     /// Bridge firmware version.
     pub fw_version: String,
-    /// Why the bridge is running this life rather than the last one. Carried
-    /// up here rather than logged and dropped, because a bridge that restarts
-    /// mid-capture restarts underneath a host that has no other way to tell.
+    /// Why the bridge is running this life rather than the last one. Carried up here
+    /// rather than logged and dropped, because a bridge restarts underneath a host
+    /// that has no other way to tell.
     pub reset_cause: ResetCause,
     /// Where the previous life stopped, when the reset preserved it.
     pub last_phase: LoopPhase,
@@ -46,9 +46,8 @@ pub struct BridgeInfo {
     pub heap_free: u32,
     /// How long the bridge had been up when it announced itself.
     ///
-    /// Small means this connection is talking to a bridge that has just
-    /// restarted — which, since a software reset keeps the USB device, is
-    /// something the host would otherwise have no way to notice.
+    /// Small means this connection is talking to a bridge that has just restarted;
+    /// see `serial::is_a_new_life`.
     pub uptime_ms: u32,
 }
 

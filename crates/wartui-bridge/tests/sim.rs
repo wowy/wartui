@@ -63,10 +63,8 @@ fn admin_command(dst: Mac, admin: AdminMsg) -> HostToBridge {
 
 /// An assignment for node 0, since almost every test needs one.
 ///
-/// A wartui node parks on the control channel and collects nothing until it is
-/// told what to scan (`src/main.rs`, and unlike the vendor firmware's all-forty
-/// default at `src/WiFiOps.cpp:77-80`). So a test that wants to see anything at
-/// all has to do first what the host does on the node's first heartbeat.
+/// A wartui node parks and collects nothing until told what to scan, so a test that
+/// wants to see anything has to do first what the host does on the first heartbeat.
 fn assign(link: &LinkHandle, version: u8, channels: ChannelSet, ble: bool) {
     link.send_urgent(admin_command(
         SimTransport::node_mac(0),
@@ -158,10 +156,8 @@ async fn observations_decode_as_sightings() {
 
 #[tokio::test(start_paused = true)]
 async fn a_node_reports_each_wifi_network_only_once() {
-    // The firmware suppresses a BSSID it has already sent until the 200-entry
-    // ring flushes it. A simulator that streamed the same networks forever
-    // would hide that, and the fleet view would be wrong about observation
-    // rates.
+    // A simulator that streamed the same networks forever would leave the fleet view
+    // wrong about observation rates.
     let config = SimConfig { node_count: 1, ble_chance: 0.0, ..SimConfig::default() };
     let mut link = SimTransport::new(config).start().expect("starts");
     assign(&link, 1, everything(), false);
@@ -204,10 +200,7 @@ async fn ble_sightings_keep_arriving_because_their_addresses_rotate() {
 
 #[tokio::test(start_paused = true)]
 async fn narrowing_a_nodes_range_collapses_its_heartbeat_period() {
-    // This is the Phase 4 milestone, run in simulation: sweep length is
-    // proportional to the assigned range, so a node given one channel
-    // heartbeats far more often. It is how an assignment can be confirmed
-    // without any access to the node's own console.
+    // How an assignment is confirmed with no access to the node's own console.
     let config = SimConfig { node_count: 1, ble_chance: 0.0, ..SimConfig::default() };
     let mut link = SimTransport::new(config).start().expect("starts");
     let node = SimTransport::node_mac(0);
@@ -297,9 +290,8 @@ async fn a_repeated_assignment_version_is_ignored_by_the_node() {
     // Skip the sweep that straddles the change.
     next_heartbeat_from(&mut link, node).await;
 
-    // The same epoch, saying something completely different. A node adopts on
-    // `!=`, so this is a frame it acknowledges and then discards — which is
-    // exactly why the host must persist a monotonic counter across restarts.
+    // The same epoch, saying something completely different: acknowledged and then
+    // discarded.
     let mut one = ChannelSet::empty();
     one.insert(0);
     assign(&link, 7, one, false);
@@ -355,7 +347,6 @@ async fn only_the_node_given_the_bluetooth_assignment_reports_any() {
     let config = SimConfig { node_count: 2, ble_chance: 1.0, ..SimConfig::default() };
     let mut link = SimTransport::new(config).start().expect("starts");
     assign(&link, 1, everything(), true);
-    // Node 1 gets the same channels and no Bluetooth.
     link.send_urgent(admin_command(
         SimTransport::node_mac(1),
         AdminMsg { epoch: 1, node_index: 1, node_count: 2, flags: 0, channels: everything() },
@@ -382,10 +373,8 @@ async fn only_the_node_given_the_bluetooth_assignment_reports_any() {
 
 #[tokio::test(start_paused = true)]
 async fn a_simulated_c6_says_it_has_no_five_ghz_radio() {
-    // The only way to put a mixed fleet in front of the planner without two
-    // kinds of board on the desk. It is the heartbeat that carries this, so a
-    // simulator that claimed 5 GHz for every node would be one where the
-    // planner's whole reason to treat nodes differently never arises.
+    // The only way to put a mixed fleet in front of the planner without two kinds of
+    // board on the desk.
     let config = SimConfig { node_count: 3, c6_nodes: 1, ble_chance: 0.0, ..SimConfig::default() };
     let mut link = SimTransport::new(config).start().expect("starts");
 
@@ -405,10 +394,8 @@ async fn a_simulated_c6_says_it_has_no_five_ghz_radio() {
 
 #[tokio::test(start_paused = true)]
 async fn a_node_holding_the_bluetooth_antenna_acknowledges_nothing_and_cannot_be_told_to_stop() {
-    // The Phase 0 failure, reproduced without hardware so the host's
-    // `no admin ack` path can be exercised. Off unless asked for, because
-    // wartui's own node firmware does not do this — it acknowledged every
-    // assignment on the bench with Bluetooth on.
+    // Reproduced without hardware so the host's `no admin ack` path can be
+    // exercised; see `SimConfig::ble_coexistence_failure`.
     let config = SimConfig {
         node_count: 1,
         ble_coexistence_failure: true,
