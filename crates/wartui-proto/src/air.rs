@@ -6,24 +6,12 @@
 //! and tested against real bytes.
 //!
 //! Every frame in both directions is wartui's own, and is deliberately
-//! unrecognisable to the vendor firmware this project grew up against. That is
-//! not tidiness. ESP-NOW has no addressing above the MAC layer and a node
-//! broadcasts to `FF:FF:FF:FF:FF:FF`, so anything speaking the vendor's format
-//! on the control channel is in everybody's conversation at once:
+//! unrecognisable to the vendor firmware this project grew up against. ESP-NOW
+//! has no addressing above the MAC layer and a node broadcasts to
+//! `FF:FF:FF:FF:FF:FF`, so anything speaking the vendor's format  on the
+//! control channel is in everybody's conversation at once.
 //!
-//! * A vendor core hearing vendor-shaped heartbeats from our nodes admits them
-//!   to its own table and cuts its plan for nodes that will never obey it —
-//!   which is the "two nodes and a stranger cover less of the pool than the two
-//!   alone" failure measured in `docs/phase-2-findings.md`, inflicted on
-//!   somebody else's fleet.
-//! * Worse in the other direction: the vendor's receive handlers test
-//!   `if (len < sizeof(...)) return;` rather than for equality, so wartui's
-//!   assignment cleared a stock node's length check and its leading bytes
-//!   decoded as `enow_admin_msg_t` — epoch, index and count landing correctly
-//!   and then the flags byte read as `start_channel_idx`. A stock node in range
-//!   adopted a garbage channel range from us.
-//!
-//! A magic of our own closes both. It is checked before anything else on both
+//! A magic of our own solves it. It is checked before anything else on both
 //! ends, so a vendor frame costs one `memcmp` here and ours costs one there.
 //! [`foreign`] is what remains of vendor awareness: it recognises `ENOW` in
 //! order to *report* it, because another fleet on the control channel is worth
@@ -31,8 +19,7 @@
 //!
 //! The header carries a version, which the vendor's did not. It is the lever
 //! for the next incompatible change: a node speaking a version this host does
-//! not know is counted and named rather than half-decoded, which is precisely
-//! the failure described above.
+//! not know is counted and named rather than half-decoded
 
 use core::fmt;
 
