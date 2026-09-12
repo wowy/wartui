@@ -203,6 +203,9 @@ edit stops; follow the pointer before changing the rule.
 - **`esp-radio 1.0.0-beta.0` requires `esp-hal ~1.1.0`, and that pins the whole family.** Do not try
   to force it; `cargo update` lists newer versions and moves nothing. Issue #16 is the real upgrade.
   → `firmware/bridge/README.md` § "Dependency versions"
+- **Every bridge and node transmits at 2 dBm**, the lowest `set_max_tx_power` accepts. It is the
+  operator's policy for the whole fleet, not a default to raise for one board; range is the cost.
+  → `crates/wartui-proto/src/plan.rs`, `TX_POWER_QUARTER_DBM`
 - **The air is plaintext ESP-NOW in both directions** — no pairing handshake and no key.
   → `firmware/bridge/src/main.rs`, peer registration
 - **Setting a node's channel is not `set_channel` alone** — without promiscuous mode on across the

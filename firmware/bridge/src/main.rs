@@ -398,11 +398,15 @@ fn main() -> ! {
     // went. This end at least says so — `SetChannel` answers a refusal with an
     // `Error` frame — but two halves of one fleet disagreeing about what is legal
     // is a trap even when one half can describe it.
-    let controller = esp_radio::wifi::WifiController::new(
+    let mut controller = esp_radio::wifi::WifiController::new(
         peripherals.WIFI,
         esp_radio::wifi::ControllerConfig::default().with_country_info(*b"US"),
     )
     .expect("Wi-Fi controller");
+    // Every radio in the fleet transmits at 2 dBm; `plan::TX_POWER_QUARTER_DBM` has why.
+    // Before the split, which borrows the controller for the rest of the program, and
+    // reported after `Ready` below, because the ROM banner swallows anything earlier.
+    let tx_power = controller.set_max_tx_power(wartui_proto::plan::TX_POWER_QUARTER_DBM);
     // Split rather than kept whole: `EspNowSender::send` needs `&mut`, so holding
     // the parts separately keeps a transmit from borrowing the receive path.
     let (manager, mut sender, receiver) = controller.esp_now().split();
@@ -426,6 +430,9 @@ fn main() -> ! {
 
     let mac = esp_radio::wifi::Interface::station().mac_address();
     bridge.announce(mac);
+    if tx_power.is_err() {
+        bridge.error("could not cap transmit power at 2 dBm");
+    }
 
     loop {
         let mut worked = false;
