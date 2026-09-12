@@ -113,6 +113,9 @@ At most one node scans Bluetooth, and by default none does. `b` moves it.
   to reach it. It's Japan-only 802.11b, so should be extremely rare.
 - **Plaintext ESP-NOW only**, in both directions. There is no pairing handshake
   and no key.
+- **Every radio transmits at 2 dBm.** The fleet is meant to ride in one vehicle
+  with its bridge; carry a node much farther off and its heartbeats are the first
+  thing lost.
 - **Nothing is compatible with an earlier wartui, and that is the policy until
   1.0.** `wartui-proto` is compiled into the host and both firmwares, so flash the
   fleet together; a node on a previous build is traffic this host cannot read. The
