@@ -304,8 +304,7 @@ impl SimNode {
             epoch: 0,
             node_index: 0,
             node_count: 1,
-            // Nothing until it is told. The vendor default is all forty channels
-            // (`src/WiFiOps.cpp:77-80`); a wartui node parks on the control channel,
+            // Nothing until it is told. A wartui node parks on the control channel,
             // so one that has never heard a core is not quietly duplicating the
             // fleet's work.
             channels: ChannelSet::empty(),
@@ -339,7 +338,7 @@ impl SimNode {
         self.holds_ble.load(Ordering::Relaxed)
     }
 
-    /// The firmware's 200-entry insertion-order ring (`src/WiFiOps.cpp:1803`).
+    /// The node's 200-entry insertion-order ring.
     /// Returns true the first time a MAC is offered.
     fn first_sighting(&mut self, mac: Mac) -> bool {
         if self.seen.contains(&mac) {
@@ -383,8 +382,7 @@ async fn run_node(
             continue;
         }
 
-        // A node walks its assigned channels one per step
-        // (`startNextNodeAssignedScan`, `src/WiFiOps.cpp:741-760`), so the
+        // A node walks its assigned channels one per step, so the
         // sweep — and therefore the heartbeat period — is proportional to how
         // many channels it was given.
         for idx in node.channels.indices() {

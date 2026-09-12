@@ -10,7 +10,7 @@
 # with # are ignored, so a capture can be appended unedited.
 #
 # The assembled frames in tests/beacon.rs check the classification ladder
-# against a reading of src/WiFiOps.cpp:154-408. These check it against the air,
+# against a reading of the auth-mode rules. These check it against the air,
 # which is a different question and the one that has caught things before.
 #
 # SCRUBBED, and the extractor does it by default. A capture of the air around

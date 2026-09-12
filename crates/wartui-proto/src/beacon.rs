@@ -1,18 +1,14 @@
 //! Turning 802.11 management frames into observations.
 //!
-//! The vendor node discovers access points with `WiFi.scanNetworks(..., passive
-//! = false, ...)` (`src/WiFiOps.cpp:745,755,779,3311`), so it transmits a probe
-//! request on every channel it is assigned — including the DFS channels, where
-//! the rules say listen and do not speak. A wartui node parks the radio and
-//! listens instead, which means it has to do for itself the one thing the scan
-//! API was buying: work out what a beacon is advertising.
+//! An active scan transmits a probe request on every channel it visits — including
+//! the DFS channels, where the rules say listen and do not speak. A wartui node
+//! parks the radio and listens instead, which means it has to do for itself the
+//! one thing the scan API was buying: work out what a beacon is advertising.
 //!
-//! A port of `getAuthType` (`src/WiFiOps.cpp:154-408`), a complete RSN/WPA
-//! information-element parser that nothing in the vendor tree calls, and of the
-//! `wifi_auth_mode_t` table it feeds (`security_int_to_string`,
-//! `src/WiFiOps.cpp:1833-1878`), collapsed into one pass yielding a [`Security`].
-//! The set of values has to stay faithful to that table even though the spelling no
-//! longer travels on the wire: it is what the WiGLE `AuthMode` column says.
+//! An RSN/WPA information-element parser and the `wifi_auth_mode_t` table it feeds,
+//! collapsed into one pass yielding a [`Security`]. The set of values has to stay
+//! faithful to that table even though the spelling no longer travels on the wire:
+//! it is what the WiGLE `AuthMode` column says.
 //!
 //! [`visible_ssid`] exists because an access point hides its name in either of two
 //! ways and only one of them looks hidden: an SSID element of length zero, or the
@@ -93,7 +89,7 @@ pub fn visible_ssid(bytes: &[u8]) -> &[u8] {
 /// Split out because promiscuous mode delivers every frame on the channel and most
 /// are data, so a caller rejects them before doing anything that costs — taking a
 /// lock, most of all. Type 0 is management, and only these two subtypes carry the
-/// elements (`src/WiFiOps.cpp:167-176`).
+/// elements.
 #[must_use]
 pub const fn is_report(frame: &[u8]) -> bool {
     let Some(&fc0) = frame.first() else { return false };
@@ -211,8 +207,7 @@ impl Elements {
                     self.has_wpa = true;
                     self.read_suites(&data[4..], false);
                 }
-                // WAPI. Its contents are not inspected, matching
-                // `src/WiFiOps.cpp:329-332`.
+                // WAPI. Its contents are not inspected.
                 68 => self.has_wapi = true,
                 _ => {}
             }
@@ -221,8 +216,8 @@ impl Elements {
     }
 
     /// Skip the version, group cipher and pairwise list, then read the AKM
-    /// suites. `src/WiFiOps.cpp:222-289` for RSN and `:277-325` for WPA; the
-    /// two bodies are the same shape once the OUI and type are stripped.
+    /// suites. The RSN and WPA bodies are the same shape once the OUI and type are
+    /// stripped.
     fn read_suites(&mut self, body: &[u8], rsn: bool) {
         // Version (2) + group cipher (4).
         let Some(rest) = body.get(6..) else { return };
@@ -248,11 +243,10 @@ impl Elements {
         }
     }
 
-    /// The classification ladder from `src/WiFiOps.cpp:341-401`, mapped
-    /// straight onto the tokens `security_int_to_string` would have produced.
+    /// The classification ladder, mapped straight onto WiGLE's `AuthMode` tokens.
     ///
-    /// Order matters and is preserved verbatim, including the two rungs that fall
-    /// through to [`Security::Undefined`]: the firmware's `switch` has no arm for
+    /// Order matters, including the two rungs that fall
+    /// through to [`Security::Undefined`]: the auth-mode table has no token for
     /// `WIFI_AUTH_OWE` or for WPA3-Enterprise, so both reach the WiGLE column as
     /// `[UNDEFINED]`. The column is a contract with an exporter rather than a
     /// description of the network.
@@ -269,10 +263,9 @@ impl Elements {
         // `[WPA2]` is `WIFI_AUTH_WPA2_ENTERPRISE` despite the spelling, and a
         // WPA-only enterprise network lands here too.
         //
-        // `!has_rsn` on the second arm is the vendor's, not a simplification
-        // (`src/WiFiOps.cpp:375`): an access point advertising 802.1X in its legacy
-        // WPA element and PSK in its RSN element will negotiate the RSN one, and
-        // without the guard the two firmwares disagree about the same beacon.
+        // `!has_rsn` on the second arm is deliberate, not a simplification: an
+        // access point advertising 802.1X in its legacy WPA element and PSK in its
+        // RSN element will negotiate the RSN one.
         if (self.has_rsn && self.rsn_8021x) || (self.has_wpa && self.wpa_8021x && !self.has_rsn) {
             return Security::Wpa2Enterprise;
         }

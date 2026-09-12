@@ -5,18 +5,16 @@
 //! between two separately compiled programs, so it deserves to be spelled out
 //! and tested against real bytes.
 //!
-//! Every frame in both directions is wartui's own, and is deliberately
-//! unrecognisable to the vendor firmware this project grew up against. ESP-NOW
-//! has no addressing above the MAC layer and a node broadcasts to
-//! `FF:FF:FF:FF:FF:FF`, so anything speaking the vendor's format on the
-//! control channel is in everybody's conversation at once.
+//! Every frame in both directions is wartui's own. ESP-NOW has no addressing
+//! above the MAC layer and a node broadcasts to `FF:FF:FF:FF:FF:FF`, so anything
+//! sharing a format on the control channel is in everybody's conversation at
+//! once.
 //!
-//! A magic of our own solves it. It is checked before anything else on both
-//! ends, so a vendor frame costs one `memcmp` here and ours costs one there.
-//! [`foreign`] is what remains of vendor awareness: it recognises `ENOW` in
-//! order to *report* it.
+//! A magic of our own solves it. It is checked before anything else, so another
+//! firmware's frame costs one `memcmp`. [`foreign`] recognises one such format,
+//! `ENOW`, in order to *report* it.
 //!
-//! The header carries a version, which the vendor's did not. It is the lever
+//! The header carries a version. It is the lever
 //! for the next incompatible change: a node speaking a version this host does
 //! not know is counted and named rather than half-decoded.
 
@@ -67,9 +65,8 @@ const OFF_BODY: usize = 6;
 /// claims to be.
 const HEADER_LEN: usize = OFF_BODY;
 
-/// What a frame is. Deliberately not the vendor's `1..=5`, and with the
-/// direction in the high bit so a misrouted frame is a decode error rather than
-/// a plausible one of something else.
+/// What a frame is, with the direction in the high bit so a misrouted frame is a
+/// decode error rather than a plausible one of something else.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum MsgType {
@@ -327,9 +324,9 @@ impl TryFrom<u8> for RecordKind {
 ///
 /// One byte on the wire, and the WiGLE `AuthMode` spelling only at the edge
 /// where WiGLE wants it — [`Display`](fmt::Display), which the store row and
-/// the exported column both go through. The vendor put the spelling on the
-/// wire, which cost seventy bytes a record to carry a closed set of eleven
-/// values and made the parser on this end a string comparison.
+/// the exported column both go through. Spelling it on the wire would
+/// cost seventy bytes a record to carry a handful of values, and make the parser
+/// on this end a string comparison.
 ///
 /// The set is open-ended, so a discriminant this build does not know is carried
 /// through as [`Security::Unknown`] rather than failing the frame: a node from
@@ -429,13 +426,11 @@ impl fmt::Display for Security {
 
 /// Node → core, one per newly-seen BSSID.
 ///
-/// Seventeen bytes plus the SSID, against the vendor's fixed 212 — padding paid on
-/// the control channel every node shares, once per access point.
+/// Seventeen bytes plus the SSID and no padding, because every byte is paid on the
+/// control channel every node shares, once per access point.
 ///
-/// The SSID is length-prefixed. The vendor line was split on commas, so a comma
-/// inside an SSID took the record apart and the sender rewrote it as an underscore
-/// before transmitting, losing the real name at the one point in the path where it
-/// still existed. A length needs no escaping.
+/// The SSID is length-prefixed, so a comma or any other byte inside it arrives
+/// intact. A length needs no escaping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SightingMsg<'a> {
     /// Wi-Fi or BLE.
@@ -535,8 +530,8 @@ impl<'a> SightingMsg<'a> {
 /// and lets the planner deal channels round-robin so every node carries some of
 /// both bands.
 ///
-/// How this frame is *delivered* is shaped by measured vendor behaviour rather
-/// than by the layout. An unacknowledged unicast is retried by the radio, all 31
+/// How this frame is *delivered* is shaped by measured behaviour rather than by
+/// the layout. An unacknowledged unicast is retried by the radio, all 31
 /// retries falling inside the one window that failed, and an 802.11
 /// acknowledgement comes from the receiver's MAC hardware — so its absence means
 /// the radio was not on the channel at all, which on a stock node was NimBLE

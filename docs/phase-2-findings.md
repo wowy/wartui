@@ -5,6 +5,10 @@ Measured on 2026-09-07. The bridge throughout is an ESP32-C6 running
 `4F:98`) on `--features esp32c5,ble` unless a section says otherwise. Runs A to
 D are one node; run E is both. Pool `us`, plaintext, control channel 6.
 
+`file:line` citations below point into
+[wowy/ESP32DualBandWardriver](https://github.com/wowy/ESP32DualBandWardriver) on
+`feat/node-interference-mitigation`, the vendor firmware.
+
 Access point addresses and names are left out deliberately, as in Phase 1:
 these were real captures of a real neighbourhood, and a BSSID is exactly what a
 geolocation database is built from. Counts and channels carry none of that and

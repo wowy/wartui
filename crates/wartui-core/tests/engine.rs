@@ -193,7 +193,6 @@ fn the_raw_frame_is_kept_alongside_the_parsed_one() {
 
 #[test]
 fn a_heartbeat_counter_going_backwards_counts_a_reboot() {
-    // Divergence 5.
     let clock = Clock::new();
     let mut engine = engine(manual(), &clock);
 
@@ -210,7 +209,7 @@ fn a_heartbeat_counter_going_backwards_counts_a_reboot() {
 
 #[test]
 fn observations_keep_a_node_visible_but_only_heartbeats_keep_it_assignable() {
-    // Divergence 2: is this node there, and can it still be given a range.
+    // Two questions: is this node there, and can it still be given a range.
     let clock = Clock::new();
     let config = EngineConfig { topology_timeout: Duration::from_secs(60), ..manual() };
     let mut engine = engine(config, &clock);
@@ -834,7 +833,7 @@ fn an_assignment_is_believed_only_once_the_node_radio_acknowledges_it() {
     engine.handle(assign(NODE, 0, 10), clock.at(2));
     let (id, _, _) = sent_admin(&engine.handle(heartbeat(NODE, 2), clock.at(6)));
 
-    // Divergence 3.
+    // Only the MAC-layer acknowledgement clears the dirty flag.
     let batch = engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(6));
     let node = engine.nodes().next().expect("the node");
     assert!(!node.dirty, "acknowledged, so there is nothing left to deliver");
@@ -977,7 +976,7 @@ fn a_reboot_re_issues_the_assignment_under_a_fresh_epoch() {
     engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(6));
     assert!(engine.nodes().next().expect("the node").confirmed.is_some());
 
-    // Divergence 5. Its own version field went back to a boot value with it, and
+    // The node rebooted. Its own version field went back to a boot value with it, and
     // since a node adopts on `!=` rather than `>`, re-sending the old epoch could
     // match what it now holds and be discarded — while still being acknowledged.
     let batch = engine.handle(heartbeat(NODE, 1), clock.at(10));
@@ -993,7 +992,6 @@ fn a_reboot_re_issues_the_assignment_under_a_fresh_epoch() {
 #[test]
 fn epochs_carry_on_from_where_the_database_left_off() {
     let clock = Clock::new();
-    // Divergence 4.
     let config = EngineConfig { assignment_base: 300, ..manual() };
     let mut engine = engine(config, &clock);
     engine.handle(heartbeat(NODE, 1), clock.at(1));
@@ -1011,7 +1009,7 @@ fn the_fleet_arithmetic_travels_with_the_assignment_rather_than_being_read_at_se
     engine.handle(heartbeat(NODE, 1), clock.at(1));
     engine.handle(assign(NODE, 0, 10), clock.at(2));
 
-    // Divergence 7.
+    // A node joins between planning and sending; `node_count` stays as planned.
     engine.handle(heartbeat(OTHER, 1), clock.at(3));
 
     let (_, _, admin) = sent_admin(&engine.handle(heartbeat(NODE, 2), clock.at(6)));
@@ -1168,9 +1166,8 @@ fn auto_assignment_deals_the_whole_pool_out_across_the_fleet() {
         }
     }
 
-    // `node_index` and `node_count` drive the transmit stagger
-    // (`src/RadioTuning.cpp:3-13`), so they must agree fleet-wide: unique indices
-    // over one shared count.
+    // `node_index` and `node_count` drive the transmit stagger, so they must
+    // agree fleet-wide: unique indices over one shared count.
     let indices: Vec<(u8, u8)> = engine
         .nodes()
         .map(|node| {
@@ -1244,7 +1241,7 @@ fn a_node_that_stops_heartbeating_leaves_the_plan_and_the_rest_take_its_channels
     engine.handle(heartbeat(peer(1), 1), clock.at(2));
     assert_eq!(covered(&wanted(&engine)), pool_indices(ChannelPool::Us));
 
-    // Divergence 2: topology is driven by heartbeats alone.
+    // Topology is driven by heartbeats alone.
     engine.handle(heartbeat(peer(1), 2), clock.at(70));
 
     let departed = engine.nodes().next().expect("the node that went quiet");

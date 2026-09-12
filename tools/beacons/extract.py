@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Turn a monitor-mode capture into beacon vectors for the parser tests.
 
-`crates/wartui-proto/src/beacon.rs` reproduces a classification ladder the
-vendor firmware wrote and never ran, so the tests around it are assembled
-frames: they check the ladder against my reading of it. That is worth doing and
+`crates/wartui-proto/src/beacon.rs` implements a classification ladder, and the tests
+around it are assembled frames: they check the ladder against my reading of it. That is worth doing and
 it is not the same as checking it against the air. This script closes that gap
 the way `tools/espnow-sniffer` does for the ESP-NOW structs — by turning real
 frames into permanent regression tests.

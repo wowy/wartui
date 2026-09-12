@@ -4,8 +4,8 @@
 //! the host TUI and the bridge firmware. Defining the wire types once is the
 //! only thing that keeps the two ends from drifting apart.
 //!
-//! The wire formats are wartui's own, and nothing here interoperates with the vendor
-//! firmware the `src/*.cpp:NNN` citations point into — CLAUDE.md says what those are.
+//! The wire formats are wartui's own, and nothing here interoperates with any other
+//! firmware.
 
 #![no_std]
 
