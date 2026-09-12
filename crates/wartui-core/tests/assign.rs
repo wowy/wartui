@@ -9,13 +9,9 @@
 //! This is the same check to make against real hardware, at real speed, with
 //! `a` in the fleet view. The simulator makes it a test rather than an evening.
 //!
-//! The period is a median over the last [`BEAT_WINDOW`] gaps and is not reset
-//! when a node adopts a new range, so each measurement here waits out a whole
-//! window of beats *counted from the assignment it is measuring*. Waiting for an
-//! absolute number of heartbeats instead would measure whatever mixture of ranges
-//! the node happened to have beaten at — including the idle beat it parks on
-//! before it is assigned anything, which at this speed is shorter than either
-//! sweep and would read as a node scanning faster than it can.
+//! The period is a median over the last [`BEAT_WINDOW`] gaps and is not reset on a
+//! new range, so every measurement here waits out a whole window of beats *counted
+//! from the assignment it is measuring*.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -62,8 +58,7 @@ async fn narrowing_a_node_to_one_channel_collapses_its_heartbeat_period() {
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().join("wartui.db");
 
-    // One node, fast-forwarded. One because the point of the test is a single
-    // node's sweep time, and a second node would only add stagger.
+    // One node, fast-forwarded: a second would only add stagger.
     let link = SimTransport::new(SimConfig {
         node_count: 1,
         speed: f64::from(SPEED),
@@ -79,9 +74,8 @@ async fn narrowing_a_node_to_one_channel_collapses_its_heartbeat_period() {
     let config = EngineConfig {
         pool: ChannelPool::All,
         assignment_base: store.assignment_base(),
-        // The planner off, because this is the by-hand path: with it on, the
-        // node would be given the whole pool before the operator says anything
-        // and there would be no wide baseline to narrow from.
+        // The planner off: with it on the node is given the whole pool before the
+        // operator says anything, leaving no wide baseline to narrow from.
         auto: false,
         ..Default::default()
     };
@@ -93,11 +87,8 @@ async fn narrowing_a_node_to_one_channel_collapses_its_heartbeat_period() {
     let (command_tx, command_rx) = mpsc::channel(4);
     let capture = tokio::spawn(drive(link, store, engine, snapshot_tx, command_rx, stop_rx));
 
-    // The wide baseline has to be asked for. A wartui node that has never
-    // heard a core parks on the control channel and collects nothing, rather
-    // than defaulting to all forty channels the way the vendor firmware does
-    // (`src/WiFiOps.cpp:77-80`) — so an unassigned node's heartbeat period says
-    // nothing about sweeping at all.
+    // The wide baseline has to be asked for: a wartui node parks until told, so an
+    // unassigned node's heartbeat period says nothing about sweeping.
     let joined = until(&snapshot_rx, "the node to turn up", |s| {
         s.nodes.first().is_some_and(|n| n.state.heartbeats >= 1)
     })
@@ -116,15 +107,10 @@ async fn narrowing_a_node_to_one_channel_collapses_its_heartbeat_period() {
     })
     .await;
 
-    // A whole window of sweeps, counted from the beat that opened the admin
-    // window rather than from the start of the capture. Every beat before this
-    // one was an idle beat — a wartui node parks until it is told what to scan —
-    // and the period is a median over the last [`BEAT_WINDOW`] gaps, so a window
-    // with any of them left in it reports the parked node's 17 ms rather than the
-    // sweep. How many there were is not a fixed number to skip: nothing goes on
-    // the air until a heartbeat opens a window, so any delay in handling the
-    // operator's command adds another, and the snapshot is only republished every
-    // 250 ms in any case.
+    // A whole window of sweeps, counted from the beat that opened the admin window:
+    // a median with any idle beat left in it reports the parked node's 17 ms. How
+    // many there were is not a fixed number to skip, since nothing goes out until a
+    // heartbeat opens a window.
     let window = u64::try_from(BEAT_WINDOW).expect("a five-deep window fits in a u64");
     let idle_beats = wide_acked.nodes[0].state.heartbeats;
     let wide = until(&snapshot_rx, "a full window of sweeps of the whole table", |s| {
@@ -132,9 +118,8 @@ async fn narrowing_a_node_to_one_channel_collapses_its_heartbeat_period() {
     })
     .await;
     let wide_period = wide.nodes[0].state.beat_period_ms().expect("a measured period");
-    // Half a sweep of the whole table, which is still several times the idle
-    // beat. Asserting it here says which number was wrong when it is wrong,
-    // rather than leaving the ratio below to fail for either reason.
+    // Half a sweep of the whole table, asserted here so a failure says which of the
+    // two numbers was wrong rather than only that the ratio was.
     let half_a_sweep = u32::from(NUM_SCAN_CHANNELS) * CHANNEL_DWELL_MS / SPEED / 2;
     assert!(
         wide_period > half_a_sweep,
@@ -146,9 +131,8 @@ async fn narrowing_a_node_to_one_channel_collapses_its_heartbeat_period() {
         .await
         .expect("the engine is listening");
 
-    // Nothing goes out until the node's next heartbeat opens its admin window,
-    // and the node adopts the channels only because the epoch differs from the
-    // 0 it booted with — the `!=` at `src/WiFiOps.cpp:1198`.
+    // Nothing goes out until the next heartbeat opens a window, and the node adopts
+    // only because the epoch differs from the 0 it booted with.
     let acked = until(&snapshot_rx, "the narrow assignment to be acknowledged", |s| {
         s.nodes.first().is_some_and(|n| n.state.confirmed.is_some_and(|c| c.channels.len() == 1))
     })
@@ -162,10 +146,8 @@ async fn narrowing_a_node_to_one_channel_collapses_its_heartbeat_period() {
     assert_eq!(acked.counters.admin_acked, 2, "the wide assignment, then the narrow one");
     assert_eq!(acked.counters.admin_failed, 0);
 
-    // A full window again, so not one gap from the wide range is left in the
-    // median. This is the whole milestone: one channel instead of forty, so about
-    // a fortieth of the sweep, observable without any access to the node beyond
-    // its radio.
+    // A full window again, so no gap from the wide range is left in the median. One
+    // channel instead of forty, observable with no access to the node but its radio.
     let beats_before = node.state.heartbeats;
     let narrow = until(&snapshot_rx, "a full window of sweeps at the new range", |s| {
         s.nodes.first().is_some_and(|n| n.state.heartbeats >= beats_before + window)
