@@ -65,7 +65,10 @@ fn a_much_stronger_signal_is_reported_again_before_the_refresh() {
     // The export keeps the strongest sighting's position, so getting closer is news.
     let mut ring: MacRing<4> = MacRing::new();
     assert!(ring.offer(mac(1), Some(-80), T0));
-    assert!(!ring.offer(mac(1), Some(-80 + DEDUP_RSSI_GAIN_DB - 1), T0 + 1), "jitter is not");
+    assert!(
+        !ring.offer(mac(1), Some(-80 + DEDUP_RSSI_GAIN_DB - 1), T0 + 1),
+        "under the margin is not"
+    );
     assert!(ring.offer(mac(1), Some(-80 + DEDUP_RSSI_GAIN_DB), T0 + 2));
 }
 
