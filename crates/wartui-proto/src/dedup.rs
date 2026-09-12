@@ -15,10 +15,9 @@
 //! - **It is at least [`DEDUP_RSSI_GAIN_DB`] stronger than anything reported for it.**
 //!   The export writes the strongest sighting's position, so a node driving towards an
 //!   access point it first heard at the edge of range has a better fix to offer. The
-//!   margin is narrow — beacon-to-beacon jitter can reach it, so a still node will
-//!   sometimes re-report an address it is no closer to — but the baseline only ever
-//!   rises, so each such re-report raises the bar for the next and wobbling cannot
-//!   repeat itself indefinitely.
+//!   margin is wide enough that ordinary jitter between beacons does not cross it, and
+//!   the baseline only ever rises, so an access point is re-reported for getting
+//!   closer and never for wobbling.
 //!
 //! Eviction is still oldest-*inserted* first, and a re-report updates its entry in
 //! place rather than moving it to the front. A constantly-beaconing access point
