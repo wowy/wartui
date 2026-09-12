@@ -37,10 +37,8 @@ fn a_run_becomes_the_indices_it_names() {
 
 #[test]
 fn indices_come_back_in_scan_channels_order_which_is_the_order_a_node_sweeps() {
-    // Not sorted by channel number: `SCAN_CHANNELS` order is the vendor's and
-    // is load-bearing, and a node walks the set by index. Ascending index
-    // happens to be ascending channel today, and this test is what would catch
-    // it if the table were ever reordered.
+    // Not sorted by channel number: a node walks the set by index. Ascending index
+    // happens to be ascending channel today, and this is what would catch a reorder.
     let mut set = ChannelSet::empty();
     for idx in [37, 3, 20, 0] {
         set.insert(idx);
@@ -63,11 +61,8 @@ fn inserting_the_same_index_twice_is_not_two_channels() {
 
 #[test]
 fn an_index_this_build_cannot_scan_is_dropped_rather_than_rejected() {
-    // A frame from a host that knows about channels this firmware does not.
-    // The indices it *does* share are still the right ones to dwell on, and
-    // refusing the whole assignment would strand the node on whatever it held
-    // — while the host, having had a MAC-layer acknowledgement, believes the
-    // assignment landed.
+    // A frame from a host that knows channels this firmware does not; see
+    // `ChannelSet` for why the extra bits are dropped rather than the frame.
     let mut set = ChannelSet::empty();
     set.insert(0);
     set.insert(NUM_SCAN_CHANNELS);
@@ -109,9 +104,7 @@ fn a_pool_as_a_set_holds_exactly_what_the_pool_contains() {
             assert_eq!(set.contains(idx), pool.contains(idx), "{pool:?} index {idx}");
         }
     }
-    // The US pool's two runs in one set, which is the whole reason the mask
-    // exists: an assignment used to be a contiguous range and could carry only
-    // one of them.
+    // The US pool's two runs in one set, which is the whole reason for the mask.
     assert_eq!(ChannelPool::Us.channels().len(), 34);
     assert!(!ChannelPool::Us.channels().contains(11), "the gap at channels 12-14");
 }

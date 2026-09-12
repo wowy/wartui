@@ -121,9 +121,9 @@ fn wpa_only_enterprise_reports_as_wpa2_because_the_firmware_says_so() {
 
 #[test]
 fn a_legacy_enterprise_element_does_not_override_what_rsn_says() {
-    // The WPA vendor element names 802.1X and the RSN element names PSK. The
-    // vendor guards its enterprise rung with `!has_rsn`
-    // (`src/WiFiOps.cpp:375`), so RSN decides and this is `[WPA2_PSK]`. Without
+    // The WPA element names 802.1X and the RSN element names PSK. The vendor guards
+    // its enterprise rung with `!has_rsn` (`src/WiFiOps.cpp:375`), so RSN decides and
+    // this is `[WPA2_PSK]`. Without
     // that guard it reads as `[WPA2]`, and a firmware and a host parsing the
     // same beacon would disagree about the same network.
     let mut ies = ie(0, b"legacy");
