@@ -4,6 +4,10 @@ Measured on 2026-09-05 with a JCMK C5 wardriver as CORE (`92:E8`),
 one ESP32-C5 as NODE (`59:50`), and an ESP32-C6 running
 `tools/espnow-sniffer` on channel 6. Encryption off on both devices.
 
+`file:line` citations below point into
+[wowy/ESP32DualBandWardriver](https://github.com/wowy/ESP32DualBandWardriver) on
+`feat/node-interference-mitigation`, the vendor firmware.
+
 ## The mesh is plaintext, and easily audible
 
 Every node frame is broadcast to `FF:FF:FF:FF:FF:FF` at about −40 dBm on the
