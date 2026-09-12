@@ -441,10 +441,9 @@ fn the_assignment_epoch_is_moved_forward_before_anything_can_be_sent() {
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().join("wartui.db");
 
-    // Divergence 4 again, from the other side. Persisting the counter only
-    // after an assignment goes out would let a crash in between hand the next
-    // run an epoch a node already holds — which the node ignores while its
-    // radio acknowledges anyway, so the host cannot tell.
+    // Divergence 4 from the other side: persisting the counter only after an
+    // assignment goes out would let a crash in between hand the next run an
+    // epoch a node already holds.
     let first = open_at(&path);
     assert_eq!(first.assignment_base(), 0, "a fresh database starts from nothing");
     first.close();

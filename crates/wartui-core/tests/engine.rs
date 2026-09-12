@@ -198,8 +198,7 @@ fn the_raw_frame_is_kept_alongside_the_parsed_one() {
 
 #[test]
 fn a_heartbeat_counter_going_backwards_counts_a_reboot() {
-    // Divergence 5. The counter runs from the node's boot, so a regression
-    // means it restarted and has forgotten whatever range it was assigned.
+    // Divergence 5.
     let clock = Clock::new();
     let mut engine = engine(manual(), &clock);
 
@@ -216,11 +215,7 @@ fn a_heartbeat_counter_going_backwards_counts_a_reboot() {
 
 #[test]
 fn observations_keep_a_node_visible_but_only_heartbeats_keep_it_assignable() {
-    // Divergence 2. The vendor firmware's `touchNode` call on the text path is
-    // commented out (`src/WiFiOps.cpp:1073-1082`), so a node streaming data
-    // whose heartbeats are being lost ages out and churns the fleet's whole
-    // topology. Two clocks, because they answer different questions: is this
-    // node there, and can it still be given a channel range.
+    // Divergence 2: is this node there, and can it still be given a range.
     let clock = Clock::new();
     let config = EngineConfig { topology_timeout: Duration::from_secs(60), ..manual() };
     let mut engine = engine(config, &clock);
@@ -903,9 +898,7 @@ fn an_assignment_is_believed_only_once_the_node_radio_acknowledges_it() {
     engine.handle(assign(NODE, 0, 10), clock.at(2));
     let (id, _, _) = sent_admin(&engine.handle(heartbeat(NODE, 2), clock.at(6)));
 
-    // Divergence 3. The vendor core clears its dirty flag from the
-    // `esp_now_send` return value, so an enqueue that nothing received still
-    // counts as an assignment delivered.
+    // Divergence 3.
     let batch = engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(6));
     let node = engine.nodes().next().expect("the node");
     assert!(!node.dirty, "acknowledged, so there is nothing left to deliver");
@@ -1056,9 +1049,8 @@ fn a_reboot_re_issues_the_assignment_under_a_fresh_epoch() {
     engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(6));
     assert!(engine.nodes().next().expect("the node").confirmed.is_some());
 
-    // Divergence 5: the counter runs from the node's boot, so a value below the
-    // last one means it restarted and has forgotten its range. Its own version
-    // field went back to a boot value with it, and since a node adopts on `!=`
+    // Divergence 5. Its own version field went back to a boot value with it,
+    // and since a node adopts on `!=`
     // rather than `>`, re-sending the old epoch could match what it now holds
     // and be discarded — while still being acknowledged.
     let batch = engine.handle(heartbeat(NODE, 1), clock.at(10));
@@ -1074,10 +1066,7 @@ fn a_reboot_re_issues_the_assignment_under_a_fresh_epoch() {
 #[test]
 fn epochs_carry_on_from_where_the_database_left_off() {
     let clock = Clock::new();
-    // Divergence 4. The vendor core keeps this counter in RAM and resets it to
-    // 1 at boot, so a restarted core that recomputes an assignment a node
-    // already holds is ignored — and if the topology changed while it was
-    // down, the two views never reconcile.
+    // Divergence 4.
     let config = EngineConfig { assignment_base: 300, ..manual() };
     let mut engine = engine(config, &clock);
     engine.handle(heartbeat(NODE, 1), clock.at(1));
@@ -1095,9 +1084,7 @@ fn the_fleet_arithmetic_travels_with_the_assignment_rather_than_being_read_at_se
     engine.handle(heartbeat(NODE, 1), clock.at(1));
     engine.handle(assign(NODE, 0, 10), clock.at(2));
 
-    // Divergence 7: a node joining between the plan and the send must not
-    // change the count the earlier node is told, or that node computes its
-    // transmit stagger slot against a fleet size its own range never came from.
+    // Divergence 7.
     engine.handle(heartbeat(OTHER, 1), clock.at(3));
 
     let (_, _, admin) = sent_admin(&engine.handle(heartbeat(NODE, 2), clock.at(6)));
@@ -1340,9 +1327,7 @@ fn a_node_that_stops_heartbeating_leaves_the_plan_and_the_rest_take_its_channels
     engine.handle(heartbeat(peer(1), 1), clock.at(2));
     assert_eq!(covered(&wanted(&engine)), pool_indices(ChannelPool::Us));
 
-    // Divergence 2: topology is driven by heartbeats alone. A node that is not
-    // heartbeating never opens an admin window, so a range held open for it is
-    // a share of the pool nobody is scanning.
+    // Divergence 2: topology is driven by heartbeats alone.
     engine.handle(heartbeat(peer(1), 2), clock.at(70));
 
     let departed = engine.nodes().next().expect("the node that went quiet");

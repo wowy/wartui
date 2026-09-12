@@ -191,9 +191,7 @@ pub struct EngineConfig {
     /// database, from [`crate::Store::assignment_base`]. Epochs are allocated
     /// from `base + 1` upwards.
     ///
-    /// Divergence 4: the vendor core keeps this counter in RAM and resets it
-    /// to 1 every boot (`src/WiFiOps.h:218`), so a restarted core that
-    /// recomputes an assignment a node already holds is silently ignored.
+    /// Divergence 4.
     pub assignment_base: u64,
 }
 
@@ -224,11 +222,7 @@ pub struct NodeState {
     pub last_seen_ms: i64,
     /// Monotonic time of the most recent frame of any kind.
     ///
-    /// Divergence 2: the vendor firmware refreshes liveness only on a
-    /// heartbeat — its `touchNode` call on the text path is commented out
-    /// (`src/WiFiOps.cpp:1073-1082`) — so a node streaming observations whose
-    /// heartbeats are being lost ages out at 60 s and churns the whole fleet's
-    /// topology. Two clocks, because they answer different questions.
+    /// Divergence 2. Two clocks, because they answer different questions.
     pub last_seen: Instant,
     /// Monotonic time of the most recent heartbeat, which is what decides
     /// whether this node can still be given a channel assignment.
@@ -290,11 +284,7 @@ pub struct NodeState {
 /// against.
 ///
 /// The index and count travel with the channels rather than being read live at
-/// send time. Divergence 7: the vendor core reads `node_count` at the moment it
-/// transmits (`src/WiFiOps.cpp:651`) while the ranges came from an earlier
-/// recalculation, so a node that joins in between is told a fleet size that
-/// disagrees with the partition its own share was cut from — and computes the
-/// wrong transmit stagger slot from it.
+/// send time — divergence 7.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Assignment {
     /// Which [`wartui_proto::plan::SCAN_CHANNELS`] indices to dwell on.
@@ -889,11 +879,8 @@ impl FleetEngine {
                 self.see_node(src, now, rssi, Some(heartbeat.capabilities), batch);
                 self.counters.heartbeats += 1;
                 let node = self.nodes.entry(src).or_insert_with(|| NodeState::new(src, now));
-                // Divergence 5: the counter runs from the node's boot, so a
-                // value below the last one means it restarted and has
-                // forgotten whatever range it was assigned. The vendor core
-                // has no equivalent check and simply carries on believing
-                // its own assignment table.
+                // Divergence 5: a counter below the last one means the node
+                // restarted and has forgotten whatever range it was assigned.
                 let rebooted = node.counter.is_some_and(|previous| heartbeat.counter < previous);
                 if rebooted {
                     node.reboots += 1;
@@ -1384,10 +1371,7 @@ impl FleetEngine {
         batch.urgent.push(HostToBridge::SendEspNow {
             id,
             dst: mac,
-            // Divergence 6: add if absent and never remove. The vendor core
-            // deletes the peer as a side effect of sending
-            // (`src/WiFiOps.cpp:672,676`), which is wasteful and races the
-            // transmit callback it then ignores anyway.
+            // Divergence 6: add if absent and never remove.
             ensure_peer: true,
             payload,
         });
@@ -1505,9 +1489,7 @@ impl FleetEngine {
                 node.last_outcome = Some(outcome);
                 node.last_latency_us = latency_us;
                 // Divergence 3: cleared on the MAC-layer acknowledgement, not
-                // on a successful enqueue. Unicast ESP-NOW is acknowledged by
-                // the receiver's own hardware, so this is the difference
-                // between knowing the node has the assignment and hoping.
+                // on a successful enqueue.
                 //
                 // Only if the node still wants what was sent: an operator who
                 // changed their mind while this was in flight has already
