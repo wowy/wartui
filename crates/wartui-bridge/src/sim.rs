@@ -1,22 +1,16 @@
 //! A simulated fleet, so the engine and the TUI can be built without hardware.
 //!
-//! The fake nodes behave the way the real firmware does, including the parts
-//! that are inconvenient: they park doing nothing until they are told what to
-//! scan, they heartbeat once per completed sweep rather than on a timer, they
-//! stagger their transmissions, they adopt an assignment only when its version
-//! *differs* from the one they hold, and they suppress a BSSID they have
-//! already reported until it falls out of a 200-entry ring. Modelling that last
-//! one matters — it is why a real fleet's observation stream goes quiet after
-//! the first pass, and a simulator that streamed endlessly would teach the
-//! wrong lesson.
+//! The fake nodes behave the way the real firmware does, including the inconvenient
+//! parts — parking until told what to scan, heartbeating once per completed sweep,
+//! staggering, adopting only on a differing epoch, and suppressing a BSSID until it
+//! falls out of a 200-entry ring. That last one matters most: it is why a real
+//! fleet's observation stream goes quiet after the first pass, and a simulator that
+//! streamed endlessly would teach the wrong lesson.
 //!
-//! Two things here are models of a *failure* rather than of correct behaviour,
-//! and both are off unless asked for. [`SimConfig::ble_coexistence_failure`]
-//! reproduces what a stock node did on the bench — hold the shared antenna
-//! through its own admin window and acknowledge nothing — which is the only way
-//! to exercise the host's `no admin ack` path without a second radio and a
-//! reflash. It is off by default because it is *not* what wartui's own node
-//! firmware measured: that one acknowledged every time with BLE on.
+//! [`SimConfig::ble_coexistence_failure`] models a *failure* — what a stock node did
+//! on the bench, and the only way to exercise the host's `no admin ack` path without
+//! a second radio — and [`SimConfig::c6_nodes`] a mixed fleet. Both are off unless
+//! asked for.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -55,36 +49,28 @@ pub struct SimConfig {
     /// node holding the Bluetooth assignment. BLE addresses rotate for privacy,
     /// so these never dedup and keep the stream alive.
     ///
-    /// A rate rather than a model: the real firmware runs one bounded scan
-    /// every few seconds and reports what it heard in a burst. What is faithful
-    /// here is *who* emits these — only the node the host gave the flag to, so
-    /// a fleet where nobody was asked reports no Bluetooth at all.
+    /// A rate rather than a model; what is faithful is *who* emits these, so a
+    /// fleet where nobody was asked reports no Bluetooth at all.
     pub ble_chance: f64,
     /// Make the node holding the Bluetooth assignment miss its admin window.
     ///
-    /// The Phase 0 failure, reproducible without hardware: a node whose radio
-    /// is away on the shared 2.4 GHz antenna acknowledges nothing, so the
-    /// bridge reports `AckFail` and the host shows `no admin ack`. Off by
-    /// default, because wartui's own node firmware does not do this — it bounds
-    /// the scan, switches the controller off, and acknowledged every assignment
-    /// on the bench (`docs/phase-1-findings.md`).
+    /// A node whose radio is away on the shared 2.4 GHz antenna acknowledges
+    /// nothing, so the bridge reports `AckFail` and the host shows `no admin ack` —
+    /// the only way to exercise that path without a second radio and a reflash. Off
+    /// by default, because wartui's own firmware bounds the scan and acknowledged
+    /// every assignment (`docs/phase-0-findings.md`, `docs/phase-1-findings.md`).
     ///
-    /// Note that it is self-latching, exactly as it was on the bench: the frame
-    /// that turns Bluetooth on is acknowledged, because the node was not yet
-    /// holding the antenna, and nothing after it is. The operator cannot take
-    /// the assignment back.
+    /// Self-latching, exactly as it was on the bench: the frame that turns Bluetooth
+    /// on is acknowledged, because the node was not yet holding the antenna, and
+    /// nothing after it is. The operator cannot take the assignment back.
     pub ble_coexistence_failure: bool,
     /// How many of the fleet are ESP32-C6s, counting from the last index.
     ///
-    /// A C6 has no 5 GHz radio, says so in its capability token, and must
-    /// therefore be dealt no 5 GHz channel — a share it cannot tune is a share
-    /// nobody scans. Zero by default: the simulator otherwise models a fleet of
-    /// C5s, which is the case with the most to render.
-    ///
-    /// This is the only way to see a mixed fleet without two kinds of board on
-    /// the desk, and the failure it guards against is invisible without one:
-    /// dealt 5 GHz, a C6 acknowledges the assignment and scans the part it can
-    /// reach, so the plan looks healthy and a third of the pool is uncovered.
+    /// Zero by default, so the simulator models a fleet of C5s. This is the only way
+    /// to see a mixed fleet without two kinds of board on the desk, and the failure
+    /// it guards against is invisible without one: dealt 5 GHz, a C6 acknowledges
+    /// and scans the part it can reach, so the plan looks healthy while a third of
+    /// the pool is uncovered.
     pub c6_nodes: u8,
 }
 
@@ -134,11 +120,10 @@ impl SimTransport {
         let world = Arc::new(World::new(&self.config));
         let started = Instant::now();
 
-        // Nothing a node says is observable until the dongle is attached and
-        // has announced itself, so the fake fleet waits for that rather than
-        // racing it. Without the gate a parked node — which heartbeats the
-        // moment it starts — can put a frame on the link ahead of `Connected`,
-        // and a host that has not seen a bridge yet has nowhere to file it.
+        // Nothing a node says is observable until the dongle has announced itself,
+        // so the fake fleet waits rather than racing it: a parked node heartbeats
+        // the moment it starts, and a host that has not seen a bridge yet has
+        // nowhere to file that.
         let (attached_tx, attached_rx) = tokio::sync::watch::channel(false);
 
         let mut admin_txs = Vec::new();
@@ -146,9 +131,8 @@ impl SimTransport {
         for index in 0..self.config.node_count {
             let (admin_tx, admin_rx) = mpsc::channel(8);
             // Shared with the bridge rather than inferred from the frames it
-            // routes, because the bridge has to know the node is deaf *before*
-            // it decides what to report — the whole point of the failure is
-            // that nothing arrives to be inferred from.
+            // routes: the bridge has to know the node is deaf *before* it decides
+            // what to report, and nothing arrives to infer it from.
             let holds_ble = Arc::new(AtomicBool::new(false));
             admin_txs.push((Self::node_mac(index), admin_tx, Arc::clone(&holds_ble)));
             // Counted from the end, so the nodes below the count keep their
@@ -194,22 +178,19 @@ async fn run_bridge(
         chip: Chip::Esp32C6,
         mac: [0x02, 0x00, 0x00, 0x00, 0xBB, 0x01],
         fw_version: format!("{}-sim", env!("CARGO_PKG_VERSION")),
-        // A simulated dongle has only ever just been switched on, and has no
-        // previous life to have stopped anywhere. Reporting anything else here
-        // would put a fault on screen that no amount of looking could explain.
+        // A simulated dongle has only ever just been switched on, so anything else
+        // here is a fault on screen that no amount of looking could explain.
         reset_cause: ResetCause::PowerOn,
         last_phase: LoopPhase::Unknown,
         // Not modelled: nothing in the simulator allocates on a device heap,
         // and a made-up figure would be read as a measurement.
         heap_free: 0,
-        // Announced the instant it came up, and it never reboots, so this is
-        // the only honest figure and it never changes.
+        // Announced the instant it came up, and it never reboots.
         uptime_ms: 0,
     };
     if plumbing.events.send(LinkEvent::Connected(info)).await.is_err() {
         return;
     }
-    // Only now is there anything for the fleet to be heard by.
     let _ = attached.send(true);
 
     let mut channel = 6u8;
@@ -217,9 +198,8 @@ async fn run_bridge(
 
     while let Some(cmd) = plumbing.commands.recv().await {
         let reply = match cmd {
-            // The real bridge replies with `Ready`; the simulator has already
-            // reported `Connected` above, so re-announcing would only confuse a
-            // host that is counting connections.
+            // The real bridge replies with `Ready`, but `Connected` has already
+            // gone out above and a host counting connections would be confused.
             HostToBridge::Identify => None,
             HostToBridge::SetChannel { channel: ch } => {
                 channel = ch;
@@ -283,11 +263,9 @@ async fn deliver(
         return SendStatus::AckOk;
     };
     match admin_txs.iter().find(|(mac, _, _)| *mac == dst) {
-        // The radio is away on the Bluetooth antenna. An 802.11 acknowledgement
-        // comes from the receiver's MAC hardware, so this is indistinguishable
-        // from a node that is not there — and the frame is genuinely dropped,
-        // not merely unreported, which is why the node can never be told to
-        // stop scanning.
+        // The radio is away on the Bluetooth antenna, which is indistinguishable
+        // from a node that is not there. The frame is genuinely dropped rather than
+        // merely unreported, which is why the node can never be told to stop.
         Some((_, _, holds_ble)) if ble_coexistence_failure && holds_ble.load(Ordering::Relaxed) => {
             SendStatus::AckFail
         }
@@ -326,11 +304,10 @@ impl SimNode {
             epoch: 0,
             node_index: 0,
             node_count: 1,
-            // Nothing until it is told. The vendor default is all forty
-            // channels (`src/WiFiOps.cpp:77-80`); wartui's node parks on the
-            // control channel and collects nothing, so that a node which has
-            // never heard a core is not quietly duplicating the fleet's work
-            // and transmitting where the pool exists to keep it off.
+            // Nothing until it is told. The vendor default is all forty channels
+            // (`src/WiFiOps.cpp:77-80`); a wartui node parks on the control channel,
+            // so one that has never heard a core is not quietly duplicating the
+            // fleet's work.
             channels: ChannelSet::empty(),
             holds_ble,
             hb_counter: 0,
@@ -391,10 +368,9 @@ async fn run_node(
     let dwell = scaled(u64::from(CHANNEL_DWELL_MS), speed);
     loop {
         if !node.assigned() {
-            // Parked on the control channel, reachable the whole time and
-            // collecting nothing. Heartbeat first and listen afterwards,
-            // because the host only ever transmits an assignment in answer to
-            // one — so this is how long joining a fleet takes.
+            // Parked on the control channel, reachable throughout and collecting
+            // nothing. Heartbeat first and listen after, because the host only
+            // transmits in answer to one — so this is how long joining takes.
             if beat(&events, &mut node, started).await.is_err() {
                 return;
             }
@@ -423,9 +399,8 @@ async fn run_node(
                     return;
                 }
             }
-            // Only the node that was given the Bluetooth assignment, which is
-            // the fleet-wide property worth being able to see in the simulator:
-            // revoking it should stop these arriving.
+            // Only the node given the Bluetooth assignment, so revoking it should
+            // stop these arriving.
             if node.scanning_ble() && node.rng.next_f64() < world.ble_chance {
                 let ble = world.ble_sighting(&mut node.rng);
                 if node.first_sighting(ble.bssid)
@@ -463,12 +438,10 @@ async fn beat(
     started: Instant,
 ) -> Result<(), ()> {
     node.hb_counter = node.hb_counter.wrapping_add(1);
-    // Capabilities are what tell the host this is a node it can drive, so a
-    // simulated fleet that left them out would be a fleet the planner ignores.
-    // Bluetooth is always claimed — the simulator has no chip and models a node
-    // built with everything — but the band is not, because a fleet where every
-    // node reaches 5 GHz is a fleet where the planner never has to leave one
-    // out of a channel, which is the half of it worth being able to see.
+    // Capabilities are what tell the host this is a node it can drive, so a fleet
+    // without them is a fleet the planner ignores. Bluetooth is always claimed; the
+    // band is not, because a fleet where everything reaches 5 GHz never makes the
+    // planner leave a node out of a channel.
     let msg = HeartbeatMsg {
         counter: node.hb_counter,
         capabilities: Capabilities::here(true, node.five_ghz),

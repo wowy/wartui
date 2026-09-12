@@ -1,30 +1,11 @@
 // Phase 0 sniffer: prove the fleet is audible, and diagnose it when it is not.
 //
-// Listens two ways at once, which is the point:
+// It listens two ways at once — the ESP-NOW receive callback and promiscuous mode —
+// and comparing the two counters says whether a silent fleet is encrypted, out of
+// range, or not transmitting. README.md has the table and how to run it.
 //
-//   1. The ESP-NOW receive callback — exactly what the wartui bridge will get.
-//      The radio only delivers frames addressed to us or to broadcast, so an
-//      encrypted fleet (which unicasts node -> core) is invisible here.
-//
-//   2. Promiscuous mode — every 802.11 frame on the channel regardless of who
-//      it is addressed to. This sees the encrypted fleet's traffic too.
-//
-// Comparing the two counters tells you which situation you are in without
-// having to go and read the node's settings:
-//
-//   promiscuous > 0, esp-now == 0   -> traffic is unicast: encryption is ON
-//   promiscuous == 0                -> nothing on this channel: wrong channel,
-//                                      out of range, or nothing transmitting
-//   both > 0                        -> plaintext fleet, working as wartui needs
-//
-// Capture with:
-//   pio device monitor -b 115200 | tee /tmp/capture.txt
-//
-// `capture_*` lines are wartui's own frames and `vendor_*` lines are somebody
-// else's, both as `<name> <length> <hex>`. There is no golden-vector fixture to
-// paste them into any more -- the wire format has one implementation of each
-// end, so `crates/wartui-proto/tests/wire.rs` writes its vectors out by hand --
-// but the hex is still the fastest way to see what a fleet is actually saying.
+// `capture_*` lines are wartui's own frames and `vendor_*` lines somebody else's,
+// both as `<name> <length> <hex>`: the fastest way to see what a fleet is saying.
 
 #include <WiFi.h>
 #include <esp_now.h>
@@ -34,9 +15,8 @@
 // Identical on main and feat/node-interference-mitigation.
 static const uint8_t MESH_CHANNEL = 6;
 
-// wartui's own frames, and the vendor's. Both are recognised because both are
-// worth capturing: one is the fleet under test and the other is whatever else
-// is on the channel it has to share.
+// Both are recognised because both are worth capturing: one is the fleet under test
+// and the other is whatever else is on the channel it has to share.
 static const char WARTUI_MAGIC[4] = {'W', 'T', 'U', 'I'};
 static const char VENDOR_MAGIC[4] = {'E', 'N', 'O', 'W'};
 
@@ -50,12 +30,10 @@ static const uint8_t ESPRESSIF_OUI[3] = {0x18, 0xFE, 0x34};
 //    4  random values
 //    1  element ID (221)   1  length   3  OUI   1  type (4)   1  version
 //
-// The 4-byte random-values field is easy to miss. Omitting it put this at 35,
-// which shifted every promiscuous capture by four bytes so the magic check
-// failed on frames that were in fact plaintext -- making the encrypted-versus-
-// absent diagnostic report "encrypted" for everything. Caught by comparing the
-// two receive paths on real hardware: promiscuous said 216 bytes where the
-// ESP-NOW callback said 212.
+// The 4-byte random-values field is easy to miss, and omitting it puts this at 35 --
+// shifting every promiscuous capture by four bytes, so the magic check fails on
+// frames that are in fact plaintext and the diagnostic reports "encrypted" for
+// everything. The two receive paths disagreeing by four bytes is how to catch it.
 static const int ESPNOW_BODY_OFFSET = 39;
 static const int FCS_LEN = 4;
 

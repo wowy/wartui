@@ -4,9 +4,9 @@
 //! it the first thing to reach for when frames are not arriving: a bridge that
 //! answers is listening, and one that does not is either wedged or not there.
 //!
-//! `dropped_tx` is the number worth watching. It counts frames the bridge threw
-//! away because the host was not draining the USB endpoint, so a non-zero value
-//! means observations were lost on this side of the radio, not on the air.
+//! `dropped_tx` is the number worth watching: frames the bridge threw away because
+//! the host was not draining the USB endpoint, so observations lost on this side of
+//! the radio rather than on the air.
 
 use std::time::Duration;
 
@@ -34,12 +34,9 @@ pub struct Args {
 pub async fn run(args: Args) -> Result<()> {
     let mut link = super::open(args.port.as_deref(), args.sim, 0)?;
 
-    // The bridge announces itself on connect; waiting for that first means a
-    // status request cannot be sent into a port nobody is listening on yet.
-    //
-    // This is the command an operator reaches for when frames are not arriving,
-    // so the timeout is the answer rather than an apology for not having one:
-    // it names the port and what to do about each of the three things it can be.
+    // The bridge announces itself on connect, so waiting for that keeps a status
+    // request from going into a port nobody is listening on. The timeout is itself an
+    // answer: it names the port and what to do about each of the three causes.
     let info = match tokio::time::timeout(REPLY_TIMEOUT, wait_for_ready(&mut link)).await {
         Ok(ready) => ready?,
         Err(_) => bail!("{}", super::no_bridge_notice(args.port.as_deref())),
@@ -68,15 +65,13 @@ pub async fn run(args: Args) -> Result<()> {
     println!("received   {rx_count} frames");
     println!("dropped    {dropped_tx} frames");
     println!("uptime     {}", human_uptime(uptime_ms));
-    // Read at the moment the bridge announced rather than now, which is close
-    // enough: nothing wartui writes allocates, so this moves only when the
-    // radio blobs move it, and what matters is the trend across captures.
+    // Read at the moment the bridge announced rather than now, which is close enough:
+    // nothing wartui writes allocates, and what matters is the trend across captures.
     println!("heap free  {} bytes", info.heap_free);
 
     if dropped_tx > 0 {
-        // Cumulative since the bridge booted, and a bridge left powered with
-        // nothing attached drops everything it hears. Saying so here stops a
-        // large number on a long-running dongle reading as a fault.
+        // Cumulative since the bridge booted, and one left powered with nothing
+        // attached drops everything it hears — so a large number is not a fault.
         println!(
             "\n{dropped_tx} frames were discarded over those {}, whenever no host was \n\
              reading fast enough. That includes any time the bridge spent powered \n\

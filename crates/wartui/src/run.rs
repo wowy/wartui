@@ -4,12 +4,9 @@
 //! with wherever the host believed it was at that moment: a GPS on
 //! `--gps`, else `--lat`/`--lon`, else nothing.
 //!
-//! It also transmits, and by default without being asked: the planner
-//! partitions the pool across the fleet and re-cuts it as the fleet changes,
-//! which is wartui at its full job of replacing the mesh's core. `p` takes
-//! that back and `a`/`A` then assign the selected node a range by hand.
-//! `--manual` starts with the planner off, and nothing reaches the air until a
-//! key is pressed.
+//! It also transmits, and by default without being asked: the planner partitions the
+//! pool across the fleet and re-cuts it as the fleet changes. `--manual` starts with
+//! the planner off, and nothing reaches the air until a key is pressed.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -173,23 +170,19 @@ pub async fn run(args: Args) -> Result<()> {
     // last batch and writes the session's end time.
     capture.await.context("the capture task panicked")?;
     if let Some(gps) = &gps {
-        // The reader is blocked on a serial read with a short timeout, so this
-        // is the difference between exiting now and exiting a fifth of a
-        // second later. Worth having anyway: a thread left reading a port the
-        // next run wants to open is a confusing failure.
+        // Worth having even though the reader's timeout is short: a thread left
+        // reading a port the next run wants to open is a confusing failure.
         gps.stop();
     }
 
     outcome?;
     println!("Capture written to {}", args.db.display());
-    // A receiver that was asked for and never answered leaves exactly as
-    // unusable a capture as no position at all, so what matters is whether a
-    // fix ever landed, not whether one was configured.
+    // A receiver asked for and never answered leaves as unusable a capture as no
+    // position at all, so what matters is whether a fix landed.
     let fixes = gps.as_ref().map_or(0, |gps| gps.view().counters.fixes);
     if args.lat.is_none() && fixes == 0 {
-        // The view says so throughout the run as well; this is for the case
-        // where the terminal never came up, and so that the last thing on
-        // screen is the reason the export will be empty.
+        // The view says so throughout as well; this is for a terminal that never
+        // came up, and so the last thing on screen says why the export is empty.
         if args.gps.is_some() {
             println!(
                 "The GPS never reported a fix, so nothing in this capture can go to WiGLE.\n\

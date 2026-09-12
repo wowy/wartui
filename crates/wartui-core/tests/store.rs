@@ -126,9 +126,8 @@ fn seeing_a_node_again_updates_last_seen_without_moving_first_seen() {
                 last_seen_ms: EPOCH_MS,
                 capabilities: Some("wartui/0.1;ble,5g".to_owned()),
             }),
-            // An observation carries no token, and most frames are
-            // observations — so this is the row that would erase the identity
-            // if the upsert wrote `excluded.capabilities` straight in.
+            // The row that would erase the identity if the upsert wrote
+            // `excluded.capabilities` straight in.
             Record::Node(NodeSeen {
                 mac: NODE,
                 first_seen_ms: EPOCH_MS,
@@ -149,8 +148,7 @@ fn seeing_a_node_again_updates_last_seen_without_moving_first_seen() {
 
 #[test]
 fn every_sighting_is_kept_rather_than_deduplicated_on_the_way_in() {
-    // Two nodes seeing one access point is coverage data, not a duplicate. The
-    // export is where one row per network gets chosen.
+    // Two nodes seeing one access point is coverage data, not a duplicate.
     let dir = tempfile::tempdir().expect("temp dir");
     let conn = write(
         &dir,
@@ -166,10 +164,8 @@ fn every_sighting_is_kept_rather_than_deduplicated_on_the_way_in() {
 
 #[test]
 fn the_export_picks_the_strongest_sighting_but_the_earliest_first_seen() {
-    // The strongest signal is the sighting whose position is closest to the
-    // transmitter, so that is the row that goes out. `FirstSeen` is a different
-    // question and comes from a different row, which is why this is a window
-    // query rather than a `GROUP BY`.
+    // The strongest signal is the sighting closest to the transmitter, and
+    // `FirstSeen` comes from a different row — hence the window query.
     let dir = tempfile::tempdir().expect("temp dir");
     let conn = write(
         &dir,
@@ -206,9 +202,8 @@ fn the_header_is_the_wigle_v1_4_pair() {
 
 #[test]
 fn a_network_nobody_had_a_position_for_is_counted_rather_than_written() {
-    // Not an error and not silent: WiGLE cannot use a row without coordinates,
-    // but the operator needs to know how much of the capture is waiting on a
-    // `--lat`/`--lon` before uploading.
+    // Not an error and not silent: the operator needs to know how much of a capture
+    // is waiting on a `--lat`/`--lon` before uploading.
     let dir = tempfile::tempdir().expect("temp dir");
     let conn = write(
         &dir,
@@ -243,9 +238,8 @@ fn a_network_with_one_positioned_sighting_is_exported_from_that_one() {
 
 #[test]
 fn an_ssid_with_a_comma_or_a_quote_is_rfc_4180_quoted() {
-    // The node firmware replaces commas in SSIDs with underscores, but the
-    // export must not depend on that: the store also holds text from older
-    // captures and from firmware nobody here controls.
+    // The node firmware replaces commas in SSIDs, but the export must not depend on
+    // that: the store also holds text from older captures.
     let dir = tempfile::tempdir().expect("temp dir");
     let mut awkward = observation(NODE, [0xAA; 6], -60, EPOCH_MS, fixed(37.0, -122.0));
     let Record::Observation(obs) = &mut awkward else { unreachable!() };
@@ -261,10 +255,8 @@ fn an_ssid_with_a_comma_or_a_quote_is_rfc_4180_quoted() {
 
 #[test]
 fn a_cloaked_ssid_recorded_before_the_parser_trimmed_it_still_exports_clean() {
-    // The store is not rewritten, so this row is what a node flashed before
-    // `beacon::visible_ssid` existed put in the file: the name's real length,
-    // every byte zero. NUL is valid UTF-8 and is none of the four characters
-    // RFC 4180 quotes on, so it used to go into the column bare.
+    // What a node flashed before `beacon::visible_ssid` existed put in the file: the
+    // name's real length, every byte zero.
     let dir = tempfile::tempdir().expect("temp dir");
     let mut cloaked = observation(NODE, [0xAA; 6], -60, EPOCH_MS, fixed(37.0, -122.0));
     let Record::Observation(obs) = &mut cloaked else { unreachable!() };
@@ -296,9 +288,8 @@ fn a_ble_record_exports_with_the_type_wigle_expects() {
 
 #[test]
 fn a_full_queue_drops_and_counts_rather_than_blocking_the_engine() {
-    // A stalled engine misses everything, including — once Phase 4 lands — the
-    // assignment racing a node's 300 ms window. One lost observation is the
-    // cheaper failure, but it has to be visible.
+    // A stalled engine misses everything, including an assignment racing a node's
+    // window. One lost observation is the cheaper failure, but must be visible.
     let dir = tempfile::tempdir().expect("temp dir");
     let mut config = StoreConfig::new(dir.path().join("wartui.db"));
     config.queue_depth = 1;
@@ -317,9 +308,8 @@ fn a_full_queue_drops_and_counts_rather_than_blocking_the_engine() {
 
 #[test]
 fn first_seen_comes_from_the_earliest_sighting_even_if_it_had_no_position() {
-    // A capture run without --lat, then a positioned one hours later, is a
-    // normal way to end up with both in one file. Reporting the later time
-    // would hide the evidence that the network was already there.
+    // A capture without --lat then a positioned one hours later is a normal way to
+    // end up with both in one file.
     let dir = tempfile::tempdir().expect("temp dir");
     let conn = write(
         &dir,
@@ -339,9 +329,9 @@ fn first_seen_comes_from_the_earliest_sighting_even_if_it_had_no_position() {
 
 #[test]
 fn a_database_from_a_newer_wartui_is_refused_rather_than_written_into() {
-    // `CREATE TABLE IF NOT EXISTS` no-ops against a newer file's tables instead
-    // of failing, so without this check an older build would append rows of the
-    // wrong shape and then stamp the version marker back down, leaving neither
+    // `CREATE TABLE IF NOT EXISTS` no-ops against a newer file's tables instead of
+    // failing, so without this an older build appends rows of the wrong shape and
+    // stamps the marker back down, leaving neither
     // build able to tell it had happened.
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().join("wartui.db");
@@ -411,9 +401,8 @@ fn every_assignment_attempt_gets_a_row_whether_or_not_it_landed() {
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().join("wartui.db");
     let store = open_at(&path);
-    // The vendor core keeps no record at all of what became of an assignment,
-    // which is why "the fleet keeps drifting off its channels" is a story
-    // rather than a query there.
+    // Every attempt gets a row, which is what makes "the fleet keeps drifting off its
+    // channels" a query rather than a story.
     store.submit(vec![
         assignment(1, AdminOutcome::Unacked, None),
         assignment(1, AdminOutcome::Acked, Some(4_500)),
@@ -441,10 +430,9 @@ fn the_assignment_epoch_is_moved_forward_before_anything_can_be_sent() {
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().join("wartui.db");
 
-    // Divergence 4 again, from the other side. Persisting the counter only
-    // after an assignment goes out would let a crash in between hand the next
-    // run an epoch a node already holds — which the node ignores while its
-    // radio acknowledges anyway, so the host cannot tell.
+    // Divergence 4 from the other side: persisting the counter only after an
+    // assignment goes out would let a crash in between hand the next run an
+    // epoch a node already holds.
     let first = open_at(&path);
     assert_eq!(first.assignment_base(), 0, "a fresh database starts from nothing");
     first.close();
@@ -500,10 +488,8 @@ fn a_v2_assignment_row_keeps_its_channels_when_they_become_a_mask() {
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().join("wartui.db");
 
-    // v2 stored a contiguous run as a pair of bounds, because that was all an
-    // assignment could be. A run is expressible as a mask, so the rows convert
-    // exactly rather than being dropped — and unlike v1's table, these are real
-    // rows: a v2 build could transmit and did write them.
+    // v2 stored a contiguous run as a pair of bounds, which a mask expresses exactly
+    // — and unlike v1's table these are real rows, since a v2 build could transmit.
     let old = Connection::open(&path).expect("creating");
     old.execute_batch(
         "CREATE TABLE session (
@@ -556,8 +542,7 @@ fn a_v2_assignment_row_keeps_its_channels_when_they_become_a_mask() {
         "the bounds became the mask that says the same thing, and no v2 row could have had BLE"
     );
 
-    // And the node table stops carrying a shape nothing else uses. Nothing ever
-    // wrote these, in any version, so there is nothing to preserve.
+    // Nothing ever wrote these, in any version, so there is nothing to preserve.
     let pinned: Vec<String> = conn
         .prepare("SELECT name FROM pragma_table_info('node') WHERE name LIKE 'pinned%'")
         .expect("preparing")
@@ -570,13 +555,10 @@ fn a_v2_assignment_row_keeps_its_channels_when_they_become_a_mask() {
 
 #[test]
 fn a_migration_that_fails_part_way_leaves_the_file_exactly_as_it_was() {
-    // The v2 rebuild renames the old table before it has written the new one,
-    // and the version marker is what decides whether it runs again. Committed
-    // statement by statement, a failure in the middle would leave a file that
-    // is neither shape and still stamped v2 — so every later open would
-    // re-enter the migration and die on the rename against a table already
-    // there. That is a capture that can never be opened again, which is worse
-    // than a capture that cannot be migrated today.
+    // The v2 rebuild renames the old table before writing the new one, so a failure
+    // committed statement by statement leaves a file that is neither shape and still
+    // stamped v2 — a capture that can never be opened again, which is worse than one
+    // that cannot be migrated today.
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().join("wartui.db");
 

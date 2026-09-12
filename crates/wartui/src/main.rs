@@ -1,16 +1,9 @@
 //! wartui's command line.
 //!
-//! `run` is the tool; everything else is a way of checking one link in the
-//! chain when `run` is not showing what it should. `sniff` proves the whole
-//! path — a node's radio, the bridge's radio, the USB link, the framing and the
-//! frame decoder — with nothing in between to be wrong. `status` and `ports`
-//! answer the two questions that come before it: is a dongle attached, and is
-//! it listening.
-//!
-//! `--log-file` is the fourth answer. The TUI owns the terminal, so a link that
-//! is failing has nowhere to say so except the one header line it shares with
-//! everything else; with a log file the transport's own account of what it
-//! tried and what the OS said goes somewhere it can be read afterwards.
+//! `run` is the tool; everything else checks one link in the chain when `run` is not
+//! showing what it should, and `crates/wartui/README.md` § "When nothing arrives"
+//! has which to reach for. `--log-file` is there because the TUI owns the terminal,
+//! so the transport has nowhere else to say what it tried and what the OS said.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -169,11 +162,8 @@ pub fn mac(mac: &Mac) -> String {
 /// One line saying how the bridge came to be running this life.
 ///
 /// Every command that has a [`BridgeInfo`] prints this, because a bridge that
-/// restarted is a bridge that lost its channel and its peer table, and until
-/// v3 of the link protocol the only trace of that was a counter going
-/// backwards. [`ResetCause::PowerOn`] is the ordinary case and says so
-/// plainly rather than being hidden, so that the absence of a line never has
-/// to be interpreted.
+/// restarted lost its channel and its peer table. [`ResetCause::PowerOn`] says so
+/// plainly rather than being hidden, so an absent line never needs interpreting.
 #[must_use]
 pub fn last_reset_line(info: &BridgeInfo) -> String {
     let cause = match info.reset_cause {
@@ -207,25 +197,22 @@ pub fn last_reset_line(info: &BridgeInfo) -> String {
 
 /// Listens for the process being asked to stop by a signal rather than a key.
 ///
-/// `q` and ctrl-c already reach the orderly exit; `SIGTERM` and `SIGHUP` did
-/// not, and the difference is not cosmetic. Leaving by a route that skips the
-/// transport's `Shutdown` guard leaves whatever was queued for the bridge
-/// sitting in the tty's output queue, and closing a tty waits for that queue to
-/// drain — against a device that may not be reading. That wait is inside the
-/// driver, so the process survives `SIGKILL` still holding the port, and the
-/// only way out is unplugging the board. A window that closes, a `kill`, or a
-/// logout are all ordinary ways to end a capture and none of them should be
-/// able to cost the operator a replug.
+/// `q` and ctrl-c already reach the orderly exit; `SIGTERM` and `SIGHUP` did not,
+/// and the difference is not cosmetic. Leaving by a route that skips the transport's
+/// `Shutdown` guard leaves whatever was queued for the bridge in the tty's output
+/// queue, and closing a tty waits for that queue to drain against a device that may
+/// not be reading. The wait is inside the driver, so the process survives `SIGKILL`
+/// still holding the port and the only way out is unplugging the board. A window
+/// closing, a `kill` or a logout are all ordinary ways to end a capture, and none
+/// should cost a replug. This is the rule `serial.rs` and `sniff.rs` point at.
 ///
-/// Built **once**, before the loop that selects on it, and this is the whole
-/// reason it is a value rather than an `async fn` called in the arm. Asking
-/// tokio for a signal stream installs a process-wide handler that replaces the
-/// default disposition — after the first call, a `SIGTERM` no longer kills the
-/// process by itself — and a stream subscribes from the moment it is created,
-/// so one delivered between a stream being dropped at the end of a select and
-/// the next one being built is seen by nobody. The default action is gone and
-/// nothing replaced it: the capture carries on, deaf, and the operator is left
-/// with `kill -9`, which is exactly the replug this exists to prevent.
+/// Built **once**, before the loop that selects on it, which is why it is a value
+/// rather than an `async fn` called in the arm: asking tokio for a signal stream
+/// installs a process-wide handler that replaces the default disposition, and a
+/// stream subscribes only from the moment it is created. One delivered between a
+/// stream being dropped at the end of a select and the next being built is seen by
+/// nobody, with the default action already gone — so the capture carries on deaf and
+/// the operator is left with `kill -9`.
 ///
 /// Never fires if the handlers cannot be installed. A future that fired
 /// spuriously here would quit a capture for no reason at all.
@@ -292,17 +279,11 @@ pub const CONNECT_NOTICE_AFTER: Duration = Duration::from_secs(5);
 
 /// What to say when the port opened and nothing behind it answered.
 ///
-/// This is the case that otherwise produces no output at all, and it is worth
-/// spelling out because the three causes need three different actions and the
-/// symptom is identical for all of them. A failure to *open* the port is not
-/// this: that arrives as [`LinkEvent::Disconnected`] carrying the OS's own
-/// message, which every command already prints.
-///
-/// The wedged case is the one that cost an afternoon to recognise: a bridge
-/// that has been powered for a long time can stop answering while still
-/// enumerating as a USB device, so the port opens, the writes succeed and
-/// nothing comes back. A reset clears it, and there is no way to tell that
-/// from the host except by trying.
+/// The case that otherwise produces no output at all, spelled out because the three
+/// causes need three different actions and the symptom is identical. A failure to
+/// *open* the port is not this: that arrives as [`LinkEvent::Disconnected`] carrying
+/// the OS's own message. The wedged case is the hard one — the port opens, the writes
+/// succeed, and nothing comes back — and a reset is the only way to tell.
 pub fn no_bridge_notice(port: Option<&str>) -> String {
     let seconds = CONNECT_NOTICE_AFTER.as_secs();
     let (where_, reset, wartui_reset) = match port {
@@ -317,9 +298,8 @@ pub fn no_bridge_notice(port: Option<&str>) -> String {
             "wartui reset".to_owned(),
         ),
     };
-    // Assembled a line at a time rather than as one continued literal: the
-    // wrapped form puts the source's own indentation inside the string, and
-    // this text is read by someone already having a bad afternoon.
+    // Assembled a line at a time: a continued literal puts the source's own
+    // indentation inside the string.
     [
         format!("nothing has identified itself as a bridge {where_} after {seconds}s."),
         "The port opened, so a device is there and it is not speaking the link protocol."
@@ -330,11 +310,9 @@ pub fn no_bridge_notice(port: Option<&str>) -> String {
         "  - another program is holding the port".to_owned(),
         "`wartui ports` lists what is attached; `--log-file` records what the transport tried."
             .to_owned(),
-        // The fallback rather than the first suggestion, now that the first one
-        // is known to work: a wedged bridge reads its receive endpoint
-        // perfectly well, so it reboots on being asked. `espflash` drives
-        // DTR/RTS and needs no firmware at all, which is what is left when even
-        // the asking goes unanswered.
+        // The fallback rather than the first suggestion: a wedged bridge reads its
+        // receive endpoint perfectly well and reboots on being asked, so `espflash`
+        // driving DTR/RTS is what is left when even the asking goes unanswered.
         format!("If that goes unanswered too, reset it over USB instead: {reset}"),
     ]
     .join("\n")
@@ -364,8 +342,8 @@ mod tests {
 
     #[test]
     fn the_notice_carries_no_stray_indentation() {
-        // A wrapped string literal keeps the source's leading whitespace, which
-        // reads as ragged gaps mid-sentence and is invisible in the source.
+        // A wrapped literal keeps the source's leading whitespace, which reads as
+        // ragged gaps mid-sentence and is invisible here.
         let notice = no_bridge_notice(Some("/dev/x"));
         for line in notice.lines() {
             // The bullets' own two-space indent is deliberate; a gap after the

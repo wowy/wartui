@@ -1,15 +1,10 @@
 //! Byte-exact checks on the frames wartui puts on the air.
 //!
-//! These vectors are written out by hand, and there is nothing else they could
-//! be. Until this format existed the file beside this one held layouts produced
-//! by a real C++ compiler from typedefs copied out of the vendor firmware,
-//! because the wire was that firmware's and a second opinion was worth having.
-//! The wire is ours now, both directions, so there is no second implementation
-//! to compare against — only the rule that a byte written here is a byte a node
-//! in the field is already sending, and changing one is changing the protocol.
-//!
-//! So every vector below spells out what it pins: the header, the field order,
-//! the endianness of the two multi-byte fields, and the sign of an RSSI.
+//! These vectors are written out by hand, and there is nothing else they could be:
+//! the wire is ours in both directions, so there is no second implementation to check
+//! against — only the rule that a byte written here is a byte a node in the field is
+//! already sending, and changing one is changing the protocol. So every vector spells
+//! out what it pins.
 
 use wartui_proto::air::{
     ADMIN_FLAG_BLE, ADMIN_MSG_LEN, AdminMsg, Capabilities, DecodeError, Frame, HEARTBEAT_MSG_LEN,
@@ -88,9 +83,8 @@ fn every_frame_carries_the_same_header() {
 
 #[test]
 fn nothing_we_transmit_carries_the_vendors_magic() {
-    // The whole reason for the change. A vendor core hearing one of these must
-    // not admit the sender to its node table, and a vendor node must not read
-    // an assignment out of one.
+    // A vendor core must not admit one of ours to its node table, nor a vendor node
+    // read an assignment out of one.
     for frame in [HEARTBEAT, SIGHTING_WIFI, SIGHTING_BLE, ADMIN, ADMIN_BLE] {
         assert_ne!(&frame[..4], &foreign::VENDOR_MAGIC[..]);
         assert_eq!(foreign::classify(frame), None);
@@ -134,7 +128,7 @@ fn a_wifi_sighting_encodes_byte_for_byte() {
 
 #[test]
 fn a_comma_in_an_ssid_survives_the_wire() {
-    // It did not before. The vendor line was split on commas, so the sender
+    // It did not before: the vendor line was split on commas, so the sender
     // rewrote one as an underscore and the real name was lost at the only
     // point in the path where it still existed.
     let decoded = SightingMsg::decode(SIGHTING_WIFI).expect("valid");

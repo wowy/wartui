@@ -38,10 +38,8 @@ pub async fn run(args: Args) -> Result<()> {
 
     let mut counts = Counts::default();
 
-    // Said once, and only into the silence it describes. `sniff` keeps waiting
-    // afterwards rather than exiting, because it is the command left running
-    // while a bridge is plugged in — but waiting without saying anything is how
-    // a wedged dongle passes for a quiet fleet.
+    // Said once, and only into the silence it describes: `sniff` keeps waiting
+    // afterwards, and waiting silently is how a wedged dongle passes for a quiet fleet.
     let mut spoken = false;
     // Built before the loop, not inside the arm below: see `crate::Terminate`.
     let mut terminate = crate::Terminate::new();
@@ -87,13 +85,10 @@ pub async fn run(args: Args) -> Result<()> {
             counts.foreign_fleet
         );
     }
-    // Every assignment on the air during a sniff came from somewhere else:
-    // this command holds the port, so `run` is not transmitting through it,
-    // and a radio does not hear its own frames. One in wartui's own format is
-    // the harder of the two to notice any other way — a vendor core's
-    // assignments are ignored by our nodes, while a second wartui core's are
-    // obeyed, and the fleet table cannot show the difference because both
-    // cores' assignments are acknowledged.
+    // Every assignment on the air during a sniff came from somewhere else: this
+    // command holds the port and a radio does not hear its own frames. One in our own
+    // format is the harder to notice any other way, because our nodes obey a second
+    // wartui core's assignments and the fleet table cannot show the difference.
     if counts.admin > 0 {
         println!(
             "# {} assignments arrived in wartui's own wire format, and this host sent \
@@ -122,11 +117,9 @@ pub async fn run(args: Args) -> Result<()> {
 
 #[derive(Default)]
 struct Counts {
-    /// Whether anything behind the port has behaved like a bridge: an
-    /// announcement, a decoded message of any kind, or the transport saying why
-    /// the link is down. Any of those leaves the operator better informed than
-    /// the notice would, whose whole subject is having heard nothing at all.
-    /// An undecodable frame is not one of them — see [`handle`].
+    /// Whether anything behind the port has behaved like a bridge: an announcement, a
+    /// decoded message of any kind, or the transport saying why the link is down. An
+    /// undecodable frame is not one of them — see [`handle`].
     heard_a_bridge: bool,
     total: u64,
     sighting: u64,
@@ -138,34 +131,26 @@ struct Counts {
     /// Another core's assignment. Counted apart from `foreign_fleet` because
     /// seeing any at all means something else is driving a fleet nearby.
     foreign_admin: u64,
-    /// Frames of ours from a build speaking a wire version this one does not.
-    /// A fleet half-way through a reflash looks exactly like this, and nothing
-    /// else would say why `run` cannot see it.
+    /// Frames of ours from a build speaking a wire version this one does not, which is
+    /// what a fleet half-way through a reflash looks like.
     incompatible: u64,
     undecodable: u64,
 }
 
 fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
     let LinkEvent::Message(message) = &event else {
-        // `Garbled` deliberately does not count. Undecodable bytes are the
-        // loudest symptom of the thing the notice exists to explain — a board
-        // running node firmware talks constantly and none of it is a frame,
-        // and any `0x00` in that stream terminates a partial frame and lands
-        // here. Treating one as proof a bridge answered would silence the
-        // notice in exactly the case it was written for.
+        // `Garbled` deliberately does not count: undecodable bytes are the loudest
+        // symptom of the very thing the notice explains, so treating one as proof a
+        // bridge answered would silence it in the case it was written for.
         if !matches!(event, LinkEvent::Garbled(_)) {
             counts.heard_a_bridge = true;
         }
         if let Some(line) = super::describe(&event) {
             println!("# {line}");
         }
-        // Printed here rather than under `Ready`, because `Ready` is what the
-        // transport turns into this event and no `Ready` ever reaches the arm
-        // below. A bridge that reboots mid-capture announces itself again on
-        // the same connection and arrives here a second time, which in a
-        // sniff log is the interesting one: `sniff` is the raw view, so the
-        // fields go out as the bridge sent them rather than through the prose
-        // `last_reset_line` writes for the commands that show one line.
+        // Printed here rather than under `Ready`, which the transport turns into this
+        // event. A bridge that reboots mid-capture arrives here a second time, and
+        // `sniff` being the raw view, the fields go out as the bridge sent them.
         if let LinkEvent::Connected(info) = &event {
             println!(
                 "#   reset {:?}, last phase {:?}, {} bytes of heap free, up {}ms",
@@ -175,12 +160,10 @@ fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
         return;
     };
 
-    // Any decoded message, not just `Connected`. The transport re-sends
-    // `Identify` until it is answered, but the bridge's transmit rings evict
-    // oldest-first, so a busy fleet can cost it every `Ready` it sends while
-    // its observations arrive perfectly well. Accusing a bridge of not
-    // speaking the link protocol underneath a screenful of frames it decoded
-    // is the one output worse than saying nothing.
+    // Any decoded message, not just `Connected`: a busy fleet can cost a bridge every
+    // `Ready` to its oldest-first transmit rings while its observations arrive
+    // perfectly well, and accusing it underneath a screenful of decoded frames is the
+    // one output worse than saying nothing.
     counts.heard_a_bridge = true;
 
     match message {
@@ -215,9 +198,8 @@ fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
                         mac(dst),
                     );
                 }
-                // Named rather than left as "undecodable", because a fleet
-                // half-way through a reflash is exactly what this looks like
-                // and nothing else would say so.
+                // Named rather than left as "undecodable": a fleet half-way
+                // through a reflash is exactly what this looks like.
                 Err(DecodeError::BadVersion(version)) => {
                     counts.incompatible += 1;
                     println!("{head}  wire version {version}, which this build does not speak");

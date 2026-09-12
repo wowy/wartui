@@ -4,9 +4,8 @@ use wartui_bridge::serial::{discover_ports, is_usable_path};
 
 #[test]
 fn macos_tty_aliases_are_never_offered() {
-    // Every USB serial device shows up twice on macOS. Opening the /dev/tty.*
-    // side blocks waiting for carrier detect, which looks exactly like a hung
-    // bridge, so only the callout device is usable.
+    // Opening the /dev/tty.* side blocks on carrier detect, which looks exactly like
+    // a hung bridge.
     assert!(!is_usable_path("/dev/tty.usbmodem14201"));
     assert!(is_usable_path("/dev/cu.usbmodem14201"));
     assert!(is_usable_path("/dev/ttyACM0"), "Linux ttyACM devices are fine");

@@ -1,31 +1,23 @@
 //! Channel pools and the assignment planner.
 //!
-//! A *pool* is still described in runs — [`ChannelPool::Us`] is two of them,
-//! with a gap at indices 11-13 — because that is the shape the regulatory
-//! picture has. An *assignment* is not. [`AdminMsg`](crate::air::AdminMsg)
-//! carries a forty-bit
+//! A *pool* is described in runs — [`ChannelPool::Us`] is two of them, with a gap
+//! at indices 11-13 — because that is the shape the regulatory picture has. An
+//! *assignment* is not: [`crate::air::AdminMsg`] carries a forty-bit
 //! [`ChannelSet`], one bit per [`SCAN_CHANNELS`] entry, so a node can hold any
-//! subset of the pool and a run boundary stops being something the planner has
-//! to steer around. Before that it was the central constraint here: a lone node
-//! on a two-run pool could not express both runs at once and had to rotate
-//! between them on a dwell timer, and every node's share had to be carved out
-//! of one run rather than out of the pool.
+//! subset and a run boundary is nothing the planner steers around. Before the
+//! mask a lone node on a two-run pool had to rotate between them on a timer.
 //!
-//! With the mask, the split is a round-robin deal: index `k` of the pool's
-//! flattened order goes to node `k % node_count`. Block-splitting would give
-//! one node the whole of 2.4 GHz and another the whole of 5 GHz for the same
-//! arithmetic, which is the worse partition — dealing gives every node some of
-//! both bands, so a node dropping out thins the fleet's coverage evenly rather
-//! than blinding it to a band until the next re-cut lands.
+//! The split is a round-robin deal: index `k` of the pool's flattened order goes
+//! to node `k % node_count`. The operator's manual has the rest of the reasoning
+//! (`crates/wartui/README.md` § "Channel pools").
 
 use crate::air::AdminMsg;
 
 /// The node's scan order, verbatim from `src/WiFiOps.cpp:53-64`.
 ///
-/// Indices 0..=13 are the 2.4 GHz channels 1..=14; 14..=39 are 5 GHz. Every bit
-/// of the [`ChannelSet`] on the wire indexes this table, and a node sweeps in
-/// index order, so the order here is load-bearing and must not be sorted or
-/// deduplicated — reordering it would silently repoint every assignment in
+/// Indices 0..=13 are the 2.4 GHz channels 1..=14; 14..=39 are 5 GHz. Every bit of
+/// the [`ChannelSet`] on the wire indexes this table, so the order must never be
+/// sorted or deduplicated: reordering it silently repoints every assignment in
 /// flight and every stored row.
 pub const SCAN_CHANNELS: [u8; 40] = [
     // 2.4 GHz
@@ -42,13 +34,9 @@ pub const NUM_SCAN_CHANNELS: u8 = 40;
 
 /// The largest fleet wartui supports.
 ///
-/// Twenty, because that is how many peers an ESP-NOW radio can hold and a node
-/// this host cannot address is not a node it can drive. The vendor firmware's
-/// own table is twenty-four (`src/WiFiOps.h:56`), but the four it has spare are
-/// unreachable from here: the bridge would refuse to register them, every
-/// assignment to them would be refused, and the planner would be partitioning
-/// the channel pool among nodes that never hear the result. Anything above
-/// twenty is unsupported rather than degraded.
+/// Twenty, because that is how many peers an ESP-NOW radio can hold, and a node
+/// this host cannot address is not one it can drive. Anything above twenty is
+/// unsupported rather than degraded.
 pub const MAX_NODES: usize = 20;
 
 /// `NODE_STAGGER_WINDOW_MS`, `src/WiFiOps.h:59`.
@@ -62,11 +50,9 @@ pub const CONTROL_CHANNEL: u8 = 6;
 
 /// How long a node listens on one channel before moving on.
 ///
-/// The vendor's `CHANNEL_TIMER` is 80 ms (`src/configs.h:159`), which is a
-/// scan's dwell budget. wartui's node sniffs instead of scanning, so the figure
-/// it needs is a beacon interval rather than a probe round-trip: the default
-/// interval is 102.4 ms, and anything shorter than that can miss an access
-/// point entirely rather than merely hearing it less often.
+/// A sniffing node needs a beacon interval rather than a scan's dwell budget (the
+/// vendor's `CHANNEL_TIMER` is 80 ms, `src/configs.h:159`): the default interval
+/// is 102.4 ms, and anything shorter can miss an access point entirely.
 pub const CHANNEL_DWELL_MS: u32 = 125;
 
 /// How long a node holds the control channel after its heartbeat.
@@ -78,11 +64,9 @@ pub const ADMIN_WAIT_MS: u32 = 300;
 
 /// How long an unassigned node waits between heartbeats.
 ///
-/// A node that has been told nothing parks on the control channel and collects
-/// nothing, so this is the whole of its cycle rather than a slice of it — which
-/// is why it is comfortably longer than [`ADMIN_WAIT_MS`] and still short
-/// enough that joining a fleet costs a second rather than a sweep. Shared with
-/// the simulator so a parked fake node is parked the same way.
+/// A node told nothing parks on the control channel, so this is the whole of its
+/// cycle rather than a slice: longer than [`ADMIN_WAIT_MS`], and short enough that
+/// joining a fleet costs a second rather than a sweep.
 pub const IDLE_BEAT_MS: u32 = 1000;
 
 const _: () = assert!(
@@ -92,9 +76,8 @@ const _: () = assert!(
 
 /// How many recently-reported BSSIDs a node suppresses.
 ///
-/// `mac_history_len`, `src/configs.h:158`. Shared between the Wi-Fi and BLE
-/// paths, oldest evicted first, and never cleared at runtime — which is why a
-/// long-running node's observation stream goes quiet rather than repeating.
+/// `mac_history_len`, `src/configs.h:158`. See [`crate::dedup`] for why nothing
+/// clears it.
 pub const DEDUP_RING: usize = 200;
 
 /// Upper bound on runs in any pool. Two today; the headroom is for a
@@ -139,17 +122,13 @@ impl IndexRun {
 
 /// A set of [`SCAN_CHANNELS`] indices — the forty bits an assignment carries.
 ///
-/// One bit per entry of the table, index `i` in bit `i`, so the set is exactly
-/// as expressive as the wire field and a node can be given any subset of the
-/// pool. That is the whole of what Phase 2 changed: an assignment used to be a
-/// pair of bounds, which could not describe the US pool's two runs at once and
-/// so made a lone node rotate between them.
+/// One bit per entry of the table, index `i` in bit `i`, so the set is exactly as
+/// expressive as the wire field.
 ///
-/// Bits at or above [`NUM_SCAN_CHANNELS`] are not representable and are dropped
-/// on the way in rather than rejected. A frame carrying one came from something
-/// that knows about channels this build does not, and the indices it *does*
-/// share are still the right ones to scan; refusing the whole assignment would
-/// strand the node on whatever it held.
+/// Bits at or above [`NUM_SCAN_CHANNELS`] are dropped on the way in rather than
+/// rejected: such a frame came from a build that knows channels this one does
+/// not, the indices it *does* share are still right, and refusing the whole
+/// assignment would strand the node on whatever it held.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub struct ChannelSet(u64);
 
@@ -309,10 +288,8 @@ impl SweepCursor {
     /// that wrapped — which is what a node counts as a completed sweep and
     /// answers with a heartbeat.
     ///
-    /// The set is passed in rather than held because it is the assignment that
-    /// owns it: re-assigning a node replaces the set and resets the cursor, and
-    /// keeping one copy means the two can never disagree about which indices
-    /// exist.
+    /// The set is passed in rather than held because the assignment owns it: one
+    /// copy means the two cannot disagree about which indices exist.
     pub fn advance(&mut self, channels: ChannelSet) -> bool {
         let next = match self.at {
             Some(at) => channels.indices().find(|idx| *idx > at),
@@ -348,19 +325,12 @@ const ALL_RUNS: [IndexRun; 2] = [
 /// Channel 14, which no pool contains and no node can tune.
 ///
 /// `esp-radio` hardcodes `schan: 1, nchan: 13` in the country blob and exposes
-/// neither, so a node handed this index refuses the hop — once per sweep, every
-/// sweep, for the life of the assignment. Reaching the field needs
-/// `esp_wifi_set_country` called directly, which means `unsafe` in a crate that
-/// forbids it. `docs/phase-1-findings.md` has the measurement and the reading of
-/// the driver.
+/// neither, so a node handed this index refuses the hop once per sweep, silently,
+/// for the life of the assignment (`docs/phase-1-findings.md`). Reaching the field
+/// needs `esp_wifi_set_country` called directly, and so `unsafe`.
 ///
-/// So it is unsupported rather than merely unused, and it is excluded here
-/// rather than left for the operator to avoid: a pool that contains a channel
-/// the fleet cannot tune spends a dwell of every sweep on nothing and reports
-/// the refusal only to a serial console nobody is watching. It stays in
-/// [`SCAN_CHANNELS`] because that table's indices are the wire format and
-/// removing an entry would repoint every assignment in flight and every stored
-/// row.
+/// Unsupported rather than merely unused, and so excluded from every pool. It
+/// stays in [`SCAN_CHANNELS`] because that table's indices are the wire format.
 pub const UNSUPPORTED_INDEX: u8 = 13;
 
 const _: () = assert!(
@@ -370,9 +340,8 @@ const _: () = assert!(
 
 /// The first [`SCAN_CHANNELS`] entry that needs a 5 GHz radio.
 ///
-/// The table is 2.4 GHz then 5 GHz, so band membership is a comparison rather
-/// than a lookup — but only because the order is what it is, which is why this
-/// is asserted against the table below rather than written down as 14.
+/// The table is 2.4 GHz then 5 GHz, so band membership is a comparison rather than
+/// a lookup — asserted against the table rather than written down as 14.
 pub const FIRST_FIVE_GHZ_INDEX: u8 = 14;
 
 const _: () = assert!(
@@ -389,10 +358,9 @@ pub const fn is_five_ghz(idx: u8) -> bool {
 
 /// What a node's radio can reach.
 ///
-/// The only part of a node's capability token the planner is entitled to look
-/// at, and deliberately not [`crate::air::Capabilities`] itself: a plan is
-/// about which channels can be tuned, and nothing else a node announces about
-/// itself should be able to change one.
+/// The only part of a node's capability token the planner may look at, and
+/// deliberately not [`crate::air::Capabilities`] itself: nothing else a node
+/// announces should be able to change a plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Radio {
     /// 2.4 and 5 GHz — an ESP32-C5.
@@ -411,18 +379,14 @@ impl Radio {
 
     /// The part of `set` this radio can actually tune.
     ///
-    /// [`plan_for`] never deals an unreachable index in the first place, so
-    /// this is for the paths that do not go through it — an assignment made by
-    /// hand, which is otherwise a way to hand a node exactly the share nobody
-    /// scans that the capability token exists to prevent. Kept here rather than
-    /// at those call sites so that which indices are 5 GHz stays said once.
+    /// [`plan_for`] never deals an unreachable index, so this is for the paths
+    /// that do not go through it — an assignment made by hand. Kept here rather
+    /// than at those call sites so which indices are 5 GHz is said once.
     #[must_use]
     pub const fn tunable(self, set: ChannelSet) -> ChannelSet {
         match self {
             Self::DualBand => set,
-            // Indices are one ascending bit each and 5 GHz is the whole tail
-            // above `FIRST_FIVE_GHZ_INDEX`, so what is left is the bits below
-            // it.
+            // 5 GHz is the whole tail above `FIRST_FIVE_GHZ_INDEX`.
             Self::TwoPointFour => {
                 ChannelSet::from_bits(set.bits() & ((1u64 << FIRST_FIVE_GHZ_INDEX) - 1))
             }
@@ -436,10 +400,9 @@ impl From<crate::air::Capabilities> for Radio {
     }
 }
 
-// `MAX_RUNS` bounds nothing the planner indexes any more — it deals out of a
-// flattened iterator — but it still records what a pool is allowed to look
-// like, and a pool exceeding it is a pool nobody thought about. A new one must
-// be added here as well as to `ChannelPool::runs`.
+// The planner deals out of a flattened iterator and indexes nothing by run, but
+// a pool exceeding `MAX_RUNS` is a pool nobody thought about. A new one goes here
+// as well as in `ChannelPool::runs`.
 const _: () = assert!(
     US_RUNS.len() <= MAX_RUNS && ALL_RUNS.len() <= MAX_RUNS,
     "a channel pool has more runs than MAX_RUNS; raise it"
@@ -451,32 +414,22 @@ const _: () = assert!(
 /// beacons rather than probing, so a restricted pool is a choice about coverage
 /// rather than about legality.
 ///
-/// That is a deliberate divergence, and the reason it is one: every
-/// `WiFi.scanNetworks` call in the vendor firmware passes `passive = false`
-/// (`src/WiFiOps.cpp:745,755,779,3311`), so a stock node sends a probe request
-/// on each channel it is assigned — including the DFS channels, where the rules
-/// say listen and do not speak. A pool cannot make a node quiet; only the node's
-/// own firmware can, which is why that half of this project is in
-/// `firmware/node` rather than here.
+/// A pool cannot make a node quiet; only the node's own firmware can, which is why
+/// that half of the project is in `firmware/node` rather than here. See
+/// [`crate::beacon`] for what the vendor's active scan did on DFS channels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ChannelPool {
     /// FCC-permitted unlicensed WLAN channels: 2.4 GHz 1-11 and 5 GHz 36-165.
     ///
-    /// Note that 5 GHz 52-144 are DFS channels, where the rules require passive
-    /// scanning. A wartui node always listens and so is welcome there; a stock
-    /// node always scans actively, and the host cannot change that.
+    /// 5 GHz 52-144 are DFS channels, where the rules require passive scanning. A
+    /// wartui node always listens and so is welcome there.
     #[default]
     Us,
     /// Every channel a node can actually tune: 2.4 GHz 1-13 and all of 5 GHz.
     ///
-    /// The unrestricted pool, and the one to put a fleet on to sweep as widely
-    /// as the hardware allows — including the UNII-4 channels 169, 173 and 177
-    /// that [`Self::Us`] leaves out.
-    ///
-    /// It is 39 channels and not 40. Channel 14 is unsupported: see
-    /// [`UNSUPPORTED_INDEX`]. That makes this pool two runs rather than one,
-    /// which before the channel mask would have cost a lone node a rotation and
-    /// is now one clear bit.
+    /// The unrestricted pool, including the UNII-4 channels 169, 173 and 177 that
+    /// [`Self::Us`] leaves out. 39 channels and not 40, and two runs rather than
+    /// one, because channel 14 is unsupported — see [`UNSUPPORTED_INDEX`].
     All,
 }
 
@@ -502,9 +455,7 @@ impl ChannelPool {
         self.runs().iter().any(|r| r.contains(idx))
     }
 
-    /// The whole pool as one set — every channel a single node could be told
-    /// to hold, which before the mask was not something one assignment could
-    /// say.
+    /// The whole pool as one set: every channel a single node could be told to hold.
     #[must_use]
     pub fn channels(self) -> ChannelSet {
         self.runs().iter().fold(ChannelSet::empty(), |set, run| {
@@ -529,12 +480,8 @@ impl core::fmt::Display for ChannelPool {
 
 /// A fleet-wide assignment: one [`ChannelSet`] per node.
 ///
-/// There is exactly one of these per fleet membership. It has no phases and no
-/// timer behind it, because a mask can say everything a node needs to hold —
-/// which is the difference Phase 2 made. The plan before it could not give a
-/// lone node both of the US pool's runs at once, so it described a *rotation*
-/// and the caller had to step through it, re-issuing the assignment on a dwell
-/// timer and accepting that coverage was intermittent in between.
+/// Exactly one of these per fleet membership, with no phases and no timer behind
+/// it: a mask says everything a node needs to hold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Plan {
     node_count: u8,
@@ -563,11 +510,9 @@ impl Plan {
 
     /// Channels in the pool that no node in this fleet has the radio for.
     ///
-    /// Empty for any fleet with an ESP32-C5 in it. Non-empty means the pool
-    /// asks for 5 GHz and nothing present can tune it, so those channels are
-    /// simply not being scanned — which is worth saying out loud, because it is
-    /// the one hole in coverage that no amount of waiting will fill and nothing
-    /// else on screen would name.
+    /// Empty for any fleet with an ESP32-C5 in it. Non-empty means the pool asks
+    /// for 5 GHz and nothing present can tune it, which is the one hole in
+    /// coverage no amount of waiting will fill.
     #[must_use]
     pub const fn unreachable(&self) -> ChannelSet {
         self.unreachable
@@ -575,11 +520,9 @@ impl Plan {
 
     /// The assignment to send to `node_index`.
     ///
-    /// `epoch` is the caller's persisted epoch byte; a node adopts the
-    /// assignment only when it differs from the one it holds. `flags` is the
-    /// caller's, not the planner's: which node scans Bluetooth is an operator's
-    /// decision about one node, and partitioning channels is a decision about
-    /// the fleet.
+    /// `epoch` is the caller's persisted epoch byte; a node adopts only when it
+    /// differs from the one it holds. `flags` is the caller's too: which node scans
+    /// Bluetooth is a decision about one node, and a plan is about the fleet.
     #[must_use]
     pub fn admin_for(&self, node_index: u8, epoch: u8, flags: u8) -> Option<AdminMsg> {
         Some(AdminMsg {
@@ -594,20 +537,13 @@ impl Plan {
 
 /// Build a plan distributing `pool` across `node_count` nodes.
 ///
-/// The pool's runs are flattened into one ascending list of indices and dealt
-/// round-robin: index `k` goes to node `k % node_count`. Every node therefore
-/// gets a share of every run — some 2.4 GHz and some 5 GHz on the US pool —
-/// rather than a block, which for the same arithmetic would have put one node
-/// on 2.4 GHz alone and left the fleet blind to a whole band the moment that
-/// node dropped out.
+/// The pool's runs are flattened into one ascending list and dealt round-robin:
+/// index `k` goes to node `k % node_count`, so every node gets some of every run.
+/// Shares differ by at most one channel, so heartbeat periods stay within one
+/// dwell of each other. `node_index` is a single fleet-wide `0..node_count`
+/// numbering because it drives the transmit stagger ([`stagger_offset_ms`]).
 ///
-/// Shares differ by at most one channel, so heartbeat periods across the fleet
-/// stay within one dwell of each other. `node_index` is a single fleet-wide
-/// `0..node_count` numbering because it drives the transmit stagger slot
-/// ([`stagger_offset_ms`]), which has to be unique across the whole fleet.
-///
-/// Every node is taken to be dual-band. For a fleet that is not, use
-/// [`plan_for`] — an ESP32-C6 dealt a 5 GHz channel is a channel nobody scans.
+/// Every node is taken to be dual-band; for a fleet that is not, use [`plan_for`].
 ///
 /// Returns `None` for zero nodes, or for more than [`MAX_NODES`].
 #[must_use]
@@ -618,34 +554,21 @@ pub fn plan(pool: ChannelPool, node_count: u8) -> Option<Plan> {
 
 /// Build a plan distributing `pool` across a fleet of known radios.
 ///
-/// The same deal as [`plan`], with one node excluded from each channel it
-/// cannot tune. A share of 5 GHz cut for an ESP32-C6 is a share nobody scans —
-/// the same failure the capability token exists to prevent for a node that is
-/// not ours at all, arriving by a different route: the node adopts the
-/// assignment, acknowledges it, and then sits on the channels it can reach
-/// while the rest of its share goes uncovered.
+/// The same deal as [`plan`], with each node excluded from the channels it cannot
+/// tune, because a share of 5 GHz cut for an ESP32-C6 is a share nobody scans.
+/// Three consequences, each deliberate and none obvious — the operator-facing
+/// account is `crates/wartui/README.md` § "Channel pools":
 ///
-/// Two things fall out of that and are worth stating, because neither is
-/// obvious and both are deliberate:
-///
-/// **The 5 GHz half is dealt first when the fleet is mixed.** Dealt in pool
-/// order, the dual-band nodes would take their share of 2.4 GHz and then the
-/// whole of 5 GHz on top, which on the US pool with one C5 and one C6 is a
-/// 29/5 split — the block-splitting this planner was written to avoid, arrived
-/// at sideways. Dealing the constrained channels first leaves the nodes that
-/// had to sit them out as the lightest when the rest is handed round, and the
-/// same fleet splits 23/11. A fleet whose radios are all alike has no
-/// constrained channels, so the order is the pool's own and the plan is
-/// byte-identical to what [`plan`] has always produced.
-///
-/// **Shares are then no longer within one of each other**, and cannot be: a
-/// C6 in a fleet holding 5 GHz channels sweeps faster than the C5 beside it
-/// however the rest is dealt. What is minimised is the largest share, which is
-/// what sets how stale the slowest node's observations get.
-///
-/// Channels no radio present can tune are left out of every share and reported
-/// by [`Plan::unreachable`] rather than being given to a node that would ignore
-/// them.
+/// - **The constrained channels go round first in a mixed fleet**, so the nodes
+///   that sat them out are the lightest when the rest is dealt. In pool order the
+///   dual-band nodes take their 2.4 GHz share and then all of 5 GHz on top, which
+///   is the block split arrived at sideways. A uniform fleet has no constrained
+///   channels and gets a plan byte-identical to [`plan`]'s.
+/// - **Shares are then no longer within one of each other**, and cannot be. What
+///   is minimised is the *largest* share, which sets how stale the slowest node's
+///   observations get.
+/// - Channels no radio present can tune are left out of every share and reported
+///   by [`Plan::unreachable`].
 ///
 /// Returns `None` for an empty fleet, or for more than [`MAX_NODES`].
 #[must_use]
@@ -656,17 +579,16 @@ pub fn plan_for(pool: ChannelPool, radios: &[Radio]) -> Option<Plan> {
     }
     let mut slots = [ChannelSet::empty(); MAX_NODES];
     let mut unreachable = ChannelSet::empty();
-    // Ties go to the node after the last one dealt to. With a uniform fleet
-    // every node is always tied, so this alone is the round-robin: index `k`
-    // to node `k % node_count`, exactly as before.
+    // Ties go to the node after the last one dealt to. In a uniform fleet every
+    // node is always tied, so this alone is the round-robin.
     let mut cursor = 0usize;
     let mixed = radios.contains(&Radio::TwoPointFour) && radios.contains(&Radio::DualBand);
 
     for pass in 0..2 {
         for run in pool.runs() {
             for idx in run.start..=run.end {
-                // One pass over the pool unless the fleet is mixed, in which
-                // case 5 GHz goes round before the part everyone can take.
+                // One pass unless the fleet is mixed, in which case 5 GHz goes
+                // round before the part everyone can take.
                 if mixed && is_five_ghz(idx) != (pass == 0) {
                     continue;
                 }
@@ -684,10 +606,7 @@ pub fn plan_for(pool: ChannelPool, radios: &[Radio]) -> Option<Plan> {
                         slots[node].insert(idx);
                         cursor = (node + 1) % usize::from(node_count);
                     }
-                    // No radio in this fleet reaches it. Left out of every
-                    // share: telling a node to dwell where it cannot tune would
-                    // cost it a dwell of every sweep and report the refusal
-                    // only to a serial console nobody is watching.
+                    // No radio in this fleet reaches it, so it goes in no share.
                     None => unreachable.insert(idx),
                 }
             }

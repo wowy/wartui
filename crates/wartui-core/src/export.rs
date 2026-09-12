@@ -14,16 +14,11 @@
 //! `2026-5-1 13:34:37`), and the SSID must be RFC-4180 quoted, since an SSID
 //! may contain a comma or a quote and is not required to be text at all.
 //!
-//! A third is here because the store is not rewritten. A cloaked access point
-//! may beacon its SSID element at the name's real length with every byte zero,
-//! and until `beacon::visible_ssid` existed those NULs were recorded verbatim
-//! and written straight into this column — valid UTF-8, so a lossy decode kept
-//! them, and free of the four characters `quote` reacts to, so they went out
-//! bare. [`record::ssid_text`](crate::record::ssid_text) is what lets a capture
-//! taken before that fix export correctly, which is the whole promise of the
-//! export being a view over the store rather than a thing produced once at
-//! capture time. It is shared with the view for the same reason WiGLE wants it
-//! here: a raw NUL is no more use to a reader than to a parser.
+//! A third is here because the store is not rewritten: a capture taken before
+//! `beacon::visible_ssid` existed holds a cloaked network's NUL padding verbatim, so
+//! [`record::ssid_text`](crate::record::ssid_text) is applied on the way out. That a
+//! capture from before a fix still exports correctly is the whole promise of the
+//! export being a view over the store.
 
 use std::io::Write;
 
@@ -50,9 +45,8 @@ pub enum ExportError {
 /// What to export.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ExportFilter {
-    /// Only this session. `None` exports every session in the database, which
-    /// is usually what is wanted: WiGLE deduplicates on its own side and more
-    /// sightings of a network is strictly better data.
+    /// Only this session. `None` exports every session, which is usually wanted:
+    /// WiGLE deduplicates its own side and more sightings is better data.
     pub session_id: Option<i64>,
 }
 
@@ -63,8 +57,7 @@ pub struct ExportSummary {
     pub networks: u64,
     /// Networks left out because no sighting of them had a position.
     ///
-    /// Not an error and not silent: WiGLE cannot use a row without
-    /// coordinates, but the operator should know how much of the capture is
+    /// Not an error and not silent: the operator should know how much of a capture is
     /// waiting on a GPS or a `--lat`/`--lon`.
     pub unpositioned: u64,
 }
@@ -100,19 +93,12 @@ pub fn wigle_csv<W: Write>(
 /// One row per BSSID: the strongest positioned sighting, with `FirstSeen` taken
 /// from the earliest sighting of that BSSID — positioned or not.
 ///
-/// Both halves of that need the window to run over the *unfiltered* set. If the
-/// position filter were applied first, `FirstSeen` would report the earliest
-/// sighting that happened to have coordinates, so an unpositioned session at
-/// 20:00 followed by a positioned one at 23:00 would submit 23:00 and hide
-/// three hours of evidence that the network was already there.
-///
-/// Ordering positioned rows ahead of unpositioned ones in `ROW_NUMBER` is what
-/// lets the outer filter be safe: without it the strongest sighting could be an
-/// unpositioned one, win rn = 1, and then be filtered out — losing a network
-/// that had a perfectly good weaker sighting to submit.
-///
-/// The `?1 IS NULL OR session_id = ?1` shape lets one statement serve both the
-/// filtered and unfiltered cases without building SQL by hand.
+/// Both halves need the window to run over the *unfiltered* set: filter on position
+/// first and `FirstSeen` reports the earliest sighting that happened to have
+/// coordinates, hiding hours of evidence that the network was already there.
+/// Ordering positioned rows ahead of unpositioned ones in `ROW_NUMBER` is what makes
+/// the outer filter safe — otherwise an unpositioned sighting can win rn = 1 and
+/// then be filtered out, losing a network with a good weaker sighting to submit.
 const SELECT_NETWORKS: &str = r"
 SELECT bssid, ssid, security, first_seen, channel, rssi, lat, lon, alt, accuracy, kind
 FROM (
