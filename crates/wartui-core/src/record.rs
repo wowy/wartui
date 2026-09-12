@@ -4,9 +4,8 @@
 //! `rusqlite` and can be tested without one. The store's job is to turn these
 //! into rows; deciding what is worth recording is the engine's.
 //!
-//! [`ssid_text`] lives here rather than beside either of its callers because
-//! both of them read this module's bytes, and when the rule was written out
-//! twice the two answers drifted apart.
+//! [`ssid_text`] lives here rather than beside either caller because both read this
+//! module's bytes, and written out twice the two answers drifted apart.
 
 use wartui_proto::air::RecordKind;
 use wartui_proto::beacon::visible_ssid;
@@ -18,17 +17,14 @@ use crate::position::Fix;
 /// Raw SSID bytes as text, for anything that has to show them to a person or
 /// write them into a column that has to be parsed as text.
 ///
-/// One rule in one place, because the view and the export were quietly
-/// disagreeing about the same bytes. A cloaked access point's zero padding is
-/// stripped by [`visible_ssid`], which is the same rule the parser applies and
-/// is repeated here because captures recorded before it exists are still read
-/// back through this. Any NUL left standing is an interior one, which is not
-/// padding and gets what `from_utf8_lossy` already gives a byte it cannot
-/// represent: a raw NUL is worth no more to a terminal than to WiGLE's parser,
-/// and a pane that emits one shows a name most terminals silently shorten.
+/// One rule in one place, because the view and the export were quietly disagreeing
+/// about the same bytes. [`visible_ssid`] strips a cloaked access point's padding,
+/// applied here as well as in the parser because captures recorded before that rule
+/// existed are still read back through this. Any NUL left standing is an interior
+/// one, and gets what `from_utf8_lossy` gives any byte it cannot represent — a raw
+/// NUL is worth no more to a terminal than to WiGLE's parser.
 ///
-/// The store keeps whatever arrived either way. This is only how it is read
-/// back out.
+/// The store keeps whatever arrived; this is only how it is read back out.
 #[must_use]
 pub fn ssid_text(bytes: &[u8]) -> String {
     let text = String::from_utf8_lossy(visible_ssid(bytes));
@@ -49,18 +45,17 @@ pub struct NodeSeen {
     /// The capability token from this node's most recent heartbeat, verbatim,
     /// or `None` for a frame that carried none.
     ///
-    /// Kept as the text that was on the wire rather than as the parsed value,
-    /// so a capture can still answer "what did this node say it was" for a
-    /// version this build did not understand. It is also the only record of
-    /// *why* a node was never assigned anything: a node row with heartbeats,
-    /// no token and no assignments is the whole diagnosis.
+    /// Kept as the text that was on the wire rather than the parsed value, so a
+    /// capture can answer "what did this node say it was" for a version this build
+    /// did not understand. It is also the only record of *why* a node was never
+    /// assigned anything: heartbeats, no token and no assignments is the diagnosis.
     ///
-    /// `None` here does not erase what an earlier heartbeat said. Most frames
-    /// are observations and carry no token, so the store coalesces rather than
-    /// overwriting — which means the stored column is the last token *ever*
-    /// seen from this node, not the last one it sent. A board reflashed to
-    /// something else mid-capture keeps its old token in the file while the
-    /// engine and the fleet table correctly stop believing it.
+    /// `None` does not erase what an earlier heartbeat said. Most frames are
+    /// observations and carry no token, so the store coalesces rather than
+    /// overwriting, and the stored column is the last token *ever* seen from this
+    /// node rather than the last one it sent — so a board reflashed mid-capture
+    /// keeps its old token in the file while the engine stops believing it. Every
+    /// other site that needs this rule points here.
     pub capabilities: Option<String>,
 }
 
@@ -84,9 +79,8 @@ pub struct Observation {
     pub node_mac: Mac,
     /// Unix milliseconds of receipt by the bridge.
     pub rx_at_ms: i64,
-    /// How strongly the bridge heard the reporting node — not the observed
-    /// network. Kept because a node reporting from the edge of the mesh is
-    /// worth being able to spot in the data afterwards.
+    /// How strongly the bridge heard the reporting node, not the observed network:
+    /// a node at the edge of the mesh is worth spotting in the data afterwards.
     pub link_rssi: Option<i8>,
     /// The observed BSSID, six raw bytes.
     pub bssid: [u8; 6],
@@ -107,10 +101,8 @@ pub struct Observation {
     pub fix: Fix,
     /// The frame exactly as it came off the air, header and all.
     ///
-    /// A couple of dozen bytes a row, and the reason a decoder fix can be
-    /// applied to history rather than only to what arrives afterwards. The
-    /// format is ours and documented now, which makes this cheaper insurance
-    /// than it was rather than unnecessary: the header says which version wrote
+    /// A couple of dozen bytes a row, and the reason a decoder fix can reach history
+    /// rather than only what arrives afterwards. The header says which version wrote
     /// the row, so a file spanning a format change is still readable.
     pub raw_body: Vec<u8>,
 }
@@ -134,9 +126,9 @@ pub struct RawFrame {
 
 /// Which bridge this capture came through.
 ///
-/// Separate from [`crate::store::SessionInfo`] because a session is opened
-/// before any bridge has announced itself: the store cannot wait for one, and a
-/// capture that never finds a dongle still deserves a session row.
+/// Separate from [`crate::store::SessionInfo`] because a session is opened before
+/// any bridge has announced itself, and a capture that never finds a dongle still
+/// deserves a session row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BridgeSeen {
     /// The bridge's own MAC, which nodes see as the core's address.
@@ -149,17 +141,13 @@ pub struct BridgeSeen {
 
 /// What became of one assignment this host put on the air.
 ///
-/// The vendor core has no equivalent: it clears its dirty flag from the
-/// `esp_now_send` return value and keeps no record of whether anything
-/// arrived. Every attempt gets a row here, successful or not, which is what
-/// turns "the fleet keeps drifting off its channels" into a query.
+/// Every attempt gets a row, successful or not, which is what turns "the fleet keeps
+/// drifting off its channels" into a query. Divergence 3.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdminOutcome {
     /// The node's radio acknowledged the frame at the MAC layer.
     Acked,
-    /// It went out and nothing came back. Usually BLE coexistence on the node:
-    /// NimBLE and Wi-Fi share the one 2.4 GHz antenna, and the admin window is
-    /// precisely when the node would otherwise be idle.
+    /// It went out and nothing came back. Usually BLE coexistence on the node.
     Unacked,
     /// The bridge could not transmit it at all.
     Refused,
@@ -187,7 +175,7 @@ pub struct AssignmentSent {
     /// Which node it was addressed to.
     pub node_mac: Mac,
     /// The persisted monotonic counter this assignment was allocated from.
-    /// Divergence 4: the vendor core keeps this in RAM and resets it at boot.
+    /// Divergence 4.
     pub counter: u64,
     /// The byte that actually went on the wire, `air::wire_epoch(counter)`.
     /// The column keeps its older name; what it holds has not changed.
@@ -206,17 +194,13 @@ pub struct AssignmentSent {
     pub delivered_at_ms: Option<i64>,
     /// What the radio said.
     pub outcome: AdminOutcome,
-    /// Bridge-measured microseconds from the heartbeat that opened the node's
-    /// admin window to the transmit callback. The whole reason the bridge
-    /// stamps both ends itself: the host's own scheduling noise never enters
-    /// the number.
+    /// Bridge-measured microseconds from the heartbeat that opened the node's admin
+    /// window to the transmit callback, stamped at both ends by the bridge so the
+    /// host's scheduling noise never enters it.
     ///
-    /// `None` when there is no such measurement to make — no heartbeat stamp
-    /// yet, or a difference longer than the window the node was holding open,
-    /// which means the heartbeat it was measured from was not the one that
-    /// opened a window at all. The outcome is recorded either way; it is only
-    /// the timing that goes missing, and a missing number is the honest answer
-    /// where the alternative was an 80-second "latency".
+    /// `None` when there is no such measurement to make: no heartbeat stamp yet, or
+    /// a difference longer than the window, which means the heartbeat behind it did
+    /// not open one. The outcome is recorded either way.
     pub latency_us: Option<u32>,
 }
 
