@@ -1,17 +1,10 @@
 //! Enough of the Bluetooth host-controller interface to run a scan.
 //!
-//! The vendor node reports BLE through NimBLE (`initBLE`,
-//! `src/WiFiOps.cpp:2031-2051`), which is a full host stack brought in to
-//! answer one question: what addresses are advertising, and how strongly. All
-//! it ever emits is `address,,[BLE],0,rssi,B` (`src/WiFiOps.cpp:144`) — no
-//! name, no services, no manufacturer data — and for that a host stack is an
-//! enormous amount of code to be wrong in.
-//!
-//! `esp-radio` hands out the controller as a raw HCI packet pipe
-//! (`BleConnector`), so four commands and one event are the whole of it. That
-//! is what this module is: the byte layouts, and nothing that talks to
-//! hardware. Packets are built and parsed here, on the host side of the path
-//! dependency, so `cargo test` reaches them.
+//! All a scan wants from Bluetooth is an address and a signal strength, and the
+//! vendor brought in a full NimBLE host stack for it (`src/WiFiOps.cpp:2031-2051`) —
+//! a lot of code to be wrong in. `esp-radio` hands out the controller as a raw HCI
+//! packet pipe, so four commands and one event are the whole of it, and this module
+//! is the byte layouts with nothing that talks to hardware.
 //!
 //! Layouts are Bluetooth Core Specification v5.3, Vol 4 Part E — the H4
 //! transport in §2, `HCI_Reset` in §7.3.2, `HCI_Set_Event_Mask` in §7.3.1,
@@ -50,28 +43,20 @@ pub const RESET: [u8; 4] = [CMD, 0x03, 0x0C, 0x00];
 
 /// `HCI_Set_Event_Mask`, with the LE Meta Event bit set.
 ///
-/// Without this a scan is enabled, is acknowledged, and reports nothing. An
-/// advertising report arrives as an LE Meta Event, which is bit 61 of the event
-/// mask, and the Core Specification's default mask is `0x00001FFF_FFFFFFFF` —
-/// bit 61 clear. [`RESET`] restores that default, so sending a reset and then
-/// only the scan commands leaves the controller filtering out the one event the
-/// scan exists to produce. Command Complete is not maskable, which is why every
-/// command still answers `status 0` while nothing else ever arrives.
-///
-/// The value is the specification's default with bit 61 added, rather than all
-/// ones: the events this firmware does not read cost queue space in the host
-/// controller and there is nothing here that would drain them.
+/// Without this a scan is enabled, acknowledged, and reports nothing: an advertising
+/// report is an LE Meta Event, which is bit 61, and [`RESET`] restores the
+/// specification's default mask with that bit clear. The value is that default plus
+/// bit 61 rather than all ones, because events nothing here drains cost queue space
+/// in the controller.
 pub const SET_EVENT_MASK: [u8; 12] =
     [CMD, 0x01, 0x0C, 0x08, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x1F, 0x00, 0x20];
 
 /// `HCI_LE_Set_Scan_Parameters`, passive.
 ///
 /// Passive rather than the vendor's `setActiveScan(true)`
-/// (`src/WiFiOps.cpp:2040`). An active scan transmits a scan request to pull
-/// back a scan response, and everything a scan response carries — the device
-/// name, most of all — is thrown away before it reaches the wire. So the
-/// transmission buys nothing, and not transmitting is the point of the whole
-/// firmware.
+/// (`src/WiFiOps.cpp:2040`): an active scan transmits to pull back a scan response
+/// whose every field is thrown away before the wire, so it buys nothing and not
+/// transmitting is the point of the firmware.
 ///
 /// `interval` and `window` are in [`SCAN_UNIT_US`] units; equal values mean the
 /// radio listens continuously while scanning is enabled.
@@ -90,10 +75,8 @@ pub const fn set_scan_parameters(interval: u16, window: u16) -> [u8; 11] {
 
 /// `HCI_LE_Set_Scan_Enable`.
 ///
-/// Duplicate filtering is left off, matching `setDuplicateFilter(false)`
-/// (`src/WiFiOps.cpp:2041`). The controller's filter is a small fixed table
-/// that would silently compete with [`crate::dedup::MacRing`] for the same job,
-/// and the ring is the one whose behaviour is understood and tested.
+/// Duplicate filtering is left off: the controller's filter is a small fixed table
+/// that would silently compete with [`crate::dedup::MacRing`] for the same job.
 #[must_use]
 pub const fn set_scan_enable(enable: bool) -> [u8; 6] {
     [CMD, 0x0C, 0x20, 0x02, enable as u8, 0x00]
@@ -141,7 +124,6 @@ impl AdvReport {
 #[must_use]
 pub fn adv_reports(packet: &[u8]) -> AdvReports<'_> {
     let empty = AdvReports { rest: &[], remaining: 0 };
-    // H4 type, event code, parameter length, subevent, report count.
     let Some(&[EVT, LE_META, _plen, ADV_REPORT, count]) = packet.get(..5) else { return empty };
     AdvReports { rest: &packet[5..], remaining: count }
 }
@@ -162,13 +144,10 @@ impl Iterator for AdvReports<'_> {
         }
         self.remaining -= 1;
 
-        // Event type, address type, address, then the advertising data whose
-        // length is declared inline, then RSSI.
-        //
-        // Reports are laid out one after another rather than as parallel arrays
-        // per parameter. The specification's parameter table reads either way;
-        // every controller and every host stack agrees on this reading, and in
-        // practice a controller sends one report per event anyway.
+        // Event type, address type, address, advertising data whose length is
+        // declared inline, then RSSI. Reports are laid out one after another rather
+        // than as parallel arrays per parameter: the specification's table reads
+        // either way, and every controller and host stack agrees on this reading.
         let mut address = *self.rest.get(2..8)?.first_chunk::<6>()?;
         address.reverse();
         let data_len = usize::from(*self.rest.get(8)?);
