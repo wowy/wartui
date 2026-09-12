@@ -250,7 +250,6 @@ fn main() -> ! {
     //
     // `US` rather than `esp-radio`'s default, which silently costs a C5 channels
     // 100-144 — `firmware/bridge/src/main.rs` has the detail.
-    #[allow(unused_mut, reason = "only the C5 has a band mode to set")]
     let mut controller = WifiController::new(
         peripherals.WIFI,
         ControllerConfig::default().with_country_info(*b"US"),
@@ -263,6 +262,12 @@ fn main() -> ! {
     match controller.set_band_mode(esp_radio::wifi::BandMode::Auto) {
         Ok(()) => {}
         Err(err) => note!("could not enable dual band: {:?}", err),
+    }
+
+    // Every radio in the fleet transmits at 2 dBm; `plan::TX_POWER_QUARTER_DBM` has why.
+    match controller.set_max_tx_power(wartui_proto::plan::TX_POWER_QUARTER_DBM) {
+        Ok(()) => {}
+        Err(err) => note!("could not cap transmit power: {:?}", err),
     }
 
     let mut sniffer = controller.sniffer();
