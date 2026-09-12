@@ -252,6 +252,11 @@ Written after this bench, from a later capture: 64.6 minutes on 2026-09-10, a C6
 bridge (`9D:24`) and five C5 nodes, Bluetooth off everywhere. It is the evidence
 for cutting `ADMIN_WAIT_MS` from 300 ms to 100 ms.
 
+It was a drive rather than a bench — about 34 km across a 6.5 by 5.8 km area — with
+GPS active throughout: every sighting is positioned by it, from a fix no more than
+1.1 s old. The host was a 2016 MacBook Air running Arch Linux on kernel 7.2, idle
+apart from a release build of wartui. Every host figure below is that machine's.
+
 The direct measurement is thin. Membership settled in the first seven seconds and
 nothing re-cut the plan afterwards, so the session holds nine assignments, all
 `acked`, at 2259–3722 µs from heartbeat to transmit callback on the bridge's clock.
@@ -281,7 +286,9 @@ from about 1230 ms to 1030 ms, about 19% more sweeps an hour.
 
 Not covered, and worth a session after the reflash: a node holding Bluetooth,
 which is the documented way to lose an admin window, and a host busier than
-this one's six frames a second.
+this one's six frames a second. A Raspberry Pi 5 should stall no worse, with
+comparable cores and more of them; what it adds is an SD card, whose write stalls
+cost the store rows rather than the engine a window.
 
 ## Still not measured
 
