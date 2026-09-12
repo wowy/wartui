@@ -28,7 +28,7 @@ and the two `run` sessions the rest of this document draws on.
 
 Before any assignment the node broadcast `MSG_HEARTBEAT` every 1005–1013 ms with an
 empty text field and a counter monotonic from boot, and collected nothing. That
-is the deliberate divergence from `WiFiOps.cpp:77-80`, where the vendor default
+is the deliberate departure from the vendor, whose default
 is all forty channels, and it is what the node README warns costs you a capture
 under `--manual` until a key is pressed.
 

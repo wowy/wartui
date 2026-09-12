@@ -49,7 +49,7 @@ use wartui_proto::link::{
     LogStr, LoopPhase, MAX_FRAME, Mac, ResetCause, SendStatus, ShortStr, decode_frame,
 };
 use wartui_proto::outbox::{ByteSink, Outbox};
-/// Where the stock mesh lives (`src/WiFiOps.cpp:15`). Shared with the node
+/// The channel the fleet speaks on. Shared with the node
 /// firmware and the host planner rather than spelled again here: nothing on the
 /// air negotiates this number, so the only thing keeping the three ends on the
 /// same channel is that they read it from the same place. The host can move
@@ -617,11 +617,10 @@ const fn peer(mac: &Mac) -> PeerInfo {
 
 /// Put one frame on the air and report what the radio made of it.
 ///
-/// Blocks until the transmit callback fires, which is the whole point. The vendor
-/// core clears its dirty flag from `esp_now_send`'s return value
-/// (`src/WiFiOps.cpp:679`) and so believes every assignment it *enqueued* was
-/// delivered; unicast ESP-NOW is MAC-acknowledged, so waiting turns that guess
-/// into a fact. `SendWaiter` busy-waits and its `Drop` waits too, but the
+/// Blocks until the transmit callback fires, which is the whole point.
+/// `esp_now_send`'s return value says only that a frame was enqueued; unicast
+/// ESP-NOW is MAC-acknowledged, so waiting turns a guess about delivery into a
+/// fact. `SendWaiter` busy-waits and its `Drop` waits too, but the
 /// scheduler is preemptive and the wait is milliseconds against a 300 ms window.
 fn transmit(
     manager: &EspNowManager<'_>,

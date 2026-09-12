@@ -157,7 +157,8 @@ pub struct EngineConfig {
     /// database, from [`crate::Store::assignment_base`]. Epochs are allocated
     /// from `base + 1` upwards.
     ///
-    /// Divergence 4.
+    /// Persisted, so a restarted host never reissues an epoch a node already
+    /// holds: the node would acknowledge it and then discard it.
     pub assignment_base: u64,
 }
 
@@ -188,7 +189,8 @@ pub struct NodeState {
     pub last_seen_ms: i64,
     /// Monotonic time of the most recent frame of any kind.
     ///
-    /// Divergence 2. Two clocks, because they answer different questions.
+    /// Any frame refreshes this; only a heartbeat refreshes `last_heartbeat`.
+    /// Two clocks, because they answer different questions.
     pub last_seen: Instant,
     /// Monotonic time of the most recent heartbeat, which is what decides
     /// whether this node can still be given a channel assignment.
@@ -784,7 +786,7 @@ impl FleetEngine {
                 self.see_node(src, now, rssi, Some(heartbeat.capabilities), batch);
                 self.counters.heartbeats += 1;
                 let node = self.nodes.entry(src).or_insert_with(|| NodeState::new(src, now));
-                // Divergence 5: a counter below the last one means the node
+                // A counter below the last one means the node
                 // restarted and has forgotten whatever range it was assigned.
                 let rebooted = node.counter.is_some_and(|previous| heartbeat.counter < previous);
                 if rebooted {
@@ -1214,7 +1216,8 @@ impl FleetEngine {
         batch.urgent.push(HostToBridge::SendEspNow {
             id,
             dst: mac,
-            // Divergence 6: add if absent and never remove.
+            // Add if absent and never remove: removing a peer races the transmit
+            // callback for the frame just sent.
             ensure_peer: true,
             payload,
         });
@@ -1319,8 +1322,8 @@ impl FleetEngine {
             if acked {
                 node.last_outcome = Some(outcome);
                 node.last_latency_us = latency_us;
-                // Divergence 3: cleared on the MAC-layer acknowledgement, not
-                // on a successful enqueue.
+                // Cleared on the MAC-layer acknowledgement, not on a successful
+                // enqueue.
                 //
                 // Only if the node still wants what was sent: an operator who
                 // changed their mind while this was in flight has already

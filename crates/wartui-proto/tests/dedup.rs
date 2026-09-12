@@ -32,7 +32,7 @@ fn an_address_is_reported_again_once_it_has_been_pushed_out() {
 
 #[test]
 fn a_repeat_does_not_move_an_address_back_to_the_front() {
-    // `seen_mac` returns before touching the cursor (`src/WiFiOps.cpp:1791`),
+    // A lookup returns before touching the cursor,
     // so a constantly-beaconing access point still ages out on schedule.
     let mut ring: MacRing<3> = MacRing::new();
     ring.insert(mac(1));

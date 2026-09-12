@@ -14,8 +14,8 @@ use wartui_proto::link::BROADCAST;
 /// dwell, off on the control channel, where every data frame in the room would
 /// otherwise reach the callback for nothing.
 ///
-/// Promiscuous mode is switched on across the change either way. That is the vendor's
-/// `setFixedChannel` (`src/WiFiOps.cpp:600-618`) and it is not decoration: on an
+/// Promiscuous mode is switched on across the change either way, and it is not
+/// decoration: on an
 /// unassociated station interface the channel does not stick without it, and a node
 /// whose channel silently did not change reports the right networks against the wrong
 /// frequency and hears no assignment.

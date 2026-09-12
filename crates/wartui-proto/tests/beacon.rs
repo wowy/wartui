@@ -81,16 +81,14 @@ fn an_open_network_has_neither_privacy_nor_cipher_suites() {
 
 #[test]
 fn privacy_with_no_cipher_suites_is_the_wep_heuristic() {
-    // `src/WiFiOps.cpp:394-396`: nothing else can explain an encrypted network
-    // that names no suite.
+    // Nothing else can explain an encrypted network that names no suite.
     assert_eq!(security_of(&ie(0, b"old")), Security::Wep);
 }
 
 #[test]
 fn each_akm_combination_maps_to_the_token_the_exporter_expects() {
     // These strings reach the WiGLE `AuthMode` column unaltered, so the ladder
-    // in `classify` is a contract, not an interpretation. The pairs come from
-    // `security_int_to_string`, `src/WiFiOps.cpp:1833-1878`.
+    // in `classify` is a contract, not an interpretation.
     assert_eq!(security_of(&ie(48, &rsn(&[2]))), Security::Wpa2Psk);
     assert_eq!(security_of(&ie(221, &wpa(&[2]))), Security::WpaPsk);
     assert_eq!(security_of(&ie(48, &rsn(&[8]))), Security::Wpa3Psk);
@@ -113,19 +111,18 @@ fn a_transitional_network_advertising_both_elements_is_wpa_wpa2() {
 }
 
 #[test]
-fn wpa_only_enterprise_reports_as_wpa2_because_the_firmware_says_so() {
+fn wpa_only_enterprise_reports_as_wpa2_because_the_token_is_shared() {
     // `WIFI_AUTH_ENTERPRISE` and `WIFI_AUTH_WPA2_ENTERPRISE` share the `[WPA2]`
-    // arm (`src/WiFiOps.cpp:370-378`), and the token is what has to match.
+    // token, and the token is what has to match.
     assert_eq!(security_of(&ie(221, &wpa(&[1]))), Security::Wpa2Enterprise);
 }
 
 #[test]
 fn a_legacy_enterprise_element_does_not_override_what_rsn_says() {
-    // The WPA element names 802.1X and the RSN element names PSK. The vendor guards
-    // its enterprise rung with `!has_rsn` (`src/WiFiOps.cpp:375`), so RSN decides and
-    // this is `[WPA2_PSK]`. Without
-    // that guard it reads as `[WPA2]`, and a firmware and a host parsing the
-    // same beacon would disagree about the same network.
+    // The WPA element names 802.1X and the RSN element names PSK. The enterprise
+    // rung is guarded with `!has_rsn`, so RSN decides and this is `[WPA2_PSK]`.
+    // Without that guard it reads as `[WPA2]`, for an access point that will
+    // negotiate PSK.
     let mut ies = ie(0, b"legacy");
     ies.extend_from_slice(&ie(48, &rsn(&[2])));
     ies.extend_from_slice(&ie(221, &wpa(&[1])));
@@ -142,7 +139,7 @@ fn owe_collapses_to_undefined_along_with_everything_else_unmapped() {
 
 #[test]
 fn wapi_outranks_every_other_element() {
-    // It is tested first in `src/WiFiOps.cpp:342-346`, before RSN is consulted.
+    // It is tested first, before RSN is consulted.
     let mut ies = ie(48, &rsn(&[2]));
     ies.extend_from_slice(&ie(68, &[]));
     assert_eq!(security_of(&ies), Security::WapiPsk);
@@ -250,8 +247,7 @@ fn frames_too_short_for_the_fixed_fields_are_refused() {
 #[test]
 fn a_truncated_element_ends_the_walk_without_losing_the_access_point() {
     // A frame that was received well enough to have a BSSID is worth reporting
-    // even if its tail was clipped; `getAuthType` breaks out of the loop for
-    // the same reason (`src/WiFiOps.cpp:209-211`).
+    // even if its tail was clipped.
     let mut ies = ie(0, b"cafe");
     ies.extend_from_slice(&ie(48, &rsn(&[2])));
     let full = beacon(&ies);

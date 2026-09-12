@@ -115,8 +115,8 @@ async fn a_fleet_left_to_itself_converges_on_a_partition_of_the_us_pool() {
         })
         .collect();
     slots.sort_unstable();
-    // The stagger slot is computed from these (`src/RadioTuning.cpp:3-13`), so
-    // two nodes sharing an index would key up on top of each other.
+    // The stagger slot is computed from these, so two nodes
+    // sharing an index would key up on top of each other.
     assert_eq!(slots, (0..6).map(|i| (i, 6)).collect::<Vec<_>>());
 
     // A node adopts mid-sweep but finishes the sweep it is on, so give each a couple
