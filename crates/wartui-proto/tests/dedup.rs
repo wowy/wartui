@@ -45,9 +45,8 @@ fn a_repeat_does_not_move_an_address_back_to_the_front() {
 
 #[test]
 fn the_all_zero_address_is_not_seen_from_boot() {
-    // The firmware's array starts zeroed with no length alongside it, so
-    // 00:00:00:00:00:00 reads as already-reported before anything has been
-    // heard. Counting entries removes the special case.
+    // A zeroed array with no length alongside it reads 00:00:00:00:00:00 as
+    // already-reported; counting entries removes the special case.
     let ring: MacRing<8> = MacRing::new();
     assert!(ring.is_empty());
     assert!(!ring.contains(&[0; 6]));
