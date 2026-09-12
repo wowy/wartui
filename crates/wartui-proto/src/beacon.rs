@@ -7,31 +7,20 @@
 //! listens instead, which means it has to do for itself the one thing the scan
 //! API was buying: work out what a beacon is advertising.
 //!
-//! The firmware already contains that code. `getAuthType`
-//! (`src/WiFiOps.cpp:154-408`) is a complete RSN/WPA information-element parser
-//! that nothing in that tree calls — the scan path was there first and the
-//! sniffing path was never finished. This module is a port of it, and of the
+//! A port of `getAuthType` (`src/WiFiOps.cpp:154-408`), a complete RSN/WPA
+//! information-element parser that nothing in the vendor tree calls, and of the
 //! `wifi_auth_mode_t` table it feeds (`security_int_to_string`,
-//! `src/WiFiOps.cpp:1833-1878`), collapsed into one pass that yields a
-//! [`Security`] directly. The set of values has to stay faithful to that table
-//! even though the spelling no longer travels on the wire: it is what the
-//! exported WiGLE `AuthMode` column ends up saying.
+//! `src/WiFiOps.cpp:1833-1878`), collapsed into one pass yielding a [`Security`].
+//! The set of values has to stay faithful to that table even though the spelling no
+//! longer travels on the wire: it is what the WiGLE `AuthMode` column says.
 //!
-//! Parsing lives here, on the host side of the path dependency, because that is
-//! where `cargo test` can reach it. A misread information element that only the
-//! firmware knew about would cost a reflash to find and another to fix.
-//!
-//! One thing the scan API was also buying is the reason [`visible_ssid`] exists.
-//! An access point hides its name in either of two ways, and only one of them
-//! looks hidden: it can beacon an SSID element of length zero, or it can beacon
-//! the element at the name's real length with every byte set to zero. Copied
-//! verbatim, the second form is a perfectly well-formed SSID made of NULs, and
-//! it survives everything downstream — `air` is byte-transparent by design, the
-//! store keeps what arrived, and NUL is valid UTF-8, so even a lossy decode
-//! passes it through. It reached a WiGLE export as a column of NULs, which is a
-//! network named after its own padding. Stripping it here rather than at each
-//! place that shows an SSID is what makes `ssid_len == 0` mean hidden, which is
-//! what every reader already assumed it meant.
+//! [`visible_ssid`] exists because an access point hides its name in either of two
+//! ways and only one of them looks hidden: an SSID element of length zero, or the
+//! element at the name's real length with every byte zero. The second form is a
+//! well-formed SSID made of NULs and survives everything downstream — `air` is
+//! byte-transparent, the store keeps what arrived, and NUL is valid UTF-8 — so it
+//! reached a WiGLE export as a column of them. Stripping it here rather than at each
+//! place that shows an SSID is what makes `ssid_len == 0` mean hidden.
 
 use crate::air::{RecordKind, SSID_MAX, Security, SightingMsg};
 
@@ -47,9 +36,8 @@ const CAP_PRIVACY: u16 = 0x0010;
 /// One access point, as heard on the air.
 ///
 /// Fixed-size and [`Copy`] on purpose: the firmware builds these inside the
-/// promiscuous receive callback, where the frame buffer belongs to the Wi-Fi
-/// driver and is gone the moment the callback returns, and parks them in a
-/// `static` ring for the main loop to drain.
+/// promiscuous receive callback, whose buffer dies when it returns, and parks them
+/// in a `static` ring for the main loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Sighting {
     /// The BSSID, from `addr3` of the management header.
@@ -90,11 +78,8 @@ impl Sighting {
 /// The name an access point actually beaconed, with a cloaked one's zero
 /// padding stripped, and empty if there was nothing but padding.
 ///
-/// Trailing zeros are padding and nothing else: a name ending in a NUL is not a
-/// thing an access point means to advertise, and the form that carries the real
-/// length with every byte zeroed is the common way of hiding. An *interior* NUL
-/// is left alone — it is not padding, and there is nothing here to say what it
-/// was meant to be.
+/// Trailing zeros are padding and nothing else. An *interior* NUL is left alone: it
+/// is not padding, and nothing here says what it was meant to be.
 #[must_use]
 pub fn visible_ssid(bytes: &[u8]) -> &[u8] {
     match bytes.iter().rposition(|&b| b != 0) {
@@ -105,11 +90,10 @@ pub fn visible_ssid(bytes: &[u8]) -> &[u8] {
 
 /// Whether a frame is worth handing to [`parse_mgmt`].
 ///
-/// Split out because promiscuous mode delivers every frame on the channel and
-/// the overwhelming majority are data, so a caller wants to reject them before
-/// doing anything that costs — taking a lock, most of all. Type 0 is
-/// management, and only these two subtypes carry the elements
-/// (`src/WiFiOps.cpp:167-176`).
+/// Split out because promiscuous mode delivers every frame on the channel and most
+/// are data, so a caller rejects them before doing anything that costs — taking a
+/// lock, most of all. Type 0 is management, and only these two subtypes carry the
+/// elements (`src/WiFiOps.cpp:167-176`).
 #[must_use]
 pub const fn is_report(frame: &[u8]) -> bool {
     let Some(&fc0) = frame.first() else { return false };
@@ -122,12 +106,10 @@ pub const fn is_report(frame: &[u8]) -> bool {
 /// at the MAC header. `parked` is the channel the radio was tuned to, used when
 /// the frame carries no channel of its own.
 ///
-/// Returns `None` for anything that is not a beacon (subtype 8) or probe
-/// response (subtype 5), and for a frame too short to hold the fixed fields.
-/// Everything past that point is best-effort: a truncated or malformed element
-/// ends the walk rather than discarding the access point, which is what
-/// `getAuthType` does and is the right call for a frame that was already
-/// received well enough to have a BSSID.
+/// Returns `None` for anything that is not a beacon (subtype 8) or probe response
+/// (subtype 5), and for a frame too short to hold the fixed fields. Past that it is
+/// best-effort: a malformed element ends the walk rather than discarding an access
+/// point whose frame was received well enough to have a BSSID.
 #[must_use]
 pub fn parse_mgmt(frame: &[u8], rssi: i8, parked: u8) -> Option<Sighting> {
     if frame.len() < HDR_LEN + FIXED_LEN || !is_report(frame) {
@@ -193,15 +175,11 @@ impl Elements {
             let (id, len) = (ies[0], usize::from(ies[1]));
             let Some(data) = ies.get(2..2 + len) else { break };
             match id {
-                // SSID. Longer than 32 bytes is not a legal SSID; keep what
-                // fits rather than dropping the access point over it.
-                //
-                // Clamp first and trim second, which is not the same as the
-                // other way round. An element claiming forty bytes whose only
-                // non-zero byte is past the thirty-second trims to thirty-nine
-                // and then clamps to thirty-two bytes of nothing but padding —
-                // a network named after it, which is what is being fixed here.
-                // Clamped first, the same element is a hidden network.
+                // SSID. Longer than 32 bytes is not legal; keep what fits rather
+                // than dropping the access point. Clamp first and trim second —
+                // the other order turns an over-long element whose only non-zero
+                // byte is past the 32nd into a name made of padding, where
+                // clamping first makes it the hidden network it is.
                 0 => {
                     let take = visible_ssid(&data[..len.min(SSID_MAX)]).len();
                     self.ssid[..take].copy_from_slice(&data[..take]);
@@ -224,9 +202,9 @@ impl Elements {
                     self.has_rsn = true;
                     self.read_suites(data, true);
                 }
-                // HT Operation, whose first byte is the primary channel. This
-                // is how a 5 GHz access point says where it is: DS Parameter
-                // Set is a 2.4 GHz element and 5 GHz beacons omit it.
+                // HT Operation, whose first byte is the primary channel: how a
+                // 5 GHz access point says where it is, DS Parameter Set being a
+                // 2.4 GHz element that 5 GHz beacons omit.
                 61 if len >= 1 && self.channel.is_none() => self.channel = Some(data[0]),
                 // Vendor specific; WPA is Microsoft's OUI with type 1.
                 221 if len >= 8 && data[..4] == [0x00, 0x50, 0xF2, 0x01] => {
@@ -273,11 +251,11 @@ impl Elements {
     /// The classification ladder from `src/WiFiOps.cpp:341-401`, mapped
     /// straight onto the tokens `security_int_to_string` would have produced.
     ///
-    /// Order matters and is preserved verbatim. Note the two rungs that fall
-    /// through to [`Security::Undefined`]: the firmware's `switch` has no arm
-    /// for `WIFI_AUTH_OWE`, and none for WPA3-Enterprise, so both reach the
-    /// WiGLE column as `[UNDEFINED]`. Reproducing that is deliberate — the
-    /// column is a contract with an exporter, not a description of the network.
+    /// Order matters and is preserved verbatim, including the two rungs that fall
+    /// through to [`Security::Undefined`]: the firmware's `switch` has no arm for
+    /// `WIFI_AUTH_OWE` or for WPA3-Enterprise, so both reach the WiGLE column as
+    /// `[UNDEFINED]`. The column is a contract with an exporter rather than a
+    /// description of the network.
     fn classify(&self) -> Security {
         if self.has_wapi {
             return Security::WapiPsk;
@@ -288,16 +266,13 @@ impl Elements {
         if self.has_rsn && self.rsn_sae {
             return if self.rsn_psk { Security::Wpa2Wpa3Psk } else { Security::Wpa3Psk };
         }
-        // `[WPA2]` is `WIFI_AUTH_WPA2_ENTERPRISE`, despite the spelling. A
-        // WPA-only enterprise network lands here too: the firmware maps
-        // `WIFI_AUTH_ENTERPRISE` to the same token.
+        // `[WPA2]` is `WIFI_AUTH_WPA2_ENTERPRISE` despite the spelling, and a
+        // WPA-only enterprise network lands here too.
         //
-        // `!has_rsn` on the second arm is the vendor's, not a simplification of
-        // it (`src/WiFiOps.cpp:375`). An access point advertising 802.1X in its
-        // legacy WPA element and PSK in its RSN element is describing what it
-        // will actually negotiate in the RSN element; without the guard it
-        // reads as enterprise, and the two firmwares would disagree about the
-        // same beacon.
+        // `!has_rsn` on the second arm is the vendor's, not a simplification
+        // (`src/WiFiOps.cpp:375`): an access point advertising 802.1X in its legacy
+        // WPA element and PSK in its RSN element will negotiate the RSN one, and
+        // without the guard the two firmwares disagree about the same beacon.
         if (self.has_rsn && self.rsn_8021x) || (self.has_wpa && self.wpa_8021x && !self.has_rsn) {
             return Security::Wpa2Enterprise;
         }
