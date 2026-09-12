@@ -1,8 +1,7 @@
 //! Enough of the Bluetooth host-controller interface to run a scan.
 //!
-//! All a scan wants from Bluetooth is an address and a signal strength, and the
-//! vendor brought in a full NimBLE host stack for it (`src/WiFiOps.cpp:2031-2051`) —
-//! a lot of code to be wrong in. `esp-radio` hands out the controller as a raw HCI
+//! All a scan wants from Bluetooth is an address and a signal strength, and a full
+//! host stack such as NimBLE is a lot of code to be wrong in. `esp-radio` hands out the controller as a raw HCI
 //! packet pipe, so four commands and one event are the whole of it, and this module
 //! is the byte layouts with nothing that talks to hardware.
 //!
@@ -53,8 +52,7 @@ pub const SET_EVENT_MASK: [u8; 12] =
 
 /// `HCI_LE_Set_Scan_Parameters`, passive.
 ///
-/// Passive rather than the vendor's `setActiveScan(true)`
-/// (`src/WiFiOps.cpp:2040`): an active scan transmits to pull back a scan response
+/// Passive rather than active: an active scan transmits to pull back a scan response
 /// whose every field is thrown away before the wire, so it buys nothing and not
 /// transmitting is the point of the firmware.
 ///

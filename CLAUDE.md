@@ -9,25 +9,6 @@ through a USB-attached ESP32 dongle. `README.md` introduces it and says which ch
 where. Both firmwares are ours, and every frame on the air is wartui's own in both
 directions.
 
-The `src/*.cpp:NNN` citations throughout this tree point at
-[wowy/ESP32DualBandWardriver](https://github.com/wowy/ESP32DualBandWardriver) on
-`feat/node-interference-mitigation`, the firmware this project grew up against. It is the
-record of measured *behaviour* and nothing else — not a specification anything here
-matches — and a checkout is not needed.
-
-`Divergence N` in a comment names one of the seven places wartui deliberately does not do what that
-firmware did. The reasoning is here; a comment citing a number says only what its own site needs.
-
-| # | wartui | the vendor, and why it mattered |
-|---|---|---|
-| 1 | keys nodes on the full six-byte MAC | a two-byte suffix (`WiFiOps.cpp:410-419`), which collides across a large enough fleet and silently merges two nodes' data |
-| 2 | refreshes liveness on any frame | only on a heartbeat — `touchNode` on the text path is commented out (`WiFiOps.cpp:1073-1082`) — so a node streaming observations whose heartbeats are lost ages out at 60 s and churns the fleet's topology |
-| 3 | clears the ADMIN-dirty flag on the MAC-layer ack | cleared it from the `esp_now_send` return, which is the difference between knowing a node has the assignment and hoping |
-| 4 | allocates assignment epochs from a counter persisted in the store | kept it in RAM and reset it to 1 every boot (`WiFiOps.h:218`), so a restarted core recomputes an epoch a node already holds and is silently ignored |
-| 5 | reads a heartbeat counter going backwards as a reboot | had no equivalent check, and carried on believing its own assignment table |
-| 6 | adds a peer if absent and never removes one | deleted the peer as a side effect of sending (`WiFiOps.cpp:672,676`), which races the transmit callback it then ignored anyway |
-| 7 | freezes `node_count` at plan time and sends it with the channels | read it live at send time (`WiFiOps.cpp:651`), so a node joining in between computed its stagger slot from a fleet size that disagreed with the partition its share was cut from |
-
 Where the prose lives:
 
 - `README.md` — the front door, and stays short.

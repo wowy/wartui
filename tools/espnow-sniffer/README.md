@@ -52,8 +52,7 @@ perfectly while a sniffer sees absolute silence. Promiscuous mode sees those
 frames anyway, which is what makes the two cases distinguishable.
 
 The sniffer stays parked on channel 6 and never hops. That is `CONTROL_CHANNEL`
-in `wartui-proto`, and the vendor firmware hard-codes the same value
-(`src/WiFiOps.cpp:15`), so there is nowhere else for either fleet's traffic to
+in `wartui-proto`, and the `ENOW` fleet uses the same value, so there is nowhere else for either fleet's traffic to
 be -- and leaving the channel, even briefly, risks missing the burst a node
 emits in its first sweep after boot.
 

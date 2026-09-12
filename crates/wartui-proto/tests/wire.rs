@@ -128,9 +128,7 @@ fn a_wifi_sighting_encodes_byte_for_byte() {
 
 #[test]
 fn a_comma_in_an_ssid_survives_the_wire() {
-    // It did not before: the vendor line was split on commas, so the sender
-    // rewrote one as an underscore and the real name was lost at the only
-    // point in the path where it still existed.
+    // The SSID is length-prefixed, so nothing has to be escaped or rewritten.
     let decoded = SightingMsg::decode(SIGHTING_WIFI).expect("valid");
     assert_eq!(decoded.ssid, b"My,Net");
 }
@@ -327,9 +325,8 @@ fn bad_magic_is_rejected_before_anything_else_is_read() {
 
 #[test]
 fn a_version_this_build_does_not_know_is_named_rather_than_guessed_at() {
-    // The vendor header had no version field, which is exactly why its
-    // ten-byte assignment could pass a longer frame's length check and decode
-    // as something plausible. This is the field that stops that happening here.
+    // Without a version field, a frame of another shape could pass a length
+    // check and decode as something plausible. This is the field that stops that happening here.
     let mut frame = HEARTBEAT.to_vec();
     frame[4] = 2;
     assert_eq!(Frame::decode(&frame), Err(DecodeError::BadVersion(2)));

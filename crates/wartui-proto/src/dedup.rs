@@ -1,7 +1,7 @@
 //! The ring that decides whether an observation is worth transmitting.
 //!
 //! A node reports a BSSID once and suppresses it until enough other addresses have
-//! pushed it out (`save_mac` / `seen_mac`, `src/WiFiOps.cpp:1803-1831`). Nothing
+//! pushed it out. Nothing
 //! clears it at runtime, which is why a fleet's observation stream goes quiet a few
 //! minutes into a run rather than repeating itself.
 //!

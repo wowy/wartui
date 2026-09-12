@@ -10,14 +10,13 @@
 //! every kilobyte of them is a kilobyte that can go wrong where a reflash is the
 //! only way to find out.
 //!
-//! `README.md` § "What it does differently" is the account of how it differs from
-//! the firmware it replaces. In short: it *listens* rather than scanning, so it
+//! `README.md` § "What it does differently" is the longer account of its
+//! design. In short: it *listens* rather than scanning, so it
 //! never transmits on a DFS channel and can hold `sniffer()` and `esp_now()` at
 //! once; it returns to the control channel after every dwell rather than once a
 //! sweep; an unassigned node parks rather than sweeping all forty channels; and
-//! every heartbeat says what this build can do. It also shares no wire format with
-//! the vendor's in either direction — [`wartui_proto::air`], and
-//! `docs/phase-4-findings.md` for the vendor length check our longer frame cleared.
+//! every heartbeat says what this build can do. Its wire format is wartui's own in
+//! both directions — [`wartui_proto::air`].
 //!
 //! The runner is `espflash flash --monitor`, and unlike the bridge the monitor is
 //! worth watching: a node's USB endpoint carries nothing but diagnostics.
@@ -370,7 +369,7 @@ fn main() -> ! {
 
 /// Broadcast one heartbeat, which is also the whole of this node's liveness.
 ///
-/// Once per completed sweep, not on a timer (`src/WiFiOps.cpp:1456-1457`). The
+/// Once per completed sweep, not on a timer. The
 /// host reads the period as a rough measure of how many channels the node is
 /// carrying, and treats sixty seconds of silence as a node that has left the
 /// fleet.

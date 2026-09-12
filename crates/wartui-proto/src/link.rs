@@ -205,8 +205,8 @@ pub enum HostToBridge {
         /// Peer address.
         mac: Mac,
     },
-    /// Drop a peer registration. Never issued as a side effect of sending —
-    /// doing that is the firmware bug at `src/WiFiOps.cpp:676`.
+    /// Drop a peer registration. Never issued as a side effect of sending, which
+    /// would race the transmit callback for the frame just sent.
     RemovePeer {
         /// Peer address.
         mac: Mac,

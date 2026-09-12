@@ -5,15 +5,10 @@ it has not reported lately, and takes its share of the channel pool from whateve
 is acting as the fleet's core — for this fleet, `wartui` on a laptop behind the
 bridge.
 
-It replaces the vendor firmware at
-[ESP32DualBandWardriver](https://github.com/wowy/ESP32DualBandWardriver) rather
-than porting it. The scanning and the ESP-NOW comms were learned there and are
-cited `file:line` throughout the source, as the record of a measured behaviour
-rather than a specification to match; the web interface, SD card, display,
-buttons, fuel gauge, GPS, geofencing, uploads and dock mode did not come across at
-all, because a node in this fleet has no use for any of them.
+It has no web interface, SD card, display, buttons, fuel gauge, GPS, geofencing,
+uploads or dock mode, because a node in this fleet has no use for any of them.
 
-It shares no wire format with it either. A node broadcasts a 13-byte heartbeat
+Its wire format is wartui's own. A node broadcasts a 13-byte heartbeat
 once per completed sweep and a 17-plus-SSID sighting per newly-seen BSSID, and
 accepts a 15-byte unicast assignment. All three sit behind wartui's own `WTUI`
 magic and a wire version byte, checked before anything else, so neither fleet can
