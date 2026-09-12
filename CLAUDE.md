@@ -107,7 +107,7 @@ ordered against each other.
 
 `store` is SQLite behind one owner thread with batched transactions and a bounded queue that
 **drops rather than blocks** (a stalled engine misses everything, including an assignment racing
-a 300 ms window). `export` (WiGLE CSV) is a view over the store, re-runnable against a finished
+a 100 ms window). `export` (WiGLE CSV) is a view over the store, re-runnable against a finished
 or still-running session. Bump `store::SCHEMA_VERSION` when the schema changes shape.
 
 Positions resolve fresh per record through `PositionChain`: GPS (`--gps`, NMEA on its own thread)

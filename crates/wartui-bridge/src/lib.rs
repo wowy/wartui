@@ -20,7 +20,7 @@ pub const EVENT_CAPACITY: usize = 4096;
 
 /// Depth of the urgent command queue, which carries channel assignments.
 ///
-/// Small, because anything queued here is racing a node's 300 ms admin window
+/// Small, because anything queued here is racing a node's 100 ms admin window
 /// and a deep backlog would be stale by the time it went out.
 pub const URGENT_CAPACITY: usize = 64;
 
@@ -172,7 +172,7 @@ pub(crate) fn link_pair() -> (LinkHandle, LinkPlumbing) {
 /// Receives commands, always preferring urgent ones.
 ///
 /// Without this bias a burst of status polls can queue ahead of a channel
-/// assignment and push it past the node's 300 ms admin window, costing a whole
+/// assignment and push it past the node's 100 ms admin window, costing a whole
 /// sweep. It is the concrete mechanism protecting that deadline.
 #[derive(Debug)]
 pub(crate) struct CommandRx {
@@ -199,7 +199,7 @@ mod tests {
     #[tokio::test]
     async fn urgent_commands_overtake_a_backlog_of_bulk_ones() {
         // Without this bias a burst of status polls can queue ahead of a channel
-        // assignment and push it past the node's 300 ms admin window.
+        // assignment and push it past the node's 100 ms admin window.
         let (handle, mut plumbing) = link_pair();
         for channel in 0..32 {
             handle.send_bulk(HostToBridge::SetChannel { channel }).expect("queued");

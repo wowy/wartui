@@ -246,6 +246,38 @@ where one was actually owed, so the figure is transmits deferred rather than
 one per stale frame, and it is the answer to the question a fresh connection
 otherwise raises: why nothing has been assigned yet.
 
+## The admin window, from a captured hour
+
+Written after this bench, from a later capture: 64.6 minutes on 2026-09-10, a C6
+bridge (`9D:24`) and five C5 nodes, Bluetooth off everywhere. It is the evidence
+for cutting `ADMIN_WAIT_MS` from 300 ms to 100 ms.
+
+The direct measurement is thin. Membership settled in the first seven seconds and
+nothing re-cut the plan afterwards, so the session holds nine assignments, all
+`acked`, at 2259–3722 µs from heartbeat to transmit callback on the bridge's clock.
+
+The rest of the hour is read from heartbeat timing instead. A heartbeat's `rx_at`
+is the host's clock at the moment the engine handled it, and a host stall of S ms
+stretches one of a node's heartbeat intervals by S and shortens the next by S.
+Across 15,400 heartbeats at periods of 1174–1280 ms, pairs of that shape measured
+1 ms at the median, 6–7 ms at p99 and 17 ms at worst — an upper bound, since node
+jitter takes the same shape. None exceeded 20 ms, and no gap in the merged stream
+of heartbeats and sightings was followed by the burst a backlog delivers.
+
+So the host answered within about 21 ms all hour, against a 300 ms window. 100 ms
+keeps roughly five times that, and about twice the 55 ms startup burst measured
+above. `BEHIND_THE_AIR` is derived from the window and shrinks with it. A window
+missed anyway costs one sweep: the node stays dirty and its next heartbeat re-sends.
+
+The same capture sizes the saving. Each node held six or seven channels and beat
+about 30 ms slower than dwells, stagger and window add up to — roughly 4.7 ms a
+channel for the hop back and the report. At 100 ms a seven-channel sweep falls
+from about 1230 ms to 1030 ms, about 19% more sweeps an hour.
+
+Not covered, and worth a session after the reflash: a node holding Bluetooth,
+which is the documented way to lose an admin window, and a host busier than
+this one's six frames a second.
+
 ## Still not measured
 
 - **Whether the shorter frames change the dedup ring's usefulness.** The ring

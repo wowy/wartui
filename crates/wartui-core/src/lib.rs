@@ -8,7 +8,7 @@
 //! [`engine`] is a pure synchronous state machine, [`runtime`] owns the clock and
 //! performs what it asks for, [`store`] is the system of record and [`export`] a view
 //! of it. The only thing wartui transmits is a channel assignment, to one node, in
-//! the 300 ms it holds open after a heartbeat.
+//! the 100 ms it holds open after a heartbeat.
 
 pub mod engine;
 pub mod export;

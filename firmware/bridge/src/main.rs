@@ -101,8 +101,8 @@ const USB_READ_BUDGET: usize = 256;
 /// How long to idle when neither radio nor link had anything to do.
 ///
 /// A busy loop would work — the scheduler is preemptive — but would burn the core
-/// for nothing. One millisecond is three hundred times finer than the 300 ms
-/// window any of this has to hit.
+/// for nothing. One millisecond is a hundred times finer than the 100 ms window
+/// any of this has to hit.
 const IDLE_SLEEP: Duration = Duration::from_millis(1);
 
 // There is no watchdog here, having built one and measured that it cannot work.
@@ -715,7 +715,7 @@ fn set_peer_rate(_manager: &EspNowManager<'_>, mac: &Mac) -> bool {
 /// `esp_now_send`'s return value says only that a frame was enqueued; unicast
 /// ESP-NOW is MAC-acknowledged, so waiting turns a guess about delivery into a
 /// fact. `SendWaiter` busy-waits and its `Drop` waits too, but the
-/// scheduler is preemptive and the wait is milliseconds against a 300 ms window.
+/// scheduler is preemptive and the wait is milliseconds against a 100 ms window.
 fn transmit(
     manager: &EspNowManager<'_>,
     sender: &mut EspNowSender<'_>,
