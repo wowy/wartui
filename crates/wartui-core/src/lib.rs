@@ -5,16 +5,10 @@
 //! `wartui export` and the TUI two front ends over one implementation, and what
 //! lets the fleet's behaviour be tested without either.
 //!
-//! The shape is deliberate and load-bearing:
-//!
-//! - [`engine`] is a pure synchronous state machine. Events in, actions out, no
-//!   I/O and no clock of its own.
-//! - [`runtime`] owns the clock and performs those actions.
-//! - [`store`] is the system of record; [`export`] is a view of it.
-//!
-//! From Phase 4 it transmits, but only ever one thing: a channel-range
-//! assignment, addressed to one node, in the 300 ms that node holds open after
-//! a heartbeat. Everything else remains listening.
+//! [`engine`] is a pure synchronous state machine, [`runtime`] owns the clock and
+//! performs what it asks for, [`store`] is the system of record and [`export`] a view
+//! of it. The only thing wartui transmits is a channel assignment, to one node, in
+//! the 300 ms it holds open after a heartbeat.
 
 pub mod engine;
 pub mod export;
