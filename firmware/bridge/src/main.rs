@@ -266,6 +266,20 @@ fn reboot() -> ! {
 /// re-announces [`BridgeToHost::Ready`], so a bridge that panics repeatedly says
 /// so in the one way the host is already listening for. The message is lost,
 /// which is the price of not printing to the endpoint the link runs over.
+/// 802.11g 24 Mbps, for ESP-NOW — spelled `Rate12m` because `esp-radio` 1.0.0-beta.0
+/// numbers `WifiPhyRate` without the gap IDF's `wifi_phy_rate_t` leaves at 4, and
+/// `set_rate` passes the discriminant straight through. From `Rate2mS` on, every
+/// variant names the rate below the one it sends: `Rate24m` is 8, which IDF reads as
+/// 48 Mbps. IDF's `WIFI_PHY_RATE_24M` is 9, and 9 is `Rate12m`.
+///
+/// The assertion pins the broken numbering, so an `esp-radio` that fixes it stops the
+/// build instead of silently halving the rate. `firmware/node/src/main.rs` has a copy.
+const ESPNOW_RATE_24M: esp_radio::esp_now::WifiPhyRate = esp_radio::esp_now::WifiPhyRate::Rate12m;
+const _: () = assert!(
+    esp_radio::esp_now::WifiPhyRate::Rate2mS as u32 == 4 && ESPNOW_RATE_24M as u32 == 9,
+    "esp-radio's WifiPhyRate numbering changed; re-check ESPNOW_RATE_24M against IDF"
+);
+
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
     reboot()
@@ -434,7 +448,7 @@ fn main() -> ! {
     // The price is sensitivity — 24 Mbps wants roughly 10 dB more signal than 1 Mbps —
     // which a fleet sharing a car has to spare. Receivers need nothing: any 802.11b/g
     // rate decodes without being told. `firmware/node/src/main.rs` sets the same rate.
-    if manager.set_rate(esp_radio::esp_now::WifiPhyRate::Rate24m).is_err() {
+    if manager.set_rate(ESPNOW_RATE_24M).is_err() {
         bridge.error("could not set the ESP-NOW rate; transmitting at 1 Mbps");
     }
 

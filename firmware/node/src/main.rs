@@ -122,6 +122,15 @@ fn reboot() -> ! {
 /// has stopped is indistinguishable from one out of range, and a reset at least
 /// restarts the heartbeat counter, which the host reads as `rebooted` and
 /// answers with a fresh assignment.
+/// 802.11g 24 Mbps, for ESP-NOW. `Rate12m` is not a typo: `esp-radio` misnumbers
+/// `WifiPhyRate` against IDF, and `firmware/bridge/src/main.rs` has the detail. The
+/// assertion is the same one, so a fixed `esp-radio` stops this build too.
+const ESPNOW_RATE_24M: esp_radio::esp_now::WifiPhyRate = esp_radio::esp_now::WifiPhyRate::Rate12m;
+const _: () = assert!(
+    esp_radio::esp_now::WifiPhyRate::Rate2mS as u32 == 4 && ESPNOW_RATE_24M as u32 == 9,
+    "esp-radio's WifiPhyRate numbering changed; re-check ESPNOW_RATE_24M against IDF"
+);
+
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
     note!("panic: {}", info);
@@ -270,7 +279,7 @@ fn main() -> ! {
     let (manager, mut sender, receiver) = controller.esp_now().split();
     // 24 Mbps rather than ESP-NOW's 1 Mbps default, for airtime on the control
     // channel — `firmware/bridge/src/main.rs` has the reasoning and the cost.
-    match manager.set_rate(esp_radio::esp_now::WifiPhyRate::Rate24m) {
+    match manager.set_rate(ESPNOW_RATE_24M) {
         Ok(()) => {}
         Err(err) => note!("could not set the ESP-NOW rate, transmitting at 1 Mbps: {:?}", err),
     }
