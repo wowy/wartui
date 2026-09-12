@@ -1,19 +1,14 @@
 //! The fleet view.
 //!
-//! Four keys here reach the air: `a` and `A` on the selected node, which ask
-//! the engine for a channel assignment; `b`, which moves the Bluetooth scan to
-//! the selected node or takes it off the fleet; and `p`, which hands the whole
-//! fleet to the engine to partition on its own — where it starts, so `p` is
-//! usually the key that takes the fleet *back*. Nothing goes out at the moment
-//! a key is pressed — a node only listens in the 300 ms after its own heartbeat
-//! — so the effect of a keystroke is a row that says `pending` until the next
-//! sweep completes. That delay is the protocol, not lag, and the view says so
-//! rather than pretending otherwise.
+//! Four keys reach the air — `a`, `A`, `b` and `p`, which the operator's manual
+//! lists (`crates/wartui/README.md`). None of them transmits when pressed: a
+//! node only listens in the 300 ms after its own heartbeat, so a keystroke's
+//! effect is a row reading `pending` until the next sweep completes. That delay
+//! is the protocol rather than lag, and the view says so.
 //!
-//! The view is rebuilt from a [`Snapshot`] the engine publishes four times a
-//! second and never from a stream of individual observations. A busy fleet can
-//! produce tens of rows a second in bursts; a terminal cannot usefully redraw
-//! that often, and a UI that tried would be back-pressuring the link.
+//! Rebuilt from a [`Snapshot`] the engine publishes four times a second, never
+//! from a stream of observations: a busy fleet produces tens of rows a second in
+//! bursts, and a UI redrawing per row would back-pressure the link.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -133,29 +128,19 @@ impl Ui {
                 self.notice = None;
                 self.selected = self.selected.saturating_sub(1);
             }
-            // One channel, and the whole pool. The pair is the Phase 4 proof:
-            // a node heartbeats once per completed sweep, so narrowing it to a
-            // single channel should collapse its beat period from seconds to
-            // about half of one, and widening it again should put it back.
-            // Nothing else in the protocol reports what a node is scanning.
-            //
-            // `A` really is the whole pool now. Until the channel mask it was
-            // the pool's *longest run*, because one assignment could not
-            // straddle the gap at channels 12-14.
+            // One channel, and the whole pool. A node heartbeats once per
+            // completed sweep, so narrowing it collapses the beat period and
+            // widening it restores it — nothing else in the protocol reports
+            // what a node is scanning.
             KeyCode::Char('a') => self.assign(narrow(snapshot), snapshot, commands),
             KeyCode::Char('A') => self.assign(widest(snapshot), snapshot, commands),
-            // Bluetooth, which at most one node in the fleet scans. Unlike the
-            // assignment keys this is honoured with auto-assignment on: the
-            // planner partitions channels and has no opinion about BLE, so
-            // there is nothing here for it to take back.
+            // Honoured with auto-assignment on, unlike the assignment keys: the
+            // planner partitions channels and has no opinion about BLE.
             KeyCode::Char('b') => self.toggle_ble(snapshot, commands),
-            // The fleet, rather than one node. On, the engine cuts the pool
-            // into as many ranges as there are heartbeating nodes and re-cuts
-            // it whenever that number changes.
+            // The fleet, rather than one node.
             KeyCode::Char('p') => self.toggle_auto(snapshot, commands),
-            // Anything else leaves the notice alone. A refused assignment is
-            // the one message the operator has to read to know why nothing
-            // happened, and a key bound to nothing should not take it away.
+            // Anything else leaves the notice alone: a key bound to nothing must
+            // not clear the one message saying why nothing happened.
             _ => {}
         }
     }
@@ -173,17 +158,14 @@ impl Ui {
         let on = !self.auto(snapshot);
         let said = match commands.try_send(Command::SetAuto(on)) {
             Ok(()) if on => {
-                // Only once it is really on its way. Remembering a request the
-                // engine never received would latch the view into a state
-                // nothing can ever agree with: the header would say one thing,
-                // `a` would be refused for the other, and `p` would flip
-                // between two states the fleet is in neither of.
+                // Only once it is really on its way: remembering a request the
+                // engine never received latches the view into a state nothing
+                // can agree with.
                 self.auto_wanted = Some(on);
                 "auto-assignment on: the pool is split across every heartbeating node".to_owned()
             }
-            // Nothing is recalled, because there is no frame that says "scan
-            // nothing" — a node keeps its last range until something replaces
-            // it. Saying so beats letting an operator believe they stopped it.
+            // Nothing is recalled — there is no frame that says "scan nothing" —
+            // so say so rather than let an operator believe they stopped it.
             Ok(()) => {
                 self.auto_wanted = Some(on);
                 "auto-assignment off: each node keeps the range it holds".to_owned()
@@ -202,19 +184,15 @@ impl Ui {
         let Some(node) = snapshot.nodes.get(self.selected) else { return };
         let target = node.state.mac;
         let holds = snapshot.ble_node == Some(target);
-        // Same rule as an assignment, for the same reason: the flag travels in
-        // the admin frame, and only a heartbeat opens the window that frame
-        // needs. Refusing here beats a request that sits undelivered.
+        // Same rule as an assignment: the flag travels in the admin frame, and
+        // only a heartbeat opens the window it needs.
         if !holds && let Some(why) = why_not_assignable(node) {
             self.say(format!("{} {why}", mac(&target)), snapshot);
             return;
         }
-        // And one refusal that is only about Bluetooth. The `ble` cargo feature
-        // decides whether the scan code exists in the build at all; the flag
-        // decides whether it runs. A node built without it adopts the flag,
-        // acknowledges the frame and scans nothing, so the fleet table would
-        // show a holder and the export would have no BLE rows in it — the exact
-        // silent acknowledgement the capability token was added to end.
+        // And one refusal only about Bluetooth: a node built without the `ble`
+        // feature adopts the flag, acknowledges, and scans nothing, so the table
+        // would name a holder and the export carry no BLE rows.
         if !holds && node.state.capabilities.is_some_and(|capabilities| !capabilities.ble) {
             self.say(
                 format!(
@@ -229,11 +207,9 @@ impl Ui {
             .try_send(Command::AssignBle { mac: if holds { None } else { Some(target) } })
         {
             Ok(()) if holds => format!("{}: bluetooth off on its next heartbeat", mac(&target)),
-            // The flag rides in the assignment frame, so a node that has not
-            // been given one has nothing for it to ride on. Saying "on its next
-            // heartbeat" there would promise something that never arrives:
-            // under `--manual` with nothing assigned, nothing ever will until
-            // `a` or `A` is pressed.
+            // The flag rides in the assignment frame, so a node without one has
+            // nothing for it to ride on — under `--manual` with nothing
+            // assigned, "on its next heartbeat" would never come true.
             Ok(()) if node.state.desired.is_none() && node.state.confirmed.is_none() => {
                 format!("{}: bluetooth, once it has been given channels", mac(&target))
             }
@@ -272,19 +248,16 @@ impl Ui {
             );
             return;
         }
-        // A node that will not adopt this never opens a window it can arrive
-        // through, so the assignment would sit dirty for ever with nothing to
-        // say why. Refusing it up front, with the reason, beats a queue that
-        // never drains.
+        // A node that will not adopt this never opens a window for it to arrive
+        // through, so refusing up front with the reason beats a queue that never
+        // drains.
         if let Some(why) = why_not_assignable(node) {
             self.say(format!("{} {why}", mac(&node.state.mac)), snapshot);
             return;
         }
-        // The engine masks this as well — a share a node's radio cannot tune
-        // is a share nobody scans, and that has to hold however the assignment
-        // was made — but the notice has to say what will really go out rather
-        // than what was asked for. Both pools start in 2.4 GHz and both keys
-        // derive their set from the pool, so what is left is never empty.
+        // The engine masks this too, but the notice has to name what will really
+        // go out rather than what was asked for. Both pools start in 2.4 GHz and
+        // both keys derive their set from the pool, so what is left is never empty.
         let channels = match node.state.capabilities {
             Some(capabilities) => Radio::from(capabilities).tunable(channels),
             None => channels,
@@ -322,11 +295,8 @@ fn narrow(snapshot: &Snapshot) -> ChannelSet {
     set
 }
 
-/// The whole pool, which one assignment can now say.
-///
-/// It used to be the pool's *longest run*: an assignment carried one contiguous
-/// range, and the US pool's gap at channels 12-14 meant `A` could offer at most
-/// 5 GHz or at most 2.4 GHz, never both.
+/// The whole pool, which one assignment can now say — before the channel mask it
+/// was the pool's longest run, never both bands.
 fn widest(snapshot: &Snapshot) -> ChannelSet {
     snapshot.pool.channels()
 }
@@ -335,9 +305,9 @@ fn widest(snapshot: &Snapshot) -> ChannelSet {
 /// node's own web UI and on every other tool the operator owns.
 ///
 /// Consecutive indices collapse into `first-last`, so a contiguous assignment
-/// still reads as `1-11` and only a genuinely scattered one costs the space.
-/// The planner deals round-robin, so scattered is the ordinary case for a fleet
-/// of more than one — which is why [`channel_cell`] leads with the count.
+/// reads as `1-11`. The planner deals round-robin, so scattered is the ordinary
+/// case for a fleet of more than one — hence [`channel_cell`] leading with the
+/// count.
 fn channel_list(set: ChannelSet) -> String {
     let mut out = String::new();
     let mut run: Option<(u8, u8)> = None;
@@ -370,22 +340,18 @@ fn push_run(out: &mut String, start: u8, end: u8) {
 
 /// The channel set as it goes in a fixed-width table cell.
 ///
-/// The count comes first because it is the fact that always fits and is the one
-/// cross-check available from here: a node heartbeats once per completed sweep,
-/// so the beat column two along should be roughly this many dwells long. The
-/// list after it is whatever is left of the column, truncated rather than
-/// wrapped — a round-robin share of the US pool is a dozen scattered channels
-/// and no sane column is wide enough for all of them.
+/// The count comes first: it always fits, and it is the cross-check against the
+/// beat column two along. The list after it is truncated rather than wrapped,
+/// because a round-robin share is a dozen scattered channels.
 fn channel_cell(set: ChannelSet, width: usize) -> String {
     let head = format!("{}: ", set.len());
     let list = channel_list(set);
     if head.len() + list.len() <= width {
         return head + &list;
     }
-    // Cut at a comma rather than at a character. `1-11,36-165` truncated by
-    // width alone can end `1-1`, which is a channel range that does not exist
-    // — a worse answer than showing one group fewer. Every character here is
-    // ASCII, so byte lengths and column widths are the same thing.
+    // Cut at a comma rather than a character: truncating `1-11,36-165` by width
+    // alone can end `1-1`, a range that does not exist. All ASCII, so byte
+    // lengths and column widths are the same thing.
     let budget = width.saturating_sub(head.len() + 1);
     let mut kept = String::new();
     for group in list.split(',') {
@@ -442,10 +408,8 @@ fn quits(key: KeyEvent) -> bool {
 }
 
 fn draw(frame: &mut Frame<'_>, snapshot: &Snapshot, ui: &Ui) {
-    // Faults get their own line, and only when there are any. Sharing the
-    // footer with the counters meant that a run with several faults at once —
-    // exactly the run where they matter — pushed the last of them off the end
-    // of the terminal.
+    // Faults get their own lines, and only when there are any: sharing the footer
+    // with the counters pushed the last of them off the terminal.
     let faults = fault_lines(&faults(snapshot), frame.area().width);
     let footer_height = 1 + u16::try_from(faults.len()).unwrap_or(u16::MAX);
     let [header, body, footer] = Layout::vertical([
@@ -524,11 +488,9 @@ fn planning(snapshot: &Snapshot) -> Span<'static> {
         // bridge has no peer slot for cannot be reached at all. The state
         // column says which.
         //
-        // This arm is why `alive` and `assignable` are counted apart. Against
-        // one number it could never fire — the planner's own filter is the
-        // assignable one, so a positive count always has a plan — and a fleet
-        // that had outgrown the peer table fell through to "nothing
-        // heartbeating yet" while the table showed them all heartbeating.
+        // This arm is why `alive` and `assignable` are counted apart: against one
+        // number a fleet that had outgrown the peer table fell through to
+        // "nothing heartbeating yet" while the table showed them all doing it.
         None if snapshot.alive > 0 => "auto — no node it can drive".to_owned(),
         None => "auto — nothing heartbeating yet".to_owned(),
     };
@@ -537,11 +499,9 @@ fn planning(snapshot: &Snapshot) -> Span<'static> {
 
 /// Where the host believes it is, said plainly and continuously.
 ///
-/// The warning `wartui run` prints before starting is on screen for about one
-/// frame before the alternate screen swallows it, which is no use to someone
-/// who then watches a night of observations accumulate and only finds out at
-/// export time that none of them can be uploaded. So it lives here instead,
-/// where it is visible for the whole capture.
+/// The warning `wartui run` prints at startup survives about one frame before the
+/// alternate screen swallows it, which is no use to someone who finds out at
+/// export time that a night of observations cannot be uploaded.
 fn position(snapshot: &Snapshot) -> Vec<Span<'static>> {
     let fix = match (snapshot.position.lat, snapshot.position.lon) {
         (Some(lat), Some(lon)) => {
@@ -561,15 +521,13 @@ fn position(snapshot: &Snapshot) -> Vec<Span<'static>> {
 
 /// What the receiver is doing, said only when it is not the thing answering.
 ///
-/// A configured GPS that is not producing the rows' positions is the failure
-/// this whole tier can have, and it is silent otherwise: the rows keep coming,
-/// they simply carry the position from before the drive started. So the note
-/// stays on screen until the receiver is what the chain is using.
+/// A configured GPS that is not producing the rows' positions is this tier's one
+/// failure, and it is otherwise silent — the rows keep coming, carrying the
+/// position from before the drive started. The note stays up until it is fixed.
 fn receiver(gps: &GpsView, source: PositionSource) -> Span<'static> {
-    // Checked before the source, because a fix stays usable for `max_age`
-    // after the puck is unplugged: for those few seconds the rows really are
-    // coming from the GPS and the port really is dead, and the footer is
-    // already saying so.
+    // Checked before the source: a fix stays usable for `max_age` after the puck
+    // is unplugged, so for those seconds the rows really are coming from the GPS
+    // and the port really is dead.
     if let GpsStatus::Failed(reason) = &gps.status {
         return Span::styled(format!("  gps: {reason}"), Style::new().fg(Color::Yellow));
     }
@@ -585,8 +543,7 @@ fn receiver(gps: &GpsView, source: PositionSource) -> Span<'static> {
         GpsStatus::Searching => "  gps searching",
         // Talking, has had a fix, and the chain has stopped believing it.
         GpsStatus::Fixed { .. } => "  gps fix is stale",
-        // Handled above, before the source is looked at.
-        GpsStatus::Failed(_) => "  gps unreadable",
+        GpsStatus::Failed(_) => "  gps unreadable", // Handled above.
     };
     let text = text.to_owned();
     Span::styled(text, Style::new().fg(Color::Yellow))
@@ -609,10 +566,9 @@ fn draw_fleet(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot, ui: &Ui) {
                 Cell::from(node.state.heartbeats.to_string()),
                 Cell::from(node.state.observations.to_string()),
                 Cell::from(ago(snapshot.now_ms - node.state.last_seen_ms)),
-                // The measured sweep period. Proportional to how many channels
-                // the node is scanning, and so the only evidence available from
-                // here that an assignment was actually adopted rather than
-                // merely acknowledged.
+                // The measured sweep period: proportional to how many channels
+                // the node scans, and so the only evidence from here that an
+                // assignment was adopted rather than merely acknowledged.
                 Cell::from(node.state.beat_period_ms().map_or_else(|| "—".to_owned(), period)),
                 Cell::from(ble_cell(node)),
                 Cell::from(channels_cell(node)),
@@ -649,10 +605,9 @@ const CHANNELS_WIDTH: u16 = 18;
 
 /// What the node is scanning, and whether that is known or merely wanted.
 ///
-/// The distinction is the whole of divergence 3. A confirmed set was
-/// acknowledged by the node's own radio; a pending one has been asked for and
-/// is waiting on a heartbeat to open the window. The vendor core cannot tell
-/// these apart, because it clears its dirty flag from the enqueue result.
+/// The distinction is the whole of divergence 3: a confirmed set was
+/// acknowledged by the node's own radio, a pending one is waiting on a
+/// heartbeat to open the window.
 fn channels_cell(node: &NodeView) -> Span<'static> {
     let state = &node.state;
     if state.dirty
@@ -679,10 +634,9 @@ fn channels_cell(node: &NodeView) -> Span<'static> {
 
 /// Whether this node is the one carrying the Bluetooth scan.
 ///
-/// Read off the assignment rather than off the snapshot's `ble_node`, so it
-/// says what the *node* is doing rather than what the host has decided: the two
-/// differ for exactly as long as it takes an assignment to be acknowledged, and
-/// that gap is where a coexistence failure lives.
+/// Read off the assignment rather than the snapshot's `ble_node`, so it says what
+/// the *node* is doing: the two differ for as long as an assignment takes to be
+/// acknowledged, and that gap is where a coexistence failure lives.
 fn ble_cell(node: &NodeView) -> Span<'static> {
     let state = &node.state;
     if state.dirty
@@ -723,37 +677,30 @@ fn why_not_assignable(node: &NodeView) -> Option<&'static str> {
 
 /// What the operator most needs to know about a node, in one column.
 ///
-/// "stale" is the one worth explaining. It means the node is still being heard
-/// — observations are arriving — but its heartbeats are not, so it cannot be
-/// given a channel range. That is a different fault from silence and has a
-/// different cause, most often BLE coexistence on the node holding the radio
-/// through its admin window.
+/// "stale" is the one worth explaining: observations are arriving and heartbeats
+/// are not, so the node cannot be given a range. A different fault from silence,
+/// with a different cause — most often BLE holding the antenna.
 fn node_state(node: &NodeView) -> (String, Style) {
     let state = &node.state;
     if state.last_heartbeat.is_none() {
         return ("no heartbeat".to_owned(), Style::new().fg(Color::Yellow));
     }
-    // Ahead of `stale`, because a peer refusal makes a node unassignable while
-    // its heartbeats keep arriving. Behind the fall-through it read as "stale",
-    // which says the heartbeats stopped — they have not, and the fix is not on
-    // the node at all but on a fleet that has outgrown the peer table.
+    // Ahead of `stale`: a peer refusal makes a node unassignable while its
+    // heartbeats keep arriving, and the fix is on the fleet, not the node.
     if state.peer_refused {
         return ("refused".to_owned(), Style::new().fg(Color::Red));
     }
     if !node.assignable {
         return ("stale".to_owned(), Style::new().fg(Color::Yellow));
     }
-    // An assignment that went out and was not acknowledged is the most
-    // actionable thing this column can say, and the cause is nearly always the
-    // same one: the node's radio was not on the control channel when its own
-    // admin window was open, because NimBLE had the antenna.
+    // The most actionable thing this column can say, and nearly always the same
+    // cause: the radio was not on the control channel in its own admin window.
     if matches!(state.last_outcome, Some(AdminOutcome::Unacked | AdminOutcome::Silent)) {
         return ("no admin ack".to_owned(), Style::new().fg(Color::Red));
     }
-    // The bridge would not put it on the air at all, and not because of the
-    // peer table — that case is caught above and is terminal. What is left is
-    // `NoPeer` or a rejected frame, which a reconnect can clear, so the node is
-    // still assignable and still says what happened to its last attempt.
+    // The bridge would not put it on the air, and not for the peer table — that
+    // is caught above and is terminal. `NoPeer` or a rejection, which a reconnect
+    // can clear, so the node is still assignable.
     if state.last_outcome == Some(AdminOutcome::Refused) {
         return ("refused".to_owned(), Style::new().fg(Color::Red));
     }
@@ -947,8 +894,7 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot, ui: &Ui, 
 fn faults(snapshot: &Snapshot) -> Vec<String> {
     let c = snapshot.counters;
     let mut faults = Vec::new();
-    // First, because when the link is down nothing else in this list is being
-    // updated and the reason is the only thing worth reading.
+    // First: with the link down nothing else here is being updated.
     if let Some(error) = &snapshot.link_error
         && !snapshot.link_up
     {
@@ -963,13 +909,10 @@ fn faults(snapshot: &Snapshot) -> Vec<String> {
     if c.peer_table_full > 0 {
         faults.push(format!("peer table full: more than {MAX_NODES} nodes"));
     }
-    // The planner gives up on a fleet it cannot address rather than cutting the
-    // pool among nodes that will never hear the result. What is already out
-    // there stays out there; it simply stops being re-cut.
-    // Counted against `assignable`, because that is the list the planner is
-    // handed: a fleet of thirty nodes of which nineteen are ours is partitioned
-    // perfectly well, and saying otherwise would send the operator unplugging
-    // hardware that was not the problem.
+    // The planner gives up rather than cut the pool among nodes that will never
+    // hear the result; what is out there stays out there. Counted against
+    // `assignable`, the list the planner is handed — a fleet of thirty of which
+    // nineteen are ours partitions perfectly well.
     if snapshot.auto && snapshot.plan.is_none() && snapshot.assignable > MAX_NODES {
         faults.push(format!(
             "{} nodes alive: over the {MAX_NODES} wartui supports, so the fleet is no longer \
@@ -977,11 +920,9 @@ fn faults(snapshot: &Snapshot) -> Vec<String> {
             snapshot.assignable
         ));
     }
-    // Channels in the pool that no node present has the radio for. The planner
-    // leaves them out of every share rather than handing 5 GHz to an ESP32-C6
-    // that would acknowledge it and scan 2.4 — which is the right thing to do
-    // and completely invisible, since what is left is a perfectly ordinary
-    // partition of the part the fleet can reach.
+    // Channels no node present has the radio for. The planner leaving them out is
+    // right and completely invisible, since what remains is an ordinary partition
+    // of the part the fleet can reach.
     if let Some(plan) = snapshot.plan
         && !plan.unreachable().is_empty()
     {
@@ -996,9 +937,8 @@ fn faults(snapshot: &Snapshot) -> Vec<String> {
         if let GpsStatus::Failed(reason) = &gps.status {
             faults.push(format!("gps unreadable: {reason}"));
         }
-        // A receiver whose every line fails the checksum is talking at a rate
-        // nobody is listening at. Silence and gibberish look the same in the
-        // header, and only one of them is fixed with --gps-baud.
+        // Every line failing its checksum is a receiver talking at a rate nobody
+        // is listening at, and only that is fixed with --gps-baud.
         if gps.counters.fixes == 0 && gps.counters.rejected > 20 {
             faults.push(format!(
                 "gps: {} unreadable lines and no fix — wrong --gps-baud?",
@@ -1012,9 +952,8 @@ fn faults(snapshot: &Snapshot) -> Vec<String> {
     if c.garbled > 0 {
         faults.push(format!("garbled {}", c.garbled));
     }
-    // The one fault here that names a node the operator owns: a fleet
-    // half-way through a reflash is invisible to the table above, and this is
-    // the only line that says why.
+    // The one fault naming a node the operator owns: a fleet half-way through a
+    // reflash is invisible to the table above.
     if c.incompatible > 0 {
         faults.push(format!("{} frames from an older firmware — reflash", c.incompatible));
     }
@@ -1024,18 +963,16 @@ fn faults(snapshot: &Snapshot) -> Vec<String> {
     if c.foreign_admin > 0 {
         faults.push(format!("{} admin frames from another core", c.foreign_admin));
     }
-    // The bridge's own count runs from its boot and is usually dominated by
-    // what it dropped before anyone was listening. Only the part this capture
-    // lost belongs in front of the operator.
+    // The bridge's own count runs from its boot and is dominated by what it
+    // dropped before anyone was listening; only this capture's loss belongs here.
     if let Some(status) = snapshot.bridge_status
         && status.dropped_since_attach > 0
     {
         faults.push(format!("bridge dropped {}", status.dropped_since_attach));
     }
-    // A bridge that restarted underneath a running capture is a fault even
-    // though nothing about it is failing now: it came back on the control
-    // channel with an empty peer table, and the gap is in the data. A
-    // power-on is not one — that is just how a capture starts.
+    // A restart underneath a running capture is a fault even with nothing failing
+    // now: the peer table came back empty and the gap is in the data. A power-on
+    // is not one — that is how a capture starts.
     if let Some(bridge) = &snapshot.bridge
         && let Some(reason) = restart_fault(bridge)
     {
@@ -1047,8 +984,7 @@ fn faults(snapshot: &Snapshot) -> Vec<String> {
 /// How to name a bridge restart in the fault box, or `None` for the one that
 /// is not a fault.
 fn restart_fault(bridge: &BridgeInfo) -> Option<String> {
-    // Reported ahead of the cause because it is the more specific statement:
-    // the bridge reset itself deliberately, and said why.
+    // Ahead of the cause, being the more specific statement: it reset itself.
     if matches!(bridge.last_phase, LoopPhase::TxStalled) {
         return Some("bridge rebooted itself: USB transmit had stalled".to_owned());
     }
@@ -1330,8 +1266,6 @@ mod tests {
         let rendered = faulty.backend().to_string();
         assert!(rendered.contains("store dropped 7"));
         assert!(rendered.contains("admin frames from another core"));
-        // The line a half-flashed fleet depends on: those nodes are not in the
-        // table at all, so this is the only place they are mentioned.
         assert!(rendered.contains("older firmware"));
         assert!(rendered.contains("vendor fleet"));
     }
@@ -1340,9 +1274,8 @@ mod tests {
 
     #[test]
     fn one_long_fault_is_broken_up_rather_than_cut_off() {
-        // The bug this replaced: the reason a link was down was appended to the
-        // header, unwrapped, so on a narrow terminal the operator saw
-        // "waiting for a bridge to announce itself" and nothing else.
+        // The reason a link was down used to be appended to the header
+        // unwrapped, so a narrow terminal showed the first clause and nothing else.
         let fault = format!("link down: {BUSY}");
         let lines = fault_lines(std::slice::from_ref(&fault), 40);
         assert!(lines.len() > 1, "it does not fit on one line: {lines:?}");
@@ -1369,10 +1302,8 @@ mod tests {
 
     #[test]
     fn a_fault_too_long_for_the_box_says_how_much_is_missing() {
-        // Three lines of a twenty-column terminal cannot hold this, and the
-        // half that names what to do about it — "Device or resource busy" — is
-        // the half that goes. Cutting it silently is the bug the fault box
-        // exists to fix, just at a narrower width.
+        // Three lines of a twenty-column terminal cannot hold this, and the half
+        // naming what to do about it is the half that would go.
         let fault = format!("link down: {BUSY}");
         let lines = fault_lines(std::slice::from_ref(&fault), 20);
         assert_eq!(lines.len(), MAX_FAULT_LINES, "{lines:?}");
@@ -1384,9 +1315,8 @@ mod tests {
 
     #[test]
     fn the_notice_does_not_eat_the_message_above_it() {
-        // It used to take its room out of the last line, so the reason ended
-        // "n denied (os error   +1 more": a sentence that reads as complete and
-        // says something the operating system never said.
+        // It used to take its room out of the last line, leaving a sentence that
+        // read as complete and said something the OS never said.
         let faults = [format!("link down: {BUSY}"), "store dropped 4".to_owned()];
         let lines = fault_lines(&faults, 30);
         let last = lines.last().expect("a line");
@@ -1401,8 +1331,8 @@ mod tests {
 
     #[test]
     fn the_notice_itself_is_never_the_thing_that_gets_clipped() {
-        // Not a terminal anyone uses, but the guarantee the footer relies on is
-        // that nothing it draws is wider than the frame.
+        // Not a terminal anyone uses, but nothing the footer draws may be wider
+        // than the frame.
         let faults: Vec<String> = (0..2000).map(|n| format!("fault {n}")).collect();
         for width in [1_u16, 8, 12] {
             let lines = fault_lines(&faults, width);
@@ -1420,8 +1350,7 @@ mod tests {
         terminal.draw(|frame| draw(frame, &snapshot, &Ui::default())).expect("drawing");
         let screen = terminal.backend().to_string();
         assert!(screen.contains("link down"), "{screen}");
-        // The tail of the reason is the part that used to be lost, and it is
-        // the part that names what to do about it.
+        // The tail of the reason is the part that names what to do about it.
         assert!(screen.contains("busy"), "{screen}");
     }
 
@@ -1466,9 +1395,8 @@ mod tests {
 
     #[test]
     fn the_header_names_the_pool_the_way_the_readme_does() {
-        // The header is the only place the pool is named on screen, and it
-        // used to name it by the variant's spelling. Every line of prose about
-        // it — README, doc comments — says "the US pool".
+        // The header is the only place the pool is named on screen, and every
+        // line of prose about it says "the US pool".
         let mut snapshot = busy();
         snapshot.pool = ChannelPool::Us;
         assert!(rendered(&snapshot).contains("pool US"));
@@ -1479,9 +1407,6 @@ mod tests {
 
     #[test]
     fn a_receiver_that_is_not_the_one_answering_says_why() {
-        // The failure this tier has is silent: rows keep being written, they
-        // just carry the position from wherever the drive started. So a GPS
-        // that is not producing the rows' positions has to say so.
         let searching =
             with_gps(GpsStatus::Searching, GpsCounters::default(), PositionSource::Static);
         assert!(rendered(&searching).contains("gps searching"));
@@ -1491,8 +1416,6 @@ mod tests {
             GpsCounters::default(),
             PositionSource::Static,
         );
-        // Talking, has had a fix, and the chain has stopped believing it —
-        // which looks identical to a healthy receiver anywhere else on screen.
         assert!(rendered(&stale).contains("gps fix is stale"));
     }
 
@@ -1510,16 +1433,14 @@ mod tests {
 
     #[test]
     fn a_capture_with_no_receiver_says_nothing_at_all_about_one() {
-        // Most captures are static, and a permanent "gps: none" would be noise
-        // on the one line that has to stay readable.
+        // Most captures are static, and a permanent "gps: none" would be noise.
         assert!(!rendered(&busy()).contains("gps"));
     }
 
     #[test]
     fn a_receiver_that_has_died_does_not_read_as_healthy_while_its_fix_lasts() {
         // The seconds after the puck falls out: the rows are still the GPS's,
-        // and the port is gone. Saying "gps ok" here would contradict the
-        // fault the footer is showing at the same moment.
+        // and the port is gone.
         let unplugged = with_gps(
             GpsStatus::Failed("/dev/cu.gps: Device not configured".to_owned()),
             GpsCounters { sentences: 400, fixes: 200, rejected: 0 },
@@ -1539,8 +1460,6 @@ mod tests {
         );
         assert!(rendered(&failed).contains("gps unreadable"));
 
-        // Gibberish at the wrong baud rate looks exactly like silence in the
-        // header, and only one of the two has a fix the operator can apply.
         let mistuned = with_gps(
             GpsStatus::Searching,
             GpsCounters { sentences: 0, fixes: 0, rejected: 300 },
@@ -1569,9 +1488,7 @@ mod tests {
         let screen = rendered(&with_bridge_drops(5));
         assert!(screen.contains("bridge dropped 5"), "{screen}");
 
-        // `busy()`'s bridge dropped 1300 frames before this host attached — a
-        // dongle left powered with nothing listening, which is neither this
-        // capture's loss nor anything the operator can act on.
+        // `busy()`'s bridge dropped 1300 frames before this host attached.
         let screen = rendered(&busy());
         assert!(!screen.contains("bridge dropped"), "{screen}");
     }
@@ -1590,24 +1507,17 @@ mod tests {
 
     #[test]
     fn a_bridge_that_restarted_is_a_fault_but_one_that_was_switched_on_is_not() {
-        // The bridge came back on the control channel with an empty peer table
-        // and a gap in the data, and nothing else on screen would say so.
         let screen = rendered(&with_restart(ResetCause::Watchdog, LoopPhase::Transmit));
         assert!(screen.contains("watchdog"), "{screen}");
 
-        // Every capture starts with a bridge that was powered on, so saying so
-        // would put a permanent fault in front of every operator. Matched on
-        // the full phrase: nodes have their own `rebooted` column, and the
-        // bare word is true of a healthy fleet.
+        // Every capture starts with a bridge that was powered on. Matched on the
+        // full phrase: nodes have their own `rebooted` column.
         let screen = rendered(&with_restart(ResetCause::PowerOn, LoopPhase::Unknown));
         assert!(!screen.contains("bridge rebooted"), "{screen}");
     }
 
     #[test]
     fn a_stalled_transmit_path_is_named_rather_than_called_a_firmware_reset() {
-        // The bridge reset itself and said exactly why, which is more specific
-        // than the `Software` cause that reset arrives under. Reporting the
-        // cause here would throw away the only part worth reading.
         let screen = rendered(&with_restart(ResetCause::Software, LoopPhase::TxStalled));
         assert!(screen.contains("USB transmit had stalled"), "{screen}");
     }
@@ -1626,10 +1536,6 @@ mod tests {
         terminal.draw(|frame| draw(frame, &busy(), &Ui::default())).expect("drawing");
         let rendered = terminal.backend().to_string();
 
-        // Divergence 3 made visible. A confirmed range was acknowledged by the
-        // node's own radio; a pending one has been asked for and is waiting on
-        // a heartbeat to open the 300 ms window. The vendor core cannot tell
-        // these apart, because it clears its dirty flag from the enqueue.
         assert!(rendered.contains("unassigned"), "a node nobody has assigned");
         assert!(rendered.contains("23: 36-165…"), "asked for, not yet acknowledged");
         assert!(rendered.contains("no admin ack"), "sent, and the node never answered");
@@ -1637,8 +1543,7 @@ mod tests {
 
     #[test]
     fn channels_are_shown_as_channel_numbers_rather_than_table_indices() {
-        // Indices into SCAN_CHANNELS are an artefact of the wire format. The
-        // number written on the node's own web UI is the channel.
+        // Indices into SCAN_CHANNELS are an artefact of the wire format.
         assert_eq!(channel_list(ChannelSet::from_run(IndexRun::new(0, 0))), "1");
         assert_eq!(channel_list(ChannelSet::from_run(IndexRun::new(0, 10))), "1-11");
         assert_eq!(channel_list(ChannelSet::from_run(IndexRun::new(14, 36))), "36-165");
@@ -1646,9 +1551,6 @@ mod tests {
 
     #[test]
     fn a_scattered_assignment_is_said_as_runs_rather_than_as_a_span() {
-        // The planner deals round-robin, so this is the ordinary shape of a
-        // share, and rendering it as `1-165` would say the node is scanning
-        // everything between.
         assert_eq!(channel_list(ChannelPool::Us.channels()), "1-11,36-165");
         let mut comb = ChannelSet::empty();
         for idx in [0, 2, 4, 14, 15] {
@@ -1660,8 +1562,6 @@ mod tests {
 
     #[test]
     fn a_channel_cell_leads_with_the_count_and_truncates_the_rest() {
-        // The count always fits and is the one cross-check available from the
-        // table: it should match how many dwells the beat column implies.
         let us = ChannelPool::Us.channels();
         assert_eq!(channel_cell(us, 40), "34: 1-11,36-165");
         assert_eq!(channel_cell(us, 10), "34: 1-11…", "and never cut mid-separator");
@@ -1670,11 +1570,9 @@ mod tests {
 
     #[test]
     fn a_pending_cell_carries_one_ellipsis_however_long_its_list_is() {
-        // The marker for "asked for, not yet acknowledged" and the marker for
-        // "there was more than fitted" are the same character, and a cut-short
-        // list already ends in one. Two in a row is not a different meaning,
-        // just a worse-looking cell — and it would be the ordinary rendering,
-        // because a round-robin share overflows this column nearly always.
+        // The "asked for, not yet acknowledged" marker and the "more than
+        // fitted" marker are the same character, and two in a row is not a
+        // different meaning, just a worse-looking cell.
         let mut view = pending(0x11);
         assert_eq!(channels_cell(&view).content, "23: 36-165…");
 
@@ -1693,29 +1591,21 @@ mod tests {
     fn the_assignment_keys_pick_one_channel_and_the_whole_pool() {
         let us = busy();
         assert_eq!(narrow(&us), ChannelSet::from_run(IndexRun::new(0, 0)), "channel 1 alone");
-        // `A` used to be the pool's longest *run*: one assignment was a
-        // contiguous range and the US pool has a gap at indices 11-13, so it
-        // could offer 5 GHz or 2.4 GHz but never both. A mask can say both.
         assert_eq!(widest(&us), ChannelPool::Us.channels());
         assert_eq!(widest(&us).len(), 34);
     }
 
     #[test]
     fn a_node_that_cannot_be_assigned_says_which_of_the_reasons_it_is() {
-        // Three different faults all end in a refused keypress, and the
-        // operator's next move is different for each: wait for the first
-        // heartbeat, make room in the bridge's peer table, or find out why the
-        // heartbeats stopped. A single "not heartbeating" for all three sent
-        // two of them looking in the wrong place.
+        // Three faults all end in a refused keypress and the operator's next
+        // move differs for each, so one wording for all three misdirects two.
         let mut snapshot = busy();
         snapshot.nodes.push(unannounced(0x21));
         snapshot.nodes.push(stale_node(0x22));
         snapshot.nodes.push(refused(0x23));
         snapshot.nodes.sort_by_key(|n| n.state.mac);
-        // `expect`, not a skip. Written as `let Some(row) = row else
-        // { continue }` the "not heartbeating" case matched no row in `busy`
-        // and was silently never asserted, which is how the fourth reason
-        // below came to be missing from the function under test.
+        // `expect`, not a skip: written as a `continue` the fourth reason went
+        // silently unasserted, which is how it came to be missing.
         let row = |mac_suffix: u8| {
             snapshot
                 .nodes
@@ -1740,11 +1630,8 @@ mod tests {
 
     #[test]
     fn a_fleet_that_cannot_be_driven_is_told_so_not_that_it_is_silent() {
-        // Every node heartbeating, none of them reachable — a fleet that has
-        // outgrown the bridge's twenty peer slots. The planner has nothing to
-        // partition, so `plan` is None, and against a single count of "alive"
-        // this fell through to "nothing heartbeating yet" while the table below
-        // it showed three nodes heartbeating.
+        // Every node heartbeating, none reachable — a fleet that has outgrown
+        // the bridge's twenty peer slots, so there is nothing to partition.
         let mut snapshot = busy();
         snapshot.auto = true;
         snapshot.plan = None;
@@ -1761,9 +1648,6 @@ mod tests {
 
     #[test]
     fn b_is_refused_on_a_node_whose_build_has_no_bluetooth_in_it() {
-        // It would take the flag, acknowledge the frame and scan nothing, while
-        // the fleet table showed a holder and the export had no BLE rows — so
-        // "at most one node scans Bluetooth" would read as "one does".
         let mut snapshot = busy();
         snapshot.nodes.push(narrowband(0x21));
         snapshot.nodes.sort_by_key(|n| n.state.mac);
@@ -1780,8 +1664,7 @@ mod tests {
         let notice = ui.notice(snapshot.now_ms).expect("a reason");
         assert!(notice.contains("without the ble feature"), "got {notice}");
 
-        // And taking it back off that node is still allowed, because the flag
-        // has to be able to leave wherever it ended up.
+        // And taking it back off that node is still allowed.
         let mut holding = snapshot.clone();
         holding.ble_node = Some(holding.nodes[row].state.mac);
         ui.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE), &holding, &tx);
@@ -1790,10 +1673,6 @@ mod tests {
 
     #[test]
     fn a_fleet_with_no_five_ghz_radio_says_the_pool_is_not_being_covered() {
-        // The planner leaves those channels out of every share rather than
-        // giving them to a node that would acknowledge and ignore them, which
-        // is right and completely invisible: what is left looks like an
-        // ordinary partition of an ordinary pool.
         let mut snapshot = busy();
         snapshot.auto = true;
         snapshot.plan = plan_for(ChannelPool::Us, &[Radio::TwoPointFour; 2]);
@@ -1805,9 +1684,6 @@ mod tests {
 
     #[test]
     fn a_node_with_no_peer_slot_says_it_was_refused_rather_than_that_it_went_quiet() {
-        // Its heartbeats are arriving; what is missing is room in the bridge's
-        // peer table, and the fix is a smaller fleet rather than a look at that
-        // node's radio. Reading as "stale" sent the operator to the wrong one.
         let view = refused(0x21);
         let (label, _) = node_state(&view);
         assert_eq!(label, "refused");
@@ -1815,12 +1691,8 @@ mod tests {
 
     #[test]
     fn a_node_heard_only_through_its_observations_reads_as_such() {
-        // There used to be a `not wartui` row here, for a node heartbeating
-        // perfectly well that had never said it was one of ours. Nothing can
-        // reach that state now: a frame that decodes at all came from our
-        // firmware, and every heartbeat carries what the node is. What is left
-        // is the honest case — observations have arrived and no heartbeat yet,
-        // so there has been no window to send anything through.
+        // The honest case: observations have arrived and no heartbeat yet, so
+        // there has been no window to send anything through.
         let view = unannounced(0x21);
         let (label, _) = node_state(&view);
         assert_eq!(label, "no heartbeat");
@@ -1829,11 +1701,8 @@ mod tests {
 
     #[test]
     fn assigning_the_whole_pool_by_hand_promises_only_what_the_node_can_tune() {
-        // `A` offers the pool, and under `--manual` nothing re-partitions
-        // afterwards to correct it — so a C6 given all 34 US channels would
-        // read as 34 confirmed while scanning 11, which is the silent
-        // half-coverage the capability token exists to end. The engine cuts it
-        // down; this has to say the same number the engine will send.
+        // `A` offers the pool and nothing re-partitions afterwards under
+        // `--manual`, so this has to say the number the engine will really send.
         let mut snapshot = busy();
         snapshot.nodes = vec![narrowband(0x84)];
         let (tx, mut rx) = mpsc::channel(4);
@@ -1884,8 +1753,7 @@ mod tests {
         assert!(terminal.backend().to_string().contains("auto — 4 of 5"));
 
         // A lone node holds the whole pool, and the header has nothing extra to
-        // say about it. Until the channel mask this read `rotating 1/2`,
-        // because one assignment could not express both of the US pool's runs.
+        // say about it.
         let mut lone = busy();
         lone.auto = true;
         lone.plan = plan(ChannelPool::Us, 1);
@@ -1905,9 +1773,6 @@ mod tests {
         ui.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE), &snapshot, &tx);
         assert_eq!(rx.try_recv().expect("a command"), Command::AssignBle { mac: Some(node) });
 
-        // Unlike `a`, this is not refused while the planner owns the fleet: the
-        // planner partitions channels and has no opinion about Bluetooth, so
-        // there is nothing for it to take back.
         let mut auto = busy();
         auto.auto = true;
         ui.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE), &auto, &tx);
@@ -1925,9 +1790,6 @@ mod tests {
     #[test]
     fn the_fleet_table_says_who_holds_the_bluetooth_scan_and_who_is_about_to() {
         let mut snapshot = busy();
-        // Read off the assignment, not off the host's intent: the two differ
-        // for exactly as long as it takes a node to acknowledge, and that gap
-        // is where a coexistence failure lives.
         snapshot.ble_node = Some(snapshot.nodes[0].state.mac);
         if let Some(confirmed) = snapshot.nodes[0].state.confirmed.as_mut() {
             confirmed.ble = true;
@@ -1952,8 +1814,7 @@ mod tests {
         assert_eq!(rx.try_recv().expect("a command"), Command::SetAuto(true));
 
         // The snapshot the engine publishes lags a keystroke by a tick, so a
-        // second press has to know what the first one asked for; otherwise both
-        // read `auto: false` and both ask for the same thing.
+        // second press has to know what the first one asked for.
         ui.on_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE), &snapshot, &tx);
         assert_eq!(rx.try_recv().expect("a command"), Command::SetAuto(false));
     }
@@ -1969,8 +1830,6 @@ mod tests {
         ui.on_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE), &snapshot, &tx);
 
         assert!(ui.notice(snapshot.now_ms).expect("a reason").contains("not accepting"));
-        // Remembering it would leave the header saying `manual` while `a` was
-        // refused for being on auto, with no way back.
         assert!(!ui.auto(&snapshot), "the fleet is where the engine says it is");
     }
 

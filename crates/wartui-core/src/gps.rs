@@ -5,10 +5,8 @@
 //! mutex and a copy, so [`crate::PositionChain::resolve`] stays the cheap
 //! synchronous call the engine needs it to be.
 //!
-//! **The reader stamps arrival time itself.** It is the only thing that knows
-//! when a byte turned up, and a fix is only as good as its age. Deciding
-//! *whether* that age is too much stays with the engine and its clock — the
-//! reader records when, the chain decides whether.
+//! **The reader stamps arrival time itself**, being the only thing that knows when a
+//! byte turned up. Whether that age is too much is [`crate::PositionChain`]'s.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -28,16 +26,14 @@ const READ_TIMEOUT: Duration = Duration::from_millis(200);
 /// First retry delay after the port fails, doubling to [`MAX_BACKOFF`].
 const MIN_BACKOFF: Duration = Duration::from_millis(250);
 
-/// Slowest retry. A GPS puck that has been unplugged is worth checking for
-/// every few seconds; more often than that is just noise in the log.
+/// Slowest retry: an unplugged puck is worth checking for every few seconds.
 const MAX_BACKOFF: Duration = Duration::from_secs(5);
 
 /// How long a port has to stay readable before the backoff is forgiven.
 ///
-/// Opening is not the same as working: a device node left behind after an
-/// unplug opens and then fails on the first read, and resetting the delay on
-/// the open alone would retry that four times a second for the rest of the
-/// capture.
+/// Opening is not the same as working: a device node left behind after an unplug
+/// opens and then fails on the first read, and resetting on the open alone would
+/// retry that four times a second for the rest of the capture.
 const HEALTHY: Duration = Duration::from_secs(2);
 
 /// Which port to read, and how fast.
@@ -67,17 +63,16 @@ pub enum GpsStatus {
     Failed(String),
 }
 
-/// Totals worth showing, mostly so a receiver talking a dialect this parser
-/// does not understand looks different from one that is not talking at all.
+/// Totals worth showing, so a receiver talking a dialect this parser does not
+/// understand looks different from one that is not talking at all.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct GpsCounters {
     /// Sentences that parsed, whether or not they carried a position.
     pub sentences: u64,
     /// Positions taken from them.
     pub fixes: u64,
-    /// Lines that failed a checksum or a field. One or two at start-up is the
-    /// reader joining a stream mid-sentence; a steady stream of them is a baud
-    /// rate that does not match.
+    /// Lines that failed a checksum or a field. One or two at start-up is the reader
+    /// joining a stream mid-sentence; a steady flow is the wrong baud rate.
     pub rejected: u64,
 }
 
@@ -109,9 +104,8 @@ pub struct Gps {
 }
 
 impl Gps {
-    /// A receiver with nothing behind it: it holds state and accepts
-    /// [`Gps::feed`], but no thread is reading a port. This is what tests use,
-    /// and what makes the whole chain drivable without hardware.
+    /// A receiver with nothing behind it: it holds state and accepts [`Gps::feed`]
+    /// with no thread reading a port, which is what makes the chain testable.
     #[must_use]
     pub fn detached() -> Self {
         Self {
@@ -129,8 +123,7 @@ impl Gps {
     /// Open `config.port` on a background thread and keep it open, reconnecting
     /// on its own if the receiver is unplugged and put back.
     ///
-    /// Returns immediately: a GPS that is not there yet must not hold up a
-    /// capture, because observations with no position are still worth having.
+    /// Returns immediately: observations with no position are still worth having.
     #[must_use]
     pub fn spawn(config: GpsConfig) -> Self {
         let gps = Self::detached();
@@ -170,23 +163,17 @@ impl Gps {
 
     /// Offer one line to the parser, as of `now_ms`.
     ///
-    /// Public because it is the seam the reader thread and the tests share: a
-    /// synthetic stream of sentences exercises exactly the code a real
-    /// receiver does.
+    /// Public because it is the seam the reader thread and the tests share.
     pub fn feed(&self, line: &[u8], now_ms: i64) {
         let mut inner = self.lock();
         match inner.nmea.parse(line) {
             Ok(Report::Fix(new)) => {
                 inner.counters.sentences += 1;
                 inner.counters.fixes += 1;
-                // A cycle is two sentences describing the same instant a few
-                // milliseconds apart, and only GGA carries the altitude, the
-                // satellite count and the dilution of precision. Letting the
-                // RMC that follows it overwrite those with nothing would mean
-                // the fix spends almost its whole life missing three of the
-                // things it was read for. So the position is replaced and the
-                // rest is carried: what a sentence does not mention, it is not
-                // contradicting.
+                // A cycle is two sentences describing the same instant, and only
+                // GGA carries altitude, satellite count and dilution. So the
+                // position is replaced and the rest carried: what a sentence does
+                // not mention, it is not contradicting.
                 let previous = inner.fix;
                 let satellites = new.satellites.or(match inner.status {
                     GpsStatus::Fixed { satellites } => satellites,
@@ -205,10 +192,9 @@ impl Gps {
             }
             Ok(Report::NoFix) => {
                 inner.counters.sentences += 1;
-                // Deliberately leaves the last fix in place. A receiver that
-                // loses lock under a bridge has not moved the host, and the
-                // chain's staleness rule is what decides when to stop
-                // believing it — not one bad sentence.
+                // Deliberately leaves the last fix in place: a receiver that loses
+                // lock under a bridge has not moved the host, and the chain's
+                // staleness rule decides when to stop believing it.
                 if !matches!(inner.status, GpsStatus::Fixed { .. }) {
                     inner.status = GpsStatus::Searching;
                 }
@@ -221,10 +207,8 @@ impl Gps {
     }
 
     fn set_status(&self, status: GpsStatus) {
-        // A reader thread nobody is watching is the most invisible thing in
-        // the program: the rows keep being written, they just stop being where
-        // the host is. The header says which state it is in; the log says when
-        // it changed and how often.
+        // A reader thread nobody is watching is the most invisible thing in the
+        // program: the rows keep being written, they just stop saying where.
         match &status {
             GpsStatus::Failed(reason) => tracing::warn!(reason = %reason, "gps unreadable"),
             other => tracing::info!(status = ?other, "gps"),
@@ -232,9 +216,8 @@ impl Gps {
         self.lock().status = status;
     }
 
-    /// A poisoned mutex means a previous holder panicked while updating the
-    /// fix. The state it left is still readable and still better than taking
-    /// the whole capture down over a position.
+    /// A poisoned mutex means a previous holder panicked mid-update; what it left is
+    /// still readable and better than taking the capture down over a position.
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
         self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }

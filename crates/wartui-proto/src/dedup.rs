@@ -1,21 +1,17 @@
 //! The ring that decides whether an observation is worth transmitting.
 //!
-//! A node reports a BSSID once and then suppresses it until enough other
-//! addresses have pushed it out (`save_mac` / `seen_mac`,
-//! `src/WiFiOps.cpp:1803-1831`, sized by `mac_history_len`,
-//! `src/configs.h:158`). Nothing clears it at runtime — `clearMacHistory()` is
-//! defined at `src/WiFiOps.cpp:1882` and never called — which is why a fleet's
-//! observation stream goes quiet a few minutes into a run rather than repeating
-//! itself, and why the rate is tens per minute rather than a firehose. That is
-//! measured behaviour, not a guess: see `docs/phase-0-findings.md`.
+//! A node reports a BSSID once and suppresses it until enough other addresses have
+//! pushed it out (`save_mac` / `seen_mac`, `src/WiFiOps.cpp:1803-1831`). Nothing
+//! clears it at runtime, which is why a fleet's observation stream goes quiet a few
+//! minutes into a run rather than repeating itself.
 //!
-//! Reproduced here rather than improved on. The store dedups again on the host
-//! and could absorb repeats, but the ring is also what keeps a node's airtime
-//! down, and airtime is the scarce thing on a shared control channel.
+//! Reproduced rather than improved on: the store dedups again on the host and could
+//! absorb repeats, but the ring is also what keeps a node's airtime down, and airtime
+//! is the scarce thing on a shared control channel.
 //!
-//! One correction. The firmware's array starts zeroed and it tracks no length,
-//! so an access point at `00:00:00:00:00:00` reads as already-seen from boot.
-//! Counting entries instead costs a `usize` and removes the special case.
+//! One correction — the firmware's array starts zeroed and tracks no length, so an
+//! access point at `00:00:00:00:00:00` reads as already-seen from boot. Counting
+//! entries costs a `usize` and removes the special case.
 
 /// A fixed-capacity ring of recently reported addresses, oldest evicted first.
 ///
@@ -43,12 +39,10 @@ impl<const N: usize> MacRing<N> {
 
     /// Record `mac`, and say whether this is the first time it has been seen.
     ///
-    /// `false` means the caller should drop the observation. A repeat does not
-    /// move the address back to the front of the ring: the firmware's
-    /// `seen_mac` returns early without touching the cursor, so an access point
-    /// that is beaconing constantly still ages out on schedule and is reported
-    /// again. That is the behaviour that keeps a stationary node's stream from
-    /// dying completely.
+    /// `false` means the caller should drop the observation. A repeat does not move the
+    /// address back to the front: the firmware's `seen_mac` returns before touching the
+    /// cursor, so a constantly-beaconing access point still ages out on schedule — which
+    /// is what keeps a stationary node's stream from dying completely.
     pub fn insert(&mut self, mac: [u8; 6]) -> bool {
         if self.contains(&mac) {
             return false;

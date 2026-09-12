@@ -5,23 +5,14 @@
 //! re-exported after a decoder fix, cannot be queried while it is still
 //! running, and cannot answer "which node saw this, and how strongly".
 //!
-//! Three decisions do most of the work here:
-//!
-//! **One thread owns the connection.** SQLite serialises writes regardless, so
-//! sharing a connection between tasks buys contention rather than throughput.
-//! A single owner also means no `Mutex<Connection>` for a caller to hold across
-//! an await by accident.
-//!
-//! **Writes are batched into transactions.** Committing per row means an fsync
-//! per row: on the order of a hundred inserts a second. Batching to
-//! [`StoreConfig::batch_rows`] or [`StoreConfig::batch_interval`], whichever
-//! comes first, is the difference between that and a hundred thousand. The
-//! interval is what keeps a quiet fleet's rows from sitting unwritten.
-//!
-//! **The queue is bounded and drops rather than blocks.** If the disk stalls,
-//! the engine must keep running: a lost observation is one row out of many,
-//! whereas a stalled engine misses everything, including — once Phase 4 lands —
-//! the assignment racing a node's 300 ms window. Drops are counted and shown.
+//! One thread owns the connection, because SQLite serialises writes regardless and
+//! sharing one buys contention rather than throughput. Writes are batched to
+//! [`StoreConfig::batch_rows`] or [`StoreConfig::batch_interval`], whichever comes
+//! first: committing per row means an fsync per row, which is the difference
+//! between a hundred inserts a second and a hundred thousand, and the interval is
+//! what keeps a quiet fleet's rows from sitting unwritten. The queue is bounded and
+//! drops rather than blocks, because a lost observation is one row while a stalled
+//! engine misses everything. Drops are counted and shown.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -39,20 +30,8 @@ use crate::record::Record;
 
 /// Bumped whenever the schema changes shape.
 ///
-/// v2 added `assignment.outcome` and `assignment.latency_us`, because Phase 4
-/// transmits and an assignment that was sent is not the same thing as one that
-/// landed.
-///
-/// v3 replaced `assignment.start_idx`/`end_idx` with a `channels` bitmask and
-/// added `ble`, because an assignment stopped being a contiguous range. A v2
-/// row's bounds convert into a mask exactly, so the migration is lossless.
-///
-/// v5 renamed `observation.raw_text` to `raw_body`, because the frame it keeps
-/// stopped being text. Older rows hold the comma-separated line a node used to
-/// broadcast and newer ones hold the binary frame; both are the observation
-/// exactly as it arrived, which is all the column ever promised, and the new
-/// frames carry a version byte in their first six so a file spanning the change
-/// is still readable row by row.
+/// `migrate` carries each step. Every one so far has been lossless, which is the
+/// property to keep: a capture is data rather than a deployment.
 pub const SCHEMA_VERSION: i32 = 5;
 
 /// The schema, applied to any database that does not already have it.
@@ -69,11 +48,9 @@ CREATE TABLE IF NOT EXISTS session (
   notes TEXT
 );
 
--- `capabilities` is what the node's most recent heartbeat said it is, rendered
--- the way the fleet table shows it (`wartui/1.0;ble,5g`). Null means nothing but
--- an observation has been heard from that address yet — a node reports what it
--- found on a channel before it gets back to the control channel to heartbeat —
--- and is why such a row can exist with no assignment rows against it.
+-- `capabilities` is the node's most recent heartbeat rendered the way the fleet
+-- table shows it (`wartui/1.0;ble,5g`). Null means only that nothing but an
+-- observation has been heard yet; see `record::NodeSeen`.
 CREATE TABLE IF NOT EXISTS node (
   mac BLOB PRIMARY KEY,
   label TEXT,
@@ -99,10 +76,9 @@ CREATE TABLE IF NOT EXISTS heartbeat (
 -- the table is append-only and a retry is a second row rather than an update.
 -- `counter` is the persisted monotonic epoch and `wire_version` the byte that
 -- actually went out; they differ because the wire field is one byte wide.
--- `channels` is the forty-bit SCAN_CHANNELS mask the frame carried, stored as
--- the integer it is rather than as a rendered channel list: the indices are
--- what the wire said, and turning them into channel numbers is the reader's
--- job and depends on a table that could change.
+-- `channels` is the forty-bit SCAN_CHANNELS mask the frame carried, stored as the
+-- integer it is: the indices are what the wire said, and rendering them depends on
+-- a table that could change.
 CREATE TABLE IF NOT EXISTS assignment (
   id INTEGER PRIMARY KEY,
   session_id INTEGER NOT NULL REFERENCES session(id),
@@ -140,9 +116,9 @@ CREATE TABLE IF NOT EXISTS observation (
   pos_at INTEGER,
   raw_body BLOB
 );
--- Deliberately no unique constraint on bssid: every sighting is kept, with the
--- node that made it and the signal it saw. Deduplication is an export-time
--- question, and answering it at ingest would throw away the coverage data.
+-- Deliberately no unique constraint on bssid: every sighting is kept, with the node
+-- that made it and the signal it saw. Deduplicating at ingest would throw away the
+-- coverage data.
 CREATE INDEX IF NOT EXISTS obs_bssid ON observation(bssid);
 CREATE INDEX IF NOT EXISTS obs_node ON observation(node_mac, rx_at);
 
@@ -247,21 +223,16 @@ impl Store {
     ) -> Result<Self, StoreError> {
         let mut conn = Connection::open(&config.path)?;
         prepare(&conn)?;
-        // Before the schema, not after. `CREATE TABLE IF NOT EXISTS` no-ops
+        // Before the schema, not after: `CREATE TABLE IF NOT EXISTS` no-ops
         // against a newer file's tables rather than failing, so an older build
-        // would append v1-shaped rows into a v2 database and then stamp the
-        // version marker back down to 1 — leaving neither build able to tell
-        // that it had happened.
+        // would append old-shaped rows and stamp the version marker back down.
         let found = check_version(&conn)?;
-        // All of it or none of it, version marker included. A migration is
-        // several statements that only make sense together — v2's assignment
-        // rebuild renames the old table before it has written the new one —
-        // and the marker is what decides whether they run again. Committed
-        // piecemeal, a failure part way through would leave a file that is
-        // neither shape and still stamped with the old version, so every later
-        // open would re-enter the migration and die on the rename against a
-        // table that is already there. A rollback leaves the file exactly as it
-        // was found, which the next open can migrate again.
+        // All of it or none of it, version marker included. A migration is several
+        // statements that only make sense together — v2's assignment rebuild
+        // renames the old table before writing the new one — and the marker is
+        // what decides whether they run again. Committed piecemeal, a failure part
+        // way through leaves a file that is neither shape and still stamped old,
+        // which every later open would re-enter and die in.
         let tx = conn.transaction()?;
         migrate(&tx, found)?;
         tx.execute_batch(SCHEMA)?;
@@ -301,9 +272,8 @@ impl Store {
 
     /// Queue records, dropping any that do not fit rather than waiting.
     ///
-    /// Never blocks. Returns how many were dropped, which is also counted into
-    /// [`Self::stats`] so the UI can show it without the caller threading it
-    /// back through.
+    /// Never blocks. Returns how many were dropped, also counted into
+    /// [`Self::stats`] so the UI need not thread it back through.
     pub fn submit(&self, records: Vec<Record>) -> usize {
         let Some(tx) = &self.tx else { return records.len() };
         let mut dropped = 0usize;
@@ -329,8 +299,8 @@ impl Store {
 
     /// Flush everything queued, close the session and stop the writer.
     ///
-    /// Called explicitly rather than left to `Drop` so a failure to finish the
-    /// last transaction is reported rather than swallowed on the way out.
+    /// Called explicitly rather than left to `Drop`, so a failure to finish the last
+    /// transaction is reported rather than swallowed.
     pub fn close(mut self) {
         self.shutdown();
     }
@@ -353,8 +323,7 @@ impl Drop for Store {
 
 /// Open a second connection for reading, which is what export uses.
 ///
-/// WAL is what makes this safe while a capture is running: readers do not block
-/// the writer and the writer does not block them, so exporting an hour of data
+/// WAL is what makes this safe while a capture is running: exporting an hour of data
 /// mid-run cannot stall ingest.
 ///
 /// # Errors
@@ -382,28 +351,22 @@ fn check_version(conn: &Connection) -> Result<i32, StoreError> {
 
 /// Bring an older database up to the current shape.
 ///
-/// Only ever called after [`check_version`] has ruled out a newer file, and
-/// before [`SCHEMA`] is applied — `CREATE TABLE IF NOT EXISTS` will not widen a
-/// table that already exists, so anything structural has to happen here.
+/// Called after [`check_version`] has ruled out a newer file and before [`SCHEMA`]
+/// is applied: `CREATE TABLE IF NOT EXISTS` will not widen an existing table, so
+/// anything structural happens here.
 fn migrate(conn: &Connection, found: i32) -> Result<(), StoreError> {
     let has_assignment = has_table(conn, "assignment")?;
 
-    // v1 declared this table but nothing in a v1 build could ever write to it:
-    // that release could not transmit, and an assignment row is only written
-    // for a frame that went out. So it is provably empty and dropping it loses
-    // nothing, which is a great deal simpler than three `ALTER TABLE`s.
+    // v1 declared this table but could not transmit, so it is provably empty and
+    // dropping it is simpler than three `ALTER TABLE`s.
     if found == 1 && has_assignment {
         conn.execute_batch("DROP TABLE assignment")?;
     }
 
-    // v2 rows are real and worth keeping. Their `start_idx`/`end_idx` name a
-    // contiguous run, which is exactly what a mask can say, so the bounds
-    // convert rather than being thrown away: bits `start..=end` set, which for
-    // a 40-bit field is `((1 << (end - start + 1)) - 1) << start`. `ble` is 0
-    // because no v2 build could ask for it.
-    //
-    // Rebuilt rather than `ALTER TABLE`d, because leaving the old columns in
-    // place would mean every later reader deciding which pair to believe.
+    // v2 rows are real and worth keeping: `start_idx`/`end_idx` name a contiguous
+    // run, which a mask can say exactly, so the bounds convert rather than being
+    // thrown away. `ble` is 0 because no v2 build could ask for it. Rebuilt rather
+    // than `ALTER TABLE`d, so no later reader has to decide which pair to believe.
     if found == 2 && has_assignment {
         conn.execute_batch(
             "ALTER TABLE assignment RENAME TO assignment_v2;
@@ -443,9 +406,7 @@ fn migrate(conn: &Connection, found: i32) -> Result<(), StoreError> {
         conn.execute_batch("ALTER TABLE node ADD COLUMN capabilities TEXT")?;
     }
 
-    // Never written by anything, in any version: a v2 build declared them and
-    // no code read or set them. Replaced rather than kept so the node table
-    // does not carry a shape the rest of the schema stopped using.
+    // Never written by anything in any version, so replaced rather than kept.
     if (1..=2).contains(&found) && has_column(conn, "node", "pinned_start_idx")? {
         conn.execute_batch(
             "ALTER TABLE node DROP COLUMN pinned_start_idx;
@@ -454,13 +415,11 @@ fn migrate(conn: &Connection, found: i32) -> Result<(), StoreError> {
         )?;
     }
 
-    // v5. The column keeps the observation exactly as it arrived, and what
-    // arrives stopped being text: an older file's rows hold a comma-separated
-    // line and a newer file's hold the frame. Renamed rather than dropped
-    // because the old rows are still the truest record of what those nodes
-    // sent, and renamed rather than left alone because a column called
-    // `raw_text` holding binary is the kind of thing that gets read wrong once
-    // and quietly.
+    // v5. The column keeps the observation exactly as it arrived, and what arrives
+    // stopped being text: older rows hold a comma-separated line, newer ones the
+    // frame. Renamed rather than dropped because the old rows are still the truest
+    // record of what those nodes sent, and rather than left alone because a column
+    // called `raw_text` holding binary gets read wrong once and quietly.
     if (1..=4).contains(&found)
         && has_table(conn, "observation")?
         && has_column(conn, "observation", "raw_text")?
@@ -486,27 +445,22 @@ fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, Stor
 
 /// How far ahead of the last used epoch to move the persisted counter at open.
 ///
-/// Divergence 4 exists because a node adopts an assignment only when its
-/// version *differs* from the one it holds, so re-using an epoch after a
-/// restart is silently ignored — and worse, the ack still arrives, so the host
-/// believes an assignment landed that the node discarded. Writing the counter
-/// forward before issuing anything means a crash can only ever skip epochs,
-/// never repeat one. Skipping is free; repeating is the bug.
+/// Divergence 4, and worse than the table says: a re-used epoch is not only ignored
+/// but still acknowledged, so the host believes an assignment landed that the node
+/// discarded. Writing the counter forward before issuing anything means a crash can
+/// only ever skip epochs. Skipping is free; repeating is the bug.
 ///
-/// Sixty-four holds as long as one assignment row in every sixty-four survives
-/// the store's lossy queue, since each one re-books the block from its own
-/// counter. Assignments are written at operator-keypress rate and are a few
-/// dozen bytes, so losing sixty-four consecutively means the queue has been
-/// full for the whole capture — a state the view is already shouting about.
+/// Sixty-four holds as long as one assignment row in every sixty-four survives the
+/// store's lossy queue, since each re-books the block from its own counter. Losing
+/// sixty-four consecutively means a queue full for the whole capture, which the
+/// view is already shouting about.
 const VERSION_RESERVATION: u64 = 64;
 
 /// Read the persisted assignment epoch and immediately book a block of them.
 ///
-/// Under `BEGIN IMMEDIATE`, so the read and the write cannot interleave with
-/// another wartui opening the same file. Two processes that both read the same
-/// base would both book the same block and then hand the same epoch to the same
-/// node — a frame the node discards on its `!=` and acknowledges anyway, which
-/// is the one failure this whole mechanism exists to prevent.
+/// Under `BEGIN IMMEDIATE`, so the read and the write cannot interleave with another
+/// wartui opening the same file: two processes reading the same base would book the
+/// same block and hand the same epoch to the same node.
 fn reserve_versions(conn: &mut Connection) -> Result<u64, StoreError> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let base: u64 = tx
@@ -526,10 +480,9 @@ fn reserve_versions(conn: &mut Connection) -> Result<u64, StoreError> {
 }
 
 fn prepare(conn: &Connection) -> Result<(), rusqlite::Error> {
-    // WAL so the export's reader and the ingest writer never wait on each
-    // other; NORMAL because losing the tail of a capture to a power cut is an
-    // acceptable trade for not fsyncing every commit; a busy timeout so a
-    // concurrent export backs off instead of erroring.
+    // WAL so the export's reader and the ingest writer never wait on each other;
+    // NORMAL because losing a capture's tail to a power cut beats fsyncing every
+    // commit; a busy timeout so a concurrent export backs off instead of erroring.
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.busy_timeout(Duration::from_secs(5))?;

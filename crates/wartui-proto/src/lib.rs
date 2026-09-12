@@ -4,12 +4,8 @@
 //! the host TUI and the bridge firmware. Defining the wire types once is the
 //! only thing that keeps the two ends from drifting apart.
 //!
-//! The wire formats are wartui's own. Where a doc comment here cites
-//! `src/*.cpp:NNN` it is pointing into the vendor firmware this project grew up
-//! against — <https://github.com/wowy/ESP32DualBandWardriver>, branch
-//! `feat/node-interference-mitigation` — as the record of a *measured
-//! behaviour* that a design decision here answers. Nothing in this crate
-//! interoperates with it, and from the frame layouts up nothing is meant to.
+//! The wire formats are wartui's own, and nothing here interoperates with the vendor
+//! firmware the `src/*.cpp:NNN` citations point into — CLAUDE.md says what those are.
 
 #![no_std]
 

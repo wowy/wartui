@@ -34,23 +34,14 @@ const IDENTIFY_INTERVAL: Duration = Duration::from_millis(500);
 
 /// How many unanswered `Identify` frames before the attempt is abandoned.
 ///
-/// Twelve go out at 0.0 s to 5.5 s — `interval`'s first tick is immediate — and
-/// the thirteenth tick, at 6.0 s, is the one that gives up. That is a second
-/// past the CLI's five-second "nothing has identified itself" notice, so the
-/// operator still gets the long form, which names the three things it usually
-/// is, before the one-line reason lands under it.
+/// The thirteenth tick gives up, at 6.0 s — a second past the CLI's five-second
+/// notice, so the operator reads the long form before the one-line reason.
 ///
-/// It is bounded at all because asking forever wedges the process, and pointing
-/// `wartui` at a node instead of the bridge is all it takes to get there. Node
-/// firmware never reads the USB endpoint the host writes to, so frames sent to
-/// one pile up in the kernel's output queue for that tty. The fd is blocking —
-/// `serialport` clears `O_NONBLOCK` once the port is open — and closing a tty
-/// waits for its output queue to drain, against a device that will never take
-/// it. That wait is inside the driver, so the process survives `SIGKILL` and
-/// keeps the port held: the operator's only way out is unplugging the board.
-/// Giving up early enough that nothing is left queued is what prevents it, and
-/// [`supervise`] retries on its own cadence afterwards, so a dongle that is
-/// merely slow to boot still gets found.
+/// Bounded at all because asking forever wedges the process, and pointing `wartui`
+/// at a node rather than the bridge is all it takes: frames pile up in that tty's
+/// output queue, which closing the port waits on and `SIGKILL` cannot interrupt
+/// (`crates/wartui/src/main.rs`, `Terminate`). Giving up before anything is left
+/// queued is what prevents it, and [`supervise`] retries on its own cadence.
 const IDENTIFY_ATTEMPTS: u32 = 12;
 
 /// A serial port that might be a bridge.
@@ -213,8 +204,7 @@ async fn connect(
         .open()
         .map_err(|e| format!("could not open {path}: {e}"))?;
     // Distinct from being connected: the port is ours, and whether anything is
-    // listening on the other end is the next question. Which of these two lines
-    // is the last one in the log is the whole diagnosis.
+    // listening is the next question. Which line is last in the log is the diagnosis.
     progress!(port = %path, "port open; asking the bridge to identify itself");
     let writer = port.try_clone().map_err(|e| format!("could not split {path}: {e}"))?;
     // A third handle, given to the guard below so that the cleanup it does is
@@ -223,30 +213,21 @@ async fn connect(
 
     let stop = Arc::new(AtomicBool::new(false));
     let announced = Arc::new(AtomicBool::new(false));
-    // Distinct from `announced`, and the distinction is load-bearing. A bridge
-    // whose fleet is busy can lose every `Ready` it sends to its own transmit
-    // rings, which evict oldest-first, while its observations arrive perfectly
-    // well — `sniff` says the same thing where it decides whether to accuse a
-    // port of not being a bridge. Giving up on `announced` alone would tear
-    // down a link that is working and delivering, every few seconds, which is
-    // worse than the wedge this bound exists to prevent. A frame that would not
-    // decode does not count: a board running node firmware talks constantly and
-    // none of it is a frame.
+    // Distinct from `announced`, and load-bearing: a bridge whose fleet is busy can
+    // lose every `Ready` to its own oldest-first transmit rings while its
+    // observations arrive perfectly well, so giving up on `announced` alone would
+    // tear down a working link every few seconds. A frame that would not decode does
+    // not count — a board running node firmware talks constantly and none of it is
+    // a frame.
     let decoded = Arc::new(AtomicBool::new(false));
     let (dead_tx, mut dead_rx) = mpsc::channel::<String>(1);
-    // Unbounded, and now deliberately so rather than provisionally. The biased
-    // select below arbitrates at the moment a command is taken rather than the
-    // moment it reaches the wire, so a burst of bulk commands drains straight
-    // into this queue and an assignment behind them inherits their latency.
-    //
-    // Phase 4 measured what that costs. On a C6 bridge, heartbeat-to-transmit-
-    // callback came out at 28-35 ms against a node's 300 ms admin window —
-    // about a tenth of the budget, and that figure is the pessimistic one,
-    // taken from *unacknowledged* sends where the callback fires only after the
-    // radio exhausts its retry chain. A successful send is far quicker. There
-    // is no case for two bounded channels and a condvar in `write_loop` at
-    // those numbers; if the fleet ever grows enough bulk traffic to change
-    // them, that is the fix, and `assignment.latency_us` is where it shows up.
+    // Unbounded, and deliberately so. The biased select below arbitrates when a
+    // command is taken rather than when it reaches the wire, so a burst of bulk
+    // commands drains into this queue and an assignment behind them inherits the
+    // latency — 28-35 ms against a node's 300 ms admin window, and that is the
+    // pessimistic figure, taken from unacknowledged sends (`docs/phase-4-findings.md`).
+    // Two bounded channels and a condvar in `write_loop` is the fix if that ever
+    // changes, and `assignment.latency_us` is where it would show.
     let (write_tx, write_rx) = std::sync::mpsc::channel::<HostToBridge>();
 
     let reader = std::thread::Builder::new()
@@ -336,18 +317,14 @@ async fn connect(
 /// Stops the port's threads and empties its output queue, however the
 /// connection ends.
 ///
-/// This is a `Drop` and not a few lines at the end of [`connect`] because the
-/// end that matters does not run those lines. `connect` is an async fn, and
-/// quitting a capture drops the task running it: the runtime stops it at an
-/// await and everything after the select loop is simply skipped. The reader and
-/// writer threads then keep their handles on the port, and whatever is queued
-/// for a device that is not reading goes with them into a `close` that waits
-/// for that device to take it — which is the wedge, reached by the one path
-/// that had no cleanup on it.
+/// A `Drop` rather than a few lines at the end of [`connect`], because the end that
+/// matters does not reach those lines: quitting a capture drops the task, so the
+/// runtime stops it at an await and the reader and writer threads keep their handles
+/// on the port. Whatever is queued for a device that is not reading then goes into a
+/// `close` that waits for it — the wedge, by the one path that had no cleanup.
 ///
-/// Clearing the queue is also what releases a writer already blocked inside a
-/// write: the handles share one open file description, so the discard reaches
-/// the queue that thread is stuck on.
+/// Clearing the queue is also what releases a writer already blocked inside a write:
+/// the handles share one open file description.
 struct Shutdown {
     stop: Arc<AtomicBool>,
     port: Box<dyn serialport::SerialPort>,
@@ -370,9 +347,7 @@ fn read_loop(
 ) -> String {
     let mut acc = FrameAccumulator::<MAX_FRAME>::new();
     let mut buf = [0u8; 1024];
-    // The uptime carried by the last `Ready` seen on this connection. Local
-    // rather than shared: only this loop ever needs it, and it is a property
-    // of one connection rather than of the link.
+    // Local rather than shared: a property of one connection, not of the link.
     let mut last_uptime: Option<u32> = None;
 
     while !stop.load(Ordering::Relaxed) {
@@ -410,29 +385,25 @@ fn read_loop(
                 }) => {
                     decoded.store(true, Ordering::Relaxed);
                     announced.store(true, Ordering::Relaxed);
-                    // Two `Ready` frames can arrive on one connection for two
-                    // very different reasons, and the uptime is what separates
-                    // them. One is a second answer to an `Identify` we sent
-                    // before the first answer came back: same life, uptime a
-                    // few milliseconds further on, and reporting it would look
+                    // Two `Ready` frames arrive on one connection for two very
+                    // different reasons, and the uptime is what separates them.
+                    // One is a second answer to an `Identify` sent before the
+                    // first came back: same life, and reporting it would look
                     // like a reconnect that never happened. The other is a
-                    // bridge that rebooted underneath us — a software reset
-                    // does not re-enumerate the USB device, measured, so this
-                    // file descriptor reads straight through it — and that one
-                    // has to be reported or the whole restart is invisible:
-                    // the engine would keep the dead life's `BridgeInfo`, go
-                    // on believing in a peer table the reboot emptied, and
-                    // never say a word about it. An uptime that went backwards
-                    // is the second case and cannot be the first.
+                    // bridge that rebooted underneath us — a software reset does
+                    // not re-enumerate the USB device, so this descriptor reads
+                    // straight through it — and that has to be reported, or the
+                    // engine keeps the dead life's `BridgeInfo` and goes on
+                    // believing in a peer table the reboot emptied. An uptime
+                    // that went backwards is the second case and cannot be the
+                    // first.
                     let fresh_life = is_a_new_life(uptime_ms, last_uptime);
                     last_uptime = Some(uptime_ms);
                     if !fresh_life {
                         continue;
                     }
-                    // The success this whole sequence is about. Without it a log
-                    // of a link that dropped and came back would end at
-                    // "opening the bridge", which is what a link that never
-                    // came back looks like too.
+                    // Without it, a log of a link that dropped and came back ends
+                    // at "opening the bridge" — as does one that never did.
                     let hex = mac.map(|byte| format!("{byte:02X}")).join(":");
                     tracing::info!(
                         chip = ?chip,
@@ -458,11 +429,9 @@ fn read_loop(
                     decoded.store(true, Ordering::Relaxed);
                     LinkEvent::Message(msg)
                 }
-                // Reset banners and half-frames land here; the framing has
-                // already resynchronised, so this is a counter, not a fault.
-                // Logged at `debug` because a cable bad enough to garble every
-                // frame would otherwise write the log file as fast as the bridge
-                // can talk.
+                // Reset banners and half-frames land here; the framing has already
+                // resynchronised, so this is a counter rather than a fault. At
+                // `debug`, or a bad cable writes the log as fast as the bridge talks.
                 Err(e) => {
                     tracing::debug!(error = %e, "undecodable frame");
                     LinkEvent::Garbled(e)
@@ -497,13 +466,11 @@ fn write_loop(
             tracing::error!("command did not fit in a frame; dropping it");
             continue;
         };
-        // Not `write_all`, which cannot be told to stop. Emptying the output
-        // queue is what releases a write blocked against a device that is not
-        // reading, and `write_all` would answer that by writing the rest of the
-        // frame straight back into the queue it was just cleared from — after
-        // the flush, and on the path where this thread is never joined there is
-        // no second one. So the frame is abandoned instead: nobody is reading
-        // it, and the connection it belonged to is over.
+        // Not `write_all`, which cannot be told to stop. Emptying the output queue
+        // is what releases a write blocked against a device that is not reading,
+        // and `write_all` would answer by writing the rest of the frame straight
+        // back into the queue just cleared. So the frame is abandoned: nobody is
+        // reading it, and its connection is over.
         let mut sent = 0;
         while sent < n {
             if stop.load(Ordering::Relaxed) {
@@ -513,8 +480,8 @@ fn write_loop(
                 Ok(0) => return,
                 Ok(written) => sent += written,
                 // A write timeout is the port being slow, not shut: the loop
-                // re-checks `stop` and tries again, which is also what makes
-                // this thread notice a shutdown while the fleet is quiet.
+                // re-checks `stop`, which is how this thread notices a shutdown
+                // while the fleet is quiet.
                 Err(e) if matches!(e.kind(), ErrorKind::TimedOut | ErrorKind::Interrupted) => {}
                 Err(e) => {
                     tracing::warn!("serial write failed: {e}");
@@ -527,10 +494,9 @@ fn write_loop(
 
 /// Whether a `Ready` came from a life that started after the last one seen.
 ///
-/// The first is always a new life. After that the only thing that separates a
-/// reboot from a second answer to an `Identify` already in flight is that the
-/// reboot's clock started again, so an uptime that went backwards is the test.
-/// See the call site for why both arrive on one connection.
+/// The first is always a new life. After that, the only thing separating a reboot
+/// from a second answer to an `Identify` already in flight is that the reboot's
+/// clock started again. See the call site for why both arrive on one connection.
 fn is_a_new_life(uptime_ms: u32, last_seen: Option<u32>) -> bool {
     last_seen.is_none_or(|previous| uptime_ms < previous)
 }
@@ -548,17 +514,14 @@ mod tests {
     #[test]
     fn a_second_answer_to_an_identify_is_not_a_reconnect() {
         // Two `Identify` frames in flight, answered two milliseconds apart.
-        // Reporting the second would look like a reconnect that never
-        // happened, and would clear engine state nothing had disturbed.
         assert!(!is_a_new_life(1_202, Some(1_200)));
         assert!(!is_a_new_life(1_200, Some(1_200)), "the same millisecond counts as the same life");
     }
 
     #[test]
     fn a_bridge_that_rebooted_underneath_the_host_is_reported() {
-        // The case a software reset produces: the USB device is not
-        // re-enumerated, so this arrives on the connection the old life was
-        // announced on, and the clock starting again is the only sign of it.
+        // What a software reset produces: no re-enumeration, so this arrives on
+        // the connection the old life was announced on.
         assert!(is_a_new_life(180, Some(10_800_000)), "a stall reset after hours of service");
         assert!(is_a_new_life(0, Some(3_100)), "and one only seconds into a life");
     }

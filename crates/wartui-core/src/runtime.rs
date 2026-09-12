@@ -1,9 +1,7 @@
 //! Wiring: link in, engine in the middle, store and UI out.
 //!
-//! This is the only place that reads a clock, and the only place that decides
-//! *when* things happen. [`crate::engine::FleetEngine`] decides what happens.
-//! Keeping the two apart is what lets the fleet's behaviour be tested against
-//! an invented clock in microseconds.
+//! The only place that reads a clock, and the only place that decides *when* things
+//! happen; [`crate::engine::FleetEngine`] decides what happens.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -16,9 +14,8 @@ use crate::store::Store;
 
 /// How often the engine ages liveness and republishes the snapshot.
 ///
-/// Four times a second: fast enough that a node going quiet is noticed while
-/// the operator is still looking at it, slow enough that a burst of
-/// observations cannot turn into a burst of redraws.
+/// Four times a second: fast enough that a node going quiet is noticed while the
+/// operator is still looking, slow enough not to redraw per observation.
 pub const TICK: Duration = Duration::from_millis(250);
 
 /// The current time, in both forms the engine needs.
@@ -29,9 +26,8 @@ pub fn now() -> Now {
 
 /// How many operator instructions may be waiting at once.
 ///
-/// Small on purpose. These come from keystrokes, and a queue deeper than the
-/// operator's patience would replay a burst of assignments minutes after they
-/// stopped pressing the key.
+/// Small on purpose: a queue deeper than the operator's patience would replay a burst
+/// of assignments minutes after they stopped pressing the key.
 pub const COMMAND_QUEUE: usize = 8;
 
 /// Run the fleet until the link closes or `stop` fires.

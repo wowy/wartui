@@ -1,18 +1,11 @@
 //! The Phase 5 milestone: the fleet partitioning itself, against a simulated
 //! fleet on a fake clock.
 //!
-//! Two things are being checked, and only the second of them needs a fleet.
-//! The planner's arithmetic is already property-tested in `wartui-proto`; what
-//! cannot be tested there is whether the partition survives the trip through
-//! the engine, the wire format, a node's `!=` comparison on the epoch, and back
-//! out as the channels that node then scans. That is the whole chain, and the
-//! only evidence a real node offers of what it is scanning is what it reports.
-//!
-//! So: converge six nodes on a partition of the US pool, then read the capture
-//! back and require that not one network was reported on a channel the pool
-//! excludes. That is the same check to make against real hardware, where the
-//! excluded channels — 12, 13, 14, 169, 173 and 177 — are excluded because the
-//! firmware scans *actively* and would be transmitting on them.
+//! The planner's arithmetic is property-tested in `wartui-proto`. What cannot be
+//! tested there is whether a partition survives the trip through the engine, the wire
+//! format, a node's `!=` on the epoch, and back out as the channels it scans — so six
+//! nodes converge on a partition of the US pool and the capture is then read back for
+//! any network reported on a channel the pool excludes.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -63,10 +56,8 @@ async fn a_fleet_left_to_itself_converges_on_a_partition_of_the_us_pool() {
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().join("wartui.db");
 
-    // `ble_chance` is set high and nothing is ever given the Bluetooth
-    // assignment, which is the point: at most one node in a fleet scans BLE and
-    // by default none does, so a busy room full of advertisers should produce
-    // no BLE rows at all. Checked at the bottom.
+    // `ble_chance` is high and nothing is ever given the Bluetooth assignment, so a
+    // busy room full of advertisers should produce no BLE rows. Checked at the bottom.
     let link = SimTransport::new(SimConfig {
         node_count: u8::try_from(NODES).expect("six fits"),
         speed: 60.0,
@@ -94,9 +85,8 @@ async fn a_fleet_left_to_itself_converges_on_a_partition_of_the_us_pool() {
     let (_command_tx, command_rx) = mpsc::channel(4);
     let capture = tokio::spawn(drive(link, store, engine, snapshot_tx, command_rx, stop_rx));
 
-    // Nobody asks for any of this. The nodes turn up, the engine cuts the pool
-    // across them, and each one takes its share in the admin window its own
-    // heartbeat opens.
+    // Nobody asks for any of this: the nodes turn up and each takes its share in the
+    // admin window its own heartbeat opens.
     let settled = until(&snapshot_rx, "every node to acknowledge a range", |s| {
         s.nodes.len() == NODES
             && s.nodes.iter().all(|n| {
@@ -129,9 +119,8 @@ async fn a_fleet_left_to_itself_converges_on_a_partition_of_the_us_pool() {
     // two nodes sharing an index would key up on top of each other.
     assert_eq!(slots, (0..6).map(|i| (i, 6)).collect::<Vec<_>>());
 
-    // A node adopts an assignment mid-sweep but finishes the sweep it is on, so
-    // give every one of them a couple of clear sweeps before believing that
-    // what it reports is what it was assigned.
+    // A node adopts mid-sweep but finishes the sweep it is on, so give each a couple
+    // of clear sweeps before believing what it reports.
     let beats: Vec<u64> = settled.nodes.iter().map(|n| n.state.heartbeats).collect();
     until(&snapshot_rx, "two clear sweeps on the new assignments", |s| {
         s.nodes.iter().zip(&beats).all(|(n, before)| n.state.heartbeats >= before + 3)
@@ -142,10 +131,8 @@ async fn a_fleet_left_to_itself_converges_on_a_partition_of_the_us_pool() {
     stop_tx.send(()).expect("the capture is still running");
     capture.await.expect("the capture task should not panic");
 
-    // Every row in the session, with no cut-off. There is nothing to exclude:
-    // a wartui node parks and collects nothing until it is assigned, so unlike
-    // a stock fleet there is no burst of all-forty-channel observations from
-    // before the plan landed.
+    // Every row, with no cut-off: a wartui node parks until assigned, so there is no
+    // burst of all-forty-channel observations from before the plan landed.
     let conn = open_readonly(&path).expect("reopening the capture");
     let mut query = conn
         .prepare("SELECT DISTINCT channel FROM observation WHERE kind = 'wifi'")
@@ -157,9 +144,7 @@ async fn a_fleet_left_to_itself_converges_on_a_partition_of_the_us_pool() {
         .expect("reading the rows");
 
     assert!(!channels.is_empty(), "the fleet is still reporting networks");
-    // The pool exists because every scan the firmware performs is active: a
-    // node assigned a channel transmits probe requests on it. These six are the
-    // ones the US pool leaves out.
+    // The six the US pool leaves out.
     for excluded in [12, 13, 14, 169, 173, 177] {
         assert!(
             !channels.contains(&excluded),
@@ -176,10 +161,8 @@ async fn a_fleet_left_to_itself_converges_on_a_partition_of_the_us_pool() {
         assert!(allowed.contains(channel), "channel {channel} is not in the US pool");
     }
 
-    // Nobody was given the Bluetooth assignment, so nobody scanned Bluetooth —
-    // in a simulated room where an advertiser turns up on four dwells in five.
-    // A node that scanned BLE because its firmware was built with it would show
-    // up here, which is the failure the flag exists to make impossible.
+    // Nobody was given the Bluetooth assignment, in a room where an advertiser turns
+    // up on four dwells in five. A node scanning because its build can would show here.
     let ble: i64 = conn
         .query_row("SELECT count(*) FROM observation WHERE kind = 'ble'", [], |row| row.get(0))
         .expect("counting BLE rows");

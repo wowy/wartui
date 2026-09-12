@@ -1,47 +1,26 @@
 //! wartui's USB ESP-NOW bridge.
 //!
-//! A laptop cannot speak ESP-NOW, so this dongle does it on the laptop's
-//! behalf: it parks a radio on the mesh's control channel, forwards every frame
-//! it hears up the USB link, and — from Phase 4 — transmits frames the host
-//! hands it.
+//! A laptop cannot speak ESP-NOW, so this dongle does it on the laptop's behalf:
+//! it parks a radio on the mesh's control channel, forwards every frame it hears
+//! up the USB link, and transmits frames the host hands it.
 //!
-//! It is deliberately dumb. It understands COBS framing and it understands
-//! `esp-radio`, and nothing whatsoever about what the bytes mean: not the
-//! air header, not heartbeats, not channel assignments. Every rule that
-//! could turn out to be wrong lives on the host, where it is unit-testable and
-//! a fix costs a `cargo run` rather than a reflash. The interesting property is
-//! not that the bridge is simple, it is that the bridge is *finished* — the
-//! parts of this project most likely to change cannot reach it.
+//! It is deliberately dumb — COBS framing and `esp-radio`, and nothing about what
+//! the bytes mean. Every rule that could turn out to be wrong lives on the host,
+//! where it is unit-testable and a fix costs a `cargo run` rather than a reflash.
+//! The interesting property is not that the bridge is simple but that it is
+//! *finished*: the parts of this project most likely to change cannot reach it.
 //!
-//! The one rule that has to be decided here rather than on the host is when the
-//! USB transmit endpoint has stopped draining, because by then nothing this end
-//! says can reach anybody. Even that is only *applied* here: the arithmetic is
-//! [`wartui_proto::stall::StallWatch`], where `cargo test` can reach it. It was
-//! written in this file once and shipped two defects that only a bench found.
+//! The one rule that has to be decided here is when the USB transmit endpoint has
+//! stopped draining, because by then nothing this end says can reach anybody. Even
+//! that is only *applied* here — the arithmetic is
+//! [`wartui_proto::stall::StallWatch`], where `cargo test` can reach it, after a
+//! version written in this file shipped two defects only a bench found.
 //!
-//! It transmits. [`HostToBridge::SendEspNow`] hands the payload straight to
-//! the radio and answers with the *transmit-callback* status rather than the
-//! enqueue result, which is the one thing the vendor core gets wrong
-//! (`src/WiFiOps.cpp:679`) and the reason wartui can tell a delivered
-//! assignment from a hopeful one. Peers are added on demand and never removed
-//! as a side effect of sending.
+//! [`HostToBridge::SendEspNow`] answers with the *transmit-callback* status rather
+//! than the enqueue result, which is what lets the host tell a delivered
+//! assignment from a hopeful one. Peers are added on demand and never removed.
 //!
-//! ## Flashing
-//!
-//! ```bash
-//! cargo run --release --features esp32c6   # or --features esp32c5
-//! cargo +esp run --release --features esp32s3 --target xtensa-esp32s3-none-elf
-//! ```
-//!
-//! The runner is `espflash flash --monitor` with no `--chip`, so it detects the
-//! part itself. Note that `--monitor` prints the framed link bytes as text and
-//! will look like noise; use `wartui sniff` instead.
-//!
-//! The S3 is the odd one out because it is Xtensa: it needs `espup`'s `esp`
-//! toolchain and a `core` built from source, neither of which the RISC-V parts
-//! want. The `+esp` override beats `rust-toolchain.toml`, which stays on
-//! stable so that a C5 or a C6 costs nobody a second toolchain.
-
+//! `README.md` has the flashing commands and the esp-hal version wall.
 #![no_std]
 #![no_main]
 #![deny(
@@ -117,31 +96,23 @@ const USB_READ_BUDGET: usize = 256;
 
 /// How long to idle when neither radio nor link had anything to do.
 ///
-/// A busy loop would work — the scheduler is preemptive, so the Wi-Fi task
-/// still runs — but it would burn the core for nothing. One millisecond is
-/// three hundred times finer than the 300 ms admin window that any of this has
-/// to hit.
+/// A busy loop would work — the scheduler is preemptive — but would burn the core
+/// for nothing. One millisecond is three hundred times finer than the 300 ms
+/// window any of this has to hit.
 const IDLE_SLEEP: Duration = Duration::from_millis(1);
 
-// There is no watchdog here, having built one and measured that it does not
-// work. `esp_hal::init` disables every watchdog on the chip
-// (`esp-hal-1.1.2/src/lib.rs:751-761`), so a genuine hang in the loop below has
-// nothing behind it and the board has to be unplugged — a real gap, left
-// deliberately open. The RWDT that would close it never fires on these parts
-// with esp-hal 1.1.2: enabled at five seconds, tried both before `esp_hal::init`
-// and after the radio was up, with `enable()` called first so that its wholesale
-// write of `wdtconfig0` could not undo the rest, a build spinning in `loop {}`
-// was never reset in any arrangement. Nothing in `esp-rtos` or `esp-radio`
-// mentions the RWDT, so nothing is feeding it; the remaining suspicion is the
-// C6's LP_WDT clock not being ungated by `Rtc::new`, which would send every one
-// of those register writes nowhere — measured false: the registers read back
-// exactly as configured, seconds later. It counts, unfed, and its reset never
-// reaches the CPU. `WDT_PROCPU_RESET_EN` is the one enable that will not be
-// written. `docs/phase-3-findings.md` has the register dumps.
+// There is no watchdog here, having built one and measured that it cannot work.
+// `esp_hal::init` disables every watchdog on the chip
+// (`esp-hal-1.1.2/src/lib.rs:751-761`), and the RWDT that would close the gap
+// provably never resets these parts on esp-hal 1.1.2 — it counts, unfed, and
+// `WDT_PROCPU_RESET_EN` is the one enable that will not be written
+// (`docs/phase-3-findings.md` has the register dumps).
 //
-// A safety net that provably catches nothing is worse than an absent one,
-// because it will be trusted. The failure this project has actually seen was
-// never a hang, and [`StallWatch`] is what guards it.
+// So a genuine hang in the loop below has nothing behind it and the board has to
+// be unplugged: a real gap, left deliberately open, because a safety net that
+// provably catches nothing is worse than an absent one — it will be trusted. The
+// failure this project has actually seen was never a hang, and [`StallWatch`] is
+// what guards it.
 
 /// Where the loop was when it last stopped making progress.
 ///
@@ -151,21 +122,17 @@ const IDLE_SLEEP: Duration = Duration::from_millis(1);
 /// undefined, which is why [`boot_phase`] only believes it when the reset
 /// reason says the RTC domain was not reset.
 ///
-/// An `AtomicU8` rather than a `u8` because `unsafe_code` is forbidden here
-/// and a plain `static mut` cannot be written without it. It is never
-/// contended: only the main task touches it.
+/// An `AtomicU8` because `unsafe_code` is forbidden here and a `static mut` cannot
+/// be written without it. Never contended: only the main task touches it.
 #[esp_hal::ram(unstable(rtc_fast, persistent))]
 static PHASE: AtomicU8 = AtomicU8::new(0);
 
 /// Says that [`PHASE`] was written by a build that writes it.
 ///
-/// Persistent RTC memory holds whatever the last thing to use it left there,
-/// which after a reflash is the previous firmware's data and after a power-on
-/// is nothing in particular. Neither is a phase, and both would be reported as
-/// one with a straight face — the first board flashed with this firmware
-/// claimed it had stopped at `Boot`, which was a bit pattern rather than an
-/// observation. A word that this build alone writes is what separates a marker
-/// from a coincidence.
+/// Persistent RTC memory holds whatever the last thing to use it left there — the
+/// previous firmware's data after a reflash, nothing in particular after a
+/// power-on — and either would be reported as a phase with a straight face. A word
+/// this build alone writes is what separates a marker from a coincidence.
 #[esp_hal::ram(unstable(rtc_fast, persistent))]
 static PHASE_VALID: AtomicU32 = AtomicU32::new(0);
 
@@ -179,10 +146,8 @@ fn mark(phase: LoopPhase) {
 
 /// What the marker said, if this reset is one that preserved it.
 ///
-/// A power-on gives uninitialised RTC memory, and reporting whatever bit
-/// pattern it held would put a confident and invented phase in front of an
-/// operator. Anything else reached us through a reset that left the RTC domain
-/// alone, so the marker is real.
+/// A power-on gives uninitialised RTC memory; anything else reached us through a
+/// reset that left the RTC domain alone, so the marker is real.
 fn boot_phase(cause: ResetCause) -> LoopPhase {
     if matches!(cause, ResetCause::PowerOn) || PHASE_VALID.load(Ordering::Relaxed) != PHASE_MAGIC {
         return LoopPhase::Unknown;
@@ -202,29 +167,21 @@ fn boot_phase(cause: ResetCause) -> LoopPhase {
 
 /// Flatten the chip's reset reason into the handful of stories worth telling.
 ///
-/// `SocResetReason` names silicon blocks rather than causes, and the three
-/// chips disagree about both which blocks exist and what to call them. Matching
-/// only the variants every chip defines was the first version of this and it
-/// silently cost the C5 its two: `PowerGlitch` and `CpuLockup` exist on that
-/// part alone and fell through to [`ResetCause::Unknown`], which on a chip
-/// nothing has ever been bench-tested on is the worst place to lose a signal.
+/// `SocResetReason` names silicon blocks rather than causes, and the three chips
+/// disagree about which blocks exist and what to call them. The C5 has
+/// `PowerGlitch` and `CpuLockup` alone; the S3 *renames* the CPU-scoped variants
+/// the RISC-V parts spell `Cpu0Sw`, `Cpu0Mwdt0`, `Cpu0Mwdt1` and `Cpu0RtcWdt`,
+/// having two cores with neither privileged.
 ///
-/// The S3 makes the same trap worse, because its differences are *renames*
-/// rather than additions and so they are compile errors rather than silence:
-/// the CPU-scoped variants the RISC-V parts spell `Cpu0Sw`, `Cpu0Mwdt0`,
-/// `Cpu0Mwdt1` and `Cpu0RtcWdt` are `CpuSw`, `CpuMwdt0`, `CpuMwdt1` and
-/// `CpuRtcWdt` there, for the good reason that the S3 has two cores and neither
-/// is privileged. The *numeric* codes behind those names are identical on all
-/// three parts — 0x0C is a software CPU reset everywhere — which is exactly why
-/// this is worth a comment: nothing about a build failing here means the chips
-/// actually behave differently, and the temptation to match on `reason as u8`
-/// and be done should be resisted, because the enum is the only thing that
-/// makes the next chip's differences visible at all.
+/// The numeric codes behind those names are identical on all three parts, so the
+/// temptation to match on `reason as u8` and be done should be resisted: the enum
+/// is the only thing that makes the next chip's differences visible. Matching only
+/// the variants every chip defines was the first version here, and it silently
+/// cost the C5 both of its own.
 ///
 /// What is left unmapped is deliberate. `CoreDeepSleep` cannot happen: nothing
-/// here sleeps. `CoreSDIO` (C6) and `CoreEfuseCrc` (all three) are real but say
-/// nothing an operator could act on beyond "this board is unwell", which
-/// [`ResetCause::Unknown`] already says.
+/// here sleeps. `CoreSDIO` and `CoreEfuseCrc` say nothing an operator could act on
+/// beyond "this board is unwell", which [`ResetCause::Unknown`] already says.
 fn reset_cause() -> ResetCause {
     let Some(reason) = esp_hal::system::reset_reason() else {
         return ResetCause::Unknown;
@@ -252,21 +209,19 @@ fn reset_cause() -> ResetCause {
         SocResetReason::CpuMwdt0 | SocResetReason::CpuMwdt1 | SocResetReason::CpuRtcWdt => {
             ResetCause::Watchdog
         }
-        // A glitch on the supply rail is a brownout as far as anyone holding
-        // the board is concerned, and the remedy printed for it — check the
-        // cable and the hub — is the right one.
+        // A glitch on the supply rail is a brownout to anyone holding the board,
+        // and the remedy printed for it is the right one.
         #[cfg(feature = "esp32c5")]
         SocResetReason::PowerGlitch => ResetCause::Brownout,
         #[cfg(feature = "esp32s3")]
         SocResetReason::CorePwrGlitch => ResetCause::Brownout,
-        // The S3's *other* glitch detector, which is not the same story told
-        // twice: esp-hal names 0x17 "glitch on power" and 0x13 "glitch on
-        // clock", and only the first one is answered by a different cable.
+        // The S3's *other* glitch detector: esp-hal names 0x17 "glitch on power"
+        // and 0x13 "glitch on clock", and only the first wants a new cable.
         #[cfg(feature = "esp32s3")]
         SocResetReason::SysClkGlitch => ResetCause::ClockGlitch,
-        // The only signal any of these parts gives for the hang class, and only
-        // the C5 gives it. There is no working watchdog behind it to fall back
-        // on, so on a C6 or an S3 the hang class is simply unreported.
+        // The only signal any of these parts gives for the hang class, and only the
+        // C5 gives it — with no working watchdog behind it, a C6 or an S3 simply
+        // does not report that class at all.
         #[cfg(feature = "esp32c5")]
         SocResetReason::CpuLockup => ResetCause::Lockup,
         SocResetReason::SysBrownOut => ResetCause::Brownout,
@@ -283,25 +238,19 @@ fn reset_cause() -> ResetCause {
 /// Reset the chip, undoing first what the C5's ROM leaves behind.
 ///
 /// Every reset this firmware takes comes through here — the panic handler, the
-/// stall detector and [`HostToBridge::Reset`] — because on one of the three
-/// parts a bare `software_reset()` does not reboot the board, it ends it. The
-/// C5 (and the C61) come up with `PCR.RESET_EVENT_BYPASS.reset_event_bypass`
-/// set, which keeps a core reset from also resetting the system bus; the ROM's
-/// own MSPI core reset then leaves the AXI bus frozen, and the next boot hangs
-/// on the first thing it does that needs flash. The ROM banner prints,
-/// `SPI mode:` never does, and nothing recovers the board — not `wartui reset`,
-/// not `espflash reset`, both measured — until it loses power. On a bridge that
-/// is strictly worse than the wedge the stall detector exists to clear, which
-/// is why it cannot be left to an operator to remember.
+/// stall detector and [`HostToBridge::Reset`] — because on the C5 a bare
+/// `software_reset()` does not reboot the board, it ends it. The part comes up
+/// with `PCR.RESET_EVENT_BYPASS.reset_event_bypass` set, which keeps a core reset
+/// from also resetting the system bus; the ROM's own MSPI core reset then leaves
+/// the AXI bus frozen. The banner prints, `SPI mode:` never does, and nothing
+/// recovers the board until it loses power — measured four ways. That is strictly
+/// worse than the wedge the stall detector exists to clear.
 ///
-/// Clearing the bit is what ESP-IDF's `bootloader_hardware_init` does on every
-/// boot, and what `esp-hal` does in its C5 `pre_init` from 1.2 onwards
-/// (esp-rs/esp-hal#5703, fixed by #5745). We cannot have that fix by upgrading:
-/// `esp-radio 1.0.0-beta.0` requires `esp-hal = "~1.1.0"`, which
-/// `firmware/bridge/README.md` sets out at length. It is written here rather
-/// than at the top of [`main`] because a panic can land before `main` reaches
-/// any line of its own, and one funnel is one place to delete when that pin
-/// finally moves — issue #16 carries what that upgrade needs.
+/// Clearing the bit is what ESP-IDF does on every boot and what `esp-hal` does in
+/// its C5 `pre_init` from 1.2 onwards (esp-rs/esp-hal#5703), which the version
+/// wall in `README.md` keeps out of reach. Written here rather than in [`main`]
+/// because a panic can land before `main` reaches a line of its own, and one
+/// funnel is one place to delete when that pin moves — see issue #16.
 fn reboot() -> ! {
     #[cfg(feature = "esp32c5")]
     esp_hal::peripherals::PCR::regs()
@@ -313,12 +262,10 @@ fn reboot() -> ! {
 
 /// Resets rather than hanging.
 ///
-/// A halted bridge is invisible: the port stays open, no frames arrive, and the
-/// operator power-cycles it to find out why. A reset re-announces
-/// [`BridgeToHost::Ready`], so a bridge that panics repeatedly says so in the
-/// one way the host is already listening for. The panic message is lost, which
-/// is the price of not being allowed to print to the USB endpoint the link
-/// runs over.
+/// A halted bridge is invisible: the port stays open and no frames arrive. A reset
+/// re-announces [`BridgeToHost::Ready`], so a bridge that panics repeatedly says
+/// so in the one way the host is already listening for. The message is lost,
+/// which is the price of not printing to the endpoint the link runs over.
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
     reboot()
@@ -363,36 +310,31 @@ struct Bridge {
     /// Whether the USB transmit endpoint has stopped draining while a host
     /// waited, which is the one failure this firmware recovers from by itself.
     ///
-    /// The rule is four lines of arithmetic against a clock and it has been
-    /// wrong twice, so it lives in [`wartui_proto::stall`] where `cargo test`
-    /// can reach it rather than here where only a bench can.
+    /// The rule has been wrong twice, so it lives in [`wartui_proto::stall`].
     stall: StallWatch,
 }
 
 impl Bridge {
     /// Microseconds since boot, wrapping after roughly 71 minutes.
     ///
-    /// The host only ever subtracts one of these from another to measure a
-    /// heartbeat-to-assignment latency, so the wrap is harmless and the
-    /// narrower type keeps the frame small.
+    /// The host only subtracts one of these from another, so the wrap is harmless
+    /// and the narrower type keeps the frame small.
     fn now_us(&self) -> u32 {
         self.boot.elapsed().as_micros() as u32
     }
 
     /// Milliseconds since boot, which is the clock [`StallWatch`] runs on.
     ///
-    /// Full width, unlike [`Bridge::now_us`]: that one is a latency the host
-    /// subtracts from another and may wrap, while this one is compared against
-    /// timeouts and a wrap would read as a host that spoke in the future.
+    /// Full width, unlike [`Bridge::now_us`]: this one is compared against
+    /// timeouts, where a wrap would read as a host that spoke in the future.
     fn now_ms(&self) -> u64 {
         self.boot.elapsed().as_millis()
     }
 
     /// Say who we are.
     ///
-    /// Sent at boot and again whenever the host asks, since the host is usually
-    /// not attached at boot and `Ready` is how it learns the chip, the MAC and
-    /// which revision of the link this build speaks.
+    /// Sent at boot and again whenever the host asks, since the host is usually not
+    /// attached at boot and this is how it learns the chip, MAC and link revision.
     fn announce(&mut self, mac: Mac) {
         self.outbox.send(&BridgeToHost::Ready {
             chip: CHIP,
@@ -401,13 +343,13 @@ impl Bridge {
             proto_version: LINK_PROTO_VERSION,
             reset_cause: self.cause,
             last_phase: self.phase,
-            // Saturating rather than wrapping: the heaps here total 100 KiB,
-            // so the cast cannot lose anything, but a `as` that silently could
-            // is not worth leaving in a frame the host draws conclusions from.
+            // Saturating rather than wrapping: the heaps total 100 KiB so the cast
+            // cannot lose anything, but an `as` that silently could is not worth
+            // leaving in a frame the host draws conclusions from.
             heap_free: u32::try_from(esp_alloc::HEAP.free()).unwrap_or(u32::MAX),
-            // The host's only way to tell this frame from a second answer to
-            // an `Identify` it sent twice, both of which arrive on the same
-            // connection because a software reset keeps the USB device.
+            // The host's only way to tell this from a second answer to an
+            // `Identify`: a software reset keeps the USB device, so both arrive
+            // on the same connection.
             uptime_ms: self.boot.elapsed().as_millis() as u32,
         });
     }
@@ -427,9 +369,8 @@ impl Bridge {
 fn main() -> ! {
     let peripherals = esp_hal::init(esp_hal::Config::default().with_cpu_clock(CpuClock::max()));
 
-    // Read before anything else writes it: this is the marker the *previous*
-    // life left behind, and `esp_hal::init` has already latched the reset
-    // reason it has to be interpreted against.
+    // Read before anything else writes it: this is the *previous* life's marker,
+    // and `esp_hal::init` has already latched the reset reason to read it against.
     let cause = reset_cause();
     let phase = boot_phase(cause);
     mark(LoopPhase::Boot);
@@ -450,24 +391,20 @@ fn main() -> ! {
     let software_interrupt = SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
     esp_rtos::start(timg0.timer0, software_interrupt.software_interrupt0);
 
-    // `Default::default()` would be China, which is `esp-radio`'s default and
-    // not a neutral one: it is applied under `WIFI_COUNTRY_POLICY_MANUAL`, and
-    // it refuses 5 GHz 100-144 outright. The bridge sits on channel 6 and would
-    // never notice — but `--channel` is a plain `u8` the operator can point
-    // anywhere, and a fleet moved to a channel this domain forbids would stop
-    // here while the nodes, which set `US`, were perfectly willing to go. Unlike
-    // a node, this end does say so: `SetChannel` answers a refusal with an
-    // `Error` frame the host prints. The reason to set it anyway is that two
-    // halves of one fleet disagreeing about what is legal is a trap even when
-    // one half can describe it.
+    // `esp-radio`'s default is China under `WIFI_COUNTRY_POLICY_MANUAL`, which
+    // refuses 5 GHz 100-144 outright. The bridge sits on channel 6 and would never
+    // notice, but `--channel` is a plain `u8` an operator can point anywhere, and
+    // a fleet moved somewhere this domain forbids would stop here while the nodes
+    // went. This end at least says so — `SetChannel` answers a refusal with an
+    // `Error` frame — but two halves of one fleet disagreeing about what is legal
+    // is a trap even when one half can describe it.
     let controller = esp_radio::wifi::WifiController::new(
         peripherals.WIFI,
         esp_radio::wifi::ControllerConfig::default().with_country_info(*b"US"),
     )
     .expect("Wi-Fi controller");
-    // Split rather than kept whole: `EspNowSender::send` needs `&mut`, and
-    // holding the manager and receiver separately means a transmit does not
-    // have to borrow the parts that answer `GetStatus` and drain the radio.
+    // Split rather than kept whole: `EspNowSender::send` needs `&mut`, so holding
+    // the parts separately keeps a transmit from borrowing the receive path.
     let (manager, mut sender, receiver) = controller.esp_now().split();
 
     let now = Instant::now();
@@ -501,11 +438,10 @@ fn main() -> ! {
         let moved = bridge.outbox.pump(&mut sink);
         worked |= moved;
 
-        // Nothing subtler is available. The endpoint cannot be re-armed from
-        // this end, and every way of telling the host would go out through the
-        // path that is broken — so the reset *is* the message: the host sees
-        // the link drop and come back, and the `Ready` behind it says
-        // `TxStalled`, which is the whole diagnosis in one frame.
+        // Nothing subtler is available: the endpoint cannot be re-armed from this
+        // end, and every way of telling the host goes out through the broken path.
+        // So the reset *is* the message — the link drops, comes back, and the
+        // `Ready` behind it says `TxStalled`.
         let queued = !bridge.outbox.is_empty();
         if bridge.stall.note_tx(moved, queued, bridge.now_ms()) {
             mark(LoopPhase::TxStalled);
@@ -540,12 +476,11 @@ fn drain_radio(receiver: &EspNowReceiver<'_>, bridge: &mut Bridge) -> bool {
             dst: received.info.dst_address,
             // The only receive-control field every supported chip agrees on.
             //
-            // It arrives unsigned. `wifi_pkt_rx_ctrl_t.rssi` is a signed 8-bit
-            // bitfield, but the generated accessor extracts the bits unsigned
-            // and transmutes, so -62 dBm reaches us as 194 and any clamp to
-            // `i8` saturates every frame to 127. Reinterpreting the low byte
-            // recovers the value, and keeps working unchanged if the binding is
-            // ever fixed to sign-extend.
+            // It arrives unsigned: `wifi_pkt_rx_ctrl_t.rssi` is a signed 8-bit
+            // bitfield, but the generated accessor extracts the bits unsigned and
+            // transmutes, so -62 dBm reaches us as 194 and a clamp to `i8`
+            // saturates every frame to 127. Reinterpreting the low byte recovers
+            // it, and keeps working if the binding is ever fixed to sign-extend.
             rssi: (received.info.rx_control.rssi as u8) as i8,
             // Reported from our own state, not the frame: the per-chip
             // receive-control structs do not all carry a channel.
@@ -575,20 +510,15 @@ fn drain_link(
         let Some(frame) = bridge.accumulator.push(byte) else { continue };
         match decode_frame::<HostToBridge>(frame) {
             Ok(command) => {
-                // Proof of a host: something on the other end of this cable
-                // speaks the link protocol and is asking us for things. Only a
-                // frame that decoded counts — a board running node firmware
-                // talks constantly and none of it is a frame, and
-                // [`StallWatch::note_tx`] must not read that as somebody waiting
-                // on an answer.
+                // Proof of a host, and only a frame that decoded counts: a board
+                // running node firmware talks constantly and none of it is a
+                // frame, which `StallWatch` must not read as somebody waiting.
                 bridge.stall.note_host(bridge.now_ms());
                 handle(command, manager, sender, bridge, mac);
             }
             Err(err) => {
-                // Expected after a reset, when the ROM bootloader's banner
-                // arrives down the same pipe. Reported at debug so a genuine
-                // version mismatch is still visible without the banner making
-                // noise every boot.
+                // Expected after a reset, when the ROM banner arrives down the
+                // same pipe. At debug, so a real version mismatch still shows.
                 let mut message = LogStr::new();
                 let _ = core::fmt::Write::write_fmt(&mut message, format_args!("{err}"));
                 bridge.outbox.send(&BridgeToHost::Log { level: LogLevel::Debug, message });
@@ -637,18 +567,14 @@ fn handle(
         HostToBridge::Reset => reboot(),
 
         HostToBridge::SendEspNow { id, dst, ensure_peer, payload } => {
-            // Named separately from `Command` because it is the one place the
-            // loop can block for an unbounded time: `SendWaiter` busy-waits on
-            // a callback with no timeout of its own, so a phase of `Transmit`
-            // behind a watchdog reset says which call did not come back.
+            // Named separately from `Command` because it is the one place the loop
+            // can block unboundedly: `SendWaiter` busy-waits on a callback with no
+            // timeout, so a `Transmit` phase says which call did not come back.
             mark(LoopPhase::Transmit);
             let status = transmit(manager, sender, &dst, ensure_peer, &payload);
-            // Stamped *after* the transmit callback, not before the send.
-            // Subtracted from the `rx_us` of the heartbeat that opened the
-            // node's admin window, this is the real time from "the node is
-            // listening" to "the radio says the node has it" — the number
-            // that decides whether a bridge this dumb can hit a 300 ms
-            // window, measured rather than argued about.
+            // Stamped *after* the transmit callback, not before the send. Against
+            // the `rx_us` of the heartbeat that opened the window, this is the real
+            // time from "the node is listening" to "the radio says it has it".
             let tx_us = bridge.now_us();
             bridge.outbox.send(&BridgeToHost::SendResult { id, status, tx_us });
         }
@@ -662,10 +588,9 @@ fn handle(
 
         HostToBridge::RemovePeer { mac } => match manager.remove_peer(&mac) {
             Ok(()) => bridge.log(LogLevel::Debug, "peer removed"),
-            // Symmetric with `AddPeer` swallowing `PeerExists`: gone is the
-            // outcome the host asked for. Freeing a slot is precisely the
-            // idempotent path a full peer table sends the host down, and it
-            // should not have to remember which peers it already gave up.
+            // Symmetric with `AddPeer` swallowing `PeerExists`: gone is the outcome
+            // the host asked for, and freeing a slot is the idempotent path a full
+            // peer table sends it down.
             Err(EspNowError::Error(esp_radio::esp_now::Error::NotFound)) => {
                 bridge.log(LogLevel::Debug, "peer was already gone");
             }
@@ -676,15 +601,14 @@ fn handle(
 
 /// A plaintext station peer on whatever channel the radio is already using.
 ///
-/// `channel: None` becomes 0, which ESP-NOW reads as "the current one". Setting
-/// it explicitly would mean re-registering every peer whenever the host moves
-/// the bridge with [`HostToBridge::SetChannel`].
+/// `channel: None` becomes 0, which ESP-NOW reads as "the current one" — setting it
+/// explicitly would mean re-registering every peer on a [`HostToBridge::SetChannel`].
 const fn peer(mac: &Mac) -> PeerInfo {
     PeerInfo {
         interface: EspNowWifiInterface::Station,
         peer_address: *mac,
-        // wartui does not do encrypted ESP-NOW at all, so there is no PMK to
-        // derive and no LMK to carry. Nodes must have `use_encryption` off.
+        // wartui does no encrypted ESP-NOW at all, so there is no PMK and no LMK.
+        // Nodes must have `use_encryption` off.
         lmk: None,
         channel: None,
         encrypt: false,
@@ -693,13 +617,12 @@ const fn peer(mac: &Mac) -> PeerInfo {
 
 /// Put one frame on the air and report what the radio made of it.
 ///
-/// Blocks until the transmit callback fires, which is the whole point: the
-/// vendor core clears its dirty flag from `esp_now_send`'s return value
-/// (`src/WiFiOps.cpp:679`), so it believes every assignment it *enqueued* was
-/// delivered. Unicast ESP-NOW is MAC-acknowledged, so waiting turns that guess
-/// into a fact. `SendWaiter` busy-waits and its `Drop` waits too, so there is
-/// no way to start a send and walk away — but the scheduler is preemptive, the
-/// Wi-Fi task still runs, and the wait is milliseconds against a 300 ms window.
+/// Blocks until the transmit callback fires, which is the whole point. The vendor
+/// core clears its dirty flag from `esp_now_send`'s return value
+/// (`src/WiFiOps.cpp:679`) and so believes every assignment it *enqueued* was
+/// delivered; unicast ESP-NOW is MAC-acknowledged, so waiting turns that guess
+/// into a fact. `SendWaiter` busy-waits and its `Drop` waits too, but the
+/// scheduler is preemptive and the wait is milliseconds against a 300 ms window.
 fn transmit(
     manager: &EspNowManager<'_>,
     sender: &mut EspNowSender<'_>,
@@ -713,14 +636,12 @@ fn transmit(
         }
         match manager.add_peer(peer(dst)) {
             Ok(()) => {}
-            // The radio's table holds twenty entries in total, and one of them
-            // is the broadcast peer `esp-radio` registers at init
-            // (`esp_now/mod.rs:726`). That slot is worth more to a twentieth
-            // node than it is to us: this bridge only ever *receives*
-            // broadcasts, nodes send them, and ESP-NOW delivers a received
-            // frame whether or not its sender is a peer. So give it up and try
-            // once more. A second refusal means a fleet above the twenty
-            // `MAX_NODES` wartui supports, which the host reports as such.
+            // The radio's table holds twenty entries, one of them the broadcast
+            // peer `esp-radio` registers at init (`esp_now/mod.rs:726`). That slot
+            // is worth more to a twentieth node: this bridge only ever *receives*
+            // broadcasts, and ESP-NOW delivers a received frame whether or not its
+            // sender is a peer. So give it up and retry once. A second refusal
+            // means a fleet above `MAX_NODES`, which the host reports as such.
             Err(EspNowError::Error(esp_radio::esp_now::Error::PeerListFull)) => {
                 if manager.remove_peer(&BROADCAST).is_err() {
                     return SendStatus::PeerTableFull;
@@ -748,9 +669,8 @@ fn transmit(
     };
 
     match waiter.wait() {
-        // Broadcast is never acknowledged, so a success here means only that
-        // the frame was sent. Saying so is more honest than reporting an ack
-        // that no standard requires anyone to send.
+        // Broadcast is never acknowledged, so success here means only that the
+        // frame was sent.
         Ok(()) if *dst == BROADCAST => SendStatus::Broadcast,
         Ok(()) => SendStatus::AckOk,
         Err(_) => SendStatus::AckFail,

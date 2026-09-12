@@ -1,13 +1,9 @@
 //! The channel-pool planner.
 //!
 //! The properties here are what stop a node being told to scan a channel the
-//! operator excluded, or two nodes being given the same one while a third
-//! covers nothing. They are properties rather than a comparison against another
-//! implementation, and that is a deliberate loss: until Phase 2 the assignment
-//! shape was the vendor core's, and a golden-vector fixture could check this
-//! planner against frames sniffed off a real one. Every frame is wartui's own
-//! now, in both directions, and there is no second implementation left to
-//! disagree with.
+//! operator excluded, or two nodes being given the same one while a third covers
+//! nothing. Properties rather than a comparison against another implementation,
+//! because there is no second implementation left to disagree with.
 
 use std::collections::BTreeSet;
 
@@ -53,10 +49,8 @@ fn us_pool_excludes_exactly_the_channels_it_should() {
 
 #[test]
 fn no_pool_offers_the_one_channel_a_node_cannot_tune() {
-    // `esp-radio` hardcodes `nchan: 13` in the country blob and exposes no way
-    // to reach it, so a node handed index 13 refuses the hop once per sweep for
-    // the life of the assignment and says so only on a serial console nobody is
-    // watching. A pool containing it spends a dwell of every sweep on nothing.
+    // A node handed index 13 refuses the hop once per sweep, silently; see
+    // `plan::UNSUPPORTED_INDEX`.
     assert_eq!(SCAN_CHANNELS[usize::from(UNSUPPORTED_INDEX)], 14);
     for pool in POOLS {
         assert!(!pool.contains(UNSUPPORTED_INDEX), "{pool:?} offers channel 14");
@@ -75,9 +69,7 @@ fn both_pools_are_two_runs_because_both_have_a_hole_in_them() {
 
 #[test]
 fn one_plan_covers_the_pool_and_nothing_else() {
-    // No phases: what the fleet holds at any moment is the whole pool. Before
-    // the channel mask this could only be true after a full rotation, and a
-    // lone node on the US pool was scanning half the pool at any instant.
+    // No phases: what the fleet holds at any moment is the whole pool.
     for pool in POOLS {
         let allowed: BTreeSet<u8> = pool.runs().iter().flat_map(|r| r.start..=r.end).collect();
         for nodes in FLEET_SIZES {
@@ -125,11 +117,8 @@ fn node_indices_are_unique_and_fleet_wide() {
 
 #[test]
 fn a_lone_node_holds_the_whole_pool_at_once() {
-    // The property Phase 2 exists for. An assignment used to carry one contiguous
-    // range, so one node could not express the US pool's two runs together and
-    // the plan rotated it between them on a sixty-second dwell — leaving half
-    // the pool unscanned at every instant, and re-issuing an assignment (and
-    // spending an epoch) every minute for as long as the fleet stayed at one.
+    // A lone node holds both of the US pool's runs at once, which before the channel
+    // mask took a rotation on a sixty-second dwell.
     for pool in POOLS {
         let lone = plan(pool, 1).expect("one node is a valid fleet");
         assert_eq!(lone.channels_for(0), Some(pool.channels()));
@@ -158,10 +147,9 @@ fn all_pool_with_one_node_is_every_channel_that_node_can_tune() {
 
 #[test]
 fn the_deal_is_round_robin_in_scan_channels_order() {
-    // Index k of the pool's flattened order goes to node k % node_count. Said
-    // out longhand here because everything below is a consequence of it, and a
-    // planner that satisfied the consequences by some other means would be a
-    // different planner with the same tests passing.
+    // Index k of the pool's flattened order goes to node k % node_count. Said out
+    // longhand because everything below is a consequence of it, and a planner
+    // satisfying those by other means would pass the same tests.
     for pool in POOLS {
         for nodes in FLEET_SIZES {
             let p = plan(pool, nodes).expect("valid fleet size");
@@ -179,9 +167,8 @@ fn the_deal_is_round_robin_in_scan_channels_order() {
 
 #[test]
 fn shares_differ_by_at_most_one_channel() {
-    // A node's sweep period is proportional to how many channels it holds, so
-    // an uneven deal shows up as one node heartbeating visibly slower than the
-    // rest — and as that node's observations being the stalest in the export.
+    // A sweep period is proportional to the share, so an uneven deal shows up as one
+    // node's observations being the stalest in the export.
     for pool in POOLS {
         for nodes in FLEET_SIZES {
             let p = plan(pool, nodes).expect("valid fleet size");
@@ -198,10 +185,8 @@ fn shares_differ_by_at_most_one_channel() {
 
 #[test]
 fn every_node_gets_some_of_every_run_while_there_are_enough_channels() {
-    // The reason for dealing rather than block-splitting. Eleven 2.4 GHz
-    // channels and twenty-three 5 GHz ones would have gone to disjoint sets of
-    // nodes under the old apportionment, so a node dropping out took a whole
-    // band with it until the next re-cut landed.
+    // The reason for dealing rather than block-splitting: under a block split a node
+    // dropping out takes a whole band with it until the next re-cut.
     for pool in POOLS {
         let shortest = pool.runs().iter().map(IndexRun::len).min().expect("a pool has runs");
         for nodes in 1..=shortest.min(20) {
@@ -238,10 +223,8 @@ fn admin_messages_carry_the_snapshot_node_count() {
 
 #[test]
 fn a_uniform_fleet_gets_the_same_plan_by_either_route() {
-    // `plan` is `plan_for` with every radio dual-band, and a fleet that is all
-    // one thing has no constrained channels — so the mixed-fleet machinery must
-    // be invisible to it. Every stored assignment and every fleet on a bench
-    // today is one of these.
+    // `plan` is `plan_for` with every radio dual-band, so the mixed-fleet machinery
+    // must be invisible to it. Every fleet on a bench today is one of these.
     for pool in POOLS {
         for nodes in FLEET_SIZES {
             let radios = vec![Radio::DualBand; usize::from(nodes)];
@@ -252,11 +235,8 @@ fn a_uniform_fleet_gets_the_same_plan_by_either_route() {
 
 #[test]
 fn a_two_point_four_radio_is_never_dealt_a_channel_it_cannot_tune() {
-    // The whole point. An ESP32-C6 adopts a 5 GHz share and acknowledges it,
-    // then scans the part it can reach — so the rest of that share is a hole in
-    // the fleet's coverage with an assignment sitting on top of it, which is
-    // the failure the capability token exists to prevent arriving by a
-    // different route.
+    // A C6 adopts a 5 GHz share, acknowledges it, and scans the part it can reach —
+    // leaving a hole in the fleet's coverage with an assignment on top of it.
     for pool in POOLS {
         for dual in 0..4u8 {
             for narrow in 1..4u8 {
@@ -281,10 +261,8 @@ fn a_two_point_four_radio_is_never_dealt_a_channel_it_cannot_tune() {
 
 #[test]
 fn channels_no_radio_present_can_tune_are_named_rather_than_dealt() {
-    // A fleet of nothing but C6s on the US pool covers eleven of thirty-four
-    // channels. That is not a fault the planner can fix and not one it should
-    // hide: the alternative is handing 5 GHz to a node that will ignore it,
-    // which looks identical on screen and is worse in the data.
+    // A fleet of nothing but C6s covers eleven of the US pool's thirty-four. Not a
+    // fault the planner can fix, and not one it should hide.
     let radios = [Radio::TwoPointFour; 3];
     let p = plan_for(ChannelPool::Us, &radios).expect("a valid fleet");
     let unreachable: BTreeSet<u8> = p.unreachable().indices().collect();
