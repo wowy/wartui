@@ -104,7 +104,7 @@ pub const DEDUP_REFRESH_MS: u32 = 5 * 60 * 1000;
 
 /// How much stronger a sighting must be than any reported for its address to be
 /// reported again before the refresh.
-pub const DEDUP_RSSI_GAIN_DB: i8 = 5;
+pub const DEDUP_RSSI_GAIN_DB: i8 = 10;
 
 /// Upper bound on runs in any pool. Two today; the headroom is for a
 /// "US non-DFS" pool, which would be three.

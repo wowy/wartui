@@ -232,7 +232,7 @@ An `alive` node that has stopped reporting is usually not broken: a node reports
 an address once and then holds it back, so a node that is standing still goes quiet
 once it has reported everything in range. That memory is on the node, not the host,
 so it carries over into your next session. A held address is reported again five
-minutes after it was last reported, or sooner if the node hears it at least 5 dB
+minutes after it was last reported, or sooner if the node hears it at least 10 dB
 louder than it has reported it before. Rebooting a node clears the memory
 (`crates/wartui-proto/src/dedup.rs` explains why it works this way).
 
