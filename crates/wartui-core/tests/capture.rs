@@ -94,9 +94,8 @@ const SECOND: &[u8] = b"$GPGGA,123529.00,4810.038,N,01131.000,E,1,08,0.9,545.4,M
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_moving_capture_writes_where_the_receiver_was_for_each_row() {
-    // The point of the GPS tier: not one position for the session, but the
-    // position at the moment each observation arrived. A drive is the only
-    // reason to build any of this, and this is that in miniature.
+    // The point of the GPS tier: not one position for the session, but the position
+    // at the moment each observation arrived.
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().join("drive.db");
 
@@ -125,11 +124,10 @@ async fn a_moving_capture_writes_where_the_receiver_was_for_each_row() {
     let (command_tx, command_rx) = tokio::sync::mpsc::channel(4);
 
     let capture = tokio::spawn(drive(link, store, engine, snapshot_tx, command_rx, stop_rx));
-    // One node scans Bluetooth, which is what keeps observations arriving for
-    // the whole drive: advertisers rotate their addresses, so they never fall
-    // into a node's dedup ring, while the fake neighbourhood's access points
-    // are all reported in the first sweep and then suppressed. Without a live
-    // stream there is nothing for the second fix to be attached to.
+    // One node scans Bluetooth, which is what keeps observations arriving for the
+    // whole drive: advertisers rotate their addresses and never fall into the dedup
+    // ring, while the access points are all reported in the first sweep. Without a
+    // live stream there is nothing for the second fix to be attached to.
     command_tx
         .send(Command::AssignBle { mac: Some(SimTransport::node_mac(0)) })
         .await
