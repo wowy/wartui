@@ -5,6 +5,10 @@ after it. The reasoning below was written down first on purpose, so that what
 the hardware said could be compared against what the change claimed rather than
 summarised alongside it.
 
+`file:line` citations below point into
+[wowy/ESP32DualBandWardriver](https://github.com/wowy/ESP32DualBandWardriver) on
+`feat/node-interference-mitigation`, the vendor firmware.
+
 The bench was one ESP32-S3 bridge (`6A:4C`) and three ESP32-C6 nodes (`75:40`,
 `9A:24`, `00:08`), `9A:24` flashed with the `ble` feature and the other two
 without. **No ESP32-C5 was attached**, so nothing here exercises 5 GHz: every

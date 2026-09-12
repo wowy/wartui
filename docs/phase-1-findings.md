@@ -10,6 +10,10 @@ used two C5s at once: `4F:98` alongside that same board, as does
 "BLE coexists", which is the only run with Bluetooth compiled in — and then into
 `57:84` only. Plaintext, control channel 6.
 
+`file:line` citations below point into
+[wowy/ESP32DualBandWardriver](https://github.com/wowy/ESP32DualBandWardriver) on
+`feat/node-interference-mitigation`, the vendor firmware.
+
 Access point addresses and names are left out deliberately: these were real
 captures of a real neighbourhood, and a BSSID is exactly what a geolocation
 database is built from. Counts and channels are the whole of what was being
