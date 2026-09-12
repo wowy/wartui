@@ -132,8 +132,8 @@ fn a_lone_node_holds_the_whole_pool_at_once() {
 
 #[test]
 fn all_pool_with_one_node_is_every_channel_that_node_can_tune() {
-    // Not quite the whole table: stock firmware defaults to all forty indices
-    // (`src/WiFiOps.cpp:77-80`), and one of them is a channel the radio refuses.
+    // Not quite the whole table: one of the forty indices is a channel the
+    // radio refuses.
     let p = plan(ChannelPool::All, 1).expect("valid");
     let set = p.channels_for(0).expect("assigned");
     for idx in 0..NUM_SCAN_CHANNELS {
@@ -206,8 +206,8 @@ fn every_node_gets_some_of_every_run_while_there_are_enough_channels() {
 
 #[test]
 fn admin_messages_carry_the_snapshot_node_count() {
-    // Sending a live count instead of the planned one is the firmware bug at
-    // `src/WiFiOps.cpp:651`; the count must match the partition it came from.
+    // The planned count, not a live one: it must match the partition it came
+    // from, or a node joining in between computes its stagger slot wrongly.
     let p = plan(ChannelPool::Us, 5).expect("valid");
     for n in 0..5 {
         let admin = p.admin_for(n, 9, wartui_proto::air::ADMIN_FLAG_BLE).expect("assigned");
@@ -329,7 +329,7 @@ fn stagger_matches_the_firmware_helper() {
 fn the_wire_epoch_cycles_through_every_value_the_firmware_will_accept() {
     use wartui_proto::air::wire_epoch;
 
-    // Divergence 4. The host persists a `u64`; the wire field is one byte and
+    // The host persists a `u64`; the wire field is one byte and
     // the firmware never puts 0 in it, so a node holding a freshly-zeroed field
     // must not be mistaken for one holding an assignment.
     assert_eq!(wire_epoch(1), 1);

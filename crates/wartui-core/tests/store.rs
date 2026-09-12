@@ -430,7 +430,7 @@ fn the_assignment_epoch_is_moved_forward_before_anything_can_be_sent() {
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().join("wartui.db");
 
-    // Divergence 4 from the other side: persisting the counter only after an
+    // Persisting the counter only after an
     // assignment goes out would let a crash in between hand the next run an
     // epoch a node already holds.
     let first = open_at(&path);

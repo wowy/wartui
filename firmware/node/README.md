@@ -7,11 +7,9 @@ bridge.
 
 It replaces the vendor firmware at
 [ESP32DualBandWardriver](https://github.com/wowy/ESP32DualBandWardriver) rather
-than porting it. The scanning and the ESP-NOW comms were learned there and are
-cited `file:line` throughout the source, as the record of a measured behaviour
-rather than a specification to match; the web interface, SD card, display,
-buttons, fuel gauge, GPS, geofencing, uploads and dock mode did not come across at
-all, because a node in this fleet has no use for any of them.
+than porting it. The web interface, SD card, display, buttons, fuel gauge, GPS,
+geofencing, uploads and dock mode did not come across at all, because a node in
+this fleet has no use for any of them.
 
 It shares no wire format with it either. A node broadcasts a 13-byte heartbeat
 once per completed sweep and a 17-plus-SSID sighting per newly-seen BSSID, and

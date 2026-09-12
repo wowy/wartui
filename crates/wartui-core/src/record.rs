@@ -34,9 +34,8 @@ pub fn ssid_text(bytes: &[u8]) -> String {
 /// A node was heard from, which is enough to keep its row current.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodeSeen {
-    /// The node's full six-byte MAC.
-    ///
-    /// Divergence 1.
+    /// The node's full six-byte MAC. Any shorter suffix collides across a large
+    /// enough fleet and silently merges two nodes' data.
     pub mac: Mac,
     /// Unix milliseconds when this host first saw the node in this session.
     pub first_seen_ms: i64,
@@ -142,7 +141,7 @@ pub struct BridgeSeen {
 /// What became of one assignment this host put on the air.
 ///
 /// Every attempt gets a row, successful or not, which is what turns "the fleet keeps
-/// drifting off its channels" into a query. Divergence 3.
+/// drifting off its channels" into a query.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdminOutcome {
     /// The node's radio acknowledged the frame at the MAC layer.
@@ -175,7 +174,6 @@ pub struct AssignmentSent {
     /// Which node it was addressed to.
     pub node_mac: Mac,
     /// The persisted monotonic counter this assignment was allocated from.
-    /// Divergence 4.
     pub counter: u64,
     /// The byte that actually went on the wire, `air::wire_epoch(counter)`.
     /// The column keeps its older name; what it holds has not changed.

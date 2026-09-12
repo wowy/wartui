@@ -13,7 +13,7 @@
 
 use crate::air::AdminMsg;
 
-/// The node's scan order, verbatim from `src/WiFiOps.cpp:53-64`.
+/// The node's scan order.
 ///
 /// Indices 0..=13 are the 2.4 GHz channels 1..=14; 14..=39 are 5 GHz. Every bit of
 /// the [`ChannelSet`] on the wire indexes this table, so the order must never be
@@ -29,7 +29,7 @@ pub const SCAN_CHANNELS: [u8; 40] = [
     149, 153, 157, 161, 165, 169, 173, 177,
 ];
 
-/// `NUM_SCAN_CHANNELS`, `src/WiFiOps.cpp:66`.
+/// How many entries [`SCAN_CHANNELS`] has.
 pub const NUM_SCAN_CHANNELS: u8 = 40;
 
 /// The largest fleet wartui supports.
@@ -39,25 +39,24 @@ pub const NUM_SCAN_CHANNELS: u8 = 40;
 /// unsupported rather than degraded.
 pub const MAX_NODES: usize = 20;
 
-/// `NODE_STAGGER_WINDOW_MS`, `src/WiFiOps.h:59`.
+/// The window a fleet's heartbeat transmissions are staggered across.
 pub const NODE_STAGGER_WINDOW_MS: u32 = 120;
 
 /// The channel every node returns to in order to speak to the controller.
 ///
-/// `ESPNOW_CHANNEL`, `src/WiFiOps.cpp:15`. Nothing negotiates this: a node that
+/// Nothing negotiates this: a node that
 /// picked a different one would be transmitting into an empty room.
 pub const CONTROL_CHANNEL: u8 = 6;
 
 /// How long a node listens on one channel before moving on.
 ///
-/// A sniffing node needs a beacon interval rather than a scan's dwell budget (the
-/// vendor's `CHANNEL_TIMER` is 80 ms, `src/configs.h:159`): the default interval
-/// is 102.4 ms, and anything shorter can miss an access point entirely.
+/// A sniffing node needs a beacon interval rather than a scan's dwell budget: the
+/// default interval is 102.4 ms, and anything shorter can miss an access point entirely.
 pub const CHANNEL_DWELL_MS: u32 = 125;
 
 /// How long a node holds the control channel after its heartbeat.
 ///
-/// `ADMIN_WAIT_MS`, `src/WiFiOps.h:58`. This is the window an assignment has to
+/// This is the window an assignment has to
 /// land inside, and the reason the host sends one only in the moment after a
 /// heartbeat.
 pub const ADMIN_WAIT_MS: u32 = 300;
@@ -76,7 +75,7 @@ const _: () = assert!(
 
 /// How many recently-reported BSSIDs a node suppresses.
 ///
-/// `mac_history_len`, `src/configs.h:158`. See [`crate::dedup`] for why nothing
+/// See [`crate::dedup`] for why nothing
 /// clears it.
 pub const DEDUP_RING: usize = 200;
 
@@ -416,7 +415,7 @@ const _: () = assert!(
 ///
 /// A pool cannot make a node quiet; only the node's own firmware can, which is why
 /// that half of the project is in `firmware/node` rather than here. See
-/// [`crate::beacon`] for what the vendor's active scan did on DFS channels.
+/// [`crate::beacon`] for why an active scan does not belong on DFS channels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ChannelPool {
     /// FCC-permitted unlicensed WLAN channels: 2.4 GHz 1-11 and 5 GHz 36-165.
@@ -617,7 +616,6 @@ pub fn plan_for(pool: ChannelPool, radios: &[Radio]) -> Option<Plan> {
 
 /// How long node `node_index` waits before transmitting its heartbeat.
 ///
-/// Verbatim port of `calculateNodeStaggerOffsetMs`, `src/RadioTuning.cpp:3-13`.
 /// A lone node owns the channel, and an index outside the assignment means the
 /// core has not placed the node yet; neither should delay anything.
 #[must_use]

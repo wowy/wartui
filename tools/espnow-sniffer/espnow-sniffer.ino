@@ -11,8 +11,7 @@
 #include <esp_now.h>
 #include <esp_wifi.h>
 
-// `static constexpr uint8_t ESPNOW_CHANNEL = 6;` — src/WiFiOps.cpp:15.
-// Identical on main and feat/node-interference-mitigation.
+// `CONTROL_CHANNEL` in wartui-proto.
 static const uint8_t MESH_CHANNEL = 6;
 
 // Both are recognised because both are worth capturing: one is the fleet under test
@@ -121,7 +120,7 @@ static volatile uint32_t promisc_frames = 0;
 static volatile uint32_t foreign_action = 0;
 static uint32_t capture_seq = 0;
 
-// Park the radio the way the firmware does (src/WiFiOps.cpp:586-620).
+// Park the radio the way a wartui node does (firmware/node/src/radio.rs).
 static void setFixedChannel(uint8_t ch) {
   esp_wifi_set_ps(WIFI_PS_NONE);
   esp_wifi_set_promiscuous(false);

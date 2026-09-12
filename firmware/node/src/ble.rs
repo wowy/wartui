@@ -15,10 +15,8 @@
 //!
 //! The scan is **bounded and switched off** rather than left running.
 //! `HCI_LE_Set_Scan_Enable(0)` stops the controller taking the antenna at all,
-//! which is stronger than the vendor's
-//! `while (pBLEScan->isScanning()) delay(1)` (`src/WiFiOps.cpp:1452-1453`): that
-//! waits for a scan to finish while leaving an initialised NimBLE stack behind it,
-//! and something in that stack keeps the radio.
+//! which is stronger than waiting for a scan to finish: an initialised host stack
+//! left behind a finished scan can keep the radio.
 //!
 //! And it runs **at the far end of the sweep from the admin window**, finished
 //! before the heartbeat goes out. That is a claim about wall-clock distance rather
@@ -39,7 +37,7 @@ use wartui_proto::hci::{
     set_scan_parameters,
 };
 
-/// How long one sweep listens. `BLE_SCAN_DURATION`, `src/configs.h:72`.
+/// How long one sweep listens.
 pub const SCAN_MS: u32 = 500;
 
 /// Distinct advertisers one sweep will hold.
