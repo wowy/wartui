@@ -6,18 +6,13 @@
 //! evidence a network exists, and the export is where the question of whether
 //! it can be uploaded gets asked.
 //!
-//! The tiers are tried in that order every time, per record, which is why the
-//! source is stored per row rather than per session: one capture can begin
-//! indoors on a typed-in position, pick up satellites in the car park, and lose
-//! them again in a tunnel, and the rows say so individually.
+//! The tiers are tried in that order per record, which is why the source is stored
+//! per row rather than per session: one capture can begin indoors on a typed-in
+//! position, pick up satellites in the car park, and lose them in a tunnel.
 //!
-//! **A fix has to be recent to be used at all.** Ranking a fix below a typed-in
-//! position is not the interesting decision; ageing one out is. A GPS that
-//! stopped talking twenty minutes ago is not reporting where the host is, it is
-//! reporting where the host was, and at driving speed that is the difference
-//! between a street and a neighbourhood. Past [`PositionChain::max_age`] the
-//! chain falls through to the tier below, and the row records which tier
-//! answered.
+//! **A fix has to be recent to be used at all**, which is the interesting half —
+//! past [`PositionChain::max_age`] the chain falls through to the tier below. See
+//! [`DEFAULT_MAX_AGE`] for what recent means and why.
 
 use std::time::Duration;
 
@@ -69,9 +64,8 @@ pub struct Fix {
     pub source: PositionSource,
     /// When the fix itself was taken, in Unix milliseconds.
     ///
-    /// Deliberately separate from the observation's receive time: a stale GPS
-    /// fix attached to a fresh observation is a real and invisible error
-    /// otherwise, and this is what makes the staleness visible.
+    /// Separate from the observation's receive time, which is what makes a stale fix
+    /// attached to a fresh observation visible rather than invisible.
     pub at_ms: Option<i64>,
 }
 
@@ -119,8 +113,7 @@ impl PositionChain {
 
     /// A chain whose only tier is a position the operator typed in.
     ///
-    /// `at_ms` is left unset because a static position has no fix time — it is
-    /// as current as the operator's claim about it and no more.
+    /// `at_ms` is unset: a static position is as current as the operator's claim.
     #[must_use]
     pub const fn fixed(lat: f64, lon: f64, alt: Option<f64>) -> Self {
         Self {
@@ -139,9 +132,8 @@ impl PositionChain {
 
     /// Put a receiver at the top of the chain, above whatever is already in it.
     ///
-    /// Both tiers are worth having together: the static position is what the
-    /// rows carry until the first fix lands, and again whenever the receiver
-    /// goes quiet for longer than `max_age`.
+    /// Both tiers together: the static position is what the rows carry until the
+    /// first fix lands, and whenever the receiver goes quiet for longer than `max_age`.
     #[must_use]
     pub fn with_gps(mut self, gps: Gps, max_age: Duration) -> Self {
         self.gps = Some(gps);
@@ -163,9 +155,7 @@ impl PositionChain {
 
     /// Resolve the best position available as of `now_ms`.
     ///
-    /// Takes the time rather than reading a clock so that the engine stays a
-    /// pure function of its inputs: the same fleet, the same fix and the same
-    /// instant always produce the same row.
+    /// Takes the time rather than reading a clock, so the engine stays pure.
     #[must_use]
     pub fn resolve(&self, now_ms: i64) -> Fix {
         if let Some((fix, received_at_ms)) = self.gps.as_ref().and_then(Gps::latest) {
@@ -237,9 +227,8 @@ mod tests {
 
     #[test]
     fn a_fix_older_than_the_limit_stops_being_believed() {
-        // The whole reason the chain takes a clock. At 50 km/h a minute-old fix
-        // is most of a kilometre away, and silently attaching it to fresh
-        // observations would be worse than admitting to a static position.
+        // The whole reason the chain takes a clock; `DEFAULT_MAX_AGE` has the
+        // arithmetic.
         let (gps, chain) = chain_with_gps();
         gps.feed(GGA, 10_000);
         assert_eq!(chain.resolve(15_000).source, PositionSource::Gps, "exactly at the limit");
