@@ -122,8 +122,9 @@ const IDLE_SLEEP: Duration = Duration::from_millis(1);
 /// undefined, which is why [`boot_phase`] only believes it when the reset
 /// reason says the RTC domain was not reset.
 ///
-/// An `AtomicU8` because `unsafe_code` is forbidden here and a `static mut` cannot
-/// be written without it. Never contended: only the main task touches it.
+/// An `AtomicU8` because a `static mut` cannot be written without `unsafe`, which is
+/// denied here everywhere but [`set_peer_rate`]. Never contended: only the main task
+/// touches it.
 #[esp_hal::ram(unstable(rtc_fast, persistent))]
 static PHASE: AtomicU8 = AtomicU8::new(0);
 
@@ -430,9 +431,7 @@ fn main() -> ! {
 
     let mac = esp_radio::wifi::Interface::station().mac_address();
     bridge.announce(mac);
-    if tx_power.is_err() {
-        bridge.error("could not cap transmit power at 2 dBm");
-    }
+    finish_radio_setup(&manager, &mut bridge, tx_power.is_ok());
 
     loop {
         let mut worked = false;
@@ -586,8 +585,9 @@ fn handle(
             bridge.outbox.send(&BridgeToHost::SendResult { id, status, tx_us });
         }
 
-        HostToBridge::AddPeer { mac } => match manager.add_peer(peer(&mac)) {
-            Ok(()) => bridge.log(LogLevel::Debug, "peer added"),
+        HostToBridge::AddPeer { mac } => match add_peer(manager, &mac) {
+            Ok(true) => bridge.log(LogLevel::Debug, "peer added"),
+            Ok(false) => bridge.error("peer added, but its rate was refused; it stays at 1 Mbps"),
             // Already known is the outcome the host wanted, not a failure.
             Err(EspNowError::Error(esp_radio::esp_now::Error::PeerExists)) => {}
             Err(_) => bridge.error("could not add that peer"),
@@ -622,6 +622,79 @@ const fn peer(mac: &Mac) -> PeerInfo {
     }
 }
 
+/// The radio setup that has to wait for `Ready`, because the ROM banner swallows any
+/// frame sent before it.
+///
+/// Out of `main` because `main` sits at `.clippy.toml`'s stack threshold on the C5,
+/// and every `Error` frame built there is another 276 bytes of its frame.
+#[inline(never)]
+fn finish_radio_setup(manager: &EspNowManager<'_>, bridge: &mut Bridge, tx_power_capped: bool) {
+    if !tx_power_capped {
+        bridge.error("could not cap transmit power at 2 dBm");
+    }
+    // The one peer not added through `add_peer`: `esp-radio` registers it at init.
+    if !set_peer_rate(manager, &BROADCAST) {
+        bridge.error("could not set the broadcast peer's rate; it stays at 1 Mbps");
+    }
+}
+
+/// Register a peer and set the rate it is sent at, saying whether the rate took.
+///
+/// The funnel for every peer this bridge adds. The rate belongs to the peer entry,
+/// so a peer registered any other way — or removed and registered again — is sent to
+/// at 1 Mbps with nothing to say so. A refused rate is not an error here: that peer
+/// is slower, not unreachable.
+fn add_peer(manager: &EspNowManager<'_>, mac: &Mac) -> Result<bool, EspNowError> {
+    manager.add_peer(peer(mac))?;
+    Ok(set_peer_rate(manager, mac))
+}
+
+/// Send to `mac` at 802.11g 24 Mbps rather than ESP-NOW's 802.11b 1 Mbps default.
+///
+/// For airtime on the control channel. A 90-byte frame is about 910 µs at 1 Mbps
+/// with its long preamble and about 50 µs at 24 Mbps, and every frame the fleet sends
+/// is about that short, so the rate and preamble are the whole cost: a node's 6 ms
+/// stagger slot in a twenty-node fleet is mostly empty air rather than mostly one
+/// heartbeat. Not 802.11ax, which the S3 cannot decode and whose preamble costs more
+/// than it saves on frames this short. Receivers need nothing; any 802.11b/g rate
+/// decodes unannounced.
+///
+/// The price is sensitivity, roughly 10 dB against 1 Mbps, which a fleet sharing a
+/// car has even at 2 dBm (`plan::TX_POWER_QUARTER_DBM`): on the bench, a C5 and a C6
+/// beside this bridge arrived at −43 and −58 dBm and lost 0% and 2.3% of their
+/// heartbeats over ten minutes.
+///
+/// Straight into IDF, and so the one `unsafe` in this firmware. `esp-radio`
+/// 1.0.0-beta.0 wraps only the interface-wide `esp_wifi_config_espnow_rate`, which the
+/// C5 and C6 Wi-Fi libraries refuse in Wi-Fi 6 mode (esp-hal #1612) — and whose
+/// `WifiPhyRate` is numbered without IDF's gap at 4, so its `Rate24m` sends 48 Mbps.
+/// `esp_now_set_peer_rate_config` is the per-peer call that replaced it, and taking
+/// IDF's own constants sidesteps the numbering. `firmware/node/src/radio.rs` has the
+/// node's copy.
+///
+/// The manager goes unused: it is proof that `esp_wifi_start` and `esp_now_init` have
+/// both run, which IDF requires first.
+#[allow(unsafe_code, reason = "the one IDF call esp-radio does not wrap")]
+fn set_peer_rate(_manager: &EspNowManager<'_>, mac: &Mac) -> bool {
+    #[cfg(feature = "esp32c5")]
+    use esp_wifi_sys_esp32c5::include as sys;
+    #[cfg(feature = "esp32c6")]
+    use esp_wifi_sys_esp32c6::include as sys;
+    #[cfg(feature = "esp32s3")]
+    use esp_wifi_sys_esp32s3::include as sys;
+
+    let mut config = sys::esp_now_rate_config_t {
+        phymode: sys::wifi_phy_mode_t_WIFI_PHY_MODE_11G,
+        rate: sys::wifi_phy_rate_t_WIFI_PHY_RATE_24M,
+        ersu: false,
+        dcm: false,
+    };
+    // SAFETY: `mac` is six readable bytes and `config` is a fully initialised
+    // `esp_now_rate_config_t`, both alive for the whole call. ESP-NOW is initialised,
+    // since an `EspNowManager` exists. 0 is `ESP_OK`.
+    unsafe { sys::esp_now_set_peer_rate_config(mac.as_ptr(), &mut config) == 0 }
+}
+
 /// Put one frame on the air and report what the radio made of it.
 ///
 /// Blocks until the transmit callback fires, which is the whole point.
@@ -640,8 +713,10 @@ fn transmit(
         if !ensure_peer {
             return SendStatus::NoPeer;
         }
-        match manager.add_peer(peer(dst)) {
-            Ok(()) => {}
+        match add_peer(manager, dst) {
+            // A refused rate leaves the peer at 1 Mbps, which still delivers, and a
+            // `SendStatus` has no way to say it.
+            Ok(_) => {}
             // The radio's table holds twenty entries, one of them the broadcast
             // peer `esp-radio` registers at init (`esp_now/mod.rs:726`). That slot
             // is worth more to a twentieth node: this bridge only ever *receives*
@@ -652,8 +727,8 @@ fn transmit(
                 if manager.remove_peer(&BROADCAST).is_err() {
                     return SendStatus::PeerTableFull;
                 }
-                match manager.add_peer(peer(dst)) {
-                    Ok(()) | Err(EspNowError::Error(esp_radio::esp_now::Error::PeerExists)) => {}
+                match add_peer(manager, dst) {
+                    Ok(_) | Err(EspNowError::Error(esp_radio::esp_now::Error::PeerExists)) => {}
                     Err(EspNowError::Error(esp_radio::esp_now::Error::PeerListFull)) => {
                         return SendStatus::PeerTableFull;
                     }

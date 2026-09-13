@@ -273,6 +273,9 @@ fn main() -> ! {
     let mut sniffer = controller.sniffer();
     sniffer.set_receive_cb(sniff::on_frame);
     let (manager, mut sender, receiver) = controller.esp_now().split();
+    if !radio::set_broadcast_rate(&manager) {
+        note!("could not set the ESP-NOW rate; broadcasting at 1 Mbps");
+    }
 
     // Brought up before the loop rather than on demand: initialising a radio
     // between a dwell and an admin window is the kind of surprise to avoid.
