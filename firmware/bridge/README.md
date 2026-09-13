@@ -39,6 +39,10 @@ cargo +esp run --release --features esp32s3 --target xtensa-esp32s3-none-elf
 Exactly one chip feature is required. The first line is the whole story for the
 RISC-V parts: stable, one flag, and `rust-toolchain.toml` pins it.
 
+A Seeed XIAO ESP32-C6 with an antenna on its U.FL connector also wants
+`xiao-external-antenna`, or its RF switch stays on the onboard ceramic antenna;
+[`../node/README.md`](../node/README.md) § "Building and flashing" has the rest.
+
 The S3 is Xtensa and needs `espup` — `cargo install espup && espup install`, then
 `. ~/export-esp.sh` in any shell that will link one, which is what puts
 `xtensa-esp32s3-elf-gcc` on `PATH`. `+esp` overrides the pin; `--target` is needed
