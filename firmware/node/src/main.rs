@@ -30,6 +30,8 @@
 #![deny(clippy::large_stack_frames)]
 
 use esp_hal::clock::CpuClock;
+#[cfg(feature = "xiao-external-antenna")]
+use esp_hal::gpio::{Level, Output, OutputConfig};
 use esp_hal::interrupt::software::SoftwareInterruptControl;
 use esp_hal::time::{Duration, Instant};
 use esp_hal::timer::timg::TimerGroup;
@@ -60,6 +62,8 @@ extern crate alloc;
 compile_error!("select a chip: --features esp32c5 or --features esp32c6");
 #[cfg(all(feature = "esp32c5", feature = "esp32c6"))]
 compile_error!("select exactly one chip: esp32c5 and esp32c6 are mutually exclusive");
+#[cfg(all(feature = "xiao-external-antenna", not(feature = "esp32c6")))]
+compile_error!("xiao-external-antenna drives a XIAO ESP32-C6's RF switch; build it with esp32c6");
 
 /// Say something on the USB endpoint, if this build has anywhere to say it.
 ///
@@ -241,6 +245,24 @@ fn main() -> ! {
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     let software_interrupt = SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
     esp_rtos::start(timg0.timer0, software_interrupt.software_interrupt0);
+
+    // A XIAO ESP32-C6 routes the chip's one RF pin through a switch between an
+    // onboard ceramic antenna and a U.FL connector, and nothing in the radio stack
+    // knows it is there. Left undriven the switch stays on the ceramic antenna, so
+    // an antenna on the connector is decoration and the node reads as one with a
+    // weak radio rather than a wrong setting. GPIO3 low powers the switch; GPIO14
+    // high selects the connector, 100 ms later, as Seeed's own firmware does — the
+    // bench worked without the wait, but a switch still powering up when it is told
+    // which way to point is not a failure this node could report. Set before the
+    // radio starts, so its first frame leaves by the antenna the build asked for,
+    // and bound for the life of `main`, which never returns, so the pins are never
+    // handed back.
+    #[cfg(feature = "xiao-external-antenna")]
+    let _antenna = {
+        let power = Output::new(peripherals.GPIO3, Level::Low, OutputConfig::default());
+        CurrentThreadHandle::get().delay(Duration::from_millis(100));
+        (power, Output::new(peripherals.GPIO14, Level::High, OutputConfig::default()))
+    };
 
     // Order matters. Configuring the controller needs `&mut`, while `sniffer()` and
     // `esp_now()` each borrow it for as long as they live — so everything mutable

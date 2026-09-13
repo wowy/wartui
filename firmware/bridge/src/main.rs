@@ -32,6 +32,8 @@
 
 use esp_hal::Blocking;
 use esp_hal::clock::CpuClock;
+#[cfg(feature = "xiao-external-antenna")]
+use esp_hal::gpio::{Level, Output, OutputConfig};
 use esp_hal::interrupt::software::SoftwareInterruptControl;
 use esp_hal::rtc_cntl::SocResetReason;
 use esp_hal::time::{Duration, Instant};
@@ -64,6 +66,8 @@ extern crate alloc;
 
 #[cfg(not(any(feature = "esp32c5", feature = "esp32c6", feature = "esp32s3")))]
 compile_error!("select a chip: --features esp32c5, esp32c6 or esp32s3");
+#[cfg(all(feature = "xiao-external-antenna", not(feature = "esp32c6")))]
+compile_error!("xiao-external-antenna drives a XIAO ESP32-C6's RF switch; build it with esp32c6");
 
 /// Counted rather than checked pairwise.
 ///
@@ -391,6 +395,16 @@ fn main() -> ! {
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     let software_interrupt = SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
     esp_rtos::start(timg0.timer0, software_interrupt.software_interrupt0);
+
+    // A XIAO ESP32-C6's RF switch, powered, given 100 ms, then set to the U.FL
+    // connector before the radio starts and held for the life of `main`.
+    // `firmware/node/src/main.rs` has why.
+    #[cfg(feature = "xiao-external-antenna")]
+    let _antenna = {
+        let power = Output::new(peripherals.GPIO3, Level::Low, OutputConfig::default());
+        CurrentThreadHandle::get().delay(Duration::from_millis(100));
+        (power, Output::new(peripherals.GPIO14, Level::High, OutputConfig::default()))
+    };
 
     // `esp-radio`'s default is China under `WIFI_COUNTRY_POLICY_MANUAL`, which
     // refuses 5 GHz 100-144 outright. The bridge sits on channel 6 and would never

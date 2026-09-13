@@ -71,6 +71,7 @@ has to go on, so getting them wrong here is indistinguishable from lying about i
 cargo run --release --features esp32c6            # or --features esp32c5
 cargo run --release --features esp32c6,ble        # with Bluetooth
 cargo run --release --no-default-features --features esp32c6   # without diagnostics
+cargo run --release --features esp32c6,xiao-external-antenna  # XIAO C6, antenna on U.FL
 ```
 
 Exactly one chip feature is required; `src/main.rs` rejects zero or both at compile
@@ -92,6 +93,14 @@ pipe.
 
 A `ble` build is not a node that scans Bluetooth. It is a node that *can*, if the
 core sets the flag.
+
+`xiao-external-antenna` is for a Seeed XIAO ESP32-C6 with an antenna on its U.FL
+connector. The board switches its one RF pin between that connector and an onboard
+ceramic antenna, and without the feature it stays on the ceramic one: an antenna
+plugged in does nothing, and the node simply reads as weak. Build with it only when
+an antenna is fitted, since a radio pointed at an empty connector is close to deaf.
+It is rejected on a C5: the XIAO ESP32-C5 has a U.FL connector and no onboard
+antenna, so there is nothing to switch.
 
 ## The regulatory domain is set here, and it is not a preference
 

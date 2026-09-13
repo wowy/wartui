@@ -46,6 +46,11 @@ esp32s3 = [
   "dep:esp-wifi-sys-esp32s3",
 ]
 
+# A Seeed XIAO ESP32-C6 with an antenna on its U.FL connector. The board's RF
+# switch otherwise stays on the onboard ceramic antenna and ignores anything
+# plugged in. C6 only; `firmware/node/src/main.rs` has why.
+xiao-external-antenna = []
+
 [dependencies]
 esp-alloc = "0.10.0"
 esp-bootloader-esp-idf = "0.5.0"
