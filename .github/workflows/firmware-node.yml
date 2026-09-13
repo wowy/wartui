@@ -1,0 +1,65 @@
+name: Firmware - Node
+
+# Path-filtered: this builds only when something the node firmware compiles
+# changes — its own sources, `crates/wartui-proto` (the path dependency both
+# firmwares compile; a wire change is a firmware change), `rustfmt.toml` (fmt
+# resolves it from the repo root), or this file. One workflow per firmware
+# because GitHub's path filter is workflow-wide, never per-job.
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - firmware/node/**
+      - crates/wartui-proto/**
+      - .github/workflows/firmware-node.yml
+      - rustfmt.toml
+  pull_request:
+    paths:
+      - firmware/node/**
+      - crates/wartui-proto/**
+      - .github/workflows/firmware-node.yml
+      - rustfmt.toml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  node:
+    strategy:
+      matrix:
+        target: [esp32c5, esp32c6]
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+
+      - name: Lint
+        run: |
+          pushd firmware/node
+          cargo fmt --all -- --check
+          popd
+
+      - name: Build
+        run: |
+          pushd firmware/node
+          cargo build --release --features ${{matrix.target}} --locked --verbose
+          popd
+
+      - name: Clippy
+        run: |
+          pushd firmware/node
+          cargo clippy --release --features ${{matrix.target}} --locked -- -D warnings
+          popd
