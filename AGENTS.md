@@ -64,6 +64,12 @@ cd firmware/node
 cargo clippy --release --features esp32c6     # and esp32c5, and each with ,ble
 ```
 
+CI mirrors the workspace split: `.github/workflows/wartui.yml` ("Application") lints, builds and
+tests the host crates on every push to `main` and every PR, while `firmware-bridge.yml` and
+`firmware-node.yml` run the firmware matrices only when their firmware directory,
+`crates/wartui-proto` (the path dependency both firmwares compile), `rustfmt.toml`, or the
+workflow file itself changes.
+
 ## Architecture
 
 Four host crates, strictly layered, plus firmware that shares the bottom one.
