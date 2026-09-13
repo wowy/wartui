@@ -11,12 +11,14 @@ on:
     branches: ["main"]
     paths:
       - firmware/bridge/**
+      - '!firmware/bridge/README.md'
       - crates/wartui-proto/**
       - .github/workflows/firmware-bridge.yml
       - rustfmt.toml
   pull_request:
     paths:
       - firmware/bridge/**
+      - '!firmware/bridge/README.md'
       - crates/wartui-proto/**
       - .github/workflows/firmware-bridge.yml
       - rustfmt.toml
