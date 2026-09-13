@@ -251,14 +251,18 @@ fn main() -> ! {
     // knows it is there. Left undriven the switch stays on the ceramic antenna, so
     // an antenna on the connector is decoration and the node reads as one with a
     // weak radio rather than a wrong setting. GPIO3 low powers the switch; GPIO14
-    // high selects the connector. Set before the radio starts, so its first frame
-    // leaves by the antenna the build asked for, and bound for the life of `main`,
-    // which never returns, so the pins are never handed back.
+    // high selects the connector, 100 ms later, as Seeed's own firmware does — the
+    // bench worked without the wait, but a switch still powering up when it is told
+    // which way to point is not a failure this node could report. Set before the
+    // radio starts, so its first frame leaves by the antenna the build asked for,
+    // and bound for the life of `main`, which never returns, so the pins are never
+    // handed back.
     #[cfg(feature = "xiao-external-antenna")]
-    let _antenna = (
-        Output::new(peripherals.GPIO3, Level::Low, OutputConfig::default()),
-        Output::new(peripherals.GPIO14, Level::High, OutputConfig::default()),
-    );
+    let _antenna = {
+        let power = Output::new(peripherals.GPIO3, Level::Low, OutputConfig::default());
+        CurrentThreadHandle::get().delay(Duration::from_millis(100));
+        (power, Output::new(peripherals.GPIO14, Level::High, OutputConfig::default()))
+    };
 
     // Order matters. Configuring the controller needs `&mut`, while `sniffer()` and
     // `esp_now()` each borrow it for as long as they live — so everything mutable
