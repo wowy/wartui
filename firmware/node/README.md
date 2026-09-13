@@ -99,7 +99,8 @@ connector. The board switches its one RF pin between that connector and an onboa
 ceramic antenna, and without the feature it stays on the ceramic one: an antenna
 plugged in does nothing, and the node simply reads as weak. Build with it only when
 an antenna is fitted, since a radio pointed at an empty connector is close to deaf.
-It is rejected on a C5, whose boards do not share the pins.
+It is rejected on a C5: the XIAO ESP32-C5 has a U.FL connector and no onboard
+antenna, so there is nothing to switch.
 
 ## The regulatory domain is set here, and it is not a preference
 
