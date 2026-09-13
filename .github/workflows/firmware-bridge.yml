@@ -1,9 +1,25 @@
-name: Build & Test
+name: Firmware - Bridge
+
+# Path-filtered: this builds only when something the bridge firmware compiles
+# changes — its own sources, `crates/wartui-proto` (the path dependency both
+# firmwares compile; a wire change is a firmware change), `rustfmt.toml` (fmt
+# resolves it from the repo root), or this file. One workflow per firmware
+# because GitHub's path filter is workflow-wide, never per-job.
 
 on:
   push:
     branches: ["main"]
+    paths:
+      - firmware/bridge/**
+      - crates/wartui-proto/**
+      - .github/workflows/firmware-bridge.yml
+      - rustfmt.toml
   pull_request:
+    paths:
+      - firmware/bridge/**
+      - crates/wartui-proto/**
+      - .github/workflows/firmware-bridge.yml
+      - rustfmt.toml
 
 permissions:
   contents: read
@@ -16,33 +32,10 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  wartui:
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y libudev-dev
-
-      - name: Lint
-        run: cargo fmt --all -- --check
-
-      - name: Build
-        run: cargo build --all-targets --all-features --locked --verbose
-
-      - name: Clippy
-        run: cargo clippy --all-targets --all-features --locked -- -D warnings
-
-      - name: Run tests
-        run: cargo test --all-targets --all-features --locked --verbose
-
-  firmware:
+  bridge:
     strategy:
       matrix:
         target: [esp32c5, esp32c6]
-        firmware_type: [bridge, node]
 
     runs-on: ubuntu-latest
 
@@ -55,23 +48,23 @@ jobs:
 
       - name: Lint
         run: |
-          pushd firmware/${{matrix.firmware_type}}
+          pushd firmware/bridge
           cargo fmt --all -- --check
           popd
 
       - name: Build
         run: |
-          pushd firmware/${{matrix.firmware_type}}
+          pushd firmware/bridge
           cargo build --release --features ${{matrix.target}} --locked --verbose
           popd
 
       - name: Clippy
         run: |
-          pushd firmware/${{matrix.firmware_type}}
+          pushd firmware/bridge
           cargo clippy --release --features ${{matrix.target}} --locked -- -D warnings
           popd
 
-  firmware-s3-bridge:
+  s3-bridge:
     runs-on: ubuntu-latest
 
     steps:
