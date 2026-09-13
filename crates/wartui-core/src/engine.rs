@@ -586,7 +586,9 @@ impl FleetEngine {
             plan_members: Vec::new(),
             ble_node: None,
             last_arrival: None,
-            backlog_lag_us: 0,
+            // Pessimistic from the start, as on `Connected`: the port opens onto a
+            // backlog, and its frames reach the engine before the bridge's `Ready`.
+            backlog_lag_us: BEHIND_THE_AIR,
             config,
         }
     }

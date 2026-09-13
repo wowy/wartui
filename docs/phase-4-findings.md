@@ -314,8 +314,14 @@ Latency fell from the captured hour's 2.3–3.7 ms to about 1.4 ms, which is
 consistent with #32's 24 Mbps ESP-NOW rate but was not isolated.
 
 One oddity repeated in both runs: a session's first assignment is acknowledged and
-written with no latency. Its node was parked both times, so the window was not at
-stake, and the cause has not been looked for.
+written with no latency. It was a bug. The backlog is already in the USB pipe when
+the port opens, so it reaches the engine ahead of the bridge's `Ready`, and a fresh
+engine took its very first frame as live: nothing earlier to measure it against, and
+no `Connected` yet to start it pessimistic. Both times that frame was a heartbeat,
+and its node's share went out into a window minutes old — acknowledged only because
+the node was parked and listening for its full second, and filtered out of the
+latency column because the gap was far wider than the window. The engine now starts
+behind the air, as it already did on connect.
 
 ### Bluetooth on the node being re-cut
 
