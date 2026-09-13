@@ -317,9 +317,29 @@ One oddity repeated in both runs: a session's first assignment is acknowledged a
 written with no latency. Its node was parked both times, so the window was not at
 stake, and the cause has not been looked for.
 
-Not covered, and worth a session after the reflash: a node holding Bluetooth,
-which is the documented way to lose an admin window, and a host busier than
-this one's six frames a second. A Raspberry Pi 5 should stall no worse, with
+### Bluetooth on the node being re-cut
+
+A third capture, 9.2 minutes on the same boards and builds, gave Bluetooth to one
+node at a time with the view's `b` key and reset only the other, because the
+engine takes the scan off a node that goes quiet. Every re-cut therefore landed on
+the node holding Bluetooth while it swept and scanned — the case
+`docs/phase-0-findings.md` found costing a stock node every assignment sent to it.
+
+All 18 assignments were `acked`. Twelve went into a sweeping node's 100 ms window
+while that node held the scan: ten carrying the flag, both grants among them, and
+the two withdrawals that took it away, at 1388–3524 µs. Bluetooth sightings came
+only from the holder — 62 from `4F:08` in its phase, 48 from `00:08` in its — and
+both nodes' heartbeat periods stayed at 3097 and 1546 ms, since the 500 ms scan
+comes round at most once every five seconds. Moving the scan showed the overlap
+the engine allows: the grant to `00:08` was acknowledged 1.2 s before the
+withdrawal to `4F:08`.
+
+The capture ended 16 s after the scan was taken off the fleet, which shows the
+withdrawal acknowledged and no Bluetooth sighting after it, and not much more.
+
+Still not covered: a host busier than the captured hour's six frames a second,
+and a fleet of more than two nodes, whose re-cuts put more assignments into the
+same moment. A Raspberry Pi 5 should stall no worse, with
 comparable cores and more of them; what it adds is an SD card, whose write stalls
 cost the store rows rather than the engine a window.
 
