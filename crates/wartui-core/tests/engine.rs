@@ -152,6 +152,14 @@ fn connected() -> Event {
     }))
 }
 
+/// Connected, and past the backlog: the first frame after a connect cannot be
+/// told from a replayed one, so a test about a live window sends one first. It is
+/// not ours, so it admits nobody.
+fn caught_up(engine: &mut FleetEngine, clock: &Clock) {
+    engine.handle(connected(), clock.at(0));
+    engine.handle(rx(GONE, b"not a frame"), clock.at(0));
+}
+
 fn counters(engine: &FleetEngine) -> Counters {
     engine.counters()
 }
@@ -1185,6 +1193,7 @@ fn a_fleet_is_partitioned_without_being_asked_and_stops_when_told() {
     // fails here rather than everywhere.
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
+    caught_up(&mut engine, &clock);
     for n in 0..3 {
         let batch = engine.handle(heartbeat(peer(n), 1), clock.at(1));
         assert!(!batch.urgent.is_empty(), "a node's share goes out in its own window");
@@ -1210,6 +1219,7 @@ fn a_fleet_is_partitioned_without_being_asked_and_stops_when_told() {
 fn a_node_joining_re_cuts_the_pool_for_the_whole_fleet() {
     let clock = Clock::new();
     let mut engine = engine(auto(), &clock);
+    caught_up(&mut engine, &clock);
     // A node's own first heartbeat is what admits it, and the window it has
     // just opened is the one its share goes out in — not the next one.
     let (id, dst, first) = sent_admin(&engine.handle(heartbeat(peer(0), 1), clock.at(1)));
@@ -1255,6 +1265,7 @@ fn a_node_that_stops_heartbeating_leaves_the_plan_and_the_rest_take_its_channels
 fn one_node_on_a_two_run_pool_gets_all_of_it_in_one_frame() {
     let clock = Clock::new();
     let mut engine = engine(auto(), &clock);
+    caught_up(&mut engine, &clock);
 
     // This is where the rotation used to be: one contiguous range could not say
     // the US pool's two runs, so a lone node was given them in turn on a timer.
@@ -1430,6 +1441,7 @@ fn channels_given_by_hand_keep_the_stagger_slot_the_plan_gave_the_node() {
 fn a_node_that_rejoins_holding_the_right_channels_is_still_re_issued_when_it_reboots() {
     let clock = Clock::new();
     let mut engine = engine(auto(), &clock);
+    caught_up(&mut engine, &clock);
     let (first, _, _) = sent_admin(&engine.handle(heartbeat(peer(0), 1), clock.at(1)));
     engine.handle(send_result(first, SendStatus::AckOk, 900), clock.at(1));
     let (second, _, _) = sent_admin(&engine.handle(heartbeat(peer(1), 1), clock.at(2)));
@@ -1551,6 +1563,22 @@ fn a_heartbeat_heard_live_opens_an_admin_window_again() {
         .handle(beat_at(NODE, 5, Capabilities::here(true, true), 5_000_000), clock.at_ms(1_010));
     let (_, dst, _) = sent_admin(&live);
     assert_eq!(dst, NODE, "the window this heartbeat opened is the live one");
+}
+
+// The backlog is already in the USB pipe when the port opens, so it reaches the
+// engine ahead of the bridge's answer to `Identify` — `wartui sniff` prints
+// heartbeats above the bridge's own header. The very first frame of a session has
+// no arrival before it to measure against, and must not be taken as live for that.
+#[test]
+fn a_heartbeat_replayed_before_the_bridge_announces_itself_does_not_open_an_admin_window() {
+    let clock = Clock::new();
+    let mut engine = engine(auto(), &clock);
+
+    // Minutes old on the bridge's clock, and the first thing this engine sees.
+    let first = engine
+        .handle(beat_at(NODE, 307, Capabilities::here(true, true), 359_000_000), clock.at_ms(31));
+    assert!(engine.nodes().next().expect("admitted").dirty, "the plan owes it a share");
+    assert!(first.urgent.is_empty(), "no assignment into a window that shut long ago");
 }
 
 // A latency measures one thing — how long an assignment took to land inside the
