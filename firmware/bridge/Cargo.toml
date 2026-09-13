@@ -74,7 +74,7 @@ static_cell = "2.1.1"
 wartui-proto = { path = "../../crates/wartui-proto" }
 
 [lints.rust]
-# Stated in CLAUDE.md as a project-wide rule, but the root workspace excludes
+# Stated in AGENTS.md as a project-wide rule, but the root workspace excludes
 # `firmware`, so until this line existed the firmwares were covered by the
 # documentation and not by the compiler. `deny` rather than the host's `forbid`
 # so that `set_peer_rate` alone can allow it.
