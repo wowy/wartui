@@ -2,17 +2,18 @@
 //!
 //! The fake nodes behave the way the real firmware does, including the inconvenient
 //! parts — parking until told what to scan, heartbeating once per completed sweep,
-//! staggering, adopting only on a differing epoch, and suppressing a BSSID until it
-//! falls out of a 200-entry ring. That last one matters most: it is why a real
-//! fleet's observation stream goes quiet after the first pass, and a simulator that
-//! streamed endlessly would teach the wrong lesson.
+//! staggering, adopting only on a differing epoch, and suppressing a BSSID through the
+//! same [`MacRing`] the firmware links, on node time scaled by [`SimConfig::speed`].
+//! That last one matters most: it is why a real fleet's observation stream thins to a
+//! trickle after the first pass, and a simulator that streamed endlessly would teach
+//! the wrong lesson. Simulated signal is fixed per network, so only the refresh ever
+//! re-reports one here.
 //!
 //! [`SimConfig::ble_coexistence_failure`] models a *failure* — what a stock node did
 //! on the bench, and the only way to exercise the host's `no admin ack` path without
 //! a second radio — and [`SimConfig::c6_nodes`] a mixed fleet. Both are off unless
 //! asked for.
 
-use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -22,6 +23,7 @@ use wartui_proto::air::{
     AdminMsg, Capabilities, Frame, HeartbeatMsg, RecordKind, SIGHTING_MSG_MAX, Security,
     SightingMsg,
 };
+use wartui_proto::dedup::MacRing;
 use wartui_proto::link::{
     BROADCAST, BridgeToHost, Chip, EspNowPayload, HostToBridge, LogLevel, LogStr, LoopPhase, Mac,
     ResetCause, SendStatus,
@@ -292,7 +294,10 @@ struct SimNode {
     /// planner's only reason to treat one node differently from another.
     five_ghz: bool,
     hb_counter: u32,
-    seen: VecDeque<Mac>,
+    seen: Box<MacRing<DEDUP_RING>>,
+    /// When this node booted, on tokio's clock so a paused test controls it.
+    boot: tokio::time::Instant,
+    speed: f64,
     rng: Xorshift,
 }
 
@@ -310,7 +315,9 @@ impl SimNode {
             channels: ChannelSet::empty(),
             holds_ble,
             hb_counter: 0,
-            seen: VecDeque::with_capacity(DEDUP_RING),
+            seen: Box::default(),
+            boot: tokio::time::Instant::now(),
+            speed: 1.0,
             rng: Xorshift::new(0xA5A5_0000 ^ u64::from(index).wrapping_mul(0x9E37_79B9)),
         }
     }
@@ -338,17 +345,12 @@ impl SimNode {
         self.holds_ble.load(Ordering::Relaxed)
     }
 
-    /// The node's 200-entry insertion-order ring.
-    /// Returns true the first time a MAC is offered.
-    fn first_sighting(&mut self, mac: Mac) -> bool {
-        if self.seen.contains(&mac) {
-            return false;
-        }
-        if self.seen.len() == DEDUP_RING {
-            self.seen.pop_front();
-        }
-        self.seen.push_back(mac);
-        true
+    /// Whether the firmware would transmit this sighting now, recording it if so.
+    /// A simulated broadcast cannot fail, so asking and recording are one step.
+    fn worth_reporting(&mut self, network: &Network) -> bool {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let now_ms = (self.boot.elapsed().as_secs_f64() * 1000.0 * self.speed) as u64 as u32;
+        self.seen.offer(network.bssid, Some(network.rssi), now_ms)
     }
 }
 
@@ -364,6 +366,10 @@ async fn run_node(
     if attached.wait_for(|up| *up).await.is_err() {
         return;
     }
+    // Here rather than in `SimNode::new`, which may run outside the runtime and so off
+    // the clock a paused test is moving.
+    node.boot = tokio::time::Instant::now();
+    node.speed = speed;
     let dwell = scaled(u64::from(CHANNEL_DWELL_MS), speed);
     loop {
         if !node.assigned() {
@@ -391,9 +397,7 @@ async fn run_node(
             }
             let channel = SCAN_CHANNELS[usize::from(idx)];
             for net in world.on_channel(channel) {
-                if node.first_sighting(net.bssid)
-                    && emit(&events, &node, net, started).await.is_err()
-                {
+                if node.worth_reporting(net) && emit(&events, &node, net, started).await.is_err() {
                     return;
                 }
             }
@@ -401,8 +405,7 @@ async fn run_node(
             // stop these arriving.
             if node.scanning_ble() && node.rng.next_f64() < world.ble_chance {
                 let ble = world.ble_sighting(&mut node.rng);
-                if node.first_sighting(ble.bssid)
-                    && emit(&events, &node, &ble, started).await.is_err()
+                if node.worth_reporting(&ble) && emit(&events, &node, &ble, started).await.is_err()
                 {
                     return;
                 }

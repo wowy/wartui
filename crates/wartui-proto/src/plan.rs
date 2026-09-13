@@ -93,11 +93,18 @@ const _: () = assert!(
     "a parked node must hold the control channel for at least a full admin window"
 );
 
-/// How many recently-reported BSSIDs a node suppresses.
-///
-/// See [`crate::dedup`] for why nothing
-/// clears it.
+/// How many recently-reported addresses a node holds. See [`crate::dedup`].
 pub const DEDUP_RING: usize = 200;
+
+/// How long a node suppresses an address it has reported before reporting it again.
+///
+/// Five minutes: long enough that a stationary node's whole neighbourhood costs a few
+/// sightings a minute, short enough that a fresh host session hears it without a reboot.
+pub const DEDUP_REFRESH_MS: u32 = 5 * 60 * 1000;
+
+/// How much stronger a sighting must be than any reported for its address to be
+/// reported again before the refresh.
+pub const DEDUP_RSSI_GAIN_DB: i8 = 10;
 
 /// Upper bound on runs in any pool. Two today; the headroom is for a
 /// "US non-DFS" pool, which would be three.
