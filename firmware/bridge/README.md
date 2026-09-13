@@ -137,6 +137,13 @@ firmware's `esp_rtos::start` would both stop compiling against a version faked
 into range. Issue #16 has the shape of the real upgrade — `[patch.crates-io]`
 across the family at one monorepo rev — and what to delete when it lands.
 
+Both firmwares also depend directly on their chip's `esp-wifi-sys-*` bindings, for
+`esp_now_set_peer_rate_config` — the one IDF call `esp-radio` does not wrap, and the
+only `unsafe` in either (`set_peer_rate` in `src/main.rs`). It is held at the
+version `esp-radio` itself resolves, so the declarations match the Wi-Fi libraries
+actually linked; when `esp-radio` moves, move it with it and check that `cargo tree
+-i esp-wifi-sys-esp32c6 --features esp32c6` still shows a single copy.
+
 `esp-generate` is a version behind this set; its scaffolding (`build.rs`,
 `.cargo/config.toml`) is what was taken from it, not its dependency list. One
 piece of that does not survive the S3: `build.rs`'s `linker_be_nice` registers

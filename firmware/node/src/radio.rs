@@ -1,8 +1,10 @@
-//! The two things this firmware asks of the radio.
+//! What this firmware asks of the radio.
 //!
 //! Parking is not `set_channel` alone — see [`park`]. A node that sniffs has
 //! promiscuous mode on for its own reasons, so that falls out for free on the dwell
 //! side; the hop back to the control channel is the one to check on hardware.
+//!
+//! [`set_broadcast_rate`] is the one `unsafe` in this firmware.
 
 use esp_radio::esp_now::{EspNowManager, EspNowSender};
 use esp_radio::wifi::sniffer::Sniffer;
@@ -30,6 +32,32 @@ pub fn park(manager: &EspNowManager<'_>, sniffer: &Sniffer<'_>, channel: u8, lis
         let _ = sniffer.set_promiscuous_mode(false);
     }
     parked
+}
+
+/// Broadcast at 802.11g 24 Mbps rather than ESP-NOW's 1 Mbps default, saying whether
+/// that took.
+///
+/// Every frame a node sends is a broadcast, so the rate goes on the broadcast peer
+/// `esp-radio` registers at init, once; a node never removes that peer.
+/// `set_peer_rate` in `firmware/bridge/src/main.rs` has why 24 Mbps, what it costs,
+/// and why this cannot go through `esp-radio`.
+#[allow(unsafe_code, reason = "the one IDF call esp-radio does not wrap")]
+pub fn set_broadcast_rate(_manager: &EspNowManager<'_>) -> bool {
+    #[cfg(feature = "esp32c5")]
+    use esp_wifi_sys_esp32c5::include as sys;
+    #[cfg(feature = "esp32c6")]
+    use esp_wifi_sys_esp32c6::include as sys;
+
+    let mut config = sys::esp_now_rate_config_t {
+        phymode: sys::wifi_phy_mode_t_WIFI_PHY_MODE_11G,
+        rate: sys::wifi_phy_rate_t_WIFI_PHY_RATE_24M,
+        ersu: false,
+        dcm: false,
+    };
+    // SAFETY: `BROADCAST` is six readable bytes and `config` is a fully initialised
+    // `esp_now_rate_config_t`, both alive for the whole call. ESP-NOW is initialised,
+    // since an `EspNowManager` exists. 0 is `ESP_OK`.
+    unsafe { sys::esp_now_set_peer_rate_config(BROADCAST.as_ptr(), &mut config) == 0 }
 }
 
 /// Put a frame on the air for whoever is listening.
