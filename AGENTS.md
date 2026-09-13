@@ -6,8 +6,7 @@ Guidance for coding agents working in this repository.
 
 A terminal fleet controller for ESP32-C5 and ESP32-C6 wardriving nodes, speaking ESP-NOW
 through a USB-attached ESP32 dongle. `README.md` introduces it and says which chip goes
-where. Both firmwares are ours, and every frame on the air is wartui's own in both
-directions.
+where.
 
 Where the prose lives:
 
@@ -18,9 +17,7 @@ Where the prose lives:
 - `firmware/*/README.md` — each firmware's own constraints, including the esp-hal version
   wall (`firmware/bridge/README.md`).
 - `docs/phase-N-findings.md` — what each bench actually measured, and why several
-  invariants below exist. Phase 0 is the vendor fleet; 1 is our node firmware; 2 is channel
-  masks and Bluetooth; 3 is the USB link and the wedge; 4 is the wire becoming ours, and is
-  the one written ahead of the bench rather than after it.
+  invariants below exist.
 
 Module-level `//!` docs carry the reasoning behind the invariants below. They are the
 record; this file is the index.
@@ -44,9 +41,8 @@ cargo run -p wartui -- ports | status | sniff        # with a bridge plugged in
 cargo run -p wartui -- --log-file wartui.log run     # the only way to see transport logs
 ```
 
-`wartui ports` cannot say which attached board is the bridge, and probing is slow, but the USB
-serial number *is* the device's MAC — `crates/wartui/README.md` § "Telling the boards apart"
-has the one-liners. Refer to boards by their last two octets, per the global rule.
+Refer to boards by their last two octets; `crates/wartui/README.md` § "Telling the boards
+apart" has the one-liners.
 
 Each firmware is a **separate workspace** (`exclude = ["firmware"]`): different target, own
 toolchain pin, own lockfile. `cargo test --workspace` never touches them.
@@ -64,25 +60,19 @@ cd firmware/node
 cargo clippy --release --features esp32c6     # and esp32c5, and each with ,ble
 ```
 
-CI mirrors the workspace split: `.github/workflows/wartui.yml` ("Application") lints, builds and
-tests the host crates on every push to `main` and every PR, while `firmware-bridge.yml` and
-`firmware-node.yml` run the firmware matrices only when their firmware directory,
-`crates/wartui-proto` (the path dependency both firmwares compile), `rustfmt.toml`, or the
-workflow file itself changes.
+CI mirrors the workspace split: host crates on every push and PR; each firmware only
+when something it compiles changes.
 
 ## Architecture
 
 Four host crates, strictly layered, plus firmware that shares the bottom one.
 
 - **`crates/wartui-proto`** — `no_std`, allocation-free wire formats and the parsing that goes
-  with them. `air` (the three ESP-NOW frames, and `air::foreign` for recognising somebody
-  else's), `beacon` (802.11 management frames and RSN/WPA elements to a `Sighting`), `hci` (the four
-  Bluetooth commands and one event a scan needs), `dedup` (the node's oldest-out MAC ring),
-  `link` (our own COBS/postcard/CRC USB protocol), `outbox` (the bridge's bounded TX rings),
-  `stall` (when that endpoint has stopped draining), `plan` (channel pools, timings and the
-  partitioning planner). Compiled into *both* the host
-  and the firmware by path dependency, which is the only thing keeping the ends in step — and
-  the reason a node's parsers are testable with `cargo test` rather than a reflash.
+  with them: `air` (the three ESP-NOW frames, and `air::foreign` for recognising somebody
+  else's), `beacon`, `hci`, `dedup`, `link`, `outbox`, `stall`, `plan` (channel pools, timings
+  and the partitioning planner). Compiled into *both* the host and the firmware by path
+  dependency, which is the only thing keeping the ends in step — and the reason a node's
+  parsers are testable with `cargo test` rather than a reflash.
 - **`crates/wartui-bridge`** — host side of the USB link. Everything above talks to a `LinkHandle`
   and cannot tell a real dongle (`serial`) from the fake fleet (`sim`).
 - **`crates/wartui-core`** — the headless half. Draws nothing, parses no arguments.
@@ -129,8 +119,7 @@ is here rather than only in a `//!`.
   (17 plus the SSID) and `AdminMsg` (15). ESP-NOW has no addressing above the MAC layer and a
   node broadcasts, so a shared format is a shared conversation. The magic is checked before
   anything else at both ends. Encode/decode is written out by hand, never by transmuting a
-  packed struct, and pinned byte-for-byte in `crates/wartui-proto/tests/wire.rs` — hand-written
-  vectors, because there is no second implementation of either end left to check against.
+  packed struct, and pinned byte-for-byte in `crates/wartui-proto/tests/wire.rs`.
 - **A wire change means reflashing every node at once.** `wartui-proto` is a path dependency of
   both firmwares. A frame carrying our magic and an unknown version byte is counted as
   `incompatible` and named in the footer (`N frames from an older firmware — reflash`), never
@@ -175,21 +164,18 @@ Each of these is enforced in one place and explained there at length. The claim 
 edit stops; follow the pointer before changing the rule.
 
 - **Somebody else's fleet is recognised in order to be reported, never to be accommodated.**
-  Nothing keeps a mixed fleet working; the vendor node is what is being replaced.
   → `crates/wartui-proto/src/air.rs` `//!`, `air::foreign`
 - **The planner deals only channels a node's own radio can tune**, and what no radio present can
   reach comes back in `Plan::unreachable` rather than being dealt anyway.
   → `crates/wartui-proto/src/plan.rs`, `plan_for`; `crates/wartui/README.md` § "Channel pools"
 - **Channel 14 is in no pool and is never dealt**, and stays in the scan table because that table's
   indices are the wire format. → `crates/wartui-proto/src/plan.rs`, `UNSUPPORTED_INDEX`
-- **At most one node scans Bluetooth, and by default none does.** `ADMIN_FLAG_BLE` is an operator's
-  decision, not a property of the flashed firmware, and withdrawing it means an assignment
-  **re-issued** without the flag — so `reissue` is the one funnel.
+- **At most one node scans Bluetooth, and by default none does.** `ADMIN_FLAG_BLE` is an
+  operator's decision, not a property of the flashed firmware.
   → `crates/wartui-core/src/engine.rs`, `Command::AssignBle` / `on_assign_ble` / `reissue`;
   `docs/phase-2-findings.md`
-- **A heartbeat replayed out of the bridge's backlog is not an admin window.** Such a heartbeat
-  still admits its node; the window it names shut long ago. Delete either half of the check and the
-  symptom is a plausible-looking lie rather than an error.
+- **A heartbeat replayed out of the bridge's backlog is not an admin window.** Delete either
+  half of the check and the symptom is a plausible-looking lie rather than an error.
   → `crates/wartui-core/src/engine.rs`, `note_arrival` / `air_is_live` / `BEHIND_THE_AIR`
 - **The bridge's USB transmit endpoint can die on its own, and the bridge reboots when it does.**
   `StallWatch` times the *contradiction*, and **every one of its four clauses is load-bearing**:
@@ -216,9 +202,8 @@ edit stops; follow the pointer before changing the rule.
   operator's policy for the whole fleet, not a default to raise for one board; range is the cost.
   → `crates/wartui-proto/src/plan.rs`, `TX_POWER_QUARTER_DBM`
 - **ESP-NOW goes out at 802.11g 24 Mbps, set per peer through IDF directly** — `esp-radio`'s
-  `set_rate` is refused on the C5 and C6, and misnumbered besides. The rate belongs to the peer
-  entry, so every peer the bridge adds goes through `add_peer`, and a node sets it once on the
-  broadcast peer. → `firmware/bridge/src/main.rs`, `set_peer_rate`; `firmware/node/src/radio.rs`
+  `set_rate` is refused on the C5 and C6, and misnumbered besides.
+  → `firmware/bridge/src/main.rs`, `set_peer_rate`; `firmware/node/src/radio.rs`
 - **The air is plaintext ESP-NOW in both directions** — no pairing handshake and no key.
   → `firmware/bridge/src/main.rs`, peer registration
 - **Setting a node's channel is not `set_channel` alone** — without promiscuous mode on across the
