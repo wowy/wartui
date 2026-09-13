@@ -27,6 +27,7 @@ esp32c5 = [
   "esp-hal/esp32c5",
   "esp-radio/esp32c5",
   "esp-rtos/esp32c5",
+  "dep:esp-wifi-sys-esp32c5",
 ]
 esp32c6 = [
   "esp-alloc/esp32c6",
@@ -34,6 +35,7 @@ esp32c6 = [
   "esp-hal/esp32c6",
   "esp-radio/esp32c6",
   "esp-rtos/esp32c6",
+  "dep:esp-wifi-sys-esp32c6",
 ]
 esp32s3 = [
   "esp-alloc/esp32s3",
@@ -41,6 +43,7 @@ esp32s3 = [
   "esp-hal/esp32s3",
   "esp-radio/esp32s3",
   "esp-rtos/esp32s3",
+  "dep:esp-wifi-sys-esp32s3",
 ]
 
 [dependencies]
@@ -54,6 +57,12 @@ esp-radio = { version = "1.0.0-beta.0", default-features = false, features = [
   "wifi",
 ] }
 esp-rtos = { version = "0.3.0", features = ["esp-alloc", "esp-radio"] }
+# IDF's own bindings, for the one call `esp-radio` does not wrap —
+# `esp_now_set_peer_rate_config`, in `set_peer_rate`. Held at the version
+# `esp-radio` links; README.md § "Dependency versions".
+esp-wifi-sys-esp32c5 = { version = "0.2.0", optional = true }
+esp-wifi-sys-esp32c6 = { version = "0.2.0", optional = true }
+esp-wifi-sys-esp32s3 = { version = "0.2.0", optional = true }
 nb = "1.1.0"
 portable-atomic = { version = "1.15.0", default-features = false }
 static_cell = "2.1.1"
@@ -62,8 +71,9 @@ wartui-proto = { path = "../../crates/wartui-proto" }
 [lints.rust]
 # Stated in CLAUDE.md as a project-wide rule, but the root workspace excludes
 # `firmware`, so until this line existed the firmwares were covered by the
-# documentation and not by the compiler.
-unsafe_code = "forbid"
+# documentation and not by the compiler. `deny` rather than the host's `forbid`
+# so that `set_peer_rate` alone can allow it.
+unsafe_code = "deny"
 
 [lints.clippy]
 all = { level = "deny", priority = -1 }
