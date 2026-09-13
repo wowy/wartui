@@ -59,7 +59,7 @@ enum Command {
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> Result<()> {
-    let cli = Cli::parse();
+    let cli = parse(std::env::args_os()).unwrap_or_else(|e| e.exit());
     // Held for the whole process: dropping the guard stops the writer thread,
     // and the last thing logged before an exit is usually the interesting one.
     let _log = logging(cli.log_file.as_deref())?;
@@ -72,6 +72,47 @@ async fn main() -> Result<()> {
         Some(Command::Reset(args)) => reset::run(args).await,
         Some(Command::Ports) => ports(),
     }
+}
+
+/// Parse the command line, refusing `run`'s arguments ahead of another subcommand.
+///
+/// They are flattened into [`Cli`] so that a bare `wartui` runs, which means clap
+/// accepts them before any subcommand too, and then nothing reads them:
+/// `wartui --port X status` probed whatever port discovery found and reported that
+/// no bridge was there. An argument that silently does nothing is worse than an error,
+/// so one typed there is refused. `--log-file` is global and means the same in either
+/// place.
+fn parse<I, T>(args: I) -> Result<Cli, clap::Error>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
+    use clap::{CommandFactory, FromArgMatches, error::ErrorKind, parser::ValueSource};
+
+    let mut command = Cli::command();
+    let matches = command.try_get_matches_from_mut(args)?;
+    if let Some((name, _)) = matches.subcommand() {
+        let misplaced = command.get_arguments().find(|arg| {
+            !arg.is_global_set()
+                && matches.value_source(arg.get_id().as_str()) == Some(ValueSource::CommandLine)
+        });
+        if let Some(arg) = misplaced {
+            let flag = arg.get_long().unwrap_or(arg.get_id().as_str());
+            let takes_it = command
+                .find_subcommand(name)
+                .is_some_and(|sub| sub.get_arguments().any(|a| a.get_long() == Some(flag)));
+            let advice = if takes_it {
+                format!("put it after the subcommand: wartui {name} --{flag} ...")
+            } else {
+                format!("'{name}' does not take it")
+            };
+            return Err(command.error(
+                ErrorKind::ArgumentConflict,
+                format!("'--{flag}' before '{name}' would be ignored; {advice}"),
+            ));
+        }
+    }
+    Cli::from_arg_matches(&matches)
 }
 
 /// Send `tracing` output to `path`, if one was given.
@@ -320,7 +361,46 @@ pub fn no_bridge_notice(port: Option<&str>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::no_bridge_notice;
+    use super::{Command, no_bridge_notice, parse};
+
+    #[test]
+    fn a_port_before_a_subcommand_is_refused_rather_than_ignored() {
+        let error = parse(["wartui", "--port", "/dev/ttyACM2", "status"]).err().unwrap();
+        let message = error.to_string();
+        assert!(message.contains("wartui status --port"), "{message}");
+    }
+
+    #[test]
+    fn a_run_argument_the_subcommand_does_not_take_says_so() {
+        let error = parse(["wartui", "--sim", "3", "export", "--wigle", "-"]).err().unwrap();
+        let message = error.to_string();
+        assert!(message.contains("'export' does not take it"), "{message}");
+    }
+
+    #[test]
+    fn a_port_after_the_subcommand_reaches_it() {
+        let cli = parse(["wartui", "status", "--port", "/dev/ttyACM2"]).unwrap();
+        let Some(Command::Status(args)) = cli.command else { panic!("not status") };
+        assert_eq!(args.port.as_deref(), Some("/dev/ttyACM2"));
+    }
+
+    #[test]
+    fn run_arguments_without_a_subcommand_still_run() {
+        let cli = parse(["wartui", "--port", "/dev/ttyACM2"]).unwrap();
+        assert!(cli.command.is_none());
+        assert_eq!(cli.run.port.as_deref(), Some("/dev/ttyACM2"));
+    }
+
+    #[test]
+    fn the_log_file_is_global_and_allowed_on_either_side() {
+        for args in [
+            ["wartui", "--log-file", "w.log", "status", "--port", "/dev/x"],
+            ["wartui", "status", "--log-file", "w.log", "--port", "/dev/x"],
+        ] {
+            let cli = parse(args).unwrap();
+            assert_eq!(cli.log_file.as_deref(), Some(std::path::Path::new("w.log")));
+        }
+    }
 
     #[test]
     fn the_notice_names_the_port_it_was_waiting_on() {
