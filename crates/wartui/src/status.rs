@@ -24,7 +24,7 @@ const REPLY_TIMEOUT: Duration = super::CONNECT_NOTICE_AFTER;
 pub struct Args {
     /// Serial port of the bridge. Discovered automatically if omitted.
     #[arg(long, value_name = "PATH")]
-    port: Option<String>,
+    pub(crate) port: Option<String>,
 
     /// Ask the simulator instead of hardware.
     #[arg(long, value_name = "NODES", num_args = 0..=1, default_missing_value = "3")]

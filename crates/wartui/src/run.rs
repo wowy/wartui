@@ -47,7 +47,7 @@ impl From<PoolArg> for ChannelPool {
 pub struct Args {
     /// Serial port of the bridge. Discovered automatically if omitted.
     #[arg(long, value_name = "PATH")]
-    port: Option<String>,
+    pub(crate) port: Option<String>,
 
     /// Use the built-in simulator with this many fake nodes instead of hardware.
     #[arg(long, value_name = "NODES", num_args = 0..=1, default_missing_value = "3")]
