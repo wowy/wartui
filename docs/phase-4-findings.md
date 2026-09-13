@@ -246,6 +246,103 @@ where one was actually owed, so the figure is transmits deferred rather than
 one per stale frame, and it is the answer to the question a fresh connection
 otherwise raises: why nothing has been assigned yet.
 
+## The admin window, from a captured hour
+
+Written after this bench, from a later capture: 64.6 minutes on 2026-09-10, a C6
+bridge (`9D:24`) and five C5 nodes, Bluetooth off everywhere. It is the evidence
+for cutting `ADMIN_WAIT_MS` from 300 ms to 100 ms.
+
+It was a drive rather than a bench — about 34 km across a 6.5 by 5.8 km area — with
+GPS active throughout: every sighting is positioned by it, from a fix no more than
+1.1 s old. The host was a 2016 MacBook Air running Arch Linux on kernel 7.2, idle
+apart from a release build of wartui. Every host figure below is that machine's.
+
+The direct measurement is thin. Membership settled in the first seven seconds and
+nothing re-cut the plan afterwards, so the session holds nine assignments, all
+`acked`, at 2259–3722 µs from heartbeat to transmit callback on the bridge's clock.
+
+The rest of the hour is read from heartbeat timing instead. A heartbeat's `rx_at`
+is the host's clock at the moment the engine handled it, and a host stall of S ms
+stretches one of a node's heartbeat intervals by S and shortens the next by S.
+Across 15,400 heartbeats at periods of 1174–1280 ms, pairs of that shape measured
+1 ms at the median, 6–7 ms at p99 and 17 ms at worst — an upper bound, since node
+jitter takes the same shape. None exceeded 20 ms, and no gap in the merged stream
+of heartbeats and sightings was followed by the burst a backlog delivers.
+
+So the host answered within about 21 ms all hour, against a 300 ms window. 100 ms
+keeps roughly five times that, and about twice the 55 ms startup burst measured
+above. The tight case is one this capture never produced: an assignment queued
+behind another node's unacknowledged send inherits its 28–35 ms retry chain
+(`crates/wartui-bridge/src/serial.rs`), and on top of a worst host stall that is
+about 55 ms — still inside the window, at about twice the margin rather than five.
+It takes a re-cut landing while one node is not acknowledging, which is most
+likely the node holding Bluetooth. `BEHIND_THE_AIR` is derived from the window and
+shrinks with it. A window missed anyway costs one sweep: the node stays dirty and
+its next heartbeat re-sends.
+
+The same capture sizes the saving. Each node held six or seven channels and beat
+about 30 ms slower than dwells, stagger and window add up to — roughly 4.7 ms a
+channel for the hop back and the report. At 100 ms a seven-channel sweep falls
+from about 1230 ms to 1030 ms, about 19% more sweeps an hour.
+
+### Retested on the bench at 100 ms
+
+Two headless captures of 8.2 minutes each on 2026-09-12, on three boards: a XIAO
+ESP32-C6 bridge (`9D:24`), a XIAO C6 node (`00:08`) and a XIAO C5 node (`4F:08`),
+Bluetooth off. A bench fleet never changes membership by itself, so one node at a
+time was held in reset past the 60 s topology timeout and then released. Each
+departure and each return re-cuts the plan, and the node that stayed is sent its
+share while it sweeps — the only kind of assignment the 100 ms window governs. A
+node coming back from reset is parked and listens for a full second, so its own
+assignments are counted apart.
+
+| | First run | Rebased onto #34 |
+| --- | --- | --- |
+| Into a sweeping node's 100 ms window | 9 of 9 `acked`, 1415–5530 µs | 9 of 9 `acked`, 1386–1829 µs |
+| Into a parked node | 6 of 6 `acked` | 6 of 6 `acked` |
+| `00:08` heartbeats at the bridge | −73.8 dBm, 37% lost | −49.2 dBm, none lost |
+| `4F:08` heartbeats at the bridge | −41.5 dBm, none lost | −34.0 dBm, none lost |
+
+In the first run both XIAO C6s were on their ceramic antennas; after #34 both were
+on U.FL. The first run's heartbeat loss was the antenna's, and every assignment
+into that node's window was acknowledged regardless: heartbeats are broadcast and
+get no MAC-layer retries, while assignments are unicast and do.
+
+Sweep periods matched the arithmetic at 100 ms in both runs: 1545 ms for eleven
+channels at a 60 ms stagger and 3096 ms for twenty-three, against 1587 and 3083 ms.
+Latency fell from the captured hour's 2.3–3.7 ms to about 1.4 ms, which is
+consistent with #32's 24 Mbps ESP-NOW rate but was not isolated.
+
+One oddity repeated in both runs: a session's first assignment is acknowledged and
+written with no latency. Its node was parked both times, so the window was not at
+stake, and the cause has not been looked for.
+
+### Bluetooth on the node being re-cut
+
+A third capture, 9.2 minutes on the same boards and builds, gave Bluetooth to one
+node at a time with the view's `b` key and reset only the other, because the
+engine takes the scan off a node that goes quiet. Every re-cut therefore landed on
+the node holding Bluetooth while it swept and scanned — the case
+`docs/phase-0-findings.md` found costing a stock node every assignment sent to it.
+
+All 18 assignments were `acked`. Twelve went into a sweeping node's 100 ms window
+while that node held the scan: ten carrying the flag, both grants among them, and
+the two withdrawals that took it away, at 1388–3524 µs. Bluetooth sightings came
+only from the holder — 62 from `4F:08` in its phase, 48 from `00:08` in its — and
+both nodes' heartbeat periods stayed at 3097 and 1546 ms, since the 500 ms scan
+comes round at most once every five seconds. Moving the scan showed the overlap
+the engine allows: the grant to `00:08` was acknowledged 1.2 s before the
+withdrawal to `4F:08`.
+
+The capture ended 16 s after the scan was taken off the fleet, which shows the
+withdrawal acknowledged and no Bluetooth sighting after it, and not much more.
+
+Still not covered: a host busier than the captured hour's six frames a second,
+and a fleet of more than two nodes, whose re-cuts put more assignments into the
+same moment. A Raspberry Pi 5 should stall no worse, with
+comparable cores and more of them; what it adds is an SD card, whose write stalls
+cost the store rows rather than the engine a window.
+
 ## Still not measured
 
 - **Whether the shorter frames change the dedup ring's usefulness.** The ring

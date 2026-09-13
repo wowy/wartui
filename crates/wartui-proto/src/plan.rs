@@ -73,8 +73,13 @@ pub const CHANNEL_DWELL_MS: u32 = 125;
 ///
 /// This is the window an assignment has to
 /// land inside, and the reason the host sends one only in the moment after a
-/// heartbeat.
-pub const ADMIN_WAIT_MS: u32 = 300;
+/// heartbeat. It is also, once per sweep, time in which no channel is swept.
+///
+/// 100 ms is about five times the slowest the host answered across an hour of
+/// captured traffic, and a window missed costs one sweep rather than the
+/// assignment, because the node stays dirty and its next heartbeat re-sends
+/// (`docs/phase-4-findings.md`, "The admin window, from a captured hour").
+pub const ADMIN_WAIT_MS: u32 = 100;
 
 /// How long an unassigned node waits between heartbeats.
 ///

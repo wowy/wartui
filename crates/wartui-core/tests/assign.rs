@@ -180,7 +180,7 @@ async fn narrowing_a_node_to_one_channel_collapses_its_heartbeat_period() {
         ChannelSet::from_run(IndexRun::new(5, 5))
     );
     assert!(!ble);
-    // The number that settles whether a bridge this dumb can hit a 300 ms
+    // The number that settles whether a bridge this dumb can hit a 100 ms
     // window. Measured on the bridge's own clock, from the heartbeat that
     // opened the window to the transmit callback.
     assert!(latency.is_some(), "and carries the latency the whole design turns on");

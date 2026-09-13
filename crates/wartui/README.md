@@ -66,7 +66,7 @@ then take it back at the next re-cut, which reads as the key having been ignored
 Bluetooth.
 
 Nothing goes out at the moment the key is pressed. A node's radio is away
-scanning some other channel for all but the 300 ms it holds open after its own
+scanning some other channel for all but the 100 ms it holds open after its own
 heartbeat, so the assignment waits for that window — the `channels` column reads
 `1: 1…` until it lands, then drops the ellipsis. On a full sweep that is up to
 four seconds. That delay is the protocol, not lag.
