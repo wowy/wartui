@@ -276,13 +276,46 @@ behind another node's unacknowledged send inherits its 28–35 ms retry chain
 (`crates/wartui-bridge/src/serial.rs`), and on top of a worst host stall that is
 about 55 ms — still inside the window, at about twice the margin rather than five.
 It takes a re-cut landing while one node is not acknowledging, which is most
-likely the node holding Bluetooth. `BEHIND_THE_AIR` is derived from the window and shrinks with it. A window
-missed anyway costs one sweep: the node stays dirty and its next heartbeat re-sends.
+likely the node holding Bluetooth. `BEHIND_THE_AIR` is derived from the window and
+shrinks with it. A window missed anyway costs one sweep: the node stays dirty and
+its next heartbeat re-sends.
 
 The same capture sizes the saving. Each node held six or seven channels and beat
 about 30 ms slower than dwells, stagger and window add up to — roughly 4.7 ms a
 channel for the hop back and the report. At 100 ms a seven-channel sweep falls
 from about 1230 ms to 1030 ms, about 19% more sweeps an hour.
+
+### Retested on the bench at 100 ms
+
+Two headless captures of 8.2 minutes each on 2026-09-12, on three boards: a XIAO
+ESP32-C6 bridge (`9D:24`), a XIAO C6 node (`00:08`) and a XIAO C5 node (`4F:08`),
+Bluetooth off. A bench fleet never changes membership by itself, so one node at a
+time was held in reset past the 60 s topology timeout and then released. Each
+departure and each return re-cuts the plan, and the node that stayed is sent its
+share while it sweeps — the only kind of assignment the 100 ms window governs. A
+node coming back from reset is parked and listens for a full second, so its own
+assignments are counted apart.
+
+| | First run | Rebased onto #34 |
+| --- | --- | --- |
+| Into a sweeping node's 100 ms window | 9 of 9 `acked`, 1415–5530 µs | 9 of 9 `acked`, 1386–1829 µs |
+| Into a parked node | 6 of 6 `acked` | 6 of 6 `acked` |
+| `00:08` heartbeats at the bridge | −73.8 dBm, 37% lost | −49.2 dBm, none lost |
+| `4F:08` heartbeats at the bridge | −41.5 dBm, none lost | −34.0 dBm, none lost |
+
+In the first run both XIAO C6s were on their ceramic antennas; after #34 both were
+on U.FL. The first run's heartbeat loss was the antenna's, and every assignment
+into that node's window was acknowledged regardless: heartbeats are broadcast and
+get no MAC-layer retries, while assignments are unicast and do.
+
+Sweep periods matched the arithmetic at 100 ms in both runs: 1545 ms for eleven
+channels at a 60 ms stagger and 3096 ms for twenty-three, against 1587 and 3083 ms.
+Latency fell from the captured hour's 2.3–3.7 ms to about 1.4 ms, which is
+consistent with #32's 24 Mbps ESP-NOW rate but was not isolated.
+
+One oddity repeated in both runs: a session's first assignment is acknowledged and
+written with no latency. Its node was parked both times, so the window was not at
+stake, and the cause has not been looked for.
 
 Not covered, and worth a session after the reflash: a node holding Bluetooth,
 which is the documented way to lose an admin window, and a host busier than
