@@ -102,7 +102,7 @@ macro_rules! note {
 #[cfg(feature = "ble")]
 const BLE_INTERVAL_MS: u64 = NUM_SCAN_CHANNELS as u64 * CHANNEL_DWELL_MS as u64;
 
-/// Granularity of the listening loops. Fine enough that a 300 ms window is not
+/// Granularity of the listening loops. Fine enough that a 100 ms window is not
 /// meaningfully shortened, coarse enough not to spin the core.
 const POLL_MS: u64 = 2;
 

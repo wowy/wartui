@@ -3,7 +3,7 @@
 //! Deliberately built on blocking [`serialport`] reads and writes on dedicated
 //! threads rather than an async serial crate. A tty file descriptor is a poor
 //! fit for kqueue/epoll readiness, and the extra hop costs latency exactly
-//! where it is scarce — a node holds its admin window open for only 300 ms.
+//! where it is scarce — a node holds its admin window open for only 100 ms.
 //! Two threads and a pair of channels are simpler and more predictable.
 
 use std::io::{ErrorKind, Read, Write};
@@ -224,7 +224,7 @@ async fn connect(
     // Unbounded, and deliberately so. The biased select below arbitrates when a
     // command is taken rather than when it reaches the wire, so a burst of bulk
     // commands drains into this queue and an assignment behind them inherits the
-    // latency — 28-35 ms against a node's 300 ms admin window, and that is the
+    // latency — 28-35 ms against a node's 100 ms admin window, and that is the
     // pessimistic figure, taken from unacknowledged sends (`docs/phase-4-findings.md`).
     // Two bounded channels and a condvar in `write_loop` is the fix if that ever
     // changes, and `assignment.latency_us` is where it would show.

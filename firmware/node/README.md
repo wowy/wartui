@@ -31,7 +31,7 @@ rebuilt around every scan.
 
 **It is on the control channel far more often.** Nothing owns the radio, so the
 node returns to the control channel after *every* dwell to report what it heard,
-and an assignment sent at any of those moments lands. The 300 ms window after a
+and an assignment sent at any of those moments lands. The 100 ms window after a
 heartbeat is still honoured and the host's timing model is unchanged; it simply
 stops being the only chance.
 
