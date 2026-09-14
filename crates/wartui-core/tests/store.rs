@@ -186,17 +186,19 @@ fn the_export_picks_the_strongest_sighting_but_the_earliest_first_seen() {
 }
 
 #[test]
-fn the_header_is_the_wigle_v1_4_pair() {
+fn the_header_is_the_wigle_v1_6_pair() {
     let dir = tempfile::tempdir().expect("temp dir");
     let conn = write(&dir, vec![]);
     let (csv, _) = export(&conn);
     let mut lines = csv.lines();
 
-    assert!(lines.next().expect("pre-header").starts_with("WigleWifi-1.4,appRelease=0.1.0,"));
+    let pre_header = lines.next().expect("pre-header");
+    assert!(pre_header.starts_with("WigleWifi-1.6,appRelease=0.1.0,"));
+    assert!(pre_header.ends_with("star=Sol,body=3,subBody=0"), "{pre_header}");
     assert_eq!(
         lines.next().expect("column header"),
-        "MAC,SSID,AuthMode,FirstSeen,Channel,RSSI,\
-         CurrentLatitude,CurrentLongitude,AltitudeMeters,AccuracyMeters,Type"
+        "MAC,SSID,AuthMode,FirstSeen,Channel,Frequency,RSSI,\
+         CurrentLatitude,CurrentLongitude,AltitudeMeters,AccuracyMeters,RCOIs,MfgrId,Type"
     );
 }
 
@@ -282,8 +284,11 @@ fn a_ble_record_exports_with_the_type_wigle_expects() {
 
     let (csv, _) = export(&conn);
     let row = csv.lines().nth(2).expect("a row");
-    assert!(row.ends_with(",BLE"), "{row}");
+    assert!(row.ends_with(",,,BLE"), "{row}");
     assert!(row.contains("AA:AA:AA:AA:AA:AA,,[BLE],"), "an empty SSID stays empty: {row}");
+    // Channel 0 with a blank frequency behind it: a passive scan has no
+    // "device type" code to put there, and the row says so by leaving it out.
+    assert!(row.contains(",0,,-60,"), "channel 0, then no frequency: {row}");
 }
 
 #[test]

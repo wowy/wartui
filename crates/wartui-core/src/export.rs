@@ -1,6 +1,6 @@
-//! WiGLE CSV export.
+//! WiGLE CSV export, in the v1.6 file format.
 //!
-//! WiGLE's v1.4 file is one row per network, so the interesting work is
+//! WiGLE's file is one row per network, so the interesting work is
 //! choosing which of a network's many sightings to submit. The store keeps
 //! every one — several nodes may see the same access point, repeatedly, from
 //! different places — and the row that goes out is the one with the strongest
@@ -19,6 +19,17 @@
 //! [`record::ssid_text`](crate::record::ssid_text) is applied on the way out. That a
 //! capture from before a fix still exports correctly is the whole promise of the
 //! export being a view over the store.
+//!
+//! The columns v1.6 added over v1.4 are derived or honestly blank rather than stored.
+//! `Frequency` is computed from the channel a sighting named, because the centre
+//! frequency is a function of the channel and the store already keeps the channel —
+//! deriving it means every capture already on disk exports with the column filled.
+//! `RCOIs` and `MfgrId` are blank because nothing in the pipeline yet collects a
+//! roaming consortium identifier or a Bluetooth manufacturer ID; the columns are
+//! shaped so that capturing them later is a fill-in rather than a re-format. A BLE
+//! row's `Frequency` stays blank on purpose: what WiGLE asks for there is a
+//! Bluetooth "device type" code, a class-of-device value that only an active inquiry
+//! produces, and a node that never transmits while scanning has none to report.
 
 use std::io::Write;
 
@@ -28,8 +39,8 @@ use rusqlite::{Connection, Row};
 use crate::record::ssid_text;
 
 /// The pre-header WiGLE reads for provenance, then the column header.
-const COLUMNS: &str = "MAC,SSID,AuthMode,FirstSeen,Channel,RSSI,\
-CurrentLatitude,CurrentLongitude,AltitudeMeters,AccuracyMeters,Type";
+const COLUMNS: &str = "MAC,SSID,AuthMode,FirstSeen,Channel,Frequency,RSSI,\
+CurrentLatitude,CurrentLongitude,AltitudeMeters,AccuracyMeters,RCOIs,MfgrId,Type";
 
 /// Why an export failed.
 #[derive(Debug, thiserror::Error)]
@@ -62,7 +73,7 @@ pub struct ExportSummary {
     pub unpositioned: u64,
 }
 
-/// Write a WiGLE v1.4 CSV.
+/// Write a WiGLE v1.6 CSV.
 ///
 /// # Errors
 /// [`ExportError`] if the query or the write fails.
@@ -74,10 +85,13 @@ pub fn wigle_csv<W: Write>(
 ) -> Result<ExportSummary, ExportError> {
     let mut summary = ExportSummary { networks: 0, unpositioned: unpositioned(conn, filter)? };
 
+    // `star=Sol,body=3,subBody=0` is Earth in the notation the pre-header
+    // requires: body 3 is the third orbit, subBody 0 no satellite. Captures are
+    // taken from the ground.
     writeln!(
         out,
-        "WigleWifi-1.4,appRelease={app_version},model=wartui,release={app_version},\
-         device=wartui,display=,board=ESP32-C5,brand=wartui"
+        "WigleWifi-1.6,appRelease={app_version},model=wartui,release={app_version},\
+         device=wartui,display=,board=ESP32-C5,brand=wartui,star=Sol,body=3,subBody=0"
     )?;
     writeln!(out, "{COLUMNS}")?;
 
@@ -142,10 +156,11 @@ fn write_row<W: Write>(row: &Row<'_>, out: &mut W) -> Result<(), ExportError> {
     let alt: Option<f64> = row.get(8)?;
     let accuracy: Option<f64> = row.get(9)?;
     let kind: String = row.get(10)?;
+    let frequency = frequency_column(channel, &kind);
 
     writeln!(
         out,
-        "{},{},{},{},{channel},{rssi},{lat},{lon},{},{},{}",
+        "{},{},{},{},{channel},{frequency},{rssi},{lat},{lon},{},{},,,{}",
         mac(&bssid),
         quote(&ssid_text(ssid.as_deref().unwrap_or_default())),
         quote(&security),
@@ -155,6 +170,26 @@ fn write_row<W: Write>(row: &Row<'_>, out: &mut W) -> Result<(), ExportError> {
         if kind == "ble" { "BLE" } else { "WIFI" },
     )?;
     Ok(())
+}
+
+/// The centre frequency of the channel a sighting named, as WiGLE's `Frequency`
+/// column wants it: a function of the channel, so derived on the way out rather
+/// than stored, which fills the column for captures recorded before it existed.
+///
+/// Blank wherever the channel names no frequency this fleet's radios can tune —
+/// the two bands the pools cover and nothing else, with channel 14's odd one out
+/// — and blank for every BLE row, where the column means something only an
+/// active inquiry could produce (see the module docs).
+fn frequency_column(channel: i64, kind: &str) -> String {
+    if kind != "wifi" {
+        return String::new();
+    }
+    match channel {
+        1..=13 => format!("{}", 2407 + 5 * channel),
+        14 => "2484".to_owned(),
+        36..=177 => format!("{}", 5000 + 5 * channel),
+        _ => String::new(),
+    }
 }
 
 /// Uppercase colon-separated, which is what WiGLE and the node firmware's own
@@ -206,6 +241,29 @@ mod tests {
 
     #[test]
     fn macs_are_uppercase_and_colon_separated() {
-        assert_eq!(mac(&[0x02, 0x00, 0x5e, 0x10, 0x57, 0x84]), "02:00:5E:10:57:84");
+        assert_eq!(mac(&[0x02, 0x00, 0x5E, 0x10, 0x57, 0x84]), "02:00:5E:10:57:84");
+    }
+
+    #[test]
+    fn wifi_channels_map_to_their_centre_frequencies() {
+        assert_eq!(frequency_column(1, "wifi"), "2412");
+        assert_eq!(frequency_column(6, "wifi"), "2437");
+        assert_eq!(frequency_column(13, "wifi"), "2472");
+        // Channel 14 is the one 2.4 GHz channel that breaks the 5 MHz ladder.
+        assert_eq!(frequency_column(14, "wifi"), "2484");
+        assert_eq!(frequency_column(36, "wifi"), "5180");
+        assert_eq!(frequency_column(165, "wifi"), "5825");
+        assert_eq!(frequency_column(177, "wifi"), "5885");
+    }
+
+    #[test]
+    fn frequencies_are_blank_where_no_frequency_was_named() {
+        // A BLE row's frequency column means a "device type" code a passive scan
+        // cannot produce, so it is blank whatever the channel field holds.
+        assert_eq!(frequency_column(0, "ble"), "");
+        // A channel no pool contains is not something to guess a frequency for.
+        assert_eq!(frequency_column(0, "wifi"), "");
+        assert_eq!(frequency_column(15, "wifi"), "");
+        assert_eq!(frequency_column(200, "wifi"), "");
     }
 }
