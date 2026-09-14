@@ -478,7 +478,7 @@ pub async fn run(args: Args) -> Result<()> {
     report.put("db_mib", db_bytes.map(mib));
     report.put("wal_mib", wal_bytes.map(mib));
     report.put("observation_rows", u64::try_from(observation_rows).unwrap_or(0));
-    report.put("export_networks", exported.networks);
+    report.put("export_rows", exported.rows);
     // Only the measured window's, like the commits.
     let in_window = |passes: &[CheckpointPass]| -> Vec<Duration> {
         let mut took: Vec<Duration> = passes
