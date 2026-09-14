@@ -312,6 +312,66 @@ fn a_full_queue_drops_and_counts_rather_than_blocking_the_engine() {
 }
 
 #[test]
+fn closing_reports_every_committed_batch_when_timings_were_asked_for() {
+    // The benchmark divides rows by these, so a batch counted twice or not at all
+    // would show up as a store that got better or worse for no reason.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut config = StoreConfig::new(dir.path().join("wartui.db"));
+    config.batch_rows = 8;
+    config.batch_interval = Duration::from_secs(3600);
+    config.timings = true;
+    let session = SessionInfo { espnow_channel: 6, pool: ChannelPool::Us, notes: None };
+    let store = Store::open(&config, &session, EPOCH_MS).expect("opening the store");
+
+    let rows: Vec<Record> = (0..20u8)
+        .map(|n| observation(NODE, [0x02, 0, 0, 0, 0, n], -60, EPOCH_MS, Fix::none()))
+        .collect();
+    assert_eq!(store.submit(rows), 0);
+    let report = store.close();
+
+    assert_eq!(report.written, 20);
+    assert_eq!(report.dropped, 0);
+    // Two full batches of eight, then the four left over at close.
+    let rows: Vec<usize> = report.batches.iter().map(|b| b.rows).collect();
+    assert_eq!(rows, [8, 8, 4], "{report:?}");
+    for batch in &report.batches {
+        assert!(batch.commit <= batch.batch, "a commit is part of its batch: {report:?}");
+    }
+    assert!(
+        report.batches.windows(2).all(|w| w[0].committed_at <= w[1].committed_at),
+        "in the order they committed, so a warm-up can be cut off the front: {report:?}"
+    );
+}
+
+#[test]
+fn a_capture_keeps_no_timings_unless_asked() {
+    // The list grows per commit for as long as a capture runs.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = store(&dir);
+    assert_eq!(store.submit(vec![observation(NODE, [0xAA; 6], -60, EPOCH_MS, Fix::none())]), 0);
+    let report = store.close();
+    assert_eq!(report.written, 1);
+    assert!(report.batches.is_empty());
+}
+
+#[test]
+fn a_page_size_asked_for_is_the_one_a_new_database_gets() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("wartui.db");
+    let mut config = StoreConfig::new(&path);
+    config.page_size = Some(16_384);
+    config.cache_kib = Some(32 * 1024);
+    config.wal_autocheckpoint_pages = Some(4000);
+    let session = SessionInfo { espnow_channel: 6, pool: ChannelPool::Us, notes: None };
+    Store::open(&config, &session, EPOCH_MS).expect("opening the store").close();
+
+    let conn = open_readonly(&path).expect("reopening read-only");
+    let page_size: i64 =
+        conn.pragma_query_value(None, "page_size", |r| r.get(0)).expect("reading page_size");
+    assert_eq!(page_size, 16_384, "set before WAL wrote the header, or it would be 4096");
+}
+
+#[test]
 fn first_seen_comes_from_the_earliest_sighting_even_if_it_had_no_position() {
     // A capture without --lat then a positioned one hours later is a normal way to
     // end up with both in one file.
