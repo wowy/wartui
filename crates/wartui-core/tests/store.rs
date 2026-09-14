@@ -680,15 +680,15 @@ fn a_re_hearing_past_the_window_exports_a_second_row() {
 
 #[test]
 fn a_re_hearing_exactly_one_window_later_is_still_the_same_row() {
-    // The window is an hour and thirty seconds: that much later belongs to the
-    // row already submitted, and the strongest sighting of the two is the one
-    // it carries.
+    // The window is an hour less thirty seconds: that much later still belongs
+    // to the row already submitted, and the strongest sighting of the two is
+    // the one it carries.
     let dir = tempfile::tempdir().expect("temp dir");
     let conn = write(
         &dir,
         vec![
             observation(NODE, [0xAA; 6], -60, EPOCH_MS, fixed(37.0, -122.0)),
-            observation(NODE, [0xAA; 6], -50, EPOCH_MS + 3_630_000, fixed(37.5, -122.5)),
+            observation(NODE, [0xAA; 6], -50, EPOCH_MS + 3_570_000, fixed(37.5, -122.5)),
         ],
     );
 
@@ -697,6 +697,27 @@ fn a_re_hearing_exactly_one_window_later_is_still_the_same_row() {
     let row = csv.lines().nth(2).expect("a row");
     assert!(row.contains("37.5,-122.5"), "the strongest of the two: {row}");
     assert!(row.contains("2026-05-01 13:34:37"), "and the window's own start: {row}");
+}
+
+#[test]
+fn a_re_hearing_exactly_an_hour_later_is_a_row_of_its_own() {
+    // The game counts a re-capture an hour after the last one, and a window of
+    // a full hour would fold exactly that — a sighting opens the next window
+    // only past the width. Hence the slack under the hour; see
+    // `DEFAULT_RECAPTURE_SECS`.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let conn = write(
+        &dir,
+        vec![
+            observation(NODE, [0xAA; 6], -60, EPOCH_MS, fixed(37.0, -122.0)),
+            observation(NODE, [0xAA; 6], -55, EPOCH_MS + 3_600_000, fixed(37.1, -122.1)),
+        ],
+    );
+
+    let (csv, summary) = export(&conn);
+    assert_eq!(summary.rows, 2, "an hour apart on the mark is two captures");
+    let rows: Vec<&str> = csv.lines().skip(2).collect();
+    assert!(rows[1].contains("2026-05-01 14:34:37"), "{}", rows[1]);
 }
 
 #[test]

@@ -14,8 +14,10 @@
 //! The fold is in Rust rather than SQL because the anchor rule is sequential —
 //! where a window ends decides where the next begins, which no window function
 //! can compute without recursion. It streams sightings in network-then-time
-//! order and holds one window's state at a time; the store stays the system of
-//! record and nothing here writes back.
+//! order, holding one window's state at a time and collecting the rows it
+//! submits for the sort at the end, so memory grows with the rows written and
+//! never with the sightings read; the store stays the system of record and
+//! nothing here writes back.
 //!
 //! Two details are here because WiGLE rejects files without them: the timestamp
 //! must be zero-padded (`2026-05-01 13:34:37`, where the node firmware emits
@@ -51,14 +53,19 @@ const COLUMNS: &str = "MAC,SSID,AuthMode,FirstSeen,Channel,Frequency,RSSI,\
 CurrentLatitude,CurrentLongitude,AltitudeMeters,AccuracyMeters,RCOIs,MfgrId,Type";
 
 /// The recapture window an export folds a network's sightings into, by
-/// default: an hour, plus thirty seconds of slack.
+/// default: an hour, less thirty seconds of slack.
 ///
 /// WDGWars, the leaderboard this default is cut for, scores a capture of a
-/// network once per hour. The slack past the hour means a re-hearing that
-/// arrives a few seconds late still opens a window of its own rather than
-/// being folded into the row already submitted — a row lost to a late
-/// re-hearing is a capture the game would have counted.
-pub const DEFAULT_RECAPTURE_SECS: u64 = 3630;
+/// network once per hour, so a re-hearing an hour or more after the last one
+/// is a capture worth a row. The slack sits *under* the hour so that a
+/// re-hearing on the hour, or a few seconds late, still clears the window and
+/// opens a row of its own — a window of a full hour would fold exactly the
+/// on-the-hour re-hearing, because a sighting opens the next window only
+/// *past* the width, and a window over the hour would fold every re-hearing
+/// within the slack, losing captures the game would have counted. Erring the
+/// other way is cheap: a re-hearing a few seconds *early* opens a row the
+/// game ignores, since it counts once an hour and folds the rest itself.
+pub const DEFAULT_RECAPTURE_SECS: u64 = 3570;
 
 /// Why an export failed.
 #[derive(Debug, thiserror::Error)]

@@ -45,14 +45,15 @@ short version.
 store rather than a second copy of it, so it can be re-run after a decoder fix,
 against a session that ended last week, or against one still going.
 
-`--recapture SECONDS` (default 3630 — an hour and thirty seconds) folds each
+`--recapture SECONDS` (default 3570 — an hour less thirty seconds) folds each
 network's sightings into windows that wide and writes one row per window: the
 strongest positioned sighting, with `FirstSeen` from the window's own first
 sighting. WDGWars scores a capture of a network once per hour, so a network
-re-heard an hour and a minute later is worth a second row; the thirty seconds
-of slack past the hour mean a re-hearing that arrives a little late still
-opens a window of its own. `--recapture 0` folds a network's whole capture
-into a single row.
+re-heard an hour and a minute later is worth a second row; the slack sits
+*under* the hour, so a re-hearing on the hour or a little late still opens a
+window of its own, and the odd row from a slightly early re-hearing is one the
+game ignores. `--recapture 0` folds a network's whole capture into a single
+row.
 
 `--log-file` is global and is the only way to see the transport's own account of
 a run.
