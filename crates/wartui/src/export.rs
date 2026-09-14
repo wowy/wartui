@@ -30,8 +30,8 @@ pub struct Args {
     session: Option<i64>,
 
     /// How long a network's sightings fold into one row, in seconds. An hour
-    /// plus slack by default, so a network re-heard an hour later is worth
-    /// capturing again; `0` writes one row per network.
+    /// less slack by default, so a network re-heard an hour or more later is
+    /// worth capturing again; `0` writes one row per network.
     #[arg(long, value_name = "SECONDS", default_value_t = DEFAULT_RECAPTURE_SECS)]
     recapture: u64,
 }
