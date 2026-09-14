@@ -659,65 +659,49 @@ fn first_seen_comes_from_the_window_s_own_first_sighting_even_unpositioned() {
 
 #[test]
 fn a_re_hearing_past_the_window_exports_a_second_row() {
-    // WDGWars scores a capture of a network once per hour, so a sighting an
-    // hour and a minute after the window opened has to be a row of its own.
+    // WDGWars skips a re-scan of the same AP within the hour from scoring, so
+    // a sighting just past the hour after the window opened has to be a row
+    // of its own — the first re-hearing the site will count.
     let dir = tempfile::tempdir().expect("temp dir");
     let conn = write(
         &dir,
         vec![
             observation(NODE, [0xAA; 6], -60, EPOCH_MS, fixed(37.0, -122.0)),
-            observation(NODE, [0xAA; 6], -55, EPOCH_MS + 3_660_000, fixed(37.1, -122.1)),
+            observation(NODE, [0xAA; 6], -55, EPOCH_MS + 3_601_000, fixed(37.1, -122.1)),
         ],
     );
 
     let (csv, summary) = export(&conn);
-    assert_eq!(summary.rows, 2, "an hour and a minute apart is two captures");
+    assert_eq!(summary.rows, 2, "an hour and a second apart is two captures");
     let rows: Vec<&str> = csv.lines().skip(2).collect();
     assert!(rows[0].contains("2026-05-01 13:34:37"), "{}", rows[0]);
-    assert!(rows[1].contains("2026-05-01 14:35:37"), "{}", rows[1]);
+    assert!(rows[1].contains("2026-05-01 14:34:38"), "{}", rows[1]);
     assert!(rows[1].contains("37.1,-122.1"), "the re-hearing's position: {}", rows[1]);
 }
 
 #[test]
-fn a_re_hearing_exactly_one_window_later_is_still_the_same_row() {
-    // The window is an hour less thirty seconds: that much later still belongs
-    // to the row already submitted, and the strongest sighting of the two is
-    // the one it carries.
+fn a_re_hearing_exactly_an_hour_later_is_still_the_same_row() {
+    // The site's cooldown is one hour per user and MAC — "re-scanning the
+    // same AP within 1h is silently skipped from scoring; GPS may still be
+    // refined" — and the window is that rule, inclusive at the boundary,
+    // because a sighting opens the next window only past the width. So a
+    // re-hearing exactly on the hour stays in the row already submitted, and
+    // the stronger reading of the two is the one it carries: the GPS
+    // refinement the rule allows.
     let dir = tempfile::tempdir().expect("temp dir");
     let conn = write(
         &dir,
         vec![
             observation(NODE, [0xAA; 6], -60, EPOCH_MS, fixed(37.0, -122.0)),
-            observation(NODE, [0xAA; 6], -50, EPOCH_MS + 3_570_000, fixed(37.5, -122.5)),
+            observation(NODE, [0xAA; 6], -50, EPOCH_MS + 3_600_000, fixed(37.5, -122.5)),
         ],
     );
 
     let (csv, summary) = export(&conn);
-    assert_eq!(summary.rows, 1, "a window exactly wide, no more");
+    assert_eq!(summary.rows, 1, "an hour apart on the mark is one capture");
     let row = csv.lines().nth(2).expect("a row");
     assert!(row.contains("37.5,-122.5"), "the strongest of the two: {row}");
     assert!(row.contains("2026-05-01 13:34:37"), "and the window's own start: {row}");
-}
-
-#[test]
-fn a_re_hearing_exactly_an_hour_later_is_a_row_of_its_own() {
-    // The game counts a re-capture an hour after the last one, and a window of
-    // a full hour would fold exactly that — a sighting opens the next window
-    // only past the width. Hence the slack under the hour; see
-    // `DEFAULT_RECAPTURE_SECS`.
-    let dir = tempfile::tempdir().expect("temp dir");
-    let conn = write(
-        &dir,
-        vec![
-            observation(NODE, [0xAA; 6], -60, EPOCH_MS, fixed(37.0, -122.0)),
-            observation(NODE, [0xAA; 6], -55, EPOCH_MS + 3_600_000, fixed(37.1, -122.1)),
-        ],
-    );
-
-    let (csv, summary) = export(&conn);
-    assert_eq!(summary.rows, 2, "an hour apart on the mark is two captures");
-    let rows: Vec<&str> = csv.lines().skip(2).collect();
-    assert!(rows[1].contains("2026-05-01 14:34:37"), "{}", rows[1]);
 }
 
 #[test]

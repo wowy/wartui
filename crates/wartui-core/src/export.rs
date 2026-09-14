@@ -53,19 +53,20 @@ const COLUMNS: &str = "MAC,SSID,AuthMode,FirstSeen,Channel,Frequency,RSSI,\
 CurrentLatitude,CurrentLongitude,AltitudeMeters,AccuracyMeters,RCOIs,MfgrId,Type";
 
 /// The recapture window an export folds a network's sightings into, by
-/// default: an hour, less thirty seconds of slack.
+/// default: exactly one hour.
 ///
 /// WDGWars, the leaderboard this default is cut for, scores a capture of a
-/// network once per hour, so a re-hearing an hour or more after the last one
-/// is a capture worth a row. The slack sits *under* the hour so that a
-/// re-hearing on the hour, or a few seconds late, still clears the window and
-/// opens a row of its own — a window of a full hour would fold exactly the
-/// on-the-hour re-hearing, because a sighting opens the next window only
-/// *past* the width, and a window over the hour would fold every re-hearing
-/// within the slack, losing captures the game would have counted. Erring the
-/// other way is cheap: a re-hearing a few seconds *early* opens a row the
-/// game ignores, since it counts once an hour and folds the rest itself.
-pub const DEFAULT_RECAPTURE_SECS: u64 = 3570;
+/// network once per hour per user — "re-scanning the same AP within 1h is
+/// silently skipped from scoring; GPS may still be refined" — and this is
+/// that cooldown verbatim, with no slack in either direction: the site is
+/// the authority on its own rule, and the export's job is to say when the AP
+/// was actually scanned. A re-hearing within the hour stays in the row
+/// already submitted, where its stronger reading can still refine the row's
+/// position — the refinement the rule itself allows — and the hour is
+/// inclusive like the rule's, because a sighting opens the next window only
+/// *past* the width. Slack under the hour would write rows the site skips
+/// anyway; slack over it would fold away re-hearings it counts.
+pub const DEFAULT_RECAPTURE_SECS: u64 = 3600;
 
 /// Why an export failed.
 #[derive(Debug, thiserror::Error)]
