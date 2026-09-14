@@ -39,7 +39,8 @@ short version.
 | `--record-raw` | off | Also keep the undecoded bytes of every frame |
 | `--notes TEXT` | — | A note about this run, stored with the session |
 
-`export` takes `--db`, `--wigle PATH` and `--session ID`. It is a view over the
+`export` takes `--db`, `--wigle PATH` and `--session ID`, and writes the
+[WiGLE v1.6 format](https://api.wigle.net/csvFormat.html). It is a view over the
 store rather than a second copy of it, so it can be re-run after a decoder fix,
 against a session that ended last week, or against one still going.
 `--log-file` is global and is the only way to see the transport's own account of
