@@ -27,6 +27,7 @@
 //! Hidden, because it is for judging changes to the store rather than for capturing.
 
 mod io;
+mod timeline;
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -45,6 +46,8 @@ use wartui_core::runtime::{COMMAND_QUEUE, drive, now};
 use wartui_core::store::{SessionInfo, Store, StoreConfig, open_readonly};
 use wartui_proto::link::Mac;
 use wartui_proto::plan::{ChannelPool, DEDUP_RING, NUM_SCAN_CHANNELS};
+
+use self::timeline::{Mark, Slice, Timeline};
 
 /// How often each node's progress is checked during the measured window.
 ///
@@ -155,19 +158,28 @@ pub struct Args {
     #[arg(long, value_name = "BYTES")]
     page_size: Option<u32>,
 
+    /// Cut the run into slices this long, in seconds, so a long run shows when it
+    /// slowed down rather than only that it did.
+    #[arg(long, value_name = "SECONDS", default_value_t = 60)]
+    interval: u64,
+
     /// Print the report as one JSON object, for tabulating repeated runs.
     #[arg(long)]
     json: bool,
 }
 
 pub async fn run(args: Args) -> Result<()> {
-    make_room(&args.db, args.fresh)?;
-
     let (nodes, speed, ble_chance) = args.profile.load();
     let nodes = args.nodes.unwrap_or(nodes);
     if nodes == 0 {
         bail!("--nodes must be at least 1");
     }
+    if args.interval < SAMPLE.as_secs() {
+        bail!("--interval must be at least {}s, the sampling period", SAMPLE.as_secs());
+    }
+    // After the arguments are known to be good, so a mistyped flag does not cost the
+    // file `--fresh` was about to replace.
+    make_room(&args.db, args.fresh)?;
     let sim = SimConfig {
         node_count: nodes,
         speed: args.speed.unwrap_or(speed),
@@ -253,13 +265,21 @@ pub async fn run(args: Args) -> Result<()> {
 
     // Everything from here is the measured window.
     let measured_from = Instant::now();
-    let process_before = io::ProcessIo::read();
-    let device_before = device.as_ref().and_then(io::Device::stat);
+    let start = mark(Duration::ZERO, &before, 0, device.as_ref());
+    let (process_before, device_before) = (start.process, start.device);
     if !args.json {
         eprintln!("benchmarking for {}s into {} ...", args.duration, args.db.display());
     }
 
-    let busy = watch_the_fleet(&snapshot_rx, &before, Duration::from_secs(args.duration)).await;
+    let (busy, slices) = watch_the_fleet(
+        &snapshot_rx,
+        start,
+        device.as_ref(),
+        measured_from,
+        Duration::from_secs(args.interval),
+        Duration::from_secs(args.duration),
+    )
+    .await;
     let last = snapshot_rx.borrow().clone();
 
     let _ = stop_tx.send(());
@@ -297,6 +317,39 @@ pub async fn run(args: Args) -> Result<()> {
         store_report.batches.iter().filter(|b| b.committed_at >= measured_from).collect();
     let rows_written: u64 = batches.iter().map(|b| b.rows as u64).sum();
     let rows_dropped = store_report.dropped.saturating_sub(before.store.dropped);
+
+    let timeline: Vec<Report> = slices
+        .iter()
+        .map(|slice| {
+            let window = measured_from + slice.start..measured_from + slice.end;
+            let mut commits: Vec<Duration> = batches
+                .iter()
+                .filter(|b| window.contains(&b.committed_at))
+                .map(|b| b.commit)
+                .collect();
+            commits.sort_unstable();
+            let seconds = slice.seconds();
+            let mut row = Report::default();
+            row.put("t_s", slice.end.as_secs());
+            row.put("obs_per_s", ratio(slice.observations, seconds));
+            row.put("rows_per_s", ratio(slice.written, seconds));
+            row.put("dropped", slice.dropped);
+            row.put("commits", commits.len());
+            row.put("commit_p50_ms", percentile(&commits, 50).map(ms));
+            row.put("commit_p99_ms", percentile(&commits, 99).map(ms));
+            row.put("write_calls", slice.process.map(|p| p.write_calls));
+            row.put("dev_writes", slice.device.map(|d| d.writes));
+            row.put("dev_mib", slice.device.map(|d| mib(d.sectors * 512)));
+            row.put(
+                "dev_kib_per_write",
+                slice.device.and_then(|d| ratio(d.sectors / 2, d.writes as f64)),
+            );
+            row.put("dev_write_ms", slice.device.map(|d| d.write_ms));
+            row.put("idle", slice.idle_windows);
+            row
+        })
+        .collect();
+    let timeline_table = table(&timeline);
 
     let mut report = Report::default();
     report.put("wartui", env!("CARGO_PKG_VERSION"));
@@ -365,11 +418,19 @@ pub async fn run(args: Args) -> Result<()> {
     report.put("observation_rows", u64::try_from(observation_rows).unwrap_or(0));
     report.put("export_networks", exported.networks);
     report.put("export_ms", ms(export_time));
+    report.put("interval_s", args.interval);
+    report.put("timeline", Value::List(timeline));
 
     if args.json {
         println!("{}", report.json());
     } else {
         print!("{}", report.human());
+        println!();
+        println!(
+            "Every {}s. Device figures trail the store by the kernel's writeback delay.",
+            args.interval
+        );
+        print!("{timeline_table}");
         println!();
         if busy.idle_windows > 0 {
             println!(
@@ -448,18 +509,23 @@ struct Busy {
 }
 
 /// Sleep out the measured window, checking every [`SAMPLE`] that each node is still
-/// reporting.
+/// reporting, and cutting the run into slices of `every`.
 async fn watch_the_fleet(
     snapshots: &watch::Receiver<Arc<Snapshot>>,
-    start: &Snapshot,
+    start: Mark,
+    device: Option<&io::Device>,
+    measured_from: Instant,
+    every: Duration,
     duration: Duration,
-) -> Busy {
+) -> (Busy, Vec<Slice>) {
     let counts = |snapshot: &Snapshot| -> HashMap<Mac, u64> {
         snapshot.nodes.iter().map(|node| (node.state.mac, node.state.observations)).collect()
     };
-    let first = counts(start);
+    let first = counts(&snapshots.borrow());
     let mut previous = first.clone();
     let mut busy = Busy::default();
+    let mut timeline = Timeline::new(every, start);
+    let mut latest = start;
 
     let deadline = tokio::time::Instant::now() + duration;
     loop {
@@ -469,7 +535,8 @@ async fn watch_the_fleet(
         }
         let step = SAMPLE.min(deadline - now);
         tokio::time::sleep(step).await;
-        let current = counts(&snapshots.borrow());
+        let snapshot = Arc::clone(&snapshots.borrow());
+        let current = counts(&snapshot);
         // A trailing sliver shorter than a sweep would accuse a node doing its job.
         if step == SAMPLE {
             busy.idle_windows += first
@@ -478,12 +545,27 @@ async fn watch_the_fleet(
                 .count() as u64;
         }
         previous = current;
+        latest = mark(measured_from.elapsed(), &snapshot, busy.idle_windows, device);
+        timeline.sample(latest);
     }
 
     let totals = first.iter().map(|(mac, &from)| previous[mac].saturating_sub(from));
     busy.slowest = totals.clone().min().unwrap_or(0);
     busy.fastest = totals.max().unwrap_or(0);
-    busy
+    (busy, timeline.finish(latest))
+}
+
+/// The run's cumulative counters as they stand, for the [`Timeline`].
+fn mark(at: Duration, snapshot: &Snapshot, idle_windows: u64, device: Option<&io::Device>) -> Mark {
+    Mark {
+        at,
+        observations: snapshot.counters.observations,
+        written: snapshot.store.written,
+        dropped: snapshot.store.dropped,
+        idle_windows,
+        process: io::ProcessIo::read(),
+        device: device.and_then(io::Device::stat),
+    }
 }
 
 /// Refuse to reuse a database unless told to, and clear it out when told.
@@ -549,6 +631,21 @@ enum Value {
     Real(f64),
     Text(String),
     Absent,
+    /// Rows of their own, such as the timeline: an array in JSON, and left for
+    /// [`table`] in the human report, which cannot fit them on one line.
+    List(Vec<Report>),
+}
+
+impl Value {
+    /// A scalar for a person to read. Lists render as a [`table`] instead.
+    fn human(&self) -> String {
+        match self {
+            Self::Count(n) => n.to_string(),
+            Self::Real(n) => format!("{n:.2}"),
+            Self::Text(s) => s.clone(),
+            Self::Absent | Self::List(_) => "—".to_owned(),
+        }
+    }
 }
 
 impl From<u64> for Value {
@@ -596,17 +693,13 @@ impl Report {
         self.0.push((key, value.into()));
     }
 
+    /// The scalars, one to a line. Lists are left out; see [`table`].
     fn human(&self) -> String {
-        let width = self.0.iter().map(|(key, _)| key.len()).max().unwrap_or(0);
+        let scalars = || self.0.iter().filter(|(_, value)| !matches!(value, Value::List(_)));
+        let width = scalars().map(|(key, _)| key.len()).max().unwrap_or(0);
         let mut out = String::new();
-        for (key, value) in &self.0 {
-            let value = match value {
-                Value::Count(n) => n.to_string(),
-                Value::Real(n) => format!("{n:.2}"),
-                Value::Text(s) => s.clone(),
-                Value::Absent => "—".to_owned(),
-            };
-            let _ = writeln!(out, "{key:width$}  {value}");
+        for (key, value) in scalars() {
+            let _ = writeln!(out, "{key:width$}  {}", value.human());
         }
         out
     }
@@ -621,12 +714,45 @@ impl Report {
                     Value::Real(n) => format!("{n:.3}"),
                     Value::Text(s) => json_string(s),
                     Value::Absent => "null".to_owned(),
+                    Value::List(rows) => {
+                        format!("[{}]", rows.iter().map(Self::json).collect::<Vec<_>>().join(","))
+                    }
                 };
                 format!("{}:{value}", json_string(key))
             })
             .collect();
         format!("{{{}}}", fields.join(","))
     }
+}
+
+/// Rows of the same shape as a right-aligned table, headed by the first row's keys.
+fn table(rows: &[Report]) -> String {
+    let Some(first) = rows.first() else { return String::new() };
+    let cells: Vec<Vec<String>> =
+        rows.iter().map(|row| row.0.iter().map(|(_, value)| value.human()).collect()).collect();
+    let widths: Vec<usize> = first
+        .0
+        .iter()
+        .enumerate()
+        .map(|(i, (key, _))| {
+            cells
+                .iter()
+                .filter_map(|row| row.get(i))
+                .map(|c| c.chars().count())
+                .fold(key.len(), usize::max)
+        })
+        .collect();
+    let line = |items: Vec<&str>| {
+        let padded: Vec<String> =
+            items.iter().zip(&widths).map(|(item, &width)| format!("{item:>width$}")).collect();
+        padded.join("  ")
+    };
+    let mut out = String::new();
+    let _ = writeln!(out, "{}", line(first.0.iter().map(|(key, _)| key.as_str()).collect()));
+    for row in &cells {
+        let _ = writeln!(out, "{}", line(row.iter().map(String::as_str).collect()));
+    }
+    out
 }
 
 fn json_string(s: &str) -> String {
@@ -652,7 +778,43 @@ mod tests {
 
     use wartui_proto::plan::{ChannelPool, DEDUP_RING, MAX_NODES, NUM_SCAN_CHANNELS};
 
-    use super::{Report, busy_networks, percentile};
+    use super::{Report, Value, busy_networks, percentile, table};
+
+    fn slice(t_s: u64, rows_per_s: f64, device_writes: Option<u64>) -> Report {
+        let mut row = Report::default();
+        row.put("t_s", t_s);
+        row.put("rows_per_s", rows_per_s);
+        row.put("dev_writes", device_writes);
+        row
+    }
+
+    #[test]
+    fn the_timeline_is_an_array_in_json_and_a_table_for_a_person() {
+        let mut report = Report::default();
+        report.put("rows", 12u64);
+        report
+            .put("timeline", Value::List(vec![slice(60, 11402.5, None), slice(120, 9.0, Some(7))]));
+
+        assert_eq!(
+            report.json(),
+            concat!(
+                r#"{"rows":12,"timeline":["#,
+                r#"{"t_s":60,"rows_per_s":11402.500,"dev_writes":null},"#,
+                r#"{"t_s":120,"rows_per_s":9.000,"dev_writes":7}]}"#
+            )
+        );
+        assert_eq!(report.human(), "rows  12\n", "the table is printed on its own");
+
+        let rows = [slice(60, 11402.5, None), slice(120, 9.0, Some(7))];
+        assert_eq!(
+            table(&rows),
+            concat!(
+                "t_s  rows_per_s  dev_writes\n",
+                " 60    11402.50           —\n",
+                "120        9.00           7\n",
+            )
+        );
+    }
 
     #[test]
     fn every_node_in_any_fleet_is_given_more_networks_than_its_ring_holds() {
