@@ -46,6 +46,24 @@ against a session that ended last week, or against one still going.
 `--log-file` is global and is the only way to see the transport's own account of
 a run.
 
+### Benchmarking the store
+
+`bench` is hidden, and is for judging a change to the store on the card it will run
+from. It drives the simulator through the engine into a fresh database with nothing
+drawn, then reports rows, commit times, and on Linux what the kernel and the block
+device actually wrote:
+
+```sh
+wartui bench --db /path/on/the/card/bench.db --fresh --duration 300 --json
+```
+
+`--profile drive` (the default) is ten nodes at real time; `--profile burst` is twenty.
+The simulated neighbourhood is sized so every node reports on every sweep, measuring
+starts once the whole fleet holds its assignments, and `idle_node_windows` must read 0
+for a run to count. Each SQLite and batching setting has a flag, so two settings
+compare on one binary. [`docs/store-io-findings.md`](../../docs/store-io-findings.md)
+has the method and the numbers so far.
+
 ## Assigning channels
 
 | Key | What it does |

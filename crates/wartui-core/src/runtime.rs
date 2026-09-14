@@ -10,7 +10,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use wartui_bridge::LinkHandle;
 
 use crate::engine::{Command, Event, FleetEngine, Now, Snapshot};
-use crate::store::Store;
+use crate::store::{Store, StoreReport};
 
 /// How often the engine ages liveness and republishes the snapshot.
 ///
@@ -34,7 +34,8 @@ pub const COMMAND_QUEUE: usize = 8;
 ///
 /// Consumes the store so the last batch is committed and the session's
 /// `ended_at` written before this returns — an interrupted capture should still
-/// be a complete database.
+/// be a complete database. Returns what the store's writer did, which `wartui bench`
+/// reports and nothing else reads.
 pub async fn drive(
     mut link: LinkHandle,
     store: Store,
@@ -42,7 +43,7 @@ pub async fn drive(
     snapshot: watch::Sender<Arc<Snapshot>>,
     mut commands: mpsc::Receiver<Command>,
     mut stop: oneshot::Receiver<()>,
-) {
+) -> StoreReport {
     let mut ticker = tokio::time::interval(TICK);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // Once the UI is gone this branch is disabled rather than polled. A closed
@@ -111,5 +112,5 @@ pub async fn drive(
     }
 
     let _ = snapshot.send(Arc::new(engine.snapshot(now(), store.stats())));
-    store.close();
+    store.close()
 }

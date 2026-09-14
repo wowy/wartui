@@ -164,10 +164,24 @@ pub struct StoreConfig {
     pub batch_interval: Duration,
     /// Queue depth between the engine and the writer.
     pub queue_depth: usize,
+    /// The writer's page cache, in KiB. `None` leaves SQLite's default, about 2 MiB.
+    pub cache_kib: Option<u32>,
+    /// How many pages the WAL may reach before a commit checkpoints it into the
+    /// main file. `None` leaves SQLite's default of 1000.
+    pub wal_autocheckpoint_pages: Option<u32>,
+    /// Page size in bytes. Only a new file takes it: a WAL database keeps the size
+    /// it was created with. `None` leaves SQLite's default of 4096.
+    pub page_size: Option<u32>,
+    /// Keep the wall time of every batch for [`Store::close`] to report.
+    ///
+    /// Off unless asked, because the list grows with every commit for as long as the
+    /// capture runs. `wartui bench` asks.
+    pub timings: bool,
 }
 
 impl StoreConfig {
-    /// Defaults tuned for a live capture: 512 rows or 100 ms.
+    /// Defaults tuned for a live capture: 512 rows or 100 ms, and SQLite's own
+    /// cache, checkpoint and page size.
     #[must_use]
     pub fn new(path: impl Into<PathBuf>) -> Self {
         Self {
@@ -175,8 +189,41 @@ impl StoreConfig {
             batch_rows: 512,
             batch_interval: Duration::from_millis(100),
             queue_depth: 4096,
+            cache_kib: None,
+            wal_autocheckpoint_pages: None,
+            page_size: None,
+            timings: false,
         }
     }
+}
+
+/// What the writer did over the store's life, returned by [`Store::close`].
+///
+/// For `wartui bench`, which is how a change to the store is judged on the slow cards
+/// it matters on. The view only ever needs [`StoreStats`].
+#[derive(Debug, Clone, Default)]
+pub struct StoreReport {
+    /// Rows written.
+    pub written: u64,
+    /// Rows dropped, whether by a full queue or a failed batch.
+    pub dropped: u64,
+    /// Every committed batch, in order. Empty unless [`StoreConfig::timings`] asked
+    /// for it.
+    pub batches: Vec<BatchTiming>,
+}
+
+/// One committed batch, as [`StoreReport`] keeps it.
+#[derive(Debug, Clone, Copy)]
+pub struct BatchTiming {
+    /// When the commit returned, so a benchmark can leave out its warm-up.
+    pub committed_at: Instant,
+    /// Rows in the batch.
+    pub rows: usize,
+    /// Statements and commit together.
+    pub batch: Duration,
+    /// The `COMMIT` alone: where the WAL is written, and where SQLite runs an
+    /// automatic checkpoint.
+    pub commit: Duration,
 }
 
 /// What to record about the session being opened.
@@ -205,7 +252,7 @@ struct Stats {
 pub struct Store {
     tx: Option<SyncSender<Record>>,
     stats: Arc<Stats>,
-    join: Option<JoinHandle<()>>,
+    join: Option<JoinHandle<StoreReport>>,
     session_id: i64,
     assignment_base: u64,
 }
@@ -222,7 +269,7 @@ impl Store {
         started_at_ms: i64,
     ) -> Result<Self, StoreError> {
         let mut conn = Connection::open(&config.path)?;
-        prepare(&conn)?;
+        prepare(&conn, config)?;
         // Before the schema, not after: `CREATE TABLE IF NOT EXISTS` no-ops
         // against a newer file's tables rather than failing, so an older build
         // would append old-shaped rows and stamp the version marker back down.
@@ -250,7 +297,8 @@ impl Store {
                 let stats = Arc::clone(&stats);
                 let batch_rows = config.batch_rows;
                 let batch_interval = config.batch_interval;
-                move || writer(conn, &rx, session_id, batch_rows, batch_interval, &stats)
+                let timings = config.timings;
+                move || writer(conn, &rx, session_id, batch_rows, batch_interval, timings, &stats)
             })
             .map_err(StoreError::Spawn)?;
 
@@ -300,18 +348,25 @@ impl Store {
     /// Flush everything queued, close the session and stop the writer.
     ///
     /// Called explicitly rather than left to `Drop`, so a failure to finish the last
-    /// transaction is reported rather than swallowed.
-    pub fn close(mut self) {
-        self.shutdown();
+    /// transaction is reported rather than swallowed. Returns what the writer did,
+    /// which only the benchmark reads.
+    pub fn close(mut self) -> StoreReport {
+        self.shutdown()
     }
 
-    fn shutdown(&mut self) {
+    fn shutdown(&mut self) -> StoreReport {
         drop(self.tx.take());
-        if let Some(join) = self.join.take()
-            && join.join().is_err()
-        {
-            tracing::error!("the store writer thread panicked; the last batch may be lost");
-        }
+        let mut report = match self.join.take().map(JoinHandle::join) {
+            Some(Ok(report)) => report,
+            Some(Err(_)) => {
+                tracing::error!("the store writer thread panicked; the last batch may be lost");
+                StoreReport::default()
+            }
+            None => StoreReport::default(),
+        };
+        report.written = self.stats.written.load(Ordering::Relaxed);
+        report.dropped = self.stats.dropped.load(Ordering::Relaxed);
+        report
     }
 }
 
@@ -479,7 +534,12 @@ fn reserve_versions(conn: &mut Connection) -> Result<u64, StoreError> {
     Ok(base)
 }
 
-fn prepare(conn: &Connection) -> Result<(), rusqlite::Error> {
+fn prepare(conn: &Connection, config: &StoreConfig) -> Result<(), rusqlite::Error> {
+    // First, because a new file's page size is fixed when its header is written, and
+    // switching it to WAL writes the header.
+    if let Some(bytes) = config.page_size {
+        conn.pragma_update(None, "page_size", bytes)?;
+    }
     // WAL so the export's reader and the ingest writer never wait on each other;
     // NORMAL because losing a capture's tail to a power cut beats fsyncing every
     // commit; a busy timeout so a concurrent export backs off instead of erroring.
@@ -487,6 +547,14 @@ fn prepare(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.busy_timeout(Duration::from_secs(5))?;
     conn.pragma_update(None, "foreign_keys", true)?;
+    if let Some(kib) = config.cache_kib {
+        // Negative means KiB rather than pages, so the figure holds whatever the
+        // page size is.
+        conn.pragma_update(None, "cache_size", -i64::from(kib))?;
+    }
+    if let Some(pages) = config.wal_autocheckpoint_pages {
+        conn.pragma_update(None, "wal_autocheckpoint", pages)?;
+    }
     Ok(())
 }
 
@@ -525,10 +593,15 @@ fn writer(
     session_id: i64,
     batch_rows: usize,
     batch_interval: Duration,
+    timings: bool,
     stats: &Stats,
-) {
+) -> StoreReport {
     let mut pending: Vec<Record> = Vec::with_capacity(batch_rows);
     let mut last_flush = Instant::now();
+    let mut report = StoreReport::default();
+    let mut flush = |conn: &mut Connection, pending: &mut Vec<Record>| {
+        flush(conn, session_id, pending, stats, timings.then_some(&mut report));
+    };
 
     loop {
         match rx.recv_timeout(batch_interval) {
@@ -540,34 +613,50 @@ fn writer(
                 // indefinitely, because the timeout only fires when the queue
                 // goes quiet.
                 if pending.len() >= batch_rows || last_flush.elapsed() >= batch_interval {
-                    flush(&mut conn, session_id, &mut pending, stats);
+                    flush(&mut conn, &mut pending);
                     last_flush = Instant::now();
                 }
             }
             Err(RecvTimeoutError::Timeout) => {
-                flush(&mut conn, session_id, &mut pending, stats);
+                flush(&mut conn, &mut pending);
                 last_flush = Instant::now();
             }
             Err(RecvTimeoutError::Disconnected) => break,
         }
     }
 
-    flush(&mut conn, session_id, &mut pending, stats);
+    flush(&mut conn, &mut pending);
     if let Err(e) = conn.execute(
         "UPDATE session SET ended_at = ?1 WHERE id = ?2",
         params![chrono::Utc::now().timestamp_millis(), session_id],
     ) {
         tracing::warn!("could not close out the session row: {e}");
     }
+    report
 }
 
-fn flush(conn: &mut Connection, session_id: i64, pending: &mut Vec<Record>, stats: &Stats) {
+fn flush(
+    conn: &mut Connection,
+    session_id: i64,
+    pending: &mut Vec<Record>,
+    stats: &Stats,
+    report: Option<&mut StoreReport>,
+) {
     if pending.is_empty() {
         return;
     }
     let count = pending.len();
+    let started = Instant::now();
     match write_batch(conn, session_id, pending) {
-        Ok(()) => {
+        Ok(commit) => {
+            if let Some(report) = report {
+                report.batches.push(BatchTiming {
+                    committed_at: Instant::now(),
+                    rows: count,
+                    batch: started.elapsed(),
+                    commit,
+                });
+            }
             stats.written.fetch_add(count as u64, Ordering::Relaxed);
         }
         Err(e) => {
@@ -580,11 +669,12 @@ fn flush(conn: &mut Connection, session_id: i64, pending: &mut Vec<Record>, stat
     pending.clear();
 }
 
+/// Write one batch in one transaction, returning how long the commit alone took.
 fn write_batch(
     conn: &mut Connection,
     session_id: i64,
     pending: &[Record],
-) -> Result<(), rusqlite::Error> {
+) -> Result<Duration, rusqlite::Error> {
     let tx = conn.transaction()?;
     for record in pending {
         match record {
@@ -717,5 +807,7 @@ fn write_batch(
             }
         }
     }
-    tx.commit()
+    let committing = Instant::now();
+    tx.commit()?;
+    Ok(committing.elapsed())
 }

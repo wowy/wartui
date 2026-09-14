@@ -15,6 +15,7 @@ use wartui_bridge::sim::{SimConfig, SimTransport};
 use wartui_bridge::{BridgeInfo, LinkEvent, LinkHandle};
 use wartui_proto::link::{LoopPhase, Mac, ResetCause};
 
+mod bench;
 mod export;
 mod reset;
 mod run;
@@ -55,6 +56,10 @@ enum Command {
     Reset(reset::Args),
     /// List serial ports that look like an Espressif device.
     Ports,
+    /// Drive the simulator into a store with nothing drawn, and report what it
+    /// cost the disk.
+    #[command(hide = true)]
+    Bench(bench::Args),
 }
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
@@ -71,6 +76,7 @@ async fn main() -> Result<()> {
         Some(Command::Status(args)) => status::run(args).await,
         Some(Command::Reset(args)) => reset::run(args).await,
         Some(Command::Ports) => ports(),
+        Some(Command::Bench(args)) => bench::run(args).await,
     }
 }
 
