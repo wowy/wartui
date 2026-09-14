@@ -60,8 +60,9 @@ wartui bench --db /path/on/the/card/bench.db --fresh --duration 300 --json
 `--profile drive` (the default) is ten nodes at real time; `--profile burst` is twenty.
 The simulated neighbourhood is sized so every node reports on every sweep, measuring
 starts once the whole fleet holds its assignments, and `idle_node_windows` must read 0
-for a run to count. Each SQLite and batching setting has a flag, so two settings
-compare on one binary. [`docs/store-io-findings.md`](../../docs/store-io-findings.md)
+for a run to count. `--interval` (60 s by default) adds a timeline to the report, so a
+long run shows when the card slowed down. Each SQLite and batching setting has a flag,
+so two settings compare on one binary. [`docs/store-io-findings.md`](../../docs/store-io-findings.md)
 has the method and the numbers so far.
 
 ## Assigning channels

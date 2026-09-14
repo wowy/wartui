@@ -23,11 +23,29 @@ The device counters cover the whole device, so every other writer on the card is
 them. Run on an otherwise idle machine, take three runs per setting, and compare
 medians.
 
+The report also carries a `timeline`: the same figures for every `--interval` (60 s
+by default), cut at the first 2 s sample past each boundary. Totals hide a card that
+slows down part-way through, which is what these tend to do:
+
+- **the card's write cache fills**, after hundreds of MB to a few GB
+- **the database outgrows SQLite's page cache**, so index pages start coming back
+  off the card
+- **the board gets hot** and throttles
+
+A slice's device figures trail the store's by the kernel's writeback delay, up to
+about 30 s. Nothing is synced between slices, since that would change the writeback
+being measured, so read the device columns as a trend.
+
+Five minutes is enough to compare settings. Once per device, run 30–60 minutes to
+find where it settles, and check free space first: `drive` writes roughly 3 GB an
+hour.
+
 ```sh
 cargo build --release -p wartui
 for i in 1 2 3; do
   target/release/wartui bench --db /mnt/card/bench.db --fresh --duration 300 --json
 done
+target/release/wartui bench --db /mnt/card/bench.db --fresh --duration 3600 --json
 ```
 
 The SQLite and batching settings are flags (`--commit-interval`, `--commit-rows`,
