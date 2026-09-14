@@ -1,9 +1,10 @@
 //! The store and the export, end to end through a real SQLite file.
 //!
-//! The export's job is to pick one row per network out of many sightings, and
-//! to format it the way WiGLE will accept. Both halves are easy to get subtly
-//! wrong and impossible to notice from the outside — a file WiGLE rejects looks
-//! exactly like a file it accepts until it is uploaded.
+//! The export's job is to fold a network's many sightings into recapture
+//! windows and pick one row per window, and to format it the way WiGLE will
+//! accept. Both halves are easy to get subtly wrong and impossible to notice
+//! from the outside — a file WiGLE rejects looks exactly like a file it
+//! accepts until it is uploaded.
 
 use std::time::Duration;
 
@@ -75,8 +76,17 @@ fn write(dir: &tempfile::TempDir, records: Vec<Record>) -> Connection {
 }
 
 fn export(conn: &Connection) -> (String, wartui_core::export::ExportSummary) {
+    export_with(conn, ExportFilter::default())
+}
+
+/// Export with an explicit filter, for the tests that pin a window of their
+/// own rather than the default one.
+fn export_with(
+    conn: &Connection,
+    filter: ExportFilter,
+) -> (String, wartui_core::export::ExportSummary) {
     let mut out = Vec::new();
-    let summary = wigle_csv(conn, ExportFilter::default(), &mut out, "0.1.0").expect("exporting");
+    let summary = wigle_csv(conn, filter, &mut out, "0.1.0").expect("exporting");
     (String::from_utf8(out).expect("the CSV is UTF-8"), summary)
 }
 
@@ -180,7 +190,7 @@ fn the_export_picks_the_strongest_sighting_but_the_earliest_first_seen() {
     let (csv, summary) = export(&conn);
     let row = csv.lines().nth(2).expect("one data row");
 
-    assert_eq!(summary.networks, 1);
+    assert_eq!(summary.rows, 1);
     assert!(row.contains("38.5,-123.5"), "the strongest sighting's position: {row}");
     assert!(row.contains(",-50,"), "and its RSSI: {row}");
     assert!(row.starts_with("AA:AA:AA:AA:AA:AA,"));
@@ -218,7 +228,7 @@ fn a_network_nobody_had_a_position_for_is_counted_rather_than_written() {
     );
 
     let (csv, summary) = export(&conn);
-    assert_eq!(summary, wartui_core::export::ExportSummary { networks: 1, unpositioned: 1 });
+    assert_eq!(summary, wartui_core::export::ExportSummary { rows: 1, unpositioned: 1 });
     assert!(!csv.contains("BB:BB:BB:BB:BB:BB"));
 }
 
@@ -236,7 +246,7 @@ fn a_network_with_one_positioned_sighting_is_exported_from_that_one() {
     );
 
     let (csv, summary) = export(&conn);
-    assert_eq!(summary, wartui_core::export::ExportSummary { networks: 1, unpositioned: 0 });
+    assert_eq!(summary, wartui_core::export::ExportSummary { rows: 1, unpositioned: 0 });
     assert!(csv.lines().nth(2).expect("a row").contains(",-80,37,-122,"));
 }
 
@@ -514,7 +524,7 @@ fn a_new_database_has_no_index_on_bssid_and_exports_all_the_same() {
     assert!(!has_bssid_index(&dir.path().join("wartui.db")));
 
     let (csv, summary) = export(&conn);
-    assert_eq!(summary.networks, 2, "{csv}");
+    assert_eq!(summary.rows, 2, "{csv}");
     assert!(csv.contains(",-50,37.1,"), "still the strongest sighting: {csv}");
 }
 
@@ -546,7 +556,7 @@ fn a_v5_database_loses_its_bssid_index_and_keeps_every_row() {
     let rows: i64 =
         conn.query_row("SELECT COUNT(*) FROM observation", [], |r| r.get(0)).expect("counting");
     assert_eq!(rows, 1);
-    assert_eq!(export(&conn).1.networks, 1);
+    assert_eq!(export(&conn).1.rows, 1);
 }
 
 fn observation_indexes(path: &std::path::Path) -> Vec<String> {
@@ -603,7 +613,32 @@ fn a_page_size_asked_for_is_the_one_a_new_database_gets() {
 #[test]
 fn first_seen_comes_from_the_earliest_sighting_even_if_it_had_no_position() {
     // A capture without --lat then a positioned one hours later is a normal way to
-    // end up with both in one file.
+    // end up with both in one file. Pinned to the zero window, which folds a
+    // network's whole capture into one row; the default window splits these
+    // three hours apart and is covered below.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let conn = write(
+        &dir,
+        vec![
+            observation(NODE, [0xAA; 6], -60, EPOCH_MS, Fix::none()),
+            observation(NODE, [0xAA; 6], -60, EPOCH_MS + 10_800_000, fixed(37.0, -122.0)),
+        ],
+    );
+
+    let (csv, summary) =
+        export_with(&conn, ExportFilter { recapture_secs: 0, ..ExportFilter::default() });
+    assert_eq!(summary.rows, 1);
+    assert!(
+        csv.lines().nth(2).expect("a row").contains("2026-05-01 13:34:37"),
+        "the earliest sighting's time, not the earliest positioned one: {csv}"
+    );
+}
+
+#[test]
+fn first_seen_comes_from_the_window_s_own_first_sighting_even_unpositioned() {
+    // The default window splits these three hours apart, so the second window's
+    // row says when *it* opened, and the first window — heard, never positioned —
+    // is counted rather than written.
     let dir = tempfile::tempdir().expect("temp dir");
     let conn = write(
         &dir,
@@ -614,11 +649,72 @@ fn first_seen_comes_from_the_earliest_sighting_even_if_it_had_no_position() {
     );
 
     let (csv, summary) = export(&conn);
-    assert_eq!(summary.networks, 1);
+    assert_eq!(summary.rows, 1);
+    assert_eq!(summary.unpositioned, 1, "the window with no fix is counted, not written");
     assert!(
-        csv.lines().nth(2).expect("a row").contains("2026-05-01 13:34:37"),
-        "the earliest sighting's time, not the earliest positioned one: {csv}"
+        csv.lines().nth(2).expect("a row").contains("2026-05-01 16:34:37"),
+        "the second window's first sighting, not the capture's: {csv}"
     );
+}
+
+#[test]
+fn a_re_hearing_past_the_window_exports_a_second_row() {
+    // WDGWars scores a capture of a network once per hour, so a sighting an
+    // hour and a minute after the window opened has to be a row of its own.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let conn = write(
+        &dir,
+        vec![
+            observation(NODE, [0xAA; 6], -60, EPOCH_MS, fixed(37.0, -122.0)),
+            observation(NODE, [0xAA; 6], -55, EPOCH_MS + 3_660_000, fixed(37.1, -122.1)),
+        ],
+    );
+
+    let (csv, summary) = export(&conn);
+    assert_eq!(summary.rows, 2, "an hour and a minute apart is two captures");
+    let rows: Vec<&str> = csv.lines().skip(2).collect();
+    assert!(rows[0].contains("2026-05-01 13:34:37"), "{}", rows[0]);
+    assert!(rows[1].contains("2026-05-01 14:35:37"), "{}", rows[1]);
+    assert!(rows[1].contains("37.1,-122.1"), "the re-hearing's position: {}", rows[1]);
+}
+
+#[test]
+fn a_re_hearing_exactly_one_window_later_is_still_the_same_row() {
+    // The window is an hour and thirty seconds: that much later belongs to the
+    // row already submitted, and the strongest sighting of the two is the one
+    // it carries.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let conn = write(
+        &dir,
+        vec![
+            observation(NODE, [0xAA; 6], -60, EPOCH_MS, fixed(37.0, -122.0)),
+            observation(NODE, [0xAA; 6], -50, EPOCH_MS + 3_630_000, fixed(37.5, -122.5)),
+        ],
+    );
+
+    let (csv, summary) = export(&conn);
+    assert_eq!(summary.rows, 1, "a window exactly wide, no more");
+    let row = csv.lines().nth(2).expect("a row");
+    assert!(row.contains("37.5,-122.5"), "the strongest of the two: {row}");
+    assert!(row.contains("2026-05-01 13:34:37"), "and the window's own start: {row}");
+}
+
+#[test]
+fn rows_are_ordered_by_when_their_windows_opened() {
+    // The fold visits networks in address order; the file must not.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let conn = write(
+        &dir,
+        vec![
+            observation(OTHER, [0xBB; 6], -60, EPOCH_MS + 60_000, fixed(37.0, -122.0)),
+            observation(NODE, [0xAA; 6], -60, EPOCH_MS, fixed(37.0, -122.0)),
+        ],
+    );
+
+    let (csv, _) = export(&conn);
+    let rows: Vec<&str> = csv.lines().skip(2).collect();
+    assert!(rows[0].starts_with("AA:AA:AA:AA:AA:AA,"), "{}", rows[0]);
+    assert!(rows[1].starts_with("BB:BB:BB:BB:BB:BB,"), "{}", rows[1]);
 }
 
 #[test]

@@ -44,6 +44,16 @@ short version.
 [WiGLE v1.6 format](https://api.wigle.net/csvFormat.html). It is a view over the
 store rather than a second copy of it, so it can be re-run after a decoder fix,
 against a session that ended last week, or against one still going.
+
+`--recapture SECONDS` (default 3630 — an hour and thirty seconds) folds each
+network's sightings into windows that wide and writes one row per window: the
+strongest positioned sighting, with `FirstSeen` from the window's own first
+sighting. WDGWars scores a capture of a network once per hour, so a network
+re-heard an hour and a minute later is worth a second row; the thirty seconds
+of slack past the hour mean a re-hearing that arrives a little late still
+opens a window of its own. `--recapture 0` folds a network's whole capture
+into a single row.
+
 `--log-file` is global and is the only way to see the transport's own account of
 a run.
 
@@ -178,8 +188,9 @@ Two consequences worth knowing:
   beacons transmitted on 1 and 3. It reports the channel the beacon itself names,
   which is the access point's real one; the alternative would be filing a real
   network under the wrong frequency. About a quarter of access points are found
-  by more than one node. `export` picks one row per network, so this costs store
-  rows and nothing else. 5 GHz channels do not overlap and do not do it.
+by more than one node. `export` folds each network's sightings into recapture
+windows and picks the strongest per window, so this costs store rows and
+nothing else. 5 GHz channels do not overlap and do not do it.
 - **A fleet with no 5 GHz radio in it can cover only 11 channels on `us`**, so
   from twelve such nodes onward there are more nodes than channels to give them.
   The surplus nodes keep whatever they last held rather than being told to scan
