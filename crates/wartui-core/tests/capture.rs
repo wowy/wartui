@@ -80,9 +80,9 @@ async fn a_simulated_fleet_becomes_a_database_and_then_a_wigle_file() {
     );
     for row in csv.lines().skip(2) {
         let fields: Vec<&str> = row.split(',').collect();
-        assert_eq!(fields.len(), 11, "WiGLE v1.4 has eleven columns: {row}");
-        assert!(matches!(fields[10], "WIFI" | "BLE"), "{row}");
-        assert_eq!(fields[6], "37.7749", "{row}");
+        assert_eq!(fields.len(), 14, "WiGLE v1.6 has fourteen columns: {row}");
+        assert!(matches!(fields[13], "WIFI" | "BLE"), "{row}");
+        assert_eq!(fields[7], "37.7749", "{row}");
     }
 }
 
@@ -161,9 +161,9 @@ async fn a_moving_capture_writes_where_the_receiver_was_for_each_row() {
     assert!(summary.networks > 0);
     for row in csv.lines().skip(2) {
         let fields: Vec<&str> = row.split(',').collect();
-        assert!(fields[6].starts_with("48.1"), "the receiver\'s latitude, not the fallback: {row}");
+        assert!(fields[7].starts_with("48.1"), "the receiver\'s latitude, not the fallback: {row}");
         // The receiver's own dilution of precision, carried all the way to the
         // column WiGLE reads it from — 0 there means "unknown".
-        assert_eq!(fields[9], "4.5", "{row}");
+        assert_eq!(fields[10], "4.5", "{row}");
     }
 }
