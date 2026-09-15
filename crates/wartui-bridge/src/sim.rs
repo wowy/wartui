@@ -15,7 +15,7 @@
 //! asked for.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
@@ -74,6 +74,13 @@ pub struct SimConfig {
     /// and scans the part it can reach, so the plan looks healthy while a third of
     /// the pool is uncovered.
     pub c6_nodes: u8,
+    /// Give a network a new address once it has been heard this many times, as a moving
+    /// fleet leaves networks behind and meets new ones.
+    ///
+    /// `None`, the default, keeps the neighbourhood the same for ever, which is a parked
+    /// fleet. Counted per network across the whole fleet, and on every hearing rather than
+    /// every report, so a node whose ring suppresses a network still moves it on.
+    pub sightings_per_address: Option<u32>,
 }
 
 impl Default for SimConfig {
@@ -86,6 +93,7 @@ impl Default for SimConfig {
             ble_chance: 0.15,
             ble_coexistence_failure: false,
             c6_nodes: 0,
+            sightings_per_address: None,
         }
     }
 }
@@ -396,8 +404,10 @@ async fn run_node(
                 return;
             }
             let channel = SCAN_CHANNELS[usize::from(idx)];
-            for net in world.on_channel(channel) {
-                if node.worth_reporting(net) && emit(&events, &node, net, started).await.is_err() {
+            for slot in world.on_channel(channel) {
+                let net = world.hear(slot);
+                if node.worth_reporting(&net) && emit(&events, &node, &net, started).await.is_err()
+                {
                     return;
                 }
             }
@@ -529,7 +539,10 @@ fn elapsed_ms(started: Instant) -> u32 {
 #[derive(Debug)]
 struct World {
     networks: Vec<Network>,
+    /// How many times each network's slot has been heard, for turnover.
+    heard: Vec<AtomicU32>,
     ble_chance: f64,
+    sightings_per_address: Option<u32>,
 }
 
 impl World {
@@ -542,7 +555,7 @@ impl World {
             Security::Wpa3Psk,
             Security::Wpa2Wpa3Psk,
         ];
-        let networks = (0..config.wifi_networks)
+        let networks: Vec<Network> = (0..config.wifi_networks)
             .map(|i| {
                 let channel = SCAN_CHANNELS[rng.below(NUM_SCAN_CHANNELS.into())];
                 Network {
@@ -554,11 +567,36 @@ impl World {
                 }
             })
             .collect();
-        Self { networks, ble_chance: config.ble_chance }
+        let heard = networks.iter().map(|_| AtomicU32::new(0)).collect();
+        Self {
+            networks,
+            heard,
+            ble_chance: config.ble_chance,
+            // Zero would turn every network over before it was heard at all; read it as
+            // no turnover rather than divide by it.
+            sightings_per_address: config.sightings_per_address.filter(|&n| n > 0),
+        }
     }
 
-    fn on_channel(&self, channel: u8) -> impl Iterator<Item = &Network> {
-        self.networks.iter().filter(move |n| n.channel == channel)
+    /// The slots holding the networks on a channel.
+    fn on_channel(&self, channel: u8) -> impl Iterator<Item = usize> + '_ {
+        (0..self.networks.len()).filter(move |&slot| self.networks[slot].channel == channel)
+    }
+
+    /// The network in `slot` as it is heard now, counting the hearing.
+    ///
+    /// With [`SimConfig::sightings_per_address`], every that-many hearings the slot holds a
+    /// different device: the same channel, signal and name under a new address. The count
+    /// is the world's, shared by the fleet, so it is the neighbourhood that moves on rather
+    /// than one node's view of it.
+    fn hear(&self, slot: usize) -> Network {
+        let network = &self.networks[slot];
+        let Some(per_address) = self.sightings_per_address else { return network.clone() };
+        let generation = self.heard[slot].fetch_add(1, Ordering::Relaxed) / per_address;
+        if generation == 0 {
+            return network.clone();
+        }
+        Network { bssid: moved(network.bssid, generation), ..network.clone() }
     }
 
     /// BLE advertisers use rotating private addresses, so every sighting is a
@@ -572,6 +610,27 @@ impl World {
             rssi: -40 - i8::try_from(rng.below(50)).unwrap_or(0),
         }
     }
+}
+
+/// The address a network's slot holds after its `generation`th turnover.
+///
+/// Mixed rather than counted, so consecutive devices in a slot look no more related than
+/// any two real ones, and derived from the slot's first address rather than drawn from the
+/// world's generator, so turning over cannot change the neighbourhood a seed produces.
+/// Locally administered, like every simulated address.
+fn moved(bssid: Mac, generation: u32) -> Mac {
+    let mut first = [0u8; 8];
+    first[..6].copy_from_slice(&bssid);
+    let v = mix(mix(u64::from_le_bytes(first)) ^ u64::from(generation)).to_le_bytes();
+    [0x02, v[1], v[2], v[3], v[4], v[5]]
+}
+
+/// SplitMix64's finaliser: every input bit reaches every output bit.
+const fn mix(mut z: u64) -> u64 {
+    z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
 }
 
 #[derive(Debug, Clone)]
