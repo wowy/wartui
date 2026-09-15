@@ -106,21 +106,32 @@ pub struct Device {
 }
 
 impl Device {
-    /// The device holding `path`, if the kernel will say. A filesystem with no single
-    /// block device behind it — tmpfs, overlay, a network mount — has none.
-    #[cfg(unix)]
+    /// The device holding `path`, if the kernel will say.
+    ///
+    /// Asked by number first, which is how ext4 and most filesystems answer. btrfs gives
+    /// every file an anonymous device number that names no block device, so failing
+    /// that the device is the source the filesystem was mounted from. A btrfs spanning
+    /// several devices names only the one it was mounted by, and a filesystem with no
+    /// block device behind it at all — tmpfs, overlay, a network mount — has none.
     pub fn holding(path: &Path) -> Option<Self> {
-        use std::os::unix::fs::MetadataExt;
-        let (major, minor) = split_dev(std::fs::metadata(path).ok()?.dev());
+        let (major, minor) = dev_of(path)?;
+        Self::numbered(major, minor).or_else(|| Self::named(&Mount::holding(path)?.source))
+    }
+
+    fn numbered(major: u64, minor: u64) -> Option<Self> {
         let link = std::fs::read_link(format!("/sys/dev/block/{major}:{minor}")).ok()?;
         let name = link.file_name()?.to_string_lossy().into_owned();
         Some(Self { name, major, minor })
     }
 
-    /// Without `st_dev` there is no device to name.
-    #[cfg(not(unix))]
-    pub fn holding(_path: &Path) -> Option<Self> {
-        None
+    /// The device at a path such as `/dev/nvme0n1p3`. Canonicalised first, because
+    /// `/dev/mapper/root` is a link and sysfs knows the device as `dm-0`.
+    fn named(source: &str) -> Option<Self> {
+        let path = std::fs::canonicalize(source).ok()?;
+        let name = path.file_name()?.to_str()?.to_owned();
+        let numbers = std::fs::read_to_string(format!("/sys/class/block/{name}/dev")).ok()?;
+        let (major, minor) = parse_dev_numbers(&numbers)?;
+        Some(Self { name, major, minor })
     }
 
     /// The device's counters as they stand.
@@ -128,6 +139,145 @@ impl Device {
         let path = format!("/sys/dev/block/{}:{}/stat", self.major, self.minor);
         parse_device_stat(&std::fs::read_to_string(path).ok()?)
     }
+}
+
+/// A device number as sysfs and `mountinfo` write it, `259:3`.
+fn parse_dev_numbers(text: &str) -> Option<(u64, u64)> {
+    let (major, minor) = text.trim().split_once(':')?;
+    Some((major.parse().ok()?, minor.parse().ok()?))
+}
+
+/// The device number of the filesystem holding `path`.
+#[cfg(unix)]
+fn dev_of(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    Some(split_dev(std::fs::metadata(path).ok()?.dev()))
+}
+
+/// Without `st_dev` there is no device to name.
+#[cfg(not(unix))]
+fn dev_of(_path: &Path) -> Option<(u64, u64)> {
+    None
+}
+
+/// The filesystem a file lives on, as `/proc/self/mountinfo` describes its mount.
+///
+/// Reported because the same card behaves differently under another filesystem or other
+/// mount options — btrfs compressing and copying on write is not ext4 overwriting in
+/// place — and a run that does not say which is not comparable with the next.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Mount {
+    /// `ext4`, `btrfs`.
+    pub fstype: String,
+    /// What was mounted, usually a device path.
+    pub source: String,
+    /// This mount's own options, such as `rw,noatime`.
+    pub options: String,
+    /// The filesystem's options, such as btrfs's `compress=zstd:1`.
+    pub fs_options: String,
+}
+
+impl Mount {
+    /// The mount holding `path`, where the kernel keeps `mountinfo`.
+    pub fn holding(path: &Path) -> Option<Self> {
+        let (major, minor) = dev_of(path)?;
+        find_mount(&std::fs::read_to_string("/proc/self/mountinfo").ok()?, major, minor)
+    }
+}
+
+/// The mount with this device number. A filesystem mounted more than once — a bind
+/// mount — has entries that agree on everything reported, so the last is as good as any.
+fn find_mount(mountinfo: &str, major: u64, minor: u64) -> Option<Mount> {
+    mountinfo
+        .lines()
+        .filter_map(parse_mount)
+        .filter(|(numbers, _)| *numbers == (major, minor))
+        .map(|(_, mount)| mount)
+        .next_back()
+}
+
+/// One line of `mountinfo`: an ID, the parent's, the device number, the root, the mount
+/// point, the mount's options and any number of optional fields, then ` - `, the
+/// filesystem type, the source and the filesystem's options (`proc_pid_mountinfo(5)`).
+fn parse_mount(line: &str) -> Option<((u64, u64), Mount)> {
+    let (mount, filesystem) = line.split_once(" - ")?;
+    let mount: Vec<&str> = mount.split(' ').collect();
+    let mut filesystem = filesystem.split(' ');
+    Some((
+        parse_dev_numbers(mount.get(2)?)?,
+        Mount {
+            fstype: filesystem.next()?.to_owned(),
+            source: unescape(filesystem.next()?),
+            options: (*mount.get(5)?).to_owned(),
+            fs_options: filesystem.next().unwrap_or_default().to_owned(),
+        },
+    ))
+}
+
+/// Undo `mountinfo`'s octal escapes, `\040` for a space, which is how a field with a
+/// space in it survives a format split on spaces.
+fn unescape(field: &str) -> String {
+    let bytes = field.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let code = bytes
+            .get(i + 1..i + 4)
+            .filter(|digits| bytes[i] == b'\\' && digits.iter().all(u8::is_ascii_digit))
+            .and_then(|digits| u8::from_str_radix(std::str::from_utf8(digits).ok()?, 8).ok());
+        if let Some(code) = code {
+            out.push(code);
+            i += 4;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Whether the machine is running on its battery: `Some(false)` on mains, `None` with no
+/// battery to ask, as on a Pi.
+///
+/// Reported because a laptop on battery holds its CPU to a lower performance level, and
+/// the store's writer is CPU-bound, so the same laptop plugged in is a different machine.
+/// Read once, as the run starts.
+pub fn on_battery() -> Option<bool> {
+    let read = |dir: &Path, name: &str| {
+        std::fs::read_to_string(dir.join(name)).ok().map(|s| s.trim().to_owned())
+    };
+    let supplies: Vec<Supply> = std::fs::read_dir("/sys/class/power_supply")
+        .ok()?
+        .flatten()
+        .map(|entry| {
+            let dir = entry.path();
+            Supply {
+                kind: read(&dir, "type"),
+                status: read(&dir, "status"),
+                scope: read(&dir, "scope"),
+            }
+        })
+        .collect();
+    judge_power(&supplies)
+}
+
+/// One entry of `/sys/class/power_supply`, as far as [`judge_power`] cares.
+#[derive(Debug, Default)]
+struct Supply {
+    kind: Option<String>,
+    status: Option<String>,
+    scope: Option<String>,
+}
+
+/// On battery when a system battery is discharging. A wireless mouse's battery is a
+/// `Battery` too, and is told apart by its `Device` scope.
+fn judge_power(supplies: &[Supply]) -> Option<bool> {
+    let mut batteries = supplies
+        .iter()
+        .filter(|s| s.kind.as_deref() == Some("Battery") && s.scope.as_deref() != Some("Device"))
+        .peekable();
+    batteries.peek()?;
+    Some(batteries.any(|b| b.status.as_deref() == Some("Discharging")))
 }
 
 /// Split a Linux `dev_t` into major and minor, laid out as glibc's `gnu_dev_major` and
@@ -160,8 +310,87 @@ fn parse_peak_rss(text: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DeviceIo, ProcessIo, parse_device_stat, parse_peak_rss, parse_process_io, split_dev,
+        DeviceIo, ProcessIo, Supply, find_mount, judge_power, parse_dev_numbers, parse_device_stat,
+        parse_peak_rss, parse_process_io, split_dev, unescape,
     };
+
+    /// A Pi on ext4, a laptop's btrfs subvolume with its anonymous device number, and a
+    /// card whose mount point and source both have spaces in them.
+    const MOUNTINFO: &str = "\
+23 1 259:2 / / rw,noatime shared:1 - ext4 /dev/nvme0n1p2 rw
+29 23 179:1 / /mnt/card rw,noatime shared:12 - ext4 /dev/mmcblk0p1 rw
+72 1 0:35 /root / rw,relatime shared:1 - btrfs /dev/nvme0n1p3 rw,compress=zstd:1,ssd,discard=async,space_cache=v2,subvolid=257,subvol=/root
+40 23 8:1 / /media/my\\040card rw,nosuid - vfat /dev/disk/by-label/MY\\040CARD rw,fmask=0022
+";
+
+    #[test]
+    fn an_ext4_mount_is_found_by_its_device_number() {
+        let mount = find_mount(MOUNTINFO, 179, 1).expect("the card");
+        assert_eq!(mount.fstype, "ext4");
+        assert_eq!(mount.source, "/dev/mmcblk0p1");
+        assert_eq!(mount.options, "rw,noatime");
+        assert_eq!(mount.fs_options, "rw");
+    }
+
+    #[test]
+    fn a_btrfs_mount_is_found_by_its_anonymous_number_and_names_its_real_device() {
+        // The number stat gives a btrfs file names no block device, which is the whole
+        // reason for asking mountinfo: the source is the device.
+        let mount = find_mount(MOUNTINFO, 0, 35).expect("the subvolume");
+        assert_eq!(mount.fstype, "btrfs");
+        assert_eq!(mount.source, "/dev/nvme0n1p3");
+        assert_eq!(mount.options, "rw,relatime");
+        assert!(mount.fs_options.contains("compress=zstd:1"), "{mount:?}");
+    }
+
+    #[test]
+    fn a_mount_with_spaces_and_no_optional_fields_still_parses() {
+        let mount = find_mount(MOUNTINFO, 8, 1).expect("the vfat card");
+        assert_eq!(mount.source, "/dev/disk/by-label/MY CARD");
+        assert_eq!(mount.options, "rw,nosuid");
+    }
+
+    #[test]
+    fn a_device_number_nothing_is_mounted_from_finds_nothing() {
+        assert_eq!(find_mount(MOUNTINFO, 8, 2), None);
+    }
+
+    #[test]
+    fn only_complete_octal_escapes_are_undone() {
+        assert_eq!(unescape(r"a\040b"), "a b");
+        assert_eq!(unescape(r"tab\011end"), "tab\tend");
+        assert_eq!(unescape(r"not\+12"), r"not\+12");
+        assert_eq!(unescape(r"short\04"), r"short\04");
+    }
+
+    #[test]
+    fn device_numbers_are_read_as_sysfs_writes_them() {
+        assert_eq!(parse_dev_numbers("259:3\n"), Some((259, 3)));
+        assert_eq!(parse_dev_numbers("259"), None);
+    }
+
+    fn supply(kind: &str, status: &str, scope: Option<&str>) -> Supply {
+        Supply {
+            kind: Some(kind.to_owned()),
+            status: Some(status.to_owned()),
+            scope: scope.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn a_discharging_system_battery_is_on_battery_and_a_charging_one_is_not() {
+        let adapter = Supply { kind: Some("Mains".to_owned()), ..Supply::default() };
+        let on = [adapter, supply("Battery", "Discharging", Some("System"))];
+        assert_eq!(judge_power(&on), Some(true));
+        let charging = [supply("Battery", "Charging", None)];
+        assert_eq!(judge_power(&charging), Some(false));
+    }
+
+    #[test]
+    fn a_machine_whose_only_battery_is_in_its_mouse_has_no_battery() {
+        assert_eq!(judge_power(&[supply("Battery", "Discharging", Some("Device"))]), None);
+        assert_eq!(judge_power(&[]), None);
+    }
 
     /// glibc's `gnu_dev_makedev`, the inverse of what is under test.
     const fn makedev(major: u64, minor: u64) -> u64 {
