@@ -173,12 +173,6 @@ pub struct Args {
     #[arg(long, value_name = "BYTES")]
     page_size: Option<u32>,
 
-    /// Leave the `obs_bssid` index unbuilt until the store closes, then build it once.
-    /// The build is timed as `index_build_ms` and left out of the rates; its I/O is in the
-    /// totals, since a capture would pay it, but not in the timeline.
-    #[arg(long)]
-    defer_bssid_index: bool,
-
     /// Checkpoint from a thread of its own every this many milliseconds, instead of
     /// inside whichever commit fills the WAL.
     #[arg(long, value_name = "MS")]
@@ -235,7 +229,6 @@ pub async fn run(args: Args) -> Result<()> {
     store_config.wal_autocheckpoint_pages = args.wal_autocheckpoint;
     store_config.page_size = args.page_size;
     store_config.timings = true;
-    store_config.defer_bssid_index = args.defer_bssid_index;
     if let Some(ms) = args.checkpoint_every {
         store_config.checkpoint = Checkpoint::Background {
             every: Duration::from_millis(ms.max(1)),
@@ -328,9 +321,7 @@ pub async fn run(args: Args) -> Result<()> {
     // Includes the final flush and the checkpoint SQLite runs when the last connection
     // closes, both of which a real capture pays too.
     let store_report = capture.await.context("the capture task panicked")?;
-    // The deferred index's build is reported on its own, so it does not dilute the rates.
-    let elapsed =
-        measured_from.elapsed().saturating_sub(store_report.index_build.unwrap_or_default());
+    let elapsed = measured_from.elapsed();
     drop(command_tx);
 
     let process =
@@ -422,7 +413,6 @@ pub async fn run(args: Args) -> Result<()> {
     report.put("cache_kib", store_config.cache_kib.map(u64::from));
     report.put("wal_autocheckpoint_pages", store_config.wal_autocheckpoint_pages.map(u64::from));
     report.put("page_size", store_config.page_size.map(u64::from));
-    report.put("defer_bssid_index", if store_config.defer_bssid_index { "on" } else { "off" });
     let (checkpoint, every_ms, truncate_mib) = match store_config.checkpoint {
         Checkpoint::Inline => ("inline", None, None),
         Checkpoint::Background { every, truncate_at } => {
@@ -479,7 +469,6 @@ pub async fn run(args: Args) -> Result<()> {
     report.put("wal_mib", wal_bytes.map(mib));
     report.put("observation_rows", u64::try_from(observation_rows).unwrap_or(0));
     report.put("export_networks", exported.networks);
-    report.put("index_build_ms", store_report.index_build.map(ms));
     // Only the measured window's, like the commits.
     let in_window = |passes: &[CheckpointPass]| -> Vec<Duration> {
         let mut took: Vec<Duration> = passes

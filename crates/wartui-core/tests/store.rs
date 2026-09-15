@@ -406,33 +406,54 @@ fn has_bssid_index(path: &std::path::Path) -> bool {
 }
 
 #[test]
-fn a_deferred_bssid_index_is_missing_while_capturing_and_built_at_close() {
+fn a_new_database_has_no_index_on_bssid_and_exports_all_the_same() {
+    // The index cost the card fourteen times the writes and made export slower; the
+    // export's scan and sort must still find every network without it.
     let dir = tempfile::tempdir().expect("temp dir");
-    let path = dir.path().join("wartui.db");
-    let mut config = StoreConfig::new(&path);
-    config.batch_rows = 1;
-    config.defer_bssid_index = true;
-    let session = SessionInfo { espnow_channel: 6, pool: ChannelPool::Us, notes: None };
-    let store = Store::open(&config, &session, EPOCH_MS).expect("opening the store");
-    assert!(!has_bssid_index(&path), "the schema committed at open leaves it out");
+    let conn = write(
+        &dir,
+        vec![
+            observation(NODE, [0xAA; 6], -70, EPOCH_MS, fixed(37.0, -122.0)),
+            observation(OTHER, [0xAA; 6], -50, EPOCH_MS + 1_000, fixed(37.1, -122.1)),
+            observation(NODE, [0xBB; 6], -60, EPOCH_MS, fixed(37.0, -122.0)),
+        ],
+    );
+    assert!(!has_bssid_index(&dir.path().join("wartui.db")));
 
-    let sighting = observation(NODE, [0xAA; 6], -60, EPOCH_MS, fixed(37.0, -122.0));
-    assert_eq!(store.submit(vec![sighting]), 0);
-    let report = store.close();
-
-    assert!(has_bssid_index(&path), "closing builds it");
-    assert!(report.index_build.is_some(), "and times it: {report:?}");
-    let conn = open_readonly(&path).expect("reopening read-only");
-    assert_eq!(export(&conn).1.networks, 1, "and the capture exports like any other");
+    let (csv, summary) = export(&conn);
+    assert_eq!(summary.networks, 2, "{csv}");
+    assert!(csv.contains(",-50,37.1,"), "still the strongest sighting: {csv}");
 }
 
 #[test]
-fn by_default_the_bssid_index_exists_from_open_and_nothing_is_built_at_close() {
+fn a_v5_database_loses_its_bssid_index_and_keeps_every_row() {
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().join("wartui.db");
-    let store = open_at(&path);
+    let first = open_at(&path);
+    assert_eq!(
+        first.submit(vec![observation(NODE, [0xAA; 6], -60, EPOCH_MS, fixed(37.0, -122.0))]),
+        0
+    );
+    first.close();
+
+    // Put the file back the way v5 left it: the same tables, with the index.
+    let old = Connection::open(&path).expect("reopening");
+    old.execute_batch("CREATE INDEX obs_bssid ON observation(bssid)").expect("v5's index");
+    old.pragma_update(None, "user_version", 5).expect("stamping");
+    drop(old);
     assert!(has_bssid_index(&path));
-    assert_eq!(store.close().index_build, None);
+
+    open_at(&path).close();
+
+    assert!(!has_bssid_index(&path), "opening it brings it forward");
+    let conn = open_readonly(&path).expect("reopening read-only");
+    let version: i32 =
+        conn.pragma_query_value(None, "user_version", |row| row.get(0)).expect("the version");
+    assert_eq!(version, 6);
+    let rows: i64 =
+        conn.query_row("SELECT COUNT(*) FROM observation", [], |r| r.get(0)).expect("counting");
+    assert_eq!(rows, 1);
+    assert_eq!(export(&conn).1.networks, 1);
 }
 
 #[test]
