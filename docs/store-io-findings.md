@@ -541,3 +541,55 @@ What it says:
 `wartui run --commit-interval` changes the interval, and `bench --inline-checkpoint`
 measures SQLite's own checkpoint for comparison. `wal_rewinds` is gone from the report:
 the WAL's size says the same thing, without the undercount.
+
+**Confirmed on the card with no flags** (commit `c6e6f67`, one 350 s `drive` run). It
+matched the tuned run above, with 0 idle node-windows, 0 dropped, 0 truncations and 0
+passes behind:
+
+| figure | defaults | tuned run above (queue 4,096) |
+| --- | --- | --- |
+| batch p50 / p99 / max ms | 42.5 / 46.0 / 47.4 | 44.5 / 50.8 / 57.7 |
+| commit p50 / p99 / max ms | 4.9 / 5.4 / 8.0 | 4.8 / 9.5 / 18.7 |
+| checkpoint p50 / p99 / max ms | 31.5 / 46.0 / 58.7 | 31.2 / 45.4 / 65.6 |
+| device MiB, writes | 428.7, 5,612 | 428.4, 5,577 |
+| WAL file, largest sampled | 0.66 MiB | 0.68 MiB |
+| peak RSS | 25.6 MiB | 23.8 MiB |
+| export | 12.9 s | 13.0 s |
+
+The queue's 1.8 MiB is in line with the estimate. The other gaps are one run apart
+from each other, and are within what single runs vary by.
+
+**Twenty nodes, same defaults** (one 350 s `burst` run, same card). The load was 4.6×
+`drive`'s: 26,600 sightings a second, 53,420 rows a second. That is 9.32 M sightings
+of 2.35 M addresses, about 4.7 times the drive the store is sized for. It had 0 idle
+node-windows, 0 rows dropped, 0 truncations and 0 passes behind.
+
+| figure | `burst` | `drive`, defaults |
+| --- | --- | --- |
+| rows/s | 53,420 | 11,531 |
+| commits/s, rows/commit | 3.26, 16,374 | 0.95, 12,158 |
+| batch p50 / p99 / max ms | 38 / 58 / 60 | 42.5 / 46.0 / 47.4 |
+| commit p50 / p99 / max ms | 4.8 / 7.6 / 11.7 | 4.9 / 5.4 / 8.0 |
+| checkpoint p50 / p99 / max ms | 37 / 54 / 62 | 31.5 / 46.0 / 58.7 |
+| device MiB, writes | 1,976, 19,625 | 429, 5,612 |
+| device MiB per MiB of database | 2.1 | 2.2 |
+| WAL file, largest sampled | 0.85 MiB | 0.66 MiB |
+| database at close | 921 MiB | 196 MiB |
+| peak RSS | 59.3 MiB | 25.6 MiB |
+| export | 62.5 s (2.35 M networks) | 12.9 s (509 k) |
+
+What it says:
+
+- **At this rate the row limit sets the pace.** Commits land every 300 ms or so, on
+  the 16,384-row limit rather than the one-second interval. Every checkpoint pass,
+  p99 54 ms, still finished before the next commit, so the WAL stayed at one commit's
+  size.
+- **The queue keeps five times headroom.** The slowest batch, 60 ms, lets about
+  3,200 rows arrive against 16,384 slots. The old 4,096 would have been 78% full.
+- **Nothing degraded as the file grew.** Per-minute rows/s, device MiB and commit p99
+  were flat from the first minute to the sixth, while the database reached 921 MiB.
+  With no index on sightings, every insert is an append.
+- **Memory follows the addresses, not the store.** Peak RSS rose by about 18 bytes per
+  extra address, which is the engine's set of every address it has heard.
+- **Export time is linear in the capture.** It took 62.5 s here for 4.6× the rows that
+  took 12.9 s, well past the drive the store is sized for.
