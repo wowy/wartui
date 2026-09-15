@@ -657,6 +657,26 @@ fn period(ms: u32) -> String {
     if ms < 1000 { format!("{ms}ms") } else { format!("{:.1}s", f64::from(ms) / 1000.0) }
 }
 
+/// An estimated count, to about the precision the estimate has. The unique-address
+/// figures are within about 1%, so the digits past three are noise once there are
+/// enough of them to matter.
+fn approx(n: u64) -> String {
+    if n < 10_000 {
+        return n.to_string();
+    }
+    let (k, m) = (n as f64 / 1e3, n as f64 / 1e6);
+    // Each unit is judged on the figure as it would be printed, not the raw count, so one
+    // that rounds up past its unit's range (99,950 to "100.0k") moves on to the next.
+    for (value, digits, below, unit) in [(k, 1, 100.0, "k"), (k, 0, 1000.0, "k"), (m, 2, 10.0, "M")]
+    {
+        let text = format!("{value:.digits$}");
+        if text.parse::<f64>().is_ok_and(|shown| shown < below) {
+            return format!("{text}{unit}");
+        }
+    }
+    format!("{m:.1}M")
+}
+
 /// Why a node cannot be given an assignment, or `None` if it can.
 ///
 /// The wording is the message the operator sees on the refused keypress, so it
@@ -730,8 +750,10 @@ fn draw_stream(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot) {
         Constraint::Min(10),
     ];
     let title = format!(
-        " unique APs {} — unique BLE {} ({} total records) ",
-        snapshot.unique_wifi_aps, snapshot.unique_ble_aps, snapshot.counters.observations
+        " unique APs ~{} — unique BLE ~{} ({} total records) ",
+        approx(snapshot.unique_wifi_aps),
+        approx(snapshot.unique_ble_aps),
+        snapshot.counters.observations
     );
     frame.render_widget(
         Table::new(rows, widths).header(header).block(Block::bordered().title(title)),
@@ -1225,6 +1247,20 @@ mod tests {
             position: Fix::none(),
             ..busy()
         }
+    }
+
+    #[test]
+    fn an_estimated_count_shows_only_the_digits_it_can_vouch_for() {
+        assert_eq!(approx(0), "0");
+        assert_eq!(approx(9_999), "9999");
+        assert_eq!(approx(12_345), "12.3k");
+        assert_eq!(approx(506_360), "506k");
+        assert_eq!(approx(2_350_000), "2.35M");
+        assert_eq!(approx(23_500_000), "23.5M");
+        // Figures that round up into the next unit are shown in it.
+        assert_eq!(approx(99_950), "100k");
+        assert_eq!(approx(999_500), "1.00M");
+        assert_eq!(approx(9_999_999), "10.0M");
     }
 
     /// Rendering must not panic at any size the terminal might be.

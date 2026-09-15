@@ -444,7 +444,7 @@ pub async fn run(args: Args) -> Result<()> {
         "observations_heard",
         last.counters.observations.saturating_sub(before.counters.observations),
     );
-    // Over the whole run, warm-up included, as the engine counts them.
+    // Over the whole run, warm-up included, as the engine estimates them: within about 1%.
     report.put("unique_addresses", last.unique_wifi_aps + last.unique_ble_aps);
     report.put("rows_written", rows_written);
     report.put("rows_dropped", rows_dropped);
