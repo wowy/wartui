@@ -183,6 +183,40 @@ fn an_observation_produces_a_node_row_and_an_observation_row() {
 }
 
 #[test]
+fn unique_addresses_are_counted_once_per_kind_however_often_they_are_heard() {
+    let clock = Clock::new();
+    let mut engine = engine(manual(), &clock);
+
+    let sighting = |kind: RecordKind, n: u8| {
+        let mut frame = [0u8; SIGHTING_MSG_MAX];
+        let len = SightingMsg {
+            kind,
+            bssid: [0x02, 0x00, 0x00, 0x00, u8::from(kind == RecordKind::Ble), n],
+            channel: 6,
+            rssi: -60,
+            security: Security::Wpa2Psk,
+            ssid: b"example",
+        }
+        .encode_into(&mut frame)
+        .expect("fits");
+        rx(NODE, &frame[..len])
+    };
+    for round in 0..3 {
+        for n in 0..30 {
+            engine.handle(sighting(RecordKind::Wifi, n), clock.at(round));
+        }
+        for n in 0..7 {
+            engine.handle(sighting(RecordKind::Ble, n), clock.at(round));
+        }
+    }
+
+    let snapshot = engine.snapshot(clock.at(3), StoreStats::default());
+    assert_eq!(snapshot.unique_wifi_aps, 30);
+    assert_eq!(snapshot.unique_ble_aps, 7);
+    assert_eq!(counters(&engine).observations, 111, "every sighting still counts");
+}
+
+#[test]
 fn the_raw_frame_is_kept_alongside_the_parsed_one() {
     // If this decoder turns out to be wrong, the frame as it arrived is what lets
     // the fix reach history rather than only what comes afterwards.
