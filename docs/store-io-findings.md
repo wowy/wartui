@@ -612,6 +612,9 @@ being `main` at `b1ab911`:
 | rows dropped, idle node-windows | 0, 0 | 0, 0 | 0, 0 | 0, 0 |
 | batch p99 ms | 45.9 | 46.5 | 57.3 | 55.2 |
 | commit p99 ms | 7.5 | 8.6 | 9.1 | 8.9 |
+| device MiB, writes | 428.7, 5,613 | 428.4, 5,582 | 1,975.8, 19,601 | 1,976.4, 19,619 |
+| KiB per device write | 78.2 | 78.6 | 103.2 | 103.2 |
+| WAL file, largest sampled | 0.66 MiB | 0.67 MiB | 0.85 MiB | 0.85 MiB |
 
 What it says:
 
@@ -624,4 +627,6 @@ What it says:
   addresses cost 2.5 MiB more than ten, which is the larger fleet and the queue.
 - **The estimate is within 1%.** +0.7% and +0.4% on the old exact counts, though
   from separate runs, so each gap holds the run's variation as well as the estimate's.
-- **The store did not notice.** Batch and commit p99 moved by what single runs vary by.
+- **The store did not notice.** Bytes and requests to the card agree within 0.6%, the
+  WAL peaked at the same size, and batch and commit p99 moved by what single runs vary
+  by.
