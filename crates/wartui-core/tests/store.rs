@@ -427,6 +427,33 @@ fn a_checkpoint_right_after_each_commit_lets_the_writer_rewind_the_wal_itself() 
 }
 
 #[test]
+fn a_commit_too_soon_after_a_checkpoint_still_gets_one_when_the_fleet_goes_quiet() {
+    // The writer's own checkpoint is off, so a wake-up the checkpointer passes over would
+    // leave that commit unsynced until the next commit, which a quiet fleet never sends.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut config = StoreConfig::new(dir.path().join("wartui.db"));
+    config.batch_interval = Duration::from_millis(10);
+    config.checkpoint =
+        Checkpoint::Background { every: Duration::from_millis(200), truncate_at: u64::MAX };
+    let session = SessionInfo { espnow_channel: 6, pool: ChannelPool::Us, notes: None };
+    let store = Store::open(&config, &session, EPOCH_MS).expect("opening the store");
+
+    // Two commits well inside one interval, then nothing.
+    assert_eq!(store.submit(vec![observation(NODE, [0xAA; 6], -60, EPOCH_MS, Fix::none())]), 0);
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(store.submit(vec![observation(NODE, [0xBB; 6], -60, EPOCH_MS, Fix::none())]), 0);
+    std::thread::sleep(Duration::from_millis(500));
+
+    let closing = std::time::Instant::now();
+    let report = store.close();
+    let before_close = report.checkpoints.passes.iter().filter(|p| p.finished_at < closing).count();
+    assert!(
+        before_close >= 2,
+        "the second commit's pass runs when the interval is up, not at close: {report:?}"
+    );
+}
+
+#[test]
 fn by_default_the_store_checkpoints_from_its_own_thread_after_every_commit() {
     // What the card measured best: see `StoreConfig::new`.
     let config = StoreConfig::new("unused.db");
