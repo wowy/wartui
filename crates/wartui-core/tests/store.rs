@@ -723,6 +723,45 @@ fn rows_are_ordered_by_when_their_windows_opened() {
 }
 
 #[test]
+fn two_windows_of_one_network_interleave_with_another_in_time_order() {
+    // The fold finishes AA's windows before it reaches BB, so an order by network
+    // would write AA, AA, BB. The file is ordered by window start.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let conn = write(
+        &dir,
+        vec![
+            observation(NODE, [0xAA; 6], -60, EPOCH_MS, fixed(37.0, -122.0)),
+            observation(NODE, [0xBB; 6], -60, EPOCH_MS + 1_800_000, fixed(37.0, -122.0)),
+            observation(NODE, [0xAA; 6], -60, EPOCH_MS + 7_200_000, fixed(37.0, -122.0)),
+        ],
+    );
+
+    let (csv, summary) = export(&conn);
+    assert_eq!(summary.rows, 3, "{csv}");
+    let macs: Vec<&str> = csv.lines().skip(2).map(|row| &row[..17]).collect();
+    assert_eq!(macs, ["AA:AA:AA:AA:AA:AA", "BB:BB:BB:BB:BB:BB", "AA:AA:AA:AA:AA:AA"]);
+}
+
+#[test]
+fn an_export_run_twice_on_one_connection_writes_the_same_file() {
+    // The sort goes through a temporary table on the caller's connection, which a
+    // second export must start afresh rather than add to.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let conn = write(
+        &dir,
+        vec![
+            observation(NODE, [0xAA; 6], -60, EPOCH_MS, fixed(37.0, -122.0)),
+            observation(NODE, [0xBB; 6], -60, EPOCH_MS + 60_000, fixed(37.0, -122.0)),
+        ],
+    );
+
+    let first = export(&conn);
+    let second = export(&conn);
+    assert_eq!(first.1.rows, 2);
+    assert_eq!(first, second);
+}
+
+#[test]
 fn a_database_from_a_newer_wartui_is_refused_rather_than_written_into() {
     // `CREATE TABLE IF NOT EXISTS` no-ops against a newer file's tables instead of
     // failing, so without this an older build appends rows of the wrong shape and

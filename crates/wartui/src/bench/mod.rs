@@ -355,6 +355,9 @@ pub async fn run(args: Args) -> Result<()> {
     let exported =
         wigle_csv(&conn, ExportFilter::default(), &mut std::io::sink(), env!("CARGO_PKG_VERSION"))?;
     let export_time = exporting.elapsed();
+    // The high-water mark never falls, so this is the higher of the capture's peak and the
+    // export's. An export that stays under the capture's peak reads the same as the capture.
+    let export_peak_rss = io::peak_rss_kib();
 
     // The warm-up's commits are left out along with its I/O. A batch that began
     // before the window and committed inside it counts, which is one batch in hundreds.
@@ -509,6 +512,7 @@ pub async fn run(args: Args) -> Result<()> {
     // Sampled every couple of seconds, so a peak between samples is missed.
     report.put("wal_peak_mib", slices.iter().filter_map(|slice| slice.wal).max().map(mib));
     report.put("export_ms", ms(export_time));
+    report.put("export_peak_rss_mib", export_peak_rss.map(|kib| mib(kib * 1024)));
     report.put("interval_s", args.interval);
     report.put("timeline", Value::List(timeline));
 
