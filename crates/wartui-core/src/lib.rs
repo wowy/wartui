@@ -10,6 +10,7 @@
 //! of it. The only thing wartui transmits is a channel assignment, to one node, in
 //! the 100 ms it holds open after a heartbeat.
 
+pub mod distinct;
 pub mod engine;
 pub mod export;
 pub mod gps;
