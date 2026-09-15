@@ -392,3 +392,89 @@ with it. Still to confirm: the export time on the Pi's CPU and card.
 that file too. `--defer-bssid-index` went with it, since there is no longer an index to
 defer. Every run after this change measures the store without the index, so the
 "deferred" columns above are what the plain store now does, minus the build at close.
+
+### With the hourly recapture export (`export/hourly-recapture`)
+
+That branch replaces the per-network window query with one ordered stream,
+`ORDER BY bssid, rx_at, id`, and folds it into recapture windows in Rust. Its query
+wants a different index, so the index was measured again against it: the branch's own
+release export over the full-drive database above (2,014,780 rows, 506,746
+addresses), twice with each layout, on the Mac.
+
+| index | plan | wall | user | sys | peak RSS |
+| --- | --- | --- | --- | --- | --- |
+| `obs_bssid` | index scan, temp B-tree for `rx_at, id` | 6.42 s, 4.58 s | 2.61 s, 2.70 s | 1.72 s, 1.86 s | 183 MiB |
+| none | table scan, temp B-tree for the whole order | 3.29 s, 3.20 s | 2.61 s, 2.64 s | 0.35 s, 0.32 s | 185 MiB |
+| `(bssid, rx_at, id)` | index scan, no sort | 4.08 s, 3.93 s | 2.16 s, 2.18 s | 1.59 s, 1.73 s | 183 MiB |
+
+All six exports wrote the same 506,746 rows, byte for byte (same SHA-256).
+
+- **No index is still fastest.** The composite index satisfies the whole `ORDER BY`,
+  which saves about 0.45 s of sorting, and costs about 1.3 s of system time in random
+  table reads, which is the access pattern a card is slowest at.
+- **Its capture cost would be `obs_bssid`'s again.** Its key still leads with a random
+  address, so every commit would dirty leaf pages across the index. That is inferred
+  from the `obs_bssid` runs, not measured for this index. It is 50 MiB for a full drive;
+  building it once over a finished capture took 1.5 s with the `sqlite3` CLI.
+- **The branch's export holds every submitted row in memory** for the final sort by
+  window: about 183 MiB for this drive, whatever the index, against 13–16 MiB for the
+  current export. That is a property of the fold, not the store, and the thing to look
+  at before that branch lands on a small board.
+
+### Commit interval and background checkpoints, on the card
+
+CM5 on the Amazon Basics microSD, ext4 `noatime`, schema v6 (no `obs_bssid`, still
+`obs_node`). One `drive` run of 350 s each: a full drive of 2.01 M sightings of about
+509 k addresses. Every run had 0 idle node-windows and 0 rows dropped.
+
+| figure | inline, 100 ms | background every 1 s | inline, 1 s or 16,384 rows |
+| --- | --- | --- | --- |
+| rows/s | 11,529 | 11,530 | 11,536 |
+| commits/s, rows/commit | 22.6, 511 | 22.6, 510 | 0.92, 12,581 |
+| batch p50 / p99 / max ms | 2.3 / 127 / 159 | 2.2 / 2.4 / 337 | 48 / 252 / 267 |
+| commit p50 / p95 / p99 / max ms | 0.12 / 3.8 / 125 / 157 | 0.14 / 0.18 / 0.19 / 12.7 | 1.0 / 193 / 215 / 230 |
+| write syscalls | 503 k | 507 k | 227 k |
+| MiB handed to the kernel | 1,125 | 1,144 | 570 |
+| device writes | 13,768 | 5,936 | 5,075 |
+| device MiB | 1,138 | 1,109 | 577 |
+| KiB per device write | 85 | 191 | 116 |
+| device MiB per MiB of database | 4.7 | 4.6 | 2.4 |
+| checkpoint passes, p50 / p99 / max ms | — | 327, 52 / 253 / 311 | — |
+| WAL truncations, max ms | — | 12, 269 | — |
+| WAL file, largest sampled | 4.0 MiB | 56.5 MiB | 4.9 MiB |
+| peak RSS | 20.4 MiB | 19.7 MiB | 23.9 MiB |
+| export | 13.1 s | 12.9 s | 12.8 s |
+
+What it says:
+
+- **Without `obs_bssid` the card takes a full drive.** The export of 509 k addresses
+  takes 13 s on the card, and peak RSS is up by about 8 MiB on the earlier fixed
+  neighbourhood's, which is about what the engine's set of half a million addresses
+  should cost.
+- **One-second commits halve the bytes.** The pages every commit touches, the table's
+  last page and each node's tail, are rewritten once a second instead of 22 times, so
+  the card gets 2.4× the database's size instead of 4.7×. The slowest batch is still
+  267 ms, and at 11,500 rows/s that is about 3,100 rows against a 4,096-record queue.
+  Nothing dropped, but the headroom is thin.
+- **The background checkpointer removed the commit stalls and kept the bytes.** Commit
+  p99 fell from 125 ms to 0.19 ms. But batch max rose to 337 ms, with truncations up to
+  269 ms, because `TRUNCATE` takes the writer's lock. It ran twelve times, and the
+  arithmetic says why. A writer only rewinds the WAL when a checkpoint has copied every
+  frame before its next transaction begins, and a 52 ms pass rarely beats commits
+  45 ms apart. The WAL therefore only grew, at roughly half of the 1,144 MiB written, or
+  about 100 MiB a minute, and passed 64 MiB every half-minute or so.
+- **The sampled WAL size is a high-water mark.** A rewound WAL is reused from the
+  start, not shrunk, so only a truncation shows up as a drop.
+
+**Next.** Checkpoint right after a commit instead of on a timer. With one-second
+commits a pass of 50–250 ms finishes well before the next transaction, so the writer
+should rewind the WAL itself every commit and the truncation becomes a fallback. That
+would combine the halved bytes with the vanished commit stalls, and give the queue its
+headroom back.
+
+Both have since landed. Schema v7 drops `obs_node` as well, since nothing read it.
+`--checkpoint-every` now runs its pass right after a commit, at most that often, and
+truncates only once a pass has caught up. The report adds two counts:
+
+- `wal_rewinds`: passes that found the WAL rewound since the pass before.
+- `checkpoints_behind`: passes that could not copy everything, busy or outrun.

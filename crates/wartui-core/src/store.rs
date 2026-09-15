@@ -32,7 +32,7 @@ use crate::record::Record;
 ///
 /// `migrate` carries each step. Every one so far has been lossless, which is the
 /// property to keep: a capture is data rather than a deployment.
-pub const SCHEMA_VERSION: i32 = 6;
+pub const SCHEMA_VERSION: i32 = 7;
 
 /// The schema, applied to any database that does not already have it.
 const SCHEMA: &str = r"
@@ -118,9 +118,8 @@ CREATE TABLE IF NOT EXISTS observation (
 );
 -- Deliberately no unique constraint on bssid: every sighting is kept, with the node
 -- that made it and the signal it saw. Deduplicating at ingest would throw away the
--- coverage data. Nor is there an index on bssid, though export groups by it: see the v6
--- step in `migrate` for why.
-CREATE INDEX IF NOT EXISTS obs_node ON observation(node_mac, rx_at);
+-- coverage data. Nor does the table have an index of any kind, though export groups by
+-- bssid: the v6 and v7 steps in `migrate` say why.
 
 CREATE TABLE IF NOT EXISTS raw_frame (
   id INTEGER PRIMARY KEY,
@@ -190,15 +189,19 @@ pub enum Checkpoint {
     Inline,
     /// A thread of its own with a connection of its own, so the writer does not wait.
     ///
-    /// Every `every` it copies what the WAL holds with a `PASSIVE` checkpoint, which runs
-    /// beside the writer's commits instead of holding them up. A passive checkpoint cannot
-    /// rewind a WAL that is still being appended to, so the file would only grow; once it
-    /// passes `truncate_at` bytes a `TRUNCATE` checkpoint follows. That one does make the
-    /// writer wait, but only for what arrived since the passive pass before it.
+    /// Woken by each commit, at most once every `every`, it copies the WAL back with a
+    /// `PASSIVE` checkpoint, which runs beside the writer instead of holding it up. Right
+    /// after a commit is the moment that matters: SQLite rewinds the WAL to its start only
+    /// when a writer begins a transaction and finds every frame already copied, so a pass
+    /// that finishes before the next commit keeps the WAL the size of a commit. Run on a
+    /// timer instead, a pass lands across commits, never catches up, and the WAL only grows
+    /// (`docs/store-io-findings.md`). If commits still outpace the card, the file grows
+    /// anyway; once it passes `truncate_at` bytes, and a pass has caught up so nothing is
+    /// left to copy under the writer's lock, a `TRUNCATE` rewinds it.
     Background {
-        /// How often to copy the WAL back.
+        /// The least time between passes. Zero is a pass after every commit.
         every: Duration,
-        /// The WAL file size in bytes past which to rewind it.
+        /// The WAL file size in bytes past which to truncate it.
         truncate_at: u64,
     },
 }
@@ -224,6 +227,8 @@ pub struct CheckpointPass {
     pub frames: i64,
     /// Frames it had copied into the database file when it returned.
     pub copied: i64,
+    /// Whether SQLite said it could not finish, for want of a lock.
+    pub busy: bool,
 }
 
 impl StoreConfig {
@@ -303,8 +308,9 @@ pub struct Store {
     tx: Option<SyncSender<Record>>,
     stats: Arc<Stats>,
     join: Option<JoinHandle<StoreReport>>,
-    /// The background checkpointer and what stops it, under [`Checkpoint::Background`].
-    checkpointer: Option<(SyncSender<()>, JoinHandle<CheckpointReport>)>,
+    /// The background checkpointer, under [`Checkpoint::Background`]. It stops when the
+    /// writer does, because the writer holds the only thing that wakes it.
+    checkpointer: Option<JoinHandle<CheckpointReport>>,
     session_id: i64,
     assignment_base: u64,
 }
@@ -341,6 +347,16 @@ impl Store {
         let session_id = insert_session(&mut conn, session, started_at_ms)?;
         let assignment_base = reserve_versions(&mut conn)?;
 
+        // The writer wakes the checkpointer after each commit. One wake-up waiting stands for
+        // any number of commits, so the channel holds one.
+        let (wake, woken) = match config.checkpoint {
+            Checkpoint::Inline => (None, None),
+            Checkpoint::Background { .. } => {
+                let (wake, woken) = sync_channel(1);
+                (Some(wake), Some(woken))
+            }
+        };
+
         let (tx, rx) = sync_channel(config.queue_depth);
         let stats = Arc::new(Stats::default());
         let join = std::thread::Builder::new()
@@ -348,24 +364,23 @@ impl Store {
             .spawn({
                 let stats = Arc::clone(&stats);
                 let config = config.clone();
-                move || writer(conn, &rx, session_id, &config, &stats)
+                move || writer(conn, &rx, session_id, &config, &stats, wake.as_ref())
             })
             .map_err(StoreError::Spawn)?;
 
-        let checkpointer = match config.checkpoint {
-            Checkpoint::Inline => None,
-            Checkpoint::Background { every, truncate_at } => {
+        let checkpointer = match (config.checkpoint, woken) {
+            (Checkpoint::Background { every, truncate_at }, Some(woken)) => {
                 let conn = Connection::open(&config.path)?;
                 // Waits out the writer's commit rather than failing a truncation on it.
                 conn.busy_timeout(Duration::from_secs(5))?;
                 let wal = wal_path(&config.path);
-                let (stop, stopped) = sync_channel(1);
                 let join = std::thread::Builder::new()
                     .name("wartui-checkpoint".to_owned())
-                    .spawn(move || checkpointer(&conn, &wal, &stopped, every, truncate_at))
+                    .spawn(move || checkpointer(&conn, &wal, &woken, every, truncate_at))
                     .map_err(StoreError::Spawn)?;
-                Some((stop, join))
+                Some(join)
             }
+            _ => None,
         };
 
         Ok(Self {
@@ -437,9 +452,9 @@ impl Store {
             }
             None => StoreReport::default(),
         };
-        // After the writer, so its last batch has a checkpoint to land in.
-        if let Some((stop, join)) = self.checkpointer.take() {
-            let _ = stop.send(());
+        // After the writer, whose end is what stops it, so its last batch has a checkpoint
+        // to land in.
+        if let Some(join) = self.checkpointer.take() {
             match join.join() {
                 Ok(checkpoints) => report.checkpoints = checkpoints,
                 Err(_) => tracing::error!("the store checkpoint thread panicked"),
@@ -574,6 +589,15 @@ fn migrate(conn: &Connection, found: i32) -> Result<(), StoreError> {
     if (1..=5).contains(&found) {
         conn.execute_batch("DROP INDEX IF EXISTS obs_bssid")?;
     }
+
+    // v7. `obs_node` answered a question nothing asked. No query anywhere filtered or
+    // sorted sightings by node, yet the index was about a sixth of a full drive's file
+    // (48 MiB of 292) and every commit rewrote the last page of each node's run in it, to
+    // the WAL and again at checkpoint. A per-node query that wants it later can build it
+    // over a finished capture far more cheaply than capture could keep it up.
+    if (1..=6).contains(&found) {
+        conn.execute_batch("DROP INDEX IF EXISTS obs_node")?;
+    }
     Ok(())
 }
 
@@ -627,25 +651,42 @@ fn reserve_versions(conn: &mut Connection) -> Result<u64, StoreError> {
     Ok(base)
 }
 
-/// The background checkpointer's loop, until `stop` says or the store is gone.
+/// The background checkpointer's loop, woken by the writer's commits until the writer is
+/// gone.
 ///
 /// Always one last pass on the way out, so a stopped store does not leave behind a WAL
 /// the next open has to replay.
 fn checkpointer(
     conn: &Connection,
     wal: &Path,
-    stop: &Receiver<()>,
+    woken: &Receiver<()>,
     every: Duration,
     truncate_at: u64,
 ) -> CheckpointReport {
     let mut report = CheckpointReport::default();
+    let mut last_pass: Option<Instant> = None;
     loop {
-        let stopping = !matches!(stop.recv_timeout(every), Err(RecvTimeoutError::Timeout));
-        match checkpoint(conn, "PASSIVE") {
-            Ok(pass) => report.passes.push(pass),
-            Err(e) => tracing::warn!("a background checkpoint failed: {e}"),
+        let stopping = woken.recv().is_err();
+        // Skipped rather than held back: a pass delayed until the interval is up would
+        // start partway to the next commit, which is when it is least likely to catch up.
+        if !stopping && last_pass.is_some_and(|last| last.elapsed() < every) {
+            continue;
         }
-        if std::fs::metadata(wal).is_ok_and(|m| m.len() > truncate_at) {
+        last_pass = Some(Instant::now());
+        let caught_up = match checkpoint(conn, "PASSIVE") {
+            Ok(pass) => {
+                let caught_up = !pass.busy && pass.copied >= pass.frames;
+                report.passes.push(pass);
+                caught_up
+            }
+            Err(e) => {
+                tracing::warn!("a background checkpoint failed: {e}");
+                false
+            }
+        };
+        // Only once a pass has caught up: the truncation then holds the writer's lock to
+        // rewind the file, not to copy and sync whatever the pass left behind.
+        if caught_up && std::fs::metadata(wal).is_ok_and(|m| m.len() > truncate_at) {
             match checkpoint(conn, "TRUNCATE") {
                 Ok(pass) => report.truncations.push(pass),
                 Err(e) => tracing::warn!("truncating the WAL failed: {e}"),
@@ -660,10 +701,12 @@ fn checkpointer(
 /// Run one checkpoint in `mode` and say what it did.
 fn checkpoint(conn: &Connection, mode: &str) -> Result<CheckpointPass, rusqlite::Error> {
     let started = Instant::now();
-    let (frames, copied) = conn.query_row(&format!("PRAGMA wal_checkpoint({mode})"), [], |r| {
-        Ok((r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))
-    })?;
-    Ok(CheckpointPass { finished_at: Instant::now(), took: started.elapsed(), frames, copied })
+    let (busy, frames, copied) =
+        conn.query_row(&format!("PRAGMA wal_checkpoint({mode})"), [], |r| {
+            Ok((r.get::<_, i64>(0)? != 0, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))
+        })?;
+    let finished_at = Instant::now();
+    Ok(CheckpointPass { finished_at, took: finished_at - started, frames, copied, busy })
 }
 
 /// SQLite's WAL for a database: the name with `-wal` on the end, not an extension.
@@ -735,13 +778,19 @@ fn writer(
     session_id: i64,
     config: &StoreConfig,
     stats: &Stats,
+    wake: Option<&SyncSender<()>>,
 ) -> StoreReport {
     let (batch_rows, batch_interval) = (config.batch_rows, config.batch_interval);
     let mut pending: Vec<Record> = Vec::with_capacity(batch_rows);
     let mut last_flush = Instant::now();
     let mut report = StoreReport::default();
     let mut flush = |conn: &mut Connection, pending: &mut Vec<Record>| {
+        let committing = !pending.is_empty();
         flush(conn, session_id, pending, stats, config.timings.then_some(&mut report));
+        // A full channel already has a wake-up waiting, and that one covers this commit.
+        if committing && let Some(wake) = wake {
+            let _ = wake.try_send(());
+        }
     };
 
     loop {

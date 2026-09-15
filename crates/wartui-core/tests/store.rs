@@ -13,7 +13,9 @@ use wartui_core::position::{Fix, PositionSource};
 use wartui_core::record::{
     AdminOutcome, AssignmentSent, BridgeSeen, Heartbeat, NodeSeen, Observation, Record,
 };
-use wartui_core::store::{Checkpoint, SessionInfo, Store, StoreConfig, open_readonly};
+use wartui_core::store::{
+    Checkpoint, SCHEMA_VERSION, SessionInfo, Store, StoreConfig, open_readonly,
+};
 use wartui_proto::air::RecordKind;
 use wartui_proto::link::Mac;
 use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun};
@@ -361,8 +363,9 @@ fn a_background_checkpointer_copies_and_truncates_the_wal_and_every_row_survives
     let mut config = StoreConfig::new(&path);
     config.batch_rows = 8;
     config.batch_interval = Duration::from_millis(5);
-    // Any WAL at all is past the limit, so every pass is followed by a truncation.
-    config.checkpoint = Checkpoint::Background { every: Duration::from_millis(5), truncate_at: 0 };
+    // Any WAL at all is past the limit, so every pass that catches up is followed by a
+    // truncation, and the last one, with the writer gone, always catches up.
+    config.checkpoint = Checkpoint::Background { every: Duration::ZERO, truncate_at: 0 };
     let session = SessionInfo { espnow_channel: 6, pool: ChannelPool::Us, notes: None };
     let store = Store::open(&config, &session, EPOCH_MS).expect("opening the store");
 
@@ -382,6 +385,45 @@ fn a_background_checkpointer_copies_and_truncates_the_wal_and_every_row_survives
     let rows: i64 =
         conn.query_row("SELECT COUNT(*) FROM observation", [], |r| r.get(0)).expect("counting");
     assert_eq!(rows, 200, "copying the WAL back from another connection loses nothing");
+}
+
+/// The WAL file's size after twenty small commits spaced well apart, under `checkpoint`.
+fn wal_after_spaced_commits(checkpoint: Checkpoint) -> u64 {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("wartui.db");
+    let mut config = StoreConfig::new(&path);
+    config.batch_rows = 50;
+    config.batch_interval = Duration::from_millis(5);
+    // So that inline, SQLite's own checkpoint never rewinds the WAL either.
+    config.wal_autocheckpoint_pages = Some(1_000_000);
+    config.checkpoint = checkpoint;
+    let session = SessionInfo { espnow_channel: 6, pool: ChannelPool::Us, notes: None };
+    let store = Store::open(&config, &session, EPOCH_MS).expect("opening the store");
+
+    for n in 0..20u8 {
+        let rows: Vec<Record> = (0..50u8)
+            .map(|m| observation(NODE, [0x02, 0, 0, 1, n, m], -60, EPOCH_MS, Fix::none()))
+            .collect();
+        assert_eq!(store.submit(rows), 0);
+        // Far longer than a pass over a few pages takes, so each catches up before the
+        // next commit begins.
+        std::thread::sleep(Duration::from_millis(40));
+    }
+    let size = std::fs::metadata(dir.path().join("wartui.db-wal")).map_or(0, |m| m.len());
+    store.close();
+    size
+}
+
+#[test]
+fn a_checkpoint_right_after_each_commit_lets_the_writer_rewind_the_wal_itself() {
+    let inline = wal_after_spaced_commits(Checkpoint::Inline);
+    // Never truncated, so a small WAL can only be the writer rewinding it.
+    let background = wal_after_spaced_commits(Checkpoint::Background {
+        every: Duration::ZERO,
+        truncate_at: u64::MAX,
+    });
+    // Never checkpointed, the WAL holds all twenty commits; rewound after each, about one.
+    assert!(background * 4 < inline, "background {background} bytes, inline {inline}");
 }
 
 #[test]
@@ -449,11 +491,45 @@ fn a_v5_database_loses_its_bssid_index_and_keeps_every_row() {
     let conn = open_readonly(&path).expect("reopening read-only");
     let version: i32 =
         conn.pragma_query_value(None, "user_version", |row| row.get(0)).expect("the version");
-    assert_eq!(version, 6);
+    assert_eq!(version, SCHEMA_VERSION);
     let rows: i64 =
         conn.query_row("SELECT COUNT(*) FROM observation", [], |r| r.get(0)).expect("counting");
     assert_eq!(rows, 1);
     assert_eq!(export(&conn).1.networks, 1);
+}
+
+fn observation_indexes(path: &std::path::Path) -> Vec<String> {
+    open_readonly(path)
+        .expect("reopening read-only")
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'observation'")
+        .and_then(|mut q| q.query_map([], |r| r.get(0)).and_then(Iterator::collect))
+        .expect("listing the indexes")
+}
+
+#[test]
+fn a_v6_database_loses_its_node_index_and_a_new_one_indexes_no_sighting() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("wartui.db");
+    let first = open_at(&path);
+    let sighting = observation(NODE, [0xAA; 6], -60, EPOCH_MS, fixed(37.0, -122.0));
+    assert_eq!(first.submit(vec![sighting]), 0);
+    first.close();
+    assert!(observation_indexes(&path).is_empty(), "every sighting is an append");
+
+    // Put the file back the way v6 left it.
+    let old = Connection::open(&path).expect("reopening");
+    old.execute_batch("CREATE INDEX obs_node ON observation(node_mac, rx_at)").expect("v6's index");
+    old.pragma_update(None, "user_version", 6).expect("stamping");
+    drop(old);
+    assert_eq!(observation_indexes(&path), ["obs_node"]);
+
+    open_at(&path).close();
+
+    assert!(observation_indexes(&path).is_empty(), "opening it brings it forward");
+    let conn = open_readonly(&path).expect("reopening read-only");
+    let rows: i64 =
+        conn.query_row("SELECT COUNT(*) FROM observation", [], |r| r.get(0)).expect("counting");
+    assert_eq!(rows, 1, "and the sighting is still there");
 }
 
 #[test]
