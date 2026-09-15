@@ -18,7 +18,9 @@
 //! reached a WiGLE export as a column of them. Stripping it here rather than at each
 //! place that shows an SSID is what makes `ssid_len == 0` mean hidden.
 
-use crate::air::{RecordKind, SSID_MAX, Security, SightingMsg};
+use core::fmt;
+
+use crate::air::{EXT_MAX, RecordKind, SSID_MAX, Security, SightingMsg};
 
 /// 802.11 MAC header length for a management frame: no QoS, no HT control.
 const HDR_LEN: usize = 24;
@@ -40,6 +42,8 @@ pub struct Sighting {
     pub bssid: [u8; 6],
     ssid: [u8; SSID_MAX],
     ssid_len: u8,
+    rcoi: [u8; EXT_MAX],
+    rcoi_len: u8,
     /// The `AuthMode` token this frame's elements amount to.
     pub security: Security,
     /// The channel the access point says it is on, or the one we were parked on.
@@ -57,6 +61,16 @@ impl Sighting {
         &self.ssid[..usize::from(self.ssid_len)]
     }
 
+    /// The roaming consortium element's body, verbatim as the beacon carried
+    /// it. Empty when the access point beaconed none — most do not — or when
+    /// what it beaconed was longer than the wire can carry, in which case it is
+    /// dropped whole rather than truncated: a partly-arrived identifier is
+    /// nobody's. What the bytes mean is [`rcoi_text`]'s to say.
+    #[must_use]
+    pub fn rcoi(&self) -> &[u8] {
+        &self.rcoi[..usize::from(self.rcoi_len)]
+    }
+
     /// The same observation in the shape the wire carries.
     #[must_use]
     pub fn as_msg(&self) -> SightingMsg<'_> {
@@ -67,6 +81,7 @@ impl Sighting {
             rssi: self.rssi,
             security: self.security,
             ssid: self.ssid(),
+            ext: self.rcoi(),
         }
     }
 }
@@ -81,6 +96,66 @@ pub fn visible_ssid(bytes: &[u8]) -> &[u8] {
     match bytes.iter().rposition(|&b| b != 0) {
         Some(last) => &bytes[..=last],
         None => &[],
+    }
+}
+
+/// The roaming consortium element's body as WiGLE's `RCOIs` column spells it:
+/// each identifier in hex — six digits for the three-byte form, ten for the
+/// five-byte one — separated by single spaces.
+///
+/// The body is one count byte, one byte holding the first two identifiers'
+/// lengths in its nibbles, then the identifiers themselves, the third (if any)
+/// being whatever is left. A body whose claimed lengths do not fit is rendered
+/// as nothing rather than in part: an identifier half-arrived is nobody's.
+#[must_use]
+pub fn rcoi_text(body: &[u8]) -> RcoiText<'_> {
+    RcoiText(body)
+}
+
+/// The rendering [`rcoi_text`] returns. A `Display` rather than a function
+/// returning a `String`, because this crate is `no_std` and allocation-free —
+/// the same dodge `Security`'s WiGLE token uses — and the host asks for the
+/// string where it has one to ask with.
+pub struct RcoiText<'a>(&'a [u8]);
+
+impl fmt::Display for RcoiText<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The count byte says how many identifiers the *operator* has; the
+        // body's own layout says how many are here, and it is the layout that
+        // gets rendered. First-wins rules belong to the walk, not the body.
+        let Some(ois) = self.0.get(2..) else { return Ok(()) };
+        let lengths = self.0[1];
+        let len1 = usize::from(lengths & 0x0F);
+        let len2 = usize::from(lengths >> 4);
+        if len1 + len2 > ois.len() {
+            return Ok(());
+        }
+        let len3 = ois.len() - len1 - len2;
+        let mut first = true;
+        for (start, len) in [(0, len1), (len1, len2), (len1 + len2, len3)] {
+            if len == 0 {
+                continue;
+            }
+            if !first {
+                f.write_str(" ")?;
+            }
+            first = false;
+            write_oi(f, &ois[start..start + len])?;
+        }
+        Ok(())
+    }
+}
+
+/// One identifier: six hex digits for the three-byte form and ten for the
+/// five-byte one, which are the two forms Hotspot 2.0 actually uses. Any other
+/// length is spelled out plainly rather than padded into a shape it is not.
+fn write_oi(f: &mut fmt::Formatter<'_>, oi: &[u8]) -> fmt::Result {
+    match oi {
+        [a, b, c] => write!(f, "{:06X}", u32::from_be_bytes([0, *a, *b, *c])),
+        [a, b, c, d, e] => {
+            write!(f, "{:010X}", u64::from_be_bytes([0, 0, 0, *a, *b, *c, *d, *e]))
+        }
+        _ => oi.iter().try_for_each(|byte| write!(f, "{byte:02X}")),
     }
 }
 
@@ -123,6 +198,8 @@ pub fn parse_mgmt(frame: &[u8], rssi: i8, parked: u8) -> Option<Sighting> {
         bssid,
         ssid: scan.ssid,
         ssid_len: scan.ssid_len,
+        rcoi: scan.rcoi,
+        rcoi_len: scan.rcoi_len,
         security: scan.classify(),
         channel: scan.channel.unwrap_or(parked),
         rssi,
@@ -133,6 +210,8 @@ pub fn parse_mgmt(frame: &[u8], rssi: i8, parked: u8) -> Option<Sighting> {
 struct Elements {
     ssid: [u8; SSID_MAX],
     ssid_len: u8,
+    rcoi: [u8; EXT_MAX],
+    rcoi_len: u8,
     channel: Option<u8>,
     privacy: bool,
     has_rsn: bool,
@@ -151,6 +230,8 @@ impl Elements {
         Self {
             ssid: [0; SSID_MAX],
             ssid_len: 0,
+            rcoi: [0; EXT_MAX],
+            rcoi_len: 0,
             channel: None,
             privacy,
             has_rsn: false,
@@ -197,6 +278,24 @@ impl Elements {
                 48 if len >= 8 => {
                     self.has_rsn = true;
                     self.read_suites(data, true);
+                }
+                // Roaming Consortium: what a Passpoint access point says about
+                // which hotspot operators will authenticate you. Kept verbatim —
+                // the count byte and the nibble-packed lengths byte included —
+                // because the walk's job is to find it, not to read it;
+                // [`rcoi_text`] does that, on the host, where a fix costs a
+                // re-export rather than a reflash.
+                //
+                // Dropped whole rather than truncated when it exceeds what the
+                // wire can carry: the pieces of an identifier say nothing the
+                // whole one does. First wins, like the channel elements.
+                111 if (2..=EXT_MAX).contains(&len) && self.rcoi_len == 0 => {
+                    self.rcoi[..len].copy_from_slice(data);
+                    // Cast is safe: `len` is at most EXT_MAX, which is 17.
+                    #[allow(clippy::cast_possible_truncation)]
+                    {
+                        self.rcoi_len = len as u8;
+                    }
                 }
                 // HT Operation, whose first byte is the primary channel: how a
                 // 5 GHz access point says where it is, DS Parameter Set being a

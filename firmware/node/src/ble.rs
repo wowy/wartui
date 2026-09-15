@@ -32,6 +32,7 @@ use esp_hal::time::{Duration, Instant};
 use esp_radio::ble::Config;
 use esp_radio::ble::controller::BleConnector;
 use esp_rtos::CurrentThreadHandle;
+use esp_sync::NonReentrantMutex;
 use wartui_proto::hci::{
     AdvReport, PACKET_MAX, RESET, SCAN_UNIT_US, SET_EVENT_MASK, adv_reports, set_scan_enable,
     set_scan_parameters,
@@ -53,13 +54,80 @@ pub const SCAN_MS: u32 = 500;
 /// and "new" is most of a sweep. So this is the worst-case delay standing between
 /// the last dwell and the window the node has to be listening in.
 ///
-/// Eighty and not more because `Scanner` is built by value, so the ring is on the
-/// stack of `Scanner::new` and then of `main`: at 96 entries an `esp32c5,ble` build
-/// trips `clippy::large_stack_frames`, which `main.rs` denies. The C5 binds first —
-/// a C6 reaches 112 — and the margin is deliberate so a dependency bump does not
-/// land on the limit. Wanting a bigger ring is a reason to move the reports into a
-/// `static`, the way `sniff` holds its sightings.
+/// The ring lives in a `static`, the way `sniff` holds its sightings, because a
+/// report stopped being seven bytes when the sighting wire started carrying the
+/// manufacturer identifier: at twelve, a by-value `Scanner` puts enough of the
+/// ring on the stack of `Scanner::new` and of `main` to trip
+/// `clippy::large_stack_frames`, which `main.rs` denies. In `.bss` the same
+/// eighty reports cost 960 bytes that no stack has to find room for.
 const REPORTS: usize = 80;
+
+/// The reports of the sweep in flight, and how far the main loop has drained it.
+struct Ring {
+    items: [AdvReport; REPORTS],
+    len: usize,
+    taken: usize,
+    /// Advertisers lost to a full ring, since boot.
+    dropped: u32,
+}
+
+static RING: NonReentrantMutex<Ring> = NonReentrantMutex::new(Ring {
+    items: [AdvReport { address: [0; 6], rssi: 0, mfgr: None }; REPORTS],
+    len: 0,
+    taken: 0,
+    dropped: 0,
+});
+
+impl Ring {
+    /// Keep `report` if it is new, or if it is a better reading than the one held.
+    fn record(&mut self, report: AdvReport) {
+        if !report.has_rssi() {
+            return;
+        }
+        if let Some(held) = self.items[..self.len].iter_mut().find(|r| r.address == report.address)
+        {
+            held.rssi = held.rssi.max(report.rssi);
+            // The identifier can arrive in a later packet than the first
+            // hearing; an advertiser that led with its flags and followed with
+            // its manufacturer data is still the one advertiser.
+            if held.mfgr.is_none() {
+                held.mfgr = report.mfgr;
+            }
+            return;
+        }
+        if self.len == REPORTS {
+            self.dropped = self.dropped.wrapping_add(1);
+            return;
+        }
+        self.items[self.len] = report;
+        self.len += 1;
+    }
+}
+
+/// Take the oldest report not yet taken, if there is one.
+///
+/// One at a time rather than a bulk drain, so nothing holds the ring's lock
+/// across a transmit — the same shape `sniff` gives its sightings. The bound
+/// is `len` and not the array: `sniff` can index its ring freely because its
+/// slots are `Option` and say when they are empty, where these are plain
+/// reports and the slots past `len` are an earlier sweep's leavings or the
+/// zero fill — a `00:00:00:00:00:00` advertiser at 0 dBm that would go on
+/// the air as if heard.
+pub fn take() -> Option<AdvReport> {
+    RING.with(|ring| {
+        if ring.taken >= ring.len {
+            return None;
+        }
+        let report = ring.items[ring.taken];
+        ring.taken += 1;
+        Some(report)
+    })
+}
+
+/// Advertisers lost to a full ring since boot.
+pub fn dropped() -> u32 {
+    RING.with(|ring| ring.dropped)
+}
 
 /// Listen continuously while enabled: interval and window equal, at 30 ms.
 const SCAN_WINDOW: u16 = (30_000 / SCAN_UNIT_US) as u16;
@@ -70,10 +138,6 @@ const POLL_MS: u64 = 2;
 pub struct Scanner<'d> {
     connector: BleConnector<'d>,
     packet: [u8; PACKET_MAX],
-    reports: [AdvReport; REPORTS],
-    len: usize,
-    /// Advertisers lost to a full buffer, since boot.
-    dropped: u32,
 }
 
 impl<'d> Scanner<'d> {
@@ -82,9 +146,6 @@ impl<'d> Scanner<'d> {
         let mut scanner = Self {
             connector: BleConnector::new(bt, Config::default()).ok()?,
             packet: [0; PACKET_MAX],
-            reports: [AdvReport { address: [0; 6], rssi: 0 }; REPORTS],
-            len: 0,
-            dropped: 0,
         };
         // A reset first: the controller keeps whatever state the last run left it
         // in, and enabling a scan twice is an error rather than a no-op.
@@ -96,7 +157,11 @@ impl<'d> Scanner<'d> {
         Some(scanner)
     }
 
-    /// Listen for `SCAN_MS`, then stop, and return what was heard.
+    /// Listen for `SCAN_MS`, then stop, filing what was heard in the ring.
+    ///
+    /// Returns how many distinct advertisers were heard; the reports themselves
+    /// come out through [`take`], one at a time, so nothing here holds the
+    /// ring's lock across a sleep or a transmit.
     ///
     /// Distinct addresses only, keeping the strongest reading for each: the same
     /// advertiser is heard several times a second and only one belongs on the wire.
@@ -105,8 +170,13 @@ impl<'d> Scanner<'d> {
     /// drains on a budget and a busy room leaves a few reports queued for the next
     /// scan to count. Dedup absorbs the repeats, so the cost is the precision of a
     /// console figure; draining first would cost whole reports instead.
-    pub fn sweep(&mut self) -> &[AdvReport] {
-        self.len = 0;
+    pub fn sweep(&mut self) -> usize {
+        // A fresh sweep discards nothing the main loop has not already taken:
+        // the drain in `report_ble` runs to completion between sweeps.
+        RING.with(|ring| {
+            ring.len = 0;
+            ring.taken = 0;
+        });
         // Written directly rather than through `command`, because from here on the
         // queue is what the sweep is for: `command` drains until two reads come
         // back empty, and a busy room can hold it there for its whole budget,
@@ -114,7 +184,7 @@ impl<'d> Scanner<'d> {
         // below absorbs the Command Complete at no cost, since `adv_reports` yields
         // nothing for a packet that is not one.
         if self.connector.write(&set_scan_enable(true)).is_err() {
-            return &[];
+            return 0;
         }
 
         let until = Instant::now() + Duration::from_millis(u64::from(SCAN_MS));
@@ -123,7 +193,7 @@ impl<'d> Scanner<'d> {
                 Ok(0) | Err(_) => CurrentThreadHandle::get().delay(Duration::from_millis(POLL_MS)),
                 Ok(read) => {
                     for report in adv_reports(&self.packet[..read]) {
-                        record(&mut self.reports, &mut self.len, &mut self.dropped, report);
+                        RING.with(|ring| ring.record(report));
                     }
                 }
             }
@@ -132,12 +202,7 @@ impl<'d> Scanner<'d> {
         // Unconditionally, and before anything else happens. This is the line
         // the whole module exists for.
         self.command(&set_scan_enable(false));
-        &self.reports[..self.len]
-    }
-
-    /// Advertisers lost to a full buffer since boot.
-    pub const fn dropped(&self) -> u32 {
-        self.dropped
+        RING.with(|ring| ring.len)
     }
 
     /// Send one command and drain whatever the controller says back.
@@ -167,26 +232,4 @@ impl<'d> Scanner<'d> {
         }
         Some(())
     }
-}
-
-/// Keep `report` if it is new, or if it is a better reading than the one held.
-fn record(
-    reports: &mut [AdvReport; REPORTS],
-    len: &mut usize,
-    dropped: &mut u32,
-    report: AdvReport,
-) {
-    if !report.has_rssi() {
-        return;
-    }
-    if let Some(held) = reports[..*len].iter_mut().find(|r| r.address == report.address) {
-        held.rssi = held.rssi.max(report.rssi);
-        return;
-    }
-    if *len == REPORTS {
-        *dropped = dropped.wrapping_add(1);
-        return;
-    }
-    reports[*len] = report;
-    *len += 1;
 }

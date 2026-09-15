@@ -118,7 +118,8 @@ is here rather than only in a `//!`.
 
 - **The wire is ours, in both directions, and shares nothing with the vendor's.** Every frame is
   `WTUI`, a wire version byte, a type byte and a body: `HeartbeatMsg` (13 bytes), `SightingMsg`
-  (17 plus the SSID) and `AdminMsg` (15). ESP-NOW has no addressing above the MAC layer and a
+  (18 plus the SSID and a length-prefixed trailer) and `AdminMsg` (15). ESP-NOW has no addressing
+  above the MAC layer and a
   node broadcasts, so a shared format is a shared conversation. The magic is checked before
   anything else at both ends. Encode/decode is written out by hand, never by transmuting a
   packed struct, and pinned byte-for-byte in `crates/wartui-proto/tests/wire.rs`.
@@ -127,6 +128,13 @@ is here rather than only in a `//!`.
   `incompatible` and named in the footer (`N frames from an older firmware — reflash`), never
   admitted to the node table and never half-decoded. The bridge is format-blind and does not
   need the reflash.
+- **The sighting trailer means what the kind says it means, and the wire layer never interprets
+  it.** For Wi-Fi it is the roaming consortium element's body verbatim; for BLE it is exactly two
+  bytes of company identifier, or nothing. The split is made once, in the engine's `Frame::Sighting`
+  arm; keeping `air` byte-transparent over the trailer is what lets a change to how an identifier
+  is *read* cost a re-export rather than a reflash.
+  → `crates/wartui-proto/src/air.rs`, `SightingMsg::ext`; `crates/wartui-proto/src/beacon.rs`,
+  `rcoi_text`; `crates/wartui-core/src/engine.rs`
 - **Nothing here is compatible with an earlier wartui, and that is the policy until 1.0.** No
   migration path is built for a fleet mid-upgrade and no code reads an older wire format to be
   helpful about it; a node on a previous build is somebody else's traffic as far as this host is
