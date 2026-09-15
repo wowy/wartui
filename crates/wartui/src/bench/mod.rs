@@ -165,8 +165,9 @@ pub struct Args {
     #[arg(long, value_name = "MIB")]
     cache_mib: Option<u32>,
 
-    /// WAL pages before a commit checkpoints.
-    #[arg(long, value_name = "PAGES")]
+    /// WAL pages before a commit checkpoints. Only SQLite's own checkpoint reads it, so it
+    /// needs --inline-checkpoint: the background checkpointer turns that one off.
+    #[arg(long, value_name = "PAGES", requires = "inline_checkpoint")]
     wal_autocheckpoint: Option<u32>,
 
     /// Page size for the new database, in bytes.
@@ -222,7 +223,9 @@ pub async fn run(args: Args) -> Result<()> {
 
     let mut store_config = StoreConfig::new(&args.db);
     if let Some(ms) = args.commit_interval {
-        store_config.batch_interval = Duration::from_millis(ms);
+        // At least a millisecond, as `run` clamps it: a zero wait would spin the writer
+        // whenever it is idle and skew the very numbers this measures.
+        store_config.batch_interval = Duration::from_millis(ms.max(1));
     }
     if let Some(rows) = args.commit_rows {
         store_config.batch_rows = rows;

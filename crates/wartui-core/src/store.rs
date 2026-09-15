@@ -683,13 +683,27 @@ fn checkpointer(
 ) -> CheckpointReport {
     let mut report = CheckpointReport::default();
     let mut last_pass: Option<Instant> = None;
+    // A wake-up that came too soon after the last pass. It is still owed one: otherwise
+    // the last commit before the fleet goes quiet sits uncopied, and unsynced, until the
+    // next commit or the store closes, since the writer's own checkpoint is off.
+    let mut owed = false;
     loop {
-        let stopping = woken.recv().is_err();
-        // Skipped rather than held back: a pass delayed until the interval is up would
-        // start partway to the next commit, which is when it is least likely to catch up.
+        let stopping = if owed {
+            // Another commit may wake it first, and still be too soon; the wait then
+            // resumes for whatever of the interval is left.
+            let left =
+                last_pass.map_or(Duration::ZERO, |last| every.saturating_sub(last.elapsed()));
+            matches!(woken.recv_timeout(left), Err(RecvTimeoutError::Disconnected))
+        } else {
+            woken.recv().is_err()
+        };
+        // Put off rather than run at once: a pass straight after the last one would copy
+        // next to nothing and sync the file again for it.
         if !stopping && last_pass.is_some_and(|last| last.elapsed() < every) {
+            owed = true;
             continue;
         }
+        owed = false;
         last_pass = Some(Instant::now());
         let caught_up = match checkpoint(conn, "PASSIVE") {
             Ok(pass) => {
