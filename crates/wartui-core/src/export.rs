@@ -14,10 +14,16 @@
 //! The fold is in Rust rather than SQL because the anchor rule is sequential —
 //! where a window ends decides where the next begins, which no window function
 //! can compute without recursion. It streams sightings in network-then-time
-//! order, holding one window's state at a time and collecting the rows it
-//! submits for the sort at the end, so memory grows with the rows written and
-//! never with the sightings read; the store stays the system of record and
-//! nothing here writes back.
+//! order and holds one window's state at a time.
+//!
+//! The file is ordered by when each window opened, not by network, and that sort is
+//! left to SQLite: submitted rows go into a temporary table on the export's own
+//! connection and come back out in order. SQLite sorts within its page cache and spills
+//! the rest to a temporary file, so a longer capture costs temporary disk rather than
+//! memory. Held in a `Vec` instead, a full drive's rows took 183 MiB
+//! (`docs/store-io-findings.md`). That file goes to `SQLITE_TMPDIR`, then `TMPDIR`,
+//! then `/var/tmp`, which on a Pi that boots from its card is the card. Nothing in the
+//! store is written: a temporary table belongs to the connection, not the file.
 //!
 //! Two details are here because WiGLE rejects files without them: the timestamp
 //! must be zero-padded (`2026-05-01 13:34:37`, where the node firmware emits
@@ -44,7 +50,7 @@
 use std::io::Write;
 
 use chrono::{DateTime, SecondsFormat, Utc};
-use rusqlite::{Connection, Row};
+use rusqlite::{Connection, Row, Statement};
 
 use crate::record::ssid_text;
 
@@ -136,52 +142,83 @@ pub fn wigle_csv<W: Write>(
     let recapture_ms =
         i64::try_from(filter.recapture_secs.saturating_mul(1000)).unwrap_or(i64::MAX);
 
-    let mut stmt = conn.prepare(SELECT_SIGHTINGS)?;
-    let mut rows = stmt.query(rusqlite::params![filter.session_id])?;
+    // Set before the table exists, since changing it discards the connection's temporary
+    // tables. A file is the bundled build's default already; the memory bound rests on it.
+    conn.pragma_update(None, "temp_store", "FILE")?;
+    // One transaction, so the inserts are one commit rather than one each. A failed
+    // export rolls the table's creation back with it.
+    let tx = conn.unchecked_transaction()?;
+    tx.execute_batch(CREATE_EXPORT_ROWS)?;
 
-    let mut submitted: Vec<Submitted> = Vec::new();
-    let mut unpositioned = 0u64;
-    let mut window: Option<Window> = None;
+    let mut summary = ExportSummary::default();
+    {
+        let mut insert = tx.prepare(INSERT_EXPORT_ROW)?;
+        let mut stmt = tx.prepare(SELECT_SIGHTINGS)?;
+        let mut rows = stmt.query(rusqlite::params![filter.session_id])?;
+        let mut window: Option<Window> = None;
 
-    while let Some(row) = rows.next()? {
-        let candidate = Candidate::of(row)?;
-        let opens_window = match &window {
-            // The first sighting of the capture, or of the next network.
-            None => true,
-            Some(w) => {
-                w.best.bssid != candidate.bssid
-                    || (recapture_ms > 0 && candidate.rx_at - w.first_seen > recapture_ms)
+        while let Some(row) = rows.next()? {
+            let candidate = Candidate::of(row)?;
+            let opens_window = match &window {
+                // The first sighting of the capture, or of the next network.
+                None => true,
+                Some(w) => {
+                    w.best.bssid != candidate.bssid
+                        || (recapture_ms > 0 && candidate.rx_at - w.first_seen > recapture_ms)
+                }
+            };
+            if opens_window {
+                close(&mut window, &mut insert, &mut summary)?;
+                window = Some(Window { first_seen: candidate.rx_at, best: candidate });
+            } else if let Some(w) = window.as_mut()
+                && candidate.submits_over(&w.best)
+            {
+                w.best = candidate;
             }
-        };
-        if opens_window {
-            close(&mut window, &mut submitted, &mut unpositioned);
-            window = Some(Window { first_seen: candidate.rx_at, best: candidate });
-        } else if let Some(w) = window.as_mut()
-            && candidate.submits_over(&w.best)
-        {
-            w.best = candidate;
+        }
+        close(&mut window, &mut insert, &mut summary)?;
+
+        // By when each row's window opened, so a file re-exported after a decoder
+        // fix diffs cleanly against the one before it; the network breaks ties.
+        let mut sorted = tx.prepare(SELECT_EXPORT_ROWS)?;
+        let mut rows = sorted.query([])?;
+        while let Some(row) = rows.next()? {
+            write_row(&Window { first_seen: row.get(11)?, best: Candidate::of(row)? }, out)?;
         }
     }
-    close(&mut window, &mut submitted, &mut unpositioned);
-
-    // By when each row's window opened, so a file re-exported after a decoder
-    // fix diffs cleanly against the one before it; the network breaks ties.
-    submitted.sort_by(|a, b| (a.first_seen, &a.best.bssid).cmp(&(b.first_seen, &b.best.bssid)));
-    for row in &submitted {
-        write_row(row, out)?;
-    }
-    Ok(ExportSummary { rows: submitted.len() as u64, unpositioned })
+    tx.execute_batch("DROP TABLE temp.export_row")?;
+    tx.commit()?;
+    Ok(summary)
 }
 
-/// Retire the window in flight, submitting it if its best sighting is
-/// positioned and counting it if not.
-fn close(window: &mut Option<Window>, submitted: &mut Vec<Submitted>, unpositioned: &mut u64) {
-    let Some(w) = window.take() else { return };
-    if w.best.positioned() {
-        submitted.push(Submitted { first_seen: w.first_seen, best: w.best });
+/// Retire the window in flight, submitting it to the table the rows are sorted in
+/// if its best sighting is positioned and counting it if not.
+fn close(
+    window: &mut Option<Window>,
+    insert: &mut Statement<'_>,
+    summary: &mut ExportSummary,
+) -> rusqlite::Result<()> {
+    let Some(Window { first_seen, best }) = window.take() else { return Ok(()) };
+    if best.positioned() {
+        insert.execute(rusqlite::params![
+            best.bssid,
+            best.ssid,
+            best.security,
+            best.channel,
+            best.rssi,
+            best.lat,
+            best.lon,
+            best.alt,
+            best.accuracy,
+            best.kind,
+            best.rx_at,
+            first_seen,
+        ])?;
+        summary.rows += 1;
     } else {
-        *unpositioned += 1;
+        summary.unpositioned += 1;
     }
+    Ok(())
 }
 
 /// Every sighting of every network in the filter, in fold order: network, then
@@ -196,6 +233,29 @@ SELECT bssid, ssid, security, channel, rssi, lat, lon, alt, accuracy, kind, rx_a
 FROM observation o
 WHERE ?1 IS NULL OR o.session_id = ?1
 ORDER BY o.bssid, o.rx_at, o.id
+";
+
+/// The rows waiting for the sort by window start: a submitted sighting in
+/// [`SELECT_SIGHTINGS`]'s column order, so [`Candidate::of`] reads it back, then when
+/// its window opened. Dropped first in case an earlier export on this connection
+/// left one behind.
+const CREATE_EXPORT_ROWS: &str = r"
+DROP TABLE IF EXISTS temp.export_row;
+CREATE TEMP TABLE export_row (
+  bssid BLOB, ssid BLOB, security TEXT, channel INTEGER, rssi INTEGER,
+  lat REAL, lon REAL, alt REAL, accuracy REAL, kind TEXT, rx_at INTEGER,
+  first_seen INTEGER
+);
+";
+
+const INSERT_EXPORT_ROW: &str = "INSERT INTO temp.export_row VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, \
+?8, ?9, ?10, ?11, ?12)";
+
+/// Two windows of one network never open at the same instant, so the order is total.
+const SELECT_EXPORT_ROWS: &str = r"
+SELECT bssid, ssid, security, channel, rssi, lat, lon, alt, accuracy, kind, rx_at, first_seen
+FROM temp.export_row
+ORDER BY first_seen, bssid
 ";
 
 /// One sighting in flight through the fold, carrying everything a submitted
@@ -260,14 +320,7 @@ struct Window {
     best: Candidate,
 }
 
-/// A window that closed on a positioned sighting, waiting for its turn in the
-/// file: rows are ordered by when their windows opened, not by network.
-struct Submitted {
-    first_seen: i64,
-    best: Candidate,
-}
-
-fn write_row<W: Write>(row: &Submitted, out: &mut W) -> Result<(), ExportError> {
+fn write_row<W: Write>(row: &Window, out: &mut W) -> Result<(), ExportError> {
     let best = &row.best;
     let channel = best.channel;
     let rssi = best.rssi;

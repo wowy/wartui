@@ -416,10 +416,37 @@ All six exports wrote the same 506,746 rows, byte for byte (same SHA-256).
   address, so every commit would dirty leaf pages across the index. That is inferred
   from the `obs_bssid` runs, not measured for this index. It is 50 MiB for a full drive;
   building it once over a finished capture took 1.5 s with the `sqlite3` CLI.
-- **The branch's export holds every submitted row in memory** for the final sort by
+- **The branch's export held every submitted row in memory** for the final sort by
   window: about 183 MiB for this drive, whatever the index, against 13–16 MiB for the
-  current export. That is a property of the fold, not the store, and the thing to look
-  at before that branch lands on a small board.
+  export it replaces. That is a property of the fold, not the store. The next section
+  moves the sort into SQLite.
+
+#### Sorting the submitted rows in SQLite instead of a `Vec`
+
+The fold now writes each submitted row to a `TEMP` table on the export's connection and
+reads it back `ORDER BY first_seen, bssid`. SQLite sorts within its page cache and spills
+the rest to a temporary file. One `drive` run of 350 s on a Linux laptop (Core Ultra 7
+258V, btrfs on NVMe) produced 2,023,542 sightings. Both builds exported it twice, with
+`SQLITE_TMPDIR=/var/tmp` so the temporary files landed on the disk:
+
+| | `Vec` | `TEMP` table |
+| --- | --- | --- |
+| rows written | 508,739 | 508,739 |
+| wall time | 2.87 s, 2.83 s | 3.24 s, 3.32 s |
+| system time | 0.22 s, 0.21 s | 0.23 s, 0.24 s |
+| peak RSS | 210 MiB | 12.8 MiB |
+| filesystem writes | 140 MiB | 208 MiB |
+
+Both builds wrote the same file, byte for byte (same SHA-256).
+
+- **Memory no longer follows the capture.** Peak RSS is back where the per-network query
+  left it, and it holds one window plus SQLite's cache however long the capture is.
+- **The price is temporary disk, about 68 MiB for a full drive, and 0.4 s.** The writes
+  column includes the 42 MiB CSV and the spill of the fold's own `ORDER BY`, which both
+  builds pay. What the `TEMP` table adds is its rows and their sort. SQLite deletes both
+  files as it goes, and none were left behind.
+- **On a Pi that boots from its card, that temporary file is on the card** unless
+  `SQLITE_TMPDIR` or `TMPDIR` points somewhere else. Not yet measured there.
 
 ### Commit interval and background checkpoints, on the card
 
