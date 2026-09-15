@@ -170,7 +170,7 @@ pub fn wigle_csv<W: Write>(
         let mut window: Option<Window> = None;
 
         while let Some(row) = rows.next()? {
-            let candidate = Candidate::of(row)?;
+            let mut candidate = Candidate::of(row)?;
             let opens_window = match &window {
                 // The first sighting of the capture, or of the next network.
                 None => true,
@@ -182,10 +182,15 @@ pub fn wigle_csv<W: Write>(
             if opens_window {
                 close(&mut window, &mut insert, &mut summary)?;
                 window = Some(Window { first_seen: candidate.rx_at, best: candidate });
-            } else if let Some(w) = window.as_mut()
-                && candidate.submits_over(&w.best)
-            {
-                w.best = candidate;
+            } else if let Some(w) = window.as_mut() {
+                // Which sighting submits is decided by position and signal alone;
+                // the identifiers are the window's, so a loser still lends them.
+                if candidate.submits_over(&w.best) {
+                    candidate.inherit_identifiers(&mut w.best);
+                    w.best = candidate;
+                } else {
+                    w.best.inherit_identifiers(&mut candidate);
+                }
             }
         }
         close(&mut window, &mut insert, &mut summary)?;
@@ -326,6 +331,24 @@ impl Candidate {
             mfgr_id: row.get(11)?,
             rx_at: row.get(12)?,
         })
+    }
+
+    /// Take `other`'s roaming consortium and manufacturer identifier wherever this
+    /// sighting has none of its own.
+    ///
+    /// The sighting that wins a window is picked for its position and signal, and
+    /// whether a packet carried a trailer has nothing to do with either: a beacon
+    /// or probe response may omit the element, and one advertisement of many
+    /// carries the manufacturer data. Without this a stronger sighting that lacked
+    /// them would blank a column the store can fill — the loss the node's own BLE
+    /// ring already guards against by merging a later report's identifier in.
+    fn inherit_identifiers(&mut self, other: &mut Self) {
+        if self.rcoi.is_none() {
+            self.rcoi = other.rcoi.take();
+        }
+        if self.mfgr_id.is_none() {
+            self.mfgr_id = other.mfgr_id;
+        }
     }
 
     /// Whether this sighting carries coordinates a WiGLE row can be written

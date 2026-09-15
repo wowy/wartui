@@ -331,6 +331,53 @@ fn a_passpoint_row_exports_its_roaming_consortium() {
 }
 
 #[test]
+fn a_window_keeps_a_roaming_consortium_its_strongest_sighting_lacked() {
+    // A beacon without the element outshouts a weaker one with it. The row's
+    // position and signal are the strong sighting's; its identifiers are the
+    // window's.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut weak = observation(NODE, [0xAA; 6], -80, EPOCH_MS, fixed(37.0, -122.0));
+    let Record::Observation(obs) = &mut weak else { unreachable!() };
+    obs.rcoi = Some(OPEN_ROAMING.to_vec());
+    let strong = observation(OTHER, [0xAA; 6], -40, EPOCH_MS + 1000, fixed(38.0, -123.0));
+    let conn = write(&dir, vec![weak, strong]);
+
+    let (csv, summary) = export(&conn);
+    assert_eq!(summary.rows, 1);
+    let row = csv.lines().nth(2).expect("a row");
+    assert!(row.contains(",-40,38,-123,"), "the strong sighting submits: {row}");
+    assert!(
+        row.ends_with("5A03BA0000 BAA2D00000 BAA2D02000,,WIFI"),
+        "and the weak one's identifiers ride along: {row}"
+    );
+}
+
+#[test]
+fn a_window_keeps_a_manufacturer_identifier_a_later_weaker_sighting_carried() {
+    // The other order: the best sighting is already held when a weaker
+    // advertisement with the manufacturer data arrives.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let ble = |node, rssi, at_ms, mfgr_id| {
+        let mut record = observation(node, [0xAA; 6], rssi, at_ms, fixed(37.0, -122.0));
+        let Record::Observation(obs) = &mut record else { unreachable!() };
+        obs.kind = RecordKind::Ble;
+        obs.channel = 0;
+        obs.ssid = Vec::new();
+        obs.security = "[BLE]".to_owned();
+        obs.mfgr_id = mfgr_id;
+        record
+    };
+    let conn = write(
+        &dir,
+        vec![ble(NODE, -40, EPOCH_MS, None), ble(OTHER, -80, EPOCH_MS + 1000, Some(76))],
+    );
+
+    let (csv, summary) = export(&conn);
+    assert_eq!(summary.rows, 1);
+    assert!(csv.contains(",0,,-40,37,-122,16,0,,76,BLE"), "{csv}");
+}
+
+#[test]
 fn a_ble_row_exports_its_manufacturer_identifier() {
     let dir = tempfile::tempdir().expect("temp dir");
     let mut ble = observation(NODE, [0xAA; 6], -60, EPOCH_MS, fixed(37.0, -122.0));
