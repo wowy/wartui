@@ -11,7 +11,7 @@
 //! to the same card lands in them too, which on a Pi booted from that card is journald at
 //! the least.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// What this process asked the kernel to write, from `/proc/self/io`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -175,13 +175,23 @@ pub struct Mount {
     pub options: String,
     /// The filesystem's options, such as btrfs's `compress=zstd:1`.
     pub fs_options: String,
+    /// Where it is mounted.
+    pub point: PathBuf,
 }
 
 impl Mount {
     /// The mount holding `path`, where the kernel keeps `mountinfo`.
+    ///
+    /// By device number first, which is exact. That is not enough for btrfs: each
+    /// subvolume gives its files a device number of its own, while `mountinfo` lists the
+    /// filesystem's, so a database under a subvolume such as Fedora's `/home` matches no
+    /// line. Failing the number, the mount is the one whose mount point is the deepest
+    /// directory above the path, which is how `findmnt --target` answers.
     pub fn holding(path: &Path) -> Option<Self> {
+        let mountinfo = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
         let (major, minor) = dev_of(path)?;
-        find_mount(&std::fs::read_to_string("/proc/self/mountinfo").ok()?, major, minor)
+        find_mount(&mountinfo, major, minor)
+            .or_else(|| enclosing_mount(&mountinfo, &std::fs::canonicalize(path).ok()?))
     }
 }
 
@@ -194,6 +204,26 @@ fn find_mount(mountinfo: &str, major: u64, minor: u64) -> Option<Mount> {
         .filter(|(numbers, _)| *numbers == (major, minor))
         .map(|(_, mount)| mount)
         .next_back()
+}
+
+/// The mount whose mount point is the deepest directory above `path`, which must be
+/// absolute and canonical. Compared by whole components, so `/homework` is not under
+/// `/home`. A later mount over the same point hides an earlier one, so a tie goes to the
+/// later.
+fn enclosing_mount(mountinfo: &str, path: &Path) -> Option<Mount> {
+    mountinfo
+        .lines()
+        .filter_map(parse_mount)
+        .map(|(_, mount)| mount)
+        .filter(|mount| path.starts_with(&mount.point))
+        .fold(None, |deepest: Option<Mount>, mount| match deepest {
+            Some(deeper)
+                if deeper.point.components().count() > mount.point.components().count() =>
+            {
+                Some(deeper)
+            }
+            _ => Some(mount),
+        })
 }
 
 /// One line of `mountinfo`: an ID, the parent's, the device number, the root, the mount
@@ -210,6 +240,7 @@ fn parse_mount(line: &str) -> Option<((u64, u64), Mount)> {
             source: unescape(filesystem.next()?),
             options: (*mount.get(5)?).to_owned(),
             fs_options: filesystem.next().unwrap_or_default().to_owned(),
+            point: PathBuf::from(unescape(mount.get(4)?)),
         },
     ))
 }
@@ -309,10 +340,46 @@ fn parse_peak_rss(text: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::{
-        DeviceIo, ProcessIo, Supply, find_mount, judge_power, parse_dev_numbers, parse_device_stat,
-        parse_peak_rss, parse_process_io, split_dev, unescape,
+        DeviceIo, ProcessIo, Supply, enclosing_mount, find_mount, judge_power, parse_dev_numbers,
+        parse_device_stat, parse_peak_rss, parse_process_io, split_dev, unescape,
     };
+
+    /// Fedora's layout: a root and a home subvolume of one btrfs, a tmpfs, and sysfs. The
+    /// device number a file under `/home` reports is the subvolume's, which appears on no
+    /// line here.
+    const LAPTOP: &str = "\
+24 1 0:25 / /sys rw,nosuid shared:2 - sysfs sysfs rw
+72 1 0:35 /root / rw,relatime shared:1 - btrfs /dev/nvme0n1p3 rw,compress=zstd:1,ssd,discard=async,space_cache=v2,subvolid=257,subvol=/root
+73 72 0:35 /home /home rw,relatime shared:3 - btrfs /dev/nvme0n1p3 rw,compress=zstd:1,ssd,discard=async,space_cache=v2,subvolid=256,subvol=/home
+80 72 0:40 / /tmp rw,nosuid,nodev shared:4 - tmpfs tmpfs rw
+";
+
+    #[test]
+    fn a_path_under_a_btrfs_subvolume_is_found_by_its_deepest_mount_point() {
+        let mount = enclosing_mount(LAPTOP, Path::new("/home/someone/bench")).expect("home");
+        assert_eq!(mount.point, Path::new("/home"));
+        assert_eq!(mount.fstype, "btrfs");
+        assert_eq!(mount.source, "/dev/nvme0n1p3");
+        assert!(mount.fs_options.contains("subvol=/home"), "{mount:?}");
+    }
+
+    #[test]
+    fn mount_points_are_compared_by_whole_components() {
+        let mount = enclosing_mount(LAPTOP, Path::new("/homework/bench")).expect("root");
+        assert_eq!(mount.point, Path::new("/"));
+        let mount = enclosing_mount(LAPTOP, Path::new("/tmp/bench")).expect("tmp");
+        assert_eq!(mount.fstype, "tmpfs");
+    }
+
+    #[test]
+    fn a_later_mount_over_the_same_point_is_the_one_in_force() {
+        let shadowed = format!("{LAPTOP}90 80 179:1 / /tmp rw,noatime - ext4 /dev/mmcblk0p1 rw\n");
+        let mount = enclosing_mount(&shadowed, Path::new("/tmp/bench")).expect("tmp");
+        assert_eq!(mount.source, "/dev/mmcblk0p1");
+    }
 
     /// A Pi on ext4, a laptop's btrfs subvolume with its anonymous device number, and a
     /// card whose mount point and source both have spaces in them.
@@ -334,8 +401,8 @@ mod tests {
 
     #[test]
     fn a_btrfs_mount_is_found_by_its_anonymous_number_and_names_its_real_device() {
-        // The number stat gives a btrfs file names no block device, which is the whole
-        // reason for asking mountinfo: the source is the device.
+        // A btrfs device number names no block device, so the source is the device. The
+        // number only matches like this outside a subvolume; see the enclosing-mount tests.
         let mount = find_mount(MOUNTINFO, 0, 35).expect("the subvolume");
         assert_eq!(mount.fstype, "btrfs");
         assert_eq!(mount.source, "/dev/nvme0n1p3");
