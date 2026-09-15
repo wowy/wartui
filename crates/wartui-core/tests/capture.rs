@@ -84,6 +84,10 @@ async fn a_simulated_fleet_becomes_a_database_and_then_a_wigle_file() {
         assert!(matches!(fields[13], "WIFI" | "BLE"), "{row}");
         assert_eq!(fields[7], "37.7749", "{row}");
     }
+    assert!(
+        csv.contains("5A03BA0000 BAA2D00000 BAA2D02000"),
+        "the simulated Passpoint networks carry their roaming consortium: {csv}"
+    );
 }
 
 /// Two fixes a few streets apart, so a row can be told which one it was written
@@ -166,4 +170,8 @@ async fn a_moving_capture_writes_where_the_receiver_was_for_each_row() {
         // column WiGLE reads it from — 0 there means "unknown".
         assert_eq!(fields[10], "4.5", "{row}");
     }
+    assert!(
+        csv.contains(",76,BLE"),
+        "the simulated advertisers carry their manufacturer identifiers: {csv}"
+    );
 }

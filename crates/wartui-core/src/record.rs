@@ -96,6 +96,14 @@ pub struct Observation {
     pub rssi: i16,
     /// Wi-Fi or BLE.
     pub kind: RecordKind,
+    /// The roaming consortium element's body, verbatim as the beacon carried
+    /// it. `None` for BLE, and for the Wi-Fi that beaconed no such element —
+    /// which is most of it.
+    pub rcoi: Option<Vec<u8>>,
+    /// The Bluetooth SIG company identifier a BLE advertiser carried in its
+    /// manufacturer-specific data. `None` for Wi-Fi, and for the advertiser
+    /// that sent none — many do not.
+    pub mfgr_id: Option<u16>,
     /// Where the host believed it was when this arrived.
     pub fix: Fix,
     /// The frame exactly as it came off the air, header and all.

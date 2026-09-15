@@ -46,9 +46,11 @@ DLT_IEEE802_11_RADIO = 127
 BEACON, PROBE_RESPONSE = 8, 5
 
 # Elements `crates/wartui-proto/src/beacon.rs` reads. Their contents are cipher
-# suites and channel numbers — the substance of the test, and identifying of
-# nobody — so they are kept as they arrived.
-SSID, DS_PARAM, RSN, HT_OPERATION, WAPI, VENDOR = 0, 3, 48, 61, 68, 221
+# suites, channel numbers and hotspot-operator identifiers — the substance of
+# the test, and identifying of nobody — so they are kept as they arrived.
+SSID, DS_PARAM, RSN, HT_OPERATION, WAPI, ROAMING_CONSORTIUM, VENDOR = (
+    0, 3, 48, 61, 68, 111, 221,
+)
 
 # Microsoft's OUI and type 1: the WPA element, which is the only vendor-specific
 # element the parser looks inside. Every other one — WPS most of all, which
@@ -137,7 +139,7 @@ def scrub(frame, index):
             out[body] = b"\x00" * length
         elif tag == RSN:
             out[body] = scrub_rsn(bytes(out[body]))
-        elif tag not in (DS_PARAM, HT_OPERATION, WAPI, VENDOR):
+        elif tag not in (DS_PARAM, HT_OPERATION, WAPI, ROAMING_CONSORTIUM, VENDOR):
             out[body] = b"\x00" * length
 
         at = body.stop

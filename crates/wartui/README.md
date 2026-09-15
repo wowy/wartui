@@ -55,6 +55,15 @@ stays in the row, where its stronger reading can still improve the position,
 and one past the hour is a second row the site scores. `--recapture 0` folds
 a network's whole capture into a single row.
 
+Rows carry what the nodes took off the air: a Passpoint access point's
+roaming consortium identifiers in `RCOIs`, a BLE advertiser's manufacturer
+identifier in `MfgrId`, both blank when the network offered none. Captures
+made before the nodes started collecting them export those
+columns blank too — the store records NULL rather than a guess. A BLE row's
+`Frequency` is blank on purpose: the column means a Bluetooth "device type"
+code that only an active inquiry produces, and the nodes never transmit while
+scanning.
+
 `--log-file` is global and is the only way to see the transport's own account of
 a run.
 

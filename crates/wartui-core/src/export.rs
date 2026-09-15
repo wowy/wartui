@@ -40,9 +40,11 @@
 //! `Frequency` is computed from the channel a sighting named, because the centre
 //! frequency is a function of the channel and the store already keeps the channel —
 //! deriving it means every capture already on disk exports with the column filled.
-//! `RCOIs` and `MfgrId` are blank because nothing in the pipeline yet collects a
-//! roaming consortium identifier or a Bluetooth manufacturer ID; the columns are
-//! shaped so that capturing them later is a fill-in rather than a re-format. A BLE
+//! `RCOIs` and `MfgrId` carry what the capture actually holds — a Passpoint access
+//! point's roaming consortium identifiers, a BLE advertiser's manufacturer
+//! identifier — and are blank when it holds none, or when the capture was taken by a
+//! build that did not collect them: the store says that with NULL, and a blank
+//! column repeats it without claiming the beacon carried nothing. A BLE
 //! row's `Frequency` stays blank on purpose: what WiGLE asks for there is a
 //! Bluetooth "device type" code, a class-of-device value that only an active inquiry
 //! produces, and a node that never transmits while scanning has none to report.
@@ -51,6 +53,7 @@ use std::io::Write;
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use rusqlite::{Connection, Row, Statement};
+use wartui_proto::beacon::rcoi_text;
 
 use crate::record::ssid_text;
 
@@ -142,6 +145,15 @@ pub fn wigle_csv<W: Write>(
     let recapture_ms =
         i64::try_from(filter.recapture_secs.saturating_mul(1000)).unwrap_or(i64::MAX);
 
+    // The two trailer columns travel together in the v8 migration, so one
+    // probe decides for both. A probe that cannot run at all is a file the
+    // query below will speak for, so it falls through to the current shape.
+    let sightings = if crate::store::has_column(conn, "observation", "rcoi").unwrap_or(true) {
+        SELECT_SIGHTINGS
+    } else {
+        SELECT_SIGHTINGS_PRE_V8
+    };
+
     // Set before the table exists, since changing it discards the connection's temporary
     // tables. A file is the bundled build's default already; the memory bound rests on it.
     conn.pragma_update(None, "temp_store", "FILE")?;
@@ -153,12 +165,12 @@ pub fn wigle_csv<W: Write>(
     let mut summary = ExportSummary::default();
     {
         let mut insert = tx.prepare(INSERT_EXPORT_ROW)?;
-        let mut stmt = tx.prepare(SELECT_SIGHTINGS)?;
+        let mut stmt = tx.prepare(sightings)?;
         let mut rows = stmt.query(rusqlite::params![filter.session_id])?;
         let mut window: Option<Window> = None;
 
         while let Some(row) = rows.next()? {
-            let candidate = Candidate::of(row)?;
+            let mut candidate = Candidate::of(row)?;
             let opens_window = match &window {
                 // The first sighting of the capture, or of the next network.
                 None => true,
@@ -170,10 +182,15 @@ pub fn wigle_csv<W: Write>(
             if opens_window {
                 close(&mut window, &mut insert, &mut summary)?;
                 window = Some(Window { first_seen: candidate.rx_at, best: candidate });
-            } else if let Some(w) = window.as_mut()
-                && candidate.submits_over(&w.best)
-            {
-                w.best = candidate;
+            } else if let Some(w) = window.as_mut() {
+                // Which sighting submits is decided by position and signal alone;
+                // the identifiers are the window's, so a loser still lends them.
+                if candidate.submits_over(&w.best) {
+                    candidate.inherit_identifiers(&mut w.best);
+                    w.best = candidate;
+                } else {
+                    w.best.inherit_identifiers(&mut candidate);
+                }
             }
         }
         close(&mut window, &mut insert, &mut summary)?;
@@ -183,7 +200,7 @@ pub fn wigle_csv<W: Write>(
         let mut sorted = tx.prepare(SELECT_EXPORT_ROWS)?;
         let mut rows = sorted.query([])?;
         while let Some(row) = rows.next()? {
-            write_row(&Window { first_seen: row.get(11)?, best: Candidate::of(row)? }, out)?;
+            write_row(&Window { first_seen: row.get(13)?, best: Candidate::of(row)? }, out)?;
         }
     }
     tx.execute_batch("DROP TABLE temp.export_row")?;
@@ -211,6 +228,8 @@ fn close(
             best.alt,
             best.accuracy,
             best.kind,
+            best.rcoi,
+            best.mfgr_id,
             best.rx_at,
             first_seen,
         ])?;
@@ -229,7 +248,23 @@ fn close(
 /// order, and were faster than one random lookup per sighting (the store's v6 migration
 /// says more).
 const SELECT_SIGHTINGS: &str = r"
-SELECT bssid, ssid, security, channel, rssi, lat, lon, alt, accuracy, kind, rx_at
+SELECT bssid, ssid, security, channel, rssi, lat, lon, alt, accuracy, kind, rcoi, mfgr_id, rx_at
+FROM observation o
+WHERE ?1 IS NULL OR o.session_id = ?1
+ORDER BY o.bssid, o.rx_at, o.id
+";
+
+/// The same query for a capture that predates the trailer columns and has not
+/// been migrated: both read as NULL, which is what they are — those sightings
+/// were heard by builds that took nothing of the kind off the air.
+///
+/// Deliberately not a migration, because the export opens the file read-only
+/// and that is what makes it safe against a capture still running — no write
+/// lock to contend with the store's. An older file stays exactly as it is
+/// until a later `run` migrates it, and exports truthfully in the meantime.
+const SELECT_SIGHTINGS_PRE_V8: &str = r"
+SELECT bssid, ssid, security, channel, rssi, lat, lon, alt, accuracy, kind,
+       NULL AS rcoi, NULL AS mfgr_id, rx_at
 FROM observation o
 WHERE ?1 IS NULL OR o.session_id = ?1
 ORDER BY o.bssid, o.rx_at, o.id
@@ -243,17 +278,18 @@ const CREATE_EXPORT_ROWS: &str = r"
 DROP TABLE IF EXISTS temp.export_row;
 CREATE TEMP TABLE export_row (
   bssid BLOB, ssid BLOB, security TEXT, channel INTEGER, rssi INTEGER,
-  lat REAL, lon REAL, alt REAL, accuracy REAL, kind TEXT, rx_at INTEGER,
-  first_seen INTEGER
+  lat REAL, lon REAL, alt REAL, accuracy REAL, kind TEXT, rcoi BLOB, mfgr_id INTEGER,
+  rx_at INTEGER, first_seen INTEGER
 );
 ";
 
 const INSERT_EXPORT_ROW: &str = "INSERT INTO temp.export_row VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, \
-?8, ?9, ?10, ?11, ?12)";
+?8, ?9, ?10, ?11, ?12, ?13, ?14)";
 
 /// Two windows of one network never open at the same instant, so the order is total.
 const SELECT_EXPORT_ROWS: &str = r"
-SELECT bssid, ssid, security, channel, rssi, lat, lon, alt, accuracy, kind, rx_at, first_seen
+SELECT bssid, ssid, security, channel, rssi, lat, lon, alt, accuracy, kind, rcoi, mfgr_id, rx_at,
+       first_seen
 FROM temp.export_row
 ORDER BY first_seen, bssid
 ";
@@ -272,6 +308,8 @@ struct Candidate {
     alt: Option<f64>,
     accuracy: Option<f64>,
     kind: String,
+    rcoi: Option<Vec<u8>>,
+    mfgr_id: Option<u16>,
     rx_at: i64,
 }
 
@@ -289,8 +327,28 @@ impl Candidate {
             alt: row.get(7)?,
             accuracy: row.get(8)?,
             kind: row.get(9)?,
-            rx_at: row.get(10)?,
+            rcoi: row.get(10)?,
+            mfgr_id: row.get(11)?,
+            rx_at: row.get(12)?,
         })
+    }
+
+    /// Take `other`'s roaming consortium and manufacturer identifier wherever this
+    /// sighting has none of its own.
+    ///
+    /// The sighting that wins a window is picked for its position and signal, and
+    /// whether a packet carried a trailer has nothing to do with either: a beacon
+    /// or probe response may omit the element, and one advertisement of many
+    /// carries the manufacturer data. Without this a stronger sighting that lacked
+    /// them would blank a column the store can fill — the loss the node's own BLE
+    /// ring already guards against by merging a later report's identifier in.
+    fn inherit_identifiers(&mut self, other: &mut Self) {
+        if self.rcoi.is_none() {
+            self.rcoi = other.rcoi.take();
+        }
+        if self.mfgr_id.is_none() {
+            self.mfgr_id = other.mfgr_id;
+        }
     }
 
     /// Whether this sighting carries coordinates a WiGLE row can be written
@@ -327,10 +385,15 @@ fn write_row<W: Write>(row: &Window, out: &mut W) -> Result<(), ExportError> {
     let lat = best.lat.unwrap_or(0.0);
     let lon = best.lon.unwrap_or(0.0);
     let frequency = frequency_column(channel, &best.kind);
+    // The WiGLE spellings of the two captured columns: the roaming consortium
+    // body as hex identifiers, the company identifier as a number. A capture
+    // from before they were collected stores NULL, and a blank column says so.
+    let rcois = best.rcoi.as_deref().map_or_else(String::new, |body| rcoi_text(body).to_string());
+    let mfgr = best.mfgr_id.map_or_else(String::new, |id| id.to_string());
 
     writeln!(
         out,
-        "{},{},{},{},{channel},{frequency},{rssi},{lat},{lon},{},{},,,{}",
+        "{},{},{},{},{channel},{frequency},{rssi},{lat},{lon},{},{},{rcois},{mfgr},{}",
         mac(&best.bssid),
         quote(&ssid_text(best.ssid.as_deref().unwrap_or_default())),
         quote(&best.security),

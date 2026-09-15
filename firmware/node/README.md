@@ -12,8 +12,10 @@ geofencing, uploads and dock mode did not come across at all, because a node in
 this fleet has no use for any of them.
 
 It shares no wire format with it either. A node broadcasts a 13-byte heartbeat
-once per completed sweep and a 17-plus-SSID sighting per newly-seen BSSID, and
-accepts a 15-byte unicast assignment. All three sit behind wartui's own `WTUI`
+once per completed sweep and an 18-plus-SSID sighting per newly-seen BSSID —
+whose trailer carries a Passpoint network's roaming consortium identifiers, or
+a BLE advertiser's manufacturer identifier, when there are any — and accepts a
+15-byte unicast assignment. All three sit behind wartui's own `WTUI`
 magic and a wire version byte, checked before anything else, so neither fleet can
 reach the other at all.
 
@@ -155,9 +157,10 @@ firmware exists to avoid. It is initialised and never enabled —
 `HCI_LE_Set_Scan_Enable` is only ever sent from inside a sweep.
 
 There is no host stack. `esp-radio` exposes the controller as a raw HCI pipe and
-all this firmware wants is an address and a signal strength, so the four commands
-and one event live in `wartui_proto::hci` where they are unit-tested, and
-`src/ble.rs` is only the conversation.
+all this firmware wants is an address, a signal strength and — when an advertiser
+offers one — its manufacturer identifier, so the four commands and one event live
+in `wartui_proto::hci` where they are unit-tested, and `src/ble.rs` is only the
+conversation.
 
 ## What is testable, and where
 
@@ -182,9 +185,10 @@ carry device names and serials, and a probe response is addressed to a real clie
 nearby. So addresses come out synthetic, SSIDs become `ap-NNN` padded to the
 length the real one had, and every element the parser does not read has its
 contents replaced; every tag and length stays at its original offset, and the SSID
-length, DS Parameter Set, RSN, HT Operation and WPA elements arrive untouched,
-which is the whole of what is being tested. `--raw` turns it off for a fixture you
-are keeping to yourself, and its output does not belong in a repository.
+length, DS Parameter Set, RSN, HT Operation, WPA and Roaming Consortium elements
+arrive untouched, which is the whole of what is being tested. `--raw` turns it
+off for a fixture you are keeping to yourself, and its output does not belong in
+a repository.
 
 ## Two things that are easy to get wrong
 

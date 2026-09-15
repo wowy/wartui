@@ -38,7 +38,7 @@ use crate::record::Record;
 ///
 /// `migrate` carries each step. Every one so far has been lossless, which is the
 /// property to keep: a capture is data rather than a deployment.
-pub const SCHEMA_VERSION: i32 = 7;
+pub const SCHEMA_VERSION: i32 = 8;
 
 /// The schema, applied to any database that does not already have it.
 const SCHEMA: &str = r"
@@ -117,6 +117,8 @@ CREATE TABLE IF NOT EXISTS observation (
   channel INTEGER NOT NULL,
   rssi INTEGER NOT NULL,
   kind TEXT NOT NULL,
+  rcoi BLOB,
+  mfgr_id INTEGER,
   lat REAL, lon REAL, alt REAL, accuracy REAL,
   pos_source TEXT NOT NULL,
   pos_at INTEGER,
@@ -616,6 +618,22 @@ fn migrate(conn: &Connection, found: i32) -> Result<(), StoreError> {
     if (1..=6).contains(&found) {
         conn.execute_batch("DROP INDEX IF EXISTS obs_node")?;
     }
+
+    // v8. Two optional columns on the observation, for the roaming consortium
+    // body and the BLE manufacturer identifier the sighting wire started
+    // carrying. Both NULL for every row that predates them, which is the
+    // truthful value: those sightings were heard by builds that took nothing
+    // of the kind off the air, and a blank column says so without claiming
+    // they were absent from the beacons.
+    if (1..=7).contains(&found)
+        && has_table(conn, "observation")?
+        && !has_column(conn, "observation", "rcoi")?
+    {
+        conn.execute_batch(
+            "ALTER TABLE observation ADD COLUMN rcoi BLOB;
+             ALTER TABLE observation ADD COLUMN mfgr_id INTEGER;",
+        )?;
+    }
     Ok(())
 }
 
@@ -627,8 +645,9 @@ fn has_table(conn: &Connection, table: &str) -> Result<bool, StoreError> {
     Ok(stmt.exists(params![table])?)
 }
 
-/// Whether a table already has a column, so a migration can be run once.
-fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, StoreError> {
+/// Whether a table already has a column, so a migration can be run once — and
+/// so a reader that never migrates can ask what shape the file is in.
+pub(crate) fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, StoreError> {
     let mut stmt = conn.prepare("SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2")?;
     Ok(stmt.exists(params![table, column])?)
 }
@@ -940,9 +959,9 @@ fn write_batch(
                 tx.prepare_cached(
                     "INSERT INTO observation
                        (session_id, node_mac, rx_at, link_rssi, bssid, ssid, security,
-                        channel, rssi, kind, lat, lon, alt, accuracy, pos_source, pos_at,
-                        raw_body)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+                        channel, rssi, kind, rcoi, mfgr_id, lat, lon, alt, accuracy,
+                        pos_source, pos_at, raw_body)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
                 )?
                 .execute(params![
                     session_id,
@@ -955,6 +974,8 @@ fn write_batch(
                     obs.channel,
                     obs.rssi,
                     kind_name(obs.kind),
+                    obs.rcoi,
+                    obs.mfgr_id,
                     obs.fix.lat,
                     obs.fix.lon,
                     obs.fix.alt,
