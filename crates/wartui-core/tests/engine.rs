@@ -210,9 +210,12 @@ fn unique_addresses_are_counted_once_per_kind_however_often_they_are_heard() {
         }
     }
 
+    // Within one rather than exact: two of these addresses sharing one of the estimator's
+    // 16,384 registers reads one short, and whether any do depends on a hash the standard
+    // library is free to change.
     let snapshot = engine.snapshot(clock.at(3), StoreStats::default());
-    assert_eq!(snapshot.unique_wifi_aps, 30);
-    assert_eq!(snapshot.unique_ble_aps, 7);
+    assert!(snapshot.unique_wifi_aps.abs_diff(30) <= 1, "{}", snapshot.unique_wifi_aps);
+    assert!(snapshot.unique_ble_aps.abs_diff(7) <= 1, "{}", snapshot.unique_ble_aps);
     assert_eq!(counters(&engine).observations, 111, "every sighting still counts");
 }
 

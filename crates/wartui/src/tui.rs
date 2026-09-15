@@ -661,14 +661,20 @@ fn period(ms: u32) -> String {
 /// figures are within about 1%, so the digits past three are noise once there are
 /// enough of them to matter.
 fn approx(n: u64) -> String {
-    let n_f = n as f64;
-    match n {
-        0..10_000 => n.to_string(),
-        10_000..100_000 => format!("{:.1}k", n_f / 1e3),
-        100_000..1_000_000 => format!("{:.0}k", n_f / 1e3),
-        1_000_000..10_000_000 => format!("{:.2}M", n_f / 1e6),
-        _ => format!("{:.1}M", n_f / 1e6),
+    if n < 10_000 {
+        return n.to_string();
     }
+    let (k, m) = (n as f64 / 1e3, n as f64 / 1e6);
+    // Each unit is judged on the figure as it would be printed, not the raw count, so one
+    // that rounds up past its unit's range (99,950 to "100.0k") moves on to the next.
+    for (value, digits, below, unit) in [(k, 1, 100.0, "k"), (k, 0, 1000.0, "k"), (m, 2, 10.0, "M")]
+    {
+        let text = format!("{value:.digits$}");
+        if text.parse::<f64>().is_ok_and(|shown| shown < below) {
+            return format!("{text}{unit}");
+        }
+    }
+    format!("{m:.1}M")
 }
 
 /// Why a node cannot be given an assignment, or `None` if it can.
@@ -1251,6 +1257,10 @@ mod tests {
         assert_eq!(approx(506_360), "506k");
         assert_eq!(approx(2_350_000), "2.35M");
         assert_eq!(approx(23_500_000), "23.5M");
+        // Figures that round up into the next unit are shown in it.
+        assert_eq!(approx(99_950), "100k");
+        assert_eq!(approx(999_500), "1.00M");
+        assert_eq!(approx(9_999_999), "10.0M");
     }
 
     /// Rendering must not panic at any size the terminal might be.
