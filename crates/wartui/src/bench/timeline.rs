@@ -32,6 +32,8 @@ pub struct Mark {
     pub process: Option<ProcessIo>,
     /// The card's I/O, where the kernel keeps it.
     pub device: Option<DeviceIo>,
+    /// The WAL file's size in bytes, if it exists.
+    pub wal: Option<u64>,
 }
 
 /// What happened between two marks.
@@ -53,6 +55,8 @@ pub struct Slice {
     pub process: Option<ProcessIo>,
     /// Device I/O inside it, if both marks had it.
     pub device: Option<DeviceIo>,
+    /// The WAL file's size in bytes as the slice closed: a level, not a difference.
+    pub wal: Option<u64>,
 }
 
 impl Slice {
@@ -66,6 +70,7 @@ impl Slice {
             idle_windows: to.idle_windows.saturating_sub(from.idle_windows),
             process: to.process.zip(from.process).map(|(to, from)| to.since(from)),
             device: to.device.zip(from.device).map(|(to, from)| to.since(from)),
+            wal: to.wal,
         }
     }
 

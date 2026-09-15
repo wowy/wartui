@@ -63,7 +63,8 @@ starts once the whole fleet holds its assignments, and `idle_node_windows` must 
 for a run to count. `--interval` (60 s by default) adds a timeline to the report, so a
 long run shows when the card slowed down. Each SQLite and batching setting has a flag,
 so two settings compare on one binary. `--defer-bssid-index` captures without the
-`obs_bssid` index and builds it once at close. [`docs/store-io-findings.md`](../../docs/store-io-findings.md)
+`obs_bssid` index and builds it once at close, and `--checkpoint-every MS` copies the WAL
+back from a thread of its own instead of inside a commit. [`docs/store-io-findings.md`](../../docs/store-io-findings.md)
 has the method and the numbers so far.
 
 ## Assigning channels

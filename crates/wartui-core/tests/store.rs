@@ -13,7 +13,7 @@ use wartui_core::position::{Fix, PositionSource};
 use wartui_core::record::{
     AdminOutcome, AssignmentSent, BridgeSeen, Heartbeat, NodeSeen, Observation, Record,
 };
-use wartui_core::store::{SessionInfo, Store, StoreConfig, open_readonly};
+use wartui_core::store::{Checkpoint, SessionInfo, Store, StoreConfig, open_readonly};
 use wartui_proto::air::RecordKind;
 use wartui_proto::link::Mac;
 use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun};
@@ -352,6 +352,45 @@ fn a_capture_keeps_no_timings_unless_asked() {
     let report = store.close();
     assert_eq!(report.written, 1);
     assert!(report.batches.is_empty());
+}
+
+#[test]
+fn a_background_checkpointer_copies_and_truncates_the_wal_and_every_row_survives() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("wartui.db");
+    let mut config = StoreConfig::new(&path);
+    config.batch_rows = 8;
+    config.batch_interval = Duration::from_millis(5);
+    // Any WAL at all is past the limit, so every pass is followed by a truncation.
+    config.checkpoint = Checkpoint::Background { every: Duration::from_millis(5), truncate_at: 0 };
+    let session = SessionInfo { espnow_channel: 6, pool: ChannelPool::Us, notes: None };
+    let store = Store::open(&config, &session, EPOCH_MS).expect("opening the store");
+
+    for n in 0..20u8 {
+        let rows: Vec<Record> = (0..10u8)
+            .map(|m| observation(NODE, [0x02, 0, 0, 0, n, m], -60, EPOCH_MS, Fix::none()))
+            .collect();
+        assert_eq!(store.submit(rows), 0);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    std::thread::sleep(Duration::from_millis(50));
+    let report = store.close();
+
+    assert!(!report.checkpoints.passes.is_empty(), "{report:?}");
+    assert!(!report.checkpoints.truncations.is_empty(), "{report:?}");
+    let conn = open_readonly(&path).expect("reopening read-only");
+    let rows: i64 =
+        conn.query_row("SELECT COUNT(*) FROM observation", [], |r| r.get(0)).expect("counting");
+    assert_eq!(rows, 200, "copying the WAL back from another connection loses nothing");
+}
+
+#[test]
+fn by_default_checkpoints_happen_in_commits_and_no_thread_reports_any() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = store(&dir);
+    assert_eq!(store.submit(vec![observation(NODE, [0xAA; 6], -60, EPOCH_MS, Fix::none())]), 0);
+    let report = store.close();
+    assert!(report.checkpoints.passes.is_empty() && report.checkpoints.truncations.is_empty());
 }
 
 fn has_bssid_index(path: &std::path::Path) -> bool {

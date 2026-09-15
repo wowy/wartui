@@ -191,6 +191,53 @@ pub struct StoreConfig {
     /// taken while the capture runs has no index to use. Only a database without the index
     /// yet is affected, and the file is the same shape at close either way.
     pub defer_bssid_index: bool,
+    /// When the WAL is copied back into the database file.
+    pub checkpoint: Checkpoint,
+}
+
+/// When the WAL is copied back into the database file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Checkpoint {
+    /// SQLite's own, inside whichever commit takes the WAL past its limit
+    /// ([`StoreConfig::wal_autocheckpoint_pages`]), so that commit waits for the card.
+    #[default]
+    Inline,
+    /// A thread of its own with a connection of its own, so the writer does not wait.
+    ///
+    /// Every `every` it copies what the WAL holds with a `PASSIVE` checkpoint, which runs
+    /// beside the writer's commits instead of holding them up. A passive checkpoint cannot
+    /// rewind a WAL that is still being appended to, so the file would only grow; once it
+    /// passes `truncate_at` bytes a `TRUNCATE` checkpoint follows. That one does make the
+    /// writer wait, but only for what arrived since the passive pass before it.
+    Background {
+        /// How often to copy the WAL back.
+        every: Duration,
+        /// The WAL file size in bytes past which to rewind it.
+        truncate_at: u64,
+    },
+}
+
+/// What the background checkpointer did. Empty under [`Checkpoint::Inline`], whose
+/// checkpoints happen inside commits and are part of their timings.
+#[derive(Debug, Clone, Default)]
+pub struct CheckpointReport {
+    /// Every passive pass, in order.
+    pub passes: Vec<CheckpointPass>,
+    /// Every truncating checkpoint, in order.
+    pub truncations: Vec<CheckpointPass>,
+}
+
+/// One checkpoint.
+#[derive(Debug, Clone, Copy)]
+pub struct CheckpointPass {
+    /// When it returned, so a benchmark can leave out its warm-up.
+    pub finished_at: Instant,
+    /// How long it took.
+    pub took: Duration,
+    /// Frames in the WAL when it ran.
+    pub frames: i64,
+    /// Frames it had copied into the database file when it returned.
+    pub copied: i64,
 }
 
 impl StoreConfig {
@@ -208,6 +255,7 @@ impl StoreConfig {
             page_size: None,
             timings: false,
             defer_bssid_index: false,
+            checkpoint: Checkpoint::Inline,
         }
     }
 }
@@ -228,6 +276,8 @@ pub struct StoreReport {
     /// How long building a deferred `obs_bssid` index took at close. `None` unless
     /// [`StoreConfig::defer_bssid_index`] deferred it, or if building it failed.
     pub index_build: Option<Duration>,
+    /// What the background checkpointer did, if there was one.
+    pub checkpoints: CheckpointReport,
 }
 
 /// One committed batch, as [`StoreReport`] keeps it.
@@ -271,6 +321,8 @@ pub struct Store {
     tx: Option<SyncSender<Record>>,
     stats: Arc<Stats>,
     join: Option<JoinHandle<StoreReport>>,
+    /// The background checkpointer and what stops it, under [`Checkpoint::Background`].
+    checkpointer: Option<(SyncSender<()>, JoinHandle<CheckpointReport>)>,
     session_id: i64,
     assignment_base: u64,
 }
@@ -321,7 +373,30 @@ impl Store {
             })
             .map_err(StoreError::Spawn)?;
 
-        Ok(Self { tx: Some(tx), stats, join: Some(join), session_id, assignment_base })
+        let checkpointer = match config.checkpoint {
+            Checkpoint::Inline => None,
+            Checkpoint::Background { every, truncate_at } => {
+                let conn = Connection::open(&config.path)?;
+                // Waits out the writer's commit rather than failing a truncation on it.
+                conn.busy_timeout(Duration::from_secs(5))?;
+                let wal = wal_path(&config.path);
+                let (stop, stopped) = sync_channel(1);
+                let join = std::thread::Builder::new()
+                    .name("wartui-checkpoint".to_owned())
+                    .spawn(move || checkpointer(&conn, &wal, &stopped, every, truncate_at))
+                    .map_err(StoreError::Spawn)?;
+                Some((stop, join))
+            }
+        };
+
+        Ok(Self {
+            tx: Some(tx),
+            stats,
+            join: Some(join),
+            checkpointer,
+            session_id,
+            assignment_base,
+        })
     }
 
     /// The session rows will be attributed to.
@@ -383,6 +458,14 @@ impl Store {
             }
             None => StoreReport::default(),
         };
+        // After the writer, so its last batch has a checkpoint to land in.
+        if let Some((stop, join)) = self.checkpointer.take() {
+            let _ = stop.send(());
+            match join.join() {
+                Ok(checkpoints) => report.checkpoints = checkpoints,
+                Err(_) => tracing::error!("the store checkpoint thread panicked"),
+            }
+        }
         report.written = self.stats.written.load(Ordering::Relaxed);
         report.dropped = self.stats.dropped.load(Ordering::Relaxed);
         report
@@ -553,6 +636,52 @@ fn reserve_versions(conn: &mut Connection) -> Result<u64, StoreError> {
     Ok(base)
 }
 
+/// The background checkpointer's loop, until `stop` says or the store is gone.
+///
+/// Always one last pass on the way out, so a stopped store does not leave behind a WAL
+/// the next open has to replay.
+fn checkpointer(
+    conn: &Connection,
+    wal: &Path,
+    stop: &Receiver<()>,
+    every: Duration,
+    truncate_at: u64,
+) -> CheckpointReport {
+    let mut report = CheckpointReport::default();
+    loop {
+        let stopping = !matches!(stop.recv_timeout(every), Err(RecvTimeoutError::Timeout));
+        match checkpoint(conn, "PASSIVE") {
+            Ok(pass) => report.passes.push(pass),
+            Err(e) => tracing::warn!("a background checkpoint failed: {e}"),
+        }
+        if std::fs::metadata(wal).is_ok_and(|m| m.len() > truncate_at) {
+            match checkpoint(conn, "TRUNCATE") {
+                Ok(pass) => report.truncations.push(pass),
+                Err(e) => tracing::warn!("truncating the WAL failed: {e}"),
+            }
+        }
+        if stopping {
+            return report;
+        }
+    }
+}
+
+/// Run one checkpoint in `mode` and say what it did.
+fn checkpoint(conn: &Connection, mode: &str) -> Result<CheckpointPass, rusqlite::Error> {
+    let started = Instant::now();
+    let (frames, copied) = conn.query_row(&format!("PRAGMA wal_checkpoint({mode})"), [], |r| {
+        Ok((r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))
+    })?;
+    Ok(CheckpointPass { finished_at: Instant::now(), took: started.elapsed(), frames, copied })
+}
+
+/// SQLite's WAL for a database: the name with `-wal` on the end, not an extension.
+fn wal_path(db: &Path) -> PathBuf {
+    let mut name = db.as_os_str().to_owned();
+    name.push("-wal");
+    PathBuf::from(name)
+}
+
 fn prepare(conn: &Connection, config: &StoreConfig) -> Result<(), rusqlite::Error> {
     // First, because a new file's page size is fixed when its header is written, and
     // switching it to WAL writes the header.
@@ -571,7 +700,10 @@ fn prepare(conn: &Connection, config: &StoreConfig) -> Result<(), rusqlite::Erro
         // page size is.
         conn.pragma_update(None, "cache_size", -i64::from(kib))?;
     }
-    if let Some(pages) = config.wal_autocheckpoint_pages {
+    if matches!(config.checkpoint, Checkpoint::Background { .. }) {
+        // The checkpointer's job now; a commit that ran one would wait for the card.
+        conn.pragma_update(None, "wal_autocheckpoint", 0)?;
+    } else if let Some(pages) = config.wal_autocheckpoint_pages {
         conn.pragma_update(None, "wal_autocheckpoint", pages)?;
     }
     Ok(())
