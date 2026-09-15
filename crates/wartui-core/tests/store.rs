@@ -13,7 +13,9 @@ use wartui_core::position::{Fix, PositionSource};
 use wartui_core::record::{
     AdminOutcome, AssignmentSent, BridgeSeen, Heartbeat, NodeSeen, Observation, Record,
 };
-use wartui_core::store::{SessionInfo, Store, StoreConfig, open_readonly};
+use wartui_core::store::{
+    Checkpoint, SCHEMA_VERSION, SessionInfo, Store, StoreConfig, open_readonly,
+};
 use wartui_proto::air::RecordKind;
 use wartui_proto::link::Mac;
 use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun};
@@ -309,6 +311,293 @@ fn a_full_queue_drops_and_counts_rather_than_blocking_the_engine() {
 
     assert!(dropped > 0, "a depth-1 queue and no draining should overflow");
     assert_eq!(store.stats().dropped, dropped as u64, "and say so in the stats");
+}
+
+#[test]
+fn closing_reports_every_committed_batch_when_timings_were_asked_for() {
+    // The benchmark divides rows by these, so a batch counted twice or not at all
+    // would show up as a store that got better or worse for no reason.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut config = StoreConfig::new(dir.path().join("wartui.db"));
+    config.batch_rows = 8;
+    config.batch_interval = Duration::from_secs(3600);
+    config.timings = true;
+    let session = SessionInfo { espnow_channel: 6, pool: ChannelPool::Us, notes: None };
+    let store = Store::open(&config, &session, EPOCH_MS).expect("opening the store");
+
+    let rows: Vec<Record> = (0..20u8)
+        .map(|n| observation(NODE, [0x02, 0, 0, 0, 0, n], -60, EPOCH_MS, Fix::none()))
+        .collect();
+    assert_eq!(store.submit(rows), 0);
+    let report = store.close();
+
+    assert_eq!(report.written, 20);
+    assert_eq!(report.dropped, 0);
+    // Two full batches of eight, then the four left over at close.
+    let rows: Vec<usize> = report.batches.iter().map(|b| b.rows).collect();
+    assert_eq!(rows, [8, 8, 4], "{report:?}");
+    for batch in &report.batches {
+        assert!(batch.commit <= batch.batch, "a commit is part of its batch: {report:?}");
+    }
+    assert!(
+        report.batches.windows(2).all(|w| w[0].committed_at <= w[1].committed_at),
+        "in the order they committed, so a warm-up can be cut off the front: {report:?}"
+    );
+}
+
+#[test]
+fn a_capture_keeps_no_timings_unless_asked() {
+    // The list grows per commit for as long as a capture runs.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = store(&dir);
+    assert_eq!(store.submit(vec![observation(NODE, [0xAA; 6], -60, EPOCH_MS, Fix::none())]), 0);
+    let report = store.close();
+    assert_eq!(report.written, 1);
+    assert!(report.batches.is_empty());
+}
+
+#[test]
+fn a_background_checkpointer_copies_and_truncates_the_wal_and_every_row_survives() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("wartui.db");
+    let mut config = StoreConfig::new(&path);
+    config.batch_rows = 8;
+    config.batch_interval = Duration::from_millis(5);
+    // Any WAL at all is past the limit, so every pass that catches up is followed by a
+    // truncation, and the last one, with the writer gone, always catches up.
+    config.checkpoint = Checkpoint::Background { every: Duration::ZERO, truncate_at: 0 };
+    let session = SessionInfo { espnow_channel: 6, pool: ChannelPool::Us, notes: None };
+    let store = Store::open(&config, &session, EPOCH_MS).expect("opening the store");
+
+    for n in 0..20u8 {
+        let rows: Vec<Record> = (0..10u8)
+            .map(|m| observation(NODE, [0x02, 0, 0, 0, n, m], -60, EPOCH_MS, Fix::none()))
+            .collect();
+        assert_eq!(store.submit(rows), 0);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    std::thread::sleep(Duration::from_millis(50));
+    let report = store.close();
+
+    assert!(!report.checkpoints.passes.is_empty(), "{report:?}");
+    assert!(!report.checkpoints.truncations.is_empty(), "{report:?}");
+    let conn = open_readonly(&path).expect("reopening read-only");
+    let rows: i64 =
+        conn.query_row("SELECT COUNT(*) FROM observation", [], |r| r.get(0)).expect("counting");
+    assert_eq!(rows, 200, "copying the WAL back from another connection loses nothing");
+}
+
+/// The WAL file's size after twenty small commits spaced well apart, under `checkpoint`.
+fn wal_after_spaced_commits(checkpoint: Checkpoint) -> u64 {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("wartui.db");
+    let mut config = StoreConfig::new(&path);
+    config.batch_rows = 50;
+    config.batch_interval = Duration::from_millis(5);
+    // So that inline, SQLite's own checkpoint never rewinds the WAL either.
+    config.wal_autocheckpoint_pages = Some(1_000_000);
+    config.checkpoint = checkpoint;
+    let session = SessionInfo { espnow_channel: 6, pool: ChannelPool::Us, notes: None };
+    let store = Store::open(&config, &session, EPOCH_MS).expect("opening the store");
+
+    for n in 0..20u8 {
+        let rows: Vec<Record> = (0..50u8)
+            .map(|m| observation(NODE, [0x02, 0, 0, 1, n, m], -60, EPOCH_MS, Fix::none()))
+            .collect();
+        assert_eq!(store.submit(rows), 0);
+        // Far longer than a pass over a few pages takes, so each catches up before the
+        // next commit begins.
+        std::thread::sleep(Duration::from_millis(40));
+    }
+    let size = std::fs::metadata(dir.path().join("wartui.db-wal")).map_or(0, |m| m.len());
+    store.close();
+    size
+}
+
+#[test]
+fn a_checkpoint_right_after_each_commit_lets_the_writer_rewind_the_wal_itself() {
+    let inline = wal_after_spaced_commits(Checkpoint::Inline);
+    // Never truncated, so a small WAL can only be the writer rewinding it.
+    let background = wal_after_spaced_commits(Checkpoint::Background {
+        every: Duration::ZERO,
+        truncate_at: u64::MAX,
+    });
+    // Never checkpointed, the WAL holds all twenty commits; rewound after each, about one.
+    assert!(background * 4 < inline, "background {background} bytes, inline {inline}");
+}
+
+#[test]
+fn a_commit_too_soon_after_a_checkpoint_still_gets_one_when_the_fleet_goes_quiet() {
+    // The writer's own checkpoint is off, so a wake-up the checkpointer passes over would
+    // leave that commit unsynced until the next commit, which a quiet fleet never sends.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut config = StoreConfig::new(dir.path().join("wartui.db"));
+    config.batch_interval = Duration::from_millis(10);
+    config.checkpoint =
+        Checkpoint::Background { every: Duration::from_millis(200), truncate_at: u64::MAX };
+    let session = SessionInfo { espnow_channel: 6, pool: ChannelPool::Us, notes: None };
+    let store = Store::open(&config, &session, EPOCH_MS).expect("opening the store");
+
+    // Two commits well inside one interval, then nothing.
+    assert_eq!(store.submit(vec![observation(NODE, [0xAA; 6], -60, EPOCH_MS, Fix::none())]), 0);
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(store.submit(vec![observation(NODE, [0xBB; 6], -60, EPOCH_MS, Fix::none())]), 0);
+    std::thread::sleep(Duration::from_millis(500));
+
+    let closing = std::time::Instant::now();
+    let report = store.close();
+    let before_close = report.checkpoints.passes.iter().filter(|p| p.finished_at < closing).count();
+    assert!(
+        before_close >= 2,
+        "the second commit's pass runs when the interval is up, not at close: {report:?}"
+    );
+}
+
+#[test]
+fn by_default_the_store_checkpoints_from_its_own_thread_after_every_commit() {
+    // What the card measured best: see `StoreConfig::new`.
+    let config = StoreConfig::new("unused.db");
+    assert_eq!(
+        config.checkpoint,
+        Checkpoint::Background { every: Duration::ZERO, truncate_at: 64 << 20 }
+    );
+    assert_eq!(
+        (config.batch_interval, config.batch_rows, config.queue_depth),
+        (Duration::from_secs(1), 16_384, 16_384)
+    );
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = store(&dir);
+    assert_eq!(store.submit(vec![observation(NODE, [0xAA; 6], -60, EPOCH_MS, Fix::none())]), 0);
+    let report = store.close();
+    assert!(!report.checkpoints.passes.is_empty(), "{report:?}");
+}
+
+#[test]
+fn an_inline_checkpoint_leaves_it_to_sqlite_and_no_thread_reports_any() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut config = StoreConfig::new(dir.path().join("wartui.db"));
+    config.batch_interval = Duration::from_millis(10);
+    config.checkpoint = Checkpoint::Inline;
+    let session = SessionInfo { espnow_channel: 6, pool: ChannelPool::Us, notes: None };
+    let store = Store::open(&config, &session, EPOCH_MS).expect("opening the store");
+    assert_eq!(store.submit(vec![observation(NODE, [0xAA; 6], -60, EPOCH_MS, Fix::none())]), 0);
+    let report = store.close();
+    assert!(report.checkpoints.passes.is_empty() && report.checkpoints.truncations.is_empty());
+}
+
+fn has_bssid_index(path: &std::path::Path) -> bool {
+    open_readonly(path)
+        .expect("reopening read-only")
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = 'obs_bssid'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .expect("asking for the index")
+        == 1
+}
+
+#[test]
+fn a_new_database_has_no_index_on_bssid_and_exports_all_the_same() {
+    // The index cost the card fourteen times the writes and made export slower; the
+    // export's scan and sort must still find every network without it.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let conn = write(
+        &dir,
+        vec![
+            observation(NODE, [0xAA; 6], -70, EPOCH_MS, fixed(37.0, -122.0)),
+            observation(OTHER, [0xAA; 6], -50, EPOCH_MS + 1_000, fixed(37.1, -122.1)),
+            observation(NODE, [0xBB; 6], -60, EPOCH_MS, fixed(37.0, -122.0)),
+        ],
+    );
+    assert!(!has_bssid_index(&dir.path().join("wartui.db")));
+
+    let (csv, summary) = export(&conn);
+    assert_eq!(summary.networks, 2, "{csv}");
+    assert!(csv.contains(",-50,37.1,"), "still the strongest sighting: {csv}");
+}
+
+#[test]
+fn a_v5_database_loses_its_bssid_index_and_keeps_every_row() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("wartui.db");
+    let first = open_at(&path);
+    assert_eq!(
+        first.submit(vec![observation(NODE, [0xAA; 6], -60, EPOCH_MS, fixed(37.0, -122.0))]),
+        0
+    );
+    first.close();
+
+    // Put the file back the way v5 left it: the same tables, with the index.
+    let old = Connection::open(&path).expect("reopening");
+    old.execute_batch("CREATE INDEX obs_bssid ON observation(bssid)").expect("v5's index");
+    old.pragma_update(None, "user_version", 5).expect("stamping");
+    drop(old);
+    assert!(has_bssid_index(&path));
+
+    open_at(&path).close();
+
+    assert!(!has_bssid_index(&path), "opening it brings it forward");
+    let conn = open_readonly(&path).expect("reopening read-only");
+    let version: i32 =
+        conn.pragma_query_value(None, "user_version", |row| row.get(0)).expect("the version");
+    assert_eq!(version, SCHEMA_VERSION);
+    let rows: i64 =
+        conn.query_row("SELECT COUNT(*) FROM observation", [], |r| r.get(0)).expect("counting");
+    assert_eq!(rows, 1);
+    assert_eq!(export(&conn).1.networks, 1);
+}
+
+fn observation_indexes(path: &std::path::Path) -> Vec<String> {
+    open_readonly(path)
+        .expect("reopening read-only")
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'observation'")
+        .and_then(|mut q| q.query_map([], |r| r.get(0)).and_then(Iterator::collect))
+        .expect("listing the indexes")
+}
+
+#[test]
+fn a_v6_database_loses_its_node_index_and_a_new_one_indexes_no_sighting() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("wartui.db");
+    let first = open_at(&path);
+    let sighting = observation(NODE, [0xAA; 6], -60, EPOCH_MS, fixed(37.0, -122.0));
+    assert_eq!(first.submit(vec![sighting]), 0);
+    first.close();
+    assert!(observation_indexes(&path).is_empty(), "every sighting is an append");
+
+    // Put the file back the way v6 left it.
+    let old = Connection::open(&path).expect("reopening");
+    old.execute_batch("CREATE INDEX obs_node ON observation(node_mac, rx_at)").expect("v6's index");
+    old.pragma_update(None, "user_version", 6).expect("stamping");
+    drop(old);
+    assert_eq!(observation_indexes(&path), ["obs_node"]);
+
+    open_at(&path).close();
+
+    assert!(observation_indexes(&path).is_empty(), "opening it brings it forward");
+    let conn = open_readonly(&path).expect("reopening read-only");
+    let rows: i64 =
+        conn.query_row("SELECT COUNT(*) FROM observation", [], |r| r.get(0)).expect("counting");
+    assert_eq!(rows, 1, "and the sighting is still there");
+}
+
+#[test]
+fn a_page_size_asked_for_is_the_one_a_new_database_gets() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("wartui.db");
+    let mut config = StoreConfig::new(&path);
+    config.page_size = Some(16_384);
+    config.cache_kib = Some(32 * 1024);
+    config.wal_autocheckpoint_pages = Some(4000);
+    let session = SessionInfo { espnow_channel: 6, pool: ChannelPool::Us, notes: None };
+    Store::open(&config, &session, EPOCH_MS).expect("opening the store").close();
+
+    let conn = open_readonly(&path).expect("reopening read-only");
+    let page_size: i64 =
+        conn.pragma_query_value(None, "page_size", |r| r.get(0)).expect("reading page_size");
+    assert_eq!(page_size, 16_384, "set before WAL wrote the header, or it would be 4096");
 }
 
 #[test]

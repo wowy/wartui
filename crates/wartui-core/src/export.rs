@@ -113,6 +113,10 @@ pub fn wigle_csv<W: Write>(
 /// Ordering positioned rows ahead of unpositioned ones in `ROW_NUMBER` is what makes
 /// the outer filter safe — otherwise an unpositioned sighting can win rn = 1 and
 /// then be filtered out, losing a network with a good weaker sighting to submit.
+///
+/// There is deliberately no index on `bssid` for this to walk: a scan and a sort read the
+/// table in order, and were faster than one random lookup per sighting (the store's v6
+/// migration says more).
 const SELECT_NETWORKS: &str = r"
 SELECT bssid, ssid, security, first_seen, channel, rssi, lat, lon, alt, accuracy, kind
 FROM (

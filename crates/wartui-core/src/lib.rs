@@ -25,4 +25,7 @@ pub use engine::{
 pub use gps::{Gps, GpsConfig, GpsStatus, GpsView};
 pub use position::{Fix, PositionChain, PositionSource};
 pub use record::{AdminOutcome, Record};
-pub use store::{SessionInfo, Store, StoreConfig, StoreError};
+pub use store::{
+    BatchTiming, Checkpoint, CheckpointPass, CheckpointReport, SessionInfo, Store, StoreConfig,
+    StoreError, StoreReport,
+};

@@ -13,6 +13,12 @@
 //! what keeps a quiet fleet's rows from sitting unwritten. The queue is bounded and
 //! drops rather than blocks, because a lost observation is one row while a stalled
 //! engine misses everything. Drops are counted and shown.
+//!
+//! A second thread, with a connection of its own, copies the WAL back into the file right
+//! after each commit ([`Checkpoint::Background`]), so no commit waits for the card while a
+//! checkpoint syncs. It only copies pages: the writer is still the one thing that writes
+//! rows. `docs/store-io-findings.md` has the measurements behind the batching, the
+//! checkpoint and the lack of any index on sightings.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -32,7 +38,7 @@ use crate::record::Record;
 ///
 /// `migrate` carries each step. Every one so far has been lossless, which is the
 /// property to keep: a capture is data rather than a deployment.
-pub const SCHEMA_VERSION: i32 = 5;
+pub const SCHEMA_VERSION: i32 = 7;
 
 /// The schema, applied to any database that does not already have it.
 const SCHEMA: &str = r"
@@ -118,9 +124,8 @@ CREATE TABLE IF NOT EXISTS observation (
 );
 -- Deliberately no unique constraint on bssid: every sighting is kept, with the node
 -- that made it and the signal it saw. Deduplicating at ingest would throw away the
--- coverage data.
-CREATE INDEX IF NOT EXISTS obs_bssid ON observation(bssid);
-CREATE INDEX IF NOT EXISTS obs_node ON observation(node_mac, rx_at);
+-- coverage data. Nor does the table have an index of any kind, though export groups by
+-- bssid: the v6 and v7 steps in `migrate` say why.
 
 CREATE TABLE IF NOT EXISTS raw_frame (
   id INTEGER PRIMARY KEY,
@@ -164,19 +169,134 @@ pub struct StoreConfig {
     pub batch_interval: Duration,
     /// Queue depth between the engine and the writer.
     pub queue_depth: usize,
+    /// The writer's page cache, in KiB. `None` leaves SQLite's default, about 2 MiB.
+    pub cache_kib: Option<u32>,
+    /// How many pages the WAL may reach before a commit checkpoints it into the
+    /// main file. `None` leaves SQLite's default of 1000.
+    pub wal_autocheckpoint_pages: Option<u32>,
+    /// Page size in bytes. Only a new file takes it: a WAL database keeps the size
+    /// it was created with. `None` leaves SQLite's default of 4096.
+    pub page_size: Option<u32>,
+    /// Keep the wall time of every batch for [`Store::close`] to report.
+    ///
+    /// Off unless asked, because the list grows with every commit for as long as the
+    /// capture runs. `wartui bench` asks.
+    pub timings: bool,
+    /// When the WAL is copied back into the database file.
+    pub checkpoint: Checkpoint,
+}
+
+/// When the WAL is copied back into the database file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Checkpoint {
+    /// SQLite's own, inside whichever commit takes the WAL past its limit
+    /// ([`StoreConfig::wal_autocheckpoint_pages`]), so that commit waits for the card.
+    #[default]
+    Inline,
+    /// A thread of its own with a connection of its own, so the writer does not wait.
+    ///
+    /// Woken by each commit, at most once every `every`, it copies the WAL back with a
+    /// `PASSIVE` checkpoint, which runs beside the writer instead of holding it up. Right
+    /// after a commit is the moment that matters: SQLite rewinds the WAL to its start only
+    /// when a writer begins a transaction and finds every frame already copied, so a pass
+    /// that finishes before the next commit keeps the WAL the size of a commit. Run on a
+    /// timer instead, a pass lands across commits, never catches up, and the WAL only grows
+    /// (`docs/store-io-findings.md`). If commits still outpace the card, the file grows
+    /// anyway; once it passes `truncate_at` bytes, and a pass has caught up so nothing is
+    /// left to copy under the writer's lock, a `TRUNCATE` rewinds it.
+    Background {
+        /// The least time between passes. Zero is a pass after every commit.
+        every: Duration,
+        /// The WAL file size in bytes past which to truncate it.
+        truncate_at: u64,
+    },
+}
+
+/// What the background checkpointer did. Empty under [`Checkpoint::Inline`], whose
+/// checkpoints happen inside commits and are part of their timings.
+#[derive(Debug, Clone, Default)]
+pub struct CheckpointReport {
+    /// Every passive pass, in order.
+    pub passes: Vec<CheckpointPass>,
+    /// Every truncating checkpoint, in order.
+    pub truncations: Vec<CheckpointPass>,
+}
+
+/// One checkpoint.
+#[derive(Debug, Clone, Copy)]
+pub struct CheckpointPass {
+    /// When it returned, so a benchmark can leave out its warm-up.
+    pub finished_at: Instant,
+    /// How long it took.
+    pub took: Duration,
+    /// Frames in the WAL when it ran.
+    pub frames: i64,
+    /// Frames it had copied into the database file when it returned.
+    pub copied: i64,
+    /// Whether SQLite said it could not finish, for want of a lock.
+    pub busy: bool,
 }
 
 impl StoreConfig {
-    /// Defaults tuned for a live capture: 512 rows or 100 ms.
+    /// Defaults tuned for a live capture on a microSD card: commit every second or 16,384
+    /// rows, queue up to 16,384 records, and checkpoint the WAL from a thread of its own
+    /// right after each commit. SQLite's own cache and page size.
+    ///
+    /// Measured on a Raspberry Pi writing a full drive to a card
+    /// (`docs/store-io-findings.md`). A commit a second rewrites the pages every commit
+    /// touches once a second, not ten times, and checkpointing right after it lets the
+    /// writer rewind the WAL itself: together they took the bytes written from 2.8× the
+    /// database to 2.2× and the slowest batch from 149 ms to 58 ms. The queue is about
+    /// 1.4 s of a drive's rows for about 2 MiB, against that 58 ms. The price is the
+    /// loss window: a crash loses at most the second not yet committed plus the queue.
+    /// The checkpoint also syncs the WAL once a second, so a power cut loses no more.
     #[must_use]
     pub fn new(path: impl Into<PathBuf>) -> Self {
         Self {
             path: path.into(),
-            batch_rows: 512,
-            batch_interval: Duration::from_millis(100),
-            queue_depth: 4096,
+            batch_rows: 16_384,
+            batch_interval: Duration::from_secs(1),
+            queue_depth: 16_384,
+            cache_kib: None,
+            wal_autocheckpoint_pages: None,
+            page_size: None,
+            timings: false,
+            // A pass after every commit, and the truncation a safety valve that a WAL the
+            // size of one commit never reaches.
+            checkpoint: Checkpoint::Background { every: Duration::ZERO, truncate_at: 64 << 20 },
         }
     }
+}
+
+/// What the writer did over the store's life, returned by [`Store::close`].
+///
+/// For `wartui bench`, which is how a change to the store is judged on the slow cards
+/// it matters on. The view only ever needs [`StoreStats`].
+#[derive(Debug, Clone, Default)]
+pub struct StoreReport {
+    /// Rows written.
+    pub written: u64,
+    /// Rows dropped, whether by a full queue or a failed batch.
+    pub dropped: u64,
+    /// Every committed batch, in order. Empty unless [`StoreConfig::timings`] asked
+    /// for it.
+    pub batches: Vec<BatchTiming>,
+    /// What the background checkpointer did, if there was one.
+    pub checkpoints: CheckpointReport,
+}
+
+/// One committed batch, as [`StoreReport`] keeps it.
+#[derive(Debug, Clone, Copy)]
+pub struct BatchTiming {
+    /// When the commit returned, so a benchmark can leave out its warm-up.
+    pub committed_at: Instant,
+    /// Rows in the batch.
+    pub rows: usize,
+    /// Statements and commit together.
+    pub batch: Duration,
+    /// The `COMMIT` alone: where the WAL is written, and where SQLite runs an
+    /// automatic checkpoint.
+    pub commit: Duration,
 }
 
 /// What to record about the session being opened.
@@ -205,7 +325,10 @@ struct Stats {
 pub struct Store {
     tx: Option<SyncSender<Record>>,
     stats: Arc<Stats>,
-    join: Option<JoinHandle<()>>,
+    join: Option<JoinHandle<StoreReport>>,
+    /// The background checkpointer, under [`Checkpoint::Background`]. It stops when the
+    /// writer does, because the writer holds the only thing that wakes it.
+    checkpointer: Option<JoinHandle<CheckpointReport>>,
     session_id: i64,
     assignment_base: u64,
 }
@@ -222,7 +345,7 @@ impl Store {
         started_at_ms: i64,
     ) -> Result<Self, StoreError> {
         let mut conn = Connection::open(&config.path)?;
-        prepare(&conn)?;
+        prepare(&conn, config)?;
         // Before the schema, not after: `CREATE TABLE IF NOT EXISTS` no-ops
         // against a newer file's tables rather than failing, so an older build
         // would append old-shaped rows and stamp the version marker back down.
@@ -242,19 +365,50 @@ impl Store {
         let session_id = insert_session(&mut conn, session, started_at_ms)?;
         let assignment_base = reserve_versions(&mut conn)?;
 
+        // The writer wakes the checkpointer after each commit. One wake-up waiting stands for
+        // any number of commits, so the channel holds one.
+        let (wake, woken) = match config.checkpoint {
+            Checkpoint::Inline => (None, None),
+            Checkpoint::Background { .. } => {
+                let (wake, woken) = sync_channel(1);
+                (Some(wake), Some(woken))
+            }
+        };
+
         let (tx, rx) = sync_channel(config.queue_depth);
         let stats = Arc::new(Stats::default());
         let join = std::thread::Builder::new()
             .name("wartui-store".to_owned())
             .spawn({
                 let stats = Arc::clone(&stats);
-                let batch_rows = config.batch_rows;
-                let batch_interval = config.batch_interval;
-                move || writer(conn, &rx, session_id, batch_rows, batch_interval, &stats)
+                let config = config.clone();
+                move || writer(conn, &rx, session_id, &config, &stats, wake.as_ref())
             })
             .map_err(StoreError::Spawn)?;
 
-        Ok(Self { tx: Some(tx), stats, join: Some(join), session_id, assignment_base })
+        let checkpointer = match (config.checkpoint, woken) {
+            (Checkpoint::Background { every, truncate_at }, Some(woken)) => {
+                let conn = Connection::open(&config.path)?;
+                // Waits out the writer's commit rather than failing a truncation on it.
+                conn.busy_timeout(Duration::from_secs(5))?;
+                let wal = wal_path(&config.path);
+                let join = std::thread::Builder::new()
+                    .name("wartui-checkpoint".to_owned())
+                    .spawn(move || checkpointer(&conn, &wal, &woken, every, truncate_at))
+                    .map_err(StoreError::Spawn)?;
+                Some(join)
+            }
+            _ => None,
+        };
+
+        Ok(Self {
+            tx: Some(tx),
+            stats,
+            join: Some(join),
+            checkpointer,
+            session_id,
+            assignment_base,
+        })
     }
 
     /// The session rows will be attributed to.
@@ -300,18 +454,33 @@ impl Store {
     /// Flush everything queued, close the session and stop the writer.
     ///
     /// Called explicitly rather than left to `Drop`, so a failure to finish the last
-    /// transaction is reported rather than swallowed.
-    pub fn close(mut self) {
-        self.shutdown();
+    /// transaction is reported rather than swallowed. Returns what the writer did,
+    /// which only the benchmark reads.
+    pub fn close(mut self) -> StoreReport {
+        self.shutdown()
     }
 
-    fn shutdown(&mut self) {
+    fn shutdown(&mut self) -> StoreReport {
         drop(self.tx.take());
-        if let Some(join) = self.join.take()
-            && join.join().is_err()
-        {
-            tracing::error!("the store writer thread panicked; the last batch may be lost");
+        let mut report = match self.join.take().map(JoinHandle::join) {
+            Some(Ok(report)) => report,
+            Some(Err(_)) => {
+                tracing::error!("the store writer thread panicked; the last batch may be lost");
+                StoreReport::default()
+            }
+            None => StoreReport::default(),
+        };
+        // After the writer, whose end is what stops it, so its last batch has a checkpoint
+        // to land in.
+        if let Some(join) = self.checkpointer.take() {
+            match join.join() {
+                Ok(checkpoints) => report.checkpoints = checkpoints,
+                Err(_) => tracing::error!("the store checkpoint thread panicked"),
+            }
         }
+        report.written = self.stats.written.load(Ordering::Relaxed);
+        report.dropped = self.stats.dropped.load(Ordering::Relaxed);
+        report
     }
 }
 
@@ -426,6 +595,27 @@ fn migrate(conn: &Connection, found: i32) -> Result<(), StoreError> {
     {
         conn.execute_batch("ALTER TABLE observation RENAME COLUMN raw_text TO raw_body")?;
     }
+
+    // v6. `obs_bssid` cost more than it bought, on both sides of the store. Its key is a
+    // random address, so every commit dirtied leaf pages across the whole index, each
+    // written once to the WAL and again at checkpoint. With it, the process wrote fourteen
+    // times as much for the same rows, and a microSD card dropped two rows in three where
+    // without it the card dropped none. Export, the one reader that groups by address, was
+    // faster without it as well: walking the index reads the table once per sighting in
+    // random order, where a scan and a sort read it in order. The numbers are in
+    // `docs/store-io-findings.md`. An index is derived data, so dropping it loses nothing.
+    if (1..=5).contains(&found) {
+        conn.execute_batch("DROP INDEX IF EXISTS obs_bssid")?;
+    }
+
+    // v7. `obs_node` answered a question nothing asked. No query anywhere filtered or
+    // sorted sightings by node, yet the index was about a sixth of a full drive's file
+    // (48 MiB of 292) and every commit rewrote the last page of each node's run in it, to
+    // the WAL and again at checkpoint. A per-node query that wants it later can build it
+    // over a finished capture far more cheaply than capture could keep it up.
+    if (1..=6).contains(&found) {
+        conn.execute_batch("DROP INDEX IF EXISTS obs_node")?;
+    }
     Ok(())
 }
 
@@ -479,7 +669,91 @@ fn reserve_versions(conn: &mut Connection) -> Result<u64, StoreError> {
     Ok(base)
 }
 
-fn prepare(conn: &Connection) -> Result<(), rusqlite::Error> {
+/// The background checkpointer's loop, woken by the writer's commits until the writer is
+/// gone.
+///
+/// Always one last pass on the way out, so a stopped store does not leave behind a WAL
+/// the next open has to replay.
+fn checkpointer(
+    conn: &Connection,
+    wal: &Path,
+    woken: &Receiver<()>,
+    every: Duration,
+    truncate_at: u64,
+) -> CheckpointReport {
+    let mut report = CheckpointReport::default();
+    let mut last_pass: Option<Instant> = None;
+    // A wake-up that came too soon after the last pass. It is still owed one: otherwise
+    // the last commit before the fleet goes quiet sits uncopied, and unsynced, until the
+    // next commit or the store closes, since the writer's own checkpoint is off.
+    let mut owed = false;
+    loop {
+        let stopping = if owed {
+            // Another commit may wake it first, and still be too soon; the wait then
+            // resumes for whatever of the interval is left.
+            let left =
+                last_pass.map_or(Duration::ZERO, |last| every.saturating_sub(last.elapsed()));
+            matches!(woken.recv_timeout(left), Err(RecvTimeoutError::Disconnected))
+        } else {
+            woken.recv().is_err()
+        };
+        // Put off rather than run at once: a pass straight after the last one would copy
+        // next to nothing and sync the file again for it.
+        if !stopping && last_pass.is_some_and(|last| last.elapsed() < every) {
+            owed = true;
+            continue;
+        }
+        owed = false;
+        last_pass = Some(Instant::now());
+        let caught_up = match checkpoint(conn, "PASSIVE") {
+            Ok(pass) => {
+                let caught_up = !pass.busy && pass.copied >= pass.frames;
+                report.passes.push(pass);
+                caught_up
+            }
+            Err(e) => {
+                tracing::warn!("a background checkpoint failed: {e}");
+                false
+            }
+        };
+        // Only once a pass has caught up: the truncation then holds the writer's lock to
+        // rewind the file, not to copy and sync whatever the pass left behind.
+        if caught_up && std::fs::metadata(wal).is_ok_and(|m| m.len() > truncate_at) {
+            match checkpoint(conn, "TRUNCATE") {
+                Ok(pass) => report.truncations.push(pass),
+                Err(e) => tracing::warn!("truncating the WAL failed: {e}"),
+            }
+        }
+        if stopping {
+            return report;
+        }
+    }
+}
+
+/// Run one checkpoint in `mode` and say what it did.
+fn checkpoint(conn: &Connection, mode: &str) -> Result<CheckpointPass, rusqlite::Error> {
+    let started = Instant::now();
+    let (busy, frames, copied) =
+        conn.query_row(&format!("PRAGMA wal_checkpoint({mode})"), [], |r| {
+            Ok((r.get::<_, i64>(0)? != 0, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))
+        })?;
+    let finished_at = Instant::now();
+    Ok(CheckpointPass { finished_at, took: finished_at - started, frames, copied, busy })
+}
+
+/// SQLite's WAL for a database: the name with `-wal` on the end, not an extension.
+fn wal_path(db: &Path) -> PathBuf {
+    let mut name = db.as_os_str().to_owned();
+    name.push("-wal");
+    PathBuf::from(name)
+}
+
+fn prepare(conn: &Connection, config: &StoreConfig) -> Result<(), rusqlite::Error> {
+    // First, because a new file's page size is fixed when its header is written, and
+    // switching it to WAL writes the header.
+    if let Some(bytes) = config.page_size {
+        conn.pragma_update(None, "page_size", bytes)?;
+    }
     // WAL so the export's reader and the ingest writer never wait on each other;
     // NORMAL because losing a capture's tail to a power cut beats fsyncing every
     // commit; a busy timeout so a concurrent export backs off instead of erroring.
@@ -487,6 +761,17 @@ fn prepare(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.busy_timeout(Duration::from_secs(5))?;
     conn.pragma_update(None, "foreign_keys", true)?;
+    if let Some(kib) = config.cache_kib {
+        // Negative means KiB rather than pages, so the figure holds whatever the
+        // page size is.
+        conn.pragma_update(None, "cache_size", -i64::from(kib))?;
+    }
+    if matches!(config.checkpoint, Checkpoint::Background { .. }) {
+        // The checkpointer's job now; a commit that ran one would wait for the card.
+        conn.pragma_update(None, "wal_autocheckpoint", 0)?;
+    } else if let Some(pages) = config.wal_autocheckpoint_pages {
+        conn.pragma_update(None, "wal_autocheckpoint", pages)?;
+    }
     Ok(())
 }
 
@@ -523,12 +808,22 @@ fn writer(
     mut conn: Connection,
     rx: &Receiver<Record>,
     session_id: i64,
-    batch_rows: usize,
-    batch_interval: Duration,
+    config: &StoreConfig,
     stats: &Stats,
-) {
+    wake: Option<&SyncSender<()>>,
+) -> StoreReport {
+    let (batch_rows, batch_interval) = (config.batch_rows, config.batch_interval);
     let mut pending: Vec<Record> = Vec::with_capacity(batch_rows);
     let mut last_flush = Instant::now();
+    let mut report = StoreReport::default();
+    let mut flush = |conn: &mut Connection, pending: &mut Vec<Record>| {
+        let committing = !pending.is_empty();
+        flush(conn, session_id, pending, stats, config.timings.then_some(&mut report));
+        // A full channel already has a wake-up waiting, and that one covers this commit.
+        if committing && let Some(wake) = wake {
+            let _ = wake.try_send(());
+        }
+    };
 
     loop {
         match rx.recv_timeout(batch_interval) {
@@ -540,34 +835,50 @@ fn writer(
                 // indefinitely, because the timeout only fires when the queue
                 // goes quiet.
                 if pending.len() >= batch_rows || last_flush.elapsed() >= batch_interval {
-                    flush(&mut conn, session_id, &mut pending, stats);
+                    flush(&mut conn, &mut pending);
                     last_flush = Instant::now();
                 }
             }
             Err(RecvTimeoutError::Timeout) => {
-                flush(&mut conn, session_id, &mut pending, stats);
+                flush(&mut conn, &mut pending);
                 last_flush = Instant::now();
             }
             Err(RecvTimeoutError::Disconnected) => break,
         }
     }
 
-    flush(&mut conn, session_id, &mut pending, stats);
+    flush(&mut conn, &mut pending);
     if let Err(e) = conn.execute(
         "UPDATE session SET ended_at = ?1 WHERE id = ?2",
         params![chrono::Utc::now().timestamp_millis(), session_id],
     ) {
         tracing::warn!("could not close out the session row: {e}");
     }
+    report
 }
 
-fn flush(conn: &mut Connection, session_id: i64, pending: &mut Vec<Record>, stats: &Stats) {
+fn flush(
+    conn: &mut Connection,
+    session_id: i64,
+    pending: &mut Vec<Record>,
+    stats: &Stats,
+    report: Option<&mut StoreReport>,
+) {
     if pending.is_empty() {
         return;
     }
     let count = pending.len();
+    let started = Instant::now();
     match write_batch(conn, session_id, pending) {
-        Ok(()) => {
+        Ok(commit) => {
+            if let Some(report) = report {
+                report.batches.push(BatchTiming {
+                    committed_at: Instant::now(),
+                    rows: count,
+                    batch: started.elapsed(),
+                    commit,
+                });
+            }
             stats.written.fetch_add(count as u64, Ordering::Relaxed);
         }
         Err(e) => {
@@ -580,11 +891,12 @@ fn flush(conn: &mut Connection, session_id: i64, pending: &mut Vec<Record>, stat
     pending.clear();
 }
 
+/// Write one batch in one transaction, returning how long the commit alone took.
 fn write_batch(
     conn: &mut Connection,
     session_id: i64,
     pending: &[Record],
-) -> Result<(), rusqlite::Error> {
+) -> Result<Duration, rusqlite::Error> {
     let tx = conn.transaction()?;
     for record in pending {
         match record {
@@ -717,5 +1029,7 @@ fn write_batch(
             }
         }
     }
-    tx.commit()
+    let committing = Instant::now();
+    tx.commit()?;
+    Ok(committing.elapsed())
 }

@@ -79,6 +79,42 @@ fn assign(link: &LinkHandle, version: u8, channels: ChannelSet, ble: bool) {
     .expect("queued");
 }
 
+/// How many distinct Wi-Fi addresses are among the first `sightings` a lone node reports
+/// from a neighbourhood of forty networks.
+async fn distinct_addresses(sightings_per_address: Option<u32>, sightings: usize) -> usize {
+    let mut link = SimTransport::new(SimConfig {
+        node_count: 1,
+        wifi_networks: 40,
+        ble_chance: 0.0,
+        sightings_per_address,
+        ..SimConfig::default()
+    })
+    .start()
+    .expect("simulator starts");
+    assign(&link, 1, ChannelPool::All.channels(), false);
+
+    let mut seen = HashSet::new();
+    let mut reported = 0;
+    while reported < sightings {
+        let (_, raw) = next_frame(&mut link).await;
+        if let Some(sighting) = sighting_of(&raw) {
+            seen.insert(sighting.bssid);
+            reported += 1;
+        }
+    }
+    seen.len()
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_moving_neighbourhood_keeps_meeting_new_addresses_and_a_parked_one_does_not() {
+    // Parked, forty networks fit the dedup ring, so whatever is reported again is one of
+    // the same forty: the ring's refresh, not a new device.
+    assert!(distinct_addresses(None, 120).await <= 40);
+    // Moving on after two hearings, a network the ring suppressed once comes back under
+    // an address it has never held, so every report is a device not seen before.
+    assert_eq!(distinct_addresses(Some(2), 120).await, 120);
+}
+
 /// The next `SendResult` the bridge reports.
 async fn next_send_result(link: &mut LinkHandle) -> SendStatus {
     loop {
