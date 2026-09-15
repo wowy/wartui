@@ -207,6 +207,8 @@ pub async fn run(args: Args) -> Result<()> {
     // The directory rather than the file, which does not exist yet.
     let dir = args.db.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
     let device = io::Device::holding(dir);
+    let mount = io::Mount::holding(dir);
+    let on_battery = io::on_battery();
 
     let link = SimTransport::new(sim.clone()).start().context("starting the simulator")?;
     let started = now();
@@ -356,6 +358,10 @@ pub async fn run(args: Args) -> Result<()> {
     report.put("os", format!("{} {}", std::env::consts::OS, std::env::consts::ARCH));
     report.put("kernel", io::kernel_release());
     report.put("device", device.as_ref().map(|d| d.name.clone()));
+    report.put("filesystem", mount.as_ref().map(|m| m.fstype.clone()));
+    report.put("mount_options", mount.as_ref().map(|m| m.options.clone()));
+    report.put("fs_options", mount.as_ref().map(|m| m.fs_options.clone()));
+    report.put("on_battery", on_battery.map(|yes| if yes { "yes" } else { "no" }));
     report.put("profile", args.profile.name());
     report.put("duration_s", args.duration);
 
