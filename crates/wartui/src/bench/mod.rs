@@ -61,6 +61,14 @@ const SETTLE_TIMEOUT: Duration = Duration::from_secs(120);
 /// The pool the benchmark fleet scans.
 const POOL: ChannelPool = ChannelPool::Us;
 
+/// Sightings per address in the simulated drive.
+///
+/// The drive the store is sized for is two million sightings of half a million networks:
+/// four to one is the ratio of the operator's own drives, and half a million is the most
+/// WDGWars accepts in a day. `drive` produces about 5,750 sightings a second, so a run of
+/// 350 s is one such drive.
+const SIGHTINGS_PER_ADDRESS: u32 = 4;
+
 /// A named load, so runs on different machines are comparable.
 #[derive(Debug, Clone, Copy, ValueEnum, Default)]
 pub enum Profile {
@@ -130,6 +138,11 @@ pub struct Args {
     #[arg(long, value_name = "N")]
     seed: Option<u64>,
 
+    /// Sightings of a network before it gives way to a new address, as a moving fleet
+    /// leaves networks behind. 4 by default; 0 keeps the neighbourhood fixed.
+    #[arg(long, value_name = "N")]
+    sightings_per_address: Option<u32>,
+
     /// Also keep every frame's undecoded bytes, as `run --record-raw` does.
     #[arg(long)]
     record_raw: bool,
@@ -192,6 +205,8 @@ pub async fn run(args: Args) -> Result<()> {
         wifi_networks: args.networks.unwrap_or_else(|| busy_networks(nodes, POOL)),
         ble_chance: args.ble_chance.unwrap_or(ble_chance),
         seed: args.seed.unwrap_or(SimConfig::default().seed),
+        sightings_per_address: Some(args.sightings_per_address.unwrap_or(SIGHTINGS_PER_ADDRESS))
+            .filter(|&n| n > 0),
         ..SimConfig::default()
     };
 
@@ -379,6 +394,7 @@ pub async fn run(args: Args) -> Result<()> {
     report.put("sim_networks", u64::from(sim.wifi_networks));
     report.put("sim_ble_chance", sim.ble_chance);
     report.put("sim_seed", sim.seed);
+    report.put("sim_sightings_per_address", sim.sightings_per_address.map(u64::from));
     report.put("record_raw", if args.record_raw { "on" } else { "off" });
 
     report.put("commit_rows", store_config.batch_rows);
@@ -400,6 +416,8 @@ pub async fn run(args: Args) -> Result<()> {
         "observations_heard",
         last.counters.observations.saturating_sub(before.counters.observations),
     );
+    // Over the whole run, warm-up included, as the engine counts them.
+    report.put("unique_addresses", last.unique_wifi_aps + last.unique_ble_aps);
     report.put("rows_written", rows_written);
     report.put("rows_dropped", rows_dropped);
     report.put("rows_per_s", ratio(rows_written, seconds));
