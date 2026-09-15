@@ -98,10 +98,143 @@ Already visible:
   holds more than twenty rows, so half the statements the writer runs keep rewriting
   the same handful.
 
-### Raspberry Pi, microSD
+### Raspberry Pi CM5, Intel Optane 16 GB NVMe
 
-To be measured.
+`drive`, 300 s, three runs, kernel 6.18, ext4 mounted `noatime`. The medians are below, and every run agreed
+with them to within 0.5%. Idle node-windows 0 and rows dropped 0 in all three.
 
-### x86 laptop, Linux
+| figure | median |
+| --- | --- |
+| rows/s | 11,531 |
+| commits/s, rows/commit | 22.5, 511 |
+| commit p50 / p95 / p99 ms | 1.33 / 62.4 / 63.7 |
+| batch p50 ms | 4.90 |
+| write syscalls | 5.85 M (865 per commit) |
+| MiB handed to the kernel | 14,928 (2.2 MiB per commit) |
+| device writes | 1.74 M (5,800/s) |
+| device MiB | 15,021 |
+| KiB per device write | 8.84 |
+| database at close | 236 MiB |
+| peak RSS | 9.6 MiB |
+| export of 1.74 M observations | 14.8 s |
 
-To be measured.
+Per minute (run 1):
+
+| minute | device MiB | KiB/write | commit p99 ms |
+| --- | --- | --- | --- |
+| 1 | 2,143 | 11.3 | 53.1 |
+| 2 | 3,045 | 9.0 | 61.4 |
+| 3 | 3,273 | 8.5 | 63.4 |
+| 4 | 3,275 | 8.4 | 63.6 |
+| 5 | 3,282 | 8.3 | 64.7 |
+
+What it says:
+
+- **The store writes about 64 bytes to the device for every byte the database
+  grows.** 15 GiB went out to grow the file by 236 MiB. The process itself handed the
+  kernel 2.2 MiB per commit, for 511 rows that grow the file by about 36 KiB. Once
+  settled that is roughly 55 MiB/s, or about 196 GiB per hour of driving.
+- **The writes are small and scattered, and they get smaller as the file grows.** At
+  8.8 KiB per request, the load is essentially random 4 KiB pages, and per-write size
+  falls from 11.3 to 8.3 KiB over five minutes. That is the signature of a
+  random-keyed index (`obs_bssid`): each commit dirties leaf pages spread over the
+  whole index, and there are more of them to hit as it grows.
+- **Commits are bimodal.** p50 is 1.3 ms and p95 is 62 ms, with almost nothing in
+  between, which fits some commits also running SQLite's automatic checkpoint. That
+  copies the WAL's pages back into the database file, so every dirty page is written
+  twice.
+- **A microSD card is unlikely to sustain this.** The Optane took 5,800 random writes
+  a second and still averaged 3.1 ms per request once queueing is counted. An A2-rated
+  card is only specified for 2,000 random-write IOPS at 4 KiB, and 196 GiB an hour is
+  an endurance problem for any card. Not yet measured on one.
+- **Memory is not the constraint.** 9.6 MiB peak with SQLite's default ~2 MiB cache.
+- **`device_flushes` is 0, and that is likely the drive, not the store.** A device
+  that reports no volatile write cache is never sent flush requests.
+- **`storage_write_mib` counts whole kernel pages, and this kernel's are 16 KiB.**
+  `rpi-2712` kernels use 16 KiB pages, so a 4 KiB SQLite page write that dirties a
+  page-cache page is charged at 16 KiB. That is why it reads 33.5 GiB against 14.9 GiB
+  actually written; on the x86 laptop below, with 4 KiB pages, the two nearly agree.
+  Read `write_mib` and the device columns instead.
+
+### Raspberry Pi CM5, Amazon Basics 64 GB microSD
+
+`drive`, 300 s, three runs, the same board and kernel as the Optane runs above, and
+ext4 mounted `noatime` there too.
+Idle node-windows was 0 in every run, so the fleet produced the same load. The
+card could not keep up with it.
+
+| figure | median |
+| --- | --- |
+| rows/s | 3,633 |
+| rows dropped | 2.36 M of 3.46 M (68%) |
+| commits/s, rows/commit | 7.1, 512 |
+| commit p50 / p95 / p99 / max ms | 1.31 / 690 / 721 / 759 |
+| write syscalls | 1.56 M |
+| MiB handed to the kernel | 3,854 (1.8 MiB per commit) |
+| device writes | 369 k |
+| device MiB | 3,934 |
+| KiB per device write | 10.8 |
+| device write ms per request | 13.3 |
+| database at close | 76 MiB |
+| export of 560 k observations | 4.2 s |
+
+Per minute, as the median of the three runs:
+
+| minute | rows/s | dropped | commit p99 ms | device writes | device MiB | KiB/write |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | 6,122 | 320,521 | 497 | 61,710 | 936 | 15.1 |
+| 2 | 3,420 | 484,992 | 646 | 74,004 | 776 | 10.7 |
+| 3 | 3,036 | 505,440 | 699 | 74,951 | 756 | 10.0 |
+| 4 | 2,900 | 517,344 | 716 | 79,596 | 741 | 9.5 |
+| 5 | 2,806 | 524,538 | 738 | 80,961 | 736 | 9.4 |
+
+What it says:
+
+- **The store drops most of what it is given from the first minute on.** It dropped
+  320 k rows in minute 1 and 525 k in minute 5.
+- **The card is at its random-write ceiling, and the work per row keeps rising.** Its
+  request count creeps up (61 k to 81 k a minute, about 1,350/s by minute 5) while
+  bytes per request fall (15 to 9.4 KiB). Throughput was still falling when the run
+  ended, so five minutes did not find the floor.
+- **Commits are fast or about 0.7 s, with little in between.** At 7.1 commits/s the
+  writer averages 141 ms a commit, which works out to roughly one commit in five being
+  a slow one. That fits SQLite's automatic checkpoint (every 1000 pages) running
+  inside the commit and waiting on the card. It is inferred from the percentiles, not
+  counted. Each 0.7 s stall lets about 8,000 rows arrive against a 4,096-record queue.
+- **Write amplification is the same shape as on the Optane.** 3.9 GiB went to the card
+  to grow the file by 76 MiB, about 52×.
+
+### Lenovo ThinkPad X1 Carbon Gen 13, Crucial T500 NVMe
+
+`drive`, 300 s, three runs, Fedora 44, kernel 7.2, x86_64, **on battery**. btrfs
+mounted `relatime,compress=zstd:1,discard=async`, no encryption. The device counters
+are empty because btrfs gives files an anonymous device number with no
+`/sys/dev/block` entry, so `bench` could not name the device. It now falls back to the
+mount's source, and reports the filesystem, its options and whether the machine was on
+battery.
+
+| figure | median |
+| --- | --- |
+| rows/s | 11,514 |
+| rows dropped | 3,474, then 3,534 and 0 (about 0.1%) |
+| commit p50 / p95 / p99 ms | 3.30 / 57.3 / 64.3 |
+| commit max ms | 602, 563 and 87 |
+| write syscalls | 5.84 M |
+| MiB handed to the kernel | 14,891 |
+| database at close | 236 MiB |
+| peak RSS | 11.2 MiB |
+| export of 1.73 M observations | 7.5 s |
+
+What it says:
+
+- **The process writes the same thing on every machine.** 14.9 GiB of writes to grow
+  a 236 MiB file, which is within 0.3% of the CM5 on Optane. The amplification belongs
+  to the store and SQLite, not to the device or the filesystem.
+- **A single stall of about 0.6 s drops rows even on a fast SSD.** Both runs that
+  dropped did so in the first two minutes, and both had one commit of 560–600 ms. At
+  11,500 rows/s the 4,096-record queue holds about 355 ms of headroom.
+- **A median commit costs 3.3 ms against 1.3 ms on the Pi.** That compares two
+  machines, not two drives. btrfs with zstd compression does more work per write than
+  ext4, and on battery the CPU is likely held to a lower performance level. The 0.6 s
+  stalls could come from either. A run plugged in, with the device counters, is the
+  one to compare.
