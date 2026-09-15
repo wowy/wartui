@@ -107,10 +107,18 @@ impl Ring {
 /// Take the oldest report not yet taken, if there is one.
 ///
 /// One at a time rather than a bulk drain, so nothing holds the ring's lock
-/// across a transmit — the same shape `sniff` gives its sightings.
+/// across a transmit — the same shape `sniff` gives its sightings. The bound
+/// is `len` and not the array: `sniff` can index its ring freely because its
+/// slots are `Option` and say when they are empty, where these are plain
+/// reports and the slots past `len` are an earlier sweep's leavings or the
+/// zero fill — a `00:00:00:00:00:00` advertiser at 0 dBm that would go on
+/// the air as if heard.
 pub fn take() -> Option<AdvReport> {
     RING.with(|ring| {
-        let report = ring.items.get(ring.taken).copied()?;
+        if ring.taken >= ring.len {
+            return None;
+        }
+        let report = ring.items[ring.taken];
         ring.taken += 1;
         Some(report)
     })
