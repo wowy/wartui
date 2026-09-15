@@ -354,6 +354,48 @@ fn a_capture_keeps_no_timings_unless_asked() {
     assert!(report.batches.is_empty());
 }
 
+fn has_bssid_index(path: &std::path::Path) -> bool {
+    open_readonly(path)
+        .expect("reopening read-only")
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = 'obs_bssid'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .expect("asking for the index")
+        == 1
+}
+
+#[test]
+fn a_deferred_bssid_index_is_missing_while_capturing_and_built_at_close() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("wartui.db");
+    let mut config = StoreConfig::new(&path);
+    config.batch_rows = 1;
+    config.defer_bssid_index = true;
+    let session = SessionInfo { espnow_channel: 6, pool: ChannelPool::Us, notes: None };
+    let store = Store::open(&config, &session, EPOCH_MS).expect("opening the store");
+    assert!(!has_bssid_index(&path), "the schema committed at open leaves it out");
+
+    let sighting = observation(NODE, [0xAA; 6], -60, EPOCH_MS, fixed(37.0, -122.0));
+    assert_eq!(store.submit(vec![sighting]), 0);
+    let report = store.close();
+
+    assert!(has_bssid_index(&path), "closing builds it");
+    assert!(report.index_build.is_some(), "and times it: {report:?}");
+    let conn = open_readonly(&path).expect("reopening read-only");
+    assert_eq!(export(&conn).1.networks, 1, "and the capture exports like any other");
+}
+
+#[test]
+fn by_default_the_bssid_index_exists_from_open_and_nothing_is_built_at_close() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("wartui.db");
+    let store = open_at(&path);
+    assert!(has_bssid_index(&path));
+    assert_eq!(store.close().index_build, None);
+}
+
 #[test]
 fn a_page_size_asked_for_is_the_one_a_new_database_gets() {
     let dir = tempfile::tempdir().expect("temp dir");

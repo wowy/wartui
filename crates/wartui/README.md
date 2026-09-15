@@ -62,7 +62,8 @@ The simulated neighbourhood is sized so every node reports on every sweep, measu
 starts once the whole fleet holds its assignments, and `idle_node_windows` must read 0
 for a run to count. `--interval` (60 s by default) adds a timeline to the report, so a
 long run shows when the card slowed down. Each SQLite and batching setting has a flag,
-so two settings compare on one binary. [`docs/store-io-findings.md`](../../docs/store-io-findings.md)
+so two settings compare on one binary. `--defer-bssid-index` captures without the
+`obs_bssid` index and builds it once at close. [`docs/store-io-findings.md`](../../docs/store-io-findings.md)
 has the method and the numbers so far.
 
 ## Assigning channels

@@ -238,3 +238,29 @@ What it says:
   ext4, and on battery the CPU is likely held to a lower performance level. The 0.6 s
   stalls could come from either. A run plugged in, with the device counters, is the
   one to compare.
+
+## Experiments
+
+### Deferring the `obs_bssid` index
+
+**Hypothesis.** Most of the write amplification is `obs_bssid`. Its key is a random
+address, so every commit dirties leaf pages spread across the whole index, and each
+page is written twice: to the WAL, then into the file at checkpoint. The other writes
+mostly append. Leaving the index unbuilt during capture should cut the pages per
+commit from hundreds to tens, and the rows the card can take should rise with it.
+
+`--defer-bssid-index` creates the schema without the index and builds it once, after
+the last batch. The build is timed as `index_build_ms` and left out of the rates. Its
+I/O is in the totals, since a capture would pay it, but not in the timeline. Run it
+beside the baseline on the same device:
+
+```sh
+for i in 1 2 3; do
+  target/release/wartui bench --db /mnt/card/bench.db --fresh --duration 300 --defer-bssid-index --json
+done
+```
+
+To be measured. If it pays off, making it the store's behaviour still needs two
+things decided: how an export taken during a capture finds its networks without the
+index, and whether an index built in one go at close is affordable on a card after an
+hour's drive.
