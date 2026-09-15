@@ -16,7 +16,7 @@
 //! now does. It lives here rather than in the view because it is the same kind
 //! of fact as a channel assignment: something one node holds, delivered inside
 //! that node's own admin window, believed only on an acknowledgement.
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use wartui_bridge::{BridgeInfo, LinkEvent};
@@ -26,6 +26,7 @@ use wartui_proto::air::{
 use wartui_proto::link::{BridgeToHost, EspNowPayload, HostToBridge, Mac, SendStatus};
 use wartui_proto::plan::{self, ChannelPool, ChannelSet, Plan, Radio};
 
+use crate::distinct::Distinct;
 use crate::position::PositionChain;
 use crate::record::{
     AdminOutcome, AssignmentSent, Heartbeat, NodeSeen, Observation, RawFrame, Record, ssid_text,
@@ -452,10 +453,11 @@ pub struct Snapshot {
     pub assignable: usize,
     /// The most recent observations, newest last.
     pub tail: Vec<TailEntry>,
-    /// Distinct Wi-Fi BSSIDs seen this session.
-    pub unique_wifi_aps: usize,
-    /// Distinct BLE BSSIDs seen this session.
-    pub unique_ble_aps: usize,
+    /// Distinct Wi-Fi BSSIDs seen this session, estimated (about 0.8% standard error;
+    /// see [`crate::distinct`]).
+    pub unique_wifi_aps: u64,
+    /// Distinct BLE addresses seen this session, estimated the same way.
+    pub unique_ble_aps: u64,
     /// Engine totals.
     pub counters: Counters,
     /// Store totals.
@@ -505,8 +507,8 @@ pub struct FleetEngine {
     link_error: Option<String>,
     counters: Counters,
     tail: VecDeque<TailEntry>,
-    unique_wifi: HashSet<Mac>,
-    unique_ble: HashSet<Mac>,
+    unique_wifi: Distinct,
+    unique_ble: Distinct,
     bridge_status: Option<BridgeStatus>,
     /// The bridge's drop count when this host attached, subtracted from every
     /// later reading. `None` until the first status of a connection arrives.
@@ -572,8 +574,8 @@ impl FleetEngine {
             link_error: None,
             counters: Counters::default(),
             tail: VecDeque::new(),
-            unique_wifi: HashSet::new(),
-            unique_ble: HashSet::new(),
+            unique_wifi: Distinct::new(),
+            unique_ble: Distinct::new(),
             bridge_status: None,
             dropped_baseline: None,
             last_status_poll: None,
@@ -830,10 +832,10 @@ impl FleetEngine {
                 self.counters.observations += 1;
                 match sighting.kind {
                     RecordKind::Wifi => {
-                        self.unique_wifi.insert(sighting.bssid);
+                        self.unique_wifi.insert(&sighting.bssid);
                     }
                     RecordKind::Ble => {
-                        self.unique_ble.insert(sighting.bssid);
+                        self.unique_ble.insert(&sighting.bssid);
                     }
                 }
                 if let Some(node) = self.nodes.get_mut(&src) {
@@ -1424,8 +1426,8 @@ impl FleetEngine {
             alive,
             assignable,
             tail: self.tail.iter().cloned().collect(),
-            unique_wifi_aps: self.unique_wifi.len(),
-            unique_ble_aps: self.unique_ble.len(),
+            unique_wifi_aps: self.unique_wifi.estimate(),
+            unique_ble_aps: self.unique_ble.estimate(),
             counters: self.counters,
             store,
             bridge_status: self.bridge_status,

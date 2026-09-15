@@ -590,6 +590,9 @@ What it says:
   were flat from the first minute to the sixth, while the database reached 921 MiB.
   With no index on sightings, every insert is an append.
 - **Memory follows the addresses, not the store.** Peak RSS rose by about 18 bytes per
-  extra address, which is the engine's set of every address it has heard.
+  extra address, which is the engine's set of every address it has heard. That set is
+  now a fixed 16 KiB estimate (`crates/wartui-core/src/distinct.rs`), so memory no
+  longer follows the addresses, and `unique_addresses` in runs after it is within
+  about 1% rather than exact.
 - **Export time is linear in the capture.** It took 62.5 s here for 4.6× the rows that
   took 12.9 s, well past the drive the store is sized for.

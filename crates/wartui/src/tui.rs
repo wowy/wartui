@@ -657,6 +657,20 @@ fn period(ms: u32) -> String {
     if ms < 1000 { format!("{ms}ms") } else { format!("{:.1}s", f64::from(ms) / 1000.0) }
 }
 
+/// An estimated count, to about the precision the estimate has. The unique-address
+/// figures are within about 1%, so the digits past three are noise once there are
+/// enough of them to matter.
+fn approx(n: u64) -> String {
+    let n_f = n as f64;
+    match n {
+        0..10_000 => n.to_string(),
+        10_000..100_000 => format!("{:.1}k", n_f / 1e3),
+        100_000..1_000_000 => format!("{:.0}k", n_f / 1e3),
+        1_000_000..10_000_000 => format!("{:.2}M", n_f / 1e6),
+        _ => format!("{:.1}M", n_f / 1e6),
+    }
+}
+
 /// Why a node cannot be given an assignment, or `None` if it can.
 ///
 /// The wording is the message the operator sees on the refused keypress, so it
@@ -730,8 +744,10 @@ fn draw_stream(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot) {
         Constraint::Min(10),
     ];
     let title = format!(
-        " unique APs {} — unique BLE {} ({} total records) ",
-        snapshot.unique_wifi_aps, snapshot.unique_ble_aps, snapshot.counters.observations
+        " unique APs ~{} — unique BLE ~{} ({} total records) ",
+        approx(snapshot.unique_wifi_aps),
+        approx(snapshot.unique_ble_aps),
+        snapshot.counters.observations
     );
     frame.render_widget(
         Table::new(rows, widths).header(header).block(Block::bordered().title(title)),
@@ -1225,6 +1241,16 @@ mod tests {
             position: Fix::none(),
             ..busy()
         }
+    }
+
+    #[test]
+    fn an_estimated_count_shows_only_the_digits_it_can_vouch_for() {
+        assert_eq!(approx(0), "0");
+        assert_eq!(approx(9_999), "9999");
+        assert_eq!(approx(12_345), "12.3k");
+        assert_eq!(approx(506_360), "506k");
+        assert_eq!(approx(2_350_000), "2.35M");
+        assert_eq!(approx(23_500_000), "23.5M");
     }
 
     /// Rendering must not panic at any size the terminal might be.
