@@ -13,6 +13,12 @@
 //! what keeps a quiet fleet's rows from sitting unwritten. The queue is bounded and
 //! drops rather than blocks, because a lost observation is one row while a stalled
 //! engine misses everything. Drops are counted and shown.
+//!
+//! A second thread, with a connection of its own, copies the WAL back into the file right
+//! after each commit ([`Checkpoint::Background`]), so no commit waits for the card while a
+//! checkpoint syncs. It only copies pages: the writer is still the one thing that writes
+//! rows. `docs/store-io-findings.md` has the measurements behind the batching, the
+//! checkpoint and the lack of any index on sightings.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -232,20 +238,32 @@ pub struct CheckpointPass {
 }
 
 impl StoreConfig {
-    /// Defaults tuned for a live capture: 512 rows or 100 ms, and SQLite's own
-    /// cache, checkpoint and page size.
+    /// Defaults tuned for a live capture on a microSD card: commit every second or 16,384
+    /// rows, queue up to 16,384 records, and checkpoint the WAL from a thread of its own
+    /// right after each commit. SQLite's own cache and page size.
+    ///
+    /// Measured on a Raspberry Pi writing a full drive to a card
+    /// (`docs/store-io-findings.md`). A commit a second rewrites the pages every commit
+    /// touches once a second, not ten times, and checkpointing right after it lets the
+    /// writer rewind the WAL itself: together they took the bytes written from 2.8× the
+    /// database to 2.2× and the slowest batch from 149 ms to 58 ms. The queue is about
+    /// 1.4 s of a drive's rows for about 2 MiB, against that 58 ms. The price is the
+    /// loss window: a crash loses at most the second not yet committed plus the queue.
+    /// The checkpoint also syncs the WAL once a second, so a power cut loses no more.
     #[must_use]
     pub fn new(path: impl Into<PathBuf>) -> Self {
         Self {
             path: path.into(),
-            batch_rows: 512,
-            batch_interval: Duration::from_millis(100),
-            queue_depth: 4096,
+            batch_rows: 16_384,
+            batch_interval: Duration::from_secs(1),
+            queue_depth: 16_384,
             cache_kib: None,
             wal_autocheckpoint_pages: None,
             page_size: None,
             timings: false,
-            checkpoint: Checkpoint::Inline,
+            // A pass after every commit, and the truncation a safety valve that a WAL the
+            // size of one commit never reaches.
+            checkpoint: Checkpoint::Background { every: Duration::ZERO, truncate_at: 64 << 20 },
         }
     }
 }

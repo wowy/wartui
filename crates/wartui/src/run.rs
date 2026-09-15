@@ -112,6 +112,11 @@ pub struct Args {
     #[arg(long)]
     record_raw: bool,
 
+    /// Commit to the store at least this often, in milliseconds; 1000 by default. A crash
+    /// loses at most this much of the capture, plus whatever is still queued.
+    #[arg(long, value_name = "MS")]
+    commit_interval: Option<u64>,
+
     /// A note about this run, stored with the session.
     #[arg(long)]
     notes: Option<String>,
@@ -143,7 +148,12 @@ pub async fn run(args: Args) -> Result<()> {
 
     let started = now();
     let session = SessionInfo { espnow_channel: args.channel, pool, notes: args.notes.clone() };
-    let store = Store::open(&StoreConfig::new(&args.db), &session, started.unix_ms)
+    let mut store_config = StoreConfig::new(&args.db);
+    if let Some(ms) = args.commit_interval {
+        // At least a millisecond: a zero wait would spin the writer whenever it is idle.
+        store_config.batch_interval = Duration::from_millis(ms.max(1));
+    }
+    let store = Store::open(&store_config, &session, started.unix_ms)
         .with_context(|| format!("opening {}", args.db.display()))?;
 
     let config = EngineConfig {

@@ -37,6 +37,7 @@ short version.
 | `--sim N` | — | Run a fake fleet instead of hardware |
 | `--sim-c6 N` | `0` | Make that many of them C6s, from the end of the fleet |
 | `--record-raw` | off | Also keep the undecoded bytes of every frame |
+| `--commit-interval MS` | `1000` | How often the store commits; a crash loses at most this much |
 | `--notes TEXT` | — | A note about this run, stored with the session |
 
 `export` takes `--db`, `--wigle PATH` and `--session ID`, and writes the
@@ -62,8 +63,9 @@ The simulated neighbourhood is sized so every node reports on every sweep, measu
 starts once the whole fleet holds its assignments, and `idle_node_windows` must read 0
 for a run to count. `--interval` (60 s by default) adds a timeline to the report, so a
 long run shows when the card slowed down. Each SQLite and batching setting has a flag,
-so two settings compare on one binary. `--checkpoint-every MS` copies the WAL back from
-a thread of its own right after a commit, at most that often, instead of inside one. [`docs/store-io-findings.md`](../../docs/store-io-findings.md)
+so two settings compare on one binary. The store checkpoints from a thread of its
+own right after each commit; `--checkpoint-every MS` spaces those passes out, and
+`--inline-checkpoint` puts SQLite's own back inside the commit for comparison. [`docs/store-io-findings.md`](../../docs/store-io-findings.md)
 has the method and the numbers so far.
 
 ## Assigning channels

@@ -427,9 +427,33 @@ fn a_checkpoint_right_after_each_commit_lets_the_writer_rewind_the_wal_itself() 
 }
 
 #[test]
-fn by_default_checkpoints_happen_in_commits_and_no_thread_reports_any() {
+fn by_default_the_store_checkpoints_from_its_own_thread_after_every_commit() {
+    // What the card measured best: see `StoreConfig::new`.
+    let config = StoreConfig::new("unused.db");
+    assert_eq!(
+        config.checkpoint,
+        Checkpoint::Background { every: Duration::ZERO, truncate_at: 64 << 20 }
+    );
+    assert_eq!(
+        (config.batch_interval, config.batch_rows, config.queue_depth),
+        (Duration::from_secs(1), 16_384, 16_384)
+    );
+
     let dir = tempfile::tempdir().expect("temp dir");
     let store = store(&dir);
+    assert_eq!(store.submit(vec![observation(NODE, [0xAA; 6], -60, EPOCH_MS, Fix::none())]), 0);
+    let report = store.close();
+    assert!(!report.checkpoints.passes.is_empty(), "{report:?}");
+}
+
+#[test]
+fn an_inline_checkpoint_leaves_it_to_sqlite_and_no_thread_reports_any() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut config = StoreConfig::new(dir.path().join("wartui.db"));
+    config.batch_interval = Duration::from_millis(10);
+    config.checkpoint = Checkpoint::Inline;
+    let session = SessionInfo { espnow_channel: 6, pool: ChannelPool::Us, notes: None };
+    let store = Store::open(&config, &session, EPOCH_MS).expect("opening the store");
     assert_eq!(store.submit(vec![observation(NODE, [0xAA; 6], -60, EPOCH_MS, Fix::none())]), 0);
     let report = store.close();
     assert!(report.checkpoints.passes.is_empty() && report.checkpoints.truncations.is_empty());
