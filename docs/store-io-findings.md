@@ -446,7 +446,32 @@ Both builds wrote the same file, byte for byte (same SHA-256).
   builds pay. What the `TEMP` table adds is its rows and their sort. SQLite deletes both
   files as it goes, and none were left behind.
 - **On a Pi that boots from its card, that temporary file is on the card** unless
-  `SQLITE_TMPDIR` or `TMPDIR` points somewhere else. Not yet measured there.
+  `SQLITE_TMPDIR` or `TMPDIR` points somewhere else.
+
+**On the CM5.** One `drive` run of 350 s on the CM5, with the database and the CSV on its
+microSD card. The `TEMP` table build exported it twice with the temporary files on the
+card, then twice with `SQLITE_TMPDIR=/dev/shm`:
+
+| | temporary files on the card | in `/dev/shm` |
+| --- | --- | --- |
+| rows written | 509,248 | 509,248 |
+| wall time | 8.53 s, 9.34 s | 9.10 s, 9.01 s |
+| system time | 0.27 s, 0.37 s | 0.27 s, 0.29 s |
+| peak RSS | 11.6 MiB, 12.1 MiB | 12.1 MiB, 11.1 MiB |
+| filesystem writes | 257 MiB, 250 MiB | 41.6 MiB |
+
+- **Memory holds on the Pi.** About 12 MiB, where the `Vec` would have needed about
+  210 MiB for this drive.
+- **Export is bound by the CPU, not the card.** It is about 2.8× the laptop's time,
+  and the card and RAM runs overlap. System time barely moves either way.
+- **The temporary files are about 210 MiB here**, the difference between the two
+  columns. The `/dev/shm` column is only the CSV. The figure overstates the bytes,
+  because `rpi-2712` kernels count whole 16 KiB pages, as the first section notes.
+  It also counts writes into the page cache, not to the card. SQLite unlinks its
+  temporary files as it opens them, so pages freed before writeback may never reach the
+  card. That is not measured.
+- **`/dev/shm` saves nothing.** It is RAM, so it holds the same temporary files in memory
+  outside the process's RSS, and it was no faster. The card is the right default.
 
 ### Commit interval and background checkpoints, on the card
 
