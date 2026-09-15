@@ -173,8 +173,9 @@ pub struct Args {
     #[arg(long, value_name = "BYTES")]
     page_size: Option<u32>,
 
-    /// Checkpoint from a thread of its own every this many milliseconds, instead of
-    /// inside whichever commit fills the WAL.
+    /// Checkpoint from a thread of its own right after a commit, at most once every this
+    /// many milliseconds (0 for after every commit), instead of inside whichever commit
+    /// fills the WAL.
     #[arg(long, value_name = "MS")]
     checkpoint_every: Option<u64>,
 
@@ -231,7 +232,7 @@ pub async fn run(args: Args) -> Result<()> {
     store_config.timings = true;
     if let Some(ms) = args.checkpoint_every {
         store_config.checkpoint = Checkpoint::Background {
-            every: Duration::from_millis(ms.max(1)),
+            every: Duration::from_millis(ms),
             truncate_at: args.truncate_wal_mib.saturating_mul(1024 * 1024),
         };
     }
@@ -487,6 +488,17 @@ pub async fn run(args: Args) -> Result<()> {
     let truncations = in_window(&store_report.checkpoints.truncations);
     report.put("wal_truncations", truncations.len());
     report.put("wal_truncation_ms_max", percentile(&truncations, 100).map(ms));
+    let window: Vec<&CheckpointPass> = store_report
+        .checkpoints
+        .passes
+        .iter()
+        .filter(|pass| pass.finished_at >= measured_from)
+        .collect();
+    // A pass that finds fewer frames than the pass before saw the WAL rewound in between,
+    // by the writer or by a truncation.
+    report.put("wal_rewinds", window.windows(2).filter(|w| w[1].frames < w[0].frames).count());
+    report
+        .put("checkpoints_behind", window.iter().filter(|p| p.busy || p.copied < p.frames).count());
     // Sampled every couple of seconds, so a peak between samples is missed.
     report.put("wal_peak_mib", slices.iter().filter_map(|slice| slice.wal).max().map(mib));
     report.put("export_ms", ms(export_time));

@@ -63,7 +63,7 @@ starts once the whole fleet holds its assignments, and `idle_node_windows` must 
 for a run to count. `--interval` (60 s by default) adds a timeline to the report, so a
 long run shows when the card slowed down. Each SQLite and batching setting has a flag,
 so two settings compare on one binary. `--checkpoint-every MS` copies the WAL back from
-a thread of its own instead of inside a commit. [`docs/store-io-findings.md`](../../docs/store-io-findings.md)
+a thread of its own right after a commit, at most that often, instead of inside one. [`docs/store-io-findings.md`](../../docs/store-io-findings.md)
 has the method and the numbers so far.
 
 ## Assigning channels
