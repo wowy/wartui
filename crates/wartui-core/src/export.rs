@@ -1,13 +1,29 @@
 //! WiGLE CSV export, in the v1.6 file format.
 //!
-//! WiGLE's file is one row per network, so the interesting work is
-//! choosing which of a network's many sightings to submit. The store keeps
-//! every one — several nodes may see the same access point, repeatedly, from
-//! different places — and the row that goes out is the one with the strongest
-//! signal, because that is the sighting whose position is closest to the
-//! transmitter. `FirstSeen` still comes from the earliest sighting of the
-//! network, which is a different row and the reason this is a window query
-//! rather than a `GROUP BY`.
+//! A network's sightings are folded into recapture windows, and one row is
+//! submitted per window: the strongest positioned sighting, with `FirstSeen`
+//! from the window's own first sighting — positioned or not, which is a
+//! different row and the reason the fold carries both. The window is anchored
+//! at that first sighting and closes on the first sighting more than
+//! [`ExportFilter::recapture_secs`] after it opened, so a network watched for
+//! three hours yields a row an hour, rather than a row for ever (which would
+//! score one capture on a leaderboard that counts re-captures) or a row per
+//! sighting (which WiGLE would deduplicate its own side anyway). `0` keeps the
+//! older shape: one row per network for the whole capture.
+//!
+//! The fold is in Rust rather than SQL because the anchor rule is sequential —
+//! where a window ends decides where the next begins, which no window function
+//! can compute without recursion. It streams sightings in network-then-time
+//! order and holds one window's state at a time.
+//!
+//! The file is ordered by when each window opened, not by network, and that sort is
+//! left to SQLite: submitted rows go into a temporary table on the export's own
+//! connection and come back out in order. SQLite sorts within its page cache and spills
+//! the rest to a temporary file, so a longer capture costs temporary disk rather than
+//! memory. Held in a `Vec` instead, a full drive's rows took 183 MiB
+//! (`docs/store-io-findings.md`). That file goes to `SQLITE_TMPDIR`, then `TMPDIR`,
+//! then `/var/tmp`, which on a Pi that boots from its card is the card. Nothing in the
+//! store is written: a temporary table belongs to the connection, not the file.
 //!
 //! Two details are here because WiGLE rejects files without them: the timestamp
 //! must be zero-padded (`2026-05-01 13:34:37`, where the node firmware emits
@@ -34,13 +50,29 @@
 use std::io::Write;
 
 use chrono::{DateTime, SecondsFormat, Utc};
-use rusqlite::{Connection, Row};
+use rusqlite::{Connection, Row, Statement};
 
 use crate::record::ssid_text;
 
 /// The pre-header WiGLE reads for provenance, then the column header.
 const COLUMNS: &str = "MAC,SSID,AuthMode,FirstSeen,Channel,Frequency,RSSI,\
 CurrentLatitude,CurrentLongitude,AltitudeMeters,AccuracyMeters,RCOIs,MfgrId,Type";
+
+/// The recapture window an export folds a network's sightings into, by
+/// default: exactly one hour.
+///
+/// WDGWars, the leaderboard this default is cut for, scores a capture of a
+/// network once per hour per user — "re-scanning the same AP within 1h is
+/// silently skipped from scoring; GPS may still be refined" — and this is
+/// that cooldown verbatim, with no slack in either direction: the site is
+/// the authority on its own rule, and the export's job is to say when the AP
+/// was actually scanned. A re-hearing within the hour stays in the row
+/// already submitted, where its stronger reading can still refine the row's
+/// position — the refinement the rule itself allows — and the hour is
+/// inclusive like the rule's, because a sighting opens the next window only
+/// *past* the width. Slack under the hour would write rows the site skips
+/// anyway; slack over it would fold away re-hearings it counts.
+pub const DEFAULT_RECAPTURE_SECS: u64 = 3600;
 
 /// Why an export failed.
 #[derive(Debug, thiserror::Error)]
@@ -54,19 +86,31 @@ pub enum ExportError {
 }
 
 /// What to export.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct ExportFilter {
     /// Only this session. `None` exports every session, which is usually wanted:
     /// WiGLE deduplicates its own side and more sightings is better data.
     pub session_id: Option<i64>,
+    /// How long after a window opened a sighting still belongs to it, in
+    /// seconds; the first sighting later than that opens the next window.
+    /// `0` folds a network's whole capture into one row.
+    pub recapture_secs: u64,
+}
+
+impl Default for ExportFilter {
+    /// Every session, folded into [`DEFAULT_RECAPTURE_SECS`] windows.
+    fn default() -> Self {
+        Self { session_id: None, recapture_secs: DEFAULT_RECAPTURE_SECS }
+    }
 }
 
 /// What an export did.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ExportSummary {
-    /// Networks written.
-    pub networks: u64,
-    /// Networks left out because no sighting of them had a position.
+    /// Rows written — one per network, per recapture window that closed on a
+    /// positioned sighting.
+    pub rows: u64,
+    /// Rows left out because no sighting in their window had a position.
     ///
     /// Not an error and not silent: the operator should know how much of a capture is
     /// waiting on a GPS or a `--lat`/`--lon`.
@@ -83,8 +127,6 @@ pub fn wigle_csv<W: Write>(
     out: &mut W,
     app_version: &str,
 ) -> Result<ExportSummary, ExportError> {
-    let mut summary = ExportSummary { networks: 0, unpositioned: unpositioned(conn, filter)? };
-
     // `star=Sol,body=3,subBody=0` is Earth in the notation the pre-header
     // requires: body 3 is the third orbit, subBody 0 no satellite. Captures are
     // taken from the ground.
@@ -95,83 +137,207 @@ pub fn wigle_csv<W: Write>(
     )?;
     writeln!(out, "{COLUMNS}")?;
 
-    let mut stmt = conn.prepare(SELECT_NETWORKS)?;
-    let mut rows = stmt.query(rusqlite::params![filter.session_id])?;
-    while let Some(row) = rows.next()? {
-        write_row(row, out)?;
-        summary.networks += 1;
+    // A window wide enough to overflow the millisecond clock is the same as no
+    // window at all: nothing in one capture can be that far apart.
+    let recapture_ms =
+        i64::try_from(filter.recapture_secs.saturating_mul(1000)).unwrap_or(i64::MAX);
+
+    // Set before the table exists, since changing it discards the connection's temporary
+    // tables. A file is the bundled build's default already; the memory bound rests on it.
+    conn.pragma_update(None, "temp_store", "FILE")?;
+    // One transaction, so the inserts are one commit rather than one each. A failed
+    // export rolls the table's creation back with it.
+    let tx = conn.unchecked_transaction()?;
+    tx.execute_batch(CREATE_EXPORT_ROWS)?;
+
+    let mut summary = ExportSummary::default();
+    {
+        let mut insert = tx.prepare(INSERT_EXPORT_ROW)?;
+        let mut stmt = tx.prepare(SELECT_SIGHTINGS)?;
+        let mut rows = stmt.query(rusqlite::params![filter.session_id])?;
+        let mut window: Option<Window> = None;
+
+        while let Some(row) = rows.next()? {
+            let candidate = Candidate::of(row)?;
+            let opens_window = match &window {
+                // The first sighting of the capture, or of the next network.
+                None => true,
+                Some(w) => {
+                    w.best.bssid != candidate.bssid
+                        || (recapture_ms > 0 && candidate.rx_at - w.first_seen > recapture_ms)
+                }
+            };
+            if opens_window {
+                close(&mut window, &mut insert, &mut summary)?;
+                window = Some(Window { first_seen: candidate.rx_at, best: candidate });
+            } else if let Some(w) = window.as_mut()
+                && candidate.submits_over(&w.best)
+            {
+                w.best = candidate;
+            }
+        }
+        close(&mut window, &mut insert, &mut summary)?;
+
+        // By when each row's window opened, so a file re-exported after a decoder
+        // fix diffs cleanly against the one before it; the network breaks ties.
+        let mut sorted = tx.prepare(SELECT_EXPORT_ROWS)?;
+        let mut rows = sorted.query([])?;
+        while let Some(row) = rows.next()? {
+            write_row(&Window { first_seen: row.get(11)?, best: Candidate::of(row)? }, out)?;
+        }
     }
+    tx.execute_batch("DROP TABLE temp.export_row")?;
+    tx.commit()?;
     Ok(summary)
 }
 
-/// One row per BSSID: the strongest positioned sighting, with `FirstSeen` taken
-/// from the earliest sighting of that BSSID — positioned or not.
-///
-/// Both halves need the window to run over the *unfiltered* set: filter on position
-/// first and `FirstSeen` reports the earliest sighting that happened to have
-/// coordinates, hiding hours of evidence that the network was already there.
-/// Ordering positioned rows ahead of unpositioned ones in `ROW_NUMBER` is what makes
-/// the outer filter safe — otherwise an unpositioned sighting can win rn = 1 and
-/// then be filtered out, losing a network with a good weaker sighting to submit.
-///
-/// There is deliberately no index on `bssid` for this to walk: a scan and a sort read the
-/// table in order, and were faster than one random lookup per sighting (the store's v6
-/// migration says more).
-const SELECT_NETWORKS: &str = r"
-SELECT bssid, ssid, security, first_seen, channel, rssi, lat, lon, alt, accuracy, kind
-FROM (
-  SELECT
-    o.bssid, o.ssid, o.security, o.channel, o.rssi, o.lat, o.lon, o.alt, o.accuracy, o.kind,
-    MIN(o.rx_at) OVER (PARTITION BY o.bssid) AS first_seen,
-    ROW_NUMBER() OVER (
-      PARTITION BY o.bssid
-      ORDER BY (o.lat IS NOT NULL AND o.lon IS NOT NULL) DESC, o.rssi DESC, o.rx_at ASC
-    ) AS rn
-  FROM observation o
-  WHERE ?1 IS NULL OR o.session_id = ?1
-)
-WHERE rn = 1 AND lat IS NOT NULL AND lon IS NOT NULL
-ORDER BY first_seen
-";
-
-/// Networks with no positioned sighting at all.
-fn unpositioned(conn: &Connection, filter: ExportFilter) -> Result<u64, rusqlite::Error> {
-    conn.query_row(
-        r"SELECT COUNT(*) FROM (
-            SELECT bssid FROM observation
-            WHERE (?1 IS NULL OR session_id = ?1)
-            GROUP BY bssid
-            HAVING SUM(lat IS NOT NULL AND lon IS NOT NULL) = 0
-          )",
-        rusqlite::params![filter.session_id],
-        |row| row.get(0),
-    )
+/// Retire the window in flight, submitting it to the table the rows are sorted in
+/// if its best sighting is positioned and counting it if not.
+fn close(
+    window: &mut Option<Window>,
+    insert: &mut Statement<'_>,
+    summary: &mut ExportSummary,
+) -> rusqlite::Result<()> {
+    let Some(Window { first_seen, best }) = window.take() else { return Ok(()) };
+    if best.positioned() {
+        insert.execute(rusqlite::params![
+            best.bssid,
+            best.ssid,
+            best.security,
+            best.channel,
+            best.rssi,
+            best.lat,
+            best.lon,
+            best.alt,
+            best.accuracy,
+            best.kind,
+            best.rx_at,
+            first_seen,
+        ])?;
+        summary.rows += 1;
+    } else {
+        summary.unpositioned += 1;
+    }
+    Ok(())
 }
 
-fn write_row<W: Write>(row: &Row<'_>, out: &mut W) -> Result<(), ExportError> {
-    let bssid: Vec<u8> = row.get(0)?;
-    let ssid: Option<Vec<u8>> = row.get(1)?;
-    let security: String = row.get(2)?;
-    let first_seen: i64 = row.get(3)?;
-    let channel: i64 = row.get(4)?;
-    let rssi: i64 = row.get(5)?;
-    let lat: f64 = row.get(6)?;
-    let lon: f64 = row.get(7)?;
-    let alt: Option<f64> = row.get(8)?;
-    let accuracy: Option<f64> = row.get(9)?;
-    let kind: String = row.get(10)?;
-    let frequency = frequency_column(channel, &kind);
+/// Every sighting of every network in the filter, in fold order: network, then
+/// time. The `id` tiebreaker keeps the order — and therefore which sighting a
+/// tied window submits — deterministic.
+///
+/// There is deliberately no index for this to walk: a scan and a sort read the table in
+/// order, and were faster than one random lookup per sighting (the store's v6 migration
+/// says more).
+const SELECT_SIGHTINGS: &str = r"
+SELECT bssid, ssid, security, channel, rssi, lat, lon, alt, accuracy, kind, rx_at
+FROM observation o
+WHERE ?1 IS NULL OR o.session_id = ?1
+ORDER BY o.bssid, o.rx_at, o.id
+";
+
+/// The rows waiting for the sort by window start: a submitted sighting in
+/// [`SELECT_SIGHTINGS`]'s column order, so [`Candidate::of`] reads it back, then when
+/// its window opened. Dropped first in case an earlier export on this connection
+/// left one behind.
+const CREATE_EXPORT_ROWS: &str = r"
+DROP TABLE IF EXISTS temp.export_row;
+CREATE TEMP TABLE export_row (
+  bssid BLOB, ssid BLOB, security TEXT, channel INTEGER, rssi INTEGER,
+  lat REAL, lon REAL, alt REAL, accuracy REAL, kind TEXT, rx_at INTEGER,
+  first_seen INTEGER
+);
+";
+
+const INSERT_EXPORT_ROW: &str = "INSERT INTO temp.export_row VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, \
+?8, ?9, ?10, ?11, ?12)";
+
+/// Two windows of one network never open at the same instant, so the order is total.
+const SELECT_EXPORT_ROWS: &str = r"
+SELECT bssid, ssid, security, channel, rssi, lat, lon, alt, accuracy, kind, rx_at, first_seen
+FROM temp.export_row
+ORDER BY first_seen, bssid
+";
+
+/// One sighting in flight through the fold, carrying everything a submitted
+/// row needs so the winner of a window can be written without going back to
+/// the database.
+struct Candidate {
+    bssid: Vec<u8>,
+    ssid: Option<Vec<u8>>,
+    security: String,
+    channel: i64,
+    rssi: i64,
+    lat: Option<f64>,
+    lon: Option<f64>,
+    alt: Option<f64>,
+    accuracy: Option<f64>,
+    kind: String,
+    rx_at: i64,
+}
+
+impl Candidate {
+    /// Read one sighting off a query row.
+    fn of(row: &Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            bssid: row.get(0)?,
+            ssid: row.get(1)?,
+            security: row.get(2)?,
+            channel: row.get(3)?,
+            rssi: row.get(4)?,
+            lat: row.get(5)?,
+            lon: row.get(6)?,
+            alt: row.get(7)?,
+            accuracy: row.get(8)?,
+            kind: row.get(9)?,
+            rx_at: row.get(10)?,
+        })
+    }
+
+    /// Whether this sighting carries coordinates a WiGLE row can be written
+    /// from.
+    const fn positioned(&self) -> bool {
+        self.lat.is_some() && self.lon.is_some()
+    }
+
+    /// Whether this sighting is the one to submit over `other`: a positioned
+    /// one beats an unpositioned one, then the stronger signal, then the
+    /// earlier one. Position-first is what keeps a network with one good weaker
+    /// sighting from losing it to a stronger sighting that had no fix; the
+    /// strongest signal is the sighting closest to the transmitter.
+    fn submits_over(&self, other: &Self) -> bool {
+        match (self.positioned(), other.positioned()) {
+            (true, false) => true,
+            (false, true) => false,
+            _ => self.rssi > other.rssi || (self.rssi == other.rssi && self.rx_at < other.rx_at),
+        }
+    }
+}
+
+/// The fold's state for one network's current window: when it opened, and the
+/// sighting that would be submitted if the window closed now.
+struct Window {
+    first_seen: i64,
+    best: Candidate,
+}
+
+fn write_row<W: Write>(row: &Window, out: &mut W) -> Result<(), ExportError> {
+    let best = &row.best;
+    let channel = best.channel;
+    let rssi = best.rssi;
+    let lat = best.lat.unwrap_or(0.0);
+    let lon = best.lon.unwrap_or(0.0);
+    let frequency = frequency_column(channel, &best.kind);
 
     writeln!(
         out,
         "{},{},{},{},{channel},{frequency},{rssi},{lat},{lon},{},{},,,{}",
-        mac(&bssid),
-        quote(&ssid_text(ssid.as_deref().unwrap_or_default())),
-        quote(&security),
-        timestamp(first_seen),
-        alt.unwrap_or(0.0),
-        accuracy.unwrap_or(0.0),
-        if kind == "ble" { "BLE" } else { "WIFI" },
+        mac(&best.bssid),
+        quote(&ssid_text(best.ssid.as_deref().unwrap_or_default())),
+        quote(&best.security),
+        timestamp(row.first_seen),
+        best.alt.unwrap_or(0.0),
+        best.accuracy.unwrap_or(0.0),
+        if best.kind == "ble" { "BLE" } else { "WIFI" },
     )?;
     Ok(())
 }

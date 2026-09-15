@@ -71,12 +71,12 @@ async fn a_simulated_fleet_becomes_a_database_and_then_a_wigle_file() {
     let summary = wigle_csv(&conn, ExportFilter::default(), &mut csv, "0.1.0").expect("exporting");
     let csv = String::from_utf8(csv).expect("the CSV is UTF-8");
 
-    assert!(summary.networks > 0);
+    assert!(summary.rows > 0);
     assert_eq!(summary.unpositioned, 0, "a static position covers every row");
     assert_eq!(
         csv.lines().count() as u64,
-        summary.networks + 2,
-        "two header lines and one row per network"
+        summary.rows + 2,
+        "two header lines and one row per recapture window"
     );
     for row in csv.lines().skip(2) {
         let fields: Vec<&str> = row.split(',').collect();
@@ -158,7 +158,7 @@ async fn a_moving_capture_writes_where_the_receiver_was_for_each_row() {
     let mut csv = Vec::new();
     let summary = wigle_csv(&conn, ExportFilter::default(), &mut csv, "0.1.0").expect("exporting");
     let csv = String::from_utf8(csv).expect("the CSV is UTF-8");
-    assert!(summary.networks > 0);
+    assert!(summary.rows > 0);
     for row in csv.lines().skip(2) {
         let fields: Vec<&str> = row.split(',').collect();
         assert!(fields[7].starts_with("48.1"), "the receiver\'s latitude, not the fallback: {row}");
