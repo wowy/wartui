@@ -260,7 +260,80 @@ for i in 1 2 3; do
 done
 ```
 
-To be measured. If it pays off, making it the store's behaviour still needs two
-things decided: how an export taken during a capture finds its networks without the
-index, and whether an index built in one go at close is affordable on a card after an
-hour's drive.
+**CM5 on the Amazon Basics microSD**, ext4 `noatime`, three runs of `drive` for
+300 s. The baseline column is the medians from the card section above.
+
+| figure | baseline | deferred |
+| --- | --- | --- |
+| rows/s | 3,633 | 11,534 |
+| rows dropped | 68% | 0 in every run |
+| commit p50 / p95 / p99 / max ms | 1.31 / 690 / 721 / 759 | 0.12 / 3.8 / 125 / 157 |
+| batch p50 ms | 4.99 | 2.22 |
+| write syscalls | 1.56 M | 458 k |
+| MiB handed to the kernel | 3,854 | 1,051 |
+| device writes | 369 k | 11.5 k |
+| device MiB | 3,934 | 1,019 |
+| KiB per device write | 10.8 | 90.4 |
+| database at close | 76 MiB | 234 MiB |
+| device MiB per MiB of database | 52 | 4.4 |
+| index build at close | — | 2.7 s |
+| export | 4.2 s (560 k rows) | 14.7 s (1.74 M rows) |
+| peak RSS | 10.6 MiB | 12.6 MiB |
+
+Over the timeline the deferred runs held about 11,530 rows/s and 190–195 device MiB
+a minute, from the first minute to the fifth. Commit p99 stayed between 119 and
+129 ms, and nothing degraded.
+
+**ThinkPad**, on battery for both, btrfs. The baseline column is the medians from
+the ThinkPad section above.
+
+| figure | baseline | deferred |
+| --- | --- | --- |
+| rows/s | 11,514 | 11,520 |
+| rows dropped | 3,474 in two of three runs | 0 in every run |
+| commit p50 / p95 / p99 / max ms | 3.30 / 57.3 / 64.3 / 563 | 0.34 / 1.88 / 20.4 / 39.5 |
+| write syscalls | 5.84 M | 456 k |
+| MiB handed to the kernel | 14,891 | 1,047 |
+| index build at close | — | 0.98 s |
+| export | 7.5 s | 7.5 s |
+
+What it says:
+
+- **The hypothesis holds.** Without `obs_bssid`, the process wrote 14× less for the
+  same rows on both machines, 1,047–1,051 MiB where the baseline wrote about 14.9 GiB.
+  The card took the whole load with nothing dropped, where it had dropped two rows in
+  three.
+- **The card now sees long writes instead of scattered ones.** 90 KiB per request
+  against 10.8, and a hundredth as many requests per row. At this rate the card takes
+  about 12 GiB an hour for about 2.8 GiB of database, where the baseline workload
+  would have asked for about 196 GiB an hour.
+- **About 4.4× amplification remains.** Each commit hands the kernel about 155 KiB to
+  grow the file by about 35 KiB. That is consistent with the pages a commit always
+  touches: the table's last page, the tail of each node's `obs_node` run, the node and
+  heartbeat rows. They are rewritten to the WAL every commit, then copied again at
+  checkpoint. Longer commits (fewer rewrites of the same pages per second) and less
+  frequent checkpoints (one copy of a page rewritten many times) are the levers for
+  that, and are the next things to measure.
+- **The slow commits are now 1 in 50 or so, and short.** p95 is under 4 ms, and p99
+  and max are 125–157 ms on the card. At 11,500 rows/s a 157 ms stall is about 1,800
+  rows against a 4,096-record queue, so the headroom is real but not large. These are
+  likely still the automatic checkpoint.
+- **Export does not get slower.** The index is built before the export either way.
+  The card's 14.7 s is the same as the Optane baseline's 14.8 s for the same rows, so
+  export is bound by the CPU, not the storage.
+
+Caveats before it becomes the default:
+
+- **The card's index build may not have written to the card.** SQLite's sort for
+  `CREATE INDEX` spills to a temporary file once it outgrows its memory, and on unix
+  it looks in `SQLITE_TMPDIR`, `TMPDIR`, then `/var/tmp`. On this Pi those are on the
+  NVMe root, so 2.7 s is probably flattering for a box that boots from its card.
+- **The build scales with the capture.** 2.7 s for 1.74 M rows is five minutes of
+  this load; an hour is about twelve times the rows, and the sort is worse than
+  linear.
+- **A capture that never closes has no index.** A power cut, or a crash, leaves a
+  database the export opens read-only and cannot index, so export would have to work
+  without it or something would have to build it on the next open.
+- **An export during a capture has no index to use.**
+- **Peak RSS rose by about 2 MiB on both machines**, probably the build's sort. It is
+  worth watching as captures get longer.
