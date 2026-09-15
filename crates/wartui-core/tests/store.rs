@@ -357,30 +357,7 @@ fn a_capture_from_before_the_trailer_was_collected_migrates_and_stays_honest() {
     // blank columns rather than by refusing the file.
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().join("wartui.db");
-
-    let old = Connection::open(&path).expect("creating");
-    old.execute_batch(
-        "CREATE TABLE session (
-           id INTEGER PRIMARY KEY, started_at INTEGER NOT NULL, ended_at INTEGER,
-           bridge_mac BLOB, bridge_chip TEXT, bridge_fw TEXT,
-           espnow_channel INTEGER NOT NULL, channel_pool TEXT NOT NULL, notes TEXT);
-         INSERT INTO session (id, started_at, espnow_channel, channel_pool)
-           VALUES (1, 0, 6, 'us');
-         CREATE TABLE observation (
-           id INTEGER PRIMARY KEY, session_id INTEGER NOT NULL, node_mac BLOB NOT NULL,
-           rx_at INTEGER NOT NULL, link_rssi INTEGER, bssid BLOB NOT NULL, ssid BLOB,
-           security TEXT NOT NULL, channel INTEGER NOT NULL, rssi INTEGER NOT NULL,
-           kind TEXT NOT NULL, lat REAL, lon REAL, alt REAL, accuracy REAL,
-           pos_source TEXT NOT NULL, pos_at INTEGER, raw_body BLOB);
-         INSERT INTO observation
-           (session_id, node_mac, rx_at, bssid, ssid, security, channel, rssi, kind,
-            lat, lon, alt, accuracy, pos_source, raw_body)
-         VALUES (1, x'0200005E1057', 1, x'AAAAAAAAAAAA', x'6F6C64', '[WPA2_PSK]', 6, -60,
-                 'wifi', 37.0, -122.0, 16.0, NULL, 'static', x'00');",
-    )
-    .expect("v7 tables");
-    old.pragma_update(None, "user_version", 7).expect("stamping");
-    drop(old);
+    write_v7_capture(&path);
 
     let store = open_at(&path);
     let mut fresh = observation(NODE, [0xBB; 6], -60, EPOCH_MS, fixed(37.0, -122.0));
@@ -402,6 +379,61 @@ fn a_capture_from_before_the_trailer_was_collected_migrates_and_stays_honest() {
         csv.contains("5A03BA0000 BAA2D00000 BAA2D02000"),
         "the new row carries its roaming consortium: {csv}"
     );
+}
+
+#[test]
+fn an_export_reads_a_capture_that_was_never_migrated() {
+    // `wartui export` opens the file read-only and never migrates it — the
+    // read-only open is what makes an export safe against a capture still
+    // running — so a v7 capture has to export as it lies on disk: the same
+    // row the last release wrote, trailer columns blank, and the file still
+    // v7 afterwards.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("wartui.db");
+    write_v7_capture(&path);
+
+    // The export command's own path: a read-only open, no store, no migration.
+    let conn = open_readonly(&path).expect("export open");
+    let (csv, summary) = export(&conn);
+    assert_eq!(summary.rows, 1);
+    assert!(
+        csv.contains(
+            "AA:AA:AA:AA:AA:AA,old,[WPA2_PSK],1970-01-01 00:00:00,6,2437,-60,37,-122,16,0,,,WIFI"
+        ),
+        "the pre-v8 row exports with the columns honestly blank: {csv}"
+    );
+
+    let found: i64 = conn
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .expect("reading the version back");
+    assert_eq!(found, 7, "an export never migrates the file it reads");
+}
+
+/// A capture exactly as v7 left it: one session, one positioned Wi-Fi
+/// sighting, and no trailer columns on the observation.
+fn write_v7_capture(path: &std::path::Path) {
+    let old = Connection::open(path).expect("creating");
+    old.execute_batch(
+        "CREATE TABLE session (
+           id INTEGER PRIMARY KEY, started_at INTEGER NOT NULL, ended_at INTEGER,
+           bridge_mac BLOB, bridge_chip TEXT, bridge_fw TEXT,
+           espnow_channel INTEGER NOT NULL, channel_pool TEXT NOT NULL, notes TEXT);
+         INSERT INTO session (id, started_at, espnow_channel, channel_pool)
+           VALUES (1, 0, 6, 'us');
+         CREATE TABLE observation (
+           id INTEGER PRIMARY KEY, session_id INTEGER NOT NULL, node_mac BLOB NOT NULL,
+           rx_at INTEGER NOT NULL, link_rssi INTEGER, bssid BLOB NOT NULL, ssid BLOB,
+           security TEXT NOT NULL, channel INTEGER NOT NULL, rssi INTEGER NOT NULL,
+           kind TEXT NOT NULL, lat REAL, lon REAL, alt REAL, accuracy REAL,
+           pos_source TEXT NOT NULL, pos_at INTEGER, raw_body BLOB);
+         INSERT INTO observation
+           (session_id, node_mac, rx_at, bssid, ssid, security, channel, rssi, kind,
+            lat, lon, alt, accuracy, pos_source, raw_body)
+         VALUES (1, x'0200005E1057', 1, x'AAAAAAAAAAAA', x'6F6C64', '[WPA2_PSK]', 6, -60,
+                 'wifi', 37.0, -122.0, 16.0, NULL, 'static', x'00');",
+    )
+    .expect("v7 tables");
+    old.pragma_update(None, "user_version", 7).expect("stamping");
 }
 
 #[test]

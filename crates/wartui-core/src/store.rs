@@ -645,8 +645,9 @@ fn has_table(conn: &Connection, table: &str) -> Result<bool, StoreError> {
     Ok(stmt.exists(params![table])?)
 }
 
-/// Whether a table already has a column, so a migration can be run once.
-fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, StoreError> {
+/// Whether a table already has a column, so a migration can be run once — and
+/// so a reader that never migrates can ask what shape the file is in.
+pub(crate) fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, StoreError> {
     let mut stmt = conn.prepare("SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2")?;
     Ok(stmt.exists(params![table, column])?)
 }
