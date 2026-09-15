@@ -478,3 +478,66 @@ truncates only once a pass has caught up. The report adds two counts:
 
 - `wal_rewinds`: passes that found the WAL rewound since the pass before.
 - `checkpoints_behind`: passes that could not copy everything, busy or outrun.
+
+### Schema v7, and checkpoints right after commits, on the card
+
+The same CM5 and card, schema v7 (no index on `observation`), one 350 s `drive` run
+each: 2.01 M sightings of about 509 k addresses, 0 idle node-windows and 0 rows
+dropped every time.
+
+| figure | inline, 100 ms | 1 s commits, pass after each | the same, queue 65,536 |
+| --- | --- | --- | --- |
+| commits/s, rows/commit | 22.6, 510 | 0.95, 12,196 | 0.95, 12,158 |
+| batch p50 / p99 / max ms | 1.7 / 110 / 149 | 44.5 / 50.8 / 57.7 | 44.3 / 47.9 / 56.6 |
+| commit p50 / p99 / max ms | 0.06 / 108 / 147 | 4.8 / 9.5 / 18.7 | 4.8 / 7.7 / 16.7 |
+| write syscalls | 229 k | 160 k | 160 k |
+| MiB handed to the kernel | 543 | 409 | 409 |
+| device writes | 1,835 | 5,577 | 5,597 |
+| device MiB | 550 | 428 | 429 |
+| KiB per device write | 307 | 79 | 79 |
+| device write ms, total | 23,472 | 20,559 | 27,733 |
+| device MiB per MiB of database | 2.8 | 2.2 | 2.2 |
+| checkpoint passes, p50 / p99 / max ms | — | 333, 31 / 45 / 66 | 334, 31 / 47 / 55 |
+| WAL truncations | — | 0 | 0 |
+| WAL file, largest sampled | 4.0 MiB | 0.68 MiB | 0.66 MiB |
+| database at close | 196 MiB | 196 MiB | 196 MiB |
+| peak RSS | 19.8 MiB | 23.8 MiB | 35.3 MiB |
+| export | 13.0 s | 13.0 s | 13.0 s |
+
+What it says:
+
+- **Dropping `obs_node` halved the bytes on its own.** The baseline wrote 550 MiB
+  where v6 wrote 1,138, and the database shrank from 242 to 196 MiB. Most of what each
+  commit rewrote was the tail page of each node's run in that index.
+- **Checkpointing right after a commit did what the timer could not.** Every pass
+  caught up, no truncation ran, and the WAL never exceeded 0.7 MiB, about one commit.
+  The writer rewound it itself.
+- **The stalls are gone.** The slowest batch fell from 149 ms to 58 ms, and at
+  11,500 rows/s 58 ms is about 670 rows against a 4,096-record queue, six times
+  headroom where the baseline had under three. Commit p99 fell from 108 ms to 9.5 ms.
+- **Bytes fell another fifth, to 2.2× the database.** The WAL and the file both get
+  every page, so about 2× is the floor for WAL mode; what is left over it is the
+  table's last page and the node and heartbeat rows, rewritten once a second.
+- **The writes are smaller, not bigger.** 79 KiB per device write against 307: a
+  checkpoint a second copies a second's pages into the file, where the inline store
+  copied 4 MiB of WAL at a time. The card spent less time writing all the same
+  (20.6 s against 23.5 s), and the bytes and the stalls are what cost the capture.
+- **The larger queue bought nothing here and cost 11.5 MiB.** `sync_channel`
+  allocates every slot up front, about 196 bytes each. With a 58 ms worst batch the
+  default queue never came close to filling.
+- **`wal_rewinds` undercounts.** It counted 150 of 333 passes, because it only notices
+  a rewind when the next commit is smaller than the last. The WAL's size is the
+  evidence.
+- **Durability improves as a side effect.** Under `synchronous=NORMAL`, SQLite syncs
+  the WAL when it checkpoints, not when it commits. A checkpoint a second syncs a
+  second's rows, where the inline store synced every 4 MiB or so of WAL.
+
+**Decision.** These are now the store's defaults:
+
+- commit every second or 16,384 rows
+- a queue of 16,384 records
+- the background checkpoint after every commit, truncating past 64 MiB
+
+`wartui run --commit-interval` changes the interval, and `bench --inline-checkpoint`
+measures SQLite's own checkpoint for comparison. `wal_rewinds` is gone from the report:
+the WAL's size says the same thing, without the undercount.

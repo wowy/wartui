@@ -173,15 +173,19 @@ pub struct Args {
     #[arg(long, value_name = "BYTES")]
     page_size: Option<u32>,
 
-    /// Checkpoint from a thread of its own right after a commit, at most once every this
-    /// many milliseconds (0 for after every commit), instead of inside whichever commit
-    /// fills the WAL.
-    #[arg(long, value_name = "MS")]
+    /// Space the store's background checkpoints at least this many milliseconds apart.
+    /// They run right after a commit, and by default after every one.
+    #[arg(long, value_name = "MS", conflicts_with = "inline_checkpoint")]
     checkpoint_every: Option<u64>,
 
-    /// With --checkpoint-every, rewind the WAL once it passes this many MiB.
-    #[arg(long, value_name = "MIB", default_value_t = 64)]
+    /// Truncate the WAL once it passes this many MiB, and a pass has caught up.
+    #[arg(long, value_name = "MIB", default_value_t = 64, conflicts_with = "inline_checkpoint")]
     truncate_wal_mib: u64,
+
+    /// Leave checkpoints to SQLite, inside whichever commit fills the WAL, as the store
+    /// did before it had a checkpoint thread. For comparison.
+    #[arg(long)]
+    inline_checkpoint: bool,
 
     /// Cut the run into slices this long, in seconds, so a long run shows when it
     /// slowed down rather than only that it did.
@@ -230,11 +234,13 @@ pub async fn run(args: Args) -> Result<()> {
     store_config.wal_autocheckpoint_pages = args.wal_autocheckpoint;
     store_config.page_size = args.page_size;
     store_config.timings = true;
-    if let Some(ms) = args.checkpoint_every {
-        store_config.checkpoint = Checkpoint::Background {
-            every: Duration::from_millis(ms),
-            truncate_at: args.truncate_wal_mib.saturating_mul(1024 * 1024),
-        };
+    if args.inline_checkpoint {
+        store_config.checkpoint = Checkpoint::Inline;
+    } else if let Checkpoint::Background { every, truncate_at } = &mut store_config.checkpoint {
+        if let Some(ms) = args.checkpoint_every {
+            *every = Duration::from_millis(ms);
+        }
+        *truncate_at = args.truncate_wal_mib.saturating_mul(1024 * 1024);
     }
 
     // The directory rather than the file, which does not exist yet.
@@ -488,17 +494,15 @@ pub async fn run(args: Args) -> Result<()> {
     let truncations = in_window(&store_report.checkpoints.truncations);
     report.put("wal_truncations", truncations.len());
     report.put("wal_truncation_ms_max", percentile(&truncations, 100).map(ms));
-    let window: Vec<&CheckpointPass> = store_report
+    // Passes that could not copy everything, for want of a lock or outrun by commits.
+    let behind = store_report
         .checkpoints
         .passes
         .iter()
         .filter(|pass| pass.finished_at >= measured_from)
-        .collect();
-    // A pass that finds fewer frames than the pass before saw the WAL rewound in between,
-    // by the writer or by a truncation.
-    report.put("wal_rewinds", window.windows(2).filter(|w| w[1].frames < w[0].frames).count());
-    report
-        .put("checkpoints_behind", window.iter().filter(|p| p.busy || p.copied < p.frames).count());
+        .filter(|pass| pass.busy || pass.copied < pass.frames)
+        .count();
+    report.put("checkpoints_behind", behind);
     // Sampled every couple of seconds, so a peak between samples is missed.
     report.put("wal_peak_mib", slices.iter().filter_map(|slice| slice.wal).max().map(mib));
     report.put("export_ms", ms(export_time));
