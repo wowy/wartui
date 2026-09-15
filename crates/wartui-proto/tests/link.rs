@@ -37,6 +37,7 @@ fn sample_events() -> Vec<BridgeToHost, 8> {
         rssi: -50,
         security: Security::Wpa2Psk,
         ssid: b"net",
+        ext: &[],
     }
     .encode_into(&mut frame)
     .expect("fits");

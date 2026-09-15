@@ -464,16 +464,17 @@ fn report(sender: &mut EspNowSender<'_>, node: &mut Node, channel: u8) {
 #[cfg(feature = "ble")]
 fn report_ble(sender: &mut EspNowSender<'_>, node: &mut Node, scanner: &mut ble::Scanner<'_>) {
     let mut lines = 0u32;
-    let mut heard = 0u32;
+    let heard = scanner.sweep();
     let now = now_ms();
-    for report in scanner.sweep() {
-        heard += 1;
+    // One report at a time out of the ring, so the lock is never held across a
+    // transmit — the same shape the Wi-Fi sightings are drained in.
+    while let Some(report) = ble::take() {
         let rssi = report.has_rssi().then_some(report.rssi);
         if !node.seen.is_due(&report.address, rssi, now) {
             continue;
         }
         let mut frame = [0u8; SIGHTING_MSG_MAX];
-        let Some(len) = report.as_msg().encode_into(&mut frame) else { continue };
+        let Some(len) = report.encode_into(&mut frame) else { continue };
         // After the broadcast, for the reason `report` gives.
         if radio::broadcast(sender, &frame[..len]) {
             node.seen.record(report.address, rssi, now);
@@ -482,7 +483,7 @@ fn report_ble(sender: &mut EspNowSender<'_>, node: &mut Node, scanner: &mut ble:
     }
     if heard > 0 {
         node.reported = node.reported.wrapping_add(lines);
-        note!("ble: {} heard, {} new, {} dropped", heard, lines, scanner.dropped());
+        note!("ble: {} heard, {} new, {} dropped", heard, lines, ble::dropped());
     }
 }
 

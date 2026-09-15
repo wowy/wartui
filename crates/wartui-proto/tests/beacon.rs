@@ -6,7 +6,7 @@
 //! and are exercised by `every_captured_beacon_yields_a_usable_observation`.
 
 use wartui_proto::air::{SIGHTING_MSG_MAX, SSID_MAX, Security, SightingMsg};
-use wartui_proto::beacon::parse_mgmt;
+use wartui_proto::beacon::{parse_mgmt, rcoi_text};
 
 /// One `tag, len, data` element.
 fn ie(tag: u8, data: &[u8]) -> Vec<u8> {
@@ -273,6 +273,66 @@ fn an_over_long_ssid_is_kept_to_what_the_standard_allows() {
     let long = [b'x'; 60];
     let ap = parse_mgmt(&beacon(&ie(0, &long)), -50, 6).expect("a beacon");
     assert_eq!(ap.ssid().len(), SSID_MAX);
+}
+
+/// The OpenRoaming triple, the widest roaming consortium element anybody real
+/// beacons: three five-byte identifiers behind a count byte and a
+/// nibble-packed lengths byte.
+const OPEN_ROAMING: [u8; 17] = [
+    0x02, 0x55, //
+    0x5A, 0x03, 0xBA, 0x00, 0x00, //
+    0xBA, 0xA2, 0xD0, 0x00, 0x00, //
+    0xBA, 0xA2, 0xD0, 0x20, 0x00,
+];
+
+#[test]
+fn a_passpoint_beacon_yields_its_roaming_consortium_verbatim() {
+    // Kept raw — count and lengths bytes included — so reading it differently
+    // later costs a re-export, never a reflash.
+    let ap = parse_mgmt(&beacon(&ie(111, &OPEN_ROAMING)), -50, 6).expect("a beacon");
+    assert_eq!(ap.rcoi(), &OPEN_ROAMING);
+
+    let mut buf = [0u8; SIGHTING_MSG_MAX];
+    let len = ap.as_msg().encode_into(&mut buf).expect("fits");
+    assert_eq!(SightingMsg::decode(&buf[..len]).expect("valid").ext, &OPEN_ROAMING);
+}
+
+#[test]
+fn a_roaming_consortium_longer_than_the_wire_carries_is_dropped_whole() {
+    // Truncating would invent an identifier nobody beaconed.
+    let ap = parse_mgmt(&beacon(&ie(111, &[0u8; 18])), -50, 6).expect("a beacon");
+    assert!(ap.rcoi().is_empty());
+}
+
+#[test]
+fn a_second_roaming_consortium_element_does_not_overwrite_the_first() {
+    // The same rule the channel elements follow: a stray trailing element must
+    // not rewrite what the access point actually said.
+    let first = [0x01, 0x03, 0x5A, 0x03, 0xBA];
+    let second = [0x01, 0x03, 0xBA, 0xA2, 0xD0];
+    let mut ies = ie(111, &first);
+    ies.extend_from_slice(&ie(111, &second));
+    let ap = parse_mgmt(&beacon(&ies), -50, 6).expect("a beacon");
+    assert_eq!(ap.rcoi(), &first);
+}
+
+#[test]
+fn roaming_consortium_bodies_render_the_way_wigle_spells_them() {
+    // Three-byte identifiers get six hex digits and five-byte ones ten, which
+    // are the two forms Hotspot 2.0 actually uses; the third identifier is
+    // whatever of the body is left.
+    assert_eq!(rcoi_text(&OPEN_ROAMING).to_string(), "5A03BA0000 BAA2D00000 BAA2D02000");
+
+    // Lengths nibble 0x03: a three-byte first identifier, no second, and the
+    // rest the third.
+    let body = [0x01, 0x03, 0x5A, 0x03, 0xBA, 0x11, 0x22, 0x33];
+    assert_eq!(rcoi_text(&body).to_string(), "5A03BA 112233");
+
+    // A body whose claimed lengths do not fit is nobody's, and renders as
+    // nothing rather than in part.
+    let claims_more_than_it_carries = [0x01, 0x55, 0x5A, 0x03];
+    assert_eq!(rcoi_text(&claims_more_than_it_carries).to_string(), "");
+    assert_eq!(rcoi_text(&[]).to_string(), "");
 }
 
 #[test]

@@ -7,9 +7,9 @@
 //! out what it pins.
 
 use wartui_proto::air::{
-    ADMIN_FLAG_BLE, ADMIN_MSG_LEN, AdminMsg, Capabilities, DecodeError, Frame, HEARTBEAT_MSG_LEN,
-    HeartbeatMsg, MAGIC, RecordKind, SIGHTING_MSG_MAX, SIGHTING_MSG_MIN, SSID_MAX, Security,
-    SightingMsg, WIRE_VERSION, foreign,
+    ADMIN_FLAG_BLE, ADMIN_MSG_LEN, AdminMsg, Capabilities, DecodeError, EXT_MAX, Frame,
+    HEARTBEAT_MSG_LEN, HeartbeatMsg, MAGIC, RecordKind, SIGHTING_MSG_MAX, SIGHTING_MSG_MIN,
+    SSID_MAX, Security, SightingMsg, WIRE_VERSION, foreign,
 };
 use wartui_proto::plan::{ChannelSet, IndexRun};
 
@@ -29,6 +29,7 @@ const SIGHTING_WIFI: &[u8] = &[
     0x03, // security: [WPA2_PSK]
     0x06, // ssid_len
     b'M', b'y', b',', b'N', b'e', b't', // and the comma survives
+    0x00, // no trailer: this access point beaconed no roaming consortium
 ];
 
 const SIGHTING_BLE: &[u8] = &[
@@ -39,6 +40,39 @@ const SIGHTING_BLE: &[u8] = &[
     0xBA, // rssi -70
     0x0A, // security: [BLE]
     0x00, // no SSID
+    0x00, // no trailer: this advertiser carried no manufacturer data
+];
+
+/// A Wi-Fi sighting whose beacon carried the OpenRoaming roaming consortium
+/// triple, verbatim in the trailer: count, the nibble-packed lengths, then
+/// three five-byte identifiers.
+const SIGHTING_WIFI_RCOI: &[u8] = &[
+    0x57, 0x54, 0x55, 0x49, 0x01, 0x02, // header
+    0x00, // kind: Wi-Fi
+    0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, // bssid
+    0x0B, // channel 11
+    0xD6, // rssi -42
+    0x03, // security: [WPA2_PSK]
+    0x06, // ssid_len
+    b'M', b'y', b',', b'N', b'e', b't', 0x11, // ext_len: 17, the most there is
+    0x02, // ANQP OI count
+    0x55, // OI lengths: five and five, the third implicit
+    0x5A, 0x03, 0xBA, 0x00, 0x00, // 5A03BA0000
+    0xBA, 0xA2, 0xD0, 0x00, 0x00, // BAA2D00000
+    0xBA, 0xA2, 0xD0, 0x20, 0x00, // BAA2D02000
+];
+
+/// A BLE sighting from an advertiser that carried a manufacturer identifier.
+const SIGHTING_BLE_MFGR: &[u8] = &[
+    0x57, 0x54, 0x55, 0x49, 0x01, 0x02, // header
+    0x01, // kind: BLE
+    0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, // address
+    0x00, // channel 0
+    0xBA, // rssi -70
+    0x0A, // security: [BLE]
+    0x00, // no SSID
+    0x02, // ext_len: the identifier, and nothing else
+    0x4C, 0x00, // company identifier 76, little-endian
 ];
 
 const ADMIN: &[u8] = &[
@@ -66,16 +100,34 @@ const VENDOR_ADMIN: &[u8] = &[0x45, 0x4E, 0x4F, 0x57, 0x05, 0x07, 0x02, 0x05, 0x
 fn the_frames_are_the_lengths_the_constants_promise() {
     assert_eq!(HEARTBEAT.len(), HEARTBEAT_MSG_LEN);
     assert_eq!(ADMIN.len(), ADMIN_MSG_LEN);
-    assert_eq!(SIGHTING_BLE.len(), SIGHTING_MSG_MIN, "a sighting with no SSID is the floor");
-    assert_eq!(SIGHTING_MSG_MAX, SIGHTING_MSG_MIN + SSID_MAX);
+    assert_eq!(
+        SIGHTING_BLE.len(),
+        SIGHTING_MSG_MIN,
+        "a sighting with no SSID and no trailer is the floor"
+    );
+    assert_eq!(
+        SIGHTING_WIFI_RCOI.len(),
+        SIGHTING_MSG_MIN + 6 + EXT_MAX,
+        "the widest trailer there is"
+    );
+    assert_eq!(SIGHTING_MSG_MAX, SIGHTING_MSG_MIN + SSID_MAX + EXT_MAX);
     // The point of the whole exercise: a heartbeat was 212 bytes and a
-    // sighting was 212 bytes, on a control channel every node shares.
-    const { assert!(HEARTBEAT_MSG_LEN < 20 && SIGHTING_MSG_MAX < 60) };
+    // sighting was 212 bytes, on a control channel every node shares. The
+    // ceiling is ESP-NOW's own — a payload over 250 bytes cannot be sent.
+    const { assert!(HEARTBEAT_MSG_LEN < 20 && SIGHTING_MSG_MAX < 250) };
 }
 
 #[test]
 fn every_frame_carries_the_same_header() {
-    for frame in [HEARTBEAT, SIGHTING_WIFI, SIGHTING_BLE, ADMIN, ADMIN_BLE] {
+    for frame in [
+        HEARTBEAT,
+        SIGHTING_WIFI,
+        SIGHTING_BLE,
+        SIGHTING_WIFI_RCOI,
+        SIGHTING_BLE_MFGR,
+        ADMIN,
+        ADMIN_BLE,
+    ] {
         assert_eq!(&frame[..4], MAGIC, "magic");
         assert_eq!(frame[4], WIRE_VERSION, "version");
     }
@@ -85,7 +137,15 @@ fn every_frame_carries_the_same_header() {
 fn nothing_we_transmit_carries_the_vendors_magic() {
     // A vendor core must not admit one of ours to its node table, nor a vendor node
     // read an assignment out of one.
-    for frame in [HEARTBEAT, SIGHTING_WIFI, SIGHTING_BLE, ADMIN, ADMIN_BLE] {
+    for frame in [
+        HEARTBEAT,
+        SIGHTING_WIFI,
+        SIGHTING_BLE,
+        SIGHTING_WIFI_RCOI,
+        SIGHTING_BLE_MFGR,
+        ADMIN,
+        ADMIN_BLE,
+    ] {
         assert_ne!(&frame[..4], &foreign::VENDOR_MAGIC[..]);
         assert_eq!(foreign::classify(frame), None);
     }
@@ -119,11 +179,40 @@ fn a_wifi_sighting_encodes_byte_for_byte() {
         rssi: -42,
         security: Security::Wpa2Psk,
         ssid: b"My,Net",
+        ext: &[],
     };
     let mut buf = [0u8; SIGHTING_MSG_MAX];
     let len = msg.encode_into(&mut buf).expect("SIGHTING_MSG_MAX is always enough");
     assert_eq!(&buf[..len], SIGHTING_WIFI);
     assert_eq!(SightingMsg::decode(SIGHTING_WIFI), Ok(msg));
+}
+
+#[test]
+fn a_wifi_sighting_with_a_roaming_consortium_encodes_byte_for_byte() {
+    // The trailer is the element's body verbatim — count byte and lengths
+    // byte included — so a change to how it is read costs a re-export, never
+    // a re-flash.
+    const OPEN_ROAMING: &[u8] = &[
+        0x02, 0x55, //
+        0x5A, 0x03, 0xBA, 0x00, 0x00, //
+        0xBA, 0xA2, 0xD0, 0x00, 0x00, //
+        0xBA, 0xA2, 0xD0, 0x20, 0x00,
+    ];
+    let msg = SightingMsg {
+        kind: RecordKind::Wifi,
+        bssid: [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF],
+        channel: 11,
+        rssi: -42,
+        security: Security::Wpa2Psk,
+        ssid: b"My,Net",
+        ext: OPEN_ROAMING,
+    };
+    let mut buf = [0u8; SIGHTING_MSG_MAX];
+    let len = msg.encode_into(&mut buf).expect("fits");
+    assert_eq!(&buf[..len], SIGHTING_WIFI_RCOI);
+    let back = SightingMsg::decode(SIGHTING_WIFI_RCOI).expect("valid");
+    assert_eq!(back, msg);
+    assert_eq!(back.ext, OPEN_ROAMING, "the body survives the wire unchanged");
 }
 
 #[test]
@@ -142,11 +231,31 @@ fn a_ble_sighting_encodes_byte_for_byte() {
         rssi: -70,
         security: Security::Ble,
         ssid: b"",
+        ext: &[],
     };
     let mut buf = [0u8; SIGHTING_MSG_MAX];
     let len = msg.encode_into(&mut buf).expect("fits");
     assert_eq!(&buf[..len], SIGHTING_BLE);
     assert_eq!(SightingMsg::decode(SIGHTING_BLE), Ok(msg));
+}
+
+#[test]
+fn a_ble_sighting_with_a_manufacturer_id_encodes_byte_for_byte() {
+    // Two little-endian bytes and nothing else: the trailer for a BLE
+    // sighting is the identifier or it is empty, never anything in between.
+    let msg = SightingMsg {
+        kind: RecordKind::Ble,
+        bssid: [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF],
+        channel: 0,
+        rssi: -70,
+        security: Security::Ble,
+        ssid: b"",
+        ext: &76u16.to_le_bytes(),
+    };
+    let mut buf = [0u8; SIGHTING_MSG_MAX];
+    let len = msg.encode_into(&mut buf).expect("fits");
+    assert_eq!(&buf[..len], SIGHTING_BLE_MFGR);
+    assert_eq!(SightingMsg::decode(SIGHTING_BLE_MFGR), Ok(msg));
 }
 
 #[test]
@@ -164,8 +273,9 @@ fn an_rssi_is_signed_and_a_channel_is_not() {
 }
 
 #[test]
-fn the_longest_ssid_there_is_fits_the_buffer_sized_for_it() {
+fn the_longest_ssid_and_trailer_there_are_fit_the_buffer_sized_for_it() {
     let ssid = [b'x'; SSID_MAX];
+    let ext = [0xEE; EXT_MAX];
     let msg = SightingMsg {
         kind: RecordKind::Wifi,
         bssid: [1, 2, 3, 4, 5, 6],
@@ -173,11 +283,14 @@ fn the_longest_ssid_there_is_fits_the_buffer_sized_for_it() {
         rssi: -1,
         security: Security::Open,
         ssid: &ssid,
+        ext: &ext,
     };
     let mut buf = [0u8; SIGHTING_MSG_MAX];
     let len = msg.encode_into(&mut buf).expect("that is what the constant is for");
     assert_eq!(len, SIGHTING_MSG_MAX);
-    assert_eq!(SightingMsg::decode(&buf[..len]).expect("valid").ssid, &ssid[..]);
+    let back = SightingMsg::decode(&buf[..len]).expect("valid");
+    assert_eq!(back.ssid, &ssid[..]);
+    assert_eq!(back.ext, &ext[..]);
 
     // And a buffer one byte short refuses rather than truncating, so a node
     // cannot broadcast a half-formed frame.
@@ -195,6 +308,7 @@ fn an_ssid_longer_than_the_standard_allows_is_refused_at_both_ends() {
         rssi: -1,
         security: Security::Open,
         ssid: &ssid,
+        ext: &[],
     };
     let mut buf = [0u8; 128];
     assert_eq!(msg.encode_into(&mut buf), None);
@@ -202,6 +316,40 @@ fn an_ssid_longer_than_the_standard_allows_is_refused_at_both_ends() {
     let mut frame = SIGHTING_BLE.to_vec();
     frame[16] = 33;
     assert_eq!(SightingMsg::decode(&frame), Err(DecodeError::SsidTooLong(33)));
+}
+
+#[test]
+fn a_trailer_longer_than_the_wire_allows_is_refused_at_both_ends() {
+    // Refused on the way in, so a node cannot broadcast it, and on the way
+    // out, so a frame from a build with a wider trailer is named rather than
+    // half-read.
+    let msg = SightingMsg {
+        kind: RecordKind::Ble,
+        bssid: [1, 2, 3, 4, 5, 6],
+        channel: 0,
+        rssi: -1,
+        security: Security::Ble,
+        ssid: b"",
+        ext: &[0xEE; EXT_MAX + 1],
+    };
+    let mut buf = [0u8; 128];
+    assert_eq!(msg.encode_into(&mut buf), None);
+
+    let mut frame = SIGHTING_WIFI.to_vec();
+    frame[23] = 18;
+    assert_eq!(SightingMsg::decode(&frame), Err(DecodeError::ExtTooLong(18)));
+}
+
+#[test]
+fn a_trailer_short_of_its_claim_is_short_rather_than_silently_empty() {
+    // `ext_len` says two and one arrived. Reading what is there would file an
+    // identifier nobody sent.
+    let mut frame = SIGHTING_BLE_MFGR.to_vec();
+    frame.pop();
+    assert_eq!(
+        SightingMsg::decode(&frame),
+        Err(DecodeError::TooShort { need: SIGHTING_MSG_MIN + 2, got: SIGHTING_MSG_MIN + 1 })
+    );
 }
 
 #[test]
