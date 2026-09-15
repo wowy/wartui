@@ -1,6 +1,7 @@
 //! Enough of the Bluetooth host-controller interface to run a scan.
 //!
-//! All a scan wants from Bluetooth is an address and a signal strength, and a full
+//! All a scan wants from Bluetooth is an address, a signal strength and — if
+//! the advertiser volunteered it — a manufacturer identifier, and a full
 //! host stack such as NimBLE is a lot of code to be wrong in. `esp-radio` hands out the controller as a raw HCI
 //! packet pipe, so four commands and one event are the whole of it, and this module
 //! is the byte layouts with nothing that talks to hardware.
@@ -89,15 +90,21 @@ pub struct AdvReport {
     /// Signal strength in dBm. `127` means the controller had no reading, which
     /// the Core Specification defines and which is not a plausible dBm value.
     pub rssi: i8,
+    /// The Bluetooth SIG company identifier from the advertiser's
+    /// manufacturer-specific data, if it carried any. `None` when it did not —
+    /// which is common, and not a fault.
+    pub mfgr: Option<u16>,
 }
 
 impl AdvReport {
-    /// The observation in the shape the wire carries.
+    /// The observation in the shape the wire carries, with `ext` as the
+    /// trailer — for a BLE sighting, the company identifier's two
+    /// little-endian bytes or nothing.
     ///
     /// BLE records have no SSID and no channel, and the exporter depends on
     /// both being empty and zero rather than absent.
     #[must_use]
-    pub const fn as_msg(&self) -> SightingMsg<'static> {
+    pub const fn as_msg<'a>(&self, ext: &'a [u8]) -> SightingMsg<'a> {
         SightingMsg {
             kind: RecordKind::Ble,
             bssid: self.address,
@@ -105,6 +112,20 @@ impl AdvReport {
             rssi: self.rssi,
             security: Security::Ble,
             ssid: b"",
+            ext,
+        }
+    }
+
+    /// The frame a node broadcasts about this report, trailer and all.
+    ///
+    /// The company identifier is the trailer, so the rule that turns one into
+    /// the other lives here — once, where the identifier was read — rather
+    /// than at each caller.
+    #[must_use]
+    pub fn encode_into(&self, out: &mut [u8]) -> Option<usize> {
+        match self.mfgr {
+            Some(id) => self.as_msg(&id.to_le_bytes()).encode_into(out),
+            None => self.as_msg(&[]).encode_into(out),
         }
     }
 
@@ -113,6 +134,32 @@ impl AdvReport {
     pub const fn has_rssi(&self) -> bool {
         self.rssi != 127
     }
+}
+
+/// The company identifier out of a report's advertising data, if it holds
+/// manufacturer-specific data.
+///
+/// Advertising data is a run of structures — a length that counts the type
+/// byte and the payload, then that type byte, then the payload — and the
+/// manufacturer-specific type is `0xFF`, whose payload begins with the two
+/// little-endian bytes WiGLE's `MfgrId` column wants. First such structure
+/// wins; a run that stops making sense ends the walk with nothing, which is
+/// the same deal the beacon parser gives a malformed element.
+fn manufacturer_id(data: &[u8]) -> Option<u16> {
+    let mut rest = data;
+    while let Some((&len, tail)) = rest.split_first() {
+        let len = usize::from(len);
+        // A zero length is the padding some controllers append; anything
+        // shorter than it claims is the end of the structures.
+        if len == 0 || tail.len() < len {
+            return None;
+        }
+        if tail[0] == 0xFF && len >= 3 {
+            return Some(u16::from_le_bytes([tail[1], tail[2]]));
+        }
+        rest = tail.get(len..)?;
+    }
+    None
 }
 
 /// Walk the advertising reports in one HCI packet.
@@ -151,7 +198,8 @@ impl Iterator for AdvReports<'_> {
         address.reverse();
         let data_len = usize::from(*self.rest.get(8)?);
         let rssi = *self.rest.get(9 + data_len)? as i8;
+        let mfgr = self.rest.get(9..9 + data_len).and_then(manufacturer_id);
         self.rest = self.rest.get(10 + data_len..)?;
-        Some(AdvReport { address, rssi })
+        Some(AdvReport { address, rssi, mfgr })
     }
 }

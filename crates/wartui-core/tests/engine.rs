@@ -132,6 +132,7 @@ fn named_observation(src: Mac, bssid: &str, rssi: i8, ssid: &[u8]) -> Event {
         rssi,
         security: Security::Wpa2Psk,
         ssid,
+        ext: &[],
     }
     .encode_into(&mut frame)
     .expect("fits");
@@ -196,6 +197,7 @@ fn unique_addresses_are_counted_once_per_kind_however_often_they_are_heard() {
             rssi: -60,
             security: Security::Wpa2Psk,
             ssid: b"example",
+            ext: &[],
         }
         .encode_into(&mut frame)
         .expect("fits");

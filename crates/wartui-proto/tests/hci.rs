@@ -126,14 +126,50 @@ fn a_report_that_claims_more_devices_than_it_carries_is_survivable() {
 #[test]
 fn a_report_becomes_the_frame_a_node_broadcasts() {
     let packet = event(&[(ADDR, &[], -70)]);
-    let msg = adv_reports(&packet).next().expect("one report").as_msg();
+    let report = adv_reports(&packet).next().expect("one report");
+    let msg = report.as_msg(&[]);
     assert_eq!(msg.kind, RecordKind::Ble);
     assert_eq!(msg.security, Security::Ble);
     assert_eq!(msg.channel, 0, "BLE has no channel, and the exporter depends on the zero");
     assert!(msg.ssid.is_empty(), "and no SSID");
+    assert!(msg.ext.is_empty(), "and no trailer: this advertiser sent none");
 
     let mut buf = [0u8; SIGHTING_MSG_MAX];
-    let len = msg.encode_into(&mut buf).expect("fits");
+    let len = report.encode_into(&mut buf).expect("fits");
     assert_eq!(SightingMsg::decode(&buf[..len]).expect("valid"), msg);
     assert_eq!(SightingMsg::decode(&buf[..len]).expect("valid").bssid, ADDR);
+}
+
+#[test]
+fn a_manufacturer_identifier_is_read_out_of_the_advertising_data() {
+    // `0xFF` is the manufacturer-specific structure, and its payload begins
+    // with the two little-endian bytes WiGLE's `MfgrId` column wants. Here it
+    // sits behind a flags structure, which is how real advertisers carry it.
+    let data = &[0x02, 0x01, 0x06, 0x05, 0xFF, 0x4C, 0x00, 0x10, 0x02];
+    let packet = event(&[(ADDR, data, -70)]);
+    let report = adv_reports(&packet).next().expect("one report");
+    assert_eq!(report.mfgr, Some(76));
+
+    let mut buf = [0u8; SIGHTING_MSG_MAX];
+    let len = report.encode_into(&mut buf).expect("fits");
+    let back = SightingMsg::decode(&buf[..len]).expect("valid");
+    assert_eq!(back.ext, &76u16.to_le_bytes(), "the identifier is the trailer");
+}
+
+#[test]
+fn an_advertiser_without_manufacturer_data_has_none() {
+    // Most do not send any, and that is not a fault.
+    let packet = event(&[(ADDR, &[0x02, 0x01, 0x06], -70)]);
+    let report = adv_reports(&packet).next().expect("one report");
+    assert_eq!(report.mfgr, None);
+}
+
+#[test]
+fn a_malformed_structure_run_yields_no_identifier_rather_than_a_wrong_one() {
+    // The walk stops where the data stops making sense — same deal the beacon
+    // parser gives a malformed element. A structure claiming five bytes while
+    // carrying three ends the run before any identifier is guessed at.
+    let packet = event(&[(ADDR, &[0x05, 0xFF, 0x4C, 0x00], -70)]);
+    let report = adv_reports(&packet).next().expect("one report");
+    assert_eq!(report.mfgr, None);
 }

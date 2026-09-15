@@ -34,19 +34,30 @@ pub const WIRE_VERSION: u8 = 1;
 /// Longest SSID 802.11 allows, and so the most a sighting carries.
 pub const SSID_MAX: usize = 32;
 
+/// Most a sighting's trailer carries, past its length byte.
+///
+/// Anchored on the widest roaming consortium element anybody real beacons: a
+/// count byte, a lengths byte and three five-byte identifiers — the
+/// `5A03BA0000 BAA2D00000 BAA2D02000` OpenRoaming triple. A trailer that
+/// would not fit is dropped whole where it is parsed rather than truncated
+/// on the wire: a half-arrived identifier is nobody's.
+pub const EXT_MAX: usize = 17;
+
 /// Length of [`HeartbeatMsg`] on the wire.
 pub const HEARTBEAT_MSG_LEN: usize = OFF_BODY + 7;
 
 /// Length of [`AdminMsg`] on the wire.
 pub const ADMIN_MSG_LEN: usize = OFF_BODY + 4 + CHANNEL_SET_BYTES;
 
-/// Length of a [`SightingMsg`] carrying no SSID — the floor a decoder needs
-/// before it can read `ssid_len` and find out how much more there is.
-pub const SIGHTING_MSG_MIN: usize = OFF_BODY + 11;
+/// Length of a [`SightingMsg`] carrying no SSID and no trailer — the floor a
+/// decoder needs before it can read `ssid_len` and find out how much more
+/// there is.
+pub const SIGHTING_MSG_MIN: usize = OFF_BODY + 12;
 
-/// Length of a [`SightingMsg`] carrying the longest SSID there is, and so a
-/// buffer [`SightingMsg::encode_into`] can always finish in.
-pub const SIGHTING_MSG_MAX: usize = SIGHTING_MSG_MIN + SSID_MAX;
+/// Length of a [`SightingMsg`] carrying the longest SSID and the longest
+/// trailer there are, and so a buffer [`SightingMsg::encode_into`] can always
+/// finish in.
+pub const SIGHTING_MSG_MAX: usize = SIGHTING_MSG_MIN + SSID_MAX + EXT_MAX;
 
 /// [`AdminMsg::flags`] bit 0: scan Bluetooth as well as Wi-Fi.
 pub const ADMIN_FLAG_BLE: u8 = 1 << 0;
@@ -120,6 +131,9 @@ pub enum DecodeError {
     /// `ssid_len` exceeded [`SSID_MAX`], which 802.11 makes impossible, so the
     /// frame is malformed rather than merely unusual.
     SsidTooLong(u8),
+    /// `ext_len` exceeded [`EXT_MAX`], which no parser this build knows will
+    /// produce, so the frame is malformed rather than merely unusual.
+    ExtTooLong(u8),
 }
 
 impl fmt::Display for DecodeError {
@@ -130,6 +144,7 @@ impl fmt::Display for DecodeError {
             Self::BadVersion(v) => write!(f, "wire version {v}, expected {WIRE_VERSION}"),
             Self::UnknownType(t) => write!(f, "unknown message type {t:#04x}"),
             Self::SsidTooLong(n) => write!(f, "ssid length {n} exceeds {SSID_MAX}"),
+            Self::ExtTooLong(n) => write!(f, "ext length {n} exceeds {EXT_MAX}"),
         }
     }
 }
@@ -426,8 +441,9 @@ impl fmt::Display for Security {
 
 /// Node → core, one per newly-seen BSSID.
 ///
-/// Seventeen bytes plus the SSID and no padding, because every byte is paid on the
-/// control channel every node shares, once per access point.
+/// Eighteen bytes plus the SSID and the trailer, and no padding, because every
+/// byte is paid on the control channel every node shares, once per access
+/// point.
 ///
 /// The SSID is length-prefixed, so a comma or any other byte inside it arrives
 /// intact. A length needs no escaping.
@@ -452,10 +468,22 @@ pub struct SightingMsg<'a> {
     /// beacon is parsed (`beacon::visible_ssid`), so that it never reaches the
     /// wire at all rather than being tidied up at each end.
     pub ssid: &'a [u8],
+    /// The kind-dependent trailer, at most [`EXT_MAX`] bytes and
+    /// length-prefixed on the wire after the SSID.
+    ///
+    /// For Wi-Fi it is the roaming consortium element's body verbatim — every
+    /// byte between its `Element ID` and `Length` octets — and for BLE it is
+    /// exactly two bytes, the Bluetooth SIG company identifier an advertiser
+    /// carried, little-endian, or nothing when it carried none. One trailer
+    /// rather than a field of each kind, because the two never compete for the
+    /// same bytes and every byte is paid on a channel every node shares. This
+    /// layer carries the bytes and does not interpret them; what they *mean* is
+    /// decided where they are parsed and where they are written down.
+    pub ext: &'a [u8],
 }
 
 impl<'a> SightingMsg<'a> {
-    /// Decode from a received frame, borrowing the SSID from it.
+    /// Decode from a received frame, borrowing the SSID and trailer from it.
     ///
     /// # Errors
     /// See [`DecodeError`].
@@ -471,7 +499,17 @@ impl<'a> SightingMsg<'a> {
         if usize::from(ssid_len) > SSID_MAX {
             return Err(DecodeError::SsidTooLong(ssid_len));
         }
+        // `SIGHTING_MSG_MIN` already counts the trailer's length byte, so this
+        // is the first byte past whatever SSID there is.
         let need = SIGHTING_MSG_MIN + usize::from(ssid_len);
+        if buf.len() < need {
+            return Err(DecodeError::TooShort { need, got: buf.len() });
+        }
+        let ext_len = buf[need - 1];
+        if usize::from(ext_len) > EXT_MAX {
+            return Err(DecodeError::ExtTooLong(ext_len));
+        }
+        let need = need + usize::from(ext_len);
         if buf.len() < need {
             return Err(DecodeError::TooShort { need, got: buf.len() });
         }
@@ -485,21 +523,23 @@ impl<'a> SightingMsg<'a> {
             #[allow(clippy::cast_possible_wrap)]
             rssi: buf[OFF_BODY + 8] as i8,
             security: Security::from_u8(buf[OFF_BODY + 9]),
-            ssid: &buf[SIGHTING_MSG_MIN..need],
+            ssid: &buf[OFF_BODY + 11..SIGHTING_MSG_MIN + usize::from(ssid_len) - 1],
+            ext: &buf[SIGHTING_MSG_MIN + usize::from(ssid_len)..need],
         })
     }
 
     /// Write the frame into `out`, returning how many bytes it took.
     ///
-    /// `None` if `out` is too small or the SSID is longer than [`SSID_MAX`];
-    /// [`SIGHTING_MSG_MAX`] is always enough. Nothing is written when it fails,
-    /// so a caller cannot broadcast a half-formed frame.
+    /// `None` if `out` is too small, the SSID is longer than [`SSID_MAX`] or
+    /// the trailer is longer than [`EXT_MAX`]; [`SIGHTING_MSG_MAX`] is always
+    /// enough. Nothing is written when it fails, so a caller cannot broadcast
+    /// a half-formed frame.
     #[must_use]
     pub fn encode_into(&self, out: &mut [u8]) -> Option<usize> {
-        if self.ssid.len() > SSID_MAX {
+        if self.ssid.len() > SSID_MAX || self.ext.len() > EXT_MAX {
             return None;
         }
-        let len = SIGHTING_MSG_MIN + self.ssid.len();
+        let len = SIGHTING_MSG_MIN + self.ssid.len() + self.ext.len();
         let out = out.get_mut(..len)?;
         write_header(out, MsgType::Sighting);
         out[OFF_BODY] = self.kind.as_u8();
@@ -508,12 +548,14 @@ impl<'a> SightingMsg<'a> {
         // Two's complement again; `to_le_bytes` on an `i8` is the same byte.
         out[OFF_BODY + 8] = self.rssi.to_le_bytes()[0];
         out[OFF_BODY + 9] = self.security.as_u8();
-        // The cast cannot lose data: bounded by SSID_MAX, which is 32.
+        // The casts cannot lose data: bounded by SSID_MAX and EXT_MAX.
         #[allow(clippy::cast_possible_truncation)]
         {
             out[OFF_BODY + 10] = self.ssid.len() as u8;
+            out[OFF_BODY + 11 + self.ssid.len()] = self.ext.len() as u8;
         }
-        out[SIGHTING_MSG_MIN..len].copy_from_slice(self.ssid);
+        out[OFF_BODY + 11..OFF_BODY + 11 + self.ssid.len()].copy_from_slice(self.ssid);
+        out[SIGHTING_MSG_MIN + self.ssid.len()..len].copy_from_slice(self.ext);
         Some(len)
     }
 }

@@ -502,7 +502,7 @@ async fn send_frame(
     started: Instant,
 ) -> Result<(), ()> {
     let mut payload = EspNowPayload::new();
-    payload.extend_from_slice(frame).expect("212 bytes fits the 250-byte payload");
+    payload.extend_from_slice(frame).expect("the longest sighting fits the 250-byte payload");
     let rx = BridgeToHost::Rx {
         src,
         dst: BROADCAST,
@@ -564,6 +564,9 @@ impl World {
                     security: securities[rng.below(securities.len())],
                     channel,
                     rssi: -30 - i8::try_from(rng.below(60)).unwrap_or(0),
+                    // Every fourth network is a Passpoint one, so both the
+                    // with-trailer and without paths run on every capture.
+                    ext: if i % 4 == 0 { OPEN_ROAMING.to_vec() } else { Vec::new() },
                 }
             })
             .collect();
@@ -608,6 +611,10 @@ impl World {
             security: Security::Ble,
             channel: 0,
             rssi: -40 - i8::try_from(rng.below(50)).unwrap_or(0),
+            // Half of them carry a manufacturer identifier — 76, which a
+            // person can check against the SIG company list — so both BLE
+            // trailer paths run too.
+            ext: if rng.below(2) == 0 { 76u16.to_le_bytes().to_vec() } else { Vec::new() },
         }
     }
 }
@@ -640,7 +647,20 @@ struct Network {
     security: Security,
     channel: u8,
     rssi: i8,
+    /// The sighting's trailer, as bytes: the roaming consortium body for
+    /// Wi-Fi, the manufacturer identifier for BLE. Stored rendered so `as_msg`
+    /// needs no kind-dependent logic of its own.
+    ext: Vec<u8>,
 }
+
+/// The OpenRoaming roaming consortium triple, so a simulated Passpoint
+/// neighbourhood exercises the trailer the way a real one would.
+const OPEN_ROAMING: [u8; 17] = [
+    0x02, 0x55, //
+    0x5A, 0x03, 0xBA, 0x00, 0x00, //
+    0xBA, 0xA2, 0xD0, 0x00, 0x00, //
+    0xBA, 0xA2, 0xD0, 0x20, 0x00,
+];
 
 impl Network {
     /// The observation a node would broadcast about it.
@@ -652,6 +672,7 @@ impl Network {
             rssi: self.rssi,
             security: self.security,
             ssid: self.ssid.as_bytes(),
+            ext: &self.ext,
         }
     }
 }

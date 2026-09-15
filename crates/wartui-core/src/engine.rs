@@ -841,6 +841,21 @@ impl FleetEngine {
                 if let Some(node) = self.nodes.get_mut(&src) {
                     node.observations += 1;
                 }
+                // The trailer's meaning is the kind's — the roaming consortium
+                // body for Wi-Fi, the company identifier for BLE — and this is
+                // where that split is made. A trailer a well-formed frame of
+                // this wire version cannot carry, a BLE one that is not exactly
+                // two bytes, is dropped rather than guessed at.
+                let (rcoi, mfgr_id) = match sighting.kind {
+                    RecordKind::Wifi => {
+                        ((!sighting.ext.is_empty()).then(|| sighting.ext.to_vec()), None)
+                    }
+                    RecordKind::Ble => (
+                        None,
+                        (sighting.ext.len() == 2)
+                            .then(|| u16::from_le_bytes([sighting.ext[0], sighting.ext[1]])),
+                    ),
+                };
                 let observation = Observation {
                     node_mac: src,
                     rx_at_ms: now.unix_ms,
@@ -851,6 +866,8 @@ impl FleetEngine {
                     channel: u16::from(sighting.channel),
                     rssi: i16::from(sighting.rssi),
                     kind: sighting.kind,
+                    rcoi,
+                    mfgr_id,
                     fix: self.config.position.resolve(now.unix_ms),
                     raw_body: payload.to_vec(),
                 };

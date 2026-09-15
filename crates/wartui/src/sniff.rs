@@ -9,6 +9,7 @@ use anyhow::Result;
 use clap::Args as ClapArgs;
 use wartui_bridge::LinkEvent;
 use wartui_proto::air::{DecodeError, Frame, RecordKind, SightingMsg, foreign};
+use wartui_proto::beacon::rcoi_text;
 use wartui_proto::link::{BROADCAST, BridgeToHost};
 
 use super::mac;
@@ -271,8 +272,20 @@ fn render(sighting: &SightingMsg<'_>) -> String {
         RecordKind::Wifi => "wifi",
         RecordKind::Ble => "ble ",
     };
+    // What the trailer carries depends on the kind, the same split the engine
+    // makes of it: roaming consortium identifiers for Wi-Fi, a manufacturer
+    // identifier for BLE.
+    let trailer = match sighting.kind {
+        RecordKind::Wifi if !sighting.ext.is_empty() => {
+            format!("  rcoi {}", rcoi_text(sighting.ext))
+        }
+        RecordKind::Ble if sighting.ext.len() == 2 => {
+            format!("  mfgr {}", u16::from_le_bytes([sighting.ext[0], sighting.ext[1]]))
+        }
+        _ => String::new(),
+    };
     format!(
-        "{kind}  {}  ch {:>3}  {:>4}dBm  {:<16}  {}",
+        "{kind}  {}  ch {:>3}  {:>4}dBm  {:<16}  {}{trailer}",
         mac(&sighting.bssid),
         sighting.channel,
         sighting.rssi,

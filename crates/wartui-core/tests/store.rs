@@ -47,6 +47,8 @@ fn observation(node: Mac, bssid: [u8; 6], rssi: i16, at_ms: i64, fix: Fix) -> Re
         channel: 6,
         rssi,
         kind: RecordKind::Wifi,
+        rcoi: None,
+        mfgr_id: None,
         fix,
         raw_body: b"raw".to_vec(),
     })
@@ -301,6 +303,105 @@ fn a_ble_record_exports_with_the_type_wigle_expects() {
     // Channel 0 with a blank frequency behind it: a passive scan has no
     // "device type" code to put there, and the row says so by leaving it out.
     assert!(row.contains(",0,,-60,"), "channel 0, then no frequency: {row}");
+}
+
+/// The OpenRoaming triple, the widest roaming consortium element anybody real
+/// beacons.
+const OPEN_ROAMING: [u8; 17] = [
+    0x02, 0x55, //
+    0x5A, 0x03, 0xBA, 0x00, 0x00, //
+    0xBA, 0xA2, 0xD0, 0x00, 0x00, //
+    0xBA, 0xA2, 0xD0, 0x20, 0x00,
+];
+
+#[test]
+fn a_passpoint_row_exports_its_roaming_consortium() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut passpoint = observation(NODE, [0xAA; 6], -60, EPOCH_MS, fixed(37.0, -122.0));
+    let Record::Observation(obs) = &mut passpoint else { unreachable!() };
+    obs.rcoi = Some(OPEN_ROAMING.to_vec());
+    let conn = write(&dir, vec![passpoint]);
+
+    let (csv, summary) = export(&conn);
+    assert_eq!(summary.rows, 1);
+    assert!(
+        csv.contains("5A03BA0000 BAA2D00000 BAA2D02000,,WIFI"),
+        "the identifiers in WiGLE's spelling, and no manufacturer id: {csv}"
+    );
+}
+
+#[test]
+fn a_ble_row_exports_its_manufacturer_identifier() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut ble = observation(NODE, [0xAA; 6], -60, EPOCH_MS, fixed(37.0, -122.0));
+    let Record::Observation(obs) = &mut ble else { unreachable!() };
+    obs.kind = RecordKind::Ble;
+    obs.channel = 0;
+    obs.ssid = Vec::new();
+    obs.security = "[BLE]".to_owned();
+    obs.mfgr_id = Some(76);
+    let conn = write(&dir, vec![ble]);
+
+    let (csv, _) = export(&conn);
+    assert!(
+        csv.contains(",0,,-60,37,-122,16,0,,76,BLE"),
+        "no frequency and no consortium, and the identifier as a number: {csv}"
+    );
+}
+
+#[test]
+fn a_capture_from_before_the_trailer_was_collected_migrates_and_stays_honest() {
+    // v7's observation table has no rcoi or mfgr_id columns. v8 adds them as
+    // NULL, which is the truthful value — those sightings were heard by builds
+    // that took nothing of the kind off the air — and the export says so with
+    // blank columns rather than by refusing the file.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("wartui.db");
+
+    let old = Connection::open(&path).expect("creating");
+    old.execute_batch(
+        "CREATE TABLE session (
+           id INTEGER PRIMARY KEY, started_at INTEGER NOT NULL, ended_at INTEGER,
+           bridge_mac BLOB, bridge_chip TEXT, bridge_fw TEXT,
+           espnow_channel INTEGER NOT NULL, channel_pool TEXT NOT NULL, notes TEXT);
+         INSERT INTO session (id, started_at, espnow_channel, channel_pool)
+           VALUES (1, 0, 6, 'us');
+         CREATE TABLE observation (
+           id INTEGER PRIMARY KEY, session_id INTEGER NOT NULL, node_mac BLOB NOT NULL,
+           rx_at INTEGER NOT NULL, link_rssi INTEGER, bssid BLOB NOT NULL, ssid BLOB,
+           security TEXT NOT NULL, channel INTEGER NOT NULL, rssi INTEGER NOT NULL,
+           kind TEXT NOT NULL, lat REAL, lon REAL, alt REAL, accuracy REAL,
+           pos_source TEXT NOT NULL, pos_at INTEGER, raw_body BLOB);
+         INSERT INTO observation
+           (session_id, node_mac, rx_at, bssid, ssid, security, channel, rssi, kind,
+            lat, lon, alt, accuracy, pos_source, raw_body)
+         VALUES (1, x'0200005E1057', 1, x'AAAAAAAAAAAA', x'6F6C64', '[WPA2_PSK]', 6, -60,
+                 'wifi', 37.0, -122.0, 16.0, NULL, 'static', x'00');",
+    )
+    .expect("v7 tables");
+    old.pragma_update(None, "user_version", 7).expect("stamping");
+    drop(old);
+
+    let store = open_at(&path);
+    let mut fresh = observation(NODE, [0xBB; 6], -60, EPOCH_MS, fixed(37.0, -122.0));
+    let Record::Observation(obs) = &mut fresh else { unreachable!() };
+    obs.rcoi = Some(OPEN_ROAMING.to_vec());
+    store.submit(vec![fresh]);
+    store.close();
+
+    let conn = open_readonly(&path).expect("reopening");
+    let (csv, summary) = export(&conn);
+    assert_eq!(summary.rows, 2);
+    assert!(
+        csv.contains(
+            "AA:AA:AA:AA:AA:AA,old,[WPA2_PSK],1970-01-01 00:00:00,6,2437,-60,37,-122,16,0,,,WIFI"
+        ),
+        "the pre-v8 row exports with the columns honestly blank: {csv}"
+    );
+    assert!(
+        csv.contains("5A03BA0000 BAA2D00000 BAA2D02000"),
+        "the new row carries its roaming consortium: {csv}"
+    );
 }
 
 #[test]
