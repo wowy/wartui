@@ -71,6 +71,12 @@ one node scans Bluetooth.
 - **Proof.** Every 2 s each node's observation count is checked. `idle_node_windows`
   counts the windows in which a node heard nothing, and anything but zero means the
   run is not what its profile says. The human report prints a warning when it happens.
+- **Turnover.** The store is sized for one drive of at most 2 M sightings of 500 k
+  networks. Four sightings per network is the ratio of the operator's own drives, and
+  500 k is the most WDGWars accepts in a day. So a network's slot takes a new address
+  after four hearings (`--sightings-per-address`, 0 to turn it off). At about 5,750
+  sightings a second, a 350 s run is one such drive. Runs recorded before this was
+  added had a fixed neighbourhood of about 5,300 addresses.
 
 ## Baseline
 
@@ -337,3 +343,52 @@ Caveats before it becomes the default:
 - **An export during a capture has no index to use.**
 - **Peak RSS rose by about 2 MiB on both machines**, probably the build's sort. It is
   worth watching as captures get longer.
+
+### Does export need `obs_bssid` at all?
+
+Both export queries group by address. `SELECT_NETWORKS` uses a window partitioned by
+`bssid`; the unpositioned count uses `GROUP BY bssid`. With the index, SQLite walks
+the index in address order and looks every sighting up in the table by rowid, which
+is one random read per row. Without it, SQLite scans the table in order and sorts in
+a temporary B-tree:
+
+| query | with `obs_bssid` | without |
+| --- | --- | --- |
+| networks | `SCAN o USING INDEX obs_bssid`, temp B-tree for the rest of the order | `SCAN o`, temp B-tree for the order |
+| unpositioned | `SCAN observation USING INDEX obs_bssid` | `SCAN observation`, temp B-tree for the `GROUP BY` |
+
+A smoke test on the Mac used one capture from the fixed-neighbourhood `burst` profile
+(798 k sightings, 10,263 addresses), exported twice each way:
+
+| | with `obs_bssid` | without |
+| --- | --- | --- |
+| `wartui export` wall time | 3.58 s, 3.12 s | 2.13 s, 2.04 s |
+
+Without the index export was faster, not slower.
+
+**At a full drive's scale.** One `drive` run of 350 s on the Mac with turnover at
+four sightings per address and the index deferred. It produced 2,000,565 sightings of
+506,360 unique addresses, with 0 idle node-windows and 0 rows dropped. Commit p50 /
+p99 / max was 0.34 / 6.6 / 28.5 ms, and the index took 0.84 s to build at close.
+The database held 2,014,780 observation rows (warm-up included) in 271 MiB. Exported
+twice each way:
+
+| | with `obs_bssid` | without |
+| --- | --- | --- |
+| wall time | 9.89 s, 8.37 s | 5.84 s, 5.40 s |
+| system time | 3.10 s, 3.27 s | 0.52 s, 0.46 s |
+| peak RSS | 13.5 MiB | 15.6 MiB |
+| networks written | 506,746 | 506,746 |
+
+The index costs export about 3.5 s, nearly all of it system time. That fits one
+random table read per sighting, the path a card is slowest at. Sorting without it
+costs about 2 MiB more memory. So `obs_bssid` does not pay for itself on either
+side: capture is fourteen times cheaper without it, and export is faster. It can
+leave the schema entirely rather than be deferred, which takes the build at close,
+the unindexed database a crash leaves, and the unindexed export during a capture
+with it. Still to confirm: the export time on the Pi's CPU and card.
+
+**Decision.** Schema v6 drops `obs_bssid`, and opening an older capture drops it from
+that file too. `--defer-bssid-index` went with it, since there is no longer an index to
+defer. Every run after this change measures the store without the index, so the
+"deferred" columns above are what the plain store now does, minus the build at close.
