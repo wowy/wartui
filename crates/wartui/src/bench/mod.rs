@@ -158,6 +158,12 @@ pub struct Args {
     #[arg(long, value_name = "BYTES")]
     page_size: Option<u32>,
 
+    /// Leave the `obs_bssid` index unbuilt until the store closes, then build it once.
+    /// The build is timed as `index_build_ms` and left out of the rates; its I/O is in the
+    /// totals, since a capture would pay it, but not in the timeline.
+    #[arg(long)]
+    defer_bssid_index: bool,
+
     /// Cut the run into slices this long, in seconds, so a long run shows when it
     /// slowed down rather than only that it did.
     #[arg(long, value_name = "SECONDS", default_value_t = 60)]
@@ -203,6 +209,7 @@ pub async fn run(args: Args) -> Result<()> {
     store_config.wal_autocheckpoint_pages = args.wal_autocheckpoint;
     store_config.page_size = args.page_size;
     store_config.timings = true;
+    store_config.defer_bssid_index = args.defer_bssid_index;
 
     // The directory rather than the file, which does not exist yet.
     let dir = args.db.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
@@ -288,7 +295,9 @@ pub async fn run(args: Args) -> Result<()> {
     // Includes the final flush and the checkpoint SQLite runs when the last connection
     // closes, both of which a real capture pays too.
     let store_report = capture.await.context("the capture task panicked")?;
-    let elapsed = measured_from.elapsed();
+    // The deferred index's build is reported on its own, so it does not dilute the rates.
+    let elapsed =
+        measured_from.elapsed().saturating_sub(store_report.index_build.unwrap_or_default());
     drop(command_tx);
 
     let process =
@@ -378,6 +387,7 @@ pub async fn run(args: Args) -> Result<()> {
     report.put("cache_kib", store_config.cache_kib.map(u64::from));
     report.put("wal_autocheckpoint_pages", store_config.wal_autocheckpoint_pages.map(u64::from));
     report.put("page_size", store_config.page_size.map(u64::from));
+    report.put("defer_bssid_index", if store_config.defer_bssid_index { "on" } else { "off" });
 
     let seconds = elapsed.as_secs_f64();
     report.put("warmup_s", warmup.as_secs_f64());
@@ -423,6 +433,7 @@ pub async fn run(args: Args) -> Result<()> {
     report.put("wal_mib", wal_bytes.map(mib));
     report.put("observation_rows", u64::try_from(observation_rows).unwrap_or(0));
     report.put("export_networks", exported.networks);
+    report.put("index_build_ms", store_report.index_build.map(ms));
     report.put("export_ms", ms(export_time));
     report.put("interval_s", args.interval);
     report.put("timeline", Value::List(timeline));

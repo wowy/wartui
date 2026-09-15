@@ -118,8 +118,7 @@ CREATE TABLE IF NOT EXISTS observation (
 );
 -- Deliberately no unique constraint on bssid: every sighting is kept, with the node
 -- that made it and the signal it saw. Deduplicating at ingest would throw away the
--- coverage data.
-CREATE INDEX IF NOT EXISTS obs_bssid ON observation(bssid);
+-- coverage data. The index on bssid is `BSSID_INDEX`, kept apart so it can be built late.
 CREATE INDEX IF NOT EXISTS obs_node ON observation(node_mac, rx_at);
 
 CREATE TABLE IF NOT EXISTS raw_frame (
@@ -133,6 +132,15 @@ CREATE TABLE IF NOT EXISTS raw_frame (
   bytes BLOB NOT NULL
 );
 ";
+
+/// The export's index, kept out of [`SCHEMA`] so [`StoreConfig::defer_bssid_index`] can
+/// leave it until the capture closes.
+///
+/// Its key is a random address, so every commit dirties leaf pages scattered across the
+/// whole index, and each of those is written to the WAL and again into the file at
+/// checkpoint. The benchmark measured the store writing about fifty times the bytes the
+/// database grows by (`docs/store-io-findings.md`), and this index is the leading suspect.
+const BSSID_INDEX: &str = "CREATE INDEX IF NOT EXISTS obs_bssid ON observation(bssid)";
 
 /// Why the store could not be opened or written.
 #[derive(Debug, thiserror::Error)]
@@ -177,6 +185,12 @@ pub struct StoreConfig {
     /// Off unless asked, because the list grows with every commit for as long as the
     /// capture runs. `wartui bench` asks.
     pub timings: bool,
+    /// Leave the `obs_bssid` index unbuilt until the store closes, then build it once.
+    ///
+    /// An experiment for `wartui bench`, not yet something a capture should do: an export
+    /// taken while the capture runs has no index to use. Only a database without the index
+    /// yet is affected, and the file is the same shape at close either way.
+    pub defer_bssid_index: bool,
 }
 
 impl StoreConfig {
@@ -193,6 +207,7 @@ impl StoreConfig {
             wal_autocheckpoint_pages: None,
             page_size: None,
             timings: false,
+            defer_bssid_index: false,
         }
     }
 }
@@ -210,6 +225,9 @@ pub struct StoreReport {
     /// Every committed batch, in order. Empty unless [`StoreConfig::timings`] asked
     /// for it.
     pub batches: Vec<BatchTiming>,
+    /// How long building a deferred `obs_bssid` index took at close. `None` unless
+    /// [`StoreConfig::defer_bssid_index`] deferred it, or if building it failed.
+    pub index_build: Option<Duration>,
 }
 
 /// One committed batch, as [`StoreReport`] keeps it.
@@ -283,6 +301,9 @@ impl Store {
         let tx = conn.transaction()?;
         migrate(&tx, found)?;
         tx.execute_batch(SCHEMA)?;
+        if !config.defer_bssid_index {
+            tx.execute_batch(BSSID_INDEX)?;
+        }
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         tx.commit()?;
 
@@ -295,10 +316,8 @@ impl Store {
             .name("wartui-store".to_owned())
             .spawn({
                 let stats = Arc::clone(&stats);
-                let batch_rows = config.batch_rows;
-                let batch_interval = config.batch_interval;
-                let timings = config.timings;
-                move || writer(conn, &rx, session_id, batch_rows, batch_interval, timings, &stats)
+                let config = config.clone();
+                move || writer(conn, &rx, session_id, &config, &stats)
             })
             .map_err(StoreError::Spawn)?;
 
@@ -591,16 +610,15 @@ fn writer(
     mut conn: Connection,
     rx: &Receiver<Record>,
     session_id: i64,
-    batch_rows: usize,
-    batch_interval: Duration,
-    timings: bool,
+    config: &StoreConfig,
     stats: &Stats,
 ) -> StoreReport {
+    let (batch_rows, batch_interval) = (config.batch_rows, config.batch_interval);
     let mut pending: Vec<Record> = Vec::with_capacity(batch_rows);
     let mut last_flush = Instant::now();
     let mut report = StoreReport::default();
     let mut flush = |conn: &mut Connection, pending: &mut Vec<Record>| {
-        flush(conn, session_id, pending, stats, timings.then_some(&mut report));
+        flush(conn, session_id, pending, stats, config.timings.then_some(&mut report));
     };
 
     loop {
@@ -626,6 +644,15 @@ fn writer(
     }
 
     flush(&mut conn, &mut pending);
+    if config.defer_bssid_index {
+        // After the last batch, so it is built once over every row rather than kept up
+        // row by row, and before `ended_at`, so a session marked ended has its index.
+        let building = Instant::now();
+        match conn.execute_batch(BSSID_INDEX) {
+            Ok(()) => report.index_build = Some(building.elapsed()),
+            Err(e) => tracing::error!("could not build the deferred bssid index: {e}"),
+        }
+    }
     if let Err(e) = conn.execute(
         "UPDATE session SET ended_at = ?1 WHERE id = ?2",
         params![chrono::Utc::now().timestamp_millis(), session_id],
