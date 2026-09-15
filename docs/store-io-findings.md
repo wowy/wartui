@@ -590,9 +590,38 @@ What it says:
   were flat from the first minute to the sixth, while the database reached 921 MiB.
   With no index on sightings, every insert is an append.
 - **Memory follows the addresses, not the store.** Peak RSS rose by about 18 bytes per
-  extra address, which is the engine's set of every address it has heard. That set is
-  now a fixed 16 KiB estimate (`crates/wartui-core/src/distinct.rs`), so memory no
-  longer follows the addresses, and `unique_addresses` in runs after it is within
-  about 1% rather than exact.
+  extra address, which is the engine's set of every address it has heard. The next
+  section replaces it.
 - **Export time is linear in the capture.** It took 62.5 s here for 4.6× the rows that
   took 12.9 s, well past the drive the store is sized for.
+
+### Estimating unique addresses instead of keeping them
+
+The engine's set of every address, which drew only the view's "unique APs" and this
+report's `unique_addresses`, is now a HyperLogLog of 16 KiB per kind
+(`crates/wartui-core/src/distinct.rs`). `unique_addresses` from here on is an estimate,
+not a count. The store is unchanged.
+
+The same CM5 and card, one 350 s run of each profile on each build, the "before" build
+being `main` at `b1ab911`:
+
+| figure | `drive` before | `drive` after | `burst` before | `burst` after |
+| --- | --- | --- | --- | --- |
+| peak RSS | 25.7 MiB | 14.6 MiB | 59.2 MiB | 17.1 MiB |
+| `unique_addresses` | 508,840 | 512,533 | 2,351,377 | 2,360,882 |
+| rows dropped, idle node-windows | 0, 0 | 0, 0 | 0, 0 | 0, 0 |
+| batch p99 ms | 45.9 | 46.5 | 57.3 | 55.2 |
+| commit p99 ms | 7.5 | 8.6 | 9.1 | 8.9 |
+
+What it says:
+
+- **The set cost more at its peak than per address.** It fell by 11.1 MiB on `drive`
+  and 42.1 MiB on `burst`. That is consistent with the set's last doubling holding the
+  old table and the new one at once: one byte of control and six of key per slot, in a
+  power-of-two table kept seven-eighths full, comes to about 10.5 MiB at 509 k
+  addresses and 42 MiB at 2.35 M.
+- **Memory no longer follows the addresses.** Twenty nodes and 4.6 times the
+  addresses cost 2.5 MiB more than ten, which is the larger fleet and the queue.
+- **The estimate is within 1%.** +0.7% and +0.4% on the old exact counts, though
+  from separate runs, so each gap holds the run's variation as well as the estimate's.
+- **The store did not notice.** Batch and commit p99 moved by what single runs vary by.
