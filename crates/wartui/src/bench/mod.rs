@@ -43,7 +43,9 @@ use wartui_core::engine::{Command, EngineConfig, FleetEngine, Snapshot, StoreSta
 use wartui_core::export::{ExportFilter, wigle_csv};
 use wartui_core::position::PositionChain;
 use wartui_core::runtime::{COMMAND_QUEUE, drive, now};
-use wartui_core::store::{SessionInfo, Store, StoreConfig, open_readonly};
+use wartui_core::store::{
+    Checkpoint, CheckpointPass, SessionInfo, Store, StoreConfig, open_readonly,
+};
 use wartui_proto::link::Mac;
 use wartui_proto::plan::{ChannelPool, DEDUP_RING, NUM_SCAN_CHANNELS};
 
@@ -177,6 +179,15 @@ pub struct Args {
     #[arg(long)]
     defer_bssid_index: bool,
 
+    /// Checkpoint from a thread of its own every this many milliseconds, instead of
+    /// inside whichever commit fills the WAL.
+    #[arg(long, value_name = "MS")]
+    checkpoint_every: Option<u64>,
+
+    /// With --checkpoint-every, rewind the WAL once it passes this many MiB.
+    #[arg(long, value_name = "MIB", default_value_t = 64)]
+    truncate_wal_mib: u64,
+
     /// Cut the run into slices this long, in seconds, so a long run shows when it
     /// slowed down rather than only that it did.
     #[arg(long, value_name = "SECONDS", default_value_t = 60)]
@@ -225,6 +236,12 @@ pub async fn run(args: Args) -> Result<()> {
     store_config.page_size = args.page_size;
     store_config.timings = true;
     store_config.defer_bssid_index = args.defer_bssid_index;
+    if let Some(ms) = args.checkpoint_every {
+        store_config.checkpoint = Checkpoint::Background {
+            every: Duration::from_millis(ms.max(1)),
+            truncate_at: args.truncate_wal_mib.saturating_mul(1024 * 1024),
+        };
+    }
 
     // The directory rather than the file, which does not exist yet.
     let dir = args.db.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
@@ -289,7 +306,8 @@ pub async fn run(args: Args) -> Result<()> {
 
     // Everything from here is the measured window.
     let measured_from = Instant::now();
-    let start = mark(Duration::ZERO, &before, 0, device.as_ref());
+    let wal = with_suffix(&args.db, "-wal");
+    let start = mark(Duration::ZERO, &before, 0, device.as_ref(), &wal);
     let (process_before, device_before) = (start.process, start.device);
     if !args.json {
         eprintln!("benchmarking for {}s into {} ...", args.duration, args.db.display());
@@ -298,7 +316,7 @@ pub async fn run(args: Args) -> Result<()> {
     let (busy, slices) = watch_the_fleet(
         &snapshot_rx,
         start,
-        device.as_ref(),
+        (device.as_ref(), &wal),
         measured_from,
         Duration::from_secs(args.interval),
         Duration::from_secs(args.duration),
@@ -371,6 +389,7 @@ pub async fn run(args: Args) -> Result<()> {
                 slice.device.and_then(|d| ratio(d.sectors / 2, d.writes as f64)),
             );
             row.put("dev_write_ms", slice.device.map(|d| d.write_ms));
+            row.put("wal_mib", slice.wal.map(mib));
             row.put("idle", slice.idle_windows);
             row
         })
@@ -404,6 +423,15 @@ pub async fn run(args: Args) -> Result<()> {
     report.put("wal_autocheckpoint_pages", store_config.wal_autocheckpoint_pages.map(u64::from));
     report.put("page_size", store_config.page_size.map(u64::from));
     report.put("defer_bssid_index", if store_config.defer_bssid_index { "on" } else { "off" });
+    let (checkpoint, every_ms, truncate_mib) = match store_config.checkpoint {
+        Checkpoint::Inline => ("inline", None, None),
+        Checkpoint::Background { every, truncate_at } => {
+            ("background", Some(millis(every)), Some(truncate_at / (1024 * 1024)))
+        }
+    };
+    report.put("checkpoint", checkpoint);
+    report.put("checkpoint_every_ms", every_ms);
+    report.put("truncate_wal_mib", truncate_mib);
 
     let seconds = elapsed.as_secs_f64();
     report.put("warmup_s", warmup.as_secs_f64());
@@ -452,6 +480,26 @@ pub async fn run(args: Args) -> Result<()> {
     report.put("observation_rows", u64::try_from(observation_rows).unwrap_or(0));
     report.put("export_networks", exported.networks);
     report.put("index_build_ms", store_report.index_build.map(ms));
+    // Only the measured window's, like the commits.
+    let in_window = |passes: &[CheckpointPass]| -> Vec<Duration> {
+        let mut took: Vec<Duration> = passes
+            .iter()
+            .filter(|pass| pass.finished_at >= measured_from)
+            .map(|pass| pass.took)
+            .collect();
+        took.sort_unstable();
+        took
+    };
+    let passes = in_window(&store_report.checkpoints.passes);
+    report.put("checkpoint_passes", passes.len());
+    report.put("checkpoint_ms_p50", percentile(&passes, 50).map(ms));
+    report.put("checkpoint_ms_p99", percentile(&passes, 99).map(ms));
+    report.put("checkpoint_ms_max", percentile(&passes, 100).map(ms));
+    let truncations = in_window(&store_report.checkpoints.truncations);
+    report.put("wal_truncations", truncations.len());
+    report.put("wal_truncation_ms_max", percentile(&truncations, 100).map(ms));
+    // Sampled every couple of seconds, so a peak between samples is missed.
+    report.put("wal_peak_mib", slices.iter().filter_map(|slice| slice.wal).max().map(mib));
     report.put("export_ms", ms(export_time));
     report.put("interval_s", args.interval);
     report.put("timeline", Value::List(timeline));
@@ -548,7 +596,7 @@ struct Busy {
 async fn watch_the_fleet(
     snapshots: &watch::Receiver<Arc<Snapshot>>,
     start: Mark,
-    device: Option<&io::Device>,
+    (device, wal): (Option<&io::Device>, &Path),
     measured_from: Instant,
     every: Duration,
     duration: Duration,
@@ -580,7 +628,7 @@ async fn watch_the_fleet(
                 .count() as u64;
         }
         previous = current;
-        latest = mark(measured_from.elapsed(), &snapshot, busy.idle_windows, device);
+        latest = mark(measured_from.elapsed(), &snapshot, busy.idle_windows, device, wal);
         timeline.sample(latest);
     }
 
@@ -591,7 +639,13 @@ async fn watch_the_fleet(
 }
 
 /// The run's cumulative counters as they stand, for the [`Timeline`].
-fn mark(at: Duration, snapshot: &Snapshot, idle_windows: u64, device: Option<&io::Device>) -> Mark {
+fn mark(
+    at: Duration,
+    snapshot: &Snapshot,
+    idle_windows: u64,
+    device: Option<&io::Device>,
+    wal: &Path,
+) -> Mark {
     Mark {
         at,
         observations: snapshot.counters.observations,
@@ -600,6 +654,7 @@ fn mark(at: Duration, snapshot: &Snapshot, idle_windows: u64, device: Option<&io
         idle_windows,
         process: io::ProcessIo::read(),
         device: device.and_then(io::Device::stat),
+        wal: std::fs::metadata(wal).map(|m| m.len()).ok(),
     }
 }
 
