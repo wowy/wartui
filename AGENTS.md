@@ -31,6 +31,8 @@ cargo fmt --check
 
 cargo test -p wartui-core --test engine                    # one test binary
 cargo test -p wartui-core --test engine a_heartbeat_counter # one test by name substring
+
+cargo run --release -p wartui -- bench --db bench.db --fresh  # store I/O, sim-driven; see docs/store-io-findings.md
 ```
 
 Run it without hardware — the simulator runs a fake fleet on a fake clock:

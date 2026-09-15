@@ -37,6 +37,7 @@ short version.
 | `--sim N` | — | Run a fake fleet instead of hardware |
 | `--sim-c6 N` | `0` | Make that many of them C6s, from the end of the fleet |
 | `--record-raw` | off | Also keep the undecoded bytes of every frame |
+| `--commit-interval MS` | `1000` | How often the store commits; a crash loses at most this much |
 | `--notes TEXT` | — | A note about this run, stored with the session |
 
 `export` takes `--db`, `--wigle PATH` and `--session ID`, and writes the
@@ -45,6 +46,27 @@ store rather than a second copy of it, so it can be re-run after a decoder fix,
 against a session that ended last week, or against one still going.
 `--log-file` is global and is the only way to see the transport's own account of
 a run.
+
+### Benchmarking the store
+
+`bench` is hidden, and is for judging a change to the store on the card it will run
+from. It drives the simulator through the engine into a fresh database with nothing
+drawn, then reports rows, commit times, and on Linux what the kernel and the block
+device actually wrote:
+
+```sh
+wartui bench --db /path/on/the/card/bench.db --fresh --duration 300 --json
+```
+
+`--profile drive` (the default) is ten nodes at real time; `--profile burst` is twenty.
+The simulated neighbourhood is sized so every node reports on every sweep, measuring
+starts once the whole fleet holds its assignments, and `idle_node_windows` must read 0
+for a run to count. `--interval` (60 s by default) adds a timeline to the report, so a
+long run shows when the card slowed down. Each SQLite and batching setting has a flag,
+so two settings compare on one binary. The store checkpoints from a thread of its
+own right after each commit; `--checkpoint-every MS` spaces those passes out, and
+`--inline-checkpoint` puts SQLite's own back inside the commit for comparison. [`docs/store-io-findings.md`](../../docs/store-io-findings.md)
+has the method and the numbers so far.
 
 ## Assigning channels
 
