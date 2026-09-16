@@ -422,10 +422,9 @@ fn draw(frame: &mut Frame<'_>, snapshot: &Snapshot, ui: &Ui) {
     draw_header(frame, header, snapshot);
 
     // Side by side when there is room for both, stacked when there is not: the
-    // fleet table needs 88 columns before it starts eliding MACs, which is the
-    // one thing in it that cannot be guessed from context.
-    let [fleet, stream] = if body.width >= 128 {
-        Layout::horizontal([Constraint::Length(88), Constraint::Min(40)]).areas(body)
+    // fleet table needs 79 columns before its state column starts clipping.
+    let [fleet, stream] = if body.width >= 119 {
+        Layout::horizontal([Constraint::Length(79), Constraint::Min(40)]).areas(body)
     } else {
         Layout::vertical([Constraint::Percentage(45), Constraint::Percentage(55)]).areas(body)
     };
@@ -561,7 +560,7 @@ fn draw_fleet(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot, ui: &Ui) {
         .map(|(i, node)| {
             let (state, style) = node_state(node);
             let row = Row::new(vec![
-                Cell::from(mac(&node.state.mac)),
+                Cell::from(node_label(node)),
                 Cell::from(node.state.link_rssi.map_or_else(|| "—".to_owned(), |r| format!("{r}"))),
                 Cell::from(node.state.heartbeats.to_string()),
                 Cell::from(node.state.observations.to_string()),
@@ -583,7 +582,7 @@ fn draw_fleet(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot, ui: &Ui) {
         .collect();
 
     let widths = [
-        Constraint::Length(17),
+        Constraint::Length(8),
         Constraint::Length(4),
         Constraint::Length(5),
         Constraint::Length(6),
@@ -650,6 +649,24 @@ fn ble_cell(node: &NodeView) -> Span<'static> {
         return Span::styled("ble", Style::new().fg(Color::Cyan));
     }
     Span::raw("")
+}
+
+/// Which chip a node is and the last two octets of its address: `C5 57:84`.
+///
+/// The chip is read off the band its heartbeats announce, so a node heard only
+/// through its sightings is `—` until its first heartbeat says.
+fn node_label(node: &NodeView) -> String {
+    let chip = match node.state.capabilities.map(Radio::from) {
+        Some(Radio::DualBand) => "C5",
+        Some(Radio::TwoPointFour) => "C6",
+        None => "— ",
+    };
+    format!("{chip} {}", short_mac(&node.state.mac))
+}
+
+/// The last two octets of an address, which is how the boards are told apart.
+fn short_mac(mac: &Mac) -> String {
+    format!("{:02X}:{:02X}", mac[4], mac[5])
 }
 
 /// A sweep period, in whichever unit reads at a glance.
@@ -773,10 +790,8 @@ fn observation_row(entry: &TailEntry) -> Row<'static> {
     };
     Row::new(vec![
         Cell::from(clock(entry.rx_at_ms)),
-        // The last two bytes of the reporting node's MAC. Enough to tell one
-        // node's rows from another's at a glance; the full address is a pane
-        // away in the fleet table.
-        Cell::from(format!("{:02X}:{:02X}", entry.node_mac[4], entry.node_mac[5])),
+        // The same octets the fleet table names the node by.
+        Cell::from(short_mac(&entry.node_mac)),
         Cell::from(mac(&entry.bssid)).style(kind),
         Cell::from(if entry.channel == 0 { "—".to_owned() } else { entry.channel.to_string() }),
         Cell::from(entry.rssi.to_string()),
@@ -1280,12 +1295,29 @@ mod tests {
     }
 
     #[test]
+    fn the_fleet_table_names_each_node_by_chip_and_last_two_octets() {
+        let snapshot = Snapshot {
+            nodes: vec![node(0x84, 0, true), narrowband(0x85), unannounced(0x86)],
+            tail: Vec::new(),
+            ..busy()
+        };
+        let mut terminal = Terminal::new(TestBackend::new(200, 40)).expect("test backend");
+        terminal.draw(|frame| draw(frame, &snapshot, &Ui::default())).expect("drawing");
+        let rendered = terminal.backend().to_string();
+
+        assert!(rendered.contains("C5 57:84"), "a dual-band radio is a C5");
+        assert!(rendered.contains("C6 57:85"), "a 2.4 GHz radio is a C6");
+        assert!(rendered.contains("—  57:86"), "a node that has not heartbeated has no chip yet");
+        assert!(!rendered.contains("02:00:5E:10:57"), "and no row spells out the whole address");
+    }
+
+    #[test]
     fn a_wide_terminal_shows_the_fleet_and_the_stream_side_by_side() {
         let mut terminal = Terminal::new(TestBackend::new(200, 40)).expect("test backend");
         terminal.draw(|frame| draw(frame, &busy(), &Ui::default())).expect("drawing");
         let rendered = terminal.backend().to_string();
 
-        assert!(rendered.contains("02:00:5E:10:57:84"), "the fleet table");
+        assert!(rendered.contains("C5 57:84"), "the fleet table");
         assert!(rendered.contains("AA:BB:CC:DD:EE"), "and the observation stream");
         assert!(rendered.contains("4 of 5 alive"));
         assert!(rendered.contains("no heartbeat"), "the one node nothing can be sent to yet");

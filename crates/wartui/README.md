@@ -243,6 +243,10 @@ says what it is doing on the header — `gps searching`, `gps ok, 8 sats`,
 
 ## Reading the fleet table
 
+Each row names its node by chip and the last two octets of its address — `C5 57:84`,
+`C6 9D:24` — read off the band its heartbeats announce, so a node not yet heartbeating
+shows `—` in place of the chip.
+
 | State | Meaning |
 | --- | --- |
 | `alive` | Heartbeating, so it can be given channels |
