@@ -10,7 +10,7 @@ name = "wartui-node-fw"
 description = "Wardriving node firmware for wartui. Sniffs, reports, and takes channel assignments."
 version = "0.1.0"
 edition = "2024"
-license = "MIT OR Apache-2.0"
+license = "MIT"
 repository = "https://github.com/wowy/wartui"
 
 [[bin]]
