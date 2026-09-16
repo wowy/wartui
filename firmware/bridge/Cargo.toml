@@ -9,7 +9,7 @@ name = "wartui-bridge-fw"
 description = "USB ESP-NOW bridge firmware for wartui. Framing and radio calls, no protocol knowledge."
 version = "0.1.0"
 edition = "2024"
-license = "MIT OR Apache-2.0"
+license = "MIT"
 repository = "https://github.com/wowy/wartui"
 
 [[bin]]
