@@ -1010,7 +1010,10 @@ fn write_batch(
                 .execute(params![
                     session_id,
                     &a.node_mac[..],
-                    a.counter,
+                    // Saturating rather than wrapping, and upwards: the column records
+                    // which epoch went out, and an epoch that reads as lower than one
+                    // already spent is the failure this counter exists to prevent.
+                    i64::try_from(a.counter).unwrap_or(i64::MAX),
                     a.wire_version,
                     a.node_index,
                     a.node_count,
