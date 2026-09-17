@@ -9,8 +9,8 @@ collects every observation the fleet produces.
 
 The nodes run `firmware/node` and the dongle runs `firmware/bridge`, both in this
 repository, and every frame on the air is wartui's own in either direction. The
-bridge may be a C5, a C6 or an ESP32-S3 — it parks on the control channel and
-never needs 5 GHz. The nodes are C5 and C6, because a node is the thing that has
+bridge may be a C5 or a C6 — it parks on the control channel and never needs
+5 GHz. The nodes are C5 and C6, because a node is the thing that has
 to reach both bands.
 
 ## Running it
@@ -133,10 +133,6 @@ cargo test -p wartui-core --test engine a_heartbeat_counter # one test by name
 
 cd firmware/bridge && cargo clippy --release --features esp32c6   # and esp32c5
 cd firmware/node   && cargo clippy --release --features esp32c6   # and with ,ble
-
-# The S3 bridge is Xtensa: espup's toolchain, and its own target.
-cd firmware/bridge && cargo +esp clippy --release --features esp32s3 \
-  --target xtensa-esp32s3-none-elf
 ```
 
 `wartui-proto` is `no_std` because it is compiled into the firmwares as well as

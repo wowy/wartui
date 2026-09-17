@@ -375,4 +375,4 @@ The address shape is what picks the ESP32s out: everything else on the bus
 carries a manufacturing serial. The bridge is then the row whose address the
 fleet table shows as the bridge's, and a node the row whose heartbeats
 `wartui sniff` attributes to that address. Where the board generations differ,
-the OUI separates them too. An S3 in the list is a bridge and never a node.
+the OUI separates them too.

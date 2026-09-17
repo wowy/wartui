@@ -4,17 +4,7 @@
 // diff against upstream.
 
 fn main() {
-    // `--error-handling-script` is an LLD option, which the S3's
-    // `xtensa-esp32s3-elf-gcc` rejects outright — so a hook whose whole job is to
-    // explain link errors would instead *be* the link error. Skipped there rather than
-    // rewritten, so the function below stays diffable against `esp-generate`.
-    //
-    // The variable is also absent when the linker invokes this binary as the script
-    // rather than cargo invoking it as a build script; that reads as "not xtensa" and
-    // calls through, which is what that path needs.
-    if std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() != Ok("xtensa") {
-        linker_be_nice();
-    }
+    linker_be_nice();
     // make sure linkall.x is the last linker script (otherwise might cause problems with flip-link)
     println!("cargo:rustc-link-arg=-Tlinkall.x");
 }

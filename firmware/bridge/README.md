@@ -34,28 +34,14 @@ bridge announcement and why `wartui reset` is the cheap thing to try first.
 
 ```sh
 cargo run --release --features esp32c6    # or --features esp32c5
-cargo +esp run --release --features esp32s3 --target xtensa-esp32s3-none-elf
 ```
 
-Exactly one chip feature is required. The first line is the whole story for the
-RISC-V parts: stable, one flag, and `rust-toolchain.toml` pins it.
+Exactly one chip feature is required. That is the whole story: stable, one flag,
+and `rust-toolchain.toml` pins it.
 
 A Seeed XIAO ESP32-C6 with an antenna on its U.FL connector also wants
 `xiao-external-antenna`, or its RF switch stays on the onboard ceramic antenna;
 [`../node/README.md`](../node/README.md) § "Building and flashing" has the rest.
-
-The S3 is Xtensa and needs `espup` — `cargo install espup && espup install`, then
-`. ~/export-esp.sh` in any shell that will link one, which is what puts
-`xtensa-esp32s3-elf-gcc` on `PATH`. `+esp` overrides the pin; `--target` is needed
-because `[build] target` in `.cargo/config.toml` names the RISC-V triple.
-Everything else the S3 wants — its runner, `build-std`, the linker flags — is in
-that file and is inert on stable, so the C5 and C6 commands are unchanged. It
-needs the second toolchain because `xtensa-lx-rt` still requires
-`#![feature(asm_experimental_arch)]` and no channel ships a prebuilt `core` for
-the target; that is structural rather than a version lag.
-
-An S3 is a bridge and never a node: it has no 5 GHz radio, which costs a board
-that parks on the control channel nothing, and its devkits are cheap.
 
 The cargo runner is `espflash flash --monitor` with no `--chip`, so espflash
 detects the part. `--monitor` renders the framed link bytes as text and looks like
@@ -150,9 +136,4 @@ actually linked; when `esp-radio` moves, move it with it and check that `cargo t
 -i esp-wifi-sys-esp32c6 --features esp32c6` still shows a single copy.
 
 `esp-generate` is a version behind this set; its scaffolding (`build.rs`,
-`.cargo/config.toml`) is what was taken from it, not its dependency list. One
-piece of that does not survive the S3: `build.rs`'s `linker_be_nice` registers
-itself with `--error-handling-script`, an LLD option, and the S3 links with
-`xtensa-esp32s3-elf-gcc` — left on, the hook whose job is to explain link errors
-becomes the link error on every build. It is skipped for `target_arch = "xtensa"`
-rather than rewritten, so the function stays diffable against upstream.
+`.cargo/config.toml`) is what was taken from it, not its dependency list.
