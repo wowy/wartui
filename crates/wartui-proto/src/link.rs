@@ -25,16 +25,15 @@ use serde::{Serialize, de::DeserializeOwned};
 /// - v3: [`ResetCause`], [`LoopPhase`], `heap_free` and `uptime_ms` on `Ready`, so
 ///   a bridge that reboots says why and where it was.
 /// - v4: [`ResetCause::Lockup`].
-/// - v5: [`Chip::Esp32S3`] and [`ResetCause::ClockGlitch`].
+/// - v5: `Chip::Esp32S3` and `ResetCause::ClockGlitch`.
+/// - v6: [`Chip`] and [`ResetCause`] lose their S3-only variants.
 ///
 /// Every bump is a decode failure waiting for an older host: postcard writes an enum
 /// variant as its index and a struct's fields in order, so a new variant is a byte
 /// with no case and a new field on `Ready` shifts everything after it — met inside the
 /// very frame meant to introduce the bridge, which reads as a bridge that answered
-/// nothing. `ClockGlitch` also *moved* `Brownout` and `External` by an index, which
-/// was harmless only because no v5 bridge had shipped. The next such insertion will
-/// not be.
-pub const LINK_PROTO_VERSION: u8 = 5;
+/// nothing.
+pub const LINK_PROTO_VERSION: u8 = 6;
 
 /// ESP-NOW's own payload ceiling. The 212-byte wardriver frames fit inside it.
 pub const MAX_ESPNOW_PAYLOAD: usize = 250;
@@ -71,17 +70,12 @@ pub enum Chip {
     Esp32C5,
     /// 2.4 GHz only, which is all ESP-NOW needs at the default channel.
     Esp32C6,
-    /// 2.4 GHz only, like the C6, and the only Xtensa part wartui builds for.
-    ///
-    /// Being Xtensa is invisible on the wire and expensive everywhere else: it is
-    /// why `firmware/bridge` needs a second toolchain.
-    Esp32S3,
 }
 
 /// Why the bridge is running this life rather than the last one.
 ///
 /// A flattening of `esp_hal`'s per-chip `SocResetReason`, which names silicon
-/// blocks rather than causes and differs between all three parts. What an operator
+/// blocks rather than causes and differs between the two parts. What an operator
 /// needs is which story this was, and the ones that matter are not [`Self::PowerOn`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub enum ResetCause {
@@ -98,20 +92,10 @@ pub enum ResetCause {
     /// [`ResetCause::Watchdog`]: no watchdog on any of these parts actually fires
     /// (`docs/phase-3-findings.md`), so `Watchdog` here would name a mechanism
     /// known not to work. The corollary, worth stating where it will be read: on a
-    /// C6 or an S3 the hang class has *no* signal and the board has to be
-    /// unplugged.
+    /// C6 the hang class has *no* signal and the board has to be unplugged.
     Lockup,
     /// The supply sagged. Usually a hub or a cable rather than the board.
     Brownout,
-    /// The clock-glitch detector fired.
-    ///
-    /// Reported by the S3 alone, which has two glitch detectors watching different
-    /// things: `CorePwrGlitch` (0x17) the supply, which *is* a brownout by another
-    /// name, and `SysClkGlitch` (0x13) the clock. Only the first is answered by
-    /// checking the cable, so folding them together sends whoever read it to swap
-    /// perfectly good ones — the rule [`ResetCause::Lockup`] states from the other
-    /// side.
-    ClockGlitch,
     /// A reset the firmware did not ask for and cannot attribute, which
     /// includes the one `espflash` drives over DTR/RTS.
     External,

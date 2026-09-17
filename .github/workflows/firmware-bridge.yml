@@ -65,39 +65,3 @@ jobs:
           pushd firmware/bridge
           cargo clippy --release --features ${{matrix.target}} --locked -- -D warnings
           popd
-
-  s3-bridge:
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v7
-      - uses: esp-rs/xtensa-toolchain@v1.7
-        with:
-          buildtargets: esp32s3
-          default: false
-          override: false
-          # `std` only; this firmware is `no_std`.
-          ldproxy: false
-          # Sets `xtensa-esp32s3-elf-gcc` on the PATH
-          export: true
-
-      - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y libudev-dev
-
-      - name: Lint
-        run: |
-          pushd firmware/bridge
-          cargo +esp fmt --all -- --check
-          popd
-
-      - name: Build
-        run: |
-          pushd firmware/bridge
-          cargo +esp build --release --features esp32s3 --target xtensa-esp32s3-none-elf --locked --verbose
-          popd
-
-      - name: Clippy
-        run: |
-          pushd firmware/bridge
-          cargo +esp clippy --release --features esp32s3 --target xtensa-esp32s3-none-elf --locked -- -D warnings
-          popd

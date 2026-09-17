@@ -1,21 +1,5 @@
-# The RISC-V parts build on stable, and this pin is what keeps that true: a C5
-# or a C6 costs nobody a second toolchain.
-#
-# The S3 is Xtensa and cannot join them. Not for the reason this file used to
-# give — `c_variadic` is nowhere in the dependency set any more, and stable
-# rustc has known `xtensa-esp32s3-none-elf` since well before 1.98 — but for two
-# narrower ones that have not moved: `xtensa-lx` and `xtensa-lx-rt`, which
-# `esp-hal` pulls in on `cfg(target_arch = "xtensa")`, still open with
-# `#![feature(asm_experimental_arch)]`, and no channel ships a prebuilt `core`
-# for the target. Both are what `espup`'s `esp` toolchain is for. Neither is a
-# version lag that a dependency bump would fix; `xtensa-lx-rt 0.23` is the same.
-#
-# So an S3 is built by overriding this file rather than by changing it:
-#
-#     cargo +esp build --release --features esp32s3 --target xtensa-esp32s3-none-elf
-#
-# `.cargo/config.toml` carries the rest (the runner, `build-std`, the linker
-# flags), all of it inert on stable.
+# Both bridge chips are RISC-V, and this pin is what keeps them building on
+# stable: a C5 or a C6 costs nobody a second toolchain.
 [toolchain]
 channel = "stable"
 components = ["rust-src"]

@@ -18,9 +18,6 @@ path = "src/main.rs"
 
 [features]
 # Exactly one must be selected; src/main.rs enforces it.
-#
-# The S3 is Xtensa, so it needs `--target xtensa-esp32s3-none-elf` and the
-# `esp` toolchain on top of the feature. See `rust-toolchain.toml`.
 esp32c5 = [
   "esp-alloc/esp32c5",
   "esp-bootloader-esp-idf/esp32c5",
@@ -36,14 +33,6 @@ esp32c6 = [
   "esp-radio/esp32c6",
   "esp-rtos/esp32c6",
   "dep:esp-wifi-sys-esp32c6",
-]
-esp32s3 = [
-  "esp-alloc/esp32s3",
-  "esp-bootloader-esp-idf/esp32s3",
-  "esp-hal/esp32s3",
-  "esp-radio/esp32s3",
-  "esp-rtos/esp32s3",
-  "dep:esp-wifi-sys-esp32s3",
 ]
 
 # A Seeed XIAO ESP32-C6 with an antenna on its U.FL connector. The board's RF
@@ -67,7 +56,6 @@ esp-rtos = { version = "0.3.0", features = ["esp-alloc", "esp-radio"] }
 # `esp-radio` links; README.md § "Dependency versions".
 esp-wifi-sys-esp32c5 = { version = "0.2.0", optional = true }
 esp-wifi-sys-esp32c6 = { version = "0.2.0", optional = true }
-esp-wifi-sys-esp32s3 = { version = "0.2.0", optional = true }
 nb = "1.1.0"
 portable-atomic = { version = "1.15.0", default-features = false }
 static_cell = "2.1.1"

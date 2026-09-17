@@ -8,7 +8,7 @@ cannot disturb a running fleet.
 
 ```sh
 cd tools/espnow-sniffer
-pio run -e c6 -t upload          # or -e c5 / -e s3
+pio run -e c6 -t upload          # or -e c5
 pio device monitor -b 115200 | tee /tmp/capture.txt
 ```
 
