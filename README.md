@@ -1,17 +1,31 @@
 # wartui
 
-A terminal fleet controller for ESP32-C5 and ESP32-C6 wardriving nodes.
+A terminal-based fleet controller for ESP32-C5 and ESP32-C6 wardriving nodes.
+
+![alt text](./docs/images/wartui-example.png "The wartui application running in simulator mode.")
 
 The nodes talk [ESP-NOW](https://www.espressif.com/en/solutions/low-power-solutions/esp-now),
 which a laptop (generally) cannot speak, so wartui drives a USB-attached ESP32
 as a radio bridge. It owns the node table, issues channel assignments, and
 collects every observation the fleet produces.
 
-The nodes run `firmware/node` and the dongle runs `firmware/bridge`, both in this
-repository, and every frame on the air is wartui's own in either direction. The
-bridge may be a C5 or a C6 — it parks on the control channel and never needs
-5 GHz. The nodes are C5 and C6, because a node is the thing that has
-to reach both bands.
+The nodes run `firmware/node` and the dongle runs `firmware/bridge`, both in this repository. The
+bridge may be a C5 or a C6. It parks on the 2.4 GHz channel 6 for control messages, and never needs
+5 GHz. The nodes can also be C5s or C6s, though only the C5s support the 5 GHz band. C6 support is
+included because I had both sitting around, and the firmware toolchain is the same.
+
+## History
+
+**tl;dr - the initial ESP32 firmware and wire format is from JustCallMeKoko's
+[ESP32DualBandWardriver](https://github.com/justcallmekoko/ESP32DualBandWardriver) project. Support
+his work by [buying real hardware](https://justcallmekokollc.com/)!**
+
+After purchasing a C5 Wardriver from JustCallMeKoko, I started looking into its open firmware. I had
+some ideas around reducing interference between nodes by reducing the tx power, and what started
+with some lightly modified firmware ended up as an entirely separate project.
+
+I wanted a way to motivate myself to relearn Rust, and a fun little TUI sounded like just the
+ticket. I hope you enjoy what I've built, modify it, and share with others!
 
 ## Running it
 
@@ -58,16 +72,16 @@ wartui reset      # reboot a bridge that has stopped answering
 
 ## Subprojects
 
-| Path | What it is |
-| --- | --- |
-| [`crates/wartui`](crates/wartui/README.md) | The CLI and the [ratatui](https://ratatui.rs/) UI — **view the linked README for the full operator's manual** |
-| `crates/wartui-core` | Headless fleet engine, SQLite store, position, WiGLE export |
-| `crates/wartui-bridge` | Host-side link to the dongle: transport, port discovery, simulator |
-| `crates/wartui-proto` | `no_std` wire formats and parsers, shared with both firmwares |
-| [`firmware/bridge`](firmware/bridge/README.md) | The dongle: COBS framing and `esp-radio` calls, no protocol knowledge |
-| [`firmware/node`](firmware/node/README.md) | The nodes: sniffs, reports, takes assignments |
-| [`tools/espnow-sniffer`](tools/espnow-sniffer/README.md) | Passive Arduino sniffer for bring-up and frame capture |
-| `tools/beacons` | Turns a monitor-mode capture into fixtures for the beacon parser |
+| Path                                                     | What it is                                                                                                    |
+| -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| [`crates/wartui`](crates/wartui/README.md)               | The CLI and the [ratatui](https://ratatui.rs/) UI — **view the linked README for the full operator's manual** |
+| `crates/wartui-core`                                     | Headless fleet engine, SQLite store, position, WiGLE export                                                   |
+| `crates/wartui-bridge`                                   | Host-side link to the dongle: transport, port discovery, simulator                                            |
+| `crates/wartui-proto`                                    | `no_std` wire formats and parsers, shared with both firmwares                                                 |
+| [`firmware/bridge`](firmware/bridge/README.md)           | The dongle: COBS framing and `esp-radio` calls, no protocol knowledge                                         |
+| [`firmware/node`](firmware/node/README.md)               | The nodes: sniffs, reports, takes assignments                                                                 |
+| [`tools/espnow-sniffer`](tools/espnow-sniffer/README.md) | Passive Arduino sniffer for bring-up and frame capture                                                        |
+| `tools/beacons`                                          | Turns a monitor-mode capture into fixtures for the beacon parser                                              |
 
 Each firmware is its own workspace — a different target, its own toolchain pin and
 its own lockfile — and both take a path dependency up into `crates/wartui-proto`,
@@ -76,13 +90,13 @@ crates have no README of their own; their `//!` module docs are the detail.
 
 ## At the keyboard
 
-| Key | What it does |
-| --- | --- |
-| `↑` `↓` / `k` `j` | Move the cursor down the fleet table |
-| `a` / `A` | Give the selected node one channel / the whole pool |
-| `b` | Move the Bluetooth scan to it, or take it off the fleet |
-| `p` | Take the fleet back from the planner, or hand it over again |
-| `q` | Stop, committing the last batch |
+| Key               | What it does                                                |
+| ----------------- | ----------------------------------------------------------- |
+| `↑` `↓` / `k` `j` | Move the cursor down the fleet table                        |
+| `a` / `A`         | Give the selected node one channel / the whole pool         |
+| `b`               | Move the Bluetooth scan to it, or take it off the fleet     |
+| `p`               | Take the fleet back from the planner, or hand it over again |
+| `q`               | Stop, committing the last batch                             |
 
 wartui partitions the channel pool across the fleet without being asked, which is
 the core's job and the reason this exists. `p` takes that back and `--manual`
