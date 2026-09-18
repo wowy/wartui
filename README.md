@@ -87,19 +87,17 @@ docs are the detail.
 
 ## At the keyboard
 
-| Key               | What it does                                                |
-| ----------------- | ----------------------------------------------------------- |
-| `↑` `↓` / `k` `j` | Move the cursor down the fleet table                        |
-| `a` / `A`         | Give the selected node one channel / the whole pool         |
-| `b`               | Move the Bluetooth scan to it, or take it off the fleet     |
-| `p`               | Take the fleet back from the planner, or hand it over again |
-| `q`               | Stop, committing the last batch                             |
+| Key               | What it does                                            |
+| ----------------- | ------------------------------------------------------- |
+| `↑` `↓` / `k` `j` | Move the cursor down the fleet table                    |
+| `b`               | Move the Bluetooth scan to it, or take it off the fleet |
+| `q`               | Stop, committing the last batch                         |
 
-wartui partitions the channel pool across the fleet without being asked, which is the core's job and
-the reason this exists. `p` takes that back and `--manual` starts without it; **`a` and `A` are
-refused until one of them does**.
+wartui partitions the channel pool across the fleet without being asked and re-cuts it as the fleet
+changes, which is the core's job and the reason this exists. It is the only thing that decides what
+a node scans: there is no key and no flag that overrides one node's share.
 
-Nothing goes out at the moment a key is pressed. A node's radio is away scanning for all but the 100
+Nothing goes out at the moment a share changes. A node's radio is away scanning for all but the 100
 ms it holds open after its own heartbeat, so the assignment waits for that window — up to about four
 seconds on a full sweep. The `channels` column reads `1: 1…` until it lands.
 

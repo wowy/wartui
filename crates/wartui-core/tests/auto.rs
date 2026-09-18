@@ -73,7 +73,6 @@ async fn a_fleet_left_to_itself_converges_on_a_partition_of_the_us_pool() {
         .expect("opening the store");
     let config = EngineConfig {
         pool: ChannelPool::Us,
-        auto: true,
         assignment_base: store.assignment_base(),
         ..Default::default()
     };

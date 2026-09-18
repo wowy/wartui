@@ -165,8 +165,8 @@ const CHANNEL_SET_MASK: u64 = (1u64 << NUM_SCAN_CHANNELS) - 1;
 
 impl ChannelSet {
     /// The empty set. A node is never *sent* one: there is no frame meaning
-    /// "scan nothing", so the planner skips a node it has nothing for and the
-    /// engine ignores a hand-assignment of one.
+    /// "scan nothing", so the planner skips a node it has nothing for rather
+    /// than telling it to stop.
     #[must_use]
     pub const fn empty() -> Self {
         Self(0)
@@ -401,22 +401,6 @@ impl Radio {
     #[must_use]
     pub const fn can_tune(self, idx: u8) -> bool {
         matches!(self, Self::DualBand) || !is_five_ghz(idx)
-    }
-
-    /// The part of `set` this radio can actually tune.
-    ///
-    /// [`plan_for`] never deals an unreachable index, so this is for the paths
-    /// that do not go through it — an assignment made by hand. Kept here rather
-    /// than at those call sites so which indices are 5 GHz is said once.
-    #[must_use]
-    pub const fn tunable(self, set: ChannelSet) -> ChannelSet {
-        match self {
-            Self::DualBand => set,
-            // 5 GHz is the whole tail above `FIRST_FIVE_GHZ_INDEX`.
-            Self::TwoPointFour => {
-                ChannelSet::from_bits(set.bits() & ((1u64 << FIRST_FIVE_GHZ_INDEX) - 1))
-            }
-        }
     }
 }
 

@@ -4,9 +4,10 @@
 //! with wherever the host believed it was at that moment: a GPS on
 //! `--gps`, else `--lat`/`--lon`, else nothing.
 //!
-//! It also transmits, and by default without being asked: the planner partitions the
-//! pool across the fleet and re-cuts it as the fleet changes. `--manual` starts with
-//! the planner off, and nothing reaches the air until a key is pressed.
+//! It also transmits, and without being asked: the planner partitions the pool
+//! across the fleet and re-cuts it as the fleet changes. That is the only thing
+//! that decides what a node scans, and nothing on the command line or at the
+//! keyboard overrides it.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -63,20 +64,9 @@ pub struct Args {
     db: PathBuf,
 
     /// Which channels the fleet should scan. Recorded with the session, and
-    /// the set the view's assignment keys choose from.
+    /// the set the planner partitions across it.
     #[arg(long, value_enum, default_value_t = PoolArg::Us)]
     pool: PoolArg,
-
-    /// Do not partition the pool across the fleet. Channel ranges are then
-    /// only what `a` and `A` assign by hand, and nothing goes out unasked.
-    /// Toggled in the view either way with `p`.
-    #[arg(long, alias = "no-auto")]
-    manual: bool,
-
-    /// Accepted and ignored: partitioning the pool is what wartui does unless
-    /// `--manual` says otherwise. Kept because it used to be how you asked.
-    #[arg(long, hide = true, conflicts_with = "manual")]
-    auto: bool,
 
     /// The mesh's ESP-NOW control channel.
     #[arg(long, default_value_t = 6)]
@@ -158,7 +148,6 @@ pub async fn run(args: Args) -> Result<()> {
 
     let config = EngineConfig {
         pool,
-        auto: !args.manual,
         record_raw: args.record_raw,
         position,
         // Epochs continue from wherever this database left off. Reusing one a

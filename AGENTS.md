@@ -95,7 +95,7 @@ test invents (`crates/wartui-core/tests/engine.rs`). Do not reach for `Instant::
 `async` inside `engine`.
 
 Operator keypresses are `Event::Command`, not methods — a keypress and a heartbeat have to be
-ordered against each other.
+ordered against each other. Only `b` gets that far; channels are the planner's.
 
 ### Store is the system of record
 
@@ -137,6 +137,11 @@ is here rather than only in a `//!`.
   concerned. Flash the fleet together. The one thing that does survive a shape change is the
   store, which migrates (`store::SCHEMA_VERSION`) because a capture is data rather than a
   deployment.
+- **The planner is the only author of an assignment.** There is no operator override, no mode and
+  no flag: `FleetEngine::replan` decides what every node scans and nothing else writes a node's
+  `desired`. That is what lets the fleet table, the store and the stagger arithmetic read a node's
+  share as the plan's without asking who put it there. `Command::AssignBle` is the one operator
+  decision, and it is about *which* node scans Bluetooth rather than what any node scans.
 - **Only heartbeating nodes are assignable or in the plan** — a node that is merely being heard
   never opens an admin window. `stale`, `no heartbeat` and silence are deliberately distinct
   states, and `SCAN_CHANNELS` order is load-bearing: never sort or deduplicate it, because those

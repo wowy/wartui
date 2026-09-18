@@ -1,10 +1,11 @@
 //! The fleet view.
 //!
-//! Four keys reach the air — `a`, `A`, `b` and `p`, which the operator's manual
-//! lists (`crates/wartui/README.md`). None of them transmits when pressed: a
-//! node only listens in the 100 ms after its own heartbeat, so a keystroke's
-//! effect is a row reading `pending` until the next sweep completes. That delay
-//! is the protocol rather than lag, and the view says so.
+//! One key reaches the air — `b`, which moves the Bluetooth scan, and which the
+//! operator's manual lists (`crates/wartui/README.md`). What a node scans is the
+//! planner's and nothing here can override it. `b` does not transmit when
+//! pressed either: a node only listens in the 100 ms after its own heartbeat, so
+//! a keystroke's effect is a row reading `pending` until the next sweep
+//! completes. That delay is the protocol rather than lag, and the view says so.
 //!
 //! Rebuilt from a [`Snapshot`] the engine publishes four times a second, never
 //! from a stream of observations: a busy fleet produces tens of rows a second in
@@ -103,10 +104,6 @@ struct Ui {
     selected: usize,
     /// What was said, and the snapshot time it was said at.
     notice: Option<(String, i64)>,
-    /// Auto-assignment as it was last asked to be, until the engine's snapshot
-    /// catches up. Without it two presses inside one frame would both read the
-    /// same stale state and ask for the same thing twice.
-    auto_wanted: Option<bool>,
 }
 
 /// How long a notice stays on the footer before the counters have it back.
@@ -128,51 +125,13 @@ impl Ui {
                 self.notice = None;
                 self.selected = self.selected.saturating_sub(1);
             }
-            // One channel, and the whole pool. A node heartbeats once per
-            // completed sweep, so narrowing it collapses the beat period and
-            // widening it restores it — nothing else in the protocol reports
-            // what a node is scanning.
-            KeyCode::Char('a') => self.assign(narrow(snapshot), snapshot, commands),
-            KeyCode::Char('A') => self.assign(widest(snapshot), snapshot, commands),
-            // Honoured with auto-assignment on, unlike the assignment keys: the
-            // planner partitions channels and has no opinion about BLE.
+            // The one decision left to the operator: the planner partitions
+            // channels and has no opinion about Bluetooth.
             KeyCode::Char('b') => self.toggle_ble(snapshot, commands),
-            // The fleet, rather than one node.
-            KeyCode::Char('p') => self.toggle_auto(snapshot, commands),
             // Anything else leaves the notice alone: a key bound to nothing must
             // not clear the one message saying why nothing happened.
             _ => {}
         }
-    }
-
-    /// Whether auto-assignment is on, as far as the operator can tell.
-    fn auto(&mut self, snapshot: &Snapshot) -> bool {
-        // The engine's answer wins as soon as it has one.
-        if self.auto_wanted == Some(snapshot.auto) {
-            self.auto_wanted = None;
-        }
-        self.auto_wanted.unwrap_or(snapshot.auto)
-    }
-
-    fn toggle_auto(&mut self, snapshot: &Snapshot, commands: &mpsc::Sender<Command>) {
-        let on = !self.auto(snapshot);
-        let said = match commands.try_send(Command::SetAuto(on)) {
-            Ok(()) if on => {
-                // Only once it is really on its way: remembering a request the
-                // engine never received latches the view into a state nothing
-                // can agree with.
-                self.auto_wanted = Some(on);
-                "auto-assignment on: the pool is split across every heartbeating node".to_owned()
-            }
-            // Nothing is recalled — there is no frame that says "scan nothing" —
-            // so say so rather than let an operator believe they stopped it.
-            Ok(()) => {
-                self.auto_wanted = Some(on);
-                "auto-assignment off: each node keeps the range it holds".to_owned()
-            }
-            Err(_) => "the engine is not accepting commands".to_owned(),
-        };
-        self.say(said, snapshot);
     }
 
     /// Move the Bluetooth scan onto the selected node, or off it.
@@ -208,67 +167,14 @@ impl Ui {
         {
             Ok(()) if holds => format!("{}: bluetooth off on its next heartbeat", mac(&target)),
             // The flag rides in the assignment frame, so a node without one has
-            // nothing for it to ride on — under `--manual` with nothing
-            // assigned, "on its next heartbeat" would never come true.
+            // nothing for it to ride on. The planner gives every heartbeating
+            // node channels, so this is the fleet that has outgrown its pool —
+            // more nodes than channels their radios can reach — where "on its
+            // next heartbeat" would never come true.
             Ok(()) if node.state.desired.is_none() && node.state.confirmed.is_none() => {
                 format!("{}: bluetooth, once it has been given channels", mac(&target))
             }
             Ok(()) => format!("{}: bluetooth on its next heartbeat", mac(&target)),
-            Err(_) => "the engine is not accepting commands".to_owned(),
-        };
-        self.say(said, snapshot);
-    }
-
-    fn assign(
-        &mut self,
-        channels: ChannelSet,
-        snapshot: &Snapshot,
-        commands: &mpsc::Sender<Command>,
-    ) {
-        let Some(node) = snapshot.nodes.get(self.selected) else { return };
-        // The engine would honour it and then take it back at the next
-        // re-partition, which is a worse answer than refusing outright.
-        if self.auto(snapshot) {
-            self.say(
-                "auto-assignment is on — press p to take the fleet back by hand".to_owned(),
-                snapshot,
-            );
-            return;
-        }
-        // Twenty is the radio's peer table and therefore the fleet. Past it the
-        // stagger arithmetic is describing a fleet the bridge cannot address,
-        // so saying no here beats sending frames that will be refused.
-        if snapshot.nodes.len() > MAX_NODES {
-            self.say(
-                format!(
-                    "{} nodes: wartui supports {MAX_NODES}, so nothing can be assigned",
-                    snapshot.nodes.len()
-                ),
-                snapshot,
-            );
-            return;
-        }
-        // A node that will not adopt this never opens a window for it to arrive
-        // through, so refusing up front with the reason beats a queue that never
-        // drains.
-        if let Some(why) = why_not_assignable(node) {
-            self.say(format!("{} {why}", mac(&node.state.mac)), snapshot);
-            return;
-        }
-        // The engine masks this too, but the notice has to name what will really
-        // go out rather than what was asked for. Both pools start in 2.4 GHz and
-        // both keys derive their set from the pool, so what is left is never empty.
-        let channels = match node.state.capabilities {
-            Some(capabilities) => Radio::from(capabilities).tunable(channels),
-            None => channels,
-        };
-        let command = Command::Assign { mac: node.state.mac, channels };
-        let said = match commands.try_send(command) {
-            Ok(()) => format!(
-                "{} → channel {} on its next heartbeat",
-                mac(&node.state.mac),
-                channel_list(channels)
-            ),
             Err(_) => "the engine is not accepting commands".to_owned(),
         };
         self.say(said, snapshot);
@@ -286,19 +192,6 @@ impl Ui {
             .filter(|(_, at)| now_ms - at < NOTICE_MS)
             .map(|(text, _)| text.as_str())
     }
-}
-
-/// The first channel of the configured pool, as a set of exactly one.
-fn narrow(snapshot: &Snapshot) -> ChannelSet {
-    let mut set = ChannelSet::empty();
-    set.insert(snapshot.pool.runs().first().map_or(0, |run| run.start));
-    set
-}
-
-/// The whole pool, which one assignment can now say — before the channel mask it
-/// was the pool's longest run, never both bands.
-fn widest(snapshot: &Snapshot) -> ChannelSet {
-    snapshot.pool.channels()
 }
 
 /// A set of indices, said in channel numbers, which is what is written on the
@@ -471,15 +364,12 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot) {
     frame.render_widget(Paragraph::new(body).block(Block::bordered().title(" wartui ")), area);
 }
 
-/// Who is deciding what the fleet scans, said where the pool is said.
+/// What the planner has to work with, said where the pool is said.
 ///
-/// This is the one line that distinguishes a monitor that can assign from a
-/// core replacement, so it is on screen for the whole capture rather than
+/// The partition is the only thing that decides what a node scans, so how much
+/// of the fleet is really in it is on screen for the whole capture rather than
 /// inferable from watching ranges change on their own.
 fn planning(snapshot: &Snapshot) -> Span<'static> {
-    if !snapshot.auto {
-        return Span::styled("manual", Style::new().fg(Color::DarkGray));
-    }
     let text = match snapshot.plan {
         Some(plan) => format!("auto — {} of {}", plan.node_count(), snapshot.nodes.len()),
         None if snapshot.assignable > MAX_NODES => "auto — too many nodes".to_owned(),
@@ -696,8 +586,8 @@ fn approx(n: u64) -> String {
 
 /// Why a node cannot be given an assignment, or `None` if it can.
 ///
-/// The wording is the message the operator sees on the refused keypress, so it
-/// says what is wrong rather than naming a state.
+/// The wording is the message the operator sees when `b` is refused, so it says
+/// what is wrong rather than naming a state.
 fn why_not_assignable(node: &NodeView) -> Option<&'static str> {
     let state = &node.state;
     if state.capabilities.is_none() {
@@ -894,7 +784,7 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot, ui: &Ui, 
         )));
     } else {
         let mut spans = vec![Span::styled(
-            " q quit  ↑↓ select  a/A assign  p auto ",
+            " q quit  ↑↓ select  b bluetooth ",
             Style::new().fg(Color::Black).bg(Color::Gray).add_modifier(Modifier::BOLD),
         )];
         spans.push(Span::raw(format!(
@@ -950,7 +840,7 @@ fn faults(snapshot: &Snapshot) -> Vec<String> {
     // hear the result; what is out there stays out there. Counted against
     // `assignable`, the list the planner is handed — a fleet of thirty of which
     // nineteen are ours partitions perfectly well.
-    if snapshot.auto && snapshot.plan.is_none() && snapshot.assignable > MAX_NODES {
+    if snapshot.plan.is_none() && snapshot.assignable > MAX_NODES {
         faults.push(format!(
             "{} nodes alive: over the {MAX_NODES} wartui supports, so the fleet is no longer \
              being partitioned",
@@ -1179,7 +1069,6 @@ mod tests {
             link_up: true,
             link_error: None,
             pool: ChannelPool::Us,
-            auto: false,
             plan: None,
             ble_node: None,
             nodes: vec![
@@ -1655,17 +1544,9 @@ mod tests {
     }
 
     #[test]
-    fn the_assignment_keys_pick_one_channel_and_the_whole_pool() {
-        let us = busy();
-        assert_eq!(narrow(&us), ChannelSet::from_run(IndexRun::new(0, 0)), "channel 1 alone");
-        assert_eq!(widest(&us), ChannelPool::Us.channels());
-        assert_eq!(widest(&us).len(), 34);
-    }
-
-    #[test]
     fn a_node_that_cannot_be_assigned_says_which_of_the_reasons_it_is() {
-        // Three faults all end in a refused keypress and the operator's next
-        // move differs for each, so one wording for all three misdirects two.
+        // Three faults all end in a refused `b` and the operator's next move
+        // differs for each, so one wording for all three misdirects two.
         let mut snapshot = busy();
         snapshot.nodes.push(unannounced(0x21));
         snapshot.nodes.push(stale_node(0x22));
@@ -1688,7 +1569,7 @@ mod tests {
         ] {
             let (tx, mut rx) = mpsc::channel(4);
             let mut ui = Ui { selected: row, ..Default::default() };
-            ui.on_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE), &snapshot, &tx);
+            ui.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE), &snapshot, &tx);
             assert!(rx.try_recv().is_err(), "row {row} queued something");
             let notice = ui.notice(snapshot.now_ms).expect("a reason");
             assert!(notice.contains(want), "row {row}: wanted {want:?}, got {notice}");
@@ -1700,7 +1581,6 @@ mod tests {
         // Every node heartbeating, none reachable — a fleet that has outgrown
         // the bridge's twenty peer slots, so there is nothing to partition.
         let mut snapshot = busy();
-        snapshot.auto = true;
         snapshot.plan = None;
         snapshot.nodes = vec![refused(0x21), refused(0x22), refused(0x23)];
         snapshot.alive = 3;
@@ -1741,7 +1621,6 @@ mod tests {
     #[test]
     fn a_fleet_with_no_five_ghz_radio_says_the_pool_is_not_being_covered() {
         let mut snapshot = busy();
-        snapshot.auto = true;
         snapshot.plan = plan_for(ChannelPool::Us, &[Radio::TwoPointFour; 2]);
         let mut terminal = Terminal::new(TestBackend::new(200, 40)).expect("test backend");
         terminal.draw(|frame| draw(frame, &snapshot, &Ui::default())).expect("drawing");
@@ -1767,53 +1646,16 @@ mod tests {
     }
 
     #[test]
-    fn assigning_the_whole_pool_by_hand_promises_only_what_the_node_can_tune() {
-        // `A` offers the pool and nothing re-partitions afterwards under
-        // `--manual`, so this has to say the number the engine will really send.
-        let mut snapshot = busy();
-        snapshot.nodes = vec![narrowband(0x84)];
-        let (tx, mut rx) = mpsc::channel(4);
-        let mut ui = Ui::default();
-        ui.on_key(KeyEvent::new(KeyCode::Char('A'), KeyModifiers::NONE), &snapshot, &tx);
-
-        let Command::Assign { channels, .. } = rx.try_recv().expect("a command") else {
-            panic!("expected an assignment")
-        };
-        assert_eq!(channels, Radio::TwoPointFour.tunable(ChannelPool::Us.channels()));
-        let notice = ui.notice(snapshot.now_ms).expect("a notice");
-        assert!(notice.contains("1-11"), "got {notice}");
-        assert!(!notice.contains("36"), "the 5 GHz half is not promised: got {notice}");
-    }
-
-    #[test]
-    fn assigning_the_selected_node_queues_one_command_and_says_so() {
-        let snapshot = busy();
-        let (tx, mut rx) = mpsc::channel(4);
-        let mut ui = Ui::default();
-        ui.on_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE), &snapshot, &tx);
-
-        assert_eq!(
-            rx.try_recv().expect("a command"),
-            Command::Assign {
-                mac: [0x02, 0x00, 0x5E, 0x10, 0x57, 0x84],
-                channels: ChannelSet::from_run(IndexRun::new(0, 0))
-            }
-        );
-        let notice = ui.notice(snapshot.now_ms).expect("a notice");
-        assert!(notice.contains("on its next heartbeat"), "got {notice}");
-        // And it goes away again, rather than sitting on the footer for the
-        // rest of the capture in place of the counters.
-        assert!(ui.notice(snapshot.now_ms + NOTICE_MS).is_none());
-    }
-
-    #[test]
-    fn who_is_deciding_what_the_fleet_scans_is_on_screen_for_the_whole_capture() {
-        let mut manual = Terminal::new(TestBackend::new(150, 20)).expect("test backend");
-        manual.draw(|frame| draw(frame, &busy(), &Ui::default())).expect("drawing");
-        assert!(manual.backend().to_string().contains("manual"));
+    fn what_the_planner_has_to_work_with_is_on_screen_for_the_whole_capture() {
+        let mut empty = busy();
+        empty.nodes.clear();
+        empty.alive = 0;
+        empty.assignable = 0;
+        let mut waiting = Terminal::new(TestBackend::new(150, 20)).expect("test backend");
+        waiting.draw(|frame| draw(frame, &empty, &Ui::default())).expect("drawing");
+        assert!(waiting.backend().to_string().contains("nothing heartbeating yet"));
 
         let mut auto = busy();
-        auto.auto = true;
         auto.plan = plan(ChannelPool::Us, 4);
         let mut terminal = Terminal::new(TestBackend::new(150, 20)).expect("test backend");
         terminal.draw(|frame| draw(frame, &auto, &Ui::default())).expect("drawing");
@@ -1822,7 +1664,6 @@ mod tests {
         // A lone node holds the whole pool, and the header has nothing extra to
         // say about it.
         let mut lone = busy();
-        lone.auto = true;
         lone.plan = plan(ChannelPool::Us, 1);
         let mut terminal = Terminal::new(TestBackend::new(150, 20)).expect("test backend");
         terminal.draw(|frame| draw(frame, &lone, &Ui::default())).expect("drawing");
@@ -1838,11 +1679,6 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(4);
         let mut ui = Ui::default();
         ui.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE), &snapshot, &tx);
-        assert_eq!(rx.try_recv().expect("a command"), Command::AssignBle { mac: Some(node) });
-
-        let mut auto = busy();
-        auto.auto = true;
-        ui.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE), &auto, &tx);
         assert_eq!(rx.try_recv().expect("a command"), Command::AssignBle { mac: Some(node) });
 
         // And pressing it on the node that already holds it is how it comes off
@@ -1873,53 +1709,8 @@ mod tests {
     }
 
     #[test]
-    fn p_hands_the_fleet_to_the_planner_and_takes_it_back() {
-        let snapshot = busy();
-        let (tx, mut rx) = mpsc::channel(4);
-        let mut ui = Ui::default();
-        ui.on_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE), &snapshot, &tx);
-        assert_eq!(rx.try_recv().expect("a command"), Command::SetAuto(true));
-
-        // The snapshot the engine publishes lags a keystroke by a tick, so a
-        // second press has to know what the first one asked for.
-        ui.on_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE), &snapshot, &tx);
-        assert_eq!(rx.try_recv().expect("a command"), Command::SetAuto(false));
-    }
-
-    #[test]
-    fn a_toggle_the_engine_never_received_does_not_latch_the_view() {
-        let snapshot = busy();
-        // A command channel with no room in it, which is what a wedged engine
-        // looks like from here.
-        let (tx, _rx) = mpsc::channel(1);
-        tx.try_send(Command::SetAuto(true)).expect("filling the queue");
-        let mut ui = Ui::default();
-        ui.on_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE), &snapshot, &tx);
-
-        assert!(ui.notice(snapshot.now_ms).expect("a reason").contains("not accepting"));
-        assert!(!ui.auto(&snapshot), "the fleet is where the engine says it is");
-    }
-
-    #[test]
-    fn assigning_by_hand_is_refused_while_the_planner_owns_the_fleet() {
-        let mut snapshot = busy();
-        snapshot.auto = true;
-        snapshot.plan = plan(ChannelPool::Us, 4);
-        let (tx, mut rx) = mpsc::channel(4);
-        let mut ui = Ui::default();
-        ui.on_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE), &snapshot, &tx);
-
-        // The engine would honour it and then take it back at the next
-        // re-partition, which reads as the range having been ignored.
-        assert!(rx.try_recv().is_err(), "nothing was queued");
-        let notice = ui.notice(snapshot.now_ms).expect("a reason");
-        assert!(notice.contains("press p"), "got {notice}");
-    }
-
-    #[test]
     fn a_fleet_over_the_limit_says_it_has_stopped_being_partitioned() {
         let mut snapshot = busy();
-        snapshot.auto = true;
         snapshot.plan = None;
         snapshot.assignable = MAX_NODES + 1;
         let mut terminal = Terminal::new(TestBackend::new(200, 40)).expect("test backend");

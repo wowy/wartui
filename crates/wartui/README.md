@@ -29,7 +29,6 @@ short version.
 | `--port PATH` | discovered | Serial port of the bridge |
 | `--channel N` | `6` | The fleet's ESP-NOW control channel |
 | `--pool us\|all` | `us` | Which channels the fleet should scan |
-| `--manual` | off | Do not partition the pool; nothing goes out unasked |
 | `--lat` `--lon` `--alt` | — | A static position for every observation |
 | `--gps PATH` | — | An NMEA receiver, preferred over `--lat`/`--lon` |
 | `--gps-baud N` | `9600` | Line rate of that receiver |
@@ -88,40 +87,37 @@ own right after each commit; `--checkpoint-every MS` spaces those passes out, an
 `--inline-checkpoint` puts SQLite's own back inside the commit for comparison. [`docs/store-io-findings.md`](../../docs/store-io-findings.md)
 has the method and the numbers so far.
 
-## Assigning channels
+## At the keyboard
 
 | Key | What it does |
 | --- | --- |
 | `↑` `↓` / `k` `j` | Move the cursor down the fleet table |
-| `a` | Give the selected node exactly **one** channel |
-| `A` | Give it the whole pool |
-| `b` | Move the Bluetooth scan to it, or take it off the fleet |
-| `p` | Take the fleet back from the planner, or hand it over again |
+| `b` | Move the Bluetooth scan to the selected node, or take it off the fleet |
 | `q` / `Esc` / `ctrl-c` | Stop, committing the last batch |
 
-The header says which of you is deciding: `manual`, or `auto — 4 of 5` for four
-heartbeating nodes out of five seen. It starts on `auto`, so **`a` and `A` are
-refused until you press `p`** (or started the capture with `--manual`, in which case
-`p` would hand the fleet *to* the planner rather than take it back — it is a toggle
-against whatever the header says). The planner would honour a hand-assigned set and
-then take it back at the next re-cut, which reads as the key having been ignored.
-`b` is not refused: the planner partitions channels and has no opinion about
-Bluetooth.
+`b` is the only one that reaches the air, and it decides *which* node scans
+Bluetooth rather than what any node scans. Channels are not a key.
 
-Nothing goes out at the moment the key is pressed. A node's radio is away
-scanning some other channel for all but the 100 ms it holds open after its own
-heartbeat, so the assignment waits for that window — the `channels` column reads
-`1: 1…` until it lands, then drops the ellipsis. On a full sweep that is up to
-four seconds. That delay is the protocol, not lag.
+## How channels are assigned
+
+**The planner cuts the pool, and nothing else does.** It deals it across every
+heartbeating node and re-cuts it whenever that set changes; no key and no flag
+overrides one node's share. The header says what it has to work with:
+`auto — 4 of 5` for four heartbeating nodes out of five seen.
+
+Nothing goes out at the moment a node's share changes. Its radio is away scanning
+some other channel for all but the 100 ms it holds open after its own heartbeat,
+so the assignment waits for that window — the `channels` column reads `1: 1…`
+until it lands, then drops the ellipsis. On a full sweep that is up to four
+seconds. That delay is the protocol, not lag.
 
 That column leads with a count because a share dealt round-robin is a dozen
 scattered channels and no sane column is wide enough for all of them. The count
 is the useful half anyway: it is what the `beat` column should be proportional
-to. Narrowing a node from the whole pool to one channel should collapse its
-`beat` from seconds to a fraction of one within three sweeps, which is the only
-evidence available that an assignment was adopted rather than merely
-acknowledged — a node heartbeats once per completed sweep and reports nothing
-about what it is scanning.
+to. Bringing a second node up halves the first one's share, and its `beat`
+should halve with it within three sweeps — the only evidence available that an
+assignment was adopted rather than merely acknowledged, since a node heartbeats
+once per completed sweep and reports nothing about what it is scanning.
 
 An assignment is believed only when the node's own radio acknowledges it at the
 MAC layer, never when the bridge reports a successful enqueue.
@@ -176,11 +172,6 @@ get. A fleet whose radios are all alike has no constrained channels.
 If no node in the fleet has a 5 GHz radio at all, those channels are left out of
 every assignment rather than given to a node that would ignore them, and the
 footer says how many of the pool are going unscanned.
-
-Assigning by hand is cut down the same way: `A` offers the whole pool, so the set
-is narrowed to what that node's heartbeat says its radio can reach, and the
-notice names the narrowed set rather than what was asked for. With the planner
-off, nothing re-partitions afterwards to notice.
 
 Every fleet change re-cuts the pool for the *whole* fleet, not just the node that
 joined or left. `node_index` and `node_count` travel in every assignment and are
@@ -252,16 +243,16 @@ shows `—` in place of the chip.
 | `alive` | Heartbeating, so it can be given channels |
 | `stale` | Still being heard, but not heartbeating — most often Bluetooth coexistence on the node holding the radio through its admin window |
 | `no heartbeat` | Seen, but has never completed a sweep |
-| `no admin ack` | An assignment went out and its radio did not answer — nearly always Bluetooth, see [Assigning channels](#assigning-channels) |
+| `no admin ack` | An assignment went out and its radio did not answer — nearly always Bluetooth, see [How channels are assigned](#how-channels-are-assigned) |
 | `refused` | The bridge would not transmit it — nearly always a full peer table. Its heartbeats are still arriving; what is missing is a slot to address it through |
 | `rebooted xN` | Its heartbeat counter went backwards, so it has forgotten any assignment; wartui re-issues under a fresh epoch |
 
-A node that is `stale`, `refused` or `no heartbeat` is out of the plan, and for
-the same reason it cannot be assigned by hand: nothing wartui sends it would
-reach it, or nothing yet says which band its radio can tune — so a share of the
-pool cut for it is a share that may be nobody's. Pressing `a`, `A` or `b` on one
-says which of the three it is, because the next move differs for each: wait for the
-first heartbeat, clear the peer table, or go and find out why the heartbeats stopped.
+A node that is `stale`, `refused` or `no heartbeat` is out of the plan: nothing
+wartui sends it would reach it, or nothing yet says which band its radio can tune
+— so a share of the pool cut for it is a share that may be nobody's. Pressing `b`
+on one says which of the three it is, because the next move differs for each: wait
+for the first heartbeat, clear the peer table, or go and find out why the
+heartbeats stopped.
 
 **`refused` is usually not a fleet above twenty nodes.** The bridge never removes a
 peer, so a long session accumulates slots for nodes that have since gone, and a
