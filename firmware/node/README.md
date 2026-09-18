@@ -38,10 +38,10 @@ heartbeat is still honoured and the host's timing model is unchanged; it simply
 stops being the only chance.
 
 **An unassigned node waits rather than sweeping.** It parks on the control channel
-and heartbeats every second until it is told what to scan. Under wartui's planner
-that lasts a single heartbeat. Under `--manual` it lasts until a key is pressed,
-and **the node collects nothing until then** — the intended trade, and worth
-knowing before wondering where the observations went.
+and heartbeats every second until it is told what to scan, and **collects nothing
+until then**. wartui's planner answers the first heartbeat, so that lasts a single
+beat — the intended trade, and worth knowing before wondering where the first
+second of a capture went.
 
 **It says what it is, in every heartbeat.** Three of a heartbeat's thirteen bytes
 are a version and a feature byte, shown by the host as:

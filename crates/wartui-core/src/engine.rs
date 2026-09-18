@@ -8,14 +8,16 @@
 //!
 //! Transmitting lives here as well: allocating an epoch, waiting for the
 //! heartbeat that opens a node's 100 ms admin window, and believing the
-//! assignment landed only on a MAC-layer acknowledgement. With auto-assignment
-//! on, the engine holds a partition of the pool across every heartbeating node
-//! and re-cuts it when that set changes.
+//! assignment landed only on a MAC-layer acknowledgement. The engine holds a
+//! partition of the pool across every heartbeating node and re-cuts it when that
+//! set changes, and that partition is the only thing an assignment ever carries:
+//! nothing outside [`FleetEngine::replan`] decides what a node scans.
 //!
-//! [`Command::AssignBle`] is the one thing a timer used to do and an operator
-//! now does. It lives here rather than in the view because it is the same kind
-//! of fact as a channel assignment: something one node holds, delivered inside
-//! that node's own admin window, believed only on an acknowledgement.
+//! [`Command::AssignBle`] is the exception, and only about which node scans
+//! Bluetooth rather than what it scans. It lives here rather than in the view
+//! because it is the same kind of fact as a channel assignment: something one
+//! node holds, delivered inside that node's own admin window, believed only on
+//! an acknowledgement.
 use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
 
@@ -68,18 +70,6 @@ pub enum Event {
 /// both through [`FleetEngine::handle`] is what makes that ordering testable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
-    /// Give one node a set of scan-channel indices.
-    ///
-    /// Nothing goes out immediately: a node only listens in the 100 ms it holds
-    /// open after a heartbeat, so this marks it dirty and the frame goes on the
-    /// next one. Honoured whether or not auto-assignment is on — the engine is
-    /// the mechanism, the view is the policy.
-    Assign {
-        /// Which node.
-        mac: Mac,
-        /// The channels it should dwell on.
-        channels: ChannelSet,
-    },
     /// Move the Bluetooth scan to one node, or take it away from the fleet.
     ///
     /// At most one node, and by default none: NimBLE holds the one 2.4 GHz
@@ -89,19 +79,13 @@ pub enum Command {
     /// (`docs/phase-0-findings.md`, `docs/phase-1-findings.md`), so it is a cost
     /// the operator chooses on one node rather than one the fleet pays.
     ///
-    /// Like [`Self::Assign`], nothing goes out now: the flag rides on that
-    /// node's next assignment. Moving it costs two frames, because the node
-    /// giving it up has to be told as well.
+    /// Nothing goes out now: the flag rides on that node's next assignment, and
+    /// a node only listens in the 100 ms it holds open after a heartbeat. Moving
+    /// it costs two frames, because the node giving it up has to be told as well.
     AssignBle {
         /// Which node, or `None` to stop scanning BLE anywhere.
         mac: Option<Mac>,
     },
-    /// Turn auto-assignment on or off.
-    ///
-    /// Switching it on re-partitions immediately. Switching it off leaves the
-    /// fleet holding whatever it holds: there is no frame that says "scan
-    /// nothing".
-    SetAuto(bool),
 }
 
 /// What the engine wants done as a result.
@@ -129,16 +113,8 @@ impl ActionBatch {
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
     /// Which channels the fleet is meant to scan. Recorded in the session,
-    /// shown in the UI, and — with [`Self::auto`] on — the set the engine
-    /// partitions across the fleet.
+    /// shown in the UI, and the set the engine partitions across the fleet.
     pub pool: ChannelPool,
-    /// Hold the whole fleet on a partition of [`Self::pool`], re-issued
-    /// whenever the set of heartbeating nodes changes.
-    ///
-    /// On by default: a fleet nobody has partitioned is a fleet of nodes all
-    /// sweeping the same channels. Off, wartui is a monitor that can assign when
-    /// told to.
-    pub auto: bool,
     /// How long a node may go without a heartbeat before it stops counting
     /// towards topology. Matches the firmware's own 60 s node timeout.
     pub topology_timeout: Duration,
@@ -167,7 +143,6 @@ impl Default for EngineConfig {
     fn default() -> Self {
         Self {
             pool: ChannelPool::Us,
-            auto: true,
             topology_timeout: Duration::from_secs(60),
             status_interval: Duration::from_secs(5),
             tail_len: 200,
@@ -227,9 +202,9 @@ pub struct NodeState {
     /// What the node acknowledged, which is a different thing. Cleared when it
     /// reboots, because a reboot means it has forgotten.
     pub confirmed: Option<Assignment>,
-    /// Whether [`Self::desired`] still needs to be delivered. Set when the
-    /// operator asks and when the node reboots; cleared only on an
-    /// acknowledgement, never on a successful enqueue.
+    /// Whether [`Self::desired`] still needs to be delivered. Set when the plan
+    /// changes, when the Bluetooth scan moves and when the node reboots; cleared
+    /// only on an acknowledgement, never on a successful enqueue.
     pub dirty: bool,
     /// How many times an assignment has been put on the air for this node.
     pub admin_attempts: u32,
@@ -432,10 +407,8 @@ pub struct Snapshot {
     pub link_error: Option<String>,
     /// The configured channel pool.
     pub pool: ChannelPool,
-    /// Whether the engine is holding the fleet on a partition of that pool.
-    pub auto: bool,
-    /// The partition in force, when there is one. `None` with auto off, with
-    /// nothing heartbeating, or with more nodes alive than wartui supports.
+    /// The partition in force, when there is one. `None` with nothing
+    /// heartbeating, or with more nodes alive than wartui supports.
     pub plan: Option<Plan>,
     /// Which node is scanning Bluetooth, if any.
     pub ble_node: Option<Mac>,
@@ -522,8 +495,6 @@ pub struct FleetEngine {
     next_send_id: u16,
     /// The last epoch handed out. Starts at the store's persisted base.
     last_counter: u64,
-    /// Whether the engine partitions the pool across the fleet by itself.
-    auto: bool,
     /// The partition in force.
     plan: Option<Plan>,
     /// The members that plan was built for, in the order that gave them their
@@ -583,7 +554,6 @@ impl FleetEngine {
             pending: BTreeMap::new(),
             next_send_id: 1,
             last_counter: config.assignment_base,
-            auto: config.auto,
             plan: None,
             plan_members: Vec::new(),
             ble_node: None,
@@ -601,7 +571,7 @@ impl FleetEngine {
         let mut batch = ActionBatch::default();
         match event {
             Event::Tick => self.on_tick(now, &mut batch),
-            Event::Command(command) => self.on_command(command, now),
+            Event::Command(command) => self.on_command(command),
             Event::Link(LinkEvent::Connected(info)) => {
                 batch.records.push(Record::Bridge(crate::record::BridgeSeen {
                     mac: info.mac,
@@ -647,11 +617,12 @@ impl FleetEngine {
         self.expire_pending(now, batch);
         // A node ageing out of topology is the passage of time rather than
         // anything arriving, so the tick is the only thing that can see it.
-        // Checked outside `replan`, which returns early with auto off: the
-        // Bluetooth assignment is not the planner's, and a node that has left the
-        // fleet is not scanning for us. A node that announces itself without the
-        // `ble` feature loses it on the same tick and for the same reason — it
-        // would adopt the flag, acknowledge, and scan nothing.
+        // Checked outside `replan`, because the Bluetooth assignment is not the
+        // planner's: the plan is a function of who is present, and this is an
+        // operator's choice that a re-cut has no opinion about. A node that has
+        // left the fleet is not scanning for us either way. A node that announces
+        // itself without the `ble` feature loses it on the same tick and for the
+        // same reason — it would adopt the flag, acknowledge, and scan nothing.
         //
         // Both cases are about a node that has *spoken*, which is why
         // `last_heartbeat` guards the first: a node put in the table by a
@@ -904,89 +875,10 @@ impl FleetEngine {
     }
 
     /// Take an operator's instruction. Nothing goes out from here.
-    fn on_command(&mut self, command: Command, now: Now) {
+    fn on_command(&mut self, command: Command) {
         match command {
-            Command::Assign { mac, channels } => self.on_assign(mac, channels, now),
             Command::AssignBle { mac } => self.on_assign_ble(mac),
-            Command::SetAuto(on) => {
-                self.auto = on;
-                // Forget what the last plan was built for, so switching back on
-                // re-partitions rather than waiting for the fleet to change.
-                self.plan_members.clear();
-                if !on {
-                    self.plan = None;
-                }
-                self.replan(now);
-            }
         }
-    }
-
-    /// Give one node a set of channels, by hand.
-    fn on_assign(&mut self, mac: Mac, channels: ChannelSet, now: Now) {
-        // `plan_for` refuses to deal a node a channel its radio cannot tune, and
-        // so must this: nothing re-partitions afterwards to correct a hand
-        // assignment, and `Plan::unreachable` never sees one. A node with no
-        // token is left alone — the checks below turn it away for that instead.
-        let channels = match self.nodes.get(&mac).and_then(|node| node.capabilities) {
-            Some(capabilities) => Radio::from(capabilities).tunable(channels),
-            None => channels,
-        };
-
-        // No frame means "scan nothing", and a node that adopted an empty set
-        // would be acknowledged and shown as confirmed while collecting nothing.
-        // Also catches what the mask above can leave behind: a node handed
-        // nothing but 5 GHz that has no radio for any of it.
-        if channels.is_empty() {
-            return;
-        }
-
-        // Under a plan the node keeps the index and count the plan gave it: a
-        // hand-assigned set changes what one node scans, not where in the stagger
-        // window it keys up. Without a plan they are taken over the heartbeating
-        // nodes ordered by MAC — the same numbering the planner uses, so taking
-        // the fleet back by hand cannot renumber one node against a fleet still
-        // holding the plan's arithmetic.
-        let planned = self
-            .plan
-            .zip(self.plan_members.iter().position(|(m, _)| *m == mac))
-            .map(|(plan, index)| (u8::try_from(index).unwrap_or(u8::MAX), plan.node_count()));
-        let (node_index, node_count) = match planned {
-            Some(pair) => pair,
-            None => {
-                let living: Vec<Mac> = self
-                    .nodes
-                    .values()
-                    .filter(|node| self.is_assignable(node, now))
-                    .map(|node| node.mac)
-                    .collect();
-                // Not heartbeating, or not drivable at all: either way it will
-                // never adopt what this would send. The view refuses it first.
-                let Some(index) = living.iter().position(|m| *m == mac) else { return };
-                (
-                    u8::try_from(index).unwrap_or(u8::MAX),
-                    u8::try_from(living.len()).unwrap_or(u8::MAX),
-                )
-            }
-        };
-
-        // A fresh epoch even when the set is unchanged: a node adopts on `!=`, so
-        // re-sending one it already holds is acknowledged and then discarded,
-        // which looks exactly like success.
-        self.last_counter += 1;
-        // The Bluetooth flag rides in the same frame, so every assignment has to
-        // carry the fleet's current answer to "who scans BLE" — or a hand
-        // assignment would move the scan as a side effect of giving channels.
-        let assignment = Assignment {
-            channels,
-            ble: self.ble_node == Some(mac),
-            node_index,
-            node_count,
-            counter: self.last_counter,
-        };
-
-        let Some(node) = self.nodes.get_mut(&mac) else { return };
-        node.desired = Some(assignment);
-        node.dirty = true;
     }
 
     /// Move the Bluetooth scan, or take it off the fleet entirely.
@@ -1057,9 +949,6 @@ impl FleetEngine {
     /// anything, which is what keeps this off a heartbeat's critical path. It is
     /// called from every tick, so that has to stay true.
     fn replan(&mut self, now: Now) {
-        if !self.auto {
-            return;
-        }
         let members: Vec<(Mac, Radio)> = self
             .nodes
             .values()
@@ -1107,6 +996,7 @@ impl FleetEngine {
         // One epoch per node that actually needs telling. Held locally because
         // the decision needs the node in hand, and `self` is borrowed for it.
         let mut counter = self.last_counter;
+        let ble_node = self.ble_node;
         for (index, (mac, _)) in members.iter().enumerate() {
             let index = u8::try_from(index).unwrap_or(u8::MAX);
             // Nothing for this node: more nodes than the pool has channels *this
@@ -1116,8 +1006,13 @@ impl FleetEngine {
             // duplicating another share rather than leaving a gap — and the
             // footer's unreachable line says the fleet is short of the pool.
             let Some(channels) = plan.channels_for(index) else { continue };
-            let ble = self.ble_node == Some(*mac);
             let Some(node) = self.nodes.get_mut(mac) else { continue };
+            // Masked the same way [`Self::reissue`] masks it: a node reflashed
+            // without the `ble` feature would adopt the flag, acknowledge, and
+            // scan nothing. The tick is what takes the scan off the fleet, and a
+            // re-cut landing in between must not hand it straight back.
+            let ble = ble_node == Some(*mac)
+                && node.capabilities.is_none_or(|capabilities| capabilities.ble);
 
             let wanted = |a: Assignment| {
                 a.channels == channels
@@ -1436,7 +1331,6 @@ impl FleetEngine {
             link_up: self.link_up,
             link_error: self.link_error.clone(),
             pool: self.config.pool,
-            auto: self.auto,
             plan: self.plan,
             ble_node: self.ble_node,
             nodes,
