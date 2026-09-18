@@ -507,11 +507,16 @@ fn drain_admin(receiver: &EspNowReceiver<'_>, node: &mut Node) {
     while let Some(received) = receiver.receive() {
         let admin = match Frame::decode(received.data()) {
             Ok(Frame::Admin(admin)) => admin,
-            // A host speaking a wire version this build does not. Said out loud
-            // rather than dropped with everything else: it is the whole diagnosis
-            // for a node that is talked to and never answers.
+            // A host whose assignment is not the shape this build reads — a
+            // different wire version, or a different length under the same one.
+            // Said out loud rather than dropped with everything else: it is the
+            // whole diagnosis for a node that is talked to and never answers.
             Err(DecodeError::BadVersion(version)) => {
                 note!("ignoring a frame at wire version {}; reflash this node", version);
+                continue;
+            }
+            Err(DecodeError::BadLength { need, got }) => {
+                note!("ignoring a {} byte assignment, this build reads {}; reflash this node", got, need);
                 continue;
             }
             // Everything else on this channel: our own broadcasts coming back, the

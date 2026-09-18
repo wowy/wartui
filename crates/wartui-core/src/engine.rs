@@ -739,8 +739,10 @@ impl FleetEngine {
                 return;
             }
             // Ours, from a build this one cannot read — a fleet half-way through
-            // a reflash, and the version byte is what lets it be said.
-            Err(DecodeError::BadVersion(_)) => {
+            // a reflash. A version byte this build does not know says so; so
+            // does a fixed-length frame that is not its own length, which is
+            // what a layout change looks like while `WIRE_VERSION` is held.
+            Err(DecodeError::BadVersion(_) | DecodeError::BadLength { .. }) => {
                 self.counters.incompatible += 1;
                 return;
             }

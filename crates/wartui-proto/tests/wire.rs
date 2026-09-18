@@ -493,18 +493,44 @@ fn an_unknown_type_byte_is_rejected() {
 
 #[test]
 fn short_frames_are_rejected_by_the_layout_they_claim_to_be() {
+    // Too short to carry a header at all, which is as far as `header` gets.
     assert_eq!(Frame::decode(&HEARTBEAT[..4]), Err(DecodeError::TooShort { need: 6, got: 4 }));
-    assert_eq!(
-        Frame::decode(&HEARTBEAT[..HEARTBEAT_MSG_LEN - 1]),
-        Err(DecodeError::TooShort { need: HEARTBEAT_MSG_LEN, got: HEARTBEAT_MSG_LEN - 1 })
-    );
-    assert_eq!(
-        Frame::decode(&ADMIN[..ADMIN_MSG_LEN - 1]),
-        Err(DecodeError::TooShort { need: ADMIN_MSG_LEN, got: ADMIN_MSG_LEN - 1 })
-    );
+    // A sighting is as long as its own SSID and trailer say, so short is short.
     assert_eq!(
         Frame::decode(&SIGHTING_BLE[..SIGHTING_MSG_MIN - 1]),
         Err(DecodeError::TooShort { need: SIGHTING_MSG_MIN, got: SIGHTING_MSG_MIN - 1 })
+    );
+    // The other two are each one size, so either side of it is a layout this
+    // build does not read.
+    assert_eq!(
+        Frame::decode(&HEARTBEAT[..HEARTBEAT_MSG_LEN - 1]),
+        Err(DecodeError::BadLength { need: HEARTBEAT_MSG_LEN, got: HEARTBEAT_MSG_LEN - 1 })
+    );
+    assert_eq!(
+        Frame::decode(&ADMIN[..ADMIN_MSG_LEN - 1]),
+        Err(DecodeError::BadLength { need: ADMIN_MSG_LEN, got: ADMIN_MSG_LEN - 1 })
+    );
+}
+
+#[test]
+fn a_fixed_frame_longer_than_this_build_reads_is_refused_rather_than_truncated() {
+    // The half of a layout change that would otherwise be silent: a wider
+    // assignment from a newer host has a valid header, a known type byte and
+    // enough bytes for every field this build knows, so a length check is the
+    // only thing between it and being adopted as a plausible wrong share.
+    // `WIRE_VERSION` does not move before 1.0, so this is that check.
+    let mut wider = ADMIN.to_vec();
+    wider.push(0xFF);
+    assert_eq!(
+        Frame::decode(&wider),
+        Err(DecodeError::BadLength { need: ADMIN_MSG_LEN, got: ADMIN_MSG_LEN + 1 })
+    );
+
+    let mut wider = HEARTBEAT.to_vec();
+    wider.push(0xFF);
+    assert_eq!(
+        Frame::decode(&wider),
+        Err(DecodeError::BadLength { need: HEARTBEAT_MSG_LEN, got: HEARTBEAT_MSG_LEN + 1 })
     );
 }
 
