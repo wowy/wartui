@@ -28,7 +28,7 @@ short version.
 | `--db PATH` | `wartui.db` | Where to keep the capture |
 | `--port PATH` | discovered | Serial port of the bridge |
 | `--channel N` | `6` | The fleet's ESP-NOW control channel |
-| `--pool us\|all` | `us` | Which channels the fleet should scan |
+| `--pool us\|eu\|all` | `all` | Which channels the fleet should scan |
 | `--lat` `--lon` `--alt` | — | A static position for every observation |
 | `--gps PATH` | — | An NMEA receiver, preferred over `--lat`/`--lon` |
 | `--gps-baud N` | `9600` | Line rate of that receiver |
@@ -108,8 +108,9 @@ overrides one node's share. The header says what it has to work with:
 Nothing goes out at the moment a node's share changes. Its radio is away scanning
 some other channel for all but the 100 ms it holds open after its own heartbeat,
 so the assignment waits for that window — the `channels` column reads `1: 1…`
-until it lands, then drops the ellipsis. On a full sweep that is up to four
-seconds. That delay is the protocol, not lag.
+until it lands, then drops the ellipsis. On a full sweep of the default pool
+that is up to about five seconds, and about four on `us`. That delay is the
+protocol, not lag.
 
 That column leads with a count because a share dealt round-robin is a dozen
 scattered channels and no sane column is wide enough for all of them. The count
@@ -147,10 +148,22 @@ not one.
 
 ## Channel pools
 
-`--pool us` (the default) is 2.4 GHz 1–11 and 5 GHz 36–165. `--pool all` is
-every channel a node can tune: 2.4 GHz 1–13 and all of 5 GHz, including the
-UNII-4 channels 169, 173 and 177. Channel 14 is in neither and is never dealt —
-`esp-radio` exposes no way to reach it.
+`--pool all` is the default: every channel a node can tune, 2.4 GHz 1–13 and all
+of 5 GHz including the UNII-4 channels 169, 173 and 177. The other two are
+narrower, and the choice is about coverage rather than legality — a node parks
+and reads beacons, so a pool says where it listens and never what it emits.
+
+| Pool | 2.4 GHz | 5 GHz | Channels |
+| --- | --- | --- | --- |
+| `all` | 1–13 | 36–177 | 39 |
+| `us` | 1–11 | 36–165 | 34 |
+| `eu` | 1–13 | 36–140 | 30 |
+
+`us` is what the FCC permits: no 12 or 13, and no UNII-4. `eu` is what ETSI
+permits: 2.4 GHz all the way to 13, and 5 GHz stopping at 140, because channel
+144's twenty megahertz run past the 5725 MHz edge and 149 upwards is another
+band again. Channel 14 is in no pool and is never dealt — `esp-radio` exposes no
+way to reach it.
 
 An assignment carries a forty-bit channel mask, so it can name any subset of the
 pool. The planner deals the pool out round-robin: index *k* of the pool goes to
@@ -192,8 +205,9 @@ Two consequences worth knowing:
 by more than one node. `export` folds each network's sightings into recapture
 windows and picks the strongest per window, so this costs store rows and
 nothing else. 5 GHz channels do not overlap and do not do it.
-- **A fleet with no 5 GHz radio in it can cover only 11 channels on `us`**, so
-  from twelve such nodes onward there are more nodes than channels to give them.
+- **A fleet with no 5 GHz radio in it covers 2.4 GHz and nothing else**, which is
+  13 channels on `all` and `eu` and 11 on `us`, so from fourteen such nodes onward
+  — twelve on `us` — there are more nodes than channels to give them.
   The surplus nodes keep whatever they last held rather than being told to scan
   nothing — there is no frame that means that — so their shares double up with
   someone else's.

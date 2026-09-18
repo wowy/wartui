@@ -98,11 +98,11 @@ changes, which is the core's job and the reason this exists. It is the only thin
 a node scans: there is no key and no flag that overrides one node's share.
 
 Nothing goes out at the moment a share changes. A node's radio is away scanning for all but the 100
-ms it holds open after its own heartbeat, so the assignment waits for that window — up to about four
-seconds on a full sweep. The `channels` column reads `1: 1…` until it lands.
+ms it holds open after its own heartbeat, so the assignment waits for that window — up to about five
+seconds on a full sweep of the default pool. The `channels` column reads `1: 1…` until it lands.
 
-`--pool us` is the default: 2.4 GHz 1–11 and 5 GHz 36–165. `--pool all` is every channel a node can
-tune, 2.4 GHz 1–13 and all of 5 GHz.
+`--pool all` is the default: every channel a node can tune, 2.4 GHz 1–13 and all of 5 GHz.
+`--pool us` is 2.4 GHz 1–11 and 5 GHz 36–165; `--pool eu` is 2.4 GHz 1–13 and 5 GHz 36–140.
 
 At most one node scans Bluetooth, and by default none does. `b` moves it.
 
@@ -114,7 +114,7 @@ At most one node scans Bluetooth, and by default none does. `b` moves it.
 - **Maximum twenty nodes** (`plan::MAX_NODES`) — that is how many peers an ESP-NOW radio holds.
   Above it, capture continues and nothing is dropped, but the planner stops re-cutting and says so.
 - **An ESP32-C6 is never dealt a 5 GHz channel.** Its radio is 2.4 GHz only.
-- **Channel 14 is in neither pool** and is never dealt; `esp-radio` exposes no way to reach it. It's
+- **Channel 14 is in no pool** and is never dealt; `esp-radio` exposes no way to reach it. It's
   Japan-only 802.11b, so should be extremely rare.
 - **Plaintext ESP-NOW only**, in both directions. There is no pairing handshake and no key.
 - **Every radio transmits at 2 dBm.** The fleet is meant to ride in one vehicle with its bridge;

@@ -812,6 +812,7 @@ fn insert_session(
 const fn pool_name(pool: ChannelPool) -> &'static str {
     match pool {
         ChannelPool::Us => "us",
+        ChannelPool::Eu => "eu",
         ChannelPool::All => "all",
     }
 }

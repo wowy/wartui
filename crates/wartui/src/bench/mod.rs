@@ -61,6 +61,10 @@ const SAMPLE: Duration = Duration::from_secs(2);
 const SETTLE_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// The pool the benchmark fleet scans.
+///
+/// Named rather than taken from the default, because the channel count sets how
+/// fast a node sweeps and so the rate rows arrive at. The numbers in
+/// `docs/store-io-findings.md` are this pool's.
 const POOL: ChannelPool = ChannelPool::Us;
 
 /// Sightings per address in the simulated drive.
@@ -920,7 +924,7 @@ mod tests {
 
     #[test]
     fn every_node_in_any_fleet_is_given_more_networks_than_its_ring_holds() {
-        for pool in [ChannelPool::Us, ChannelPool::All] {
+        for pool in [ChannelPool::Us, ChannelPool::Eu, ChannelPool::All] {
             for nodes in 1..=u8::try_from(MAX_NODES).unwrap() {
                 let per_channel =
                     usize::from(busy_networks(nodes, pool)) / usize::from(NUM_SCAN_CHANNELS);

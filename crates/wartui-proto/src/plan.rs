@@ -1,7 +1,7 @@
 //! Channel pools and the assignment planner.
 //!
-//! A *pool* is described in runs — [`ChannelPool::Us`] is two of them, with a gap
-//! at indices 11-13 — because that is the shape the regulatory picture has. An
+//! A *pool* is described in runs — every one of them is two, each with its own
+//! hole in the middle — because that is the shape the regulatory picture has. An
 //! *assignment* is not: [`crate::air::AdminMsg`] carries a forty-bit
 //! [`ChannelSet`], one bit per [`SCAN_CHANNELS`] entry, so a node can hold any
 //! subset and a run boundary is nothing the planner steers around. Before the
@@ -341,6 +341,15 @@ const US_RUNS: [IndexRun; 2] = [
     IndexRun::new(14, 36),
 ];
 
+const EU_RUNS: [IndexRun; 2] = [
+    // 2.4 GHz channels 1-13. Excludes 14, which is in no pool.
+    IndexRun::new(0, 12),
+    // 5 GHz 36-140: 5150-5350 and 5470-5725, less channels 104 and 108, which
+    // `SCAN_CHANNELS` does not carry. Excludes 144, whose 20 MHz slot runs past
+    // 5725, and all of 149-177.
+    IndexRun::new(14, 30),
+];
+
 const ALL_RUNS: [IndexRun; 2] = [
     // Everything below channel 14.
     IndexRun::new(0, 12),
@@ -414,7 +423,7 @@ impl From<crate::air::Capabilities> for Radio {
 // a pool exceeding `MAX_RUNS` is a pool nobody thought about. A new one goes here
 // as well as in `ChannelPool::runs`.
 const _: () = assert!(
-    US_RUNS.len() <= MAX_RUNS && ALL_RUNS.len() <= MAX_RUNS,
+    US_RUNS.len() <= MAX_RUNS && EU_RUNS.len() <= MAX_RUNS && ALL_RUNS.len() <= MAX_RUNS,
     "a channel pool has more runs than MAX_RUNS; raise it"
 );
 
@@ -433,13 +442,24 @@ pub enum ChannelPool {
     ///
     /// 5 GHz 52-144 are DFS channels, where the rules require passive scanning. A
     /// wartui node always listens and so is welcome there.
-    #[default]
     Us,
+    /// ETSI-permitted unlicensed WLAN channels: 2.4 GHz 1-13 and 5 GHz 36-140.
+    ///
+    /// The 5 GHz half is what [`SCAN_CHANNELS`] carries of 5150-5350 and
+    /// 5470-5725, and it ends at channel 140: 144's twenty megahertz run past
+    /// 5725, and 149 upwards is another band again. The 2.4 GHz half is wider
+    /// than [`Self::Us`] by channels 12 and 13.
+    Eu,
     /// Every channel a node can actually tune: 2.4 GHz 1-13 and all of 5 GHz.
     ///
     /// The unrestricted pool, including the UNII-4 channels 169, 173 and 177 that
     /// [`Self::Us`] leaves out. 39 channels and not 40, and two runs rather than
     /// one, because channel 14 is unsupported — see [`UNSUPPORTED_INDEX`].
+    ///
+    /// The default. A pool bounds where a node listens rather than what it emits,
+    /// so narrowing it to one regulatory domain is a choice about coverage that
+    /// an operator in another domain pays for in channels never swept.
+    #[default]
     All,
 }
 
@@ -449,6 +469,7 @@ impl ChannelPool {
     pub const fn runs(self) -> &'static [IndexRun] {
         match self {
             Self::Us => &US_RUNS,
+            Self::Eu => &EU_RUNS,
             Self::All => &ALL_RUNS,
         }
     }
@@ -483,6 +504,7 @@ impl core::fmt::Display for ChannelPool {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str(match self {
             Self::Us => "US",
+            Self::Eu => "EU",
             Self::All => "All",
         })
     }

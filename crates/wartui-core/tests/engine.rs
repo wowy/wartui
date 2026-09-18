@@ -55,6 +55,14 @@ fn engine(config: EngineConfig, clock: &Clock) -> FleetEngine {
     FleetEngine::new(config, clock.at(0))
 }
 
+/// A config on the US pool, for the tests whose channel counts are its.
+///
+/// The default pool is `All`; a test that asserts the shape of a pool names the
+/// one it means, so its arithmetic does not move when the default does.
+fn us_config() -> EngineConfig {
+    EngineConfig { pool: ChannelPool::Us, ..Default::default() }
+}
+
 /// Whatever `frame` is, arriving from `src`.
 fn rx(src: Mac, frame: &[u8]) -> Event {
     rx_at(src, frame, 0)
@@ -667,7 +675,7 @@ fn a_stranger_in_the_fleet_does_not_take_a_share_of_the_pool() {
     // nodes plus a stranger must partition the pool two ways, not three. Three
     // would leave a third of it assigned to a node that will never scan it.
     let clock = Clock::new();
-    let mut engine = engine(EngineConfig::default(), &clock);
+    let mut engine = engine(us_config(), &clock);
     engine.handle(heartbeat(NODE, 1), clock.at(1));
     engine.handle(heartbeat(OTHER, 1), clock.at(1));
     engine.handle(rx(THIRD, &[0x45, 0x4E, 0x4F, 0x57, 0x03, 0x93, 0x00, 0x00, 0x00]), clock.at(1));
@@ -697,7 +705,7 @@ fn a_two_point_four_node_is_never_dealt_a_channel_it_cannot_tune() {
     // A C6 adopts a 5 GHz share, acknowledges it, and scans the part it can reach
     // — leaving a hole with an assignment sitting on top of it.
     let clock = Clock::new();
-    let mut engine = engine(EngineConfig::default(), &clock);
+    let mut engine = engine(us_config(), &clock);
     engine.handle(heartbeat(NODE, 1), clock.at(1));
     engine.handle(narrowband_heartbeat(OTHER, 1), clock.at(1));
     engine.handle(Event::Tick, clock.at(2));
@@ -819,7 +827,7 @@ fn a_node_that_stops_claiming_bluetooth_is_told_to_stop_rather_than_merely_forgo
 #[test]
 fn an_assignment_is_believed_only_once_the_node_radio_acknowledges_it() {
     let clock = Clock::new();
-    let mut engine = engine(EngineConfig::default(), &clock);
+    let mut engine = engine(us_config(), &clock);
     engine.handle(heartbeat(NODE, 1), clock.at(1));
     let (id, _, _) = sent_admin(&engine.handle(heartbeat(NODE, 2), clock.at(6)));
 
@@ -887,7 +895,7 @@ fn an_assignment_the_bridge_never_answers_for_is_written_down_as_unknown() {
 #[test]
 fn a_lost_answer_expiring_late_does_not_unpick_an_assignment_that_has_since_landed() {
     let clock = Clock::new();
-    let config = EngineConfig { admin_timeout: Duration::from_secs(2), ..Default::default() };
+    let config = EngineConfig { admin_timeout: Duration::from_secs(2), ..us_config() };
     let mut engine = engine(config, &clock);
     engine.handle(heartbeat(NODE, 1), clock.at(1));
 
@@ -988,7 +996,7 @@ fn epochs_carry_on_from_where_the_database_left_off() {
 #[test]
 fn the_heartbeat_period_is_the_median_of_recent_sweeps() {
     let clock = Clock::new();
-    let mut engine = engine(EngineConfig::default(), &clock);
+    let mut engine = engine(us_config(), &clock);
 
     // Four-second sweeps, about what a node holding the whole US pool does, with
     // one heartbeat lost in the middle. The median is what absorbs it.
@@ -1091,7 +1099,7 @@ fn wanted(engine: &FleetEngine) -> Vec<ChannelSet> {
 #[test]
 fn the_planner_deals_the_whole_pool_out_across_the_fleet() {
     let clock = Clock::new();
-    let mut engine = engine(EngineConfig::default(), &clock);
+    let mut engine = engine(us_config(), &clock);
     for n in 0..3 {
         engine.handle(heartbeat(peer(n), 1), clock.at(1));
     }
@@ -1129,7 +1137,7 @@ fn a_fleet_is_partitioned_without_being_asked_and_nothing_can_stop_it() {
     // assignment there is: no command reaches this, and no configuration turns
     // it off.
     let clock = Clock::new();
-    let mut engine = engine(EngineConfig::default(), &clock);
+    let mut engine = engine(us_config(), &clock);
     caught_up(&mut engine, &clock);
     for n in 0..3 {
         let batch = engine.handle(heartbeat(peer(n), 1), clock.at(1));
@@ -1176,7 +1184,7 @@ fn a_node_joining_re_cuts_the_pool_for_the_whole_fleet() {
 #[test]
 fn a_node_that_stops_heartbeating_leaves_the_plan_and_the_rest_take_its_channels() {
     let clock = Clock::new();
-    let mut engine = engine(EngineConfig::default(), &clock);
+    let mut engine = engine(us_config(), &clock);
     engine.handle(heartbeat(peer(0), 1), clock.at(1));
     engine.handle(heartbeat(peer(1), 1), clock.at(2));
     assert_eq!(covered(&wanted(&engine)), pool_indices(ChannelPool::Us));
@@ -1194,7 +1202,7 @@ fn a_node_that_stops_heartbeating_leaves_the_plan_and_the_rest_take_its_channels
 #[test]
 fn one_node_on_a_two_run_pool_gets_all_of_it_in_one_frame() {
     let clock = Clock::new();
-    let mut engine = engine(EngineConfig::default(), &clock);
+    let mut engine = engine(us_config(), &clock);
     caught_up(&mut engine, &clock);
 
     // This is where the rotation used to be: one contiguous range could not say
@@ -1315,7 +1323,7 @@ fn a_fleet_larger_than_the_radio_can_address_stops_being_re_partitioned() {
 #[test]
 fn a_node_that_rejoins_holding_the_right_channels_is_still_re_issued_when_it_reboots() {
     let clock = Clock::new();
-    let mut engine = engine(EngineConfig::default(), &clock);
+    let mut engine = engine(us_config(), &clock);
     caught_up(&mut engine, &clock);
     let (first, _, _) = sent_admin(&engine.handle(heartbeat(peer(0), 1), clock.at(1)));
     engine.handle(send_result(first, SendStatus::AckOk, 900), clock.at(1));
@@ -1349,7 +1357,7 @@ fn a_node_that_rejoins_holding_the_right_channels_is_still_re_issued_when_it_reb
 #[test]
 fn a_node_the_bridge_cannot_peer_with_leaves_the_plan_so_the_rest_still_cover_the_pool() {
     let clock = Clock::new();
-    let mut engine = engine(EngineConfig::default(), &clock);
+    let mut engine = engine(us_config(), &clock);
     for n in 0..3 {
         engine.handle(heartbeat(peer(n), 1), clock.at(1));
     }

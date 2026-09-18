@@ -142,7 +142,7 @@ pub struct EngineConfig {
 impl Default for EngineConfig {
     fn default() -> Self {
         Self {
-            pool: ChannelPool::Us,
+            pool: ChannelPool::All,
             topology_timeout: Duration::from_secs(60),
             status_interval: Duration::from_secs(5),
             tail_len: 200,

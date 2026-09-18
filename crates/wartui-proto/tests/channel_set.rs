@@ -81,7 +81,7 @@ fn an_index_this_build_cannot_scan_is_dropped_rather_than_rejected() {
 
 #[test]
 fn the_five_wire_bytes_round_trip_and_are_little_endian() {
-    for pool in [ChannelPool::Us, ChannelPool::All] {
+    for pool in [ChannelPool::Us, ChannelPool::Eu, ChannelPool::All] {
         let set = pool.channels();
         assert_eq!(ChannelSet::from_bytes(set.to_bytes()), set, "{pool:?}");
     }
@@ -97,16 +97,18 @@ fn the_five_wire_bytes_round_trip_and_are_little_endian() {
 
 #[test]
 fn a_pool_as_a_set_holds_exactly_what_the_pool_contains() {
-    for pool in [ChannelPool::Us, ChannelPool::All] {
+    for pool in [ChannelPool::Us, ChannelPool::Eu, ChannelPool::All] {
         let set = pool.channels();
         assert_eq!(set.len(), u32::from(pool.channel_count()), "{pool:?}");
         for idx in 0..NUM_SCAN_CHANNELS {
             assert_eq!(set.contains(idx), pool.contains(idx), "{pool:?} index {idx}");
         }
     }
-    // The US pool's two runs in one set, which is the whole reason for the mask.
+    // Two runs in one set, which is the whole reason for the mask.
     assert_eq!(ChannelPool::Us.channels().len(), 34);
     assert!(!ChannelPool::Us.channels().contains(11), "the gap at channels 12-14");
+    assert_eq!(ChannelPool::Eu.channels().len(), 30);
+    assert!(!ChannelPool::Eu.channels().contains(31), "channel 144 is outside the EU pool");
 }
 
 /// The seam between adopting an assignment and dwelling on it.

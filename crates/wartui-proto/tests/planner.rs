@@ -12,7 +12,7 @@ use wartui_proto::plan::{
     SCAN_CHANNELS, UNSUPPORTED_INDEX, is_five_ghz, plan, plan_for, stagger_offset_ms,
 };
 
-const POOLS: [ChannelPool; 2] = [ChannelPool::Us, ChannelPool::All];
+const POOLS: [ChannelPool; 3] = [ChannelPool::Us, ChannelPool::Eu, ChannelPool::All];
 
 const FLEET_SIZES: std::ops::RangeInclusive<u8> = 1..=20;
 
@@ -47,6 +47,34 @@ fn us_pool_excludes_exactly_the_channels_it_should() {
 }
 
 #[test]
+fn eu_pool_excludes_exactly_the_channels_it_should() {
+    // 5 GHz stops at 140: channel 144's twenty megahertz run past 5725, and
+    // 149 upwards is another band. 2.4 GHz runs the whole way to 13.
+    let excluded: BTreeSet<u8> =
+        [14, 144, 149, 153, 157, 161, 165, 169, 173, 177].into_iter().collect();
+    for (idx, &channel) in SCAN_CHANNELS.iter().enumerate() {
+        let idx = u8::try_from(idx).expect("table is 40 entries");
+        assert_eq!(
+            ChannelPool::Eu.contains(idx),
+            !excluded.contains(&channel),
+            "channel {channel} (index {idx}) is on the wrong side of the EU pool"
+        );
+    }
+    assert_eq!(
+        ChannelPool::Eu.channel_count(),
+        30,
+        "thirteen 2.4 GHz channels and seventeen 5 GHz"
+    );
+}
+
+#[test]
+fn the_default_pool_is_every_channel_a_node_can_tune() {
+    // A pool bounds where a node listens, so the widest one is the one that
+    // costs an operator nothing to be handed without asking.
+    assert_eq!(ChannelPool::default(), ChannelPool::All);
+}
+
+#[test]
 fn no_pool_offers_the_one_channel_a_node_cannot_tune() {
     // A node handed index 13 refuses the hop once per sweep, silently; see
     // `plan::UNSUPPORTED_INDEX`.
@@ -61,8 +89,9 @@ fn no_pool_offers_the_one_channel_a_node_cannot_tune() {
 }
 
 #[test]
-fn both_pools_are_two_runs_because_both_have_a_hole_in_them() {
+fn every_pool_is_two_runs_because_every_one_has_a_hole_in_it() {
     assert_eq!(ChannelPool::Us.runs().len(), 2, "the gap at channels 12-14 splits the US pool");
+    assert_eq!(ChannelPool::Eu.runs().len(), 2, "channel 14 alone splits the EU pool");
     assert_eq!(ChannelPool::All.runs().len(), 2, "and channel 14 alone splits the All pool");
 }
 

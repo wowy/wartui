@@ -29,9 +29,11 @@ use crate::tui;
 #[derive(Debug, Clone, Copy, ValueEnum, Default)]
 pub enum PoolArg {
     /// FCC-permitted unlicensed channels: 2.4 GHz 1–11 and 5 GHz 36–165.
-    #[default]
     Us,
+    /// ETSI-permitted unlicensed channels: 2.4 GHz 1–13 and 5 GHz 36–140.
+    Eu,
     /// Every channel the node firmware knows about, matching stock behaviour.
+    #[default]
     All,
 }
 
@@ -39,6 +41,7 @@ impl From<PoolArg> for ChannelPool {
     fn from(arg: PoolArg) -> Self {
         match arg {
             PoolArg::Us => Self::Us,
+            PoolArg::Eu => Self::Eu,
             PoolArg::All => Self::All,
         }
     }
@@ -65,7 +68,7 @@ pub struct Args {
 
     /// Which channels the fleet should scan. Recorded with the session, and
     /// the set the planner partitions across it.
-    #[arg(long, value_enum, default_value_t = PoolArg::Us)]
+    #[arg(long, value_enum, default_value_t = PoolArg::All)]
     pool: PoolArg,
 
     /// The mesh's ESP-NOW control channel.
