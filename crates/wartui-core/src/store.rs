@@ -34,21 +34,21 @@ use wartui_proto::plan::ChannelPool;
 use crate::engine::StoreStats;
 use crate::record::Record;
 
-/// The schema shape this build writes and reads.
+/// The schema shape this build writes and reads — the only one it will touch.
 ///
-/// 8 until wartui 1.0, the same rule as [`wartui_proto::air::WIRE_VERSION`] and
+/// 1 until wartui 1.0, the same rule as [`wartui_proto::air::WIRE_VERSION`] and
 /// for the same reason: nothing here is compatible with an earlier wartui, so a
 /// marker distinguishing the two marks a difference the policy has already
-/// settled. `migrate`'s arms carry the steps that brought a file this far and
-/// each one is lossless, which is the property to keep — a capture is data
-/// rather than a deployment. What they buy is a file this build can open, not a
-/// reading of it in an earlier build's terms: a mask of scan-table indices means
-/// what the build that wrote it meant, and no arm rewrites it.
+/// settled. There is no migration and nothing reads an older file to be helpful
+/// about it. [`SCHEMA`] changes as freely as the project needs, and a database
+/// stamped anything but this is somebody else's — refused by [`check_version`]
+/// rather than adapted, because adapting it would mean deciding what an older
+/// build meant, and a mask of scan-table indices means what the build that wrote
+/// it meant.
 ///
-/// Every arm is keyed on the marker, so one added while this is 8 fires on every
-/// open of a file already stamped 8. Structural change is what moves it, and
-/// that decision waits for 1.0.
-pub const SCHEMA_VERSION: i32 = 8;
+/// The marker is the lever held for the first capture that has to be read in an
+/// earlier build's terms. Nothing before 1.0 is, so it does not move before then.
+pub const SCHEMA_VERSION: i32 = 1;
 
 /// The schema, applied to any database that does not already have it.
 const SCHEMA: &str = r"
@@ -138,7 +138,7 @@ CREATE TABLE IF NOT EXISTS observation (
 -- Deliberately no unique constraint on bssid: every sighting is kept, with the node
 -- that made it and the signal it saw. Deduplicating at ingest would throw away the
 -- coverage data. Nor does the table have an index of any kind, though export groups by
--- bssid: the v6 and v7 steps in `migrate` say why.
+-- bssid: `docs/store-io-findings.md` has the measurements that took both of them out.
 
 CREATE TABLE IF NOT EXISTS raw_frame (
   id INTEGER PRIMARY KEY,
@@ -161,9 +161,12 @@ pub enum StoreError {
     /// The writer thread could not be started.
     #[error("could not start the store writer thread: {0}")]
     Spawn(#[source] std::io::Error),
-    /// The database was written by a newer wartui.
-    #[error("database schema is v{found}, but this build understands v{ours}")]
-    SchemaTooNew {
+    /// The database was written by a wartui with a different schema.
+    #[error(
+        "database schema is v{found}, but this build writes v{ours}; captures are not \
+         portable between wartui builds before 1.0 — start a new file"
+    )]
+    SchemaMismatch {
         /// What the file says.
         found: i32,
         /// What this build writes.
@@ -360,17 +363,15 @@ impl Store {
         let mut conn = Connection::open(&config.path)?;
         prepare(&conn, config)?;
         // Before the schema, not after: `CREATE TABLE IF NOT EXISTS` no-ops
-        // against a newer file's tables rather than failing, so an older build
-        // would append old-shaped rows and stamp the version marker back down.
-        let found = check_version(&conn)?;
-        // All of it or none of it, version marker included. A migration is several
-        // statements that only make sense together — v2's assignment rebuild
-        // renames the old table before writing the new one — and the marker is
-        // what decides whether they run again. Committed piecemeal, a failure part
-        // way through leaves a file that is neither shape and still stamped old,
-        // which every later open would re-enter and die in.
+        // against a foreign file's tables rather than failing, so without this
+        // the build appends rows of the wrong shape and stamps the version
+        // marker to its own, leaving nothing able to tell it had happened.
+        check_version(&conn)?;
+        // All of it or none of it, version marker included. The marker is what says
+        // the tables are there, so a file stamped SCHEMA_VERSION with half a schema
+        // under it passes `check_version` on every later open and then fails on a
+        // missing table instead of being fixed.
         let tx = conn.transaction()?;
-        migrate(&tx, found)?;
         tx.execute_batch(SCHEMA)?;
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         tx.commit()?;
@@ -509,7 +510,7 @@ impl Drop for Store {
 /// mid-run cannot stall ingest.
 ///
 /// # Errors
-/// [`StoreError`] if the file cannot be opened or is from a newer wartui.
+/// [`StoreError`] if the file cannot be opened or is from a different wartui.
 pub fn open_readonly(path: &Path) -> Result<Connection, StoreError> {
     let conn = Connection::open_with_flags(
         path,
@@ -520,147 +521,17 @@ pub fn open_readonly(path: &Path) -> Result<Connection, StoreError> {
     Ok(conn)
 }
 
-/// Refuse a database written by a newer wartui, and report what this one is.
+/// Refuse a database written by any wartui but this one.
 ///
-/// A fresh file reads 0, which is older than anything and therefore fine.
-fn check_version(conn: &Connection) -> Result<i32, StoreError> {
+/// Not just a newer one: there is no migration before 1.0, so a lower marker is as
+/// foreign as a higher one and guessing at it would be the compatibility this build
+/// does not claim. A fresh file reads 0 and is about to be stamped.
+fn check_version(conn: &Connection) -> Result<(), StoreError> {
     let found: i32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if found > SCHEMA_VERSION {
-        return Err(StoreError::SchemaTooNew { found, ours: SCHEMA_VERSION });
-    }
-    Ok(found)
-}
-
-/// Bring an older database up to the current shape.
-///
-/// Called after [`check_version`] has ruled out a newer file and before [`SCHEMA`]
-/// is applied: `CREATE TABLE IF NOT EXISTS` will not widen an existing table, so
-/// anything structural happens here.
-fn migrate(conn: &Connection, found: i32) -> Result<(), StoreError> {
-    let has_assignment = has_table(conn, "assignment")?;
-
-    // v1 declared this table but could not transmit, so it is provably empty and
-    // dropping it is simpler than three `ALTER TABLE`s.
-    if found == 1 && has_assignment {
-        conn.execute_batch("DROP TABLE assignment")?;
-    }
-
-    // v2 rows are real and worth keeping: `start_idx`/`end_idx` name a contiguous
-    // run, which a mask can say exactly, so the bounds convert rather than being
-    // thrown away. `ble` is 0 because no v2 build could ask for it. Rebuilt rather
-    // than `ALTER TABLE`d, so no later reader has to decide which pair to believe.
-    if found == 2 && has_assignment {
-        conn.execute_batch(
-            "ALTER TABLE assignment RENAME TO assignment_v2;
-             CREATE TABLE assignment (
-               id INTEGER PRIMARY KEY,
-               session_id INTEGER NOT NULL REFERENCES session(id),
-               node_mac BLOB NOT NULL,
-               counter INTEGER NOT NULL,
-               wire_version INTEGER NOT NULL,
-               node_index INTEGER NOT NULL,
-               node_count INTEGER NOT NULL,
-               channels INTEGER NOT NULL,
-               ble INTEGER NOT NULL,
-               created_at INTEGER NOT NULL,
-               delivered_at INTEGER,
-               outcome TEXT,
-               latency_us INTEGER
-             );
-             INSERT INTO assignment
-               (id, session_id, node_mac, counter, wire_version, node_index, node_count,
-                channels, ble, created_at, delivered_at, outcome, latency_us)
-             SELECT id, session_id, node_mac, counter, wire_version, node_index, node_count,
-                    ((1 << (end_idx - start_idx + 1)) - 1) << start_idx, 0,
-                    created_at, delivered_at, outcome, latency_us
-             FROM assignment_v2;
-             DROP TABLE assignment_v2;",
-        )?;
-    }
-
-    // Added in v4. Every row already in the file predates the token, so null is
-    // the truthful value for all of them: those nodes were never asked. The
-    // `has_table` guard is for a v1 file, which has no `node` table at all.
-    if (1..=3).contains(&found)
-        && has_table(conn, "node")?
-        && !has_column(conn, "node", "capabilities")?
-    {
-        conn.execute_batch("ALTER TABLE node ADD COLUMN capabilities TEXT")?;
-    }
-
-    // Never written by anything in any version, so replaced rather than kept.
-    if (1..=2).contains(&found) && has_column(conn, "node", "pinned_start_idx")? {
-        conn.execute_batch(
-            "ALTER TABLE node DROP COLUMN pinned_start_idx;
-             ALTER TABLE node DROP COLUMN pinned_end_idx;
-             ALTER TABLE node ADD COLUMN pinned_channels INTEGER;",
-        )?;
-    }
-
-    // v5. The column keeps the observation exactly as it arrived, and what arrives
-    // stopped being text: older rows hold a comma-separated line, newer ones the
-    // frame. Renamed rather than dropped because the old rows are still the truest
-    // record of what those nodes sent, and rather than left alone because a column
-    // called `raw_text` holding binary gets read wrong once and quietly.
-    if (1..=4).contains(&found)
-        && has_table(conn, "observation")?
-        && has_column(conn, "observation", "raw_text")?
-    {
-        conn.execute_batch("ALTER TABLE observation RENAME COLUMN raw_text TO raw_body")?;
-    }
-
-    // v6. `obs_bssid` cost more than it bought, on both sides of the store. Its key is a
-    // random address, so every commit dirtied leaf pages across the whole index, each
-    // written once to the WAL and again at checkpoint. With it, the process wrote fourteen
-    // times as much for the same rows, and a microSD card dropped two rows in three where
-    // without it the card dropped none. Export, the one reader that groups by address, was
-    // faster without it as well: walking the index reads the table once per sighting in
-    // random order, where a scan and a sort read it in order. The numbers are in
-    // `docs/store-io-findings.md`. An index is derived data, so dropping it loses nothing.
-    if (1..=5).contains(&found) {
-        conn.execute_batch("DROP INDEX IF EXISTS obs_bssid")?;
-    }
-
-    // v7. `obs_node` answered a question nothing asked. No query anywhere filtered or
-    // sorted sightings by node, yet the index was about a sixth of a full drive's file
-    // (48 MiB of 292) and every commit rewrote the last page of each node's run in it, to
-    // the WAL and again at checkpoint. A per-node query that wants it later can build it
-    // over a finished capture far more cheaply than capture could keep it up.
-    if (1..=6).contains(&found) {
-        conn.execute_batch("DROP INDEX IF EXISTS obs_node")?;
-    }
-
-    // v8. Two optional columns on the observation, for the roaming consortium
-    // body and the BLE manufacturer identifier the sighting wire started
-    // carrying. Both NULL for every row that predates them, which is the
-    // truthful value: those sightings were heard by builds that took nothing
-    // of the kind off the air, and a blank column says so without claiming
-    // they were absent from the beacons.
-    if (1..=7).contains(&found)
-        && has_table(conn, "observation")?
-        && !has_column(conn, "observation", "rcoi")?
-    {
-        conn.execute_batch(
-            "ALTER TABLE observation ADD COLUMN rcoi BLOB;
-             ALTER TABLE observation ADD COLUMN mfgr_id INTEGER;",
-        )?;
+    if found != 0 && found != SCHEMA_VERSION {
+        return Err(StoreError::SchemaMismatch { found, ours: SCHEMA_VERSION });
     }
     Ok(())
-}
-
-/// Whether the file has this table at all. A v1 database predates most of them,
-/// and `ALTER TABLE` on one that is not there aborts the whole migration.
-fn has_table(conn: &Connection, table: &str) -> Result<bool, StoreError> {
-    let mut stmt =
-        conn.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1")?;
-    Ok(stmt.exists(params![table])?)
-}
-
-/// Whether a table already has a column, so a migration can be run once — and
-/// so a reader that never migrates can ask what shape the file is in.
-pub(crate) fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, StoreError> {
-    let mut stmt = conn.prepare("SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2")?;
-    Ok(stmt.exists(params![table, column])?)
 }
 
 /// How far ahead of the last used epoch to move the persisted counter at open.

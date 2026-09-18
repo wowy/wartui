@@ -145,15 +145,6 @@ pub fn wigle_csv<W: Write>(
     let recapture_ms =
         i64::try_from(filter.recapture_secs.saturating_mul(1000)).unwrap_or(i64::MAX);
 
-    // The two trailer columns travel together in the v8 migration, so one
-    // probe decides for both. A probe that cannot run at all is a file the
-    // query below will speak for, so it falls through to the current shape.
-    let sightings = if crate::store::has_column(conn, "observation", "rcoi").unwrap_or(true) {
-        SELECT_SIGHTINGS
-    } else {
-        SELECT_SIGHTINGS_PRE_V8
-    };
-
     // Set before the table exists, since changing it discards the connection's temporary
     // tables. A file is the bundled build's default already; the memory bound rests on it.
     conn.pragma_update(None, "temp_store", "FILE")?;
@@ -165,7 +156,7 @@ pub fn wigle_csv<W: Write>(
     let mut summary = ExportSummary::default();
     {
         let mut insert = tx.prepare(INSERT_EXPORT_ROW)?;
-        let mut stmt = tx.prepare(sightings)?;
+        let mut stmt = tx.prepare(SELECT_SIGHTINGS)?;
         let mut rows = stmt.query(rusqlite::params![filter.session_id])?;
         let mut window: Option<Window> = None;
 
@@ -245,26 +236,10 @@ fn close(
 /// tied window submits — deterministic.
 ///
 /// There is deliberately no index for this to walk: a scan and a sort read the table in
-/// order, and were faster than one random lookup per sighting (the store's v6 migration
-/// says more).
+/// order, and were faster than one random lookup per sighting
+/// (`docs/store-io-findings.md` says more).
 const SELECT_SIGHTINGS: &str = r"
 SELECT bssid, ssid, security, channel, rssi, lat, lon, alt, accuracy, kind, rcoi, mfgr_id, rx_at
-FROM observation o
-WHERE ?1 IS NULL OR o.session_id = ?1
-ORDER BY o.bssid, o.rx_at, o.id
-";
-
-/// The same query for a capture that predates the trailer columns and has not
-/// been migrated: both read as NULL, which is what they are — those sightings
-/// were heard by builds that took nothing of the kind off the air.
-///
-/// Deliberately not a migration, because the export opens the file read-only
-/// and that is what makes it safe against a capture still running — no write
-/// lock to contend with the store's. An older file stays exactly as it is
-/// until a later `run` migrates it, and exports truthfully in the meantime.
-const SELECT_SIGHTINGS_PRE_V8: &str = r"
-SELECT bssid, ssid, security, channel, rssi, lat, lon, alt, accuracy, kind,
-       NULL AS rcoi, NULL AS mfgr_id, rx_at
 FROM observation o
 WHERE ?1 IS NULL OR o.session_id = ?1
 ORDER BY o.bssid, o.rx_at, o.id

@@ -19,7 +19,7 @@ use wartui_core::store::{
 };
 use wartui_proto::air::RecordKind;
 use wartui_proto::link::Mac;
-use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun};
+use wartui_proto::plan::ChannelPool;
 
 const NODE: Mac = [0x02, 0x00, 0x5E, 0x10, 0x57, 0x84];
 const OTHER: Mac = [0x02, 0x00, 0x5E, 0x10, 0x57, 0x85];
@@ -418,93 +418,6 @@ fn a_ble_row_exports_its_manufacturer_identifier() {
 }
 
 #[test]
-fn a_capture_from_before_the_trailer_was_collected_migrates_and_stays_honest() {
-    // v7's observation table has no rcoi or mfgr_id columns. v8 adds them as
-    // NULL, which is the truthful value — those sightings were heard by builds
-    // that took nothing of the kind off the air — and the export says so with
-    // blank columns rather than by refusing the file.
-    let dir = tempfile::tempdir().expect("temp dir");
-    let path = dir.path().join("wartui.db");
-    write_v7_capture(&path);
-
-    let store = open_at(&path);
-    let mut fresh = observation(NODE, [0xBB; 6], -60, EPOCH_MS, fixed(37.0, -122.0));
-    let Record::Observation(obs) = &mut fresh else { unreachable!() };
-    obs.rcoi = Some(OPEN_ROAMING.to_vec());
-    store.submit(vec![fresh]);
-    store.close();
-
-    let conn = open_readonly(&path).expect("reopening");
-    let (csv, summary) = export(&conn);
-    assert_eq!(summary.rows, 2);
-    assert!(
-        csv.contains(
-            "AA:AA:AA:AA:AA:AA,old,[WPA2_PSK],1970-01-01 00:00:00,6,2437,-60,37,-122,16,0,,,WIFI"
-        ),
-        "the pre-v8 row exports with the columns honestly blank: {csv}"
-    );
-    assert!(
-        csv.contains("5A03BA0000 BAA2D00000 BAA2D02000"),
-        "the new row carries its roaming consortium: {csv}"
-    );
-}
-
-#[test]
-fn an_export_reads_a_capture_that_was_never_migrated() {
-    // `wartui export` opens the file read-only and never migrates it — the
-    // read-only open is what makes an export safe against a capture still
-    // running — so a v7 capture has to export as it lies on disk: the same
-    // row the last release wrote, trailer columns blank, and the file still
-    // v7 afterwards.
-    let dir = tempfile::tempdir().expect("temp dir");
-    let path = dir.path().join("wartui.db");
-    write_v7_capture(&path);
-
-    // The export command's own path: a read-only open, no store, no migration.
-    let conn = open_readonly(&path).expect("export open");
-    let (csv, summary) = export(&conn);
-    assert_eq!(summary.rows, 1);
-    assert!(
-        csv.contains(
-            "AA:AA:AA:AA:AA:AA,old,[WPA2_PSK],1970-01-01 00:00:00,6,2437,-60,37,-122,16,0,,,WIFI"
-        ),
-        "the pre-v8 row exports with the columns honestly blank: {csv}"
-    );
-
-    let found: i64 = conn
-        .pragma_query_value(None, "user_version", |row| row.get(0))
-        .expect("reading the version back");
-    assert_eq!(found, 7, "an export never migrates the file it reads");
-}
-
-/// A capture exactly as v7 left it: one session, one positioned Wi-Fi
-/// sighting, and no trailer columns on the observation.
-fn write_v7_capture(path: &std::path::Path) {
-    let old = Connection::open(path).expect("creating");
-    old.execute_batch(
-        "CREATE TABLE session (
-           id INTEGER PRIMARY KEY, started_at INTEGER NOT NULL, ended_at INTEGER,
-           bridge_mac BLOB, bridge_chip TEXT, bridge_fw TEXT,
-           espnow_channel INTEGER NOT NULL, channel_pool TEXT NOT NULL, notes TEXT);
-         INSERT INTO session (id, started_at, espnow_channel, channel_pool)
-           VALUES (1, 0, 6, 'us');
-         CREATE TABLE observation (
-           id INTEGER PRIMARY KEY, session_id INTEGER NOT NULL, node_mac BLOB NOT NULL,
-           rx_at INTEGER NOT NULL, link_rssi INTEGER, bssid BLOB NOT NULL, ssid BLOB,
-           security TEXT NOT NULL, channel INTEGER NOT NULL, rssi INTEGER NOT NULL,
-           kind TEXT NOT NULL, lat REAL, lon REAL, alt REAL, accuracy REAL,
-           pos_source TEXT NOT NULL, pos_at INTEGER, raw_body BLOB);
-         INSERT INTO observation
-           (session_id, node_mac, rx_at, bssid, ssid, security, channel, rssi, kind,
-            lat, lon, alt, accuracy, pos_source, raw_body)
-         VALUES (1, x'0200005E1057', 1, x'AAAAAAAAAAAA', x'6F6C64', '[WPA2_PSK]', 6, -60,
-                 'wifi', 37.0, -122.0, 16.0, NULL, 'static', x'00');",
-    )
-    .expect("v7 tables");
-    old.pragma_update(None, "user_version", 7).expect("stamping");
-}
-
-#[test]
 fn a_full_queue_drops_and_counts_rather_than_blocking_the_engine() {
     // A stalled engine misses everything, including an assignment racing a node's
     // window. One lost observation is the cheaper failure, but must be visible.
@@ -730,71 +643,6 @@ fn a_new_database_has_no_index_on_bssid_and_exports_all_the_same() {
 }
 
 #[test]
-fn a_v5_database_loses_its_bssid_index_and_keeps_every_row() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let path = dir.path().join("wartui.db");
-    let first = open_at(&path);
-    assert_eq!(
-        first.submit(vec![observation(NODE, [0xAA; 6], -60, EPOCH_MS, fixed(37.0, -122.0))]),
-        0
-    );
-    first.close();
-
-    // Put the file back the way v5 left it: the same tables, with the index.
-    let old = Connection::open(&path).expect("reopening");
-    old.execute_batch("CREATE INDEX obs_bssid ON observation(bssid)").expect("v5's index");
-    old.pragma_update(None, "user_version", 5).expect("stamping");
-    drop(old);
-    assert!(has_bssid_index(&path));
-
-    open_at(&path).close();
-
-    assert!(!has_bssid_index(&path), "opening it brings it forward");
-    let conn = open_readonly(&path).expect("reopening read-only");
-    let version: i32 =
-        conn.pragma_query_value(None, "user_version", |row| row.get(0)).expect("the version");
-    assert_eq!(version, SCHEMA_VERSION);
-    let rows: i64 =
-        conn.query_row("SELECT COUNT(*) FROM observation", [], |r| r.get(0)).expect("counting");
-    assert_eq!(rows, 1);
-    assert_eq!(export(&conn).1.rows, 1);
-}
-
-fn observation_indexes(path: &std::path::Path) -> Vec<String> {
-    open_readonly(path)
-        .expect("reopening read-only")
-        .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'observation'")
-        .and_then(|mut q| q.query_map([], |r| r.get(0)).and_then(Iterator::collect))
-        .expect("listing the indexes")
-}
-
-#[test]
-fn a_v6_database_loses_its_node_index_and_a_new_one_indexes_no_sighting() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let path = dir.path().join("wartui.db");
-    let first = open_at(&path);
-    let sighting = observation(NODE, [0xAA; 6], -60, EPOCH_MS, fixed(37.0, -122.0));
-    assert_eq!(first.submit(vec![sighting]), 0);
-    first.close();
-    assert!(observation_indexes(&path).is_empty(), "every sighting is an append");
-
-    // Put the file back the way v6 left it.
-    let old = Connection::open(&path).expect("reopening");
-    old.execute_batch("CREATE INDEX obs_node ON observation(node_mac, rx_at)").expect("v6's index");
-    old.pragma_update(None, "user_version", 6).expect("stamping");
-    drop(old);
-    assert_eq!(observation_indexes(&path), ["obs_node"]);
-
-    open_at(&path).close();
-
-    assert!(observation_indexes(&path).is_empty(), "opening it brings it forward");
-    let conn = open_readonly(&path).expect("reopening read-only");
-    let rows: i64 =
-        conn.query_row("SELECT COUNT(*) FROM observation", [], |r| r.get(0)).expect("counting");
-    assert_eq!(rows, 1, "and the sighting is still there");
-}
-
-#[test]
 fn a_page_size_asked_for_is_the_one_a_new_database_gets() {
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().join("wartui.db");
@@ -963,29 +811,54 @@ fn an_export_run_twice_on_one_connection_writes_the_same_file() {
 }
 
 #[test]
-fn a_database_from_a_newer_wartui_is_refused_rather_than_written_into() {
-    // `CREATE TABLE IF NOT EXISTS` no-ops against a newer file's tables instead of
-    // failing, so without this an older build appends rows of the wrong shape and
-    // stamps the marker back down, leaving neither
-    // build able to tell it had happened.
+fn a_database_from_another_wartui_is_refused_rather_than_written_into() {
+    // `CREATE TABLE IF NOT EXISTS` no-ops against a foreign file's tables instead of
+    // failing, so without this the build appends rows of the wrong shape and stamps
+    // the marker to its own, leaving neither build able to tell it had happened.
+    //
+    // 1 is deliberately not in this list: it is the marker this build writes
+    for found in [99, 2] {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("wartui.db");
+        let other = Connection::open(&path).expect("creating");
+        other.pragma_update(None, "user_version", found).expect("stamping");
+        drop(other);
+
+        let session = SessionInfo { espnow_channel: 6, pool: ChannelPool::Us, notes: None };
+        let opened = Store::open(&StoreConfig::new(&path), &session, EPOCH_MS);
+        assert!(
+            matches!(
+                opened,
+                Err(wartui_core::store::StoreError::SchemaMismatch { found: f, ours })
+                    if f == found && ours == SCHEMA_VERSION
+            ),
+            "expected v{found} to be refused, got {opened:?}"
+        );
+
+        // The export path refuses it too, and for the same reason.
+        assert!(open_readonly(&path).is_err(), "v{found} must not export either");
+
+        let still: i32 = Connection::open(&path)
+            .expect("reopening")
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("reading the version");
+        assert_eq!(still, found, "and the marker must be left alone");
+    }
+}
+
+#[test]
+fn a_fresh_database_is_stamped_with_this_build_s_schema_version() {
+    // 0 is what an empty file reads, and it is the one marker that is not a refusal:
+    // there is nothing in the file to be incompatible with. The stamp is what makes
+    // the next open recognise it.
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().join("wartui.db");
-    let future = Connection::open(&path).expect("creating");
-    future.pragma_update(None, "user_version", 99).expect("stamping");
-    drop(future);
+    open_at(&path).close();
 
-    let session = SessionInfo { espnow_channel: 6, pool: ChannelPool::Us, notes: None };
-    let opened = Store::open(&StoreConfig::new(&path), &session, EPOCH_MS);
-    assert!(
-        matches!(opened, Err(wartui_core::store::StoreError::SchemaTooNew { found: 99, .. })),
-        "expected a refusal, got {opened:?}"
-    );
-
-    let still: i32 = Connection::open(&path)
-        .expect("reopening")
-        .pragma_query_value(None, "user_version", |row| row.get(0))
-        .expect("reading the version");
-    assert_eq!(still, 99, "and the marker must be left alone");
+    let conn = open_readonly(&path).expect("reopening");
+    let version: i32 =
+        conn.pragma_query_value(None, "user_version", |row| row.get(0)).expect("the version");
+    assert_eq!(version, SCHEMA_VERSION);
 }
 
 #[test]
@@ -1086,162 +959,4 @@ fn the_assignment_epoch_is_moved_forward_before_anything_can_be_sent() {
         third.assignment_base() > base + 1,
         "and spending one moves the reservation along with it"
     );
-}
-
-#[test]
-fn a_database_from_the_previous_wartui_is_brought_forward_rather_than_refused() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let path = dir.path().join("wartui.db");
-
-    // v1's `assignment` table has no `outcome`, `latency_us` or `counter`, and
-    // `CREATE TABLE IF NOT EXISTS` will not widen a table that already exists.
-    let old = Connection::open(&path).expect("creating");
-    old.execute_batch(
-        "CREATE TABLE assignment (
-           id INTEGER PRIMARY KEY, session_id INTEGER NOT NULL, node_mac BLOB NOT NULL,
-           wire_version INTEGER NOT NULL, node_index INTEGER NOT NULL,
-           node_count INTEGER NOT NULL, start_idx INTEGER NOT NULL, end_idx INTEGER NOT NULL,
-           created_at INTEGER NOT NULL, delivered_at INTEGER)",
-    )
-    .expect("v1 table");
-    old.pragma_update(None, "user_version", 1).expect("stamping");
-    drop(old);
-
-    let store = open_at(&path);
-    store.submit(vec![assignment(1, AdminOutcome::Acked, Some(2_000))]);
-    store.close();
-
-    let conn = open_readonly(&path).expect("reopening");
-    let outcome: String = conn
-        .query_row("SELECT outcome FROM assignment", [], |row| row.get(0))
-        .expect("the row the migrated table can hold");
-    assert_eq!(outcome, "acked");
-}
-
-#[test]
-fn a_v2_assignment_row_keeps_its_channels_when_they_become_a_mask() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let path = dir.path().join("wartui.db");
-
-    // v2 stored a contiguous run as a pair of bounds, which a mask expresses exactly
-    // — and unlike v1's table these are real rows, since a v2 build could transmit.
-    let old = Connection::open(&path).expect("creating");
-    old.execute_batch(
-        "CREATE TABLE session (
-           id INTEGER PRIMARY KEY, started_at INTEGER NOT NULL, ended_at INTEGER,
-           bridge_mac BLOB, bridge_chip TEXT, bridge_fw TEXT,
-           espnow_channel INTEGER NOT NULL, channel_pool TEXT NOT NULL, notes TEXT);
-         INSERT INTO session (id, started_at, espnow_channel, channel_pool)
-           VALUES (1, 0, 6, 'us');
-         CREATE TABLE node (
-           mac BLOB PRIMARY KEY, label TEXT, first_seen INTEGER NOT NULL,
-           last_seen INTEGER NOT NULL, pinned_start_idx INTEGER, pinned_end_idx INTEGER);
-         CREATE TABLE assignment (
-           id INTEGER PRIMARY KEY, session_id INTEGER NOT NULL, node_mac BLOB NOT NULL,
-           counter INTEGER NOT NULL, wire_version INTEGER NOT NULL,
-           node_index INTEGER NOT NULL, node_count INTEGER NOT NULL,
-           start_idx INTEGER NOT NULL, end_idx INTEGER NOT NULL,
-           created_at INTEGER NOT NULL, delivered_at INTEGER, outcome TEXT, latency_us INTEGER);
-         INSERT INTO assignment
-           (session_id, node_mac, counter, wire_version, node_index, node_count,
-            start_idx, end_idx, created_at, delivered_at, outcome, latency_us)
-         VALUES (1, x'0200005E1057', 4, 4, 0, 2, 14, 36, 1, 2, 'acked', 4500),
-                (1, x'0200005E1057', 5, 5, 1, 2, 0, 0, 3, 4, 'unacked', NULL);",
-    )
-    .expect("v2 tables");
-    old.pragma_update(None, "user_version", 2).expect("stamping");
-    drop(old);
-
-    let store = open_at(&path);
-    store.close();
-
-    let conn = open_readonly(&path).expect("reopening");
-    let rows: Vec<(i64, bool, String)> = conn
-        .prepare("SELECT channels, ble, outcome FROM assignment ORDER BY id")
-        .expect("preparing")
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
-        .expect("querying")
-        .map(|r| r.expect("row"))
-        .collect();
-
-    let expect = |start, end| {
-        i64::try_from(ChannelSet::from_run(IndexRun::new(start, end)).bits())
-            .expect("a 42-bit mask")
-    };
-    assert_eq!(
-        rows,
-        vec![
-            (expect(14, 36), false, "acked".to_owned()),
-            (expect(0, 0), false, "unacked".to_owned()),
-        ],
-        "the bounds became the mask that says the same thing, and no v2 row could have had BLE"
-    );
-
-    // Nothing ever wrote these, in any version, so there is nothing to preserve.
-    let pinned: Vec<String> = conn
-        .prepare("SELECT name FROM pragma_table_info('node') WHERE name LIKE 'pinned%'")
-        .expect("preparing")
-        .query_map([], |row| row.get(0))
-        .expect("querying")
-        .map(|r| r.expect("row"))
-        .collect();
-    assert_eq!(pinned, vec!["pinned_channels".to_owned()]);
-}
-
-#[test]
-fn a_migration_that_fails_part_way_leaves_the_file_exactly_as_it_was() {
-    // The v2 rebuild renames the old table before writing the new one, so a failure
-    // committed statement by statement leaves a file that is neither shape and still
-    // stamped v2 — a capture that can never be opened again, which is worse than one
-    // that cannot be migrated today.
-    let dir = tempfile::tempdir().expect("temp dir");
-    let path = dir.path().join("wartui.db");
-
-    // A v2 file whose `counter` is nullable, holding one row that is null
-    // there. v3 declares that column NOT NULL, so the rebuild fails on its
-    // INSERT — after the rename has already happened.
-    let old = Connection::open(&path).expect("creating");
-    old.execute_batch(
-        "CREATE TABLE assignment (
-           id INTEGER PRIMARY KEY, session_id INTEGER NOT NULL, node_mac BLOB NOT NULL,
-           counter INTEGER, wire_version INTEGER NOT NULL,
-           node_index INTEGER NOT NULL, node_count INTEGER NOT NULL,
-           start_idx INTEGER NOT NULL, end_idx INTEGER NOT NULL,
-           created_at INTEGER NOT NULL, delivered_at INTEGER, outcome TEXT, latency_us INTEGER);
-         INSERT INTO assignment
-           (session_id, node_mac, counter, wire_version, node_index, node_count,
-            start_idx, end_idx, created_at)
-         VALUES (1, x'0200005E1057', NULL, 4, 0, 2, 14, 36, 1);",
-    )
-    .expect("v2 tables");
-    old.pragma_update(None, "user_version", 2).expect("stamping");
-    drop(old);
-
-    let session = SessionInfo { espnow_channel: 6, pool: ChannelPool::Us, notes: None };
-    let opened = Store::open(&StoreConfig::new(&path), &session, EPOCH_MS);
-    assert!(opened.is_err(), "the migration cannot succeed, so the open must not: {opened:?}");
-
-    let conn = Connection::open(&path).expect("reopening");
-    let version: i32 = conn
-        .pragma_query_value(None, "user_version", |row| row.get(0))
-        .expect("reading the version");
-    assert_eq!(version, 2, "still v2, so a later build can still try");
-
-    let tables: Vec<String> = conn
-        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
-        .expect("preparing")
-        .query_map([], |row| row.get(0))
-        .expect("querying")
-        .map(|r| r.expect("row"))
-        .collect();
-    assert_eq!(tables, vec!["assignment".to_owned()], "no half-renamed table left behind");
-
-    let columns: Vec<String> = conn
-        .prepare("SELECT name FROM pragma_table_info('assignment') WHERE name LIKE '%_idx'")
-        .expect("preparing")
-        .query_map([], |row| row.get(0))
-        .expect("querying")
-        .map(|r| r.expect("row"))
-        .collect();
-    assert_eq!(columns, vec!["start_idx".to_owned(), "end_idx".to_owned()], "and v2 rows intact");
 }

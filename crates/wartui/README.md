@@ -12,32 +12,32 @@ short version.
 
 `run` is the default, so the subcommand can be left off.
 
-| Command | What it does |
-| --- | --- |
-| `run` | Capture a fleet into the store and watch it live |
-| `export` | Write a WiGLE CSV from a capture |
-| `sniff` | Print every frame the bridge hears, decoded |
-| `status` | Ask the bridge for its channel, counters and uptime |
-| `reset` | Reboot a bridge that has stopped answering |
-| `ports` | List serial ports that look like an Espressif device |
+| Command  | What it does                                         |
+| -------- | ---------------------------------------------------- |
+| `run`    | Capture a fleet into the store and watch it live     |
+| `export` | Write a WiGLE CSV from a capture                     |
+| `sniff`  | Print every frame the bridge hears, decoded          |
+| `status` | Ask the bridge for its channel, counters and uptime  |
+| `reset`  | Reboot a bridge that has stopped answering           |
+| `ports`  | List serial ports that look like an Espressif device |
 
 `run` takes:
 
-| Flag | Default | What it is |
-| --- | --- | --- |
-| `--db PATH` | `wartui.db` | Where to keep the capture |
-| `--port PATH` | discovered | Serial port of the bridge |
-| `--channel N` | `6` | The fleet's ESP-NOW control channel |
-| `--pool us\|eu\|all` | `all` | Which channels the fleet should scan |
-| `--lat` `--lon` `--alt` | — | A static position for every observation |
-| `--gps PATH` | — | An NMEA receiver, preferred over `--lat`/`--lon` |
-| `--gps-baud N` | `9600` | Line rate of that receiver |
-| `--gps-max-age S` | `5` | How old a fix may be before falling back |
-| `--sim N` | — | Run a fake fleet instead of hardware |
-| `--sim-c6 N` | `0` | Make that many of them C6s, from the end of the fleet |
-| `--record-raw` | off | Also keep the undecoded bytes of every frame |
-| `--commit-interval MS` | `1000` | How often the store commits; a crash loses at most this much |
-| `--notes TEXT` | — | A note about this run, stored with the session |
+| Flag                    | Default     | What it is                                                   |
+| ----------------------- | ----------- | ------------------------------------------------------------ |
+| `--db PATH`             | `wartui.db` | Where to keep the capture                                    |
+| `--port PATH`           | discovered  | Serial port of the bridge                                    |
+| `--channel N`           | `6`         | The fleet's ESP-NOW control channel                          |
+| `--pool us\|eu\|all`    | `all`       | Which channels the fleet should scan                         |
+| `--lat` `--lon` `--alt` | —           | A static position for every observation                      |
+| `--gps PATH`            | —           | An NMEA receiver, preferred over `--lat`/`--lon`             |
+| `--gps-baud N`          | `9600`      | Line rate of that receiver                                   |
+| `--gps-max-age S`       | `5`         | How old a fix may be before falling back                     |
+| `--sim N`               | —           | Run a fake fleet instead of hardware                         |
+| `--sim-c6 N`            | `0`         | Make that many of them C6s, from the end of the fleet        |
+| `--record-raw`          | off         | Also keep the undecoded bytes of every frame                 |
+| `--commit-interval MS`  | `1000`      | How often the store commits; a crash loses at most this much |
+| `--notes TEXT`          | —           | A note about this run, stored with the session               |
 
 `export` takes `--db`, `--wigle PATH` and `--session ID`, and writes the
 [WiGLE v1.6 format](https://api.wigle.net/csvFormat.html). It is a view over the
@@ -56,12 +56,10 @@ a network's whole capture into a single row.
 
 Rows carry what the nodes took off the air: a Passpoint access point's
 roaming consortium identifiers in `RCOIs`, a BLE advertiser's manufacturer
-identifier in `MfgrId`, both blank when the network offered none. Captures
-made before the nodes started collecting them export those
-columns blank too — the store records NULL rather than a guess. A BLE row's
-`Frequency` is blank on purpose: the column means a Bluetooth "device type"
-code that only an active inquiry produces, and the nodes never transmit while
-scanning.
+identifier in `MfgrId`, both blank when the network offered none — the store
+records NULL rather than a guess. A BLE row's `Frequency` is blank on purpose:
+the column means a Bluetooth "device type" code that only an active inquiry
+produces, and the nodes never transmit while scanning.
 
 `--log-file` is global and is the only way to see the transport's own account of
 a run.
@@ -89,13 +87,13 @@ has the method and the numbers so far.
 
 ## At the keyboard
 
-| Key | What it does |
-| --- | --- |
-| `↑` `↓` / `k` `j` | Move the cursor down the fleet table |
-| `b` | Move the Bluetooth scan to the selected node, or take it off the fleet |
-| `q` / `Esc` / `ctrl-c` | Stop, committing the last batch |
+| Key                    | What it does                                                           |
+| ---------------------- | ---------------------------------------------------------------------- |
+| `↑` `↓` / `k` `j`      | Move the cursor down the fleet table                                   |
+| `b`                    | Move the Bluetooth scan to the selected node, or take it off the fleet |
+| `q` / `Esc` / `ctrl-c` | Stop, committing the last batch                                        |
 
-`b` is the only one that reaches the air, and it decides *which* node scans
+`b` is the only one that reaches the air, and it decides _which_ node scans
 Bluetooth rather than what any node scans. Channels are not a key.
 
 ## How channels are assigned
@@ -153,11 +151,11 @@ of 5 GHz including the UNII-4 channels 169, 173 and 177. The other two are
 narrower, and the choice is about coverage rather than legality — a node parks
 and reads beacons, so a pool says where it listens and never what it emits.
 
-| Pool | 2.4 GHz | 5 GHz | Channels |
-| --- | --- | --- | --- |
-| `all` | 1–13 | 36–177 | 41 |
-| `us` | 1–11 | 36–165 | 36 |
-| `eu` | 1–13 | 36–140 | 32 |
+| Pool  | 2.4 GHz | 5 GHz  | Channels |
+| ----- | ------- | ------ | -------- |
+| `all` | 1–13    | 36–177 | 41       |
+| `us`  | 1–11    | 36–165 | 36       |
+| `eu`  | 1–13    | 36–140 | 32       |
 
 `us` is what the FCC permits: no 12 or 13, and no UNII-4. `eu` is what ETSI
 permits: 2.4 GHz all the way to 13, and 5 GHz stopping at 140, because channel
@@ -166,8 +164,8 @@ band again. Channel 14 is in no pool and is never dealt — `esp-radio` exposes 
 way to reach it.
 
 An assignment carries a forty-two-bit channel mask, so it can name any subset of the
-pool. The planner deals the pool out round-robin: index *k* of the pool goes to
-node *k mod n*, so every node carries some 2.4 GHz and some 5 GHz.
+pool. The planner deals the pool out round-robin: index _k_ of the pool goes to
+node _k mod n_, so every node carries some 2.4 GHz and some 5 GHz.
 Block-splitting would put one node on the whole of 2.4 GHz and another on the
 whole of 5 GHz, and losing that node would blind the fleet to a band until the
 next re-cut landed.
@@ -179,14 +177,14 @@ the C5s would take their share of 2.4 GHz and then all of 5 GHz on top of it,
 which is the block split above arrived at sideways. Shares are then no longer
 within one channel of each other and cannot be — a C6 beside a C5 holding 5 GHz
 sweeps faster however the rest is dealt. What the deal minimises is the
-*largest* share, which is what sets how stale the slowest node's observations
+_largest_ share, which is what sets how stale the slowest node's observations
 get. A fleet whose radios are all alike has no constrained channels.
 
 If no node in the fleet has a 5 GHz radio at all, those channels are left out of
 every assignment rather than given to a node that would ignore them, and the
 footer says how many of the pool are going unscanned.
 
-Every fleet change re-cuts the pool for the *whole* fleet, not just the node that
+Every fleet change re-cuts the pool for the _whole_ fleet, not just the node that
 joined or left. `node_index` and `node_count` travel in every assignment and are
 what each node computes its transmit stagger from, so a fleet whose members
 disagree about the count keys up on top of itself. Each node takes its new share
@@ -202,9 +200,9 @@ Two consequences worth knowing:
   beacons transmitted on 1 and 3. It reports the channel the beacon itself names,
   which is the access point's real one; the alternative would be filing a real
   network under the wrong frequency. About a quarter of access points are found
-by more than one node. `export` folds each network's sightings into recapture
-windows and picks the strongest per window, so this costs store rows and
-nothing else. 5 GHz channels do not overlap and do not do it.
+  by more than one node. `export` folds each network's sightings into recapture
+  windows and picks the strongest per window, so this costs store rows and
+  nothing else. 5 GHz channels do not overlap and do not do it.
 - **A fleet with no 5 GHz radio in it covers 2.4 GHz and nothing else**, which is
   13 channels on `all` and `eu` and 11 on `us`, so from fourteen such nodes onward
   — twelve on `us` — there are more nodes than channels to give them.
@@ -252,14 +250,14 @@ Each row names its node by chip and the last two octets of its address — `C5 5
 `C6 9D:24` — read off the band its heartbeats announce, so a node not yet heartbeating
 shows `—` in place of the chip.
 
-| State | Meaning |
-| --- | --- |
-| `alive` | Heartbeating, so it can be given channels |
-| `stale` | Still being heard, but not heartbeating — most often Bluetooth coexistence on the node holding the radio through its admin window |
-| `no heartbeat` | Seen, but has never completed a sweep |
-| `no admin ack` | An assignment went out and its radio did not answer — nearly always Bluetooth, see [How channels are assigned](#how-channels-are-assigned) |
-| `refused` | The bridge would not transmit it — nearly always a full peer table. Its heartbeats are still arriving; what is missing is a slot to address it through |
-| `rebooted xN` | Its heartbeat counter went backwards, so it has forgotten any assignment; wartui re-issues under a fresh epoch |
+| State          | Meaning                                                                                                                                                |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `alive`        | Heartbeating, so it can be given channels                                                                                                              |
+| `stale`        | Still being heard, but not heartbeating — most often Bluetooth coexistence on the node holding the radio through its admin window                      |
+| `no heartbeat` | Seen, but has never completed a sweep                                                                                                                  |
+| `no admin ack` | An assignment went out and its radio did not answer — nearly always Bluetooth, see [How channels are assigned](#how-channels-are-assigned)             |
+| `refused`      | The bridge would not transmit it — nearly always a full peer table. Its heartbeats are still arriving; what is missing is a slot to address it through |
+| `rebooted xN`  | Its heartbeat counter went backwards, so it has forgotten any assignment; wartui re-issues under a fresh epoch                                         |
 
 A node that is `stale`, `refused` or `no heartbeat` is out of the plan: nothing
 wartui sends it would reach it, or nothing yet says which band its radio can tune
@@ -347,7 +345,7 @@ answers one port at a time and slowly: pointed at a node, `wartui status` waits 
 seconds for a link protocol the node does not speak and tells you only that this one
 is not the bridge.
 
-Ask the USB tree instead. An ESP32's serial number *is* its MAC, so the OS
+Ask the USB tree instead. An ESP32's serial number _is_ its MAC, so the OS
 already knows, with no esp tool, no reflash and without opening anything. On
 Linux, udev has paired them:
 

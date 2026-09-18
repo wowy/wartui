@@ -388,9 +388,8 @@ leave the schema entirely rather than be deferred, which takes the build at clos
 the unindexed database a crash leaves, and the unindexed export during a capture
 with it. Still to confirm: the export time on the Pi's CPU and card.
 
-**Decision.** Schema v6 drops `obs_bssid`, and opening an older capture drops it from
-that file too. `--defer-bssid-index` went with it, since there is no longer an index to
-defer. Every run after this change measures the store without the index, so the
+**Decision.** Schema v6 drops `obs_bssid`. `--defer-bssid-index` went with it, since
+there is no longer an index to defer. Every run after this change measures the store without the index, so the
 "deferred" columns above are what the plain store now does, minus the build at close.
 
 ### With the hourly recapture export (`export/hourly-recapture`)
