@@ -23,7 +23,7 @@ This is the operator's manual. The root [`README.md`](../../README.md) is the sh
 
 | Flag                    | Default     | What it is                                                   |
 | ----------------------- | ----------- | ------------------------------------------------------------ |
-| `--db PATH`             | `wartui.db` | Where to keep the capture                                    |
+| `--db PATH`             | dated       | Where to keep the capture                                    |
 | `--port PATH`           | discovered  | Serial port of the bridge                                    |
 | `--channel N`           | `6`         | The fleet's ESP-NOW control channel                          |
 | `--pool us\|eu\|all`    | `all`       | Which channels the fleet should scan                         |
@@ -37,10 +37,17 @@ This is the operator's manual. The root [`README.md`](../../README.md) is the sh
 | `--commit-interval MS`  | `1000`      | How often the store commits; a crash loses at most this much |
 | `--notes TEXT`          | —           | A note about this run, stored with the session               |
 
+`--db` names the capture for the minute the run started — `wartui-2026-09-18-14-30.db` — so a
+directory of them sorts into the order they were made rather than being one file every run appends
+to. The date is in ISO order whatever the locale reading it: that is what makes them sort, and what
+lets `export` pick out the last one. Two runs begun inside the same minute share a name, and the
+second adds its session to the first one's file.
+
 `export` takes `--db`, `--wigle PATH` and `--session ID`, and writes the [WiGLE v1.6
-format](https://api.wigle.net/csvFormat.html). It is a view over the store rather than a second copy
-of it, so it can be re-run after a decoder fix, against a session that ended last week, or against
-one still going.
+format](https://api.wigle.net/csvFormat.html). Without `--db` it opens the newest capture in the
+working directory, which is the one a finished `run` left there. It is a view over the store rather
+than a second copy of it, so it can be re-run after a decoder fix, against a session that ended last
+week, or against one still going.
 
 `--recapture SECONDS` (default 3600 — one hour) folds each network's sightings into windows that
 wide and writes one row per window: the strongest positioned sighting, with `FirstSeen` from the

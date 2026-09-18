@@ -14,6 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use chrono::Local;
 use clap::{Args as ClapArgs, ValueEnum};
 use tokio::sync::{mpsc, oneshot, watch};
 use wartui_core::engine::{EngineConfig, FleetEngine, StoreStats};
@@ -23,7 +24,7 @@ use wartui_core::runtime::{COMMAND_QUEUE, drive, now};
 use wartui_core::store::{SessionInfo, Store, StoreConfig};
 use wartui_proto::plan::ChannelPool;
 
-use crate::tui;
+use crate::{capture, tui};
 
 /// Which channels the fleet is meant to scan.
 #[derive(Debug, Clone, Copy, ValueEnum, Default)]
@@ -62,9 +63,10 @@ pub struct Args {
     #[arg(long, value_name = "NODES", default_value_t = 0, requires = "sim")]
     sim_c6: u8,
 
-    /// Where to keep the capture.
-    #[arg(long, value_name = "PATH", default_value = "wartui.db")]
-    db: PathBuf,
+    /// Where to keep the capture. A new `wartui-YYYY-MM-DD-HH-MM.db` in the
+    /// working directory, named for the minute this run started, by default.
+    #[arg(long, value_name = "PATH")]
+    db: Option<PathBuf>,
 
     /// Which channels the fleet should scan. Recorded with the session, and
     /// the set the planner partitions across it.
@@ -140,14 +142,15 @@ pub async fn run(args: Args) -> Result<()> {
     let link = crate::open(args.port.as_deref(), args.sim, args.sim_c6)?;
 
     let started = now();
+    let db = args.db.unwrap_or_else(|| capture::dated_path(Local::now()));
     let session = SessionInfo { espnow_channel: args.channel, pool, notes: args.notes.clone() };
-    let mut store_config = StoreConfig::new(&args.db);
+    let mut store_config = StoreConfig::new(&db);
     if let Some(ms) = args.commit_interval {
         // At least a millisecond: a zero wait would spin the writer whenever it is idle.
         store_config.batch_interval = Duration::from_millis(ms.max(1));
     }
     let store = Store::open(&store_config, &session, started.unix_ms)
-        .with_context(|| format!("opening {}", args.db.display()))?;
+        .with_context(|| format!("opening {}", db.display()))?;
 
     let config = EngineConfig {
         pool,
@@ -178,7 +181,7 @@ pub async fn run(args: Args) -> Result<()> {
     }
 
     outcome?;
-    println!("Capture written to {}", args.db.display());
+    println!("Capture written to {}", db.display());
     // A receiver asked for and never answered leaves as unusable a capture as no
     // position at all, so what matters is whether a fix landed.
     let fixes = gps.as_ref().map_or(0, |gps| gps.view().counters.fixes);
@@ -198,6 +201,6 @@ pub async fn run(args: Args) -> Result<()> {
             );
         }
     }
-    println!("Export it with: wartui export --db {} --wigle out.csv", args.db.display());
+    println!("Export it with: wartui export --db {} --wigle out.csv", db.display());
     Ok(())
 }
