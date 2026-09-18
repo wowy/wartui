@@ -820,6 +820,10 @@ fn a_database_from_another_wartui_is_refused_rather_than_written_into() {
     // this project shipped and is exactly as foreign as a marker from the future. The
     // refusal is the whole compatibility story, so it is worth pinning that a lower
     // marker does not quietly take the old "bring it forward" path that used to exist.
+    //
+    // 1 is deliberately not in this list: it is the marker this build writes, and also
+    // the one the first schema wrote, so it is the single value the check cannot judge.
+    // `the_one_marker_this_build_cannot_tell_from_its_own_is_1` is where that lives.
     for found in [99, 8] {
         let dir = tempfile::tempdir().expect("temp dir");
         let path = dir.path().join("wartui.db");
@@ -847,6 +851,57 @@ fn a_database_from_another_wartui_is_refused_rather_than_written_into() {
             .expect("reading the version");
         assert_eq!(still, found, "and the marker must be left alone");
     }
+}
+
+#[test]
+fn the_one_marker_this_build_cannot_tell_from_its_own_is_1() {
+    // A known and accepted gap, pinned here so it is not a surprise.
+    //
+    // `SCHEMA_VERSION` restarted at 1, and 1 is also what wartui's very first schema
+    // stamped. A marker is the whole of `check_version`, so it cannot separate the two:
+    // a genuine v1 capture is taken for one of ours, `CREATE TABLE IF NOT EXISTS`
+    // no-ops over its differently-shaped tables, and the file opens.
+    //
+    // It is tolerable because of what happens next rather than because it cannot
+    // happen. v1 predates the fleet being able to transmit at all, so a surviving v1
+    // capture is close to hypothetical; and when one does turn up, every insert fails
+    // against the old columns and `flush` drops the batch it cannot write. The count
+    // is the same `dropped` the view already shouts about. Nothing is rewritten and
+    // no wrong row is stored — the failure is loud and empty, not quiet and wrong.
+    //
+    // If that stops being good enough, the fix is a marker no build ever wrote, or an
+    // `application_id` alongside the version, and this test is what will fail first.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("wartui.db");
+
+    // v1's `assignment`: a contiguous run as bounds, and no `counter`, `channels`,
+    // `ble`, `outcome` or `latency_us` for a row of ours to go in.
+    let old = Connection::open(&path).expect("creating");
+    old.execute_batch(
+        "CREATE TABLE assignment (
+           id INTEGER PRIMARY KEY, session_id INTEGER NOT NULL, node_mac BLOB NOT NULL,
+           wire_version INTEGER NOT NULL, node_index INTEGER NOT NULL,
+           node_count INTEGER NOT NULL, start_idx INTEGER NOT NULL, end_idx INTEGER NOT NULL,
+           created_at INTEGER NOT NULL, delivered_at INTEGER)",
+    )
+    .expect("v1 table");
+    old.pragma_update(None, "user_version", 1).expect("stamping");
+    drop(old);
+
+    let session = SessionInfo { espnow_channel: 6, pool: ChannelPool::Us, notes: None };
+    let store = Store::open(&StoreConfig::new(&path), &session, EPOCH_MS)
+        .expect("the collision: a v1 file is indistinguishable from ours by its marker");
+
+    store.submit(vec![assignment(1, AdminOutcome::Acked, Some(2_000))]);
+    let report = store.close();
+    assert_eq!(report.written, 0, "the v1 table cannot hold the row");
+    assert_eq!(report.dropped, 1, "so it is dropped and counted, not written wrong");
+
+    // And the row really is absent, rather than half-written under the old columns.
+    let conn = Connection::open(&path).expect("reopening");
+    let rows: i64 =
+        conn.query_row("SELECT count(*) FROM assignment", [], |row| row.get(0)).expect("counting");
+    assert_eq!(rows, 0);
 }
 
 #[test]
