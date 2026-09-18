@@ -56,12 +56,10 @@ a network's whole capture into a single row.
 
 Rows carry what the nodes took off the air: a Passpoint access point's
 roaming consortium identifiers in `RCOIs`, a BLE advertiser's manufacturer
-identifier in `MfgrId`, both blank when the network offered none. Captures
-made before the nodes started collecting them export those
-columns blank too — the store records NULL rather than a guess. A BLE row's
-`Frequency` is blank on purpose: the column means a Bluetooth "device type"
-code that only an active inquiry produces, and the nodes never transmit while
-scanning.
+identifier in `MfgrId`, both blank when the network offered none — the store
+records NULL rather than a guess. A BLE row's `Frequency` is blank on purpose:
+the column means a Bluetooth "device type" code that only an active inquiry
+produces, and the nodes never transmit while scanning.
 
 `--log-file` is global and is the only way to see the transport's own account of
 a run.
@@ -381,3 +379,13 @@ carries a manufacturing serial. The bridge is then the row whose address the
 fleet table shows as the bridge's, and a node the row whose heartbeats
 `wartui sniff` attributes to that address. Where the board generations differ,
 the OUI separates them too.
+
+## When the capture file is refused
+
+`database schema is v8, but this build writes v1` means the file was written by a
+different wartui, and that is deliberate rather than a bug. Before 1.0 the schema
+changes shape whenever the work needs it and there is no migration: nothing reads a
+capture from another build, because doing so would mean guessing what that build
+meant by what it stored. Point `--db` at a new path and keep the old file for a
+build that can read it. The refusal leaves it exactly as it lies, so nothing is lost
+by trying.

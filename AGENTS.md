@@ -105,7 +105,9 @@ ordered against each other. Only `b` gets that far; channels are the planner's.
 `store` is SQLite behind one owner thread with batched transactions and a bounded queue that
 **drops rather than blocks** (a stalled engine misses everything, including an assignment racing
 a 100 ms window). `export` (WiGLE CSV) is a view over the store, re-runnable against a finished
-or still-running session. Bump `store::SCHEMA_VERSION` when the schema changes shape.
+or still-running session. `SCHEMA` changes shape as freely as the work needs;
+`store::SCHEMA_VERSION` stays at 1 until 1.0, and a capture stamped anything else is refused
+rather than migrated.
 
 Positions resolve fresh per record through `PositionChain`: GPS (`--gps`, NMEA on its own thread)
 → static `--lat`/`--lon` → nothing. Which tier answered is stored per row.
@@ -141,11 +143,13 @@ is here rather than only in a `//!`.
   layout does: `air::WIRE_VERSION` is the lever held for the first change a fleet in the field has
   to survive, and `store::SCHEMA_VERSION` the same for the first capture that has to be read in an
   earlier build's terms. Nothing before 1.0 is either, so spending one re-pins every fixture in
-  `crates/wartui-proto/tests/wire.rs`, or adds a `migrate` arm, to mark a difference the policy has
-  already settled. The store keeps the `migrate` arms it has — they are what make an older file
-  openable at all, and each is lossless because a capture is data rather than a deployment. What
-  they do not do is restate an old capture in this build's terms: a stored `ChannelSet` is the
-  indices that went out, read against the scan table of the build that wrote them.
+  `crates/wartui-proto/tests/wire.rs` to mark a difference the policy has already settled. **The
+  store has no migrations before 1.0 either.** `check_version` refuses any marker but its own — a
+  lower one as firmly as a higher one — so a capture from another build is somebody else's file,
+  and the fix is a new `--db` path rather than a `migrate` arm. Bringing one forward would mean
+  deciding what an older build meant, which is the compatibility this policy declines to claim: a
+  stored `ChannelSet` is the indices that went out, read against the scan table of the build that
+  wrote them.
 - **The planner is the only author of an assignment.** There is no operator override, no mode and
   no flag: `FleetEngine::replan` decides what every node scans and nothing else writes a node's
   `desired`. That is what lets the fleet table, the store and the stagger arithmetic read a node's
