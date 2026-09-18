@@ -175,8 +175,8 @@ impl ChannelSet {
     /// Every index in `run`.
     #[must_use]
     pub const fn from_run(run: IndexRun) -> Self {
-        // `run.len()` is at least 1, so the shift is at most 40 and the
-        // subtraction cannot underflow.
+        // `run.len()` is at most `NUM_SCAN_CHANNELS` and at least 1, so the
+        // shift stays under 64 and the subtraction cannot underflow.
         let width = run.len() as u32;
         let bits = if width >= 64 { u64::MAX } else { (1u64 << width) - 1 };
         Self((bits << run.start) & CHANNEL_SET_MASK)

@@ -39,7 +39,7 @@ fn scan_channel_table_matches_the_firmware() {
 fn us_pool_excludes_exactly_the_channels_it_should() {
     let excluded: BTreeSet<u8> = [12, 13, 14, 169, 173, 177].into_iter().collect();
     for (idx, &channel) in SCAN_CHANNELS.iter().enumerate() {
-        let idx = u8::try_from(idx).expect("table is 40 entries");
+        let idx = u8::try_from(idx).expect("table is 42 entries");
         assert_eq!(
             ChannelPool::Us.contains(idx),
             !excluded.contains(&channel),
@@ -57,7 +57,7 @@ fn eu_pool_excludes_exactly_the_channels_it_should() {
     let excluded: BTreeSet<u8> =
         [14, 144, 149, 153, 157, 161, 165, 169, 173, 177].into_iter().collect();
     for (idx, &channel) in SCAN_CHANNELS.iter().enumerate() {
-        let idx = u8::try_from(idx).expect("table is 40 entries");
+        let idx = u8::try_from(idx).expect("table is 42 entries");
         assert_eq!(
             ChannelPool::Eu.contains(idx),
             !excluded.contains(&channel),

@@ -16,7 +16,6 @@ use wartui_core::gps::Gps;
 use wartui_core::position::PositionChain;
 use wartui_core::runtime::{drive, now};
 use wartui_core::store::{SessionInfo, Store, StoreConfig, open_readonly};
-use wartui_proto::plan::ChannelPool;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_simulated_fleet_becomes_a_database_and_then_a_wigle_file() {
@@ -29,7 +28,7 @@ async fn a_simulated_fleet_becomes_a_database_and_then_a_wigle_file() {
         .expect("starting the simulator");
 
     let started = now();
-    let session = SessionInfo { espnow_channel: 6, pool: ChannelPool::Us, ..Default::default() };
+    let session = SessionInfo { espnow_channel: 6, ..Default::default() };
     let store = Store::open(&StoreConfig::new(&path), &session, started.unix_ms)
         .expect("opening the store");
 
@@ -108,7 +107,7 @@ async fn a_moving_capture_writes_where_the_receiver_was_for_each_row() {
         .expect("starting the simulator");
 
     let started = now();
-    let session = SessionInfo { espnow_channel: 6, pool: ChannelPool::Us, ..Default::default() };
+    let session = SessionInfo { espnow_channel: 6, ..Default::default() };
     let store = Store::open(&StoreConfig::new(&path), &session, started.unix_ms)
         .expect("opening the store");
 

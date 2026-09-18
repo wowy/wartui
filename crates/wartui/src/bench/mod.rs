@@ -62,9 +62,10 @@ const SETTLE_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// The pool the benchmark fleet scans.
 ///
-/// Named rather than taken from the default, because the channel count sets how
-/// fast a node sweeps and so the rate rows arrive at. The numbers in
-/// `docs/store-io-findings.md` are this pool's.
+/// Named rather than taken from the default, so the workload does not move when
+/// the default does. The channel count still feeds it — `busy_networks` scales
+/// on `channel_count`, and a node's sweep is as long as its share — so a run is
+/// comparable with `docs/store-io-findings.md` only where that count matches.
 const POOL: ChannelPool = ChannelPool::Us;
 
 /// Sightings per address in the simulated drive.
