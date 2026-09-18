@@ -167,9 +167,11 @@ impl Ui {
         {
             Ok(()) if holds => format!("{}: bluetooth off on its next heartbeat", mac(&target)),
             // The flag rides in the assignment frame, so a node without one has
-            // nothing for it to ride on. The planner gives every heartbeating
-            // node channels, so this is the fleet that has outgrown its pool —
-            // more nodes than channels their radios can reach — where "on its
+            // nothing for it to ride on. `replan` runs inside the heartbeat that
+            // admits a node, so a fleet the planner can cut never reaches this:
+            // it is the two fleets it cannot. Above twenty nodes there is no plan
+            // at all, and below that a fleet with more nodes than channels their
+            // radios can reach leaves its surplus undealt. Either way "on its
             // next heartbeat" would never come true.
             Ok(()) if node.state.desired.is_none() && node.state.confirmed.is_none() => {
                 format!("{}: bluetooth, once it has been given channels", mac(&target))
