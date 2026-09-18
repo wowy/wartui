@@ -48,14 +48,6 @@ use crate::record::Record;
 ///
 /// The marker is the lever held for the first capture that has to be read in an
 /// earlier build's terms. Nothing before 1.0 is, so it does not move before then.
-///
-/// One marker this cannot separate from its own: 1 is also what wartui's first
-/// schema stamped, so a genuine v1 capture opens rather than being refused. That
-/// gap is accepted rather than unnoticed — v1 predates the fleet being able to
-/// transmit, and a v1 file that does turn up drops every batch it cannot write
-/// instead of storing a wrong row. `tests/store.rs`,
-/// `the_one_marker_this_build_cannot_tell_from_its_own_is_1`, pins it and says
-/// what to do if it stops being good enough.
 pub const SCHEMA_VERSION: i32 = 1;
 
 /// The schema, applied to any database that does not already have it.
