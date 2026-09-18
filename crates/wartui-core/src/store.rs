@@ -345,6 +345,11 @@ pub struct Store {
     /// The background checkpointer, under [`Checkpoint::Background`]. It stops when the
     /// writer does, because the writer holds the only thing that wakes it.
     checkpointer: Option<JoinHandle<CheckpointReport>>,
+    /// Passes that caught up, counted as they happen. Its own allocation rather than a
+    /// third field in [`Stats`]: the checkpointer writes this and the writer writes
+    /// those, and there is no reason to hand the two threads one cache line to argue
+    /// over for the sake of saving an `Arc`.
+    caught_up: Arc<AtomicU64>,
     session_id: i64,
     assignment_base: u64,
 }
@@ -400,15 +405,17 @@ impl Store {
             })
             .map_err(StoreError::Spawn)?;
 
+        let caught_up = Arc::new(AtomicU64::new(0));
         let checkpointer = match (config.checkpoint, woken) {
             (Checkpoint::Background { every, truncate_at }, Some(woken)) => {
                 let conn = Connection::open(&config.path)?;
                 // Waits out the writer's commit rather than failing a truncation on it.
                 conn.busy_timeout(Duration::from_secs(5))?;
                 let wal = wal_path(&config.path);
+                let counted = Arc::clone(&caught_up);
                 let join = std::thread::Builder::new()
                     .name("wartui-checkpoint".to_owned())
-                    .spawn(move || checkpointer(&conn, &wal, &woken, every, truncate_at))
+                    .spawn(move || checkpointer(&conn, &wal, &woken, every, truncate_at, &counted))
                     .map_err(StoreError::Spawn)?;
                 Some(join)
             }
@@ -420,6 +427,7 @@ impl Store {
             stats,
             join: Some(join),
             checkpointer,
+            caught_up,
             session_id,
             assignment_base,
         })
@@ -463,6 +471,18 @@ impl Store {
             written: self.stats.written.load(Ordering::Relaxed),
             dropped: self.stats.dropped.load(Ordering::Relaxed),
         }
+    }
+
+    /// How many background checkpoints have caught up with the writer so far.
+    ///
+    /// A pass that caught up is one that copied every frame the WAL held, which is what
+    /// lets the next commit rewind the file rather than extend it. Counted live because
+    /// [`StoreReport::checkpoints`] only arrives once the store is closed, and whether
+    /// the WAL is being kept short is a question worth asking of a capture still running.
+    /// Under [`Checkpoint::Inline`] there is no checkpointer and this stays 0.
+    #[must_use]
+    pub fn checkpoints_caught_up(&self) -> u64 {
+        self.caught_up.load(Ordering::Relaxed)
     }
 
     /// Flush everything queued, close the session and stop the writer.
@@ -581,6 +601,7 @@ fn checkpointer(
     woken: &Receiver<()>,
     every: Duration,
     truncate_at: u64,
+    caught_up_count: &AtomicU64,
 ) -> CheckpointReport {
     let mut report = CheckpointReport::default();
     let mut last_pass: Option<Instant> = None;
@@ -617,6 +638,9 @@ fn checkpointer(
                 false
             }
         };
+        if caught_up {
+            caught_up_count.fetch_add(1, Ordering::Relaxed);
+        }
         // Only once a pass has caught up: the truncation then holds the writer's lock to
         // rewind the file, not to copy and sync whatever the pass left behind.
         if caught_up && std::fs::metadata(wal).is_ok_and(|m| m.len() > truncate_at) {
