@@ -531,7 +531,14 @@ fn a_running_store_says_how_many_of_its_checkpoints_have_caught_up() {
     let dir = tempfile::tempdir().expect("temp dir");
     let mut config = StoreConfig::new(dir.path().join("wartui.db"));
     config.batch_rows = 10;
-    config.batch_interval = Duration::from_millis(5);
+    // The row count is the only thing allowed to decide a commit: the writer also
+    // flushes once `batch_interval` has passed since the last one, so a drain that
+    // outruns a short interval splits one submit into two commits, two wake-ups and two
+    // passes — and then a pass covering the first half satisfies a wait meant for the
+    // second. An interval no drain reaches leaves one submit worth exactly one commit,
+    // which `timings` lets this test insist on rather than assume.
+    config.batch_interval = Duration::from_secs(60);
+    config.timings = true;
     config.checkpoint = Checkpoint::Background { every: Duration::ZERO, truncate_at: u64::MAX };
     let session = SessionInfo { espnow_channel: 6, pool: ChannelPool::Us, notes: None };
     let store = Store::open(&config, &session, EPOCH_MS).expect("opening the store");
@@ -543,11 +550,13 @@ fn a_running_store_says_how_many_of_its_checkpoints_have_caught_up() {
             .map(|m| observation(NODE, [0x02, 0, 0, 2, n as u8, m], -60, EPOCH_MS, Fix::none()))
             .collect();
         assert_eq!(store.submit(rows), 0);
-        // The count is what a test waits on instead of guessing how long a pass takes,
-        // so it has to move within one commit rather than eventually.
+        // Sampled before the submit, not after it: one commit means one pass, and that
+        // pass can finish before a sample taken later reads the count, leaving a wait for
+        // a further increment that no other commit is coming to provide.
         wait_for("a checkpoint to catch up", || store.checkpoints_caught_up() > caught_up);
     }
-    store.close();
+    let report = store.close();
+    assert_eq!(report.batches.len(), 3, "one commit per submit");
 }
 
 #[test]
@@ -555,7 +564,7 @@ fn a_store_checkpointing_inline_has_no_passes_to_count() {
     let dir = tempfile::tempdir().expect("temp dir");
     let mut config = StoreConfig::new(dir.path().join("wartui.db"));
     config.batch_rows = 10;
-    config.batch_interval = Duration::from_millis(5);
+    config.batch_interval = Duration::from_secs(60);
     config.checkpoint = Checkpoint::Inline;
     let session = SessionInfo { espnow_channel: 6, pool: ChannelPool::Us, notes: None };
     let store = Store::open(&config, &session, EPOCH_MS).expect("opening the store");
@@ -581,7 +590,14 @@ fn wal_after_settled_commits(checkpoint: Checkpoint) -> u64 {
     let path = dir.path().join("wartui.db");
     let mut config = StoreConfig::new(&path);
     config.batch_rows = 50;
-    config.batch_interval = Duration::from_millis(5);
+    // The row count is the only thing allowed to decide a commit: the writer also
+    // flushes once `batch_interval` has passed since the last one, so a drain that
+    // outruns a short interval splits one submit into two commits, two wake-ups and two
+    // passes — and then a pass covering the first half satisfies a wait meant for the
+    // second. An interval no drain reaches leaves one submit worth exactly one commit,
+    // which `timings` lets this test insist on rather than assume.
+    config.batch_interval = Duration::from_secs(60);
+    config.timings = true;
     // So that inline, SQLite's own checkpoint never rewinds the WAL either.
     config.wal_autocheckpoint_pages = Some(1_000_000);
     config.checkpoint = checkpoint;
@@ -595,16 +611,16 @@ fn wal_after_settled_commits(checkpoint: Checkpoint) -> u64 {
             .map(|m| observation(NODE, [0x02, 0, 0, 1, n as u8, m], -60, EPOCH_MS, Fix::none()))
             .collect();
         assert_eq!(store.submit(rows), 0);
-        // Waiting on the commit is also what keeps the batches apart: the writer flushes
-        // at fifty pending rows, so twenty submits are twenty commits only while each
-        // has drained before the next arrives.
         wait_for("the batch to commit", || store.stats().written >= (n + 1) * 50);
         if checkpointed {
             wait_for("a checkpoint to catch up", || store.checkpoints_caught_up() > caught_up);
         }
     }
     let size = std::fs::metadata(dir.path().join("wartui.db-wal")).map_or(0, |m| m.len());
-    store.close();
+    let report = store.close();
+    // What the waiting above rests on, checked rather than described: a submit the writer
+    // split in two would put a commit's frames in the WAL that no pass was waited for.
+    assert_eq!(report.batches.len(), 20, "one commit per submit");
     size
 }
 
