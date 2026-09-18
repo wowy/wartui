@@ -2,7 +2,7 @@
 //!
 //! A *pool* is described in runs — every one of them is two, each with its own
 //! hole in the middle — because that is the shape the regulatory picture has. An
-//! *assignment* is not: [`crate::air::AdminMsg`] carries a forty-bit
+//! *assignment* is not: [`crate::air::AdminMsg`] carries a forty-two-bit
 //! [`ChannelSet`], one bit per [`SCAN_CHANNELS`] entry, so a node can hold any
 //! subset and a run boundary is nothing the planner steers around. Before the
 //! mask a lone node on a two-run pool had to rotate between them on a timer.
@@ -15,22 +15,22 @@ use crate::air::AdminMsg;
 
 /// The node's scan order.
 ///
-/// Indices 0..=13 are the 2.4 GHz channels 1..=14; 14..=39 are 5 GHz. Every bit of
+/// Indices 0..=13 are the 2.4 GHz channels 1..=14; 14..=41 are 5 GHz. Every bit of
 /// the [`ChannelSet`] on the wire indexes this table, so the order must never be
 /// sorted or deduplicated: reordering it silently repoints every assignment in
 /// flight and every stored row.
-pub const SCAN_CHANNELS: [u8; 40] = [
+pub const SCAN_CHANNELS: [u8; 42] = [
     // 2.4 GHz
     1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, //
     // 5 GHz
     36, 40, 44, 48, //
     52, 56, 60, 64, //
-    100, 112, 116, 120, 124, 128, 132, 136, 140, 144, //
+    100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144, //
     149, 153, 157, 161, 165, 169, 173, 177,
 ];
 
 /// How many entries [`SCAN_CHANNELS`] has.
-pub const NUM_SCAN_CHANNELS: u8 = 40;
+pub const NUM_SCAN_CHANNELS: u8 = 42;
 
 /// The largest fleet wartui supports.
 ///
@@ -146,7 +146,7 @@ impl IndexRun {
     }
 }
 
-/// A set of [`SCAN_CHANNELS`] indices — the forty bits an assignment carries.
+/// A set of [`SCAN_CHANNELS`] indices — the forty-two bits an assignment carries.
 ///
 /// One bit per entry of the table, index `i` in bit `i`, so the set is exactly as
 /// expressive as the wire field.
@@ -158,8 +158,8 @@ impl IndexRun {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub struct ChannelSet(u64);
 
-/// Bytes a [`ChannelSet`] occupies on the wire. Forty bits, little-endian.
-pub const CHANNEL_SET_BYTES: usize = 5;
+/// Bytes a [`ChannelSet`] occupies on the wire. Forty-two bits, little-endian.
+pub const CHANNEL_SET_BYTES: usize = 6;
 
 const CHANNEL_SET_MASK: u64 = (1u64 << NUM_SCAN_CHANNELS) - 1;
 
@@ -232,23 +232,23 @@ impl ChannelSet {
         if self.0 == 0 {
             return None;
         }
-        // At most 39: the mask keeps every set bit below NUM_SCAN_CHANNELS.
+        // At most 41: the mask keeps every set bit below NUM_SCAN_CHANNELS.
         #[allow(clippy::cast_possible_truncation)]
         Some(self.0.trailing_zeros() as u8)
     }
 
-    /// The five wire bytes, little-endian.
+    /// The six wire bytes, little-endian.
     #[must_use]
     pub const fn to_bytes(self) -> [u8; CHANNEL_SET_BYTES] {
         let all = self.0.to_le_bytes();
-        [all[0], all[1], all[2], all[3], all[4]]
+        [all[0], all[1], all[2], all[3], all[4], all[5]]
     }
 
-    /// A set from the five wire bytes.
+    /// A set from the six wire bytes.
     #[must_use]
     pub const fn from_bytes(bytes: [u8; CHANNEL_SET_BYTES]) -> Self {
         Self::from_bits(u64::from_le_bytes([
-            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], 0, 0, 0,
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], 0, 0,
         ]))
     }
 }
@@ -338,16 +338,15 @@ const US_RUNS: [IndexRun; 2] = [
     // 2.4 GHz channels 1-11. Excludes 12, 13 and 14.
     IndexRun::new(0, 10),
     // 5 GHz channels 36-165. Excludes the UNII-4 channels 169, 173 and 177.
-    IndexRun::new(14, 36),
+    IndexRun::new(14, 38),
 ];
 
 const EU_RUNS: [IndexRun; 2] = [
     // 2.4 GHz channels 1-13. Excludes 14, which is in no pool.
     IndexRun::new(0, 12),
-    // 5 GHz 36-140: 5150-5350 and 5470-5725, less channels 104 and 108, which
-    // `SCAN_CHANNELS` does not carry. Excludes 144, whose 20 MHz slot runs past
-    // 5725, and all of 149-177.
-    IndexRun::new(14, 30),
+    // 5 GHz 36-140: 5150-5350 and 5470-5725. Excludes 144, whose 20 MHz slot
+    // runs past 5725, and all of 149-177.
+    IndexRun::new(14, 32),
 ];
 
 const ALL_RUNS: [IndexRun; 2] = [
@@ -445,15 +444,14 @@ pub enum ChannelPool {
     Us,
     /// ETSI-permitted unlicensed WLAN channels: 2.4 GHz 1-13 and 5 GHz 36-140.
     ///
-    /// The 5 GHz half is what [`SCAN_CHANNELS`] carries of 5150-5350 and
-    /// 5470-5725, and it ends at channel 140: 144's twenty megahertz run past
-    /// 5725, and 149 upwards is another band again. The 2.4 GHz half is wider
-    /// than [`Self::Us`] by channels 12 and 13.
+    /// The 5 GHz half is 5150-5350 and 5470-5725, ending at channel 140: 144's
+    /// twenty megahertz run past 5725, and 149 upwards is another band again.
+    /// The 2.4 GHz half is wider than [`Self::Us`] by channels 12 and 13.
     Eu,
     /// Every channel a node can actually tune: 2.4 GHz 1-13 and all of 5 GHz.
     ///
     /// The unrestricted pool, including the UNII-4 channels 169, 173 and 177 that
-    /// [`Self::Us`] leaves out. 39 channels and not 40, and two runs rather than
+    /// [`Self::Us`] leaves out. 41 channels and not 42, and two runs rather than
     /// one, because channel 14 is unsupported — see [`UNSUPPORTED_INDEX`].
     ///
     /// The default. A pool bounds where a node listens rather than what it emits,

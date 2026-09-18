@@ -114,7 +114,7 @@ is here rather than only in a `//!`.
 
 - **The wire is ours, in both directions, and shares nothing with the vendor's.** Every frame is
   `WTUI`, a wire version byte, a type byte and a body: `HeartbeatMsg` (13 bytes), `SightingMsg`
-  (18 plus the SSID and a length-prefixed trailer) and `AdminMsg` (15). ESP-NOW has no addressing
+  (18 plus the SSID and a length-prefixed trailer) and `AdminMsg` (16). ESP-NOW has no addressing
   above the MAC layer and a
   node broadcasts, so a shared format is a shared conversation. The magic is checked before
   anything else at both ends. Encode/decode is written out by hand, never by transmuting a
@@ -134,9 +134,15 @@ is here rather than only in a `//!`.
 - **Nothing here is compatible with an earlier wartui, and that is the policy until 1.0.** No
   migration path is built for a fleet mid-upgrade and no code reads an older wire format to be
   helpful about it; a node on a previous build is somebody else's traffic as far as this host is
-  concerned. Flash the fleet together. The one thing that does survive a shape change is the
-  store, which migrates (`store::SCHEMA_VERSION`) because a capture is data rather than a
-  deployment.
+  concerned. Flash the fleet together. **Neither version marker moves until 1.0**, whatever a
+  layout does: `air::WIRE_VERSION` is the lever held for the first change a fleet in the field has
+  to survive, and `store::SCHEMA_VERSION` the same for the first capture that has to be read in an
+  earlier build's terms. Nothing before 1.0 is either, so spending one re-pins every fixture in
+  `crates/wartui-proto/tests/wire.rs`, or adds a `migrate` arm, to mark a difference the policy has
+  already settled. The store keeps the `migrate` arms it has — they are what make an older file
+  openable at all, and each is lossless because a capture is data rather than a deployment. What
+  they do not do is restate an old capture in this build's terms: a stored `ChannelSet` is the
+  indices that went out, read against the scan table of the build that wrote them.
 - **The planner is the only author of an assignment.** There is no operator override, no mode and
   no flag: `FleetEngine::replan` decides what every node scans and nothing else writes a node's
   `desired`. That is what lets the fleet table, the store and the stagger arithmetic read a node's

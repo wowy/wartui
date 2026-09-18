@@ -109,7 +109,7 @@ Nothing goes out at the moment a node's share changes. Its radio is away scannin
 some other channel for all but the 100 ms it holds open after its own heartbeat,
 so the assignment waits for that window — the `channels` column reads `1: 1…`
 until it lands, then drops the ellipsis. On a full sweep of the default pool
-that is up to about five seconds, and about four on `us`. That delay is the
+that is up to about five seconds, and four and a half on `us`. That delay is the
 protocol, not lag.
 
 That column leads with a count because a share dealt round-robin is a dozen
@@ -155,9 +155,9 @@ and reads beacons, so a pool says where it listens and never what it emits.
 
 | Pool | 2.4 GHz | 5 GHz | Channels |
 | --- | --- | --- | --- |
-| `all` | 1–13 | 36–177 | 39 |
-| `us` | 1–11 | 36–165 | 34 |
-| `eu` | 1–13 | 36–140 | 30 |
+| `all` | 1–13 | 36–177 | 41 |
+| `us` | 1–11 | 36–165 | 36 |
+| `eu` | 1–13 | 36–140 | 32 |
 
 `us` is what the FCC permits: no 12 or 13, and no UNII-4. `eu` is what ETSI
 permits: 2.4 GHz all the way to 13, and 5 GHz stopping at 140, because channel
@@ -165,7 +165,7 @@ permits: 2.4 GHz all the way to 13, and 5 GHz stopping at 140, because channel
 band again. Channel 14 is in no pool and is never dealt — `esp-radio` exposes no
 way to reach it.
 
-An assignment carries a forty-bit channel mask, so it can name any subset of the
+An assignment carries a forty-two-bit channel mask, so it can name any subset of the
 pool. The planner deals the pool out round-robin: index *k* of the pool goes to
 node *k mod n*, so every node carries some 2.4 GHz and some 5 GHz.
 Block-splitting would put one node on the whole of 2.4 GHz and another on the

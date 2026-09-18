@@ -14,9 +14,11 @@
 //! firmware's frame costs one `memcmp`. [`foreign`] recognises one such format,
 //! `ENOW`, in order to *report* it.
 //!
-//! The header carries a version. It is the lever
-//! for the next incompatible change: a node speaking a version this host does
-//! not know is counted and named rather than half-decoded.
+//! The header carries a version. It is the lever held for the first change a
+//! fleet in the field has to survive: a node speaking a version this host does
+//! not know is counted and named rather than half-decoded. Until wartui 1.0
+//! nothing is such a change, so the byte does not move — see
+//! [`WIRE_VERSION`].
 
 use core::fmt;
 
@@ -27,7 +29,12 @@ pub const MAGIC: [u8; 4] = *b"WTUI";
 
 /// The frame version this build speaks and the only one it decodes.
 ///
-/// Bumped when any layout below changes shape. Anything else is reported as
+/// 1 until wartui 1.0, whatever the layouts below do. Nothing here is
+/// compatible with an earlier wartui and the fleet is flashed together, so a
+/// byte telling the two apart marks a difference nothing acts on and costs a
+/// re-pin of every fixture in `tests/wire.rs` to say it. This is held for the
+/// first change a fleet in the field has to survive; a layout that changes
+/// shape before then simply changes shape. Anything else is reported as
 /// incompatible rather than guessed at — see the module docs.
 pub const WIRE_VERSION: u8 = 1;
 

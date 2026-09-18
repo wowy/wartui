@@ -28,7 +28,11 @@ fn scan_channel_table_matches_the_firmware() {
     assert_eq!(SCAN_CHANNELS.len(), usize::from(NUM_SCAN_CHANNELS));
     assert_eq!(&SCAN_CHANNELS[..14], &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
     assert_eq!(&SCAN_CHANNELS[14..18], &[36, 40, 44, 48]);
-    assert_eq!(SCAN_CHANNELS[39], 177);
+    assert_eq!(
+        &SCAN_CHANNELS[22..34],
+        &[100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144]
+    );
+    assert_eq!(SCAN_CHANNELS[41], 177);
 }
 
 #[test]
@@ -42,8 +46,8 @@ fn us_pool_excludes_exactly_the_channels_it_should() {
             "channel {channel} (index {idx}) is on the wrong side of the US pool"
         );
     }
-    assert_eq!(ChannelPool::Us.channel_count(), 34);
-    assert_eq!(ChannelPool::All.channel_count(), 39, "39 and not 40: channel 14 is unsupported");
+    assert_eq!(ChannelPool::Us.channel_count(), 36);
+    assert_eq!(ChannelPool::All.channel_count(), 41, "41 and not 42: channel 14 is unsupported");
 }
 
 #[test]
@@ -60,11 +64,7 @@ fn eu_pool_excludes_exactly_the_channels_it_should() {
             "channel {channel} (index {idx}) is on the wrong side of the EU pool"
         );
     }
-    assert_eq!(
-        ChannelPool::Eu.channel_count(),
-        30,
-        "thirteen 2.4 GHz channels and seventeen 5 GHz"
-    );
+    assert_eq!(ChannelPool::Eu.channel_count(), 32, "thirteen 2.4 GHz channels and nineteen 5 GHz");
 }
 
 #[test]
@@ -160,7 +160,7 @@ fn a_lone_node_holds_the_whole_pool_at_once() {
 
 #[test]
 fn all_pool_with_one_node_is_every_channel_that_node_can_tune() {
-    // Not quite the whole table: one of the forty indices is a channel the
+    // Not quite the whole table: one of the forty-two indices is a channel the
     // radio refuses.
     let p = plan(ChannelPool::All, 1).expect("valid");
     let set = p.channels_for(0).expect("assigned");
@@ -289,13 +289,13 @@ fn a_two_point_four_radio_is_never_dealt_a_channel_it_cannot_tune() {
 
 #[test]
 fn channels_no_radio_present_can_tune_are_named_rather_than_dealt() {
-    // A fleet of nothing but C6s covers eleven of the US pool's thirty-four. Not a
+    // A fleet of nothing but C6s covers eleven of the US pool's thirty-six. Not a
     // fault the planner can fix, and not one it should hide.
     let radios = [Radio::TwoPointFour; 3];
     let p = plan_for(ChannelPool::Us, &radios).expect("a valid fleet");
     let unreachable: BTreeSet<u8> = p.unreachable().indices().collect();
     assert!(unreachable.iter().all(|idx| is_five_ghz(*idx)), "only 5 GHz is out of reach");
-    assert_eq!(unreachable.len(), 23, "every 5 GHz channel in the US pool");
+    assert_eq!(unreachable.len(), 25, "every 5 GHz channel in the US pool");
 
     let dealt: BTreeSet<u8> = covered(&p).into_iter().collect();
     assert!(dealt.is_disjoint(&unreachable), "nothing unreachable was dealt anyway");
@@ -310,21 +310,21 @@ fn channels_no_radio_present_can_tune_are_named_rather_than_dealt() {
 #[test]
 fn a_mixed_fleet_is_dealt_to_keep_the_slowest_node_as_fast_as_it_can_be() {
     // Dealt in pool order, the C5 would take its half of 2.4 GHz and then all
-    // of 5 GHz on top: 29 channels against the C6's 5, which is the block split
+    // of 5 GHz on top: 31 channels against the C6's 5, which is the block split
     // this planner was written to avoid. Dealing the constrained channels first
-    // costs nothing and gets the largest share down to 23.
+    // costs nothing and gets the largest share down to 25.
     let p = plan_for(ChannelPool::Us, &[Radio::DualBand, Radio::TwoPointFour]).expect("valid");
     let c5 = p.channels_for(0).expect("assigned").len();
     let c6 = p.channels_for(1).expect("assigned").len();
-    assert_eq!((c5, c6), (23, 11), "the C5 takes 5 GHz and the C6 takes 2.4");
+    assert_eq!((c5, c6), (25, 11), "the C5 takes 5 GHz and the C6 takes 2.4");
     assert_eq!(c5 + c6, u32::from(ChannelPool::Us.channel_count()), "and between them, all of it");
 
-    // Two C5s and a C6: the twenty-three 5 GHz channels go 12/11 to the C5s,
+    // Two C5s and a C6: the twenty-five 5 GHz channels go 13/12 to the C5s,
     // and the C6 is far enough behind to take the whole of 2.4 GHz.
     let three = [Radio::DualBand, Radio::DualBand, Radio::TwoPointFour];
     let p = plan_for(ChannelPool::Us, &three).expect("valid");
     let sizes: Vec<u32> = (0..3).map(|n| p.channels_for(n).expect("assigned").len()).collect();
-    assert_eq!(sizes, vec![12, 11, 11]);
+    assert_eq!(sizes, vec![13, 12, 11]);
 }
 
 #[test]

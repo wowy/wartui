@@ -131,7 +131,7 @@ async fn a_fleet_left_to_itself_converges_on_a_partition_of_the_us_pool() {
     capture.await.expect("the capture task should not panic");
 
     // Every row, with no cut-off: a wartui node parks until assigned, so there is no
-    // burst of all-forty-channel observations from before the plan landed.
+    // burst of whole-table observations from before the plan landed.
     let conn = open_readonly(&path).expect("reopening the capture");
     let mut query = conn
         .prepare("SELECT DISTINCT channel FROM observation WHERE kind = 'wifi'")

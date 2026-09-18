@@ -14,7 +14,7 @@
 //! design. In short: it *listens* rather than scanning, so it
 //! never transmits on a DFS channel and can hold `sniffer()` and `esp_now()` at
 //! once; it returns to the control channel after every dwell rather than once a
-//! sweep; an unassigned node parks rather than sweeping all forty channels; and
+//! sweep; an unassigned node parks rather than sweeping the whole table; and
 //! every heartbeat says what this build can do. Its wire format is wartui's own in
 //! both directions — [`wartui_proto::air`].
 //!

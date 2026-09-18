@@ -80,7 +80,7 @@ const ADMIN: &[u8] = &[
     0x07, // epoch
     0x02, 0x05, // node 2 of 5
     0x00, // flags
-    0x00, 0x00, 0xFF, 0x00, 0x00, // indices 16..=23
+    0x00, 0x00, 0xFF, 0x00, 0x00, 0x00, // indices 16..=23
 ];
 
 const ADMIN_BLE: &[u8] = &[
@@ -88,7 +88,7 @@ const ADMIN_BLE: &[u8] = &[
     0xC8, // epoch 200
     0x00, 0x01, // node 0 of 1
     0x01, // ADMIN_FLAG_BLE
-    0x41, 0x20, 0x00, 0x00, 0x80, // indices 0, 6, 13 and 39
+    0x41, 0x20, 0x00, 0x00, 0x00, 0x02, // indices 0, 6, 13 and 41
 ];
 
 /// A stock node's heartbeat, and a stock core's assignment. Kept only as inputs
@@ -420,10 +420,10 @@ fn an_assignment_encodes_byte_for_byte() {
 #[test]
 fn the_channel_mask_goes_out_least_significant_byte_first() {
     // Four indices chosen to straddle byte boundaries and to reach the top of
-    // the forty, so a mask written big-endian — or in four bytes rather than
-    // five — cannot produce these bytes.
+    // the forty-two, so a mask written big-endian — or in five bytes rather
+    // than six — cannot produce these bytes.
     let mut channels = ChannelSet::empty();
-    for idx in [0, 6, 13, 39] {
+    for idx in [0, 6, 13, 41] {
         channels.insert(idx);
     }
     let msg =
@@ -431,7 +431,7 @@ fn the_channel_mask_goes_out_least_significant_byte_first() {
     assert_eq!(msg.encode().as_slice(), ADMIN_BLE);
 
     let back = AdminMsg::decode(ADMIN_BLE).expect("valid");
-    assert_eq!(back.channels.indices().collect::<Vec<_>>(), vec![0, 6, 13, 39]);
+    assert_eq!(back.channels.indices().collect::<Vec<_>>(), vec![0, 6, 13, 41]);
     assert!(back.scan_ble());
 }
 

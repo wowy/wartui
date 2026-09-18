@@ -1,4 +1,4 @@
-//! The forty-bit channel mask an assignment carries.
+//! The forty-two-bit channel mask an assignment carries.
 //!
 //! It is a small type, and every one of these properties is load-bearing
 //! somewhere: the wire encoding is a contract with the node firmware, the
@@ -31,8 +31,8 @@ fn a_run_becomes_the_indices_it_names() {
 
     // Both ends of the table, where an off-by-one in the shift would show.
     assert_eq!(ChannelSet::from_run(IndexRun::new(0, 0)).indices().collect::<Vec<_>>(), vec![0]);
-    assert_eq!(ChannelSet::from_run(IndexRun::new(39, 39)).indices().collect::<Vec<_>>(), vec![39]);
-    assert_eq!(ChannelSet::from_run(IndexRun::new(0, 39)).len(), u32::from(NUM_SCAN_CHANNELS));
+    assert_eq!(ChannelSet::from_run(IndexRun::new(41, 41)).indices().collect::<Vec<_>>(), vec![41]);
+    assert_eq!(ChannelSet::from_run(IndexRun::new(0, 41)).len(), u32::from(NUM_SCAN_CHANNELS));
 }
 
 #[test]
@@ -48,7 +48,7 @@ fn indices_come_back_in_scan_channels_order_which_is_the_order_a_node_sweeps() {
     assert_eq!(set.indices().len(), 4, "the iterator knows its own length");
 
     let channels: Vec<u8> = indices.iter().map(|i| SCAN_CHANNELS[usize::from(*i)]).collect();
-    assert_eq!(channels, vec![1, 4, 60, 169]);
+    assert_eq!(channels, vec![1, 4, 60, 161]);
 }
 
 #[test]
@@ -71,7 +71,7 @@ fn an_index_this_build_cannot_scan_is_dropped_rather_than_rejected() {
     assert!(!set.contains(NUM_SCAN_CHANNELS));
 
     // The same on the way in from the wire, where the extra bits are in the
-    // top of the five bytes rather than beyond them.
+    // top of the six bytes rather than beyond them.
     assert_eq!(ChannelSet::from_bits(u64::MAX).len(), u32::from(NUM_SCAN_CHANNELS));
     assert_eq!(
         ChannelSet::from_bytes([0xFF; CHANNEL_SET_BYTES]).len(),
@@ -80,19 +80,19 @@ fn an_index_this_build_cannot_scan_is_dropped_rather_than_rejected() {
 }
 
 #[test]
-fn the_five_wire_bytes_round_trip_and_are_little_endian() {
+fn the_six_wire_bytes_round_trip_and_are_little_endian() {
     for pool in [ChannelPool::Us, ChannelPool::Eu, ChannelPool::All] {
         let set = pool.channels();
         assert_eq!(ChannelSet::from_bytes(set.to_bytes()), set, "{pool:?}");
     }
 
-    // Index 0 is the low bit of the first byte and index 39 the high bit of the
-    // fifth: the two ends of the field, which is where a byte-order or width
-    // mistake shows up first.
+    // Index 0 is the low bit of the first byte and index 41 the second bit of
+    // the sixth: the two ends of the field, which is where a byte-order or
+    // width mistake shows up first.
     let mut ends = ChannelSet::empty();
     ends.insert(0);
-    ends.insert(39);
-    assert_eq!(ends.to_bytes(), [0x01, 0x00, 0x00, 0x00, 0x80]);
+    ends.insert(41);
+    assert_eq!(ends.to_bytes(), [0x01, 0x00, 0x00, 0x00, 0x00, 0x02]);
 }
 
 #[test]
@@ -105,10 +105,10 @@ fn a_pool_as_a_set_holds_exactly_what_the_pool_contains() {
         }
     }
     // Two runs in one set, which is the whole reason for the mask.
-    assert_eq!(ChannelPool::Us.channels().len(), 34);
+    assert_eq!(ChannelPool::Us.channels().len(), 36);
     assert!(!ChannelPool::Us.channels().contains(11), "the gap at channels 12-14");
-    assert_eq!(ChannelPool::Eu.channels().len(), 30);
-    assert!(!ChannelPool::Eu.channels().contains(31), "channel 144 is outside the EU pool");
+    assert_eq!(ChannelPool::Eu.channels().len(), 32);
+    assert!(!ChannelPool::Eu.channels().contains(33), "channel 144 is outside the EU pool");
 }
 
 /// The seam between adopting an assignment and dwelling on it.
