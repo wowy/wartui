@@ -516,7 +516,11 @@ fn drain_admin(receiver: &EspNowReceiver<'_>, node: &mut Node) {
                 continue;
             }
             Err(DecodeError::BadLength { need, got }) => {
-                note!("ignoring a {} byte assignment, this build reads {}; reflash this node", got, need);
+                note!(
+                    "ignoring a {} byte assignment, this build reads {}; reflash this node",
+                    got,
+                    need
+                );
                 continue;
             }
             // Everything else on this channel: our own broadcasts coming back, the

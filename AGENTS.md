@@ -51,15 +51,18 @@ toolchain pin, own lockfile. `cargo test --workspace` never touches them.
 
 ```sh
 cd firmware/bridge
+cargo fmt --all -- --check                    # its own workspace, so the root `cargo fmt` misses it
 cargo clippy --release --features esp32c6     # and --features esp32c5; exactly one is required
 cargo run --release --features esp32c6        # runner is `espflash flash --monitor`
 
 cd firmware/node
+cargo fmt --all -- --check
 cargo clippy --release --features esp32c6     # and esp32c5, and each with ,ble
 ```
 
 CI mirrors the workspace split: host crates on every push and PR; each firmware only
-when something it compiles changes.
+when something it compiles changes. It runs `fmt` and `clippy` in each firmware
+directory, so a `wartui-proto` change that reaches the firmware is checked there too.
 
 ## Architecture
 
