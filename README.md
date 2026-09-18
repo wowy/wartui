@@ -101,8 +101,8 @@ Nothing goes out at the moment a share changes. A node's radio is away scanning 
 ms it holds open after its own heartbeat, so the assignment waits for that window — up to about five
 seconds on a full sweep of the default pool. The `channels` column reads `1: 1…` until it lands.
 
-`--pool all` is the default: every channel a node can tune, 2.4 GHz 1–13 and all of 5 GHz.
-`--pool us` is 2.4 GHz 1–11 and 5 GHz 36–165; `--pool eu` is 2.4 GHz 1–13 and 5 GHz 36–140.
+`--pool all` is the default: every channel a node can tune, 2.4 GHz 1–13 and all of 5 GHz. `--pool
+us` is 2.4 GHz 1–11 and 5 GHz 36–165; `--pool eu` is 2.4 GHz 1–13 and 5 GHz 36–140.
 
 At most one node scans Bluetooth, and by default none does. `b` moves it.
 
