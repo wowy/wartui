@@ -344,8 +344,9 @@ const US_RUNS: [IndexRun; 2] = [
 const EU_RUNS: [IndexRun; 2] = [
     // 2.4 GHz channels 1-13. Excludes 14, which is in no pool.
     IndexRun::new(0, 12),
-    // 5 GHz 36-140: 5150-5350 and 5470-5725. Excludes 144, whose 20 MHz slot
-    // runs past 5725, and all of 149-177.
+    // 5 GHz 36-140: 5150-5350 and 5470-5725, less channels 104 and 108, which
+    // `SCAN_CHANNELS` does not carry. Excludes 144, whose 20 MHz slot runs past
+    // 5725, and all of 149-177.
     IndexRun::new(14, 30),
 ];
 
@@ -444,9 +445,10 @@ pub enum ChannelPool {
     Us,
     /// ETSI-permitted unlicensed WLAN channels: 2.4 GHz 1-13 and 5 GHz 36-140.
     ///
-    /// The 5 GHz half is 5150-5350 and 5470-5725, which ends at channel 140:
-    /// 144's twenty megahertz run past 5725, and 149 upwards is another band
-    /// again. The 2.4 GHz half is wider than [`Self::Us`] by channels 12 and 13.
+    /// The 5 GHz half is what [`SCAN_CHANNELS`] carries of 5150-5350 and
+    /// 5470-5725, and it ends at channel 140: 144's twenty megahertz run past
+    /// 5725, and 149 upwards is another band again. The 2.4 GHz half is wider
+    /// than [`Self::Us`] by channels 12 and 13.
     Eu,
     /// Every channel a node can actually tune: 2.4 GHz 1-13 and all of 5 GHz.
     ///

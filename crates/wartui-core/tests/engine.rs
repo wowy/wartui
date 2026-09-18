@@ -996,7 +996,7 @@ fn epochs_carry_on_from_where_the_database_left_off() {
 #[test]
 fn the_heartbeat_period_is_the_median_of_recent_sweeps() {
     let clock = Clock::new();
-    let mut engine = engine(EngineConfig::default(), &clock);
+    let mut engine = engine(us_config(), &clock);
 
     // Four-second sweeps, about what a node holding the whole US pool does, with
     // one heartbeat lost in the middle. The median is what absorbs it.

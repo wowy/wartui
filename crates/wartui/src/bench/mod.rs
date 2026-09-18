@@ -924,7 +924,7 @@ mod tests {
 
     #[test]
     fn every_node_in_any_fleet_is_given_more_networks_than_its_ring_holds() {
-        for pool in [ChannelPool::Us, ChannelPool::All] {
+        for pool in [ChannelPool::Us, ChannelPool::Eu, ChannelPool::All] {
             for nodes in 1..=u8::try_from(MAX_NODES).unwrap() {
                 let per_channel =
                     usize::from(busy_networks(nodes, pool)) / usize::from(NUM_SCAN_CHANNELS);
