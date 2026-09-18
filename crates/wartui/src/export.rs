@@ -42,7 +42,16 @@ pub struct Args {
 pub fn run(args: Args) -> Result<()> {
     let db = match args.db {
         Some(path) => path,
-        None => capture::newest(Path::new("."))?,
+        None => {
+            let found = capture::newest(Path::new("."))?;
+            // Named on the way past, because which capture was picked is otherwise
+            // invisible, and the case where that matters is the quiet one: a run that
+            // opened its store and then died leaves a file newer than the evening
+            // being exported, and an export of it says nothing but `0 rows`.
+            // Standard error, because standard output may be the CSV.
+            eprintln!("exporting {}", found.display());
+            found
+        }
     };
     let conn = open_readonly(&db).with_context(|| format!("opening {}", db.display()))?;
     let filter = ExportFilter { session_id: args.session, recapture_secs: args.recapture };

@@ -1,8 +1,10 @@
 //! What a capture is called, and how `export` finds the last one.
 //!
 //! A capture is an evening out, and the file is named for the minute the run started, so
-//! a second run never appends to the first one's file and a directory of them reads as a
-//! log. The date is ISO order — year, month, day — whatever order the reader's locale
+//! a directory of them reads as a log rather than as one file every run appends to. Two
+//! runs begun inside the same minute do share a name, and the second adds its session to
+//! the first one's file — what [`wartui_core::store::Store::open`] does for any path
+//! given twice, and what `--db` is for. The date is ISO order — year, month, day — whatever order the reader's locale
 //! would put them in: a name that begins with the year and continues in the operator's
 //! own order sorts wrong for half the world and reads as an impossible date for the
 //! other half. In ISO order the names sort chronologically as text, which is the whole
@@ -12,7 +14,10 @@
 //! The clock is local, because the question asked of a filename is which evening it is
 //! rather than which UTC instant. Nothing inside the capture is: the store keeps unix
 //! millis and the WiGLE export is UTC. Nothing reads the stamp back out of a name except
-//! [`newest`], comparing names written on the one host.
+//! [`newest`], comparing names written on the one host — and the repeated hour of a
+//! daylight-saving fall-back is the one place those names are out of order, so two runs
+//! an hour apart across it sort the wrong way round. An offset in the name would settle
+//! it and would cost every other name the width.
 
 use std::path::{Path, PathBuf};
 
@@ -45,8 +50,13 @@ pub fn newest(dir: &Path) -> Result<PathBuf> {
     let entries = std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))?;
     let latest = entries
         .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_str().is_some_and(is_capture_name))
+        // Only after the name matches, because this is a `stat` each: a directory
+        // someone archived a capture into carries the name without being one, and
+        // handing it to the reader costs them SQLite's account of the failure
+        // rather than this module's.
+        .filter(|entry| entry.path().is_file())
         .map(|entry| entry.file_name())
-        .filter(|name| name.to_str().is_some_and(is_capture_name))
         .max();
     match latest {
         Some(name) => Ok(dir.join(name)),
@@ -122,6 +132,8 @@ mod tests {
         ] {
             std::fs::File::create(dir.path().join(name)).unwrap();
         }
+        // Carries the newest name of all and is not a capture.
+        std::fs::create_dir(dir.path().join("wartui-2026-12-25-00-00.db")).unwrap();
         assert_eq!(newest(dir.path()).unwrap(), dir.path().join("wartui-2026-09-18-14-30.db"));
     }
 

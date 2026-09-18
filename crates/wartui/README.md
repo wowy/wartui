@@ -37,10 +37,11 @@ This is the operator's manual. The root [`README.md`](../../README.md) is the sh
 | `--commit-interval MS`  | `1000`      | How often the store commits; a crash loses at most this much |
 | `--notes TEXT`          | —           | A note about this run, stored with the session               |
 
-`--db` names the capture for the minute the run started — `wartui-2026-09-18-14-30.db` — so no two
-runs share a file and a directory of them sorts into the order they were made. The date is in ISO
-order whatever the locale reading it: that is what makes them sort, and what lets `export` pick out
-the last one.
+`--db` names the capture for the minute the run started — `wartui-2026-09-18-14-30.db` — so a
+directory of them sorts into the order they were made rather than being one file every run appends
+to. The date is in ISO order whatever the locale reading it: that is what makes them sort, and what
+lets `export` pick out the last one. Two runs begun inside the same minute share a name, and the
+second adds its session to the first one's file.
 
 `export` takes `--db`, `--wigle PATH` and `--session ID`, and writes the [WiGLE v1.6
 format](https://api.wigle.net/csvFormat.html). Without `--db` it opens the newest capture in the
