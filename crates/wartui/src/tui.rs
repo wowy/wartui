@@ -1232,8 +1232,8 @@ mod tests {
 
     #[test]
     fn one_long_fault_is_broken_up_rather_than_cut_off() {
-        // Appended to the header unwrapped, the reason a link is down shows its
-        // first clause on a narrow terminal and nothing else.
+        // Unwrapped, a reason this long would show its first clause on a narrow
+        // terminal and nothing else, so `fault_lines` breaks it up instead.
         let fault = format!("link down: {BUSY}");
         let lines = fault_lines(std::slice::from_ref(&fault), 40);
         assert!(lines.len() > 1, "it does not fit on one line: {lines:?}");
@@ -1273,8 +1273,9 @@ mod tests {
 
     #[test]
     fn the_notice_does_not_eat_the_message_above_it() {
-        // The notice takes a line of its own: room out of the last fault leaves a
-        // sentence that reads as complete and says something the OS never said.
+        // The notice takes a line of its own: taking its room out of the last fault
+        // would leave a sentence that reads as complete and says something the OS
+        // never said.
         let faults = [format!("link down: {BUSY}"), "store dropped 4".to_owned()];
         let lines = fault_lines(&faults, 30);
         let last = lines.last().expect("a line");

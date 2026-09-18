@@ -6,8 +6,8 @@
 //! (`docs/store-io-findings.md`). The store cannot answer instead without undoing what
 //! makes capture cheap. A `COUNT(DISTINCT bssid)` scans and sorts a table that has no
 //! index, on the card, and its read snapshot holds back the checkpoint that keeps the WAL
-//! one commit long. A table or index keyed by address is a random-key B-tree, which schema
-//! v6 has no room for at fourteen times the writes.
+//! one commit long. A table or index keyed by address is a random-key B-tree, which the
+//! schema has no room for at fourteen times the writes.
 //!
 //! So the figure is an estimate: a HyperLogLog of 2^14 one-byte registers, 16 KiB whatever
 //! the session hears, with a standard error of about 0.8%. Below a few tens of thousands
