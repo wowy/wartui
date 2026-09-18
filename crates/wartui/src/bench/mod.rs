@@ -61,6 +61,10 @@ const SAMPLE: Duration = Duration::from_secs(2);
 const SETTLE_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// The pool the benchmark fleet scans.
+///
+/// Named rather than taken from the default, because the channel count sets how
+/// fast a node sweeps and so the rate rows arrive at. The numbers in
+/// `docs/store-io-findings.md` are this pool's.
 const POOL: ChannelPool = ChannelPool::Us;
 
 /// Sightings per address in the simulated drive.

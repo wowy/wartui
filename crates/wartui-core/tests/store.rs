@@ -93,6 +93,27 @@ fn export_with(
 }
 
 #[test]
+fn a_session_records_its_pool_under_the_stored_spelling() {
+    // Lowercase, and deliberately not `ChannelPool`'s `Display`: captures on
+    // disk carry these strings, so the two spellings are separate on purpose.
+    for (pool, spelling) in
+        [(ChannelPool::Us, "us"), (ChannelPool::Eu, "eu"), (ChannelPool::All, "all")]
+    {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("wartui.db");
+        let config = StoreConfig::new(&path);
+        let session = SessionInfo { espnow_channel: 6, pool, notes: None };
+        Store::open(&config, &session, EPOCH_MS).expect("opening the store").close();
+
+        let conn = open_readonly(&path).expect("reopening read-only");
+        let stored: String = conn
+            .query_row("SELECT channel_pool FROM session", [], |row| row.get(0))
+            .expect("the session row");
+        assert_eq!(stored, spelling, "{pool:?}");
+    }
+}
+
+#[test]
 fn every_kind_of_record_round_trips() {
     let dir = tempfile::tempdir().expect("temp dir");
     let conn = write(

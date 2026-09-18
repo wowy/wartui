@@ -1353,11 +1353,14 @@ mod tests {
 
     #[test]
     fn the_header_names_the_pool_the_way_the_readme_does() {
-        // The header is the only place the pool is named on screen, and every
-        // line of prose about it says "the US pool".
+        // The header is the only place the pool is named on screen, and it
+        // spells each one the way the manual does.
         let mut snapshot = busy();
         snapshot.pool = ChannelPool::Us;
         assert!(rendered(&snapshot).contains("pool US"));
+
+        snapshot.pool = ChannelPool::Eu;
+        assert!(rendered(&snapshot).contains("pool EU"));
 
         snapshot.pool = ChannelPool::All;
         assert!(rendered(&snapshot).contains("pool All"));

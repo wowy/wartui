@@ -28,7 +28,7 @@ short version.
 | `--db PATH` | `wartui.db` | Where to keep the capture |
 | `--port PATH` | discovered | Serial port of the bridge |
 | `--channel N` | `6` | The fleet's ESP-NOW control channel |
-| `--pool us\|all` | `us` | Which channels the fleet should scan |
+| `--pool us\|eu\|all` | `all` | Which channels the fleet should scan |
 | `--lat` `--lon` `--alt` | — | A static position for every observation |
 | `--gps PATH` | — | An NMEA receiver, preferred over `--lat`/`--lon` |
 | `--gps-baud N` | `9600` | Line rate of that receiver |
@@ -147,10 +147,22 @@ not one.
 
 ## Channel pools
 
-`--pool us` (the default) is 2.4 GHz 1–11 and 5 GHz 36–165. `--pool all` is
-every channel a node can tune: 2.4 GHz 1–13 and all of 5 GHz, including the
-UNII-4 channels 169, 173 and 177. Channel 14 is in neither and is never dealt —
-`esp-radio` exposes no way to reach it.
+`--pool all` is the default: every channel a node can tune, 2.4 GHz 1–13 and all
+of 5 GHz including the UNII-4 channels 169, 173 and 177. The other two are
+narrower, and the choice is about coverage rather than legality — a node parks
+and reads beacons, so a pool says where it listens and never what it emits.
+
+| Pool | 2.4 GHz | 5 GHz | Channels |
+| --- | --- | --- | --- |
+| `all` | 1–13 | 36–177 | 39 |
+| `us` | 1–11 | 36–165 | 34 |
+| `eu` | 1–13 | 36–140 | 30 |
+
+`us` is what the FCC permits: no 12 or 13, and no UNII-4. `eu` is what ETSI
+permits: 2.4 GHz all the way to 13, and 5 GHz stopping at 140, because channel
+144's twenty megahertz run past the 5725 MHz edge and 149 upwards is another
+band again. Channel 14 is in no pool and is never dealt — `esp-radio` exposes no
+way to reach it.
 
 An assignment carries a forty-bit channel mask, so it can name any subset of the
 pool. The planner deals the pool out round-robin: index *k* of the pool goes to
