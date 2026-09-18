@@ -27,10 +27,10 @@ target
 __pycache__/
 *.py[cod]
 
-# Captures. `wartui run` defaults to `--db wartui.db` in the working directory,
-# so the repository root is where one lands if you forget the flag — and a
-# capture is a list of the access points around whoever ran it, which is the
-# one thing in this project that must never be committed.
+# Captures. `wartui run` writes `wartui-<date>.db` to the working directory unless
+# `--db` says otherwise, so the repository root is where one lands if you run it
+# from here — and a capture is a list of the access points around whoever ran it,
+# which is the one thing in this project that must never be committed.
 # A `.db` or `.pcap` anywhere in this tree is a capture by definition, so those
 # are unanchored. A `.csv` is not — an export-regression fixture would be a
 # reasonable thing to check in — so only the working directory is covered,

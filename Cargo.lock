@@ -2104,6 +2104,7 @@ dependencies = [
  "chrono",
  "clap",
  "ratatui",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-appender",

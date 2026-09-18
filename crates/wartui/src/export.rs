@@ -6,18 +6,21 @@
 //! last case safe.
 
 use std::io::{BufWriter, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
 use wartui_core::export::{DEFAULT_RECAPTURE_SECS, ExportFilter, wigle_csv};
 use wartui_core::store::open_readonly;
 
+use crate::capture;
+
 #[derive(ClapArgs, Debug)]
 pub struct Args {
-    /// The capture to export.
-    #[arg(long, value_name = "PATH", default_value = "wartui.db")]
-    db: PathBuf,
+    /// The capture to export. The newest `wartui-<date>.db` in the working
+    /// directory by default, which is the one a finished `run` left there.
+    #[arg(long, value_name = "PATH")]
+    db: Option<PathBuf>,
 
     /// Where to write the WiGLE CSV. `-` writes to standard output.
     #[arg(long, value_name = "PATH")]
@@ -37,7 +40,11 @@ pub struct Args {
 }
 
 pub fn run(args: Args) -> Result<()> {
-    let conn = open_readonly(&args.db).with_context(|| format!("opening {}", args.db.display()))?;
+    let db = match args.db {
+        Some(path) => path,
+        None => capture::newest(Path::new("."))?,
+    };
+    let conn = open_readonly(&db).with_context(|| format!("opening {}", db.display()))?;
     let filter = ExportFilter { session_id: args.session, recapture_secs: args.recapture };
     let version = env!("CARGO_PKG_VERSION");
 

@@ -16,6 +16,7 @@ use wartui_bridge::{BridgeInfo, LinkEvent, LinkHandle};
 use wartui_proto::link::{LoopPhase, Mac, ResetCause};
 
 mod bench;
+mod capture;
 mod export;
 mod reset;
 mod run;
