@@ -1166,7 +1166,7 @@ fn a_v2_assignment_row_keeps_its_channels_when_they_become_a_mask() {
 
     let expect = |start, end| {
         i64::try_from(ChannelSet::from_run(IndexRun::new(start, end)).bits())
-            .expect("a 40-bit mask")
+            .expect("a 42-bit mask")
     };
     assert_eq!(
         rows,

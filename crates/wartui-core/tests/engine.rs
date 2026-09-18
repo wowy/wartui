@@ -1209,7 +1209,7 @@ fn one_node_on_a_two_run_pool_gets_all_of_it_in_one_frame() {
     // the US pool's two runs, so a lone node was given them in turn on a timer.
     let (id, _, first) = sent_admin(&engine.handle(heartbeat(peer(0), 1), clock.at(1)));
     assert_eq!(first.channels, ChannelPool::Us.channels());
-    assert_eq!(first.channels.len(), 34, "eleven 2.4 GHz channels and twenty-three 5 GHz");
+    assert_eq!(first.channels.len(), 36, "eleven 2.4 GHz channels and twenty-five 5 GHz");
     engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(1));
 
     // And nothing re-issues it. Ticks are what the dwell timer used to fire on,

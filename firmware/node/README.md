@@ -116,8 +116,8 @@ host cannot tell that from a node whose radio did not tune. `src/main.rs` passes
 Channel limits otherwise belong to the controller, not here — the node parks and
 listens, transmitting only on the control channel, so where it dwells is a
 coverage decision rather than a legal one. This firmware gates nothing: it parks on
-whatever it is dealt and reports a refusal, which in practice means a C5 tunes 39
-of the 40 channels in `SCAN_CHANNELS` and a C6 the 13 of them that are 2.4 GHz.
+whatever it is dealt and reports a refusal, which in practice means a C5 tunes 41
+of the 42 channels in `SCAN_CHANNELS` and a C6 the 13 of them that are 2.4 GHz.
 The one a C5 will not take is **channel 14**, which `esp-radio` refuses through a
 hardcoded `nchan: 13` that no exposed setting can reach. That refusal is the
 driver's rather than a rule made here, so the firmware still attempts it — but no channel pool

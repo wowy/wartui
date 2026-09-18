@@ -34,10 +34,20 @@ use wartui_proto::plan::ChannelPool;
 use crate::engine::StoreStats;
 use crate::record::Record;
 
-/// Bumped whenever the schema changes shape.
+/// The schema shape this build writes and reads.
 ///
-/// `migrate` carries each step. Every one so far has been lossless, which is the
-/// property to keep: a capture is data rather than a deployment.
+/// 8 until wartui 1.0, the same rule as [`wartui_proto::air::WIRE_VERSION`] and
+/// for the same reason: nothing here is compatible with an earlier wartui, so a
+/// marker distinguishing the two marks a difference the policy has already
+/// settled. `migrate`'s arms carry the steps that brought a file this far and
+/// each one is lossless, which is the property to keep — a capture is data
+/// rather than a deployment. What they buy is a file this build can open, not a
+/// reading of it in an earlier build's terms: a mask of scan-table indices means
+/// what the build that wrote it meant, and no arm rewrites it.
+///
+/// Every arm is keyed on the marker, so one added while this is 8 fires on every
+/// open of a file already stamped 8. Structural change is what moves it, and
+/// that decision waits for 1.0.
 pub const SCHEMA_VERSION: i32 = 8;
 
 /// The schema, applied to any database that does not already have it.
@@ -82,9 +92,10 @@ CREATE TABLE IF NOT EXISTS heartbeat (
 -- the table is append-only and a retry is a second row rather than an update.
 -- `counter` is the persisted monotonic epoch and `wire_version` the byte that
 -- actually went out; they differ because the wire field is one byte wide.
--- `channels` is the forty-bit SCAN_CHANNELS mask the frame carried, stored as the
--- integer it is: the indices are what the wire said, and rendering them depends on
--- a table that could change.
+-- `channels` is the forty-two-bit SCAN_CHANNELS mask the frame carried, stored as the
+-- integer it is: the indices are what the wire said, and which channels they name is
+-- the scan table of the build that wrote the row. Nothing reads the column back, and
+-- nothing rewrites it when the table changes -- a row records what went out.
 CREATE TABLE IF NOT EXISTS assignment (
   id INTEGER PRIMARY KEY,
   session_id INTEGER NOT NULL REFERENCES session(id),

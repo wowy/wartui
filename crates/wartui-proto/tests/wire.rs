@@ -80,7 +80,7 @@ const ADMIN: &[u8] = &[
     0x07, // epoch
     0x02, 0x05, // node 2 of 5
     0x00, // flags
-    0x00, 0x00, 0xFF, 0x00, 0x00, // indices 16..=23
+    0x00, 0x00, 0xFF, 0x00, 0x00, 0x00, // indices 16..=23
 ];
 
 const ADMIN_BLE: &[u8] = &[
@@ -88,7 +88,7 @@ const ADMIN_BLE: &[u8] = &[
     0xC8, // epoch 200
     0x00, 0x01, // node 0 of 1
     0x01, // ADMIN_FLAG_BLE
-    0x41, 0x20, 0x00, 0x00, 0x80, // indices 0, 6, 13 and 39
+    0x41, 0x20, 0x00, 0x00, 0x00, 0x02, // indices 0, 6, 13 and 41
 ];
 
 /// A stock node's heartbeat, and a stock core's assignment. Kept only as inputs
@@ -420,10 +420,10 @@ fn an_assignment_encodes_byte_for_byte() {
 #[test]
 fn the_channel_mask_goes_out_least_significant_byte_first() {
     // Four indices chosen to straddle byte boundaries and to reach the top of
-    // the forty, so a mask written big-endian — or in four bytes rather than
-    // five — cannot produce these bytes.
+    // the forty-two, so a mask written big-endian — or in five bytes rather
+    // than six — cannot produce these bytes.
     let mut channels = ChannelSet::empty();
-    for idx in [0, 6, 13, 39] {
+    for idx in [0, 6, 13, 41] {
         channels.insert(idx);
     }
     let msg =
@@ -431,7 +431,7 @@ fn the_channel_mask_goes_out_least_significant_byte_first() {
     assert_eq!(msg.encode().as_slice(), ADMIN_BLE);
 
     let back = AdminMsg::decode(ADMIN_BLE).expect("valid");
-    assert_eq!(back.channels.indices().collect::<Vec<_>>(), vec![0, 6, 13, 39]);
+    assert_eq!(back.channels.indices().collect::<Vec<_>>(), vec![0, 6, 13, 41]);
     assert!(back.scan_ble());
 }
 
@@ -493,18 +493,44 @@ fn an_unknown_type_byte_is_rejected() {
 
 #[test]
 fn short_frames_are_rejected_by_the_layout_they_claim_to_be() {
+    // Too short to carry a header at all, which is as far as `header` gets.
     assert_eq!(Frame::decode(&HEARTBEAT[..4]), Err(DecodeError::TooShort { need: 6, got: 4 }));
-    assert_eq!(
-        Frame::decode(&HEARTBEAT[..HEARTBEAT_MSG_LEN - 1]),
-        Err(DecodeError::TooShort { need: HEARTBEAT_MSG_LEN, got: HEARTBEAT_MSG_LEN - 1 })
-    );
-    assert_eq!(
-        Frame::decode(&ADMIN[..ADMIN_MSG_LEN - 1]),
-        Err(DecodeError::TooShort { need: ADMIN_MSG_LEN, got: ADMIN_MSG_LEN - 1 })
-    );
+    // A sighting is as long as its own SSID and trailer say, so short is short.
     assert_eq!(
         Frame::decode(&SIGHTING_BLE[..SIGHTING_MSG_MIN - 1]),
         Err(DecodeError::TooShort { need: SIGHTING_MSG_MIN, got: SIGHTING_MSG_MIN - 1 })
+    );
+    // The other two are each one size, so either side of it is a layout this
+    // build does not read.
+    assert_eq!(
+        Frame::decode(&HEARTBEAT[..HEARTBEAT_MSG_LEN - 1]),
+        Err(DecodeError::BadLength { need: HEARTBEAT_MSG_LEN, got: HEARTBEAT_MSG_LEN - 1 })
+    );
+    assert_eq!(
+        Frame::decode(&ADMIN[..ADMIN_MSG_LEN - 1]),
+        Err(DecodeError::BadLength { need: ADMIN_MSG_LEN, got: ADMIN_MSG_LEN - 1 })
+    );
+}
+
+#[test]
+fn a_fixed_frame_longer_than_this_build_reads_is_refused_rather_than_truncated() {
+    // The half of a layout change that would otherwise be silent: a wider
+    // assignment from a newer host has a valid header, a known type byte and
+    // enough bytes for every field this build knows, so a length check is the
+    // only thing between it and being adopted as a plausible wrong share.
+    // `WIRE_VERSION` does not move before 1.0, so this is that check.
+    let mut wider = ADMIN.to_vec();
+    wider.push(0xFF);
+    assert_eq!(
+        Frame::decode(&wider),
+        Err(DecodeError::BadLength { need: ADMIN_MSG_LEN, got: ADMIN_MSG_LEN + 1 })
+    );
+
+    let mut wider = HEARTBEAT.to_vec();
+    wider.push(0xFF);
+    assert_eq!(
+        Frame::decode(&wider),
+        Err(DecodeError::BadLength { need: HEARTBEAT_MSG_LEN, got: HEARTBEAT_MSG_LEN + 1 })
     );
 }
 

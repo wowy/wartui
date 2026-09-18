@@ -14,9 +14,11 @@
 //! firmware's frame costs one `memcmp`. [`foreign`] recognises one such format,
 //! `ENOW`, in order to *report* it.
 //!
-//! The header carries a version. It is the lever
-//! for the next incompatible change: a node speaking a version this host does
-//! not know is counted and named rather than half-decoded.
+//! The header carries a version. It is the lever held for the first change a
+//! fleet in the field has to survive: a node speaking a version this host does
+//! not know is counted and named rather than half-decoded. Until wartui 1.0
+//! nothing is such a change, so the byte does not move — see
+//! [`WIRE_VERSION`].
 
 use core::fmt;
 
@@ -27,7 +29,12 @@ pub const MAGIC: [u8; 4] = *b"WTUI";
 
 /// The frame version this build speaks and the only one it decodes.
 ///
-/// Bumped when any layout below changes shape. Anything else is reported as
+/// 1 until wartui 1.0, whatever the layouts below do. Nothing here is
+/// compatible with an earlier wartui and the fleet is flashed together, so a
+/// byte telling the two apart marks a difference nothing acts on and costs a
+/// re-pin of every fixture in `tests/wire.rs` to say it. This is held for the
+/// first change a fleet in the field has to survive; a layout that changes
+/// shape before then simply changes shape. Anything else is reported as
 /// incompatible rather than guessed at — see the module docs.
 pub const WIRE_VERSION: u8 = 1;
 
@@ -120,6 +127,20 @@ pub enum DecodeError {
         /// Bytes actually present.
         got: usize,
     },
+    /// A fixed-length frame that was not its own length.
+    ///
+    /// [`HeartbeatMsg`] and [`AdminMsg`] are each exactly one size, so anything
+    /// else carrying their type byte came from a build whose layout differs from
+    /// this one's. Longer is the dangerous half: the leading bytes would parse,
+    /// and the frame would be adopted as a plausible wrong assignment. Since
+    /// [`WIRE_VERSION`] does not move before 1.0, this is what says a fleet is
+    /// half-way through a reflash.
+    BadLength {
+        /// Bytes this build's layout is.
+        need: usize,
+        /// Bytes actually present.
+        got: usize,
+    },
     /// First four bytes were not [`MAGIC`].
     BadMagic,
     /// A frame of ours, from a build speaking a version this one does not.
@@ -140,6 +161,7 @@ impl fmt::Display for DecodeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::TooShort { need, got } => write!(f, "frame too short: need {need}, got {got}"),
+            Self::BadLength { need, got } => write!(f, "frame is {got} bytes, not {need}"),
             Self::BadMagic => f.write_str("bad magic, expected \"WTUI\""),
             Self::BadVersion(v) => write!(f, "wire version {v}, expected {WIRE_VERSION}"),
             Self::UnknownType(t) => write!(f, "unknown message type {t:#04x}"),
@@ -273,8 +295,8 @@ impl HeartbeatMsg {
             MsgType::Heartbeat => {}
             other => return Err(DecodeError::UnknownType(other.as_u8())),
         }
-        if buf.len() < HEARTBEAT_MSG_LEN {
-            return Err(DecodeError::TooShort { need: HEARTBEAT_MSG_LEN, got: buf.len() });
+        if buf.len() != HEARTBEAT_MSG_LEN {
+            return Err(DecodeError::BadLength { need: HEARTBEAT_MSG_LEN, got: buf.len() });
         }
         let counter = u32::from_le_bytes([
             buf[OFF_BODY],
@@ -627,8 +649,8 @@ impl AdminMsg {
             MsgType::Admin => {}
             other => return Err(DecodeError::UnknownType(other.as_u8())),
         }
-        if buf.len() < ADMIN_MSG_LEN {
-            return Err(DecodeError::TooShort { need: ADMIN_MSG_LEN, got: buf.len() });
+        if buf.len() != ADMIN_MSG_LEN {
+            return Err(DecodeError::BadLength { need: ADMIN_MSG_LEN, got: buf.len() });
         }
         let mut channels = [0u8; CHANNEL_SET_BYTES];
         channels.copy_from_slice(&buf[OFF_BODY + 4..OFF_BODY + 4 + CHANNEL_SET_BYTES]);
@@ -641,7 +663,7 @@ impl AdminMsg {
         })
     }
 
-    /// Encode to the fifteen bytes a wartui node expects.
+    /// Encode to the [`ADMIN_MSG_LEN`] bytes a wartui node expects.
     #[must_use]
     pub fn encode(&self) -> [u8; ADMIN_MSG_LEN] {
         let mut out = [0u8; ADMIN_MSG_LEN];

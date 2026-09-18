@@ -1047,7 +1047,7 @@ mod tests {
     fn pending(last: u8) -> NodeView {
         let mut view = node(last, 0, true);
         view.state.desired = Some(Assignment {
-            channels: ChannelSet::from_run(IndexRun::new(14, 36)),
+            channels: ChannelSet::from_run(IndexRun::new(14, 38)),
             ble: false,
             node_index: 0,
             node_count: 1,
@@ -1498,7 +1498,7 @@ mod tests {
         let rendered = terminal.backend().to_string();
 
         assert!(rendered.contains("unassigned"), "a node nobody has assigned");
-        assert!(rendered.contains("23: 36-165…"), "asked for, not yet acknowledged");
+        assert!(rendered.contains("25: 36-165…"), "asked for, not yet acknowledged");
         assert!(rendered.contains("no admin ack"), "sent, and the node never answered");
     }
 
@@ -1507,7 +1507,7 @@ mod tests {
         // Indices into SCAN_CHANNELS are an artefact of the wire format.
         assert_eq!(channel_list(ChannelSet::from_run(IndexRun::new(0, 0))), "1");
         assert_eq!(channel_list(ChannelSet::from_run(IndexRun::new(0, 10))), "1-11");
-        assert_eq!(channel_list(ChannelSet::from_run(IndexRun::new(14, 36))), "36-165");
+        assert_eq!(channel_list(ChannelSet::from_run(IndexRun::new(14, 38))), "36-165");
     }
 
     #[test]
@@ -1524,9 +1524,9 @@ mod tests {
     #[test]
     fn a_channel_cell_leads_with_the_count_and_truncates_the_rest() {
         let us = ChannelPool::Us.channels();
-        assert_eq!(channel_cell(us, 40), "34: 1-11,36-165");
-        assert_eq!(channel_cell(us, 10), "34: 1-11…", "and never cut mid-separator");
-        assert_eq!(channel_cell(us, 8), "34: …", "rather than an invented range like 1-1");
+        assert_eq!(channel_cell(us, 40), "36: 1-11,36-165");
+        assert_eq!(channel_cell(us, 10), "36: 1-11…", "and never cut mid-separator");
+        assert_eq!(channel_cell(us, 8), "36: …", "rather than an invented range like 1-1");
     }
 
     #[test]
@@ -1535,7 +1535,7 @@ mod tests {
         // fitted" marker are the same character, and two in a row is not a
         // different meaning, just a worse-looking cell.
         let mut view = pending(0x11);
-        assert_eq!(channels_cell(&view).content, "23: 36-165…");
+        assert_eq!(channels_cell(&view).content, "25: 36-165…");
 
         let mut comb = ChannelSet::empty();
         for idx in [0, 3, 6, 9, 12, 15, 18, 21] {
