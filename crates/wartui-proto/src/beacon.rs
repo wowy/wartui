@@ -7,8 +7,9 @@
 //!
 //! An RSN/WPA information-element parser and the `wifi_auth_mode_t` table it feeds,
 //! collapsed into one pass yielding a [`Security`]. The set of values has to stay
-//! faithful to that table even though the spelling no longer travels on the wire:
-//! it is what the WiGLE `AuthMode` column says.
+//! faithful to that table even though the spelling never travels on the wire — a
+//! frame carries the discriminant as one byte — because it is what the WiGLE
+//! `AuthMode` column says.
 //!
 //! [`visible_ssid`] exists because an access point hides its name in either of two
 //! ways and only one of them looks hidden: an SSID element of length zero, or the

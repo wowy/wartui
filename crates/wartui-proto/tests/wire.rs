@@ -378,8 +378,8 @@ fn a_security_value_this_build_never_heard_of_does_not_cost_the_observation() {
 
 #[test]
 fn every_security_value_round_trips_and_spells_itself_the_wigle_way() {
-    // These tokens leave the host in the `AuthMode` column, so they are still a
-    // format even though they no longer travel on the wire.
+    // These tokens leave the host in the `AuthMode` column, so they are a format
+    // even though they never travel on the wire.
     let named = [
         (Security::Open, "[OPEN]"),
         (Security::Wep, "[WEP]"),

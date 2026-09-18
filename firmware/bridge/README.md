@@ -119,7 +119,7 @@ reports them as available and moves nothing, and will keep doing that until
 `esp-radio` publishes again. Both firmwares are held at the same set by the same
 dependency, which is worth keeping true — they share `wartui-proto`.
 
-The pin is no longer free. The ESP32-C5 fix for a software reset that leaves the
+The pin is not free. The ESP32-C5 fix for a software reset that leaves the
 board unbootable until it loses power is upstream from `esp-hal` 1.2.0-rc.0
 (esp-rs/esp-hal#5703), and being unable to take it is why `reboot()` writes that
 register out by hand on the C5. Cargo cannot be talked round it either:

@@ -1,13 +1,13 @@
 //! How many distinct addresses a session has heard, in memory that does not grow with it.
 //!
-//! The view's "unique APs" figure used to be the length of a set holding every address
-//! heard. That set was the one thing in the process that grew with the drive: about
-//! 18 bytes an address, 9 MiB for a day's 500 k networks and 42 MiB for a twenty-node
-//! burst (`docs/store-io-findings.md`). The store cannot answer the question instead
-//! without undoing what made capture cheap. A `COUNT(DISTINCT bssid)` scans and sorts a
-//! table that has no index, on the card, and its read snapshot holds back the checkpoint
-//! that keeps the WAL one commit long. A table or index keyed by address is the random-key
-//! B-tree that schema v6 dropped for costing fourteen times the writes.
+//! Answering exactly means holding every address heard, and a set of them is the one
+//! thing in the process that would grow with the drive: about 18 bytes an address, 9 MiB
+//! for a day's 500 k networks and 42 MiB for a twenty-node burst
+//! (`docs/store-io-findings.md`). The store cannot answer instead without undoing what
+//! makes capture cheap. A `COUNT(DISTINCT bssid)` scans and sorts a table that has no
+//! index, on the card, and its read snapshot holds back the checkpoint that keeps the WAL
+//! one commit long. A table or index keyed by address is a random-key B-tree, which schema
+//! v6 has no room for at fourteen times the writes.
 //!
 //! So the figure is an estimate: a HyperLogLog of 2^14 one-byte registers, 16 KiB whatever
 //! the session hears, with a standard error of about 0.8%. Below a few tens of thousands

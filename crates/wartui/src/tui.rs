@@ -346,10 +346,10 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot) {
         |s| format!("  channel {}  peers {}  bridge rx {}", s.channel, s.peer_count, s.rx_count),
     );
 
-    // The reason a link is down used to be appended here, on the one line that
-    // shares its width with the bridge's identity — so on a narrow terminal the
-    // single most useful thing on screen was the part that got clipped. It
-    // lives in the fault box now, which is vertical and wraps.
+    // The reason a link is down belongs in the fault box, which is vertical and
+    // wraps, rather than on this line, which shares its width with the bridge's
+    // identity — appended here, the single most useful thing on screen is the
+    // part a narrow terminal clips.
     let first = vec![Span::raw(link)];
 
     let mut second = vec![
@@ -1232,8 +1232,8 @@ mod tests {
 
     #[test]
     fn one_long_fault_is_broken_up_rather_than_cut_off() {
-        // The reason a link was down used to be appended to the header
-        // unwrapped, so a narrow terminal showed the first clause and nothing else.
+        // Appended to the header unwrapped, the reason a link is down shows its
+        // first clause on a narrow terminal and nothing else.
         let fault = format!("link down: {BUSY}");
         let lines = fault_lines(std::slice::from_ref(&fault), 40);
         assert!(lines.len() > 1, "it does not fit on one line: {lines:?}");
@@ -1273,8 +1273,8 @@ mod tests {
 
     #[test]
     fn the_notice_does_not_eat_the_message_above_it() {
-        // It used to take its room out of the last line, leaving a sentence that
-        // read as complete and said something the OS never said.
+        // The notice takes a line of its own: room out of the last fault leaves a
+        // sentence that reads as complete and says something the OS never said.
         let faults = [format!("link down: {BUSY}"), "store dropped 4".to_owned()];
         let lines = fault_lines(&faults, 30);
         let last = lines.last().expect("a line");

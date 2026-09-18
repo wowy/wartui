@@ -274,12 +274,12 @@ async fn connect(
             }
             _ = identify.tick(), if !announced.load(Ordering::Relaxed) => {
                 if asked >= IDENTIFY_ATTEMPTS && !decoded.load(Ordering::Relaxed) {
-                    // Says what was observed, and stops short of the conclusion
-                    // it used to draw. "It is not a bridge" is false in the case
-                    // an operator actually hits: it *is* the bridge, its
-                    // transmit endpoint has stopped draining, and it is still
-                    // reading every frame sent to it — which is why the remedy
-                    // named here is a command rather than a shrug.
+                    // Says what was observed, and stops short of concluding
+                    // "it is not a bridge", which is false in the case an
+                    // operator actually hits: it *is* the bridge, its transmit
+                    // endpoint has stopped draining, and it is still reading
+                    // every frame sent to it — which is why the remedy named
+                    // here is a command rather than a shrug.
                     let seconds =
                         IDENTIFY_INTERVAL.as_millis() * u128::from(IDENTIFY_ATTEMPTS) / 1000;
                     break Err(format!(

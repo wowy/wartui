@@ -317,8 +317,8 @@ fn a_frame_that_is_not_ours_at_all_is_counted_as_undecodable() {
 
 #[test]
 fn a_vendor_fleet_nearby_is_counted_and_never_joins_this_one() {
-    // The whole reason wartui stopped speaking the vendor's format: a stock node
-    // broadcasts on this channel and used to be indistinguishable from ours.
+    // The whole reason wartui speaks a format of its own: a stock node broadcasts
+    // on this channel, and a shared magic would make it indistinguishable from ours.
     // Still counted, because a second fleet where these nodes listen matters.
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
@@ -1205,15 +1205,15 @@ fn one_node_on_a_two_run_pool_gets_all_of_it_in_one_frame() {
     let mut engine = engine(us_config(), &clock);
     caught_up(&mut engine, &clock);
 
-    // This is where the rotation used to be: one contiguous range could not say
-    // the US pool's two runs, so a lone node was given them in turn on a timer.
+    // Nothing here rotates: one contiguous range cannot say the US pool's two runs,
+    // but a `ChannelSet` can, so a lone node is dealt the whole pool in one frame.
     let (id, _, first) = sent_admin(&engine.handle(heartbeat(peer(0), 1), clock.at(1)));
     assert_eq!(first.channels, ChannelPool::Us.channels());
     assert_eq!(first.channels.len(), 36, "eleven 2.4 GHz channels and twenty-five 5 GHz");
     engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(1));
 
-    // And nothing re-issues it. Ticks are what the dwell timer used to fire on,
-    // so a plan still holding after several minutes of them is the whole change.
+    // And nothing re-issues it. The plan has no timer and ticks drive no dwell, so
+    // a plan still holding after several minutes of them is the whole claim.
     for minute in 1..=5 {
         let batch = engine.handle(Event::Tick, clock.at(60 * minute));
         assert!(batch.urgent.is_empty(), "nothing is owed at minute {minute}");
