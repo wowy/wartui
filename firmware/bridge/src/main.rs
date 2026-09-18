@@ -176,8 +176,7 @@ fn boot_phase(cause: ResetCause) -> LoopPhase {
 /// The numeric codes behind the shared names are identical on both parts, so the
 /// temptation to match on `reason as u8` and be done should be resisted: the enum
 /// is the only thing that makes the next chip's differences visible. Matching only
-/// the variants every chip defines was the first version here, and it silently
-/// cost the C5 both of its own.
+/// the variants every chip defines silently costs the C5 both of its own.
 ///
 /// What is left unmapped is deliberate. `CoreDeepSleep` cannot happen: nothing
 /// here sleeps. `CoreSDIO` and `CoreEfuseCrc` say nothing an operator could act on

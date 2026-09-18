@@ -257,8 +257,8 @@ impl Capabilities {
     }
 }
 
-/// The form the fleet table and the store column show, and the one the old
-/// ASCII token had: `wartui/1.0;ble,5g`.
+/// The form the fleet table and the store column show: `wartui/1.0;ble,5g`. The
+/// three bytes a heartbeat carries are what travels; this is for reading.
 impl fmt::Display for Capabilities {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "wartui/{}.{}", self.major, self.minor)?;
@@ -725,8 +725,8 @@ impl<'a> Frame<'a> {
 /// scans — so counting it as line noise would hide the one clue an operator has
 /// for a channel that is busier than the fleet can explain.
 ///
-/// The vendor magic is all that is matched. Since wartui's own frames no longer
-/// carry it, anything that does belongs to somebody else by definition.
+/// The vendor magic is all that is matched. wartui's own frames carry [`MAGIC`],
+/// so anything carrying `ENOW` belongs to somebody else by definition.
 pub mod foreign {
     /// The vendor's frame preamble.
     pub const VENDOR_MAGIC: [u8; 4] = *b"ENOW";

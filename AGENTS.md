@@ -238,6 +238,14 @@ edit stops; follow the pointer before changing the rule.
   reasoning in them is often the only record of a hardware constraint. Match that register, and
   update the reasoning when the decision changes.
 - Documentation should be clear and concise. Link documents when necessary, do not repeat.
+- **Prose says what the project does, not where it was.** Nothing before 1.0 is compatible with
+  an earlier wartui, so no reader has one to reconcile this build against: "used to", "no
+  longer", "previously", and notes that a thing was renamed, moved or replaced cost a reader the
+  present tense and buy them nothing. The reasoning survives the chronology — state the
+  constraint that rules an alternative out, not the order the two were tried in. Git history
+  holds the change and the commit message explains it. Two exemptions: `docs/*-findings.md` are
+  dated bench records and say what a bench measured; `README.md` § "History" is provenance and
+  attribution, not a changelog.
 - Rustfmt is configured with `max_width = 100` and `use_small_heuristics = "Max"`.
 - Tests are mostly integration tests under `crates/*/tests/` with full-sentence names
   (`observations_keep_a_node_visible_but_only_heartbeats_keep_it_assignable`); `#[cfg(test)]`

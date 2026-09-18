@@ -49,9 +49,9 @@ fn this_build_announces_the_version_it_speaks() {
 }
 
 #[test]
-fn capabilities_are_shown_the_way_the_old_token_was_spelled() {
-    // The fleet table and the store column both read this: no longer a wire format,
-    // but an operator who has read one fleet table should be able to read the next.
+fn capabilities_are_shown_as_one_token_an_operator_can_read() {
+    // The fleet table and the store column both read this: not a wire format, but an
+    // operator who has read one fleet table should be able to read the next.
     assert_eq!(
         Capabilities { major: 1, minor: 0, ble: true, five_ghz: true }.to_string(),
         "wartui/1.0;ble,5g"
