@@ -446,10 +446,7 @@ async fn sweep(
                 if was_opened {
                     opened += 1;
                 }
-                // Only from a board that had nowhere else to defer to, and so was
-                // heard out in full. A board given a second and a half while another
-                // was waiting has not been shown to be anything.
-                if alone && was_opened && remembered.is_some() && candidate.mac() == remembered {
+                if silence_disowns_it(alone, was_opened, remembered, candidate) {
                     remembered_went_quiet = true;
                 }
                 // Copied out rather than read in place: the guard would otherwise
@@ -905,6 +902,33 @@ fn write_loop(
     }
 }
 
+/// Whether this board's silence says it has stopped being the bridge.
+///
+/// Silence alone says nothing, and each of the three guards here is a way of being
+/// silent for a reason that is not the board's:
+///
+/// - **It has to be the board the file names.** Any other board's silence is just a
+///   board that was never the bridge.
+/// - **The port has to have opened.** One that would not said nothing because
+///   nothing was asked of it: ModemManager holds a fresh CDC-ACM device for a few
+///   seconds on some distributions, and a missing `dialout` group holds it for ever.
+/// - **There has to have been nothing else to try.** A board with another waiting
+///   gets [`PROBE_TICKS`], and a bridge still bringing its radio up takes longer
+///   than that. Concluding from a probe is concluding from impatience.
+///
+/// This is not the usual way the file is corrected, and not the important one:
+/// whatever board does answer writes its own address over it. This is for the case
+/// where nothing answers at all, which is the only one that leaves a wrong entry
+/// standing.
+fn silence_disowns_it(
+    alone: bool,
+    opened: bool,
+    remembered: Option<Mac>,
+    candidate: &PortCandidate,
+) -> bool {
+    alone && opened && remembered.is_some() && candidate.mac() == remembered
+}
+
 /// Whether a `Ready` came from a life that started after the last one seen.
 ///
 /// The first is always a new life. After that, the only thing separating a reboot
@@ -916,7 +940,45 @@ fn is_a_new_life(uptime_ms: u32, last_seen: Option<u32>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::is_a_new_life;
+    use super::{is_a_new_life, silence_disowns_it};
+    use crate::ports::{BRIDGE_PID, ESPRESSIF_VID, PortCandidate, candidate, parse_mac};
+
+    const BRIDGE_MAC: &str = "10:BD:A3:EC:44:C0";
+    const NODE_MAC: &str = "02:00:5E:10:9D:24";
+
+    fn board(mac: &str) -> PortCandidate {
+        candidate("/dev/ttyACM0", Some(ESPRESSIF_VID), Some(BRIDGE_PID), Some(mac))
+    }
+
+    #[test]
+    fn a_remembered_board_that_was_heard_out_and_said_nothing_is_disowned() {
+        assert!(silence_disowns_it(true, true, parse_mac(BRIDGE_MAC), &board(BRIDGE_MAC)));
+    }
+
+    #[test]
+    fn a_board_that_would_not_open_is_not_disowned() {
+        // It said nothing because nothing was asked of it — ModemManager holding a
+        // fresh device, or a missing `dialout` group. Forgetting the bridge over
+        // either throws away the right answer for a reason that is not the board's.
+        assert!(!silence_disowns_it(true, false, parse_mac(BRIDGE_MAC), &board(BRIDGE_MAC)));
+    }
+
+    #[test]
+    fn a_board_given_only_a_probe_is_not_disowned() {
+        // A bridge power-cycled alongside a node takes longer than `PROBE_TICKS` to
+        // bring its radio up, and would otherwise be forgotten for being slow.
+        assert!(!silence_disowns_it(false, true, parse_mac(BRIDGE_MAC), &board(BRIDGE_MAC)));
+    }
+
+    #[test]
+    fn another_boards_silence_says_nothing_about_the_one_remembered() {
+        assert!(!silence_disowns_it(true, true, parse_mac(BRIDGE_MAC), &board(NODE_MAC)));
+    }
+
+    #[test]
+    fn with_nothing_remembered_there_is_nothing_to_disown() {
+        assert!(!silence_disowns_it(true, true, None, &board(BRIDGE_MAC)));
+    }
 
     #[test]
     fn the_first_ready_on_a_connection_is_always_the_bridge_arriving() {
