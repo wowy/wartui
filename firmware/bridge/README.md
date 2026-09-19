@@ -70,7 +70,7 @@ every time an operator closes a window. The reset _is_ the message, since every 
 would go out through the path that is broken; the `Ready` behind it says `TxStalled`. The rule lives
 in `wartui-proto` rather than here so that it is tested in microseconds instead of on a bench.
 
-Reach for `wartui reset --port <path>` before `espflash`: the receive path is alive in this state,
+Reach for `wartui reset --bridge <board>` before `espflash`: the receive path is alive in this state,
 so the bridge reboots on being asked, and a software reset keeps the device path where an `espflash`
 reset re-enumerates the board and can move `ttyACM0` to `ttyACM1` underneath a script. `espflash
 reset --port <path>` is the fallback for when even that goes unanswered, which means the firmware

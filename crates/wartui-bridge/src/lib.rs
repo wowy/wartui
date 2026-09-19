@@ -4,7 +4,13 @@
 //! whether the frames came from a real dongle or from [`sim`]. That is what
 //! lets the fleet engine and the TUI be built and tested with nothing plugged
 //! in.
+//!
+//! It also owns the host's serial ports generally, in [`ports`]: what is attached
+//! and what the OS says it is, with no judgement about which of them is a bridge.
+//! Keeping that in one place is what lets anything else that opens a device share
+//! the enumeration rather than write a second one.
 
+pub mod ports;
 pub mod serial;
 pub mod sim;
 
@@ -78,8 +84,14 @@ pub enum LinkEvent {
 #[derive(Debug, Error)]
 pub enum TransportError {
     /// No serial port looked like an Espressif device.
-    #[error("no bridge found; pass an explicit port with --port")]
+    #[error("no bridge found; name one with --bridge")]
     NoBridgeFound,
+    /// A bridge was named and nothing attached answers to that name.
+    #[error("no board attached is {spec}")]
+    NoSuchBridge {
+        /// The path or address that was asked for.
+        spec: String,
+    },
     /// Opening the port failed.
     #[error("could not open {port}: {source}")]
     Open {

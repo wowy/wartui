@@ -45,19 +45,19 @@ const ANNOUNCE_GRACE: Duration = Duration::from_millis(750);
 
 #[derive(ClapArgs)]
 pub struct Args {
-    /// Serial port of the bridge. Discovered automatically if omitted.
-    #[arg(long, value_name = "PATH")]
-    port: Option<String>,
+    /// The bridge, as a device path or as the board's address. Detected if omitted.
+    #[arg(long, value_name = "PATH|MAC")]
+    bridge: Option<String>,
 }
 
 pub async fn run(args: Args) -> Result<()> {
-    let mut link = super::open(args.port.as_deref(), None, 0)?;
+    let mut link = super::open(args.bridge.as_deref(), None, 0)?;
 
     // Sent immediately, without waiting to be told the bridge is there: the case
     // this command is for is the one where nothing ever announces itself, and the
     // writer thread is ready as soon as the port is open.
     link.send_urgent(HostToBridge::Reset).context("queueing the reset")?;
-    println!("reset sent to {}", args.port.as_deref().unwrap_or("the discovered port"));
+    println!("reset sent to {}", args.bridge.as_deref().unwrap_or("the board that was detected"));
 
     match tokio::time::timeout(RECOVERY_TIMEOUT, wait_for_reboot(&mut link)).await {
         Ok(Ok((info, uptime_ms))) => {
@@ -65,7 +65,7 @@ pub async fn run(args: Args) -> Result<()> {
             Ok(())
         }
         Ok(Err(err)) => Err(err),
-        Err(_) => bail!("{}", unreachable_notice(args.port.as_deref())),
+        Err(_) => bail!("{}", unreachable_notice(args.bridge.as_deref())),
     }
 }
 
@@ -163,11 +163,19 @@ fn report(info: Option<&BridgeInfo>, uptime_ms: u32) {
 }
 
 /// What to say when even a reset frame goes unanswered.
-fn unreachable_notice(port: Option<&str>) -> String {
+///
+/// `espflash` takes a path and nothing else, so a board named by its address is
+/// resolved to one here rather than quoted into a line that will not run.
+fn unreachable_notice(bridge: Option<&str>) -> String {
     let seconds = RECOVERY_TIMEOUT.as_secs();
-    let (where_, espflash) = match port {
-        Some(path) => (format!("on {path}"), format!("espflash reset --port {path}")),
-        None => ("on the discovered port".to_owned(), "espflash reset".to_owned()),
+    let device = bridge.and_then(super::named_device);
+    let (where_, espflash) = match (bridge, device.as_deref()) {
+        (Some(_), Some(path)) => (format!("on {path}"), format!("espflash reset --port {path}")),
+        (Some(name), None) => (
+            format!("named {name}, which no attached board answers to"),
+            "espflash reset".to_owned(),
+        ),
+        (None, _) => ("on the board that was detected".to_owned(), "espflash reset".to_owned()),
     };
     [
         format!("the bridge {where_} did not come back within {seconds}s."),
@@ -203,16 +211,16 @@ mod tests {
     }
 
     #[test]
-    fn the_notice_names_the_port_and_a_remedy_that_needs_no_firmware() {
+    fn the_notice_names_the_board_and_a_remedy_that_needs_no_firmware() {
         let notice = unreachable_notice(Some("/dev/ttyACM0"));
         assert!(notice.contains("on /dev/ttyACM0 did not come back within 10s"), "{notice}");
         assert!(notice.contains("espflash reset --port /dev/ttyACM0"), "{notice}");
     }
 
     #[test]
-    fn without_a_port_it_still_reads_as_a_sentence() {
+    fn without_a_named_board_it_still_reads_as_a_sentence() {
         let notice = unreachable_notice(None);
-        assert!(notice.contains("on the discovered port"), "{notice}");
+        assert!(notice.contains("on the board that was detected"), "{notice}");
         // No dangling `--port` with nothing after it.
         assert!(!notice.contains("--port"), "{notice}");
     }

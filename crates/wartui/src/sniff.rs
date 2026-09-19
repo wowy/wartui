@@ -16,9 +16,9 @@ use super::mac;
 
 #[derive(ClapArgs)]
 pub struct Args {
-    /// Serial port of the bridge. Discovered automatically if omitted.
-    #[arg(long, value_name = "PATH")]
-    port: Option<String>,
+    /// The bridge, as a device path or as the board's address. Detected if omitted.
+    #[arg(long, value_name = "PATH|MAC")]
+    bridge: Option<String>,
 
     /// Use the built-in simulator with this many fake nodes instead of hardware.
     #[arg(long, value_name = "NODES", num_args = 0..=1, default_missing_value = "3")]
@@ -34,7 +34,7 @@ pub struct Args {
 }
 
 pub async fn run(args: Args) -> Result<()> {
-    let mut link = super::open(args.port.as_deref(), args.sim, 0)?;
+    let mut link = super::open(args.bridge.as_deref(), args.sim, 0)?;
     println!("# waiting for the bridge; ctrl-c to stop");
 
     let mut counts = Counts::default();
@@ -56,7 +56,7 @@ pub async fn run(args: Args) -> Result<()> {
             () = &mut notice, if !spoken => {
                 spoken = true;
                 if !counts.heard_a_bridge {
-                    eprintln!("\n{}\n", super::no_bridge_notice(args.port.as_deref()));
+                    eprintln!("\n{}\n", super::no_bridge_notice(args.bridge.as_deref()));
                 }
             }
             event = link.recv() => match event {
@@ -310,7 +310,7 @@ mod tests {
     use wartui_proto::link::LinkError;
 
     fn args() -> Args {
-        Args { port: None, sim: None, raw: false, verbose: false }
+        Args { bridge: None, sim: None, raw: false, verbose: false }
     }
 
     fn heard(event: LinkEvent) -> bool {

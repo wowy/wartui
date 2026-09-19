@@ -10,21 +10,21 @@ This is the operator's manual. The root [`README.md`](../../README.md) is the sh
 
 `run` is the default, so the subcommand can be left off.
 
-| Command  | What it does                                         |
-| -------- | ---------------------------------------------------- |
-| `run`    | Capture a fleet into the store and watch it live     |
-| `export` | Write a WiGLE CSV from a capture                     |
-| `sniff`  | Print every frame the bridge hears, decoded          |
-| `status` | Ask the bridge for its channel, counters and uptime  |
-| `reset`  | Reboot a bridge that has stopped answering           |
-| `ports`  | List serial ports that look like an Espressif device |
+| Command  | What it does                                                |
+| -------- | ----------------------------------------------------------- |
+| `run`    | Capture a fleet into the store and watch it live            |
+| `export` | Write a WiGLE CSV from a capture                            |
+| `sniff`  | Print every frame the bridge hears, decoded                 |
+| `status` | Ask the bridge for its channel, counters and uptime         |
+| `reset`  | Reboot a bridge that has stopped answering                  |
+| `ports`  | List the Espressif boards attached, and the address of each |
 
 `run` takes:
 
 | Flag                    | Default     | What it is                                                   |
 | ----------------------- | ----------- | ------------------------------------------------------------ |
 | `--db PATH`             | dated       | Where to keep the capture                                    |
-| `--port PATH`           | discovered  | Serial port of the bridge                                    |
+| `--bridge PATH\|MAC`    | detected    | Which board the bridge is, by path or by address             |
 | `--channel N`           | `6`         | The fleet's ESP-NOW control channel                          |
 | `--pool us\|eu\|all`    | `all`       | Which channels the fleet should scan                         |
 | `--lat` `--lon` `--alt` | —           | A static position for every observation                      |
@@ -292,7 +292,9 @@ fault.
 
 The header says `waiting for a bridge to announce itself` for two quite different reasons, and the
 fault box says which. `link down: could not open …` means the port is not ours — nearly always
-another `wartui`, a `screen` session or an IDE's serial monitor still holding it. No fault at all
+another `wartui`, a `screen` session, an IDE's serial monitor or ModemManager still holding it.
+ModemManager is the one that clears on its own: on a distribution that runs it, it opens every
+freshly-attached CDC-ACM device for a few seconds to ask whether it is a modem. No fault at all
 means the port opened and the dongle is not answering.
 
 In that second case the bridge is usually not dead but deaf in one direction: its USB transmit
@@ -300,9 +302,10 @@ endpoint has stopped draining while it goes on reading every frame you send it. 
 within three seconds and reboots itself, so this should clear on its own and show up afterwards as
 `bridge rebooted itself: USB transmit had stalled`. If it does not, `wartui reset` asks it to
 reboot, which works because the receive path is the half that still runs — and keeps the device
-path, where `espflash reset --port …` re-enumerates the board and can move `ttyACM0` to `ttyACM1`
-under a script that named it. `espflash` is the fallback for a bridge that answers nothing at all,
-and unplugging is the last resort.
+path, where `espflash reset --port …` re-enumerates the board and can move `ttyACM0` to `ttyACM1`.
+Naming the board by its address rather than by a path is what survives that: `--bridge
+10:BD:A3:EC:44:C0` means the same board whichever node it came back on. `espflash` is the fallback
+for a bridge that answers nothing at all, and unplugging is the last resort.
 
 ```sh
 wartui status                          # exits in 5 s with the reason
@@ -319,40 +322,32 @@ would not decode, and dropped bulk commands.
 
 ### Telling the boards apart
 
-If the same port keeps being the wrong device — a node plugged in by USB looks identical to the
-bridge, same vendor and product ID — pin it with `--port`. `wartui ports` lists the candidates but
-cannot say which is which, and probing answers one port at a time and slowly: pointed at a node,
-`wartui status` waits five seconds for a link protocol the node does not speak and tells you only
-that this one is not the bridge.
+A node plugged in by USB is the same vendor and product ID as the bridge and sits on an adjacent
+device node, so a path says nothing about which board it reaches. `wartui ports` names them:
 
-Ask the USB tree instead. An ESP32's serial number _is_ its MAC, so the OS already knows, with no
-esp tool, no reflash and without opening anything. On Linux, udev has paired them:
+```
+$ wartui ports
+/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:EC:44:C0-if00
+  10:BD:A3:EC:44:C0     USB JTAG/serial debug unit  (303a:1001)
+/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_02:00:5E:10:9D:24-if00
+  02:00:5E:10:9D:24     USB JTAG/serial debug unit  (303a:1001)
+```
+
+**An ESP32's USB serial number is its MAC**, so the operating system has already paired each device
+node with the address that board's radio transmits from — with nothing opened, no `esp` tool and no
+reflash. That one fact is what the whole command rests on, and it holds on Linux and macOS alike. It
+is also why every board gets a name of its own above: udev builds those from the serial number, so
+no two ESP32s share one. Everything else on the bus carries a manufacturing serial instead, and a
+device that reports none at all reads as `address not reported` and is named by its socket.
+
+The bridge is the row whose address the fleet table shows as the bridge's, and a node the row whose
+heartbeats `wartui sniff` attributes to that address. Where the board generations differ, the OUI
+separates them too.
+
+Either name works as `--bridge`. The address is the one worth keeping: a device node moves when the
+board re-enumerates, and a `by-path` name moves when the cable does, while an address moves only when
+the board does.
 
 ```sh
-for l in /dev/serial/by-id/usb-Espressif_*; do
-  mac=${l##*unit_}; printf '%s\t%s\n' "$(readlink -f "$l")" "${mac%-if00}"
-done
+wartui --bridge 10:BD:A3:EC:44:C0
 ```
-
-On macOS the same fact comes out of `ioreg`. The two properties sit on different nodes of the tree
-and come out in either order, so they are paired as they arrive rather than assumed adjacent:
-
-```sh
-ioreg -l -w0 | LC_ALL=C awk -F'"' '
-  BEGIN { printf "%-24s %s\n", "PORT", "ADDRESS" }
-  /USB Serial Number/ && $4 ~ /^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$/ { mac = $4 }
-  /IOCalloutDevice/ && $4 ~ /usbmodem/ { dev = $4 }
-  mac != "" && dev != "" { printf "%-24s %s\n", dev, mac; mac = dev = "" }
-'
-```
-
-```
-PORT                     ADDRESS
-/dev/cu.usbmodem2101     02:00:5E:10:9D:24
-/dev/cu.usbmodem142201   02:00:5E:10:4F:98
-```
-
-The address shape is what picks the ESP32s out: everything else on the bus carries a manufacturing
-serial. The bridge is then the row whose address the fleet table shows as the bridge's, and a node
-the row whose heartbeats `wartui sniff` attributes to that address. Where the board generations
-differ, the OUI separates them too.
