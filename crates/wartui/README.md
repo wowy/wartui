@@ -297,8 +297,11 @@ others. A board that answers is held for the rest of the run: unplug the bridge 
 reflash a node and wartui waits for the bridge to come back rather than transmitting into the node.
 
 That file is state, not settings. Deleting it is always safe and costs one slower start, and it is
-what to delete if wartui keeps opening the wrong board. wartui deletes it itself when the board it
-names is attached and stops answering, which is what a reflashed bridge looks like.
+what to delete if wartui keeps opening the wrong board. It corrects itself two ways without being
+asked: whichever board answers writes its own address over it, and a board that is the only one
+attached and stops answering is dropped from it — which is what a reflashed bridge looks like. A
+board merely passed over during a sweep is not dropped, because being slower than the board beside
+it is not evidence of anything.
 
 The header says `waiting for a bridge to announce itself` for two quite different reasons, and the
 fault box says which. `link down: could not open …` means the port is not ours — nearly always
