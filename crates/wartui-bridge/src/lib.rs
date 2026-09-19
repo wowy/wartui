@@ -11,6 +11,7 @@
 //! the enumeration rather than write a second one.
 
 pub mod ports;
+pub mod remember;
 pub mod serial;
 pub mod sim;
 
@@ -91,6 +92,24 @@ pub enum TransportError {
     NoSuchBridge {
         /// The path or address that was asked for.
         spec: String,
+    },
+    /// Several boards are attached and nothing says which of them is the bridge.
+    #[error(
+        "several boards are attached and none is known to be the bridge ({boards}); \
+             name one with --bridge"
+    )]
+    AmbiguousBridge {
+        /// The boards that were found, by address where they report one.
+        boards: String,
+    },
+    /// The OS refused the port.
+    #[error(
+        "could not open {port}: permission denied. A serial port belongs to the \
+             `dialout` group: `sudo usermod -aG dialout $USER`, then log in again"
+    )]
+    Forbidden {
+        /// The port path.
+        port: String,
     },
     /// Opening the port failed.
     #[error("could not open {port}: {source}")]

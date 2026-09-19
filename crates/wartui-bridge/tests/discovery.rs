@@ -171,3 +171,81 @@ fn a_named_path_is_answered_without_consulting_what_is_attached() {
     let spec: BridgeSpec = "/dev/ttyACM9".parse().expect("parsing cannot fail");
     assert_eq!(serial::resolve_in(&[], &spec).expect("the path as given"), "/dev/ttyACM9");
 }
+
+#[test]
+fn a_remembered_bridge_is_tried_before_anything_else() {
+    // The ordinary run: one port opened, and it is the right one.
+    let boards = [esp("/dev/ttyACM0", NODE_MAC), esp("/dev/ttyACM1", BRIDGE_MAC)];
+    let order = serial::select(&boards, None, ports::parse_mac(BRIDGE_MAC));
+    assert_eq!(order[0].path, "/dev/ttyACM1");
+    assert_eq!(order[1].path, "/dev/ttyACM0", "and the rest are still swept behind it");
+}
+
+#[test]
+fn a_remembered_bridge_that_is_not_attached_leaves_an_ordinary_sweep() {
+    // Plugging in a different bridge has to work on the first run that sees it,
+    // so the address orders the sweep and never filters it.
+    let boards = [esp("/dev/ttyACM0", NODE_MAC)];
+    let order = serial::select(&boards, None, ports::parse_mac("AA:BB:CC:DD:EE:FF"));
+    assert_eq!(order.len(), 1);
+    assert_eq!(order[0].path, "/dev/ttyACM0");
+}
+
+#[test]
+fn the_sweep_order_is_the_same_on_every_pass() {
+    // Two runs on one machine must agree about what they tried, or a log from one
+    // says nothing about the other.
+    let boards = [esp("/dev/ttyACM2", NODE_MAC), esp("/dev/ttyACM0", BRIDGE_MAC)];
+    let first = serial::select(&boards, None, None);
+    let again = serial::select(&boards, None, None);
+    assert_eq!(first, again);
+    assert_eq!(first[0].path, "/dev/ttyACM0", "and by path, having nothing better");
+}
+
+#[test]
+fn a_named_path_is_the_only_candidate_and_is_never_swept_past() {
+    // Naming a board is naming it: reaching for another would open something the
+    // operator did not ask for, and transmit into it.
+    let boards = [esp("/dev/ttyACM0", BRIDGE_MAC), esp("/dev/ttyACM1", NODE_MAC)];
+    let spec: BridgeSpec = "/dev/ttyACM9".parse().expect("parsing cannot fail");
+    let order = serial::select(&boards, Some(&spec), ports::parse_mac(BRIDGE_MAC));
+    assert_eq!(order.len(), 1);
+    assert_eq!(order[0].path, "/dev/ttyACM9", "even one that is not attached");
+}
+
+#[test]
+fn a_named_address_that_is_not_attached_sweeps_nothing_at_all() {
+    let boards = [esp("/dev/ttyACM0", BRIDGE_MAC)];
+    let spec: BridgeSpec = NODE_MAC.parse().expect("parsing cannot fail");
+    assert!(serial::select(&boards, Some(&spec), None).is_empty());
+}
+
+#[test]
+fn a_reset_reaches_the_one_board_attached() {
+    let boards = [esp("/dev/ttyACM0", BRIDGE_MAC)];
+    assert_eq!(serial::unambiguous_bridge(&boards, None).expect("the only board"), "/dev/ttyACM0");
+}
+
+#[test]
+fn a_reset_reaches_the_remembered_board_out_of_several() {
+    let boards = [esp("/dev/ttyACM0", NODE_MAC), esp("/dev/ttyACM1", BRIDGE_MAC)];
+    let known = serial::unambiguous_bridge(&boards, ports::parse_mac(BRIDGE_MAC));
+    assert_eq!(known.expect("the remembered board"), "/dev/ttyACM1");
+}
+
+#[test]
+fn a_reset_refuses_to_guess_between_several_boards() {
+    // A `Reset` sent to a node reboots the node and costs it the addresses it was
+    // holding back, so this command never sweeps.
+    let boards = [esp("/dev/ttyACM0", BRIDGE_MAC), esp("/dev/ttyACM1", NODE_MAC)];
+    let refused = serial::unambiguous_bridge(&boards, None).expect_err("no way to tell");
+    let message = refused.to_string();
+    assert!(message.contains(BRIDGE_MAC) && message.contains(NODE_MAC), "{message}");
+    assert!(message.contains("--bridge"), "{message}");
+}
+
+#[test]
+fn a_reset_with_nothing_attached_says_so_rather_than_naming_a_board() {
+    let refused = serial::unambiguous_bridge(&[], None).expect_err("nothing attached");
+    assert!(refused.to_string().contains("no bridge found"), "{refused}");
+}

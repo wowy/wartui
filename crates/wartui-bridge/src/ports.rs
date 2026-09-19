@@ -13,11 +13,23 @@
 //! opened. [`PortCandidate::mac`] is that fact, and it is what lets one board be
 //! told from another without a probe, a reflash or an `esp` tool.
 //!
+//! **Never set DTR or RTS on a port, and never ask `serialport` to.** Opening a
+//! board is safe only by accident of how the two lines move together. The kernel's
+//! CDC-ACM driver raises `DTR | RTS` in one `SET_CONTROL_LINE_STATE` on open and
+//! drops both together on last close, and an ESP32's USB Serial/JTAG emulates the
+//! classic two-transistor auto-reset circuit: it resets at **DTR=0, RTS=1** and
+//! straps for the download ROM at **DTR=1, RTS=0**, so both-together is inert.
+//! `.dtr_on_open(false)` looks like politeness and is the reset sequence — it
+//! moves one line and not the other. `esptool` reaches that state deliberately,
+//! routing through (1,1) to avoid the other. Leave both alone, and set
+//! `FlowControl::None` explicitly so the driver cannot toggle RTS on its own.
+//!
 //! **What a device is for is decided by vendor ID and nothing else.**
 //! [`could_be_a_bridge`] and [`could_be_a_receiver`] are complements, so the two
-//! sets cannot overlap however either is called: looking for a bridge means
-//! writing into what is opened, and a node's port is the one thing that must
-//! never be written into by something looking for anything else. Exclusive
+//! sets cannot overlap however either is called. That matters because looking for
+//! a bridge means *writing* into what is opened: the sweep sends `Identify` frames
+//! down every candidate until one answers, so widening that set past Espressif's
+//! vendor ID would mean transmitting into whatever else is plugged in. Exclusive
 //! opening is a backstop against two readers, not a substitute for that.
 
 use std::collections::{HashMap, HashSet};
@@ -29,6 +41,14 @@ use crate::TransportError;
 
 /// Espressif's USB vendor ID, shared by the C5's and C6's native USB Serial/JTAG.
 pub const ESPRESSIF_VID: u16 = 0x303A;
+
+/// The product ID that native USB Serial/JTAG reports.
+///
+/// Every board in this fleet is one, so it separates nothing on its own. It orders
+/// a sweep: a board behind a USB-to-UART bridge chip carries the chip's vendor ID
+/// rather than Espressif's and never reaches the list at all, so anything here that
+/// is *not* this is an Espressif device of some other kind and is worth trying last.
+pub const BRIDGE_PID: u16 = 0x1001;
 
 /// Where udev keeps the names that survive a replug.
 const BY_ID: &str = "/dev/serial/by-id";
@@ -116,8 +136,15 @@ pub fn is_usable_path(path: &str) -> bool {
     !path.starts_with("/dev/tty.")
 }
 
-/// Read a MAC written the way an ESP32's USB serial number and this crate's own
-/// output both write it: six colon-separated hex pairs.
+/// Write a MAC the one way this crate writes one, so that what it prints can be
+/// pasted straight back in as `--bridge`.
+#[must_use]
+pub fn mac_text(mac: &Mac) -> String {
+    mac.iter().map(|byte| format!("{byte:02X}")).collect::<Vec<_>>().join(":")
+}
+
+/// Read a MAC written the way an ESP32's USB serial number and [`mac_text`] both
+/// write it: six colon-separated hex pairs.
 #[must_use]
 pub fn parse_mac(text: &str) -> Option<Mac> {
     let mut mac = [0u8; 6];

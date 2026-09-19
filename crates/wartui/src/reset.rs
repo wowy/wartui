@@ -16,6 +16,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::Args as ClapArgs;
+use wartui_bridge::remember::BridgeMemory;
+use wartui_bridge::serial::{self, discover_ports};
 use wartui_bridge::{BridgeInfo, LinkEvent};
 use wartui_proto::link::{BridgeToHost, HostToBridge};
 
@@ -51,13 +53,26 @@ pub struct Args {
 }
 
 pub async fn run(args: Args) -> Result<()> {
-    let mut link = super::open(args.bridge.as_deref(), None, 0)?;
+    // Resolved to one board here rather than left to the transport, which sweeps.
+    // A sweep sends this command's `Reset` into every Espressif board attached
+    // until one answers, and a node that receives one reboots — losing the
+    // addresses it was holding back, which is a node's own memory and survives a
+    // session (`crates/wartui-proto/src/dedup.rs`). So this command gets an
+    // unambiguous board or none, and says which it wanted.
+    let board = match args.bridge.as_deref() {
+        Some(named) => named.to_owned(),
+        None => serial::unambiguous_bridge(
+            &discover_ports().context("listing serial ports")?,
+            BridgeMemory::discover().recall(),
+        )?,
+    };
+    let mut link = super::open(Some(&board), None, 0)?;
 
     // Sent immediately, without waiting to be told the bridge is there: the case
     // this command is for is the one where nothing ever announces itself, and the
     // writer thread is ready as soon as the port is open.
     link.send_urgent(HostToBridge::Reset).context("queueing the reset")?;
-    println!("reset sent to {}", args.bridge.as_deref().unwrap_or("the board that was detected"));
+    println!("reset sent to {board}");
 
     match tokio::time::timeout(RECOVERY_TIMEOUT, wait_for_reboot(&mut link)).await {
         Ok(Ok((info, uptime_ms))) => {
@@ -65,7 +80,7 @@ pub async fn run(args: Args) -> Result<()> {
             Ok(())
         }
         Ok(Err(err)) => Err(err),
-        Err(_) => bail!("{}", unreachable_notice(args.bridge.as_deref())),
+        Err(_) => bail!("{}", unreachable_notice(Some(&board))),
     }
 }
 
