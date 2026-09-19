@@ -368,7 +368,9 @@ enum Pass {
     /// A board announced itself, and the connection to it has since ended.
     Connected(Mac),
     /// Nothing answered. `opened` counts the ports that were actually opened, which
-    /// is what decides how long to wait before trying again.
+    /// is what decides how long to wait before trying again: a candidate the OS
+    /// refused, or that vanished between the enumeration and the open, cost no time
+    /// and is no reason to wait longer.
     Failed { reason: String, opened: usize },
 }
 
@@ -413,6 +415,12 @@ async fn sweep(
     // wrongly. One of several unproven boards has earned no such benefit.
     let proven = candidates.len() == 1 || transport.spec.is_some() || settled.is_some();
     let attempts = if proven { IDENTIFY_ATTEMPTS } else { PROBE_ATTEMPTS };
+    if !proven {
+        // Said once per sweep, so that the announcement below reads as a choice
+        // rather than as the only board there was. With two bridges attached it is
+        // the only record of which one this run is driving and which it passed over.
+        tracing::info!(boards = candidates.len(), "no bridge is known yet; asking each in turn");
+    }
 
     let mut reasons = Vec::new();
     let mut opened = 0;
@@ -430,7 +438,9 @@ async fn sweep(
         match attempt.await {
             Ok(()) => return Pass::HandleDropped,
             Err(reason) => {
-                opened += 1;
+                if state.opened.load(Ordering::Relaxed) {
+                    opened += 1;
+                }
                 // Copied out rather than read in place: the guard would otherwise
                 // be held across the send below, which is not `Send`.
                 let announced = *state.mac.lock().unwrap_or_else(|e| e.into_inner());
@@ -481,6 +491,9 @@ async fn sweep(
 struct Attempt {
     /// Set to abandon the port: both threads check it between blocking calls.
     stop: AtomicBool,
+    /// The port was opened, as against refused or absent. A candidate that never
+    /// opened cost nothing, which is what the sweep's backoff turns on.
+    opened: AtomicBool,
     /// A `Ready` has arrived, so this board is the bridge.
     announced: AtomicBool,
     /// Any frame at all has decoded.
@@ -528,6 +541,7 @@ async fn connect(
         .map_err(|e| open_failure(path, &e))?;
     // Distinct from being connected: the port is ours, and whether anything is
     // listening is the next question. Which line is last in the log is the diagnosis.
+    state.opened.store(true, Ordering::Relaxed);
     progress!(port = %path, "port open; asking the bridge to identify itself");
     let writer = port.try_clone().map_err(|e| format!("could not split {path}: {e}"))?;
     // A third handle, given to the guard below so that the cleanup it does is

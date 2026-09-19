@@ -193,11 +193,12 @@ fn open(bridge: Option<&str>, sim: Option<u8>, sim_c6: u8) -> Result<LinkHandle>
         Some(spec) => SerialTransport::with_spec(spec),
         None => SerialTransport::new(),
     }
-    // Given even when a board was named, because the board named is still worth
-    // remembering: `--bridge` once is how an operator teaches wartui which of
-    // several boards it is, and typing it every run afterwards is the thing this
-    // is here to save them.
-    .remember_in(BridgeMemory::discover())
+    // Only detection writes to the file. A board named on the command line is a
+    // decision that is already written down, in the place it can be read — and
+    // recording it here would mean a single `wartui status --bridge X`, which
+    // changes nothing and is asked in order to find something out, quietly
+    // deciding what every later run opens.
+    .remember_in(if bridge.is_none() { BridgeMemory::discover() } else { BridgeMemory::none() })
     .start()
     .context("opening the link")
 }
