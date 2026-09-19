@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use wartui_bridge::remember::BridgeMemory;
 use wartui_bridge::serial::{self, BridgeSpec, SerialTransport, discover_ports};
 use wartui_bridge::sim::{SimConfig, SimTransport};
 use wartui_bridge::{BridgeInfo, LinkEvent, LinkHandle};
@@ -192,6 +193,12 @@ fn open(bridge: Option<&str>, sim: Option<u8>, sim_c6: u8) -> Result<LinkHandle>
         Some(spec) => SerialTransport::with_spec(spec),
         None => SerialTransport::new(),
     }
+    // Only detection writes to the file. A board named on the command line is a
+    // decision that is already written down, in the place it can be read — and
+    // recording it here would mean a single `wartui status --bridge X`, which
+    // changes nothing and is asked in order to find something out, quietly
+    // deciding what every later run opens.
+    .remember_in(if bridge.is_none() { BridgeMemory::discover() } else { BridgeMemory::none() })
     .start()
     .context("opening the link")
 }
@@ -232,7 +239,7 @@ fn describe(event: &LinkEvent) -> Option<String> {
 /// A MAC in the form the firmware's own logs and the sniffer captures use, so
 /// an address can be grepped for across all three.
 pub fn mac(mac: &Mac) -> String {
-    mac.iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(":")
+    wartui_bridge::ports::mac_text(mac)
 }
 
 /// One line saying how the bridge came to be running this life.

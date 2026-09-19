@@ -191,6 +191,20 @@ edit stops; follow the pointer before changing the rule.
 
 - **Somebody else's fleet is recognised in order to be reported, never to be accommodated.**
   → `crates/wartui-proto/src/air.rs` `//!`, `air::foreign`
+- **Finding the bridge means transmitting into what is opened**, so the sweep opens Espressif
+  vendor IDs and nothing else, and `wartui reset` — which transmits before anything has identified
+  itself — never sweeps at all. → `crates/wartui-bridge/src/ports.rs` `//!`,
+  `serial::select` / `serial::unambiguous_bridge`
+- **A connection asks once and then only waits.** A board that is not reading its USB endpoint
+  absorbs exactly one packet and NACKs the rest, and they sit in the tty's output queue through a
+  `close` that no signal can interrupt — 30 s measured against a node, during which the process
+  cannot exit. One `Identify` is also sufficient, because a board that is merely still booting
+  reads it out of that same FIFO when its loop starts. → `crates/wartui-bridge/src/serial.rs`,
+  `connect`'s `identify` arm
+- **Never set DTR or RTS on a serial port, or ask `serialport` to.** The kernel raises both
+  together on open, which an ESP32's USB Serial/JTAG ignores; moving one without the other is its
+  reset sequence, so `.dtr_on_open(false)` reboots the board it was being polite to.
+  → `crates/wartui-bridge/src/ports.rs` `//!`
 - **The planner deals only channels a node's own radio can tune**, and what no radio present can
   reach comes back in `Plan::unreachable` rather than being dealt anyway.
   → `crates/wartui-proto/src/plan.rs`, `plan_for`; `crates/wartui/README.md` § "Channel pools"

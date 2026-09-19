@@ -2119,6 +2119,7 @@ name = "wartui-bridge"
 version = "0.1.0"
 dependencies = [
  "serialport",
+ "tempfile",
  "thiserror 2.0.20",
  "tokio",
  "tracing",

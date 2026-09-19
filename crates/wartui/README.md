@@ -290,12 +290,26 @@ fault.
 
 ## When nothing arrives
 
+**wartui finds the bridge by asking.** With several Espressif boards attached — a node plugged in
+by USB is one — it opens each in turn and keeps the first that answers the link protocol, then
+writes that board's address to `~/.local/state/wartui/bridge` so later runs open one port and no
+others. A board that answers is held for the rest of the run: unplug the bridge mid-session to
+reflash a node and wartui waits for the bridge to come back rather than transmitting into the node.
+
+That file is state, not settings. Deleting it is always safe and costs one slower start, and it is
+what to delete if wartui keeps opening the wrong board. It corrects itself two ways without being
+asked: whichever board answers writes its own address over it, and a board that is the only one
+attached and stops answering is dropped from it — which is what a reflashed bridge looks like. A
+board merely passed over during a sweep is not dropped, because being slower than the board beside
+it is not evidence of anything.
+
 The header says `waiting for a bridge to announce itself` for two quite different reasons, and the
 fault box says which. `link down: could not open …` means the port is not ours — nearly always
 another `wartui`, a `screen` session, an IDE's serial monitor or ModemManager still holding it.
 ModemManager is the one that clears on its own: on a distribution that runs it, it opens every
 freshly-attached CDC-ACM device for a few seconds to ask whether it is a modem. No fault at all
-means the port opened and the dongle is not answering.
+means the port opened and the dongle is not answering. `swept N boards and none answered` is the
+third: every Espressif board attached was tried and none of them was a bridge.
 
 In that second case the bridge is usually not dead but deaf in one direction: its USB transmit
 endpoint has stopped draining while it goes on reading every frame you send it. The firmware notices
@@ -311,7 +325,19 @@ for a bridge that answers nothing at all, and unplugging is the last resort.
 wartui status                          # exits in 5 s with the reason
 wartui reset                           # reboot a bridge that stopped answering
 wartui --log-file wartui.log run
+rm ~/.local/state/wartui/bridge        # forget which board was the bridge
 ```
+
+`wartui reset` takes about thirty seconds to fail when it is pointed at a board that is not a
+bridge, and that is the cost of what it does: it transmits before anything has identified itself,
+because the board it is for answers nothing. A board that is not reading takes the first packet and
+leaves the rest queued, and closing the port waits for them. `run` never pays this: it asks with one
+frame and no more, however long it then waits for the answer.
+
+`wartui reset` never sweeps. A `Reset` reaching a node reboots it and costs it the addresses it was
+holding back, so it goes to the board named with `--bridge`, else the remembered one, else the only
+one attached — and with several attached and none of them known, it says so and asks for a
+`--bridge` rather than guessing.
 
 `--log-file` is the only way to see the transport's own account of a run: the view owns the
 terminal, so without it nothing is logged anywhere. It records which port was resolved, whether it
