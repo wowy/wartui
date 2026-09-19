@@ -31,24 +31,27 @@ const READ_TIMEOUT: Duration = Duration::from_millis(50);
 /// fires immediately, which is when the single `Identify` goes out.
 const IDENTIFY_INTERVAL: Duration = Duration::from_millis(500);
 
-/// How long to wait for a board that is known to be the bridge, in ticks of
+/// How long to wait for a board when there is no other to try, in ticks of
 /// [`IDENTIFY_INTERVAL`].
 ///
 /// The thirteenth tick gives up, at 6.0 s — a second past the CLI's five-second
 /// notice, so the operator reads the long form before the one-line reason. Long
 /// because a dongle still bringing its radio up is not a wedged one, and the
 /// remedy for the wedge (`wartui reset`) is worth being sure about.
+///
+/// Patience is about how long a board is worth *before another is tried*, which is
+/// why this is not what a board answered last time gets when something else is
+/// attached: opening the other board costs a second and a half and settles it, and
+/// waiting six for the first would put the answer past the notice the CLI prints at
+/// five. A board passed over that way is tried again on the next pass, 750 ms later.
 const SETTLE_TICKS: u32 = 12;
 
-/// How long an unproven board gets before the sweep tries the next, in the same
-/// ticks.
+/// How long a board gets when there is another to try, in the same ticks.
 ///
 /// 1.5 s, because a healthy bridge answers in about two milliseconds
 /// (`docs/phase-3-findings.md`) and a sweep pays this for every board attached.
-/// Six seconds is the patience owed to a board already known to be the bridge,
-/// whose silence means a wedge; one that has never said what it is has earned
-/// none of it, and passing over the real bridge costs a retry rather than a
-/// failure.
+/// Passing over the real bridge costs a retry rather than a failure, which is the
+/// trade [`SETTLE_TICKS`] explains.
 const PROBE_TICKS: u32 = 3;
 
 /// How many undecodable frames from an unproven board before it is passed over.
@@ -324,6 +327,12 @@ async fn supervise(transport: SerialTransport, mut plumbing: crate::LinkPlumbing
                     previous = None;
                     repeats = 0;
                     delay = transport.reconnect_delay;
+                    // Waited out like any other retry, rather than reopening at once.
+                    // A board that announces itself and then drops — a marginal cable,
+                    // or one rebooting in a loop — would otherwise be reopened and
+                    // asked again as fast as the port can be opened, for as long as it
+                    // kept doing it. `Disconnected` has already gone out for this one.
+                    tokio::time::sleep(delay).await;
                     continue;
                 }
                 Pass::Failed { reason, opened } => {
@@ -404,14 +413,10 @@ async fn sweep(
         return Pass::Failed { reason, opened: 0 };
     }
 
-    // Twelve attempts is the patience owed to a board already known to be the
-    // bridge, whose silence means a wedge and whose remedy is `wartui reset`. It
-    // is owed to the only board attached for the same reason — there is nothing
-    // else to try, so cutting it short would only report the wedge sooner and
-    // wrongly. One of several unproven boards has earned no such benefit.
-    let proven = candidates.len() == 1 || transport.spec.is_some() || settled.is_some();
-    let patience = if proven { SETTLE_TICKS } else { PROBE_TICKS };
-    if !proven {
+    // Whether this pass has anywhere else to go. It decides both how long each board
+    // is worth and whether a board's silence is worth concluding anything from.
+    let alone = candidates.len() == 1 || transport.spec.is_some() || settled.is_some();
+    if !alone {
         // Said once per sweep, so that the announcement below reads as a choice
         // rather than as the only board there was. With two bridges attached it is
         // the only record of which one this run is driving and which it passed over.
@@ -420,12 +425,15 @@ async fn sweep(
 
     let mut reasons = Vec::new();
     let mut opened = 0;
+    // Set only by the remembered board being opened and then saying nothing, which
+    // is the one thing that means it has stopped being the bridge.
+    let mut remembered_went_quiet = false;
     for candidate in &candidates {
         let state = Arc::new(Attempt::default());
         let attempt = connect(
             &candidate.path,
-            patience,
-            proven,
+            if alone { SETTLE_TICKS } else { PROBE_TICKS },
+            alone,
             &state,
             &transport.memory,
             plumbing,
@@ -434,8 +442,15 @@ async fn sweep(
         match attempt.await {
             Ok(()) => return Pass::HandleDropped,
             Err(reason) => {
-                if state.opened.load(Ordering::Relaxed) {
+                let was_opened = state.opened.load(Ordering::Relaxed);
+                if was_opened {
                     opened += 1;
+                }
+                // Only from a board that had nowhere else to defer to, and so was
+                // heard out in full. A board given a second and a half while another
+                // was waiting has not been shown to be anything.
+                if alone && was_opened && remembered.is_some() && candidate.mac() == remembered {
+                    remembered_went_quiet = true;
                 }
                 // Copied out rather than read in place: the guard would otherwise
                 // be held across the send below, which is not `Send`.
@@ -444,7 +459,9 @@ async fn sweep(
                 // candidate: the sweep is over and what is left is a reconnection.
                 if let Some(mac) = announced {
                     tracing::warn!(reason = %reason, mac = %ports::mac_text(&mac), "link down");
-                    let _ = plumbing.events.send(LinkEvent::Disconnected { reason }).await;
+                    if plumbing.events.send(LinkEvent::Disconnected { reason }).await.is_err() {
+                        return Pass::HandleDropped;
+                    }
                     return Pass::Connected(mac);
                 }
                 reasons.push(reason);
@@ -452,15 +469,22 @@ async fn sweep(
         }
     }
 
-    // A board remembered as the bridge, still attached, and silent through a full
-    // attempt has been reflashed or replaced. Kept, it would cost every later run
-    // that patience before the sweep it needed anyway — and it is the one entry
-    // that can come to point at a node, since a node is what a bridge becomes when
-    // it is reflashed.
-    if settled.is_none()
-        && let Some(wanted) = remembered
-        && candidates.iter().any(|candidate| candidate.mac() == Some(wanted))
-    {
+    // A board remembered as the bridge, opened, heard out in full, and silent has
+    // been reflashed or replaced. Kept, it would cost every later run that patience
+    // before the sweep it needed anyway — and it is the one entry that can come to
+    // point at a node, since a node is what a bridge becomes when it is reflashed.
+    //
+    // It is not the only way the file is corrected, and not the common one: whatever
+    // board does answer writes its own address over it. This is for the case where
+    // nothing answers at all, which is the only case that leaves a wrong entry
+    // standing.
+    //
+    // **Opened is the whole of it.** A port that would not open said nothing because
+    // nothing was asked of it: ModemManager holds a fresh CDC-ACM device for a few
+    // seconds on some distributions, and a missing `dialout` group holds it for
+    // ever. Forgetting the bridge over either would throw away the right answer for
+    // a reason that has nothing to do with the board.
+    if settled.is_none() && remembered_went_quiet {
         transport.memory.forget();
     }
 
@@ -533,6 +557,10 @@ async fn connect(
 
     let port = serialport::new(path, BAUD)
         .timeout(READ_TIMEOUT)
+        // Named rather than left to the default, because it is the setting that
+        // keeps the driver from moving RTS on its own; `ports` explains why that
+        // matters on a board whose reset line is a pair of modem signals.
+        .flow_control(serialport::FlowControl::None)
         .open()
         .map_err(|e| open_failure(path, &e))?;
     // Distinct from being connected: the port is ours, and whether anything is

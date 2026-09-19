@@ -225,7 +225,13 @@ impl Gps {
     fn read_forever(&self, config: &GpsConfig) {
         let mut backoff = MIN_BACKOFF;
         while !self.stop.load(Ordering::Relaxed) {
-            match serialport::new(&config.port, config.baud).timeout(READ_TIMEOUT).open() {
+            let opening = serialport::new(&config.port, config.baud)
+                .timeout(READ_TIMEOUT)
+                // As on the bridge's port: the one setting that keeps the driver
+                // from moving RTS by itself.
+                .flow_control(serialport::FlowControl::None)
+                .open();
+            match opening {
                 Ok(port) => {
                     if !matches!(self.view().status, GpsStatus::Fixed { .. }) {
                         self.set_status(GpsStatus::Searching);
