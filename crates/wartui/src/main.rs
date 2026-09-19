@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use wartui_bridge::serial::{SerialTransport, discover_ports};
+use wartui_bridge::serial::{self, BridgeSpec, SerialTransport, discover_ports};
 use wartui_bridge::sim::{SimConfig, SimTransport};
 use wartui_bridge::{BridgeInfo, LinkEvent, LinkHandle};
 use wartui_proto::link::{LoopPhase, Mac, ResetCause};
@@ -55,7 +55,7 @@ enum Command {
     Status(status::Args),
     /// Reboot the bridge, for when it has stopped answering.
     Reset(reset::Args),
-    /// List serial ports that look like an Espressif device.
+    /// List the Espressif boards attached, and the address of each.
     Ports,
     /// Drive the simulator into a store with nothing drawn, and report what it
     /// cost the disk.
@@ -85,7 +85,7 @@ async fn main() -> Result<()> {
 ///
 /// They are flattened into [`Cli`] so that a bare `wartui` runs, which means clap
 /// accepts them before any subcommand too, and then nothing reads them:
-/// `wartui --port X status` probed whatever port discovery found and reported that
+/// `wartui --bridge X status` opens whatever board detection found and reports that
 /// no bridge was there. An argument that silently does nothing is worse than an error,
 /// so one typed there is refused. `--log-file` is global and means the same in either
 /// place.
@@ -149,38 +149,64 @@ fn logging(
     Ok(Some(guard))
 }
 
+/// List the Espressif boards attached, each named by the address it transmits from.
+///
+/// The address is the point of the command. A node plugged in by USB is the same
+/// vendor and product as the bridge and sits on an adjacent device node, so a path
+/// says nothing about which board it reaches — while an ESP32's USB serial number
+/// *is* its MAC, so the OS has already answered, with nothing opened and no `esp`
+/// tool. The bridge is then the row whose address the fleet table shows as the
+/// bridge's, and a node the row `wartui sniff` attributes heartbeats to.
 fn ports() -> Result<()> {
     let found = discover_ports().context("listing serial ports")?;
     if found.is_empty() {
-        println!("No Espressif device found.");
-        println!("If the bridge is plugged in, pass its path with --port.");
+        println!("No Espressif board is attached.");
+        println!("If the bridge is plugged in, name it with --bridge.");
         return Ok(());
     }
     for candidate in found {
+        println!("{}", candidate.path);
+        let address = candidate.mac().map_or_else(
+            || "address not reported".to_owned(),
+            |address| format!("{:<17}", mac(&address)),
+        );
         let product = candidate.product.as_deref().unwrap_or("unknown device");
         match (candidate.vid, candidate.pid) {
-            (Some(vid), Some(pid)) => {
-                println!("{}  {product}  ({vid:04x}:{pid:04x})", candidate.path);
-            }
-            _ => println!("{}  {product}", candidate.path),
+            (Some(vid), Some(pid)) => println!("  {address}  {product}  ({vid:04x}:{pid:04x})"),
+            _ => println!("  {address}  {product}"),
         }
     }
     Ok(())
 }
 
 /// Open whichever transport the arguments called for.
-fn open(port: Option<&str>, sim: Option<u8>, sim_c6: u8) -> Result<LinkHandle> {
+fn open(bridge: Option<&str>, sim: Option<u8>, sim_c6: u8) -> Result<LinkHandle> {
     if let Some(node_count) = sim {
         let config =
             SimConfig { node_count, c6_nodes: sim_c6.min(node_count), ..SimConfig::default() };
         return SimTransport::new(config).start().context("starting the simulator");
     }
-    match port {
-        Some(path) => SerialTransport::with_port(path),
+    match bridge.map(spec) {
+        Some(spec) => SerialTransport::with_spec(spec),
         None => SerialTransport::new(),
     }
     .start()
     .context("opening the link")
+}
+
+/// How a `--bridge` value was meant. Parsing it cannot fail: what is not an address
+/// is a path, and whether that path exists is the transport's question.
+fn spec(bridge: &str) -> BridgeSpec {
+    bridge.parse().unwrap_or_else(|never| match never {})
+}
+
+/// The device path a `--bridge` value names, when one is attached.
+///
+/// An address is the durable way to name a board and the useless way to name it to
+/// another program, so advice that quotes `espflash` resolves it first rather than
+/// printing a line that cannot be run.
+fn named_device(bridge: &str) -> Option<String> {
+    serial::resolve(&spec(bridge)).ok()
 }
 
 /// Render a link-level event that is not a frame.
@@ -331,16 +357,24 @@ pub const CONNECT_NOTICE_AFTER: Duration = Duration::from_secs(5);
 /// *open* the port is not this: that arrives as [`LinkEvent::Disconnected`] carrying
 /// the OS's own message. The wedged case is the hard one — the port opens, the writes
 /// succeed, and nothing comes back — and a reset is the only way to tell.
-pub fn no_bridge_notice(port: Option<&str>) -> String {
+pub fn no_bridge_notice(bridge: Option<&str>) -> String {
     let seconds = CONNECT_NOTICE_AFTER.as_secs();
-    let (where_, reset, wartui_reset) = match port {
-        Some(path) => (
+    let device = bridge.and_then(named_device);
+    let (where_, reset, wartui_reset) = match (bridge, device.as_deref()) {
+        (Some(name), Some(path)) => (
             format!("on {path}"),
             format!("espflash reset --port {path}"),
-            format!("wartui reset --port {path}"),
+            format!("wartui reset --bridge {name}"),
         ),
-        None => (
-            "on the port that was discovered".to_owned(),
+        // An address that resolves to nothing attached. Naming it back is the whole
+        // diagnosis, so the remedies below are about the board rather than the port.
+        (Some(name), None) => (
+            format!("as {name}, which no attached board answers to"),
+            "espflash reset".to_owned(),
+            "wartui reset".to_owned(),
+        ),
+        (None, _) => (
+            "on the board that was detected".to_owned(),
             "espflash reset".to_owned(),
             "wartui reset".to_owned(),
         ),
@@ -367,13 +401,13 @@ pub fn no_bridge_notice(port: Option<&str>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Command, no_bridge_notice, parse};
+    use super::{BridgeSpec, Command, no_bridge_notice, parse, spec};
 
     #[test]
-    fn a_port_before_a_subcommand_is_refused_rather_than_ignored() {
-        let error = parse(["wartui", "--port", "/dev/ttyACM2", "status"]).err().unwrap();
+    fn a_bridge_before_a_subcommand_is_refused_rather_than_ignored() {
+        let error = parse(["wartui", "--bridge", "/dev/ttyACM2", "status"]).err().unwrap();
         let message = error.to_string();
-        assert!(message.contains("wartui status --port"), "{message}");
+        assert!(message.contains("wartui status --bridge"), "{message}");
     }
 
     #[test]
@@ -384,24 +418,31 @@ mod tests {
     }
 
     #[test]
-    fn a_port_after_the_subcommand_reaches_it() {
-        let cli = parse(["wartui", "status", "--port", "/dev/ttyACM2"]).unwrap();
+    fn a_bridge_after_the_subcommand_reaches_it() {
+        let cli = parse(["wartui", "status", "--bridge", "/dev/ttyACM2"]).unwrap();
         let Some(Command::Status(args)) = cli.command else { panic!("not status") };
-        assert_eq!(args.port.as_deref(), Some("/dev/ttyACM2"));
+        assert_eq!(args.bridge.as_deref(), Some("/dev/ttyACM2"));
+    }
+
+    #[test]
+    fn a_bridge_can_be_named_by_its_address_as_readily_as_by_a_path() {
+        let cli = parse(["wartui", "status", "--bridge", "10:BD:A3:EC:44:C0"]).unwrap();
+        let Some(Command::Status(args)) = cli.command else { panic!("not status") };
+        assert!(matches!(spec(args.bridge.as_deref().expect("a bridge")), BridgeSpec::Mac(_)));
     }
 
     #[test]
     fn run_arguments_without_a_subcommand_still_run() {
-        let cli = parse(["wartui", "--port", "/dev/ttyACM2"]).unwrap();
+        let cli = parse(["wartui", "--bridge", "/dev/ttyACM2"]).unwrap();
         assert!(cli.command.is_none());
-        assert_eq!(cli.run.port.as_deref(), Some("/dev/ttyACM2"));
+        assert_eq!(cli.run.bridge.as_deref(), Some("/dev/ttyACM2"));
     }
 
     #[test]
     fn the_log_file_is_global_and_allowed_on_either_side() {
         for args in [
-            ["wartui", "--log-file", "w.log", "status", "--port", "/dev/x"],
-            ["wartui", "status", "--log-file", "w.log", "--port", "/dev/x"],
+            ["wartui", "--log-file", "w.log", "status", "--bridge", "/dev/x"],
+            ["wartui", "status", "--log-file", "w.log", "--bridge", "/dev/x"],
         ] {
             let cli = parse(args).unwrap();
             assert_eq!(cli.log_file.as_deref(), Some(std::path::Path::new("w.log")));
@@ -409,7 +450,7 @@ mod tests {
     }
 
     #[test]
-    fn the_notice_names_the_port_it_was_waiting_on() {
+    fn the_notice_names_the_board_it_was_waiting_on() {
         let notice = no_bridge_notice(Some("/dev/cu.usbmodem2101"));
         assert!(notice.contains("on /dev/cu.usbmodem2101 after 5s"), "{notice}");
         // The remedy has to be runnable as printed, which means carrying the
@@ -418,9 +459,9 @@ mod tests {
     }
 
     #[test]
-    fn without_a_port_the_notice_still_reads_as_a_sentence() {
+    fn without_a_named_board_the_notice_still_reads_as_a_sentence() {
         let notice = no_bridge_notice(None);
-        assert!(notice.contains("on the port that was discovered"), "{notice}");
+        assert!(notice.contains("on the board that was detected"), "{notice}");
         assert!(notice.contains("espflash reset"), "{notice}");
         // No dangling `--port` with nothing after it.
         assert!(!notice.contains("--port"), "{notice}");

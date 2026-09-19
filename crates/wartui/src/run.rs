@@ -50,9 +50,9 @@ impl From<PoolArg> for ChannelPool {
 
 #[derive(ClapArgs, Debug)]
 pub struct Args {
-    /// Serial port of the bridge. Discovered automatically if omitted.
-    #[arg(long, value_name = "PATH")]
-    pub(crate) port: Option<String>,
+    /// The bridge, as a device path or as the board's address. Detected if omitted.
+    #[arg(long, value_name = "PATH|MAC")]
+    pub(crate) bridge: Option<String>,
 
     /// Use the built-in simulator with this many fake nodes instead of hardware.
     #[arg(long, value_name = "NODES", num_args = 0..=1, default_missing_value = "3")]
@@ -139,7 +139,7 @@ pub async fn run(args: Args) -> Result<()> {
     };
 
     let pool: ChannelPool = args.pool.into();
-    let link = crate::open(args.port.as_deref(), args.sim, args.sim_c6)?;
+    let link = crate::open(args.bridge.as_deref(), args.sim, args.sim_c6)?;
 
     let started = now();
     // Whether the capture was named by hand decides what the parting line can tell them

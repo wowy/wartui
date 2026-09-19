@@ -61,7 +61,7 @@ wartui export --db tonight.db            # writes tonight.csv beside it
 of record and the CSV is a view over it, re-runnable against a finished session or one still going.
 
 ```sh
-wartui ports      # which serial devices look like an Espressif board
+wartui ports      # which boards are attached, and the address of each
 wartui status     # is the link alive, is anything being dropped
 wartui sniff      # every frame the fleet sends, decoded
 wartui reset      # reboot a bridge that has stopped answering
@@ -73,7 +73,7 @@ wartui reset      # reboot a bridge that has stopped answering
 | -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
 | [`crates/wartui`](crates/wartui/README.md)               | The CLI and the [ratatui](https://ratatui.rs/) UI — **view the linked README for the full operator's manual** |
 | `crates/wartui-core`                                     | Headless fleet engine, SQLite store, position, WiGLE export                                                   |
-| `crates/wartui-bridge`                                   | Host-side link to the dongle: transport, port discovery, simulator                                            |
+| `crates/wartui-bridge`                                   | Host-side link to the dongle: transport, the host's serial ports, simulator                                   |
 | `crates/wartui-proto`                                    | `no_std` wire formats and parsers, shared with both firmwares                                                 |
 | [`firmware/bridge`](firmware/bridge/README.md)           | The dongle: COBS framing and `esp-radio` calls, no protocol knowledge                                         |
 | [`firmware/node`](firmware/node/README.md)               | The nodes: sniffs, reports, takes assignments                                                                 |

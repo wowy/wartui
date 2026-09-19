@@ -22,9 +22,9 @@ const REPLY_TIMEOUT: Duration = super::CONNECT_NOTICE_AFTER;
 
 #[derive(ClapArgs)]
 pub struct Args {
-    /// Serial port of the bridge. Discovered automatically if omitted.
-    #[arg(long, value_name = "PATH")]
-    pub(crate) port: Option<String>,
+    /// The bridge, as a device path or as the board's address. Detected if omitted.
+    #[arg(long, value_name = "PATH|MAC")]
+    pub(crate) bridge: Option<String>,
 
     /// Ask the simulator instead of hardware.
     #[arg(long, value_name = "NODES", num_args = 0..=1, default_missing_value = "3")]
@@ -32,14 +32,14 @@ pub struct Args {
 }
 
 pub async fn run(args: Args) -> Result<()> {
-    let mut link = super::open(args.port.as_deref(), args.sim, 0)?;
+    let mut link = super::open(args.bridge.as_deref(), args.sim, 0)?;
 
     // The bridge announces itself on connect, so waiting for that keeps a status
     // request from going into a port nobody is listening on. The timeout is itself an
     // answer: it names the port and what to do about each of the three causes.
     let info = match tokio::time::timeout(REPLY_TIMEOUT, wait_for_ready(&mut link)).await {
         Ok(ready) => ready?,
-        Err(_) => bail!("{}", super::no_bridge_notice(args.port.as_deref())),
+        Err(_) => bail!("{}", super::no_bridge_notice(args.bridge.as_deref())),
     };
     println!(
         "bridge     {} on {:?}, firmware {}",

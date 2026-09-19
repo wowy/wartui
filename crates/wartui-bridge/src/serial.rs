@@ -13,14 +13,12 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 use wartui_proto::link::{
-    BridgeToHost, FrameAccumulator, HostToBridge, LINK_PROTO_VERSION, LinkError, MAX_FRAME,
+    BridgeToHost, FrameAccumulator, HostToBridge, LINK_PROTO_VERSION, LinkError, MAX_FRAME, Mac,
     decode_frame, encode_frame,
 };
 
+use crate::ports::{self, PortCandidate};
 use crate::{BridgeInfo, LinkEvent, LinkHandle, TransportError, link_pair};
-
-/// Espressif's USB vendor ID, shared by the C5's and C6's native USB Serial/JTAG.
-pub const ESPRESSIF_VID: u16 = 0x303A;
 
 /// USB CDC ignores the rate, but the field still has to be given.
 const BAUD: u32 = 921_600;
@@ -44,55 +42,79 @@ const IDENTIFY_INTERVAL: Duration = Duration::from_millis(500);
 /// queued is what prevents it, and [`supervise`] retries on its own cadence.
 const IDENTIFY_ATTEMPTS: u32 = 12;
 
-/// A serial port that might be a bridge.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PortCandidate {
-    /// Device path to open.
-    pub path: String,
-    /// USB vendor ID, when the OS reported one.
-    pub vid: Option<u16>,
-    /// USB product ID, when the OS reported one.
-    pub pid: Option<u16>,
-    /// Product string, for showing the user which device was picked.
-    pub product: Option<String>,
-}
-
-/// List serial ports that look like an Espressif device.
+/// The Espressif boards attached, which are the bridge and any node on USB.
 ///
 /// # Errors
 /// [`TransportError::Enumerate`] if the ports cannot be listed.
 pub fn discover_ports() -> Result<Vec<PortCandidate>, TransportError> {
-    let ports = serialport::available_ports().map_err(TransportError::Enumerate)?;
-    let mut found: Vec<PortCandidate> = ports
-        .into_iter()
-        .filter_map(|p| match p.port_type {
-            serialport::SerialPortType::UsbPort(usb) if usb.vid == ESPRESSIF_VID => {
-                Some(PortCandidate {
-                    path: p.port_name,
-                    vid: Some(usb.vid),
-                    pid: Some(usb.pid),
-                    product: usb.product,
-                })
-            }
-            _ => None,
-        })
-        .filter(|c| is_usable_path(&c.path))
-        .collect();
-    found.sort_by(|a, b| a.path.cmp(&b.path));
+    let mut found = ports::list()?;
+    found.retain(ports::could_be_a_bridge);
     Ok(found)
 }
 
-/// On macOS every USB serial device appears twice. `/dev/tty.*` is the callout
-/// side and blocks on carrier detect, so only `/dev/cu.*` is usable.
-#[must_use]
-pub fn is_usable_path(path: &str) -> bool {
-    !path.starts_with("/dev/tty.")
+/// How a bridge was named on the command line.
+///
+/// A MAC is worth accepting because it is the only name that survives everything:
+/// re-enumeration moves a device node, replugging into another socket moves a
+/// `by-path` name, and an ESP32's address moves only when the board does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BridgeSpec {
+    /// A device path, opened as given and never traded for another.
+    Path(String),
+    /// A board's address, matched against what the OS reports as its serial number.
+    Mac(Mac),
+}
+
+impl std::str::FromStr for BridgeSpec {
+    type Err = std::convert::Infallible;
+
+    /// Six colon-separated hex pairs is an address; everything else is a path.
+    /// Nothing else can be: no device node is spelled that way.
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        Ok(ports::parse_mac(text).map_or_else(|| Self::Path(text.to_owned()), Self::Mac))
+    }
+}
+
+impl std::fmt::Display for BridgeSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Path(path) => f.write_str(path),
+            Self::Mac(mac) => {
+                for (i, byte) in mac.iter().enumerate() {
+                    if i > 0 {
+                        f.write_str(":")?;
+                    }
+                    write!(f, "{byte:02X}")?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+/// The port a spec names, out of what is attached.
+///
+/// A spec that names a board not attached is refused rather than answered with
+/// another: an operator who named a board meant that board, and quietly opening a
+/// different one is how a capture ends up attributed to the wrong fleet.
+///
+/// # Errors
+/// [`TransportError::NoSuchBridge`] if nothing attached carries that address.
+pub fn resolve(spec: &BridgeSpec) -> Result<String, TransportError> {
+    match spec {
+        BridgeSpec::Path(path) => Ok(path.clone()),
+        BridgeSpec::Mac(wanted) => ports::list()?
+            .into_iter()
+            .find(|candidate| candidate.mac().as_ref() == Some(wanted))
+            .map(|candidate| candidate.path)
+            .ok_or_else(|| TransportError::NoSuchBridge { spec: spec.to_string() }),
+    }
 }
 
 /// A link to a real bridge, reconnecting on its own when the cable moves.
 #[derive(Debug, Clone)]
 pub struct SerialTransport {
-    port: Option<String>,
+    spec: Option<BridgeSpec>,
     reconnect_delay: Duration,
 }
 
@@ -106,13 +128,13 @@ impl SerialTransport {
     /// Find a bridge automatically.
     #[must_use]
     pub const fn new() -> Self {
-        Self { port: None, reconnect_delay: Duration::from_millis(750) }
+        Self { spec: None, reconnect_delay: Duration::from_millis(750) }
     }
 
-    /// Use a specific device path instead of searching.
+    /// Use the board the operator named, by path or by address.
     #[must_use]
-    pub fn with_port(port: impl Into<String>) -> Self {
-        Self { port: Some(port.into()), reconnect_delay: Duration::from_millis(750) }
+    pub fn with_spec(spec: BridgeSpec) -> Self {
+        Self { spec: Some(spec), reconnect_delay: Duration::from_millis(750) }
     }
 
     /// How long to wait between reconnection attempts.
@@ -138,8 +160,8 @@ impl SerialTransport {
     }
 
     fn resolve_port(&self) -> Result<String, TransportError> {
-        if let Some(port) = &self.port {
-            return Ok(port.clone());
+        if let Some(spec) = &self.spec {
+            return resolve(spec);
         }
         discover_ports()?.into_iter().next().map(|c| c.path).ok_or(TransportError::NoBridgeFound)
     }

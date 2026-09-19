@@ -43,8 +43,8 @@ cargo run -p wartui -- ports | status | sniff        # with a bridge plugged in
 cargo run -p wartui -- --log-file wartui.log run     # the only way to see transport logs
 ```
 
-Refer to boards by their last two octets; `crates/wartui/README.md` § "Telling the boards
-apart" has the one-liners.
+Refer to boards by their last two octets; `wartui ports` names each attached board by its
+address, and `crates/wartui/README.md` § "Telling the boards apart" says why that works.
 
 Each firmware is a **separate workspace** (`exclude = ["firmware"]`): different target, own
 toolchain pin, own lockfile. `cargo test --workspace` never touches them.
@@ -75,7 +75,9 @@ Four host crates, strictly layered, plus firmware that shares the bottom one.
   dependency, which is the only thing keeping the ends in step — and the reason a node's
   parsers are testable with `cargo test` rather than a reflash.
 - **`crates/wartui-bridge`** — host side of the USB link. Everything above talks to a `LinkHandle`
-  and cannot tell a real dongle (`serial`) from the fake fleet (`sim`).
+  and cannot tell a real dongle (`serial`) from the fake fleet (`sim`). It also owns the host's
+  serial ports generally (`ports`), which is what keeps one enumeration between the bridge and
+  anything else that opens a device.
 - **`crates/wartui-core`** — the headless half. Draws nothing, parses no arguments.
 - **`crates/wartui`** — clap CLI (`run`/`export`/`sniff`/`status`/`reset`/`ports`) and the ratatui
   view.

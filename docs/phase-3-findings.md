@@ -108,7 +108,7 @@ handler and the stall detector all use — does **not** re-enumerate the USB
 device: the same open file descriptor kept reading straight through the reboot,
 and `/dev/ttyACM0` stayed `/dev/ttyACM0`. `espflash`'s DTR/RTS reset does
 re-enumerate: the board came back as `/dev/ttyACM1`, and later as `ttyACM0`
-again, which is enough to make a `--port` in a script wrong. That is one more
+again, which is enough to make a device path in a script wrong. That is one more
 reason `wartui reset` is the first thing to reach for.
 
 ## Ruled out
