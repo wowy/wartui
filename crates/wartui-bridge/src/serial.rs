@@ -27,39 +27,35 @@ const BAUD: u32 = 921_600;
 /// Long enough not to spin, short enough that shutdown feels immediate.
 const READ_TIMEOUT: Duration = Duration::from_millis(50);
 
-/// How often to re-ask a silent bridge to identify itself. The first tick of a
-/// tokio interval fires immediately, so the usual case costs one frame.
+/// How long one tick of the patience below is. The first tick of a tokio interval
+/// fires immediately, which is when the single `Identify` goes out.
 const IDENTIFY_INTERVAL: Duration = Duration::from_millis(500);
 
-/// How many unanswered `Identify` frames before the attempt is abandoned.
+/// How long to wait for a board that is known to be the bridge, in ticks of
+/// [`IDENTIFY_INTERVAL`].
 ///
 /// The thirteenth tick gives up, at 6.0 s — a second past the CLI's five-second
-/// notice, so the operator reads the long form before the one-line reason.
-///
-/// Bounded at all because asking forever wedges the process, and pointing `wartui`
-/// at a node rather than the bridge is all it takes: frames pile up in that tty's
-/// output queue, which closing the port waits on and `SIGKILL` cannot interrupt
-/// (`crates/wartui/src/main.rs`, `Terminate`). Giving up before anything is left
-/// queued is what prevents it, and [`supervise`] retries on its own cadence.
-const IDENTIFY_ATTEMPTS: u32 = 12;
+/// notice, so the operator reads the long form before the one-line reason. Long
+/// because a dongle still bringing its radio up is not a wedged one, and the
+/// remedy for the wedge (`wartui reset`) is worth being sure about.
+const SETTLE_TICKS: u32 = 12;
 
-/// How many unanswered `Identify` frames one unproven board gets before the next
-/// is tried.
+/// How long an unproven board gets before the sweep tries the next, in the same
+/// ticks.
 ///
-/// Three rather than [`IDENTIFY_ATTEMPTS`]' twelve, because a sweep pays this for
-/// every board attached and a healthy bridge answers in about two milliseconds
-/// (`docs/phase-3-findings.md`). Twelve is the patience owed to a board that is
-/// *known* to be the bridge and may be wedged; a board that has never said what it
-/// is has earned none of it. It is also the smaller of the two risks: the wedge
-/// [`Shutdown`] guards against needs a full USB output queue, and three frames of
-/// eight bytes cannot fill one.
-const PROBE_ATTEMPTS: u32 = 3;
+/// 1.5 s, because a healthy bridge answers in about two milliseconds
+/// (`docs/phase-3-findings.md`) and a sweep pays this for every board attached.
+/// Six seconds is the patience owed to a board already known to be the bridge,
+/// whose silence means a wedge; one that has never said what it is has earned
+/// none of it, and passing over the real bridge costs a retry rather than a
+/// failure.
+const PROBE_TICKS: u32 = 3;
 
 /// How many undecodable frames from an unproven board before it is passed over.
 ///
 /// A board running node firmware talks constantly and none of it is a frame, so
 /// this is the difference between rejecting one in a tenth of a second and waiting
-/// out [`PROBE_ATTEMPTS`]. It is never applied to a proven board: a bridge forwarding
+/// out [`PROBE_TICKS`]. It is never applied to a proven board: a bridge forwarding
 /// a busy fleet down a bad cable produces these too, and giving up on it would tear
 /// down a working link.
 const PROBE_GARBLE_LIMIT: u32 = 64;
@@ -414,7 +410,7 @@ async fn sweep(
     // else to try, so cutting it short would only report the wedge sooner and
     // wrongly. One of several unproven boards has earned no such benefit.
     let proven = candidates.len() == 1 || transport.spec.is_some() || settled.is_some();
-    let attempts = if proven { IDENTIFY_ATTEMPTS } else { PROBE_ATTEMPTS };
+    let patience = if proven { SETTLE_TICKS } else { PROBE_TICKS };
     if !proven {
         // Said once per sweep, so that the announcement below reads as a choice
         // rather than as the only board there was. With two bridges attached it is
@@ -428,7 +424,7 @@ async fn sweep(
         let state = Arc::new(Attempt::default());
         let attempt = connect(
             &candidate.path,
-            attempts,
+            patience,
             proven,
             &state,
             &transport.memory,
@@ -512,14 +508,14 @@ struct Attempt {
 
 /// One candidate's turn. `Err` carries a reason to show the user.
 ///
-/// `attempts` is the whole difference between a probe and settling on a board: the
-/// open, the guard, the threads and the frames are one code path either way, which
+/// `patience` is the whole difference between a probe and settling on a board: the
+/// open, the guard, the threads and the frame are one code path either way, which
 /// is what keeps there from being two places to get [`Shutdown`] wrong. A probe
 /// that wins needs no handing over, because the `identify` arm below is already
 /// gated off once a board has announced itself.
 async fn connect(
     path: &str,
-    attempts: u32,
+    patience: u32,
     proven: bool,
     state: &Arc<Attempt>,
     memory: &BridgeMemory,
@@ -584,12 +580,27 @@ async fn connect(
         })
         .map_err(|e| format!("could not start writer thread: {e}"))?;
 
-    // A bridge announces itself at boot, and the host is rarely watching at
-    // that moment: unplugging the dongle is not part of restarting the TUI.
-    // So we ask, and go on asking while the radio could still be coming up —
-    // but not for ever, which is what [`IDENTIFY_ATTEMPTS`] bounds.
+    // A bridge announces itself at boot, and the host is rarely watching at that
+    // moment: unplugging the dongle is not part of restarting the TUI. So we ask —
+    // **exactly once, and then only wait.**
+    //
+    // Once, because a board that is not reading its USB endpoint absorbs exactly
+    // one packet: the ESP32's USB Serial/JTAG takes one into its OUT FIFO and NACKs
+    // every one after it until firmware reads that FIFO, which node firmware never
+    // does. The second frame is therefore still in flight when the port is closed,
+    // and `close` waits for the tty's output queue — measured at 30 s against a
+    // node on this bench, which is the kernel's own timer giving up rather than the
+    // board relenting. Nothing can interrupt it: the thread stays alive in the
+    // kernel, and because a process cannot exit while one of its threads is in
+    // there, `wartui status` pointed at a node hung for half a minute after
+    // printing its answer. One frame never reaches that.
+    //
+    // Once is also enough. A frame written to an enumerated board is delivered:
+    // if its main loop has not started draining the link yet, our `Identify` waits
+    // in that same FIFO and is read when it does. The patience below is for the
+    // *answer* to take its time, not for the asking to be repeated.
     let mut identify = tokio::time::interval(IDENTIFY_INTERVAL);
-    let mut asked = 0_u32;
+    let mut waited = 0_u32;
 
     // Forward commands, preserving the urgent-first bias, until either the
     // reader dies or the engine drops its handle.
@@ -608,14 +619,14 @@ async fn connect(
                         "{path} is talking, and none of it is the link protocol"
                     ));
                 }
-                if asked >= attempts && !state.decoded.load(Ordering::Relaxed) {
+                if waited >= patience && !state.decoded.load(Ordering::Relaxed) {
                     // Says what was observed, and stops short of concluding
                     // "it is not a bridge", which is false in the case an
                     // operator actually hits: it *is* the bridge, its transmit
                     // endpoint has stopped draining, and it is still reading
                     // every frame sent to it — which is why the remedy named
                     // here is a command rather than a shrug.
-                    let millis = IDENTIFY_INTERVAL.as_millis() * u128::from(attempts);
+                    let millis = IDENTIFY_INTERVAL.as_millis() * u128::from(patience);
                     // A board that was named or remembered is the one the advice is
                     // for; one passed over in a sweep is very likely a node, and
                     // telling an operator to reset it would be telling them to
@@ -631,8 +642,11 @@ async fn connect(
                         format!("nothing on {path} answered the link protocol in {millis}ms")
                     });
                 }
-                asked += 1;
-                if write_tx.send(HostToBridge::Identify).is_err() {
+                waited += 1;
+                // The first tick of a tokio interval fires immediately, so this is
+                // the one ask, sent as soon as the port is open. See above for why
+                // there is never a second.
+                if waited == 1 && write_tx.send(HostToBridge::Identify).is_err() {
                     break Err("writer stopped".to_owned());
                 }
             }
@@ -668,6 +682,11 @@ async fn connect(
 ///
 /// Clearing the queue is also what releases a writer already blocked inside a write:
 /// the handles share one open file description.
+///
+/// It does **not** make that close safe, and cannot: a `tcflush` empties the tty's
+/// own queue, and the packet the USB layer has already accepted is past it. Not
+/// writing a second packet is what keeps the close short, which is [`connect`]'s
+/// single `Identify`.
 struct Shutdown {
     state: Arc<Attempt>,
     port: Box<dyn serialport::SerialPort>,
