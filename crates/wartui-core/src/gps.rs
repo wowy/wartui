@@ -8,10 +8,12 @@
 //! **The reader stamps arrival time itself**, being the only thing that knows when a
 //! byte turned up. Whether that age is too much is [`crate::PositionChain`]'s.
 
+use std::io::ErrorKind;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::discover::{self, BAUD_LADDER, PROBE_WINDOW};
 use crate::nmea::{Nmea, NmeaError, Report};
 use crate::position::{Fix, PositionSource};
 
@@ -36,13 +38,55 @@ const MAX_BACKOFF: Duration = Duration::from_secs(5);
 /// retry that four times a second for the rest of the capture.
 const HEALTHY: Duration = Duration::from_secs(2);
 
-/// Which port to read, and how fast.
-#[derive(Debug, Clone)]
+/// How many times a port that has worked is retried before the search reopens.
+///
+/// A receiver put back into the same socket keeps its `by-id` name, so the common
+/// unplug costs a reconnection rather than another walk of the ladder. The search
+/// resumes when the path is gone from the enumeration, or when these are spent.
+const RETRIES_BEFORE_SEARCHING: u32 = 3;
+
+/// Which port to read, and how fast — or neither, and go and find out.
+#[derive(Debug, Clone, Default)]
 pub struct GpsConfig {
-    /// Device path, e.g. `/dev/cu.usbserial-1420`.
-    pub port: String,
-    /// Line rate. Most receivers ship at 9600; u-blox modules often at 38400.
-    pub baud: u32,
+    /// A device path the operator named. `None` searches for one.
+    pub port: Option<String>,
+    /// A line rate the operator named. `None` walks [`BAUD_LADDER`].
+    pub baud: Option<u32>,
+    /// Ports something else has claimed, which the search must not open.
+    pub reserved: Vec<String>,
+}
+
+impl GpsConfig {
+    /// Go and find a receiver.
+    #[must_use]
+    pub fn search() -> Self {
+        Self::default()
+    }
+
+    /// Read this port and no other.
+    #[must_use]
+    pub fn pinned(port: impl Into<String>) -> Self {
+        Self { port: Some(port.into()), ..Self::default() }
+    }
+
+    /// Use this rate rather than walking the ladder.
+    #[must_use]
+    pub fn at_baud(mut self, baud: u32) -> Self {
+        self.baud = Some(baud);
+        self
+    }
+
+    /// Leave these ports alone, whatever they turn out to be.
+    #[must_use]
+    pub fn reserving(mut self, paths: Vec<String>) -> Self {
+        self.reserved = paths;
+        self
+    }
+
+    /// The rates to try, in order.
+    fn ladder(&self) -> Vec<u32> {
+        self.baud.map_or_else(|| BAUD_LADDER.to_vec(), |baud| vec![baud])
+    }
 }
 
 /// What the receiver is doing, in terms fit to put on screen.
@@ -50,6 +94,20 @@ pub struct GpsConfig {
 pub enum GpsStatus {
     /// The port has not been opened yet.
     Connecting,
+    /// Listening to a port at a rate, to find out whether it is a receiver.
+    Scanning {
+        /// The port being listened to.
+        port: String,
+        /// The rate being tried.
+        baud: u32,
+    },
+    /// Every port was listened to and none of them was a receiver.
+    ///
+    /// Distinct from [`GpsStatus::Failed`], and the distinction is the whole of
+    /// what makes searching by default bearable: a receiver nobody asked for and
+    /// nobody attached is not a fault, and must not put a line on a view that has
+    /// one line to say anything on.
+    NoReceiver,
     /// Sentences are arriving and the receiver says it has no fix. Normal for
     /// the first half-minute after a cold start, and for indoors forever.
     Searching,
@@ -85,6 +143,14 @@ pub struct GpsView {
     pub counters: GpsCounters,
     /// Unix milliseconds the last fix arrived, if one ever has.
     pub last_fix_ms: Option<i64>,
+    /// The port and rate being read, once the search has settled on one.
+    pub settled: Option<(String, u32)>,
+    /// Whether the rate was the operator's choice rather than the ladder's.
+    ///
+    /// The view needs it to know whether `--gps-baud` is worth mentioning: a rate
+    /// the ladder chose is a rate that already produced valid sentences, so
+    /// unreadable lines afterwards mean something else entirely.
+    pub pinned_baud: bool,
 }
 
 #[derive(Debug)]
@@ -94,6 +160,8 @@ struct Inner {
     received_at_ms: Option<i64>,
     status: GpsStatus,
     counters: GpsCounters,
+    settled: Option<(String, u32)>,
+    pinned_baud: bool,
 }
 
 /// A handle on the receiver, cheap to clone and safe to share.
@@ -115,6 +183,8 @@ impl Gps {
                 received_at_ms: None,
                 status: GpsStatus::Connecting,
                 counters: GpsCounters::default(),
+                settled: None,
+                pinned_baud: false,
             })),
             stop: Arc::new(AtomicBool::new(false)),
         }
@@ -127,6 +197,7 @@ impl Gps {
     #[must_use]
     pub fn spawn(config: GpsConfig) -> Self {
         let gps = Self::detached();
+        gps.lock().pinned_baud = config.baud.is_some();
         let worker = gps.clone();
         let started = std::thread::Builder::new()
             .name("wartui-gps".to_owned())
@@ -158,6 +229,8 @@ impl Gps {
             status: inner.status.clone(),
             counters: inner.counters,
             last_fix_ms: inner.received_at_ms,
+            settled: inner.settled.clone(),
+            pinned_baud: inner.pinned_baud,
         }
     }
 
@@ -222,40 +295,155 @@ impl Gps {
         self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// Find a receiver, read it, and go back to looking when it goes away.
+    ///
+    /// The search lives on this thread because nothing above waits for it: a
+    /// capture starts the moment it is asked to and takes whatever position is
+    /// available when each row is written, so a few seconds spent listening to
+    /// ports costs the capture nothing. It is also what makes a receiver survive
+    /// being unplugged and put back into a different socket, which a reader given
+    /// one literal path cannot do.
     fn read_forever(&self, config: &GpsConfig) {
         let mut backoff = MIN_BACKOFF;
+        // What the search settled on. Kept across reconnections, because a puck put
+        // back where it came from is the same port at the same rate.
+        let mut settled: Option<(String, u32)> = None;
+        // Why the search stopped reading the port it had. A receiver that was
+        // working and has stopped is news, whichever way it stopped; one that was
+        // never there is not.
+        let mut lost: Option<String> = None;
+        let mut retries = 0_u32;
+
         while !self.stop.load(Ordering::Relaxed) {
-            let opening = serialport::new(&config.port, config.baud)
-                .timeout(READ_TIMEOUT)
-                // As on the bridge's port: the one setting that keeps the driver
-                // from moving RTS by itself.
-                .flow_control(serialport::FlowControl::None)
-                .open();
-            match opening {
-                Ok(port) => {
+            let searching = settled.is_none();
+            let Some((port, baud)) =
+                settled.clone().or_else(|| self.search(config, lost.is_none() && searching))
+            else {
+                self.set_status(nothing_found(config.port.as_deref(), lost.as_deref(), why_not));
+                std::thread::sleep(backoff);
+                backoff = (backoff * 2).min(MAX_BACKOFF);
+                continue;
+            };
+            if settled.is_none() {
+                settled = Some((port.clone(), baud));
+                lost = None;
+                retries = 0;
+                self.lock().settled = Some((port.clone(), baud));
+                tracing::info!(port = %port, baud, "reading a receiver");
+            }
+
+            match open_port(&port, baud) {
+                Ok(handle) => {
                     if !matches!(self.view().status, GpsStatus::Fixed { .. }) {
                         self.set_status(GpsStatus::Searching);
                     }
                     let opened = Instant::now();
-                    let reason = self.read_port(port);
+                    let reason = self.read_port(handle);
                     if self.stop.load(Ordering::Relaxed) {
                         return;
                     }
                     if opened.elapsed() >= HEALTHY {
                         backoff = MIN_BACKOFF;
+                        retries = 0;
                     }
                     self.set_status(GpsStatus::Failed(reason));
                 }
-                Err(e) => self.set_status(GpsStatus::Failed(format!("{}: {e}", config.port))),
+                Err(e) => self.set_status(GpsStatus::Failed(format!("{port}: {e}"))),
+            }
+
+            // A port that keeps failing, or that is no longer there at all, is worth
+            // looking past. A named one never is: the operator said which, and
+            // searching would answer a question they did not ask.
+            retries += 1;
+            let gone = !still_there(&port);
+            if config.port.is_none() && (retries > RETRIES_BEFORE_SEARCHING || gone) {
+                // Said in the terms that were actually established. A port that has
+                // left the enumeration was unplugged; one that is still there and has
+                // stopped talking is a receiver reconfigured, a cable failing, or
+                // another program holding it — and telling an operator to check a
+                // cable that is plugged in wastes the only thing the note buys them.
+                lost = Some(if gone {
+                    format!("{port} is no longer attached")
+                } else {
+                    format!("{port} stopped sending NMEA")
+                });
+                settled = None;
+                self.lock().settled = None;
             }
             std::thread::sleep(backoff);
             backoff = (backoff * 2).min(MAX_BACKOFF);
         }
     }
 
+    /// Listen to each candidate port at each rate until one of them is a receiver.
+    ///
+    /// `announce` is false while re-searching after a receiver was lost, so that the
+    /// note saying it has gone stays up rather than being overwritten by the scan
+    /// that is looking for it — the scan is most of every cycle, and the operator
+    /// needs the reason, not the activity.
+    fn search(&self, config: &GpsConfig, announce: bool) -> Option<(String, u32)> {
+        // Both named leaves detection nothing to decide. Reading the port is then the
+        // operator's instruction rather than a question, and putting a probe in front
+        // of it would refuse a working receiver for emitting too little inside one
+        // window — which is what a receiver configured for a single sentence a second
+        // does, and which this reader handled before it was ever asked to search.
+        if let (Some(path), Some(baud)) = (&config.port, config.baud) {
+            return Some((path.clone(), baud));
+        }
+        let ladder = config.ladder();
+        let (ports, needed) = match &config.port {
+            // Named: the ladder still runs, because a path says nothing about a rate.
+            // One sentence settles it, since the operator has already said what the
+            // device is; the question is only which rate it speaks at.
+            Some(path) => (
+                vec![wartui_bridge::ports::candidate(path, None, None, None)],
+                discover::SENTENCES_ON_A_NAMED_PORT,
+            ),
+            None => match wartui_bridge::ports::list() {
+                Ok(attached) => (
+                    discover::candidates(attached, &config.reserved),
+                    discover::SENTENCES_TO_BELIEVE,
+                ),
+                Err(e) => {
+                    tracing::debug!(error = %e, "could not list serial ports");
+                    return None;
+                }
+            },
+        };
+        discover::settle(&ports, &ladder, needed, |path, baud| {
+            if announce {
+                self.set_status(GpsStatus::Scanning { port: path.to_owned(), baud });
+            }
+            self.listen(path, baud)
+        })
+        .map(|(path, baud)| (path.to_owned(), baud))
+    }
+
+    /// Read whatever a port has to say for [`PROBE_WINDOW`], and say nothing back.
+    fn listen(&self, path: &str, baud: u32) -> Vec<u8> {
+        use std::io::Read;
+
+        let Ok(mut port) = open_port(path, baud) else { return Vec::new() };
+        let mut sample = Vec::new();
+        let mut buf = [0u8; 512];
+        let until = Instant::now() + PROBE_WINDOW;
+        // Accumulated across short reads rather than taken in one long one, so that
+        // `stop` is noticed within the read timeout and a capture being shut down
+        // does not wait out the window.
+        while Instant::now() < until && !self.stop.load(Ordering::Relaxed) {
+            match port.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => sample.extend_from_slice(&buf[..n]),
+                Err(e) if matches!(e.kind(), ErrorKind::TimedOut | ErrorKind::Interrupted) => {}
+                Err(_) => break,
+            }
+        }
+        sample
+    }
+
     /// Read until the port fails, returning why in terms fit to show a user.
     fn read_port(&self, mut port: Box<dyn serialport::SerialPort>) -> String {
-        use std::io::{ErrorKind, Read};
+        use std::io::Read;
 
         let mut lines = Lines::default();
         let mut buf = [0u8; 512];
@@ -277,9 +465,65 @@ impl Gps {
     }
 }
 
+/// What to say when a search came back with nothing.
+///
+/// The whole of what makes searching by default bearable. A receiver nobody asked
+/// for and nobody attached is not a fault, and a view with one line to say anything
+/// on must not spend it saying that most captures have no GPS — so that case is
+/// silent, and the search quietly runs again in case one is plugged in mid-capture.
+///
+/// A receiver the operator *named* is the opposite: they asked for that port, and
+/// silence about it would leave a capture recording no position for a reason nobody
+/// mentioned. So is one that *was* being read and has gone — a puck out of its
+/// socket halfway down a road is the difference between a capture that uploads and
+/// one that does not, and the operator is the only one who can put it back.
+fn nothing_found(
+    named: Option<&str>,
+    lost: Option<&str>,
+    why: impl FnOnce(&str) -> String,
+) -> GpsStatus {
+    match (named, lost) {
+        (Some(path), _) => GpsStatus::Failed(why(path)),
+        (None, Some(reason)) => GpsStatus::Failed(reason.to_owned()),
+        (None, None) => GpsStatus::NoReceiver,
+    }
+}
+
+/// Why a named port produced no receiver, in the OS's own words where it has any.
+fn why_not(path: &str) -> String {
+    match open_port(path, BAUD_LADDER[0]) {
+        Err(e) => format!("{path}: {e}"),
+        // It opened, so it is there and it is not a receiver — or not one talking
+        // NMEA, which a u-blox configured to emit only UBX binary is not.
+        Ok(_) => format!("{path} answered no NMEA at any rate tried"),
+    }
+}
+
+/// Open a serial port the one way this crate opens one.
+fn open_port(path: &str, baud: u32) -> serialport::Result<Box<dyn serialport::SerialPort>> {
+    serialport::new(path, baud)
+        .timeout(READ_TIMEOUT)
+        // As on the bridge's port: the one setting that keeps the driver from moving
+        // RTS by itself. `wartui_bridge::ports` has why that matters.
+        .flow_control(serialport::FlowControl::None)
+        .open()
+}
+
+/// Whether a path the search settled on is still among the ports attached.
+///
+/// A receiver unplugged and put back into another socket comes back under another
+/// name, and looking for the old one for ever is what a reader given one literal
+/// path does. Enumeration failing counts as "still there": a failure to list is not
+/// evidence that a working port has gone.
+fn still_there(path: &str) -> bool {
+    wartui_bridge::ports::list().map_or(true, |attached| {
+        attached.iter().any(|candidate| candidate.path == path || candidate.device == path)
+    })
+}
+
 /// Reassembles lines from however the OS chose to split the stream.
 #[derive(Debug, Default)]
-struct Lines {
+pub(crate) struct Lines {
     buf: Vec<u8>,
     /// Set when a line grew past [`MAX_LINE`]: everything up to the next
     /// newline is discarded rather than kept and mis-parsed.
@@ -287,7 +531,7 @@ struct Lines {
 }
 
 impl Lines {
-    fn push(&mut self, bytes: &[u8], mut yield_line: impl FnMut(&[u8])) {
+    pub(crate) fn push(&mut self, bytes: &[u8], mut yield_line: impl FnMut(&[u8])) {
         for byte in bytes {
             if *byte == b'\n' {
                 if !self.overrun && !self.buf.is_empty() {
@@ -308,6 +552,35 @@ impl Lines {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_receiver_nobody_asked_for_and_nobody_attached_is_not_a_fault() {
+        // Searching is the default, so this is most captures. A fault here would be
+        // a fault on the view of every run made without a GPS.
+        assert_eq!(nothing_found(None, None, |_| unreachable!()), GpsStatus::NoReceiver);
+    }
+
+    #[test]
+    fn a_receiver_that_was_named_and_not_found_says_so() {
+        let status =
+            nothing_found(Some("/dev/ttyNOPE"), None, |path| format!("{path}: no such device"));
+        assert_eq!(status, GpsStatus::Failed("/dev/ttyNOPE: no such device".to_owned()));
+    }
+
+    #[test]
+    fn a_receiver_that_was_being_read_and_has_gone_says_so_too() {
+        // Measured on the bench: pulling the puck mid-capture left the header with
+        // nothing to say about it while the rows quietly stopped carrying a
+        // position. The red `pos none` line is the alarm; this is the reason.
+        let gone =
+            nothing_found(None, Some("/dev/ttyACM0 is no longer attached"), |_| unreachable!());
+        assert_eq!(gone, GpsStatus::Failed("/dev/ttyACM0 is no longer attached".to_owned()));
+        // And a port still attached that has stopped talking says that instead, so
+        // nobody is sent to check a cable that is plugged in.
+        let quiet =
+            nothing_found(None, Some("/dev/ttyACM0 stopped sending NMEA"), |_| unreachable!());
+        assert_eq!(quiet, GpsStatus::Failed("/dev/ttyACM0 stopped sending NMEA".to_owned()));
+    }
 
     const GGA: &[u8] = b"$GPGGA,123519.00,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*69";
     const GGA_NO_FIX: &[u8] = b"$GPGGA,123520.00,4807.038,N,01131.000,E,0,00,,,M,,M,,*76";

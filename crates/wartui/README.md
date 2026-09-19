@@ -28,8 +28,9 @@ This is the operator's manual. The root [`README.md`](../../README.md) is the sh
 | `--channel N`           | `6`         | The fleet's ESP-NOW control channel                          |
 | `--pool us\|eu\|all`    | `all`       | Which channels the fleet should scan                         |
 | `--lat` `--lon` `--alt` | —           | A static position for every observation                      |
-| `--gps PATH`            | —           | An NMEA receiver, preferred over `--lat`/`--lon`             |
-| `--gps-baud N`          | `9600`      | Line rate of that receiver                                   |
+| `--gps PATH`            | detected    | An NMEA receiver, preferred over `--lat`/`--lon`             |
+| `--no-gps`              | off         | Do not look for a receiver at all                            |
+| `--gps-baud N`          | detected    | Line rate of that receiver                                   |
 | `--gps-max-age S`       | `5`         | How old a fix may be before falling back                     |
 | `--sim N`               | —           | Run a fake fleet instead of hardware                         |
 | `--sim-c6 N`            | `0`         | Make that many of them C6s, from the end of the fleet        |
@@ -213,27 +214,51 @@ dropped for want of a position — but **WiGLE will not accept a row without coo
 capture with no position given exports nothing and says how many networks it left out.
 
 ```sh
-wartui run --db drive.db --gps /dev/ttyUSB0 --lat 37.7749 --lon -122.4194
+wartui run --db drive.db --lat 37.7749 --lon -122.4194
 ```
 
-Giving both is the useful combination: satellite positions whenever the receiver has one, the
-typed-in position the rest of the time, rather than nothing at all while the receiver is still
-finding itself.
+**A receiver is found without being named.** Every serial port that is not one of the fleet's own
+boards is listened to in turn, at 9600, then 38400, 4800 and 115200, and the first that produces two
+sentences passing their checksum is the one read for the rest of the capture. A port that names
+itself — `u-blox`, `GPS`, `GNSS` — is tried first, but that only decides the order: the common pucks
+sit behind a general-purpose USB-to-UART chip that says nothing about what is behind it, so what
+settles it is reading the port.
 
-`--gps` takes any receiver that speaks NMEA 0183 over a serial port. `GGA` and `RMC` are read and
-everything else ignored; the altitude, the satellite count and an accuracy estimated from the
-reported HDOP all reach the export. `--gps-baud` defaults to 9600, which is what most receivers ship
-at — u-blox modules are often 38400, and the wrong rate shows up in the footer as unreadable lines
-with no fix rather than as silence.
+The search **writes nothing to any port**, and never opens an Espressif one. That is what keeps it
+from meeting the other half of wartui, which is transmitting into whatever it opens while it looks
+for the bridge.
+
+Giving `--lat`/`--lon` as well is the useful combination: satellite positions whenever the receiver
+has one, the typed-in position the rest of the time, rather than nothing at all while the receiver is
+still finding itself.
+
+`--gps PATH` pins one receiver, for when several are attached or the search settles on the wrong
+device; the rates are still tried unless `--gps-baud` names one, and one sentence is enough to
+settle a port you named rather than the two an unknown port has to produce. **Naming both opens the
+port and reads it with no probe at all** — there is nothing left to detect, and a receiver
+configured to say very little would otherwise be refused for saying too little inside one window.
+`--no-gps` turns the search off, and `--sim` implies it unless `--gps` names a receiver: a
+simulated fleet is how wartui is worked on with nothing plugged in, and a search that opens every
+serial port on the machine is not part of that.
+Any receiver that speaks NMEA 0183 over a serial port will do: `GGA` and `RMC` are read and
+everything else ignored, and the altitude, the satellite count and an accuracy estimated from the
+reported HDOP all reach the export.
+
+**A receiver that is named and not found is a fault; one that was never found is not.** Searching is
+the default, so most captures made without a GPS are captures where there was never going to be one,
+and the header says nothing about it. `--gps` is the operator asking for a particular port, so its
+absence is reported.
 
 **A fix has to be recent to be used.** Past `--gps-max-age` seconds the position falls back to the
 tier below and the header says `gps fix is stale`, because at driving speed a minute-old fix is a
 different neighbourhood and a row that quietly claimed it would be worse than one admitting to the
 static position.
 
-The receiver runs on its own thread and nothing waits for it: a capture starts immediately,
-reconnects on its own if the puck is unplugged and put back, and says what it is doing on the header
-— `gps searching`, `gps ok, 8 sats`, `gps fix is stale`, or the error from the port.
+The receiver runs on its own thread and nothing waits for it: a capture starts immediately, and says
+what it is doing on the header — `gps scanning /dev/… @38400`, `gps searching`, `gps ok, 8 sats`,
+`gps fix is stale`, or the error from the port. The search living on that thread is also what lets a
+puck be unplugged and put back into a *different* socket: it comes back under another name, and the
+next pass finds it there.
 
 ## Reading the fleet table
 

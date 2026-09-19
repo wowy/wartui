@@ -404,8 +404,10 @@ fn position(snapshot: &Snapshot) -> Vec<Span<'static>> {
         ),
     };
     let mut spans = vec![fix];
-    if let Some(gps) = &snapshot.gps {
-        spans.push(receiver(gps, snapshot.position.source));
+    if let Some(gps) = &snapshot.gps
+        && let Some(span) = receiver(gps, snapshot.position.source)
+    {
+        spans.push(span);
     }
     spans
 }
@@ -415,29 +417,38 @@ fn position(snapshot: &Snapshot) -> Vec<Span<'static>> {
 /// A configured GPS that is not producing the rows' positions is this tier's one
 /// failure, and it is otherwise silent — the rows keep coming, carrying the
 /// position from before the drive started. The note stays up until it is fixed.
-fn receiver(gps: &GpsView, source: PositionSource) -> Span<'static> {
+///
+/// Returns nothing at all when the search found no receiver. Looking for one is the
+/// default, so most captures that say nothing about a GPS are captures where there
+/// was never going to be one, and a line reporting that on every one of them would
+/// be a fault where there is no fault.
+fn receiver(gps: &GpsView, source: PositionSource) -> Option<Span<'static>> {
     // Checked before the source: a fix stays usable for `max_age` after the puck
     // is unplugged, so for those seconds the rows really are coming from the GPS
     // and the port really is dead.
     if let GpsStatus::Failed(reason) = &gps.status {
-        return Span::styled(format!("  gps: {reason}"), Style::new().fg(Color::Yellow));
+        return Some(Span::styled(format!("  gps: {reason}"), Style::new().fg(Color::Yellow)));
     }
     if source == PositionSource::Gps {
         let sats = match gps.status {
             GpsStatus::Fixed { satellites: Some(n) } => format!(", {n} sats"),
             _ => String::new(),
         };
-        return Span::styled(format!("  gps ok{sats}"), Style::new().fg(Color::Green));
+        return Some(Span::styled(format!("  gps ok{sats}"), Style::new().fg(Color::Green)));
     }
     let text = match &gps.status {
-        GpsStatus::Connecting => "  gps connecting",
-        GpsStatus::Searching => "  gps searching",
+        GpsStatus::Connecting => "  gps connecting".to_owned(),
+        // Named, so the port is worth saying: the operator is watching the ladder
+        // work through the rates their receiver might be at.
+        GpsStatus::Scanning { port, baud } => format!("  gps scanning {port} @{baud}"),
+        GpsStatus::Searching => "  gps searching".to_owned(),
         // Talking, has had a fix, and the chain has stopped believing it.
-        GpsStatus::Fixed { .. } => "  gps fix is stale",
-        GpsStatus::Failed(_) => "  gps unreadable", // Handled above.
+        GpsStatus::Fixed { .. } => "  gps fix is stale".to_owned(),
+        GpsStatus::Failed(_) => "  gps unreadable".to_owned(), // Handled above.
+        // Nothing was attached, which is not news.
+        GpsStatus::NoReceiver => return None,
     };
-    let text = text.to_owned();
-    Span::styled(text, Style::new().fg(Color::Yellow))
+    Some(Span::styled(text, Style::new().fg(Color::Yellow)))
 }
 
 fn draw_fleet(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot, ui: &Ui) {
@@ -866,13 +877,23 @@ fn faults(snapshot: &Snapshot) -> Vec<String> {
         if let GpsStatus::Failed(reason) = &gps.status {
             faults.push(format!("gps unreadable: {reason}"));
         }
-        // Every line failing its checksum is a receiver talking at a rate nobody
-        // is listening at, and only that is fixed with --gps-baud.
+        // Every line failing its checksum is a receiver talking at a rate nobody is
+        // listening at. Worth saying only when the rate was the operator's: one the
+        // ladder chose already produced valid sentences at that rate, so a flood of
+        // rejects afterwards is a receiver that changed or a cable that is failing,
+        // and `--gps-baud` is not the answer to either.
         if gps.counters.fixes == 0 && gps.counters.rejected > 20 {
-            faults.push(format!(
-                "gps: {} unreadable lines and no fix — wrong --gps-baud?",
-                gps.counters.rejected
-            ));
+            let rejected = gps.counters.rejected;
+            faults.push(if gps.pinned_baud {
+                format!("gps: {rejected} unreadable lines and no fix — wrong --gps-baud?")
+            } else {
+                match &gps.settled {
+                    Some((port, baud)) => {
+                        format!("gps: {rejected} unreadable lines and no fix from {port} @{baud}")
+                    }
+                    None => format!("gps: {rejected} unreadable lines and no fix"),
+                }
+            });
         }
     }
     if c.undecodable > 0 {
@@ -1342,7 +1363,22 @@ mod tests {
             snapshot.position.lat = Some(48.1173);
             snapshot.position.lon = Some(11.5167);
         }
-        snapshot.gps = Some(GpsView { status, counters, last_fix_ms: Some(EPOCH_MS) });
+        snapshot.gps = Some(GpsView {
+            status,
+            counters,
+            last_fix_ms: Some(EPOCH_MS),
+            settled: Some(("/dev/ttyACM1".to_owned(), 9600)),
+            pinned_baud: false,
+        });
+        snapshot
+    }
+
+    /// The same, for a receiver the operator named a rate for.
+    fn with_pinned_gps(status: GpsStatus, counters: GpsCounters) -> Snapshot {
+        let mut snapshot = with_gps(status, counters, PositionSource::Static);
+        if let Some(gps) = snapshot.gps.as_mut() {
+            gps.pinned_baud = true;
+        }
         snapshot
     }
 
@@ -1422,12 +1458,49 @@ mod tests {
         );
         assert!(rendered(&failed).contains("gps unreadable"));
 
-        let mistuned = with_gps(
+        // A rate the operator chose is the one that `--gps-baud` can answer for.
+        let mistuned = with_pinned_gps(
+            GpsStatus::Searching,
+            GpsCounters { sentences: 0, fixes: 0, rejected: 300 },
+        );
+        assert!(rendered(&mistuned).contains("wrong --gps-baud"));
+    }
+
+    #[test]
+    fn a_detected_rate_is_never_blamed_on_the_flag_that_did_not_choose_it() {
+        // The ladder settles on a rate by getting valid sentences out of it, so
+        // unreadable lines afterwards are a receiver that changed or a cable that is
+        // failing. Sending the operator to `--gps-baud` would send them nowhere.
+        let noisy = with_gps(
             GpsStatus::Searching,
             GpsCounters { sentences: 0, fixes: 0, rejected: 300 },
             PositionSource::Static,
         );
-        assert!(rendered(&mistuned).contains("wrong --gps-baud"));
+        let drawn = rendered(&noisy);
+        assert!(!drawn.contains("--gps-baud"), "{drawn}");
+        assert!(drawn.contains("300 unreadable lines"), "{drawn}");
+    }
+
+    #[test]
+    fn a_receiver_that_was_never_found_is_not_a_fault_and_not_a_line() {
+        // Searching is the default, so most captures with no receiver are captures
+        // where there was never going to be one. Saying so on every one of them
+        // would put a fault on the view where there is no fault.
+        let none = with_gps(GpsStatus::NoReceiver, GpsCounters::default(), PositionSource::Static);
+        let drawn = rendered(&none);
+        assert!(!drawn.contains("gps"), "{drawn}");
+        // And the row below still says where the capture thinks it is.
+        assert!(drawn.contains("(static)"), "{drawn}");
+    }
+
+    #[test]
+    fn a_ladder_being_walked_says_which_port_and_which_rate() {
+        let scanning = with_gps(
+            GpsStatus::Scanning { port: "/dev/ttyUSB0".to_owned(), baud: 38_400 },
+            GpsCounters::default(),
+            PositionSource::Static,
+        );
+        assert!(rendered(&scanning).contains("gps scanning /dev/ttyUSB0 @38400"));
     }
 
     /// A capture whose only fault is the bridge dropping frames.

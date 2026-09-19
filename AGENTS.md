@@ -111,8 +111,9 @@ or still-running session. `SCHEMA` changes shape as freely as the work needs;
 `store::SCHEMA_VERSION` stays at 1 until 1.0, and a capture stamped anything else is refused
 rather than migrated.
 
-Positions resolve fresh per record through `PositionChain`: GPS (`--gps`, NMEA on its own thread)
-→ static `--lat`/`--lon` → nothing. Which tier answered is stored per row.
+Positions resolve fresh per record through `PositionChain`: GPS (found by `discover`, or pinned with
+`--gps`; NMEA on its own thread) → static `--lat`/`--lon` → nothing. Which tier answered is stored
+per row.
 
 ## Invariants that are easy to break
 
@@ -193,8 +194,9 @@ edit stops; follow the pointer before changing the rule.
   → `crates/wartui-proto/src/air.rs` `//!`, `air::foreign`
 - **Finding the bridge means transmitting into what is opened**, so the sweep opens Espressif
   vendor IDs and nothing else, and `wartui reset` — which transmits before anything has identified
-  itself — never sweeps at all. → `crates/wartui-bridge/src/ports.rs` `//!`,
-  `serial::select` / `serial::unambiguous_bridge`
+  itself — never sweeps at all. The GPS search is the complement: it opens everything *but* those,
+  and writes to none of them. → `crates/wartui-bridge/src/ports.rs` `//!`,
+  `serial::select` / `serial::unambiguous_bridge`, `crates/wartui-core/src/discover.rs` `//!`
 - **A connection asks once and then only waits.** A board that is not reading its USB endpoint
   absorbs exactly one packet and NACKs the rest, and they sit in the tty's output queue through a
   `close` that no signal can interrupt — 30 s measured against a node, during which the process
