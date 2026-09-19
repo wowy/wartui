@@ -45,7 +45,8 @@ pub fn dated_path(started: DateTime<Local>) -> PathBuf {
 ///
 /// Beside the capture rather than in the working directory, so a capture copied off the
 /// card exports next to itself rather than wherever the export was run from. A `--db`
-/// named without an extension gains one, so the export can never land on the capture.
+/// named without an extension gains one; a `--db` that already ends in `.csv` comes back
+/// unchanged, and `export` refuses that rather than writing an export over a capture.
 pub fn export_path(db: &Path) -> PathBuf {
     let mut csv = db.to_path_buf();
     csv.set_extension("csv");
@@ -173,6 +174,12 @@ mod tests {
     #[test]
     fn an_export_stays_in_the_directory_the_capture_was_read_from() {
         assert_eq!(export_path(Path::new("/cards/tonight.db")), Path::new("/cards/tonight.csv"));
+    }
+
+    #[test]
+    fn a_capture_already_named_csv_exports_to_its_own_name() {
+        // Which `export` refuses rather than acting on; see its `is_the_capture`.
+        assert_eq!(export_path(Path::new("tonight.csv")), Path::new("tonight.csv"));
     }
 
     #[test]

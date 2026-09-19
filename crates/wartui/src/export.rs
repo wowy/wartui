@@ -65,6 +65,13 @@ pub fn run(args: Args) -> Result<()> {
         Some(path) => (path, false),
         None => (capture::export_path(&db), true),
     };
+    if is_the_capture(&out, &db) {
+        bail!(
+            "{} is the capture itself, and writing the export there would empty it; \
+             name the CSV with --out PATH",
+            out.display()
+        );
+    }
     let conn = open_readonly(&db).with_context(|| format!("opening {}", db.display()))?;
     let filter = ExportFilter { session_id: args.session, recapture_secs: args.recapture };
     let version = env!("CARGO_PKG_VERSION");
@@ -76,10 +83,8 @@ pub fn run(args: Args) -> Result<()> {
         writer.flush().context("flushing the export")?;
         summary
     } else {
-        let file = create_csv(&out, derived)?;
-        let mut writer = BufWriter::new(file);
-        let summary = wigle_csv(&conn, filter, &mut writer, version)?;
-        writer.flush().context("flushing the export")?;
+        let summary =
+            into_csv(&out, derived, |writer| Ok(wigle_csv(&conn, filter, writer, version)?))?;
         eprintln!("{} rows written to {}", summary.rows, out.display());
         summary
     };
@@ -92,6 +97,48 @@ pub fn run(args: Args) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Whether `out` names the capture itself.
+///
+/// Worth a syscall because the cost of missing it is the evening: the CSV is opened for
+/// writing before a row is read, so `--db tonight.db -o tonight.db` — one keystroke from
+/// a real command now that `-o` follows `--db` — truncates the store while the export
+/// holds it open, and the capture is the one thing here that cannot be taken again.
+///
+/// Canonicalised, so `./tonight.db` and `tonight.db` are one answer rather than two, and
+/// so a link to the capture is recognised as the capture. A path that is not there yet
+/// cannot be it, which is the ordinary case and is what the failed canonicalise means.
+fn is_the_capture(out: &Path, db: &Path) -> bool {
+    match (out.canonicalize(), db.canonicalize()) {
+        (Ok(out), Ok(db)) => out == db,
+        _ => false,
+    }
+}
+
+/// Write the CSV at `path` through `write`, taking a name we chose back if it fails.
+///
+/// The file has to exist before a row can go into it, so a failure part way through —
+/// a query that gives up, a full disk — would otherwise leave an empty export under the
+/// derived name, and the next run would refuse it. The retry would be blocked by what
+/// the fault left behind, which is the one moment the guard must not be in the way.
+/// A path the reader typed is left where it failed: they named the file, and what is in
+/// it is theirs to look at.
+fn into_csv<T>(
+    path: &Path,
+    derived: bool,
+    write: impl FnOnce(&mut BufWriter<std::fs::File>) -> Result<T>,
+) -> Result<T> {
+    let file = create_csv(path, derived)?;
+    let mut writer = BufWriter::new(file);
+    let written = write(&mut writer).and_then(|value| {
+        writer.flush().context("flushing the export")?;
+        Ok(value)
+    });
+    if written.is_err() && derived {
+        let _ = std::fs::remove_file(path);
+    }
+    written
 }
 
 /// Open the CSV, refusing to write over a name this command chose rather than the reader.
@@ -119,7 +166,11 @@ fn create_csv(path: &Path, derived: bool) -> Result<std::fs::File> {
 mod tests {
     use std::io::Write;
 
-    use super::create_csv;
+    use std::path::Path;
+
+    use anyhow::bail;
+
+    use super::{create_csv, into_csv, is_the_capture};
 
     #[test]
     fn a_name_we_chose_is_created_when_nothing_holds_it() {
@@ -148,5 +199,50 @@ mod tests {
         std::fs::write(&path, "an export of the session before").unwrap();
         create_csv(&path, false).unwrap().write_all(b"rows").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "rows");
+    }
+
+    #[test]
+    fn a_name_we_chose_is_given_back_when_the_export_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wartui-2026-09-18-14-30.csv");
+        let failed: Result<(), _> = into_csv(&path, true, |_| bail!("the query went wrong"));
+        assert!(failed.is_err());
+        // Nothing left under the name, so the retry that fixes the fault is not
+        // refused by what the fault left behind.
+        assert!(!path.exists(), "an empty export was left at {}", path.display());
+    }
+
+    #[test]
+    fn a_name_the_reader_typed_is_left_where_it_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tonight.csv");
+        let failed: Result<(), _> = into_csv(&path, false, |_| bail!("the query went wrong"));
+        assert!(failed.is_err());
+        // They named the file, so what happened to it is theirs to look at.
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn what_was_written_survives_a_successful_export() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wartui-2026-09-18-14-30.csv");
+        let rows = into_csv(&path, true, |writer| {
+            writer.write_all(b"rows")?;
+            Ok(973)
+        })
+        .unwrap();
+        assert_eq!(rows, 973);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "rows");
+    }
+
+    #[test]
+    fn the_capture_is_recognised_however_the_path_to_it_was_typed() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("tonight.db");
+        std::fs::write(&db, "a capture").unwrap();
+        assert!(is_the_capture(&dir.path().join(".").join("tonight.db"), &db));
+        assert!(!is_the_capture(&dir.path().join("tonight.csv"), &db));
+        // Standard output is not a path at all, and asking the filesystem says so.
+        assert!(!is_the_capture(Path::new("-"), &db));
     }
 }
