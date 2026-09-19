@@ -79,6 +79,7 @@ wartui reset      # reboot a bridge that has stopped answering
 | [`firmware/node`](firmware/node/README.md)               | The nodes: sniffs, reports, takes assignments                                                                 |
 | [`tools/espnow-sniffer`](tools/espnow-sniffer/README.md) | Passive Arduino sniffer for bring-up and frame capture                                                        |
 | `tools/beacons`                                          | Turns a monitor-mode capture into fixtures for the beacon parser                                              |
+| `tools/render.py`                                        | Renders the running view as text, for a diff or an agent                                                      |
 
 Each firmware is its own workspace — a different target, its own toolchain pin and its own lockfile
 — and both take a path dependency up into `crates/wartui-proto`, which is the only thing keeping the
@@ -145,3 +146,30 @@ implementation of either end to check against.
 
 `--log-file` is the only way to see transport logs: the view owns the terminal, so without it
 nothing is logged anywhere.
+
+### Suggested tools
+
+Two things render the view, and they answer different questions.
+
+**ratatui's `TestBackend`** draws one frame from a `Snapshot` built by hand and hands back the
+text. `crates/wartui/src/tui.rs`'s tests are full of it — fast, deterministic and committed, so
+it is the regression net and the first thing to reach for. It never runs the event loop, the
+terminal setup or the simulator.
+
+**[pyte](https://github.com/selectel/pyte)** is a VT100 emulator with no terminal behind it.
+`tools/render.py` puts the real binary on a pty at a size you choose, feeds what it draws to
+pyte and prints the grid, which covers what `TestBackend` cannot: the live loop, the layout the
+view picks at a real width, and colour.
+
+```sh
+sudo dnf install python3-pyte    # or pip install pyte
+
+python3 tools/render.py --cols 120 --rows 30    # the wide layout, fleet beside the stream
+python3 tools/render.py --cols 80 --rows 24     # the narrow one, stacked
+python3 tools/render.py --keys jb --attrs       # after two keys, with everything drawn in colour
+```
+
+Text rather than a screenshot is the point: it diffs, it greps, and a coding agent reads it
+without an image. `--keys` presses keys before the screen is read, so the cursor and the
+Bluetooth assignment are reachable too. The capture goes to a temporary database that is deleted
+on the way out.
