@@ -1,11 +1,11 @@
 //! The host's serial ports, as the operating system describes them.
 //!
 //! Nothing here knows the link protocol. It answers "what is attached, and what
-//! does the OS say it is" — which is [`serial`](crate::serial)'s input, and also
-//! the GPS reader's in `wartui-core`. That is why generic port enumeration lives
-//! in this crate rather than beside either consumer: `wartui-proto` is `no_std`
-//! and cannot hold `serialport`, and `wartui-core` already depends on this crate,
-//! so a module here is reachable from both without inverting a layer.
+//! does the OS say it is", which is [`serial`](crate::serial)'s input. It is kept
+//! separate from the judgement made on that answer so that a second thing looking
+//! for a device shares one enumeration rather than writing another: `wartui-proto`
+//! is `no_std` and cannot hold `serialport`, and `wartui-core` already depends on
+//! this crate, so this module is reachable from either without inverting a layer.
 //!
 //! **An ESP32's USB serial number is its MAC.** The C5's and C6's native USB
 //! Serial/JTAG reports the address the radio transmits from, so the OS has
@@ -13,12 +13,12 @@
 //! opened. [`PortCandidate::mac`] is that fact, and it is what lets one board be
 //! told from another without a probe, a reflash or an `esp` tool.
 //!
-//! **A candidate set is decided by vendor ID and nothing else.**
-//! [`could_be_a_bridge`] and [`could_be_a_receiver`] partition what is attached,
-//! and they are complements on purpose: whoever is looking for a bridge writes
-//! into what it opens, and a node's port is the one thing that must never be
-//! written into by something looking for a GPS. Exclusive opening is a backstop
-//! against two readers, not a substitute for the partition.
+//! **What a device is for is decided by vendor ID and nothing else.**
+//! [`could_be_a_bridge`] and [`could_be_a_receiver`] are complements, so the two
+//! sets cannot overlap however either is called: looking for a bridge means
+//! writing into what is opened, and a node's port is the one thing that must
+//! never be written into by something looking for anything else. Exclusive
+//! opening is a backstop against two readers, not a substitute for that.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;

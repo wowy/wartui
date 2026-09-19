@@ -166,14 +166,16 @@ fn ports() -> Result<()> {
     }
     for candidate in found {
         println!("{}", candidate.path);
-        let address = candidate.mac().map_or_else(
-            || "address not reported".to_owned(),
-            |address| format!("{:<17}", mac(&address)),
-        );
+        // Padded to the width of the longer of the two, which is the words rather
+        // than an address: an unaddressed board in the list must not shift every
+        // column on its own row.
+        let address = candidate
+            .mac()
+            .map_or_else(|| "address not reported".to_owned(), |address| mac(&address));
         let product = candidate.product.as_deref().unwrap_or("unknown device");
         match (candidate.vid, candidate.pid) {
-            (Some(vid), Some(pid)) => println!("  {address}  {product}  ({vid:04x}:{pid:04x})"),
-            _ => println!("  {address}  {product}"),
+            (Some(vid), Some(pid)) => println!("  {address:<20}  {product}  ({vid:04x}:{pid:04x})"),
+            _ => println!("  {address:<20}  {product}"),
         }
     }
     Ok(())
@@ -366,13 +368,16 @@ pub fn no_bridge_notice(bridge: Option<&str>) -> String {
             format!("espflash reset --port {path}"),
             format!("wartui reset --bridge {name}"),
         ),
-        // An address that resolves to nothing attached. Naming it back is the whole
-        // diagnosis, so the remedies below are about the board rather than the port.
-        (Some(name), None) => (
-            format!("as {name}, which no attached board answers to"),
-            "espflash reset".to_owned(),
-            "wartui reset".to_owned(),
-        ),
+        // A board that is not attached needs none of what follows: there is no port
+        // to have been opened, so the three causes below are all about something
+        // else, and the one fact worth saying is already known.
+        (Some(name), None) => {
+            return [
+                format!("no attached board is {name}, so nothing was opened."),
+                "`wartui ports` lists what is attached, each board with its address.".to_owned(),
+            ]
+            .join("\n");
+        }
         (None, _) => (
             "on the board that was detected".to_owned(),
             "espflash reset".to_owned(),

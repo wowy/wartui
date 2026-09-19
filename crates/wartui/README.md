@@ -328,15 +328,17 @@ device node, so a path says nothing about which board it reaches. `wartui ports`
 ```
 $ wartui ports
 /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:EC:44:C0-if00
-  10:BD:A3:EC:44:C0  USB JTAG/serial debug unit  (303a:1001)
-/dev/ttyACM2
-  02:00:5E:10:9D:24  USB JTAG/serial debug unit  (303a:1001)
+  10:BD:A3:EC:44:C0     USB JTAG/serial debug unit  (303a:1001)
+/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_02:00:5E:10:9D:24-if00
+  02:00:5E:10:9D:24     USB JTAG/serial debug unit  (303a:1001)
 ```
 
 **An ESP32's USB serial number is its MAC**, so the operating system has already paired each device
 node with the address that board's radio transmits from — with nothing opened, no `esp` tool and no
-reflash. That one fact is what the whole command rests on, and it holds on Linux and macOS alike.
-Everything else on the bus carries a manufacturing serial, which reads as `address not reported`.
+reflash. That one fact is what the whole command rests on, and it holds on Linux and macOS alike. It
+is also why every board gets a name of its own above: udev builds those from the serial number, so
+no two ESP32s share one. Everything else on the bus carries a manufacturing serial instead, and a
+device that reports none at all reads as `address not reported` and is named by its socket.
 
 The bridge is the row whose address the fleet table shows as the bridge's, and a node the row whose
 heartbeats `wartui sniff` attributes to that address. Where the board generations differ, the OUI

@@ -3,7 +3,7 @@
 use wartui_bridge::ports::{
     self, ESPRESSIF_VID, PortCandidate, StableNames, candidate, is_usable_path, with_stable_paths,
 };
-use wartui_bridge::serial::{BridgeSpec, discover_ports};
+use wartui_bridge::serial::{self, BridgeSpec, discover_ports};
 
 /// The bridge on this bench, and a node beside it: same vendor, same product,
 /// adjacent device nodes, and nothing but the address to tell them apart.
@@ -145,4 +145,29 @@ fn a_board_and_a_receiver_are_never_offered_to_each_other() {
     assert!(!ports::could_be_a_receiver(&bridge));
     assert!(ports::could_be_a_receiver(&puck));
     assert!(!ports::could_be_a_bridge(&puck));
+}
+
+#[test]
+fn an_address_selects_the_board_carrying_it_and_answers_with_its_path() {
+    let boards = [esp("/dev/ttyACM0", BRIDGE_MAC), esp("/dev/ttyACM1", NODE_MAC)];
+    let spec: BridgeSpec = NODE_MAC.parse().expect("parsing cannot fail");
+    assert_eq!(serial::resolve_in(&boards, &spec).expect("that board"), "/dev/ttyACM1");
+}
+
+#[test]
+fn an_address_that_is_not_attached_is_refused_rather_than_answered_with_another() {
+    // The failure that matters: answering with the other board would attribute a
+    // whole capture to the wrong fleet, and say nothing about having done so.
+    let boards = [esp("/dev/ttyACM0", BRIDGE_MAC)];
+    let spec: BridgeSpec = NODE_MAC.parse().expect("parsing cannot fail");
+    let refused = serial::resolve_in(&boards, &spec).expect_err("no such board");
+    assert!(refused.to_string().contains(NODE_MAC), "{refused}");
+}
+
+#[test]
+fn a_named_path_is_answered_without_consulting_what_is_attached() {
+    // Whether it exists is the question the open asks, and the OS answers it
+    // better than a list does — so a path is never checked against one.
+    let spec: BridgeSpec = "/dev/ttyACM9".parse().expect("parsing cannot fail");
+    assert_eq!(serial::resolve_in(&[], &spec).expect("the path as given"), "/dev/ttyACM9");
 }

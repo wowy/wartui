@@ -94,19 +94,36 @@ impl std::fmt::Display for BridgeSpec {
 
 /// The port a spec names, out of what is attached.
 ///
+/// # Errors
+/// [`TransportError::Enumerate`] if the ports cannot be listed, or
+/// [`TransportError::NoSuchBridge`] if nothing attached carries that address.
+pub fn resolve(spec: &BridgeSpec) -> Result<String, TransportError> {
+    match spec {
+        // A path is answered without enumerating: whether it exists is the
+        // question the open asks, and the OS gives a better answer than a list.
+        BridgeSpec::Path(path) => Ok(path.clone()),
+        BridgeSpec::Mac(_) => resolve_in(&ports::list()?, spec),
+    }
+}
+
+/// The same choice, against a list rather than against what is plugged in.
+///
 /// A spec that names a board not attached is refused rather than answered with
 /// another: an operator who named a board meant that board, and quietly opening a
 /// different one is how a capture ends up attributed to the wrong fleet.
 ///
 /// # Errors
-/// [`TransportError::NoSuchBridge`] if nothing attached carries that address.
-pub fn resolve(spec: &BridgeSpec) -> Result<String, TransportError> {
+/// [`TransportError::NoSuchBridge`] if nothing in `candidates` is that board.
+pub fn resolve_in(
+    candidates: &[PortCandidate],
+    spec: &BridgeSpec,
+) -> Result<String, TransportError> {
     match spec {
         BridgeSpec::Path(path) => Ok(path.clone()),
-        BridgeSpec::Mac(wanted) => ports::list()?
-            .into_iter()
+        BridgeSpec::Mac(wanted) => candidates
+            .iter()
             .find(|candidate| candidate.mac().as_ref() == Some(wanted))
-            .map(|candidate| candidate.path)
+            .map(|candidate| candidate.path.clone())
             .ok_or_else(|| TransportError::NoSuchBridge { spec: spec.to_string() }),
     }
 }

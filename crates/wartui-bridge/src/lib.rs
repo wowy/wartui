@@ -5,10 +5,10 @@
 //! lets the fleet engine and the TUI be built and tested with nothing plugged
 //! in.
 //!
-//! It also owns the host's serial ports generally, in [`ports`] — the bridge is
-//! one consumer of that and the GPS reader in `wartui-core` is another, and
-//! keeping one enumeration is what keeps the two from ever opening each other's
-//! device.
+//! It also owns the host's serial ports generally, in [`ports`]: what is attached
+//! and what the OS says it is, with no judgement about which of them is a bridge.
+//! Keeping that in one place is what lets anything else that opens a device share
+//! the enumeration rather than write a second one.
 
 pub mod ports;
 pub mod serial;

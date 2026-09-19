@@ -76,8 +76,8 @@ Four host crates, strictly layered, plus firmware that shares the bottom one.
   parsers are testable with `cargo test` rather than a reflash.
 - **`crates/wartui-bridge`** — host side of the USB link. Everything above talks to a `LinkHandle`
   and cannot tell a real dongle (`serial`) from the fake fleet (`sim`). It also owns the host's
-  serial ports generally (`ports`), which is what keeps one enumeration between the bridge and
-  anything else that opens a device.
+  serial ports generally (`ports`): what is attached and what the OS says it is, with no judgement
+  about which of them is a bridge, so anything else that opens a device shares one enumeration.
 - **`crates/wartui-core`** — the headless half. Draws nothing, parses no arguments.
 - **`crates/wartui`** — clap CLI (`run`/`export`/`sniff`/`status`/`reset`/`ports`) and the ratatui
   view.
