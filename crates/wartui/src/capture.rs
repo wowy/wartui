@@ -41,6 +41,17 @@ pub fn dated_path(started: DateTime<Local>) -> PathBuf {
     PathBuf::from(format!("{PREFIX}{}{SUFFIX}", started.format(STAMP)))
 }
 
+/// The CSV a capture at `db` exports to: its own name, with `.csv` where the `.db` was.
+///
+/// Beside the capture rather than in the working directory, so a capture copied off the
+/// card exports next to itself rather than wherever the export was run from. A `--db`
+/// named without an extension gains one, so the export can never land on the capture.
+pub fn export_path(db: &Path) -> PathBuf {
+    let mut csv = db.to_path_buf();
+    csv.set_extension("csv");
+    csv
+}
+
 /// The most recent capture [`dated_path`] could have written into `dir`.
 ///
 /// The names sort chronologically, so the answer is the greatest of them. By name and
@@ -85,7 +96,7 @@ mod tests {
 
     use chrono::{DateTime, Local, NaiveDate};
 
-    use super::{dated_path, newest};
+    use super::{dated_path, export_path, newest};
 
     fn at(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> DateTime<Local> {
         NaiveDate::from_ymd_opt(year, month, day)
@@ -151,5 +162,21 @@ mod tests {
         std::fs::File::create(dir.path().join("out.csv")).unwrap();
         let error = newest(dir.path()).unwrap_err().to_string();
         assert!(error.contains("--db"), "{error}");
+    }
+
+    #[test]
+    fn a_capture_exports_to_a_csv_beside_it() {
+        let db = dated_path(at(2026, 9, 18, 14, 30));
+        assert_eq!(export_path(&db), Path::new("wartui-2026-09-18-14-30.csv"));
+    }
+
+    #[test]
+    fn an_export_stays_in_the_directory_the_capture_was_read_from() {
+        assert_eq!(export_path(Path::new("/cards/tonight.db")), Path::new("/cards/tonight.csv"));
+    }
+
+    #[test]
+    fn a_capture_named_without_an_extension_still_exports_to_one() {
+        assert_eq!(export_path(Path::new("tonight")), Path::new("tonight.csv"));
     }
 }

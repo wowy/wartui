@@ -378,7 +378,7 @@ mod tests {
 
     #[test]
     fn a_run_argument_the_subcommand_does_not_take_says_so() {
-        let error = parse(["wartui", "--sim", "3", "export", "--wigle", "-"]).err().unwrap();
+        let error = parse(["wartui", "--sim", "3", "export", "--out", "-"]).err().unwrap();
         let message = error.to_string();
         assert!(message.contains("'export' does not take it"), "{message}");
     }

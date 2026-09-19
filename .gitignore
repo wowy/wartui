@@ -34,7 +34,8 @@ __pycache__/
 # A `.db` or `.pcap` anywhere in this tree is a capture by definition, so those
 # are unanchored. A `.csv` is not — an export-regression fixture would be a
 # reasonable thing to check in — so only the working directory is covered,
-# which is where a forgotten `--wigle` path lands.
+# which is where `wartui export` writes when nothing tells it otherwise: beside
+# the capture, under the same name.
 *.db
 *.db-wal
 *.db-shm

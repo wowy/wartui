@@ -43,11 +43,16 @@ to. The date is in ISO order whatever the locale reading it: that is what makes 
 lets `export` pick out the last one. Two runs begun inside the same minute share a name, and the
 second adds its session to the first one's file.
 
-`export` takes `--db`, `--wigle PATH` and `--session ID`, and writes the [WiGLE v1.6
-format](https://api.wigle.net/csvFormat.html). Without `--db` it opens the newest capture in the
-working directory, which is the one a finished `run` left there. It is a view over the store rather
-than a second copy of it, so it can be re-run after a decoder fix, against a session that ended last
-week, or against one still going.
+`export` takes `--db`, `--out PATH` and `--session ID`, and writes the [WiGLE v1.6
+format](https://api.wigle.net/csvFormat.html). Both ends default, so exporting the evening that just
+ended is `wartui export` and nothing else: without `--db` it opens the newest capture in the working
+directory, which is the one a finished `run` left there, and without `--out` it writes beside that
+capture under the same name — `wartui-2026-09-18-14-30.db` exports to
+`wartui-2026-09-18-14-30.csv`. A name arrived at that way is never written over, since the file it
+would replace may be the export already uploaded: `--out PATH` (short `-o`) names another, or the
+same one again to mean it, and `--out -` writes to standard output. The CSV is a view over the store
+rather than a second copy of it, so it can be re-run after a decoder fix, against a session that
+ended last week, or against one still going.
 
 `--recapture SECONDS` (default 3600 — one hour) folds each network's sightings into windows that
 wide and writes one row per window: the strongest positioned sighting, with `FirstSeen` from the
