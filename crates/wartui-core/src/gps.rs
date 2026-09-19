@@ -308,13 +308,17 @@ impl Gps {
         // What the search settled on. Kept across reconnections, because a puck put
         // back where it came from is the same port at the same rate.
         let mut settled: Option<(String, u32)> = None;
-        // The port the search was reading before it went away. A receiver that was
-        // working and is now gone is news; one that was never there is not.
+        // Why the search stopped reading the port it had. A receiver that was
+        // working and has stopped is news, whichever way it stopped; one that was
+        // never there is not.
         let mut lost: Option<String> = None;
         let mut retries = 0_u32;
 
         while !self.stop.load(Ordering::Relaxed) {
-            let Some((port, baud)) = settled.clone().or_else(|| self.search(config)) else {
+            let searching = settled.is_none();
+            let Some((port, baud)) =
+                settled.clone().or_else(|| self.search(config, lost.is_none() && searching))
+            else {
                 self.set_status(nothing_found(config.port.as_deref(), lost.as_deref(), why_not));
                 std::thread::sleep(backoff);
                 backoff = (backoff * 2).min(MAX_BACKOFF);
@@ -351,9 +355,18 @@ impl Gps {
             // looking past. A named one never is: the operator said which, and
             // searching would answer a question they did not ask.
             retries += 1;
-            if config.port.is_none() && (retries > RETRIES_BEFORE_SEARCHING || !still_there(&port))
-            {
-                lost = Some(port.clone());
+            let gone = !still_there(&port);
+            if config.port.is_none() && (retries > RETRIES_BEFORE_SEARCHING || gone) {
+                // Said in the terms that were actually established. A port that has
+                // left the enumeration was unplugged; one that is still there and has
+                // stopped talking is a receiver reconfigured, a cable failing, or
+                // another program holding it — and telling an operator to check a
+                // cable that is plugged in wastes the only thing the note buys them.
+                lost = Some(if gone {
+                    format!("{port} is no longer attached")
+                } else {
+                    format!("{port} stopped sending NMEA")
+                });
                 settled = None;
                 self.lock().settled = None;
             }
@@ -363,21 +376,44 @@ impl Gps {
     }
 
     /// Listen to each candidate port at each rate until one of them is a receiver.
-    fn search(&self, config: &GpsConfig) -> Option<(String, u32)> {
+    ///
+    /// `announce` is false while re-searching after a receiver was lost, so that the
+    /// note saying it has gone stays up rather than being overwritten by the scan
+    /// that is looking for it — the scan is most of every cycle, and the operator
+    /// needs the reason, not the activity.
+    fn search(&self, config: &GpsConfig, announce: bool) -> Option<(String, u32)> {
+        // Both named leaves detection nothing to decide. Reading the port is then the
+        // operator's instruction rather than a question, and putting a probe in front
+        // of it would refuse a working receiver for emitting too little inside one
+        // window — which is what a receiver configured for a single sentence a second
+        // does, and which this reader handled before it was ever asked to search.
+        if let (Some(path), Some(baud)) = (&config.port, config.baud) {
+            return Some((path.clone(), baud));
+        }
         let ladder = config.ladder();
-        let ports = match &config.port {
+        let (ports, needed) = match &config.port {
             // Named: the ladder still runs, because a path says nothing about a rate.
-            Some(path) => vec![wartui_bridge::ports::candidate(path, None, None, None)],
+            // One sentence settles it, since the operator has already said what the
+            // device is; the question is only which rate it speaks at.
+            Some(path) => (
+                vec![wartui_bridge::ports::candidate(path, None, None, None)],
+                discover::SENTENCES_ON_A_NAMED_PORT,
+            ),
             None => match wartui_bridge::ports::list() {
-                Ok(attached) => discover::candidates(attached, &config.reserved),
+                Ok(attached) => (
+                    discover::candidates(attached, &config.reserved),
+                    discover::SENTENCES_TO_BELIEVE,
+                ),
                 Err(e) => {
                     tracing::debug!(error = %e, "could not list serial ports");
                     return None;
                 }
             },
         };
-        discover::settle(&ports, &ladder, |path, baud| {
-            self.set_status(GpsStatus::Scanning { port: path.to_owned(), baud });
+        discover::settle(&ports, &ladder, needed, |path, baud| {
+            if announce {
+                self.set_status(GpsStatus::Scanning { port: path.to_owned(), baud });
+            }
             self.listen(path, baud)
         })
         .map(|(path, baud)| (path.to_owned(), baud))
@@ -448,7 +484,7 @@ fn nothing_found(
 ) -> GpsStatus {
     match (named, lost) {
         (Some(path), _) => GpsStatus::Failed(why(path)),
-        (None, Some(path)) => GpsStatus::Failed(format!("{path} is no longer attached")),
+        (None, Some(reason)) => GpsStatus::Failed(reason.to_owned()),
         (None, None) => GpsStatus::NoReceiver,
     }
 }
@@ -536,8 +572,14 @@ mod tests {
         // Measured on the bench: pulling the puck mid-capture left the header with
         // nothing to say about it while the rows quietly stopped carrying a
         // position. The red `pos none` line is the alarm; this is the reason.
-        let status = nothing_found(None, Some("/dev/ttyACM0"), |_| unreachable!());
-        assert_eq!(status, GpsStatus::Failed("/dev/ttyACM0 is no longer attached".to_owned()));
+        let gone =
+            nothing_found(None, Some("/dev/ttyACM0 is no longer attached"), |_| unreachable!());
+        assert_eq!(gone, GpsStatus::Failed("/dev/ttyACM0 is no longer attached".to_owned()));
+        // And a port still attached that has stopped talking says that instead, so
+        // nobody is sent to check a cable that is plugged in.
+        let quiet =
+            nothing_found(None, Some("/dev/ttyACM0 stopped sending NMEA"), |_| unreachable!());
+        assert_eq!(quiet, GpsStatus::Failed("/dev/ttyACM0 stopped sending NMEA".to_owned()));
     }
 
     const GGA: &[u8] = b"$GPGGA,123519.00,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*69";

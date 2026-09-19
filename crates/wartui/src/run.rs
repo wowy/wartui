@@ -133,7 +133,14 @@ pub async fn run(args: Args) -> Result<()> {
     // The receiver is started before the link so that the first observations
     // of the capture have a chance of being positioned; it takes a few seconds
     // to answer, and nothing waits for it either way.
-    let gps = (!args.no_gps).then(|| {
+    // Not under `--sim` unless a receiver was named. A simulated fleet is the way to
+    // work on wartui with nothing plugged in, and a search that opens every serial
+    // port on a developer's machine four times over — resetting whatever is wired for
+    // auto-reset on DTR — is not what that command is for. Naming one with `--gps` is
+    // still honoured: driving the simulator against a real receiver is how the
+    // position tier gets exercised without a fleet.
+    let looking = !args.no_gps && (args.sim.is_none() || args.gps.is_some());
+    let gps = looking.then(|| {
         let config = match &args.gps {
             Some(port) => GpsConfig::pinned(port),
             // A `--bridge` given as a path is opened as given, whatever it is, so

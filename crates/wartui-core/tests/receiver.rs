@@ -1,7 +1,10 @@
 //! Finding an NMEA receiver, against recorded streams rather than a serial port.
 
 use wartui_bridge::ports::{self, ESPRESSIF_VID, PortCandidate, candidate};
-use wartui_core::discover::{BAUD_LADDER, candidates, looks_like_nmea, settle};
+use wartui_core::discover::{
+    BAUD_LADDER, SENTENCES_ON_A_NAMED_PORT, SENTENCES_TO_BELIEVE, candidates, looks_like_nmea,
+    sentences_in, settle,
+};
 
 /// What a u-blox 7 says every second, as this bench's puck says it.
 const NMEA: &[u8] = b"$GPRMC,183154.00,A,4501.66762,N,09348.12480,W,0.046,,190926,,,D*60\r\n\
@@ -110,7 +113,7 @@ fn a_bare_uart_bridge_is_tried_rather_than_ruled_out() {
 #[test]
 fn the_ladder_keeps_the_first_rate_that_produces_valid_sentences() {
     let ports = [puck("/dev/ttyACM1")];
-    let settled = settle(&ports, &BAUD_LADDER, |_, baud| {
+    let settled = settle(&ports, &BAUD_LADDER, SENTENCES_TO_BELIEVE, |_, baud| {
         if baud == 38_400 { NMEA.to_vec() } else { b"\xff\xfe junk\r\n".to_vec() }
     });
     assert_eq!(settled, Some(("/dev/ttyACM1", 38_400)));
@@ -120,7 +123,7 @@ fn the_ladder_keeps_the_first_rate_that_produces_valid_sentences() {
 fn a_named_rate_is_the_only_one_tried() {
     let ports = [puck("/dev/ttyACM1")];
     let mut tried = Vec::new();
-    let settled = settle(&ports, &[9_600], |_, baud| {
+    let settled = settle(&ports, &[9_600], SENTENCES_TO_BELIEVE, |_, baud| {
         tried.push(baud);
         NMEA.to_vec()
     });
@@ -131,7 +134,7 @@ fn a_named_rate_is_the_only_one_tried() {
 #[test]
 fn a_port_that_says_nothing_is_passed_over_for_the_next() {
     let ports = [uart("/dev/ttyUSB0"), puck("/dev/ttyACM1")];
-    let settled = settle(&ports, &BAUD_LADDER, |path, _| {
+    let settled = settle(&ports, &BAUD_LADDER, SENTENCES_TO_BELIEVE, |path, _| {
         if path == "/dev/ttyACM1" { NMEA.to_vec() } else { Vec::new() }
     });
     assert_eq!(settled, Some(("/dev/ttyACM1", 9_600)));
@@ -140,17 +143,36 @@ fn a_port_that_says_nothing_is_passed_over_for_the_next() {
 #[test]
 fn nothing_is_settled_on_when_no_port_is_a_receiver() {
     let ports = [uart("/dev/ttyUSB0")];
-    assert_eq!(settle(&ports, &BAUD_LADDER, |_, _| b"nothing to see\r\n".to_vec()), None);
+    assert_eq!(
+        settle(&ports, &BAUD_LADDER, SENTENCES_TO_BELIEVE, |_, _| b"nothing to see\r\n".to_vec()),
+        None
+    );
 }
 
 #[test]
 fn every_rate_of_every_port_is_tried_before_giving_up() {
     let ports = [uart("/dev/ttyUSB0"), uart("/dev/ttyUSB1")];
     let mut tried = 0;
-    let settled = settle(&ports, &BAUD_LADDER, |_, _| {
+    let settled = settle(&ports, &BAUD_LADDER, SENTENCES_TO_BELIEVE, |_, _| {
         tried += 1;
         Vec::new()
     });
     assert_eq!(settled, None);
     assert_eq!(tried, 2 * BAUD_LADDER.len());
+}
+
+#[test]
+fn a_named_port_settles_on_one_sentence_rather_than_two() {
+    // The operator has already said what the device is; only the rate is in
+    // question. A receiver emitting a single sentence a second is a real
+    // configuration, and asking it for two inside one window would refuse it.
+    let one = b"$GPRMC,183154.00,A,4501.66762,N,09348.12480,W,0.046,,190926,,,D*60\r\n";
+    assert_eq!(sentences_in(one), 1);
+    assert!(!looks_like_nmea(one), "not enough for a port nobody vouched for");
+
+    let ports = [puck("/dev/ttyACM1")];
+    let named = settle(&ports, &[9_600], SENTENCES_ON_A_NAMED_PORT, |_, _| one.to_vec());
+    assert_eq!(named, Some(("/dev/ttyACM1", 9_600)));
+    let unknown = settle(&ports, &[9_600], SENTENCES_TO_BELIEVE, |_, _| one.to_vec());
+    assert_eq!(unknown, None);
 }

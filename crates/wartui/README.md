@@ -233,7 +233,13 @@ has one, the typed-in position the rest of the time, rather than nothing at all 
 still finding itself.
 
 `--gps PATH` pins one receiver, for when several are attached or the search settles on the wrong
-device; the rates are still tried unless `--gps-baud` names one. `--no-gps` turns the search off.
+device; the rates are still tried unless `--gps-baud` names one, and one sentence is enough to
+settle a port you named rather than the two an unknown port has to produce. **Naming both opens the
+port and reads it with no probe at all** — there is nothing left to detect, and a receiver
+configured to say very little would otherwise be refused for saying too little inside one window.
+`--no-gps` turns the search off, and `--sim` implies it unless `--gps` names a receiver: a
+simulated fleet is how wartui is worked on with nothing plugged in, and a search that opens every
+serial port on the machine is not part of that.
 Any receiver that speaks NMEA 0183 over a serial port will do: `GGA` and `RMC` are read and
 everything else ignored, and the altitude, the satellite count and an accuracy estimated from the
 reported HDOP all reach the export.
