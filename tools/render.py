@@ -58,13 +58,23 @@ PLAIN = ("default", "default", False, False)
 
 
 def build():
-    """Build wartui and return the binary, letting cargo talk to our own stderr."""
-    subprocess.run(["cargo", "build", "-q", "-p", "wartui"], check=True)
-    meta = subprocess.run(
-        ["cargo", "metadata", "--format-version", "1", "--no-deps"],
-        capture_output=True, text=True, check=True,
+    """Build wartui and return the binary, letting cargo diagnose to our own stderr.
+
+    Cargo is asked where it put the binary rather than being assumed to have put
+    it under `debug/`: a `build.target` in anyone's cargo config moves it under
+    the triple, and a build that succeeds followed by a spawn that cannot find
+    what it built is a confusing way to learn that.
+    """
+    built = subprocess.run(
+        ["cargo", "build", "-q", "-p", "wartui", "--message-format", "json-render-diagnostics"],
+        stdout=subprocess.PIPE, text=True, check=True,
     )
-    return os.path.join(json.loads(meta.stdout)["target_directory"], "debug", "wartui")
+    for line in built.stdout.splitlines():
+        event = json.loads(line)
+        if event.get("reason") == "compiler-artifact" and event.get("executable"):
+            if event["target"]["name"] == "wartui":
+                return event["executable"]
+    sys.exit("cargo built nothing called wartui")
 
 
 def spawn(command, cols, rows):
@@ -88,13 +98,17 @@ def spawn(command, cols, rows):
     return proc, master
 
 
-def pump(master, stream, proc, seconds):
+def pump(master, stream, decoder, proc, seconds):
     """Feed everything drawn for this long into `stream`; False if it stopped drawing.
+
+    The decoder belongs to the whole render rather than to one call. A
+    box-drawing character is three bytes and every frame is full of them, so a
+    read that splits one across two pumps — which `--keys` guarantees — would
+    lose it to a replacement glyph in a decoder that is then thrown away.
 
     A dead child is read as EOF or EIO on the master rather than as an exit
     status, so both are the same answer here.
     """
-    decoder = codecs.getincrementaldecoder("utf-8")("replace")
     deadline = time.monotonic() + seconds
     while True:
         remaining = deadline - time.monotonic()
@@ -114,29 +128,37 @@ def pump(master, stream, proc, seconds):
         stream.feed(decoder.decode(chunk))
 
 
-def press(master, stream, proc, keys, settle):
+def press(master, stream, decoder, proc, keys, settle):
     """Press each key and let the view redraw before the next one."""
     for key in keys:
         os.write(master, key.encode())
-        if not pump(master, stream, proc, settle):
+        if not pump(master, stream, decoder, proc, settle):
             return False
     return True
 
 
+def stop(proc):
+    """Wait for it to go, and insist if it will not.
+
+    Nothing here waits without a deadline. A child that has closed its stdio and
+    carried on reads exactly like one that has exited, and a render that hangs
+    with the screen unprinted is worse than one that kills something.
+    """
+    for insist in (proc.terminate, proc.kill):
+        try:
+            return proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            insist()
+    return proc.wait()
+
+
 def quit_cleanly(master, proc):
-    """`q` commits the last batch; anything still running after that is killed."""
+    """`q` commits the last batch; anything still running after that is signalled."""
     try:
         os.write(master, b"q")
     except OSError:
         pass
-    try:
-        proc.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+    return stop(proc)
 
 
 def styled_runs(screen):
@@ -172,22 +194,36 @@ def describe(style):
 
 
 def main(args):
+    if (args.lat is None) != (args.lon is None):
+        sys.exit("--lat and --lon go together; a half-given position is a wrong one")
+    lat = DEFAULT_LAT if args.lat is None else args.lat
+    lon = DEFAULT_LON if args.lon is None else args.lon
+
     binary = args.bin or build()
+    # The capture is a temporary file from here on, so every way out of this
+    # function goes through the removal rather than just the expected one.
     scratch = tempfile.mkdtemp(prefix="wartui-render-")
-    command = [binary, "run", "--sim", str(args.sim), "--db", os.path.join(scratch, "render.db")]
+    try:
+        return render(args, binary, os.path.join(scratch, "render.db"), lat, lon)
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
+def render(args, binary, db, lat, lon):
+    command = [binary, "run", "--sim", str(args.sim), "--db", db]
     if args.sim_c6:
         command += ["--sim-c6", str(args.sim_c6)]
-    if args.lat is not None:
-        command += ["--lat", repr(args.lat), "--lon", repr(args.lon)]
+    command += ["--lat", repr(lat), "--lon", repr(lon)]
     command += args.rest
 
     screen = pyte.Screen(args.cols, args.rows)
     stream = pyte.Stream(screen)
+    decoder = codecs.getincrementaldecoder("utf-8")("replace")
     proc, master = spawn(command, args.cols, args.rows)
     try:
-        drawing = pump(master, stream, proc, args.after)
+        drawing = pump(master, stream, decoder, proc, args.after)
         if drawing:
-            drawing = press(master, stream, proc, args.keys, args.settle)
+            drawing = press(master, stream, decoder, proc, args.keys, args.settle)
 
         # Read the screen while it is still being drawn on. What the view emits
         # on its way out is the terminal's business, not part of the frame.
@@ -204,12 +240,11 @@ def main(args):
             # Whatever it managed to say is on the screen above — a clap usage
             # error, or a panic — so the note goes after it rather than into it.
             sys.stdout.flush()
-            proc.wait()
+            stop(proc)
             print(f"\n# wartui stopped early, status {proc.returncode}", file=sys.stderr)
             return 1
     finally:
         os.close(master)
-        shutil.rmtree(scratch, ignore_errors=True)
     return 0
 
 
@@ -225,8 +260,8 @@ if __name__ == "__main__":
     parser.add_argument("--settle", type=float, default=1.0, metavar="SECONDS",
                         help="how long to let the view redraw between keys")
     parser.add_argument("--attrs", action="store_true", help="also list everything drawn in colour")
-    parser.add_argument("--lat", type=float, default=DEFAULT_LAT, help="position to record")
-    parser.add_argument("--lon", type=float, default=DEFAULT_LON)
+    parser.add_argument("--lat", type=float, help="position to record; both halves or neither")
+    parser.add_argument("--lon", type=float)
     parser.add_argument("--bin", metavar="PATH", help="an existing binary, instead of building")
     parser.add_argument("rest", nargs="*", metavar="-- ARGS", help="passed on to wartui run")
     sys.exit(main(parser.parse_args()))
