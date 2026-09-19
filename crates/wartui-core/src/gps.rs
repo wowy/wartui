@@ -308,17 +308,21 @@ impl Gps {
         // What the search settled on. Kept across reconnections, because a puck put
         // back where it came from is the same port at the same rate.
         let mut settled: Option<(String, u32)> = None;
+        // The port the search was reading before it went away. A receiver that was
+        // working and is now gone is news; one that was never there is not.
+        let mut lost: Option<String> = None;
         let mut retries = 0_u32;
 
         while !self.stop.load(Ordering::Relaxed) {
             let Some((port, baud)) = settled.clone().or_else(|| self.search(config)) else {
-                self.set_status(nothing_found(config.port.as_deref(), why_not));
+                self.set_status(nothing_found(config.port.as_deref(), lost.as_deref(), why_not));
                 std::thread::sleep(backoff);
                 backoff = (backoff * 2).min(MAX_BACKOFF);
                 continue;
             };
             if settled.is_none() {
                 settled = Some((port.clone(), baud));
+                lost = None;
                 retries = 0;
                 self.lock().settled = Some((port.clone(), baud));
                 tracing::info!(port = %port, baud, "reading a receiver");
@@ -349,6 +353,7 @@ impl Gps {
             retries += 1;
             if config.port.is_none() && (retries > RETRIES_BEFORE_SEARCHING || !still_there(&port))
             {
+                lost = Some(port.clone());
                 settled = None;
                 self.lock().settled = None;
             }
@@ -433,11 +438,18 @@ impl Gps {
 ///
 /// A receiver the operator *named* is the opposite: they asked for that port, and
 /// silence about it would leave a capture recording no position for a reason nobody
-/// mentioned.
-fn nothing_found(named: Option<&str>, why: impl FnOnce(&str) -> String) -> GpsStatus {
-    match named {
-        Some(path) => GpsStatus::Failed(why(path)),
-        None => GpsStatus::NoReceiver,
+/// mentioned. So is one that *was* being read and has gone — a puck out of its
+/// socket halfway down a road is the difference between a capture that uploads and
+/// one that does not, and the operator is the only one who can put it back.
+fn nothing_found(
+    named: Option<&str>,
+    lost: Option<&str>,
+    why: impl FnOnce(&str) -> String,
+) -> GpsStatus {
+    match (named, lost) {
+        (Some(path), _) => GpsStatus::Failed(why(path)),
+        (None, Some(path)) => GpsStatus::Failed(format!("{path} is no longer attached")),
+        (None, None) => GpsStatus::NoReceiver,
     }
 }
 
@@ -509,13 +521,23 @@ mod tests {
     fn a_receiver_nobody_asked_for_and_nobody_attached_is_not_a_fault() {
         // Searching is the default, so this is most captures. A fault here would be
         // a fault on the view of every run made without a GPS.
-        assert_eq!(nothing_found(None, |_| unreachable!()), GpsStatus::NoReceiver);
+        assert_eq!(nothing_found(None, None, |_| unreachable!()), GpsStatus::NoReceiver);
     }
 
     #[test]
     fn a_receiver_that_was_named_and_not_found_says_so() {
-        let status = nothing_found(Some("/dev/ttyNOPE"), |path| format!("{path}: no such device"));
+        let status =
+            nothing_found(Some("/dev/ttyNOPE"), None, |path| format!("{path}: no such device"));
         assert_eq!(status, GpsStatus::Failed("/dev/ttyNOPE: no such device".to_owned()));
+    }
+
+    #[test]
+    fn a_receiver_that_was_being_read_and_has_gone_says_so_too() {
+        // Measured on the bench: pulling the puck mid-capture left the header with
+        // nothing to say about it while the rows quietly stopped carrying a
+        // position. The red `pos none` line is the alarm; this is the reason.
+        let status = nothing_found(None, Some("/dev/ttyACM0"), |_| unreachable!());
+        assert_eq!(status, GpsStatus::Failed("/dev/ttyACM0 is no longer attached".to_owned()));
     }
 
     const GGA: &[u8] = b"$GPGGA,123519.00,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*69";
