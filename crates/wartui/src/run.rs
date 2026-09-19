@@ -142,6 +142,10 @@ pub async fn run(args: Args) -> Result<()> {
     let link = crate::open(args.port.as_deref(), args.sim, args.sim_c6)?;
 
     let started = now();
+    // Whether the capture was named by hand decides what the parting line can tell them
+    // to type: a dated name is the newest in this directory, which is what `export`
+    // finds on its own, and one chosen by hand has to be given back.
+    let named_db = args.db.is_some();
     let db = args.db.unwrap_or_else(|| capture::dated_path(Local::now()));
     let session = SessionInfo { espnow_channel: args.channel, pool, notes: args.notes.clone() };
     let mut store_config = StoreConfig::new(&db);
@@ -201,6 +205,10 @@ pub async fn run(args: Args) -> Result<()> {
             );
         }
     }
-    println!("Export it with: wartui export --db {} --wigle out.csv", db.display());
+    if named_db {
+        println!("Export it with: wartui export --db {}", db.display());
+    } else {
+        println!("Export it with: wartui export");
+    }
     Ok(())
 }

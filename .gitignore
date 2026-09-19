@@ -33,13 +33,15 @@ __pycache__/
 # which is the one thing in this project that must never be committed.
 # A `.db` or `.pcap` anywhere in this tree is a capture by definition, so those
 # are unanchored. A `.csv` is not — an export-regression fixture would be a
-# reasonable thing to check in — so only the working directory is covered,
-# which is where a forgotten `--wigle` path lands.
+# reasonable thing to check in — so two narrower rules cover the exports: the
+# working directory, and a capture's own name anywhere beneath it, since
+# `wartui export` writes beside the capture under that name unless told otherwise.
 *.db
 *.db-wal
 *.db-shm
 *.pcap
 /*.csv
+wartui-*.csv
 
 # macOS
 .DS_Store

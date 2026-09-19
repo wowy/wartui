@@ -54,7 +54,7 @@ With a bridge plugged in, `run` is the default and the subcommand can be left of
 
 ```sh
 wartui run --db tonight.db --lat 37.7749 --lon -122.4194
-wartui export --db tonight.db --wigle tonight.csv
+wartui export --db tonight.db            # writes tonight.csv beside it
 ```
 
 `q` stops a capture, committing the last batch and closing out the session. The store is the system
