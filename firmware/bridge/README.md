@@ -100,11 +100,11 @@ says so by re-announcing itself, which the host is already listening for.
 
 ## Dependency versions
 
-`esp-radio 1.0.0-beta.0` requires `esp-hal = "~1.1.0"`, and that one requirement holds the whole
-family back: `esp-hal 1.2.0`, `esp-rtos 0.4`, `esp-alloc 0.11` and `esp-sync 0.3` are all published
-and none of them will resolve. `cargo update` reports them as available and moves nothing, and will
-keep doing that until `esp-radio` publishes again. Both firmwares are held at the same set by the
-same dependency, which is worth keeping true — they share `wartui-proto`.
+`esp-radio 1.0.0-beta.0` requires `esp-hal = "~1.1.0"`, and that one requirement fixes the whole
+family. For `esp-hal` and `esp-rtos` it is a wall Cargo enforces: `esp-hal 1.2.0` and `esp-rtos 0.4`
+are published, neither has a resolution alongside `esp-radio`, and nothing can pull one in by
+accident. Both firmwares are held at the same set by the same dependency, which is worth keeping
+true — they share `wartui-proto`.
 
 The pin is not free. The ESP32-C5 fix for a software reset that leaves the board unbootable until it
 loses power is upstream from `esp-hal` 1.2.0-rc.0 (esp-rs/esp-hal#5703), and being unable to take it
@@ -114,11 +114,38 @@ either: `SoftwareInterruptControl` is gone in 1.2.1, so `esp-rtos 0.3.0` and thi
 shape of the real upgrade — `[patch.crates-io]` across the family at one monorepo rev — and what to
 delete when it lands.
 
-Both firmwares also depend directly on their chip's `esp-wifi-sys-*` bindings, for
+The other half of the family is the dangerous half, because it resolves. `esp-alloc` and the
+`esp-wifi-sys-*` bindings are dependencies of `esp-radio` *and* direct dependencies of both
+firmwares, and a version above what `esp-radio` asks for is semver-incompatible with it rather than
+in conflict with it — so Cargo adds a second copy instead of refusing, and both copies are linked:
+
+- Two `esp-wifi-sys-*` each export `__esp_radio_printf` as `no_mangle`, and each carries its own
+  copy of the IDF Wi-Fi blobs. `lto = "fat"` refuses the build. That is the cheap version.
+- Two `esp-alloc` are two heaps. Only the direct copy takes `#[global_allocator]` and the `malloc`
+  shims, and only that one is handed regions by `heap_allocator!` in `src/main.rs`. But `esp-rtos`
+  and `esp-radio` allocate every task stack and every Wi-Fi driver queue through *their* copy's
+  `esp_alloc::InternalMemory`, which reads its own `HEAP` static rather than going through those
+  shims — so the firmware builds, links, passes CI, and then panics at `esp_rtos::start`, before the
+  radio is even up. The panic handler resets, so the board does it again: 88 boots in 20 seconds,
+  never reaching `Ready`. No host build can see any of that.
+
+A second copy does not need a manifest to arrive, either: `esp-sync` is a direct dependency of the
+node alone, and it doubled in the *bridge* because `esp-alloc 0.11` brought its own.
+
+So every crate `esp-radio` also depends on is held at the version `esp-radio` resolves, and they all
+move when it does. Two things hold that without a board to test on: `.github/dependabot.yml` ignores
+the incompatible bumps in both firmware directories, and each firmware's CI job counts the versions
+before it builds. By hand, from either firmware directory:
+
+```sh
+cargo tree --locked --features esp32c6 -e normal --prefix none --format '{p}' \
+  | awk '{print $1, $2}' | sort -u | grep -E '^esp-(alloc|hal|radio|rtos|sync|wifi-sys-esp32c[56]) '
+```
+
+They are direct dependencies for reasons that do not go away. `esp-wifi-sys-*` is here for
 `esp_now_set_peer_rate_config` — the one IDF call `esp-radio` does not wrap, and the only `unsafe`
-in either (`set_peer_rate` in `src/main.rs`). It is held at the version `esp-radio` itself resolves,
-so the declarations match the Wi-Fi libraries actually linked; when `esp-radio` moves, move it with
-it and check that `cargo tree -i esp-wifi-sys-esp32c6 --features esp32c6` still shows a single copy.
+in either firmware (`set_peer_rate` in `src/main.rs`). `esp-alloc` is here because the firmware is
+what owns the heap and declares its regions.
 
 `esp-generate` is a version behind this set; its scaffolding (`build.rs`, `.cargo/config.toml`) is
 what was taken from it, not its dependency list.

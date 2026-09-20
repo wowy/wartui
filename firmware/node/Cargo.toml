@@ -57,7 +57,11 @@ log = ["dep:esp-println"]
 xiao-external-antenna = []
 
 [dependencies]
-esp-alloc = "0.11.0"
+# `esp-radio` and `esp-rtos` allocate their task stacks and the Wi-Fi driver's
+# queues through their own copy's `HEAP`, which nothing here fills, so a second
+# copy is a second and empty heap. Held at the version `esp-radio` resolves;
+# `firmware/bridge/README.md` § "Dependency versions".
+esp-alloc = "0.10.0"
 esp-bootloader-esp-idf = "0.5.0"
 esp-hal = { version = "1.1.2", features = ["unstable"] }
 # `jtag-serial` rather than `auto`, because these boards are USB and the

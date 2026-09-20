@@ -242,8 +242,13 @@ edit stops; follow the pointer before changing the rule.
 - **Both firmwares pass `US` for the regulatory domain, and that is not a preference**: `esp-radio`
   defaults to China, which silently costs a C5 channels 100–144 on every sweep.
   → `firmware/bridge/src/main.rs`, `firmware/node/README.md`
-- **`esp-radio 1.0.0-beta.0` requires `esp-hal ~1.1.0`, and that pins the whole family.** Do not try
-  to force it; `cargo update` lists newer versions and moves nothing. Issue #16 is the real upgrade.
+- **Every crate `esp-radio` also depends on is held at the version `esp-radio` resolves.**
+  `esp-radio 1.0.0-beta.0` requires `esp-hal ~1.1.0`, which walls off `esp-hal` and `esp-rtos`
+  outright. The others — `esp-alloc`, `esp-sync`, `esp-wifi-sys-*` — go higher perfectly happily,
+  and a higher one is a *second copy* rather than an upgrade: a duplicate `__esp_radio_printf` that
+  fat LTO refuses, or a second `esp-alloc` whose `HEAP` nothing fills, which builds and then panics
+  on the first task the radio spawns. Dependabot ignores them and each firmware's CI job counts the
+  versions; issue #16 is the real upgrade, and moves all of them at once.
   → `firmware/bridge/README.md` § "Dependency versions"
 - **Every bridge and node transmits at 2 dBm**, the lowest `set_max_tx_power` accepts. It is the
   operator's policy for the whole fleet, not a default to raise for one board; range is the cost.

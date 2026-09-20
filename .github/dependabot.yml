@@ -1,12 +1,40 @@
 version: 2
 updates:
   - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "daily"
+
+  # The firmwares are their own workspaces, and every crate `esp-radio
+  # 1.0.0-beta.0` also depends on is held at the version `esp-radio` resolves.
+  # Bumping one out of that range does not upgrade it, it adds a second copy:
+  # `__esp_radio_printf` multiply defined under `lto = "fat"` for
+  # `esp-wifi-sys-*`, a second and empty heap for `esp-alloc`. Issue #16 moves
+  # the whole family at once, by hand. `esp-radio` itself is deliberately not
+  # ignored — a pull request there is the signal that the wall has moved.
+  # `firmware/bridge/README.md` § "Dependency versions" has the reasoning.
+  - package-ecosystem: "cargo"
     directories:
-      - "/"
       - "/firmware/bridge"
       - "/firmware/node"
     schedule:
       interval: "daily"
+    # Minor and major only, which for a 0.x crate is the whole of what is
+    # semver-incompatible. A patch release stays inside what `esp-radio` asks
+    # for, so it moves the one copy rather than adding a second, and each
+    # firmware's CI job counts the versions before it builds. Those are worth
+    # taking — `esp-hal 1.1.3` is a fix this firmware can have.
+    ignore:
+      - dependency-name: "esp-alloc"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      - dependency-name: "esp-hal"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      - dependency-name: "esp-rtos"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      - dependency-name: "esp-sync"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      - dependency-name: "esp-wifi-sys-*"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
 
   - package-ecosystem: "github-actions"
     # Workflow files stored in the default location of `.github/workflows`
