@@ -105,6 +105,17 @@ impl StallWatch {
         self.last_host = Some(now_ms);
     }
 
+    /// When a frame from the host last decoded, or `None` if none ever has.
+    ///
+    /// Exposed so that anything else needing to know whether a host is there reads the
+    /// clock that is already kept rather than starting a second one. The bridge's panel
+    /// does: it falls back to what it knows on its own when the host stops talking, and
+    /// two clocks for one fact would disagree the moment either changed.
+    #[must_use]
+    pub const fn last_host(&self) -> Option<u64> {
+        self.last_host
+    }
+
     /// Account for one pass of the outbox, and say whether to give up.
     ///
     /// `moved` is whether that pass placed any byte at all; `queued` is whether

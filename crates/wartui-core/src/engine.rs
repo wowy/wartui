@@ -373,15 +373,20 @@ pub struct StoreStats {
 
 /// A node as of one snapshot.
 ///
-/// `assignable` is carried rather than left for the UI to re-derive, because the
-/// rule is not the obvious one: a node can be streaming observations with a
-/// healthy RSSI and still be unable to accept an assignment, since only
-/// heartbeats open its admin window.
+/// Both flags are carried rather than left for the UI to re-derive, because neither
+/// rule is the obvious one and neither can be recovered from what else is here: a
+/// node can be streaming observations with a healthy RSSI and still be unable to
+/// accept an assignment, since only heartbeats open its admin window — and the
+/// timeout that decides liveness is engine configuration a reader of a snapshot has
+/// no access to.
 #[derive(Debug, Clone)]
 pub struct NodeView {
     /// Everything known about the node.
     pub state: NodeState,
     /// Whether it has heartbeated inside the topology timeout.
+    pub alive: bool,
+    /// Whether it can be given an assignment, which is [`Self::alive`] and more;
+    /// see [`FleetEngine::is_assignable`].
     pub assignable: bool,
 }
 
@@ -1363,11 +1368,12 @@ impl FleetEngine {
             .nodes
             .values()
             .map(|state| NodeView {
+                alive: self.is_alive(state, now),
                 assignable: self.is_assignable(state, now),
                 state: state.clone(),
             })
             .collect();
-        let alive = nodes.iter().filter(|n| self.is_alive(&n.state, now)).count();
+        let alive = nodes.iter().filter(|n| n.alive).count();
         let assignable = nodes.iter().filter(|n| n.assignable).count();
         Snapshot {
             bridge: self.bridge.clone(),

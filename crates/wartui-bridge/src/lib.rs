@@ -17,7 +17,9 @@ pub mod sim;
 
 use thiserror::Error;
 use tokio::sync::mpsc;
-use wartui_proto::link::{BridgeToHost, Chip, HostToBridge, LinkError, LoopPhase, Mac, ResetCause};
+use wartui_proto::link::{
+    BridgeToHost, Chip, HostToBridge, LinkError, LoopPhase, Mac, Panel, ResetCause,
+};
 
 /// Inbound event queue depth.
 ///
@@ -56,6 +58,12 @@ pub struct BridgeInfo {
     /// Small means this connection is talking to a bridge that has just restarted;
     /// see `serial::is_a_new_life`.
     pub uptime_ms: u32,
+    /// The screen this bridge has, if it has one.
+    ///
+    /// Carried up so the host formats to the geometry that is there and pushes
+    /// nothing at a bridge without a screen. `None` is the ordinary case: it is a
+    /// board fact, not a chip fact, and most boards have no panel.
+    pub panel: Option<Panel>,
 }
 
 /// Something that happened on the link.

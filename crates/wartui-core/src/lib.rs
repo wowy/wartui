@@ -7,8 +7,12 @@
 //!
 //! [`engine`] is a pure synchronous state machine, [`runtime`] owns the clock and
 //! performs what it asks for, [`store`] is the system of record and [`export`] a view
-//! of it. The only thing wartui transmits is a channel assignment, to one node, in
-//! the 100 ms it holds open after a heartbeat.
+//! of it. [`panel`] is a second view, of a snapshot rather than the store, and exists
+//! here for the reason `export` does: it is formatting with a rule in it, and a rule
+//! belongs where `cargo test` can reach it.
+//!
+//! The only thing wartui transmits is a channel assignment, to one node, in the 100 ms
+//! it holds open after a heartbeat.
 
 pub mod discover;
 pub mod distinct;
@@ -16,6 +20,7 @@ pub mod engine;
 pub mod export;
 pub mod gps;
 pub mod nmea;
+pub mod panel;
 pub mod position;
 pub mod record;
 pub mod runtime;

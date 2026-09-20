@@ -399,6 +399,7 @@ mod tests {
             last_phase: LoopPhase::Unknown,
             heap_free: 0,
             uptime_ms: 0,
+            panel: None,
         }
     }
 

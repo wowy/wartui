@@ -779,6 +779,7 @@ fn read_loop(
                     last_phase,
                     heap_free,
                     uptime_ms,
+                    panel,
                     ..
                 }) => {
                     state.decoded.store(true, Ordering::Relaxed);
@@ -822,6 +823,7 @@ fn read_loop(
                         phase = ?last_phase,
                         heap_free,
                         uptime_ms,
+                        panel = ?panel,
                         "the bridge announced itself"
                     );
                     LinkEvent::Connected(BridgeInfo {
@@ -832,6 +834,7 @@ fn read_loop(
                         last_phase,
                         heap_free,
                         uptime_ms,
+                        panel,
                     })
                 }
                 Ok(msg) => {

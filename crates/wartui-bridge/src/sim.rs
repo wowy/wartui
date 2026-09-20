@@ -27,7 +27,7 @@ use wartui_proto::air::{
 use wartui_proto::dedup::MacRing;
 use wartui_proto::link::{
     BROADCAST, BridgeToHost, Chip, EspNowPayload, HostToBridge, LogLevel, LogStr, LoopPhase, Mac,
-    ResetCause, SendStatus,
+    Panel, ResetCause, SendStatus,
 };
 use wartui_proto::plan::{
     ADMIN_WAIT_MS, BLE_BEAT_MS, CHANNEL_DWELL_MS, ChannelSet, DEDUP_RING, IDLE_BEAT_MS,
@@ -210,6 +210,11 @@ async fn run_bridge(
         heap_free: 0,
         // Announced the instant it came up, and it never reboots.
         uptime_ms: 0,
+        // A simulated C6 with a T-Dongle-C5's screen, which no board is. The point is
+        // that `--sim` exercises the whole push path — render, rate limit, encode, send
+        // — with nothing attached, and a simulator that reported no panel would leave
+        // that path untested until a board was on the desk.
+        panel: Some(Panel { cols: 26, rows: 8 }),
     };
     if plumbing.events.send(LinkEvent::Connected(info)).await.is_err() {
         return;
@@ -224,6 +229,10 @@ async fn run_bridge(
             // The real bridge replies with `Ready`, but `Connected` has already
             // gone out above and a host counting connections would be confused.
             HostToBridge::Identify => None,
+            // Nothing to draw on, and nothing to say about it: a real bridge without a
+            // screen would do the same. The host only sends these because this simulator
+            // claims a panel above.
+            HostToBridge::ShowPanel { .. } => None,
             HostToBridge::SetChannel { channel: ch } => {
                 channel = ch;
                 None
