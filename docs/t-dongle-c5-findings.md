@@ -82,6 +82,15 @@ That is worth knowing because it means the 1 Hz figure is a ceiling rather than
 a duty cycle, and the panel's real cost on a quiet capture is far below anything
 above.
 
+It also sets the bridge's fallback screen. A later 75 s capture pushed 21 times,
+median gap 2.50 s but **maximum 19.75 s** — a fifth of it spent saying nothing at
+all, because nothing had changed. So a push is no evidence a host is there, and
+the only thing that keeps arriving is the five-second `GetStatus`. `HOST_GONE_MS`
+has to clear that interval with room, which is why it is ten seconds and not the
+five it started at; at five, that 19.75 s stretch would have dropped the panel to
+"no host" and back twice over, repainting every row each way, with a host
+attached and working the whole time.
+
 ## Numbers this replaces
 
 An earlier note estimated a full-frame push at 6–15 ms at 20–40 MHz, reasoning
