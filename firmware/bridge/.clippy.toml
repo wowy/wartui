@@ -1,7 +1,11 @@
-# One `BridgeToHost` is 276 bytes: the enum inlines a 250-byte ESP-NOW payload
-# because boxing it would put an allocator on the receive path, which is exactly
-# what `wartui-proto` exists to avoid. A function that builds two of them is
-# therefore normally over 1KB and says nothing interesting. The threshold is set
-# above that but well under the main task's stack, which the linker sizes at
-# 216KB, so anything this still catches is worth reading.
-stack-size-threshold = 2048
+# The messages this firmware moves are big by design and cannot be boxed: an
+# allocator on the receive path is exactly what `wartui-proto` exists to avoid,
+# so `HostToBridge` inlines both a 250-byte ESP-NOW payload and a whole panel's
+# worth of lines, and is 328 bytes. `BridgeToHost` is 276 for the same reason.
+# A function that takes one and builds another is therefore over 2KB before it
+# has done anything interesting, and `handle` is exactly that function.
+#
+# So the threshold is set above the size those enums force and well under the
+# main task's stack, which the linker sizes at 216KB — anything this still
+# catches is a frame nothing in the protocol accounts for, and worth reading.
+stack-size-threshold = 3072
