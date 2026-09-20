@@ -114,9 +114,9 @@ either: `SoftwareInterruptControl` is gone in 1.2.1, so `esp-rtos 0.3.0` and thi
 shape of the real upgrade — `[patch.crates-io]` across the family at one monorepo rev — and what to
 delete when it lands.
 
-The other half of the family is the dangerous half, because it resolves. `esp-alloc`, `esp-sync` and
-the `esp-wifi-sys-*` bindings are dependencies of `esp-radio` *and* direct dependencies here, and a
-higher version in this manifest is semver-incompatible with the one `esp-radio` asks for rather than
+The other half of the family is the dangerous half, because it resolves. `esp-alloc` and the
+`esp-wifi-sys-*` bindings are dependencies of `esp-radio` *and* direct dependencies of both
+firmwares, and a version above what `esp-radio` asks for is semver-incompatible with it rather than
 in conflict with it — so Cargo adds a second copy instead of refusing, and both copies are linked:
 
 - Two `esp-wifi-sys-*` each export `__esp_radio_printf` as `no_mangle`, and each carries its own
@@ -125,17 +125,21 @@ in conflict with it — so Cargo adds a second copy instead of refusing, and bot
   shims, and only that one is handed regions by `heap_allocator!` in `src/main.rs`. But `esp-rtos`
   and `esp-radio` allocate every task stack and every Wi-Fi driver queue through *their* copy's
   `esp_alloc::InternalMemory`, which reads its own `HEAP` static rather than going through those
-  shims — so the firmware builds, links, passes CI, and panics on the first task it spawns. No host
-  build can see it.
+  shims — so the firmware builds, links, passes CI, and then panics at `esp_rtos::start`, before the
+  radio is even up. The panic handler resets, so the board does it again: 88 boots in 20 seconds,
+  never reaching `Ready`. No host build can see any of that.
+
+A second copy does not need a manifest to arrive, either: `esp-sync` is a direct dependency of the
+node alone, and it doubled in the *bridge* because `esp-alloc 0.11` brought its own.
 
 So every crate `esp-radio` also depends on is held at the version `esp-radio` resolves, and they all
 move when it does. Two things hold that without a board to test on: `.github/dependabot.yml` ignores
-them in both firmware directories, and each firmware's CI job asserts one version of each. By hand,
-from either firmware directory:
+the incompatible bumps in both firmware directories, and each firmware's CI job counts the versions
+before it builds. By hand, from either firmware directory:
 
 ```sh
 cargo tree --locked --features esp32c6 -e normal --prefix none --format '{p}' \
-  | awk '{print $1, $2}' | sort -u | grep -E '^esp-(alloc|hal|radio|sync|wifi-sys)'
+  | awk '{print $1, $2}' | sort -u | grep -E '^esp-(alloc|hal|radio|rtos|sync|wifi-sys-esp32c[56]) '
 ```
 
 They are direct dependencies for reasons that do not go away. `esp-wifi-sys-*` is here for
