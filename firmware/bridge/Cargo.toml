@@ -55,7 +55,7 @@ esp-rtos = { version = "0.3.0", features = ["esp-alloc", "esp-radio"] }
 # `esp_now_set_peer_rate_config`, in `set_peer_rate`. Held at the version
 # `esp-radio` links; README.md § "Dependency versions".
 esp-wifi-sys-esp32c5 = { version = "0.2.0", optional = true }
-esp-wifi-sys-esp32c6 = { version = "0.2.0", optional = true }
+esp-wifi-sys-esp32c6 = { version = "0.3.0", optional = true }
 nb = "1.1.0"
 portable-atomic = { version = "1.15.0", default-features = false }
 static_cell = "2.1.1"

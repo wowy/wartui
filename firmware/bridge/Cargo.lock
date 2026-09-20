@@ -619,7 +619,7 @@ dependencies = [
  "esp-metadata-generated 0.4.0",
  "esp-sync 0.2.1",
  "esp-wifi-sys-esp32c5",
- "esp-wifi-sys-esp32c6",
+ "esp-wifi-sys-esp32c6 0.2.0",
  "esp32c5",
  "esp32c6",
 ]
@@ -651,7 +651,7 @@ dependencies = [
  "esp-rom-sys",
  "esp-sync 0.2.1",
  "esp-wifi-sys-esp32c5",
- "esp-wifi-sys-esp32c6",
+ "esp-wifi-sys-esp32c6 0.2.0",
  "esp32c5",
  "esp32c6",
  "heapless 0.9.3",
@@ -762,6 +762,12 @@ name = "esp-wifi-sys-esp32c6"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "57649401fc2f906a16e2268de88693724a125adcd0eba89b594a157affcee2d5"
+
+[[package]]
+name = "esp-wifi-sys-esp32c6"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5bb01c06a3dbd75121146f619513ee610505b2d80ce3c421ed0c840a19e12f67"
 
 [[package]]
 name = "esp32"
@@ -1526,7 +1532,7 @@ dependencies = [
  "esp-radio",
  "esp-rtos",
  "esp-wifi-sys-esp32c5",
- "esp-wifi-sys-esp32c6",
+ "esp-wifi-sys-esp32c6 0.3.0",
  "nb 1.1.0",
  "portable-atomic",
  "static_cell",
