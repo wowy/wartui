@@ -168,25 +168,26 @@ impl Node {
         }
     }
 
-    /// Whether the node has anything to do.
+    /// Whether the node has anything to do, given whether it has a scan to run.
     ///
-    /// Channels, or the Bluetooth scan on a build that has one. An empty mask with
-    /// the flag clear counts as nothing rather than as an error: no frame means
-    /// "scan nothing", so this needs a confused host, and parking is the same
-    /// answer as never having been told anything.
-    const fn assigned(&self) -> bool {
-        self.version != 0 && (!self.channels.is_empty() || self.bluetooth_only())
+    /// Channels, or the Bluetooth scan. An empty mask with the flag clear counts as
+    /// nothing rather than as an error: no frame means "scan nothing", so this needs a
+    /// confused host, and parking is the same answer as never having been told anything.
+    const fn assigned(&self, scanning: bool) -> bool {
+        self.version != 0 && (!self.channels.is_empty() || self.bluetooth_only(scanning))
     }
 
     /// Whether this node's whole job is Bluetooth.
     ///
-    /// `cfg!` rather than trust: a build without the feature has no scan to run, so a
-    /// flag that reaches one anyway leaves it parked and reporting nothing — honest,
-    /// and diagnosable from the adoption line — rather than heartbeating once a
-    /// second over a radio that is not there. The core refuses to send it; this is
-    /// the node not depending on that.
-    const fn bluetooth_only(&self) -> bool {
-        cfg!(feature = "ble") && self.ble && self.channels.is_empty()
+    /// `scanning` is whether there is a scan to run at all: the `ble` feature, and a
+    /// controller that started. A flag that reaches a node with neither leaves it parked
+    /// and reporting nothing — honest, and diagnosable from the adoption line — rather
+    /// than holding the control channel for a scan that cannot happen. The core announces
+    /// what this node can do and so never asks; this is the node not depending on that,
+    /// and the reason the answer is passed in rather than read off a `cfg!`, which would
+    /// cover the build without the feature and miss the radio that would not start.
+    const fn bluetooth_only(&self, scanning: bool) -> bool {
+        scanning && self.ble && self.channels.is_empty()
     }
 
     /// Take an assignment, if it is not the one already held.
@@ -323,7 +324,8 @@ fn main() -> ! {
     };
     #[cfg(not(feature = "ble"))]
     let scanner: Option<()> = None;
-    let capabilities = capabilities(scanner.is_some());
+    let scanning = scanner.is_some();
+    let capabilities = capabilities(scanning);
 
     let node = NODE.take();
     let mac = esp_radio::wifi::Interface::station().mac_address();
@@ -335,7 +337,7 @@ fn main() -> ! {
     );
 
     loop {
-        if !node.assigned() {
+        if !node.assigned(scanning) {
             // Parked: reachable the whole time, collecting nothing. Heartbeat
             // first and listen afterwards, because the host only ever transmits
             // an assignment in answer to one — so this is how long joining a
@@ -353,7 +355,7 @@ fn main() -> ! {
             continue;
         }
 
-        if node.bluetooth_only() {
+        if node.bluetooth_only(scanning) {
             // Bluetooth is this node's whole job, so it sniffs nothing and never
             // leaves the control channel: it is the one node an assignment can
             // always reach, and the only thing the Bluetooth controller takes the
@@ -364,9 +366,8 @@ fn main() -> ! {
             // last, because that is the moment the core answers in.
             let cycle = Instant::now() + Duration::from_millis(u64::from(BLE_BEAT_MS));
             if radio::park(&manager, &sniffer, CONTROL_CHANNEL, false) {
-                // `None` only on a controller that would not start at boot, which
-                // said so then. One line a second saying it again is noise, and the
-                // cycle is otherwise the same: heartbeat, and answer for it.
+                // Always `Some` here: `scanning` is what put this node in this arm,
+                // and it is that scanner being there.
                 #[cfg(feature = "ble")]
                 if let Some(scanner) = scanner.as_deref_mut() {
                     report_ble(&mut sender, node, scanner);

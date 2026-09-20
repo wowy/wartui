@@ -166,14 +166,14 @@ impl Ui {
             .try_send(Command::AssignBle { mac: if holds { None } else { Some(target) } })
         {
             Ok(()) if holds => format!("{}: bluetooth off on its next heartbeat", mac(&target)),
-            // The scan arrives as an assignment, so a node the planner has nothing
-            // for has nothing for it to arrive in. `replan` runs inside the
-            // heartbeat that admits a node, so a fleet the planner can cut never
-            // reaches this: it is the two fleets it cannot. Above twenty nodes there
-            // is no plan at all, and below that a fleet with more nodes than
-            // channels their radios can reach leaves its surplus undealt. Either
-            // way "on its next heartbeat" would never come true.
-            Ok(()) if node.state.desired.is_none() && node.state.confirmed.is_none() => {
+            // The scan arrives as an assignment, so a fleet with no plan has nothing
+            // for it to arrive in: above twenty nodes the planner refuses the whole
+            // fleet, and "on its next heartbeat" would never come true. A surplus
+            // node inside a plan is not this case — more nodes than the pool has
+            // channels for leaves one undealt, and giving that one the scan deals it
+            // the empty share the flag travels in, so it is told on its next
+            // heartbeat like any other.
+            Ok(()) if snapshot.plan.is_none() => {
                 format!("{}: bluetooth, once it is in a plan", mac(&target))
             }
             Ok(()) => format!("{}: bluetooth on its next heartbeat", mac(&target)),
@@ -1722,6 +1722,42 @@ mod tests {
         holding.ble_node = Some(holding.nodes[row].state.mac);
         ui.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE), &holding, &tx);
         assert_eq!(rx.try_recv().expect("a command"), Command::AssignBle { mac: None });
+    }
+
+    #[test]
+    fn b_waits_for_a_plan_only_on_a_fleet_that_has_none() {
+        // A node the planner dealt nothing is still in the plan, so giving it the scan
+        // deals it the empty share the flag travels in and it hears on its next
+        // heartbeat like any other. The wait is for a fleet with no plan at all, where
+        // `replan` sends nothing to anybody — and that node may well be holding an
+        // assignment from when the fleet was smaller, so what it holds says nothing
+        // about whether the flag can reach it.
+        let mut snapshot = busy();
+        snapshot.plan = plan_for(ChannelPool::Us, &[Job::Wifi(Radio::TwoPointFour); 12]);
+        let surplus = snapshot
+            .nodes
+            .iter()
+            .position(|n| n.assignable && n.state.desired.is_none() && n.state.confirmed.is_none())
+            .expect("a node with no share of its own");
+
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut ui = Ui { selected: surplus, ..Default::default() };
+        ui.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE), &snapshot, &tx);
+        assert!(rx.try_recv().is_ok(), "the command goes out either way");
+        let notice = ui.notice(snapshot.now_ms).expect("a notice");
+        assert!(notice.contains("on its next heartbeat"), "got {notice}");
+
+        let mut planless = snapshot.clone();
+        planless.plan = None;
+        let holder = planless
+            .nodes
+            .iter()
+            .position(|n| n.assignable && n.state.confirmed.is_some())
+            .expect("a node still holding what it was given");
+        let mut ui = Ui { selected: holder, ..Default::default() };
+        ui.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE), &planless, &tx);
+        let notice = ui.notice(planless.now_ms).expect("a notice");
+        assert!(notice.contains("once it is in a plan"), "got {notice}");
     }
 
     #[test]

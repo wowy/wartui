@@ -256,8 +256,10 @@ def command_for(args, binary, db, lat, lon):
         # Not simulating means `run` goes looking for a receiver, opening every attached
         # port that is not an Espressif board. Nothing here wants one: the position is
         # pinned below, and a search is a poor thing to run across someone's desk for the
-        # sake of a screenshot. Named on the command line, it is wanted after all.
-        if not any(arg.startswith(("--gps", "--no-gps")) for arg in args.rest):
+        # sake of a screenshot. Named on the command line, it is wanted after all —
+        # `--gps` exactly, since `--gps-baud` is a hint for the search rather than a
+        # receiver, and matching it would turn the search back on.
+        if not any(arg == "--gps" or arg.startswith("--gps=") for arg in args.rest):
             command.append("--no-gps")
     command += ["--lat", repr(lat), "--lon", repr(lon)]
     return command + args.rest
