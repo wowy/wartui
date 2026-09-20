@@ -573,6 +573,20 @@ impl ChannelPool {
             ChannelSet::from_bits(set.bits() | ChannelSet::from_run(*run).bits())
         })
     }
+
+    /// Every channel of the pool that `radio` can tune.
+    ///
+    /// Never empty: every pool has 2.4 GHz in it and every [`Radio`] reaches 2.4 GHz.
+    /// That is what makes this a usable answer for a node the deal had nothing for —
+    /// see [`Plan::channels_for`].
+    #[must_use]
+    pub fn reachable_by(self, radio: Radio) -> ChannelSet {
+        let mut set = ChannelSet::empty();
+        for idx in self.channels().indices().filter(|idx| radio.can_tune(*idx)) {
+            set.insert(idx);
+        }
+        set
+    }
 }
 
 /// How the pool is named on screen and in prose — "US", not the variant's `Us`.
@@ -626,7 +640,10 @@ impl Plan {
     /// - `None` — nothing for this node: an index outside the fleet, or a surplus
     ///   slot in a fleet with more nodes than it has channels it can reach. There
     ///   is no frame meaning "scan nothing", so a caller that gets `None` leaves
-    ///   the node holding whatever it already has rather than inventing one.
+    ///   the node holding whatever it already has rather than inventing one — and
+    ///   has to answer for the node holding *nothing*, which is the Bluetooth
+    ///   scanner's share after the scan is taken off it. [`ChannelPool::reachable_by`]
+    ///   is what that caller reaches for.
     #[must_use]
     pub fn channels_for(&self, node_index: u8) -> Option<ChannelSet> {
         let set = *self.slots.get(usize::from(node_index))?;

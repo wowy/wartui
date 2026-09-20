@@ -217,7 +217,9 @@ Two consequences worth knowing:
   more nodes than channels to give them. The surplus nodes keep whatever they last held rather than
   being told to scan nothing — the only frame carrying no channels is the Bluetooth node's, and it
   means "Bluetooth is the whole job" rather than "stop" — so their shares double up with someone
-  else's.
+  else's. A node that has nothing to keep is the one exception: the node that *was* the Bluetooth
+  scanner holds no channels at all, so taking the scan off it hands it everything its radio can
+  reach instead. That node then sweeps the whole pool on its own and its `beat` says so.
 
 ## Positions
 

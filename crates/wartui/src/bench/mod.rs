@@ -286,11 +286,17 @@ pub async fn run(args: Args) -> Result<()> {
     let capture = tokio::spawn(drive(link, store, engine, snapshot_tx, command_rx, stop_rx));
     // Naming a node before it has been heard is allowed, and this one is the only
     // source of addresses that never dedup.
-    let ble_node = SimTransport::node_mac(0);
-    command_tx
-        .send(Command::AssignBle { mac: Some(ble_node) })
-        .await
-        .context("the capture stopped before it began")?;
+    //
+    // Not on a fleet of one, which the flags allow: Bluetooth is a whole node's job,
+    // so the only node would sniff nothing and the run would measure a stream of
+    // advertisers instead of the sweep its profile describes.
+    let ble_node = (nodes > 1).then(|| SimTransport::node_mac(0));
+    if let Some(mac) = ble_node {
+        command_tx
+            .send(Command::AssignBle { mac: Some(mac) })
+            .await
+            .context("the capture stopped before it began")?;
+    }
 
     if !args.json {
         eprintln!("waiting for {nodes} nodes to take their assignments ...");
@@ -578,7 +584,7 @@ fn busy_networks(nodes: u8, pool: ChannelPool) -> u16 {
 async fn settle(
     snapshots: &mut watch::Receiver<Arc<Snapshot>>,
     nodes: usize,
-    ble_node: Mac,
+    ble_node: Option<Mac>,
 ) -> Result<Arc<Snapshot>, watch::error::RecvError> {
     let settled = snapshots
         .wait_for(|snapshot| {
@@ -592,7 +598,7 @@ async fn settle(
                             // the scan, so an empty channel set is what "settled"
                             // looks like for it and waiting for a share would wait
                             // out the timeout.
-                            if state.mac == ble_node {
+                            if ble_node == Some(state.mac) {
                                 confirmed.ble && confirmed.channels.is_empty()
                             } else {
                                 !confirmed.channels.is_empty()

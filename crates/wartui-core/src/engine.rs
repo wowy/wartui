@@ -1020,18 +1020,39 @@ impl FleetEngine {
         // One epoch per node that actually needs telling. Held locally because
         // the decision needs the node in hand, and `self` is borrowed for it.
         let mut counter = self.last_counter;
-        for (index, (mac, _)) in members.iter().enumerate() {
+        let pool = self.config.pool;
+        for (index, (mac, job)) in members.iter().enumerate() {
             let index = u8::try_from(index).unwrap_or(u8::MAX);
+            let Some(node) = self.nodes.get_mut(mac) else { continue };
             // Nothing for this node: more nodes than the pool has channels *this
             // fleet* can reach, which with the radios read out of the tokens
             // means as few as twelve nodes with no 5 GHz between them. There is
             // no frame meaning "scan nothing", so it keeps what it holds —
             // duplicating another share rather than leaving a gap — and the
             // footer's unreachable line says the fleet is short of the pool.
-            // An *empty* set is not that case: it is the Bluetooth node's, and it
-            // goes out with the flag beside it.
-            let Some(channels) = plan.channels_for(index) else { continue };
-            let Some(node) = self.nodes.get_mut(mac) else { continue };
+            //
+            // Unless what it holds is nothing to scan, which is the assignment of
+            // a node that *was* the Bluetooth scanner and no longer is. That node
+            // is not duplicating a share, it is blind and still holding the
+            // antenna, and leaving it alone would mean the scan could never be
+            // taken off it. So it is dealt everything its own radio can reach —
+            // the surplus rule at its limit, and never empty, because every pool
+            // has 2.4 GHz in it and every radio tunes 2.4 GHz.
+            //
+            // An empty set from the plan itself is neither case: it is the
+            // Bluetooth node's, and it goes out with the flag beside it.
+            let held = node.desired.or(node.confirmed);
+            let channels = match plan.channels_for(index) {
+                Some(channels) => channels,
+                None if held.is_some_and(|assignment| assignment.channels.is_empty()) => {
+                    match job.radio() {
+                        Some(radio) => pool.reachable_by(radio),
+                        // Unreachable: a `Job::Bluetooth` slot is never `None` above.
+                        None => continue,
+                    }
+                }
+                None => continue,
+            };
             // The same `scanner` the job came from, so `channels.is_empty()` and
             // `ble` always agree.
             let ble = scanner == Some(*mac);

@@ -19,7 +19,7 @@ use wartui_proto::link::{
     BROADCAST, BridgeToHost, Chip, EspNowPayload, HostToBridge, LoopPhase, Mac, ResetCause,
     SendStatus,
 };
-use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun, plan};
+use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun, Radio, plan};
 
 const NODE: Mac = [0x02, 0x00, 0x5E, 0x10, 0x57, 0x84];
 const OTHER: Mac = [0x02, 0x00, 0x5E, 0x10, 0x57, 0x85];
@@ -1328,6 +1328,48 @@ fn no_node_is_ever_sent_an_empty_assignment_without_the_bluetooth_flag() {
 }
 
 #[test]
+fn nor_on_a_fleet_with_more_nodes_than_channels_to_give_them() {
+    // The same invariant on an oversubscribed fleet, where the scanner's slot is also
+    // the one the deal has nothing for — the arrangement in which the two halves of
+    // the frame came apart. `channels_for` says `None` and what the node holds is the
+    // empty set rather than a share worth keeping, so the rule that a node the plan
+    // has nothing for keeps what it holds had to grow the case where it holds nothing.
+    let clock = Clock::new();
+    let config = EngineConfig { pool: ChannelPool::Us, ..EngineConfig::default() };
+    let mut engine = engine(config, &clock);
+    let token = Capabilities::here(true, false);
+    let mut seen_empty = 0;
+    let check = |batch: &ActionBatch, seen_empty: &mut u32| {
+        for admin in admins(batch) {
+            assert_eq!(admin.channels.is_empty(), admin.scan_ble(), "one fact, said twice");
+            if admin.channels.is_empty() {
+                *seen_empty += 1;
+            }
+        }
+    };
+
+    for n in 0..13 {
+        check(&engine.handle(beat_at(peer(n), 1, token, 0), clock.at(1)), &mut seen_empty);
+    }
+    // Given, moved, and taken away again: every way the flag leaves a node.
+    for (from, target) in [(2u64, Some(peer(12))), (20, Some(peer(0))), (40, None)] {
+        engine.handle(Event::Command(Command::AssignBle { mac: target }), clock.at(from));
+        for beat in 0..6u32 {
+            let at = clock.at(from + u64::from(beat));
+            check(&engine.handle(Event::Tick, at), &mut seen_empty);
+            for n in 0..13 {
+                let batch = engine.handle(beat_at(peer(n), beat + 1, token, 0), at);
+                check(&batch, &mut seen_empty);
+                if let Some(HostToBridge::SendEspNow { id, .. }) = batch.urgent.first() {
+                    engine.handle(send_result(*id, SendStatus::AckOk, 900), at);
+                }
+            }
+        }
+    }
+    assert!(seen_empty >= 2, "the scan really did move around: {seen_empty}");
+}
+
+#[test]
 fn a_lone_node_given_the_bluetooth_scan_leaves_the_fleet_sniffing_no_wifi() {
     // The cost of making Bluetooth a whole node's job, stated: a fleet of one that
     // holds the scan sweeps nothing. A plan rather than a refusal, because refusing
@@ -1352,6 +1394,87 @@ fn a_lone_node_given_the_bluetooth_scan_leaves_the_fleet_sniffing_no_wifi() {
         EngineConfig::default().pool.channels(),
         "every channel of the pool went into no share"
     );
+}
+
+/// Drive a fleet of `nodes` ESP32-C6s claiming `ble` until every assignment has
+/// landed, answering each frame with an ack.
+///
+/// Twelve of these on `us` is the case worth having a helper for: eleven reachable
+/// channels means one slot is always surplus, and `crates/wartui/README.md`
+/// § "Channel pools" documents that as a fleet an operator may really run.
+fn settle_c6_fleet(engine: &mut FleetEngine, clock: &Clock, nodes: u8, from: u64) {
+    for beat in 0..6u32 {
+        let at = clock.at(from + u64::from(beat));
+        engine.handle(Event::Tick, at);
+        for n in 0..nodes {
+            let batch =
+                engine.handle(beat_at(peer(n), beat + 1, Capabilities::here(true, false), 0), at);
+            if let Some(HostToBridge::SendEspNow { id, .. }) = batch.urgent.first() {
+                engine.handle(send_result(*id, SendStatus::AckOk, 900), at);
+            }
+        }
+    }
+}
+
+#[test]
+fn the_bluetooth_scan_can_be_taken_off_a_node_the_planner_has_no_share_for() {
+    // Twelve C6s on `us` is eleven reachable channels across twelve nodes, so one
+    // slot is dealt nothing. A node the plan has nothing for keeps what it holds —
+    // but the Bluetooth node holds *nothing to scan*, so keeping it would mean the
+    // scan could never be taken off it: it would go on holding the antenna for ever
+    // while the fleet table showed a node the host no longer thinks is the holder,
+    // and `b` would report a withdrawal that never happened.
+    let clock = Clock::new();
+    let config = EngineConfig { pool: ChannelPool::Us, ..EngineConfig::default() };
+    let mut engine = engine(config, &clock);
+    for n in 0..12 {
+        engine.handle(beat_at(peer(n), 1, Capabilities::here(true, false), 0), clock.at(1));
+    }
+    engine.handle(Event::Command(Command::AssignBle { mac: Some(peer(11)) }), clock.at(2));
+    settle_c6_fleet(&mut engine, &clock, 12, 2);
+    let scanner = engine.nodes().find(|node| node.mac == peer(11)).expect("here");
+    let held = scanner.confirmed.expect("it took the scan");
+    assert!(held.ble && held.channels.is_empty(), "it really is the surplus slot: {held:?}");
+
+    engine.handle(Event::Command(Command::AssignBle { mac: None }), clock.at(20));
+    settle_c6_fleet(&mut engine, &clock, 12, 20);
+
+    assert_eq!(engine.snapshot(clock.at(40), StoreStats::default()).ble_node, None);
+    for node in engine.nodes() {
+        let held = node.desired.or(node.confirmed).expect("in the plan");
+        assert!(!held.ble, "{:02X?} is still scanning Bluetooth", node.mac);
+        assert!(!held.channels.is_empty(), "{:02X?} was left with nothing to scan", node.mac);
+    }
+    // The surplus rule at its limit: it duplicates the whole fleet's work rather
+    // than going blind, which is what a lone node holds too.
+    let back = engine.nodes().find(|node| node.mac == peer(11)).expect("here");
+    let held = back.desired.or(back.confirmed).expect("in the plan");
+    assert_eq!(held.channels, ChannelPool::Us.reachable_by(Radio::TwoPointFour));
+}
+
+#[test]
+fn moving_the_bluetooth_scan_never_leaves_two_nodes_scanning_it() {
+    // The same oversubscribed fleet, with the scan *moved* rather than withdrawn, and
+    // one node wider so that a slot is surplus on *both* sides of the move: with the
+    // scan away from node 0 there are twelve sniffers for eleven channels either way,
+    // so the node giving it up can land on the slot the deal has nothing for.
+    let clock = Clock::new();
+    let config = EngineConfig { pool: ChannelPool::Us, ..EngineConfig::default() };
+    let mut engine = engine(config, &clock);
+    for n in 0..13 {
+        engine.handle(beat_at(peer(n), 1, Capabilities::here(true, false), 0), clock.at(1));
+    }
+    engine.handle(Event::Command(Command::AssignBle { mac: Some(peer(12)) }), clock.at(2));
+    settle_c6_fleet(&mut engine, &clock, 13, 2);
+    engine.handle(Event::Command(Command::AssignBle { mac: Some(peer(0)) }), clock.at(20));
+    settle_c6_fleet(&mut engine, &clock, 13, 20);
+
+    let scanning: Vec<Mac> = engine
+        .nodes()
+        .filter(|node| node.desired.or(node.confirmed).is_some_and(|held| held.ble))
+        .map(|node| node.mac)
+        .collect();
+    assert_eq!(scanning, vec![peer(0)], "at most one node scans Bluetooth");
 }
 
 #[test]

@@ -274,8 +274,8 @@ fn the_pool_is_cut_across_only_the_nodes_still_sniffing() {
     // Three nodes, one of them on Bluetooth, deals the same shares as two nodes —
     // the point of the change, and the reason moving the scan has to re-cut.
     let two = plan(ChannelPool::Us, 2).expect("valid");
-    let three = plan_for(ChannelPool::Us, &[Job::Wifi(Radio::DualBand); 2]).expect("valid");
-    assert_eq!(two, three, "the convenience route and the explicit one agree");
+    let explicit = plan_for(ChannelPool::Us, &[Job::Wifi(Radio::DualBand); 2]).expect("valid");
+    assert_eq!(two, explicit, "the convenience route and the explicit one agree");
 
     let with_scanner = plan_for(
         ChannelPool::Us,
@@ -336,6 +336,15 @@ fn the_empty_set_is_offered_only_to_the_node_scanning_bluetooth() {
     let p = plan_for(ChannelPool::Eu, &crowd).expect("a valid fleet");
     assert!(p.channels_for(13).is_none(), "thirteen 2.4 GHz channels across fourteen nodes");
     assert!(p.admin_for(13, 1, wartui_proto::air::ADMIN_FLAG_BLE).is_none());
+
+    // Every pool has 2.4 GHz in it and every radio tunes 2.4 GHz, so the fallback
+    // the engine gives such a node is never itself empty.
+    for pool in POOLS {
+        for radio in [Radio::DualBand, Radio::TwoPointFour] {
+            assert!(!pool.reachable_by(radio).is_empty(), "{pool:?}/{radio:?}");
+            assert!(pool.reachable_by(radio).indices().all(|idx| radio.can_tune(idx)));
+        }
+    }
 }
 
 #[test]

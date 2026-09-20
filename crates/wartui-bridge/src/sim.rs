@@ -446,8 +446,12 @@ async fn run_node(
                 return;
             }
             // To the deadline rather than for a duration, so a busy second leaves
-            // nothing here and the next scan starts at once.
-            if nap_until(cycle, &mut admin_rx, &mut node).await.is_break() {
+            // little here and the next scan starts at once — but never less than a
+            // whole admin window, which is the floor the firmware holds too. Without
+            // it a node whose reports outran the deadline would loop with no window
+            // and, on a lone node, no sleep at all.
+            let window = tokio::time::Instant::now() + scaled(u64::from(ADMIN_WAIT_MS), speed);
+            if nap_until(cycle.max(window), &mut admin_rx, &mut node).await.is_break() {
                 return;
             }
             continue;
