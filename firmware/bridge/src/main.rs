@@ -325,6 +325,18 @@ struct Bridge {
     /// anything yet, which is what the fallback screen is for.
     #[cfg(feature = "t-dongle-c5")]
     panel_lines: PanelLines,
+    /// The screen this bridge actually brought up.
+    ///
+    /// Starts as [`PANEL`] and is cleared if the panel refuses to start, so a board
+    /// whose screen is dead tells the host there is no screen rather than inviting a
+    /// line a second at one. What is announced has to be what is true.
+    panel: Option<Panel>,
+    /// Why there is no screen on a board built to have one.
+    ///
+    /// Sent with every announcement rather than once at boot. A host is usually not
+    /// attached when this firmware starts — that is the whole reason `Identify`
+    /// exists — so a fault reported only at boot is a fault nobody ever reads.
+    panel_fault: Option<&'static str>,
 }
 
 impl Bridge {
@@ -364,8 +376,11 @@ impl Bridge {
             // `Identify`: a software reset keeps the USB device, so both arrive
             // on the same connection.
             uptime_ms: self.boot.elapsed().as_millis() as u32,
-            panel: PANEL,
+            panel: self.panel,
         });
+        if let Some(why) = self.panel_fault {
+            self.error(why);
+        }
     }
 
     /// Take the lines the host wants shown.
@@ -462,13 +477,15 @@ fn main() -> ! {
         stall: StallWatch::new(),
         #[cfg(feature = "t-dongle-c5")]
         panel_lines: PanelLines::new(),
+        panel: PANEL,
+        panel_fault: None,
     };
 
     // After the radio, so a panel that refuses its init sequence cannot stop a bridge
     // from bridging, and before `announce`, so the screen is lit by the time anything
     // could be looking at it.
     #[cfg(feature = "t-dongle-c5")]
-    let mut screen = panel::Screen::new(panel::Pins {
+    let mut screen = match panel::Screen::new(panel::Pins {
         spi: peripherals.SPI2,
         mosi: peripherals.GPIO2,
         sck: peripherals.GPIO6,
@@ -477,7 +494,14 @@ fn main() -> ! {
         rst: peripherals.GPIO1,
         backlight: peripherals.GPIO0,
         sd_cs: peripherals.GPIO23,
-    });
+    }) {
+        Ok(screen) => Some(screen),
+        Err(why) => {
+            bridge.panel = None;
+            bridge.panel_fault = Some(why);
+            None
+        }
+    };
 
     match manager.set_channel(DEFAULT_CHANNEL) {
         Ok(()) => {}
@@ -504,7 +528,7 @@ fn main() -> ! {
         // one it was inside. `render` returns without touching the bus unless a line
         // changed and its floor has passed, so an idle bridge still sleeps.
         #[cfg(feature = "t-dongle-c5")]
-        {
+        if let Some(screen) = screen.as_mut() {
             mark(LoopPhase::Render);
             worked |= screen.render(&mut bridge, mac);
         }

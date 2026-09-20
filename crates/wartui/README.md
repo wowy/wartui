@@ -329,6 +329,45 @@ those nodes speak a wire format this host does not, so the footer is the only pl
 own total since it booted, which on a dongle left powered with nothing listening is large and not a
 fault.
 
+## The bridge panel
+
+A LilyGO T-Dongle-C5 has a screen, and a bridge flashed for it shows five lines of the capture
+while it runs. Nothing turns this on: the bridge says whether it has a panel when it announces
+itself, `wartui status` prints what it said, and a bridge without one is sent nothing at all.
+
+| Line | What it says |
+| --- | --- |
+| `gps ok, 9 sats` | Where the position is coming from |
+| `nodes 3` | How many nodes are heartbeating, and how many of those can be driven |
+| `APs ~12.3k` | Distinct Wi-Fi access points this session, estimated |
+| `BLE ~840` | Distinct BLE addresses, estimated the same way |
+| `rssi -55 avg, -72 min` | How strongly the *bridge* is hearing the fleet |
+
+The numbers are the same ones the view shows, from the same snapshot, about once a second.
+
+**Each line is coloured by its own state**, so the panel can be read from across a car without
+being read closely: green for fine, amber for working but not ideal, red for a fault.
+
+- **GPS is green only on a live, current fix**, which is a stricter reading than the view's.
+  A receiver that is connecting, scanning, searching, or holding a fix too old to still be
+  believed is amber — it is attached and trying. No receiver, a port that will not read, and a
+  pinned `--lat`/`--lon` are all red, however deliberate any of them was: none of the three is
+  going to produce another fix, and a capture being written against a constant position is the
+  thing most worth noticing from a distance.
+- **Nodes** turn amber when something is heartbeating that cannot be driven — the two counts
+  differ, so the line prints both — and red when nothing is alive or the link is down.
+- **RSSI** turns amber when the fleet's average falls below −65 dBm or any one node below −70.
+  Both sit above the −74 dBm a 24 Mbps ESP-NOW link needs, so the line warns while there is
+  still something to do about it: close a window, move the dongle off the floor, walk a node
+  back. It says `rssi: none heard` in red if nodes are alive and the bridge has measured none
+  of them.
+- **The AP and BLE counts have no bad state** and stay green.
+
+Before any host speaks, and for a few seconds after one goes away, the bridge shows what it
+knows by itself instead — chip, address, channel and uptime, all in amber, because no host is
+exactly "working but not ideal". Start a capture and it takes the panel back within a second,
+with no replug and no reflash.
+
 ## When nothing arrives
 
 **wartui finds the bridge by asking.** With several Espressif boards attached — a node plugged in

@@ -19,8 +19,8 @@
 //! a cosmetic default to inherit, so [`ColorOrder::Bgr`] is set explicitly. The same
 //! goes for the rest of the init list, none of which any pinout carries and all of
 //! which is the difference between a working screen and a shifted, wrong-coloured one:
-//! inversion on, a `(1, 26)` display offset (the vendor's `x_gap`/`y_gap` swap in
-//! landscape), and rotation 3 for 160x80 the way round its own examples use.
+//! inversion on, the vendor's `(26, 1)` offset into the controller's larger
+//! framebuffer, and rotation 3 for 160x80 the way round its own examples use.
 //!
 //! # Why it cannot steal time from the radio
 //!
@@ -56,7 +56,7 @@ use mipidsi::interface::SpiInterface;
 use mipidsi::models::ST7735s;
 use mipidsi::options::{ColorInversion, ColorOrder, Orientation, Rotation};
 use mipidsi::{Builder, Display};
-use static_cell::ConstStaticCell;
+use static_cell::{ConstStaticCell, StaticCell};
 use wartui_proto::link::{PANEL_ROWS, PanelLine, PanelLines, Severity, ShortStr};
 
 use crate::Bridge;
@@ -64,8 +64,24 @@ use crate::Bridge;
 /// Pixels across, in the landscape orientation this panel is used in.
 const WIDTH: u16 = 160;
 
-/// Pixels down.
+/// Pixels down, in that same orientation.
 const HEIGHT: u16 = 80;
+
+/// The panel as its own controller addresses it, which is portrait.
+///
+/// Not the same numbers as [`WIDTH`] and [`HEIGHT`] and not interchangeable with
+/// them: mipidsi applies the size and offset in framebuffer space and the rotation
+/// afterwards, so landscape figures here are rejected outright — 160 is wider than an
+/// ST7735's 132-column framebuffer, and `init` answers `InvalidDisplaySize`.
+const NATIVE_SIZE: (u16, u16) = (HEIGHT, WIDTH);
+
+/// Where this 80x160 panel sits in that 132x162 framebuffer.
+///
+/// The vendor's `x_gap = 26`, `y_gap = 1`, verbatim and in that order, because these
+/// are framebuffer coordinates too. Their driver swaps them when it builds a
+/// landscape address window; mipidsi rotates for us, so the swap here would be one
+/// rotation too many.
+const NATIVE_OFFSET: (u16, u16) = (26, 1);
 
 /// Height of one row, which is `FONT_6X10`'s.
 const ROW_HEIGHT: u16 = 10;
@@ -122,6 +138,11 @@ const BACKGROUND: Rgb565 = Rgb565::BLACK;
 /// `ConstStaticCell` rather than `StaticCell`: the latter's `init` builds the array
 /// as a value and copies it in, which puts a whole row of pixels on the stack on the
 /// way to a static. This one is the array, already where it will live.
+/// The screen itself, out of `main`'s frame for the reason `OUTBOX` is out of it:
+/// it is a few hundred bytes of state that lives for the whole program, and `main`
+/// already sits at `.clippy.toml`'s threshold on the C5.
+static SCREEN: StaticCell<Screen> = StaticCell::new();
+
 static TRANSFER: ConstStaticCell<[u8; TRANSFER_BYTES]> =
     ConstStaticCell::new([0u8; TRANSFER_BYTES]);
 
@@ -173,12 +194,16 @@ impl Screen {
     /// Out of `main` because `main` already sits at `.clippy.toml`'s stack threshold
     /// on the C5, and `clippy::large_stack_frames` is denied.
     ///
+    /// # Errors
+    /// A short reason if the bus or the panel refuses, which the caller reports and
+    /// then carries on without a screen. Deliberately not a panic: the panic handler
+    /// reboots, so a board whose panel will not start would boot-loop instead of
+    /// bridging — and a bridge that cannot draw is still a bridge. The failure has to
+    /// reach the host to be fixed, and it cannot do that from inside a reset.
+    ///
     /// # Panics
-    /// If SPI2 refuses the configuration, or the panel refuses its init sequence.
-    /// Either is a wiring or a build fault rather than a condition to recover from,
-    /// and the panic handler reboots.
-    #[must_use]
-    pub fn new(pins: Pins) -> Self {
+    /// If called twice. There is one screen and one `StaticCell` behind it.
+    pub fn new(pins: Pins) -> Result<&'static mut Self, &'static str> {
         // Before a single byte goes down a bus the card slot shares. Nothing here
         // talks to the slot, so an `ExclusiveDevice` for the panel is correct as long
         // as that stays true — adding TF later makes it wrong and wants a shared-bus
@@ -192,7 +217,7 @@ impl Screen {
             .with_mode(Mode::_0)
             .with_write_bit_order(esp_hal::spi::BitOrder::MsbFirst);
         let spi = Spi::new(pins.spi, config)
-            .expect("SPI2 takes the panel's configuration")
+            .map_err(|_| "SPI2 refused the panel's configuration")?
             .with_sck(pins.sck)
             .with_mosi(pins.mosi);
         // The panel never reads, so MISO is left unclaimed even though the board wires
@@ -203,31 +228,33 @@ impl Screen {
         let reset = Output::new(pins.rst, Level::High, OutputConfig::default());
 
         let mut delay = Delay::new();
-        let device = ExclusiveDevice::new(spi, cs, delay).expect("a fresh CS pin");
+        let device =
+            ExclusiveDevice::new(spi, cs, delay).map_err(|_| "the panel's CS pin refused")?;
         let wire = SpiInterface::new(device, dc, TRANSFER.take());
 
         let mut display = Builder::new(ST7735s, wire)
             .reset_pin(reset)
-            .display_size(WIDTH, HEIGHT)
-            // The vendor's `x_gap = 26`, `y_gap = 1`, which swap in landscape.
-            .display_offset(1, 26)
+            .display_size(NATIVE_SIZE.0, NATIVE_SIZE.1)
+            .display_offset(NATIVE_OFFSET.0, NATIVE_OFFSET.1)
             // `INVON` is in the init list, with `INVOFF` commented out beside it.
             .invert_colors(ColorInversion::Inverted)
             // Not a default to inherit. See the module doc.
             .color_order(ColorOrder::Bgr)
+            // Reverses rows and swaps them with columns, so MADCTL comes out 0xA0 —
+            // 0xA8 with the colour order — which is the vendor's rotation 3.
             .orientation(Orientation::new().rotate(Rotation::Deg270))
             .init(&mut delay)
-            .expect("the panel takes its init sequence");
-        display.clear(BACKGROUND).expect("a cleared panel");
+            .map_err(|_| "the panel refused its init sequence")?;
+        display.clear(BACKGROUND).map_err(|_| "the panel would not clear")?;
 
-        Self {
+        Ok(SCREEN.init(Self {
             display,
             shown: [const { None }; PANEL_ROWS],
             fallback: false,
             last_ms: 0,
             _backlight: backlight,
             _sd_cs: sd_cs,
-        }
+        }))
     }
 
     /// Bring the screen up to date, and say whether anything was drawn.

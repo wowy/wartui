@@ -36,8 +36,18 @@ env:
 jobs:
   bridge:
     strategy:
+      # Two axes rather than one, because a board feature is not a chip: `chip` names
+      # the `esp-wifi-sys-*` crate the duplicate check counts, and `features` is what
+      # is actually built. Without the third row `t-dongle-c5` would only ever be
+      # built by hand, which is the current fate of `xiao-external-antenna`.
       matrix:
-        target: [esp32c5, esp32c6]
+        include:
+          - chip: esp32c5
+            features: esp32c5
+          - chip: esp32c6
+            features: esp32c6
+          - chip: esp32c5
+            features: esp32c5,t-dongle-c5
 
     runs-on: ubuntu-latest
 
@@ -65,9 +75,9 @@ jobs:
       - name: One copy of each esp-radio-pinned crate
         run: |
           pushd firmware/bridge
-          resolved=$(cargo tree --locked --features ${{matrix.target}} -e normal \
+          resolved=$(cargo tree --locked --features ${{matrix.features}} -e normal \
             --prefix none --format '{p}' | awk '{print $1, $2}' | sort -u)
-          for c in esp-alloc esp-hal esp-radio esp-rtos esp-sync esp-wifi-sys-${{matrix.target}}; do
+          for c in esp-alloc esp-hal esp-radio esp-rtos esp-sync esp-wifi-sys-${{matrix.chip}}; do
             n=$(printf '%s\n' "$resolved" | grep -c "^$c " || true)
             if [ "$n" != 1 ]; then
               printf '%s\n' "$resolved" | grep "^$c " || true
@@ -80,11 +90,11 @@ jobs:
       - name: Build
         run: |
           pushd firmware/bridge
-          cargo build --release --features ${{matrix.target}} --locked --verbose
+          cargo build --release --features ${{matrix.features}} --locked --verbose
           popd
 
       - name: Clippy
         run: |
           pushd firmware/bridge
-          cargo clippy --release --features ${{matrix.target}} --locked -- -D warnings
+          cargo clippy --release --features ${{matrix.features}} --locked -- -D warnings
           popd

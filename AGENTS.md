@@ -16,8 +16,8 @@ Where the prose lives:
   when that behaviour changes.**
 - `firmware/*/README.md` — each firmware's own constraints, including the esp-hal version
   wall (`firmware/bridge/README.md`).
-- `docs/phase-N-findings.md` — what each bench actually measured, and why several
-  invariants below exist.
+- `docs/*-findings.md` — what each bench actually measured, and why several invariants
+  below exist. `phase-N` are the fleet's, and the rest are named for what was measured.
 
 Module-level `//!` docs carry the reasoning behind the invariants below. They are the
 record; this file is the index.
@@ -87,7 +87,8 @@ Four host crates, strictly layered, plus firmware that shares the bottom one.
 - **`crates/wartui`** — clap CLI (`run`/`export`/`sniff`/`status`/`reset`/`ports`) and the ratatui
   view.
 - **`firmware/bridge`** — dumb radio bridge: COBS framing and `esp-radio` calls, no protocol
-  knowledge. Fixes there cost a reflash, so logic belongs on the host.
+  knowledge. Fixes there cost a reflash, so logic belongs on the host. A board with a screen
+  draws lines the host composed and hands it, which is the same rule seen from the other side.
 - **`firmware/node`** — the nodes. Sniffs rather than scans, so it never transmits while
   looking and can hold `sniffer()` and `esp_now()` at once (both borrow the controller
   immutably; `scan_async` wants `&mut`). Returns to the control channel after every dwell,
@@ -139,6 +140,22 @@ is here rather than only in a `//!`.
   `incompatible` and named in the footer (`N frames from an older firmware — reflash`), never
   admitted to the node table and never half-decoded. The bridge is format-blind and does not
   need the reflash.
+- **The bridge displays what it is handed and never composes it.** A board with a panel is
+  sent finished lines with a severity on each, blits them, and owns nothing about them but the
+  three colours a `Severity` means and the fallback screen it draws when no host is talking —
+  link-local facts, which is why they cost the format-blind rule nothing. It reads no air
+  frame to find out what to say, so a change to what the panel says or how it is arranged
+  costs a `cargo run` rather than a reflash. The bridge advertising its own geometry in
+  `Ready` is what removes the operator flag: a board without a screen reports `None` and is
+  sent nothing at all.
+  → `crates/wartui-core/src/panel.rs`, `firmware/bridge/src/panel.rs`,
+  `crates/wartui-proto/src/link.rs`, `HostToBridge::ShowPanel`
+- **`link::LINK_PROTO_VERSION` does not move before 1.0 either**, and for the reason
+  `air::WIRE_VERSION` does not: there is no older peer for it to protect when the policy is to
+  flash both ends from one tree. The cost is that a host and a bridge built from different
+  trees meet as an undecodable frame rather than a named mismatch, which is stated where the
+  constant is. Every addition to the link enums therefore goes on the end — postcard writes a
+  variant as its index and a struct's fields in order.
 - **The sighting trailer means what the kind says it means, and the wire layer never interprets
   it.** For Wi-Fi it is the roaming consortium element's body verbatim; for BLE it is exactly two
   bytes of company identifier, or nothing. The split is made once, in the engine's `Frame::Sighting`
