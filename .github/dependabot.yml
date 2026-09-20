@@ -1,12 +1,30 @@
 version: 2
 updates:
   - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "daily"
+
+  # The firmwares are their own workspaces, and every crate `esp-radio
+  # 1.0.0-beta.0` also depends on is held at the version `esp-radio` resolves.
+  # Bumping one past that does not upgrade it, it adds a second copy:
+  # `__esp_radio_printf` multiply defined under `lto = "fat"` for
+  # `esp-wifi-sys-*`, a second and empty heap for `esp-alloc`. Issue #16 moves
+  # the whole family at once, by hand. `esp-radio` itself is deliberately not
+  # ignored — a pull request there is the signal that the wall has moved.
+  # `firmware/bridge/README.md` § "Dependency versions" has the reasoning.
+  - package-ecosystem: "cargo"
     directories:
-      - "/"
       - "/firmware/bridge"
       - "/firmware/node"
     schedule:
       interval: "daily"
+    ignore:
+      - dependency-name: "esp-alloc"
+      - dependency-name: "esp-hal"
+      - dependency-name: "esp-rtos"
+      - dependency-name: "esp-sync"
+      - dependency-name: "esp-wifi-sys-*"
 
   - package-ecosystem: "github-actions"
     # Workflow files stored in the default location of `.github/workflows`

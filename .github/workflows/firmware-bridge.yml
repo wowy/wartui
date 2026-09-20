@@ -60,6 +60,27 @@ jobs:
           cargo build --release --features ${{matrix.target}} --locked --verbose
           popd
 
+      # Every crate `esp-radio` also depends on must resolve to exactly one
+      # version. A second copy is not an upgrade: two `esp-wifi-sys-*` export
+      # `__esp_radio_printf` and `lto = "fat"` refuses the build, while a second
+      # `esp-alloc` is a second and empty heap that shows up only on a board.
+      # `firmware/bridge/README.md` § "Dependency versions" has the reasoning;
+      # `.github/dependabot.yml` is what keeps the bumps from arriving.
+      - name: One copy of each esp-radio-pinned crate
+        run: |
+          pushd firmware/bridge
+          resolved=$(cargo tree --locked --features ${{matrix.target}} -e normal \
+            --prefix none --format '{p}' | awk '{print $1, $2}' | sort -u)
+          for c in esp-alloc esp-hal esp-radio esp-sync esp-wifi-sys-${{matrix.target}}; do
+            n=$(printf '%s\n' "$resolved" | grep -c "^$c " || true)
+            if [ "$n" != 1 ]; then
+              printf '%s\n' "$resolved" | grep "^$c " || true
+              echo "::error::$c resolves to $n versions, expected exactly 1"
+              exit 1
+            fi
+          done
+          popd
+
       - name: Clippy
         run: |
           pushd firmware/bridge
