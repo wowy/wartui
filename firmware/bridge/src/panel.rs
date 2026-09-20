@@ -24,8 +24,9 @@
 //!
 //! # Why it cannot steal time from the radio
 //!
-//! One line is 160 x 10 x 2 = 3.2 KB, about 1.3 ms of blocking transfer at 20 MHz, and
-//! a full repaint eight of those. Three things keep that off the loop's critical path:
+//! One line is 160 x 15 x 2 = 4.8 KB of pixels and 1.9 ms of bus time, and costs about
+//! five times that: 9.3 ms measured, against 36 ms for a full repaint
+//! (`docs/t-dongle-c5-findings.md`). The cost is the glyphs rather than the bus. Three things keep that off the loop's critical path:
 //! only lines whose text *or* severity changed are redrawn, the whole of it is behind
 //! a floor of [`MIN_REDRAW_MS`], and the pixels go out through a `StaticCell` buffer
 //! rather than the heap — `heap_allocator!` hands that to the radio blobs, and nothing
@@ -38,8 +39,8 @@
 
 use core::fmt::Write;
 
-use embedded_graphics::mono_font::MonoTextStyle;
-use embedded_graphics::mono_font::ascii::FONT_6X10;
+use embedded_graphics::mono_font::ascii::FONT_9X15;
+use embedded_graphics::mono_font::{MonoFont, MonoTextStyle};
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::*;
 use embedded_graphics::primitives::Rectangle;
@@ -83,14 +84,32 @@ const NATIVE_SIZE: (u16, u16) = (HEIGHT, WIDTH);
 /// rotation too many.
 const NATIVE_OFFSET: (u16, u16) = (26, 1);
 
-/// Height of one row, which is `FONT_6X10`'s.
-const ROW_HEIGHT: u16 = 10;
+/// What the lines are drawn in.
+///
+/// The largest font that still fits all five lines on an 80-pixel-high screen: five
+/// rows of fifteen pixels leave five to spare, and `FONT_10X20` would fit only four
+/// lines. Seventeen columns is what it costs, and what the host's wording is cut to.
+/// Everything below is derived from it, so trying another is this one line — the
+/// geometry travels to the host in [`BridgeToHost::Ready`] and the lines come back
+/// already laid out for it.
+const FONT: MonoFont<'static> = FONT_9X15;
 
-/// Characters that fit across one line: 160 pixels at six each.
-pub const COLS: u8 = (WIDTH / 6) as u8;
+/// Height of one row, which is one glyph's.
+const ROW_HEIGHT: u16 = FONT.character_size.height as u16;
 
-/// Rows that fit down the screen, which is exactly what the wire carries.
-pub const ROWS: u8 = PANEL_ROWS as u8;
+/// Characters that fit across one line.
+pub const COLS: u8 = (WIDTH / FONT.character_size.width as u16) as u8;
+
+/// Rows that fit down the screen, never more than the wire carries.
+pub const ROWS: u8 = {
+    let fits = (HEIGHT / ROW_HEIGHT) as usize;
+    (if fits < PANEL_ROWS { fits } else { PANEL_ROWS }) as u8
+};
+
+// The host is told this geometry and trusts it. A font whose rows do not fit, or whose
+// characters do not, would have it drawing off the bottom or off the side.
+const _: () = assert!(ROWS as u16 * ROW_HEIGHT <= HEIGHT);
+const _: () = assert!(COLS as u16 * FONT.character_size.width as u16 <= WIDTH);
 
 /// The panel's SPI clock, from the vendor driver's `SPISettings(20000000, ...)`.
 ///
@@ -282,7 +301,10 @@ impl Screen {
         let crossed = self.fallback != fallback;
         self.fallback = fallback;
         let mut drew = false;
-        for row in 0..PANEL_ROWS {
+        // Over the rows this screen has, not the rows the wire can carry. They are the
+        // same number only by coincidence of the font, and clearing the difference
+        // costs a transfer per row for pixels that are past the bottom of the glass.
+        for row in 0..ROWS as usize {
             let wanted = lines.get(row);
             // Severity as well as text: a line whose number held while its colour
             // changed is the whole point of having colours.
@@ -351,7 +373,7 @@ impl Screen {
         let _ = self.display.fill_solid(&strip, BACKGROUND);
 
         let Some(line) = line else { return };
-        let style = MonoTextStyle::new(&FONT_6X10, colour(line.level));
+        let style = MonoTextStyle::new(&FONT, colour(line.level));
         let _ = Text::with_baseline(
             line.text.as_str(),
             Point::new(0, i32::from(top)),

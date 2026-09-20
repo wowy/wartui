@@ -178,10 +178,13 @@ pub enum SendStatus {
     Rejected,
 }
 
-/// Rows a [`Panel`] may have, and so lines one [`HostToBridge::ShowPanel`] carries.
+/// The most rows a [`Panel`] may have, and so the most lines one
+/// [`HostToBridge::ShowPanel`] carries.
 ///
-/// Eight is what a 10-pixel font gives on the 80-pixel-high screen the bridge firmware
-/// drives. A panel that reports fewer uses fewer; nothing may send more.
+/// A ceiling rather than a count: what a bridge actually has depends on the font it
+/// draws in, it says so in [`BridgeToHost::Ready`], and a panel that reports fewer is
+/// sent fewer. Eight leaves room above any font that fits five lines on the 80-pixel
+/// screen this was written for, and the frame is sized against it.
 pub const PANEL_ROWS: usize = 8;
 
 /// A panel the bridge can draw lines of text on.

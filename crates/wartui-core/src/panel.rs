@@ -54,6 +54,12 @@ use crate::position::PositionSource;
 /// the floor, walk a node back.
 pub const RSSI_WEAK_AVG: i8 = -65;
 
+/// The reading below which a figure stops being worth printing.
+///
+/// Well under both thresholds, because this is not a judgement about the link —
+/// [`RSSI_WEAK_MIN`] already makes that one — but about the number. See [`dbm`].
+const RSSI_FLOOR: i32 = -100;
+
 /// Weakest link RSSI, in dBm, below which one node is worth looking at.
 ///
 /// The more negative of the pair, because one node at the edge of a fleet that is
@@ -108,7 +114,7 @@ fn gps_line(snapshot: &Snapshot) -> (Severity, String) {
         // No receiver was ever configured, so the chain's other tiers are the whole
         // story. Both are red: a pinned position is not wardriving data.
         return match snapshot.position.source {
-            PositionSource::Static => (Severity::Error, "gps: position pinned".to_owned()),
+            PositionSource::Static => (Severity::Error, "gps: pinned".to_owned()),
             _ => (Severity::Error, "gps: none".to_owned()),
         };
     };
@@ -146,8 +152,10 @@ fn nodes_line(snapshot: &Snapshot) -> (Severity, String) {
     }
     match (snapshot.alive, snapshot.assignable) {
         (0, _) => (Severity::Error, "no nodes alive".to_owned()),
+        // Drivable first, so it reads as "nine of twenty" — the plain-English order,
+        // and the one that puts the number an operator can act on at the front.
         (alive, drivable) if alive > drivable => {
-            (Severity::Warn, format!("nodes {alive}, {drivable} drivable"))
+            (Severity::Warn, format!("nodes {drivable} of {alive}"))
         }
         (alive, _) => (Severity::Ok, format!("nodes {alive}")),
     }
@@ -185,14 +193,30 @@ fn rssi_line(snapshot: &Snapshot) -> (Severity, String) {
 
     let weak = mean < i32::from(RSSI_WEAK_AVG) || min < RSSI_WEAK_MIN;
     let level = if weak { Severity::Warn } else { Severity::Ok };
-    // One node is min and mean at once, and so is a fleet the bridge hears equally
-    // well; printing the same number twice reads as a bug rather than as agreement.
+    // Two shapes, because a subject, two figures and two labels do not fit seventeen
+    // columns together. When the figures differ the labels earn the room — an
+    // unlabelled pair is an order the reader has to have been told, and this is a line
+    // meant to be read at a glance rather than learnt. When they agree there is one
+    // number, no order to describe, and the subject takes the room back. A fleet the
+    // bridge hears equally well is the ordinary case on a bench, and one node is
+    // always this case.
     let text = if mean == i32::from(min) {
-        format!("rssi {min}")
+        format!("rssi {}", dbm(mean))
     } else {
-        format!("rssi {mean} avg, {min} min")
+        format!("avg {} min {}", dbm(mean), dbm(i32::from(min)))
     };
     (level, text)
+}
+
+/// One RSSI reading, in the three characters the line can spare for it.
+///
+/// [`RSSI_FLOOR`] and below is `BAD` rather than the figure. Three digits and a sign is
+/// one character more than the panel has, and the exact number stopped meaning anything
+/// well above it: a link this weak is not one that is nearly working, and what an
+/// operator does about -104 dBm is what they do about -100. The word is the width of an
+/// ordinary reading, so the line does not change shape as a node crosses.
+fn dbm(value: i32) -> String {
+    if value <= RSSI_FLOOR { "BAD".to_owned() } else { value.to_string() }
 }
 
 /// A count rendered short enough for a narrow line.
@@ -235,7 +259,7 @@ mod tests {
     const EPOCH_MS: i64 = 1_777_642_477_000;
 
     /// The geometry the T-Dongle-C5's panel actually reports.
-    const SCREEN: Panel = Panel { cols: 26, rows: 8 };
+    const SCREEN: Panel = Panel { cols: 17, rows: 5 };
 
     /// A capture with nothing attached and nothing heard, which is what the first
     /// second of every run looks like.
@@ -356,7 +380,7 @@ mod tests {
         pinned.position = Fix { source: PositionSource::Static, ..Fix::none() };
         let (level, text) = row(&pinned, 0);
         assert_eq!(level, Severity::Error);
-        assert_eq!(text, "gps: position pinned");
+        assert_eq!(text, "gps: pinned");
     }
 
     #[test]
@@ -366,7 +390,7 @@ mod tests {
         snapshot.assignable = 2;
         let (level, text) = row(&snapshot, 1);
         assert_eq!(level, Severity::Warn);
-        assert_eq!(text, "nodes 5, 2 drivable");
+        assert_eq!(text, "nodes 2 of 5");
 
         // Nothing to say twice when every alive node is drivable.
         let (level, text) = row(&fleet(&[Some(-40), Some(-45)]), 1);
@@ -415,7 +439,7 @@ mod tests {
         // exactly the case `RSSI_WEAK_MIN` exists for.
         let (level, text) = row(&fleet(&[Some(-40), Some(-40), Some(-72)]), 4);
         assert_eq!(level, Severity::Warn);
-        assert_eq!(text, "rssi -50 avg, -72 min");
+        assert_eq!(text, "avg -50 min -72");
 
         let (level, _) = row(&fleet(&[Some(-40), Some(-45)]), 4);
         assert_eq!(level, Severity::Ok);
@@ -449,13 +473,68 @@ mod tests {
     }
 
     #[test]
+    fn a_reading_too_weak_to_print_is_named_rather_than_numbered() {
+        // Three digits and a sign is a character more than the line has, and the exact
+        // figure stopped meaning anything long before this: what an operator does about
+        // -104 dBm is what they do about -100.
+        let (level, text) = row(&fleet(&[Some(-40), Some(-104)]), 4);
+        assert_eq!(level, Severity::Warn);
+        assert_eq!(text, "avg -72 min BAD");
+
+        // The average can cross on its own, with no single node past the floor.
+        let (_, text) = row(&fleet(&[Some(-99), Some(-103)]), 4);
+        assert_eq!(text, "avg BAD min BAD");
+
+        // And the boundary is the floor itself, not one past it.
+        let (_, text) = row(&fleet(&[Some(-40), Some(-99)]), 4);
+        assert_eq!(text, "avg -69 min -99");
+        let (_, text) = row(&fleet(&[Some(-42), Some(-100)]), 4);
+        assert_eq!(text, "avg -71 min BAD");
+    }
+
+    #[test]
+    fn nothing_this_composes_overflows_the_panel_that_ships() {
+        // `firmware/bridge/src/panel.rs` gets twenty columns out of its font, and the
+        // RSSI line fills every one of them. Rendered wide and measured, so a reworded
+        // line that would arrive truncated on the bench fails here instead — the
+        // truncation in `fit` is a backstop for an unfamiliar screen, not a licence to
+        // write past this one.
+        let wide = Panel { cols: 32, rows: 8 };
+        let mut worst = fleet(&[Some(-100), Some(-40), None]);
+        worst.alive = 20;
+        worst.assignable = 9;
+        worst.unique_wifi_aps = 9_999_999;
+        worst.unique_ble_aps = 9_999_999;
+        worst.gps = Some(GpsView {
+            status: GpsStatus::Fixed { satellites: Some(24) },
+            counters: GpsCounters::default(),
+            last_fix_ms: None,
+            settled: None,
+            pinned_baud: false,
+        });
+        worst.position = Fix { source: PositionSource::Gps, ..Fix::none() };
+
+        for snapshot in [&worst, &quiet(), &gps(GpsStatus::NoReceiver, PositionSource::Static)] {
+            for line in &render(snapshot, wide) {
+                assert!(
+                    line.text.len() <= usize::from(SCREEN.cols),
+                    "{:?} is {} characters, past the panel's {}",
+                    line.text,
+                    line.text.len(),
+                    SCREEN.cols
+                );
+            }
+        }
+    }
+
+    #[test]
     fn a_narrower_screen_truncates_rather_than_overflowing() {
         let narrow = Panel { cols: 8, rows: 8 };
         let lines = render(&fleet(&[Some(-40), Some(-72)]), narrow);
         for line in &lines {
             assert!(line.text.len() <= 8, "{:?} is wider than the panel", line.text);
         }
-        assert_eq!(lines[4].text.as_str(), "rssi -56");
+        assert_eq!(lines[4].text.as_str(), "avg -56 ");
     }
 
     #[test]

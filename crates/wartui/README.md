@@ -341,7 +341,14 @@ itself, `wartui status` prints what it said, and a bridge without one is sent no
 | `nodes 3` | How many nodes are heartbeating, and how many of those can be driven |
 | `APs ~12.3k` | Distinct Wi-Fi access points this session, estimated |
 | `BLE ~840` | Distinct BLE addresses, estimated the same way |
-| `rssi -55 avg, -72 min` | How strongly the *bridge* is hearing the fleet |
+| `avg -55 min -72` | How strongly the *bridge* is hearing the fleet |
+
+The screen is seventeen characters wide, so the wording is terse on purpose. A fleet
+that cannot all be driven reads `nodes 2 of 5` — drivable first, alive second. The RSSI
+line drops its own label when it has two figures to name, and reads `rssi -55` when the
+average and the weakest are the same number. A reading of −100 dBm or worse prints as
+`BAD`: three digits and a sign do not fit, and the exact figure stopped meaning anything
+well above it.
 
 The numbers are the same ones the view shows, from the same snapshot, about once a second.
 
@@ -360,7 +367,7 @@ being read closely: green for fine, amber for working but not ideal, red for a f
   Both sit above the −74 dBm a 24 Mbps ESP-NOW link needs, so the line warns while there is
   still something to do about it: close a window, move the dongle off the floor, walk a node
   back. It says `rssi: none heard` in red if nodes are alive and the bridge has measured none
-  of them.
+  of them, and `rssi —` when nothing is alive to measure.
 - **The AP and BLE counts have no bad state** and stay green.
 
 Before any host speaks, and for a few seconds after one goes away, the bridge shows what it
