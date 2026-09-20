@@ -37,14 +37,20 @@ use wartui_proto::hci::{
     AdvReport, PACKET_MAX, RESET, SCAN_UNIT_US, SET_EVENT_MASK, adv_reports, set_scan_enable,
     set_scan_parameters,
 };
-use wartui_proto::plan::{ADMIN_WAIT_MS, BLE_BEAT_MS};
+use wartui_proto::plan::{ADMIN_WAIT_MS, BLE_BEAT_MS, NODE_STAGGER_WINDOW_MS};
 
 /// How long one scan listens.
 pub const SCAN_MS: u32 = 500;
 
+// The whole of the cycle `main.rs` runs, in order: the scan, the stagger this node
+// waits out before its heartbeat, and the window it then holds open. The stagger
+// belongs here even though only the last node in the fleet waits the whole of it —
+// the bound has to hold for that node too, and a scan long enough to eat it would
+// leave `remaining_ms` at zero and stretch the cycle past `BLE_BEAT_MS`, which is
+// the cadence the host reads as proof the assignment landed.
 const _: () = assert!(
-    SCAN_MS + ADMIN_WAIT_MS <= BLE_BEAT_MS,
-    "a Bluetooth node's cycle must fit a whole scan and a whole admin window"
+    SCAN_MS + NODE_STAGGER_WINDOW_MS + ADMIN_WAIT_MS <= BLE_BEAT_MS,
+    "a Bluetooth node's cycle must fit a whole scan, its stagger and a whole admin window"
 );
 
 /// Distinct advertisers one sweep will hold.
