@@ -158,12 +158,14 @@ pub async fn drive(
                                 .collect::<Vec<_>>()
                                 .join(" | ")
                         );
-                        if let Err(e) =
-                            link.send_bulk(HostToBridge::ShowPanel { lines: lines.clone() })
-                        {
-                            tracing::debug!("dropping a panel push: {e}");
+                        match link.send_bulk(HostToBridge::ShowPanel { lines: lines.clone() }) {
+                            // Cached only once it is really on its way. A dropped push
+                            // that still updated the cache would be suppressed for ever
+                            // after by the very comparison above, since the lines it
+                            // failed to send are the ones the next render produces.
+                            Ok(()) => panel_lines = Some(lines),
+                            Err(e) => tracing::debug!("dropping a panel push: {e}"),
                         }
-                        panel_lines = Some(lines);
                     }
                 }
             }

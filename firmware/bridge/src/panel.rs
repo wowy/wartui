@@ -127,10 +127,15 @@ const MIN_REDRAW_MS: u64 = 500;
 
 /// How long the host may go quiet before the panel says so.
 ///
-/// Several missed pushes rather than one. A host at 1 Hz must never flicker back to
-/// the fallback between two good seconds, and the cost of waiting is only that a
-/// screen is briefly out of date rather than briefly wrong.
-const HOST_GONE_MS: u64 = 5_000;
+/// Measured against the host's `status_interval` of five seconds
+/// (`crates/wartui-core/src/engine.rs`), not against the 1 Hz panel rate: a push only
+/// goes out when a line's text or colour changed, so a capture with nothing moving
+/// sends nothing but that five-second `GetStatus`. At five this would go false in the
+/// gap before every one of them and a working capture would flash "no host" for ever.
+/// Ten is two of those polls, which is the same margin and the same reasoning as
+/// `stall::HOST_PRESENT_WINDOW_MS`; the cost of waiting is only that a screen is
+/// briefly out of date rather than briefly wrong.
+const HOST_GONE_MS: u64 = 10_000;
 
 /// Bytes the display interface batches pixels through.
 ///

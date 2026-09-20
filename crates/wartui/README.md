@@ -370,7 +370,7 @@ being read closely: green for fine, amber for working but not ideal, red for a f
   of them, and `rssi —` when nothing is alive to measure.
 - **The AP and BLE counts have no bad state** and stay green.
 
-Before any host speaks, and for a few seconds after one goes away, the bridge shows what it
+Before any host speaks, and for about ten seconds after one goes away, the bridge shows what it
 knows by itself instead — chip, address, channel and uptime, all in amber, because no host is
 exactly "working but not ideal". Start a capture and it takes the panel back within a second,
 with no replug and no reflash.

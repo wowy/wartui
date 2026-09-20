@@ -187,9 +187,11 @@ fn rssi_line(snapshot: &Snapshot) -> (Severity, String) {
         };
     };
 
-    // Rounded towards zero, which for a negative dBm is the pessimistic direction.
+    // Floored rather than truncated, which for a negative dBm is the pessimistic
+    // direction: `/` rounds towards zero, so a fleet at -65 and -66 would average to
+    // -65 and sit exactly on the right side of a threshold set to catch it.
     let total: i32 = heard.iter().map(|&r| i32::from(r)).sum();
-    let mean = total / heard.len() as i32;
+    let mean = total.div_euclid(heard.len() as i32);
 
     let weak = mean < i32::from(RSSI_WEAK_AVG) || min < RSSI_WEAK_MIN;
     let level = if weak { Severity::Warn } else { Severity::Ok };
@@ -439,10 +441,20 @@ mod tests {
         // exactly the case `RSSI_WEAK_MIN` exists for.
         let (level, text) = row(&fleet(&[Some(-40), Some(-40), Some(-72)]), 4);
         assert_eq!(level, Severity::Warn);
-        assert_eq!(text, "avg -50 min -72");
+        assert_eq!(text, "avg -51 min -72");
 
         let (level, _) = row(&fleet(&[Some(-40), Some(-45)]), 4);
         assert_eq!(level, Severity::Ok);
+
+        // A fleet astride the threshold. The true average is -65.5, and the warning is
+        // the point of the line, so the half goes to the fleet's detriment rather than
+        // rounding towards zero into a green line on a fleet this constant exists to
+        // catch.
+        let (level, text) = row(&fleet(&[Some(-65), Some(-66)]), 4);
+        assert_eq!(level, Severity::Warn);
+        // And the floored average has met the minimum, so the line collapses to one
+        // figure — which is the shape, not a single node.
+        assert_eq!(text, "rssi -66");
     }
 
     #[test]
@@ -487,14 +499,14 @@ mod tests {
 
         // And the boundary is the floor itself, not one past it.
         let (_, text) = row(&fleet(&[Some(-40), Some(-99)]), 4);
-        assert_eq!(text, "avg -69 min -99");
+        assert_eq!(text, "avg -70 min -99");
         let (_, text) = row(&fleet(&[Some(-42), Some(-100)]), 4);
         assert_eq!(text, "avg -71 min BAD");
     }
 
     #[test]
     fn nothing_this_composes_overflows_the_panel_that_ships() {
-        // `firmware/bridge/src/panel.rs` gets twenty columns out of its font, and the
+        // `firmware/bridge/src/panel.rs` gets seventeen columns out of its font, and the
         // RSSI line fills every one of them. Rendered wide and measured, so a reworded
         // line that would arrive truncated on the bench fails here instead — the
         // truncation in `fit` is a backstop for an unfamiliar screen, not a licence to
