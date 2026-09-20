@@ -173,9 +173,15 @@ sudo dnf install python3-pyte    # or pip install pyte
 python3 tools/render.py --cols 120 --rows 30    # the wide layout, fleet beside the stream
 python3 tools/render.py --cols 80 --rows 24     # the narrow one, stacked
 python3 tools/render.py --keys jb --attrs       # after two keys, with everything drawn in colour
+python3 tools/render.py --bridge --keys b       # the fleet on the desk rather than a fake one
 ```
 
 Text rather than a screenshot is the point: it diffs, it greps, and a coding agent reads it
 without an image. `--keys` presses keys before the screen is read, so the cursor and the
 Bluetooth assignment are reachable too. The capture goes to a temporary database that is deleted
-on the way out.
+on the way out, unless `--db` names one to keep.
+
+`--bridge` renders the boards attached instead of the simulator, optionally naming which one is
+the bridge, and is how a real fleet gets read as text. A real node answers only in its own admin
+window, at the end of a sweep, so `--after` and `--settle` default to an order of magnitude longer
+there — a share read any sooner reads as pending when it is merely on its way.

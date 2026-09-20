@@ -25,10 +25,20 @@ because a first `draw` writes only the cells it considers non-empty: cargo's
 compile chatter would sit under the view for the rest of the render. Building
 first also puts a compile error in front of you instead of inside the grid.
 
-`--sim` is assumed. It needs no hardware, and it is also what keeps the GPS search
-from opening every serial port on the machine. The capture goes to a temporary
-database that is deleted on the way out, since `run` otherwise leaves a
-`wartui-<date>.db` wherever it was started.
+The simulator is what runs unless `--bridge` asks for the fleet on the desk. It needs
+no hardware, and it is also what keeps the GPS search from opening every serial port on
+the machine — so `--bridge` turns that search off itself, unless the caller names a
+receiver. A render is after a screen rather than a position, and `--lat`/`--lon` already
+pin one.
+
+Real nodes answer on their own schedule rather than an accelerated clock, which is what
+`--after` and `--settle` default differently for: an assignment lands in the node's own
+admin window at the end of a sweep, so a `b` read a second later reads as pending when
+it is merely early.
+
+The capture goes to a temporary database that is deleted on the way out, since `run`
+otherwise leaves a `wartui-<date>.db` wherever it was started. `--db` keeps it instead,
+which is worth having on hardware: what the fleet heard is not reproducible.
 """
 
 import argparse
@@ -55,6 +65,20 @@ except ImportError:
 DEFAULT_LAT, DEFAULT_LON = 37.7749, -122.4194
 
 PLAIN = ("default", "default", False, False)
+
+# `--bridge` given without a value: wartui finds the board, exactly as it does when its
+# own `--bridge` is left off. A sentinel rather than a string, so no device could name it.
+DETECT = object()
+
+DEFAULT_SIM_NODES = 3
+
+# How long to let the fleet fill in, and how long to leave a key to land, when nothing on
+# the command line says. A simulated fleet runs on its own clock and has settled in well
+# under a second. A real one answers in each node's own admin window, which comes at the
+# end of a sweep — about five seconds on a full pool — so a screen read any sooner than
+# this shows a share that is still on its way as one that never arrives.
+SIM_AFTER, SIM_SETTLE = 4.0, 1.0
+BRIDGE_AFTER, BRIDGE_SETTLE = 15.0, 15.0
 
 
 def build():
@@ -199,7 +223,17 @@ def main(args):
     lat = DEFAULT_LAT if args.lat is None else args.lat
     lon = DEFAULT_LON if args.lon is None else args.lon
 
+    bridge = args.bridge is not None
+    if bridge and (args.sim is not None or args.sim_c6):
+        sys.exit("--bridge renders the fleet on the desk, and --sim a fake one; pick one")
+    if args.after is None:
+        args.after = BRIDGE_AFTER if bridge else SIM_AFTER
+    if args.settle is None:
+        args.settle = BRIDGE_SETTLE if bridge else SIM_SETTLE
+
     binary = args.bin or build()
+    if args.db:
+        return render(args, binary, args.db, lat, lon)
     # The capture is a temporary file from here on, so every way out of this
     # function goes through the removal rather than just the expected one.
     scratch = tempfile.mkdtemp(prefix="wartui-render-")
@@ -209,12 +243,28 @@ def main(args):
         shutil.rmtree(scratch, ignore_errors=True)
 
 
-def render(args, binary, db, lat, lon):
-    command = [binary, "run", "--sim", str(args.sim), "--db", db]
-    if args.sim_c6:
-        command += ["--sim-c6", str(args.sim_c6)]
+def command_for(args, binary, db, lat, lon):
+    """The `wartui run` this render is of: the simulator, or the boards attached."""
+    command = [binary, "run", "--db", db]
+    if args.bridge is None:
+        command += ["--sim", str(DEFAULT_SIM_NODES if args.sim is None else args.sim)]
+        if args.sim_c6:
+            command += ["--sim-c6", str(args.sim_c6)]
+    else:
+        if args.bridge is not DETECT:
+            command += ["--bridge", args.bridge]
+        # Not simulating means `run` goes looking for a receiver, opening every attached
+        # port that is not an Espressif board. Nothing here wants one: the position is
+        # pinned below, and a search is a poor thing to run across someone's desk for the
+        # sake of a screenshot. Named on the command line, it is wanted after all.
+        if not any(arg.startswith(("--gps", "--no-gps")) for arg in args.rest):
+            command.append("--no-gps")
     command += ["--lat", repr(lat), "--lon", repr(lon)]
-    command += args.rest
+    return command + args.rest
+
+
+def render(args, binary, db, lat, lon):
+    command = command_for(args, binary, db, lat, lon)
 
     screen = pyte.Screen(args.cols, args.rows)
     stream = pyte.Stream(screen)
@@ -250,18 +300,25 @@ def render(args, binary, db, lat, lon):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Render the running view as text.")
-    parser.add_argument("--sim", type=int, default=3, metavar="NODES", help="fake nodes to run")
+    parser.add_argument("--sim", type=int, metavar="NODES",
+                        help=f"fake nodes to run; {DEFAULT_SIM_NODES} unless --bridge")
     parser.add_argument("--sim-c6", type=int, default=0, metavar="NODES", help="of which C6s")
+    parser.add_argument("--bridge", nargs="?", const=DETECT, metavar="PATH|MAC",
+                        help="render the attached fleet instead, optionally naming the bridge")
     parser.add_argument("--cols", type=int, default=120, help="terminal width to lay out at")
     parser.add_argument("--rows", type=int, default=30, help="terminal height to lay out at")
-    parser.add_argument("--after", type=float, default=4.0, metavar="SECONDS",
-                        help="how long to let the fleet fill in before reading the screen")
+    parser.add_argument("--after", type=float, metavar="SECONDS",
+                        help=f"how long to let the fleet fill in first; {SIM_AFTER:g}s, "
+                             f"or {BRIDGE_AFTER:g}s with --bridge")
     parser.add_argument("--keys", default="", help="keys to press first, e.g. jjb")
-    parser.add_argument("--settle", type=float, default=1.0, metavar="SECONDS",
-                        help="how long to let the view redraw between keys")
+    parser.add_argument("--settle", type=float, metavar="SECONDS",
+                        help=f"how long to let a key land; {SIM_SETTLE:g}s, or "
+                             f"{BRIDGE_SETTLE:g}s with --bridge")
     parser.add_argument("--attrs", action="store_true", help="also list everything drawn in colour")
     parser.add_argument("--lat", type=float, help="position to record; both halves or neither")
     parser.add_argument("--lon", type=float)
     parser.add_argument("--bin", metavar="PATH", help="an existing binary, instead of building")
+    parser.add_argument("--db", metavar="PATH",
+                        help="keep the capture here, rather than in a temporary file")
     parser.add_argument("rest", nargs="*", metavar="-- ARGS", help="passed on to wartui run")
     sys.exit(main(parser.parse_args()))
