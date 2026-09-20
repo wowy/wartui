@@ -57,7 +57,7 @@ log = ["dep:esp-println"]
 xiao-external-antenna = []
 
 [dependencies]
-esp-alloc = "0.10.0"
+esp-alloc = "0.11.0"
 esp-bootloader-esp-idf = "0.5.0"
 esp-hal = { version = "1.1.2", features = ["unstable"] }
 # `jtag-serial` rather than `auto`, because these boards are USB and the
