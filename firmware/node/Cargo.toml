@@ -80,7 +80,7 @@ esp-sync = "0.2.1"
 # `esp_now_set_peer_rate_config`, in `radio::set_broadcast_rate`. Held at the
 # version `esp-radio` links; `firmware/bridge/README.md` § "Dependency versions".
 esp-wifi-sys-esp32c5 = { version = "0.2.0", optional = true }
-esp-wifi-sys-esp32c6 = { version = "0.2.0", optional = true }
+esp-wifi-sys-esp32c6 = { version = "0.3.0", optional = true }
 static_cell = "2.1.1"
 wartui-proto = { path = "../../crates/wartui-proto" }
 
