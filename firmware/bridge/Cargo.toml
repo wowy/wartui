@@ -41,7 +41,7 @@ esp32c6 = [
 xiao-external-antenna = []
 
 [dependencies]
-esp-alloc = "0.10.0"
+esp-alloc = "0.11.0"
 esp-bootloader-esp-idf = "0.5.0"
 esp-hal = { version = "1.1.2", features = ["unstable"] }
 esp-radio = { version = "1.0.0-beta.0", default-features = false, features = [
