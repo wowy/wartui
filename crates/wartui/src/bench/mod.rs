@@ -588,8 +588,15 @@ async fn settle(
                     !state.dirty
                         && state.observations > 0
                         && state.confirmed.as_ref().is_some_and(|confirmed| {
-                            !confirmed.channels.is_empty()
-                                && (state.mac != ble_node || confirmed.ble)
+                            // The Bluetooth node on its own terms: its whole job is
+                            // the scan, so an empty channel set is what "settled"
+                            // looks like for it and waiting for a share would wait
+                            // out the timeout.
+                            if state.mac == ble_node {
+                                confirmed.ble && confirmed.channels.is_empty()
+                            } else {
+                                !confirmed.channels.is_empty()
+                            }
                         })
                 })
         })

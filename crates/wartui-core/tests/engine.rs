@@ -7,6 +7,7 @@
 use std::time::{Duration, Instant};
 
 use wartui_bridge::{BridgeInfo, LinkEvent};
+use wartui_core::ActionBatch;
 use wartui_core::engine::{Command, Counters, EngineConfig, Event, FleetEngine, Now, StoreStats};
 use wartui_core::gps::Gps;
 use wartui_core::position::{DEFAULT_MAX_AGE, PositionChain, PositionSource};
@@ -109,6 +110,21 @@ fn sent_admin(batch: &wartui_core::ActionBatch) -> (u16, Mac, AdminMsg) {
     };
     assert!(ensure_peer, "divergence 6: peers are added on demand and never deleted");
     (*id, *dst, AdminMsg::decode(payload).expect("a valid admin frame"))
+}
+
+/// Every assignment in a batch, decoded back off the wire.
+///
+/// Unlike [`sent_admin`], says nothing about how many there should be: a re-cut can
+/// put one frame on the air per node whose window happens to be open.
+fn admins(batch: &ActionBatch) -> Vec<AdminMsg> {
+    batch
+        .urgent
+        .iter()
+        .filter_map(|action| match action {
+            HostToBridge::SendEspNow { payload, .. } => AdminMsg::decode(payload).ok(),
+            _ => None,
+        })
+        .collect()
 }
 
 /// The channels of an inclusive index run, which is what most of these tests want:
@@ -1222,7 +1238,7 @@ fn one_node_on_a_two_run_pool_gets_all_of_it_in_one_frame() {
 }
 
 #[test]
-fn bluetooth_goes_to_one_node_at_a_time_and_moving_it_tells_both() {
+fn moving_the_bluetooth_scan_re_cuts_the_pool_and_tells_both_ends() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
     // Both join, then both settle: the second node's arrival re-cuts the pool,
@@ -1239,21 +1255,129 @@ fn bluetooth_goes_to_one_node_at_a_time_and_moving_it_tells_both() {
     assert!(engine.nodes().all(|node| !node.confirmed.expect("planned").ble));
     assert_eq!(engine.snapshot(clock.at(2), StoreStats::default()).ble_node, None);
 
-    let held = engine.nodes().next().expect("the node").confirmed.expect("planned").channels;
+    let whole_pool = EngineConfig::default().pool.channels();
     engine.handle(Event::Command(Command::AssignBle { mac: Some(peer(0)) }), clock.at(3));
+    // Bluetooth is the whole job, so the scan does not ride on the share — it takes
+    // its place. One epoch carries both.
     let (id, dst, admin) = sent_admin(&engine.handle(heartbeat(peer(0), 3), clock.at(4)));
     assert_eq!(dst, peer(0));
-    assert!(admin.scan_ble(), "the flag rides on that node's own next assignment");
-    assert_eq!(admin.channels, held, "and changes nothing else about the assignment");
+    assert!(admin.scan_ble(), "the flag arrives in that node's own next assignment");
+    assert!(admin.channels.is_empty(), "and it sniffs no Wi-Fi at all");
     assert_ne!(admin.epoch, 0, "under an epoch the node will adopt");
     engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(4));
 
-    // Moving it is two frames: the node giving it up has to be told as well.
-    engine.handle(Event::Command(Command::AssignBle { mac: Some(peer(1)) }), clock.at(5));
-    let (_, _, gave_up) = sent_admin(&engine.handle(heartbeat(peer(0), 4), clock.at(6)));
+    // And the pool is re-cut across what is left, which here is one node: giving the
+    // scan away is a change to every other node's share, not just to that node's.
+    let (id, dst, rest) = sent_admin(&engine.handle(heartbeat(peer(1), 3), clock.at(5)));
+    assert_eq!(dst, peer(1));
+    assert_eq!(rest.channels, whole_pool, "the only node still sniffing takes all of it");
+    assert!(!rest.scan_ble());
+    engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(5));
+
+    // Moving it is two frames: the node giving it up has a share coming back to it.
+    engine.handle(Event::Command(Command::AssignBle { mac: Some(peer(1)) }), clock.at(6));
+    let (_, _, gave_up) = sent_admin(&engine.handle(heartbeat(peer(0), 4), clock.at(7)));
     assert!(!gave_up.scan_ble());
-    let (_, _, took_it) = sent_admin(&engine.handle(heartbeat(peer(1), 3), clock.at(7)));
+    assert_eq!(gave_up.channels, whole_pool, "and takes the whole pool with it");
+    let (_, _, took_it) = sent_admin(&engine.handle(heartbeat(peer(1), 4), clock.at(8)));
     assert!(took_it.scan_ble());
+    assert!(took_it.channels.is_empty());
+}
+
+#[test]
+fn no_node_is_ever_sent_an_empty_assignment_without_the_bluetooth_flag() {
+    // The one frame that must never exist: a node told to scan nothing parks, and
+    // this host goes on believing it is sweeping. Every path that can produce one
+    // is in here — a join, the scan given, the scan moved, a reflash that drops the
+    // feature, and the holder going quiet — because the two halves are computed
+    // separately at the wire and only agree by construction.
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    let mut seen_empty = 0;
+    let check = |batch: &ActionBatch, seen_empty: &mut u32| {
+        for admin in admins(batch) {
+            assert_eq!(
+                admin.channels.is_empty(),
+                admin.scan_ble(),
+                "an empty mask and the Bluetooth flag are the same fact"
+            );
+            if admin.channels.is_empty() {
+                *seen_empty += 1;
+            }
+        }
+    };
+
+    for n in 0..3 {
+        check(&engine.handle(heartbeat(peer(n), 1), clock.at(1)), &mut seen_empty);
+    }
+    engine.handle(Event::Command(Command::AssignBle { mac: Some(peer(1)) }), clock.at(2));
+    for n in 0..3 {
+        check(&engine.handle(heartbeat(peer(n), 2), clock.at(3)), &mut seen_empty);
+    }
+    engine.handle(Event::Command(Command::AssignBle { mac: Some(peer(2)) }), clock.at(4));
+    for n in 0..3 {
+        check(&engine.handle(heartbeat(peer(n), 3), clock.at(5)), &mut seen_empty);
+    }
+    // The holder reflashed without the feature, and then the fleet ageing out around
+    // it — the two ways the scan is taken back rather than moved.
+    check(&engine.handle(narrowband_heartbeat(peer(2), 1), clock.at(6)), &mut seen_empty);
+    check(&engine.handle(Event::Tick, clock.at(7)), &mut seen_empty);
+    check(&engine.handle(Event::Tick, clock.at(200)), &mut seen_empty);
+
+    assert!(seen_empty >= 2, "and the Bluetooth node really was sent one: {seen_empty}");
+}
+
+#[test]
+fn a_lone_node_given_the_bluetooth_scan_leaves_the_fleet_sniffing_no_wifi() {
+    // The cost of making Bluetooth a whole node's job, stated: a fleet of one that
+    // holds the scan sweeps nothing. A plan rather than a refusal, because refusing
+    // would leave the node holding the share it already had — still sniffing Wi-Fi,
+    // which is the opposite of what was asked — and the footer is what says so.
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(heartbeat(peer(0), 1), clock.at(1));
+    let (id, _, _) = sent_admin(&engine.handle(heartbeat(peer(0), 2), clock.at(2)));
+    engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(2));
+
+    engine.handle(Event::Command(Command::AssignBle { mac: Some(peer(0)) }), clock.at(3));
+    let (id, _, admin) = sent_admin(&engine.handle(heartbeat(peer(0), 3), clock.at(4)));
+    assert!(admin.scan_ble() && admin.channels.is_empty());
+    engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(4));
+
+    let snapshot = engine.snapshot(clock.at(4), StoreStats::default());
+    let plan = snapshot.plan.expect("a fleet of one is still a fleet");
+    assert_eq!(plan.node_count(), 1, "and the scanner is still its slot");
+    assert_eq!(
+        plan.unreachable(),
+        EngineConfig::default().pool.channels(),
+        "every channel of the pool went into no share"
+    );
+}
+
+#[test]
+fn a_node_reflashed_without_bluetooth_is_dealt_a_share_in_the_epoch_that_clears_the_flag() {
+    // Both halves in one frame, because both come off one value. Cleared alone it
+    // would leave the node holding an empty mask with nothing to scan; dealt alone
+    // it would leave the fleet table naming a holder that is not one.
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(heartbeat(peer(0), 1), clock.at(1));
+    engine.handle(heartbeat(peer(1), 1), clock.at(1));
+    engine.handle(Event::Command(Command::AssignBle { mac: Some(peer(0)) }), clock.at(2));
+    let (id, _, admin) = sent_admin(&engine.handle(heartbeat(peer(0), 2), clock.at(3)));
+    assert!(admin.scan_ble() && admin.channels.is_empty());
+    engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(3));
+
+    // Reflashed with the feature left out, which is a reboot whose token changed.
+    let (id, _, back) = sent_admin(&engine.handle(narrowband_heartbeat(peer(0), 1), clock.at(10)));
+    assert!(!back.scan_ble(), "the flag is withdrawn");
+    assert!(!back.channels.is_empty(), "and a share arrives in the same frame");
+    engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(10));
+
+    engine.handle(Event::Tick, clock.at(11));
+    assert_eq!(engine.snapshot(clock.at(11), StoreStats::default()).ble_node, None);
+    let node = engine.nodes().find(|node| node.mac == peer(0)).expect("still here");
+    assert!(!node.dirty, "one epoch was enough; the tick does not spend a second");
 }
 
 #[test]

@@ -31,7 +31,7 @@ use wartui_core::position::PositionSource;
 use wartui_core::record::AdminOutcome;
 use wartui_proto::air::RecordKind;
 use wartui_proto::link::{LoopPhase, Mac, ResetCause};
-use wartui_proto::plan::{ChannelSet, MAX_NODES, Radio, SCAN_CHANNELS};
+use wartui_proto::plan::{self, ChannelSet, MAX_NODES, Radio, SCAN_CHANNELS};
 
 /// How long the input thread waits for a keypress before checking whether it
 /// should stop. Long enough not to spin, short enough that quitting is instant.
@@ -166,15 +166,15 @@ impl Ui {
             .try_send(Command::AssignBle { mac: if holds { None } else { Some(target) } })
         {
             Ok(()) if holds => format!("{}: bluetooth off on its next heartbeat", mac(&target)),
-            // The flag rides in the assignment frame, so a node without one has
-            // nothing for it to ride on. `replan` runs inside the heartbeat that
-            // admits a node, so a fleet the planner can cut never reaches this:
-            // it is the two fleets it cannot. Above twenty nodes there is no plan
-            // at all, and below that a fleet with more nodes than channels their
-            // radios can reach leaves its surplus undealt. Either way "on its
-            // next heartbeat" would never come true.
+            // The scan arrives as an assignment, so a node the planner has nothing
+            // for has nothing for it to arrive in. `replan` runs inside the
+            // heartbeat that admits a node, so a fleet the planner can cut never
+            // reaches this: it is the two fleets it cannot. Above twenty nodes there
+            // is no plan at all, and below that a fleet with more nodes than
+            // channels their radios can reach leaves its surplus undealt. Either
+            // way "on its next heartbeat" would never come true.
             Ok(()) if node.state.desired.is_none() && node.state.confirmed.is_none() => {
-                format!("{}: bluetooth, once it has been given channels", mac(&target))
+                format!("{}: bluetooth, once it is in a plan", mac(&target))
             }
             Ok(()) => format!("{}: bluetooth on its next heartbeat", mac(&target)),
             Err(_) => "the engine is not accepting commands".to_owned(),
@@ -510,11 +510,18 @@ const CHANNELS_WIDTH: u16 = 18;
 /// The distinction is the whole of divergence 3: a confirmed set was
 /// acknowledged by the node's own radio, a pending one is waiting on a
 /// heartbeat to open the window.
+///
+/// An empty set is the Bluetooth node's and says so in words. The count-and-list
+/// form would render it `0: none`, which reads as a fault rather than as the job it
+/// is; a value of a different kind belongs in a different shape.
 fn channels_cell(node: &NodeView) -> Span<'static> {
     let state = &node.state;
     if state.dirty
         && let Some(desired) = state.desired
     {
+        if desired.channels.is_empty() {
+            return Span::styled("bluetooth…", Style::new().fg(Color::Yellow));
+        }
         // One character of the column is spent on the ellipsis, which is the
         // pending marker as well as the truncation marker — they cannot be
         // confused, because a pending cell is the yellow one. A cut-short list
@@ -530,7 +537,13 @@ fn channels_cell(node: &NodeView) -> Span<'static> {
     }
     state.confirmed.map_or_else(
         || Span::styled("unassigned", Style::new().fg(Color::DarkGray)),
-        |confirmed| Span::raw(channel_cell(confirmed.channels, usize::from(CHANNELS_WIDTH))),
+        |confirmed| {
+            if confirmed.channels.is_empty() {
+                Span::styled("bluetooth", Style::new().fg(Color::Cyan))
+            } else {
+                Span::raw(channel_cell(confirmed.channels, usize::from(CHANNELS_WIDTH)))
+            }
+        },
     )
 }
 
@@ -860,18 +873,32 @@ fn faults(snapshot: &Snapshot) -> Vec<String> {
             snapshot.assignable
         ));
     }
-    // Channels no node present has the radio for. The planner leaving them out is
-    // right and completely invisible, since what remains is an ordinary partition
-    // of the part the fleet can reach.
+    // Channels that went into no share. The planner leaving them out is right and
+    // completely invisible, since what remains is an ordinary partition of the part
+    // the fleet can reach — so the only account of them is here.
+    //
+    // Two causes, told apart the way `Plan::unreachable` says they can be: every
+    // radio tunes 2.4 GHz, so a 2.4 GHz channel is in there only when no node is
+    // sniffing at all.
     if let Some(plan) = snapshot.plan
         && !plan.unreachable().is_empty()
     {
-        faults.push(format!(
-            "{} channels of the {} pool are 5 GHz and no node in this fleet has a 5 GHz radio, \
-             so they are not being scanned",
-            plan.unreachable().len(),
-            snapshot.pool
-        ));
+        let no_sniffer = plan.unreachable().indices().any(|idx| !plan::is_five_ghz(idx));
+        faults.push(if no_sniffer {
+            format!(
+                "every node in this fleet is scanning Bluetooth, so none of the {} channels of \
+                 the {} pool is being swept",
+                plan.unreachable().len(),
+                snapshot.pool
+            )
+        } else {
+            format!(
+                "{} channels of the {} pool are 5 GHz and no node in this fleet is sniffing with \
+                 a 5 GHz radio, so they are not being scanned",
+                plan.unreachable().len(),
+                snapshot.pool
+            )
+        });
     }
     if let Some(gps) = &snapshot.gps {
         if let GpsStatus::Failed(reason) = &gps.status {
@@ -982,7 +1009,7 @@ mod tests {
     use wartui_core::position::Fix;
     use wartui_proto::air::Capabilities;
     use wartui_proto::link::Chip;
-    use wartui_proto::plan::{ChannelPool, IndexRun, Radio, plan, plan_for};
+    use wartui_proto::plan::{ChannelPool, IndexRun, Job, Radio, plan, plan_for};
 
     use super::*;
 
@@ -1700,11 +1727,48 @@ mod tests {
     #[test]
     fn a_fleet_with_no_five_ghz_radio_says_the_pool_is_not_being_covered() {
         let mut snapshot = busy();
-        snapshot.plan = plan_for(ChannelPool::Us, &[Radio::TwoPointFour; 2]);
+        snapshot.plan = plan_for(ChannelPool::Us, &[Job::Wifi(Radio::TwoPointFour); 2]);
         let mut terminal = Terminal::new(TestBackend::new(200, 40)).expect("test backend");
         terminal.draw(|frame| draw(frame, &snapshot, &Ui::default())).expect("drawing");
         let rendered = terminal.backend().to_string();
-        assert!(rendered.contains("no node in this fleet has a 5 GHz radio"), "got {rendered}");
+        assert!(
+            rendered.contains("no node in this fleet is sniffing with a 5 GHz radio"),
+            "got {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_fleet_whose_only_node_scans_bluetooth_says_nothing_is_being_swept() {
+        // The 5 GHz wording would be a plausible-looking lie here: every channel is
+        // out of reach, 2.4 GHz included, and the reason is not the radio.
+        let mut snapshot = busy();
+        snapshot.plan = plan_for(ChannelPool::Us, &[Job::Bluetooth]);
+        let mut terminal = Terminal::new(TestBackend::new(200, 40)).expect("test backend");
+        terminal.draw(|frame| draw(frame, &snapshot, &Ui::default())).expect("drawing");
+        let rendered = terminal.backend().to_string();
+        assert!(
+            rendered.contains("every node in this fleet is scanning Bluetooth"),
+            "got {rendered}"
+        );
+        assert!(!rendered.contains("5 GHz radio"), "and not for the wrong reason: {rendered}");
+    }
+
+    #[test]
+    fn the_channels_column_says_bluetooth_for_the_node_whose_whole_job_it_is() {
+        // `0: none` would read as a fault rather than as the job it is.
+        let mut view = assigned(0x11);
+        view.state.confirmed = Some(Assignment {
+            channels: ChannelSet::empty(),
+            ble: true,
+            node_index: 0,
+            node_count: 2,
+            counter: 1,
+        });
+        assert_eq!(channels_cell(&view).content, "bluetooth");
+
+        view.state.desired = view.state.confirmed;
+        view.state.dirty = true;
+        assert_eq!(channels_cell(&view).content, "bluetooth…", "and says so while it waits");
     }
 
     #[test]

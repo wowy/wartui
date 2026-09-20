@@ -96,16 +96,18 @@ far.
 | Key                    | What it does                                                           |
 | ---------------------- | ---------------------------------------------------------------------- |
 | `↑` `↓` / `k` `j`      | Move the cursor down the fleet table                                   |
-| `b`                    | Move the Bluetooth scan to the selected node, or take it off the fleet |
+| `b`                    | Make the selected node the Bluetooth scanner, or take the scan off    |
 | `q` / `Esc` / `ctrl-c` | Stop, committing the last batch                                        |
 
-`b` is the only one that reaches the air, and it decides _which_ node scans Bluetooth rather than
-what any node scans. Channels are not a key.
+`b` is the only one that reaches the air, and it decides _which_ node scans Bluetooth instead of
+Wi-Fi. It reaches that node's share only by being an input to the planner, which is still the only
+author of one. Channels are not a key.
 
 ## How channels are assigned
 
-**The planner cuts the pool, and nothing else does.** It deals it across every heartbeating node and
-re-cuts it whenever that set changes; no key and no flag overrides one node's share. The header says
+**The planner cuts the pool, and nothing else does.** It deals it across every heartbeating node
+that is sniffing and re-cuts it whenever that set changes; no key and no flag writes one node's
+share. `b` changes the set rather than the shares — see § "Bluetooth". The header says
 what it has to work with: `auto — 4 of 5` for four heartbeating nodes out of five seen.
 
 Nothing goes out at the moment a node's share changes. Its radio is away scanning some other channel
@@ -119,32 +121,43 @@ no sane column is wide enough for all of them. The count is the useful half anyw
 `beat` column should be proportional to. Bringing a second node up halves the first one's share, and
 its `beat` should halve with it within three sweeps — the only evidence available that an assignment
 was adopted rather than merely acknowledged, since a node heartbeats once per completed sweep and
-reports nothing about what it is scanning.
+reports nothing about what it is scanning. The Bluetooth node is the exception: it sweeps nothing,
+so its `beat` reads a flat 1.0 s, which is the same kind of evidence and proportional to nothing.
 
 An assignment is believed only when the node's own radio acknowledges it at the MAC layer, never
 when the bridge reports a successful enqueue.
 
 If a node keeps showing `no admin ack`, the cause is nearly always Bluetooth: the two radios share
 the one 2.4 GHz antenna, and the admin window is precisely when the node would otherwise be idle.
-Press `b` on it.
+Press `b` on it — and note that the node holding the scan is the least likely to show this, because
+its Wi-Fi radio never leaves the control channel.
 
 ## Bluetooth
 
-**At most one node scans Bluetooth, and by default none does.** `b` on the selected node moves the
-scan to it; `b` again on the node that holds it takes it off the fleet. The `ble` column says who
-has it, and reads `on…` or `off…` while a change waits for that node's next admin window, the same
-way `channels` does.
+**At most one node scans Bluetooth, by default none does, and it is that node's whole job.** `b` on
+the selected node gives it the scan; `b` again on the node that holds it takes it off the fleet. The
+`ble` column says who has it, and reads `on…` or `off…` while a change waits for that node's next
+admin window, the same way `channels` does — and that node's `channels` column reads `bluetooth`,
+because it is dealt none.
 
-It is a per-node choice rather than a build flag because the cost is real: a node holding the scan
-runs about 10% slower per sweep, measured in
-[`docs/phase-2-findings.md`](../../docs/phase-2-findings.md). Worth paying on one node for Bluetooth
-coverage; not worth paying on all of them.
+It costs a whole node because the two radios share the one 2.4 GHz antenna, and a node that also
+sweeps has to hand it back in time for every admin window it must answer in — which a stock node
+did not, acknowledging none of thirty-two assignments
+([`docs/phase-2-findings.md`](../../docs/phase-2-findings.md)). A node with nothing else to do has
+nothing to hand it back to, so the scan runs **once a second** rather than once per sweep, and the
+node's own transmits are the only thing it competes with.
+
+The fleet is one sniffer short while it does, and the pool is re-cut across the rest the moment the
+scan moves: giving it away grows every other node's share, and taking it back shrinks them again.
+A fleet of **one** node holding the scan sweeps no Wi-Fi at all, which is a real hole and is
+reported in the fault box rather than left to be inferred.
 
 The `ble` cargo feature decides whether the code is in the binary at all; the assignment decides
 whether it runs, and it is off at every boot regardless of the build. **`b` is refused on a node
-built without the feature**, which its heartbeat says. Nothing about the frame would fail — it would
-adopt the flag, acknowledge, and scan nothing — so the `ble` column would name a holder that is not
-one.
+whose heartbeat does not claim `ble`**, which covers a build without the feature and a build whose
+Bluetooth controller would not start. Nothing about the frame would fail — such a node would adopt
+the flag, acknowledge, and scan nothing — so the `ble` column would name a holder that is not one,
+and the node would now be sniffing nothing either.
 
 ## Channel pools
 
@@ -202,8 +215,9 @@ Two consequences worth knowing:
 - **A fleet with no 5 GHz radio in it covers 2.4 GHz and nothing else**, which is 13 channels on
   `all` and `eu` and 11 on `us`, so from fourteen such nodes onward — twelve on `us` — there are
   more nodes than channels to give them. The surplus nodes keep whatever they last held rather than
-  being told to scan nothing — there is no frame that means that — so their shares double up with
-  someone else's.
+  being told to scan nothing — the only frame carrying no channels is the Bluetooth node's, and it
+  means "Bluetooth is the whole job" rather than "stop" — so their shares double up with someone
+  else's.
 
 ## Positions
 

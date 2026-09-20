@@ -2,8 +2,9 @@
 //!
 //! The fake nodes behave the way the real firmware does, including the inconvenient
 //! parts — parking until told what to scan, heartbeating once per completed sweep,
-//! staggering, adopting only on a differing epoch, and suppressing a BSSID through the
-//! same [`MacRing`] the firmware links, on node time scaled by [`SimConfig::speed`].
+//! scanning Bluetooth and nothing else when that is the node's job, staggering,
+//! adopting only on a differing epoch, and suppressing a BSSID through the same
+//! [`MacRing`] the firmware links, on node time scaled by [`SimConfig::speed`].
 //! That last one matters most: it is why a real fleet's observation stream thins to a
 //! trickle after the first pass, and a simulator that streamed endlessly would teach
 //! the wrong lesson. Simulated signal is fixed per network, so only the refresh ever
@@ -29,8 +30,8 @@ use wartui_proto::link::{
     ResetCause, SendStatus,
 };
 use wartui_proto::plan::{
-    ADMIN_WAIT_MS, CHANNEL_DWELL_MS, ChannelSet, DEDUP_RING, IDLE_BEAT_MS, NODE_STAGGER_WINDOW_MS,
-    NUM_SCAN_CHANNELS, SCAN_CHANNELS,
+    ADMIN_WAIT_MS, BLE_BEAT_MS, CHANNEL_DWELL_MS, ChannelSet, DEDUP_RING, IDLE_BEAT_MS,
+    NODE_STAGGER_WINDOW_MS, NUM_SCAN_CHANNELS, SCAN_CHANNELS,
 };
 
 use crate::{BridgeInfo, LinkEvent, LinkHandle, TransportError, link_pair};
@@ -47,9 +48,12 @@ pub struct SimConfig {
     pub seed: u64,
     /// Size of the imaginary neighbourhood.
     pub wifi_networks: u16,
-    /// Chance per channel dwell that a BLE advertiser shows up, for the one
-    /// node holding the Bluetooth assignment. BLE addresses rotate for privacy,
+    /// Chance per advertiser slot in a scan that a BLE advertiser shows up, for the
+    /// one node holding the Bluetooth assignment. BLE addresses rotate for privacy,
     /// so these never dedup and keep the stream alive.
+    ///
+    /// Per scan rather than per dwell, because such a node dwells on nothing: its
+    /// whole second is one scan, and it has [`ADVERTISERS_PER_SCAN`] slots in it.
     ///
     /// A rate rather than a model; what is faithful is *who* emits these, so a
     /// fleet where nobody was asked reports no Bluetooth at all.
@@ -97,6 +101,15 @@ impl Default for SimConfig {
         }
     }
 }
+
+/// Advertisers one simulated scan can turn up, each subject to
+/// [`SimConfig::ble_chance`].
+///
+/// A scan and not a dwell: the node holding the Bluetooth assignment sniffs no Wi-Fi,
+/// so its whole second is one scan, and one advertiser a second would be a trickle
+/// where an ordinary room is a stream — a real scan hears about fifty
+/// (`docs/phase-1-findings.md`), most of them addresses it has never seen.
+const ADVERTISERS_PER_SCAN: usize = 12;
 
 /// A simulated bridge with a simulated fleet behind it.
 #[derive(Debug, Clone)]
@@ -331,8 +344,18 @@ impl SimNode {
     }
 
     /// Whether the node has been told what to scan.
-    const fn assigned(&self) -> bool {
-        self.epoch != 0
+    ///
+    /// The channels, or the Bluetooth scan. An empty mask with the flag clear counts
+    /// as nothing, the way the firmware counts it: no frame means "scan nothing", so
+    /// reaching this needs a confused host, and parking is the same answer as never
+    /// having been told anything at all.
+    fn assigned(&self) -> bool {
+        self.epoch != 0 && (!self.channels.is_empty() || self.bluetooth_only())
+    }
+
+    /// Whether this node's whole job is Bluetooth.
+    fn bluetooth_only(&self) -> bool {
+        self.channels.is_empty() && self.scanning_ble()
     }
 
     /// Apply an assignment, but only when its epoch differs — the same `!=`
@@ -396,6 +419,40 @@ async fn run_node(
             continue;
         }
 
+        // Bluetooth is a whole node's job, so this one dwells on nothing: one scan
+        // per BLE_BEAT_MS, scan start to scan start, and what is left of the second
+        // after the reports and the heartbeat is the window it answers in.
+        if node.bluetooth_only() {
+            let cycle = tokio::time::Instant::now() + scaled(u64::from(BLE_BEAT_MS), speed);
+            for _ in 0..ADVERTISERS_PER_SCAN {
+                if node.rng.next_f64() >= world.ble_chance {
+                    continue;
+                }
+                let ble = world.ble_sighting(&mut node.rng);
+                if node.worth_reporting(&ble) && emit(&events, &node, &ble, started).await.is_err()
+                {
+                    return;
+                }
+            }
+            let stagger = u64::from(wartui_proto::plan::stagger_offset_ms(
+                node.node_index,
+                node.node_count,
+                NODE_STAGGER_WINDOW_MS,
+            ));
+            if nap(scaled(stagger, speed), &mut admin_rx, &mut node).await.is_break() {
+                return;
+            }
+            if beat(&events, &mut node, started).await.is_err() {
+                return;
+            }
+            // To the deadline rather than for a duration, so a busy second leaves
+            // nothing here and the next scan starts at once.
+            if nap_until(cycle, &mut admin_rx, &mut node).await.is_break() {
+                return;
+            }
+            continue;
+        }
+
         // A node walks its assigned channels one per step, so the
         // sweep — and therefore the heartbeat period — is proportional to how
         // many channels it was given.
@@ -407,15 +464,6 @@ async fn run_node(
             for slot in world.on_channel(channel) {
                 let net = world.hear(slot);
                 if node.worth_reporting(&net) && emit(&events, &node, &net, started).await.is_err()
-                {
-                    return;
-                }
-            }
-            // Only the node given the Bluetooth assignment, so revoking it should
-            // stop these arriving.
-            if node.scanning_ble() && node.rng.next_f64() < world.ble_chance {
-                let ble = world.ble_sighting(&mut node.rng);
-                if node.worth_reporting(&ble) && emit(&events, &node, &ble, started).await.is_err()
                 {
                     return;
                 }
@@ -469,7 +517,19 @@ async fn nap(
     admin_rx: &mut mpsc::Receiver<AdminMsg>,
     node: &mut SimNode,
 ) -> std::ops::ControlFlow<()> {
-    let deadline = tokio::time::Instant::now() + duration;
+    nap_until(tokio::time::Instant::now() + duration, admin_rx, node).await
+}
+
+/// Sleep until a deadline, adopting any assignment that arrives meanwhile.
+///
+/// The primitive [`nap`] is a wrapper over, because a Bluetooth node's cycle is a
+/// deadline rather than a duration: what is left of its second after the scan and the
+/// heartbeat is whatever is left, and a scan that overran leaves nothing.
+async fn nap_until(
+    deadline: tokio::time::Instant,
+    admin_rx: &mut mpsc::Receiver<AdminMsg>,
+    node: &mut SimNode,
+) -> std::ops::ControlFlow<()> {
     loop {
         tokio::select! {
             () = tokio::time::sleep_until(deadline) => return std::ops::ControlFlow::Continue(()),

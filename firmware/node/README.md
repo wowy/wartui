@@ -10,9 +10,10 @@ web interface, SD card, display, buttons, fuel gauge, GPS, geofencing, uploads a
 come across at all, because a node in this fleet has no use for any of them.
 
 It shares no wire format with it either. A node broadcasts a 13-byte heartbeat once per completed
-sweep and an 18-plus-SSID sighting per newly-seen BSSID — whose trailer carries a Passpoint
-network's roaming consortium identifiers, or a BLE advertiser's manufacturer identifier, when there
-are any — and accepts a 15-byte unicast assignment. All three sit behind wartui's own `WTUI` magic
+sweep — or once per scan, on the node whose job is Bluetooth — and an 18-plus-SSID sighting per
+newly-seen BSSID, whose trailer carries a Passpoint network's roaming consortium identifiers, or a
+BLE advertiser's manufacturer identifier, when there are any. It accepts a 16-byte unicast
+assignment. All three sit behind wartui's own `WTUI` magic
 and a wire version byte, checked before anything else, so neither fleet can reach the other at all.
 
 ## What it does differently
@@ -36,6 +37,10 @@ every second until it is told what to scan, and **collects nothing until then**.
 answers the first heartbeat, so that lasts a single beat — the intended trade, and worth knowing
 before wondering where the first second of a capture went.
 
+**The node given the Bluetooth scan sweeps nothing.** It is dealt no channels and never leaves the
+control channel, so it is the one node an assignment can always reach; its whole cycle is one scan
+per second. § "Bluetooth is a whole node's job" has the rest.
+
 **It says what it is, in every heartbeat.** Three of a heartbeat's thirteen bytes are a version and
 a feature byte, shown by the host as:
 
@@ -43,19 +48,25 @@ a feature byte, shown by the host as:
 wartui/1.0;ble,5g
 ```
 
-The protocol version, then what this build can do: `ble` if the cargo feature is compiled in, `5g`
-if the chip has the radio for it — a C5 does, a C6 does not. `ble` says the code exists, not that it
-is running; that is the core's decision and is off at every boot.
+The protocol version, then what this node can do: `ble` if the cargo feature is compiled in *and*
+the Bluetooth controller started, `5g` if the chip has the radio for it — a C5 does, a C6 does not.
+`ble` says the scan is there to be run, not that it is running; that is the core's decision and is
+off at every boot.
+
+The controller is why this is read at runtime rather than off `cfg!`. A `ble` build whose controller
+refuses to start would otherwise claim a scan it cannot run — and since the core deals that node no
+channels, it would sniff nothing either. Claiming nothing is how it stays a Wi-Fi node.
 
 The host deals no channels to a node until it has heard this. Every heartbeat carries it rather than
 only the first, because one sent once is one lost to a dropped frame — and because a board reflashed
 with something else should stop claiming the old build's features.
 
 Both bits are acted on rather than merely recorded. A build without `5g` is dealt no 5 GHz channel,
-because it would adopt the share, acknowledge it and scan only the part it could reach. A build
-without `ble` is refused the Bluetooth scan, and loses it if it was already holding one when it
-announced itself. Neither refusal needs anything of this firmware: these three bytes are the whole
-of what the host has to go on, so getting them wrong here is indistinguishable from lying about it.
+because it would adopt the share, acknowledge it and scan only the part it could reach. A node
+without `ble` is refused the Bluetooth scan, and loses it — getting a share of the pool back in the
+same frame — if it was already holding one when it announced itself. Neither refusal needs anything
+of this firmware: these three bytes are the whole of what the host has to go on, so getting them
+wrong here is indistinguishable from lying about it.
 
 ## Building and flashing
 
@@ -81,7 +92,7 @@ part. Unlike the bridge, the monitor is worth watching: nothing but diagnostics 
 | `esp32c6,ble` | 760 KB |
 
 A `ble` build is not a node that scans Bluetooth. It is a node that _can_, if the core sets the
-flag.
+flag — and a node that does scans nothing else.
 
 `xiao-external-antenna` is for a Seeed XIAO ESP32-C6 with an antenna on its U.FL connector. The
 board switches its one RF pin between that connector and an onboard ceramic antenna, and without the
@@ -110,30 +121,42 @@ would spend a dwell of every sweep on nothing with no way for the host to notice
 [`docs/phase-1-findings.md`](../../docs/phase-1-findings.md) has the measurements and the reading of
 the driver.
 
-## Bluetooth runs only when the core asks
+## Bluetooth is a whole node's job, and only when the core asks
 
 **At most one node scans, and the core decides which.** Bit 0 of the assignment's flags byte carries
 it, clear at every boot regardless of how the firmware was built: the `ble` cargo feature decides
-whether any of this is compiled in, and the flag decides whether it runs. That shape is a measured
-cost showing through — a stock node with BLE on acknowledged none of thirty-two assignments, where
-this one acknowledges first attempt every time and runs about 10% slower per sweep while it holds
-the scan ([`docs/phase-0-findings.md`](../../docs/phase-0-findings.md) and
-[`docs/phase-2-findings.md`](../../docs/phase-2-findings.md)). The two radios share the one 2.4 GHz
-antenna and the admin window is precisely when a node is otherwise idle, so it is worth paying on
-one node and not on all of them — and which node is an operator's decision rather than a property of
-whatever binary is on the board.
+whether any of this is compiled in, and the flag decides whether it runs. The frame that sets it
+carries **no channels**, and that is not an accident of the encoding — an empty mask with the flag
+beside it means "Bluetooth is all of it", and an empty mask without the flag is the one thing the
+core never sends, which this firmware treats as never having been told anything at all.
 
-Three things keep that cost where it belongs. The controller is told `HCI_LE_Set_Scan_Enable(0)` at
-the end of every sweep rather than merely being waited on. The scan runs at the far end of the cycle
-from the admin window. And it is rate-limited to one scan per `NUM_SCAN_CHANNELS` dwells — about
-four seconds — rather than one per completed sweep, because a sweep is only as long as the
-assignment: a node holding a single channel finishes one every 125 ms, and "once per sweep" would
-put a 500 ms scan against nearly every admin window it has. Narrowing a node to one channel is a
-supported thing to do, so that case has to be the safe one.
+The reason is a measured cost. A stock node with BLE on acknowledged none of thirty-two assignments:
+the two radios share the one 2.4 GHz antenna, and the admin window is precisely when a node is
+otherwise idle and the Bluetooth controller is free to take it
+([`docs/phase-0-findings.md`](../../docs/phase-0-findings.md),
+[`docs/phase-2-findings.md`](../../docs/phase-2-findings.md)). A node with no sweep to run has
+nothing to hand the antenna back to, so the conflict is arranged away rather than scheduled around —
+which is worth one node's Wi-Fi coverage, and which node is an operator's decision rather than a
+property of whatever binary is on the board.
+
+The cycle is `plan::BLE_BEAT_MS` — one second — measured scan start to scan start rather than as a
+gap, so a busy room that overran is followed immediately by the next scan instead of pushing the
+cadence out. Inside it: a 500 ms scan, the controller off, the new advertisers reported, the transmit
+stagger, the heartbeat, and then whatever is left of the second spent holding the window open. A
+const-assert beside `SCAN_MS` in `src/ble.rs` keeps the scan and a full admin window inside the
+second; what is left over is the report burst's, and a burst that overruns costs the tail of one
+window rather than the assignment, because the core re-sends on the next heartbeat either way.
+
+Two things keep the antenna where it belongs. The controller is told `HCI_LE_Set_Scan_Enable(0)` at
+the end of every scan rather than merely being waited on — an initialised host stack left behind a
+finished scan can keep the radio. And the node's Wi-Fi radio never leaves the control channel, so
+the scan is the only thing that ever takes the antenna from it.
 
 The controller is brought up at boot on a `ble` build, because initialising a radio between a dwell
 and an admin window is exactly the kind of surprise this firmware exists to avoid. It is initialised
-and never enabled — `HCI_LE_Set_Scan_Enable` is only ever sent from inside a sweep.
+and never enabled — `HCI_LE_Set_Scan_Enable` is only ever sent from inside a scan. A controller that
+will not start is announced as no `ble` in every heartbeat, so the core never asks that node for the
+scan and it stays a Wi-Fi node.
 
 There is no host stack. `esp-radio` exposes the controller as a raw HCI pipe and all this firmware
 wants is an address, a signal strength and — when an advertiser offers one — its manufacturer

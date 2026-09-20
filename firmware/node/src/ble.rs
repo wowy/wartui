@@ -18,10 +18,10 @@
 //! which is stronger than waiting for a scan to finish: an initialised host stack
 //! left behind a finished scan can keep the radio.
 //!
-//! And it runs **at the far end of the sweep from the admin window**, finished
-//! before the heartbeat goes out. That is a claim about wall-clock distance rather
-//! than position in the loop, so the caller rate-limits it too — see
-//! `BLE_INTERVAL_MS` in `main.rs`.
+//! And the node **sniffs no Wi-Fi at all** while it holds the scan, so there is no
+//! sweep for the scan to collide with: its cycle is one scan per
+//! [`wartui_proto::plan::BLE_BEAT_MS`], and the only thing that wants the antenna
+//! afterwards is that node's own heartbeat, which the scan is finished before.
 //!
 //! There is no host stack. `esp-radio` exposes the controller as a raw HCI pipe and
 //! all this firmware wants is an address and a signal strength, so the packets are
@@ -37,9 +37,15 @@ use wartui_proto::hci::{
     AdvReport, PACKET_MAX, RESET, SCAN_UNIT_US, SET_EVENT_MASK, adv_reports, set_scan_enable,
     set_scan_parameters,
 };
+use wartui_proto::plan::{ADMIN_WAIT_MS, BLE_BEAT_MS};
 
-/// How long one sweep listens.
+/// How long one scan listens.
 pub const SCAN_MS: u32 = 500;
+
+const _: () = assert!(
+    SCAN_MS + ADMIN_WAIT_MS <= BLE_BEAT_MS,
+    "a Bluetooth node's cycle must fit a whole scan and a whole admin window"
+);
 
 /// Distinct advertisers one sweep will hold.
 ///

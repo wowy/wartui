@@ -91,6 +91,17 @@ const ADMIN_BLE: &[u8] = &[
     0x41, 0x20, 0x00, 0x00, 0x00, 0x02, // indices 0, 6, 13 and 41
 ];
 
+/// The assignment a node whose whole job is Bluetooth is sent: the flag, and an
+/// empty [`ChannelSet`]. The one frame carrying a mask of zero, and the reason an
+/// empty mask means "Bluetooth is all of it" rather than "scan nothing".
+const ADMIN_BLE_ONLY: &[u8] = &[
+    0x57, 0x54, 0x55, 0x49, 0x01, 0x81, // header
+    0x09, // epoch
+    0x01, 0x03, // node 1 of 3
+    0x01, // ADMIN_FLAG_BLE
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // no channels at all
+];
+
 /// A stock node's heartbeat, and a stock core's assignment. Kept only as inputs
 /// to [`foreign::classify`] — nothing here decodes either.
 const VENDOR_HEARTBEAT: &[u8] = &[0x45, 0x4E, 0x4F, 0x57, 0x03, 0x93, 0x00, 0x00, 0x00];
@@ -433,6 +444,23 @@ fn the_channel_mask_goes_out_least_significant_byte_first() {
     let back = AdminMsg::decode(ADMIN_BLE).expect("valid");
     assert_eq!(back.channels.indices().collect::<Vec<_>>(), vec![0, 6, 13, 41]);
     assert!(back.scan_ble());
+}
+
+#[test]
+fn the_bluetooth_node_is_sent_the_flag_and_an_empty_channel_mask() {
+    let msg = AdminMsg {
+        epoch: 9,
+        node_index: 1,
+        node_count: 3,
+        flags: ADMIN_FLAG_BLE,
+        channels: ChannelSet::empty(),
+    };
+    assert_eq!(msg.encode().as_slice(), ADMIN_BLE_ONLY);
+
+    let back = AdminMsg::decode(ADMIN_BLE_ONLY).expect("valid");
+    assert!(back.channels.is_empty(), "it sniffs nothing");
+    assert!(back.scan_ble(), "and the flag is what says why");
+    assert_eq!((back.node_index, back.node_count), (1, 3), "and it is still a slot in the fleet");
 }
 
 #[test]

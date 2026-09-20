@@ -91,8 +91,10 @@ Four host crates, strictly layered, plus firmware that shares the bottom one.
 - **`firmware/node`** — the nodes. Sniffs rather than scans, so it never transmits while
   looking and can hold `sniffer()` and `esp_now()` at once (both borrow the controller
   immutably; `scan_async` wants `&mut`). Returns to the control channel after every dwell,
-  and parks there doing nothing when it holds no assignment. Same rule as the bridge: the
-  logic lives in `wartui-proto`, and this crate is the conversation with the radio.
+  and parks there doing nothing when it holds no assignment. The node given the Bluetooth
+  scan never leaves the control channel at all: it sniffs nothing and its whole cycle is
+  one scan per `plan::BLE_BEAT_MS`. Same rule as the bridge: the logic lives in
+  `wartui-proto`, and this crate is the conversation with the radio.
 
 ### The engine/runtime split is load-bearing
 
@@ -162,7 +164,10 @@ is here rather than only in a `//!`.
   no flag: `FleetEngine::replan` decides what every node scans and nothing else writes a node's
   `desired`. That is what lets the fleet table, the store and the stagger arithmetic read a node's
   share as the plan's without asking who put it there. `Command::AssignBle` is the one operator
-  decision, and it is about *which* node scans Bluetooth rather than what any node scans.
+  decision, and it is an *input* to the planner rather than an exception to it: it names the node
+  whose job is Bluetooth, and the planner is what deals that node nothing and hands its share
+  round. So moving the scan re-cuts the whole pool, and `replan` — not `reissue` — is what
+  delivers both ends of the move.
 - **Only heartbeating nodes are assignable or in the plan** — a node that is merely being heard
   never opens an admin window. `stale`, `no heartbeat` and silence are deliberately distinct
   states, and `SCAN_CHANNELS` order is load-bearing: never sort or deduplicate it, because those
@@ -184,7 +189,7 @@ is here rather than only in a `//!`.
 - **`IndexRun` describes a *pool*, never the shape of an assignment.** An assignment is a
   `ChannelSet` naming any subset of `SCAN_CHANNELS`, so the planner flattens the pool and deals
   round-robin rather than steering around run boundaries. The plan has no phases and no timer; it
-  changes when fleet membership changes and at no other time.
+  changes when fleet membership changes, when the Bluetooth scan moves, and at no other time.
 - **`clippy::all` is denied workspace-wide, in both firmwares too, and so is `unsafe_code`.** The
   host workspace forbids it outright. Each firmware denies it and allows it on exactly one
   function, the ESP-NOW rate call `esp-radio` does not wrap; a second `#[allow(unsafe_code)]`
@@ -213,13 +218,20 @@ edit stops; follow the pointer before changing the rule.
   reset sequence, so `.dtr_on_open(false)` reboots the board it was being polite to.
   → `crates/wartui-bridge/src/ports.rs` `//!`
 - **The planner deals only channels a node's own radio can tune**, and what no radio present can
-  reach comes back in `Plan::unreachable` rather than being dealt anyway.
+  reach comes back in `Plan::unreachable` rather than being dealt anyway. A `Job::Bluetooth` slot
+  can tune nothing, so a fleet whose only 5 GHz radio holds the scan reports 5 GHz unreachable, and
+  a fleet of one that holds it reports the whole pool.
   → `crates/wartui-proto/src/plan.rs`, `plan_for`; `crates/wartui/README.md` § "Channel pools"
 - **Channel 14 is in no pool and is never dealt**, and stays in the scan table because that table's
   indices are the wire format. → `crates/wartui-proto/src/plan.rs`, `UNSUPPORTED_INDEX`
-- **At most one node scans Bluetooth, and by default none does.** `ADMIN_FLAG_BLE` is an
-  operator's decision, not a property of the flashed firmware.
-  → `crates/wartui-core/src/engine.rs`, `Command::AssignBle` / `on_assign_ble` / `reissue`;
+- **At most one node scans Bluetooth, by default none does, and it is that node's whole job.**
+  `ADMIN_FLAG_BLE` is an operator's decision, not a property of the flashed firmware. The node
+  holding it is dealt no channels and is counted in `node_count` anyway, because `node_index` and
+  `node_count` are the stagger's arithmetic rather than a census of who is sniffing. An empty
+  `ChannelSet` is sent only with the flag beside it; without it, a node told to scan nothing parks
+  while the host believes it is sweeping, and `Plan::admin_for` refuses to build that frame.
+  → `crates/wartui-proto/src/plan.rs`, `Job` / `Plan::channels_for` / `admin_for`;
+  `crates/wartui-core/src/engine.rs`, `Command::AssignBle` / `on_assign_ble` / `replan`;
   `docs/phase-2-findings.md`
 - **A heartbeat replayed out of the bridge's backlog is not an admin window.** Delete either
   half of the check and the symptom is a plausible-looking lie rather than an error.

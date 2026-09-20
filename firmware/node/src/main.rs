@@ -14,9 +14,10 @@
 //! design. In short: it *listens* rather than scanning, so it
 //! never transmits on a DFS channel and can hold `sniffer()` and `esp_now()` at
 //! once; it returns to the control channel after every dwell rather than once a
-//! sweep; an unassigned node parks rather than sweeping the whole table; and
-//! every heartbeat says what this build can do. Its wire format is wartui's own in
-//! both directions — [`wartui_proto::air`].
+//! sweep; an unassigned node parks rather than sweeping the whole table; the node
+//! given the Bluetooth scan sniffs nothing and holds the control channel for its
+//! whole second; and every heartbeat says what this build can do. Its wire format
+//! is wartui's own in both directions — [`wartui_proto::air`].
 //!
 //! The runner is `espflash flash --monitor`, and unlike the bridge the monitor is
 //! worth watching: a node's USB endpoint carries nothing but diagnostics.
@@ -46,8 +47,9 @@ use wartui_proto::air::{
 };
 use wartui_proto::dedup::MacRing;
 use wartui_proto::plan::{
-    ADMIN_WAIT_MS, CHANNEL_DWELL_MS, CONTROL_CHANNEL, ChannelSet, DEDUP_RING, IDLE_BEAT_MS,
-    NODE_STAGGER_WINDOW_MS, NUM_SCAN_CHANNELS, SCAN_CHANNELS, SweepCursor, stagger_offset_ms,
+    ADMIN_WAIT_MS, BLE_BEAT_MS, CHANNEL_DWELL_MS, CONTROL_CHANNEL, ChannelSet, DEDUP_RING,
+    IDLE_BEAT_MS, NODE_STAGGER_WINDOW_MS, NUM_SCAN_CHANNELS, SCAN_CHANNELS, SweepCursor,
+    stagger_offset_ms,
 };
 
 #[cfg(feature = "ble")]
@@ -87,22 +89,6 @@ macro_rules! note {
         }
     }};
 }
-
-/// Shortest gap between Bluetooth sweeps.
-///
-/// Only reached when the core has set `ADMIN_FLAG_BLE` for this node; `README.md`
-/// § "Bluetooth runs only when the core asks" has why that is an operator's
-/// decision rather than a property of the flashed build.
-///
-/// A sweep is nominally one completed pass over the assigned channels, but an
-/// assignment can be a single channel — the planner's ordinary outcome on a full
-/// fleet. Such a node passes every 125 ms, so tying the scan to the pass would
-/// have it hold the shared 2.4 GHz antenna for four fifths of its life,
-/// immediately before every admin window it has to answer in. Rate-limiting to
-/// what a node carrying the whole pool would reach anyway means no assignment size
-/// makes Bluetooth the dominant cost.
-#[cfg(feature = "ble")]
-const BLE_INTERVAL_MS: u64 = NUM_SCAN_CHANNELS as u64 * CHANNEL_DWELL_MS as u64;
 
 /// Granularity of the listening loops. Fine enough that a 100 ms window is not
 /// meaningfully shortened, coarse enough not to spin the core.
@@ -182,13 +168,25 @@ impl Node {
         }
     }
 
-    /// Whether the node has anything to sweep.
+    /// Whether the node has anything to do.
     ///
-    /// An empty mask counts as nothing rather than as an error: no frame means
+    /// Channels, or the Bluetooth scan on a build that has one. An empty mask with
+    /// the flag clear counts as nothing rather than as an error: no frame means
     /// "scan nothing", so this needs a confused host, and parking is the same
     /// answer as never having been told anything.
     const fn assigned(&self) -> bool {
-        self.version != 0 && !self.channels.is_empty()
+        self.version != 0 && (!self.channels.is_empty() || self.bluetooth_only())
+    }
+
+    /// Whether this node's whole job is Bluetooth.
+    ///
+    /// `cfg!` rather than trust: a build without the feature has no scan to run, so a
+    /// flag that reaches one anyway leaves it parked and reporting nothing — honest,
+    /// and diagnosable from the adoption line — rather than heartbeating once a
+    /// second over a radio that is not there. The core refuses to send it; this is
+    /// the node not depending on that.
+    const fn bluetooth_only(&self) -> bool {
+        cfg!(feature = "ble") && self.ble && self.channels.is_empty()
     }
 
     /// Take an assignment, if it is not the one already held.
@@ -226,13 +224,18 @@ impl Node {
     }
 }
 
-/// What this build is, as every heartbeat says it.
+/// What this node is, as every heartbeat says it.
 ///
-/// `ble` is whether the code is compiled in, not whether it is running: the scan is
-/// the core's decision and is off at every boot. `5g` is the chip, and is what
-/// keeps the planner from dealing a C6 a share nobody scans.
-const CAPABILITIES: Capabilities =
-    Capabilities::here(cfg!(feature = "ble"), cfg!(feature = "esp32c5"));
+/// `ble` is whether there is a controller here to scan with, not whether it is
+/// scanning: the scan is the core's decision and is off at every boot. Read off the
+/// controller rather than off the cargo feature, because the core deals *no channels*
+/// to the node it asks for Bluetooth — so a node claiming a scan it cannot run would
+/// sniff nothing either, and a `ble` build whose controller refused to start is
+/// exactly that node. `5g` is the chip, and is what keeps the planner from dealing a
+/// C6 a share nobody scans.
+fn capabilities(bluetooth: bool) -> Capabilities {
+    Capabilities::here(bluetooth, cfg!(feature = "esp32c5"))
+}
 
 static NODE: ConstStaticCell<Node> = ConstStaticCell::new(Node::new());
 
@@ -308,15 +311,19 @@ fn main() -> ! {
     // Brought up before the loop rather than on demand: initialising a radio
     // between a dwell and an admin window is the kind of surprise to avoid.
     #[cfg(feature = "ble")]
-    let mut ble_due = Instant::now();
-    #[cfg(feature = "ble")]
     let mut scanner = match ble::Scanner::new(peripherals.BT) {
         Some(scanner) => Some(SCANNER.init(scanner)),
         None => {
-            note!("bluetooth controller would not start; scanning Wi-Fi only");
+            // Announced as no `ble` below, so the core never asks this node for the
+            // scan — which matters more than it used to, since asking would leave it
+            // sniffing nothing either.
+            note!("bluetooth controller would not start; sniffing Wi-Fi only");
             None
         }
     };
+    #[cfg(not(feature = "ble"))]
+    let scanner: Option<()> = None;
+    let capabilities = capabilities(scanner.is_some());
 
     let node = NODE.take();
     let mac = esp_radio::wifi::Interface::station().mac_address();
@@ -338,11 +345,46 @@ fn main() -> ! {
             // gives below. The listen runs either way: it is what keeps this
             // loop from spinning.
             if radio::park(&manager, &sniffer, CONTROL_CHANNEL, false) {
-                heartbeat(&mut sender, node);
+                heartbeat(&mut sender, node, capabilities);
             } else {
                 note!("radio would not park on channel {}", CONTROL_CHANNEL);
             }
             listen(&receiver, node, IDLE_BEAT_MS);
+            continue;
+        }
+
+        if node.bluetooth_only() {
+            // Bluetooth is this node's whole job, so it sniffs nothing and never
+            // leaves the control channel: it is the one node an assignment can
+            // always reach, and the only thing the Bluetooth controller takes the
+            // shared 2.4 GHz antenna from is this node's own heartbeat.
+            //
+            // Scan start to scan start is `BLE_BEAT_MS`. The scan first, because
+            // the reports are what the heartbeat should be followed by; the window
+            // last, because that is the moment the core answers in.
+            let cycle = Instant::now() + Duration::from_millis(u64::from(BLE_BEAT_MS));
+            if radio::park(&manager, &sniffer, CONTROL_CHANNEL, false) {
+                // `None` only on a controller that would not start at boot, which
+                // said so then. One line a second saying it again is noise, and the
+                // cycle is otherwise the same: heartbeat, and answer for it.
+                #[cfg(feature = "ble")]
+                if let Some(scanner) = scanner.as_deref_mut() {
+                    report_ble(&mut sender, node, scanner);
+                }
+                let stagger =
+                    stagger_offset_ms(node.node_index, node.node_count, NODE_STAGGER_WINDOW_MS);
+                if stagger > 0 {
+                    CurrentThreadHandle::get().delay(Duration::from_millis(u64::from(stagger)));
+                }
+                heartbeat(&mut sender, node, capabilities);
+            } else {
+                note!("radio would not park on channel {}", CONTROL_CHANNEL);
+            }
+            // Whatever is left of the second, held open. A busy room that overran
+            // leaves only the floor here and the next scan starts at once, which is
+            // the right trade: a window missed costs one cycle, and the core's
+            // re-send waits on the next heartbeat either way.
+            listen(&receiver, node, remaining_ms(cycle).max(ADMIN_WAIT_MS));
             continue;
         }
 
@@ -384,23 +426,25 @@ fn main() -> ! {
         // host sees an unbroken sequence instead of the reboot-shaped gap that
         // would make it re-issue. Silence is the honest report.
         if node.advance() && on_control {
-            #[cfg(feature = "ble")]
-            if node.ble && Instant::now() >= ble_due {
-                ble_due = Instant::now() + Duration::from_millis(BLE_INTERVAL_MS);
-                if let Some(scanner) = scanner.as_deref_mut() {
-                    report_ble(&mut sender, node, scanner);
-                }
-            }
-
             let stagger =
                 stagger_offset_ms(node.node_index, node.node_count, NODE_STAGGER_WINDOW_MS);
             if stagger > 0 {
                 CurrentThreadHandle::get().delay(Duration::from_millis(u64::from(stagger)));
             }
-            heartbeat(&mut sender, node);
+            heartbeat(&mut sender, node, capabilities);
             listen(&receiver, node, ADMIN_WAIT_MS);
         }
     }
+}
+
+/// How much of a deadline is left, in milliseconds, saturating at zero.
+///
+/// The Bluetooth cycle is a deadline rather than a duration: what is left of its
+/// second after the scan, the reports and the heartbeat is whatever is left.
+#[allow(clippy::cast_possible_truncation)]
+fn remaining_ms(deadline: Instant) -> u32 {
+    let now = Instant::now();
+    if now >= deadline { 0 } else { (deadline - now).as_millis() as u32 }
 }
 
 /// Milliseconds since boot, as the dedup ring counts them. Truncation is the ring's
@@ -416,11 +460,11 @@ fn now_ms() -> u32 {
 /// host reads the period as a rough measure of how many channels the node is
 /// carrying, and treats sixty seconds of silence as a node that has left the
 /// fleet.
-fn heartbeat(sender: &mut EspNowSender<'_>, node: &mut Node) {
+fn heartbeat(sender: &mut EspNowSender<'_>, node: &mut Node, capabilities: Capabilities) {
     // Every heartbeat carries the capabilities, not just the first: sent once they
     // would be lost to a dropped frame or stale after a reflash, and they are three
     // bytes of thirteen.
-    let msg = HeartbeatMsg { counter: node.counter, capabilities: CAPABILITIES };
+    let msg = HeartbeatMsg { counter: node.counter, capabilities };
     if radio::broadcast(sender, &msg.encode()) {
         node.counter = node.counter.wrapping_add(1).max(1);
     }
@@ -456,11 +500,12 @@ fn report(sender: &mut EspNowSender<'_>, node: &mut Node, channel: u8) {
     }
 }
 
-/// Listen for advertisers once per sweep and report the new ones.
+/// Listen for advertisers and report the new ones.
 ///
-/// Deliberately after the last channel of the sweep and before the heartbeat, so
-/// the Bluetooth radio is off again well ahead of the window this node has to
-/// answer an assignment in.
+/// Called once per [`BLE_BEAT_MS`] on the node whose whole job this is, at the top of
+/// its cycle and before the heartbeat, so the Bluetooth controller is off again well
+/// ahead of the window this node has to answer an assignment in. The node sniffs no
+/// Wi-Fi, so the scan competes with nothing but that heartbeat for the antenna.
 #[cfg(feature = "ble")]
 fn report_ble(sender: &mut EspNowSender<'_>, node: &mut Node, scanner: &mut ble::Scanner<'_>) {
     let mut lines = 0u32;
@@ -551,6 +596,11 @@ struct Channels(ChannelSet);
 
 impl core::fmt::Display for Channels {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // `none` rather than nothing: the one assignment with an empty set is the
+        // Bluetooth node's, and a blank between the brackets reads as a bug.
+        if self.0.is_empty() {
+            return f.write_str("none");
+        }
         for (n, idx) in self.0.indices().enumerate() {
             if n > 0 {
                 f.write_str(",")?;
