@@ -10,6 +10,12 @@
 //! The split is a round-robin deal: index `k` of the pool's flattened order goes
 //! to node `k % node_count`. The operator's manual has the rest of the reasoning
 //! (`crates/wartui/README.md` § "Channel pools").
+//!
+//! A fleet is a slice of [`Job`]s rather than of radios, because one node's job is
+//! Bluetooth and that node is dealt nothing. It is still a slot: `node_index` and
+//! `node_count` are the fleet's transmit-stagger arithmetic ([`stagger_offset_ms`])
+//! rather than a census of who is sniffing, so cutting it out of the deal must not
+//! cut it out of the numbering.
 
 use crate::air::AdminMsg;
 
@@ -93,6 +99,23 @@ const _: () = assert!(
     "a parked node must hold the control channel for at least a full admin window"
 );
 
+/// How often the node scanning Bluetooth starts a scan.
+///
+/// Scan start to scan start, so a scan that overran in a busy room is followed
+/// immediately by the next one rather than pushing the cadence out. Such a node
+/// sweeps no channels ([`Job::Bluetooth`]), so this is the whole of its cycle and
+/// therefore the period its heartbeats arrive at.
+///
+/// Deliberately its own number rather than [`IDLE_BEAT_MS`], which it happens to
+/// equal: one is how long joining a fleet takes and the other a working node's duty
+/// cycle, and spelling the coincidence as a rule would make a change to either wrong.
+pub const BLE_BEAT_MS: u32 = 1000;
+
+const _: () = assert!(
+    BLE_BEAT_MS >= ADMIN_WAIT_MS,
+    "a Bluetooth node must hold the control channel for at least a full admin window"
+);
+
 /// How many recently-reported addresses a node holds. See [`crate::dedup`].
 pub const DEDUP_RING: usize = 200;
 
@@ -164,9 +187,13 @@ pub const CHANNEL_SET_BYTES: usize = 6;
 const CHANNEL_SET_MASK: u64 = (1u64 << NUM_SCAN_CHANNELS) - 1;
 
 impl ChannelSet {
-    /// The empty set. A node is never *sent* one: there is no frame meaning
-    /// "scan nothing", so the planner skips a node it has nothing for rather
-    /// than telling it to stop.
+    /// The empty set.
+    ///
+    /// Sent only alongside [`crate::air::ADMIN_FLAG_BLE`], where it does not mean
+    /// "scan nothing" but "Bluetooth is the whole of the job" — see
+    /// [`Job::Bluetooth`]. Without the flag there is no frame meaning "scan
+    /// nothing", so the planner skips a node it has nothing for rather than
+    /// telling it to stop: a node sent one would park.
     #[must_use]
     pub const fn empty() -> Self {
         Self(0)
@@ -394,7 +421,9 @@ pub const fn is_five_ghz(idx: u8) -> bool {
 ///
 /// The only part of a node's capability token the planner may look at, and
 /// deliberately not [`crate::air::Capabilities`] itself: nothing else a node
-/// announces should be able to change a plan.
+/// announces should be able to change a plan. What the node has been *asked* to do
+/// arrives beside it as a [`Job`], which is the operator's decision rather than the
+/// token's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Radio {
     /// 2.4 and 5 GHz — an ESP32-C5.
@@ -415,6 +444,59 @@ impl Radio {
 impl From<crate::air::Capabilities> for Radio {
     fn from(capabilities: crate::air::Capabilities) -> Self {
         if capabilities.five_ghz { Self::DualBand } else { Self::TwoPointFour }
+    }
+}
+
+/// What the planner is dealing to, one per fleet slot.
+///
+/// A node's radio is what it *can* tune and comes off its own capability token; the
+/// job is what it has been *asked* to do and comes from the operator. Both reach
+/// [`plan_for`] as one value per slot so the two cannot be held separately and drift
+/// apart — a node dealt no channels because it is scanning Bluetooth, and an
+/// assignment whose flag says otherwise, is a node told to do nothing at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Job {
+    /// Sniff Wi-Fi with this radio, on whatever the deal gives it.
+    Wifi(Radio),
+    /// Scan Bluetooth, and so be dealt no channels.
+    ///
+    /// Still a slot: it keeps its `node_index` and counts in `node_count`, because
+    /// those are the fleet's transmit-stagger arithmetic rather than a description
+    /// of who is sniffing. The shares around it are cut as though it were present
+    /// and idle.
+    ///
+    /// No [`Radio`], deliberately. A node scanning Bluetooth changes no plan by
+    /// changing band, so a reflash from a C5 to a C6 while it holds the scan
+    /// correctly causes no re-cut.
+    Bluetooth,
+}
+
+impl Job {
+    /// Whether the node in this slot can be dealt `idx`.
+    ///
+    /// Always false for [`Self::Bluetooth`], which is the whole of how the planner
+    /// cuts it out of the deal.
+    #[must_use]
+    pub const fn can_tune(self, idx: u8) -> bool {
+        match self {
+            Self::Wifi(radio) => radio.can_tune(idx),
+            Self::Bluetooth => false,
+        }
+    }
+
+    /// The radio this slot sniffs with, or `None` when it is not sniffing.
+    #[must_use]
+    pub const fn radio(self) -> Option<Radio> {
+        match self {
+            Self::Wifi(radio) => Some(radio),
+            Self::Bluetooth => None,
+        }
+    }
+}
+
+impl From<Radio> for Job {
+    fn from(radio: Radio) -> Self {
+        Self::Wifi(radio)
     }
 }
 
@@ -491,6 +573,20 @@ impl ChannelPool {
             ChannelSet::from_bits(set.bits() | ChannelSet::from_run(*run).bits())
         })
     }
+
+    /// Every channel of the pool that `radio` can tune.
+    ///
+    /// Never empty: every pool has 2.4 GHz in it and every [`Radio`] reaches 2.4 GHz.
+    /// That is what makes this a usable answer for a node the deal had nothing for —
+    /// see [`Plan::channels_for`].
+    #[must_use]
+    pub fn reachable_by(self, radio: Radio) -> ChannelSet {
+        let mut set = ChannelSet::empty();
+        for idx in self.channels().indices().filter(|idx| radio.can_tune(*idx)) {
+            set.insert(idx);
+        }
+        set
+    }
 }
 
 /// How the pool is named on screen and in prose — "US", not the variant's `Us`.
@@ -516,6 +612,13 @@ impl core::fmt::Display for ChannelPool {
 pub struct Plan {
     node_count: u8,
     slots: [ChannelSet; MAX_NODES],
+    /// The slot dealt nothing because it is scanning Bluetooth, if any.
+    ///
+    /// One, not a set: at most one node scans Bluetooth, and this is where that
+    /// bound becomes structural rather than a rule a caller has to keep. A fleet
+    /// naming two keeps the first and the rest are surplus slots, dealt nothing and
+    /// told nothing, which is a defined outcome for a call the host cannot make.
+    bluetooth: Option<u8>,
     unreachable: ChannelSet,
 }
 
@@ -528,21 +631,46 @@ impl Plan {
 
     /// What `node_index` should scan, if anything.
     ///
-    /// `None` for an index outside the fleet, and for the empty set — which is
-    /// reachable only with more nodes than the pool has channels. There is no
-    /// frame meaning "scan nothing", so a caller that gets `None` leaves the
-    /// node holding whatever it already has rather than inventing one.
+    /// Three answers in two shapes, because the two empty ones mean opposite
+    /// things:
+    ///
+    /// - `Some` non-empty — its share of the pool.
+    /// - `Some` empty — it is the node scanning Bluetooth, and the empty set is
+    ///   what says so on the wire. Sent, with [`crate::air::ADMIN_FLAG_BLE`].
+    /// - `None` — nothing for this node: an index outside the fleet, or a surplus
+    ///   slot in a fleet with more nodes than it has channels it can reach. There
+    ///   is no frame meaning "scan nothing", so a caller that gets `None` leaves
+    ///   the node holding whatever it already has rather than inventing one — and
+    ///   has to answer for the node holding *nothing*, which is the Bluetooth
+    ///   scanner's share after the scan is taken off it. [`ChannelPool::reachable_by`]
+    ///   is what that caller reaches for.
     #[must_use]
     pub fn channels_for(&self, node_index: u8) -> Option<ChannelSet> {
         let set = *self.slots.get(usize::from(node_index))?;
-        (node_index < self.node_count && !set.is_empty()).then_some(set)
+        if node_index >= self.node_count {
+            return None;
+        }
+        if self.bluetooth == Some(node_index) {
+            return Some(ChannelSet::empty());
+        }
+        (!set.is_empty()).then_some(set)
     }
 
-    /// Channels in the pool that no node in this fleet has the radio for.
+    /// Which slot is scanning Bluetooth, if any.
+    #[must_use]
+    pub const fn bluetooth(&self) -> Option<u8> {
+        self.bluetooth
+    }
+
+    /// Channels of the pool that went into no share, and that no amount of waiting
+    /// will fill.
     ///
-    /// Empty for any fleet with an ESP32-C5 in it. Non-empty means the pool asks
-    /// for 5 GHz and nothing present can tune it, which is the one hole in
-    /// coverage no amount of waiting will fill.
+    /// Two causes, and a caller can tell them apart without asking: every [`Radio`]
+    /// tunes 2.4 GHz, so a 2.4 GHz index is in here only when no slot is sniffing at
+    /// all — a fleet whose whole membership is the Bluetooth scanner. An all-5 GHz
+    /// set is the other cause, the pool asking for a band nothing present can reach,
+    /// which a lone ESP32-C6 produces and so does an ESP32-C5 that holds the scan
+    /// beside one.
     #[must_use]
     pub const fn unreachable(&self) -> ChannelSet {
         self.unreachable
@@ -551,17 +679,20 @@ impl Plan {
     /// The assignment to send to `node_index`.
     ///
     /// `epoch` is the caller's persisted epoch byte; a node adopts only when it
-    /// differs from the one it holds. `flags` is the caller's too: which node scans
-    /// Bluetooth is a decision about one node, and a plan is about the fleet.
+    /// differs from the one it holds. `flags` is the caller's too: *which* node scans
+    /// Bluetooth is the operator's decision, and the plan is what acts on it.
+    ///
+    /// `None` when there is nothing to say, and also for the one frame that must
+    /// never exist: an empty [`ChannelSet`] without
+    /// [`crate::air::ADMIN_FLAG_BLE`] tells a node to scan nothing, and a node sent
+    /// one parks while the host goes on believing it is sweeping.
     #[must_use]
     pub fn admin_for(&self, node_index: u8, epoch: u8, flags: u8) -> Option<AdminMsg> {
-        Some(AdminMsg {
-            epoch,
-            node_index,
-            node_count: self.node_count,
-            flags,
-            channels: self.channels_for(node_index)?,
-        })
+        let channels = self.channels_for(node_index)?;
+        if channels.is_empty() && flags & crate::air::ADMIN_FLAG_BLE == 0 {
+            return None;
+        }
+        Some(AdminMsg { epoch, node_index, node_count: self.node_count, flags, channels })
     }
 }
 
@@ -573,21 +704,24 @@ impl Plan {
 /// dwell of each other. `node_index` is a single fleet-wide `0..node_count`
 /// numbering because it drives the transmit stagger ([`stagger_offset_ms`]).
 ///
-/// Every node is taken to be dual-band; for a fleet that is not, use [`plan_for`].
+/// Every node is taken to be a dual-band radio sniffing Wi-Fi; for a fleet that is
+/// not, use [`plan_for`].
 ///
 /// Returns `None` for zero nodes, or for more than [`MAX_NODES`].
 #[must_use]
 pub fn plan(pool: ChannelPool, node_count: u8) -> Option<Plan> {
-    let radios = [Radio::DualBand; MAX_NODES];
-    plan_for(pool, radios.get(..usize::from(node_count))?)
+    let fleet = [Job::Wifi(Radio::DualBand); MAX_NODES];
+    plan_for(pool, fleet.get(..usize::from(node_count))?)
 }
 
-/// Build a plan distributing `pool` across a fleet of known radios.
+/// Build a plan distributing `pool` across a fleet of known radios and jobs.
 ///
 /// The same deal as [`plan`], with each node excluded from the channels it cannot
-/// tune, because a share of 5 GHz cut for an ESP32-C6 is a share nobody scans.
-/// Three consequences, each deliberate and none obvious — the operator-facing
-/// account is `crates/wartui/README.md` § "Channel pools":
+/// tune, because a share of 5 GHz cut for an ESP32-C6 is a share nobody scans, and
+/// a [`Job::Bluetooth`] slot excluded from all of them, because Bluetooth is the
+/// whole of what that node was asked for. Four consequences, each deliberate and
+/// none obvious — the operator-facing account is `crates/wartui/README.md`
+/// § "Channel pools":
 ///
 /// - **The constrained channels go round first in a mixed fleet**, so the nodes
 ///   that sat them out are the lightest when the rest is dealt. In pool order the
@@ -598,13 +732,19 @@ pub fn plan(pool: ChannelPool, node_count: u8) -> Option<Plan> {
 ///   is minimised is the *largest* share, which sets how stale the slowest node's
 ///   observations get.
 /// - Channels no radio present can tune are left out of every share and reported
-///   by [`Plan::unreachable`].
+///   by [`Plan::unreachable`], and so are all of them when the fleet's whole
+///   membership is scanning Bluetooth. A fleet of nothing but Bluetooth is a plan
+///   rather than a refusal: refusing would leave that node holding its old share
+///   and still sniffing Wi-Fi, which is the opposite of what was asked.
+/// - **A Bluetooth slot is counted but not dealt to.** `node_count` includes it and
+///   it keeps its index, because those are the stagger's arithmetic; see
+///   [`Job::Bluetooth`].
 ///
 /// Returns `None` for an empty fleet, or for more than [`MAX_NODES`].
 #[must_use]
-pub fn plan_for(pool: ChannelPool, radios: &[Radio]) -> Option<Plan> {
-    let node_count = u8::try_from(radios.len()).ok()?;
-    if node_count == 0 || radios.len() > MAX_NODES {
+pub fn plan_for(pool: ChannelPool, fleet: &[Job]) -> Option<Plan> {
+    let node_count = u8::try_from(fleet.len()).ok()?;
+    if node_count == 0 || fleet.len() > MAX_NODES {
         return None;
     }
     let mut slots = [ChannelSet::empty(); MAX_NODES];
@@ -612,7 +752,13 @@ pub fn plan_for(pool: ChannelPool, radios: &[Radio]) -> Option<Plan> {
     // Ties go to the node after the last one dealt to. In a uniform fleet every
     // node is always tied, so this alone is the round-robin.
     let mut cursor = 0usize;
-    let mixed = radios.contains(&Radio::TwoPointFour) && radios.contains(&Radio::DualBand);
+    // Over the sniffing slots only: a C5 holding the Bluetooth scan beside a C6 is
+    // not a mixed fleet, it is a one-radio fleet with 5 GHz out of reach.
+    let mixed = fleet.contains(&Job::Wifi(Radio::TwoPointFour))
+        && fleet.contains(&Job::Wifi(Radio::DualBand));
+    #[allow(clippy::cast_possible_truncation)]
+    let bluetooth =
+        fleet.iter().position(|job| matches!(job, Job::Bluetooth)).map(|slot| slot as u8);
 
     for pass in 0..2 {
         for run in pool.runs() {
@@ -629,20 +775,21 @@ pub fn plan_for(pool: ChannelPool, radios: &[Radio]) -> Option<Plan> {
                 // ahead of one that did not; ties in fleet order from `cursor`.
                 let winner = (0..usize::from(node_count))
                     .map(|step| (cursor + step) % usize::from(node_count))
-                    .filter(|node| radios[*node].can_tune(idx))
+                    .filter(|node| fleet[*node].can_tune(idx))
                     .min_by_key(|node| slots[*node].len());
                 match winner {
                     Some(node) => {
                         slots[node].insert(idx);
                         cursor = (node + 1) % usize::from(node_count);
                     }
-                    // No radio in this fleet reaches it, so it goes in no share.
+                    // Nothing in this fleet is both sniffing and able to reach it,
+                    // so it goes in no share.
                     None => unreachable.insert(idx),
                 }
             }
         }
     }
-    Some(Plan { node_count, slots, unreachable })
+    Some(Plan { node_count, slots, bluetooth, unreachable })
 }
 
 /// How long node `node_index` waits before transmitting its heartbeat.

@@ -88,15 +88,17 @@ docs are the detail.
 
 ## At the keyboard
 
-| Key               | What it does                                            |
-| ----------------- | ------------------------------------------------------- |
-| `↑` `↓` / `k` `j` | Move the cursor down the fleet table                    |
-| `b`               | Move the Bluetooth scan to it, or take it off the fleet |
-| `q`               | Stop, committing the last batch                         |
+| Key               | What it does                                                  |
+| ----------------- | ------------------------------------------------------------- |
+| `↑` `↓` / `k` `j` | Move the cursor down the fleet table                          |
+| `b`               | Make it the Bluetooth scanner, or take the scan off the fleet |
+| `q`               | Stop, committing the last batch                               |
 
 wartui partitions the channel pool across the fleet without being asked and re-cuts it as the fleet
 changes, which is the core's job and the reason this exists. It is the only thing that decides what
-a node scans: there is no key and no flag that overrides one node's share.
+a node scans: no key and no flag writes one node's share. `b` is an input to it rather than an
+override — it says which node is not taking channels, and the planner deals that node's share
+round the rest.
 
 Nothing goes out at the moment a share changes. A node's radio is away scanning for all but the 100
 ms it holds open after its own heartbeat, so the assignment waits for that window — up to about five
@@ -105,7 +107,9 @@ seconds on a full sweep of the default pool. The `channels` column reads `1: 1�
 `--pool all` is the default: every channel a node can tune, 2.4 GHz 1–13 and all of 5 GHz. `--pool
 us` is 2.4 GHz 1–11 and 5 GHz 36–165; `--pool eu` is 2.4 GHz 1–13 and 5 GHz 36–140.
 
-At most one node scans Bluetooth, and by default none does. `b` moves it.
+At most one node scans Bluetooth, by default none does, and it is that node's whole job: `b` gives
+it the scan, takes its Wi-Fi channels away, and re-cuts the pool across the rest. It scans once a
+second, and its `channels` column reads `bluetooth`.
 
 **Fleet states, GPS, channel-pool detail and troubleshooting are in
 [`crates/wartui/README.md`](crates/wartui/README.md).**
@@ -114,6 +118,8 @@ At most one node scans Bluetooth, and by default none does. `b` moves it.
 
 - **Maximum twenty nodes** (`plan::MAX_NODES`) — that is how many peers an ESP-NOW radio holds.
   Above it, capture continues and nothing is dropped, but the planner stops re-cutting and says so.
+- **The Bluetooth scanner sniffs no Wi-Fi.** It is one node's whole job, so a fleet of one that
+  holds the scan sweeps nothing at all and the footer says so.
 - **An ESP32-C6 is never dealt a 5 GHz channel.** Its radio is 2.4 GHz only.
 - **Channel 14 is in no pool** and is never dealt; `esp-radio` exposes no way to reach it. It's
   Japan-only 802.11b, so should be extremely rare.
@@ -167,9 +173,15 @@ sudo dnf install python3-pyte    # or pip install pyte
 python3 tools/render.py --cols 120 --rows 30    # the wide layout, fleet beside the stream
 python3 tools/render.py --cols 80 --rows 24     # the narrow one, stacked
 python3 tools/render.py --keys jb --attrs       # after two keys, with everything drawn in colour
+python3 tools/render.py --bridge --keys b       # the fleet on the desk rather than a fake one
 ```
 
 Text rather than a screenshot is the point: it diffs, it greps, and a coding agent reads it
 without an image. `--keys` presses keys before the screen is read, so the cursor and the
 Bluetooth assignment are reachable too. The capture goes to a temporary database that is deleted
-on the way out.
+on the way out, unless `--db` names one to keep.
+
+`--bridge` renders the boards attached instead of the simulator, optionally naming which one is
+the bridge, and is how a real fleet gets read as text. A real node answers only in its own admin
+window, at the end of a sweep, so `--after` and `--settle` default to an order of magnitude longer
+there — a share read any sooner reads as pending when it is merely on its way.

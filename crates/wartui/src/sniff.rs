@@ -189,13 +189,17 @@ fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
                     counts.admin += 1;
                     let indices: Vec<String> =
                         admin.channels.indices().map(|idx| idx.to_string()).collect();
+                    // `none` rather than nothing: the one frame with an empty set is
+                    // the Bluetooth node's, and a blank there reads as a bug.
+                    let indices =
+                        if indices.is_empty() { "none".to_owned() } else { indices.join(",") };
                     println!(
                         "{head}  ADMIN e{} node {}/{}{} channel idx {}  -> {}",
                         admin.epoch,
                         admin.node_index,
                         admin.node_count,
                         if admin.scan_ble() { " +ble" } else { "" },
-                        indices.join(","),
+                        indices,
                         mac(dst),
                     );
                 }

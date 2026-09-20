@@ -584,8 +584,8 @@ impl<'a> SightingMsg<'a> {
 
 /// wartui's channel assignment — the one frame a node acts on.
 ///
-/// Fifteen bytes: the header, then [`epoch`](Self::epoch), `node_index`,
-/// `node_count`, [`flags`](Self::flags) and five bytes of [`ChannelSet`].
+/// Sixteen bytes: the header, then [`epoch`](Self::epoch), `node_index`,
+/// `node_count`, [`flags`](Self::flags) and six bytes of [`ChannelSet`].
 ///
 /// The mask is why this is not a pair of bounds. A run cannot describe a
 /// restricted pool: the US pool is 2.4 GHz 1-11 and 5 GHz 36-165 with a gap

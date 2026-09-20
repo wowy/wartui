@@ -13,10 +13,11 @@
 //! set changes, and that partition is the only thing an assignment ever carries:
 //! nothing outside [`FleetEngine::replan`] decides what a node scans.
 //!
-//! [`Command::AssignBle`] is the exception, and only about which node scans
-//! Bluetooth rather than what it scans. It lives here rather than in the view
-//! because it is the same kind of fact as a channel assignment: something one
-//! node holds, delivered inside that node's own admin window, believed only on
+//! [`Command::AssignBle`] is not an exception to that but an *input* to it: it says
+//! which node's job is Bluetooth, the planner deals that node no channels, and the
+//! frame it produces is the planner's like any other. It lives here rather than in
+//! the view because it is the same kind of fact as a channel assignment: something
+//! one node holds, delivered inside that node's own admin window, believed only on
 //! an acknowledgement.
 use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
@@ -26,7 +27,7 @@ use wartui_proto::air::{
     AdminMsg, Capabilities, DecodeError, Frame, RecordKind, foreign, wire_epoch,
 };
 use wartui_proto::link::{BridgeToHost, EspNowPayload, HostToBridge, Mac, SendStatus};
-use wartui_proto::plan::{self, ChannelPool, ChannelSet, Plan, Radio};
+use wartui_proto::plan::{self, ChannelPool, ChannelSet, Job, Plan, Radio};
 
 use crate::distinct::Distinct;
 use crate::position::PositionChain;
@@ -70,18 +71,21 @@ pub enum Event {
 /// both through [`FleetEngine::handle`] is what makes that ordering testable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
-    /// Move the Bluetooth scan to one node, or take it away from the fleet.
+    /// Give one node the Bluetooth scan as its whole job, or take it away from the
+    /// fleet.
     ///
-    /// At most one node, and by default none: NimBLE holds the one 2.4 GHz
-    /// antenna through exactly the window a node has to be listening in, which
-    /// cost a stock node every assignment sent to it. Our firmware bounds the
-    /// scan and pays a ~10% sweep-period cost instead
-    /// (`docs/phase-0-findings.md`, `docs/phase-1-findings.md`), so it is a cost
-    /// the operator chooses on one node rather than one the fleet pays.
+    /// At most one node, and by default none. The two radios share the one 2.4 GHz
+    /// antenna, and a scan holds it through exactly the window a node has to be
+    /// listening in — which cost a stock node every assignment sent to it
+    /// (`docs/phase-0-findings.md`). A node that sniffs no Wi-Fi has nothing to
+    /// hold the antenna against, which is why Bluetooth is a whole node's job
+    /// rather than a slice of one's: it costs the fleet a sniffer and buys a scan
+    /// every [`wartui_proto::plan::BLE_BEAT_MS`].
     ///
-    /// Nothing goes out now: the flag rides on that node's next assignment, and
-    /// a node only listens in the 100 ms it holds open after a heartbeat. Moving
-    /// it costs two frames, because the node giving it up has to be told as well.
+    /// Nothing goes out now, and nothing is decided now: the planner reads this on
+    /// its next re-cut, which takes that node's channels away and deals them round
+    /// the rest. Moving it costs two frames, because the node giving it up has a
+    /// share of the pool coming back to it.
     AssignBle {
         /// Which node, or `None` to stop scanning BLE anywhere.
         mac: Option<Mac>,
@@ -228,8 +232,14 @@ pub struct NodeState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Assignment {
     /// Which [`wartui_proto::plan::SCAN_CHANNELS`] indices to dwell on.
+    ///
+    /// Empty exactly when [`ble`](Self::ble) is set, and never otherwise:
+    /// Bluetooth is a node's whole job, and an empty set without the flag is the
+    /// one thing a node cannot be told, since it would park while this host
+    /// believed it was sweeping. [`FleetEngine::replan`] reads both off one value
+    /// so they cannot drift.
     pub channels: ChannelSet,
-    /// Whether this node is the one scanning Bluetooth.
+    /// Whether this node's job is Bluetooth, and so whether it sniffs no Wi-Fi.
     ///
     /// Part of the assignment rather than beside it: it travels in the same frame
     /// and is adopted by the same epoch comparison, so treating them separately
@@ -273,10 +283,12 @@ impl NodeState {
 
     /// How long this node is taking between heartbeats, in milliseconds.
     ///
-    /// The median of the last few gaps rather than the last one. A node
-    /// heartbeats once per completed sweep, so this is proportional to how many
-    /// channels it is scanning — which is the whole proof that an assignment
-    /// landed, visible without serial access to the node. The median is what
+    /// The median of the last few gaps rather than the last one. A node heartbeats
+    /// once per completed sweep, so this is proportional to how many channels it is
+    /// scanning — which is the whole proof that an assignment landed, visible
+    /// without serial access to the node. The node scanning Bluetooth sweeps
+    /// nothing and reads a flat [`wartui_proto::plan::BLE_BEAT_MS`] instead, which
+    /// is the same kind of proof and proportional to nothing. The median is what
     /// keeps one lost heartbeat, which doubles a single gap, from reading as a
     /// range twice the size.
     #[must_use]
@@ -498,14 +510,17 @@ pub struct FleetEngine {
     /// The partition in force.
     plan: Option<Plan>,
     /// The members that plan was built for, in the order that gave them their
-    /// `node_index`, each with the radio it was cut a share for. Compared against
-    /// the live membership to decide whether to re-partition — radio included,
-    /// because a node whose token changed band has a share of the wrong shape
-    /// while the membership is unchanged.
-    plan_members: Vec<(Mac, Radio)>,
-    /// The one node asked to scan Bluetooth, if any. Not part of the plan: the
-    /// plan is a function of who is present, and this is an operator's choice
-    /// that survives re-partitioning.
+    /// `node_index`, each with the job it was cut a share for. Compared against
+    /// the live membership to decide whether to re-partition — the job included,
+    /// because a node whose token changed band, or which has taken the Bluetooth
+    /// scan, has a share of the wrong shape while the membership is unchanged.
+    plan_members: Vec<(Mac, Job)>,
+    /// The one node asked to scan Bluetooth, if any.
+    ///
+    /// Held beside the plan rather than in it because it is an operator's choice
+    /// and the plan is a function of who is present; it reaches the planner as a
+    /// [`Job::Bluetooth`] slot on every re-cut, which is what takes that node's
+    /// Wi-Fi share away and hands it round.
     ble_node: Option<Mac>,
     /// The previous frame's bridge stamp and the host instant it was handled
     /// on, which together say whether this host is reading the link in real
@@ -615,14 +630,16 @@ impl FleetEngine {
 
     fn on_tick(&mut self, now: Now, batch: &mut ActionBatch) {
         self.expire_pending(now, batch);
+        // Who is *named* as the holder, which is a different question from who is
+        // dealt a Bluetooth slot: `replan` masks the slot by the capability on
+        // every re-cut, so a node that stopped claiming the feature has already
+        // been dealt a share again by the heartbeat that said so. What is left is
+        // the name the snapshot shows, and taking it back is what makes `b` able
+        // to give the scan to somebody else.
+        //
         // A node ageing out of topology is the passage of time rather than
-        // anything arriving, so the tick is the only thing that can see it.
-        // Checked outside `replan`, because the Bluetooth assignment is not the
-        // planner's: the plan is a function of who is present, and this is an
-        // operator's choice that a re-cut has no opinion about. A node that has
-        // left the fleet is not scanning for us either way. A node that announces
-        // itself without the `ble` feature loses it on the same tick and for the
-        // same reason — it would adopt the flag, acknowledge, and scan nothing.
+        // anything arriving, so the tick is the only thing that can see it. A node
+        // that has left the fleet is not scanning for us either way.
         //
         // Both cases are about a node that has *spoken*, which is why
         // `last_heartbeat` guards the first: a node put in the table by a
@@ -636,23 +653,13 @@ impl FleetEngine {
                     || node.capabilities.is_some_and(|capabilities| !capabilities.ble)
             })
         });
-        if let Some(mac) = self.ble_node.take_if(|_| ble_gone) {
-            // Forgetting who held the scan is not taking it off them: the flag
-            // travels in the assignment frame, so a node still holding one goes
-            // on scanning — and goes on being *shown* as a holder, since the
-            // fleet table reads the flag off the assignment. Re-issuing under a
-            // fresh epoch is the only way to withdraw it. For a node that has
-            // merely gone quiet that frame waits on a heartbeat that may never
-            // come, which is right: if it returns, it returns without the scan.
-            //
-            // Only if the flag is really out there — a node that lost the scan by
-            // changing its own token has already had it taken off by the reboot
-            // re-issue, and a second epoch would have it re-adopt what it holds.
-            let holds = self.nodes.get(&mac).and_then(|node| node.desired.or(node.confirmed));
-            if holds.is_some_and(|assignment| assignment.ble) {
-                self.reissue(mac);
-            }
-        }
+        // Clearing this is only about what the snapshot claims; the withdrawal
+        // itself rides in the re-cut below, which this runs before. A node that
+        // changed its own token is still a member, so it is dealt a share and told
+        // the flag is off in one epoch. A node that has left the fleet is not a
+        // member, so the re-cut drops what it was owed — and if it comes back, it
+        // comes back without the scan.
+        let _ = self.ble_node.take_if(|_| ble_gone);
         self.replan(now);
         let due = self
             .last_status_poll
@@ -885,10 +892,13 @@ impl FleetEngine {
 
     /// Move the Bluetooth scan, or take it off the fleet entirely.
     ///
-    /// Nothing is sent from here. The flag lives in the assignment frame, so
-    /// telling a node about it means re-issuing what it already holds under a
-    /// fresh epoch; a node with nothing to re-issue gets the flag with whatever
-    /// assignment reaches it next.
+    /// Nothing is sent from here, and nothing is decided either. Moving the scan
+    /// changes what *two* nodes scan — the one taking it stops sniffing Wi-Fi and
+    /// the one giving it up takes a share of the pool back — so it is a re-cut
+    /// rather than a flag flipped on an existing assignment, and the planner is
+    /// still the only author of one. [`Self::replan`] runs on every heartbeat and
+    /// every tick and reads this, so each end takes its new assignment in its own
+    /// window, under one epoch carrying both the share and the flag.
     fn on_assign_ble(&mut self, target: Option<Mac>) {
         // A node built without the `ble` feature would adopt the flag,
         // acknowledge, and scan nothing. The view refuses the keypress first; the
@@ -907,34 +917,30 @@ impl FleetEngine {
         if self.ble_node == target {
             return;
         }
-        let previous = std::mem::replace(&mut self.ble_node, target);
-        // Both ends of the move, the node giving it up first. Each frame waits on
-        // its own node's next heartbeat, so a new holder that heartbeats first
-        // holds the scan alongside the old one until that one's window comes
-        // round: the overlap is bounded by a heartbeat rather than excluded, and
-        // "at most one node scans Bluetooth" is about what the host asks for.
-        for mac in previous.into_iter().chain(target) {
-            self.reissue(mac);
-        }
+        // Each end's frame waits on its own node's next heartbeat, so a new holder
+        // that heartbeats first holds the scan alongside the old one until that
+        // one's window comes round: the overlap is bounded by a heartbeat rather
+        // than excluded, and "at most one node scans Bluetooth" is about what the
+        // host asks for.
+        self.ble_node = target;
     }
 
     /// Re-mark a node's assignment for delivery under a new epoch.
     ///
-    /// Refreshes the Bluetooth flag on the way past: this is the only path by
-    /// which a node already holding the right channels hears about a change to
-    /// it, and a reboot re-issue must not put back a scan the fleet has since
-    /// moved. A reflash is exactly a reboot whose token has changed, and the
-    /// capabilities are read off the heartbeat before this runs, so the
-    /// withdrawal travels in the frame the reboot was going to send anyway.
+    /// For a node that rebooted, which has forgotten what it holds: what it was
+    /// last given is re-sent under an epoch it cannot already match.
+    ///
+    /// Deliberately does not touch the Bluetooth flag. A change to the flag is
+    /// always a change to the channels too, so it is always a re-cut and always
+    /// [`Self::replan`]'s — and clearing the flag here without the channels beside
+    /// it would leave a Bluetooth node holding an empty set with nothing to scan.
     fn reissue(&mut self, mac: Mac) {
         self.last_counter += 1;
         let counter = self.last_counter;
-        let ble = self.ble_node == Some(mac);
         if let Some(node) = self.nodes.get_mut(&mac)
             && let Some(desired) = node.desired.as_mut()
         {
             desired.counter = counter;
-            desired.ble = ble && node.capabilities.is_none_or(|capabilities| capabilities.ble);
             node.dirty = true;
         }
     }
@@ -951,15 +957,31 @@ impl FleetEngine {
     /// anything, which is what keeps this off a heartbeat's critical path. It is
     /// called from every tick, so that has to stay true.
     fn replan(&mut self, now: Now) {
-        let members: Vec<(Mac, Radio)> = self
+        // One value, read twice below, so a node's channels and its Bluetooth flag
+        // cannot disagree. Masked by the capability for the reason [`Self::reissue`]
+        // used to give, and now for a second one: a node reflashed without the `ble`
+        // feature must be dealt a share again, and a job taken from `ble_node` alone
+        // would leave it holding an empty set with the flag cleared — a node told to
+        // scan nothing, which parks while this host believes it is sweeping.
+        let scanner = self.ble_node.filter(|mac| {
+            self.nodes
+                .get(mac)
+                .is_some_and(|node| node.capabilities.is_some_and(|capabilities| capabilities.ble))
+        });
+        let members: Vec<(Mac, Job)> = self
             .nodes
             .values()
             // Taken rather than defaulted, so no node reaches the planner with
             // a band it did not claim.
             .filter_map(|node| {
-                node.capabilities
-                    .filter(|_| self.is_assignable(node, now))
-                    .map(|capabilities| (node.mac, Radio::from(capabilities)))
+                node.capabilities.filter(|_| self.is_assignable(node, now)).map(|capabilities| {
+                    let job = if scanner == Some(node.mac) {
+                        Job::Bluetooth
+                    } else {
+                        Job::Wifi(Radio::from(capabilities))
+                    };
+                    (node.mac, job)
+                })
             })
             .collect();
 
@@ -980,11 +1002,11 @@ impl FleetEngine {
         }
 
         let count = u8::try_from(members.len()).unwrap_or(u8::MAX);
-        let radios: Vec<Radio> = members.iter().map(|(_, radio)| *radio).collect();
+        let jobs: Vec<Job> = members.iter().map(|(_, job)| *job).collect();
         // Not `plan`: a share of 5 GHz cut for an ESP32-C6 is a share nobody
         // scans, which is the failure the capability token exists to prevent,
         // reached by a node that is genuinely one of ours.
-        let Some(plan) = plan::plan_for(self.config.pool, &radios) else {
+        let Some(plan) = plan::plan_for(self.config.pool, &jobs) else {
             // Nothing heartbeating, or more nodes than the radio's peer table
             // can hold. Either way there is no partition to be in, and the
             // fleet keeps whatever it already had rather than being told
@@ -998,23 +1020,42 @@ impl FleetEngine {
         // One epoch per node that actually needs telling. Held locally because
         // the decision needs the node in hand, and `self` is borrowed for it.
         let mut counter = self.last_counter;
-        let ble_node = self.ble_node;
-        for (index, (mac, _)) in members.iter().enumerate() {
+        let pool = self.config.pool;
+        for (index, (mac, job)) in members.iter().enumerate() {
             let index = u8::try_from(index).unwrap_or(u8::MAX);
+            let Some(node) = self.nodes.get_mut(mac) else { continue };
             // Nothing for this node: more nodes than the pool has channels *this
             // fleet* can reach, which with the radios read out of the tokens
             // means as few as twelve nodes with no 5 GHz between them. There is
             // no frame meaning "scan nothing", so it keeps what it holds —
             // duplicating another share rather than leaving a gap — and the
             // footer's unreachable line says the fleet is short of the pool.
-            let Some(channels) = plan.channels_for(index) else { continue };
-            let Some(node) = self.nodes.get_mut(mac) else { continue };
-            // Masked the same way [`Self::reissue`] masks it: a node reflashed
-            // without the `ble` feature would adopt the flag, acknowledge, and
-            // scan nothing. The tick is what takes the scan off the fleet, and a
-            // re-cut landing in between must not hand it straight back.
-            let ble = ble_node == Some(*mac)
-                && node.capabilities.is_none_or(|capabilities| capabilities.ble);
+            //
+            // Unless what it holds is nothing to scan, which is the assignment of
+            // a node that *was* the Bluetooth scanner and no longer is. That node
+            // is not duplicating a share, it is blind and still holding the
+            // antenna, and leaving it alone would mean the scan could never be
+            // taken off it. So it is dealt everything its own radio can reach —
+            // the surplus rule at its limit, and never empty, because every pool
+            // has 2.4 GHz in it and every radio tunes 2.4 GHz.
+            //
+            // An empty set from the plan itself is neither case: it is the
+            // Bluetooth node's, and it goes out with the flag beside it.
+            let held = node.desired.or(node.confirmed);
+            let channels = match plan.channels_for(index) {
+                Some(channels) => channels,
+                None if held.is_some_and(|assignment| assignment.channels.is_empty()) => {
+                    match job.radio() {
+                        Some(radio) => pool.reachable_by(radio),
+                        // Unreachable: a `Job::Bluetooth` slot is never `None` above.
+                        None => continue,
+                    }
+                }
+                None => continue,
+            };
+            // The same `scanner` the job came from, so `channels.is_empty()` and
+            // `ble` always agree.
+            let ble = scanner == Some(*mac);
 
             let wanted = |a: Assignment| {
                 a.channels == channels
@@ -1117,7 +1158,7 @@ impl FleetEngine {
             flags: AdminMsg::flags_for(assignment.ble),
             channels: assignment.channels,
         };
-        // Fifteen bytes into a 250-byte buffer, so this cannot fail.
+        // Sixteen bytes into a 250-byte buffer, so this cannot fail.
         let payload = EspNowPayload::from_slice(&msg.encode()).unwrap_or_default();
 
         self.pending.insert(

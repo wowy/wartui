@@ -20,9 +20,12 @@
 //!   plan for all of them. [`settle`] waits for the whole fleet to hold its assignment
 //!   before the clock, the kernel counters and the commit timings start.
 //!
-//! Every [`SAMPLE`], each node's observation count is compared with the last, and a node
-//! that heard nothing in a window is counted in `idle_node_windows`. Anything but zero
-//! means the run did not measure what its profile says.
+//! Every [`SAMPLE`], each sniffing node's observation count is compared with the last,
+//! and a node that heard nothing in a window is counted in `idle_node_windows`. Anything
+//! but zero means the run did not measure what its profile says. The Bluetooth node is
+//! not among them: it sweeps nothing, so its rate is `--ble-chance` times a constant
+//! rather than anything the store did, and counting it would put a number set on the
+//! command line into a figure about how the fleet kept up.
 //!
 //! Hidden, because it is for judging changes to the store rather than for capturing.
 
@@ -137,7 +140,9 @@ pub struct Args {
     #[arg(long, value_name = "N")]
     networks: Option<u16>,
 
-    /// Chance per channel dwell that the Bluetooth node hears an advertiser.
+    /// Chance per advertiser slot in a scan that the Bluetooth node hears one. Such a
+    /// node dwells on nothing, so its whole second is one scan with a fixed number of
+    /// slots in it; zero means it reports nothing at all.
     #[arg(long, value_name = "P")]
     ble_chance: Option<f64>,
 
@@ -286,11 +291,17 @@ pub async fn run(args: Args) -> Result<()> {
     let capture = tokio::spawn(drive(link, store, engine, snapshot_tx, command_rx, stop_rx));
     // Naming a node before it has been heard is allowed, and this one is the only
     // source of addresses that never dedup.
-    let ble_node = SimTransport::node_mac(0);
-    command_tx
-        .send(Command::AssignBle { mac: Some(ble_node) })
-        .await
-        .context("the capture stopped before it began")?;
+    //
+    // Not on a fleet of one, which the flags allow: Bluetooth is a whole node's job,
+    // so the only node would sniff nothing and the run would measure a stream of
+    // advertisers instead of the sweep its profile describes.
+    let ble_node = (nodes > 1).then(|| SimTransport::node_mac(0));
+    if let Some(mac) = ble_node {
+        command_tx
+            .send(Command::AssignBle { mac: Some(mac) })
+            .await
+            .context("the capture stopped before it began")?;
+    }
 
     if !args.json {
         eprintln!("waiting for {nodes} nodes to take their assignments ...");
@@ -324,6 +335,7 @@ pub async fn run(args: Args) -> Result<()> {
     let (busy, slices) = watch_the_fleet(
         &snapshot_rx,
         start,
+        ble_node,
         (device.as_ref(), &wal),
         measured_from,
         Duration::from_secs(args.interval),
@@ -575,21 +587,34 @@ fn busy_networks(nodes: u8, pool: ChannelPool) -> u16 {
 /// nothing waiting to be re-sent, and has reported a sighting; and the Bluetooth node
 /// holds its scan. Nodes join one at a time and each join re-cuts every assignment, so
 /// nothing short of the whole fleet being quiet about its assignments will do.
+///
+/// A sighting is not asked of the Bluetooth node. Its only sightings are advertisers, at
+/// a rate `--ble-chance` sets and may set to zero, so waiting for one would wait out the
+/// timeout and abort a run the flags allow. Holding the scan is what settled means for
+/// it, which is the same evidence for the same thing: the assignment arrived.
 async fn settle(
     snapshots: &mut watch::Receiver<Arc<Snapshot>>,
     nodes: usize,
-    ble_node: Mac,
+    ble_node: Option<Mac>,
 ) -> Result<Arc<Snapshot>, watch::error::RecvError> {
     let settled = snapshots
         .wait_for(|snapshot| {
             snapshot.nodes.len() == nodes
                 && snapshot.nodes.iter().all(|node| {
                     let state = &node.state;
+                    let sniffing = ble_node != Some(state.mac);
                     !state.dirty
-                        && state.observations > 0
+                        && (state.observations > 0 || !sniffing)
                         && state.confirmed.as_ref().is_some_and(|confirmed| {
-                            !confirmed.channels.is_empty()
-                                && (state.mac != ble_node || confirmed.ble)
+                            // The Bluetooth node on its own terms: its whole job is
+                            // the scan, so an empty channel set is what "settled"
+                            // looks like for it and waiting for a share would wait
+                            // out the timeout.
+                            if sniffing {
+                                !confirmed.channels.is_empty()
+                            } else {
+                                confirmed.ble && confirmed.channels.is_empty()
+                            }
                         })
                 })
         })
@@ -598,6 +623,8 @@ async fn settle(
 }
 
 /// How busy the fleet stayed over the measured window.
+///
+/// Every figure is over the sniffing nodes only; [`watch_the_fleet`] says why.
 #[derive(Debug, Default)]
 struct Busy {
     /// Windows of [`SAMPLE`] in which a node reported nothing, summed over nodes.
@@ -610,16 +637,28 @@ struct Busy {
 
 /// Sleep out the measured window, checking every [`SAMPLE`] that each node is still
 /// reporting, and cutting the run into slices of `every`.
+///
+/// The Bluetooth node is left out of every figure [`Busy`] carries. It sweeps nothing, so
+/// what it reports is `--ble-chance` of a fixed number of slots a second whatever the
+/// store is doing: it is never the node that stopped keeping up, and it is always the
+/// slowest, which would leave `node_obs_per_s_min` describing a number off the command
+/// line rather than the thinnest Wi-Fi share.
 async fn watch_the_fleet(
     snapshots: &watch::Receiver<Arc<Snapshot>>,
     start: Mark,
+    ble_node: Option<Mac>,
     (device, wal): (Option<&io::Device>, &Path),
     measured_from: Instant,
     every: Duration,
     duration: Duration,
 ) -> (Busy, Vec<Slice>) {
     let counts = |snapshot: &Snapshot| -> HashMap<Mac, u64> {
-        snapshot.nodes.iter().map(|node| (node.state.mac, node.state.observations)).collect()
+        snapshot
+            .nodes
+            .iter()
+            .filter(|node| Some(node.state.mac) != ble_node)
+            .map(|node| (node.state.mac, node.state.observations))
+            .collect()
     };
     let first = counts(&snapshots.borrow());
     let mut previous = first.clone();

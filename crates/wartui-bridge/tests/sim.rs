@@ -10,7 +10,7 @@ use wartui_bridge::sim::{SimConfig, SimTransport};
 use wartui_bridge::{LinkEvent, LinkHandle};
 use wartui_proto::air::{AdminMsg, Frame, HeartbeatMsg, RecordKind, SightingMsg};
 use wartui_proto::link::{BridgeToHost, EspNowPayload, HostToBridge, Mac, SendStatus};
-use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun};
+use wartui_proto::plan::{BLE_BEAT_MS, ChannelPool, ChannelSet, IndexRun};
 
 /// The next node → core frame, as (source, the bytes it arrived as).
 ///
@@ -65,6 +65,11 @@ fn admin_command(dst: Mac, admin: AdminMsg) -> HostToBridge {
 ///
 /// A wartui node parks and collects nothing until told what to scan, so a test that
 /// wants to see anything has to do first what the host does on the first heartbeat.
+///
+/// An empty `channels` with `ble` set is the Bluetooth-only assignment: that node
+/// sniffs nothing, and the flag is what says why. Empty with `ble` clear is the one
+/// thing the host never sends, which the node treats as never having been told
+/// anything.
 fn assign(link: &LinkHandle, version: u8, channels: ChannelSet, ble: bool) {
     link.send_urgent(admin_command(
         SimTransport::node_mac(0),
@@ -217,7 +222,7 @@ async fn a_node_reports_each_wifi_network_only_once() {
 async fn ble_sightings_keep_arriving_because_their_addresses_rotate() {
     let config = SimConfig { node_count: 1, ble_chance: 1.0, ..SimConfig::default() };
     let mut link = SimTransport::new(config).start().expect("starts");
-    assign(&link, 1, everything(), true);
+    assign(&link, 1, ChannelSet::empty(), true);
 
     let mut ble = HashSet::new();
     let mut sweeps = 0;
@@ -232,6 +237,79 @@ async fn ble_sightings_keep_arriving_because_their_addresses_rotate() {
         }
     }
     assert!(ble.len() > 10, "rotating BLE addresses should keep producing new sightings");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_bluetooth_node_heartbeats_on_its_own_second_rather_than_a_sweep() {
+    // The cadence, at the default advertiser rate rather than a saturated room:
+    // BLE_BEAT_MS between heartbeats, where a sweeping node's period is its share.
+    let config = SimConfig { node_count: 1, ..SimConfig::default() };
+    let mut link = SimTransport::new(config).start().expect("starts");
+    assign(&link, 1, ChannelSet::empty(), true);
+
+    let mut beats = Vec::new();
+    let mut ble = 0;
+    while beats.len() < 6 {
+        let (_, raw) = next_frame(&mut link).await;
+        match Frame::decode(&raw) {
+            Ok(Frame::Heartbeat(_)) => beats.push(tokio::time::Instant::now()),
+            Ok(Frame::Sighting(sighting)) if sighting.kind == RecordKind::Ble => ble += 1,
+            _ => {}
+        }
+    }
+    let gaps: Vec<u128> = beats.windows(2).map(|pair| (pair[1] - pair[0]).as_millis()).collect();
+    assert!(
+        gaps.iter().skip(1).all(|gap| *gap == u128::from(BLE_BEAT_MS)),
+        "scan start to scan start: {gaps:?}"
+    );
+    assert!(ble > 0, "and the default advertiser rate still produces some: {ble}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_node_whose_whole_job_is_bluetooth_reports_advertisers_and_no_access_points() {
+    // The point of the split: a fleet of one holding the scan sweeps nothing, so
+    // every sighting it produces is an advertiser and its beat is the scan cadence
+    // rather than a sweep.
+    let config = SimConfig { node_count: 1, ble_chance: 1.0, ..SimConfig::default() };
+    let mut link = SimTransport::new(config).start().expect("starts");
+    assign(&link, 1, ChannelSet::empty(), true);
+
+    let mut wifi = 0;
+    let mut ble = 0;
+    let mut beats = 0;
+    while beats < 4 {
+        let (_, raw) = next_frame(&mut link).await;
+        match Frame::decode(&raw) {
+            Ok(Frame::Heartbeat(_)) => beats += 1,
+            Ok(Frame::Sighting(sighting)) if sighting.kind == RecordKind::Ble => ble += 1,
+            Ok(Frame::Sighting(_)) => wifi += 1,
+            _ => {}
+        }
+    }
+    assert_eq!(wifi, 0, "a Bluetooth node sniffs no Wi-Fi at all");
+    assert!(ble > 10, "and reports advertisers every cycle instead: {ble}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_node_told_to_scan_nothing_at_all_parks_rather_than_spinning() {
+    // The one frame the host never sends. A node that took it literally would loop
+    // on nothing, so it counts as never having been told anything: it parks, which
+    // means the idle beat and no sightings of any kind.
+    let config = SimConfig { node_count: 1, ble_chance: 1.0, ..SimConfig::default() };
+    let mut link = SimTransport::new(config).start().expect("starts");
+    assign(&link, 1, ChannelSet::empty(), false);
+
+    let mut sightings = 0;
+    let mut beats = 0;
+    while beats < 4 {
+        let (_, raw) = next_frame(&mut link).await;
+        match Frame::decode(&raw) {
+            Ok(Frame::Heartbeat(_)) => beats += 1,
+            Ok(Frame::Sighting(_)) => sightings += 1,
+            _ => {}
+        }
+    }
+    assert_eq!(sightings, 0, "parked collects nothing");
 }
 
 #[tokio::test(start_paused = true)]
@@ -382,15 +460,17 @@ async fn a_seeded_run_is_reproducible() {
 async fn only_the_node_given_the_bluetooth_assignment_reports_any() {
     let config = SimConfig { node_count: 2, ble_chance: 1.0, ..SimConfig::default() };
     let mut link = SimTransport::new(config).start().expect("starts");
-    assign(&link, 1, everything(), true);
+    // The shape the host sends: the scanner gets the flag and no channels, and the
+    // whole pool goes to the node still sniffing.
+    assign(&link, 1, ChannelSet::empty(), true);
     link.send_urgent(admin_command(
         SimTransport::node_mac(1),
         AdminMsg { epoch: 1, node_index: 1, node_count: 2, flags: 0, channels: everything() },
     ))
     .expect("queued");
 
-    // A room where an advertiser turns up on every dwell, so a node that was
-    // going to report one has had every chance to.
+    // A room where an advertiser turns up in every slot of every scan, so a node
+    // that was going to report one has had every chance to.
     let mut ble_by_node: HashMap<Mac, usize> = HashMap::new();
     let mut sweeps = 0;
     while sweeps < 3 {
