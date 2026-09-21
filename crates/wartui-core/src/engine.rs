@@ -27,7 +27,9 @@ use wartui_proto::air::{
     AdminMsg, Capabilities, DecodeError, Frame, RecordKind, foreign, wire_epoch,
 };
 use wartui_proto::link::{BridgeToHost, EspNowPayload, HostToBridge, Mac, SendStatus};
-use wartui_proto::plan::{self, ChannelPool, ChannelSet, Job, Plan, Radio};
+use wartui_proto::plan::{
+    self, ChannelPool, ChannelSet, DEFAULT_TX_POWER_QUARTER_DBM, Job, Plan, Radio, clamp_tx_power,
+};
 
 use crate::distinct::Distinct;
 use crate::position::PositionChain;
@@ -141,6 +143,15 @@ pub struct EngineConfig {
     /// Persisted, so a restarted host never reissues an epoch a node already
     /// holds: the node would acknowledge it and then discard it.
     pub assignment_base: u64,
+    /// Wi-Fi transmit power sent to the bridge on connection and to every node in
+    /// its assignment, in ESP-IDF quarter-dBm units.
+    ///
+    /// There is no operator control yet; this is the runtime configuration seam
+    /// that keeps the firmware default from becoming a compile-time fleet policy.
+    ///
+    /// [`FleetEngine::new`] brings it inside the range IDF accepts, so a value outside
+    /// it costs the fleet a clamp rather than leaving every radio at its boot power.
+    pub tx_power: i8,
 }
 
 impl Default for EngineConfig {
@@ -154,6 +165,7 @@ impl Default for EngineConfig {
             position: PositionChain::empty(),
             admin_timeout: Duration::from_secs(2),
             assignment_base: 0,
+            tx_power: DEFAULT_TX_POWER_QUARTER_DBM,
         }
     }
 }
@@ -249,6 +261,8 @@ pub struct Assignment {
     pub node_index: u8,
     /// Fleet size as of this assignment.
     pub node_count: u8,
+    /// Wi-Fi transmit power for this node in ESP-IDF quarter-dBm units.
+    pub tx_power: i8,
     /// The persisted monotonic epoch it was allocated from.
     pub counter: u64,
 }
@@ -557,7 +571,10 @@ struct PendingAdmin {
 impl FleetEngine {
     /// Start an engine. `now` fixes the session's start time.
     #[must_use]
-    pub fn new(config: EngineConfig, now: Now) -> Self {
+    pub fn new(mut config: EngineConfig, now: Now) -> Self {
+        // Clamped once, here, rather than at each of the three places a power reaches a
+        // radio: `plan::clamp_tx_power` says why a refused one must not be reachable.
+        config.tx_power = clamp_tx_power(config.tx_power);
         Self {
             nodes: BTreeMap::new(),
             bridge: None,
@@ -617,9 +634,10 @@ impl FleetEngine {
                 // A new connection means a new baseline, whether or not the
                 // bridge itself rebooted.
                 self.dropped_baseline = None;
-                // Ask straight away rather than waiting out the interval.
-                self.last_status_poll = Some(now.mono);
-                batch.bulk.push(wartui_proto::link::HostToBridge::GetStatus);
+                // Straight away rather than waiting out the interval: a bridge that
+                // restarted has gone back to its firmware fallback power, and this host
+                // has no status for it at all.
+                self.poll_bridge(now, &mut batch);
             }
             Event::Link(LinkEvent::Disconnected { reason }) => {
                 self.link_up = false;
@@ -670,9 +688,27 @@ impl FleetEngine {
             .last_status_poll
             .is_none_or(|last| now.mono.duration_since(last) >= self.config.status_interval);
         if due && self.link_up {
-            self.last_status_poll = Some(now.mono);
-            batch.bulk.push(wartui_proto::link::HostToBridge::GetStatus);
+            self.poll_bridge(now, batch);
         }
+    }
+
+    /// Ask the bridge how it is, and tell it what to transmit at.
+    ///
+    /// Paired on purpose, and repeated every `status_interval` rather than sent once on
+    /// connection. `bulk` drops rather than blocks, and a dropped `SetTxPower` has
+    /// nothing behind it to notice: the bridge would spend the rest of the session at
+    /// its firmware fallback while this host's snapshot, the panel and the link-budget
+    /// reasoning read the configured value. The poll beside it already recovers that
+    /// way, which is the whole argument for carrying the power with it rather than
+    /// making it urgent — nothing here is racing a node's admin window, and the urgent
+    /// queue is small precisely so that nothing but an assignment waits in it.
+    ///
+    /// `esp_wifi_set_max_tx_power` is idempotent and the bridge logs only a power that
+    /// changed, so the repeat costs one small frame per interval and no log line.
+    fn poll_bridge(&mut self, now: Now, batch: &mut ActionBatch) {
+        self.last_status_poll = Some(now.mono);
+        batch.bulk.push(HostToBridge::SetTxPower { power: self.config.tx_power });
+        batch.bulk.push(HostToBridge::GetStatus);
     }
 
     fn on_message(&mut self, msg: &BridgeToHost, now: Now, batch: &mut ActionBatch) {
@@ -1067,6 +1103,7 @@ impl FleetEngine {
                     && a.ble == ble
                     && a.node_index == index
                     && a.node_count == count
+                    && a.tx_power == self.config.tx_power
             };
             // Already scanning exactly this, or already queued to. Re-issuing
             // either would burn an epoch to tell a node what it already knows.
@@ -1086,8 +1123,14 @@ impl FleetEngine {
             }
 
             counter += 1;
-            node.desired =
-                Some(Assignment { channels, ble, node_index: index, node_count: count, counter });
+            node.desired = Some(Assignment {
+                channels,
+                ble,
+                node_index: index,
+                node_count: count,
+                tx_power: self.config.tx_power,
+                counter,
+            });
             node.dirty = true;
         }
         self.last_counter = counter;
@@ -1162,8 +1205,9 @@ impl FleetEngine {
             node_count: assignment.node_count,
             flags: AdminMsg::flags_for(assignment.ble),
             channels: assignment.channels,
+            tx_power: assignment.tx_power,
         };
-        // Sixteen bytes into a 250-byte buffer, so this cannot fail.
+        // Seventeen bytes into a 250-byte buffer, so this cannot fail.
         let payload = EspNowPayload::from_slice(&msg.encode()).unwrap_or_default();
 
         self.pending.insert(

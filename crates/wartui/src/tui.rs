@@ -1062,6 +1062,7 @@ mod tests {
             ble: false,
             node_index: 0,
             node_count: 1,
+            tx_power: 8,
             counter: 9,
         });
         view.state.last_outcome = Some(AdminOutcome::Acked);
@@ -1087,6 +1088,7 @@ mod tests {
             ble: false,
             node_index: 0,
             node_count: 1,
+            tx_power: 8,
             counter: 10,
         });
         view.state.dirty = true;
@@ -1773,6 +1775,7 @@ mod tests {
             ble: true,
             node_index: 0,
             node_count: 2,
+            tx_power: 8,
             counter: 1,
         });
         assert_eq!(channels_cell(&view).content, "bluetooth");

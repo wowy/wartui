@@ -54,7 +54,7 @@ pub const EXT_MAX: usize = 17;
 pub const HEARTBEAT_MSG_LEN: usize = OFF_BODY + 7;
 
 /// Length of [`AdminMsg`] on the wire.
-pub const ADMIN_MSG_LEN: usize = OFF_BODY + 4 + CHANNEL_SET_BYTES;
+pub const ADMIN_MSG_LEN: usize = OFF_BODY + 4 + CHANNEL_SET_BYTES + 1;
 
 /// Length of a [`SightingMsg`] carrying no SSID and no trailer — the floor a
 /// decoder needs before it can read `ssid_len` and find out how much more
@@ -584,8 +584,8 @@ impl<'a> SightingMsg<'a> {
 
 /// wartui's channel assignment — the one frame a node acts on.
 ///
-/// Sixteen bytes: the header, then [`epoch`](Self::epoch), `node_index`,
-/// `node_count`, [`flags`](Self::flags) and six bytes of [`ChannelSet`].
+/// Seventeen bytes: the header, then [`epoch`](Self::epoch), `node_index`,
+/// `node_count`, [`flags`](Self::flags), six bytes of [`ChannelSet`] and transmit power.
 ///
 /// The mask is why this is not a pair of bounds. A run cannot describe a
 /// restricted pool: the US pool is 2.4 GHz 1-11 and 5 GHz 36-165 with a gap
@@ -625,6 +625,12 @@ pub struct AdminMsg {
     pub flags: u8,
     /// Which [`SCAN_CHANNELS`](crate::plan::SCAN_CHANNELS) indices to dwell on.
     pub channels: ChannelSet,
+    /// Wi-Fi transmit power in ESP-IDF quarter-dBm units.
+    ///
+    /// Applied when the assignment is adopted, alongside every other property of the
+    /// node's work. The host supplies the same configured value to the bridge on
+    /// connection.
+    pub tx_power: i8,
 }
 
 impl AdminMsg {
@@ -660,6 +666,7 @@ impl AdminMsg {
             node_count: buf[OFF_BODY + 2],
             flags: buf[OFF_BODY + 3],
             channels: ChannelSet::from_bytes(channels),
+            tx_power: i8::from_le_bytes([buf[OFF_BODY + 4 + CHANNEL_SET_BYTES]]),
         })
     }
 
@@ -672,7 +679,9 @@ impl AdminMsg {
         out[OFF_BODY + 1] = self.node_index;
         out[OFF_BODY + 2] = self.node_count;
         out[OFF_BODY + 3] = self.flags;
-        out[OFF_BODY + 4..].copy_from_slice(&self.channels.to_bytes());
+        out[OFF_BODY + 4..OFF_BODY + 4 + CHANNEL_SET_BYTES]
+            .copy_from_slice(&self.channels.to_bytes());
+        out[OFF_BODY + 4 + CHANNEL_SET_BYTES] = self.tx_power.to_le_bytes()[0];
         out
     }
 }

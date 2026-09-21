@@ -192,10 +192,11 @@ cargo tree --locked --features esp32c6 -e normal --prefix none --format '{p}' \
   | grep -E '^(esp-(alloc|hal|radio|rtos|sync|wifi-sys-esp32c[56])|embedded-hal) '
 ```
 
-They are direct dependencies for reasons that do not go away. `esp-wifi-sys-*` is here for
-`esp_now_set_peer_rate_config` — the one IDF call `esp-radio` does not wrap, and the only `unsafe`
-in either firmware (`set_peer_rate` in `src/main.rs`). `esp-alloc` is here because the firmware is
-what owns the heap and declares its regions.
+They are direct dependencies for reasons that do not go away. `esp-wifi-sys-*` is here for the two
+IDF calls `esp-radio` does not wrap, which are the only `unsafe` in either firmware:
+`esp_now_set_peer_rate_config` (`set_peer_rate` in `src/main.rs`) and `esp_wifi_set_max_tx_power`
+(`set_tx_power` beside it). `esp-alloc` is here because the firmware is what owns the heap and
+declares its regions.
 
 `esp-generate` is a version behind this set; its scaffolding (`build.rs`, `.cargo/config.toml`) is
 what was taken from it, not its dependency list.

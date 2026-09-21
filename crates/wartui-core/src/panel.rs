@@ -45,8 +45,8 @@ use crate::position::PositionSource;
 
 /// Mean link RSSI, in dBm, below which the fleet is worth looking at.
 ///
-/// Not a stock link budget. Every radio in the fleet transmits at 2 dBm
-/// ([`wartui_proto::plan::TX_POWER_QUARTER_DBM`]) and ESP-NOW goes out at 802.11g
+/// Not a stock link budget. Every radio in the fleet defaults to 2 dBm
+/// ([`wartui_proto::plan::DEFAULT_TX_POWER_QUARTER_DBM`]) and ESP-NOW goes out at 802.11g
 /// 24 Mbps, whose specified receiver sensitivity is about −74 dBm — so that is the
 /// floor, and a threshold set at it would warn at the moment nodes started missing
 /// their admin windows rather than before. These two sit above it on purpose, while

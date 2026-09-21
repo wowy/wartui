@@ -238,7 +238,7 @@ fn admin_messages_carry_the_snapshot_node_count() {
     // from, or a node joining in between computes its stagger slot wrongly.
     let p = plan(ChannelPool::Us, 5).expect("valid");
     for n in 0..5 {
-        let admin = p.admin_for(n, 9, wartui_proto::air::ADMIN_FLAG_BLE).expect("assigned");
+        let admin = p.admin_for(n, 9, wartui_proto::air::ADMIN_FLAG_BLE, 8).expect("assigned");
         assert_eq!(admin.node_count, 5);
         assert_eq!(admin.node_index, n);
         assert_eq!(admin.epoch, 9);
@@ -246,6 +246,7 @@ fn admin_messages_carry_the_snapshot_node_count() {
         // Flags are the caller's: which node scans Bluetooth is the operator's
         // decision, and the plan is what acts on it.
         assert!(admin.scan_ble());
+        assert_eq!(admin.tx_power, 8);
     }
 }
 
@@ -324,18 +325,18 @@ fn the_empty_set_is_offered_only_to_the_node_scanning_bluetooth() {
     let p = plan_for(ChannelPool::Us, &[Job::Bluetooth, Job::Wifi(Radio::DualBand)])
         .expect("a valid fleet");
     assert!(
-        p.admin_for(0, 1, wartui_proto::air::ADMIN_FLAG_BLE)
+        p.admin_for(0, 1, wartui_proto::air::ADMIN_FLAG_BLE, 8)
             .is_some_and(|admin| admin.channels.is_empty())
     );
-    assert!(p.admin_for(0, 1, 0).is_none(), "an empty mask without the flag is refused");
-    assert!(p.admin_for(1, 1, 0).is_some(), "and a real share needs no flag");
+    assert!(p.admin_for(0, 1, 0, 8).is_none(), "an empty mask without the flag is refused");
+    assert!(p.admin_for(1, 1, 0, 8).is_some(), "and a real share needs no flag");
 
     // A surplus slot is `None` either way: there is nothing to say to it, and the
     // flag does not invent something.
     let crowd = [Job::Wifi(Radio::TwoPointFour); 14];
     let p = plan_for(ChannelPool::Eu, &crowd).expect("a valid fleet");
     assert!(p.channels_for(13).is_none(), "thirteen 2.4 GHz channels across fourteen nodes");
-    assert!(p.admin_for(13, 1, wartui_proto::air::ADMIN_FLAG_BLE).is_none());
+    assert!(p.admin_for(13, 1, wartui_proto::air::ADMIN_FLAG_BLE, 8).is_none());
 
     // Every pool has 2.4 GHz in it and every radio tunes 2.4 GHz, so the fallback
     // the engine gives such a node is never itself empty.

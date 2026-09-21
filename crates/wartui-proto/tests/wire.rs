@@ -81,6 +81,7 @@ const ADMIN: &[u8] = &[
     0x02, 0x05, // node 2 of 5
     0x00, // flags
     0x00, 0x00, 0xFF, 0x00, 0x00, 0x00, // indices 16..=23
+    0x08, // transmit power: 2 dBm
 ];
 
 const ADMIN_BLE: &[u8] = &[
@@ -89,6 +90,7 @@ const ADMIN_BLE: &[u8] = &[
     0x00, 0x01, // node 0 of 1
     0x01, // ADMIN_FLAG_BLE
     0x41, 0x20, 0x00, 0x00, 0x00, 0x02, // indices 0, 6, 13 and 41
+    0x08, // transmit power: 2 dBm
 ];
 
 /// The assignment a node whose whole job is Bluetooth is sent: the flag, and an
@@ -100,6 +102,7 @@ const ADMIN_BLE_ONLY: &[u8] = &[
     0x01, 0x03, // node 1 of 3
     0x01, // ADMIN_FLAG_BLE
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // no channels at all
+    0x08, // transmit power: 2 dBm
 ];
 
 /// A stock node's heartbeat, and a stock core's assignment. Kept only as inputs
@@ -423,6 +426,7 @@ fn an_assignment_encodes_byte_for_byte() {
         node_count: 5,
         flags: 0,
         channels: ChannelSet::from_run(IndexRun::new(16, 23)),
+        tx_power: 8,
     };
     assert_eq!(msg.encode().as_slice(), ADMIN);
     assert_eq!(AdminMsg::decode(ADMIN), Ok(msg));
@@ -437,8 +441,14 @@ fn the_channel_mask_goes_out_least_significant_byte_first() {
     for idx in [0, 6, 13, 41] {
         channels.insert(idx);
     }
-    let msg =
-        AdminMsg { epoch: 200, node_index: 0, node_count: 1, flags: ADMIN_FLAG_BLE, channels };
+    let msg = AdminMsg {
+        epoch: 200,
+        node_index: 0,
+        node_count: 1,
+        flags: ADMIN_FLAG_BLE,
+        channels,
+        tx_power: 8,
+    };
     assert_eq!(msg.encode().as_slice(), ADMIN_BLE);
 
     let back = AdminMsg::decode(ADMIN_BLE).expect("valid");
@@ -454,6 +464,7 @@ fn the_bluetooth_node_is_sent_the_flag_and_an_empty_channel_mask() {
         node_count: 3,
         flags: ADMIN_FLAG_BLE,
         channels: ChannelSet::empty(),
+        tx_power: 8,
     };
     assert_eq!(msg.encode().as_slice(), ADMIN_BLE_ONLY);
 
@@ -461,6 +472,7 @@ fn the_bluetooth_node_is_sent_the_flag_and_an_empty_channel_mask() {
     assert!(back.channels.is_empty(), "it sniffs nothing");
     assert!(back.scan_ble(), "and the flag is what says why");
     assert_eq!((back.node_index, back.node_count), (1, 3), "and it is still a slot in the fleet");
+    assert_eq!(back.tx_power, 8);
 }
 
 #[test]

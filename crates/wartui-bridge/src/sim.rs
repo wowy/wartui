@@ -238,6 +238,7 @@ async fn run_bridge(
             // screen would do the same. The host only sends these because this simulator
             // claims a panel above.
             HostToBridge::ShowPanel { .. } => None,
+            HostToBridge::SetTxPower { .. } => None,
             HostToBridge::SetChannel { channel: ch } => {
                 channel = ch;
                 None

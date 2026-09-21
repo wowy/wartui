@@ -331,6 +331,13 @@ struct Bridge {
     /// whose screen is dead tells the host there is no screen rather than inviting a
     /// line a second at one. What is announced has to be what is true.
     panel: Option<Panel>,
+    /// The transmit power the radio is known to be at, or `None` when the boot attempt
+    /// was refused and what it is at is anyone's guess.
+    ///
+    /// Held so that `SetTxPower` — which the host repeats with every status poll,
+    /// because a dropped one would be silent — logs a power that changed rather than a
+    /// line every interval.
+    tx_power: Option<i8>,
     /// Why there is no screen on a board built to have one.
     ///
     /// Sent with every announcement rather than once at boot. A host is usually not
@@ -457,10 +464,11 @@ fn main() -> ! {
         esp_radio::wifi::ControllerConfig::default().with_country_info(*b"US"),
     )
     .expect("Wi-Fi controller");
-    // Every radio in the fleet transmits at 2 dBm; `plan::TX_POWER_QUARTER_DBM` has why.
-    // Before the split, which borrows the controller for the rest of the program, and
-    // reported after `Ready` below, because the ROM banner swallows anything earlier.
-    let tx_power = controller.set_max_tx_power(wartui_proto::plan::TX_POWER_QUARTER_DBM);
+    // The standalone fallback is 2 dBm. The host restores its configured value after
+    // every connection. Set this before the split, which borrows the controller for
+    // the rest of the program, and report a failure after `Ready` below because the
+    // ROM banner swallows anything earlier.
+    let tx_power = controller.set_max_tx_power(wartui_proto::plan::DEFAULT_TX_POWER_QUARTER_DBM);
     // Split rather than kept whole: `EspNowSender::send` needs `&mut`, so holding
     // the parts separately keeps a transmit from borrowing the receive path.
     let (manager, mut sender, receiver) = controller.esp_now().split();
@@ -479,6 +487,7 @@ fn main() -> ! {
         panel_lines: PanelLines::new(),
         panel: PANEL,
         panel_fault: None,
+        tx_power: tx_power.is_ok().then_some(wartui_proto::plan::DEFAULT_TX_POWER_QUARTER_DBM),
     };
 
     // After the radio, so a panel that refuses its init sequence cannot stop a bridge
@@ -663,6 +672,20 @@ fn handle(
 
         HostToBridge::ShowPanel { lines } => bridge.show_panel(lines),
 
+        HostToBridge::SetTxPower { power } => {
+            if set_tx_power(manager, power) {
+                // Only a change is worth a line: the host re-sends this with every
+                // status poll so that a command lost to a full queue cannot leave the
+                // radio at its fallback for the rest of the session.
+                if bridge.tx_power != Some(power) {
+                    bridge.log(LogLevel::Info, "transmit power changed");
+                }
+                bridge.tx_power = Some(power);
+            } else {
+                bridge.error("the radio refused that transmit power");
+            }
+        }
+
         HostToBridge::SendEspNow { id, dst, ensure_peer, payload } => {
             // Named separately from `Command` because it is the one place the loop
             // can block unboundedly: `SendWaiter` busy-waits on a callback with no
@@ -750,11 +773,11 @@ fn add_peer(manager: &EspNowManager<'_>, mac: &Mac) -> Result<bool, EspNowError>
 /// short. Receivers need nothing; any 802.11b/g rate decodes unannounced.
 ///
 /// The price is sensitivity, roughly 10 dB against 1 Mbps, which a fleet sharing a
-/// car has even at 2 dBm (`plan::TX_POWER_QUARTER_DBM`): on the bench, a C5 and a C6
+/// car has at the 2 dBm default (`plan::DEFAULT_TX_POWER_QUARTER_DBM`): on the bench, a C5 and a C6
 /// beside this bridge arrived at −43 and −58 dBm and lost 0% and 2.3% of their
 /// heartbeats over ten minutes.
 ///
-/// Straight into IDF, and so the one `unsafe` in this firmware. `esp-radio`
+/// Straight into IDF, one of this firmware's two `unsafe` calls. `esp-radio`
 /// 1.0.0-beta.0 wraps only the interface-wide `esp_wifi_config_espnow_rate`, which the
 /// C5 and C6 Wi-Fi libraries refuse in Wi-Fi 6 mode (esp-hal #1612) — and whose
 /// `WifiPhyRate` is numbered without IDF's gap at 4, so its `Rate24m` sends 48 Mbps.
@@ -764,7 +787,7 @@ fn add_peer(manager: &EspNowManager<'_>, mac: &Mac) -> Result<bool, EspNowError>
 ///
 /// The manager goes unused: it is proof that `esp_wifi_start` and `esp_now_init` have
 /// both run, which IDF requires first.
-#[allow(unsafe_code, reason = "the one IDF call esp-radio does not wrap")]
+#[allow(unsafe_code, reason = "esp-radio's own espnow-rate call is refused on the C5 and C6")]
 fn set_peer_rate(_manager: &EspNowManager<'_>, mac: &Mac) -> bool {
     #[cfg(feature = "esp32c5")]
     use esp_wifi_sys_esp32c5::include as sys;
@@ -781,6 +804,31 @@ fn set_peer_rate(_manager: &EspNowManager<'_>, mac: &Mac) -> bool {
     // `esp_now_rate_config_t`, both alive for the whole call. ESP-NOW is initialised,
     // since an `EspNowManager` exists. 0 is `ESP_OK`.
     unsafe { sys::esp_now_set_peer_rate_config(mac.as_ptr(), &mut config) == 0 }
+}
+
+/// Set the Wi-Fi transmit power after ESP-NOW has borrowed the controller.
+///
+/// `WifiController::set_max_tx_power` requires a mutable controller, but the bridge
+/// keeps its ESP-NOW handles alive for the rest of its process. This is the narrow
+/// direct IDF equivalent, used only for a host configuration command.
+///
+/// The manager goes unused for the reason [`set_peer_rate`] takes one: IDF wants
+/// `esp_wifi_start` behind this call, and a witness is what stops it being made from
+/// somewhere in `main` that compiles and then fails on the board.
+#[allow(
+    unsafe_code,
+    reason = "esp-radio requires a mutable controller after long-lived handles borrow it"
+)]
+fn set_tx_power(_manager: &EspNowManager<'_>, power: i8) -> bool {
+    #[cfg(feature = "esp32c5")]
+    use esp_wifi_sys_esp32c5::include as sys;
+    #[cfg(feature = "esp32c6")]
+    use esp_wifi_sys_esp32c6::include as sys;
+
+    // SAFETY: Wi-Fi and ESP-NOW have started before the bridge reads host commands,
+    // and this passes the scalar ESP-IDF expects. The function changes only the
+    // radio's maximum transmit power.
+    unsafe { sys::esp_wifi_set_max_tx_power(power) == 0 }
 }
 
 /// Put one frame on the air and report what the radio made of it.

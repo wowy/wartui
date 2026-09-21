@@ -4,7 +4,9 @@
 //! promiscuous mode on for its own reasons, so that falls out for free on the dwell
 //! side; the hop back to the control channel is the one to check on hardware.
 //!
-//! [`set_broadcast_rate`] is the one `unsafe` in this firmware.
+//! [`set_broadcast_rate`] and [`set_tx_power`] are the two direct IDF calls this
+//! firmware needs because `esp-radio` does not expose them once its long-lived handles
+//! borrow the controller.
 
 use esp_radio::esp_now::{EspNowManager, EspNowSender};
 use esp_radio::wifi::sniffer::Sniffer;
@@ -41,7 +43,7 @@ pub fn park(manager: &EspNowManager<'_>, sniffer: &Sniffer<'_>, channel: u8, lis
 /// `esp-radio` registers at init, once; a node never removes that peer.
 /// `set_peer_rate` in `firmware/bridge/src/main.rs` has why 24 Mbps, what it costs,
 /// and why this cannot go through `esp-radio`.
-#[allow(unsafe_code, reason = "the one IDF call esp-radio does not wrap")]
+#[allow(unsafe_code, reason = "esp-radio's own espnow-rate call is refused on the C5 and C6")]
 pub fn set_broadcast_rate(_manager: &EspNowManager<'_>) -> bool {
     #[cfg(feature = "esp32c5")]
     use esp_wifi_sys_esp32c5::include as sys;
@@ -58,6 +60,31 @@ pub fn set_broadcast_rate(_manager: &EspNowManager<'_>) -> bool {
     // `esp_now_rate_config_t`, both alive for the whole call. ESP-NOW is initialised,
     // since an `EspNowManager` exists. 0 is `ESP_OK`.
     unsafe { sys::esp_now_set_peer_rate_config(BROADCAST.as_ptr(), &mut config) == 0 }
+}
+
+/// Set the Wi-Fi transmit power after ESP-NOW has borrowed the controller.
+///
+/// `WifiController::set_max_tx_power` is safe but requires `&mut self`; the node keeps
+/// the sniffer and ESP-NOW handles borrowed for its whole life, so this is the narrow
+/// direct IDF equivalent. The caller applies it only when adopting a fresh assignment.
+///
+/// The manager goes unused for the reason [`set_broadcast_rate`] takes one: IDF wants
+/// `esp_wifi_start` behind this call, and a witness is what stops it being made from
+/// somewhere in `main` that compiles and then fails on the board.
+#[allow(
+    unsafe_code,
+    reason = "esp-radio requires a mutable controller after long-lived handles borrow it"
+)]
+pub fn set_tx_power(_manager: &EspNowManager<'_>, power: i8) -> bool {
+    #[cfg(feature = "esp32c5")]
+    use esp_wifi_sys_esp32c5::include as sys;
+    #[cfg(feature = "esp32c6")]
+    use esp_wifi_sys_esp32c6::include as sys;
+
+    // SAFETY: Wi-Fi has started before the node enters its receive loop, and this
+    // passes the scalar ESP-IDF expects. The function changes only the radio's
+    // maximum transmit power.
+    unsafe { sys::esp_wifi_set_max_tx_power(power) == 0 }
 }
 
 /// Put a frame on the air for whoever is listening.
