@@ -128,7 +128,8 @@ second, and its `channels` column reads `bluetooth`.
   carry a node much farther off and its heartbeats are the first thing lost.
 - **Nothing is compatible with an earlier wartui, and that is the policy until 1.0.** `wartui-proto`
   is compiled into the host and both firmwares, so flash the fleet together. The bridge is
-  format-blind and does not need reflashing for a wire change.
+  format-blind and does not need reflashing for a wire change — but it does need one for a
+  change to the USB link, and a host and bridge from different trees will not talk at all.
 
 ## Development
 

@@ -7,6 +7,12 @@ It knows about COBS framing and it knows about `esp-radio`. It does not know wha
 what a heartbeat means, or how channels are assigned — all of that lives on the host, where it is
 unit-testable and a fix costs a `cargo run` rather than a reflash.
 
+A board with a screen is the same rule from the other side: the host sends finished lines with a
+severity on each and this firmware blits them, so what the panel says and how it is arranged are
+also a `cargo run` away. What is decided here is only what cannot be — the three colours a severity
+means, which are a property of the panel rather than of the fleet, and the fallback screen it draws
+when no host is talking, which is link-local state nothing else knows.
+
 It transmits, and answers with the **transmit-callback** status rather than the enqueue result.
 Unicast ESP-NOW is acknowledged by the receiver's own MAC hardware, so `AckOk` means a node really
 has the frame. The callback comes back in 2–4 ms against the node's 100 ms admin window, and in
@@ -38,6 +44,42 @@ Exactly one chip feature is required. That is the whole story: stable, one flag,
 A Seeed XIAO ESP32-C6 with an antenna on its U.FL connector also wants `xiao-external-antenna`, or
 its RF switch stays on the onboard ceramic antenna; [`../node/README.md`](../node/README.md) §
 "Building and flashing" has the rest.
+
+A LilyGO T-Dongle-C5 wants `esp32c5,t-dongle-c5`, which lights its ST7735 panel and makes the bridge
+announce it. Both are board features layered over a chip feature and both are inert without one;
+they are mutually exclusive, because `xiao-external-antenna` drives GPIO3 and GPIO14, which on a
+T-Dongle-C5 are `LCD_DC` and `USB_DP`. Built without `t-dongle-c5` the same source reports no panel
+and is sent no lines, so one tree covers every board.
+
+## The panel
+
+Five lines the host composes from its own snapshot — GPS, node counts, approximate Wi-Fi and BLE
+totals, and the fleet's link RSSI — each coloured green, amber or red by how that one thing is
+going. [`../../crates/wartui/README.md`](../../crates/wartui/README.md) § "The bridge panel" says
+what an operator reads off them.
+
+The pins are the vendor's, from `include/pin_config.h` and `lib/lcd_st7735/`:
+
+| Signal | GPIO | |
+| --- | --- | --- |
+| `LCD_MOSI` | 2 | shared with `SD_CMD` |
+| `LCD_SCK` | 6 | shared with `SD_CLK` |
+| `LCD_MISO` | 7 | shared with `SD_DAT0`; the panel never reads, so this is left unclaimed |
+| `LCD_CS` | 10 | |
+| `LCD_DC` | 3 | the vendor calls it `LCD_RS` |
+| `LCD_RST` | 1 | |
+| `LCD_BL` | 0 | **active low** — 0 is lit, and driving it high is the failure that reads as a dead panel |
+| `SD_CS` | 23 | held high, so the card slot stays off a bus it shares with the panel |
+
+Two things about the init are worth knowing before changing any of it, and both are in
+[`src/panel.rs`](src/panel.rs)'s `//!` at length. The panel is **BGR**, set explicitly rather than
+inherited — get it wrong and red renders blue, which on a screen whose whole job is red against
+green against yellow is not cosmetic. And mipidsi takes the size and offset in the controller's own
+portrait framebuffer and rotates afterwards, so they are `80x160` at `(26, 1)`; landscape figures
+are rejected outright, because 160 is wider than an ST7735's 132-column framebuffer.
+
+A panel that will not start is reported and then done without — the bridge carries on bridging and
+says `panel: none`, rather than panicking into a reboot nobody can read.
 
 The cargo runner is `espflash flash --monitor` with no `--chip`, so espflash detects the part.
 `--monitor` renders the framed link bytes as text and looks like line noise; use `wartui sniff` to
@@ -132,6 +174,13 @@ in conflict with it — so Cargo adds a second copy instead of refusing, and bot
 A second copy does not need a manifest to arrive, either: `esp-sync` is a direct dependency of the
 node alone, and it doubled in the *bridge* because `esp-alloc 0.11` brought its own.
 
+The panel's three crates — `embedded-graphics`, `embedded-hal-bus` and `mipidsi` — are outside this
+wall: none is in `esp-radio`'s dependency closure, and all three are free to move. They are not
+outside it entirely, though. All three sit on `embedded-hal` 1.0, which `esp-hal` also brings, and a
+second copy of *that* would be the same class of problem as the ones above — so the check below
+names it too. It prints two lines for it, and that is correct: `embedded-hal` 0.2 is a different
+crate that has always coexisted here. Two copies of 1.x would not be.
+
 So every crate `esp-radio` also depends on is held at the version `esp-radio` resolves, and they all
 move when it does. Two things hold that without a board to test on: `.github/dependabot.yml` ignores
 the incompatible bumps in both firmware directories, and each firmware's CI job counts the versions
@@ -139,7 +188,8 @@ before it builds. By hand, from either firmware directory:
 
 ```sh
 cargo tree --locked --features esp32c6 -e normal --prefix none --format '{p}' \
-  | awk '{print $1, $2}' | sort -u | grep -E '^esp-(alloc|hal|radio|rtos|sync|wifi-sys-esp32c[56]) '
+  | awk '{print $1, $2}' | sort -u \
+  | grep -E '^(esp-(alloc|hal|radio|rtos|sync|wifi-sys-esp32c[56])|embedded-hal) '
 ```
 
 They are direct dependencies for reasons that do not go away. `esp-wifi-sys-*` is here for

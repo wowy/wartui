@@ -18,22 +18,24 @@
 use heapless::{String, Vec};
 use serde::{Serialize, de::DeserializeOwned};
 
-/// Bumped whenever the message enums change shape. Host and bridge must agree.
+/// The revision of this protocol both ends must agree on.
 ///
-/// - v2: [`HostToBridge::Identify`], so a host attaching to an already-running
-///   dongle need not wait for a [`BridgeToHost::Ready`] sent minutes earlier.
-/// - v3: [`ResetCause`], [`LoopPhase`], `heap_free` and `uptime_ms` on `Ready`, so
-///   a bridge that reboots says why and where it was.
-/// - v4: [`ResetCause::Lockup`].
-/// - v5: `Chip::Esp32S3` and `ResetCause::ClockGlitch`.
-/// - v6: [`Chip`] and [`ResetCause`] lose their S3-only variants.
+/// Held at 1 until 1.0, whatever the message enums do, and for the reason
+/// [`crate::air::WIRE_VERSION`] is: nothing before 1.0 is compatible with an earlier
+/// wartui and the policy is to flash both ends from one tree, so there is no older peer
+/// for the byte to protect. It is the lever kept for the first change a build in the field
+/// has to survive, and spending it on a shape change nobody can still be running would
+/// leave nothing to spend then.
 ///
-/// Every bump is a decode failure waiting for an older host: postcard writes an enum
-/// variant as its index and a struct's fields in order, so a new variant is a byte
-/// with no case and a new field on `Ready` shifts everything after it — met inside the
-/// very frame meant to introduce the bridge, which reads as a bridge that answered
-/// nothing.
-pub const LINK_PROTO_VERSION: u8 = 6;
+/// The cost is real and belongs where it will be read. The byte sits *outside* the postcard
+/// blob so a mismatched flash is detectable without a successful deserialize, and holding it
+/// gives that up: a host and a bridge built from different trees meet as an undecodable
+/// frame rather than a named mismatch. Postcard writes an enum variant as its index and a
+/// struct's fields in order, so a new variant is a byte with no case and a new field on
+/// [`BridgeToHost::Ready`] shifts everything after it — met inside the very frame meant to
+/// introduce the bridge, which reads as a bridge that answered nothing. That is also why
+/// every addition to these enums goes on the end.
+pub const LINK_PROTO_VERSION: u8 = 1;
 
 /// ESP-NOW's own payload ceiling. The 212-byte wardriver frames fit inside it.
 pub const MAX_ESPNOW_PAYLOAD: usize = 250;
@@ -62,6 +64,16 @@ pub const BROADCAST: Mac = [0xFF; 6];
 // payload that outgrew the buffer is a build error rather than a silent truncation.
 const MAX_BODY: usize = MAX_FRAME - 8;
 const _: () = assert!(MAX_ESPNOW_PAYLOAD + 32 < MAX_BODY);
+// The other frame with a size worth checking. A whole-panel push carries every row every
+// time, so the worst case is fixed rather than traffic-dependent: `PANEL_ROWS` lines of a
+// full `ShortStr`, each with a severity byte and postcard's length prefix, plus the
+// variant index and the vector's own length. Checked here so a panel that grew a row or a
+// wider `ShortStr` is a build error rather than a bridge quietly losing the bottom of its
+// screen.
+const _: () = assert!(
+    PANEL_ROWS * (32 + 2) + 2 < MAX_BODY,
+    "a whole-panel push must fit one frame, or a bridge would silently lose rows"
+);
 
 /// Which chip the bridge firmware is running on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
@@ -133,6 +145,9 @@ pub enum LoopPhase {
     /// The transmit path stopped draining while the host was still talking, so
     /// the bridge reset itself. See [`BridgeToHost::Ready`].
     TxStalled,
+    /// Pushing pixels at the panel, which is the other call in the loop that
+    /// blocks for longer than a memcpy.
+    Render,
 }
 
 /// Severity of a [`BridgeToHost::Log`] line.
@@ -162,6 +177,56 @@ pub enum SendStatus {
     /// The radio refused the frame outright.
     Rejected,
 }
+
+/// The most rows a [`Panel`] may have, and so the most lines one
+/// [`HostToBridge::ShowPanel`] carries.
+///
+/// A ceiling rather than a count: what a bridge actually has depends on the font it
+/// draws in, it says so in [`BridgeToHost::Ready`], and a panel that reports fewer is
+/// sent fewer. Eight leaves room above any font that fits five lines on the 80-pixel
+/// screen this was written for, and the frame is sized against it.
+pub const PANEL_ROWS: usize = 8;
+
+/// A panel the bridge can draw lines of text on.
+///
+/// Announced in [`BridgeToHost::Ready`] rather than configured, so the host formats to the
+/// geometry that is actually there and sends nothing at all to a bridge without a screen.
+/// That is also why there is no operator flag for any of this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct Panel {
+    /// Characters that fit across one line.
+    pub cols: u8,
+    /// Lines that fit down the screen, never more than [`PANEL_ROWS`].
+    pub rows: u8,
+}
+
+/// How a line is going.
+///
+/// The bridge maps this to a colour and the host decides which one a line has, because the
+/// thresholds are the host's to know: what counts as a weak link is arithmetic over a
+/// snapshot, and retuning it must not cost a reflash. The colours themselves are a property
+/// of the panel and live in the firmware.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub enum Severity {
+    /// Fine.
+    Ok,
+    /// Working, but not as it should be.
+    Warn,
+    /// A fault, and the capture is the worse for it.
+    Error,
+}
+
+/// One row of the panel, laid out by the host.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct PanelLine {
+    /// How the thing this line reports is going.
+    pub level: Severity,
+    /// The text, already truncated to the panel's width.
+    pub text: ShortStr,
+}
+
+/// A whole panel's worth of lines.
+pub type PanelLines = Vec<PanelLine, PANEL_ROWS>;
 
 /// Commands the host sends to the bridge.
 ///
@@ -211,6 +276,20 @@ pub enum HostToBridge {
     GetStatus,
     /// Reboot the bridge.
     Reset,
+    /// Lines to display, already laid out by the host.
+    ///
+    /// Every line, every time, so a push is idempotent: a bridge that reboots mid-session
+    /// repaints correctly on the next one with no resync protocol to get wrong. At the
+    /// host's redraw rate that costs a few hundred bytes a second, which is not worth
+    /// trading that property for.
+    ///
+    /// The host composes the text and decides each line's [`Severity`]; the bridge blits
+    /// what it is handed. That is what keeps the bridge format-blind, and what makes a
+    /// change to what the panel says cost a `cargo run` rather than a reflash.
+    ShowPanel {
+        /// One per row, top to bottom. Never more than the [`Panel`] announced.
+        lines: PanelLines,
+    },
 }
 
 /// Events and replies the bridge sends to the host.
@@ -246,6 +325,13 @@ pub enum BridgeToHost {
         /// nothing else in the frame separates them. See
         /// `crates/wartui-bridge/src/serial.rs`.
         uptime_ms: u32,
+        /// The screen this bridge has, if it has one.
+        ///
+        /// The bridge advertising its own geometry is what removes the operator flag: a
+        /// board with no panel reports `None` and is sent no [`HostToBridge::ShowPanel`]
+        /// at all, and one with a panel is formatted to the width it really has rather
+        /// than to a number the host guessed.
+        panel: Option<Panel>,
     },
     /// An ESP-NOW frame arrived.
     Rx {

@@ -168,6 +168,9 @@ fn connected() -> Event {
         last_phase: LoopPhase::Unknown,
         heap_free: 65_536,
         uptime_ms: 1_000,
+        // The ordinary bridge: a board with no screen. Nothing in the engine reads
+        // this — the panel is composed in `runtime` from the snapshot.
+        panel: None,
     }))
 }
 

@@ -27,6 +27,9 @@ use tokio::sync::{mpsc, oneshot, watch};
 use wartui_bridge::BridgeInfo;
 use wartui_core::engine::{Command, NodeView, Snapshot, TailEntry};
 use wartui_core::gps::{GpsStatus, GpsView};
+// Shared with the bridge's panel rather than written twice: the two reporting
+// different numbers for one estimate is a bug nobody would think to look for.
+use wartui_core::panel::approx;
 use wartui_core::position::PositionSource;
 use wartui_core::record::AdminOutcome;
 use wartui_proto::air::RecordKind;
@@ -591,26 +594,6 @@ fn period(ms: u32) -> String {
     if ms < 1000 { format!("{ms}ms") } else { format!("{:.1}s", f64::from(ms) / 1000.0) }
 }
 
-/// An estimated count, to about the precision the estimate has. The unique-address
-/// figures are within about 1%, so the digits past three are noise once there are
-/// enough of them to matter.
-fn approx(n: u64) -> String {
-    if n < 10_000 {
-        return n.to_string();
-    }
-    let (k, m) = (n as f64 / 1e3, n as f64 / 1e6);
-    // Each unit is judged on the figure as it would be printed, not the raw count, so one
-    // that rounds up past its unit's range (99,950 to "100.0k") moves on to the next.
-    for (value, digits, below, unit) in [(k, 1, 100.0, "k"), (k, 0, 1000.0, "k"), (m, 2, 10.0, "M")]
-    {
-        let text = format!("{value:.digits$}");
-        if text.parse::<f64>().is_ok_and(|shown| shown < below) {
-            return format!("{text}{unit}");
-        }
-    }
-    format!("{m:.1}M")
-}
-
 /// Why a node cannot be given an assignment, or `None` if it can.
 ///
 /// The wording is the message the operator sees when `b` is refused, so it says
@@ -1030,7 +1013,7 @@ mod tests {
         // heartbeated is not assignable at all, so building the ordinary case
         // that way would make every assignment test below a test of a refusal.
         state.capabilities = Some(Capabilities::here(true, true));
-        NodeView { state, assignable }
+        NodeView { state, alive: true, assignable }
     }
 
     /// A node heard only through its observations, which is an ordinary few
@@ -1041,6 +1024,7 @@ mod tests {
         let mut view = node(last, 0, false);
         view.state.capabilities = None;
         view.state.last_heartbeat = None;
+        view.alive = false;
         view
     }
 
@@ -1055,7 +1039,10 @@ mod tests {
     /// Heartbeating stopped and nothing else is wrong. The only one of the
     /// four refusals whose cause is on the node rather than in this host.
     fn stale_node(last: u8) -> NodeView {
-        node(last, 0, false)
+        let mut view = node(last, 0, false);
+        // Still being heard, and no longer heartbeating, which is what `stale` means.
+        view.alive = false;
+        view
     }
 
     /// Heartbeating perfectly well, with nowhere in the bridge's peer table to
@@ -1116,6 +1103,7 @@ mod tests {
                 last_phase: LoopPhase::Unknown,
                 heap_free: 65_536,
                 uptime_ms: 1_000,
+                panel: None,
             }),
             link_up: true,
             link_error: None,
@@ -1201,20 +1189,6 @@ mod tests {
             position: Fix::none(),
             ..busy()
         }
-    }
-
-    #[test]
-    fn an_estimated_count_shows_only_the_digits_it_can_vouch_for() {
-        assert_eq!(approx(0), "0");
-        assert_eq!(approx(9_999), "9999");
-        assert_eq!(approx(12_345), "12.3k");
-        assert_eq!(approx(506_360), "506k");
-        assert_eq!(approx(2_350_000), "2.35M");
-        assert_eq!(approx(23_500_000), "23.5M");
-        // Figures that round up into the next unit are shown in it.
-        assert_eq!(approx(99_950), "100k");
-        assert_eq!(approx(999_500), "1.00M");
-        assert_eq!(approx(9_999_999), "10.0M");
     }
 
     /// Rendering must not panic at any size the terminal might be.

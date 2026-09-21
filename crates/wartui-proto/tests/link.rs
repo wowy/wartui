@@ -6,7 +6,8 @@ use wartui_proto::air::{
 };
 use wartui_proto::link::{
     BROADCAST, BridgeToHost, Chip, FrameAccumulator, HostToBridge, LINK_PROTO_VERSION, LinkError,
-    LogLevel, LoopPhase, MAX_FRAME, ResetCause, SendStatus, crc16, decode_frame, encode_frame,
+    LogLevel, LoopPhase, MAX_FRAME, PANEL_ROWS, Panel, PanelLine, PanelLines, ResetCause,
+    SendStatus, Severity, ShortStr, crc16, decode_frame, encode_frame,
 };
 
 fn sample_commands() -> Vec<HostToBridge, 8> {
@@ -23,9 +24,24 @@ fn sample_commands() -> Vec<HostToBridge, 8> {
     v.push(HostToBridge::RemovePeer { mac: [1, 2, 3, 4, 5, 6] }).ok();
     v.push(HostToBridge::GetStatus).ok();
     v.push(HostToBridge::Reset).ok();
+    v.push(HostToBridge::ShowPanel { lines: full_panel() }).ok();
+    // Last on purpose: `a_full_212_byte_frame_fits_with_room_to_spare` takes the final case
+    // and measures it as the ESP-NOW one. Anything pushed after this silently becomes the
+    // frame that test believes it is sizing.
     v.push(HostToBridge::SendEspNow { id: 0xBEEF, dst: [0xAA; 6], ensure_peer: true, payload })
         .ok();
     v
+}
+
+/// Every row full, which is the worst case the const assert in `link.rs` is checked against.
+fn full_panel() -> PanelLines {
+    let levels = [Severity::Ok, Severity::Warn, Severity::Error];
+    let mut lines = PanelLines::new();
+    for row in 0..PANEL_ROWS {
+        let text = ShortStr::try_from("x".repeat(32).as_str()).expect("32 is the capacity");
+        lines.push(PanelLine { level: levels[row % levels.len()], text }).ok();
+    }
+    lines
 }
 
 fn sample_events() -> Vec<BridgeToHost, 8> {
@@ -56,6 +72,21 @@ fn sample_events() -> Vec<BridgeToHost, 8> {
         last_phase: LoopPhase::TxStalled,
         heap_free: 61_234,
         uptime_ms: 8_675_309,
+        panel: None,
+    })
+    .ok();
+    // A second one, because `Option` and the enums the first case does not reach are the
+    // fields a round trip would otherwise pass on without carrying.
+    v.push(BridgeToHost::Ready {
+        chip: Chip::Esp32C5,
+        mac: [0x10, 0x20, 0x30, 0x40, 0x50, 0x61],
+        fw_version: String::try_from("0.1.0").expect("short"),
+        proto_version: LINK_PROTO_VERSION,
+        reset_cause: ResetCause::Lockup,
+        last_phase: LoopPhase::Render,
+        heap_free: 60_000,
+        uptime_ms: 1_000,
+        panel: Some(Panel { cols: 26, rows: 8 }),
     })
     .ok();
     v.push(BridgeToHost::Rx {
@@ -118,6 +149,16 @@ fn a_full_212_byte_frame_fits_with_room_to_spare() {
     let mut out = [0u8; MAX_FRAME];
     let n = encode_frame(&cmd, &mut out).expect("encodes");
     assert!(n < MAX_FRAME, "a full ESP-NOW frame used {n} of {MAX_FRAME} bytes");
+}
+
+#[test]
+fn a_full_panel_push_fits_with_room_to_spare() {
+    // The const assert in `link.rs` says this arithmetically; this says it through the
+    // encoder, which is the thing that would actually truncate.
+    let cmd = HostToBridge::ShowPanel { lines: full_panel() };
+    let mut out = [0u8; MAX_FRAME];
+    let n = encode_frame(&cmd, &mut out).expect("encodes");
+    assert!(n < MAX_FRAME, "a full panel used {n} of {MAX_FRAME} bytes");
 }
 
 #[test]

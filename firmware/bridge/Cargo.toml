@@ -40,6 +40,13 @@ esp32c6 = [
 # plugged in. C6 only; `firmware/node/src/main.rs` has why.
 xiao-external-antenna = []
 
+# A LilyGO T-Dongle-C5: the same C5 in a USB-A shell, with an ST7735 panel on
+# SPI2. A board fact layered over a chip feature, like the one above, and inert
+# without it — a bridge built without this reports no panel and is sent no lines.
+# C5 only, and mutually exclusive with `xiao-external-antenna`, which drives two
+# of this board's display and USB pins; `src/main.rs` enforces both.
+t-dongle-c5 = ["dep:embedded-graphics", "dep:embedded-hal-bus", "dep:mipidsi"]
+
 [dependencies]
 # `esp-radio` and `esp-rtos` allocate their task stacks and the Wi-Fi driver's
 # queues through their own copy's `HEAP`, which nothing here fills, so a second
@@ -60,6 +67,14 @@ esp-rtos = { version = "0.3.0", features = ["esp-alloc", "esp-radio"] }
 # `esp-radio` links; README.md § "Dependency versions".
 esp-wifi-sys-esp32c5 = { version = "0.2.0", optional = true }
 esp-wifi-sys-esp32c6 = { version = "0.2.0", optional = true }
+# The panel, behind `t-dongle-c5`. Outside the `esp-radio` wall that holds the
+# `esp-*` family — none of these is in its dependency closure — but not outside
+# it entirely: all three sit on `embedded-hal` 1.0, which `esp-hal` also brings,
+# and a second copy of *that* would be the same class of problem. README.md
+# § "Dependency versions" has the check.
+embedded-graphics = { version = "0.8.2", optional = true }
+embedded-hal-bus = { version = "0.3.0", optional = true }
+mipidsi = { version = "0.10.0", default-features = false, optional = true }
 nb = "1.1.0"
 portable-atomic = { version = "1.15.0", default-features = false }
 static_cell = "2.1.1"

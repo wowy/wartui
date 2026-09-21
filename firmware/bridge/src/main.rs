@@ -30,6 +30,9 @@
 )]
 #![deny(clippy::large_stack_frames)]
 
+#[cfg(feature = "t-dongle-c5")]
+mod panel;
+
 use esp_hal::Blocking;
 use esp_hal::clock::CpuClock;
 #[cfg(feature = "xiao-external-antenna")]
@@ -48,7 +51,8 @@ use static_cell::StaticCell;
 use wartui_proto::heapless::Vec;
 use wartui_proto::link::{
     BROADCAST, BridgeToHost, Chip, FrameAccumulator, HostToBridge, LINK_PROTO_VERSION, LogLevel,
-    LogStr, LoopPhase, MAX_FRAME, Mac, ResetCause, SendStatus, ShortStr, decode_frame,
+    LogStr, LoopPhase, MAX_FRAME, Mac, Panel, PanelLines, ResetCause, SendStatus, ShortStr,
+    decode_frame,
 };
 use wartui_proto::outbox::{ByteSink, Outbox};
 /// The channel the fleet speaks on. Shared with the node
@@ -68,6 +72,14 @@ extern crate alloc;
 compile_error!("select a chip: --features esp32c5 or esp32c6");
 #[cfg(all(feature = "xiao-external-antenna", not(feature = "esp32c6")))]
 compile_error!("xiao-external-antenna drives a XIAO ESP32-C6's RF switch; build it with esp32c6");
+#[cfg(all(feature = "t-dongle-c5", not(feature = "esp32c5")))]
+compile_error!("t-dongle-c5 is an ESP32-C5 in a USB-A shell; build it with esp32c5");
+// Unreachable while the two above hold, since the chips are exclusive too — but
+// stated rather than inferred, because what makes these two incompatible is not the
+// chip: `xiao-external-antenna` drives GPIO3 and GPIO14, which on a T-Dongle-C5 are
+// `LCD_DC` and `USB_DP`.
+#[cfg(all(feature = "t-dongle-c5", feature = "xiao-external-antenna"))]
+compile_error!("t-dongle-c5 and xiao-external-antenna both drive GPIO3; pick one board");
 
 /// Counted rather than checked pairwise.
 ///
@@ -88,6 +100,16 @@ const _: () = assert!(CHIPS_SELECTED <= 1, "select exactly one chip feature, not
 const CHIP: Chip = Chip::Esp32C5;
 #[cfg(feature = "esp32c6")]
 const CHIP: Chip = Chip::Esp32C6;
+
+/// The screen this board has, announced in [`BridgeToHost::Ready`].
+///
+/// A board fact rather than a chip fact, which is why it hangs off the board feature
+/// and not off `CHIP`. `None` is what removes the operator flag at the other end: a
+/// host told there is no panel sends no lines at all.
+#[cfg(feature = "t-dongle-c5")]
+const PANEL: Option<Panel> = Some(Panel { cols: panel::COLS, rows: panel::ROWS });
+#[cfg(not(feature = "t-dongle-c5"))]
+const PANEL: Option<Panel> = None;
 
 /// Bytes to take from the USB endpoint in one pass.
 ///
@@ -163,6 +185,7 @@ fn boot_phase(cause: ResetCause) -> LoopPhase {
         6 => LoopPhase::Pump,
         7 => LoopPhase::Idle,
         8 => LoopPhase::TxStalled,
+        9 => LoopPhase::Render,
         _ => LoopPhase::Unknown,
     }
 }
@@ -295,6 +318,25 @@ struct Bridge {
     ///
     /// The rule has been wrong twice, so it lives in [`wartui_proto::stall`].
     stall: StallWatch,
+    /// The lines the host last sent.
+    ///
+    /// Held here rather than on the screen so that [`handle`] — which borrows the
+    /// radio — never has to borrow the panel as well. Empty means no host has said
+    /// anything yet, which is what the fallback screen is for.
+    #[cfg(feature = "t-dongle-c5")]
+    panel_lines: PanelLines,
+    /// The screen this bridge actually brought up.
+    ///
+    /// Starts as [`PANEL`] and is cleared if the panel refuses to start, so a board
+    /// whose screen is dead tells the host there is no screen rather than inviting a
+    /// line a second at one. What is announced has to be what is true.
+    panel: Option<Panel>,
+    /// Why there is no screen on a board built to have one.
+    ///
+    /// Sent with every announcement rather than once at boot. A host is usually not
+    /// attached when this firmware starts — that is the whole reason `Identify`
+    /// exists — so a fault reported only at boot is a fault nobody ever reads.
+    panel_fault: Option<&'static str>,
 }
 
 impl Bridge {
@@ -334,8 +376,27 @@ impl Bridge {
             // `Identify`: a software reset keeps the USB device, so both arrive
             // on the same connection.
             uptime_ms: self.boot.elapsed().as_millis() as u32,
+            panel: self.panel,
         });
+        if let Some(why) = self.panel_fault {
+            self.error(why);
+        }
     }
+
+    /// Take the lines the host wants shown.
+    ///
+    /// Stored rather than drawn: the loop decides when pixels move, so a chatty host
+    /// cannot turn a frame into a blocking SPI transfer inside the receive path.
+    #[cfg(feature = "t-dongle-c5")]
+    fn show_panel(&mut self, lines: PanelLines) {
+        self.panel_lines = lines;
+    }
+
+    /// Nowhere to draw them. Dropped rather than refused, because a host that has
+    /// ignored a `panel: None` must not be able to wedge a bridge that has no screen.
+    #[cfg(not(feature = "t-dongle-c5"))]
+    #[expect(clippy::unused_self, reason = "the panel build takes `&mut self`")]
+    fn show_panel(&self, _lines: PanelLines) {}
 
     fn log(&mut self, level: LogLevel, message: &str) {
         let message = LogStr::try_from(message).unwrap_or_default();
@@ -414,6 +475,32 @@ fn main() -> ! {
         cause,
         phase,
         stall: StallWatch::new(),
+        #[cfg(feature = "t-dongle-c5")]
+        panel_lines: PanelLines::new(),
+        panel: PANEL,
+        panel_fault: None,
+    };
+
+    // After the radio, so a panel that refuses its init sequence cannot stop a bridge
+    // from bridging, and before `announce`, so the screen is lit by the time anything
+    // could be looking at it.
+    #[cfg(feature = "t-dongle-c5")]
+    let mut screen = match panel::Screen::new(panel::Pins {
+        spi: peripherals.SPI2,
+        mosi: peripherals.GPIO2,
+        sck: peripherals.GPIO6,
+        cs: peripherals.GPIO10,
+        dc: peripherals.GPIO3,
+        rst: peripherals.GPIO1,
+        backlight: peripherals.GPIO0,
+        sd_cs: peripherals.GPIO23,
+    }) {
+        Ok(screen) => Some(screen),
+        Err(why) => {
+            bridge.panel = None;
+            bridge.panel_fault = Some(why);
+            None
+        }
     };
 
     match manager.set_channel(DEFAULT_CHANNEL) {
@@ -435,6 +522,16 @@ fn main() -> ! {
         mark(LoopPhase::Pump);
         let moved = bridge.outbox.pump(&mut sink);
         worked |= moved;
+
+        // Named as its own phase for the reason `Transmit` is: it is a call that can
+        // block for longer than a memcpy, so a reset with nobody watching says which
+        // one it was inside. `render` returns without touching the bus unless a line
+        // changed and its floor has passed, so an idle bridge still sleeps.
+        #[cfg(feature = "t-dongle-c5")]
+        if let Some(screen) = screen.as_mut() {
+            mark(LoopPhase::Render);
+            worked |= screen.render(&mut bridge, mac);
+        }
 
         // Nothing subtler is available: the endpoint cannot be re-armed from this
         // end, and every way of telling the host goes out through the broken path.
@@ -563,6 +660,8 @@ fn handle(
         }
 
         HostToBridge::Reset => reboot(),
+
+        HostToBridge::ShowPanel { lines } => bridge.show_panel(lines),
 
         HostToBridge::SendEspNow { id, dst, ensure_peer, payload } => {
             // Named separately from `Command` because it is the one place the loop

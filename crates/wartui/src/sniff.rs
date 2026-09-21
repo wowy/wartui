@@ -157,6 +157,12 @@ fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
                 "#   reset {:?}, last phase {:?}, {} bytes of heap free, up {}ms",
                 info.reset_cause, info.last_phase, info.heap_free, info.uptime_ms
             );
+            // What the bridge said about its own screen, printed as it said it:
+            // this is the field that decides whether the host pushes a panel at all.
+            match info.panel {
+                Some(panel) => println!("#   panel {}x{}", panel.cols, panel.rows),
+                None => println!("#   no panel"),
+            }
         }
         return;
     };

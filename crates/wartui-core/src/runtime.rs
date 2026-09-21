@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, oneshot, watch};
 use wartui_bridge::LinkHandle;
+use wartui_proto::link::{HostToBridge, PanelLines};
 
 use crate::engine::{Command, Event, FleetEngine, Now, Snapshot};
 use crate::store::{Store, StoreReport};
@@ -17,6 +18,31 @@ use crate::store::{Store, StoreReport};
 /// Four times a second: fast enough that a node going quiet is noticed while the
 /// operator is still looking, slow enough not to redraw per observation.
 pub const TICK: Duration = Duration::from_millis(250);
+
+/// How often the bridge's panel is repainted, when it has one.
+///
+/// One second, which is four ticks: fast enough to watch a node drop while standing
+/// over the dongle, slow enough that the estimator counts do not flicker between two
+/// readings of the same number. This is a ceiling and not a cadence — a push whose
+/// lines match the last one is not sent at all, and on a settled capture most
+/// seconds say nothing.
+pub const PANEL_INTERVAL: Duration = Duration::from_millis(1_000);
+
+/// How long the panel may go without a push, however little has changed.
+///
+/// Suppressing an unchanged push is what keeps a quiet capture off the wire, but it
+/// makes the host's idea of what the dongle is showing load-bearing, and the only
+/// thing that corrects that idea is a `Ready`. A bridge that reboots mid-session
+/// comes up with an empty panel and its own fallback screen; if its announcement is
+/// the frame that gets lost, the lines have not changed, nothing is ever pushed
+/// again, and the dongle says "no host" for the rest of the session with a host
+/// attached and talking to it.
+///
+/// So the whole panel goes out on this interval regardless. That restores what a
+/// whole-panel push was for: every frame is idempotent, so resynchronising is just
+/// sending one. The bridge compares each row against what it drew and redraws none
+/// of them, so a repaint nothing needed costs a frame on the wire and no SPI at all.
+pub const PANEL_REPAINT: Duration = Duration::from_secs(10);
 
 /// The current time, in both forms the engine needs.
 #[must_use]
@@ -50,6 +76,12 @@ pub async fn drive(
     // receiver is permanently ready, so leaving it in the `select!` would spin
     // the loop as fast as the scheduler allows for the rest of the capture.
     let mut steerable = true;
+    // What the panel was last sent, and when. Both are needed: the interval keeps a
+    // busy fleet from repainting on every command, and comparing the lines keeps a
+    // quiet one from sending a frame a second that says exactly what the last one did.
+    let mut panel_sent: Option<Instant> = None;
+    let mut panel_drawn: Option<Instant> = None;
+    let mut panel_lines: Option<PanelLines> = None;
 
     loop {
         let event = tokio::select! {
@@ -85,6 +117,10 @@ pub async fn drive(
                         | wartui_bridge::LinkEvent::Disconnected { .. }
                 )
         );
+        // A bridge that has just announced itself is showing whatever it draws with no
+        // host, and a reboot does not re-enumerate the USB device — so without this the
+        // cached lines below would suppress the very push that takes the panel back.
+        let relinked = matches!(event, Event::Link(wartui_bridge::LinkEvent::Connected(_)));
 
         let now = now();
         let batch = engine.handle(event, now);
@@ -103,11 +139,62 @@ pub async fn drive(
             }
         }
 
+        if relinked {
+            panel_lines = None;
+        }
+
         if publish {
+            let view = Arc::new(engine.snapshot(now, store.stats()));
             // Lossy on purpose: the UI wants the latest state, never a queue of
             // stale ones, and a UI that has stopped reading must not be able to
             // slow the engine down.
-            let _ = snapshot.send(Arc::new(engine.snapshot(now, store.stats())));
+            let _ = snapshot.send(Arc::clone(&view));
+
+            // The panel is a view of the same snapshot, so it is composed here rather
+            // than in `engine::handle`: a screen is not a fleet decision, and the
+            // engine reads no clock. A bridge that announced no panel is sent nothing
+            // at all, which is what removes the operator flag.
+            if let Some(geometry) = view.bridge.as_ref().and_then(|bridge| bridge.panel) {
+                let due =
+                    panel_sent.is_none_or(|last| now.mono.duration_since(last) >= PANEL_INTERVAL);
+                let lines = due.then(|| crate::panel::render(&view, geometry));
+                // Against the interval first, so an unchanged panel costs a render
+                // rather than a frame, and a changed one still waits its turn.
+                if let Some(lines) = lines {
+                    panel_sent = Some(now.mono);
+                    // Either the lines moved, or it has been long enough that the
+                    // host should stop trusting its own record of what is on the
+                    // glass; `PANEL_REPAINT` says why the second one exists.
+                    let stale = panel_drawn
+                        .is_none_or(|last| now.mono.duration_since(last) >= PANEL_REPAINT);
+                    if stale || panel_lines.as_ref() != Some(&lines) {
+                        // At debug, and only when something is actually sent, so a
+                        // log of a capture shows what the dongle was showing at each
+                        // point in it rather than a line a second saying the same
+                        // thing. A settled panel still prints one line per repaint.
+                        tracing::debug!(
+                            rows = lines.len(),
+                            "pushing the panel: {}",
+                            lines
+                                .iter()
+                                .map(|line| line.text.as_str())
+                                .collect::<Vec<_>>()
+                                .join(" | ")
+                        );
+                        match link.send_bulk(HostToBridge::ShowPanel { lines: lines.clone() }) {
+                            // Cached only once it is really on its way. A dropped push
+                            // that still updated the cache would be suppressed for ever
+                            // after by the very comparison above, since the lines it
+                            // failed to send are the ones the next render produces.
+                            Ok(()) => {
+                                panel_lines = Some(lines);
+                                panel_drawn = Some(now.mono);
+                            }
+                            Err(e) => tracing::debug!("dropping a panel push: {e}"),
+                        }
+                    }
+                }
+            }
         }
     }
 

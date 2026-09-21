@@ -36,8 +36,17 @@ env:
 jobs:
   bridge:
     strategy:
+      # Two axes to cover both the chip and board features.
       matrix:
-        target: [esp32c5, esp32c6]
+        include:
+          - chip: esp32c5
+            features: esp32c5
+          - chip: esp32c5
+            features: esp32c5,t-dongle-c5
+          - chip: esp32c6
+            features: esp32c6
+          - chip: esp32c6
+            features: esp32c6,xiao-external-antenna
 
     runs-on: ubuntu-latest
 
@@ -65,9 +74,9 @@ jobs:
       - name: One copy of each esp-radio-pinned crate
         run: |
           pushd firmware/bridge
-          resolved=$(cargo tree --locked --features ${{matrix.target}} -e normal \
+          resolved=$(cargo tree --locked --features ${{matrix.features}} -e normal \
             --prefix none --format '{p}' | awk '{print $1, $2}' | sort -u)
-          for c in esp-alloc esp-hal esp-radio esp-rtos esp-sync esp-wifi-sys-${{matrix.target}}; do
+          for c in esp-alloc esp-hal esp-radio esp-rtos esp-sync esp-wifi-sys-${{matrix.chip}}; do
             n=$(printf '%s\n' "$resolved" | grep -c "^$c " || true)
             if [ "$n" != 1 ]; then
               printf '%s\n' "$resolved" | grep "^$c " || true
@@ -75,16 +84,27 @@ jobs:
               exit 1
             fi
           done
+          # Not in the loop above, because two lines is the right answer here and
+          # one would be wrong: `embedded-hal` 0.2 is a different crate that has
+          # always coexisted with 1.x. It is checked at all because the panel's
+          # three crates sit on 1.0 and `esp-hal` brings it too, so a second copy
+          # of *that* would be the same class of problem as a second `esp-hal`.
+          n=$(printf '%s\n' "$resolved" | grep -c '^embedded-hal v1' || true)
+          if [ "$n" != 1 ]; then
+            printf '%s\n' "$resolved" | grep '^embedded-hal ' || true
+            echo "::error::embedded-hal 1.x resolves to $n versions, expected exactly 1"
+            exit 1
+          fi
           popd
 
       - name: Build
         run: |
           pushd firmware/bridge
-          cargo build --release --features ${{matrix.target}} --locked --verbose
+          cargo build --release --features ${{matrix.features}} --locked --verbose
           popd
 
       - name: Clippy
         run: |
           pushd firmware/bridge
-          cargo clippy --release --features ${{matrix.target}} --locked -- -D warnings
+          cargo clippy --release --features ${{matrix.features}} --locked -- -D warnings
           popd

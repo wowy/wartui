@@ -269,6 +269,7 @@ pub fn last_reset_line(info: &BridgeInfo) -> String {
         LoopPhase::DrainLink => Some("it was reading host commands"),
         LoopPhase::Pump => Some("it was writing to the USB endpoint"),
         LoopPhase::Boot => Some("it had not reached its main loop"),
+        LoopPhase::Render => Some("it was drawing its panel"),
         LoopPhase::Idle | LoopPhase::Unknown => None,
     };
     match phase {
