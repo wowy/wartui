@@ -36,18 +36,17 @@ env:
 jobs:
   bridge:
     strategy:
-      # Two axes rather than one, because a board feature is not a chip: `chip` names
-      # the `esp-wifi-sys-*` crate the duplicate check counts, and `features` is what
-      # is actually built. Without the third row `t-dongle-c5` would only ever be
-      # built by hand, which is the current fate of `xiao-external-antenna`.
+      # Two axes to cover both the chip and board features.
       matrix:
         include:
           - chip: esp32c5
             features: esp32c5
-          - chip: esp32c6
-            features: esp32c6
           - chip: esp32c5
             features: esp32c5,t-dongle-c5
+          - chip: esp32c6
+            features: esp32c6
+          - chip: esp32c6
+            features: esp32c6,xiao-external-antenna
 
     runs-on: ubuntu-latest
 
