@@ -380,6 +380,7 @@ fn an_admin_frame_from_elsewhere_means_a_rival_core_is_powered_up() {
         node_count: 2,
         flags: 0,
         channels: run(0, 19),
+        tx_power: 8,
     }
     .encode();
     let event = Event::Link(LinkEvent::Message(BridgeToHost::Rx {
@@ -436,13 +437,17 @@ fn the_bridge_is_recorded_when_it_announces_itself() {
 }
 
 #[test]
-fn the_bridge_is_asked_for_its_counters_on_connect_and_then_on_the_interval() {
+fn the_bridge_is_configured_and_asked_for_its_counters_on_connect_and_then_on_the_interval() {
     let clock = Clock::new();
-    let config = EngineConfig { status_interval: Duration::from_secs(5), ..Default::default() };
+    let config = EngineConfig {
+        status_interval: Duration::from_secs(5),
+        tx_power: 52,
+        ..Default::default()
+    };
     let mut engine = engine(config, &clock);
 
     let batch = engine.handle(connected(), clock.at(1));
-    assert_eq!(batch.bulk, vec![wartui_proto::link::HostToBridge::GetStatus]);
+    assert_eq!(batch.bulk, vec![HostToBridge::SetTxPower { power: 52 }, HostToBridge::GetStatus]);
 
     // Not again straight away: the interval starts from the connect.
     assert!(engine.handle(Event::Tick, clock.at(3)).bulk.is_empty());
@@ -450,6 +455,17 @@ fn the_bridge_is_asked_for_its_counters_on_connect_and_then_on_the_interval() {
         engine.handle(Event::Tick, clock.at(6)).bulk,
         vec![wartui_proto::link::HostToBridge::GetStatus]
     );
+}
+
+#[test]
+fn an_assignment_carries_the_configured_transmit_power() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig { tx_power: 52, ..Default::default() }, &clock);
+    caught_up(&mut engine, &clock);
+
+    let (_, _, admin) = sent_admin(&engine.handle(heartbeat(NODE, 1), clock.at(1)));
+
+    assert_eq!(admin.tx_power, 52);
 }
 
 #[test]

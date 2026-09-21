@@ -25,6 +25,7 @@ fn sample_commands() -> Vec<HostToBridge, 8> {
     v.push(HostToBridge::GetStatus).ok();
     v.push(HostToBridge::Reset).ok();
     v.push(HostToBridge::ShowPanel { lines: full_panel() }).ok();
+    v.push(HostToBridge::SetTxPower { power: 8 }).ok();
     // Last on purpose: `a_full_212_byte_frame_fits_with_room_to_spare` takes the final case
     // and measures it as the ESP-NOW one. Anything pushed after this silently becomes the
     // frame that test believes it is sizing.

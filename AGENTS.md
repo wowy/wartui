@@ -208,9 +208,10 @@ is here rather than only in a `//!`.
   round-robin rather than steering around run boundaries. The plan has no phases and no timer; it
   changes when fleet membership changes, when the Bluetooth scan moves, and at no other time.
 - **`clippy::all` is denied workspace-wide, in both firmwares too, and so is `unsafe_code`.** The
-  host workspace forbids it outright. Each firmware denies it and allows it on exactly one
-  function, the ESP-NOW rate call `esp-radio` does not wrap; a second `#[allow(unsafe_code)]`
-  is a decision to make in review, not a convenience.
+  host workspace forbids it outright. Each firmware allows the two IDF calls `esp-radio` cannot
+  express after its long-lived handles borrow the controller: the ESP-NOW peer-rate call and the
+  runtime transmit-power call. Any further `#[allow(unsafe_code)]` is a decision to make in
+  review, not a convenience.
 
 ### Load-bearing, and reasoned where they live
 
@@ -279,9 +280,10 @@ edit stops; follow the pointer before changing the rule.
   on the first task the radio spawns. Dependabot ignores them and each firmware's CI job counts the
   versions; issue #16 is the real upgrade, and moves all of them at once.
   → `firmware/bridge/README.md` § "Dependency versions"
-- **Every bridge and node transmits at 2 dBm**, the lowest `set_max_tx_power` accepts. It is the
-  operator's policy for the whole fleet, not a default to raise for one board; range is the cost.
-  → `crates/wartui-proto/src/plan.rs`, `TX_POWER_QUARTER_DBM`
+- **Every bridge and node defaults to 2 dBm**, the lowest `set_max_tx_power` accepts. The host
+  carries its runtime quarter-dBm setting to the bridge on connection and to nodes in their
+  assignments; range is the cost of changing the default.
+  → `crates/wartui-proto/src/plan.rs`, `DEFAULT_TX_POWER_QUARTER_DBM`
 - **ESP-NOW goes out at 802.11g 24 Mbps, set per peer through IDF directly** — `esp-radio`'s
   `set_rate` is refused on the C5 and C6, and misnumbered besides.
   → `firmware/bridge/src/main.rs`, `set_peer_rate`; `firmware/node/src/radio.rs`

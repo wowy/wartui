@@ -79,6 +79,7 @@ fn assign(link: &LinkHandle, version: u8, channels: ChannelSet, ble: bool) {
             node_count: 1,
             flags: AdminMsg::flags_for(ble),
             channels,
+            tx_power: 8,
         },
     ))
     .expect("queued");
@@ -377,6 +378,7 @@ async fn sending_to_an_absent_node_is_not_acknowledged() {
             node_count: 1,
             flags: 0,
             channels: ChannelSet::from_run(IndexRun::new(0, 3)),
+            tx_power: 8,
         },
     ))
     .expect("queued");
@@ -465,7 +467,14 @@ async fn only_the_node_given_the_bluetooth_assignment_reports_any() {
     assign(&link, 1, ChannelSet::empty(), true);
     link.send_urgent(admin_command(
         SimTransport::node_mac(1),
-        AdminMsg { epoch: 1, node_index: 1, node_count: 2, flags: 0, channels: everything() },
+        AdminMsg {
+            epoch: 1,
+            node_index: 1,
+            node_count: 2,
+            flags: 0,
+            channels: everything(),
+            tx_power: 8,
+        },
     ))
     .expect("queued");
 

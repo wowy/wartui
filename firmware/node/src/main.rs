@@ -296,8 +296,9 @@ fn main() -> ! {
         Err(err) => note!("could not enable dual band: {:?}", err),
     }
 
-    // Every radio in the fleet transmits at 2 dBm; `plan::TX_POWER_QUARTER_DBM` has why.
-    match controller.set_max_tx_power(wartui_proto::plan::TX_POWER_QUARTER_DBM) {
+    // The standalone fallback is 2 dBm. A host replaces it through the first
+    // assignment it sends; `DEFAULT_TX_POWER_QUARTER_DBM` documents the default.
+    match controller.set_max_tx_power(wartui_proto::plan::DEFAULT_TX_POWER_QUARTER_DBM) {
         Ok(()) => {}
         Err(err) => note!("could not cap transmit power: {:?}", err),
     }
@@ -575,14 +576,21 @@ fn drain_admin(receiver: &EspNowReceiver<'_>, node: &mut Node) {
             _ => continue,
         };
         if node.adopt(&admin) {
+            if !radio::set_tx_power(admin.tx_power) {
+                note!(
+                    "could not set transmit power to {} quarter-dBm; retaining the previous power",
+                    admin.tx_power
+                );
+            }
             note!(
-                "assigned v{}: {} channels ({}), ble {}, node {} of {}",
+                "assigned v{}: {} channels ({}), ble {}, node {} of {}, power {} quarter-dBm",
                 node.version,
                 node.channels.len(),
                 Channels(node.channels),
                 if node.ble { "on" } else { "off" },
                 node.node_index,
-                node.node_count
+                node.node_count,
+                admin.tx_power
             );
         }
     }

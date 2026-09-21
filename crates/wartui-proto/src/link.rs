@@ -290,6 +290,15 @@ pub enum HostToBridge {
         /// One per row, top to bottom. Never more than the [`Panel`] announced.
         lines: PanelLines,
     },
+    /// Set the bridge radio's Wi-Fi transmit power in ESP-IDF quarter-dBm units.
+    ///
+    /// Sent after every connection so a bridge that restarted under a running host is
+    /// restored without an operator control. The bridge reports a hardware rejection and
+    /// keeps its prior setting.
+    SetTxPower {
+        /// ESP-IDF quarter-dBm units.
+        power: i8,
+    },
 }
 
 /// Events and replies the bridge sends to the host.

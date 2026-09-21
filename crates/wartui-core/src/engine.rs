@@ -27,7 +27,9 @@ use wartui_proto::air::{
     AdminMsg, Capabilities, DecodeError, Frame, RecordKind, foreign, wire_epoch,
 };
 use wartui_proto::link::{BridgeToHost, EspNowPayload, HostToBridge, Mac, SendStatus};
-use wartui_proto::plan::{self, ChannelPool, ChannelSet, Job, Plan, Radio};
+use wartui_proto::plan::{
+    self, ChannelPool, ChannelSet, DEFAULT_TX_POWER_QUARTER_DBM, Job, Plan, Radio,
+};
 
 use crate::distinct::Distinct;
 use crate::position::PositionChain;
@@ -141,6 +143,12 @@ pub struct EngineConfig {
     /// Persisted, so a restarted host never reissues an epoch a node already
     /// holds: the node would acknowledge it and then discard it.
     pub assignment_base: u64,
+    /// Wi-Fi transmit power sent to the bridge on connection and to every node in
+    /// its assignment, in ESP-IDF quarter-dBm units.
+    ///
+    /// There is no operator control yet; this is the runtime configuration seam
+    /// that keeps the firmware default from becoming a compile-time fleet policy.
+    pub tx_power: i8,
 }
 
 impl Default for EngineConfig {
@@ -154,6 +162,7 @@ impl Default for EngineConfig {
             position: PositionChain::empty(),
             admin_timeout: Duration::from_secs(2),
             assignment_base: 0,
+            tx_power: DEFAULT_TX_POWER_QUARTER_DBM,
         }
     }
 }
@@ -249,6 +258,8 @@ pub struct Assignment {
     pub node_index: u8,
     /// Fleet size as of this assignment.
     pub node_count: u8,
+    /// Wi-Fi transmit power for this node in ESP-IDF quarter-dBm units.
+    pub tx_power: i8,
     /// The persisted monotonic epoch it was allocated from.
     pub counter: u64,
 }
@@ -617,6 +628,9 @@ impl FleetEngine {
                 // A new connection means a new baseline, whether or not the
                 // bridge itself rebooted.
                 self.dropped_baseline = None;
+                // A bridge that restarted has gone back to its firmware fallback.
+                // Restore the host's configured value before normal maintenance.
+                batch.bulk.push(HostToBridge::SetTxPower { power: self.config.tx_power });
                 // Ask straight away rather than waiting out the interval.
                 self.last_status_poll = Some(now.mono);
                 batch.bulk.push(wartui_proto::link::HostToBridge::GetStatus);
@@ -1067,6 +1081,7 @@ impl FleetEngine {
                     && a.ble == ble
                     && a.node_index == index
                     && a.node_count == count
+                    && a.tx_power == self.config.tx_power
             };
             // Already scanning exactly this, or already queued to. Re-issuing
             // either would burn an epoch to tell a node what it already knows.
@@ -1086,8 +1101,14 @@ impl FleetEngine {
             }
 
             counter += 1;
-            node.desired =
-                Some(Assignment { channels, ble, node_index: index, node_count: count, counter });
+            node.desired = Some(Assignment {
+                channels,
+                ble,
+                node_index: index,
+                node_count: count,
+                tx_power: self.config.tx_power,
+                counter,
+            });
             node.dirty = true;
         }
         self.last_counter = counter;
@@ -1162,8 +1183,9 @@ impl FleetEngine {
             node_count: assignment.node_count,
             flags: AdminMsg::flags_for(assignment.ble),
             channels: assignment.channels,
+            tx_power: assignment.tx_power,
         };
-        // Sixteen bytes into a 250-byte buffer, so this cannot fail.
+        // Seventeen bytes into a 250-byte buffer, so this cannot fail.
         let payload = EspNowPayload::from_slice(&msg.encode()).unwrap_or_default();
 
         self.pending.insert(

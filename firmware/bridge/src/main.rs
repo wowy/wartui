@@ -457,10 +457,11 @@ fn main() -> ! {
         esp_radio::wifi::ControllerConfig::default().with_country_info(*b"US"),
     )
     .expect("Wi-Fi controller");
-    // Every radio in the fleet transmits at 2 dBm; `plan::TX_POWER_QUARTER_DBM` has why.
-    // Before the split, which borrows the controller for the rest of the program, and
-    // reported after `Ready` below, because the ROM banner swallows anything earlier.
-    let tx_power = controller.set_max_tx_power(wartui_proto::plan::TX_POWER_QUARTER_DBM);
+    // The standalone fallback is 2 dBm. The host restores its configured value after
+    // every connection. Set this before the split, which borrows the controller for
+    // the rest of the program, and report a failure after `Ready` below because the
+    // ROM banner swallows anything earlier.
+    let tx_power = controller.set_max_tx_power(wartui_proto::plan::DEFAULT_TX_POWER_QUARTER_DBM);
     // Split rather than kept whole: `EspNowSender::send` needs `&mut`, so holding
     // the parts separately keeps a transmit from borrowing the receive path.
     let (manager, mut sender, receiver) = controller.esp_now().split();
@@ -663,6 +664,14 @@ fn handle(
 
         HostToBridge::ShowPanel { lines } => bridge.show_panel(lines),
 
+        HostToBridge::SetTxPower { power } => {
+            if set_tx_power(power) {
+                bridge.log(LogLevel::Info, "transmit power changed");
+            } else {
+                bridge.error("the radio refused that transmit power");
+            }
+        }
+
         HostToBridge::SendEspNow { id, dst, ensure_peer, payload } => {
             // Named separately from `Command` because it is the one place the loop
             // can block unboundedly: `SendWaiter` busy-waits on a callback with no
@@ -750,7 +759,7 @@ fn add_peer(manager: &EspNowManager<'_>, mac: &Mac) -> Result<bool, EspNowError>
 /// short. Receivers need nothing; any 802.11b/g rate decodes unannounced.
 ///
 /// The price is sensitivity, roughly 10 dB against 1 Mbps, which a fleet sharing a
-/// car has even at 2 dBm (`plan::TX_POWER_QUARTER_DBM`): on the bench, a C5 and a C6
+/// car has at the 2 dBm default (`plan::DEFAULT_TX_POWER_QUARTER_DBM`): on the bench, a C5 and a C6
 /// beside this bridge arrived at −43 and −58 dBm and lost 0% and 2.3% of their
 /// heartbeats over ten minutes.
 ///
@@ -781,6 +790,27 @@ fn set_peer_rate(_manager: &EspNowManager<'_>, mac: &Mac) -> bool {
     // `esp_now_rate_config_t`, both alive for the whole call. ESP-NOW is initialised,
     // since an `EspNowManager` exists. 0 is `ESP_OK`.
     unsafe { sys::esp_now_set_peer_rate_config(mac.as_ptr(), &mut config) == 0 }
+}
+
+/// Set the Wi-Fi transmit power after ESP-NOW has borrowed the controller.
+///
+/// `WifiController::set_max_tx_power` requires a mutable controller, but the bridge
+/// keeps its ESP-NOW handles alive for the rest of its process. This is the narrow
+/// direct IDF equivalent, used only for a host configuration command.
+#[allow(
+    unsafe_code,
+    reason = "esp-radio requires a mutable controller after long-lived handles borrow it"
+)]
+fn set_tx_power(power: i8) -> bool {
+    #[cfg(feature = "esp32c5")]
+    use esp_wifi_sys_esp32c5::include as sys;
+    #[cfg(feature = "esp32c6")]
+    use esp_wifi_sys_esp32c6::include as sys;
+
+    // SAFETY: Wi-Fi and ESP-NOW have started before the bridge reads host commands,
+    // and this passes the scalar ESP-IDF expects. The function changes only the
+    // radio's maximum transmit power.
+    unsafe { sys::esp_wifi_set_max_tx_power(power) == 0 }
 }
 
 /// Put one frame on the air and report what the radio made of it.

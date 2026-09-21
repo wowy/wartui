@@ -54,18 +54,15 @@ pub const NODE_STAGGER_WINDOW_MS: u32 = 120;
 /// picked a different one would be transmitting into an empty room.
 pub const CONTROL_CHANNEL: u8 = 6;
 
-/// The transmit power every bridge and node is capped at, in `esp-radio`'s quarter-dBm
-/// units: 8 is 2 dBm, the lowest `set_max_tx_power` accepts.
+/// The default Wi-Fi transmit power, in ESP-IDF's quarter-dBm units.
 ///
-/// The operator's policy for the whole fleet, not a per-board tuning knob. A fleet rides
-/// in one vehicle with its bridge, so the 20 dBm default buys range nothing here needs
-/// and puts a node beside its bridge far above the level a receiver is designed for: on
-/// the bench a C6 at the default arrived at −21 dBm from a few centimetres away. The cost
-/// is range, and it is paid first by heartbeats from a node carried farther off.
-pub const TX_POWER_QUARTER_DBM: i8 = 8;
+/// 8 is 2 dBm, the lowest value `set_max_tx_power` accepts. The host supplies this
+/// default to every bridge it connects and in every node assignment, so firmware does
+/// not hard-code the fleet policy.
+pub const DEFAULT_TX_POWER_QUARTER_DBM: i8 = 8;
 
 const _: () = assert!(
-    TX_POWER_QUARTER_DBM >= 8 && TX_POWER_QUARTER_DBM <= 84,
+    DEFAULT_TX_POWER_QUARTER_DBM >= 8 && DEFAULT_TX_POWER_QUARTER_DBM <= 84,
     "esp-radio's set_max_tx_power accepts 8 to 84 quarter-dBm"
 );
 
@@ -687,12 +684,18 @@ impl Plan {
     /// [`crate::air::ADMIN_FLAG_BLE`] tells a node to scan nothing, and a node sent
     /// one parks while the host goes on believing it is sweeping.
     #[must_use]
-    pub fn admin_for(&self, node_index: u8, epoch: u8, flags: u8) -> Option<AdminMsg> {
+    pub fn admin_for(
+        &self,
+        node_index: u8,
+        epoch: u8,
+        flags: u8,
+        tx_power: i8,
+    ) -> Option<AdminMsg> {
         let channels = self.channels_for(node_index)?;
         if channels.is_empty() && flags & crate::air::ADMIN_FLAG_BLE == 0 {
             return None;
         }
-        Some(AdminMsg { epoch, node_index, node_count: self.node_count, flags, channels })
+        Some(AdminMsg { epoch, node_index, node_count: self.node_count, flags, channels, tx_power })
     }
 }
 
