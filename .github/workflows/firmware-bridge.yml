@@ -85,6 +85,17 @@ jobs:
               exit 1
             fi
           done
+          # Not in the loop above, because two lines is the right answer here and
+          # one would be wrong: `embedded-hal` 0.2 is a different crate that has
+          # always coexisted with 1.x. It is checked at all because the panel's
+          # three crates sit on 1.0 and `esp-hal` brings it too, so a second copy
+          # of *that* would be the same class of problem as a second `esp-hal`.
+          n=$(printf '%s\n' "$resolved" | grep -c '^embedded-hal v1' || true)
+          if [ "$n" != 1 ]; then
+            printf '%s\n' "$resolved" | grep '^embedded-hal ' || true
+            echo "::error::embedded-hal 1.x resolves to $n versions, expected exactly 1"
+            exit 1
+          fi
           popd
 
       - name: Build

@@ -23,10 +23,26 @@ pub const TICK: Duration = Duration::from_millis(250);
 ///
 /// One second, which is four ticks: fast enough to watch a node drop while standing
 /// over the dongle, slow enough that the estimator counts do not flicker between two
-/// readings of the same number. A push carries every line, so the rate is also the
-/// whole of the resynchronisation protocol — a bridge that rebooted a moment ago is
-/// correct again within one of these.
+/// readings of the same number. This is a ceiling and not a cadence — a push whose
+/// lines match the last one is not sent at all, and on a settled capture most
+/// seconds say nothing.
 pub const PANEL_INTERVAL: Duration = Duration::from_millis(1_000);
+
+/// How long the panel may go without a push, however little has changed.
+///
+/// Suppressing an unchanged push is what keeps a quiet capture off the wire, but it
+/// makes the host's idea of what the dongle is showing load-bearing, and the only
+/// thing that corrects that idea is a `Ready`. A bridge that reboots mid-session
+/// comes up with an empty panel and its own fallback screen; if its announcement is
+/// the frame that gets lost, the lines have not changed, nothing is ever pushed
+/// again, and the dongle says "no host" for the rest of the session with a host
+/// attached and talking to it.
+///
+/// So the whole panel goes out on this interval regardless. That restores what a
+/// whole-panel push was for: every frame is idempotent, so resynchronising is just
+/// sending one. The bridge compares each row against what it drew and redraws none
+/// of them, so a repaint nothing needed costs a frame on the wire and no SPI at all.
+pub const PANEL_REPAINT: Duration = Duration::from_secs(10);
 
 /// The current time, in both forms the engine needs.
 #[must_use]
@@ -64,6 +80,7 @@ pub async fn drive(
     // busy fleet from repainting on every command, and comparing the lines keeps a
     // quiet one from sending a frame a second that says exactly what the last one did.
     let mut panel_sent: Option<Instant> = None;
+    let mut panel_drawn: Option<Instant> = None;
     let mut panel_lines: Option<PanelLines> = None;
 
     loop {
@@ -145,10 +162,16 @@ pub async fn drive(
                 // rather than a frame, and a changed one still waits its turn.
                 if let Some(lines) = lines {
                     panel_sent = Some(now.mono);
-                    if panel_lines.as_ref() != Some(&lines) {
-                        // At debug and only on a change, so a log of a capture shows
-                        // what the dongle was showing at each point in it rather than
-                        // a line a second saying the same thing.
+                    // Either the lines moved, or it has been long enough that the
+                    // host should stop trusting its own record of what is on the
+                    // glass; `PANEL_REPAINT` says why the second one exists.
+                    let stale = panel_drawn
+                        .is_none_or(|last| now.mono.duration_since(last) >= PANEL_REPAINT);
+                    if stale || panel_lines.as_ref() != Some(&lines) {
+                        // At debug, and only when something is actually sent, so a
+                        // log of a capture shows what the dongle was showing at each
+                        // point in it rather than a line a second saying the same
+                        // thing. A settled panel still prints one line per repaint.
                         tracing::debug!(
                             rows = lines.len(),
                             "pushing the panel: {}",
@@ -163,7 +186,10 @@ pub async fn drive(
                             // that still updated the cache would be suppressed for ever
                             // after by the very comparison above, since the lines it
                             // failed to send are the ones the next render produces.
-                            Ok(()) => panel_lines = Some(lines),
+                            Ok(()) => {
+                                panel_lines = Some(lines);
+                                panel_drawn = Some(now.mono);
+                            }
                             Err(e) => tracing::debug!("dropping a panel push: {e}"),
                         }
                     }

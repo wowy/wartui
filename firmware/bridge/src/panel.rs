@@ -26,11 +26,13 @@
 //!
 //! One line is 160 x 15 x 2 = 4.8 KB of pixels and 1.9 ms of bus time, and costs about
 //! five times that: 9.3 ms measured, against 36 ms for a full repaint
-//! (`docs/t-dongle-c5-findings.md`). The cost is the glyphs rather than the bus. Three things keep that off the loop's critical path:
-//! only lines whose text *or* severity changed are redrawn, the whole of it is behind
-//! a floor of [`MIN_REDRAW_MS`], and the pixels go out through a `StaticCell` buffer
-//! rather than the heap — `heap_allocator!` hands that to the radio blobs, and nothing
-//! in wartui's own bridge code allocates.
+//! (`docs/t-dongle-c5-findings.md`). The cost is the glyphs rather than the bus.
+//!
+//! Four things keep that off the loop's critical path: only lines whose text *or*
+//! severity changed are redrawn, drawing is behind a floor of [`MIN_REDRAW_MS`],
+//! deciding whether to draw is behind [`MIN_LOOK_MS`], and the pixels go out through a
+//! `StaticCell` buffer rather than the heap — `heap_allocator!` hands that to the radio
+//! blobs, and nothing in wartui's own bridge code allocates.
 //!
 //! # The backlight is active low
 //!
@@ -125,6 +127,17 @@ const SPI_HZ: u32 = 20_000_000;
 /// jitter turn a one-second push into a two-second one.
 const MIN_REDRAW_MS: u64 = 500;
 
+/// The shortest gap between two decisions about whether to redraw.
+///
+/// `MIN_REDRAW_MS` only moves when a row is actually drawn, so on a settled screen it
+/// stops advancing and stops gating: every pass of a loop that turns over about a
+/// thousand times a second would otherwise copy the host's lines and compare all five,
+/// and in fallback mode would format the whole screen from scratch, to conclude each
+/// time that nothing had changed. This bounds that to ten times a second. It is not
+/// `MIN_REDRAW_MS` itself because that would delay a real change by up to half a
+/// second, which is the thing `MIN_REDRAW_MS` is deliberately set below 1 Hz to avoid.
+const MIN_LOOK_MS: u64 = 100;
+
 /// How long the host may go quiet before the panel says so.
 ///
 /// Measured against the host's `status_interval` of five seconds
@@ -207,6 +220,8 @@ pub struct Screen {
     fallback: bool,
     /// When the last row went out.
     last_ms: u64,
+    /// When the decision above was last taken, drawn or not.
+    last_look_ms: u64,
     /// Kept alive so nothing else can claim the pins, and so the screen stays lit.
     _backlight: Output<'static>,
     _sd_cs: Output<'static>,
@@ -276,6 +291,7 @@ impl Screen {
             shown: [const { None }; PANEL_ROWS],
             fallback: false,
             last_ms: 0,
+            last_look_ms: 0,
             _backlight: backlight,
             _sd_cs: sd_cs,
         }))
@@ -287,9 +303,15 @@ impl Screen {
     /// say does not keep an idle bridge awake.
     pub fn render(&mut self, bridge: &mut Bridge, mac: [u8; 6]) -> bool {
         let now_ms = bridge.now_ms();
+        // Cheapest test first, then the one that bounds the work below on a screen
+        // that has settled; `MIN_LOOK_MS` says why one gate is not enough.
         if now_ms.saturating_sub(self.last_ms) < MIN_REDRAW_MS {
             return false;
         }
+        if now_ms.saturating_sub(self.last_look_ms) < MIN_LOOK_MS {
+            return false;
+        }
+        self.last_look_ms = now_ms;
 
         // Reusing the clock `StallWatch` already keeps, rather than starting a second
         // one that would disagree with it: it is set by every frame that decodes, which

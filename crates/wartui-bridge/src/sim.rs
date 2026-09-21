@@ -214,7 +214,12 @@ async fn run_bridge(
         // that `--sim` exercises the whole push path — render, rate limit, encode, send
         // — with nothing attached, and a simulator that reported no panel would leave
         // that path untested until a board was on the desk.
-        panel: Some(Panel { cols: 26, rows: 8 }),
+        //
+        // The geometry is the shipping board's rather than a roomy invention, so what
+        // `--sim` puts on the wire is what a dongle would be sent, truncation and all.
+        // It tracked the font once and did not follow it to `FONT_9X15`, which left
+        // the simulator rehearsing a width of 26 that nothing has.
+        panel: Some(Panel { cols: 17, rows: 5 }),
     };
     if plumbing.events.send(LinkEvent::Connected(info)).await.is_err() {
         return;

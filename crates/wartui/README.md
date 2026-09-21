@@ -367,7 +367,7 @@ being read closely: green for fine, amber for working but not ideal, red for a f
   Both sit above the −74 dBm a 24 Mbps ESP-NOW link needs, so the line warns while there is
   still something to do about it: close a window, move the dongle off the floor, walk a node
   back. It says `rssi: none heard` in red if nodes are alive and the bridge has measured none
-  of them, and `rssi —` when nothing is alive to measure.
+  of them, and `rssi n/a` when nothing is alive to measure.
 - **The AP and BLE counts have no bad state** and stay green.
 
 Before any host speaks, and for about ten seconds after one goes away, the bridge shows what it

@@ -95,9 +95,12 @@ pub fn render(snapshot: &Snapshot, panel: Panel) -> PanelLines {
 
 /// One line's worth of text, cut to the panel's width.
 ///
-/// By characters rather than bytes: everything composed here is ASCII today, and a
-/// slice at a byte that is not a boundary would be a panic rather than a short line
-/// the first time that stopped being true.
+/// By characters rather than bytes: everything composed here is ASCII, and a slice at a
+/// byte that is not a boundary would be a panic rather than a short line the first time
+/// that stopped being true. `nothing_composed_here_leaves_ascii` holds the antecedent,
+/// and it is not only about panics — the bridge draws with a font whose glyph mapping
+/// covers U+0020 to U+007F and silently substitutes `?` for everything else, so a
+/// non-ASCII character here reaches the glass as a question mark and no host test sees it.
 fn fit(text: &str, cols: u8) -> ShortStr {
     let mut out = ShortStr::new();
     for c in text.chars().take(cols as usize) {
@@ -181,7 +184,7 @@ fn rssi_line(snapshot: &Snapshot) -> (Severity, String) {
         // nothing alive the line above has already said so, and a second fault
         // colour for one fact reads as two.
         return if snapshot.alive == 0 {
-            (Severity::Ok, "rssi —".to_owned())
+            (Severity::Ok, "rssi n/a".to_owned())
         } else {
             (Severity::Error, "rssi: none heard".to_owned())
         };
@@ -335,7 +338,7 @@ mod tests {
         // line says which kind of nothing this is.
         assert_eq!(lines[0].text.as_str(), "gps: none");
         assert_eq!(lines[1].text.as_str(), "no nodes alive");
-        assert_eq!(lines[4].text.as_str(), "rssi —");
+        assert_eq!(lines[4].text.as_str(), "rssi n/a");
     }
 
     #[test]
@@ -534,6 +537,44 @@ mod tests {
                     line.text,
                     line.text.len(),
                     SCREEN.cols
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn nothing_composed_here_leaves_ascii() {
+        // The bridge draws with `FONT_9X15`, whose glyph mapping covers U+0020 to
+        // U+007F and quietly substitutes `?` for anything else. So a tidy typographic
+        // dash composed here does not reach the glass as a dash — it reaches it as
+        // `rssi ?`, and every host-side assertion still passes because they compare
+        // the string rather than the pixels. Nothing but this test stands between a
+        // well-meant character and that.
+        let wide = Panel { cols: 32, rows: 8 };
+        let mut worst = fleet(&[Some(-100), Some(-40), None]);
+        worst.alive = 20;
+        worst.assignable = 9;
+
+        let mut cases = vec![quiet(), worst, fleet(&[Some(-55)])];
+        for status in [
+            GpsStatus::Connecting,
+            GpsStatus::Scanning { port: "/dev/ttyUSB0".to_owned(), baud: 9_600 },
+            GpsStatus::NoReceiver,
+            GpsStatus::Searching,
+            GpsStatus::Fixed { satellites: Some(24) },
+            GpsStatus::Failed("permission denied".to_owned()),
+        ] {
+            for source in [PositionSource::Gps, PositionSource::Static, PositionSource::None] {
+                cases.push(gps(status.clone(), source));
+            }
+        }
+
+        for snapshot in &cases {
+            for line in &render(snapshot, wide) {
+                assert!(
+                    line.text.is_ascii(),
+                    "{:?} would reach the panel with a `?` in it",
+                    line.text
                 );
             }
         }
