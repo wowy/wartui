@@ -64,10 +64,15 @@ pub const DEFAULT_TX_POWER_QUARTER_DBM: i8 = 8;
 /// The lowest transmit power `set_max_tx_power` accepts: 2 dBm.
 pub const MIN_TX_POWER_QUARTER_DBM: i8 = 8;
 
-/// The highest transmit power `set_max_tx_power` accepts: 21 dBm.
-pub const MAX_TX_POWER_QUARTER_DBM: i8 = 84;
+/// The highest transmit power the host will configure: 20 dBm.
+///
+/// `set_max_tx_power` accepts up to 84 (21 dBm), but whether values above 20 dBm
+/// behave correctly is unverified, so nothing higher than this leaves the host.
+/// The ceiling is policy, then, not the IDF's — and the firmware carries no
+/// maximum of its own, because this is the only place one is needed.
+pub const MAX_TX_POWER_QUARTER_DBM: i8 = 80;
 
-/// Bring a transmit power inside the range IDF accepts.
+/// Bring a transmit power inside the range the host permits.
 ///
 /// Every power that reaches a radio goes through this, because a refused one is close
 /// to invisible on a node: the refusal is a `note!`, which is a discarded
@@ -90,7 +95,7 @@ pub const fn clamp_tx_power(power: i8) -> i8 {
 
 const _: () = assert!(
     DEFAULT_TX_POWER_QUARTER_DBM == clamp_tx_power(DEFAULT_TX_POWER_QUARTER_DBM),
-    "esp-radio's set_max_tx_power accepts 8 to 84 quarter-dBm"
+    "the host configures 8 to 80 quarter-dBm: the IDF's floor, and 20 dBm at the top"
 );
 
 /// How long a node listens on one channel before moving on.

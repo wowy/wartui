@@ -452,6 +452,35 @@ mod tests {
     }
 
     #[test]
+    fn the_transmit_power_flags_reach_run() {
+        let cli = parse(["wartui", "--tx-power", "10", "--bridge-tx-power", "15"]).unwrap();
+        assert!(cli.command.is_none());
+        assert_eq!(cli.run.tx_power, Some(10));
+        assert_eq!(cli.run.bridge_tx_power, Some(15));
+    }
+
+    #[test]
+    fn the_bridge_power_flag_stands_alone() {
+        let cli = parse(["wartui", "run", "--bridge-tx-power", "15"]).unwrap();
+        let Some(Command::Run(args)) = cli.command else { panic!("not run") };
+        assert_eq!(args.tx_power, None);
+        assert_eq!(args.bridge_tx_power, Some(15));
+    }
+
+    #[test]
+    fn a_transmit_power_outside_2_to_20_dbm_is_refused() {
+        // Refused rather than clamped: a power the operator typed and got wrong
+        // should say so, not run the fleet at a power nobody asked for.
+        for args in [
+            ["wartui", "--tx-power", "25"].as_slice(),
+            ["wartui", "--tx-power", "1"].as_slice(),
+            ["wartui", "--bridge-tx-power", "21"].as_slice(),
+        ] {
+            assert!(parse(args).is_err(), "{args:?} should be refused");
+        }
+    }
+
+    #[test]
     fn the_log_file_is_global_and_allowed_on_either_side() {
         for args in [
             ["wartui", "--log-file", "w.log", "status", "--bridge", "/dev/x"],

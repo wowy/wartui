@@ -143,15 +143,20 @@ pub struct EngineConfig {
     /// Persisted, so a restarted host never reissues an epoch a node already
     /// holds: the node would acknowledge it and then discard it.
     pub assignment_base: u64,
-    /// Wi-Fi transmit power sent to the bridge on connection and to every node in
-    /// its assignment, in ESP-IDF quarter-dBm units.
+    /// Wi-Fi transmit power sent to every node in its assignment, in ESP-IDF
+    /// quarter-dBm units.
     ///
-    /// There is no operator control yet; this is the runtime configuration seam
-    /// that keeps the firmware default from becoming a compile-time fleet policy.
-    ///
-    /// [`FleetEngine::new`] brings it inside the range IDF accepts, so a value outside
-    /// it costs the fleet a clamp rather than leaving every radio at its boot power.
+    /// [`FleetEngine::new`] brings it inside the range the host permits, so a value
+    /// outside it costs the fleet a clamp rather than leaving every radio at its
+    /// boot power.
     pub tx_power: i8,
+    /// Wi-Fi transmit power sent to the bridge with every status poll, in ESP-IDF
+    /// quarter-dBm units.
+    ///
+    /// A separate setting from [`Self::tx_power`] because the bridge's job is not a
+    /// node's: its transmissions are assignments, not the heartbeats and sightings a
+    /// fleet is positioned for. Clamped at construction alongside `tx_power`.
+    pub bridge_tx_power: i8,
 }
 
 impl Default for EngineConfig {
@@ -166,6 +171,7 @@ impl Default for EngineConfig {
             admin_timeout: Duration::from_secs(2),
             assignment_base: 0,
             tx_power: DEFAULT_TX_POWER_QUARTER_DBM,
+            bridge_tx_power: DEFAULT_TX_POWER_QUARTER_DBM,
         }
     }
 }
@@ -572,9 +578,10 @@ impl FleetEngine {
     /// Start an engine. `now` fixes the session's start time.
     #[must_use]
     pub fn new(mut config: EngineConfig, now: Now) -> Self {
-        // Clamped once, here, rather than at each of the three places a power reaches a
-        // radio: `plan::clamp_tx_power` says why a refused one must not be reachable.
+        // Clamped once, here, rather than at either place a power reaches a radio:
+        // `plan::clamp_tx_power` says why a refused one must not be reachable.
         config.tx_power = clamp_tx_power(config.tx_power);
+        config.bridge_tx_power = clamp_tx_power(config.bridge_tx_power);
         Self {
             nodes: BTreeMap::new(),
             bridge: None,
@@ -707,7 +714,7 @@ impl FleetEngine {
     /// changed, so the repeat costs one small frame per interval and no log line.
     fn poll_bridge(&mut self, now: Now, batch: &mut ActionBatch) {
         self.last_status_poll = Some(now.mono);
-        batch.bulk.push(HostToBridge::SetTxPower { power: self.config.tx_power });
+        batch.bulk.push(HostToBridge::SetTxPower { power: self.config.bridge_tx_power });
         batch.bulk.push(HostToBridge::GetStatus);
     }
 
