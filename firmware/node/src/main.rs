@@ -36,7 +36,7 @@ use esp_hal::gpio::{Level, Output, OutputConfig};
 use esp_hal::interrupt::software::SoftwareInterruptControl;
 use esp_hal::time::{Duration, Instant};
 use esp_hal::timer::timg::TimerGroup;
-use esp_radio::esp_now::{EspNowReceiver, EspNowSender};
+use esp_radio::esp_now::{EspNowManager, EspNowReceiver, EspNowSender};
 use esp_radio::wifi::{ControllerConfig, WifiController};
 use esp_rtos::CurrentThreadHandle;
 use static_cell::ConstStaticCell;
@@ -352,7 +352,7 @@ fn main() -> ! {
             } else {
                 note!("radio would not park on channel {}", CONTROL_CHANNEL);
             }
-            listen(&receiver, node, IDLE_BEAT_MS);
+            listen(&manager, &receiver, node, IDLE_BEAT_MS);
             continue;
         }
 
@@ -386,7 +386,7 @@ fn main() -> ! {
             // leaves only the floor here and the next scan starts at once, which is
             // the right trade: a window missed costs one cycle, and the core's
             // re-send waits on the next heartbeat either way.
-            listen(&receiver, node, remaining_ms(cycle).max(ADMIN_WAIT_MS));
+            listen(&manager, &receiver, node, remaining_ms(cycle).max(ADMIN_WAIT_MS));
             continue;
         }
 
@@ -416,7 +416,7 @@ fn main() -> ! {
         let on_control = radio::park(&manager, &sniffer, CONTROL_CHANNEL, false);
         if on_control {
             report(&mut sender, node, channel);
-            drain_admin(&receiver, node);
+            drain_admin(&manager, &receiver, node);
         } else {
             note!("radio would not return to channel {}", CONTROL_CHANNEL);
         }
@@ -434,7 +434,7 @@ fn main() -> ! {
                 CurrentThreadHandle::get().delay(Duration::from_millis(u64::from(stagger)));
             }
             heartbeat(&mut sender, node, capabilities);
-            listen(&receiver, node, ADMIN_WAIT_MS);
+            listen(&manager, &receiver, node, ADMIN_WAIT_MS);
         }
     }
 }
@@ -538,10 +538,10 @@ fn report_ble(sender: &mut EspNowSender<'_>, node: &mut Node, scanner: &mut ble:
 ///
 /// This is the admin window. The radio acknowledges a unicast assignment in
 /// hardware either way, but adopting one needs the frame, read only here.
-fn listen(receiver: &EspNowReceiver<'_>, node: &mut Node, ms: u32) {
+fn listen(manager: &EspNowManager<'_>, receiver: &EspNowReceiver<'_>, node: &mut Node, ms: u32) {
     let until = Instant::now() + Duration::from_millis(u64::from(ms));
     loop {
-        drain_admin(receiver, node);
+        drain_admin(manager, receiver, node);
         if Instant::now() >= until {
             return;
         }
@@ -550,7 +550,7 @@ fn listen(receiver: &EspNowReceiver<'_>, node: &mut Node, ms: u32) {
 }
 
 /// Take whatever the radio has queued and adopt any assignment in it.
-fn drain_admin(receiver: &EspNowReceiver<'_>, node: &mut Node) {
+fn drain_admin(manager: &EspNowManager<'_>, receiver: &EspNowReceiver<'_>, node: &mut Node) {
     while let Some(received) = receiver.receive() {
         let admin = match Frame::decode(received.data()) {
             Ok(Frame::Admin(admin)) => admin,
@@ -576,7 +576,7 @@ fn drain_admin(receiver: &EspNowReceiver<'_>, node: &mut Node) {
             _ => continue,
         };
         if node.adopt(&admin) {
-            if !radio::set_tx_power(admin.tx_power) {
+            if !radio::set_tx_power(manager, admin.tx_power) {
                 note!(
                     "could not set transmit power to {} quarter-dBm; retaining the previous power",
                     admin.tx_power

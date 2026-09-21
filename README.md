@@ -124,8 +124,9 @@ second, and its `channels` column reads `bluetooth`.
 - **Channel 14 is in no pool** and is never dealt; `esp-radio` exposes no way to reach it. It's
   Japan-only 802.11b, so should be extremely rare.
 - **Plaintext ESP-NOW only**, in both directions. There is no pairing handshake and no key.
-- **Every radio transmits at 2 dBm.** The fleet is meant to ride in one vehicle with its bridge;
-  carry a node much farther off and its heartbeats are the first thing lost.
+- **Every radio transmits at 2 dBm by default.** The fleet is meant to ride in one vehicle with
+  its bridge; carry a node much farther off and its heartbeats are the first thing lost. The host
+  carries one transmit power to the whole fleet at runtime, so changing it costs no reflash.
 - **Nothing is compatible with an earlier wartui, and that is the policy until 1.0.** `wartui-proto`
   is compiled into the host and both firmwares, so flash the fleet together. The bridge is
   format-blind and does not need reflashing for a wire change — but it does need one for a

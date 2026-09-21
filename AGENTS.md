@@ -130,7 +130,7 @@ is here rather than only in a `//!`.
 
 - **The wire is ours, in both directions, and shares nothing with the vendor's.** Every frame is
   `WTUI`, a wire version byte, a type byte and a body: `HeartbeatMsg` (13 bytes), `SightingMsg`
-  (18 plus the SSID and a length-prefixed trailer) and `AdminMsg` (16). ESP-NOW has no addressing
+  (18 plus the SSID and a length-prefixed trailer) and `AdminMsg` (17). ESP-NOW has no addressing
   above the MAC layer and a
   node broadcasts, so a shared format is a shared conversation. The magic is checked before
   anything else at both ends. Encode/decode is written out by hand, never by transmuting a
@@ -280,10 +280,13 @@ edit stops; follow the pointer before changing the rule.
   on the first task the radio spawns. Dependabot ignores them and each firmware's CI job counts the
   versions; issue #16 is the real upgrade, and moves all of them at once.
   → `firmware/bridge/README.md` § "Dependency versions"
-- **Every bridge and node defaults to 2 dBm**, the lowest `set_max_tx_power` accepts. The host
-  carries its runtime quarter-dBm setting to the bridge on connection and to nodes in their
-  assignments; range is the cost of changing the default.
-  → `crates/wartui-proto/src/plan.rs`, `DEFAULT_TX_POWER_QUARTER_DBM`
+- **Every bridge and node defaults to 2 dBm**, the lowest `set_max_tx_power` accepts, and the host
+  is what decides otherwise: it clamps its quarter-dBm setting into the range IDF accepts once, at
+  engine construction, then carries it to the bridge with **every status poll** and to nodes in
+  their assignments. The poll carries it because `bulk` drops rather than blocks and a lost
+  `SetTxPower` has nothing behind it to notice; range is the cost of changing the default.
+  → `crates/wartui-proto/src/plan.rs`, `clamp_tx_power` / `DEFAULT_TX_POWER_QUARTER_DBM`;
+  `crates/wartui-core/src/engine.rs`, `poll_bridge`
 - **ESP-NOW goes out at 802.11g 24 Mbps, set per peer through IDF directly** — `esp-radio`'s
   `set_rate` is refused on the C5 and C6, and misnumbered besides.
   → `firmware/bridge/src/main.rs`, `set_peer_rate`; `firmware/node/src/radio.rs`

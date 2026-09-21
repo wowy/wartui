@@ -28,7 +28,7 @@ use wartui_proto::air::{
 };
 use wartui_proto::link::{BridgeToHost, EspNowPayload, HostToBridge, Mac, SendStatus};
 use wartui_proto::plan::{
-    self, ChannelPool, ChannelSet, DEFAULT_TX_POWER_QUARTER_DBM, Job, Plan, Radio,
+    self, ChannelPool, ChannelSet, DEFAULT_TX_POWER_QUARTER_DBM, Job, Plan, Radio, clamp_tx_power,
 };
 
 use crate::distinct::Distinct;
@@ -148,6 +148,9 @@ pub struct EngineConfig {
     ///
     /// There is no operator control yet; this is the runtime configuration seam
     /// that keeps the firmware default from becoming a compile-time fleet policy.
+    ///
+    /// [`FleetEngine::new`] brings it inside the range IDF accepts, so a value outside
+    /// it costs the fleet a clamp rather than leaving every radio at its boot power.
     pub tx_power: i8,
 }
 
@@ -568,7 +571,10 @@ struct PendingAdmin {
 impl FleetEngine {
     /// Start an engine. `now` fixes the session's start time.
     #[must_use]
-    pub fn new(config: EngineConfig, now: Now) -> Self {
+    pub fn new(mut config: EngineConfig, now: Now) -> Self {
+        // Clamped once, here, rather than at each of the three places a power reaches a
+        // radio: `plan::clamp_tx_power` says why a refused one must not be reachable.
+        config.tx_power = clamp_tx_power(config.tx_power);
         Self {
             nodes: BTreeMap::new(),
             bridge: None,
@@ -628,12 +634,10 @@ impl FleetEngine {
                 // A new connection means a new baseline, whether or not the
                 // bridge itself rebooted.
                 self.dropped_baseline = None;
-                // A bridge that restarted has gone back to its firmware fallback.
-                // Restore the host's configured value before normal maintenance.
-                batch.bulk.push(HostToBridge::SetTxPower { power: self.config.tx_power });
-                // Ask straight away rather than waiting out the interval.
-                self.last_status_poll = Some(now.mono);
-                batch.bulk.push(wartui_proto::link::HostToBridge::GetStatus);
+                // Straight away rather than waiting out the interval: a bridge that
+                // restarted has gone back to its firmware fallback power, and this host
+                // has no status for it at all.
+                self.poll_bridge(now, &mut batch);
             }
             Event::Link(LinkEvent::Disconnected { reason }) => {
                 self.link_up = false;
@@ -684,9 +688,27 @@ impl FleetEngine {
             .last_status_poll
             .is_none_or(|last| now.mono.duration_since(last) >= self.config.status_interval);
         if due && self.link_up {
-            self.last_status_poll = Some(now.mono);
-            batch.bulk.push(wartui_proto::link::HostToBridge::GetStatus);
+            self.poll_bridge(now, batch);
         }
+    }
+
+    /// Ask the bridge how it is, and tell it what to transmit at.
+    ///
+    /// Paired on purpose, and repeated every `status_interval` rather than sent once on
+    /// connection. `bulk` drops rather than blocks, and a dropped `SetTxPower` has
+    /// nothing behind it to notice: the bridge would spend the rest of the session at
+    /// its firmware fallback while this host's snapshot, the panel and the link-budget
+    /// reasoning read the configured value. The poll beside it already recovers that
+    /// way, which is the whole argument for carrying the power with it rather than
+    /// making it urgent — nothing here is racing a node's admin window, and the urgent
+    /// queue is small precisely so that nothing but an assignment waits in it.
+    ///
+    /// `esp_wifi_set_max_tx_power` is idempotent and the bridge logs only a power that
+    /// changed, so the repeat costs one small frame per interval and no log line.
+    fn poll_bridge(&mut self, now: Now, batch: &mut ActionBatch) {
+        self.last_status_poll = Some(now.mono);
+        batch.bulk.push(HostToBridge::SetTxPower { power: self.config.tx_power });
+        batch.bulk.push(HostToBridge::GetStatus);
     }
 
     fn on_message(&mut self, msg: &BridgeToHost, now: Now, batch: &mut ActionBatch) {

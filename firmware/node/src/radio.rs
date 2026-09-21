@@ -43,7 +43,7 @@ pub fn park(manager: &EspNowManager<'_>, sniffer: &Sniffer<'_>, channel: u8, lis
 /// `esp-radio` registers at init, once; a node never removes that peer.
 /// `set_peer_rate` in `firmware/bridge/src/main.rs` has why 24 Mbps, what it costs,
 /// and why this cannot go through `esp-radio`.
-#[allow(unsafe_code, reason = "the one IDF call esp-radio does not wrap")]
+#[allow(unsafe_code, reason = "esp-radio's own espnow-rate call is refused on the C5 and C6")]
 pub fn set_broadcast_rate(_manager: &EspNowManager<'_>) -> bool {
     #[cfg(feature = "esp32c5")]
     use esp_wifi_sys_esp32c5::include as sys;
@@ -67,11 +67,15 @@ pub fn set_broadcast_rate(_manager: &EspNowManager<'_>) -> bool {
 /// `WifiController::set_max_tx_power` is safe but requires `&mut self`; the node keeps
 /// the sniffer and ESP-NOW handles borrowed for its whole life, so this is the narrow
 /// direct IDF equivalent. The caller applies it only when adopting a fresh assignment.
+///
+/// The manager goes unused for the reason [`set_broadcast_rate`] takes one: IDF wants
+/// `esp_wifi_start` behind this call, and a witness is what stops it being made from
+/// somewhere in `main` that compiles and then fails on the board.
 #[allow(
     unsafe_code,
     reason = "esp-radio requires a mutable controller after long-lived handles borrow it"
 )]
-pub fn set_tx_power(power: i8) -> bool {
+pub fn set_tx_power(_manager: &EspNowManager<'_>, power: i8) -> bool {
     #[cfg(feature = "esp32c5")]
     use esp_wifi_sys_esp32c5::include as sys;
     #[cfg(feature = "esp32c6")]

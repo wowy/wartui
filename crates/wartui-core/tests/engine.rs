@@ -451,9 +451,27 @@ fn the_bridge_is_configured_and_asked_for_its_counters_on_connect_and_then_on_th
 
     // Not again straight away: the interval starts from the connect.
     assert!(engine.handle(Event::Tick, clock.at(3)).bulk.is_empty());
+    // The power rides with every poll, not only the connect: `bulk` drops rather than
+    // blocks, and nothing else would ever notice a `SetTxPower` that went missing.
     assert_eq!(
         engine.handle(Event::Tick, clock.at(6)).bulk,
-        vec![wartui_proto::link::HostToBridge::GetStatus]
+        vec![HostToBridge::SetTxPower { power: 52 }, HostToBridge::GetStatus]
+    );
+}
+
+#[test]
+fn a_transmit_power_no_radio_would_accept_is_brought_into_range_rather_than_sent() {
+    let clock = Clock::new();
+    let mut too_high = engine(EngineConfig { tx_power: 120, ..Default::default() }, &clock);
+    assert_eq!(
+        too_high.handle(connected(), clock.at(1)).bulk,
+        vec![HostToBridge::SetTxPower { power: 84 }, HostToBridge::GetStatus]
+    );
+
+    let mut too_low = engine(EngineConfig { tx_power: -4, ..Default::default() }, &clock);
+    assert_eq!(
+        too_low.handle(connected(), clock.at(1)).bulk,
+        vec![HostToBridge::SetTxPower { power: 8 }, HostToBridge::GetStatus]
     );
 }
 

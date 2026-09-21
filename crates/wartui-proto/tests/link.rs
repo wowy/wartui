@@ -1,4 +1,8 @@
 //! The host-to-bridge USB framing.
+//!
+//! Both sample sets carry one case per variant and panic rather than `ok()` on a full
+//! vector: a push that failed silently would drop a variant out of every round trip
+//! below and leave the suite passing.
 
 use heapless::{String, Vec};
 use wartui_proto::air::{
@@ -10,7 +14,7 @@ use wartui_proto::link::{
     SendStatus, Severity, ShortStr, crc16, decode_frame, encode_frame,
 };
 
-fn sample_commands() -> Vec<HostToBridge, 8> {
+fn sample_commands() -> Vec<HostToBridge, 16> {
     let mut payload = Vec::new();
     payload
         .extend_from_slice(
@@ -19,18 +23,18 @@ fn sample_commands() -> Vec<HostToBridge, 8> {
         .expect("212 fits in 250");
 
     let mut v = Vec::new();
-    v.push(HostToBridge::SetChannel { channel: 6 }).ok();
-    v.push(HostToBridge::AddPeer { mac: [1, 2, 3, 4, 5, 6] }).ok();
-    v.push(HostToBridge::RemovePeer { mac: [1, 2, 3, 4, 5, 6] }).ok();
-    v.push(HostToBridge::GetStatus).ok();
-    v.push(HostToBridge::Reset).ok();
-    v.push(HostToBridge::ShowPanel { lines: full_panel() }).ok();
-    v.push(HostToBridge::SetTxPower { power: 8 }).ok();
+    v.push(HostToBridge::SetChannel { channel: 6 }).expect("sample_commands has room");
+    v.push(HostToBridge::AddPeer { mac: [1, 2, 3, 4, 5, 6] }).expect("sample_commands has room");
+    v.push(HostToBridge::RemovePeer { mac: [1, 2, 3, 4, 5, 6] }).expect("sample_commands has room");
+    v.push(HostToBridge::GetStatus).expect("sample_commands has room");
+    v.push(HostToBridge::Reset).expect("sample_commands has room");
+    v.push(HostToBridge::ShowPanel { lines: full_panel() }).expect("sample_commands has room");
+    v.push(HostToBridge::SetTxPower { power: 8 }).expect("sample_commands has room");
     // Last on purpose: `a_full_212_byte_frame_fits_with_room_to_spare` takes the final case
     // and measures it as the ESP-NOW one. Anything pushed after this silently becomes the
     // frame that test believes it is sizing.
     v.push(HostToBridge::SendEspNow { id: 0xBEEF, dst: [0xAA; 6], ensure_peer: true, payload })
-        .ok();
+        .expect("sample_commands has room");
     v
 }
 
@@ -45,7 +49,7 @@ fn full_panel() -> PanelLines {
     lines
 }
 
-fn sample_events() -> Vec<BridgeToHost, 8> {
+fn sample_events() -> Vec<BridgeToHost, 16> {
     let mut frame = [0u8; SIGHTING_MSG_MAX];
     let len = SightingMsg {
         kind: RecordKind::Wifi,
@@ -75,7 +79,7 @@ fn sample_events() -> Vec<BridgeToHost, 8> {
         uptime_ms: 8_675_309,
         panel: None,
     })
-    .ok();
+    .expect("sample_events has room");
     // A second one, because `Option` and the enums the first case does not reach are the
     // fields a round trip would otherwise pass on without carrying.
     v.push(BridgeToHost::Ready {
@@ -89,7 +93,7 @@ fn sample_events() -> Vec<BridgeToHost, 8> {
         uptime_ms: 1_000,
         panel: Some(Panel { cols: 26, rows: 8 }),
     })
-    .ok();
+    .expect("sample_events has room");
     v.push(BridgeToHost::Rx {
         src: [9; 6],
         dst: BROADCAST,
@@ -98,8 +102,9 @@ fn sample_events() -> Vec<BridgeToHost, 8> {
         rx_us: 123_456,
         payload,
     })
-    .ok();
-    v.push(BridgeToHost::SendResult { id: 7, status: SendStatus::AckOk, tx_us: 999 }).ok();
+    .expect("sample_events has room");
+    v.push(BridgeToHost::SendResult { id: 7, status: SendStatus::AckOk, tx_us: 999 })
+        .expect("sample_events has room");
     v.push(BridgeToHost::Status {
         channel: 6,
         peer_count: 3,
@@ -107,12 +112,12 @@ fn sample_events() -> Vec<BridgeToHost, 8> {
         dropped_tx: 0,
         uptime_ms: 60_000,
     })
-    .ok();
+    .expect("sample_events has room");
     v.push(BridgeToHost::Log {
         level: LogLevel::Warn,
         message: String::try_from("outbound ring full").expect("short"),
     })
-    .ok();
+    .expect("sample_events has room");
     v
 }
 
