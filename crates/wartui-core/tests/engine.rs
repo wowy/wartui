@@ -441,12 +441,14 @@ fn the_bridge_is_configured_and_asked_for_its_counters_on_connect_and_then_on_th
     let clock = Clock::new();
     let config = EngineConfig {
         status_interval: Duration::from_secs(5),
-        tx_power: 52,
+        tx_power: 20,
+        bridge_tx_power: 52,
         ..Default::default()
     };
     let mut engine = engine(config, &clock);
 
     let batch = engine.handle(connected(), clock.at(1));
+    // The bridge's own power, not the fleet's: the two are configured apart.
     assert_eq!(batch.bulk, vec![HostToBridge::SetTxPower { power: 52 }, HostToBridge::GetStatus]);
 
     // Not again straight away: the interval starts from the connect.
@@ -462,13 +464,20 @@ fn the_bridge_is_configured_and_asked_for_its_counters_on_connect_and_then_on_th
 #[test]
 fn a_transmit_power_no_radio_would_accept_is_brought_into_range_rather_than_sent() {
     let clock = Clock::new();
-    let mut too_high = engine(EngineConfig { tx_power: 120, ..Default::default() }, &clock);
+    let mut too_high =
+        engine(EngineConfig { tx_power: 120, bridge_tx_power: 120, ..Default::default() }, &clock);
+    // The ceiling is 20 dBm rather than the 21 the IDF would take: whether anything
+    // higher works correctly is unverified, so the host keeps it unreachable.
     assert_eq!(
         too_high.handle(connected(), clock.at(1)).bulk,
-        vec![HostToBridge::SetTxPower { power: 84 }, HostToBridge::GetStatus]
+        vec![HostToBridge::SetTxPower { power: 80 }, HostToBridge::GetStatus]
     );
+    too_high.handle(rx(GONE, b"not a frame"), clock.at(1));
+    let (_, _, admin) = sent_admin(&too_high.handle(heartbeat(NODE, 1), clock.at(1)));
+    assert_eq!(admin.tx_power, 80);
 
-    let mut too_low = engine(EngineConfig { tx_power: -4, ..Default::default() }, &clock);
+    let mut too_low =
+        engine(EngineConfig { tx_power: -4, bridge_tx_power: -4, ..Default::default() }, &clock);
     assert_eq!(
         too_low.handle(connected(), clock.at(1)).bulk,
         vec![HostToBridge::SetTxPower { power: 8 }, HostToBridge::GetStatus]
@@ -478,7 +487,8 @@ fn a_transmit_power_no_radio_would_accept_is_brought_into_range_rather_than_sent
 #[test]
 fn an_assignment_carries_the_configured_transmit_power() {
     let clock = Clock::new();
-    let mut engine = engine(EngineConfig { tx_power: 52, ..Default::default() }, &clock);
+    let mut engine =
+        engine(EngineConfig { tx_power: 52, bridge_tx_power: 20, ..Default::default() }, &clock);
     caught_up(&mut engine, &clock);
 
     let (_, _, admin) = sent_admin(&engine.handle(heartbeat(NODE, 1), clock.at(1)));

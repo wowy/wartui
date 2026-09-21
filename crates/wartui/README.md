@@ -21,28 +21,35 @@ This is the operator's manual. The root [`README.md`](../../README.md) is the sh
 
 `run` takes:
 
-| Flag                    | Default     | What it is                                                   |
-| ----------------------- | ----------- | ------------------------------------------------------------ |
-| `--db PATH`             | dated       | Where to keep the capture                                    |
-| `--bridge PATH\|MAC`    | detected    | Which board the bridge is, by path or by address             |
-| `--channel N`           | `6`         | The fleet's ESP-NOW control channel                          |
-| `--pool us\|eu\|all`    | `all`       | Which channels the fleet should scan                         |
-| `--lat` `--lon` `--alt` | —           | A static position for every observation                      |
-| `--gps PATH`            | detected    | An NMEA receiver, preferred over `--lat`/`--lon`             |
-| `--no-gps`              | off         | Do not look for a receiver at all                            |
-| `--gps-baud N`          | detected    | Line rate of that receiver                                   |
-| `--gps-max-age S`       | `5`         | How old a fix may be before falling back                     |
-| `--sim N`               | —           | Run a fake fleet instead of hardware                         |
-| `--sim-c6 N`            | `0`         | Make that many of them C6s, from the end of the fleet        |
-| `--record-raw`          | off         | Also keep the undecoded bytes of every frame                 |
-| `--commit-interval MS`  | `1000`      | How often the store commits; a crash loses at most this much |
-| `--notes TEXT`          | —           | A note about this run, stored with the session               |
+| Flag                    | Default      | What it is                                                   |
+| ----------------------- | ------------ | ------------------------------------------------------------ |
+| `--db PATH`             | dated        | Where to keep the capture                                    |
+| `--bridge PATH\|MAC`    | detected     | Which board the bridge is, by path or by address             |
+| `--channel N`           | `6`          | The fleet's ESP-NOW control channel                          |
+| `--pool us\|eu\|all`    | `all`        | Which channels the fleet should scan                         |
+| `--lat` `--lon` `--alt` | —            | A static position for every observation                      |
+| `--gps PATH`            | detected     | An NMEA receiver, preferred over `--lat`/`--lon`             |
+| `--no-gps`              | off          | Do not look for a receiver at all                            |
+| `--gps-baud N`          | detected     | Line rate of that receiver                                   |
+| `--gps-max-age S`       | `5`          | How old a fix may be before falling back                     |
+| `--sim N`               | —            | Run a fake fleet instead of hardware                         |
+| `--sim-c6 N`            | `0`          | Make that many of them C6s, from the end of the fleet        |
+| `--record-raw`          | off          | Also keep the undecoded bytes of every frame                 |
+| `--tx-power DBM`        | `2`          | Wi-Fi transmit power for the fleet, bridge included          |
+| `--bridge-tx-power DBM` | `--tx-power` | Wi-Fi transmit power for the bridge alone                    |
+| `--commit-interval MS`  | `1000`       | How often the store commits; a crash loses at most this much |
+| `--notes TEXT`          | —            | A note about this run, stored with the session               |
 
 `--db` names the capture for the minute the run started — `wartui-2026-09-18-14-30.db` — so a
 directory of them sorts into the order they were made rather than being one file every run appends
 to. The date is in ISO order whatever the locale reading it: that is what makes them sort, and what
 lets `export` pick out the last one. Two runs begun inside the same minute share a name, and the
 second adds its session to the first one's file.
+
+`--tx-power` is how loudly the whole fleet transmits — the nodes' heartbeats and sightings and the
+bridge's assignments — in whole dBm, 2 to 20, 2 by default. `--bridge-tx-power` sets the bridge
+alone and wins when both are given; the nodes still follow `--tx-power`. 20 dBm is the ceiling: the
+firmware would accept 21, but whether anything above 20 works correctly is unverified.
 
 `export` takes `--db`, `--out PATH` and `--session ID`, and writes the [WiGLE v1.6
 format](https://api.wigle.net/csvFormat.html). Both ends default, so exporting the evening that just

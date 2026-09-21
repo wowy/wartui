@@ -22,7 +22,7 @@ use wartui_core::gps::{Gps, GpsConfig};
 use wartui_core::position::PositionChain;
 use wartui_core::runtime::{COMMAND_QUEUE, drive, now};
 use wartui_core::store::{SessionInfo, Store, StoreConfig};
-use wartui_proto::plan::ChannelPool;
+use wartui_proto::plan::{ChannelPool, DEFAULT_TX_POWER_QUARTER_DBM};
 
 use crate::{capture, tui};
 
@@ -111,6 +111,17 @@ pub struct Args {
     #[arg(long)]
     record_raw: bool,
 
+    /// Wi-Fi transmit power for the fleet in dBm, the bridge included: 2 to 20,
+    /// 2 by default. 20 dBm is the ceiling because whether anything higher works
+    /// correctly is unverified, though the firmware would accept it.
+    #[arg(long, value_name = "DBM", value_parser = clap::value_parser!(i8).range(2..=20))]
+    pub(crate) tx_power: Option<i8>,
+
+    /// Wi-Fi transmit power for the bridge alone, in dBm. Takes precedence over
+    /// `--tx-power` when both are given; nodes still follow `--tx-power`.
+    #[arg(long, value_name = "DBM", value_parser = clap::value_parser!(i8).range(2..=20))]
+    pub(crate) bridge_tx_power: Option<i8>,
+
     /// Commit to the store at least this often, in milliseconds; 1000 by default. A crash
     /// loses at most this much of the capture, plus whatever is still queued.
     #[arg(long, value_name = "MS")]
@@ -119,6 +130,19 @@ pub struct Args {
     /// A note about this run, stored with the session.
     #[arg(long)]
     notes: Option<String>,
+}
+
+/// The fleet's two transmit powers in ESP-IDF quarter-dBm units: `(nodes, bridge)`.
+///
+/// The command line takes whole dBm, 2 to 20, which maps exactly onto the 8 to 80
+/// quarter-dBm the host permits; the wire carries quarter-dBm, so the conversion
+/// happens once here rather than on either side of it. `--bridge-tx-power` wins for
+/// the bridge when both flags are given; nodes always follow `--tx-power`.
+fn tx_powers(tx_power: Option<i8>, bridge_tx_power: Option<i8>) -> (i8, i8) {
+    let quarter = |dbm: i8| dbm * 4;
+    let nodes = tx_power.map_or(DEFAULT_TX_POWER_QUARTER_DBM, quarter);
+    let bridge = bridge_tx_power.or(tx_power).map_or(DEFAULT_TX_POWER_QUARTER_DBM, quarter);
+    (nodes, bridge)
 }
 
 pub async fn run(args: Args) -> Result<()> {
@@ -179,10 +203,13 @@ pub async fn run(args: Args) -> Result<()> {
     let store = Store::open(&store_config, &session, started.unix_ms)
         .with_context(|| format!("opening {}", db.display()))?;
 
+    let (tx_power, bridge_tx_power) = tx_powers(args.tx_power, args.bridge_tx_power);
     let config = EngineConfig {
         pool,
         record_raw: args.record_raw,
         position,
+        tx_power,
+        bridge_tx_power,
         // Epochs continue from wherever this database left off. Reusing one a
         // node already holds would be ignored on the air and acknowledged
         // anyway, which is indistinguishable from success.
@@ -245,4 +272,35 @@ pub async fn run(args: Args) -> Result<()> {
         println!("Export it with: wartui export");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tx_powers;
+    use wartui_proto::plan::DEFAULT_TX_POWER_QUARTER_DBM;
+
+    #[test]
+    fn without_a_power_flag_the_whole_fleet_keeps_the_default() {
+        assert_eq!(
+            tx_powers(None, None),
+            (DEFAULT_TX_POWER_QUARTER_DBM, DEFAULT_TX_POWER_QUARTER_DBM)
+        );
+    }
+
+    #[test]
+    fn tx_power_alone_covers_the_bridge_too() {
+        // One flag, one fleet: the bridge is not excepted from a power the
+        // operator set for everything.
+        assert_eq!(tx_powers(Some(10), None), (40, 40));
+    }
+
+    #[test]
+    fn bridge_tx_power_wins_for_the_bridge_when_both_are_given() {
+        assert_eq!(tx_powers(Some(10), Some(17)), (40, 68));
+    }
+
+    #[test]
+    fn bridge_tx_power_alone_leaves_the_nodes_at_the_default() {
+        assert_eq!(tx_powers(None, Some(17)), (DEFAULT_TX_POWER_QUARTER_DBM, 68));
+    }
 }

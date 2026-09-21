@@ -281,10 +281,13 @@ edit stops; follow the pointer before changing the rule.
   versions; issue #16 is the real upgrade, and moves all of them at once.
   → `firmware/bridge/README.md` § "Dependency versions"
 - **Every bridge and node defaults to 2 dBm**, the lowest `set_max_tx_power` accepts, and the host
-  is what decides otherwise: it clamps its quarter-dBm setting into the range IDF accepts once, at
-  engine construction, then carries it to the bridge with **every status poll** and to nodes in
-  their assignments. The poll carries it because `bulk` drops rather than blocks and a lost
-  `SetTxPower` has nothing behind it to notice; range is the cost of changing the default.
+  is what decides otherwise: `--tx-power` sets the fleet, `--bridge-tx-power` overrides it for the
+  bridge alone, and both take whole dBm (2 to 20) that the CLI converts to quarter-dBm. The engine
+  clamps the two settings once, at construction, then carries the bridge's with **every status
+  poll** and the nodes' in their assignments. The poll carries it because `bulk` drops rather than
+  blocks and a lost `SetTxPower` has nothing behind it to notice; range is the cost of changing
+  the default. The ceiling is 20 dBm rather than the 21 the IDF accepts — whether anything above
+  20 dBm works correctly is unverified, so the clamp keeps it unreachable.
   → `crates/wartui-proto/src/plan.rs`, `clamp_tx_power` / `DEFAULT_TX_POWER_QUARTER_DBM`;
   `crates/wartui-core/src/engine.rs`, `poll_bridge`
 - **ESP-NOW goes out at 802.11g 24 Mbps, set per peer through IDF directly** — `esp-radio`'s
