@@ -161,7 +161,7 @@ pub async fn run(args: Args) -> Result<()> {
     // work on wartui with nothing plugged in, and a search that opens every serial
     // port on a developer's machine four times over — resetting whatever is wired for
     // auto-reset on DTR — is not what that command is for. Naming one with `--gps` is
-    // still honoured: driving the simulator against a real receiver is how the
+    // still honored: driving the simulator against a real receiver is how the
     // position tier gets exercised without a fleet.
     let looking = !args.no_gps && (args.sim.is_none() || args.gps.is_some());
     let gps = looking.then(|| {
@@ -236,8 +236,7 @@ pub async fn run(args: Args) -> Result<()> {
 
     outcome?;
     println!("Capture written to {}", db.display());
-    // A receiver asked for and never answered leaves as unusable a capture as no
-    // position at all, so what matters is whether a fix landed.
+    // Without a GPS fix the capture isn't usable by WiGLE.
     let fixes = gps.as_ref().map_or(0, |gps| gps.view().counters.fixes);
     if args.lat.is_none() && fixes == 0 {
         // The view says so throughout as well; this is for a terminal that never
@@ -248,14 +247,13 @@ pub async fn run(args: Args) -> Result<()> {
                 "No position was given, so nothing in it can go to WiGLE. Drop --no-gps to \n\
                  look for a receiver, or run again with --lat and --lon."
             ),
-            // One was read and never got a fix. Naming it is the useful half: the
-            // rate is already known to be right, so the sky is what is left.
+            // Receiver found; no fix.
             (_, _, Some((port, baud))) => println!(
                 "The receiver on {port} at {baud} never reported a fix, so nothing in this \n\
                  capture can go to WiGLE. Check that it can see the sky, and run with --lat \n\
                  and --lon as well so a run like this still has a position."
             ),
-            // Named and never found: the port is the operator's to check.
+            // No receiver found at specified port
             (_, Some(port), None) => println!(
                 "Nothing on {port} answered as an NMEA receiver, so nothing in this capture \n\
                  can go to WiGLE. Check the path, or leave --gps off and let wartui look."

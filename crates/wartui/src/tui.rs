@@ -99,9 +99,8 @@ async fn view(
     outcome
 }
 
-/// What the view knows that the engine does not: which row the operator is
-/// looking at, and whether they have been told off for pressing a key that
-/// cannot work.
+/// Which row the operator is looking at, and whether they have been told off for pressing a key
+/// that cannot work.
 #[derive(Debug, Default)]
 struct Ui {
     selected: usize,
@@ -128,8 +127,6 @@ impl Ui {
                 self.notice = None;
                 self.selected = self.selected.saturating_sub(1);
             }
-            // The one decision left to the operator: the planner partitions
-            // channels and has no opinion about Bluetooth.
             KeyCode::Char('b') => self.toggle_ble(snapshot, commands),
             // Anything else leaves the notice alone: a key bound to nothing must
             // not clear the one message saying why nothing happened.
@@ -138,10 +135,6 @@ impl Ui {
     }
 
     /// Move the Bluetooth scan onto the selected node, or off it.
-    ///
-    /// One node at a time, because that is what the engine holds. Pressing `b`
-    /// on the node that already has it takes it off the fleet entirely, which
-    /// is the only way back to no-BLE-anywhere.
     fn toggle_ble(&mut self, snapshot: &Snapshot, commands: &mpsc::Sender<Command>) {
         let Some(node) = snapshot.nodes.get(self.selected) else { return };
         let target = node.state.mac;
@@ -161,7 +154,7 @@ impl Ui {
         // controller started.
         if !holds && node.state.capabilities.is_some_and(|capabilities| !capabilities.ble) {
             self.say(
-                format!("{} reports no bluetooth scan to run, so it cannot hold it", mac(&target)),
+                format!("{} does not support bluetooth scanning", mac(&target)),
                 snapshot,
             );
             return;
