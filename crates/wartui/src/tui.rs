@@ -1,11 +1,6 @@
 //! The fleet view.
 //!
-//! One key reaches the air — `b`, which moves the Bluetooth scan, and which the
-//! operator's manual lists (`crates/wartui/README.md`). What a node scans is the
-//! planner's and nothing here can override it. `b` does not transmit when
-//! pressed either: a node only listens in the 100 ms after its own heartbeat, so
-//! a keystroke's effect is a row reading `pending` until the next sweep
-//! completes. That delay is the protocol rather than lag, and the view says so.
+//! See the operator's manual (`crates/wartui/README.md`) for a usage guide.
 //!
 //! Rebuilt from a [`Snapshot`] the engine publishes four times a second, never
 //! from a stream of observations: a busy fleet produces tens of rows a second in
@@ -99,13 +94,12 @@ async fn view(
     outcome
 }
 
-/// What the view knows that the engine does not: which row the operator is
-/// looking at, and whether they have been told off for pressing a key that
-/// cannot work.
+/// Which row the operator is looking at, and whether they have been notified of a key
+/// press that cannot work.
 #[derive(Debug, Default)]
 struct Ui {
     selected: usize,
-    /// What was said, and the snapshot time it was said at.
+    /// The notice and the snapshot time it was sent.
     notice: Option<(String, i64)>,
 }
 
@@ -128,8 +122,6 @@ impl Ui {
                 self.notice = None;
                 self.selected = self.selected.saturating_sub(1);
             }
-            // The one decision left to the operator: the planner partitions
-            // channels and has no opinion about Bluetooth.
             KeyCode::Char('b') => self.toggle_ble(snapshot, commands),
             // Anything else leaves the notice alone: a key bound to nothing must
             // not clear the one message saying why nothing happened.
@@ -138,10 +130,6 @@ impl Ui {
     }
 
     /// Move the Bluetooth scan onto the selected node, or off it.
-    ///
-    /// One node at a time, because that is what the engine holds. Pressing `b`
-    /// on the node that already has it takes it off the fleet entirely, which
-    /// is the only way back to no-BLE-anywhere.
     fn toggle_ble(&mut self, snapshot: &Snapshot, commands: &mpsc::Sender<Command>) {
         let Some(node) = snapshot.nodes.get(self.selected) else { return };
         let target = node.state.mac;
@@ -160,10 +148,7 @@ impl Ui {
         // decides whether the code is there, and `ble::Scanner::new` whether the
         // controller started.
         if !holds && node.state.capabilities.is_some_and(|capabilities| !capabilities.ble) {
-            self.say(
-                format!("{} reports no bluetooth scan to run, so it cannot hold it", mac(&target)),
-                snapshot,
-            );
+            self.say(format!("{} does not support bluetooth scanning", mac(&target)), snapshot);
             return;
         }
         let said = match commands
@@ -336,8 +321,8 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot) {
     let link = if let Some(bridge) = &snapshot.bridge {
         let state = if snapshot.link_up { "up" } else { "down" };
         format!(
-            "bridge {} on {:?}, firmware {} — link {state}",
-            mac(&bridge.mac),
+            "bridge {} on {:?}, fw v{} — link {state}",
+            short_mac(&bridge.mac),
             bridge.chip,
             bridge.fw_version
         )
@@ -346,8 +331,8 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot) {
     };
 
     let radio = snapshot.bridge_status.map_or_else(
-        || "  channel ?".to_owned(),
-        |s| format!("  channel {}  peers {}  bridge rx {}", s.channel, s.peer_count, s.rx_count),
+        || "  ???".to_owned(),
+        |s| format!("  peers {}  bridge rx {}", s.peer_count, s.rx_count),
     );
 
     // The reason a link is down belongs in the fault box, which is vertical and
@@ -398,14 +383,13 @@ fn planning(snapshot: &Snapshot) -> Span<'static> {
 /// alternate screen swallows it, which is no use to someone who finds out at
 /// export time that a night of observations cannot be uploaded.
 fn position(snapshot: &Snapshot) -> Vec<Span<'static>> {
-    let fix = match (snapshot.position.lat, snapshot.position.lon) {
-        (Some(lat), Some(lon)) => {
-            Span::raw(format!("pos {lat:.5},{lon:.5} ({})", snapshot.position.source.as_str()))
-        }
-        _ => Span::styled(
+    let fix = if snapshot.position.is_located() {
+        Span::default()
+    } else {
+        Span::styled(
             "pos none — these observations cannot be uploaded",
             Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
-        ),
+        )
     };
     let mut spans = vec![fix];
     if let Some(gps) = &snapshot.gps
@@ -438,7 +422,7 @@ fn receiver(gps: &GpsView, source: PositionSource) -> Option<Span<'static>> {
             GpsStatus::Fixed { satellites: Some(n) } => format!(", {n} sats"),
             _ => String::new(),
         };
-        return Some(Span::styled(format!("  gps ok{sats}"), Style::new().fg(Color::Green)));
+        return Some(Span::styled(format!("gps ok{sats}"), Style::new().fg(Color::Green)));
     }
     let text = match &gps.status {
         GpsStatus::Connecting => "  gps connecting".to_owned(),
@@ -1352,7 +1336,7 @@ mod tests {
     fn an_unpositioned_capture_says_so_for_the_whole_run() {
         let mut positioned = Terminal::new(TestBackend::new(150, 20)).expect("test backend");
         positioned.draw(|frame| draw(frame, &busy(), &Ui::default())).expect("drawing");
-        assert!(positioned.backend().to_string().contains("pos 37.77490,-122.41940 (static)"));
+        assert!(!positioned.backend().to_string().contains("pos none"));
 
         let mut without = Terminal::new(TestBackend::new(150, 20)).expect("test backend");
         without.draw(|frame| draw(frame, &empty(), &Ui::default())).expect("drawing");
@@ -1429,8 +1413,8 @@ mod tests {
             PositionSource::Gps,
         );
         let screen = rendered(&fixed);
-        assert!(screen.contains("pos 48.11730,11.51670 (gps)"), "{screen}");
-        assert!(screen.contains("gps ok, 8 sats"));
+        assert!(!screen.contains("pos none"), "{screen}");
+        assert!(screen.contains("gps ok, 8 sats"), "{screen}");
     }
 
     #[test]
@@ -1493,8 +1477,8 @@ mod tests {
         let none = with_gps(GpsStatus::NoReceiver, GpsCounters::default(), PositionSource::Static);
         let drawn = rendered(&none);
         assert!(!drawn.contains("gps"), "{drawn}");
-        // And the row below still says where the capture thinks it is.
-        assert!(drawn.contains("(static)"), "{drawn}");
+        // A static position still keeps the unpositioned warning off screen.
+        assert!(!drawn.contains("pos none"), "{drawn}");
     }
 
     #[test]
@@ -1692,7 +1676,7 @@ mod tests {
         ui.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE), &snapshot, &tx);
         assert!(rx.try_recv().is_err(), "nothing was queued");
         let notice = ui.notice(snapshot.now_ms).expect("a reason");
-        assert!(notice.contains("reports no bluetooth scan"), "got {notice}");
+        assert!(notice.contains("does not support bluetooth scanning"), "got {notice}");
 
         // And taking it back off that node is still allowed.
         let mut holding = snapshot.clone();

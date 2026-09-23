@@ -1,6 +1,6 @@
 //! What a capture is called, and how `export` finds the last one.
 //!
-//! A capture is an evening out, and the file is named for the minute the run started, so
+//! A capture is a wardriving run, and the file is named for the minute the run started, so
 //! a directory of them reads as a log rather than as one file every run appends to. Two
 //! runs begun inside the same minute do share a name, and the second adds its session to
 //! the first one's file — what [`wartui_core::store::Store::open`] does for any path
