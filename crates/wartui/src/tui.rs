@@ -148,10 +148,7 @@ impl Ui {
         // decides whether the code is there, and `ble::Scanner::new` whether the
         // controller started.
         if !holds && node.state.capabilities.is_some_and(|capabilities| !capabilities.ble) {
-            self.say(
-                format!("{} does not support bluetooth scanning", mac(&target)),
-                snapshot,
-            );
+            self.say(format!("{} does not support bluetooth scanning", mac(&target)), snapshot);
             return;
         }
         let said = match commands
@@ -386,15 +383,13 @@ fn planning(snapshot: &Snapshot) -> Span<'static> {
 /// alternate screen swallows it, which is no use to someone who finds out at
 /// export time that a night of observations cannot be uploaded.
 fn position(snapshot: &Snapshot) -> Vec<Span<'static>> {
-    let fix = match (snapshot.position.lat, snapshot.position.lon) {
-        (Some(lat), Some(lon)) => {
-            //Span::raw(format!("pos {lat:.5},{lon:.5} ({})", snapshot.position.source.as_str()))
-            Span::raw("")
-        }
-        _ => Span::styled(
+    let fix = if snapshot.position.is_located() {
+        Span::default()
+    } else {
+        Span::styled(
             "pos none — these observations cannot be uploaded",
             Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
-        ),
+        )
     };
     let mut spans = vec![fix];
     if let Some(gps) = &snapshot.gps
