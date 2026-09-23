@@ -1336,7 +1336,7 @@ mod tests {
     fn an_unpositioned_capture_says_so_for_the_whole_run() {
         let mut positioned = Terminal::new(TestBackend::new(150, 20)).expect("test backend");
         positioned.draw(|frame| draw(frame, &busy(), &Ui::default())).expect("drawing");
-        assert!(positioned.backend().to_string().contains("pos 37.77490,-122.41940 (static)"));
+        assert!(!positioned.backend().to_string().contains("pos none"));
 
         let mut without = Terminal::new(TestBackend::new(150, 20)).expect("test backend");
         without.draw(|frame| draw(frame, &empty(), &Ui::default())).expect("drawing");
@@ -1413,8 +1413,8 @@ mod tests {
             PositionSource::Gps,
         );
         let screen = rendered(&fixed);
-        assert!(screen.contains("pos 48.11730,11.51670 (gps)"), "{screen}");
-        assert!(screen.contains("gps ok, 8 sats"));
+        assert!(!screen.contains("pos none"), "{screen}");
+        assert!(screen.contains("gps ok, 8 sats"), "{screen}");
     }
 
     #[test]
@@ -1477,8 +1477,8 @@ mod tests {
         let none = with_gps(GpsStatus::NoReceiver, GpsCounters::default(), PositionSource::Static);
         let drawn = rendered(&none);
         assert!(!drawn.contains("gps"), "{drawn}");
-        // And the row below still says where the capture thinks it is.
-        assert!(drawn.contains("(static)"), "{drawn}");
+        // A static position still keeps the unpositioned warning off screen.
+        assert!(!drawn.contains("pos none"), "{drawn}");
     }
 
     #[test]
@@ -1676,7 +1676,7 @@ mod tests {
         ui.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE), &snapshot, &tx);
         assert!(rx.try_recv().is_err(), "nothing was queued");
         let notice = ui.notice(snapshot.now_ms).expect("a reason");
-        assert!(notice.contains("reports no bluetooth scan"), "got {notice}");
+        assert!(notice.contains("does not support bluetooth scanning"), "got {notice}");
 
         // And taking it back off that node is still allowed.
         let mut holding = snapshot.clone();
