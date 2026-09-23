@@ -324,8 +324,8 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot) {
     let link = if let Some(bridge) = &snapshot.bridge {
         let state = if snapshot.link_up { "up" } else { "down" };
         format!(
-            "bridge {} on {:?}, firmware {} — link {state}",
-            mac(&bridge.mac),
+            "bridge {} on {:?}, fw v{} — link {state}",
+            short_mac(&bridge.mac),
             bridge.chip,
             bridge.fw_version
         )
@@ -334,8 +334,8 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot) {
     };
 
     let radio = snapshot.bridge_status.map_or_else(
-        || "  channel ?".to_owned(),
-        |s| format!("  channel {}  peers {}  bridge rx {}", s.channel, s.peer_count, s.rx_count),
+        || "  ???".to_owned(),
+        |s| format!("  peers {}  bridge rx {}", s.peer_count, s.rx_count),
     );
 
     // The reason a link is down belongs in the fault box, which is vertical and
@@ -388,7 +388,8 @@ fn planning(snapshot: &Snapshot) -> Span<'static> {
 fn position(snapshot: &Snapshot) -> Vec<Span<'static>> {
     let fix = match (snapshot.position.lat, snapshot.position.lon) {
         (Some(lat), Some(lon)) => {
-            Span::raw(format!("pos {lat:.5},{lon:.5} ({})", snapshot.position.source.as_str()))
+            //Span::raw(format!("pos {lat:.5},{lon:.5} ({})", snapshot.position.source.as_str()))
+            Span::raw("")
         }
         _ => Span::styled(
             "pos none — these observations cannot be uploaded",
@@ -426,7 +427,7 @@ fn receiver(gps: &GpsView, source: PositionSource) -> Option<Span<'static>> {
             GpsStatus::Fixed { satellites: Some(n) } => format!(", {n} sats"),
             _ => String::new(),
         };
-        return Some(Span::styled(format!("  gps ok{sats}"), Style::new().fg(Color::Green)));
+        return Some(Span::styled(format!("gps ok{sats}"), Style::new().fg(Color::Green)));
     }
     let text = match &gps.status {
         GpsStatus::Connecting => "  gps connecting".to_owned(),
