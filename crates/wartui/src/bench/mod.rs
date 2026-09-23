@@ -935,7 +935,7 @@ mod tests {
     }
 
     #[test]
-    fn the_timeline_is_an_array_in_json_and_a_table_for_a_person() {
+    fn report_formats_timeline_as_json_array_and_human_table_when_rendered() {
         let mut report = Report::default();
         report.put("rows", 12u64);
         report
@@ -963,7 +963,7 @@ mod tests {
     }
 
     #[test]
-    fn every_node_in_any_fleet_is_given_more_networks_than_its_ring_holds() {
+    fn busy_networks_calculates_network_density_exceeding_dedup_capacity_when_sizing_fleet() {
         for pool in [ChannelPool::Us, ChannelPool::Eu, ChannelPool::All] {
             for nodes in 1..=u8::try_from(MAX_NODES).unwrap() {
                 let per_channel =
@@ -979,7 +979,7 @@ mod tests {
     }
 
     #[test]
-    fn percentiles_are_nearest_rank_and_the_hundredth_is_the_slowest() {
+    fn percentile_computes_nearest_rank_value_when_given_durations() {
         let times: Vec<Duration> = (1..=10).map(Duration::from_millis).collect();
         assert_eq!(percentile(&times, 50), Some(Duration::from_millis(5)));
         assert_eq!(percentile(&times, 95), Some(Duration::from_millis(10)));
@@ -988,7 +988,7 @@ mod tests {
     }
 
     #[test]
-    fn the_json_report_is_one_object_with_nulls_for_what_was_not_measured() {
+    fn report_formats_json_with_nulls_when_optional_metrics_are_unmeasured() {
         let mut report = Report::default();
         report.put("device", Some("mmcblk0p2"));
         report.put("kernel", None::<String>);

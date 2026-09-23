@@ -26,13 +26,13 @@ fn event(reports: &[([u8; 6], &[u8], i8)]) -> Vec<u8> {
 const ADDR: [u8; 6] = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF];
 
 #[test]
-fn the_reset_command_is_the_one_the_specification_names() {
+fn hci_command_encodes_reset_command_when_constant_is_evaluated() {
     // H4 command, opcode 0x0C03 little-endian, no parameters.
     assert_eq!(RESET, [0x01, 0x03, 0x0C, 0x00]);
 }
 
 #[test]
-fn the_event_mask_unhides_the_one_event_a_scan_exists_to_produce() {
+fn hci_command_sets_le_meta_event_bit_when_constructing_event_mask() {
     // Measured on hardware: without this the controller accepts every command
     // with `status 0` and delivers not one advertising report, because a reset
     // restores the specification's default mask and an advertising report is an
@@ -47,7 +47,7 @@ fn the_event_mask_unhides_the_one_event_a_scan_exists_to_produce() {
 }
 
 #[test]
-fn scan_parameters_ask_for_a_passive_continuous_listen() {
+fn hci_command_formats_passive_continuous_scan_when_parameters_configured() {
     let cmd = set_scan_parameters(0x0060, 0x0060);
     assert_eq!(&cmd[..4], &[0x01, 0x0B, 0x20, 0x07], "opcode 0x200B, seven parameters");
     assert_eq!(cmd[4], 0x00, "passive: the node must not transmit a scan request");
@@ -57,13 +57,13 @@ fn scan_parameters_ask_for_a_passive_continuous_listen() {
 }
 
 #[test]
-fn scan_enable_carries_the_flag_and_leaves_duplicate_filtering_off() {
+fn hci_command_formats_scan_enable_without_filter_duplicates_when_toggled() {
     assert_eq!(set_scan_enable(true), [0x01, 0x0C, 0x20, 0x02, 0x01, 0x00]);
     assert_eq!(set_scan_enable(false), [0x01, 0x0C, 0x20, 0x02, 0x00, 0x00]);
 }
 
 #[test]
-fn an_advertising_report_yields_the_address_the_right_way_round() {
+fn hci_parser_extracts_correct_mac_address_when_parsing_advertising_report() {
     let packet = event(&[(ADDR, &[0x02, 0x01, 0x06], -70)]);
     let reports: Vec<_> = adv_reports(&packet).collect();
     assert_eq!(reports.len(), 1);
@@ -73,7 +73,7 @@ fn an_advertising_report_yields_the_address_the_right_way_round() {
 }
 
 #[test]
-fn several_reports_in_one_event_are_all_read() {
+fn hci_parser_extracts_all_reports_when_event_contains_multiple_records() {
     let other = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06];
     let packet = event(&[(ADDR, &[], -40), (other, &[0x02, 0x01, 0x06], -90)]);
     let reports: Vec<_> = adv_reports(&packet).collect();
@@ -85,7 +85,7 @@ fn several_reports_in_one_event_are_all_read() {
 }
 
 #[test]
-fn a_controller_with_no_reading_is_distinguishable_from_a_strong_signal() {
+fn hci_parser_identifies_missing_rssi_when_controller_reports_127() {
     // 127 is the specification's "not available", and is not a dBm a radio
     // could report. Passing it through would put an implausible row in the
     // export.
@@ -95,7 +95,7 @@ fn a_controller_with_no_reading_is_distinguishable_from_a_strong_signal() {
 }
 
 #[test]
-fn anything_that_is_not_an_advertising_report_yields_nothing() {
+fn hci_parser_ignores_non_advertising_events_when_parsing_packets() {
     // Command completions and unknown events arrive on the same pipe, so the
     // caller hands everything over and expects silence for most of it.
     assert_eq!(adv_reports(&[]).count(), 0);
@@ -105,7 +105,7 @@ fn anything_that_is_not_an_advertising_report_yields_nothing() {
 }
 
 #[test]
-fn a_truncated_event_stops_rather_than_inventing_a_device() {
+fn hci_parser_handles_truncated_event_safely_when_payload_is_cut() {
     let packet = event(&[(ADDR, &[0x02, 0x01, 0x06], -70), (ADDR, &[], -70)]);
     for cut in 5..packet.len() {
         // Whatever survives must be a prefix of the whole reading; the point is
@@ -117,14 +117,14 @@ fn a_truncated_event_stops_rather_than_inventing_a_device() {
 }
 
 #[test]
-fn a_report_that_claims_more_devices_than_it_carries_is_survivable() {
+fn hci_parser_survives_inflated_report_count_when_payload_is_short() {
     let mut packet = event(&[(ADDR, &[], -70)]);
     packet[4] = 200;
     assert_eq!(adv_reports(&packet).count(), 1, "one report is all there is");
 }
 
 #[test]
-fn a_report_becomes_the_frame_a_node_broadcasts() {
+fn hci_report_converts_to_ble_sighting_frame_when_encoded() {
     let packet = event(&[(ADDR, &[], -70)]);
     let report = adv_reports(&packet).next().expect("one report");
     let msg = report.as_msg(&[]);
@@ -141,7 +141,7 @@ fn a_report_becomes_the_frame_a_node_broadcasts() {
 }
 
 #[test]
-fn a_manufacturer_identifier_is_read_out_of_the_advertising_data() {
+fn hci_parser_extracts_manufacturer_id_when_manufacturer_structure_present() {
     // `0xFF` is the manufacturer-specific structure, and its payload begins
     // with the two little-endian bytes WiGLE's `MfgrId` column wants. Here it
     // sits behind a flags structure, which is how real advertisers carry it.
@@ -157,7 +157,7 @@ fn a_manufacturer_identifier_is_read_out_of_the_advertising_data() {
 }
 
 #[test]
-fn an_advertiser_without_manufacturer_data_has_none() {
+fn hci_parser_returns_none_for_manufacturer_id_when_data_omits_structure() {
     // Most do not send any, and that is not a fault.
     let packet = event(&[(ADDR, &[0x02, 0x01, 0x06], -70)]);
     let report = adv_reports(&packet).next().expect("one report");
@@ -165,7 +165,7 @@ fn an_advertiser_without_manufacturer_data_has_none() {
 }
 
 #[test]
-fn a_malformed_structure_run_yields_no_identifier_rather_than_a_wrong_one() {
+fn hci_parser_suppresses_manufacturer_id_when_data_structure_is_malformed() {
     // The walk stops where the data stops making sense — same deal the beacon
     // parser gives a malformed element. A structure claiming five bytes while
     // carrying three ends the run before any identifier is guessed at.

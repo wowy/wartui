@@ -1183,7 +1183,7 @@ mod tests {
     /// takes the whole capture down with it, in the alternate screen, where the
     /// backtrace is unreadable. These sizes are cheap insurance against that.
     #[test]
-    fn every_plausible_terminal_size_renders() {
+    fn view_renders_without_panicking_when_given_various_terminal_sizes() {
         for snapshot in [busy(), empty()] {
             for (width, height) in [(200, 50), (120, 30), (80, 24), (40, 10), (20, 5), (6, 3)] {
                 let mut terminal =
@@ -1194,7 +1194,7 @@ mod tests {
     }
 
     #[test]
-    fn the_fleet_table_names_each_node_by_chip_and_last_two_octets() {
+    fn fleet_table_displays_chip_and_mac_suffix_when_rendering_nodes() {
         let snapshot = Snapshot {
             nodes: vec![node(0x84, 0, true), narrowband(0x85), unannounced(0x86)],
             tail: Vec::new(),
@@ -1211,7 +1211,7 @@ mod tests {
     }
 
     #[test]
-    fn a_wide_terminal_shows_the_fleet_and_the_stream_side_by_side() {
+    fn view_shows_fleet_and_stream_side_by_side_when_terminal_is_wide() {
         let mut terminal = Terminal::new(TestBackend::new(200, 40)).expect("test backend");
         terminal.draw(|frame| draw(frame, &busy(), &Ui::default())).expect("drawing");
         let rendered = terminal.backend().to_string();
@@ -1223,7 +1223,7 @@ mod tests {
     }
 
     #[test]
-    fn faults_are_only_shown_once_they_have_happened() {
+    fn view_displays_faults_only_when_they_have_occurred() {
         let mut clean = Terminal::new(TestBackend::new(200, 40)).expect("test backend");
         clean.draw(|frame| draw(frame, &empty(), &Ui::default())).expect("drawing");
         assert!(!clean.backend().to_string().contains("dropped"));
@@ -1240,7 +1240,7 @@ mod tests {
     const BUSY: &str = "could not open /dev/cu.usbmodem101: Device or resource busy";
 
     #[test]
-    fn one_long_fault_is_broken_up_rather_than_cut_off() {
+    fn fault_lines_wraps_long_message_when_fault_exceeds_terminal_width() {
         // Unwrapped, a reason this long would show its first clause on a narrow
         // terminal and nothing else, so `fault_lines` breaks it up instead.
         let fault = format!("link down: {BUSY}");
@@ -1252,13 +1252,13 @@ mod tests {
     }
 
     #[test]
-    fn faults_that_fit_still_share_one_line() {
+    fn fault_lines_combines_messages_into_one_line_when_faults_fit_within_width() {
         let faults = ["store dropped 7".to_owned(), "unparsed 3".to_owned()];
         assert_eq!(fault_lines(&faults, 200), vec!["  store dropped 7  unparsed 3".to_owned()]);
     }
 
     #[test]
-    fn more_faults_than_the_footer_can_hold_are_counted_rather_than_dropped() {
+    fn fault_lines_appends_overflow_count_when_faults_exceed_footer_capacity() {
         let faults: Vec<String> = (0..12).map(|n| format!("fault number {n} of twelve")).collect();
         let lines = fault_lines(&faults, 40);
         assert_eq!(lines.len(), MAX_FAULT_LINES, "the fleet table keeps the rest of the screen");
@@ -1268,7 +1268,7 @@ mod tests {
     }
 
     #[test]
-    fn a_fault_too_long_for_the_box_says_how_much_is_missing() {
+    fn fault_lines_appends_truncated_indicator_when_single_fault_exceeds_box_capacity() {
         // Three lines of a twenty-column terminal cannot hold this, and the half
         // naming what to do about it is the half that would go.
         let fault = format!("link down: {BUSY}");
@@ -1281,7 +1281,7 @@ mod tests {
     }
 
     #[test]
-    fn the_notice_does_not_eat_the_message_above_it() {
+    fn fault_lines_preserves_preceding_messages_when_overflow_notice_is_added() {
         // The notice takes a line of its own: taking its room out of the last fault
         // would leave a sentence that reads as complete and says something the OS
         // never said.
@@ -1298,7 +1298,7 @@ mod tests {
     }
 
     #[test]
-    fn the_notice_itself_is_never_the_thing_that_gets_clipped() {
+    fn fault_lines_keeps_overflow_notice_within_bounds_when_terminal_width_is_narrow() {
         // Not a terminal anyone uses, but nothing the footer draws may be wider
         // than the frame.
         let faults: Vec<String> = (0..2000).map(|n| format!("fault {n}")).collect();
@@ -1311,7 +1311,7 @@ mod tests {
     }
 
     #[test]
-    fn the_reason_a_link_is_down_reaches_a_narrow_terminal() {
+    fn view_displays_link_down_reason_when_terminal_is_narrow() {
         let mut snapshot = empty();
         snapshot.link_error = Some(BUSY.to_owned());
         let mut terminal = Terminal::new(TestBackend::new(60, 24)).expect("test backend");
@@ -1323,7 +1323,7 @@ mod tests {
     }
 
     #[test]
-    fn a_link_that_is_down_says_why() {
+    fn view_displays_link_error_details_when_link_is_down() {
         let mut terminal = Terminal::new(TestBackend::new(120, 20)).expect("test backend");
         terminal.draw(|frame| draw(frame, &empty(), &Ui::default())).expect("drawing");
         let rendered = terminal.backend().to_string();
@@ -1333,7 +1333,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unpositioned_capture_says_so_for_the_whole_run() {
+    fn view_displays_pos_none_indicator_when_capture_lacks_position_fix() {
         let mut positioned = Terminal::new(TestBackend::new(150, 20)).expect("test backend");
         positioned.draw(|frame| draw(frame, &busy(), &Ui::default())).expect("drawing");
         assert!(!positioned.backend().to_string().contains("pos none"));
@@ -1377,7 +1377,7 @@ mod tests {
     }
 
     #[test]
-    fn the_header_names_the_pool_the_way_the_readme_does() {
+    fn header_displays_pool_name_when_rendering_active_channel_pool() {
         // The header is the only place the pool is named on screen, and it
         // spells each one the way the manual does.
         let mut snapshot = busy();
@@ -1392,7 +1392,7 @@ mod tests {
     }
 
     #[test]
-    fn a_receiver_that_is_not_the_one_answering_says_why() {
+    fn view_explains_gps_status_when_receiver_is_searching_or_stale() {
         let searching =
             with_gps(GpsStatus::Searching, GpsCounters::default(), PositionSource::Static);
         assert!(rendered(&searching).contains("gps searching"));
@@ -1406,7 +1406,7 @@ mod tests {
     }
 
     #[test]
-    fn a_receiver_the_rows_are_using_is_named_with_its_satellite_count() {
+    fn view_displays_satellite_count_when_gps_fix_is_active() {
         let fixed = with_gps(
             GpsStatus::Fixed { satellites: Some(8) },
             GpsCounters { sentences: 400, fixes: 200, rejected: 1 },
@@ -1418,13 +1418,13 @@ mod tests {
     }
 
     #[test]
-    fn a_capture_with_no_receiver_says_nothing_at_all_about_one() {
+    fn view_omits_gps_status_when_no_receiver_is_present() {
         // Most captures are static, and a permanent "gps: none" would be noise.
         assert!(!rendered(&busy()).contains("gps"));
     }
 
     #[test]
-    fn a_receiver_that_has_died_does_not_read_as_healthy_while_its_fix_lasts() {
+    fn view_displays_failure_message_when_receiver_disconnects_mid_capture() {
         // The seconds after the puck falls out: the rows are still the GPS's,
         // and the port is gone.
         let unplugged = with_gps(
@@ -1438,7 +1438,7 @@ mod tests {
     }
 
     #[test]
-    fn a_receiver_that_cannot_be_read_is_a_fault_rather_than_a_silence() {
+    fn view_reports_gps_fault_when_receiver_is_unreadable_or_baud_rate_is_wrong() {
         let failed = with_gps(
             GpsStatus::Failed("/dev/cu.gps: No such file or directory".to_owned()),
             GpsCounters::default(),
@@ -1455,7 +1455,7 @@ mod tests {
     }
 
     #[test]
-    fn a_detected_rate_is_never_blamed_on_the_flag_that_did_not_choose_it() {
+    fn view_reports_unreadable_lines_without_blaming_baud_flag_when_baud_rate_was_auto_detected() {
         // The ladder settles on a rate by getting valid sentences out of it, so
         // unreadable lines afterwards are a receiver that changed or a cable that is
         // failing. Sending the operator to `--gps-baud` would send them nowhere.
@@ -1470,7 +1470,7 @@ mod tests {
     }
 
     #[test]
-    fn a_receiver_that_was_never_found_is_not_a_fault_and_not_a_line() {
+    fn view_suppresses_gps_fault_line_when_no_receiver_was_found() {
         // Searching is the default, so most captures with no receiver are captures
         // where there was never going to be one. Saying so on every one of them
         // would put a fault on the view where there is no fault.
@@ -1482,7 +1482,7 @@ mod tests {
     }
 
     #[test]
-    fn a_ladder_being_walked_says_which_port_and_which_rate() {
+    fn view_displays_port_and_baud_rate_when_gps_ladder_is_scanning() {
         let scanning = with_gps(
             GpsStatus::Scanning { port: "/dev/ttyUSB0".to_owned(), baud: 38_400 },
             GpsCounters::default(),
@@ -1507,7 +1507,7 @@ mod tests {
     }
 
     #[test]
-    fn frames_dropped_during_this_capture_are_a_fault_but_the_bridges_own_history_is_not() {
+    fn view_reports_bridge_drops_only_when_drops_occur_during_current_capture() {
         let screen = rendered(&with_bridge_drops(5));
         assert!(screen.contains("bridge dropped 5"), "{screen}");
 
@@ -1529,7 +1529,7 @@ mod tests {
     }
 
     #[test]
-    fn a_bridge_that_restarted_is_a_fault_but_one_that_was_switched_on_is_not() {
+    fn view_reports_bridge_reboot_when_reset_cause_is_watchdog() {
         let screen = rendered(&with_restart(ResetCause::Watchdog, LoopPhase::Transmit));
         assert!(screen.contains("watchdog"), "{screen}");
 
@@ -1540,13 +1540,13 @@ mod tests {
     }
 
     #[test]
-    fn a_stalled_transmit_path_is_named_rather_than_called_a_firmware_reset() {
+    fn view_reports_usb_tx_stall_when_bridge_reboots_due_to_tx_stalled() {
         let screen = rendered(&with_restart(ResetCause::Software, LoopPhase::TxStalled));
         assert!(screen.contains("USB transmit had stalled"), "{screen}");
     }
 
     #[test]
-    fn q_escape_and_ctrl_c_all_quit() {
+    fn quits_returns_true_when_receiving_q_esc_or_ctrl_c() {
         assert!(quits(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)));
         assert!(quits(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
         assert!(quits(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)));
@@ -1554,7 +1554,8 @@ mod tests {
     }
 
     #[test]
-    fn the_fleet_table_distinguishes_a_confirmed_range_from_a_wanted_one() {
+    fn fleet_table_distinguishes_confirmed_from_desired_assignments_when_rendering_channel_column()
+    {
         let mut terminal = Terminal::new(TestBackend::new(200, 40)).expect("test backend");
         terminal.draw(|frame| draw(frame, &busy(), &Ui::default())).expect("drawing");
         let rendered = terminal.backend().to_string();
@@ -1565,7 +1566,7 @@ mod tests {
     }
 
     #[test]
-    fn channels_are_shown_as_channel_numbers_rather_than_table_indices() {
+    fn channel_list_formats_indices_as_channel_numbers_when_given_index_runs() {
         // Indices into SCAN_CHANNELS are an artefact of the wire format.
         assert_eq!(channel_list(ChannelSet::from_run(IndexRun::new(0, 0))), "1");
         assert_eq!(channel_list(ChannelSet::from_run(IndexRun::new(0, 10))), "1-11");
@@ -1573,7 +1574,7 @@ mod tests {
     }
 
     #[test]
-    fn a_scattered_assignment_is_said_as_runs_rather_than_as_a_span() {
+    fn channel_list_formats_channels_as_compact_runs_when_channel_set_is_scattered() {
         assert_eq!(channel_list(ChannelPool::Us.channels()), "1-11,36-165");
         let mut comb = ChannelSet::empty();
         for idx in [0, 2, 4, 14, 15] {
@@ -1584,7 +1585,7 @@ mod tests {
     }
 
     #[test]
-    fn a_channel_cell_leads_with_the_count_and_truncates_the_rest() {
+    fn channel_cell_prefixes_count_and_truncates_channels_when_width_is_limited() {
         let us = ChannelPool::Us.channels();
         assert_eq!(channel_cell(us, 40), "36: 1-11,36-165");
         assert_eq!(channel_cell(us, 10), "36: 1-11…", "and never cut mid-separator");
@@ -1592,7 +1593,7 @@ mod tests {
     }
 
     #[test]
-    fn a_pending_cell_carries_one_ellipsis_however_long_its_list_is() {
+    fn channels_cell_emits_single_ellipsis_when_pending_channel_list_is_truncated() {
         // The "asked for, not yet acknowledged" marker and the "more than
         // fitted" marker are the same character, and two in a row is not a
         // different meaning, just a worse-looking cell.
@@ -1611,7 +1612,7 @@ mod tests {
     }
 
     #[test]
-    fn a_node_that_cannot_be_assigned_says_which_of_the_reasons_it_is() {
+    fn ui_displays_specific_refusal_notice_when_toggling_ble_on_unassignable_node() {
         // Three faults all end in a refused `b` and the operator's next move
         // differs for each, so one wording for all three misdirects two.
         let mut snapshot = busy();
@@ -1644,7 +1645,7 @@ mod tests {
     }
 
     #[test]
-    fn a_fleet_that_cannot_be_driven_is_told_so_not_that_it_is_silent() {
+    fn view_warns_no_drivable_nodes_when_all_nodes_are_refused_peer_slots() {
         // Every node heartbeating, none reachable — a fleet that has outgrown
         // the bridge's twenty peer slots, so there is nothing to partition.
         let mut snapshot = busy();
@@ -1661,7 +1662,7 @@ mod tests {
     }
 
     #[test]
-    fn b_is_refused_on_a_node_whose_build_has_no_bluetooth_in_it() {
+    fn ui_refuses_ble_assignment_when_node_lacks_bluetooth_capability() {
         let mut snapshot = busy();
         snapshot.nodes.push(narrowband(0x21));
         snapshot.nodes.sort_by_key(|n| n.state.mac);
@@ -1686,7 +1687,7 @@ mod tests {
     }
 
     #[test]
-    fn b_waits_for_a_plan_only_on_a_fleet_that_has_none() {
+    fn ui_displays_plan_dependency_notice_when_assigning_ble_on_fleet_without_plan() {
         // A node the planner dealt nothing is still in the plan, so giving it the scan
         // deals it the empty share the flag travels in and it hears on its next
         // heartbeat like any other. The wait is for a fleet with no plan at all, where
@@ -1722,7 +1723,7 @@ mod tests {
     }
 
     #[test]
-    fn a_fleet_with_no_five_ghz_radio_says_the_pool_is_not_being_covered() {
+    fn view_warns_missing_five_ghz_coverage_when_fleet_has_no_five_ghz_radios() {
         let mut snapshot = busy();
         snapshot.plan = plan_for(ChannelPool::Us, &[Job::Wifi(Radio::TwoPointFour); 2]);
         let mut terminal = Terminal::new(TestBackend::new(200, 40)).expect("test backend");
@@ -1735,7 +1736,7 @@ mod tests {
     }
 
     #[test]
-    fn a_fleet_whose_only_node_scans_bluetooth_says_nothing_is_being_swept() {
+    fn view_warns_no_wifi_sniffing_when_all_nodes_scan_bluetooth() {
         // The 5 GHz wording would be a plausible-looking lie here: every channel is
         // out of reach, 2.4 GHz included, and the reason is not the radio.
         let mut snapshot = busy();
@@ -1751,7 +1752,7 @@ mod tests {
     }
 
     #[test]
-    fn the_channels_column_says_bluetooth_for_the_node_whose_whole_job_it_is() {
+    fn channels_cell_displays_bluetooth_when_node_is_assigned_bluetooth_scan() {
         // `0: none` would read as a fault rather than as the job it is.
         let mut view = assigned(0x11);
         view.state.confirmed = Some(Assignment {
@@ -1770,14 +1771,14 @@ mod tests {
     }
 
     #[test]
-    fn a_node_with_no_peer_slot_says_it_was_refused_rather_than_that_it_went_quiet() {
+    fn node_state_returns_refused_label_when_node_has_no_peer_slot() {
         let view = refused(0x21);
         let (label, _) = node_state(&view);
         assert_eq!(label, "refused");
     }
 
     #[test]
-    fn a_node_heard_only_through_its_observations_reads_as_such() {
+    fn node_state_returns_no_heartbeat_label_when_node_is_only_heard_via_observations() {
         // The honest case: observations have arrived and no heartbeat yet, so
         // there has been no window to send anything through.
         let view = unannounced(0x21);
@@ -1787,7 +1788,7 @@ mod tests {
     }
 
     #[test]
-    fn what_the_planner_has_to_work_with_is_on_screen_for_the_whole_capture() {
+    fn view_displays_planner_status_when_rendering_header() {
         let mut empty = busy();
         empty.nodes.clear();
         empty.alive = 0;
@@ -1814,7 +1815,7 @@ mod tests {
     }
 
     #[test]
-    fn b_moves_the_bluetooth_scan_and_a_second_press_takes_it_off_the_fleet() {
+    fn ui_toggles_ble_assignment_when_b_key_is_pressed() {
         let snapshot = busy();
         let node = snapshot.nodes[0].state.mac;
         let (tx, mut rx) = mpsc::channel(4);
@@ -1832,7 +1833,7 @@ mod tests {
     }
 
     #[test]
-    fn the_fleet_table_says_who_holds_the_bluetooth_scan_and_who_is_about_to() {
+    fn fleet_table_shows_ble_assignment_status_when_node_holds_or_awaits_ble() {
         let mut snapshot = busy();
         snapshot.ble_node = Some(snapshot.nodes[0].state.mac);
         if let Some(confirmed) = snapshot.nodes[0].state.confirmed.as_mut() {
@@ -1850,7 +1851,7 @@ mod tests {
     }
 
     #[test]
-    fn a_fleet_over_the_limit_says_it_has_stopped_being_partitioned() {
+    fn view_warns_partitioning_has_stopped_when_fleet_exceeds_max_nodes() {
         let mut snapshot = busy();
         snapshot.plan = None;
         snapshot.assignable = MAX_NODES + 1;
@@ -1860,7 +1861,7 @@ mod tests {
     }
 
     #[test]
-    fn the_cursor_stays_on_a_real_row_as_the_fleet_grows_and_shrinks() {
+    fn ui_clamps_cursor_to_valid_row_when_navigating_or_fleet_size_changes() {
         let snapshot = busy();
         let (tx, _rx) = mpsc::channel(4);
         let mut ui = Ui::default();

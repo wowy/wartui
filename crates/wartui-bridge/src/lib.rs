@@ -236,7 +236,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn urgent_commands_overtake_a_backlog_of_bulk_ones() {
+    async fn link_handle_prioritises_urgent_commands_when_bulk_commands_are_backlogged() {
         // Without this bias a burst of status polls can queue ahead of a channel
         // assignment and push it past the node's 100 ms admin window.
         let (handle, mut plumbing) = link_pair();
@@ -249,7 +249,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bulk_commands_still_drain_once_urgent_is_empty() {
+    async fn link_handle_drains_bulk_commands_when_urgent_queue_is_empty() {
         let (handle, mut plumbing) = link_pair();
         handle.send_bulk(HostToBridge::GetStatus).expect("queued");
         handle.send_urgent(HostToBridge::Reset).expect("queued");
@@ -259,14 +259,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn commands_stop_when_the_handle_is_dropped() {
+    async fn command_rx_returns_none_when_link_handle_is_dropped() {
         let (handle, mut plumbing) = link_pair();
         drop(handle);
         assert_eq!(plumbing.commands.recv().await, None);
     }
 
     #[tokio::test]
-    async fn a_full_urgent_queue_is_reported_rather_than_blocking() {
+    async fn link_handle_returns_full_error_when_urgent_queue_capacity_exceeded() {
         // The engine must keep running: a missed assignment is retried on the
         // next heartbeat, but a stalled engine misses everything.
         let (handle, _plumbing) = link_pair();
@@ -277,7 +277,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sending_after_shutdown_reports_closed() {
+    async fn link_handle_returns_closed_error_when_sending_after_plumbing_dropped() {
         let (handle, plumbing) = link_pair();
         drop(plumbing);
         assert_eq!(handle.send_urgent(HostToBridge::Reset), Err(SendError::Closed));

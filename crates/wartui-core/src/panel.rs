@@ -331,7 +331,7 @@ mod tests {
     }
 
     #[test]
-    fn a_capture_that_has_heard_nothing_still_fills_every_line() {
+    fn panel_view_populates_all_lines_when_snapshot_is_empty() {
         let lines = render(&quiet(), SCREEN);
         assert_eq!(lines.len(), 5);
         // Not a blank screen and not a zero pretending to be a measurement: each
@@ -342,7 +342,7 @@ mod tests {
     }
 
     #[test]
-    fn the_gps_line_is_green_only_on_a_live_fix() {
+    fn panel_view_sets_ok_severity_for_gps_when_fix_is_live() {
         // The chain answering from the receiver is the whole of the rule, and it is
         // what the satellite count hangs off too.
         let (level, text) =
@@ -358,7 +358,7 @@ mod tests {
     }
 
     #[test]
-    fn a_receiver_that_is_still_trying_is_yellow_rather_than_red() {
+    fn panel_view_sets_warn_severity_for_gps_when_receiver_is_searching_or_connecting() {
         for status in [
             GpsStatus::Connecting,
             GpsStatus::Scanning { port: "/dev/ttyUSB0".to_owned(), baud: 9_600 },
@@ -373,7 +373,7 @@ mod tests {
     }
 
     #[test]
-    fn nothing_that_can_produce_another_fix_is_red() {
+    fn panel_view_sets_error_severity_for_gps_when_receiver_failed_or_position_pinned() {
         for status in [GpsStatus::NoReceiver, GpsStatus::Failed("no such port".to_owned())] {
             let (level, _) = row(&gps(status.clone(), PositionSource::None), 0);
             assert_eq!(level, Severity::Error, "{status:?} is not going to answer");
@@ -389,7 +389,7 @@ mod tests {
     }
 
     #[test]
-    fn a_fleet_that_cannot_all_be_driven_says_both_numbers() {
+    fn panel_view_formats_node_counts_when_fleet_has_undrivable_nodes() {
         let mut snapshot = fleet(&[Some(-40), Some(-45)]);
         snapshot.alive = 5;
         snapshot.assignable = 2;
@@ -404,7 +404,7 @@ mod tests {
     }
 
     #[test]
-    fn a_link_that_is_down_outranks_whatever_the_fleet_last_looked_like() {
+    fn panel_view_displays_link_down_error_when_link_is_inactive() {
         let mut snapshot = fleet(&[Some(-40)]);
         snapshot.link_up = false;
         let (level, text) = row(&snapshot, 1);
@@ -413,7 +413,7 @@ mod tests {
     }
 
     #[test]
-    fn the_counts_are_rendered_as_the_estimates_they_are() {
+    fn panel_view_formats_approximate_counts_when_rendering_network_totals() {
         let mut snapshot = quiet();
         snapshot.unique_wifi_aps = 12_345;
         snapshot.unique_ble_aps = 42;
@@ -422,7 +422,7 @@ mod tests {
     }
 
     #[test]
-    fn a_number_that_is_both_min_and_average_is_said_once() {
+    fn panel_view_formats_single_rssi_value_when_all_nodes_have_identical_signal() {
         // One node is the obvious case.
         let (level, text) = row(&fleet(&[Some(-52)]), 4);
         assert_eq!(level, Severity::Ok);
@@ -435,7 +435,7 @@ mod tests {
     }
 
     #[test]
-    fn a_weak_average_and_a_single_weak_node_are_both_worth_a_warning() {
+    fn panel_view_sets_warn_severity_for_rssi_when_signal_is_weak() {
         // Every node weak: the average carries it.
         let (level, _) = row(&fleet(&[Some(-68), Some(-67)]), 4);
         assert_eq!(level, Severity::Warn);
@@ -461,7 +461,7 @@ mod tests {
     }
 
     #[test]
-    fn nodes_the_bridge_has_not_measured_are_skipped_rather_than_counted_as_zero() {
+    fn panel_view_ignores_unmeasured_nodes_when_calculating_rssi_stats() {
         // A node heard only through its observations has no link RSSI yet. Folding
         // its absence in as a nought would read as a perfect link.
         let (level, text) = row(&fleet(&[Some(-60), None]), 4);
@@ -475,7 +475,7 @@ mod tests {
     }
 
     #[test]
-    fn a_node_outside_the_topology_timeout_is_not_folded_in() {
+    fn panel_view_excludes_stale_nodes_when_calculating_rssi_stats() {
         // Its last measurement is real and long past; the fleet's link health is
         // the fleet that is still here.
         let mut snapshot = fleet(&[Some(-40), Some(-90)]);
@@ -488,7 +488,7 @@ mod tests {
     }
 
     #[test]
-    fn a_reading_too_weak_to_print_is_named_rather_than_numbered() {
+    fn panel_view_displays_bad_label_when_rssi_falls_below_floor() {
         // Three digits and a sign is a character more than the line has, and the exact
         // figure stopped meaning anything long before this: what an operator does about
         // -104 dBm is what they do about -100.
@@ -508,7 +508,7 @@ mod tests {
     }
 
     #[test]
-    fn nothing_this_composes_overflows_the_panel_that_ships() {
+    fn panel_view_constrains_line_lengths_when_rendering_to_hardware_geometry() {
         // `firmware/bridge/src/panel.rs` gets seventeen columns out of its font, and the
         // RSSI line fills every one of them. Rendered wide and measured, so a reworded
         // line that would arrive truncated on the bench fails here instead — the
@@ -543,7 +543,7 @@ mod tests {
     }
 
     #[test]
-    fn nothing_composed_here_leaves_ascii() {
+    fn panel_view_emits_strict_ascii_characters_when_rendering_all_screens() {
         // The bridge draws with `FONT_9X15`, whose glyph mapping covers U+0020 to
         // U+007F and quietly substitutes `?` for anything else. So a tidy typographic
         // dash composed here does not reach the glass as a dash — it reaches it as
@@ -581,7 +581,7 @@ mod tests {
     }
 
     #[test]
-    fn a_narrower_screen_truncates_rather_than_overflowing() {
+    fn panel_view_truncates_lines_when_screen_width_is_narrow() {
         let narrow = Panel { cols: 8, rows: 8 };
         let lines = render(&fleet(&[Some(-40), Some(-72)]), narrow);
         for line in &lines {
@@ -591,7 +591,7 @@ mod tests {
     }
 
     #[test]
-    fn a_shorter_screen_keeps_the_lines_that_fit_from_the_top() {
+    fn panel_view_truncates_rows_from_top_when_screen_height_is_short() {
         let short = Panel { cols: 26, rows: 2 };
         let lines = render(&quiet(), short);
         assert_eq!(lines.len(), 2);
@@ -600,7 +600,7 @@ mod tests {
     }
 
     #[test]
-    fn counts_are_shortened_the_same_way_the_view_shortens_them() {
+    fn approx_formats_abbreviated_counts_when_given_various_magnitudes() {
         assert_eq!(approx(0), "0");
         assert_eq!(approx(9_999), "9999");
         assert_eq!(approx(12_345), "12.3k");

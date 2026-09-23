@@ -11,7 +11,7 @@ fn mac(n: u16) -> [u8; 6] {
 }
 
 #[test]
-fn the_first_sighting_is_reported_and_the_second_is_not() {
+fn mac_ring_accepts_first_sighting_and_filters_immediate_duplicate_when_offered() {
     let mut ring: MacRing<4> = MacRing::new();
     assert!(ring.offer(mac(1), Some(-70), T0), "a new address is worth transmitting");
     assert!(!ring.offer(mac(1), Some(-70), T0 + 1), "the same address is not");
@@ -20,7 +20,7 @@ fn the_first_sighting_is_reported_and_the_second_is_not() {
 }
 
 #[test]
-fn asking_does_not_record() {
+fn mac_ring_preserves_unrecorded_state_when_only_querying_is_due() {
     // The node asks, broadcasts, and records only if the broadcast went out.
     let mut ring: MacRing<4> = MacRing::new();
     assert!(ring.is_due(&mac(1), Some(-70), T0));
@@ -30,7 +30,7 @@ fn asking_does_not_record() {
 }
 
 #[test]
-fn an_address_is_reported_again_once_it_has_been_pushed_out() {
+fn mac_ring_permits_retransmission_when_old_address_is_evicted() {
     let mut ring: MacRing<4> = MacRing::new();
     assert!(ring.offer(mac(0), Some(-70), T0));
     for n in 1..=4 {
@@ -41,7 +41,7 @@ fn an_address_is_reported_again_once_it_has_been_pushed_out() {
 }
 
 #[test]
-fn a_stationary_node_reports_its_neighbourhood_again_after_the_refresh() {
+fn mac_ring_permits_retransmission_when_refresh_window_elapses() {
     // Without this a node that has reported everything in range is silent for good,
     // across host sessions too.
     let mut ring: MacRing<4> = MacRing::new();
@@ -52,7 +52,7 @@ fn a_stationary_node_reports_its_neighbourhood_again_after_the_refresh() {
 }
 
 #[test]
-fn the_refresh_survives_the_millisecond_clock_wrapping() {
+fn mac_ring_handles_refresh_correctly_when_millisecond_clock_wraps() {
     let mut ring: MacRing<4> = MacRing::new();
     let before_wrap = u32::MAX - 10;
     assert!(ring.offer(mac(1), Some(-70), before_wrap));
@@ -61,7 +61,7 @@ fn the_refresh_survives_the_millisecond_clock_wrapping() {
 }
 
 #[test]
-fn a_much_stronger_signal_is_reported_again_before_the_refresh() {
+fn mac_ring_accepts_duplicate_address_when_rssi_gain_exceeds_threshold() {
     // The export keeps the strongest sighting's position, so getting closer is news.
     let mut ring: MacRing<4> = MacRing::new();
     assert!(ring.offer(mac(1), Some(-80), T0));
@@ -70,7 +70,7 @@ fn a_much_stronger_signal_is_reported_again_before_the_refresh() {
 }
 
 #[test]
-fn the_signal_baseline_only_rises_so_wobbling_is_not_news() {
+fn mac_ring_filters_weaker_signals_when_rssi_fluctuates_below_peak() {
     let mut ring: MacRing<4> = MacRing::new();
     assert!(ring.offer(mac(1), Some(-60), T0));
     assert!(!ring.offer(mac(1), Some(-90), T0 + 1));
@@ -81,7 +81,7 @@ fn the_signal_baseline_only_rises_so_wobbling_is_not_news() {
 }
 
 #[test]
-fn a_refresh_resets_the_signal_baseline() {
+fn mac_ring_resets_rssi_baseline_when_refresh_interval_elapses() {
     // The node may be somewhere else entirely by now.
     let mut ring: MacRing<4> = MacRing::new();
     assert!(ring.offer(mac(1), Some(-40), T0));
@@ -91,7 +91,7 @@ fn a_refresh_resets_the_signal_baseline() {
 }
 
 #[test]
-fn a_reading_without_a_signal_strength_is_never_stronger() {
+fn mac_ring_prefers_valid_rssi_over_missing_signal_when_evaluating_due() {
     // A BLE controller with no reading says 127, which must not read as +127 dBm.
     let mut ring: MacRing<4> = MacRing::new();
     assert!(ring.offer(mac(1), None, T0));
@@ -100,7 +100,7 @@ fn a_reading_without_a_signal_strength_is_never_stronger() {
 }
 
 #[test]
-fn a_repeat_does_not_move_an_address_back_to_the_front() {
+fn mac_ring_preserves_fifo_eviction_order_when_address_is_re_reported() {
     // A re-report updates in place, so a constantly-beaconing access point still ages
     // out on schedule.
     let mut ring: MacRing<3> = MacRing::new();
@@ -113,7 +113,7 @@ fn a_repeat_does_not_move_an_address_back_to_the_front() {
 }
 
 #[test]
-fn the_all_zero_address_is_not_seen_from_boot() {
+fn mac_ring_treats_zero_mac_as_unseen_when_ring_is_fresh() {
     // A zeroed array with no length alongside it would read 00:00:00:00:00:00 as
     // already-reported; counting entries removes the special case.
     let ring: MacRing<8> = MacRing::new();
@@ -123,7 +123,7 @@ fn the_all_zero_address_is_not_seen_from_boot() {
 }
 
 #[test]
-fn the_firmware_sized_ring_holds_what_it_says_it_does() {
+fn mac_ring_enforces_capacity_bounds_when_configured_with_firmware_ring_size() {
     let mut ring: MacRing<DEDUP_RING> = MacRing::new();
     for n in 0..u16::try_from(DEDUP_RING).expect("fits") {
         assert!(ring.offer(mac(n), Some(-70), T0), "every address here is distinct");

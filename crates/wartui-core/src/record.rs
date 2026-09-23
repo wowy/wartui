@@ -232,7 +232,7 @@ mod tests {
     use super::ssid_text;
 
     #[test]
-    fn a_cloaked_ssid_is_stripped_back_to_a_hidden_network() {
+    fn ssid_text_strips_padding_when_ssid_is_cloaked() {
         assert_eq!(ssid_text(&[0u8; 8]), "");
         assert_eq!(ssid_text(b"Home\0\0\0"), "Home");
         assert_eq!(ssid_text(b""), "");
@@ -240,7 +240,7 @@ mod tests {
     }
 
     #[test]
-    fn a_nul_that_is_not_padding_reaches_neither_the_file_nor_the_terminal() {
+    fn ssid_text_replaces_interior_null_bytes_with_replacement_character_when_formatting() {
         // An interior NUL is left alone by the trim, so this is the last thing
         // standing between it and a column WiGLE has to parse, or a terminal
         // that would swallow it and show a shorter name than the one on air.

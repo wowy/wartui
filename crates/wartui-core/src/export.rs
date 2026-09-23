@@ -432,7 +432,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn timestamps_are_zero_padded() {
+    fn timestamp_formatter_pads_zeros_when_formatting_utc_datetime() {
         // The whole reason this function exists. The node firmware emits
         // `2026-5-1 13:34:37` for this instant, which WiGLE rejects.
         assert_eq!(timestamp(1_777_642_477_000), "2026-05-01 13:34:37");
@@ -440,7 +440,7 @@ mod tests {
     }
 
     #[test]
-    fn only_troublesome_fields_are_quoted() {
+    fn csv_quoter_quotes_only_special_characters_when_formatting_fields() {
         assert_eq!(quote("plain"), "plain");
         assert_eq!(quote("has,comma"), "\"has,comma\"");
         assert_eq!(quote("say \"hi\""), "\"say \"\"hi\"\"\"");
@@ -448,12 +448,12 @@ mod tests {
     }
 
     #[test]
-    fn macs_are_uppercase_and_colon_separated() {
+    fn mac_formatter_formats_uppercase_hex_with_colons_when_rendering_address() {
         assert_eq!(mac(&[0x02, 0x00, 0x5E, 0x10, 0x57, 0x84]), "02:00:5E:10:57:84");
     }
 
     #[test]
-    fn wifi_channels_map_to_their_centre_frequencies() {
+    fn frequency_column_computes_mhz_from_wifi_channels_when_generating_export() {
         assert_eq!(frequency_column(1, "wifi"), "2412");
         assert_eq!(frequency_column(6, "wifi"), "2437");
         assert_eq!(frequency_column(13, "wifi"), "2472");
@@ -465,7 +465,7 @@ mod tests {
     }
 
     #[test]
-    fn frequencies_are_blank_where_no_frequency_was_named() {
+    fn frequency_column_returns_empty_string_when_given_ble_or_unmapped_channels() {
         // A BLE row's frequency column means a "device type" code a passive scan
         // cannot produce, so it is blank whatever the channel field holds.
         assert_eq!(frequency_column(0, "ble"), "");

@@ -30,7 +30,7 @@ cargo clippy --workspace --all-targets
 cargo fmt --check
 
 cargo test -p wartui-core --test engine                    # one test binary
-cargo test -p wartui-core --test engine a_heartbeat_counter # one test by name substring
+cargo test -p wartui-core --test engine engine_ignores_    # tests by name prefix
 
 cargo run --release -p wartui -- bench --db bench.db --fresh  # store I/O, sim-driven; see docs/store-io-findings.md
 ```
@@ -316,9 +316,18 @@ edit stops; follow the pointer before changing the rule.
   dated bench records and say what a bench measured; `README.md` § "History" is provenance and
   attribution, not a changelog.
 - Rustfmt is configured with `max_width = 100` and `use_small_heuristics = "Max"`.
-- Tests are mostly integration tests under `crates/*/tests/` with full-sentence names
-  (`observations_keep_a_node_visible_but_only_heartbeats_keep_it_assignable`); `#[cfg(test)]`
-  modules are used for parsing/formatting units (`nmea`, `position`, `export`, `outbox`).
+- Tests are mostly integration tests under `crates/*/tests/`; `#[cfg(test)]` modules are used
+  for parsing/formatting units (`nmea`, `position`, `export`, `outbox`).
+- Test names follow the `component_action_when_condition` pattern
+  (`engine_increments_reboot_counter_when_heartbeat_counter_decreases`):
+  - `component` is the unit under test, named the same way across a file (`engine`, `store`,
+    `planner`, `beacon_parser`, `fault_lines`), so a prefix filters to it.
+  - `action` is what it does, in the present tense (`increments_reboot_counter`, `rejects_frame`).
+  - `when_condition` is the input or state that triggers it
+    (`when_heartbeat_counter_decreases`).
+
+  The name says what failed without opening the body; the *why* belongs in a comment inside
+  the test, not in the name.
 - All work happens on a branch and lands through a pull request; nothing is committed directly to
   `main`.
 - Commit messages are clear and concise: an imperative one-line subject, then a paragraph explaining

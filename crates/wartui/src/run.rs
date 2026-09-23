@@ -278,7 +278,7 @@ mod tests {
     use wartui_proto::plan::DEFAULT_TX_POWER_QUARTER_DBM;
 
     #[test]
-    fn without_a_power_flag_the_whole_fleet_keeps_the_default() {
+    fn run_cmd_applies_default_tx_power_when_no_flags_are_specified() {
         assert_eq!(
             tx_powers(None, None),
             (DEFAULT_TX_POWER_QUARTER_DBM, DEFAULT_TX_POWER_QUARTER_DBM)
@@ -286,19 +286,19 @@ mod tests {
     }
 
     #[test]
-    fn tx_power_alone_covers_the_bridge_too() {
+    fn run_cmd_applies_tx_power_to_nodes_and_bridge_when_tx_power_flag_given() {
         // One flag, one fleet: the bridge is not excepted from a power the
         // operator set for everything.
         assert_eq!(tx_powers(Some(10), None), (40, 40));
     }
 
     #[test]
-    fn bridge_tx_power_wins_for_the_bridge_when_both_are_given() {
+    fn run_cmd_applies_bridge_tx_power_override_when_both_power_flags_specified() {
         assert_eq!(tx_powers(Some(10), Some(17)), (40, 68));
     }
 
     #[test]
-    fn bridge_tx_power_alone_leaves_the_nodes_at_the_default() {
+    fn run_cmd_leaves_nodes_at_default_tx_power_when_only_bridge_tx_power_specified() {
         assert_eq!(tx_powers(None, Some(17)), (DEFAULT_TX_POWER_QUARTER_DBM, 68));
     }
 }

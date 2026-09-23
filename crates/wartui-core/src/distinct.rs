@@ -97,12 +97,12 @@ mod tests {
     }
 
     #[test]
-    fn nothing_heard_reads_zero() {
+    fn distinct_tracker_returns_zero_when_no_addresses_observed() {
         assert_eq!(Distinct::new().estimate(), 0);
     }
 
     #[test]
-    fn one_address_heard_many_times_reads_one() {
+    fn distinct_tracker_counts_network_once_when_duplicate_bssid_observed() {
         let mut distinct = Distinct::new();
         for _ in 0..10_000 {
             distinct.insert(&mac(7));
@@ -111,7 +111,7 @@ mod tests {
     }
 
     #[test]
-    fn small_counts_read_within_a_handful() {
+    fn distinct_tracker_estimates_accurately_when_counting_small_sample_sizes() {
         // Linear counting's own noise is about five addresses at a thousand, so a
         // bound much tighter than this would be testing the hash, not the estimator.
         let mut distinct = Distinct::new();
@@ -124,7 +124,7 @@ mod tests {
     }
 
     #[test]
-    fn a_drive_and_a_burst_read_within_two_percent_in_the_same_memory() {
+    fn distinct_tracker_maintains_error_bounds_in_fixed_memory_when_scaling_to_millions() {
         let mut distinct = Distinct::new();
         for n in 0..2_000_000 {
             distinct.insert(&mac(n));

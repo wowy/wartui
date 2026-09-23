@@ -417,42 +417,42 @@ mod tests {
     use super::{BridgeSpec, Command, no_bridge_notice, parse, spec};
 
     #[test]
-    fn a_bridge_before_a_subcommand_is_refused_rather_than_ignored() {
+    fn cli_parser_rejects_global_bridge_flag_when_placed_before_subcommand() {
         let error = parse(["wartui", "--bridge", "/dev/ttyACM2", "status"]).err().unwrap();
         let message = error.to_string();
         assert!(message.contains("wartui status --bridge"), "{message}");
     }
 
     #[test]
-    fn a_run_argument_the_subcommand_does_not_take_says_so() {
+    fn cli_parser_rejects_run_specific_flags_when_passed_to_subcommand() {
         let error = parse(["wartui", "--sim", "3", "export", "--out", "-"]).err().unwrap();
         let message = error.to_string();
         assert!(message.contains("'export' does not take it"), "{message}");
     }
 
     #[test]
-    fn a_bridge_after_the_subcommand_reaches_it() {
+    fn cli_parser_passes_bridge_argument_when_placed_after_subcommand() {
         let cli = parse(["wartui", "status", "--bridge", "/dev/ttyACM2"]).unwrap();
         let Some(Command::Status(args)) = cli.command else { panic!("not status") };
         assert_eq!(args.bridge.as_deref(), Some("/dev/ttyACM2"));
     }
 
     #[test]
-    fn a_bridge_can_be_named_by_its_address_as_readily_as_by_a_path() {
+    fn cli_parser_accepts_mac_address_as_bridge_spec_when_parsing_args() {
         let cli = parse(["wartui", "status", "--bridge", "10:BD:A3:EC:44:C0"]).unwrap();
         let Some(Command::Status(args)) = cli.command else { panic!("not status") };
         assert!(matches!(spec(args.bridge.as_deref().expect("a bridge")), BridgeSpec::Mac(_)));
     }
 
     #[test]
-    fn run_arguments_without_a_subcommand_still_run() {
+    fn cli_parser_defaults_to_run_command_when_subcommand_is_omitted() {
         let cli = parse(["wartui", "--bridge", "/dev/ttyACM2"]).unwrap();
         assert!(cli.command.is_none());
         assert_eq!(cli.run.bridge.as_deref(), Some("/dev/ttyACM2"));
     }
 
     #[test]
-    fn the_transmit_power_flags_reach_run() {
+    fn cli_parser_populates_tx_power_flags_when_parsing_run_options() {
         let cli = parse(["wartui", "--tx-power", "10", "--bridge-tx-power", "15"]).unwrap();
         assert!(cli.command.is_none());
         assert_eq!(cli.run.tx_power, Some(10));
@@ -460,7 +460,7 @@ mod tests {
     }
 
     #[test]
-    fn the_bridge_power_flag_stands_alone() {
+    fn cli_parser_allows_bridge_tx_power_independently_when_tx_power_is_omitted() {
         let cli = parse(["wartui", "run", "--bridge-tx-power", "15"]).unwrap();
         let Some(Command::Run(args)) = cli.command else { panic!("not run") };
         assert_eq!(args.tx_power, None);
@@ -468,7 +468,7 @@ mod tests {
     }
 
     #[test]
-    fn a_transmit_power_outside_2_to_20_dbm_is_refused() {
+    fn cli_parser_rejects_tx_power_when_value_is_outside_2_to_20_dbm_range() {
         // Refused rather than clamped: a power the operator typed and got wrong
         // should say so, not run the fleet at a power nobody asked for.
         for args in [
@@ -481,7 +481,7 @@ mod tests {
     }
 
     #[test]
-    fn the_log_file_is_global_and_allowed_on_either_side() {
+    fn cli_parser_accepts_log_file_flag_when_placed_before_or_after_subcommand() {
         for args in [
             ["wartui", "--log-file", "w.log", "status", "--bridge", "/dev/x"],
             ["wartui", "status", "--log-file", "w.log", "--bridge", "/dev/x"],
@@ -492,7 +492,7 @@ mod tests {
     }
 
     #[test]
-    fn the_notice_names_the_board_it_was_waiting_on() {
+    fn cli_diagnostics_formats_named_bridge_notice_when_bridge_is_specified() {
         let notice = no_bridge_notice(Some("/dev/cu.usbmodem2101"));
         assert!(notice.contains("on /dev/cu.usbmodem2101 after 5s"), "{notice}");
         // The remedy has to be runnable as printed, which means carrying the
@@ -501,7 +501,7 @@ mod tests {
     }
 
     #[test]
-    fn without_a_named_board_the_notice_still_reads_as_a_sentence() {
+    fn cli_diagnostics_formats_generic_bridge_notice_when_bridge_is_unspecified() {
         let notice = no_bridge_notice(None);
         assert!(notice.contains("on the board that was detected"), "{notice}");
         assert!(notice.contains("espflash reset"), "{notice}");
@@ -510,7 +510,7 @@ mod tests {
     }
 
     #[test]
-    fn the_notice_carries_no_stray_indentation() {
+    fn cli_diagnostics_preserves_clean_formatting_when_generating_bridge_notice() {
         // A wrapped literal keeps the source's leading whitespace, which reads as
         // ragged gaps mid-sentence and is invisible here.
         let notice = no_bridge_notice(Some("/dev/x"));
@@ -524,7 +524,7 @@ mod tests {
     }
 
     #[test]
-    fn the_bullets_are_the_only_indented_lines() {
+    fn cli_formatter_formats_bullet_points_when_rendering_help_or_diagnostics() {
         let notice = no_bridge_notice(Some("/dev/x"));
         for line in notice.lines().filter(|l| l.starts_with(' ')) {
             assert!(line.starts_with("  - "), "unexpected indent: {line:?}");
@@ -532,7 +532,7 @@ mod tests {
     }
 
     #[test]
-    fn the_notice_names_all_three_causes() {
+    fn cli_diagnostics_lists_all_failure_causes_when_generating_bridge_notice() {
         let notice = no_bridge_notice(Some("/dev/x"));
         for cause in ["node firmware", "wedged", "another program"] {
             assert!(notice.contains(cause), "missing {cause}: {notice}");

@@ -19,7 +19,7 @@ fn link(device: &str, name: &str) -> (String, String) {
 }
 
 #[test]
-fn macos_tty_aliases_are_never_offered() {
+fn discovery_filters_macos_tty_aliases_when_probing_serial_candidates() {
     // Opening the /dev/tty.* side blocks on carrier detect, which looks exactly like
     // a hung bridge.
     assert!(!is_usable_path("/dev/tty.usbmodem14201"));
@@ -29,7 +29,7 @@ fn macos_tty_aliases_are_never_offered() {
 }
 
 #[test]
-fn discovery_does_not_fail_when_nothing_is_plugged_in() {
+fn discovery_returns_empty_list_without_error_when_no_devices_are_attached() {
     // An empty list is the normal state, not an error; the transport retries.
     let found = discover_ports().expect("listing ports should succeed");
     for port in found {
@@ -39,7 +39,7 @@ fn discovery_does_not_fail_when_nothing_is_plugged_in() {
 }
 
 #[test]
-fn a_board_is_named_by_the_mac_its_usb_serial_number_carries() {
+fn ports_scanner_extracts_mac_address_when_given_esp32_serial_number() {
     // The whole reason `wartui ports` can say which board is which: an ESP32's
     // serial number is the address its radio transmits from.
     assert_eq!(esp("/dev/ttyACM0", BRIDGE_MAC).mac(), ports::parse_mac(BRIDGE_MAC));
@@ -47,7 +47,7 @@ fn a_board_is_named_by_the_mac_its_usb_serial_number_carries() {
 }
 
 #[test]
-fn a_device_carrying_a_manufacturing_serial_has_no_address() {
+fn ports_scanner_yields_none_for_mac_when_given_manufacturing_serial() {
     // Everything else on the bus. `ports` says so rather than inventing one.
     let puck = candidate("/dev/ttyACM1", Some(0x1546), Some(0x01A7), Some("0001"));
     assert_eq!(puck.mac(), None);
@@ -55,7 +55,7 @@ fn a_device_carrying_a_manufacturing_serial_has_no_address() {
 }
 
 #[test]
-fn a_bridge_given_as_a_mac_is_told_from_one_given_as_a_path() {
+fn bridge_spec_distinguishes_mac_address_from_file_path_when_parsed() {
     let by_address: BridgeSpec = BRIDGE_MAC.parse().expect("parsing cannot fail");
     let by_path: BridgeSpec = "/dev/ttyACM0".parse().expect("parsing cannot fail");
     assert_eq!(by_address, BridgeSpec::Mac(ports::parse_mac(BRIDGE_MAC).expect("an address")));
@@ -66,7 +66,7 @@ fn a_bridge_given_as_a_mac_is_told_from_one_given_as_a_path() {
 }
 
 #[test]
-fn a_path_that_merely_contains_hex_is_still_a_path() {
+fn bridge_spec_parses_path_containing_colons_as_path_when_parsed() {
     // Nothing rules out a device node with colons in it, and reading one as an
     // address would open a board the operator never named.
     let spec: BridgeSpec = "/dev/serial/by-id/usb-Espressif_10:BD:A3:EC:44:C0-if00"
@@ -76,7 +76,7 @@ fn a_path_that_merely_contains_hex_is_still_a_path() {
 }
 
 #[test]
-fn an_espressif_board_is_named_by_its_by_id_symlink_when_one_exists() {
+fn ports_scanner_prefers_by_id_symlink_when_stable_path_is_available() {
     // The path `wartui ports` prints is the one worth copying into `--bridge`: it
     // survives the re-enumeration that moves ttyACM0 to ttyACM1.
     let by_id = "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:EC:44:C0-if00";
@@ -90,13 +90,13 @@ fn an_espressif_board_is_named_by_its_by_id_symlink_when_one_exists() {
 }
 
 #[test]
-fn a_port_with_no_symlink_keeps_the_path_the_os_gave_it() {
+fn ports_scanner_preserves_device_path_when_symlink_is_unavailable() {
     let named = with_stable_paths(vec![esp("/dev/ttyACM0", BRIDGE_MAC)], &StableNames::default());
     assert_eq!(named[0].path, "/dev/ttyACM0");
 }
 
 #[test]
-fn a_by_id_name_shared_by_two_devices_falls_back_to_the_socket() {
+fn ports_scanner_falls_back_to_by_path_when_by_id_is_ambiguous() {
     // Two receivers of one model reporting no serial number answer to one by-id
     // name, and udev can only give it to whichever enumerated last. Opening it
     // would mean opening whichever was plugged in most recently rather than the
@@ -119,7 +119,7 @@ fn a_by_id_name_shared_by_two_devices_falls_back_to_the_socket() {
 }
 
 #[test]
-fn two_boards_reporting_their_own_addresses_each_keep_their_by_id_name() {
+fn ports_scanner_keeps_distinct_by_id_paths_when_boards_have_unique_macs() {
     // The contrast with the twins above: an ESP32 names itself, so no two share a
     // by-id name however many are attached.
     let names = StableNames::from_pairs(
@@ -136,7 +136,7 @@ fn two_boards_reporting_their_own_addresses_each_keep_their_by_id_name() {
 }
 
 #[test]
-fn a_board_and_a_receiver_are_never_offered_to_each_other() {
+fn ports_scanner_strictly_separates_bridge_and_gps_devices_when_filtering() {
     // The partition the two detectors rest on: whoever looks for a bridge writes
     // into what it opens, and a node's port must never be in the other's list.
     let bridge = esp("/dev/ttyACM0", BRIDGE_MAC);
@@ -148,14 +148,14 @@ fn a_board_and_a_receiver_are_never_offered_to_each_other() {
 }
 
 #[test]
-fn an_address_selects_the_board_carrying_it_and_answers_with_its_path() {
+fn serial_discovery_resolves_board_path_when_specified_by_mac_address() {
     let boards = [esp("/dev/ttyACM0", BRIDGE_MAC), esp("/dev/ttyACM1", NODE_MAC)];
     let spec: BridgeSpec = NODE_MAC.parse().expect("parsing cannot fail");
     assert_eq!(serial::resolve_in(&boards, &spec).expect("that board"), "/dev/ttyACM1");
 }
 
 #[test]
-fn an_address_that_is_not_attached_is_refused_rather_than_answered_with_another() {
+fn serial_discovery_rejects_unattached_mac_address_when_resolving_bridge() {
     // The failure that matters: answering with the other board would attribute a
     // whole capture to the wrong fleet, and say nothing about having done so.
     let boards = [esp("/dev/ttyACM0", BRIDGE_MAC)];
@@ -165,7 +165,7 @@ fn an_address_that_is_not_attached_is_refused_rather_than_answered_with_another(
 }
 
 #[test]
-fn a_named_path_is_answered_without_consulting_what_is_attached() {
+fn serial_discovery_accepts_raw_path_verbatim_when_specified_by_path() {
     // Whether it exists is the question the open asks, and the OS answers it
     // better than a list does — so a path is never checked against one.
     let spec: BridgeSpec = "/dev/ttyACM9".parse().expect("parsing cannot fail");
@@ -173,7 +173,7 @@ fn a_named_path_is_answered_without_consulting_what_is_attached() {
 }
 
 #[test]
-fn a_remembered_bridge_is_tried_before_anything_else() {
+fn serial_discovery_prioritises_remembered_mac_when_ordering_probe_candidates() {
     // The ordinary run: one port opened, and it is the right one.
     let boards = [esp("/dev/ttyACM0", NODE_MAC), esp("/dev/ttyACM1", BRIDGE_MAC)];
     let order = serial::select(&boards, None, ports::parse_mac(BRIDGE_MAC));
@@ -182,7 +182,7 @@ fn a_remembered_bridge_is_tried_before_anything_else() {
 }
 
 #[test]
-fn a_remembered_bridge_that_is_not_attached_leaves_an_ordinary_sweep() {
+fn serial_discovery_falls_back_to_full_sweep_when_remembered_mac_is_missing() {
     // Plugging in a different bridge has to work on the first run that sees it,
     // so the address orders the sweep and never filters it.
     let boards = [esp("/dev/ttyACM0", NODE_MAC)];
@@ -192,7 +192,7 @@ fn a_remembered_bridge_that_is_not_attached_leaves_an_ordinary_sweep() {
 }
 
 #[test]
-fn the_sweep_order_is_the_same_on_every_pass() {
+fn serial_discovery_maintains_deterministic_sweep_order_across_runs() {
     // Two runs on one machine must agree about what they tried, or a log from one
     // says nothing about the other.
     let boards = [esp("/dev/ttyACM2", NODE_MAC), esp("/dev/ttyACM0", BRIDGE_MAC)];
@@ -203,7 +203,7 @@ fn the_sweep_order_is_the_same_on_every_pass() {
 }
 
 #[test]
-fn a_named_path_is_the_only_candidate_and_is_never_swept_past() {
+fn serial_discovery_restricts_candidate_to_named_path_when_explicitly_given() {
     // Naming a board is naming it: reaching for another would open something the
     // operator did not ask for, and transmit into it.
     let boards = [esp("/dev/ttyACM0", BRIDGE_MAC), esp("/dev/ttyACM1", NODE_MAC)];
@@ -214,27 +214,27 @@ fn a_named_path_is_the_only_candidate_and_is_never_swept_past() {
 }
 
 #[test]
-fn a_named_address_that_is_not_attached_sweeps_nothing_at_all() {
+fn serial_discovery_returns_empty_candidates_when_named_mac_is_not_attached() {
     let boards = [esp("/dev/ttyACM0", BRIDGE_MAC)];
     let spec: BridgeSpec = NODE_MAC.parse().expect("parsing cannot fail");
     assert!(serial::select(&boards, Some(&spec), None).is_empty());
 }
 
 #[test]
-fn a_reset_reaches_the_one_board_attached() {
+fn serial_discovery_selects_sole_attached_board_when_resetting_without_hint() {
     let boards = [esp("/dev/ttyACM0", BRIDGE_MAC)];
     assert_eq!(serial::unambiguous_bridge(&boards, None).expect("the only board"), "/dev/ttyACM0");
 }
 
 #[test]
-fn a_reset_reaches_the_remembered_board_out_of_several() {
+fn serial_discovery_selects_remembered_bridge_when_resetting_among_multiple_boards() {
     let boards = [esp("/dev/ttyACM0", NODE_MAC), esp("/dev/ttyACM1", BRIDGE_MAC)];
     let known = serial::unambiguous_bridge(&boards, ports::parse_mac(BRIDGE_MAC));
     assert_eq!(known.expect("the remembered board"), "/dev/ttyACM1");
 }
 
 #[test]
-fn a_reset_refuses_to_guess_between_several_boards() {
+fn serial_discovery_refuses_reset_when_multiple_unremembered_boards_are_present() {
     // A `Reset` sent to a node reboots the node and costs it the addresses it was
     // holding back, so this command never sweeps.
     let boards = [esp("/dev/ttyACM0", BRIDGE_MAC), esp("/dev/ttyACM1", NODE_MAC)];
@@ -245,7 +245,7 @@ fn a_reset_refuses_to_guess_between_several_boards() {
 }
 
 #[test]
-fn a_reset_with_nothing_attached_says_so_rather_than_naming_a_board() {
+fn serial_discovery_returns_error_when_resetting_with_no_boards_attached() {
     let refused = serial::unambiguous_bridge(&[], None).expect_err("nothing attached");
     assert!(refused.to_string().contains("no bridge found"), "{refused}");
 }

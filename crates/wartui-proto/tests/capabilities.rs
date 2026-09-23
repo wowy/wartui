@@ -14,7 +14,7 @@ fn round_trip(caps: Capabilities) -> Capabilities {
 }
 
 #[test]
-fn capabilities_round_trip_through_a_heartbeat() {
+fn capabilities_survives_heartbeat_round_trip_when_encoded_and_decoded() {
     for (ble, five) in [(false, false), (true, false), (false, true), (true, true)] {
         let caps = Capabilities::here(ble, five);
         assert_eq!(round_trip(caps), caps, "{caps}");
@@ -22,7 +22,7 @@ fn capabilities_round_trip_through_a_heartbeat() {
 }
 
 #[test]
-fn the_feature_bits_are_the_ones_the_plan_named() {
+fn capabilities_maps_feature_bits_when_converting_to_flags() {
     // Written out rather than derived, because these are wire values: a node in
     // the field sets them and a host that changed its mind would misread it.
     assert_eq!(Capabilities::here(false, false).flags(), 0);
@@ -32,7 +32,7 @@ fn the_feature_bits_are_the_ones_the_plan_named() {
 }
 
 #[test]
-fn a_feature_this_host_has_never_heard_of_does_not_disqualify_a_node() {
+fn capabilities_preserves_known_flags_when_parsing_unknown_feature_bits() {
     // Dropping such a node would take its share of the pool out of the fleet.
     let caps = Capabilities::from_parts(1, 9, 0b1111_1111);
     assert_eq!((caps.major, caps.minor), (1, 9));
@@ -43,13 +43,13 @@ fn a_feature_this_host_has_never_heard_of_does_not_disqualify_a_node() {
 }
 
 #[test]
-fn this_build_announces_the_version_it_speaks() {
+fn capabilities_matches_current_major_and_minor_constants_when_constructed() {
     let caps = Capabilities::here(true, true);
     assert_eq!((caps.major, caps.minor), (CAPABILITY_MAJOR, CAPABILITY_MINOR));
 }
 
 #[test]
-fn capabilities_are_shown_as_one_token_an_operator_can_read() {
+fn capabilities_formats_as_display_token_when_rendered_as_string() {
     // The fleet table and the store column both read this: not a wire format, but an
     // operator who has read one fleet table should be able to read the next.
     assert_eq!(

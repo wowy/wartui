@@ -47,4 +47,5 @@ wartui-*.csv
 .DS_Store
 
 # AI tools
-.claude/worktrees
+.claude/worktrees/
+.junie/plans/

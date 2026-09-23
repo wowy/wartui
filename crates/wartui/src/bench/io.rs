@@ -358,7 +358,7 @@ mod tests {
 ";
 
     #[test]
-    fn a_path_under_a_btrfs_subvolume_is_found_by_its_deepest_mount_point() {
+    fn io_bench_finds_enclosing_mount_when_path_is_under_btrfs_subvolume() {
         let mount = enclosing_mount(LAPTOP, Path::new("/home/someone/bench")).expect("home");
         assert_eq!(mount.point, Path::new("/home"));
         assert_eq!(mount.fstype, "btrfs");
@@ -367,7 +367,7 @@ mod tests {
     }
 
     #[test]
-    fn mount_points_are_compared_by_whole_components() {
+    fn io_bench_matches_mount_points_by_component_when_resolving_path() {
         let mount = enclosing_mount(LAPTOP, Path::new("/homework/bench")).expect("root");
         assert_eq!(mount.point, Path::new("/"));
         let mount = enclosing_mount(LAPTOP, Path::new("/tmp/bench")).expect("tmp");
@@ -375,7 +375,7 @@ mod tests {
     }
 
     #[test]
-    fn a_later_mount_over_the_same_point_is_the_one_in_force() {
+    fn io_bench_prefers_latest_shadowed_mount_when_duplicate_points_exist() {
         let shadowed = format!("{LAPTOP}90 80 179:1 / /tmp rw,noatime - ext4 /dev/mmcblk0p1 rw\n");
         let mount = enclosing_mount(&shadowed, Path::new("/tmp/bench")).expect("tmp");
         assert_eq!(mount.source, "/dev/mmcblk0p1");
@@ -391,7 +391,7 @@ mod tests {
 ";
 
     #[test]
-    fn an_ext4_mount_is_found_by_its_device_number() {
+    fn io_bench_locates_ext4_mount_when_given_device_number() {
         let mount = find_mount(MOUNTINFO, 179, 1).expect("the card");
         assert_eq!(mount.fstype, "ext4");
         assert_eq!(mount.source, "/dev/mmcblk0p1");
@@ -400,7 +400,7 @@ mod tests {
     }
 
     #[test]
-    fn a_btrfs_mount_is_found_by_its_anonymous_number_and_names_its_real_device() {
+    fn io_bench_locates_btrfs_mount_when_given_anonymous_device_number() {
         // A btrfs device number names no block device, so the source is the device. The
         // number only matches like this outside a subvolume; see the enclosing-mount tests.
         let mount = find_mount(MOUNTINFO, 0, 35).expect("the subvolume");
@@ -411,19 +411,19 @@ mod tests {
     }
 
     #[test]
-    fn a_mount_with_spaces_and_no_optional_fields_still_parses() {
+    fn io_bench_parses_mountinfo_when_paths_contain_escaped_spaces() {
         let mount = find_mount(MOUNTINFO, 8, 1).expect("the vfat card");
         assert_eq!(mount.source, "/dev/disk/by-label/MY CARD");
         assert_eq!(mount.options, "rw,nosuid");
     }
 
     #[test]
-    fn a_device_number_nothing_is_mounted_from_finds_nothing() {
+    fn io_bench_returns_none_when_device_number_has_no_mount() {
         assert_eq!(find_mount(MOUNTINFO, 8, 2), None);
     }
 
     #[test]
-    fn only_complete_octal_escapes_are_undone() {
+    fn io_bench_unescapes_octal_sequences_when_parsing_mountinfo_strings() {
         assert_eq!(unescape(r"a\040b"), "a b");
         assert_eq!(unescape(r"tab\011end"), "tab\tend");
         assert_eq!(unescape(r"not\+12"), r"not\+12");
@@ -431,7 +431,7 @@ mod tests {
     }
 
     #[test]
-    fn device_numbers_are_read_as_sysfs_writes_them() {
+    fn io_bench_parses_major_minor_numbers_when_reading_sysfs_dev_format() {
         assert_eq!(parse_dev_numbers("259:3\n"), Some((259, 3)));
         assert_eq!(parse_dev_numbers("259"), None);
     }
@@ -445,7 +445,7 @@ mod tests {
     }
 
     #[test]
-    fn a_discharging_system_battery_is_on_battery_and_a_charging_one_is_not() {
+    fn io_bench_reports_on_battery_status_when_power_source_is_discharging() {
         let adapter = Supply { kind: Some("Mains".to_owned()), ..Supply::default() };
         let on = [adapter, supply("Battery", "Discharging", Some("System"))];
         assert_eq!(judge_power(&on), Some(true));
@@ -454,7 +454,7 @@ mod tests {
     }
 
     #[test]
-    fn a_machine_whose_only_battery_is_in_its_mouse_has_no_battery() {
+    fn io_bench_ignores_peripheral_batteries_when_evaluating_system_power() {
         assert_eq!(judge_power(&[supply("Battery", "Discharging", Some("Device"))]), None);
         assert_eq!(judge_power(&[]), None);
     }
@@ -465,20 +465,20 @@ mod tests {
     }
 
     #[test]
-    fn a_small_device_number_splits_into_the_pair_ls_shows() {
+    fn io_bench_splits_device_number_when_given_standard_sixteen_bit_dev() {
         // An SD card's second partition.
         assert_eq!(split_dev(makedev(179, 2)), (179, 2));
         assert_eq!(split_dev(45_826), (179, 2));
     }
 
     #[test]
-    fn a_device_number_past_the_old_sixteen_bits_still_splits() {
+    fn io_bench_splits_large_device_number_when_exceeding_sixteen_bits() {
         assert_eq!(split_dev(makedev(259, 70_000)), (259, 70_000));
         assert_eq!(split_dev(makedev(0x1234, 0x0056_789A)), (0x1234, 0x0056_789A));
     }
 
     #[test]
-    fn the_process_counters_are_read_by_name_not_position() {
+    fn io_bench_parses_proc_io_fields_by_key_when_reading_process_stats() {
         let text = "rchar: 10\nwchar: 2048\nsyscr: 3\nsyscw: 17\nread_bytes: 0\n\
                     write_bytes: 4096\ncancelled_write_bytes: 0\n";
         assert_eq!(
@@ -488,12 +488,12 @@ mod tests {
     }
 
     #[test]
-    fn a_process_file_missing_a_counter_is_not_read_as_zero() {
+    fn io_bench_returns_none_when_proc_io_is_missing_required_fields() {
         assert_eq!(parse_process_io("rchar: 10\nwchar: 2048\n"), None);
     }
 
     #[test]
-    fn a_modern_device_stat_includes_flushes() {
+    fn io_bench_parses_flush_counts_when_reading_modern_diskstats() {
         let text = "    4200     120  336000    1500    9001     700 1234567   88000        0   \
                     51000   90000       0       0        0       0      312     4100\n";
         assert_eq!(
@@ -508,7 +508,7 @@ mod tests {
     }
 
     #[test]
-    fn an_old_kernels_device_stat_has_no_flushes_and_still_parses() {
+    fn io_bench_parses_legacy_diskstats_without_flushes_when_eleven_fields_present() {
         let text = "4200 120 336000 1500 9001 700 1234567 88000 0 51000 90000";
         let io = parse_device_stat(text).expect("eleven fields are enough");
         assert_eq!(io.flushes, None);
@@ -516,7 +516,7 @@ mod tests {
     }
 
     #[test]
-    fn device_counters_subtract_and_an_unknown_flush_count_stays_unknown() {
+    fn io_bench_computes_delta_metrics_when_subtracting_device_io_samples() {
         let before = DeviceIo { writes: 10, sectors: 80, write_ms: 5, flushes: None };
         let after = DeviceIo { writes: 25, sectors: 200, write_ms: 9, flushes: Some(4) };
         assert_eq!(
@@ -526,7 +526,7 @@ mod tests {
     }
 
     #[test]
-    fn the_peak_resident_set_is_read_in_kib() {
+    fn io_bench_extracts_peak_rss_in_kib_when_parsing_proc_status() {
         let text =
             "Name:\twartui\nVmPeak:\t  900000 kB\nVmHWM:\t   12345 kB\nVmRSS:\t   11000 kB\n";
         assert_eq!(parse_peak_rss(text), Some(12_345));
