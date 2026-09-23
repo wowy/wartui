@@ -141,7 +141,7 @@ cargo clippy --workspace --all-targets
 cargo fmt --check
 
 cargo test -p wartui-core --test engine                     # one test binary
-cargo test -p wartui-core --test engine a_heartbeat_counter # one test by name
+cargo test -p wartui-core --test engine engine_ignores_     # tests by name prefix
 
 cd firmware/bridge && cargo clippy --release --features esp32c6   # and esp32c5
 cd firmware/node   && cargo clippy --release --features esp32c6   # and with ,ble
