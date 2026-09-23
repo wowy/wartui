@@ -1,11 +1,6 @@
 //! The fleet view.
 //!
-//! One key reaches the air — `b`, which moves the Bluetooth scan, and which the
-//! operator's manual lists (`crates/wartui/README.md`). What a node scans is the
-//! planner's and nothing here can override it. `b` does not transmit when
-//! pressed either: a node only listens in the 100 ms after its own heartbeat, so
-//! a keystroke's effect is a row reading `pending` until the next sweep
-//! completes. That delay is the protocol rather than lag, and the view says so.
+//! See the operator's manual (`crates/wartui/README.md`) for a usage guide.
 //!
 //! Rebuilt from a [`Snapshot`] the engine publishes four times a second, never
 //! from a stream of observations: a busy fleet produces tens of rows a second in
@@ -99,12 +94,12 @@ async fn view(
     outcome
 }
 
-/// Which row the operator is looking at, and whether they have been told off for pressing a key
-/// that cannot work.
+/// Which row the operator is looking at, and whether they have been notified of a key
+/// press that cannot work.
 #[derive(Debug, Default)]
 struct Ui {
     selected: usize,
-    /// What was said, and the snapshot time it was said at.
+    /// The notice and the snapshot time it was sent.
     notice: Option<(String, i64)>,
 }
 
