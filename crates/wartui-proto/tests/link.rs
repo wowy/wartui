@@ -122,14 +122,14 @@ fn sample_events() -> Vec<BridgeToHost, 16> {
 }
 
 #[test]
-fn crc16_matches_the_ccitt_false_check_value() {
+fn crc16_matches_ccitt_false_standard_when_given_test_vectors() {
     // The standard check value for CRC-16/CCITT-FALSE.
     assert_eq!(crc16(b"123456789"), 0x29B1);
     assert_eq!(crc16(b""), 0xFFFF);
 }
 
 #[test]
-fn commands_round_trip() {
+fn link_codec_round_trips_all_host_commands_when_encoded_and_decoded() {
     for cmd in sample_commands() {
         let mut out = [0u8; MAX_FRAME];
         let n = encode_frame(&cmd, &mut out).expect("encodes");
@@ -140,7 +140,7 @@ fn commands_round_trip() {
 }
 
 #[test]
-fn events_round_trip() {
+fn link_codec_round_trips_all_bridge_events_when_encoded_and_decoded() {
     for event in sample_events() {
         let mut out = [0u8; MAX_FRAME];
         let n = encode_frame(&event, &mut out).expect("encodes");
@@ -150,7 +150,7 @@ fn events_round_trip() {
 }
 
 #[test]
-fn a_full_212_byte_frame_fits_with_room_to_spare() {
+fn link_codec_fits_max_esp_now_payload_when_encoding_frame() {
     let cmd = sample_commands().into_iter().next_back().expect("the SendEspNow case");
     let mut out = [0u8; MAX_FRAME];
     let n = encode_frame(&cmd, &mut out).expect("encodes");
@@ -158,7 +158,7 @@ fn a_full_212_byte_frame_fits_with_room_to_spare() {
 }
 
 #[test]
-fn a_full_panel_push_fits_with_room_to_spare() {
+fn link_codec_fits_full_panel_display_when_encoding_show_panel_command() {
     // The const assert in `link.rs` says this arithmetically; this says it through the
     // encoder, which is the thing that would actually truncate.
     let cmd = HostToBridge::ShowPanel { lines: full_panel() };
@@ -168,7 +168,7 @@ fn a_full_panel_push_fits_with_room_to_spare() {
 }
 
 #[test]
-fn encoded_frames_have_exactly_one_zero_and_it_is_last() {
+fn link_codec_terminates_frame_with_single_null_byte_when_cobs_encoded() {
     // This is what makes the terminator unambiguous and resync possible.
     for cmd in sample_commands() {
         let mut out = [0u8; MAX_FRAME];
@@ -179,7 +179,7 @@ fn encoded_frames_have_exactly_one_zero_and_it_is_last() {
 }
 
 #[test]
-fn a_corrupted_byte_is_caught_by_the_checksum() {
+fn link_decoder_rejects_frame_when_payload_checksum_is_corrupted() {
     let cmd = HostToBridge::SetChannel { channel: 6 };
     let mut out = [0u8; MAX_FRAME];
     let n = encode_frame(&cmd, &mut out).expect("encodes");
@@ -194,7 +194,7 @@ fn a_corrupted_byte_is_caught_by_the_checksum() {
 }
 
 #[test]
-fn a_frame_from_a_different_protocol_version_is_rejected_clearly() {
+fn link_decoder_rejects_frame_when_protocol_version_mismatches() {
     let cmd = HostToBridge::GetStatus;
     let mut out = [0u8; MAX_FRAME];
     let n = encode_frame(&cmd, &mut out).expect("encodes");
@@ -221,7 +221,7 @@ fn a_frame_from_a_different_protocol_version_is_rejected_clearly() {
 }
 
 #[test]
-fn accumulator_yields_back_to_back_frames() {
+fn frame_accumulator_delivers_sequential_frames_when_processing_continuous_stream() {
     let mut stream = std::vec::Vec::new();
     let cmds = sample_commands();
     for cmd in &cmds {
@@ -241,7 +241,7 @@ fn accumulator_yields_back_to_back_frames() {
 }
 
 #[test]
-fn accumulator_resynchronises_after_a_reset_banner() {
+fn frame_accumulator_resynchronises_cleanly_when_stream_contains_bootloader_noise() {
     // A bridge reset sprays ROM bootloader chatter down the same pipe before
     // the first real frame. Nothing before the next terminator should survive,
     // and everything after it should.
@@ -276,7 +276,7 @@ fn accumulator_resynchronises_after_a_reset_banner() {
 }
 
 #[test]
-fn accumulator_ignores_runs_of_zeros() {
+fn frame_accumulator_ignores_leading_zeros_when_accumulating_stream() {
     let mut acc = FrameAccumulator::<MAX_FRAME>::new();
     for _ in 0..16 {
         assert!(acc.push(0).is_none(), "empty frames must not be emitted");
@@ -294,7 +294,7 @@ fn accumulator_ignores_runs_of_zeros() {
 }
 
 #[test]
-fn accumulator_discards_a_frame_too_large_to_be_ours() {
+fn frame_accumulator_discards_oversized_frame_when_capacity_is_exceeded() {
     let mut acc = FrameAccumulator::<64>::new();
     for _ in 0..200 {
         assert!(acc.push(0xAB).is_none());
@@ -315,7 +315,7 @@ fn accumulator_discards_a_frame_too_large_to_be_ours() {
 }
 
 #[test]
-fn a_truncated_frame_is_rejected() {
+fn link_decoder_rejects_payload_when_frame_is_truncated() {
     let mut empty: [u8; 0] = [];
     assert!(decode_frame::<HostToBridge>(&mut empty).is_err());
     let mut tiny = [1u8, 2];

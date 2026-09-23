@@ -112,7 +112,7 @@ async fn distinct_addresses(sightings_per_address: Option<u32>, sightings: usize
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_moving_neighbourhood_keeps_meeting_new_addresses_and_a_parked_one_does_not() {
+async fn sim_transport_tracks_distinct_macs_when_neighbourhood_is_moving_vs_parked() {
     // Parked, forty networks fit the dedup ring, so whatever is reported again is one of
     // the same forty: the ring's refresh, not a new device.
     assert!(distinct_addresses(None, 120).await <= 40);
@@ -138,7 +138,7 @@ fn everything() -> ChannelSet {
 }
 
 #[tokio::test(start_paused = true)]
-async fn the_bridge_announces_itself_first() {
+async fn sim_bridge_emits_connected_event_first_when_simulation_starts() {
     let mut link = SimTransport::new(SimConfig::default()).start().expect("starts");
     match link.recv().await.expect("an event") {
         LinkEvent::Connected(info) => {
@@ -149,7 +149,7 @@ async fn the_bridge_announces_itself_first() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn every_node_eventually_heartbeats() {
+async fn sim_bridge_receives_heartbeats_from_all_nodes_when_fleet_runs() {
     let config = SimConfig { node_count: 4, ..SimConfig::default() };
     let mut link = SimTransport::new(config).start().expect("starts");
 
@@ -165,7 +165,7 @@ async fn every_node_eventually_heartbeats() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn heartbeat_counters_increase_monotonically() {
+async fn sim_node_increments_heartbeat_counter_monotonically_when_operating() {
     let config = SimConfig { node_count: 1, ..SimConfig::default() };
     let mut link = SimTransport::new(config).start().expect("starts");
 
@@ -182,7 +182,7 @@ async fn heartbeat_counters_increase_monotonically() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn observations_decode_as_sightings() {
+async fn sim_bridge_emits_valid_sightings_with_negative_rssi_when_nodes_sniff() {
     let config = SimConfig { node_count: 1, ..SimConfig::default() };
     let mut link = SimTransport::new(config).start().expect("starts");
     assign(&link, 1, everything(), true);
@@ -197,7 +197,7 @@ async fn observations_decode_as_sightings() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_node_reports_each_wifi_network_only_once() {
+async fn sim_node_deduplicates_wifi_sightings_when_operating_in_static_neighbourhood() {
     // A simulator that streamed the same networks forever would leave the fleet view
     // wrong about observation rates.
     let config = SimConfig { node_count: 1, ble_chance: 0.0, ..SimConfig::default() };
@@ -220,7 +220,7 @@ async fn a_node_reports_each_wifi_network_only_once() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn ble_sightings_keep_arriving_because_their_addresses_rotate() {
+async fn sim_node_generates_new_ble_sightings_when_advertiser_addresses_rotate() {
     let config = SimConfig { node_count: 1, ble_chance: 1.0, ..SimConfig::default() };
     let mut link = SimTransport::new(config).start().expect("starts");
     assign(&link, 1, ChannelSet::empty(), true);
@@ -241,7 +241,7 @@ async fn ble_sightings_keep_arriving_because_their_addresses_rotate() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_bluetooth_node_heartbeats_on_its_own_second_rather_than_a_sweep() {
+async fn sim_node_heartbeats_at_ble_cadence_when_assigned_bluetooth_scan() {
     // The cadence, at the default advertiser rate rather than a saturated room:
     // BLE_BEAT_MS between heartbeats, where a sweeping node's period is its share.
     let config = SimConfig { node_count: 1, ..SimConfig::default() };
@@ -267,7 +267,7 @@ async fn a_bluetooth_node_heartbeats_on_its_own_second_rather_than_a_sweep() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_node_whose_whole_job_is_bluetooth_reports_advertisers_and_no_access_points() {
+async fn sim_node_reports_only_ble_sightings_when_holding_ble_flag() {
     // The point of the split: a fleet of one holding the scan sweeps nothing, so
     // every sighting it produces is an advertiser and its beat is the scan cadence
     // rather than a sweep.
@@ -292,7 +292,7 @@ async fn a_node_whose_whole_job_is_bluetooth_reports_advertisers_and_no_access_p
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_node_told_to_scan_nothing_at_all_parks_rather_than_spinning() {
+async fn sim_node_parks_without_sightings_when_assigned_empty_channels_without_ble() {
     // The one frame the host never sends. A node that took it literally would loop
     // on nothing, so it counts as never having been told anything: it parks, which
     // means the idle beat and no sightings of any kind.
@@ -314,7 +314,7 @@ async fn a_node_told_to_scan_nothing_at_all_parks_rather_than_spinning() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn narrowing_a_nodes_range_collapses_its_heartbeat_period() {
+async fn sim_node_accelerates_heartbeat_period_when_channel_range_is_narrowed() {
     // How an assignment is confirmed with no access to the node's own console.
     let config = SimConfig { node_count: 1, ble_chance: 0.0, ..SimConfig::default() };
     let mut link = SimTransport::new(config).start().expect("starts");
@@ -344,7 +344,7 @@ async fn narrowing_a_nodes_range_collapses_its_heartbeat_period() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn an_assignment_is_acknowledged() {
+async fn sim_bridge_returns_ack_ok_when_assignment_sent_to_active_node() {
     let config = SimConfig { node_count: 1, ..SimConfig::default() };
     let mut link = SimTransport::new(config).start().expect("starts");
     let node = SimTransport::node_mac(0);
@@ -364,7 +364,7 @@ async fn an_assignment_is_acknowledged() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn sending_to_an_absent_node_is_not_acknowledged() {
+async fn sim_bridge_returns_ack_fail_when_frame_sent_to_unreachable_node() {
     // Clearing an assignment's dirty flag on this would be the firmware's bug;
     // the host must be able to tell delivery from a successful enqueue.
     let config = SimConfig { node_count: 1, ..SimConfig::default() };
@@ -394,7 +394,7 @@ async fn sending_to_an_absent_node_is_not_acknowledged() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_repeated_assignment_version_is_ignored_by_the_node() {
+async fn sim_node_ignores_retransmitted_assignment_when_epoch_version_is_unchanged() {
     // Nodes compare with `!=`, and a node that has never heard a core holds
     // version 0. Re-sending the version it already has changes nothing, which
     // is exactly why the host must persist a monotonic counter across restarts.
@@ -423,7 +423,7 @@ async fn a_repeated_assignment_version_is_ignored_by_the_node() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_status_request_is_answered() {
+async fn sim_bridge_answers_status_request_with_channel_when_queried() {
     let mut link = SimTransport::new(SimConfig::default()).start().expect("starts");
     link.send_bulk(HostToBridge::SetChannel { channel: 11 }).expect("queued");
     link.send_bulk(HostToBridge::GetStatus).expect("queued");
@@ -439,7 +439,7 @@ async fn a_status_request_is_answered() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_seeded_run_is_reproducible() {
+async fn sim_transport_produces_deterministic_sightings_when_seeded() {
     async fn first_sightings(seed: u64) -> Vec<Vec<u8>> {
         let config = SimConfig { node_count: 1, seed, ..SimConfig::default() };
         let mut link = SimTransport::new(config).start().expect("starts");
@@ -459,7 +459,7 @@ async fn a_seeded_run_is_reproducible() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn only_the_node_given_the_bluetooth_assignment_reports_any() {
+async fn sim_fleet_restricts_ble_reports_to_assigned_node_when_partitioned() {
     let config = SimConfig { node_count: 2, ble_chance: 1.0, ..SimConfig::default() };
     let mut link = SimTransport::new(config).start().expect("starts");
     // The shape the host sends: the scanner gets the flag and no channels, and the
@@ -497,7 +497,7 @@ async fn only_the_node_given_the_bluetooth_assignment_reports_any() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_simulated_c6_says_it_has_no_five_ghz_radio() {
+async fn sim_node_reports_two_point_four_capability_only_when_configured_as_c6() {
     // The only way to put a mixed fleet in front of the planner without two kinds of
     // board on the desk.
     let config = SimConfig { node_count: 3, c6_nodes: 1, ble_chance: 0.0, ..SimConfig::default() };
@@ -518,7 +518,7 @@ async fn a_simulated_c6_says_it_has_no_five_ghz_radio() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_node_holding_the_bluetooth_antenna_acknowledges_nothing_and_cannot_be_told_to_stop() {
+async fn sim_node_fails_to_ack_assignments_when_ble_coexistence_failure_is_simulated() {
     // Reproduced without hardware so the host's `no admin ack` path can be
     // exercised; see `SimConfig::ble_coexistence_failure`.
     let config = SimConfig {

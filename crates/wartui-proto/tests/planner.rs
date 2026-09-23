@@ -24,7 +24,7 @@ fn covered(p: &wartui_proto::plan::Plan) -> Vec<u8> {
 }
 
 #[test]
-fn scan_channel_table_matches_the_firmware() {
+fn scan_channel_table_matches_firmware_definitions_when_checking_indices() {
     assert_eq!(SCAN_CHANNELS.len(), usize::from(NUM_SCAN_CHANNELS));
     assert_eq!(&SCAN_CHANNELS[..14], &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
     assert_eq!(&SCAN_CHANNELS[14..18], &[36, 40, 44, 48]);
@@ -36,7 +36,7 @@ fn scan_channel_table_matches_the_firmware() {
 }
 
 #[test]
-fn us_pool_excludes_exactly_the_channels_it_should() {
+fn channel_set_excludes_unsupported_channels_when_constructing_us_pool() {
     let excluded: BTreeSet<u8> = [12, 13, 14, 169, 173, 177].into_iter().collect();
     for (idx, &channel) in SCAN_CHANNELS.iter().enumerate() {
         let idx = u8::try_from(idx).expect("table is 42 entries");
@@ -51,7 +51,7 @@ fn us_pool_excludes_exactly_the_channels_it_should() {
 }
 
 #[test]
-fn eu_pool_excludes_exactly_the_channels_it_should() {
+fn channel_set_excludes_unsupported_channels_when_constructing_eu_pool() {
     // 5 GHz stops at 140: channel 144's twenty megahertz run past 5725, and
     // 149 upwards is another band. 2.4 GHz runs the whole way to 13.
     let excluded: BTreeSet<u8> =
@@ -68,14 +68,14 @@ fn eu_pool_excludes_exactly_the_channels_it_should() {
 }
 
 #[test]
-fn the_default_pool_is_every_channel_a_node_can_tune() {
+fn channel_pool_defaults_to_all_when_invoking_default() {
     // A pool bounds where a node listens, so the widest one is the one that
     // costs an operator nothing to be handed without asking.
     assert_eq!(ChannelPool::default(), ChannelPool::All);
 }
 
 #[test]
-fn no_pool_offers_the_one_channel_a_node_cannot_tune() {
+fn channel_pool_excludes_unsupported_channel_fourteen_when_enumerating_pools() {
     // A node handed index 13 refuses the hop once per sweep, silently; see
     // `plan::UNSUPPORTED_INDEX`.
     assert_eq!(SCAN_CHANNELS[usize::from(UNSUPPORTED_INDEX)], 14);
@@ -89,14 +89,14 @@ fn no_pool_offers_the_one_channel_a_node_cannot_tune() {
 }
 
 #[test]
-fn every_pool_is_two_runs_because_every_one_has_a_hole_in_it() {
+fn channel_pool_partitions_into_two_runs_when_checking_pool_gaps() {
     assert_eq!(ChannelPool::Us.runs().len(), 2, "the gap at channels 12-14 splits the US pool");
     assert_eq!(ChannelPool::Eu.runs().len(), 2, "channel 14 alone splits the EU pool");
     assert_eq!(ChannelPool::All.runs().len(), 2, "and channel 14 alone splits the All pool");
 }
 
 #[test]
-fn one_plan_covers_the_pool_and_nothing_else() {
+fn planner_covers_entire_pool_without_extraneous_channels_when_generating_plan() {
     // No phases: what the fleet holds at any moment is the whole pool.
     for pool in POOLS {
         let allowed: BTreeSet<u8> = pool.runs().iter().flat_map(|r| r.start..=r.end).collect();
@@ -109,7 +109,7 @@ fn one_plan_covers_the_pool_and_nothing_else() {
 }
 
 #[test]
-fn no_two_nodes_are_given_the_same_channel() {
+fn planner_partitions_channels_without_overlap_when_dividing_pool() {
     for pool in POOLS {
         for nodes in FLEET_SIZES {
             let p = plan(pool, nodes).expect("valid fleet size");
@@ -125,7 +125,7 @@ fn no_two_nodes_are_given_the_same_channel() {
 }
 
 #[test]
-fn node_indices_are_unique_and_fleet_wide() {
+fn planner_assigns_contiguous_unique_indices_when_planning_fleet() {
     // node_index drives the transmit stagger slot, so it must not restart per
     // run — two nodes sharing an index would key up simultaneously.
     for pool in POOLS {
@@ -144,7 +144,7 @@ fn node_indices_are_unique_and_fleet_wide() {
 }
 
 #[test]
-fn a_lone_node_holds_the_whole_pool_at_once() {
+fn planner_assigns_full_pool_when_fleet_consists_of_single_node() {
     // A lone node holds both of the US pool's runs at once, which before the channel
     // mask took a rotation on a sixty-second dwell.
     for pool in POOLS {
@@ -159,7 +159,7 @@ fn a_lone_node_holds_the_whole_pool_at_once() {
 }
 
 #[test]
-fn all_pool_with_one_node_is_every_channel_that_node_can_tune() {
+fn planner_assigns_all_tunable_channels_when_planning_single_node_on_all_pool() {
     // Not quite the whole table: one of the forty-two indices is a channel the
     // radio refuses.
     let p = plan(ChannelPool::All, 1).expect("valid");
@@ -174,7 +174,7 @@ fn all_pool_with_one_node_is_every_channel_that_node_can_tune() {
 }
 
 #[test]
-fn the_deal_is_round_robin_in_scan_channels_order() {
+fn planner_distributes_channels_round_robin_when_partitioning_pool() {
     // Index k of the pool's flattened order goes to node k % node_count. Said out
     // longhand because everything below is a consequence of it, and a planner
     // satisfying those by other means would pass the same tests.
@@ -194,7 +194,7 @@ fn the_deal_is_round_robin_in_scan_channels_order() {
 }
 
 #[test]
-fn shares_differ_by_at_most_one_channel() {
+fn planner_balances_channel_counts_within_one_when_dealing_to_fleet() {
     // A sweep period is proportional to the share, so an uneven deal shows up as one
     // node's observations being the stalest in the export.
     for pool in POOLS {
@@ -212,7 +212,7 @@ fn shares_differ_by_at_most_one_channel() {
 }
 
 #[test]
-fn every_node_gets_some_of_every_run_while_there_are_enough_channels() {
+fn planner_distributes_all_index_runs_to_nodes_when_channel_count_permits() {
     // The reason for dealing rather than block-splitting: under a block split a node
     // dropping out takes a whole band with it until the next re-cut.
     for pool in POOLS {
@@ -233,7 +233,7 @@ fn every_node_gets_some_of_every_run_while_there_are_enough_channels() {
 }
 
 #[test]
-fn admin_messages_carry_the_snapshot_node_count() {
+fn plan_encodes_fleet_metadata_into_admin_frame_when_generating_admin_msg() {
     // The planned count, not a live one: it must match the partition it came
     // from, or a node joining in between computes its stagger slot wrongly.
     let p = plan(ChannelPool::Us, 5).expect("valid");
@@ -251,7 +251,7 @@ fn admin_messages_carry_the_snapshot_node_count() {
 }
 
 #[test]
-fn the_node_scanning_bluetooth_is_dealt_no_channels_and_still_counts_in_the_fleet() {
+fn planner_assigns_empty_channel_set_when_node_holds_ble_flag() {
     // Counted, because `node_index` and `node_count` are the fleet's stagger
     // arithmetic rather than a census of who is sniffing: cut it out of the
     // numbering and every other node's transmit slot moves.
@@ -271,7 +271,7 @@ fn the_node_scanning_bluetooth_is_dealt_no_channels_and_still_counts_in_the_flee
 }
 
 #[test]
-fn the_pool_is_cut_across_only_the_nodes_still_sniffing() {
+fn planner_partitions_pool_across_wifi_nodes_only_when_ble_node_present() {
     // Three nodes, one of them on Bluetooth, deals the same shares as two nodes —
     // the point of the change, and the reason moving the scan has to re-cut.
     let two = plan(ChannelPool::Us, 2).expect("valid");
@@ -293,7 +293,7 @@ fn the_pool_is_cut_across_only_the_nodes_still_sniffing() {
 }
 
 #[test]
-fn a_fleet_whose_only_node_scans_bluetooth_leaves_the_whole_pool_unreachable() {
+fn planner_marks_entire_pool_unreachable_when_only_node_is_assigned_ble() {
     // A plan rather than a refusal: refusing would leave that node holding the
     // share it already had, still sniffing Wi-Fi, which is the opposite of what
     // was asked. The hole is real and `unreachable` is where it is reported.
@@ -307,7 +307,7 @@ fn a_fleet_whose_only_node_scans_bluetooth_leaves_the_whole_pool_unreachable() {
 }
 
 #[test]
-fn a_five_ghz_radio_given_the_bluetooth_scan_takes_five_ghz_out_of_reach_with_it() {
+fn planner_marks_five_ghz_unreachable_when_only_dual_band_node_assigned_ble() {
     // Not a mixed fleet: it is a one-radio fleet whose only dual-band node is
     // doing something else, so the 5 GHz pass must not run at all.
     let fleet = [Job::Bluetooth, Job::Wifi(Radio::TwoPointFour)];
@@ -318,7 +318,7 @@ fn a_five_ghz_radio_given_the_bluetooth_scan_takes_five_ghz_out_of_reach_with_it
 }
 
 #[test]
-fn the_empty_set_is_offered_only_to_the_node_scanning_bluetooth() {
+fn plan_refuses_empty_channel_set_when_node_lacks_ble_flag() {
     // The one frame that must never exist: an empty mask without the flag tells a
     // node to scan nothing, and a node sent one parks while the host goes on
     // believing it is sweeping.
@@ -349,7 +349,7 @@ fn the_empty_set_is_offered_only_to_the_node_scanning_bluetooth() {
 }
 
 #[test]
-fn a_uniform_fleet_gets_the_same_plan_by_either_route() {
+fn planner_produces_identical_plan_when_using_convenience_or_explicit_api() {
     // `plan` is `plan_for` with every radio dual-band, so the mixed-fleet machinery
     // must be invisible to it. Every fleet on a bench today is one of these.
     for pool in POOLS {
@@ -361,7 +361,7 @@ fn a_uniform_fleet_gets_the_same_plan_by_either_route() {
 }
 
 #[test]
-fn a_two_point_four_radio_is_never_dealt_a_channel_it_cannot_tune() {
+fn planner_restricts_single_band_node_to_two_point_four_channels_when_dealing() {
     // A C6 adopts a 5 GHz share, acknowledges it, and scans the part it can reach —
     // leaving a hole in the fleet's coverage with an assignment on top of it.
     for pool in POOLS {
@@ -388,7 +388,7 @@ fn a_two_point_four_radio_is_never_dealt_a_channel_it_cannot_tune() {
 }
 
 #[test]
-fn channels_no_radio_present_can_tune_are_named_rather_than_dealt() {
+fn planner_reports_untunable_channels_as_unreachable_when_five_ghz_radios_absent() {
     // A fleet of nothing but C6s covers eleven of the US pool's thirty-six. Not a
     // fault the planner can fix, and not one it should hide.
     let fleet = [Job::Wifi(Radio::TwoPointFour); 3];
@@ -412,7 +412,7 @@ fn channels_no_radio_present_can_tune_are_named_rather_than_dealt() {
 }
 
 #[test]
-fn a_mixed_fleet_is_dealt_to_keep_the_slowest_node_as_fast_as_it_can_be() {
+fn planner_optimizes_channel_shares_when_fleet_contains_mixed_radios() {
     // Dealt in pool order, the C5 would take its half of 2.4 GHz and then all
     // of 5 GHz on top: 31 channels against the C6's 5, which is the block split
     // this planner was written to avoid. Dealing the constrained channels first
@@ -435,7 +435,7 @@ fn a_mixed_fleet_is_dealt_to_keep_the_slowest_node_as_fast_as_it_can_be() {
 }
 
 #[test]
-fn impossible_fleet_sizes_are_rejected() {
+fn planner_returns_none_when_fleet_size_is_zero_or_exceeds_max_nodes() {
     assert!(plan(ChannelPool::Us, 0).is_none());
     assert!(plan(ChannelPool::Us, u8::try_from(MAX_NODES).expect("fits") + 1).is_none());
     assert!(plan_for(ChannelPool::Us, &[]).is_none());
@@ -443,7 +443,7 @@ fn impossible_fleet_sizes_are_rejected() {
 }
 
 #[test]
-fn stagger_matches_the_firmware_helper() {
+fn stagger_offset_ms_computes_slot_delay_when_given_node_index_and_count() {
     // Verbatim expectations from `calculateNodeStaggerOffsetMs`.
     assert_eq!(stagger_offset_ms(0, 1, NODE_STAGGER_WINDOW_MS), 0, "a lone node owns the channel");
     assert_eq!(stagger_offset_ms(3, 3, NODE_STAGGER_WINDOW_MS), 0, "index outside the fleet");
@@ -461,7 +461,7 @@ fn stagger_matches_the_firmware_helper() {
 }
 
 #[test]
-fn the_wire_epoch_cycles_through_every_value_the_firmware_will_accept() {
+fn wire_epoch_cycles_non_zero_u8_range_when_epoch_counter_increments() {
     use wartui_proto::air::wire_epoch;
 
     // The host persists a `u64`; the wire field is one byte and

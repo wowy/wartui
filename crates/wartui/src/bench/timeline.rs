@@ -140,7 +140,7 @@ mod tests {
     const MINUTE: Duration = Duration::from_secs(60);
 
     #[test]
-    fn a_slice_closes_at_each_boundary_and_the_short_tail_is_kept() {
+    fn timeline_closes_slice_at_each_boundary_when_samples_arrive() {
         let mut timeline = Timeline::new(MINUTE, at(0));
         for seconds in (2..=130).step_by(2) {
             timeline.sample(at(seconds));
@@ -155,14 +155,14 @@ mod tests {
     }
 
     #[test]
-    fn a_run_ending_on_a_boundary_has_no_empty_last_slice() {
+    fn timeline_suppresses_empty_trailing_slice_when_run_ends_on_window_boundary() {
         let mut timeline = Timeline::new(MINUTE, at(0));
         timeline.sample(at(60));
         assert_eq!(timeline.finish(at(60)).len(), 1);
     }
 
     #[test]
-    fn a_sample_late_past_several_boundaries_closes_one_slice_and_stays_on_the_grid() {
+    fn timeline_closes_single_slice_when_sample_skips_multiple_boundaries() {
         // A stalled sampler is a slow run's symptom, not a reason to invent slices.
         let mut timeline = Timeline::new(MINUTE, at(0));
         timeline.sample(at(190));
@@ -176,7 +176,7 @@ mod tests {
     }
 
     #[test]
-    fn device_counters_in_a_slice_need_both_ends() {
+    fn timeline_computes_device_deltas_only_when_both_marks_contain_device_stats() {
         let device = DeviceIo { writes: 5, sectors: 40, write_ms: 1, flushes: None };
         let mut timeline = Timeline::new(MINUTE, at(0));
         timeline.sample(Mark { device: Some(device), ..at(60) });

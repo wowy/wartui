@@ -111,7 +111,7 @@ const VENDOR_HEARTBEAT: &[u8] = &[0x45, 0x4E, 0x4F, 0x57, 0x03, 0x93, 0x00, 0x00
 const VENDOR_ADMIN: &[u8] = &[0x45, 0x4E, 0x4F, 0x57, 0x05, 0x07, 0x02, 0x05, 0x10, 0x17];
 
 #[test]
-fn the_frames_are_the_lengths_the_constants_promise() {
+fn wire_codec_matches_expected_frame_lengths_when_checking_constants() {
     assert_eq!(HEARTBEAT.len(), HEARTBEAT_MSG_LEN);
     assert_eq!(ADMIN.len(), ADMIN_MSG_LEN);
     assert_eq!(
@@ -132,7 +132,7 @@ fn the_frames_are_the_lengths_the_constants_promise() {
 }
 
 #[test]
-fn every_frame_carries_the_same_header() {
+fn wire_codec_includes_magic_and_version_header_when_inspecting_frames() {
     for frame in [
         HEARTBEAT,
         SIGHTING_WIFI,
@@ -148,7 +148,7 @@ fn every_frame_carries_the_same_header() {
 }
 
 #[test]
-fn nothing_we_transmit_carries_the_vendors_magic() {
+fn foreign_classifier_rejects_our_frames_when_checking_vendor_magic() {
     // A vendor core must not admit one of ours to its node table, nor a vendor node
     // read an assignment out of one.
     for frame in [
@@ -166,7 +166,7 @@ fn nothing_we_transmit_carries_the_vendors_magic() {
 }
 
 #[test]
-fn a_heartbeat_encodes_byte_for_byte() {
+fn heartbeat_msg_serializes_byte_for_byte_when_encoded_and_decoded() {
     let msg = HeartbeatMsg {
         counter: 0x1234_5678,
         capabilities: Capabilities { major: 1, minor: 0, ble: true, five_ghz: true },
@@ -176,7 +176,7 @@ fn a_heartbeat_encodes_byte_for_byte() {
 }
 
 #[test]
-fn the_heartbeat_counter_goes_out_least_significant_byte_first() {
+fn heartbeat_msg_serializes_counter_as_little_endian_when_encoded() {
     // A counter read big-endian would still be monotonic, so the reboot
     // detector would never notice; only the bytes say which it is.
     let decoded = HeartbeatMsg::decode(HEARTBEAT).expect("valid");
@@ -185,7 +185,7 @@ fn the_heartbeat_counter_goes_out_least_significant_byte_first() {
 }
 
 #[test]
-fn a_wifi_sighting_encodes_byte_for_byte() {
+fn sighting_msg_serializes_wifi_payload_byte_for_byte_when_encoded_and_decoded() {
     let msg = SightingMsg {
         kind: RecordKind::Wifi,
         bssid: [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF],
@@ -202,7 +202,7 @@ fn a_wifi_sighting_encodes_byte_for_byte() {
 }
 
 #[test]
-fn a_wifi_sighting_with_a_roaming_consortium_encodes_byte_for_byte() {
+fn sighting_msg_serializes_roaming_consortium_trailer_when_encoded() {
     // The trailer is the element's body verbatim — count byte and lengths
     // byte included — so a change to how it is read costs a re-export, never
     // a re-flash.
@@ -230,14 +230,14 @@ fn a_wifi_sighting_with_a_roaming_consortium_encodes_byte_for_byte() {
 }
 
 #[test]
-fn a_comma_in_an_ssid_survives_the_wire() {
+fn sighting_msg_preserves_comma_in_ssid_when_decoded_from_wire() {
     // The SSID is length-prefixed, so nothing has to be escaped or rewritten.
     let decoded = SightingMsg::decode(SIGHTING_WIFI).expect("valid");
     assert_eq!(decoded.ssid, b"My,Net");
 }
 
 #[test]
-fn a_ble_sighting_encodes_byte_for_byte() {
+fn sighting_msg_serializes_ble_payload_byte_for_byte_when_encoded_and_decoded() {
     let msg = SightingMsg {
         kind: RecordKind::Ble,
         bssid: [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF],
@@ -254,7 +254,7 @@ fn a_ble_sighting_encodes_byte_for_byte() {
 }
 
 #[test]
-fn a_ble_sighting_with_a_manufacturer_id_encodes_byte_for_byte() {
+fn sighting_msg_serializes_ble_manufacturer_trailer_when_encoded() {
     // Two little-endian bytes and nothing else: the trailer for a BLE
     // sighting is the identifier or it is empty, never anything in between.
     let msg = SightingMsg {
@@ -273,7 +273,7 @@ fn a_ble_sighting_with_a_manufacturer_id_encodes_byte_for_byte() {
 }
 
 #[test]
-fn an_rssi_is_signed_and_a_channel_is_not() {
+fn sighting_msg_parses_signed_rssi_and_unsigned_channel_when_decoded() {
     // 0xD6 as an unsigned byte is 214, which is a plausible-looking number and
     // a nonsensical dBm. Channel 165 is the other way round: the top of the
     // 5 GHz pool, and a channel read as a signed byte would be -91.
@@ -287,7 +287,7 @@ fn an_rssi_is_signed_and_a_channel_is_not() {
 }
 
 #[test]
-fn the_longest_ssid_and_trailer_there_are_fit_the_buffer_sized_for_it() {
+fn sighting_msg_fits_max_buffer_when_ssid_and_trailer_are_longest() {
     let ssid = [b'x'; SSID_MAX];
     let ext = [0xEE; EXT_MAX];
     let msg = SightingMsg {
@@ -313,7 +313,7 @@ fn the_longest_ssid_and_trailer_there_are_fit_the_buffer_sized_for_it() {
 }
 
 #[test]
-fn an_ssid_longer_than_the_standard_allows_is_refused_at_both_ends() {
+fn sighting_msg_rejects_oversized_ssid_when_encoding_or_decoding() {
     let ssid = [b'x'; SSID_MAX + 1];
     let msg = SightingMsg {
         kind: RecordKind::Wifi,
@@ -333,7 +333,7 @@ fn an_ssid_longer_than_the_standard_allows_is_refused_at_both_ends() {
 }
 
 #[test]
-fn a_trailer_longer_than_the_wire_allows_is_refused_at_both_ends() {
+fn sighting_msg_rejects_oversized_trailer_when_encoding_or_decoding() {
     // Refused on the way in, so a node cannot broadcast it, and on the way
     // out, so a frame from a build with a wider trailer is named rather than
     // half-read.
@@ -355,7 +355,7 @@ fn a_trailer_longer_than_the_wire_allows_is_refused_at_both_ends() {
 }
 
 #[test]
-fn a_trailer_short_of_its_claim_is_short_rather_than_silently_empty() {
+fn sighting_msg_returns_too_short_error_when_trailer_length_is_truncated() {
     // `ext_len` says two and one arrived. Reading what is there would file an
     // identifier nobody sent.
     let mut frame = SIGHTING_BLE_MFGR.to_vec();
@@ -367,7 +367,7 @@ fn a_trailer_short_of_its_claim_is_short_rather_than_silently_empty() {
 }
 
 #[test]
-fn a_truncated_ssid_is_short_rather_than_silently_empty() {
+fn sighting_msg_returns_too_short_error_when_ssid_is_truncated() {
     // `ssid_len` says six and five arrived. Reading what is there would file
     // an access point under a name it never had.
     let mut frame = SIGHTING_WIFI.to_vec();
@@ -379,7 +379,7 @@ fn a_truncated_ssid_is_short_rather_than_silently_empty() {
 }
 
 #[test]
-fn a_security_value_this_build_never_heard_of_does_not_cost_the_observation() {
+fn sighting_msg_preserves_sighting_with_unknown_security_when_decoded() {
     // A node from a later build reporting a mode this host has no name for
     // still reported an access point, and the address is the part that matters.
     let mut frame = SIGHTING_BLE.to_vec();
@@ -391,7 +391,7 @@ fn a_security_value_this_build_never_heard_of_does_not_cost_the_observation() {
 }
 
 #[test]
-fn every_security_value_round_trips_and_spells_itself_the_wigle_way() {
+fn security_enum_round_trips_to_wigle_tokens_when_converted() {
     // These tokens leave the host in the `AuthMode` column, so they are a format
     // even though they never travel on the wire.
     let named = [
@@ -419,7 +419,7 @@ fn every_security_value_round_trips_and_spells_itself_the_wigle_way() {
 }
 
 #[test]
-fn an_assignment_encodes_byte_for_byte() {
+fn assignment_serializes_byte_for_byte_when_encoded_to_wire() {
     let msg = AdminMsg {
         epoch: 7,
         node_index: 2,
@@ -433,7 +433,7 @@ fn an_assignment_encodes_byte_for_byte() {
 }
 
 #[test]
-fn the_channel_mask_goes_out_least_significant_byte_first() {
+fn admin_msg_serializes_channel_mask_as_little_endian_when_encoded() {
     // Four indices chosen to straddle byte boundaries and to reach the top of
     // the forty-two, so a mask written big-endian — or in five bytes rather
     // than six — cannot produce these bytes.
@@ -457,7 +457,7 @@ fn the_channel_mask_goes_out_least_significant_byte_first() {
 }
 
 #[test]
-fn the_bluetooth_node_is_sent_the_flag_and_an_empty_channel_mask() {
+fn admin_msg_encodes_ble_flag_and_empty_mask_when_node_scans_bluetooth() {
     let msg = AdminMsg {
         epoch: 9,
         node_index: 1,
@@ -476,7 +476,7 @@ fn the_bluetooth_node_is_sent_the_flag_and_an_empty_channel_mask() {
 }
 
 #[test]
-fn an_unknown_flag_bit_survives_a_decode_and_re_encode() {
+fn admin_msg_preserves_unknown_flag_bits_when_round_tripped() {
     // A newer host setting a bit this build has no name for must not have it
     // quietly dropped on the way through.
     let mut frame = ADMIN_BLE.to_vec();
@@ -488,7 +488,7 @@ fn an_unknown_flag_bit_survives_a_decode_and_re_encode() {
 }
 
 #[test]
-fn frame_decode_routes_every_type_to_its_own_layout() {
+fn frame_decoder_dispatches_type_byte_to_corresponding_frame_when_decoded() {
     assert!(matches!(Frame::decode(HEARTBEAT), Ok(Frame::Heartbeat(_))));
     assert!(matches!(Frame::decode(SIGHTING_WIFI), Ok(Frame::Sighting(_))));
     assert!(matches!(Frame::decode(SIGHTING_BLE), Ok(Frame::Sighting(_))));
@@ -496,7 +496,7 @@ fn frame_decode_routes_every_type_to_its_own_layout() {
 }
 
 #[test]
-fn a_decoder_refuses_a_frame_of_the_wrong_type() {
+fn frame_decoder_rejects_payload_when_frame_type_mismatches() {
     // Each decoder is reachable directly, and reading an assignment out of a
     // heartbeat would be adopting four bytes of counter as a channel mask.
     assert_eq!(AdminMsg::decode(HEARTBEAT), Err(DecodeError::UnknownType(0x01)));
@@ -505,14 +505,14 @@ fn a_decoder_refuses_a_frame_of_the_wrong_type() {
 }
 
 #[test]
-fn bad_magic_is_rejected_before_anything_else_is_read() {
+fn wire_decoder_rejects_frame_when_magic_bytes_do_not_match() {
     let mut frame = HEARTBEAT.to_vec();
     frame[0] = b'X';
     assert_eq!(Frame::decode(&frame), Err(DecodeError::BadMagic));
 }
 
 #[test]
-fn a_version_this_build_does_not_know_is_named_rather_than_guessed_at() {
+fn wire_decoder_rejects_frame_when_wire_version_is_unsupported() {
     // Without a version field, a frame of another shape could pass a length
     // check and decode as something plausible. This is the field that stops that happening here.
     let mut frame = HEARTBEAT.to_vec();
@@ -525,14 +525,14 @@ fn a_version_this_build_does_not_know_is_named_rather_than_guessed_at() {
 }
 
 #[test]
-fn an_unknown_type_byte_is_rejected() {
+fn wire_decoder_rejects_frame_when_type_byte_is_unknown() {
     let mut frame = HEARTBEAT.to_vec();
     frame[5] = 0x42;
     assert_eq!(Frame::decode(&frame), Err(DecodeError::UnknownType(0x42)));
 }
 
 #[test]
-fn short_frames_are_rejected_by_the_layout_they_claim_to_be() {
+fn wire_decoder_rejects_truncated_payload_when_frame_is_too_short() {
     // Too short to carry a header at all, which is as far as `header` gets.
     assert_eq!(Frame::decode(&HEARTBEAT[..4]), Err(DecodeError::TooShort { need: 6, got: 4 }));
     // A sighting is as long as its own SSID and trailer say, so short is short.
@@ -553,7 +553,7 @@ fn short_frames_are_rejected_by_the_layout_they_claim_to_be() {
 }
 
 #[test]
-fn a_fixed_frame_longer_than_this_build_reads_is_refused_rather_than_truncated() {
+fn wire_decoder_rejects_payload_when_fixed_frame_exceeds_expected_length() {
     // The half of a layout change that would otherwise be silent: a wider
     // assignment from a newer host has a valid header, a known type byte and
     // enough bytes for every field this build knows, so a length check is the
@@ -575,7 +575,7 @@ fn a_fixed_frame_longer_than_this_build_reads_is_refused_rather_than_truncated()
 }
 
 #[test]
-fn the_vendors_traffic_is_recognised_without_being_decoded() {
+fn foreign_classifier_identifies_vendor_traffic_when_foreign_frames_arrive() {
     // Another fleet on the control channel is an operational fact — it is
     // transmitting where these nodes are listening — so counting it as line
     // noise would hide the one clue an operator has.
@@ -588,7 +588,7 @@ fn the_vendors_traffic_is_recognised_without_being_decoded() {
 }
 
 #[test]
-fn nothing_shorter_than_a_vendor_header_is_mistaken_for_one() {
+fn foreign_classifier_returns_none_when_input_is_shorter_than_vendor_header() {
     assert_eq!(foreign::classify(&VENDOR_ADMIN[..4]), None, "magic alone names no type");
     assert_eq!(foreign::classify(b""), None);
     assert_eq!(foreign::classify(b"not espnow at all"), None);

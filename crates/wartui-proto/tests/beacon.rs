@@ -70,7 +70,7 @@ fn security_of(ies: &[u8]) -> Security {
 }
 
 #[test]
-fn an_open_network_has_neither_privacy_nor_cipher_suites() {
+fn beacon_parser_classifies_network_as_open_when_no_privacy_or_ciphers_present() {
     let frame = mgmt(8, 0x0001, &ie(0, b"cafe"));
     let ap = parse_mgmt(&frame, -50, 6).expect("a beacon");
     assert_eq!(ap.security, Security::Open);
@@ -80,13 +80,13 @@ fn an_open_network_has_neither_privacy_nor_cipher_suites() {
 }
 
 #[test]
-fn privacy_with_no_cipher_suites_is_the_wep_heuristic() {
+fn beacon_parser_classifies_network_as_wep_when_privacy_set_without_ciphers() {
     // Nothing else can explain an encrypted network that names no suite.
     assert_eq!(security_of(&ie(0, b"old")), Security::Wep);
 }
 
 #[test]
-fn each_akm_combination_maps_to_the_token_the_exporter_expects() {
+fn beacon_parser_maps_akm_suites_to_security_tokens_when_parsing_rsn_and_wpa() {
     // These strings reach the WiGLE `AuthMode` column unaltered, so the ladder
     // in `classify` is a contract, not an interpretation.
     assert_eq!(security_of(&ie(48, &rsn(&[2]))), Security::Wpa2Psk);
@@ -103,7 +103,7 @@ fn each_akm_combination_maps_to_the_token_the_exporter_expects() {
 }
 
 #[test]
-fn a_transitional_network_advertising_both_elements_is_wpa_wpa2() {
+fn beacon_parser_classifies_network_as_wpa_wpa2_psk_when_both_rsn_and_wpa_present() {
     let mut ies = ie(0, b"mixed");
     ies.extend_from_slice(&ie(48, &rsn(&[2])));
     ies.extend_from_slice(&ie(221, &wpa(&[2])));
@@ -111,14 +111,14 @@ fn a_transitional_network_advertising_both_elements_is_wpa_wpa2() {
 }
 
 #[test]
-fn wpa_only_enterprise_reports_as_wpa2_because_the_token_is_shared() {
+fn beacon_parser_classifies_network_as_wpa2_enterprise_when_wpa_specifies_enterprise() {
     // `WIFI_AUTH_ENTERPRISE` and `WIFI_AUTH_WPA2_ENTERPRISE` share the `[WPA2]`
     // token, and the token is what has to match.
     assert_eq!(security_of(&ie(221, &wpa(&[1]))), Security::Wpa2Enterprise);
 }
 
 #[test]
-fn a_legacy_enterprise_element_does_not_override_what_rsn_says() {
+fn beacon_parser_prioritises_rsn_psk_over_legacy_wpa_when_both_elements_present() {
     // The WPA element names 802.1X and the RSN element names PSK. The enterprise
     // rung is guarded with `!has_rsn`, so RSN decides and this is `[WPA2_PSK]`.
     // Without that guard it reads as `[WPA2]`, for an access point that will
@@ -130,7 +130,7 @@ fn a_legacy_enterprise_element_does_not_override_what_rsn_says() {
 }
 
 #[test]
-fn owe_collapses_to_undefined_along_with_everything_else_unmapped() {
+fn beacon_parser_classifies_network_as_undefined_when_given_unmapped_akm_suite() {
     // The firmware's `switch` has no arm for `WIFI_AUTH_OWE`, so it falls to
     // `default`. Reproducing the gap is deliberate: the column is a contract
     // with an exporter, not a description of the network.
@@ -138,7 +138,7 @@ fn owe_collapses_to_undefined_along_with_everything_else_unmapped() {
 }
 
 #[test]
-fn wapi_outranks_every_other_element() {
+fn beacon_parser_prioritises_wapi_security_when_multiple_security_ies_present() {
     // It is tested first, before RSN is consulted.
     let mut ies = ie(48, &rsn(&[2]));
     ies.extend_from_slice(&ie(68, &[]));
@@ -146,7 +146,7 @@ fn wapi_outranks_every_other_element() {
 }
 
 #[test]
-fn a_hidden_network_still_yields_a_bssid() {
+fn beacon_parser_extracts_bssid_when_ssid_element_is_empty() {
     // Twelve of the access points in the Phase 0 capture had empty SSIDs, and
     // a wardrive that dropped them would be missing the interesting ones.
     let ap = parse_mgmt(&beacon(&ie(0, b"")), -70, 11).expect("a beacon");
@@ -155,7 +155,7 @@ fn a_hidden_network_still_yields_a_bssid() {
 }
 
 #[test]
-fn an_ssid_of_nothing_but_zero_bytes_is_a_hidden_network() {
+fn beacon_parser_recognises_hidden_network_when_ssid_contains_only_zero_bytes() {
     // The other way of cloaking: the element carries the name's real length
     // with every byte zeroed. This is the exact shape that reached a WiGLE
     // export as eight NULs in the SSID column.
@@ -165,13 +165,13 @@ fn an_ssid_of_nothing_but_zero_bytes_is_a_hidden_network() {
 }
 
 #[test]
-fn a_zero_padded_ssid_keeps_the_name_and_loses_the_padding() {
+fn beacon_parser_strips_trailing_null_bytes_when_ssid_is_zero_padded() {
     let ap = parse_mgmt(&beacon(&ie(0, b"Home\0\0\0")), -70, 11).expect("a beacon");
     assert_eq!(ap.ssid(), b"Home");
 }
 
 #[test]
-fn an_interior_zero_byte_is_not_padding_and_is_kept() {
+fn beacon_parser_preserves_interior_null_bytes_when_parsing_ssid() {
     // The guard against over-trimming. Nothing here knows what a NUL in the
     // middle of a name was meant to be, so nothing here decides.
     let ap = parse_mgmt(&beacon(&ie(0, b"a\0b")), -70, 11).expect("a beacon");
@@ -182,13 +182,13 @@ fn an_interior_zero_byte_is_not_padding_and_is_kept() {
 }
 
 #[test]
-fn an_over_long_ssid_of_nothing_but_zeros_is_a_hidden_network() {
+fn beacon_parser_recognises_hidden_network_when_overlong_ssid_contains_only_zeros() {
     let ap = parse_mgmt(&beacon(&ie(0, &[0u8; 40])), -50, 6).expect("a beacon");
     assert!(ap.ssid().is_empty());
 }
 
 #[test]
-fn a_name_past_the_legal_length_does_not_rescue_the_padding_in_front_of_it() {
+fn beacon_parser_clamps_before_trimming_when_ssid_exceeds_legal_length() {
     // The input that separates clamping first from trimming first, and so the
     // reason the parser does them in that order: trimmed first this keeps
     // thirty-nine bytes, and the clamp then yields thirty-two zeros — a
@@ -200,7 +200,7 @@ fn a_name_past_the_legal_length_does_not_rescue_the_padding_in_front_of_it() {
 }
 
 #[test]
-fn the_channel_comes_from_the_element_that_carries_it() {
+fn beacon_parser_extracts_channel_from_ds_or_ht_elements_when_present() {
     // DS Parameter Set on 2.4 GHz.
     let mut ies = ie(0, b"n");
     ies.extend_from_slice(&ie(3, &[11]));
@@ -217,14 +217,14 @@ fn the_channel_comes_from_the_element_that_carries_it() {
 }
 
 #[test]
-fn ds_parameter_set_wins_over_ht_operation() {
+fn beacon_parser_prioritises_ds_parameter_set_over_ht_operation_when_both_present() {
     let mut ies = ie(3, &[6]);
     ies.extend_from_slice(&ie(61, &[36, 0, 0, 0, 0]));
     assert_eq!(parse_mgmt(&beacon(&ies), -50, 1).expect("beacon").channel, 6);
 }
 
 #[test]
-fn probe_responses_count_and_other_frames_do_not() {
+fn beacon_parser_accepts_probe_responses_and_rejects_other_frames_when_parsing_mgmt() {
     assert!(parse_mgmt(&mgmt(5, 0x0001, &ie(0, b"n")), -50, 6).is_some(), "probe response");
     assert!(parse_mgmt(&mgmt(4, 0x0001, &ie(0, b"n")), -50, 6).is_none(), "probe request");
     assert!(parse_mgmt(&mgmt(13, 0x0001, &[]), -50, 6).is_none(), "action frame");
@@ -236,7 +236,7 @@ fn probe_responses_count_and_other_frames_do_not() {
 }
 
 #[test]
-fn frames_too_short_for_the_fixed_fields_are_refused() {
+fn beacon_parser_rejects_frame_when_length_is_insufficient_for_fixed_fields() {
     let frame = beacon(&ie(0, b"n"));
     for len in 0..36 {
         assert!(parse_mgmt(&frame[..len], -50, 6).is_none(), "{len} bytes is not a beacon");
@@ -245,7 +245,7 @@ fn frames_too_short_for_the_fixed_fields_are_refused() {
 }
 
 #[test]
-fn a_truncated_element_ends_the_walk_without_losing_the_access_point() {
+fn beacon_parser_preserves_bssid_when_element_list_is_truncated() {
     // A frame that was received well enough to have a BSSID is worth reporting
     // even if its tail was clipped.
     let mut ies = ie(0, b"cafe");
@@ -258,7 +258,7 @@ fn a_truncated_element_ends_the_walk_without_losing_the_access_point() {
 }
 
 #[test]
-fn a_suite_count_that_overruns_the_element_is_survivable() {
+fn beacon_parser_handles_corrupt_suite_count_without_overrunning_when_parsing_rsn() {
     // Claiming 4000 pairwise suites inside a 20-byte element is either a bug or
     // an attack; either way it must not read past the frame.
     let mut body = vec![0x01, 0x00, 0x00, 0x0F, 0xAC, 4];
@@ -269,7 +269,7 @@ fn a_suite_count_that_overruns_the_element_is_survivable() {
 }
 
 #[test]
-fn an_over_long_ssid_is_kept_to_what_the_standard_allows() {
+fn beacon_parser_truncates_ssid_to_max_length_when_element_is_overlong() {
     let long = [b'x'; 60];
     let ap = parse_mgmt(&beacon(&ie(0, &long)), -50, 6).expect("a beacon");
     assert_eq!(ap.ssid().len(), SSID_MAX);
@@ -286,7 +286,7 @@ const OPEN_ROAMING: [u8; 17] = [
 ];
 
 #[test]
-fn a_passpoint_beacon_yields_its_roaming_consortium_verbatim() {
+fn beacon_parser_extracts_roaming_consortium_verbatim_when_passpoint_ie_present() {
     // Kept raw — count and lengths bytes included — so reading it differently
     // later costs a re-export, never a reflash.
     let ap = parse_mgmt(&beacon(&ie(111, &OPEN_ROAMING)), -50, 6).expect("a beacon");
@@ -298,14 +298,14 @@ fn a_passpoint_beacon_yields_its_roaming_consortium_verbatim() {
 }
 
 #[test]
-fn a_roaming_consortium_longer_than_the_wire_carries_is_dropped_whole() {
+fn beacon_parser_drops_roaming_consortium_when_element_exceeds_wire_capacity() {
     // Truncating would invent an identifier nobody beaconed.
     let ap = parse_mgmt(&beacon(&ie(111, &[0u8; 18])), -50, 6).expect("a beacon");
     assert!(ap.rcoi().is_empty());
 }
 
 #[test]
-fn a_second_roaming_consortium_element_does_not_overwrite_the_first() {
+fn beacon_parser_preserves_first_roaming_consortium_when_duplicate_elements_occur() {
     // The same rule the channel elements follow: a stray trailing element must
     // not rewrite what the access point actually said.
     let first = [0x01, 0x03, 0x5A, 0x03, 0xBA];
@@ -317,7 +317,7 @@ fn a_second_roaming_consortium_element_does_not_overwrite_the_first() {
 }
 
 #[test]
-fn roaming_consortium_bodies_render_the_way_wigle_spells_them() {
+fn rcoi_text_formats_roaming_consortium_ids_when_rendering_wigle_strings() {
     // Three-byte identifiers get six hex digits and five-byte ones ten, which
     // are the two forms Hotspot 2.0 actually uses; the third identifier is
     // whatever of the body is left.
@@ -336,7 +336,7 @@ fn roaming_consortium_bodies_render_the_way_wigle_spells_them() {
 }
 
 #[test]
-fn a_sighting_round_trips_through_the_wire_format() {
+fn sighting_msg_survives_wire_round_trip_when_parsed_from_beacon() {
     // The point of the whole module: what the radio heard has to survive being
     // broadcast and read back by the host. The SSID here has a comma in it,
     // which the format this replaced could not carry — the sender rewrote it
@@ -362,7 +362,7 @@ fn a_sighting_round_trips_through_the_wire_format() {
 const CAPTURED: &str = include_str!("beacon_vectors.txt");
 
 #[test]
-fn every_captured_beacon_yields_a_usable_observation() {
+fn beacon_parser_yields_usable_observation_when_processing_captured_beacons() {
     // The question the assembled frames above cannot answer: whether the ladder
     // agrees with the air, rather than with a reading of the firmware. These
     // came off a real street through `tools/beacons/extract.py`, which scrubs

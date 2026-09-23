@@ -330,7 +330,7 @@ mod tests {
     }
 
     #[test]
-    fn an_undecodable_frame_is_not_a_bridge_answering() {
+    fn sniff_cmd_ignores_garbled_frame_when_tracking_bridge_liveness() {
         // The board that produces these fastest is one running node firmware,
         // which is the first cause the notice names. Counting a garbled frame
         // as contact would suppress the notice permanently after one of them.
@@ -338,7 +338,7 @@ mod tests {
     }
 
     #[test]
-    fn a_decoded_message_counts_even_without_an_announcement() {
+    fn sniff_cmd_increments_decoded_counter_when_sighting_arrives_without_announcement() {
         // `Ready` can be lost to the bridge's transmit rings while everything
         // else it sends arrives; frames on screen must not be contradicted.
         let status = BridgeToHost::Status {
@@ -352,7 +352,7 @@ mod tests {
     }
 
     #[test]
-    fn a_reason_the_link_is_down_counts_because_it_is_the_better_diagnosis() {
+    fn sniff_cmd_marks_bridge_heard_when_receiving_disconnected_event_with_reason() {
         assert!(heard(LinkEvent::Disconnected { reason: "could not open".to_owned() }));
     }
 }

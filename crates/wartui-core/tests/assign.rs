@@ -151,7 +151,7 @@ async fn sweep(path: &Path, nodes: u8) -> (ChannelSet, u32) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_node_dealt_a_smaller_share_sweeps_it_faster() {
+async fn assignment_flow_updates_sweep_period_when_smaller_channel_share_is_assigned() {
     let dir = tempfile::tempdir().expect("temp dir");
 
     let (whole, wide_period) = sweep(&dir.path().join("lone.db"), 1).await;

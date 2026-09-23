@@ -954,12 +954,12 @@ mod tests {
     }
 
     #[test]
-    fn a_remembered_board_that_was_heard_out_and_said_nothing_is_disowned() {
+    fn serial_link_disowns_remembered_board_when_device_fails_to_respond() {
         assert!(silence_disowns_it(true, true, parse_mac(BRIDGE_MAC), &board(BRIDGE_MAC)));
     }
 
     #[test]
-    fn a_board_that_would_not_open_is_not_disowned() {
+    fn serial_link_preserves_remembered_board_when_port_fails_to_open() {
         // It said nothing because nothing was asked of it — ModemManager holding a
         // fresh device, or a missing `dialout` group. Forgetting the bridge over
         // either throws away the right answer for a reason that is not the board's.
@@ -967,37 +967,37 @@ mod tests {
     }
 
     #[test]
-    fn a_board_given_only_a_probe_is_not_disowned() {
+    fn serial_link_preserves_remembered_board_when_only_short_probe_completed() {
         // A bridge power-cycled alongside a node takes longer than `PROBE_TICKS` to
         // bring its radio up, and would otherwise be forgotten for being slow.
         assert!(!silence_disowns_it(false, true, parse_mac(BRIDGE_MAC), &board(BRIDGE_MAC)));
     }
 
     #[test]
-    fn another_boards_silence_says_nothing_about_the_one_remembered() {
+    fn serial_link_ignores_unrelated_board_silence_when_evaluating_disown() {
         assert!(!silence_disowns_it(true, true, parse_mac(BRIDGE_MAC), &board(NODE_MAC)));
     }
 
     #[test]
-    fn with_nothing_remembered_there_is_nothing_to_disown() {
+    fn serial_link_returns_false_when_no_board_is_remembered() {
         assert!(!silence_disowns_it(true, true, None, &board(BRIDGE_MAC)));
     }
 
     #[test]
-    fn the_first_ready_on_a_connection_is_always_the_bridge_arriving() {
+    fn serial_link_recognises_new_life_when_receiving_initial_ready_frame() {
         assert!(is_a_new_life(0, None));
         assert!(is_a_new_life(10_800_000, None), "attaching to one already up for hours");
     }
 
     #[test]
-    fn a_second_answer_to_an_identify_is_not_a_reconnect() {
+    fn serial_link_ignores_duplicate_ready_frame_when_uptime_advances() {
         // Two `Identify` frames in flight, answered two milliseconds apart.
         assert!(!is_a_new_life(1_202, Some(1_200)));
         assert!(!is_a_new_life(1_200, Some(1_200)), "the same millisecond counts as the same life");
     }
 
     #[test]
-    fn a_bridge_that_rebooted_underneath_the_host_is_reported() {
+    fn serial_link_reports_reboot_event_when_bridge_uptime_decreases() {
         // What a software reset produces: no re-enumeration, so this arrives on
         // the connection the old life was announced on.
         assert!(is_a_new_life(180, Some(10_800_000)), "a stall reset after hours of service");

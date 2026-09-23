@@ -136,7 +136,7 @@ mod tests {
     use super::human_uptime;
 
     #[test]
-    fn uptime_reads_in_the_largest_useful_unit() {
+    fn status_cmd_formats_uptime_in_largest_unit_when_displaying_diagnostics() {
         assert_eq!(human_uptime(0), "0s");
         assert_eq!(human_uptime(59_999), "59s");
         assert_eq!(human_uptime(60_000), "1m 0s");

@@ -11,7 +11,7 @@ use wartui_proto::plan::{
 };
 
 #[test]
-fn an_empty_set_is_the_one_thing_a_node_is_never_sent() {
+fn channel_set_initializes_with_zero_length_when_empty() {
     let empty = ChannelSet::empty();
     assert!(empty.is_empty());
     assert_eq!(empty.len(), 0);
@@ -21,7 +21,7 @@ fn an_empty_set_is_the_one_thing_a_node_is_never_sent() {
 }
 
 #[test]
-fn a_run_becomes_the_indices_it_names() {
+fn channel_set_contains_named_indices_when_constructed_from_index_run() {
     let set = ChannelSet::from_run(IndexRun::new(14, 36));
     assert_eq!(set.indices().collect::<Vec<_>>(), (14..=36).collect::<Vec<_>>());
     assert_eq!(set.len(), 23);
@@ -36,7 +36,7 @@ fn a_run_becomes_the_indices_it_names() {
 }
 
 #[test]
-fn indices_come_back_in_scan_channels_order_which_is_the_order_a_node_sweeps() {
+fn channel_set_yields_indices_in_scan_channels_order_when_iterating() {
     // Not sorted by channel number: a node walks the set by index. Ascending index
     // happens to be ascending channel today, and this is what would catch a reorder.
     let mut set = ChannelSet::empty();
@@ -52,7 +52,7 @@ fn indices_come_back_in_scan_channels_order_which_is_the_order_a_node_sweeps() {
 }
 
 #[test]
-fn inserting_the_same_index_twice_is_not_two_channels() {
+fn channel_set_maintains_single_element_when_inserting_duplicate_index() {
     let mut set = ChannelSet::empty();
     set.insert(9);
     set.insert(9);
@@ -60,7 +60,7 @@ fn inserting_the_same_index_twice_is_not_two_channels() {
 }
 
 #[test]
-fn an_index_this_build_cannot_scan_is_dropped_rather_than_rejected() {
+fn channel_set_ignores_out_of_range_indices_when_inserting_or_deserializing() {
     // A frame from a host that knows channels this firmware does not; see
     // `ChannelSet` for why the extra bits are dropped rather than the frame.
     let mut set = ChannelSet::empty();
@@ -80,7 +80,7 @@ fn an_index_this_build_cannot_scan_is_dropped_rather_than_rejected() {
 }
 
 #[test]
-fn the_six_wire_bytes_round_trip_and_are_little_endian() {
+fn channel_set_encodes_to_little_endian_wire_bytes_when_serialized() {
     for pool in [ChannelPool::Us, ChannelPool::Eu, ChannelPool::All] {
         let set = pool.channels();
         assert_eq!(ChannelSet::from_bytes(set.to_bytes()), set, "{pool:?}");
@@ -96,7 +96,7 @@ fn the_six_wire_bytes_round_trip_and_are_little_endian() {
 }
 
 #[test]
-fn a_pool_as_a_set_holds_exactly_what_the_pool_contains() {
+fn channel_set_matches_pool_definition_when_constructed_from_channel_pool() {
     for pool in [ChannelPool::Us, ChannelPool::Eu, ChannelPool::All] {
         let set = pool.channels();
         assert_eq!(set.len(), u32::from(pool.channel_count()), "{pool:?}");
@@ -117,7 +117,7 @@ fn a_pool_as_a_set_holds_exactly_what_the_pool_contains() {
 /// A cursor that began life on the lowest assigned index would therefore be
 /// stepped past before that channel was ever listened to.
 #[test]
-fn a_fresh_cursor_lands_on_the_first_channel_rather_than_stepping_over_it() {
+fn sweep_cursor_targets_first_assigned_channel_when_advancing_from_fresh_state() {
     let mut set = ChannelSet::empty();
     for idx in [3, 9, 20] {
         set.insert(idx);
@@ -130,7 +130,7 @@ fn a_fresh_cursor_lands_on_the_first_channel_rather_than_stepping_over_it() {
 }
 
 #[test]
-fn a_sweep_visits_every_assigned_channel_once_before_it_says_it_wrapped() {
+fn sweep_cursor_reports_wrap_only_after_visiting_all_assigned_channels_when_sweeping() {
     let mut set = ChannelSet::empty();
     for idx in [3, 9, 20] {
         set.insert(idx);
@@ -150,7 +150,7 @@ fn a_sweep_visits_every_assigned_channel_once_before_it_says_it_wrapped() {
 }
 
 #[test]
-fn a_single_channel_wraps_on_every_step_but_the_first() {
+fn sweep_cursor_wraps_on_subsequent_steps_when_channel_set_has_single_channel() {
     // The narrowest assignment the view can make, and the one whose heartbeat
     // period the assignment test measures.
     let set = ChannelSet::from_run(IndexRun::new(5, 5));
@@ -162,7 +162,7 @@ fn a_single_channel_wraps_on_every_step_but_the_first() {
 }
 
 #[test]
-fn re_assigning_a_node_starts_its_sweep_over_rather_than_where_it_left_off() {
+fn sweep_cursor_resets_to_lowest_channel_when_new_cursor_is_initialized() {
     // Adoption replaces the set and resets the cursor together. Carrying the
     // old position across would skip every newly assigned index below it — and
     // a re-cut moves a node's whole share, so that is most of them.

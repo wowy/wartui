@@ -217,7 +217,7 @@ mod tests {
     use super::{FRESH_UPTIME_MS, rebooted, unreachable_notice};
 
     #[test]
-    fn a_clock_that_went_backwards_is_the_reboot() {
+    fn reset_cmd_identifies_reboot_when_uptime_decreases_relative_to_previous_state() {
         // The ordinary case: it answered before the reset, so no threshold.
         assert!(rebooted(200, Some(10_800_000)), "hours of uptime replaced by a fresh life");
         assert!(!rebooted(10_800_050, Some(10_800_000)), "the same life, fifty ms later");
@@ -227,7 +227,7 @@ mod tests {
     }
 
     #[test]
-    fn a_bridge_that_never_spoke_falls_back_to_freshness() {
+    fn reset_cmd_assumes_clean_state_when_bridge_has_no_prior_history() {
         // The wedged case: nothing was heard from the old life to compare against.
         assert!(rebooted(0, None));
         assert!(rebooted(FRESH_UPTIME_MS, None));
@@ -235,14 +235,14 @@ mod tests {
     }
 
     #[test]
-    fn the_notice_names_the_board_and_a_remedy_that_needs_no_firmware() {
+    fn reset_cmd_formats_unreachable_notice_with_port_when_board_is_named() {
         let notice = unreachable_notice(Some("/dev/ttyACM0"));
         assert!(notice.contains("on /dev/ttyACM0 did not come back within 10s"), "{notice}");
         assert!(notice.contains("espflash reset --port /dev/ttyACM0"), "{notice}");
     }
 
     #[test]
-    fn without_a_named_board_it_still_reads_as_a_sentence() {
+    fn reset_cmd_formats_unreachable_notice_without_port_when_board_is_unnamed() {
         let notice = unreachable_notice(None);
         assert!(notice.contains("on the board that was detected"), "{notice}");
         // No dangling `--port` with nothing after it.

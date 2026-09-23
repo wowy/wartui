@@ -151,7 +151,7 @@ mod tests {
     }
 
     #[test]
-    fn a_bridge_nobody_has_ever_spoken_to_is_never_reset() {
+    fn stall_watch_remains_clear_when_host_has_never_communicated() {
         let mut watch = StallWatch::new();
         // A bench bridge beside a talking fleet: rings full, endpoint refusing,
         // for an hour.
@@ -161,7 +161,7 @@ mod tests {
     }
 
     #[test]
-    fn a_wedged_endpoint_with_the_host_still_asking_is_reset_at_the_timeout() {
+    fn stall_watch_trips_reboot_when_tx_stalls_while_host_communicates() {
         let mut watch = StallWatch::new();
         assert!(!wedged(&mut watch, 0));
         assert!(!wedged(&mut watch, TX_STALL_TIMEOUT_MS - 1));
@@ -169,7 +169,7 @@ mod tests {
     }
 
     #[test]
-    fn a_host_that_quits_is_not_a_host_that_is_waiting() {
+    fn stall_watch_remains_clear_when_host_disconnects_after_sending_frame() {
         let mut watch = StallWatch::new();
         // Its last frame arms the stall in the same pass, and it never speaks
         // again. `HOST_PRESENT_WINDOW_MS` goes on believing in it for another
@@ -182,7 +182,7 @@ mod tests {
     }
 
     #[test]
-    fn a_pass_that_moved_a_byte_starts_the_clock_again() {
+    fn stall_watch_resets_timer_when_tx_makes_forward_progress() {
         let mut watch = StallWatch::new();
         // A congested endpoint that keeps almost catching up: it refuses for
         // just under the timeout, lets one byte through, and does it again.
@@ -197,7 +197,7 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_outbox_is_not_a_stall() {
+    fn stall_watch_remains_clear_when_outbox_is_empty() {
         let mut watch = StallWatch::new();
         // A quiet fleet and an attentive host: nothing to say, and saying it
         // for an hour is not evidence of anything.
@@ -208,7 +208,7 @@ mod tests {
     }
 
     #[test]
-    fn the_clock_starts_when_the_host_arrives_and_not_when_the_rings_filled() {
+    fn stall_watch_starts_timer_only_when_host_arrives_at_full_outbox() {
         let mut watch = StallWatch::new();
         // An hour of refusing bytes with nobody attached, which must not count.
         for second in 0..3_600 {
@@ -221,7 +221,7 @@ mod tests {
     }
 
     #[test]
-    fn a_host_gone_longer_than_the_window_stops_counting_and_starts_over() {
+    fn stall_watch_resets_stall_clock_when_host_exceeds_presence_window() {
         let mut watch = StallWatch::new();
         assert!(!wedged(&mut watch, 0));
         // The bench case, ticked at the millisecond the loop really runs at:
@@ -239,7 +239,7 @@ mod tests {
     }
 
     #[test]
-    fn a_host_seen_once_long_ago_is_not_a_host() {
+    fn stall_watch_ignores_stale_host_when_presence_window_has_elapsed() {
         let mut watch = StallWatch::new();
         watch.note_host(0);
         for ms in HOST_PRESENT_WINDOW_MS..HOST_PRESENT_WINDOW_MS + 60_000 {

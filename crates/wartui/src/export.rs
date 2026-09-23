@@ -173,7 +173,7 @@ mod tests {
     use super::{create_csv, into_csv, is_the_capture};
 
     #[test]
-    fn a_name_we_chose_is_created_when_nothing_holds_it() {
+    fn export_writer_creates_destination_file_when_derived_path_does_not_exist() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wartui-2026-09-18-14-30.csv");
         create_csv(&path, true).unwrap().write_all(b"rows").unwrap();
@@ -181,7 +181,7 @@ mod tests {
     }
 
     #[test]
-    fn a_name_we_chose_is_never_written_over() {
+    fn export_mgr_refuses_overwrite_when_auto_generated_file_already_exists() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wartui-2026-09-18-14-30.csv");
         std::fs::write(&path, "the export that was uploaded").unwrap();
@@ -193,7 +193,7 @@ mod tests {
     }
 
     #[test]
-    fn a_name_the_reader_typed_is_written_over() {
+    fn export_writer_allows_overwrite_when_destination_path_is_explicitly_specified() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tonight.csv");
         std::fs::write(&path, "an export of the session before").unwrap();
@@ -202,7 +202,7 @@ mod tests {
     }
 
     #[test]
-    fn a_name_we_chose_is_given_back_when_the_export_fails() {
+    fn export_writer_deletes_partial_file_when_auto_generated_export_fails() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wartui-2026-09-18-14-30.csv");
         let failed: Result<(), _> = into_csv(&path, true, |_| bail!("the query went wrong"));
@@ -213,7 +213,7 @@ mod tests {
     }
 
     #[test]
-    fn a_name_the_reader_typed_is_left_where_it_failed() {
+    fn export_writer_preserves_partial_file_when_explicitly_named_export_fails() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tonight.csv");
         let failed: Result<(), _> = into_csv(&path, false, |_| bail!("the query went wrong"));
@@ -223,7 +223,7 @@ mod tests {
     }
 
     #[test]
-    fn what_was_written_survives_a_successful_export() {
+    fn export_writer_persists_full_payload_when_export_succeeds() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wartui-2026-09-18-14-30.csv");
         let rows = into_csv(&path, true, |writer| {
@@ -236,7 +236,7 @@ mod tests {
     }
 
     #[test]
-    fn the_capture_is_recognised_however_the_path_to_it_was_typed() {
+    fn export_writer_identifies_matching_source_db_when_comparing_paths() {
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("tonight.db");
         std::fs::write(&db, "a capture").unwrap();

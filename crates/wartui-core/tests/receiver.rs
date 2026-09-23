@@ -28,19 +28,19 @@ fn board(device: &str) -> PortCandidate {
 }
 
 #[test]
-fn a_stream_of_valid_sentences_is_a_receiver() {
+fn nmea_detector_recognises_receiver_when_stream_contains_valid_sentences() {
     assert!(looks_like_nmea(NMEA));
 }
 
 #[test]
-fn a_receiver_with_no_lock_is_still_a_receiver() {
+fn nmea_detector_accepts_receiver_when_sentences_valid_without_lock() {
     // Indoors, or thirty seconds into a cold start. It is the receiver either way,
     // and refusing it would mean never finding one in a garage.
     assert!(looks_like_nmea(NO_LOCK));
 }
 
 #[test]
-fn a_board_spewing_log_lines_is_not_mistaken_for_a_receiver() {
+fn nmea_detector_rejects_chatter_when_stream_contains_log_lines() {
     let chatter = b"I (443) wifi: mode : sta\r\nI (451) phy_init: phy ver 970\r\n\
                     E (462) radio: no peer\r\n"
         .as_slice();
@@ -48,7 +48,7 @@ fn a_board_spewing_log_lines_is_not_mistaken_for_a_receiver() {
 }
 
 #[test]
-fn a_stream_read_at_the_wrong_rate_is_rejected_rather_than_half_believed() {
+fn nmea_detector_rejects_stream_when_baud_rate_is_mismatched() {
     // What a 38400 receiver looks like read at 9600: the bytes are mangled, so the
     // checksums do not hold even where a `$` survives.
     let mangled: Vec<u8> = NMEA.iter().map(|byte| byte.rotate_left(3)).collect();
@@ -56,7 +56,7 @@ fn a_stream_read_at_the_wrong_rate_is_rejected_rather_than_half_believed() {
 }
 
 #[test]
-fn one_sentence_that_passes_its_checksum_by_luck_does_not_settle_a_port() {
+fn nmea_detector_requires_multiple_sentences_when_evaluating_unnamed_port() {
     // The checksum is an eight-bit XOR, so a device emitting text agrees with one
     // about once in 256 lines. Two in a window is not luck.
     let one = b"$GPGGA,123519.00,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*69\r\n";
@@ -66,7 +66,7 @@ fn one_sentence_that_passes_its_checksum_by_luck_does_not_settle_a_port() {
 }
 
 #[test]
-fn a_sentence_split_across_the_window_is_not_counted_twice_or_at_all() {
+fn nmea_detector_rejects_fragment_when_sentence_is_split_across_window() {
     // A probe joins the stream wherever it happens to be, so the first line is
     // normally a fragment. It has to fail rather than be patched up.
     let tail = &NMEA[30..];
@@ -74,7 +74,7 @@ fn a_sentence_split_across_the_window_is_not_counted_twice_or_at_all() {
 }
 
 #[test]
-fn an_espressif_board_is_never_offered_to_the_search() {
+fn receiver_candidates_filters_espressif_devices_when_probing_gps() {
     // The one thing that must never be opened by something looking for a GPS: the
     // other half of wartui is transmitting into whatever it opens.
     let attached = vec![board("/dev/ttyACM0"), puck("/dev/ttyACM1")];
@@ -84,7 +84,7 @@ fn an_espressif_board_is_never_offered_to_the_search() {
 }
 
 #[test]
-fn the_search_never_opens_a_port_reserved_for_the_bridge() {
+fn receiver_candidates_excludes_reserved_bridge_port_when_enumerating() {
     // `--bridge /dev/ttyUSB0` opens that path whatever it is, so it is named here
     // as well — the vendor filter cannot see it.
     let attached = vec![uart("/dev/ttyUSB0"), puck("/dev/ttyACM1")];
@@ -94,7 +94,7 @@ fn the_search_never_opens_a_port_reserved_for_the_bridge() {
 }
 
 #[test]
-fn a_device_that_names_itself_a_receiver_is_tried_first() {
+fn receiver_candidates_prioritises_named_gps_when_sorting_devices() {
     let mut named = uart("/dev/ttyUSB1");
     named.product = Some("u-blox 7 - GPS/GNSS Receiver".to_owned());
     let attached = vec![uart("/dev/ttyUSB0"), named];
@@ -103,7 +103,7 @@ fn a_device_that_names_itself_a_receiver_is_tried_first() {
 }
 
 #[test]
-fn a_bare_uart_bridge_is_tried_rather_than_ruled_out() {
+fn receiver_candidates_includes_bare_uart_when_enumerating_ports() {
     // The common pucks sit behind one, so a hint can order the search and can never
     // decide it. Reading the port is what decides it.
     let found = candidates(vec![uart("/dev/ttyUSB0")], &[]);
@@ -111,7 +111,7 @@ fn a_bare_uart_bridge_is_tried_rather_than_ruled_out() {
 }
 
 #[test]
-fn the_ladder_keeps_the_first_rate_that_produces_valid_sentences() {
+fn receiver_ladder_selects_first_matching_baud_when_stepping_through_ladder() {
     let ports = [puck("/dev/ttyACM1")];
     let settled = settle(&ports, &BAUD_LADDER, SENTENCES_TO_BELIEVE, |_, baud| {
         if baud == 38_400 { NMEA.to_vec() } else { b"\xff\xfe junk\r\n".to_vec() }
@@ -120,7 +120,7 @@ fn the_ladder_keeps_the_first_rate_that_produces_valid_sentences() {
 }
 
 #[test]
-fn a_named_rate_is_the_only_one_tried() {
+fn receiver_ladder_probes_single_baud_when_rate_is_pinned() {
     let ports = [puck("/dev/ttyACM1")];
     let mut tried = Vec::new();
     let settled = settle(&ports, &[9_600], SENTENCES_TO_BELIEVE, |_, baud| {
@@ -132,7 +132,7 @@ fn a_named_rate_is_the_only_one_tried() {
 }
 
 #[test]
-fn a_port_that_says_nothing_is_passed_over_for_the_next() {
+fn receiver_ladder_skips_silent_port_when_probing_candidates() {
     let ports = [uart("/dev/ttyUSB0"), puck("/dev/ttyACM1")];
     let settled = settle(&ports, &BAUD_LADDER, SENTENCES_TO_BELIEVE, |path, _| {
         if path == "/dev/ttyACM1" { NMEA.to_vec() } else { Vec::new() }
@@ -141,7 +141,7 @@ fn a_port_that_says_nothing_is_passed_over_for_the_next() {
 }
 
 #[test]
-fn nothing_is_settled_on_when_no_port_is_a_receiver() {
+fn receiver_ladder_returns_none_when_no_ports_match_nmea() {
     let ports = [uart("/dev/ttyUSB0")];
     assert_eq!(
         settle(&ports, &BAUD_LADDER, SENTENCES_TO_BELIEVE, |_, _| b"nothing to see\r\n".to_vec()),
@@ -150,7 +150,7 @@ fn nothing_is_settled_on_when_no_port_is_a_receiver() {
 }
 
 #[test]
-fn every_rate_of_every_port_is_tried_before_giving_up() {
+fn receiver_ladder_exhausts_all_baud_combinations_when_probing_candidates() {
     let ports = [uart("/dev/ttyUSB0"), uart("/dev/ttyUSB1")];
     let mut tried = 0;
     let settled = settle(&ports, &BAUD_LADDER, SENTENCES_TO_BELIEVE, |_, _| {
@@ -162,7 +162,7 @@ fn every_rate_of_every_port_is_tried_before_giving_up() {
 }
 
 #[test]
-fn a_named_port_settles_on_one_sentence_rather_than_two() {
+fn receiver_ladder_settles_on_single_sentence_when_port_is_explicitly_named() {
     // The operator has already said what the device is; only the rate is in
     // question. A receiver emitting a single sentence a second is a real
     // configuration, and asking it for two inside one window would refuse it.

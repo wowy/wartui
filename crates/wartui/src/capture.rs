@@ -109,12 +109,12 @@ mod tests {
     }
 
     #[test]
-    fn a_capture_is_named_for_the_minute_it_started() {
+    fn capture_mgr_formats_filename_from_timestamp_when_session_starts() {
         assert_eq!(dated_path(at(2026, 9, 18, 14, 30)), Path::new("wartui-2026-09-18-14-30.db"));
     }
 
     #[test]
-    fn capture_names_sort_in_the_order_they_were_written() {
+    fn capture_mgr_sorts_records_in_chronological_order_when_listing_sessions() {
         let written: Vec<_> = [
             at(2025, 12, 31, 23, 59),
             at(2026, 1, 1, 0, 0),
@@ -130,7 +130,7 @@ mod tests {
     }
 
     #[test]
-    fn the_newest_capture_is_the_one_export_finds() {
+    fn capture_mgr_locates_most_recent_valid_capture_file_when_querying_directory() {
         let dir = tempfile::tempdir().unwrap();
         for name in [
             "wartui-2026-09-18-14-30.db",
@@ -150,7 +150,7 @@ mod tests {
     }
 
     #[test]
-    fn a_name_run_writes_is_a_name_export_finds() {
+    fn capture_mgr_finds_matching_filename_when_exporting_session() {
         let dir = tempfile::tempdir().unwrap();
         let written = dir.path().join(dated_path(at(2026, 9, 18, 14, 30)));
         std::fs::File::create(&written).unwrap();
@@ -158,7 +158,7 @@ mod tests {
     }
 
     #[test]
-    fn a_directory_with_no_capture_names_the_flag() {
+    fn capture_mgr_reports_error_referencing_db_flag_when_directory_has_no_captures() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::File::create(dir.path().join("out.csv")).unwrap();
         let error = newest(dir.path()).unwrap_err().to_string();
@@ -166,24 +166,24 @@ mod tests {
     }
 
     #[test]
-    fn a_capture_exports_to_a_csv_beside_it() {
+    fn capture_mgr_derives_adjacent_csv_path_when_given_db_path() {
         let db = dated_path(at(2026, 9, 18, 14, 30));
         assert_eq!(export_path(&db), Path::new("wartui-2026-09-18-14-30.csv"));
     }
 
     #[test]
-    fn an_export_stays_in_the_directory_the_capture_was_read_from() {
+    fn capture_mgr_preserves_parent_directory_when_deriving_csv_path() {
         assert_eq!(export_path(Path::new("/cards/tonight.db")), Path::new("/cards/tonight.csv"));
     }
 
     #[test]
-    fn a_capture_already_named_csv_exports_to_its_own_name() {
+    fn capture_mgr_exports_to_specified_csv_when_destination_path_is_given() {
         // Which `export` refuses rather than acting on; see its `is_the_capture`.
         assert_eq!(export_path(Path::new("tonight.csv")), Path::new("tonight.csv"));
     }
 
     #[test]
-    fn a_capture_named_without_an_extension_still_exports_to_one() {
+    fn capture_mgr_appends_csv_extension_when_input_path_lacks_extension() {
         assert_eq!(export_path(Path::new("tonight")), Path::new("tonight.csv"));
     }
 }

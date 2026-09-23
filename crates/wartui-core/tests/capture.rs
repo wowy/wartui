@@ -18,7 +18,7 @@ use wartui_core::runtime::{drive, now};
 use wartui_core::store::{SessionInfo, Store, StoreConfig, open_readonly};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_simulated_fleet_becomes_a_database_and_then_a_wigle_file() {
+async fn capture_session_persists_sightings_and_exports_wigle_when_simulated() {
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().join("wartui.db");
 
@@ -96,7 +96,7 @@ const FIRST: &[u8] = b"$GPGGA,123519.00,4807.038,N,01131.000,E,1,08,0.9,545.4,M,
 const SECOND: &[u8] = b"$GPGGA,123529.00,4810.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*6C";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_moving_capture_writes_where_the_receiver_was_for_each_row() {
+async fn capture_session_attaches_dynamic_gps_positions_when_vehicle_moves() {
     // The point of the GPS tier: not one position for the session, but the position
     // at the moment each observation arrived.
     let dir = tempfile::tempdir().expect("temp dir");

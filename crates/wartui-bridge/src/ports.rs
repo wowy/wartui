@@ -299,13 +299,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_esp32_serial_number_reads_as_the_address_it_transmits_from() {
+    fn ports_scanner_extracts_mac_address_when_serial_number_is_esp32_format() {
         assert_eq!(parse_mac("10:BD:A3:EC:44:C0"), Some([0x10, 0xBD, 0xA3, 0xEC, 0x44, 0xC0]));
         assert_eq!(parse_mac("10:bd:a3:ec:44:c0"), Some([0x10, 0xBD, 0xA3, 0xEC, 0x44, 0xC0]));
     }
 
     #[test]
-    fn a_manufacturing_serial_is_not_an_address() {
+    fn ports_scanner_returns_none_when_serial_number_is_not_mac_address() {
         // Everything on the bus that is not an ESP32 carries one of these.
         assert_eq!(parse_mac("0001"), None);
         assert_eq!(parse_mac(""), None);
@@ -316,7 +316,7 @@ mod tests {
     }
 
     #[test]
-    fn the_two_candidate_sets_never_overlap() {
+    fn ports_scanner_partitions_bridge_and_gps_ports_when_enumerating_usb_devices() {
         let bridge = candidate("/dev/ttyACM0", Some(ESPRESSIF_VID), Some(0x1001), None);
         let puck = candidate("/dev/ttyACM1", Some(0x1546), Some(0x01A7), None);
         assert!(could_be_a_bridge(&bridge) && !could_be_a_receiver(&bridge));

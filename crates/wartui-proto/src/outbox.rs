@@ -432,7 +432,7 @@ mod tests {
     }
 
     #[test]
-    fn a_frame_survives_the_round_trip() {
+    fn outbox_encodes_and_decodes_frame_when_round_tripped_through_sink() {
         let mut outbox = Outbox::new();
         let mut sink = Fake::open();
         assert!(outbox.send(&log(0)));
@@ -443,7 +443,7 @@ mod tests {
     }
 
     #[test]
-    fn priority_is_written_before_bulk() {
+    fn outbox_writes_priority_frames_before_bulk_frames_when_both_are_queued() {
         let mut outbox = Outbox::new();
         let mut sink = Fake::open();
         outbox.send(&log(0));
@@ -456,7 +456,7 @@ mod tests {
     }
 
     #[test]
-    fn a_full_bulk_ring_keeps_the_newest() {
+    fn outbox_drops_oldest_bulk_frames_when_bulk_ring_capacity_is_exceeded() {
         let mut outbox = Outbox::new();
         for n in 0..BULK_DEPTH as u8 + 4 {
             outbox.send(&log(n));
@@ -471,7 +471,7 @@ mod tests {
     }
 
     #[test]
-    fn a_full_priority_ring_keeps_the_newest() {
+    fn outbox_drops_oldest_priority_frames_when_priority_ring_capacity_is_exceeded() {
         let mut outbox = Outbox::new();
         // A host that has stopped reading but goes on sending `Identify` gets
         // answered every time; the answer that finally matters is the last.
@@ -492,7 +492,7 @@ mod tests {
     }
 
     #[test]
-    fn a_frame_evicted_mid_write_does_not_take_the_next_one_with_it() {
+    fn outbox_resynchronises_cobs_stream_when_frame_is_evicted_mid_write() {
         let mut outbox = Outbox::new();
         for n in 0..BULK_DEPTH as u8 {
             outbox.send(&log(n));
@@ -516,7 +516,7 @@ mod tests {
     }
 
     #[test]
-    fn is_empty_tracks_a_frame_all_the_way_off_the_wire() {
+    fn outbox_reports_not_empty_when_frame_is_partially_written() {
         // The bridge resets itself when this says there is something to send and
         // nothing has moved for three seconds, so a half-written frame must count as
         // pending: reporting empty between `send` and the last byte makes a wedged
@@ -539,7 +539,7 @@ mod tests {
     }
 
     #[test]
-    fn a_wedged_sink_never_reports_progress_or_loses_a_queued_frame() {
+    fn outbox_preserves_queued_frames_without_progress_when_sink_is_wedged() {
         let mut outbox = Outbox::new();
         outbox.send(&log(0));
 

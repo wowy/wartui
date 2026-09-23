@@ -10,7 +10,7 @@ fn address() -> [u8; 6] {
 }
 
 #[test]
-fn a_bridge_remembered_on_one_run_is_recalled_by_the_next() {
+fn bridge_memory_persists_and_recalls_mac_when_stored_to_disk() {
     let dir = tempfile::tempdir().expect("temp dir");
     let memory = BridgeMemory::at(dir.path().join("bridge"));
     assert_eq!(memory.recall(), None, "nothing has been found yet");
@@ -19,7 +19,7 @@ fn a_bridge_remembered_on_one_run_is_recalled_by_the_next() {
 }
 
 #[test]
-fn the_file_holds_the_address_in_the_form_everything_else_prints_it() {
+fn bridge_memory_formats_mac_as_colon_separated_string_when_persisted() {
     // So that it can be grepped against `wartui sniff` output and against the
     // by-id symlink, which carry the same spelling.
     let dir = tempfile::tempdir().expect("temp dir");
@@ -29,7 +29,7 @@ fn the_file_holds_the_address_in_the_form_everything_else_prints_it() {
 }
 
 #[test]
-fn a_directory_that_does_not_exist_yet_is_made_rather_than_refused() {
+fn bridge_memory_creates_parent_directories_when_persisting_mac() {
     let dir = tempfile::tempdir().expect("temp dir");
     let memory = BridgeMemory::at(dir.path().join("state/wartui/bridge"));
     memory.remember(address());
@@ -37,7 +37,7 @@ fn a_directory_that_does_not_exist_yet_is_made_rather_than_refused() {
 }
 
 #[test]
-fn a_file_that_is_not_an_address_reads_as_nothing_remembered() {
+fn bridge_memory_returns_none_when_persisted_file_contains_invalid_mac() {
     // Which is also what a torn write leaves, and why one write is enough.
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().join("bridge");
@@ -48,7 +48,7 @@ fn a_file_that_is_not_an_address_reads_as_nothing_remembered() {
 }
 
 #[test]
-fn a_memory_with_nowhere_to_keep_anything_is_silent_rather_than_broken() {
+fn bridge_memory_acts_as_noop_when_configured_with_none_backend() {
     // What a host with no state directory gets. It must cost a sweep and nothing
     // else — never a failed capture.
     let memory = BridgeMemory::none();
@@ -58,7 +58,7 @@ fn a_memory_with_nowhere_to_keep_anything_is_silent_rather_than_broken() {
 }
 
 #[test]
-fn a_state_directory_that_cannot_be_written_costs_a_slower_start_and_nothing_else() {
+fn bridge_memory_fails_silently_when_storage_path_is_unwritable() {
     let dir = tempfile::tempdir().expect("temp dir");
     // A file where the directory would have to go: `create_dir_all` cannot win.
     let blocked = dir.path().join("blocked");
@@ -69,7 +69,7 @@ fn a_state_directory_that_cannot_be_written_costs_a_slower_start_and_nothing_els
 }
 
 #[test]
-fn a_board_that_stops_being_the_bridge_is_forgotten() {
+fn bridge_memory_clears_persisted_mac_when_forget_is_called() {
     let dir = tempfile::tempdir().expect("temp dir");
     let memory = BridgeMemory::at(dir.path().join("bridge"));
     memory.remember(address());

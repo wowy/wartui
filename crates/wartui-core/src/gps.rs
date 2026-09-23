@@ -554,21 +554,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_receiver_nobody_asked_for_and_nobody_attached_is_not_a_fault() {
+    fn gps_tracker_returns_no_receiver_status_when_device_unspecified_and_absent() {
         // Searching is the default, so this is most captures. A fault here would be
         // a fault on the view of every run made without a GPS.
         assert_eq!(nothing_found(None, None, |_| unreachable!()), GpsStatus::NoReceiver);
     }
 
     #[test]
-    fn a_receiver_that_was_named_and_not_found_says_so() {
+    fn gps_tracker_returns_failed_status_when_specified_port_is_missing() {
         let status =
             nothing_found(Some("/dev/ttyNOPE"), None, |path| format!("{path}: no such device"));
         assert_eq!(status, GpsStatus::Failed("/dev/ttyNOPE: no such device".to_owned()));
     }
 
     #[test]
-    fn a_receiver_that_was_being_read_and_has_gone_says_so_too() {
+    fn gps_tracker_reports_failure_when_connected_receiver_disconnects_or_goes_silent() {
         // Measured on the bench: pulling the puck mid-capture left the header with
         // nothing to say about it while the rows quietly stopped carrying a
         // position. The red `pos none` line is the alarm; this is the reason.
@@ -586,7 +586,7 @@ mod tests {
     const GGA_NO_FIX: &[u8] = b"$GPGGA,123520.00,4807.038,N,01131.000,E,0,00,,,M,,M,,*76";
 
     #[test]
-    fn a_receiver_that_has_never_had_a_fix_offers_nothing() {
+    fn gps_tracker_returns_none_for_fix_when_no_valid_coordinates_received() {
         let gps = Gps::detached();
         assert_eq!(gps.latest(), None);
         gps.feed(GGA_NO_FIX, 1_000);
@@ -595,7 +595,7 @@ mod tests {
     }
 
     #[test]
-    fn a_fix_is_kept_with_the_time_it_arrived_not_the_time_it_was_taken() {
+    fn gps_tracker_records_local_arrival_timestamp_when_fix_is_parsed() {
         // The two differ, and only the arrival time can say how stale a fix
         // is: the receiver's own clock is the thing being reported on.
         let gps = Gps::detached();
@@ -607,7 +607,7 @@ mod tests {
     }
 
     #[test]
-    fn the_altitude_and_accuracy_survive_the_sentence_that_does_not_carry_them() {
+    fn gps_tracker_preserves_altitude_and_accuracy_across_rmc_sentences() {
         // Receivers emit GGA and RMC every cycle, RMC normally last, so
         // whatever the RMC does not carry is what the fix spends its life as.
         // Only GGA has an altitude or an HDOP, and both have a column waiting
@@ -622,7 +622,7 @@ mod tests {
     }
 
     #[test]
-    fn losing_lock_does_not_throw_away_the_last_known_position() {
+    fn gps_tracker_retains_last_fix_when_satellite_lock_is_temporarily_lost() {
         // Driving under a bridge should not blank the position of every
         // observation for the next second. Age is what disqualifies a fix.
         let gps = Gps::detached();
@@ -634,7 +634,7 @@ mod tests {
     }
 
     #[test]
-    fn garbage_is_counted_rather_than_mistaken_for_a_place() {
+    fn gps_tracker_increments_rejected_counter_when_given_corrupt_payload() {
         let gps = Gps::detached();
         gps.feed(b"\xff\xfe binary junk", 1_000);
         gps.feed(GGA, 2_000);
@@ -645,7 +645,7 @@ mod tests {
     }
 
     #[test]
-    fn sentences_split_across_reads_are_reassembled() {
+    fn lines_buffer_reassembles_complete_sentences_when_stream_is_fragmented() {
         // A USB serial read returns whatever happened to be in the buffer, so
         // this is the normal case rather than an edge one.
         let gps = Gps::detached();
@@ -658,7 +658,7 @@ mod tests {
     }
 
     #[test]
-    fn a_receiver_talking_something_other_than_nmea_cannot_grow_the_buffer() {
+    fn lines_buffer_caps_capacity_when_stream_exceeds_max_line_length() {
         let gps = Gps::detached();
         let mut lines = Lines::default();
         lines.push(&vec![b'x'; MAX_LINE * 4], |line| gps.feed(line, 1_000));

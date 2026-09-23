@@ -187,7 +187,7 @@ fn counters(engine: &FleetEngine) -> Counters {
 }
 
 #[test]
-fn an_observation_produces_a_node_row_and_an_observation_row() {
+fn engine_produces_node_and_observation_records_when_sighting_arrives() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
 
@@ -205,7 +205,7 @@ fn an_observation_produces_a_node_row_and_an_observation_row() {
 }
 
 #[test]
-fn unique_addresses_are_counted_once_per_kind_however_often_they_are_heard() {
+fn engine_counts_unique_addresses_once_per_kind_when_duplicate_sightings_arrive() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
 
@@ -243,7 +243,7 @@ fn unique_addresses_are_counted_once_per_kind_however_often_they_are_heard() {
 }
 
 #[test]
-fn the_raw_frame_is_kept_alongside_the_parsed_one() {
+fn engine_preserves_raw_frame_bytes_when_sighting_is_recorded() {
     // If this decoder turns out to be wrong, the frame as it arrived is what lets
     // the fix reach history rather than only what comes afterwards.
     let clock = Clock::new();
@@ -260,7 +260,7 @@ fn the_raw_frame_is_kept_alongside_the_parsed_one() {
 }
 
 #[test]
-fn a_heartbeat_counter_going_backwards_counts_a_reboot() {
+fn engine_increments_reboot_counter_when_heartbeat_counter_decreases() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
 
@@ -276,7 +276,7 @@ fn a_heartbeat_counter_going_backwards_counts_a_reboot() {
 }
 
 #[test]
-fn observations_keep_a_node_visible_but_only_heartbeats_keep_it_assignable() {
+fn engine_keeps_node_visible_without_marking_assignable_when_only_observations_arrive() {
     // Two questions: is this node there, and can it still be given a range.
     let clock = Clock::new();
     let config = EngineConfig { topology_timeout: Duration::from_secs(60), ..Default::default() };
@@ -298,7 +298,7 @@ fn observations_keep_a_node_visible_but_only_heartbeats_keep_it_assignable() {
 }
 
 #[test]
-fn a_truncated_sighting_is_counted_rather_than_stored() {
+fn engine_increments_unparsed_counter_without_storing_when_sighting_is_truncated() {
     // A frame that arrives short is not an observation of anything.
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
@@ -316,7 +316,7 @@ fn a_truncated_sighting_is_counted_rather_than_stored() {
 }
 
 #[test]
-fn a_frame_that_is_not_ours_at_all_is_counted_as_undecodable() {
+fn engine_increments_unparsed_counter_when_frame_magic_is_unknown() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
 
@@ -335,7 +335,7 @@ fn a_frame_that_is_not_ours_at_all_is_counted_as_undecodable() {
 }
 
 #[test]
-fn a_vendor_fleet_nearby_is_counted_and_never_joins_this_one() {
+fn engine_counts_foreign_vendor_traffic_when_foreign_frames_arrive() {
     // The whole reason wartui speaks a format of its own: a stock node broadcasts
     // on this channel, and a shared magic would make it indistinguishable from ours.
     // Still counted, because a second fleet where these nodes listen matters.
@@ -353,7 +353,7 @@ fn a_vendor_fleet_nearby_is_counted_and_never_joins_this_one() {
 }
 
 #[test]
-fn a_node_on_older_firmware_is_named_rather_than_left_as_noise() {
+fn engine_counts_incompatible_firmware_frames_when_wire_version_is_unsupported() {
     // A fleet half-way through a reflash looks like this and nothing else would
     // say so: ours, from a build speaking a wire version this host does not.
     let clock = Clock::new();
@@ -370,7 +370,7 @@ fn a_node_on_older_firmware_is_named_rather_than_left_as_noise() {
 }
 
 #[test]
-fn an_admin_frame_from_elsewhere_means_a_rival_core_is_powered_up() {
+fn engine_counts_foreign_admin_traffic_when_rival_core_transmits() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
 
@@ -400,7 +400,7 @@ fn an_admin_frame_from_elsewhere_means_a_rival_core_is_powered_up() {
 }
 
 #[test]
-fn a_sender_whose_frames_do_not_decode_does_not_join_the_fleet() {
+fn engine_ignores_unknown_sender_when_payload_cannot_be_decoded() {
     // A transmitter we cannot understand is counted, not adopted.
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
@@ -421,7 +421,7 @@ fn a_sender_whose_frames_do_not_decode_does_not_join_the_fleet() {
 }
 
 #[test]
-fn the_bridge_is_recorded_when_it_announces_itself() {
+fn engine_emits_bridge_record_when_bridge_connected_event_arrives() {
     // The session row is written before any bridge has announced.
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
@@ -437,7 +437,7 @@ fn the_bridge_is_recorded_when_it_announces_itself() {
 }
 
 #[test]
-fn the_bridge_is_configured_and_asked_for_its_counters_on_connect_and_then_on_the_interval() {
+fn engine_configures_bridge_and_polls_status_when_connected_and_on_interval() {
     let clock = Clock::new();
     let config = EngineConfig {
         status_interval: Duration::from_secs(5),
@@ -462,7 +462,7 @@ fn the_bridge_is_configured_and_asked_for_its_counters_on_connect_and_then_on_th
 }
 
 #[test]
-fn a_transmit_power_no_radio_would_accept_is_brought_into_range_rather_than_sent() {
+fn engine_clamps_transmit_power_when_configured_outside_valid_range() {
     let clock = Clock::new();
     let mut too_high =
         engine(EngineConfig { tx_power: 120, bridge_tx_power: 120, ..Default::default() }, &clock);
@@ -485,7 +485,7 @@ fn a_transmit_power_no_radio_would_accept_is_brought_into_range_rather_than_sent
 }
 
 #[test]
-fn an_assignment_carries_the_configured_transmit_power() {
+fn engine_populates_tx_power_in_admin_msg_when_assignment_is_issued() {
     let clock = Clock::new();
     let mut engine =
         engine(EngineConfig { tx_power: 52, bridge_tx_power: 20, ..Default::default() }, &clock);
@@ -497,7 +497,7 @@ fn an_assignment_carries_the_configured_transmit_power() {
 }
 
 #[test]
-fn a_disconnected_bridge_is_not_polled() {
+fn engine_suppresses_status_polls_when_bridge_is_disconnected() {
     // Every poll at a closed link is a command queued to be thrown away.
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
@@ -509,7 +509,7 @@ fn a_disconnected_bridge_is_not_polled() {
 }
 
 #[test]
-fn the_tail_keeps_the_newest_observations_and_no_more() {
+fn engine_evicts_oldest_tail_entries_when_stream_tail_capacity_is_exceeded() {
     let clock = Clock::new();
     let config = EngineConfig { tail_len: 4, ..Default::default() };
     let mut engine = engine(config, &clock);
@@ -526,7 +526,7 @@ fn the_tail_keeps_the_newest_observations_and_no_more() {
 }
 
 #[test]
-fn the_tail_shows_a_hidden_network_as_hidden_and_never_a_raw_nul() {
+fn engine_formats_hidden_ssid_label_when_sighting_is_cloaked() {
     // An interior NUL is not padding: it survives the trim, and a terminal handed
     // one silently shows a shorter name than the one on the air.
     let clock = Clock::new();
@@ -541,7 +541,7 @@ fn the_tail_shows_a_hidden_network_as_hidden_and_never_a_raw_nul() {
 }
 
 #[test]
-fn every_observation_carries_the_position_the_host_believed_in() {
+fn engine_attaches_current_position_to_observation_when_sighting_arrives() {
     let clock = Clock::new();
     let config = EngineConfig {
         position: PositionChain::fixed(37.7749, -122.4194, Some(16.0)),
@@ -573,7 +573,7 @@ fn observed(batch: &wartui_core::ActionBatch) -> &wartui_core::record::Observati
 }
 
 #[test]
-fn a_drive_that_gets_a_fix_partway_through_says_where_each_row_actually_was() {
+fn engine_updates_position_sources_dynamically_when_gps_fix_resolves() {
     // The reason the source is a column and not a session-wide setting.
     let clock = Clock::new();
     let gps = Gps::detached();
@@ -597,7 +597,7 @@ fn a_drive_that_gets_a_fix_partway_through_says_where_each_row_actually_was() {
 }
 
 #[test]
-fn a_receiver_that_goes_quiet_hands_the_rows_back_to_the_static_position() {
+fn engine_falls_back_to_static_position_when_gps_fix_becomes_stale() {
     // Not "keeps the last fix forever": at driving speed a minute-old position is
     // a different street.
     let clock = Clock::new();
@@ -626,7 +626,7 @@ fn a_receiver_that_goes_quiet_hands_the_rows_back_to_the_static_position() {
 }
 
 #[test]
-fn raw_frames_are_only_kept_when_asked_for() {
+fn engine_omits_raw_frame_bytes_when_keep_raw_frames_is_disabled() {
     let clock = Clock::new();
     let mut off = engine(EngineConfig::default(), &clock);
     let mut on = engine(EngineConfig { record_raw: true, ..Default::default() }, &clock);
@@ -639,7 +639,7 @@ fn raw_frames_are_only_kept_when_asked_for() {
 }
 
 #[test]
-fn nodes_are_ordered_by_mac_so_the_table_does_not_reshuffle() {
+fn engine_orders_nodes_by_mac_address_when_generating_snapshot() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
 
@@ -653,7 +653,7 @@ fn nodes_are_ordered_by_mac_so_the_table_does_not_reshuffle() {
 }
 
 #[test]
-fn bridge_drops_are_counted_from_the_moment_this_host_attached() {
+fn engine_tracks_bridge_dropped_tx_deltas_when_status_polls_arrive() {
     // A bridge left powered with nothing attached drops everything it hears, so
     // its own counter is dominated by history. What matters is *this* capture.
     let clock = Clock::new();
@@ -692,7 +692,7 @@ fn bridge_drops_are_counted_from_the_moment_this_host_attached() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn an_assignment_waits_for_the_heartbeat_that_opens_the_window() {
+fn engine_defers_admin_assignment_until_heartbeat_opens_window() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
     caught_up(&mut engine, &clock);
@@ -716,7 +716,7 @@ fn an_assignment_waits_for_the_heartbeat_that_opens_the_window() {
 }
 
 #[test]
-fn a_node_heard_only_through_its_observations_gets_nothing_yet() {
+fn engine_withholds_assignment_when_node_is_only_heard_via_observations() {
     // A node reports what it found on a channel before it gets back to the control
     // channel, so until its heartbeat nothing says which band its radio reaches.
     let clock = Clock::new();
@@ -733,7 +733,7 @@ fn a_node_heard_only_through_its_observations_gets_nothing_yet() {
 }
 
 #[test]
-fn a_stranger_in_the_fleet_does_not_take_a_share_of_the_pool() {
+fn engine_excludes_foreign_nodes_from_plan_when_unsupported_frames_arrive() {
     // The failure this exists to prevent, in the smallest form that shows it: two
     // nodes plus a stranger must partition the pool two ways, not three. Three
     // would leave a third of it assigned to a node that will never scan it.
@@ -764,7 +764,7 @@ fn a_stranger_in_the_fleet_does_not_take_a_share_of_the_pool() {
 }
 
 #[test]
-fn a_two_point_four_node_is_never_dealt_a_channel_it_cannot_tune() {
+fn engine_restricts_single_band_node_to_two_point_four_channels_when_planning() {
     // A C6 adopts a 5 GHz share, acknowledges it, and scans the part it can reach
     // — leaving a hole with an assignment sitting on top of it.
     let clock = Clock::new();
@@ -795,7 +795,7 @@ fn a_two_point_four_node_is_never_dealt_a_channel_it_cannot_tune() {
 }
 
 #[test]
-fn the_bluetooth_scan_is_not_given_to_a_node_that_has_no_bluetooth_in_it() {
+fn engine_refuses_ble_assignment_when_target_node_lacks_bluetooth_capability() {
     // The `ble` feature decides whether the scan code exists; the flag decides
     // whether it runs. `ble_node` must not name a node that cannot answer.
     let clock = Clock::new();
@@ -829,7 +829,7 @@ fn the_bluetooth_scan_is_not_given_to_a_node_that_has_no_bluetooth_in_it() {
 }
 
 #[test]
-fn the_bluetooth_scan_waits_for_a_node_that_has_not_arrived_yet_however_long_that_takes() {
+fn engine_holds_pending_ble_assignment_when_designated_node_is_unseen() {
     // Nothing is ever removed from the node table, so an absent MAC has never been
     // heard rather than having gone away. Reading absence as departure took the
     // scan back before the node's first heartbeat could arrive.
@@ -863,7 +863,7 @@ fn the_bluetooth_scan_waits_for_a_node_that_has_not_arrived_yet_however_long_tha
 }
 
 #[test]
-fn a_node_that_stops_claiming_bluetooth_is_told_to_stop_rather_than_merely_forgotten() {
+fn engine_clears_ble_assignment_when_node_capabilities_lose_bluetooth() {
     // Forgetting who held the scan is not taking it off them: the flag rides in
     // the assignment frame, so the node goes on being shown as a holder.
     let clock = Clock::new();
@@ -888,7 +888,7 @@ fn a_node_that_stops_claiming_bluetooth_is_told_to_stop_rather_than_merely_forgo
 }
 
 #[test]
-fn an_assignment_is_believed_only_once_the_node_radio_acknowledges_it() {
+fn engine_confirms_assignment_only_when_mac_ack_is_received() {
     let clock = Clock::new();
     let mut engine = engine(us_config(), &clock);
     engine.handle(heartbeat(NODE, 1), clock.at(1));
@@ -913,7 +913,7 @@ fn an_assignment_is_believed_only_once_the_node_radio_acknowledges_it() {
 }
 
 #[test]
-fn an_unacknowledged_assignment_is_retried_on_the_next_heartbeat() {
+fn engine_retries_assignment_on_subsequent_heartbeat_when_mac_ack_fails() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
     engine.handle(heartbeat(NODE, 1), clock.at(1));
@@ -935,7 +935,7 @@ fn an_unacknowledged_assignment_is_retried_on_the_next_heartbeat() {
 }
 
 #[test]
-fn an_assignment_the_bridge_never_answers_for_is_written_down_as_unknown() {
+fn engine_records_unknown_outcome_when_ack_window_expires_without_answer() {
     let clock = Clock::new();
     let config = EngineConfig { admin_timeout: Duration::from_secs(2), ..Default::default() };
     let mut engine = engine(config, &clock);
@@ -956,7 +956,7 @@ fn an_assignment_the_bridge_never_answers_for_is_written_down_as_unknown() {
 }
 
 #[test]
-fn a_lost_answer_expiring_late_does_not_unpick_an_assignment_that_has_since_landed() {
+fn engine_ignores_late_unacked_timeout_when_subsequent_assignment_succeeds() {
     let clock = Clock::new();
     let config = EngineConfig { admin_timeout: Duration::from_secs(2), ..us_config() };
     let mut engine = engine(config, &clock);
@@ -986,7 +986,7 @@ fn a_lost_answer_expiring_late_does_not_unpick_an_assignment_that_has_since_land
 }
 
 #[test]
-fn the_assignment_latency_is_measured_end_to_end_on_the_bridge_clock() {
+fn engine_computes_assignment_latency_when_ack_timestamps_are_received() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
     engine.handle(heartbeat(NODE, 1), clock.at(1));
@@ -1004,7 +1004,7 @@ fn the_assignment_latency_is_measured_end_to_end_on_the_bridge_clock() {
 }
 
 #[test]
-fn a_latency_measured_across_the_bridge_counter_wrapping_is_still_right() {
+fn engine_computes_latency_correctly_when_bridge_microsecond_counter_wraps() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
     // Both heartbeats are stamped just short of the wrap, a millisecond apart,
@@ -1023,7 +1023,7 @@ fn a_latency_measured_across_the_bridge_counter_wrapping_is_still_right() {
 }
 
 #[test]
-fn a_reboot_re_issues_the_assignment_under_a_fresh_epoch() {
+fn engine_clears_assignment_and_triggers_replan_when_node_reboots() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
     engine.handle(heartbeat(NODE, 40), clock.at(1));
@@ -1045,7 +1045,7 @@ fn a_reboot_re_issues_the_assignment_under_a_fresh_epoch() {
 }
 
 #[test]
-fn epochs_carry_on_from_where_the_database_left_off() {
+fn engine_resumes_epoch_counter_from_persisted_base_when_initialized() {
     let clock = Clock::new();
     let config = EngineConfig { assignment_base: 300, ..Default::default() };
     let mut engine = engine(config, &clock);
@@ -1057,7 +1057,7 @@ fn epochs_carry_on_from_where_the_database_left_off() {
 }
 
 #[test]
-fn the_heartbeat_period_is_the_median_of_recent_sweeps() {
+fn engine_computes_median_heartbeat_period_when_multiple_beats_arrive() {
     let clock = Clock::new();
     let mut engine = engine(us_config(), &clock);
 
@@ -1072,7 +1072,7 @@ fn the_heartbeat_period_is_the_median_of_recent_sweeps() {
 }
 
 #[test]
-fn a_bridge_that_cannot_transmit_at_all_is_a_failure_not_a_delivery() {
+fn engine_records_failure_and_retries_when_bridge_returns_send_fail() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
     engine.handle(heartbeat(NODE, 1), clock.at(1));
@@ -1088,7 +1088,7 @@ fn a_bridge_that_cannot_transmit_at_all_is_a_failure_not_a_delivery() {
 }
 
 #[test]
-fn a_fleet_too_big_for_the_radio_is_told_so_once_rather_than_retried_forever() {
+fn engine_handles_peer_table_full_without_endless_retries_when_slot_refused() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
     engine.handle(heartbeat(NODE, 1), clock.at(1));
@@ -1110,7 +1110,7 @@ fn a_fleet_too_big_for_the_radio_is_told_so_once_rather_than_retried_forever() {
 }
 
 #[test]
-fn an_acknowledgement_for_an_assignment_the_plan_has_already_replaced_is_not_believed() {
+fn engine_ignores_stale_mac_ack_when_replan_has_superseded_epoch() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
     engine.handle(heartbeat(NODE, 1), clock.at(1));
@@ -1160,7 +1160,7 @@ fn wanted(engine: &FleetEngine) -> Vec<ChannelSet> {
 }
 
 #[test]
-fn the_planner_deals_the_whole_pool_out_across_the_fleet() {
+fn engine_partitions_full_channel_pool_across_fleet_when_nodes_join() {
     let clock = Clock::new();
     let mut engine = engine(us_config(), &clock);
     for n in 0..3 {
@@ -1195,7 +1195,7 @@ fn the_planner_deals_the_whole_pool_out_across_the_fleet() {
 }
 
 #[test]
-fn a_fleet_is_partitioned_without_being_asked_and_nothing_can_stop_it() {
+fn engine_automatically_repartitions_channel_pool_when_fleet_membership_changes() {
     // The difference between wartui and a monitor, and the only author of an
     // assignment there is: no command reaches this, and no configuration turns
     // it off.
@@ -1217,7 +1217,7 @@ fn a_fleet_is_partitioned_without_being_asked_and_nothing_can_stop_it() {
 }
 
 #[test]
-fn a_node_joining_re_cuts_the_pool_for_the_whole_fleet() {
+fn engine_recuts_channel_pool_for_entire_fleet_when_new_node_joins() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
     caught_up(&mut engine, &clock);
@@ -1245,7 +1245,7 @@ fn a_node_joining_re_cuts_the_pool_for_the_whole_fleet() {
 }
 
 #[test]
-fn a_node_that_stops_heartbeating_leaves_the_plan_and_the_rest_take_its_channels() {
+fn engine_evicts_silent_node_and_redistributes_channels_when_heartbeats_stop() {
     let clock = Clock::new();
     let mut engine = engine(us_config(), &clock);
     engine.handle(heartbeat(peer(0), 1), clock.at(1));
@@ -1263,7 +1263,7 @@ fn a_node_that_stops_heartbeating_leaves_the_plan_and_the_rest_take_its_channels
 }
 
 #[test]
-fn one_node_on_a_two_run_pool_gets_all_of_it_in_one_frame() {
+fn engine_assigns_all_pool_runs_to_single_node_when_fleet_size_is_one() {
     let clock = Clock::new();
     let mut engine = engine(us_config(), &clock);
     caught_up(&mut engine, &clock);
@@ -1285,7 +1285,7 @@ fn one_node_on_a_two_run_pool_gets_all_of_it_in_one_frame() {
 }
 
 #[test]
-fn moving_the_bluetooth_scan_re_cuts_the_pool_and_tells_both_ends() {
+fn engine_recuts_pool_and_updates_both_nodes_when_ble_scan_is_moved() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
     // Both join, then both settle: the second node's arrival re-cuts the pool,
@@ -1332,7 +1332,7 @@ fn moving_the_bluetooth_scan_re_cuts_the_pool_and_tells_both_ends() {
 }
 
 #[test]
-fn no_node_is_ever_sent_an_empty_assignment_without_the_bluetooth_flag() {
+fn engine_refuses_empty_channel_assignment_when_ble_flag_is_absent() {
     // The one frame that must never exist: a node told to scan nothing parks, and
     // this host goes on believing it is sweeping. Every path that can produce one
     // is in here — a join, the scan given, the scan moved, a reflash that drops the
@@ -1375,7 +1375,7 @@ fn no_node_is_ever_sent_an_empty_assignment_without_the_bluetooth_flag() {
 }
 
 #[test]
-fn nor_on_a_fleet_with_more_nodes_than_channels_to_give_them() {
+fn engine_leaves_surplus_nodes_unassigned_when_fleet_exceeds_available_channels() {
     // The same invariant on an oversubscribed fleet, where the scanner's slot is also
     // the one the deal has nothing for — the arrangement in which the two halves of
     // the frame came apart. `channels_for` says `None` and what the node holds is the
@@ -1417,7 +1417,7 @@ fn nor_on_a_fleet_with_more_nodes_than_channels_to_give_them() {
 }
 
 #[test]
-fn a_lone_node_given_the_bluetooth_scan_leaves_the_fleet_sniffing_no_wifi() {
+fn engine_marks_all_wifi_pools_unreachable_when_sole_node_holds_ble() {
     // The cost of making Bluetooth a whole node's job, stated: a fleet of one that
     // holds the scan sweeps nothing. A plan rather than a refusal, because refusing
     // would leave the node holding the share it already had — still sniffing Wi-Fi,
@@ -1464,7 +1464,7 @@ fn settle_c6_fleet(engine: &mut FleetEngine, clock: &Clock, nodes: u8, from: u64
 }
 
 #[test]
-fn the_bluetooth_scan_can_be_taken_off_a_node_the_planner_has_no_share_for() {
+fn engine_clears_ble_flag_from_surplus_node_when_commanded() {
     // Twelve C6s on `us` is eleven reachable channels across twelve nodes, so one
     // slot is dealt nothing. A node the plan has nothing for keeps what it holds —
     // but the Bluetooth node holds *nothing to scan*, so keeping it would mean the
@@ -1500,7 +1500,7 @@ fn the_bluetooth_scan_can_be_taken_off_a_node_the_planner_has_no_share_for() {
 }
 
 #[test]
-fn moving_the_bluetooth_scan_never_leaves_two_nodes_scanning_it() {
+fn engine_ensures_single_ble_scanner_when_reassigning_bluetooth_job() {
     // The same oversubscribed fleet, with the scan *moved* rather than withdrawn, and
     // one node wider so that a slot is surplus on *both* sides of the move: with the
     // scan away from node 0 there are twelve sniffers for eleven channels either way,
@@ -1525,7 +1525,7 @@ fn moving_the_bluetooth_scan_never_leaves_two_nodes_scanning_it() {
 }
 
 #[test]
-fn a_node_reflashed_without_bluetooth_is_dealt_a_share_in_the_epoch_that_clears_the_flag() {
+fn engine_assigns_wifi_channels_in_clearing_epoch_when_node_loses_ble_capability() {
     // Both halves in one frame, because both come off one value. Cleared alone it
     // would leave the node holding an empty mask with nothing to scan; dealt alone
     // it would leave the fleet table naming a holder that is not one.
@@ -1551,7 +1551,7 @@ fn a_node_reflashed_without_bluetooth_is_dealt_a_share_in_the_epoch_that_clears_
 }
 
 #[test]
-fn the_bluetooth_assignment_does_not_outlive_the_node_holding_it() {
+fn engine_clears_ble_assignment_when_assigned_node_times_out() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
     engine.handle(heartbeat(peer(0), 1), clock.at(1));
@@ -1567,7 +1567,7 @@ fn the_bluetooth_assignment_does_not_outlive_the_node_holding_it() {
 }
 
 #[test]
-fn a_settled_fleet_is_left_alone_rather_than_re_issued_every_tick() {
+fn engine_suppresses_redundant_assignments_when_fleet_plan_is_settled() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
     for n in 0..3 {
@@ -1596,7 +1596,7 @@ fn a_settled_fleet_is_left_alone_rather_than_re_issued_every_tick() {
 }
 
 #[test]
-fn a_fleet_larger_than_the_radio_can_address_stops_being_re_partitioned() {
+fn engine_stops_repartitioning_and_marks_plan_none_when_fleet_exceeds_max_nodes() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
     for n in 0..=u8::try_from(wartui_proto::plan::MAX_NODES).expect("twenty fits") {
@@ -1615,7 +1615,7 @@ fn a_fleet_larger_than_the_radio_can_address_stops_being_re_partitioned() {
 }
 
 #[test]
-fn a_node_that_rejoins_holding_the_right_channels_is_still_re_issued_when_it_reboots() {
+fn engine_reissues_assignment_with_new_epoch_when_rebooted_node_rejoins() {
     let clock = Clock::new();
     let mut engine = engine(us_config(), &clock);
     caught_up(&mut engine, &clock);
@@ -1649,7 +1649,7 @@ fn a_node_that_rejoins_holding_the_right_channels_is_still_re_issued_when_it_reb
 }
 
 #[test]
-fn a_node_the_bridge_cannot_peer_with_leaves_the_plan_so_the_rest_still_cover_the_pool() {
+fn engine_excludes_unpeerable_node_from_plan_when_bridge_slot_is_refused() {
     let clock = Clock::new();
     let mut engine = engine(us_config(), &clock);
     for n in 0..3 {
@@ -1682,7 +1682,7 @@ fn a_node_the_bridge_cannot_peer_with_leaves_the_plan_so_the_rest_still_cover_th
 // every one of those heartbeats names a window that shut long ago
 // (`docs/phase-4-findings.md`).
 #[test]
-fn heartbeats_replayed_out_of_the_bridges_backlog_do_not_open_admin_windows() {
+fn engine_ignores_backlog_heartbeats_when_evaluating_admin_windows() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
     engine.handle(connected(), clock.at_ms(0));
@@ -1720,7 +1720,7 @@ fn heartbeats_replayed_out_of_the_bridges_backlog_do_not_open_admin_windows() {
 // The other half of the same rule: once the host is reading live, every heartbeat
 // opens a window again. Without it the fix would never assign anything.
 #[test]
-fn a_heartbeat_heard_live_opens_an_admin_window_again() {
+fn engine_opens_admin_window_when_live_heartbeat_arrives_after_backlog() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
     engine.handle(connected(), clock.at_ms(0));
@@ -1745,7 +1745,7 @@ fn a_heartbeat_heard_live_opens_an_admin_window_again() {
 // heartbeats above the bridge's own header. The very first frame of a session has
 // no arrival before it to measure against, and must not be taken as live for that.
 #[test]
-fn a_heartbeat_replayed_before_the_bridge_announces_itself_does_not_open_an_admin_window() {
+fn engine_withholds_admin_window_when_heartbeat_precedes_bridge_announcement() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
 
@@ -1761,7 +1761,7 @@ fn a_heartbeat_replayed_before_the_bridge_announces_itself_does_not_open_an_admi
 // measurement, however honest the two stamps behind it
 // (`docs/phase-4-findings.md`).
 #[test]
-fn a_latency_longer_than_the_admin_window_is_not_recorded_as_one() {
+fn engine_discards_latency_sample_when_ack_round_trip_exceeds_admin_window() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
     engine.handle(beat_at(NODE, 1, Capabilities::here(true, true), 1_000_000), clock.at(1));
@@ -1782,7 +1782,7 @@ fn a_latency_longer_than_the_admin_window_is_not_recorded_as_one() {
 // A latency exactly at the window is still a latency: the node was listening for
 // that whole 100 ms, so the boundary belongs inside.
 #[test]
-fn a_latency_at_the_edge_of_the_admin_window_is_still_recorded() {
+fn engine_records_latency_sample_when_ack_round_trip_equals_admin_window() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
     engine.handle(beat_at(NODE, 1, Capabilities::here(true, true), 1_000_000), clock.at(1));
