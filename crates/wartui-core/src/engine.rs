@@ -19,6 +19,11 @@
 //! the view because it is the same kind of fact as a channel assignment: something
 //! one node holds, delivered inside that node's own admin window, believed only on
 //! an acknowledgement.
+//!
+//! [`Command::SetTxPower`] is the second operator input, and a narrower one: it
+//! changes what the fleet transmits at, never what it scans, so it re-sends the
+//! plan already in force under fresh epochs rather than asking the planner to
+//! re-cut anything.
 use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
 
@@ -92,6 +97,23 @@ pub enum Command {
         /// Which node, or `None` to stop scanning BLE anywhere.
         mac: Option<Mac>,
     },
+
+    /// Change the fleet's transmit powers, in ESP-IDF quarter-dBm units.
+    ///
+    /// Clamped the same way [`FleetEngine::new`] clamps [`EngineConfig::tx_power`] and
+    /// [`EngineConfig::bridge_tx_power`]. The bridge's power goes out at once, over the
+    /// same `bulk` channel the status poll uses, when the link is up and the value
+    /// changed — nothing here waits for the next poll. The nodes' power is never sent
+    /// from here: it re-sends each member's share of the plan already in force under a
+    /// fresh epoch, and each node picks it up on its own next heartbeat. Setting a
+    /// value the engine already holds is a no-op: nothing goes out and no epoch is
+    /// spent.
+    SetTxPower {
+        /// Wi-Fi transmit power for the nodes.
+        nodes: i8,
+        /// Wi-Fi transmit power for the bridge.
+        bridge: i8,
+    },
 }
 
 /// What the engine wants done as a result.
@@ -148,14 +170,16 @@ pub struct EngineConfig {
     ///
     /// [`FleetEngine::new`] brings it inside the range the host permits, so a value
     /// outside it costs the fleet a clamp rather than leaving every radio at its
-    /// boot power.
+    /// boot power. [`Command::SetTxPower`] clamps it the same way when it changes
+    /// mid-run.
     pub tx_power: i8,
     /// Wi-Fi transmit power sent to the bridge with every status poll, in ESP-IDF
     /// quarter-dBm units.
     ///
     /// A separate setting from [`Self::tx_power`] because the bridge's job is not a
     /// node's: its transmissions are assignments, not the heartbeats and sightings a
-    /// fleet is positioned for. Clamped at construction alongside `tx_power`.
+    /// fleet is positioned for. Clamped at construction alongside `tx_power`, and
+    /// again by [`Command::SetTxPower`] when it changes mid-run.
     pub bridge_tx_power: i8,
 }
 
@@ -484,6 +508,12 @@ pub struct Snapshot {
     /// [`Self::position`] because "no fix" and "no receiver" look identical in
     /// a row and are completely different problems to the person watching.
     pub gps: Option<crate::gps::GpsView>,
+    /// The nodes' Wi-Fi transmit power, in ESP-IDF quarter-dBm units. What the
+    /// settings modal starts a fleet row from.
+    pub tx_power: i8,
+    /// The bridge's Wi-Fi transmit power, in ESP-IDF quarter-dBm units. What the
+    /// settings modal starts a bridge row from.
+    pub bridge_tx_power: i8,
 }
 
 /// The bridge's self-report.
@@ -615,7 +645,7 @@ impl FleetEngine {
         let mut batch = ActionBatch::default();
         match event {
             Event::Tick => self.on_tick(now, &mut batch),
-            Event::Command(command) => self.on_command(command),
+            Event::Command(command) => self.on_command(command, &mut batch),
             Event::Link(LinkEvent::Connected(info)) => {
                 batch.records.push(Record::Bridge(crate::record::BridgeSeen {
                     mac: info.mac,
@@ -931,10 +961,44 @@ impl FleetEngine {
         }));
     }
 
-    /// Take an operator's instruction. Nothing goes out from here.
-    fn on_command(&mut self, command: Command) {
+    /// Take an operator's instruction. Nothing goes out from here except a
+    /// bridge transmit power, which cannot wait for a heartbeat the way an
+    /// assignment can.
+    fn on_command(&mut self, command: Command, batch: &mut ActionBatch) {
         match command {
             Command::AssignBle { mac } => self.on_assign_ble(mac),
+            Command::SetTxPower { nodes, bridge } => self.on_set_tx_power(nodes, bridge, batch),
+        }
+    }
+
+    /// Change what the fleet transmits at, without touching what it scans.
+    ///
+    /// Both values are clamped exactly as [`FleetEngine::new`] clamps them. The
+    /// bridge's new power goes out at once, ahead of the next status poll: `bulk`
+    /// drops rather than blocks, and a dropped `SetTxPower` has nothing behind it
+    /// to notice until the poll repeats it anyway, so sending it here costs one
+    /// small frame and saves up to `status_interval` of running at the old power.
+    /// The nodes' new power is never sent from here — it is folded into the plan
+    /// already in force by [`Self::deal`], which re-sends every member's
+    /// assignment under a fresh epoch, and each node adopts it on its own next
+    /// heartbeat. With no plan in force, the next [`Self::replan`] reads the new
+    /// [`EngineConfig::tx_power`] on its own. A value the engine already holds is
+    /// a no-op either way: nothing goes out and no epoch is spent.
+    fn on_set_tx_power(&mut self, nodes: i8, bridge: i8, batch: &mut ActionBatch) {
+        let nodes = clamp_tx_power(nodes);
+        let bridge = clamp_tx_power(bridge);
+        if bridge != self.config.bridge_tx_power {
+            self.config.bridge_tx_power = bridge;
+            if self.link_up {
+                batch.bulk.push(HostToBridge::SetTxPower { power: bridge });
+            }
+        }
+        if nodes != self.config.tx_power {
+            self.config.tx_power = nodes;
+            if let Some(plan) = self.plan {
+                let members = self.plan_members.clone();
+                self.deal(&plan, &members);
+            }
         }
     }
 
@@ -1049,7 +1113,6 @@ impl FleetEngine {
             }
         }
 
-        let count = u8::try_from(members.len()).unwrap_or(u8::MAX);
         let jobs: Vec<Job> = members.iter().map(|(_, job)| *job).collect();
         // Not `plan`: a share of 5 GHz cut for an ESP32-C6 is a share nobody
         // scans, which is the failure the capability token exists to prevent,
@@ -1064,7 +1127,18 @@ impl FleetEngine {
         };
         self.counters.replans += 1;
         self.plan = Some(plan);
+        self.deal(&plan, &members);
+    }
 
+    /// Give every member of `plan` its share, marking a node dirty only when
+    /// what it is told to hold has actually changed.
+    ///
+    /// Split out of [`Self::replan`] so [`Self::on_set_tx_power`] can re-send the
+    /// plan already in force under fresh epochs without asking the planner to
+    /// re-cut anything: `members` is the same list `replan` cut `plan` against,
+    /// in the same order, so the `node_index` each carries still lines up.
+    fn deal(&mut self, plan: &Plan, members: &[(Mac, Job)]) {
+        let count = u8::try_from(members.len()).unwrap_or(u8::MAX);
         // One epoch per node that actually needs telling. Held locally because
         // the decision needs the node in hand, and `self` is borrowed for it.
         let mut counter = self.last_counter;
@@ -1101,9 +1175,9 @@ impl FleetEngine {
                 }
                 None => continue,
             };
-            // The same `scanner` the job came from, so `channels.is_empty()` and
+            // `replan` builds `job` from `scanner`, so `channels.is_empty()` and
             // `ble` always agree.
-            let ble = scanner == Some(*mac);
+            let ble = *job == Job::Bluetooth;
 
             let wanted = |a: Assignment| {
                 a.channels == channels
@@ -1446,6 +1520,8 @@ impl FleetEngine {
             now_ms: now.unix_ms,
             position: self.config.position.resolve(now.unix_ms),
             gps: self.config.position.gps().map(crate::gps::Gps::view),
+            tx_power: self.config.tx_power,
+            bridge_tx_power: self.config.bridge_tx_power,
         }
     }
 

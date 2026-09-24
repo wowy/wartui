@@ -19,7 +19,9 @@ use wartui_proto::link::{
     BROADCAST, BridgeToHost, Chip, EspNowPayload, HostToBridge, LoopPhase, Mac, ResetCause,
     SendStatus,
 };
-use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun, Radio, plan};
+use wartui_proto::plan::{
+    ChannelPool, ChannelSet, DEFAULT_TX_POWER_QUARTER_DBM, IndexRun, Radio, plan,
+};
 
 const NODE: Mac = [0x02, 0x00, 0x5E, 0x10, 0x57, 0x84];
 const OTHER: Mac = [0x02, 0x00, 0x5E, 0x10, 0x57, 0x85];
@@ -1794,4 +1796,116 @@ fn engine_records_latency_sample_when_ack_round_trip_equals_admin_window() {
 
     let Some(Record::Assignment(row)) = batch.records.first() else { panic!("a row") };
     assert_eq!(row.latency_us, Some(100_000));
+}
+
+// ---------------------------------------------------------------------------
+// Command::SetTxPower: the operator's second input, changing what the fleet
+// transmits at without touching what it scans.
+// ---------------------------------------------------------------------------
+
+fn set_tx_power(nodes: i8, bridge: i8) -> Event {
+    Event::Command(Command::SetTxPower { nodes, bridge })
+}
+
+#[test]
+fn engine_reissues_assignment_with_new_tx_power_when_set_tx_power_received() {
+    let clock = Clock::new();
+    let mut engine = engine(us_config(), &clock);
+    caught_up(&mut engine, &clock);
+    let (id, _, first) = sent_admin(&engine.handle(heartbeat(NODE, 1), clock.at(1)));
+    engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(1));
+
+    let command = engine.handle(set_tx_power(40, DEFAULT_TX_POWER_QUARTER_DBM), clock.at(2));
+    assert!(command.urgent.is_empty(), "nothing sent until the node's own window");
+
+    let (_, dst, admin) = sent_admin(&engine.handle(heartbeat(NODE, 2), clock.at(3)));
+    assert_eq!(dst, NODE);
+    assert_eq!(admin.tx_power, 40);
+    assert_eq!(admin.channels, first.channels, "the same share, just louder");
+    assert_ne!(admin.epoch, first.epoch, "a fresh epoch, since the node already holds the old one");
+}
+
+#[test]
+fn engine_sends_bridge_tx_power_immediately_when_set_tx_power_received() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(connected(), clock.at(1));
+
+    let batch = engine.handle(set_tx_power(DEFAULT_TX_POWER_QUARTER_DBM, 60), clock.at(2));
+
+    assert_eq!(
+        batch.bulk,
+        vec![HostToBridge::SetTxPower { power: 60 }],
+        "ahead of the next status poll, not queued behind it"
+    );
+}
+
+#[test]
+fn engine_leaves_plan_and_replan_count_unchanged_when_tx_power_changes() {
+    let clock = Clock::new();
+    let mut engine = engine(us_config(), &clock);
+    caught_up(&mut engine, &clock);
+    engine.handle(heartbeat(peer(0), 1), clock.at(1));
+    engine.handle(heartbeat(peer(1), 1), clock.at(2));
+    let before = engine.snapshot(clock.at(2), StoreStats::default()).plan;
+    let replans_before = engine.counters().replans;
+
+    engine.handle(set_tx_power(40, DEFAULT_TX_POWER_QUARTER_DBM), clock.at(3));
+
+    let after = engine.snapshot(clock.at(3), StoreStats::default()).plan;
+    assert_eq!(after, before, "the same partition, not a re-cut");
+    assert_eq!(engine.counters().replans, replans_before);
+}
+
+#[test]
+fn engine_sends_nothing_when_set_tx_power_matches_current_values() {
+    let clock = Clock::new();
+    let mut engine = engine(us_config(), &clock);
+    caught_up(&mut engine, &clock);
+    let (id, _, _) = sent_admin(&engine.handle(heartbeat(peer(0), 1), clock.at(1)));
+    engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(1));
+    let counter_before = engine.nodes().next().expect("a node").confirmed.expect("acked").counter;
+
+    let batch = engine.handle(
+        set_tx_power(DEFAULT_TX_POWER_QUARTER_DBM, DEFAULT_TX_POWER_QUARTER_DBM),
+        clock.at(2),
+    );
+
+    assert!(batch.bulk.is_empty());
+    assert!(batch.urgent.is_empty());
+    let node = engine.nodes().next().expect("a node");
+    assert!(!node.dirty, "nothing wanted a fresh epoch");
+    assert_eq!(node.confirmed.expect("still acked").counter, counter_before);
+}
+
+#[test]
+fn engine_clamps_tx_power_when_command_value_out_of_range() {
+    let clock = Clock::new();
+    let config = EngineConfig { bridge_tx_power: 40, ..us_config() };
+    let mut engine = engine(config, &clock);
+    caught_up(&mut engine, &clock);
+    let (id, _, _) = sent_admin(&engine.handle(heartbeat(peer(0), 1), clock.at(1)));
+    engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(1));
+
+    let batch = engine.handle(set_tx_power(120, -4), clock.at(2));
+    assert_eq!(
+        batch.bulk,
+        vec![HostToBridge::SetTxPower { power: 8 }],
+        "the bridge's floor, 2 dBm"
+    );
+
+    let (_, _, admin) = sent_admin(&engine.handle(heartbeat(peer(0), 2), clock.at(3)));
+    assert_eq!(admin.tx_power, 80, "the nodes' ceiling, 20 dBm");
+}
+
+#[test]
+fn engine_snapshot_reports_tx_powers_when_taken() {
+    let clock = Clock::new();
+    let config = EngineConfig { tx_power: 40, bridge_tx_power: 60, ..Default::default() };
+    let engine = engine(config, &clock);
+
+    let snapshot = engine.snapshot(clock.at(1), StoreStats::default());
+
+    assert_eq!(snapshot.tx_power, 40);
+    assert_eq!(snapshot.bridge_tx_power, 60);
 }

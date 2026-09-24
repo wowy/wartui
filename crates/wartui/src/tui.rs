@@ -6,6 +6,7 @@
 //! from a stream of observations: a busy fleet produces tens of rows a second in
 //! bursts, and a UI redrawing per row would back-pressure the link.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -16,7 +17,7 @@ use ratatui::crossterm::event::{self, Event as TermEvent, KeyCode, KeyEvent, Key
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Cell, Paragraph, Row, Table, TableState};
+use ratatui::widgets::{Block, Cell, Clear, Paragraph, Row, Table, TableState};
 use ratatui::{DefaultTerminal, Frame};
 use tokio::sync::{mpsc, oneshot, watch};
 use wartui_bridge::BridgeInfo;
@@ -31,9 +32,26 @@ use wartui_proto::air::RecordKind;
 use wartui_proto::link::{LoopPhase, Mac, ResetCause};
 use wartui_proto::plan::{self, ChannelSet, MAX_NODES, Radio, SCAN_CHANNELS};
 
+use crate::config;
+
 /// How long the input thread waits for a keypress before checking whether it
 /// should stop. Long enough not to spin, short enough that quitting is instant.
 const INPUT_POLL: Duration = Duration::from_millis(100);
+
+/// What the settings modal needs beyond what a [`Snapshot`] carries.
+///
+/// Resolved once, in `main`, and carried into the view rather than re-derived
+/// from a snapshot: where to save and whether a flag overrules it are facts
+/// about how this process was started, not about the fleet.
+#[derive(Debug, Clone, Default)]
+pub struct Settings {
+    /// Where `wartui.toml` would be written, or `None` when there is nowhere
+    /// to save it — no default location found and no `--config` given.
+    pub config_path: Option<PathBuf>,
+    /// Which of `--node-tx-power`/`--bridge-tx-power` were given on this run,
+    /// so a save's notice can name the flag that still wins the next one.
+    pub overrides: Vec<&'static str>,
+}
 
 /// Run the view until the operator quits or the engine stops.
 ///
@@ -44,9 +62,10 @@ pub async fn run(
     mut snapshot: watch::Receiver<Arc<Snapshot>>,
     commands: mpsc::Sender<Command>,
     stop: oneshot::Sender<()>,
+    settings: Settings,
 ) -> Result<()> {
     let mut terminal = ratatui::try_init().context("preparing the terminal")?;
-    let result = view(&mut terminal, &mut snapshot, &commands).await;
+    let result = view(&mut terminal, &mut snapshot, &commands, settings).await;
     ratatui::restore();
     // The engine is told to stop only once the terminal is back to normal, so
     // anything it logs on the way out lands on a screen the user can read.
@@ -58,10 +77,11 @@ async fn view(
     terminal: &mut DefaultTerminal,
     snapshot: &mut watch::Receiver<Arc<Snapshot>>,
     commands: &mpsc::Sender<Command>,
+    settings: Settings,
 ) -> Result<()> {
     let (keys, running) = spawn_input();
     let mut keys = keys;
-    let mut ui = Ui::default();
+    let mut ui = Ui { settings, ..Ui::default() };
     // Built before the loop, not inside the arm below: see `crate::Terminate`.
     let mut terminate = crate::Terminate::new();
     let outcome = loop {
@@ -73,6 +93,11 @@ async fn view(
 
         tokio::select! {
             key = keys.recv() => match key {
+                // ctrl-c always quits, modal or not.
+                Some(key) if is_ctrl_c(key) => break Ok(()),
+                // An open modal gets the key ahead of `quits()`: `esc`/`q` close
+                // it rather than the view while it is open.
+                Some(key) if ui.modal.is_some() => ui.on_modal_key(key, &current, commands),
                 Some(key) if quits(key) => break Ok(()),
                 Some(key) => ui.on_key(key, &current, commands),
                 // The input thread died; carrying on would leave a view nobody
@@ -106,6 +131,44 @@ struct Ui {
     fleet_offset: usize,
     /// The notice and the snapshot time it was sent.
     notice: Option<(String, i64)>,
+    /// The settings modal, open or closed.
+    modal: Option<ConfigModal>,
+    /// Where to save and whether a flag would win over it. Fixed for the life
+    /// of the view.
+    settings: Settings,
+}
+
+/// One row the settings modal can move between. A new setting adds a variant
+/// here and a row in [`draw_settings_modal`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Field {
+    Fleet,
+    Bridge,
+}
+
+/// The settings modal's own state while it is open, seeded from the snapshot
+/// that was current when it opened and edited independently of it from then on.
+#[derive(Debug, Clone, Copy)]
+struct ConfigModal {
+    selected: Field,
+    /// Whole dBm, the units the operator sees and `config::TX_POWER_DBM` bounds.
+    fleet_dbm: i8,
+    /// Whole dBm, the bridge's effective power — always a number, since the
+    /// bridge row shows what is in force rather than whether anything holds it.
+    bridge_dbm: i8,
+}
+
+impl ConfigModal {
+    /// Step the selected row by one dBm, clamped to the range the file and the
+    /// flags share, with no wrap-around: hitting the end of the range stays
+    /// there rather than jumping to the other one.
+    fn step(&mut self, delta: i8) {
+        let value = match self.selected {
+            Field::Fleet => &mut self.fleet_dbm,
+            Field::Bridge => &mut self.bridge_dbm,
+        };
+        *value = (*value + delta).clamp(*config::TX_POWER_DBM.start(), *config::TX_POWER_DBM.end());
+    }
 }
 
 /// How long a notice stays on the footer before the counters have it back.
@@ -128,10 +191,88 @@ impl Ui {
                 self.selected = self.selected.saturating_sub(1);
             }
             KeyCode::Char('b') => self.toggle_ble(snapshot, commands),
+            KeyCode::Char('c') => self.open_modal(snapshot),
             // Anything else leaves the notice alone: a key bound to nothing must
             // not clear the one message saying why nothing happened.
             _ => {}
         }
+    }
+
+    /// Open the settings modal, seeded from the snapshot's current powers.
+    ///
+    /// Unreachable while a modal is already open: `view`'s main loop routes
+    /// every key to [`Self::on_modal_key`] instead, once `self.modal` is
+    /// `Some`, so `c` pressed again is simply not bound there.
+    fn open_modal(&mut self, snapshot: &Snapshot) {
+        self.notice = None;
+        self.modal = Some(ConfigModal {
+            selected: Field::Fleet,
+            fleet_dbm: snapshot.tx_power / 4,
+            bridge_dbm: snapshot.bridge_tx_power / 4,
+        });
+    }
+
+    /// Keys while the settings modal is open. Nothing here reaches [`Self::on_key`]:
+    /// `view`'s main loop chooses between them before either runs.
+    fn on_modal_key(
+        &mut self,
+        key: KeyEvent,
+        snapshot: &Snapshot,
+        commands: &mpsc::Sender<Command>,
+    ) {
+        let Some(modal) = self.modal.as_mut() else { return };
+        match key.code {
+            KeyCode::Down | KeyCode::Char('j') => modal.selected = Field::Bridge,
+            KeyCode::Up | KeyCode::Char('k') => modal.selected = Field::Fleet,
+            KeyCode::Left | KeyCode::Char('h') => modal.step(-1),
+            KeyCode::Right | KeyCode::Char('l') => modal.step(1),
+            KeyCode::Esc | KeyCode::Char('q') => self.modal = None,
+            KeyCode::Enter => self.apply(false, snapshot, commands),
+            KeyCode::Char('s') => self.apply(true, snapshot, commands),
+            // Same rule as `on_key`: a key bound to nothing leaves the notice
+            // alone.
+            _ => {}
+        }
+    }
+
+    /// Send the modal's values to the engine and close it, saving them to
+    /// `wartui.toml` as well when `save` is set.
+    fn apply(&mut self, save: bool, snapshot: &Snapshot, commands: &mpsc::Sender<Command>) {
+        let Some(modal) = self.modal.take() else { return };
+        let command =
+            Command::SetTxPower { nodes: modal.fleet_dbm * 4, bridge: modal.bridge_dbm * 4 };
+        if commands.try_send(command).is_err() {
+            self.say("the engine is not accepting commands".to_owned(), snapshot);
+            return;
+        }
+        let mut text = format!(
+            "tx power: fleet {} dBm, bridge {} dBm — nodes take it on their next heartbeat",
+            modal.fleet_dbm, modal.bridge_dbm
+        );
+        if save {
+            text.push_str(&self.save_outcome(modal));
+        }
+        self.say(text, snapshot);
+    }
+
+    /// What to append to the notice once a save was asked for: where it landed,
+    /// that a flag will still win the next run, or why it did not happen.
+    fn save_outcome(&self, modal: ConfigModal) -> String {
+        let mut outcome = match &self.settings.config_path {
+            Some(path) => {
+                let result = config::update(path, |c| {
+                    c.tx_power.fleet = Some(modal.fleet_dbm);
+                    c.tx_power.bridge = Some(modal.bridge_dbm);
+                });
+                match result {
+                    Ok(()) => format!("; saved to {}", path.display()),
+                    Err(error) => format!("; could not save: {error}"),
+                }
+            }
+            None => "; nowhere to save it — use --config".to_owned(),
+        };
+        outcome.push_str(&overrides_notice(&self.settings.overrides));
+        outcome
     }
 
     /// Move the Bluetooth scan onto the selected node, or off it.
@@ -291,9 +432,27 @@ fn tracing_spawn_failed() {
     eprintln!("could not start the keyboard thread; use ctrl-c to quit");
 }
 
+/// What to say about the flags in `overrides`, empty when there are none.
+///
+/// Named rather than counted: `--node-tx-power` and `--bridge-tx-power` win over
+/// only their own half of a save, so the operator needs to know which one still
+/// will at the next start-up.
+fn overrides_notice(overrides: &[&str]) -> String {
+    match overrides {
+        [] => String::new(),
+        [only] => format!("; {only} on the command line still wins"),
+        rest => format!("; {} on the command line still win", rest.join(" and ")),
+    }
+}
+
 fn quits(key: KeyEvent) -> bool {
-    matches!(key.code, KeyCode::Char('q') | KeyCode::Esc)
-        || (key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c')))
+    matches!(key.code, KeyCode::Char('q') | KeyCode::Esc) || is_ctrl_c(key)
+}
+
+/// Whether `key` is ctrl-c, which quits even while a modal is open — unlike `q`
+/// and `Esc`, which only close it.
+fn is_ctrl_c(key: KeyEvent) -> bool {
+    key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c'))
 }
 
 fn draw(frame: &mut Frame<'_>, snapshot: &Snapshot, ui: &mut Ui) {
@@ -320,6 +479,46 @@ fn draw(frame: &mut Frame<'_>, snapshot: &Snapshot, ui: &mut Ui) {
     draw_fleet(frame, fleet, snapshot, ui);
     draw_stream(frame, stream, snapshot);
     draw_footer(frame, footer, snapshot, ui, &faults);
+
+    if let Some(modal) = &ui.modal {
+        draw_settings_modal(frame, modal);
+    }
+}
+
+/// The settings modal, centred over the live view behind it.
+fn draw_settings_modal(frame: &mut Frame<'_>, modal: &ConfigModal) {
+    let area = centered_rect(44, 8, frame.area());
+    frame.render_widget(Clear, area);
+
+    let block = Block::bordered().title(" settings ");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let row = |label: &str, dbm: i8, selected: bool| {
+        let style =
+            if selected { Style::new().add_modifier(Modifier::REVERSED) } else { Style::new() };
+        Line::from(Span::styled(format!("{label:<18}◂ {dbm:>2} dBm ▸"), style))
+    };
+    let lines = vec![
+        row("fleet tx power", modal.fleet_dbm, modal.selected == Field::Fleet),
+        row("bridge tx power", modal.bridge_dbm, modal.selected == Field::Bridge),
+        Line::default(),
+        Line::from("enter apply · s apply & save · esc cancel"),
+    ];
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// A box `width` by `height`, centred in `area` and clipped to it when it does
+/// not fit.
+fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
+    let width = width.min(area.width);
+    let height = height.min(area.height);
+    Rect {
+        x: area.x + (area.width - width) / 2,
+        y: area.y + (area.height - height) / 2,
+        width,
+        height,
+    }
 }
 
 fn draw_header(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot) {
@@ -768,7 +967,7 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot, ui: &Ui, 
         )));
     } else {
         let mut spans = vec![Span::styled(
-            " q quit  ↑↓ select  b bluetooth ",
+            " q quit  ↑↓ select  b bluetooth  c settings ",
             Style::new().fg(Color::Black).bg(Color::Gray).add_modifier(Modifier::BOLD),
         )];
         spans.push(Span::raw(format!(
@@ -967,7 +1166,9 @@ mod tests {
     use wartui_core::position::Fix;
     use wartui_proto::air::Capabilities;
     use wartui_proto::link::Chip;
-    use wartui_proto::plan::{ChannelPool, IndexRun, Job, Radio, plan, plan_for};
+    use wartui_proto::plan::{
+        ChannelPool, DEFAULT_TX_POWER_QUARTER_DBM, IndexRun, Job, Radio, plan, plan_for,
+    };
 
     use super::*;
 
@@ -1145,6 +1346,8 @@ mod tests {
                 at_ms: None,
             },
             gps: None,
+            tx_power: DEFAULT_TX_POWER_QUARTER_DBM,
+            bridge_tx_power: DEFAULT_TX_POWER_QUARTER_DBM,
         }
     }
 
@@ -1891,5 +2094,189 @@ mod tests {
             ui.fleet_offset, offset_at_bottom,
             "the window moved for a cursor move inside it"
         );
+    }
+
+    #[test]
+    fn ui_opens_modal_with_snapshot_values_when_c_key_is_pressed() {
+        let mut snapshot = busy();
+        snapshot.tx_power = 40; // 10 dBm
+        snapshot.bridge_tx_power = 60; // 15 dBm
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+
+        ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
+
+        let modal = ui.modal.expect("the modal opened");
+        assert_eq!(modal.selected, Field::Fleet);
+        assert_eq!(modal.fleet_dbm, 10);
+        assert_eq!(modal.bridge_dbm, 15);
+        assert!(rx.try_recv().is_err(), "opening the modal sends nothing");
+    }
+
+    #[test]
+    fn ui_closes_modal_without_sending_a_command_when_esc_or_q_pressed() {
+        let snapshot = busy();
+        let (tx, mut rx) = mpsc::channel(4);
+        for closer in [KeyCode::Esc, KeyCode::Char('q')] {
+            let mut ui = Ui::default();
+            ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
+            assert!(ui.modal.is_some(), "the modal is open");
+
+            ui.on_modal_key(KeyEvent::new(closer, KeyModifiers::NONE), &snapshot, &tx);
+
+            assert!(ui.modal.is_none(), "{closer:?} closes it");
+            assert!(rx.try_recv().is_err(), "{closer:?} cancels rather than applies");
+        }
+    }
+
+    #[test]
+    fn ui_modal_clamps_step_to_two_and_twenty_dbm_when_stepping_past_the_range() {
+        let snapshot = busy();
+        let (tx, _rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+        ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
+
+        for _ in 0..30 {
+            ui.on_modal_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE), &snapshot, &tx);
+        }
+        assert_eq!(ui.modal.expect("still open").fleet_dbm, 2, "stops at the floor");
+
+        for _ in 0..40 {
+            ui.on_modal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &snapshot, &tx);
+        }
+        assert_eq!(ui.modal.expect("still open").fleet_dbm, 20, "stops at the ceiling");
+    }
+
+    #[test]
+    fn ui_sends_set_tx_power_in_quarter_dbm_when_enter_pressed() {
+        let mut snapshot = busy();
+        snapshot.tx_power = 40;
+        snapshot.bridge_tx_power = 60;
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+        ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
+        ui.on_modal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &snapshot, &tx);
+
+        ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
+
+        assert_eq!(rx.try_recv().unwrap(), Command::SetTxPower { nodes: 44, bridge: 60 });
+        assert!(ui.modal.is_none(), "applying closes the modal");
+        let notice = ui.notice(snapshot.now_ms).expect("a notice");
+        assert!(notice.contains("fleet 11 dBm, bridge 15 dBm"), "{notice}");
+    }
+
+    #[test]
+    fn ui_saves_config_file_and_names_it_in_notice_when_s_pressed() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wartui.toml");
+        let snapshot = busy();
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut ui = Ui {
+            settings: Settings { config_path: Some(target.clone()), overrides: Vec::new() },
+            ..Ui::default()
+        };
+        ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
+
+        ui.on_modal_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE), &snapshot, &tx);
+
+        assert!(rx.try_recv().is_ok(), "the live change still goes out");
+        let notice = ui.notice(snapshot.now_ms).expect("a notice");
+        assert!(notice.contains(&target.display().to_string()), "{notice}");
+        assert!(!notice.contains("still wins"), "{notice}");
+        let saved = config::load(Some(&target)).expect("a valid file");
+        assert_eq!(saved.tx_power.fleet, Some(2));
+        assert_eq!(saved.tx_power.bridge, Some(2));
+    }
+
+    #[test]
+    fn ui_warns_node_flag_still_wins_when_saving_with_node_tx_power_overridden() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wartui.toml");
+        let snapshot = busy();
+        let (tx, _rx) = mpsc::channel(4);
+        let mut ui = Ui {
+            settings: Settings { config_path: Some(target), overrides: vec!["--node-tx-power"] },
+            ..Ui::default()
+        };
+        ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
+
+        ui.on_modal_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE), &snapshot, &tx);
+
+        let notice = ui.notice(snapshot.now_ms).expect("a notice");
+        assert!(notice.contains("--node-tx-power on the command line still wins"), "{notice}");
+    }
+
+    #[test]
+    fn ui_warns_bridge_flag_still_wins_when_saving_with_bridge_tx_power_overridden() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wartui.toml");
+        let snapshot = busy();
+        let (tx, _rx) = mpsc::channel(4);
+        let mut ui = Ui {
+            settings: Settings { config_path: Some(target), overrides: vec!["--bridge-tx-power"] },
+            ..Ui::default()
+        };
+        ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
+
+        ui.on_modal_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE), &snapshot, &tx);
+
+        let notice = ui.notice(snapshot.now_ms).expect("a notice");
+        assert!(notice.contains("--bridge-tx-power on the command line still wins"), "{notice}");
+    }
+
+    #[test]
+    fn ui_warns_both_flags_still_win_when_saving_with_both_overridden() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wartui.toml");
+        let snapshot = busy();
+        let (tx, _rx) = mpsc::channel(4);
+        let mut ui = Ui {
+            settings: Settings {
+                config_path: Some(target),
+                overrides: vec!["--node-tx-power", "--bridge-tx-power"],
+            },
+            ..Ui::default()
+        };
+        ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
+
+        ui.on_modal_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE), &snapshot, &tx);
+
+        let notice = ui.notice(snapshot.now_ms).expect("a notice");
+        assert!(
+            notice.contains("--node-tx-power and --bridge-tx-power on the command line still win"),
+            "{notice}"
+        );
+    }
+
+    #[test]
+    fn ui_reports_nowhere_to_save_when_no_config_path_is_set() {
+        let snapshot = busy();
+        let (tx, _rx) = mpsc::channel(4);
+        let mut ui =
+            Ui { settings: Settings { config_path: None, overrides: Vec::new() }, ..Ui::default() };
+        ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
+
+        ui.on_modal_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE), &snapshot, &tx);
+
+        let notice = ui.notice(snapshot.now_ms).expect("a notice");
+        assert!(notice.contains("nowhere to save it"), "{notice}");
+    }
+
+    #[test]
+    fn draw_renders_settings_modal_over_the_live_view_when_open() {
+        let snapshot = busy();
+        let mut ui = Ui::default();
+        let (tx, _rx) = mpsc::channel(4);
+        ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("test backend");
+        terminal.draw(|frame| draw(frame, &snapshot, &mut ui)).expect("drawing");
+        let rendered = terminal.backend().to_string();
+
+        assert!(rendered.contains("settings"), "{rendered}");
+        assert!(rendered.contains("fleet tx power"), "{rendered}");
+        assert!(rendered.contains("bridge tx power"), "{rendered}");
+        // The view behind it is still live, not blanked out.
+        assert!(rendered.contains("C5 57:84"), "{rendered}");
     }
 }
