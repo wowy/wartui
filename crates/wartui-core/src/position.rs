@@ -200,6 +200,15 @@ mod tests {
     }
 
     #[test]
+    fn position_chain_returns_unlocated_fix_when_position_is_old() {
+        let gps = Gps::detached();
+        let chain = PositionChain::empty().with_gps(gps.clone(), DEFAULT_MAX_AGE);
+        gps.feed(GGA, 0);
+        let fix = chain.resolve(5_001);
+        assert!(!fix.is_located());
+    }
+
+    #[test]
     fn position_chain_returns_static_coordinates_when_configured_with_fixed_location() {
         let fix = PositionChain::fixed(37.7749, -122.4194, Some(16.0)).resolve(0);
         assert_eq!(fix.source, PositionSource::Static);
