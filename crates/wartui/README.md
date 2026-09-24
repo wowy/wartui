@@ -49,7 +49,8 @@ second adds its session to the first one's file.
 `--tx-power` is how loudly the whole fleet transmits — the nodes' heartbeats and sightings and the
 bridge's assignments — in whole dBm, 2 to 20, 2 by default. `--bridge-tx-power` sets the bridge
 alone and wins when both are given; the nodes still follow `--tx-power`. 20 dBm is the ceiling: the
-firmware would accept 21, but whether anything above 20 works correctly is unverified.
+firmware would accept 21, but whether anything above 20 works correctly is unverified. It can also
+be set in `wartui.toml`; see "Config file" below for precedence.
 
 `export` takes `--db`, `--out PATH` and `--session ID`, and writes the [WiGLE v1.6
 format](https://api.wigle.net/csvFormat.html). Both ends default, so exporting the evening that just
@@ -77,6 +78,42 @@ on purpose: the column means a Bluetooth "device type" code that only an active 
 and the nodes never transmit while scanning.
 
 `--log-file` is global and is the only way to see the transport's own account of a run.
+`--config PATH` is global too, and names a `wartui.toml` somewhere other than the default
+location; see "Config file" below.
+
+### Config file
+
+`wartui.toml` holds settings an operator wants to stop typing every run. It is read only for
+`run`, so a broken config cannot stop `ports`, `status` or `reset` from working. It is edited by
+hand.
+
+The default location is per OS:
+
+| OS               | Path                                               |
+| ---------------- | -------------------------------------------------- |
+| macOS            | `~/Library/Application Support/wartui/wartui.toml` |
+| Linux and others | `$XDG_CONFIG_HOME/wartui/wartui.toml`, or `~/.config/wartui/wartui.toml` when that variable is unset or relative |
+
+`--config PATH` (global, so it can go before or after a subcommand) reads a file somewhere else
+instead, for testing and debugging. Naming a file that does not exist
+is refused; a missing default file is not — an operator who has never written one gets the
+built-in defaults, silently.
+
+Today it holds one table:
+
+```toml
+[tx-power]
+fleet = 10    # dBm, nodes and bridge
+bridge = 15   # dBm, bridge alone
+```
+
+Precedence is flag, then file, then default: `--tx-power`/`--bridge-tx-power` beat
+`[tx-power]`, which beats 2 dBm. `--tx-power` beats even a file's `bridge` entry, because the
+flag is documented as "the fleet, bridge included."
+
+An unknown key or table makes wartui refuse to start, naming the file and the line; an
+out-of-range value does too, naming the file and the key — the same way an out-of-range
+`--tx-power` is refused.
 
 ### Benchmarking the store
 

@@ -18,6 +18,7 @@ use wartui_proto::link::{LoopPhase, Mac, ResetCause};
 
 mod bench;
 mod capture;
+mod config;
 mod export;
 mod reset;
 mod run;
@@ -38,6 +39,12 @@ struct Cli {
     /// share a terminal with a log.
     #[arg(long, value_name = "PATH", global = true)]
     log_file: Option<PathBuf>,
+
+    /// Read settings from this file instead of the default location
+    /// (`~/.config/wartui/wartui.toml`, or `~/Library/Application Support/wartui/wartui.toml`
+    /// on macOS). Only `run` reads it; see `crates/wartui/README.md` § "Config file".
+    #[arg(long, value_name = "PATH", global = true)]
+    config: Option<PathBuf>,
 
     /// With no subcommand, these are `run`'s arguments.
     #[command(flatten)]
@@ -71,8 +78,16 @@ async fn main() -> Result<()> {
     // and the last thing logged before an exit is usually the interesting one.
     let _log = logging(cli.log_file.as_deref())?;
     match cli.command {
-        None => run::run(cli.run).await,
-        Some(Command::Run(args)) => run::run(args).await,
+        // Loaded only for the command that reads it: a broken config must not stop
+        // `ports` / `status` / `reset` / `export` / `sniff` from working.
+        None => {
+            let config = config::load(cli.config.as_deref())?;
+            run::run(cli.run, &config).await
+        }
+        Some(Command::Run(args)) => {
+            let config = config::load(cli.config.as_deref())?;
+            run::run(args, &config).await
+        }
         Some(Command::Export(args)) => export::run(args),
         Some(Command::Sniff(args)) => sniff::run(args).await,
         Some(Command::Status(args)) => status::run(args).await,
@@ -488,6 +503,17 @@ mod tests {
         ] {
             let cli = parse(args).unwrap();
             assert_eq!(cli.log_file.as_deref(), Some(std::path::Path::new("w.log")));
+        }
+    }
+
+    #[test]
+    fn cli_parser_accepts_config_flag_when_placed_before_or_after_subcommand() {
+        for args in [
+            ["wartui", "--config", "w.toml", "status", "--bridge", "/dev/x"],
+            ["wartui", "status", "--config", "w.toml", "--bridge", "/dev/x"],
+        ] {
+            let cli = parse(args).unwrap();
+            assert_eq!(cli.config.as_deref(), Some(std::path::Path::new("w.toml")));
         }
     }
 

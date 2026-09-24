@@ -5,7 +5,7 @@
 //! found, and throwing it away costs one slower start while the boards are swept
 //! again. `--bridge` is the thing an operator chooses and keeps, and that belongs
 //! on the command line where it can be read. Anything that wants to be remembered
-//! *and* decided belongs there too, not here.
+//! *and* decided belongs on the command line or in `wartui.toml`, not here.
 //!
 //! **Every failure to read or write it is ignored.** A read-only home, no `$HOME`
 //! at all, a directory where the file should be — each costs a sweep and nothing
