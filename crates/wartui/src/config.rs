@@ -152,8 +152,14 @@ fn default_path_in(macos: bool, home: Option<&OsStr>, xdg: Option<&OsStr>) -> Op
 /// field is removed, and a table left with nothing under it is dropped rather
 /// than kept as an empty `[tx-power]`. Re-parsed through [`Config::validate`]
 /// before anything is written, so `update` never leaves a file `load` would
-/// refuse either. The write itself lands in a temp file beside `path` and is
-/// renamed into place — a torn write here would stop the next run from starting.
+/// refuse either.
+///
+/// The write itself lands in a temp file and is renamed into place — a torn
+/// write here would stop the next run from starting — beside the file `path`
+/// *resolves to* rather than `path` itself, so a `path` that is a symlink stays
+/// one: the rename replaces what it points at, not the link. A file that
+/// existed keeps its permissions, copied onto the temp file before the rename;
+/// a new file gets whatever the process umask gives it, same as before.
 pub fn update(path: &Path, change: impl FnOnce(&mut Config)) -> Result<()> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
@@ -172,16 +178,25 @@ pub fn update(path: &Path, change: impl FnOnce(&mut Config)) -> Result<()> {
         toml::from_str(&written).context("the settings just written do not parse")?;
     reparsed.validate().context("the settings just written are invalid")?;
 
-    if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+    // A path that does not exist yet has nothing to resolve or to have
+    // permissions of, so it is used as given and a new file gets the default.
+    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let permissions = std::fs::metadata(&target).ok().map(|meta| meta.permissions());
+
+    if let Some(parent) = target.parent().filter(|parent| !parent.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating {}", parent.display()))?;
     }
-    let mut temp_name = path.as_os_str().to_owned();
+    let mut temp_name = target.as_os_str().to_owned();
     temp_name.push(".tmp");
     let temp_path = PathBuf::from(temp_name);
     std::fs::write(&temp_path, &written)
         .with_context(|| format!("writing {}", temp_path.display()))?;
-    std::fs::rename(&temp_path, path).with_context(|| format!("saving {}", path.display()))?;
+    if let Some(permissions) = permissions {
+        std::fs::set_permissions(&temp_path, permissions)
+            .with_context(|| format!("setting permissions on {}", temp_path.display()))?;
+    }
+    std::fs::rename(&temp_path, &target).with_context(|| format!("saving {}", target.display()))?;
     Ok(())
 }
 
@@ -476,5 +491,37 @@ mod tests {
             text.lines().any(|line| line.contains("fleet = 7") && line.contains("# quiet")),
             "the comment stays on the same line: {text}"
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn config_update_writes_through_symlink_when_path_is_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real.toml");
+        let link = dir.path().join("wartui.toml");
+        std::fs::write(&real, "[tx-power]\nfleet = 6\n").unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        update(&link, |c| c.tx_power.fleet = Some(10)).unwrap();
+
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "still a link");
+        let saved = load(Some(&real)).unwrap();
+        assert_eq!(saved.tx_power.fleet, Some(10), "the file it pointed to got the change");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn config_update_keeps_permissions_when_file_exists() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wartui.toml");
+        std::fs::write(&target, "[tx-power]\nfleet = 6\n").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        update(&target, |c| c.tx_power.fleet = Some(10)).unwrap();
+
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "the mode survives the rewrite");
     }
 }

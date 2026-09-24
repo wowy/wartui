@@ -1909,3 +1909,59 @@ fn engine_snapshot_reports_tx_powers_when_taken() {
     assert_eq!(snapshot.tx_power, 40);
     assert_eq!(snapshot.bridge_tx_power, 60);
 }
+
+#[test]
+fn engine_reissues_surplus_node_with_new_tx_power_when_set_tx_power_received() {
+    let clock = Clock::new();
+    let config = EngineConfig { pool: ChannelPool::Us, ..EngineConfig::default() };
+    let mut engine = engine(config, &clock);
+    let token = Capabilities::here(true, false);
+
+    // Eleven C6s settle first, `peer(1)` through `peer(11)`: the pool's eleven
+    // 2.4 GHz channels give each of them a share of its own.
+    for beat in 0..6u32 {
+        let at = clock.at(2 + u64::from(beat));
+        for n in 1..=11 {
+            let batch = engine.handle(beat_at(peer(n), beat + 1, token, 0), at);
+            if let Some(HostToBridge::SendEspNow { id, .. }) = batch.urgent.first() {
+                engine.handle(send_result(*id, SendStatus::AckOk, 900), at);
+            }
+        }
+    }
+
+    // `peer(0)` joins — sorting before all eleven by MAC, so it takes slot 0 and
+    // pushes `peer(11)` out to the last slot, the one the deal leaves without a
+    // channel on a pool with nothing left to give it. `peer(11)` keeps exactly
+    // what it held from the eleven-node plan, `node_count` included, while the
+    // other ten are re-cut fresh shares under the new count.
+    for beat in 0..6u32 {
+        let at = clock.at(20 + u64::from(beat));
+        for n in 0..=11 {
+            let batch = engine.handle(beat_at(peer(n), beat + 7, token, 0), at);
+            if let Some(HostToBridge::SendEspNow { id, .. }) = batch.urgent.first() {
+                engine.handle(send_result(*id, SendStatus::AckOk, 900), at);
+            }
+        }
+    }
+
+    let surplus = engine
+        .nodes()
+        .find(|node| node.desired.or(node.confirmed).is_some_and(|a| a.node_count == 11))
+        .expect("one slot kept the eleven-node plan's share");
+    let held = surplus.desired.or(surplus.confirmed).expect("still holding channels");
+    let surplus_mac = surplus.mac;
+    assert_eq!(surplus_mac, peer(11), "the slot the new member's arrival pushed out");
+
+    let command = engine.handle(
+        Event::Command(Command::SetTxPower { nodes: 40, bridge: DEFAULT_TX_POWER_QUARTER_DBM }),
+        clock.at(30),
+    );
+    assert!(command.urgent.is_empty(), "nothing sent until the node's own window");
+
+    let (_, dst, admin) =
+        sent_admin(&engine.handle(beat_at(surplus_mac, 13, token, 0), clock.at(31)));
+    assert_eq!(dst, surplus_mac);
+    assert_eq!(admin.tx_power, 40, "the surplus node still hears about the change");
+    assert_eq!(admin.channels, held.channels, "its own share is unchanged");
+    assert_eq!(admin.node_count, 11, "and so is the stagger arithmetic it was dealt");
+}

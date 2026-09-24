@@ -981,9 +981,10 @@ impl FleetEngine {
     /// The nodes' new power is never sent from here — it is folded into the plan
     /// already in force by [`Self::deal`], which re-sends every member's
     /// assignment under a fresh epoch, and each node adopts it on its own next
-    /// heartbeat. With no plan in force, the next [`Self::replan`] reads the new
-    /// [`EngineConfig::tx_power`] on its own. A value the engine already holds is
-    /// a no-op either way: nothing goes out and no epoch is spent.
+    /// heartbeat. With no plan in force, nothing is sent to any node yet: the
+    /// fleet keeps whatever it holds until it is next in a plan, which is what
+    /// [`Self::deal`] then sends it under. A value the engine already holds is a
+    /// no-op either way: nothing goes out and no epoch is spent.
     fn on_set_tx_power(&mut self, nodes: i8, bridge: i8, batch: &mut ActionBatch) {
         let nodes = clamp_tx_power(nodes);
         let bridge = clamp_tx_power(bridge);
@@ -1173,7 +1174,25 @@ impl FleetEngine {
                         None => continue,
                     }
                 }
-                None => continue,
+                // The plain surplus case: nothing changes about what it scans, so
+                // it keeps `held` exactly, but `SetTxPower` still has to reach it —
+                // nothing else will re-send an assignment nobody re-cut. During an
+                // ordinary re-cut `held`'s power already matches, so this is a
+                // no-op then, same as before this arm existed.
+                None => {
+                    if let Some(assignment) = held
+                        && assignment.tx_power != self.config.tx_power
+                    {
+                        counter += 1;
+                        node.desired = Some(Assignment {
+                            tx_power: self.config.tx_power,
+                            counter,
+                            ..assignment
+                        });
+                        node.dirty = true;
+                    }
+                    continue;
+                }
             };
             // `replan` builds `job` from `scanner`, so `channels.is_empty()` and
             // `ble` always agree.
