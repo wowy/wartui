@@ -373,11 +373,7 @@ fn planning(snapshot: &Snapshot) -> Span<'static> {
     Span::styled(text, Style::new().fg(Color::Green))
 }
 
-/// Where the host believes it is, said plainly and continuously.
-///
-/// The warning `wartui run` prints at startup survives about one frame before the
-/// alternate screen swallows it, which is no use to someone who finds out at
-/// export time that a night of observations cannot be uploaded.
+/// Current GPS position, or a warning
 fn position(snapshot: &Snapshot) -> Vec<Span<'static>> {
     let fix = if snapshot.position.is_located() {
         Span::default()
@@ -426,10 +422,8 @@ fn receiver(gps: &GpsView, source: PositionSource) -> Option<Span<'static>> {
         // work through the rates their receiver might be at.
         GpsStatus::Scanning { port, baud } => format!("  gps scanning {port} @{baud}"),
         GpsStatus::Searching => "  gps searching".to_owned(),
-        // Talking, has had a fix, and the chain has stopped believing it.
         GpsStatus::Fixed { .. } => "  gps fix is stale".to_owned(),
-        GpsStatus::Failed(_) => "  gps unreadable".to_owned(), // Handled above.
-        // Nothing was attached, which is not news.
+        GpsStatus::Failed(_) => "  gps unreadable".to_owned(),
         GpsStatus::NoReceiver => return None,
     };
     Some(Span::styled(text, Style::new().fg(Color::Yellow)))
