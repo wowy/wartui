@@ -468,17 +468,17 @@ mod tests {
 
     #[test]
     fn cli_parser_populates_tx_power_flags_when_parsing_run_options() {
-        let cli = parse(["wartui", "--tx-power", "10", "--bridge-tx-power", "15"]).unwrap();
+        let cli = parse(["wartui", "--node-tx-power", "10", "--bridge-tx-power", "15"]).unwrap();
         assert!(cli.command.is_none());
-        assert_eq!(cli.run.tx_power, Some(10));
+        assert_eq!(cli.run.node_tx_power, Some(10));
         assert_eq!(cli.run.bridge_tx_power, Some(15));
     }
 
     #[test]
-    fn cli_parser_allows_bridge_tx_power_independently_when_tx_power_is_omitted() {
+    fn cli_parser_allows_bridge_tx_power_independently_when_node_tx_power_is_omitted() {
         let cli = parse(["wartui", "run", "--bridge-tx-power", "15"]).unwrap();
         let Some(Command::Run(args)) = cli.command else { panic!("not run") };
-        assert_eq!(args.tx_power, None);
+        assert_eq!(args.node_tx_power, None);
         assert_eq!(args.bridge_tx_power, Some(15));
     }
 
@@ -487,8 +487,8 @@ mod tests {
         // Refused rather than clamped: a power the operator typed and got wrong
         // should say so, not run the fleet at a power nobody asked for.
         for args in [
-            ["wartui", "--tx-power", "25"].as_slice(),
-            ["wartui", "--tx-power", "1"].as_slice(),
+            ["wartui", "--node-tx-power", "25"].as_slice(),
+            ["wartui", "--node-tx-power", "1"].as_slice(),
             ["wartui", "--bridge-tx-power", "21"].as_slice(),
         ] {
             assert!(parse(args).is_err(), "{args:?} should be refused");

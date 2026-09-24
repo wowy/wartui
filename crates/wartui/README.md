@@ -35,8 +35,8 @@ This is the operator's manual. The root [`README.md`](../../README.md) is the sh
 | `--sim N`               | —            | Run a fake fleet instead of hardware                         |
 | `--sim-c6 N`            | `0`          | Make that many of them C6s, from the end of the fleet        |
 | `--record-raw`          | off          | Also keep the undecoded bytes of every frame                 |
-| `--tx-power DBM`        | `2`          | Wi-Fi transmit power for the fleet, bridge included          |
-| `--bridge-tx-power DBM` | `--tx-power` | Wi-Fi transmit power for the bridge alone                    |
+| `--node-tx-power DBM`   | `2`          | Wi-Fi transmit power for the nodes                           |
+| `--bridge-tx-power DBM` | `2`          | Wi-Fi transmit power for the bridge                          |
 | `--commit-interval MS`  | `1000`       | How often the store commits; a crash loses at most this much |
 | `--notes TEXT`          | —            | A note about this run, stored with the session               |
 
@@ -46,11 +46,11 @@ to. The date is in ISO order whatever the locale reading it: that is what makes 
 lets `export` pick out the last one. Two runs begun inside the same minute share a name, and the
 second adds its session to the first one's file.
 
-`--tx-power` is how loudly the whole fleet transmits — the nodes' heartbeats and sightings and the
-bridge's assignments — in whole dBm, 2 to 20, 2 by default. `--bridge-tx-power` sets the bridge
-alone and wins when both are given; the nodes still follow `--tx-power`. 20 dBm is the ceiling: the
-firmware would accept 21, but whether anything above 20 works correctly is unverified. It can also
-be set in `wartui.toml`; see "Config file" below for precedence.
+`--node-tx-power` is how loudly the nodes transmit — their heartbeats and sightings — in whole dBm,
+2 to 20, 2 by default. `--bridge-tx-power` sets the bridge's assignments the same way, completely
+independent: neither flag falls back to the other, and each defaults to 2 dBm on its own. 20 dBm is
+the ceiling: the firmware would accept 21, but whether anything above 20 works correctly is
+unverified. Either can also be set in `wartui.toml`; see "Config file" below for precedence.
 
 `export` takes `--db`, `--out PATH` and `--session ID`, and writes the [WiGLE v1.6
 format](https://api.wigle.net/csvFormat.html). Both ends default, so exporting the evening that just
@@ -103,17 +103,18 @@ Today it holds one table:
 
 ```toml
 [tx-power]
-fleet = 10    # dBm, nodes and bridge
-bridge = 15   # dBm, bridge alone
+fleet = 10    # dBm, nodes
+bridge = 15   # dBm, bridge
 ```
 
-Precedence is flag, then file, then default: `--tx-power`/`--bridge-tx-power` beat
-`[tx-power]`, which beats 2 dBm. `--tx-power` beats even a file's `bridge` entry, because the
-flag is documented as "the fleet, bridge included."
+`fleet` and `bridge` are independent, the same as `--node-tx-power` and `--bridge-tx-power` are.
+Precedence is flag, then file, then default, resolved separately for each: `--node-tx-power` beats
+`fleet`, which beats 2 dBm; `--bridge-tx-power` beats `bridge`, which beats 2 dBm. Neither value
+falls back to the other's.
 
 An unknown key or table makes wartui refuse to start, naming the file and the line; an
 out-of-range value does too, naming the file and the key — the same way an out-of-range
-`--tx-power` is refused.
+`--node-tx-power` is refused.
 
 ### Benchmarking the store
 

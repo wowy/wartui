@@ -3,7 +3,7 @@
 //! **Configuration, not state.** This is the operator's own decision, so a mistake in
 //! it is refused rather than absorbed: an unknown key or an out-of-range value stops
 //! wartui from starting and names the file and the problem, the same way an
-//! out-of-range `--tx-power` does. `crates/wartui-bridge/src/remember.rs` is the
+//! out-of-range `--node-tx-power` does. `crates/wartui-bridge/src/remember.rs` is the
 //! opposite case — a cache thrown away and rebuilt when it is wrong — and the
 //! distinction is why that file is silent about failures and this one is not.
 //!
@@ -33,9 +33,9 @@ pub struct Config {
     pub tx_power: TxPower,
 }
 
-/// The `[tx-power]` table: `fleet` covers the nodes and the bridge, `bridge`
-/// overrides it for the bridge alone — the same split `--tx-power` and
-/// `--bridge-tx-power` make on the command line.
+/// The `[tx-power]` table: `fleet` covers the nodes and `bridge` the bridge, each
+/// independent and falling back to the default on its own — the same split
+/// `--node-tx-power` and `--bridge-tx-power` make on the command line.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct TxPower {

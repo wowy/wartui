@@ -111,16 +111,16 @@ pub struct Args {
     #[arg(long)]
     record_raw: bool,
 
-    /// Wi-Fi transmit power for the fleet in dBm, the bridge included: 2 to 20,
-    /// 2 by default. Beats `[tx-power]` in `wartui.toml`; see
-    /// `crates/wartui/README.md` § "Config file". 20 dBm is the ceiling because
-    /// whether anything higher works correctly is unverified, though the firmware
-    /// would accept it.
+    /// Wi-Fi transmit power for the nodes in dBm: 2 to 20, 2 by default. Beats
+    /// `[tx-power] fleet` in `wartui.toml`; see `crates/wartui/README.md` §
+    /// "Config file". 20 dBm is the ceiling because whether anything higher
+    /// works correctly is unverified, though the firmware would accept it.
+    /// Independent of `--bridge-tx-power`: it never sets the bridge.
     #[arg(long, value_name = "DBM", value_parser = tx_power_value_parser())]
-    pub(crate) tx_power: Option<i8>,
+    pub(crate) node_tx_power: Option<i8>,
 
-    /// Wi-Fi transmit power for the bridge alone, in dBm. Takes precedence over
-    /// `--tx-power` when both are given; nodes still follow `--tx-power`.
+    /// Wi-Fi transmit power for the bridge alone, in dBm. Independent of
+    /// `--node-tx-power`: it never sets the nodes.
     #[arg(long, value_name = "DBM", value_parser = tx_power_value_parser())]
     pub(crate) bridge_tx_power: Option<i8>,
 
@@ -146,28 +146,22 @@ fn tx_power_value_parser() -> clap::builder::RangedI64ValueParser<i8> {
 ///
 /// Whole dBm in, 2 to 20, which maps exactly onto the 8 to 80 quarter-dBm the host
 /// permits; the wire carries quarter-dBm, so the conversion happens once here rather
-/// than on either side of it. The command line beats the file, and the file beats
-/// the default:
+/// than on either side of it. Nodes and bridge are completely independent, each
+/// resolved on its own: the command line beats the file, and the file beats the
+/// default, with no fallback between the two:
 ///
 /// ```text
-/// nodes  = cli.tx_power                       ∨ file.fleet               ∨ default
-/// bridge = cli.bridge_tx_power ∨ cli.tx_power ∨ file.bridge ∨ file.fleet ∨ default
+/// nodes  = cli.node_tx_power   ∨ file.fleet  ∨ default
+/// bridge = cli.bridge_tx_power ∨ file.bridge ∨ default
 /// ```
-///
-/// `--tx-power` beats a file's `bridge`: the flag is documented as "the fleet,
-/// bridge included," and a typed flag is the more recent decision.
 fn tx_powers(
-    tx_power: Option<i8>,
+    node_tx_power: Option<i8>,
     bridge_tx_power: Option<i8>,
     file: &config::TxPower,
 ) -> (i8, i8) {
     let quarter = |dbm: i8| dbm * 4;
-    let nodes = tx_power.or(file.fleet).map_or(DEFAULT_TX_POWER_QUARTER_DBM, quarter);
-    let bridge = bridge_tx_power
-        .or(tx_power)
-        .or(file.bridge)
-        .or(file.fleet)
-        .map_or(DEFAULT_TX_POWER_QUARTER_DBM, quarter);
+    let nodes = node_tx_power.or(file.fleet).map_or(DEFAULT_TX_POWER_QUARTER_DBM, quarter);
+    let bridge = bridge_tx_power.or(file.bridge).map_or(DEFAULT_TX_POWER_QUARTER_DBM, quarter);
     (nodes, bridge)
 }
 
@@ -230,7 +224,7 @@ pub async fn run(args: Args, config: &config::Config) -> Result<()> {
         .with_context(|| format!("opening {}", db.display()))?;
 
     let (tx_power, bridge_tx_power) =
-        tx_powers(args.tx_power, args.bridge_tx_power, &config.tx_power);
+        tx_powers(args.node_tx_power, args.bridge_tx_power, &config.tx_power);
     let config = EngineConfig {
         pool,
         record_raw: args.record_raw,
@@ -314,14 +308,17 @@ mod tests {
     }
 
     #[test]
-    fn run_cmd_applies_tx_power_to_nodes_and_bridge_when_tx_power_flag_given() {
-        // One flag, one fleet: the bridge is not excepted from a power the
-        // operator set for everything.
-        assert_eq!(tx_powers(Some(10), None, &TxPower::default()), (40, 40));
+    fn run_cmd_leaves_bridge_at_default_tx_power_when_only_node_tx_power_given() {
+        // Nodes and bridge are independent: a node power alone never touches
+        // the bridge, which stays at the default.
+        assert_eq!(
+            tx_powers(Some(10), None, &TxPower::default()),
+            (40, DEFAULT_TX_POWER_QUARTER_DBM)
+        );
     }
 
     #[test]
-    fn run_cmd_applies_bridge_tx_power_override_when_both_power_flags_specified() {
+    fn run_cmd_applies_both_tx_powers_independently_when_both_flags_specified() {
         assert_eq!(tx_powers(Some(10), Some(17), &TxPower::default()), (40, 68));
     }
 
@@ -336,7 +333,7 @@ mod tests {
     #[test]
     fn run_cmd_applies_file_fleet_power_when_no_flags_given() {
         let file = TxPower { fleet: Some(10), bridge: None };
-        assert_eq!(tx_powers(None, None, &file), (40, 40));
+        assert_eq!(tx_powers(None, None, &file), (40, DEFAULT_TX_POWER_QUARTER_DBM));
     }
 
     #[test]
@@ -346,11 +343,11 @@ mod tests {
     }
 
     #[test]
-    fn run_cmd_prefers_cli_tx_power_over_file_bridge_power_when_both_given() {
-        // `--tx-power` is documented as "the fleet, bridge included," so it beats
-        // even a file `bridge` entry.
+    fn run_cmd_keeps_file_bridge_power_when_only_node_tx_power_flag_given() {
+        // `--node-tx-power` never touches the bridge, so a file's `bridge`
+        // entry survives it untouched.
         let file = TxPower { fleet: Some(6), bridge: Some(17) };
-        assert_eq!(tx_powers(Some(10), None, &file), (40, 40));
+        assert_eq!(tx_powers(Some(10), None, &file), (40, 68));
     }
 
     #[test]
