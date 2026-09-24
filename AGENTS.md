@@ -316,8 +316,10 @@ edit stops; follow the pointer before changing the rule.
   dated bench records and say what a bench measured; `README.md` § "History" is provenance and
   attribution, not a changelog.
 - Rustfmt is configured with `max_width = 100` and `use_small_heuristics = "Max"`.
-- Tests are mostly integration tests under `crates/*/tests/`; `#[cfg(test)]` modules are used
-  for parsing/formatting units (`nmea`, `position`, `export`, `outbox`).
+- Tests follow the Rust convention: unit tests live in a `#[cfg(test)]` module beside the code
+  they test, and tests that exercise a crate through its public API live under
+  `crates/*/tests/`. Most of the suite is the latter; `nmea`, `position`, `export` and `outbox`
+  carry unit tests of their own.
 - Test names follow the `component_action_when_condition` pattern
   (`engine_increments_reboot_counter_when_heartbeat_counter_decreases`):
   - `component` is the unit under test, named the same way across a file (`engine`, `store`,
