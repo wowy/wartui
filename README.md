@@ -126,8 +126,8 @@ second, and its `channels` column reads `bluetooth`.
 - **Plaintext ESP-NOW only**, in both directions. There is no pairing handshake and no key.
 - **Every radio transmits at 2 dBm by default.** The fleet is meant to ride in one vehicle with
   its bridge; carry a node much farther off and its heartbeats are the first thing lost.
-  `--tx-power` sets the fleet's power at runtime and `--bridge-tx-power` the bridge's alone, so
-  changing it costs no reflash.
+  `--node-tx-power` sets the nodes' power at runtime and `--bridge-tx-power` the bridge's,
+  independently, so changing either costs no reflash.
 - **Nothing is compatible with an earlier wartui, and that is the policy until 1.0.** `wartui-proto`
   is compiled into the host and both firmwares, so flash the fleet together. The bridge is
   format-blind and does not need reflashing for a wire change — but it does need one for a

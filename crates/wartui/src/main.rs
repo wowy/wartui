@@ -18,6 +18,7 @@ use wartui_proto::link::{LoopPhase, Mac, ResetCause};
 
 mod bench;
 mod capture;
+mod config;
 mod export;
 mod reset;
 mod run;
@@ -71,6 +72,8 @@ async fn main() -> Result<()> {
     // and the last thing logged before an exit is usually the interesting one.
     let _log = logging(cli.log_file.as_deref())?;
     match cli.command {
+        // `run` loads `wartui.toml` itself, so a broken config cannot stop
+        // `ports` / `status` / `reset` / `export` / `sniff` from working.
         None => run::run(cli.run).await,
         Some(Command::Run(args)) => run::run(args).await,
         Some(Command::Export(args)) => export::run(args),
@@ -453,17 +456,17 @@ mod tests {
 
     #[test]
     fn cli_parser_populates_tx_power_flags_when_parsing_run_options() {
-        let cli = parse(["wartui", "--tx-power", "10", "--bridge-tx-power", "15"]).unwrap();
+        let cli = parse(["wartui", "--node-tx-power", "10", "--bridge-tx-power", "15"]).unwrap();
         assert!(cli.command.is_none());
-        assert_eq!(cli.run.tx_power, Some(10));
+        assert_eq!(cli.run.node_tx_power, Some(10));
         assert_eq!(cli.run.bridge_tx_power, Some(15));
     }
 
     #[test]
-    fn cli_parser_allows_bridge_tx_power_independently_when_tx_power_is_omitted() {
+    fn cli_parser_allows_bridge_tx_power_independently_when_node_tx_power_is_omitted() {
         let cli = parse(["wartui", "run", "--bridge-tx-power", "15"]).unwrap();
         let Some(Command::Run(args)) = cli.command else { panic!("not run") };
-        assert_eq!(args.tx_power, None);
+        assert_eq!(args.node_tx_power, None);
         assert_eq!(args.bridge_tx_power, Some(15));
     }
 
@@ -472,8 +475,8 @@ mod tests {
         // Refused rather than clamped: a power the operator typed and got wrong
         // should say so, not run the fleet at a power nobody asked for.
         for args in [
-            ["wartui", "--tx-power", "25"].as_slice(),
-            ["wartui", "--tx-power", "1"].as_slice(),
+            ["wartui", "--node-tx-power", "25"].as_slice(),
+            ["wartui", "--node-tx-power", "1"].as_slice(),
             ["wartui", "--bridge-tx-power", "21"].as_slice(),
         ] {
             assert!(parse(args).is_err(), "{args:?} should be refused");
@@ -489,6 +492,29 @@ mod tests {
             let cli = parse(args).unwrap();
             assert_eq!(cli.log_file.as_deref(), Some(std::path::Path::new("w.log")));
         }
+    }
+
+    #[test]
+    fn cli_parser_accepts_config_flag_when_passed_to_run() {
+        let cli = parse(["wartui", "--config", "w.toml"]).unwrap();
+        assert!(cli.command.is_none());
+        assert_eq!(cli.run.config.as_deref(), Some(std::path::Path::new("w.toml")));
+
+        let cli = parse(["wartui", "run", "--config", "w.toml"]).unwrap();
+        let Some(Command::Run(args)) = cli.command else { panic!("not run") };
+        assert_eq!(args.config.as_deref(), Some(std::path::Path::new("w.toml")));
+    }
+
+    #[test]
+    fn cli_parser_rejects_config_flag_when_passed_to_other_subcommand() {
+        // Before the subcommand: `run`'s flags are refused ahead of another
+        // subcommand, same as `--bridge` above.
+        let error = parse(["wartui", "--config", "w.toml", "status"]).err().unwrap();
+        assert!(error.to_string().contains("'status' does not take it"), "{error}");
+
+        // After the subcommand: `status` has no `--config` of its own, so clap
+        // refuses it as an unknown argument.
+        assert!(parse(["wartui", "status", "--config", "w.toml"]).is_err());
     }
 
     #[test]

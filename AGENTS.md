@@ -281,10 +281,12 @@ edit stops; follow the pointer before changing the rule.
   versions; issue #16 is the real upgrade, and moves all of them at once.
   → `firmware/bridge/README.md` § "Dependency versions"
 - **Every bridge and node defaults to 2 dBm**, the lowest `set_max_tx_power` accepts, and the host
-  is what decides otherwise: `--tx-power` sets the fleet, `--bridge-tx-power` overrides it for the
-  bridge alone, and both take whole dBm (2 to 20) that the CLI converts to quarter-dBm. The engine
-  clamps the two settings once, at construction, then carries the bridge's with **every status
-  poll** and the nodes' in their assignments. The poll carries it because `bulk` drops rather than
+  is what decides otherwise: `--node-tx-power` sets the nodes and `--bridge-tx-power` the bridge,
+  each independent of the other and falling back to the default on its own. Both take whole dBm
+  (2 to 20) that the CLI converts to quarter-dBm. `[tx-power]` in `wartui.toml` makes the same
+  split with `fleet` and `bridge`, and a flag beats the file for its own value. The engine clamps
+  the two settings once, at construction, then carries the bridge's with **every status poll** and
+  the nodes' in their assignments. The poll carries it because `bulk` drops rather than
   blocks and a lost `SetTxPower` has nothing behind it to notice; range is the cost of changing
   the default. The ceiling is 20 dBm rather than the 21 the IDF accepts — whether anything above
   20 dBm works correctly is unverified, so the clamp keeps it unreachable.
