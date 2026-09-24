@@ -16,7 +16,7 @@ use ratatui::crossterm::event::{self, Event as TermEvent, KeyCode, KeyEvent, Key
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Cell, Paragraph, Row, Table};
+use ratatui::widgets::{Block, Cell, Paragraph, Row, Table, TableState};
 use ratatui::{DefaultTerminal, Frame};
 use tokio::sync::{mpsc, oneshot, watch};
 use wartui_bridge::BridgeInfo;
@@ -67,7 +67,7 @@ async fn view(
     let outcome = loop {
         let current = snapshot.borrow_and_update().clone();
         ui.clamp(current.nodes.len());
-        if let Err(e) = terminal.draw(|frame| draw(frame, &current, &ui)) {
+        if let Err(e) = terminal.draw(|frame| draw(frame, &current, &mut ui)) {
             break Err(e).context("drawing the fleet view");
         }
 
@@ -99,6 +99,11 @@ async fn view(
 #[derive(Debug, Default)]
 struct Ui {
     selected: usize,
+    /// The fleet table's scroll offset, carried from the previous frame so a
+    /// stateful `Table` moves the window only when the cursor reaches its
+    /// edge rather than recomputing from row 0 — which would pin the cursor
+    /// to the bottom of the box and turn `k` into a scroll instead of a move.
+    fleet_offset: usize,
     /// The notice and the snapshot time it was sent.
     notice: Option<(String, i64)>,
 }
@@ -291,7 +296,7 @@ fn quits(key: KeyEvent) -> bool {
         || (key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c')))
 }
 
-fn draw(frame: &mut Frame<'_>, snapshot: &Snapshot, ui: &Ui) {
+fn draw(frame: &mut Frame<'_>, snapshot: &Snapshot, ui: &mut Ui) {
     // Faults get their own lines, and only when there are any: sharing the footer
     // with the counters pushed the last of them off the terminal.
     let faults = fault_lines(&faults(snapshot), frame.area().width);
@@ -445,7 +450,7 @@ fn receiver(gps: &GpsView, source: PositionSource) -> Option<Span<'static>> {
     Some(Span::styled(text, Style::new().fg(Color::Yellow)))
 }
 
-fn draw_fleet(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot, ui: &Ui) {
+fn draw_fleet(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot, ui: &mut Ui) {
     let header =
         Row::new(["node", "rssi", "beats", "obs", "last", "beat", "ble", "channels", "state"])
             .style(Style::new().add_modifier(Modifier::BOLD));
@@ -453,10 +458,9 @@ fn draw_fleet(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot, ui: &Ui) {
     let rows: Vec<Row<'_>> = snapshot
         .nodes
         .iter()
-        .enumerate()
-        .map(|(i, node)| {
+        .map(|node| {
             let (state, style) = node_state(node);
-            let row = Row::new(vec![
+            Row::new(vec![
                 Cell::from(node_label(node)),
                 Cell::from(node.state.link_rssi.map_or_else(|| "—".to_owned(), |r| format!("{r}"))),
                 Cell::from(node.state.heartbeats.to_string()),
@@ -469,12 +473,7 @@ fn draw_fleet(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot, ui: &Ui) {
                 Cell::from(ble_cell(node)),
                 Cell::from(channels_cell(node)),
                 Cell::from(state).style(style),
-            ]);
-            if i == ui.selected {
-                row.style(Style::new().add_modifier(Modifier::REVERSED))
-            } else {
-                row
-            }
+            ])
         })
         .collect();
 
@@ -490,10 +489,20 @@ fn draw_fleet(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot, ui: &Ui) {
         Constraint::Min(12),
     ];
     let title = format!(" fleet — {} of {} alive ", snapshot.alive, snapshot.nodes.len());
-    frame.render_widget(
-        Table::new(rows, widths).header(header).block(Block::bordered().title(title)),
-        area,
-    );
+    let table = Table::new(rows, widths)
+        .header(header)
+        .block(Block::bordered().title(title))
+        .row_highlight_style(Style::new().add_modifier(Modifier::REVERSED));
+
+    // The offset persists in `Ui` across frames (see its doc comment) so the
+    // window scrolls only when the cursor reaches its edge, rather than
+    // snapping back to row 0 every frame and pinning the cursor to the
+    // bottom of the box.
+    let mut state = TableState::new()
+        .with_offset(ui.fleet_offset)
+        .with_selected((!snapshot.nodes.is_empty()).then_some(ui.selected));
+    frame.render_stateful_widget(table, area, &mut state);
+    ui.fleet_offset = state.offset();
 }
 
 /// How wide the channels column is, and therefore how much of the list fits.
@@ -1194,7 +1203,7 @@ mod tests {
             for (width, height) in [(200, 50), (120, 30), (80, 24), (40, 10), (20, 5), (6, 3)] {
                 let mut terminal =
                     Terminal::new(TestBackend::new(width, height)).expect("test backend");
-                terminal.draw(|frame| draw(frame, &snapshot, &Ui::default())).expect("drawing");
+                terminal.draw(|frame| draw(frame, &snapshot, &mut Ui::default())).expect("drawing");
             }
         }
     }
@@ -1207,7 +1216,7 @@ mod tests {
             ..busy()
         };
         let mut terminal = Terminal::new(TestBackend::new(200, 40)).expect("test backend");
-        terminal.draw(|frame| draw(frame, &snapshot, &Ui::default())).expect("drawing");
+        terminal.draw(|frame| draw(frame, &snapshot, &mut Ui::default())).expect("drawing");
         let rendered = terminal.backend().to_string();
 
         assert!(rendered.contains("C5 57:84"), "a dual-band radio is a C5");
@@ -1219,7 +1228,7 @@ mod tests {
     #[test]
     fn view_shows_fleet_and_stream_side_by_side_when_terminal_is_wide() {
         let mut terminal = Terminal::new(TestBackend::new(200, 40)).expect("test backend");
-        terminal.draw(|frame| draw(frame, &busy(), &Ui::default())).expect("drawing");
+        terminal.draw(|frame| draw(frame, &busy(), &mut Ui::default())).expect("drawing");
         let rendered = terminal.backend().to_string();
 
         assert!(rendered.contains("C5 57:84"), "the fleet table");
@@ -1231,11 +1240,11 @@ mod tests {
     #[test]
     fn view_displays_faults_only_when_they_have_occurred() {
         let mut clean = Terminal::new(TestBackend::new(200, 40)).expect("test backend");
-        clean.draw(|frame| draw(frame, &empty(), &Ui::default())).expect("drawing");
+        clean.draw(|frame| draw(frame, &empty(), &mut Ui::default())).expect("drawing");
         assert!(!clean.backend().to_string().contains("dropped"));
 
         let mut faulty = Terminal::new(TestBackend::new(200, 40)).expect("test backend");
-        faulty.draw(|frame| draw(frame, &busy(), &Ui::default())).expect("drawing");
+        faulty.draw(|frame| draw(frame, &busy(), &mut Ui::default())).expect("drawing");
         let rendered = faulty.backend().to_string();
         assert!(rendered.contains("store dropped 7"));
         assert!(rendered.contains("admin frames from another core"));
@@ -1321,7 +1330,7 @@ mod tests {
         let mut snapshot = empty();
         snapshot.link_error = Some(BUSY.to_owned());
         let mut terminal = Terminal::new(TestBackend::new(60, 24)).expect("test backend");
-        terminal.draw(|frame| draw(frame, &snapshot, &Ui::default())).expect("drawing");
+        terminal.draw(|frame| draw(frame, &snapshot, &mut Ui::default())).expect("drawing");
         let screen = terminal.backend().to_string();
         assert!(screen.contains("link down"), "{screen}");
         // The tail of the reason is the part that names what to do about it.
@@ -1331,7 +1340,7 @@ mod tests {
     #[test]
     fn view_displays_link_error_details_when_link_is_down() {
         let mut terminal = Terminal::new(TestBackend::new(120, 20)).expect("test backend");
-        terminal.draw(|frame| draw(frame, &empty(), &Ui::default())).expect("drawing");
+        terminal.draw(|frame| draw(frame, &empty(), &mut Ui::default())).expect("drawing");
         let rendered = terminal.backend().to_string();
 
         assert!(rendered.contains("waiting for bridge"));
@@ -1341,11 +1350,11 @@ mod tests {
     #[test]
     fn view_displays_pos_none_indicator_when_capture_lacks_position_fix() {
         let mut positioned = Terminal::new(TestBackend::new(150, 20)).expect("test backend");
-        positioned.draw(|frame| draw(frame, &busy(), &Ui::default())).expect("drawing");
+        positioned.draw(|frame| draw(frame, &busy(), &mut Ui::default())).expect("drawing");
         assert!(!positioned.backend().to_string().contains("pos none"));
 
         let mut without = Terminal::new(TestBackend::new(150, 20)).expect("test backend");
-        without.draw(|frame| draw(frame, &empty(), &Ui::default())).expect("drawing");
+        without.draw(|frame| draw(frame, &empty(), &mut Ui::default())).expect("drawing");
         assert!(without.backend().to_string().contains("pos none"));
     }
 
@@ -1378,7 +1387,7 @@ mod tests {
 
     fn rendered(snapshot: &Snapshot) -> String {
         let mut terminal = Terminal::new(TestBackend::new(200, 40)).expect("test backend");
-        terminal.draw(|frame| draw(frame, snapshot, &Ui::default())).expect("drawing");
+        terminal.draw(|frame| draw(frame, snapshot, &mut Ui::default())).expect("drawing");
         terminal.backend().to_string()
     }
 
@@ -1563,7 +1572,7 @@ mod tests {
     fn fleet_table_distinguishes_confirmed_from_desired_assignments_when_rendering_channel_column()
     {
         let mut terminal = Terminal::new(TestBackend::new(200, 40)).expect("test backend");
-        terminal.draw(|frame| draw(frame, &busy(), &Ui::default())).expect("drawing");
+        terminal.draw(|frame| draw(frame, &busy(), &mut Ui::default())).expect("drawing");
         let rendered = terminal.backend().to_string();
 
         assert!(rendered.contains("unassigned"), "a node nobody has assigned");
@@ -1661,7 +1670,7 @@ mod tests {
         snapshot.assignable = 0;
 
         let mut terminal = Terminal::new(TestBackend::new(200, 40)).expect("test backend");
-        terminal.draw(|frame| draw(frame, &snapshot, &Ui::default())).expect("drawing");
+        terminal.draw(|frame| draw(frame, &snapshot, &mut Ui::default())).expect("drawing");
         let rendered = terminal.backend().to_string();
         assert!(rendered.contains("no node it can drive"), "got {rendered}");
         assert!(!rendered.contains("nothing heartbeating"), "they are all heartbeating");
@@ -1733,7 +1742,7 @@ mod tests {
         let mut snapshot = busy();
         snapshot.plan = plan_for(ChannelPool::Us, &[Job::Wifi(Radio::TwoPointFour); 2]);
         let mut terminal = Terminal::new(TestBackend::new(200, 40)).expect("test backend");
-        terminal.draw(|frame| draw(frame, &snapshot, &Ui::default())).expect("drawing");
+        terminal.draw(|frame| draw(frame, &snapshot, &mut Ui::default())).expect("drawing");
         let rendered = terminal.backend().to_string();
         assert!(
             rendered.contains("no node in this fleet is sniffing with a 5 GHz radio"),
@@ -1746,7 +1755,7 @@ mod tests {
         let mut snapshot = busy();
         snapshot.plan = plan_for(ChannelPool::Us, &[Job::Bluetooth]);
         let mut terminal = Terminal::new(TestBackend::new(200, 40)).expect("test backend");
-        terminal.draw(|frame| draw(frame, &snapshot, &Ui::default())).expect("drawing");
+        terminal.draw(|frame| draw(frame, &snapshot, &mut Ui::default())).expect("drawing");
         let rendered = terminal.backend().to_string();
         assert!(
             rendered.contains("every node in this fleet is scanning Bluetooth"),
@@ -1797,13 +1806,13 @@ mod tests {
         empty.alive = 0;
         empty.assignable = 0;
         let mut waiting = Terminal::new(TestBackend::new(150, 20)).expect("test backend");
-        waiting.draw(|frame| draw(frame, &empty, &Ui::default())).expect("drawing");
+        waiting.draw(|frame| draw(frame, &empty, &mut Ui::default())).expect("drawing");
         assert!(waiting.backend().to_string().contains("nothing heartbeating yet"));
 
         let mut snapshot = busy();
         snapshot.plan = plan(ChannelPool::Us, 4);
         let mut terminal = Terminal::new(TestBackend::new(150, 20)).expect("test backend");
-        terminal.draw(|frame| draw(frame, &snapshot, &Ui::default())).expect("drawing");
+        terminal.draw(|frame| draw(frame, &snapshot, &mut Ui::default())).expect("drawing");
         assert!(terminal.backend().to_string().contains("4 of 5"));
 
         // A lone node holds the whole pool, and the header has nothing extra to
@@ -1811,7 +1820,7 @@ mod tests {
         let mut lone = busy();
         lone.plan = plan(ChannelPool::Us, 1);
         let mut terminal = Terminal::new(TestBackend::new(150, 20)).expect("test backend");
-        terminal.draw(|frame| draw(frame, &lone, &Ui::default())).expect("drawing");
+        terminal.draw(|frame| draw(frame, &lone, &mut Ui::default())).expect("drawing");
         let rendered = terminal.backend().to_string();
         assert!(rendered.contains("1 of 5"));
         assert!(!rendered.contains("rotating"));
@@ -1847,7 +1856,7 @@ mod tests {
         }
 
         let mut terminal = Terminal::new(TestBackend::new(160, 20)).expect("test backend");
-        terminal.draw(|frame| draw(frame, &snapshot, &Ui::default())).expect("drawing");
+        terminal.draw(|frame| draw(frame, &snapshot, &mut Ui::default())).expect("drawing");
         let rendered = terminal.backend().to_string();
         assert!(rendered.contains(" ble "), "the node whose radio confirmed it");
         assert!(rendered.contains("on…"), "and the node still waiting on its window");
@@ -1859,7 +1868,7 @@ mod tests {
         snapshot.plan = None;
         snapshot.assignable = MAX_NODES + 1;
         let mut terminal = Terminal::new(TestBackend::new(200, 40)).expect("test backend");
-        terminal.draw(|frame| draw(frame, &snapshot, &Ui::default())).expect("drawing");
+        terminal.draw(|frame| draw(frame, &snapshot, &mut Ui::default())).expect("drawing");
         assert!(terminal.backend().to_string().contains("no longer"));
     }
 
@@ -1877,5 +1886,35 @@ mod tests {
         // past the end of it.
         ui.clamp(1);
         assert_eq!(ui.selected, 0);
+    }
+
+    #[test]
+    fn fleet_table_scrolls_to_selected_node_when_nodes_exceed_visible_rows() {
+        let mut snapshot = busy();
+        snapshot.nodes = (0..15u8).map(|last| node(last, 0, true)).collect();
+        snapshot.alive = 15;
+        snapshot.assignable = 15;
+        snapshot.tail = Vec::new();
+
+        // Wide enough for the side-by-side layout, short enough that the fleet
+        // box has only a handful of data rows once its header and borders are
+        // paid for — fewer than the fifteen nodes above.
+        let mut terminal = Terminal::new(TestBackend::new(200, 16)).expect("test backend");
+        let mut ui = Ui { selected: 14, ..Default::default() };
+        terminal.draw(|frame| draw(frame, &snapshot, &mut ui)).expect("drawing");
+        let rendered = terminal.backend().to_string();
+        assert!(rendered.contains("57:0E"), "the selected node scrolled into view: {rendered}");
+        assert!(!rendered.contains("57:00"), "the first node should have scrolled off: {rendered}");
+
+        // Moving the cursor up one row, still well inside the window, must not
+        // move the window: the offset persisted in `Ui` is what keeps scrolling
+        // minimal rather than recomputed from row 0 every frame.
+        let offset_at_bottom = ui.fleet_offset;
+        ui.selected -= 1;
+        terminal.draw(|frame| draw(frame, &snapshot, &mut ui)).expect("drawing");
+        assert_eq!(
+            ui.fleet_offset, offset_at_bottom,
+            "the window moved for a cursor move inside it"
+        );
     }
 }
