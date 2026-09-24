@@ -355,15 +355,13 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot) {
     frame.render_widget(Paragraph::new(body).block(Block::bordered().title(" wartui ")), area);
 }
 
-/// What the planner has to work with, said where the pool is said.
+/// The fleet planner status.
 ///
-/// The partition is the only thing that decides what a node scans, so how much
-/// of the fleet is really in it is on screen for the whole capture rather than
-/// inferable from watching ranges change on their own.
+/// Displays how many nodes are healthy, or error states around planning the fleet.
 fn planning(snapshot: &Snapshot) -> Span<'static> {
     let text = match snapshot.plan {
-        Some(plan) => format!("auto — {} of {}", plan.node_count(), snapshot.nodes.len()),
-        None if snapshot.assignable > MAX_NODES => "auto — too many nodes".to_owned(),
+        Some(plan) => format!("{} of {}", plan.node_count(), snapshot.nodes.len()),
+        None if snapshot.assignable > MAX_NODES => "too many nodes".to_owned(),
         // Heartbeating is not on its own enough to be in a plan: a node the
         // bridge has no peer slot for cannot be reached at all. The state
         // column says which.
@@ -371,8 +369,8 @@ fn planning(snapshot: &Snapshot) -> Span<'static> {
         // This arm is why `alive` and `assignable` are counted apart: against one
         // number a fleet that had outgrown the peer table fell through to
         // "nothing heartbeating yet" while the table showed them all doing it.
-        None if snapshot.alive > 0 => "auto — no node it can drive".to_owned(),
-        None => "auto — nothing heartbeating yet".to_owned(),
+        None if snapshot.alive > 0 => "no node it can drive".to_owned(),
+        None => "nothing heartbeating yet".to_owned(),
     };
     Span::styled(text, Style::new().fg(Color::Green))
 }
@@ -1797,11 +1795,11 @@ mod tests {
         waiting.draw(|frame| draw(frame, &empty, &Ui::default())).expect("drawing");
         assert!(waiting.backend().to_string().contains("nothing heartbeating yet"));
 
-        let mut auto = busy();
-        auto.plan = plan(ChannelPool::Us, 4);
+        let mut snapshot = busy();
+        snapshot.plan = plan(ChannelPool::Us, 4);
         let mut terminal = Terminal::new(TestBackend::new(150, 20)).expect("test backend");
-        terminal.draw(|frame| draw(frame, &auto, &Ui::default())).expect("drawing");
-        assert!(terminal.backend().to_string().contains("auto — 4 of 5"));
+        terminal.draw(|frame| draw(frame, &snapshot, &Ui::default())).expect("drawing");
+        assert!(terminal.backend().to_string().contains("4 of 5"));
 
         // A lone node holds the whole pool, and the header has nothing extra to
         // say about it.
@@ -1810,7 +1808,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(150, 20)).expect("test backend");
         terminal.draw(|frame| draw(frame, &lone, &Ui::default())).expect("drawing");
         let rendered = terminal.backend().to_string();
-        assert!(rendered.contains("auto — 1 of 5"));
+        assert!(rendered.contains("1 of 5"));
         assert!(!rendered.contains("rotating"));
     }
 
