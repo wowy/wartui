@@ -494,10 +494,6 @@ fn draw_fleet(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot, ui: &mut U
         .block(Block::bordered().title(title))
         .row_highlight_style(Style::new().add_modifier(Modifier::REVERSED));
 
-    // The offset persists in `Ui` across frames (see its doc comment) so the
-    // window scrolls only when the cursor reaches its edge, rather than
-    // snapping back to row 0 every frame and pinning the cursor to the
-    // bottom of the box.
     let mut state = TableState::new()
         .with_offset(ui.fleet_offset)
         .with_selected((!snapshot.nodes.is_empty()).then_some(ui.selected));
