@@ -16,7 +16,8 @@ not make — stop and report back rather than improvising a different design.
 
 While working:
 
-- Name tests `component_action_when_condition`; most belong under `crates/*/tests/`.
+- Put unit tests in a `#[cfg(test)]` module beside the code, and tests that go through a crate's
+  public API under `crates/*/tests/`. Either way, name them `component_action_when_condition`.
 - If view or CLI behaviour changes, keep `crates/wartui/README.md` true.
 - Write prose in the present tense, per AGENTS.md § Conventions.
 
