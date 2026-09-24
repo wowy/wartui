@@ -318,16 +318,19 @@ fn draw(frame: &mut Frame<'_>, snapshot: &Snapshot, ui: &Ui) {
 }
 
 fn draw_header(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot) {
-    let link = if let Some(bridge) = &snapshot.bridge {
+    let (link, border_color) = if let Some(bridge) = &snapshot.bridge {
         let state = if snapshot.link_up { "up" } else { "down" };
-        format!(
-            "bridge {} on {:?}, fw v{} — link {state}",
-            short_mac(&bridge.mac),
-            bridge.chip,
-            bridge.fw_version
+        (
+            format!(
+                "bridge {} ({:?}), fw v{} — link {state}",
+                short_mac(&bridge.mac),
+                bridge.chip,
+                bridge.fw_version
+            ),
+            Color::Green,
         )
     } else {
-        "waiting for a bridge to announce itself".to_owned()
+        ("waiting for bridge".to_owned(), Color::Red)
     };
 
     let radio = snapshot.bridge_status.map_or_else(
@@ -352,7 +355,12 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot) {
     second.extend(position(snapshot));
 
     let body = vec![Line::from(first), Line::from(second)];
-    frame.render_widget(Paragraph::new(body).block(Block::bordered().title(" wartui ")), area);
+    frame.render_widget(
+        Paragraph::new(body).block(
+            Block::bordered().title(" wartui ").border_style(border_color).title_style(Color::Gray),
+        ),
+        area,
+    );
 }
 
 /// The fleet planner status.
@@ -1326,7 +1334,7 @@ mod tests {
         terminal.draw(|frame| draw(frame, &empty(), &Ui::default())).expect("drawing");
         let rendered = terminal.backend().to_string();
 
-        assert!(rendered.contains("waiting for a bridge"));
+        assert!(rendered.contains("waiting for bridge"));
         assert!(rendered.contains("no bridge found"));
     }
 
