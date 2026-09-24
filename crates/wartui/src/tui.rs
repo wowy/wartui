@@ -338,11 +338,6 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot) {
         ("waiting for bridge".to_owned(), Color::Red)
     };
 
-    let radio = snapshot.bridge_status.map_or_else(
-        || "  ???".to_owned(),
-        |s| format!("  peers {}  bridge rx {}", s.peer_count, s.rx_count),
-    );
-
     // The reason a link is down belongs in the fault box, which is vertical and
     // wraps, rather than on this line, which shares its width with the bridge's
     // identity — appended here, the single most useful thing on screen is the
@@ -352,10 +347,7 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot) {
     let mut second = vec![
         Span::raw(format!("pool {}  ", snapshot.pool)),
         planning(snapshot),
-        Span::raw(format!(
-            "  session {}{radio}  ",
-            elapsed(snapshot.now_ms - snapshot.started_at_ms),
-        )),
+        Span::raw(format!("  session {}  ", elapsed(snapshot.now_ms - snapshot.started_at_ms),)),
     ];
     second.extend(position(snapshot));
 
@@ -375,15 +367,8 @@ fn planning(snapshot: &Snapshot) -> Span<'static> {
     let text = match snapshot.plan {
         Some(plan) => format!("{} of {}", plan.node_count(), snapshot.nodes.len()),
         None if snapshot.assignable > MAX_NODES => "too many nodes".to_owned(),
-        // Heartbeating is not on its own enough to be in a plan: a node the
-        // bridge has no peer slot for cannot be reached at all. The state
-        // column says which.
-        //
-        // This arm is why `alive` and `assignable` are counted apart: against one
-        // number a fleet that had outgrown the peer table fell through to
-        // "nothing heartbeating yet" while the table showed them all doing it.
         None if snapshot.alive > 0 => "no node it can drive".to_owned(),
-        None => "nothing heartbeating yet".to_owned(),
+        None => "no nodes detected".to_owned(),
     };
     Span::styled(text, Style::new().fg(Color::Green))
 }
@@ -1803,7 +1788,7 @@ mod tests {
         empty.assignable = 0;
         let mut waiting = Terminal::new(TestBackend::new(150, 20)).expect("test backend");
         waiting.draw(|frame| draw(frame, &empty, &mut Ui::default())).expect("drawing");
-        assert!(waiting.backend().to_string().contains("nothing heartbeating yet"));
+        assert!(waiting.backend().to_string().contains("no nodes detected"));
 
         let mut snapshot = busy();
         snapshot.plan = plan(ChannelPool::Us, 4);
