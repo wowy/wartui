@@ -203,8 +203,8 @@ mod tests {
     fn position_chain_returns_unlocated_fix_when_position_is_old() {
         let gps = Gps::detached();
         let chain = PositionChain::empty().with_gps(gps.clone(), DEFAULT_MAX_AGE);
-        gps.feed(GGA, 10_000);
-        let fix = chain.resolve(15_000);
+        gps.feed(GGA, 0);
+        let fix = chain.resolve(5_001);
         assert!(!fix.is_located());
     }
 
