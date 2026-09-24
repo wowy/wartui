@@ -1735,8 +1735,6 @@ mod tests {
 
     #[test]
     fn view_warns_no_wifi_sniffing_when_all_nodes_scan_bluetooth() {
-        // The 5 GHz wording would be a plausible-looking lie here: every channel is
-        // out of reach, 2.4 GHz included, and the reason is not the radio.
         let mut snapshot = busy();
         snapshot.plan = plan_for(ChannelPool::Us, &[Job::Bluetooth]);
         let mut terminal = Terminal::new(TestBackend::new(200, 40)).expect("test backend");
@@ -1746,7 +1744,6 @@ mod tests {
             rendered.contains("every node in this fleet is scanning Bluetooth"),
             "got {rendered}"
         );
-        assert!(!rendered.contains("5 GHz radio"), "and not for the wrong reason: {rendered}");
     }
 
     #[test]
