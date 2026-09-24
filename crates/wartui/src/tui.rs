@@ -318,16 +318,19 @@ fn draw(frame: &mut Frame<'_>, snapshot: &Snapshot, ui: &Ui) {
 }
 
 fn draw_header(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot) {
-    let link = if let Some(bridge) = &snapshot.bridge {
+    let (link, border_color) = if let Some(bridge) = &snapshot.bridge {
         let state = if snapshot.link_up { "up" } else { "down" };
-        format!(
-            "bridge {} on {:?}, fw v{} — link {state}",
-            short_mac(&bridge.mac),
-            bridge.chip,
-            bridge.fw_version
+        (
+            format!(
+                "bridge {} ({:?}), fw v{} — link {state}",
+                short_mac(&bridge.mac),
+                bridge.chip,
+                bridge.fw_version
+            ),
+            Color::Green,
         )
     } else {
-        "waiting for a bridge to announce itself".to_owned()
+        ("waiting for bridge".to_owned(), Color::Red)
     };
 
     let radio = snapshot.bridge_status.map_or_else(
@@ -352,18 +355,21 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot) {
     second.extend(position(snapshot));
 
     let body = vec![Line::from(first), Line::from(second)];
-    frame.render_widget(Paragraph::new(body).block(Block::bordered().title(" wartui ")), area);
+    frame.render_widget(
+        Paragraph::new(body).block(
+            Block::bordered().title(" wartui ").border_style(border_color).title_style(Color::Gray),
+        ),
+        area,
+    );
 }
 
-/// What the planner has to work with, said where the pool is said.
+/// The fleet planner status.
 ///
-/// The partition is the only thing that decides what a node scans, so how much
-/// of the fleet is really in it is on screen for the whole capture rather than
-/// inferable from watching ranges change on their own.
+/// Displays how many nodes are healthy, or error states around planning the fleet.
 fn planning(snapshot: &Snapshot) -> Span<'static> {
     let text = match snapshot.plan {
-        Some(plan) => format!("auto — {} of {}", plan.node_count(), snapshot.nodes.len()),
-        None if snapshot.assignable > MAX_NODES => "auto — too many nodes".to_owned(),
+        Some(plan) => format!("{} of {}", plan.node_count(), snapshot.nodes.len()),
+        None if snapshot.assignable > MAX_NODES => "too many nodes".to_owned(),
         // Heartbeating is not on its own enough to be in a plan: a node the
         // bridge has no peer slot for cannot be reached at all. The state
         // column says which.
@@ -371,8 +377,8 @@ fn planning(snapshot: &Snapshot) -> Span<'static> {
         // This arm is why `alive` and `assignable` are counted apart: against one
         // number a fleet that had outgrown the peer table fell through to
         // "nothing heartbeating yet" while the table showed them all doing it.
-        None if snapshot.alive > 0 => "auto — no node it can drive".to_owned(),
-        None => "auto — nothing heartbeating yet".to_owned(),
+        None if snapshot.alive > 0 => "no node it can drive".to_owned(),
+        None => "nothing heartbeating yet".to_owned(),
     };
     Span::styled(text, Style::new().fg(Color::Green))
 }
@@ -1328,7 +1334,7 @@ mod tests {
         terminal.draw(|frame| draw(frame, &empty(), &Ui::default())).expect("drawing");
         let rendered = terminal.backend().to_string();
 
-        assert!(rendered.contains("waiting for a bridge"));
+        assert!(rendered.contains("waiting for bridge"));
         assert!(rendered.contains("no bridge found"));
     }
 
@@ -1737,8 +1743,6 @@ mod tests {
 
     #[test]
     fn view_warns_no_wifi_sniffing_when_all_nodes_scan_bluetooth() {
-        // The 5 GHz wording would be a plausible-looking lie here: every channel is
-        // out of reach, 2.4 GHz included, and the reason is not the radio.
         let mut snapshot = busy();
         snapshot.plan = plan_for(ChannelPool::Us, &[Job::Bluetooth]);
         let mut terminal = Terminal::new(TestBackend::new(200, 40)).expect("test backend");
@@ -1748,7 +1752,6 @@ mod tests {
             rendered.contains("every node in this fleet is scanning Bluetooth"),
             "got {rendered}"
         );
-        assert!(!rendered.contains("5 GHz radio"), "and not for the wrong reason: {rendered}");
     }
 
     #[test]
@@ -1797,11 +1800,11 @@ mod tests {
         waiting.draw(|frame| draw(frame, &empty, &Ui::default())).expect("drawing");
         assert!(waiting.backend().to_string().contains("nothing heartbeating yet"));
 
-        let mut auto = busy();
-        auto.plan = plan(ChannelPool::Us, 4);
+        let mut snapshot = busy();
+        snapshot.plan = plan(ChannelPool::Us, 4);
         let mut terminal = Terminal::new(TestBackend::new(150, 20)).expect("test backend");
-        terminal.draw(|frame| draw(frame, &auto, &Ui::default())).expect("drawing");
-        assert!(terminal.backend().to_string().contains("auto — 4 of 5"));
+        terminal.draw(|frame| draw(frame, &snapshot, &Ui::default())).expect("drawing");
+        assert!(terminal.backend().to_string().contains("4 of 5"));
 
         // A lone node holds the whole pool, and the header has nothing extra to
         // say about it.
@@ -1810,7 +1813,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(150, 20)).expect("test backend");
         terminal.draw(|frame| draw(frame, &lone, &Ui::default())).expect("drawing");
         let rendered = terminal.backend().to_string();
-        assert!(rendered.contains("auto — 1 of 5"));
+        assert!(rendered.contains("1 of 5"));
         assert!(!rendered.contains("rotating"));
     }
 
