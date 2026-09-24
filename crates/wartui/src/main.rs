@@ -40,12 +40,6 @@ struct Cli {
     #[arg(long, value_name = "PATH", global = true)]
     log_file: Option<PathBuf>,
 
-    /// Read settings from this file instead of the default location
-    /// (`~/.config/wartui/wartui.toml`, or `~/Library/Application Support/wartui/wartui.toml`
-    /// on macOS). Only `run` reads it; see `crates/wartui/README.md` § "Config file".
-    #[arg(long, value_name = "PATH", global = true)]
-    config: Option<PathBuf>,
-
     /// With no subcommand, these are `run`'s arguments.
     #[command(flatten)]
     run: run::Args,
@@ -78,16 +72,10 @@ async fn main() -> Result<()> {
     // and the last thing logged before an exit is usually the interesting one.
     let _log = logging(cli.log_file.as_deref())?;
     match cli.command {
-        // Loaded only for the command that reads it: a broken config must not stop
+        // `run` loads `wartui.toml` itself, so a broken config cannot stop
         // `ports` / `status` / `reset` / `export` / `sniff` from working.
-        None => {
-            let config = config::load(cli.config.as_deref())?;
-            run::run(cli.run, &config).await
-        }
-        Some(Command::Run(args)) => {
-            let config = config::load(cli.config.as_deref())?;
-            run::run(args, &config).await
-        }
+        None => run::run(cli.run).await,
+        Some(Command::Run(args)) => run::run(args).await,
         Some(Command::Export(args)) => export::run(args),
         Some(Command::Sniff(args)) => sniff::run(args).await,
         Some(Command::Status(args)) => status::run(args).await,
@@ -507,14 +495,26 @@ mod tests {
     }
 
     #[test]
-    fn cli_parser_accepts_config_flag_when_placed_before_or_after_subcommand() {
-        for args in [
-            ["wartui", "--config", "w.toml", "status", "--bridge", "/dev/x"],
-            ["wartui", "status", "--config", "w.toml", "--bridge", "/dev/x"],
-        ] {
-            let cli = parse(args).unwrap();
-            assert_eq!(cli.config.as_deref(), Some(std::path::Path::new("w.toml")));
-        }
+    fn cli_parser_accepts_config_flag_when_passed_to_run() {
+        let cli = parse(["wartui", "--config", "w.toml"]).unwrap();
+        assert!(cli.command.is_none());
+        assert_eq!(cli.run.config.as_deref(), Some(std::path::Path::new("w.toml")));
+
+        let cli = parse(["wartui", "run", "--config", "w.toml"]).unwrap();
+        let Some(Command::Run(args)) = cli.command else { panic!("not run") };
+        assert_eq!(args.config.as_deref(), Some(std::path::Path::new("w.toml")));
+    }
+
+    #[test]
+    fn cli_parser_rejects_config_flag_when_passed_to_other_subcommand() {
+        // Before the subcommand: `run`'s flags are refused ahead of another
+        // subcommand, same as `--bridge` above.
+        let error = parse(["wartui", "--config", "w.toml", "status"]).err().unwrap();
+        assert!(error.to_string().contains("'status' does not take it"), "{error}");
+
+        // After the subcommand: `status` has no `--config` of its own, so clap
+        // refuses it as an unknown argument.
+        assert!(parse(["wartui", "status", "--config", "w.toml"]).is_err());
     }
 
     #[test]

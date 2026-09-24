@@ -54,6 +54,12 @@ pub struct Args {
     #[arg(long, value_name = "PATH|MAC")]
     pub(crate) bridge: Option<String>,
 
+    /// Read settings from this file instead of the default location
+    /// (`~/.config/wartui/wartui.toml`, or `~/Library/Application Support/wartui/wartui.toml`
+    /// on macOS). Only `run` reads it; see `crates/wartui/README.md` § "Config file".
+    #[arg(long, value_name = "PATH")]
+    pub(crate) config: Option<PathBuf>,
+
     /// Use the built-in simulator with this many fake nodes instead of hardware.
     #[arg(long, value_name = "NODES", num_args = 0..=1, default_missing_value = "3")]
     sim: Option<u8>,
@@ -165,7 +171,11 @@ fn tx_powers(
     (nodes, bridge)
 }
 
-pub async fn run(args: Args, config: &config::Config) -> Result<()> {
+pub async fn run(args: Args) -> Result<()> {
+    // Only `run` reads `--config`, so a broken `wartui.toml` cannot stop `ports` /
+    // `status` / `reset` / `export` / `sniff` from working.
+    let config = config::load(args.config.as_deref())?;
+
     let position = match (args.lat, args.lon) {
         (Some(lat), Some(lon)) => PositionChain::fixed(lat, lon, args.alt),
         (None, None) => PositionChain::empty(),

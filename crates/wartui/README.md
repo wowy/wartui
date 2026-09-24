@@ -39,6 +39,7 @@ This is the operator's manual. The root [`README.md`](../../README.md) is the sh
 | `--bridge-tx-power DBM` | `2`          | Wi-Fi transmit power for the bridge                          |
 | `--commit-interval MS`  | `1000`       | How often the store commits; a crash loses at most this much |
 | `--notes TEXT`          | —            | A note about this run, stored with the session               |
+| `--config PATH`         | per-OS path  | Read `wartui.toml` from somewhere else; see "Config file"    |
 
 `--db` names the capture for the minute the run started — `wartui-2026-09-18-14-30.db` — so a
 directory of them sorts into the order they were made rather than being one file every run appends
@@ -78,7 +79,7 @@ on purpose: the column means a Bluetooth "device type" code that only an active 
 and the nodes never transmit while scanning.
 
 `--log-file` is global and is the only way to see the transport's own account of a run.
-`--config PATH` is global too, and names a `wartui.toml` somewhere other than the default
+`--config PATH` is a `run` argument and names a `wartui.toml` somewhere other than the default
 location; see "Config file" below.
 
 ### Config file
@@ -94,10 +95,9 @@ The default location is per OS:
 | macOS            | `~/Library/Application Support/wartui/wartui.toml` |
 | Linux and others | `$XDG_CONFIG_HOME/wartui/wartui.toml`, or `~/.config/wartui/wartui.toml` when that variable is unset or relative |
 
-`--config PATH` (global, so it can go before or after a subcommand) reads a file somewhere else
-instead, for testing and debugging. Naming a file that does not exist
-is refused; a missing default file is not — an operator who has never written one gets the
-built-in defaults, silently.
+`--config PATH`, a `run` argument, reads a file somewhere else instead, for testing and debugging.
+Naming a file that does not exist is refused; a missing default file is not — an operator who has
+never written one gets the built-in defaults, silently.
 
 Today it holds one table:
 

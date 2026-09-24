@@ -7,11 +7,11 @@
 //! opposite case — a cache thrown away and rebuilt when it is wrong — and the
 //! distinction is why that file is silent about failures and this one is not.
 //!
-//! Only the commands that read a setting from here load the file, so a broken
-//! `wartui.toml` cannot stop `ports`, `status` or `reset` from working; `main.rs`
-//! loads it once, for `run` alone. Within `run`, the command line beats the file and
-//! the file beats the default: a flag typed for this one invocation is a more recent
-//! decision than a file left on disk, and both outrank silently defaulting to 2 dBm.
+//! Only `run` loads the file — `--config` is one of its own arguments — so a broken
+//! `wartui.toml` cannot stop `ports`, `status` or `reset` from working. Within `run`,
+//! the command line beats the file and the file beats the default: a flag typed for
+//! this one invocation is a more recent decision than a file left on disk, and both
+//! outrank silently defaulting to 2 dBm.
 //!
 //! This lives in `crates/wartui` rather than `wartui-core`: the core crate parses no
 //! arguments, and a config file is operator input just like a flag is.
