@@ -1,23 +1,26 @@
 //! The fleet engine: a pure synchronous state machine.
 //!
-//! [`FleetEngine::handle`] reads no clock, touches no socket and opens no file.
-//! Every effect leaves as an [`ActionBatch`] for someone else to perform, and
-//! every input arrives as an [`Event`] with the time already decided by the
-//! caller — so it cannot block the link by accident.
-//! The fleet's behavior is testable via mock clock.
+//! # Architecture
 //!
-//! Transmitting lives here as well: allocating an epoch, waiting for the
-//! heartbeat that opens a node's 100 ms admin window, and believing the
-//! assignment landed only on a MAC-layer acknowledgement. The engine holds a
-//! partition of the pool across every heartbeating node and re-cuts it when that
-//! set changes, and that partition is the only thing an assignment ever carries:
-//! nothing outside [`FleetEngine::replan`] decides what a node scans.
+//! [`FleetEngine::handle`] reads no clock, touches no socket, and opens no file.
+//! Inputs arrive as an [`Event`] with caller-determined timestamps, and all effects
+//! are emitted as an [`ActionBatch`] to prevent accidental link blocking and ensure
+//! deterministic testing against simulated clocks.
 //!
-//! [`Command::AssignBle`] sets a single node as a Bluetooth scanner. That node
-//! receives no Wi-Fi channels to scan; only Bluetooth.
+//! # Transmission & Partitioning
 //!
-//! [`Command::SetTxPower`] changes the transmit power level for the fleet (nodes).
-//! Upon a change, it broadcasts the same fleet plan with a new epoch value.
+//! Transmitting involves allocating an epoch, waiting for the heartbeat that opens a node's
+//! 100 ms admin window, and confirming delivery strictly via MAC-layer acknowledgement.
+//! The engine maintains a partitioned channel pool across all active, heartbeating nodes and
+//! re-cuts the allocation whenever membership changes; no logic outside [`FleetEngine::replan`]
+//! dictates node scanning behavior.
+//!
+//! # Fleet Commands
+//!
+//! - [`Command::AssignBle`]: Designates a single node as the dedicated Bluetooth scanner,
+//!   allocating it zero Wi-Fi channels.
+//! - [`Command::SetTxPower`]: Updates the fleet transmit power level and redistributes the
+//!   existing plan under a new epoch.
 use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
 
