@@ -1009,6 +1009,14 @@ impl FleetEngine {
         }
     }
 
+    /// Checks whether a node is heard from and known to lack BLE capability.
+    ///
+    /// Returns `true` only if the node is present in the table and its advertised
+    /// capabilities explicitly indicate no BLE support. Unseen nodes return `false`.
+    fn node_lacks_ble(&self, mac: Mac) -> bool {
+        self.nodes.get(&mac).and_then(|node| node.capabilities).is_some_and(|caps| !caps.ble)
+    }
+
     /// Move the Bluetooth scan, or take it off the fleet entirely.
     ///
     /// Nothing is sent from here, and nothing is decided either. Moving the scan
@@ -1029,11 +1037,7 @@ impl FleetEngine {
         // asked and must not name a node that cannot answer. A node this host has
         // not heard from is *not* refused — naming one before it appears is
         // legitimate, and the tick takes the scan back once its token says so.
-        let target_lacks_ble = target.is_some_and(|mac| {
-            self.nodes.get(&mac).and_then(|node| node.capabilities).is_some_and(|caps| !caps.ble)
-        });
-
-        if target_lacks_ble {
+        if target.is_some_and(|mac| self.node_lacks_ble(mac)) {
             return;
         }
 
