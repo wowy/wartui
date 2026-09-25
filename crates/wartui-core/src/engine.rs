@@ -3,8 +3,8 @@
 //! [`FleetEngine::handle`] reads no clock, touches no socket and opens no file.
 //! Every effect leaves as an [`ActionBatch`] for someone else to perform, and
 //! every input arrives as an [`Event`] with the time already decided by the
-//! caller — so it cannot block the link by accident, and the whole of the
-//! fleet's behaviour is testable against a clock a test invents.
+//! caller — so it cannot block the link by accident.
+//! The fleet's behavior is testable via mock clock.
 //!
 //! Transmitting lives here as well: allocating an epoch, waiting for the
 //! heartbeat that opens a node's 100 ms admin window, and believing the
@@ -13,17 +13,11 @@
 //! set changes, and that partition is the only thing an assignment ever carries:
 //! nothing outside [`FleetEngine::replan`] decides what a node scans.
 //!
-//! [`Command::AssignBle`] is not an exception to that but an *input* to it: it says
-//! which node's job is Bluetooth, the planner deals that node no channels, and the
-//! frame it produces is the planner's like any other. It lives here rather than in
-//! the view because it is the same kind of fact as a channel assignment: something
-//! one node holds, delivered inside that node's own admin window, believed only on
-//! an acknowledgement.
+//! [`Command::AssignBle`] sets a single node as a Bluetooth scanner. That node
+//! receives no Wi-Fi channels to scan; only Bluetooth.
 //!
-//! [`Command::SetTxPower`] is the second operator input, and a narrower one: it
-//! changes what the fleet transmits at, never what it scans, so it re-sends the
-//! plan already in force under fresh epochs rather than asking the planner to
-//! re-cut anything.
+//! [`Command::SetTxPower`] changes the transmit power level for the fleet (nodes).
+//! Upon a change, it broadcasts the same fleet plan with a new epoch value.
 use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
 
