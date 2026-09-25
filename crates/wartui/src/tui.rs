@@ -30,7 +30,9 @@ use wartui_core::position::PositionSource;
 use wartui_core::record::AdminOutcome;
 use wartui_proto::air::RecordKind;
 use wartui_proto::link::{LoopPhase, Mac, ResetCause};
-use wartui_proto::plan::{self, ChannelSet, MAX_NODES, Radio, SCAN_CHANNELS};
+use wartui_proto::plan::{
+    self, ChannelSet, DEFAULT_TX_POWER_QUARTER_DBM, MAX_NODES, Radio, SCAN_CHANNELS,
+};
 
 use crate::config;
 
@@ -48,9 +50,16 @@ pub struct Settings {
     /// Where `wartui.toml` would be written, or `None` when there is nowhere
     /// to save it — no default location found and no `--config` given.
     pub config_path: Option<PathBuf>,
-    /// Which of `--node-tx-power`/`--bridge-tx-power` were given on this run,
-    /// so a save's notice can name the flag that still wins the next one.
-    pub overrides: Vec<&'static str>,
+    /// The `[tx-power]` entries `wartui.toml` held at start-up. A save compares
+    /// against this — updated after each successful one — rather than against
+    /// the engine's current power, so a value already put into force with
+    /// `Enter` is still recognised as a change worth writing.
+    pub file: config::TxPower,
+    /// What `--node-tx-power`/`--bridge-tx-power` gave on this run, `None` for
+    /// whichever was not given. A flag beats the file for its own row, so a
+    /// save's notice names the flag that still wins the next one, and a row
+    /// still equal to its flag is left out of the file rather than overwritten.
+    pub flags: config::TxPower,
 }
 
 /// Run the view until the operator quits or the engine stops.
@@ -154,6 +163,30 @@ impl Field {
             Self::Bridge => "--bridge-tx-power",
         }
     }
+
+    /// This row's entry in a `[tx-power]` table, `file`'s or `flags`'.
+    fn value_in(self, powers: &config::TxPower) -> Option<i8> {
+        match self {
+            Self::Fleet => powers.fleet,
+            Self::Bridge => powers.bridge,
+        }
+    }
+
+    /// Set this row's entry in a `[tx-power]` table.
+    fn set_in(self, powers: &mut config::TxPower, value: i8) {
+        match self {
+            Self::Fleet => powers.fleet = Some(value),
+            Self::Bridge => powers.bridge = Some(value),
+        }
+    }
+
+    /// This row's value in the modal.
+    fn modal_value(self, modal: &ConfigModal) -> i8 {
+        match self {
+            Self::Fleet => modal.fleet_dbm,
+            Self::Bridge => modal.bridge_dbm,
+        }
+    }
 }
 
 /// The settings modal's own state while it is open, seeded from the snapshot
@@ -166,13 +199,6 @@ struct ConfigModal {
     /// Whole dBm, the bridge's effective power — always a number, since the
     /// bridge row shows what is in force rather than whether anything holds it.
     bridge_dbm: i8,
-    /// What the modal opened with, so a save touches only the row the operator
-    /// actually moved: the effective power a row starts from may already be a
-    /// flag's rather than the file's, and writing it back to the file when it
-    /// never changed would overwrite whatever the file held with that flag's
-    /// value.
-    opened_fleet_dbm: i8,
-    opened_bridge_dbm: i8,
 }
 
 impl ConfigModal {
@@ -224,13 +250,7 @@ impl Ui {
         self.notice = None;
         let fleet_dbm = snapshot.tx_power / 4;
         let bridge_dbm = snapshot.bridge_tx_power / 4;
-        self.modal = Some(ConfigModal {
-            selected: Field::Fleet,
-            fleet_dbm,
-            bridge_dbm,
-            opened_fleet_dbm: fleet_dbm,
-            opened_bridge_dbm: bridge_dbm,
-        });
+        self.modal = Some(ConfigModal { selected: Field::Fleet, fleet_dbm, bridge_dbm });
     }
 
     /// Keys while the settings modal is open. Nothing here reaches [`Self::on_key`]:
@@ -286,48 +306,54 @@ impl Ui {
     /// What to append to the notice once a save was asked for: where it landed,
     /// that a flag will still win the next run, or why it did not happen.
     ///
-    /// Touches only the rows that moved from what the modal opened with. A row
-    /// left alone is left alone in the file too, present or absent: the modal
-    /// opens on the *effective* power, which may already be a flag's rather
-    /// than the file's, and writing it back unasked would overwrite whatever
-    /// the file held for that row with the flag's value.
-    fn save_outcome(&self, modal: ConfigModal) -> String {
-        let mut changed = Vec::new();
-        if modal.fleet_dbm != modal.opened_fleet_dbm {
-            changed.push(Field::Fleet);
-        }
-        if modal.bridge_dbm != modal.opened_bridge_dbm {
-            changed.push(Field::Bridge);
-        }
+    /// A row is written when the modal's value differs from what the next
+    /// start would resolve to with no flags — `settings.file`'s entry, or the
+    /// default when it has none — and the row's flag, if any, is not still
+    /// holding that same value: a flag beats the file for its own row, so
+    /// writing a row a flag holds untouched would look like a save but be
+    /// overwritten again at the next start regardless. A successful write
+    /// updates `settings.file` too, so a second save in the same run compares
+    /// against what the file now holds.
+    fn save_outcome(&mut self, modal: ConfigModal) -> String {
+        let default_dbm = DEFAULT_TX_POWER_QUARTER_DBM / 4;
+        let changed: Vec<Field> = [Field::Fleet, Field::Bridge]
+            .into_iter()
+            .filter(|field| {
+                let value = field.modal_value(&modal);
+                let baseline = field.value_in(&self.settings.file).unwrap_or(default_dbm);
+                let flag_held = field.value_in(&self.settings.flags) == Some(value);
+                value != baseline && !flag_held
+            })
+            .collect();
         if changed.is_empty() {
-            return "; nothing changed, so nothing saved".to_owned();
+            return "; nothing to save".to_owned();
         }
 
-        let mut outcome = match &self.settings.config_path {
+        let mut outcome = match self.settings.config_path.clone() {
             Some(path) => {
-                let result = config::update(path, |c| {
+                let result = config::update(&path, |c| {
                     for field in &changed {
-                        match field {
-                            Field::Fleet => c.tx_power.fleet = Some(modal.fleet_dbm),
-                            Field::Bridge => c.tx_power.bridge = Some(modal.bridge_dbm),
-                        }
+                        field.set_in(&mut c.tx_power, field.modal_value(&modal));
                     }
                 });
                 match result {
-                    Ok(()) => format!("; saved to {}", path.display()),
+                    Ok(()) => {
+                        for field in &changed {
+                            field.set_in(&mut self.settings.file, field.modal_value(&modal));
+                        }
+                        format!("; saved to {}", path.display())
+                    }
                     Err(error) => format!("; could not save: {error}"),
                 }
             }
             None => "; nowhere to save it — use --config".to_owned(),
         };
-        let overrides: Vec<&str> = self
-            .settings
-            .overrides
+        let flagged: Vec<&str> = changed
             .iter()
-            .copied()
-            .filter(|flag| changed.iter().any(|field| field.flag() == *flag))
+            .filter(|field| field.value_in(&self.settings.flags).is_some())
+            .map(|field| field.flag())
             .collect();
-        outcome.push_str(&overrides_notice(&overrides));
+        outcome.push_str(&overrides_notice(&flagged));
         outcome
     }
 
@@ -2257,7 +2283,7 @@ mod tests {
         let snapshot = busy();
         let (tx, mut rx) = mpsc::channel(4);
         let mut ui = Ui {
-            settings: Settings { config_path: Some(target.clone()), overrides: Vec::new() },
+            settings: Settings { config_path: Some(target.clone()), ..Default::default() },
             ..Ui::default()
         };
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
@@ -2279,13 +2305,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wartui.toml");
         std::fs::write(&target, "[tx-power]\nbridge = 15\n").unwrap();
-        // The modal opens on the snapshot's effective power, not the file's own
-        // value — which is exactly why an untouched row must not be rewritten to
-        // whatever the modal happened to open with.
-        let snapshot = busy();
+        // The file already holds the bridge's value, so the row must not be
+        // rewritten just because the operator moved a different row.
+        let mut snapshot = busy();
+        snapshot.bridge_tx_power = 60; // 15 dBm, matching the file.
         let (tx, _rx) = mpsc::channel(4);
         let mut ui = Ui {
-            settings: Settings { config_path: Some(target.clone()), overrides: Vec::new() },
+            settings: Settings {
+                config_path: Some(target.clone()),
+                file: config::TxPower { fleet: None, bridge: Some(15) },
+                ..Default::default()
+            },
             ..Ui::default()
         };
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
@@ -2305,7 +2335,7 @@ mod tests {
         let snapshot = busy();
         let (tx, mut rx) = mpsc::channel(4);
         let mut ui = Ui {
-            settings: Settings { config_path: Some(target.clone()), overrides: Vec::new() },
+            settings: Settings { config_path: Some(target.clone()), ..Default::default() },
             ..Ui::default()
         };
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
@@ -2314,18 +2344,117 @@ mod tests {
 
         assert!(rx.try_recv().is_ok(), "the live command still goes out");
         let notice = ui.notice(snapshot.now_ms).expect("a notice");
-        assert!(notice.contains("nothing changed, so nothing saved"), "{notice}");
+        assert!(notice.contains("nothing to save"), "{notice}");
         assert!(!target.exists(), "nothing was written");
+    }
+
+    #[test]
+    fn ui_saves_value_already_applied_with_enter_when_reopened_and_saved() {
+        // The scenario a review found: `c`, raise fleet, `Enter` — the engine
+        // now runs the new value. Reopening later and saving with nothing
+        // further moved must still write it, because the file never got it.
+        let mut applied = busy();
+        applied.tx_power = 40; // 10 dBm.
+        let (tx, _rx) = mpsc::channel(4);
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wartui.toml");
+        let mut ui = Ui {
+            settings: Settings { config_path: Some(target.clone()), ..Default::default() },
+            ..Ui::default()
+        };
+        ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &applied, &tx);
+        for _ in 0..4 {
+            ui.on_modal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &applied, &tx);
+        }
+        ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &applied, &tx);
+        assert!(ui.modal.is_none(), "enter applied and closed the modal");
+
+        // The next snapshot reflects the 14 dBm the engine is now running.
+        let mut running = applied;
+        running.tx_power = 56;
+        ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &running, &tx);
+        assert_eq!(ui.modal.expect("reopened").fleet_dbm, 14, "seeded from what is running");
+
+        ui.on_modal_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE), &running, &tx);
+
+        let notice = ui.notice(running.now_ms).expect("a notice");
+        assert!(notice.contains(&target.display().to_string()), "{notice}");
+        let saved = config::load(Some(&target)).expect("a valid file");
+        assert_eq!(saved.tx_power.fleet, Some(14), "the value already in force is saved");
+    }
+
+    #[test]
+    fn ui_writes_nothing_on_second_save_when_first_save_already_caught_up_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wartui.toml");
+        let snapshot = busy();
+        let (tx, _rx) = mpsc::channel(4);
+        let mut ui = Ui {
+            settings: Settings { config_path: Some(target.clone()), ..Default::default() },
+            ..Ui::default()
+        };
+        ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
+        ui.on_modal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &snapshot, &tx);
+        ui.on_modal_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE), &snapshot, &tx);
+        let after_first = std::fs::read_to_string(&target).expect("written by the first save");
+
+        // A later snapshot showing the engine now at the value just saved.
+        let mut running = snapshot.clone();
+        running.tx_power = 12; // 3 dBm.
+        ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &running, &tx);
+
+        ui.on_modal_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE), &running, &tx);
+
+        let notice = ui.notice(running.now_ms).expect("a notice");
+        assert!(notice.contains("nothing to save"), "{notice}");
+        let after_second = std::fs::read_to_string(&target).expect("still there");
+        assert_eq!(after_first, after_second, "the second save touched nothing");
+    }
+
+    #[test]
+    fn ui_leaves_flag_held_row_unwritten_when_only_the_other_row_moves() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wartui.toml");
+        std::fs::write(&target, "[tx-power]\nfleet = 10\n").unwrap();
+        let mut snapshot = busy();
+        snapshot.tx_power = 48; // 12 dBm: --node-tx-power's value, still in force.
+        let (tx, _rx) = mpsc::channel(4);
+        let mut ui = Ui {
+            settings: Settings {
+                config_path: Some(target.clone()),
+                file: config::TxPower { fleet: Some(10), bridge: None },
+                flags: config::TxPower { fleet: Some(12), bridge: None },
+            },
+            ..Ui::default()
+        };
+        ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
+        // Only the bridge row moves; the fleet row differs from the file too,
+        // but the flag is still holding it at 12 and nobody touched it.
+        ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &snapshot, &tx);
+        ui.on_modal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &snapshot, &tx);
+
+        ui.on_modal_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE), &snapshot, &tx);
+
+        let notice = ui.notice(snapshot.now_ms).expect("a notice");
+        assert!(!notice.contains("--node-tx-power"), "{notice}");
+        let saved = config::load(Some(&target)).expect("a valid file");
+        assert_eq!(saved.tx_power.fleet, Some(10), "the flag-held row is untouched");
+        assert_eq!(saved.tx_power.bridge, Some(3), "the row that moved is written");
     }
 
     #[test]
     fn ui_warns_node_flag_still_wins_when_saving_with_node_tx_power_overridden() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wartui.toml");
-        let snapshot = busy();
+        let mut snapshot = busy();
+        snapshot.tx_power = 40; // 10 dBm: --node-tx-power's value.
         let (tx, _rx) = mpsc::channel(4);
         let mut ui = Ui {
-            settings: Settings { config_path: Some(target), overrides: vec!["--node-tx-power"] },
+            settings: Settings {
+                config_path: Some(target),
+                flags: config::TxPower { fleet: Some(10), bridge: None },
+                ..Default::default()
+            },
             ..Ui::default()
         };
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
@@ -2341,10 +2470,15 @@ mod tests {
     fn ui_warns_bridge_flag_still_wins_when_saving_with_bridge_tx_power_overridden() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wartui.toml");
-        let snapshot = busy();
+        let mut snapshot = busy();
+        snapshot.bridge_tx_power = 60; // 15 dBm: --bridge-tx-power's value.
         let (tx, _rx) = mpsc::channel(4);
         let mut ui = Ui {
-            settings: Settings { config_path: Some(target), overrides: vec!["--bridge-tx-power"] },
+            settings: Settings {
+                config_path: Some(target),
+                flags: config::TxPower { fleet: None, bridge: Some(15) },
+                ..Default::default()
+            },
             ..Ui::default()
         };
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
@@ -2361,12 +2495,15 @@ mod tests {
     fn ui_warns_both_flags_still_win_when_saving_with_both_overridden() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wartui.toml");
-        let snapshot = busy();
+        let mut snapshot = busy();
+        snapshot.tx_power = 40; // 10 dBm.
+        snapshot.bridge_tx_power = 60; // 15 dBm.
         let (tx, _rx) = mpsc::channel(4);
         let mut ui = Ui {
             settings: Settings {
                 config_path: Some(target),
-                overrides: vec!["--node-tx-power", "--bridge-tx-power"],
+                flags: config::TxPower { fleet: Some(10), bridge: Some(15) },
+                ..Default::default()
             },
             ..Ui::default()
         };
@@ -2388,18 +2525,21 @@ mod tests {
     fn ui_warns_only_the_changed_rows_flag_when_other_row_is_untouched() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wartui.toml");
-        let snapshot = busy();
+        let mut snapshot = busy();
+        snapshot.tx_power = 40; // 10 dBm.
+        snapshot.bridge_tx_power = 60; // 15 dBm.
         let (tx, _rx) = mpsc::channel(4);
         let mut ui = Ui {
             settings: Settings {
                 config_path: Some(target),
-                overrides: vec!["--node-tx-power", "--bridge-tx-power"],
+                flags: config::TxPower { fleet: Some(10), bridge: Some(15) },
+                ..Default::default()
             },
             ..Ui::default()
         };
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
         // Only the fleet row moves; the bridge flag is given too, but its row
-        // never changed and so is never saved.
+        // is still at the flag's value and so is never saved.
         ui.on_modal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &snapshot, &tx);
 
         ui.on_modal_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE), &snapshot, &tx);
@@ -2413,8 +2553,7 @@ mod tests {
     fn ui_reports_nowhere_to_save_when_no_config_path_is_set() {
         let snapshot = busy();
         let (tx, _rx) = mpsc::channel(4);
-        let mut ui =
-            Ui { settings: Settings { config_path: None, overrides: Vec::new() }, ..Ui::default() };
+        let mut ui = Ui { settings: Settings::default(), ..Ui::default() };
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
         ui.on_modal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &snapshot, &tx);
 

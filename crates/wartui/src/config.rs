@@ -37,7 +37,7 @@ pub struct Config {
 /// The `[tx-power]` table: `fleet` covers the nodes and `bridge` the bridge, each
 /// independent and falling back to the default on its own — the same split
 /// `--node-tx-power` and `--bridge-tx-power` make on the command line.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Clone, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct TxPower {
     pub fleet: Option<i8>,

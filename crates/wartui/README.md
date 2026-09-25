@@ -152,10 +152,11 @@ only author of one. Channels are not a key.
 `c` opens a modal for the fleet's transmit power, with a row each for the nodes and the bridge.
 `↑`/`↓` (or `j`/`k`) move between them, `←`/`→` (or `h`/`l`) step the selected value by 1 dBm, and
 `Enter` sends it to the engine: the bridge takes it on its next status poll, the nodes on their next
-heartbeat. `s` does the same and also writes `fleet`/`bridge` to `wartui.toml`, so it becomes the
-default the next run starts from — `--node-tx-power`/`--bridge-tx-power` still win over it if given
-again at start-up. `Esc` or `q` closes the modal without changing anything; `ctrl-c` quits even
-while it is open.
+heartbeat. `s` does the same and also writes each row that differs from what `wartui.toml` would
+start the next run with, so a value already applied with `Enter` is saved too — and skips a row
+`--node-tx-power`/`--bridge-tx-power` set and you left alone, since a flag still wins that row at
+the next start-up regardless. `Esc` or `q` closes the modal without changing anything; `ctrl-c`
+quits even while it is open.
 
 ## How channels are assigned
 

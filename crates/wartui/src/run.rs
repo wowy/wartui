@@ -237,16 +237,11 @@ pub async fn run(args: Args) -> Result<()> {
 
     let (tx_power, bridge_tx_power) =
         tx_powers(args.node_tx_power, args.bridge_tx_power, &config.tx_power);
-    // A flag beats the file for its own value, so a save while one is given would
-    // be silently overridden the next time wartui starts; the modal's notice
-    // names it rather than letting the operator find out at the next run.
-    let mut overrides = Vec::new();
-    if args.node_tx_power.is_some() {
-        overrides.push("--node-tx-power");
-    }
-    if args.bridge_tx_power.is_some() {
-        overrides.push("--bridge-tx-power");
-    }
+    let settings = tui::Settings {
+        config_path,
+        file: config.tx_power.clone(),
+        flags: config::TxPower { fleet: args.node_tx_power, bridge: args.bridge_tx_power },
+    };
     let config = EngineConfig {
         pool,
         record_raw: args.record_raw,
@@ -267,7 +262,6 @@ pub async fn run(args: Args) -> Result<()> {
     let (command_tx, command_rx) = mpsc::channel(COMMAND_QUEUE);
 
     let capture = tokio::spawn(drive(link, store, engine, snapshot_tx, command_rx, stop_rx));
-    let settings = tui::Settings { config_path, overrides };
     let outcome = tui::run(snapshot_rx, command_tx, stop_tx, settings).await;
     // Always waited on, even when the view failed: this is what commits the
     // last batch and writes the session's end time.
