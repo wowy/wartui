@@ -55,7 +55,7 @@ pub struct Now {
 
 /// Something the engine must react to.
 // `Link` dwarfs `Tick` because it carries an inline ESP-NOW payload. Boxing it
-// would mean an allocation for every frame received in order to shrink a value
+// would mean an allocation for every frame received to shrink a value
 // that is created, matched on and dropped inside one call to `handle`.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
@@ -103,8 +103,7 @@ pub enum Command {
     /// changed — nothing here waits for the next poll. The nodes' power is never sent
     /// from here: it re-sends each member's share of the plan already in force under a
     /// fresh epoch, and each node picks it up on its own next heartbeat. Setting a
-    /// value the engine already holds is a no-op: nothing goes out and no epoch is
-    /// spent.
+    /// value the engine already holds is a no-op.
     SetTxPower {
         /// Wi-Fi transmit power for the nodes.
         nodes: i8,
@@ -982,17 +981,28 @@ impl FleetEngine {
     /// fleet keeps whatever it holds until it is next in a plan, which is what
     /// [`Self::deal`] then sends it under. A value the engine already holds is a
     /// no-op either way: nothing goes out and no epoch is spent.
-    fn on_set_tx_power(&mut self, nodes: i8, bridge: i8, batch: &mut ActionBatch) {
-        let nodes = clamp_tx_power(nodes);
-        let bridge = clamp_tx_power(bridge);
-        if bridge != self.config.bridge_tx_power {
-            self.config.bridge_tx_power = bridge;
+    fn on_set_tx_power(&mut self, nodes_power: i8, bridge_power: i8, batch: &mut ActionBatch) {
+        let clamped_bridge = clamp_tx_power(bridge_power);
+        let clamped_nodes = clamp_tx_power(nodes_power);
+
+        self.update_bridge_tx_power(clamped_bridge, batch);
+        self.update_nodes_tx_power(clamped_nodes);
+    }
+
+    /// Update the bridge transmit power and immediately queue a control frame if connected.
+    fn update_bridge_tx_power(&mut self, power: i8, batch: &mut ActionBatch) {
+        if power != self.config.bridge_tx_power {
+            self.config.bridge_tx_power = power;
             if self.link_up {
-                batch.bulk.push(HostToBridge::SetTxPower { power: bridge });
+                batch.bulk.push(HostToBridge::SetTxPower { power });
             }
         }
-        if nodes != self.config.tx_power {
-            self.config.tx_power = nodes;
+    }
+
+    /// Update the fleet node transmit power and re-deal assignments under current plan members.
+    fn update_nodes_tx_power(&mut self, power: i8) {
+        if power != self.config.tx_power {
+            self.config.tx_power = power;
             if let Some(plan) = self.plan {
                 let members = self.plan_members.clone();
                 self.deal(&plan, &members);
