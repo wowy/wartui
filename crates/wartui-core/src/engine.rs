@@ -473,9 +473,9 @@ pub struct Snapshot {
     pub nodes: Vec<NodeView>,
     /// How many are heartbeating inside the topology timeout.
     ///
-    /// Deliberately not the same number as [`Self::assignable`]: a fleet that has
+    /// Deliberately different number than [`Self::assignable`]: a fleet that has
     /// outgrown the bridge's twenty peer slots is entirely alive and entirely
-    /// undrivable, and one count for both leaves that unsayable.
+    /// undrivable.
     pub alive: usize,
     /// How many of those can actually be given an assignment.
     ///
@@ -585,7 +585,7 @@ pub struct FleetEngine {
 
 /// A lag large enough that [`FleetEngine::air_is_live`] says no, used as the
 /// starting assumption on a connection whose backlog has not been seen yet.
-const BEHIND_THE_AIR: u64 = plan::ADMIN_WAIT_MS as u64 * 1_000;
+const BEHIND_THE_AIR_US: u64 = plan::ADMIN_WAIT_MS as u64 * 1_000;
 
 /// One assignment in flight.
 #[derive(Debug, Clone, Copy)]
@@ -630,7 +630,7 @@ impl FleetEngine {
             last_arrival: None,
             // Pessimistic from the start, as on `Connected`: the port opens onto a
             // backlog, and its frames reach the engine before the bridge's `Ready`.
-            backlog_lag_us: BEHIND_THE_AIR,
+            backlog_lag_us: BEHIND_THE_AIR_US,
             config,
         }
     }
@@ -655,16 +655,16 @@ impl FleetEngine {
                 // is behind the air until a frame turns up that it had to wait
                 // for. Starting pessimistic costs at most one admin window and
                 // keeps the first frame of a long backlog from being the one
-                // stale window this cannot recognise.
+                // stale window this cannot recognize.
                 self.last_arrival = None;
-                self.backlog_lag_us = BEHIND_THE_AIR;
+                self.backlog_lag_us = BEHIND_THE_AIR_US;
                 // Its peer table starts empty, whether this is a new bridge or
                 // the same one rebooted, so a node it had no room for before
                 // may fit now.
                 for node in self.nodes.values_mut() {
                     node.peer_refused = false;
                 }
-                // A new connection means a new baseline, whether or not the
+                // A new connection means a new baseline, whether the
                 // bridge itself rebooted.
                 self.dropped_baseline = None;
                 // Straight away rather than waiting out the interval: a bridge that
@@ -676,7 +676,7 @@ impl FleetEngine {
                 self.link_up = false;
                 self.link_error = Some(reason);
                 self.last_arrival = None;
-                self.backlog_lag_us = BEHIND_THE_AIR;
+                self.backlog_lag_us = BEHIND_THE_AIR_US;
             }
             Event::Link(LinkEvent::Garbled(_)) => self.counters.garbled += 1,
             Event::Link(LinkEvent::Message(msg)) => self.on_message(&msg, now, &mut batch),
@@ -693,7 +693,7 @@ impl FleetEngine {
         // the name the snapshot shows, and taking it back is what makes `b` able
         // to give the scan to somebody else.
         //
-        // A node ageing out of topology is the passage of time rather than
+        // A node aging out of topology is the passage of time rather than
         // anything arriving, so the tick is the only thing that can see it. A node
         // that has left the fleet is not scanning for us either way.
         //
@@ -727,7 +727,7 @@ impl FleetEngine {
 
     /// Ask the bridge how it is, and tell it what to transmit at.
     ///
-    /// Paired on purpose, and repeated every `status_interval` rather than sent once on
+    /// Paired on purpose and repeated every `status_interval` rather than sent once on
     /// connection. `bulk` drops rather than blocks, and a dropped `SetTxPower` has
     /// nothing behind it to notice: the bridge would spend the rest of the session at
     /// its firmware fallback while this host's snapshot, the panel and the link-budget
@@ -969,44 +969,43 @@ impl FleetEngine {
 
     /// Change what the fleet transmits at, without touching what it scans.
     ///
-    /// Both values are clamped exactly as [`FleetEngine::new`] clamps them. The
-    /// bridge's new power goes out at once, ahead of the next status poll: `bulk`
-    /// drops rather than blocks, and a dropped `SetTxPower` has nothing behind it
-    /// to notice until the poll repeats it anyway, so sending it here costs one
-    /// small frame and saves up to `status_interval` of running at the old power.
-    /// The nodes' new power is never sent from here — it is folded into the plan
-    /// already in force by [`Self::deal`], which re-sends every member's
-    /// assignment under a fresh epoch, and each node adopts it on its own next
-    /// heartbeat. With no plan in force, nothing is sent to any node yet: the
-    /// fleet keeps whatever it holds until it is next in a plan, which is what
-    /// [`Self::deal`] then sends it under. A value the engine already holds is a
-    /// no-op either way: nothing goes out and no epoch is spent.
-    fn on_set_tx_power(&mut self, nodes_power: i8, bridge_power: i8, batch: &mut ActionBatch) {
-        let clamped_bridge = clamp_tx_power(bridge_power);
-        let clamped_nodes = clamp_tx_power(nodes_power);
-
-        self.update_bridge_tx_power(clamped_bridge, batch);
-        self.update_nodes_tx_power(clamped_nodes);
+    /// Both values are clamped exactly as [`FleetEngine::new`] clamps them.
+    ///
+    /// - **Bridge power**: Dispatched immediately ahead of the next status poll.
+    ///   Because `bulk` drops rather than blocks and a dropped `SetTxPower` has
+    ///   no retry until the next poll, dispatching here saves up to `status_interval`
+    ///   of running at the previous power level.
+    /// - **Nodes power**: Folded into the active plan via [`Self::deal`], re-issuing
+    ///   member assignments under a fresh epoch to be adopted on each node's next
+    ///   heartbeat. If no plan is active, transmission is deferred until the next plan.
+    /// - If a value is already held, it is a no-op: no frame is sent and no epoch is spent.
+    fn on_set_tx_power(&mut self, nodes: i8, bridge: i8, batch: &mut ActionBatch) {
+        self.update_bridge_tx_power(clamp_tx_power(bridge), batch);
+        self.update_nodes_tx_power(clamp_tx_power(nodes));
     }
 
     /// Update the bridge transmit power and immediately queue a control frame if connected.
     fn update_bridge_tx_power(&mut self, power: i8, batch: &mut ActionBatch) {
-        if power != self.config.bridge_tx_power {
-            self.config.bridge_tx_power = power;
-            if self.link_up {
-                batch.bulk.push(HostToBridge::SetTxPower { power });
-            }
+        if power == self.config.bridge_tx_power {
+            return;
+        }
+
+        self.config.bridge_tx_power = power;
+        if self.link_up {
+            batch.bulk.push(HostToBridge::SetTxPower { power });
         }
     }
 
     /// Update the fleet node transmit power and re-deal assignments under current plan members.
     fn update_nodes_tx_power(&mut self, power: i8) {
-        if power != self.config.tx_power {
-            self.config.tx_power = power;
-            if let Some(plan) = self.plan {
-                let members = self.plan_members.clone();
-                self.deal(&plan, &members);
-            }
+        if power == self.config.tx_power {
+            return;
+        }
+
+        self.config.tx_power = power;
+        if let Some(plan) = self.plan {
+            let members = self.plan_members.clone();
+            self.deal(&plan, &members);
         }
     }
 
@@ -1020,23 +1019,24 @@ impl FleetEngine {
     /// every tick and reads this, so each end takes its new assignment in its own
     /// window, under one epoch carrying both the share and the flag.
     fn on_assign_ble(&mut self, target: Option<Mac>) {
+        if self.ble_node == target {
+            return;
+        }
+
         // A node built without the `ble` feature would adopt the flag,
         // acknowledge, and scan nothing. The view refuses the keypress first; the
         // check is here too because `ble_node` is the only record of who was
         // asked and must not name a node that cannot answer. A node this host has
         // not heard from is *not* refused — naming one before it appears is
         // legitimate, and the tick takes the scan back once its token says so.
-        if let Some(mac) = target
-            && self
-                .nodes
-                .get(&mac)
-                .is_some_and(|node| node.capabilities.is_some_and(|capabilities| !capabilities.ble))
-        {
+        let target_lacks_ble = target.is_some_and(|mac| {
+            self.nodes.get(&mac).and_then(|node| node.capabilities).is_some_and(|caps| !caps.ble)
+        });
+
+        if target_lacks_ble {
             return;
         }
-        if self.ble_node == target {
-            return;
-        }
+
         // Each end's frame waits on its own node's next heartbeat, so a new holder
         // that heartbeats first holds the scan alongside the old one until that
         // one's window comes round: the overlap is bounded by a heartbeat rather
@@ -1143,7 +1143,7 @@ impl FleetEngine {
     ///
     /// Split out of [`Self::replan`] so [`Self::on_set_tx_power`] can re-send the
     /// plan already in force under fresh epochs without asking the planner to
-    /// re-cut anything: `members` is the same list `replan` cut `plan` against,
+    /// re-cut anything. `members` is the same list `replan` cut `plan` against,
     /// in the same order, so the `node_index` each carries still lines up.
     fn deal(&mut self, plan: &Plan, members: &[(Mac, Job)]) {
         let count = u8::try_from(members.len()).unwrap_or(u8::MAX);
@@ -1243,6 +1243,25 @@ impl FleetEngine {
         self.last_counter = counter;
     }
 
+    /// Calculates the updated backlog lag based on elapsed bridge and host time.
+    ///
+    /// Returns `0` if the host elapsed time matches or exceeds the bridge elapsed time,
+    /// indicating that the queue has drained. Otherwise, returns the accumulated lag.
+    #[inline]
+    fn calculate_updated_lag(
+        current_lag_us: u64,
+        bridge_elapsed_us: u64,
+        host_elapsed_us: u64,
+    ) -> u64 {
+        let lag_increase_us = bridge_elapsed_us.saturating_sub(host_elapsed_us);
+        if lag_increase_us == 0 {
+            // The host out-waited the air: nothing is queued behind this.
+            0
+        } else {
+            current_lag_us.saturating_add(lag_increase_us)
+        }
+    }
+
     /// Track whether this host is reading the link in real time.
     ///
     /// The bridge buffers what it hears while nothing is attached, so a fresh
@@ -1257,18 +1276,18 @@ impl FleetEngine {
     /// resets the moment the host waits longer for a frame than the bridge spent
     /// producing one, which can only happen with nothing queued.
     ///
-    /// Deliberately an estimate rather than a clock synchronisation. It has one
+    /// Deliberately an estimate rather than a clock synchronization. It has one
     /// job: to keep [`Self::send_admin`] from mistaking the past for the present.
     fn note_arrival(&mut self, rx_us: u32, now: Now) {
         if let Some((last_rx_us, last_mono)) = self.last_arrival {
-            let bridge_delta = u64::from(rx_us.wrapping_sub(last_rx_us));
-            let host_delta = now.mono.saturating_duration_since(last_mono).as_micros() as u64;
-            if host_delta >= bridge_delta {
-                // The host out-waited the air: nothing is queued behind this.
-                self.backlog_lag_us = 0;
-            } else {
-                self.backlog_lag_us = self.backlog_lag_us.saturating_add(bridge_delta - host_delta);
-            }
+            let bridge_elapsed_us = u64::from(rx_us.wrapping_sub(last_rx_us));
+            let host_elapsed_us = now.mono.saturating_duration_since(last_mono).as_micros() as u64;
+
+            self.backlog_lag_us = Self::calculate_updated_lag(
+                self.backlog_lag_us,
+                bridge_elapsed_us,
+                host_elapsed_us,
+            );
         }
         self.last_arrival = Some((rx_us, now.mono));
     }
@@ -1279,7 +1298,7 @@ impl FleetEngine {
     /// was alive and its radio is what it said — but the 100 ms window it opened
     /// shut long ago, so transmitting into it reaches nothing.
     fn air_is_live(&self) -> bool {
-        self.backlog_lag_us < BEHIND_THE_AIR
+        self.backlog_lag_us < BEHIND_THE_AIR_US
     }
 
     /// Put a dirty node's assignment on the air, if it has one.
