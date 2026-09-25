@@ -108,7 +108,7 @@ test invents (`crates/wartui-core/tests/engine.rs`). Do not reach for `Instant::
 `async` inside `engine`.
 
 Operator keypresses are `Event::Command`, not methods — a keypress and a heartbeat have to be
-ordered against each other. Only `b` gets that far; channels are the planner's.
+ordered against each other. Only `b` and `c` get that far; channels are the planner's.
 
 ### Store is the system of record
 
@@ -290,8 +290,12 @@ edit stops; follow the pointer before changing the rule.
   blocks and a lost `SetTxPower` has nothing behind it to notice; range is the cost of changing
   the default. The ceiling is 20 dBm rather than the 21 the IDF accepts — whether anything above
   20 dBm works correctly is unverified, so the clamp keeps it unreachable.
+  `wartui_core::engine::Command::SetTxPower` changes both mid-run, from the operator's own settings
+  modal (`c`): clamped the same way, and — for the nodes — by re-sending the plan already in force
+  under fresh epochs rather than asking the planner to re-cut anything, since it changes what the
+  fleet transmits at and never what it scans.
   → `crates/wartui-proto/src/plan.rs`, `clamp_tx_power` / `DEFAULT_TX_POWER_QUARTER_DBM`;
-  `crates/wartui-core/src/engine.rs`, `poll_bridge`
+  `crates/wartui-core/src/engine.rs`, `poll_bridge` / `Command::SetTxPower` / `on_set_tx_power`
 - **ESP-NOW goes out at 802.11g 24 Mbps, set per peer through IDF directly** — `esp-radio`'s
   `set_rate` is refused on the C5 and C6, and misnumbered besides.
   → `firmware/bridge/src/main.rs`, `set_peer_rate`; `firmware/node/src/radio.rs`

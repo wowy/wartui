@@ -254,7 +254,7 @@ mod tests {
     use std::time::Instant;
 
     use wartui_proto::air::Capabilities;
-    use wartui_proto::plan::ChannelPool;
+    use wartui_proto::plan::{ChannelPool, DEFAULT_TX_POWER_QUARTER_DBM};
 
     use super::*;
     use crate::engine::{Counters, NodeState, NodeView, Now, StoreStats};
@@ -289,6 +289,8 @@ mod tests {
             now_ms: EPOCH_MS,
             position: Fix::none(),
             gps: None,
+            tx_power: DEFAULT_TX_POWER_QUARTER_DBM,
+            bridge_tx_power: DEFAULT_TX_POWER_QUARTER_DBM,
         }
     }
 

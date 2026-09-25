@@ -86,7 +86,7 @@ location; see "Config file" below.
 
 `wartui.toml` holds settings an operator wants to stop typing every run. It is read only for
 `run`, so a broken config cannot stop `ports`, `status` or `reset` from working. It is edited by
-hand.
+hand or with `c`; see "At the keyboard" below.
 
 The default location is per OS:
 
@@ -142,11 +142,21 @@ far.
 | ---------------------- | ---------------------------------------------------------------------- |
 | `↑` `↓` / `k` `j`      | Move the cursor down the fleet table                                   |
 | `b`                    | Make the selected node the Bluetooth scanner, or take the scan off    |
+| `c`                    | Open the transmit-power settings modal                                |
 | `q` / `Esc` / `ctrl-c` | Stop, committing the last batch                                        |
 
-`b` is the only one that reaches the air, and it decides _which_ node scans Bluetooth instead of
-Wi-Fi. It reaches that node's share only by being an input to the planner, which is still the only
-author of one. Channels are not a key.
+`b` and `c` are the only ones that reach the air. `b` decides _which_ node scans Bluetooth instead
+of Wi-Fi; it reaches that node's share only by being an input to the planner, which is still the
+only author of one. Channels are not a key.
+
+`c` opens a modal for the fleet's transmit power, with a row each for the nodes and the bridge.
+`↑`/`↓` (or `j`/`k`) move between them, `←`/`→` (or `h`/`l`) step the selected value by 1 dBm, and
+`Enter` sends it to the engine: the bridge takes it on its next status poll, the nodes on their next
+heartbeat. `s` does the same and also writes each row that differs from what `wartui.toml` would
+start the next run with, so a value already applied with `Enter` is saved too — and skips a row
+`--node-tx-power`/`--bridge-tx-power` set and you left alone, since a flag still wins that row at
+the next start-up regardless. `Esc` or `q` closes the modal without changing anything; `ctrl-c`
+quits even while it is open.
 
 ## How channels are assigned
 

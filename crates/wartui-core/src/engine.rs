@@ -1,24 +1,26 @@
 //! The fleet engine: a pure synchronous state machine.
 //!
-//! [`FleetEngine::handle`] reads no clock, touches no socket and opens no file.
-//! Every effect leaves as an [`ActionBatch`] for someone else to perform, and
-//! every input arrives as an [`Event`] with the time already decided by the
-//! caller — so it cannot block the link by accident, and the whole of the
-//! fleet's behaviour is testable against a clock a test invents.
+//! # Architecture
 //!
-//! Transmitting lives here as well: allocating an epoch, waiting for the
-//! heartbeat that opens a node's 100 ms admin window, and believing the
-//! assignment landed only on a MAC-layer acknowledgement. The engine holds a
-//! partition of the pool across every heartbeating node and re-cuts it when that
-//! set changes, and that partition is the only thing an assignment ever carries:
-//! nothing outside [`FleetEngine::replan`] decides what a node scans.
+//! [`FleetEngine::handle`] reads no clock, touches no socket, and opens no file.
+//! Inputs arrive as an [`Event`] with caller-determined timestamps, and all effects
+//! are emitted as an [`ActionBatch`] to prevent accidental link blocking and ensure
+//! deterministic testing against simulated clocks.
 //!
-//! [`Command::AssignBle`] is not an exception to that but an *input* to it: it says
-//! which node's job is Bluetooth, the planner deals that node no channels, and the
-//! frame it produces is the planner's like any other. It lives here rather than in
-//! the view because it is the same kind of fact as a channel assignment: something
-//! one node holds, delivered inside that node's own admin window, believed only on
-//! an acknowledgement.
+//! # Transmission & Partitioning
+//!
+//! Transmitting involves allocating an epoch, waiting for the heartbeat that opens a node's
+//! 100 ms admin window, and confirming delivery strictly via MAC-layer acknowledgement.
+//! The engine maintains a partitioned channel pool across all active, heartbeating nodes and
+//! re-cuts the allocation whenever membership changes; no logic outside [`FleetEngine::replan`]
+//! dictates node scanning behavior.
+//!
+//! # Fleet Commands
+//!
+//! - [`Command::AssignBle`]: Designates a single node as the dedicated Bluetooth scanner,
+//!   allocating it zero Wi-Fi channels.
+//! - [`Command::SetTxPower`]: Updates the fleet transmit power level and redistributes the
+//!   existing plan under a new epoch.
 use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
 
@@ -53,7 +55,7 @@ pub struct Now {
 
 /// Something the engine must react to.
 // `Link` dwarfs `Tick` because it carries an inline ESP-NOW payload. Boxing it
-// would mean an allocation for every frame received in order to shrink a value
+// would mean an allocation for every frame received to shrink a value
 // that is created, matched on and dropped inside one call to `handle`.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
@@ -91,6 +93,22 @@ pub enum Command {
     AssignBle {
         /// Which node, or `None` to stop scanning BLE anywhere.
         mac: Option<Mac>,
+    },
+
+    /// Change the fleet's transmit powers, in ESP-IDF quarter-dBm units.
+    ///
+    /// Clamped the same way [`FleetEngine::new`] clamps [`EngineConfig::tx_power`] and
+    /// [`EngineConfig::bridge_tx_power`]. The bridge's power goes out at once, over the
+    /// same `bulk` channel the status poll uses, when the link is up and the value
+    /// changed — nothing here waits for the next poll. The nodes' power is never sent
+    /// from here: it re-sends each member's share of the plan already in force under a
+    /// fresh epoch, and each node picks it up on its own next heartbeat. Setting a
+    /// value the engine already holds is a no-op.
+    SetTxPower {
+        /// Wi-Fi transmit power for the nodes.
+        nodes: i8,
+        /// Wi-Fi transmit power for the bridge.
+        bridge: i8,
     },
 }
 
@@ -148,14 +166,16 @@ pub struct EngineConfig {
     ///
     /// [`FleetEngine::new`] brings it inside the range the host permits, so a value
     /// outside it costs the fleet a clamp rather than leaving every radio at its
-    /// boot power.
+    /// boot power. [`Command::SetTxPower`] clamps it the same way when it changes
+    /// mid-run.
     pub tx_power: i8,
     /// Wi-Fi transmit power sent to the bridge with every status poll, in ESP-IDF
     /// quarter-dBm units.
     ///
     /// A separate setting from [`Self::tx_power`] because the bridge's job is not a
     /// node's: its transmissions are assignments, not the heartbeats and sightings a
-    /// fleet is positioned for. Clamped at construction alongside `tx_power`.
+    /// fleet is positioned for. Clamped at construction alongside `tx_power`, and
+    /// again by [`Command::SetTxPower`] when it changes mid-run.
     pub bridge_tx_power: i8,
 }
 
@@ -453,9 +473,9 @@ pub struct Snapshot {
     pub nodes: Vec<NodeView>,
     /// How many are heartbeating inside the topology timeout.
     ///
-    /// Deliberately not the same number as [`Self::assignable`]: a fleet that has
+    /// Deliberately different number than [`Self::assignable`]: a fleet that has
     /// outgrown the bridge's twenty peer slots is entirely alive and entirely
-    /// undrivable, and one count for both leaves that unsayable.
+    /// undrivable.
     pub alive: usize,
     /// How many of those can actually be given an assignment.
     ///
@@ -484,6 +504,12 @@ pub struct Snapshot {
     /// [`Self::position`] because "no fix" and "no receiver" look identical in
     /// a row and are completely different problems to the person watching.
     pub gps: Option<crate::gps::GpsView>,
+    /// The nodes' Wi-Fi transmit power, in ESP-IDF quarter-dBm units. What the
+    /// settings modal starts a fleet row from.
+    pub tx_power: i8,
+    /// The bridge's Wi-Fi transmit power, in ESP-IDF quarter-dBm units. What the
+    /// settings modal starts a bridge row from.
+    pub bridge_tx_power: i8,
 }
 
 /// The bridge's self-report.
@@ -559,7 +585,7 @@ pub struct FleetEngine {
 
 /// A lag large enough that [`FleetEngine::air_is_live`] says no, used as the
 /// starting assumption on a connection whose backlog has not been seen yet.
-const BEHIND_THE_AIR: u64 = plan::ADMIN_WAIT_MS as u64 * 1_000;
+const BEHIND_THE_AIR_US: u64 = plan::ADMIN_WAIT_MS as u64 * 1_000;
 
 /// One assignment in flight.
 #[derive(Debug, Clone, Copy)]
@@ -604,7 +630,7 @@ impl FleetEngine {
             last_arrival: None,
             // Pessimistic from the start, as on `Connected`: the port opens onto a
             // backlog, and its frames reach the engine before the bridge's `Ready`.
-            backlog_lag_us: BEHIND_THE_AIR,
+            backlog_lag_us: BEHIND_THE_AIR_US,
             config,
         }
     }
@@ -615,7 +641,7 @@ impl FleetEngine {
         let mut batch = ActionBatch::default();
         match event {
             Event::Tick => self.on_tick(now, &mut batch),
-            Event::Command(command) => self.on_command(command),
+            Event::Command(command) => self.on_command(command, &mut batch),
             Event::Link(LinkEvent::Connected(info)) => {
                 batch.records.push(Record::Bridge(crate::record::BridgeSeen {
                     mac: info.mac,
@@ -629,16 +655,16 @@ impl FleetEngine {
                 // is behind the air until a frame turns up that it had to wait
                 // for. Starting pessimistic costs at most one admin window and
                 // keeps the first frame of a long backlog from being the one
-                // stale window this cannot recognise.
+                // stale window this cannot recognize.
                 self.last_arrival = None;
-                self.backlog_lag_us = BEHIND_THE_AIR;
+                self.backlog_lag_us = BEHIND_THE_AIR_US;
                 // Its peer table starts empty, whether this is a new bridge or
                 // the same one rebooted, so a node it had no room for before
                 // may fit now.
                 for node in self.nodes.values_mut() {
                     node.peer_refused = false;
                 }
-                // A new connection means a new baseline, whether or not the
+                // A new connection means a new baseline, whether the
                 // bridge itself rebooted.
                 self.dropped_baseline = None;
                 // Straight away rather than waiting out the interval: a bridge that
@@ -650,7 +676,7 @@ impl FleetEngine {
                 self.link_up = false;
                 self.link_error = Some(reason);
                 self.last_arrival = None;
-                self.backlog_lag_us = BEHIND_THE_AIR;
+                self.backlog_lag_us = BEHIND_THE_AIR_US;
             }
             Event::Link(LinkEvent::Garbled(_)) => self.counters.garbled += 1,
             Event::Link(LinkEvent::Message(msg)) => self.on_message(&msg, now, &mut batch),
@@ -667,7 +693,7 @@ impl FleetEngine {
         // the name the snapshot shows, and taking it back is what makes `b` able
         // to give the scan to somebody else.
         //
-        // A node ageing out of topology is the passage of time rather than
+        // A node aging out of topology is the passage of time rather than
         // anything arriving, so the tick is the only thing that can see it. A node
         // that has left the fleet is not scanning for us either way.
         //
@@ -701,7 +727,7 @@ impl FleetEngine {
 
     /// Ask the bridge how it is, and tell it what to transmit at.
     ///
-    /// Paired on purpose, and repeated every `status_interval` rather than sent once on
+    /// Paired on purpose and repeated every `status_interval` rather than sent once on
     /// connection. `bulk` drops rather than blocks, and a dropped `SetTxPower` has
     /// nothing behind it to notice: the bridge would spend the rest of the session at
     /// its firmware fallback while this host's snapshot, the panel and the link-budget
@@ -931,11 +957,64 @@ impl FleetEngine {
         }));
     }
 
-    /// Take an operator's instruction. Nothing goes out from here.
-    fn on_command(&mut self, command: Command) {
+    /// Take an operator's instruction. Nothing goes out from here except a
+    /// bridge transmit power, which cannot wait for a heartbeat the way an
+    /// assignment can.
+    fn on_command(&mut self, command: Command, batch: &mut ActionBatch) {
         match command {
             Command::AssignBle { mac } => self.on_assign_ble(mac),
+            Command::SetTxPower { nodes, bridge } => self.on_set_tx_power(nodes, bridge, batch),
         }
+    }
+
+    /// Change what the fleet transmits at, without touching what it scans.
+    ///
+    /// Both values are clamped exactly as [`FleetEngine::new`] clamps them.
+    ///
+    /// - **Bridge power**: Dispatched immediately ahead of the next status poll.
+    ///   Because `bulk` drops rather than blocks and a dropped `SetTxPower` has
+    ///   no retry until the next poll, dispatching here saves up to `status_interval`
+    ///   of running at the previous power level.
+    /// - **Nodes power**: Folded into the active plan via [`Self::deal`], re-issuing
+    ///   member assignments under a fresh epoch to be adopted on each node's next
+    ///   heartbeat. If no plan is active, transmission is deferred until the next plan.
+    /// - If a value is already held, it is a no-op: no frame is sent and no epoch is spent.
+    fn on_set_tx_power(&mut self, nodes: i8, bridge: i8, batch: &mut ActionBatch) {
+        self.update_bridge_tx_power(clamp_tx_power(bridge), batch);
+        self.update_nodes_tx_power(clamp_tx_power(nodes));
+    }
+
+    /// Update the bridge transmit power and immediately queue a control frame if connected.
+    fn update_bridge_tx_power(&mut self, power: i8, batch: &mut ActionBatch) {
+        if power == self.config.bridge_tx_power {
+            return;
+        }
+
+        self.config.bridge_tx_power = power;
+        if self.link_up {
+            batch.bulk.push(HostToBridge::SetTxPower { power });
+        }
+    }
+
+    /// Update the fleet node transmit power and re-deal assignments under current plan members.
+    fn update_nodes_tx_power(&mut self, power: i8) {
+        if power == self.config.tx_power {
+            return;
+        }
+
+        self.config.tx_power = power;
+        if let Some(plan) = self.plan {
+            let members = self.plan_members.clone();
+            self.deal(&plan, &members);
+        }
+    }
+
+    /// Checks whether a node is heard from and known to lack BLE capability.
+    ///
+    /// Returns `true` only if the node is present in the table and its advertised
+    /// capabilities explicitly indicate no BLE support. Unseen nodes return `false`.
+    fn node_lacks_ble(&self, mac: Mac) -> bool {
+        self.nodes.get(&mac).and_then(|node| node.capabilities).is_some_and(|caps| !caps.ble)
     }
 
     /// Move the Bluetooth scan, or take it off the fleet entirely.
@@ -948,23 +1027,20 @@ impl FleetEngine {
     /// every tick and reads this, so each end takes its new assignment in its own
     /// window, under one epoch carrying both the share and the flag.
     fn on_assign_ble(&mut self, target: Option<Mac>) {
+        if self.ble_node == target {
+            return;
+        }
+
         // A node built without the `ble` feature would adopt the flag,
         // acknowledge, and scan nothing. The view refuses the keypress first; the
         // check is here too because `ble_node` is the only record of who was
         // asked and must not name a node that cannot answer. A node this host has
         // not heard from is *not* refused — naming one before it appears is
         // legitimate, and the tick takes the scan back once its token says so.
-        if let Some(mac) = target
-            && self
-                .nodes
-                .get(&mac)
-                .is_some_and(|node| node.capabilities.is_some_and(|capabilities| !capabilities.ble))
-        {
+        if target.is_some_and(|mac| self.node_lacks_ble(mac)) {
             return;
         }
-        if self.ble_node == target {
-            return;
-        }
+
         // Each end's frame waits on its own node's next heartbeat, so a new holder
         // that heartbeats first holds the scan alongside the old one until that
         // one's window comes round: the overlap is bounded by a heartbeat rather
@@ -1049,7 +1125,6 @@ impl FleetEngine {
             }
         }
 
-        let count = u8::try_from(members.len()).unwrap_or(u8::MAX);
         let jobs: Vec<Job> = members.iter().map(|(_, job)| *job).collect();
         // Not `plan`: a share of 5 GHz cut for an ESP32-C6 is a share nobody
         // scans, which is the failure the capability token exists to prevent,
@@ -1064,7 +1139,18 @@ impl FleetEngine {
         };
         self.counters.replans += 1;
         self.plan = Some(plan);
+        self.deal(&plan, &members);
+    }
 
+    /// Give every member of `plan` its share, marking a node dirty only when
+    /// what it is told to hold has actually changed.
+    ///
+    /// Split out of [`Self::replan`] so [`Self::on_set_tx_power`] can re-send the
+    /// plan already in force under fresh epochs without asking the planner to
+    /// re-cut anything. `members` is the same list `replan` cut `plan` against,
+    /// in the same order, so the `node_index` each carries still lines up.
+    fn deal(&mut self, plan: &Plan, members: &[(Mac, Job)]) {
+        let count = u8::try_from(members.len()).unwrap_or(u8::MAX);
         // One epoch per node that actually needs telling. Held locally because
         // the decision needs the node in hand, and `self` is borrowed for it.
         let mut counter = self.last_counter;
@@ -1099,11 +1185,29 @@ impl FleetEngine {
                         None => continue,
                     }
                 }
-                None => continue,
+                // The plain surplus case: nothing changes about what it scans, so
+                // it keeps `held` exactly, but `SetTxPower` still has to reach it —
+                // nothing else will re-send an assignment nobody re-cut. During an
+                // ordinary re-cut `held`'s power already matches, so this is a
+                // no-op then, same as before this arm existed.
+                None => {
+                    if let Some(assignment) = held
+                        && assignment.tx_power != self.config.tx_power
+                    {
+                        counter += 1;
+                        node.desired = Some(Assignment {
+                            tx_power: self.config.tx_power,
+                            counter,
+                            ..assignment
+                        });
+                        node.dirty = true;
+                    }
+                    continue;
+                }
             };
-            // The same `scanner` the job came from, so `channels.is_empty()` and
+            // `replan` builds `job` from `scanner`, so `channels.is_empty()` and
             // `ble` always agree.
-            let ble = scanner == Some(*mac);
+            let ble = *job == Job::Bluetooth;
 
             let wanted = |a: Assignment| {
                 a.channels == channels
@@ -1143,6 +1247,25 @@ impl FleetEngine {
         self.last_counter = counter;
     }
 
+    /// Calculates the updated backlog lag based on elapsed bridge and host time.
+    ///
+    /// Returns `0` if the host elapsed time matches or exceeds the bridge elapsed time,
+    /// indicating that the queue has drained. Otherwise, returns the accumulated lag.
+    #[inline]
+    fn calculate_updated_lag(
+        current_lag_us: u64,
+        bridge_elapsed_us: u64,
+        host_elapsed_us: u64,
+    ) -> u64 {
+        let lag_increase_us = bridge_elapsed_us.saturating_sub(host_elapsed_us);
+        if lag_increase_us == 0 {
+            // The host out-waited the air: nothing is queued behind this.
+            0
+        } else {
+            current_lag_us.saturating_add(lag_increase_us)
+        }
+    }
+
     /// Track whether this host is reading the link in real time.
     ///
     /// The bridge buffers what it hears while nothing is attached, so a fresh
@@ -1157,18 +1280,18 @@ impl FleetEngine {
     /// resets the moment the host waits longer for a frame than the bridge spent
     /// producing one, which can only happen with nothing queued.
     ///
-    /// Deliberately an estimate rather than a clock synchronisation. It has one
+    /// Deliberately an estimate rather than a clock synchronization. It has one
     /// job: to keep [`Self::send_admin`] from mistaking the past for the present.
     fn note_arrival(&mut self, rx_us: u32, now: Now) {
         if let Some((last_rx_us, last_mono)) = self.last_arrival {
-            let bridge_delta = u64::from(rx_us.wrapping_sub(last_rx_us));
-            let host_delta = now.mono.saturating_duration_since(last_mono).as_micros() as u64;
-            if host_delta >= bridge_delta {
-                // The host out-waited the air: nothing is queued behind this.
-                self.backlog_lag_us = 0;
-            } else {
-                self.backlog_lag_us = self.backlog_lag_us.saturating_add(bridge_delta - host_delta);
-            }
+            let bridge_elapsed_us = u64::from(rx_us.wrapping_sub(last_rx_us));
+            let host_elapsed_us = now.mono.saturating_duration_since(last_mono).as_micros() as u64;
+
+            self.backlog_lag_us = Self::calculate_updated_lag(
+                self.backlog_lag_us,
+                bridge_elapsed_us,
+                host_elapsed_us,
+            );
         }
         self.last_arrival = Some((rx_us, now.mono));
     }
@@ -1179,7 +1302,7 @@ impl FleetEngine {
     /// was alive and its radio is what it said — but the 100 ms window it opened
     /// shut long ago, so transmitting into it reaches nothing.
     fn air_is_live(&self) -> bool {
-        self.backlog_lag_us < BEHIND_THE_AIR
+        self.backlog_lag_us < BEHIND_THE_AIR_US
     }
 
     /// Put a dirty node's assignment on the air, if it has one.
@@ -1446,6 +1569,8 @@ impl FleetEngine {
             now_ms: now.unix_ms,
             position: self.config.position.resolve(now.unix_ms),
             gps: self.config.position.gps().map(crate::gps::Gps::view),
+            tx_power: self.config.tx_power,
+            bridge_tx_power: self.config.bridge_tx_power,
         }
     }
 
