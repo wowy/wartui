@@ -239,7 +239,6 @@ pub async fn run(args: Args) -> Result<()> {
         tx_powers(args.node_tx_power, args.bridge_tx_power, &config.tx_power);
     let settings = tui::Settings {
         config_path,
-        file: config.tx_power.clone(),
         flags: config::TxPower { fleet: args.node_tx_power, bridge: args.bridge_tx_power },
     };
     let config = EngineConfig {

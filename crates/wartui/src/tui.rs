@@ -50,11 +50,6 @@ pub struct Settings {
     /// Where `wartui.toml` would be written, or `None` when there is nowhere
     /// to save it — no default location found and no `--config` given.
     pub config_path: Option<PathBuf>,
-    /// The `[tx-power]` entries `wartui.toml` held at start-up. A save compares
-    /// against this — updated after each successful one — rather than against
-    /// the engine's current power, so a value already put into force with
-    /// `Enter` is still recognised as a change worth writing.
-    pub file: config::TxPower,
     /// What `--node-tx-power`/`--bridge-tx-power` gave on this run, `None` for
     /// whichever was not given. A flag beats the file for its own row, so a
     /// save's notice names the flag that still wins the next one, and a row
@@ -306,55 +301,46 @@ impl Ui {
     /// What to append to the notice once a save was asked for: where it landed,
     /// that a flag will still win the next run, or why it did not happen.
     ///
-    /// A row is written when the modal's value differs from what the next
-    /// start would resolve to with no flags — `settings.file`'s entry, or the
-    /// default when it has none — and the row's flag, if any, is not still
-    /// holding that same value: a flag beats the file for its own row, so
-    /// writing a row a flag holds untouched would look like a save but be
-    /// overwritten again at the next start regardless. A successful write
-    /// updates `settings.file` too, so a second save in the same run compares
-    /// against what the file now holds.
-    fn save_outcome(&mut self, modal: ConfigModal) -> String {
+    /// A row is written when its value differs from what the file on disk
+    /// would start the next run with — its entry, or the default when it has
+    /// none — unless the row's flag is still holding that same value: a flag
+    /// beats the file for its own row, so writing a row a flag holds
+    /// untouched would look like a save but be overwritten again at the next
+    /// start regardless. The comparison is made inside `config::update`'s
+    /// closure, against the file as it is at the moment of the save, so a hand
+    /// edit made mid-run counts.
+    fn save_outcome(&self, modal: ConfigModal) -> String {
+        let Some(path) = self.settings.config_path.clone() else {
+            return "; nowhere to save it — use --config".to_owned();
+        };
         let default_dbm = DEFAULT_TX_POWER_QUARTER_DBM / 4;
-        let changed: Vec<Field> = [Field::Fleet, Field::Bridge]
-            .into_iter()
-            .filter(|field| {
+        let flags = self.settings.flags.clone();
+        let mut recorded: Vec<Field> = Vec::new();
+        let saved = config::update(&path, |c| {
+            for field in [Field::Fleet, Field::Bridge] {
                 let value = field.modal_value(&modal);
-                let baseline = field.value_in(&self.settings.file).unwrap_or(default_dbm);
-                let flag_held = field.value_in(&self.settings.flags) == Some(value);
-                value != baseline && !flag_held
-            })
-            .collect();
-        if changed.is_empty() {
-            return "; nothing to save".to_owned();
-        }
-
-        let mut outcome = match self.settings.config_path.clone() {
-            Some(path) => {
-                let result = config::update(&path, |c| {
-                    for field in &changed {
-                        field.set_in(&mut c.tx_power, field.modal_value(&modal));
-                    }
-                });
-                match result {
-                    Ok(()) => {
-                        for field in &changed {
-                            field.set_in(&mut self.settings.file, field.modal_value(&modal));
-                        }
-                        format!("; saved to {}", path.display())
-                    }
-                    Err(error) => format!("; could not save: {error}"),
+                let baseline = field.value_in(&c.tx_power).unwrap_or(default_dbm);
+                let flag_held = field.value_in(&flags) == Some(value);
+                if value != baseline && !flag_held {
+                    field.set_in(&mut c.tx_power, value);
+                    recorded.push(field);
                 }
             }
-            None => "; nowhere to save it — use --config".to_owned(),
-        };
-        let flagged: Vec<&str> = changed
-            .iter()
-            .filter(|field| field.value_in(&self.settings.flags).is_some())
-            .map(|field| field.flag())
-            .collect();
-        outcome.push_str(&overrides_notice(&flagged));
-        outcome
+        });
+        match saved {
+            Err(error) => format!("; could not save: {error}"),
+            Ok(()) if recorded.is_empty() => "; nothing to save".to_owned(),
+            Ok(()) => {
+                let flagged: Vec<&str> = recorded
+                    .iter()
+                    .filter(|field| field.value_in(&flags).is_some())
+                    .map(|field| field.flag())
+                    .collect();
+                let mut outcome = format!("; saved to {}", path.display());
+                outcome.push_str(&overrides_notice(&flagged));
+                outcome
+            }
+        }
     }
 
     /// Move the Bluetooth scan onto the selected node, or off it.
@@ -2301,6 +2287,36 @@ mod tests {
     }
 
     #[test]
+    fn ui_saves_against_current_file_when_it_was_hand_edited_mid_run() {
+        // The review's scenario: a hand edit made to `wartui.toml` after the
+        // modal opened must still be the baseline a save compares against,
+        // not a copy read at start-up — otherwise a save that puts the file
+        // back to what the operator wants looks like "nothing to save" and
+        // leaves the hand edit in place.
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wartui.toml");
+        std::fs::write(&target, "[tx-power]\nfleet = 5\n").unwrap();
+        let mut snapshot = busy();
+        snapshot.tx_power = 20; // 5 dBm, matching the file at start-up.
+        let (tx, _rx) = mpsc::channel(4);
+        let mut ui = Ui {
+            settings: Settings { config_path: Some(target.clone()), ..Default::default() },
+            ..Ui::default()
+        };
+        ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
+
+        // The file is hand-edited to 7 while the modal is open; the modal
+        // still shows 5, and that is the value the operator saves.
+        std::fs::write(&target, "[tx-power]\nfleet = 7\n").unwrap();
+        ui.on_modal_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE), &snapshot, &tx);
+
+        let notice = ui.notice(snapshot.now_ms).expect("a notice");
+        assert!(notice.contains(&target.display().to_string()), "{notice}");
+        let saved = config::load(Some(&target)).expect("a valid file");
+        assert_eq!(saved.tx_power.fleet, Some(5), "the modal's value won, not the stale copy");
+    }
+
+    #[test]
     fn ui_leaves_existing_bridge_value_untouched_when_only_fleet_changes() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wartui.toml");
@@ -2311,11 +2327,7 @@ mod tests {
         snapshot.bridge_tx_power = 60; // 15 dBm, matching the file.
         let (tx, _rx) = mpsc::channel(4);
         let mut ui = Ui {
-            settings: Settings {
-                config_path: Some(target.clone()),
-                file: config::TxPower { fleet: None, bridge: Some(15) },
-                ..Default::default()
-            },
+            settings: Settings { config_path: Some(target.clone()), ..Default::default() },
             ..Ui::default()
         };
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
@@ -2422,7 +2434,6 @@ mod tests {
         let mut ui = Ui {
             settings: Settings {
                 config_path: Some(target.clone()),
-                file: config::TxPower { fleet: Some(10), bridge: None },
                 flags: config::TxPower { fleet: Some(12), bridge: None },
             },
             ..Ui::default()
@@ -2453,7 +2464,6 @@ mod tests {
             settings: Settings {
                 config_path: Some(target),
                 flags: config::TxPower { fleet: Some(10), bridge: None },
-                ..Default::default()
             },
             ..Ui::default()
         };
@@ -2477,7 +2487,6 @@ mod tests {
             settings: Settings {
                 config_path: Some(target),
                 flags: config::TxPower { fleet: None, bridge: Some(15) },
-                ..Default::default()
             },
             ..Ui::default()
         };
@@ -2503,7 +2512,6 @@ mod tests {
             settings: Settings {
                 config_path: Some(target),
                 flags: config::TxPower { fleet: Some(10), bridge: Some(15) },
-                ..Default::default()
             },
             ..Ui::default()
         };
@@ -2533,7 +2541,6 @@ mod tests {
             settings: Settings {
                 config_path: Some(target),
                 flags: config::TxPower { fleet: Some(10), bridge: Some(15) },
-                ..Default::default()
             },
             ..Ui::default()
         };

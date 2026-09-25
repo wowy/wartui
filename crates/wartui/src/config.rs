@@ -157,9 +157,14 @@ fn default_path_in(macos: bool, home: Option<&OsStr>, xdg: Option<&OsStr>) -> Op
 /// The write itself lands in a temp file and is renamed into place — a torn
 /// write here would stop the next run from starting — beside the file `path`
 /// *resolves to* rather than `path` itself, so a `path` that is a symlink stays
-/// one: the rename replaces what it points at, not the link. A file that
-/// existed keeps its permissions, copied onto the temp file before the rename;
-/// a new file gets whatever the process umask gives it, same as before.
+/// one: the rename replaces what it points at, not the link, even a dangling
+/// one. A file that existed keeps its permissions, copied onto the temp file
+/// before the rename; a new file gets whatever the process umask gives it.
+///
+/// Skipped entirely when `change` leaves the document identical to what was
+/// read: no temp file, no rename, and — for a file that did not exist —
+/// nothing created. This is what lets a save whose value turns out to match
+/// the file exactly report success without disturbing it.
 pub fn update(path: &Path, change: impl FnOnce(&mut Config)) -> Result<()> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
@@ -178,9 +183,13 @@ pub fn update(path: &Path, change: impl FnOnce(&mut Config)) -> Result<()> {
         toml::from_str(&written).context("the settings just written do not parse")?;
     reparsed.validate().context("the settings just written are invalid")?;
 
+    if written == text {
+        return Ok(());
+    }
+
     // A path that does not exist yet has nothing to resolve or to have
     // permissions of, so it is used as given and a new file gets the default.
-    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let target = resolve_symlink_target(path)?;
     let permissions = std::fs::metadata(&target).ok().map(|meta| meta.permissions());
 
     if let Some(parent) = target.parent().filter(|parent| !parent.as_os_str().is_empty()) {
@@ -198,6 +207,31 @@ pub fn update(path: &Path, change: impl FnOnce(&mut Config)) -> Result<()> {
     }
     std::fs::rename(&temp_path, &target).with_context(|| format!("saving {}", target.display()))?;
     Ok(())
+}
+
+/// Follow `path` through however many symlinks it is, to the file a write
+/// through it ultimately lands on — even one that does not exist yet, which
+/// is where [`std::fs::canonicalize`] falls short: it refuses a dangling
+/// link, and the fallback of using `path` itself would make `update` replace
+/// the link with a plain file instead of writing through it. A relative link
+/// target is resolved against the link's own parent directory, the same way
+/// a shell would. Bounded at 40 hops so a cycle errors rather than spinning.
+fn resolve_symlink_target(path: &Path) -> Result<PathBuf> {
+    let mut current = path.to_path_buf();
+    for _ in 0..40 {
+        let Ok(metadata) = std::fs::symlink_metadata(&current) else { return Ok(current) };
+        if !metadata.file_type().is_symlink() {
+            return Ok(current);
+        }
+        let link = std::fs::read_link(&current)
+            .with_context(|| format!("reading link {}", current.display()))?;
+        current = if link.is_absolute() {
+            link
+        } else {
+            current.parent().unwrap_or_else(|| Path::new("")).join(link)
+        };
+    }
+    bail!("too many levels of symbolic links: {}", path.display())
 }
 
 /// Set or remove `[tx-power]`'s two keys, dropping the table entirely once
@@ -507,6 +541,65 @@ mod tests {
         assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "still a link");
         let saved = load(Some(&real)).unwrap();
         assert_eq!(saved.tx_power.fleet, Some(10), "the file it pointed to got the change");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn config_update_creates_target_when_path_is_a_dangling_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("real.toml");
+        let link = dir.path().join("wartui.toml");
+        std::os::unix::fs::symlink(&target, &link).unwrap(); // target does not exist yet
+
+        update(&link, |c| c.tx_power.fleet = Some(10)).unwrap();
+
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "still a link");
+        assert_eq!(std::fs::read_link(&link).unwrap(), target, "still points at the same place");
+        let saved = load(Some(&target)).unwrap();
+        assert_eq!(saved.tx_power.fleet, Some(10), "the link's target got created");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn config_update_follows_a_relative_chain_of_dangling_links() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("real.toml");
+        let middle = dir.path().join("middle.toml");
+        let link = dir.path().join("wartui.toml");
+        // `middle` names `real.toml` relative to its own directory, and neither
+        // it nor `real.toml` exists yet.
+        std::os::unix::fs::symlink("real.toml", &middle).unwrap();
+        std::os::unix::fs::symlink(&middle, &link).unwrap();
+
+        update(&link, |c| c.tx_power.fleet = Some(7)).unwrap();
+
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert!(std::fs::symlink_metadata(&middle).unwrap().file_type().is_symlink());
+        let saved = load(Some(&target)).unwrap();
+        assert_eq!(saved.tx_power.fleet, Some(7), "the chain's final target got created");
+    }
+
+    #[test]
+    fn config_update_leaves_file_untouched_when_change_is_a_no_op() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wartui.toml");
+        std::fs::write(&target, "[tx-power]\nfleet = 10\n").unwrap();
+        let before = std::fs::metadata(&target).unwrap().modified().unwrap();
+
+        update(&target, |c| c.tx_power.fleet = Some(10)).unwrap();
+
+        let after = std::fs::metadata(&target).unwrap().modified().unwrap();
+        assert_eq!(before, after, "an identical document is never rewritten");
+    }
+
+    #[test]
+    fn config_update_creates_no_file_when_change_sets_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wartui.toml");
+
+        update(&target, |_| {}).unwrap();
+
+        assert!(!target.exists(), "nothing qualified, so nothing was written");
     }
 
     #[test]
