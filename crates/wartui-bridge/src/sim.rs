@@ -4,7 +4,7 @@
 //! parts — parking until told what to scan, heartbeating once per completed sweep,
 //! scanning Bluetooth and nothing else when that is the node's job, staggering,
 //! adopting only on a differing epoch, and suppressing a BSSID through the same
-//! [`MacRing`] the firmware links, on node time scaled by [`SimConfig::speed`].
+//! [`DedupRing`] the firmware links, on node time scaled by [`SimConfig::speed`].
 //! That last one matters most: it is why a real fleet's observation stream thins to a
 //! trickle after the first pass, and a simulator that streamed endlessly would teach
 //! the wrong lesson. Simulated signal is fixed per network, so only the refresh ever
@@ -24,14 +24,14 @@ use wartui_proto::air::{
     AdminMsg, Capabilities, Frame, HeartbeatMsg, RecordKind, SIGHTING_MSG_MAX, Security,
     SightingMsg,
 };
-use wartui_proto::dedup::MacRing;
+use wartui_proto::dedup::DedupRing;
 use wartui_proto::link::{
     BROADCAST, BridgeToHost, Chip, EspNowPayload, HostToBridge, LogLevel, LogStr, LoopPhase, Mac,
     Panel, ResetCause, SendStatus,
 };
 use wartui_proto::plan::{
-    ADMIN_WAIT_MS, BLE_BEAT_MS, CHANNEL_DWELL_MS, ChannelSet, DEDUP_RING, IDLE_BEAT_MS,
-    NODE_STAGGER_WINDOW_MS, NUM_SCAN_CHANNELS, SCAN_CHANNELS,
+    ADMIN_WAIT_MS, BLE_BEAT_MS, CHANNEL_DWELL_MS, ChannelSet, IDLE_BEAT_MS, NODE_STAGGER_WINDOW_MS,
+    NUM_SCAN_CHANNELS, SCAN_CHANNELS,
 };
 
 use crate::{BridgeInfo, LinkEvent, LinkHandle, TransportError, link_pair};
@@ -342,7 +342,7 @@ struct SimNode {
     /// planner's only reason to treat one node differently from another.
     five_ghz: bool,
     hb_counter: u32,
-    seen: Box<MacRing<DEDUP_RING>>,
+    seen: Box<DedupRing>,
     /// When this node booted, on tokio's clock so a paused test controls it.
     boot: tokio::time::Instant,
     speed: f64,

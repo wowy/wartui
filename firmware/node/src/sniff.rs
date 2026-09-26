@@ -9,6 +9,14 @@
 //! ten times in a 125 ms dwell, so without that the ring fills with copies of the
 //! loudest network and drops the ones not yet seen.
 //!
+//! And it deduplicates against [`SEEN`], the dedup ring itself: an access point already
+//! reported and not yet due to be reported again is worth nothing, but without this
+//! check it still took a [`PENDING`] slot, and a dense channel filled that ring with
+//! addresses `report` would go on to discard anyway — starving the access points not
+//! yet seen this dwell. `SEEN` is checked from inside [`PENDING_RING`]'s lock, which is
+//! the one place the two nest; every other caller takes `SEEN` on its own, per sighting,
+//! and never across a transmit.
+//!
 //! Capture is opened and closed around the dwell rather than left running, because
 //! promiscuous mode is on across every channel change (`radio::park`). A frame
 //! arriving inside one of those toggles was heard on a channel the ring is not stamped
@@ -17,9 +25,25 @@
 //! up named against a frequency it was never on, which is the one thing a fleet's
 //! channel assignments are checked by. Frames in those windows are dropped.
 
+use esp_hal::time::Instant;
 use esp_radio::wifi::sniffer::PromiscuousPkt;
 use esp_sync::NonReentrantMutex;
 use wartui_proto::beacon::{Sighting, is_report, parse_mgmt};
+use wartui_proto::dedup::DedupRing;
+
+/// The dedup ring: addresses already reported and not yet due again.
+///
+/// A `static` rather than a field of `Node`, because the receive callback needs to
+/// reach it and cannot borrow anything (see the module doc). Nests inside
+/// [`PENDING_RING`]'s lock in [`on_frame`]; every other caller in `main.rs` takes it
+/// on its own, per sighting, and that lock order must hold everywhere `SEEN` is used.
+pub static SEEN: NonReentrantMutex<DedupRing> = NonReentrantMutex::new(DedupRing::new());
+
+/// Milliseconds since boot, as [`SEEN`] counts them. Truncation is the ring's own wrap.
+#[allow(clippy::cast_possible_truncation)]
+pub fn now_ms() -> u32 {
+    Instant::now().duration_since_epoch().as_millis() as u32
+}
 
 /// How many distinct access points one dwell can hold.
 const PENDING: usize = 48;
@@ -100,6 +124,14 @@ pub fn on_frame(pkt: PromiscuousPkt<'_>) {
         let rssi = (pkt.rx_cntl.rssi as u8) as i8;
 
         let Some(sighting) = parse_mgmt(frame, rssi, pending.channel) else { return };
+
+        // Already reported and not due again: a pending slot spent on it is one taken
+        // from an access point not yet seen this dwell. Checked before the pending
+        // duplicate test below, so an already-reported address never reaches it.
+        let now = now_ms();
+        if !SEEN.with(|seen| seen.is_due(&sighting.bssid, Some(rssi), now)) {
+            return;
+        }
 
         if pending.items[..pending.len].iter().flatten().any(|s| s.bssid == sighting.bssid) {
             return;
