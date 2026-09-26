@@ -56,6 +56,9 @@ pub const HEARTBEAT_MSG_LEN: usize = OFF_BODY + 7;
 /// Length of [`AdminMsg`] on the wire.
 pub const ADMIN_MSG_LEN: usize = OFF_BODY + 4 + CHANNEL_SET_BYTES + 1;
 
+/// Length of [`ClearMsg`] on the wire: the header, and nothing else.
+pub const CLEAR_MSG_LEN: usize = OFF_BODY;
+
 /// Length of a [`SightingMsg`] carrying no SSID and no trailer — the floor a
 /// decoder needs before it can read `ssid_len` and find out how much more
 /// there is.
@@ -92,8 +95,10 @@ pub enum MsgType {
     Heartbeat = 0x01,
     /// Node → core, one per newly-seen BSSID.
     Sighting = 0x02,
-    /// Core → node. The only frame a node acts on.
+    /// Core → node. Carries a channel and Bluetooth assignment.
     Admin = 0x81,
+    /// Core → node. Asks the node to forget every address it has reported.
+    Clear = 0x82,
 }
 
 impl MsgType {
@@ -112,6 +117,7 @@ impl TryFrom<u8> for MsgType {
             0x01 => Ok(Self::Heartbeat),
             0x02 => Ok(Self::Sighting),
             0x81 => Ok(Self::Admin),
+            0x82 => Ok(Self::Clear),
             other => Err(DecodeError::UnknownType(other)),
         }
     }
@@ -582,7 +588,8 @@ impl<'a> SightingMsg<'a> {
     }
 }
 
-/// wartui's channel assignment — the one frame a node acts on.
+/// wartui's channel assignment — one of the two frames a node acts on, the
+/// other being [`ClearMsg`].
 ///
 /// Seventeen bytes: the header, then [`epoch`](Self::epoch), `node_index`,
 /// `node_count`, [`flags`](Self::flags), six bytes of [`ChannelSet`] and transmit power.
@@ -686,6 +693,41 @@ impl AdminMsg {
     }
 }
 
+/// Core → node: forget every address it has reported.
+///
+/// Header only, no body — the whole instruction is the type byte. Idempotent,
+/// so it carries no epoch: a node that already believes its ring is empty
+/// clearing it again costs one extra round of sightings and nothing else, so
+/// there is no state to disagree about the way an assignment's epoch guards
+/// against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClearMsg;
+
+impl ClearMsg {
+    /// Decode from a received frame.
+    ///
+    /// # Errors
+    /// See [`DecodeError`].
+    pub fn decode(buf: &[u8]) -> Result<Self, DecodeError> {
+        match header(buf)? {
+            MsgType::Clear => {}
+            other => return Err(DecodeError::UnknownType(other.as_u8())),
+        }
+        if buf.len() != CLEAR_MSG_LEN {
+            return Err(DecodeError::BadLength { need: CLEAR_MSG_LEN, got: buf.len() });
+        }
+        Ok(Self)
+    }
+
+    /// Encode to the [`CLEAR_MSG_LEN`] bytes a wartui node expects.
+    #[must_use]
+    pub fn encode(&self) -> [u8; CLEAR_MSG_LEN] {
+        let mut out = [0u8; CLEAR_MSG_LEN];
+        write_header(&mut out, MsgType::Clear);
+        out
+    }
+}
+
 /// Turn a host-side monotonic assignment counter into the byte the wire carries.
 ///
 /// A node adopts an assignment only when this byte *differs* from the one it holds,
@@ -709,6 +751,9 @@ pub enum Frame<'a> {
     /// Core → node. Seeing one this host did not send means another core is
     /// driving this fleet.
     Admin(AdminMsg),
+    /// Core → node. Seeing one this host did not send means another core is
+    /// driving this fleet, the same as [`Frame::Admin`].
+    Clear(ClearMsg),
 }
 
 impl<'a> Frame<'a> {
@@ -721,6 +766,7 @@ impl<'a> Frame<'a> {
             MsgType::Heartbeat => HeartbeatMsg::decode(buf).map(Frame::Heartbeat),
             MsgType::Sighting => SightingMsg::decode(buf).map(Frame::Sighting),
             MsgType::Admin => AdminMsg::decode(buf).map(Frame::Admin),
+            MsgType::Clear => ClearMsg::decode(buf).map(Frame::Clear),
         }
     }
 }

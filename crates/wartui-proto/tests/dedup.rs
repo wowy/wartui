@@ -123,6 +123,31 @@ fn mac_ring_treats_zero_mac_as_unseen_when_ring_is_fresh() {
 }
 
 #[test]
+fn mac_ring_forgets_every_address_when_cleared() {
+    let mut ring: MacRing<4> = MacRing::new();
+    ring.offer(mac(1), Some(-70), T0);
+    ring.offer(mac(2), Some(-70), T0);
+    ring.clear();
+    assert_eq!(ring.len(), 0);
+    assert!(ring.is_empty());
+    assert!(!ring.contains(&mac(1)));
+    assert!(ring.is_due(&mac(1), Some(-70), T0), "due again, not merely unrecorded");
+}
+
+#[test]
+fn mac_ring_fills_from_the_start_when_recording_after_clear() {
+    let mut ring: MacRing<3> = MacRing::new();
+    ring.offer(mac(1), Some(-70), T0);
+    ring.offer(mac(2), Some(-70), T0);
+    ring.offer(mac(3), Some(-70), T0);
+    ring.clear();
+    ring.offer(mac(4), Some(-70), T0);
+    assert_eq!(ring.len(), 1);
+    assert!(ring.contains(&mac(4)));
+    assert!(!ring.contains(&mac(1)), "the pre-clear entries are gone");
+}
+
+#[test]
 fn mac_ring_enforces_capacity_bounds_when_configured_with_firmware_ring_size() {
     let mut ring: MacRing<DEDUP_RING> = MacRing::new();
     for n in 0..u16::try_from(DEDUP_RING).expect("fits") {

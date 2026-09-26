@@ -74,7 +74,7 @@ directory, so a `wartui-proto` change that reaches the firmware is checked there
 Four host crates, strictly layered, plus firmware that shares the bottom one.
 
 - **`crates/wartui-proto`** — `no_std`, allocation-free wire formats and the parsing that goes
-  with them: `air` (the three ESP-NOW frames, and `air::foreign` for recognising somebody
+  with them: `air` (the four ESP-NOW frames, and `air::foreign` for recognising somebody
   else's), `beacon`, `hci`, `dedup`, `link`, `outbox`, `stall`, `plan` (channel pools, timings
   and the partitioning planner). Compiled into *both* the host and the firmware by path
   dependency, which is the only thing keeping the ends in step — and the reason a node's
@@ -108,7 +108,7 @@ test invents (`crates/wartui-core/tests/engine.rs`). Do not reach for `Instant::
 `async` inside `engine`.
 
 Operator keypresses are `Event::Command`, not methods — a keypress and a heartbeat have to be
-ordered against each other. Only `b` and `c` get that far; channels are the planner's.
+ordered against each other. Only `b`, `c`, `r` and `R` get that far; channels are the planner's.
 
 ### Store is the system of record
 
@@ -130,8 +130,8 @@ is here rather than only in a `//!`.
 
 - **The wire is ours, in both directions, and shares nothing with the vendor's.** Every frame is
   `WTUI`, a wire version byte, a type byte and a body: `HeartbeatMsg` (13 bytes), `SightingMsg`
-  (18 plus the SSID and a length-prefixed trailer) and `AdminMsg` (17). ESP-NOW has no addressing
-  above the MAC layer and a
+  (18 plus the SSID and a length-prefixed trailer), `AdminMsg` (17) and `ClearMsg` (6, header
+  only). ESP-NOW has no addressing above the MAC layer and a
   node broadcasts, so a shared format is a shared conversation. The magic is checked before
   anything else at both ends. Encode/decode is written out by hand, never by transmuting a
   packed struct, and pinned byte-for-byte in `crates/wartui-proto/tests/wire.rs`.

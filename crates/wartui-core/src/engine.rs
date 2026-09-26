@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 
 use wartui_bridge::{BridgeInfo, LinkEvent};
 use wartui_proto::air::{
-    AdminMsg, Capabilities, DecodeError, Frame, RecordKind, foreign, wire_epoch,
+    AdminMsg, Capabilities, ClearMsg, DecodeError, Frame, RecordKind, foreign, wire_epoch,
 };
 use wartui_proto::link::{BridgeToHost, EspNowPayload, HostToBridge, Mac, SendStatus};
 use wartui_proto::plan::{
@@ -110,6 +110,16 @@ pub enum Command {
         /// Wi-Fi transmit power for the bridge.
         bridge: i8,
     },
+
+    /// Ask a node, or every assignable node, to empty its dedup ring.
+    ///
+    /// Each node's clear goes out in its own next admin window, the same as an
+    /// assignment does.
+    ClearRing {
+        /// Which node, or `None` for every node [`FleetEngine::is_assignable`]
+        /// counts as of the moment this command arrives.
+        mac: Option<Mac>,
+    },
 }
 
 /// What the engine wants done as a result.
@@ -133,7 +143,6 @@ impl ActionBatch {
     }
 }
 
-/// How the engine should behave.
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
     /// Which channels the fleet is meant to scan. Recorded in the session,
@@ -248,6 +257,12 @@ pub struct NodeState {
     /// changes, when the Bluetooth scan moves and when the node reboots; cleared
     /// only on an acknowledgement, never on a successful enqueue.
     pub dirty: bool,
+    /// Whether this node's dedup ring should be cleared on its next admin window.
+    ///
+    /// Set by [`Command::ClearRing`]. Cleared on the clear's own `AckOk`, on a full
+    /// peer table (the same terminal handling an assignment gets), and when the
+    /// node reboots — a node that has just booted already holds an empty ring.
+    pub clear_dedup_ring: bool,
     /// How many times an assignment has been put on the air for this node.
     pub admin_attempts: u32,
     /// What happened to the most recent attempt.
@@ -264,9 +279,6 @@ pub struct NodeState {
 
 /// What one node was told to do, and the fleet arithmetic it was computed
 /// against.
-///
-/// The index and count travel with the channels rather than being read live at
-/// send time — divergence 7.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Assignment {
     /// Which [`wartui_proto::plan::SCAN_CHANNELS`] indices to dwell on.
@@ -313,6 +325,7 @@ impl NodeState {
             desired: None,
             confirmed: None,
             dirty: false,
+            clear_dedup_ring: false,
             admin_attempts: 0,
             last_outcome: None,
             last_latency_us: None,
@@ -551,8 +564,9 @@ pub struct FleetEngine {
     dropped_baseline: Option<u32>,
     last_status_poll: Option<Instant>,
     started_at_ms: i64,
-    /// Assignments on the air, keyed by the id the bridge will echo back.
-    pending: BTreeMap<u16, PendingAdmin>,
+    /// Assignments and clears on the air, keyed by the id the bridge will echo
+    /// back.
+    pending: BTreeMap<u16, Pending>,
     /// Wraps, and harmlessly: an id only has to be unique among the handful of
     /// assignments outstanding at once, not for the life of the session.
     next_send_id: u16,
@@ -586,6 +600,23 @@ pub struct FleetEngine {
 /// A lag large enough that [`FleetEngine::air_is_live`] says no, used as the
 /// starting assumption on a connection whose backlog has not been seen yet.
 const BEHIND_THE_AIR_US: u64 = plan::ADMIN_WAIT_MS as u64 * 1_000;
+
+/// One assignment or clear in flight.
+#[derive(Debug, Clone, Copy)]
+enum Pending {
+    Admin(PendingAdmin),
+    Clear { mac: Mac, sent_mono: Instant },
+}
+
+impl Pending {
+    /// When this was put on the air, whichever variant it is.
+    fn sent_mono(&self) -> Instant {
+        match self {
+            Self::Admin(pending) => pending.sent_mono,
+            Self::Clear { sent_mono, .. } => *sent_mono,
+        }
+    }
+}
 
 /// One assignment in flight.
 #[derive(Debug, Clone, Copy)]
@@ -641,7 +672,7 @@ impl FleetEngine {
         let mut batch = ActionBatch::default();
         match event {
             Event::Tick => self.on_tick(now, &mut batch),
-            Event::Command(command) => self.on_command(command, &mut batch),
+            Event::Command(command) => self.on_command(command, now, &mut batch),
             Event::Link(LinkEvent::Connected(info)) => {
                 batch.records.push(Record::Bridge(crate::record::BridgeSeen {
                     mac: info.mac,
@@ -806,11 +837,7 @@ impl FleetEngine {
 
         let frame = match Frame::decode(payload) {
             Ok(frame) => frame,
-            // Not ours at all. A vendor fleet on this channel is the one
-            // undecodable thing with an operational meaning — it is
-            // transmitting where these nodes are listening, and on a stock
-            // fleet every scan is an active one — so it is counted where an
-            // operator will look for it rather than as line noise.
+            // Not ours at all (doesn't match our frame preamble).
             Err(DecodeError::BadMagic) => {
                 match foreign::classify(payload) {
                     Some(foreign::Foreign::Admin) => self.counters.foreign_admin += 1,
@@ -819,10 +846,7 @@ impl FleetEngine {
                 }
                 return;
             }
-            // Ours, from a build this one cannot read — a fleet half-way through
-            // a reflash. A version byte this build does not know says so; so
-            // does a fixed-length frame that is not its own length, which is
-            // what a layout change looks like while `WIRE_VERSION` is held.
+            // Version or length mismatch.
             Err(DecodeError::BadVersion(_) | DecodeError::BadLength { .. }) => {
                 self.counters.incompatible += 1;
                 return;
@@ -833,13 +857,12 @@ impl FleetEngine {
             }
         };
 
-        // Decode before admitting anyone to the fleet: a sender whose frames are
-        // not ours is not a node, and would otherwise sit in the table forever
-        // as `no heartbeat`.
+        // Decode before admitting anyone to the fleet
         match frame {
             // Nothing to do about it, but an operator chasing a fleet that keeps
-            // changing its mind needs to know.
-            Frame::Admin(_) => self.counters.foreign_admin += 1,
+            // changing its mind needs to know. A clear this host did not send is
+            // the same fact as an assignment this host did not send.
+            Frame::Admin(_) | Frame::Clear(_) => self.counters.foreign_admin += 1,
             Frame::Heartbeat(heartbeat) => {
                 self.see_node(src, now, rssi, Some(heartbeat.capabilities), batch);
                 self.counters.heartbeats += 1;
@@ -849,10 +872,11 @@ impl FleetEngine {
                 let rebooted = node.counter.is_some_and(|previous| heartbeat.counter < previous);
                 if rebooted {
                     node.reboots += 1;
-                    // Its epoch field went back to a boot value too, so the
-                    // belief goes and the assignment is re-issued under a fresh
-                    // epoch rather than one the node might now match.
+                    // Its epoch field went back to a boot value too, so the assignment is
+                    // re-issued under a fresh epoch rather than one the node might now match.
                     node.confirmed = None;
+                    // A node that has just booted already holds an empty ring.
+                    node.clear_dedup_ring = false;
                 }
                 node.capabilities = Some(heartbeat.capabilities);
                 node.note_beat_gap(now);
@@ -880,6 +904,7 @@ impl FleetEngine {
                 // transmitting in — as long as the heartbeat is news.
                 // `send_admin` checks that for itself.
                 self.send_admin(src, now, batch);
+                self.send_dedup_ring_clear(src, now, batch);
             }
             Frame::Sighting(sighting) => {
                 self.see_node(src, now, rssi, None, batch);
@@ -960,10 +985,11 @@ impl FleetEngine {
     /// Take an operator's instruction. Nothing goes out from here except a
     /// bridge transmit power, which cannot wait for a heartbeat the way an
     /// assignment can.
-    fn on_command(&mut self, command: Command, batch: &mut ActionBatch) {
+    fn on_command(&mut self, command: Command, now: Now, batch: &mut ActionBatch) {
         match command {
             Command::AssignBle { mac } => self.on_assign_ble(mac),
             Command::SetTxPower { nodes, bridge } => self.on_set_tx_power(nodes, bridge, batch),
+            Command::ClearRing { mac } => self.on_clear_dedup_ring(mac, now),
         }
     }
 
@@ -1047,6 +1073,35 @@ impl FleetEngine {
         // than excluded, and "at most one node scans Bluetooth" is about what the
         // host asks for.
         self.ble_node = target;
+    }
+
+    /// Mark a node, or every assignable node, as owing a cleared dedup ring.
+    ///
+    /// `Some` sets the flag only if that node is in the table at all — naming one
+    /// that has never been heard from is a no-op rather than a row created for
+    /// it. `None` reads [`Self::is_assignable`] at the moment the command
+    /// arrives, the same set the planner would partition over right now.
+    fn on_clear_dedup_ring(&mut self, mac: Option<Mac>, now: Now) {
+        match mac {
+            Some(mac) => {
+                if let Some(node) = self.nodes.get_mut(&mac) {
+                    node.clear_dedup_ring = true;
+                }
+            }
+            None => {
+                let targets: Vec<Mac> = self
+                    .nodes
+                    .values()
+                    .filter(|node| self.is_assignable(node, now))
+                    .map(|node| node.mac)
+                    .collect();
+                for mac in targets {
+                    if let Some(node) = self.nodes.get_mut(&mac) {
+                        node.clear_dedup_ring = true;
+                    }
+                }
+            }
+        }
     }
 
     /// Re-mark a node's assignment for delivery under a new epoch.
@@ -1342,13 +1397,13 @@ impl FleetEngine {
 
         self.pending.insert(
             id,
-            PendingAdmin {
+            Pending::Admin(PendingAdmin {
                 mac,
                 assignment,
                 sent_mono: now.mono,
                 sent_ms: now.unix_ms,
                 heartbeat_rx_us,
-            },
+            }),
         );
         self.counters.admin_sent += 1;
         batch.urgent.push(HostToBridge::SendEspNow {
@@ -1361,7 +1416,41 @@ impl FleetEngine {
         });
     }
 
-    /// The bridge said what became of an assignment.
+    /// Put a clear on the air for a node that owes one, if it has anywhere to
+    /// land.
+    ///
+    /// Only ever called straight off a heartbeat, the same as [`Self::send_admin`]
+    /// and for the same reason: that is the one moment the node's radio is on the
+    /// control channel and listening.
+    fn send_dedup_ring_clear(&mut self, mac: Mac, now: Now, batch: &mut ActionBatch) {
+        let live = self.air_is_live();
+        let Some(node) = self.nodes.get(&mac) else { return };
+        if !node.clear_dedup_ring || !live {
+            return;
+        }
+
+        let id = self.next_send_id;
+        self.next_send_id = self.next_send_id.wrapping_add(1).max(1);
+        self.pending.insert(id, Pending::Clear { mac, sent_mono: now.mono });
+        // Six bytes into a 250-byte buffer, so this cannot fail.
+        let payload = EspNowPayload::from_slice(&ClearMsg.encode()).unwrap_or_default();
+        batch.urgent.push(HostToBridge::SendEspNow { id, dst: mac, ensure_peer: true, payload });
+    }
+
+    /// Terminal handling for a full peer table: twenty peers is the entire
+    /// supported fleet, so there is no later heartbeat at which this becomes
+    /// possible. Shared by the assignment and the clear path, which each add
+    /// what else a full table means for what they were trying to deliver.
+    fn mark_peer_table_full(&mut self, mac: Mac) {
+        self.counters.peer_table_full += 1;
+        if let Some(node) = self.nodes.get_mut(&mac) {
+            // And it leaves the plan, so the next re-cut spreads the pool over
+            // the nodes that can actually be reached.
+            node.peer_refused = true;
+        }
+    }
+
+    /// The bridge said what became of an assignment or a clear.
     fn on_send_result(
         &mut self,
         id: u16,
@@ -1371,9 +1460,25 @@ impl FleetEngine {
         batch: &mut ActionBatch,
     ) {
         // An id we do not know is one of ours from before a reconnect, or a reply
-        // to something else. Either way there is no assignment to resolve.
+        // to something else. Either way there is nothing to resolve.
         let Some(pending) = self.pending.remove(&id) else { return };
+        match pending {
+            Pending::Admin(pending) => {
+                self.on_admin_send_result(pending, status, tx_us, now, batch)
+            }
+            Pending::Clear { mac, .. } => self.on_clear_send_result(mac, status),
+        }
+    }
 
+    /// The bridge said what became of an assignment.
+    fn on_admin_send_result(
+        &mut self,
+        pending: PendingAdmin,
+        status: SendStatus,
+        tx_us: u32,
+        now: Now,
+        batch: &mut ActionBatch,
+    ) {
         let outcome = match status {
             SendStatus::AckOk => AdminOutcome::Acked,
             SendStatus::AckFail => AdminOutcome::Unacked,
@@ -1385,17 +1490,13 @@ impl FleetEngine {
             | SendStatus::Rejected => AdminOutcome::Refused,
         };
 
-        // A full peer table is terminal, not a miss: twenty peers is the entire
-        // supported fleet, so there is no later heartbeat at which this becomes
-        // possible. Give up on what was wanted and let the view say why.
+        // A full peer table is terminal, not a miss: give up on what was wanted
+        // and let the view say why.
         if matches!(status, SendStatus::PeerTableFull) {
-            self.counters.peer_table_full += 1;
+            self.mark_peer_table_full(pending.mac);
             if let Some(node) = self.nodes.get_mut(&pending.mac) {
                 node.dirty = false;
                 node.desired = None;
-                // And it leaves the plan, so the next re-cut spreads the pool
-                // over the nodes that can actually be reached.
-                node.peer_refused = true;
             }
         }
 
@@ -1417,17 +1518,44 @@ impl FleetEngine {
         self.resolve(&pending, outcome, latency_us, now, batch);
     }
 
-    /// Give up on assignments the bridge never answered for.
+    /// The bridge said what became of a clear. Unlike an assignment, this writes
+    /// no store record and touches none of the `admin_*` counters, which stay
+    /// assignment-only.
+    fn on_clear_send_result(&mut self, mac: Mac, status: SendStatus) {
+        match status {
+            SendStatus::AckOk => {
+                if let Some(node) = self.nodes.get_mut(&mac) {
+                    node.clear_dedup_ring = false;
+                }
+            }
+            SendStatus::PeerTableFull => {
+                self.mark_peer_table_full(mac);
+                if let Some(node) = self.nodes.get_mut(&mac) {
+                    node.clear_dedup_ring = false;
+                }
+            }
+            // Everything else leaves the flag set, so the clear is retried on
+            // the next heartbeat.
+            SendStatus::AckFail
+            | SendStatus::Broadcast
+            | SendStatus::NoPeer
+            | SendStatus::Rejected => {}
+        }
+    }
+
+    /// Give up on assignments the bridge never answered for. A clear that
+    /// expires the same way is dropped quietly, with its flag left set: the next
+    /// heartbeat retries it, the same as an unacknowledged one would.
     fn expire_pending(&mut self, now: Now, batch: &mut ActionBatch) {
         let timeout = self.config.admin_timeout;
         let stale: Vec<u16> = self
             .pending
             .iter()
-            .filter(|(_, p)| now.mono.duration_since(p.sent_mono) >= timeout)
+            .filter(|(_, p)| now.mono.duration_since(p.sent_mono()) >= timeout)
             .map(|(id, _)| *id)
             .collect();
         for id in stale {
-            if let Some(pending) = self.pending.remove(&id) {
+            if let Some(Pending::Admin(pending)) = self.pending.remove(&id) {
                 self.resolve(&pending, AdminOutcome::Silent, None, now, batch);
             }
         }

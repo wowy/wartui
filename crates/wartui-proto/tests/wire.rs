@@ -7,9 +7,9 @@
 //! out what it pins.
 
 use wartui_proto::air::{
-    ADMIN_FLAG_BLE, ADMIN_MSG_LEN, AdminMsg, Capabilities, DecodeError, EXT_MAX, Frame,
-    HEARTBEAT_MSG_LEN, HeartbeatMsg, MAGIC, RecordKind, SIGHTING_MSG_MAX, SIGHTING_MSG_MIN,
-    SSID_MAX, Security, SightingMsg, WIRE_VERSION, foreign,
+    ADMIN_FLAG_BLE, ADMIN_MSG_LEN, AdminMsg, CLEAR_MSG_LEN, Capabilities, ClearMsg, DecodeError,
+    EXT_MAX, Frame, HEARTBEAT_MSG_LEN, HeartbeatMsg, MAGIC, RecordKind, SIGHTING_MSG_MAX,
+    SIGHTING_MSG_MIN, SSID_MAX, Security, SightingMsg, WIRE_VERSION, foreign,
 };
 use wartui_proto::plan::{ChannelSet, IndexRun};
 
@@ -105,6 +105,9 @@ const ADMIN_BLE_ONLY: &[u8] = &[
     0x08, // transmit power: 2 dBm
 ];
 
+/// Header only: the whole instruction is the type byte.
+const CLEAR: &[u8] = &[0x57, 0x54, 0x55, 0x49, 0x01, 0x82];
+
 /// A stock node's heartbeat, and a stock core's assignment. Kept only as inputs
 /// to [`foreign::classify`] — nothing here decodes either.
 const VENDOR_HEARTBEAT: &[u8] = &[0x45, 0x4E, 0x4F, 0x57, 0x03, 0x93, 0x00, 0x00, 0x00];
@@ -125,6 +128,7 @@ fn wire_codec_matches_expected_frame_lengths_when_checking_constants() {
         "the widest trailer there is"
     );
     assert_eq!(SIGHTING_MSG_MAX, SIGHTING_MSG_MIN + SSID_MAX + EXT_MAX);
+    assert_eq!(CLEAR.len(), CLEAR_MSG_LEN, "header only, nothing else");
     // The point of the whole exercise: a heartbeat was 212 bytes and a
     // sighting was 212 bytes, on a control channel every node shares. The
     // ceiling is ESP-NOW's own — a payload over 250 bytes cannot be sent.
@@ -141,6 +145,7 @@ fn wire_codec_includes_magic_and_version_header_when_inspecting_frames() {
         SIGHTING_BLE_MFGR,
         ADMIN,
         ADMIN_BLE,
+        CLEAR,
     ] {
         assert_eq!(&frame[..4], MAGIC, "magic");
         assert_eq!(frame[4], WIRE_VERSION, "version");
@@ -159,6 +164,7 @@ fn foreign_classifier_rejects_our_frames_when_checking_vendor_magic() {
         SIGHTING_BLE_MFGR,
         ADMIN,
         ADMIN_BLE,
+        CLEAR,
     ] {
         assert_ne!(&frame[..4], &foreign::VENDOR_MAGIC[..]);
         assert_eq!(foreign::classify(frame), None);
@@ -488,11 +494,37 @@ fn admin_msg_preserves_unknown_flag_bits_when_round_tripped() {
 }
 
 #[test]
+fn clear_msg_serializes_byte_for_byte_when_encoded_and_decoded() {
+    assert_eq!(ClearMsg.encode().as_slice(), CLEAR);
+    assert_eq!(ClearMsg::decode(CLEAR), Ok(ClearMsg));
+}
+
+#[test]
+fn clear_msg_rejects_frame_when_length_is_not_header_only() {
+    // Longer is the dangerous half, the same reasoning `BadLength` exists for
+    // everywhere else: a wider frame from a later build must not be adopted as
+    // a plausible clear.
+    let mut wider = CLEAR.to_vec();
+    wider.push(0xFF);
+    assert_eq!(
+        ClearMsg::decode(&wider),
+        Err(DecodeError::BadLength { need: CLEAR_MSG_LEN, got: CLEAR_MSG_LEN + 1 })
+    );
+
+    let shorter = &CLEAR[..CLEAR_MSG_LEN - 1];
+    assert_eq!(
+        ClearMsg::decode(shorter),
+        Err(DecodeError::TooShort { need: CLEAR_MSG_LEN, got: CLEAR_MSG_LEN - 1 })
+    );
+}
+
+#[test]
 fn frame_decoder_dispatches_type_byte_to_corresponding_frame_when_decoded() {
     assert!(matches!(Frame::decode(HEARTBEAT), Ok(Frame::Heartbeat(_))));
     assert!(matches!(Frame::decode(SIGHTING_WIFI), Ok(Frame::Sighting(_))));
     assert!(matches!(Frame::decode(SIGHTING_BLE), Ok(Frame::Sighting(_))));
     assert!(matches!(Frame::decode(ADMIN), Ok(Frame::Admin(_))));
+    assert!(matches!(Frame::decode(CLEAR), Ok(Frame::Clear(_))));
 }
 
 #[test]
