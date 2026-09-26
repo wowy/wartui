@@ -246,6 +246,7 @@ static SCANNER: StaticCell<ble::Scanner<'static>> = StaticCell::new();
 #[esp_hal::main]
 fn main() -> ! {
     let peripherals = esp_hal::init(esp_hal::Config::default().with_cpu_clock(CpuClock::max()));
+    note!("reset reason: {:?}", esp_hal::system::reset_reason());
 
     // The radio blobs allocate; nothing in wartui's own code does.
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 64 * 1024);
