@@ -8,8 +8,9 @@
 
 use wartui_proto::air::{
     ADMIN_FLAG_BLE, ADMIN_MSG_LEN, AdminMsg, CLEAR_MSG_LEN, Capabilities, ClearMsg, DecodeError,
-    EXT_MAX, Frame, HEARTBEAT_MSG_LEN, HeartbeatMsg, MAGIC, RecordKind, SIGHTING_MSG_MAX,
-    SIGHTING_MSG_MIN, SSID_MAX, Security, SightingMsg, WIRE_VERSION, foreign,
+    EXT_MAX, Frame, HEARTBEAT_MSG_LEN, HeartbeatMsg, MAGIC, RecordKind, SIGHTING_BATCH_HEADER,
+    SIGHTING_BATCH_MAX, SIGHTING_RECORD_MAX, SIGHTING_RECORD_MIN, SIGHTINGS_PER_BATCH_MAX,
+    SSID_MAX, Security, SightingBatch, SightingBatchWriter, SightingMsg, WIRE_VERSION, foreign,
 };
 use wartui_proto::plan::{ChannelSet, IndexRun};
 
@@ -20,8 +21,9 @@ const HEARTBEAT: &[u8] = &[
     0x01, 0x00, 0x03, // capabilities: major 1, minor 0, ble + 5g
 ];
 
-const SIGHTING_WIFI: &[u8] = &[
-    0x57, 0x54, 0x55, 0x49, 0x01, 0x02, // header
+/// A Wi-Fi record: no header of its own, since [`SightingBatch`] carries one
+/// for the whole frame.
+const WIFI_RECORD: &[u8] = &[
     0x00, // kind: Wi-Fi
     0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, // bssid
     0x0B, // channel 11
@@ -32,8 +34,7 @@ const SIGHTING_WIFI: &[u8] = &[
     0x00, // no trailer: this access point beaconed no roaming consortium
 ];
 
-const SIGHTING_BLE: &[u8] = &[
-    0x57, 0x54, 0x55, 0x49, 0x01, 0x02, // header
+const BLE_RECORD: &[u8] = &[
     0x01, // kind: BLE
     0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, // address
     0x00, // channel 0, which is what BLE reports
@@ -43,11 +44,10 @@ const SIGHTING_BLE: &[u8] = &[
     0x00, // no trailer: this advertiser carried no manufacturer data
 ];
 
-/// A Wi-Fi sighting whose beacon carried the OpenRoaming roaming consortium
+/// A Wi-Fi record whose beacon carried the OpenRoaming roaming consortium
 /// triple, verbatim in the trailer: count, the nibble-packed lengths, then
-/// three five-byte identifiers.
-const SIGHTING_WIFI_RCOI: &[u8] = &[
-    0x57, 0x54, 0x55, 0x49, 0x01, 0x02, // header
+/// three five-byte identifiers. The widest record there is.
+const WIFI_RCOI_RECORD: &[u8] = &[
     0x00, // kind: Wi-Fi
     0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, // bssid
     0x0B, // channel 11
@@ -62,9 +62,8 @@ const SIGHTING_WIFI_RCOI: &[u8] = &[
     0xBA, 0xA2, 0xD0, 0x20, 0x00, // BAA2D02000
 ];
 
-/// A BLE sighting from an advertiser that carried a manufacturer identifier.
-const SIGHTING_BLE_MFGR: &[u8] = &[
-    0x57, 0x54, 0x55, 0x49, 0x01, 0x02, // header
+/// A BLE record from an advertiser that carried a manufacturer identifier.
+const BLE_MFGR_RECORD: &[u8] = &[
     0x01, // kind: BLE
     0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, // address
     0x00, // channel 0
@@ -73,6 +72,40 @@ const SIGHTING_BLE_MFGR: &[u8] = &[
     0x00, // no SSID
     0x02, // ext_len: the identifier, and nothing else
     0x4C, 0x00, // company identifier 76, little-endian
+];
+
+/// One batch, carrying the one Wi-Fi record above.
+const SIGHTING_BATCH_1: &[u8] = &[
+    0x57, 0x54, 0x55, 0x49, 0x01, 0x02, // header
+    0x01, 0x00, // seq 1, little-endian
+    0x01, // count
+    0x00, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x0B, 0xD6, 0x03, 0x06, b'M', b'y', b',', b'N', b'e',
+    b't', 0x00, // WIFI_RECORD
+];
+
+/// A single-record BLE batch, for the tests that want `Frame::Sightings` on a
+/// BLE record without a Wi-Fi one alongside it.
+const SIGHTING_BATCH_BLE: &[u8] = &[
+    0x57, 0x54, 0x55, 0x49, 0x01, 0x02, // header
+    0x09, 0x00, // seq 9
+    0x01, // count
+    0x01, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00, 0xBA, 0x0A, 0x00, 0x00, // BLE_RECORD
+];
+
+/// A mixed batch: Wi-Fi, then BLE, then the widest record there is.
+const SIGHTING_BATCH_3: &[u8] = &[
+    0x57, 0x54, 0x55, 0x49, 0x01, 0x02, // header
+    0x07, 0x00, // seq 7
+    0x03, // count
+    // WIFI_RECORD
+    0x00, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x0B, 0xD6, 0x03, 0x06, b'M', b'y', b',', b'N', b'e',
+    b't', 0x00, //
+    // BLE_RECORD
+    0x01, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00, 0xBA, 0x0A, 0x00, 0x00, //
+    // WIFI_RCOI_RECORD
+    0x00, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x0B, 0xD6, 0x03, 0x06, b'M', b'y', b',', b'N', b'e',
+    b't', 0x11, 0x02, 0x55, 0x5A, 0x03, 0xBA, 0x00, 0x00, 0xBA, 0xA2, 0xD0, 0x00, 0x00, 0xBA, 0xA2,
+    0xD0, 0x20, 0x00,
 ];
 
 const ADMIN: &[u8] = &[
@@ -118,35 +151,37 @@ fn wire_codec_matches_expected_frame_lengths_when_checking_constants() {
     assert_eq!(HEARTBEAT.len(), HEARTBEAT_MSG_LEN);
     assert_eq!(ADMIN.len(), ADMIN_MSG_LEN);
     assert_eq!(
-        SIGHTING_BLE.len(),
-        SIGHTING_MSG_MIN,
-        "a sighting with no SSID and no trailer is the floor"
+        BLE_RECORD.len(),
+        SIGHTING_RECORD_MIN,
+        "a record with no SSID and no trailer is the floor"
     );
     assert_eq!(
-        SIGHTING_WIFI_RCOI.len(),
-        SIGHTING_MSG_MIN + 6 + EXT_MAX,
+        WIFI_RCOI_RECORD.len(),
+        SIGHTING_RECORD_MIN + 6 + EXT_MAX,
         "the widest trailer there is"
     );
-    assert_eq!(SIGHTING_MSG_MAX, SIGHTING_MSG_MIN + SSID_MAX + EXT_MAX);
+    assert_eq!(SIGHTING_RECORD_MAX, SIGHTING_RECORD_MIN + SSID_MAX + EXT_MAX);
+    assert_eq!(
+        SIGHTING_BATCH_1.len(),
+        SIGHTING_BATCH_HEADER + WIFI_RECORD.len(),
+        "the header plus the one record it carries"
+    );
     assert_eq!(CLEAR.len(), CLEAR_MSG_LEN, "header only, nothing else");
     // The point of the whole exercise: a heartbeat was 212 bytes and a
     // sighting was 212 bytes, on a control channel every node shares. The
-    // ceiling is ESP-NOW's own — a payload over 250 bytes cannot be sent.
-    const { assert!(HEARTBEAT_MSG_LEN < 20 && SIGHTING_MSG_MAX < 250) };
+    // ceiling is ESP-NOW's own — a payload over 250 bytes cannot be sent, and
+    // a batch is packed to fill exactly that many.
+    const {
+        assert!(HEARTBEAT_MSG_LEN < 20 && SIGHTING_RECORD_MAX < SIGHTING_BATCH_MAX);
+        assert!(SIGHTING_BATCH_MAX == 250);
+    };
 }
 
 #[test]
 fn wire_codec_includes_magic_and_version_header_when_inspecting_frames() {
-    for frame in [
-        HEARTBEAT,
-        SIGHTING_WIFI,
-        SIGHTING_BLE,
-        SIGHTING_WIFI_RCOI,
-        SIGHTING_BLE_MFGR,
-        ADMIN,
-        ADMIN_BLE,
-        CLEAR,
-    ] {
+    for frame in
+        [HEARTBEAT, SIGHTING_BATCH_1, SIGHTING_BATCH_BLE, SIGHTING_BATCH_3, ADMIN, ADMIN_BLE, CLEAR]
+    {
         assert_eq!(&frame[..4], MAGIC, "magic");
         assert_eq!(frame[4], WIRE_VERSION, "version");
     }
@@ -156,16 +191,9 @@ fn wire_codec_includes_magic_and_version_header_when_inspecting_frames() {
 fn foreign_classifier_rejects_our_frames_when_checking_vendor_magic() {
     // A vendor core must not admit one of ours to its node table, nor a vendor node
     // read an assignment out of one.
-    for frame in [
-        HEARTBEAT,
-        SIGHTING_WIFI,
-        SIGHTING_BLE,
-        SIGHTING_WIFI_RCOI,
-        SIGHTING_BLE_MFGR,
-        ADMIN,
-        ADMIN_BLE,
-        CLEAR,
-    ] {
+    for frame in
+        [HEARTBEAT, SIGHTING_BATCH_1, SIGHTING_BATCH_BLE, SIGHTING_BATCH_3, ADMIN, ADMIN_BLE, CLEAR]
+    {
         assert_ne!(&frame[..4], &foreign::VENDOR_MAGIC[..]);
         assert_eq!(foreign::classify(frame), None);
     }
@@ -191,7 +219,7 @@ fn heartbeat_msg_serializes_counter_as_little_endian_when_encoded() {
 }
 
 #[test]
-fn sighting_msg_serializes_wifi_payload_byte_for_byte_when_encoded_and_decoded() {
+fn sighting_msg_serializes_wifi_record_byte_for_byte_when_encoded_and_decoded() {
     let msg = SightingMsg {
         kind: RecordKind::Wifi,
         bssid: [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF],
@@ -201,10 +229,10 @@ fn sighting_msg_serializes_wifi_payload_byte_for_byte_when_encoded_and_decoded()
         ssid: b"My,Net",
         ext: &[],
     };
-    let mut buf = [0u8; SIGHTING_MSG_MAX];
-    let len = msg.encode_into(&mut buf).expect("SIGHTING_MSG_MAX is always enough");
-    assert_eq!(&buf[..len], SIGHTING_WIFI);
-    assert_eq!(SightingMsg::decode(SIGHTING_WIFI), Ok(msg));
+    let mut buf = [0u8; SIGHTING_RECORD_MAX];
+    let len = msg.encode_record_into(&mut buf).expect("SIGHTING_RECORD_MAX is always enough");
+    assert_eq!(&buf[..len], WIFI_RECORD);
+    assert_eq!(SightingMsg::decode_record(WIFI_RECORD), Ok((msg, WIFI_RECORD.len())));
 }
 
 #[test]
@@ -227,10 +255,11 @@ fn sighting_msg_serializes_roaming_consortium_trailer_when_encoded() {
         ssid: b"My,Net",
         ext: OPEN_ROAMING,
     };
-    let mut buf = [0u8; SIGHTING_MSG_MAX];
-    let len = msg.encode_into(&mut buf).expect("fits");
-    assert_eq!(&buf[..len], SIGHTING_WIFI_RCOI);
-    let back = SightingMsg::decode(SIGHTING_WIFI_RCOI).expect("valid");
+    let mut buf = [0u8; SIGHTING_RECORD_MAX];
+    let len = msg.encode_record_into(&mut buf).expect("fits");
+    assert_eq!(&buf[..len], WIFI_RCOI_RECORD);
+    let (back, consumed) = SightingMsg::decode_record(WIFI_RCOI_RECORD).expect("valid");
+    assert_eq!(consumed, WIFI_RCOI_RECORD.len());
     assert_eq!(back, msg);
     assert_eq!(back.ext, OPEN_ROAMING, "the body survives the wire unchanged");
 }
@@ -238,12 +267,12 @@ fn sighting_msg_serializes_roaming_consortium_trailer_when_encoded() {
 #[test]
 fn sighting_msg_preserves_comma_in_ssid_when_decoded_from_wire() {
     // The SSID is length-prefixed, so nothing has to be escaped or rewritten.
-    let decoded = SightingMsg::decode(SIGHTING_WIFI).expect("valid");
+    let (decoded, _) = SightingMsg::decode_record(WIFI_RECORD).expect("valid");
     assert_eq!(decoded.ssid, b"My,Net");
 }
 
 #[test]
-fn sighting_msg_serializes_ble_payload_byte_for_byte_when_encoded_and_decoded() {
+fn sighting_msg_serializes_ble_record_byte_for_byte_when_encoded_and_decoded() {
     let msg = SightingMsg {
         kind: RecordKind::Ble,
         bssid: [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF],
@@ -253,10 +282,10 @@ fn sighting_msg_serializes_ble_payload_byte_for_byte_when_encoded_and_decoded() 
         ssid: b"",
         ext: &[],
     };
-    let mut buf = [0u8; SIGHTING_MSG_MAX];
-    let len = msg.encode_into(&mut buf).expect("fits");
-    assert_eq!(&buf[..len], SIGHTING_BLE);
-    assert_eq!(SightingMsg::decode(SIGHTING_BLE), Ok(msg));
+    let mut buf = [0u8; SIGHTING_RECORD_MAX];
+    let len = msg.encode_record_into(&mut buf).expect("fits");
+    assert_eq!(&buf[..len], BLE_RECORD);
+    assert_eq!(SightingMsg::decode_record(BLE_RECORD), Ok((msg, BLE_RECORD.len())));
 }
 
 #[test]
@@ -272,10 +301,10 @@ fn sighting_msg_serializes_ble_manufacturer_trailer_when_encoded() {
         ssid: b"",
         ext: &76u16.to_le_bytes(),
     };
-    let mut buf = [0u8; SIGHTING_MSG_MAX];
-    let len = msg.encode_into(&mut buf).expect("fits");
-    assert_eq!(&buf[..len], SIGHTING_BLE_MFGR);
-    assert_eq!(SightingMsg::decode(SIGHTING_BLE_MFGR), Ok(msg));
+    let mut buf = [0u8; SIGHTING_RECORD_MAX];
+    let len = msg.encode_record_into(&mut buf).expect("fits");
+    assert_eq!(&buf[..len], BLE_MFGR_RECORD);
+    assert_eq!(SightingMsg::decode_record(BLE_MFGR_RECORD), Ok((msg, BLE_MFGR_RECORD.len())));
 }
 
 #[test]
@@ -283,13 +312,13 @@ fn sighting_msg_parses_signed_rssi_and_unsigned_channel_when_decoded() {
     // 0xD6 as an unsigned byte is 214, which is a plausible-looking number and
     // a nonsensical dBm. Channel 165 is the other way round: the top of the
     // 5 GHz pool, and a channel read as a signed byte would be -91.
-    let decoded = SightingMsg::decode(SIGHTING_WIFI).expect("valid");
+    let (decoded, _) = SightingMsg::decode_record(WIFI_RECORD).expect("valid");
     assert_eq!(decoded.rssi, -42);
 
     let msg = SightingMsg { channel: 165, ..decoded };
-    let mut buf = [0u8; SIGHTING_MSG_MAX];
-    let len = msg.encode_into(&mut buf).expect("fits");
-    assert_eq!(SightingMsg::decode(&buf[..len]).expect("valid").channel, 165);
+    let mut buf = [0u8; SIGHTING_RECORD_MAX];
+    let len = msg.encode_record_into(&mut buf).expect("fits");
+    assert_eq!(SightingMsg::decode_record(&buf[..len]).expect("valid").0.channel, 165);
 }
 
 #[test]
@@ -305,17 +334,18 @@ fn sighting_msg_fits_max_buffer_when_ssid_and_trailer_are_longest() {
         ssid: &ssid,
         ext: &ext,
     };
-    let mut buf = [0u8; SIGHTING_MSG_MAX];
-    let len = msg.encode_into(&mut buf).expect("that is what the constant is for");
-    assert_eq!(len, SIGHTING_MSG_MAX);
-    let back = SightingMsg::decode(&buf[..len]).expect("valid");
+    let mut buf = [0u8; SIGHTING_RECORD_MAX];
+    let len = msg.encode_record_into(&mut buf).expect("that is what the constant is for");
+    assert_eq!(len, SIGHTING_RECORD_MAX);
+    let (back, consumed) = SightingMsg::decode_record(&buf[..len]).expect("valid");
+    assert_eq!(consumed, len);
     assert_eq!(back.ssid, &ssid[..]);
     assert_eq!(back.ext, &ext[..]);
 
     // And a buffer one byte short refuses rather than truncating, so a node
-    // cannot broadcast a half-formed frame.
-    let mut cramped = [0u8; SIGHTING_MSG_MAX - 1];
-    assert_eq!(msg.encode_into(&mut cramped), None);
+    // cannot broadcast a half-formed record.
+    let mut cramped = [0u8; SIGHTING_RECORD_MAX - 1];
+    assert_eq!(msg.encode_record_into(&mut cramped), None);
 }
 
 #[test]
@@ -331,11 +361,11 @@ fn sighting_msg_rejects_oversized_ssid_when_encoding_or_decoding() {
         ext: &[],
     };
     let mut buf = [0u8; 128];
-    assert_eq!(msg.encode_into(&mut buf), None);
+    assert_eq!(msg.encode_record_into(&mut buf), None);
 
-    let mut frame = SIGHTING_BLE.to_vec();
-    frame[16] = 33;
-    assert_eq!(SightingMsg::decode(&frame), Err(DecodeError::SsidTooLong(33)));
+    let mut record = BLE_RECORD.to_vec();
+    record[10] = 33; // ssid_len
+    assert_eq!(SightingMsg::decode_record(&record), Err(DecodeError::SsidTooLong(33)));
 }
 
 #[test]
@@ -353,22 +383,22 @@ fn sighting_msg_rejects_oversized_trailer_when_encoding_or_decoding() {
         ext: &[0xEE; EXT_MAX + 1],
     };
     let mut buf = [0u8; 128];
-    assert_eq!(msg.encode_into(&mut buf), None);
+    assert_eq!(msg.encode_record_into(&mut buf), None);
 
-    let mut frame = SIGHTING_WIFI.to_vec();
-    frame[23] = 18;
-    assert_eq!(SightingMsg::decode(&frame), Err(DecodeError::ExtTooLong(18)));
+    let mut record = WIFI_RECORD.to_vec();
+    record[17] = 18; // ext_len
+    assert_eq!(SightingMsg::decode_record(&record), Err(DecodeError::ExtTooLong(18)));
 }
 
 #[test]
 fn sighting_msg_returns_too_short_error_when_trailer_length_is_truncated() {
     // `ext_len` says two and one arrived. Reading what is there would file an
     // identifier nobody sent.
-    let mut frame = SIGHTING_BLE_MFGR.to_vec();
-    frame.pop();
+    let mut record = BLE_MFGR_RECORD.to_vec();
+    record.pop();
     assert_eq!(
-        SightingMsg::decode(&frame),
-        Err(DecodeError::TooShort { need: SIGHTING_MSG_MIN + 2, got: SIGHTING_MSG_MIN + 1 })
+        SightingMsg::decode_record(&record),
+        Err(DecodeError::TooShort { need: SIGHTING_RECORD_MIN + 2, got: SIGHTING_RECORD_MIN + 1 })
     );
 }
 
@@ -376,11 +406,11 @@ fn sighting_msg_returns_too_short_error_when_trailer_length_is_truncated() {
 fn sighting_msg_returns_too_short_error_when_ssid_is_truncated() {
     // `ssid_len` says six and five arrived. Reading what is there would file
     // an access point under a name it never had.
-    let mut frame = SIGHTING_WIFI.to_vec();
-    frame.pop();
+    let mut record = WIFI_RECORD.to_vec();
+    record.pop();
     assert_eq!(
-        SightingMsg::decode(&frame),
-        Err(DecodeError::TooShort { need: SIGHTING_MSG_MIN + 6, got: SIGHTING_MSG_MIN + 5 })
+        SightingMsg::decode_record(&record),
+        Err(DecodeError::TooShort { need: SIGHTING_RECORD_MIN + 6, got: SIGHTING_RECORD_MIN + 5 })
     );
 }
 
@@ -388,12 +418,156 @@ fn sighting_msg_returns_too_short_error_when_ssid_is_truncated() {
 fn sighting_msg_preserves_sighting_with_unknown_security_when_decoded() {
     // A node from a later build reporting a mode this host has no name for
     // still reported an access point, and the address is the part that matters.
-    let mut frame = SIGHTING_BLE.to_vec();
-    frame[15] = 200;
-    let decoded = SightingMsg::decode(&frame).expect("still a sighting");
+    let mut record = BLE_RECORD.to_vec();
+    record[9] = 200; // security
+    let (decoded, _) = SightingMsg::decode_record(&record).expect("still a sighting");
     assert_eq!(decoded.security, Security::Unknown(200));
     assert_eq!(decoded.security.token(), None);
     assert_eq!(decoded.security.to_string(), "[UNKNOWN:200]");
+}
+
+#[test]
+fn sighting_batch_writer_packs_one_record_byte_for_byte_when_built() {
+    let mut writer = SightingBatchWriter::new(1);
+    assert!(writer.push(&SightingMsg {
+        kind: RecordKind::Wifi,
+        bssid: [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF],
+        channel: 11,
+        rssi: -42,
+        security: Security::Wpa2Psk,
+        ssid: b"My,Net",
+        ext: &[],
+    }));
+    assert_eq!(writer.len(), 1);
+    assert_eq!(writer.as_bytes(), SIGHTING_BATCH_1);
+
+    let batch = SightingBatch::decode(SIGHTING_BATCH_1).expect("valid");
+    assert_eq!(batch.seq, 1);
+    assert_eq!(batch.count, 1);
+    let records: Vec<_> = batch.iter().collect();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].1, WIFI_RECORD);
+}
+
+#[test]
+fn sighting_batch_writer_packs_mixed_records_byte_for_byte_when_built() {
+    let mut writer = SightingBatchWriter::new(7);
+    assert!(writer.push(&SightingMsg {
+        kind: RecordKind::Wifi,
+        bssid: [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF],
+        channel: 11,
+        rssi: -42,
+        security: Security::Wpa2Psk,
+        ssid: b"My,Net",
+        ext: &[],
+    }));
+    assert!(writer.push(&SightingMsg {
+        kind: RecordKind::Ble,
+        bssid: [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF],
+        channel: 0,
+        rssi: -70,
+        security: Security::Ble,
+        ssid: b"",
+        ext: &[],
+    }));
+    // The trailer bytes of `WIFI_RCOI_RECORD`, past its own header-free fields.
+    assert!(writer.push(&SightingMsg {
+        kind: RecordKind::Wifi,
+        bssid: [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF],
+        channel: 11,
+        rssi: -42,
+        security: Security::Wpa2Psk,
+        ssid: b"My,Net",
+        ext: &WIFI_RCOI_RECORD[18..],
+    }));
+    assert_eq!(writer.as_bytes(), SIGHTING_BATCH_3);
+
+    let batch = SightingBatch::decode(SIGHTING_BATCH_3).expect("valid");
+    let raw: Vec<&[u8]> = batch.iter().map(|(_, raw)| raw).collect();
+    assert_eq!(raw, std::vec![WIFI_RECORD, BLE_RECORD, WIFI_RCOI_RECORD]);
+}
+
+#[test]
+fn sighting_batch_writer_fills_to_espnow_ceiling_when_packing_minimal_records() {
+    // Nineteen bare records and one carrying a one-byte SSID sum to exactly
+    // 241 bytes behind the nine-byte header: 250 total, the ESP-NOW ceiling,
+    // reached at exactly SIGHTINGS_PER_BATCH_MAX records.
+    let minimal = SightingMsg {
+        kind: RecordKind::Ble,
+        bssid: [0; 6],
+        channel: 0,
+        rssi: -1,
+        security: Security::Ble,
+        ssid: b"",
+        ext: &[],
+    };
+    let mut writer = SightingBatchWriter::new(1);
+    for _ in 0..SIGHTINGS_PER_BATCH_MAX - 1 {
+        assert!(writer.push(&minimal));
+    }
+    assert!(writer.push(&SightingMsg { ssid: b"x", ..minimal }));
+    assert_eq!(writer.len(), SIGHTINGS_PER_BATCH_MAX);
+    assert_eq!(writer.as_bytes().len(), SIGHTING_BATCH_MAX);
+
+    // One more record, however small, no longer fits: nothing is written, and
+    // the frame already on the air is unchanged.
+    assert!(!writer.push(&minimal));
+    assert_eq!(writer.len(), SIGHTINGS_PER_BATCH_MAX, "the refused push wrote nothing");
+    assert_eq!(writer.as_bytes().len(), SIGHTING_BATCH_MAX);
+
+    let batch = SightingBatch::decode(writer.as_bytes()).expect("valid");
+    assert_eq!(batch.iter().count(), SIGHTINGS_PER_BATCH_MAX);
+}
+
+#[test]
+fn sighting_batch_rejects_frame_when_count_is_zero() {
+    let mut frame = SIGHTING_BATCH_1[..SIGHTING_BATCH_HEADER].to_vec();
+    frame[8] = 0; // count
+    assert_eq!(
+        SightingBatch::decode(&frame),
+        Err(DecodeError::TooShort {
+            need: SIGHTING_BATCH_HEADER + SIGHTING_RECORD_MIN,
+            got: frame.len(),
+        })
+    );
+}
+
+#[test]
+fn sighting_batch_rejects_frame_when_count_exceeds_records_present() {
+    let mut frame = SIGHTING_BATCH_1.to_vec();
+    frame[8] = 2; // claims a second record that is not there
+    assert_eq!(
+        SightingBatch::decode(&frame),
+        Err(DecodeError::TooShort { need: SIGHTING_RECORD_MIN, got: 0 })
+    );
+}
+
+#[test]
+fn sighting_batch_rejects_frame_when_trailing_bytes_follow_last_record() {
+    let mut frame = SIGHTING_BATCH_1.to_vec();
+    frame.extend_from_slice(BLE_RECORD); // count still says 1
+    assert_eq!(
+        SightingBatch::decode(&frame),
+        Err(DecodeError::BadLength {
+            need: SIGHTING_BATCH_HEADER + WIFI_RECORD.len(),
+            got: frame.len(),
+        })
+    );
+}
+
+#[test]
+fn sighting_batch_rejects_whole_frame_when_second_record_is_malformed() {
+    // Validated whole before anything is yielded: a fault in the second
+    // record must not let the first through.
+    let second = SIGHTING_BATCH_HEADER + WIFI_RECORD.len();
+
+    let mut bad_ssid = SIGHTING_BATCH_3.to_vec();
+    bad_ssid[second + 10] = 33; // the second record's ssid_len
+    assert_eq!(SightingBatch::decode(&bad_ssid), Err(DecodeError::SsidTooLong(33)));
+
+    let mut bad_kind = SIGHTING_BATCH_3.to_vec();
+    bad_kind[second] = 2; // no RecordKind is 2
+    assert_eq!(SightingBatch::decode(&bad_kind), Err(DecodeError::UnknownType(2)));
 }
 
 #[test]
@@ -521,8 +695,8 @@ fn clear_msg_rejects_frame_when_length_is_not_header_only() {
 #[test]
 fn frame_decoder_dispatches_type_byte_to_corresponding_frame_when_decoded() {
     assert!(matches!(Frame::decode(HEARTBEAT), Ok(Frame::Heartbeat(_))));
-    assert!(matches!(Frame::decode(SIGHTING_WIFI), Ok(Frame::Sighting(_))));
-    assert!(matches!(Frame::decode(SIGHTING_BLE), Ok(Frame::Sighting(_))));
+    assert!(matches!(Frame::decode(SIGHTING_BATCH_1), Ok(Frame::Sightings(_))));
+    assert!(matches!(Frame::decode(SIGHTING_BATCH_BLE), Ok(Frame::Sightings(_))));
     assert!(matches!(Frame::decode(ADMIN), Ok(Frame::Admin(_))));
     assert!(matches!(Frame::decode(CLEAR), Ok(Frame::Clear(_))));
 }
@@ -533,7 +707,7 @@ fn frame_decoder_rejects_payload_when_frame_type_mismatches() {
     // heartbeat would be adopting four bytes of counter as a channel mask.
     assert_eq!(AdminMsg::decode(HEARTBEAT), Err(DecodeError::UnknownType(0x01)));
     assert_eq!(HeartbeatMsg::decode(ADMIN), Err(DecodeError::UnknownType(0x81)));
-    assert_eq!(SightingMsg::decode(ADMIN), Err(DecodeError::UnknownType(0x81)));
+    assert_eq!(SightingBatch::decode(ADMIN), Err(DecodeError::UnknownType(0x81)));
 }
 
 #[test]
@@ -567,10 +741,10 @@ fn wire_decoder_rejects_frame_when_type_byte_is_unknown() {
 fn wire_decoder_rejects_truncated_payload_when_frame_is_too_short() {
     // Too short to carry a header at all, which is as far as `header` gets.
     assert_eq!(Frame::decode(&HEARTBEAT[..4]), Err(DecodeError::TooShort { need: 6, got: 4 }));
-    // A sighting is as long as its own SSID and trailer say, so short is short.
+    // A batch needs its own header past the shared one: seq and count.
     assert_eq!(
-        Frame::decode(&SIGHTING_BLE[..SIGHTING_MSG_MIN - 1]),
-        Err(DecodeError::TooShort { need: SIGHTING_MSG_MIN, got: SIGHTING_MSG_MIN - 1 })
+        Frame::decode(&SIGHTING_BATCH_1[..SIGHTING_BATCH_HEADER - 1]),
+        Err(DecodeError::TooShort { need: SIGHTING_BATCH_HEADER, got: SIGHTING_BATCH_HEADER - 1 })
     );
     // The other two are each one size, so either side of it is a layout this
     // build does not read.

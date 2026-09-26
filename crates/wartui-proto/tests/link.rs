@@ -6,7 +6,7 @@
 
 use heapless::{String, Vec};
 use wartui_proto::air::{
-    Capabilities, HeartbeatMsg, RecordKind, SIGHTING_MSG_MAX, Security, SightingMsg,
+    Capabilities, HeartbeatMsg, RecordKind, Security, SightingBatchWriter, SightingMsg,
 };
 use wartui_proto::link::{
     BROADCAST, BridgeToHost, Chip, FrameAccumulator, HostToBridge, LINK_PROTO_VERSION, LinkError,
@@ -50,8 +50,8 @@ fn full_panel() -> PanelLines {
 }
 
 fn sample_events() -> Vec<BridgeToHost, 16> {
-    let mut frame = [0u8; SIGHTING_MSG_MAX];
-    let len = SightingMsg {
+    let mut writer = SightingBatchWriter::new(1);
+    assert!(writer.push(&SightingMsg {
         kind: RecordKind::Wifi,
         bssid: [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF],
         channel: 6,
@@ -59,11 +59,9 @@ fn sample_events() -> Vec<BridgeToHost, 16> {
         security: Security::Wpa2Psk,
         ssid: b"net",
         ext: &[],
-    }
-    .encode_into(&mut frame)
-    .expect("fits");
+    }));
     let mut payload = Vec::new();
-    payload.extend_from_slice(&frame[..len]).expect("a sighting fits in 250");
+    payload.extend_from_slice(writer.as_bytes()).expect("a batch fits in 250");
 
     let mut v = Vec::new();
     v.push(BridgeToHost::Ready {
