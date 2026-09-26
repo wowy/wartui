@@ -2012,7 +2012,7 @@ fn engine_sends_clear_on_next_heartbeat_when_node_clear_requested() {
 
     let command = engine.handle(clear_ring(Some(NODE)), clock.at(2));
     assert!(command.urgent.is_empty(), "nothing sent until the node's own window");
-    assert!(engine.nodes().next().expect("the node").clear_owed);
+    assert!(engine.nodes().next().expect("the node").clear_dedup_ring);
 
     let (_, dst) = sent_clear(&engine.handle(heartbeat(NODE, 2), clock.at(3)));
     assert_eq!(dst, NODE);
@@ -2020,7 +2020,7 @@ fn engine_sends_clear_on_next_heartbeat_when_node_clear_requested() {
 }
 
 #[test]
-fn engine_keeps_clear_owed_when_clear_unacked() {
+fn engine_keeps_clear_dedup_ring_when_clear_unacked() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
     caught_up(&mut engine, &clock);
@@ -2030,7 +2030,7 @@ fn engine_keeps_clear_owed_when_clear_unacked() {
 
     let (id, _) = sent_clear(&engine.handle(heartbeat(NODE, 2), clock.at(3)));
     engine.handle(send_result(id, SendStatus::AckFail, 900), clock.at(3));
-    assert!(engine.nodes().next().expect("the node").clear_owed, "still owed");
+    assert!(engine.nodes().next().expect("the node").clear_dedup_ring, "still owed");
 
     // Retried on the next heartbeat, the same as an unacknowledged assignment.
     let (_, dst) = sent_clear(&engine.handle(heartbeat(NODE, 3), clock.at(4)));
@@ -2038,7 +2038,7 @@ fn engine_keeps_clear_owed_when_clear_unacked() {
 }
 
 #[test]
-fn engine_drops_clear_owed_when_clear_acked() {
+fn engine_drops_clear_dedup_ring_when_clear_acked() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
     caught_up(&mut engine, &clock);
@@ -2048,7 +2048,7 @@ fn engine_drops_clear_owed_when_clear_acked() {
 
     let (id, _) = sent_clear(&engine.handle(heartbeat(NODE, 2), clock.at(3)));
     engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(3));
-    assert!(!engine.nodes().next().expect("the node").clear_owed);
+    assert!(!engine.nodes().next().expect("the node").clear_dedup_ring);
 
     let next = engine.handle(heartbeat(NODE, 3), clock.at(4));
     assert!(clears(&next).is_empty(), "nothing left to send");
@@ -2064,25 +2064,25 @@ fn engine_marks_only_assignable_nodes_when_fleet_clear_requested() {
 
     engine.handle(clear_ring(None), clock.at(2));
 
-    assert!(engine.nodes().find(|n| n.mac == NODE).expect("heartbeating").clear_owed);
+    assert!(engine.nodes().find(|n| n.mac == NODE).expect("heartbeating").clear_dedup_ring);
     assert!(
-        !engine.nodes().find(|n| n.mac == OTHER).expect("only observed").clear_owed,
+        !engine.nodes().find(|n| n.mac == OTHER).expect("only observed").clear_dedup_ring,
         "has never heartbeated, so it is not in the set the planner would cut for either"
     );
 }
 
 #[test]
-fn engine_drops_clear_owed_when_node_reboots() {
+fn engine_drops_clear_dedup_ring_when_node_reboots() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
     engine.handle(heartbeat(NODE, 5), clock.at(1));
     engine.handle(clear_ring(Some(NODE)), clock.at(2));
-    assert!(engine.nodes().next().expect("the node").clear_owed);
+    assert!(engine.nodes().next().expect("the node").clear_dedup_ring);
 
     // The counter goes backwards: a reboot, and a freshly booted node already
     // holds an empty ring.
     engine.handle(heartbeat(NODE, 1), clock.at(3));
-    assert!(!engine.nodes().next().expect("the node").clear_owed);
+    assert!(!engine.nodes().next().expect("the node").clear_dedup_ring);
 }
 
 #[test]
@@ -2110,7 +2110,7 @@ fn engine_holds_clear_when_heartbeat_replayed_from_backlog() {
         }
     }
     assert_eq!(sent, 0, "no clear fired into a window that had already closed");
-    assert!(engine.nodes().next().expect("the node").clear_owed, "still owed");
+    assert!(engine.nodes().next().expect("the node").clear_dedup_ring, "still owed");
 
     // Once the host is reading live, the next heartbeat's window carries it. The
     // reset is about the *last* step alone (`Self::note_arrival`): the host has to

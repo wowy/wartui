@@ -262,7 +262,7 @@ pub struct NodeState {
     /// Set by [`Command::ClearRing`]. Cleared on the clear's own `AckOk`, on a full
     /// peer table (the same terminal handling an assignment gets), and when the
     /// node reboots — a node that has just booted already holds an empty ring.
-    pub clear_owed: bool,
+    pub clear_dedup_ring: bool,
     /// How many times an assignment has been put on the air for this node.
     pub admin_attempts: u32,
     /// What happened to the most recent attempt.
@@ -325,7 +325,7 @@ impl NodeState {
             desired: None,
             confirmed: None,
             dirty: false,
-            clear_owed: false,
+            clear_dedup_ring: false,
             admin_attempts: 0,
             last_outcome: None,
             last_latency_us: None,
@@ -876,7 +876,7 @@ impl FleetEngine {
                     // re-issued under a fresh epoch rather than one the node might now match.
                     node.confirmed = None;
                     // A node that has just booted already holds an empty ring.
-                    node.clear_owed = false;
+                    node.clear_dedup_ring = false;
                 }
                 node.capabilities = Some(heartbeat.capabilities);
                 node.note_beat_gap(now);
@@ -904,7 +904,7 @@ impl FleetEngine {
                 // transmitting in — as long as the heartbeat is news.
                 // `send_admin` checks that for itself.
                 self.send_admin(src, now, batch);
-                self.send_clear(src, now, batch);
+                self.send_dedup_ring_clear(src, now, batch);
             }
             Frame::Sighting(sighting) => {
                 self.see_node(src, now, rssi, None, batch);
@@ -989,7 +989,7 @@ impl FleetEngine {
         match command {
             Command::AssignBle { mac } => self.on_assign_ble(mac),
             Command::SetTxPower { nodes, bridge } => self.on_set_tx_power(nodes, bridge, batch),
-            Command::ClearRing { mac } => self.on_clear_ring(mac, now),
+            Command::ClearRing { mac } => self.on_clear_dedup_ring(mac, now),
         }
     }
 
@@ -1081,11 +1081,11 @@ impl FleetEngine {
     /// that has never been heard from is a no-op rather than a row created for
     /// it. `None` reads [`Self::is_assignable`] at the moment the command
     /// arrives, the same set the planner would partition over right now.
-    fn on_clear_ring(&mut self, mac: Option<Mac>, now: Now) {
+    fn on_clear_dedup_ring(&mut self, mac: Option<Mac>, now: Now) {
         match mac {
             Some(mac) => {
                 if let Some(node) = self.nodes.get_mut(&mac) {
-                    node.clear_owed = true;
+                    node.clear_dedup_ring = true;
                 }
             }
             None => {
@@ -1097,7 +1097,7 @@ impl FleetEngine {
                     .collect();
                 for mac in targets {
                     if let Some(node) = self.nodes.get_mut(&mac) {
-                        node.clear_owed = true;
+                        node.clear_dedup_ring = true;
                     }
                 }
             }
@@ -1422,10 +1422,10 @@ impl FleetEngine {
     /// Only ever called straight off a heartbeat, the same as [`Self::send_admin`]
     /// and for the same reason: that is the one moment the node's radio is on the
     /// control channel and listening.
-    fn send_clear(&mut self, mac: Mac, now: Now, batch: &mut ActionBatch) {
+    fn send_dedup_ring_clear(&mut self, mac: Mac, now: Now, batch: &mut ActionBatch) {
         let live = self.air_is_live();
         let Some(node) = self.nodes.get(&mac) else { return };
-        if !node.clear_owed || !live {
+        if !node.clear_dedup_ring || !live {
             return;
         }
 
@@ -1525,13 +1525,13 @@ impl FleetEngine {
         match status {
             SendStatus::AckOk => {
                 if let Some(node) = self.nodes.get_mut(&mac) {
-                    node.clear_owed = false;
+                    node.clear_dedup_ring = false;
                 }
             }
             SendStatus::PeerTableFull => {
                 self.mark_peer_table_full(mac);
                 if let Some(node) = self.nodes.get_mut(&mac) {
-                    node.clear_owed = false;
+                    node.clear_dedup_ring = false;
                 }
             }
             // Everything else leaves the flag set, so the clear is retried on
