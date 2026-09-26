@@ -13,7 +13,7 @@ use wartui_core::gps::Gps;
 use wartui_core::position::{DEFAULT_MAX_AGE, PositionChain, PositionSource};
 use wartui_core::record::{AdminOutcome, Record};
 use wartui_proto::air::{
-    AdminMsg, Capabilities, Frame, HeartbeatMsg, RecordKind, SIGHTING_MSG_MAX, Security,
+    AdminMsg, Capabilities, Frame, HeartbeatMsg, RecordKind, Security, SightingBatchWriter,
     SightingMsg,
 };
 use wartui_proto::link::{
@@ -163,6 +163,15 @@ fn run(start: u8, end: u8) -> ChannelSet {
     ChannelSet::from_run(IndexRun::new(start, end))
 }
 
+/// A sighting-batch frame carrying `records`, in order, under `seq`.
+fn batch(seq: u16, records: &[SightingMsg<'_>]) -> Vec<u8> {
+    let mut writer = SightingBatchWriter::new(seq);
+    for msg in records {
+        assert!(writer.push(msg), "test record fits");
+    }
+    writer.as_bytes().to_vec()
+}
+
 fn observation(src: Mac, bssid: &str, rssi: i8) -> Event {
     named_observation(src, bssid, rssi, b"example")
 }
@@ -172,8 +181,7 @@ fn named_observation(src: Mac, bssid: &str, rssi: i8, ssid: &[u8]) -> Event {
     for (byte, hex) in raw.iter_mut().zip(bssid.split(':')) {
         *byte = u8::from_str_radix(hex, 16).expect("a hex octet");
     }
-    let mut frame = [0u8; SIGHTING_MSG_MAX];
-    let len = SightingMsg {
+    let msg = SightingMsg {
         kind: RecordKind::Wifi,
         bssid: raw,
         channel: 6,
@@ -181,10 +189,8 @@ fn named_observation(src: Mac, bssid: &str, rssi: i8, ssid: &[u8]) -> Event {
         security: Security::Wpa2Psk,
         ssid,
         ext: &[],
-    }
-    .encode_into(&mut frame)
-    .expect("fits");
-    rx(src, &frame[..len])
+    };
+    rx(src, &batch(1, &[msg]))
 }
 
 fn connected() -> Event {
@@ -240,8 +246,7 @@ fn engine_counts_unique_addresses_once_per_kind_when_duplicate_sightings_arrive(
     let mut engine = engine(EngineConfig::default(), &clock);
 
     let sighting = |kind: RecordKind, n: u8| {
-        let mut frame = [0u8; SIGHTING_MSG_MAX];
-        let len = SightingMsg {
+        let msg = SightingMsg {
             kind,
             bssid: [0x02, 0x00, 0x00, 0x00, u8::from(kind == RecordKind::Ble), n],
             channel: 6,
@@ -249,10 +254,8 @@ fn engine_counts_unique_addresses_once_per_kind_when_duplicate_sightings_arrive(
             security: Security::Wpa2Psk,
             ssid: b"example",
             ext: &[],
-        }
-        .encode_into(&mut frame)
-        .expect("fits");
-        rx(NODE, &frame[..len])
+        };
+        rx(NODE, &batch(1, &[msg]))
     };
     for round in 0..3 {
         for n in 0..30 {
@@ -282,11 +285,120 @@ fn engine_preserves_raw_frame_bytes_when_sighting_is_recorded() {
     let batch = engine.handle(observation(NODE, "AA:BB:CC:DD:EE:FF", -60), clock.at(1));
     let Record::Observation(obs) = &batch.records[1] else { panic!("expected an observation") };
 
-    assert_eq!(&obs.raw_body[..4], b"WTUI");
-    assert_eq!(
-        wartui_proto::air::SightingMsg::decode(&obs.raw_body).expect("valid").ssid,
-        b"example"
-    );
+    // The record's own bytes, not the batch's shared header: a record carries
+    // no magic of its own, and the whole batch is kept separately under
+    // `--record-raw`.
+    let (decoded, consumed) = SightingMsg::decode_record(&obs.raw_body).expect("valid");
+    assert_eq!(consumed, obs.raw_body.len(), "nothing but this one record");
+    assert_eq!(decoded.ssid, b"example");
+}
+
+#[test]
+fn engine_produces_one_node_seen_and_three_observations_when_batch_of_three_arrives() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+
+    let msgs = [
+        SightingMsg {
+            kind: RecordKind::Wifi,
+            bssid: [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01],
+            channel: 6,
+            rssi: -50,
+            security: Security::Open,
+            ssid: b"one",
+            ext: &[],
+        },
+        SightingMsg {
+            kind: RecordKind::Wifi,
+            bssid: [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x02],
+            channel: 6,
+            rssi: -55,
+            security: Security::Open,
+            ssid: b"two",
+            ext: &[],
+        },
+        SightingMsg {
+            kind: RecordKind::Ble,
+            bssid: [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x03],
+            channel: 0,
+            rssi: -60,
+            security: Security::Ble,
+            ssid: b"",
+            ext: &[],
+        },
+    ];
+    let frame = batch(1, &msgs);
+    let result = engine.handle(rx(NODE, &frame), clock.at(1));
+
+    // One touch for the whole frame, not one per record.
+    assert_eq!(result.records.len(), 4, "one node touch and three observations");
+    assert!(matches!(result.records[0], Record::Node(_)));
+    let observations: Vec<_> = result.records[1..]
+        .iter()
+        .map(|r| match r {
+            Record::Observation(obs) => obs,
+            other => panic!("expected an observation, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(observations.len(), 3);
+    for (obs, msg) in observations.iter().zip(&msgs) {
+        assert_eq!(obs.bssid, msg.bssid);
+        // Each observation's raw_body is its own record, never the batch
+        // around it.
+        let (decoded, consumed) = SightingMsg::decode_record(&obs.raw_body).expect("valid");
+        assert_eq!(consumed, obs.raw_body.len());
+        assert_eq!(decoded.bssid, msg.bssid);
+    }
+    assert_eq!(counters(&engine).observations, 3);
+}
+
+#[test]
+fn engine_counts_batches_lost_when_sequence_gap_of_two_arrives() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+
+    let msg = SightingMsg {
+        kind: RecordKind::Wifi,
+        bssid: [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF],
+        channel: 6,
+        rssi: -60,
+        security: Security::Open,
+        ssid: b"",
+        ext: &[],
+    };
+    engine.handle(rx(NODE, &batch(1, &[msg])), clock.at(1));
+    engine.handle(rx(NODE, &batch(4, &[msg])), clock.at(2));
+
+    let node = engine.nodes().find(|n| n.mac == NODE).expect("the node");
+    assert_eq!(node.batches_lost, 2, "batches 2 and 3 never arrived");
+    assert_eq!(counters(&engine).batches_lost, 2);
+}
+
+#[test]
+fn engine_resets_batch_sequence_baseline_when_node_reboots() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+
+    let msg = SightingMsg {
+        kind: RecordKind::Wifi,
+        bssid: [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF],
+        channel: 6,
+        rssi: -60,
+        security: Security::Open,
+        ssid: b"",
+        ext: &[],
+    };
+    engine.handle(heartbeat(NODE, 5), clock.at(1));
+    engine.handle(rx(NODE, &batch(10, &[msg])), clock.at(2));
+
+    // The node reboots: its heartbeat counter goes back to a boot value, and
+    // its batch counter along with it.
+    engine.handle(heartbeat(NODE, 1), clock.at(3));
+    engine.handle(rx(NODE, &batch(0, &[msg])), clock.at(4));
+
+    let node = engine.nodes().find(|n| n.mac == NODE).expect("the node");
+    assert_eq!(node.batches_lost, 0, "the gap across a reboot is history, not a loss");
+    assert_eq!(node.last_seq, Some(0));
 }
 
 #[test]

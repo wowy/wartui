@@ -22,7 +22,10 @@ pub mod stall;
 /// `heapless` themselves, and can never end up on a mismatched version.
 pub use heapless;
 
-pub use air::{AdminMsg, DecodeError, Frame, HeartbeatMsg, MsgType, SightingMsg};
+pub use air::{
+    AdminMsg, DecodeError, Frame, HeartbeatMsg, MsgType, SightingBatch, SightingBatchWriter,
+    SightingMsg,
+};
 pub use beacon::{Sighting, parse_mgmt};
 pub use dedup::MacRing;
 pub use hci::AdvReport;

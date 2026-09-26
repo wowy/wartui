@@ -10,12 +10,13 @@ web interface, SD card, display, buttons, fuel gauge, GPS, geofencing, uploads a
 come across at all, because a node in this fleet has no use for any of them.
 
 It shares no wire format with it either. A node broadcasts a 13-byte heartbeat once per completed
-sweep — or once per scan, on the node whose job is Bluetooth — and an 18-plus-SSID sighting per
-newly-seen BSSID, whose trailer carries a Passpoint network's roaming consortium identifiers, or a
-BLE advertiser's manufacturer identifier, when there are any. It accepts a 16-byte unicast
-assignment, and a 6-byte unicast clear that empties its dedup ring. All four sit behind wartui's own
-`WTUI` magic and a wire version byte, checked before anything else, so neither fleet can reach the
-other at all.
+sweep — or once per scan, on the node whose job is Bluetooth — and a sighting batch at the end of
+each dwell or scan, packed to fill the 250-byte ESP-NOW payload: a nine-byte header followed by one
+12-plus-SSID record per newly-seen BSSID or advertiser, whose trailer carries a Passpoint network's
+roaming consortium identifiers, or a BLE advertiser's manufacturer identifier, when there are any. It
+accepts a 16-byte unicast assignment, and a 6-byte unicast clear that empties its dedup ring. All
+four sit behind wartui's own `WTUI` magic and a wire version byte, checked before anything else, so
+neither fleet can reach the other at all.
 
 ## What it does differently
 

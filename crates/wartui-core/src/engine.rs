@@ -26,7 +26,8 @@ use std::time::{Duration, Instant};
 
 use wartui_bridge::{BridgeInfo, LinkEvent};
 use wartui_proto::air::{
-    AdminMsg, Capabilities, ClearMsg, DecodeError, Frame, RecordKind, foreign, wire_epoch,
+    AdminMsg, Capabilities, ClearMsg, DecodeError, Frame, RecordKind, SightingMsg, foreign,
+    wire_epoch,
 };
 use wartui_proto::link::{BridgeToHost, EspNowPayload, HostToBridge, Mac, SendStatus};
 use wartui_proto::plan::{
@@ -275,6 +276,14 @@ pub struct NodeState {
     last_heartbeat_rx_us: Option<u32>,
     /// Gaps between recent heartbeats, in milliseconds, newest last.
     beat_gaps: VecDeque<u32>,
+    /// The `seq` of this node's most recent sighting batch. `None` before its
+    /// first, and reset on a detected reboot: the counter restarts at boot,
+    /// and a gap across one is history rather than a loss.
+    pub last_seq: Option<u16>,
+    /// Batches lost between this node and the host, counted from gaps in
+    /// `seq`. Each one is everything one dwell or Bluetooth scan produced,
+    /// hidden until the node's dedup ring next refreshes them.
+    pub batches_lost: u64,
 }
 
 /// What one node was told to do, and the fleet arithmetic it was computed
@@ -331,6 +340,8 @@ impl NodeState {
             last_latency_us: None,
             last_heartbeat_rx_us: None,
             beat_gaps: VecDeque::new(),
+            last_seq: None,
+            batches_lost: 0,
         }
     }
 
@@ -412,6 +423,9 @@ pub struct Counters {
     pub peer_table_full: u64,
     /// How many times the pool has been re-partitioned across the fleet.
     pub replans: u64,
+    /// Sighting batches lost between a node and the host, summed across the
+    /// fleet, from gaps in each node's `seq`.
+    pub batches_lost: u64,
 }
 
 /// Counters the store keeps, folded into the snapshot for display.
@@ -877,6 +891,10 @@ impl FleetEngine {
                     node.confirmed = None;
                     // A node that has just booted already holds an empty ring.
                     node.clear_dedup_ring = false;
+                    // Its batch counter went back to a boot value as well, so the
+                    // gap between whatever it last sent and its first batch since
+                    // is a reboot's worth of history rather than a loss.
+                    node.last_seq = None;
                 }
                 node.capabilities = Some(heartbeat.capabilities);
                 node.note_beat_gap(now);
@@ -906,54 +924,96 @@ impl FleetEngine {
                 self.send_admin(src, now, batch);
                 self.send_dedup_ring_clear(src, now, batch);
             }
-            Frame::Sighting(sighting) => {
+            Frame::Sightings(sightings) => {
+                // Once for the whole frame: a batch is one node speaking once,
+                // not `count` nodes speaking once each.
                 self.see_node(src, now, rssi, None, batch);
-                self.counters.observations += 1;
-                match sighting.kind {
-                    RecordKind::Wifi => {
-                        self.unique_wifi.insert(&sighting.bssid);
-                    }
-                    RecordKind::Ble => {
-                        self.unique_ble.insert(&sighting.bssid);
-                    }
+                self.note_batch_seq(src, sightings.seq);
+                for (sighting, raw) in sightings.iter() {
+                    self.on_sighting(src, now, rssi, sighting, raw, batch);
                 }
-                if let Some(node) = self.nodes.get_mut(&src) {
-                    node.observations += 1;
-                }
-                // The trailer's meaning is the kind's — the roaming consortium
-                // body for Wi-Fi, the company identifier for BLE — and this is
-                // where that split is made. A trailer a well-formed frame of
-                // this wire version cannot carry, a BLE one that is not exactly
-                // two bytes, is dropped rather than guessed at.
-                let (rcoi, mfgr_id) = match sighting.kind {
-                    RecordKind::Wifi => {
-                        ((!sighting.ext.is_empty()).then(|| sighting.ext.to_vec()), None)
-                    }
-                    RecordKind::Ble => (
-                        None,
-                        (sighting.ext.len() == 2)
-                            .then(|| u16::from_le_bytes([sighting.ext[0], sighting.ext[1]])),
-                    ),
-                };
-                let observation = Observation {
-                    node_mac: src,
-                    rx_at_ms: now.unix_ms,
-                    link_rssi: Some(rssi),
-                    bssid: sighting.bssid,
-                    ssid: sighting.ssid.to_vec(),
-                    security: sighting.security.to_string(),
-                    channel: u16::from(sighting.channel),
-                    rssi: i16::from(sighting.rssi),
-                    kind: sighting.kind,
-                    rcoi,
-                    mfgr_id,
-                    fix: self.config.position.resolve(now.unix_ms),
-                    raw_body: payload.to_vec(),
-                };
-                self.push_tail(&observation);
-                batch.records.push(Record::Observation(observation));
             }
         }
+    }
+
+    /// One record out of a [`Frame::Sightings`] batch, after [`Self::see_node`]
+    /// and [`Self::note_batch_seq`] have already run for the frame it came in.
+    #[allow(clippy::too_many_arguments, reason = "the pieces of one record, at the call site")]
+    fn on_sighting(
+        &mut self,
+        src: Mac,
+        now: Now,
+        rssi: i8,
+        sighting: SightingMsg<'_>,
+        raw: &[u8],
+        batch: &mut ActionBatch,
+    ) {
+        self.counters.observations += 1;
+        match sighting.kind {
+            RecordKind::Wifi => {
+                self.unique_wifi.insert(&sighting.bssid);
+            }
+            RecordKind::Ble => {
+                self.unique_ble.insert(&sighting.bssid);
+            }
+        }
+        if let Some(node) = self.nodes.get_mut(&src) {
+            node.observations += 1;
+        }
+        // The trailer's meaning is the kind's — the roaming consortium
+        // body for Wi-Fi, the company identifier for BLE — and this is
+        // where that split is made. A trailer a well-formed frame of
+        // this wire version cannot carry, a BLE one that is not exactly
+        // two bytes, is dropped rather than guessed at.
+        let (rcoi, mfgr_id) = match sighting.kind {
+            RecordKind::Wifi => ((!sighting.ext.is_empty()).then(|| sighting.ext.to_vec()), None),
+            RecordKind::Ble => (
+                None,
+                (sighting.ext.len() == 2)
+                    .then(|| u16::from_le_bytes([sighting.ext[0], sighting.ext[1]])),
+            ),
+        };
+        let observation = Observation {
+            node_mac: src,
+            rx_at_ms: now.unix_ms,
+            link_rssi: Some(rssi),
+            bssid: sighting.bssid,
+            ssid: sighting.ssid.to_vec(),
+            security: sighting.security.to_string(),
+            channel: u16::from(sighting.channel),
+            rssi: i16::from(sighting.rssi),
+            kind: sighting.kind,
+            rcoi,
+            mfgr_id,
+            fix: self.config.position.resolve(now.unix_ms),
+            // The record's own bytes, not the batch around it: a batch's
+            // shared header carries nothing a re-parse of one record needs,
+            // and the whole frame is still kept in `Record::Raw` when
+            // `--record-raw` is on.
+            raw_body: raw.to_vec(),
+        };
+        self.push_tail(&observation);
+        batch.records.push(Record::Observation(observation));
+    }
+
+    /// Track batches lost between this node and the host.
+    ///
+    /// `seq` counts up once per batch a node sends, wrapping and restarting at
+    /// boot — the reboot arm above resets the baseline for the same reason it
+    /// resets everything else a boot forgets. A gap under 1024 is batches lost
+    /// in a row; at or past it, the count has wrapped or the frame arrived out
+    /// of order, and guessing at a loss that large would invent history rather
+    /// than report it.
+    fn note_batch_seq(&mut self, src: Mac, seq: u16) {
+        let Some(node) = self.nodes.get_mut(&src) else { return };
+        if let Some(last) = node.last_seq {
+            let gap = u64::from(seq.wrapping_sub(last.wrapping_add(1)));
+            if gap < 1024 {
+                node.batches_lost += gap;
+                self.counters.batches_lost += gap;
+            }
+        }
+        node.last_seq = Some(seq);
     }
 
     /// Refresh what is known about the node at `src`, and file the row that
