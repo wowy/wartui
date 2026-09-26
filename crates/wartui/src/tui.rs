@@ -734,9 +734,10 @@ fn receiver(gps: &GpsView, source: PositionSource) -> Option<Span<'static>> {
 }
 
 fn draw_fleet(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot, ui: &mut Ui) {
-    let header =
-        Row::new(["node", "rssi", "beats", "obs", "last", "beat", "ble", "channels", "state"])
-            .style(Style::new().add_modifier(Modifier::BOLD));
+    let header = Row::new([
+        "node", "rssi", "beats", "obs", "lost", "last", "beat", "ble", "channels", "state",
+    ])
+    .style(Style::new().add_modifier(Modifier::BOLD));
 
     let rows: Vec<Row<'_>> = snapshot
         .nodes
@@ -748,6 +749,7 @@ fn draw_fleet(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot, ui: &mut U
                 Cell::from(node.state.link_rssi.map_or_else(|| "—".to_owned(), |r| format!("{r}"))),
                 Cell::from(node.state.heartbeats.to_string()),
                 Cell::from(node.state.observations.to_string()),
+                Cell::from(lost_cell(node)),
                 Cell::from(ago(snapshot.now_ms - node.state.last_seen_ms)),
                 // The measured sweep period: proportional to how many channels
                 // the node scans, and so the only evidence from here that an
@@ -765,6 +767,7 @@ fn draw_fleet(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot, ui: &mut U
         Constraint::Length(4),
         Constraint::Length(5),
         Constraint::Length(6),
+        Constraint::Length(5),
         Constraint::Length(5),
         Constraint::Length(6),
         Constraint::Length(4),
@@ -827,6 +830,20 @@ fn channels_cell(node: &NodeView) -> Span<'static> {
             }
         },
     )
+}
+
+/// Whole batches missing between this node and the host, or `—` before its
+/// first one has arrived — which is not the same thing as zero: a node that
+/// has never sent a batch has nothing to have lost yet.
+///
+/// Read off `observations` rather than `last_seq`: every batch carries at least one
+/// record, and a reboot clears `last_seq` but not the losses counted before it.
+fn lost_cell(node: &NodeView) -> String {
+    if node.state.observations == 0 {
+        "—".to_owned()
+    } else {
+        node.state.batches_lost.to_string()
+    }
 }
 
 /// Whether this node is the one carrying the Bluetooth scan.
@@ -1081,6 +1098,9 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot, ui: &Ui, 
         )));
         if c.admin_sent > 0 {
             spans.push(Span::raw(format!("  admin {}/{}", c.admin_acked, c.admin_sent)));
+        }
+        if c.batches_lost > 0 {
+            spans.push(Span::raw(format!("  lost {}", c.batches_lost)));
         }
         // Beside the totals rather than in the fault box: connecting to a
         // bridge that has been buffering beside a fleet produces these as a
@@ -1430,6 +1450,7 @@ mod tests {
                 admin_failed: 1,
                 peer_table_full: 0,
                 replans: 0,
+                batches_lost: 0,
             },
             store: StoreStats { written: 800, dropped: 7 },
             bridge_status: Some(BridgeStatus {
@@ -1812,6 +1833,25 @@ mod tests {
         // `busy()`'s bridge dropped 1300 frames before this host attached.
         let screen = rendered(&busy());
         assert!(!screen.contains("bridge dropped"), "{screen}");
+    }
+
+    /// The footer's running-totals line, identified by `frames` rather than
+    /// position: the fleet table's `lost` column header would otherwise make
+    /// a plain substring search for "lost" match every screen.
+    fn totals_line(screen: &str) -> String {
+        screen.lines().find(|line| line.contains("frames")).unwrap_or_default().to_owned()
+    }
+
+    #[test]
+    fn view_shows_lost_total_when_batches_lost_is_nonzero() {
+        let mut snapshot = busy();
+        snapshot.counters.batches_lost = 7;
+        let screen = rendered(&snapshot);
+        assert!(totals_line(&screen).contains("lost 7"), "{screen}");
+
+        // `busy()` itself has nothing lost, the same rule `admin` follows.
+        let screen = rendered(&busy());
+        assert!(!totals_line(&screen).contains("lost"), "{screen}");
     }
 
     /// A capture whose only fault is that the bridge restarted underneath it.
@@ -2201,6 +2241,24 @@ mod tests {
         let rendered = terminal.backend().to_string();
         assert!(rendered.contains(" ble "), "the node whose radio confirmed it");
         assert!(rendered.contains("on…"), "and the node still waiting on its window");
+    }
+
+    #[test]
+    fn fleet_table_shows_lost_column_when_node_has_missed_batches() {
+        // Rebooted since: `last_seq` is cleared, and the losses before it still show.
+        let mut with_loss = node(0x84, 1, true);
+        with_loss.state.last_seq = None;
+        with_loss.state.batches_lost = 42;
+        let mut never_sent = node(0x85, 0, true);
+        never_sent.state.observations = 0;
+
+        assert_eq!(lost_cell(&with_loss), "42");
+        assert_eq!(lost_cell(&never_sent), "—", "a dash rather than a zero");
+
+        let snapshot = Snapshot { nodes: vec![with_loss, never_sent], tail: Vec::new(), ..busy() };
+        let screen = rendered(&snapshot);
+        assert!(screen.contains("lost"), "the column header: {screen}");
+        assert!(screen.contains("42"), "the node with missed batches: {screen}");
     }
 
     #[test]

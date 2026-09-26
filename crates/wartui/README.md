@@ -14,7 +14,7 @@ This is the operator's manual. The root [`README.md`](../../README.md) is the sh
 | -------- | ----------------------------------------------------------- |
 | `run`    | Capture a fleet into the store and watch it live            |
 | `export` | Write a WiGLE CSV from a capture                            |
-| `sniff`  | Print every frame the bridge hears, decoded                 |
+| `sniff`  | Print every frame the bridge hears, decoded, a line per record |
 | `status` | Ask the bridge for its channel, counters and uptime         |
 | `reset`  | Reboot a bridge that has stopped answering                  |
 | `ports`  | List the Espressif boards attached, and the address of each |
@@ -374,6 +374,13 @@ least 10 dB louder than it has reported it before. `r` clears the selected node'
 clears every assignable node's, each without a reboot and each on its next heartbeat; a node's
 memory is also emptied whenever its share or its Bluetooth role changes
 (`crates/wartui-proto/src/dedup.rs` explains why it works this way).
+
+The `lost` column is whole batches missing between a node and the host, counted from gaps in the
+sequence number every batch carries — `—` before its first one arrives, a running count after. Each
+one lost is everything a dwell or a Bluetooth scan produced, up to about a dozen access points, and
+those addresses stay hidden the same way a lost frame always has: until the node's own five-minute
+refresh reports them again. The footer's `lost N` is the same count summed across the fleet, and
+appears only once something has been.
 
 The header has three ways of saying it has nothing to drive: `auto — nothing heartbeating yet`,
 `auto — no node it can drive` (nodes are alive but none is assignable), and `auto — too many nodes`

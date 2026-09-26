@@ -116,16 +116,17 @@ impl AdvReport {
         }
     }
 
-    /// The frame a node broadcasts about this report, trailer and all.
+    /// Hand `f` the record this report becomes, trailer and all.
     ///
     /// The company identifier is the trailer, so the rule that turns one into
     /// the other lives here — once, where the identifier was read — rather
-    /// than at each caller.
-    #[must_use]
-    pub fn encode_into(&self, out: &mut [u8]) -> Option<usize> {
+    /// than at each caller. A callback rather than a returned [`SightingMsg`]
+    /// because the identifier's two bytes need somewhere to live for the
+    /// borrow, and that somewhere cannot outlive this call.
+    pub fn with_msg<R>(&self, f: impl FnOnce(SightingMsg<'_>) -> R) -> R {
         match self.mfgr {
-            Some(id) => self.as_msg(&id.to_le_bytes()).encode_into(out),
-            None => self.as_msg(&[]).encode_into(out),
+            Some(id) => f(self.as_msg(&id.to_le_bytes())),
+            None => f(self.as_msg(&[])),
         }
     }
 

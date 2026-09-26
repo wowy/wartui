@@ -5,7 +5,7 @@
 //! capture is least likely to contain. Real frames go in `beacon_vectors.txt`
 //! and are exercised by `every_captured_beacon_yields_a_usable_observation`.
 
-use wartui_proto::air::{SIGHTING_MSG_MAX, SSID_MAX, Security, SightingMsg};
+use wartui_proto::air::{SIGHTING_RECORD_MAX, SSID_MAX, Security, SightingMsg};
 use wartui_proto::beacon::{parse_mgmt, rcoi_text};
 
 /// One `tag, len, data` element.
@@ -292,9 +292,9 @@ fn beacon_parser_extracts_roaming_consortium_verbatim_when_passpoint_ie_present(
     let ap = parse_mgmt(&beacon(&ie(111, &OPEN_ROAMING)), -50, 6).expect("a beacon");
     assert_eq!(ap.rcoi(), &OPEN_ROAMING);
 
-    let mut buf = [0u8; SIGHTING_MSG_MAX];
-    let len = ap.as_msg().encode_into(&mut buf).expect("fits");
-    assert_eq!(SightingMsg::decode(&buf[..len]).expect("valid").ext, &OPEN_ROAMING);
+    let mut buf = [0u8; SIGHTING_RECORD_MAX];
+    let len = ap.as_msg().encode_record_into(&mut buf).expect("fits");
+    assert_eq!(SightingMsg::decode_record(&buf[..len]).expect("valid").0.ext, &OPEN_ROAMING);
 }
 
 #[test]
@@ -346,10 +346,10 @@ fn sighting_msg_survives_wire_round_trip_when_parsed_from_beacon() {
     ies.extend_from_slice(&ie(48, &rsn(&[2])));
     let ap = parse_mgmt(&beacon(&ies), -42, 11).expect("a beacon");
 
-    let mut buf = [0u8; SIGHTING_MSG_MAX];
-    let len = ap.as_msg().encode_into(&mut buf).expect("the frame fits");
+    let mut buf = [0u8; SIGHTING_RECORD_MAX];
+    let len = ap.as_msg().encode_record_into(&mut buf).expect("the frame fits");
 
-    let back = SightingMsg::decode(&buf[..len]).expect("valid frame");
+    let (back, _) = SightingMsg::decode_record(&buf[..len]).expect("valid frame");
     assert_eq!(back.bssid, ap.bssid);
     assert_eq!(back.ssid, b"My,Net");
     assert_eq!(back.security, ap.security);
@@ -390,12 +390,13 @@ fn beacon_parser_yields_usable_observation_when_processing_captured_beacons() {
 
         // The payload has to survive the wire, which is the only reason any of
         // this is parsed at all.
-        let mut buf = [0u8; SIGHTING_MSG_MAX];
+        let mut buf = [0u8; SIGHTING_RECORD_MAX];
         let written = ap
             .as_msg()
-            .encode_into(&mut buf)
-            .unwrap_or_else(|| panic!("{name}: frame did not fit SIGHTING_MSG_MAX"));
-        let back = SightingMsg::decode(&buf[..written]).unwrap_or_else(|e| panic!("{name}: {e}"));
+            .encode_record_into(&mut buf)
+            .unwrap_or_else(|| panic!("{name}: record did not fit SIGHTING_RECORD_MAX"));
+        let (back, _) =
+            SightingMsg::decode_record(&buf[..written]).unwrap_or_else(|e| panic!("{name}: {e}"));
         assert_eq!(back.ssid, ap.ssid(), "{name}: SSID did not survive the wire");
 
         tokens.insert(ap.security.to_string());

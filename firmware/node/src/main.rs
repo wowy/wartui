@@ -43,7 +43,8 @@ use static_cell::ConstStaticCell;
 #[cfg(feature = "ble")]
 use static_cell::StaticCell;
 use wartui_proto::air::{
-    AdminMsg, Capabilities, DecodeError, Frame, HeartbeatMsg, SIGHTING_MSG_MAX,
+    AdminMsg, Capabilities, DecodeError, Frame, HeartbeatMsg, SIGHTINGS_PER_BATCH_MAX,
+    SightingBatchWriter, SightingMsg,
 };
 use wartui_proto::plan::{
     ADMIN_WAIT_MS, BLE_BEAT_MS, CHANNEL_DWELL_MS, CONTROL_CHANNEL, ChannelSet, IDLE_BEAT_MS,
@@ -146,6 +147,10 @@ struct Node {
     /// has restarted and forgotten its assignment.
     counter: u32,
     reported: u32,
+    /// This sighting batch's sequence number, advanced only once a batch is
+    /// actually broadcast — the same rule [`heartbeat`] follows for `counter`.
+    /// A gap the host sees in it is batches lost on the way there.
+    seq: u16,
 }
 
 impl Node {
@@ -162,6 +167,7 @@ impl Node {
             cursor: SweepCursor::new(),
             counter: 1,
             reported: 0,
+            seq: 0,
         }
     }
 
@@ -486,26 +492,101 @@ fn heartbeat(sender: &mut EspNowSender<'_>, node: &mut Node, capabilities: Capab
     }
 }
 
+/// Packs every sighting one dwell or Bluetooth scan produces into as few
+/// broadcasts as the 250-byte ESP-NOW payload allows, and sends what it holds
+/// at the end rather than carrying anything into the next one — the host
+/// stamps a sighting's position on arrival, so held sightings would carry the
+/// wrong one.
+///
+/// `members` mirrors what `writer` currently holds, so a broadcast's success
+/// can be turned into a dedup-ring entry per record without re-decoding the
+/// frame just sent.
+struct Outgoing {
+    writer: SightingBatchWriter,
+    members: [([u8; 6], Option<i8>); SIGHTINGS_PER_BATCH_MAX],
+    len: usize,
+}
+
+impl Outgoing {
+    fn new(seq: u16) -> Self {
+        Self {
+            writer: SightingBatchWriter::new(seq),
+            members: [([0u8; 6], None); SIGHTINGS_PER_BATCH_MAX],
+            len: 0,
+        }
+    }
+
+    /// Add one sighting, flushing first if it does not fit what is already
+    /// packed. Returns how many records a flush this triggered actually sent,
+    /// which is zero unless it had to make room.
+    fn offer(
+        &mut self,
+        sender: &mut EspNowSender<'_>,
+        node: &mut Node,
+        msg: &SightingMsg<'_>,
+        addr: [u8; 6],
+        rssi: Option<i8>,
+        now: u32,
+    ) -> u32 {
+        if self.writer.push(msg) {
+            self.remember(addr, rssi);
+            return 0;
+        }
+        let flushed = self.flush(sender, node, now);
+        // An empty batch has room for any record that encodes at all, so a refusal
+        // here is a record over its limits: skipped, and never entered in `SEEN`.
+        if self.writer.push(msg) {
+            self.remember(addr, rssi);
+        }
+        flushed
+    }
+
+    /// Note an address the writer has just taken, for [`Self::flush`] to record.
+    fn remember(&mut self, addr: [u8; 6], rssi: Option<i8>) {
+        if self.len < self.members.len() {
+            self.members[self.len] = (addr, rssi);
+            self.len += 1;
+        }
+    }
+
+    /// Broadcast what is packed, if anything, returning how many records it
+    /// held. `SEEN` is only updated once the radio confirms the broadcast:
+    /// recorded only once it is on the air, so a batch the radio never sent
+    /// stays due to be offered again.
+    fn flush(&mut self, sender: &mut EspNowSender<'_>, node: &mut Node, now: u32) -> u32 {
+        if self.writer.is_empty() {
+            return 0;
+        }
+        let sent = if radio::broadcast(sender, self.writer.as_bytes()) {
+            for &(addr, rssi) in &self.members[..self.len] {
+                sniff::SEEN.with(|seen| seen.record(addr, rssi, now));
+            }
+            node.seq = node.seq.wrapping_add(1);
+            u32::try_from(self.len).unwrap_or(u32::MAX)
+        } else {
+            0
+        };
+        self.writer.reset(node.seq);
+        self.len = 0;
+        sent
+    }
+}
+
 /// Report everything heard on `channel` that has not been reported lately.
 fn report(sender: &mut EspNowSender<'_>, node: &mut Node, channel: u8) {
-    let mut sent = 0u32;
     let now = sniff::now_ms();
+    let mut outgoing = Outgoing::new(node.seq);
+    let mut sent = 0u32;
     while let Some(sighting) = sniff::take() {
         let rssi = Some(sighting.rssi);
-        // Taken and released per sighting, never across the transmit below — the
-        // callback's own rule for `sniff::SEEN`, kept here too.
+        // Taken and released per sighting, never across the transmit inside
+        // `offer` — the callback's own rule for `sniff::SEEN`, kept here too.
         if !sniff::SEEN.with(|seen| seen.is_due(&sighting.bssid, rssi, now)) {
             continue;
         }
-        let mut frame = [0u8; SIGHTING_MSG_MAX];
-        let Some(len) = sighting.as_msg().encode_into(&mut frame) else { continue };
-        // Recorded only once it is on the air: suppressing an access point the host
-        // never received would hide it until the refresh.
-        if radio::broadcast(sender, &frame[..len]) {
-            sniff::SEEN.with(|seen| seen.record(sighting.bssid, rssi, now));
-            sent += 1;
-        }
+        sent += outgoing.offer(sender, node, &sighting.as_msg(), sighting.bssid, rssi, now);
     }
+    sent += outgoing.flush(sender, node, now);
     if sent > 0 {
         node.reported = node.reported.wrapping_add(sent);
         note!(
@@ -526,9 +607,10 @@ fn report(sender: &mut EspNowSender<'_>, node: &mut Node, channel: u8) {
 /// Wi-Fi, so the scan competes with nothing but that heartbeat for the antenna.
 #[cfg(feature = "ble")]
 fn report_ble(sender: &mut EspNowSender<'_>, node: &mut Node, scanner: &mut ble::Scanner<'_>) {
-    let mut lines = 0u32;
     let heard = scanner.sweep();
     let now = sniff::now_ms();
+    let mut outgoing = Outgoing::new(node.seq);
+    let mut lines = 0u32;
     // One report at a time out of the ring, so the lock is never held across a
     // transmit — the same shape the Wi-Fi sightings are drained in.
     while let Some(report) = ble::take() {
@@ -536,14 +618,10 @@ fn report_ble(sender: &mut EspNowSender<'_>, node: &mut Node, scanner: &mut ble:
         if !sniff::SEEN.with(|seen| seen.is_due(&report.address, rssi, now)) {
             continue;
         }
-        let mut frame = [0u8; SIGHTING_MSG_MAX];
-        let Some(len) = report.encode_into(&mut frame) else { continue };
-        // After the broadcast, for the reason `report` gives.
-        if radio::broadcast(sender, &frame[..len]) {
-            sniff::SEEN.with(|seen| seen.record(report.address, rssi, now));
-            lines += 1;
-        }
+        lines +=
+            report.with_msg(|msg| outgoing.offer(sender, node, &msg, report.address, rssi, now));
     }
+    lines += outgoing.flush(sender, node, now);
     if heard > 0 {
         node.reported = node.reported.wrapping_add(lines);
         note!("ble: {} heard, {} new, {} dropped", heard, lines, ble::dropped());

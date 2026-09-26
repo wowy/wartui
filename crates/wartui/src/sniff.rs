@@ -70,9 +70,11 @@ pub async fn run(args: Args) -> Result<()> {
     }
 
     println!(
-        "\n# {} frames: {} sighting, {} heartbeat, {} admin, {} not ours, {} undecodable",
+        "\n# {} frames: {} sighting in {} batches, {} heartbeat, {} admin, {} not ours, \
+         {} undecodable",
         counts.total,
         counts.sighting,
+        counts.batches,
         counts.heartbeat,
         counts.admin,
         counts.foreign_fleet + counts.foreign_admin,
@@ -123,7 +125,10 @@ struct Counts {
     /// undecodable frame is not one of them — see [`handle`].
     heard_a_bridge: bool,
     total: u64,
+    /// Records seen, across every batch — not the number of `Rx` frames.
     sighting: u64,
+    /// Sighting-batch frames, each carrying one or more `sighting` records.
+    batches: u64,
     heartbeat: u64,
     admin: u64,
     /// Vendor heartbeats and observations. Another fleet is on this channel,
@@ -187,9 +192,18 @@ fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
                         heartbeat.counter, heartbeat.capabilities
                     );
                 }
-                Ok(Frame::Sighting(sighting)) => {
-                    counts.sighting += 1;
-                    println!("{head}  {}", render(&sighting));
+                Ok(Frame::Sightings(sightings)) => {
+                    counts.batches += 1;
+                    for (i, (sighting, _raw)) in sightings.iter().enumerate() {
+                        counts.sighting += 1;
+                        println!(
+                            "{head}  B#{} {}/{}  {}",
+                            sightings.seq,
+                            i + 1,
+                            sightings.count,
+                            render(&sighting)
+                        );
+                    }
                 }
                 Ok(Frame::Admin(admin)) => {
                     counts.admin += 1;

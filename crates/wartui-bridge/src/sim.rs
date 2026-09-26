@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 use wartui_proto::air::{
-    AdminMsg, Capabilities, Frame, HeartbeatMsg, RecordKind, SIGHTING_MSG_MAX, Security,
+    AdminMsg, Capabilities, Frame, HeartbeatMsg, RecordKind, Security, SightingBatchWriter,
     SightingMsg,
 };
 use wartui_proto::dedup::DedupRing;
@@ -342,6 +342,10 @@ struct SimNode {
     /// planner's only reason to treat one node differently from another.
     five_ghz: bool,
     hb_counter: u32,
+    /// This node's next sighting batch counter, mirroring `Node::seq` on the
+    /// firmware: it advances only once a batch actually goes out, the same
+    /// rule the heartbeat counter follows.
+    seq: u16,
     seen: Box<DedupRing>,
     /// When this node booted, on tokio's clock so a paused test controls it.
     boot: tokio::time::Instant,
@@ -363,6 +367,7 @@ impl SimNode {
             channels: ChannelSet::empty(),
             holds_ble,
             hb_counter: 0,
+            seq: 0,
             seen: Box::default(),
             boot: tokio::time::Instant::now(),
             speed: 1.0,
@@ -462,15 +467,26 @@ async fn run_node(
         // after the reports and the heartbeat is the window it answers in.
         if node.bluetooth_only() {
             let cycle = tokio::time::Instant::now() + scaled(u64::from(BLE_BEAT_MS), speed);
+            let mut writer = SightingBatchWriter::new(node.seq);
             for _ in 0..ADVERTISERS_PER_SCAN {
                 if node.rng.next_f64() >= world.ble_chance {
                     continue;
                 }
                 let ble = world.ble_sighting(&mut node.rng);
-                if node.worth_reporting(&ble) && emit(&events, &node, &ble, started).await.is_err()
-                {
-                    return;
+                if !node.worth_reporting(&ble) {
+                    continue;
                 }
+                if !writer.push(&ble.as_msg()) {
+                    if flush_batch(&events, &mut node, &writer, started).await.is_err() {
+                        return;
+                    }
+                    writer = SightingBatchWriter::new(node.seq);
+                    // An empty batch always has room for one more record.
+                    let _ = writer.push(&ble.as_msg());
+                }
+            }
+            if flush_batch(&events, &mut node, &writer, started).await.is_err() {
+                return;
             }
             let stagger = u64::from(wartui_proto::plan::stagger_offset_ms(
                 node.node_index,
@@ -503,12 +519,23 @@ async fn run_node(
                 return;
             }
             let channel = SCAN_CHANNELS[usize::from(idx)];
+            let mut writer = SightingBatchWriter::new(node.seq);
             for slot in world.on_channel(channel) {
                 let net = world.hear(slot);
-                if node.worth_reporting(&net) && emit(&events, &node, &net, started).await.is_err()
-                {
-                    return;
+                if !node.worth_reporting(&net) {
+                    continue;
                 }
+                if !writer.push(&net.as_msg()) {
+                    if flush_batch(&events, &mut node, &writer, started).await.is_err() {
+                        return;
+                    }
+                    writer = SightingBatchWriter::new(node.seq);
+                    // An empty batch always has room for one more record.
+                    let _ = writer.push(&net.as_msg());
+                }
+            }
+            if flush_batch(&events, &mut node, &writer, started).await.is_err() {
+                return;
             }
         }
 
@@ -584,18 +611,21 @@ async fn nap_until(
     }
 }
 
-async fn emit(
+/// Broadcast `writer`'s batch if it holds anything, advancing `node.seq` only
+/// once it actually goes out — the same rule the heartbeat counter follows,
+/// and the reason a dwell or scan that heard nothing sends no frame at all.
+async fn flush_batch(
     events: &mpsc::Sender<LinkEvent>,
-    node: &SimNode,
-    network: &Network,
+    node: &mut SimNode,
+    writer: &SightingBatchWriter,
     started: Instant,
 ) -> Result<(), ()> {
-    let mut frame = [0u8; SIGHTING_MSG_MAX];
-    let len = network
-        .as_msg()
-        .encode_into(&mut frame)
-        .expect("SIGHTING_MSG_MAX is sized for the longest SSID there is");
-    send_frame(events, node.mac, &frame[..len], started).await
+    if writer.is_empty() {
+        return Ok(());
+    }
+    send_frame(events, node.mac, writer.as_bytes(), started).await?;
+    node.seq = node.seq.wrapping_add(1);
+    Ok(())
 }
 
 async fn send_frame(

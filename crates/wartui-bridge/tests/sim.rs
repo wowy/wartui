@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use tokio::time::Instant;
 use wartui_bridge::sim::{SimConfig, SimTransport};
 use wartui_bridge::{LinkEvent, LinkHandle};
-use wartui_proto::air::{AdminMsg, ClearMsg, Frame, HeartbeatMsg, RecordKind, SightingMsg};
+use wartui_proto::air::{AdminMsg, ClearMsg, Frame, HeartbeatMsg, RecordKind};
 use wartui_proto::link::{BridgeToHost, EspNowPayload, HostToBridge, Mac, SendStatus};
 use wartui_proto::plan::{BLE_BEAT_MS, ChannelPool, ChannelSet, IndexRun};
 
@@ -34,13 +34,6 @@ async fn next_frame(link: &mut LinkHandle) -> (Mac, Vec<u8>) {
 fn heartbeat_of(raw: &[u8]) -> Option<HeartbeatMsg> {
     match Frame::decode(raw) {
         Ok(Frame::Heartbeat(heartbeat)) => Some(heartbeat),
-        _ => None,
-    }
-}
-
-fn sighting_of(raw: &[u8]) -> Option<SightingMsg<'_>> {
-    match Frame::decode(raw) {
-        Ok(Frame::Sighting(sighting)) => Some(sighting),
         _ => None,
     }
 }
@@ -107,11 +100,15 @@ async fn distinct_addresses(sightings_per_address: Option<u32>, sightings: usize
 
     let mut seen = HashSet::new();
     let mut reported = 0;
-    while reported < sightings {
+    'outer: while reported < sightings {
         let (_, raw) = next_frame(&mut link).await;
-        if let Some(sighting) = sighting_of(&raw) {
+        let Ok(Frame::Sightings(batch)) = Frame::decode(&raw) else { continue };
+        for (sighting, _) in batch.iter() {
             seen.insert(sighting.bssid);
             reported += 1;
+            if reported >= sightings {
+                break 'outer;
+            }
         }
     }
     seen.len()
@@ -196,9 +193,11 @@ async fn sim_bridge_emits_valid_sightings_with_negative_rssi_when_nodes_sniff() 
     let mut checked = 0;
     while checked < 20 {
         let (_, raw) = next_frame(&mut link).await;
-        let Some(sighting) = sighting_of(&raw) else { continue };
-        assert!(sighting.rssi < 0, "signal strengths are negative dBm");
-        checked += 1;
+        let Ok(Frame::Sightings(batch)) = Frame::decode(&raw) else { continue };
+        for (sighting, _) in batch.iter() {
+            assert!(sighting.rssi < 0, "signal strengths are negative dBm");
+            checked += 1;
+        }
     }
 }
 
@@ -216,7 +215,11 @@ async fn sim_node_deduplicates_wifi_sightings_when_operating_in_static_neighbour
         let (_, raw) = next_frame(&mut link).await;
         match Frame::decode(&raw) {
             Ok(Frame::Heartbeat(_)) => sweeps += 1,
-            Ok(Frame::Sighting(sighting)) => *counts.entry(sighting.bssid).or_default() += 1,
+            Ok(Frame::Sightings(batch)) => {
+                for (sighting, _) in batch.iter() {
+                    *counts.entry(sighting.bssid).or_default() += 1;
+                }
+            }
             _ => {}
         }
     }
@@ -237,8 +240,10 @@ async fn sim_node_generates_new_ble_sightings_when_advertiser_addresses_rotate()
         let (_, raw) = next_frame(&mut link).await;
         match Frame::decode(&raw) {
             Ok(Frame::Heartbeat(_)) => sweeps += 1,
-            Ok(Frame::Sighting(sighting)) if sighting.kind == RecordKind::Ble => {
-                ble.insert(sighting.bssid);
+            Ok(Frame::Sightings(batch)) => {
+                for (sighting, _) in batch.iter().filter(|(s, _)| s.kind == RecordKind::Ble) {
+                    ble.insert(sighting.bssid);
+                }
             }
             _ => {}
         }
@@ -260,7 +265,9 @@ async fn sim_node_heartbeats_at_ble_cadence_when_assigned_bluetooth_scan() {
         let (_, raw) = next_frame(&mut link).await;
         match Frame::decode(&raw) {
             Ok(Frame::Heartbeat(_)) => beats.push(tokio::time::Instant::now()),
-            Ok(Frame::Sighting(sighting)) if sighting.kind == RecordKind::Ble => ble += 1,
+            Ok(Frame::Sightings(batch)) => {
+                ble += batch.iter().filter(|(s, _)| s.kind == RecordKind::Ble).count();
+            }
             _ => {}
         }
     }
@@ -288,8 +295,11 @@ async fn sim_node_reports_only_ble_sightings_when_holding_ble_flag() {
         let (_, raw) = next_frame(&mut link).await;
         match Frame::decode(&raw) {
             Ok(Frame::Heartbeat(_)) => beats += 1,
-            Ok(Frame::Sighting(sighting)) if sighting.kind == RecordKind::Ble => ble += 1,
-            Ok(Frame::Sighting(_)) => wifi += 1,
+            Ok(Frame::Sightings(batch)) => {
+                for (sighting, _) in batch.iter() {
+                    if sighting.kind == RecordKind::Ble { ble += 1 } else { wifi += 1 }
+                }
+            }
             _ => {}
         }
     }
@@ -312,7 +322,7 @@ async fn sim_node_parks_without_sightings_when_assigned_empty_channels_without_b
         let (_, raw) = next_frame(&mut link).await;
         match Frame::decode(&raw) {
             Ok(Frame::Heartbeat(_)) => beats += 1,
-            Ok(Frame::Sighting(_)) => sightings += 1,
+            Ok(Frame::Sightings(batch)) => sightings += batch.iter().count(),
             _ => {}
         }
     }
@@ -472,7 +482,7 @@ async fn sim_transport_produces_deterministic_sightings_when_seeded() {
         let mut frames = Vec::new();
         while frames.len() < 10 {
             let (_, raw) = next_frame(&mut link).await;
-            if sighting_of(&raw).is_some() {
+            if matches!(Frame::decode(&raw), Ok(Frame::Sightings(_))) {
                 frames.push(raw);
             }
         }
@@ -511,8 +521,11 @@ async fn sim_fleet_restricts_ble_reports_to_assigned_node_when_partitioned() {
         let (src, raw) = next_frame(&mut link).await;
         match Frame::decode(&raw) {
             Ok(Frame::Heartbeat(_)) if src == SimTransport::node_mac(1) => sweeps += 1,
-            Ok(Frame::Sighting(sighting)) if sighting.kind == RecordKind::Ble => {
-                *ble_by_node.entry(src).or_default() += 1;
+            Ok(Frame::Sightings(batch)) => {
+                let ble = batch.iter().filter(|(s, _)| s.kind == RecordKind::Ble).count();
+                if ble > 0 {
+                    *ble_by_node.entry(src).or_default() += ble;
+                }
             }
             _ => {}
         }
