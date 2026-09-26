@@ -384,9 +384,10 @@ fn write_row<W: Write>(row: &Window, out: &mut W) -> Result<(), ExportError> {
 /// column wants it: a function of the channel, so derived on the way out rather
 /// than stored, which fills the column for captures recorded before it existed.
 ///
-/// The channel is the one the access point announces in its own beacon
-/// (`wartui_proto::beacon::parse_mgmt`), not the channel the node was tuned to,
-/// so the column covers the 2.4 GHz channels — 14 the odd one out — and the
+/// The channel is the one the access point announces in its own beacon, or the
+/// one the node was parked on when the beacon announces none
+/// (`wartui_proto::beacon::parse_mgmt`). An access point can announce a channel
+/// no pool tunes, so the column covers the 2.4 GHz channels — 14 the odd one out — and the
 /// 5 GHz ladder from 32 to 177. Blank for a channel on neither ladder, and
 /// blank for every BLE row, where the column means something only an active
 /// inquiry could produce (see the module docs).
@@ -465,6 +466,7 @@ mod tests {
         assert_eq!(frequency_column(32, "wifi"), "5160");
         assert_eq!(frequency_column(33, "wifi"), "5165");
         assert_eq!(frequency_column(34, "wifi"), "5170");
+        assert_eq!(frequency_column(35, "wifi"), "5175");
         assert_eq!(frequency_column(36, "wifi"), "5180");
         assert_eq!(frequency_column(165, "wifi"), "5825");
         assert_eq!(frequency_column(177, "wifi"), "5885");
