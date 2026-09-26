@@ -113,9 +113,7 @@ pub enum Command {
 
     /// Ask a node, or every assignable node, to empty its dedup ring.
     ///
-    /// Not an assignment: the planner is still the only author of one, and this
-    /// changes nothing about what a node scans. Nothing goes out now — each
-    /// node's clear goes out in its own next admin window, the same as an
+    /// Each node's clear goes out in its own next admin window, the same as an
     /// assignment does.
     ClearRing {
         /// Which node, or `None` for every node [`FleetEngine::is_assignable`]
@@ -145,7 +143,6 @@ impl ActionBatch {
     }
 }
 
-/// How the engine should behave.
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
     /// Which channels the fleet is meant to scan. Recorded in the session,
@@ -282,9 +279,6 @@ pub struct NodeState {
 
 /// What one node was told to do, and the fleet arithmetic it was computed
 /// against.
-///
-/// The index and count travel with the channels rather than being read live at
-/// send time — divergence 7.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Assignment {
     /// Which [`wartui_proto::plan::SCAN_CHANNELS`] indices to dwell on.
@@ -843,11 +837,7 @@ impl FleetEngine {
 
         let frame = match Frame::decode(payload) {
             Ok(frame) => frame,
-            // Not ours at all. A vendor fleet on this channel is the one
-            // undecodable thing with an operational meaning — it is
-            // transmitting where these nodes are listening, and on a stock
-            // fleet every scan is an active one — so it is counted where an
-            // operator will look for it rather than as line noise.
+            // Not ours at all (doesn't match our frame preamble).
             Err(DecodeError::BadMagic) => {
                 match foreign::classify(payload) {
                     Some(foreign::Foreign::Admin) => self.counters.foreign_admin += 1,
@@ -856,10 +846,7 @@ impl FleetEngine {
                 }
                 return;
             }
-            // Ours, from a build this one cannot read — a fleet half-way through
-            // a reflash. A version byte this build does not know says so; so
-            // does a fixed-length frame that is not its own length, which is
-            // what a layout change looks like while `WIRE_VERSION` is held.
+            // Version or length mismatch.
             Err(DecodeError::BadVersion(_) | DecodeError::BadLength { .. }) => {
                 self.counters.incompatible += 1;
                 return;
@@ -870,9 +857,7 @@ impl FleetEngine {
             }
         };
 
-        // Decode before admitting anyone to the fleet: a sender whose frames are
-        // not ours is not a node, and would otherwise sit in the table forever
-        // as `no heartbeat`.
+        // Decode before admitting anyone to the fleet
         match frame {
             // Nothing to do about it, but an operator chasing a fleet that keeps
             // changing its mind needs to know. A clear this host did not send is
@@ -887,12 +872,10 @@ impl FleetEngine {
                 let rebooted = node.counter.is_some_and(|previous| heartbeat.counter < previous);
                 if rebooted {
                     node.reboots += 1;
-                    // Its epoch field went back to a boot value too, so the
-                    // belief goes and the assignment is re-issued under a fresh
-                    // epoch rather than one the node might now match.
+                    // Its epoch field went back to a boot value too, so the assignment is
+                    // re-issued under a fresh epoch rather than one the node might now match.
                     node.confirmed = None;
-                    // A node that has just booted already holds an empty ring;
-                    // nothing owed against the one it forgot survives the reboot.
+                    // A node that has just booted already holds an empty ring.
                     node.clear_owed = false;
                 }
                 node.capabilities = Some(heartbeat.capabilities);
