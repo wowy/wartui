@@ -146,7 +146,11 @@ const _: () = assert!(
 );
 
 /// How many recently-reported addresses a node holds. See [`crate::dedup`].
-pub const DEDUP_RING: usize = 200;
+pub const DEDUP_RING: usize = 256;
+
+/// Hash slots behind [`DEDUP_RING`]. A power of two at least twice the ring, so the
+/// index [`crate::dedup::MacRing`] builds over it is never more than half full.
+pub const DEDUP_INDEX: usize = 2 * DEDUP_RING;
 
 /// How long a node suppresses an address it has reported before reporting it again.
 ///

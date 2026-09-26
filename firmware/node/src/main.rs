@@ -45,11 +45,9 @@ use static_cell::StaticCell;
 use wartui_proto::air::{
     AdminMsg, Capabilities, DecodeError, Frame, HeartbeatMsg, SIGHTING_MSG_MAX,
 };
-use wartui_proto::dedup::MacRing;
 use wartui_proto::plan::{
-    ADMIN_WAIT_MS, BLE_BEAT_MS, CHANNEL_DWELL_MS, CONTROL_CHANNEL, ChannelSet, DEDUP_RING,
-    IDLE_BEAT_MS, NODE_STAGGER_WINDOW_MS, NUM_SCAN_CHANNELS, SCAN_CHANNELS, SweepCursor,
-    stagger_offset_ms,
+    ADMIN_WAIT_MS, BLE_BEAT_MS, CHANNEL_DWELL_MS, CONTROL_CHANNEL, ChannelSet, IDLE_BEAT_MS,
+    NODE_STAGGER_WINDOW_MS, NUM_SCAN_CHANNELS, SCAN_CHANNELS, SweepCursor, stagger_offset_ms,
 };
 
 #[cfg(feature = "ble")]
@@ -126,9 +124,10 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 
 /// Everything that changes while the node runs.
 ///
-/// Built at compile time into a [`ConstStaticCell`] rather than on the stack:
-/// the dedup ring alone is two and a half kilobytes, and `StaticCell::init_with`
-/// would still construct it in a frame before moving it.
+/// Built at compile time into a [`ConstStaticCell`] and taken as a `&'static mut`,
+/// rather than built in a local and moved in: nothing outside the main loop touches
+/// it, so it needs no lock — unlike the dedup ring, which lives in [`sniff::SEEN`]
+/// instead because the receive callback has to reach it from another task.
 struct Node {
     /// The epoch of the assignment held. Zero means none has ever arrived, which
     /// the core never puts on the wire.
@@ -146,7 +145,6 @@ struct Node {
     /// Monotonic from boot. Its going backwards is how the host notices a node
     /// has restarted and forgotten its assignment.
     counter: u32,
-    seen: MacRing<DEDUP_RING>,
     reported: u32,
 }
 
@@ -163,7 +161,6 @@ impl Node {
             ble: false,
             cursor: SweepCursor::new(),
             counter: 1,
-            seen: MacRing::new(),
             reported: 0,
         }
     }
@@ -226,10 +223,13 @@ impl Node {
     ///
     /// The one way the ring gets emptied: anything else that should empty it —
     /// an adopted share change, a clear from the host — calls this rather than
-    /// touching `seen` directly.
+    /// touching [`sniff::SEEN`] directly.
     fn forget_reported(&mut self, why: &str) {
-        let len = self.seen.len();
-        self.seen.clear();
+        let len = sniff::SEEN.with(|seen| {
+            let len = seen.len();
+            seen.clear();
+            len
+        });
         note!("forgot {} reported addresses: {}", len, why);
     }
 
@@ -470,13 +470,6 @@ fn remaining_ms(deadline: Instant) -> u32 {
     if now >= deadline { 0 } else { (deadline - now).as_millis() as u32 }
 }
 
-/// Milliseconds since boot, as the dedup ring counts them. Truncation is the ring's
-/// own wrap.
-#[allow(clippy::cast_possible_truncation)]
-fn now_ms() -> u32 {
-    Instant::now().duration_since_epoch().as_millis() as u32
-}
-
 /// Broadcast one heartbeat, which is also the whole of this node's liveness.
 ///
 /// Once per completed sweep, not on a timer. The
@@ -496,10 +489,12 @@ fn heartbeat(sender: &mut EspNowSender<'_>, node: &mut Node, capabilities: Capab
 /// Report everything heard on `channel` that has not been reported lately.
 fn report(sender: &mut EspNowSender<'_>, node: &mut Node, channel: u8) {
     let mut sent = 0u32;
-    let now = now_ms();
+    let now = sniff::now_ms();
     while let Some(sighting) = sniff::take() {
         let rssi = Some(sighting.rssi);
-        if !node.seen.is_due(&sighting.bssid, rssi, now) {
+        // Taken and released per sighting, never across the transmit below — the
+        // callback's own rule for `sniff::SEEN`, kept here too.
+        if !sniff::SEEN.with(|seen| seen.is_due(&sighting.bssid, rssi, now)) {
             continue;
         }
         let mut frame = [0u8; SIGHTING_MSG_MAX];
@@ -507,7 +502,7 @@ fn report(sender: &mut EspNowSender<'_>, node: &mut Node, channel: u8) {
         // Recorded only once it is on the air: suppressing an access point the host
         // never received would hide it until the refresh.
         if radio::broadcast(sender, &frame[..len]) {
-            node.seen.record(sighting.bssid, rssi, now);
+            sniff::SEEN.with(|seen| seen.record(sighting.bssid, rssi, now));
             sent += 1;
         }
     }
@@ -533,19 +528,19 @@ fn report(sender: &mut EspNowSender<'_>, node: &mut Node, channel: u8) {
 fn report_ble(sender: &mut EspNowSender<'_>, node: &mut Node, scanner: &mut ble::Scanner<'_>) {
     let mut lines = 0u32;
     let heard = scanner.sweep();
-    let now = now_ms();
+    let now = sniff::now_ms();
     // One report at a time out of the ring, so the lock is never held across a
     // transmit — the same shape the Wi-Fi sightings are drained in.
     while let Some(report) = ble::take() {
         let rssi = report.has_rssi().then_some(report.rssi);
-        if !node.seen.is_due(&report.address, rssi, now) {
+        if !sniff::SEEN.with(|seen| seen.is_due(&report.address, rssi, now)) {
             continue;
         }
         let mut frame = [0u8; SIGHTING_MSG_MAX];
         let Some(len) = report.encode_into(&mut frame) else { continue };
         // After the broadcast, for the reason `report` gives.
         if radio::broadcast(sender, &frame[..len]) {
-            node.seen.record(report.address, rssi, now);
+            sniff::SEEN.with(|seen| seen.record(report.address, rssi, now));
             lines += 1;
         }
     }
