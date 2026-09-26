@@ -384,10 +384,13 @@ fn write_row<W: Write>(row: &Window, out: &mut W) -> Result<(), ExportError> {
 /// column wants it: a function of the channel, so derived on the way out rather
 /// than stored, which fills the column for captures recorded before it existed.
 ///
-/// Blank wherever the channel names no frequency this fleet's radios can tune —
-/// the two bands the pools cover and nothing else, with channel 14's odd one out
-/// — and blank for every BLE row, where the column means something only an
-/// active inquiry could produce (see the module docs).
+/// The channel is the one the access point announces in its own beacon, or the
+/// one the node was parked on when the beacon announces none
+/// (`wartui_proto::beacon::parse_mgmt`). An access point can announce a channel
+/// no pool tunes, so the column covers the 2.4 GHz channels — 14 the odd one out — and the
+/// 5 GHz ladder from 32 to 177. Blank for a channel on neither ladder, and
+/// blank for every BLE row, where the column means something only an active
+/// inquiry could produce (see the module docs).
 fn frequency_column(channel: i64, kind: &str) -> String {
     if kind != "wifi" {
         return String::new();
@@ -395,7 +398,7 @@ fn frequency_column(channel: i64, kind: &str) -> String {
     match channel {
         1..=13 => format!("{}", 2407 + 5 * channel),
         14 => "2484".to_owned(),
-        36..=177 => format!("{}", 5000 + 5 * channel),
+        32..=177 => format!("{}", 5000 + 5 * channel),
         _ => String::new(),
     }
 }
@@ -459,6 +462,11 @@ mod tests {
         assert_eq!(frequency_column(13, "wifi"), "2472");
         // Channel 14 is the one 2.4 GHz channel that breaks the 5 MHz ladder.
         assert_eq!(frequency_column(14, "wifi"), "2484");
+        // An access point can announce these below the pools' 36.
+        assert_eq!(frequency_column(32, "wifi"), "5160");
+        assert_eq!(frequency_column(33, "wifi"), "5165");
+        assert_eq!(frequency_column(34, "wifi"), "5170");
+        assert_eq!(frequency_column(35, "wifi"), "5175");
         assert_eq!(frequency_column(36, "wifi"), "5180");
         assert_eq!(frequency_column(165, "wifi"), "5825");
         assert_eq!(frequency_column(177, "wifi"), "5885");
@@ -469,9 +477,10 @@ mod tests {
         // A BLE row's frequency column means a "device type" code a passive scan
         // cannot produce, so it is blank whatever the channel field holds.
         assert_eq!(frequency_column(0, "ble"), "");
-        // A channel no pool contains is not something to guess a frequency for.
+        // A channel on neither band's ladder is not something to guess a frequency for.
         assert_eq!(frequency_column(0, "wifi"), "");
         assert_eq!(frequency_column(15, "wifi"), "");
+        assert_eq!(frequency_column(31, "wifi"), "");
         assert_eq!(frequency_column(200, "wifi"), "");
     }
 }
