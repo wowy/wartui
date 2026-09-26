@@ -143,11 +143,14 @@ far.
 | `↑` `↓` / `k` `j`      | Move the cursor down the fleet table                                   |
 | `b`                    | Make the selected node the Bluetooth scanner, or take the scan off    |
 | `c`                    | Open the transmit-power settings modal                                |
+| `r`                    | Clear the selected node's dedup ring on its next heartbeat            |
+| `R`                    | Clear every assignable node's dedup ring, each on its next heartbeat  |
 | `q` / `Esc` / `ctrl-c` | Stop, committing the last batch                                        |
 
-`b` and `c` are the only ones that reach the air. `b` decides _which_ node scans Bluetooth instead
-of Wi-Fi; it reaches that node's share only by being an input to the planner, which is still the
-only author of one. Channels are not a key.
+`b`, `c`, `r` and `R` are the only ones that reach the air. `b` decides _which_ node scans Bluetooth
+instead of Wi-Fi; it reaches that node's share only by being an input to the planner, which is still
+the only author of one. `r` and `R` ask a node, or every assignable one, to forget every address it
+has reported. Channels are not a key.
 
 `c` opens a modal for the fleet's transmit power, with a row each for the nodes and the bridge.
 `↑`/`↓` (or `j`/`k`) move between them, `←`/`→` (or `h`/`l`) step the selected value by 1 dBm, and
@@ -367,7 +370,9 @@ An `alive` node that has stopped reporting is usually not broken: a node reports
 then holds it back, so a node that is standing still goes quiet once it has reported everything in
 range. That memory is on the node, not the host, so it carries over into your next session. A held
 address is reported again five minutes after it was last reported, or sooner if the node hears it at
-least 10 dB louder than it has reported it before. Rebooting a node clears the memory
+least 10 dB louder than it has reported it before. `r` clears the selected node's memory and `R`
+clears every assignable node's, each without a reboot and each on its next heartbeat; a node's
+memory is also emptied whenever its share or its Bluetooth role changes
 (`crates/wartui-proto/src/dedup.rs` explains why it works this way).
 
 The header has three ways of saying it has nothing to drive: `auto — nothing heartbeating yet`,

@@ -209,6 +209,12 @@ fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
                         mac(dst),
                     );
                 }
+                // A clear this host did not send is the same fact as an assignment
+                // it did not send: something else is driving these nodes.
+                Ok(Frame::Clear(_)) => {
+                    counts.admin += 1;
+                    println!("{head}  CLEAR  -> {}", mac(dst));
+                }
                 // Named rather than left as "undecodable": a fleet half-way
                 // through a reflash is exactly what this looks like.
                 Err(DecodeError::BadVersion(version)) => {

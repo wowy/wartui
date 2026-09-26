@@ -19,6 +19,13 @@
 //!   the baseline only ever rises, so an access point is re-reported for getting
 //!   closer and never for wobbling.
 //!
+//! [`MacRing::clear`] empties the ring outright, for two further reasons:
+//!
+//! - **The node's job changed.** Entries built under the old share describe a
+//!   neighbourhood the node no longer listens to and only take up slots.
+//! - **The operator asked.** This gives a fresh capture from a stationary spot without
+//!   waiting out the refresh or rebooting the node.
+//!
 //! Eviction is still oldest-*inserted* first, and a re-report updates its entry in
 //! place rather than moving it to the front. A constantly-beaconing access point
 //! therefore still ages out on schedule, and a busy neighbourhood refreshes itself
@@ -125,6 +132,15 @@ impl<const N: usize> MacRing<N> {
     #[must_use]
     pub const fn is_empty(&self) -> bool {
         self.len == 0
+    }
+
+    /// Empty the ring outright, so every address held is due again.
+    ///
+    /// The entries themselves are left as they are: [`Self::find`] only ever looks at
+    /// `..len`, so there is nothing to overwrite.
+    pub fn clear(&mut self) {
+        self.len = 0;
+        self.cursor = 0;
     }
 }
 

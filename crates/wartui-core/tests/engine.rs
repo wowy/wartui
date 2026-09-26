@@ -13,7 +13,8 @@ use wartui_core::gps::Gps;
 use wartui_core::position::{DEFAULT_MAX_AGE, PositionChain, PositionSource};
 use wartui_core::record::{AdminOutcome, Record};
 use wartui_proto::air::{
-    AdminMsg, Capabilities, HeartbeatMsg, RecordKind, SIGHTING_MSG_MAX, Security, SightingMsg,
+    AdminMsg, Capabilities, Frame, HeartbeatMsg, RecordKind, SIGHTING_MSG_MAX, Security,
+    SightingMsg,
 };
 use wartui_proto::link::{
     BROADCAST, BridgeToHost, Chip, EspNowPayload, HostToBridge, LoopPhase, Mac, ResetCause,
@@ -124,6 +125,33 @@ fn admins(batch: &ActionBatch) -> Vec<AdminMsg> {
         .iter()
         .filter_map(|action| match action {
             HostToBridge::SendEspNow { payload, .. } => AdminMsg::decode(payload).ok(),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The one clear in a batch, decoded back off the wire.
+///
+/// Filters rather than indexing `batch.urgent[0]`: a heartbeat that also owes an
+/// assignment can carry both, and this says nothing about that one.
+fn sent_clear(batch: &ActionBatch) -> (u16, Mac) {
+    let found = clears(batch);
+    assert_eq!(found.len(), 1, "exactly one clear");
+    found[0]
+}
+
+/// Every clear in a batch, decoded back off the wire, as (id, destination).
+fn clears(batch: &ActionBatch) -> Vec<(u16, Mac)> {
+    batch
+        .urgent
+        .iter()
+        .filter_map(|action| match action {
+            HostToBridge::SendEspNow { id, dst, ensure_peer, payload }
+                if matches!(Frame::decode(payload), Ok(Frame::Clear(_))) =>
+            {
+                assert!(*ensure_peer, "divergence 6: peers are added on demand and never deleted");
+                Some((*id, *dst))
+            }
             _ => None,
         })
         .collect()
@@ -1964,4 +1992,133 @@ fn engine_reissues_surplus_node_with_new_tx_power_when_set_tx_power_received() {
     assert_eq!(admin.tx_power, 40, "the surplus node still hears about the change");
     assert_eq!(admin.channels, held.channels, "its own share is unchanged");
     assert_eq!(admin.node_count, 11, "and so is the stagger arithmetic it was dealt");
+}
+
+// ---------------------------------------------------------------------------
+// Command::ClearRing: not an assignment, delivered the same way one is.
+// ---------------------------------------------------------------------------
+
+fn clear_ring(mac: Option<Mac>) -> Event {
+    Event::Command(Command::ClearRing { mac })
+}
+
+#[test]
+fn engine_sends_clear_on_next_heartbeat_when_node_clear_requested() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    caught_up(&mut engine, &clock);
+    let (id, _, _) = sent_admin(&engine.handle(heartbeat(NODE, 1), clock.at(1)));
+    engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(1));
+
+    let command = engine.handle(clear_ring(Some(NODE)), clock.at(2));
+    assert!(command.urgent.is_empty(), "nothing sent until the node's own window");
+    assert!(engine.nodes().next().expect("the node").clear_owed);
+
+    let (_, dst) = sent_clear(&engine.handle(heartbeat(NODE, 2), clock.at(3)));
+    assert_eq!(dst, NODE);
+    assert_eq!(counters(&engine).admin_sent, 1, "the clear does not count as an assignment");
+}
+
+#[test]
+fn engine_keeps_clear_owed_when_clear_unacked() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    caught_up(&mut engine, &clock);
+    let (id, _, _) = sent_admin(&engine.handle(heartbeat(NODE, 1), clock.at(1)));
+    engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(1));
+    engine.handle(clear_ring(Some(NODE)), clock.at(2));
+
+    let (id, _) = sent_clear(&engine.handle(heartbeat(NODE, 2), clock.at(3)));
+    engine.handle(send_result(id, SendStatus::AckFail, 900), clock.at(3));
+    assert!(engine.nodes().next().expect("the node").clear_owed, "still owed");
+
+    // Retried on the next heartbeat, the same as an unacknowledged assignment.
+    let (_, dst) = sent_clear(&engine.handle(heartbeat(NODE, 3), clock.at(4)));
+    assert_eq!(dst, NODE);
+}
+
+#[test]
+fn engine_drops_clear_owed_when_clear_acked() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    caught_up(&mut engine, &clock);
+    let (id, _, _) = sent_admin(&engine.handle(heartbeat(NODE, 1), clock.at(1)));
+    engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(1));
+    engine.handle(clear_ring(Some(NODE)), clock.at(2));
+
+    let (id, _) = sent_clear(&engine.handle(heartbeat(NODE, 2), clock.at(3)));
+    engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(3));
+    assert!(!engine.nodes().next().expect("the node").clear_owed);
+
+    let next = engine.handle(heartbeat(NODE, 3), clock.at(4));
+    assert!(clears(&next).is_empty(), "nothing left to send");
+}
+
+#[test]
+fn engine_marks_only_assignable_nodes_when_fleet_clear_requested() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(heartbeat(NODE, 1), clock.at(1));
+    // Only observed, never heartbeated: not assignable, so not owed a clear.
+    engine.handle(observation(OTHER, "AA:BB:CC:DD:EE:FF", -60), clock.at(1));
+
+    engine.handle(clear_ring(None), clock.at(2));
+
+    assert!(engine.nodes().find(|n| n.mac == NODE).expect("heartbeating").clear_owed);
+    assert!(
+        !engine.nodes().find(|n| n.mac == OTHER).expect("only observed").clear_owed,
+        "has never heartbeated, so it is not in the set the planner would cut for either"
+    );
+}
+
+#[test]
+fn engine_drops_clear_owed_when_node_reboots() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(heartbeat(NODE, 5), clock.at(1));
+    engine.handle(clear_ring(Some(NODE)), clock.at(2));
+    assert!(engine.nodes().next().expect("the node").clear_owed);
+
+    // The counter goes backwards: a reboot, and a freshly booted node already
+    // holds an empty ring.
+    engine.handle(heartbeat(NODE, 1), clock.at(3));
+    assert!(!engine.nodes().next().expect("the node").clear_owed);
+}
+
+#[test]
+fn engine_holds_clear_when_heartbeat_replayed_from_backlog() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(connected(), clock.at_ms(0));
+
+    // The same shape as `engine_ignores_backlog_heartbeats_when_evaluating_admin_windows`:
+    // nine heartbeats a second apart on the bridge's clock, two milliseconds apart
+    // on the host's, so only the first is real time and none of the windows they
+    // open are live.
+    let mut sent = 0;
+    for beat in 0..9u32 {
+        let batch = engine.handle(
+            beat_at(NODE, beat + 1, Capabilities::here(true, true), 1_000_000 + beat * 1_000_000),
+            clock.at_ms(u64::from(beat) * 2),
+        );
+        sent += batch.urgent.len();
+        if beat == 0 {
+            // The node exists the moment its first heartbeat admits it, so the
+            // clear asked for here lands on it exactly like an operator's
+            // keypress would.
+            engine.handle(clear_ring(Some(NODE)), clock.at_ms(1));
+        }
+    }
+    assert_eq!(sent, 0, "no clear fired into a window that had already closed");
+    assert!(engine.nodes().next().expect("the node").clear_owed, "still owed");
+
+    // Once the host is reading live, the next heartbeat's window carries it. The
+    // reset is about the *last* step alone (`Self::note_arrival`): the host has to
+    // wait at least as long as the bridge's own clock says this step took, the
+    // same gap `engine_opens_admin_window_when_live_heartbeat_arrives_after_backlog`
+    // uses for an assignment.
+    let live = engine
+        .handle(beat_at(NODE, 10, Capabilities::here(true, true), 10_000_000), clock.at_ms(1_020));
+    let (_, dst) = sent_clear(&live);
+    assert_eq!(dst, NODE);
 }

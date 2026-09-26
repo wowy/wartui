@@ -230,6 +230,10 @@ impl Ui {
             }
             KeyCode::Char('b') => self.toggle_ble(snapshot, commands),
             KeyCode::Char('c') => self.open_modal(snapshot),
+            // Matched on the character rather than a shift modifier: crossterm
+            // sends shift+r as `'R'`, not `'r'` with a modifier flag.
+            KeyCode::Char('r') => self.clear_ring(snapshot, commands),
+            KeyCode::Char('R') => self.clear_fleet_ring(snapshot, commands),
             // Anything else leaves the notice alone: a key bound to nothing must
             // not clear the one message saying why nothing happened.
             _ => {}
@@ -380,6 +384,39 @@ impl Ui {
                 format!("{}: bluetooth, once it is in a plan", mac(&target))
             }
             Ok(()) => format!("{}: bluetooth on its next heartbeat", mac(&target)),
+            Err(_) => "the engine is not accepting commands".to_owned(),
+        };
+        self.say(said, snapshot);
+    }
+
+    /// Clear the selected node's dedup ring on its next heartbeat.
+    fn clear_ring(&mut self, snapshot: &Snapshot, commands: &mpsc::Sender<Command>) {
+        let Some(node) = snapshot.nodes.get(self.selected) else { return };
+        let target = node.state.mac;
+        // Same refusal `toggle_ble` makes: the frame travels in the admin window,
+        // and only a heartbeat opens one.
+        if let Some(why) = why_not_assignable(node) {
+            self.say(format!("{} {why}", mac(&target)), snapshot);
+            return;
+        }
+        let said = match commands.try_send(Command::ClearRing { mac: Some(target) }) {
+            Ok(()) => format!("{}: clearing its dedup ring on its next heartbeat", mac(&target)),
+            Err(_) => "the engine is not accepting commands".to_owned(),
+        };
+        self.say(said, snapshot);
+    }
+
+    /// Clear every assignable node's dedup ring, each on its own next heartbeat.
+    fn clear_fleet_ring(&mut self, snapshot: &Snapshot, commands: &mpsc::Sender<Command>) {
+        if snapshot.assignable == 0 {
+            self.say("no node is heartbeating, so there is no ring to clear".to_owned(), snapshot);
+            return;
+        }
+        let said = match commands.try_send(Command::ClearRing { mac: None }) {
+            Ok(()) => format!(
+                "clearing the dedup ring on {} nodes, each on its next heartbeat",
+                snapshot.assignable
+            ),
             Err(_) => "the engine is not accepting commands".to_owned(),
         };
         self.say(said, snapshot);
@@ -837,8 +874,8 @@ fn period(ms: u32) -> String {
 
 /// Why a node cannot be given an assignment, or `None` if it can.
 ///
-/// The wording is the message the operator sees when `b` is refused, so it says
-/// what is wrong rather than naming a state.
+/// The wording is the message the operator sees when `b` or `r` is refused, so it
+/// says what is wrong rather than naming a state.
 fn why_not_assignable(node: &NodeView) -> Option<&'static str> {
     let state = &node.state;
     if state.capabilities.is_none() {
@@ -1035,7 +1072,7 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot, ui: &Ui, 
         )));
     } else {
         let mut spans = vec![Span::styled(
-            " q quit  ↑↓ select  b bluetooth  c settings ",
+            " q quit  ↑↓ select  b bluetooth  c settings  r clear  R clear fleet ",
             Style::new().fg(Color::Black).bg(Color::Gray).add_modifier(Modifier::BOLD),
         )];
         spans.push(Span::raw(format!(
@@ -2088,6 +2125,64 @@ mod tests {
         ui.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE), &holding, &tx);
         assert_eq!(rx.try_recv().expect("a command"), Command::AssignBle { mac: None });
         assert!(ui.notice(holding.now_ms).expect("a notice").contains("bluetooth off"));
+    }
+
+    #[test]
+    fn ui_sends_clear_ring_when_r_key_is_pressed() {
+        let snapshot = busy();
+        let node = snapshot.nodes[0].state.mac;
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+        ui.on_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE), &snapshot, &tx);
+        assert_eq!(rx.try_recv().expect("a command"), Command::ClearRing { mac: Some(node) });
+        assert!(
+            ui.notice(snapshot.now_ms).expect("a notice").contains("clearing its dedup ring"),
+            "got {:?}",
+            ui.notice(snapshot.now_ms)
+        );
+    }
+
+    #[test]
+    fn ui_sends_fleet_clear_ring_when_shift_r_key_is_pressed() {
+        let snapshot = busy();
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+        // Crossterm sends shift+r as `'R'`, not `'r'` with a shift modifier.
+        ui.on_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT), &snapshot, &tx);
+        assert_eq!(rx.try_recv().expect("a command"), Command::ClearRing { mac: None });
+        let notice = ui.notice(snapshot.now_ms).expect("a notice");
+        assert!(notice.contains("clearing the dedup ring on"), "got {notice}");
+    }
+
+    #[test]
+    fn ui_refuses_clear_ring_when_node_has_not_heartbeated_yet() {
+        let mut snapshot = busy();
+        snapshot.nodes.push(unannounced(0x21));
+        snapshot.nodes.sort_by_key(|n| n.state.mac);
+        let row = snapshot
+            .nodes
+            .iter()
+            .position(|n| n.state.mac[5] == 0x21)
+            .expect("the unannounced node");
+
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut ui = Ui { selected: row, ..Default::default() };
+        ui.on_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE), &snapshot, &tx);
+        assert!(rx.try_recv().is_err(), "nothing was queued");
+        let notice = ui.notice(snapshot.now_ms).expect("a reason");
+        assert!(notice.contains("heartbeated yet"), "got {notice}");
+    }
+
+    #[test]
+    fn ui_sends_nothing_when_fleet_clear_requested_with_no_assignable_nodes() {
+        let mut snapshot = busy();
+        snapshot.assignable = 0;
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+        ui.on_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT), &snapshot, &tx);
+        assert!(rx.try_recv().is_err(), "nothing was queued");
+        let notice = ui.notice(snapshot.now_ms).expect("a reason");
+        assert!(notice.contains("no node is heartbeating"), "got {notice}");
     }
 
     #[test]

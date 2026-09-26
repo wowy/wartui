@@ -13,8 +13,9 @@ It shares no wire format with it either. A node broadcasts a 13-byte heartbeat o
 sweep — or once per scan, on the node whose job is Bluetooth — and an 18-plus-SSID sighting per
 newly-seen BSSID, whose trailer carries a Passpoint network's roaming consortium identifiers, or a
 BLE advertiser's manufacturer identifier, when there are any. It accepts a 16-byte unicast
-assignment. All three sit behind wartui's own `WTUI` magic
-and a wire version byte, checked before anything else, so neither fleet can reach the other at all.
+assignment, and a 6-byte unicast clear that empties its dedup ring. All four sit behind wartui's own
+`WTUI` magic and a wire version byte, checked before anything else, so neither fleet can reach the
+other at all.
 
 ## What it does differently
 
@@ -40,6 +41,11 @@ before wondering where the first second of a capture went.
 **The node given the Bluetooth scan sweeps nothing.** It is dealt no channels and never leaves the
 control channel, so it is the one node an assignment can always reach; its whole cycle is one scan
 per second. § "Bluetooth is a whole node's job" has the rest.
+
+**It forgets what it has reported in two cases.** An assignment that changes its channels or its
+Bluetooth flag empties the dedup ring, because the entries describe a neighbourhood it no longer
+listens to. So does a clear frame, which the host sends on the operator's `r` or `R` and which
+carries no other instruction. `crates/wartui-proto/src/dedup.rs` has the reasoning.
 
 **It says what it is, in every heartbeat.** Three of a heartbeat's thirteen bytes are a version and
 a feature byte, shown by the host as:

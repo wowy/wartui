@@ -111,6 +111,16 @@ impl Default for SimConfig {
 /// (`docs/phase-1-findings.md`), most of them addresses it has never seen.
 const ADVERTISERS_PER_SCAN: usize = 12;
 
+/// What a heartbeat's admin window delivers to a simulated node.
+///
+/// Mirrors what the firmware's `drain_admin` can read off the air: an assignment to
+/// adopt (`Frame::Admin`), or a request to empty the dedup ring (`Frame::Clear`).
+#[derive(Debug, Clone, Copy)]
+enum SimCommand {
+    Assign(AdminMsg),
+    Clear,
+}
+
 /// A simulated bridge with a simulated fleet behind it.
 #[derive(Debug, Clone)]
 pub struct SimTransport {
@@ -149,7 +159,7 @@ impl SimTransport {
         // nowhere to file that.
         let (attached_tx, attached_rx) = tokio::sync::watch::channel(false);
 
-        let mut admin_txs = Vec::new();
+        let mut admin_txs: Vec<(Mac, mpsc::Sender<SimCommand>, Arc<AtomicBool>)> = Vec::new();
         let mut fleet = Vec::new();
         for index in 0..self.config.node_count {
             let (admin_tx, admin_rx) = mpsc::channel(8);
@@ -191,7 +201,7 @@ impl SimTransport {
 /// The dongle half: announces itself, routes admin frames, answers status.
 async fn run_bridge(
     mut plumbing: crate::LinkPlumbing,
-    admin_txs: Vec<(Mac, mpsc::Sender<AdminMsg>, Arc<AtomicBool>)>,
+    admin_txs: Vec<(Mac, mpsc::Sender<SimCommand>, Arc<AtomicBool>)>,
     started: Instant,
     node_count: u8,
     ble_coexistence_failure: bool,
@@ -284,7 +294,7 @@ async fn run_bridge(
 
 /// Hand a transmitted frame to whichever simulated node it is addressed to.
 async fn deliver(
-    admin_txs: &[(Mac, mpsc::Sender<AdminMsg>, Arc<AtomicBool>)],
+    admin_txs: &[(Mac, mpsc::Sender<SimCommand>, Arc<AtomicBool>)],
     dst: Mac,
     payload: &[u8],
     peers: &[Mac],
@@ -296,9 +306,11 @@ async fn deliver(
     if !peers.contains(&dst) {
         return SendStatus::NoPeer;
     }
-    let Ok(Frame::Admin(admin)) = Frame::decode(payload) else {
+    let command = match Frame::decode(payload) {
+        Ok(Frame::Admin(admin)) => SimCommand::Assign(admin),
+        Ok(Frame::Clear(_)) => SimCommand::Clear,
         // The real radio would happily transmit it; nobody is listening.
-        return SendStatus::AckOk;
+        _ => return SendStatus::AckOk,
     };
     match admin_txs.iter().find(|(mac, _, _)| *mac == dst) {
         // The radio is away on the Bluetooth antenna, which is indistinguishable
@@ -307,7 +319,7 @@ async fn deliver(
         Some((_, _, holds_ble)) if ble_coexistence_failure && holds_ble.load(Ordering::Relaxed) => {
             SendStatus::AckFail
         }
-        Some((_, tx, _)) if tx.send(admin).await.is_ok() => SendStatus::AckOk,
+        Some((_, tx, _)) if tx.send(command).await.is_ok() => SendStatus::AckOk,
         // Addressed to a node that is not out there, so nothing acknowledges.
         _ => SendStatus::AckFail,
     }
@@ -375,9 +387,15 @@ impl SimNode {
 
     /// Apply an assignment, but only when its epoch differs — the same `!=`
     /// comparison the node firmware makes.
+    ///
+    /// Resets `seen` first when the new share changes what this node scans or its
+    /// Bluetooth flag, mirroring `Node::adopt`.
     fn apply(&mut self, admin: AdminMsg) {
         if admin.epoch == self.epoch {
             return;
+        }
+        if admin.channels != self.channels || admin.scan_ble() != self.scanning_ble() {
+            self.forget_reported();
         }
         self.epoch = admin.epoch;
         self.node_index = admin.node_index;
@@ -389,6 +407,11 @@ impl SimNode {
     /// Whether this node is the one scanning Bluetooth.
     fn scanning_ble(&self) -> bool {
         self.holds_ble.load(Ordering::Relaxed)
+    }
+
+    /// Empty the dedup ring, mirroring `Node::forget_reported`.
+    fn forget_reported(&mut self) {
+        self.seen.clear();
     }
 
     /// Whether the firmware would transmit this sighting now, recording it if so.
@@ -404,7 +427,7 @@ async fn run_node(
     mut node: SimNode,
     world: Arc<World>,
     events: mpsc::Sender<LinkEvent>,
-    mut admin_rx: mpsc::Receiver<AdminMsg>,
+    mut admin_rx: mpsc::Receiver<SimCommand>,
     speed: f64,
     started: Instant,
     mut attached: tokio::sync::watch::Receiver<bool>,
@@ -533,7 +556,7 @@ async fn beat(
 /// callback still fires, so an assignment lands mid-sleep. This reproduces that.
 async fn nap(
     duration: Duration,
-    admin_rx: &mut mpsc::Receiver<AdminMsg>,
+    admin_rx: &mut mpsc::Receiver<SimCommand>,
     node: &mut SimNode,
 ) -> std::ops::ControlFlow<()> {
     nap_until(tokio::time::Instant::now() + duration, admin_rx, node).await
@@ -546,14 +569,15 @@ async fn nap(
 /// heartbeat is whatever is left, and a scan that overran leaves nothing.
 async fn nap_until(
     deadline: tokio::time::Instant,
-    admin_rx: &mut mpsc::Receiver<AdminMsg>,
+    admin_rx: &mut mpsc::Receiver<SimCommand>,
     node: &mut SimNode,
 ) -> std::ops::ControlFlow<()> {
     loop {
         tokio::select! {
             () = tokio::time::sleep_until(deadline) => return std::ops::ControlFlow::Continue(()),
             received = admin_rx.recv() => match received {
-                Some(admin) => node.apply(admin),
+                Some(SimCommand::Assign(admin)) => node.apply(admin),
+                Some(SimCommand::Clear) => node.forget_reported(),
                 None => return std::ops::ControlFlow::Break(()),
             },
         }

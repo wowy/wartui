@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use tokio::time::Instant;
 use wartui_bridge::sim::{SimConfig, SimTransport};
 use wartui_bridge::{LinkEvent, LinkHandle};
-use wartui_proto::air::{AdminMsg, Frame, HeartbeatMsg, RecordKind, SightingMsg};
+use wartui_proto::air::{AdminMsg, ClearMsg, Frame, HeartbeatMsg, RecordKind, SightingMsg};
 use wartui_proto::link::{BridgeToHost, EspNowPayload, HostToBridge, Mac, SendStatus};
 use wartui_proto::plan::{BLE_BEAT_MS, ChannelPool, ChannelSet, IndexRun};
 
@@ -59,6 +59,12 @@ fn admin_command(dst: Mac, admin: AdminMsg) -> HostToBridge {
     let mut payload = EspNowPayload::new();
     payload.extend_from_slice(&admin.encode()).expect("an assignment fits");
     HostToBridge::SendEspNow { id: 1, dst, ensure_peer: true, payload }
+}
+
+fn clear_command(dst: Mac, ensure_peer: bool) -> HostToBridge {
+    let mut payload = EspNowPayload::new();
+    payload.extend_from_slice(&ClearMsg.encode()).expect("a clear fits");
+    HostToBridge::SendEspNow { id: 1, dst, ensure_peer, payload }
 }
 
 /// An assignment for node 0, since almost every test needs one.
@@ -391,6 +397,25 @@ async fn sim_bridge_returns_ack_fail_when_frame_sent_to_unreachable_node() {
             return;
         }
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn sim_bridge_returns_ack_ok_when_clear_sent_to_active_node() {
+    let config = SimConfig { node_count: 1, ..SimConfig::default() };
+    let mut link = SimTransport::new(config).start().expect("starts");
+    let node = SimTransport::node_mac(0);
+
+    link.send_urgent(clear_command(node, true)).expect("queued");
+    assert_eq!(next_send_result(&mut link).await, SendStatus::AckOk);
+}
+
+#[tokio::test(start_paused = true)]
+async fn sim_bridge_returns_no_peer_when_clear_sent_to_unknown_node() {
+    let config = SimConfig { node_count: 1, ..SimConfig::default() };
+    let mut link = SimTransport::new(config).start().expect("starts");
+
+    link.send_urgent(clear_command([0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01], false)).expect("queued");
+    assert_eq!(next_send_result(&mut link).await, SendStatus::NoPeer);
 }
 
 #[tokio::test(start_paused = true)]

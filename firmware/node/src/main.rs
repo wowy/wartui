@@ -200,9 +200,17 @@ impl Node {
     /// rather than refusing the frame, because the radio has already
     /// MAC-acknowledged it and a node that quietly declined would leave the two
     /// sides disagreeing with nothing to say so.
+    ///
+    /// Forgets every reported address first when the new share changes what this
+    /// node scans or its Bluetooth flag: entries built under the old share describe
+    /// a neighbourhood this node no longer listens to. A first assignment after
+    /// boot finds the ring already empty, so that case costs nothing.
     fn adopt(&mut self, admin: &AdminMsg) -> bool {
         if admin.epoch == self.version {
             return false;
+        }
+        if admin.channels != self.channels || admin.scan_ble() != self.ble {
+            self.forget_reported("new share");
         }
         self.version = admin.epoch;
         self.node_index = admin.node_index;
@@ -211,6 +219,18 @@ impl Node {
         self.ble = admin.scan_ble();
         self.cursor = SweepCursor::new();
         true
+    }
+
+    /// Empty the dedup ring, so the next sweep reports this node's whole
+    /// neighbourhood again.
+    ///
+    /// The one way the ring gets emptied: anything else that should empty it —
+    /// an adopted share change, a clear from the host — calls this rather than
+    /// touching `seen` directly.
+    fn forget_reported(&mut self, why: &str) {
+        let len = self.seen.len();
+        self.seen.clear();
+        note!("forgot {} reported addresses: {}", len, why);
     }
 
     /// Step to the next assigned channel, saying whether that completed a sweep.
@@ -555,17 +575,21 @@ fn drain_admin(manager: &EspNowManager<'_>, receiver: &EspNowReceiver<'_>, node:
     while let Some(received) = receiver.receive() {
         let admin = match Frame::decode(received.data()) {
             Ok(Frame::Admin(admin)) => admin,
-            // A host whose assignment is not the shape this build reads — a
-            // different wire version, or a different length under the same one.
-            // Said out loud rather than dropped with everything else: it is the
-            // whole diagnosis for a node that is talked to and never answers.
+            Ok(Frame::Clear(_)) => {
+                node.forget_reported("host asked");
+                continue;
+            }
+            // A host whose frame is not the shape this build reads — a different
+            // wire version, or a different length under the same one. Said out
+            // loud rather than dropped with everything else: it is the whole
+            // diagnosis for a node that is talked to and never answers.
             Err(DecodeError::BadVersion(version)) => {
                 note!("ignoring a frame at wire version {}; reflash this node", version);
                 continue;
             }
             Err(DecodeError::BadLength { need, got }) => {
                 note!(
-                    "ignoring a {} byte assignment, this build reads {}; reflash this node",
+                    "ignoring a {} byte frame, this build reads {}; reflash this node",
                     got,
                     need
                 );
