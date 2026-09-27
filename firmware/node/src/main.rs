@@ -426,6 +426,10 @@ fn main() -> ! {
                 if let Some(deadline) = node.next_beat
                     && Instant::now() >= deadline
                 {
+                    // Drain first: this node never leaves the control channel, so
+                    // an admin frame that landed after the last listen was acked
+                    // and queued, and this heartbeat must report its epoch.
+                    drain_admin(&manager, &receiver, node);
                     heartbeat(&mut sender, node, capabilities);
                     listen(&manager, &receiver, node, ADMIN_WAIT_MS);
                     node.next_beat = Some(next_beat_after(deadline));

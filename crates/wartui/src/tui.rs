@@ -2023,6 +2023,19 @@ mod tests {
     }
 
     #[test]
+    fn channels_cell_renders_plain_when_desired_is_cleared_and_confirmed_is_held() {
+        // A node that departs the plan (`replan`'s departed loop, or
+        // `PeerTableFull`) keeps `confirmed` while `desired` clears.
+        // `adopted` has to read against what it still holds, not nothing.
+        let mut view = assigned(0x11);
+        view.state.desired = None;
+        assert!(view.state.adopted(), "confirmed is still held, and its epoch still matches");
+        let cell = channels_cell(&view);
+        assert!(!cell.content.ends_with('…'), "adopted, not stuck waiting");
+        assert_eq!(cell.style.fg, None, "plain, not coloured");
+    }
+
+    #[test]
     fn ble_cell_renders_blue_when_acknowledged_but_not_adopted() {
         let mut view = acked_not_adopted(0x11);
         view.state.confirmed = view.state.confirmed.map(|a| Assignment { ble: true, ..a });

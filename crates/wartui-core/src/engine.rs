@@ -366,15 +366,21 @@ impl NodeState {
         }
     }
 
-    /// Whether this node's heartbeat has confirmed it holds [`Self::desired`].
+    /// Whether this node's heartbeat has confirmed it holds what this host
+    /// currently cares about: [`Self::desired`] when there is one, since that
+    /// is newer than anything acknowledged; [`Self::confirmed`] otherwise, so
+    /// a node that departed the plan (`desired` cleared, `confirmed` kept) is
+    /// read against what it actually holds rather than nothing at all.
     ///
     /// The stronger fact layered on top of [`Self::confirmed`]: a MAC-layer ack
     /// says the frame was delivered, this says the node actually took it. `false`
-    /// with no live heartbeat yet, or while [`Self::held_epoch`] and the epoch
-    /// [`Self::desired`] carries disagree.
+    /// with no live heartbeat yet, or while [`Self::held_epoch`] and that
+    /// assignment's epoch disagree.
     #[must_use]
     pub fn adopted(&self) -> bool {
-        self.desired.is_some_and(|d| self.held_epoch == Some(wire_epoch(d.counter)))
+        self.desired
+            .or(self.confirmed)
+            .is_some_and(|d| self.held_epoch == Some(wire_epoch(d.counter)))
     }
 }
 
@@ -953,6 +959,9 @@ impl FleetEngine {
                     node.last_seq = None;
                     node.last_batch = None;
                     node.last_batch_rx_us = None;
+                    // The node's epoch went back to a boot value too; what it
+                    // held is no longer known.
+                    node.held_epoch = None;
                 }
                 node.capabilities = Some(heartbeat.capabilities);
                 // A replayed heartbeat's epoch is history, not now: it must not

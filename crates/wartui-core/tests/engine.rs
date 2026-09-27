@@ -1502,6 +1502,36 @@ fn engine_ignores_epoch_when_heartbeat_is_replayed_from_backlog() {
 }
 
 #[test]
+fn engine_counts_one_reboot_when_replayed_counter_drop_precedes_live_epoch_zero() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(heartbeat(NODE, 1), clock.at(1));
+    let (id, _, first) = sent_admin(&engine.handle(heartbeat(NODE, 2), clock.at(6)));
+    engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(6));
+    engine.handle(heartbeat_holding(NODE, 3, first.epoch), clock.at(10));
+    assert!(engine.nodes().next().expect("the node").adopted());
+
+    // Replayed out of the backlog (a huge rx_us jump against a tiny host-time
+    // one) and its counter is behind the one already seen: a reboot on its
+    // own, and this alone must not also wait for an epoch to say so.
+    engine.handle(
+        beat_at(NODE, 1, 0, Capabilities::here(true, true), 1_000_000),
+        clock.at_ms(10_002),
+    );
+    assert_eq!(engine.nodes().next().expect("the node").reboots, 1);
+
+    // The next heartbeat is live and reports epoch 0 too -- the same reboot's
+    // first live word on it, not a second reboot. `held_epoch` has to have
+    // been cleared already by the replayed one above, or this looks like the
+    // node forgetting a second, different epoch.
+    engine.handle(
+        beat_at(NODE, 2, 0, Capabilities::here(true, true), 1_050_000),
+        clock.at_ms(10_102),
+    );
+    assert_eq!(engine.nodes().next().expect("the node").reboots, 1, "one reboot, not two");
+}
+
+#[test]
 fn engine_resumes_epoch_counter_from_persisted_base_when_initialized() {
     let clock = Clock::new();
     let config = EngineConfig { assignment_base: 300, ..Default::default() };
