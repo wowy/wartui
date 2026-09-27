@@ -66,8 +66,8 @@ sweep shortens as the fleet grows:
 A fixed heartbeat interval, rather than one per sweep, makes the window's cost independent
 of the share. At one beat every 5 s it is about 2% of the node's time at any fleet size, and
 sniffing is bounded by the hop cost alone: about 96% of a dwell-plus-hop. The price is
-latency: an assignment waits up to one interval for its window, where it now waits up to
-one sweep.
+latency: an assignment waits up to one interval for its window, where on this drive's build
+it waited up to one sweep.
 
 ## The change on the bench
 
@@ -99,8 +99,8 @@ in its ROM bootloader (`espflash board-info --after no-reset`) past the 60 s tim
   next heartbeat, 3.4 s after that.
 - Every record either node logged was stored. On `0A:28` that is 281 Wi-Fi and 184 Bluetooth, in
   both the log and the store. The node's `unacked` count stayed at 0 throughout.
-- `beat` measures a sweep period longer than the heartbeat interval: 5.0 s shown for a 5.5 s
-  sweep, against the ~5.0 s it would read if the gaps with no counter step were dropped. The
-  span over five intervals is coarse, though: it is off by up to one sweep across ~25 s, so
-  about 10% at 2.6 s sweeps and 10–20% at 5 s ones. #97 replaces the column with the node's own
-  report of the epoch it holds.
+- `beat` read 5.0 s for the 5.5 s lone sweep. This bench cannot tell the span arithmetic from
+  the per-gap version it replaced: 25 s holds four or five 5.5 s sweeps, so both land on 5.0 s.
+  The engine tests are what pin a sweep longer than the interval. The span is off by up to one
+  sweep across ~25 s, about 10% at 2.6 s sweeps and 10–20% at 5 s ones. #97 replaces the column
+  with the node's own report of the epoch it holds.
