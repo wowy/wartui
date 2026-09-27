@@ -679,6 +679,20 @@ struct PendingAdmin {
     heartbeat_rx_us: Option<u32>,
 }
 
+/// Allocate the next monotonic counter, skipping the one whose wire epoch
+/// collides with what a node's heartbeat says it already holds — otherwise a
+/// fresh capture's first assignment can carry the same wire epoch a node kept
+/// from a previous run, which the node acks and silently discards. Consecutive
+/// counters map to distinct wire epochs (`wire_epoch`'s `% 255`), so at most one
+/// skip is ever needed. `Some(0)` never matches: `wire_epoch` never returns it.
+fn next_epoch(last: &mut u64, held: Option<u8>) -> u64 {
+    *last += 1;
+    if Some(wire_epoch(*last)) == held {
+        *last += 1;
+    }
+    *last
+}
+
 impl FleetEngine {
     /// Start an engine. `now` fixes the session's start time.
     #[must_use]
@@ -1010,6 +1024,19 @@ impl FleetEngine {
                 // Re-partitioning here rather than on the next tick is what lets
                 // it take its share inside the window it has just opened.
                 self.replan(now);
+                // `deal` can allocate a counter before `held_epoch` is known (a backlog
+                // replay leaves it `None`), and an ack can be lost after a node genuinely
+                // adopted. Both look the same here: the node's heartbeat reports holding
+                // exactly what `desired` carries. Re-issuing spends one more epoch and is
+                // correct either way.
+                if let Some(node) = self.nodes.get(&src)
+                    && live
+                    && node.dirty
+                    && let Some(desired) = node.desired
+                    && node.held_epoch == Some(wire_epoch(desired.counter))
+                {
+                    self.reissue(src);
+                }
                 // The node holds its window open for 100 ms and its radio is gone
                 // after that, so this is the only moment in the sweep worth
                 // transmitting in — as long as the heartbeat is news.
@@ -1316,15 +1343,17 @@ impl FleetEngine {
     ///
     /// For a node that rebooted, which has forgotten what it holds, or one still
     /// addressing a bridge that is gone: either way, what it was last given is
-    /// re-sent under an epoch it cannot already match.
+    /// re-sent under an epoch it cannot already match. Routed through
+    /// [`next_epoch`] for the same reason: the epoch it is about to be re-sent
+    /// under must not be the one it already reports holding.
     ///
     /// Deliberately does not touch the Bluetooth flag. A change to the flag is
     /// always a change to the channels too, so it is always a re-cut and always
     /// [`Self::replan`]'s — and clearing the flag here without the channels beside
     /// it would leave a Bluetooth node holding an empty set with nothing to scan.
     fn reissue(&mut self, mac: Mac) {
-        self.last_counter += 1;
-        let counter = self.last_counter;
+        let held = self.nodes.get(&mac).and_then(|node| node.held_epoch);
+        let counter = next_epoch(&mut self.last_counter, held);
         if let Some(node) = self.nodes.get_mut(&mac)
             && let Some(desired) = node.desired.as_mut()
         {
@@ -1414,8 +1443,10 @@ impl FleetEngine {
     /// re-cut anything. `members` is the same list `replan` cut `plan` against,
     /// in the same order, so each member's slot still lines up with the plan's.
     fn deal(&mut self, plan: &Plan, members: &[(Mac, Job)]) {
-        // One epoch per node that actually needs telling. Held locally because
-        // the decision needs the node in hand, and `self` is borrowed for it.
+        // One epoch per node that actually needs telling, through `next_epoch` so
+        // it never collides with what the node's own heartbeat says it holds.
+        // Held locally because the decision needs the node in hand, and `self`
+        // is borrowed for it.
         let mut counter = self.last_counter;
         let pool = self.config.pool;
         for (index, (mac, job)) in members.iter().enumerate() {
@@ -1457,7 +1488,7 @@ impl FleetEngine {
                     if let Some(assignment) = held
                         && assignment.tx_power != self.config.tx_power
                     {
-                        counter += 1;
+                        let counter = next_epoch(&mut counter, node.held_epoch);
                         node.desired = Some(Assignment {
                             tx_power: self.config.tx_power,
                             counter,
@@ -1492,7 +1523,7 @@ impl FleetEngine {
                 continue;
             }
 
-            counter += 1;
+            let counter = next_epoch(&mut counter, node.held_epoch);
             node.desired =
                 Some(Assignment { channels, ble, tx_power: self.config.tx_power, counter });
             node.dirty = true;

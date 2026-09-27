@@ -14,7 +14,7 @@ use wartui_core::position::{DEFAULT_MAX_AGE, PositionChain, PositionSource};
 use wartui_core::record::{AdminOutcome, Record};
 use wartui_proto::air::{
     AdminMsg, Capabilities, Frame, HeartbeatMsg, RecordKind, Security, SightingBatchWriter,
-    SightingMsg,
+    SightingMsg, wire_epoch,
 };
 use wartui_proto::link::{
     BROADCAST, BridgeToHost, Chip, EspNowPayload, HostToBridge, LoopPhase, Mac, ResetCause,
@@ -2617,4 +2617,53 @@ fn engine_holds_clear_when_heartbeat_replayed_from_backlog() {
     );
     let (_, dst) = sent_clear(&live);
     assert_eq!(dst, NODE);
+}
+
+#[test]
+fn engine_skips_held_epoch_when_dealing_first_assignment() {
+    // The node's first heartbeat is not itself a live window (nothing to compare
+    // the bridge's clock against yet), so `deal` runs against it but nothing
+    // goes out; the second heartbeat is the one whose window is actually open.
+    // By then the node has already reported holding wire epoch 1 -- exactly
+    // what `deal` would allocate first under `EngineConfig::default()`
+    // (`assignment_base` 0, so the first counter is 1 and `wire_epoch(1) == 1`).
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(heartbeat_holding(NODE, 1, 1), clock.at(1));
+    let batch = engine.handle(heartbeat_holding(NODE, 2, 1), clock.at(6));
+    let (id, _, admin) = sent_admin(&batch);
+    assert_ne!(admin.epoch, 1, "never the epoch the node's own heartbeat already reports");
+
+    engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(6));
+    engine.handle(heartbeat_holding(NODE, 3, admin.epoch), clock.at(10));
+    assert!(engine.nodes().next().expect("the node").adopted());
+}
+
+#[test]
+fn engine_reissues_assignment_when_desired_epoch_matches_held_epoch() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(heartbeat(OTHER, 1), clock.at(1));
+
+    // NODE's first heartbeat is a backlog replay (huge bridge-side rx_us jump against
+    // a tiny host-clock one): `held_epoch` stays unknown, so `deal` has nothing to skip.
+    let batch = engine
+        .handle(beat_at(NODE, 1, 0, Capabilities::here(true, true), 1_000_000), clock.at_ms(1_002));
+    assert!(batch.urgent.is_empty(), "no assignment into a window that already shut");
+
+    let node = engine.nodes().find(|n| n.mac == NODE).expect("the node");
+    let desired = node.desired.expect("dealt while held_epoch was unknown");
+    let collide_epoch = wire_epoch(desired.counter);
+
+    // A live heartbeat now reports exactly the epoch just allocated blind. The
+    // host waits out the same 4 s the bridge's clock advances (4_000_000 rx_us
+    // against 4_000 host ms), which is what reads as caught-up rather than
+    // another backlog frame; `heartbeat_holding` cannot express this because it
+    // always reports rx_us 0.
+    let batch = engine.handle(
+        beat_at(NODE, 2, collide_epoch, Capabilities::here(true, true), 5_000_000),
+        clock.at_ms(5_002),
+    );
+    let (_, _, admin) = sent_admin(&batch);
+    assert_ne!(admin.epoch, collide_epoch, "reissued under a fresh epoch");
 }

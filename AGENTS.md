@@ -205,7 +205,9 @@ is here rather than only in a `//!`.
   rather than merely receiving it. A node adopts an assignment only when the epoch/version differs
   from the one it holds, so re-sending an identical one is acknowledged and silently discarded. If a
   node's heartbeat reports an epoch other than the one it acked, the frame did not land after all,
-  and the host re-sends it on that heartbeat's window rather than waiting.
+  and the host re-sends it on that heartbeat's window rather than waiting. The host never sends a
+  node the epoch its heartbeat says it already holds, because a fresh capture restarts the counter
+  while a running node keeps its epoch across it.
   → `crates/wartui-core/src/engine.rs`, `NodeState::adopted` / `Counters::admin_unadopted`
 - **`IndexRun` describes a *pool*, never the shape of an assignment.** An assignment is a
   `ChannelSet` naming any subset of `SCAN_CHANNELS`, so the planner flattens the pool and deals
