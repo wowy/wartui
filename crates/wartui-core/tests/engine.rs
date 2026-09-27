@@ -428,7 +428,7 @@ fn engine_drops_batch_when_seq_and_payload_repeat() {
     let frame = batch(1, &[msg]);
     engine.handle(rx_at(NODE, &frame, 0), clock.at(1));
     // A retry lands a few ms later by the bridge's own clock, well inside
-    // one channel dwell.
+    // the 150 ms window.
     engine.handle(rx_at(NODE, &frame, 4_000), clock.at(2));
 
     let node = engine.nodes().find(|n| n.mac == NODE).expect("the node");
@@ -444,11 +444,39 @@ fn engine_drops_batch_when_seq_and_payload_repeat() {
 }
 
 #[test]
-fn engine_records_batch_when_seq_and_payload_repeat_after_a_dwell() {
+fn engine_drops_batch_when_seq_and_payload_repeat_inside_the_window() {
+    // 140 ms is past one channel dwell (125 ms) but inside the window's own
+    // 150 ms, pinning that the window is a fixed value rather than derived
+    // from the dwell.
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+
+    let msg = SightingMsg {
+        kind: RecordKind::Wifi,
+        bssid: [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF],
+        channel: 6,
+        rssi: -60,
+        security: Security::Open,
+        ssid: b"",
+        ext: &[],
+    };
+    let frame = batch(1, &[msg]);
+    engine.handle(rx_at(NODE, &frame, 0), clock.at(1));
+    engine.handle(rx_at(NODE, &frame, 140_000), clock.at(2));
+
+    let node = engine.nodes().find(|n| n.mac == NODE).expect("the node");
+    assert_eq!(counters(&engine).observations, 1, "the duplicate's record is not recorded twice");
+    assert_eq!(counters(&engine).duplicate_batches, 1);
+    assert_eq!(counters(&engine).batches_lost, 0);
+    assert_eq!(node.duplicate_batches, 1);
+}
+
+#[test]
+fn engine_records_batch_when_seq_and_payload_repeat_after_the_window() {
     // The node sent batch 1 and the bridge received it, but every ack was
     // lost, so the node marked the send failed and left `seq` at 1. The same
     // addresses are due again and are re-sent under that seq on a later
-    // dwell; heard at the same RSSI, the bytes are identical too. This is a
+    // report; heard at the same RSSI, the bytes are identical too. This is a
     // genuine later sighting, not a MAC-layer retry, and must be recorded.
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
@@ -464,7 +492,7 @@ fn engine_records_batch_when_seq_and_payload_repeat_after_a_dwell() {
     };
     let frame = batch(1, &[msg]);
     engine.handle(rx_at(NODE, &frame, 0), clock.at(1));
-    // A full channel dwell (200,000 us > 125,000 us) later.
+    // Past the 150 ms window.
     engine.handle(rx_at(NODE, &frame, 200_000), clock.at(2));
 
     let node = engine.nodes().find(|n| n.mac == NODE).expect("the node");

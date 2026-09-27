@@ -444,12 +444,12 @@ pub struct Counters {
     pub batches_lost: u64,
     /// Sighting batches dropped as MAC-layer retransmissions, summed across
     /// the fleet: same `seq`, byte-identical to the batch immediately before
-    /// them, and received within one channel dwell of it, because the
-    /// bridge's ack was lost and the node's radio retried until it got one.
-    /// A same-`seq`, same-bytes batch arriving a dwell or more later is a
-    /// node's own re-send after a failed send, not a retransmission, and is
-    /// recorded instead. Not counted in `batches_lost`, since nothing was
-    /// actually lost.
+    /// them, and received within [`FleetEngine::DUPLICATE_BATCH_WINDOW_US`]
+    /// of it, because the bridge's ack was lost and the node's radio retried
+    /// until it got one. A same-`seq`, same-bytes batch arriving outside that
+    /// window is a node's own re-send after a failed send, not a
+    /// retransmission, and is recorded instead. Not counted in
+    /// `batches_lost`, since nothing was actually lost.
     pub duplicate_batches: u64,
 }
 
@@ -1063,8 +1063,8 @@ impl FleetEngine {
     /// catches it in the `Sightings` arm first. A repeat that does reach here is a
     /// node whose send failed after all its retries even though the frame arrived:
     /// it never advanced `seq`, and its next batch — new content, or the same
-    /// addresses heard again a dwell or more later — reuses the number, so this
-    /// counts no loss for it either.
+    /// addresses heard again outside [`Self::DUPLICATE_BATCH_WINDOW_US`] —
+    /// reuses the number, so this counts no loss for it either.
     /// A gap under 1024 is batches lost in a row; at or past it, the count has
     /// wrapped or the frame arrived out of order, and guessing at a loss that
     /// large would invent history rather than report it.
@@ -1083,17 +1083,19 @@ impl FleetEngine {
     /// How long after a batch a byte-identical repeat under the same `seq` is
     /// still an 802.11 retry rather than a node's own later re-send.
     ///
-    /// Equal to one channel dwell (`plan::CHANNEL_DWELL_MS`) in microseconds,
-    /// checked with a strict `<` so a repeat at or past a full dwell away is
-    /// never counted as the retry: the radio's own retry sequence lands well
-    /// inside it (`docs/batch-loss-findings.md` has the drive that measured
-    /// it), while a node cannot send its next report sooner than one dwell
-    /// later — it reports once per dwell (or once per
-    /// `plan::BLE_BEAT_MS` on the Bluetooth node) and a report that fails
-    /// leaves it silent for the rest of that dwell. A bridge reboot resets
-    /// `rx_us`, so the wrapped difference against a pre-reboot stamp is huge
-    /// and the batch is recorded rather than dropped — the safe direction.
-    const DUPLICATE_BATCH_WINDOW_US: u64 = plan::CHANNEL_DWELL_MS as u64 * 1000;
+    /// 150 ms, checked with a strict `<` so a repeat at or past it is never
+    /// counted as the retry. The radio's own retry sequence lands well inside
+    /// it — `docs/batch-loss-findings.md` has the drive that measured it.
+    /// A byte-identical same-`seq` batch that is not a retry is a node
+    /// re-sending addresses it has heard again, which takes at least a whole
+    /// sweep: even a node with a single channel spends a dwell
+    /// (`plan::CHANNEL_DWELL_MS`) plus the heartbeat's admin window
+    /// (`plan::ADMIN_WAIT_MS`) on every sweep, over 200 ms, and the
+    /// Bluetooth node reports once per `plan::BLE_BEAT_MS`. A bridge reboot
+    /// resets `rx_us`, so the wrapped difference against a pre-reboot stamp
+    /// is huge and the batch is recorded rather than dropped — the safe
+    /// direction.
+    const DUPLICATE_BATCH_WINDOW_US: u64 = 150_000;
 
     /// Whether `payload` arriving at `rx_us` is a MAC-layer retransmission of
     /// this node's most recent batch: the same `seq`, byte-identical to what
@@ -1103,7 +1105,7 @@ impl FleetEngine {
     /// Same `seq` and same bytes also arises when the bridge received an
     /// earlier batch but every ack back was lost, so the node marked the send
     /// failed and left `seq` where it was; the same addresses, heard at the
-    /// same RSSI, are then re-sent under that `seq` on the node's next dwell.
+    /// same RSSI, are then re-sent under that `seq` the next time it reports.
     /// The window is what tells the two apart — dropping a batch outside it
     /// would discard a genuine later sighting rather than a retry. A
     /// same-`seq` batch with different bytes is a different event entirely —

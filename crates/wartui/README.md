@@ -392,12 +392,12 @@ node's own five-minute refresh reports them again. The footer's `lost N` is the 
 across the fleet, and appears only once something has been.
 
 The footer's `dup N` is different: batches dropped because they are the same `seq`,
-byte-identical to the one just before them, and arrived within one channel dwell of it — a
-node's radio retransmitting after the bridge's ack was lost rather than anything missing. A
-batch that repeats the same seq and bytes a dwell or more later is the node's own re-send after
-a failed send, and is recorded like any other. Its observations were already recorded from the
-first copy, so nothing here is hidden and nothing is lost — `dup` and `lost` never count the
-same batch.
+byte-identical to the one just before them, and arrived within 150 ms of it — a node's radio
+retransmitting after the bridge's ack was lost rather than anything missing. A batch that
+repeats the same seq and bytes 150 ms or more later is the node's own re-send after a failed
+send, and is recorded like any other. Its observations were already recorded from the first
+copy, so nothing here is hidden and nothing is lost — `dup` and `lost` never count the same
+batch.
 
 The header has three ways of saying it has nothing to drive: `auto — nothing heartbeating yet`,
 `auto — no node it can drive` (nodes are alive but none is assignable), and `auto — too many nodes`

@@ -103,8 +103,8 @@ all of it, with the same six nodes (`10:D0` on Bluetooth) and the C6 bridge `9D:
     2.9% of the drive. 361 of the 362 arrived within 100 ms of the original; one came
     seconds later, which is a node re-sending the same addresses at the same RSSI
     after an unacknowledged send, not a retry. The engine now drops a batch that
-    repeats its node's last `seq` and bytes within one channel dwell (125 ms) by the
-    bridge's own clock, which a node's next report cannot beat.
+    repeats its node's last `seq` and bytes within 150 ms by the bridge's own
+    clock, which a node's next report cannot beat.
   - 182 reused the number with different records: every retry of a batch that did
     arrive went unacknowledged, so the node kept its `seq` and sent those addresses
     again later. Those are recorded.
