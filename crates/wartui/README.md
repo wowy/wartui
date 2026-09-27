@@ -391,10 +391,12 @@ dozen access points, and those addresses stay hidden the same way a lost frame a
 node's own five-minute refresh reports them again. The footer's `lost N` is the same count summed
 across the fleet, and appears only once something has been.
 
-The footer's `dup N` is different: batches dropped because they are the same `seq` and
-byte-identical to the one just before them, which is a node's radio retransmitting after the
-bridge's ack was lost rather than anything missing. Its observations were already recorded from
-the first copy, so nothing here is hidden and nothing is lost — `dup` and `lost` never count the
+The footer's `dup N` is different: batches dropped because they are the same `seq`,
+byte-identical to the one just before them, and arrived within one channel dwell of it — a
+node's radio retransmitting after the bridge's ack was lost rather than anything missing. A
+batch that repeats the same seq and bytes a dwell or more later is the node's own re-send after
+a failed send, and is recorded like any other. Its observations were already recorded from the
+first copy, so nothing here is hidden and nothing is lost — `dup` and `lost` never count the
 same batch.
 
 The header has three ways of saying it has nothing to drive: `auto — nothing heartbeating yet`,

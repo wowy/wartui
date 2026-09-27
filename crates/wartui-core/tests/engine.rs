@@ -426,8 +426,10 @@ fn engine_drops_batch_when_seq_and_payload_repeat() {
         ext: &[],
     };
     let frame = batch(1, &[msg]);
-    engine.handle(rx(NODE, &frame), clock.at(1));
-    engine.handle(rx(NODE, &frame), clock.at(2));
+    engine.handle(rx_at(NODE, &frame, 0), clock.at(1));
+    // A retry lands a few ms later by the bridge's own clock, well inside
+    // one channel dwell.
+    engine.handle(rx_at(NODE, &frame, 4_000), clock.at(2));
 
     let node = engine.nodes().find(|n| n.mac == NODE).expect("the node");
     assert_eq!(counters(&engine).observations, 1, "the duplicate's record is not recorded twice");
@@ -439,6 +441,36 @@ fn engine_drops_batch_when_seq_and_payload_repeat() {
         EPOCH_MS + 2000,
         "the duplicate is still proof of life, so last_seen moves to its arrival"
     );
+}
+
+#[test]
+fn engine_records_batch_when_seq_and_payload_repeat_after_a_dwell() {
+    // The node sent batch 1 and the bridge received it, but every ack was
+    // lost, so the node marked the send failed and left `seq` at 1. The same
+    // addresses are due again and are re-sent under that seq on a later
+    // dwell; heard at the same RSSI, the bytes are identical too. This is a
+    // genuine later sighting, not a MAC-layer retry, and must be recorded.
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+
+    let msg = SightingMsg {
+        kind: RecordKind::Wifi,
+        bssid: [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF],
+        channel: 6,
+        rssi: -60,
+        security: Security::Open,
+        ssid: b"",
+        ext: &[],
+    };
+    let frame = batch(1, &[msg]);
+    engine.handle(rx_at(NODE, &frame, 0), clock.at(1));
+    // A full channel dwell (200,000 us > 125,000 us) later.
+    engine.handle(rx_at(NODE, &frame, 200_000), clock.at(2));
+
+    let node = engine.nodes().find(|n| n.mac == NODE).expect("the node");
+    assert_eq!(counters(&engine).observations, 2, "both batches are recorded");
+    assert_eq!(counters(&engine).duplicate_batches, 0);
+    assert_eq!(node.duplicate_batches, 0);
 }
 
 #[test]

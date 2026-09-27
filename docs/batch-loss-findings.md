@@ -100,9 +100,11 @@ all of it, with the same six nodes (`10:D0` on Bluetooth) and the C6 bridge `9D:
   - 362 were byte-identical and about 4 ms apart: the radio retransmitting after a
     lost ack. ESP-NOW on the bridge passes both copies up, so the host stored the
     same records twice: 1,152 observation rows repeat one stored within 50 ms,
-    2.9% of the drive. The engine now drops a batch that repeats both its node's last
-    `seq` and its bytes. Replayed over this drive's frames, that drops 362 batches
-    holding 1,159 records.
+    2.9% of the drive. 361 of the 362 arrived within 100 ms of the original; one came
+    seconds later, which is a node re-sending the same addresses at the same RSSI
+    after an unacknowledged send, not a retry. The engine now drops a batch that
+    repeats its node's last `seq` and bytes within one channel dwell (125 ms) by the
+    bridge's own clock, which a node's next report cannot beat.
   - 182 reused the number with different records: every retry of a batch that did
     arrive went unacknowledged, so the node kept its `seq` and sent those addresses
     again later. Those are recorded.
