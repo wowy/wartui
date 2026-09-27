@@ -375,6 +375,31 @@ fn engine_counts_batches_lost_when_sequence_gap_of_two_arrives() {
 }
 
 #[test]
+fn engine_counts_no_batches_lost_when_sequence_repeats() {
+    // A node reuses a seq after an unacknowledged send rather than advancing past
+    // it, so the retry lands with the same seq as the batch before it.
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+
+    let msg = SightingMsg {
+        kind: RecordKind::Wifi,
+        bssid: [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF],
+        channel: 6,
+        rssi: -60,
+        security: Security::Open,
+        ssid: b"",
+        ext: &[],
+    };
+    engine.handle(rx(NODE, &batch(1, &[msg])), clock.at(1));
+    engine.handle(rx(NODE, &batch(1, &[msg])), clock.at(2));
+    engine.handle(rx(NODE, &batch(2, &[msg])), clock.at(3));
+
+    let node = engine.nodes().find(|n| n.mac == NODE).expect("the node");
+    assert_eq!(node.batches_lost, 0, "a repeated seq is a retry, not a gap");
+    assert_eq!(counters(&engine).batches_lost, 0);
+}
+
+#[test]
 fn engine_resets_batch_sequence_baseline_when_node_reboots() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);

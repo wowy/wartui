@@ -998,12 +998,14 @@ impl FleetEngine {
 
     /// Track batches lost between this node and the host.
     ///
-    /// `seq` counts up once per batch a node sends, wrapping and restarting at
-    /// boot — the reboot arm above resets the baseline for the same reason it
-    /// resets everything else a boot forgets. A gap under 1024 is batches lost
-    /// in a row; at or past it, the count has wrapped or the frame arrived out
-    /// of order, and guessing at a loss that large would invent history rather
-    /// than report it.
+    /// `seq` counts up once per batch a node sends and the bridge acknowledges,
+    /// wrapping and restarting at boot — the reboot arm above resets the
+    /// baseline for the same reason it resets everything else a boot forgets.
+    /// A node reuses the same `seq` after an unacknowledged unicast rather than
+    /// advancing past it, so a repeat here is that retry landing, not a gap.
+    /// A gap under 1024 is batches lost in a row; at or past it, the count has
+    /// wrapped or the frame arrived out of order, and guessing at a loss that
+    /// large would invent history rather than report it.
     fn note_batch_seq(&mut self, src: Mac, seq: u16) {
         let Some(node) = self.nodes.get_mut(&src) else { return };
         if let Some(last) = node.last_seq {

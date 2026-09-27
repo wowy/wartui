@@ -4,11 +4,17 @@
 //! promiscuous mode on for its own reasons, so that falls out for free on the dwell
 //! side; the hop back to the control channel is the one to check on hardware.
 //!
-//! [`set_broadcast_rate`] and [`set_tx_power`] are the two direct IDF calls this
-//! firmware needs because `esp-radio` does not expose them once its long-lived handles
-//! borrow the controller.
+//! [`set_peer_rate`] and [`set_tx_power`] are the two direct IDF calls this firmware
+//! needs because `esp-radio` does not expose them once its long-lived handles borrow
+//! the controller.
+//!
+//! A heartbeat broadcasts: it is how a bridge discovers a node in the first place,
+//! before either side knows the other's address. A sighting batch unicasts, to
+//! whichever core last sent this node an admin or clear frame, so the radio retries
+//! it and an unacknowledged batch is knowable as such — see [`unicast`] and
+//! `main.rs`'s `Outgoing`.
 
-use esp_radio::esp_now::{EspNowManager, EspNowSender};
+use esp_radio::esp_now::{EspNowError, EspNowManager, EspNowSender, EspNowWifiInterface, PeerInfo};
 use esp_radio::wifi::sniffer::Sniffer;
 use wartui_proto::link::BROADCAST;
 
@@ -36,15 +42,15 @@ pub fn park(manager: &EspNowManager<'_>, sniffer: &Sniffer<'_>, channel: u8, lis
     parked
 }
 
-/// Broadcast at 802.11g 24 Mbps rather than ESP-NOW's 1 Mbps default, saying whether
-/// that took.
+/// Send at 802.11g 24 Mbps rather than ESP-NOW's 1 Mbps default, saying whether that
+/// took.
 ///
-/// Every frame a node sends is a broadcast, so the rate goes on the broadcast peer
-/// `esp-radio` registers at init, once; a node never removes that peer.
-/// `set_peer_rate` in `firmware/bridge/src/main.rs` has why 24 Mbps, what it costs,
-/// and why this cannot go through `esp-radio`.
+/// Applied to the broadcast peer `esp-radio` registers at init, once at boot, and to
+/// the core peer whenever [`set_core_peer`] registers one. `set_peer_rate` in
+/// `firmware/bridge/src/main.rs` has why 24 Mbps, what it costs, and why this cannot
+/// go through `esp-radio`.
 #[allow(unsafe_code, reason = "esp-radio's own espnow-rate call is refused on the C5 and C6")]
-pub fn set_broadcast_rate(_manager: &EspNowManager<'_>) -> bool {
+pub fn set_peer_rate(_manager: &EspNowManager<'_>, mac: &[u8; 6]) -> bool {
     #[cfg(feature = "esp32c5")]
     use esp_wifi_sys_esp32c5::include as sys;
     #[cfg(feature = "esp32c6")]
@@ -56,10 +62,10 @@ pub fn set_broadcast_rate(_manager: &EspNowManager<'_>) -> bool {
         ersu: false,
         dcm: false,
     };
-    // SAFETY: `BROADCAST` is six readable bytes and `config` is a fully initialised
+    // SAFETY: `mac` is six readable bytes and `config` is a fully initialised
     // `esp_now_rate_config_t`, both alive for the whole call. ESP-NOW is initialised,
     // since an `EspNowManager` exists. 0 is `ESP_OK`.
-    unsafe { sys::esp_now_set_peer_rate_config(BROADCAST.as_ptr(), &mut config) == 0 }
+    unsafe { sys::esp_now_set_peer_rate_config(mac.as_ptr(), &mut config) == 0 }
 }
 
 /// Set the Wi-Fi transmit power after ESP-NOW has borrowed the controller.
@@ -68,7 +74,7 @@ pub fn set_broadcast_rate(_manager: &EspNowManager<'_>) -> bool {
 /// the sniffer and ESP-NOW handles borrowed for its whole life, so this is the narrow
 /// direct IDF equivalent. The caller applies it only when adopting a fresh assignment.
 ///
-/// The manager goes unused for the reason [`set_broadcast_rate`] takes one: IDF wants
+/// The manager goes unused for the reason [`set_peer_rate`] takes one: IDF wants
 /// `esp_wifi_start` behind this call, and a witness is what stops it being made from
 /// somewhere in `main` that compiles and then fails on the board.
 #[allow(
@@ -87,14 +93,62 @@ pub fn set_tx_power(_manager: &EspNowManager<'_>, power: i8) -> bool {
     unsafe { sys::esp_wifi_set_max_tx_power(power) == 0 }
 }
 
-/// Put a frame on the air for whoever is listening.
+/// A plaintext station peer on whatever channel the radio is already using.
 ///
-/// Broadcast, because that is how a plaintext node reaches its core and because it
-/// needs no peer slot on either end. Nothing acknowledges a broadcast, so the return
-/// value says only that the radio transmitted it — the ack that matters runs the
-/// other way, when the host unicasts an assignment.
+/// `channel: None` becomes 0, which ESP-NOW reads as "the current one" — the node
+/// hops channels far more often than its core changes, so naming one explicitly
+/// would mean re-registering the peer on every dwell.
+const fn peer(mac: [u8; 6]) -> PeerInfo {
+    PeerInfo {
+        interface: EspNowWifiInterface::Station,
+        peer_address: mac,
+        // wartui does no encrypted ESP-NOW at all, so there is no PMK and no LMK.
+        lmk: None,
+        channel: None,
+        encrypt: false,
+    }
+}
+
+/// Make `mac` the node's one core peer, saying whether it registered.
+///
+/// `old` is the peer this replaces, if any, and is removed only after `mac` is
+/// registered — never `BROADCAST`, which `esp-radio` registers at init and this
+/// firmware never touches, because heartbeats keep using it after the core
+/// changes. Registering before removing means a failure here leaves the previous
+/// core's peer entry intact, so the caller's "leave `core` unchanged" is still
+/// backed by a peer that works. A rate that refused to set still leaves the peer
+/// usable, just slower, so only registration failure is reported to the caller.
+pub fn set_core_peer(
+    manager: &EspNowManager<'_>,
+    old: Option<[u8; 6]>,
+    mac: [u8; 6],
+) -> Result<(), EspNowError> {
+    manager.add_peer(peer(mac))?;
+    let _ = set_peer_rate(manager, &mac);
+    if let Some(prev) = old {
+        let _ = manager.remove_peer(&prev);
+    }
+    Ok(())
+}
+
+/// Broadcast a frame for whoever is listening on the control channel.
+///
+/// Heartbeats only: nothing acknowledges a broadcast, so the return value says only
+/// that the radio transmitted it. A node's core is learned from an admin or clear
+/// frame, and until one arrives a heartbeat is the only thing a node can send.
 pub fn broadcast(sender: &mut EspNowSender<'_>, frame: &[u8]) -> bool {
     // `esp-radio` registers the broadcast peer at init, and the waiter's `Drop`
     // blocks anyway, so waiting costs nothing that walking away would save.
     sender.send(&BROADCAST, frame).is_ok_and(|waiter| waiter.wait().is_ok())
+}
+
+/// Unicast a frame to `dst`, true only once the MAC layer has acknowledged it.
+///
+/// Sighting batches go this way rather than broadcast, so the radio retries a
+/// frame nobody heard instead of it being gone after one try. `wait` blocks for the
+/// send callback, the same as [`broadcast`]; the difference is what `Ok` means for a
+/// unicast destination, which `firmware/bridge/src/main.rs`'s `transmit` also relies
+/// on: the callback status is the MAC ack, not just an enqueue.
+pub fn unicast(sender: &mut EspNowSender<'_>, dst: &[u8; 6], frame: &[u8]) -> bool {
+    sender.send(dst, frame).is_ok_and(|waiter| waiter.wait().is_ok())
 }
