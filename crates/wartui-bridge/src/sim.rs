@@ -353,7 +353,9 @@ struct SimNode {
     /// not a heartbeat goes out then.
     hb_counter: u32,
     /// When this node next sends a heartbeat and holds the admin window open.
-    /// `None` until the first assignment is adopted.
+    /// `None` while parked. Set fresh every time an assignment is adopted
+    /// while parked, not only the first, so a stale deadline from before this
+    /// node last parked never fires early.
     next_beat: Option<tokio::time::Instant>,
     /// This node's next sighting batch counter, mirroring `Node::seq` on the
     /// firmware: it advances only once a batch actually goes out.
@@ -476,9 +478,12 @@ async fn run_node(
             {
                 return;
             }
-            // First assignment adopted, mid-nap: this node has just heartbeated,
-            // so its next one is a whole interval out from here.
-            if node.assigned() && node.next_beat.is_none() {
+            // An assignment adopted mid-nap, or moving from parked to assigned
+            // generally: this node has just heartbeated, so its next one is a
+            // whole interval out from here rather than immediate — set every
+            // time, since a stale deadline from before this node last parked
+            // would otherwise fire on the very next dwell.
+            if node.assigned() {
                 node.next_beat =
                     Some(tokio::time::Instant::now() + scaled(u64::from(ASSIGNED_BEAT_MS), speed));
             }

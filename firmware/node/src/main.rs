@@ -149,8 +149,10 @@ struct Node {
     /// the host notices a node has restarted and forgotten its assignment.
     counter: u32,
     /// When this node next sends a heartbeat and holds the admin window open.
-    /// `None` until the first assignment is adopted: an unassigned node
-    /// heartbeats every [`IDLE_BEAT_MS`] instead, with no deadline of its own.
+    /// `None` while parked: an unassigned node heartbeats every
+    /// [`IDLE_BEAT_MS`] instead, with no deadline of its own. Set fresh every
+    /// time an assignment is adopted while parked, not only the first, so a
+    /// stale deadline from before this node last parked never fires early.
     next_beat: Option<Instant>,
     reported: u32,
     /// This sighting batch's sequence number, advanced only once the core
@@ -400,9 +402,11 @@ fn main() -> ! {
                 note!("radio would not park on channel {}", CONTROL_CHANNEL);
             }
             listen(&manager, &receiver, node, IDLE_BEAT_MS);
-            // First assignment adopted, mid-listen: this node has just
-            // heartbeated and held a window, so its next one is a whole
-            // interval out from here rather than immediate.
+            // An assignment adopted mid-listen, or moving from parked to
+            // assigned generally: this node has just heartbeated and held a
+            // window, so its next one is a whole interval out from here
+            // rather than immediate — set every time, since a stale deadline
+            // from before this node last parked would otherwise fire early.
             if node.assigned(scanning) {
                 node.next_beat =
                     Some(Instant::now() + Duration::from_millis(u64::from(ASSIGNED_BEAT_MS)));
@@ -435,6 +439,10 @@ fn main() -> ! {
                 }
             } else {
                 note!("radio would not park on channel {}", CONTROL_CHANNEL);
+                // What keeps this loop from spinning when the radio refuses:
+                // nothing else here sleeps unconditionally the way the idle
+                // branch's `listen` does.
+                listen(&manager, &receiver, node, ADMIN_WAIT_MS);
             }
             // Straight into the next scan either way: a beat not yet due costs
             // this node nothing but the next check.

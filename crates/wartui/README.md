@@ -184,9 +184,10 @@ That column leads with a count because a share dealt round-robin is a dozen scat
 no sane column is wide enough for all of them. The count is the useful half anyway: it is what the
 `beat` column should be proportional to. `beat` is the node's sweep period, computed from the
 counter its heartbeat carries — not the heartbeat's own cadence, which is a fixed 5 seconds once
-assigned. Bringing a second node up halves the first one's share, and its `beat` should halve with
-it within a few heartbeat intervals — the only evidence available that an assignment was adopted
-rather than merely acknowledged, since a node reports nothing about what it is scanning. The
+assigned. It is a span over the last five heartbeat intervals rather than a single gap, so bringing
+a second node up halves the first one's share, and its `beat` should halve with it within about
+five heartbeat intervals — the only evidence available that an assignment was adopted rather than
+merely acknowledged, since a node reports nothing about what it is scanning. The
 Bluetooth node is the exception: it sweeps nothing, so its `beat` reads about one scan (~0.5 s),
 which is the same kind of evidence and proportional to nothing.
 

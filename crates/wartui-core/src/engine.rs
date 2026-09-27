@@ -274,8 +274,9 @@ pub struct NodeState {
     /// Bridge-local microsecond stamp of the most recent heartbeat, which is
     /// the near end of that measurement.
     last_heartbeat_rx_us: Option<u32>,
-    /// Gaps between recent heartbeats, in milliseconds, newest last.
-    beat_gaps: VecDeque<u32>,
+    /// Recent heartbeats' arrival time and counter, oldest first, for
+    /// [`Self::beat_period_ms`]'s span. At most [`BEAT_WINDOW`] + 1 entries.
+    beat_samples: VecDeque<(Instant, u32)>,
     /// The `seq` of this node's most recent sighting batch. `None` before its
     /// first, and reset on a detected reboot: the counter restarts at boot,
     /// and a gap across one is history rather than a loss.
@@ -352,7 +353,7 @@ impl NodeState {
             last_outcome: None,
             last_latency_us: None,
             last_heartbeat_rx_us: None,
-            beat_gaps: VecDeque::new(),
+            beat_samples: VecDeque::new(),
             last_seq: None,
             last_batch: None,
             last_batch_rx_us: None,
@@ -363,59 +364,76 @@ impl NodeState {
 
     /// How long this node's sweep takes, in milliseconds.
     ///
-    /// The median of the last few samples rather than the last one. A heartbeat
-    /// arrives every [`wartui_proto::plan::ASSIGNED_BEAT_MS`] rather than once
-    /// per sweep, so each sample divides the gap between two heartbeats by how
-    /// many sweeps the counter advanced across it: `gap_ms / (counter -
-    /// previous_counter)`. Dividing by the counter step is what keeps a lost
-    /// heartbeat from distorting a sample at all — it only widens the counter
-    /// step the next arrival divides by, rather than doubling a raw gap. What
-    /// comes out is still proportional to how many channels the node is
+    /// A span over the whole window of recent heartbeats — `(newest.time -
+    /// oldest.time) / (newest.counter - oldest.counter)` — rather than one
+    /// heartbeat's gap divided by its own counter step. A single gap is wrong
+    /// two ways at once: a sweep longer than the heartbeat interval can carry
+    /// the *same* counter across two or more heartbeats, which a per-gap
+    /// figure could only skip, silently losing that elapsed time — a lone
+    /// node holding the whole pool sweeps in about 5.3 s against a 5 s
+    /// interval, so most gaps see no step at all, and the rare one that does
+    /// would read back a flat 5 s rather than the true 5.3. And even where
+    /// every gap does see a step, dividing one heartbeat interval by a small
+    /// integer count quantises badly: a 2 s sweep divides 5 s by 2 or 3 and
+    /// reads 2500 or 1666 ms, never 2000. Spanning [`BEAT_WINDOW`] intervals
+    /// (about 25 s) instead means the count both ends divide by is large
+    /// enough that the quantisation error is at most one sweep over the whole
+    /// span, and a lost or replayed heartbeat costs nothing: the next arrival
+    /// still spans the same elapsed time and counter step it always would
+    /// have, just with one interval folded into the next.
+    ///
+    /// `None` while fewer than two samples span a nonzero counter step — on a
+    /// fresh node, or right after a reboot clears the window.
+    ///
+    /// What comes out is proportional to how many channels the node is
     /// scanning, which is the whole proof that an assignment landed, visible
     /// without serial access to the node. The node scanning Bluetooth reads
-    /// roughly one scan. The median is what keeps one still-noisy sample from
-    /// reading as the range.
+    /// roughly one scan.
     #[must_use]
     pub fn beat_period_ms(&self) -> Option<u32> {
-        if self.beat_gaps.is_empty() {
-            return None;
-        }
-        let mut gaps: Vec<u32> = self.beat_gaps.iter().copied().collect();
-        gaps.sort_unstable();
-        Some(gaps[gaps.len() / 2])
+        let &(oldest_at, oldest_counter) = self.beat_samples.front()?;
+        let &(newest_at, newest_counter) = self.beat_samples.back()?;
+        let steps = newest_counter.checked_sub(oldest_counter).filter(|&steps| steps > 0)?;
+        let span_ms = newest_at.duration_since(oldest_at).as_millis();
+        u32::try_from(span_ms / u128::from(steps)).ok()
     }
 
-    /// Record a per-sweep period sample from a heartbeat carrying `counter`.
+    /// Record a heartbeat's arrival time and counter, for
+    /// [`Self::beat_period_ms`]'s span.
     ///
-    /// Skipped when the counter did not advance (a duplicate or replayed
-    /// heartbeat) or went backwards (a reboot, already handled by the caller):
-    /// either would divide by zero or invent a period nobody sniffed. Called
-    /// before `self.counter` is updated to the new value, so `self.counter`
-    /// still holds the previous sample's counter here.
-    fn note_beat_gap(&mut self, now: Now, counter: u32) {
-        let (Some(previous_at), Some(previous_counter)) = (self.last_heartbeat, self.counter)
-        else {
-            return;
-        };
-        if counter <= previous_counter {
+    /// Cleared on `rebooted`: the counter has gone back to a boot value, so
+    /// every sample already held would span across that reset. Otherwise
+    /// always pushed and capped at [`BEAT_WINDOW`] + 1 entries, except a
+    /// replay — the same counter arriving at the same instant, which a
+    /// backlog flush can produce — which would only crowd out a real sample
+    /// for nothing.
+    fn note_beat_gap(&mut self, now: Now, counter: u32, rebooted: bool) {
+        if rebooted {
+            self.beat_samples.clear();
+        }
+        if self
+            .beat_samples
+            .back()
+            .is_some_and(|&(at, previous)| at == now.mono && previous == counter)
+        {
             return;
         }
-        let steps = counter - previous_counter;
-        let gap = now.mono.duration_since(previous_at).as_millis();
-        let gap = u32::try_from(gap).unwrap_or(u32::MAX);
-        if self.beat_gaps.len() >= BEAT_WINDOW {
-            self.beat_gaps.pop_front();
+        if self.beat_samples.len() > BEAT_WINDOW {
+            self.beat_samples.pop_front();
         }
-        self.beat_gaps.push_back(gap / steps);
+        self.beat_samples.push_back((now.mono, counter));
     }
 }
 
-/// How many heartbeat gaps to keep per node.
+/// How many heartbeat intervals [`NodeState::beat_period_ms`]'s span covers.
 ///
-/// Five: enough for the median to survive one lost heartbeat, few enough that
-/// the figure follows a new assignment within three sweeps rather than averaging
-/// the old range in for a minute. Public because it is also how many heartbeats
-/// anything measuring a period across a change of range has to wait out.
+/// Five, about 25 s at [`wartui_proto::plan::ASSIGNED_BEAT_MS`]: long enough
+/// that a short sweep's quantisation error is a small fraction of the
+/// reading, short enough that the figure still follows a new assignment
+/// inside half a minute rather than averaging a much older range in. The
+/// window itself holds `BEAT_WINDOW + 1` samples, so that many heartbeats —
+/// not `BEAT_WINDOW` — is how long anything measuring a period across a
+/// change of range has to wait for every sample in the span to belong to it.
 pub const BEAT_WINDOW: usize = 5;
 
 /// Running totals, all of them since the engine started.
@@ -662,9 +680,9 @@ const BEHIND_THE_AIR_US: u64 = plan::ADMIN_WAIT_MS as u64 * 1_000;
 /// an 802.11 retry rather than a node's own later re-send.
 ///
 /// 100 ms, checked with a strict `<` so a repeat at or past it is never counted
-/// as the retry. The radio's own retries arrived about 4 ms after the original
-/// and 361 of 362 within 100 ms (`docs/batch-loss-findings.md`). A
-/// byte-identical same-`seq` batch that is not a retry is a node re-sending
+/// as the retry. The radio's own retries arrived about 4 ms after the
+/// original, every one of them within 100 ms (`docs/batch-loss-findings.md`).
+/// A byte-identical same-`seq` batch that is not a retry is a node re-sending
 /// addresses it has heard again, which takes at least a whole sweep: a sweep
 /// has no admin window in it, so the shortest time between two reports of one
 /// channel is a single dwell (`plan::CHANNEL_DWELL_MS`), and a one-channel
@@ -978,7 +996,7 @@ impl FleetEngine {
                     node.last_batch_rx_us = None;
                 }
                 node.capabilities = Some(heartbeat.capabilities);
-                node.note_beat_gap(now, heartbeat.counter);
+                node.note_beat_gap(now, heartbeat.counter, rebooted);
                 node.counter = Some(heartbeat.counter);
                 node.last_heartbeat = Some(now.mono);
                 node.last_heartbeat_rx_us = Some(rx_us);

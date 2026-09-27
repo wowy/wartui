@@ -4,13 +4,16 @@
 //! completes instantly and deterministically.
 
 use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
 use tokio::time::Instant;
 use wartui_bridge::sim::{SimConfig, SimTransport};
 use wartui_bridge::{LinkEvent, LinkHandle};
 use wartui_proto::air::{AdminMsg, ClearMsg, Frame, HeartbeatMsg, RecordKind};
 use wartui_proto::link::{BridgeToHost, EspNowPayload, HostToBridge, Mac, SendStatus};
-use wartui_proto::plan::{ASSIGNED_BEAT_MS, CHANNEL_DWELL_MS, ChannelPool, ChannelSet, IndexRun};
+use wartui_proto::plan::{
+    ASSIGNED_BEAT_MS, CHANNEL_DWELL_MS, ChannelPool, ChannelSet, IDLE_BEAT_MS, IndexRun,
+};
 
 /// The next node → core frame, as (source, the bytes it arrived as).
 ///
@@ -436,6 +439,51 @@ async fn sim_node_heartbeats_at_assigned_beat_when_sweeping() {
     let (_, c1) = beats[1];
     let (_, c2) = beats[2];
     assert!(c2 - c1 > 1, "many sweeps complete inside one heartbeat interval: {c1} -> {c2}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn sim_node_waits_a_full_beat_when_reassigned_after_parking() {
+    // A stale `next_beat` left over from a share this node held before it
+    // parked must not fire on the very first dwell once it is reassigned.
+    let config = SimConfig { node_count: 1, ble_chance: 0.0, ..SimConfig::default() };
+    let mut link = SimTransport::new(config).start().expect("starts");
+    let node = SimTransport::node_mac(0);
+    let mut one = ChannelSet::empty();
+    one.insert(0);
+
+    assign(&link, 1, one, false);
+    // Let its next_beat deadline pass at least once while assigned, so it is
+    // well in the past by the time this node parks.
+    next_heartbeat_from(&mut link, node).await;
+    next_heartbeat_from(&mut link, node).await;
+
+    // An admin frame with no channels and no Bluetooth flag is the one thing
+    // the host never sends, and this node treats it as never having been told
+    // anything: it parks.
+    assign(&link, 2, ChannelSet::empty(), false);
+
+    // Drain idle heartbeats until a whole beat interval has passed while
+    // parked, so a stale deadline would be long overdue by the time this node
+    // is reassigned. Draining rather than sleeping blind is what keeps a
+    // backlog of idle beats from being mistaken for the first fresh one below.
+    let past_a_beat =
+        tokio::time::Instant::now() + Duration::from_millis(u64::from(ASSIGNED_BEAT_MS));
+    let mut last_idle_at = next_heartbeat_from(&mut link, node).await;
+    while tokio::time::Instant::now() < past_a_beat {
+        last_idle_at = next_heartbeat_from(&mut link, node).await;
+    }
+
+    assign(&link, 3, one, false);
+    let first = next_heartbeat_from(&mut link, node).await;
+    let gap = (first - last_idle_at).as_millis();
+    // At least a whole interval — the fix — never a mere dwell or admin window,
+    // which is what the stale-deadline bug produced. The idle beat already in
+    // flight when the reassignment lands can add up to one more IDLE_BEAT_MS,
+    // since it is not cut short.
+    assert!(
+        gap >= u128::from(ASSIGNED_BEAT_MS) && gap <= u128::from(ASSIGNED_BEAT_MS + IDLE_BEAT_MS),
+        "the first heartbeat after reassignment waits a full interval, not one dwell: {gap} ms"
+    );
 }
 
 #[tokio::test(start_paused = true)]

@@ -1380,59 +1380,76 @@ fn engine_resumes_epoch_counter_from_persisted_base_when_initialized() {
 }
 
 #[test]
-fn engine_computes_median_heartbeat_period_when_multiple_beats_arrive() {
+fn engine_spans_beat_period_when_one_heartbeat_is_lost() {
+    // Six heartbeats, mostly four seconds apart, with one lost in the middle so
+    // the gap it left doubles to eight. Spanning the whole window absorbs the
+    // one bad gap rather than reading it back whole.
     let clock = Clock::new();
     let mut engine = engine(us_config(), &clock);
 
-    // Four-second heartbeat gaps, each a counter step of one sweep, with one
-    // heartbeat lost in the middle so the gap it left doubles. The median is
-    // what absorbs it.
     for (n, at) in [1u64, 5, 9, 17, 21, 25].into_iter().enumerate() {
         engine.handle(heartbeat(NODE, n as u32 + 1), clock.at(at));
     }
 
     let node = engine.nodes().next().expect("the node");
-    assert_eq!(node.beat_period_ms(), Some(4_000));
+    assert_eq!(node.beat_period_ms(), Some(4_800), "24000 ms span / 5 counter steps");
 }
 
 #[test]
-fn engine_divides_period_by_counter_step_when_beats_skip_several_sweeps() {
-    // Five seconds apart but four sweeps' worth of counter, the way an assigned
-    // node's heartbeat arrives: the period is the gap divided by the step, not
-    // the raw gap.
+fn engine_spans_beat_period_when_sweep_exceeds_heartbeat_interval() {
+    // A sweep longer than the fixed 5 s heartbeat interval means some
+    // consecutive beats carry the same counter — no sweep completed in that
+    // interval — which a single gap divided by its own step could only skip,
+    // losing the elapsed time. The span still reads it: five 5 s beats, only
+    // four of which see a completed sweep.
     let clock = Clock::new();
     let mut engine = engine(us_config(), &clock);
 
-    engine.handle(heartbeat(NODE, 1), clock.at(0));
-    engine.handle(heartbeat(NODE, 5), clock.at(5));
-    engine.handle(heartbeat(NODE, 9), clock.at(10));
+    for (n, counter) in [0u32, 1, 2, 2, 3, 4].into_iter().enumerate() {
+        engine.handle(heartbeat(NODE, counter), clock.at(n as u64 * 5));
+    }
 
     let node = engine.nodes().next().expect("the node");
-    assert_eq!(node.beat_period_ms(), Some(1_250), "5000 ms / 4 sweeps");
+    assert_eq!(node.beat_period_ms(), Some(6_250), "25000 ms span / 4 counter steps");
 }
 
 #[test]
-fn engine_skips_sample_when_counter_does_not_advance_or_goes_backward() {
-    // A duplicate or replayed heartbeat (same counter) and a reboot (counter
-    // going backward) each divide by zero or invent a period nobody sniffed, so
-    // neither leaves a sample behind.
+fn engine_spans_beat_period_closely_when_sweep_is_much_shorter_than_interval() {
+    // A sweep this short completes many times between two heartbeats. The
+    // span reads close to the true period; a single gap divided by its own
+    // small counter step would instead quantise to 2500 or 1666 ms, never the
+    // 2000 ms this sweep actually takes.
     let clock = Clock::new();
     let mut engine = engine(us_config(), &clock);
 
-    engine.handle(heartbeat(NODE, 4), clock.at(0));
-    // Same counter again: no sweep happened between these two arrivals.
-    engine.handle(heartbeat(NODE, 4), clock.at(5));
-    assert_eq!(engine.nodes().next().expect("the node").beat_period_ms(), None);
+    for (n, counter) in [0u32, 2, 5, 7, 10, 12].into_iter().enumerate() {
+        engine.handle(heartbeat(NODE, counter), clock.at(n as u64 * 5));
+    }
+
+    let node = engine.nodes().next().expect("the node");
+    assert_eq!(node.beat_period_ms(), Some(2_083), "25000 ms span / 12 counter steps");
+}
+
+#[test]
+fn engine_clears_beat_window_when_counter_goes_backward() {
+    // A reboot means the counter went back to a boot value: every sample held
+    // spans across that reset, so none of them describes a real sweep.
+    let clock = Clock::new();
+    let mut engine = engine(us_config(), &clock);
+
+    engine.handle(heartbeat(NODE, 5), clock.at(0));
+    engine.handle(heartbeat(NODE, 9), clock.at(5));
+    assert_eq!(engine.nodes().next().expect("the node").beat_period_ms(), Some(1_250));
 
     // A reboot: the counter goes back to a boot value.
     engine.handle(heartbeat(NODE, 1), clock.at(10));
     assert_eq!(
         engine.nodes().next().expect("the node").beat_period_ms(),
         None,
-        "a reboot leaves no period sample either"
+        "the window is cleared, and one sample alone has no span"
     );
 
-    // A genuine sweep afterwards is a normal sample.
+    // A second heartbeat after the reboot gives a fresh, clean span.
     engine.handle(heartbeat(NODE, 2), clock.at(11));
     assert_eq!(engine.nodes().next().expect("the node").beat_period_ms(), Some(1_000));
 }
