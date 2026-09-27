@@ -118,12 +118,20 @@ const fn peer(mac: [u8; 6]) -> PeerInfo {
 /// core's peer entry intact, so the caller's "leave `core` unchanged" is still
 /// backed by a peer that works. A rate that refused to set still leaves the peer
 /// usable, just slower, so only registration failure is reported to the caller.
+///
+/// `PeerExists` is not that failure: `old`'s removal above is best-effort, so a
+/// node switching back to a core it held before can find it still registered.
+/// Treated as success, same as `transmit` in `firmware/bridge/src/main.rs` — the
+/// alternative is a node that can never move back onto a MAC it once left.
 pub fn set_core_peer(
     manager: &EspNowManager<'_>,
     old: Option<[u8; 6]>,
     mac: [u8; 6],
 ) -> Result<(), EspNowError> {
-    manager.add_peer(peer(mac))?;
+    match manager.add_peer(peer(mac)) {
+        Ok(()) | Err(EspNowError::Error(esp_radio::esp_now::Error::PeerExists)) => {}
+        Err(err) => return Err(err),
+    }
     let _ = set_peer_rate(manager, &mac);
     if let Some(prev) = old {
         let _ = manager.remove_peer(&prev);

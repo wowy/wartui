@@ -21,7 +21,10 @@ This is the operator's manual. The root [`README.md`](../../README.md) is the sh
 
 A node broadcasts its heartbeat but unicasts its sighting batches to whichever bridge last sent it
 an admin or clear frame, so `sniff` on a second bridge on the same channel hears every node's
-heartbeats but none of their sightings — those go to the fleet's own bridge alone.
+heartbeats but none of their sightings — those go to the fleet's own bridge alone. If the bridge
+attached to this host is swapped for a different one mid-run, `run` re-sends every node's
+assignment so each learns the new address from that frame; the same bridge reconnecting or
+rebooting sends nothing, since every node is already addressing it correctly.
 
 `run` takes:
 

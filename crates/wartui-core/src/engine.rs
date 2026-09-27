@@ -693,6 +693,20 @@ impl FleetEngine {
                     chip: format!("{:?}", info.chip),
                     fw_version: info.fw_version.clone(),
                 }));
+                // A node unicasts its sightings to whichever bridge last sent it an
+                // admin or clear frame, never learning it from a heartbeat, which
+                // still broadcasts. `self.bridge` is not cleared on `Disconnected`,
+                // so if one was already held and its MAC differs, every node is
+                // still aimed at a bridge that is gone, with heartbeats alone
+                // keeping the fleet looking healthy. Re-sending each assignment
+                // under a fresh epoch puts an admin frame in that node's next
+                // window, which is what moves it onto the new bridge's address.
+                if self.bridge.as_ref().is_some_and(|bridge| bridge.mac != info.mac) {
+                    let macs: Vec<Mac> = self.nodes.keys().copied().collect();
+                    for mac in macs {
+                        self.reissue(mac);
+                    }
+                }
                 self.bridge = Some(info);
                 self.link_up = true;
                 self.link_error = None;
@@ -1168,8 +1182,9 @@ impl FleetEngine {
 
     /// Re-mark a node's assignment for delivery under a new epoch.
     ///
-    /// For a node that rebooted, which has forgotten what it holds: what it was
-    /// last given is re-sent under an epoch it cannot already match.
+    /// For a node that rebooted, which has forgotten what it holds, or one still
+    /// addressing a bridge that is gone: either way, what it was last given is
+    /// re-sent under an epoch it cannot already match.
     ///
     /// Deliberately does not touch the Bluetooth flag. A change to the flag is
     /// always a change to the channels too, so it is always a re-cut and always

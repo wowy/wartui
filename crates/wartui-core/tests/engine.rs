@@ -194,9 +194,14 @@ fn named_observation(src: Mac, bssid: &str, rssi: i8, ssid: &[u8]) -> Event {
 }
 
 fn connected() -> Event {
+    connected_with_mac([0x02, 0x00, 0x5E, 0x10, 0x9D, 0x24])
+}
+
+/// A connect from a bridge at `mac`, for the tests about a bridge swap.
+fn connected_with_mac(mac: Mac) -> Event {
     Event::Link(LinkEvent::Connected(BridgeInfo {
         chip: Chip::Esp32C6,
-        mac: [0x02, 0x00, 0x5E, 0x10, 0x9D, 0x24],
+        mac,
         fw_version: "0.1.0".to_owned(),
         // An ordinary connect. The engine draws no conclusions from these, but a
         // fixture that said otherwise would describe a fleet without a bridge.
@@ -1988,6 +1993,41 @@ fn engine_reissues_assignment_with_new_tx_power_when_set_tx_power_received() {
     assert_eq!(admin.tx_power, 40);
     assert_eq!(admin.channels, first.channels, "the same share, just louder");
     assert_ne!(admin.epoch, first.epoch, "a fresh epoch, since the node already holds the old one");
+}
+
+#[test]
+fn engine_reissues_assignments_when_a_different_bridge_connects() {
+    let clock = Clock::new();
+    let mut engine = engine(us_config(), &clock);
+    caught_up(&mut engine, &clock);
+    let (id, _, first) = sent_admin(&engine.handle(heartbeat(NODE, 1), clock.at(1)));
+    engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(1));
+
+    let other_bridge: Mac = [0x02, 0x00, 0x5E, 0x10, 0x9D, 0x25];
+    engine.handle(connected_with_mac(other_bridge), clock.at(2));
+    engine.handle(rx(GONE, b"not a frame"), clock.at(2));
+
+    let (_, dst, admin) = sent_admin(&engine.handle(heartbeat(NODE, 2), clock.at(3)));
+    assert_eq!(dst, NODE);
+    assert_eq!(admin.channels, first.channels, "the same share, just re-addressed");
+    assert_eq!(admin.node_index, first.node_index);
+    assert_eq!(admin.node_count, first.node_count);
+    assert_ne!(admin.epoch, first.epoch, "a fresh epoch, since the node already holds the old one");
+}
+
+#[test]
+fn engine_reissues_nothing_when_the_same_bridge_reconnects() {
+    let clock = Clock::new();
+    let mut engine = engine(us_config(), &clock);
+    caught_up(&mut engine, &clock);
+    let (id, _, _) = sent_admin(&engine.handle(heartbeat(NODE, 1), clock.at(1)));
+    engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(1));
+
+    engine.handle(connected(), clock.at(2));
+    engine.handle(rx(GONE, b"not a frame"), clock.at(2));
+
+    let batch = engine.handle(heartbeat(NODE, 2), clock.at(3));
+    assert!(admins(&batch).is_empty(), "the node already holds this share, addressed correctly");
 }
 
 #[test]
