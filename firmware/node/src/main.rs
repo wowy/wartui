@@ -132,12 +132,9 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 /// instead because the receive callback has to reach it from another task.
 struct Node {
     /// The epoch of the assignment held. Zero means none has ever arrived, which
-    /// the core never puts on the wire.
+    /// the core never puts on the wire. Sent back in every heartbeat, so the
+    /// host can tell adoption from a MAC-layer ack.
     version: u8,
-    /// Slot in the fleet the plan was cut for.
-    node_index: u8,
-    /// Fleet size the plan was cut for.
-    node_count: u8,
     /// Which [`SCAN_CHANNELS`] indices to dwell on, in ascending order.
     channels: ChannelSet,
     /// Whether the core asked this node to scan Bluetooth as well.
@@ -176,8 +173,6 @@ impl Node {
     const fn new() -> Self {
         Self {
             version: 0,
-            node_index: 0,
-            node_count: 1,
             channels: ChannelSet::empty(),
             ble: false,
             cursor: SweepCursor::new(),
@@ -235,8 +230,6 @@ impl Node {
             self.forget_reported("new share");
         }
         self.version = admin.epoch;
-        self.node_index = admin.node_index;
-        self.node_count = admin.node_count;
         self.channels = admin.channels;
         self.ble = admin.scan_ble();
         self.cursor = SweepCursor::new();
@@ -515,14 +508,15 @@ fn next_beat_after(deadline: Instant) -> Instant {
 ///
 /// Sent only from the control channel, at most once every [`ASSIGNED_BEAT_MS`]
 /// for an assigned node. The counter it carries tracks completed sweeps on its
-/// own timer, so it advances whether or not this call goes out; the host reads
-/// its period as a rough measure of how many channels the node is carrying, and
-/// treats sixty seconds of silence as a node that has left the fleet.
+/// own timer, so it advances whether or not this call goes out; the host treats
+/// sixty seconds of silence as a node that has left the fleet. `node.version` is
+/// the epoch this node holds, which is how the host tells adoption from a
+/// MAC-layer ack.
 fn heartbeat(sender: &mut EspNowSender<'_>, node: &Node, capabilities: Capabilities) {
     // Every heartbeat carries the capabilities, not just the first: sent once they
-    // would be lost to a dropped frame or stale after a reflash, and they are three
-    // bytes of thirteen.
-    let msg = HeartbeatMsg { counter: node.counter, capabilities };
+    // would be lost to a dropped frame or stale after a reflash, and they are
+    // three bytes of fourteen.
+    let msg = HeartbeatMsg { counter: node.counter, epoch: node.version, capabilities };
     radio::broadcast(sender, &msg.encode());
 }
 
@@ -756,13 +750,11 @@ fn drain_admin(manager: &EspNowManager<'_>, receiver: &EspNowReceiver<'_>, node:
                 );
             }
             note!(
-                "assigned v{}: {} channels ({}), ble {}, node {} of {}, power {} quarter-dBm",
+                "assigned v{}: {} channels ({}), ble {}, power {} quarter-dBm",
                 node.version,
                 node.channels.len(),
                 Channels(node.channels),
                 if node.ble { "on" } else { "off" },
-                node.node_index,
-                node.node_count,
                 admin.tx_power
             );
         }

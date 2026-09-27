@@ -177,22 +177,20 @@ what it has to work with: `auto — 4 of 5` for four heartbeating nodes out of f
 
 Nothing goes out at the moment a node's share changes. Its radio is away scanning some other channel
 for all but the 100 ms it holds open once every 5 seconds, so the assignment waits for that
-window — the `channels` column reads `1: 1…` until it lands, then drops the ellipsis. That wait is
-up to 5 seconds, the heartbeat interval, rather than a sweep. That delay is the protocol, not lag.
+window — the `channels` column reads `1: 1…` in yellow until it lands. That wait is up to 5
+seconds, the heartbeat interval, rather than a sweep. That delay is the protocol, not lag.
 
 That column leads with a count because a share dealt round-robin is a dozen scattered channels and
-no sane column is wide enough for all of them. The count is the useful half anyway: it is what the
-`beat` column should be proportional to. `beat` is the node's sweep period, computed from the
-counter its heartbeat carries — not the heartbeat's own cadence, which is a fixed 5 seconds once
-assigned. It is a span over the last five heartbeat intervals rather than a single gap, so bringing
-a second node up halves the first one's share, and its `beat` should halve with it within about
-five heartbeat intervals — the only evidence available that an assignment was adopted rather than
-merely acknowledged, since a node reports nothing about what it is scanning. The
-Bluetooth node is the exception: it sweeps nothing, so its `beat` reads about one scan (~0.5 s),
-which is the same kind of evidence and proportional to nothing.
+no sane column is wide enough for all of them.
 
 An assignment is believed only when the node's own radio acknowledges it at the MAC layer, never
-when the bridge reports a successful enqueue.
+when the bridge reports a successful enqueue — but an ack is not proof the node actually took the
+frame. Every heartbeat carries the epoch the node holds, and adoption is that separate, stronger
+fact: `channels` and `ble` show the acknowledged set in blue with a trailing `…` until the node's
+own heartbeat reports holding it, usually within 5 s of the admin window landing, then turn plain
+(or cyan for Bluetooth). If a heartbeat instead reports some *other* epoch than the one acknowledged,
+wartui re-sends the same epoch in the window that heartbeat opened, and the footer counts it under
+"acknowledged but not adopted".
 
 If a node keeps showing `no admin ack`, the cause is nearly always Bluetooth: the two radios share
 the one 2.4 GHz antenna, and the admin window is precisely when the node would otherwise be idle.
@@ -264,10 +262,9 @@ rather than given to a node that would ignore them, and the footer says how many
 going unscanned.
 
 Every fleet change re-cuts the pool for the _whole_ fleet, not just the node that joined or left.
-`node_index` and `node_count` travel in every assignment, reporting the node's slot and the fleet
-size the plan was cut for. Each node takes its new share in its own next admin window, so a fleet
-converges within one heartbeat interval. An unchanged fleet is left alone: a node adopts an
-assignment only when its epoch differs from the one it holds.
+Each node takes its new share in its own next admin window, so a fleet converges within one
+heartbeat interval. An unchanged fleet is left alone: a node adopts an assignment only when its
+epoch differs from the one it holds.
 
 Two consequences worth knowing:
 
@@ -285,7 +282,7 @@ Two consequences worth knowing:
   means "Bluetooth is the whole job" rather than "stop" — so their shares double up with someone
   else's. A node that has nothing to keep is the one exception: the node that *was* the Bluetooth
   scanner holds no channels at all, so taking the scan off it hands it everything its radio can
-  reach instead. That node then sweeps the whole pool on its own and its `beat` says so.
+  reach instead, and its `channels` column shows the whole pool once it is adopted.
 
 ## Positions
 
@@ -355,7 +352,13 @@ chip.
 | `no heartbeat` | Seen, but has never completed a sweep                                                                                                                  |
 | `no admin ack` | An assignment went out and its radio did not answer — nearly always Bluetooth, see [How channels are assigned](#how-channels-are-assigned)             |
 | `refused`      | The bridge would not transmit it — nearly always a full peer table. Its heartbeats are still arriving; what is missing is a slot to address it through |
-| `rebooted xN`  | Its heartbeat counter went backwards, so it has forgotten any assignment; wartui re-issues under a fresh epoch                                         |
+| `rebooted xN`  | Its heartbeat counter went backwards, or its epoch went back to 0, so it has forgotten any assignment; wartui re-issues under a fresh epoch            |
+
+The `channels` and `ble` columns turn blue with a trailing `…` when a node's radio has acknowledged
+an assignment but its own heartbeat has not yet said it holds it — see
+[How channels are assigned](#how-channels-are-assigned). If that gap does not close, the footer
+counts it under "assignments acknowledged but not adopted", distinct from `no admin ack`'s
+count of assignments the radio never acknowledged at all.
 
 A node that is `stale`, `refused` or `no heartbeat` is out of the plan: nothing wartui sends it
 would reach it, or nothing yet says which band its radio can tune — so a share of the pool cut for

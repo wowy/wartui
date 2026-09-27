@@ -188,8 +188,8 @@ fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
                 Ok(Frame::Heartbeat(heartbeat)) => {
                     counts.heartbeat += 1;
                     println!(
-                        "{head}  HEARTBEAT #{}  {}",
-                        heartbeat.counter, heartbeat.capabilities
+                        "{head}  HEARTBEAT #{} e{}  {}",
+                        heartbeat.counter, heartbeat.epoch, heartbeat.capabilities
                     );
                 }
                 Ok(Frame::Sightings(sightings)) => {
@@ -214,10 +214,8 @@ fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
                     let indices =
                         if indices.is_empty() { "none".to_owned() } else { indices.join(",") };
                     println!(
-                        "{head}  ADMIN e{} node {}/{}{} channel idx {}  -> {}",
+                        "{head}  ADMIN e{}{} channel idx {}  -> {}",
                         admin.epoch,
-                        admin.node_index,
-                        admin.node_count,
                         if admin.scan_ble() { " +ble" } else { "" },
                         indices,
                         mac(dst),

@@ -475,9 +475,9 @@ fn push_run(out: &mut String, start: u8, end: u8) {
 
 /// The channel set as it goes in a fixed-width table cell.
 ///
-/// The count comes first: it always fits, and it is the cross-check against the
-/// beat column two along. The list after it is truncated rather than wrapped,
-/// because a round-robin share is a dozen scattered channels.
+/// The count comes first: it always fits. The list after it is truncated
+/// rather than wrapped, because a round-robin share is a dozen scattered
+/// channels.
 fn channel_cell(set: ChannelSet, width: usize) -> String {
     let head = format!("{}: ", set.len());
     let list = channel_list(set);
@@ -734,10 +734,9 @@ fn receiver(gps: &GpsView, source: PositionSource) -> Option<Span<'static>> {
 }
 
 fn draw_fleet(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot, ui: &mut Ui) {
-    let header = Row::new([
-        "node", "rssi", "beats", "obs", "lost", "last", "beat", "ble", "channels", "state",
-    ])
-    .style(Style::new().add_modifier(Modifier::BOLD));
+    let header =
+        Row::new(["node", "rssi", "beats", "obs", "lost", "last", "ble", "channels", "state"])
+            .style(Style::new().add_modifier(Modifier::BOLD));
 
     let rows: Vec<Row<'_>> = snapshot
         .nodes
@@ -751,10 +750,6 @@ fn draw_fleet(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot, ui: &mut U
                 Cell::from(node.state.observations.to_string()),
                 Cell::from(lost_cell(node)),
                 Cell::from(ago(snapshot.now_ms - node.state.last_seen_ms)),
-                // The measured sweep period: proportional to how many channels
-                // the node scans, and so the only evidence from here that an
-                // assignment was adopted rather than merely acknowledged.
-                Cell::from(node.state.beat_period_ms().map_or_else(|| "—".to_owned(), period)),
                 Cell::from(ble_cell(node)),
                 Cell::from(channels_cell(node)),
                 Cell::from(state).style(style),
@@ -769,7 +764,6 @@ fn draw_fleet(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot, ui: &mut U
         Constraint::Length(6),
         Constraint::Length(5),
         Constraint::Length(5),
-        Constraint::Length(6),
         Constraint::Length(4),
         Constraint::Length(CHANNELS_WIDTH),
         Constraint::Min(12),
@@ -790,11 +784,14 @@ fn draw_fleet(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot, ui: &mut U
 /// How wide the channels column is, and therefore how much of the list fits.
 const CHANNELS_WIDTH: u16 = 18;
 
-/// What the node is scanning, and whether that is known or merely wanted.
+/// What the node is scanning, and whether that is known, acknowledged, or
+/// adopted.
 ///
-/// The distinction is the whole of divergence 3: a confirmed set was
-/// acknowledged by the node's own radio, a pending one is waiting on a
-/// heartbeat to open the window.
+/// Three states: pending (`dirty`, yellow `…`) is a share sent but not yet
+/// acknowledged; acked-not-adopted (`!dirty`, confirmed, but the node's own
+/// heartbeat has not yet said it holds it) is the confirmed set with a blue
+/// `…`, since a MAC-layer ack is not proof the frame was actually taken —
+/// [`NodeState::adopted`] is; adopted is the confirmed set plain.
 ///
 /// An empty set is the Bluetooth node's and says so in words. The count-and-list
 /// form would render it `0: none`, which reads as a fault rather than as the job it
@@ -823,10 +820,22 @@ fn channels_cell(node: &NodeView) -> Span<'static> {
     state.confirmed.map_or_else(
         || Span::styled("unassigned", Style::new().fg(Color::DarkGray)),
         |confirmed| {
+            let adopted = state.adopted();
             if confirmed.channels.is_empty() {
-                Span::styled("bluetooth", Style::new().fg(Color::Cyan))
-            } else {
+                return if adopted {
+                    Span::styled("bluetooth", Style::new().fg(Color::Cyan))
+                } else {
+                    Span::styled("bluetooth…", Style::new().fg(Color::Blue))
+                };
+            }
+            if adopted {
                 Span::raw(channel_cell(confirmed.channels, usize::from(CHANNELS_WIDTH)))
+            } else {
+                let mut cell = channel_cell(confirmed.channels, usize::from(CHANNELS_WIDTH) - 1);
+                if !cell.ends_with('…') {
+                    cell.push('…');
+                }
+                Span::styled(cell, Style::new().fg(Color::Blue))
             }
         },
     )
@@ -850,7 +859,9 @@ fn lost_cell(node: &NodeView) -> String {
 ///
 /// Read off the assignment rather than the snapshot's `ble_node`, so it says what
 /// the *node* is doing: the two differ for as long as an assignment takes to be
-/// acknowledged, and that gap is where a coexistence failure lives.
+/// acknowledged or adopted, and that gap is where a coexistence failure lives.
+/// The same three states as [`channels_cell`]: pending yellow, acked-not-adopted
+/// blue, adopted cyan.
 fn ble_cell(node: &NodeView) -> Span<'static> {
     let state = &node.state;
     if state.dirty
@@ -861,7 +872,11 @@ fn ble_cell(node: &NodeView) -> Span<'static> {
         return Span::styled(label, Style::new().fg(Color::Yellow));
     }
     if state.confirmed.is_some_and(|c| c.ble) {
-        return Span::styled("ble", Style::new().fg(Color::Cyan));
+        return if state.adopted() {
+            Span::styled("ble", Style::new().fg(Color::Cyan))
+        } else {
+            Span::styled("ble…", Style::new().fg(Color::Blue))
+        };
     }
     Span::raw("")
 }
@@ -882,11 +897,6 @@ fn node_label(node: &NodeView) -> String {
 /// The last two octets of an address, which is how the boards are told apart.
 fn short_mac(mac: &Mac) -> String {
     format!("{:02X}:{:02X}", mac[4], mac[5])
-}
-
-/// A sweep period, in whichever unit reads at a glance.
-fn period(ms: u32) -> String {
-    if ms < 1000 { format!("{ms}ms") } else { format!("{:.1}s", f64::from(ms) / 1000.0) }
 }
 
 /// Why a node cannot be given an assignment, or `None` if it can.
@@ -1144,6 +1154,9 @@ fn faults(snapshot: &Snapshot) -> Vec<String> {
     if c.admin_failed > 0 {
         faults.push(format!("{} assignments unacknowledged", c.admin_failed));
     }
+    if c.admin_unadopted > 0 {
+        faults.push(format!("{} assignments acknowledged but not adopted", c.admin_unadopted));
+    }
     if c.peer_table_full > 0 {
         faults.push(format!("peer table full: more than {MAX_NODES} nodes"));
     }
@@ -1292,7 +1305,7 @@ mod tests {
     use wartui_core::engine::{Assignment, BridgeStatus, Counters, NodeState, Now, StoreStats};
     use wartui_core::gps::GpsCounters;
     use wartui_core::position::Fix;
-    use wartui_proto::air::Capabilities;
+    use wartui_proto::air::{Capabilities, wire_epoch};
     use wartui_proto::link::Chip;
     use wartui_proto::plan::{
         ChannelPool, DEFAULT_TX_POWER_QUARTER_DBM, IndexRun, Job, Radio, plan, plan_for,
@@ -1357,19 +1370,37 @@ mod tests {
         view
     }
 
-    /// A node that has been given channels and has acknowledged them.
+    /// Set `held_epoch` to match what `desired` (or, absent that, `confirmed`)
+    /// carries, the way a node's own heartbeat would once it actually adopted
+    /// the frame. [`NodeState::adopted`] is true after this.
+    fn adopt(state: &mut NodeState) {
+        let assignment = state.desired.or(state.confirmed).expect("something to adopt");
+        state.held_epoch = Some(wire_epoch(assignment.counter));
+    }
+
+    /// A node that has been given channels, has acknowledged them, and whose
+    /// own heartbeat has confirmed it holds them: fully settled.
     fn assigned(last: u8) -> NodeView {
         let mut view = node(last, 0, true);
-        view.state.confirmed = Some(Assignment {
+        let assignment = Assignment {
             channels: ChannelSet::from_run(IndexRun::new(0, 0)),
             ble: false,
-            node_index: 0,
-            node_count: 1,
             tx_power: 8,
             counter: 9,
-        });
+        };
+        view.state.confirmed = Some(assignment);
+        view.state.desired = Some(assignment);
         view.state.last_outcome = Some(AdminOutcome::Acked);
         view.state.last_latency_us = Some(4_200);
+        adopt(&mut view.state);
+        view
+    }
+
+    /// A node whose radio acknowledged its assignment, but whose own
+    /// heartbeat has not yet said it holds it.
+    fn acked_not_adopted(last: u8) -> NodeView {
+        let mut view = assigned(last);
+        view.state.held_epoch = None;
         view
     }
 
@@ -1389,8 +1420,6 @@ mod tests {
         view.state.desired = Some(Assignment {
             channels: ChannelSet::from_run(IndexRun::new(14, 38)),
             ble: false,
-            node_index: 0,
-            node_count: 1,
             tx_power: 8,
             counter: 10,
         });
@@ -1451,6 +1480,7 @@ mod tests {
                 admin_sent: 3,
                 admin_acked: 2,
                 admin_failed: 1,
+                admin_unadopted: 0,
                 peer_table_full: 0,
                 replans: 0,
                 batches_lost: 0,
@@ -1966,6 +1996,54 @@ mod tests {
     }
 
     #[test]
+    fn channels_cell_renders_yellow_ellipsis_when_assignment_is_pending() {
+        let view = pending(0x11);
+        let cell = channels_cell(&view);
+        assert!(cell.content.ends_with('…'));
+        assert_eq!(cell.style.fg, Some(Color::Yellow));
+    }
+
+    #[test]
+    fn channels_cell_renders_blue_ellipsis_when_acknowledged_but_not_adopted() {
+        let view = acked_not_adopted(0x11);
+        assert!(!view.state.adopted());
+        let cell = channels_cell(&view);
+        assert!(cell.content.ends_with('…'), "the confirmed set, marked as not yet adopted");
+        assert!(cell.content.starts_with('1'), "the confirmed set is still shown");
+        assert_eq!(cell.style.fg, Some(Color::Blue));
+    }
+
+    #[test]
+    fn channels_cell_renders_plain_when_assignment_is_adopted() {
+        let view = assigned(0x11);
+        assert!(view.state.adopted());
+        let cell = channels_cell(&view);
+        assert!(!cell.content.ends_with('…'), "nothing left to wait for");
+        assert_eq!(cell.style.fg, None, "plain, not coloured");
+    }
+
+    #[test]
+    fn ble_cell_renders_blue_when_acknowledged_but_not_adopted() {
+        let mut view = acked_not_adopted(0x11);
+        view.state.confirmed = view.state.confirmed.map(|a| Assignment { ble: true, ..a });
+        view.state.desired = view.state.confirmed;
+        let cell = ble_cell(&view);
+        assert_eq!(cell.content, "ble…");
+        assert_eq!(cell.style.fg, Some(Color::Blue));
+    }
+
+    #[test]
+    fn ble_cell_renders_cyan_when_adopted() {
+        let mut view = assigned(0x11);
+        view.state.confirmed = view.state.confirmed.map(|a| Assignment { ble: true, ..a });
+        view.state.desired = view.state.confirmed;
+        adopt(&mut view.state);
+        let cell = ble_cell(&view);
+        assert_eq!(cell.content, "ble");
+        assert_eq!(cell.style.fg, Some(Color::Cyan));
+    }
+
+    #[test]
     fn ui_displays_specific_refusal_notice_when_toggling_ble_on_unassignable_node() {
         // Three faults all end in a refused `b` and the operator's next move
         // differs for each, so one wording for all three misdirects two.
@@ -2106,17 +2184,13 @@ mod tests {
     fn channels_cell_displays_bluetooth_when_node_is_assigned_bluetooth_scan() {
         // `0: none` would read as a fault rather than as the job it is.
         let mut view = assigned(0x11);
-        view.state.confirmed = Some(Assignment {
-            channels: ChannelSet::empty(),
-            ble: true,
-            node_index: 0,
-            node_count: 2,
-            tx_power: 8,
-            counter: 1,
-        });
+        let assignment =
+            Assignment { channels: ChannelSet::empty(), ble: true, tx_power: 8, counter: 1 };
+        view.state.confirmed = Some(assignment);
+        view.state.desired = Some(assignment);
+        adopt(&mut view.state);
         assert_eq!(channels_cell(&view).content, "bluetooth");
 
-        view.state.desired = view.state.confirmed;
         view.state.dirty = true;
         assert_eq!(channels_cell(&view).content, "bluetooth…", "and says so while it waits");
     }

@@ -12,10 +12,9 @@
 //! (`crates/wartui/README.md` § "Channel pools").
 //!
 //! A fleet is a slice of [`Job`]s rather than of radios, because one node's job is
-//! Bluetooth and that node is dealt nothing. It is still a slot: `node_index` and
-//! `node_count` report the node's place and the fleet size the plan was cut for, in
-//! the fleet table, so cutting it out of the deal must not cut it out of the
-//! numbering.
+//! Bluetooth and that node is dealt nothing. It is still a slot, counted in
+//! [`Plan::node_count`] for the fleet table, so cutting it out of the deal must not
+//! cut it out of the count.
 
 use crate::air::AdminMsg;
 
@@ -489,10 +488,9 @@ pub enum Job {
     Wifi(Radio),
     /// Scan Bluetooth, and so be dealt no channels.
     ///
-    /// Still a slot: it keeps its `node_index` and counts in `node_count`, which
-    /// report the node's place and the fleet size the plan was cut for rather than
-    /// a description of who is sniffing. The shares around it are cut as though it
-    /// were present and idle.
+    /// Still a slot: it counts in [`Plan::node_count`], which reports the fleet size
+    /// the plan was cut for rather than a description of who is sniffing. The
+    /// shares around it are cut as though it were present and idle.
     ///
     /// No [`Radio`], deliberately. A node scanning Bluetooth changes no plan by
     /// changing band, so a reflash from a C5 to a C6 while it holds the scan
@@ -658,7 +656,7 @@ impl Plan {
         self.node_count
     }
 
-    /// What `node_index` should scan, if anything.
+    /// What slot `index` should scan, if anything.
     ///
     /// Three answers in two shapes, because the two empty ones mean opposite
     /// things:
@@ -674,12 +672,12 @@ impl Plan {
     ///   scanner's share after the scan is taken off it. [`ChannelPool::reachable_by`]
     ///   is what that caller reaches for.
     #[must_use]
-    pub fn channels_for(&self, node_index: u8) -> Option<ChannelSet> {
-        let set = *self.slots.get(usize::from(node_index))?;
-        if node_index >= self.node_count {
+    pub fn channels_for(&self, index: u8) -> Option<ChannelSet> {
+        let set = *self.slots.get(usize::from(index))?;
+        if index >= self.node_count {
             return None;
         }
-        if self.bluetooth == Some(node_index) {
+        if self.bluetooth == Some(index) {
             return Some(ChannelSet::empty());
         }
         (!set.is_empty()).then_some(set)
@@ -705,7 +703,7 @@ impl Plan {
         self.unreachable
     }
 
-    /// The assignment to send to `node_index`.
+    /// The assignment to send to slot `index`.
     ///
     /// `epoch` is the caller's persisted epoch byte; a node adopts only when it
     /// differs from the one it holds. `flags` is the caller's too: *which* node scans
@@ -716,18 +714,12 @@ impl Plan {
     /// [`crate::air::ADMIN_FLAG_BLE`] tells a node to scan nothing, and a node sent
     /// one parks while the host goes on believing it is sweeping.
     #[must_use]
-    pub fn admin_for(
-        &self,
-        node_index: u8,
-        epoch: u8,
-        flags: u8,
-        tx_power: i8,
-    ) -> Option<AdminMsg> {
-        let channels = self.channels_for(node_index)?;
+    pub fn admin_for(&self, index: u8, epoch: u8, flags: u8, tx_power: i8) -> Option<AdminMsg> {
+        let channels = self.channels_for(index)?;
         if channels.is_empty() && flags & crate::air::ADMIN_FLAG_BLE == 0 {
             return None;
         }
-        Some(AdminMsg { epoch, node_index, node_count: self.node_count, flags, channels, tx_power })
+        Some(AdminMsg { epoch, flags, channels, tx_power })
     }
 }
 
@@ -736,8 +728,7 @@ impl Plan {
 /// The pool's runs are flattened into one ascending list and dealt round-robin:
 /// index `k` goes to node `k % node_count`, so every node gets some of every run.
 /// Shares differ by at most one channel, so heartbeat periods stay within one
-/// dwell of each other. `node_index` is a single fleet-wide `0..node_count`
-/// numbering, reported in the fleet table alongside `node_count`.
+/// dwell of each other.
 ///
 /// Every node is taken to be a dual-band radio sniffing Wi-Fi; for a fleet that is
 /// not, use [`plan_for`].
@@ -771,9 +762,9 @@ pub fn plan(pool: ChannelPool, node_count: u8) -> Option<Plan> {
 ///   membership is scanning Bluetooth. A fleet of nothing but Bluetooth is a plan
 ///   rather than a refusal: refusing would leave that node holding its old share
 ///   and still sniffing Wi-Fi, which is the opposite of what was asked.
-/// - **A Bluetooth slot is counted but not dealt to.** `node_count` includes it and
-///   it keeps its index, because those report the fleet's shape rather than who
-///   is sniffing; see [`Job::Bluetooth`].
+/// - **A Bluetooth slot is counted but not dealt to.** [`Plan::node_count`]
+///   includes it, because that reports the fleet's shape rather than who is
+///   sniffing; see [`Job::Bluetooth`].
 ///
 /// Returns `None` for an empty fleet, or for more than [`MAX_NODES`].
 #[must_use]

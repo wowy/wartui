@@ -337,10 +337,8 @@ async fn deliver(
 struct SimNode {
     mac: Mac,
     /// The epoch starts at 0 on a fresh node, so the first assignment of any
-    /// epoch always takes.
+    /// epoch always takes. Reported in every heartbeat.
     epoch: u8,
-    node_index: u8,
-    node_count: u8,
     channels: ChannelSet,
     /// Whether this node was asked to scan Bluetooth, mirrored where the
     /// bridge can read it.
@@ -373,8 +371,6 @@ impl SimNode {
             mac: SimTransport::node_mac(index),
             five_ghz,
             epoch: 0,
-            node_index: 0,
-            node_count: 1,
             // Nothing until it is told. A wartui node parks on the control channel,
             // so one that has never heard a core is not quietly duplicating the
             // fleet's work.
@@ -420,8 +416,6 @@ impl SimNode {
             self.forget_reported();
         }
         self.epoch = admin.epoch;
-        self.node_index = admin.node_index;
-        self.node_count = admin.node_count;
         self.channels = admin.channels;
         self.holds_ble.store(admin.scan_ble(), Ordering::Relaxed);
     }
@@ -593,7 +587,7 @@ fn next_beat_after(deadline: tokio::time::Instant, speed: f64) -> tokio::time::I
     if next <= now { now + scaled(u64::from(ASSIGNED_BEAT_MS), speed) } else { next }
 }
 
-/// Broadcast one heartbeat, carrying the node's current counter.
+/// Broadcast one heartbeat, carrying the node's current counter and held epoch.
 ///
 /// The counter tracks completed sweeps or scans on its own, so it advances
 /// whether or not this call goes out; this only ever reads it.
@@ -608,6 +602,7 @@ async fn beat(
     // planner leave a node out of a channel.
     let msg = HeartbeatMsg {
         counter: node.hb_counter,
+        epoch: node.epoch,
         capabilities: Capabilities::here(true, node.five_ghz),
     };
     send_frame(events, node.mac, &msg.encode(), started).await

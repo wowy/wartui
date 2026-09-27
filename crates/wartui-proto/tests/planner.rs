@@ -126,8 +126,8 @@ fn planner_partitions_channels_without_overlap_when_dividing_pool() {
 
 #[test]
 fn planner_assigns_contiguous_unique_indices_when_planning_fleet() {
-    // node_index reports the node's slot, so it must not restart per run — two
-    // nodes sharing an index would report the same slot in the fleet table.
+    // Slot order must not restart per run — two nodes sharing a slot would
+    // report the same place in the fleet table.
     for pool in POOLS {
         for nodes in FLEET_SIZES {
             let p = plan(pool, nodes).expect("valid fleet size");
@@ -234,13 +234,9 @@ fn planner_distributes_all_index_runs_to_nodes_when_channel_count_permits() {
 
 #[test]
 fn plan_encodes_fleet_metadata_into_admin_frame_when_generating_admin_msg() {
-    // The planned count, not a live one: it must match the partition it came
-    // from, or a node joining in between reports the wrong slot in the fleet table.
     let p = plan(ChannelPool::Us, 5).expect("valid");
     for n in 0..5 {
         let admin = p.admin_for(n, 9, wartui_proto::air::ADMIN_FLAG_BLE, 8).expect("assigned");
-        assert_eq!(admin.node_count, 5);
-        assert_eq!(admin.node_index, n);
         assert_eq!(admin.epoch, 9);
         assert_eq!(admin.channels, p.channels_for(n).expect("assigned"));
         // Flags are the caller's: which node scans Bluetooth is the operator's
@@ -252,9 +248,8 @@ fn plan_encodes_fleet_metadata_into_admin_frame_when_generating_admin_msg() {
 
 #[test]
 fn planner_assigns_empty_channel_set_when_node_holds_ble_flag() {
-    // Counted, because `node_index` and `node_count` report the fleet's shape
-    // rather than a census of who is sniffing: cut it out of the numbering and
-    // every other node's reported slot moves.
+    // Counted, because `Plan::node_count` reports the fleet's shape rather than
+    // a census of who is sniffing.
     let fleet = [Job::Bluetooth, Job::Wifi(Radio::DualBand), Job::Wifi(Radio::DualBand)];
     let p = plan_for(ChannelPool::Us, &fleet).expect("a valid fleet");
 

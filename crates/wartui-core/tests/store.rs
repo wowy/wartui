@@ -144,6 +144,7 @@ fn store_persists_and_reads_all_record_types_when_round_tripped() {
                 node_mac: NODE,
                 rx_at_ms: EPOCH_MS,
                 counter: 174,
+                epoch: 5,
                 link_rssi: Some(-41),
             }),
             observation(NODE, [0xAA; 6], -60, EPOCH_MS, fixed(37.7749, -122.4194)),
@@ -154,6 +155,9 @@ fn store_persists_and_reads_all_record_types_when_round_tripped() {
     let beats: i64 = conn.query_row("SELECT COUNT(*) FROM heartbeat", [], |r| r.get(0)).unwrap();
     let obs: i64 = conn.query_row("SELECT COUNT(*) FROM observation", [], |r| r.get(0)).unwrap();
     assert_eq!((nodes, beats, obs), (1, 1, 1));
+
+    let epoch: i64 = conn.query_row("SELECT epoch FROM heartbeat", [], |r| r.get(0)).unwrap();
+    assert_eq!(epoch, 5, "the epoch the frame said the node held");
 
     let (mac, source): (Vec<u8>, String) = conn
         .query_row("SELECT node_mac, pos_source FROM observation", [], |r| {
@@ -983,8 +987,6 @@ fn assignment(counter: u64, outcome: AdminOutcome, latency_us: Option<u32>) -> R
         node_mac: NODE,
         counter,
         wire_version: wartui_proto::air::wire_epoch(counter),
-        node_index: 0,
-        node_count: 2,
         channels: wartui_proto::plan::ChannelSet::from_run(wartui_proto::plan::IndexRun::new(5, 5)),
         ble: false,
         created_at_ms: EPOCH_MS,

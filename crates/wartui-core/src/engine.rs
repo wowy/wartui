@@ -274,9 +274,16 @@ pub struct NodeState {
     /// Bridge-local microsecond stamp of the most recent heartbeat, which is
     /// the near end of that measurement.
     last_heartbeat_rx_us: Option<u32>,
-    /// Recent heartbeats' arrival time and counter, oldest first, for
-    /// [`Self::beat_period_ms`]'s span. At most [`BEAT_WINDOW`] + 1 entries.
-    beat_samples: VecDeque<(Instant, u32)>,
+    /// The assignment epoch this node's most recent *live* heartbeat reported
+    /// it holds, or `0` for none. `None` before any live heartbeat has arrived;
+    /// a replayed heartbeat never sets this, since it says what the node held
+    /// when it was sent rather than what it holds now. See
+    /// [`FleetEngine::air_is_live`].
+    pub held_epoch: Option<u8>,
+    /// How many times this node's heartbeat has reported an epoch other than
+    /// the one it acknowledged: acked but not adopted, and re-sent on the
+    /// heartbeat that revealed it.
+    pub unadopted: u32,
     /// The `seq` of this node's most recent sighting batch. `None` before its
     /// first, and reset on a detected reboot: the counter restarts at boot,
     /// and a gap across one is history rather than a loss.
@@ -318,10 +325,6 @@ pub struct Assignment {
     /// and is adopted by the same epoch comparison, so treating them separately
     /// would make "acknowledged" ambiguous.
     pub ble: bool,
-    /// This node's slot in the fleet the plan was cut for.
-    pub node_index: u8,
-    /// Fleet size as of this assignment.
-    pub node_count: u8,
     /// Wi-Fi transmit power for this node in ESP-IDF quarter-dBm units.
     pub tx_power: i8,
     /// The persisted monotonic epoch it was allocated from.
@@ -353,7 +356,8 @@ impl NodeState {
             last_outcome: None,
             last_latency_us: None,
             last_heartbeat_rx_us: None,
-            beat_samples: VecDeque::new(),
+            held_epoch: None,
+            unadopted: 0,
             last_seq: None,
             last_batch: None,
             last_batch_rx_us: None,
@@ -362,79 +366,17 @@ impl NodeState {
         }
     }
 
-    /// How long this node's sweep takes, in milliseconds.
+    /// Whether this node's heartbeat has confirmed it holds [`Self::desired`].
     ///
-    /// A span over the whole window of recent heartbeats — `(newest.time -
-    /// oldest.time) / (newest.counter - oldest.counter)` — rather than one
-    /// heartbeat's gap divided by its own counter step. A single gap is wrong
-    /// two ways at once: a sweep longer than the heartbeat interval can carry
-    /// the *same* counter across two or more heartbeats, which a per-gap
-    /// figure could only skip, silently losing that elapsed time — a lone
-    /// node holding the whole pool sweeps in about 5.3 s against a 5 s
-    /// interval, so most gaps see no step at all, and the rare one that does
-    /// would read back a flat 5 s rather than the true 5.3. And even where
-    /// every gap does see a step, dividing one heartbeat interval by a small
-    /// integer count quantises badly: a 2 s sweep divides 5 s by 2 or 3 and
-    /// reads 2500 or 1666 ms, never 2000. Spanning [`BEAT_WINDOW`] intervals
-    /// (about 25 s) instead means the count both ends divide by is large
-    /// enough that the quantisation error is at most one sweep over the whole
-    /// span, and a lost or replayed heartbeat costs nothing: the next arrival
-    /// still spans the same elapsed time and counter step it always would
-    /// have, just with one interval folded into the next.
-    ///
-    /// `None` while fewer than two samples span a nonzero counter step — on a
-    /// fresh node, or right after a reboot clears the window.
-    ///
-    /// What comes out is proportional to how many channels the node is
-    /// scanning, which is the whole proof that an assignment landed, visible
-    /// without serial access to the node. The node scanning Bluetooth reads
-    /// roughly one scan.
+    /// The stronger fact layered on top of [`Self::confirmed`]: a MAC-layer ack
+    /// says the frame was delivered, this says the node actually took it. `false`
+    /// with no live heartbeat yet, or while [`Self::held_epoch`] and the epoch
+    /// [`Self::desired`] carries disagree.
     #[must_use]
-    pub fn beat_period_ms(&self) -> Option<u32> {
-        let &(oldest_at, oldest_counter) = self.beat_samples.front()?;
-        let &(newest_at, newest_counter) = self.beat_samples.back()?;
-        let steps = newest_counter.checked_sub(oldest_counter).filter(|&steps| steps > 0)?;
-        let span_ms = newest_at.duration_since(oldest_at).as_millis();
-        u32::try_from(span_ms / u128::from(steps)).ok()
-    }
-
-    /// Record a heartbeat's arrival time and counter, for
-    /// [`Self::beat_period_ms`]'s span.
-    ///
-    /// Cleared on `rebooted`: the counter has gone back to a boot value, so
-    /// every sample already held would span across that reset. Otherwise
-    /// always pushed and capped at [`BEAT_WINDOW`] + 1 entries, except a
-    /// replay — the same counter arriving at the same instant, which a
-    /// backlog flush can produce — which would only crowd out a real sample
-    /// for nothing.
-    fn note_beat_gap(&mut self, now: Now, counter: u32, rebooted: bool) {
-        if rebooted {
-            self.beat_samples.clear();
-        }
-        if self
-            .beat_samples
-            .back()
-            .is_some_and(|&(at, previous)| at == now.mono && previous == counter)
-        {
-            return;
-        }
-        if self.beat_samples.len() > BEAT_WINDOW {
-            self.beat_samples.pop_front();
-        }
-        self.beat_samples.push_back((now.mono, counter));
+    pub fn adopted(&self) -> bool {
+        self.desired.is_some_and(|d| self.held_epoch == Some(wire_epoch(d.counter)))
     }
 }
-
-/// How many heartbeat intervals [`NodeState::beat_period_ms`]'s span covers.
-///
-/// Five, about 25 s at [`wartui_proto::plan::ASSIGNED_BEAT_MS`]: long enough
-/// that a short sweep's quantisation error is a small fraction of the
-/// reading, short enough that the figure still follows a new assignment
-/// inside half a minute rather than averaging a much older range in. The
-/// window itself holds `BEAT_WINDOW + 1` samples, so that many heartbeats —
-/// not `BEAT_WINDOW` — is how long anything measuring a period across a
-/// change of range has to wait for every sample in the span to belong to it.
-pub const BEAT_WINDOW: usize = 5;
 
 /// Running totals, all of them since the engine started.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -470,6 +412,11 @@ pub struct Counters {
     /// Assignments that went out and were not acknowledged, were refused by
     /// the bridge, or were never answered for.
     pub admin_failed: u64,
+    /// Assignments a node acknowledged but whose heartbeat then reported a
+    /// different epoch: the node did not actually take the frame. Re-sent on
+    /// the heartbeat that revealed it, the same retry path an unacknowledged
+    /// assignment takes.
+    pub admin_unadopted: u64,
     /// Assignments refused because the bridge's peer table was full, which
     /// means the fleet is larger than the twenty nodes wartui supports.
     pub peer_table_full: u64,
@@ -650,7 +597,7 @@ pub struct FleetEngine {
     /// The partition in force.
     plan: Option<Plan>,
     /// The members that plan was built for, in the order that gave them their
-    /// `node_index`, each with the job it was cut a share for. Compared against
+    /// slot, each with the job it was cut a share for. Compared against
     /// the live membership to decide whether to re-partition — the job included,
     /// because a node whose token changed band, or which has taken the Bluetooth
     /// scan, has a share of the wrong shape while the membership is unchanged.
@@ -975,14 +922,26 @@ impl FleetEngine {
             Frame::Heartbeat(heartbeat) => {
                 self.see_node(src, now, rssi, Some(heartbeat.capabilities), batch);
                 self.counters.heartbeats += 1;
+                // Read before the node is borrowed: whether this heartbeat is
+                // live decides whether its epoch is believed at all. See
+                // `air_is_live`.
+                let live = self.air_is_live();
                 let node = self.nodes.entry(src).or_insert_with(|| NodeState::new(src, now));
                 // A counter below the last one means the node
                 // restarted and has forgotten whatever range it was assigned.
-                let rebooted = node.counter.is_some_and(|previous| heartbeat.counter < previous);
+                let counter_rebooted =
+                    node.counter.is_some_and(|previous| heartbeat.counter < previous);
+                // A live heartbeat reporting no epoch after one previously reported
+                // holding a real one is the same fact by a different route: the
+                // node's epoch field went back to a boot value too.
+                let epoch_rebooted = live
+                    && heartbeat.epoch == 0
+                    && node.held_epoch.is_some_and(|previous| previous != 0);
+                let rebooted = counter_rebooted || epoch_rebooted;
                 if rebooted {
                     node.reboots += 1;
-                    // Its epoch field went back to a boot value too, so the assignment is
-                    // re-issued under a fresh epoch rather than one the node might now match.
+                    // The assignment is re-issued under a fresh epoch rather than
+                    // one the node might now match.
                     node.confirmed = None;
                     // A node that has just booted already holds an empty ring.
                     node.clear_dedup_ring = false;
@@ -996,7 +955,11 @@ impl FleetEngine {
                     node.last_batch_rx_us = None;
                 }
                 node.capabilities = Some(heartbeat.capabilities);
-                node.note_beat_gap(now, heartbeat.counter, rebooted);
+                // A replayed heartbeat's epoch is history, not now: it must not
+                // overwrite what a live one already said.
+                if live {
+                    node.held_epoch = Some(heartbeat.epoch);
+                }
                 node.counter = Some(heartbeat.counter);
                 node.last_heartbeat = Some(now.mono);
                 node.last_heartbeat_rx_us = Some(rx_us);
@@ -1005,11 +968,33 @@ impl FleetEngine {
                     node_mac: src,
                     rx_at_ms: now.unix_ms,
                     counter: heartbeat.counter,
+                    epoch: heartbeat.epoch,
                     link_rssi: Some(rssi),
                 }));
 
                 if rebooted && node.desired.is_some() {
                     self.reissue(src);
+                }
+                // Acked but not adopted: the node's radio delivered the frame, but
+                // its heartbeat says it does not hold what it acknowledged — a
+                // length or version mismatch, a dropped receive queue, or a bug.
+                // `confirmed` is already `None` when this heartbeat is the reboot
+                // itself, which is what keeps that case out of this one. Re-sent on
+                // this window, the same retry path an unacknowledged assignment
+                // takes; the epoch does not change, since the node still does not
+                // hold it either way.
+                //
+                // Re-fetched rather than reused: `reissue` above needed the whole
+                // of `self`, which the borrow checker will not let this hold across.
+                if let Some(node) = self.nodes.get_mut(&src)
+                    && live
+                    && !node.dirty
+                    && let Some(confirmed) = node.confirmed
+                    && heartbeat.epoch != wire_epoch(confirmed.counter)
+                {
+                    node.unadopted += 1;
+                    node.dirty = true;
+                    self.counters.admin_unadopted += 1;
                 }
                 // A node's first heartbeat is the moment it joins the fleet, and
                 // every other node's range depends on how many there are.
@@ -1343,8 +1328,8 @@ impl FleetEngine {
     /// nodes changes and at no other time.
     ///
     /// Membership is every node currently heartbeating; see
-    /// [`Self::is_assignable`]. Nodes are ordered by MAC, which is the order that
-    /// gives them their `node_index`, so the numbering is a function of who is
+    /// [`Self::is_assignable`]. Nodes are ordered by MAC, which is the order the
+    /// planner slots them into, so each node's share is a function of who is
     /// present rather than of the order they turned up in.
     ///
     /// Cheap on the common path: an unchanged membership returns without touching
@@ -1418,9 +1403,8 @@ impl FleetEngine {
     /// Split out of [`Self::replan`] so [`Self::on_set_tx_power`] can re-send the
     /// plan already in force under fresh epochs without asking the planner to
     /// re-cut anything. `members` is the same list `replan` cut `plan` against,
-    /// in the same order, so the `node_index` each carries still lines up.
+    /// in the same order, so each member's slot still lines up with the plan's.
     fn deal(&mut self, plan: &Plan, members: &[(Mac, Job)]) {
-        let count = u8::try_from(members.len()).unwrap_or(u8::MAX);
         // One epoch per node that actually needs telling. Held locally because
         // the decision needs the node in hand, and `self` is borrowed for it.
         let mut counter = self.last_counter;
@@ -1480,11 +1464,7 @@ impl FleetEngine {
             let ble = *job == Job::Bluetooth;
 
             let wanted = |a: Assignment| {
-                a.channels == channels
-                    && a.ble == ble
-                    && a.node_index == index
-                    && a.node_count == count
-                    && a.tx_power == self.config.tx_power
+                a.channels == channels && a.ble == ble && a.tx_power == self.config.tx_power
             };
             // Already scanning exactly this, or already queued to. Re-issuing
             // either would burn an epoch to tell a node what it already knows.
@@ -1504,14 +1484,8 @@ impl FleetEngine {
             }
 
             counter += 1;
-            node.desired = Some(Assignment {
-                channels,
-                ble,
-                node_index: index,
-                node_count: count,
-                tx_power: self.config.tx_power,
-                counter,
-            });
+            node.desired =
+                Some(Assignment { channels, ble, tx_power: self.config.tx_power, counter });
             node.dirty = true;
         }
         self.last_counter = counter;
@@ -1601,13 +1575,11 @@ impl FleetEngine {
 
         let msg = AdminMsg {
             epoch: wire_epoch(assignment.counter),
-            node_index: assignment.node_index,
-            node_count: assignment.node_count,
             flags: AdminMsg::flags_for(assignment.ble),
             channels: assignment.channels,
             tx_power: assignment.tx_power,
         };
-        // Seventeen bytes into a 250-byte buffer, so this cannot fail.
+        // Fifteen bytes into a 250-byte buffer, so this cannot fail.
         let payload = EspNowPayload::from_slice(&msg.encode()).unwrap_or_default();
 
         self.pending.insert(
@@ -1822,8 +1794,6 @@ impl FleetEngine {
             node_mac: pending.mac,
             counter: pending.assignment.counter,
             wire_version: wire_epoch(pending.assignment.counter),
-            node_index: pending.assignment.node_index,
-            node_count: pending.assignment.node_count,
             channels: pending.assignment.channels,
             ble: pending.assignment.ble,
             created_at_ms: pending.sent_ms,

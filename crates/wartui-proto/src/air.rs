@@ -64,10 +64,10 @@ pub const SSID_MAX: usize = 32;
 pub const EXT_MAX: usize = 17;
 
 /// Length of [`HeartbeatMsg`] on the wire.
-pub const HEARTBEAT_MSG_LEN: usize = OFF_BODY + 7;
+pub const HEARTBEAT_MSG_LEN: usize = OFF_BODY + 8;
 
 /// Length of [`AdminMsg`] on the wire.
-pub const ADMIN_MSG_LEN: usize = OFF_BODY + 4 + CHANNEL_SET_BYTES + 1;
+pub const ADMIN_MSG_LEN: usize = OFF_BODY + 2 + CHANNEL_SET_BYTES + 1;
 
 /// Length of [`ClearMsg`] on the wire: the header, and nothing else.
 pub const CLEAR_MSG_LEN: usize = OFF_BODY;
@@ -325,6 +325,9 @@ pub struct HeartbeatMsg {
     /// Monotonic from node boot, so a value below the last one means the node
     /// restarted and has forgotten whatever assignment it held.
     pub counter: u32,
+    /// The assignment epoch this node currently holds, or 0 for none — parked
+    /// since boot. The host never puts 0 on the wire, so 0 is unambiguous.
+    pub epoch: u8,
     /// What that node is.
     pub capabilities: Capabilities,
 }
@@ -350,23 +353,25 @@ impl HeartbeatMsg {
         ]);
         Ok(Self {
             counter,
+            epoch: buf[OFF_BODY + 4],
             capabilities: Capabilities::from_parts(
-                buf[OFF_BODY + 4],
                 buf[OFF_BODY + 5],
                 buf[OFF_BODY + 6],
+                buf[OFF_BODY + 7],
             ),
         })
     }
 
-    /// Encode to the thirteen bytes a heartbeat is.
+    /// Encode to the fourteen bytes a heartbeat is.
     #[must_use]
     pub fn encode(&self) -> [u8; HEARTBEAT_MSG_LEN] {
         let mut out = [0u8; HEARTBEAT_MSG_LEN];
         write_header(&mut out, MsgType::Heartbeat);
         out[OFF_BODY..OFF_BODY + 4].copy_from_slice(&self.counter.to_le_bytes());
-        out[OFF_BODY + 4] = self.capabilities.major;
-        out[OFF_BODY + 5] = self.capabilities.minor;
-        out[OFF_BODY + 6] = self.capabilities.flags();
+        out[OFF_BODY + 4] = self.epoch;
+        out[OFF_BODY + 5] = self.capabilities.major;
+        out[OFF_BODY + 6] = self.capabilities.minor;
+        out[OFF_BODY + 7] = self.capabilities.flags();
         out
     }
 }
@@ -789,8 +794,8 @@ impl SightingBatchWriter {
 /// wartui's channel assignment — one of the two frames a node acts on, the
 /// other being [`ClearMsg`].
 ///
-/// Seventeen bytes: the header, then [`epoch`](Self::epoch), `node_index`,
-/// `node_count`, [`flags`](Self::flags), six bytes of [`ChannelSet`] and transmit power.
+/// Fifteen bytes: the header, then [`epoch`](Self::epoch), [`flags`](Self::flags),
+/// six bytes of [`ChannelSet`] and transmit power.
 ///
 /// The mask is why this is not a pair of bounds. A run cannot describe a
 /// restricted pool: the US pool is 2.4 GHz 1-11 and 5 GHz 36-165 with a gap
@@ -818,10 +823,6 @@ pub struct AdminMsg {
     /// Distinct from the header's [`WIRE_VERSION`], which is the shape of the
     /// frame rather than the generation of the plan inside it.
     pub epoch: u8,
-    /// This node's slot in the fleet the plan was cut for.
-    pub node_index: u8,
-    /// Fleet size the plan was cut for.
-    pub node_count: u8,
     /// Per-node switches. [`ADMIN_FLAG_BLE`] is the only one defined.
     ///
     /// Carried whole rather than unpacked into `bool`s so an unknown bit set by
@@ -864,14 +865,12 @@ impl AdminMsg {
             return Err(DecodeError::BadLength { need: ADMIN_MSG_LEN, got: buf.len() });
         }
         let mut channels = [0u8; CHANNEL_SET_BYTES];
-        channels.copy_from_slice(&buf[OFF_BODY + 4..OFF_BODY + 4 + CHANNEL_SET_BYTES]);
+        channels.copy_from_slice(&buf[OFF_BODY + 2..OFF_BODY + 2 + CHANNEL_SET_BYTES]);
         Ok(Self {
             epoch: buf[OFF_BODY],
-            node_index: buf[OFF_BODY + 1],
-            node_count: buf[OFF_BODY + 2],
-            flags: buf[OFF_BODY + 3],
+            flags: buf[OFF_BODY + 1],
             channels: ChannelSet::from_bytes(channels),
-            tx_power: i8::from_le_bytes([buf[OFF_BODY + 4 + CHANNEL_SET_BYTES]]),
+            tx_power: i8::from_le_bytes([buf[OFF_BODY + 2 + CHANNEL_SET_BYTES]]),
         })
     }
 
@@ -881,12 +880,10 @@ impl AdminMsg {
         let mut out = [0u8; ADMIN_MSG_LEN];
         write_header(&mut out, MsgType::Admin);
         out[OFF_BODY] = self.epoch;
-        out[OFF_BODY + 1] = self.node_index;
-        out[OFF_BODY + 2] = self.node_count;
-        out[OFF_BODY + 3] = self.flags;
-        out[OFF_BODY + 4..OFF_BODY + 4 + CHANNEL_SET_BYTES]
+        out[OFF_BODY + 1] = self.flags;
+        out[OFF_BODY + 2..OFF_BODY + 2 + CHANNEL_SET_BYTES]
             .copy_from_slice(&self.channels.to_bytes());
-        out[OFF_BODY + 4 + CHANNEL_SET_BYTES] = self.tx_power.to_le_bytes()[0];
+        out[OFF_BODY + 2 + CHANNEL_SET_BYTES] = self.tx_power.to_le_bytes()[0];
         out
     }
 }
