@@ -78,12 +78,47 @@ serial log was read beside it. Three runs:
   that did not), nor do they coincide with other nodes' frames. Heartbeats still
   broadcast, so this is outside the change.
 
+## The change on the road
+
+Measured on 2026-09-27: a 77-minute drive over much of the first drive's route, but not
+all of it, with the same six nodes (`10:D0` on Bluetooth) and the C6 bridge `9D:24`.
+40,466 frames, about 69 km.
+
+| node | batches | lost | same `seq` twice (identical payload) | heartbeat loss | median link RSSI |
+| --- | --- | --- | --- | --- | --- |
+| 10D0 (BLE) | 2672 | 0 | 68 (54) | 0.3% | -56 |
+| 4F98 | 5928 | 0 | 128 (102) | 4.3% | -58 |
+| 5784 | 3451 | 0 | 266 (135) | 13.4% | -63 |
+| 5950 | 1504 | 0 | 22 (21) | 0.2% | -54 |
+| 4F08 | 2233 | 0 | 38 (33) | 0.7% | -58 |
+| C5B8 | 2089 | 0 | 22 (17) | 1.2% | -57 |
+
+- No batch was lost after the bridge's radio took it, against 250 (3.0%) on the first
+  drive. The air was no kinder: heartbeats, which still broadcast, lost 3.3% against
+  2.7%.
+- 544 batches arrived twice under the same `seq`:
+  - 362 were byte-identical and about 4 ms apart: the radio retransmitting after a
+    lost ack. ESP-NOW on the bridge passes both copies up, so the host stored the
+    same records twice: 1,152 observation rows repeat one stored within 50 ms,
+    2.9% of the drive. The engine now drops a batch that repeats both its node's last
+    `seq` and its bytes. Replayed over this drive's frames, that drops 362 batches
+    holding 1,159 records.
+  - 182 reused the number with different records: every retry of a batch that did
+    arrive went unacknowledged, so the node kept its `seq` and sent those addresses
+    again later. Those are recorded.
+- `5784` carried most of both kinds. Its link sat about 10 dB below the first drive's
+  (median -63 against -51 dBm) and it lost 13% of its heartbeats, yet every one of its
+  batches arrived. Where it sits in the car is worth a look.
+- The Bluetooth node lost 0.3% of its heartbeats, so the bench's 12% did not recur.
+- Unique Wi-Fi networks per km rose from 110 to 189, but the routes differ. On the 119
+  cells of about 220 × 240 m that both drives covered, this drive found 14% more unique
+  networks (4,369 against 3,838). That is consistent with the change, but time of day,
+  speed and route are not held still, so it is not a measure of it.
+
 ## Open questions
 
-- The next drive should show `batches_lost` near zero. `seq` now advances only on an
-  ack, so the count holds only loss after the bridge's radio took the frame, and the
-  findings above found none of that. The node's `unacked` count in its log lines is
-  where the air loss shows now.
 - Swapping in a different bridge mid-run is covered by an engine test and not yet
   run on hardware.
-- Whether the Bluetooth node's heartbeat loss on the bench shows up on the road.
+- How many batches the radio's retries recovered on the road. An unacknowledged batch
+  is invisible to the host, so the node's `unacked` count, in its own log, is the only
+  record of it, and no node log was captured on this drive.

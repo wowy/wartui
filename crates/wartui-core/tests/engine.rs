@@ -381,8 +381,10 @@ fn engine_counts_batches_lost_when_sequence_gap_of_two_arrives() {
 
 #[test]
 fn engine_counts_no_batches_lost_when_sequence_repeats() {
-    // A node reuses a seq after an unacknowledged send rather than advancing past
-    // it, so the retry lands with the same seq as the batch before it.
+    // A node whose send fails after all its retries even though the frame
+    // arrived does not advance seq, so its next batch reuses the number with
+    // new content rather than resending what already landed. Different bytes
+    // at the same seq, so this is not the byte-identical retransmission case.
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
 
@@ -395,13 +397,72 @@ fn engine_counts_no_batches_lost_when_sequence_repeats() {
         ssid: b"",
         ext: &[],
     };
+    let other = SightingMsg { bssid: [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01], ..msg };
     engine.handle(rx(NODE, &batch(1, &[msg])), clock.at(1));
-    engine.handle(rx(NODE, &batch(1, &[msg])), clock.at(2));
+    engine.handle(rx(NODE, &batch(1, &[other])), clock.at(2));
     engine.handle(rx(NODE, &batch(2, &[msg])), clock.at(3));
 
     let node = engine.nodes().find(|n| n.mac == NODE).expect("the node");
-    assert_eq!(node.batches_lost, 0, "a repeated seq is a retry, not a gap");
+    assert_eq!(node.batches_lost, 0, "a repeated seq with new bytes is not a gap");
     assert_eq!(counters(&engine).batches_lost, 0);
+    assert_eq!(counters(&engine).duplicate_batches, 0, "different bytes, not a retransmission");
+    assert_eq!(counters(&engine).observations, 3, "every batch's record is kept");
+}
+
+#[test]
+fn engine_drops_batch_when_seq_and_payload_repeat() {
+    // The bridge received the frame, its ack was lost, and the node's radio
+    // retransmitted the exact same frame; ESP-NOW delivered both copies.
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+
+    let msg = SightingMsg {
+        kind: RecordKind::Wifi,
+        bssid: [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF],
+        channel: 6,
+        rssi: -60,
+        security: Security::Open,
+        ssid: b"",
+        ext: &[],
+    };
+    let frame = batch(1, &[msg]);
+    engine.handle(rx(NODE, &frame), clock.at(1));
+    engine.handle(rx(NODE, &frame), clock.at(2));
+
+    let node = engine.nodes().find(|n| n.mac == NODE).expect("the node");
+    assert_eq!(counters(&engine).observations, 1, "the duplicate's record is not recorded twice");
+    assert_eq!(counters(&engine).duplicate_batches, 1);
+    assert_eq!(counters(&engine).batches_lost, 0);
+    assert_eq!(node.duplicate_batches, 1);
+    assert_eq!(
+        node.last_seen_ms,
+        EPOCH_MS + 2000,
+        "the duplicate is still proof of life, so last_seen moves to its arrival"
+    );
+}
+
+#[test]
+fn engine_records_raw_frame_when_duplicate_batch_arrives() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig { record_raw: true, ..Default::default() }, &clock);
+
+    let msg = SightingMsg {
+        kind: RecordKind::Wifi,
+        bssid: [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF],
+        channel: 6,
+        rssi: -60,
+        security: Security::Open,
+        ssid: b"",
+        ext: &[],
+    };
+    let frame = batch(1, &[msg]);
+    engine.handle(rx(NODE, &frame), clock.at(1));
+    let second = engine.handle(rx(NODE, &frame), clock.at(2));
+
+    assert!(
+        second.records.iter().any(|r| matches!(r, Record::Raw(_))),
+        "a duplicate is still a frame the bridge forwarded, kept under --record-raw"
+    );
 }
 
 #[test]
@@ -429,6 +490,35 @@ fn engine_resets_batch_sequence_baseline_when_node_reboots() {
     let node = engine.nodes().find(|n| n.mac == NODE).expect("the node");
     assert_eq!(node.batches_lost, 0, "the gap across a reboot is history, not a loss");
     assert_eq!(node.last_seq, Some(0));
+}
+
+#[test]
+fn engine_records_batch_when_it_repeats_after_a_reboot() {
+    // The reboot arm clears the stored batch bytes along with last_seq, so a
+    // batch that happens to repeat the pre-reboot seq and bytes is a fresh
+    // observation rather than a retransmission of what came before the boot.
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+
+    let msg = SightingMsg {
+        kind: RecordKind::Wifi,
+        bssid: [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF],
+        channel: 6,
+        rssi: -60,
+        security: Security::Open,
+        ssid: b"",
+        ext: &[],
+    };
+    engine.handle(heartbeat(NODE, 5), clock.at(1));
+    engine.handle(rx(NODE, &batch(3, &[msg])), clock.at(2));
+
+    // The node reboots: its heartbeat counter goes back to a boot value.
+    engine.handle(heartbeat(NODE, 1), clock.at(3));
+    // Same seq, same bytes as the batch before the reboot.
+    engine.handle(rx(NODE, &batch(3, &[msg])), clock.at(4));
+
+    assert_eq!(counters(&engine).duplicate_batches, 0, "a reboot clears the baseline");
+    assert_eq!(counters(&engine).observations, 2, "both batches are recorded");
 }
 
 #[test]
