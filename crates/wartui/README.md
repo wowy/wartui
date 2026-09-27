@@ -19,6 +19,13 @@ This is the operator's manual. The root [`README.md`](../../README.md) is the sh
 | `reset`  | Reboot a bridge that has stopped answering                  |
 | `ports`  | List the Espressif boards attached, and the address of each |
 
+A node broadcasts its heartbeat but unicasts its sighting batches to whichever bridge last sent it
+an admin or clear frame, so `sniff` on a second bridge on the same channel hears every node's
+heartbeats but none of their sightings — those go to the fleet's own bridge alone. If the bridge
+attached to this host is swapped for a different one mid-run, `run` re-sends every node's
+assignment so each learns the new address from that frame; the same bridge reconnecting or
+rebooting sends nothing, since every node is already addressing it correctly.
+
 `run` takes:
 
 | Flag                    | Default      | What it is                                                   |
@@ -376,11 +383,21 @@ memory is also emptied whenever its share or its Bluetooth role changes
 (`crates/wartui-proto/src/dedup.rs` explains why it works this way).
 
 The `lost` column is whole batches missing between a node and the host, counted from gaps in the
-sequence number every batch carries — `—` before its first one arrives, a running count after. Each
-one lost is everything a dwell or a Bluetooth scan produced, up to about a dozen access points, and
-those addresses stay hidden the same way a lost frame always has: until the node's own five-minute
-refresh reports them again. The footer's `lost N` is the same count summed across the fleet, and
-appears only once something has been.
+sequence number every batch carries — `—` before its first one arrives, a running count after. A
+batch's sequence advances only once its node's radio gets a MAC-layer ack for it, so a gap here is
+loss after the bridge's radio took the frame — its receive queue or the USB path to the host — not
+loss on the air. Each one lost is everything a dwell or a Bluetooth scan produced, up to about a
+dozen access points, and those addresses stay hidden the same way a lost frame always has: until the
+node's own five-minute refresh reports them again. The footer's `lost N` is the same count summed
+across the fleet, and appears only once something has been.
+
+The footer's `dup N` is different: batches dropped because they are the same `seq`,
+byte-identical to the one just before them, and arrived within 150 ms of it — a node's radio
+retransmitting after the bridge's ack was lost rather than anything missing. A batch that
+repeats the same seq and bytes 150 ms or more later is the node's own re-send after a failed
+send, and is recorded like any other. Its observations were already recorded from the first
+copy, so nothing here is hidden and nothing is lost — `dup` and `lost` never count the same
+batch.
 
 The header has three ways of saying it has nothing to drive: `auto — nothing heartbeating yet`,
 `auto — no node it can drive` (nodes are alive but none is assignable), and `auto — too many nodes`

@@ -131,10 +131,12 @@ is here rather than only in a `//!`.
 - **The wire is ours, in both directions, and shares nothing with the vendor's.** Every frame is
   `WTUI`, a wire version byte, a type byte and a body: `HeartbeatMsg` (13 bytes), `SightingBatch`
   (9 plus records of 12 plus the SSID and the trailer), `AdminMsg` (17) and `ClearMsg` (6, header
-  only). ESP-NOW has no addressing above the MAC layer and a
-  node broadcasts, so a shared format is a shared conversation. The magic is checked before
-  anything else at both ends. Encode/decode is written out by hand, never by transmuting a
-  packed struct, and pinned byte-for-byte in `crates/wartui-proto/tests/wire.rs`.
+  only). A heartbeat broadcasts, since that is how a bridge discovers a node before either
+  side knows the other's address; a sighting batch unicasts to the bridge that last sent
+  this node an admin or clear frame, so a shared format is a shared conversation either way.
+  The magic is checked before anything else at both ends. Encode/decode is written out by
+  hand, never by transmuting a packed struct, and pinned byte-for-byte in
+  `crates/wartui-proto/tests/wire.rs`.
 - **A wire change means reflashing every node at once.** `wartui-proto` is a path dependency of
   both firmwares. A frame carrying our magic and an unknown version byte is counted as
   `incompatible` and named in the footer (`N frames from an older firmware — reflash`), never

@@ -280,10 +280,23 @@ pub struct NodeState {
     /// first, and reset on a detected reboot: the counter restarts at boot,
     /// and a gap across one is history rather than a loss.
     pub last_seq: Option<u16>,
+    /// Bytes of this node's most recent sighting-batch frame, kept only to
+    /// recognise a MAC-layer retransmission of it: same `seq`, same bytes.
+    /// `None` before its first batch, and reset alongside `last_seq` on a
+    /// detected reboot.
+    last_batch: Option<Vec<u8>>,
+    /// Bridge-local microsecond stamp of [`Self::last_batch`], the near end
+    /// of [`FleetEngine::is_duplicate_batch`]'s retransmission window. `None`
+    /// before its first batch, and reset alongside `last_batch` on a
+    /// detected reboot.
+    last_batch_rx_us: Option<u32>,
     /// Batches lost between this node and the host, counted from gaps in
     /// `seq`. Each one is everything one dwell or Bluetooth scan produced,
     /// hidden until the node's dedup ring next refreshes them.
     pub batches_lost: u64,
+    /// Batches from this node dropped as MAC-layer retransmissions; see
+    /// [`Counters::duplicate_batches`].
+    pub duplicate_batches: u64,
 }
 
 /// What one node was told to do, and the fleet arithmetic it was computed
@@ -341,7 +354,10 @@ impl NodeState {
             last_heartbeat_rx_us: None,
             beat_gaps: VecDeque::new(),
             last_seq: None,
+            last_batch: None,
+            last_batch_rx_us: None,
             batches_lost: 0,
+            duplicate_batches: 0,
         }
     }
 
@@ -426,6 +442,15 @@ pub struct Counters {
     /// Sighting batches lost between a node and the host, summed across the
     /// fleet, from gaps in each node's `seq`.
     pub batches_lost: u64,
+    /// Sighting batches dropped as MAC-layer retransmissions, summed across
+    /// the fleet: same `seq`, byte-identical to the batch immediately before
+    /// them, and received within [`FleetEngine::DUPLICATE_BATCH_WINDOW_US`]
+    /// of it, because the bridge's ack was lost and the node's radio retried
+    /// until it got one. A same-`seq`, same-bytes batch arriving outside that
+    /// window is a node's own re-send after a failed send, not a
+    /// retransmission, and is recorded instead. Not counted in
+    /// `batches_lost`, since nothing was actually lost.
+    pub duplicate_batches: u64,
 }
 
 /// Counters the store keeps, folded into the snapshot for display.
@@ -693,6 +718,20 @@ impl FleetEngine {
                     chip: format!("{:?}", info.chip),
                     fw_version: info.fw_version.clone(),
                 }));
+                // A node unicasts its sightings to whichever bridge last sent it an
+                // admin or clear frame, never learning it from a heartbeat, which
+                // still broadcasts. `self.bridge` is not cleared on `Disconnected`,
+                // so if one was already held and its MAC differs, every node is
+                // still aimed at a bridge that is gone, with heartbeats alone
+                // keeping the fleet looking healthy. Re-sending each assignment
+                // under a fresh epoch puts an admin frame in that node's next
+                // window, which is what moves it onto the new bridge's address.
+                if self.bridge.as_ref().is_some_and(|bridge| bridge.mac != info.mac) {
+                    let macs: Vec<Mac> = self.nodes.keys().copied().collect();
+                    for mac in macs {
+                        self.reissue(mac);
+                    }
+                }
                 self.bridge = Some(info);
                 self.link_up = true;
                 self.link_error = None;
@@ -893,8 +932,12 @@ impl FleetEngine {
                     node.clear_dedup_ring = false;
                     // Its batch counter went back to a boot value as well, so the
                     // gap between whatever it last sent and its first batch since
-                    // is a reboot's worth of history rather than a loss.
+                    // is a reboot's worth of history rather than a loss. The stored
+                    // bytes go with it: an identical batch after a reboot is a new
+                    // observation, not a retransmission of what was sent before.
                     node.last_seq = None;
+                    node.last_batch = None;
+                    node.last_batch_rx_us = None;
                 }
                 node.capabilities = Some(heartbeat.capabilities);
                 node.note_beat_gap(now);
@@ -928,10 +971,24 @@ impl FleetEngine {
                 // Once for the whole frame: a batch is one node speaking once,
                 // not `count` nodes speaking once each.
                 self.see_node(src, now, rssi, None, batch);
-                self.note_batch_seq(src, sightings.seq);
-                for (sighting, raw) in sightings.iter() {
-                    self.on_sighting(src, now, rssi, sighting, raw, batch);
+                if self.is_duplicate_batch(src, sightings.seq, payload, rx_us) {
+                    // The node's radio retransmitted after a lost MAC ack, and
+                    // the bridge delivered both copies. `see_node` above already
+                    // recorded this as proof of life with a fresh link RSSI;
+                    // there is nothing else to record, since recording it again
+                    // would double the observations for one thing that happened
+                    // once.
+                    self.counters.duplicate_batches += 1;
+                    if let Some(node) = self.nodes.get_mut(&src) {
+                        node.duplicate_batches += 1;
+                    }
+                } else {
+                    self.note_batch_seq(src, sightings.seq);
+                    for (sighting, raw) in sightings.iter() {
+                        self.on_sighting(src, now, rssi, sighting, raw, batch);
+                    }
                 }
+                self.remember_batch(src, payload, rx_us);
             }
         }
     }
@@ -998,12 +1055,19 @@ impl FleetEngine {
 
     /// Track batches lost between this node and the host.
     ///
-    /// `seq` counts up once per batch a node sends, wrapping and restarting at
-    /// boot — the reboot arm above resets the baseline for the same reason it
-    /// resets everything else a boot forgets. A gap under 1024 is batches lost
-    /// in a row; at or past it, the count has wrapped or the frame arrived out
-    /// of order, and guessing at a loss that large would invent history rather
-    /// than report it.
+    /// `seq` counts up once per batch a node sends and the bridge acknowledges,
+    /// wrapping and restarting at boot — the reboot arm above resets the
+    /// baseline for the same reason it resets everything else a boot forgets.
+    /// A MAC-layer retransmission — same `seq`, byte-identical, within
+    /// [`Self::DUPLICATE_BATCH_WINDOW_US`] — never reaches here: [`Self::is_duplicate_batch`]
+    /// catches it in the `Sightings` arm first. A repeat that does reach here is a
+    /// node whose send failed after all its retries even though the frame arrived:
+    /// it never advanced `seq`, and its next batch — new content, or the same
+    /// addresses heard again outside [`Self::DUPLICATE_BATCH_WINDOW_US`] —
+    /// reuses the number, so this counts no loss for it either.
+    /// A gap under 1024 is batches lost in a row; at or past it, the count has
+    /// wrapped or the frame arrived out of order, and guessing at a loss that
+    /// large would invent history rather than report it.
     fn note_batch_seq(&mut self, src: Mac, seq: u16) {
         let Some(node) = self.nodes.get_mut(&src) else { return };
         if let Some(last) = node.last_seq {
@@ -1014,6 +1078,57 @@ impl FleetEngine {
             }
         }
         node.last_seq = Some(seq);
+    }
+
+    /// How long after a batch a byte-identical repeat under the same `seq` is
+    /// still an 802.11 retry rather than a node's own later re-send.
+    ///
+    /// 150 ms, checked with a strict `<` so a repeat at or past it is never
+    /// counted as the retry. The radio's own retry sequence lands well inside
+    /// it — `docs/batch-loss-findings.md` has the drive that measured it.
+    /// A byte-identical same-`seq` batch that is not a retry is a node
+    /// re-sending addresses it has heard again, which takes at least a whole
+    /// sweep: even a node with a single channel spends a dwell
+    /// (`plan::CHANNEL_DWELL_MS`) plus the heartbeat's admin window
+    /// (`plan::ADMIN_WAIT_MS`) on every sweep, over 200 ms, and the
+    /// Bluetooth node reports once per `plan::BLE_BEAT_MS`. A bridge reboot
+    /// resets `rx_us`, so the wrapped difference against a pre-reboot stamp
+    /// is huge and the batch is recorded rather than dropped — the safe
+    /// direction.
+    const DUPLICATE_BATCH_WINDOW_US: u64 = 150_000;
+
+    /// Whether `payload` arriving at `rx_us` is a MAC-layer retransmission of
+    /// this node's most recent batch: the same `seq`, byte-identical to what
+    /// was stored for it, and received within [`Self::DUPLICATE_BATCH_WINDOW_US`]
+    /// of it.
+    ///
+    /// Same `seq` and same bytes also arises when the bridge received an
+    /// earlier batch but every ack back was lost, so the node marked the send
+    /// failed and left `seq` where it was; the same addresses, heard at the
+    /// same RSSI, are then re-sent under that `seq` the next time it reports.
+    /// The window is what tells the two apart — dropping a batch outside it
+    /// would discard a genuine later sighting rather than a retry. A
+    /// same-`seq` batch with different bytes is a different event entirely —
+    /// see [`Self::note_batch_seq`] — and is not caught here.
+    fn is_duplicate_batch(&self, src: Mac, seq: u16, payload: &[u8], rx_us: u32) -> bool {
+        self.nodes.get(&src).is_some_and(|node| {
+            node.last_seq == Some(seq)
+                && node.last_batch.as_deref() == Some(payload)
+                && node.last_batch_rx_us.is_some_and(|last_rx_us| {
+                    u64::from(rx_us.wrapping_sub(last_rx_us)) < Self::DUPLICATE_BATCH_WINDOW_US
+                })
+        })
+    }
+
+    /// Remember `payload` and `rx_us` as this node's most recent batch, for
+    /// the next [`Self::is_duplicate_batch`] check. Called for every batch,
+    /// duplicate or not, so the stored bytes and timestamp always match the
+    /// last one seen.
+    fn remember_batch(&mut self, src: Mac, payload: &[u8], rx_us: u32) {
+        if let Some(node) = self.nodes.get_mut(&src) {
+            node.last_batch = Some(payload.to_vec());
+            node.last_batch_rx_us = Some(rx_us);
+        }
     }
 
     /// Refresh what is known about the node at `src`, and file the row that
@@ -1166,8 +1281,9 @@ impl FleetEngine {
 
     /// Re-mark a node's assignment for delivery under a new epoch.
     ///
-    /// For a node that rebooted, which has forgotten what it holds: what it was
-    /// last given is re-sent under an epoch it cannot already match.
+    /// For a node that rebooted, which has forgotten what it holds, or one still
+    /// addressing a bridge that is gone: either way, what it was last given is
+    /// re-sent under an epoch it cannot already match.
     ///
     /// Deliberately does not touch the Bluetooth flag. A change to the flag is
     /// always a change to the channels too, so it is always a re-cut and always

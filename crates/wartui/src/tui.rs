@@ -1102,6 +1102,9 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot, ui: &Ui, 
         if c.batches_lost > 0 {
             spans.push(Span::raw(format!("  lost {}", c.batches_lost)));
         }
+        if c.duplicate_batches > 0 {
+            spans.push(Span::raw(format!("  dup {}", c.duplicate_batches)));
+        }
         // Beside the totals rather than in the fault box: connecting to a
         // bridge that has been buffering beside a fleet produces these as a
         // matter of course, and a line in the fault box would make the
@@ -1451,6 +1454,7 @@ mod tests {
                 peer_table_full: 0,
                 replans: 0,
                 batches_lost: 0,
+                duplicate_batches: 0,
             },
             store: StoreStats { written: 800, dropped: 7 },
             bridge_status: Some(BridgeStatus {
@@ -1852,6 +1856,18 @@ mod tests {
         // `busy()` itself has nothing lost, the same rule `admin` follows.
         let screen = rendered(&busy());
         assert!(!totals_line(&screen).contains("lost"), "{screen}");
+    }
+
+    #[test]
+    fn view_shows_dup_total_when_duplicate_batches_is_nonzero() {
+        let mut snapshot = busy();
+        snapshot.counters.duplicate_batches = 3;
+        let screen = rendered(&snapshot);
+        assert!(totals_line(&screen).contains("dup 3"), "{screen}");
+
+        // `busy()` itself has nothing duplicated, the same rule `lost` follows.
+        let screen = rendered(&busy());
+        assert!(!totals_line(&screen).contains("dup"), "{screen}");
     }
 
     /// A capture whose only fault is that the bridge restarted underneath it.

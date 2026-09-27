@@ -46,6 +46,7 @@ use wartui_proto::air::{
     AdminMsg, Capabilities, DecodeError, Frame, HeartbeatMsg, SIGHTINGS_PER_BATCH_MAX,
     SightingBatchWriter, SightingMsg,
 };
+use wartui_proto::link::BROADCAST;
 use wartui_proto::plan::{
     ADMIN_WAIT_MS, BLE_BEAT_MS, CHANNEL_DWELL_MS, CONTROL_CHANNEL, ChannelSet, IDLE_BEAT_MS,
     NODE_STAGGER_WINDOW_MS, NUM_SCAN_CHANNELS, SCAN_CHANNELS, SweepCursor, stagger_offset_ms,
@@ -147,10 +148,18 @@ struct Node {
     /// has restarted and forgotten its assignment.
     counter: u32,
     reported: u32,
-    /// This sighting batch's sequence number, advanced only once a batch is
-    /// actually broadcast — the same rule [`heartbeat`] follows for `counter`.
-    /// A gap the host sees in it is batches lost on the way there.
+    /// This sighting batch's sequence number, advanced only once the core
+    /// acknowledges a batch, as `counter` is only once [`heartbeat`] is on the
+    /// air. A host-visible gap in it is loss after the bridge's radio
+    /// took the frame (its receive queue or USB path), never loss on the air:
+    /// an unacknowledged batch reuses `seq` rather than advancing past it.
     seq: u16,
+    /// The MAC address sightings unicast to, learned from the source of the last
+    /// admin or clear frame this node received, whether or not it changed the
+    /// assignment. `None` from boot until the first one arrives.
+    core: Option<[u8; 6]>,
+    /// Sighting batches this node sent that the core never acknowledged.
+    unacked: u32,
 }
 
 impl Node {
@@ -168,6 +177,8 @@ impl Node {
             counter: 1,
             reported: 0,
             seq: 0,
+            core: None,
+            unacked: 0,
         }
     }
 
@@ -333,7 +344,7 @@ fn main() -> ! {
     let mut sniffer = controller.sniffer();
     sniffer.set_receive_cb(sniff::on_frame);
     let (manager, mut sender, receiver) = controller.esp_now().split();
-    if !radio::set_broadcast_rate(&manager) {
+    if !radio::set_peer_rate(&manager, &BROADCAST) {
         note!("could not set the ESP-NOW rate; broadcasting at 1 Mbps");
     }
 
@@ -492,19 +503,29 @@ fn heartbeat(sender: &mut EspNowSender<'_>, node: &mut Node, capabilities: Capab
     }
 }
 
-/// Packs every sighting one dwell or Bluetooth scan produces into as few
-/// broadcasts as the 250-byte ESP-NOW payload allows, and sends what it holds
+/// Packs every sighting one dwell or Bluetooth scan produces into as few unicasts
+/// to `node.core` as the 250-byte ESP-NOW payload allows, and sends what it holds
 /// at the end rather than carrying anything into the next one — the host
 /// stamps a sighting's position on arrival, so held sightings would carry the
 /// wrong one.
 ///
-/// `members` mirrors what `writer` currently holds, so a broadcast's success
-/// can be turned into a dedup-ring entry per record without re-decoding the
+/// `members` mirrors what `writer` currently holds, so an acknowledged unicast's
+/// success can be turned into a dedup-ring entry per record without re-decoding the
 /// frame just sent.
+///
+/// `failed` latches once a batch in this report goes unacknowledged, or `node.core`
+/// is `None`: every batch after it in the same report is discarded rather than
+/// packed and retried. With no bridge in range nothing a node sends is ever
+/// acknowledged, so without the latch every dwell would end in a full string of
+/// retried, still-unacknowledged batches. One failed frame is the bound instead;
+/// nothing discarded enters `SEEN`, so it stays due, and the next report's first
+/// batch is the probe that finds out whether a core has come back — recovery needs
+/// no extra logic.
 struct Outgoing {
     writer: SightingBatchWriter,
     members: [([u8; 6], Option<i8>); SIGHTINGS_PER_BATCH_MAX],
     len: usize,
+    failed: bool,
 }
 
 impl Outgoing {
@@ -513,12 +534,18 @@ impl Outgoing {
             writer: SightingBatchWriter::new(seq),
             members: [([0u8; 6], None); SIGHTINGS_PER_BATCH_MAX],
             len: 0,
+            failed: false,
         }
     }
 
     /// Add one sighting, flushing first if it does not fit what is already
     /// packed. Returns how many records a flush this triggered actually sent,
     /// which is zero unless it had to make room.
+    ///
+    /// Once `failed` is set, this stops packing anything: `report`/`report_ble`
+    /// still call it for every address so their rings drain, but it discards
+    /// rather than filling a batch nobody would acknowledge. The address is never
+    /// entered in `SEEN`, so it is due again next time it is heard.
     fn offer(
         &mut self,
         sender: &mut EspNowSender<'_>,
@@ -528,11 +555,19 @@ impl Outgoing {
         rssi: Option<i8>,
         now: u32,
     ) -> u32 {
+        if self.failed {
+            return 0;
+        }
         if self.writer.push(msg) {
             self.remember(addr, rssi);
             return 0;
         }
         let flushed = self.flush(sender, node, now);
+        // A flush that just failed leaves nothing to pack this sighting behind: taking
+        // it would hand the final flush a second frame for an absent core.
+        if self.failed {
+            return flushed;
+        }
         // An empty batch has room for any record that encodes at all, so a refusal
         // here is a record over its limits: skipped, and never entered in `SEEN`.
         if self.writer.push(msg) {
@@ -549,22 +584,27 @@ impl Outgoing {
         }
     }
 
-    /// Broadcast what is packed, if anything, returning how many records it
-    /// held. `SEEN` is only updated once the radio confirms the broadcast:
-    /// recorded only once it is on the air, so a batch the radio never sent
-    /// stays due to be offered again.
+    /// Unicast what is packed, if anything, to `node.core`, returning how many
+    /// records it held. `SEEN` is only updated once the radio confirms the ack:
+    /// recorded only once the core has it, so a batch nobody acknowledged stays
+    /// due to be offered again next time its addresses are heard.
     fn flush(&mut self, sender: &mut EspNowSender<'_>, node: &mut Node, now: u32) -> u32 {
         if self.writer.is_empty() {
             return 0;
         }
-        let sent = if radio::broadcast(sender, self.writer.as_bytes()) {
-            for &(addr, rssi) in &self.members[..self.len] {
-                sniff::SEEN.with(|seen| seen.record(addr, rssi, now));
+        let sent = match node.core {
+            Some(core) if radio::unicast(sender, &core, self.writer.as_bytes()) => {
+                for &(addr, rssi) in &self.members[..self.len] {
+                    sniff::SEEN.with(|seen| seen.record(addr, rssi, now));
+                }
+                node.seq = node.seq.wrapping_add(1);
+                u32::try_from(self.len).unwrap_or(u32::MAX)
             }
-            node.seq = node.seq.wrapping_add(1);
-            u32::try_from(self.len).unwrap_or(u32::MAX)
-        } else {
-            0
+            _ => {
+                node.unacked = node.unacked.wrapping_add(1);
+                self.failed = true;
+                0
+            }
         };
         self.writer.reset(node.seq);
         self.len = 0;
@@ -587,14 +627,15 @@ fn report(sender: &mut EspNowSender<'_>, node: &mut Node, channel: u8) {
         sent += outgoing.offer(sender, node, &sighting.as_msg(), sighting.bssid, rssi, now);
     }
     sent += outgoing.flush(sender, node, now);
-    if sent > 0 {
+    if sent > 0 || outgoing.failed {
         node.reported = node.reported.wrapping_add(sent);
         note!(
-            "ch {}: {} new, {} total, {} dropped",
+            "ch {}: {} new, {} total, {} dropped, {} unacked",
             channel,
             sent,
             node.reported,
-            sniff::dropped()
+            sniff::dropped(),
+            node.unacked
         );
     }
 }
@@ -622,9 +663,15 @@ fn report_ble(sender: &mut EspNowSender<'_>, node: &mut Node, scanner: &mut ble:
             report.with_msg(|msg| outgoing.offer(sender, node, &msg, report.address, rssi, now));
     }
     lines += outgoing.flush(sender, node, now);
-    if heard > 0 {
+    if heard > 0 || outgoing.failed {
         node.reported = node.reported.wrapping_add(lines);
-        note!("ble: {} heard, {} new, {} dropped", heard, lines, ble::dropped());
+        note!(
+            "ble: {} heard, {} new, {} dropped, {} unacked",
+            heard,
+            lines,
+            ble::dropped(),
+            node.unacked
+        );
     }
 }
 
@@ -646,9 +693,14 @@ fn listen(manager: &EspNowManager<'_>, receiver: &EspNowReceiver<'_>, node: &mut
 /// Take whatever the radio has queued and adopt any assignment in it.
 fn drain_admin(manager: &EspNowManager<'_>, receiver: &EspNowReceiver<'_>, node: &mut Node) {
     while let Some(received) = receiver.receive() {
+        let src = received.info.src_address;
         let admin = match Frame::decode(received.data()) {
-            Ok(Frame::Admin(admin)) => admin,
+            Ok(Frame::Admin(admin)) => {
+                note_core(manager, node, src);
+                admin
+            }
             Ok(Frame::Clear(_)) => {
+                note_core(manager, node, src);
                 node.forget_reported("host asked");
                 continue;
             }
@@ -691,6 +743,26 @@ fn drain_admin(manager: &EspNowManager<'_>, receiver: &EspNowReceiver<'_>, node:
                 admin.tx_power
             );
         }
+    }
+}
+
+/// Point sighting batches at `src`, if that is not the core already held.
+///
+/// Runs before [`Node::adopt`]'s epoch check, on every admin or clear frame, not
+/// only ones that change the assignment: a bridge that swapped and re-sent the same
+/// epoch still has to move the core, or every sighting after it unicasts into
+/// silence forever. Registration failure is left as a note — the old peer, and the
+/// old `node.core`, are still there to unicast to.
+fn note_core(manager: &EspNowManager<'_>, node: &mut Node, src: [u8; 6]) {
+    if node.core == Some(src) {
+        return;
+    }
+    match radio::set_core_peer(manager, node.core, src) {
+        Ok(()) => {
+            node.core = Some(src);
+            note!("core is now {}", MacFmt(src));
+        }
+        Err(_) => note!("could not register {} as the core peer; keeping the old one", MacFmt(src)),
     }
 }
 
