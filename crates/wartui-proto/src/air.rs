@@ -818,9 +818,9 @@ pub struct AdminMsg {
     /// Distinct from the header's [`WIRE_VERSION`], which is the shape of the
     /// frame rather than the generation of the plan inside it.
     pub epoch: u8,
-    /// This node's slot in the fleet-wide staggering order.
+    /// This node's slot in the fleet the plan was cut for.
     pub node_index: u8,
-    /// Fleet size the stagger is computed against.
+    /// Fleet size the plan was cut for.
     pub node_count: u8,
     /// Per-node switches. [`ADMIN_FLAG_BLE`] is the only one defined.
     ///

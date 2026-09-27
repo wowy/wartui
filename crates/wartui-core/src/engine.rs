@@ -85,7 +85,7 @@ pub enum Command {
     /// (`docs/phase-0-findings.md`). A node that sniffs no Wi-Fi has nothing to
     /// hold the antenna against, which is why Bluetooth is a whole node's job
     /// rather than a slice of one's: it costs the fleet a sniffer and buys a scan
-    /// every [`wartui_proto::plan::BLE_BEAT_MS`].
+    /// run back to back with the next.
     ///
     /// Nothing goes out now, and nothing is decided now: the planner reads this on
     /// its next re-cut, which takes that node's channels away and deals them round
@@ -317,7 +317,7 @@ pub struct Assignment {
     /// and is adopted by the same epoch comparison, so treating them separately
     /// would make "acknowledged" ambiguous.
     pub ble: bool,
-    /// This node's slot in the fleet-wide stagger order.
+    /// This node's slot in the fleet the plan was cut for.
     pub node_index: u8,
     /// Fleet size as of this assignment.
     pub node_count: u8,
@@ -361,16 +361,20 @@ impl NodeState {
         }
     }
 
-    /// How long this node is taking between heartbeats, in milliseconds.
+    /// How long this node's sweep takes, in milliseconds.
     ///
-    /// The median of the last few gaps rather than the last one. A node heartbeats
-    /// once per completed sweep, so this is proportional to how many channels it is
-    /// scanning — which is the whole proof that an assignment landed, visible
-    /// without serial access to the node. The node scanning Bluetooth sweeps
-    /// nothing and reads a flat [`wartui_proto::plan::BLE_BEAT_MS`] instead, which
-    /// is the same kind of proof and proportional to nothing. The median is what
-    /// keeps one lost heartbeat, which doubles a single gap, from reading as a
-    /// range twice the size.
+    /// The median of the last few samples rather than the last one. A heartbeat
+    /// arrives every [`wartui_proto::plan::ASSIGNED_BEAT_MS`] rather than once
+    /// per sweep, so each sample divides the gap between two heartbeats by how
+    /// many sweeps the counter advanced across it: `gap_ms / (counter -
+    /// previous_counter)`. Dividing by the counter step is what keeps a lost
+    /// heartbeat from distorting a sample at all — it only widens the counter
+    /// step the next arrival divides by, rather than doubling a raw gap. What
+    /// comes out is still proportional to how many channels the node is
+    /// scanning, which is the whole proof that an assignment landed, visible
+    /// without serial access to the node. The node scanning Bluetooth reads
+    /// roughly one scan. The median is what keeps one still-noisy sample from
+    /// reading as the range.
     #[must_use]
     pub fn beat_period_ms(&self) -> Option<u32> {
         if self.beat_gaps.is_empty() {
@@ -381,14 +385,28 @@ impl NodeState {
         Some(gaps[gaps.len() / 2])
     }
 
-    fn note_beat_gap(&mut self, now: Now) {
-        if let Some(previous) = self.last_heartbeat {
-            let gap = now.mono.duration_since(previous).as_millis();
-            if self.beat_gaps.len() >= BEAT_WINDOW {
-                self.beat_gaps.pop_front();
-            }
-            self.beat_gaps.push_back(u32::try_from(gap).unwrap_or(u32::MAX));
+    /// Record a per-sweep period sample from a heartbeat carrying `counter`.
+    ///
+    /// Skipped when the counter did not advance (a duplicate or replayed
+    /// heartbeat) or went backwards (a reboot, already handled by the caller):
+    /// either would divide by zero or invent a period nobody sniffed. Called
+    /// before `self.counter` is updated to the new value, so `self.counter`
+    /// still holds the previous sample's counter here.
+    fn note_beat_gap(&mut self, now: Now, counter: u32) {
+        let (Some(previous_at), Some(previous_counter)) = (self.last_heartbeat, self.counter)
+        else {
+            return;
+        };
+        if counter <= previous_counter {
+            return;
         }
+        let steps = counter - previous_counter;
+        let gap = now.mono.duration_since(previous_at).as_millis();
+        let gap = u32::try_from(gap).unwrap_or(u32::MAX);
+        if self.beat_gaps.len() >= BEAT_WINDOW {
+            self.beat_gaps.pop_front();
+        }
+        self.beat_gaps.push_back(gap / steps);
     }
 }
 
@@ -444,7 +462,7 @@ pub struct Counters {
     pub batches_lost: u64,
     /// Sighting batches dropped as MAC-layer retransmissions, summed across
     /// the fleet: same `seq`, byte-identical to the batch immediately before
-    /// them, and received within [`FleetEngine::DUPLICATE_BATCH_WINDOW_US`]
+    /// them, and received within [`DUPLICATE_BATCH_WINDOW_US`]
     /// of it, because the bridge's ack was lost and the node's radio retried
     /// until it got one. A same-`seq`, same-bytes batch arriving outside that
     /// window is a node's own re-send after a failed send, not a
@@ -639,6 +657,26 @@ pub struct FleetEngine {
 /// A lag large enough that [`FleetEngine::air_is_live`] says no, used as the
 /// starting assumption on a connection whose backlog has not been seen yet.
 const BEHIND_THE_AIR_US: u64 = plan::ADMIN_WAIT_MS as u64 * 1_000;
+
+/// How long after a batch a byte-identical repeat under the same `seq` is still
+/// an 802.11 retry rather than a node's own later re-send.
+///
+/// 100 ms, checked with a strict `<` so a repeat at or past it is never counted
+/// as the retry. The radio's own retries arrived about 4 ms after the original
+/// and 361 of 362 within 100 ms (`docs/batch-loss-findings.md`). A
+/// byte-identical same-`seq` batch that is not a retry is a node re-sending
+/// addresses it has heard again, which takes at least a whole sweep: a sweep
+/// has no admin window in it, so the shortest time between two reports of one
+/// channel is a single dwell (`plan::CHANNEL_DWELL_MS`), and a one-channel
+/// share re-reports every ~130 ms. A bridge reboot resets `rx_us`, so the
+/// wrapped difference against a pre-reboot stamp is huge and the batch is
+/// recorded rather than dropped — the safe direction.
+const DUPLICATE_BATCH_WINDOW_US: u64 = 100_000;
+
+const _: () = assert!(
+    DUPLICATE_BATCH_WINDOW_US < plan::CHANNEL_DWELL_MS as u64 * 1_000,
+    "the shortest time between two reports of one channel is one dwell"
+);
 
 /// One assignment or clear in flight.
 #[derive(Debug, Clone, Copy)]
@@ -940,7 +978,7 @@ impl FleetEngine {
                     node.last_batch_rx_us = None;
                 }
                 node.capabilities = Some(heartbeat.capabilities);
-                node.note_beat_gap(now);
+                node.note_beat_gap(now, heartbeat.counter);
                 node.counter = Some(heartbeat.counter);
                 node.last_heartbeat = Some(now.mono);
                 node.last_heartbeat_rx_us = Some(rx_us);
@@ -1059,11 +1097,11 @@ impl FleetEngine {
     /// wrapping and restarting at boot — the reboot arm above resets the
     /// baseline for the same reason it resets everything else a boot forgets.
     /// A MAC-layer retransmission — same `seq`, byte-identical, within
-    /// [`Self::DUPLICATE_BATCH_WINDOW_US`] — never reaches here: [`Self::is_duplicate_batch`]
+    /// [`DUPLICATE_BATCH_WINDOW_US`] — never reaches here: [`Self::is_duplicate_batch`]
     /// catches it in the `Sightings` arm first. A repeat that does reach here is a
     /// node whose send failed after all its retries even though the frame arrived:
     /// it never advanced `seq`, and its next batch — new content, or the same
-    /// addresses heard again outside [`Self::DUPLICATE_BATCH_WINDOW_US`] —
+    /// addresses heard again outside [`DUPLICATE_BATCH_WINDOW_US`] —
     /// reuses the number, so this counts no loss for it either.
     /// A gap under 1024 is batches lost in a row; at or past it, the count has
     /// wrapped or the frame arrived out of order, and guessing at a loss that
@@ -1080,26 +1118,9 @@ impl FleetEngine {
         node.last_seq = Some(seq);
     }
 
-    /// How long after a batch a byte-identical repeat under the same `seq` is
-    /// still an 802.11 retry rather than a node's own later re-send.
-    ///
-    /// 150 ms, checked with a strict `<` so a repeat at or past it is never
-    /// counted as the retry. The radio's own retry sequence lands well inside
-    /// it — `docs/batch-loss-findings.md` has the drive that measured it.
-    /// A byte-identical same-`seq` batch that is not a retry is a node
-    /// re-sending addresses it has heard again, which takes at least a whole
-    /// sweep: even a node with a single channel spends a dwell
-    /// (`plan::CHANNEL_DWELL_MS`) plus the heartbeat's admin window
-    /// (`plan::ADMIN_WAIT_MS`) on every sweep, over 200 ms, and the
-    /// Bluetooth node reports once per `plan::BLE_BEAT_MS`. A bridge reboot
-    /// resets `rx_us`, so the wrapped difference against a pre-reboot stamp
-    /// is huge and the batch is recorded rather than dropped — the safe
-    /// direction.
-    const DUPLICATE_BATCH_WINDOW_US: u64 = 150_000;
-
     /// Whether `payload` arriving at `rx_us` is a MAC-layer retransmission of
     /// this node's most recent batch: the same `seq`, byte-identical to what
-    /// was stored for it, and received within [`Self::DUPLICATE_BATCH_WINDOW_US`]
+    /// was stored for it, and received within [`DUPLICATE_BATCH_WINDOW_US`]
     /// of it.
     ///
     /// Same `seq` and same bytes also arises when the bridge received an
@@ -1115,7 +1136,7 @@ impl FleetEngine {
             node.last_seq == Some(seq)
                 && node.last_batch.as_deref() == Some(payload)
                 && node.last_batch_rx_us.is_some_and(|last_rx_us| {
-                    u64::from(rx_us.wrapping_sub(last_rx_us)) < Self::DUPLICATE_BATCH_WINDOW_US
+                    u64::from(rx_us.wrapping_sub(last_rx_us)) < DUPLICATE_BATCH_WINDOW_US
                 })
         })
     }

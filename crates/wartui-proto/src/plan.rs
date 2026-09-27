@@ -13,9 +13,9 @@
 //!
 //! A fleet is a slice of [`Job`]s rather than of radios, because one node's job is
 //! Bluetooth and that node is dealt nothing. It is still a slot: `node_index` and
-//! `node_count` are the fleet's transmit-stagger arithmetic ([`stagger_offset_ms`])
-//! rather than a census of who is sniffing, so cutting it out of the deal must not
-//! cut it out of the numbering.
+//! `node_count` report the node's place and the fleet size the plan was cut for, in
+//! the fleet table, so cutting it out of the deal must not cut it out of the
+//! numbering.
 
 use crate::air::AdminMsg;
 
@@ -44,9 +44,6 @@ pub const NUM_SCAN_CHANNELS: u8 = 42;
 /// this host cannot address is not one it can drive. Anything above twenty is
 /// unsupported rather than degraded.
 pub const MAX_NODES: usize = 20;
-
-/// The window a fleet's heartbeat transmissions are staggered across.
-pub const NODE_STAGGER_WINDOW_MS: u32 = 120;
 
 /// The channel every node returns to in order to speak to the controller.
 ///
@@ -108,11 +105,12 @@ pub const CHANNEL_DWELL_MS: u32 = 125;
 ///
 /// This is the window an assignment has to
 /// land inside, and the reason the host sends one only in the moment after a
-/// heartbeat. It is also, once per sweep, time in which no channel is swept.
+/// heartbeat. It is also, once per [`ASSIGNED_BEAT_MS`], time in which no channel
+/// is swept.
 ///
 /// 100 ms is about five times the slowest the host answered across an hour of
-/// captured traffic, and a window missed costs one sweep rather than the
-/// assignment, because the node stays dirty and its next heartbeat re-sends
+/// captured traffic, and a window missed costs one heartbeat interval rather than
+/// the assignment, because the node stays dirty and its next heartbeat re-sends
 /// (`docs/phase-4-findings.md`, "The admin window, from a captured hour").
 pub const ADMIN_WAIT_MS: u32 = 100;
 
@@ -128,21 +126,19 @@ const _: () = assert!(
     "a parked node must hold the control channel for at least a full admin window"
 );
 
-/// How often the node scanning Bluetooth starts a scan.
+/// How often an assigned node — sweeping or Bluetooth — sends a heartbeat and
+/// holds [`ADMIN_WAIT_MS`] open.
 ///
-/// Scan start to scan start, so a scan that overran in a busy room is followed
-/// immediately by the next one rather than pushing the cadence out. Such a node
-/// sweeps no channels ([`Job::Bluetooth`]), so this is the whole of its cycle and
-/// therefore the period its heartbeats arrive at.
-///
-/// Deliberately its own number rather than [`IDLE_BEAT_MS`], which it happens to
-/// equal: one is how long joining a fleet takes and the other a working node's duty
-/// cycle, and spelling the coincidence as a rule would make a change to either wrong.
-pub const BLE_BEAT_MS: u32 = 1000;
+/// On a timer rather than once per sweep: at any fleet size the window costs
+/// about 2% of the node's time, against sniffing bounded only by the hop cost. The
+/// price is latency — an assignment waits up to one interval for its window,
+/// because a missed window costs one more interval before the host re-sends on
+/// the next heartbeat. See `docs/duty-cycle-findings.md`.
+pub const ASSIGNED_BEAT_MS: u32 = 5000;
 
 const _: () = assert!(
-    BLE_BEAT_MS >= ADMIN_WAIT_MS,
-    "a Bluetooth node must hold the control channel for at least a full admin window"
+    ASSIGNED_BEAT_MS >= ADMIN_WAIT_MS,
+    "an assigned node must hold the control channel for at least a full admin window"
 );
 
 /// How many recently-reported addresses a node holds. See [`crate::dedup`].
@@ -493,10 +489,10 @@ pub enum Job {
     Wifi(Radio),
     /// Scan Bluetooth, and so be dealt no channels.
     ///
-    /// Still a slot: it keeps its `node_index` and counts in `node_count`, because
-    /// those are the fleet's transmit-stagger arithmetic rather than a description
-    /// of who is sniffing. The shares around it are cut as though it were present
-    /// and idle.
+    /// Still a slot: it keeps its `node_index` and counts in `node_count`, which
+    /// report the node's place and the fleet size the plan was cut for rather than
+    /// a description of who is sniffing. The shares around it are cut as though it
+    /// were present and idle.
     ///
     /// No [`Radio`], deliberately. A node scanning Bluetooth changes no plan by
     /// changing band, so a reflash from a C5 to a C6 while it holds the scan
@@ -741,7 +737,7 @@ impl Plan {
 /// index `k` goes to node `k % node_count`, so every node gets some of every run.
 /// Shares differ by at most one channel, so heartbeat periods stay within one
 /// dwell of each other. `node_index` is a single fleet-wide `0..node_count`
-/// numbering because it drives the transmit stagger ([`stagger_offset_ms`]).
+/// numbering, reported in the fleet table alongside `node_count`.
 ///
 /// Every node is taken to be a dual-band radio sniffing Wi-Fi; for a fleet that is
 /// not, use [`plan_for`].
@@ -776,8 +772,8 @@ pub fn plan(pool: ChannelPool, node_count: u8) -> Option<Plan> {
 ///   rather than a refusal: refusing would leave that node holding its old share
 ///   and still sniffing Wi-Fi, which is the opposite of what was asked.
 /// - **A Bluetooth slot is counted but not dealt to.** `node_count` includes it and
-///   it keeps its index, because those are the stagger's arithmetic; see
-///   [`Job::Bluetooth`].
+///   it keeps its index, because those report the fleet's shape rather than who
+///   is sniffing; see [`Job::Bluetooth`].
 ///
 /// Returns `None` for an empty fleet, or for more than [`MAX_NODES`].
 #[must_use]
@@ -829,16 +825,4 @@ pub fn plan_for(pool: ChannelPool, fleet: &[Job]) -> Option<Plan> {
         }
     }
     Some(Plan { node_count, slots, bluetooth, unreachable })
-}
-
-/// How long node `node_index` waits before transmitting its heartbeat.
-///
-/// A lone node owns the channel, and an index outside the assignment means the
-/// core has not placed the node yet; neither should delay anything.
-#[must_use]
-pub const fn stagger_offset_ms(node_index: u8, node_count: u8, window_ms: u32) -> u32 {
-    if node_count <= 1 || node_index >= node_count {
-        return 0;
-    }
-    (node_index as u32 * window_ms) / node_count as u32
 }

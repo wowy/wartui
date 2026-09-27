@@ -767,10 +767,10 @@ fn add_peer(manager: &EspNowManager<'_>, mac: &Mac) -> Result<bool, EspNowError>
 ///
 /// For airtime on the control channel. A 90-byte frame is about 910 µs at 1 Mbps
 /// with its long preamble and about 50 µs at 24 Mbps, and every frame the fleet sends
-/// is about that short, so the rate and preamble are the whole cost: a node's 6 ms
-/// stagger slot in a twenty-node fleet is mostly empty air rather than mostly one
-/// heartbeat. Not 802.11ax, whose preamble costs more than it saves on frames this
-/// short. Receivers need nothing; any 802.11b/g rate decodes unannounced.
+/// is about that short, so the rate and preamble are the whole cost: a heartbeat is a
+/// sliver of the 100 ms admin window it opens, not most of it. Not 802.11ax, whose
+/// preamble costs more than it saves on frames this short. Receivers need nothing;
+/// any 802.11b/g rate decodes unannounced.
 ///
 /// The price is sensitivity, roughly 10 dB against 1 Mbps, which a fleet sharing a
 /// car has at the 2 dBm default (`plan::DEFAULT_TX_POWER_QUARTER_DBM`): on the bench, a C5 and a C6

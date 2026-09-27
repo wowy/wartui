@@ -8,8 +8,8 @@
 use std::collections::BTreeSet;
 
 use wartui_proto::plan::{
-    ChannelPool, ChannelSet, IndexRun, Job, MAX_NODES, NODE_STAGGER_WINDOW_MS, NUM_SCAN_CHANNELS,
-    Radio, SCAN_CHANNELS, UNSUPPORTED_INDEX, is_five_ghz, plan, plan_for, stagger_offset_ms,
+    ChannelPool, ChannelSet, IndexRun, Job, MAX_NODES, NUM_SCAN_CHANNELS, Radio, SCAN_CHANNELS,
+    UNSUPPORTED_INDEX, is_five_ghz, plan, plan_for,
 };
 
 const POOLS: [ChannelPool; 3] = [ChannelPool::Us, ChannelPool::Eu, ChannelPool::All];
@@ -126,8 +126,8 @@ fn planner_partitions_channels_without_overlap_when_dividing_pool() {
 
 #[test]
 fn planner_assigns_contiguous_unique_indices_when_planning_fleet() {
-    // node_index drives the transmit stagger slot, so it must not restart per
-    // run — two nodes sharing an index would key up simultaneously.
+    // node_index reports the node's slot, so it must not restart per run — two
+    // nodes sharing an index would report the same slot in the fleet table.
     for pool in POOLS {
         for nodes in FLEET_SIZES {
             let p = plan(pool, nodes).expect("valid fleet size");
@@ -235,7 +235,7 @@ fn planner_distributes_all_index_runs_to_nodes_when_channel_count_permits() {
 #[test]
 fn plan_encodes_fleet_metadata_into_admin_frame_when_generating_admin_msg() {
     // The planned count, not a live one: it must match the partition it came
-    // from, or a node joining in between computes its stagger slot wrongly.
+    // from, or a node joining in between reports the wrong slot in the fleet table.
     let p = plan(ChannelPool::Us, 5).expect("valid");
     for n in 0..5 {
         let admin = p.admin_for(n, 9, wartui_proto::air::ADMIN_FLAG_BLE, 8).expect("assigned");
@@ -252,9 +252,9 @@ fn plan_encodes_fleet_metadata_into_admin_frame_when_generating_admin_msg() {
 
 #[test]
 fn planner_assigns_empty_channel_set_when_node_holds_ble_flag() {
-    // Counted, because `node_index` and `node_count` are the fleet's stagger
-    // arithmetic rather than a census of who is sniffing: cut it out of the
-    // numbering and every other node's transmit slot moves.
+    // Counted, because `node_index` and `node_count` report the fleet's shape
+    // rather than a census of who is sniffing: cut it out of the numbering and
+    // every other node's reported slot moves.
     let fleet = [Job::Bluetooth, Job::Wifi(Radio::DualBand), Job::Wifi(Radio::DualBand)];
     let p = plan_for(ChannelPool::Us, &fleet).expect("a valid fleet");
 
@@ -440,24 +440,6 @@ fn planner_returns_none_when_fleet_size_is_zero_or_exceeds_max_nodes() {
     assert!(plan(ChannelPool::Us, u8::try_from(MAX_NODES).expect("fits") + 1).is_none());
     assert!(plan_for(ChannelPool::Us, &[]).is_none());
     assert!(plan_for(ChannelPool::Us, &[Job::Wifi(Radio::DualBand); MAX_NODES + 1]).is_none());
-}
-
-#[test]
-fn stagger_offset_ms_computes_slot_delay_when_given_node_index_and_count() {
-    // Verbatim expectations from `calculateNodeStaggerOffsetMs`.
-    assert_eq!(stagger_offset_ms(0, 1, NODE_STAGGER_WINDOW_MS), 0, "a lone node owns the channel");
-    assert_eq!(stagger_offset_ms(3, 3, NODE_STAGGER_WINDOW_MS), 0, "index outside the fleet");
-    assert_eq!(stagger_offset_ms(0, 4, NODE_STAGGER_WINDOW_MS), 0);
-    assert_eq!(stagger_offset_ms(1, 4, NODE_STAGGER_WINDOW_MS), 30);
-    assert_eq!(stagger_offset_ms(3, 4, NODE_STAGGER_WINDOW_MS), 90);
-    // Truncating division keeps the last slot strictly inside the window.
-    for count in 2..=u8::try_from(MAX_NODES).expect("fits") {
-        for index in 0..count {
-            assert!(
-                stagger_offset_ms(index, count, NODE_STAGGER_WINDOW_MS) < NODE_STAGGER_WINDOW_MS
-            );
-        }
-    }
 }
 
 #[test]

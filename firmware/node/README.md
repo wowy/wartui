@@ -9,11 +9,12 @@ It replaces the vendor firmware at
 web interface, SD card, display, buttons, fuel gauge, GPS, geofencing, uploads and dock mode did not
 come across at all, because a node in this fleet has no use for any of them.
 
-It shares no wire format with it either. A node broadcasts a 13-byte heartbeat once per completed
-sweep — or once per scan, on the node whose job is Bluetooth — since that is how a bridge discovers
-a node before either side knows the other's address. It unicasts a sighting batch at the end of each
-dwell or scan to whichever bridge last sent it an admin or clear frame, packed to fill the 250-byte
-ESP-NOW payload: a nine-byte header followed by one 12-plus-SSID record per newly-seen BSSID or
+It shares no wire format with it either. A node broadcasts a 13-byte heartbeat every 5 seconds once
+assigned, carrying a counter that tracks its completed sweeps — or scans, on the node whose job is
+Bluetooth — since a heartbeat is how a bridge discovers a node before either side knows the other's
+address. It unicasts a sighting batch at the end of each dwell or scan to whichever bridge last sent
+it an admin or clear frame, packed to fill the 250-byte ESP-NOW payload: a nine-byte header followed
+by one 12-plus-SSID record per newly-seen BSSID or
 advertiser, whose trailer carries a Passpoint network's roaming consortium identifiers, or a BLE
 advertiser's manufacturer identifier, when there are any. It accepts a 16-byte unicast assignment,
 and a 6-byte unicast clear that empties its dedup ring. All four sit behind wartui's own `WTUI` magic
@@ -31,9 +32,10 @@ the controller immutably, so a node holds both for the life of the program; `sca
 be torn down and rebuilt around every scan.
 
 **It is on the control channel far more often.** Nothing owns the radio, so the node returns to the
-control channel after _every_ dwell to report what it heard, and an assignment sent at any of those
-moments lands. The 100 ms window after a heartbeat is still honoured and the host's timing model is
-unchanged; it simply stops being the only chance.
+control channel after _every_ dwell to report what it heard and check for an assignment already
+waiting, not only after a heartbeat. A heartbeat opens a 100 ms window the host answers an
+assignment inside, once every 5 seconds rather than once a sweep — a missed window costs one more
+heartbeat interval, not the assignment, since the host re-sends on the next one.
 
 **An unassigned node waits rather than sweeping.** It parks on the control channel and heartbeats
 every second until it is told what to scan, and **collects nothing until then**. wartui's planner
@@ -41,8 +43,8 @@ answers the first heartbeat, so that lasts a single beat — the intended trade,
 before wondering where the first second of a capture went.
 
 **The node given the Bluetooth scan sweeps nothing.** It is dealt no channels and never leaves the
-control channel, so it is the one node an assignment can always reach; its whole cycle is one scan
-per second. § "Bluetooth is a whole node's job" has the rest.
+control channel, so it is the one node an assignment can always reach; it runs one scan after another,
+back to back. § "Bluetooth is a whole node's job" has the rest.
 
 **It forgets what it has reported in two cases.** An assignment that changes its channels or its
 Bluetooth flag empties the dedup ring, because the entries describe a neighbourhood it no longer
@@ -147,13 +149,13 @@ nothing to hand the antenna back to, so the conflict is arranged away rather tha
 which is worth one node's Wi-Fi coverage, and which node is an operator's decision rather than a
 property of whatever binary is on the board.
 
-The cycle is `plan::BLE_BEAT_MS` — one second — measured scan start to scan start rather than as a
-gap, so a busy room that overran is followed immediately by the next scan instead of pushing the
-cadence out. Inside it: a 500 ms scan, the controller off, the new advertisers reported, the transmit
-stagger, the heartbeat, and then whatever is left of the second spent holding the window open. A
-const-assert beside `SCAN_MS` in `src/ble.rs` keeps the scan and a full admin window inside the
-second; what is left over is the report burst's, and a burst that overruns costs the tail of one
-window rather than the assignment, because the core re-sends on the next heartbeat either way.
+One scan runs after another, back to back: the controller off, the new advertisers reported, and
+straight into the next scan, with no deadline of its own. A `plan::ASSIGNED_BEAT_MS` timer runs
+alongside, independent of the scan cadence: when it comes due, this node's next dwell-free pass
+sends a heartbeat and holds a full admin window open before resuming scans. A const-assert beside
+`SCAN_MS` in `src/ble.rs` keeps a scan shorter than that timer, so it is always checked between
+scans; a scan that overran costs the tail of one window rather than the assignment, because the
+core re-sends on the next heartbeat either way.
 
 Two things keep the antenna where it belongs. The controller is told `HCI_LE_Set_Scan_Enable(0)` at
 the end of every scan rather than merely being waited on — an initialised host stack left behind a

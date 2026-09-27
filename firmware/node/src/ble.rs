@@ -19,9 +19,10 @@
 //! left behind a finished scan can keep the radio.
 //!
 //! And the node **sniffs no Wi-Fi at all** while it holds the scan, so there is no
-//! sweep for the scan to collide with: its cycle is one scan per
-//! [`wartui_proto::plan::BLE_BEAT_MS`], and the only thing that wants the antenna
-//! afterwards is that node's own heartbeat, which the scan is finished before.
+//! sweep for the scan to collide with: it runs one scan after another, back to
+//! back, and the only thing that wants the antenna is that node's own heartbeat —
+//! sent, at most once every [`wartui_proto::plan::ASSIGNED_BEAT_MS`], after a scan
+//! has finished rather than during one.
 //!
 //! There is no host stack. `esp-radio` exposes the controller as a raw HCI pipe and
 //! all this firmware wants is an address and a signal strength, so the packets are
@@ -37,20 +38,17 @@ use wartui_proto::hci::{
     AdvReport, PACKET_MAX, RESET, SCAN_UNIT_US, SET_EVENT_MASK, adv_reports, set_scan_enable,
     set_scan_parameters,
 };
-use wartui_proto::plan::{ADMIN_WAIT_MS, BLE_BEAT_MS, NODE_STAGGER_WINDOW_MS};
+use wartui_proto::plan::ASSIGNED_BEAT_MS;
 
 /// How long one scan listens.
 pub const SCAN_MS: u32 = 500;
 
-// The whole of the cycle `main.rs` runs, in order: the scan, the stagger this node
-// waits out before its heartbeat, and the window it then holds open. The stagger
-// belongs here even though only the last node in the fleet waits the whole of it —
-// the bound has to hold for that node too, and a scan long enough to eat it would
-// leave `remaining_ms` at zero and stretch the cycle past `BLE_BEAT_MS`, which is
-// the cadence the host reads as proof the assignment landed.
+// A scan runs back to back with the next regardless of the heartbeat, so the only
+// thing that would be wrong is a scan long enough to swallow a whole heartbeat
+// interval and never let the deadline be checked between scans.
 const _: () = assert!(
-    SCAN_MS + NODE_STAGGER_WINDOW_MS + ADMIN_WAIT_MS <= BLE_BEAT_MS,
-    "a Bluetooth node's cycle must fit a whole scan, its stagger and a whole admin window"
+    SCAN_MS < ASSIGNED_BEAT_MS,
+    "a scan must finish inside one heartbeat interval, or the beat deadline is never checked"
 );
 
 /// Distinct advertisers one sweep will hold.
@@ -62,9 +60,9 @@ const _: () = assert!(
 /// number sits well clear of the measurement rather than just above it.
 ///
 /// It is also the ceiling on the burst: `report_ble` broadcasts one frame per *new*
-/// advertiser, immediately before the stagger, the heartbeat and the admin window,
-/// and "new" is most of a sweep. So this is the worst-case delay standing between
-/// the last dwell and the window the node has to be listening in.
+/// advertiser, before the next scan starts, and "new" is most of a sweep. So this
+/// is the worst-case delay standing between one scan ending and the next one
+/// starting.
 ///
 /// The ring lives in a `static`, the way `sniff` holds its sightings, because a
 /// report stopped being seven bytes when the sighting wire started carrying the
