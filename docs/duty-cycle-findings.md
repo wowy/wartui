@@ -68,3 +68,39 @@ of the share. At one beat every 5 s it is about 2% of the node's time at any fle
 sniffing is bounded by the hop cost alone: about 96% of a dwell-plus-hop. The price is
 latency: an assignment waits up to one interval for its window, where it now waits up to
 one sweep.
+
+## The change on the bench
+
+Measured on 2026-09-27 with the 5 s heartbeat build (`ASSIGNED_BEAT_MS`) on a XIAO C6 bridge
+`00:08` with an external antenna and two C5 nodes, `0A:28` and `7E:3C`, all on one desk. The
+capture ran 20 minutes with `--record-raw`, with both nodes' serial logs read alongside. In turn
+it covered: Wi-Fi only; `0A:28` given the Bluetooth scan and then relieved of it; `7E:3C` held
+in its ROM bootloader (`espflash board-info --after no-reset`) past the 60 s timeout, then reset.
+
+| phase | node | share | heartbeat gap, mean (range) | sweep period, from counters | `beat` shown |
+| --- | --- | --- | --- | --- | --- |
+| Wi-Fi only, 10 min | 0A:28 | 21 ch | 4999 ms (4881–5028) | 2754 ms | 2.8 s |
+| | 7E:3C | 20 ch | 5000 ms (4885–5046) | 2642 ms | 2.5 s |
+| Bluetooth on 0A:28, 5 min | 0A:28 | scan | 4997 ms (4707–5254) | 524 ms | 525 ms |
+| | 7E:3C | 41 ch | 5083 ms, one beat lost | 5351 ms | 5.0 s |
+| 7E:3C offline | 0A:28 | 41 ch | 4897–5026 ms | 5496 ms | 5.0 s |
+
+- Heartbeats kept their interval with no drift. Each gap stayed within one dwell (sweeping) or
+  one scan (Bluetooth) of 5 s, which is how often each checks the deadline. 3 of 483 heartbeats
+  were lost.
+- A sweep costs about 131 ms a channel with the window amortised in: a dwell, the hop, and
+  100 ms of window every 5 s.
+- The Bluetooth node scanned every ~514 ms, 613 scans in its log. Its batches come as often as
+  it hears a new advertiser, so the median gap is 2.7 s, but the shortest are one scan apart.
+- Each of the nine assignments was sent on the heartbeat that made it due, acknowledged first
+  time, and delivered 1–3 ms after it was created. A keypress re-cut was adopted by both nodes
+  2.4–4.2 s later. The offline node's share went to `0A:28` 63 s after it went quiet. Once reset,
+  it was dealt its share 1.6 s after boot through its idle beat, and `0A:28` got its own at the
+  next heartbeat, 3.4 s after that.
+- Every record either node logged was stored. On `0A:28` that is 281 Wi-Fi and 184 Bluetooth, in
+  both the log and the store. The node's `unacked` count stayed at 0 throughout.
+- `beat` measures a sweep period longer than the heartbeat interval: 5.0 s shown for a 5.5 s
+  sweep, against the ~5.0 s it would read if the gaps with no counter step were dropped. The
+  span over five intervals is coarse, though: it is off by up to one sweep across ~25 s, so
+  about 10% at 2.6 s sweeps and 10–20% at 5 s ones. #97 replaces the column with the node's own
+  report of the epoch it holds.
