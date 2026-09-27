@@ -1,10 +1,11 @@
 //! A simulated fleet, so the engine and the TUI can be built without hardware.
 //!
 //! The fake nodes behave the way the real firmware does, including the inconvenient
-//! parts — parking until told what to scan, heartbeating once per completed sweep,
-//! scanning Bluetooth and nothing else when that is the node's job, staggering,
-//! adopting only on a differing epoch, and suppressing a BSSID through the same
-//! [`DedupRing`] the firmware links, on node time scaled by [`SimConfig::speed`].
+//! parts — parking until told what to scan, heartbeating on a timer independent of
+//! how often they sweep, scanning Bluetooth and nothing else when that is the
+//! node's job, adopting only on a differing epoch, and suppressing a BSSID through
+//! the same [`DedupRing`] the firmware links, on node time scaled by
+//! [`SimConfig::speed`].
 //! That last one matters most: it is why a real fleet's observation stream thins to a
 //! trickle after the first pass, and a simulator that streamed endlessly would teach
 //! the wrong lesson. Simulated signal is fixed per network, so only the refresh ever
@@ -30,8 +31,8 @@ use wartui_proto::link::{
     Panel, ResetCause, SendStatus,
 };
 use wartui_proto::plan::{
-    ADMIN_WAIT_MS, BLE_BEAT_MS, CHANNEL_DWELL_MS, ChannelSet, IDLE_BEAT_MS, NODE_STAGGER_WINDOW_MS,
-    NUM_SCAN_CHANNELS, SCAN_CHANNELS,
+    ADMIN_WAIT_MS, ASSIGNED_BEAT_MS, CHANNEL_DWELL_MS, ChannelSet, IDLE_BEAT_MS, NUM_SCAN_CHANNELS,
+    SCAN_CHANNELS,
 };
 
 use crate::{BridgeInfo, LinkEvent, LinkHandle, TransportError, link_pair};
@@ -52,8 +53,9 @@ pub struct SimConfig {
     /// one node holding the Bluetooth assignment. BLE addresses rotate for privacy,
     /// so these never dedup and keep the stream alive.
     ///
-    /// Per scan rather than per dwell, because such a node dwells on nothing: its
-    /// whole second is one scan, and it has [`ADVERTISERS_PER_SCAN`] slots in it.
+    /// Per scan rather than per dwell, because such a node dwells on nothing: it
+    /// runs one scan after another, and each has [`ADVERTISERS_PER_SCAN`] slots
+    /// in it.
     ///
     /// A rate rather than a model; what is faithful is *who* emits these, so a
     /// fleet where nobody was asked reports no Bluetooth at all.
@@ -106,10 +108,15 @@ impl Default for SimConfig {
 /// [`SimConfig::ble_chance`].
 ///
 /// A scan and not a dwell: the node holding the Bluetooth assignment sniffs no Wi-Fi,
-/// so its whole second is one scan, and one advertiser a second would be a trickle
+/// so it runs one scan after another, and one advertiser a scan would be a trickle
 /// where an ordinary room is a stream — a real scan hears about fifty
 /// (`docs/phase-1-findings.md`), most of them addresses it has never seen.
 const ADVERTISERS_PER_SCAN: usize = 12;
+
+/// How long one simulated Bluetooth scan holds the antenna, mirroring
+/// `firmware/node/src/ble.rs`'s `SCAN_MS`. Simulated time rather than wall time, so
+/// the fake scan costs nothing but a tick of the paused clock.
+const SCAN_MS: u32 = 500;
 
 /// What a heartbeat's admin window delivers to a simulated node.
 ///
@@ -341,10 +348,17 @@ struct SimNode {
     /// Whether its radio reaches 5 GHz. Announced in every heartbeat, and the
     /// planner's only reason to treat one node differently from another.
     five_ghz: bool,
+    /// Counts completed sweeps — or scans, for the node holding Bluetooth — the
+    /// same way the firmware's does: on the sweep or scan completing, whether or
+    /// not a heartbeat goes out then.
     hb_counter: u32,
+    /// When this node next sends a heartbeat and holds the admin window open.
+    /// `None` while parked. Set fresh every time an assignment is adopted
+    /// while parked, not only the first, so a stale deadline from before this
+    /// node last parked never fires early.
+    next_beat: Option<tokio::time::Instant>,
     /// This node's next sighting batch counter, mirroring `Node::seq` on the
-    /// firmware: it advances only once a batch actually goes out, the same
-    /// rule the heartbeat counter follows.
+    /// firmware: it advances only once a batch actually goes out.
     seq: u16,
     seen: Box<DedupRing>,
     /// When this node booted, on tokio's clock so a paused test controls it.
@@ -366,7 +380,10 @@ impl SimNode {
             // fleet's work.
             channels: ChannelSet::empty(),
             holds_ble,
-            hb_counter: 0,
+            // 1, not 0, matching the firmware's `Node::new`: the counter is never
+            // zero, so a fresh node's first heartbeat already carries a value.
+            hb_counter: 1,
+            next_beat: None,
             seq: 0,
             seen: Box::default(),
             boot: tokio::time::Instant::now(),
@@ -449,24 +466,37 @@ async fn run_node(
         if !node.assigned() {
             // Parked on the control channel, reachable throughout and collecting
             // nothing. Heartbeat first and listen after, because the host only
-            // transmits in answer to one — so this is how long joining takes.
-            if beat(&events, &mut node, started).await.is_err() {
+            // transmits in answer to one — so this is how long joining takes. One
+            // idle beat is this node's whole cycle, so the counter advances here too.
+            if beat(&events, &node, started).await.is_err() {
                 return;
             }
+            node.hb_counter = node.hb_counter.wrapping_add(1);
             if nap(scaled(u64::from(IDLE_BEAT_MS), speed), &mut admin_rx, &mut node)
                 .await
                 .is_break()
             {
                 return;
             }
+            // An assignment adopted mid-nap, or moving from parked to assigned
+            // generally: this node has just heartbeated, so its next one is a
+            // whole interval out from here rather than immediate — set every
+            // time, since a stale deadline from before this node last parked
+            // would otherwise fire on the very next dwell.
+            if node.assigned() {
+                node.next_beat =
+                    Some(tokio::time::Instant::now() + scaled(u64::from(ASSIGNED_BEAT_MS), speed));
+            }
             continue;
         }
 
-        // Bluetooth is a whole node's job, so this one dwells on nothing: one scan
-        // per BLE_BEAT_MS, scan start to scan start, and what is left of the second
-        // after the reports and the heartbeat is the window it answers in.
+        // Bluetooth is a whole node's job, so this one dwells on nothing: it runs
+        // one scan after another, and its counter advances once a scan, regardless
+        // of whether a heartbeat goes out on this pass.
         if node.bluetooth_only() {
-            let cycle = tokio::time::Instant::now() + scaled(u64::from(BLE_BEAT_MS), speed);
+            if nap(scaled(u64::from(SCAN_MS), speed), &mut admin_rx, &mut node).await.is_break() {
+                return;
+            }
             let mut writer = SightingBatchWriter::new(node.seq);
             for _ in 0..ADVERTISERS_PER_SCAN {
                 if node.rng.next_f64() >= world.ble_chance {
@@ -488,32 +518,29 @@ async fn run_node(
             if flush_batch(&events, &mut node, &writer, started).await.is_err() {
                 return;
             }
-            let stagger = u64::from(wartui_proto::plan::stagger_offset_ms(
-                node.node_index,
-                node.node_count,
-                NODE_STAGGER_WINDOW_MS,
-            ));
-            if nap(scaled(stagger, speed), &mut admin_rx, &mut node).await.is_break() {
-                return;
-            }
-            if beat(&events, &mut node, started).await.is_err() {
-                return;
-            }
-            // To the deadline rather than for a duration, so a busy second leaves
-            // little here and the next scan starts at once — but never less than a
-            // whole admin window, which is the floor the firmware holds too. Without
-            // it a node whose reports outran the deadline would loop with no window
-            // and, on a lone node, no sleep at all.
-            let window = tokio::time::Instant::now() + scaled(u64::from(ADMIN_WAIT_MS), speed);
-            if nap_until(cycle.max(window), &mut admin_rx, &mut node).await.is_break() {
-                return;
+            node.hb_counter = node.hb_counter.wrapping_add(1);
+            if let Some(deadline) = node.next_beat
+                && tokio::time::Instant::now() >= deadline
+            {
+                if beat(&events, &node, started).await.is_err() {
+                    return;
+                }
+                if nap(scaled(u64::from(ADMIN_WAIT_MS), speed), &mut admin_rx, &mut node)
+                    .await
+                    .is_break()
+                {
+                    return;
+                }
+                node.next_beat = Some(next_beat_after(deadline, speed));
             }
             continue;
         }
 
-        // A node walks its assigned channels one per step, so the
-        // sweep — and therefore the heartbeat period — is proportional to how
-        // many channels it was given.
+        // A node walks its assigned channels one per step, checking the beat
+        // deadline after each — mirroring the firmware's return to the control
+        // channel after every dwell — so the sweep, and therefore the counter, is
+        // proportional to how many channels it was given regardless of how the
+        // heartbeat timer lines up against it.
         for idx in node.channels.indices() {
             if nap(dwell, &mut admin_rx, &mut node).await.is_break() {
                 return;
@@ -537,35 +564,44 @@ async fn run_node(
             if flush_batch(&events, &mut node, &writer, started).await.is_err() {
                 return;
             }
+            if let Some(deadline) = node.next_beat
+                && tokio::time::Instant::now() >= deadline
+            {
+                if beat(&events, &node, started).await.is_err() {
+                    return;
+                }
+                if nap(scaled(u64::from(ADMIN_WAIT_MS), speed), &mut admin_rx, &mut node)
+                    .await
+                    .is_break()
+                {
+                    return;
+                }
+                node.next_beat = Some(next_beat_after(deadline, speed));
+            }
         }
-
-        // Stagger, then heartbeat, then hold the admin window open.
-        let stagger = u64::from(wartui_proto::plan::stagger_offset_ms(
-            node.node_index,
-            node.node_count,
-            NODE_STAGGER_WINDOW_MS,
-        ));
-        if nap(scaled(stagger, speed), &mut admin_rx, &mut node).await.is_break() {
-            return;
-        }
-
-        if beat(&events, &mut node, started).await.is_err() {
-            return;
-        }
-
-        if nap(scaled(u64::from(ADMIN_WAIT_MS), speed), &mut admin_rx, &mut node).await.is_break() {
-            return;
-        }
+        // A completed sweep, whether or not a heartbeat went out along the way.
+        node.hb_counter = node.hb_counter.wrapping_add(1);
     }
 }
 
-/// Broadcast one heartbeat and advance the counter.
+/// Push a heartbeat deadline forward by one [`ASSIGNED_BEAT_MS`], never behind
+/// now — the same rule the firmware's `next_beat_after` holds, so a stalled node
+/// catching up does not fire a burst of overdue beats.
+fn next_beat_after(deadline: tokio::time::Instant, speed: f64) -> tokio::time::Instant {
+    let next = deadline + scaled(u64::from(ASSIGNED_BEAT_MS), speed);
+    let now = tokio::time::Instant::now();
+    if next <= now { now + scaled(u64::from(ASSIGNED_BEAT_MS), speed) } else { next }
+}
+
+/// Broadcast one heartbeat, carrying the node's current counter.
+///
+/// The counter tracks completed sweeps or scans on its own, so it advances
+/// whether or not this call goes out; this only ever reads it.
 async fn beat(
     events: &mpsc::Sender<LinkEvent>,
-    node: &mut SimNode,
+    node: &SimNode,
     started: Instant,
 ) -> Result<(), ()> {
-    node.hb_counter = node.hb_counter.wrapping_add(1);
     // Capabilities are what tell the host this is a node it can drive, so a fleet
     // without them is a fleet the planner ignores. Bluetooth is always claimed; the
     // band is not, because a fleet where everything reaches 5 GHz never makes the
@@ -591,9 +627,7 @@ async fn nap(
 
 /// Sleep until a deadline, adopting any assignment that arrives meanwhile.
 ///
-/// The primitive [`nap`] is a wrapper over, because a Bluetooth node's cycle is a
-/// deadline rather than a duration: what is left of its second after the scan and the
-/// heartbeat is whatever is left, and a scan that overran leaves nothing.
+/// The primitive [`nap`] is a wrapper over.
 async fn nap_until(
     deadline: tokio::time::Instant,
     admin_rx: &mut mpsc::Receiver<SimCommand>,

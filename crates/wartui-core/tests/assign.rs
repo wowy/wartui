@@ -1,20 +1,23 @@
 //! The Phase 4 milestone, run against a simulated fleet.
 //!
-//! A node heartbeats once per completed sweep and reports nothing at all about
-//! what it is scanning, so the only evidence available that an assignment was
-//! *adopted* — rather than merely acknowledged — is that the node's heartbeat
-//! period changed. Nothing but the planner decides what a node holds, and the
-//! only thing that moves a share is how many nodes there are to share with: a
-//! fleet of one takes the whole pool, and a fleet of ten takes a tenth each.
-//! Their sweep periods should differ by about that ratio.
+//! A node's heartbeat carries a counter that advances once per completed sweep,
+//! and reports nothing else at all about what it is scanning, so the only
+//! evidence available that an assignment was *adopted* — rather than merely
+//! acknowledged — is that the node's sweep period, derived from that counter,
+//! changed. Nothing but the planner decides what a node holds, and the only
+//! thing that moves a share is how many nodes there are to share with: a fleet
+//! of one takes the whole pool, and a fleet of ten takes a tenth each. Their
+//! sweep periods should differ by about that ratio.
 //!
 //! This is the same check to make against real hardware, at real speed: bring a
 //! second node up and watch the first one's `beat` halve. The simulator makes it
 //! a test rather than an evening.
 //!
-//! The period is a median over the last [`BEAT_WINDOW`] gaps and is not reset on a
-//! new range, so every measurement here waits out a whole window of beats *counted
-//! from the assignment it is measuring*.
+//! The period is a span over the last [`BEAT_WINDOW`] heartbeat intervals — the
+//! window holds one more sample than that — and is not reset on a new range, so
+//! every measurement here waits out a whole `BEAT_WINDOW + 1` heartbeats,
+//! *counted from the assignment it is measuring*, before every sample in the
+//! span belongs to it.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -111,13 +114,13 @@ async fn sweep(path: &Path, nodes: u8) -> (ChannelSet, u32) {
     let channels = first.state.confirmed.expect("a share").channels;
     let mac = first.state.mac;
 
-    // A whole window of sweeps, counted from the beat that opened the admin
-    // window: a median with any idle beat left in it reports the parked node's
-    // 17 ms. How many there were is not a fixed number to skip, since nothing
-    // goes out until a heartbeat opens a window.
-    let window = u64::try_from(BEAT_WINDOW).expect("a five-deep window fits in a u64");
+    // BEAT_WINDOW + 1, because that is how many samples the span's window
+    // holds: waiting out that many fresh heartbeats is what flushes every
+    // sample from before this share — the parked beat, or an earlier one —
+    // out of it.
+    let window = u64::try_from(BEAT_WINDOW + 1).expect("a six-deep window fits in a u64");
     let before = first.state.heartbeats;
-    let swept = until(&snapshot_rx, "a full window of sweeps of the new share", |s| {
+    let swept = until(&snapshot_rx, "a full window of heartbeats of the new share", |s| {
         s.nodes.first().is_some_and(|n| n.state.heartbeats >= before + window)
     })
     .await;

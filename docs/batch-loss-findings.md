@@ -97,14 +97,18 @@ all of it, with the same six nodes (`10:D0` on Bluetooth) and the C6 bridge `9D:
   drive. The air was no kinder: heartbeats, which still broadcast, lost 3.3% against
   2.7%.
 - 544 batches arrived twice under the same `seq`:
-  - 362 were byte-identical and about 4 ms apart: the radio retransmitting after a
-    lost ack. ESP-NOW on the bridge passes both copies up, so the host stored the
-    same records twice: 1,152 observation rows repeat one stored within 50 ms,
-    2.9% of the drive. 361 of the 362 arrived within 100 ms of the original; one came
-    seconds later, which is a node re-sending the same addresses at the same RSSI
-    after an unacknowledged send, not a retry. The engine now drops a batch that
-    repeats its node's last `seq` and bytes within 150 ms by the bridge's own
-    clock, which a node's next report cannot beat.
+  - 362 were byte-identical: 361 were the radio retransmitting after a lost ack,
+    about 4 ms apart and so within 100 ms of the original every time. ESP-NOW on
+    the bridge passes both copies up, so the host stored the same records twice:
+    1,152 observation rows repeat one stored within 50 ms, 2.9% of the drive.
+    Every retry on the drive landed within 100 ms, so a 100 ms window drops none
+    of them. The 362nd came seconds later, which is a node re-sending the same
+    addresses at the same RSSI after an unacknowledged send, not a retry. The
+    engine at the time dropped a batch that repeats its node's last `seq` and
+    bytes within 150 ms by the bridge's own clock, which a node's next report
+    could not beat. The window narrowed to 100 ms when heartbeats moved to a 5 s
+    interval and a sweep no longer carries an admin window
+    (`docs/duty-cycle-findings.md`).
   - 182 reused the number with different records: every retry of a batch that did
     arrive went unacknowledged, so the node kept its `seq` and sent those addresses
     again later. Those are recorded.

@@ -93,9 +93,9 @@ Four host crates, strictly layered, plus firmware that shares the bottom one.
   looking and can hold `sniffer()` and `esp_now()` at once (both borrow the controller
   immutably; `scan_async` wants `&mut`). Returns to the control channel after every dwell,
   and parks there doing nothing when it holds no assignment. The node given the Bluetooth
-  scan never leaves the control channel at all: it sniffs nothing and its whole cycle is
-  one scan per `plan::BLE_BEAT_MS`. Same rule as the bridge: the logic lives in
-  `wartui-proto`, and this crate is the conversation with the radio.
+  scan never leaves the control channel at all: it sniffs nothing and runs one scan after
+  another, back to back. Same rule as the bridge: the logic lives in `wartui-proto`, and
+  this crate is the conversation with the radio.
 
 ### The engine/runtime split is load-bearing
 
@@ -181,8 +181,8 @@ is here rather than only in a `//!`.
   wrote them.
 - **The planner is the only author of an assignment.** There is no operator override, no mode and
   no flag: `FleetEngine::replan` decides what every node scans and nothing else writes a node's
-  `desired`. That is what lets the fleet table, the store and the stagger arithmetic read a node's
-  share as the plan's without asking who put it there. `Command::AssignBle` is the one operator
+  `desired`. That is what lets the fleet table and the store read a node's share as the plan's
+  without asking who put it there. `Command::AssignBle` is the one operator
   decision, and it is an *input* to the planner rather than an exception to it: it names the node
   whose job is Bluetooth, and the planner is what deals that node nothing and hands its share
   round. So moving the scan re-cuts the whole pool, and `replan` — not `reissue` — is what
@@ -203,8 +203,8 @@ is here rather than only in a `//!`.
   callback), never on a successful enqueue.
 - **A node adopts an assignment only when the epoch/version differs** from the one it holds, so
   re-sending an identical one is acknowledged and silently discarded. `node_index`/`node_count`
-  travel in every assignment and drive each node's transmit stagger, so every fleet change re-cuts
-  the whole plan, not just the affected node.
+  travel in every assignment, reporting the node's slot and the fleet size the plan was cut for,
+  so every fleet change re-cuts the whole plan, not just the affected node.
 - **`IndexRun` describes a *pool*, never the shape of an assignment.** An assignment is a
   `ChannelSet` naming any subset of `SCAN_CHANNELS`, so the planner flattens the pool and deals
   round-robin rather than steering around run boundaries. The plan has no phases and no timer; it
@@ -247,8 +247,9 @@ edit stops; follow the pointer before changing the rule.
 - **At most one node scans Bluetooth, by default none does, and it is that node's whole job.**
   `ADMIN_FLAG_BLE` is an operator's decision, not a property of the flashed firmware. The node
   holding it is dealt no channels and is counted in `node_count` anyway, because `node_index` and
-  `node_count` are the stagger's arithmetic rather than a census of who is sniffing. An empty
-  `ChannelSet` is sent only with the flag beside it; without it, a node told to scan nothing parks
+  `node_count` report the node's slot and the fleet size the plan was cut for, rather than a census
+  of who is sniffing. An empty `ChannelSet` is sent only with the flag beside it; without it, a
+  node told to scan nothing parks
   while the host believes it is sweeping, and `Plan::admin_for` refuses to build that frame.
   → `crates/wartui-proto/src/plan.rs`, `Job` / `Plan::channels_for` / `admin_for`;
   `crates/wartui-core/src/engine.rs`, `Command::AssignBle` / `on_assign_ble` / `replan`;

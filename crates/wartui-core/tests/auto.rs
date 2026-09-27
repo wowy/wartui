@@ -114,14 +114,15 @@ async fn auto_partitioner_converges_on_us_pool_partition_when_fleet_joins() {
         })
         .collect();
     slots.sort_unstable();
-    // The stagger slot is computed from these, so two nodes
-    // sharing an index would key up on top of each other.
+    // node_index and node_count report the fleet the plan was cut for, so two
+    // nodes sharing an index would report the same slot in the fleet table.
     assert_eq!(slots, (0..6).map(|i| (i, 6)).collect::<Vec<_>>());
 
-    // A node adopts mid-sweep but finishes the sweep it is on, so give each a couple
-    // of clear sweeps before believing what it reports.
+    // A node adopts mid-sweep but finishes the sweep it is on, and heartbeats keep
+    // arriving on their own timer regardless, so give each a few heartbeat
+    // intervals — many sweeps at this share — before believing what it reports.
     let beats: Vec<u64> = settled.nodes.iter().map(|n| n.state.heartbeats).collect();
-    until(&snapshot_rx, "two clear sweeps on the new assignments", |s| {
+    until(&snapshot_rx, "several heartbeat intervals on the new assignments", |s| {
         s.nodes.iter().zip(&beats).all(|(n, before)| n.state.heartbeats >= before + 3)
             && s.tail.iter().filter(|e| e.kind == RecordKind::Wifi).count() >= 20
     })

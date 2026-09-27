@@ -176,18 +176,20 @@ share. `b` changes the set rather than the shares — see § "Bluetooth". The he
 what it has to work with: `auto — 4 of 5` for four heartbeating nodes out of five seen.
 
 Nothing goes out at the moment a node's share changes. Its radio is away scanning some other channel
-for all but the 100 ms it holds open after its own heartbeat, so the assignment waits for that
-window — the `channels` column reads `1: 1…` until it lands, then drops the ellipsis. On a full
-sweep of the default pool that is up to about five seconds, and four and a half on `us`. That delay
-is the protocol, not lag.
+for all but the 100 ms it holds open once every 5 seconds, so the assignment waits for that
+window — the `channels` column reads `1: 1…` until it lands, then drops the ellipsis. That wait is
+up to 5 seconds, the heartbeat interval, rather than a sweep. That delay is the protocol, not lag.
 
 That column leads with a count because a share dealt round-robin is a dozen scattered channels and
 no sane column is wide enough for all of them. The count is the useful half anyway: it is what the
-`beat` column should be proportional to. Bringing a second node up halves the first one's share, and
-its `beat` should halve with it within three sweeps — the only evidence available that an assignment
-was adopted rather than merely acknowledged, since a node heartbeats once per completed sweep and
-reports nothing about what it is scanning. The Bluetooth node is the exception: it sweeps nothing,
-so its `beat` reads a flat 1.0 s, which is the same kind of evidence and proportional to nothing.
+`beat` column should be proportional to. `beat` is the node's sweep period, computed from the
+counter its heartbeat carries — not the heartbeat's own cadence, which is a fixed 5 seconds once
+assigned. It is a span over the last five heartbeat intervals rather than a single gap, so bringing
+a second node up halves the first one's share, and its `beat` should halve with it within about
+five heartbeat intervals — the only evidence available that an assignment was adopted rather than
+merely acknowledged, since a node reports nothing about what it is scanning. The
+Bluetooth node is the exception: it sweeps nothing, so its `beat` reads about one scan (~0.5 s),
+which is the same kind of evidence and proportional to nothing.
 
 An assignment is believed only when the node's own radio acknowledges it at the MAC layer, never
 when the bridge reports a successful enqueue.
@@ -209,7 +211,7 @@ It costs a whole node because the two radios share the one 2.4 GHz antenna, and 
 sweeps has to hand it back in time for every admin window it must answer in — which a stock node
 did not, acknowledging none of thirty-two assignments
 ([`docs/phase-2-findings.md`](../../docs/phase-2-findings.md)). A node with nothing else to do has
-nothing to hand it back to, so the scan runs **once a second** rather than once per sweep, and the
+nothing to hand it back to, so the scan runs **back to back** rather than "once a second", and the
 node's own transmits are the only thing it competes with.
 
 The fleet is one sniffer short while it does, and the pool is re-cut across the rest the moment the
@@ -262,11 +264,10 @@ rather than given to a node that would ignore them, and the footer says how many
 going unscanned.
 
 Every fleet change re-cuts the pool for the _whole_ fleet, not just the node that joined or left.
-`node_index` and `node_count` travel in every assignment and are what each node computes its
-transmit stagger from, so a fleet whose members disagree about the count keys up on top of itself.
-Each node takes its new share in its own next admin window, so a fleet converges in about one sweep.
-An unchanged fleet is left alone: a node adopts an assignment only when its epoch differs from the
-one it holds.
+`node_index` and `node_count` travel in every assignment, reporting the node's slot and the fleet
+size the plan was cut for. Each node takes its new share in its own next admin window, so a fleet
+converges within one heartbeat interval. An unchanged fleet is left alone: a node adopts an
+assignment only when its epoch differs from the one it holds.
 
 Two consequences worth knowing:
 
@@ -392,9 +393,9 @@ node's own five-minute refresh reports them again. The footer's `lost N` is the 
 across the fleet, and appears only once something has been.
 
 The footer's `dup N` is different: batches dropped because they are the same `seq`,
-byte-identical to the one just before them, and arrived within 150 ms of it — a node's radio
+byte-identical to the one just before them, and arrived within 100 ms of it — a node's radio
 retransmitting after the bridge's ack was lost rather than anything missing. A batch that
-repeats the same seq and bytes 150 ms or more later is the node's own re-send after a failed
+repeats the same seq and bytes 100 ms or more later is the node's own re-send after a failed
 send, and is recorded like any other. Its observations were already recorded from the first
 copy, so nothing here is hidden and nothing is lost — `dup` and `lost` never count the same
 batch.

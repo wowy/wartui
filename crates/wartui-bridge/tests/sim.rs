@@ -4,13 +4,16 @@
 //! completes instantly and deterministically.
 
 use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
 use tokio::time::Instant;
 use wartui_bridge::sim::{SimConfig, SimTransport};
 use wartui_bridge::{LinkEvent, LinkHandle};
 use wartui_proto::air::{AdminMsg, ClearMsg, Frame, HeartbeatMsg, RecordKind};
 use wartui_proto::link::{BridgeToHost, EspNowPayload, HostToBridge, Mac, SendStatus};
-use wartui_proto::plan::{BLE_BEAT_MS, ChannelPool, ChannelSet, IndexRun};
+use wartui_proto::plan::{
+    ASSIGNED_BEAT_MS, CHANNEL_DWELL_MS, ChannelPool, ChannelSet, IDLE_BEAT_MS, IndexRun,
+};
 
 /// The next node → core frame, as (source, the bytes it arrived as).
 ///
@@ -44,6 +47,20 @@ async fn next_heartbeat_from(link: &mut LinkHandle, want: Mac) -> Instant {
         let (src, raw) = next_frame(link).await;
         if src == want && heartbeat_of(&raw).is_some() {
             return Instant::now();
+        }
+    }
+}
+
+/// Wait for the next heartbeat from `want`, returning when it arrived and the
+/// counter it carried — the sweep-count proof, since a heartbeat's own cadence
+/// is fixed and carries none.
+async fn next_heartbeat_counter_from(link: &mut LinkHandle, want: Mac) -> (Instant, u32) {
+    loop {
+        let (src, raw) = next_frame(link).await;
+        if src == want
+            && let Some(heartbeat) = heartbeat_of(&raw)
+        {
+            return (Instant::now(), heartbeat.counter);
         }
     }
 }
@@ -252,16 +269,23 @@ async fn sim_node_generates_new_ble_sightings_when_advertiser_addresses_rotate()
 }
 
 #[tokio::test(start_paused = true)]
-async fn sim_node_heartbeats_at_ble_cadence_when_assigned_bluetooth_scan() {
-    // The cadence, at the default advertiser rate rather than a saturated room:
-    // BLE_BEAT_MS between heartbeats, where a sweeping node's period is its share.
+async fn sim_node_heartbeats_at_assigned_beat_when_holding_bluetooth_scan() {
+    // The heartbeat cadence is ASSIGNED_BEAT_MS, checked only between scans:
+    // firing one holds a 100 ms admin window open before the next scan can
+    // start, which delays the next check by that much. The schedule advances
+    // from the deadline rather than the fire time, so the lateness accumulates
+    // by one admin window every cycle and wraps once it passes a scan step —
+    // every gap stays within one scan step of ASSIGNED_BEAT_MS, and the mean
+    // over a whole wrap is exact.
+    const SIM_SCAN_MS: u128 = 500; // mirrors the sim's own scan length
+
     let config = SimConfig { node_count: 1, ..SimConfig::default() };
     let mut link = SimTransport::new(config).start().expect("starts");
     assign(&link, 1, ChannelSet::empty(), true);
 
     let mut beats = Vec::new();
     let mut ble = 0;
-    while beats.len() < 6 {
+    while beats.len() < 12 {
         let (_, raw) = next_frame(&mut link).await;
         match Frame::decode(&raw) {
             Ok(Frame::Heartbeat(_)) => beats.push(tokio::time::Instant::now()),
@@ -272,9 +296,18 @@ async fn sim_node_heartbeats_at_ble_cadence_when_assigned_bluetooth_scan() {
         }
     }
     let gaps: Vec<u128> = beats.windows(2).map(|pair| (pair[1] - pair[0]).as_millis()).collect();
+    // The first gap straddles the idle-to-assigned transition and is off the
+    // schedule; every gap after it is on it, across a full wrap of the cycle.
+    let checked = &gaps[1..];
     assert!(
-        gaps.iter().skip(1).all(|gap| *gap == u128::from(BLE_BEAT_MS)),
-        "scan start to scan start: {gaps:?}"
+        checked.iter().all(|gap| gap.abs_diff(u128::from(ASSIGNED_BEAT_MS)) <= SIM_SCAN_MS),
+        "every gap within one scan step of ASSIGNED_BEAT_MS: {gaps:?}"
+    );
+    let mean = checked.iter().sum::<u128>() / checked.len() as u128;
+    assert_eq!(
+        mean,
+        u128::from(ASSIGNED_BEAT_MS),
+        "no cumulative drift over a full wrap: {gaps:?}"
     );
     assert!(ble > 0, "and the default advertiser rate still produces some: {ble}");
 }
@@ -282,8 +315,8 @@ async fn sim_node_heartbeats_at_ble_cadence_when_assigned_bluetooth_scan() {
 #[tokio::test(start_paused = true)]
 async fn sim_node_reports_only_ble_sightings_when_holding_ble_flag() {
     // The point of the split: a fleet of one holding the scan sweeps nothing, so
-    // every sighting it produces is an advertiser and its beat is the scan cadence
-    // rather than a sweep.
+    // every sighting it produces is an advertiser, reported every scan rather than
+    // every sweep.
     let config = SimConfig { node_count: 1, ble_chance: 1.0, ..SimConfig::default() };
     let mut link = SimTransport::new(config).start().expect("starts");
     assign(&link, 1, ChannelSet::empty(), true);
@@ -331,32 +364,145 @@ async fn sim_node_parks_without_sightings_when_assigned_empty_channels_without_b
 
 #[tokio::test(start_paused = true)]
 async fn sim_node_accelerates_heartbeat_period_when_channel_range_is_narrowed() {
-    // How an assignment is confirmed with no access to the node's own console.
+    // How an assignment is confirmed with no access to the node's own console: the
+    // heartbeat arrives on a fixed timer, independent of the sweep, so the counter
+    // it carries is the proof. Dividing the gap between two heartbeats by the
+    // counter step gives the node's sweep period, the same arithmetic
+    // `NodeState::beat_period_ms` does.
     let config = SimConfig { node_count: 1, ble_chance: 0.0, ..SimConfig::default() };
     let mut link = SimTransport::new(config).start().expect("starts");
     let node = SimTransport::node_mac(0);
     assign(&link, 1, everything(), false);
 
-    // Skip the sweep that straddles the first assignment, then measure.
+    // Skip the heartbeat that straddles the first assignment, then measure two
+    // clean ones.
     next_heartbeat_from(&mut link, node).await;
-    let first = next_heartbeat_from(&mut link, node).await;
-    let second = next_heartbeat_from(&mut link, node).await;
-    let wide = second - first;
+    let (t1, c1) = next_heartbeat_counter_from(&mut link, node).await;
+    let (t2, c2) = next_heartbeat_counter_from(&mut link, node).await;
+    let wide = (t2 - t1).as_millis() / u128::from(c2 - c1);
 
     let mut one = ChannelSet::empty();
     one.insert(0);
     assign(&link, 2, one, false);
 
-    // Skip the sweep that straddles the change, then measure a clean one.
+    // Skip the heartbeat that straddles the change, then measure a clean pair.
     next_heartbeat_from(&mut link, node).await;
-    let a = next_heartbeat_from(&mut link, node).await;
-    let b = next_heartbeat_from(&mut link, node).await;
-    let narrow = b - a;
+    let (a1, ac1) = next_heartbeat_counter_from(&mut link, node).await;
+    let (a2, ac2) = next_heartbeat_counter_from(&mut link, node).await;
+    let narrow = (a2 - a1).as_millis() / u128::from(ac2 - ac1);
 
     assert!(
         narrow * 4 < wide,
-        "a one-channel node should heartbeat far faster: {narrow:?} vs {wide:?}"
+        "a one-channel node should sweep far faster: {narrow:?} vs {wide:?}"
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn sim_node_heartbeats_at_assigned_beat_when_sweeping() {
+    // A one-channel share sweeps many times inside one heartbeat interval: the
+    // beat is checked only between dwells, so firing one holds a 100 ms admin
+    // window open before the next dwell can start, which delays the next check
+    // by that much. The schedule advances from the deadline rather than the
+    // fire time, so the lateness accumulates by one admin window every cycle
+    // and wraps once it passes a dwell — every gap stays within one dwell of
+    // ASSIGNED_BEAT_MS, and the mean over a whole wrap is exact, while the
+    // counter climbs by many sweeps between any two beats.
+    let config = SimConfig { node_count: 1, ble_chance: 0.0, ..SimConfig::default() };
+    let mut link = SimTransport::new(config).start().expect("starts");
+    let node = SimTransport::node_mac(0);
+    let mut one = ChannelSet::empty();
+    one.insert(0);
+    assign(&link, 1, one, false);
+
+    let mut beats = Vec::new();
+    while beats.len() < 12 {
+        beats.push(next_heartbeat_counter_from(&mut link, node).await);
+    }
+    let gaps: Vec<u128> =
+        beats.windows(2).map(|pair| (pair[1].0 - pair[0].0).as_millis()).collect();
+    // The first gap straddles the idle-to-assigned transition and is off the
+    // schedule; every gap after it is on it, across a full wrap of the cycle.
+    let checked = &gaps[1..];
+    assert!(
+        checked
+            .iter()
+            .all(|gap| gap.abs_diff(u128::from(ASSIGNED_BEAT_MS)) <= u128::from(CHANNEL_DWELL_MS)),
+        "every gap within one dwell step of ASSIGNED_BEAT_MS: {gaps:?}"
+    );
+    let mean = checked.iter().sum::<u128>() / checked.len() as u128;
+    assert_eq!(
+        mean,
+        u128::from(ASSIGNED_BEAT_MS),
+        "no cumulative drift over a full wrap: {gaps:?}"
+    );
+
+    let (_, c1) = beats[1];
+    let (_, c2) = beats[2];
+    assert!(c2 - c1 > 1, "many sweeps complete inside one heartbeat interval: {c1} -> {c2}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn sim_node_waits_a_full_beat_when_reassigned_after_parking() {
+    // A stale `next_beat` left over from a share this node held before it
+    // parked must not fire on the very first dwell once it is reassigned.
+    let config = SimConfig { node_count: 1, ble_chance: 0.0, ..SimConfig::default() };
+    let mut link = SimTransport::new(config).start().expect("starts");
+    let node = SimTransport::node_mac(0);
+    let mut one = ChannelSet::empty();
+    one.insert(0);
+
+    assign(&link, 1, one, false);
+    // Let its next_beat deadline pass at least once while assigned, so it is
+    // well in the past by the time this node parks.
+    next_heartbeat_from(&mut link, node).await;
+    next_heartbeat_from(&mut link, node).await;
+
+    // An admin frame with no channels and no Bluetooth flag is the one thing
+    // the host never sends, and this node treats it as never having been told
+    // anything: it parks.
+    assign(&link, 2, ChannelSet::empty(), false);
+
+    // Drain idle heartbeats until a whole beat interval has passed while
+    // parked, so a stale deadline would be long overdue by the time this node
+    // is reassigned. Draining rather than sleeping blind is what keeps a
+    // backlog of idle beats from being mistaken for the first fresh one below.
+    let past_a_beat =
+        tokio::time::Instant::now() + Duration::from_millis(u64::from(ASSIGNED_BEAT_MS));
+    let mut last_idle_at = next_heartbeat_from(&mut link, node).await;
+    while tokio::time::Instant::now() < past_a_beat {
+        last_idle_at = next_heartbeat_from(&mut link, node).await;
+    }
+
+    assign(&link, 3, one, false);
+    let first = next_heartbeat_from(&mut link, node).await;
+    let gap = (first - last_idle_at).as_millis();
+    // At least a whole interval — the fix — never a mere dwell or admin window,
+    // which is what the stale-deadline bug produced. The idle beat already in
+    // flight when the reassignment lands can add up to one more IDLE_BEAT_MS,
+    // since it is not cut short.
+    assert!(
+        gap >= u128::from(ASSIGNED_BEAT_MS) && gap <= u128::from(ASSIGNED_BEAT_MS + IDLE_BEAT_MS),
+        "the first heartbeat after reassignment waits a full interval, not one dwell: {gap} ms"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn sim_node_advances_counter_once_per_scan_when_holding_bluetooth_scan() {
+    // The counter is the proof visible without serial access, and it should climb
+    // at a steady rate every heartbeat interval: one count per scan, not one per
+    // heartbeat.
+    let config = SimConfig { node_count: 1, ble_chance: 0.0, ..SimConfig::default() };
+    let mut link = SimTransport::new(config).start().expect("starts");
+    let node = SimTransport::node_mac(0);
+    assign(&link, 1, ChannelSet::empty(), true);
+
+    next_heartbeat_from(&mut link, node).await;
+    let (_, c1) = next_heartbeat_counter_from(&mut link, node).await;
+    let (_, c2) = next_heartbeat_counter_from(&mut link, node).await;
+    let (_, c3) = next_heartbeat_counter_from(&mut link, node).await;
+
+    assert!(c2 - c1 > 1, "several scans complete inside one heartbeat interval: {c1} -> {c2}");
+    assert_eq!(c2 - c1, c3 - c2, "a steady per-scan rate: {c1}, {c2}, {c3}");
 }
 
 #[tokio::test(start_paused = true)]

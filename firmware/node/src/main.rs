@@ -15,9 +15,9 @@
 //! never transmits on a DFS channel and can hold `sniffer()` and `esp_now()` at
 //! once; it returns to the control channel after every dwell rather than once a
 //! sweep; an unassigned node parks rather than sweeping the whole table; the node
-//! given the Bluetooth scan sniffs nothing and holds the control channel for its
-//! whole second; and every heartbeat says what this build can do. Its wire format
-//! is wartui's own in both directions — [`wartui_proto::air`].
+//! given the Bluetooth scan sniffs nothing and holds the control channel always;
+//! and every heartbeat says what this build can do. Its wire format is wartui's
+//! own in both directions — [`wartui_proto::air`].
 //!
 //! The runner is `espflash flash --monitor`, and unlike the bridge the monitor is
 //! worth watching: a node's USB endpoint carries nothing but diagnostics.
@@ -48,8 +48,8 @@ use wartui_proto::air::{
 };
 use wartui_proto::link::BROADCAST;
 use wartui_proto::plan::{
-    ADMIN_WAIT_MS, BLE_BEAT_MS, CHANNEL_DWELL_MS, CONTROL_CHANNEL, ChannelSet, IDLE_BEAT_MS,
-    NODE_STAGGER_WINDOW_MS, NUM_SCAN_CHANNELS, SCAN_CHANNELS, SweepCursor, stagger_offset_ms,
+    ADMIN_WAIT_MS, ASSIGNED_BEAT_MS, CHANNEL_DWELL_MS, CONTROL_CHANNEL, ChannelSet, IDLE_BEAT_MS,
+    NUM_SCAN_CHANNELS, SCAN_CHANNELS, SweepCursor,
 };
 
 #[cfg(feature = "ble")]
@@ -134,9 +134,9 @@ struct Node {
     /// The epoch of the assignment held. Zero means none has ever arrived, which
     /// the core never puts on the wire.
     version: u8,
-    /// Slot in the fleet-wide staggering order.
+    /// Slot in the fleet the plan was cut for.
     node_index: u8,
-    /// Fleet size the stagger is computed against.
+    /// Fleet size the plan was cut for.
     node_count: u8,
     /// Which [`SCAN_CHANNELS`] indices to dwell on, in ascending order.
     channels: ChannelSet,
@@ -144,9 +144,16 @@ struct Node {
     ble: bool,
     /// Where the sweep has got to in those indices.
     cursor: SweepCursor,
-    /// Monotonic from boot. Its going backwards is how the host notices a node
-    /// has restarted and forgotten its assignment.
+    /// Monotonic from boot, counting completed sweeps (a Bluetooth node's
+    /// completed scans, a parked node's idle beats). Its going backwards is how
+    /// the host notices a node has restarted and forgotten its assignment.
     counter: u32,
+    /// When this node next sends a heartbeat and holds the admin window open.
+    /// `None` while parked: an unassigned node heartbeats every
+    /// [`IDLE_BEAT_MS`] instead, with no deadline of its own. Set fresh every
+    /// time an assignment is adopted while parked, not only the first, so a
+    /// stale deadline from before this node last parked never fires early.
+    next_beat: Option<Instant>,
     reported: u32,
     /// This sighting batch's sequence number, advanced only once the core
     /// acknowledges a batch, as `counter` is only once [`heartbeat`] is on the
@@ -175,6 +182,7 @@ impl Node {
             ble: false,
             cursor: SweepCursor::new(),
             counter: 1,
+            next_beat: None,
             reported: 0,
             seq: 0,
             core: None,
@@ -381,16 +389,28 @@ fn main() -> ! {
             // first and listen afterwards, because the host only ever transmits
             // an assignment in answer to one — so this is how long joining a
             // fleet takes, and there is nothing to be gained by waiting first.
+            // One idle beat is this node's whole cycle, so the counter the
+            // heartbeat carries advances here too.
             //
             // Only heartbeat if the radio got there, for the reason the sweep
             // gives below. The listen runs either way: it is what keeps this
             // loop from spinning.
             if radio::park(&manager, &sniffer, CONTROL_CHANNEL, false) {
                 heartbeat(&mut sender, node, capabilities);
+                node.counter = node.counter.wrapping_add(1).max(1);
             } else {
                 note!("radio would not park on channel {}", CONTROL_CHANNEL);
             }
             listen(&manager, &receiver, node, IDLE_BEAT_MS);
+            // An assignment adopted mid-listen, or moving from parked to
+            // assigned generally: this node has just heartbeated and held a
+            // window, so its next one is a whole interval out from here
+            // rather than immediate — set every time, since a stale deadline
+            // from before this node last parked would otherwise fire early.
+            if node.assigned(scanning) {
+                node.next_beat =
+                    Some(Instant::now() + Duration::from_millis(u64::from(ASSIGNED_BEAT_MS)));
+            }
             continue;
         }
 
@@ -400,10 +420,8 @@ fn main() -> ! {
             // always reach, and the only thing the Bluetooth controller takes the
             // shared 2.4 GHz antenna from is this node's own heartbeat.
             //
-            // Scan start to scan start is `BLE_BEAT_MS`. The scan first, because
-            // the reports are what the heartbeat should be followed by; the window
-            // last, because that is the moment the core answers in.
-            let cycle = Instant::now() + Duration::from_millis(u64::from(BLE_BEAT_MS));
+            // One scan is this node's whole sweep, so the counter advances every
+            // time regardless of whether a heartbeat goes out on this pass.
             if radio::park(&manager, &sniffer, CONTROL_CHANNEL, false) {
                 // Always `Some` here: `scanning` is what put this node in this arm,
                 // and it is that scanner being there.
@@ -411,20 +429,23 @@ fn main() -> ! {
                 if let Some(scanner) = scanner.as_deref_mut() {
                     report_ble(&mut sender, node, scanner);
                 }
-                let stagger =
-                    stagger_offset_ms(node.node_index, node.node_count, NODE_STAGGER_WINDOW_MS);
-                if stagger > 0 {
-                    CurrentThreadHandle::get().delay(Duration::from_millis(u64::from(stagger)));
+                node.counter = node.counter.wrapping_add(1).max(1);
+                if let Some(deadline) = node.next_beat
+                    && Instant::now() >= deadline
+                {
+                    heartbeat(&mut sender, node, capabilities);
+                    listen(&manager, &receiver, node, ADMIN_WAIT_MS);
+                    node.next_beat = Some(next_beat_after(deadline));
                 }
-                heartbeat(&mut sender, node, capabilities);
             } else {
                 note!("radio would not park on channel {}", CONTROL_CHANNEL);
+                // What keeps this loop from spinning when the radio refuses:
+                // nothing else here sleeps unconditionally the way the idle
+                // branch's `listen` does.
+                listen(&manager, &receiver, node, ADMIN_WAIT_MS);
             }
-            // Whatever is left of the second, held open. A busy room that overran
-            // leaves only the floor here and the next scan starts at once, which is
-            // the right trade: a window missed costs one cycle, and the core's
-            // re-send waits on the next heartbeat either way.
-            listen(&manager, &receiver, node, remaining_ms(cycle).max(ADMIN_WAIT_MS));
+            // Straight into the next scan either way: a beat not yet due costs
+            // this node nothing but the next check.
             continue;
         }
 
@@ -460,47 +481,49 @@ fn main() -> ! {
         }
 
         // `advance` runs either way, so a radio that refused one hop does not leave
-        // the node dwelling there for ever. Everything else needs the control
-        // channel: a heartbeat sent from a dwell channel is not heard and, worse,
-        // is *counted* — the local transmit succeeds and the counter climbs, so the
-        // host sees an unbroken sequence instead of the reboot-shaped gap that
-        // would make it re-issue. Silence is the honest report.
-        if node.advance() && on_control {
-            let stagger =
-                stagger_offset_ms(node.node_index, node.node_count, NODE_STAGGER_WINDOW_MS);
-            if stagger > 0 {
-                CurrentThreadHandle::get().delay(Duration::from_millis(u64::from(stagger)));
-            }
+        // the node dwelling there for ever, and the counter it bumps on a completed
+        // sweep counts every one of them, whether or not a heartbeat goes out on
+        // this pass. Only the heartbeat itself needs the control channel: sent
+        // from a dwell channel it would not be heard.
+        if node.advance() {
+            node.counter = node.counter.wrapping_add(1).max(1);
+        }
+        if on_control
+            && let Some(deadline) = node.next_beat
+            && Instant::now() >= deadline
+        {
             heartbeat(&mut sender, node, capabilities);
             listen(&manager, &receiver, node, ADMIN_WAIT_MS);
+            node.next_beat = Some(next_beat_after(deadline));
         }
     }
 }
 
-/// How much of a deadline is left, in milliseconds, saturating at zero.
+/// Push a heartbeat deadline forward by one [`ASSIGNED_BEAT_MS`], never behind now.
 ///
-/// The Bluetooth cycle is a deadline rather than a duration: what is left of its
-/// second after the scan, the reports and the heartbeat is whatever is left.
-#[allow(clippy::cast_possible_truncation)]
-fn remaining_ms(deadline: Instant) -> u32 {
+/// A node that stalled — a long run of refused hops, a wedged radio recovering —
+/// must not fire a burst of overdue beats once it catches up: the next one is
+/// always a whole interval away from whichever moment noticed the deadline had
+/// passed, rather than from the deadline itself.
+fn next_beat_after(deadline: Instant) -> Instant {
+    let next = deadline + Duration::from_millis(u64::from(ASSIGNED_BEAT_MS));
     let now = Instant::now();
-    if now >= deadline { 0 } else { (deadline - now).as_millis() as u32 }
+    if next <= now { now + Duration::from_millis(u64::from(ASSIGNED_BEAT_MS)) } else { next }
 }
 
 /// Broadcast one heartbeat, which is also the whole of this node's liveness.
 ///
-/// Once per completed sweep, not on a timer. The
-/// host reads the period as a rough measure of how many channels the node is
-/// carrying, and treats sixty seconds of silence as a node that has left the
-/// fleet.
-fn heartbeat(sender: &mut EspNowSender<'_>, node: &mut Node, capabilities: Capabilities) {
+/// Sent only from the control channel, at most once every [`ASSIGNED_BEAT_MS`]
+/// for an assigned node. The counter it carries tracks completed sweeps on its
+/// own timer, so it advances whether or not this call goes out; the host reads
+/// its period as a rough measure of how many channels the node is carrying, and
+/// treats sixty seconds of silence as a node that has left the fleet.
+fn heartbeat(sender: &mut EspNowSender<'_>, node: &Node, capabilities: Capabilities) {
     // Every heartbeat carries the capabilities, not just the first: sent once they
     // would be lost to a dropped frame or stale after a reflash, and they are three
     // bytes of thirteen.
     let msg = HeartbeatMsg { counter: node.counter, capabilities };
-    if radio::broadcast(sender, &msg.encode()) {
-        node.counter = node.counter.wrapping_add(1).max(1);
-    }
+    radio::broadcast(sender, &msg.encode());
 }
 
 /// Packs every sighting one dwell or Bluetooth scan produces into as few unicasts
@@ -642,10 +665,10 @@ fn report(sender: &mut EspNowSender<'_>, node: &mut Node, channel: u8) {
 
 /// Listen for advertisers and report the new ones.
 ///
-/// Called once per [`BLE_BEAT_MS`] on the node whose whole job this is, at the top of
-/// its cycle and before the heartbeat, so the Bluetooth controller is off again well
-/// ahead of the window this node has to answer an assignment in. The node sniffs no
-/// Wi-Fi, so the scan competes with nothing but that heartbeat for the antenna.
+/// Called once per scan on the node whose whole job this is, ahead of whichever
+/// heartbeat follows it, so the Bluetooth controller is off again well ahead of
+/// the window that heartbeat opens. The node sniffs no Wi-Fi, so the scan
+/// competes with nothing but that heartbeat for the antenna.
 #[cfg(feature = "ble")]
 fn report_ble(sender: &mut EspNowSender<'_>, node: &mut Node, scanner: &mut ble::Scanner<'_>) {
     let heard = scanner.sweep();

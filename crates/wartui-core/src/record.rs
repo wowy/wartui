@@ -186,7 +186,7 @@ pub struct AssignmentSent {
     /// The byte that actually went on the wire, `air::wire_epoch(counter)`.
     /// The column keeps its older name; what it holds has not changed.
     pub wire_version: u8,
-    /// The node's slot in the fleet-wide stagger order.
+    /// The node's slot in the fleet the plan was cut for.
     pub node_index: u8,
     /// Fleet size as of the assignment, not as of the send — divergence 7.
     pub node_count: u8,

@@ -428,7 +428,7 @@ fn engine_drops_batch_when_seq_and_payload_repeat() {
     let frame = batch(1, &[msg]);
     engine.handle(rx_at(NODE, &frame, 0), clock.at(1));
     // A retry lands a few ms later by the bridge's own clock, well inside
-    // the 150 ms window.
+    // the 100 ms window.
     engine.handle(rx_at(NODE, &frame, 4_000), clock.at(2));
 
     let node = engine.nodes().find(|n| n.mac == NODE).expect("the node");
@@ -445,9 +445,10 @@ fn engine_drops_batch_when_seq_and_payload_repeat() {
 
 #[test]
 fn engine_drops_batch_when_seq_and_payload_repeat_inside_the_window() {
-    // 140 ms is past one channel dwell (125 ms) but inside the window's own
-    // 150 ms, pinning that the window is a fixed value rather than derived
-    // from the dwell.
+    // 90 ms is inside the window's own 100 ms, narrower than one channel dwell
+    // (125 ms): a sweep has no admin window in it, so the shortest gap between
+    // two reports of the same channel is a single dwell, and the window is
+    // pinned below that rather than derived from it.
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
 
@@ -462,7 +463,7 @@ fn engine_drops_batch_when_seq_and_payload_repeat_inside_the_window() {
     };
     let frame = batch(1, &[msg]);
     engine.handle(rx_at(NODE, &frame, 0), clock.at(1));
-    engine.handle(rx_at(NODE, &frame, 140_000), clock.at(2));
+    engine.handle(rx_at(NODE, &frame, 90_000), clock.at(2));
 
     let node = engine.nodes().find(|n| n.mac == NODE).expect("the node");
     assert_eq!(counters(&engine).observations, 1, "the duplicate's record is not recorded twice");
@@ -492,8 +493,8 @@ fn engine_records_batch_when_seq_and_payload_repeat_after_the_window() {
     };
     let frame = batch(1, &[msg]);
     engine.handle(rx_at(NODE, &frame, 0), clock.at(1));
-    // Past the 150 ms window.
-    engine.handle(rx_at(NODE, &frame, 200_000), clock.at(2));
+    // Past the 100 ms window.
+    engine.handle(rx_at(NODE, &frame, 110_000), clock.at(2));
 
     let node = engine.nodes().find(|n| n.mac == NODE).expect("the node");
     assert_eq!(counters(&engine).observations, 2, "both batches are recorded");
@@ -1379,18 +1380,78 @@ fn engine_resumes_epoch_counter_from_persisted_base_when_initialized() {
 }
 
 #[test]
-fn engine_computes_median_heartbeat_period_when_multiple_beats_arrive() {
+fn engine_spans_beat_period_when_one_heartbeat_is_lost() {
+    // Six heartbeats, mostly four seconds apart, with one lost in the middle so
+    // the gap it left doubles to eight. Spanning the whole window absorbs the
+    // one bad gap rather than reading it back whole.
     let clock = Clock::new();
     let mut engine = engine(us_config(), &clock);
 
-    // Four-second sweeps, about what a node holding the whole US pool does, with
-    // one heartbeat lost in the middle. The median is what absorbs it.
     for (n, at) in [1u64, 5, 9, 17, 21, 25].into_iter().enumerate() {
         engine.handle(heartbeat(NODE, n as u32 + 1), clock.at(at));
     }
 
     let node = engine.nodes().next().expect("the node");
-    assert_eq!(node.beat_period_ms(), Some(4_000));
+    assert_eq!(node.beat_period_ms(), Some(4_800), "24000 ms span / 5 counter steps");
+}
+
+#[test]
+fn engine_spans_beat_period_when_sweep_exceeds_heartbeat_interval() {
+    // A sweep longer than the fixed 5 s heartbeat interval means some
+    // consecutive beats carry the same counter — no sweep completed in that
+    // interval — which a single gap divided by its own step could only skip,
+    // losing the elapsed time. The span still reads it: five 5 s beats, only
+    // four of which see a completed sweep.
+    let clock = Clock::new();
+    let mut engine = engine(us_config(), &clock);
+
+    for (n, counter) in [0u32, 1, 2, 2, 3, 4].into_iter().enumerate() {
+        engine.handle(heartbeat(NODE, counter), clock.at(n as u64 * 5));
+    }
+
+    let node = engine.nodes().next().expect("the node");
+    assert_eq!(node.beat_period_ms(), Some(6_250), "25000 ms span / 4 counter steps");
+}
+
+#[test]
+fn engine_spans_beat_period_closely_when_sweep_is_much_shorter_than_interval() {
+    // A sweep this short completes many times between two heartbeats. The
+    // span reads close to the true period; a single gap divided by its own
+    // small counter step would instead quantise to 2500 or 1666 ms, never the
+    // 2000 ms this sweep actually takes.
+    let clock = Clock::new();
+    let mut engine = engine(us_config(), &clock);
+
+    for (n, counter) in [0u32, 2, 5, 7, 10, 12].into_iter().enumerate() {
+        engine.handle(heartbeat(NODE, counter), clock.at(n as u64 * 5));
+    }
+
+    let node = engine.nodes().next().expect("the node");
+    assert_eq!(node.beat_period_ms(), Some(2_083), "25000 ms span / 12 counter steps");
+}
+
+#[test]
+fn engine_clears_beat_window_when_counter_goes_backward() {
+    // A reboot means the counter went back to a boot value: every sample held
+    // spans across that reset, so none of them describes a real sweep.
+    let clock = Clock::new();
+    let mut engine = engine(us_config(), &clock);
+
+    engine.handle(heartbeat(NODE, 5), clock.at(0));
+    engine.handle(heartbeat(NODE, 9), clock.at(5));
+    assert_eq!(engine.nodes().next().expect("the node").beat_period_ms(), Some(1_250));
+
+    // A reboot: the counter goes back to a boot value.
+    engine.handle(heartbeat(NODE, 1), clock.at(10));
+    assert_eq!(
+        engine.nodes().next().expect("the node").beat_period_ms(),
+        None,
+        "the window is cleared, and one sample alone has no span"
+    );
+
+    // A second heartbeat after the reboot gives a fresh, clean span.
+    engine.handle(heartbeat(NODE, 2), clock.at(11));
+    assert_eq!(engine.nodes().next().expect("the node").beat_period_ms(), Some(1_000));
 }
 
 #[test]
@@ -1504,8 +1565,8 @@ fn engine_partitions_full_channel_pool_across_fleet_when_nodes_join() {
         }
     }
 
-    // `node_index` and `node_count` drive the transmit stagger, so they must
-    // agree fleet-wide: unique indices over one shared count.
+    // `node_index` and `node_count` report the fleet the plan was cut for, so
+    // they must agree fleet-wide: unique indices over one shared count.
     let indices: Vec<(u8, u8)> = engine
         .nodes()
         .map(|node| {
@@ -1553,7 +1614,7 @@ fn engine_recuts_channel_pool_for_entire_fleet_when_new_node_joins() {
     let (_, _, second) = sent_admin(&engine.handle(heartbeat(peer(1), 1), clock.at(2)));
     assert_eq!(second.node_count, 2, "the fleet the range was cut for");
 
-    // The settled node is owed a new range too: its stagger slot comes from a
+    // The settled node is owed a new range too: its reported slot comes from a
     // count that has just changed.
     let settled = engine.nodes().next().expect("the first node");
     assert!(settled.dirty, "re-issued, though it was acknowledged a moment ago");
@@ -2318,7 +2379,7 @@ fn engine_reissues_surplus_node_with_new_tx_power_when_set_tx_power_received() {
     assert_eq!(dst, surplus_mac);
     assert_eq!(admin.tx_power, 40, "the surplus node still hears about the change");
     assert_eq!(admin.channels, held.channels, "its own share is unchanged");
-    assert_eq!(admin.node_count, 11, "and so is the stagger arithmetic it was dealt");
+    assert_eq!(admin.node_count, 11, "and so is the fleet size the plan was cut for");
 }
 
 // ---------------------------------------------------------------------------

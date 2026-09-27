@@ -284,6 +284,8 @@ The same capture sizes the saving. Each node held six or seven channels and beat
 about 30 ms slower than dwells, stagger and window add up to — roughly 4.7 ms a
 channel for the hop back and the report. At 100 ms a seven-channel sweep falls
 from about 1230 ms to 1030 ms, about 19% more sweeps an hour.
+`docs/duty-cycle-findings.md` measures what the window and the stagger still cost at
+100 ms, per node and projected to a twenty-node fleet.
 
 ### Retested on the bench at 100 ms
 
