@@ -9,14 +9,14 @@ It replaces the vendor firmware at
 web interface, SD card, display, buttons, fuel gauge, GPS, geofencing, uploads and dock mode did not
 come across at all, because a node in this fleet has no use for any of them.
 
-It shares no wire format with it either. A node broadcasts a 13-byte heartbeat every 5 seconds once
+It shares no wire format with it either. A node broadcasts a 14-byte heartbeat every 5 seconds once
 assigned, carrying a counter that tracks its completed sweeps — or scans, on the node whose job is
 Bluetooth — since a heartbeat is how a bridge discovers a node before either side knows the other's
-address. It unicasts a sighting batch at the end of each dwell or scan to whichever bridge last sent
-it an admin or clear frame, packed to fill the 250-byte ESP-NOW payload: a nine-byte header followed
-by one 12-plus-SSID record per newly-seen BSSID or
-advertiser, whose trailer carries a Passpoint network's roaming consortium identifiers, or a BLE
-advertiser's manufacturer identifier, when there are any. It accepts a 16-byte unicast assignment,
+address, and the epoch of the assignment it holds, or 0 for none. It unicasts a sighting batch at
+the end of each dwell or scan to whichever bridge last sent it an admin or clear frame, packed to
+fill the 250-byte ESP-NOW payload: a nine-byte header followed by one 12-plus-SSID record per
+newly-seen BSSID or advertiser, whose trailer carries a Passpoint network's roaming consortium identifiers, or a BLE
+advertiser's manufacturer identifier, when there are any. It accepts a 15-byte unicast assignment,
 and a 6-byte unicast clear that empties its dedup ring. All four sit behind wartui's own `WTUI` magic
 and a wire version byte, checked before anything else, so neither fleet can reach the other at all.
 
@@ -51,8 +51,9 @@ Bluetooth flag empties the dedup ring, because the entries describe a neighbourh
 listens to. So does a clear frame, which the host sends on the operator's `r` or `R` and which
 carries no other instruction. `crates/wartui-proto/src/dedup.rs` has the reasoning.
 
-**It says what it is, in every heartbeat.** Three of a heartbeat's thirteen bytes are a version and
-a feature byte, shown by the host as:
+**It says what it is, and what it holds, in every heartbeat.** One byte is the epoch of the
+assignment adopted, or 0 for none — how the host tells adoption from a MAC-layer ack without asking
+the node's own console. Three more are a version and a feature byte, shown by the host as:
 
 ```
 wartui/1.0;ble,5g

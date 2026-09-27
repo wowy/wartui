@@ -105,18 +105,13 @@ async fn auto_partitioner_converges_on_us_pool_partition_when_fleet_joins() {
     // two nodes overlap.
     assert_eq!(covered(&held), covered_runs(ChannelPool::Us.runs()));
 
-    let mut slots: Vec<(u8, u8)> = settled
-        .nodes
-        .iter()
-        .map(|n| {
-            let a = n.state.confirmed.expect("confirmed");
-            (a.node_index, a.node_count)
-        })
-        .collect();
-    slots.sort_unstable();
-    // node_index and node_count report the fleet the plan was cut for, so two
-    // nodes sharing an index would report the same slot in the fleet table.
-    assert_eq!(slots, (0..6).map(|i| (i, 6)).collect::<Vec<_>>());
+    // Nodes are ordered by MAC, the same order the planner slots them into, so
+    // each node's share should line up with the plan's own numbering.
+    for (i, node) in settled.nodes.iter().enumerate() {
+        let index = u8::try_from(i).expect("six fits");
+        let expected = plan.channels_for(index).expect("a slot for every one of the six");
+        assert_eq!(node.state.confirmed.expect("confirmed").channels, expected, "slot {index}");
+    }
 
     // A node adopts mid-sweep but finishes the sweep it is on, and heartbeats keep
     // arriving on their own timer regardless, so give each a few heartbeat

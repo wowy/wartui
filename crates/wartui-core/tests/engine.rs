@@ -14,7 +14,7 @@ use wartui_core::position::{DEFAULT_MAX_AGE, PositionChain, PositionSource};
 use wartui_core::record::{AdminOutcome, Record};
 use wartui_proto::air::{
     AdminMsg, Capabilities, Frame, HeartbeatMsg, RecordKind, Security, SightingBatchWriter,
-    SightingMsg,
+    SightingMsg, wire_epoch,
 };
 use wartui_proto::link::{
     BROADCAST, BridgeToHost, Chip, EspNowPayload, HostToBridge, LoopPhase, Mac, ResetCause,
@@ -86,19 +86,26 @@ fn rx_at(src: Mac, frame: &[u8], rx_us: u32) -> Event {
 }
 
 /// A heartbeat from a node with everything: both features, both bands. Almost
-/// every test below wants this one.
+/// every test below wants this one. Reports epoch 0: nothing adopted, which
+/// is what every test not about adoption wants said.
 fn heartbeat(src: Mac, counter: u32) -> Event {
-    beat_at(src, counter, Capabilities::here(true, true), 0)
+    beat_at(src, counter, 0, Capabilities::here(true, true), 0)
 }
 
 /// A heartbeat from a node that can do neither of the things capabilities can
 /// claim: an ESP32-C6 built without the `ble` feature.
 fn narrowband_heartbeat(src: Mac, counter: u32) -> Event {
-    beat_at(src, counter, Capabilities::here(false, false), 0)
+    beat_at(src, counter, 0, Capabilities::here(false, false), 0)
 }
 
-fn beat_at(src: Mac, counter: u32, capabilities: Capabilities, rx_us: u32) -> Event {
-    rx_at(src, &HeartbeatMsg { counter, capabilities }.encode(), rx_us)
+/// A heartbeat reporting the epoch the node holds, for the tests about
+/// adoption.
+fn heartbeat_holding(src: Mac, counter: u32, epoch: u8) -> Event {
+    beat_at(src, counter, epoch, Capabilities::here(true, true), 0)
+}
+
+fn beat_at(src: Mac, counter: u32, epoch: u8, capabilities: Capabilities, rx_us: u32) -> Event {
+    rx_at(src, &HeartbeatMsg { counter, epoch, capabilities }.encode(), rx_us)
 }
 
 fn send_result(id: u16, status: SendStatus, tx_us: u32) -> Event {
@@ -683,7 +690,9 @@ fn engine_counts_incompatible_firmware_frames_when_wire_version_is_unsupported()
     let mut engine = engine(EngineConfig::default(), &clock);
 
     let mut frame =
-        HeartbeatMsg { counter: 1, capabilities: Capabilities::here(true, true) }.encode().to_vec();
+        HeartbeatMsg { counter: 1, epoch: 0, capabilities: Capabilities::here(true, true) }
+            .encode()
+            .to_vec();
     frame[4] = frame[4].wrapping_add(1);
     engine.handle(rx(NODE, &frame), clock.at(1));
 
@@ -697,15 +706,9 @@ fn engine_counts_foreign_admin_traffic_when_rival_core_transmits() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
 
-    let admin = wartui_proto::air::AdminMsg {
-        epoch: 3,
-        node_index: 0,
-        node_count: 2,
-        flags: 0,
-        channels: run(0, 19),
-        tx_power: 8,
-    }
-    .encode();
+    let admin =
+        wartui_proto::air::AdminMsg { epoch: 3, flags: 0, channels: run(0, 19), tx_power: 8 }
+            .encode();
     let event = Event::Link(LinkEvent::Message(BridgeToHost::Rx {
         src: OTHER,
         dst: NODE,
@@ -1034,7 +1037,10 @@ fn engine_defers_admin_assignment_until_heartbeat_opens_window() {
     let opened = engine.handle(heartbeat(NODE, 2), clock.at(6));
     let (_, dst, admin) = sent_admin(&opened);
     assert_eq!(dst, NODE);
-    assert_eq!(admin.node_count, 2, "and learns the fleet it is now part of");
+    assert!(
+        admin.channels.len() < alone.channels.len(),
+        "its share narrowed now it shares the pool"
+    );
     assert_eq!(counters(&engine).admin_sent, 3);
 }
 
@@ -1215,7 +1221,7 @@ fn engine_confirms_assignment_only_when_mac_ack_is_received() {
     let clock = Clock::new();
     let mut engine = engine(us_config(), &clock);
     engine.handle(heartbeat(NODE, 1), clock.at(1));
-    let (id, _, _) = sent_admin(&engine.handle(heartbeat(NODE, 2), clock.at(6)));
+    let (id, _, admin) = sent_admin(&engine.handle(heartbeat(NODE, 2), clock.at(6)));
 
     // Only the MAC-layer acknowledgement clears the dirty flag.
     let batch = engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(6));
@@ -1231,8 +1237,9 @@ fn engine_confirms_assignment_only_when_mac_ack_is_received() {
     assert_eq!(row.channels, ChannelPool::Us.channels());
     assert!(!row.ble);
 
-    // And a later heartbeat sends nothing, because there is nothing to send.
-    assert!(engine.handle(heartbeat(NODE, 3), clock.at(10)).urgent.is_empty());
+    // And a later heartbeat, reporting the epoch it adopted, sends nothing:
+    // there is nothing left to say.
+    assert!(engine.handle(heartbeat_holding(NODE, 3, admin.epoch), clock.at(10)).urgent.is_empty());
 }
 
 #[test]
@@ -1317,7 +1324,7 @@ fn engine_computes_assignment_latency_when_ack_timestamps_are_received() {
     // Stamped by the bridge at 1_000_000 µs and the callback at 1_004_500: 4.5 ms
     // from "the node is listening" to "its radio has the frame".
     let opened =
-        engine.handle(beat_at(NODE, 2, Capabilities::here(true, true), 1_000_000), clock.at(6));
+        engine.handle(beat_at(NODE, 2, 0, Capabilities::here(true, true), 1_000_000), clock.at(6));
     let (id, _, _) = sent_admin(&opened);
     let batch = engine.handle(send_result(id, SendStatus::AckOk, 1_004_500), clock.at(6));
 
@@ -1332,12 +1339,13 @@ fn engine_computes_latency_correctly_when_bridge_microsecond_counter_wraps() {
     let mut engine = engine(EngineConfig::default(), &clock);
     // Both heartbeats are stamped just short of the wrap, a millisecond apart,
     // which is what a bridge approaching 71 minutes of uptime actually emits.
-    engine.handle(beat_at(NODE, 1, Capabilities::here(true, true), u32::MAX - 2_000), clock.at(1));
+    engine
+        .handle(beat_at(NODE, 1, 0, Capabilities::here(true, true), u32::MAX - 2_000), clock.at(1));
 
     // The bridge's stamp is a `u32` of microseconds and wraps every 71 minutes. A
     // heartbeat 1 ms before the wrap and a callback 3.5 ms after are 4.5 ms apart.
     let opened = engine
-        .handle(beat_at(NODE, 2, Capabilities::here(true, true), u32::MAX - 999), clock.at(6));
+        .handle(beat_at(NODE, 2, 0, Capabilities::here(true, true), u32::MAX - 999), clock.at(6));
     let (id, _, _) = sent_admin(&opened);
     let batch = engine.handle(send_result(id, SendStatus::AckOk, 3_500), clock.at(6));
 
@@ -1367,6 +1375,162 @@ fn engine_clears_assignment_and_triggers_replan_when_node_reboots() {
     assert!(node.confirmed.is_none(), "what it held is no longer believed");
 }
 
+// ---------------------------------------------------------------------------
+// Phase 4b: adoption — the heartbeat's own epoch, layered on top of the
+// MAC-layer ack.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn engine_marks_node_adopted_when_heartbeat_reports_desired_epoch() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(heartbeat(NODE, 1), clock.at(1));
+    let (id, _, first) = sent_admin(&engine.handle(heartbeat(NODE, 2), clock.at(6)));
+    engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(6));
+    assert!(!engine.nodes().next().expect("the node").adopted(), "acked, not yet adopted");
+
+    engine.handle(heartbeat_holding(NODE, 3, first.epoch), clock.at(10));
+    assert!(engine.nodes().next().expect("the node").adopted());
+}
+
+#[test]
+fn engine_resends_assignment_when_heartbeat_reports_other_epoch_after_ack() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(heartbeat(NODE, 1), clock.at(1));
+    let (id, _, first) = sent_admin(&engine.handle(heartbeat(NODE, 2), clock.at(6)));
+    engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(6));
+
+    // Acknowledged, but the node's own heartbeat says it holds something else —
+    // a length or version mismatch, a dropped receive queue, or a bug. Re-sent
+    // on this window, and no epoch burned: the node still does not hold it
+    // either way.
+    let other = first.epoch.wrapping_add(1);
+    let batch = engine.handle(heartbeat_holding(NODE, 3, other), clock.at(10));
+    let (_, _, resent) = sent_admin(&batch);
+    assert_eq!(resent.epoch, first.epoch, "no epoch burned on a retry");
+    assert_eq!(resent.channels, first.channels);
+    assert_eq!(counters(&engine).admin_unadopted, 1);
+    assert_eq!(engine.nodes().next().expect("the node").unadopted, 1);
+}
+
+#[test]
+fn engine_counts_unadopted_when_heartbeat_reports_zero_after_ack() {
+    // The never-adopted case folded into the same fact: a `0` from a node that
+    // has never once reported holding anything is still "not what it acked".
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(heartbeat(NODE, 1), clock.at(1));
+    let (id, _, first) = sent_admin(&engine.handle(heartbeat(NODE, 2), clock.at(6)));
+    engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(6));
+
+    let batch = engine.handle(heartbeat_holding(NODE, 3, 0), clock.at(10));
+    let (_, _, resent) = sent_admin(&batch);
+    assert_eq!(resent.epoch, first.epoch, "it still does not hold it either way");
+    assert_eq!(counters(&engine).admin_unadopted, 1);
+
+    let node = engine.nodes().next().expect("the node");
+    assert_eq!(node.unadopted, 1);
+    assert_eq!(node.reboots, 0, "never having adopted anything is not a reboot");
+}
+
+#[test]
+fn engine_reissues_assignment_when_heartbeat_reports_epoch_zero() {
+    // The counter keeps climbing; only the epoch says the node forgot
+    // everything, which the counter check alone would miss.
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(heartbeat(NODE, 1), clock.at(1));
+    let (id, _, first) = sent_admin(&engine.handle(heartbeat(NODE, 2), clock.at(6)));
+    engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(6));
+    engine.handle(heartbeat_holding(NODE, 3, first.epoch), clock.at(10));
+    assert!(engine.nodes().next().expect("the node").adopted());
+
+    let batch = engine.handle(heartbeat_holding(NODE, 4, 0), clock.at(11));
+    let (_, _, reissued) = sent_admin(&batch);
+    assert_ne!(reissued.epoch, first.epoch, "a fresh epoch");
+    assert_eq!(reissued.channels, first.channels, "the share it was already holding");
+}
+
+#[test]
+fn engine_counts_reboot_when_heartbeat_epoch_returns_to_zero() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(heartbeat(NODE, 1), clock.at(1));
+    let (id, _, first) = sent_admin(&engine.handle(heartbeat(NODE, 2), clock.at(6)));
+    engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(6));
+    engine.handle(heartbeat_holding(NODE, 3, first.epoch), clock.at(10));
+    assert!(engine.nodes().next().expect("the node").adopted());
+
+    // Owed a cleared ring too, so this reboot's reset can be told apart from
+    // one that never ran.
+    engine.handle(Event::Command(Command::ClearRing { mac: Some(NODE) }), clock.at(10));
+    assert!(engine.nodes().next().expect("the node").clear_dedup_ring);
+
+    engine.handle(heartbeat_holding(NODE, 4, 0), clock.at(11));
+
+    let node = engine.nodes().next().expect("the node");
+    assert_eq!(node.reboots, 1, "the epoch alone is enough to count it");
+    assert!(node.confirmed.is_none(), "what it held is no longer believed");
+    assert!(!node.clear_dedup_ring, "a node that just booted already holds an empty ring");
+}
+
+#[test]
+fn engine_ignores_epoch_when_heartbeat_is_replayed_from_backlog() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(heartbeat(NODE, 1), clock.at(1));
+    let (id, _, first) = sent_admin(&engine.handle(heartbeat(NODE, 2), clock.at(6)));
+    engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(6));
+    engine.handle(heartbeat_holding(NODE, 3, first.epoch), clock.at(10));
+    assert!(engine.nodes().next().expect("the node").adopted());
+
+    // A heartbeat replayed out of the bridge's backlog: its own clock jumps far
+    // ahead of the host's, the tell that this window already shut. It reports
+    // epoch 0 -- what a reboot would say -- but it is history, not now, and
+    // must not be believed.
+    let batch = engine.handle(
+        beat_at(NODE, 4, 0, Capabilities::here(true, true), 1_000_000),
+        clock.at_ms(10_002),
+    );
+    assert!(batch.urgent.is_empty(), "no assignment into a window that already shut");
+
+    let node = engine.nodes().next().expect("the node");
+    assert_eq!(node.reboots, 0, "a replayed heartbeat is not a reboot");
+    assert!(node.adopted(), "held_epoch still says what the live heartbeat said");
+    assert_eq!(counters(&engine).admin_unadopted, 0);
+}
+
+#[test]
+fn engine_counts_one_reboot_when_replayed_counter_drop_precedes_live_epoch_zero() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(heartbeat(NODE, 1), clock.at(1));
+    let (id, _, first) = sent_admin(&engine.handle(heartbeat(NODE, 2), clock.at(6)));
+    engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(6));
+    engine.handle(heartbeat_holding(NODE, 3, first.epoch), clock.at(10));
+    assert!(engine.nodes().next().expect("the node").adopted());
+
+    // Replayed out of the backlog (a huge rx_us jump against a tiny host-time
+    // one) and its counter is behind the one already seen: a reboot on its
+    // own, and this alone must not also wait for an epoch to say so.
+    engine.handle(
+        beat_at(NODE, 1, 0, Capabilities::here(true, true), 1_000_000),
+        clock.at_ms(10_002),
+    );
+    assert_eq!(engine.nodes().next().expect("the node").reboots, 1);
+
+    // The next heartbeat is live and reports epoch 0 too -- the same reboot's
+    // first live word on it, not a second reboot. `held_epoch` has to have
+    // been cleared already by the replayed one above, or this looks like the
+    // node forgetting a second, different epoch.
+    engine.handle(
+        beat_at(NODE, 2, 0, Capabilities::here(true, true), 1_050_000),
+        clock.at_ms(10_102),
+    );
+    assert_eq!(engine.nodes().next().expect("the node").reboots, 1, "one reboot, not two");
+}
+
 #[test]
 fn engine_resumes_epoch_counter_from_persisted_base_when_initialized() {
     let clock = Clock::new();
@@ -1377,81 +1541,6 @@ fn engine_resumes_epoch_counter_from_persisted_base_when_initialized() {
     let (_, _, admin) = sent_admin(&engine.handle(heartbeat(NODE, 2), clock.at(6)));
     // 301 narrowed to a byte that skips zero, which the firmware never sends.
     assert_eq!(admin.epoch, 46);
-}
-
-#[test]
-fn engine_spans_beat_period_when_one_heartbeat_is_lost() {
-    // Six heartbeats, mostly four seconds apart, with one lost in the middle so
-    // the gap it left doubles to eight. Spanning the whole window absorbs the
-    // one bad gap rather than reading it back whole.
-    let clock = Clock::new();
-    let mut engine = engine(us_config(), &clock);
-
-    for (n, at) in [1u64, 5, 9, 17, 21, 25].into_iter().enumerate() {
-        engine.handle(heartbeat(NODE, n as u32 + 1), clock.at(at));
-    }
-
-    let node = engine.nodes().next().expect("the node");
-    assert_eq!(node.beat_period_ms(), Some(4_800), "24000 ms span / 5 counter steps");
-}
-
-#[test]
-fn engine_spans_beat_period_when_sweep_exceeds_heartbeat_interval() {
-    // A sweep longer than the fixed 5 s heartbeat interval means some
-    // consecutive beats carry the same counter — no sweep completed in that
-    // interval — which a single gap divided by its own step could only skip,
-    // losing the elapsed time. The span still reads it: five 5 s beats, only
-    // four of which see a completed sweep.
-    let clock = Clock::new();
-    let mut engine = engine(us_config(), &clock);
-
-    for (n, counter) in [0u32, 1, 2, 2, 3, 4].into_iter().enumerate() {
-        engine.handle(heartbeat(NODE, counter), clock.at(n as u64 * 5));
-    }
-
-    let node = engine.nodes().next().expect("the node");
-    assert_eq!(node.beat_period_ms(), Some(6_250), "25000 ms span / 4 counter steps");
-}
-
-#[test]
-fn engine_spans_beat_period_closely_when_sweep_is_much_shorter_than_interval() {
-    // A sweep this short completes many times between two heartbeats. The
-    // span reads close to the true period; a single gap divided by its own
-    // small counter step would instead quantise to 2500 or 1666 ms, never the
-    // 2000 ms this sweep actually takes.
-    let clock = Clock::new();
-    let mut engine = engine(us_config(), &clock);
-
-    for (n, counter) in [0u32, 2, 5, 7, 10, 12].into_iter().enumerate() {
-        engine.handle(heartbeat(NODE, counter), clock.at(n as u64 * 5));
-    }
-
-    let node = engine.nodes().next().expect("the node");
-    assert_eq!(node.beat_period_ms(), Some(2_083), "25000 ms span / 12 counter steps");
-}
-
-#[test]
-fn engine_clears_beat_window_when_counter_goes_backward() {
-    // A reboot means the counter went back to a boot value: every sample held
-    // spans across that reset, so none of them describes a real sweep.
-    let clock = Clock::new();
-    let mut engine = engine(us_config(), &clock);
-
-    engine.handle(heartbeat(NODE, 5), clock.at(0));
-    engine.handle(heartbeat(NODE, 9), clock.at(5));
-    assert_eq!(engine.nodes().next().expect("the node").beat_period_ms(), Some(1_250));
-
-    // A reboot: the counter goes back to a boot value.
-    engine.handle(heartbeat(NODE, 1), clock.at(10));
-    assert_eq!(
-        engine.nodes().next().expect("the node").beat_period_ms(),
-        None,
-        "the window is cleared, and one sample alone has no span"
-    );
-
-    // A second heartbeat after the reboot gives a fresh, clean span.
-    engine.handle(heartbeat(NODE, 2), clock.at(11));
-    assert_eq!(engine.nodes().next().expect("the node").beat_period_ms(), Some(1_000));
 }
 
 #[test]
@@ -1508,7 +1597,6 @@ fn engine_ignores_stale_mac_ack_when_replan_has_superseded_epoch() {
     assert!(node.dirty, "the newer assignment is still owed");
     assert!(node.confirmed.is_none());
     let desired = node.desired.expect("desired");
-    assert_eq!(desired.node_count, 2);
     assert_ne!(desired.channels, alone.channels, "and it is not the share that was acked");
 }
 
@@ -1564,17 +1652,6 @@ fn engine_partitions_full_channel_pool_across_fleet_when_nodes_join() {
             );
         }
     }
-
-    // `node_index` and `node_count` report the fleet the plan was cut for, so
-    // they must agree fleet-wide: unique indices over one shared count.
-    let indices: Vec<(u8, u8)> = engine
-        .nodes()
-        .map(|node| {
-            let a = node.desired.expect("every member of the plan has channels");
-            (a.node_index, a.node_count)
-        })
-        .collect();
-    assert_eq!(indices, vec![(0, 3), (1, 3), (2, 3)]);
 }
 
 #[test]
@@ -1608,18 +1685,23 @@ fn engine_recuts_channel_pool_for_entire_fleet_when_new_node_joins() {
     // just opened is the one its share goes out in — not the next one.
     let (id, dst, first) = sent_admin(&engine.handle(heartbeat(peer(0), 1), clock.at(1)));
     assert_eq!(dst, peer(0));
-    assert_eq!(first.node_count, 1);
+    let plan_of = |engine: &FleetEngine, at| {
+        engine.snapshot(clock.at(at), StoreStats::default()).plan.expect("a plan").node_count()
+    };
+    assert_eq!(plan_of(&engine, 1), 1);
     engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(1));
 
     let (_, _, second) = sent_admin(&engine.handle(heartbeat(peer(1), 1), clock.at(2)));
-    assert_eq!(second.node_count, 2, "the fleet the range was cut for");
+    assert_eq!(plan_of(&engine, 2), 2, "the fleet the range was cut for");
+    assert!(second.channels.len() < first.channels.len(), "narrower now it shares the pool");
 
-    // The settled node is owed a new range too: its reported slot comes from a
-    // count that has just changed.
+    // The settled node is owed a new range too: the plan just changed shape.
     let settled = engine.nodes().next().expect("the first node");
     assert!(settled.dirty, "re-issued, though it was acknowledged a moment ago");
-    assert_eq!(settled.desired.expect("a new range").node_count, 2);
-    assert_eq!(settled.confirmed.expect("what it still holds").node_count, 1);
+    assert_ne!(
+        settled.desired.expect("a new range").channels,
+        settled.confirmed.expect("what it still holds").channels
+    );
 
     let (_, dst, third) = sent_admin(&engine.handle(heartbeat(peer(0), 2), clock.at(6)));
     assert_eq!(dst, peer(0), "and it goes out in that node's own next window");
@@ -1642,7 +1724,11 @@ fn engine_evicts_silent_node_and_redistributes_channels_when_heartbeats_stop() {
     assert!(departed.desired.is_none(), "nothing is owed to a node that cannot receive it");
     assert!(!departed.dirty);
     let survivor = engine.nodes().nth(1).expect("the node still beating");
-    assert_eq!(survivor.desired.expect("a range").node_count, 1);
+    assert_eq!(
+        covered(&[survivor.desired.expect("a range").channels]),
+        pool_indices(ChannelPool::Us),
+        "alone now, it holds the whole pool"
+    );
 }
 
 #[test]
@@ -1779,7 +1865,7 @@ fn engine_leaves_surplus_nodes_unassigned_when_fleet_exceeds_available_channels(
     };
 
     for n in 0..13 {
-        check(&engine.handle(beat_at(peer(n), 1, token, 0), clock.at(1)), &mut seen_empty);
+        check(&engine.handle(beat_at(peer(n), 1, 0, token, 0), clock.at(1)), &mut seen_empty);
     }
     // Given, moved, and taken away again: every way the flag leaves a node.
     for (from, target) in [(2u64, Some(peer(12))), (20, Some(peer(0))), (40, None)] {
@@ -1788,7 +1874,7 @@ fn engine_leaves_surplus_nodes_unassigned_when_fleet_exceeds_available_channels(
             let at = clock.at(from + u64::from(beat));
             check(&engine.handle(Event::Tick, at), &mut seen_empty);
             for n in 0..13 {
-                let batch = engine.handle(beat_at(peer(n), beat + 1, token, 0), at);
+                let batch = engine.handle(beat_at(peer(n), beat + 1, 0, token, 0), at);
                 check(&batch, &mut seen_empty);
                 if let Some(HostToBridge::SendEspNow { id, .. }) = batch.urgent.first() {
                     engine.handle(send_result(*id, SendStatus::AckOk, 900), at);
@@ -1837,8 +1923,8 @@ fn settle_c6_fleet(engine: &mut FleetEngine, clock: &Clock, nodes: u8, from: u64
         let at = clock.at(from + u64::from(beat));
         engine.handle(Event::Tick, at);
         for n in 0..nodes {
-            let batch =
-                engine.handle(beat_at(peer(n), beat + 1, Capabilities::here(true, false), 0), at);
+            let batch = engine
+                .handle(beat_at(peer(n), beat + 1, 0, Capabilities::here(true, false), 0), at);
             if let Some(HostToBridge::SendEspNow { id, .. }) = batch.urgent.first() {
                 engine.handle(send_result(*id, SendStatus::AckOk, 900), at);
             }
@@ -1858,7 +1944,7 @@ fn engine_clears_ble_flag_from_surplus_node_when_commanded() {
     let config = EngineConfig { pool: ChannelPool::Us, ..EngineConfig::default() };
     let mut engine = engine(config, &clock);
     for n in 0..12 {
-        engine.handle(beat_at(peer(n), 1, Capabilities::here(true, false), 0), clock.at(1));
+        engine.handle(beat_at(peer(n), 1, 0, Capabilities::here(true, false), 0), clock.at(1));
     }
     engine.handle(Event::Command(Command::AssignBle { mac: Some(peer(11)) }), clock.at(2));
     settle_c6_fleet(&mut engine, &clock, 12, 2);
@@ -1892,7 +1978,7 @@ fn engine_ensures_single_ble_scanner_when_reassigning_bluetooth_job() {
     let config = EngineConfig { pool: ChannelPool::Us, ..EngineConfig::default() };
     let mut engine = engine(config, &clock);
     for n in 0..13 {
-        engine.handle(beat_at(peer(n), 1, Capabilities::here(true, false), 0), clock.at(1));
+        engine.handle(beat_at(peer(n), 1, 0, Capabilities::here(true, false), 0), clock.at(1));
     }
     engine.handle(Event::Command(Command::AssignBle { mac: Some(peer(12)) }), clock.at(2));
     settle_c6_fleet(&mut engine, &clock, 13, 2);
@@ -1958,19 +2044,23 @@ fn engine_suppresses_redundant_assignments_when_fleet_plan_is_settled() {
     }
     // Acknowledge each node's range, which takes the fleet to the state it
     // spends the whole capture in.
+    let mut epochs = [0u8; 3];
     for n in 0..3 {
-        let (id, _, _) = sent_admin(&engine.handle(heartbeat(peer(n), 2), clock.at(5)));
+        let (id, _, admin) = sent_admin(&engine.handle(heartbeat(peer(n), 2), clock.at(5)));
+        epochs[usize::from(n)] = admin.epoch;
         engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(5));
     }
     let settled = counters(&engine).admin_sent;
 
     // A node adopts on `!=`, so an epoch it already holds is acknowledged and
     // discarded — re-cutting an unchanged fleet would do that at heartbeat rate.
+    // Each node's heartbeat reports the epoch it adopted, the same as a real one
+    // would once its assignment landed.
     for beat in 3..6u32 {
         let at = clock.at(u64::from(10 + beat));
         engine.handle(Event::Tick, at);
         for n in 0..3 {
-            let batch = engine.handle(heartbeat(peer(n), beat), at);
+            let batch = engine.handle(heartbeat_holding(peer(n), beat, epochs[usize::from(n)]), at);
             assert!(batch.urgent.is_empty(), "nothing left to say");
         }
     }
@@ -2006,15 +2096,19 @@ fn engine_reissues_assignment_with_new_epoch_when_rebooted_node_rejoins() {
     engine.handle(send_result(first, SendStatus::AckOk, 900), clock.at(1));
     let (second, _, _) = sent_admin(&engine.handle(heartbeat(peer(1), 1), clock.at(2)));
     engine.handle(send_result(second, SendStatus::AckOk, 900), clock.at(2));
-    let (recut, _, _) = sent_admin(&engine.handle(heartbeat(peer(0), 2), clock.at(3)));
+    let (recut, _, recut_admin) = sent_admin(&engine.handle(heartbeat(peer(0), 2), clock.at(3)));
     engine.handle(send_result(recut, SendStatus::AckOk, 900), clock.at(3));
 
     // It goes quiet long enough to leave the plan, then comes back to a re-cut
-    // that gives it the channels it is already holding.
+    // that gives it the channels it is already holding. Each heartbeat reports
+    // the epoch it adopted, the same as a real node's would.
     engine.handle(heartbeat(peer(1), 2), clock.at(70));
-    engine.handle(heartbeat(peer(0), 3), clock.at(71));
+    engine.handle(heartbeat_holding(peer(0), 3, recut_admin.epoch), clock.at(71));
     assert!(
-        engine.handle(heartbeat(peer(0), 4), clock.at(75)).urgent.is_empty(),
+        engine
+            .handle(heartbeat_holding(peer(0), 4, recut_admin.epoch), clock.at(75))
+            .urgent
+            .is_empty(),
         "a node already scanning its share is not told so again"
     );
 
@@ -2028,7 +2122,6 @@ fn engine_reissues_assignment_with_new_epoch_when_rebooted_node_rejoins() {
         admin.channels,
         plan(ChannelPool::Us, 2).expect("two nodes").channels_for(0).expect("assigned")
     );
-    assert_eq!(admin.node_count, 2);
 }
 
 #[test]
@@ -2075,7 +2168,13 @@ fn engine_ignores_backlog_heartbeats_when_evaluating_admin_windows() {
     let mut sent = 0;
     for beat in 0..9u32 {
         let batch = engine.handle(
-            beat_at(NODE, beat + 1, Capabilities::here(true, true), 1_000_000 + beat * 1_000_000),
+            beat_at(
+                NODE,
+                beat + 1,
+                0,
+                Capabilities::here(true, true),
+                1_000_000 + beat * 1_000_000,
+            ),
             clock.at_ms(u64::from(beat) * 2),
         );
         sent += batch.urgent.len();
@@ -2112,13 +2211,19 @@ fn engine_opens_admin_window_when_live_heartbeat_arrives_after_backlog() {
     // clock for a frame the bridge stamped a second later.
     for beat in 0..4u32 {
         engine.handle(
-            beat_at(NODE, beat + 1, Capabilities::here(true, true), 1_000_000 + beat * 1_000_000),
+            beat_at(
+                NODE,
+                beat + 1,
+                0,
+                Capabilities::here(true, true),
+                1_000_000 + beat * 1_000_000,
+            ),
             clock.at_ms(u64::from(beat) * 2),
         );
     }
 
     let live = engine
-        .handle(beat_at(NODE, 5, Capabilities::here(true, true), 5_000_000), clock.at_ms(1_010));
+        .handle(beat_at(NODE, 5, 0, Capabilities::here(true, true), 5_000_000), clock.at_ms(1_010));
     let (_, dst, _) = sent_admin(&live);
     assert_eq!(dst, NODE, "the window this heartbeat opened is the live one");
 }
@@ -2133,8 +2238,10 @@ fn engine_withholds_admin_window_when_heartbeat_precedes_bridge_announcement() {
     let mut engine = engine(EngineConfig::default(), &clock);
 
     // Minutes old on the bridge's clock, and the first thing this engine sees.
-    let first = engine
-        .handle(beat_at(NODE, 307, Capabilities::here(true, true), 359_000_000), clock.at_ms(31));
+    let first = engine.handle(
+        beat_at(NODE, 307, 0, Capabilities::here(true, true), 359_000_000),
+        clock.at_ms(31),
+    );
     assert!(engine.nodes().next().expect("admitted").dirty, "the plan owes it a share");
     assert!(first.urgent.is_empty(), "no assignment into a window that shut long ago");
 }
@@ -2147,10 +2254,10 @@ fn engine_withholds_admin_window_when_heartbeat_precedes_bridge_announcement() {
 fn engine_discards_latency_sample_when_ack_round_trip_exceeds_admin_window() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
-    engine.handle(beat_at(NODE, 1, Capabilities::here(true, true), 1_000_000), clock.at(1));
+    engine.handle(beat_at(NODE, 1, 0, Capabilities::here(true, true), 1_000_000), clock.at(1));
 
     let opened =
-        engine.handle(beat_at(NODE, 2, Capabilities::here(true, true), 2_000_000), clock.at(6));
+        engine.handle(beat_at(NODE, 2, 0, Capabilities::here(true, true), 2_000_000), clock.at(6));
     let (id, _, _) = sent_admin(&opened);
     // The callback comes back a full second after the heartbeat, ten times the
     // window the node was holding open.
@@ -2168,10 +2275,10 @@ fn engine_discards_latency_sample_when_ack_round_trip_exceeds_admin_window() {
 fn engine_records_latency_sample_when_ack_round_trip_equals_admin_window() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
-    engine.handle(beat_at(NODE, 1, Capabilities::here(true, true), 1_000_000), clock.at(1));
+    engine.handle(beat_at(NODE, 1, 0, Capabilities::here(true, true), 1_000_000), clock.at(1));
 
     let opened =
-        engine.handle(beat_at(NODE, 2, Capabilities::here(true, true), 2_000_000), clock.at(6));
+        engine.handle(beat_at(NODE, 2, 0, Capabilities::here(true, true), 2_000_000), clock.at(6));
     let (id, _, _) = sent_admin(&opened);
     let batch = engine.handle(send_result(id, SendStatus::AckOk, 2_100_000), clock.at(6));
 
@@ -2221,8 +2328,6 @@ fn engine_reissues_assignments_when_a_different_bridge_connects() {
     let (_, dst, admin) = sent_admin(&engine.handle(heartbeat(NODE, 2), clock.at(3)));
     assert_eq!(dst, NODE);
     assert_eq!(admin.channels, first.channels, "the same share, just re-addressed");
-    assert_eq!(admin.node_index, first.node_index);
-    assert_eq!(admin.node_count, first.node_count);
     assert_ne!(admin.epoch, first.epoch, "a fresh epoch, since the node already holds the old one");
 }
 
@@ -2231,13 +2336,13 @@ fn engine_reissues_nothing_when_the_same_bridge_reconnects() {
     let clock = Clock::new();
     let mut engine = engine(us_config(), &clock);
     caught_up(&mut engine, &clock);
-    let (id, _, _) = sent_admin(&engine.handle(heartbeat(NODE, 1), clock.at(1)));
+    let (id, _, first) = sent_admin(&engine.handle(heartbeat(NODE, 1), clock.at(1)));
     engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(1));
 
     engine.handle(connected(), clock.at(2));
     engine.handle(rx(GONE, b"not a frame"), clock.at(2));
 
-    let batch = engine.handle(heartbeat(NODE, 2), clock.at(3));
+    let batch = engine.handle(heartbeat_holding(NODE, 2, first.epoch), clock.at(3));
     assert!(admins(&batch).is_empty(), "the node already holds this share, addressed correctly");
 }
 
@@ -2338,7 +2443,7 @@ fn engine_reissues_surplus_node_with_new_tx_power_when_set_tx_power_received() {
     for beat in 0..6u32 {
         let at = clock.at(2 + u64::from(beat));
         for n in 1..=11 {
-            let batch = engine.handle(beat_at(peer(n), beat + 1, token, 0), at);
+            let batch = engine.handle(beat_at(peer(n), beat + 1, 0, token, 0), at);
             if let Some(HostToBridge::SendEspNow { id, .. }) = batch.urgent.first() {
                 engine.handle(send_result(*id, SendStatus::AckOk, 900), at);
             }
@@ -2348,25 +2453,21 @@ fn engine_reissues_surplus_node_with_new_tx_power_when_set_tx_power_received() {
     // `peer(0)` joins — sorting before all eleven by MAC, so it takes slot 0 and
     // pushes `peer(11)` out to the last slot, the one the deal leaves without a
     // channel on a pool with nothing left to give it. `peer(11)` keeps exactly
-    // what it held from the eleven-node plan, `node_count` included, while the
-    // other ten are re-cut fresh shares under the new count.
+    // what it held from the eleven-node plan, while the other ten are re-cut
+    // fresh shares under the new count.
     for beat in 0..6u32 {
         let at = clock.at(20 + u64::from(beat));
         for n in 0..=11 {
-            let batch = engine.handle(beat_at(peer(n), beat + 7, token, 0), at);
+            let batch = engine.handle(beat_at(peer(n), beat + 7, 0, token, 0), at);
             if let Some(HostToBridge::SendEspNow { id, .. }) = batch.urgent.first() {
                 engine.handle(send_result(*id, SendStatus::AckOk, 900), at);
             }
         }
     }
 
-    let surplus = engine
-        .nodes()
-        .find(|node| node.desired.or(node.confirmed).is_some_and(|a| a.node_count == 11))
-        .expect("one slot kept the eleven-node plan's share");
+    let surplus = engine.nodes().find(|node| node.mac == peer(11)).expect("the eleventh node");
     let held = surplus.desired.or(surplus.confirmed).expect("still holding channels");
     let surplus_mac = surplus.mac;
-    assert_eq!(surplus_mac, peer(11), "the slot the new member's arrival pushed out");
 
     let command = engine.handle(
         Event::Command(Command::SetTxPower { nodes: 40, bridge: DEFAULT_TX_POWER_QUARTER_DBM }),
@@ -2375,11 +2476,10 @@ fn engine_reissues_surplus_node_with_new_tx_power_when_set_tx_power_received() {
     assert!(command.urgent.is_empty(), "nothing sent until the node's own window");
 
     let (_, dst, admin) =
-        sent_admin(&engine.handle(beat_at(surplus_mac, 13, token, 0), clock.at(31)));
+        sent_admin(&engine.handle(beat_at(surplus_mac, 13, 0, token, 0), clock.at(31)));
     assert_eq!(dst, surplus_mac);
     assert_eq!(admin.tx_power, 40, "the surplus node still hears about the change");
     assert_eq!(admin.channels, held.channels, "its own share is unchanged");
-    assert_eq!(admin.node_count, 11, "and so is the fleet size the plan was cut for");
 }
 
 // ---------------------------------------------------------------------------
@@ -2395,14 +2495,14 @@ fn engine_sends_clear_on_next_heartbeat_when_node_clear_requested() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
     caught_up(&mut engine, &clock);
-    let (id, _, _) = sent_admin(&engine.handle(heartbeat(NODE, 1), clock.at(1)));
+    let (id, _, first) = sent_admin(&engine.handle(heartbeat(NODE, 1), clock.at(1)));
     engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(1));
 
     let command = engine.handle(clear_ring(Some(NODE)), clock.at(2));
     assert!(command.urgent.is_empty(), "nothing sent until the node's own window");
     assert!(engine.nodes().next().expect("the node").clear_dedup_ring);
 
-    let (_, dst) = sent_clear(&engine.handle(heartbeat(NODE, 2), clock.at(3)));
+    let (_, dst) = sent_clear(&engine.handle(heartbeat_holding(NODE, 2, first.epoch), clock.at(3)));
     assert_eq!(dst, NODE);
     assert_eq!(counters(&engine).admin_sent, 1, "the clear does not count as an assignment");
 }
@@ -2486,7 +2586,13 @@ fn engine_holds_clear_when_heartbeat_replayed_from_backlog() {
     let mut sent = 0;
     for beat in 0..9u32 {
         let batch = engine.handle(
-            beat_at(NODE, beat + 1, Capabilities::here(true, true), 1_000_000 + beat * 1_000_000),
+            beat_at(
+                NODE,
+                beat + 1,
+                0,
+                Capabilities::here(true, true),
+                1_000_000 + beat * 1_000_000,
+            ),
             clock.at_ms(u64::from(beat) * 2),
         );
         sent += batch.urgent.len();
@@ -2505,8 +2611,59 @@ fn engine_holds_clear_when_heartbeat_replayed_from_backlog() {
     // wait at least as long as the bridge's own clock says this step took, the
     // same gap `engine_opens_admin_window_when_live_heartbeat_arrives_after_backlog`
     // uses for an assignment.
-    let live = engine
-        .handle(beat_at(NODE, 10, Capabilities::here(true, true), 10_000_000), clock.at_ms(1_020));
+    let live = engine.handle(
+        beat_at(NODE, 10, 0, Capabilities::here(true, true), 10_000_000),
+        clock.at_ms(1_020),
+    );
     let (_, dst) = sent_clear(&live);
     assert_eq!(dst, NODE);
+}
+
+#[test]
+fn engine_skips_held_epoch_when_dealing_first_assignment() {
+    // The node's first heartbeat is not itself a live window (nothing to compare
+    // the bridge's clock against yet), so `deal` runs against it but nothing
+    // goes out; the second heartbeat is the one whose window is actually open.
+    // By then the node has already reported holding wire epoch 1 -- exactly
+    // what `deal` would allocate first under `EngineConfig::default()`
+    // (`assignment_base` 0, so the first counter is 1 and `wire_epoch(1) == 1`).
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(heartbeat_holding(NODE, 1, 1), clock.at(1));
+    let batch = engine.handle(heartbeat_holding(NODE, 2, 1), clock.at(6));
+    let (id, _, admin) = sent_admin(&batch);
+    assert_ne!(admin.epoch, 1, "never the epoch the node's own heartbeat already reports");
+
+    engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(6));
+    engine.handle(heartbeat_holding(NODE, 3, admin.epoch), clock.at(10));
+    assert!(engine.nodes().next().expect("the node").adopted());
+}
+
+#[test]
+fn engine_reissues_assignment_when_desired_epoch_matches_held_epoch() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(heartbeat(OTHER, 1), clock.at(1));
+
+    // NODE's first heartbeat is a backlog replay (huge bridge-side rx_us jump against
+    // a tiny host-clock one): `held_epoch` stays unknown, so `deal` has nothing to skip.
+    let batch = engine
+        .handle(beat_at(NODE, 1, 0, Capabilities::here(true, true), 1_000_000), clock.at_ms(1_002));
+    assert!(batch.urgent.is_empty(), "no assignment into a window that already shut");
+
+    let node = engine.nodes().find(|n| n.mac == NODE).expect("the node");
+    let desired = node.desired.expect("dealt while held_epoch was unknown");
+    let collide_epoch = wire_epoch(desired.counter);
+
+    // A live heartbeat now reports exactly the epoch just allocated blind. The
+    // host waits out the same 4 s the bridge's clock advances (4_000_000 rx_us
+    // against 4_000 host ms), which is what reads as caught-up rather than
+    // another backlog frame; `heartbeat_holding` cannot express this because it
+    // always reports rx_us 0.
+    let batch = engine.handle(
+        beat_at(NODE, 2, collide_epoch, Capabilities::here(true, true), 5_000_000),
+        clock.at_ms(5_002),
+    );
+    let (_, _, admin) = sent_admin(&batch);
+    assert_ne!(admin.epoch, collide_epoch, "reissued under a fresh epoch");
 }

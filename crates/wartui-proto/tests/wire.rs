@@ -18,6 +18,15 @@ use wartui_proto::plan::{ChannelSet, IndexRun};
 const HEARTBEAT: &[u8] = &[
     0x57, 0x54, 0x55, 0x49, 0x01, 0x01, // header
     0x78, 0x56, 0x34, 0x12, // counter 0x1234_5678, little-endian
+    0x05, // epoch
+    0x01, 0x00, 0x03, // capabilities: major 1, minor 0, ble + 5g
+];
+
+/// A heartbeat from a node parked since boot: epoch 0, never sent by the host.
+const HEARTBEAT_NO_EPOCH: &[u8] = &[
+    0x57, 0x54, 0x55, 0x49, 0x01, 0x01, // header
+    0x78, 0x56, 0x34, 0x12, // counter 0x1234_5678, little-endian
+    0x00, // epoch: none held
     0x01, 0x00, 0x03, // capabilities: major 1, minor 0, ble + 5g
 ];
 
@@ -111,7 +120,6 @@ const SIGHTING_BATCH_3: &[u8] = &[
 const ADMIN: &[u8] = &[
     0x57, 0x54, 0x55, 0x49, 0x01, 0x81, // header
     0x07, // epoch
-    0x02, 0x05, // node 2 of 5
     0x00, // flags
     0x00, 0x00, 0xFF, 0x00, 0x00, 0x00, // indices 16..=23
     0x08, // transmit power: 2 dBm
@@ -120,7 +128,6 @@ const ADMIN: &[u8] = &[
 const ADMIN_BLE: &[u8] = &[
     0x57, 0x54, 0x55, 0x49, 0x01, 0x81, // header
     0xC8, // epoch 200
-    0x00, 0x01, // node 0 of 1
     0x01, // ADMIN_FLAG_BLE
     0x41, 0x20, 0x00, 0x00, 0x00, 0x02, // indices 0, 6, 13 and 41
     0x08, // transmit power: 2 dBm
@@ -132,7 +139,6 @@ const ADMIN_BLE: &[u8] = &[
 const ADMIN_BLE_ONLY: &[u8] = &[
     0x57, 0x54, 0x55, 0x49, 0x01, 0x81, // header
     0x09, // epoch
-    0x01, 0x03, // node 1 of 3
     0x01, // ADMIN_FLAG_BLE
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // no channels at all
     0x08, // transmit power: 2 dBm
@@ -203,10 +209,22 @@ fn foreign_classifier_rejects_our_frames_when_checking_vendor_magic() {
 fn heartbeat_msg_serializes_byte_for_byte_when_encoded_and_decoded() {
     let msg = HeartbeatMsg {
         counter: 0x1234_5678,
+        epoch: 5,
         capabilities: Capabilities { major: 1, minor: 0, ble: true, five_ghz: true },
     };
     assert_eq!(msg.encode().as_slice(), HEARTBEAT);
     assert_eq!(HeartbeatMsg::decode(HEARTBEAT), Ok(msg));
+}
+
+#[test]
+fn heartbeat_msg_serializes_epoch_zero_when_node_holds_no_assignment() {
+    let msg = HeartbeatMsg {
+        counter: 0x1234_5678,
+        epoch: 0,
+        capabilities: Capabilities { major: 1, minor: 0, ble: true, five_ghz: true },
+    };
+    assert_eq!(msg.encode().as_slice(), HEARTBEAT_NO_EPOCH);
+    assert_eq!(HeartbeatMsg::decode(HEARTBEAT_NO_EPOCH), Ok(msg));
 }
 
 #[test]
@@ -602,8 +620,6 @@ fn security_enum_round_trips_to_wigle_tokens_when_converted() {
 fn assignment_serializes_byte_for_byte_when_encoded_to_wire() {
     let msg = AdminMsg {
         epoch: 7,
-        node_index: 2,
-        node_count: 5,
         flags: 0,
         channels: ChannelSet::from_run(IndexRun::new(16, 23)),
         tx_power: 8,
@@ -621,14 +637,7 @@ fn admin_msg_serializes_channel_mask_as_little_endian_when_encoded() {
     for idx in [0, 6, 13, 41] {
         channels.insert(idx);
     }
-    let msg = AdminMsg {
-        epoch: 200,
-        node_index: 0,
-        node_count: 1,
-        flags: ADMIN_FLAG_BLE,
-        channels,
-        tx_power: 8,
-    };
+    let msg = AdminMsg { epoch: 200, flags: ADMIN_FLAG_BLE, channels, tx_power: 8 };
     assert_eq!(msg.encode().as_slice(), ADMIN_BLE);
 
     let back = AdminMsg::decode(ADMIN_BLE).expect("valid");
@@ -638,20 +647,13 @@ fn admin_msg_serializes_channel_mask_as_little_endian_when_encoded() {
 
 #[test]
 fn admin_msg_encodes_ble_flag_and_empty_mask_when_node_scans_bluetooth() {
-    let msg = AdminMsg {
-        epoch: 9,
-        node_index: 1,
-        node_count: 3,
-        flags: ADMIN_FLAG_BLE,
-        channels: ChannelSet::empty(),
-        tx_power: 8,
-    };
+    let msg =
+        AdminMsg { epoch: 9, flags: ADMIN_FLAG_BLE, channels: ChannelSet::empty(), tx_power: 8 };
     assert_eq!(msg.encode().as_slice(), ADMIN_BLE_ONLY);
 
     let back = AdminMsg::decode(ADMIN_BLE_ONLY).expect("valid");
     assert!(back.channels.is_empty(), "it sniffs nothing");
     assert!(back.scan_ble(), "and the flag is what says why");
-    assert_eq!((back.node_index, back.node_count), (1, 3), "and it is still a slot in the fleet");
     assert_eq!(back.tx_power, 8);
 }
 
@@ -660,7 +662,7 @@ fn admin_msg_preserves_unknown_flag_bits_when_round_tripped() {
     // A newer host setting a bit this build has no name for must not have it
     // quietly dropped on the way through.
     let mut frame = ADMIN_BLE.to_vec();
-    frame[9] = 0b1000_0001;
+    frame[7] = 0b1000_0001;
     let decoded = AdminMsg::decode(&frame).expect("valid");
     assert_eq!(decoded.flags, 0b1000_0001);
     assert!(decoded.scan_ble());

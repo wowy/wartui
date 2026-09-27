@@ -129,8 +129,8 @@ These bite from a distance — from a file other than the one that owns them —
 is here rather than only in a `//!`.
 
 - **The wire is ours, in both directions, and shares nothing with the vendor's.** Every frame is
-  `WTUI`, a wire version byte, a type byte and a body: `HeartbeatMsg` (13 bytes), `SightingBatch`
-  (9 plus records of 12 plus the SSID and the trailer), `AdminMsg` (17) and `ClearMsg` (6, header
+  `WTUI`, a wire version byte, a type byte and a body: `HeartbeatMsg` (14 bytes), `SightingBatch`
+  (9 plus records of 12 plus the SSID and the trailer), `AdminMsg` (15) and `ClearMsg` (6, header
   only). A heartbeat broadcasts, since that is how a bridge discovers a node before either
   side knows the other's address; a sighting batch unicasts to the bridge that last sent
   this node an admin or clear frame, so a shared format is a shared conversation either way.
@@ -200,11 +200,15 @@ is here rather than only in a `//!`.
   it, capture continues and the planner refuses to re-cut rather than partitioning among nodes the
   bridge cannot address.
 - **An assignment is believed only on a MAC-layer ack** (`SendStatus::AckOk` from the transmit
-  callback), never on a successful enqueue.
-- **A node adopts an assignment only when the epoch/version differs** from the one it holds, so
-  re-sending an identical one is acknowledged and silently discarded. `node_index`/`node_count`
-  travel in every assignment, reporting the node's slot and the fleet size the plan was cut for,
-  so every fleet change re-cuts the whole plan, not just the affected node.
+  callback), never on a successful enqueue — and an ack is not adoption. Every heartbeat carries the
+  epoch the node holds, or 0 for none, so the host can tell whether the node actually took the frame
+  rather than merely receiving it. A node adopts an assignment only when the epoch/version differs
+  from the one it holds, so re-sending an identical one is acknowledged and silently discarded. If a
+  node's heartbeat reports an epoch other than the one it acked, the frame did not land after all,
+  and the host re-sends it on that heartbeat's window rather than waiting. The host never sends a
+  node the epoch its heartbeat says it already holds, because a fresh capture restarts the counter
+  while a running node keeps its epoch across it.
+  → `crates/wartui-core/src/engine.rs`, `NodeState::adopted` / `Counters::admin_unadopted`
 - **`IndexRun` describes a *pool*, never the shape of an assignment.** An assignment is a
   `ChannelSet` naming any subset of `SCAN_CHANNELS`, so the planner flattens the pool and deals
   round-robin rather than steering around run boundaries. The plan has no phases and no timer; it
@@ -246,10 +250,9 @@ edit stops; follow the pointer before changing the rule.
   indices are the wire format. → `crates/wartui-proto/src/plan.rs`, `UNSUPPORTED_INDEX`
 - **At most one node scans Bluetooth, by default none does, and it is that node's whole job.**
   `ADMIN_FLAG_BLE` is an operator's decision, not a property of the flashed firmware. The node
-  holding it is dealt no channels and is counted in `node_count` anyway, because `node_index` and
-  `node_count` report the node's slot and the fleet size the plan was cut for, rather than a census
-  of who is sniffing. An empty `ChannelSet` is sent only with the flag beside it; without it, a
-  node told to scan nothing parks
+  holding it is dealt no channels and is counted in `Plan::node_count` anyway, because that reports
+  the fleet size the plan was cut for rather than a census of who is sniffing. An empty `ChannelSet`
+  is sent only with the flag beside it; without it, a node told to scan nothing parks
   while the host believes it is sweeping, and `Plan::admin_for` refuses to build that frame.
   → `crates/wartui-proto/src/plan.rs`, `Job` / `Plan::channels_for` / `admin_for`;
   `crates/wartui-core/src/engine.rs`, `Command::AssignBle` / `on_assign_ble` / `replan`;

@@ -65,6 +65,18 @@ async fn next_heartbeat_counter_from(link: &mut LinkHandle, want: Mac) -> (Insta
     }
 }
 
+/// Wait for the next heartbeat from `want`, returning the decoded frame.
+async fn next_heartbeat_msg_from(link: &mut LinkHandle, want: Mac) -> HeartbeatMsg {
+    loop {
+        let (src, raw) = next_frame(link).await;
+        if src == want
+            && let Some(heartbeat) = heartbeat_of(&raw)
+        {
+            return heartbeat;
+        }
+    }
+}
+
 fn admin_command(dst: Mac, admin: AdminMsg) -> HostToBridge {
     let mut payload = EspNowPayload::new();
     payload.extend_from_slice(&admin.encode()).expect("an assignment fits");
@@ -89,14 +101,7 @@ fn clear_command(dst: Mac, ensure_peer: bool) -> HostToBridge {
 fn assign(link: &LinkHandle, version: u8, channels: ChannelSet, ble: bool) {
     link.send_urgent(admin_command(
         SimTransport::node_mac(0),
-        AdminMsg {
-            epoch: version,
-            node_index: 0,
-            node_count: 1,
-            flags: AdminMsg::flags_for(ble),
-            channels,
-            tx_power: 8,
-        },
+        AdminMsg { epoch: version, flags: AdminMsg::flags_for(ble), channels, tx_power: 8 },
     ))
     .expect("queued");
 }
@@ -363,38 +368,43 @@ async fn sim_node_parks_without_sightings_when_assigned_empty_channels_without_b
 }
 
 #[tokio::test(start_paused = true)]
-async fn sim_node_accelerates_heartbeat_period_when_channel_range_is_narrowed() {
-    // How an assignment is confirmed with no access to the node's own console: the
-    // heartbeat arrives on a fixed timer, independent of the sweep, so the counter
-    // it carries is the proof. Dividing the gap between two heartbeats by the
-    // counter step gives the node's sweep period, the same arithmetic
-    // `NodeState::beat_period_ms` does.
+async fn sim_node_reports_epoch_zero_until_assigned_then_the_adopted_epoch() {
+    // The heartbeat carries the epoch the node holds, so adoption is confirmed
+    // by the epoch on the next heartbeat rather than inferred from cadence.
+    let config = SimConfig { node_count: 1, ble_chance: 0.0, ..SimConfig::default() };
+    let mut link = SimTransport::new(config).start().expect("starts");
+    let node = SimTransport::node_mac(0);
+
+    let parked = next_heartbeat_msg_from(&mut link, node).await;
+    assert_eq!(parked.epoch, 0, "parked since boot, nothing adopted yet");
+
+    assign(&link, 1, everything(), false);
+
+    // Skip the heartbeat that straddles the assignment landing mid-sweep.
+    next_heartbeat_msg_from(&mut link, node).await;
+    let adopted = next_heartbeat_msg_from(&mut link, node).await;
+    assert_eq!(adopted.epoch, 1, "the next clean heartbeat reports the adopted epoch");
+}
+
+#[tokio::test(start_paused = true)]
+async fn sim_node_reports_new_epoch_when_channel_range_is_narrowed() {
     let config = SimConfig { node_count: 1, ble_chance: 0.0, ..SimConfig::default() };
     let mut link = SimTransport::new(config).start().expect("starts");
     let node = SimTransport::node_mac(0);
     assign(&link, 1, everything(), false);
 
-    // Skip the heartbeat that straddles the first assignment, then measure two
-    // clean ones.
-    next_heartbeat_from(&mut link, node).await;
-    let (t1, c1) = next_heartbeat_counter_from(&mut link, node).await;
-    let (t2, c2) = next_heartbeat_counter_from(&mut link, node).await;
-    let wide = (t2 - t1).as_millis() / u128::from(c2 - c1);
+    next_heartbeat_msg_from(&mut link, node).await;
+    let first = next_heartbeat_msg_from(&mut link, node).await;
+    assert_eq!(first.epoch, 1);
 
     let mut one = ChannelSet::empty();
     one.insert(0);
     assign(&link, 2, one, false);
 
-    // Skip the heartbeat that straddles the change, then measure a clean pair.
-    next_heartbeat_from(&mut link, node).await;
-    let (a1, ac1) = next_heartbeat_counter_from(&mut link, node).await;
-    let (a2, ac2) = next_heartbeat_counter_from(&mut link, node).await;
-    let narrow = (a2 - a1).as_millis() / u128::from(ac2 - ac1);
-
-    assert!(
-        narrow * 4 < wide,
-        "a one-channel node should sweep far faster: {narrow:?} vs {wide:?}"
-    );
+    // Skip the heartbeat that straddles the change, then check a clean one.
+    next_heartbeat_msg_from(&mut link, node).await;
+    let narrowed = next_heartbeat_msg_from(&mut link, node).await;
+    assert_eq!(narrowed.epoch, 2, "the heartbeat reports the new epoch after narrowing");
 }
 
 #[tokio::test(start_paused = true)]
@@ -536,8 +546,6 @@ async fn sim_bridge_returns_ack_fail_when_frame_sent_to_unreachable_node() {
         [0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01],
         AdminMsg {
             epoch: 1,
-            node_index: 0,
-            node_count: 1,
             flags: 0,
             channels: ChannelSet::from_run(IndexRun::new(0, 3)),
             tx_power: 8,
@@ -648,14 +656,7 @@ async fn sim_fleet_restricts_ble_reports_to_assigned_node_when_partitioned() {
     assign(&link, 1, ChannelSet::empty(), true);
     link.send_urgent(admin_command(
         SimTransport::node_mac(1),
-        AdminMsg {
-            epoch: 1,
-            node_index: 1,
-            node_count: 2,
-            flags: 0,
-            channels: everything(),
-            tx_power: 8,
-        },
+        AdminMsg { epoch: 1, flags: 0, channels: everything(), tx_power: 8 },
     ))
     .expect("queued");
 

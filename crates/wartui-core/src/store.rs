@@ -82,6 +82,7 @@ CREATE TABLE IF NOT EXISTS heartbeat (
   node_mac BLOB NOT NULL,
   rx_at INTEGER NOT NULL,
   counter INTEGER NOT NULL,
+  epoch INTEGER NOT NULL,
   rssi INTEGER,
   admin_sent INTEGER NOT NULL DEFAULT 0,
   admin_acked INTEGER,
@@ -102,8 +103,6 @@ CREATE TABLE IF NOT EXISTS assignment (
   node_mac BLOB NOT NULL,
   counter INTEGER NOT NULL,
   wire_version INTEGER NOT NULL,
-  node_index INTEGER NOT NULL,
-  node_count INTEGER NOT NULL,
   channels INTEGER NOT NULL,
   ble INTEGER NOT NULL,
   created_at INTEGER NOT NULL,
@@ -851,14 +850,15 @@ fn write_batch(
             }
             Record::Heartbeat(hb) => {
                 tx.prepare_cached(
-                    "INSERT INTO heartbeat (session_id, node_mac, rx_at, counter, rssi)
-                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    "INSERT INTO heartbeat (session_id, node_mac, rx_at, counter, epoch, rssi)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 )?
                 .execute(params![
                     session_id,
                     &hb.node_mac[..],
                     hb.rx_at_ms,
                     hb.counter,
+                    hb.epoch,
                     hb.link_rssi
                 ])?;
             }
@@ -910,9 +910,9 @@ fn write_batch(
             Record::Assignment(a) => {
                 tx.prepare_cached(
                     "INSERT INTO assignment
-                       (session_id, node_mac, counter, wire_version, node_index, node_count,
+                       (session_id, node_mac, counter, wire_version,
                         channels, ble, created_at, delivered_at, outcome, latency_us)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
                 )?
                 .execute(params![
                     session_id,
@@ -922,8 +922,6 @@ fn write_batch(
                     // already spent is the failure this counter exists to prevent.
                     i64::try_from(a.counter).unwrap_or(i64::MAX),
                     a.wire_version,
-                    a.node_index,
-                    a.node_count,
                     i64::try_from(a.channels.bits()).unwrap_or(0),
                     a.ble,
                     a.created_at_ms,
