@@ -42,14 +42,48 @@ so recorded as reported only on ack": the addresses in an unacknowledged batch s
 due and go out again the next time the node hears them, rather than going dark for a
 whole refresh window.
 
+## The change on the bench
+
+Measured on 2026-09-27 with the unicast build on bridge `0A:28` and the same six C5
+nodes, all on one desk. Every frame was stored with `--record-raw`, and each node's
+serial log was read beside it. Three runs:
+
+| run | length | batches | lost | unacked | node-logged vs stored records |
+| --- | --- | --- | --- | --- | --- |
+| Wi-Fi only | 10 min | 114 | 0 | 0 | equal on every node |
+| `10:D0` given the Bluetooth scan | 3.5 min | 86 | 0 | 0 | equal on every node; 105 of 105 on `10:D0` |
+| bridge unplugged for 137 s | 4 min | 96 | 0 | 65 during the outage | equal, or one more stored |
+
+- Every node logged `core is now 10:BD:A3:CC:0A:28` with its first assignment. A later
+  run against the same bridge logged no new core and re-sent nothing, as it should.
+- The Bluetooth node's acks arrive. It sent 185 scan reports and 40 batches straight
+  after its scans, and none went unacknowledged.
+- An absent bridge costs the sweep nothing measurable. The heartbeat counter still
+  counts sweeps while nobody hears them, so its jump across the outage gives the sweep
+  rate without a bridge: 979, 1047, 1006, 1089, 1031 and 1069 ms per sweep, against
+  978, 1046, 1005, 1089, 1027 and 1068 ms with one. The failures were sparse (3, 6, 8
+  and 48 on the four nodes that had anything new to send; none on the other two),
+  because the dedup ring had already muted most of the room, and the one failed frame
+  per report is the most one can cost.
+- `seq` ran straight through the outage on every node, with no gap and no repeat.
+  Delivery resumed on replug without anything re-sent to a node. The "one more stored"
+  in the table is a node log line dropped on the USB link, not a record.
+- Once the bridge is powered, it acks whether or not a host is reading it. Batches
+  acked after `wartui` stopped were counted as reported and never stored, so a host
+  that stops while the fleet keeps running loses those sightings, as it did with
+  broadcast.
+- As the Bluetooth node, `10:D0` lost 24 of 202 heartbeats, in single beats about every
+  5.5 s. On the drive it lost 0.4% in the same role. The lost beats do not follow its
+  own batches (a batch in 16% of the cycles that lost a beat, against 18% of those
+  that did not), nor do they coincide with other nodes' frames. Heartbeats still
+  broadcast, so this is outside the change.
+
 ## Open questions
 
-- The per-failure retry cost with the bridge absent is not yet measured; phase 0 saw
-  31 retries in that state.
 - The next drive should show `batches_lost` near zero. `seq` now advances only on an
   ack, so the count holds only loss after the bridge's radio took the frame, and the
   findings above found none of that. The node's `unacked` count in its log lines is
   where the air loss shows now.
-- The Bluetooth node's reception of acks right after a scan is unmeasured — its
-  antenna is shared with the controller, and a unicast's wait falls right after a
-  sweep.
+- Swapping in a different bridge mid-run is covered by an engine test and not yet
+  run on hardware.
+- Whether the Bluetooth node's heartbeat loss on the bench shows up on the road.
