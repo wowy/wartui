@@ -92,8 +92,8 @@ location; see "Config file" below.
 ### Config file
 
 `wartui.toml` holds settings an operator wants to stop typing every run. It is read only for
-`run`, so a broken config cannot stop `ports`, `status` or `reset` from working. It is edited by
-hand or with `c`; see "At the keyboard" below.
+`run`, so a broken config cannot stop `ports`, `status` or `reset` from working. The settings
+modal (`c`) writes it, replacing the whole file on each save; see "At the keyboard" below.
 
 The default location is per OS:
 
@@ -112,9 +112,11 @@ Today it holds this:
 pool = "us"
 
 [tx-power]
-fleet = 10    # dBm, nodes
-bridge = 15   # dBm, bridge
+fleet = 10
+bridge = 15
 ```
+
+Both powers are whole dBm, `fleet` for the nodes and `bridge` for the bridge.
 
 `pool` takes `us`, `eu` or `all`, the same words `--pool` does. Precedence is flag, then file, then
 default: `--pool` beats `pool`, which beats `all`. A pool is fixed for the life of a run — see "At
@@ -167,15 +169,12 @@ has reported. Channels are not a key.
 
 `c` opens a modal with a row each for the pool, the nodes' transmit power, and the bridge's.
 `↑`/`↓` (or `j`/`k`) move between them, `←`/`→` (or `h`/`l`) step the selected row: a power by 1 dBm,
-the pool through `us → eu → all` — both stop at their ends rather than wrapping. `Enter` sends the
-powers to the engine: the bridge takes its value on its next status poll, the nodes on their next
-heartbeat. The pool can't change live, so moving its row and pressing `Enter` only warns that it
-needs a save and a restart. `s` sends the powers the same way and also writes each row that differs
-from what `wartui.toml` would start the next run with, so a power already applied with `Enter` is
-saved too — and skips a row `--node-tx-power`/`--bridge-tx-power`/`--pool` set and you left alone,
-since a flag still wins that row at the next start-up regardless. A saved pool change takes effect
-after a restart, and the notice says so. `Esc` or `q` closes the modal without changing anything; `ctrl-c` quits
-even while it is open.
+the pool through `all → eu → us` — both stop at their ends rather than wrapping. `Enter` sends the
+powers to the engine — the bridge takes its value on its next status poll, the nodes on their next
+heartbeat — and writes every row shown to `wartui.toml`'s `pool` and `[tx-power]` keys, whatever was
+there before, then closes the modal. The pool can't change live, so the notice says a restart is
+needed whenever the row was moved. `Esc` or `q` closes the modal without changing anything; `ctrl-c`
+quits even while it is open.
 
 ## How channels are assigned
 
