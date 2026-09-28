@@ -564,9 +564,9 @@ fn draw(frame: &mut Frame<'_>, snapshot: &Snapshot, ui: &mut Ui) {
     draw_header(frame, header, snapshot);
 
     // Side by side when there is room for both, stacked when there is not: the
-    // fleet table needs 79 columns before its state column starts clipping.
-    let [fleet, stream] = if body.width >= 119 {
-        Layout::horizontal([Constraint::Length(79), Constraint::Min(40)]).areas(body)
+    // fleet table needs 74 columns before its state column starts clipping.
+    let [fleet, stream] = if body.width >= 114 {
+        Layout::horizontal([Constraint::Length(74), Constraint::Min(40)]).areas(body)
     } else {
         Layout::vertical([Constraint::Percentage(45), Constraint::Percentage(55)]).areas(body)
     };
@@ -723,9 +723,8 @@ fn receiver(gps: &GpsView, source: PositionSource) -> Option<Span<'static>> {
 }
 
 fn draw_fleet(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot, ui: &mut Ui) {
-    let header =
-        Row::new(["node", "rssi", "beats", "obs", "lost", "last", "channels", "state"])
-            .style(Style::new().add_modifier(Modifier::BOLD));
+    let header = Row::new(["node", "rssi", "beats", "obs", "lost", "last", "channels", "state"])
+        .style(Style::new().add_modifier(Modifier::BOLD));
 
     let rows: Vec<Row<'_>> = snapshot
         .nodes
@@ -2245,6 +2244,8 @@ mod tests {
     #[test]
     fn fleet_table_shows_bluetooth_in_channel_column_when_node_holds_or_awaits_ble() {
         let mut snapshot = busy();
+        // The stream pane names nodes by the same octets, on the same lines.
+        snapshot.tail = Vec::new();
         let mac = snapshot.nodes[0].state.mac;
 
         // Adopted: confirmed and desired agree on the Bluetooth assignment,
