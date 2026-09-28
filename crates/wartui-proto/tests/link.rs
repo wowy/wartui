@@ -18,7 +18,7 @@ fn sample_commands() -> Vec<HostToBridge, 16> {
     let mut payload = Vec::new();
     payload
         .extend_from_slice(
-            &HeartbeatMsg { counter: 42, epoch: 0, capabilities: Capabilities::here(true, true) }
+            &HeartbeatMsg { counter: 42, epoch: 0, capabilities: Capabilities::here(true) }
                 .encode(),
         )
         .expect("212 fits in 250");

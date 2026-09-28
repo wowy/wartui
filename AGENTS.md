@@ -62,7 +62,7 @@ cargo run --release --features esp32c6        # runner is `espflash flash --moni
 
 cd firmware/node
 cargo fmt --all -- --check
-cargo clippy --release --features esp32c6     # and esp32c5, and each with ,ble
+cargo clippy --release --features esp32c6     # and esp32c5
 ```
 
 CI mirrors the workspace split: host crates on every push and PR; each firmware only

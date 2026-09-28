@@ -597,13 +597,13 @@ async fn beat(
     started: Instant,
 ) -> Result<(), ()> {
     // Capabilities are what tell the host this is a node it can drive, so a fleet
-    // without them is a fleet the planner ignores. Bluetooth is always claimed; the
-    // band is not, because a fleet where everything reaches 5 GHz never makes the
-    // planner leave a node out of a channel.
+    // without them is a fleet the planner ignores. The band varies by node, because
+    // a fleet where everything reaches 5 GHz never makes the planner leave a node
+    // out of a channel.
     let msg = HeartbeatMsg {
         counter: node.hb_counter,
         epoch: node.epoch,
-        capabilities: Capabilities::here(true, node.five_ghz),
+        capabilities: Capabilities::here(node.five_ghz),
     };
     send_frame(events, node.mac, &msg.encode(), started).await
 }

@@ -40,12 +40,6 @@ esp32c6 = [
   "dep:esp-wifi-sys-esp32c6",
 ]
 
-# Bluetooth scanning. Off by default: it costs a second radio, a coexistence
-# arbiter and roughly as much airtime per sweep as every channel dwell put
-# together (`docs/phase-0-findings.md`). Turn it on for the one node in a fleet
-# that should be collecting BLE.
-ble = ["esp-radio/ble", "esp-radio/coex"]
-
 # Diagnostics on the USB serial port. Unlike the bridge, a node has no link
 # protocol sharing that endpoint, so printing to it is free and is the only
 # window into a device with no display.
@@ -72,6 +66,8 @@ esp-println = { version = "0.18.0", default-features = false, features = [
   "jtag-serial",
 ], optional = true }
 esp-radio = { version = "1.0.0-beta.0", default-features = false, features = [
+  "ble",
+  "coex",
   "esp-alloc",
   "esp-now",
   "sniffer",

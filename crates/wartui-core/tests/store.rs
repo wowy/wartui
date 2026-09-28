@@ -138,7 +138,7 @@ fn store_persists_and_reads_all_record_types_when_round_tripped() {
                 mac: NODE,
                 first_seen_ms: EPOCH_MS,
                 last_seen_ms: EPOCH_MS,
-                capabilities: Some("wartui/0.1;ble,5g".to_owned()),
+                capabilities: Some("wartui/0.1;5g".to_owned()),
             }),
             Record::Heartbeat(Heartbeat {
                 node_mac: NODE,
@@ -178,7 +178,7 @@ fn node_tracker_updates_last_seen_and_preserves_first_seen_when_re_observed() {
                 mac: NODE,
                 first_seen_ms: EPOCH_MS,
                 last_seen_ms: EPOCH_MS,
-                capabilities: Some("wartui/0.1;ble,5g".to_owned()),
+                capabilities: Some("wartui/0.1;5g".to_owned()),
             }),
             // The row that would erase the identity if the upsert wrote
             // `excluded.capabilities` straight in.
@@ -197,7 +197,7 @@ fn node_tracker_updates_last_seen_and_preserves_first_seen_when_re_observed() {
         })
         .unwrap();
     assert_eq!((first, last), (EPOCH_MS, EPOCH_MS + 60_000));
-    assert_eq!(caps.as_deref(), Some("wartui/0.1;ble,5g"), "what it last said it was, kept");
+    assert_eq!(caps.as_deref(), Some("wartui/0.1;5g"), "what it last said it was, kept");
 }
 
 #[test]

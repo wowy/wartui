@@ -53,37 +53,28 @@ carries no other instruction. `crates/wartui-proto/src/dedup.rs` has the reasoni
 
 **It says what it is, and what it holds, in every heartbeat.** One byte is the epoch of the
 assignment adopted, or 0 for none — how the host tells adoption from a MAC-layer ack without asking
-the node's own console. Three more are a version and a feature byte, shown by the host as:
+the node's own console. Three more are a version and a capability byte, shown by the host as:
 
 ```
-wartui/1.0;ble,5g
+wartui/1.0;5g
 ```
 
-The protocol version, then what this node can do: `ble` if the cargo feature is compiled in *and*
-the Bluetooth controller started, `5g` if the chip has the radio for it — a C5 does, a C6 does not.
-`ble` says the scan is there to be run, not that it is running; that is the core's decision and is
-off at every boot.
-
-The controller is why this is read at runtime rather than off `cfg!`. A `ble` build whose controller
-refuses to start would otherwise claim a scan it cannot run — and since the core deals that node no
-channels, it would sniff nothing either. Claiming nothing is how it stays a Wi-Fi node.
+The protocol version, then `5g` if the chip has the radio for it — a C5 does, a C6 does not.
+Bluetooth is not a capability: every node can scan it, and the core's `ADMIN_FLAG_BLE` decides
+whether one does, off at every boot.
 
 The host deals no channels to a node until it has heard this. Every heartbeat carries it rather than
-only the first, because one sent once is one lost to a dropped frame — and because a board reflashed
-with something else should stop claiming the old build's features.
+only the first, because one sent once is one lost to a dropped frame.
 
-Both bits are acted on rather than merely recorded. A build without `5g` is dealt no 5 GHz channel,
-because it would adopt the share, acknowledge it and scan only the part it could reach. A node
-without `ble` is refused the Bluetooth scan, and loses it — getting a share of the pool back in the
-same frame — if it was already holding one when it announced itself. Neither refusal needs anything
-of this firmware: these three bytes are the whole of what the host has to go on, so getting them
-wrong here is indistinguishable from lying about it.
+The bit is acted on rather than merely recorded: a build without `5g` is dealt no 5 GHz channel,
+because it would adopt the share, acknowledge it and scan only the part it could reach. This
+firmware needs nothing beyond it: this one byte is the whole of what the host has to go on, so
+getting it wrong here is indistinguishable from lying about it.
 
 ## Building and flashing
 
 ```sh
 cargo run --release --features esp32c6            # or --features esp32c5
-cargo run --release --features esp32c6,ble        # with Bluetooth
 cargo run --release --no-default-features --features esp32c6   # without diagnostics
 cargo run --release --features esp32c6,xiao-external-antenna  # XIAO C6, antenna on U.FL
 ```
@@ -97,13 +88,8 @@ and nothing else — a node that is not saying anything is hard to tell from a n
 working. The cargo runner is `espflash flash --monitor` with no `--chip`, so espflash detects the
 part. Unlike the bridge, the monitor is worth watching: nothing but diagnostics goes down that pipe.
 
-| Build         | Flash  |
-| ------------- | ------ |
-| `esp32c6`     | 512 KB |
-| `esp32c6,ble` | 760 KB |
-
-A `ble` build is not a node that scans Bluetooth. It is a node that _can_, if the core sets the
-flag — and a node that does scans nothing else.
+Every node can scan Bluetooth; it does so only if the core sets the flag — and a node that does
+scans nothing else. The `esp32c6` release image is about 757 KB.
 
 `xiao-external-antenna` is for a Seeed XIAO ESP32-C6 with an antenna on its U.FL connector. The
 board switches its one RF pin between that connector and an onboard ceramic antenna, and without the
@@ -135,11 +121,11 @@ the driver.
 ## Bluetooth is a whole node's job, and only when the core asks
 
 **At most one node scans, and the core decides which.** Bit 0 of the assignment's flags byte carries
-it, clear at every boot regardless of how the firmware was built: the `ble` cargo feature decides
-whether any of this is compiled in, and the flag decides whether it runs. The frame that sets it
-carries **no channels**, and that is not an accident of the encoding — an empty mask with the flag
-beside it means "Bluetooth is all of it", and an empty mask without the flag is the one thing the
-core never sends, which this firmware treats as never having been told anything at all.
+it, clear at every boot on every build: Bluetooth scanning is always compiled in, and the flag
+decides whether it runs. The frame that sets it carries **no channels**, and that is not an accident
+of the encoding — an empty mask with the flag beside it means "Bluetooth is all of it", and an empty
+mask without the flag is the one thing the core never sends, which this firmware treats as never
+having been told anything at all.
 
 The reason is a measured cost. A stock node with BLE on acknowledged none of thirty-two assignments:
 the two radios share the one 2.4 GHz antenna, and the admin window is precisely when a node is
@@ -163,11 +149,11 @@ the end of every scan rather than merely being waited on — an initialised host
 finished scan can keep the radio. And the node's Wi-Fi radio never leaves the control channel, so
 the scan is the only thing that ever takes the antenna from it.
 
-The controller is brought up at boot on a `ble` build, because initialising a radio between a dwell
+The controller is brought up at boot on every build, because initialising a radio between a dwell
 and an admin window is exactly the kind of surprise this firmware exists to avoid. It is initialised
 and never enabled — `HCI_LE_Set_Scan_Enable` is only ever sent from inside a scan. A controller that
-will not start is announced as no `ble` in every heartbeat, so the core never asks that node for the
-scan and it stays a Wi-Fi node.
+will not start leaves a node handed the scan parked, sniffing nothing, and says so on its own
+console — the host cannot tell, since capabilities carry no Bluetooth bit for it to withhold.
 
 There is no host stack. `esp-radio` exposes the controller as a raw HCI pipe and all this firmware
 wants is an address, a signal strength and — when an advertiser offers one — its manufacturer
