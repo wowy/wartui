@@ -394,8 +394,8 @@ batch's sequence advances only once its node's radio gets a MAC-layer ack for it
 loss after the bridge's radio took the frame — its receive queue or the USB path to the host — not
 loss on the air. Each one lost is everything a dwell or a Bluetooth scan produced, up to about a
 dozen access points, and those addresses stay hidden the same way a lost frame always has: until the
-node's own five-minute refresh reports them again. The footer's `lost N` is the same count summed
-across the fleet, and appears only once something has been.
+node's own five-minute refresh reports them again. The column appears only once some node has lost
+a batch. The footer's `lost N` is the same count summed across the fleet, and follows the same rule.
 
 The footer's `dup N` is different: batches dropped because they are the same `seq`,
 byte-identical to the one just before them, and arrived within 100 ms of it — a node's radio
