@@ -186,8 +186,8 @@ no sane column is wide enough for all of them.
 An assignment is believed only when the node's own radio acknowledges it at the MAC layer, never
 when the bridge reports a successful enqueue — but an ack is not proof the node actually took the
 frame. Every heartbeat carries the epoch the node holds, and adoption is that separate, stronger
-fact: `channels` and `ble` show the acknowledged set in blue with a trailing `…` until the node's
-own heartbeat reports holding it, usually within 5 s of the admin window landing, then turn plain
+fact: `channels` shows the acknowledged set in blue with a trailing `…` until the node's
+own heartbeat reports holding it, usually within 5 s of the admin window landing, then turns plain
 (or cyan for Bluetooth). If a heartbeat instead reports some *other* epoch than the one acknowledged,
 wartui re-sends the same epoch in the window that heartbeat opened, and the footer counts it under
 "acknowledged but not adopted".
@@ -201,9 +201,10 @@ its Wi-Fi radio never leaves the control channel.
 
 **At most one node scans Bluetooth, by default none does, and it is that node's whole job.** The scan
 is off at every boot; `b` is what turns it on. `b` on the selected node gives it the scan; `b` again
-on the node that holds it takes it off the fleet. The `ble` column says who has it, and reads `on…`
-or `off…` while a change waits for that node's next admin window, the same way `channels` does — and
-that node's `channels` column reads `bluetooth`, because it is dealt none.
+on the node that holds it takes it off the fleet. The `channels` column says who has it: it reads
+`bluetooth` because that node is dealt no channels, and `bluetooth…` while the change waits for its
+next admin window. Taking the scan off shows as that node's new channel share, pending with a
+yellow `…`.
 
 It costs a whole node because the two radios share the one 2.4 GHz antenna, and a node that also
 sweeps has to hand it back in time for every admin window it must answer in — which a stock node
@@ -347,7 +348,7 @@ chip.
 | `refused`      | The bridge would not transmit it — nearly always a full peer table. Its heartbeats are still arriving; what is missing is a slot to address it through |
 | `rebooted xN`  | Its heartbeat counter went backwards, or its epoch went back to 0, so it has forgotten any assignment; wartui re-issues under a fresh epoch            |
 
-The `channels` and `ble` columns turn blue with a trailing `…` when a node's radio has acknowledged
+The `channels` column turns blue with a trailing `…` when a node's radio has acknowledged
 an assignment but its own heartbeat has not yet said it holds it — see
 [How channels are assigned](#how-channels-are-assigned). If that gap does not close, the footer
 counts it under "assignments acknowledged but not adopted", distinct from `no admin ack`'s

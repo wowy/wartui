@@ -564,9 +564,9 @@ fn draw(frame: &mut Frame<'_>, snapshot: &Snapshot, ui: &mut Ui) {
     draw_header(frame, header, snapshot);
 
     // Side by side when there is room for both, stacked when there is not: the
-    // fleet table needs 79 columns before its state column starts clipping.
-    let [fleet, stream] = if body.width >= 119 {
-        Layout::horizontal([Constraint::Length(79), Constraint::Min(40)]).areas(body)
+    // fleet table needs 74 columns before its state column starts clipping.
+    let [fleet, stream] = if body.width >= 114 {
+        Layout::horizontal([Constraint::Length(74), Constraint::Min(40)]).areas(body)
     } else {
         Layout::vertical([Constraint::Percentage(45), Constraint::Percentage(55)]).areas(body)
     };
@@ -723,9 +723,8 @@ fn receiver(gps: &GpsView, source: PositionSource) -> Option<Span<'static>> {
 }
 
 fn draw_fleet(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot, ui: &mut Ui) {
-    let header =
-        Row::new(["node", "rssi", "beats", "obs", "lost", "last", "ble", "channels", "state"])
-            .style(Style::new().add_modifier(Modifier::BOLD));
+    let header = Row::new(["node", "rssi", "beats", "obs", "lost", "last", "channels", "state"])
+        .style(Style::new().add_modifier(Modifier::BOLD));
 
     let rows: Vec<Row<'_>> = snapshot
         .nodes
@@ -739,7 +738,6 @@ fn draw_fleet(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot, ui: &mut U
                 Cell::from(node.state.observations.to_string()),
                 Cell::from(lost_cell(node)),
                 Cell::from(ago(snapshot.now_ms - node.state.last_seen_ms)),
-                Cell::from(ble_cell(node)),
                 Cell::from(channels_cell(node)),
                 Cell::from(state).style(style),
             ])
@@ -753,7 +751,6 @@ fn draw_fleet(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot, ui: &mut U
         Constraint::Length(6),
         Constraint::Length(5),
         Constraint::Length(5),
-        Constraint::Length(4),
         Constraint::Length(CHANNELS_WIDTH),
         Constraint::Min(12),
     ];
@@ -842,32 +839,6 @@ fn lost_cell(node: &NodeView) -> String {
     } else {
         node.state.batches_lost.to_string()
     }
-}
-
-/// Whether this node is the one carrying the Bluetooth scan.
-///
-/// Read off the assignment rather than the snapshot's `ble_node`, so it says what
-/// the *node* is doing: the two differ for as long as an assignment takes to be
-/// acknowledged or adopted, and that gap is where a coexistence failure lives.
-/// The same three states as [`channels_cell`]: pending yellow, acked-not-adopted
-/// blue, adopted cyan.
-fn ble_cell(node: &NodeView) -> Span<'static> {
-    let state = &node.state;
-    if state.dirty
-        && let Some(desired) = state.desired
-        && desired.ble != state.confirmed.is_some_and(|c| c.ble)
-    {
-        let label = if desired.ble { "on…" } else { "off…" };
-        return Span::styled(label, Style::new().fg(Color::Yellow));
-    }
-    if state.confirmed.is_some_and(|c| c.ble) {
-        return if state.adopted() {
-            Span::styled("ble", Style::new().fg(Color::Cyan))
-        } else {
-            Span::styled("ble…", Style::new().fg(Color::Blue))
-        };
-    }
-    Span::raw("")
 }
 
 /// Which chip a node is and the last two octets of its address: `C5 57:84`.
@@ -2024,27 +1995,6 @@ mod tests {
     }
 
     #[test]
-    fn ble_cell_renders_blue_when_acknowledged_but_not_adopted() {
-        let mut view = acked_not_adopted(0x11);
-        view.state.confirmed = view.state.confirmed.map(|a| Assignment { ble: true, ..a });
-        view.state.desired = view.state.confirmed;
-        let cell = ble_cell(&view);
-        assert_eq!(cell.content, "ble…");
-        assert_eq!(cell.style.fg, Some(Color::Blue));
-    }
-
-    #[test]
-    fn ble_cell_renders_cyan_when_adopted() {
-        let mut view = assigned(0x11);
-        view.state.confirmed = view.state.confirmed.map(|a| Assignment { ble: true, ..a });
-        view.state.desired = view.state.confirmed;
-        adopt(&mut view.state);
-        let cell = ble_cell(&view);
-        assert_eq!(cell.content, "ble");
-        assert_eq!(cell.style.fg, Some(Color::Cyan));
-    }
-
-    #[test]
     fn ui_displays_specific_refusal_notice_when_toggling_ble_on_unassignable_node() {
         // Three faults all end in a refused `b` and the operator's next move
         // differs for each, so one wording for all three misdirects two.
@@ -2292,21 +2242,39 @@ mod tests {
     }
 
     #[test]
-    fn fleet_table_shows_ble_assignment_status_when_node_holds_or_awaits_ble() {
+    fn fleet_table_shows_bluetooth_in_channel_column_when_node_holds_or_awaits_ble() {
         let mut snapshot = busy();
-        snapshot.ble_node = Some(snapshot.nodes[0].state.mac);
-        if let Some(confirmed) = snapshot.nodes[0].state.confirmed.as_mut() {
-            confirmed.ble = true;
-        }
+        // The stream pane names nodes by the same octets, on the same lines.
+        snapshot.tail = Vec::new();
+        let mac = snapshot.nodes[0].state.mac;
+
+        // Adopted: confirmed and desired agree on the Bluetooth assignment,
+        // and the node's own heartbeat has said it holds it.
+        let existing = snapshot.nodes[0].state.confirmed.expect("assigned() sets one");
+        let ble = Assignment { channels: ChannelSet::empty(), ble: true, ..existing };
+        snapshot.nodes[0].state.confirmed = Some(ble);
+        snapshot.nodes[0].state.desired = Some(ble);
+        adopt(&mut snapshot.nodes[0].state);
+        snapshot.ble_node = Some(mac);
+
+        // Still dirty: sent but not yet acknowledged.
         if let Some(desired) = snapshot.nodes[3].state.desired.as_mut() {
+            desired.channels = ChannelSet::empty();
             desired.ble = true;
         }
 
         let mut terminal = Terminal::new(TestBackend::new(160, 20)).expect("test backend");
         terminal.draw(|frame| draw(frame, &snapshot, &mut Ui::default())).expect("drawing");
         let rendered = terminal.backend().to_string();
-        assert!(rendered.contains(" ble "), "the node whose radio confirmed it");
-        assert!(rendered.contains("on…"), "and the node still waiting on its window");
+
+        let adopted_row =
+            rendered.lines().find(|line| line.contains("57:84")).expect("the adopted node's row");
+        assert!(adopted_row.contains("bluetooth"), "got {adopted_row}");
+        assert!(!adopted_row.contains("bluetooth…"), "adopted, not pending: {adopted_row}");
+
+        let pending_row =
+            rendered.lines().find(|line| line.contains("57:87")).expect("the pending node's row");
+        assert!(pending_row.contains("bluetooth…"), "got {pending_row}");
     }
 
     #[test]
