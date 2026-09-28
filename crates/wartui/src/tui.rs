@@ -724,7 +724,7 @@ fn receiver(gps: &GpsView, source: PositionSource) -> Option<Span<'static>> {
 
 fn draw_fleet(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot, ui: &mut Ui) {
     let header =
-        Row::new(["node", "rssi", "beats", "obs", "lost", "last", "ble", "channels", "state"])
+        Row::new(["node", "rssi", "beats", "obs", "lost", "last", "channels", "state"])
             .style(Style::new().add_modifier(Modifier::BOLD));
 
     let rows: Vec<Row<'_>> = snapshot
@@ -739,7 +739,6 @@ fn draw_fleet(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot, ui: &mut U
                 Cell::from(node.state.observations.to_string()),
                 Cell::from(lost_cell(node)),
                 Cell::from(ago(snapshot.now_ms - node.state.last_seen_ms)),
-                Cell::from(ble_cell(node)),
                 Cell::from(channels_cell(node)),
                 Cell::from(state).style(style),
             ])
@@ -753,7 +752,6 @@ fn draw_fleet(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot, ui: &mut U
         Constraint::Length(6),
         Constraint::Length(5),
         Constraint::Length(5),
-        Constraint::Length(4),
         Constraint::Length(CHANNELS_WIDTH),
         Constraint::Min(12),
     ];
@@ -842,32 +840,6 @@ fn lost_cell(node: &NodeView) -> String {
     } else {
         node.state.batches_lost.to_string()
     }
-}
-
-/// Whether this node is the one carrying the Bluetooth scan.
-///
-/// Read off the assignment rather than the snapshot's `ble_node`, so it says what
-/// the *node* is doing: the two differ for as long as an assignment takes to be
-/// acknowledged or adopted, and that gap is where a coexistence failure lives.
-/// The same three states as [`channels_cell`]: pending yellow, acked-not-adopted
-/// blue, adopted cyan.
-fn ble_cell(node: &NodeView) -> Span<'static> {
-    let state = &node.state;
-    if state.dirty
-        && let Some(desired) = state.desired
-        && desired.ble != state.confirmed.is_some_and(|c| c.ble)
-    {
-        let label = if desired.ble { "on…" } else { "off…" };
-        return Span::styled(label, Style::new().fg(Color::Yellow));
-    }
-    if state.confirmed.is_some_and(|c| c.ble) {
-        return if state.adopted() {
-            Span::styled("ble", Style::new().fg(Color::Cyan))
-        } else {
-            Span::styled("ble…", Style::new().fg(Color::Blue))
-        };
-    }
-    Span::raw("")
 }
 
 /// Which chip a node is and the last two octets of its address: `C5 57:84`.
@@ -2021,27 +1993,6 @@ mod tests {
         let cell = channels_cell(&view);
         assert!(!cell.content.ends_with('…'), "adopted, not stuck waiting");
         assert_eq!(cell.style.fg, None, "plain, not coloured");
-    }
-
-    #[test]
-    fn ble_cell_renders_blue_when_acknowledged_but_not_adopted() {
-        let mut view = acked_not_adopted(0x11);
-        view.state.confirmed = view.state.confirmed.map(|a| Assignment { ble: true, ..a });
-        view.state.desired = view.state.confirmed;
-        let cell = ble_cell(&view);
-        assert_eq!(cell.content, "ble…");
-        assert_eq!(cell.style.fg, Some(Color::Blue));
-    }
-
-    #[test]
-    fn ble_cell_renders_cyan_when_adopted() {
-        let mut view = assigned(0x11);
-        view.state.confirmed = view.state.confirmed.map(|a| Assignment { ble: true, ..a });
-        view.state.desired = view.state.confirmed;
-        adopt(&mut view.state);
-        let cell = ble_cell(&view);
-        assert_eq!(cell.content, "ble");
-        assert_eq!(cell.style.fg, Some(Color::Cyan));
     }
 
     #[test]
