@@ -238,16 +238,21 @@ fn ble_pending_drops_newest_when_full() {
 }
 
 #[test]
-fn ble_pending_counts_each_turned_away_report_when_full() {
-    // The counter is packets, not advertisers: one address with no room
-    // counts again on every repeat within the scan.
+fn ble_pending_counts_advertiser_once_when_repeated_while_full() {
+    // The counter is advertisers, not packets: one address with no room
+    // counts once however often it repeats within the scan, and again in the next.
     let mut pending = BlePending::<1>::new();
     pending.record(report(1, -60, None), due);
     for _ in 0..3 {
         pending.record(report(2, -60, None), due);
     }
-    assert_eq!(pending.dropped(), 3);
+    assert_eq!(pending.dropped(), 1);
     assert_eq!(pending.len(), 1);
+
+    pending.clear();
+    pending.record(report(1, -60, None), due);
+    pending.record(report(2, -60, None), due);
+    assert_eq!(pending.dropped(), 2, "a new scan counts it again");
 }
 
 #[test]

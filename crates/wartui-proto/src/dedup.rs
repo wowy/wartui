@@ -269,3 +269,65 @@ impl<const N: usize, const S: usize> Default for MacRing<N, S> {
         Self::new()
     }
 }
+
+/// Addresses a full buffer turned away, counted once per dwell or scan.
+///
+/// A pending buffer that is full turns an address away on every frame it sends, and an
+/// access point beacons about ten times a dwell, so a count of refused packets measures
+/// how loud the neighbourhood is rather than how many networks went unreported. This
+/// counts each address once until [`Self::reset`], which the caller runs at the start of
+/// each dwell or scan.
+///
+/// [`Self::note`] runs inside the Wi-Fi receive callback's lock, so its cost is fixed:
+/// one hash and one bit, however many addresses are refused. The price is that two
+/// addresses sharing one of the 1024 bits in a dwell count once — about 1 in 50 at 50
+/// refusals — so the total slightly undercounts. The hash is fixed; radio addresses are
+/// not an adversary worth defending a diagnostic count against.
+#[derive(Debug, Clone)]
+pub struct Refused {
+    /// One bit per hash of an address refused since the last [`Self::reset`].
+    seen: [u32; 32],
+    /// Addresses counted since construction. Wraps.
+    total: u16,
+}
+
+impl Refused {
+    /// Nothing refused, `const` so it can sit in a `static`.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { seen: [0; 32], total: 0 }
+    }
+
+    /// Count `addr` as refused, unless it already was since the last [`Self::reset`].
+    pub fn note(&mut self, addr: &[u8; 6]) {
+        // FNV-1a over the address, folded to the bitset's 10 bits.
+        let mut h: u32 = 0x811C_9DC5;
+        for &b in addr {
+            h = (h ^ u32::from(b)).wrapping_mul(0x0100_0193);
+        }
+        let bit = (h ^ (h >> 10) ^ (h >> 20)) & 0x3FF;
+        let word = &mut self.seen[(bit >> 5) as usize];
+        let mask = 1 << (bit & 31);
+        if *word & mask == 0 {
+            *word |= mask;
+            self.total = self.total.wrapping_add(1);
+        }
+    }
+
+    /// Start a new dwell or scan: every address counts again. The total carries on.
+    pub fn reset(&mut self) {
+        self.seen = [0; 32];
+    }
+
+    /// Addresses refused since construction, once per dwell or scan each. Wraps.
+    #[must_use]
+    pub const fn total(&self) -> u16 {
+        self.total
+    }
+}
+
+impl Default for Refused {
+    fn default() -> Self {
+        Self::new()
+    }
+}

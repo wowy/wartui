@@ -55,11 +55,11 @@ const _: () = assert!(
 /// Slots go only to advertisers due to be reported: [`Scanner::sweep`] asks
 /// [`sniff::SEEN`] before an address takes one, so an advertiser the host already
 /// has costs nothing however often it repeats. An ordinary room filled about 60
-/// of it (`docs/phase-1-findings.md`), and overflow drops the *newest* advertiser
-/// against a counter no host reads — the one failure here nothing would notice —
+/// of it (`docs/phase-1-findings.md`), and overflow drops the *newest* advertiser,
 /// so the number sits well clear of the measurement rather than just above it.
-/// That counter, [`dropped`], counts packets turned away rather than advertisers,
-/// and it is the only sign of saturation: the console's `heard` is capped here.
+/// [`dropped`] counts those advertisers, once per scan each, and it is the only
+/// sign of saturation: the console's `heard` is capped here. The heartbeat carries
+/// it to the host, which shows the fleet's total as `ble drop`.
 ///
 /// It is also the ceiling on the burst: `report_ble` drains the sweep into
 /// `Outgoing` batches unicast to the core before the next scan starts, so this is
@@ -87,9 +87,9 @@ pub fn take() -> Option<AdvReport> {
     PENDING.with(BlePending::take)
 }
 
-/// Reports turned away by a full buffer since boot. Packets, not advertisers:
-/// an address that finds no room counts again on every repeat within a sweep.
-pub fn dropped() -> u32 {
+/// Advertisers turned away by a full buffer since boot, each counted once per
+/// sweep however often it repeats. Wraps.
+pub fn dropped() -> u16 {
     PENDING.with(|pending| pending.dropped())
 }
 

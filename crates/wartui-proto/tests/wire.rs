@@ -20,6 +20,8 @@ const HEARTBEAT: &[u8] = &[
     0x78, 0x56, 0x34, 0x12, // counter 0x1234_5678, little-endian
     0x05, // epoch
     0x01, 0x00, 0x01, // capabilities: major 1, minor 0, 5g
+    0x2A, 0x00, // wifi_dropped 42, little-endian
+    0x04, 0x03, // ble_dropped 0x0304, little-endian
 ];
 
 /// A heartbeat from a node parked since boot: epoch 0, never sent by the host.
@@ -28,6 +30,8 @@ const HEARTBEAT_NO_EPOCH: &[u8] = &[
     0x78, 0x56, 0x34, 0x12, // counter 0x1234_5678, little-endian
     0x00, // epoch: none held
     0x01, 0x00, 0x01, // capabilities: major 1, minor 0, 5g
+    0x00, 0x00, // wifi_dropped 0
+    0x00, 0x00, // ble_dropped 0
 ];
 
 /// A Wi-Fi record: no header of its own, since [`SightingBatch`] carries one
@@ -178,7 +182,7 @@ fn wire_codec_matches_expected_frame_lengths_when_checking_constants() {
     // ceiling is ESP-NOW's own — a payload over 250 bytes cannot be sent, and
     // a batch is packed to fill exactly that many.
     const {
-        assert!(HEARTBEAT_MSG_LEN < 20 && SIGHTING_RECORD_MAX < SIGHTING_BATCH_MAX);
+        assert!(HEARTBEAT_MSG_LEN < 32 && SIGHTING_RECORD_MAX < SIGHTING_BATCH_MAX);
         assert!(SIGHTING_BATCH_MAX == 250);
     };
 }
@@ -211,6 +215,8 @@ fn heartbeat_msg_serializes_byte_for_byte_when_encoded_and_decoded() {
         counter: 0x1234_5678,
         epoch: 5,
         capabilities: Capabilities { major: 1, minor: 0, five_ghz: true },
+        wifi_dropped: 42,
+        ble_dropped: 0x0304,
     };
     assert_eq!(msg.encode().as_slice(), HEARTBEAT);
     assert_eq!(HeartbeatMsg::decode(HEARTBEAT), Ok(msg));
@@ -222,6 +228,8 @@ fn heartbeat_msg_serializes_epoch_zero_when_node_holds_no_assignment() {
         counter: 0x1234_5678,
         epoch: 0,
         capabilities: Capabilities { major: 1, minor: 0, five_ghz: true },
+        wifi_dropped: 0,
+        ble_dropped: 0,
     };
     assert_eq!(msg.encode().as_slice(), HEARTBEAT_NO_EPOCH);
     assert_eq!(HeartbeatMsg::decode(HEARTBEAT_NO_EPOCH), Ok(msg));
@@ -234,6 +242,29 @@ fn heartbeat_msg_serializes_counter_as_little_endian_when_encoded() {
     let decoded = HeartbeatMsg::decode(HEARTBEAT).expect("valid");
     assert_eq!(decoded.counter, 0x1234_5678);
     assert_eq!(&HEARTBEAT[6..10], &[0x78, 0x56, 0x34, 0x12]);
+}
+
+#[test]
+fn heartbeat_msg_serializes_drop_counts_as_little_endian_when_encoded() {
+    let decoded = HeartbeatMsg::decode(HEARTBEAT).expect("valid");
+    assert_eq!(decoded.wifi_dropped, 42);
+    assert_eq!(decoded.ble_dropped, 0x0304);
+    assert_eq!(&HEARTBEAT[14..16], &[0x2A, 0]);
+    assert_eq!(&HEARTBEAT[16..18], &[0x04, 0x03]);
+}
+
+#[test]
+fn heartbeat_msg_rejects_frame_when_node_sends_fourteen_byte_heartbeat() {
+    // A node flashed from a tree whose heartbeat carries no drop counts. The
+    // engine counts this as incompatible and asks for a reflash.
+    assert_eq!(
+        HeartbeatMsg::decode(&HEARTBEAT[..14]),
+        Err(DecodeError::BadLength { need: HEARTBEAT_MSG_LEN, got: 14 })
+    );
+    assert_eq!(
+        Frame::decode(&HEARTBEAT[..14]),
+        Err(DecodeError::BadLength { need: HEARTBEAT_MSG_LEN, got: 14 })
+    );
 }
 
 #[test]

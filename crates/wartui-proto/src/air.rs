@@ -64,7 +64,7 @@ pub const SSID_MAX: usize = 32;
 pub const EXT_MAX: usize = 17;
 
 /// Length of [`HeartbeatMsg`] on the wire.
-pub const HEARTBEAT_MSG_LEN: usize = OFF_BODY + 8;
+pub const HEARTBEAT_MSG_LEN: usize = OFF_BODY + 12;
 
 /// Length of [`AdminMsg`] on the wire.
 pub const ADMIN_MSG_LEN: usize = OFF_BODY + 2 + CHANNEL_SET_BYTES + 1;
@@ -310,6 +310,15 @@ pub struct HeartbeatMsg {
     pub epoch: u8,
     /// What that node is.
     pub capabilities: Capabilities,
+    /// Access points a full pending ring turned away since boot, each counted once per
+    /// dwell (`dedup::Refused`). Wraps. Most are reported on a later dwell, so this
+    /// measures the ring against the neighbourhood rather than counting losses; the host
+    /// reads it as a difference between heartbeats.
+    pub wifi_dropped: u16,
+    /// Advertisers a full pending buffer turned away since boot, each counted once per
+    /// scan. Wraps, and is read as a difference like `wifi_dropped`. 0 on a node that has
+    /// never held the Bluetooth scan.
+    pub ble_dropped: u16,
 }
 
 impl HeartbeatMsg {
@@ -331,6 +340,7 @@ impl HeartbeatMsg {
             buf[OFF_BODY + 2],
             buf[OFF_BODY + 3],
         ]);
+        let le = |at: usize| u16::from_le_bytes([buf[at], buf[at + 1]]);
         Ok(Self {
             counter,
             epoch: buf[OFF_BODY + 4],
@@ -339,10 +349,12 @@ impl HeartbeatMsg {
                 buf[OFF_BODY + 6],
                 buf[OFF_BODY + 7],
             ),
+            wifi_dropped: le(OFF_BODY + 8),
+            ble_dropped: le(OFF_BODY + 10),
         })
     }
 
-    /// Encode to the fourteen bytes a heartbeat is.
+    /// Encode to the eighteen bytes a heartbeat is.
     #[must_use]
     pub fn encode(&self) -> [u8; HEARTBEAT_MSG_LEN] {
         let mut out = [0u8; HEARTBEAT_MSG_LEN];
@@ -352,6 +364,8 @@ impl HeartbeatMsg {
         out[OFF_BODY + 5] = self.capabilities.major;
         out[OFF_BODY + 6] = self.capabilities.minor;
         out[OFF_BODY + 7] = self.capabilities.flags();
+        out[OFF_BODY + 8..OFF_BODY + 10].copy_from_slice(&self.wifi_dropped.to_le_bytes());
+        out[OFF_BODY + 10..OFF_BODY + 12].copy_from_slice(&self.ble_dropped.to_le_bytes());
         out
     }
 }
