@@ -106,13 +106,19 @@ The default location is per OS:
 Naming a file that does not exist is refused; a missing default file is not — an operator who has
 never written one gets the built-in defaults, silently.
 
-Today it holds one table:
+Today it holds this:
 
 ```toml
+pool = "us"
+
 [tx-power]
 fleet = 10    # dBm, nodes
 bridge = 15   # dBm, bridge
 ```
+
+`pool` takes `us`, `eu` or `all`, the same words `--pool` does. Precedence is flag, then file, then
+default: `--pool` beats `pool`, which beats `all`. A pool is fixed for the life of a run — see "At
+the keyboard" below for what changing it in the modal costs.
 
 `fleet` and `bridge` are independent, the same as `--node-tx-power` and `--bridge-tx-power` are.
 Precedence is flag, then file, then default, resolved separately for each: `--node-tx-power` beats
@@ -120,8 +126,8 @@ Precedence is flag, then file, then default, resolved separately for each: `--no
 falls back to the other's.
 
 An unknown key or table makes wartui refuse to start, naming the file and the line; an
-out-of-range value does too, naming the file and the key — the same way an out-of-range
-`--node-tx-power` is refused.
+out-of-range value or an unknown `pool` spelling does too, naming the file and the key — the same
+way an out-of-range `--node-tx-power` is refused.
 
 ### Benchmarking the store
 
@@ -149,7 +155,7 @@ far.
 | ---------------------- | ---------------------------------------------------------------------- |
 | `↑` `↓` / `k` `j`      | Move the cursor down the fleet table                                   |
 | `b`                    | Make the selected node the Bluetooth scanner, or take the scan off    |
-| `c`                    | Open the transmit-power settings modal                                |
+| `c`                    | Open the settings modal (transmit power and pool)                     |
 | `r`                    | Clear the selected node's dedup ring on its next heartbeat            |
 | `R`                    | Clear every assignable node's dedup ring, each on its next heartbeat  |
 | `q` / `Esc` / `ctrl-c` | Stop, committing the last batch                                        |
@@ -159,14 +165,17 @@ instead of Wi-Fi; it reaches that node's share only by being an input to the pla
 the only author of one. `r` and `R` ask a node, or every assignable one, to forget every address it
 has reported. Channels are not a key.
 
-`c` opens a modal for the fleet's transmit power, with a row each for the nodes and the bridge.
-`↑`/`↓` (or `j`/`k`) move between them, `←`/`→` (or `h`/`l`) step the selected value by 1 dBm, and
-`Enter` sends it to the engine: the bridge takes it on its next status poll, the nodes on their next
-heartbeat. `s` does the same and also writes each row that differs from what `wartui.toml` would
-start the next run with, so a value already applied with `Enter` is saved too — and skips a row
-`--node-tx-power`/`--bridge-tx-power` set and you left alone, since a flag still wins that row at
-the next start-up regardless. `Esc` or `q` closes the modal without changing anything; `ctrl-c`
-quits even while it is open.
+`c` opens a modal with a row each for the pool, the nodes' transmit power, and the bridge's.
+`↑`/`↓` (or `j`/`k`) move between them, `←`/`→` (or `h`/`l`) step the selected row: a power by 1 dBm,
+the pool through `us → eu → all` — both stop at their ends rather than wrapping. `Enter` sends the
+powers to the engine: the bridge takes its value on its next status poll, the nodes on their next
+heartbeat. The pool can't change live, so moving its row and pressing `Enter` only warns that it
+needs a save and a restart. `s` sends the powers the same way and also writes each row that differs
+from what `wartui.toml` would start the next run with, so a power already applied with `Enter` is
+saved too — and skips a row `--node-tx-power`/`--bridge-tx-power`/`--pool` set and you left alone,
+since a flag still wins that row at the next start-up regardless. A saved pool change takes effect
+after a restart, and the notice says so. `Esc` or `q` closes the modal without changing anything; `ctrl-c` quits
+even while it is open.
 
 ## How channels are assigned
 

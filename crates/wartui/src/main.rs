@@ -484,6 +484,20 @@ mod tests {
     }
 
     #[test]
+    fn cli_parser_defaults_pool_to_none_when_flag_omitted() {
+        let cli = parse(["wartui"]).unwrap();
+        assert!(cli.command.is_none());
+        assert_eq!(cli.run.pool, None);
+    }
+
+    #[test]
+    fn cli_parser_populates_pool_flag_when_given() {
+        let cli = parse(["wartui", "--pool", "eu"]).unwrap();
+        assert!(cli.command.is_none());
+        assert_eq!(cli.run.pool, Some(crate::run::PoolArg::Eu));
+    }
+
+    #[test]
     fn cli_parser_accepts_log_file_flag_when_placed_before_or_after_subcommand() {
         for args in [
             ["wartui", "--log-file", "w.log", "status", "--bridge", "/dev/x"],
