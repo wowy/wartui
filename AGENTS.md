@@ -175,11 +175,13 @@ is here rather than only in a `//!`.
   `crates/wartui-proto/tests/wire.rs` to mark a difference the policy has already settled. **The
   store has no migrations before 1.0 either.** `check_version` refuses any marker but its own — a
   lower one as firmly as a higher one — and its own marker over a schema fingerprint that is not
-  this build's, or over none, so a capture from another build is somebody else's file,
-  and the fix is a new `--db` path rather than a `migrate` arm. Bringing one forward would mean
-  deciding what an older build meant, which is the compatibility this policy declines to claim: a
-  stored `ChannelSet` is the indices that went out, read against the scan table of the build that
-  wrote them.
+  this build's, or over none. A capture from another build is somebody else's file, and the fix
+  is a new `--db` path rather than a `migrate` arm. The fingerprint enforces only the shape of
+  the tables. A build that keeps that shape but changes what a stored value means still opens
+  the file, so that half rests on the policy rather than the check. Bringing one forward would
+  mean deciding what an older build meant, which is the compatibility this policy declines to
+  claim: a stored `ChannelSet` is the indices that went out, read against the scan table of the
+  build that wrote them.
 - **The planner is the only author of an assignment.** There is no operator override, no mode and
   no flag: `FleetEngine::replan` decides what every node scans and nothing else writes a node's
   `desired`. That is what lets the fleet table and the store read a node's share as the plan's
