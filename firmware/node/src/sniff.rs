@@ -14,8 +14,9 @@
 //! check it still took a [`PENDING`] slot, and a dense channel filled that ring with
 //! addresses `report` would go on to discard anyway — starving the access points not
 //! yet seen this dwell. `SEEN` is checked from inside [`PENDING_RING`]'s lock, which is
-//! the one place the two nest; every other caller takes `SEEN` on its own, per sighting,
-//! and never across a transmit.
+//! the one place the two nest, and `ble::Scanner::sweep` nests it the same way inside
+//! `ble::PENDING`; every other caller takes `SEEN` on its own, per sighting, and never
+//! across a transmit.
 //!
 //! Capture is opened and closed around the dwell rather than left running, because
 //! promiscuous mode is on across every channel change (`radio::park`). A frame
@@ -35,8 +36,9 @@ use wartui_proto::dedup::DedupRing;
 ///
 /// A `static` rather than a field of `Node`, because the receive callback needs to
 /// reach it and cannot borrow anything (see the module doc). Nests inside
-/// [`PENDING_RING`]'s lock in [`on_frame`]; every other caller in `main.rs` takes it
-/// on its own, per sighting, and that lock order must hold everywhere `SEEN` is used.
+/// [`PENDING_RING`]'s lock in [`on_frame`] and inside `ble::PENDING`'s in
+/// `ble::Scanner::sweep`; every other caller in `main.rs` takes it on its own, per
+/// sighting, and that lock order must hold everywhere `SEEN` is used.
 pub static SEEN: NonReentrantMutex<DedupRing> = NonReentrantMutex::new(DedupRing::new());
 
 /// Milliseconds since boot, as [`SEEN`] counts them. Truncation is the ring's own wrap.

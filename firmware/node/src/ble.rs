@@ -32,10 +32,12 @@ use esp_radio::ble::controller::BleConnector;
 use esp_rtos::CurrentThreadHandle;
 use esp_sync::NonReentrantMutex;
 use wartui_proto::hci::{
-    AdvReport, PACKET_MAX, RESET, SCAN_UNIT_US, SET_EVENT_MASK, adv_reports, set_scan_enable,
-    set_scan_parameters,
+    AdvReport, BlePending, PACKET_MAX, RESET, SCAN_UNIT_US, SET_EVENT_MASK, adv_reports,
+    set_scan_enable, set_scan_parameters,
 };
 use wartui_proto::plan::ASSIGNED_BEAT_MS;
+
+use crate::sniff;
 
 /// How long one scan listens.
 pub const SCAN_MS: u32 = 500;
@@ -50,90 +52,45 @@ const _: () = assert!(
 
 /// Distinct advertisers one sweep will hold.
 ///
-/// Addresses rotate for privacy, so these rarely repeat and the ring behind them
-/// suppresses little. An ordinary room filled about 60 of it
-/// (`docs/phase-1-findings.md`), and overflow drops the *newest* advertiser against
-/// a counter no host reads — the one failure here nothing would notice — so the
-/// number sits well clear of the measurement rather than just above it.
+/// Slots go only to advertisers due to be reported: [`Scanner::sweep`] asks
+/// [`sniff::SEEN`] before an address takes one, so an advertiser the host already
+/// has costs nothing however often it repeats. An ordinary room filled about 60
+/// of it (`docs/phase-1-findings.md`), and overflow drops the *newest* advertiser
+/// against a counter no host reads — the one failure here nothing would notice —
+/// so the number sits well clear of the measurement rather than just above it.
+/// That counter, [`dropped`], counts packets turned away rather than advertisers,
+/// and it is the only sign of saturation: the console's `heard` is capped here.
 ///
-/// It is also the ceiling on the burst: `report_ble` broadcasts one frame per *new*
-/// advertiser, before the next scan starts, and "new" is most of a sweep. So this
-/// is the worst-case delay standing between one scan ending and the next one
+/// It is also the ceiling on the burst: `report_ble` drains the sweep into
+/// `Outgoing` batches unicast to the core before the next scan starts, so this is
+/// the worst-case delay standing between one scan ending and the next one
 /// starting.
 ///
-/// The ring lives in a `static`, the way `sniff` holds its sightings, because a
-/// report stopped being seven bytes when the sighting wire started carrying the
-/// manufacturer identifier: at twelve, a by-value `Scanner` puts enough of the
-/// ring on the stack of `Scanner::new` and of `main` to trip
+/// The buffer lives in a `static`, the way `sniff` holds its sightings, because a
+/// report is twelve bytes with the manufacturer identifier: a by-value `Scanner`
+/// puts enough of the buffer on the stack of `Scanner::new` and of `main` to trip
 /// `clippy::large_stack_frames`, which `main.rs` denies. In `.bss` the same
 /// eighty reports cost 960 bytes that no stack has to find room for.
 const REPORTS: usize = 80;
 
 /// The reports of the sweep in flight, and how far the main loop has drained it.
-struct Ring {
-    items: [AdvReport; REPORTS],
-    len: usize,
-    taken: usize,
-    /// Advertisers lost to a full ring, since boot.
-    dropped: u32,
-}
-
-static RING: NonReentrantMutex<Ring> = NonReentrantMutex::new(Ring {
-    items: [AdvReport { address: [0; 6], rssi: 0, mfgr: None }; REPORTS],
-    len: 0,
-    taken: 0,
-    dropped: 0,
-});
-
-impl Ring {
-    /// Keep `report` if it is new, or if it is a better reading than the one held.
-    fn record(&mut self, report: AdvReport) {
-        if !report.has_rssi() {
-            return;
-        }
-        if let Some(held) = self.items[..self.len].iter_mut().find(|r| r.address == report.address)
-        {
-            held.rssi = held.rssi.max(report.rssi);
-            // The identifier can arrive in a later packet than the first
-            // hearing; an advertiser that led with its flags and followed with
-            // its manufacturer data is still the one advertiser.
-            if held.mfgr.is_none() {
-                held.mfgr = report.mfgr;
-            }
-            return;
-        }
-        if self.len == REPORTS {
-            self.dropped = self.dropped.wrapping_add(1);
-            return;
-        }
-        self.items[self.len] = report;
-        self.len += 1;
-    }
-}
+///
+/// Its lock is taken before [`sniff::SEEN`]'s, in [`Scanner::sweep`], and never
+/// after it.
+static PENDING: NonReentrantMutex<BlePending<REPORTS>> = NonReentrantMutex::new(BlePending::new());
 
 /// Take the oldest report not yet taken, if there is one.
 ///
-/// One at a time rather than a bulk drain, so nothing holds the ring's lock
-/// across a transmit — the same shape `sniff` gives its sightings. The bound
-/// is `len` and not the array: `sniff` can index its ring freely because its
-/// slots are `Option` and say when they are empty, where these are plain
-/// reports and the slots past `len` are an earlier sweep's leavings or the
-/// zero fill — a `00:00:00:00:00:00` advertiser at 0 dBm that would go on
-/// the air as if heard.
+/// One at a time rather than a bulk drain, so nothing holds the buffer's lock
+/// across a transmit — the same shape `sniff` gives its sightings.
 pub fn take() -> Option<AdvReport> {
-    RING.with(|ring| {
-        if ring.taken >= ring.len {
-            return None;
-        }
-        let report = ring.items[ring.taken];
-        ring.taken += 1;
-        Some(report)
-    })
+    PENDING.with(BlePending::take)
 }
 
-/// Advertisers lost to a full ring since boot.
+/// Reports turned away by a full buffer since boot. Packets, not advertisers:
+/// an address that finds no room counts again on every repeat within a sweep.
 pub fn dropped() -> u32 {
-    RING.with(|ring| ring.dropped)
+    PENDING.with(|pending| pending.dropped())
 }
 
 /// Listen continuously while enabled: interval and window equal, at 30 ms.
@@ -164,11 +121,11 @@ impl<'d> Scanner<'d> {
         Some(scanner)
     }
 
-    /// Listen for `SCAN_MS`, then stop, filing what was heard in the ring.
+    /// Listen for `SCAN_MS`, then stop, filing what was heard in [`PENDING`].
     ///
-    /// Returns how many distinct advertisers were heard; the reports themselves
-    /// come out through [`take`], one at a time, so nothing here holds the
-    /// ring's lock across a sleep or a transmit.
+    /// Returns how many distinct advertisers due to be reported were heard, at
+    /// most [`REPORTS`]; the reports themselves come out through [`take`], one at
+    /// a time, so nothing here holds the buffer's lock across a sleep or a transmit.
     ///
     /// Distinct addresses only, keeping the strongest reading for each: the same
     /// advertiser is heard several times a second and only one belongs on the wire.
@@ -180,10 +137,7 @@ impl<'d> Scanner<'d> {
     pub fn sweep(&mut self) -> usize {
         // A fresh sweep discards nothing the main loop has not already taken:
         // the drain in `report_ble` runs to completion between sweeps.
-        RING.with(|ring| {
-            ring.len = 0;
-            ring.taken = 0;
-        });
+        PENDING.with(BlePending::clear);
         // Written directly rather than through `command`, because from here on the
         // queue is what the sweep is for: `command` drains until two reads come
         // back empty, and a busy room can hold it there for its whole budget,
@@ -194,13 +148,20 @@ impl<'d> Scanner<'d> {
             return 0;
         }
 
+        // `SEEN` changes only when `report_ble` records a delivery, after the
+        // sweep, so one reading of the clock serves every report in it.
+        let now = sniff::now_ms();
         let until = Instant::now() + Duration::from_millis(u64::from(SCAN_MS));
         while Instant::now() < until {
             match self.connector.next(&mut self.packet) {
                 Ok(0) | Err(_) => CurrentThreadHandle::get().delay(Duration::from_millis(POLL_MS)),
                 Ok(read) => {
                     for report in adv_reports(&self.packet[..read]) {
-                        RING.with(|ring| ring.record(report));
+                        PENDING.with(|pending| {
+                            pending.record(report, |r| {
+                                sniff::SEEN.with(|seen| seen.is_due(&r.address, Some(r.rssi), now))
+                            });
+                        });
                     }
                 }
             }
@@ -209,7 +170,7 @@ impl<'d> Scanner<'d> {
         // Unconditionally, and before anything else happens. This is the line
         // the whole module exists for.
         self.command(&set_scan_enable(false));
-        RING.with(|ring| ring.len)
+        PENDING.with(|pending| pending.len())
     }
 
     /// Send one command and drain whatever the controller says back.
