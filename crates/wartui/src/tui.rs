@@ -724,37 +724,50 @@ fn receiver(gps: &GpsView, source: PositionSource) -> Option<Span<'static>> {
 }
 
 fn draw_fleet(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot, ui: &mut Ui) {
-    let header = Row::new(["node", "rssi", "beats", "obs", "lost", "last", "channels", "state"])
-        .style(Style::new().add_modifier(Modifier::BOLD));
+    // The `lost` column is drawn only once some node has lost a batch, the
+    // footer's `lost N` rule: a column of zeros is width spent saying nothing.
+    let show_lost = snapshot.nodes.iter().any(|n| n.state.batches_lost > 0);
+    let lost_at = 4;
+
+    let mut header = vec!["node", "rssi", "beats", "obs", "last", "channels", "state"];
+    if show_lost {
+        header.insert(lost_at, "lost");
+    }
+    let header = Row::new(header).style(Style::new().add_modifier(Modifier::BOLD));
 
     let rows: Vec<Row<'_>> = snapshot
         .nodes
         .iter()
         .map(|node| {
             let (state, style) = node_state(node);
-            Row::new(vec![
+            let mut cells = vec![
                 Cell::from(node_label(node)),
                 Cell::from(node.state.link_rssi.map_or_else(|| "—".to_owned(), |r| format!("{r}"))),
                 Cell::from(node.state.heartbeats.to_string()),
                 Cell::from(node.state.observations.to_string()),
-                Cell::from(lost_cell(node)),
                 Cell::from(ago(snapshot.now_ms - node.state.last_seen_ms)),
                 Cell::from(channels_cell(node)),
                 Cell::from(state).style(style),
-            ])
+            ];
+            if show_lost {
+                cells.insert(lost_at, Cell::from(lost_cell(node)));
+            }
+            Row::new(cells)
         })
         .collect();
 
-    let widths = [
+    let mut widths = vec![
         Constraint::Length(8),
         Constraint::Length(4),
         Constraint::Length(5),
         Constraint::Length(6),
         Constraint::Length(5),
-        Constraint::Length(5),
         Constraint::Length(CHANNELS_WIDTH),
         Constraint::Min(12),
     ];
+    if show_lost {
+        widths.insert(lost_at, Constraint::Length(5));
+    }
     let title = format!(" fleet — {} of {} alive ", snapshot.alive, snapshot.nodes.len());
     let table = Table::new(rows, widths)
         .header(header)
@@ -1858,8 +1871,8 @@ mod tests {
     }
 
     /// The footer's running-totals line, identified by `frames` rather than
-    /// position: the fleet table's `lost` column header would otherwise make
-    /// a plain substring search for "lost" match every screen.
+    /// position: the fleet table's `lost` column header, drawn once any node
+    /// has lost a batch, would otherwise match a plain substring search for "lost".
     fn totals_line(screen: &str) -> String {
         screen.lines().find(|line| line.contains("frames")).unwrap_or_default().to_owned()
     }
@@ -2358,8 +2371,31 @@ mod tests {
 
         let snapshot = Snapshot { nodes: vec![with_loss, never_sent], tail: Vec::new(), ..busy() };
         let screen = rendered(&snapshot);
-        assert!(screen.contains("lost"), "the column header: {screen}");
+        assert!(fleet_header(&screen).contains("lost"), "the column header: {screen}");
         assert!(screen.contains("42"), "the node with missed batches: {screen}");
+    }
+
+    #[test]
+    fn fleet_table_hides_lost_column_when_no_node_has_missed_batches() {
+        let sending = node(0x84, 1, true);
+        let mut never_sent = node(0x85, 0, true);
+        never_sent.state.observations = 0;
+        assert_eq!(sending.state.batches_lost, 0);
+        assert_eq!(never_sent.state.batches_lost, 0);
+
+        let snapshot = Snapshot { nodes: vec![sending, never_sent], tail: Vec::new(), ..busy() };
+        let screen = rendered(&snapshot);
+        let header = fleet_header(&screen);
+        assert!(header.contains("obs"), "the header line itself: {screen}");
+        assert!(!header.contains("lost"), "{header}");
+    }
+
+    /// The fleet table's header line, found by `rssi` and `beats` (the tail's
+    /// header has an `rssi` too): "lost" can appear elsewhere on screen (see
+    /// `totals_line`).
+    fn fleet_header(screen: &str) -> String {
+        let header = |line: &&str| line.contains("rssi") && line.contains("beats");
+        screen.lines().find(header).unwrap_or_default().to_owned()
     }
 
     #[test]
