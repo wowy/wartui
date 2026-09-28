@@ -672,15 +672,38 @@ fn engine_counts_since_boot_ring_drops_when_node_reboots() {
 }
 
 #[test]
-fn engine_accumulates_ring_drops_when_counter_wraps() {
+fn engine_counts_falling_ring_drops_as_restart_when_reboot_undetected() {
+    // Heard soon after boot, then rebooted out of range and heard again at a
+    // higher counter: neither the counter nor the epoch shows the reboot, but a
+    // since-boot count that falls does.
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+
+    engine.handle(heartbeat_dropping(NODE, 3, 40, 9), clock.at(1));
+    engine.handle(heartbeat_dropping(NODE, 10, 2, 1), clock.at(2));
+
+    assert_eq!(counters(&engine).wifi_dropped, 2);
+    assert_eq!(counters(&engine).ble_dropped, 1);
+    assert_eq!(
+        engine.nodes().next().expect("a node").reboots,
+        0,
+        "drops are not the reboot detector"
+    );
+}
+
+#[test]
+fn engine_undercounts_ring_drops_when_counter_wraps() {
+    // A wrap looks like a restart, so the drops between the last count and the
+    // wrap are lost. That is at most one heartbeat's worth once every 65536
+    // refusals, where reading a missed reboot as a wrap would add ~65000.
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
 
     engine.handle(heartbeat_dropping(NODE, 10, u16::MAX - 1, u16::MAX), clock.at(1));
     engine.handle(heartbeat_dropping(NODE, 11, 3, 0), clock.at(2));
 
-    assert_eq!(counters(&engine).wifi_dropped, 5);
-    assert_eq!(counters(&engine).ble_dropped, 1);
+    assert_eq!(counters(&engine).wifi_dropped, 3);
+    assert_eq!(counters(&engine).ble_dropped, 0);
 }
 
 #[test]

@@ -988,13 +988,18 @@ impl FleetEngine {
                 // node's first heartbeat is only a baseline, the same rule as the
                 // bridge's `dropped_baseline`: what it refused before this capture
                 // is not this capture's. A reboot restarted the count at 0, so the
-                // whole value is new. A u16 difference is correct as long as fewer
-                // than 65536 refusals happen between two heartbeats, which a 48-slot
-                // ring refilled every dwell cannot reach.
+                // whole value is new. A since-boot count only falls when the node
+                // restarts, so a falling one is read as a restart too, even when the
+                // counter and epoch checks miss it: a node that reboots out of range
+                // can come back with a higher counter. It only decides how drops are
+                // counted, not `reboots`. A genuine u16 wrap reads the same way and
+                // undercounts by the drops between `prev` and the wrap, at most one
+                // heartbeat's worth once every 65536, where a difference would add
+                // ~65000 after a missed reboot.
                 let advance = |value: u16, prev: Option<u16>| match prev {
                     None => 0,
-                    Some(_) if rebooted => u64::from(value),
-                    Some(prev) => u64::from(value.wrapping_sub(prev)),
+                    Some(prev) if rebooted || value < prev => u64::from(value),
+                    Some(prev) => u64::from(value - prev),
                 };
                 self.counters.wifi_dropped +=
                     advance(heartbeat.wifi_dropped, node.last_wifi_dropped);
