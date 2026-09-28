@@ -11,7 +11,7 @@
 //! `wartui.toml` cannot stop `ports`, `status` or `reset` from working. Within `run`,
 //! the command line beats the file and the file beats the default: a flag typed for
 //! this one invocation is a more recent decision than a file left on disk, and both
-//! outrank silently defaulting to 2 dBm.
+//! outrank the built-in default.
 //!
 //! This lives in `crates/wartui` rather than `wartui-core`: the core crate parses no
 //! arguments, and a config file is operator input just like a flag is.
@@ -24,12 +24,20 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use toml_edit::DocumentMut;
 
+use crate::run::PoolArg;
+
 /// Everything `wartui.toml` can hold. Add a field and a table to grow it; every
 /// struct denies unknown fields, so a typo in the file is caught rather than
 /// silently ignored.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct Config {
+    /// The root `pool` key. An unknown spelling is a serde error, named with
+    /// the file the same way an out-of-range tx-power is. `None` means the
+    /// file said nothing, which `run::pool` falls back on the same way it
+    /// falls back on a missing `--pool`.
+    #[serde(default)]
+    pub pool: Option<PoolArg>,
     #[serde(default)]
     pub tx_power: TxPower,
 }
@@ -177,6 +185,7 @@ pub fn update(path: &Path, change: impl FnOnce(&mut Config)) -> Result<()> {
         toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
     change(&mut config);
     write_tx_power(&mut doc, &config.tx_power);
+    write_pool(&mut doc, config.pool);
 
     let written = doc.to_string();
     let reparsed: Config =
@@ -252,29 +261,45 @@ fn write_tx_power(doc: &mut DocumentMut, tx_power: &TxPower) {
 
 /// Set one key of one table to `Some(value)`, or remove it for `None`. Creates
 /// the table if a value is being set and it is not there yet.
-///
-/// A key already holding a value keeps its decor — the whitespace and any
-/// trailing comment around it — rather than losing it to a freshly built item:
-/// `table.insert` would otherwise replace the whole node, decor included, so
-/// `fleet = 4   # quiet` becoming `fleet = 7` would lose the comment along with
-/// the old number.
 fn set_field(doc: &mut DocumentMut, table: &str, key: &str, value: Option<i8>) {
     match value {
         Some(value) => {
             let item = doc.entry(table).or_insert_with(toml_edit::table);
             let Some(table) = item.as_table_like_mut() else { return };
-            let mut new_value = toml_edit::Value::from(i64::from(value));
-            if let Some(decor) =
-                table.get(key).and_then(toml_edit::Item::as_value).map(toml_edit::Value::decor)
-            {
-                *new_value.decor_mut() = decor.clone();
-            }
-            table.insert(key, toml_edit::Item::Value(new_value));
+            set_value(table, key, Some(toml_edit::Value::from(i64::from(value))));
         }
         None => {
             if let Some(table) = doc.get_mut(table).and_then(toml_edit::Item::as_table_like_mut) {
-                table.remove(key);
+                set_value(table, key, None);
             }
+        }
+    }
+}
+
+/// Set or remove the root `pool` key, written as its lowercase spelling
+/// (`PoolArg::name`) so `wartui.toml` and `--pool` take the same words.
+fn write_pool(doc: &mut DocumentMut, pool: Option<PoolArg>) {
+    let value = pool.map(|pool| toml_edit::Value::from(pool.name()));
+    set_value(doc.as_table_mut(), "pool", value);
+}
+
+/// Set or remove one key of `table` to `value`, keeping the existing value's
+/// decor — the whitespace and any trailing comment around it — rather than
+/// losing it to a freshly built item: `table.insert` would otherwise replace
+/// the whole node, decor included, so `fleet = 4   # quiet` becoming
+/// `fleet = 7` would lose the comment along with the old number.
+fn set_value(table: &mut dyn toml_edit::TableLike, key: &str, value: Option<toml_edit::Value>) {
+    match value {
+        Some(mut value) => {
+            if let Some(decor) =
+                table.get(key).and_then(toml_edit::Item::as_value).map(toml_edit::Value::decor)
+            {
+                *value.decor_mut() = decor.clone();
+            }
+            table.insert(key, toml_edit::Item::Value(value));
+        }
+        None => {
+            table.remove(key);
         }
     }
 }
@@ -282,6 +307,7 @@ fn set_field(doc: &mut DocumentMut, table: &str, key: &str, value: Option<i8>) {
 #[cfg(test)]
 mod tests {
     use super::{Config, default_path_in, load, load_from, path, update};
+    use crate::run::PoolArg;
     use std::ffi::OsStr;
 
     #[test]
@@ -348,6 +374,33 @@ mod tests {
         let config = load(Some(&path)).unwrap();
         assert_eq!(config.tx_power.fleet, Some(10));
         assert_eq!(config.tx_power.bridge, Some(15));
+    }
+
+    #[test]
+    fn config_loader_reads_pool_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wartui.toml");
+        std::fs::write(&path, "pool = \"eu\"\n").unwrap();
+        let config = load(Some(&path)).unwrap();
+        assert_eq!(config.pool, Some(PoolArg::Eu));
+    }
+
+    #[test]
+    fn config_loader_returns_none_pool_when_key_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wartui.toml");
+        std::fs::write(&path, "[tx-power]\nfleet = 10\n").unwrap();
+        let config = load(Some(&path)).unwrap();
+        assert_eq!(config.pool, None);
+    }
+
+    #[test]
+    fn config_loader_rejects_unknown_pool_and_names_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wartui.toml");
+        std::fs::write(&path, "pool = \"jp\"\n").unwrap();
+        let error = load(Some(&path)).unwrap_err();
+        assert!(error.to_string().contains("wartui.toml"), "{error}");
     }
 
     #[test]
@@ -508,6 +561,43 @@ mod tests {
         let saved = load(Some(&target)).unwrap();
         assert_eq!(saved.tx_power.fleet, Some(10));
         assert_eq!(saved.tx_power.bridge, Some(15));
+    }
+
+    #[test]
+    fn config_update_writes_pool_as_root_key_that_reloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wartui.toml");
+
+        update(&target, |c| c.pool = Some(PoolArg::Eu)).unwrap();
+
+        let saved = load(Some(&target)).unwrap();
+        assert_eq!(saved.pool, Some(PoolArg::Eu));
+    }
+
+    #[test]
+    fn config_update_keeps_trailing_comment_when_changing_pool() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wartui.toml");
+        std::fs::write(&target, "pool = \"us\"   # quiet\n").unwrap();
+
+        update(&target, |c| c.pool = Some(PoolArg::Eu)).unwrap();
+
+        let text = std::fs::read_to_string(&target).unwrap();
+        assert!(text.contains("pool = \"eu\""), "{text}");
+        assert!(text.contains("# quiet"), "{text}");
+    }
+
+    #[test]
+    fn config_update_keeps_pool_when_only_tx_power_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wartui.toml");
+        std::fs::write(&target, "pool = \"eu\"\n").unwrap();
+
+        update(&target, |c| c.tx_power.fleet = Some(10)).unwrap();
+
+        let saved = load(Some(&target)).unwrap();
+        assert_eq!(saved.pool, Some(PoolArg::Eu), "untouched by this update");
+        assert_eq!(saved.tx_power.fleet, Some(10));
     }
 
     #[test]

@@ -27,7 +27,11 @@ use wartui_proto::plan::{ChannelPool, DEFAULT_TX_POWER_QUARTER_DBM};
 use crate::{capture, config, tui};
 
 /// Which channels the fleet is meant to scan.
-#[derive(Debug, Clone, Copy, ValueEnum, Default)]
+///
+/// `Deserialize` accepts exactly clap's own spellings (`us`, `eu`, `all`), so a
+/// `pool` typed in `wartui.toml` and one typed on the command line agree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum PoolArg {
     /// FCC-permitted unlicensed channels: 2.4 GHz 1–11 and 5 GHz 36–165.
     Us,
@@ -38,12 +42,34 @@ pub enum PoolArg {
     All,
 }
 
+impl PoolArg {
+    /// The lowercase spelling `wartui.toml` holds, which [`config::update`]
+    /// writes back for whichever variant the modal saves.
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Us => "us",
+            Self::Eu => "eu",
+            Self::All => "all",
+        }
+    }
+}
+
 impl From<PoolArg> for ChannelPool {
     fn from(arg: PoolArg) -> Self {
         match arg {
             PoolArg::Us => Self::Us,
             PoolArg::Eu => Self::Eu,
             PoolArg::All => Self::All,
+        }
+    }
+}
+
+impl From<ChannelPool> for PoolArg {
+    fn from(pool: ChannelPool) -> Self {
+        match pool {
+            ChannelPool::Us => Self::Us,
+            ChannelPool::Eu => Self::Eu,
+            ChannelPool::All => Self::All,
         }
     }
 }
@@ -75,9 +101,11 @@ pub struct Args {
     db: Option<PathBuf>,
 
     /// Which channels the fleet should scan. Recorded with the session, and
-    /// the set the planner partitions across it.
-    #[arg(long, value_enum, default_value_t = PoolArg::All)]
-    pool: PoolArg,
+    /// the set the planner partitions across it. Beats `pool` in
+    /// `wartui.toml`; `all` is the default. See `crates/wartui/README.md` §
+    /// "Config file".
+    #[arg(long, value_enum)]
+    pub(crate) pool: Option<PoolArg>,
 
     /// The mesh's ESP-NOW control channel.
     #[arg(long, default_value_t = 6)]
@@ -171,6 +199,17 @@ fn tx_powers(
     (nodes, bridge)
 }
 
+/// Which channel pool the fleet scans: the command line beats the file, and the
+/// file beats the default, with no fallback between the two — the same
+/// precedence [`tx_powers`] resolves for the transmit powers.
+///
+/// ```text
+/// pool = cli.pool ∨ file.pool ∨ default
+/// ```
+fn pool(flag: Option<PoolArg>, file: Option<PoolArg>) -> ChannelPool {
+    flag.or(file).unwrap_or_default().into()
+}
+
 pub async fn run(args: Args) -> Result<()> {
     // Only `run` reads `--config`, so a broken `wartui.toml` cannot stop `ports` /
     // `status` / `reset` / `export` / `sniff` from working.
@@ -217,7 +256,7 @@ pub async fn run(args: Args) -> Result<()> {
         None => position,
     };
 
-    let pool: ChannelPool = args.pool.into();
+    let pool = pool(args.pool, config.pool);
     let link = crate::open(args.bridge.as_deref(), args.sim, args.sim_c6)?;
 
     let started = now();
@@ -240,6 +279,7 @@ pub async fn run(args: Args) -> Result<()> {
     let settings = tui::Settings {
         config_path,
         flags: config::TxPower { fleet: args.node_tx_power, bridge: args.bridge_tx_power },
+        pool_flag: args.pool,
     };
     let config = EngineConfig {
         pool,
@@ -311,9 +351,9 @@ pub async fn run(args: Args) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::tx_powers;
+    use super::{PoolArg, pool, tx_powers};
     use crate::config::TxPower;
-    use wartui_proto::plan::DEFAULT_TX_POWER_QUARTER_DBM;
+    use wartui_proto::plan::{ChannelPool, DEFAULT_TX_POWER_QUARTER_DBM};
 
     #[test]
     fn run_cmd_applies_default_tx_power_when_no_flags_are_specified() {
@@ -370,5 +410,20 @@ mod tests {
     fn run_cmd_prefers_cli_bridge_tx_power_over_file_when_both_given() {
         let file = TxPower { fleet: Some(6), bridge: Some(17) };
         assert_eq!(tx_powers(None, Some(20), &file), (24, 80));
+    }
+
+    #[test]
+    fn run_cmd_prefers_flag_pool_over_file_when_both_given() {
+        assert_eq!(pool(Some(PoolArg::Us), Some(PoolArg::Eu)), ChannelPool::Us);
+    }
+
+    #[test]
+    fn run_cmd_applies_file_pool_when_no_flag_given() {
+        assert_eq!(pool(None, Some(PoolArg::Eu)), ChannelPool::Eu);
+    }
+
+    #[test]
+    fn run_cmd_applies_default_pool_when_neither_flag_nor_file_given() {
+        assert_eq!(pool(None, None), ChannelPool::All);
     }
 }
