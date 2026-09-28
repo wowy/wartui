@@ -604,6 +604,9 @@ async fn beat(
         counter: node.hb_counter,
         epoch: node.epoch,
         capabilities: Capabilities::here(node.five_ghz),
+        // A simulated node's rings never fill.
+        wifi_dropped: 0,
+        ble_dropped: 0,
     };
     send_frame(events, node.mac, &msg.encode(), started).await
 }

@@ -18,6 +18,10 @@
 //! `ble::PENDING`; every other caller takes `SEEN` on its own, per sighting, and never
 //! across a transmit.
 //!
+//! An access point that finds the ring full is counted in [`Refused`], once per dwell
+//! however often it beacons, so [`dropped`] counts addresses rather than packets. It is
+//! not in [`SEEN`], so the next dwell reports it: a refusal is mostly delay.
+//!
 //! Capture is opened and closed around the dwell rather than left running, because
 //! promiscuous mode is on across every channel change (`radio::park`). A frame
 //! arriving inside one of those toggles was heard on a channel the ring is not stamped
@@ -30,7 +34,7 @@ use esp_hal::time::Instant;
 use esp_radio::wifi::sniffer::PromiscuousPkt;
 use esp_sync::NonReentrantMutex;
 use wartui_proto::beacon::{Sighting, is_report, parse_mgmt};
-use wartui_proto::dedup::DedupRing;
+use wartui_proto::dedup::{DedupRing, Refused};
 
 /// The dedup ring: addresses already reported and not yet due again.
 ///
@@ -64,8 +68,8 @@ struct Pending {
     armed: bool,
     /// The channel the radio is parked on, for frames that name none.
     channel: u8,
-    /// Access points lost to a full ring, since boot.
-    dropped: u32,
+    /// Access points turned away by a full ring since boot, once per dwell each.
+    dropped: Refused,
 }
 
 static PENDING_RING: NonReentrantMutex<Pending> = NonReentrantMutex::new(Pending {
@@ -74,7 +78,7 @@ static PENDING_RING: NonReentrantMutex<Pending> = NonReentrantMutex::new(Pending
     taken: 0,
     armed: false,
     channel: 0,
-    dropped: 0,
+    dropped: Refused::new(),
 });
 
 /// Start collecting on `channel`, discarding anything left from the last one.
@@ -89,6 +93,7 @@ pub fn arm(channel: u8) {
         }
         pending.len = 0;
         pending.taken = 0;
+        pending.dropped.reset();
         pending.channel = channel;
         pending.armed = true;
     });
@@ -142,7 +147,7 @@ pub fn on_frame(pkt: PromiscuousPkt<'_>) {
             // The newest rather than the oldest: everything already here is a
             // distinct access point not yet reported, so evicting one would trade
             // a certain observation for a possible one.
-            pending.dropped = pending.dropped.wrapping_add(1);
+            pending.dropped.note(&sighting.bssid);
             return;
         }
         pending.items[pending.len] = Some(sighting);
@@ -163,8 +168,9 @@ pub fn take() -> Option<Sighting> {
     })
 }
 
-/// Access points lost to a full ring since boot. A number that climbs means
-/// [`PENDING`] is too small for the neighbourhood, not that the dwell is wrong.
-pub fn dropped() -> u32 {
-    PENDING_RING.with(|pending| pending.dropped)
+/// Access points turned away by a full ring since boot, each counted once per dwell.
+/// Wraps. The heartbeat carries it to the host. A number that climbs means [`PENDING`]
+/// is too small for the neighbourhood, not that the dwell is wrong.
+pub fn dropped() -> u16 {
+    PENDING_RING.with(|pending| pending.dropped.total())
 }

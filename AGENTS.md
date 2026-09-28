@@ -129,7 +129,7 @@ These bite from a distance — from a file other than the one that owns them —
 is here rather than only in a `//!`.
 
 - **The wire is ours, in both directions, and shares nothing with the vendor's.** Every frame is
-  `WTUI`, a wire version byte, a type byte and a body: `HeartbeatMsg` (14 bytes), `SightingBatch`
+  `WTUI`, a wire version byte, a type byte and a body: `HeartbeatMsg` (18 bytes), `SightingBatch`
   (9 plus records of 12 plus the SSID and the trailer), `AdminMsg` (15) and `ClearMsg` (6, header
   only). A heartbeat broadcasts, since that is how a bridge discovers a node before either
   side knows the other's address; a sighting batch unicasts to the bridge that last sent

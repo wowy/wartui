@@ -21,7 +21,7 @@ use ratatui::widgets::{Block, Cell, Clear, Paragraph, Row, Table, TableState};
 use ratatui::{DefaultTerminal, Frame};
 use tokio::sync::{mpsc, oneshot, watch};
 use wartui_bridge::BridgeInfo;
-use wartui_core::engine::{Command, NodeView, Snapshot, TailEntry};
+use wartui_core::engine::{Command, Counters, NodeView, Snapshot, TailEntry};
 use wartui_core::gps::{GpsStatus, GpsView};
 // Shared with the bridge's panel rather than written twice: the two reporting
 // different numbers for one estimate is a bug nobody would think to look for.
@@ -547,7 +547,8 @@ fn draw(frame: &mut Frame<'_>, snapshot: &Snapshot, ui: &mut Ui) {
     // Faults get their own lines, and only when there are any: sharing the footer
     // with the counters pushed the last of them off the terminal.
     let faults = fault_lines(&faults(snapshot), frame.area().width);
-    let footer_height = 1 + u16::try_from(faults.len()).unwrap_or(u16::MAX);
+    let drops = u16::from(drop_line(&snapshot.counters).is_some());
+    let footer_height = 1 + drops + u16::try_from(faults.len()).unwrap_or(u16::MAX);
     let [header, body, footer] = Layout::vertical([
         Constraint::Length(4),
         Constraint::Min(6),
@@ -1087,6 +1088,12 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot, ui: &Ui, 
         lines.push(Line::from(spans));
     }
 
+    // A line of its own rather than a span of the totals, so a notice never hides
+    // it; plain rather than yellow, since a full ring is expected in a dense area.
+    if let Some(drops) = drop_line(&c) {
+        lines.push(Line::from(drops));
+    }
+
     // Already fitted to the width by `fault_lines`, so nothing here can be
     // clipped and no fault can push another one off the end.
     for fault in faults {
@@ -1094,6 +1101,23 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot, ui: &Ui, 
     }
 
     frame.render_widget(Paragraph::new(lines).dim(), area);
+}
+
+/// Sightings the fleet's nodes had no ring room for this session, or `None` while
+/// there are none. Most are reported on the next dwell or scan, so this reads as
+/// a measure of the rings against the area rather than as a fault.
+fn drop_line(c: &Counters) -> Option<String> {
+    if c.wifi_dropped == 0 && c.ble_dropped == 0 {
+        return None;
+    }
+    let mut line = String::new();
+    if c.wifi_dropped > 0 {
+        line.push_str(&format!("  wifi drop {}", c.wifi_dropped));
+    }
+    if c.ble_dropped > 0 {
+        line.push_str(&format!("  ble drop {}", c.ble_dropped));
+    }
+    Some(line)
 }
 
 /// Everything that has gone wrong so far, in the order an operator would want
@@ -1447,6 +1471,8 @@ mod tests {
                 replans: 0,
                 batches_lost: 0,
                 duplicate_batches: 0,
+                wifi_dropped: 0,
+                ble_dropped: 0,
             },
             store: StoreStats { written: 800, dropped: 7 },
             bridge_status: Some(BridgeStatus {
@@ -1860,6 +1886,44 @@ mod tests {
         // `busy()` itself has nothing duplicated, the same rule `lost` follows.
         let screen = rendered(&busy());
         assert!(!totals_line(&screen).contains("dup"), "{screen}");
+    }
+
+    #[test]
+    fn footer_hides_drop_line_when_both_counts_zero() {
+        let screen = rendered(&busy());
+        assert!(!screen.contains("wifi drop"), "{screen}");
+        assert!(!screen.contains("ble drop"), "{screen}");
+    }
+
+    #[test]
+    fn footer_displays_drop_line_when_wifi_count_nonzero() {
+        let mut snapshot = busy();
+        snapshot.counters.wifi_dropped = 12;
+        let screen = rendered(&snapshot);
+        let line = screen.lines().find(|l| l.contains("wifi drop")).expect("a drop line");
+        assert!(line.contains("wifi drop 12"), "{screen}");
+        // A kind with nothing dropped is left out rather than shown as 0.
+        assert!(!line.contains("ble drop"), "{screen}");
+        assert!(!line.contains("frames"), "a line of its own, not a span of the totals");
+
+        snapshot.counters.ble_dropped = 4;
+        assert!(rendered(&snapshot).contains("wifi drop 12  ble drop 4"));
+    }
+
+    #[test]
+    fn footer_keeps_drop_line_when_notice_shown() {
+        // The notice takes the totals line; the drops are on their own line so
+        // they stay.
+        let mut snapshot = busy();
+        snapshot.counters.wifi_dropped = 12;
+        snapshot.counters.ble_dropped = 4;
+        let mut ui = Ui { notice: Some(("a notice".to_owned(), snapshot.now_ms)), ..Ui::default() };
+        let mut terminal = Terminal::new(TestBackend::new(200, 40)).expect("test backend");
+        terminal.draw(|frame| draw(frame, &snapshot, &mut ui)).expect("drawing");
+        let screen = terminal.backend().to_string();
+        assert!(screen.contains("a notice"), "{screen}");
+        assert!(!screen.contains("stored 800"), "the notice replaced the totals: {screen}");
+        assert!(screen.contains("wifi drop 12  ble drop 4"), "{screen}");
     }
 
     /// A capture whose only fault is that the bridge restarted underneath it.

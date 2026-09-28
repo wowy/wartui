@@ -146,6 +146,8 @@ fn store_persists_and_reads_all_record_types_when_round_tripped() {
                 counter: 174,
                 epoch: 5,
                 link_rssi: Some(-41),
+                wifi_dropped: 12,
+                ble_dropped: 3,
             }),
             observation(NODE, [0xAA; 6], -60, EPOCH_MS, fixed(37.7749, -122.4194)),
         ],
@@ -158,6 +160,13 @@ fn store_persists_and_reads_all_record_types_when_round_tripped() {
 
     let epoch: i64 = conn.query_row("SELECT epoch FROM heartbeat", [], |r| r.get(0)).unwrap();
     assert_eq!(epoch, 5, "the epoch the frame said the node held");
+
+    let dropped: (i64, i64) = conn
+        .query_row("SELECT wifi_dropped, ble_dropped FROM heartbeat", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap();
+    assert_eq!(dropped, (12, 3), "the since-boot counts as the frame carried them");
 
     let (mac, source): (Vec<u8>, String) = conn
         .query_row("SELECT node_mac, pos_source FROM observation", [], |r| {

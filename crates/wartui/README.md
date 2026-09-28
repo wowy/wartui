@@ -405,6 +405,13 @@ send, and is recorded like any other. Its observations were already recorded fro
 copy, so nothing here is hidden and nothing is lost — `dup` and `lost` never count the same
 batch.
 
+A line of its own below the totals, `wifi drop N  ble drop M`, counts distinct networks and
+advertisers a node heard but had no room for in that dwell or Bluetooth scan, summed across the
+fleet for this session. It appears once either count is above zero, leaves out a kind still at
+zero, and stays for the rest of the session. It is not a fault: a turned-away address is not held
+back, so the node reports it on its next pass; only one it hears in no later pass is lost. A count
+that grows steadily means a node's buffer is too small for the area.
+
 The header has three ways of saying it has nothing to drive: `auto — nothing heartbeating yet`,
 `auto — no node it can drive` (nodes are alive but none is assignable), and `auto — too many nodes`
 (over twenty, so the planner has stopped re-cutting; whatever is assigned stays assigned and capture

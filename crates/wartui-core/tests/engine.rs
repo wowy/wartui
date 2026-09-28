@@ -104,7 +104,20 @@ fn heartbeat_holding(src: Mac, counter: u32, epoch: u8) -> Event {
 }
 
 fn beat_at(src: Mac, counter: u32, epoch: u8, capabilities: Capabilities, rx_us: u32) -> Event {
-    rx_at(src, &HeartbeatMsg { counter, epoch, capabilities }.encode(), rx_us)
+    let msg = HeartbeatMsg { counter, epoch, capabilities, wifi_dropped: 0, ble_dropped: 0 };
+    rx_at(src, &msg.encode(), rx_us)
+}
+
+/// A heartbeat carrying the node's since-boot ring refusals, Wi-Fi then BLE.
+fn heartbeat_dropping(src: Mac, counter: u32, wifi_dropped: u16, ble_dropped: u16) -> Event {
+    let msg = HeartbeatMsg {
+        counter,
+        epoch: 0,
+        capabilities: Capabilities::here(true),
+        wifi_dropped,
+        ble_dropped,
+    };
+    rx(src, &msg.encode())
 }
 
 fn send_result(id: u16, status: SendStatus, tx_us: u32) -> Event {
@@ -605,6 +618,95 @@ fn engine_increments_reboot_counter_when_heartbeat_counter_decreases() {
 }
 
 #[test]
+fn engine_ignores_ring_drops_when_first_heartbeat_of_session() {
+    // What a node refused before this capture started is not this capture's.
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+
+    engine.handle(heartbeat_dropping(NODE, 10, 500, 70), clock.at(1));
+
+    assert_eq!((counters(&engine).wifi_dropped, counters(&engine).ble_dropped), (0, 0));
+}
+
+#[test]
+fn engine_sums_ring_drops_across_nodes_when_heartbeats_advance() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+
+    engine.handle(heartbeat_dropping(NODE, 10, 100, 0), clock.at(1));
+    engine.handle(heartbeat_dropping(OTHER, 20, 7, 0), clock.at(1));
+    engine.handle(heartbeat_dropping(NODE, 11, 103, 0), clock.at(2));
+    engine.handle(heartbeat_dropping(OTHER, 21, 12, 0), clock.at(2));
+    engine.handle(heartbeat_dropping(NODE, 12, 104, 0), clock.at(3));
+
+    assert_eq!(counters(&engine).wifi_dropped, 3 + 5 + 1);
+}
+
+#[test]
+fn engine_keeps_wifi_and_ble_drops_apart_when_both_advance() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+
+    engine.handle(heartbeat_dropping(NODE, 10, 100, 40), clock.at(1));
+    engine.handle(heartbeat_dropping(NODE, 11, 102, 49), clock.at(2));
+
+    assert_eq!(counters(&engine).wifi_dropped, 2);
+    assert_eq!(counters(&engine).ble_dropped, 9);
+}
+
+#[test]
+fn engine_counts_since_boot_ring_drops_when_node_reboots() {
+    // A reboot restarts the node's count at 0, so everything it carries after
+    // one was refused this session.
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+
+    engine.handle(heartbeat_dropping(NODE, 174, 100, 40), clock.at(1));
+    engine.handle(heartbeat_dropping(NODE, 175, 110, 41), clock.at(2));
+    engine.handle(heartbeat_dropping(NODE, 2, 6, 1), clock.at(3));
+    engine.handle(heartbeat_dropping(NODE, 3, 8, 1), clock.at(4));
+
+    assert_eq!(engine.nodes().next().expect("a node").reboots, 1);
+    assert_eq!(counters(&engine).wifi_dropped, 10 + 6 + 2);
+    assert_eq!(counters(&engine).ble_dropped, 1 + 1);
+}
+
+#[test]
+fn engine_counts_falling_ring_drops_as_restart_when_reboot_undetected() {
+    // Heard soon after boot, then rebooted out of range and heard again at a
+    // higher counter: neither the counter nor the epoch shows the reboot, but a
+    // since-boot count that falls does.
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+
+    engine.handle(heartbeat_dropping(NODE, 3, 40, 9), clock.at(1));
+    engine.handle(heartbeat_dropping(NODE, 10, 2, 1), clock.at(2));
+
+    assert_eq!(counters(&engine).wifi_dropped, 2);
+    assert_eq!(counters(&engine).ble_dropped, 1);
+    assert_eq!(
+        engine.nodes().next().expect("a node").reboots,
+        0,
+        "drops are not the reboot detector"
+    );
+}
+
+#[test]
+fn engine_undercounts_ring_drops_when_counter_wraps() {
+    // A wrap looks like a restart, so the drops between the last count and the
+    // wrap are lost. That is at most one heartbeat's worth once every 65536
+    // refusals, where reading a missed reboot as a wrap would add ~65000.
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+
+    engine.handle(heartbeat_dropping(NODE, 10, u16::MAX - 1, u16::MAX), clock.at(1));
+    engine.handle(heartbeat_dropping(NODE, 11, 3, 0), clock.at(2));
+
+    assert_eq!(counters(&engine).wifi_dropped, 3);
+    assert_eq!(counters(&engine).ble_dropped, 0);
+}
+
+#[test]
 fn engine_keeps_node_visible_without_marking_assignable_when_only_observations_arrive() {
     // Two questions: is this node there, and can it still be given a range.
     let clock = Clock::new();
@@ -688,9 +790,15 @@ fn engine_counts_incompatible_firmware_frames_when_wire_version_is_unsupported()
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
 
-    let mut frame = HeartbeatMsg { counter: 1, epoch: 0, capabilities: Capabilities::here(true) }
-        .encode()
-        .to_vec();
+    let mut frame = HeartbeatMsg {
+        counter: 1,
+        epoch: 0,
+        capabilities: Capabilities::here(true),
+        wifi_dropped: 0,
+        ble_dropped: 0,
+    }
+    .encode()
+    .to_vec();
     frame[4] = frame[4].wrapping_add(1);
     engine.handle(rx(NODE, &frame), clock.at(1));
 

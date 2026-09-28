@@ -305,6 +305,11 @@ pub struct NodeState {
     /// Batches from this node dropped as MAC-layer retransmissions; see
     /// [`Counters::duplicate_batches`].
     pub duplicate_batches: u64,
+    /// The `wifi_dropped` this node's most recent heartbeat carried, the baseline
+    /// [`Counters::wifi_dropped`] advances from. `None` before its first heartbeat.
+    last_wifi_dropped: Option<u16>,
+    /// The same for `ble_dropped` and [`Counters::ble_dropped`].
+    last_ble_dropped: Option<u16>,
 }
 
 /// What one node was told to do, and the fleet arithmetic it was computed
@@ -363,6 +368,8 @@ impl NodeState {
             last_batch_rx_us: None,
             batches_lost: 0,
             duplicate_batches: 0,
+            last_wifi_dropped: None,
+            last_ble_dropped: None,
         }
     }
 
@@ -440,6 +447,13 @@ pub struct Counters {
     /// retransmission, and is recorded instead. Not counted in
     /// `batches_lost`, since nothing was actually lost.
     pub duplicate_batches: u64,
+    /// Access points nodes heard but had no pending-ring room for, summed across
+    /// the fleet this session, each counted once per dwell. Mostly delay rather
+    /// than loss: an address turned away is not in the dedup ring, so the next
+    /// dwell reports it. Steady growth means the ring is too small for the area.
+    pub wifi_dropped: u64,
+    /// The same for advertisers and the Bluetooth scan's buffer, once per scan.
+    pub ble_dropped: u64,
 }
 
 /// Counters the store keeps, folded into the snapshot for display.
@@ -970,6 +984,28 @@ impl FleetEngine {
                 if live {
                     node.held_epoch = Some(heartbeat.epoch);
                 }
+                // The node's since-boot counts, turned into this session's. A
+                // node's first heartbeat is only a baseline, the same rule as the
+                // bridge's `dropped_baseline`: what it refused before this capture
+                // is not this capture's. A reboot restarted the count at 0, so the
+                // whole value is new. A since-boot count only falls when the node
+                // restarts, so a falling one is read as a restart too, even when the
+                // counter and epoch checks miss it: a node that reboots out of range
+                // can come back with a higher counter. It only decides how drops are
+                // counted, not `reboots`. A genuine u16 wrap reads the same way and
+                // undercounts by the drops between `prev` and the wrap, at most one
+                // heartbeat's worth once every 65536, where a difference would add
+                // ~65000 after a missed reboot.
+                let advance = |value: u16, prev: Option<u16>| match prev {
+                    None => 0,
+                    Some(prev) if rebooted || value < prev => u64::from(value),
+                    Some(prev) => u64::from(value - prev),
+                };
+                self.counters.wifi_dropped +=
+                    advance(heartbeat.wifi_dropped, node.last_wifi_dropped);
+                self.counters.ble_dropped += advance(heartbeat.ble_dropped, node.last_ble_dropped);
+                node.last_wifi_dropped = Some(heartbeat.wifi_dropped);
+                node.last_ble_dropped = Some(heartbeat.ble_dropped);
                 node.counter = Some(heartbeat.counter);
                 node.last_heartbeat = Some(now.mono);
                 node.last_heartbeat_rx_us = Some(rx_us);
@@ -980,6 +1016,8 @@ impl FleetEngine {
                     counter: heartbeat.counter,
                     epoch: heartbeat.epoch,
                     link_rssi: Some(rssi),
+                    wifi_dropped: heartbeat.wifi_dropped,
+                    ble_dropped: heartbeat.ble_dropped,
                 }));
 
                 if rebooted && node.desired.is_some() {

@@ -13,6 +13,7 @@
 //! and the LE Advertising Report in §7.7.65.2.
 
 use crate::air::{RecordKind, Security, SightingMsg};
+use crate::dedup::Refused;
 
 /// Largest HCI packet, so a read buffer can never be short.
 ///
@@ -209,7 +210,7 @@ impl Iterator for AdvReports<'_> {
 /// The reports of one scan, one per address, waiting for the main loop to drain them.
 ///
 /// It never wraps: a full buffer turns the newest address away and counts it in
-/// [`Self::dropped`], the same policy the Wi-Fi sightings follow.
+/// [`Self::dropped`], once per scan, the same policy the Wi-Fi sightings follow.
 ///
 /// Slots go only to addresses the caller says are due to be reported. An
 /// advertiser the host already has is heard again on every scan; given a slot,
@@ -220,7 +221,7 @@ pub struct BlePending<const N: usize> {
     items: [AdvReport; N],
     len: usize,
     taken: usize,
-    dropped: u32,
+    dropped: Refused,
 }
 
 impl<const N: usize> Default for BlePending<N> {
@@ -237,7 +238,7 @@ impl<const N: usize> BlePending<N> {
             items: [AdvReport { address: [0; 6], rssi: 0, mfgr: None }; N],
             len: 0,
             taken: 0,
-            dropped: 0,
+            dropped: Refused::new(),
         }
     }
 
@@ -266,7 +267,7 @@ impl<const N: usize> BlePending<N> {
             return;
         }
         if self.len == N {
-            self.dropped = self.dropped.wrapping_add(1);
+            self.dropped.note(&report.address);
             return;
         }
         self.items[self.len] = report;
@@ -287,10 +288,12 @@ impl<const N: usize> BlePending<N> {
         Some(report)
     }
 
-    /// Empty the buffer for a new scan. [`Self::dropped`] carries on.
+    /// Empty the buffer for a new scan. [`Self::dropped`] carries on, and an
+    /// advertiser turned away last scan counts again if it is turned away in this one.
     pub fn clear(&mut self) {
         self.len = 0;
         self.taken = 0;
+        self.dropped.reset();
     }
 
     /// Distinct addresses held this scan, at most `N`.
@@ -305,12 +308,11 @@ impl<const N: usize> BlePending<N> {
         self.len == 0
     }
 
-    /// Reports turned away by a full buffer since construction.
-    ///
-    /// Counts packets, not advertisers: once the buffer is full, an address
-    /// not in it counts again on every repeat within the scan.
+    /// Advertisers turned away by a full buffer since construction, each counted
+    /// once per scan however often it repeats. Wraps. See [`Refused`] for how it
+    /// slightly undercounts.
     #[must_use]
-    pub const fn dropped(&self) -> u32 {
-        self.dropped
+    pub const fn dropped(&self) -> u16 {
+        self.dropped.total()
     }
 }

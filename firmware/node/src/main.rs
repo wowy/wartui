@@ -504,8 +504,14 @@ fn next_beat_after(deadline: Instant) -> Instant {
 fn heartbeat(sender: &mut EspNowSender<'_>, node: &Node, capabilities: Capabilities) {
     // Every heartbeat carries the capabilities, not just the first: sent once they
     // would be lost to a dropped frame or stale after a reflash, and they are
-    // three bytes of fourteen.
-    let msg = HeartbeatMsg { counter: node.counter, epoch: node.version, capabilities };
+    // three bytes of eighteen.
+    let msg = HeartbeatMsg {
+        counter: node.counter,
+        epoch: node.version,
+        capabilities,
+        wifi_dropped: sniff::dropped(),
+        ble_dropped: ble::dropped(),
+    };
     radio::broadcast(sender, &msg.encode());
 }
 
