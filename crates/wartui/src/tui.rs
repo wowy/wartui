@@ -358,17 +358,6 @@ impl Ui {
             self.say(format!("{} {why}", mac(&target)), snapshot);
             return;
         }
-        // And one refusal only about Bluetooth: such a node adopts the flag,
-        // acknowledges, and scans nothing, so the table would name a holder and the
-        // export carry no BLE rows — and under this fleet's rules it would be sniffing
-        // nothing either. Two builds report it and the node says which in its own log,
-        // so this names the claim rather than guessing at the cause: the `ble` feature
-        // decides whether the code is there, and `ble::Scanner::new` whether the
-        // controller started.
-        if !holds && node.state.capabilities.is_some_and(|capabilities| !capabilities.ble) {
-            self.say(format!("{} does not support bluetooth scanning", mac(&target)), snapshot);
-            return;
-        }
         let said = match commands
             .try_send(Command::AssignBle { mac: if holds { None } else { Some(target) } })
         {
@@ -1328,7 +1317,7 @@ mod tests {
         // Heartbeating unless a test says otherwise. A node that has not
         // heartbeated is not assignable at all, so building the ordinary case
         // that way would make every assignment test below a test of a refusal.
-        state.capabilities = Some(Capabilities::here(true, true));
+        state.capabilities = Some(Capabilities::here(true));
         NodeView { state, alive: true, assignable }
     }
 
@@ -1344,11 +1333,10 @@ mod tests {
         view
     }
 
-    /// A node whose token says 2.4 GHz only and no Bluetooth code: an ESP32-C6
-    /// built without the `ble` feature.
+    /// A node whose token says 2.4 GHz only: an ESP32-C6.
     fn narrowband(last: u8) -> NodeView {
         let mut view = node(last, 0, true);
-        view.state.capabilities = Some(Capabilities::here(false, false));
+        view.state.capabilities = Some(Capabilities::here(false));
         view
     }
 
@@ -2104,31 +2092,6 @@ mod tests {
         let rendered = terminal.backend().to_string();
         assert!(rendered.contains("no node it can drive"), "got {rendered}");
         assert!(!rendered.contains("nothing heartbeating"), "they are all heartbeating");
-    }
-
-    #[test]
-    fn ui_refuses_ble_assignment_when_node_lacks_bluetooth_capability() {
-        let mut snapshot = busy();
-        snapshot.nodes.push(narrowband(0x21));
-        snapshot.nodes.sort_by_key(|n| n.state.mac);
-        let row = snapshot
-            .nodes
-            .iter()
-            .position(|n| n.state.mac[5] == 0x21)
-            .expect("the narrowband node");
-
-        let (tx, mut rx) = mpsc::channel(4);
-        let mut ui = Ui { selected: row, ..Default::default() };
-        ui.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE), &snapshot, &tx);
-        assert!(rx.try_recv().is_err(), "nothing was queued");
-        let notice = ui.notice(snapshot.now_ms).expect("a reason");
-        assert!(notice.contains("does not support bluetooth scanning"), "got {notice}");
-
-        // And taking it back off that node is still allowed.
-        let mut holding = snapshot.clone();
-        holding.ble_node = Some(holding.nodes[row].state.mac);
-        ui.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE), &holding, &tx);
-        assert_eq!(rx.try_recv().expect("a command"), Command::AssignBle { mac: None });
     }
 
     #[test]

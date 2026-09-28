@@ -19,7 +19,7 @@ const HEARTBEAT: &[u8] = &[
     0x57, 0x54, 0x55, 0x49, 0x01, 0x01, // header
     0x78, 0x56, 0x34, 0x12, // counter 0x1234_5678, little-endian
     0x05, // epoch
-    0x01, 0x00, 0x03, // capabilities: major 1, minor 0, ble + 5g
+    0x01, 0x00, 0x01, // capabilities: major 1, minor 0, 5g
 ];
 
 /// A heartbeat from a node parked since boot: epoch 0, never sent by the host.
@@ -27,7 +27,7 @@ const HEARTBEAT_NO_EPOCH: &[u8] = &[
     0x57, 0x54, 0x55, 0x49, 0x01, 0x01, // header
     0x78, 0x56, 0x34, 0x12, // counter 0x1234_5678, little-endian
     0x00, // epoch: none held
-    0x01, 0x00, 0x03, // capabilities: major 1, minor 0, ble + 5g
+    0x01, 0x00, 0x01, // capabilities: major 1, minor 0, 5g
 ];
 
 /// A Wi-Fi record: no header of its own, since [`SightingBatch`] carries one
@@ -210,7 +210,7 @@ fn heartbeat_msg_serializes_byte_for_byte_when_encoded_and_decoded() {
     let msg = HeartbeatMsg {
         counter: 0x1234_5678,
         epoch: 5,
-        capabilities: Capabilities { major: 1, minor: 0, ble: true, five_ghz: true },
+        capabilities: Capabilities { major: 1, minor: 0, five_ghz: true },
     };
     assert_eq!(msg.encode().as_slice(), HEARTBEAT);
     assert_eq!(HeartbeatMsg::decode(HEARTBEAT), Ok(msg));
@@ -221,7 +221,7 @@ fn heartbeat_msg_serializes_epoch_zero_when_node_holds_no_assignment() {
     let msg = HeartbeatMsg {
         counter: 0x1234_5678,
         epoch: 0,
-        capabilities: Capabilities { major: 1, minor: 0, ble: true, five_ghz: true },
+        capabilities: Capabilities { major: 1, minor: 0, five_ghz: true },
     };
     assert_eq!(msg.encode().as_slice(), HEARTBEAT_NO_EPOCH);
     assert_eq!(HeartbeatMsg::decode(HEARTBEAT_NO_EPOCH), Ok(msg));

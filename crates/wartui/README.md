@@ -199,11 +199,11 @@ its Wi-Fi radio never leaves the control channel.
 
 ## Bluetooth
 
-**At most one node scans Bluetooth, by default none does, and it is that node's whole job.** `b` on
-the selected node gives it the scan; `b` again on the node that holds it takes it off the fleet. The
-`ble` column says who has it, and reads `on…` or `off…` while a change waits for that node's next
-admin window, the same way `channels` does — and that node's `channels` column reads `bluetooth`,
-because it is dealt none.
+**At most one node scans Bluetooth, by default none does, and it is that node's whole job.** The scan
+is off at every boot; `b` is what turns it on. `b` on the selected node gives it the scan; `b` again
+on the node that holds it takes it off the fleet. The `ble` column says who has it, and reads `on…`
+or `off…` while a change waits for that node's next admin window, the same way `channels` does — and
+that node's `channels` column reads `bluetooth`, because it is dealt none.
 
 It costs a whole node because the two radios share the one 2.4 GHz antenna, and a node that also
 sweeps has to hand it back in time for every admin window it must answer in — which a stock node
@@ -216,13 +216,6 @@ The fleet is one sniffer short while it does, and the pool is re-cut across the 
 scan moves: giving it away grows every other node's share, and taking it back shrinks them again.
 A fleet of **one** node holding the scan sweeps no Wi-Fi at all, which is a real hole and is
 reported in the fault box rather than left to be inferred.
-
-The `ble` cargo feature decides whether the code is in the binary at all; the assignment decides
-whether it runs, and it is off at every boot regardless of the build. **`b` is refused on a node
-whose heartbeat does not claim `ble`**, which covers a build without the feature and a build whose
-Bluetooth controller would not start. Nothing about the frame would fail — such a node would adopt
-the flag, acknowledge, and scan nothing — so the `ble` column would name a holder that is not one,
-and the node would now be sniffing nothing either.
 
 ## Channel pools
 

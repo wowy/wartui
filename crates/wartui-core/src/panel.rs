@@ -298,7 +298,7 @@ mod tests {
         let now = Now { mono: Instant::now(), unix_ms: EPOCH_MS };
         let mut state = NodeState::new([0x02, 0x00, 0x5E, 0x10, 0x57, last], now);
         state.last_heartbeat = Some(now.mono);
-        state.capabilities = Some(Capabilities::here(true, true));
+        state.capabilities = Some(Capabilities::here(true));
         state.link_rssi = rssi;
         NodeView { state, alive: true, assignable: true }
     }

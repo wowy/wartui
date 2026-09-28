@@ -39,9 +39,7 @@ use esp_hal::timer::timg::TimerGroup;
 use esp_radio::esp_now::{EspNowManager, EspNowReceiver, EspNowSender};
 use esp_radio::wifi::{ControllerConfig, WifiController};
 use esp_rtos::CurrentThreadHandle;
-use static_cell::ConstStaticCell;
-#[cfg(feature = "ble")]
-use static_cell::StaticCell;
+use static_cell::{ConstStaticCell, StaticCell};
 use wartui_proto::air::{
     AdminMsg, Capabilities, DecodeError, Frame, HeartbeatMsg, SIGHTINGS_PER_BATCH_MAX,
     SightingBatchWriter, SightingMsg,
@@ -52,7 +50,6 @@ use wartui_proto::plan::{
     NUM_SCAN_CHANNELS, SCAN_CHANNELS, SweepCursor,
 };
 
-#[cfg(feature = "ble")]
 mod ble;
 mod radio;
 mod sniff;
@@ -196,13 +193,12 @@ impl Node {
 
     /// Whether this node's whole job is Bluetooth.
     ///
-    /// `scanning` is whether there is a scan to run at all: the `ble` feature, and a
-    /// controller that started. A flag that reaches a node with neither leaves it parked
-    /// and reporting nothing — honest, and diagnosable from the adoption line — rather
-    /// than holding the control channel for a scan that cannot happen. The core announces
-    /// what this node can do and so never asks; this is the node not depending on that,
-    /// and the reason the answer is passed in rather than read off a `cfg!`, which would
-    /// cover the build without the feature and miss the radio that would not start.
+    /// `scanning` is whether the controller started. The host cannot see that —
+    /// every node can scan, so capabilities carry no Bluetooth bit — so this node
+    /// does not depend on the host never asking: a flag that reaches one with no
+    /// controller leaves it parked and reporting nothing, honest and diagnosable
+    /// from the adoption line, rather than holding the control channel for a scan
+    /// that cannot happen.
     const fn bluetooth_only(&self, scanning: bool) -> bool {
         scanning && self.ble && self.channels.is_empty()
     }
@@ -265,20 +261,13 @@ impl Node {
 
 /// What this node is, as every heartbeat says it.
 ///
-/// `ble` is whether there is a controller here to scan with, not whether it is
-/// scanning: the scan is the core's decision and is off at every boot. Read off the
-/// controller rather than off the cargo feature, because the core deals *no channels*
-/// to the node it asks for Bluetooth — so a node claiming a scan it cannot run would
-/// sniff nothing either, and a `ble` build whose controller refused to start is
-/// exactly that node. `5g` is the chip, and is what keeps the planner from dealing a
-/// C6 a share nobody scans.
-fn capabilities(bluetooth: bool) -> Capabilities {
-    Capabilities::here(bluetooth, cfg!(feature = "esp32c5"))
-}
+/// `5g` is the chip, and is what keeps the planner from dealing a C6 a share
+/// nobody scans. Bluetooth is not a capability at all: every node can scan it,
+/// and the scan is the core's decision, off at every boot.
+const CAPABILITIES: Capabilities = Capabilities::here(cfg!(feature = "esp32c5"));
 
 static NODE: ConstStaticCell<Node> = ConstStaticCell::new(Node::new());
 
-#[cfg(feature = "ble")]
 static SCANNER: StaticCell<ble::Scanner<'static>> = StaticCell::new();
 
 #[esp_hal::main]
@@ -351,21 +340,18 @@ fn main() -> ! {
 
     // Brought up before the loop rather than on demand: initialising a radio
     // between a dwell and an admin window is the kind of surprise to avoid.
-    #[cfg(feature = "ble")]
     let mut scanner = match ble::Scanner::new(peripherals.BT) {
         Some(scanner) => Some(SCANNER.init(scanner)),
         None => {
-            // Announced as no `ble` below, so the core never asks this node for the
-            // scan — which matters more than it used to, since asking would leave it
-            // sniffing nothing either.
+            // The host cannot see this: capabilities carry no Bluetooth bit, so a
+            // controller that would not start is a fact only this node's own
+            // console knows. It sniffs Wi-Fi as normal, and parks if handed the
+            // scan anyway.
             note!("bluetooth controller would not start; sniffing Wi-Fi only");
             None
         }
     };
-    #[cfg(not(feature = "ble"))]
-    let scanner: Option<()> = None;
     let scanning = scanner.is_some();
-    let capabilities = capabilities(scanning);
 
     let node = NODE.take();
     let mac = esp_radio::wifi::Interface::station().mac_address();
@@ -389,7 +375,7 @@ fn main() -> ! {
             // gives below. The listen runs either way: it is what keeps this
             // loop from spinning.
             if radio::park(&manager, &sniffer, CONTROL_CHANNEL, false) {
-                heartbeat(&mut sender, node, capabilities);
+                heartbeat(&mut sender, node, CAPABILITIES);
                 node.counter = node.counter.wrapping_add(1).max(1);
             } else {
                 note!("radio would not park on channel {}", CONTROL_CHANNEL);
@@ -418,7 +404,6 @@ fn main() -> ! {
             if radio::park(&manager, &sniffer, CONTROL_CHANNEL, false) {
                 // Always `Some` here: `scanning` is what put this node in this arm,
                 // and it is that scanner being there.
-                #[cfg(feature = "ble")]
                 if let Some(scanner) = scanner.as_deref_mut() {
                     report_ble(&mut sender, node, scanner);
                 }
@@ -430,7 +415,7 @@ fn main() -> ! {
                     // an admin frame that landed after the last listen was acked
                     // and queued, and this heartbeat must report its epoch.
                     drain_admin(&manager, &receiver, node);
-                    heartbeat(&mut sender, node, capabilities);
+                    heartbeat(&mut sender, node, CAPABILITIES);
                     listen(&manager, &receiver, node, ADMIN_WAIT_MS);
                     node.next_beat = Some(next_beat_after(deadline));
                 }
@@ -489,7 +474,7 @@ fn main() -> ! {
             && let Some(deadline) = node.next_beat
             && Instant::now() >= deadline
         {
-            heartbeat(&mut sender, node, capabilities);
+            heartbeat(&mut sender, node, CAPABILITIES);
             listen(&manager, &receiver, node, ADMIN_WAIT_MS);
             node.next_beat = Some(next_beat_after(deadline));
         }
@@ -667,7 +652,6 @@ fn report(sender: &mut EspNowSender<'_>, node: &mut Node, channel: u8) {
 /// heartbeat follows it, so the Bluetooth controller is off again well ahead of
 /// the window that heartbeat opens. The node sniffs no Wi-Fi, so the scan
 /// competes with nothing but that heartbeat for the antenna.
-#[cfg(feature = "ble")]
 fn report_ble(sender: &mut EspNowSender<'_>, node: &mut Node, scanner: &mut ble::Scanner<'_>) {
     let heard = scanner.sweep();
     let now = sniff::now_ms();

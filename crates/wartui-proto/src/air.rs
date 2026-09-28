@@ -106,11 +106,8 @@ pub const SIGHTINGS_PER_BATCH_MAX: usize =
 /// [`AdminMsg::flags`] bit 0: scan Bluetooth as well as Wi-Fi.
 pub const ADMIN_FLAG_BLE: u8 = 1 << 0;
 
-/// [`Capabilities::flags`] bit 0: this build has the Bluetooth scan compiled in.
-pub const CAP_FLAG_BLE: u8 = 1 << 0;
-
-/// [`Capabilities::flags`] bit 1: this radio reaches 5 GHz.
-pub const CAP_FLAG_5G: u8 = 1 << 1;
+/// [`Capabilities::flags`] bit 0: this radio reaches 5 GHz.
+pub const CAP_FLAG_5G: u8 = 1 << 0;
 
 const OFF_VERSION: usize = 4;
 const OFF_TYPE: usize = 5;
@@ -243,13 +240,13 @@ fn write_header(out: &mut [u8], msg_type: MsgType) {
 
 /// What a node says it is, in every heartbeat it sends.
 ///
-/// A version, and which of two optional capabilities this particular board has;
-/// the magic is what separates one of ours from a stock node.
+/// A version, and the one capability this particular board has; the magic is
+/// what separates one of ours from a stock node.
 ///
-/// Both features are refusals rather than requests. A node without `ble` is
-/// never handed [`ADMIN_FLAG_BLE`], because it would acknowledge the assignment
-/// and scan nothing; a node without `five_ghz` is never dealt a 5 GHz index,
-/// because a share it cannot tune is a share nobody scans.
+/// `five_ghz` is a refusal rather than a request: a node without it is never
+/// dealt a 5 GHz index, because a share it cannot tune is a share nobody
+/// scans. Bluetooth is not a capability at all — every node can scan it, and
+/// [`ADMIN_FLAG_BLE`] is the operator's decision, off at every boot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Capabilities {
     /// Bumped when node → core changes shape in a way an older host cannot
@@ -257,10 +254,6 @@ pub struct Capabilities {
     pub major: u8,
     /// Bumped for additions an older host can ignore.
     pub minor: u8,
-    /// Built with the `ble` cargo feature, so the Bluetooth scan is code this
-    /// node actually has. Says nothing about whether it is running: that is the
-    /// assignment's [`ADMIN_FLAG_BLE`], and it is off at every boot.
-    pub ble: bool,
     /// The radio reaches 5 GHz. False on an ESP32-C6, which is 2.4 GHz only.
     pub five_ghz: bool,
 }
@@ -273,21 +266,14 @@ pub const CAPABILITY_MINOR: u8 = 0;
 impl Capabilities {
     /// What this build is, for a node to announce.
     #[must_use]
-    pub const fn here(ble: bool, five_ghz: bool) -> Self {
-        Self { major: CAPABILITY_MAJOR, minor: CAPABILITY_MINOR, ble, five_ghz }
+    pub const fn here(five_ghz: bool) -> Self {
+        Self { major: CAPABILITY_MAJOR, minor: CAPABILITY_MINOR, five_ghz }
     }
 
     /// The feature bits as the wire carries them.
     #[must_use]
     pub const fn flags(&self) -> u8 {
-        let mut flags = 0;
-        if self.ble {
-            flags |= CAP_FLAG_BLE;
-        }
-        if self.five_ghz {
-            flags |= CAP_FLAG_5G;
-        }
-        flags
+        if self.five_ghz { CAP_FLAG_5G } else { 0 }
     }
 
     /// Rebuild from the three bytes a heartbeat carries.
@@ -297,23 +283,17 @@ impl Capabilities {
     /// this host has never heard of.
     #[must_use]
     pub const fn from_parts(major: u8, minor: u8, flags: u8) -> Self {
-        Self { major, minor, ble: flags & CAP_FLAG_BLE != 0, five_ghz: flags & CAP_FLAG_5G != 0 }
+        Self { major, minor, five_ghz: flags & CAP_FLAG_5G != 0 }
     }
 }
 
-/// The form the fleet table and the store column show: `wartui/1.0;ble,5g`. The
+/// The form the fleet table and the store column show: `wartui/1.0;5g`. The
 /// three bytes a heartbeat carries are what travels; this is for reading.
 impl fmt::Display for Capabilities {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "wartui/{}.{}", self.major, self.minor)?;
-        let mut first = true;
-        for (present, name) in [(self.ble, "ble"), (self.five_ghz, "5g")] {
-            if !present {
-                continue;
-            }
-            f.write_str(if first { ";" } else { "," })?;
-            f.write_str(name)?;
-            first = false;
+        if self.five_ghz {
+            f.write_str(";5g")?;
         }
         Ok(())
     }

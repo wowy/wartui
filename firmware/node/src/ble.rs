@@ -1,14 +1,11 @@
-//! Bluetooth scanning, when this build was asked for it and the core asked for
-//! it too.
-//!
-//! Compiled in only under `--features ble`, and *run* only while the core has set
-//! `ADMIN_FLAG_BLE` for this node — at most one node in a fleet, and none by
-//! default. On a stock node BLE cost it every channel assignment sent to it,
-//! because an 802.11 acknowledgement comes from the receiver's MAC hardware and
-//! its absence means the radio was simply not on the channel: NimBLE and Wi-Fi
-//! share the one 2.4 GHz antenna, and the admin window is precisely when the node
-//! is otherwise idle and the controller is free to take it. This firmware
-//! acknowledged every time at around a tenth of its sweep period
+//! Bluetooth scanning, run only while the core has set `ADMIN_FLAG_BLE` for this
+//! node — at most one node in a fleet, and none by default. On a stock node BLE
+//! cost it every channel assignment sent to it, because an 802.11 acknowledgement
+//! comes from the receiver's MAC hardware and its absence means the radio was
+//! simply not on the channel: NimBLE and Wi-Fi share the one 2.4 GHz antenna, and
+//! the admin window is precisely when the node is otherwise idle and the
+//! controller is free to take it. This firmware acknowledged every time at around
+//! a tenth of its sweep period
 //! (`docs/phase-0-findings.md`, `docs/phase-1-findings.md`).
 //!
 //! Two things here are what avoid repeating that.

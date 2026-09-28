@@ -793,35 +793,22 @@ impl FleetEngine {
 
     fn on_tick(&mut self, now: Now, batch: &mut ActionBatch) {
         self.expire_pending(now, batch);
-        // Who is *named* as the holder, which is a different question from who is
-        // dealt a Bluetooth slot: `replan` masks the slot by the capability on
-        // every re-cut, so a node that stopped claiming the feature has already
-        // been dealt a share again by the heartbeat that said so. What is left is
-        // the name the snapshot shows, and taking it back is what makes `b` able
-        // to give the scan to somebody else.
-        //
         // A node aging out of topology is the passage of time rather than
         // anything arriving, so the tick is the only thing that can see it. A node
         // that has left the fleet is not scanning for us either way.
         //
-        // Both cases are about a node that has *spoken*, which is why
-        // `last_heartbeat` guards the first: a node put in the table by a
-        // sighting alone has no heartbeat behind it yet, and reading that as
-        // "gone" takes the scan back before the node has had any chance to
-        // answer. Only `!is_alive` needs the guard — capabilities arrive in
-        // heartbeats, so `Some` capabilities implies one by construction.
+        // `last_heartbeat` guards it: a node put in the table by a sighting alone
+        // has no heartbeat behind it yet, and reading that as "gone" takes the
+        // scan back before the node has had any chance to answer.
         let ble_gone = self.ble_node.is_some_and(|mac| {
-            self.nodes.get(&mac).is_some_and(|node| {
-                (node.last_heartbeat.is_some() && !self.is_alive(node, now))
-                    || node.capabilities.is_some_and(|capabilities| !capabilities.ble)
-            })
+            self.nodes
+                .get(&mac)
+                .is_some_and(|node| node.last_heartbeat.is_some() && !self.is_alive(node, now))
         });
         // Clearing this is only about what the snapshot claims; the withdrawal
         // itself rides in the re-cut below, which this runs before. A node that
-        // changed its own token is still a member, so it is dealt a share and told
-        // the flag is off in one epoch. A node that has left the fleet is not a
-        // member, so the re-cut drops what it was owed — and if it comes back, it
-        // comes back without the scan.
+        // has left the fleet is not a member, so the re-cut drops what it was
+        // owed — and if it comes back, it comes back without the scan.
         let _ = self.ble_node.take_if(|_| ble_gone);
         self.replan(now);
         let due = self
@@ -1270,14 +1257,6 @@ impl FleetEngine {
         }
     }
 
-    /// Checks whether a node is heard from and known to lack BLE capability.
-    ///
-    /// Returns `true` only if the node is present in the table and its advertised
-    /// capabilities explicitly indicate no BLE support. Unseen nodes return `false`.
-    fn node_lacks_ble(&self, mac: Mac) -> bool {
-        self.nodes.get(&mac).and_then(|node| node.capabilities).is_some_and(|caps| !caps.ble)
-    }
-
     /// Move the Bluetooth scan, or take it off the fleet entirely.
     ///
     /// Nothing is sent from here, and nothing is decided either. Moving the scan
@@ -1289,16 +1268,6 @@ impl FleetEngine {
     /// window, under one epoch carrying both the share and the flag.
     fn on_assign_ble(&mut self, target: Option<Mac>) {
         if self.ble_node == target {
-            return;
-        }
-
-        // A node built without the `ble` feature would adopt the flag,
-        // acknowledge, and scan nothing. The view refuses the keypress first; the
-        // check is here too because `ble_node` is the only record of who was
-        // asked and must not name a node that cannot answer. A node this host has
-        // not heard from is *not* refused — naming one before it appears is
-        // legitimate, and the tick takes the scan back once its token says so.
-        if target.is_some_and(|mac| self.node_lacks_ble(mac)) {
             return;
         }
 
@@ -1374,17 +1343,9 @@ impl FleetEngine {
     /// anything, which is what keeps this off a heartbeat's critical path. It is
     /// called from every tick, so that has to stay true.
     fn replan(&mut self, now: Now) {
-        // One value, read twice below, so a node's channels and its Bluetooth flag
-        // cannot disagree. Masked by the capability for the reason [`Self::reissue`]
-        // used to give, and now for a second one: a node reflashed without the `ble`
-        // feature must be dealt a share again, and a job taken from `ble_node` alone
-        // would leave it holding an empty set with the flag cleared — a node told to
-        // scan nothing, which parks while this host believes it is sweeping.
-        let scanner = self.ble_node.filter(|mac| {
-            self.nodes
-                .get(mac)
-                .is_some_and(|node| node.capabilities.is_some_and(|capabilities| capabilities.ble))
-        });
+        // One value, read once per member below, so a node's channels and its
+        // Bluetooth flag cannot disagree.
+        let scanner = self.ble_node;
         let members: Vec<(Mac, Job)> = self
             .nodes
             .values()

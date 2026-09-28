@@ -144,7 +144,7 @@ cargo test -p wartui-core --test engine                     # one test binary
 cargo test -p wartui-core --test engine engine_ignores_     # tests by name prefix
 
 cd firmware/bridge && cargo clippy --release --features esp32c6   # and esp32c5
-cd firmware/node   && cargo clippy --release --features esp32c6   # and with ,ble
+cd firmware/node   && cargo clippy --release --features esp32c6   # and esp32c5
 ```
 
 `wartui-proto` is `no_std` because it is compiled into the firmwares as well as the host — which is
