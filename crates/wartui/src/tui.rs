@@ -2243,21 +2243,37 @@ mod tests {
     }
 
     #[test]
-    fn fleet_table_shows_ble_assignment_status_when_node_holds_or_awaits_ble() {
+    fn fleet_table_shows_bluetooth_in_channel_column_when_node_holds_or_awaits_ble() {
         let mut snapshot = busy();
-        snapshot.ble_node = Some(snapshot.nodes[0].state.mac);
-        if let Some(confirmed) = snapshot.nodes[0].state.confirmed.as_mut() {
-            confirmed.ble = true;
-        }
+        let mac = snapshot.nodes[0].state.mac;
+
+        // Adopted: confirmed and desired agree on the Bluetooth assignment,
+        // and the node's own heartbeat has said it holds it.
+        let existing = snapshot.nodes[0].state.confirmed.expect("assigned() sets one");
+        let ble = Assignment { channels: ChannelSet::empty(), ble: true, ..existing };
+        snapshot.nodes[0].state.confirmed = Some(ble);
+        snapshot.nodes[0].state.desired = Some(ble);
+        adopt(&mut snapshot.nodes[0].state);
+        snapshot.ble_node = Some(mac);
+
+        // Still dirty: sent but not yet acknowledged.
         if let Some(desired) = snapshot.nodes[3].state.desired.as_mut() {
+            desired.channels = ChannelSet::empty();
             desired.ble = true;
         }
 
         let mut terminal = Terminal::new(TestBackend::new(160, 20)).expect("test backend");
         terminal.draw(|frame| draw(frame, &snapshot, &mut Ui::default())).expect("drawing");
         let rendered = terminal.backend().to_string();
-        assert!(rendered.contains(" ble "), "the node whose radio confirmed it");
-        assert!(rendered.contains("on…"), "and the node still waiting on its window");
+
+        let adopted_row =
+            rendered.lines().find(|line| line.contains("57:84")).expect("the adopted node's row");
+        assert!(adopted_row.contains("bluetooth"), "got {adopted_row}");
+        assert!(!adopted_row.contains("bluetooth…"), "adopted, not pending: {adopted_row}");
+
+        let pending_row =
+            rendered.lines().find(|line| line.contains("57:87")).expect("the pending node's row");
+        assert!(pending_row.contains("bluetooth…"), "got {pending_row}");
     }
 
     #[test]
