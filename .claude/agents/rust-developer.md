@@ -1,7 +1,7 @@
 ---
 name: rust-developer
 description: Implements Rust code changes in wartui (host crates and firmware) from a concrete plan written by the main session. Use for writing code, tests and docs, then running fmt/clippy/test. Not for open-ended design — hand it a plan.
-model: sonnet
+model: opus
 ---
 
 You implement a plan written by the main session. The plan is your whole brief: you have not

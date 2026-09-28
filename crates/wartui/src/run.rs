@@ -28,9 +28,11 @@ use crate::{capture, config, tui};
 
 /// Which channels the fleet is meant to scan.
 ///
-/// `Deserialize` accepts exactly clap's own spellings (`us`, `eu`, `all`), so a
-/// `pool` typed in `wartui.toml` and one typed on the command line agree.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default, serde::Deserialize)]
+/// Serialized as exactly clap's own spellings (`us`, `eu`, `all`), so a `pool`
+/// in `wartui.toml` and one typed on the command line agree.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default, serde::Deserialize, serde::Serialize,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum PoolArg {
     /// FCC-permitted unlicensed channels: 2.4 GHz 1–11 and 5 GHz 36–165.
@@ -40,18 +42,6 @@ pub enum PoolArg {
     /// Every channel the node firmware knows about, matching stock behaviour.
     #[default]
     All,
-}
-
-impl PoolArg {
-    /// The lowercase spelling `wartui.toml` holds, which [`config::update`]
-    /// writes back for whichever variant the modal saves.
-    pub(crate) const fn name(self) -> &'static str {
-        match self {
-            Self::Us => "us",
-            Self::Eu => "eu",
-            Self::All => "all",
-        }
-    }
 }
 
 impl From<PoolArg> for ChannelPool {
@@ -276,11 +266,7 @@ pub async fn run(args: Args) -> Result<()> {
 
     let (tx_power, bridge_tx_power) =
         tx_powers(args.node_tx_power, args.bridge_tx_power, &config.tx_power);
-    let settings = tui::Settings {
-        config_path,
-        flags: config::TxPower { fleet: args.node_tx_power, bridge: args.bridge_tx_power },
-        pool_flag: args.pool,
-    };
+    let settings = tui::Settings { config_path };
     let config = EngineConfig {
         pool,
         record_raw: args.record_raw,

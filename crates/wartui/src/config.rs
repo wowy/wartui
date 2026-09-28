@@ -21,38 +21,46 @@ use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use serde::Deserialize;
-use toml_edit::DocumentMut;
+use serde::{Deserialize, Serialize};
 
 use crate::run::PoolArg;
 
 /// Everything `wartui.toml` can hold. Add a field and a table to grow it; every
 /// struct denies unknown fields, so a typo in the file is caught rather than
 /// silently ignored.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct Config {
     /// The root `pool` key. An unknown spelling is a serde error, named with
     /// the file the same way an out-of-range tx-power is. `None` means the
     /// file said nothing, which `run::pool` falls back on the same way it
     /// falls back on a missing `--pool`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pool: Option<PoolArg>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "TxPower::is_empty")]
     pub tx_power: TxPower,
 }
 
 /// The `[tx-power]` table: `fleet` covers the nodes and `bridge` the bridge, each
 /// independent and falling back to the default on its own — the same split
 /// `--node-tx-power` and `--bridge-tx-power` make on the command line.
-#[derive(Debug, Default, Clone, Deserialize)]
+#[derive(Debug, Default, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct TxPower {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub fleet: Option<i8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub bridge: Option<i8>,
 }
 
-/// Whole dBm a transmit power may name, on the command line or in the file — 20 dBm
+impl TxPower {
+    /// Whether neither key is set, so `save` writes no `[tx-power]` table at all.
+    fn is_empty(&self) -> bool {
+        self.fleet.is_none() && self.bridge.is_none()
+    }
+}
+
+/// Valid whole dBm transmit power values, on the command line or in the file. 20 dBm
 /// is the ceiling because whether anything above it works correctly is unverified,
 /// per `AGENTS.md`'s tx-power invariant.
 pub const TX_POWER_DBM: RangeInclusive<i8> = 2..=20;
@@ -144,60 +152,32 @@ fn default_path_in(macos: bool, home: Option<&OsStr>, xdg: Option<&OsStr>) -> Op
     Some(Path::new(home).join(".config/wartui/wartui.toml"))
 }
 
-/// Change `wartui.toml` at `path`, applying `change` to whatever is on disk right
-/// now rather than to a value remembered from an earlier `load`.
+/// Write `config` to `wartui.toml` at `path`, replacing whatever the file held.
 ///
-/// `change` sees the file's *current* `Config`, not a value built from scratch: a
-/// field it leaves alone keeps whatever the file already held, so a future
-/// setting beside `tx-power` is not wiped out by a save that only meant to touch
-/// this one. The file is parsed fresh even to get there, and a parse error is
-/// propagated rather than swallowed — a file `load` would already refuse cannot
-/// be safely updated, since there is no trustworthy `Config` to hand `change`.
+/// The file belongs to the settings modal, which saves every setting it shows.
+/// Nothing on disk is read back or merged: a hand edit, a comment, or a file
+/// that does not parse is simply overwritten. `config` is checked with
+/// [`Config::validate`] first, so `save` never leaves a file `load` would refuse.
 ///
-/// The result is written into a [`DocumentMut`] read from the same text, so a
-/// comment, a key's position and anything else the operator wrote by hand
-/// survive a change of keys this doesn't touch: a `Some` field is set, a `None`
-/// field is removed, and a table left with nothing under it is dropped rather
-/// than kept as an empty `[tx-power]`. Re-parsed through [`Config::validate`]
-/// before anything is written, so `update` never leaves a file `load` would
-/// refuse either.
+/// The write lands in a temp file and is renamed into place — a torn write here
+/// would stop the next run from starting — beside the file `path` *resolves to*
+/// rather than `path` itself, so a `path` that is a symlink stays one: the rename
+/// replaces what it points at, not the link, even a dangling one. A file that
+/// existed keeps its permissions, copied onto the temp file before the rename; a
+/// new file gets whatever the process umask gives it.
 ///
-/// The write itself lands in a temp file and is renamed into place — a torn
-/// write here would stop the next run from starting — beside the file `path`
-/// *resolves to* rather than `path` itself, so a `path` that is a symlink stays
-/// one: the rename replaces what it points at, not the link, even a dangling
-/// one. A file that existed keeps its permissions, copied onto the temp file
-/// before the rename; a new file gets whatever the process umask gives it.
-///
-/// Skipped entirely when `change` leaves the document identical to what was
-/// read: no temp file, no rename, and — for a file that did not exist —
-/// nothing created. This is what lets a save whose value turns out to match
-/// the file exactly report success without disturbing it.
-pub fn update(path: &Path, change: impl FnOnce(&mut Config)) -> Result<()> {
-    let text = match std::fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
-    };
-    let mut doc: DocumentMut =
-        text.parse().with_context(|| format!("parsing {}", path.display()))?;
-    let mut config: Config =
-        toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
-    change(&mut config);
-    write_tx_power(&mut doc, &config.tx_power);
-    write_pool(&mut doc, config.pool);
+/// Skipped entirely when the file already holds exactly this text: no temp file
+/// and no rename.
+pub fn save(path: &Path, config: &Config) -> Result<()> {
+    config.validate().context("the settings to save are invalid")?;
+    let written = toml::to_string(config).context("serialising the settings")?;
 
-    let written = doc.to_string();
-    let reparsed: Config =
-        toml::from_str(&written).context("the settings just written do not parse")?;
-    reparsed.validate().context("the settings just written are invalid")?;
-
-    if written == text {
+    if std::fs::read_to_string(path).is_ok_and(|text| text == written) {
         return Ok(());
     }
 
     // A path that does not exist yet has nothing to resolve or to have
-    // permissions of, so it is used as given and a new file gets the default.
+    // permissions of, so it is used as given, and a new file gets the default.
     let target = resolve_symlink_target(path)?;
     let permissions = std::fs::metadata(&target).ok().map(|meta| meta.permissions());
 
@@ -221,7 +201,7 @@ pub fn update(path: &Path, change: impl FnOnce(&mut Config)) -> Result<()> {
 /// Follow `path` through however many symlinks it is, to the file a write
 /// through it ultimately lands on — even one that does not exist yet, which
 /// is where [`std::fs::canonicalize`] falls short: it refuses a dangling
-/// link, and the fallback of using `path` itself would make `update` replace
+/// link, and the fallback of using `path` itself would make `save` replace
 /// the link with a plain file instead of writing through it. A relative link
 /// target is resolved against the link's own parent directory, the same way
 /// a shell would. Bounded at 40 hops so a cycle errors rather than spinning.
@@ -243,70 +223,9 @@ fn resolve_symlink_target(path: &Path) -> Result<PathBuf> {
     bail!("too many levels of symbolic links: {}", path.display())
 }
 
-/// Set or remove `[tx-power]`'s two keys, dropping the table entirely once
-/// both are gone. `as_table_like` rather than `as_table` throughout, so a file
-/// that wrote `tx-power = { fleet = 10 }` as an inline table is edited in place
-/// rather than silently left alone.
-fn write_tx_power(doc: &mut DocumentMut, tx_power: &TxPower) {
-    set_field(doc, "tx-power", "fleet", tx_power.fleet);
-    set_field(doc, "tx-power", "bridge", tx_power.bridge);
-    let empty = doc
-        .get("tx-power")
-        .and_then(toml_edit::Item::as_table_like)
-        .is_some_and(|table| table.is_empty());
-    if empty {
-        doc.remove("tx-power");
-    }
-}
-
-/// Set one key of one table to `Some(value)`, or remove it for `None`. Creates
-/// the table if a value is being set and it is not there yet.
-fn set_field(doc: &mut DocumentMut, table: &str, key: &str, value: Option<i8>) {
-    match value {
-        Some(value) => {
-            let item = doc.entry(table).or_insert_with(toml_edit::table);
-            let Some(table) = item.as_table_like_mut() else { return };
-            set_value(table, key, Some(toml_edit::Value::from(i64::from(value))));
-        }
-        None => {
-            if let Some(table) = doc.get_mut(table).and_then(toml_edit::Item::as_table_like_mut) {
-                set_value(table, key, None);
-            }
-        }
-    }
-}
-
-/// Set or remove the root `pool` key, written as its lowercase spelling
-/// (`PoolArg::name`) so `wartui.toml` and `--pool` take the same words.
-fn write_pool(doc: &mut DocumentMut, pool: Option<PoolArg>) {
-    let value = pool.map(|pool| toml_edit::Value::from(pool.name()));
-    set_value(doc.as_table_mut(), "pool", value);
-}
-
-/// Set or remove one key of `table` to `value`, keeping the existing value's
-/// decor — the whitespace and any trailing comment around it — rather than
-/// losing it to a freshly built item: `table.insert` would otherwise replace
-/// the whole node, decor included, so `fleet = 4   # quiet` becoming
-/// `fleet = 7` would lose the comment along with the old number.
-fn set_value(table: &mut dyn toml_edit::TableLike, key: &str, value: Option<toml_edit::Value>) {
-    match value {
-        Some(mut value) => {
-            if let Some(decor) =
-                table.get(key).and_then(toml_edit::Item::as_value).map(toml_edit::Value::decor)
-            {
-                *value.decor_mut() = decor.clone();
-            }
-            table.insert(key, toml_edit::Item::Value(value));
-        }
-        None => {
-            table.remove(key);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{Config, default_path_in, load, load_from, path, update};
+    use super::{Config, TxPower, default_path_in, load, load_from, path, save};
     use crate::run::PoolArg;
     use std::ffi::OsStr;
 
@@ -463,16 +382,22 @@ mod tests {
         assert_eq!(path(Some(&explicit)), Some(explicit));
     }
 
+    /// A `Config` holding every key the settings modal saves.
+    fn full(pool: PoolArg, fleet: i8, bridge: i8) -> Config {
+        Config { pool: Some(pool), tx_power: TxPower { fleet: Some(fleet), bridge: Some(bridge) } }
+    }
+
+    /// A `Config` with only the fleet's tx power set.
+    fn fleet_only(fleet: i8) -> Config {
+        Config { pool: None, tx_power: TxPower { fleet: Some(fleet), bridge: None } }
+    }
+
     #[test]
-    fn config_update_creates_file_and_parent_directories_when_missing() {
+    fn config_save_creates_file_and_parent_directories_when_missing() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("nested/deeper/wartui.toml");
 
-        update(&target, |c| {
-            c.tx_power.fleet = Some(10);
-            c.tx_power.bridge = Some(15);
-        })
-        .unwrap();
+        save(&target, &full(PoolArg::Us, 10, 15)).unwrap();
 
         let saved = load(Some(&target)).unwrap();
         assert_eq!(saved.tx_power.fleet, Some(10));
@@ -480,41 +405,39 @@ mod tests {
     }
 
     #[test]
-    fn config_update_keeps_existing_comments_when_writing() {
-        let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("wartui.toml");
-        std::fs::write(&target, "# operator notes\n[tx-power]\nfleet = 6\n").unwrap();
-
-        update(&target, |c| c.tx_power.fleet = Some(10)).unwrap();
-
-        let text = std::fs::read_to_string(&target).unwrap();
-        assert!(text.contains("# operator notes"), "{text}");
-    }
-
-    #[test]
-    fn config_update_writes_both_keys_when_given() {
+    fn config_save_writes_every_key_that_reloads_when_all_are_set() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wartui.toml");
 
-        update(&target, |c| {
-            c.tx_power.fleet = Some(8);
-            c.tx_power.bridge = Some(12);
-        })
-        .unwrap();
+        save(&target, &full(PoolArg::Eu, 8, 12)).unwrap();
 
         let saved = load(Some(&target)).unwrap();
+        assert_eq!(saved.pool, Some(PoolArg::Eu));
         assert_eq!(saved.tx_power.fleet, Some(8));
         assert_eq!(saved.tx_power.bridge, Some(12));
+        let text = std::fs::read_to_string(&target).unwrap();
+        assert!(text.contains("pool = \"eu\""), "the same spelling --pool takes: {text}");
     }
 
     #[test]
-    fn config_update_refuses_out_of_range_value_and_leaves_file_unchanged() {
+    fn config_save_omits_tx_power_table_when_neither_power_is_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wartui.toml");
+
+        save(&target, &Config { pool: Some(PoolArg::All), tx_power: TxPower::default() }).unwrap();
+
+        let text = std::fs::read_to_string(&target).unwrap();
+        assert!(!text.contains("tx-power"), "{text}");
+    }
+
+    #[test]
+    fn config_save_refuses_out_of_range_value_and_leaves_file_unchanged() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wartui.toml");
         let original = "[tx-power]\nfleet = 6\n";
         std::fs::write(&target, original).unwrap();
 
-        let result = update(&target, |c| c.tx_power.fleet = Some(99));
+        let result = save(&target, &fleet_only(99));
 
         assert!(result.is_err());
         let text = std::fs::read_to_string(&target).unwrap();
@@ -522,111 +445,42 @@ mod tests {
     }
 
     #[test]
-    fn config_update_leaves_unrelated_hand_edit_in_place() {
+    fn config_save_replaces_everything_when_file_holds_other_values() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wartui.toml");
-        std::fs::write(
-            &target,
-            "[tx-power]\nfleet = 6\nbridge = 6\n\n# reminder: bench with headphones off\n",
-        )
-        .unwrap();
+        std::fs::write(&target, "# notes\npool = \"us\"\n[tx-power]\nfleet = 6\nbridge = 9\n")
+            .unwrap();
 
-        update(&target, |c| c.tx_power.fleet = Some(10)).unwrap();
-
-        let text = std::fs::read_to_string(&target).unwrap();
-        assert!(text.contains("# reminder: bench with headphones off"), "{text}");
-    }
-
-    #[test]
-    fn config_update_keeps_other_fields_when_changing_tx_power() {
-        let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("wartui.toml");
-        std::fs::write(&target, "[tx-power]\nbridge = 15\n").unwrap();
-
-        update(&target, |c| c.tx_power.fleet = Some(10)).unwrap();
+        save(&target, &fleet_only(10)).unwrap();
 
         let saved = load(Some(&target)).unwrap();
+        assert_eq!(saved.pool, None, "the file holds only what was saved");
         assert_eq!(saved.tx_power.fleet, Some(10));
-        assert_eq!(saved.tx_power.bridge, Some(15), "untouched by this update");
+        assert_eq!(saved.tx_power.bridge, None);
     }
 
     #[test]
-    fn config_update_edits_inline_table_when_file_uses_one() {
+    fn config_save_overwrites_file_when_existing_file_does_not_parse() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wartui.toml");
-        std::fs::write(&target, "tx-power = { fleet = 10 }\n").unwrap();
+        std::fs::write(&target, "this is [not toml\n").unwrap();
 
-        update(&target, |c| c.tx_power.bridge = Some(15)).unwrap();
+        save(&target, &full(PoolArg::Us, 4, 5)).unwrap();
 
         let saved = load(Some(&target)).unwrap();
-        assert_eq!(saved.tx_power.fleet, Some(10));
-        assert_eq!(saved.tx_power.bridge, Some(15));
-    }
-
-    #[test]
-    fn config_update_writes_pool_as_root_key_that_reloads() {
-        let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("wartui.toml");
-
-        update(&target, |c| c.pool = Some(PoolArg::Eu)).unwrap();
-
-        let saved = load(Some(&target)).unwrap();
-        assert_eq!(saved.pool, Some(PoolArg::Eu));
-    }
-
-    #[test]
-    fn config_update_keeps_trailing_comment_when_changing_pool() {
-        let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("wartui.toml");
-        std::fs::write(&target, "pool = \"us\"   # quiet\n").unwrap();
-
-        update(&target, |c| c.pool = Some(PoolArg::Eu)).unwrap();
-
-        let text = std::fs::read_to_string(&target).unwrap();
-        assert!(text.contains("pool = \"eu\""), "{text}");
-        assert!(text.contains("# quiet"), "{text}");
-    }
-
-    #[test]
-    fn config_update_keeps_pool_when_only_tx_power_changes() {
-        let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("wartui.toml");
-        std::fs::write(&target, "pool = \"eu\"\n").unwrap();
-
-        update(&target, |c| c.tx_power.fleet = Some(10)).unwrap();
-
-        let saved = load(Some(&target)).unwrap();
-        assert_eq!(saved.pool, Some(PoolArg::Eu), "untouched by this update");
-        assert_eq!(saved.tx_power.fleet, Some(10));
-    }
-
-    #[test]
-    fn config_update_keeps_trailing_comment_when_changing_existing_key() {
-        let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("wartui.toml");
-        std::fs::write(&target, "[tx-power]\nfleet = 4   # quiet\n").unwrap();
-
-        update(&target, |c| c.tx_power.fleet = Some(7)).unwrap();
-
-        let text = std::fs::read_to_string(&target).unwrap();
-        assert!(text.contains("fleet = 7"), "{text}");
-        assert!(text.contains("# quiet"), "{text}");
-        assert!(
-            text.lines().any(|line| line.contains("fleet = 7") && line.contains("# quiet")),
-            "the comment stays on the same line: {text}"
-        );
+        assert_eq!(saved.pool, Some(PoolArg::Us));
     }
 
     #[test]
     #[cfg(unix)]
-    fn config_update_writes_through_symlink_when_path_is_one() {
+    fn config_save_writes_through_symlink_when_path_is_one() {
         let dir = tempfile::tempdir().unwrap();
         let real = dir.path().join("real.toml");
         let link = dir.path().join("wartui.toml");
         std::fs::write(&real, "[tx-power]\nfleet = 6\n").unwrap();
         std::os::unix::fs::symlink(&real, &link).unwrap();
 
-        update(&link, |c| c.tx_power.fleet = Some(10)).unwrap();
+        save(&link, &fleet_only(10)).unwrap();
 
         assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "still a link");
         let saved = load(Some(&real)).unwrap();
@@ -635,13 +489,13 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn config_update_creates_target_when_path_is_a_dangling_symlink() {
+    fn config_save_creates_target_when_path_is_a_dangling_symlink() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("real.toml");
         let link = dir.path().join("wartui.toml");
         std::os::unix::fs::symlink(&target, &link).unwrap(); // target does not exist yet
 
-        update(&link, |c| c.tx_power.fleet = Some(10)).unwrap();
+        save(&link, &fleet_only(10)).unwrap();
 
         assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "still a link");
         assert_eq!(std::fs::read_link(&link).unwrap(), target, "still points at the same place");
@@ -651,7 +505,7 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn config_update_follows_a_relative_chain_of_dangling_links() {
+    fn config_save_follows_a_relative_chain_of_dangling_links() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("real.toml");
         let middle = dir.path().join("middle.toml");
@@ -661,7 +515,7 @@ mod tests {
         std::os::unix::fs::symlink("real.toml", &middle).unwrap();
         std::os::unix::fs::symlink(&middle, &link).unwrap();
 
-        update(&link, |c| c.tx_power.fleet = Some(7)).unwrap();
+        save(&link, &fleet_only(7)).unwrap();
 
         assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
         assert!(std::fs::symlink_metadata(&middle).unwrap().file_type().is_symlink());
@@ -670,31 +524,21 @@ mod tests {
     }
 
     #[test]
-    fn config_update_leaves_file_untouched_when_change_is_a_no_op() {
+    fn config_save_leaves_file_untouched_when_it_already_holds_the_same_text() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wartui.toml");
-        std::fs::write(&target, "[tx-power]\nfleet = 10\n").unwrap();
+        save(&target, &full(PoolArg::Us, 10, 12)).unwrap();
         let before = std::fs::metadata(&target).unwrap().modified().unwrap();
 
-        update(&target, |c| c.tx_power.fleet = Some(10)).unwrap();
+        save(&target, &full(PoolArg::Us, 10, 12)).unwrap();
 
         let after = std::fs::metadata(&target).unwrap().modified().unwrap();
-        assert_eq!(before, after, "an identical document is never rewritten");
-    }
-
-    #[test]
-    fn config_update_creates_no_file_when_change_sets_nothing() {
-        let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("wartui.toml");
-
-        update(&target, |_| {}).unwrap();
-
-        assert!(!target.exists(), "nothing qualified, so nothing was written");
+        assert_eq!(before, after, "identical text is never rewritten");
     }
 
     #[test]
     #[cfg(unix)]
-    fn config_update_keeps_permissions_when_file_exists() {
+    fn config_save_keeps_permissions_when_file_exists() {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = tempfile::tempdir().unwrap();
@@ -702,7 +546,7 @@ mod tests {
         std::fs::write(&target, "[tx-power]\nfleet = 6\n").unwrap();
         std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
 
-        update(&target, |c| c.tx_power.fleet = Some(10)).unwrap();
+        save(&target, &fleet_only(10)).unwrap();
 
         let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "the mode survives the rewrite");
