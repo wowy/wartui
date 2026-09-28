@@ -60,7 +60,7 @@ impl TxPower {
     }
 }
 
-/// Whole dBm a transmit power may name, on the command line or in the file — 20 dBm
+/// Valid whole dBm transmit power values, on the command line or in the file. 20 dBm
 /// is the ceiling because whether anything above it works correctly is unverified,
 /// per `AGENTS.md`'s tx-power invariant.
 pub const TX_POWER_DBM: RangeInclusive<i8> = 2..=20;
@@ -154,8 +154,8 @@ fn default_path_in(macos: bool, home: Option<&OsStr>, xdg: Option<&OsStr>) -> Op
 
 /// Write `config` to `wartui.toml` at `path`, replacing whatever the file held.
 ///
-/// The file belongs to the settings modal, which saves every setting it shows,
-/// so nothing on disk is read back or merged: a hand edit, a comment or a file
+/// The file belongs to the settings modal, which saves every setting it shows.
+/// Nothing on disk is read back or merged: a hand edit, a comment, or a file
 /// that does not parse is simply overwritten. `config` is checked with
 /// [`Config::validate`] first, so `save` never leaves a file `load` would refuse.
 ///
@@ -177,7 +177,7 @@ pub fn save(path: &Path, config: &Config) -> Result<()> {
     }
 
     // A path that does not exist yet has nothing to resolve or to have
-    // permissions of, so it is used as given and a new file gets the default.
+    // permissions of, so it is used as given, and a new file gets the default.
     let target = resolve_symlink_target(path)?;
     let permissions = std::fs::metadata(&target).ok().map(|meta| meta.permissions());
 
