@@ -1,7 +1,9 @@
 //! The four commands and one event a BLE scan is made of.
 
 use wartui_proto::air::{RecordKind, SIGHTING_RECORD_MAX, Security, SightingMsg};
-use wartui_proto::hci::{RESET, SET_EVENT_MASK, adv_reports, set_scan_enable, set_scan_parameters};
+use wartui_proto::hci::{
+    AdvReport, BlePending, RESET, SET_EVENT_MASK, adv_reports, set_scan_enable, set_scan_parameters,
+};
 
 /// An LE Advertising Report event carrying `reports` of `(address, data, rssi)`.
 ///
@@ -174,4 +176,118 @@ fn hci_parser_suppresses_manufacturer_id_when_data_structure_is_malformed() {
     let packet = event(&[(ADDR, &[0x05, 0xFF, 0x4C, 0x00], -70)]);
     let report = adv_reports(&packet).next().expect("one report");
     assert_eq!(report.mfgr, None);
+}
+
+/// A report from the advertiser whose address ends in `n`.
+fn report(n: u8, rssi: i8, mfgr: Option<u16>) -> AdvReport {
+    AdvReport { address: [0x11, 0x22, 0x33, 0x44, 0x55, n], rssi, mfgr }
+}
+
+fn due(_: &AdvReport) -> bool {
+    true
+}
+
+fn not_due(_: &AdvReport) -> bool {
+    false
+}
+
+fn drain<const N: usize>(pending: &mut BlePending<N>) -> Vec<AdvReport> {
+    std::iter::from_fn(|| pending.take()).collect()
+}
+
+#[test]
+fn ble_pending_skips_report_when_not_due() {
+    let mut pending = BlePending::<4>::new();
+    pending.record(report(1, -60, None), not_due);
+    assert!(pending.is_empty());
+    assert_eq!(pending.dropped(), 0, "a report not due is not a report lost");
+    assert_eq!(pending.take(), None);
+}
+
+#[test]
+fn ble_pending_merges_mfgr_when_later_report_not_due() {
+    // The identifier often follows the first hearing in a later packet whose
+    // RSSI is no better; the address already holds a slot, so it merges
+    // without asking whether it is due.
+    let mut pending = BlePending::<4>::new();
+    pending.record(report(1, -60, None), due);
+    pending.record(report(1, -70, Some(0x004C)), |_| panic!("a held address is not re-checked"));
+    assert_eq!(drain(&mut pending), [report(1, -60, Some(0x004C))]);
+}
+
+#[test]
+fn ble_pending_keeps_strongest_rssi_when_address_repeats() {
+    let mut pending = BlePending::<4>::new();
+    pending.record(report(1, -70, Some(0x0006)), due);
+    pending.record(report(1, -50, Some(0x004C)), due);
+    pending.record(report(1, -80, None), due);
+    // The first identifier stays: a later one is not a better reading of it.
+    assert_eq!(drain(&mut pending), [report(1, -50, Some(0x0006))]);
+}
+
+#[test]
+fn ble_pending_drops_newest_when_full() {
+    let mut pending = BlePending::<2>::new();
+    pending.record(report(1, -60, None), due);
+    pending.record(report(2, -60, None), due);
+    pending.record(report(3, -60, None), not_due);
+    assert_eq!(pending.dropped(), 0, "only a due address counts against a full buffer");
+    pending.record(report(4, -60, None), due);
+    assert_eq!(pending.dropped(), 1);
+    assert_eq!(drain(&mut pending), [report(1, -60, None), report(2, -60, None)]);
+}
+
+#[test]
+fn ble_pending_counts_each_turned_away_report_when_full() {
+    // The counter is packets, not advertisers: one address with no room
+    // counts again on every repeat within the scan.
+    let mut pending = BlePending::<1>::new();
+    pending.record(report(1, -60, None), due);
+    for _ in 0..3 {
+        pending.record(report(2, -60, None), due);
+    }
+    assert_eq!(pending.dropped(), 3);
+    assert_eq!(pending.len(), 1);
+}
+
+#[test]
+fn ble_pending_ignores_report_when_rssi_unavailable() {
+    let mut pending = BlePending::<4>::new();
+    pending.record(report(1, 127, Some(0x004C)), |_| panic!("no reading is never considered"));
+    assert!(pending.is_empty());
+    assert_eq!(pending.dropped(), 0);
+}
+
+#[test]
+fn ble_pending_admits_new_address_when_full_of_not_due_traffic() {
+    // A crowded room of advertisers the host already has, heard on every scan,
+    // outnumbering the buffer: the new ones must still land.
+    let mut pending = BlePending::<8>::new();
+    let fresh = 100..105;
+    let is_fresh = |r: &AdvReport| fresh.contains(&r.address[5]);
+    for n in (0..20).chain(fresh.clone()) {
+        pending.record(report(n, -60, None), is_fresh);
+    }
+    let landed: Vec<u8> = drain(&mut pending).iter().map(|r| r.address[5]).collect();
+    assert_eq!(landed, fresh.collect::<Vec<_>>());
+    assert_eq!(pending.dropped(), 0);
+}
+
+#[test]
+fn ble_pending_take_stops_at_len_when_reset() {
+    let mut pending = BlePending::<4>::new();
+    pending.record(report(1, -60, None), due);
+    pending.record(report(2, -60, None), due);
+    pending.record(report(3, -60, None), due);
+    assert_eq!(drain(&mut pending).len(), 3);
+
+    // A fresh scan hearing fewer advertisers than the last leaves stale slots
+    // behind `len`, and the zero fill beyond those; neither is ever yielded.
+    pending.clear();
+    pending.record(report(9, -40, None), due);
+    assert_eq!(drain(&mut pending), [report(9, -40, None)]);
+    assert_eq!(pending.take(), None);
+
+    let mut untouched = BlePending::<4>::new();
+    assert_eq!(untouched.take(), None, "the zero fill is not an advertiser");
 }

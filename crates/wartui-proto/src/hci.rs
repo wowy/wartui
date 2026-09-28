@@ -4,7 +4,8 @@
 //! the advertiser volunteered it — a manufacturer identifier, and a full
 //! host stack such as NimBLE is a lot of code to be wrong in. `esp-radio` hands out the controller as a raw HCI
 //! packet pipe, so four commands and one event are the whole of it, and this module
-//! is the byte layouts with nothing that talks to hardware.
+//! is the byte layouts with nothing that talks to hardware. [`BlePending`], the
+//! buffer one scan's reports wait in, lives here too, so its rules run under `cargo test`.
 //!
 //! Layouts are Bluetooth Core Specification v5.3, Vol 4 Part E — the H4
 //! transport in §2, `HCI_Reset` in §7.3.2, `HCI_Set_Event_Mask` in §7.3.1,
@@ -202,5 +203,114 @@ impl Iterator for AdvReports<'_> {
         let mfgr = self.rest.get(9..9 + data_len).and_then(manufacturer_id);
         self.rest = self.rest.get(10 + data_len..)?;
         Some(AdvReport { address, rssi, mfgr })
+    }
+}
+
+/// The reports of one scan, one per address, waiting for the main loop to drain them.
+///
+/// It never wraps: a full buffer turns the newest address away and counts it in
+/// [`Self::dropped`], the same policy the Wi-Fi sightings follow.
+///
+/// Slots go only to addresses the caller says are due to be reported. An
+/// advertiser the host already has is heard again on every scan; given a slot,
+/// it is thrown away by the drain, and a crowded room fills the buffer with
+/// such repeats and turns new advertisers away.
+#[derive(Debug, Clone)]
+pub struct BlePending<const N: usize> {
+    items: [AdvReport; N],
+    len: usize,
+    taken: usize,
+    dropped: u32,
+}
+
+impl<const N: usize> Default for BlePending<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<const N: usize> BlePending<N> {
+    /// An empty buffer, `const` so it can sit in a `static`.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            items: [AdvReport { address: [0; 6], rssi: 0, mfgr: None }; N],
+            len: 0,
+            taken: 0,
+            dropped: 0,
+        }
+    }
+
+    /// Keep `report` if its address is new and `due`, or merge it into the
+    /// reading already held for that address.
+    ///
+    /// A held address merges unconditionally, without asking `due`: the
+    /// identifier can arrive in a later packet than the first hearing, and an
+    /// advertiser that led with its flags and followed with its manufacturer
+    /// data is still the one advertiser. `due` is asked only when the report
+    /// would take a new slot, and before the buffer is checked for room, so a
+    /// report that is not due neither takes a slot nor counts as dropped.
+    pub fn record(&mut self, report: AdvReport, due: impl FnOnce(&AdvReport) -> bool) {
+        if !report.has_rssi() {
+            return;
+        }
+        if let Some(held) = self.items[..self.len].iter_mut().find(|r| r.address == report.address)
+        {
+            held.rssi = held.rssi.max(report.rssi);
+            if held.mfgr.is_none() {
+                held.mfgr = report.mfgr;
+            }
+            return;
+        }
+        if !due(&report) {
+            return;
+        }
+        if self.len == N {
+            self.dropped = self.dropped.wrapping_add(1);
+            return;
+        }
+        self.items[self.len] = report;
+        self.len += 1;
+    }
+
+    /// Take the oldest report not yet taken, if there is one.
+    ///
+    /// The bound is `len` and not the array: the slots past `len` are an
+    /// earlier scan's leavings or the zero fill — a `00:00:00:00:00:00`
+    /// advertiser at 0 dBm that would go on the air as if heard.
+    pub fn take(&mut self) -> Option<AdvReport> {
+        if self.taken >= self.len {
+            return None;
+        }
+        let report = self.items[self.taken];
+        self.taken += 1;
+        Some(report)
+    }
+
+    /// Empty the buffer for a new scan. [`Self::dropped`] carries on.
+    pub fn clear(&mut self) {
+        self.len = 0;
+        self.taken = 0;
+    }
+
+    /// Distinct addresses held this scan, at most `N`.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Whether this scan holds nothing.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Reports turned away by a full buffer since construction.
+    ///
+    /// Counts packets, not advertisers: once the buffer is full, an address
+    /// not in it counts again on every repeat within the scan.
+    #[must_use]
+    pub const fn dropped(&self) -> u32 {
+        self.dropped
     }
 }
