@@ -15,7 +15,7 @@ use wartui_core::record::{
     AdminOutcome, AssignmentSent, BridgeSeen, Heartbeat, NodeSeen, Observation, Record,
 };
 use wartui_core::store::{
-    Checkpoint, SCHEMA_VERSION, SessionInfo, Store, StoreConfig, open_readonly,
+    Checkpoint, SCHEMA_VERSION, SessionInfo, Store, StoreConfig, StoreError, open_readonly,
 };
 use wartui_proto::air::RecordKind;
 use wartui_proto::link::Mac;
@@ -938,6 +938,113 @@ fn store_refuses_database_connection_when_schema_version_mismatches() {
             .expect("reading the version");
         assert_eq!(still, found, "and the marker must be left alone");
     }
+}
+
+/// Open a store at `path` and close it, leaving a stamped file behind.
+fn create(path: &std::path::Path) {
+    open_at(path).close();
+}
+
+/// The file's schema fingerprint row, raw.
+fn fingerprint_row(path: &std::path::Path) -> Option<String> {
+    Connection::open(path)
+        .expect("reopening")
+        .query_row("SELECT v FROM kv WHERE k = 'schema_fingerprint'", [], |row| row.get(0))
+        .ok()
+}
+
+fn reopen(path: &std::path::Path) -> Result<Store, StoreError> {
+    let session = SessionInfo { espnow_channel: 6, pool: ChannelPool::Us, notes: None };
+    Store::open(&StoreConfig::new(path), &session, EPOCH_MS)
+}
+
+#[test]
+fn store_reopens_database_when_fingerprint_matches() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("wartui.db");
+    create(&path);
+    reopen(&path).expect("reopening a file this build wrote").close();
+    open_readonly(&path).expect("and read-only");
+}
+
+#[test]
+fn store_refuses_database_when_fingerprint_differs() {
+    // The marker stays at 1 while the schema changes shape, so the fingerprint is what
+    // tells this build's file from another's.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("wartui.db");
+    create(&path);
+    Connection::open(&path)
+        .expect("reopening")
+        .execute("UPDATE kv SET v = '00000000deadbeef' WHERE k = 'schema_fingerprint'", [])
+        .expect("overwriting the fingerprint");
+
+    let opened = reopen(&path);
+    assert!(
+        matches!(opened, Err(StoreError::SchemaDiffers { found: Some(0xdead_beef), ours })
+            if ours != 0xdead_beef),
+        "expected the other fingerprint to be refused, got {opened:?}"
+    );
+}
+
+#[test]
+fn store_refuses_database_when_fingerprint_missing() {
+    // A file from a build that stamped no fingerprint carries this build's marker over
+    // whatever shape that build's tables had.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("wartui.db");
+    create(&path);
+    Connection::open(&path)
+        .expect("reopening")
+        .execute("DELETE FROM kv WHERE k = 'schema_fingerprint'", [])
+        .expect("deleting the fingerprint");
+
+    let opened = reopen(&path);
+    assert!(
+        matches!(opened, Err(StoreError::SchemaDiffers { found: None, .. })),
+        "expected a file without a fingerprint to be refused, got {opened:?}"
+    );
+}
+
+#[test]
+fn store_refuses_readonly_open_when_fingerprint_differs() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("wartui.db");
+    create(&path);
+    Connection::open(&path)
+        .expect("reopening")
+        .execute("UPDATE kv SET v = '00000000deadbeef' WHERE k = 'schema_fingerprint'", [])
+        .expect("overwriting the fingerprint");
+
+    let opened = open_readonly(&path);
+    assert!(
+        matches!(opened, Err(StoreError::SchemaDiffers { found: Some(0xdead_beef), .. })),
+        "expected the export path to refuse it too, got {opened:?}"
+    );
+}
+
+#[test]
+fn store_leaves_database_untouched_when_fingerprint_differs() {
+    // A refusal is before the schema, the stamp and the session row, so the other
+    // build's file is exactly as it was.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("wartui.db");
+    create(&path);
+    Connection::open(&path)
+        .expect("reopening")
+        .execute("UPDATE kv SET v = '00000000deadbeef' WHERE k = 'schema_fingerprint'", [])
+        .expect("overwriting the fingerprint");
+
+    assert!(reopen(&path).is_err(), "the file must be refused");
+
+    let conn = Connection::open(&path).expect("reopening");
+    let version: i32 =
+        conn.pragma_query_value(None, "user_version", |row| row.get(0)).expect("the version");
+    let sessions: i64 =
+        conn.query_row("SELECT count(*) FROM session", [], |row| row.get(0)).expect("sessions");
+    assert_eq!(version, SCHEMA_VERSION);
+    assert_eq!(fingerprint_row(&path).as_deref(), Some("00000000deadbeef"));
+    assert_eq!(sessions, 1, "only the session that created the file");
 }
 
 #[test]

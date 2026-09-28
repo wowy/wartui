@@ -19,6 +19,14 @@
 //! checkpoint syncs. It only copies pages: the writer is still the one thing that writes
 //! rows. `docs/store-io-findings.md` has the measurements behind the batching, the
 //! checkpoint and the lack of any index on sightings.
+//!
+//! A capture from another build is somebody else's file, and the version marker alone
+//! cannot say so: it stays at [`SCHEMA_VERSION`] while [`SCHEMA`] changes shape, and
+//! `CREATE TABLE IF NOT EXISTS` no-ops against tables of the wrong shape. So each file
+//! also carries [`SCHEMA_FINGERPRINT`], a hash of the schema text, and [`check_version`]
+//! refuses a file whose fingerprint is missing or not this build's. The hash is of the
+//! text, so a change that is only whitespace or a comment refuses old files too. That is
+//! the safe direction, and there is no migration to offer instead.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -48,7 +56,30 @@ use crate::record::Record;
 ///
 /// The marker is the lever held for the first capture that has to be read in an
 /// earlier build's terms. Nothing before 1.0 is, so it does not move before then.
+/// [`SCHEMA_FINGERPRINT`] is what tells two builds apart meanwhile.
 pub const SCHEMA_VERSION: i32 = 1;
+
+/// FNV-1a over [`SCHEMA`], stamped into `kv` as `schema_fingerprint` and checked by
+/// [`check_version`] on every open.
+///
+/// FNV-1a rather than `std::hash::DefaultHasher`, whose output may change between Rust
+/// releases: a toolchain update would then refuse every capture the same schema wrote.
+const SCHEMA_FINGERPRINT: u64 = fnv1a_64(SCHEMA.as_bytes());
+
+/// The `kv` key [`SCHEMA_FINGERPRINT`] is stored under.
+const FINGERPRINT_KEY: &str = "schema_fingerprint";
+
+/// 64-bit FNV-1a: stable, and small enough to run at compile time.
+const fn fnv1a_64(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut i = 0;
+    while i < bytes.len() {
+        hash ^= bytes[i] as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        i += 1;
+    }
+    hash
+}
 
 /// The schema, applied to any database that does not already have it.
 const SCHEMA: &str = r"
@@ -170,6 +201,19 @@ pub enum StoreError {
         found: i32,
         /// What this build writes.
         ours: i32,
+    },
+    /// The database carries this build's version marker over another build's schema.
+    #[error(
+        "database schema {} differs from this build's {ours:016x}; the capture was written \
+         by a different wartui build, and captures are not portable between wartui builds \
+         before 1.0 — start a new file with a different --db path",
+        found.map_or_else(|| "has no fingerprint and".to_owned(), |f| format!("{f:016x}"))
+    )]
+    SchemaDiffers {
+        /// The fingerprint the file carries, if it carries one that parses.
+        found: Option<u64>,
+        /// This build's.
+        ours: u64,
     },
 }
 
@@ -371,13 +415,17 @@ impl Store {
         // the build appends rows of the wrong shape and stamps the version
         // marker to its own, leaving nothing able to tell it had happened.
         check_version(&conn)?;
-        // All of it or none of it, version marker included. The marker is what says
-        // the tables are there, so a file stamped SCHEMA_VERSION with half a schema
-        // under it passes `check_version` on every later open and then fails on a
-        // missing table instead of being fixed.
+        // All of it or none of it, version marker and fingerprint included. They are
+        // what say the tables are there, so a file stamped with half a schema under it
+        // passes `check_version` on every later open and then fails on a missing table
+        // instead of being fixed.
         let tx = conn.transaction()?;
         tx.execute_batch(SCHEMA)?;
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        tx.execute(
+            "INSERT INTO kv (k, v) VALUES (?1, ?2) ON CONFLICT(k) DO UPDATE SET v = excluded.v",
+            params![FINGERPRINT_KEY, format!("{SCHEMA_FINGERPRINT:016x}")],
+        )?;
         tx.commit()?;
 
         let session_id = insert_session(&mut conn, session, started_at_ms)?;
@@ -544,13 +592,40 @@ pub fn open_readonly(path: &Path) -> Result<Connection, StoreError> {
 ///
 /// Not just a newer one: there is no migration before 1.0, so a lower marker is as
 /// foreign as a higher one and guessing at it would be the compatibility this build
-/// does not claim. A fresh file reads 0 and is about to be stamped.
+/// does not claim. A fresh file reads 0 and is about to be stamped. A file with this
+/// build's marker must also carry this build's [`SCHEMA_FINGERPRINT`]; one without a
+/// fingerprint at all is from a build that did not stamp one, and as foreign.
 fn check_version(conn: &Connection) -> Result<(), StoreError> {
     let found: i32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if found != 0 && found != SCHEMA_VERSION {
-        return Err(StoreError::SchemaMismatch { found, ours: SCHEMA_VERSION });
+    match found {
+        0 => Ok(()),
+        SCHEMA_VERSION => match stored_fingerprint(conn)? {
+            Some(SCHEMA_FINGERPRINT) => Ok(()),
+            found => Err(StoreError::SchemaDiffers { found, ours: SCHEMA_FINGERPRINT }),
+        },
+        found => Err(StoreError::SchemaMismatch { found, ours: SCHEMA_VERSION }),
     }
-    Ok(())
+}
+
+/// The fingerprint a file carries: `None` if it has no `kv` table, no row, or a value
+/// that is not a hex `u64`.
+fn stored_fingerprint(conn: &Connection) -> Result<Option<u64>, rusqlite::Error> {
+    let has_kv: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'kv')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_kv {
+        return Ok(None);
+    }
+    let value = conn.query_row("SELECT v FROM kv WHERE k = ?1", [FINGERPRINT_KEY], |row| {
+        row.get::<_, String>(0)
+    });
+    match value {
+        Ok(v) => Ok(u64::from_str_radix(&v, 16).ok()),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e),
+    }
 }
 
 /// How far ahead of the last used epoch to move the persisted counter at open.
@@ -961,4 +1036,16 @@ fn write_batch(
     let committing = Instant::now();
     tx.commit()?;
     Ok(committing.elapsed())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fnv1a_64;
+
+    #[test]
+    fn fnv1a_64_matches_reference_when_hashing_known_vectors() {
+        assert_eq!(fnv1a_64(b""), 0xcbf2_9ce4_8422_2325);
+        assert_eq!(fnv1a_64(b"a"), 0xaf63_dc4c_8601_ec8c);
+        assert_eq!(fnv1a_64(b"foobar"), 0x8594_4171_f739_67e8);
+    }
 }
