@@ -317,10 +317,20 @@ impl Ui {
     ///
     /// The modal shows what is in force, and this writes every row of it to
     /// `wartui.toml`, replacing whatever the file held — a hand edit made
-    /// while the modal was open included.
+    /// while the modal was open included. The pool cannot change live, so a
+    /// moved pool row exists only in the file: when the save does not happen,
+    /// the notice says that pool was not kept.
     fn save_outcome(&self, modal: ConfigModal) -> String {
+        let pool_moved = modal.pool != modal.running_pool;
+        let lost = || {
+            if pool_moved {
+                format!("; pool {} was not kept", ChannelPool::from(modal.pool))
+            } else {
+                String::new()
+            }
+        };
         let Some(path) = self.settings.config_path.clone() else {
-            return "; nowhere to save it — use --config".to_owned();
+            return format!("; nowhere to save it — use --config{}", lost());
         };
         let saved = config::save(
             &path,
@@ -333,10 +343,10 @@ impl Ui {
             },
         );
         match saved {
-            Err(error) => format!("; could not save: {error}"),
+            Err(error) => format!("; could not save: {error}{}", lost()),
             Ok(()) => {
                 let mut outcome = format!("; saved to {}", path.display());
-                if modal.pool != modal.running_pool {
+                if pool_moved {
                     outcome.push_str("; the pool takes effect after a restart");
                 }
                 outcome
@@ -2642,6 +2652,43 @@ mod tests {
 
         let notice = ui.notice(snapshot.now_ms).expect("a notice");
         assert!(notice.contains("use --config"), "{notice}");
+        assert!(notice.contains("pool EU was not kept"), "the moved pool row: {notice}");
+    }
+
+    #[test]
+    fn ui_reports_pool_not_kept_when_save_fails_with_pool_moved() {
+        // A regular file where the config's directory should be, so the save
+        // cannot create it.
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("not-a-dir");
+        std::fs::write(&blocker, "").unwrap();
+        let snapshot = busy();
+        let (tx, _rx) = mpsc::channel(4);
+        let mut ui = Ui {
+            settings: Settings { config_path: Some(blocker.join("wartui.toml")) },
+            ..Ui::default()
+        };
+        ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
+        ui.on_modal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &snapshot, &tx);
+
+        ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
+
+        let notice = ui.notice(snapshot.now_ms).expect("a notice");
+        assert!(notice.contains("could not save"), "{notice}");
+        assert!(notice.contains("pool EU was not kept"), "{notice}");
+    }
+
+    #[test]
+    fn ui_omits_pool_not_kept_when_save_is_impossible_with_pool_unchanged() {
+        let snapshot = busy();
+        let (tx, _rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+        ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
+
+        ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
+
+        let notice = ui.notice(snapshot.now_ms).expect("a notice");
+        assert!(!notice.contains("not kept"), "{notice}");
     }
 
     #[test]

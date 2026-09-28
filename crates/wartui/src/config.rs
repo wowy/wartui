@@ -201,7 +201,7 @@ pub fn save(path: &Path, config: &Config) -> Result<()> {
 /// Follow `path` through however many symlinks it is, to the file a write
 /// through it ultimately lands on — even one that does not exist yet, which
 /// is where [`std::fs::canonicalize`] falls short: it refuses a dangling
-/// link, and the fallback of using `path` itself would make `update` replace
+/// link, and the fallback of using `path` itself would make `save` replace
 /// the link with a plain file instead of writing through it. A relative link
 /// target is resolved against the link's own parent directory, the same way
 /// a shell would. Bounded at 40 hops so a cycle errors rather than spinning.
