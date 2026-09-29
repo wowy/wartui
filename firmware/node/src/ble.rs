@@ -56,7 +56,10 @@ const _: () = assert!(
 /// [`sniff::SEEN`] before an address takes one, so an advertiser the host already
 /// has costs nothing however often it repeats. An ordinary room filled about 60
 /// of it (`docs/phase-1-findings.md`), and overflow drops the *newest* advertiser,
-/// so the number sits well clear of the measurement rather than just above it.
+/// so the number sits at twice the measurement rather than just above it. The
+/// headroom is affordable because [`BlePending`] finds a held address by hash: every
+/// report heard is checked against the buffer with interrupts held off, and a linear
+/// search of 128 reports costs up to 18 µs there.
 /// [`dropped`] counts those advertisers, once per scan each, and it is the only
 /// sign of saturation: the console's `heard` is capped here. The heartbeat carries
 /// it to the host, which shows the fleet's total as `ble drop`.
@@ -69,15 +72,20 @@ const _: () = assert!(
 /// The buffer lives in a `static`, the way `sniff` holds its sightings, because a
 /// report is twelve bytes with the manufacturer identifier: a by-value `Scanner`
 /// puts enough of the buffer on the stack of `Scanner::new` and of `main` to trip
-/// `clippy::large_stack_frames`, which `main.rs` denies. In `.bss` the same
-/// eighty reports cost 960 bytes that no stack has to find room for.
-const REPORTS: usize = 80;
+/// `clippy::large_stack_frames`, which `main.rs` denies. As a static, the reports and
+/// their index cost 2,192 bytes that no stack has to find room for.
+const REPORTS: usize = 128;
+
+/// Hash slots behind [`REPORTS`]: a power of two at least twice it, so the index is
+/// never more than half full.
+const REPORT_INDEX: usize = 2 * REPORTS;
 
 /// The reports of the sweep in flight, and how far the main loop has drained it.
 ///
 /// Its lock is taken before [`sniff::SEEN`]'s, in [`Scanner::sweep`], and never
 /// after it.
-static PENDING: NonReentrantMutex<BlePending<REPORTS>> = NonReentrantMutex::new(BlePending::new());
+static PENDING: NonReentrantMutex<BlePending<REPORTS, REPORT_INDEX>> =
+    NonReentrantMutex::new(BlePending::new());
 
 /// Take the oldest report not yet taken, if there is one.
 ///

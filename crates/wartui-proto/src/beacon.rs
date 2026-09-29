@@ -18,10 +18,15 @@
 //! byte-transparent, the store keeps what arrived, and NUL is valid UTF-8 — so it
 //! reached a WiGLE export as a column of them. Stripping it here rather than at each
 //! place that shows an SSID is what makes `ssid_len == 0` mean hidden.
+//!
+//! [`WifiPending`], the buffer one dwell's sightings wait in, lives here too, so its
+//! rules run under `cargo test`.
 
 use core::fmt;
 
 use crate::air::{EXT_MAX, RecordKind, SSID_MAX, Security, SightingMsg};
+use crate::dedup::Refused;
+use crate::mac_index::MacIndex;
 
 /// 802.11 MAC header length for a management frame: no QoS, no HT control.
 const HDR_LEN: usize = 24;
@@ -84,6 +89,130 @@ impl Sighting {
             ssid: self.ssid(),
             ext: self.rcoi(),
         }
+    }
+}
+
+/// The sightings of one dwell, one per BSSID, waiting for the main loop to drain them.
+///
+/// It never wraps: a full buffer turns the newest access point away and counts it in
+/// [`Self::dropped`], once per dwell. Everything already held is a distinct access point
+/// not yet reported, so evicting one would trade a certain observation for a possible one.
+///
+/// An access point beacons about ten times a dwell, and only its first sighting is kept.
+/// Nothing is merged from the repeats, unlike [`crate::hci::BlePending`], whose
+/// identifier can arrive after the first hearing: a beacon carries the whole record.
+///
+/// Slots go only to access points the caller says are due to be reported, for the
+/// reason [`crate::hci::BlePending`] gives.
+///
+/// The BSSID lookup is hashed for the reason in [`crate::hci::BlePending`]'s "Why it is
+/// hashed": [`Self::record`] runs once per beacon inside a lock that holds interrupts
+/// off, and a [`Sighting`] is larger than the report a linear search there was timed on.
+///
+/// `N` is the number of sightings held and `S` the hash slots behind them: a power of
+/// two at least `2 * N`, a separate parameter for the reason [`crate::dedup::MacRing`]
+/// gives.
+#[derive(Debug, Clone)]
+pub struct WifiPending<const N: usize, const S: usize> {
+    items: [Sighting; N],
+    len: usize,
+    taken: usize,
+    dropped: Refused,
+    /// Where each held BSSID sits in `items`. Nothing is ever evicted, so entries
+    /// leave it only all at once, in [`Self::clear`].
+    index: MacIndex<S>,
+}
+
+impl<const N: usize, const S: usize> Default for WifiPending<N, S> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<const N: usize, const S: usize> WifiPending<N, S> {
+    /// An empty buffer, `const` so it can sit in a `static`.
+    #[must_use]
+    pub const fn new() -> Self {
+        const BLANK: Sighting = Sighting {
+            bssid: [0; 6],
+            ssid: [0; SSID_MAX],
+            ssid_len: 0,
+            rcoi: [0; EXT_MAX],
+            rcoi_len: 0,
+            security: Security::Open,
+            channel: 0,
+            rssi: 0,
+        };
+        Self {
+            items: [BLANK; N],
+            len: 0,
+            taken: 0,
+            dropped: Refused::new(),
+            index: MacIndex::new::<N>(),
+        }
+    }
+
+    /// Keep `sighting` if its BSSID is new this dwell and `due`.
+    ///
+    /// A held BSSID is ignored without asking `due`, which saves the caller's lookup
+    /// on every repeat beacon. `due` is asked before the buffer is checked for room,
+    /// so a sighting that is not due neither takes a slot nor counts as dropped.
+    pub fn record(&mut self, sighting: Sighting, due: impl FnOnce(&Sighting) -> bool) {
+        if self.index.find(&sighting.bssid, |pos| self.items[pos].bssid).is_some() {
+            return;
+        }
+        if !due(&sighting) {
+            return;
+        }
+        if self.len == N {
+            self.dropped.note(&sighting.bssid);
+            return;
+        }
+        self.items[self.len] = sighting;
+        self.index.insert(&sighting.bssid, self.len);
+        self.len += 1;
+    }
+
+    /// Take the oldest sighting not yet taken, if there is one.
+    ///
+    /// The bound is `len` and not the array: the slots past `len` are an earlier
+    /// dwell's leavings or the blank fill, and would go on the air as if heard.
+    pub fn take(&mut self) -> Option<Sighting> {
+        if self.taken >= self.len {
+            return None;
+        }
+        let sighting = self.items[self.taken];
+        self.taken += 1;
+        Some(sighting)
+    }
+
+    /// Empty the buffer for a new dwell. [`Self::dropped`] carries on, and an access
+    /// point turned away last dwell counts again if it is turned away in this one.
+    pub fn clear(&mut self) {
+        self.len = 0;
+        self.taken = 0;
+        self.dropped.reset();
+        self.index.clear();
+    }
+
+    /// Distinct BSSIDs held this dwell, at most `N`.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Whether this dwell holds nothing.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Access points turned away by a full buffer since construction, each counted
+    /// once per dwell however often it beacons. Wraps. See [`Refused`] for how it
+    /// slightly undercounts.
+    #[must_use]
+    pub const fn dropped(&self) -> u16 {
+        self.dropped.total()
     }
 }
 

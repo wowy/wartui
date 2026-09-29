@@ -14,6 +14,7 @@ pub mod beacon;
 pub mod dedup;
 pub mod hci;
 pub mod link;
+mod mac_index;
 pub mod outbox;
 pub mod plan;
 pub mod stall;
