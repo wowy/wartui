@@ -1,0 +1,156 @@
+name: Release
+
+# A pushed `v*` tag publishes the node and bridge images and the host binaries built from that one
+# tree. `wartui flash-fleet` in a release binary fetches its node image from the release named by
+# the tag baked into it (`WARTUI_RELEASE_TAG`), so the host and the fleet it flashes always share a
+# tree. The bridge images are published beside them, for flashing by hand. Each image is merged —
+# bootloader, partition table and app, flashed at 0x0 — and `SHA256SUMS` is what the host checks a
+# download against.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  firmware:
+    strategy:
+      matrix:
+        include:
+          - { fw: node, chip: esp32c5, features: esp32c5, asset: wartui-node-fw-esp32c5.bin }
+          - { fw: node, chip: esp32c6, features: esp32c6, asset: wartui-node-fw-esp32c6.bin }
+          - fw: node
+            chip: esp32c6
+            features: esp32c6,xiao-external-antenna
+            asset: wartui-node-fw-esp32c6-xiao.bin
+          - { fw: bridge, chip: esp32c5, features: esp32c5, asset: wartui-bridge-fw-esp32c5.bin }
+          - fw: bridge
+            chip: esp32c5
+            features: esp32c5,t-dongle-c5
+            asset: wartui-bridge-fw-esp32c5-t-dongle.bin
+          - { fw: bridge, chip: esp32c6, features: esp32c6, asset: wartui-bridge-fw-esp32c6.bin }
+          - fw: bridge
+            chip: esp32c6
+            features: esp32c6,xiao-external-antenna
+            asset: wartui-bridge-fw-esp32c6-xiao.bin
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+
+      # The same checks `firmware-node.yml` and `firmware-bridge.yml` make, for the same reason: a
+      # second copy of any of these builds, or fails to link, or panics on a board.
+      - name: One copy of each esp-radio-pinned crate
+        run: |
+          pushd firmware/${{matrix.fw}}
+          resolved=$(cargo tree --locked --features ${{matrix.features}} -e normal \
+            --prefix none --format '{p}' | awk '{print $1, $2}' | sort -u)
+          for c in esp-alloc esp-hal esp-radio esp-rtos esp-sync esp-wifi-sys-${{matrix.chip}}; do
+            n=$(printf '%s\n' "$resolved" | grep -c "^$c " || true)
+            if [ "$n" != 1 ]; then
+              printf '%s\n' "$resolved" | grep "^$c " || true
+              echo "::error::$c resolves to $n versions, expected exactly 1"
+              exit 1
+            fi
+          done
+          # The bridge's panel crates sit on `embedded-hal` 1.x beside `esp-hal`'s; 0.2 is a
+          # different crate and coexists.
+          if [ "${{matrix.fw}}" = bridge ]; then
+            n=$(printf '%s\n' "$resolved" | grep -c '^embedded-hal v1' || true)
+            if [ "$n" != 1 ]; then
+              printf '%s\n' "$resolved" | grep '^embedded-hal ' || true
+              echo "::error::embedded-hal 1.x resolves to $n versions, expected exactly 1"
+              exit 1
+            fi
+          fi
+          popd
+
+      - name: Build
+        run: |
+          pushd firmware/${{matrix.fw}}
+          cargo build --release --features ${{matrix.features}} --locked
+          popd
+
+      - name: Install espflash
+        run: cargo install espflash --locked
+
+      - name: Merge into one image
+        run: |
+          espflash save-image --skip-update-check --chip ${{matrix.chip}} --merge --skip-padding \
+            firmware/${{matrix.fw}}/target/riscv32imac-unknown-none-elf/release/wartui-${{matrix.fw}}-fw \
+            ${{matrix.asset}}
+
+      - uses: actions/upload-artifact@v7
+        with:
+          path: ${{matrix.asset}}
+          archive: false
+
+  host:
+    strategy:
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { os: macos-latest, target: aarch64-apple-darwin }
+
+    runs-on: ${{matrix.os}}
+
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{matrix.target}}
+
+      - name: Install dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+
+      - name: Build
+        env:
+          WARTUI_RELEASE_TAG: ${{ github.ref_name }}
+        run: cargo build --release --locked -p wartui --target ${{matrix.target}}
+
+      - name: Package
+        run: |
+          tar -C target/${{matrix.target}}/release -czf wartui-${{matrix.target}}.tar.gz wartui
+
+      - uses: actions/upload-artifact@v7
+        with:
+          path: wartui-${{matrix.target}}.tar.gz
+          archive: false
+
+  release:
+    needs: [firmware, host]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: assets
+          merge-multiple: true
+
+      - name: Checksums
+        run: |
+          cd assets
+          sha256sum -- * > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" assets/* \
+            --repo "${{ github.repository }}" \
+            --title "${{ github.ref_name }}" \
+            --generate-notes

@@ -1,9 +1,10 @@
 //! wartui's command line.
 //!
-//! `run` is the tool; everything else checks one link in the chain when `run` is not
-//! showing what it should, and `crates/wartui/README.md` § "When nothing arrives"
-//! has which to reach for. `--log-file` is there because the TUI owns the terminal,
-//! so the transport has nowhere else to say what it tried and what the OS said.
+//! `run` is the tool and `flash-fleet` puts the firmware on the boards it drives; everything
+//! else checks one link in the chain when `run` is not showing what it should, and
+//! `crates/wartui/README.md` § "When nothing arrives" has which to reach for. `--log-file`
+//! is there because the TUI owns the terminal, so the transport has nowhere else to say
+//! what it tried and what the OS said.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -20,6 +21,7 @@ mod bench;
 mod capture;
 mod config;
 mod export;
+mod flash;
 mod reset;
 mod run;
 mod sniff;
@@ -59,6 +61,8 @@ enum Command {
     Reset(reset::Args),
     /// List the Espressif boards attached, and the address of each.
     Ports,
+    /// Flash node firmware onto every attached board of one chip, sparing the bridge.
+    FlashFleet(flash::Args),
     /// Drive the simulator into a store with nothing drawn, and report what it
     /// cost the disk.
     #[command(hide = true)]
@@ -81,6 +85,7 @@ async fn main() -> Result<()> {
         Some(Command::Status(args)) => status::run(args).await,
         Some(Command::Reset(args)) => reset::run(args).await,
         Some(Command::Ports) => ports(),
+        Some(Command::FlashFleet(args)) => flash::run(args),
         Some(Command::Bench(args)) => bench::run(args).await,
     }
 }
@@ -529,6 +534,32 @@ mod tests {
         // After the subcommand: `status` has no `--config` of its own, so clap
         // refuses it as an unknown argument.
         assert!(parse(["wartui", "status", "--config", "w.toml"]).is_err());
+    }
+
+    #[test]
+    fn cli_parser_accepts_flash_fleet_when_given_image_and_dry_run() {
+        let cli = parse([
+            "wartui",
+            "flash-fleet",
+            "--features",
+            "esp32c5",
+            "--image",
+            "fw.bin",
+            "--dry-run",
+        ])
+        .unwrap();
+        let Some(Command::FlashFleet(args)) = cli.command else { panic!("not flash-fleet") };
+        assert_eq!(args.features, "esp32c5");
+        assert_eq!(args.image.as_deref(), Some(std::path::Path::new("fw.bin")));
+        assert!(args.dry_run);
+        assert_eq!(args.jobs, 4);
+    }
+
+    #[test]
+    fn cli_parser_rejects_flash_fleet_when_bridge_and_no_bridge_are_both_given() {
+        let args =
+            ["wartui", "flash-fleet", "--features", "esp32c5", "--no-bridge", "--bridge", "/dev/x"];
+        assert!(parse(args).is_err());
     }
 
     #[test]

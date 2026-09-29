@@ -79,6 +79,10 @@ cargo run --release --no-default-features --features esp32c6   # without diagnos
 cargo run --release --features esp32c6,xiao-external-antenna  # XIAO C6, antenna on U.FL
 ```
 
+To flash every attached board of one chip at once, and never the bridge, use `wartui flash-fleet
+--features esp32c5` from the host; [`crates/wartui/README.md`](../../crates/wartui/README.md) §
+"Flashing the fleet" has how it picks boards.
+
 Exactly one chip feature is required; `src/main.rs` rejects zero or both at compile time. The C5 is
 dual band and gets `BandMode::Auto`; the C6 is 2.4 GHz only and has no band mode to set, so half the
 channel pool is simply refused there. Both parts are RISC-V and build on stable.

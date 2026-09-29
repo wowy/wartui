@@ -98,7 +98,8 @@ fn write(path: &Path, mac: Mac) -> std::io::Result<()> {
 /// `XDG_STATE_HOME` is honoured only when it is absolute: the specification says a
 /// relative value is invalid, and taking one literally would scatter a `wartui`
 /// directory through whichever directory a capture was started from.
-fn state_dir() -> Option<PathBuf> {
+#[must_use]
+pub fn state_dir() -> Option<PathBuf> {
     if cfg!(target_os = "macos") {
         let home = std::env::var_os("HOME")?;
         return Some(Path::new(&home).join("Library/Application Support/wartui"));
