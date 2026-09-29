@@ -18,6 +18,7 @@ This is the operator's manual. The root [`README.md`](../../README.md) is the sh
 | `status` | Ask the bridge for its channel, counters and uptime         |
 | `reset`  | Reboot a bridge that has stopped answering                  |
 | `ports`  | List the Espressif boards attached, and the address of each |
+| `flash-fleet` | Flash node firmware onto every attached board of one chip; see "Flashing the fleet" |
 
 A node broadcasts its heartbeat but unicasts its sighting batches to whichever bridge last sent it
 an admin or clear frame, so `sniff` on a second bridge on the same channel hears every node's
@@ -150,6 +151,60 @@ store checkpoints from a thread of its own right after each commit; `--checkpoin
 those passes out, and `--inline-checkpoint` puts SQLite's own back inside the commit for comparison.
 [`docs/store-io-findings.md`](../../docs/store-io-findings.md) has the method and the numbers so
 far.
+
+### Flashing the fleet
+
+`flash-fleet` puts one node image on every attached board of the chip `--features` names, several
+at once, and never on the bridge. It reaches each board through `espflash`, which must be on
+`PATH`.
+
+```sh
+wartui flash-fleet --features esp32c5 --dry-run     # what would be flashed, and from where
+wartui flash-fleet --features esp32c5
+wartui flash-fleet --features esp32c6,xiao-external-antenna --bridge 10:BD:A3:EC:44:C0
+```
+
+| Flag                    | Default    | What it is                                                  |
+| ----------------------- | ---------- | ----------------------------------------------------------- |
+| `--features LIST`       | —          | The node firmware's features; exactly one of `esp32c5` or `esp32c6` |
+| `--no-default-features` | off        | Build without the firmware's default features               |
+| `--bridge PATH\|MAC`    | remembered | The bridge, which is never flashed                          |
+| `--no-bridge`           | off        | No bridge is attached; a remembered one is still spared     |
+| `--skip MAC`            | —          | Leave this board alone too; repeatable                      |
+| `--image BIN`           | —          | Flash this merged image rather than building or fetching one |
+| `--firmware-dir DIR`    | the checkout's | Build the image from the node firmware here             |
+| `--jobs N`              | `4`        | How many boards to probe or flash at once                   |
+| `--dry-run`             | off        | Probe and report; build, fetch and flash nothing            |
+
+**The bridge has to be known.** It is the same vendor, product and often the same chip as the
+nodes, so its address is the only thing that tells it apart. That is `--bridge`, else the address
+`run` remembered; with neither, the run is refused unless `--no-bridge` says no bridge is attached.
+`--no-bridge` only lifts that refusal: a remembered bridge is spared all the same.
+
+A board is flashed only when all four of these hold, and otherwise it is skipped and listed with
+the reason:
+
+1. It is native USB Serial/JTAG (`303a:1001`) and reports its address as its serial number.
+2. It is not the bridge, and not named with `--skip`.
+3. `espflash board-info` reads the chip `--features` names.
+4. `espflash board-info` reads the same address from the chip that the OS reported for the port.
+
+The image is a merged one — bootloader, partition table and app, written at `0x0` with `espflash
+write-bin` — and comes from the first of these that applies:
+
+- `--image BIN`, as given.
+- `--firmware-dir DIR`, or the checkout's `firmware/node` when this binary was built from one:
+  `cargo build --release` there with the same features, merged with `espflash save-image`.
+- The release this binary was built for: its image for the feature set, checked against that
+  release's `SHA256SUMS` and kept under the state directory (`node-images/<tag>/`), so a host
+  offline can reflash from what it fetched before. A release publishes `esp32c5`, `esp32c6` and
+  `esp32c6,xiao-external-antenna`, all with default features; anything else needs `--image` or
+  `--firmware-dir`.
+
+Whichever it is, the chip in the image's header must be the chip `--features` names, or nothing is
+touched. Each board prints one line, by its last two octets: flashed, failed with espflash's last
+line and its full output beneath, or skipped with the reason. The run fails if any board failed;
+skips alone do not fail it. `--dry-run` still resets each candidate once, since `board-info` does.
 
 ## At the keyboard
 

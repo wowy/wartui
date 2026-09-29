@@ -84,8 +84,8 @@ Four host crates, strictly layered, plus firmware that shares the bottom one.
   serial ports generally (`ports`): what is attached and what the OS says it is, with no judgement
   about which of them is a bridge, so anything else that opens a device shares one enumeration.
 - **`crates/wartui-core`** — the headless half. Draws nothing, parses no arguments.
-- **`crates/wartui`** — clap CLI (`run`/`export`/`sniff`/`status`/`reset`/`ports`) and the ratatui
-  view.
+- **`crates/wartui`** — clap CLI (`run`/`export`/`sniff`/`status`/`reset`/`ports`/`flash-fleet`)
+  and the ratatui view.
 - **`firmware/bridge`** — dumb radio bridge: COBS framing and `esp-radio` calls, no protocol
   knowledge. Fixes there cost a reflash, so logic belongs on the host. A board with a screen
   draws lines the host composed and hands it, which is the same rule seen from the other side.
