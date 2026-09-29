@@ -149,7 +149,7 @@ pub fn run(args: Args) -> Result<()> {
         args.no_default_features,
         RELEASE_TAG,
     )?;
-    println!("image  {source}");
+    println!("image  {}", source.describe(args.dry_run));
 
     let image = if args.dry_run {
         // A file named on the command line costs nothing to read, and a wrong one is worth
@@ -480,14 +480,41 @@ enum Source {
     Release { tag: String, asset: &'static str },
 }
 
-impl fmt::Display for Source {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::File(path) => write!(f, "{}", path.display()),
-            Self::Build(dir) => write!(f, "built from {}", dir.display()),
-            Self::Release { tag, asset } => write!(f, "{asset} from release {tag}"),
+impl Source {
+    /// Where the image comes from, worded for whether this run will act on it.
+    fn describe(&self, dry_run: bool) -> String {
+        match (self, dry_run) {
+            (Self::File(path), _) => path.display().to_string(),
+            (Self::Build(dir), true) => format!("would build from {}", dir.display()),
+            (Self::Build(dir), false) => format!("building from {}", dir.display()),
+            (Self::Release { tag, asset }, true) => {
+                format!("would fetch {asset} from release {tag}")
+            }
+            (Self::Release { tag, asset }, false) => format!("{asset} from release {tag}"),
         }
     }
+}
+
+/// `path` with `.` dropped and each `..` taken out with the component before it, without asking
+/// the filesystem, so a directory that does not exist still reads cleanly in an error. A `..` with
+/// nothing before it to remove is kept on a relative path and dropped at the root.
+fn normalise(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => match out.components().next_back() {
+                Some(Component::Normal(_)) => {
+                    out.pop();
+                }
+                Some(Component::RootDir | Component::Prefix(_)) => {}
+                _ => out.push(".."),
+            },
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 /// Choose the image's source: a file named, else a build when asked for one or when this binary
@@ -504,7 +531,7 @@ fn source(
     }
     let tag = tag.filter(|tag| !tag.is_empty());
     let Some(tag) = tag.filter(|_| firmware_dir.is_none()) else {
-        return Ok(Source::Build(firmware_dir.map_or_else(|| FIRMWARE_DIR.into(), Path::to_owned)));
+        return Ok(Source::Build(normalise(firmware_dir.unwrap_or(Path::new(FIRMWARE_DIR)))));
     };
     let asset = release_asset(features).filter(|_| !no_default_features);
     let Some(asset) = asset else {
@@ -1048,12 +1075,55 @@ Chip ID: 23
         let found = source(None, Some(dir), &c5, false, Some("v1")).unwrap();
         assert_eq!(found, Source::Build(dir.to_owned()));
         let found = source(None, None, &c5, false, None).unwrap();
-        assert_eq!(found, Source::Build(FIRMWARE_DIR.into()));
+        assert_eq!(found, Source::Build(normalise(Path::new(FIRMWARE_DIR))));
         let found = source(None, None, &c5, false, Some("")).unwrap();
-        assert_eq!(found, Source::Build(FIRMWARE_DIR.into()));
+        assert_eq!(found, Source::Build(normalise(Path::new(FIRMWARE_DIR))));
         let found = source(None, None, &c5, false, Some("v1")).unwrap();
         let asset = "wartui-node-fw-esp32c5.bin";
         assert_eq!(found, Source::Release { tag: "v1".to_owned(), asset });
+    }
+
+    #[test]
+    fn flash_fleet_normalises_firmware_dir_when_path_has_parent_segments() {
+        assert_eq!(
+            normalise(Path::new("/a/b/crates/wartui/../../firmware/node")),
+            Path::new("/a/b/firmware/node")
+        );
+        assert_eq!(normalise(Path::new("./fw/./node/")), Path::new("fw/node"));
+        assert_eq!(normalise(Path::new("../fw/x/..")), Path::new("../fw"));
+        assert_eq!(normalise(Path::new("/../fw")), Path::new("/fw"));
+        let dir = source(None, Some(Path::new("/x/y/../fw")), &["esp32c5"], false, None).unwrap();
+        assert_eq!(dir, Source::Build("/x/fw".into()));
+    }
+
+    #[test]
+    fn flash_fleet_shows_default_firmware_dir_without_parent_segments_when_building() {
+        let Source::Build(dir) = source(None, None, &["esp32c5"], false, None).unwrap() else {
+            panic!("not a build")
+        };
+        assert!(dir.ends_with("firmware/node"), "{}", dir.display());
+        assert!(
+            !dir.components().any(|c| c == std::path::Component::ParentDir),
+            "{}",
+            dir.display()
+        );
+    }
+
+    #[test]
+    fn flash_fleet_words_source_as_future_when_dry_run() {
+        let build = Source::Build("/fw".into());
+        assert_eq!(build.describe(true), "would build from /fw");
+        let release = Source::Release { tag: "v1".to_owned(), asset: "x.bin" };
+        assert_eq!(release.describe(true), "would fetch x.bin from release v1");
+        assert_eq!(Source::File("fw.bin".into()).describe(true), "fw.bin");
+    }
+
+    #[test]
+    fn flash_fleet_words_source_as_present_when_real_run() {
+        assert_eq!(Source::Build("/fw".into()).describe(false), "building from /fw");
+        let release = Source::Release { tag: "v1".to_owned(), asset: "x.bin" };
+        assert_eq!(release.describe(false), "x.bin from release v1");
+        assert_eq!(Source::File("fw.bin".into()).describe(false), "fw.bin");
     }
 
     #[test]
