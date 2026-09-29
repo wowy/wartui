@@ -1,11 +1,11 @@
 //! A linear-probing hash index from MAC address to a position in somebody else's array.
 //!
-//! [`crate::dedup::MacRing`] and [`crate::hci::BlePending`] both look an address up from
-//! inside a lock that holds interrupts off, once per frame or report heard, and a linear
-//! scan there costs microseconds per lookup that the radio's callback does not have. Each
-//! keeps its entries where they are and builds this index over them, so the index stores
-//! only positions and asks its owner, through a `mac_at` closure, which MAC a position
-//! holds.
+//! [`crate::dedup::MacRing`], [`crate::hci::BlePending`] and [`crate::beacon::WifiPending`]
+//! each look an address up from inside a lock that holds interrupts off, once per frame
+//! or report heard, and a linear scan there costs microseconds per lookup that the
+//! radio's callback does not have. Each keeps its entries where they are and builds this
+//! index over them, so the index stores only positions and asks its owner, through a
+//! `mac_at` closure, which MAC a position holds.
 //!
 //! Positions are `u16` and [`EMPTY`] is `u16::MAX`, which halves the index against
 //! `usize` and is why [`MacIndex::new`] demands fewer than `u16::MAX` entries. The table
