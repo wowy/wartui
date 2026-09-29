@@ -168,7 +168,7 @@ wartui flash-fleet --features esp32c6,xiao-external-antenna --bridge 10:BD:A3:EC
 | ----------------------- | ---------- | ----------------------------------------------------------- |
 | `--features LIST`       | —          | The node firmware's features; exactly one of `esp32c5` or `esp32c6` |
 | `--no-default-features` | off        | Build without the firmware's default features               |
-| `--bridge PATH\|MAC`    | remembered | The bridge, which is never flashed                          |
+| `--bridge PATH\|MAC`    | remembered | The bridge, which must be attached and is never flashed     |
 | `--no-bridge`           | off        | No bridge is attached; a remembered one is still spared     |
 | `--skip MAC`            | —          | Leave this board alone too; repeatable                      |
 | `--image BIN`           | —          | Flash this merged image rather than building or fetching one |
@@ -178,8 +178,12 @@ wartui flash-fleet --features esp32c6,xiao-external-antenna --bridge 10:BD:A3:EC
 
 **The bridge has to be known.** It is the same vendor, product and often the same chip as the
 nodes, so its address is the only thing that tells it apart. That is `--bridge`, else the address
-`run` remembered; with neither, the run is refused unless `--no-bridge` says no bridge is attached.
-`--no-bridge` only lifts that refusal: a remembered bridge is spared all the same.
+`run` remembered, and both are spared when both are known. With neither, the run is refused unless
+`--no-bridge` says no bridge is attached; that flag only lifts the refusal, and a remembered bridge
+is spared all the same. A `--bridge` that matches no attached board refuses the run, since sparing
+it would spare nothing: a typo, a device node that moved on a replug, or a macOS `/dev/tty.*` where
+`wartui ports` lists the `/dev/cu.*`. Naming the bridge by its address avoids all three. A
+remembered bridge that is not attached is simply unplugged, and is not an error.
 
 A board is flashed only when all four of these hold, and otherwise it is skipped and listed with
 the reason:
