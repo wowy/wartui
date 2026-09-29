@@ -41,6 +41,10 @@ cargo run --release --features esp32c6    # or --features esp32c5
 Exactly one chip feature is required. That is the whole story: stable, one flag, and
 `rust-toolchain.toml` pins it.
 
+Each release also publishes a merged image for `esp32c5`, `esp32c5,t-dongle-c5`, `esp32c6` and
+`esp32c6,xiao-external-antenna`. Flash the one for your board, from the same release as the host,
+with `espflash write-bin --port <PORT> 0x0 wartui-bridge-fw-<variant>.bin`.
+
 A Seeed XIAO ESP32-C6 with an antenna on its U.FL connector also wants `xiao-external-antenna`, or
 its RF switch stays on the onboard ceramic antenna; [`../node/README.md`](../node/README.md) §
 "Building and flashing" has the rest.

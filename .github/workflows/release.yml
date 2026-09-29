@@ -1,10 +1,11 @@
 name: Release
 
-# A pushed `v*` tag publishes the node images and the host binaries built from that one tree.
-# `wartui flash-fleet` in a release binary fetches its node image from the release named by the
-# tag baked into it (`WARTUI_RELEASE_TAG`), so the host and the fleet it flashes always share a
-# tree. Each node image is merged — bootloader, partition table and app, flashed at 0x0 — and
-# `SHA256SUMS` is what the host checks a download against.
+# A pushed `v*` tag publishes the node and bridge images and the host binaries built from that one
+# tree. `wartui flash-fleet` in a release binary fetches its node image from the release named by
+# the tag baked into it (`WARTUI_RELEASE_TAG`), so the host and the fleet it flashes always share a
+# tree. The bridge images are published beside them, for flashing by hand. Each image is merged —
+# bootloader, partition table and app, flashed at 0x0 — and `SHA256SUMS` is what the host checks a
+# download against.
 
 on:
   push:
@@ -17,15 +18,26 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  node:
+  firmware:
     strategy:
       matrix:
         include:
-          - { chip: esp32c5, features: esp32c5, asset: wartui-node-fw-esp32c5.bin }
-          - { chip: esp32c6, features: esp32c6, asset: wartui-node-fw-esp32c6.bin }
-          - chip: esp32c6
+          - { fw: node, chip: esp32c5, features: esp32c5, asset: wartui-node-fw-esp32c5.bin }
+          - { fw: node, chip: esp32c6, features: esp32c6, asset: wartui-node-fw-esp32c6.bin }
+          - fw: node
+            chip: esp32c6
             features: esp32c6,xiao-external-antenna
             asset: wartui-node-fw-esp32c6-xiao.bin
+          - { fw: bridge, chip: esp32c5, features: esp32c5, asset: wartui-bridge-fw-esp32c5.bin }
+          - fw: bridge
+            chip: esp32c5
+            features: esp32c5,t-dongle-c5
+            asset: wartui-bridge-fw-esp32c5-t-dongle.bin
+          - { fw: bridge, chip: esp32c6, features: esp32c6, asset: wartui-bridge-fw-esp32c6.bin }
+          - fw: bridge
+            chip: esp32c6
+            features: esp32c6,xiao-external-antenna
+            asset: wartui-bridge-fw-esp32c6-xiao.bin
 
     runs-on: ubuntu-latest
 
@@ -36,11 +48,11 @@ jobs:
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y libudev-dev
 
-      # The same check `firmware-node.yml` makes, for the same reason: a second copy of any of
-      # these builds, or fails to link, or panics on a board.
+      # The same checks `firmware-node.yml` and `firmware-bridge.yml` make, for the same reason: a
+      # second copy of any of these builds, or fails to link, or panics on a board.
       - name: One copy of each esp-radio-pinned crate
         run: |
-          pushd firmware/node
+          pushd firmware/${{matrix.fw}}
           resolved=$(cargo tree --locked --features ${{matrix.features}} -e normal \
             --prefix none --format '{p}' | awk '{print $1, $2}' | sort -u)
           for c in esp-alloc esp-hal esp-radio esp-rtos esp-sync esp-wifi-sys-${{matrix.chip}}; do
@@ -51,11 +63,21 @@ jobs:
               exit 1
             fi
           done
+          # The bridge's panel crates sit on `embedded-hal` 1.x beside `esp-hal`'s; 0.2 is a
+          # different crate and coexists.
+          if [ "${{matrix.fw}}" = bridge ]; then
+            n=$(printf '%s\n' "$resolved" | grep -c '^embedded-hal v1' || true)
+            if [ "$n" != 1 ]; then
+              printf '%s\n' "$resolved" | grep '^embedded-hal ' || true
+              echo "::error::embedded-hal 1.x resolves to $n versions, expected exactly 1"
+              exit 1
+            fi
+          fi
           popd
 
       - name: Build
         run: |
-          pushd firmware/node
+          pushd firmware/${{matrix.fw}}
           cargo build --release --features ${{matrix.features}} --locked
           popd
 
@@ -65,13 +87,13 @@ jobs:
       - name: Merge into one image
         run: |
           espflash save-image --skip-update-check --chip ${{matrix.chip}} --merge --skip-padding \
-            firmware/node/target/riscv32imac-unknown-none-elf/release/wartui-node-fw \
+            firmware/${{matrix.fw}}/target/riscv32imac-unknown-none-elf/release/wartui-${{matrix.fw}}-fw \
             ${{matrix.asset}}
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
-          name: ${{matrix.asset}}
           path: ${{matrix.asset}}
+          archive: false
 
   host:
     strategy:
@@ -101,19 +123,19 @@ jobs:
         run: |
           tar -C target/${{matrix.target}}/release -czf wartui-${{matrix.target}}.tar.gz wartui
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
-          name: wartui-${{matrix.target}}.tar.gz
           path: wartui-${{matrix.target}}.tar.gz
+          archive: false
 
   release:
-    needs: [node, host]
+    needs: [firmware, host]
     runs-on: ubuntu-latest
     permissions:
       contents: write
 
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: assets
           merge-multiple: true
@@ -121,7 +143,7 @@ jobs:
       - name: Checksums
         run: |
           cd assets
-          sha256sum * > SHA256SUMS
+          sha256sum -- * > SHA256SUMS
           cat SHA256SUMS
 
       - name: Publish
