@@ -14,6 +14,7 @@
 
 use crate::air::{RecordKind, Security, SightingMsg};
 use crate::dedup::Refused;
+use crate::mac_index::MacIndex;
 
 /// Largest HCI packet, so a read buffer can never be short.
 ///
@@ -216,21 +217,36 @@ impl Iterator for AdvReports<'_> {
 /// advertiser the host already has is heard again on every scan; given a slot,
 /// it is thrown away by the drain, and a crowded room fills the buffer with
 /// such repeats and turns new advertisers away.
+///
+/// # Why it is hashed
+///
+/// [`Self::record`] runs once per advertising report, not once per advertiser, and the
+/// node calls it inside a lock that holds interrupts off (`esp-sync`'s
+/// `NonReentrantMutex`). Timed on the ESP32-C5 and C6, a linear search of the held
+/// reports costs about 135 ns an entry: 11-12 µs worst case at 80 reports and 17-18 µs
+/// at 128, the cost [`crate::dedup`] hashed its ring to be rid of. The same index finds
+/// an address in one or two probes whatever `N` is.
+///
+/// `N` is the number of reports held and `S` the hash slots behind them: a power of two
+/// at least `2 * N`, a separate parameter for the reason [`crate::dedup::MacRing`] gives.
 #[derive(Debug, Clone)]
-pub struct BlePending<const N: usize> {
+pub struct BlePending<const N: usize, const S: usize> {
     items: [AdvReport; N],
     len: usize,
     taken: usize,
     dropped: Refused,
+    /// Where each held address sits in `items`. Nothing is ever evicted, so entries
+    /// leave it only all at once, in [`Self::clear`].
+    index: MacIndex<S>,
 }
 
-impl<const N: usize> Default for BlePending<N> {
+impl<const N: usize, const S: usize> Default for BlePending<N, S> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<const N: usize> BlePending<N> {
+impl<const N: usize, const S: usize> BlePending<N, S> {
     /// An empty buffer, `const` so it can sit in a `static`.
     #[must_use]
     pub const fn new() -> Self {
@@ -239,6 +255,7 @@ impl<const N: usize> BlePending<N> {
             len: 0,
             taken: 0,
             dropped: Refused::new(),
+            index: MacIndex::new::<N>(),
         }
     }
 
@@ -255,8 +272,8 @@ impl<const N: usize> BlePending<N> {
         if !report.has_rssi() {
             return;
         }
-        if let Some(held) = self.items[..self.len].iter_mut().find(|r| r.address == report.address)
-        {
+        if let Some(i) = self.index.find(&report.address, |pos| self.items[pos].address) {
+            let held = &mut self.items[i];
             held.rssi = held.rssi.max(report.rssi);
             if held.mfgr.is_none() {
                 held.mfgr = report.mfgr;
@@ -271,6 +288,7 @@ impl<const N: usize> BlePending<N> {
             return;
         }
         self.items[self.len] = report;
+        self.index.insert(&report.address, self.len);
         self.len += 1;
     }
 
@@ -290,10 +308,13 @@ impl<const N: usize> BlePending<N> {
 
     /// Empty the buffer for a new scan. [`Self::dropped`] carries on, and an
     /// advertiser turned away last scan counts again if it is turned away in this one.
+    ///
+    /// Resetting the index writes all `S` slots, which is cheap at once per scan.
     pub fn clear(&mut self) {
         self.len = 0;
         self.taken = 0;
         self.dropped.reset();
+        self.index.clear();
     }
 
     /// Distinct addresses held this scan, at most `N`.

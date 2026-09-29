@@ -39,16 +39,16 @@
 //!
 //! The node checks the ring from its Wi-Fi receive callback, once for every beacon
 //! and probe response it hears, inside a lock that holds interrupts off
-//! (`esp-sync`'s `NonReentrantMutex`). Timed on the ESP32-C5 and C6 with 256 entries, a
-//! linear scan of [`crate::plan::DEDUP_RING`] there took 18-37 µs a frame; a hash
-//! lookup, one or two probes, takes under 1 µs. `index` is a linear-probing table over
-//! positions in `entries`, never more than half full ([`crate::plan::DEDUP_INDEX`]) so
-//! probe runs stay short. MACs that collide degrade to a probe run no longer than `N`,
-//! which is a linear scan and no worse.
+//! (`esp-sync`'s `NonReentrantMutex`). Timed on the ESP32-C5 and C6, a linear scan of
+//! a 256-entry ring there took 18-37 µs a frame. A hash lookup takes under 1 µs, and
+//! measured the same at 512 entries as at 256, so [`crate::plan::DEDUP_RING`] is sized
+//! for the neighbourhood rather than for the lookup. The index is the shared
+//! `mac_index` table, over [`crate::plan::DEDUP_INDEX`] slots.
 //!
 //! [`DEDUP_REFRESH_MS`]: crate::plan::DEDUP_REFRESH_MS
 //! [`DEDUP_RSSI_GAIN_DB`]: crate::plan::DEDUP_RSSI_GAIN_DB
 
+use crate::mac_index::MacIndex;
 use crate::plan::{DEDUP_INDEX, DEDUP_REFRESH_MS, DEDUP_RING, DEDUP_RSSI_GAIN_DB};
 
 #[derive(Debug, Clone, Copy)]
@@ -60,10 +60,6 @@ struct Entry {
     best_rssi: i8,
 }
 
-/// Marks an `index` slot as holding nothing. `N < u16::MAX` (checked in [`MacRing::new`])
-/// is what keeps this from colliding with a real position in `entries`.
-const EMPTY: u16 = u16::MAX;
-
 /// A fixed-capacity ring of recently reported addresses, oldest evicted first.
 ///
 /// `N` is the number of addresses held; [`DEDUP_RING`] is the size the firmware uses.
@@ -74,9 +70,8 @@ pub struct MacRing<const N: usize, const S: usize> {
     entries: [Entry; N],
     len: usize,
     cursor: usize,
-    /// `index[hash(mac)..]`, probed linearly, holds the position of `mac` in
-    /// `entries`, or [`EMPTY`].
-    index: [u16; S],
+    /// Where each held address sits in `entries`.
+    index: MacIndex<S>,
 }
 
 /// The ring size the firmware and simulator use: [`DEDUP_RING`] addresses over
@@ -87,96 +82,16 @@ impl<const N: usize, const S: usize> MacRing<N, S> {
     /// An empty ring.
     #[must_use]
     pub const fn new() -> Self {
-        const {
-            assert!(
-                S.is_power_of_two() && S >= 2 * N && N < u16::MAX as usize,
-                "the index must be a power of two, at least twice the ring, with room for EMPTY"
-            );
-        }
         Self {
             entries: [Entry { mac: [0; 6], at_ms: 0, best_rssi: 0 }; N],
             len: 0,
             cursor: 0,
-            index: [EMPTY; S],
-        }
-    }
-
-    /// Fold `mac` into a hash slot: the top bits of a multiplicative hash, all in
-    /// 32-bit arithmetic, which suits RV32.
-    #[allow(
-        clippy::cast_possible_truncation,
-        reason = "S is a power of two, so trailing_zeros() is at most 31 and the shift below \
-        always leaves a value under 32 bits"
-    )]
-    const fn hash(mac: &[u8; 6]) -> usize {
-        let hi = u32::from_be_bytes([mac[0], mac[1], mac[2], mac[3]]);
-        let lo = u32::from_be_bytes([0, 0, mac[4], mac[5]]);
-        let h = (hi ^ lo).wrapping_mul(0x9E37_79B1);
-        (h >> (32 - S.trailing_zeros())) as usize
-    }
-
-    /// The `index` slot holding `mac`'s position in `entries`, if any.
-    fn find_slot(&self, mac: &[u8; 6]) -> Option<usize> {
-        let mut slot = Self::hash(mac);
-        loop {
-            let pos = self.index[slot];
-            if pos == EMPTY {
-                return None;
-            }
-            if self.entries[usize::from(pos)].mac == *mac {
-                return Some(slot);
-            }
-            slot = (slot + 1) % S;
+            index: MacIndex::new::<N>(),
         }
     }
 
     fn find(&self, mac: &[u8; 6]) -> Option<usize> {
-        self.find_slot(mac).map(|slot| usize::from(self.index[slot]))
-    }
-
-    /// Point some `index` slot at `entries[pos]`, starting the probe at its home slot.
-    fn insert_index(&mut self, mac: [u8; 6], pos: usize) {
-        let mut slot = Self::hash(&mac);
-        while self.index[slot] != EMPTY {
-            slot = (slot + 1) % S;
-        }
-        #[allow(
-            clippy::cast_possible_truncation,
-            reason = "pos < N < u16::MAX, asserted in MacRing::new"
-        )]
-        {
-            self.index[slot] = pos as u16;
-        }
-    }
-
-    /// Remove `mac` from the index, backward-shifting later entries of its probe run
-    /// forward so a later lookup does not stop early at the hole this leaves. No
-    /// tombstones: the standard deletion for linear probing.
-    fn unindex(&mut self, mac: [u8; 6]) {
-        let Some(start) = self.find_slot(&mac) else { return };
-        let mut hole = start;
-        loop {
-            self.index[hole] = EMPTY;
-            let mut j = hole;
-            loop {
-                j = (j + 1) % S;
-                let pos = self.index[j];
-                if pos == EMPTY {
-                    return;
-                }
-                let home = Self::hash(&self.entries[usize::from(pos)].mac);
-                // Whether `home` lies cyclically in `(hole, j]`: if so, `j` is still
-                // reachable from its own home slot without the hole and must stay.
-                let pinned =
-                    if hole <= j { home > hole && home <= j } else { home <= j || home > hole };
-                if pinned {
-                    continue;
-                }
-                self.index[hole] = pos;
-                hole = j;
-                break;
-            }
-        }
+        self.index.find(mac, |pos| self.entries[pos].mac)
     }
 
     /// Whether this address is held at all, due or not.
@@ -220,10 +135,11 @@ impl<const N: usize, const S: usize> MacRing<N, S> {
             // The ring is full, so this insert overwrites `cursor`'s entry: unindex
             // it first, or the index would go on pointing a stale slot at the MAC
             // that now lives there.
-            self.unindex(self.entries[self.cursor].mac);
+            let evicted = self.entries[self.cursor].mac;
+            self.index.remove(&evicted, |pos| self.entries[pos].mac);
         }
         self.entries[self.cursor] = Entry { mac, at_ms: now_ms, best_rssi: rssi };
-        self.insert_index(mac, self.cursor);
+        self.index.insert(&mac, self.cursor);
         self.cursor = (self.cursor + 1) % N;
         self.len = self.len.saturating_add(1).min(N);
     }
@@ -255,12 +171,12 @@ impl<const N: usize, const S: usize> MacRing<N, S> {
     /// The entries themselves are left as they are — a lookup never reaches one
     /// through a cleared `index` — but `index` itself is reset to empty, since
     /// a stale slot would otherwise go on pointing at an entry this call means to
-    /// forget. That's `S` halfwords, about 1 KB at the firmware's size, and this only
+    /// forget. That is `S` halfwords, 2 KB at the firmware's size, and this only
     /// runs on a share change or an operator clear.
     pub fn clear(&mut self) {
         self.len = 0;
         self.cursor = 0;
-        self.index = [EMPTY; S];
+        self.index.clear();
     }
 }
 
