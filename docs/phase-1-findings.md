@@ -595,3 +595,8 @@ Every checkpoint item now has a hardware answer. What is left is narrower:
   binary differs from itself between runs. So the suggestion that followed from
   this — bring the controller up on the first assignment rather than at boot —
   is not warranted. `docs/phase-2-findings.md` has the four runs.
+- **What the legacy scan misses by not being an extended one.** It hears no
+  advertiser that uses extended advertising alone. **Measured on 2026-09-28, and
+  it's under 1%:** 0.5–0.8% of the addresses on a drive, all on the 1M PHY and none
+  on Coded. The node keeps the legacy scan. `docs/ble-extended-scan-findings.md`
+  has the bench.

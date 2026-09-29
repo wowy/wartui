@@ -100,13 +100,64 @@ boot with no family switch, and a soak test of that build should come first.
 
 ## Drive
 
-Not yet taken. Scanner build: `--features esp32c6,xiao-external-antenna`, which prints
-`antenna: external (U.FL)` at boot.
+84 minutes (28 cycles), on 2026-09-28, on the U.FL antenna (`antenna: external (U.FL)` at
+boot). Scanner build: `--features esp32c6,xiao-external-antenna`.
+
+### Only the first 18 minutes count
+
+The session address set holds 1,024 entries, which is enough for a room and not for a road.
+It filled during cycle 6. From then on, any new address was only counted as overflow, which
+reached 129,142 reports by cycle 27. Each window's `distinct`, `legacy` and `ext_*` counts are
+read from that same set. So after cycle 6 they only count addresses already in it, and the
+long run of `distinct=3` windows from cycle 7 onward is an artifact of the bench, not an empty
+road. What holds for the whole drive is the report totals and the restart record. Everything
+about distinct addresses comes from cycles 1–6.
+
+### The gap is under 1%, all on 1M
+
+| session | distinct | heard only by extended | never a legacy PDU | of which Coded |
+| --- | --- | --- | --- | --- |
+| after cycle 5 | 831 | 339 | **4 (0.5%)** | 0 |
+| after cycle 6 (set full) | 1,024 | 466 | **8 (0.8%)** | 0 |
+
+Every advertiser the legacy scan missed was on the 1M PHY. **Nothing was heard on Coded
+that wasn't also heard on 1M**, and no report was anonymous or truncated. Those
+advertisers only turned up in two windows (X1 in cycles 5 and 6, and XC in cycle 5), 3–5 at
+a time, and each came with reports marked incomplete, as an `AUX` chain would.
+`heard only by extended` is again mostly legacy advertisers the L windows happened not to
+catch: at speed, successive windows are in different places.
+
+### Legacy yield
+
+Report totals over the drive: L 123,731 (28 windows), X1 133,104 (28), XC 62,518 (27). So X1
+takes in as much as L does, and XC takes in half, the same as in the room. Distinct counts in
+cycles 1–4 are within the spread between windows of the same mode (L 104–209, X1 90–158). At
+speed, each window covers a different stretch of road, so the drive can't separate these more
+finely.
+
+### No crash
+
+No panic and no restart in 84 minutes: 27 transitions from XC back to L on the external
+antenna. The crash in the room is still a single occurrence.
 
 ## Decision
 
-Pending the drive. The rule set in advance: propose extended scanning for the node if
-extended-only addresses are at least 5% of the distinct addresses on the drive, or if
-X1 matches L's legacy yield within noise, which would make switching to X1 free.
-The room shows the second condition holding for X1, and none of the gain the first
-condition asks for.
+Measured against the rule set in advance:
+
+- **Extended-only share ≥ 5% on the drive: no.** It was 0.5–0.8% over the 18 minutes the
+  bench could track, an order of magnitude short, and none of it was on Coded. The other 66
+  minutes weren't tracked, so they can't confirm or contradict that.
+- **X1 matches L's legacy yield: yes**, both in the room and in the drive's report totals.
+  Switching the node to an extended scan on 1M only would cost nothing measurable in
+  legacy coverage and would gain those 0.5–0.8%. Coded costs half the reports and gained
+  nothing.
+
+**Not adopted.** A gain of under 1% doesn't justify changing the scan path. The change
+would bring a new report type through `BlePending`, a rule for anonymous addresses, and
+a controller path that crashed once on this bench. The node keeps the legacy scan.
+Worth revisiting if the fleet's surroundings change, since extended-only advertisers
+are what newer devices tend to become. The examples and the `wartui-proto::hci`
+extended pieces stay in the tree, so the bench can be rerun as it is. If it's rerun on
+a drive, the session set needs to be larger than 1,024 entries, and the per-window
+counts need to stop depending on it.
+
