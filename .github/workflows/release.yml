@@ -1,11 +1,11 @@
 name: Release
 
 # A pushed `v*` tag publishes the node and bridge images and the host binaries built from that one
-# tree. `wartui flash-fleet` in a release binary fetches its node image from the release named by
-# the tag baked into it (`WARTUI_RELEASE_TAG`), so the host and the fleet it flashes always share a
-# tree. The bridge images are published beside them, for flashing by hand. Each image is merged —
-# bootloader, partition table and app, flashed at 0x0 — and `SHA256SUMS` is what the host checks a
-# download against.
+# tree. `wartui flash-fleet` and `wartui flash-bridge` in a release binary fetch their images from
+# the release named by the tag baked into it (`WARTUI_RELEASE_TAG`), so the host, the fleet and the
+# bridge it flashes always share a tree. The asset names and feature sets below must match the
+# variant tables in `crates/wartui/src/flash/mod.rs`. Each image is merged — bootloader, partition
+# table and app, flashed at 0x0 — and `SHA256SUMS` is what the host checks a download against.
 
 on:
   push:
