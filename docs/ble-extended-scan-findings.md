@@ -152,7 +152,7 @@ Measured against the rule set in advance:
   legacy coverage and would gain those 0.5–0.8%. Coded costs half the reports and gained
   nothing.
 
-**Not adopted.** A gain of under 1% doesn't justify changing the scan path. The change
+**Not adopted, pending the side-by-side A/B below.** A gain of under 1% doesn't justify changing the scan path. The change
 would bring a new report type through `BlePending`, a rule for anonymous addresses, and
 a controller path that crashed once on this bench. The node keeps the legacy scan.
 Worth revisiting if the fleet's surroundings change, since extended-only advertisers
@@ -160,4 +160,50 @@ are what newer devices tend to become. The examples and the `wartui-proto::hci`
 extended pieces stay in the tree, so the bench can be rerun as it is. If it's rerun on
 a drive, the session set needs to be larger than 1,024 entries, and the per-window
 counts need to stop depending on it.
+
+## Side by side: L and X1 at the same time
+
+The drive couldn't show whether X1 loses legacy advertisers that L hears, because
+the modes took turns and each window heard a different stretch of road. So the
+bench now takes its modes at build time (`BENCH_MODES=L` or `X1`). Two XIAO C6
+boards, `75:40` and `9A:24`, run it at once on their U.FL antennas. Each board logs
+every address the first time it's heard, and `tools/ble_ab_compare.py` compares
+the two boards' address sets over the time both logs cover. The session set is now
+an 8,192-slot hash table, and the per-window counts come from their own set, so
+neither saturates the way the drive did.
+
+### Room, 2026-09-28: the board matters, the mode doesn't
+
+Two 5-minute halves, with the modes swapped between boards at half time so any
+difference between the boards cancels out:
+
+| | `9A:24` distinct / window | `9A:24` reports / window | `75:40` distinct / window | `75:40` reports / window |
+| --- | --- | --- | --- | --- |
+| X1 | 50–61, median 54 | 8.5k–9.5k | 36–40, median 36 | 7.4k–7.6k |
+| L | 49–54, median 53 | 8.5k–8.8k | 36–42 (3 windows) | 7.5k–7.7k |
+
+`9A:24` hears about 40% more distinct advertisers than `75:40`, whichever mode it runs.
+The likely cause is the antenna or its cable. On either board, X1 and L agree to within
+a few percent. In the second half both boards booted together. Every address `75:40`
+heard on X1 was also heard by `9A:24` on L, and `9A:24` heard 16 more, which is the
+board gap again. Neither board heard an address that was never sent as a legacy PDU.
+
+**A drive has to swap the boards halfway too.** A 40% gap between the boards would
+swamp any difference between the modes.
+
+### More bench crashes
+
+In the first half, `75:40` restarted about 20 times in its first ~110 s of scanning
+**on L**, then ran cleanly. The panics were all memory corruption:
+
+- the heap allocator catching a double free (`Freed node … aliases existing hole`)
+- `ASSERT r_ble_lll_scan_rx_process:1646` and `ASSERT r_ble_lll_mmgmt_free:1811`
+  inside the controller
+- load access faults in `r_ble_lll_get_rxed_buffer`
+
+It didn't happen again with X1 on the same board in the second half, or with L on
+that board alone for 2 minutes afterwards. Both bench crashes so far happened in L
+windows. That is the production mode, but production has run for hours on these
+boards without a crash. What the bench adds is heavy `println!` from the collect loop
+and an `HCI_Reset` every window. The cause is unknown.
 
