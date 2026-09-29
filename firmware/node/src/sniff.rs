@@ -57,7 +57,12 @@ pub fn now_ms() -> u32 {
 }
 
 /// How many distinct access points one dwell can hold.
-const PENDING: usize = 48;
+///
+/// Sized for a dense channel rather than a quiet one: overflow turns the newest access
+/// point away until a later dwell, and the hashed lookup costs the same at any size, so
+/// the price of headroom is 61 bytes of static RAM a slot. At 64 the index is still 128
+/// slots.
+const PENDING: usize = 64;
 
 /// Hash slots behind [`PENDING`]: the smallest power of two at least twice it, as
 /// [`WifiPending`] requires.
