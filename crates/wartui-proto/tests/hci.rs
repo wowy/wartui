@@ -1,8 +1,12 @@
-//! The four commands and one event a BLE scan is made of.
+//! The commands and events a BLE scan is made of, legacy and extended.
 
 use wartui_proto::air::{RecordKind, SIGHTING_RECORD_MAX, Security, SightingMsg};
 use wartui_proto::hci::{
-    AdvReport, BlePending, RESET, SET_EVENT_MASK, adv_reports, set_scan_enable, set_scan_parameters,
+    ANONYMOUS, AdvReport, BlePending, DataStatus, ExtScanCommands,
+    LE_READ_LOCAL_SUPPORTED_FEATURES, PHY_1M, PHY_2M, PHY_CODED, READ_LOCAL_SUPPORTED_COMMANDS,
+    RESET, SET_EVENT_MASK, SET_LE_EVENT_MASK, ScanPhys, adv_reports, command_complete,
+    ext_adv_reports, ext_scan_commands, le_features, set_ext_scan_enable, set_ext_scan_parameters,
+    set_scan_enable, set_scan_parameters,
 };
 
 /// An LE Advertising Report event carrying `reports` of `(address, data, rssi)`.
@@ -295,4 +299,277 @@ fn ble_pending_take_stops_at_len_when_reset() {
 
     let mut untouched = BlePending::<4>::new();
     assert_eq!(untouched.take(), None, "the zero fill is not an advertiser");
+}
+
+/// One report in an LE Extended Advertising Report event.
+struct Ext<'a> {
+    event_type: u16,
+    address_type: u8,
+    address: [u8; 6],
+    primary_phy: u8,
+    secondary_phy: u8,
+    rssi: i8,
+    data: &'a [u8],
+}
+
+/// An LE Extended Advertising Report event carrying `reports`.
+fn ext_event(reports: &[Ext<'_>]) -> Vec<u8> {
+    let mut params = vec![0x0D, u8::try_from(reports.len()).expect("few reports")];
+    for r in reports {
+        params.extend(r.event_type.to_le_bytes());
+        params.push(r.address_type);
+        params.extend(r.address.iter().rev());
+        params.push(r.primary_phy);
+        params.push(r.secondary_phy);
+        params.push(0x02); // SID
+        params.push(0x7F); // Tx power: not available
+        params.push(r.rssi as u8);
+        params.extend([0x00, 0x00]); // no periodic advertising
+        params.push(0x00); // direct address type
+        params.extend([0x00; 6]); // direct address
+        params.push(u8::try_from(r.data.len()).expect("short data"));
+        params.extend_from_slice(r.data);
+    }
+    let mut packet = vec![0x04, 0x3E, u8::try_from(params.len()).expect("fits")];
+    packet.extend_from_slice(&params);
+    packet
+}
+
+/// A legacy connectable undirected PDU as the extended report describes it, on 1M.
+fn legacy_ext(address: [u8; 6], rssi: i8) -> Ext<'static> {
+    // Legacy (bit 4), connectable (bit 0), scannable (bit 1), complete.
+    Ext {
+        event_type: 0x0013,
+        address_type: 0x00,
+        address,
+        primary_phy: PHY_1M,
+        secondary_phy: 0x00,
+        rssi,
+        data: &[0x02, 0x01, 0x06],
+    }
+}
+
+/// A Command Complete for `opcode` with `status` and `ret` after it.
+fn complete(opcode: u16, status: u8, ret: &[u8]) -> Vec<u8> {
+    let [lo, hi] = opcode.to_le_bytes();
+    let mut packet = vec![0x04, 0x0E, u8::try_from(4 + ret.len()).expect("fits"), 0x01, lo, hi];
+    packet.push(status);
+    packet.extend_from_slice(ret);
+    packet
+}
+
+const EXT_ADDR: [u8; 6] = [0xC0, 0xDE, 0xBE, 0xAC, 0x00, 0x02];
+
+#[test]
+fn hci_command_sets_ext_report_bit_when_constructing_le_event_mask() {
+    assert_eq!(SET_LE_EVENT_MASK[..4], [0x01, 0x01, 0x20, 0x08], "opcode 0x2001, eight bytes");
+    let mask = u64::from_le_bytes(SET_LE_EVENT_MASK[4..].try_into().expect("eight bytes"));
+    // Bit 12 is subevent 0x0D; the rest is the specification's post-reset default.
+    assert_eq!(mask, 0x1F | (1 << 12));
+}
+
+#[test]
+fn hci_command_encodes_capability_reads_when_constants_are_evaluated() {
+    assert_eq!(READ_LOCAL_SUPPORTED_COMMANDS, [0x01, 0x02, 0x10, 0x00]);
+    assert_eq!(LE_READ_LOCAL_SUPPORTED_FEATURES, [0x01, 0x03, 0x20, 0x00]);
+}
+
+#[test]
+fn hci_command_formats_one_phy_block_when_ext_scan_on_1m() {
+    let cmd = set_ext_scan_parameters(ScanPhys::OneM, 0x0030, 0x0030);
+    assert_eq!(
+        cmd.as_bytes(),
+        [
+            0x01, 0x41, 0x20, 0x08, // opcode 0x2041, eight parameters
+            0x00, 0x00, 0x01, // public, accept everything, 1M
+            0x00, 0x30, 0x00, 0x30, 0x00, // passive, interval, window
+        ]
+    );
+}
+
+#[test]
+fn hci_command_formats_two_phy_blocks_when_ext_scan_on_1m_and_coded() {
+    let cmd = set_ext_scan_parameters(ScanPhys::OneMAndCoded, 0x0030, 0x0020);
+    assert_eq!(
+        cmd.as_bytes(),
+        [
+            0x01, 0x41, 0x20, 0x0D, // opcode 0x2041, thirteen parameters
+            0x00, 0x00, 0x05, // public, accept everything, 1M and Coded
+            0x00, 0x30, 0x00, 0x20, 0x00, // 1M: passive, interval, window
+            0x00, 0x30, 0x00, 0x20, 0x00, // Coded: the same
+        ]
+    );
+}
+
+#[test]
+fn hci_command_formats_one_phy_block_when_ext_scan_on_coded() {
+    let cmd = set_ext_scan_parameters(ScanPhys::Coded, 0x0030, 0x0030);
+    assert_eq!(
+        cmd.as_bytes(),
+        [0x01, 0x41, 0x20, 0x08, 0x00, 0x00, 0x04, 0x00, 0x30, 0x00, 0x30, 0x00]
+    );
+}
+
+#[test]
+fn hci_command_formats_ext_scan_enable_without_filter_duplicates_when_toggled() {
+    // Duplicates off, duration 0 and period 0: runs until disabled.
+    assert_eq!(set_ext_scan_enable(true), [0x01, 0x42, 0x20, 0x06, 0x01, 0, 0, 0, 0, 0]);
+    assert_eq!(set_ext_scan_enable(false), [0x01, 0x42, 0x20, 0x06, 0x00, 0, 0, 0, 0, 0]);
+}
+
+#[test]
+fn hci_command_complete_reads_opcode_and_status_when_packet_is_complete() {
+    assert_eq!(command_complete(&complete(0x0C03, 0x00, &[])), Some((0x0C03, 0x00)));
+    assert_eq!(command_complete(&complete(0x2041, 0x0C, &[])), Some((0x2041, 0x0C)));
+}
+
+#[test]
+fn hci_command_complete_returns_none_when_packet_is_not_complete() {
+    assert_eq!(command_complete(&[]), None);
+    // A Command Status, which carries its status in a different place.
+    assert_eq!(command_complete(&[0x04, 0x0F, 0x04, 0x00, 0x01, 0x41, 0x20]), None);
+    // Opcode 0 announcing free slots, with no status at all.
+    assert_eq!(command_complete(&[0x04, 0x0E, 0x03, 0x01, 0x00, 0x00]), None);
+    assert_eq!(command_complete(&event(&[(ADDR, &[], -70)])), None);
+}
+
+#[test]
+fn hci_ext_scan_commands_reads_octet_37_when_answer_lists_them() {
+    let mut table = [0u8; 64];
+    table[37] = 1 << 5;
+    let packet = complete(0x1002, 0x00, &table);
+    assert_eq!(
+        ext_scan_commands(&packet),
+        Some(ExtScanCommands { parameters: true, enable: false })
+    );
+    table[37] = (1 << 5) | (1 << 6);
+    let packet = complete(0x1002, 0x00, &table);
+    assert_eq!(
+        ext_scan_commands(&packet),
+        Some(ExtScanCommands { parameters: true, enable: true })
+    );
+}
+
+#[test]
+fn hci_ext_scan_commands_returns_none_when_answer_is_not_usable() {
+    let table = [0xFFu8; 64];
+    assert_eq!(ext_scan_commands(&complete(0x1002, 0x01, &table)), None, "failed read");
+    assert_eq!(ext_scan_commands(&complete(0x2003, 0x00, &table)), None, "another command");
+    assert_eq!(ext_scan_commands(&complete(0x1002, 0x00, &table[..37])), None, "short");
+}
+
+#[test]
+fn hci_le_features_reads_coded_and_extended_bits_when_answer_lists_them() {
+    let bits: u64 = (1 << 11) | (1 << 12);
+    let features = le_features(&complete(0x2003, 0x00, &bits.to_le_bytes())).expect("read");
+    assert!(features.coded_phy());
+    assert!(features.extended_advertising());
+
+    let features = le_features(&complete(0x2003, 0x00, &(1u64 << 12).to_le_bytes())).expect("read");
+    assert!(!features.coded_phy());
+    assert!(features.extended_advertising());
+}
+
+#[test]
+fn hci_le_features_returns_none_when_answer_is_not_usable() {
+    let bits = u64::MAX.to_le_bytes();
+    assert_eq!(le_features(&complete(0x2003, 0x01, &bits)), None, "failed read");
+    assert_eq!(le_features(&complete(0x1002, 0x00, &bits)), None, "another command");
+    assert_eq!(le_features(&complete(0x2003, 0x00, &bits[..7])), None, "short");
+}
+
+#[test]
+fn hci_ext_parser_reads_legacy_and_extended_reports_when_event_holds_both() {
+    let mfgr = &[0x06, 0xFF, 0xFF, 0xFF, b'W', b'T', 0x01];
+    let packet = ext_event(&[
+        legacy_ext(ADDR, -60),
+        Ext {
+            // Non-connectable, non-scannable, not legacy, complete.
+            event_type: 0x0000,
+            address_type: 0x01,
+            address: EXT_ADDR,
+            primary_phy: PHY_CODED,
+            secondary_phy: PHY_CODED,
+            rssi: -85,
+            data: mfgr,
+        },
+    ]);
+    let reports: Vec<_> = ext_adv_reports(&packet).collect();
+    assert_eq!(reports.len(), 2);
+
+    assert_eq!(reports[0].address, ADDR, "reversed into display order");
+    assert!(reports[0].legacy);
+    assert_eq!(reports[0].primary_phy, PHY_1M);
+    assert_eq!(reports[0].secondary_phy, 0x00);
+    assert_eq!(reports[0].data_status, DataStatus::Complete);
+    assert_eq!(reports[0].rssi, -60);
+    assert_eq!(reports[0].mfgr, None);
+    assert!(!reports[0].is_anonymous());
+
+    assert_eq!(reports[1].address, EXT_ADDR);
+    assert_eq!(reports[1].address_type, 0x01);
+    assert!(!reports[1].legacy);
+    assert_eq!(reports[1].primary_phy, PHY_CODED);
+    assert_eq!(reports[1].secondary_phy, PHY_CODED);
+    assert_eq!(reports[1].rssi, -85);
+    assert_eq!(reports[1].mfgr, Some(0xFFFF));
+    assert!(reports[1].has_rssi());
+}
+
+#[test]
+fn hci_ext_parser_reads_data_status_when_event_type_carries_it() {
+    let status = |bits: u16| {
+        let mut ext = legacy_ext(ADDR, -60);
+        ext.event_type = bits << 5;
+        ext.secondary_phy = PHY_2M;
+        let packet = ext_event(&[ext]);
+        ext_adv_reports(&packet).next().expect("one report").data_status
+    };
+    assert_eq!(status(0), DataStatus::Complete);
+    assert_eq!(status(1), DataStatus::MoreToCome);
+    assert_eq!(status(2), DataStatus::Truncated);
+    assert_eq!(status(3), DataStatus::Reserved);
+}
+
+#[test]
+fn hci_ext_parser_flags_anonymous_when_address_type_is_ff() {
+    let mut ext = legacy_ext([0; 6], -70);
+    ext.event_type = 0x0000;
+    ext.address_type = ANONYMOUS;
+    let packet = ext_event(&[ext]);
+    let report = ext_adv_reports(&packet).next().expect("one report");
+    assert!(report.is_anonymous());
+    assert!(!report.legacy);
+}
+
+#[test]
+fn hci_ext_parser_handles_truncated_event_safely_when_payload_is_cut() {
+    let packet = ext_event(&[legacy_ext(ADDR, -60), legacy_ext(ADDR, -70)]);
+    for cut in 0..packet.len() {
+        // A prefix of the whole reading, never a fabricated address.
+        let reports: Vec<_> = ext_adv_reports(&packet[..cut]).collect();
+        assert!(reports.len() < 2, "cut at {cut} still yields both");
+        for report in reports {
+            assert_eq!(report.address, ADDR);
+        }
+    }
+    assert_eq!(ext_adv_reports(&packet).count(), 2);
+}
+
+#[test]
+fn hci_ext_parser_survives_inflated_report_count_when_payload_is_short() {
+    let mut packet = ext_event(&[legacy_ext(ADDR, -60)]);
+    packet[4] = 200;
+    assert_eq!(ext_adv_reports(&packet).count(), 1, "one report is all there is");
+}
+
+#[test]
+fn hci_parsers_ignore_each_others_subevent_when_handed_the_wrong_report() {
+    // One scan family per reset, but the caller hands every packet to whichever
+    // parser it holds; a report of the other kind must read as nothing.
+    let legacy = event(&[(ADDR, &[0x02, 0x01, 0x06], -70)]);
+    assert_eq!(ext_adv_reports(&legacy).count(), 0);
+    let extended = ext_event(&[legacy_ext(ADDR, -60)]);
+    assert_eq!(adv_reports(&extended).count(), 0);
+    assert_eq!(ext_adv_reports(&complete(0x2042, 0x00, &[])).count(), 0, "cmd complete");
 }
