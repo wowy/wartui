@@ -229,13 +229,14 @@ wartui flash-bridge --features esp32c6 --bridge 10:BD:A3:EC:44:C0
 | `--firmware-dir DIR` | the checkout's | Build the image from the bridge firmware here                |
 | `--dry-run`          | off            | Probe and report; build, fetch and flash nothing             |
 
-**The board is chosen before anything is reset**, by the rule `reset` follows: the board `--bridge`
-names, else the bridge `run` remembered if it is attached, else the only Espressif board attached.
-A `--bridge` that matches no attached board, several boards with none known, or no board at all
-refuses the run; with several, the refusal lists their addresses, and naming one with `--bridge`
-settles it. The chosen board must be native USB Serial/JTAG (`303a:1001`) reporting its address,
-and `espflash board-info` must read the chip `--features` names and that same address, or nothing
-is flashed.
+**The board is chosen before anything is reset**: the board `--bridge` names, else the bridge `run`
+remembered, which must be attached, else, with none remembered, the only Espressif board attached.
+A remembered bridge that is not attached refuses the run, because the board present is known not to
+be it. A `--bridge` that matches no attached board, several boards with none known, or no board at
+all refuses the run too; with several, the refusal lists their addresses, and naming one with
+`--bridge` settles it. The chosen board must be native USB Serial/JTAG (`303a:1001`) reporting its
+address, and `espflash board-info` must read the chip `--features` names and that same address, or
+nothing is flashed.
 
 The image comes from the same three places as `flash-fleet`'s, with `firmware/bridge` in place of
 `firmware/node`. A release publishes `esp32c5`, `esp32c5,t-dongle-c5`, `esp32c6` and

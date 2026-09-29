@@ -3,10 +3,13 @@
 //! **The board is chosen before anything is reset, and only when the choice is certain.** A
 //! bridge image written over a node takes that node out of the fleet, and nothing on the bus tells
 //! the two apart but an address. So the target is the board `--bridge` names, which must be
-//! attached, or else the rule `wartui reset` follows: the remembered bridge if it is attached, else
-//! the only Espressif board there is. Several boards and none known is a refusal that lists them,
-//! never a guess. A board with no address is refused too, since the identity cross-check (`super`)
-//! needs one; with a single target, a failed cross-check is an error rather than a skip.
+//! attached; else the remembered bridge, which must be attached; else, with none remembered, the
+//! only Espressif board there is. A remembered bridge that is not attached is a refusal even when
+//! one board is: that board is known not to be the bridge, and flashing it would also overwrite
+//! the memory `flash-fleet` spares the real bridge by. Several boards and none known is a refusal
+//! that lists them, never a guess. A board with no address is refused too, since the identity
+//! cross-check (`super`) needs one; with a single target, a failed cross-check is an error rather
+//! than a skip.
 //!
 //! **A flashed board is remembered as the bridge.** It now runs bridge firmware, so `flash-fleet`
 //! spares it and `run` opens it first, without either being told.
@@ -37,7 +40,8 @@ pub struct Args {
     pub features: String,
 
     /// Which board to flash, by path or by address. It must be attached. Without it, the bridge
-    /// `run` last found, else the only Espressif board attached.
+    /// `run` last found, which must be attached; else, with none remembered, the only Espressif
+    /// board attached.
     #[arg(long, value_name = "PATH|MAC")]
     pub bridge: Option<String>,
 
@@ -125,25 +129,29 @@ fn target(
                 )
             })?
         }
-        None => {
-            let known = remembered
-                .and_then(|wanted| candidates.iter().find(|board| board.mac() == Some(wanted)));
-            match (known, candidates) {
-                (Some(known), _) => known,
-                (None, [only]) => only,
-                (None, []) => bail!("no Espressif board is attached"),
-                (None, several) => bail!(
-                    "{} boards are attached and none is known to be the bridge: {}. Name it with \
-                     --bridge (`wartui ports` lists each board's address)",
-                    several.len(),
-                    several
-                        .iter()
-                        .map(|board| board.mac().map_or_else(|| board.path.clone(), |a| mac(&a)))
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                ),
+        None => match (remembered, candidates) {
+            (Some(wanted), _) => {
+                candidates.iter().find(|board| board.mac() == Some(wanted)).ok_or_else(|| {
+                    anyhow!(
+                        "the remembered bridge {} is not attached. Name the board to flash with \
+                         --bridge (`wartui ports` lists each board's address)",
+                        mac(&wanted)
+                    )
+                })?
             }
-        }
+            (None, [only]) => only,
+            (None, []) => bail!("no Espressif board is attached"),
+            (None, several) => bail!(
+                "{} boards are attached and none is known to be the bridge: {}. Name it with \
+                     --bridge (`wartui ports` lists each board's address)",
+                several.len(),
+                several
+                    .iter()
+                    .map(|board| board.mac().map_or_else(|| board.path.clone(), |a| mac(&a)))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ),
+        },
     };
     if chosen.pid != Some(BRIDGE_PID) {
         bail!("{} is {}", chosen.path, Skip::NotSerialJtag(chosen.pid));
@@ -199,8 +207,15 @@ mod tests {
     fn flash_bridge_targets_only_board_when_nothing_is_known() {
         let found = [board("/dev/ttyACM0", Some(&BRIDGE_MAC))];
         assert_eq!(target(&found, None, None).unwrap(), found[0]);
-        // A remembered bridge that is unplugged leaves the only board as the answer.
-        assert_eq!(target(&found, None, Some(NODE_MAC)).unwrap(), found[0]);
+    }
+
+    #[test]
+    fn flash_bridge_refuses_run_when_remembered_bridge_is_not_attached() {
+        // The one board present is known not to be the bridge.
+        let found = [board("/dev/ttyACM0", Some(&BRIDGE_MAC))];
+        let error = target(&found, None, Some(NODE_MAC)).unwrap_err().to_string();
+        assert!(error.contains(&mac(&NODE_MAC)), "{error}");
+        assert!(error.contains("--bridge"), "{error}");
     }
 
     #[test]
@@ -214,7 +229,7 @@ mod tests {
 
     #[test]
     fn flash_bridge_refuses_run_when_no_board_is_attached() {
-        let error = target(&[], None, Some(BRIDGE_MAC)).unwrap_err().to_string();
+        let error = target(&[], None, None).unwrap_err().to_string();
         assert!(error.contains("no Espressif board is attached"), "{error}");
     }
 
