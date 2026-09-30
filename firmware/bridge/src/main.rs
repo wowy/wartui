@@ -33,7 +33,7 @@
 #[cfg(feature = "t-dongle-c5")]
 mod panel;
 
-use embassy_futures::select::select;
+use embassy_futures::select::{Either4, select4};
 use embassy_time::Timer;
 use esp_hal::Async;
 use esp_hal::clock::CpuClock;
@@ -46,6 +46,7 @@ use esp_hal::timer::timg::TimerGroup;
 use esp_hal::usb_serial_jtag::{UsbSerialJtag, UsbSerialJtagRx, UsbSerialJtagTx};
 use esp_radio::esp_now::{
     EspNowError, EspNowManager, EspNowReceiver, EspNowSender, EspNowWifiInterface, PeerInfo,
+    ReceivedData,
 };
 use portable_atomic::{AtomicU8, AtomicU32, Ordering};
 use static_cell::StaticCell;
@@ -118,17 +119,44 @@ const PANEL: Option<Panel> = None;
 /// radio's receive queue, which is ten frames deep and drops its oldest.
 const USB_READ_BUDGET: usize = 256;
 
-/// How long an idle pass waits: one in which neither radio nor link had anything
+/// The longest an idle pass waits: one in which neither radio nor link had anything
 /// to do.
 ///
-/// While frames are queued for the host, the pump stopped on a full 64-byte USB
-/// FIFO, and the wait also ends as soon as that FIFO empties. That is what lets the
-/// outbox drain at USB speed — 0.7 to 0.9 ms per forwarded frame, measured — rather
-/// than one 64-byte packet per millisecond. A busy loop would reach the same speed
-/// but burn the core whenever no host is reading. One millisecond is a hundred
-/// times finer than the 100 ms window any of this has to hit, and keeps the radio's
-/// ten-frame receive queue drained while a host is slow.
-const IDLE_SLEEP: embassy_time::Duration = embassy_time::Duration::from_millis(1);
+/// A received frame, a host command and — while frames are queued for the host — the
+/// USB FIFO emptying each end the wait themselves. The FIFO is what lets the outbox
+/// drain at USB speed, 0.7 to 0.9 ms per forwarded frame, measured, without a busy
+/// loop that burns the core whenever no host is reading.
+///
+/// The tick is for work no event announces: [`StallWatch`] judging elapsed time
+/// against its three seconds, the panel's look and redraw floors and its fallback
+/// screen, and the [`mark`] breadcrumbs. Sized to the panel's `MIN_LOOK_MS`, the
+/// tightest of those.
+///
+/// It also defines quiet air for the panel: a wait the tick ends saw no frame, no host
+/// byte and no FIFO drain for its whole length, and only the pass after one redraws.
+const IDLE_TICK: embassy_time::Duration = embassy_time::Duration::from_millis(100);
+
+/// USB OUT packet size, which is also the receive FIFO's: one read empties it.
+const LINK_CHUNK: usize = 64;
+
+/// What ended an idle wait.
+enum Woken {
+    Frame(ReceivedData),
+    Link(usize),
+    Drained,
+    Tick,
+}
+
+/// What an idle wait leaves for `main`: never a [`ReceivedData`], which `main`'s poll
+/// frame has no room for.
+enum Idled {
+    /// The host sent this many bytes into `LINK_BUF`.
+    Read(usize),
+    /// The tick ended the wait, so the air was quiet for all of it.
+    Quiet,
+    /// A frame or a FIFO drain ended it, and is already dealt with.
+    Busy,
+}
 
 // There is no watchdog here, having built one and measured that it cannot work.
 // `esp_hal::init` disables every watchdog on the chip
@@ -310,6 +338,10 @@ impl ByteSink for UsbSink<'_> {
 /// `.bss` rather than being built on the stack and moved into place.
 static OUTBOX: StaticCell<Outbox> = StaticCell::new();
 
+/// Where an idle wait's read lands. Static rather than a local of `main`, whose poll
+/// frame sits at `.clippy.toml`'s threshold on the C5.
+static LINK_BUF: StaticCell<[u8; LINK_CHUNK]> = StaticCell::new();
+
 /// Everything that changes while the bridge runs.
 struct Bridge {
     outbox: &'static mut Outbox,
@@ -480,7 +512,7 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     let tx_power = controller.set_max_tx_power(wartui_proto::plan::DEFAULT_TX_POWER_QUARTER_DBM);
     // Split rather than kept whole: `EspNowSender::send` needs `&mut`, so holding
     // the parts separately keeps a transmit from borrowing the receive path.
-    let (manager, mut sender, receiver) = controller.esp_now().split();
+    let (manager, mut sender, mut receiver) = controller.esp_now().split();
 
     let now = Instant::now();
     let mut bridge = Bridge {
@@ -530,6 +562,10 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     bridge.announce(mac);
     finish_radio_setup(&manager, &mut bridge, tx_power.is_ok());
 
+    let link_buf = LINK_BUF.init_with(|| [0; LINK_CHUNK]);
+    // True only on the pass straight after a wait the tick ended.
+    #[cfg(feature = "t-dongle-c5")]
+    let mut quiet = false;
     loop {
         let mut worked = false;
         mark(LoopPhase::DrainRadio);
@@ -546,9 +582,12 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
         // one it was inside. `render` returns without touching the bus unless a line
         // changed and its floor has passed, so an idle bridge still sleeps.
         #[cfg(feature = "t-dongle-c5")]
-        if let Some(screen) = screen.as_mut() {
-            mark(LoopPhase::Render);
-            worked |= screen.render(&mut bridge, mac);
+        {
+            if let Some(screen) = screen.as_mut() {
+                mark(LoopPhase::Render);
+                worked |= screen.render(&mut bridge, mac, quiet);
+            }
+            quiet = false;
         }
 
         // Nothing subtler is available: the endpoint cannot be re-armed from this
@@ -563,23 +602,78 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
 
         if !worked {
             mark(LoopPhase::Idle);
-            let flushed = async {
-                if queued {
-                    // The flush's `Result` is ignored because it cannot carry news: it is
-                    // always `Ok`, and a FIFO that never empties is the stall watch's to
-                    // judge, from `moved` on the passes that follow.
-                    let _ = embedded_io_async::Write::flush(&mut sink.tx).await;
-                } else {
-                    core::future::pending::<()>().await;
+            let idled =
+                idle_wait(&mut receiver, &mut usb_rx, link_buf, &mut sink.tx, queued, &mut bridge)
+                    .await;
+            #[cfg(feature = "t-dongle-c5")]
+            {
+                quiet = matches!(idled, Idled::Quiet);
+            }
+            if let Idled::Read(read) = idled {
+                mark(LoopPhase::DrainLink);
+                for &byte in &link_buf[..read] {
+                    take_link_byte(byte, &manager, &mut sender, &mut bridge, mac);
                 }
-            };
-            select(flushed, Timer::after(IDLE_SLEEP)).await;
-            // The flush arms the TX-empty interrupt and has no `Drop` to disarm it, so
-            // when the timer wins the interrupt would later wake this task for nothing.
-            let usb = esp_hal::peripherals::USB_DEVICE::regs();
-            usb.int_ena().modify(|_, w| w.serial_in_empty().clear_bit());
-            usb.int_clr().write(|w| w.serial_in_empty().clear_bit_by_one());
+            }
         }
+    }
+}
+
+/// Wait for a received frame, a host command, the FIFO emptying or the tick, and say
+/// which it was.
+///
+/// A frame that ends the wait is forwarded here and the host's bytes are handed back,
+/// each as soon as it is taken: it is older than anything the next pass's drains find
+/// behind it, so order holds. Both halves live outside `main`'s poll frame, which sits
+/// at `.clippy.toml`'s threshold on the C5 and has no room for a [`ReceivedData`].
+///
+/// Every arm is cancel-safe: the radio's queue and the USB FIFO give up an item only
+/// in the poll that returns it, and the flush holds no bytes.
+async fn idle_wait(
+    receiver: &mut EspNowReceiver<'_>,
+    usb_rx: &mut UsbSerialJtagRx<'_, Async>,
+    link_buf: &mut [u8; LINK_CHUNK],
+    usb_tx: &mut UsbSerialJtagTx<'_, Async>,
+    queued: bool,
+    bridge: &mut Bridge,
+) -> Idled {
+    let radio = async { Woken::Frame(receiver.receive_async().await) };
+    let link = async {
+        let read = embedded_io_async::Read::read(usb_rx, link_buf).await;
+        Woken::Link(read.unwrap_or(0))
+    };
+    let flushed = async {
+        if queued {
+            // The flush's `Result` is ignored because it cannot carry news: it is
+            // always `Ok`, and a FIFO that never empties is the stall watch's to
+            // judge, from `moved` on the passes that follow.
+            let _ = embedded_io_async::Write::flush(usb_tx).await;
+        } else {
+            core::future::pending::<()>().await;
+        }
+        Woken::Drained
+    };
+    let woken = match select4(radio, link, flushed, Timer::after(IDLE_TICK)).await {
+        Either4::First(woken) | Either4::Second(woken) | Either4::Third(woken) => woken,
+        Either4::Fourth(()) => Woken::Tick,
+    };
+    // The read arms the RX-packet interrupt and the flush the TX-empty one, and
+    // neither has a `Drop` to disarm it, so whichever lost would later wake this
+    // task for nothing.
+    let usb = esp_hal::peripherals::USB_DEVICE::regs();
+    usb.int_ena().modify(|_, w| w.serial_in_empty().clear_bit().serial_out_recv_pkt().clear_bit());
+    usb.int_clr()
+        .write(|w| w.serial_in_empty().clear_bit_by_one().serial_out_recv_pkt().clear_bit_by_one());
+    match woken {
+        Woken::Frame(received) => {
+            mark(LoopPhase::DrainRadio);
+            forward(received, bridge);
+            Idled::Busy
+        }
+        // An error reads nothing, which is no evidence of quiet air.
+        Woken::Link(read) if read > 0 => Idled::Read(read),
+        Woken::Link(_) | Woken::Drained => Idled::Busy,
+        Woken::Tick => Idled::Quiet,
     }
 }
 
@@ -589,36 +683,46 @@ fn drain_radio(receiver: &EspNowReceiver<'_>, bridge: &mut Bridge) -> bool {
 
     while let Some(received) = receiver.receive() {
         worked = true;
-        bridge.rx_count = bridge.rx_count.wrapping_add(1);
-
-        let Ok(payload) = Vec::from_slice(received.data()) else {
-            // Longer than ESP-NOW's own 250-byte ceiling, so it cannot have
-            // come from the mesh. Say so rather than truncate it.
-            bridge.log(LogLevel::Warn, "dropped an over-long ESP-NOW frame");
-            continue;
-        };
-
-        let rx_us = bridge.now_us();
-        bridge.outbox.send(&BridgeToHost::Rx {
-            src: received.info.src_address,
-            dst: received.info.dst_address,
-            // The only receive-control field every supported chip agrees on.
-            //
-            // It arrives unsigned: `wifi_pkt_rx_ctrl_t.rssi` is a signed 8-bit
-            // bitfield, but the generated accessor extracts the bits unsigned and
-            // transmutes, so -62 dBm reaches us as 194 and a clamp to `i8`
-            // saturates every frame to 127. Reinterpreting the low byte recovers
-            // it, and keeps working if the binding is ever fixed to sign-extend.
-            rssi: (received.info.rx_control.rssi as u8) as i8,
-            // Reported from our own state, not the frame: the per-chip
-            // receive-control structs do not all carry a channel.
-            channel: bridge.channel,
-            rx_us,
-            payload,
-        });
+        forward(received, bridge);
     }
 
     worked
+}
+
+/// Queue one received frame for the host.
+///
+/// Out of line for the reason [`finish_radio_setup`] is: it builds a 276-byte
+/// [`BridgeToHost`], and `main`'s poll frame sits near `.clippy.toml`'s threshold on
+/// the C5.
+#[inline(never)]
+fn forward(received: ReceivedData, bridge: &mut Bridge) {
+    bridge.rx_count = bridge.rx_count.wrapping_add(1);
+
+    let Ok(payload) = Vec::from_slice(received.data()) else {
+        // Longer than ESP-NOW's own 250-byte ceiling, so it cannot have
+        // come from the mesh. Say so rather than truncate it.
+        bridge.log(LogLevel::Warn, "dropped an over-long ESP-NOW frame");
+        return;
+    };
+
+    let rx_us = bridge.now_us();
+    bridge.outbox.send(&BridgeToHost::Rx {
+        src: received.info.src_address,
+        dst: received.info.dst_address,
+        // The only receive-control field every supported chip agrees on.
+        //
+        // It arrives unsigned: `wifi_pkt_rx_ctrl_t.rssi` is a signed 8-bit
+        // bitfield, but the generated accessor extracts the bits unsigned and
+        // transmutes, so -62 dBm reaches us as 194 and a clamp to `i8`
+        // saturates every frame to 127. Reinterpreting the low byte recovers
+        // it, and keeps working if the binding is ever fixed to sign-extend.
+        rssi: (received.info.rx_control.rssi as u8) as i8,
+        // Reported from our own state, not the frame: the per-chip
+        // receive-control structs do not all carry a channel.
+        channel: bridge.channel,
+        rx_us,
+        payload,
+    });
 }
 
 /// Read what the host has sent and act on complete frames.
@@ -634,27 +738,40 @@ fn drain_link(
     for _ in 0..USB_READ_BUDGET {
         let Ok(byte) = usb_rx.read_byte() else { break };
         worked = true;
-
-        let Some(frame) = bridge.accumulator.push(byte) else { continue };
-        match decode_frame::<HostToBridge>(frame) {
-            Ok(command) => {
-                // Proof of a host, and only a frame that decoded counts: a board
-                // running node firmware talks constantly and none of it is a
-                // frame, which `StallWatch` must not read as somebody waiting.
-                bridge.stall.note_host(bridge.now_ms());
-                handle(command, manager, sender, bridge, mac);
-            }
-            Err(err) => {
-                // Expected after a reset, when the ROM banner arrives down the
-                // same pipe. At debug, so a real version mismatch still shows.
-                let mut message = LogStr::new();
-                let _ = core::fmt::Write::write_fmt(&mut message, format_args!("{err}"));
-                bridge.outbox.send(&BridgeToHost::Log { level: LogLevel::Debug, message });
-            }
-        }
+        take_link_byte(byte, manager, sender, bridge, mac);
     }
 
     worked
+}
+
+/// Feed one byte from the host to the accumulator, and act on the frame it completes.
+///
+/// Out of line for the reason [`forward`] is.
+#[inline(never)]
+fn take_link_byte(
+    byte: u8,
+    manager: &EspNowManager<'_>,
+    sender: &mut EspNowSender<'_>,
+    bridge: &mut Bridge,
+    mac: Mac,
+) {
+    let Some(frame) = bridge.accumulator.push(byte) else { return };
+    match decode_frame::<HostToBridge>(frame) {
+        Ok(command) => {
+            // Proof of a host, and only a frame that decoded counts: a board
+            // running node firmware talks constantly and none of it is a
+            // frame, which `StallWatch` must not read as somebody waiting.
+            bridge.stall.note_host(bridge.now_ms());
+            handle(command, manager, sender, bridge, mac);
+        }
+        Err(err) => {
+            // Expected after a reset, when the ROM banner arrives down the
+            // same pipe. At debug, so a real version mismatch still shows.
+            let mut message = LogStr::new();
+            let _ = core::fmt::Write::write_fmt(&mut message, format_args!("{err}"));
+            bridge.outbox.send(&BridgeToHost::Log { level: LogLevel::Debug, message });
+        }
+    }
 }
 
 /// Carry out one host command.

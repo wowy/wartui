@@ -120,7 +120,7 @@ pub enum ResetCause {
 /// Carried across a reset in RTC memory and reported in
 /// [`BridgeToHost::Ready`], because the interesting resets are the ones nobody
 /// was watching. On its own it is a hint rather than a diagnosis — the loop
-/// visits most of these every millisecond — but paired with a
+/// visits most of these at least ten times a second — but paired with a
 /// [`ResetCause::Watchdog`] or [`ResetCause::Software`] it says which of the
 /// blocking calls in the loop was the one that did not come back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]

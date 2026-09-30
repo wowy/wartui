@@ -132,12 +132,12 @@ watchdog behind that case.
 fills, and nothing drains that FIFO unless a host is reading, so a blocking write from the receive
 path would stall the radio for as long as the TUI is wedged or the cable is out. Everything outbound
 goes through the rings in `wartui_proto::outbox`, which are drained by whatever the FIFO will take.
-The only wait on the endpoint is the main loop's idle one, bounded by `IDLE_SLEEP` and ended early
-by the FIFO emptying, so a host that stops reading costs a millisecond per pass and no more. Both
-rings evict oldest-first under pressure and count it into `Status.dropped_tx`,
-and priority frames (`Ready`, `SendResult`, `Status`, `Error`) are served ahead of `Rx` and `Log`
-rather than given an unbounded queue. That module is in `wartui-proto` so those rules are
-unit-testable on the host.
+The only wait on the endpoint is the main loop's idle one, ended by the FIFO emptying, a host
+command or a received frame, and otherwise bounded by `IDLE_TICK`, so a host that stops reading
+costs no busy passes. Both rings evict oldest-first under pressure and count it into
+`Status.dropped_tx`, and priority frames (`Ready`, `SendResult`, `Status`, `Error`) are served ahead
+of `Rx` and `Log` rather than given an unbounded queue. That module is in `wartui-proto` so those
+rules are unit-testable on the host.
 
 The one deliberate exception is the wait for a transmit callback in `transmit`, which is
 milliseconds against a 100 ms window and is what makes `AckOk` mean anything. `esp-radio`'s
