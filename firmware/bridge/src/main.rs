@@ -260,7 +260,7 @@ fn reset_cause() -> ResetCause {
 ///
 /// Clearing the bit is what ESP-IDF does on every boot and what `esp-hal` does in
 /// its C5 `pre_init` from 1.2 onwards (esp-rs/esp-hal#5703), which the version
-/// wall in `README.md` keeps out of reach. Written here rather than in [`main`]
+/// wall in `README.md` keeps out of reach. Written here rather than in `main`
 /// because a panic can land before `main` reaches a line of its own, and one
 /// funnel is one place to delete when that pin moves — see issue #16.
 fn reboot() -> ! {
@@ -457,7 +457,7 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     #[cfg(feature = "xiao-external-antenna")]
     let _antenna = {
         let power = Output::new(peripherals.GPIO3, Level::Low, OutputConfig::default());
-        esp_rtos::CurrentThreadHandle::get().delay(esp_hal::time::Duration::from_millis(100));
+        Timer::after_millis(100).await;
         (power, Output::new(peripherals.GPIO14, Level::High, OutputConfig::default()))
     };
 
@@ -563,16 +563,22 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
 
         if !worked {
             mark(LoopPhase::Idle);
-            if queued {
-                // The flush's `Result` is ignored because it cannot carry news: it is
-                // always `Ok`, and a FIFO that never empties is the stall watch's to
-                // judge, from `moved` on the passes that follow.
-                let _ =
-                    select(embedded_io_async::Write::flush(&mut sink.tx), Timer::after(IDLE_SLEEP))
-                        .await;
-            } else {
-                Timer::after(IDLE_SLEEP).await;
-            }
+            let flushed = async {
+                if queued {
+                    // The flush's `Result` is ignored because it cannot carry news: it is
+                    // always `Ok`, and a FIFO that never empties is the stall watch's to
+                    // judge, from `moved` on the passes that follow.
+                    let _ = embedded_io_async::Write::flush(&mut sink.tx).await;
+                } else {
+                    core::future::pending::<()>().await;
+                }
+            };
+            select(flushed, Timer::after(IDLE_SLEEP)).await;
+            // The flush arms the TX-empty interrupt and has no `Drop` to disarm it, so
+            // when the timer wins the interrupt would later wake this task for nothing.
+            let usb = esp_hal::peripherals::USB_DEVICE::regs();
+            usb.int_ena().modify(|_, w| w.serial_in_empty().clear_bit());
+            usb.int_clr().write(|w| w.serial_in_empty().clear_bit_by_one());
         }
     }
 }

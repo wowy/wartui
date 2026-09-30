@@ -81,10 +81,11 @@ pub async fn run(args: Args) -> Result<()> {
         // Cumulative since the bridge booted, and one left powered with nothing
         // attached drops everything it hears — so a large number is not a fault.
         println!(
-            "\n{dropped_tx} frames were discarded over those {}, whenever no host was \n\
-             reading fast enough. That includes any time the bridge spent powered \n\
-             with nothing attached. `wartui run` reports drops from the moment it \n\
-             connects, which is the number that says whether a capture lost data.",
+            "\n{dropped_tx} frames were discarded over those {}, because a host was \n\
+             not reading or a burst arrived faster than USB could drain it. That \n\
+             includes any time the bridge spent powered with nothing attached. \n\
+             `wartui run` reports drops from the moment it connects, which is the \n\
+             number that says whether a capture lost data.",
             human_uptime(uptime_ms)
         );
     }

@@ -230,8 +230,8 @@ pub struct Screen {
 impl Screen {
     /// Bring the panel up, dark screen first.
     ///
-    /// Out of `main` because `main` already sits at `.clippy.toml`'s stack threshold
-    /// on the C5, and `clippy::large_stack_frames` is denied.
+    /// Out of `main` so the panel's setup adds nothing to `main`'s frame, which
+    /// `clippy::large_stack_frames` (denied) holds under `.clippy.toml`'s threshold.
     ///
     /// # Errors
     /// A short reason if the bus or the panel refuses, which the caller reports and

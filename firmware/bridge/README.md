@@ -207,10 +207,12 @@ IDF calls `esp-radio` does not wrap, which are the only `unsafe` in either firmw
 (`set_tx_power` beside it). `esp-alloc` is here because the firmware is what owns the heap and
 declares its regions.
 
-`embassy-executor` and `embassy-time` sit on `esp-rtos` the same way: held at the versions `esp-rtos`
-builds against, and moved with it. Neither can double quietly — the executor's `Spawner` would not
-type-check against `esp-rtos`'s, and `embassy-time-driver` is `links`-keyed — so they are not in the
-check.
+`embassy-executor`, `embassy-time` and `embedded-io-async` sit on `esp-rtos` and `esp-hal` the same
+way: held at the versions those build against, and moved with them — `embedded-io-async` at 0.7, the
+only version `esp-hal` 1.1 implements its async traits for. None can double quietly — the executor's
+`Spawner` would not type-check against `esp-rtos`'s, `embassy-time-driver` is `links`-keyed, and a
+second `embedded-io-async` would have no implementation on the USB half — so they are not in the
+check, and Dependabot ignores their minor and major releases.
 
 `esp-generate` is a version behind this set; its scaffolding (`build.rs`, `.cargo/config.toml`) is
 what was taken from it, not its dependency list.

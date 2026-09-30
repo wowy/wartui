@@ -62,12 +62,9 @@ esp-radio = { version = "1.0.0-beta.0", default-features = false, features = [
   "wifi",
 ] }
 esp-rtos = { version = "0.3.0", features = ["embassy", "esp-alloc", "esp-radio"] }
-# The async half: `main` is an `esp-rtos` embassy task so the idle wait can end on
-# the USB transmit interrupt. Each held at the version `esp-rtos` 0.3.0 itself
-# builds against: `embassy-executor` 0.10, whose `Spawner` its executor hands
-# `main`, and the `embassy-time` over the `embassy-time-driver` 0.2 it implements.
-# Neither can double quietly — the spawner types would not match, and the driver
-# is `links`-keyed — but both move only when `esp-rtos` does.
+# `main` is an `esp-rtos` embassy task so the idle wait can end on the USB transmit
+# interrupt. Held at the versions `esp-rtos` and `esp-hal` build against;
+# README.md § "Dependency versions".
 embassy-executor = "0.10.0"
 embassy-futures = "0.1.2"
 embassy-time = "0.5.1"
