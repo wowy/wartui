@@ -121,8 +121,12 @@ start of the burst whenever the panel's floors have passed. The stall itself is 
 new — the polling loop lost indices 0..35 of one burst the same way — but waking on
 the air made it line up with traffic.
 
-So the panel draws only on a pass whose idle wait the tick ended, and
-`MAX_DEFER_MS` stops a fleet that never falls quiet from freezing the screen.
+So the panel draws only on a pass whose idle wait the tick ended. A deferral cap
+of 1 s, which drew anyway once a change had waited that long, was chosen first and
+dropped the same day: drawing is worth less than any frame. Estimated from
+host-side heartbeat and batch timestamps, a four-node fleet under these bursts
+still left a 100 ms silence one to two times a second, and its longest busy stretch
+was about 0.57 s.
 
 ## Numbers this replaces
 
