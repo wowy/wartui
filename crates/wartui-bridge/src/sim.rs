@@ -441,7 +441,8 @@ impl SimNode {
 
 /// A node's dedup ring, sized for its chip as the firmware sizes it.
 ///
-/// Boxed because the C6's is 64 KB, too large for a task's stack.
+/// Boxed so a `SimNode`, and the future of the task that owns it, holds a pointer
+/// rather than the C6's 64 KB ring inline.
 #[derive(Debug)]
 enum Seen {
     C5(Box<C5DedupRing>),
