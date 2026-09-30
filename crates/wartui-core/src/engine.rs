@@ -21,6 +21,8 @@
 //!   allocating it zero Wi-Fi channels.
 //! - [`Command::SetTxPower`]: Updates the fleet transmit power level and redistributes the
 //!   existing plan under a new epoch.
+//! - [`Command::RememberBle`]: Turns on or off remembering the node last given the Bluetooth scan,
+//!   which the engine hands the scan back to whenever that node is assignable and none holds it.
 use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
 
@@ -92,9 +94,23 @@ pub enum Command {
     /// its next re-cut, which takes that node's channels away and deals them round
     /// the rest. Moving it costs two frames, because the node giving it up has a
     /// share of the pool coming back to it.
+    ///
+    /// While remembering is on, the target also becomes the preferred Bluetooth node,
+    /// `None` included, so a scan taken off the fleet is not handed straight back.
     AssignBle {
         /// Which node, or `None` to stop scanning BLE anywhere.
         mac: Option<Mac>,
+    },
+
+    /// Turn remembering the preferred Bluetooth node on or off.
+    ///
+    /// Off forgets the preferred node and leaves the scan where it is: the setting is
+    /// about what happens the next time the scan has no holder, not a way to stop it.
+    /// On from off adopts whichever node holds the scan now. Setting the value the
+    /// engine already holds is a no-op.
+    RememberBle {
+        /// Whether to remember.
+        on: bool,
     },
 
     /// Change the fleet's transmit powers, in ESP-IDF quarter-dBm units.
@@ -188,6 +204,11 @@ pub struct EngineConfig {
     /// fleet is positioned for. Clamped at construction alongside `tx_power`, and
     /// again by [`Command::SetTxPower`] when it changes mid-run.
     pub bridge_tx_power: i8,
+    /// Whether [`Command::AssignBle`] records its target as the preferred Bluetooth node.
+    pub remember_ble: bool,
+    /// The node given the Bluetooth scan whenever it is assignable and no node holds
+    /// the scan. Ignored when [`Self::remember_ble`] is off.
+    pub preferred_ble: Option<Mac>,
 }
 
 impl Default for EngineConfig {
@@ -203,6 +224,8 @@ impl Default for EngineConfig {
             assignment_base: 0,
             tx_power: DEFAULT_TX_POWER_QUARTER_DBM,
             bridge_tx_power: DEFAULT_TX_POWER_QUARTER_DBM,
+            remember_ble: true,
+            preferred_ble: None,
         }
     }
 }
@@ -525,6 +548,10 @@ pub struct Snapshot {
     pub plan: Option<Plan>,
     /// Which node is scanning Bluetooth, if any.
     pub ble_node: Option<Mac>,
+    /// The node the scan returns to whenever it is assignable and none holds it.
+    pub preferred_ble: Option<Mac>,
+    /// Whether giving a node the scan records it as [`Self::preferred_ble`].
+    pub remember_ble: bool,
     /// Every node, ordered by MAC so the table does not reshuffle itself.
     pub nodes: Vec<NodeView>,
     /// How many are heartbeating inside the topology timeout.
@@ -625,11 +652,18 @@ pub struct FleetEngine {
     plan_members: Vec<(Mac, Job)>,
     /// The one node asked to scan Bluetooth, if any.
     ///
-    /// Held beside the plan rather than in it because it is an operator's choice
-    /// and the plan is a function of who is present; it reaches the planner as a
-    /// [`Job::Bluetooth`] slot on every re-cut, which is what takes that node's
-    /// Wi-Fi share away and hands it round.
+    /// Held beside the plan rather than in it because it is an operator's choice —
+    /// made now, or carried forward from [`Self::preferred_ble`] — and the plan is a
+    /// function of who is present; it reaches the planner as a [`Job::Bluetooth`]
+    /// slot on every re-cut, which is what takes that node's Wi-Fi share away and
+    /// hands it round.
     ble_node: Option<Mac>,
+    /// Whether [`Command::AssignBle`] records its target in [`Self::preferred_ble`].
+    remember_ble: bool,
+    /// The operator's last Bluetooth choice, carried forward: [`Self::replan`] gives
+    /// this node the scan whenever it is assignable and no node holds it. Always
+    /// `None` while [`Self::remember_ble`] is off.
+    preferred_ble: Option<Mac>,
     /// The previous frame's bridge stamp and the host instant it was handled
     /// on, which together say whether this host is reading the link in real
     /// time or working through a backlog. See [`FleetEngine::note_arrival`].
@@ -735,6 +769,8 @@ impl FleetEngine {
             plan: None,
             plan_members: Vec::new(),
             ble_node: None,
+            remember_ble: config.remember_ble,
+            preferred_ble: config.preferred_ble.filter(|_| config.remember_ble),
             last_arrival: None,
             // Pessimistic from the start, as on `Connected`: the port opens onto a
             // backlog, and its frames reach the engine before the bridge's `Ready`.
@@ -823,7 +859,8 @@ impl FleetEngine {
         // Clearing this is only about what the snapshot claims; the withdrawal
         // itself rides in the re-cut below, which this runs before. A node that
         // has left the fleet is not a member, so the re-cut drops what it was
-        // owed — and if it comes back, it comes back without the scan.
+        // owed. If it comes back while it is the preferred node, `replan` hands
+        // it the scan again; otherwise it comes back without it.
         let _ = self.ble_node.take_if(|_| ble_gone);
         self.replan(now);
         let due = self
@@ -1267,6 +1304,7 @@ impl FleetEngine {
     fn on_command(&mut self, command: Command, now: Now, batch: &mut ActionBatch) {
         match command {
             Command::AssignBle { mac } => self.on_assign_ble(mac),
+            Command::RememberBle { on } => self.on_remember_ble(on),
             Command::SetTxPower { nodes, bridge } => self.on_set_tx_power(nodes, bridge, batch),
             Command::ClearRing { mac } => self.on_clear_dedup_ring(mac, now),
         }
@@ -1323,7 +1361,15 @@ impl FleetEngine {
     /// still the only author of one. [`Self::replan`] runs on every heartbeat and
     /// every tick and reads this, so each end takes its new assignment in its own
     /// window, under one epoch carrying both the share and the flag.
+    ///
+    /// While remembering is on, the preferred node follows the target, `None` included:
+    /// a scan taken off the fleet stays off rather than going straight back to the
+    /// preferred node on the next re-cut. It is set before the no-op check, so naming
+    /// the node that already holds the scan still records it.
     fn on_assign_ble(&mut self, target: Option<Mac>) {
+        if self.remember_ble {
+            self.preferred_ble = target;
+        }
         if self.ble_node == target {
             return;
         }
@@ -1334,6 +1380,16 @@ impl FleetEngine {
         // than excluded, and "at most one node scans Bluetooth" is about what the
         // host asks for.
         self.ble_node = target;
+    }
+
+    /// Turn remembering the preferred Bluetooth node on or off, leaving the scan
+    /// itself where it is.
+    fn on_remember_ble(&mut self, on: bool) {
+        if on == self.remember_ble {
+            return;
+        }
+        self.remember_ble = on;
+        self.preferred_ble = if on { self.ble_node } else { None };
     }
 
     /// Mark a node, or every assignable node, as owing a cleared dedup ring.
@@ -1400,6 +1456,15 @@ impl FleetEngine {
     /// anything, which is what keeps this off a heartbeat's critical path. It is
     /// called from every tick, so that has to stay true.
     fn replan(&mut self, now: Now) {
+        // The preferred node takes the scan back whenever nothing holds it and it is
+        // drivable — at startup, and after ageing out. One map lookup on the path
+        // where it applies, none otherwise.
+        if self.ble_node.is_none()
+            && let Some(mac) = self.preferred_ble
+            && self.nodes.get(&mac).is_some_and(|node| self.is_assignable(node, now))
+        {
+            self.ble_node = Some(mac);
+        }
         // One value, read once per member below, so a node's channels and its
         // Bluetooth flag cannot disagree.
         let scanner = self.ble_node;
@@ -1927,6 +1992,8 @@ impl FleetEngine {
             pool: self.config.pool,
             plan: self.plan,
             ble_node: self.ble_node,
+            preferred_ble: self.preferred_ble,
+            remember_ble: self.remember_ble,
             nodes,
             alive,
             assignable,

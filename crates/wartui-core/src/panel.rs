@@ -276,6 +276,8 @@ mod tests {
             pool: ChannelPool::Us,
             plan: None,
             ble_node: None,
+            preferred_ble: None,
+            remember_ble: true,
             nodes: Vec::new(),
             alive: 0,
             assignable: 0,

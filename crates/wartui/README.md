@@ -95,7 +95,8 @@ location; see "Config file" below.
 
 `wartui.toml` holds settings an operator wants to stop typing every run. It is read only for
 `run`, so a broken config cannot stop `ports`, `status` or `reset` from working. The settings
-modal (`c`) writes it, replacing the whole file on each save; see "At the keyboard" below.
+modal (`c`) writes it, replacing the whole file on each save, and `b` writes the Bluetooth node; see
+"At the keyboard" below.
 
 The default location is per OS:
 
@@ -116,9 +117,16 @@ pool = "us"
 [tx-power]
 fleet = 10
 bridge = 15
+
+[bluetooth]
+remember = true
+node = "AA:BB:CC:DD:EE:FF"
 ```
 
 Both powers are whole dBm, `fleet` for the nodes and `bridge` for the bridge.
+
+`[bluetooth]` is the remembered Bluetooth node (see § "Bluetooth"). `remember` is on when absent.
+`node` is the MAC `b` last gave the scan to, written the way `wartui ports` prints one.
 
 `pool` takes `us`, `eu` or `all`, the same words `--pool` does. Precedence is flag, then file, then
 default: `--pool` beats `pool`, which beats `all`. A pool is fixed for the life of a run — see "At
@@ -130,8 +138,9 @@ Precedence is flag, then file, then default, resolved separately for each: `--no
 falls back to the other's.
 
 An unknown key or table makes wartui refuse to start, naming the file and the line; an
-out-of-range value or an unknown `pool` spelling does too, naming the file and the key — the same
-way an out-of-range `--node-tx-power` is refused.
+out-of-range value, an unknown `pool` spelling, a malformed `node` or a `node` beside
+`remember = false` does too, naming the file and the key — the same way an out-of-range
+`--node-tx-power` is refused.
 
 ### Benchmarking the store
 
@@ -252,7 +261,7 @@ full output beneath. A board flashed is remembered as the bridge, so `flash-flee
 | ---------------------- | ---------------------------------------------------------------------- |
 | `↑` `↓` / `k` `j`      | Move the cursor down the fleet table                                   |
 | `b`                    | Make the selected node the Bluetooth scanner, or take the scan off    |
-| `c`                    | Open the settings modal (transmit power and pool)                     |
+| `c`                    | Open the settings modal (transmit power, pool, bluetooth)             |
 | `r`                    | Clear the selected node's dedup ring on its next heartbeat            |
 | `R`                    | Clear every assignable node's dedup ring, each on its next heartbeat  |
 | `q` / `Esc` / `ctrl-c` | Stop, committing the last batch                                        |
@@ -260,13 +269,16 @@ full output beneath. A board flashed is remembered as the bridge, so `flash-flee
 `b`, `c`, `r` and `R` are the only ones that reach the air. `b` decides _which_ node scans Bluetooth
 instead of Wi-Fi; it reaches that node's share only by being an input to the planner, which is still
 the only author of one. `r` and `R` ask a node, or every assignable one, to forget every address it
-has reported. Channels are not a key.
+has reported. Channels are not a key. While `remember bt node` is on, `b` also writes the node it
+chose, or its absence, to `wartui.toml`'s `[bluetooth]` table and leaves the rest of the file as it
+is.
 
-`c` opens a modal with a row each for the pool, the nodes' transmit power, and the bridge's.
-`↑`/`↓` (or `j`/`k`) move between them, `←`/`→` (or `h`/`l`) step the selected row: a power by 1 dBm,
-the pool through `all → eu → us` — both stop at their ends rather than wrapping. `Enter` sends the
-powers to the engine — the bridge takes its value on its next status poll, the nodes on their next
-heartbeat — and writes every row shown to `wartui.toml`'s `pool` and `[tx-power]` keys, whatever was
+`c` opens a modal with a row each for the pool, the nodes' transmit power, the bridge's, and
+`remember bt node`. `↑`/`↓` (or `j`/`k`) move between them, `←`/`→` (or `h`/`l`) step the selected
+row: a power by 1 dBm, the pool through `all → eu → us`, `remember bt node` to `off` and `on` — all
+stop at their ends rather than wrapping. `Enter` sends the powers and the remember setting to the
+engine — the bridge takes its power on its next status poll, the nodes on their next heartbeat — and
+writes every row shown to `wartui.toml`'s `pool`, `[tx-power]` and `[bluetooth]` keys, whatever was
 there before, then closes the modal. The pool can't change live, so the notice says a restart is
 needed whenever the row was moved. `Esc` or `q` closes the modal without changing anything; `ctrl-c`
 quits even while it is open.
@@ -302,9 +314,13 @@ its Wi-Fi radio never leaves the control channel.
 
 ## Bluetooth
 
-**At most one node scans Bluetooth, by default none does, and it is that node's whole job.** The scan
-is off at every boot; `b` is what turns it on. `b` on the selected node gives it the scan; `b` again
-on the node that holds it takes it off the fleet. The `channels` column says who has it: it reads
+**At most one node scans Bluetooth, by default none does, and it is that node's whole job.** `b` on
+the selected node gives it the scan; `b` again on the node that holds it takes it off the fleet. With
+`remember bt node` on (the default), `b` also remembers that choice in `wartui.toml`, and the
+remembered node gets the scan back by itself whenever it is heartbeating and nothing holds it — at
+startup, and after it drops out of the fleet and returns. Taking the scan off with `b` forgets it.
+Turning `remember bt node` off forgets the node and leaves the scan where it is; turning it back on
+remembers whichever node holds it then. The `channels` column says who has it: it reads
 `bluetooth` because that node is dealt no channels, and `bluetooth…` while the change waits for its
 next admin window. Taking the scan off shows as that node's new channel share, pending with a
 yellow `…`.
