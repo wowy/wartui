@@ -11,7 +11,7 @@ use wartui_core::ActionBatch;
 use wartui_core::engine::{Command, Counters, EngineConfig, Event, FleetEngine, Now, StoreStats};
 use wartui_core::gps::Gps;
 use wartui_core::position::{DEFAULT_MAX_AGE, PositionChain, PositionSource};
-use wartui_core::record::{AdminOutcome, Record};
+use wartui_core::record::{AdminOutcome, BatchGap, BridgeStatusSeen, Record};
 use wartui_proto::air::{
     AdminMsg, Capabilities, Frame, HeartbeatMsg, RecordKind, Security, SightingBatchWriter,
     SightingMsg, wire_epoch,
@@ -426,6 +426,95 @@ fn engine_counts_no_batches_lost_when_sequence_repeats() {
     assert_eq!(counters(&engine).batches_lost, 0);
     assert_eq!(counters(&engine).duplicate_batches, 0, "different bytes, not a retransmission");
     assert_eq!(counters(&engine).observations, 3, "every batch's record is kept");
+}
+
+/// The `BatchGap` records in `batch`, in order.
+fn gaps(batch: &ActionBatch) -> Vec<BatchGap> {
+    batch
+        .records
+        .iter()
+        .filter_map(|r| match r {
+            Record::BatchGap(gap) => Some(*gap),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A one-record batch under `seq`, whose bytes differ with `bssid_tail` so no two
+/// are mistaken for a retransmission.
+fn seq_batch(seq: u16, bssid_tail: u8) -> Vec<u8> {
+    let msg = SightingMsg {
+        kind: RecordKind::Wifi,
+        bssid: [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, bssid_tail],
+        channel: 6,
+        rssi: -60,
+        security: Security::Open,
+        ssid: b"",
+        ext: &[],
+    };
+    batch(seq, &[msg])
+}
+
+#[test]
+fn engine_records_one_batch_gap_when_sequence_jumps_from_five_to_eight() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+
+    assert!(gaps(&engine.handle(rx(NODE, &seq_batch(5, 1)), clock.at(1))).is_empty());
+    let found = gaps(&engine.handle(rx(NODE, &seq_batch(8, 2)), clock.at(2)));
+
+    assert_eq!(
+        found,
+        vec![BatchGap {
+            node_mac: NODE,
+            rx_at_ms: clock.at(2).unix_ms,
+            after_seq: 5,
+            seq: 8,
+            lost: 2
+        }]
+    );
+    assert_eq!(counters(&engine).batches_lost, 2, "the live count is unchanged");
+}
+
+#[test]
+fn engine_records_no_batch_gap_when_sequence_repeats() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+
+    engine.handle(rx(NODE, &seq_batch(5, 1)), clock.at(1));
+    let repeat = engine.handle(rx(NODE, &seq_batch(5, 2)), clock.at(2));
+    let next = engine.handle(rx(NODE, &seq_batch(6, 3)), clock.at(3));
+
+    assert!(gaps(&repeat).is_empty());
+    assert!(gaps(&next).is_empty());
+}
+
+#[test]
+fn engine_records_no_batch_gap_when_sequence_jumps_by_1024_or_more() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+
+    engine.handle(rx(NODE, &seq_batch(5, 1)), clock.at(1));
+    // 1030 - 5 - 1 = 1024: the first gap the live count also refuses.
+    let at_limit = engine.handle(rx(NODE, &seq_batch(1030, 2)), clock.at(2));
+    // Backwards, which wraps to a gap of 65534.
+    let backwards = engine.handle(rx(NODE, &seq_batch(1000, 3)), clock.at(3));
+
+    assert!(gaps(&at_limit).is_empty());
+    assert!(gaps(&backwards).is_empty());
+    assert_eq!(counters(&engine).batches_lost, 0);
+}
+
+#[test]
+fn engine_records_batch_gap_of_one_when_sequence_wraps_from_65535_to_1() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+
+    engine.handle(rx(NODE, &seq_batch(65535, 1)), clock.at(1));
+    let found = gaps(&engine.handle(rx(NODE, &seq_batch(1, 2)), clock.at(2)));
+
+    assert_eq!(found.len(), 1);
+    assert_eq!((found[0].after_seq, found[0].seq, found[0].lost), (65535, 1, 1), "0 was lost");
 }
 
 #[test]
@@ -1117,6 +1206,59 @@ fn engine_tracks_bridge_dropped_tx_deltas_when_status_polls_arrive() {
     assert_eq!(seen(&engine).dropped_since_attach, 0);
     engine.handle(status(9), clock.at(9));
     assert_eq!(seen(&engine).dropped_since_attach, 7);
+}
+
+#[test]
+fn engine_records_raw_bridge_status_when_each_status_reply_arrives() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    let status = |dropped_tx, uptime_ms| {
+        Event::Link(LinkEvent::Message(BridgeToHost::Status {
+            channel: 6,
+            peer_count: 3,
+            rx_count: 1363,
+            dropped_tx,
+            uptime_ms,
+        }))
+    };
+    let statuses = |batch: &ActionBatch| -> Vec<BridgeStatusSeen> {
+        batch
+            .records
+            .iter()
+            .filter_map(|r| match r {
+                Record::BridgeStatus(s) => Some(*s),
+                _ => None,
+            })
+            .collect()
+    };
+
+    engine.handle(connected(), clock.at(1));
+    let first = engine.handle(status(1300, 3_240_000), clock.at(2));
+    // Lower than before: the bridge rebooted, and the row keeps what it said.
+    let second = engine.handle(status(2, 4_000), clock.at(7));
+
+    assert_eq!(
+        statuses(&first),
+        vec![BridgeStatusSeen {
+            rx_at_ms: clock.at(2).unix_ms,
+            channel: 6,
+            peer_count: 3,
+            rx_count: 1363,
+            dropped_tx: 1300,
+            uptime_ms: 3_240_000,
+        }]
+    );
+    assert_eq!(
+        statuses(&second),
+        vec![BridgeStatusSeen {
+            rx_at_ms: clock.at(7).unix_ms,
+            channel: 6,
+            peer_count: 3,
+            rx_count: 1363,
+            dropped_tx: 2,
+            uptime_ms: 4_000,
+        }]
+    );
 }
 
 // ---------------------------------------------------------------------------

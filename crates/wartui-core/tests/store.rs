@@ -12,7 +12,8 @@ use rusqlite::Connection;
 use wartui_core::export::{ExportFilter, wigle_csv};
 use wartui_core::position::{Fix, PositionSource};
 use wartui_core::record::{
-    AdminOutcome, AssignmentSent, BridgeSeen, Heartbeat, NodeSeen, Observation, Record,
+    AdminOutcome, AssignmentSent, BatchGap, BridgeSeen, BridgeStatusSeen, Heartbeat, NodeSeen,
+    Observation, Record,
 };
 use wartui_core::store::{
     Checkpoint, SCHEMA_VERSION, SessionInfo, Store, StoreConfig, StoreError, open_readonly,
@@ -175,6 +176,58 @@ fn store_persists_and_reads_all_record_types_when_round_tripped() {
         .unwrap();
     assert_eq!(mac, NODE.to_vec(), "MACs are stored as six raw bytes, never as text");
     assert_eq!(source, "static");
+}
+
+#[test]
+fn store_persists_every_bridge_status_column_when_round_tripped() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let conn = write(
+        &dir,
+        vec![Record::BridgeStatus(BridgeStatusSeen {
+            rx_at_ms: EPOCH_MS + 5_000,
+            channel: 6,
+            peer_count: 3,
+            rx_count: 4_000_000_000,
+            dropped_tx: 1305,
+            uptime_ms: 3_240_000,
+        })],
+    );
+
+    let session: i64 = conn.query_row("SELECT id FROM session", [], |r| r.get(0)).unwrap();
+    let row: (i64, i64, i64, i64, i64, i64, i64) = conn
+        .query_row(
+            "SELECT session_id, rx_at, channel, peer_count, rx_count, dropped_tx, uptime_ms
+             FROM bridge_status",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
+        )
+        .unwrap();
+    assert_eq!(row, (session, EPOCH_MS + 5_000, 6, 3, 4_000_000_000, 1305, 3_240_000));
+}
+
+#[test]
+fn store_persists_every_batch_gap_column_when_round_tripped() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let conn = write(
+        &dir,
+        vec![Record::BatchGap(BatchGap {
+            node_mac: NODE,
+            rx_at_ms: EPOCH_MS + 7_000,
+            after_seq: 65535,
+            seq: 2,
+            lost: 2,
+        })],
+    );
+
+    let session: i64 = conn.query_row("SELECT id FROM session", [], |r| r.get(0)).unwrap();
+    let row: (i64, Vec<u8>, i64, i64, i64, i64) = conn
+        .query_row(
+            "SELECT session_id, node_mac, rx_at, after_seq, seq, lost FROM batch_gap",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+        )
+        .unwrap();
+    assert_eq!(row, (session, NODE.to_vec(), EPOCH_MS + 7_000, 65535, 2, 2));
 }
 
 #[test]

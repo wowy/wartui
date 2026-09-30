@@ -491,6 +491,8 @@ loss on the air. Each one lost is everything a dwell or a Bluetooth scan produce
 dozen access points, and those addresses stay hidden the same way a lost frame always has: until the
 node's own five-minute refresh reports them again. The column appears only once some node has lost
 a batch. The footer's `lost N` is the same count summed across the fleet, and follows the same rule.
+The capture keeps each gap as a row of `batch_gap`, so summing its `lost` per node after a drive
+gives the column's final value.
 
 The footer's `dup N` is different: batches dropped because they are the same `seq`,
 byte-identical to the one just before them, and arrived within 100 ms of it — a node's radio
@@ -519,7 +521,8 @@ listen on, and `N frames from an older firmware — reflash` is a fleet part-way
 those nodes speak a wire format this host does not, so the footer is the only place they appear.
 `bridge dropped` counts frames lost since this host attached; `wartui status` reports the bridge's
 own total since it booted, which on a dongle left powered with nothing listening is large and not a
-fault.
+fault. The capture keeps every status reply as a row of `bridge_status`, with the bridge's
+since-boot counts as it sent them.
 
 ## The bridge panel
 

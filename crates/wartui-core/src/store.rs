@@ -174,6 +174,35 @@ CREATE TABLE IF NOT EXISTS observation (
 -- coverage data. Nor does the table have an index of any kind, though export groups by
 -- bssid: `docs/store-io-findings.md` has the measurements that took both of them out.
 
+-- One row per bridge status reply, which the host polls for every few seconds.
+-- `rx_count`, `dropped_tx` and `uptime_ms` are the bridge's since-boot counts as
+-- the reply carried them: raw, as `heartbeat` keeps its drop counts, so a bridge
+-- reboot shows as the values falling.
+CREATE TABLE IF NOT EXISTS bridge_status (
+  id INTEGER PRIMARY KEY,
+  session_id INTEGER NOT NULL REFERENCES session(id),
+  rx_at INTEGER NOT NULL,
+  channel INTEGER NOT NULL,
+  peer_count INTEGER NOT NULL,
+  rx_count INTEGER NOT NULL,
+  dropped_tx INTEGER NOT NULL,
+  uptime_ms INTEGER NOT NULL
+);
+
+-- One row per gap in a node's batch `seq`. `rx_at` is when the batch after the gap
+-- arrived, not when the lost batches were sent. `lost` is `seq - after_seq - 1`
+-- modulo 2^16, and only gaps under 1024 are recorded, the rule the live count
+-- follows. Summing `lost` per node gives the fleet table's `lost` column.
+CREATE TABLE IF NOT EXISTS batch_gap (
+  id INTEGER PRIMARY KEY,
+  session_id INTEGER NOT NULL REFERENCES session(id),
+  node_mac BLOB NOT NULL,
+  rx_at INTEGER NOT NULL,
+  after_seq INTEGER NOT NULL,
+  seq INTEGER NOT NULL,
+  lost INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS raw_frame (
   id INTEGER PRIMARY KEY,
   session_id INTEGER NOT NULL,
@@ -1023,6 +1052,36 @@ fn write_batch(
                        v = CAST(max(CAST(v AS INTEGER), CAST(excluded.v AS INTEGER)) AS TEXT)",
                 )?
                 .execute(params![(a.counter + VERSION_RESERVATION).to_string()])?;
+            }
+            Record::BridgeStatus(status) => {
+                tx.prepare_cached(
+                    "INSERT INTO bridge_status
+                       (session_id, rx_at, channel, peer_count, rx_count, dropped_tx, uptime_ms)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                )?
+                .execute(params![
+                    session_id,
+                    status.rx_at_ms,
+                    status.channel,
+                    status.peer_count,
+                    status.rx_count,
+                    status.dropped_tx,
+                    status.uptime_ms,
+                ])?;
+            }
+            Record::BatchGap(gap) => {
+                tx.prepare_cached(
+                    "INSERT INTO batch_gap (session_id, node_mac, rx_at, after_seq, seq, lost)
+                     VALUES (?1,?2,?3,?4,?5,?6)",
+                )?
+                .execute(params![
+                    session_id,
+                    &gap.node_mac[..],
+                    gap.rx_at_ms,
+                    gap.after_seq,
+                    gap.seq,
+                    gap.lost,
+                ])?;
             }
             Record::Raw(raw) => {
                 tx.prepare_cached(
