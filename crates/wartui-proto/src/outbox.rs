@@ -22,14 +22,18 @@
 //! - **bulk** — [`BridgeToHost::Rx`] and [`BridgeToHost::Log`]. A host that has
 //!   fallen behind is better served by the newest observations than the oldest.
 //!
-//! Both rings evict their oldest rather than refuse their newest: whichever end is
-//! dropped the frame is gone, and a host that stopped reading while still sending
-//! would otherwise be answered from behind eight stale `Ready` frames.
+//! Both rings evict rather than refuse their newest: whichever end is dropped the
+//! frame is gone, and a host that stopped reading while still sending would
+//! otherwise be answered from behind eight stale `Ready` frames.
 //!
-//! Evicting a frame already part-way onto the wire leaves a truncated prefix
-//! there, so a lone `0x00` is written behind it. COBS resynchronises at a
-//! terminator and only at a terminator: without one the host would glue the
-//! fragment to the whole of the next frame and fail the checksum on both.
+//! A full ring evicts its oldest frame not yet started. The one part-way onto the
+//! wire is finished, because abandoning it wastes the bytes already sent, and a
+//! sustained burst keeps the ring full, so it would abandon nearly every frame.
+//!
+//! A frame the endpoint refuses outright is already truncated on the wire, so a
+//! lone `0x00` is written behind it. COBS resynchronises at a terminator and only
+//! at a terminator: without one the host would glue the fragment to the whole of
+//! the next frame and fail the checksum on both.
 //!
 //! The count surfaces in [`BridgeToHost::Status`] as `dropped_tx`, where a non-zero
 //! value means frames arrived faster than the host took them: a host not reading,
@@ -84,6 +88,8 @@ struct Ring<const N: usize> {
 
 impl<const N: usize> Ring<N> {
     const fn new() -> Self {
+        // `evict_behind_front` needs a frame behind the front of a full ring.
+        const { assert!(N >= 2, "a ring must hold at least two frames") };
         Self { slots: [Slot::EMPTY; N], head: 0, len: 0 }
     }
 
@@ -126,6 +132,30 @@ impl<const N: usize> Ring<N> {
             self.head = (self.head + 1) % N;
             self.len -= 1;
         }
+    }
+
+    /// Drop the frame behind the front, keeping the front.
+    ///
+    /// The front's used bytes move into the slot behind it, which becomes the new
+    /// head. The copy is safe while that frame is part-way onto the wire: the
+    /// writer's cursor indexes the same bytes in their new slot.
+    fn evict_behind_front(&mut self) {
+        // Called only on a full ring, and `new` asserts `N >= 2`.
+        debug_assert!(self.len >= 2);
+        let front = self.head;
+        let behind = (front + 1) % N;
+        let (src, dst) = if behind > front {
+            let (lo, hi) = self.slots.split_at_mut(behind);
+            (&lo[front], &mut hi[0])
+        } else {
+            let (lo, hi) = self.slots.split_at_mut(front);
+            (&hi[0], &mut lo[behind])
+        };
+        let used = src.len as usize;
+        dst.buf[..used].copy_from_slice(&src.buf[..used]);
+        dst.len = src.len;
+        self.head = behind;
+        self.len -= 1;
     }
 }
 
@@ -200,12 +230,12 @@ impl Outbox {
     pub fn send(&mut self, msg: &BridgeToHost) -> bool {
         let queued = if is_priority(msg) {
             if self.priority.is_full() {
-                self.discard_front(Source::Priority);
+                self.make_room(Source::Priority);
             }
             self.priority.push(msg)
         } else {
             if self.bulk.is_full() {
-                self.discard_front(Source::Bulk);
+                self.make_room(Source::Bulk);
             }
             self.bulk.push(msg)
         };
@@ -216,15 +246,26 @@ impl Outbox {
         queued.is_ok()
     }
 
-    /// Evict the oldest frame from a ring to make room for a newer one.
-    ///
-    /// If it is the frame being written, the write is abandoned and a
-    /// terminator is owed to the host so it can discard the fragment on its
-    /// own rather than run it into the next frame.
-    fn discard_front(&mut self, source: Source) {
-        if self.current == Some(source) {
-            self.abandon();
+    /// Evict the oldest frame not yet started from a full ring, to make room for
+    /// a newer one. The frame being written is kept and finished.
+    fn make_room(&mut self, source: Source) {
+        let in_flight = self.current == Some(source);
+        match (source, in_flight) {
+            (Source::Priority, true) => self.priority.evict_behind_front(),
+            (Source::Priority, false) => self.priority.pop(),
+            (Source::Bulk, true) => self.bulk.evict_behind_front(),
+            (Source::Bulk, false) => self.bulk.pop(),
         }
+        self.dropped = self.dropped.saturating_add(1);
+    }
+
+    /// Drop the frame being written after the endpoint refused a byte of it.
+    ///
+    /// The frame is already truncated on the wire, so a terminator is owed to
+    /// the host so it can discard the fragment on its own rather than run it
+    /// into the next frame.
+    fn abandon_front(&mut self, source: Source) {
+        self.abandon();
         match source {
             Source::Priority => self.priority.pop(),
             Source::Bulk => self.bulk.pop(),
@@ -295,7 +336,7 @@ impl Outbox {
                 Err(nb::Error::Other(())) => {
                     // Refused outright, so this frame is already truncated on the
                     // wire: abandon it and let the host resynchronise.
-                    self.discard_front(source);
+                    self.abandon_front(source);
                 }
             }
         }
@@ -344,22 +385,24 @@ mod tests {
     extern crate std;
     use std::vec::Vec;
 
-    use super::{BULK_DEPTH, ByteSink, Outbox, PRIORITY_DEPTH};
+    use super::{BULK_DEPTH, ByteSink, Outbox, PRIORITY_DEPTH, Ring};
     use crate::link::{
         BridgeToHost, Chip, FrameAccumulator, LINK_PROTO_VERSION, LogLevel, LogStr, LoopPhase,
         ResetCause, ShortStr, decode_frame,
     };
 
     /// A sink with a settable ceiling, so a wedged host can be simulated by
-    /// letting exactly `capacity` more bytes through.
+    /// letting exactly `capacity` more bytes through. `refuse_at` makes the
+    /// endpoint refuse outright once, when that many bytes have gone out.
     struct Fake {
         out: Vec<u8>,
         capacity: usize,
+        refuse_at: Option<usize>,
     }
 
     impl Fake {
         fn new(capacity: usize) -> Self {
-            Self { out: Vec::new(), capacity }
+            Self { out: Vec::new(), capacity, refuse_at: None }
         }
 
         fn wedged() -> Self {
@@ -373,6 +416,10 @@ mod tests {
 
     impl ByteSink for Fake {
         fn write_byte(&mut self, byte: u8) -> nb::Result<(), ()> {
+            if self.refuse_at == Some(self.out.len()) {
+                self.refuse_at = None;
+                return Err(nb::Error::Other(()));
+            }
             if self.capacity == 0 {
                 return Err(nb::Error::WouldBlock);
             }
@@ -428,7 +475,10 @@ mod tests {
         frames
             .iter()
             .filter_map(|f| match f {
-                BridgeToHost::Log { message, .. } => Some(message.as_bytes()[0]),
+                // Decoded as a char: an id past 127 is two bytes of UTF-8.
+                BridgeToHost::Log { message, .. } => {
+                    message.chars().next().and_then(|c| u8::try_from(c).ok())
+                }
                 _ => None,
             })
             .collect()
@@ -495,7 +545,7 @@ mod tests {
     }
 
     #[test]
-    fn outbox_resynchronises_cobs_stream_when_frame_is_evicted_mid_write() {
+    fn outbox_keeps_in_flight_bulk_frame_when_bulk_ring_overflows_mid_write() {
         let mut outbox = Outbox::new();
         for n in 0..BULK_DEPTH as u8 {
             outbox.send(&log(n));
@@ -506,16 +556,112 @@ mod tests {
         outbox.pump(&mut sink);
         assert_eq!(sink.out.len(), 3, "the fake sink should have stalled mid-frame");
 
-        // A new frame evicts the one being written.
+        // A new frame evicts the oldest one not yet started.
         outbox.send(&log(BULK_DEPTH as u8));
 
         sink.capacity = usize::MAX;
         outbox.pump(&mut sink);
 
-        // The truncated head is discarded on its own and everything behind it
-        // decodes; without the terminator the fragment would cost two frames.
-        let expected: Vec<u8> = (1..=BULK_DEPTH as u8).map(|n| b'a' + n).collect();
+        let expected: Vec<u8> =
+            core::iter::once(b'a').chain((2..=BULK_DEPTH as u8).map(|n| b'a' + n)).collect();
         assert_eq!(bodies(&received(&sink.out)), expected);
+        assert_eq!(outbox.dropped(), 1);
+    }
+
+    #[test]
+    fn outbox_keeps_in_flight_bulk_frame_when_bulk_ring_overflows_repeatedly_mid_write() {
+        let mut outbox = Outbox::new();
+        for n in 0..BULK_DEPTH as u8 {
+            outbox.send(&log(n));
+        }
+        let mut sink = Fake::new(3);
+        outbox.pump(&mut sink);
+
+        let last = BULK_DEPTH as u8 + 10;
+        for n in BULK_DEPTH as u8..last {
+            outbox.send(&log(n));
+        }
+
+        sink.capacity = usize::MAX;
+        outbox.pump(&mut sink);
+
+        // The in-flight frame, then the newest BULK_DEPTH - 1, in order.
+        let newest = last - (BULK_DEPTH as u8 - 1);
+        let expected: Vec<u8> =
+            core::iter::once(b'a').chain((newest..last).map(|n| b'a' + n)).collect();
+        assert_eq!(bodies(&received(&sink.out)), expected);
+        assert_eq!(outbox.dropped(), 10);
+    }
+
+    #[test]
+    fn outbox_keeps_in_flight_priority_frame_when_priority_ring_overflows_mid_write() {
+        let mut outbox = Outbox::new();
+        for n in 0..PRIORITY_DEPTH as u32 {
+            outbox.send(&status(n));
+        }
+        let mut sink = Fake::new(3);
+        outbox.pump(&mut sink);
+        assert_eq!(sink.out.len(), 3, "the fake sink should have stalled mid-frame");
+
+        outbox.send(&ready());
+
+        sink.capacity = usize::MAX;
+        outbox.pump(&mut sink);
+
+        let frames = received(&sink.out);
+        let counts: Vec<u32> = frames
+            .iter()
+            .filter_map(|f| match f {
+                BridgeToHost::Status { rx_count, .. } => Some(*rx_count),
+                _ => None,
+            })
+            .collect();
+        let expected: Vec<u32> = [0].into_iter().chain(2..PRIORITY_DEPTH as u32).collect();
+        assert_eq!(counts, expected);
+        assert!(matches!(frames.last(), Some(BridgeToHost::Ready { .. })));
+        assert_eq!(frames.len(), PRIORITY_DEPTH);
+        assert_eq!(outbox.dropped(), 1);
+    }
+
+    #[test]
+    fn ring_keeps_front_bytes_when_evicting_behind_front_across_wrap() {
+        let mut ring = Ring::<3>::new();
+        for n in 0..3 {
+            ring.push(&log(n)).unwrap();
+        }
+        ring.pop();
+        ring.pop();
+        ring.push(&log(3)).unwrap();
+        ring.push(&log(4)).unwrap();
+        // The front, log(2), sits in the last slot; the one behind it wraps to 0.
+        let front: Vec<u8> = (0..).map_while(|i| ring.byte_at(i)).collect();
+
+        ring.evict_behind_front();
+
+        let kept: Vec<u8> = (0..).map_while(|i| ring.byte_at(i)).collect();
+        assert_eq!(kept, front);
+        assert_eq!(bodies(&received(&kept)), [b'c']);
+        ring.pop();
+        let next: Vec<u8> = (0..).map_while(|i| ring.byte_at(i)).collect();
+        assert_eq!(bodies(&received(&next)), [b'e']);
+    }
+
+    #[test]
+    fn outbox_resynchronises_cobs_stream_when_endpoint_refuses_mid_frame() {
+        let mut outbox = Outbox::new();
+        for n in 0..3 {
+            outbox.send(&log(n));
+        }
+
+        let mut sink = Fake::open();
+        sink.refuse_at = Some(3);
+        outbox.pump(&mut sink);
+
+        // The truncated fragment is closed off on its own and everything behind
+        // it decodes; without the terminator the fragment would cost two frames.
+        assert_eq!(sink.out[3], 0x00, "the fragment should be terminated");
+        assert_eq!(bodies(&received(&sink.out)), [b'b', b'c']);
+        assert_eq!(outbox.dropped(), 1);
     }
 
     #[test]
