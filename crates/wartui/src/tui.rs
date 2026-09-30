@@ -308,13 +308,19 @@ impl Ui {
     /// and close it.
     fn apply(&mut self, snapshot: &Snapshot, commands: &mpsc::Sender<Command>) {
         let Some(modal) = self.modal.take() else { return };
-        let command =
-            Command::SetTxPower { nodes: modal.fleet_dbm * 4, bridge: modal.bridge_dbm * 4 };
-        if commands.try_send(command).is_err()
-            || commands.try_send(Command::RememberBle { on: modal.remember_ble }).is_err()
-        {
+        // Both slots are reserved before either command goes out, so a queue with
+        // room for one cannot apply the powers while the notice says nothing was.
+        let Ok(mut permits) = commands.try_reserve_many(2) else {
             self.say("the engine is not accepting commands".to_owned(), snapshot);
             return;
+        };
+        for command in [
+            Command::SetTxPower { nodes: modal.fleet_dbm * 4, bridge: modal.bridge_dbm * 4 },
+            Command::RememberBle { on: modal.remember_ble },
+        ] {
+            if let Some(permit) = permits.next() {
+                permit.send(command);
+            }
         }
         // Same rule as `toggle_ble`: the power arrives as an assignment, so a
         // fleet with no plan has nothing for it to arrive in yet.
@@ -2778,6 +2784,29 @@ mod tests {
         assert!(!target.exists(), "nothing was written");
         let notice = ui.notice(snapshot.now_ms).expect("a notice");
         assert!(!notice.contains("save"), "{notice}");
+    }
+
+    #[test]
+    fn ui_sends_nothing_and_saves_nothing_when_enter_pressed_with_one_queue_slot_free() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wartui.toml");
+        let snapshot = busy();
+        let (tx, mut rx) = mpsc::channel(2);
+        tx.try_send(Command::ClearRing { mac: None }).unwrap();
+        let mut ui = Ui {
+            settings: Settings { config_path: Some(target.clone()), ..Settings::default() },
+            ..Ui::default()
+        };
+        ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
+
+        ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
+
+        // Room for the powers but not the remember setting: neither goes out.
+        assert_eq!(rx.try_recv().unwrap(), Command::ClearRing { mac: None });
+        assert!(rx.try_recv().is_err(), "nothing else was sent");
+        assert!(!target.exists(), "nothing was written");
+        let notice = ui.notice(snapshot.now_ms).expect("a notice");
+        assert!(notice.contains("not accepting commands"), "{notice}");
     }
 
     #[test]
