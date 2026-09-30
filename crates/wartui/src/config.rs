@@ -21,14 +21,16 @@ use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use wartui_bridge::ports::{mac_text, parse_mac};
+use wartui_proto::link::Mac;
 
 use crate::run::PoolArg;
 
 /// Everything `wartui.toml` can hold. Add a field and a table to grow it; every
 /// struct denies unknown fields, so a typo in the file is caught rather than
 /// silently ignored.
-#[derive(Debug, Default, Deserialize, Serialize)]
+#[derive(Debug, Default, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct Config {
     /// The root `pool` key. An unknown spelling is a serde error, named with
@@ -39,6 +41,8 @@ pub struct Config {
     pub pool: Option<PoolArg>,
     #[serde(default, skip_serializing_if = "TxPower::is_empty")]
     pub tx_power: TxPower,
+    #[serde(default, skip_serializing_if = "Bluetooth::is_empty")]
+    pub bluetooth: Bluetooth,
 }
 
 /// The `[tx-power]` table: `fleet` covers the nodes and `bridge` the bridge, each
@@ -60,6 +64,46 @@ impl TxPower {
     }
 }
 
+/// The `[bluetooth]` table: whether giving a node the scan (`b`) remembers it, and the
+/// node remembered. `remember` absent means on. `node` is written the way `wartui ports`
+/// prints a MAC, and is refused beside `remember = false`, which forgets it.
+#[derive(Debug, Default, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct Bluetooth {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remember: Option<bool>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "write_mac",
+        deserialize_with = "read_mac"
+    )]
+    pub node: Option<Mac>,
+}
+
+impl Bluetooth {
+    /// Whether neither key is set, so `save` writes no `[bluetooth]` table at all.
+    fn is_empty(&self) -> bool {
+        self.remember.is_none() && self.node.is_none()
+    }
+}
+
+fn write_mac<S: Serializer>(mac: &Option<Mac>, serializer: S) -> Result<S::Ok, S::Error> {
+    match mac {
+        Some(mac) => serializer.serialize_str(&mac_text(mac)),
+        None => serializer.serialize_none(),
+    }
+}
+
+fn read_mac<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Mac>, D::Error> {
+    let text = String::deserialize(deserializer)?;
+    parse_mac(&text).map(Some).ok_or_else(|| {
+        serde::de::Error::custom(format!(
+            "bluetooth.node = \"{text}\" is not a MAC written like AA:BB:CC:DD:EE:FF"
+        ))
+    })
+}
+
 /// Valid whole dBm transmit power values, on the command line or in the file. 20 dBm
 /// is the ceiling because whether anything above it works correctly is unverified,
 /// per `AGENTS.md`'s tx-power invariant.
@@ -69,6 +113,9 @@ impl Config {
     fn validate(&self) -> Result<()> {
         check_power("tx-power.fleet", self.tx_power.fleet)?;
         check_power("tx-power.bridge", self.tx_power.bridge)?;
+        if self.bluetooth.remember == Some(false) && self.bluetooth.node.is_some() {
+            bail!("bluetooth.node is set while bluetooth.remember = false, which forgets it");
+        }
         Ok(())
     }
 }
@@ -225,7 +272,7 @@ fn resolve_symlink_target(path: &Path) -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, TxPower, default_path_in, load, load_from, path, save};
+    use super::{Bluetooth, Config, TxPower, default_path_in, load, load_from, path, save};
     use crate::run::PoolArg;
     use std::ffi::OsStr;
 
@@ -377,6 +424,38 @@ mod tests {
     }
 
     #[test]
+    fn config_loader_reads_bluetooth_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wartui.toml");
+        std::fs::write(&path, "[bluetooth]\nremember = true\nnode = \"aa:BB:cc:01:02:03\"\n")
+            .unwrap();
+        let config = load(Some(&path)).unwrap();
+        assert_eq!(config.bluetooth.remember, Some(true));
+        assert_eq!(config.bluetooth.node, Some([0xAA, 0xBB, 0xCC, 1, 2, 3]));
+    }
+
+    #[test]
+    fn config_loader_rejects_malformed_bluetooth_node() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wartui.toml");
+        std::fs::write(&path, "[bluetooth]\nnode = \"AA:BB:CC\"\n").unwrap();
+        let error = load(Some(&path)).unwrap_err();
+        let chain = format!("{error:#}");
+        assert!(chain.contains("bluetooth.node"), "{chain}");
+    }
+
+    #[test]
+    fn config_loader_rejects_bluetooth_node_when_remember_is_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wartui.toml");
+        std::fs::write(&path, "[bluetooth]\nremember = false\nnode = \"AA:BB:CC:01:02:03\"\n")
+            .unwrap();
+        let error = load(Some(&path)).unwrap_err();
+        let chain = format!("{error:#}");
+        assert!(chain.contains("bluetooth.node"), "{chain}");
+    }
+
+    #[test]
     fn config_path_returns_explicit_when_given() {
         let explicit = std::path::PathBuf::from("/custom/wartui.toml");
         assert_eq!(path(Some(&explicit)), Some(explicit));
@@ -384,12 +463,20 @@ mod tests {
 
     /// A `Config` holding every key the settings modal saves.
     fn full(pool: PoolArg, fleet: i8, bridge: i8) -> Config {
-        Config { pool: Some(pool), tx_power: TxPower { fleet: Some(fleet), bridge: Some(bridge) } }
+        Config {
+            pool: Some(pool),
+            tx_power: TxPower { fleet: Some(fleet), bridge: Some(bridge) },
+            bluetooth: Bluetooth { remember: Some(true), node: Some([0xAA, 0xBB, 0xCC, 1, 2, 3]) },
+        }
     }
 
     /// A `Config` with only the fleet's tx power set.
     fn fleet_only(fleet: i8) -> Config {
-        Config { pool: None, tx_power: TxPower { fleet: Some(fleet), bridge: None } }
+        Config {
+            pool: None,
+            tx_power: TxPower { fleet: Some(fleet), bridge: None },
+            bluetooth: Bluetooth::default(),
+        }
     }
 
     #[test]
@@ -420,11 +507,29 @@ mod tests {
     }
 
     #[test]
+    fn config_save_writes_bluetooth_table_that_reloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wartui.toml");
+
+        save(&target, &full(PoolArg::Us, 8, 12)).unwrap();
+
+        let saved = load(Some(&target)).unwrap();
+        assert_eq!(saved.bluetooth.remember, Some(true));
+        assert_eq!(saved.bluetooth.node, Some([0xAA, 0xBB, 0xCC, 1, 2, 3]));
+        let text = std::fs::read_to_string(&target).unwrap();
+        assert!(
+            text.contains("node = \"AA:BB:CC:01:02:03\""),
+            "as `wartui ports` prints it: {text}"
+        );
+    }
+
+    #[test]
     fn config_save_omits_tx_power_table_when_neither_power_is_set() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wartui.toml");
 
-        save(&target, &Config { pool: Some(PoolArg::All), tx_power: TxPower::default() }).unwrap();
+        let config = Config { pool: Some(PoolArg::All), ..Config::default() };
+        save(&target, &config).unwrap();
 
         let text = std::fs::read_to_string(&target).unwrap();
         assert!(!text.contains("tx-power"), "{text}");

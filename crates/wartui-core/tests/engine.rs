@@ -2799,3 +2799,126 @@ fn engine_reissues_assignment_when_desired_epoch_matches_held_epoch() {
     let (_, _, admin) = sent_admin(&batch);
     assert_ne!(admin.epoch, collide_epoch, "reissued under a fresh epoch");
 }
+
+/// The engine's Bluetooth state as the view sees it: holder, preferred node, remember flag.
+fn ble_state(engine: &FleetEngine, now: Now) -> (Option<Mac>, Option<Mac>, bool) {
+    let snapshot = engine.snapshot(now, StoreStats::default());
+    (snapshot.ble_node, snapshot.preferred_ble, snapshot.remember_ble)
+}
+
+#[test]
+fn engine_assigns_ble_to_preferred_node_when_it_first_heartbeats() {
+    // Remembered from the file: no command is sent this run.
+    let clock = Clock::new();
+    let config = EngineConfig { preferred_ble: Some(peer(0)), ..EngineConfig::default() };
+    let mut engine = engine(config, &clock);
+    caught_up(&mut engine, &clock);
+    assert_eq!(ble_state(&engine, clock.at(0)).0, None, "nothing holds it before it is heard");
+
+    let batch = engine.handle(heartbeat(peer(0), 1), clock.at(1));
+
+    assert_eq!(ble_state(&engine, clock.at(1)).0, Some(peer(0)));
+    let (_, dst, admin) = sent_admin(&batch);
+    assert_eq!(dst, peer(0));
+    assert!(admin.scan_ble(), "its first assignment carries the scan");
+}
+
+#[test]
+fn engine_reassigns_ble_to_preferred_node_when_it_returns_after_ageing_out() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(heartbeat(peer(0), 1), clock.at(1));
+    engine.handle(heartbeat(peer(1), 1), clock.at(1));
+    engine.handle(Event::Command(Command::AssignBle { mac: Some(peer(0)) }), clock.at(2));
+
+    engine.handle(heartbeat(peer(1), 2), clock.at(70));
+    engine.handle(Event::Tick, clock.at(70));
+    assert_eq!(ble_state(&engine, clock.at(70)).0, None, "the scan ages out with the node");
+
+    let batch = engine.handle(heartbeat(peer(0), 2), clock.at(71));
+
+    assert_eq!(ble_state(&engine, clock.at(71)).0, Some(peer(0)));
+    assert!(admins(&batch).iter().any(|admin| admin.scan_ble()), "it is told in its own window");
+}
+
+#[test]
+fn engine_records_preferred_ble_when_assign_ble_commanded() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+
+    engine.handle(Event::Command(Command::AssignBle { mac: Some(peer(0)) }), clock.at(1));
+
+    assert_eq!(ble_state(&engine, clock.at(1)), (Some(peer(0)), Some(peer(0)), true));
+}
+
+#[test]
+fn engine_forgets_preferred_ble_when_scan_taken_off() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(heartbeat(peer(0), 1), clock.at(1));
+    engine.handle(Event::Command(Command::AssignBle { mac: Some(peer(0)) }), clock.at(2));
+
+    engine.handle(Event::Command(Command::AssignBle { mac: None }), clock.at(3));
+    // Still assignable, so a preferred node left behind would take the scan straight back.
+    engine.handle(heartbeat(peer(0), 2), clock.at(4));
+    engine.handle(Event::Tick, clock.at(4));
+
+    assert_eq!(ble_state(&engine, clock.at(4)), (None, None, true));
+}
+
+#[test]
+fn engine_keeps_ble_node_and_forgets_preferred_when_remember_turned_off() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(heartbeat(peer(0), 1), clock.at(1));
+    engine.handle(Event::Command(Command::AssignBle { mac: Some(peer(0)) }), clock.at(2));
+
+    engine.handle(Event::Command(Command::RememberBle { on: false }), clock.at(3));
+
+    assert_eq!(ble_state(&engine, clock.at(3)), (Some(peer(0)), None, false));
+}
+
+#[test]
+fn engine_ignores_assign_ble_for_preference_when_remember_is_off() {
+    let clock = Clock::new();
+    let config = EngineConfig { remember_ble: false, ..EngineConfig::default() };
+    let mut engine = engine(config, &clock);
+
+    engine.handle(Event::Command(Command::AssignBle { mac: Some(peer(0)) }), clock.at(1));
+
+    assert_eq!(ble_state(&engine, clock.at(1)), (Some(peer(0)), None, false));
+}
+
+#[test]
+fn engine_remembers_current_scanner_when_remember_turned_back_on() {
+    let clock = Clock::new();
+    let config = EngineConfig { remember_ble: false, ..EngineConfig::default() };
+    let mut engine = engine(config, &clock);
+    engine.handle(Event::Command(Command::AssignBle { mac: Some(peer(0)) }), clock.at(1));
+
+    engine.handle(Event::Command(Command::RememberBle { on: true }), clock.at(2));
+
+    assert_eq!(ble_state(&engine, clock.at(2)), (Some(peer(0)), Some(peer(0)), true));
+
+    // Already on: a node remembered from the file and not yet heard from survives.
+    let config = EngineConfig { preferred_ble: Some(peer(1)), ..EngineConfig::default() };
+    let mut from_file = self::engine(config, &clock);
+    from_file.handle(Event::Command(Command::RememberBle { on: true }), clock.at(1));
+    assert_eq!(ble_state(&from_file, clock.at(1)), (None, Some(peer(1)), true));
+}
+
+#[test]
+fn engine_ignores_preferred_ble_when_config_disables_remember() {
+    let clock = Clock::new();
+    let config = EngineConfig {
+        remember_ble: false,
+        preferred_ble: Some(peer(0)),
+        ..EngineConfig::default()
+    };
+    let mut engine = engine(config, &clock);
+
+    engine.handle(heartbeat(peer(0), 1), clock.at(1));
+    engine.handle(Event::Tick, clock.at(1));
+
+    assert_eq!(ble_state(&engine, clock.at(1)), (None, None, false));
+}

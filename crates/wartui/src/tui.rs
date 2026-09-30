@@ -39,16 +39,22 @@ use crate::run::PoolArg;
 /// should stop. Long enough not to spin, short enough that quitting is instant.
 const INPUT_POLL: Duration = Duration::from_millis(100);
 
-/// What the settings modal needs beyond what a [`Snapshot`] carries.
+/// What saving settings needs beyond what a [`Snapshot`] carries.
 ///
 /// Resolved once, in `main`, and carried into the view rather than re-derived
 /// from a snapshot: where to save is a fact about how this process was
-/// started, not about the fleet.
+/// started, and what the file holds is not always what is running — a pool
+/// saved for the next restart, or a power a flag overrides.
 #[derive(Debug, Clone, Default)]
 pub struct Settings {
     /// Where `wartui.toml` would be written, or `None` when there is nowhere
     /// to save it — no default location found and no `--config` given.
     pub config_path: Option<PathBuf>,
+    /// What the file holds as far as this view knows: loaded at startup, then
+    /// replaced by each successful save. `b` saves from this, changing only the
+    /// Bluetooth node, so it never writes the running pool or powers over what
+    /// the file holds for the next restart.
+    pub saved: config::Config,
 }
 
 /// Run the view until the operator quits or the engine stops.
@@ -131,7 +137,7 @@ struct Ui {
     notice: Option<(String, i64)>,
     /// The settings modal, open or closed.
     modal: Option<ConfigModal>,
-    /// Where to save. Fixed for the life of the view.
+    /// Where to save, and what was last saved there.
     settings: Settings,
 }
 
@@ -142,10 +148,11 @@ enum Field {
     Pool,
     Fleet,
     Bridge,
+    RememberBle,
 }
 
 /// Every row of the settings modal, top to bottom, as `next`/`prev` walk them.
-const FIELDS: [Field; 3] = [Field::Pool, Field::Fleet, Field::Bridge];
+const FIELDS: [Field; 4] = [Field::Pool, Field::Fleet, Field::Bridge, Field::RememberBle];
 
 impl Field {
     /// The row below this one, clamped: the last row stays put rather than
@@ -179,6 +186,8 @@ struct ConfigModal {
     /// with: the pool cannot change live, so this is what `save_outcome`
     /// compares `pool` against to say a restart is needed.
     running_pool: PoolArg,
+    /// Whether `b` remembers the node it gives the scan to.
+    remember_ble: bool,
 }
 
 /// `All → Eu → Us`, the order the pool row steps through.
@@ -201,13 +210,20 @@ fn step_pool(current: PoolArg, delta: i8) -> PoolArg {
 impl ConfigModal {
     /// Step the selected row by one: a tx-power row moves by one dBm, clamped
     /// to the range the file and the flags share; the pool row moves through
-    /// [`POOL_STEPS`]. Both stop at their ends rather than wrapping.
+    /// [`POOL_STEPS`]; the remember row is off to the left and on to the right.
+    /// All stop at their ends rather than wrapping.
     fn step(&mut self, delta: i8) {
         let value = match self.selected {
             Field::Fleet => &mut self.fleet_dbm,
             Field::Bridge => &mut self.bridge_dbm,
             Field::Pool => {
                 self.pool = step_pool(self.pool, delta);
+                return;
+            }
+            Field::RememberBle => {
+                if delta != 0 {
+                    self.remember_ble = delta > 0;
+                }
                 return;
             }
         };
@@ -262,6 +278,7 @@ impl Ui {
             bridge_dbm,
             pool,
             running_pool: pool,
+            remember_ble: snapshot.remember_ble,
         });
     }
 
@@ -293,7 +310,9 @@ impl Ui {
         let Some(modal) = self.modal.take() else { return };
         let command =
             Command::SetTxPower { nodes: modal.fleet_dbm * 4, bridge: modal.bridge_dbm * 4 };
-        if commands.try_send(command).is_err() {
+        if commands.try_send(command).is_err()
+            || commands.try_send(Command::RememberBle { on: modal.remember_ble }).is_err()
+        {
             self.say("the engine is not accepting commands".to_owned(), snapshot);
             return;
         }
@@ -308,7 +327,7 @@ impl Ui {
             "tx power: fleet {} dBm, bridge {} dBm — nodes take it {when}",
             modal.fleet_dbm, modal.bridge_dbm
         );
-        text.push_str(&self.save_outcome(modal));
+        text.push_str(&self.save_outcome(modal, snapshot));
         self.say(text, snapshot);
     }
 
@@ -320,7 +339,12 @@ impl Ui {
     /// while the modal was open included. The pool cannot change live, so a
     /// moved pool row exists only in the file: when the save does not happen,
     /// the notice says that pool was not kept.
-    fn save_outcome(&self, modal: ConfigModal) -> String {
+    ///
+    /// The Bluetooth node saved is the one remembered, falling back on the one
+    /// holding the scan, which is what the engine remembers when the row turns
+    /// on; a node remembered from the file and not yet heard from survives.
+    /// A successful save becomes [`Settings::saved`].
+    fn save_outcome(&mut self, modal: ConfigModal, snapshot: &Snapshot) -> String {
         let pool_moved = modal.pool != modal.running_pool;
         let lost = || {
             if pool_moved {
@@ -332,19 +356,25 @@ impl Ui {
         let Some(path) = self.settings.config_path.clone() else {
             return format!("; nowhere to save it — use --config{}", lost());
         };
-        let saved = config::save(
-            &path,
-            &config::Config {
-                pool: Some(modal.pool),
-                tx_power: config::TxPower {
-                    fleet: Some(modal.fleet_dbm),
-                    bridge: Some(modal.bridge_dbm),
+        let written = config::Config {
+            pool: Some(modal.pool),
+            tx_power: config::TxPower {
+                fleet: Some(modal.fleet_dbm),
+                bridge: Some(modal.bridge_dbm),
+            },
+            bluetooth: config::Bluetooth {
+                remember: Some(modal.remember_ble),
+                node: if modal.remember_ble {
+                    snapshot.preferred_ble.or(snapshot.ble_node)
+                } else {
+                    None
                 },
             },
-        );
-        match saved {
+        };
+        match config::save(&path, &written) {
             Err(error) => format!("; could not save: {error}{}", lost()),
             Ok(()) => {
+                self.settings.saved = written;
                 let mut outcome = format!("; saved to {}", path.display());
                 if pool_moved {
                     outcome.push_str("; the pool takes effect after a restart");
@@ -355,6 +385,9 @@ impl Ui {
     }
 
     /// Move the Bluetooth scan onto the selected node, or off it.
+    ///
+    /// While the engine remembers the Bluetooth node, the choice is also written
+    /// to `wartui.toml`, so a restart hands the scan back to the same node.
     fn toggle_ble(&mut self, snapshot: &Snapshot, commands: &mpsc::Sender<Command>) {
         let Some(node) = snapshot.nodes.get(self.selected) else { return };
         let target = node.state.mac;
@@ -365,9 +398,8 @@ impl Ui {
             self.say(format!("{} {why}", mac(&target)), snapshot);
             return;
         }
-        let said = match commands
-            .try_send(Command::AssignBle { mac: if holds { None } else { Some(target) } })
-        {
+        let assigned = if holds { None } else { Some(target) };
+        let mut said = match commands.try_send(Command::AssignBle { mac: assigned }) {
             Ok(()) if holds => format!("{}: bluetooth off on its next heartbeat", mac(&target)),
             // The scan arrives as an assignment, so a fleet with no plan has nothing
             // for it to arrive in: above twenty nodes the planner refuses the whole
@@ -380,9 +412,37 @@ impl Ui {
                 format!("{}: bluetooth, once it is in a plan", mac(&target))
             }
             Ok(()) => format!("{}: bluetooth on its next heartbeat", mac(&target)),
-            Err(_) => "the engine is not accepting commands".to_owned(),
+            Err(_) => {
+                self.say("the engine is not accepting commands".to_owned(), snapshot);
+                return;
+            }
         };
+        if snapshot.remember_ble {
+            said.push_str(&self.remember_outcome(assigned));
+        }
         self.say(said, snapshot);
+    }
+
+    /// Write the Bluetooth node `b` just chose to `wartui.toml`, changing nothing
+    /// outside `[bluetooth]`, and say what became of it in the style of
+    /// [`Self::save_outcome`].
+    fn remember_outcome(&mut self, node: Option<Mac>) -> String {
+        let Some(path) = self.settings.config_path.clone() else {
+            return "; nowhere to save it — use --config".to_owned();
+        };
+        // `b` saves only while the engine remembers, so `remember` is written as
+        // on beside the node: a `saved` left at off by a failed save would
+        // otherwise pair the two into a file `load` refuses.
+        let mut written = self.settings.saved.clone();
+        written.bluetooth = config::Bluetooth { remember: Some(true), node };
+        match config::save(&path, &written) {
+            Err(error) => format!("; could not save: {error}"),
+            Ok(()) => {
+                self.settings.saved = written;
+                let done = if node.is_some() { "remembered" } else { "forgotten" };
+                format!("; {done} in {}", path.display())
+            }
+        }
     }
 
     /// Clear the selected node's dedup ring on its next heartbeat.
@@ -576,7 +636,7 @@ fn draw(frame: &mut Frame<'_>, snapshot: &Snapshot, ui: &mut Ui) {
 
 /// The settings modal, centred over the live view behind it.
 fn draw_settings_modal(frame: &mut Frame<'_>, modal: &ConfigModal) {
-    let area = centered_rect(44, 9, frame.area());
+    let area = centered_rect(44, 10, frame.area());
     frame.render_widget(Clear, area);
 
     let block = Block::bordered().title(" settings ");
@@ -593,10 +653,15 @@ fn draw_settings_modal(frame: &mut Frame<'_>, modal: &ConfigModal) {
         format!("{:<18}◂ {} ▸", "pool", ChannelPool::from(modal.pool)),
         styled(modal.selected == Field::Pool),
     ));
+    let remember_row = Line::from(Span::styled(
+        format!("{:<18}◂ {} ▸", "remember bt node", if modal.remember_ble { "on" } else { "off" }),
+        styled(modal.selected == Field::RememberBle),
+    ));
     let lines = vec![
         pool_row,
         row("fleet tx power", modal.fleet_dbm, modal.selected == Field::Fleet),
         row("bridge tx power", modal.bridge_dbm, modal.selected == Field::Bridge),
+        remember_row,
         Line::default(),
         Line::from("enter save · esc cancel"),
     ];
@@ -1443,6 +1508,8 @@ mod tests {
             pool: ChannelPool::All,
             plan: None,
             ble_node: None,
+            preferred_ble: None,
+            remember_ble: true,
             nodes: vec![
                 assigned(0x84),
                 unannounced(0x85),
@@ -2606,21 +2673,24 @@ mod tests {
     }
 
     #[test]
-    fn ui_sends_only_tx_power_and_warns_of_restart_when_enter_pressed_with_pool_changed() {
+    fn ui_sends_no_pool_command_and_warns_of_restart_when_enter_pressed_with_pool_changed() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wartui.toml");
         let mut snapshot = busy();
         snapshot.pool = ChannelPool::All;
         let (tx, mut rx) = mpsc::channel(4);
-        let mut ui =
-            Ui { settings: Settings { config_path: Some(target.clone()) }, ..Ui::default() };
+        let mut ui = Ui {
+            settings: Settings { config_path: Some(target.clone()), ..Settings::default() },
+            ..Ui::default()
+        };
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
         ui.on_modal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &snapshot, &tx);
 
         ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
 
-        // Only the tx-power command goes out: the pool can't change live.
+        // Nothing carries the pool: it can't change live.
         assert_eq!(rx.try_recv().unwrap(), Command::SetTxPower { nodes: 8, bridge: 8 });
+        assert_eq!(rx.try_recv().unwrap(), Command::RememberBle { on: true });
         assert!(rx.try_recv().is_err(), "nothing else was sent");
         let notice = ui.notice(snapshot.now_ms).expect("a notice");
         assert!(notice.contains("the pool takes effect after a restart"), "{notice}");
@@ -2636,9 +2706,13 @@ mod tests {
         snapshot.pool = ChannelPool::Eu;
         snapshot.tx_power = 40; // 10 dBm
         snapshot.bridge_tx_power = 60; // 15 dBm
+        // Holding the scan and not yet remembered, so the save falls back on the holder.
+        snapshot.ble_node = Some(snapshot.nodes[0].state.mac);
         let (tx, mut rx) = mpsc::channel(4);
-        let mut ui =
-            Ui { settings: Settings { config_path: Some(target.clone()) }, ..Ui::default() };
+        let mut ui = Ui {
+            settings: Settings { config_path: Some(target.clone()), ..Settings::default() },
+            ..Ui::default()
+        };
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
 
         ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
@@ -2650,6 +2724,111 @@ mod tests {
         assert_eq!(saved.pool, Some(PoolArg::Eu));
         assert_eq!(saved.tx_power.fleet, Some(10));
         assert_eq!(saved.tx_power.bridge, Some(15));
+        assert_eq!(saved.bluetooth.remember, Some(true));
+        assert_eq!(saved.bluetooth.node, Some(snapshot.nodes[0].state.mac));
+    }
+
+    #[test]
+    fn ui_saves_preferred_node_when_b_pressed_with_remember_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wartui.toml");
+        // A pool saved for the next restart, which the running `All` must not overwrite.
+        let saved = config::Config { pool: Some(PoolArg::Us), ..config::Config::default() };
+        config::save(&target, &saved).unwrap();
+        let snapshot = busy();
+        let node = snapshot.nodes[0].state.mac;
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut ui =
+            Ui { settings: Settings { config_path: Some(target.clone()), saved }, ..Ui::default() };
+
+        ui.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE), &snapshot, &tx);
+
+        assert_eq!(rx.try_recv().unwrap(), Command::AssignBle { mac: Some(node) });
+        let file = config::load(Some(&target)).expect("a valid file");
+        assert_eq!(file.bluetooth.node, Some(node));
+        assert_eq!(file.pool, Some(PoolArg::Us), "the pool already saved stays as it is");
+        let notice = ui.notice(snapshot.now_ms).expect("a notice");
+        assert!(notice.contains("remembered in"), "{notice}");
+
+        // Taking it off forgets it in the file too.
+        let mut holding = busy();
+        holding.ble_node = Some(node);
+        ui.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE), &holding, &tx);
+        let file = config::load(Some(&target)).expect("a valid file");
+        assert_eq!(file.bluetooth.node, None);
+        assert_eq!(file.pool, Some(PoolArg::Us));
+        let notice = ui.notice(holding.now_ms).expect("a notice");
+        assert!(notice.contains("forgotten in"), "{notice}");
+    }
+
+    #[test]
+    fn ui_does_not_save_when_b_pressed_with_remember_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wartui.toml");
+        let snapshot = Snapshot { remember_ble: false, ..busy() };
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut ui = Ui {
+            settings: Settings { config_path: Some(target.clone()), ..Settings::default() },
+            ..Ui::default()
+        };
+
+        ui.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE), &snapshot, &tx);
+
+        assert!(rx.try_recv().is_ok(), "the scan still moves");
+        assert!(!target.exists(), "nothing was written");
+        let notice = ui.notice(snapshot.now_ms).expect("a notice");
+        assert!(!notice.contains("save"), "{notice}");
+    }
+
+    #[test]
+    fn ui_sends_remember_ble_and_saves_it_when_enter_pressed() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wartui.toml");
+        let mut snapshot = busy();
+        snapshot.ble_node = Some(snapshot.nodes[0].state.mac);
+        snapshot.preferred_ble = snapshot.ble_node;
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut ui = Ui {
+            settings: Settings { config_path: Some(target.clone()), ..Settings::default() },
+            ..Ui::default()
+        };
+        ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
+        for _ in 0..3 {
+            ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &snapshot, &tx);
+        }
+        ui.on_modal_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE), &snapshot, &tx);
+
+        ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
+
+        assert!(matches!(rx.try_recv().unwrap(), Command::SetTxPower { .. }));
+        assert_eq!(rx.try_recv().unwrap(), Command::RememberBle { on: false });
+        let file = config::load(Some(&target)).expect("a valid file");
+        assert_eq!(file.bluetooth.remember, Some(false));
+        assert_eq!(file.bluetooth.node, None, "turning it off forgets the node");
+        assert_eq!(ui.settings.saved.bluetooth.remember, Some(false), "the view knows it too");
+    }
+
+    #[test]
+    fn ui_toggles_remember_row_when_h_or_l_pressed() {
+        let snapshot = busy();
+        let (tx, _rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+        ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
+        for _ in 0..5 {
+            ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &snapshot, &tx);
+        }
+        let modal = ui.modal.expect("still open");
+        assert_eq!(modal.selected, Field::RememberBle, "the last row");
+        assert!(modal.remember_ble, "seeded from the snapshot");
+
+        for _ in 0..2 {
+            ui.on_modal_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE), &snapshot, &tx);
+            assert!(!ui.modal.expect("still open").remember_ble, "off, and stays off");
+        }
+        for _ in 0..2 {
+            ui.on_modal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &snapshot, &tx);
+            assert!(ui.modal.expect("still open").remember_ble, "on, and stays on");
+        }
     }
 
     #[test]
@@ -2665,8 +2844,10 @@ mod tests {
         snapshot.tx_power = 40; // 10 dBm
         snapshot.bridge_tx_power = 60; // 15 dBm
         let (tx, _rx) = mpsc::channel(4);
-        let mut ui =
-            Ui { settings: Settings { config_path: Some(target.clone()) }, ..Ui::default() };
+        let mut ui = Ui {
+            settings: Settings { config_path: Some(target.clone()), ..Settings::default() },
+            ..Ui::default()
+        };
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
 
         // Hand-edited while the modal is open: a different pool, fleet and bridge.
@@ -2685,8 +2866,10 @@ mod tests {
         let target = dir.path().join("wartui.toml");
         let snapshot = busy();
         let (tx, _rx) = mpsc::channel(4);
-        let mut ui =
-            Ui { settings: Settings { config_path: Some(target.clone()) }, ..Ui::default() };
+        let mut ui = Ui {
+            settings: Settings { config_path: Some(target.clone()), ..Settings::default() },
+            ..Ui::default()
+        };
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
         ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
         let after_first = std::fs::read_to_string(&target).expect("written by the first save");
@@ -2710,8 +2893,10 @@ mod tests {
         snapshot.pool = ChannelPool::Us;
         snapshot.tx_power = 48; // 12 dBm
         let (tx, _rx) = mpsc::channel(4);
-        let mut ui =
-            Ui { settings: Settings { config_path: Some(target.clone()) }, ..Ui::default() };
+        let mut ui = Ui {
+            settings: Settings { config_path: Some(target.clone()), ..Settings::default() },
+            ..Ui::default()
+        };
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
 
         ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
@@ -2727,8 +2912,10 @@ mod tests {
         let target = dir.path().join("wartui.toml");
         let snapshot = busy();
         let (tx, _rx) = mpsc::channel(4);
-        let mut ui =
-            Ui { settings: Settings { config_path: Some(target.clone()) }, ..Ui::default() };
+        let mut ui = Ui {
+            settings: Settings { config_path: Some(target.clone()), ..Settings::default() },
+            ..Ui::default()
+        };
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
         // Only the fleet row moves; the pool row is left alone.
         ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &snapshot, &tx);
@@ -2765,7 +2952,10 @@ mod tests {
         let snapshot = busy();
         let (tx, _rx) = mpsc::channel(4);
         let mut ui = Ui {
-            settings: Settings { config_path: Some(blocker.join("wartui.toml")) },
+            settings: Settings {
+                config_path: Some(blocker.join("wartui.toml")),
+                ..Settings::default()
+            },
             ..Ui::default()
         };
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);

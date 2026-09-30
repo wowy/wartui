@@ -188,8 +188,9 @@ is here rather than only in a `//!`.
   without asking who put it there. `Command::AssignBle` is the one operator
   decision, and it is an *input* to the planner rather than an exception to it: it names the node
   whose job is Bluetooth, and the planner is what deals that node nothing and hands its share
-  round. So moving the scan re-cuts the whole pool, and `replan` — not `reissue` — is what
-  delivers both ends of the move.
+  round. The remembered Bluetooth node is that same decision carried forward — across a restart,
+  or a node's return to the fleet — and reaches the planner the same way. So moving the scan
+  re-cuts the whole pool, and `replan` — not `reissue` — is what delivers both ends of the move.
 - **Only heartbeating nodes are assignable or in the plan** — a node that is merely being heard
   never opens an admin window. `stale`, `no heartbeat` and silence are deliberately distinct
   states, and `SCAN_CHANNELS` order is load-bearing: never sort or deduplicate it, because those
@@ -252,13 +253,15 @@ edit stops; follow the pointer before changing the rule.
 - **Channel 14 is in no pool and is never dealt**, and stays in the scan table because that table's
   indices are the wire format. → `crates/wartui-proto/src/plan.rs`, `UNSUPPORTED_INDEX`
 - **At most one node scans Bluetooth, by default none does, and it is that node's whole job.**
-  `ADMIN_FLAG_BLE` is an operator's decision, not a property of the flashed firmware. The node
+  `ADMIN_FLAG_BLE` is an operator's decision, not a property of the flashed firmware — made with
+  `b`, or carried forward from the node `b` last chose, which `wartui.toml` remembers. The node
   holding it is dealt no channels and is counted in `Plan::node_count` anyway, because that reports
   the fleet size the plan was cut for rather than a census of who is sniffing. An empty `ChannelSet`
   is sent only with the flag beside it; without it, a node told to scan nothing parks
   while the host believes it is sweeping, and `Plan::admin_for` refuses to build that frame.
   → `crates/wartui-proto/src/plan.rs`, `Job` / `Plan::channels_for` / `admin_for`;
-  `crates/wartui-core/src/engine.rs`, `Command::AssignBle` / `on_assign_ble` / `replan`;
+  `crates/wartui-core/src/engine.rs`, `Command::AssignBle` / `on_assign_ble` /
+  `Command::RememberBle` / `replan`;
   `docs/phase-2-findings.md`
 - **A heartbeat replayed out of the bridge's backlog is not an admin window.** Delete either
   half of the check and the symptom is a plausible-looking lie rather than an error.
