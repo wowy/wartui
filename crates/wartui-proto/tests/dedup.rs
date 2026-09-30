@@ -166,7 +166,9 @@ fn mac_ring_enforces_capacity_bounds_when_configured_with_c5_ring_size() {
 
 #[test]
 fn mac_ring_enforces_capacity_bounds_when_configured_with_c6_ring_size() {
-    // Boxed: the C6's ring is 64 KB, which a test thread's stack need not find.
+    // Boxed so the 64 KB ring does not stay in this frame for the whole test. A debug
+    // build may still construct it on the stack before the move, which a test thread's
+    // 2 MB stack has room for.
     assert_holds_exactly(&mut *Box::<C6DedupRing>::default(), DEDUP_RING_C6);
 }
 
