@@ -128,12 +128,13 @@ const USB_READ_BUDGET: usize = 256;
 /// loop that burns the core whenever no host is reading.
 ///
 /// The tick is for work no event announces: [`StallWatch`] judging elapsed time
-/// against its three seconds, the panel's look and redraw floors and its fallback
-/// screen, and the [`mark`] breadcrumbs. Sized to the panel's `MIN_LOOK_MS`, the
-/// tightest of those.
+/// against its three seconds, the panel's redraw floor and its fallback screen, and
+/// the [`mark`] breadcrumbs.
 ///
 /// It also defines quiet air for the panel: a wait the tick ends saw no frame, no host
 /// byte and no FIFO drain for its whole length, and only the pass after one redraws.
+/// A bursting four-node fleet still leaves a silence this long one to two times a
+/// second (`docs/t-dongle-c5-findings.md`).
 const IDLE_TICK: embassy_time::Duration = embassy_time::Duration::from_millis(100);
 
 /// USB OUT packet size, which is also the receive FIFO's: one read empties it.
