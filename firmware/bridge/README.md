@@ -131,8 +131,10 @@ watchdog behind that case.
 **Never block on the USB endpoint.** `UsbSerialJtag` stops accepting bytes as soon as its FIFO
 fills, and nothing drains that FIFO unless a host is reading, so a blocking write from the receive
 path would stall the radio for as long as the TUI is wedged or the cable is out. Everything outbound
-goes through the rings in `wartui_proto::outbox`, which are drained by whatever the FIFO will take
-and never waited on: both evict oldest-first under pressure and count it into `Status.dropped_tx`,
+goes through the rings in `wartui_proto::outbox`, which are drained by whatever the FIFO will take.
+The only wait on the endpoint is the main loop's idle one, bounded by `IDLE_SLEEP` and ended early
+by the FIFO emptying, so a host that stops reading costs a millisecond per pass and no more. Both
+rings evict oldest-first under pressure and count it into `Status.dropped_tx`,
 and priority frames (`Ready`, `SendResult`, `Status`, `Error`) are served ahead of `Rx` and `Log`
 rather than given an unbounded queue. That module is in `wartui-proto` so those rules are
 unit-testable on the host.
@@ -204,6 +206,13 @@ IDF calls `esp-radio` does not wrap, which are the only `unsafe` in either firmw
 `esp_now_set_peer_rate_config` (`set_peer_rate` in `src/main.rs`) and `esp_wifi_set_max_tx_power`
 (`set_tx_power` beside it). `esp-alloc` is here because the firmware is what owns the heap and
 declares its regions.
+
+`embassy-executor`, `embassy-time` and `embedded-io-async` sit on `esp-rtos` and `esp-hal` the same
+way: held at the versions those build against, and moved with them — `embedded-io-async` at 0.7, the
+only version `esp-hal` 1.1 implements its async traits for. None can double quietly — the executor's
+`Spawner` would not type-check against `esp-rtos`'s, `embassy-time-driver` is `links`-keyed, and a
+second `embedded-io-async` would have no implementation on the USB half — so they are not in the
+check, and Dependabot ignores their minor and major releases.
 
 `esp-generate` is a version behind this set; its scaffolding (`build.rs`, `.cargo/config.toml`) is
 what was taken from it, not its dependency list.

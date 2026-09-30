@@ -5,8 +5,9 @@
 //! answers is listening, and one that does not is either wedged or not there.
 //!
 //! `dropped_tx` is the number worth watching: frames the bridge threw away because
-//! the host was not draining the USB endpoint, so observations lost on this side of
-//! the radio rather than on the air.
+//! they arrived faster than the host drained the USB endpoint — a host not reading,
+//! or a burst too big to queue — so observations lost on this side of the radio
+//! rather than on the air.
 
 use std::time::Duration;
 
@@ -80,10 +81,11 @@ pub async fn run(args: Args) -> Result<()> {
         // Cumulative since the bridge booted, and one left powered with nothing
         // attached drops everything it hears — so a large number is not a fault.
         println!(
-            "\n{dropped_tx} frames were discarded over those {}, whenever no host was \n\
-             reading fast enough. That includes any time the bridge spent powered \n\
-             with nothing attached. `wartui run` reports drops from the moment it \n\
-             connects, which is the number that says whether a capture lost data.",
+            "\n{dropped_tx} frames were discarded over those {}, because a host was \n\
+             not reading or a burst arrived faster than USB could drain it. That \n\
+             includes any time the bridge spent powered with nothing attached. \n\
+             `wartui run` reports drops from the moment it connects, which is the \n\
+             number that says whether a capture lost data.",
             human_uptime(uptime_ms)
         );
     }

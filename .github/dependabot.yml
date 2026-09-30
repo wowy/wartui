@@ -12,6 +12,8 @@ updates:
   # `esp-wifi-sys-*`, a second and empty heap for `esp-alloc`. Issue #16 moves
   # the whole family at once, by hand. `esp-radio` itself is deliberately not
   # ignored — a pull request there is the signal that the wall has moved.
+  # The same holds for the crates `esp-rtos` and `esp-hal` themselves build
+  # against: `embassy-executor`, `embassy-time`, `embedded-io-async`.
   # `firmware/bridge/README.md` § "Dependency versions" has the reasoning.
   - package-ecosystem: "cargo"
     directories:
@@ -25,6 +27,12 @@ updates:
     # firmware's CI job counts the versions before it builds. Those are worth
     # taking — `esp-hal 1.1.3` is a fix this firmware can have.
     ignore:
+      - dependency-name: "embassy-executor"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      - dependency-name: "embassy-time"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      - dependency-name: "embedded-io-async"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
       - dependency-name: "esp-alloc"
         update-types: ["version-update:semver-minor", "version-update:semver-major"]
       - dependency-name: "esp-hal"

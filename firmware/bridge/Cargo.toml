@@ -61,7 +61,14 @@ esp-radio = { version = "1.0.0-beta.0", default-features = false, features = [
   "unstable",
   "wifi",
 ] }
-esp-rtos = { version = "0.3.0", features = ["esp-alloc", "esp-radio"] }
+esp-rtos = { version = "0.3.0", features = ["embassy", "esp-alloc", "esp-radio"] }
+# `main` is an `esp-rtos` embassy task so the idle wait can end on the USB transmit
+# interrupt. Held at the versions `esp-rtos` and `esp-hal` build against;
+# README.md § "Dependency versions".
+embassy-executor = "0.10.0"
+embassy-futures = "0.1.2"
+embassy-time = "0.5.1"
+embedded-io-async = "0.7.0"
 # IDF's own bindings, for the one call `esp-radio` does not wrap —
 # `esp_now_set_peer_rate_config`, in `set_peer_rate`. Held at the version
 # `esp-radio` links; README.md § "Dependency versions".

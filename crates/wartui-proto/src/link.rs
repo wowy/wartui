@@ -376,8 +376,9 @@ pub enum BridgeToHost {
         peer_count: u8,
         /// Frames received since boot.
         rx_count: u32,
-        /// Frames the outbound ring dropped because the host was not draining
-        /// it. Non-zero means the host fell behind.
+        /// Frames the outbound ring dropped because they arrived faster than the
+        /// host took them: a host not reading, or a burst bigger than the ring plus
+        /// what USB drains during it.
         dropped_tx: u32,
         /// Bridge uptime.
         uptime_ms: u32,
