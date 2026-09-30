@@ -41,15 +41,23 @@
 //! and probe response it hears, inside a lock that holds interrupts off
 //! (`esp-sync`'s `NonReentrantMutex`). Timed on the ESP32-C5 and C6, a linear scan of
 //! a 256-entry ring there took 18-37 µs a frame. A hash lookup takes under 1 µs, and
-//! measured the same at 512 entries as at 256, so [`crate::plan::DEDUP_RING`] is sized
-//! for the neighbourhood rather than for the lookup. The index is the shared
-//! `mac_index` table, over [`crate::plan::DEDUP_INDEX`] slots.
+//! measured the same at 512 entries as at 256, so the ring is sized for the
+//! neighbourhood and the chip's RAM rather than for the lookup. The index is the shared
+//! `mac_index` table, twice the ring's size in slots.
+//!
+//! That is why there are two sizes. [`C5DedupRing`] holds 512 addresses in 8 KB.
+//! [`C6DedupRing`] holds 4,096 in 64 KB: the C6 has 128 KB more SRAM and no 5 GHz
+//! radio, so in a mixed fleet it is the likely Bluetooth node, and the RAM comes out
+//! of a main stack that has never used more than about 2 KB of what it is given.
 //!
 //! [`DEDUP_REFRESH_MS`]: crate::plan::DEDUP_REFRESH_MS
 //! [`DEDUP_RSSI_GAIN_DB`]: crate::plan::DEDUP_RSSI_GAIN_DB
 
 use crate::mac_index::MacIndex;
-use crate::plan::{DEDUP_INDEX, DEDUP_REFRESH_MS, DEDUP_RING, DEDUP_RSSI_GAIN_DB};
+use crate::plan::{
+    DEDUP_INDEX_C5, DEDUP_INDEX_C6, DEDUP_REFRESH_MS, DEDUP_RING_C5, DEDUP_RING_C6,
+    DEDUP_RSSI_GAIN_DB,
+};
 
 #[derive(Debug, Clone, Copy)]
 struct Entry {
@@ -62,8 +70,8 @@ struct Entry {
 
 /// A fixed-capacity ring of recently reported addresses, oldest evicted first.
 ///
-/// `N` is the number of addresses held; [`DEDUP_RING`] is the size the firmware uses.
-/// `S` is the number of hash slots behind it ([`DEDUP_INDEX`]) — a separate parameter
+/// `N` is the number of addresses held; [`C5DedupRing`] and [`C6DedupRing`] are the
+/// sizes the firmware uses. `S` is the number of hash slots behind it — a separate parameter
 /// because stable Rust cannot write `[u16; 2 * N]` for a generic `N`.
 #[derive(Debug, Clone)]
 pub struct MacRing<const N: usize, const S: usize> {
@@ -74,9 +82,13 @@ pub struct MacRing<const N: usize, const S: usize> {
     index: MacIndex<S>,
 }
 
-/// The ring size the firmware and simulator use: [`DEDUP_RING`] addresses over
-/// [`DEDUP_INDEX`] hash slots.
-pub type DedupRing = MacRing<DEDUP_RING, DEDUP_INDEX>;
+/// The ring an ESP32-C5 node and its simulation use: [`DEDUP_RING_C5`] addresses
+/// over [`DEDUP_INDEX_C5`] hash slots.
+pub type C5DedupRing = MacRing<DEDUP_RING_C5, DEDUP_INDEX_C5>;
+
+/// The ring an ESP32-C6 node and its simulation use: [`DEDUP_RING_C6`] addresses
+/// over [`DEDUP_INDEX_C6`] hash slots.
+pub type C6DedupRing = MacRing<DEDUP_RING_C6, DEDUP_INDEX_C6>;
 
 impl<const N: usize, const S: usize> MacRing<N, S> {
     /// An empty ring.

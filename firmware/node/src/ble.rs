@@ -50,16 +50,18 @@ const _: () = assert!(
     "a scan must finish inside one heartbeat interval, or the beat deadline is never checked"
 );
 
-/// Distinct advertisers one sweep will hold.
+/// Distinct advertisers one sweep will hold: 128 on a C5, 256 on a C6.
 ///
 /// Slots go only to advertisers due to be reported: [`Scanner::sweep`] asks
 /// [`sniff::SEEN`] before an address takes one, so an advertiser the host already
 /// has costs nothing however often it repeats. An ordinary room filled about 60
 /// of it (`docs/phase-1-findings.md`), and overflow drops the *newest* advertiser,
-/// so the number sits at twice the measurement rather than just above it. The
-/// headroom is affordable because [`BlePending`] finds a held address by hash: every
-/// report heard is checked against the buffer with interrupts held off, and a linear
-/// search of 128 reports costs up to 18 µs there.
+/// so the C5's number sits at twice the measurement rather than just above it. The
+/// C6 has 128 KB more SRAM and no 5 GHz radio, so in a mixed fleet it is the likely
+/// Bluetooth node, and it holds twice as many for a crowded street. The headroom
+/// is affordable because [`BlePending`] finds a held address by hash: every report
+/// heard is checked against the buffer with interrupts held off, and a linear search
+/// of 128 reports costs up to 18 µs there.
 /// [`dropped`] counts those advertisers, once per scan each, and it is the only
 /// sign of saturation: the console's `heard` is capped here. The heartbeat carries
 /// it to the host, which shows the fleet's total as `ble drop`.
@@ -69,12 +71,23 @@ const _: () = assert!(
 /// the worst-case delay standing between one scan ending and the next one
 /// starting.
 ///
+/// The burst is also what bounds the C6's size. A full buffer drains back to back,
+/// faster than the bridge forwards frames to USB, into a radio receive queue ten
+/// frames deep that drops its oldest. Measured against a C6 bridge, 256 reports (16
+/// batches in 7 ms) arrived whole, and 512 (31 batches in 13 ms) lost six or seven
+/// batches every time. A lost batch was acknowledged over the air, so its
+/// advertisers are already in [`sniff::SEEN`] and stay hidden until the refresh.
+///
 /// The buffer lives in a `static`, the way `sniff` holds its sightings, because a
 /// report is twelve bytes with the manufacturer identifier: a by-value `Scanner`
 /// puts enough of the buffer on the stack of `Scanner::new` and of `main` to trip
 /// `clippy::large_stack_frames`, which `main.rs` denies. As a static, the reports and
-/// their index cost 2,192 bytes that no stack has to find room for.
+/// their index cost 2,192 bytes on a C5 and 4,240 on a C6 that no stack has to find
+/// room for.
+#[cfg(feature = "esp32c5")]
 const REPORTS: usize = 128;
+#[cfg(feature = "esp32c6")]
+const REPORTS: usize = 256;
 
 /// Hash slots behind [`REPORTS`]: a power of two at least twice it, so the index is
 /// never more than half full.

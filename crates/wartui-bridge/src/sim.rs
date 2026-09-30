@@ -4,7 +4,7 @@
 //! parts — parking until told what to scan, heartbeating on a timer independent of
 //! how often they sweep, scanning Bluetooth and nothing else when that is the
 //! node's job, adopting only on a differing epoch, and suppressing a BSSID through
-//! the same [`DedupRing`] the firmware links, on node time scaled by
+//! the same dedup ring the firmware links for its chip, on node time scaled by
 //! [`SimConfig::speed`].
 //! That last one matters most: it is why a real fleet's observation stream thins to a
 //! trickle after the first pass, and a simulator that streamed endlessly would teach
@@ -25,7 +25,7 @@ use wartui_proto::air::{
     AdminMsg, Capabilities, Frame, HeartbeatMsg, RecordKind, Security, SightingBatchWriter,
     SightingMsg,
 };
-use wartui_proto::dedup::DedupRing;
+use wartui_proto::dedup::{C5DedupRing, C6DedupRing};
 use wartui_proto::link::{
     BROADCAST, BridgeToHost, Chip, EspNowPayload, HostToBridge, LogLevel, LogStr, LoopPhase, Mac,
     Panel, ResetCause, SendStatus,
@@ -358,7 +358,7 @@ struct SimNode {
     /// This node's next sighting batch counter, mirroring `Node::seq` on the
     /// firmware: it advances only once a batch actually goes out.
     seq: u16,
-    seen: Box<DedupRing>,
+    seen: Seen,
     /// When this node booted, on tokio's clock so a paused test controls it.
     boot: tokio::time::Instant,
     speed: f64,
@@ -381,7 +381,7 @@ impl SimNode {
             hb_counter: 1,
             next_beat: None,
             seq: 0,
-            seen: Box::default(),
+            seen: Seen::new(five_ghz),
             boot: tokio::time::Instant::now(),
             speed: 1.0,
             rng: Xorshift::new(0xA5A5_0000 ^ u64::from(index).wrapping_mul(0x9E37_79B9)),
@@ -436,6 +436,36 @@ impl SimNode {
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let now_ms = (self.boot.elapsed().as_secs_f64() * 1000.0 * self.speed) as u64 as u32;
         self.seen.offer(network.bssid, Some(network.rssi), now_ms)
+    }
+}
+
+/// A node's dedup ring, sized for its chip as the firmware sizes it.
+///
+/// Boxed so a `SimNode`, and the future of the task that owns it, holds a pointer
+/// rather than the C6's 64 KB ring inline.
+#[derive(Debug)]
+enum Seen {
+    C5(Box<C5DedupRing>),
+    C6(Box<C6DedupRing>),
+}
+
+impl Seen {
+    fn new(five_ghz: bool) -> Self {
+        if five_ghz { Self::C5(Box::default()) } else { Self::C6(Box::default()) }
+    }
+
+    fn offer(&mut self, mac: [u8; 6], rssi: Option<i8>, now_ms: u32) -> bool {
+        match self {
+            Self::C5(ring) => ring.offer(mac, rssi, now_ms),
+            Self::C6(ring) => ring.offer(mac, rssi, now_ms),
+        }
+    }
+
+    fn clear(&mut self) {
+        match self {
+            Self::C5(ring) => ring.clear(),
+            Self::C6(ring) => ring.clear(),
+        }
     }
 }
 
