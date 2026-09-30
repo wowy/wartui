@@ -33,19 +33,20 @@
 #[cfg(feature = "t-dongle-c5")]
 mod panel;
 
-use esp_hal::Blocking;
+use embassy_futures::select::select;
+use embassy_time::Timer;
+use esp_hal::Async;
 use esp_hal::clock::CpuClock;
 #[cfg(feature = "xiao-external-antenna")]
 use esp_hal::gpio::{Level, Output, OutputConfig};
 use esp_hal::interrupt::software::SoftwareInterruptControl;
 use esp_hal::rtc_cntl::SocResetReason;
-use esp_hal::time::{Duration, Instant};
+use esp_hal::time::Instant;
 use esp_hal::timer::timg::TimerGroup;
 use esp_hal::usb_serial_jtag::{UsbSerialJtag, UsbSerialJtagRx, UsbSerialJtagTx};
 use esp_radio::esp_now::{
     EspNowError, EspNowManager, EspNowReceiver, EspNowSender, EspNowWifiInterface, PeerInfo,
 };
-use esp_rtos::CurrentThreadHandle;
 use portable_atomic::{AtomicU8, AtomicU32, Ordering};
 use static_cell::StaticCell;
 use wartui_proto::heapless::Vec;
@@ -117,12 +118,17 @@ const PANEL: Option<Panel> = None;
 /// radio's receive queue, which is ten frames deep and drops its oldest.
 const USB_READ_BUDGET: usize = 256;
 
-/// How long to idle when neither radio nor link had anything to do.
+/// How long an idle pass waits: one in which neither radio nor link had anything
+/// to do.
 ///
-/// A busy loop would work — the scheduler is preemptive — but would burn the core
-/// for nothing. One millisecond is a hundred times finer than the 100 ms window
-/// any of this has to hit.
-const IDLE_SLEEP: Duration = Duration::from_millis(1);
+/// While frames are queued for the host, the pump stopped on a full 64-byte USB
+/// FIFO, and the wait also ends as soon as that FIFO empties. That is what lets the
+/// outbox drain at USB speed — 0.7 to 0.9 ms per forwarded frame, measured — rather
+/// than one 64-byte packet per millisecond. A busy loop would reach the same speed
+/// but burn the core whenever no host is reading. One millisecond is a hundred
+/// times finer than the 100 ms window any of this has to hit, and keeps the radio's
+/// ten-frame receive queue drained while a host is slow.
+const IDLE_SLEEP: embassy_time::Duration = embassy_time::Duration::from_millis(1);
 
 // There is no watchdog here, having built one and measured that it cannot work.
 // `esp_hal::init` disables every watchdog on the chip
@@ -278,8 +284,11 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 }
 
 /// The USB endpoint, as somewhere to put bytes.
+///
+/// Async for the one thing the main loop awaits — the FIFO emptying — while every
+/// byte still goes in through the non-blocking calls, which work in either mode.
 struct UsbSink<'d> {
-    tx: UsbSerialJtagTx<'d, Blocking>,
+    tx: UsbSerialJtagTx<'d, Async>,
 }
 
 impl ByteSink for UsbSink<'_> {
@@ -416,8 +425,8 @@ impl Bridge {
     }
 }
 
-#[esp_hal::main]
-fn main() -> ! {
+#[esp_rtos::main]
+async fn main(_spawner: embassy_executor::Spawner) -> ! {
     let peripherals = esp_hal::init(esp_hal::Config::default().with_cpu_clock(CpuClock::max()));
 
     // Read before anything else writes it: this is the *previous* life's marker,
@@ -433,7 +442,7 @@ fn main() -> ! {
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 64 * 1024);
     esp_alloc::heap_allocator!(size: 36 * 1024);
 
-    let (usb_rx, usb_tx) = UsbSerialJtag::new(peripherals.USB_DEVICE).split();
+    let (usb_rx, usb_tx) = UsbSerialJtag::new(peripherals.USB_DEVICE).into_async().split();
     let mut sink = UsbSink { tx: usb_tx };
     let mut usb_rx = usb_rx;
 
@@ -448,7 +457,7 @@ fn main() -> ! {
     #[cfg(feature = "xiao-external-antenna")]
     let _antenna = {
         let power = Output::new(peripherals.GPIO3, Level::Low, OutputConfig::default());
-        CurrentThreadHandle::get().delay(Duration::from_millis(100));
+        esp_rtos::CurrentThreadHandle::get().delay(esp_hal::time::Duration::from_millis(100));
         (power, Output::new(peripherals.GPIO14, Level::High, OutputConfig::default()))
     };
 
@@ -554,7 +563,16 @@ fn main() -> ! {
 
         if !worked {
             mark(LoopPhase::Idle);
-            CurrentThreadHandle::get().delay(IDLE_SLEEP);
+            if queued {
+                // The flush's `Result` is ignored because it cannot carry news: it is
+                // always `Ok`, and a FIFO that never empties is the stall watch's to
+                // judge, from `moved` on the passes that follow.
+                let _ =
+                    select(embedded_io_async::Write::flush(&mut sink.tx), Timer::after(IDLE_SLEEP))
+                        .await;
+            } else {
+                Timer::after(IDLE_SLEEP).await;
+            }
         }
     }
 }
@@ -599,7 +617,7 @@ fn drain_radio(receiver: &EspNowReceiver<'_>, bridge: &mut Bridge) -> bool {
 
 /// Read what the host has sent and act on complete frames.
 fn drain_link(
-    usb_rx: &mut UsbSerialJtagRx<'_, Blocking>,
+    usb_rx: &mut UsbSerialJtagRx<'_, Async>,
     manager: &EspNowManager<'_>,
     sender: &mut EspNowSender<'_>,
     bridge: &mut Bridge,

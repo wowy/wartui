@@ -72,11 +72,14 @@ const _: () = assert!(
 /// starting.
 ///
 /// The burst is also what bounds the C6's size. A full buffer drains back to back,
-/// faster than the bridge forwards frames to USB, into a radio receive queue ten
-/// frames deep that drops its oldest. Measured against a C6 bridge, 256 reports (16
-/// batches in 7 ms) arrived whole, and 512 (31 batches in 13 ms) lost six or seven
-/// batches every time. A lost batch was acknowledged over the air, so its
-/// advertisers are already in [`sniff::SEEN`] and stay hidden until the refresh.
+/// a batch every half millisecond or so, faster than the bridge forwards frames to
+/// USB at under a millisecond each, and the difference queues in the bridge's
+/// 24-frame outbox, which drops its oldest. Measured against C5 and C6 bridges,
+/// bursts of 31 batches (512 reports) arrived whole, and loss began at about 46.
+/// At 256 reports a full buffer is 16 batches, which leaves most of the outbox for
+/// the rest of the fleet arriving at the same moment. A lost batch was acknowledged
+/// over the air, so its advertisers are already in [`sniff::SEEN`] and stay hidden
+/// until the refresh.
 ///
 /// The buffer lives in a `static`, the way `sniff` holds its sightings, because a
 /// report is twelve bytes with the manufacturer identifier: a by-value `Scanner`

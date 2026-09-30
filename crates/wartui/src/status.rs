@@ -5,8 +5,9 @@
 //! answers is listening, and one that does not is either wedged or not there.
 //!
 //! `dropped_tx` is the number worth watching: frames the bridge threw away because
-//! the host was not draining the USB endpoint, so observations lost on this side of
-//! the radio rather than on the air.
+//! they arrived faster than the host drained the USB endpoint — a host not reading,
+//! or a burst too big to queue — so observations lost on this side of the radio
+//! rather than on the air.
 
 use std::time::Duration;
 

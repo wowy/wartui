@@ -61,7 +61,17 @@ esp-radio = { version = "1.0.0-beta.0", default-features = false, features = [
   "unstable",
   "wifi",
 ] }
-esp-rtos = { version = "0.3.0", features = ["esp-alloc", "esp-radio"] }
+esp-rtos = { version = "0.3.0", features = ["embassy", "esp-alloc", "esp-radio"] }
+# The async half: `main` is an `esp-rtos` embassy task so the idle wait can end on
+# the USB transmit interrupt. Each held at the version `esp-rtos` 0.3.0 itself
+# builds against: `embassy-executor` 0.10, whose `Spawner` its executor hands
+# `main`, and the `embassy-time` over the `embassy-time-driver` 0.2 it implements.
+# Neither can double quietly — the spawner types would not match, and the driver
+# is `links`-keyed — but both move only when `esp-rtos` does.
+embassy-executor = "0.10.0"
+embassy-futures = "0.1.2"
+embassy-time = "0.5.1"
+embedded-io-async = "0.7.0"
 # IDF's own bindings, for the one call `esp-radio` does not wrap —
 # `esp_now_set_peer_rate_config`, in `set_peer_rate`. Held at the version
 # `esp-radio` links; README.md § "Dependency versions".

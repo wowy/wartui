@@ -32,7 +32,8 @@
 //! fragment to the whole of the next frame and fail the checksum on both.
 //!
 //! The count surfaces in [`BridgeToHost::Status`] as `dropped_tx`, where a non-zero
-//! value means the host rather than the bridge is the bottleneck.
+//! value means frames arrived faster than the host took them: a host not reading,
+//! or a burst bigger than the bulk ring plus what USB drains while it arrives.
 
 use crate::link::{BridgeToHost, MAX_FRAME, encode_frame};
 
@@ -40,7 +41,9 @@ use crate::link::{BridgeToHost, MAX_FRAME, encode_frame};
 ///
 /// Deep enough to cover a stalled host across several nodes' heartbeat bursts —
 /// esp-radio's own receive queue is only ten frames deep and silently discards
-/// its oldest, so the useful buffering has to live here.
+/// its oldest, so the useful buffering has to live here. What fills it is a node's
+/// back-to-back burst: a batch every ~0.5 ms on the air against ~0.8 ms per frame
+/// to USB, so the ring holds the difference for as long as the burst lasts.
 const BULK_DEPTH: usize = 24;
 
 /// Frames that answer a host request. Short, because the host asks for one at a time.
