@@ -140,12 +140,22 @@ const _: () = assert!(
     "an assigned node must hold the control channel for at least a full admin window"
 );
 
-/// How many recently-reported addresses a node holds. See [`crate::dedup`].
-pub const DEDUP_RING: usize = 512;
+/// How many recently-reported addresses an ESP32-C5 node holds. See [`crate::dedup`].
+pub const DEDUP_RING_C5: usize = 512;
 
-/// Hash slots behind [`DEDUP_RING`]. A power of two at least twice the ring, so the
+/// Hash slots behind [`DEDUP_RING_C5`]. A power of two at least twice the ring, so the
 /// index [`crate::dedup::MacRing`] builds over it is never more than half full.
-pub const DEDUP_INDEX: usize = 2 * DEDUP_RING;
+pub const DEDUP_INDEX_C5: usize = 2 * DEDUP_RING_C5;
+
+/// How many recently-reported addresses an ESP32-C6 node holds. See [`crate::dedup`].
+///
+/// Eight times the C5's. The C6 has 128 KB more SRAM and no 5 GHz radio, so in a
+/// mixed fleet it is the node likely to be given the Bluetooth scan, and the room
+/// costs it 64 KB of a main stack that has never used more than 2 KB.
+pub const DEDUP_RING_C6: usize = 4096;
+
+/// Hash slots behind [`DEDUP_RING_C6`], for the reason [`DEDUP_INDEX_C5`] gives.
+pub const DEDUP_INDEX_C6: usize = 2 * DEDUP_RING_C6;
 
 /// How long a node suppresses an address it has reported before reporting it again.
 ///

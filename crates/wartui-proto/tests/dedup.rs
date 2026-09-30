@@ -1,7 +1,7 @@
 //! The ring that keeps a node from reporting the same access point forever.
 
-use wartui_proto::dedup::{DedupRing, MacRing, Refused};
-use wartui_proto::plan::{DEDUP_REFRESH_MS, DEDUP_RING, DEDUP_RSSI_GAIN_DB};
+use wartui_proto::dedup::{C5DedupRing, C6DedupRing, MacRing, Refused};
+use wartui_proto::plan::{DEDUP_REFRESH_MS, DEDUP_RING_C5, DEDUP_RING_C6, DEDUP_RSSI_GAIN_DB};
 
 const T0: u32 = 1_000;
 
@@ -147,17 +147,27 @@ fn mac_ring_fills_from_the_start_when_recording_after_clear() {
     assert!(!ring.contains(&mac(1)), "the pre-clear entries are gone");
 }
 
-#[test]
-fn mac_ring_enforces_capacity_bounds_when_configured_with_firmware_ring_size() {
-    let mut ring: DedupRing = MacRing::new();
-    for n in 0..u16::try_from(DEDUP_RING).expect("fits") {
+/// Fill a ring to `capacity` distinct addresses, then offer one more.
+fn assert_holds_exactly<const N: usize, const S: usize>(ring: &mut MacRing<N, S>, capacity: usize) {
+    for n in 0..u16::try_from(capacity).expect("fits") {
         assert!(ring.offer(mac(n), Some(-70), T0), "every address here is distinct");
     }
-    assert_eq!(ring.len(), DEDUP_RING);
+    assert_eq!(ring.len(), capacity);
     assert!(ring.contains(&mac(0)), "nothing has displaced the first entry yet");
-    ring.offer(mac(9999), Some(-70), T0);
+    ring.offer(mac(u16::MAX), Some(-70), T0);
     assert!(!ring.contains(&mac(0)), "one more address displaces it");
-    assert_eq!(ring.len(), DEDUP_RING, "and the ring does not grow");
+    assert_eq!(ring.len(), capacity, "and the ring does not grow");
+}
+
+#[test]
+fn mac_ring_enforces_capacity_bounds_when_configured_with_c5_ring_size() {
+    assert_holds_exactly(&mut C5DedupRing::new(), DEDUP_RING_C5);
+}
+
+#[test]
+fn mac_ring_enforces_capacity_bounds_when_configured_with_c6_ring_size() {
+    // Boxed: the C6's ring is 64 KB, which a test thread's stack need not find.
+    assert_holds_exactly(&mut *Box::<C6DedupRing>::default(), DEDUP_RING_C6);
 }
 
 #[test]
