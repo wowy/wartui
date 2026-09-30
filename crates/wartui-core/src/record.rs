@@ -80,6 +80,44 @@ pub struct Heartbeat {
     pub ble_dropped: u16,
 }
 
+/// One status reply from the bridge, as it sent it.
+///
+/// Every counter is the bridge's own since its boot, so a bridge reboot shows as the
+/// values falling. The engine's since-attach figure is derived and not recorded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BridgeStatusSeen {
+    /// Unix milliseconds of receipt.
+    pub rx_at_ms: i64,
+    /// The channel the bridge is parked on.
+    pub channel: u8,
+    /// How many peers its ESP-NOW table holds.
+    pub peer_count: u8,
+    /// Frames it has received since its boot.
+    pub rx_count: u32,
+    /// Frames its outbound ring dropped on the way to the host since its boot.
+    pub dropped_tx: u32,
+    /// Milliseconds since its boot.
+    pub uptime_ms: u32,
+}
+
+/// A run of batches missing from one node's sequence, found when the batch after it
+/// arrived.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BatchGap {
+    /// Which node.
+    pub node_mac: Mac,
+    /// Unix milliseconds the batch after the gap arrived, not when the lost ones
+    /// were sent.
+    pub rx_at_ms: i64,
+    /// The `seq` of the last batch before the gap.
+    pub after_seq: u16,
+    /// The `seq` of the batch that revealed it.
+    pub seq: u16,
+    /// Batches missing between the two: `seq - after_seq - 1` modulo 2^16, always
+    /// between 1 and 1023.
+    pub lost: u16,
+}
+
 /// One network or advertiser a node reported.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Observation {
@@ -230,6 +268,10 @@ pub enum Record {
     Raw(RawFrame),
     /// Append an assignment this host transmitted.
     Assignment(AssignmentSent),
+    /// Append a bridge status reply.
+    BridgeStatus(BridgeStatusSeen),
+    /// Append a gap in a node's batch sequence.
+    BatchGap(BatchGap),
 }
 
 #[cfg(test)]

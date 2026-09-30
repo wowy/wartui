@@ -37,7 +37,8 @@ use wartui_proto::plan::{
 use crate::distinct::Distinct;
 use crate::position::PositionChain;
 use crate::record::{
-    AdminOutcome, AssignmentSent, Heartbeat, NodeSeen, Observation, RawFrame, Record, ssid_text,
+    AdminOutcome, AssignmentSent, BatchGap, BridgeStatusSeen, Heartbeat, NodeSeen, Observation,
+    RawFrame, Record, ssid_text,
 };
 
 /// The time, in both of the forms this code needs.
@@ -877,6 +878,14 @@ impl FleetEngine {
                     dropped_since_attach: dropped_tx - baseline,
                     uptime_ms: *uptime_ms,
                 });
+                batch.records.push(Record::BridgeStatus(BridgeStatusSeen {
+                    rx_at_ms: now.unix_ms,
+                    channel: *channel,
+                    peer_count: *peer_count,
+                    rx_count: *rx_count,
+                    dropped_tx: *dropped_tx,
+                    uptime_ms: *uptime_ms,
+                }));
             }
             // `Ready` reaches the engine as `LinkEvent::Connected`; the bridge's
             // own diagnostics are the operator's business, not the engine's.
@@ -1085,7 +1094,7 @@ impl FleetEngine {
                         node.duplicate_batches += 1;
                     }
                 } else {
-                    self.note_batch_seq(src, sightings.seq);
+                    self.note_batch_seq(src, sightings.seq, now, batch);
                     for (sighting, raw) in sightings.iter() {
                         self.on_sighting(src, now, rssi, sighting, raw, batch);
                     }
@@ -1169,14 +1178,24 @@ impl FleetEngine {
     /// reuses the number, so this counts no loss for it either.
     /// A gap under 1024 is batches lost in a row; at or past it, the count has
     /// wrapped or the frame arrived out of order, and guessing at a loss that
-    /// large would invent history rather than report it.
-    fn note_batch_seq(&mut self, src: Mac, seq: u16) {
+    /// large would invent history rather than report it. Each gap it counts is also
+    /// recorded as a [`Record::BatchGap`], so the store's sum matches the live count.
+    fn note_batch_seq(&mut self, src: Mac, seq: u16, now: Now, batch: &mut ActionBatch) {
         let Some(node) = self.nodes.get_mut(&src) else { return };
         if let Some(last) = node.last_seq {
-            let gap = u64::from(seq.wrapping_sub(last.wrapping_add(1)));
+            let gap = seq.wrapping_sub(last.wrapping_add(1));
             if gap < 1024 {
-                node.batches_lost += gap;
-                self.counters.batches_lost += gap;
+                node.batches_lost += u64::from(gap);
+                self.counters.batches_lost += u64::from(gap);
+            }
+            if gap > 0 && gap < 1024 {
+                batch.records.push(Record::BatchGap(BatchGap {
+                    node_mac: src,
+                    rx_at_ms: now.unix_ms,
+                    after_seq: last,
+                    seq,
+                    lost: gap,
+                }));
             }
         }
         node.last_seq = Some(seq);
