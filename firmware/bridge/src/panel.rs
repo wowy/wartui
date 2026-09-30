@@ -34,6 +34,15 @@
 //! `StaticCell` buffer rather than the heap — `heap_allocator!` hands that to the radio
 //! blobs, and nothing in wartui's own bridge code allocates.
 //!
+//! # Why it draws only on quiet air
+//!
+//! A redraw blocks the loop for tens of milliseconds, and the radio's receive queue
+//! behind it is ten frames deep and drops its oldest. The loop wakes on the first
+//! frame of a burst, so a redraw taken whenever its floors allow lands on the start of
+//! a burst and costs the frames behind it. So a redraw waits for a pass whose idle
+//! wait the tick ended, when the air has been quiet for a whole `IDLE_TICK`, and
+//! [`MAX_DEFER_MS`] bounds that wait (`docs/t-dongle-c5-findings.md`).
+//!
 //! # The backlight is active low
 //!
 //! `examples/Factory/Factory.ino` toggles it `lcd_on ? 0 : 1`. Driving GPIO0 high
@@ -130,13 +139,21 @@ const MIN_REDRAW_MS: u64 = 500;
 /// The shortest gap between two decisions about whether to redraw.
 ///
 /// `MIN_REDRAW_MS` only moves when a row is actually drawn, so on a settled screen it
-/// stops advancing and stops gating: every pass of a loop that turns over about a
-/// thousand times a second would otherwise copy the host's lines and compare all five,
-/// and in fallback mode would format the whole screen from scratch, to conclude each
-/// time that nothing had changed. This bounds that to ten times a second. It is not
-/// `MIN_REDRAW_MS` itself because that would delay a real change by up to half a
-/// second, which is the thing `MIN_REDRAW_MS` is deliberately set below 1 Hz to avoid.
+/// stops advancing and stops gating: every pass of a loop woken by each frame on the
+/// air — a steady stream while a fleet talks — would otherwise copy the host's lines
+/// and compare all five, and in fallback mode would format the whole screen from
+/// scratch, to conclude each time that nothing had changed. This bounds that to ten
+/// times a second. It is not `MIN_REDRAW_MS` itself because that would delay a real
+/// change by up to half a second, which is the thing `MIN_REDRAW_MS` is deliberately
+/// set below 1 Hz to avoid.
 const MIN_LOOK_MS: u64 = 100;
+
+/// The longest a change waits for quiet air before it is drawn anyway.
+///
+/// Without it, a fleet busy enough never to fall silent for an idle tick would freeze
+/// the screen. Set at the host's 1 Hz push rate, so a deferred change is at most one
+/// push late, and well under [`HOST_GONE_MS`].
+const MAX_DEFER_MS: u64 = 1_000;
 
 /// How long the host may go quiet before the panel says so.
 ///
@@ -222,6 +239,11 @@ pub struct Screen {
     last_ms: u64,
     /// When the decision above was last taken, drawn or not.
     last_look_ms: u64,
+    /// When a change first waited for quiet air, if one is waiting.
+    ///
+    /// The first deferral is kept, not the latest, so [`MAX_DEFER_MS`] bounds the
+    /// wait from when the change was found rather than from the last busy pass.
+    deferred_since: Option<u64>,
     /// Kept alive so nothing else can claim the pins, and so the screen stays lit.
     _backlight: Output<'static>,
     _sd_cs: Output<'static>,
@@ -292,6 +314,7 @@ impl Screen {
             fallback: false,
             last_ms: 0,
             last_look_ms: 0,
+            deferred_since: None,
             _backlight: backlight,
             _sd_cs: sd_cs,
         }))
@@ -300,8 +323,10 @@ impl Screen {
     /// Bring the screen up to date, and say whether anything was drawn.
     ///
     /// The return value is folded into the loop's `worked`, so a panel with nothing to
-    /// say does not keep an idle bridge awake.
-    pub fn render(&mut self, bridge: &mut Bridge, mac: [u8; 6]) -> bool {
+    /// say does not keep an idle bridge awake. `quiet` says the idle wait before this
+    /// pass saw no traffic for a whole tick; the module doc says why only such a pass
+    /// draws.
+    pub fn render(&mut self, bridge: &mut Bridge, mac: [u8; 6], quiet: bool) -> bool {
         let now_ms = bridge.now_ms();
         // Cheapest test first, then the one that bounds the work below on a screen
         // that has settled; `MIN_LOOK_MS` says why one gate is not enough.
@@ -326,27 +351,36 @@ impl Screen {
         };
 
         let crossed = self.fallback != fallback;
-        self.fallback = fallback;
-        let mut drew = false;
         // Over the rows this screen has, not the rows the wire can carry. They are the
         // same number only by coincidence of the font, and clearing the difference
         // costs a transfer per row for pixels that are past the bottom of the glass.
+        //
+        // Severity as well as text: a line whose number held while its colour changed
+        // is the whole point of having colours.
+        let stale = |row: usize| crossed || self.shown[row].as_ref() != lines.get(row);
+        if !(0..ROWS as usize).any(stale) {
+            self.deferred_since = None;
+            return false;
+        }
+        if !quiet {
+            let since = *self.deferred_since.get_or_insert(now_ms);
+            if now_ms.saturating_sub(since) < MAX_DEFER_MS {
+                return false;
+            }
+        }
+
+        self.fallback = fallback;
+        self.deferred_since = None;
         for row in 0..ROWS as usize {
             let wanted = lines.get(row);
-            // Severity as well as text: a line whose number held while its colour
-            // changed is the whole point of having colours.
             if !crossed && self.shown[row].as_ref() == wanted {
                 continue;
             }
             self.draw_row(row, wanted);
             self.shown[row] = wanted.cloned();
-            drew = true;
         }
-
-        if drew {
-            self.last_ms = now_ms;
-        }
-        drew
+        self.last_ms = now_ms;
+        true
     }
 
     /// What the bridge knows without being told, for when nobody is telling it.

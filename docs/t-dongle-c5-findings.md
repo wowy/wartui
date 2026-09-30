@@ -91,6 +91,39 @@ five it started at; at five, that 19.75 s stretch would have dropped the panel t
 "no host" and back twice over, repainting every row each way, with a host
 attached and working the whole time.
 
+## A redraw on the first frame of a burst costs the batches behind it
+
+Measured on 2026-09-30, with four nodes on a temporary build (not committed) each
+sending bursts of 46, 91 and 132 sighting batches, every batch acknowledged by the
+bridge's MAC, for four minutes a run. A batch is lost when its sequence number never
+reaches the host (`batch_gap`); one lost *before the outbox* is such a loss that
+`Status.dropped_tx` does not account for, which leaves the radio's receive queue.
+"Polling" is the loop that slept 1 ms between passes; "event-driven" wakes on radio,
+link and FIFO events.
+
+| Bridge | Loop | Lost | Before the outbox |
+| --- | --- | --- | --- |
+| C6, no panel | polling | 147 | none |
+| C6, no panel | event-driven | 13 | none |
+| T-Dongle-C5 | polling, two runs | 162, 372 | 52, 68 |
+| T-Dongle-C5 | event-driven, redraw whenever the floors allow | 399 | about 392 |
+| Same C5, built without `t-dongle-c5` | event-driven | 32 | none |
+| T-Dongle-C5 | event-driven, redraw on quiet air | 165, about 100 | 10, about 0 |
+
+The second quiet-air run excludes one 513-batch gap at the start of the session,
+which is traffic sent while no host was attached rather than loss under test.
+
+Inside a burst the event-driven C5's losses were one contiguous run starting at
+index 1 — 1..54, say, with the tail arriving. That is `esp-radio`'s ten-deep,
+drop-oldest receive queue behind a loop blocked in `Screen::render`. Polling put
+redraws at arbitrary moments; waking on the first frame of a burst puts one at the
+start of the burst whenever the panel's floors have passed. The stall itself is not
+new — the polling loop lost indices 0..35 of one burst the same way — but waking on
+the air made it line up with traffic.
+
+So the panel draws only on a pass whose idle wait the tick ended, and
+`MAX_DEFER_MS` stops a fleet that never falls quiet from freezing the screen.
+
 ## Numbers this replaces
 
 An earlier note estimated a full-frame push at 6–15 ms at 20–40 MHz, reasoning

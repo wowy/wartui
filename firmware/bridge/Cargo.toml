@@ -62,8 +62,8 @@ esp-radio = { version = "1.0.0-beta.0", default-features = false, features = [
   "wifi",
 ] }
 esp-rtos = { version = "0.3.0", features = ["embassy", "esp-alloc", "esp-radio"] }
-# `main` is an `esp-rtos` embassy task so the idle wait can end on the USB transmit
-# interrupt. Held at the versions `esp-rtos` and `esp-hal` build against;
+# `main` is an `esp-rtos` embassy task so the idle wait can end on USB and radio
+# events. Held at the versions `esp-rtos` and `esp-hal` build against;
 # README.md § "Dependency versions".
 embassy-executor = "0.10.0"
 embassy-futures = "0.1.2"
