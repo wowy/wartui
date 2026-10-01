@@ -31,7 +31,7 @@ rebooting sends nothing, since every node is already addressing it correctly.
 `run` takes:
 
 | Flag                    | Default     | What it is                                                |
-| ----------------------- | ----------- | --------------------------------------------------------- |
+|-------------------------|-------------|-----------------------------------------------------------|
 | `--db PATH`             | dated       | Where to keep the capture                                 |
 | `--bridge PATH\|MAC`    | detected    | Which board the bridge is, by path, address or `00:08`    |
 | `--lat` `--lon` `--alt` | —           | A static position for every observation                   |
@@ -132,8 +132,8 @@ mid-run — see "At the keyboard" below.
 `fleet` and `bridge` are independent: each one missing is 2 dBm, and neither falls back to the
 other's.
 
-An unknown key or table makes wartui refuse to start naming the file and the line; an
-out-of-range value, an unknown `pool` spelling, a malformed, or a `node` beside
+An unknown key or table makes wartui refuse to start, naming the file and the line; an
+out-of-range value, an unknown `pool` spelling, a malformed `node`, or a `node` beside
 `remember = false` does too, naming the file and the key.
 
 ### Benchmarking the store
@@ -310,7 +310,7 @@ its Wi-Fi radio never leaves the control channel.
 
 ## Bluetooth
 
-**At most one node scans Bluetooth, by default, none does, and it is that node's whole job.** `b` on
+**At most one node scans Bluetooth, by default none does, and it is that node's whole job.** `b` on
 the selected node gives it the scan; `b` again on the node that holds it takes it off the fleet. With
 `remember bt node` on (the default), `b` also remembers that choice in `wartui.toml`, and the
 remembered node gets the scan back by itself whenever it is heartbeating and nothing holds it — at
@@ -341,7 +341,7 @@ rather than legality — a node parks and reads beacons, so a pool says where it
 what it emits.
 
 | Pool  | 2.4 GHz | 5 GHz  | Channels |
-| ----- | ------- | ------ | -------- |
+|-------|---------|--------|----------|
 | `all` | 1–13    | 36–177 | 41       |
 | `us`  | 1–11    | 36–165 | 36       |
 | `eu`  | 1–13    | 36–140 | 32       |
@@ -456,7 +456,7 @@ read off the band its heartbeats announce, so a node not yet heartbeating shows 
 chip.
 
 | State          | Meaning                                                                                                                                                |
-| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+|----------------|--------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `alive`        | Heartbeating, so it can be given channels                                                                                                              |
 | `stale`        | Still being heard, but not heartbeating — most often Bluetooth coexistence on the node holding the radio through its admin window                      |
 | `no heartbeat` | Seen, but has never completed a sweep                                                                                                                  |
