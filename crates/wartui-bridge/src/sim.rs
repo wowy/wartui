@@ -11,6 +11,10 @@
 //! the wrong lesson. Simulated signal is fixed per network, so only the refresh ever
 //! re-reports one here.
 //!
+//! The bridge's microsecond clock is tokio's, so a paused test holds still the clock
+//! latency and uptime are measured on, as it does node time. [`SimConfig::speed`]
+//! does not scale it: it is the bridge's clock, not a node's.
+//!
 //! [`SimConfig::ble_coexistence_failure`] models a *failure* — what a stock node did
 //! on the bench, and the only way to exercise the host's `no admin ack` path without
 //! a second radio — and [`SimConfig::c6_nodes`] a mixed fleet. Both are off unless
@@ -18,7 +22,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tokio::sync::mpsc;
 use wartui_proto::air::{
@@ -158,7 +162,7 @@ impl SimTransport {
     pub fn start(self) -> Result<LinkHandle, TransportError> {
         let (handle, plumbing) = link_pair();
         let world = Arc::new(World::new(&self.config));
-        let started = Instant::now();
+        let started = tokio::time::Instant::now();
 
         // Nothing a node says is observable until the dongle has announced itself,
         // so the fake fleet waits rather than racing it: a parked node heartbeats
@@ -209,7 +213,7 @@ impl SimTransport {
 async fn run_bridge(
     mut plumbing: crate::LinkPlumbing,
     admin_txs: Vec<(Mac, mpsc::Sender<SimCommand>, Arc<AtomicBool>)>,
-    started: Instant,
+    started: tokio::time::Instant,
     node_count: u8,
     ble_coexistence_failure: bool,
     attached: tokio::sync::watch::Sender<bool>,
@@ -469,7 +473,7 @@ async fn run_node(
     events: mpsc::Sender<LinkEvent>,
     mut admin_rx: mpsc::Receiver<SimCommand>,
     speed: f64,
-    started: Instant,
+    started: tokio::time::Instant,
     mut attached: tokio::sync::watch::Receiver<bool>,
 ) {
     if attached.wait_for(|up| *up).await.is_err() {
@@ -618,7 +622,7 @@ fn next_beat_after(deadline: tokio::time::Instant, speed: f64) -> tokio::time::I
 async fn beat(
     events: &mpsc::Sender<LinkEvent>,
     node: &SimNode,
-    started: Instant,
+    started: tokio::time::Instant,
 ) -> Result<(), ()> {
     // Capabilities are what tell the host this is a node it can drive, so a fleet
     // without them is a fleet the planner ignores. The band varies by node, because
@@ -674,7 +678,7 @@ async fn flush_batch(
     events: &mpsc::Sender<LinkEvent>,
     node: &mut SimNode,
     writer: &SightingBatchWriter,
-    started: Instant,
+    started: tokio::time::Instant,
 ) -> Result<(), ()> {
     if writer.is_empty() {
         return Ok(());
@@ -688,7 +692,7 @@ async fn send_frame(
     events: &mpsc::Sender<LinkEvent>,
     src: Mac,
     frame: &[u8],
-    started: Instant,
+    started: tokio::time::Instant,
 ) -> Result<(), ()> {
     let mut payload = EspNowPayload::new();
     payload.extend_from_slice(frame).expect("the longest sighting fits the 250-byte payload");
@@ -708,11 +712,11 @@ fn scaled(millis: u64, speed: f64) -> Duration {
 /// per wrap away from the one host code actually has to cope with.
 const WRAP: u128 = 1 << 32;
 
-fn elapsed_us(started: Instant) -> u32 {
+fn elapsed_us(started: tokio::time::Instant) -> u32 {
     u32::try_from(started.elapsed().as_micros() % WRAP).unwrap_or(0)
 }
 
-fn elapsed_ms(started: Instant) -> u32 {
+fn elapsed_ms(started: tokio::time::Instant) -> u32 {
     u32::try_from(started.elapsed().as_millis() % WRAP).unwrap_or(0)
 }
 
