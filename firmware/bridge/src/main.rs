@@ -57,12 +57,11 @@ use wartui_proto::link::{
     decode_frame,
 };
 use wartui_proto::outbox::{ByteSink, Outbox};
-/// The channel the fleet speaks on. Shared with the node
-/// firmware and the host planner rather than spelled again here: nothing on the
-/// air negotiates this number, so the only thing keeping the three ends on the
-/// same channel is that they read it from the same place. The host can move
-/// this bridge with [`HostToBridge::SetChannel`], but nothing else will follow.
-use wartui_proto::plan::CONTROL_CHANNEL as DEFAULT_CHANNEL;
+/// The channel the fleet speaks on, and the only one this bridge ever sits on. Shared
+/// with the node firmware and the host planner rather than spelled again here: nothing
+/// on the air negotiates this number, so the only thing keeping the three ends on the
+/// same channel is that they read it from the same place.
+use wartui_proto::plan::CONTROL_CHANNEL;
 use wartui_proto::stall::StallWatch;
 
 // This creates the app descriptor the esp-idf bootloader expects.
@@ -352,7 +351,6 @@ static BRIDGE: StaticCell<Bridge> = StaticCell::new();
 struct Bridge {
     outbox: &'static mut Outbox,
     accumulator: FrameAccumulator<MAX_FRAME>,
-    channel: u8,
     rx_count: u32,
     boot: Instant,
     /// Why this life started, and where the last one stopped. Fixed at boot
@@ -500,12 +498,10 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     };
 
     // `esp-radio`'s default is China under `WIFI_COUNTRY_POLICY_MANUAL`, which
-    // refuses 5 GHz 100-144 outright. The bridge sits on channel 6 and would never
-    // notice, but `--channel` is a plain `u8` an operator can point anywhere, and
-    // a fleet moved somewhere this domain forbids would stop here while the nodes
-    // went. This end at least says so — `SetChannel` answers a refusal with an
-    // `Error` frame — but two halves of one fleet disagreeing about what is legal
-    // is a trap even when one half can describe it.
+    // refuses 5 GHz 100-144 outright. The bridge only ever sits on `CONTROL_CHANNEL`
+    // and would never notice, but a C5 node's 5 GHz sweep would lose 100-144 under
+    // that default, so the nodes pass `US` and the bridge passes it too: two halves
+    // of one fleet disagreeing about what is legal is a trap.
     let mut controller = esp_radio::wifi::WifiController::new(
         peripherals.WIFI,
         esp_radio::wifi::ControllerConfig::default().with_country_info(*b"US"),
@@ -524,7 +520,6 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     let bridge = BRIDGE.init_with(|| Bridge {
         outbox: OUTBOX.init_with(Outbox::new),
         accumulator: FrameAccumulator::new(),
-        channel: DEFAULT_CHANNEL,
         rx_count: 0,
         boot: now,
         cause,
@@ -563,7 +558,7 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
         }
     };
 
-    match manager.set_channel(DEFAULT_CHANNEL) {
+    match manager.set_channel(CONTROL_CHANNEL) {
         Ok(()) => {}
         Err(_) => bridge.error("could not park the radio on the default channel"),
     }
@@ -726,9 +721,6 @@ fn forward(received: ReceivedData, bridge: &mut Bridge) {
         // saturates every frame to 127. Reinterpreting the low byte recovers
         // it, and keeps working if the binding is ever fixed to sign-extend.
         rssi: (received.info.rx_control.rssi as u8) as i8,
-        // Reported from our own state, not the frame: the per-chip
-        // receive-control structs do not all carry a channel.
-        channel: bridge.channel,
         rx_us,
         payload,
     });
@@ -795,14 +787,6 @@ fn handle(
     match command {
         HostToBridge::Identify => bridge.announce(mac),
 
-        HostToBridge::SetChannel { channel } => match manager.set_channel(channel) {
-            Ok(()) => {
-                bridge.channel = channel;
-                bridge.log(LogLevel::Info, "channel changed");
-            }
-            Err(_) => bridge.error("the radio refused that channel"),
-        },
-
         HostToBridge::GetStatus => {
             let peer_count = manager
                 .peer_count()
@@ -810,7 +794,6 @@ fn handle(
                 .unwrap_or(0);
             let uptime_ms = bridge.boot.elapsed().as_millis() as u32;
             bridge.outbox.send(&BridgeToHost::Status {
-                channel: bridge.channel,
                 peer_count,
                 rx_count: bridge.rx_count,
                 dropped_tx: bridge.outbox.dropped(),
@@ -872,8 +855,8 @@ fn handle(
 
 /// A plaintext station peer on whatever channel the radio is already using.
 ///
-/// `channel: None` becomes 0, which ESP-NOW reads as "the current one" — setting it
-/// explicitly would mean re-registering every peer on a [`HostToBridge::SetChannel`].
+/// `channel: None` becomes 0, which ESP-NOW reads as "the current one", so a peer
+/// follows the radio rather than naming `CONTROL_CHANNEL` a second time.
 const fn peer(mac: &Mac) -> PeerInfo {
     PeerInfo {
         interface: EspNowWifiInterface::Station,

@@ -244,11 +244,6 @@ pub enum HostToBridge {
     /// is the one at boot, so restarting the TUI without unplugging the dongle
     /// would wait forever for a frame already sent.
     Identify,
-    /// Park the radio on an ESP-NOW channel. The stock mesh uses 6.
-    SetChannel {
-        /// Wi-Fi channel number.
-        channel: u8,
-    },
     /// Register a peer so unicast frames can be addressed to it.
     AddPeer {
         /// Peer address.
@@ -350,8 +345,6 @@ pub enum BridgeToHost {
         dst: Mac,
         /// Signal strength in dBm.
         rssi: i8,
-        /// Channel the radio was parked on.
-        channel: u8,
         /// Bridge-local microsecond timestamp. Against the one on
         /// [`Self::SendResult`] this measures the heartbeat-to-assignment latency
         /// without the host's own scheduling noise.
@@ -370,8 +363,6 @@ pub enum BridgeToHost {
     },
     /// Reply to [`HostToBridge::GetStatus`].
     Status {
-        /// Channel currently parked on.
-        channel: u8,
         /// Registered peers.
         peer_count: u8,
         /// Frames received since boot.

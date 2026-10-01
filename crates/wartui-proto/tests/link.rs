@@ -30,7 +30,6 @@ fn sample_commands() -> Vec<HostToBridge, 16> {
         .expect("212 fits in 250");
 
     let mut v = Vec::new();
-    v.push(HostToBridge::SetChannel { channel: 6 }).expect("sample_commands has room");
     v.push(HostToBridge::AddPeer { mac: [1, 2, 3, 4, 5, 6] }).expect("sample_commands has room");
     v.push(HostToBridge::RemovePeer { mac: [1, 2, 3, 4, 5, 6] }).expect("sample_commands has room");
     v.push(HostToBridge::GetStatus).expect("sample_commands has room");
@@ -99,19 +98,11 @@ fn sample_events() -> Vec<BridgeToHost, 16> {
         panel: Some(Panel { cols: 26, rows: 8 }),
     })
     .expect("sample_events has room");
-    v.push(BridgeToHost::Rx {
-        src: [9; 6],
-        dst: BROADCAST,
-        rssi: -73,
-        channel: 6,
-        rx_us: 123_456,
-        payload,
-    })
-    .expect("sample_events has room");
+    v.push(BridgeToHost::Rx { src: [9; 6], dst: BROADCAST, rssi: -73, rx_us: 123_456, payload })
+        .expect("sample_events has room");
     v.push(BridgeToHost::SendResult { id: 7, status: SendStatus::AckOk, tx_us: 999 })
         .expect("sample_events has room");
     v.push(BridgeToHost::Status {
-        channel: 6,
         peer_count: 3,
         rx_count: 1000,
         dropped_tx: 0,
@@ -185,7 +176,7 @@ fn link_codec_terminates_frame_with_single_null_byte_when_cobs_encoded() {
 
 #[test]
 fn link_decoder_rejects_frame_when_payload_checksum_is_corrupted() {
-    let cmd = HostToBridge::SetChannel { channel: 6 };
+    let cmd = HostToBridge::AddPeer { mac: [1, 2, 3, 4, 5, 6] };
     let mut out = [0u8; MAX_FRAME];
     let n = encode_frame(&cmd, &mut out).expect("encodes");
 
@@ -250,7 +241,7 @@ fn frame_accumulator_resynchronises_cleanly_when_stream_contains_bootloader_nois
     // A bridge reset sprays ROM bootloader chatter down the same pipe before
     // the first real frame. Nothing before the next terminator should survive,
     // and everything after it should.
-    let cmd = HostToBridge::SetChannel { channel: 11 };
+    let cmd = HostToBridge::AddPeer { mac: [0xa, 0xb, 0xc, 0xd, 0xe, 0xf] };
     let mut out = [0u8; MAX_FRAME];
     let n = encode_frame(&cmd, &mut out).expect("encodes");
 

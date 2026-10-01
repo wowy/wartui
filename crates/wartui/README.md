@@ -15,7 +15,7 @@ This is the operator's manual. The root [`README.md`](../../README.md) is the sh
 | `run`    | Capture a fleet into the store and watch it live            |
 | `export` | Write a WiGLE CSV from a capture                            |
 | `sniff`  | Print every frame the bridge hears, decoded, a line per record |
-| `status` | Ask the bridge for its channel, counters and uptime         |
+| `status` | Ask the bridge for its counters and uptime                  |
 | `reset`  | Reboot a bridge that has stopped answering                  |
 | `ports`  | List the Espressif boards attached, and the address of each |
 | `flash-fleet` | Flash node firmware onto every attached board of one chip; see "Flashing the fleet" |
@@ -34,7 +34,6 @@ rebooting sends nothing, since every node is already addressing it correctly.
 | ----------------------- | ----------- | --------------------------------------------------------- |
 | `--db PATH`             | dated       | Where to keep the capture                                 |
 | `--bridge PATH\|MAC`    | detected    | Which board the bridge is, by path, address or `00:08`    |
-| `--channel N`           | `6`         | The fleet's ESP-NOW control channel                       |
 | `--lat` `--lon` `--alt` | —           | A static position for every observation                   |
 | `--gps PATH`            | detected    | An NMEA receiver, preferred over `--lat`/`--lon`          |
 | `--no-gps`              | off         | Do not look for a receiver at all                         |

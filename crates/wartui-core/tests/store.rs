@@ -81,7 +81,7 @@ fn open_at(path: &std::path::Path) -> Store {
     // Small and quick, so a test does not sit waiting for a batch window.
     config.batch_rows = 8;
     config.batch_interval = Duration::from_millis(10);
-    let session = SessionInfo { espnow_channel: 6, pool: ChannelPool::Us, notes: None };
+    let session = SessionInfo { pool: ChannelPool::Us, notes: None };
     Store::open(&config, &session, EPOCH_MS).expect("opening the store")
 }
 
@@ -118,7 +118,7 @@ fn session_record_stores_pool_spelling_when_session_is_created() {
         let dir = tempfile::tempdir().expect("temp dir");
         let path = dir.path().join("wartui.db");
         let config = StoreConfig::new(&path);
-        let session = SessionInfo { espnow_channel: 6, pool, notes: None };
+        let session = SessionInfo { pool, notes: None };
         Store::open(&config, &session, EPOCH_MS).expect("opening the store").close();
 
         let conn = open_readonly(&path).expect("reopening read-only");
@@ -185,7 +185,6 @@ fn store_persists_every_bridge_status_column_when_round_tripped() {
         &dir,
         vec![Record::BridgeStatus(BridgeStatusSeen {
             rx_at_ms: EPOCH_MS + 5_000,
-            channel: 6,
             peer_count: 3,
             rx_count: 4_000_000_000,
             dropped_tx: 1305,
@@ -194,15 +193,15 @@ fn store_persists_every_bridge_status_column_when_round_tripped() {
     );
 
     let session: i64 = conn.query_row("SELECT id FROM session", [], |r| r.get(0)).unwrap();
-    let row: (i64, i64, i64, i64, i64, i64, i64) = conn
+    let row: (i64, i64, i64, i64, i64, i64) = conn
         .query_row(
-            "SELECT session_id, rx_at, channel, peer_count, rx_count, dropped_tx, uptime_ms
+            "SELECT session_id, rx_at, peer_count, rx_count, dropped_tx, uptime_ms
              FROM bridge_status",
             [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
         )
         .unwrap();
-    assert_eq!(row, (session, EPOCH_MS + 5_000, 6, 3, 4_000_000_000, 1305, 3_240_000));
+    assert_eq!(row, (session, EPOCH_MS + 5_000, 3, 4_000_000_000, 1305, 3_240_000));
 }
 
 #[test]
@@ -507,7 +506,7 @@ fn store_drops_records_without_blocking_when_queue_depth_is_exceeded() {
     config.queue_depth = 1;
     config.batch_rows = 1024;
     config.batch_interval = Duration::from_secs(3600);
-    let session = SessionInfo { espnow_channel: 6, pool: ChannelPool::Us, notes: None };
+    let session = SessionInfo { pool: ChannelPool::Us, notes: None };
     let store = Store::open(&config, &session, EPOCH_MS).expect("opening the store");
 
     let flood: Vec<Record> =
@@ -527,7 +526,7 @@ fn store_reports_committed_batch_timings_on_close_when_requested() {
     config.batch_rows = 8;
     config.batch_interval = Duration::from_secs(3600);
     config.timings = true;
-    let session = SessionInfo { espnow_channel: 6, pool: ChannelPool::Us, notes: None };
+    let session = SessionInfo { pool: ChannelPool::Us, notes: None };
     let store = Store::open(&config, &session, EPOCH_MS).expect("opening the store");
 
     let rows: Vec<Record> = (0..20u8)
@@ -571,7 +570,7 @@ fn background_checkpointer_flushes_and_truncates_wal_when_configured() {
     // Any WAL at all is past the limit, so every pass that catches up is followed by a
     // truncation, and the last one, with the writer gone, always catches up.
     config.checkpoint = Checkpoint::Background { every: Duration::ZERO, truncate_at: 0 };
-    let session = SessionInfo { espnow_channel: 6, pool: ChannelPool::Us, notes: None };
+    let session = SessionInfo { pool: ChannelPool::Us, notes: None };
     let store = Store::open(&config, &session, EPOCH_MS).expect("opening the store");
 
     for n in 0..20u8 {
@@ -606,7 +605,7 @@ fn store_reports_caught_up_checkpoint_count_when_running() {
     config.batch_interval = Duration::from_secs(60);
     config.timings = true;
     config.checkpoint = Checkpoint::Background { every: Duration::ZERO, truncate_at: u64::MAX };
-    let session = SessionInfo { espnow_channel: 6, pool: ChannelPool::Us, notes: None };
+    let session = SessionInfo { pool: ChannelPool::Us, notes: None };
     let store = Store::open(&config, &session, EPOCH_MS).expect("opening the store");
 
     assert_eq!(store.checkpoints_caught_up(), 0, "nothing has been committed yet");
@@ -632,7 +631,7 @@ fn inline_checkpointer_has_zero_passes_when_queried_for_caught_up() {
     config.batch_rows = 10;
     config.batch_interval = Duration::from_secs(60);
     config.checkpoint = Checkpoint::Inline;
-    let session = SessionInfo { espnow_channel: 6, pool: ChannelPool::Us, notes: None };
+    let session = SessionInfo { pool: ChannelPool::Us, notes: None };
     let store = Store::open(&config, &session, EPOCH_MS).expect("opening the store");
 
     let rows: Vec<Record> = (0..10u8)
@@ -668,7 +667,7 @@ fn wal_after_settled_commits(checkpoint: Checkpoint) -> u64 {
     config.wal_autocheckpoint_pages = Some(1_000_000);
     config.checkpoint = checkpoint;
     let checkpointed = matches!(checkpoint, Checkpoint::Background { .. });
-    let session = SessionInfo { espnow_channel: 6, pool: ChannelPool::Us, notes: None };
+    let session = SessionInfo { pool: ChannelPool::Us, notes: None };
     let store = Store::open(&config, &session, EPOCH_MS).expect("opening the store");
 
     for n in 0..20u64 {
@@ -715,7 +714,7 @@ fn background_checkpointer_runs_deferred_pass_when_fleet_becomes_quiet() {
     config.batch_interval = Duration::from_millis(10);
     config.checkpoint =
         Checkpoint::Background { every: Duration::from_millis(200), truncate_at: u64::MAX };
-    let session = SessionInfo { espnow_channel: 6, pool: ChannelPool::Us, notes: None };
+    let session = SessionInfo { pool: ChannelPool::Us, notes: None };
     let store = Store::open(&config, &session, EPOCH_MS).expect("opening the store");
 
     // Two commits well inside one interval, then nothing.
@@ -759,7 +758,7 @@ fn inline_checkpointer_reports_no_passes_when_configured() {
     let mut config = StoreConfig::new(dir.path().join("wartui.db"));
     config.batch_interval = Duration::from_millis(10);
     config.checkpoint = Checkpoint::Inline;
-    let session = SessionInfo { espnow_channel: 6, pool: ChannelPool::Us, notes: None };
+    let session = SessionInfo { pool: ChannelPool::Us, notes: None };
     let store = Store::open(&config, &session, EPOCH_MS).expect("opening the store");
     assert_eq!(store.submit(vec![observation(NODE, [0xAA; 6], -60, EPOCH_MS, Fix::none())]), 0);
     let report = store.close();
@@ -806,7 +805,7 @@ fn store_configures_custom_page_size_when_creating_database() {
     config.page_size = Some(16_384);
     config.cache_kib = Some(32 * 1024);
     config.wal_autocheckpoint_pages = Some(4000);
-    let session = SessionInfo { espnow_channel: 6, pool: ChannelPool::Us, notes: None };
+    let session = SessionInfo { pool: ChannelPool::Us, notes: None };
     Store::open(&config, &session, EPOCH_MS).expect("opening the store").close();
 
     let conn = open_readonly(&path).expect("reopening read-only");
@@ -980,7 +979,7 @@ fn store_refuses_database_connection_when_schema_version_mismatches() {
         other.pragma_update(None, "user_version", found).expect("stamping");
         drop(other);
 
-        let session = SessionInfo { espnow_channel: 6, pool: ChannelPool::Us, notes: None };
+        let session = SessionInfo { pool: ChannelPool::Us, notes: None };
         let opened = Store::open(&StoreConfig::new(&path), &session, EPOCH_MS);
         assert!(
             matches!(
@@ -1016,7 +1015,7 @@ fn fingerprint_row(path: &std::path::Path) -> Option<String> {
 }
 
 fn reopen(path: &std::path::Path) -> Result<Store, StoreError> {
-    let session = SessionInfo { espnow_channel: 6, pool: ChannelPool::Us, notes: None };
+    let session = SessionInfo { pool: ChannelPool::Us, notes: None };
     Store::open(&StoreConfig::new(path), &session, EPOCH_MS)
 }
 

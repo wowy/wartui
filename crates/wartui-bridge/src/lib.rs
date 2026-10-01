@@ -248,8 +248,8 @@ mod tests {
         // Without this bias a burst of status polls can queue ahead of a channel
         // assignment and push it past the node's 100 ms admin window.
         let (handle, mut plumbing) = link_pair();
-        for channel in 0..32 {
-            handle.send_bulk(HostToBridge::SetChannel { channel }).expect("queued");
+        for _ in 0..32 {
+            handle.send_bulk(HostToBridge::GetStatus).expect("queued");
         }
         handle.send_urgent(HostToBridge::Reset).expect("queued");
 

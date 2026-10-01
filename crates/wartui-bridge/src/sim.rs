@@ -243,7 +243,6 @@ async fn run_bridge(
     }
     let _ = attached.send(true);
 
-    let mut channel = 6u8;
     let mut peers: Vec<Mac> = Vec::new();
 
     while let Some(cmd) = plumbing.commands.recv().await {
@@ -256,10 +255,6 @@ async fn run_bridge(
             // claims a panel above.
             HostToBridge::ShowPanel { .. } => None,
             HostToBridge::SetTxPower { .. } => None,
-            HostToBridge::SetChannel { channel: ch } => {
-                channel = ch;
-                None
-            }
             HostToBridge::AddPeer { mac } => {
                 if !peers.contains(&mac) {
                     peers.push(mac);
@@ -271,7 +266,6 @@ async fn run_bridge(
                 None
             }
             HostToBridge::GetStatus => Some(BridgeToHost::Status {
-                channel,
                 peer_count: u8::try_from(peers.len()).unwrap_or(u8::MAX),
                 rx_count: 0,
                 dropped_tx: 0,
@@ -698,14 +692,8 @@ async fn send_frame(
 ) -> Result<(), ()> {
     let mut payload = EspNowPayload::new();
     payload.extend_from_slice(frame).expect("the longest sighting fits the 250-byte payload");
-    let rx = BridgeToHost::Rx {
-        src,
-        dst: BROADCAST,
-        rssi: -55,
-        channel: 6,
-        rx_us: elapsed_us(started),
-        payload,
-    };
+    let rx =
+        BridgeToHost::Rx { src, dst: BROADCAST, rssi: -55, rx_us: elapsed_us(started), payload };
     events.send(LinkEvent::Message(rx)).await.map_err(|_| ())
 }
 

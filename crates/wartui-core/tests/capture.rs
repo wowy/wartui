@@ -28,7 +28,7 @@ async fn capture_session_persists_sightings_and_exports_wigle_when_simulated() {
         .expect("starting the simulator");
 
     let started = now();
-    let session = SessionInfo { espnow_channel: 6, ..Default::default() };
+    let session = SessionInfo::default();
     let store = Store::open(&StoreConfig::new(&path), &session, started.unix_ms)
         .expect("opening the store");
 
@@ -107,7 +107,7 @@ async fn capture_session_attaches_dynamic_gps_positions_when_vehicle_moves() {
         .expect("starting the simulator");
 
     let started = now();
-    let session = SessionInfo { espnow_channel: 6, ..Default::default() };
+    let session = SessionInfo::default();
     let store = Store::open(&StoreConfig::new(&path), &session, started.unix_ms)
         .expect("opening the store");
 

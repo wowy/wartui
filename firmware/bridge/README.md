@@ -95,7 +95,7 @@ read them.
 ## Checking it works
 
 ```sh
-wartui status     # channel, counters, uptime — proves the link runs both ways
+wartui status     # counters, uptime — proves the link runs both ways
 wartui sniff      # every frame, decoded
 ```
 

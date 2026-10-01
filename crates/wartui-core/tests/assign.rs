@@ -62,7 +62,7 @@ async fn settle(path: &Path, nodes: u8) -> Vec<ChannelSet> {
     .expect("starting the simulator");
 
     let started = now();
-    let session = SessionInfo { espnow_channel: 6, pool: ChannelPool::All, ..Default::default() };
+    let session = SessionInfo { pool: ChannelPool::All, ..Default::default() };
     let store =
         Store::open(&StoreConfig::new(path), &session, started.unix_ms).expect("opening the store");
     let config = EngineConfig {
