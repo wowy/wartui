@@ -123,8 +123,8 @@ the firmware would accept 21, but whether anything above 20 works correctly is u
 `[bluetooth]` is the remembered Bluetooth node (see § "Bluetooth"). `remember` is on when absent.
 `node` is the MAC `b` last gave the scan to, written the way `wartui ports` prints one.
 
-`pool` takes `us`, `eu` or `all`; without one the fleet scans `all`. A pool is fixed for the life
-of a run — see "At the keyboard" below for what changing it in the modal costs.
+`pool` takes `us`, `eu` or `all`; without one the fleet scans `all`. The settings modal changes it
+mid-run — see "At the keyboard" below.
 
 `fleet` and `bridge` are independent: each one missing is 2 dBm, and neither falls back to the
 other's.
@@ -267,18 +267,20 @@ is.
 `c` opens a modal with a row each for the pool, the nodes' transmit power, the bridge's, and
 `remember bt node`. `↑`/`↓` (or `j`/`k`) move between them, `←`/`→` (or `h`/`l`) step the selected
 row: a power by 1 dBm, the pool through `all → eu → us`, `remember bt node` to `off` and `on` — all
-stop at their ends rather than wrapping. `Enter` sends the powers and the remember setting to the
-engine — the bridge takes its power on its next status poll, the nodes on their next heartbeat — and
-writes every row shown to `wartui.toml`'s `pool`, `[tx-power]` and `[bluetooth]` keys, whatever was
-there before, then closes the modal. The pool can't change live, so the notice says a restart is
-needed whenever the row was moved. `Esc` or `q` closes the modal without changing anything; `ctrl-c`
-quits even while it is open.
+stop at their ends rather than wrapping. `Enter` sends the pool, the powers and the remember setting
+to the engine, all of them or none, and writes every row shown to `wartui.toml`'s `pool`,
+`[tx-power]` and `[bluetooth]` keys, whatever was there before, then closes the modal. The bridge
+takes its power on its next status poll. A moved pool re-cuts the whole fleet against it, and each
+node takes its new share and power on its next heartbeat, emptying its dedup ring when its share
+changes. `Esc` or `q` closes the modal without changing anything; `ctrl-c` quits even while it is
+open.
 
 ## How channels are assigned
 
 **The planner cuts the pool, and nothing else does.** It deals it across every heartbeating node
-that is sniffing and re-cuts it whenever that set changes; no key and no flag writes one node's
-share. `b` changes the set rather than the shares — see § "Bluetooth". The header says
+that is sniffing and re-cuts it whenever that set changes, the Bluetooth scan moves, or the pool
+changes in the settings modal; no key and no flag writes one node's share. `b` changes the set
+rather than the shares — see § "Bluetooth". The header says
 what it has to work with: `auto — 4 of 5` for four heartbeating nodes out of five seen.
 
 Nothing goes out at the moment a node's share changes. Its radio is away scanning some other channel
@@ -386,7 +388,8 @@ Two consequences worth knowing:
   means "Bluetooth is the whole job" rather than "stop" — so their shares double up with someone
   else's. A node that has nothing to keep is the one exception: the node that *was* the Bluetooth
   scanner holds no channels at all, so taking the scan off it hands it everything its radio can
-  reach instead, and its `channels` column shows the whole pool once it is adopted.
+  reach instead, and its `channels` column shows the whole pool once it is adopted. A surplus node
+  holding channels a newly chosen pool leaves out is handed the same.
 
 ## Positions
 

@@ -5,7 +5,7 @@
 //! or pinned with `--gps`, else `--lat`/`--lon`, else nothing.
 //!
 //! It also transmits, and without being asked: the planner partitions the pool
-//! across the fleet and re-cuts it as the fleet changes. That is the only thing
+//! across the fleet and re-cuts it as the fleet or the pool changes. That is the only thing
 //! that decides what a node scans, and nothing on the command line or at the
 //! keyboard overrides it.
 
@@ -148,7 +148,7 @@ fn tx_powers(file: &config::TxPower) -> (i8, i8) {
     (nodes, bridge)
 }
 
-/// Which channel pool the fleet scans: the file beats the default, as
+/// Which channel pool the fleet starts on: the file beats the default, as
 /// [`tx_powers`] resolves the transmit powers.
 fn pool(file: Option<PoolArg>) -> ChannelPool {
     file.unwrap_or_default().into()
