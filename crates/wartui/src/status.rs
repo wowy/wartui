@@ -23,7 +23,8 @@ const REPLY_TIMEOUT: Duration = super::CONNECT_NOTICE_AFTER;
 
 #[derive(ClapArgs)]
 pub struct Args {
-    /// The bridge, as a device path or as the board's address. Detected if omitted.
+    /// The bridge, as a device path, the board's address, or the end of it (`00:08`). Detected
+    /// if omitted.
     #[arg(long, value_name = "PATH|MAC")]
     pub(crate) bridge: Option<String>,
 
@@ -33,7 +34,7 @@ pub struct Args {
 }
 
 pub async fn run(args: Args) -> Result<()> {
-    let mut link = super::open(args.bridge.as_deref(), args.sim, 0)?;
+    let mut link = super::open(args.bridge.as_deref(), args.sim, 0, super::Remember::Detected)?;
 
     // The bridge announces itself on connect, so waiting for that keeps a status
     // request from going into a port nobody is listening on. The timeout is itself an

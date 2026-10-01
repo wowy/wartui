@@ -238,12 +238,14 @@ edit stops; follow the pointer before changing the rule.
   itself — never sweeps at all. The GPS search is the complement: it opens everything *but* those,
   and writes to none of them. → `crates/wartui-bridge/src/ports.rs` `//!`,
   `serial::select` / `serial::unambiguous_bridge`, `crates/wartui-core/src/discover.rs` `//!`
-- **A connection asks once and then only waits.** A board that is not reading its USB endpoint
-  absorbs exactly one packet and NACKs the rest, and they sit in the tty's output queue through a
-  `close` that no signal can interrupt — 30 s measured against a node, during which the process
-  cannot exit. One `Identify` is also sufficient, because a board that is merely still booting
-  reads it out of that same FIFO when its loop starts. → `crates/wartui-bridge/src/serial.rs`,
-  `connect`'s `identify` arm
+- **A connection asks a board not known to be the bridge once, and then only waits.** A board that
+  is not reading its USB endpoint absorbs exactly one packet and NACKs the rest, and they sit in the
+  tty's output queue through a `close` that no signal can interrupt — 30 s measured against a node,
+  during which the process cannot exit. One `Identify` is also sufficient to be answered, because a
+  board that is merely still booting reads it out of that same FIFO when its loop starts. Only the
+  remembered or settled bridge is asked a second time, after `stall::TX_STALL_TIMEOUT_MS`, so that
+  a wedged one reboots itself; being named or alone does not make a board known.
+  → `crates/wartui-bridge/src/serial.rs`, `connect`'s `identify` arm
 - **Never set DTR or RTS on a serial port, or ask `serialport` to.** The kernel raises both
   together on open, which an ESP32's USB Serial/JTAG ignores; moving one without the other is its
   reset sequence, so `.dtr_on_open(false)` reboots the board it was being polite to.

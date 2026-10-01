@@ -115,7 +115,9 @@ So the firmware notices and reboots itself, within about three seconds.
 `wartui_proto::stall::StallWatch` times how long the endpoint has refused bytes _while somebody was
 waiting for them_, and needs the host to have spoken both recently and since the stall began — which
 is what keeps a bridge on a bench with no host attached quiet for ever, and keeps it from resetting
-every time an operator closes a window. The reset _is_ the message, since every way of explaining
+every time an operator closes a window. A host's first `Identify` is what starts the clock on a
+bridge that wedged before it connected, so `wartui` asks a board it already knows to be the bridge a
+second time, 3.5 s in, and the bridge reboots on that frame. The reset _is_ the message, since every way of explaining
 would go out through the path that is broken; the `Ready` behind it says `TxStalled`. The rule lives
 in `wartui-proto` rather than here so that it is tested in microseconds instead of on a bench.
 

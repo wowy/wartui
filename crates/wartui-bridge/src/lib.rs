@@ -110,6 +110,14 @@ pub enum TransportError {
         /// The boards that were found, by address where they report one.
         boards: String,
     },
+    /// A bridge was named by the end of its address, and several boards end that way.
+    #[error("several attached boards end with {spec} ({boards}); name one by more of its address")]
+    AmbiguousName {
+        /// The octets that were asked for.
+        spec: String,
+        /// The boards that end with them.
+        boards: String,
+    },
     /// The OS refused the port.
     #[error(
         "could not open {port}: permission denied. A serial port belongs to the \

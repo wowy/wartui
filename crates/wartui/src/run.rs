@@ -63,7 +63,8 @@ impl From<ChannelPool> for PoolArg {
 
 #[derive(ClapArgs, Debug)]
 pub struct Args {
-    /// The bridge, as a device path or as the board's address. Detected if omitted.
+    /// The bridge, as a device path, the board's address, or the end of it (`00:08`). Detected
+    /// if omitted. A board named here that answers is remembered as the bridge.
     #[arg(long, value_name = "PATH|MAC")]
     pub(crate) bridge: Option<String>,
 
@@ -201,7 +202,7 @@ pub async fn run(args: Args) -> Result<()> {
     };
 
     let pool = pool(config.pool);
-    let link = crate::open(args.bridge.as_deref(), args.sim, args.sim_c6)?;
+    let link = crate::open(args.bridge.as_deref(), args.sim, args.sim_c6, crate::Remember::Named)?;
 
     let started = now();
     // Whether the capture was named by hand decides what the parting line can tell them

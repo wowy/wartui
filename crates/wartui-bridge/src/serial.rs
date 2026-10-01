@@ -17,6 +17,8 @@ use wartui_proto::link::{
     decode_frame, encode_frame,
 };
 
+use wartui_proto::stall::TX_STALL_TIMEOUT_MS;
+
 use crate::ports::{self, BRIDGE_PID, PortCandidate};
 use crate::remember::BridgeMemory;
 use crate::{BridgeInfo, LinkEvent, LinkHandle, TransportError, link_pair};
@@ -28,7 +30,7 @@ const BAUD: u32 = 921_600;
 const READ_TIMEOUT: Duration = Duration::from_millis(50);
 
 /// How long one tick of the patience below is. The first tick of a tokio interval
-/// fires immediately, which is when the single `Identify` goes out.
+/// fires immediately, which is when the first `Identify` goes out.
 const IDENTIFY_INTERVAL: Duration = Duration::from_millis(500);
 
 /// How long to wait for a board when there is no other to try, in ticks of
@@ -53,6 +55,21 @@ const SETTLE_TICKS: u32 = 12;
 /// Passing over the real bridge costs a retry rather than a failure, which is the
 /// trade [`SETTLE_TICKS`] explains.
 const PROBE_TICKS: u32 = 3;
+
+/// The tick on which a board known to be the bridge is asked a second time: the
+/// first whose ask goes out after [`TX_STALL_TIMEOUT_MS`], 3.5 s in. Tick `n` fires
+/// `n - 1` intervals after the open, because the first fires at once.
+///
+/// Past the timeout so that a bridge whose transmit endpoint has wedged has already
+/// refused bytes for that long when the second frame decodes, and its `StallWatch`
+/// reboots it on that frame. [`connect`]'s `identify` arm has the rest.
+const SECOND_ASK_TICK: u32 = {
+    let interval = IDENTIFY_INTERVAL.as_millis() as u64;
+    (TX_STALL_TIMEOUT_MS / interval) as u32 + 2
+};
+
+// Asked inside a known bridge's patience, or it is never asked at all.
+const _: () = assert!(SECOND_ASK_TICK <= SETTLE_TICKS, "the second ask lands after giving up");
 
 /// How many undecodable frames from an unproven board before it is passed over.
 ///
@@ -85,53 +102,93 @@ pub fn discover_ports() -> Result<Vec<PortCandidate>, TransportError> {
 ///
 /// A MAC is worth accepting because it is the only name that survives everything:
 /// re-enumeration moves a device node, replugging into another socket moves a
-/// `by-path` name, and an ESP32's address moves only when the board does.
+/// `by-path` name, and an ESP32's address moves only when the board does. Its last
+/// few octets are worth accepting too, because they are how the fleet table and
+/// `wartui ports` are read aloud: an operator says `00:08`, not the whole address.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BridgeSpec {
     /// A device path, opened as given and never traded for another.
     Path(String),
     /// A board's address, matched against what the OS reports as its serial number.
     Mac(Mac),
+    /// The last one to five octets of a board's address, matched the same way. It
+    /// names a board only when exactly one attached board ends with them.
+    Tail(Vec<u8>),
+}
+
+impl BridgeSpec {
+    /// Whether a board at this address is one this spec could name.
+    ///
+    /// A path names no address, so it matches none: whether a path reaches a board is
+    /// a question for the OS, not for a list. A tail matching here is not yet a board
+    /// named — several may match, and [`resolve_in`] is where that is refused.
+    #[must_use]
+    pub fn matches_address(&self, mac: &Mac) -> bool {
+        match self {
+            Self::Path(_) => false,
+            Self::Mac(wanted) => wanted == mac,
+            Self::Tail(tail) => mac.ends_with(tail),
+        }
+    }
 }
 
 impl std::str::FromStr for BridgeSpec {
     type Err = std::convert::Infallible;
 
-    /// Six colon-separated hex pairs is an address; everything else is a path.
-    /// Nothing else can be: no device node is spelled that way.
+    /// Six colon-separated hex pairs is an address, and one to five is the end of
+    /// one; everything else is a path. Nothing else can be: no device node is spelled
+    /// that way. Each pair is exactly two hex digits, so `0:08` stays a path rather
+    /// than being read as a guess at what was meant.
     fn from_str(text: &str) -> Result<Self, Self::Err> {
-        Ok(ports::parse_mac(text).map_or_else(|| Self::Path(text.to_owned()), Self::Mac))
+        if let Some(mac) = ports::parse_mac(text) {
+            return Ok(Self::Mac(mac));
+        }
+        Ok(parse_tail(text).map_or_else(|| Self::Path(text.to_owned()), Self::Tail))
     }
+}
+
+/// One to five colon-separated pairs of hex digits, as the octets they spell.
+fn parse_tail(text: &str) -> Option<Vec<u8>> {
+    let octets = text
+        .split(':')
+        .map(|pair| {
+            // Checked by hand: `from_str_radix` also takes a sign, and `+8` is not a pair.
+            let digits = pair.len() == 2 && pair.bytes().all(|b| b.is_ascii_hexdigit());
+            digits.then(|| u8::from_str_radix(pair, 16).ok()).flatten()
+        })
+        .collect::<Option<Vec<u8>>>()?;
+    (1..=5).contains(&octets.len()).then_some(octets)
 }
 
 impl std::fmt::Display for BridgeSpec {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Path(path) => f.write_str(path),
-            Self::Mac(mac) => {
-                for (i, byte) in mac.iter().enumerate() {
-                    if i > 0 {
-                        f.write_str(":")?;
-                    }
-                    write!(f, "{byte:02X}")?;
-                }
-                Ok(())
+        let octets = match self {
+            Self::Path(path) => return f.write_str(path),
+            Self::Mac(mac) => mac.as_slice(),
+            Self::Tail(tail) => tail.as_slice(),
+        };
+        for (i, byte) in octets.iter().enumerate() {
+            if i > 0 {
+                f.write_str(":")?;
             }
+            write!(f, "{byte:02X}")?;
         }
+        Ok(())
     }
 }
 
 /// The port a spec names, out of what is attached.
 ///
 /// # Errors
-/// [`TransportError::Enumerate`] if the ports cannot be listed, or
-/// [`TransportError::NoSuchBridge`] if nothing attached carries that address.
+/// [`TransportError::Enumerate`] if the ports cannot be listed,
+/// [`TransportError::NoSuchBridge`] if nothing attached carries that address, or
+/// [`TransportError::AmbiguousName`] if several boards end with the octets given.
 pub fn resolve(spec: &BridgeSpec) -> Result<String, TransportError> {
     match spec {
         // A path is answered without enumerating: whether it exists is the
         // question the open asks, and the OS gives a better answer than a list.
         BridgeSpec::Path(path) => Ok(path.clone()),
-        BridgeSpec::Mac(_) => resolve_in(&ports::list()?, spec),
+        BridgeSpec::Mac(_) | BridgeSpec::Tail(_) => resolve_in(&ports::list()?, spec),
     }
 }
 
@@ -139,31 +196,52 @@ pub fn resolve(spec: &BridgeSpec) -> Result<String, TransportError> {
 ///
 /// A spec that names a board not attached is refused rather than answered with
 /// another: an operator who named a board meant that board, and quietly opening a
-/// different one is how a capture ends up attributed to the wrong fleet.
+/// different one is how a capture ends up attributed to the wrong fleet. A tail
+/// that several boards end with is refused for the same reason, before anything is
+/// opened: the bridge and a node can share their last octet, and guessing between
+/// them is transmitting into a node.
 ///
 /// # Errors
-/// [`TransportError::NoSuchBridge`] if nothing in `candidates` is that board.
+/// [`TransportError::NoSuchBridge`] if nothing in `candidates` is that board, or
+/// [`TransportError::AmbiguousName`] if several are.
 pub fn resolve_in(
     candidates: &[PortCandidate],
     spec: &BridgeSpec,
 ) -> Result<String, TransportError> {
-    match spec {
-        BridgeSpec::Path(path) => Ok(path.clone()),
-        BridgeSpec::Mac(wanted) => candidates
-            .iter()
-            .find(|candidate| candidate.mac().as_ref() == Some(wanted))
-            .map(|candidate| candidate.path.clone())
-            .ok_or_else(|| TransportError::NoSuchBridge { spec: spec.to_string() }),
+    if let BridgeSpec::Path(path) = spec {
+        return Ok(path.clone());
     }
+    match named_in(candidates, spec).as_slice() {
+        [only] => Ok(only.path.clone()),
+        [] => Err(TransportError::NoSuchBridge { spec: spec.to_string() }),
+        several => Err(TransportError::AmbiguousName {
+            spec: spec.to_string(),
+            boards: several
+                .iter()
+                .filter_map(|candidate| candidate.mac().as_ref().map(ports::mac_text))
+                .collect::<Vec<_>>()
+                .join(", "),
+        }),
+    }
+}
+
+/// Every attached board whose address the spec matches.
+fn named_in<'a>(candidates: &'a [PortCandidate], spec: &BridgeSpec) -> Vec<&'a PortCandidate> {
+    candidates
+        .iter()
+        .filter(|candidate| candidate.mac().is_some_and(|mac| spec.matches_address(&mac)))
+        .collect()
 }
 
 /// The boards to try, in the order they are worth trying.
 ///
 /// A named board is the only candidate there is, however many are attached: an
-/// operator who named one meant that one. Otherwise the order puts the board that
-/// answered last first — so the ordinary run opens one port and no others — and
-/// after that is simply deterministic, which is what makes a sweep testable and
-/// keeps two runs on one machine from disagreeing about what they tried.
+/// operator who named one meant that one. A tail that several boards end with names
+/// none of them, so it selects nothing, and [`resolve_in`] says why. Otherwise the
+/// order puts the board that answered last first — so the ordinary run opens one
+/// port and no others — and after that is simply deterministic, which is what makes
+/// a sweep testable and keeps two runs on one machine from disagreeing about what
+/// they tried.
 #[must_use]
 pub fn select(
     candidates: &[PortCandidate],
@@ -174,12 +252,10 @@ pub fn select(
         // Not matched against the enumeration: a path is opened as given, and the
         // OS says better than a list whether anything is there.
         Some(BridgeSpec::Path(path)) => vec![ports::candidate(path, None, None, None)],
-        Some(BridgeSpec::Mac(wanted)) => candidates
-            .iter()
-            .find(|candidate| candidate.mac().as_ref() == Some(wanted))
-            .cloned()
-            .into_iter()
-            .collect(),
+        Some(spec) => match named_in(candidates, spec).as_slice() {
+            [only] => vec![(*only).clone()],
+            _ => Vec::new(),
+        },
         None => {
             let mut ordered = candidates.to_vec();
             ordered.sort_by_key(|candidate| {
@@ -253,7 +329,7 @@ impl SerialTransport {
         }
     }
 
-    /// Use the board the operator named, by path or by address.
+    /// Use the board the operator named, by path, by address or by the end of one.
     #[must_use]
     pub fn with_spec(spec: BridgeSpec) -> Self {
         Self { spec: Some(spec), ..Self::new() }
@@ -405,9 +481,13 @@ async fn sweep(
     if candidates.is_empty() {
         let reason = match (settled, &transport.spec) {
             (Some(mac), _) => format!("the bridge {} is no longer attached", ports::mac_text(&mac)),
-            (None, Some(spec)) => {
-                TransportError::NoSuchBridge { spec: spec.to_string() }.to_string()
-            }
+            // Asked of the same list rather than assumed, because a tail selects
+            // nothing for two reasons — no board ends that way, or several do — and
+            // "not attached" is the wrong thing to say about the second.
+            (None, Some(spec)) => resolve_in(&attached, spec).err().map_or_else(
+                || TransportError::NoSuchBridge { spec: spec.to_string() }.to_string(),
+                |error| error.to_string(),
+            ),
             (None, None) => TransportError::NoBridgeFound.to_string(),
         };
         return Pass::Failed { reason, opened: 0 };
@@ -434,6 +514,7 @@ async fn sweep(
             &candidate.path,
             if alone { SETTLE_TICKS } else { PROBE_TICKS },
             alone,
+            is_known_bridge(candidate.mac(), remembered, settled),
             &state,
             &transport.memory,
             plumbing,
@@ -534,10 +615,21 @@ struct Attempt {
 /// is what keeps there from being two places to get [`Shutdown`] wrong. A probe
 /// that wins needs no handing over, because the `identify` arm below is already
 /// gated off once a board has announced itself.
+///
+/// `proven` is whether there was nowhere else to go, which buys the board patience
+/// and the advice to reset it. `known_bridge` is whether it is already known to run
+/// bridge firmware, which buys it a second `Identify`. They are not one fact: a board
+/// named on the command line, or the only one attached, is `proven` and may well be
+/// a node.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "what one attempt is told, read once at the call site"
+)]
 async fn connect(
     path: &str,
     patience: u32,
     proven: bool,
+    known_bridge: bool,
     state: &Arc<Attempt>,
     memory: &BridgeMemory,
     plumbing: &mut crate::LinkPlumbing,
@@ -607,7 +699,8 @@ async fn connect(
 
     // A bridge announces itself at boot, and the host is rarely watching at that
     // moment: unplugging the dongle is not part of restarting the TUI. So we ask —
-    // **exactly once, and then only wait.**
+    // **once for any board not known to be the bridge, twice for one that is, and
+    // then only wait.**
     //
     // Once, because a board that is not reading its USB endpoint absorbs exactly
     // one packet: the ESP32's USB Serial/JTAG takes one into its OUT FIFO and NACKs
@@ -618,12 +711,24 @@ async fn connect(
     // board relenting. Nothing can interrupt it: the thread stays alive in the
     // kernel, and because a process cannot exit while one of its threads is in
     // there, `wartui status` pointed at a node hung for half a minute after
-    // printing its answer. One frame never reaches that.
+    // printing its answer. One frame never reaches that. A board merely named, or
+    // the only one attached, is no exception: either may be a node.
     //
-    // Once is also enough. A frame written to an enumerated board is delivered:
-    // if its main loop has not started draining the link yet, our `Identify` waits
-    // in that same FIFO and is read when it does. The patience below is for the
-    // *answer* to take its time, not for the asking to be repeated.
+    // Once is enough to be answered. A frame written to an enumerated board is
+    // delivered: if its main loop has not started draining the link yet, our
+    // `Identify` waits in that same FIFO and is read when it does. The patience
+    // below is for the *answer* to take its time.
+    //
+    // It is not enough to be rebooted. A bridge whose transmit endpoint has wedged
+    // reboots itself only when a host frame decodes *after* the stall began
+    // (`wartui_proto::stall::StallWatch`), and the one `Identify` is what begins it
+    // — so a single ask can never trip the watch, and `wartui status` would wait out
+    // its patience against a bridge that would have cleared itself. The board
+    // remembered as the bridge, or the one this run already settled on, is known to
+    // read its endpoint, so it is asked again at [`SECOND_ASK_TICK`], once that
+    // stall has lasted [`TX_STALL_TIMEOUT_MS`]. That ask goes out only inside
+    // [`SETTLE_TICKS`]: a known bridge probed beside other boards is not waited on
+    // long enough to reach it.
     let mut identify = tokio::time::interval(IDENTIFY_INTERVAL);
     let mut waited = 0_u32;
 
@@ -668,10 +773,13 @@ async fn connect(
                     });
                 }
                 waited += 1;
-                // The first tick of a tokio interval fires immediately, so this is
-                // the one ask, sent as soon as the port is open. See above for why
-                // there is never a second.
-                if waited == 1 && write_tx.send(HostToBridge::Identify).is_err() {
+                // The first tick of a tokio interval fires immediately, so the first
+                // ask goes out as soon as the port is open. See above for why there
+                // is a second only for a board known to be the bridge.
+                let heard = state.decoded.load(Ordering::Relaxed);
+                if asks_on(waited, known_bridge, heard)
+                    && write_tx.send(HostToBridge::Identify).is_err()
+                {
                     break Err("writer stopped".to_owned());
                 }
             }
@@ -710,8 +818,8 @@ async fn connect(
 ///
 /// It does **not** make that close safe, and cannot: a `tcflush` empties the tty's
 /// own queue, and the packet the USB layer has already accepted is past it. Not
-/// writing a second packet is what keeps the close short, which is [`connect`]'s
-/// single `Identify`.
+/// writing a second packet is what keeps the close short, which is why [`connect`]
+/// asks a board not known to be the bridge only once.
 struct Shutdown {
     state: Arc<Attempt>,
     port: Box<dyn serialport::SerialPort>,
@@ -932,6 +1040,22 @@ fn silence_disowns_it(
     alone && opened && remembered.is_some() && candidate.mac() == remembered
 }
 
+/// Whether a board is already known to run bridge firmware, and so to read its
+/// USB endpoint: it is the board remembered as the bridge, or the one this run
+/// settled on. Nothing else counts — not being named, and not being alone — because
+/// a second frame into a board that does not read costs a thirty-second `close`.
+fn is_known_bridge(board: Option<Mac>, remembered: Option<Mac>, settled: Option<Mac>) -> bool {
+    board.is_some() && (board == remembered || board == settled)
+}
+
+/// Whether tick `waited` of a connection sends an `Identify`.
+///
+/// The first tick always does. [`SECOND_ASK_TICK`] does for a known bridge that has
+/// sent nothing that decoded yet; one that has is plainly not wedged.
+fn asks_on(waited: u32, known_bridge: bool, heard: bool) -> bool {
+    waited == 1 || (waited == SECOND_ASK_TICK && known_bridge && !heard)
+}
+
 /// Whether a `Ready` came from a life that started after the last one seen.
 ///
 /// The first is always a new life. After that, the only thing separating a reboot
@@ -943,7 +1067,7 @@ fn is_a_new_life(uptime_ms: u32, last_seen: Option<u32>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_a_new_life, silence_disowns_it};
+    use super::{SECOND_ASK_TICK, asks_on, is_a_new_life, is_known_bridge, silence_disowns_it};
     use crate::ports::{BRIDGE_PID, ESPRESSIF_VID, PortCandidate, candidate, parse_mac};
 
     const BRIDGE_MAC: &str = "10:BD:A3:EC:44:C0";
@@ -981,6 +1105,76 @@ mod tests {
     #[test]
     fn serial_link_returns_false_when_no_board_is_remembered() {
         assert!(!silence_disowns_it(true, true, None, &board(BRIDGE_MAC)));
+    }
+
+    #[test]
+    fn serial_link_preserves_remembered_board_when_board_named_by_path_is_silent() {
+        // A board named by path reports no address, so its silence says nothing
+        // about which board the file names.
+        let named = candidate("/dev/ttyACM0", None, None, None);
+        assert!(!silence_disowns_it(true, true, parse_mac(BRIDGE_MAC), &named));
+    }
+
+    #[test]
+    fn serial_link_preserves_remembered_board_when_another_named_board_is_silent() {
+        // `run --bridge` attaches the memory, so a named node's silence must not
+        // erase the bridge the file names.
+        assert!(!silence_disowns_it(true, true, parse_mac(BRIDGE_MAC), &board(NODE_MAC)));
+    }
+
+    #[test]
+    fn serial_link_disowns_remembered_board_when_it_is_named_and_silent() {
+        // Named or not, it was opened, heard out in full and said nothing, which is
+        // the same evidence an unnamed run forgets it on.
+        assert!(silence_disowns_it(true, true, parse_mac(BRIDGE_MAC), &board(BRIDGE_MAC)));
+    }
+
+    #[test]
+    fn serial_link_asks_second_time_when_board_is_remembered_bridge() {
+        let known = is_known_bridge(parse_mac(BRIDGE_MAC), parse_mac(BRIDGE_MAC), None);
+        assert!(known);
+        assert!(asks_on(SECOND_ASK_TICK, known, false));
+    }
+
+    #[test]
+    fn serial_link_asks_second_time_when_board_is_settled_bridge() {
+        let known = is_known_bridge(parse_mac(BRIDGE_MAC), None, parse_mac(BRIDGE_MAC));
+        assert!(known);
+        assert!(asks_on(SECOND_ASK_TICK, known, false));
+    }
+
+    #[test]
+    fn serial_link_asks_once_when_named_board_is_not_known() {
+        // Named, so `proven` — and possibly a node, which a second frame would cost
+        // a thirty-second `close`.
+        let known = is_known_bridge(parse_mac(NODE_MAC), parse_mac(BRIDGE_MAC), None);
+        assert!(!known);
+        assert!(!asks_on(SECOND_ASK_TICK, known, false));
+        assert!(!is_known_bridge(None, None, None), "a path reports no address");
+    }
+
+    #[test]
+    fn serial_link_asks_once_when_board_is_sweep_candidate() {
+        let known = is_known_bridge(parse_mac(NODE_MAC), None, None);
+        assert!(!known);
+        assert!(asks_on(1, known, false), "every board is asked once, at once");
+        assert!((2..=20).all(|tick| !asks_on(tick, known, false)));
+    }
+
+    #[test]
+    fn serial_link_asks_once_when_known_bridge_has_already_answered() {
+        assert!(!asks_on(SECOND_ASK_TICK, true, true));
+    }
+
+    #[test]
+    fn serial_link_asks_second_time_only_after_stall_timeout_when_board_is_known() {
+        // Tick `n` fires `n - 1` intervals in; the second ask must decode after the
+        // bridge's stall has lasted its timeout, and on no other tick.
+        let at_ms = u64::from(SECOND_ASK_TICK - 1) * super::IDENTIFY_INTERVAL.as_millis() as u64;
+        assert_eq!(at_ms, 3_500);
+        assert!(at_ms > wartui_proto::stall::TX_STALL_TIMEOUT_MS);
+        let asks = (1..=super::SETTLE_TICKS).filter(|&tick| asks_on(tick, true, false)).count();
+        assert_eq!(asks, 2);
     }
 
     #[test]

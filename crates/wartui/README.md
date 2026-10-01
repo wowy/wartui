@@ -33,7 +33,7 @@ rebooting sends nothing, since every node is already addressing it correctly.
 | Flag                    | Default     | What it is                                                |
 | ----------------------- | ----------- | --------------------------------------------------------- |
 | `--db PATH`             | dated       | Where to keep the capture                                 |
-| `--bridge PATH\|MAC`    | detected    | Which board the bridge is, by path or by address          |
+| `--bridge PATH\|MAC`    | detected    | Which board the bridge is, by path, address or `00:08`    |
 | `--channel N`           | `6`         | The fleet's ESP-NOW control channel                       |
 | `--lat` `--lon` `--alt` | —           | A static position for every observation                   |
 | `--gps PATH`            | detected    | An NMEA receiver, preferred over `--lat`/`--lon`          |
@@ -169,7 +169,7 @@ wartui flash-fleet --features esp32c6,xiao-external-antenna --bridge 10:BD:A3:EC
 | ----------------------- | ---------- | ----------------------------------------------------------- |
 | `--features LIST`       | —          | The node firmware's features; exactly one of `esp32c5` or `esp32c6` |
 | `--no-default-features` | off        | Build without the firmware's default features               |
-| `--bridge PATH\|MAC`    | remembered | The bridge, which must be attached and is never flashed     |
+| `--bridge PATH\|MAC`    | remembered | The bridge, which must be attached and is never flashed; `00:08` works too |
 | `--no-bridge`           | off        | No bridge is attached; a remembered one is still spared     |
 | `--skip MAC`            | —          | Leave this board alone too; repeatable                      |
 | `--image BIN`           | —          | Flash this merged image rather than building or fetching one |
@@ -182,7 +182,7 @@ nodes, so its address is the only thing that tells it apart. That is `--bridge`,
 `run` remembered, and both are spared when both are known. With neither, the run is refused unless
 `--no-bridge` says no bridge is attached; that flag only lifts the refusal, and a remembered bridge
 is spared all the same. A `--bridge` that matches no attached board refuses the run, since sparing
-it would spare nothing: a typo, a device node that moved on a replug, or a macOS `/dev/tty.*` where
+it would spare nothing, and so does a short form that several boards end with: a typo, a device node that moved on a replug, or a macOS `/dev/tty.*` where
 `wartui ports` lists the `/dev/cu.*`. Naming the bridge by its address avoids all three. A
 remembered bridge that is not attached is simply unplugged, and is not an error.
 
@@ -224,7 +224,7 @@ wartui flash-bridge --features esp32c6 --bridge 10:BD:A3:EC:44:C0
 | Flag                 | Default        | What it is                                                   |
 | -------------------- | -------------- | ------------------------------------------------------------ |
 | `--features LIST`    | —              | The bridge firmware's features; exactly one of `esp32c5` or `esp32c6` |
-| `--bridge PATH\|MAC` | see below      | The board to flash, which must be attached                   |
+| `--bridge PATH\|MAC` | see below      | The board to flash, which must be attached; `00:08` works too |
 | `--image BIN`        | —              | Flash this merged image rather than building or fetching one |
 | `--firmware-dir DIR` | the checkout's | Build the image from the bridge firmware here                |
 | `--dry-run`          | off            | Probe and report; build, fetch and flash nothing             |
@@ -232,8 +232,8 @@ wartui flash-bridge --features esp32c6 --bridge 10:BD:A3:EC:44:C0
 **The board is chosen before anything is reset**: the board `--bridge` names, else the bridge `run`
 remembered, which must be attached, else, with none remembered, the only Espressif board attached.
 A remembered bridge that is not attached refuses the run, because the board present is known not to
-be it. A `--bridge` that matches no attached board, several boards with none known, or no board at
-all refuses the run too; with several, the refusal lists their addresses, and naming one with
+be it. A `--bridge` that matches no attached board or several of them, several boards with none
+known, or no board at all refuses the run too; with several, the refusal lists their addresses, and naming one with
 `--bridge` settles it. The chosen board must be native USB Serial/JTAG (`303a:1001`) reporting its
 address, and `espflash board-info` must read the chip `--features` names and that same address, or
 nothing is flashed.
@@ -585,13 +585,17 @@ with no replug and no reflash.
 **wartui finds the bridge by asking.** With several Espressif boards attached — a node plugged in
 by USB is one — it opens each in turn and keeps the first that answers the link protocol, then
 writes that board's address to `~/.local/state/wartui/bridge` so later runs open one port and no
-others. A board that answers is held for the rest of the run: unplug the bridge mid-session to
+others. A capture started with `--bridge` writes the board it named there too, once that board
+answers: naming it for a capture is deciding to use it. `status`, `sniff` and `reset` with
+`--bridge` write nothing, so asking one board a question does not change which board later runs
+open. A board that answers is held for the rest of the run: unplug the bridge mid-session to
 reflash a node and wartui waits for the bridge to come back rather than transmitting into the node.
 
 That file is state, not settings. Deleting it is always safe and costs one slower start, and it is
 what to delete if wartui keeps opening the wrong board. It corrects itself two ways without being
-asked: whichever board answers writes its own address over it, and a board that is the only one
-attached and stops answering is dropped from it — which is what a reflashed bridge looks like. A
+asked: whichever board answers writes its own address over it, and the remembered board, opened
+with no other to try and then silent, is dropped from it — which is what a reflashed bridge looks
+like. A
 board merely passed over during a sweep is not dropped, because being slower than the board beside
 it is not evidence of anything.
 
@@ -623,8 +627,11 @@ rm ~/.local/state/wartui/bridge        # forget which board was the bridge
 `wartui reset` takes about thirty seconds to fail when it is pointed at a board that is not a
 bridge, and that is the cost of what it does: it transmits before anything has identified itself,
 because the board it is for answers nothing. A board that is not reading takes the first packet and
-leaves the rest queued, and closing the port waits for them. `run` never pays this: it asks with one
-frame and no more, however long it then waits for the answer.
+leaves the rest queued, and closing the port waits for them. `run` never pays this against a board it
+does not know: it asks with one frame and no more, however long it then waits for the answer. The
+remembered bridge, or the one a run already settled on, is asked once more 3.5 s in, because a
+bridge whose transmit endpoint wedged before wartui connected reboots itself only when a frame
+arrives after the stall has begun, and the first ask is what begins it.
 
 `wartui reset` never sweeps. A `Reset` reaching a node reboots it and costs it the addresses it was
 holding back, so it goes to the board named with `--bridge`, else the remembered one, else the only
@@ -662,10 +669,14 @@ The bridge is the row whose address the fleet table shows as the bridge's, and a
 heartbeats `wartui sniff` attributes to that address. Where the board generations differ, the OUI
 separates them too.
 
-Either name works as `--bridge`. The address is the one worth keeping: a device node moves when the
-board re-enumerates, and a `by-path` name moves when the cable does, while an address moves only when
-the board does.
+Either name works as `--bridge`, and so does the end of an address — the last one to five octets,
+two hex digits each — when exactly one attached board ends that way. `--bridge 44:C0` is how a board
+is read out of the fleet table; several boards ending the same way is a refusal that lists them,
+never a guess. The address is the one worth keeping: a device node moves when the board
+re-enumerates, and a `by-path` name moves when the cable does, while an address moves only when the
+board does.
 
 ```sh
 wartui --bridge 10:BD:A3:EC:44:C0
+wartui status --bridge 44:C0
 ```

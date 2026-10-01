@@ -14,7 +14,7 @@ use clap::{Parser, Subcommand};
 use wartui_bridge::remember::BridgeMemory;
 use wartui_bridge::serial::{self, BridgeSpec, SerialTransport, discover_ports};
 use wartui_bridge::sim::{SimConfig, SimTransport};
-use wartui_bridge::{BridgeInfo, LinkEvent, LinkHandle};
+use wartui_bridge::{BridgeInfo, LinkEvent, LinkHandle, TransportError};
 use wartui_proto::link::{LoopPhase, Mac, ResetCause};
 
 mod bench;
@@ -193,23 +193,37 @@ fn ports() -> Result<()> {
     Ok(())
 }
 
+/// Whether opening the link may write down which board answered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Remember {
+    /// Only a board found without being named: `status`, `sniff` and `reset`.
+    Detected,
+    /// A named board as well: `run`.
+    Named,
+}
+
 /// Open whichever transport the arguments called for.
-fn open(bridge: Option<&str>, sim: Option<u8>, sim_c6: u8) -> Result<LinkHandle> {
+fn open(bridge: Option<&str>, sim: Option<u8>, sim_c6: u8, rule: Remember) -> Result<LinkHandle> {
     if let Some(node_count) = sim {
         let config =
             SimConfig { node_count, c6_nodes: sim_c6.min(node_count), ..SimConfig::default() };
         return SimTransport::new(config).start().context("starting the simulator");
     }
+    // Detection always writes to the file, and a named board writes to it only from
+    // a capture. A capture against a named bridge *is* the decision to use that
+    // board, and the next unnamed run, `flash-fleet` and `flash-bridge` should act
+    // on it rather than on whichever board answered before. A one-off
+    // `wartui status --bridge X` is asked in order to find something out, and
+    // must not quietly decide what every later run opens.
+    let memory = match (bridge, rule) {
+        (None, _) | (Some(_), Remember::Named) => BridgeMemory::discover(),
+        (Some(_), Remember::Detected) => BridgeMemory::none(),
+    };
     match bridge.map(spec) {
         Some(spec) => SerialTransport::with_spec(spec),
         None => SerialTransport::new(),
     }
-    // Only detection writes to the file. A board named on the command line is a
-    // decision that is already written down, in the place it can be read — and
-    // recording it here would mean a single `wartui status --bridge X`, which
-    // changes nothing and is asked in order to find something out, quietly
-    // deciding what every later run opens.
-    .remember_in(if bridge.is_none() { BridgeMemory::discover() } else { BridgeMemory::none() })
+    .remember_in(memory)
     .start()
     .context("opening the link")
 }
@@ -225,8 +239,8 @@ fn spec(bridge: &str) -> BridgeSpec {
 /// An address is the durable way to name a board and the useless way to name it to
 /// another program, so advice that quotes `espflash` resolves it first rather than
 /// printing a line that cannot be run.
-fn named_device(bridge: &str) -> Option<String> {
-    serial::resolve(&spec(bridge)).ok()
+fn named_device(bridge: &str) -> Result<String, TransportError> {
+    serial::resolve(&spec(bridge))
 }
 
 /// Render a link-level event that is not a frame.
@@ -380,24 +394,28 @@ pub const CONNECT_NOTICE_AFTER: Duration = Duration::from_secs(5);
 /// succeed, and nothing comes back — and a reset is the only way to tell.
 pub fn no_bridge_notice(bridge: Option<&str>) -> String {
     let seconds = CONNECT_NOTICE_AFTER.as_secs();
-    let device = bridge.and_then(named_device);
-    let (where_, reset, wartui_reset) = match (bridge, device.as_deref()) {
-        (Some(name), Some(path)) => (
+    let (where_, reset, wartui_reset) = match bridge.map(|name| (name, named_device(name))) {
+        Some((name, Ok(path))) => (
             format!("on {path}"),
             format!("espflash reset --port {path}"),
             format!("wartui reset --bridge {name}"),
         ),
         // A board that is not attached needs none of what follows: there is no port
         // to have been opened, so the three causes below are all about something
-        // else, and the one fact worth saying is already known.
-        (Some(name), None) => {
+        // else, and the one fact worth saying is already known. A tail several boards
+        // end with is the same: nothing was opened, and the reason is the ambiguity.
+        Some((name, Err(error))) => {
+            let why = match error {
+                TransportError::AmbiguousName { .. } => error.to_string(),
+                _ => format!("no attached board is {name}"),
+            };
             return [
-                format!("no attached board is {name}, so nothing was opened."),
+                format!("{why}, so nothing was opened."),
                 "`wartui ports` lists what is attached, each board with its address.".to_owned(),
             ]
             .join("\n");
         }
-        (None, _) => (
+        None => (
             "on the board that was detected".to_owned(),
             "espflash reset".to_owned(),
             "wartui reset".to_owned(),
