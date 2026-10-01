@@ -29,9 +29,10 @@
 //! then `/var/tmp`, which on a Pi that boots from its card is the card. Nothing in the
 //! store is written: a temporary table belongs to the connection, not the file.
 //!
-//! The [`ExportSummary`] counts are exact rather than estimated. The fold already walks
-//! networks one at a time in address order, so a new network is a change of address,
-//! and counting networks, bands and nodes costs nothing the fold does not already pay.
+//! The [`ExportSummary`] counts are exact rather than estimated, because the fold already
+//! walks networks in order and knows where each begins. Their cost is the node and
+//! position-source columns riding through the whole-table sort, which
+//! [`SELECT_SIGHTINGS`] explains.
 //!
 //! Two details are here because WiGLE rejects files without them: the timestamp
 //! must be zero-padded (`2026-05-01 13:34:37`, where the node firmware emits
@@ -231,16 +232,15 @@ pub fn wigle_csv<W: Write>(
         while let Some(row) = rows.next()? {
             let mut candidate = Candidate::of(row)?;
             let (node, pos_source) = heard_by(row)?;
-            tally.see(&candidate, node, pos_source);
-            let opens_window = match &window {
-                // The first sighting of the capture, or of the next network.
-                None => true,
-                Some(w) => {
-                    w.best.bssid != candidate.bssid
-                        || w.best.kind != candidate.kind
-                        || (recapture_ms > 0 && candidate.rx_at - w.first_seen > recapture_ms)
-                }
-            };
+            // The first sighting of the capture, or of the next network.
+            let new_network = window
+                .as_ref()
+                .is_none_or(|w| w.best.bssid != candidate.bssid || w.best.kind != candidate.kind);
+            tally.see(&candidate, new_network, node, pos_source);
+            let opens_window = new_network
+                || window.as_ref().is_some_and(|w| {
+                    recapture_ms > 0 && candidate.rx_at - w.first_seen > recapture_ms
+                });
             if opens_window {
                 close(&mut window, &mut insert, &mut tally.summary)?;
                 window = Some(Window { first_seen: candidate.rx_at, best: candidate });
@@ -272,38 +272,26 @@ pub fn wigle_csv<W: Write>(
 
 /// Counts what the export walked over, for its [`ExportSummary`].
 ///
-/// Exact, because [`SELECT_SIGHTINGS`] orders by address and kind: every sighting of a
-/// network arrives together, so a new network is a change of either and needs only the
-/// current one remembered. Memory is bounded by the fleet rather than the capture: the
-/// node list holds one entry per node that reported, and the per-network state is reset
-/// in place when the network changes. Nothing here allocates per sighting.
+/// Exact, because the fold walks networks (address and kind) in order and tells the
+/// tally where each begins. Memory is bounded by the fleet rather than the capture: the
+/// node list holds one entry per node that reported, and the per-network band bits reset
+/// when the network changes. Nothing here allocates per sighting.
 #[derive(Default)]
 struct Tally {
     summary: ExportSummary,
-    /// The network being walked, valid once `walking` is set: its address and whether
-    /// it is a Bluetooth advertiser.
-    bssid: Vec<u8>,
-    ble: bool,
-    walking: bool,
     /// Which bands this network has been heard on, one bit per [`Bands`] field.
     bands: u8,
 }
 
 impl Tally {
-    /// Count one sighting, heard by `node`, positioned by the `pos_source` code
-    /// [`SELECT_SIGHTINGS`] gives it.
-    fn see(&mut self, c: &Candidate, node: &[u8], pos_source: i64) {
+    /// Count one sighting, the first of its network when `new_network`, heard by `node`,
+    /// positioned by the `pos_source` code [`SELECT_SIGHTINGS`] gives it.
+    fn see(&mut self, c: &Candidate, new_network: bool, node: &[u8], pos_source: i64) {
         let ble = c.kind == "ble";
         let summary = &mut self.summary;
         let stats = if ble { &mut summary.ble } else { &mut summary.wifi };
         stats.sightings += 1;
-        if !self.walking || self.ble != ble || self.bssid != c.bssid {
-            // Reused rather than reallocated, so a new network costs no allocation either
-            // once the buffer has grown to an address's length.
-            self.bssid.clear();
-            self.bssid.extend_from_slice(&c.bssid);
-            self.ble = ble;
-            self.walking = true;
+        if new_network {
             self.bands = 0;
             stats.networks += 1;
         }

@@ -95,7 +95,7 @@ pub fn run(args: Args) -> Result<()> {
         eprintln!(
             "{} rows were left out because no sighting in their window had a \
              position. Capture with --lat and --lon to include them.",
-            summary.unpositioned
+            thousands(summary.unpositioned)
         );
     }
     Ok(())
@@ -111,18 +111,23 @@ fn report(summary: &ExportSummary, out: Option<&Path>) -> String {
     let _ = writeln!(text, "{} rows written to {dest}", thousands(summary.rows));
 
     let (wifi, bands) = (&summary.wifi, &summary.wifi_bands);
-    let other =
-        if bands.other > 0 { format!(", other {}", thousands(bands.other)) } else { String::new() };
-    let _ = writeln!(
-        text,
-        "  {:<9}{:>8} networks (2.4 GHz {}, 5 GHz {}{other})  {} sightings  {} rows",
-        "Wi-Fi",
-        thousands(wifi.networks),
-        thousands(bands.ghz2_4),
-        thousands(bands.ghz5),
-        thousands(wifi.sightings),
-        thousands(wifi.rows),
-    );
+    if wifi.sightings > 0 {
+        let other = if bands.other > 0 {
+            format!(", other {}", thousands(bands.other))
+        } else {
+            String::new()
+        };
+        let _ = writeln!(
+            text,
+            "  {:<9}{:>8} networks (2.4 GHz {}, 5 GHz {}{other})  {} sightings  {} rows",
+            "Wi-Fi",
+            thousands(wifi.networks),
+            thousands(bands.ghz2_4),
+            thousands(bands.ghz5),
+            thousands(wifi.sightings),
+            thousands(wifi.rows),
+        );
+    }
     let ble = &summary.ble;
     if ble.sightings > 0 {
         let _ = writeln!(
@@ -197,7 +202,8 @@ fn thousands(n: u64) -> String {
 }
 
 /// The capture's first and last sighting in UTC, and how long lay between them. The
-/// end carries its date only when it is not the start's.
+/// end carries its date only when it is not the start's. The length is measured between
+/// the minutes shown, so it agrees with them.
 fn span(first_ms: i64, last_ms: i64) -> String {
     let at = |ms| DateTime::<Utc>::from_timestamp_millis(ms).unwrap_or_default();
     let (first, last) = (at(first_ms), at(last_ms));
@@ -206,7 +212,7 @@ fn span(first_ms: i64, last_ms: i64) -> String {
     } else {
         last.format("%Y-%m-%d %H:%M").to_string()
     };
-    let minutes = (last_ms - first_ms).max(0) / 60_000;
+    let minutes = (last_ms.div_euclid(60_000) - first_ms.div_euclid(60_000)).max(0);
     let length = if minutes < 60 {
         format!("{minutes}m")
     } else {
@@ -293,7 +299,7 @@ mod tests {
     /// A capture of two nodes, one on each kind, with sightings over an evening.
     fn evening() -> ExportSummary {
         ExportSummary {
-            rows: 4_012_345,
+            rows: 47_952,
             unpositioned: 0,
             wifi: KindStats { networks: 38_211, sightings: 3_900_112, rows: 41_002 },
             ble: KindStats { networks: 6_402, sightings: 112_233, rows: 6_950 },
@@ -324,15 +330,37 @@ mod tests {
         summary.ble = KindStats::default();
         summary.nodes.retain(|n| n.wifi > 0);
         let text = report(&summary, None);
-        assert!(text.starts_with("4,012,345 rows written to standard output\n"), "{text}");
+        assert!(text.starts_with("47,952 rows written to standard output\n"), "{text}");
         assert!(!text.contains("BLE"), "{text}");
         assert!(!text.contains("Bluetooth"), "{text}");
     }
 
     #[test]
+    fn export_report_omits_wifi_line_when_no_wifi_sightings() {
+        let mut summary = evening();
+        summary.wifi = KindStats::default();
+        summary.wifi_bands = Bands::default();
+        summary.nodes.retain(|n| n.ble > 0);
+        let text = report(&summary, None);
+        assert!(!text.contains("Wi-Fi"), "{text}");
+        assert!(text.contains("  BLE "), "{text}");
+    }
+
+    #[test]
+    fn export_report_measures_span_between_shown_minutes_when_times_have_seconds() {
+        let mut summary = evening();
+        // 2026-09-30 19:02:59 to 20:02:01 UTC: 59 minutes apart, but an hour between
+        // the minutes shown.
+        summary.first_rx = Some(1_790_794_979_000);
+        summary.last_rx = Some(1_790_798_521_000);
+        let text = report(&summary, None);
+        assert!(text.contains("2026-09-30 19:02 – 20:02 UTC (1h 0m)"), "{text}");
+    }
+
+    #[test]
     fn export_report_formats_thousands_when_counts_are_large() {
         let text = report(&evening(), Some(Path::new("out.csv")));
-        assert!(text.starts_with("4,012,345 rows written to out.csv\n"), "{text}");
+        assert!(text.starts_with("47,952 rows written to out.csv\n"), "{text}");
         assert!(
             text.contains(
                 "  Wi-Fi      38,211 networks (2.4 GHz 30,100, 5 GHz 9,804)  \

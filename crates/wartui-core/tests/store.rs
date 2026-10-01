@@ -1283,7 +1283,7 @@ fn store_advances_assignment_base_counter_when_session_opens_and_spends() {
 }
 
 #[test]
-fn export_summary_counts_distinct_networks_when_network_heard_repeatedly() {
+fn export_writer_counts_distinct_networks_when_network_heard_repeatedly() {
     let dir = tempfile::tempdir().expect("temp dir");
     let at = |n: i64| EPOCH_MS + n * 1000;
     let conn = write(
@@ -1304,7 +1304,7 @@ fn export_summary_counts_distinct_networks_when_network_heard_repeatedly() {
 }
 
 #[test]
-fn export_summary_separates_wifi_and_ble_when_capture_holds_both() {
+fn export_writer_separates_wifi_and_ble_when_capture_holds_both() {
     let dir = tempfile::tempdir().expect("temp dir");
     let conn = write(
         &dir,
@@ -1324,7 +1324,7 @@ fn export_summary_separates_wifi_and_ble_when_capture_holds_both() {
 }
 
 #[test]
-fn export_summary_counts_sightings_per_node_when_two_nodes_capture() {
+fn export_writer_counts_sightings_per_node_when_two_nodes_capture() {
     let dir = tempfile::tempdir().expect("temp dir");
     let conn = write(
         &dir,
@@ -1343,7 +1343,7 @@ fn export_summary_counts_sightings_per_node_when_two_nodes_capture() {
 }
 
 #[test]
-fn export_summary_counts_network_once_per_band_when_seen_on_both_bands() {
+fn export_writer_counts_network_once_per_band_when_seen_on_both_bands() {
     let dir = tempfile::tempdir().expect("temp dir");
     let conn = write(
         &dir,
@@ -1362,7 +1362,7 @@ fn export_summary_counts_network_once_per_band_when_seen_on_both_bands() {
 }
 
 #[test]
-fn export_summary_tallies_position_sources_when_fix_varies() {
+fn export_writer_tallies_position_sources_when_fix_varies() {
     let dir = tempfile::tempdir().expect("temp dir");
     let gps = Fix { source: PositionSource::Gps, ..fixed(37.0, -122.0) };
     let conn = write(
@@ -1380,7 +1380,7 @@ fn export_summary_tallies_position_sources_when_fix_varies() {
 }
 
 #[test]
-fn export_summary_respects_session_filter_when_session_given() {
+fn export_writer_respects_session_filter_when_session_given() {
     // Two runs into one file are two sessions; the summary counts only the one asked for.
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().join("wartui.db");
