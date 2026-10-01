@@ -400,7 +400,9 @@ pub struct BatchTiming {
 pub struct SessionInfo {
     /// The ESP-NOW control channel.
     pub espnow_channel: u8,
-    /// Which channels the fleet was told to scan.
+    /// The pool the session started on. The operator can change it mid-run, so it
+    /// is not every assignment's: each assignment row records the channels that
+    /// actually went out.
     pub pool: ChannelPool,
     /// Anything the operator wants to remember about this run.
     pub notes: Option<String>,

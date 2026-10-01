@@ -43,8 +43,8 @@ const INPUT_POLL: Duration = Duration::from_millis(100);
 ///
 /// Resolved once, in `main`, and carried into the view rather than re-derived
 /// from a snapshot: where to save is a fact about how this process was
-/// started, and what the file holds is not always what is running — a pool
-/// saved for the next restart, or a power a flag overrides.
+/// started, and what the file holds is not always what is running: a save
+/// that failed leaves the two apart.
 #[derive(Debug, Clone, Default)]
 pub struct Settings {
     /// Where `wartui.toml` would be written, or `None` when there is nowhere
@@ -53,7 +53,7 @@ pub struct Settings {
     /// What the file holds as far as this view knows: loaded at startup, then
     /// replaced by each successful save. `b` saves from this, changing only the
     /// Bluetooth node, so it never writes the running pool or powers over what
-    /// the file holds for the next restart.
+    /// the file holds.
     pub saved: config::Config,
 }
 
@@ -182,10 +182,6 @@ struct ConfigModal {
     bridge_dbm: i8,
     /// The pool row's current value, edited by `step`.
     pool: PoolArg,
-    /// The pool that is actually running, fixed at the value `pool` was seeded
-    /// with: the pool cannot change live, so this is what `save_outcome`
-    /// compares `pool` against to say a restart is needed.
-    running_pool: PoolArg,
     /// Whether `b` remembers the node it gives the scan to.
     remember_ble: bool,
 }
@@ -271,13 +267,11 @@ impl Ui {
         self.notice = None;
         let fleet_dbm = snapshot.tx_power / 4;
         let bridge_dbm = snapshot.bridge_tx_power / 4;
-        let pool = snapshot.pool.into();
         self.modal = Some(ConfigModal {
             selected: Field::Pool,
             fleet_dbm,
             bridge_dbm,
-            pool,
-            running_pool: pool,
+            pool: snapshot.pool.into(),
             remember_ble: snapshot.remember_ble,
         });
     }
@@ -308,13 +302,15 @@ impl Ui {
     /// and close it.
     fn apply(&mut self, snapshot: &Snapshot, commands: &mpsc::Sender<Command>) {
         let Some(modal) = self.modal.take() else { return };
-        // Both slots are reserved before either command goes out, so a queue with
-        // room for one cannot apply the powers while the notice says nothing was.
-        let Ok(mut permits) = commands.try_reserve_many(2) else {
+        // Every slot is reserved before any command goes out, so a queue with room
+        // for fewer cannot apply part of the modal while the notice says nothing was.
+        let Ok(mut permits) = commands.try_reserve_many(3) else {
             self.say("the engine is not accepting commands".to_owned(), snapshot);
             return;
         };
+        let pool = ChannelPool::from(modal.pool);
         for command in [
+            Command::SetPool { pool },
             Command::SetTxPower { nodes: modal.fleet_dbm * 4, bridge: modal.bridge_dbm * 4 },
             Command::RememberBle { on: modal.remember_ble },
         ] {
@@ -322,17 +318,25 @@ impl Ui {
                 permit.send(command);
             }
         }
-        // Same rule as `toggle_ble`: the power arrives as an assignment, so a
-        // fleet with no plan has nothing for it to arrive in yet.
-        let when = if snapshot.plan.is_none() {
-            "once the fleet is in a plan"
-        } else {
-            "on their next heartbeat"
-        };
+        // Same rule as `toggle_ble`: the power and the re-cut share arrive as an
+        // assignment, so a fleet with no plan has nothing for them to arrive in yet.
+        let planned = snapshot.plan.is_some();
+        let when = if planned { "on their next heartbeat" } else { "once the fleet is in a plan" };
         let mut text = format!(
             "tx power: fleet {} dBm, bridge {} dBm — nodes take it {when}",
             modal.fleet_dbm, modal.bridge_dbm
         );
+        if pool != snapshot.pool {
+            if planned {
+                text.push_str(&format!(
+                    "; pool {pool} — the fleet re-cuts on each node's next heartbeat"
+                ));
+            } else {
+                text.push_str(&format!(
+                    "; pool {pool} — nodes take it once the fleet is in a plan"
+                ));
+            }
+        }
         text.push_str(&self.save_outcome(modal, snapshot));
         self.say(text, snapshot);
     }
@@ -342,25 +346,16 @@ impl Ui {
     ///
     /// The modal shows what is in force, and this writes every row of it to
     /// `wartui.toml`, replacing whatever the file held — a hand edit made
-    /// while the modal was open included. The pool cannot change live, so a
-    /// moved pool row exists only in the file: when the save does not happen,
-    /// the notice says that pool was not kept.
+    /// while the modal was open included. Every row is already applied by the
+    /// time this runs, so a save that does not happen costs only the file.
     ///
     /// The Bluetooth node saved is the one remembered, falling back on the one
     /// holding the scan, which is what the engine remembers when the row turns
     /// on; a node remembered from the file and not yet heard from survives.
     /// A successful save becomes [`Settings::saved`].
     fn save_outcome(&mut self, modal: ConfigModal, snapshot: &Snapshot) -> String {
-        let pool_moved = modal.pool != modal.running_pool;
-        let lost = || {
-            if pool_moved {
-                format!("; pool {} was not kept", ChannelPool::from(modal.pool))
-            } else {
-                String::new()
-            }
-        };
         let Some(path) = self.settings.config_path.clone() else {
-            return format!("; nowhere to save it — use --config{}", lost());
+            return "; nowhere to save it — use --config".to_owned();
         };
         let written = config::Config {
             pool: Some(modal.pool),
@@ -378,14 +373,10 @@ impl Ui {
             },
         };
         match config::save(&path, &written) {
-            Err(error) => format!("; could not save: {error}{}", lost()),
+            Err(error) => format!("; could not save: {error}"),
             Ok(()) => {
                 self.settings.saved = written;
-                let mut outcome = format!("; saved to {}", path.display());
-                if pool_moved {
-                    outcome.push_str("; the pool takes effect after a restart");
-                }
-                outcome
+                format!("; saved to {}", path.display())
             }
         }
     }
@@ -2555,7 +2546,6 @@ mod tests {
 
         let modal = ui.modal.expect("the modal opened");
         assert_eq!(modal.pool, PoolArg::Eu);
-        assert_eq!(modal.running_pool, PoolArg::Eu);
     }
 
     #[test]
@@ -2643,6 +2633,7 @@ mod tests {
 
         ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
 
+        assert_eq!(rx.try_recv().unwrap(), Command::SetPool { pool: snapshot.pool });
         assert_eq!(rx.try_recv().unwrap(), Command::SetTxPower { nodes: 44, bridge: 60 });
         assert!(ui.modal.is_none(), "applying closes the modal");
         let notice = ui.notice(snapshot.now_ms).expect("a notice");
@@ -2679,7 +2670,7 @@ mod tests {
     }
 
     #[test]
-    fn ui_sends_no_pool_command_and_warns_of_restart_when_enter_pressed_with_pool_changed() {
+    fn ui_sends_pool_command_when_enter_pressed_with_pool_changed() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wartui.toml");
         let mut snapshot = busy();
@@ -2694,12 +2685,13 @@ mod tests {
 
         ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
 
-        // Nothing carries the pool: it can't change live.
+        assert_eq!(rx.try_recv().unwrap(), Command::SetPool { pool: ChannelPool::Eu });
         assert_eq!(rx.try_recv().unwrap(), Command::SetTxPower { nodes: 8, bridge: 8 });
         assert_eq!(rx.try_recv().unwrap(), Command::RememberBle { on: true });
         assert!(rx.try_recv().is_err(), "nothing else was sent");
+        // `busy()`'s plan is `None`, so the re-cut waits on one.
         let notice = ui.notice(snapshot.now_ms).expect("a notice");
-        assert!(notice.contains("the pool takes effect after a restart"), "{notice}");
+        assert!(notice.contains("pool EU — nodes take it once the fleet is in a plan"), "{notice}");
         let saved = config::load(Some(&target)).expect("a valid file");
         assert_eq!(saved.pool, Some(PoolArg::Eu));
     }
@@ -2738,7 +2730,7 @@ mod tests {
     fn ui_saves_preferred_node_when_b_pressed_with_remember_on() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wartui.toml");
-        // A pool saved for the next restart, which the running `All` must not overwrite.
+        // A pool already in the file, which `b` saves around rather than over.
         let saved = config::Config { pool: Some(PoolArg::Us), ..config::Config::default() };
         config::save(&target, &saved).unwrap();
         let snapshot = busy();
@@ -2801,9 +2793,29 @@ mod tests {
 
         ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
 
-        // Room for the powers but not the remember setting: neither goes out.
+        // Room for one of the modal's three commands: none goes out.
         assert_eq!(rx.try_recv().unwrap(), Command::ClearRing { mac: None });
         assert!(rx.try_recv().is_err(), "nothing else was sent");
+        assert!(!target.exists(), "nothing was written");
+        let notice = ui.notice(snapshot.now_ms).expect("a notice");
+        assert!(notice.contains("not accepting commands"), "{notice}");
+    }
+
+    #[test]
+    fn ui_sends_nothing_and_saves_nothing_when_enter_pressed_with_queue_smaller_than_three() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wartui.toml");
+        let snapshot = busy();
+        let (tx, mut rx) = mpsc::channel(2);
+        let mut ui = Ui {
+            settings: Settings { config_path: Some(target.clone()), ..Settings::default() },
+            ..Ui::default()
+        };
+        ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
+
+        ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
+
+        assert!(rx.try_recv().is_err(), "nothing was sent");
         assert!(!target.exists(), "nothing was written");
         let notice = ui.notice(snapshot.now_ms).expect("a notice");
         assert!(notice.contains("not accepting commands"), "{notice}");
@@ -2829,6 +2841,7 @@ mod tests {
 
         ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
 
+        assert!(matches!(rx.try_recv().unwrap(), Command::SetPool { .. }));
         assert!(matches!(rx.try_recv().unwrap(), Command::SetTxPower { .. }));
         assert_eq!(rx.try_recv().unwrap(), Command::RememberBle { on: false });
         let file = config::load(Some(&target)).expect("a valid file");
@@ -2911,7 +2924,7 @@ mod tests {
     }
 
     #[test]
-    fn ui_omits_restart_notice_when_enter_pressed_with_pool_unchanged() {
+    fn ui_omits_pool_from_notice_when_enter_pressed_with_pool_unchanged() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wartui.toml");
         let snapshot = busy();
@@ -2928,7 +2941,7 @@ mod tests {
         ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
 
         let notice = ui.notice(snapshot.now_ms).expect("a notice");
-        assert!(!notice.contains("restart"), "{notice}");
+        assert!(!notice.contains("; pool"), "{notice}");
     }
 
     #[test]
@@ -2943,18 +2956,18 @@ mod tests {
 
         let notice = ui.notice(snapshot.now_ms).expect("a notice");
         assert!(notice.contains("use --config"), "{notice}");
-        assert!(notice.contains("pool EU was not kept"), "the moved pool row: {notice}");
+        assert!(notice.contains("pool EU"), "the moved pool row is applied anyway: {notice}");
     }
 
     #[test]
-    fn ui_reports_pool_not_kept_when_save_fails_with_pool_moved() {
+    fn ui_applies_pool_when_save_fails_with_pool_moved() {
         // A regular file where the config's directory should be, so the save
         // cannot create it.
         let dir = tempfile::tempdir().unwrap();
         let blocker = dir.path().join("not-a-dir");
         std::fs::write(&blocker, "").unwrap();
         let snapshot = busy();
-        let (tx, _rx) = mpsc::channel(4);
+        let (tx, mut rx) = mpsc::channel(4);
         let mut ui = Ui {
             settings: Settings {
                 config_path: Some(blocker.join("wartui.toml")),
@@ -2969,20 +2982,27 @@ mod tests {
 
         let notice = ui.notice(snapshot.now_ms).expect("a notice");
         assert!(notice.contains("could not save"), "{notice}");
-        assert!(notice.contains("pool EU was not kept"), "{notice}");
+        // The engine has the pool whether or not the file does.
+        assert_eq!(rx.try_recv().unwrap(), Command::SetPool { pool: ChannelPool::Eu });
     }
 
     #[test]
-    fn ui_omits_pool_not_kept_when_save_is_impossible_with_pool_unchanged() {
-        let snapshot = busy();
+    fn ui_says_fleet_recuts_on_next_heartbeat_when_pool_moved_with_plan() {
+        let mut snapshot = busy();
+        snapshot.pool = ChannelPool::All;
+        snapshot.plan = plan(ChannelPool::All, 4);
         let (tx, _rx) = mpsc::channel(4);
         let mut ui = Ui::default();
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
+        ui.on_modal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &snapshot, &tx);
 
         ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
 
         let notice = ui.notice(snapshot.now_ms).expect("a notice");
-        assert!(!notice.contains("not kept"), "{notice}");
+        assert!(
+            notice.contains("pool EU — the fleet re-cuts on each node's next heartbeat"),
+            "{notice}"
+        );
     }
 
     #[test]

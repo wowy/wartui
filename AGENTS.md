@@ -185,12 +185,14 @@ is here rather than only in a `//!`.
 - **The planner is the only author of an assignment.** There is no operator override, no mode and
   no flag: `FleetEngine::replan` decides what every node scans and nothing else writes a node's
   `desired`. That is what lets the fleet table and the store read a node's share as the plan's
-  without asking who put it there. `Command::AssignBle` is the one operator
+  without asking who put it there. `Command::AssignBle` is one operator
   decision, and it is an *input* to the planner rather than an exception to it: it names the node
   whose job is Bluetooth, and the planner is what deals that node nothing and hands its share
   round. The remembered Bluetooth node is that same decision carried forward — across a restart,
   or a node's return to the fleet — and reaches the planner the same way. So moving the scan
   re-cuts the whole pool, and `replan` — not `reissue` — is what delivers both ends of the move.
+  `Command::SetPool` is the other, and an input the same way: it changes what the planner cuts,
+  never who holds which share.
 - **Only heartbeating nodes are assignable or in the plan** — a node that is merely being heard
   never opens an admin window. `stale`, `no heartbeat` and silence are deliberately distinct
   states, and `SCAN_CHANNELS` order is load-bearing: never sort or deduplicate it, because those
@@ -216,7 +218,8 @@ is here rather than only in a `//!`.
 - **`IndexRun` describes a *pool*, never the shape of an assignment.** An assignment is a
   `ChannelSet` naming any subset of `SCAN_CHANNELS`, so the planner flattens the pool and deals
   round-robin rather than steering around run boundaries. The plan has no phases and no timer; it
-  changes when fleet membership changes, when the Bluetooth scan moves, and at no other time.
+  changes when fleet membership changes, when the Bluetooth scan moves, when the operator changes the
+  pool, and at no other time.
 - **`clippy::all` is denied workspace-wide, in both firmwares too, and so is `unsafe_code`.** The
   host workspace forbids it outright. Each firmware allows the two IDF calls `esp-radio` cannot
   express after its long-lived handles borrow the controller: the ESP-NOW peer-rate call and the

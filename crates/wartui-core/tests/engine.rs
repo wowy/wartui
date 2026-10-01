@@ -2922,3 +2922,139 @@ fn engine_ignores_preferred_ble_when_config_disables_remember() {
 
     assert_eq!(ble_state(&engine, clock.at(1)), (None, None, false));
 }
+
+// ---------------------------------------------------------------------------
+// Command::SetPool: the operator changing what the fleet partitions, mid-run.
+// ---------------------------------------------------------------------------
+
+fn set_pool(pool: ChannelPool) -> Event {
+    Event::Command(Command::SetPool { pool })
+}
+
+/// Two dual-band nodes on the default pool, each holding its acknowledged share of it.
+fn settled_pair(clock: &Clock) -> FleetEngine {
+    let mut engine = engine(EngineConfig::default(), clock);
+    caught_up(&mut engine, clock);
+    // The second node's arrival re-cuts the pool, so the shares that stick are the
+    // ones sent on the second heartbeat.
+    for n in 0..2 {
+        engine.handle(heartbeat(peer(n), 1), clock.at(1));
+    }
+    for n in 0..2 {
+        let (id, ..) = sent_admin(&engine.handle(heartbeat(peer(n), 2), clock.at(2)));
+        engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(2));
+    }
+    assert!(engine.nodes().all(|node| !node.dirty), "both settled");
+    engine
+}
+
+#[test]
+fn engine_recuts_fleet_onto_new_pool_when_pool_is_changed() {
+    let clock = Clock::new();
+    let mut engine = settled_pair(&clock);
+    let replans_before = counters(&engine).replans;
+
+    let command = engine.handle(set_pool(ChannelPool::Us), clock.at(3));
+    assert!(command.urgent.is_empty(), "nothing sent until each node's own window");
+
+    assert_eq!(covered(&wanted(&engine)), pool_indices(ChannelPool::Us));
+    for node in engine.nodes() {
+        assert!(node.dirty, "{:02X?} owes its new share", node.mac);
+        let desired = node.desired.expect("a share");
+        let confirmed = node.confirmed.expect("the old share");
+        assert_ne!(desired.counter, confirmed.counter, "under a fresh epoch");
+    }
+    assert_eq!(counters(&engine).replans, replans_before + 1);
+    assert_eq!(engine.snapshot(clock.at(3), StoreStats::default()).pool, ChannelPool::Us);
+
+    let (_, dst, admin) = sent_admin(&engine.handle(heartbeat(peer(0), 3), clock.at(4)));
+    assert_eq!(dst, peer(0));
+    assert!(ChannelPool::Us.channels().bits() & admin.channels.bits() == admin.channels.bits());
+}
+
+#[test]
+fn engine_ignores_set_pool_when_pool_is_unchanged() {
+    let clock = Clock::new();
+    let mut engine = settled_pair(&clock);
+    let replans_before = counters(&engine).replans;
+    let counters_before: Vec<u64> =
+        engine.nodes().map(|node| node.confirmed.expect("acked").counter).collect();
+
+    let batch = engine.handle(set_pool(EngineConfig::default().pool), clock.at(3));
+
+    assert!(batch.is_empty());
+    assert!(engine.nodes().all(|node| !node.dirty), "nothing wanted a fresh epoch");
+    let counters_after: Vec<u64> =
+        engine.nodes().map(|node| node.confirmed.expect("acked").counter).collect();
+    assert_eq!(counters_after, counters_before);
+    assert_eq!(counters(&engine).replans, replans_before);
+}
+
+#[test]
+fn engine_defers_pool_until_fleet_is_planned_when_no_node_is_heartbeating() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    caught_up(&mut engine, &clock);
+
+    engine.handle(set_pool(ChannelPool::Us), clock.at(1));
+    let snapshot = engine.snapshot(clock.at(1), StoreStats::default());
+    assert_eq!(snapshot.pool, ChannelPool::Us);
+    assert!(snapshot.plan.is_none(), "nobody to cut for");
+
+    let (_, _, admin) = sent_admin(&engine.handle(heartbeat(peer(0), 1), clock.at(2)));
+    assert_eq!(admin.channels, ChannelPool::Us.channels(), "the first cut is of the new pool");
+}
+
+#[test]
+fn engine_moves_surplus_node_into_new_pool_when_pool_is_narrowed() {
+    // Twelve C6s on `all` share its thirteen 2.4 GHz channels, so every node holds
+    // one and the last holds channel 12. On `us` there are eleven for twelve, and
+    // that last node is the surplus slot: keeping what it holds would go on
+    // scanning a channel the operator just took out of the pool.
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    for n in 0..12 {
+        engine.handle(beat_at(peer(n), 1, 0, Capabilities::here(false), 0), clock.at(1));
+    }
+    settle_c6_fleet(&mut engine, &clock, 12, 2);
+    let outside = |set: ChannelSet| set.bits() & !ChannelPool::Us.channels().bits() != 0;
+    let last = engine.nodes().find(|node| node.mac == peer(11)).expect("here");
+    assert!(
+        outside(last.confirmed.expect("settled").channels),
+        "it holds a channel the new pool leaves out: {last:?}"
+    );
+
+    engine.handle(set_pool(ChannelPool::Us), clock.at(20));
+
+    for node in engine.nodes() {
+        let held = node.desired.or(node.confirmed).expect("in the plan");
+        assert!(!outside(held.channels), "{:02X?} still scans outside the pool", node.mac);
+    }
+    let last = engine.nodes().find(|node| node.mac == peer(11)).expect("here");
+    let held = last.desired.expect("dealt");
+    assert!(last.dirty, "and it goes out in that node's next window");
+    assert_eq!(held.channels, ChannelPool::Us.reachable_by(Radio::TwoPointFour));
+}
+
+#[test]
+fn engine_keeps_ble_node_assignment_when_pool_is_changed() {
+    let clock = Clock::new();
+    let mut engine = settled_pair(&clock);
+    engine.handle(Event::Command(Command::AssignBle { mac: Some(peer(0)) }), clock.at(3));
+    let (id, _, scan) = sent_admin(&engine.handle(heartbeat(peer(0), 3), clock.at(4)));
+    assert!(scan.scan_ble());
+    engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(4));
+    let (id, ..) = sent_admin(&engine.handle(heartbeat(peer(1), 3), clock.at(4)));
+    engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(4));
+
+    engine.handle(set_pool(ChannelPool::Us), clock.at(5));
+
+    let scanner = engine.nodes().find(|node| node.mac == peer(0)).expect("here");
+    assert!(!scanner.dirty, "an empty share with the flag is the same under any pool");
+    let batch = engine.handle(heartbeat_holding(peer(0), 4, scan.epoch), clock.at(6));
+    assert!(admins(&batch).is_empty(), "the Bluetooth node is re-sent nothing");
+
+    let (_, dst, admin) = sent_admin(&engine.handle(heartbeat(peer(1), 4), clock.at(7)));
+    assert_eq!(dst, peer(1));
+    assert_eq!(admin.channels, ChannelPool::Us.channels(), "the only sniffer takes the new pool");
+}

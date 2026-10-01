@@ -12,8 +12,8 @@
 //! Transmitting involves allocating an epoch, waiting for the heartbeat that opens a node's
 //! 100 ms admin window, and confirming delivery strictly via MAC-layer acknowledgement.
 //! The engine maintains a partitioned channel pool across all active, heartbeating nodes and
-//! re-cuts the allocation whenever membership changes; no logic outside [`FleetEngine::replan`]
-//! dictates node scanning behavior.
+//! re-cuts the allocation whenever membership changes or the operator changes the pool; no logic
+//! outside the planner's re-cut dictates node scanning behavior.
 //!
 //! # Fleet Commands
 //!
@@ -23,6 +23,7 @@
 //!   existing plan under a new epoch.
 //! - [`Command::RememberBle`]: Turns on or off remembering the node last given the Bluetooth scan,
 //!   which the engine hands the scan back to whenever that node is assignable and none holds it.
+//! - [`Command::SetPool`]: Changes the channel pool and re-cuts the whole fleet against it.
 use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
 
@@ -138,6 +139,17 @@ pub enum Command {
         /// counts as of the moment this command arrives.
         mac: Option<Mac>,
     },
+
+    /// Change the channel pool the fleet partitions.
+    ///
+    /// Nothing goes out from here: the planner re-cuts the whole fleet against the new
+    /// pool, and each node takes its new share in its own next admin window under a
+    /// fresh epoch. A node adopting a share that differs from the one it holds empties
+    /// its dedup ring on its own. Setting the pool already in force is a no-op.
+    SetPool {
+        /// The pool to partition from now on.
+        pool: ChannelPool,
+    },
 }
 
 /// What the engine wants done as a result.
@@ -163,8 +175,9 @@ impl ActionBatch {
 
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
-    /// Which channels the fleet is meant to scan. Recorded in the session,
-    /// shown in the UI, and the set the engine partitions across the fleet.
+    /// Which channels the fleet is meant to scan: the set the engine partitions
+    /// across the fleet, and shown in the UI. The session records the value it
+    /// starts with; [`Command::SetPool`] changes it mid-run.
     pub pool: ChannelPool,
     /// How long a node may go without a heartbeat before it stops counting
     /// towards topology. Matches the firmware's own 60 s node timeout.
@@ -1307,7 +1320,23 @@ impl FleetEngine {
             Command::RememberBle { on } => self.on_remember_ble(on),
             Command::SetTxPower { nodes, bridge } => self.on_set_tx_power(nodes, bridge, batch),
             Command::ClearRing { mac } => self.on_clear_dedup_ring(mac, now),
+            Command::SetPool { pool } => self.on_set_pool(pool),
         }
+    }
+
+    /// Change the pool and re-cut the fleet in force against it.
+    ///
+    /// Membership is unchanged, so this re-cuts `plan_members` rather than going through
+    /// [`Self::replan`], which returns early on an unchanged membership. With nobody in
+    /// the plan there is nothing to cut, and the next membership change cuts against the
+    /// new pool.
+    fn on_set_pool(&mut self, pool: ChannelPool) {
+        if pool == self.config.pool {
+            return;
+        }
+        self.config.pool = pool;
+        let members = self.plan_members.clone();
+        self.cut(&members);
     }
 
     /// Change what the fleet transmits at, without touching what it scans.
@@ -1445,7 +1474,7 @@ impl FleetEngine {
     }
 
     /// Hold the fleet on a partition of the pool, re-cutting it when the set of
-    /// nodes changes and at no other time.
+    /// nodes changes. [`Self::on_set_pool`] is the only other re-cut.
     ///
     /// Membership is every node currently heartbeating; see
     /// [`Self::is_assignable`]. Nodes are ordered by MAC, which is the order the
@@ -1501,6 +1530,14 @@ impl FleetEngine {
             }
         }
 
+        self.cut(&members);
+    }
+
+    /// Cut the pool among `members` and deal each its share.
+    ///
+    /// Split out of [`Self::replan`] so [`Self::on_set_pool`] can re-cut an unchanged
+    /// membership against a new pool.
+    fn cut(&mut self, members: &[(Mac, Job)]) {
         let jobs: Vec<Job> = members.iter().map(|(_, job)| *job).collect();
         // Not `plan`: a share of 5 GHz cut for an ESP32-C6 is a share nobody
         // scans, which is the failure the capability token exists to prevent,
@@ -1515,15 +1552,15 @@ impl FleetEngine {
         };
         self.counters.replans += 1;
         self.plan = Some(plan);
-        self.deal(&plan, &members);
+        self.deal(&plan, members);
     }
 
     /// Give every member of `plan` its share, marking a node dirty only when
     /// what it is told to hold has actually changed.
     ///
-    /// Split out of [`Self::replan`] so [`Self::on_set_tx_power`] can re-send the
+    /// Split out of [`Self::cut`] so [`Self::on_set_tx_power`] can re-send the
     /// plan already in force under fresh epochs without asking the planner to
-    /// re-cut anything. `members` is the same list `replan` cut `plan` against,
+    /// re-cut anything. `members` is the same list `plan` was cut against,
     /// in the same order, so each member's slot still lines up with the plan's.
     fn deal(&mut self, plan: &Plan, members: &[(Mac, Job)]) {
         // One epoch per node that actually needs telling, through `next_epoch` so
@@ -1542,20 +1579,27 @@ impl FleetEngine {
             // duplicating another share rather than leaving a gap — and the
             // footer's unreachable line says the fleet is short of the pool.
             //
-            // Unless what it holds is nothing to scan, which is the assignment of
-            // a node that *was* the Bluetooth scanner and no longer is. That node
-            // is not duplicating a share, it is blind and still holding the
-            // antenna, and leaving it alone would mean the scan could never be
-            // taken off it. So it is dealt everything its own radio can reach —
-            // the surplus rule at its limit, and never empty, because every pool
-            // has 2.4 GHz in it and every radio tunes 2.4 GHz.
+            // Unless what it holds is nothing to scan, or reaches outside the pool.
+            // Nothing to scan is the assignment of a node that *was* the Bluetooth
+            // scanner and no longer is: it is not duplicating a share, it is blind
+            // and still holding the antenna, and leaving it alone would mean the
+            // scan could never be taken off it. Channels outside the pool are what
+            // a node holds after the operator narrows the pool: keeping them would
+            // scan what the operator just took out. Either way it is dealt
+            // everything its own radio can reach in the pool — the surplus rule at
+            // its limit, and never empty, because every pool has 2.4 GHz in it and
+            // every radio tunes 2.4 GHz.
             //
             // An empty set from the plan itself is neither case: it is the
             // Bluetooth node's, and it goes out with the flag beside it.
             let held = node.desired.or(node.confirmed);
             let channels = match plan.channels_for(index) {
                 Some(channels) => channels,
-                None if held.is_some_and(|assignment| assignment.channels.is_empty()) => {
+                None if held.is_some_and(|assignment| {
+                    assignment.channels.is_empty()
+                        || assignment.channels.bits() & !pool.channels().bits() != 0
+                }) =>
+                {
                     match job.radio() {
                         Some(radio) => pool.reachable_by(radio),
                         // Unreachable: a `Job::Bluetooth` slot is never `None` above.
