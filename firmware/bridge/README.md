@@ -67,16 +67,16 @@ what an operator reads off them.
 
 The pins are the vendor's, from `include/pin_config.h` and `lib/lcd_st7735/`:
 
-| Signal | GPIO | |
-| --- | --- | --- |
-| `LCD_MOSI` | 2 | shared with `SD_CMD` |
-| `LCD_SCK` | 6 | shared with `SD_CLK` |
-| `LCD_MISO` | 7 | shared with `SD_DAT0`; the panel never reads, so this is left unclaimed |
-| `LCD_CS` | 10 | |
-| `LCD_DC` | 3 | the vendor calls it `LCD_RS` |
-| `LCD_RST` | 1 | |
-| `LCD_BL` | 0 | **active low** — 0 is lit, and driving it high is the failure that reads as a dead panel |
-| `SD_CS` | 23 | held high, so the card slot stays off a bus it shares with the panel |
+| Signal     | GPIO |                                                                                          |
+|------------|------|------------------------------------------------------------------------------------------|
+| `LCD_MOSI` | 2    | shared with `SD_CMD`                                                                     |
+| `LCD_SCK`  | 6    | shared with `SD_CLK`                                                                     |
+| `LCD_MISO` | 7    | shared with `SD_DAT0`; the panel never reads, so this is left unclaimed                  |
+| `LCD_CS`   | 10   |                                                                                          |
+| `LCD_DC`   | 3    | the vendor calls it `LCD_RS`                                                             |
+| `LCD_RST`  | 1    |                                                                                          |
+| `LCD_BL`   | 0    | **active low** — 0 is lit, and driving it high is the failure that reads as a dead panel |
+| `SD_CS`    | 23   | held high, so the card slot stays off a bus it shares with the panel                     |
 
 Two things about the init are worth knowing before changing any of it, and both are in
 [`src/panel.rs`](src/panel.rs)'s `//!` at length. The panel is **BGR**, set explicitly rather than

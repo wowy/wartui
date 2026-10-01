@@ -1,7 +1,7 @@
 # wartui — the CLI and the view
 
 The clap CLI and the ratatui fleet view. Both are front ends over `wartui-core`, which draws nothing
-and parses no arguments: the fleet's behaviour is decided there and tested without a terminal, and
+and parses no arguments: the fleet's behavior is decided there and tested without a terminal, and
 this crate is the conversation with the operator.
 
 This is the operator's manual. The root [`README.md`](../../README.md) is the short version.
@@ -10,16 +10,16 @@ This is the operator's manual. The root [`README.md`](../../README.md) is the sh
 
 `run` is the default, so the subcommand can be left off.
 
-| Command  | What it does                                                |
-| -------- | ----------------------------------------------------------- |
-| `run`    | Capture a fleet into the store and watch it live            |
-| `export` | Write a WiGLE CSV from a capture                            |
-| `sniff`  | Print every frame the bridge hears, decoded, a line per record |
-| `status` | Ask the bridge for its counters and uptime                  |
-| `reset`  | Reboot a bridge that has stopped answering                  |
-| `ports`  | List the Espressif boards attached, and the address of each |
-| `flash-fleet` | Flash node firmware onto every attached board of one chip; see "Flashing the fleet" |
-| `flash-bridge` | Flash bridge firmware onto the bridge; see "Flashing the bridge" |
+| Command        | What it does                                                                        |
+|----------------|-------------------------------------------------------------------------------------|
+| `run`          | Capture a fleet into the store and watch it live                                    |
+| `export`       | Write a WiGLE CSV from a capture                                                    |
+| `sniff`        | Print every frame the bridge hears, decoded, a line per record                      |
+| `status`       | Ask the bridge for its counters and uptime                                          |
+| `reset`        | Reboot a bridge that has stopped answering                                          |
+| `ports`        | List the Espressif boards attached, and the address of each                         |
+| `flash-fleet`  | Flash node firmware onto every attached board of one chip; see "Flashing the fleet" |
+| `flash-bridge` | Flash bridge firmware onto the bridge; see "Flashing the bridge"                    |
 
 A node broadcasts its heartbeat but unicasts its sighting batches to whichever bridge last sent it
 an admin or clear frame, so `sniff` on a second bridge on the same channel hears every node's
@@ -31,7 +31,7 @@ rebooting sends nothing, since every node is already addressing it correctly.
 `run` takes:
 
 | Flag                    | Default     | What it is                                                |
-| ----------------------- | ----------- | --------------------------------------------------------- |
+|-------------------------|-------------|-----------------------------------------------------------|
 | `--db PATH`             | dated       | Where to keep the capture                                 |
 | `--bridge PATH\|MAC`    | detected    | Which board the bridge is, by path, address or `00:08`    |
 | `--lat` `--lon` `--alt` | —           | A static position for every observation                   |
@@ -96,9 +96,9 @@ modal (`c`) writes it, replacing the whole file on each save, and `b` writes the
 
 The default location is per OS:
 
-| OS               | Path                                               |
-| ---------------- | -------------------------------------------------- |
-| macOS            | `~/Library/Application Support/wartui/wartui.toml` |
+| OS               | Path                                                                                                             |
+|------------------|------------------------------------------------------------------------------------------------------------------|
+| macOS            | `~/Library/Application Support/wartui/wartui.toml`                                                               |
 | Linux and others | `$XDG_CONFIG_HOME/wartui/wartui.toml`, or `~/.config/wartui/wartui.toml` when that variable is unset or relative |
 
 `--config PATH`, a `run` argument, reads a file somewhere else instead, for testing and debugging.
@@ -133,7 +133,7 @@ mid-run — see "At the keyboard" below.
 other's.
 
 An unknown key or table makes wartui refuse to start, naming the file and the line; an
-out-of-range value, an unknown `pool` spelling, a malformed `node` or a `node` beside
+out-of-range value, an unknown `pool` spelling, a malformed `node`, or a `node` beside
 `remember = false` does too, naming the file and the key.
 
 ### Benchmarking the store
@@ -168,19 +168,19 @@ wartui flash-fleet --features esp32c5
 wartui flash-fleet --features esp32c6,xiao-external-antenna --bridge 10:BD:A3:EC:44:C0
 ```
 
-| Flag                    | Default    | What it is                                                  |
-| ----------------------- | ---------- | ----------------------------------------------------------- |
-| `--features LIST`       | —          | The node firmware's features; exactly one of `esp32c5` or `esp32c6` |
-| `--no-default-features` | off        | Build without the firmware's default features               |
-| `--bridge PATH\|MAC`    | remembered | The bridge, which must be attached and is never flashed; `00:08` works too |
-| `--no-bridge`           | off        | No bridge is attached; a remembered one is still spared     |
-| `--skip MAC`            | —          | Leave this board alone too; repeatable                      |
-| `--image BIN`           | —          | Flash this merged image rather than building or fetching one |
-| `--firmware-dir DIR`    | the checkout's | Build the image from the node firmware here             |
-| `--jobs N`              | `4`        | How many boards to probe or flash at once                   |
-| `--dry-run`             | off        | Probe and report; build, fetch and flash nothing            |
+| Flag                    | Default        | What it is                                                                 |
+|-------------------------|----------------|----------------------------------------------------------------------------|
+| `--features LIST`       | —              | The node firmware's features; exactly one of `esp32c5` or `esp32c6`        |
+| `--no-default-features` | off            | Build without the firmware's default features                              |
+| `--bridge PATH\|MAC`    | remembered     | The bridge, which must be attached and is never flashed; `00:08` works too |
+| `--no-bridge`           | off            | No bridge is attached; a remembered one is still spared                    |
+| `--skip MAC`            | —              | Leave this board alone too; repeatable                                     |
+| `--image BIN`           | —              | Flash this merged image rather than building or fetching one               |
+| `--firmware-dir DIR`    | the checkout's | Build the image from the node firmware here                                |
+| `--jobs N`              | `4`            | How many boards to probe or flash at once                                  |
+| `--dry-run`             | off            | Probe and report; build, fetch and flash nothing                           |
 
-**The bridge has to be known.** It is the same vendor, product and often the same chip as the
+**The bridge has to be known.** It is the same vendor, product, and often the same chip as the
 nodes, so its address is the only thing that tells it apart. That is `--bridge`, else the address
 `run` remembered, and both are spared when both are known. With neither, the run is refused unless
 `--no-bridge` says no bridge is attached; that flag only lifts the refusal, and a remembered bridge
@@ -197,7 +197,7 @@ the reason:
 3. `espflash board-info` reads the chip `--features` names.
 4. `espflash board-info` reads the same address from the chip that the OS reported for the port.
 
-The image is a merged one — bootloader, partition table and app, written at `0x0` with `espflash
+The image is a merged one — bootloader, partition table, and app, written at `0x0` with `espflash
 write-bin` — and comes from the first of these that applies:
 
 - `--image BIN`, as given.
@@ -224,13 +224,13 @@ wartui flash-bridge --features esp32c5,t-dongle-c5
 wartui flash-bridge --features esp32c6 --bridge 10:BD:A3:EC:44:C0
 ```
 
-| Flag                 | Default        | What it is                                                   |
-| -------------------- | -------------- | ------------------------------------------------------------ |
+| Flag                 | Default        | What it is                                                            |
+|----------------------|----------------|-----------------------------------------------------------------------|
 | `--features LIST`    | —              | The bridge firmware's features; exactly one of `esp32c5` or `esp32c6` |
-| `--bridge PATH\|MAC` | see below      | The board to flash, which must be attached; `00:08` works too |
-| `--image BIN`        | —              | Flash this merged image rather than building or fetching one |
-| `--firmware-dir DIR` | the checkout's | Build the image from the bridge firmware here                |
-| `--dry-run`          | off            | Probe and report; build, fetch and flash nothing             |
+| `--bridge PATH\|MAC` | see below      | The board to flash, which must be attached; `00:08` works too         |
+| `--image BIN`        | —              | Flash this merged image rather than building or fetching one          |
+| `--firmware-dir DIR` | the checkout's | Build the image from the bridge firmware here                         |
+| `--dry-run`          | off            | Probe and report; build, fetch and flash nothing                      |
 
 **The board is chosen before anything is reset**: the board `--bridge` names, else the bridge `run`
 remembered, which must be attached, else, with none remembered, the only Espressif board attached.
@@ -251,14 +251,14 @@ full output beneath. A board flashed is remembered as the bridge, so `flash-flee
 
 ## At the keyboard
 
-| Key                    | What it does                                                           |
-| ---------------------- | ---------------------------------------------------------------------- |
-| `↑` `↓` / `k` `j`      | Move the cursor down the fleet table                                   |
-| `b`                    | Make the selected node the Bluetooth scanner, or take the scan off    |
-| `c`                    | Open the settings modal (transmit power, pool, bluetooth)             |
-| `r`                    | Clear the selected node's dedup ring on its next heartbeat            |
-| `R`                    | Clear every assignable node's dedup ring, each on its next heartbeat  |
-| `q` / `Esc` / `ctrl-c` | Stop, committing the last batch                                        |
+| Key                    | What it does                                                         |
+|------------------------|----------------------------------------------------------------------|
+| `↑` `↓` / `k` `j`      | Move the cursor down the fleet table                                 |
+| `b`                    | Make the selected node the Bluetooth scanner, or take the scan off   |
+| `c`                    | Open the settings modal (transmit power, pool, bluetooth)            |
+| `r`                    | Clear the selected node's dedup ring on its next heartbeat           |
+| `R`                    | Clear every assignable node's dedup ring, each on its next heartbeat |
+| `q` / `Esc` / `ctrl-c` | Stop, committing the last batch                                      |
 
 `b`, `c`, `r` and `R` are the only ones that reach the air. `b` decides _which_ node scans Bluetooth
 instead of Wi-Fi; it reaches that node's share only by being an input to the planner, which is still
@@ -270,7 +270,7 @@ is.
 `c` opens a modal with a row each for the pool, the nodes' transmit power, the bridge's, and
 `remember bt node`. `↑`/`↓` (or `j`/`k`) move between them, `←`/`→` (or `h`/`l`) step the selected
 row: a power by 1 dBm, the pool through `all → eu → us`, `remember bt node` to `off` and `on` — all
-stop at their ends rather than wrapping. `Enter` sends the pool, the powers and the remember setting
+stop at their ends rather than wrapping. `Enter` sends the pool, the powers, and the remember setting
 to the engine, all of them or none, and writes every row shown to `wartui.toml`'s `pool`,
 `[tx-power]` and `[bluetooth]` keys, whatever was there before, then closes the modal. The bridge
 takes its power on its next status poll. A moved pool re-cuts the whole fleet against it, and each
@@ -336,12 +336,12 @@ reported in the fault box rather than left to be inferred.
 ## Channel pools
 
 `pool = "all"` is the default: every channel a node can tune, 2.4 GHz 1–13 and all of 5 GHz including
-the UNII-4 channels 169, 173 and 177. The other two are narrower, and the choice is about coverage
+the UNII-4 channels 169, 173, and 177. The other two are narrower, and the choice is about coverage
 rather than legality — a node parks and reads beacons, so a pool says where it listens and never
 what it emits.
 
 | Pool  | 2.4 GHz | 5 GHz  | Channels |
-| ----- | ------- | ------ | -------- |
+|-------|---------|--------|----------|
 | `all` | 1–13    | 36–177 | 41       |
 | `us`  | 1–11    | 36–165 | 36       |
 | `eu`  | 1–13    | 36–140 | 32       |
@@ -377,7 +377,7 @@ epoch differs from the one it holds.
 
 Two consequences worth knowing:
 
-- **A node can report a channel that is not in its share.** The deal interleaves 2.4 GHz channels
+- **A node can report a channel not in its share.** The deal interleaves 2.4 GHz channels
   between nodes — one takes 1, 3, 5, the next 2, 4, 6 — and those channels are 5 MHz apart but 20
   MHz wide, so a node parked on 2 hears beacons transmitted on 1 and 3. It reports the channel the
   beacon itself names, which is the access point's real one; the alternative would be filing a real
@@ -407,7 +407,7 @@ wartui run --db drive.db --lat 37.7749 --lon -122.4194
 ```
 
 **A receiver is found without being named.** Every serial port that is not one of the fleet's own
-boards is listened to in turn, at 9600, then 38400, 4800 and 115200, and the first that produces two
+boards is listened to in turn, at 9600, then 38400, 4800, and 115200, and the first that produces two
 sentences passing their checksum is the one read for the rest of the capture. A port that names
 itself — `u-blox`, `GPS`, `GNSS` — is tried first, but that only decides the order: the common pucks
 sit behind a general-purpose USB-to-UART chip that says nothing about what is behind it, so what
@@ -430,7 +430,7 @@ configured to say very little would otherwise be refused for saying too little i
 simulated fleet is how wartui is worked on with nothing plugged in, and a search that opens every
 serial port on the machine is not part of that.
 Any receiver that speaks NMEA 0183 over a serial port will do: `GGA` and `RMC` are read and
-everything else ignored, and the altitude, the satellite count and an accuracy estimated from the
+everything else ignored, and the altitude, the satellite count, and an accuracy estimated from the
 reported HDOP all reach the export.
 
 **A receiver that is named and not found is a fault; one that was never found is not.** Searching is
@@ -440,10 +440,10 @@ absence is reported.
 
 **A fix has to be recent to be used.** Past `--gps-max-age` seconds the position falls back to the
 tier below and the header says `gps fix is stale`, because at driving speed a minute-old fix is a
-different neighbourhood and a row that quietly claimed it would be worse than one admitting to the
+different neighborhood and a row that quietly claimed it would be worse than one admitting to the
 static position.
 
-The receiver runs on its own thread and nothing waits for it: a capture starts immediately, and says
+The receiver runs on its own thread, and nothing waits for it: a capture starts immediately and says
 what it is doing on the header — `gps scanning /dev/… @38400`, `gps searching`, `gps ok, 8 sats`,
 `gps fix is stale`, or the error from the port. The search living on that thread is also what lets a
 puck be unplugged and put back into a *different* socket: it comes back under another name, and the
@@ -456,7 +456,7 @@ read off the band its heartbeats announce, so a node not yet heartbeating shows 
 chip.
 
 | State          | Meaning                                                                                                                                                |
-| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+|----------------|--------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `alive`        | Heartbeating, so it can be given channels                                                                                                              |
 | `stale`        | Still being heard, but not heartbeating — most often Bluetooth coexistence on the node holding the radio through its admin window                      |
 | `no heartbeat` | Seen, but has never completed a sweep                                                                                                                  |
@@ -543,13 +543,13 @@ A LilyGO T-Dongle-C5 has a screen, and a bridge flashed for it shows five lines 
 while it runs. Nothing turns this on: the bridge says whether it has a panel when it announces
 itself, `wartui status` prints what it said, and a bridge without one is sent nothing at all.
 
-| Line | What it says |
-| --- | --- |
-| `gps ok, 9 sats` | Where the position is coming from |
-| `nodes 3` | How many nodes are heartbeating, and how many of those can be driven |
-| `APs ~12.3k` | Distinct Wi-Fi access points this session, estimated |
-| `BLE ~840` | Distinct BLE addresses, estimated the same way |
-| `avg -55 min -72` | How strongly the *bridge* is hearing the fleet |
+| Line              | What it says                                                         |
+|-------------------|----------------------------------------------------------------------|
+| `gps ok, 9 sats`  | Where the position is coming from                                    |
+| `nodes 3`         | How many nodes are heartbeating, and how many of those can be driven |
+| `APs ~12.3k`      | Distinct Wi-Fi access points this session, estimated                 |
+| `BLE ~840`        | Distinct BLE addresses, estimated the same way                       |
+| `avg -55 min -72` | How strongly the *bridge* is hearing the fleet                       |
 
 The screen is seventeen characters wide, so the wording is terse on purpose. A fleet
 that cannot all be driven reads `nodes 2 of 5` — drivable first, alive second. The RSSI
@@ -560,7 +560,7 @@ well above it.
 
 The numbers are the same ones the view shows, from the same snapshot, about once a second.
 
-**Each line is coloured by its own state**, so the panel can be read from across a car without
+**Each line is colored by its own state**, so the panel can be read from across a car without
 being read closely: green for fine, amber for working but not ideal, red for a fault.
 
 - **GPS is green only on a live, current fix**, which is a stricter reading than the view's.
@@ -579,7 +579,7 @@ being read closely: green for fine, amber for working but not ideal, red for a f
 - **The AP and BLE counts have no bad state** and stay green.
 
 Before any host speaks, and for about ten seconds after one goes away, the bridge shows what it
-knows by itself instead — chip, address, channel and uptime, all in amber, because no host is
+knows by itself instead — chip, address, channel, and uptime, all in amber, because no host is
 exactly "working but not ideal". Start a capture and it takes the panel back within a second,
 with no replug and no reflash.
 
@@ -661,7 +661,7 @@ $ wartui ports
 ```
 
 **An ESP32's USB serial number is its MAC**, so the operating system has already paired each device
-node with the address that board's radio transmits from — with nothing opened, no `esp` tool and no
+node with the address that board's radio transmits from — with nothing opened, no `esp` tool, and no
 reflash. That one fact is what the whole command rests on, and it holds on Linux and macOS alike. It
 is also why every board gets a name of its own above: udev builds those from the serial number, so
 no two ESP32s share one. Everything else on the bus carries a manufacturing serial instead, and a

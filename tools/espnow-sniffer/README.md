@@ -39,11 +39,11 @@ Check which you have with `pio device list`, or `ls /dev/cu.*`.
 The sniffer listens two ways at once, and comparing the counters in the
 `# alive:` line tells you which situation you are in:
 
-| `esp-now` | `promiscuous` | Meaning |
-| --- | --- | --- |
-| > 0 | > 0 | Plaintext fleet. This is what wartui needs. |
-| 0 | > 0 | Traffic is there but **unicast**, so encryption is ON. Turn it off in each node's web UI. |
-| 0 | 0 | Nothing on this channel — wrong channel, out of range, or nothing transmitting. |
+| `esp-now` | `promiscuous` | Meaning                                                                                   |
+|-----------|---------------|-------------------------------------------------------------------------------------------|
+| > 0       | > 0           | Plaintext fleet. This is what wartui needs.                                               |
+| 0         | > 0           | Traffic is there but **unicast**, so encryption is ON. Turn it off in each node's web UI. |
+| 0         | 0             | Nothing on this channel — wrong channel, out of range, or nothing transmitting.           |
 
 The distinction matters because the ESP-NOW receive callback — the mechanism
 the wartui bridge itself relies on — only ever fires for frames addressed to
