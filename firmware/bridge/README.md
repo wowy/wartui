@@ -3,34 +3,38 @@
 The dongle. It parks an ESP32 radio on the fleet's ESP-NOW channel and forwards every frame it hears
 up a USB link to `wartui` on the host.
 
-It knows about COBS framing and it knows about `esp-radio`. It does not know what an air frame is,
-what a heartbeat means, or how channels are assigned — all of that lives on the host, where it is
-unit-testable and a fix costs a `cargo run` rather than a reflash.
+It knows COBS framing and `esp-radio`, and nothing else. What an air frame is, what a heartbeat
+means, and how channels are assigned all live on the host. There they are unit-testable, and a fix
+costs a `cargo run` rather than a reflash.
 
-A board with a screen is the same rule from the other side: the host sends finished lines with a
-severity on each and this firmware blits them, so what the panel says and how it is arranged are
-also a `cargo run` away. What is decided here is only what cannot be — the three colours a severity
-means, which are a property of the panel rather than of the fleet, and the fallback screen it draws
-when no host is talking, which is link-local state nothing else knows.
+A board with a screen follows the same rule from the other side. The host sends finished lines, each
+with a severity, and this firmware blits them. What the panel says and how it is arranged are a
+`cargo run` away too. Only two things are decided here, because nothing else can decide them:
 
-It transmits, and answers with the **transmit-callback** status rather than the enqueue result.
-Unicast ESP-NOW is acknowledged by the receiver's own MAC hardware, so `AckOk` means a node really
-has the frame. The callback comes back in 2–4 ms against the node's 100 ms admin window, and in
-28–35 ms even in the pessimistic case — an _unacknowledged_ send, where it fires only once the radio
-has exhausted its retry chain ([`docs/phase-4-findings.md`](../../docs/phase-4-findings.md)). A dumb
-bridge has more than an order of magnitude in hand when a send is acknowledged, and under three
-times when an assignment queues behind one that is not.
+- the three colors a severity means, which belong to the panel rather than the fleet;
+- the fallback screen it draws when no host is talking, which is link-local state.
+
+## Transmitting
+
+The bridge answers a send with the **transmit-callback** status, not the enqueue result. The
+receiver's own MAC hardware acknowledges unicast ESP-NOW, so `AckOk` means a node really has the
+frame.
+
+The callback returns in 2–4 ms, against the node's 100 ms admin window. The pessimistic case is an
+_unacknowledged_ send, where it fires only after the radio exhausts its retry chain. That takes
+28–35 ms ([`docs/phase-4-findings.md`](../../docs/phase-4-findings.md)). So a dumb bridge has more
+than an order of magnitude in hand when a send is acknowledged. When an assignment queues behind an
+unacknowledged one, the margin is under three times.
 
 Peers are added on demand (`ensure_peer`) and never removed as a side effect of sending. The radio's
-table holds twenty entries, one of which `esp-radio` spends on the broadcast peer at init; since
-this bridge only ever _receives_ broadcasts and ESP-NOW delivers a received frame whether or not its
-sender is a peer, that slot is given up to make room for a twentieth node.
+table holds twenty entries, and `esp-radio` spends one on the broadcast peer at init. This bridge
+only _receives_ broadcasts, and ESP-NOW delivers a received frame whether or not its sender is a
+peer. So the bridge gives that slot up to make room for a twentieth node.
 
-A `PeerTableFull` after that is genuine, but it does not have to mean a fleet above twenty. Nothing
-removes a peer, so a long session accumulates slots for nodes that have since gone and can fill the
-table with a handful still on the air. The table starts empty on every boot, which is why the host
-clears the refusal on each bridge announcement and why `wartui reset` is the cheap thing to try
-first.
+A `PeerTableFull` after that is genuine, but it need not mean a fleet above twenty. Nothing removes
+a peer, so a long session accumulates slots for nodes that have gone. A handful still on the air can
+then fill the table. The table starts empty on every boot. That is why the host clears the refusal
+on each bridge announcement, and why `wartui reset` is the cheap thing to try first.
 
 ## Building and flashing
 
@@ -38,30 +42,33 @@ first.
 cargo run --release --features esp32c6    # or --features esp32c5
 ```
 
-Exactly one chip feature is required. That is the whole story: stable, one flag, and
-`rust-toolchain.toml` pins it.
+Exactly one chip feature is required. The toolchain is stable, and `rust-toolchain.toml` pins it.
 
-From the host, `wartui flash-bridge --features esp32c6` (or the features for your board) builds
-this firmware in a checkout, or fetches the same release's image in a release binary, and flashes
-the one board it can tell is the bridge. Each release publishes an image for `esp32c5`,
-`esp32c5,t-dongle-c5`, `esp32c6` and `esp32c6,xiao-external-antenna`;
+Two board features layer over a chip feature:
+
+| Feature                 | Board                                      | What it does                                             |
+|-------------------------|--------------------------------------------|----------------------------------------------------------|
+| `xiao-external-antenna` | Seeed XIAO ESP32-C6 with a U.FL antenna    | Points the RF switch at the U.FL connector               |
+| `t-dongle-c5`           | LilyGO T-Dongle-C5 (`esp32c5,t-dongle-c5`) | Lights the ST7735 panel and makes the bridge announce it |
+
+[`../node/README.md`](../node/README.md) § "Building and flashing" has the rest on the XIAO antenna.
+
+Both board features are inert without a chip feature. They are mutually exclusive:
+`xiao-external-antenna` drives GPIO3 and GPIO14, which on a T-Dongle-C5 are `LCD_DC` and `USB_DP`.
+Built without `t-dongle-c5`, the same source reports no panel and is sent no lines. One tree covers
+every board.
+
+From the host, `wartui flash-bridge --features esp32c6` (or the features for your board) flashes
+the one board it can tell is the bridge. In a checkout it builds this firmware. In a release binary
+it fetches the same release's image. Each release publishes an image for `esp32c5`,
+`esp32c5,t-dongle-c5`, `esp32c6`, and `esp32c6,xiao-external-antenna`.
 [`crates/wartui/README.md`](../../crates/wartui/README.md) § "Flashing the bridge" has how it picks
 the board.
 
-A Seeed XIAO ESP32-C6 with an antenna on its U.FL connector also wants `xiao-external-antenna`, or
-its RF switch stays on the onboard ceramic antenna; [`../node/README.md`](../node/README.md) §
-"Building and flashing" has the rest.
-
-A LilyGO T-Dongle-C5 wants `esp32c5,t-dongle-c5`, which lights its ST7735 panel and makes the bridge
-announce it. Both are board features layered over a chip feature and both are inert without one;
-they are mutually exclusive, because `xiao-external-antenna` drives GPIO3 and GPIO14, which on a
-T-Dongle-C5 are `LCD_DC` and `USB_DP`. Built without `t-dongle-c5` the same source reports no panel
-and is sent no lines, so one tree covers every board.
-
 ## The panel
 
-Five lines the host composes from its own snapshot — GPS, node counts, approximate Wi-Fi and BLE
-totals, and the fleet's link RSSI — each coloured green, amber or red by how that one thing is
+The host composes five lines from its own snapshot: GPS, node counts, approximate Wi-Fi and BLE
+totals, and the fleet's link RSSI. Each is colored green, amber, or red by how that one thing is
 going. [`../../crates/wartui/README.md`](../../crates/wartui/README.md) § "The bridge panel" says
 what an operator reads off them.
 
@@ -78,19 +85,21 @@ The pins are the vendor's, from `include/pin_config.h` and `lib/lcd_st7735/`:
 | `LCD_BL`   | 0    | **active low** — 0 is lit, and driving it high is the failure that reads as a dead panel |
 | `SD_CS`    | 23   | held high, so the card slot stays off a bus it shares with the panel                     |
 
-Two things about the init are worth knowing before changing any of it, and both are in
-[`src/panel.rs`](src/panel.rs)'s `//!` at length. The panel is **BGR**, set explicitly rather than
-inherited — get it wrong and red renders blue, which on a screen whose whole job is red against
-green against yellow is not cosmetic. And mipidsi takes the size and offset in the controller's own
-portrait framebuffer and rotates afterwards, so they are `80x160` at `(26, 1)`; landscape figures
-are rejected outright, because 160 is wider than an ST7735's 132-column framebuffer.
+Know two things about the init before changing it. [`src/panel.rs`](src/panel.rs)'s `//!` covers
+both at length.
 
-A panel that will not start is reported and then done without — the bridge carries on bridging and
+- The panel is **BGR**, set explicitly rather than inherited. Get it wrong and red renders blue. On
+  a screen whose whole job is red against green against yellow, that is not cosmetic.
+- mipidsi takes the size and offset in the controller's own portrait framebuffer, then rotates. So
+  they are `80x160` at `(26, 1)`. Landscape figures are rejected outright, because 160 is wider than
+  an ST7735's 132-column framebuffer.
+
+A panel that will not start is reported and then done without. The bridge carries on bridging and
 says `panel: none`, rather than panicking into a reboot nobody can read.
 
 The cargo runner is `espflash flash --monitor` with no `--chip`, so espflash detects the part.
-`--monitor` renders the framed link bytes as text and looks like line noise; use `wartui sniff` to
-read them.
+`--monitor` renders the framed link bytes as text, which looks like line noise. Use `wartui sniff`
+to read them.
 
 ## Checking it works
 
@@ -99,107 +108,138 @@ wartui status     # counters, uptime — proves the link runs both ways
 wartui sniff      # every frame, decoded
 ```
 
-`wartui status` is the first thing to reach for when frames are not arriving: a bridge that answers
-is listening, and `received 0 frames` then points at the nodes rather than at the link. A bridge
-that does _not_ answer gets a named diagnosis after five seconds rather than a wait, because the
-three things it can be need three different actions and produce an identical symptom — the wrong
-firmware on the board, another program holding the port, or a bridge that has stopped answering
-while still enumerating as a USB device.
+Reach for `wartui status` first when frames are not arriving. A bridge that answers is listening,
+and `received 0 frames` then points at the nodes rather than the link.
 
-That last one is not a hung bridge. It is a bridge whose USB _transmit_ endpoint has stopped
-draining while its receive endpoint carries on decoding and executing everything you send it. One
-flag decides it: `SERIAL_IN_EP_DATA_FREE`, which `WR_DONE` clears and which, per the TRM, comes back
-only when the USB host reads the FIFO. If that read never lands, nothing on the device can clear it.
+A bridge that does _not_ answer gets a named diagnosis after five seconds rather than a wait. Three
+causes produce the identical symptom, and each needs a different action:
 
-So the firmware notices and reboots itself, within about three seconds.
+- the wrong firmware on the board;
+- another program holding the port;
+- a bridge that has stopped answering while still enumerating as a USB device.
+
+That last one is not a hung bridge. Its USB _transmit_ endpoint has stopped draining, while its
+receive endpoint still decodes and executes everything you send it. One flag decides it:
+`SERIAL_IN_EP_DATA_FREE`. `WR_DONE` clears it, and per the TRM it comes back only when the USB host
+reads the FIFO. If that read never lands, nothing on the device can clear it.
+
+So the firmware notices and reboots itself within about three seconds.
 `wartui_proto::stall::StallWatch` times how long the endpoint has refused bytes _while somebody was
-waiting for them_: a host frame decoded since the last byte moved, that host still present, and three
-seconds of refusal since both. No host frame is what keeps a bridge on a bench with no host attached
-quiet for ever, and a host that read what it asked for leaves no unanswered frame behind, which keeps
-the bridge from resetting every time an operator closes a window. The single `Identify` `wartui`
-sends on connecting is enough to clear one that wedged beforehand. The reset _is_ the message, since
-every way of explaining would go out through the path that is broken; the `Ready` behind it says
-`TxStalled`. The rule lives in `wartui-proto` rather than here so that it is tested in
-microseconds instead of on a bench. That `Ready` follows ~1.5 KB of ROM banner with no `0x00` in it,
-which overflows the host's frame buffer and would take the first frame with it, so the bridge writes
-a lone `0x00` at boot ahead of everything (`Outbox::delimit`): an empty frame every receiver already
-skips, so not a wire change.
+waiting for them_. The firmware resets when all three hold:
 
-Reach for `wartui reset --bridge <board>` before `espflash`: the receive path is alive in this state,
-so the bridge reboots on being asked, and a software reset keeps the device path where an `espflash`
-reset re-enumerates the board and can move `ttyACM0` to `ttyACM1` underneath a script. `espflash
-reset --port <path>` is the fallback for when even that goes unanswered, which means the firmware
-really is hung; [`docs/phase-3-findings.md`](../../docs/phase-3-findings.md) has why there is no
-watchdog behind that case.
+- a host frame has been decoded since the last byte moved;
+- that host is still present;
+- the endpoint has refused bytes for three seconds since both.
+
+The first condition keeps a bridge on a bench with no host attached quiet forever. The second keeps
+it from resetting every time an operator closes a window, because a host that read what it asked for
+leaves no unanswered frame behind. The single `Identify` that `wartui` sends on connecting is
+enough to clear a bridge that wedged beforehand. The rule lives in `wartui-proto` rather than here,
+so it is tested in microseconds instead of on a bench.
+
+The reset _is_ the message, since any explanation would go out through the broken path. The `Ready`
+after it says `TxStalled`.
+
+That `Ready` follows ~1.5 KB of ROM banner with no `0x00` in it. The banner overflows the host's
+frame buffer and would take the first frame with it. So the bridge writes a lone `0x00` at boot,
+ahead of everything (`Outbox::delimit`). That is an empty frame every receiver already skips, so it
+is not a wire change.
+
+Reach for `wartui reset --bridge <board>` before `espflash`. The receive path is alive in this
+state, so the bridge reboots on being asked. A software reset also keeps the device path. An
+`espflash` reset re-enumerates the board and can move `ttyACM0` to `ttyACM1` underneath a script.
+`espflash reset --port <path>` is the fallback for when even that goes unanswered, which means the
+firmware really is hung. [`docs/phase-3-findings.md`](../../docs/phase-3-findings.md) has why no
+watchdog covers that case.
 
 ## The two things that are easy to get wrong
 
 **Never block on the USB endpoint.** `UsbSerialJtag` stops accepting bytes as soon as its FIFO
-fills, and nothing drains that FIFO unless a host is reading, so a blocking write from the receive
-path would stall the radio for as long as the TUI is wedged or the cable is out. Everything outbound
-goes through the rings in `wartui_proto::outbox`, which are drained by whatever the FIFO will take.
-The only wait on the endpoint is the main loop's idle one, ended by the FIFO emptying, a host
-command or a received frame, and otherwise bounded by `IDLE_TICK`, so a host that stops reading
-costs no busy passes. Both rings evict oldest-first under pressure and count it into
-`Status.dropped_tx`, and priority frames (`Ready`, `SendResult`, `Status`, `Error`) are served ahead
-of `Rx` and `Log` rather than given an unbounded queue. That module is in `wartui-proto` so those
-rules are unit-testable on the host.
+fills. Nothing drains that FIFO unless a host is reading. So a blocking write from the receive path
+would stall the radio for as long as the TUI is wedged or the cable is out.
 
-The one deliberate exception is the wait for a transmit callback in `transmit`, which is
-milliseconds against a 100 ms window and is what makes `AckOk` mean anything. `esp-radio`'s
-`SendWaiter` busy-waits in `Drop` as well as in `wait`, so there is no way to start a send and walk
-away.
+Everything outbound goes through the rings in `wartui_proto::outbox`, drained by whatever the FIFO
+will take. The only wait on the endpoint is the main loop's idle one. The FIFO emptying, a host
+command, or a received frame ends it; otherwise `IDLE_TICK` bounds it. So a host that stops reading
+costs no busy passes. Under pressure both rings evict oldest-first and count it into
+`Status.dropped_tx`. Priority frames (`Ready`, `SendResult`, `Status`, `Error`) are served ahead of
+`Rx` and `Log` rather than given an unbounded queue. That module is in `wartui-proto` so those rules
+are unit-testable on the host.
+
+The one deliberate exception is the wait for a transmit callback in `transmit`. It is milliseconds
+against a 100 ms window, and it is what makes `AckOk` mean anything. `esp-radio`'s `SendWaiter`
+busy-waits in `Drop` as well as in `wait`, so there is no way to start a send and walk away.
 
 **Never link `esp-println` with `jtag-serial`.** It writes to the same USB endpoint and would
-interleave into the COBS stream; diagnostics go out as `Log` frames instead. For the same reason the
-panic handler resets rather than printing — the message is lost, but a bridge that panics repeatedly
-says so by re-announcing itself, which the host is already listening for.
+interleave into the COBS stream. Diagnostics go out as `Log` frames instead. For the same reason the
+panic handler resets rather than printing. The message is lost, but a bridge that panics repeatedly
+says so by re-announcing itself, which the host already listens for.
 
 ## Dependency versions
 
 `esp-radio 1.0.0-beta.0` requires `esp-hal = "~1.1.0"`, and that one requirement fixes the whole
-family. For `esp-hal` and `esp-rtos` it is a wall Cargo enforces: `esp-hal 1.2.0` and `esp-rtos 0.4`
-are published, neither has a resolution alongside `esp-radio`, and nothing can pull one in by
-accident. Both firmwares are held at the same set by the same dependency, which is worth keeping
-true — they share `wartui-proto`.
+family. It holds the family in three ways:
 
-The pin is not free. The ESP32-C5 fix for a software reset that leaves the board unbootable until it
-loses power is upstream from `esp-hal` 1.2.0-rc.0 (esp-rs/esp-hal#5703), and being unable to take it
-is why `reboot()` writes that register out by hand on the C5. Cargo cannot be talked round it
-either: `SoftwareInterruptControl` is gone in 1.2.1, so `esp-rtos 0.3.0` and this firmware's
+- **Walled:** `esp-hal` and `esp-rtos`. Cargo enforces this one.
+- **Resolves, but doubles:** `esp-alloc`, the `esp-wifi-sys-*` bindings, and `esp-sync`.
+- **Panel crates:** `embedded-graphics`, `embedded-hal-bus`, and `mipidsi`, through `embedded-hal`
+  1.0.
+
+`embassy-executor`, `embassy-time`, and `embedded-io-async` are held the same way, through
+`esp-rtos` and `esp-hal`.
+
+### The wall
+
+`esp-hal 1.2.0` and `esp-rtos 0.4` are published. Neither has a resolution alongside `esp-radio`,
+so nothing can pull one in by accident. The same dependency holds both firmwares at the same set.
+Keep that true: they share `wartui-proto`.
+
+The pin is not free. Upstream `esp-hal` fixes a C5 software reset that leaves the board unbootable
+until it loses power, from 1.2.0-rc.0 (esp-rs/esp-hal#5703). This firmware cannot take that fix, so
+`reboot()` writes that register out by hand on the C5. Cargo cannot be talked around the pin
+either. `SoftwareInterruptControl` is gone in 1.2.1, so `esp-rtos 0.3.0` and this firmware's
 `esp_rtos::start` would both stop compiling against a version faked into range. Issue #16 has the
-shape of the real upgrade — `[patch.crates-io]` across the family at one monorepo rev — and what to
-delete when it lands.
+shape of the real upgrade: `[patch.crates-io]` across the family at one monorepo rev. It also lists
+what to delete when that lands.
+
+### Crates that double
 
 The other half of the family is the dangerous half, because it resolves. `esp-alloc` and the
 `esp-wifi-sys-*` bindings are dependencies of `esp-radio` *and* direct dependencies of both
-firmwares, and a version above what `esp-radio` asks for is semver-incompatible with it rather than
-in conflict with it — so Cargo adds a second copy instead of refusing, and both copies are linked:
+firmwares. A version above what `esp-radio` asks for is semver-incompatible with it, not in conflict
+with it. So Cargo adds a second copy instead of refusing, and links both:
 
 - Two `esp-wifi-sys-*` each export `__esp_radio_printf` as `no_mangle`, and each carries its own
   copy of the IDF Wi-Fi blobs. `lto = "fat"` refuses the build. That is the cheap version.
 - Two `esp-alloc` are two heaps. Only the direct copy takes `#[global_allocator]` and the `malloc`
-  shims, and only that one is handed regions by `heap_allocator!` in `src/main.rs`. But `esp-rtos`
-  and `esp-radio` allocate every task stack and every Wi-Fi driver queue through *their* copy's
-  `esp_alloc::InternalMemory`, which reads its own `HEAP` static rather than going through those
-  shims — so the firmware builds, links, passes CI, and then panics at `esp_rtos::start`, before the
-  radio is even up. The panic handler resets, so the board does it again: 88 boots in 20 seconds,
-  never reaching `Ready`. No host build can see any of that.
+  shims. Only that one is handed regions by `heap_allocator!` in `src/main.rs`. But `esp-rtos` and
+  `esp-radio` allocate every task stack and every Wi-Fi driver queue through *their* copy's
+  `esp_alloc::InternalMemory`. It reads its own `HEAP` static rather than going through those shims.
+  So the firmware builds, links, and passes CI, then panics at `esp_rtos::start`, before the radio
+  is up. The panic handler resets, so the board does it again: 88 boots in 20 seconds, never
+  reaching `Ready`. No host build can see any of that.
 
-A second copy does not need a manifest to arrive, either: `esp-sync` is a direct dependency of the
-node alone, and it doubled in the *bridge* because `esp-alloc 0.11` brought its own.
+A second copy does not need a manifest to arrive, either. `esp-sync` is a direct dependency of the
+node alone. It doubled in the *bridge* because `esp-alloc 0.11` brought its own.
 
-The panel's three crates — `embedded-graphics`, `embedded-hal-bus` and `mipidsi` — are outside this
-wall: none is in `esp-radio`'s dependency closure, and all three are free to move. They are not
-outside it entirely, though. All three sit on `embedded-hal` 1.0, which `esp-hal` also brings, and a
-second copy of *that* would be the same class of problem as the ones above — so the check below
-names it too. It prints two lines for it, and that is correct: `embedded-hal` 0.2 is a different
-crate that has always coexisted here. Two copies of 1.x would not be.
+### Panel crates
 
-So every crate `esp-radio` also depends on is held at the version `esp-radio` resolves, and they all
-move when it does. Two things hold that without a board to test on: `.github/dependabot.yml` ignores
-the incompatible bumps in both firmware directories, and each firmware's CI job counts the versions
-before it builds. By hand, from either firmware directory:
+The panel's three crates — `embedded-graphics`, `embedded-hal-bus`, and `mipidsi` — are outside the
+wall. None is in `esp-radio`'s dependency closure, so all three are free to move. They are not
+entirely outside it, though. All three sit on `embedded-hal` 1.0, which `esp-hal` also brings. A
+second copy of *that* would be the same class of problem, so the check below names it too. It prints
+two lines for it, which is correct. `embedded-hal` 0.2 is a different crate that has always
+coexisted here; two copies of 1.x would not be.
+
+### Holding the set
+
+Every crate `esp-radio` also depends on is held at the version `esp-radio` resolves, and they all
+move when it does. Two things hold that without a board to test on:
+
+- `.github/dependabot.yml` ignores the incompatible bumps in both firmware directories;
+- each firmware's CI job counts the versions before it builds.
+
+By hand, from either firmware directory:
 
 ```sh
 cargo tree --locked --features esp32c6 -e normal --prefix none --format '{p}' \
@@ -209,16 +249,23 @@ cargo tree --locked --features esp32c6 -e normal --prefix none --format '{p}' \
 
 They are direct dependencies for reasons that do not go away. `esp-wifi-sys-*` is here for the two
 IDF calls `esp-radio` does not wrap, which are the only `unsafe` in either firmware:
-`esp_now_set_peer_rate_config` (`set_peer_rate` in `src/main.rs`) and `esp_wifi_set_max_tx_power`
-(`set_tx_power` beside it). `esp-alloc` is here because the firmware is what owns the heap and
-declares its regions.
 
-`embassy-executor`, `embassy-time` and `embedded-io-async` sit on `esp-rtos` and `esp-hal` the same
-way: held at the versions those build against, and moved with them — `embedded-io-async` at 0.7, the
-only version `esp-hal` 1.1 implements its async traits for. None can double quietly — the executor's
-`Spawner` would not type-check against `esp-rtos`'s, `embassy-time-driver` is `links`-keyed, and a
-second `embedded-io-async` would have no implementation on the USB half — so they are not in the
-check, and Dependabot ignores their minor and major releases.
+- `esp_now_set_peer_rate_config` (`set_peer_rate` in `src/main.rs`);
+- `esp_wifi_set_max_tx_power` (`set_tx_power` beside it).
 
-`esp-generate` is a version behind this set; its scaffolding (`build.rs`, `.cargo/config.toml`) is
+`esp-alloc` is here because the firmware owns the heap and declares its regions.
+
+### Embassy and `embedded-io-async`
+
+`embassy-executor`, `embassy-time`, and `embedded-io-async` are held at the versions `esp-rtos` and
+`esp-hal` build against, and move with them. `embedded-io-async` stays at 0.7, the only version
+`esp-hal` 1.1 implements its async traits for. None can double quietly:
+
+- the executor's `Spawner` would not type-check against `esp-rtos`'s;
+- `embassy-time-driver` is `links`-keyed;
+- a second `embedded-io-async` would have no implementation on the USB half.
+
+So they are not in the check, and Dependabot ignores their minor and major releases.
+
+`esp-generate` is a version behind this set. Its scaffolding (`build.rs`, `.cargo/config.toml`) is
 what was taken from it, not its dependency list.
