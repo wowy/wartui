@@ -153,11 +153,14 @@ fn chip_of(firmware: &Firmware, features: &[&str]) -> Result<Chip> {
     }
 }
 
-/// Whether `spec` names this attached board.
+/// Whether `spec` could name this attached board. A tail can match several, which each caller
+/// refuses before acting on any of them.
 fn matches(spec: &BridgeSpec, candidate: &PortCandidate) -> bool {
     match spec {
-        BridgeSpec::Mac(address) => candidate.mac() == Some(*address),
         BridgeSpec::Path(path) => *path == candidate.path || *path == candidate.device,
+        BridgeSpec::Mac(_) | BridgeSpec::Tail(_) => {
+            candidate.mac().is_some_and(|address| spec.matches_address(&address))
+        }
     }
 }
 

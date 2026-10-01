@@ -39,9 +39,9 @@ pub struct Args {
     #[arg(long, value_name = "LIST", required = true)]
     pub features: String,
 
-    /// Which board to flash, by path or by address. It must be attached. Without it, the bridge
-    /// `run` last found, which must be attached; else, with none remembered, the only Espressif
-    /// board attached.
+    /// Which board to flash, by path, by address or by the end of it (`00:08`), which must match
+    /// one board. It must be attached. Without it, the bridge `run` last found, which must be
+    /// attached; else, with none remembered, the only Espressif board attached.
     #[arg(long, value_name = "PATH|MAC")]
     pub bridge: Option<String>,
 
@@ -122,12 +122,25 @@ fn target(
 ) -> Result<PortCandidate> {
     let chosen = match named {
         Some((given, spec)) => {
-            candidates.iter().find(|candidate| matches(spec, candidate)).ok_or_else(|| {
-                anyhow!(
-                    "--bridge {given} matches no attached board. `wartui ports` lists each board \
-                     with its address; name the bridge by its address"
-                )
-            })?
+            match candidates.iter().filter(|candidate| matches(spec, candidate)).collect::<Vec<_>>()
+            {
+                named if named.len() > 1 => bail!(
+                    "--bridge {given} matches {} attached boards: {}. Name the bridge by more of \
+                     its address",
+                    named.len(),
+                    named
+                        .iter()
+                        .map(|board| board.mac().map_or_else(|| board.path.clone(), |a| mac(&a)))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                named => named.first().copied().ok_or_else(|| {
+                    anyhow!(
+                        "--bridge {given} matches no attached board. `wartui ports` lists each \
+                         board with its address; name the bridge by its address"
+                    )
+                })?,
+            }
         }
         None => match (remembered, candidates) {
             (Some(wanted), _) => {
@@ -194,6 +207,26 @@ mod tests {
         let error = target(&found, Some((given, &spec)), None).unwrap_err().to_string();
         assert!(error.contains("--bridge 10:BD:A3:EC:44:C0"), "{error}");
         assert!(error.contains("wartui ports"), "{error}");
+    }
+
+    #[test]
+    fn flash_bridge_targets_named_board_when_its_last_octets_match_one_board() {
+        let found =
+            [board("/dev/ttyACM0", Some(&NODE_MAC)), board("/dev/ttyACM1", Some(&BRIDGE_MAC))];
+        let (given, spec) = named("44:c0");
+        assert_eq!(target(&found, Some((given, &spec)), None).unwrap(), found[1]);
+    }
+
+    #[test]
+    fn flash_bridge_refuses_run_when_named_tail_matches_several_boards() {
+        // Bridge firmware over a node takes it out of the fleet, so a guess between
+        // two boards ending the same way is never made.
+        let twin = [0x3C, 0xDC, 0x75, 0x84, 0x44, 0xC0];
+        let found = [board("/dev/ttyACM0", Some(&twin)), board("/dev/ttyACM1", Some(&BRIDGE_MAC))];
+        let (given, spec) = named("44:C0");
+        let error = target(&found, Some((given, &spec)), Some(BRIDGE_MAC)).unwrap_err().to_string();
+        assert!(error.contains("--bridge 44:C0 matches 2 attached boards"), "{error}");
+        assert!(error.contains(&mac(&BRIDGE_MAC)) && error.contains(&mac(&twin)), "{error}");
     }
 
     #[test]

@@ -26,7 +26,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use clap::Args as ClapArgs;
 use wartui_bridge::remember::BridgeMemory;
-use wartui_bridge::serial::{self, discover_ports};
+use wartui_bridge::serial::{self, BridgeSpec, discover_ports};
 use wartui_bridge::{BridgeInfo, LinkEvent};
 use wartui_proto::link::{BridgeToHost, HostToBridge};
 
@@ -56,7 +56,8 @@ const ANNOUNCE_GRACE: Duration = Duration::from_millis(750);
 
 #[derive(ClapArgs)]
 pub struct Args {
-    /// The bridge, as a device path or as the board's address. Detected if omitted.
+    /// The bridge, as a device path, the board's address, or the end of it (`00:08`). Detected
+    /// if omitted.
     #[arg(long, value_name = "PATH|MAC")]
     bridge: Option<String>,
 }
@@ -67,15 +68,21 @@ pub async fn run(args: Args) -> Result<()> {
     // until one answers, and a node that receives one reboots — losing the
     // addresses it was holding back, which is a node's own memory and survives a
     // session (`crates/wartui-proto/src/dedup.rs`). So this command gets an
-    // unambiguous board or none, and says which it wanted.
+    // unambiguous board or none, and says which it wanted. A board named by the end
+    // of its address is resolved here for the same reason: a tail several boards
+    // share is refused before anything is opened, rather than left to a transport
+    // that would wait out the whole timeout saying nothing.
     let board = match args.bridge.as_deref() {
-        Some(named) => named.to_owned(),
+        Some(named) => match super::spec(named) {
+            tail @ BridgeSpec::Tail(_) => serial::resolve(&tail)?,
+            _ => named.to_owned(),
+        },
         None => serial::unambiguous_bridge(
             &discover_ports().context("listing serial ports")?,
             BridgeMemory::discover().recall(),
         )?,
     };
-    let mut link = super::open(Some(&board), None, 0)?;
+    let mut link = super::open(Some(&board), None, 0, super::Remember::Detected)?;
 
     // Sent immediately, without waiting to be told the bridge is there: the case
     // this command is for is the one where nothing ever announces itself, and the
@@ -192,7 +199,7 @@ fn report(info: Option<&BridgeInfo>, uptime_ms: u32) {
 /// resolved to one here rather than quoted into a line that will not run.
 fn unreachable_notice(bridge: Option<&str>) -> String {
     let seconds = RECOVERY_TIMEOUT.as_secs();
-    let device = bridge.and_then(super::named_device);
+    let device = bridge.and_then(|named| super::named_device(named).ok());
     let (where_, espflash) = match (bridge, device.as_deref()) {
         (Some(_), Some(path)) => (format!("on {path}"), format!("espflash reset --port {path}")),
         (Some(name), None) => (

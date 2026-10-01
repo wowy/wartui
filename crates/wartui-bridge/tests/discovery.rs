@@ -1,5 +1,6 @@
 //! Naming the boards, and telling one from another.
 
+use wartui_bridge::TransportError;
 use wartui_bridge::ports::{
     self, ESPRESSIF_VID, PortCandidate, StableNames, candidate, is_usable_path, with_stable_paths,
 };
@@ -73,6 +74,31 @@ fn bridge_spec_parses_path_containing_colons_as_path_when_parsed() {
         .parse()
         .expect("parsing cannot fail");
     assert!(matches!(spec, BridgeSpec::Path(_)));
+}
+
+#[test]
+fn bridge_spec_parses_last_octets_as_tail_when_given_one_to_five_pairs() {
+    // How boards are read aloud: the fleet table and `wartui ports` end with these.
+    let short: BridgeSpec = "00:08".parse().expect("parsing cannot fail");
+    let longer: BridgeSpec = "87:00:08".parse().expect("parsing cannot fail");
+    let lower: BridgeSpec = "44:c0".parse().expect("parsing cannot fail");
+    assert_eq!(short, BridgeSpec::Tail(vec![0x00, 0x08]));
+    assert_eq!(longer, BridgeSpec::Tail(vec![0x87, 0x00, 0x08]));
+    assert_eq!(lower, BridgeSpec::Tail(vec![0x44, 0xC0]));
+    assert_eq!(lower.to_string(), "44:C0", "printed back as `wartui ports` spells it");
+    // Six pairs is still a whole address.
+    let whole: BridgeSpec = "a0:f2:62:87:00:08".parse().expect("parsing cannot fail");
+    assert!(matches!(whole, BridgeSpec::Mac(_)));
+}
+
+#[test]
+fn bridge_spec_parses_text_as_path_when_pairs_are_not_two_hex_digits() {
+    // A single digit is not read as a guess at a pair, and nothing that merely
+    // contains colons is an address.
+    for text in ["0:08", "/dev/ttyACM0", "00:8g", "+0:08", "00:08:", "COM3", "a:b"] {
+        let spec: BridgeSpec = text.parse().expect("parsing cannot fail");
+        assert_eq!(spec, BridgeSpec::Path(text.to_owned()), "{text}");
+    }
 }
 
 #[test]
@@ -218,6 +244,43 @@ fn serial_discovery_returns_empty_candidates_when_named_mac_is_not_attached() {
     let boards = [esp("/dev/ttyACM0", BRIDGE_MAC)];
     let spec: BridgeSpec = NODE_MAC.parse().expect("parsing cannot fail");
     assert!(serial::select(&boards, Some(&spec), None).is_empty());
+}
+
+#[test]
+fn serial_discovery_resolves_board_path_when_tail_matches_one_board() {
+    let boards = [esp("/dev/ttyACM0", BRIDGE_MAC), esp("/dev/ttyACM1", NODE_MAC)];
+    let spec: BridgeSpec = "9d:24".parse().expect("parsing cannot fail");
+    assert_eq!(serial::resolve_in(&boards, &spec).expect("that board"), "/dev/ttyACM1");
+    let order = serial::select(&boards, Some(&spec), ports::parse_mac(BRIDGE_MAC));
+    assert_eq!(order, [boards[1].clone()], "and that board is the only one opened");
+}
+
+#[test]
+fn serial_discovery_rejects_tail_when_no_attached_board_ends_with_it() {
+    let boards = [esp("/dev/ttyACM0", BRIDGE_MAC), esp("/dev/ttyACM1", NODE_MAC)];
+    let spec: BridgeSpec = "00:08".parse().expect("parsing cannot fail");
+    let refused = serial::resolve_in(&boards, &spec).expect_err("no such board");
+    assert!(matches!(refused, TransportError::NoSuchBridge { .. }), "{refused}");
+    assert!(refused.to_string().contains("00:08"), "{refused}");
+    assert!(serial::select(&boards, Some(&spec), None).is_empty());
+}
+
+#[test]
+fn serial_discovery_refuses_tail_when_several_attached_boards_end_with_it() {
+    // The bridge and a node can share their last octet. Opening either on a guess is
+    // transmitting into a node, so nothing is selected, and the refusal says why
+    // rather than claiming the board is not attached.
+    let twin = "38:44:BE:12:44:C0";
+    let boards = [esp("/dev/ttyACM0", BRIDGE_MAC), esp("/dev/ttyACM1", twin)];
+    let spec: BridgeSpec = "44:C0".parse().expect("parsing cannot fail");
+    assert!(serial::select(&boards, Some(&spec), None).is_empty());
+    let refused = serial::resolve_in(&boards, &spec).expect_err("ambiguous");
+    assert!(matches!(refused, TransportError::AmbiguousName { .. }), "{refused}");
+    let message = refused.to_string();
+    assert!(message.contains(BRIDGE_MAC) && message.contains(twin), "{message}");
+    // One more octet settles it.
+    let spec: BridgeSpec = "EC:44:C0".parse().expect("parsing cannot fail");
+    assert_eq!(serial::resolve_in(&boards, &spec).expect("that board"), "/dev/ttyACM0");
 }
 
 #[test]

@@ -36,7 +36,7 @@ use super::{
     espflash_present, features, flash_args, judge_probe, mac_arg, matches, name, obtain,
     probe_args, read, source,
 };
-use crate::spec;
+use crate::{mac, spec};
 
 #[derive(ClapArgs, Debug)]
 pub struct Args {
@@ -49,8 +49,9 @@ pub struct Args {
     #[arg(long)]
     pub no_default_features: bool,
 
-    /// Which board is the bridge, by path or by address, so that it is never flashed. It must be
-    /// attached. The one `run` last found is spared as well, and is the only one by default.
+    /// Which board is the bridge, by path, by address or by the end of it (`00:08`), so that it is
+    /// never flashed. It must be attached, and the end of an address must match one board. The one
+    /// `run` last found is spared as well, and is the only one by default.
     #[arg(long, value_name = "PATH|MAC", conflicts_with = "no_bridge")]
     pub bridge: Option<String>,
 
@@ -200,13 +201,26 @@ fn bridge_to_spare(named: Option<&str>, remembered: Option<Mac>, no_bridge: bool
     )
 }
 
-/// Refuse a `--bridge` that names no attached board: sparing it would spare nothing.
+/// Refuse a `--bridge` that names no attached board, since sparing it would spare nothing, and one
+/// that several boards end with, since which of them is the bridge is the question it was asked to
+/// settle.
 fn named_bridge_attached(candidates: &[PortCandidate], spare: &Spare) -> Result<()> {
     let Some((given, spec)) = &spare.named else { return Ok(()) };
+    let named: Vec<_> = candidates.iter().filter(|candidate| matches(spec, candidate)).collect();
     ensure!(
-        candidates.iter().any(|candidate| matches(spec, candidate)),
+        !named.is_empty(),
         "--bridge {given} matches no attached board, so the bridge could not be spared. \
          `wartui ports` lists each board with its address; name the bridge by its address"
+    );
+    ensure!(
+        named.len() == 1,
+        "--bridge {given} matches {} attached boards: {}. Name the bridge by more of its address",
+        named.len(),
+        named
+            .iter()
+            .map(|board| board.mac().map_or_else(|| board.path.clone(), |a| mac(&a)))
+            .collect::<Vec<_>>()
+            .join(", ")
     );
     Ok(())
 }
@@ -395,6 +409,29 @@ mod tests {
             let spare = bridge_to_spare(Some(named), None, false).unwrap();
             named_bridge_attached(&found, &spare).unwrap();
         }
+    }
+
+    #[test]
+    fn flash_fleet_spares_only_that_board_when_bridge_is_named_by_its_last_octets() {
+        let found =
+            [board("/dev/ttyACM0", Some(&BRIDGE_MAC)), board("/dev/ttyACM1", Some(&NODE_MAC))];
+        let spare = bridge_to_spare(Some("44:c0"), None, false).unwrap();
+        named_bridge_attached(&found, &spare).unwrap();
+        let verdicts = select(&found, &spare, &[]);
+        assert_eq!(verdicts[0], Verdict::Skip(found[0].clone(), Skip::Bridge));
+        assert_eq!(verdicts[1], Verdict::Probe(found[1].clone()));
+    }
+
+    #[test]
+    fn flash_fleet_refuses_run_when_bridge_tail_matches_several_boards() {
+        // Sparing both would leave the fleet half-flashed on a guess; saying which is
+        // the bridge is what `--bridge` was for.
+        let twin = [0x3C, 0xDC, 0x75, 0x84, 0x44, 0xC0];
+        let found = [board("/dev/ttyACM0", Some(&BRIDGE_MAC)), board("/dev/ttyACM1", Some(&twin))];
+        let spare = bridge_to_spare(Some("44:C0"), None, false).unwrap();
+        let error = named_bridge_attached(&found, &spare).unwrap_err().to_string();
+        assert!(error.contains("--bridge 44:C0 matches 2 attached boards"), "{error}");
+        assert!(error.contains(&mac(&BRIDGE_MAC)) && error.contains(&mac(&twin)), "{error}");
     }
 
     #[test]

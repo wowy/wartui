@@ -53,7 +53,10 @@ pub const HOST_PRESENT_WINDOW_MS: u64 = 10_000;
 /// - a host frame decoded inside [`HOST_PRESENT_WINDOW_MS`], so there is a host
 ///   at all;
 /// - and one decoded *since the stall began*, so that host is still there now
-///   rather than having been there a moment ago.
+///   rather than having been there a moment ago. The host's first `Identify` is
+///   what begins the stall on a bridge that wedged before it connected, so the
+///   host asks a board it knows to be the bridge a second time, after
+///   [`TX_STALL_TIMEOUT_MS`] (`crates/wartui-bridge/src/serial.rs`, `connect`).
 ///
 /// # Why the clock starts at the contradiction
 ///
@@ -236,6 +239,31 @@ mod tests {
         assert!(!wedged(&mut watch, back));
         assert!(!wedged(&mut watch, back + TX_STALL_TIMEOUT_MS - 1));
         assert!(wedged(&mut watch, back + TX_STALL_TIMEOUT_MS));
+    }
+
+    #[test]
+    fn stall_watch_remains_clear_when_host_asks_once_at_real_cadence() {
+        // What the host sends a board it does not know to be the bridge: one
+        // `Identify` as the port opens, then six seconds of waiting. That frame
+        // arms the stall and is the last one, so it can never be "since".
+        let mut watch = StallWatch::new();
+        watch.note_host(0);
+        for ms in (0..=6_000).step_by(100) {
+            assert!(!watch.note_tx(false, true, ms), "reset {ms} ms after one ask");
+        }
+    }
+
+    #[test]
+    fn stall_watch_trips_reboot_when_host_asks_again_at_real_cadence() {
+        // A known bridge is asked again 3.5 s in, past the timeout, and the wedge
+        // is cleared on the pass that decodes it.
+        const SECOND_ASK_MS: u64 = 3_500;
+        let mut watch = StallWatch::new();
+        watch.note_host(0);
+        for ms in (0..SECOND_ASK_MS).step_by(100) {
+            assert!(!watch.note_tx(false, true, ms), "reset {ms} ms in, before the second ask");
+        }
+        assert!(wedged(&mut watch, SECOND_ASK_MS));
     }
 
     #[test]
