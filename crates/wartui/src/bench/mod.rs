@@ -233,8 +233,8 @@ pub async fn run(args: Args) -> Result<()> {
 
     let mut store_config = StoreConfig::new(&args.db);
     if let Some(ms) = args.commit_interval {
-        // At least a millisecond, as `run` clamps it: a zero wait would spin the writer
-        // whenever it is idle and skew the very numbers this measures.
+        // At least a millisecond: a zero wait would spin the writer whenever it is idle
+        // and skew the very numbers this measures.
         store_config.batch_interval = Duration::from_millis(ms.max(1));
     }
     if let Some(rows) = args.commit_rows {

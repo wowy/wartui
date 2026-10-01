@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use chrono::Local;
-use clap::{Args as ClapArgs, ValueEnum};
+use clap::Args as ClapArgs;
 use tokio::sync::{mpsc, oneshot, watch};
 use wartui_core::engine::{EngineConfig, FleetEngine, StoreStats};
 use wartui_core::gps::{Gps, GpsConfig};
@@ -28,11 +28,8 @@ use crate::{capture, config, tui};
 
 /// Which channels the fleet is meant to scan.
 ///
-/// Serialized as exactly clap's own spellings (`us`, `eu`, `all`), so a `pool`
-/// in `wartui.toml` and one typed on the command line agree.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default, serde::Deserialize, serde::Serialize,
-)]
+/// Spelled `us`, `eu` and `all` in `wartui.toml`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PoolArg {
     /// FCC-permitted unlicensed channels: 2.4 GHz 1–11 and 5 GHz 36–165.
@@ -90,13 +87,6 @@ pub struct Args {
     #[arg(long, value_name = "PATH")]
     db: Option<PathBuf>,
 
-    /// Which channels the fleet should scan. Recorded with the session, and
-    /// the set the planner partitions across it. Beats `pool` in
-    /// `wartui.toml`; `all` is the default. See `crates/wartui/README.md` §
-    /// "Config file".
-    #[arg(long, value_enum)]
-    pub(crate) pool: Option<PoolArg>,
-
     /// The mesh's ESP-NOW control channel.
     #[arg(long, default_value_t = 6)]
     channel: u8,
@@ -135,35 +125,9 @@ pub struct Args {
     #[arg(long)]
     record_raw: bool,
 
-    /// Wi-Fi transmit power for the nodes in dBm: 2 to 20, 2 by default. Beats
-    /// `[tx-power] fleet` in `wartui.toml`; see `crates/wartui/README.md` §
-    /// "Config file". 20 dBm is the ceiling because whether anything higher
-    /// works correctly is unverified, though the firmware would accept it.
-    /// Independent of `--bridge-tx-power`: it never sets the bridge.
-    #[arg(long, value_name = "DBM", value_parser = tx_power_value_parser())]
-    pub(crate) node_tx_power: Option<i8>,
-
-    /// Wi-Fi transmit power for the bridge alone, in dBm. Independent of
-    /// `--node-tx-power`: it never sets the nodes.
-    #[arg(long, value_name = "DBM", value_parser = tx_power_value_parser())]
-    pub(crate) bridge_tx_power: Option<i8>,
-
-    /// Commit to the store at least this often, in milliseconds; 1000 by default. A crash
-    /// loses at most this much of the capture, plus whatever is still queued.
-    #[arg(long, value_name = "MS")]
-    commit_interval: Option<u64>,
-
     /// A note about this run, stored with the session.
     #[arg(long)]
     notes: Option<String>,
-}
-
-/// The range a transmit power may name, as clap wants it: the same
-/// [`config::TX_POWER_DBM`] the file is validated against, so a flag and a file
-/// entry can't disagree about what's in range.
-fn tx_power_value_parser() -> clap::builder::RangedI64ValueParser<i8> {
-    clap::value_parser!(i8)
-        .range(i64::from(*config::TX_POWER_DBM.start())..=i64::from(*config::TX_POWER_DBM.end()))
 }
 
 /// The fleet's two transmit powers in ESP-IDF quarter-dBm units: `(nodes, bridge)`.
@@ -171,33 +135,23 @@ fn tx_power_value_parser() -> clap::builder::RangedI64ValueParser<i8> {
 /// Whole dBm in, 2 to 20, which maps exactly onto the 8 to 80 quarter-dBm the host
 /// permits; the wire carries quarter-dBm, so the conversion happens once here rather
 /// than on either side of it. Nodes and bridge are completely independent, each
-/// resolved on its own: the command line beats the file, and the file beats the
-/// default, with no fallback between the two:
+/// resolved on its own: the file beats the default.
 ///
 /// ```text
-/// nodes  = cli.node_tx_power   ∨ file.fleet  ∨ default
-/// bridge = cli.bridge_tx_power ∨ file.bridge ∨ default
+/// nodes  = file.fleet  ∨ default
+/// bridge = file.bridge ∨ default
 /// ```
-fn tx_powers(
-    node_tx_power: Option<i8>,
-    bridge_tx_power: Option<i8>,
-    file: &config::TxPower,
-) -> (i8, i8) {
+fn tx_powers(file: &config::TxPower) -> (i8, i8) {
     let quarter = |dbm: i8| dbm * 4;
-    let nodes = node_tx_power.or(file.fleet).map_or(DEFAULT_TX_POWER_QUARTER_DBM, quarter);
-    let bridge = bridge_tx_power.or(file.bridge).map_or(DEFAULT_TX_POWER_QUARTER_DBM, quarter);
+    let nodes = file.fleet.map_or(DEFAULT_TX_POWER_QUARTER_DBM, quarter);
+    let bridge = file.bridge.map_or(DEFAULT_TX_POWER_QUARTER_DBM, quarter);
     (nodes, bridge)
 }
 
-/// Which channel pool the fleet scans: the command line beats the file, and the
-/// file beats the default, with no fallback between the two — the same
-/// precedence [`tx_powers`] resolves for the transmit powers.
-///
-/// ```text
-/// pool = cli.pool ∨ file.pool ∨ default
-/// ```
-fn pool(flag: Option<PoolArg>, file: Option<PoolArg>) -> ChannelPool {
-    flag.or(file).unwrap_or_default().into()
+/// Which channel pool the fleet scans: the file beats the default, as
+/// [`tx_powers`] resolves the transmit powers.
+fn pool(file: Option<PoolArg>) -> ChannelPool {
+    file.unwrap_or_default().into()
 }
 
 pub async fn run(args: Args) -> Result<()> {
@@ -246,7 +200,7 @@ pub async fn run(args: Args) -> Result<()> {
         None => position,
     };
 
-    let pool = pool(args.pool, config.pool);
+    let pool = pool(config.pool);
     let link = crate::open(args.bridge.as_deref(), args.sim, args.sim_c6)?;
 
     let started = now();
@@ -256,16 +210,11 @@ pub async fn run(args: Args) -> Result<()> {
     let named_db = args.db.is_some();
     let db = args.db.unwrap_or_else(|| capture::dated_path(Local::now()));
     let session = SessionInfo { espnow_channel: args.channel, pool, notes: args.notes.clone() };
-    let mut store_config = StoreConfig::new(&db);
-    if let Some(ms) = args.commit_interval {
-        // At least a millisecond: a zero wait would spin the writer whenever it is idle.
-        store_config.batch_interval = Duration::from_millis(ms.max(1));
-    }
+    let store_config = StoreConfig::new(&db);
     let store = Store::open(&store_config, &session, started.unix_ms)
         .with_context(|| format!("opening {}", db.display()))?;
 
-    let (tx_power, bridge_tx_power) =
-        tx_powers(args.node_tx_power, args.bridge_tx_power, &config.tx_power);
+    let (tx_power, bridge_tx_power) = tx_powers(&config.tx_power);
     let remember_ble = config.bluetooth.remember.unwrap_or(true);
     let preferred_ble = config.bluetooth.node;
     let settings = tui::Settings { config_path, saved: config };
@@ -346,74 +295,40 @@ mod tests {
     use wartui_proto::plan::{ChannelPool, DEFAULT_TX_POWER_QUARTER_DBM};
 
     #[test]
-    fn run_cmd_applies_default_tx_power_when_no_flags_are_specified() {
+    fn run_cmd_applies_default_tx_power_when_file_names_none() {
         assert_eq!(
-            tx_powers(None, None, &TxPower::default()),
+            tx_powers(&TxPower::default()),
             (DEFAULT_TX_POWER_QUARTER_DBM, DEFAULT_TX_POWER_QUARTER_DBM)
         );
     }
 
     #[test]
-    fn run_cmd_leaves_bridge_at_default_tx_power_when_only_node_tx_power_given() {
-        // Nodes and bridge are independent: a node power alone never touches
+    fn run_cmd_leaves_bridge_at_default_tx_power_when_file_names_only_fleet() {
+        // Nodes and bridge are independent: a fleet power alone never touches
         // the bridge, which stays at the default.
-        assert_eq!(
-            tx_powers(Some(10), None, &TxPower::default()),
-            (40, DEFAULT_TX_POWER_QUARTER_DBM)
-        );
-    }
-
-    #[test]
-    fn run_cmd_applies_both_tx_powers_independently_when_both_flags_specified() {
-        assert_eq!(tx_powers(Some(10), Some(17), &TxPower::default()), (40, 68));
-    }
-
-    #[test]
-    fn run_cmd_leaves_nodes_at_default_tx_power_when_only_bridge_tx_power_specified() {
-        assert_eq!(
-            tx_powers(None, Some(17), &TxPower::default()),
-            (DEFAULT_TX_POWER_QUARTER_DBM, 68)
-        );
-    }
-
-    #[test]
-    fn run_cmd_applies_file_fleet_power_when_no_flags_given() {
         let file = TxPower { fleet: Some(10), bridge: None };
-        assert_eq!(tx_powers(None, None, &file), (40, DEFAULT_TX_POWER_QUARTER_DBM));
+        assert_eq!(tx_powers(&file), (40, DEFAULT_TX_POWER_QUARTER_DBM));
     }
 
     #[test]
-    fn run_cmd_applies_file_bridge_power_when_no_flags_given() {
+    fn run_cmd_leaves_nodes_at_default_tx_power_when_file_names_only_bridge() {
+        let file = TxPower { fleet: None, bridge: Some(17) };
+        assert_eq!(tx_powers(&file), (DEFAULT_TX_POWER_QUARTER_DBM, 68));
+    }
+
+    #[test]
+    fn run_cmd_applies_both_file_tx_powers_when_file_names_both() {
         let file = TxPower { fleet: Some(10), bridge: Some(17) };
-        assert_eq!(tx_powers(None, None, &file), (40, 68));
+        assert_eq!(tx_powers(&file), (40, 68));
     }
 
     #[test]
-    fn run_cmd_keeps_file_bridge_power_when_only_node_tx_power_flag_given() {
-        // `--node-tx-power` never touches the bridge, so a file's `bridge`
-        // entry survives it untouched.
-        let file = TxPower { fleet: Some(6), bridge: Some(17) };
-        assert_eq!(tx_powers(Some(10), None, &file), (40, 68));
+    fn run_cmd_applies_file_pool_when_file_names_one() {
+        assert_eq!(pool(Some(PoolArg::Eu)), ChannelPool::Eu);
     }
 
     #[test]
-    fn run_cmd_prefers_cli_bridge_tx_power_over_file_when_both_given() {
-        let file = TxPower { fleet: Some(6), bridge: Some(17) };
-        assert_eq!(tx_powers(None, Some(20), &file), (24, 80));
-    }
-
-    #[test]
-    fn run_cmd_prefers_flag_pool_over_file_when_both_given() {
-        assert_eq!(pool(Some(PoolArg::Us), Some(PoolArg::Eu)), ChannelPool::Us);
-    }
-
-    #[test]
-    fn run_cmd_applies_file_pool_when_no_flag_given() {
-        assert_eq!(pool(None, Some(PoolArg::Eu)), ChannelPool::Eu);
-    }
-
-    #[test]
-    fn run_cmd_applies_default_pool_when_neither_flag_nor_file_given() {
-        assert_eq!(pool(None, None), ChannelPool::All);
+    fn run_cmd_applies_default_pool_when_file_names_none() {
+        assert_eq!(pool(None), ChannelPool::All);
     }
 }

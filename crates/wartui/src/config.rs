@@ -2,16 +2,14 @@
 //!
 //! **Configuration, not state.** This is the operator's own decision, so a mistake in
 //! it is refused rather than absorbed: an unknown key or an out-of-range value stops
-//! wartui from starting and names the file and the problem, the same way an
-//! out-of-range `--node-tx-power` does. `crates/wartui-bridge/src/remember.rs` is the
-//! opposite case — a cache thrown away and rebuilt when it is wrong — and the
-//! distinction is why that file is silent about failures and this one is not.
+//! wartui from starting and names the file and the problem.
+//! `crates/wartui-bridge/src/remember.rs` is the opposite case — a cache thrown away
+//! and rebuilt when it is wrong — and the distinction is why that file is silent about
+//! failures and this one is not.
 //!
 //! Only `run` loads the file — `--config` is one of its own arguments — so a broken
 //! `wartui.toml` cannot stop `ports`, `status` or `reset` from working. Within `run`,
-//! the command line beats the file and the file beats the default: a flag typed for
-//! this one invocation is a more recent decision than a file left on disk, and both
-//! outrank the built-in default.
+//! the file beats the built-in default.
 //!
 //! This lives in `crates/wartui` rather than `wartui-core`: the core crate parses no
 //! arguments, and a config file is operator input just like a flag is.
@@ -35,8 +33,7 @@ use crate::run::PoolArg;
 pub struct Config {
     /// The root `pool` key. An unknown spelling is a serde error, named with
     /// the file the same way an out-of-range tx-power is. `None` means the
-    /// file said nothing, which `run::pool` falls back on the same way it
-    /// falls back on a missing `--pool`.
+    /// file said nothing, and `run::pool` falls back on the default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pool: Option<PoolArg>,
     #[serde(default, skip_serializing_if = "TxPower::is_empty")]
@@ -46,8 +43,7 @@ pub struct Config {
 }
 
 /// The `[tx-power]` table: `fleet` covers the nodes and `bridge` the bridge, each
-/// independent and falling back to the default on its own — the same split
-/// `--node-tx-power` and `--bridge-tx-power` make on the command line.
+/// independent and falling back to the default on its own.
 #[derive(Debug, Default, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct TxPower {
@@ -503,7 +499,7 @@ mod tests {
         assert_eq!(saved.tx_power.fleet, Some(8));
         assert_eq!(saved.tx_power.bridge, Some(12));
         let text = std::fs::read_to_string(&target).unwrap();
-        assert!(text.contains("pool = \"eu\""), "the same spelling --pool takes: {text}");
+        assert!(text.contains("pool = \"eu\""), "the spelling the file reads back: {text}");
     }
 
     #[test]

@@ -30,37 +30,30 @@ rebooting sends nothing, since every node is already addressing it correctly.
 
 `run` takes:
 
-| Flag                    | Default      | What it is                                                   |
-| ----------------------- | ------------ | ------------------------------------------------------------ |
-| `--db PATH`             | dated        | Where to keep the capture                                    |
-| `--bridge PATH\|MAC`    | detected     | Which board the bridge is, by path or by address             |
-| `--channel N`           | `6`          | The fleet's ESP-NOW control channel                          |
-| `--pool us\|eu\|all`    | `all`        | Which channels the fleet should scan                         |
-| `--lat` `--lon` `--alt` | —            | A static position for every observation                      |
-| `--gps PATH`            | detected     | An NMEA receiver, preferred over `--lat`/`--lon`             |
-| `--no-gps`              | off          | Do not look for a receiver at all                            |
-| `--gps-baud N`          | detected     | Line rate of that receiver                                   |
-| `--gps-max-age S`       | `5`          | How old a fix may be before falling back                     |
-| `--sim N`               | —            | Run a fake fleet instead of hardware                         |
-| `--sim-c6 N`            | `0`          | Make that many of them C6s, from the end of the fleet        |
-| `--record-raw`          | off          | Also keep the undecoded bytes of every frame                 |
-| `--node-tx-power DBM`   | `2`          | Wi-Fi transmit power for the nodes                           |
-| `--bridge-tx-power DBM` | `2`          | Wi-Fi transmit power for the bridge                          |
-| `--commit-interval MS`  | `1000`       | How often the store commits; a crash loses at most this much |
-| `--notes TEXT`          | —            | A note about this run, stored with the session               |
-| `--config PATH`         | per-OS path  | Read `wartui.toml` from somewhere else; see "Config file"    |
+| Flag                    | Default     | What it is                                                |
+| ----------------------- | ----------- | --------------------------------------------------------- |
+| `--db PATH`             | dated       | Where to keep the capture                                 |
+| `--bridge PATH\|MAC`    | detected    | Which board the bridge is, by path or by address          |
+| `--channel N`           | `6`         | The fleet's ESP-NOW control channel                       |
+| `--lat` `--lon` `--alt` | —           | A static position for every observation                   |
+| `--gps PATH`            | detected    | An NMEA receiver, preferred over `--lat`/`--lon`          |
+| `--no-gps`              | off         | Do not look for a receiver at all                         |
+| `--gps-baud N`          | detected    | Line rate of that receiver                                |
+| `--gps-max-age S`       | `5`         | How old a fix may be before falling back                  |
+| `--sim N`               | —           | Run a fake fleet instead of hardware                      |
+| `--sim-c6 N`            | `0`         | Make that many of them C6s, from the end of the fleet     |
+| `--record-raw`          | off         | Also keep the undecoded bytes of every frame              |
+| `--notes TEXT`          | —           | A note about this run, stored with the session            |
+| `--config PATH`         | per-OS path | Read `wartui.toml` from somewhere else; see "Config file" |
+
+The channel pool and the transmit powers are set in `wartui.toml` or the settings modal (`c`); see
+"Config file" below.
 
 `--db` names the capture for the minute the run started — `wartui-2026-09-18-14-30.db` — so a
 directory of them sorts into the order they were made rather than being one file every run appends
 to. The date is in ISO order whatever the locale reading it: that is what makes them sort, and what
 lets `export` pick out the last one. Two runs begun inside the same minute share a name, and the
 second adds its session to the first one's file.
-
-`--node-tx-power` is how loudly the nodes transmit — their heartbeats and sightings — in whole dBm,
-2 to 20, 2 by default. `--bridge-tx-power` sets the bridge's assignments the same way, completely
-independent: neither flag falls back to the other, and each defaults to 2 dBm on its own. 20 dBm is
-the ceiling: the firmware would accept 21, but whether anything above 20 works correctly is
-unverified. Either can also be set in `wartui.toml`; see "Config file" below for precedence.
 
 `export` takes `--db`, `--out PATH` and `--session ID`, and writes the [WiGLE v1.6
 format](https://api.wigle.net/csvFormat.html). Both ends default, so exporting the evening that just
@@ -123,24 +116,22 @@ remember = true
 node = "AA:BB:CC:DD:EE:FF"
 ```
 
-Both powers are whole dBm, `fleet` for the nodes and `bridge` for the bridge.
+`[tx-power]` is how loudly each end transmits, in whole dBm from 2 to 20: `fleet` for the nodes —
+their heartbeats and sightings — and `bridge` for the bridge's assignments. 20 dBm is the ceiling:
+the firmware would accept 21, but whether anything above 20 works correctly is unverified.
 
 `[bluetooth]` is the remembered Bluetooth node (see § "Bluetooth"). `remember` is on when absent.
 `node` is the MAC `b` last gave the scan to, written the way `wartui ports` prints one.
 
-`pool` takes `us`, `eu` or `all`, the same words `--pool` does. Precedence is flag, then file, then
-default: `--pool` beats `pool`, which beats `all`. A pool is fixed for the life of a run — see "At
-the keyboard" below for what changing it in the modal costs.
+`pool` takes `us`, `eu` or `all`; without one the fleet scans `all`. A pool is fixed for the life
+of a run — see "At the keyboard" below for what changing it in the modal costs.
 
-`fleet` and `bridge` are independent, the same as `--node-tx-power` and `--bridge-tx-power` are.
-Precedence is flag, then file, then default, resolved separately for each: `--node-tx-power` beats
-`fleet`, which beats 2 dBm; `--bridge-tx-power` beats `bridge`, which beats 2 dBm. Neither value
-falls back to the other's.
+`fleet` and `bridge` are independent: each one missing is 2 dBm, and neither falls back to the
+other's.
 
 An unknown key or table makes wartui refuse to start, naming the file and the line; an
 out-of-range value, an unknown `pool` spelling, a malformed `node` or a `node` beside
-`remember = false` does too, naming the file and the key — the same way an out-of-range
-`--node-tx-power` is refused.
+`remember = false` does too, naming the file and the key.
 
 ### Benchmarking the store
 
@@ -339,7 +330,7 @@ reported in the fault box rather than left to be inferred.
 
 ## Channel pools
 
-`--pool all` is the default: every channel a node can tune, 2.4 GHz 1–13 and all of 5 GHz including
+`pool = "all"` is the default: every channel a node can tune, 2.4 GHz 1–13 and all of 5 GHz including
 the UNII-4 channels 169, 173 and 177. The other two are narrower, and the choice is about coverage
 rather than legality — a node parks and reads beacons, so a pool says where it listens and never
 what it emits.
