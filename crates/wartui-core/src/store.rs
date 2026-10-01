@@ -90,7 +90,6 @@ CREATE TABLE IF NOT EXISTS session (
   bridge_mac BLOB,
   bridge_chip TEXT,
   bridge_fw TEXT,
-  espnow_channel INTEGER NOT NULL,
   channel_pool TEXT NOT NULL,
   notes TEXT
 );
@@ -182,7 +181,6 @@ CREATE TABLE IF NOT EXISTS bridge_status (
   id INTEGER PRIMARY KEY,
   session_id INTEGER NOT NULL REFERENCES session(id),
   rx_at INTEGER NOT NULL,
-  channel INTEGER NOT NULL,
   peer_count INTEGER NOT NULL,
   rx_count INTEGER NOT NULL,
   dropped_tx INTEGER NOT NULL,
@@ -210,7 +208,6 @@ CREATE TABLE IF NOT EXISTS raw_frame (
   src BLOB NOT NULL,
   dst BLOB,
   rssi INTEGER,
-  channel INTEGER,
   bytes BLOB NOT NULL
 );
 ";
@@ -398,8 +395,6 @@ pub struct BatchTiming {
 /// [`Record::Bridge`].
 #[derive(Debug, Clone, Default)]
 pub struct SessionInfo {
-    /// The ESP-NOW control channel.
-    pub espnow_channel: u8,
     /// The pool the session started on. The operator can change it mid-run, so it
     /// is not every assignment's: each assignment row records the channels that
     /// actually went out.
@@ -815,9 +810,8 @@ fn insert_session(
     started_at_ms: i64,
 ) -> Result<i64, rusqlite::Error> {
     conn.execute(
-        "INSERT INTO session (started_at, espnow_channel, channel_pool, notes)
-         VALUES (?1, ?2, ?3, ?4)",
-        params![started_at_ms, session.espnow_channel, pool_name(session.pool), session.notes,],
+        "INSERT INTO session (started_at, channel_pool, notes) VALUES (?1, ?2, ?3)",
+        params![started_at_ms, pool_name(session.pool), session.notes],
     )?;
     Ok(conn.last_insert_rowid())
 }
@@ -1058,13 +1052,12 @@ fn write_batch(
             Record::BridgeStatus(status) => {
                 tx.prepare_cached(
                     "INSERT INTO bridge_status
-                       (session_id, rx_at, channel, peer_count, rx_count, dropped_tx, uptime_ms)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                       (session_id, rx_at, peer_count, rx_count, dropped_tx, uptime_ms)
+                     VALUES (?1,?2,?3,?4,?5,?6)",
                 )?
                 .execute(params![
                     session_id,
                     status.rx_at_ms,
-                    status.channel,
                     status.peer_count,
                     status.rx_count,
                     status.dropped_tx,
@@ -1087,8 +1080,8 @@ fn write_batch(
             }
             Record::Raw(raw) => {
                 tx.prepare_cached(
-                    "INSERT INTO raw_frame (session_id, rx_at, src, dst, rssi, channel, bytes)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                    "INSERT INTO raw_frame (session_id, rx_at, src, dst, rssi, bytes)
+                     VALUES (?1,?2,?3,?4,?5,?6)",
                 )?
                 .execute(params![
                     session_id,
@@ -1096,7 +1089,6 @@ fn write_batch(
                     &raw.src[..],
                     &raw.dst[..],
                     raw.rssi,
-                    raw.channel,
                     raw.bytes,
                 ])?;
             }

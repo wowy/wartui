@@ -88,10 +88,6 @@ pub struct Args {
     #[arg(long, value_name = "PATH")]
     db: Option<PathBuf>,
 
-    /// The mesh's ESP-NOW control channel.
-    #[arg(long, default_value_t = 6)]
-    channel: u8,
-
     /// Serial port of an NMEA GPS. One is searched for when this is omitted, and
     /// whichever is read is preferred over `--lat`/`--lon` while its fix is recent.
     #[arg(long, value_name = "PATH", conflicts_with = "no_gps")]
@@ -210,7 +206,7 @@ pub async fn run(args: Args) -> Result<()> {
     // finds on its own, and one chosen by hand has to be given back.
     let named_db = args.db.is_some();
     let db = args.db.unwrap_or_else(|| capture::dated_path(Local::now()));
-    let session = SessionInfo { espnow_channel: args.channel, pool, notes: args.notes.clone() };
+    let session = SessionInfo { pool, notes: args.notes.clone() };
     let store_config = StoreConfig::new(&db);
     let store = Store::open(&store_config, &session, started.unix_ms)
         .with_context(|| format!("opening {}", db.display()))?;

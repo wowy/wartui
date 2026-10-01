@@ -1553,7 +1553,6 @@ mod tests {
             },
             store: StoreStats { written: 800, dropped: 7 },
             bridge_status: Some(BridgeStatus {
-                channel: 6,
                 peer_count: 0,
                 rx_count: 900,
                 dropped_tx: 1300,

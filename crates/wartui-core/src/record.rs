@@ -88,8 +88,6 @@ pub struct Heartbeat {
 pub struct BridgeStatusSeen {
     /// Unix milliseconds of receipt.
     pub rx_at_ms: i64,
-    /// The channel the bridge is parked on.
-    pub channel: u8,
     /// How many peers its ESP-NOW table holds.
     pub peer_count: u8,
     /// Frames it has received since its boot.
@@ -172,8 +170,6 @@ pub struct RawFrame {
     pub dst: Mac,
     /// Link signal strength.
     pub rssi: Option<i8>,
-    /// Channel the bridge was parked on.
-    pub channel: Option<u8>,
     /// The undecoded payload.
     pub bytes: Vec<u8>,
 }

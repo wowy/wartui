@@ -612,16 +612,13 @@ async fn sim_node_ignores_retransmitted_assignment_when_epoch_version_is_unchang
 }
 
 #[tokio::test(start_paused = true)]
-async fn sim_bridge_answers_status_request_with_channel_when_queried() {
+async fn sim_bridge_answers_status_request_when_queried() {
     let mut link = SimTransport::new(SimConfig::default()).start().expect("starts");
-    link.send_bulk(HostToBridge::SetChannel { channel: 11 }).expect("queued");
     link.send_bulk(HostToBridge::GetStatus).expect("queued");
 
     loop {
-        if let LinkEvent::Message(BridgeToHost::Status { channel, .. }) =
-            link.recv().await.expect("running")
+        if let LinkEvent::Message(BridgeToHost::Status { .. }) = link.recv().await.expect("running")
         {
-            assert_eq!(channel, 11, "the bridge should report the channel it was set to");
             return;
         }
     }

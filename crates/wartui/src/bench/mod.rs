@@ -265,7 +265,6 @@ pub async fn run(args: Args) -> Result<()> {
     let link = SimTransport::new(sim.clone()).start().context("starting the simulator")?;
     let started = now();
     let session = SessionInfo {
-        espnow_channel: 6,
         pool: POOL,
         notes: Some(format!("wartui bench, profile {}", args.profile.name())),
     };

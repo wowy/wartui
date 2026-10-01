@@ -15,6 +15,7 @@ use anyhow::{Context, Result, bail};
 use clap::Args as ClapArgs;
 use wartui_bridge::LinkEvent;
 use wartui_proto::link::{BridgeToHost, HostToBridge};
+use wartui_proto::plan::CONTROL_CHANNEL;
 
 /// Generous enough for a bridge that is busy forwarding a fleet, short enough
 /// that a wedged one is reported rather than waited on. The same figure the
@@ -64,12 +65,10 @@ pub async fn run(args: Args) -> Result<()> {
         .await
         .context("the bridge did not answer a status request")??;
 
-    let BridgeToHost::Status { channel, peer_count, rx_count, dropped_tx, uptime_ms } = status
-    else {
+    let BridgeToHost::Status { peer_count, rx_count, dropped_tx, uptime_ms } = status else {
         unreachable!("wait_for_status only returns Status")
     };
 
-    println!("channel    {channel}");
     println!("peers      {peer_count}");
     println!("received   {rx_count} frames");
     println!("dropped    {dropped_tx} frames");
@@ -92,7 +91,8 @@ pub async fn run(args: Args) -> Result<()> {
     }
     if rx_count == 0 {
         println!(
-            "\nThe bridge has heard nothing. Check the nodes are powered and on channel {channel}."
+            "\nThe bridge has heard nothing. Check the nodes are powered and on channel \
+             {CONTROL_CHANNEL}."
         );
     }
 

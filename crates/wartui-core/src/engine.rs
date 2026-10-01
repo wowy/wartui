@@ -611,8 +611,6 @@ pub struct Snapshot {
 /// The bridge's self-report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BridgeStatus {
-    /// Channel the radio is parked on.
-    pub channel: u8,
     /// Registered peers.
     pub peer_count: u8,
     /// Frames received since boot.
@@ -905,14 +903,14 @@ impl FleetEngine {
 
     fn on_message(&mut self, msg: &BridgeToHost, now: Now, batch: &mut ActionBatch) {
         match msg {
-            BridgeToHost::Rx { src, dst, rssi, channel, rx_us, payload } => {
+            BridgeToHost::Rx { src, dst, rssi, rx_us, payload } => {
                 self.note_arrival(*rx_us, now);
-                self.on_rx(*src, *dst, *rssi, *channel, *rx_us, payload, now, batch);
+                self.on_rx(*src, *dst, *rssi, *rx_us, payload, now, batch);
             }
             BridgeToHost::SendResult { id, status, tx_us } => {
                 self.on_send_result(*id, *status, *tx_us, now, batch);
             }
-            BridgeToHost::Status { channel, peer_count, rx_count, dropped_tx, uptime_ms } => {
+            BridgeToHost::Status { peer_count, rx_count, dropped_tx, uptime_ms } => {
                 // A count below the baseline means the bridge restarted and
                 // began again from zero, so the old baseline is meaningless.
                 let baseline = match self.dropped_baseline {
@@ -921,7 +919,6 @@ impl FleetEngine {
                 };
                 self.dropped_baseline = Some(baseline);
                 self.bridge_status = Some(BridgeStatus {
-                    channel: *channel,
                     peer_count: *peer_count,
                     rx_count: *rx_count,
                     dropped_tx: *dropped_tx,
@@ -930,7 +927,6 @@ impl FleetEngine {
                 });
                 batch.records.push(Record::BridgeStatus(BridgeStatusSeen {
                     rx_at_ms: now.unix_ms,
-                    channel: *channel,
                     peer_count: *peer_count,
                     rx_count: *rx_count,
                     dropped_tx: *dropped_tx,
@@ -952,7 +948,6 @@ impl FleetEngine {
         src: Mac,
         dst: Mac,
         rssi: i8,
-        channel: u8,
         rx_us: u32,
         payload: &[u8],
         now: Now,
@@ -966,7 +961,6 @@ impl FleetEngine {
                 src,
                 dst,
                 rssi: Some(rssi),
-                channel: Some(channel),
                 bytes: payload.to_vec(),
             }));
         }

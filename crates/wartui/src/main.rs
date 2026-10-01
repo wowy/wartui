@@ -55,7 +55,7 @@ enum Command {
     Export(export::Args),
     /// Print every frame the bridge hears.
     Sniff(sniff::Args),
-    /// Ask the bridge for its channel, counters and uptime.
+    /// Ask the bridge for its counters and uptime.
     Status(status::Args),
     /// Reboot the bridge, for when it has stopped answering.
     Reset(reset::Args),

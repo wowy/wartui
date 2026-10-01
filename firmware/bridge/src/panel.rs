@@ -77,6 +77,7 @@ use mipidsi::options::{ColorInversion, ColorOrder, Orientation, Rotation};
 use mipidsi::{Builder, Display};
 use static_cell::{ConstStaticCell, StaticCell};
 use wartui_proto::link::{PANEL_ROWS, PanelLine, PanelLines, Severity, ShortStr};
+use wartui_proto::plan::CONTROL_CHANNEL;
 
 use crate::Bridge;
 
@@ -323,7 +324,7 @@ impl Screen {
         let (lines, fallback) = if host_here && !bridge.panel_lines.is_empty() {
             (bridge.panel_lines.clone(), false)
         } else {
-            (self.own_report(bridge, mac, now_ms), true)
+            (self.own_report(mac, now_ms), true)
         };
 
         let crossed = self.fallback != fallback;
@@ -355,7 +356,7 @@ impl Screen {
     /// Link-local state only — chip, address, channel, uptime — so this costs the
     /// format-blind rule nothing. Every line is [`Severity::Warn`], because no host is
     /// exactly "working but not ideal".
-    fn own_report(&self, bridge: &Bridge, mac: [u8; 6], now_ms: u64) -> PanelLines {
+    fn own_report(&self, mac: [u8; 6], now_ms: u64) -> PanelLines {
         let mut lines = PanelLines::new();
         let mut push = |text: ShortStr| {
             lines.push(PanelLine { level: Severity::Warn, text }).ok();
@@ -368,7 +369,7 @@ impl Screen {
         push(ShortStr::try_from("no host").unwrap_or_default());
 
         let mut channel = ShortStr::new();
-        let _ = write!(channel, "channel {}", bridge.channel);
+        let _ = write!(channel, "channel {CONTROL_CHANNEL}");
         push(channel);
 
         let mut uptime = ShortStr::new();

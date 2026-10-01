@@ -79,7 +79,6 @@ fn rx_at(src: Mac, frame: &[u8], rx_us: u32) -> Event {
         src,
         dst: BROADCAST,
         rssi: -41,
-        channel: 6,
         rx_us,
         payload: EspNowPayload::from_slice(frame).expect("fits"),
     }))
@@ -844,7 +843,6 @@ fn engine_increments_unparsed_counter_when_frame_magic_is_unknown() {
         src: NODE,
         dst: BROADCAST,
         rssi: -41,
-        channel: 6,
         rx_us: 0,
         payload: EspNowPayload::from_slice(b"not a wartui frame").expect("fits"),
     }));
@@ -908,7 +906,6 @@ fn engine_counts_foreign_admin_traffic_when_rival_core_transmits() {
         src: OTHER,
         dst: NODE,
         rssi: -41,
-        channel: 6,
         rx_us: 0,
         payload: EspNowPayload::from_slice(&admin).expect("fits"),
     }));
@@ -930,7 +927,6 @@ fn engine_ignores_unknown_sender_when_payload_cannot_be_decoded() {
         src: OTHER,
         dst: BROADCAST,
         rssi: -41,
-        channel: 6,
         rx_us: 0,
         payload: EspNowPayload::from_slice(b"not an ENOW frame").expect("fits"),
     }));
@@ -1181,7 +1177,6 @@ fn engine_tracks_bridge_dropped_tx_deltas_when_status_polls_arrive() {
     let mut engine = engine(EngineConfig::default(), &clock);
     let status = |dropped_tx| {
         Event::Link(LinkEvent::Message(BridgeToHost::Status {
-            channel: 6,
             peer_count: 1,
             rx_count: 1363,
             dropped_tx,
@@ -1214,7 +1209,6 @@ fn engine_records_raw_bridge_status_when_each_status_reply_arrives() {
     let mut engine = engine(EngineConfig::default(), &clock);
     let status = |dropped_tx, uptime_ms| {
         Event::Link(LinkEvent::Message(BridgeToHost::Status {
-            channel: 6,
             peer_count: 3,
             rx_count: 1363,
             dropped_tx,
@@ -1241,7 +1235,6 @@ fn engine_records_raw_bridge_status_when_each_status_reply_arrives() {
         statuses(&first),
         vec![BridgeStatusSeen {
             rx_at_ms: clock.at(2).unix_ms,
-            channel: 6,
             peer_count: 3,
             rx_count: 1363,
             dropped_tx: 1300,
@@ -1252,7 +1245,6 @@ fn engine_records_raw_bridge_status_when_each_status_reply_arrives() {
         statuses(&second),
         vec![BridgeStatusSeen {
             rx_at_ms: clock.at(7).unix_ms,
-            channel: 6,
             peer_count: 3,
             rx_count: 1363,
             dropped_tx: 2,

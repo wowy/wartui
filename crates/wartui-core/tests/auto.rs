@@ -68,7 +68,7 @@ async fn auto_partitioner_converges_on_us_pool_partition_when_fleet_joins() {
     .expect("starting the simulator");
 
     let started = now();
-    let session = SessionInfo { espnow_channel: 6, pool: ChannelPool::Us, ..Default::default() };
+    let session = SessionInfo { pool: ChannelPool::Us, ..Default::default() };
     let store = Store::open(&StoreConfig::new(&path), &session, started.unix_ms)
         .expect("opening the store");
     let config = EngineConfig {
