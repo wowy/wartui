@@ -70,6 +70,23 @@ fn observation(node: Mac, bssid: [u8; 6], rssi: i16, at_ms: i64, fix: Fix) -> Re
     })
 }
 
+/// A Bluetooth sighting, otherwise as [`observation`].
+fn ble_observation(node: Mac, bssid: [u8; 6], at_ms: i64, fix: Fix) -> Record {
+    let mut record = observation(node, bssid, -60, at_ms, fix);
+    let Record::Observation(obs) = &mut record else { unreachable!() };
+    obs.kind = RecordKind::Ble;
+    obs.channel = 0;
+    record
+}
+
+/// A Wi-Fi sighting on `channel`, otherwise as [`observation`].
+fn on_channel(bssid: [u8; 6], channel: u16, at_ms: i64) -> Record {
+    let mut record = observation(NODE, bssid, -60, at_ms, fixed(37.0, -122.0));
+    let Record::Observation(obs) = &mut record else { unreachable!() };
+    obs.channel = channel;
+    record
+}
+
 /// A store on a fresh temporary database, plus the directory keeping it alive.
 fn store(dir: &tempfile::TempDir) -> Store {
     open_at(&dir.path().join("wartui.db"))
@@ -331,7 +348,7 @@ fn export_writer_increments_unpositioned_counter_when_sighting_lacks_fix() {
     );
 
     let (csv, summary) = export(&conn);
-    assert_eq!(summary, wartui_core::export::ExportSummary { rows: 1, unpositioned: 1 });
+    assert_eq!((summary.rows, summary.unpositioned), (1, 1));
     assert!(!csv.contains("BB:BB:BB:BB:BB:BB"));
 }
 
@@ -349,7 +366,7 @@ fn export_writer_exports_positioned_sighting_when_stronger_sighting_lacks_fix() 
     );
 
     let (csv, summary) = export(&conn);
-    assert_eq!(summary, wartui_core::export::ExportSummary { rows: 1, unpositioned: 0 });
+    assert_eq!((summary.rows, summary.unpositioned), (1, 0));
     assert!(csv.lines().nth(2).expect("a row").contains(",-80,37,-122,"));
 }
 
@@ -1263,4 +1280,129 @@ fn store_advances_assignment_base_counter_when_session_opens_and_spends() {
         third.assignment_base() > base + 1,
         "and spending one moves the reservation along with it"
     );
+}
+
+#[test]
+fn export_summary_counts_distinct_networks_when_network_heard_repeatedly() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let at = |n: i64| EPOCH_MS + n * 1000;
+    let conn = write(
+        &dir,
+        vec![
+            observation(NODE, [0xAA; 6], -60, at(0), fixed(37.0, -122.0)),
+            observation(NODE, [0xBB; 6], -60, at(1), fixed(37.0, -122.0)),
+            observation(NODE, [0xAA; 6], -60, at(2), fixed(37.0, -122.0)),
+            observation(NODE, [0xAA; 6], -60, at(3), fixed(37.0, -122.0)),
+        ],
+    );
+
+    let (_, summary) = export(&conn);
+    assert_eq!(summary.wifi.networks, 2);
+    assert_eq!(summary.wifi.sightings, 4);
+    assert_eq!(summary.wifi.rows, 2);
+    assert_eq!((summary.first_rx, summary.last_rx), (Some(at(0)), Some(at(3))));
+}
+
+#[test]
+fn export_summary_separates_wifi_and_ble_when_capture_holds_both() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let conn = write(
+        &dir,
+        vec![
+            observation(NODE, [0xAA; 6], -60, EPOCH_MS, fixed(37.0, -122.0)),
+            ble_observation(NODE, [0xCC; 6], EPOCH_MS, fixed(37.0, -122.0)),
+            ble_observation(NODE, [0xCC; 6], EPOCH_MS + 1000, fixed(37.0, -122.0)),
+            // One address heard as both kinds is a network of each.
+            ble_observation(NODE, [0xAA; 6], EPOCH_MS + 2000, fixed(37.0, -122.0)),
+        ],
+    );
+
+    let (_, summary) = export(&conn);
+    assert_eq!(summary.wifi, wartui_core::export::KindStats { networks: 1, sightings: 1, rows: 1 });
+    // AA's Bluetooth sighting is a network and a row of its own, beside its Wi-Fi one.
+    assert_eq!(summary.ble, wartui_core::export::KindStats { networks: 2, sightings: 3, rows: 2 });
+}
+
+#[test]
+fn export_summary_counts_sightings_per_node_when_two_nodes_capture() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let conn = write(
+        &dir,
+        vec![
+            observation(OTHER, [0xAA; 6], -60, EPOCH_MS, fixed(37.0, -122.0)),
+            observation(NODE, [0xAA; 6], -60, EPOCH_MS + 1000, fixed(37.0, -122.0)),
+            observation(NODE, [0xBB; 6], -60, EPOCH_MS, fixed(37.0, -122.0)),
+            ble_observation(OTHER, [0xCC; 6], EPOCH_MS, fixed(37.0, -122.0)),
+        ],
+    );
+
+    let (_, summary) = export(&conn);
+    let nodes: Vec<_> = summary.nodes.iter().map(|n| (n.mac.as_slice(), n.wifi, n.ble)).collect();
+    // Sorted by address, whatever order the sightings came in.
+    assert_eq!(nodes, [(&NODE[..], 2, 0), (&OTHER[..], 1, 1)]);
+}
+
+#[test]
+fn export_summary_counts_network_once_per_band_when_seen_on_both_bands() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let conn = write(
+        &dir,
+        vec![
+            on_channel([0xAA; 6], 6, EPOCH_MS),
+            on_channel([0xAA; 6], 36, EPOCH_MS + 1000),
+            on_channel([0xAA; 6], 6, EPOCH_MS + 2000),
+            on_channel([0xBB; 6], 149, EPOCH_MS),
+            on_channel([0xBB; 6], 149, EPOCH_MS + 1000),
+        ],
+    );
+
+    let (_, summary) = export(&conn);
+    assert_eq!(summary.wifi.networks, 2);
+    assert_eq!(summary.wifi_bands, wartui_core::export::Bands { ghz2_4: 1, ghz5: 2, other: 0 });
+}
+
+#[test]
+fn export_summary_tallies_position_sources_when_fix_varies() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let gps = Fix { source: PositionSource::Gps, ..fixed(37.0, -122.0) };
+    let conn = write(
+        &dir,
+        vec![
+            observation(NODE, [0xAA; 6], -60, EPOCH_MS, gps),
+            observation(NODE, [0xAA; 6], -60, EPOCH_MS + 1000, gps),
+            observation(NODE, [0xBB; 6], -60, EPOCH_MS, fixed(37.0, -122.0)),
+            observation(NODE, [0xCC; 6], -60, EPOCH_MS, Fix::none()),
+        ],
+    );
+
+    let (_, summary) = export(&conn);
+    assert_eq!(summary.positions, wartui_core::export::Positions { gps: 2, fixed: 1, none: 1 });
+}
+
+#[test]
+fn export_summary_respects_session_filter_when_session_given() {
+    // Two runs into one file are two sessions; the summary counts only the one asked for.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("wartui.db");
+    for records in [
+        vec![observation(NODE, [0xAA; 6], -60, EPOCH_MS, fixed(37.0, -122.0))],
+        vec![
+            observation(OTHER, [0xBB; 6], -60, EPOCH_MS, fixed(37.0, -122.0)),
+            ble_observation(OTHER, [0xCC; 6], EPOCH_MS, fixed(37.0, -122.0)),
+        ],
+    ] {
+        let store = open_at(&path);
+        assert_eq!(store.submit(records), 0);
+        store.close();
+    }
+    let conn = open_readonly(&path).expect("reopening read-only");
+    let second: i64 =
+        conn.query_row("SELECT max(id) FROM session", [], |row| row.get(0)).expect("a session");
+
+    let filter = ExportFilter { session_id: Some(second), ..ExportFilter::default() };
+    let (_, summary) = export_with(&conn, filter);
+    assert_eq!(summary.wifi.networks, 1);
+    assert_eq!(summary.ble.networks, 1);
+    assert_eq!(summary.nodes.len(), 1);
+    assert_eq!(summary.nodes[0].mac, OTHER);
 }
