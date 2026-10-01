@@ -52,9 +52,12 @@ With a bridge plugged in, start a capture and export it. `run` is the default su
 be omitted.
 
 ```sh
-wartui run --db tonight.db --lat 37.7749 --lon -122.4194
-wartui export --db tonight.db            # writes tonight.csv beside it
+wartui run --lat 37.7749 --lon -122.4194   # captures to wartui-2026-10-01-21-30.db
+wartui export                              # writes wartui-2026-10-01-21-30.csv beside it
 ```
+
+Each run creates a new `wartui-YYYY-MM-DD-HH-MM.db` in the working directory, named for the minute
+it started. `export` reads the newest one; pass `--db` to pick another.
 
 `q` stops a capture and commits the last batch. The database is the record; `export` can rebuild
 the CSV at any time, even while a capture is still running.
@@ -84,7 +87,7 @@ Each firmware is its own Cargo workspace, with its own target, toolchain pin, an
 depend on `crates/wartui-proto`, which keeps the two ends of the wire in step. The library crates
 have no README; their `//!` module docs hold the detail.
 
-## At the keyboard
+## Keyboard commands
 
 | Key                    | What it does                                                                 |
 |------------------------|------------------------------------------------------------------------------|
