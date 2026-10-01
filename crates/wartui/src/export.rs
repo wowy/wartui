@@ -15,8 +15,9 @@ use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use chrono::{DateTime, Utc};
 use clap::Args as ClapArgs;
-use wartui_core::export::{DEFAULT_RECAPTURE_SECS, ExportFilter, wigle_csv};
+use wartui_core::export::{DEFAULT_RECAPTURE_SECS, ExportFilter, ExportSummary, wigle_csv};
 use wartui_core::store::open_readonly;
 
 use crate::capture;
@@ -81,11 +82,12 @@ pub fn run(args: Args) -> Result<()> {
         let mut writer = BufWriter::new(stdout.lock());
         let summary = wigle_csv(&conn, filter, &mut writer, version)?;
         writer.flush().context("flushing the export")?;
+        eprint!("{}", report(&summary, None));
         summary
     } else {
         let summary =
             into_csv(&out, derived, |writer| Ok(wigle_csv(&conn, filter, writer, version)?))?;
-        eprintln!("{} rows written to {}", summary.rows, out.display());
+        eprint!("{}", report(&summary, Some(&out)));
         summary
     };
 
@@ -93,10 +95,130 @@ pub fn run(args: Args) -> Result<()> {
         eprintln!(
             "{} rows were left out because no sighting in their window had a \
              position. Capture with --lat and --lon to include them.",
-            summary.unpositioned
+            thousands(summary.unpositioned)
         );
     }
     Ok(())
+}
+
+/// What the export wrote and what the capture held, for standard error: standard output
+/// may be the CSV. `out` is `None` for standard output.
+fn report(summary: &ExportSummary, out: Option<&Path>) -> String {
+    use std::fmt::Write as _;
+
+    let mut text = String::new();
+    let dest = out.map_or_else(|| "standard output".to_owned(), |p| p.display().to_string());
+    let _ = writeln!(text, "{} rows written to {dest}", thousands(summary.rows));
+
+    let (wifi, bands) = (&summary.wifi, &summary.wifi_bands);
+    if wifi.sightings > 0 {
+        let other = if bands.other > 0 {
+            format!(", other {}", thousands(bands.other))
+        } else {
+            String::new()
+        };
+        let _ = writeln!(
+            text,
+            "  {:<9}{:>8} networks (2.4 GHz {}, 5 GHz {}{other})  {} sightings  {} rows",
+            "Wi-Fi",
+            thousands(wifi.networks),
+            thousands(bands.ghz2_4),
+            thousands(bands.ghz5),
+            thousands(wifi.sightings),
+            thousands(wifi.rows),
+        );
+    }
+    let ble = &summary.ble;
+    if ble.sightings > 0 {
+        let _ = writeln!(
+            text,
+            "  {:<9}{:>8} devices  {} sightings  {} rows",
+            "BLE",
+            thousands(ble.networks),
+            thousands(ble.sightings),
+            thousands(ble.rows),
+        );
+    }
+
+    let sightings = wifi.sightings + ble.sightings;
+    if sightings == 0 {
+        return text;
+    }
+    let pos = &summary.positions;
+    let share = |n: u64| n as f64 * 100.0 / sightings as f64;
+    let _ = writeln!(
+        text,
+        "  {:<11}gps {:.1}%  static {:.1}%  none {:.1}%",
+        "positions",
+        share(pos.gps),
+        share(pos.fixed),
+        share(pos.none),
+    );
+
+    let heard_wifi = summary.nodes.iter().filter(|n| n.wifi > 0).count();
+    let heard_ble = summary.nodes.iter().filter(|n| n.ble > 0).count();
+    let mut heard = Vec::new();
+    if heard_wifi > 0 {
+        heard.push(format!("{heard_wifi} heard Wi-Fi"));
+    }
+    if heard_ble > 0 {
+        heard.push(format!("{heard_ble} heard Bluetooth"));
+    }
+    let _ = writeln!(text, "  {:<11}{}", "nodes", heard.join(", "));
+    for node in &summary.nodes {
+        let mut line = format!("    {}", short_mac(&node.mac));
+        if node.wifi > 0 {
+            let _ = write!(line, "  wifi {}", thousands(node.wifi));
+        }
+        if node.ble > 0 {
+            let _ = write!(line, "  ble {}", thousands(node.ble));
+        }
+        let _ = writeln!(text, "{line}");
+    }
+
+    if let (Some(first), Some(last)) = (summary.first_rx, summary.last_rx) {
+        let _ = writeln!(text, "  {:<11}{}", "span", span(first, last));
+    }
+    text
+}
+
+/// A node by its last two octets, the way the fleet table names it.
+fn short_mac(mac: &[u8]) -> String {
+    let tail = &mac[mac.len().saturating_sub(2)..];
+    tail.iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(":")
+}
+
+/// `n` with a comma between each group of three digits.
+fn thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// The capture's first and last sighting in UTC, and how long lay between them. The
+/// end carries its date only when it is not the start's. The length is measured between
+/// the minutes shown, so it agrees with them.
+fn span(first_ms: i64, last_ms: i64) -> String {
+    let at = |ms| DateTime::<Utc>::from_timestamp_millis(ms).unwrap_or_default();
+    let (first, last) = (at(first_ms), at(last_ms));
+    let end = if first.date_naive() == last.date_naive() {
+        last.format("%H:%M").to_string()
+    } else {
+        last.format("%Y-%m-%d %H:%M").to_string()
+    };
+    let minutes = (last_ms.div_euclid(60_000) - first_ms.div_euclid(60_000)).max(0);
+    let length = if minutes < 60 {
+        format!("{minutes}m")
+    } else {
+        format!("{}h {}m", minutes / 60, minutes % 60)
+    };
+    format!("{} – {end} UTC ({length})", first.format("%Y-%m-%d %H:%M"))
 }
 
 /// Whether `out` names the capture itself.
@@ -170,7 +292,90 @@ mod tests {
 
     use anyhow::bail;
 
-    use super::{create_csv, into_csv, is_the_capture};
+    use wartui_core::export::{Bands, ExportSummary, KindStats, NodeStats, Positions};
+
+    use super::{create_csv, into_csv, is_the_capture, report};
+
+    /// A capture of two nodes, one on each kind, with sightings over an evening.
+    fn evening() -> ExportSummary {
+        ExportSummary {
+            rows: 47_952,
+            unpositioned: 0,
+            wifi: KindStats { networks: 38_211, sightings: 3_900_112, rows: 41_002 },
+            ble: KindStats { networks: 6_402, sightings: 112_233, rows: 6_950 },
+            wifi_bands: Bands { ghz2_4: 30_100, ghz5: 9_804, other: 0 },
+            positions: Positions { gps: 3_896_000, fixed: 0, none: 116_345 },
+            nodes: vec![
+                NodeStats { mac: vec![0x02, 0, 0x5E, 0x10, 0x1C, 0x5A], wifi: 0, ble: 112_233 },
+                NodeStats { mac: vec![0x02, 0, 0x5E, 0x10, 0x57, 0x84], wifi: 3_900_112, ble: 0 },
+            ],
+            // 2026-09-30 19:02 to 23:48 UTC.
+            first_rx: Some(1_790_794_920_000),
+            last_rx: Some(1_790_812_080_000),
+        }
+    }
+
+    #[test]
+    fn export_report_lists_nodes_by_last_two_octets_when_nodes_present() {
+        let text = report(&evening(), Some(Path::new("wartui-2026-09-30-19-02.csv")));
+        assert!(text.contains("\n    1C:5A  ble 112,233\n"), "{text}");
+        assert!(text.contains("\n    57:84  wifi 3,900,112\n"), "{text}");
+        assert!(text.contains("1 heard Wi-Fi, 1 heard Bluetooth"), "{text}");
+        assert!(text.contains("2026-09-30 19:02 – 23:48 UTC (4h 46m)"), "{text}");
+    }
+
+    #[test]
+    fn export_report_omits_ble_line_when_no_ble_sightings() {
+        let mut summary = evening();
+        summary.ble = KindStats::default();
+        summary.nodes.retain(|n| n.wifi > 0);
+        let text = report(&summary, None);
+        assert!(text.starts_with("47,952 rows written to standard output\n"), "{text}");
+        assert!(!text.contains("BLE"), "{text}");
+        assert!(!text.contains("Bluetooth"), "{text}");
+    }
+
+    #[test]
+    fn export_report_omits_wifi_line_when_no_wifi_sightings() {
+        let mut summary = evening();
+        summary.wifi = KindStats::default();
+        summary.wifi_bands = Bands::default();
+        summary.nodes.retain(|n| n.ble > 0);
+        let text = report(&summary, None);
+        assert!(!text.contains("Wi-Fi"), "{text}");
+        assert!(text.contains("  BLE "), "{text}");
+    }
+
+    #[test]
+    fn export_report_measures_span_between_shown_minutes_when_times_have_seconds() {
+        let mut summary = evening();
+        // 2026-09-30 19:02:59 to 20:02:01 UTC: 59 minutes apart, but an hour between
+        // the minutes shown.
+        summary.first_rx = Some(1_790_794_979_000);
+        summary.last_rx = Some(1_790_798_521_000);
+        let text = report(&summary, None);
+        assert!(text.contains("2026-09-30 19:02 – 20:02 UTC (1h 0m)"), "{text}");
+    }
+
+    #[test]
+    fn export_report_formats_thousands_when_counts_are_large() {
+        let text = report(&evening(), Some(Path::new("out.csv")));
+        assert!(text.starts_with("47,952 rows written to out.csv\n"), "{text}");
+        assert!(
+            text.contains(
+                "  Wi-Fi      38,211 networks (2.4 GHz 30,100, 5 GHz 9,804)  \
+                 3,900,112 sightings  41,002 rows\n"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("  BLE         6,402 devices  112,233 sightings  6,950 rows"),
+            "{text}"
+        );
+        assert_eq!(super::thousands(0), "0");
+        assert_eq!(super::thousands(999), "999");
+        assert_eq!(super::thousands(1_000), "1,000");
+    }
 
     #[test]
     fn export_writer_creates_destination_file_when_derived_path_does_not_exist() {

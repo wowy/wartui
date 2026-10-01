@@ -65,6 +65,10 @@ same one again to mean it, and `--out -` writes to standard output. The CSV is a
 rather than a second copy of it, so it can be re-run after a decoder fix, against a session that
 ended last week, or against one still going.
 
+When it finishes, `export` reports on standard error the rows written, the distinct Wi-Fi networks
+(per band) and Bluetooth devices, sightings of each, the share of sightings by position source,
+what each node heard, and the span of the capture. Every count is exact.
+
 `--recapture SECONDS` (default 3600 — one hour) folds each network's sightings into windows that
 wide and writes one row per window: the strongest positioned sighting, with `FirstSeen` from the
 window's own first sighting. WDGWars' scan cooldown is one hour per user and MAC — a re-scan within

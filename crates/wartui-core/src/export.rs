@@ -29,6 +29,11 @@
 //! then `/var/tmp`, which on a Pi that boots from its card is the card. Nothing in the
 //! store is written: a temporary table belongs to the connection, not the file.
 //!
+//! The [`ExportSummary`] counts are exact rather than estimated, because the fold already
+//! walks networks in order and knows where each begins. Their cost is the node and
+//! position-source columns riding through the whole-table sort, which
+//! [`SELECT_SIGHTINGS`] explains.
+//!
 //! Two details are here because WiGLE rejects files without them: the timestamp
 //! must be zero-padded (`2026-05-01 13:34:37`, where the node firmware emits
 //! `2026-5-1 13:34:37`), and the SSID must be RFC-4180 quoted, since an SSID
@@ -112,7 +117,7 @@ impl Default for ExportFilter {
 }
 
 /// What an export did.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ExportSummary {
     /// Rows written — one per network, per recapture window that closed on a
     /// positioned sighting.
@@ -122,6 +127,66 @@ pub struct ExportSummary {
     /// Not an error and not silent: the operator should know how much of a capture is
     /// waiting on a GPS or a `--lat`/`--lon`.
     pub unpositioned: u64,
+    /// Wi-Fi networks, sightings and rows.
+    pub wifi: KindStats,
+    /// Bluetooth devices, sightings and rows.
+    pub ble: KindStats,
+    /// Wi-Fi networks per band.
+    pub wifi_bands: Bands,
+    /// Sightings by which tier of the position chain answered.
+    pub positions: Positions,
+    /// Sightings per node, sorted by address.
+    pub nodes: Vec<NodeStats>,
+    /// The earliest sighting's receive time, in unix milliseconds. `None` when there
+    /// are no sightings.
+    pub first_rx: Option<i64>,
+    /// The latest sighting's receive time, in unix milliseconds.
+    pub last_rx: Option<i64>,
+}
+
+/// One record kind's share of an export.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct KindStats {
+    /// Distinct addresses heard as this kind. An address heard as both kinds counts
+    /// once in each.
+    pub networks: u64,
+    /// Sightings of this kind.
+    pub sightings: u64,
+    /// Rows of this kind written to the CSV.
+    pub rows: u64,
+}
+
+/// Wi-Fi networks per band, each counted once in every band it was heard on.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Bands {
+    /// Channels 1 to 14.
+    pub ghz2_4: u64,
+    /// Channels 32 to 177.
+    pub ghz5: u64,
+    /// Any other channel.
+    pub other: u64,
+}
+
+/// Sightings by position source.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Positions {
+    /// Positioned by the GPS.
+    pub gps: u64,
+    /// Positioned by the static `--lat`/`--lon`.
+    pub fixed: u64,
+    /// With no position.
+    pub none: u64,
+}
+
+/// One node's sightings.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NodeStats {
+    /// The node's address.
+    pub mac: Vec<u8>,
+    /// Wi-Fi sightings it reported.
+    pub wifi: u64,
+    /// Bluetooth sightings it reported.
+    pub ble: u64,
 }
 
 /// Write a WiGLE v1.6 CSV.
@@ -157,7 +222,7 @@ pub fn wigle_csv<W: Write>(
     let tx = conn.unchecked_transaction()?;
     tx.execute_batch(CREATE_EXPORT_ROWS)?;
 
-    let mut summary = ExportSummary::default();
+    let mut tally = Tally::default();
     {
         let mut insert = tx.prepare(INSERT_EXPORT_ROW)?;
         let mut stmt = tx.prepare(SELECT_SIGHTINGS)?;
@@ -166,17 +231,18 @@ pub fn wigle_csv<W: Write>(
 
         while let Some(row) = rows.next()? {
             let mut candidate = Candidate::of(row)?;
-            let opens_window = match &window {
-                // The first sighting of the capture, or of the next network.
-                None => true,
-                Some(w) => {
-                    w.best.bssid != candidate.bssid
-                        || w.best.kind != candidate.kind
-                        || (recapture_ms > 0 && candidate.rx_at - w.first_seen > recapture_ms)
-                }
-            };
+            let (node, pos_source) = heard_by(row)?;
+            // The first sighting of the capture, or of the next network.
+            let new_network = window
+                .as_ref()
+                .is_none_or(|w| w.best.bssid != candidate.bssid || w.best.kind != candidate.kind);
+            tally.see(&candidate, new_network, node, pos_source);
+            let opens_window = new_network
+                || window.as_ref().is_some_and(|w| {
+                    recapture_ms > 0 && candidate.rx_at - w.first_seen > recapture_ms
+                });
             if opens_window {
-                close(&mut window, &mut insert, &mut summary)?;
+                close(&mut window, &mut insert, &mut tally.summary)?;
                 window = Some(Window { first_seen: candidate.rx_at, best: candidate });
             } else if let Some(w) = window.as_mut() {
                 // Which sighting submits is decided by position and signal alone;
@@ -189,7 +255,7 @@ pub fn wigle_csv<W: Write>(
                 }
             }
         }
-        close(&mut window, &mut insert, &mut summary)?;
+        close(&mut window, &mut insert, &mut tally.summary)?;
 
         // By when each row's window opened, so a file re-exported after a decoder
         // fix diffs cleanly against the one before it; the network breaks ties.
@@ -201,7 +267,73 @@ pub fn wigle_csv<W: Write>(
     }
     tx.execute_batch("DROP TABLE temp.export_row")?;
     tx.commit()?;
-    Ok(summary)
+    Ok(tally.finish())
+}
+
+/// Counts what the export walked over, for its [`ExportSummary`].
+///
+/// Exact, because the fold walks networks (address and kind) in order and tells the
+/// tally where each begins. Memory is bounded by the fleet rather than the capture: the
+/// node list holds one entry per node that reported, and the per-network band bits reset
+/// when the network changes. Nothing here allocates per sighting.
+#[derive(Default)]
+struct Tally {
+    summary: ExportSummary,
+    /// Which bands this network has been heard on, one bit per [`Bands`] field.
+    bands: u8,
+}
+
+impl Tally {
+    /// Count one sighting, the first of its network when `new_network`, heard by `node`,
+    /// positioned by the `pos_source` code [`SELECT_SIGHTINGS`] gives it.
+    fn see(&mut self, c: &Candidate, new_network: bool, node: &[u8], pos_source: i64) {
+        let ble = c.kind == "ble";
+        let summary = &mut self.summary;
+        let stats = if ble { &mut summary.ble } else { &mut summary.wifi };
+        stats.sightings += 1;
+        if new_network {
+            self.bands = 0;
+            stats.networks += 1;
+        }
+        if !ble {
+            // The ranges `frequency_column` puts on each ladder.
+            let (bit, count) = match c.channel {
+                1..=14 => (1, &mut summary.wifi_bands.ghz2_4),
+                32..=177 => (2, &mut summary.wifi_bands.ghz5),
+                _ => (4, &mut summary.wifi_bands.other),
+            };
+            if self.bands & bit == 0 {
+                self.bands |= bit;
+                *count += 1;
+            }
+        }
+        match pos_source {
+            0 => summary.positions.gps += 1,
+            1 => summary.positions.fixed += 1,
+            _ => summary.positions.none += 1,
+        }
+        let at = match summary.nodes.iter().position(|n| n.mac == node) {
+            Some(at) => at,
+            None => {
+                summary.nodes.push(NodeStats { mac: node.to_vec(), wifi: 0, ble: 0 });
+                summary.nodes.len() - 1
+            }
+        };
+        if ble {
+            summary.nodes[at].ble += 1;
+        } else {
+            summary.nodes[at].wifi += 1;
+        }
+        summary.first_rx = Some(summary.first_rx.map_or(c.rx_at, |t| t.min(c.rx_at)));
+        summary.last_rx = Some(summary.last_rx.map_or(c.rx_at, |t| t.max(c.rx_at)));
+    }
+
+    /// The summary, nodes in address order.
+    fn finish(self) -> ExportSummary {
+        let mut summary = self.summary;
+        summary.nodes.sort_by(|a, b| a.mac.cmp(&b.mac));
+        summary
+    }
 }
 
 /// Retire the window in flight, submitting it to the table the rows are sorted in
@@ -230,6 +362,11 @@ fn close(
             first_seen,
         ])?;
         summary.rows += 1;
+        if best.kind == "ble" {
+            summary.ble.rows += 1;
+        } else {
+            summary.wifi.rows += 1;
+        }
     } else {
         summary.unpositioned += 1;
     }
@@ -238,13 +375,18 @@ fn close(
 
 /// Every sighting of every network in the filter, in fold order: address, kind,
 /// then time. The `id` tiebreaker keeps the order — and therefore which sighting a
-/// tied window submits — deterministic.
+/// tied window submits — deterministic. Columns 0 to 12 are a [`Candidate`]; the last
+/// two feed only the [`Tally`]. The position source arrives as `0` for `gps`, `1` for
+/// `static` and `2` otherwise rather than as its token: every column here rides through
+/// the sort of the whole table, and a small integer is the narrowest thing a sort row can
+/// carry, which measured a quarter of what the two extra columns cost the export.
 ///
 /// There is deliberately no index for this to walk: a scan and a sort read the table in
 /// order, and were faster than one random lookup per sighting
 /// (`docs/store-io-findings.md` says more).
 const SELECT_SIGHTINGS: &str = r"
-SELECT bssid, ssid, security, channel, rssi, lat, lon, alt, accuracy, kind, rcoi, mfgr_id, rx_at
+SELECT bssid, ssid, security, channel, rssi, lat, lon, alt, accuracy, kind, rcoi, mfgr_id, rx_at,
+       node_mac, CASE pos_source WHEN 'gps' THEN 0 WHEN 'static' THEN 1 ELSE 2 END
 FROM observation o
 WHERE ?1 IS NULL OR o.session_id = ?1
 ORDER BY o.bssid, o.kind, o.rx_at, o.id
@@ -274,6 +416,12 @@ SELECT bssid, ssid, security, channel, rssi, lat, lon, alt, accuracy, kind, rcoi
 FROM temp.export_row
 ORDER BY first_seen, bssid, kind
 ";
+
+/// The node that heard a [`SELECT_SIGHTINGS`] row and its position source, borrowed
+/// from the row rather than copied out of it.
+fn heard_by<'r>(row: &'r Row<'_>) -> rusqlite::Result<(&'r [u8], i64)> {
+    Ok((row.get_ref(13)?.as_blob()?, row.get_ref(14)?.as_i64()?))
+}
 
 /// One sighting in flight through the fold, carrying everything a submitted
 /// row needs so the winner of a window can be written without going back to
