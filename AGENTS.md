@@ -238,14 +238,13 @@ edit stops; follow the pointer before changing the rule.
   itself — never sweeps at all. The GPS search is the complement: it opens everything *but* those,
   and writes to none of them. → `crates/wartui-bridge/src/ports.rs` `//!`,
   `serial::select` / `serial::unambiguous_bridge`, `crates/wartui-core/src/discover.rs` `//!`
-- **A connection asks a board not known to be the bridge once, and then only waits.** A board that
-  is not reading its USB endpoint absorbs exactly one packet and NACKs the rest, and they sit in the
-  tty's output queue through a `close` that no signal can interrupt — 30 s measured against a node,
-  during which the process cannot exit. One `Identify` is also sufficient to be answered, because a
-  board that is merely still booting reads it out of that same FIFO when its loop starts. Only the
-  remembered or settled bridge is asked a second time, after `stall::TX_STALL_TIMEOUT_MS`, so that
-  a wedged one reboots itself; being named or alone does not make a board known.
-  → `crates/wartui-bridge/src/serial.rs`, `connect`'s `identify` arm
+- **A connection asks once and then only waits.** A board that is not reading its USB endpoint
+  absorbs exactly one packet and NACKs the rest, and they sit in the tty's output queue through a
+  `close` that no signal can interrupt — 30 s measured against a node, during which the process
+  cannot exit. One `Identify` is also sufficient, because a board that is merely still booting
+  reads it out of that same FIFO when its loop starts, and a bridge whose transmit endpoint has
+  wedged reboots itself on that one unanswered frame. → `crates/wartui-bridge/src/serial.rs`,
+  `connect`'s `identify` arm; `crates/wartui-proto/src/stall.rs`
 - **Never set DTR or RTS on a serial port, or ask `serialport` to.** The kernel raises both
   together on open, which an ESP32's USB Serial/JTAG ignores; moving one without the other is its
   reset sequence, so `.dtr_on_open(false)` reboots the board it was being polite to.
@@ -272,7 +271,7 @@ edit stops; follow the pointer before changing the rule.
   half of the check and the symptom is a plausible-looking lie rather than an error.
   → `crates/wartui-core/src/engine.rs`, `note_arrival` / `air_is_live` / `BEHIND_THE_AIR`
 - **The bridge's USB transmit endpoint can die on its own, and the bridge reboots when it does.**
-  `StallWatch` times the *contradiction*, and **every one of its four clauses is load-bearing**:
+  `StallWatch` times the *contradiction*, and **every one of its four facts is load-bearing**:
   delete any and a bridge reboots for ever, or never. There is no watchdog behind the hang case.
   → `crates/wartui-proto/src/stall.rs`, `StallWatch`; `docs/phase-3-findings.md`
 - **Every reset goes through `reboot()`, and on a C5 that funnel *is* the reset** — a bare

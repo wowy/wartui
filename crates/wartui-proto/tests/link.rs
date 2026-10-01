@@ -319,6 +319,45 @@ fn frame_accumulator_discards_oversized_frame_when_capacity_is_exceeded() {
     assert_eq!(got, Some(cmd));
 }
 
+/// What the host recovers from a reset's banner, an optional lone `0x00`, then one
+/// frame. The banner is 1.5 KB with no `0x00`, as measured off a rebooting C6.
+fn after_banner(delimited: bool) -> std::vec::Vec<BridgeToHost> {
+    let ready = sample_events().into_iter().next().expect("Ready is first");
+    assert!(matches!(ready, BridgeToHost::Ready { .. }));
+    let mut out = [0u8; MAX_FRAME];
+    let n = encode_frame(&ready, &mut out).expect("encodes");
+
+    let mut stream = std::vec![b'E'; 1500];
+    if delimited {
+        stream.push(0x00);
+    }
+    stream.extend_from_slice(&out[..n]);
+
+    let mut acc = FrameAccumulator::<MAX_FRAME>::new();
+    let mut got = std::vec::Vec::new();
+    for byte in stream {
+        if let Some(frame) = acc.push(byte)
+            && let Ok(msg) = decode_frame::<BridgeToHost>(frame)
+        {
+            got.push(msg);
+        }
+    }
+    got
+}
+
+#[test]
+fn frame_accumulator_loses_first_frame_when_overlong_banner_is_undelimited() {
+    // The banner overflows the buffer, and the overflow ends at the frame's own
+    // terminator, so the frame goes with it.
+    assert!(after_banner(false).is_empty());
+}
+
+#[test]
+fn frame_accumulator_decodes_first_frame_when_overlong_banner_is_delimited() {
+    // A lone `0x00` is an empty frame, skipped, and it ends the overflowed run.
+    assert!(matches!(after_banner(true)[..], [BridgeToHost::Ready { .. }]));
+}
+
 #[test]
 fn link_decoder_rejects_payload_when_frame_is_truncated() {
     let mut empty: [u8; 0] = [];

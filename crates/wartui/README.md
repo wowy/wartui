@@ -627,11 +627,10 @@ rm ~/.local/state/wartui/bridge        # forget which board was the bridge
 `wartui reset` takes about thirty seconds to fail when it is pointed at a board that is not a
 bridge, and that is the cost of what it does: it transmits before anything has identified itself,
 because the board it is for answers nothing. A board that is not reading takes the first packet and
-leaves the rest queued, and closing the port waits for them. `run` never pays this against a board it
-does not know: it asks with one frame and no more, however long it then waits for the answer. The
-remembered bridge, or the one a run already settled on, is asked once more 3.5 s in, because a
-bridge whose transmit endpoint wedged before wartui connected reboots itself only when a frame
-arrives after the stall has begun, and the first ask is what begins it.
+leaves the rest queued, and closing the port waits for them. `run` never pays this: it asks with one
+frame and no more, however long it then waits for the answer. That one frame is also enough for a
+bridge whose transmit endpoint has wedged, which reboots itself three seconds after a frame it cannot
+answer.
 
 `wartui reset` never sweeps. A `Reset` reaching a node reboots it and costs it the addresses it was
 holding back, so it goes to the board named with `--bridge`, else the remembered one, else the only
