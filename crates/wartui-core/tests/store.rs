@@ -497,6 +497,50 @@ fn export_writer_formats_ble_record_with_manufacturer_id_when_sighting_exported(
     );
 }
 
+/// `record` as a BLE advertisement: no channel, no SSID, and the `[BLE]` security tag.
+fn as_ble(mut record: Record, mfgr_id: Option<u16>) -> Record {
+    let Record::Observation(obs) = &mut record else { unreachable!() };
+    obs.kind = RecordKind::Ble;
+    obs.channel = 0;
+    obs.ssid = Vec::new();
+    obs.security = "[BLE]".to_owned();
+    obs.mfgr_id = mfgr_id;
+    record
+}
+
+#[test]
+fn export_writer_writes_row_per_kind_when_address_heard_as_wifi_and_ble() {
+    // One address can be a Wi-Fi network and a BLE advertiser at once; WiGLE
+    // records each, so neither may win the other's window.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let wifi = observation(NODE, [0xAA; 6], -50, EPOCH_MS, fixed(37.0, -122.0));
+    let ble = as_ble(observation(NODE, [0xAA; 6], -70, EPOCH_MS + 3000, fixed(37.0, -122.0)), None);
+    let conn = write(&dir, vec![wifi, ble]);
+
+    let (csv, summary) = export(&conn);
+    let rows: Vec<&str> = csv.lines().skip(2).collect();
+    assert_eq!(summary.rows, 2);
+    assert_eq!(rows.len(), 2, "{csv}");
+    assert!(rows.iter().any(|row| row.ends_with(",WIFI")), "{csv}");
+    assert!(rows.iter().any(|row| row.ends_with(",BLE")), "{csv}");
+}
+
+#[test]
+fn export_writer_keeps_identifiers_within_kind_when_address_heard_as_wifi_and_ble() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let wifi = observation(NODE, [0xAA; 6], -50, EPOCH_MS, fixed(37.0, -122.0));
+    let ble =
+        as_ble(observation(NODE, [0xAA; 6], -70, EPOCH_MS + 3000, fixed(37.0, -122.0)), Some(76));
+    let conn = write(&dir, vec![wifi, ble]);
+
+    let (csv, _) = export(&conn);
+    let row = |kind: &str| {
+        csv.lines().find(|row| row.ends_with(kind)).unwrap_or_else(|| panic!("{kind}: {csv}"))
+    };
+    assert!(row(",WIFI").ends_with(",,,WIFI"), "no BLE identifier on the Wi-Fi row: {csv}");
+    assert!(row(",BLE").ends_with(",,76,BLE"), "the BLE row keeps its own: {csv}");
+}
+
 #[test]
 fn store_drops_records_without_blocking_when_queue_depth_is_exceeded() {
     // A stalled engine misses everything, including an assignment racing a node's

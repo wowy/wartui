@@ -11,9 +11,13 @@
 //! sighting (which WiGLE would deduplicate its own side anyway). `0` keeps the
 //! older shape: one row per network for the whole capture.
 //!
+//! A network is an address and a kind. One address can be both a Wi-Fi network and a
+//! BLE advertiser, and WiGLE records those as two things (the `Type` column), so each
+//! kind folds into windows of its own and lends identifiers only to its own row.
+//!
 //! The fold is in Rust rather than SQL because the anchor rule is sequential —
 //! where a window ends decides where the next begins, which no window function
-//! can compute without recursion. It streams sightings in network-then-time
+//! can compute without recursion. It streams sightings in address, kind, then time
 //! order and holds one window's state at a time.
 //!
 //! The file is ordered by when each window opened, not by network, and that sort is
@@ -167,6 +171,7 @@ pub fn wigle_csv<W: Write>(
                 None => true,
                 Some(w) => {
                     w.best.bssid != candidate.bssid
+                        || w.best.kind != candidate.kind
                         || (recapture_ms > 0 && candidate.rx_at - w.first_seen > recapture_ms)
                 }
             };
@@ -231,8 +236,8 @@ fn close(
     Ok(())
 }
 
-/// Every sighting of every network in the filter, in fold order: network, then
-/// time. The `id` tiebreaker keeps the order — and therefore which sighting a
+/// Every sighting of every network in the filter, in fold order: address, kind,
+/// then time. The `id` tiebreaker keeps the order — and therefore which sighting a
 /// tied window submits — deterministic.
 ///
 /// There is deliberately no index for this to walk: a scan and a sort read the table in
@@ -242,7 +247,7 @@ const SELECT_SIGHTINGS: &str = r"
 SELECT bssid, ssid, security, channel, rssi, lat, lon, alt, accuracy, kind, rcoi, mfgr_id, rx_at
 FROM observation o
 WHERE ?1 IS NULL OR o.session_id = ?1
-ORDER BY o.bssid, o.rx_at, o.id
+ORDER BY o.bssid, o.kind, o.rx_at, o.id
 ";
 
 /// The rows waiting for the sort by window start: a submitted sighting in
@@ -261,12 +266,13 @@ CREATE TEMP TABLE export_row (
 const INSERT_EXPORT_ROW: &str = "INSERT INTO temp.export_row VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, \
 ?8, ?9, ?10, ?11, ?12, ?13, ?14)";
 
-/// Two windows of one network never open at the same instant, so the order is total.
+/// Two windows of one network never open at the same instant, but one address's Wi-Fi
+/// and BLE windows can, so `kind` breaks that tie and the order is total.
 const SELECT_EXPORT_ROWS: &str = r"
 SELECT bssid, ssid, security, channel, rssi, lat, lon, alt, accuracy, kind, rcoi, mfgr_id, rx_at,
        first_seen
 FROM temp.export_row
-ORDER BY first_seen, bssid
+ORDER BY first_seen, bssid, kind
 ";
 
 /// One sighting in flight through the fold, carrying everything a submitted
@@ -309,7 +315,7 @@ impl Candidate {
     }
 
     /// Take `other`'s roaming consortium and manufacturer identifier wherever this
-    /// sighting has none of its own.
+    /// sighting has none of its own. The fold only pairs sightings of one kind.
     ///
     /// The sighting that wins a window is picked for its position and signal, and
     /// whether a packet carried a trailer has nothing to do with either: a beacon
