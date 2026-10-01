@@ -463,46 +463,22 @@ mod tests {
     }
 
     #[test]
-    fn cli_parser_populates_tx_power_flags_when_parsing_run_options() {
-        let cli = parse(["wartui", "--node-tx-power", "10", "--bridge-tx-power", "15"]).unwrap();
-        assert!(cli.command.is_none());
-        assert_eq!(cli.run.node_tx_power, Some(10));
-        assert_eq!(cli.run.bridge_tx_power, Some(15));
-    }
-
-    #[test]
-    fn cli_parser_allows_bridge_tx_power_independently_when_node_tx_power_is_omitted() {
-        let cli = parse(["wartui", "run", "--bridge-tx-power", "15"]).unwrap();
-        let Some(Command::Run(args)) = cli.command else { panic!("not run") };
-        assert_eq!(args.node_tx_power, None);
-        assert_eq!(args.bridge_tx_power, Some(15));
-    }
-
-    #[test]
-    fn cli_parser_rejects_tx_power_when_value_is_outside_2_to_20_dbm_range() {
-        // Refused rather than clamped: a power the operator typed and got wrong
-        // should say so, not run the fleet at a power nobody asked for.
-        for args in [
-            ["wartui", "--node-tx-power", "25"].as_slice(),
-            ["wartui", "--node-tx-power", "1"].as_slice(),
-            ["wartui", "--bridge-tx-power", "21"].as_slice(),
+    fn cli_parser_rejects_removed_flags_when_given_before_or_after_subcommand() {
+        // Power and pool come from `wartui.toml` or the settings modal; the store
+        // commits at its built-in interval.
+        for flag in [
+            ["--pool", "eu"],
+            ["--node-tx-power", "10"],
+            ["--bridge-tx-power", "10"],
+            ["--commit-interval", "500"],
         ] {
-            assert!(parse(args).is_err(), "{args:?} should be refused");
+            for args in [
+                ["wartui", flag[0], flag[1]].as_slice(),
+                ["wartui", "run", flag[0], flag[1]].as_slice(),
+            ] {
+                assert!(parse(args).is_err(), "{args:?} should be refused");
+            }
         }
-    }
-
-    #[test]
-    fn cli_parser_defaults_pool_to_none_when_flag_omitted() {
-        let cli = parse(["wartui"]).unwrap();
-        assert!(cli.command.is_none());
-        assert_eq!(cli.run.pool, None);
-    }
-
-    #[test]
-    fn cli_parser_populates_pool_flag_when_given() {
-        let cli = parse(["wartui", "--pool", "eu"]).unwrap();
-        assert!(cli.command.is_none());
-        assert_eq!(cli.run.pool, Some(crate::run::PoolArg::Eu));
     }
 
     #[test]

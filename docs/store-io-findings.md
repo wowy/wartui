@@ -589,7 +589,8 @@ What it says:
 - a queue of 16,384 records
 - the background checkpoint after every commit, truncating past 64 MiB
 
-`wartui run --commit-interval` changes the interval, and `bench --inline-checkpoint`
+`wartui run --commit-interval` changes the interval (`run`'s flag was later removed;
+`bench --commit-interval` still sets it), and `bench --inline-checkpoint`
 measures SQLite's own checkpoint for comparison. `wal_rewinds` is gone from the report:
 the WAL's size says the same thing, without the undercount.
 

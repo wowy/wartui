@@ -104,8 +104,9 @@ Nothing goes out at the moment a share changes. A node's radio is away scanning 
 ms it holds open after its own heartbeat, so the assignment waits for that window — up to about five
 seconds on a full sweep of the default pool. The `channels` column reads `1: 1…` until it lands.
 
-`--pool all` is the default: every channel a node can tune, 2.4 GHz 1–13 and all of 5 GHz. `--pool
-us` is 2.4 GHz 1–11 and 5 GHz 36–165; `--pool eu` is 2.4 GHz 1–13 and 5 GHz 36–140.
+The pool is the `pool` key in `wartui.toml`, or set from the settings modal (`c`). `all` is the
+default: every channel a node can tune, 2.4 GHz 1–13 and all of 5 GHz. `us` is 2.4 GHz 1–11 and 5
+GHz 36–165; `eu` is 2.4 GHz 1–13 and 5 GHz 36–140.
 
 At most one node scans Bluetooth, by default none does, and it is that node's whole job: `b` gives
 it the scan, takes its Wi-Fi channels away, and re-cuts the pool across the rest. It scans once a
@@ -126,8 +127,8 @@ second, and its `channels` column reads `bluetooth`.
 - **Plaintext ESP-NOW only**, in both directions. There is no pairing handshake and no key.
 - **Every radio transmits at 2 dBm by default.** The fleet is meant to ride in one vehicle with
   its bridge; carry a node much farther off and its heartbeats are the first thing lost.
-  `--node-tx-power` sets the nodes' power at runtime and `--bridge-tx-power` the bridge's,
-  independently, so changing either costs no reflash.
+  `[tx-power]` in `wartui.toml` or the settings modal (`c`) sets the nodes' power and the
+  bridge's, independently, so changing either costs no reflash.
 - **Nothing is compatible with an earlier wartui, and that is the policy until 1.0.** `wartui-proto`
   is compiled into the host and both firmwares, so flash the fleet together. The bridge is
   format-blind and does not need reflashing for a wire change — but it does need one for a

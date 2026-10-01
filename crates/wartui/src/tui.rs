@@ -2911,31 +2911,6 @@ mod tests {
     }
 
     #[test]
-    fn ui_saves_snapshot_values_when_they_came_from_a_flag() {
-        // `--pool us` and `--node-tx-power` land in the snapshot the same way
-        // any other running value does, and Enter saves whatever is on screen
-        // regardless of where it came from.
-        let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("wartui.toml");
-        std::fs::write(&target, "pool = \"eu\"\n[tx-power]\nfleet = 5\n").unwrap();
-        let mut snapshot = busy();
-        snapshot.pool = ChannelPool::Us;
-        snapshot.tx_power = 48; // 12 dBm
-        let (tx, _rx) = mpsc::channel(4);
-        let mut ui = Ui {
-            settings: Settings { config_path: Some(target.clone()), ..Settings::default() },
-            ..Ui::default()
-        };
-        ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
-
-        ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
-
-        let saved = config::load(Some(&target)).expect("a valid file");
-        assert_eq!(saved.pool, Some(PoolArg::Us));
-        assert_eq!(saved.tx_power.fleet, Some(12));
-    }
-
-    #[test]
     fn ui_omits_restart_notice_when_enter_pressed_with_pool_unchanged() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wartui.toml");
