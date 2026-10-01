@@ -129,7 +129,7 @@ fn sent_admin(batch: &wartui_core::ActionBatch) -> (u16, Mac, AdminMsg) {
     let HostToBridge::SendEspNow { id, dst, ensure_peer, payload } = &batch.urgent[0] else {
         panic!("expected a SendEspNow")
     };
-    assert!(ensure_peer, "divergence 6: peers are added on demand and never deleted");
+    assert!(ensure_peer, "divergence 6: peers are added on demand");
     (*id, *dst, AdminMsg::decode(payload).expect("a valid admin frame"))
 }
 
@@ -167,7 +167,7 @@ fn clears(batch: &ActionBatch) -> Vec<(u16, Mac)> {
             HostToBridge::SendEspNow { id, dst, ensure_peer, payload }
                 if matches!(Frame::decode(payload), Ok(Frame::Clear(_))) =>
             {
-                assert!(*ensure_peer, "divergence 6: peers are added on demand and never deleted");
+                assert!(*ensure_peer, "divergence 6: peers are added on demand");
                 Some((*id, *dst))
             }
             _ => None,
@@ -1742,8 +1742,8 @@ fn engine_handles_peer_table_full_without_endless_retries_when_slot_refused() {
     let Some(Record::Assignment(row)) = batch.records.first() else { panic!("a row") };
     assert_eq!(row.outcome, AdminOutcome::Refused);
 
-    // Twenty peers is the radio's whole table and the whole supported fleet, so
-    // no later heartbeat makes this possible.
+    // The table stays full until a stale peer is evicted or the bridge announces
+    // itself, so the next heartbeat does not retry.
     let node = engine.nodes().next().expect("the node");
     assert!(!node.dirty, "nothing is owed to a node the bridge cannot address");
     assert!(node.desired.is_none(), "and nothing is still wanted");
@@ -1917,9 +1917,13 @@ fn engine_assigns_all_pool_runs_to_single_node_when_fleet_size_is_one() {
     engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(1));
 
     // And nothing re-issues it. The plan has no timer and ticks drive no dwell, so
-    // a plan still holding after several minutes of them is the whole claim.
+    // a plan still holding after several minutes of them is the whole claim. The
+    // node keeps heartbeating what it holds, so it stays in the fleet.
     for minute in 1..=5 {
-        let batch = engine.handle(Event::Tick, clock.at(60 * minute));
+        let at = clock.at(60 * minute);
+        let beat = u32::try_from(minute).expect("fits") + 1;
+        engine.handle(heartbeat_holding(peer(0), beat, first.epoch), at);
+        let batch = engine.handle(Event::Tick, at);
         assert!(batch.urgent.is_empty(), "nothing is owed at minute {minute}");
     }
     assert_eq!(counters(&engine).replans, 1, "one plan, once");
@@ -2215,25 +2219,6 @@ fn engine_suppresses_redundant_assignments_when_fleet_plan_is_settled() {
 }
 
 #[test]
-fn engine_stops_repartitioning_and_marks_plan_none_when_fleet_exceeds_max_nodes() {
-    let clock = Clock::new();
-    let mut engine = engine(EngineConfig::default(), &clock);
-    for n in 0..=u8::try_from(wartui_proto::plan::MAX_NODES).expect("twenty fits") {
-        engine.handle(heartbeat(peer(n), 1), clock.at(1));
-    }
-
-    // Twenty peers is the radio's whole table, so the twenty-first node is one the
-    // bridge cannot address.
-    let last = engine.nodes().last().expect("the twenty-first node");
-    assert!(last.desired.is_none(), "the node past the limit is given nothing");
-    assert_eq!(
-        engine.nodes().filter(|node| node.desired.is_some()).count(),
-        wartui_proto::plan::MAX_NODES,
-        "and the twenty already placed keep the ranges they were given"
-    );
-}
-
-#[test]
 fn engine_reissues_assignment_with_new_epoch_when_rebooted_node_rejoins() {
     let clock = Clock::new();
     let mut engine = engine(us_config(), &clock);
@@ -2280,8 +2265,7 @@ fn engine_excludes_unpeerable_node_from_plan_when_bridge_slot_is_refused() {
     let (id, dst, _) = sent_admin(&engine.handle(heartbeat(peer(2), 2), clock.at(5)));
     assert_eq!(dst, peer(2));
 
-    // Peers are never removed, so a session that has churned through twenty nodes
-    // fills the table with far fewer alive at once.
+    // The bridge has no slot left for it.
     engine.handle(send_result(id, SendStatus::PeerTableFull, 900), clock.at(5));
     engine.handle(Event::Tick, clock.at(6));
 
@@ -2297,6 +2281,83 @@ fn engine_excludes_unpeerable_node_from_plan_when_bridge_slot_is_refused() {
     engine.handle(connected(), clock.at(7));
     engine.handle(Event::Tick, clock.at(8));
     assert!(engine.nodes().nth(2).expect("the refused node").desired.is_some());
+}
+
+/// Every peer removal in a batch.
+fn removals(batch: &ActionBatch) -> Vec<Mac> {
+    batch
+        .urgent
+        .iter()
+        .filter_map(|msg| match msg {
+            HostToBridge::RemovePeer { mac } => Some(*mac),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn engine_removes_peer_when_node_has_not_heartbeated_for_topology_timeout() {
+    let clock = Clock::new();
+    let mut engine = engine(us_config(), &clock);
+    caught_up(&mut engine, &clock);
+    let (id, _, _) = sent_admin(&engine.handle(heartbeat(NODE, 1), clock.at(1)));
+    engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(1));
+
+    let batch = engine.handle(Event::Tick, clock.at(62));
+    assert_eq!(removals(&batch), vec![NODE]);
+    assert!(removals(&engine.handle(Event::Tick, clock.at(63))).is_empty(), "removed once");
+    assert_eq!(counters(&engine).peers_evicted, 1);
+}
+
+#[test]
+fn engine_readmits_refused_node_when_stale_peer_is_evicted() {
+    let clock = Clock::new();
+    let mut engine = engine(us_config(), &clock);
+    caught_up(&mut engine, &clock);
+    let (first, _, _) = sent_admin(&engine.handle(heartbeat(peer(0), 1), clock.at(1)));
+    engine.handle(send_result(first, SendStatus::AckOk, 900), clock.at(1));
+    let (second, dst, _) = sent_admin(&engine.handle(heartbeat(peer(1), 1), clock.at(2)));
+    assert_eq!(dst, peer(1));
+    engine.handle(send_result(second, SendStatus::PeerTableFull, 900), clock.at(2));
+
+    // `peer(0)` falls silent while the refused node keeps heartbeating.
+    for (beat, at) in [(2, 30), (3, 60)] {
+        engine.handle(heartbeat(peer(1), beat), clock.at(at));
+    }
+    let refused = engine.nodes().find(|node| node.mac == peer(1)).expect("the refused node");
+    assert!(!engine.is_assignable(refused, clock.at(60)));
+
+    let batch = engine.handle(Event::Tick, clock.at(62));
+    assert_eq!(removals(&batch), vec![peer(0)]);
+    let readmitted = engine.nodes().find(|node| node.mac == peer(1)).expect("the refused node");
+    assert!(engine.is_assignable(readmitted, clock.at(62)));
+    assert!(readmitted.desired.is_some());
+}
+
+#[test]
+fn engine_skips_peer_removal_when_bridge_announced_since_last_send() {
+    let clock = Clock::new();
+    let mut engine = engine(us_config(), &clock);
+    caught_up(&mut engine, &clock);
+    let (id, _, _) = sent_admin(&engine.handle(heartbeat(NODE, 1), clock.at(1)));
+    engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(1));
+
+    // A bridge announcing itself has an empty peer table, so there is nothing to remove.
+    engine.handle(connected(), clock.at(2));
+    assert!(removals(&engine.handle(Event::Tick, clock.at(62))).is_empty());
+    assert_eq!(counters(&engine).peers_evicted, 0);
+}
+
+#[test]
+fn engine_skips_peer_removal_for_node_never_sent_to() {
+    let clock = Clock::new();
+    let mut engine = engine(us_config(), &clock);
+    // Not caught up, so the heartbeat is no admin window and nothing is sent.
+    let batch = engine.handle(heartbeat(NODE, 1), clock.at(1));
+    assert!(batch.urgent.is_empty());
+
+    assert!(removals(&engine.handle(Event::Tick, clock.at(62))).is_empty());
+    assert_eq!(counters(&engine).peers_evicted, 0);
 }
 
 // The bridge holds what it hears while no host is attached, so a fresh connection

@@ -30,7 +30,7 @@ use wartui_core::position::PositionSource;
 use wartui_core::record::AdminOutcome;
 use wartui_proto::air::RecordKind;
 use wartui_proto::link::{LoopPhase, Mac, ResetCause};
-use wartui_proto::plan::{self, ChannelPool, ChannelSet, MAX_NODES, Radio, SCAN_CHANNELS};
+use wartui_proto::plan::{self, ChannelPool, ChannelSet, Radio, SCAN_CHANNELS};
 
 use crate::config;
 use crate::run::PoolArg;
@@ -398,16 +398,6 @@ impl Ui {
         let assigned = if holds { None } else { Some(target) };
         let mut said = match commands.try_send(Command::AssignBle { mac: assigned }) {
             Ok(()) if holds => format!("{}: bluetooth off on its next heartbeat", mac(&target)),
-            // The scan arrives as an assignment, so a fleet with no plan has nothing
-            // for it to arrive in: above twenty nodes the planner refuses the whole
-            // fleet, and "on its next heartbeat" would never come true. A surplus
-            // node inside a plan is not this case — more nodes than the pool has
-            // channels for leaves one undealt, and giving that one the scan deals it
-            // the empty share the flag travels in, so it is told on its next
-            // heartbeat like any other.
-            Ok(()) if snapshot.plan.is_none() => {
-                format!("{}: bluetooth, once it is in a plan", mac(&target))
-            }
             Ok(()) => format!("{}: bluetooth on its next heartbeat", mac(&target)),
             Err(_) => {
                 self.say("the engine is not accepting commands".to_owned(), snapshot);
@@ -722,7 +712,6 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot) {
 fn planning(snapshot: &Snapshot) -> Span<'static> {
     let text = match snapshot.plan {
         Some(plan) => format!("{} of {}", plan.node_count(), snapshot.nodes.len()),
-        None if snapshot.assignable > MAX_NODES => "too many nodes".to_owned(),
         None if snapshot.alive > 0 => "no node it can drive".to_owned(),
         None => "no nodes detected".to_owned(),
     };
@@ -1217,18 +1206,7 @@ fn faults(snapshot: &Snapshot) -> Vec<String> {
         faults.push(format!("{} assignments acknowledged but not adopted", c.admin_unadopted));
     }
     if c.peer_table_full > 0 {
-        faults.push(format!("peer table full: more than {MAX_NODES} nodes"));
-    }
-    // The planner gives up rather than cut the pool among nodes that will never
-    // hear the result; what is out there stays out there. Counted against
-    // `assignable`, the list the planner is handed — a fleet of thirty of which
-    // nineteen are ours partitions perfectly well.
-    if snapshot.plan.is_none() && snapshot.assignable > MAX_NODES {
-        faults.push(format!(
-            "{} nodes alive: over the {MAX_NODES} wartui supports, so the fleet is no longer \
-             being partitioned",
-            snapshot.assignable
-        ));
+        faults.push("peer table full".to_owned());
     }
     // Channels that went into no share. The planner leaving them out is right and
     // completely invisible, since what remains is an ordinary partition of the part
@@ -1545,6 +1523,7 @@ mod tests {
                 admin_failed: 1,
                 admin_unadopted: 0,
                 peer_table_full: 0,
+                peers_evicted: 0,
                 replans: 0,
                 batches_lost: 0,
                 duplicate_batches: 0,
@@ -2172,8 +2151,7 @@ mod tests {
 
     #[test]
     fn view_warns_no_drivable_nodes_when_all_nodes_are_refused_peer_slots() {
-        // Every node heartbeating, none reachable — a fleet that has outgrown
-        // the bridge's twenty peer slots, so there is nothing to partition.
+        // Every node heartbeating, none reachable, so there is nothing to partition.
         let mut snapshot = busy();
         snapshot.plan = None;
         snapshot.nodes = vec![refused(0x21), refused(0x22), refused(0x23)];
@@ -2188,13 +2166,10 @@ mod tests {
     }
 
     #[test]
-    fn ui_displays_plan_dependency_notice_when_assigning_ble_on_fleet_without_plan() {
+    fn ui_displays_next_heartbeat_notice_when_assigning_ble_to_surplus_node() {
         // A node the planner dealt nothing is still in the plan, so giving it the scan
         // deals it the empty share the flag travels in and it hears on its next
-        // heartbeat like any other. The wait is for a fleet with no plan at all, where
-        // `replan` sends nothing to anybody — and that node may well be holding an
-        // assignment from when the fleet was smaller, so what it holds says nothing
-        // about whether the flag can reach it.
+        // heartbeat like any other.
         let mut snapshot = busy();
         snapshot.plan = plan_for(ChannelPool::Us, &[Job::Wifi(Radio::TwoPointFour); 12]);
         let surplus = snapshot
@@ -2209,18 +2184,6 @@ mod tests {
         assert!(rx.try_recv().is_ok(), "the command goes out either way");
         let notice = ui.notice(snapshot.now_ms).expect("a notice");
         assert!(notice.contains("on its next heartbeat"), "got {notice}");
-
-        let mut planless = snapshot.clone();
-        planless.plan = None;
-        let holder = planless
-            .nodes
-            .iter()
-            .position(|n| n.assignable && n.state.confirmed.is_some())
-            .expect("a node still holding what it was given");
-        let mut ui = Ui { selected: holder, ..Default::default() };
-        ui.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE), &planless, &tx);
-        let notice = ui.notice(planless.now_ms).expect("a notice");
-        assert!(notice.contains("once it is in a plan"), "got {notice}");
     }
 
     #[test]
@@ -2459,16 +2422,6 @@ mod tests {
     fn fleet_header(screen: &str) -> String {
         let header = |line: &&str| line.contains("rssi") && line.contains("beats");
         screen.lines().find(header).unwrap_or_default().to_owned()
-    }
-
-    #[test]
-    fn view_warns_partitioning_has_stopped_when_fleet_exceeds_max_nodes() {
-        let mut snapshot = busy();
-        snapshot.plan = None;
-        snapshot.assignable = MAX_NODES + 1;
-        let mut terminal = Terminal::new(TestBackend::new(200, 40)).expect("test backend");
-        terminal.draw(|frame| draw(frame, &snapshot, &mut Ui::default())).expect("drawing");
-        assert!(terminal.backend().to_string().contains("no longer"));
     }
 
     #[test]

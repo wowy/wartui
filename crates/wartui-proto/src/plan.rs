@@ -40,8 +40,7 @@ pub const NUM_SCAN_CHANNELS: u8 = 42;
 /// The largest fleet wartui supports.
 ///
 /// Twenty, because that is how many peers an ESP-NOW radio can hold, and a node
-/// this host cannot address is not one it can drive. Anything above twenty is
-/// unsupported rather than degraded.
+/// this host cannot address is not one it can drive.
 pub const MAX_NODES: usize = 20;
 
 /// The channel every node returns to in order to speak to the controller.

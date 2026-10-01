@@ -395,14 +395,14 @@ wartui run --db drive.db --lat 37.7749 --lon -122.4194
 Rows name nodes by chip and last two address octets: `C5 57:84`, `C6 9D:24`. The chip comes from the
 band its heartbeats announce, so a node not yet heartbeating shows `—`.
 
-| State          | Meaning                                                                                                                                                |
-|----------------|--------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `alive`        | Heartbeating, so it can be given channels                                                                                                              |
-| `stale`        | Still being heard, but not heartbeating — most often Bluetooth coexistence on the node holding the radio through its admin window                      |
-| `no heartbeat` | Seen, but has never completed a sweep                                                                                                                  |
-| `no admin ack` | An assignment went out and its radio did not answer — nearly always Bluetooth, see [How channels are assigned](#how-channels-are-assigned)             |
-| `refused`      | The bridge would not transmit it — nearly always a full peer table. Its heartbeats are still arriving; what is missing is a slot to address it through |
-| `rebooted xN`  | Its heartbeat counter went backwards, or its epoch went back to 0, so it has forgotten any assignment; wartui re-issues under a fresh epoch            |
+| State          | Meaning                                                                                                                                     |
+|----------------|---------------------------------------------------------------------------------------------------------------------------------------------|
+| `alive`        | Heartbeating, so it can be given channels                                                                                                   |
+| `stale`        | Still being heard, but not heartbeating — most often Bluetooth coexistence on the node holding the radio through its admin window           |
+| `no heartbeat` | Seen, but has never completed a sweep                                                                                                       |
+| `no admin ack` | An assignment went out and its radio did not answer — nearly always Bluetooth, see [How channels are assigned](#how-channels-are-assigned)  |
+| `refused`      | The bridge's peer table is full                                                                                                             |
+| `rebooted xN`  | Its heartbeat counter went backwards, or its epoch went back to 0, so it has forgotten any assignment; wartui re-issues under a fresh epoch |
 
 The `channels` column shows where an assignment stands
 ([How channels are assigned](#how-channels-are-assigned)):
@@ -416,16 +416,11 @@ The `channels` column shows where an assignment stands
 
 A `stale`, `refused`, or `no heartbeat` node is out of the plan: nothing sent would reach it, or its
 band is unknown, so its share might be nobody's. `b` on one says which state it is, because the fix
-differs: wait for a heartbeat, clear the peer table, or find out why heartbeats stopped.
+differs: wait for a heartbeat, or find out why heartbeats stopped.
 
 `stale` and `no heartbeat` are deliberately distinct from silence and from each other. wartui keeps
 two clocks, so a node that streams observations but loses heartbeats doesn't age out and churn the
 whole fleet's topology.
-
-**`refused` rarely means over twenty nodes.** The bridge never removes a peer, so a long session
-fills slots with departed nodes, and a fleet of three can run out. The table empties on every boot
-and the host clears refusals when a bridge announces itself, so try `wartui reset` or a replug
-before counting nodes. Meanwhile the rest of the fleet covers the refused node's share.
 
 **An `alive` node gone quiet is usually fine.** A node reports each address once and holds it back,
 so a stationary node falls silent after reporting everything in range. That memory lives on the node
@@ -433,11 +428,10 @@ and survives into your next session. A held address is reported again five minut
 reported, or sooner if heard at least 10 dB louder. `r`/`R` clear it without a reboot, and a change
 of share or Bluetooth role empties it. `crates/wartui-proto/src/dedup.rs` explains why.
 
-| Header says                       | Meaning                                                                               |
-|-----------------------------------|---------------------------------------------------------------------------------------|
-| `auto — nothing heartbeating yet` | No node is heartbeating                                                               |
-| `auto — no node it can drive`     | Nodes are alive, but none is assignable                                               |
-| `auto — too many nodes`           | Over twenty: the planner stops re-cutting; assignments stay and capture is unaffected |
+| Header says                       | Meaning                                 |
+|-----------------------------------|-----------------------------------------|
+| `auto — nothing heartbeating yet` | No node is heartbeating                 |
+| `auto — no node it can drive`     | Nodes are alive, but none is assignable |
 
 The footer shows faults only once they happen, so a clean run has a clean footer:
 

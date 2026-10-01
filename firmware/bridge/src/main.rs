@@ -18,7 +18,8 @@
 //!
 //! [`HostToBridge::SendEspNow`] answers with the *transmit-callback* status rather
 //! than the enqueue result, which is what lets the host tell a delivered
-//! assignment from a hopeful one. Peers are added on demand and never removed.
+//! assignment from a hopeful one. Peers are added on demand and removed when the host
+//! says so (`RemovePeer`).
 //!
 //! `README.md` has the flashing commands and the esp-hal version wall.
 #![no_std]
@@ -991,8 +992,8 @@ fn transmit(
             // peer `esp-radio` registers at init (`esp_now/mod.rs:726`). That slot
             // is worth more to a twentieth node: this bridge only ever *receives*
             // broadcasts, and ESP-NOW delivers a received frame whether or not its
-            // sender is a peer. So give it up and retry once. A second refusal
-            // means a fleet above `MAX_NODES`, which the host reports as such.
+            // sender is a peer. So give it up and retry once. A second refusal is a
+            // full table.
             Err(EspNowError::Error(esp_radio::esp_now::Error::PeerListFull)) => {
                 if manager.remove_peer(&BROADCAST).is_err() {
                     return SendStatus::PeerTableFull;

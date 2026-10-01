@@ -202,9 +202,9 @@ is here rather than only in a `//!`.
   peer slot for. `None` means only that nothing but a sighting has been heard from that address
   yet — an ordinary few seconds in the life of a node about to be perfectly drivable. A share cut
   for a node whose band nothing has confirmed is a share that may be nobody's.
-- **Twenty nodes is the hard maximum** (`plan::MAX_NODES`) — an ESP-NOW radio's peer table. Above
-  it, capture continues and the planner refuses to re-cut rather than partitioning among nodes the
-  bridge cannot address.
+- **Twenty nodes maximum** (`plan::MAX_NODES`), the ESP-NOW peer table. The host removes a node's
+  peer after a minute without a heartbeat (`topology_timeout`). More than twenty heard within a
+  minute is unsupported.
 - **An assignment is believed only on a MAC-layer ack** (`SendStatus::AckOk` from the transmit
   callback), never on a successful enqueue — and an ack is not adoption. Every heartbeat carries the
   epoch the node holds, or 0 for none, so the host can tell whether the node actually took the frame
