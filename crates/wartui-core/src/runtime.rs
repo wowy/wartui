@@ -1,7 +1,9 @@
 //! Wiring: link in, engine in the middle, store and UI out.
 //!
 //! The only place that reads a clock, and the only place that decides *when* things
-//! happen; [`crate::engine::FleetEngine`] decides what happens.
+//! happen; [`crate::engine::FleetEngine`] decides what happens. It reads tokio's clock, so
+//! a paused test drives the engine and the simulator on one clock, which
+//! `FleetEngine::note_arrival` needs: it compares bridge-elapsed against host-elapsed time.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -47,7 +49,10 @@ pub const PANEL_REPAINT: Duration = Duration::from_secs(10);
 /// The current time, in both forms the engine needs.
 #[must_use]
 pub fn now() -> Now {
-    Now { mono: Instant::now(), unix_ms: chrono::Utc::now().timestamp_millis() }
+    Now {
+        mono: tokio::time::Instant::now().into_std(),
+        unix_ms: chrono::Utc::now().timestamp_millis(),
+    }
 }
 
 /// How many operator instructions may be waiting at once.

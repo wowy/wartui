@@ -21,7 +21,7 @@ use wartui_core::engine::{EngineConfig, FleetEngine, Snapshot, StoreStats};
 use wartui_core::record::AdminOutcome;
 use wartui_core::runtime::{drive, now};
 use wartui_core::store::{SessionInfo, Store, StoreConfig, open_readonly};
-use wartui_proto::plan::{ChannelPool, ChannelSet};
+use wartui_proto::plan::{ADMIN_WAIT_MS, ChannelPool, ChannelSet};
 
 /// How much faster than real time the fake fleet runs.
 const SPEED: u32 = 60;
@@ -110,9 +110,14 @@ async fn settle(path: &Path, nodes: u8) -> Vec<ChannelSet> {
     assert_eq!(ChannelSet::from_bits(u64::try_from(stored).expect("a 40-bit mask")), channels[0]);
     assert!(!ble, "nobody asked for the Bluetooth scan");
     // The number that settles whether a bridge this dumb can hit a 100 ms
-    // window. Measured on the bridge's own clock, from the heartbeat that
-    // opened the window to the transmit callback.
-    assert!(latency.is_some(), "and carries the latency the whole design turns on");
+    // window. Measured on the simulated bridge's clock, from the heartbeat that
+    // opened the window to the transmit callback; a paused test holds that
+    // clock still between the two, so host scheduling cannot reach it.
+    let latency = latency.expect("and carries the latency the whole design turns on");
+    assert!(
+        (0..=i64::from(ADMIN_WAIT_MS) * 1000).contains(&latency),
+        "{latency} us is inside the admin window"
+    );
 
     let epoch: i64 = conn
         .query_row(
@@ -126,7 +131,7 @@ async fn settle(path: &Path, nodes: u8) -> Vec<ChannelSet> {
     channels
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(start_paused = true)]
 async fn assignment_flow_reports_new_epoch_when_second_node_narrows_the_share() {
     let dir = tempfile::tempdir().expect("temp dir");
 
