@@ -17,8 +17,6 @@ use wartui_proto::link::{
     decode_frame, encode_frame,
 };
 
-use wartui_proto::stall::TX_STALL_TIMEOUT_MS;
-
 use crate::ports::{self, BRIDGE_PID, PortCandidate};
 use crate::remember::BridgeMemory;
 use crate::{BridgeInfo, LinkEvent, LinkHandle, TransportError, link_pair};
@@ -30,7 +28,7 @@ const BAUD: u32 = 921_600;
 const READ_TIMEOUT: Duration = Duration::from_millis(50);
 
 /// How long one tick of the patience below is. The first tick of a tokio interval
-/// fires immediately, which is when the first `Identify` goes out.
+/// fires immediately, which is when the single `Identify` goes out.
 const IDENTIFY_INTERVAL: Duration = Duration::from_millis(500);
 
 /// How long to wait for a board when there is no other to try, in ticks of
@@ -55,21 +53,6 @@ const SETTLE_TICKS: u32 = 12;
 /// Passing over the real bridge costs a retry rather than a failure, which is the
 /// trade [`SETTLE_TICKS`] explains.
 const PROBE_TICKS: u32 = 3;
-
-/// The tick on which a board known to be the bridge is asked a second time: the
-/// first whose ask goes out after [`TX_STALL_TIMEOUT_MS`], 3.5 s in. Tick `n` fires
-/// `n - 1` intervals after the open, because the first fires at once.
-///
-/// Past the timeout so that a bridge whose transmit endpoint has wedged has already
-/// refused bytes for that long when the second frame decodes, and its `StallWatch`
-/// reboots it on that frame. [`connect`]'s `identify` arm has the rest.
-const SECOND_ASK_TICK: u32 = {
-    let interval = IDENTIFY_INTERVAL.as_millis() as u64;
-    (TX_STALL_TIMEOUT_MS / interval) as u32 + 2
-};
-
-// Asked inside a known bridge's patience, or it is never asked at all.
-const _: () = assert!(SECOND_ASK_TICK <= SETTLE_TICKS, "the second ask lands after giving up");
 
 /// How many undecodable frames from an unproven board before it is passed over.
 ///
@@ -514,7 +497,6 @@ async fn sweep(
             &candidate.path,
             if alone { SETTLE_TICKS } else { PROBE_TICKS },
             alone,
-            is_known_bridge(candidate.mac(), remembered, settled),
             &state,
             &transport.memory,
             plumbing,
@@ -615,21 +597,10 @@ struct Attempt {
 /// is what keeps there from being two places to get [`Shutdown`] wrong. A probe
 /// that wins needs no handing over, because the `identify` arm below is already
 /// gated off once a board has announced itself.
-///
-/// `proven` is whether there was nowhere else to go, which buys the board patience
-/// and the advice to reset it. `known_bridge` is whether it is already known to run
-/// bridge firmware, which buys it a second `Identify`. They are not one fact: a board
-/// named on the command line, or the only one attached, is `proven` and may well be
-/// a node.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "what one attempt is told, read once at the call site"
-)]
 async fn connect(
     path: &str,
     patience: u32,
     proven: bool,
-    known_bridge: bool,
     state: &Arc<Attempt>,
     memory: &BridgeMemory,
     plumbing: &mut crate::LinkPlumbing,
@@ -699,8 +670,7 @@ async fn connect(
 
     // A bridge announces itself at boot, and the host is rarely watching at that
     // moment: unplugging the dongle is not part of restarting the TUI. So we ask —
-    // **once for any board not known to be the bridge, twice for one that is, and
-    // then only wait.**
+    // **exactly once, and then only wait.**
     //
     // Once, because a board that is not reading its USB endpoint absorbs exactly
     // one packet: the ESP32's USB Serial/JTAG takes one into its OUT FIFO and NACKs
@@ -711,24 +681,18 @@ async fn connect(
     // board relenting. Nothing can interrupt it: the thread stays alive in the
     // kernel, and because a process cannot exit while one of its threads is in
     // there, `wartui status` pointed at a node hung for half a minute after
-    // printing its answer. One frame never reaches that. A board merely named, or
-    // the only one attached, is no exception: either may be a node.
+    // printing its answer. One frame never reaches that.
     //
-    // Once is enough to be answered. A frame written to an enumerated board is
-    // delivered: if its main loop has not started draining the link yet, our
-    // `Identify` waits in that same FIFO and is read when it does. The patience
-    // below is for the *answer* to take its time.
+    // Once is also enough. A frame written to an enumerated board is delivered:
+    // if its main loop has not started draining the link yet, our `Identify` waits
+    // in that same FIFO and is read when it does. The patience below is for the
+    // *answer* to take its time, not for the asking to be repeated.
     //
-    // It is not enough to be rebooted. A bridge whose transmit endpoint has wedged
-    // reboots itself only when a host frame decodes *after* the stall began
-    // (`wartui_proto::stall::StallWatch`), and the one `Identify` is what begins it
-    // — so a single ask can never trip the watch, and `wartui status` would wait out
-    // its patience against a bridge that would have cleared itself. The board
-    // remembered as the bridge, or the one this run already settled on, is known to
-    // read its endpoint, so it is asked again at [`SECOND_ASK_TICK`], once that
-    // stall has lasted [`TX_STALL_TIMEOUT_MS`]. That ask goes out only inside
-    // [`SETTLE_TICKS`]: a known bridge probed beside other boards is not waited on
-    // long enough to reach it.
+    // Once is enough for a bridge whose transmit endpoint has wedged, too: its
+    // `StallWatch` (`wartui_proto::stall`) reboots it 3 s after a host frame that
+    // nothing has answered, so this one `Identify` is what clears it. A board given
+    // [`SETTLE_TICKS`] hears the `Ready` behind that reboot before it gives up; a
+    // probe gives up first, and the next connection hears it.
     let mut identify = tokio::time::interval(IDENTIFY_INTERVAL);
     let mut waited = 0_u32;
 
@@ -773,13 +737,10 @@ async fn connect(
                     });
                 }
                 waited += 1;
-                // The first tick of a tokio interval fires immediately, so the first
-                // ask goes out as soon as the port is open. See above for why there
-                // is a second only for a board known to be the bridge.
-                let heard = state.decoded.load(Ordering::Relaxed);
-                if asks_on(waited, known_bridge, heard)
-                    && write_tx.send(HostToBridge::Identify).is_err()
-                {
+                // The first tick of a tokio interval fires immediately, so this is
+                // the one ask, sent as soon as the port is open. See above for why
+                // there is never a second.
+                if waited == 1 && write_tx.send(HostToBridge::Identify).is_err() {
                     break Err("writer stopped".to_owned());
                 }
             }
@@ -818,8 +779,8 @@ async fn connect(
 ///
 /// It does **not** make that close safe, and cannot: a `tcflush` empties the tty's
 /// own queue, and the packet the USB layer has already accepted is past it. Not
-/// writing a second packet is what keeps the close short, which is why [`connect`]
-/// asks a board not known to be the bridge only once.
+/// writing a second packet is what keeps the close short, which is [`connect`]'s
+/// single `Identify`.
 struct Shutdown {
     state: Arc<Attempt>,
     port: Box<dyn serialport::SerialPort>,
@@ -1040,22 +1001,6 @@ fn silence_disowns_it(
     alone && opened && remembered.is_some() && candidate.mac() == remembered
 }
 
-/// Whether a board is already known to run bridge firmware, and so to read its
-/// USB endpoint: it is the board remembered as the bridge, or the one this run
-/// settled on. Nothing else counts — not being named, and not being alone — because
-/// a second frame into a board that does not read costs a thirty-second `close`.
-fn is_known_bridge(board: Option<Mac>, remembered: Option<Mac>, settled: Option<Mac>) -> bool {
-    board.is_some() && (board == remembered || board == settled)
-}
-
-/// Whether tick `waited` of a connection sends an `Identify`.
-///
-/// The first tick always does. [`SECOND_ASK_TICK`] does for a known bridge that has
-/// sent nothing that decoded yet; one that has is plainly not wedged.
-fn asks_on(waited: u32, known_bridge: bool, heard: bool) -> bool {
-    waited == 1 || (waited == SECOND_ASK_TICK && known_bridge && !heard)
-}
-
 /// Whether a `Ready` came from a life that started after the last one seen.
 ///
 /// The first is always a new life. After that, the only thing separating a reboot
@@ -1067,7 +1012,7 @@ fn is_a_new_life(uptime_ms: u32, last_seen: Option<u32>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{SECOND_ASK_TICK, asks_on, is_a_new_life, is_known_bridge, silence_disowns_it};
+    use super::{is_a_new_life, silence_disowns_it};
     use crate::ports::{BRIDGE_PID, ESPRESSIF_VID, PortCandidate, candidate, parse_mac};
 
     const BRIDGE_MAC: &str = "10:BD:A3:EC:44:C0";
@@ -1127,54 +1072,6 @@ mod tests {
         // Named or not, it was opened, heard out in full and said nothing, which is
         // the same evidence an unnamed run forgets it on.
         assert!(silence_disowns_it(true, true, parse_mac(BRIDGE_MAC), &board(BRIDGE_MAC)));
-    }
-
-    #[test]
-    fn serial_link_asks_second_time_when_board_is_remembered_bridge() {
-        let known = is_known_bridge(parse_mac(BRIDGE_MAC), parse_mac(BRIDGE_MAC), None);
-        assert!(known);
-        assert!(asks_on(SECOND_ASK_TICK, known, false));
-    }
-
-    #[test]
-    fn serial_link_asks_second_time_when_board_is_settled_bridge() {
-        let known = is_known_bridge(parse_mac(BRIDGE_MAC), None, parse_mac(BRIDGE_MAC));
-        assert!(known);
-        assert!(asks_on(SECOND_ASK_TICK, known, false));
-    }
-
-    #[test]
-    fn serial_link_asks_once_when_named_board_is_not_known() {
-        // Named, so `proven` — and possibly a node, which a second frame would cost
-        // a thirty-second `close`.
-        let known = is_known_bridge(parse_mac(NODE_MAC), parse_mac(BRIDGE_MAC), None);
-        assert!(!known);
-        assert!(!asks_on(SECOND_ASK_TICK, known, false));
-        assert!(!is_known_bridge(None, None, None), "a path reports no address");
-    }
-
-    #[test]
-    fn serial_link_asks_once_when_board_is_sweep_candidate() {
-        let known = is_known_bridge(parse_mac(NODE_MAC), None, None);
-        assert!(!known);
-        assert!(asks_on(1, known, false), "every board is asked once, at once");
-        assert!((2..=20).all(|tick| !asks_on(tick, known, false)));
-    }
-
-    #[test]
-    fn serial_link_asks_once_when_known_bridge_has_already_answered() {
-        assert!(!asks_on(SECOND_ASK_TICK, true, true));
-    }
-
-    #[test]
-    fn serial_link_asks_second_time_only_after_stall_timeout_when_board_is_known() {
-        // Tick `n` fires `n - 1` intervals in; the second ask must decode after the
-        // bridge's stall has lasted its timeout, and on no other tick.
-        let at_ms = u64::from(SECOND_ASK_TICK - 1) * super::IDENTIFY_INTERVAL.as_millis() as u64;
-        assert_eq!(at_ms, 3_500);
-        assert!(at_ms > wartui_proto::stall::TX_STALL_TIMEOUT_MS);
-        let asks = (1..=super::SETTLE_TICKS).filter(|&tick| asks_on(tick, true, false)).count();
-        assert_eq!(asks, 2);
     }
 
     #[test]

@@ -113,13 +113,17 @@ only when the USB host reads the FIFO. If that read never lands, nothing on the 
 
 So the firmware notices and reboots itself, within about three seconds.
 `wartui_proto::stall::StallWatch` times how long the endpoint has refused bytes _while somebody was
-waiting for them_, and needs the host to have spoken both recently and since the stall began — which
-is what keeps a bridge on a bench with no host attached quiet for ever, and keeps it from resetting
-every time an operator closes a window. A host's first `Identify` is what starts the clock on a
-bridge that wedged before it connected, so `wartui` asks a board it already knows to be the bridge a
-second time, 3.5 s in, and the bridge reboots on that frame. The reset _is_ the message, since every way of explaining
-would go out through the path that is broken; the `Ready` behind it says `TxStalled`. The rule lives
-in `wartui-proto` rather than here so that it is tested in microseconds instead of on a bench.
+waiting for them_: a host frame decoded since the last byte moved, that host still present, and three
+seconds of refusal since both. No host frame is what keeps a bridge on a bench with no host attached
+quiet for ever, and a host that read what it asked for leaves no unanswered frame behind, which keeps
+the bridge from resetting every time an operator closes a window. The single `Identify` `wartui`
+sends on connecting is enough to clear one that wedged beforehand. The reset _is_ the message, since
+every way of explaining would go out through the path that is broken; the `Ready` behind it says
+`TxStalled`. The rule lives in `wartui-proto` rather than here so that it is tested in
+microseconds instead of on a bench. That `Ready` follows ~1.5 KB of ROM banner with no `0x00` in it,
+which overflows the host's frame buffer and would take the first frame with it, so the bridge writes
+a lone `0x00` at boot ahead of everything (`Outbox::delimit`): an empty frame every receiver already
+skips, so not a wire change.
 
 Reach for `wartui reset --bridge <board>` before `espflash`: the receive path is alive in this state,
 so the bridge reboots on being asked, and a software reset keeps the device path where an `espflash`

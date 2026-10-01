@@ -694,3 +694,36 @@ temporary build per firmware. The node's `reboot()` is compile-checked for both
 its chips and has not been run on hardware — a node that fails to come back
 reads as `no heartbeat`, which is also what a node out of range reads as, so it
 is the quietest of the four and the one most worth remembering is untested.
+
+## One ask, since 7989ac2
+
+Measured on 2026-10-01. Since 7989ac2 the host sends exactly one `Identify` per connection, and
+that frame both armed the stall and was the last host frame the bridge saw — so the clause needing a
+frame decoded *after* the stall began could never hold, and a bridge wedged before the host
+connected was never cleared. A fault build whose `UsbSink::write_byte` returns `WouldBlock` from
+20 s after boot confirmed it: `wartui status --bridge` against that board got no answer in 5 s, from
+both the host before #126 and the one #126 merged, whose second ask a `status --bridge` never sends.
+
+The rule is now "a host frame decoded since the last byte moved, and 3 s of refusal since both",
+timed from the first such frame. A quitting host read what it asked for, so it leaves no unanswered
+frame behind and the disconnect case stays quiet; the bench and slow-host cases are unchanged. The
+cost is a host that sends a frame and leaves before any byte moves, whose bridge reboots three
+seconds later while that frame is inside `HOST_PRESENT_WINDOW`.
+
+With the new rule the bridge did reboot itself, but the host still saw nothing: a raw read of the
+port showed why. The reboot landed at 3.006 s, then ~1.5 KB of ROM and bootloader banner with no
+`0x00` anywhere in it, then the 27-byte `Ready` at 3.407 s. `FrameAccumulator` reads everything up to
+a terminator as one frame, so the banner overflowed it and `Ready`'s own terminator closed the
+overflowed run — the first frame after any reset is lost to the banner, silently, which is what
+`finish_radio_setup`'s comment had been describing from the wrong side. The bridge now writes a lone
+`0x00` at boot (`Outbox::delimit`), an empty frame every receiver already skips.
+
+Same fault build, with the 20 s fault armed from each boot's own start rather than from the absolute
+systimer reading — whether a software reset restarts the systimer was not checked, and the banner
+alone explains the first build's silence, so this only rules the question out:
+
+| host | `wartui status --bridge A0:F2:62:87:00:08` |
+|---|---|
+| before #126 | answered in 3.41 s: software reset, *its transmit path had stopped draining*, uptime 0 s |
+| this branch | answered in 3.41 s, the same |
+| this branch, no `--bridge` (sweep) | answered in 3.41 s — the bridge's stale pre-wedge packet decoded, and a board that has produced a frame is never given up on |

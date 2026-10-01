@@ -35,6 +35,12 @@
 //! at a terminator: without one the host would glue the fragment to the whole of
 //! the next frame and fail the checksum on both.
 //!
+//! The same lone `0x00` is what [`Outbox::delimit`] queues at boot. A reset prints
+//! the ROM banner down this endpoint with no `0x00` in it, so without a terminator
+//! of our own the host reads banner and first frame as one overlong frame and
+//! drops both. A lone `0x00` is an empty frame, which every receiver already
+//! skips, so this is not a wire change.
+//!
 //! The count surfaces in [`BridgeToHost::Status`] as `dropped_tx`, where a non-zero
 //! value means frames arrived faster than the host took them: a host not reading,
 //! or a burst bigger than the bulk ring plus what USB drains while it arrives.
@@ -175,8 +181,8 @@ pub struct Outbox {
     bulk: Ring<BULK_DEPTH>,
     current: Option<Source>,
     cursor: usize,
-    /// A frame was abandoned with bytes already sent, and the terminator that
-    /// closes off the fragment has not been accepted by the FIFO yet.
+    /// A lone terminator is owed ahead of the next frame: to close off a frame
+    /// abandoned part-way onto the wire, or because [`Outbox::delimit`] asked.
     orphan: bool,
     unflushed: bool,
     dropped: u32,
@@ -244,6 +250,18 @@ impl Outbox {
             self.dropped = self.dropped.saturating_add(1);
         }
         queued.is_ok()
+    }
+
+    /// Owe the host a lone `0x00` ahead of the next frame.
+    ///
+    /// Called once at boot, before anything is queued: the ROM banner a reset
+    /// prints carries no `0x00`, so it would otherwise run into the first frame
+    /// and take it down with it. A frame already part-way out needs nothing,
+    /// since its own terminator follows it.
+    pub const fn delimit(&mut self) {
+        if self.cursor == 0 {
+            self.orphan = true;
+        }
     }
 
     /// Evict the oldest frame not yet started from a full ring, to make room for
@@ -662,6 +680,38 @@ mod tests {
         assert_eq!(sink.out[3], 0x00, "the fragment should be terminated");
         assert_eq!(bodies(&received(&sink.out)), [b'b', b'c']);
         assert_eq!(outbox.dropped(), 1);
+    }
+
+    #[test]
+    fn outbox_writes_lone_terminator_before_next_frame_when_delimited() {
+        let mut outbox = Outbox::new();
+        outbox.delimit();
+        outbox.send(&ready());
+        let mut sink = Fake::open();
+        outbox.pump(&mut sink);
+
+        assert_eq!(sink.out[0], 0x00, "the delimiter goes first");
+        // Behind a banner with no terminator in it, which overflows the host's
+        // buffer, the delimiter is what lets `Ready` through.
+        let mut stream = std::vec![b'x'; 1500];
+        stream.extend_from_slice(&sink.out);
+        let frames = received(&stream);
+        assert!(matches!(frames[..], [BridgeToHost::Ready { .. }]));
+    }
+
+    #[test]
+    fn outbox_keeps_in_flight_frame_whole_when_delimited_mid_write() {
+        let mut outbox = Outbox::new();
+        outbox.send(&log(0));
+        let mut sink = Fake::new(3);
+        outbox.pump(&mut sink);
+
+        outbox.delimit();
+        sink.capacity = usize::MAX;
+        outbox.pump(&mut sink);
+
+        assert_eq!(bodies(&received(&sink.out)), [b'a']);
+        assert_eq!(sink.out.iter().filter(|&&b| b == 0).count(), 1, "no extra terminator");
     }
 
     #[test]

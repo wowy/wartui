@@ -515,7 +515,9 @@ pub fn decode_frame<T: DeserializeOwned>(frame: &mut [u8]) -> Result<T, LinkErro
 ///
 /// Both ends use this. A zero byte ends a frame, so the accumulator recovers on
 /// its own from a reset banner, a half-written frame or an unplugged cable: the
-/// junk is discarded at the next terminator and the stream carries on.
+/// junk is discarded at the next terminator and the stream carries on. That
+/// terminator is the next frame's unless the sender writes one of its own first,
+/// which is why the bridge's outbox delimits once at boot.
 #[derive(Debug)]
 pub struct FrameAccumulator<const N: usize = MAX_FRAME> {
     buf: [u8; N],

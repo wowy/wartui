@@ -343,6 +343,11 @@ static OUTBOX: StaticCell<Outbox> = StaticCell::new();
 /// frame sits at `.clippy.toml`'s threshold on the C5.
 static LINK_BUF: StaticCell<[u8; LINK_CHUNK]> = StaticCell::new();
 
+/// The bridge's state, static for the reason `LINK_BUF` is: as a local of `main` it
+/// sits in the poll frame across every `.await`, and once `StallWatch` grew a third
+/// timestamp that frame passed `.clippy.toml`'s threshold on the C5.
+static BRIDGE: StaticCell<Bridge> = StaticCell::new();
+
 /// Everything that changes while the bridge runs.
 struct Bridge {
     outbox: &'static mut Outbox,
@@ -358,7 +363,7 @@ struct Bridge {
     /// Whether the USB transmit endpoint has stopped draining while a host
     /// waited, which is the one failure this firmware recovers from by itself.
     ///
-    /// The rule has been wrong twice, so it lives in [`wartui_proto::stall`].
+    /// The rule has been wrong three times, so it lives in [`wartui_proto::stall`].
     stall: StallWatch,
     /// The lines the host last sent.
     ///
@@ -508,15 +513,15 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     .expect("Wi-Fi controller");
     // The standalone fallback is 2 dBm. The host restores its configured value after
     // every connection. Set this before the split, which borrows the controller for
-    // the rest of the program, and report a failure after `Ready` below because the
-    // ROM banner swallows anything earlier.
+    // the rest of the program, and report a failure in `finish_radio_setup`, once the
+    // outbox exists to carry it.
     let tx_power = controller.set_max_tx_power(wartui_proto::plan::DEFAULT_TX_POWER_QUARTER_DBM);
     // Split rather than kept whole: `EspNowSender::send` needs `&mut`, so holding
     // the parts separately keeps a transmit from borrowing the receive path.
     let (manager, mut sender, mut receiver) = controller.esp_now().split();
 
     let now = Instant::now();
-    let mut bridge = Bridge {
+    let bridge = BRIDGE.init_with(|| Bridge {
         outbox: OUTBOX.init_with(Outbox::new),
         accumulator: FrameAccumulator::new(),
         channel: DEFAULT_CHANNEL,
@@ -530,7 +535,11 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
         panel: PANEL,
         panel_fault: None,
         tx_power: tx_power.is_ok().then_some(wartui_proto::plan::DEFAULT_TX_POWER_QUARTER_DBM),
-    };
+    });
+    // Ahead of every frame this life sends. The ROM banner a reset prints has no
+    // `0x00` in it and overflows the host's frame buffer, so without a terminator of
+    // our own it runs into the first frame — `Ready` — and the host drops both.
+    bridge.outbox.delimit();
 
     // After the radio, so a panel that refuses its init sequence cannot stop a bridge
     // from bridging, and before `announce`, so the screen is lit by the time anything
@@ -561,7 +570,7 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
 
     let mac = esp_radio::wifi::Interface::station().mac_address();
     bridge.announce(mac);
-    finish_radio_setup(&manager, &mut bridge, tx_power.is_ok());
+    finish_radio_setup(&manager, bridge, tx_power.is_ok());
 
     let link_buf = LINK_BUF.init_with(|| [0; LINK_CHUNK]);
     // True only on the pass straight after a wait the tick ended.
@@ -570,9 +579,9 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     loop {
         let mut worked = false;
         mark(LoopPhase::DrainRadio);
-        worked |= drain_radio(&receiver, &mut bridge);
+        worked |= drain_radio(&receiver, bridge);
         mark(LoopPhase::DrainLink);
-        worked |= drain_link(&mut usb_rx, &manager, &mut sender, &mut bridge, mac);
+        worked |= drain_link(&mut usb_rx, &manager, &mut sender, bridge, mac);
 
         mark(LoopPhase::Pump);
         let moved = bridge.outbox.pump(&mut sink);
@@ -586,7 +595,7 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
         {
             if let Some(screen) = screen.as_mut() {
                 mark(LoopPhase::Render);
-                worked |= screen.render(&mut bridge, mac, quiet);
+                worked |= screen.render(bridge, mac, quiet);
             }
             quiet = false;
         }
@@ -604,8 +613,7 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
         if !worked {
             mark(LoopPhase::Idle);
             let idled =
-                idle_wait(&mut receiver, &mut usb_rx, link_buf, &mut sink.tx, queued, &mut bridge)
-                    .await;
+                idle_wait(&mut receiver, &mut usb_rx, link_buf, &mut sink.tx, queued, bridge).await;
             #[cfg(feature = "t-dongle-c5")]
             {
                 quiet = matches!(idled, Idled::Quiet);
@@ -613,7 +621,7 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
             if let Idled::Read(read) = idled {
                 mark(LoopPhase::DrainLink);
                 for &byte in &link_buf[..read] {
-                    take_link_byte(byte, &manager, &mut sender, &mut bridge, mac);
+                    take_link_byte(byte, &manager, &mut sender, bridge, mac);
                 }
             }
         }
@@ -878,8 +886,9 @@ const fn peer(mac: &Mac) -> PeerInfo {
     }
 }
 
-/// The radio setup that has to wait for `Ready`, because the ROM banner swallows any
-/// frame sent before it.
+/// The radio setup whose failures are reported behind `Ready`. Not because the banner
+/// costs them anything: `main` delimits the outbox before the first frame, so none is
+/// lost to it.
 ///
 /// Out of `main` because `main` sits at `.clippy.toml`'s stack threshold on the C5,
 /// and every `Error` frame built there is another 276 bytes of its frame.
