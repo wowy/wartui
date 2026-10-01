@@ -1,8 +1,7 @@
 # wartui — the CLI and the view
 
-The clap CLI and the ratatui fleet view. Both are front ends over `wartui-core`, which draws nothing
-and parses no arguments: the fleet's behavior is decided there and tested without a terminal, and
-this crate is the conversation with the operator.
+The clap CLI and the ratatui fleet view. Both are front ends over `wartui-core`, which decides the
+fleet's behavior and is tested without a terminal.
 
 This is the operator's manual. The root [`README.md`](../../README.md) is the short version.
 
@@ -21,91 +20,67 @@ This is the operator's manual. The root [`README.md`](../../README.md) is the sh
 | `flash-fleet`  | Flash node firmware onto every attached board of one chip; see "Flashing the fleet" |
 | `flash-bridge` | Flash bridge firmware onto the bridge; see "Flashing the bridge"                    |
 
-A node broadcasts its heartbeat but unicasts its sighting batches to whichever bridge last sent it
-an admin or clear frame, so `sniff` on a second bridge on the same channel hears every node's
-heartbeats but none of their sightings — those go to the fleet's own bridge alone. If the bridge
-attached to this host is swapped for a different one mid-run, `run` re-sends every node's
-assignment so each learns the new address from that frame; the same bridge reconnecting or
-rebooting sends nothing, since every node is already addressing it correctly.
+Nodes broadcast heartbeats but unicast sighting batches to the bridge that last sent them an admin
+or clear frame. So `sniff` on a second bridge on the channel hears every heartbeat and no sightings.
+If the attached bridge is swapped mid-run, `run` re-sends every assignment so each node learns the
+new address. The same bridge reconnecting or rebooting sends nothing; nodes already address it.
 
 `run` takes:
 
-| Flag                    | Default     | What it is                                                |
-|-------------------------|-------------|-----------------------------------------------------------|
-| `--db PATH`             | dated       | Where to keep the capture                                 |
-| `--bridge PATH\|MAC`    | detected    | Which board the bridge is, by path, address or `00:08`    |
-| `--lat` `--lon` `--alt` | —           | A static position for every observation                   |
-| `--gps PATH`            | detected    | An NMEA receiver, preferred over `--lat`/`--lon`          |
-| `--no-gps`              | off         | Do not look for a receiver at all                         |
-| `--gps-baud N`          | detected    | Line rate of that receiver                                |
-| `--gps-max-age S`       | `5`         | How old a fix may be before falling back                  |
-| `--sim N`               | —           | Run a fake fleet instead of hardware                      |
-| `--sim-c6 N`            | `0`         | Make that many of them C6s, from the end of the fleet     |
-| `--record-raw`          | off         | Also keep the undecoded bytes of every frame              |
-| `--notes TEXT`          | —           | A note about this run, stored with the session            |
-| `--config PATH`         | per-OS path | Read `wartui.toml` from somewhere else; see "Config file" |
+| Flag                    | Default     | What it is                                             |
+|-------------------------|-------------|--------------------------------------------------------|
+| `--db PATH`             | dated       | Where to keep the capture; see "Exporting"             |
+| `--bridge PATH\|MAC`    | detected    | Which board the bridge is, by path, address or `00:08` |
+| `--lat` `--lon` `--alt` | —           | A static position for every observation                |
+| `--gps PATH`            | detected    | An NMEA receiver, preferred over `--lat`/`--lon`       |
+| `--no-gps`              | off         | Do not look for a receiver at all                      |
+| `--gps-baud N`          | detected    | Line rate of that receiver                             |
+| `--gps-max-age S`       | `5`         | How old a fix may be before falling back               |
+| `--sim N`               | —           | Run a fake fleet instead of hardware                   |
+| `--sim-c6 N`            | `0`         | Make that many of them C6s, from the end of the fleet  |
+| `--record-raw`          | off         | Also keep the undecoded bytes of every frame           |
+| `--notes TEXT`          | —           | A note about this run, stored with the session         |
+| `--config PATH`         | per-OS path | See "Config file"                                      |
 
-The channel pool and the transmit powers are set in `wartui.toml` or the settings modal (`c`); see
-"Config file" below.
+The channel pool and transmit powers have no flag; see "Config file". `--log-file PATH` is global;
+see "When nothing arrives".
 
-`--db` names the capture for the minute the run started — `wartui-2026-09-18-14-30.db` — so a
-directory of them sorts into the order they were made rather than being one file every run appends
-to. The date is in ISO order whatever the locale reading it: that is what makes them sort, and what
-lets `export` pick out the last one. Two runs begun inside the same minute share a name, and the
-second adds its session to the first one's file.
+### Exporting
 
-`export` takes `--db`, `--out PATH` and `--session ID`, and writes the [WiGLE v1.6
-format](https://api.wigle.net/csvFormat.html). Both ends default, so exporting the evening that just
-ended is `wartui export` and nothing else: without `--db` it opens the newest capture in the working
-directory, which is the one a finished `run` left there, and without `--out` it writes beside that
-capture under the same name — `wartui-2026-09-18-14-30.db` exports to
-`wartui-2026-09-18-14-30.csv`. A name arrived at that way is never written over, since the file it
-would replace may be the export already uploaded: `--out PATH` (short `-o`) names another, or the
-same one again to mean it, and `--out -` writes to standard output. The CSV is a view over the store
-rather than a second copy of it, so it can be re-run after a decoder fix, against a session that
-ended last week, or against one still going.
+Each run names its capture for the minute it started: `wartui-2026-09-18-14-30.db`. The date is in
+ISO order whatever the locale, so captures sort in the order they were made and `export` can pick
+the newest. Two runs begun in the same minute share the file, the second adding its session.
 
-When it finishes, `export` reports on standard error the rows written, the distinct Wi-Fi networks
-(per band) and Bluetooth devices, sightings of each, the share of sightings by position source,
-what each node heard, and the span of the capture. Every count is exact.
+`export` writes the [WiGLE v1.6 format](https://api.wigle.net/csvFormat.html):
 
-`--recapture SECONDS` (default 3600 — one hour) folds each network's sightings into windows that
-wide and writes one row per window: the strongest positioned sighting, with `FirstSeen` from the
-window's own first sighting. WDGWars' scan cooldown is one hour per user and MAC — a re-scan within
-the hour is silently skipped from scoring, though its GPS may still refine the entry — so the window
-is that rule exactly: a re-hearing within the hour stays in the row, where its stronger reading can
-still improve the position, and one past the hour is a second row the site scores. `--recapture 0`
-folds a network's whole capture into a single row.
+| Flag                  | Default                  | What it is                                       |
+|-----------------------|--------------------------|--------------------------------------------------|
+| `--db PATH`           | newest in this directory | The capture to read                              |
+| `--out PATH`, `-o`    | the capture's name, .csv | Where to write; `--out -` writes to standard out |
+| `--session ID`        | every session            | Only this session                                |
+| `--recapture SECONDS` | `3600`                   | How wide each row's window is                    |
 
-Rows carry what the nodes took off the air: a Passpoint access point's roaming consortium
-identifiers in `RCOIs`, a BLE advertiser's manufacturer identifier in `MfgrId`, both blank when the
-network offered none — the store records NULL rather than a guess. A BLE row's `Frequency` is blank
-on purpose: the column means a Bluetooth "device type" code that only an active inquiry produces,
-and the nodes never transmit while scanning.
+So `wartui export` alone exports the run that just ended, `wartui-2026-09-18-14-30.db` to
+`wartui-2026-09-18-14-30.csv`. A derived name is never overwritten, since that file may be the
+export already uploaded; name it with `--out` to overwrite it on purpose. The CSV is a view over the
+store, so it can be re-run after a decoder fix, for last week's session, or during a capture.
 
-`--log-file` is global and is the only way to see the transport's own account of a run.
-`--config PATH` is a `run` argument and names a `wartui.toml` somewhere other than the default
-location; see "Config file" below.
+`--recapture` writes one row per network per window: its strongest positioned sighting, with
+`FirstSeen` from the window's first sighting. WDGWars skips a re-scan of a MAC by the same user
+within an hour from scoring, though its GPS may still refine the entry. The default matches: a
+re-hearing within the hour can still improve its row's position, and one past it is a new row.
+`--recapture 0` writes one row per network. On finishing, `export` prints exact counts to standard
+error: rows written, distinct Wi-Fi networks (per band) and Bluetooth devices, sightings of each,
+sightings by position source, what each node heard, and the capture's span.
+
+`RCOIs` holds a Passpoint access point's roaming consortium identifiers and `MfgrId` a BLE
+advertiser's manufacturer identifier, both blank (NULL in the store) when none was offered. A BLE
+row's `Frequency` is blank on purpose: that column is a Bluetooth "device type" code only an active
+inquiry produces, and the nodes never transmit while scanning.
 
 ### Config file
 
-`wartui.toml` holds settings an operator wants to stop typing every run. It is read only for
-`run`, so a broken config cannot stop `ports`, `status` or `reset` from working. The settings
-modal (`c`) writes it, replacing the whole file on each save, and `b` writes the Bluetooth node; see
-"At the keyboard" below.
-
-The default location is per OS:
-
-| OS               | Path                                                                                                             |
-|------------------|------------------------------------------------------------------------------------------------------------------|
-| macOS            | `~/Library/Application Support/wartui/wartui.toml`                                                               |
-| Linux and others | `$XDG_CONFIG_HOME/wartui/wartui.toml`, or `~/.config/wartui/wartui.toml` when that variable is unset or relative |
-
-`--config PATH`, a `run` argument, reads a file somewhere else instead, for testing and debugging.
-Naming a file that does not exist is refused; a missing default file is not — an operator who has
-never written one gets the built-in defaults, silently.
-
-Today it holds this:
+`wartui.toml` holds settings an operator wants to stop typing every run:
 
 ```toml
 pool = "us"
@@ -119,48 +94,51 @@ remember = true
 node = "AA:BB:CC:DD:EE:FF"
 ```
 
-`[tx-power]` is how loudly each end transmits, in whole dBm from 2 to 20: `fleet` for the nodes —
-their heartbeats and sightings — and `bridge` for the bridge's assignments. 20 dBm is the ceiling:
-the firmware would accept 21, but whether anything above 20 works correctly is unverified.
+| Key                    | Default | What it is                                                             |
+|------------------------|---------|------------------------------------------------------------------------|
+| `pool`                 | `all`   | The channel pool: `us`, `eu`, or `all`; see "Channel pools"            |
+| `[tx-power] fleet`     | `2`     | Node transmit power (heartbeats, sightings), whole dBm 2–20            |
+| `[tx-power] bridge`    | `2`     | Bridge transmit power (assignments), whole dBm 2–20                    |
+| `[bluetooth] remember` | on      | Whether `b` remembers the Bluetooth node; see "Bluetooth"              |
+| `[bluetooth] node`     | —       | The MAC `b` last gave the scan to, written as `wartui ports` prints it |
 
-`[bluetooth]` is the remembered Bluetooth node (see § "Bluetooth"). `remember` is on when absent.
-`node` is the MAC `b` last gave the scan to, written the way `wartui ports` prints one.
+Each power defaults on its own; neither falls back to the other. The firmware accepts 21 dBm, but
+nothing above 20 is verified to work. wartui refuses to start on an unknown key or table, naming the
+file and line. An out-of-range value, an unknown `pool`, a malformed `node`, or a `node` beside
+`remember = false` is refused too, naming the file and key. Only `run` reads the file, so a broken
+one cannot stop `ports`, `status`, or `reset`. Settings (`c`) rewrites the whole file on save, and
+`b` writes the Bluetooth node; see "Keyboard commands".
 
-`pool` takes `us`, `eu` or `all`; without one the fleet scans `all`. The settings modal changes it
-mid-run — see "At the keyboard" below.
+| OS               | Default path                                                                                                     |
+|------------------|------------------------------------------------------------------------------------------------------------------|
+| macOS            | `~/Library/Application Support/wartui/wartui.toml`                                                               |
+| Linux and others | `$XDG_CONFIG_HOME/wartui/wartui.toml`, or `~/.config/wartui/wartui.toml` when that variable is unset or relative |
 
-`fleet` and `bridge` are independent: each one missing is 2 dBm, and neither falls back to the
-other's.
-
-An unknown key or table makes wartui refuse to start, naming the file and the line; an
-out-of-range value, an unknown `pool` spelling, a malformed `node`, or a `node` beside
-`remember = false` does too, naming the file and the key.
+`--config PATH` (a `run` flag) reads another file, for testing and debugging. A named file that is
+missing is refused; a missing default file silently means the built-in defaults.
 
 ### Benchmarking the store
 
-`bench` is hidden, and is for judging a change to the store on the card it will run from. It drives
-the simulator through the engine into a fresh database with nothing drawn, then reports rows, commit
-times, and on Linux what the kernel and the block device actually wrote:
+The hidden `bench` judges a store change on the card it will run from. It drives the simulator
+through the engine into a fresh database, drawing nothing, and reports rows, commit times, and, on
+Linux, what the kernel and block device wrote.
 
 ```sh
 wartui bench --db /path/on/the/card/bench.db --fresh --duration 300 --json
 ```
 
-`--profile drive` (the default) is ten nodes at real time; `--profile burst` is twenty. The
-simulated neighbourhood is sized so every node reports on every sweep, measuring starts once the
-whole fleet holds its assignments, and `idle_node_windows` must read 0 for a run to count.
-`--interval` (60 s by default) adds a timeline to the report, so a long run shows when the card
-slowed down. Each SQLite and batching setting has a flag, so two settings compare on one binary. The
-store checkpoints from a thread of its own right after each commit; `--checkpoint-every MS` spaces
-those passes out, and `--inline-checkpoint` puts SQLite's own back inside the commit for comparison.
-[`docs/store-io-findings.md`](../../docs/store-io-findings.md) has the method and the numbers so
-far.
+`--profile drive` (default) is ten nodes at real time; `burst` is twenty. Every node reports every
+sweep in the simulated neighborhood, measuring starts once the fleet holds its assignments, and a
+run counts only if `idle_node_windows` reads 0. `--interval` (default 60 s) adds a timeline showing
+when the card slowed. Each SQLite and batching setting has a flag, so two settings compare on one
+binary. The store checkpoints on its own thread after each commit; `--checkpoint-every MS` spaces
+those out, and `--inline-checkpoint` puts SQLite's own back in the commit.
+[`docs/store-io-findings.md`](../../docs/store-io-findings.md) has the method and numbers.
 
 ### Flashing the fleet
 
-`flash-fleet` puts one node image on every attached board of the chip `--features` names, several
-at once, and never on the bridge. It reaches each board through `espflash`, which must be on
-`PATH`.
+`flash-fleet` puts one node image on every attached board of the chip `--features` names, several at
+once, never on the bridge. It uses `espflash`, which must be on `PATH`.
 
 ```sh
 wartui flash-fleet --features esp32c5 --dry-run     # what would be flashed, and from where
@@ -180,39 +158,39 @@ wartui flash-fleet --features esp32c6,xiao-external-antenna --bridge 10:BD:A3:EC
 | `--jobs N`              | `4`            | How many boards to probe or flash at once                                  |
 | `--dry-run`             | off            | Probe and report; build, fetch and flash nothing                           |
 
-**The bridge has to be known.** It is the same vendor, product, and often the same chip as the
-nodes, so its address is the only thing that tells it apart. That is `--bridge`, else the address
-`run` remembered, and both are spared when both are known. With neither, the run is refused unless
-`--no-bridge` says no bridge is attached; that flag only lifts the refusal, and a remembered bridge
-is spared all the same. A `--bridge` that matches no attached board refuses the run, since sparing
-it would spare nothing, and so does a short form that several boards end with: a typo, a device node that moved on a replug, or a macOS `/dev/tty.*` where
-`wartui ports` lists the `/dev/cu.*`. Naming the bridge by its address avoids all three. A
-remembered bridge that is not attached is simply unplugged, and is not an error.
+**The bridge has to be known.** It shares the nodes' vendor, product, and often chip, so only its
+address tells it apart. The run spares the board `--bridge` names and the bridge `run` remembered,
+whichever are known; a remembered bridge that is not attached is unplugged, not an error. The run is
+refused when:
 
-A board is flashed only when all four of these hold, and otherwise it is skipped and listed with
-the reason:
+- Neither is known, unless `--no-bridge` says none is attached.
+- `--bridge` matches no attached board, since sparing it would spare nothing. Typical causes: a
+  typo, a device node that moved on replug, or a macOS `/dev/tty.*` where `wartui ports` lists
+  `/dev/cu.*`. Naming the bridge by address avoids all three.
+- A short `--bridge` matches several boards.
+
+A board is flashed only when all four hold; otherwise it is skipped and listed with the reason:
 
 1. It is native USB Serial/JTAG (`303a:1001`) and reports its address as its serial number.
 2. It is not the bridge, and not named with `--skip`.
 3. `espflash board-info` reads the chip `--features` names.
 4. `espflash board-info` reads the same address from the chip that the OS reported for the port.
 
-The image is a merged one — bootloader, partition table, and app, written at `0x0` with `espflash
-write-bin` — and comes from the first of these that applies:
+The image is merged (bootloader, partition table, app), written at `0x0` with `espflash write-bin`,
+from the first source that applies:
 
 - `--image BIN`, as given.
 - `--firmware-dir DIR`, or the checkout's `firmware/node` when this binary was built from one:
   `cargo build --release` there with the same features, merged with `espflash save-image`.
-- The release this binary was built for: its image for the feature set, checked against that
-  release's `SHA256SUMS` and kept under the state directory (`images/<tag>/`), so a host
-  offline can reflash from what it fetched before. A release publishes `esp32c5`, `esp32c6` and
-  `esp32c6,xiao-external-antenna`, all with default features; anything else needs `--image` or
-  `--firmware-dir`.
+- The release this binary was built for, checked against its `SHA256SUMS` and kept under the state
+  directory (`images/<tag>/`) so an offline host can reflash. A release publishes `esp32c5`,
+  `esp32c6`, and `esp32c6,xiao-external-antenna`, all with default features; anything else needs
+  `--image` or `--firmware-dir`.
 
-Whichever it is, the chip in the image's header must be the chip `--features` names, or nothing is
-touched. Each board prints one line, by its last two octets: flashed, failed with espflash's last
-line and its full output beneath, or skipped with the reason. The run fails if any board failed;
-skips alone do not fail it. `--dry-run` still resets each candidate once, since `board-info` does.
+The chip in the image's header must match `--features`, or nothing is touched. Each board prints a
+line by its last two octets: flashed, failed (espflash's last line, full output beneath), or skipped
+with the reason. Any failure fails the run; skips do not. `--dry-run` still resets each candidate
+once, since `board-info` does.
 
 ### Flashing the bridge
 
@@ -232,113 +210,110 @@ wartui flash-bridge --features esp32c6 --bridge 10:BD:A3:EC:44:C0
 | `--firmware-dir DIR` | the checkout's | Build the image from the bridge firmware here                         |
 | `--dry-run`          | off            | Probe and report; build, fetch and flash nothing                      |
 
-**The board is chosen before anything is reset**: the board `--bridge` names, else the bridge `run`
-remembered, which must be attached, else, with none remembered, the only Espressif board attached.
-A remembered bridge that is not attached refuses the run, because the board present is known not to
-be it. A `--bridge` that matches no attached board or several of them, several boards with none
-known, or no board at all refuses the run too; with several, the refusal lists their addresses, and naming one with
-`--bridge` settles it. The chosen board must be native USB Serial/JTAG (`303a:1001`) reporting its
-address, and `espflash board-info` must read the chip `--features` names and that same address, or
-nothing is flashed.
+**The board is chosen before anything is reset**, from the first that applies:
 
-The image comes from the same three places as `flash-fleet`'s, with `firmware/bridge` in place of
-`firmware/node`. A release publishes `esp32c5`, `esp32c5,t-dongle-c5`, `esp32c6` and
-`esp32c6,xiao-external-antenna`, kept under the same `images/<tag>/`.
+1. The board `--bridge` names.
+2. The bridge `run` remembered, which must be attached.
+3. With none remembered, the only Espressif board attached.
 
-The board prints one line, by its last two octets: would flash, flashed, or failed with espflash's
-full output beneath. A board flashed is remembered as the bridge, so `flash-fleet` spares it and
-`run` opens it first. `--dry-run` resets it once, for `board-info`, and remembers nothing.
+The run is refused when:
 
-## At the keyboard
+- The remembered bridge is not attached, because the board present is known not to be it.
+- `--bridge` matches no attached board, or several.
+- Several boards are attached and none is known. The refusal lists their addresses; pick one with
+  `--bridge`.
+- No board is attached.
 
-| Key                    | What it does                                                         |
-|------------------------|----------------------------------------------------------------------|
-| `↑` `↓` / `k` `j`      | Move the cursor down the fleet table                                 |
-| `b`                    | Make the selected node the Bluetooth scanner, or take the scan off   |
-| `c`                    | Open the settings modal (transmit power, pool, bluetooth)            |
-| `r`                    | Clear the selected node's dedup ring on its next heartbeat           |
-| `R`                    | Clear every assignable node's dedup ring, each on its next heartbeat |
-| `q` / `Esc` / `ctrl-c` | Stop, committing the last batch                                      |
+The chosen board must be native USB Serial/JTAG (`303a:1001`) reporting its address, and
+`espflash board-info` must read the `--features` chip and that address, or nothing is flashed.
 
-`b`, `c`, `r` and `R` are the only ones that reach the air. `b` decides _which_ node scans Bluetooth
-instead of Wi-Fi; it reaches that node's share only by being an input to the planner, which is still
-the only author of one. `r` and `R` ask a node, or every assignable one, to forget every address it
-has reported. Channels are not a key. While `remember bt node` is on, `b` also writes the node it
-chose, or its absence, to `wartui.toml`'s `[bluetooth]` table and leaves the rest of the file as it
-is.
+The image comes from the same three sources as `flash-fleet`'s, with `firmware/bridge` for
+`firmware/node`. A release publishes `esp32c5`, `esp32c5,t-dongle-c5`, `esp32c6`, and
+`esp32c6,xiao-external-antenna`, under the same `images/<tag>/`.
 
-`c` opens a modal with a row each for the pool, the nodes' transmit power, the bridge's, and
-`remember bt node`. `↑`/`↓` (or `j`/`k`) move between them, `←`/`→` (or `h`/`l`) step the selected
-row: a power by 1 dBm, the pool through `all → eu → us`, `remember bt node` to `off` and `on` — all
-stop at their ends rather than wrapping. `Enter` sends the pool, the powers, and the remember setting
-to the engine, all of them or none, and writes every row shown to `wartui.toml`'s `pool`,
-`[tx-power]` and `[bluetooth]` keys, whatever was there before, then closes the modal. The bridge
-takes its power on its next status poll. A moved pool re-cuts the whole fleet against it, and each
-node takes its new share and power on its next heartbeat, emptying its dedup ring when its share
-changes. `Esc` or `q` closes the modal without changing anything; `ctrl-c` quits even while it is
-open.
+The board prints one line by its last two octets: would flash, flashed, or failed with espflash's
+full output. A flashed board is remembered as the bridge, so `flash-fleet` spares it and `run` opens
+it first. `--dry-run` resets it once, for `board-info`, and remembers nothing.
+
+## Keyboard commands
+
+| Key                    | What it does                                                                 |
+|------------------------|------------------------------------------------------------------------------|
+| `↑` `↓` / `k` `j`      | Move the cursor through the fleet table                                      |
+| `b`                    | Make the selected node the Bluetooth scanner, or take the scan off the fleet |
+| `c`                    | Open settings: channel pool, transmit power, Bluetooth                       |
+| `r` / `R`              | Clear the selected node's dedup ring, or every assignable node's             |
+| `q` / `Esc` / `ctrl-c` | Stop, committing the last batch                                              |
+
+Only `b`, `c`, `r`, and `R` reach the air, and no key sets channels. `b` picks _which_ node scans
+Bluetooth; the planner still authors every share. With `remember bt node` on, `b` also writes its
+choice, or its absence, to `[bluetooth]` in `wartui.toml`, leaving the rest of the file alone. `r`
+and `R` make a node forget every address it has reported, on its next heartbeat.
+
+### In settings (`c`)
+
+| Key               | What it does                                       |
+|-------------------|----------------------------------------------------|
+| `↑` `↓` / `k` `j` | Move between rows                                  |
+| `←` `→` / `h` `l` | Change the selected row; values stop at their ends |
+| `Enter`           | Apply every row and save it to `wartui.toml`       |
+| `Esc` / `q`       | Close without changing anything                    |
+| `ctrl-c`          | Quit                                               |
+
+The rows are the pool (`all → eu → us`), the nodes' transmit power and the bridge's (1 dBm steps),
+and `remember bt node` (`off`, `on`). `Enter` sends them all to the engine, or none, and writes
+every row shown to `pool`, `[tx-power]`, and `[bluetooth]`, whatever was there. The bridge takes its
+power on its next status poll, and settings closes. A moved pool re-cuts the fleet. Each node takes
+its new share and power on its next heartbeat, emptying its dedup ring when its share changes.
 
 ## How channels are assigned
 
-**The planner cuts the pool, and nothing else does.** It deals it across every heartbeating node
-that is sniffing and re-cuts it whenever that set changes, the Bluetooth scan moves, or the pool
-changes in the settings modal; no key and no flag writes one node's share. `b` changes the set
-rather than the shares — see § "Bluetooth". The header says
-what it has to work with: `auto — 4 of 5` for four heartbeating nodes out of five seen.
+**The planner cuts the pool, and nothing else does.** It deals the pool across every heartbeating,
+sniffing node. It re-cuts when that set changes, the Bluetooth scan moves (§ "Bluetooth"), or the
+pool changes in settings. The header shows its inputs: `auto — 4 of 5` is four heartbeating nodes of
+five seen.
 
-Nothing goes out at the moment a node's share changes. Its radio is away scanning some other channel
-for all but the 100 ms it holds open once every 5 seconds, so the assignment waits for that
-window — the `channels` column reads `1: 1…` in yellow until it lands. That wait is up to 5
-seconds, the heartbeat interval, rather than a sweep. That delay is the protocol, not lag.
+**A changed share waits for the node's admin window.** The radio is away scanning except for the
+100 ms it holds open every 5 s, so an assignment takes up to one heartbeat interval, not a sweep.
+That delay is the protocol, not lag. The `channels` column leads with a count (`1: 1…`) because a
+round-robin share is a dozen scattered channels, too many to fit.
 
-That column leads with a count because a share dealt round-robin is a dozen scattered channels and
-no sane column is wide enough for all of them.
+**An assignment counts once the node's radio acknowledges it** at the MAC layer, never on the
+bridge's report of a successful enqueue. An ack does not prove the node took it. Adoption does:
+every heartbeat carries the epoch the node holds, usually the new one within 5 s of the window. A
+heartbeat reporting some *other* epoch makes wartui re-send in the window it opened. The footer
+counts those as "assignments acknowledged but not adopted", apart from `no admin ack`'s
+never-acknowledged ones.
 
-An assignment is believed only when the node's own radio acknowledges it at the MAC layer, never
-when the bridge reports a successful enqueue — but an ack is not proof the node actually took the
-frame. Every heartbeat carries the epoch the node holds, and adoption is that separate, stronger
-fact: `channels` shows the acknowledged set in blue with a trailing `…` until the node's
-own heartbeat reports holding it, usually within 5 s of the admin window landing, then turns plain
-(or cyan for Bluetooth). If a heartbeat instead reports some *other* epoch than the one acknowledged,
-wartui re-sends the same epoch in the window that heartbeat opened, and the footer counts it under
-"acknowledged but not adopted".
-
-If a node keeps showing `no admin ack`, the cause is nearly always Bluetooth: the two radios share
-the one 2.4 GHz antenna, and the admin window is precisely when the node would otherwise be idle.
-Press `b` on it — and note that the node holding the scan is the least likely to show this, because
-its Wi-Fi radio never leaves the control channel.
+**Repeated `no admin ack` is nearly always Bluetooth**, sharing the antenna through the admin window
+(§ "Bluetooth"). Press `b` on the node. The scanning node itself rarely shows this: its Wi-Fi radio
+never leaves the control channel.
 
 ## Bluetooth
 
-**At most one node scans Bluetooth, by default none does, and it is that node's whole job.** `b` on
-the selected node gives it the scan; `b` again on the node that holds it takes it off the fleet. With
-`remember bt node` on (the default), `b` also remembers that choice in `wartui.toml`, and the
-remembered node gets the scan back by itself whenever it is heartbeating and nothing holds it — at
-startup, and after it drops out of the fleet and returns. Taking the scan off with `b` forgets it.
-Turning `remember bt node` off forgets the node and leaves the scan where it is; turning it back on
-remembers whichever node holds it then. The `channels` column says who has it: it reads
-`bluetooth` because that node is dealt no channels, and `bluetooth…` while the change waits for its
-next admin window. Taking the scan off shows as that node's new channel share, pending with a
-yellow `…`.
+**At most one node scans Bluetooth, none by default, and it is that node's whole job.** `b` on a
+node gives it the scan; `b` on the node holding it takes it off the fleet. With `remember bt node`
+on (the default), `b` saves the choice. The remembered node takes the scan back whenever it is
+heartbeating and nothing holds it: at startup, or on returning to the fleet. Taking the scan off
+with `b` forgets it. Turning `remember bt node` off forgets the node and leaves the scan; turning it
+on remembers whoever holds it then. That node's `channels` reads `bluetooth`, since it is dealt no
+channels, or `bluetooth…` while the change waits for its admin window. Taking the scan off shows as
+its new share, pending.
 
-It costs a whole node because the two radios share the one 2.4 GHz antenna, and a node that also
-sweeps has to hand it back in time for every admin window it must answer in — which a stock node
-did not, acknowledging none of thirty-two assignments
-([`docs/phase-2-findings.md`](../../docs/phase-2-findings.md)). A node with nothing else to do has
-nothing to hand it back to, so the scan runs **back to back** rather than "once a second", and the
-node's own transmits are the only thing it competes with.
+**It costs a whole node because Wi-Fi and Bluetooth share one 2.4 GHz antenna.** A node that also
+sweeps must hand the antenna back for every admin window; a stock node failed to, acknowledging none
+of thirty-two assignments ([`docs/phase-2-findings.md`](../../docs/phase-2-findings.md)). With
+nothing else to do, the scan runs **back to back**, competing only with the node's own transmits.
 
-The fleet is one sniffer short while it does, and the pool is re-cut across the rest the moment the
-scan moves: giving it away grows every other node's share, and taking it back shrinks them again.
-A fleet of **one** node holding the scan sweeps no Wi-Fi at all, which is a real hole and is
-reported in the fault box rather than left to be inferred.
+The fleet is one sniffer short, and the pool is re-cut the moment the scan moves: giving it away
+grows every other share, taking it back shrinks them. A fleet of **one** node holding the scan
+sweeps no Wi-Fi at all, and the fault box says so.
 
 ## Channel pools
 
-`pool = "all"` is the default: every channel a node can tune, 2.4 GHz 1–13 and all of 5 GHz including
-the UNII-4 channels 169, 173, and 177. The other two are narrower, and the choice is about coverage
-rather than legality — a node parks and reads beacons, so a pool says where it listens and never
-what it emits.
+`pool = "all"` is the default: everything a node can tune, 2.4 GHz 1–13 and all of 5 GHz including
+UNII-4 (169, 173, 177). A node only parks and reads beacons, so a pool sets where it listens, never
+what it emits: the choice is coverage, not legality.
 
 | Pool  | 2.4 GHz | 5 GHz  | Channels |
 |-------|---------|--------|----------|
@@ -346,114 +321,79 @@ what it emits.
 | `us`  | 1–11    | 36–165 | 36       |
 | `eu`  | 1–13    | 36–140 | 32       |
 
-`us` is what the FCC permits: no 12 or 13, and no UNII-4. `eu` is what ETSI permits: 2.4 GHz all the
-way to 13, and 5 GHz stopping at 140, because channel 144's twenty megahertz run past the 5725 MHz
-edge and 149 upwards is another band again. Channel 14 is in no pool and is never dealt —
-`esp-radio` exposes no way to reach it.
+`us` is what the FCC permits: no 12, 13, or UNII-4. `eu` is what ETSI permits: 5 GHz stops at 140,
+because 144's twenty megahertz cross the 5725 MHz edge and 149 up is another band. Channel 14 is in
+no pool; `esp-radio` cannot reach it.
 
-An assignment carries a forty-two-bit channel mask, so it can name any subset of the pool. The
-planner deals the pool out round-robin: index _k_ of the pool goes to node _k mod n_, so every node
-carries some 2.4 GHz and some 5 GHz. Block-splitting would put one node on the whole of 2.4 GHz and
-another on the whole of 5 GHz, and losing that node would blind the fleet to a band until the next
-re-cut landed.
+An assignment's forty-two-bit mask can name any subset. The planner deals round-robin, pool index
+_k_ to node _k mod n_, so every node carries both bands. A block split would put one node on all of
+2.4 GHz, and losing it would blind the fleet to that band until the next re-cut landed.
 
-**An ESP32-C6 is never dealt a 5 GHz channel.** It has no radio for one and says so in every
-heartbeat, so a share of 5 GHz cut for it would be a share nobody scans. A mixed fleet is dealt the
-5 GHz half first for that reason: in pool order the C5s would take their share of 2.4 GHz and then
-all of 5 GHz on top of it, which is the block split above arrived at sideways. Shares are then no
-longer within one channel of each other and cannot be — a C6 beside a C5 holding 5 GHz sweeps faster
-however the rest is dealt. What the deal minimises is the _largest_ share, which is what sets how
-stale the slowest node's observations get. A fleet whose radios are all alike has no constrained
-channels.
+**An ESP32-C6 is never dealt a 5 GHz channel.** It has no 5 GHz radio and says so in every
+heartbeat. A mixed fleet is dealt 5 GHz first; in pool order the C5s would take 2.4 GHz and then all
+of 5 GHz, a block split by another route. Shares can then differ by more than one channel: a C6
+beside a C5 holding 5 GHz sweeps faster however the rest is dealt. The deal minimizes the _largest_
+share, which sets how stale the slowest node's observations get. A fleet of alike radios has no
+constrained channels. With no 5 GHz radio at all, 5 GHz is left out of every assignment, and the
+footer counts the unscanned channels.
 
-If no node in the fleet has a 5 GHz radio at all, those channels are left out of every assignment
-rather than given to a node that would ignore them, and the footer says how many of the pool are
-going unscanned.
+Every fleet change re-cuts the _whole_ fleet, and each node takes its share in its next admin
+window, so the fleet converges within one heartbeat interval. A node adopts only an epoch that
+differs from its own, so an unchanged fleet is left alone. Two consequences:
 
-Every fleet change re-cuts the pool for the _whole_ fleet, not just the node that joined or left.
-Each node takes its new share in its own next admin window, so a fleet converges within one
-heartbeat interval. An unchanged fleet is left alone: a node adopts an assignment only when its
-epoch differs from the one it holds.
-
-Two consequences worth knowing:
-
-- **A node can report a channel not in its share.** The deal interleaves 2.4 GHz channels
-  between nodes — one takes 1, 3, 5, the next 2, 4, 6 — and those channels are 5 MHz apart but 20
-  MHz wide, so a node parked on 2 hears beacons transmitted on 1 and 3. It reports the channel the
-  beacon itself names, which is the access point's real one; the alternative would be filing a real
-  network under the wrong frequency. About a quarter of access points are found by more than one
-  node. `export` folds each network's sightings into recapture windows and picks the strongest per
-  window, so this costs store rows and nothing else. 5 GHz channels do not overlap and do not do it.
-- **A fleet with no 5 GHz radio in it covers 2.4 GHz and nothing else**, which is 13 channels on
-  `all` and `eu` and 11 on `us`, so from fourteen such nodes onward — twelve on `us` — there are
-  more nodes than channels to give them. The surplus nodes keep whatever they last held rather than
-  being told to scan nothing — the only frame carrying no channels is the Bluetooth node's, and it
-  means "Bluetooth is the whole job" rather than "stop" — so their shares double up with someone
-  else's. A node that has nothing to keep is the one exception: the node that *was* the Bluetooth
-  scanner holds no channels at all, so taking the scan off it hands it everything its radio can
-  reach instead, and its `channels` column shows the whole pool once it is adopted. A surplus node
-  holding channels a newly chosen pool leaves out is handed the same.
+- **A node can report a channel outside its share.** 2.4 GHz channels are interleaved (one node 1,
+  3, 5; the next 2, 4, 6), 5 MHz apart but 20 MHz wide, so a node on 2 hears 1 and 3. It reports the
+  channel the beacon names, the access point's real one, not a wrong frequency. About a quarter of
+  access points reach more than one node. `export` keeps the strongest per recapture window, so this
+  costs only store rows. 5 GHz channels do not overlap.
+- **A fleet with no 5 GHz radio covers only 2.4 GHz**: 13 channels on `all` and `eu`, 11 on `us`.
+  From fourteen such nodes (twelve on `us`), nodes outnumber channels. Surplus nodes keep what they
+  last held and double up, because the only channel-less frame means "Bluetooth is the whole job",
+  not "stop". A node with nothing to keep, such as the former Bluetooth scanner, is handed every
+  channel its radio can reach, and its `channels` shows the whole pool once adopted. So is a surplus
+  node whose channels a newly chosen pool leaves out.
 
 ## Positions
 
-Every observation is stamped with the best position available, resolved fresh each time: a GPS on
-`--gps`, then a static `--lat`/`--lon`, then nothing. Which tier answered is recorded per row, so a
-capture that starts in a garage and ends on a road is honest about both halves. A record is never
-dropped for want of a position — but **WiGLE will not accept a row without coordinates**, so a
-capture with no position given exports nothing and says how many networks it left out.
+Each observation gets the best position available, resolved fresh: GPS, then `--lat`/`--lon`, then
+none. Rows record which tier answered, so a garage-to-road capture is honest about both. No record
+is dropped for lack of a position, but **WiGLE rejects rows without coordinates**: a capture with
+none exports nothing and says how many networks it left out.
 
 ```sh
 wartui run --db drive.db --lat 37.7749 --lon -122.4194
 ```
 
-**A receiver is found without being named.** Every serial port that is not one of the fleet's own
-boards is listened to in turn, at 9600, then 38400, 4800, and 115200, and the first that produces two
-sentences passing their checksum is the one read for the rest of the capture. A port that names
-itself — `u-blox`, `GPS`, `GNSS` — is tried first, but that only decides the order: the common pucks
-sit behind a general-purpose USB-to-UART chip that says nothing about what is behind it, so what
-settles it is reading the port.
-
-The search **writes nothing to any port**, and never opens an Espressif one. That is what keeps it
-from meeting the other half of wartui, which is transmitting into whatever it opens while it looks
-for the bridge.
-
-Giving `--lat`/`--lon` as well is the useful combination: satellite positions whenever the receiver
-has one, the typed-in position the rest of the time, rather than nothing at all while the receiver is
-still finding itself.
-
-`--gps PATH` pins one receiver, for when several are attached or the search settles on the wrong
-device; the rates are still tried unless `--gps-baud` names one, and one sentence is enough to
-settle a port you named rather than the two an unknown port has to produce. **Naming both opens the
-port and reads it with no probe at all** — there is nothing left to detect, and a receiver
-configured to say very little would otherwise be refused for saying too little inside one window.
-`--no-gps` turns the search off, and `--sim` implies it unless `--gps` names a receiver: a
-simulated fleet is how wartui is worked on with nothing plugged in, and a search that opens every
-serial port on the machine is not part of that.
-Any receiver that speaks NMEA 0183 over a serial port will do: `GGA` and `RMC` are read and
-everything else ignored, and the altitude, the satellite count, and an accuracy estimated from the
-reported HDOP all reach the export.
-
-**A receiver that is named and not found is a fault; one that was never found is not.** Searching is
-the default, so most captures made without a GPS are captures where there was never going to be one,
-and the header says nothing about it. `--gps` is the operator asking for a particular port, so its
-absence is reported.
-
-**A fix has to be recent to be used.** Past `--gps-max-age` seconds the position falls back to the
-tier below and the header says `gps fix is stale`, because at driving speed a minute-old fix is a
-different neighborhood and a row that quietly claimed it would be worse than one admitting to the
-static position.
-
-The receiver runs on its own thread, and nothing waits for it: a capture starts immediately and says
-what it is doing on the header — `gps scanning /dev/… @38400`, `gps searching`, `gps ok, 8 sats`,
-`gps fix is stale`, or the error from the port. The search living on that thread is also what lets a
-puck be unplugged and put back into a *different* socket: it comes back under another name, and the
-next pass finds it there.
+- **`--lat`/`--lon` beside a receiver is the useful combination.** It fills in whenever the receiver
+  has no fix, including while it is still finding itself.
+- **A receiver is found without being named.** Each serial port that is not a fleet board is tried
+  at 9600, 38400, 4800, then 115200 baud. The first with two checksum-valid sentences is kept.
+- **Self-naming ports (`u-blox`, `GPS`, `GNSS`) only go first.** Common pucks sit behind a generic
+  USB-to-UART chip that names nothing, so reading the port settles it.
+- **The search writes nothing and never opens an Espressif port.** That keeps it clear of the bridge
+  search, which transmits into whatever it opens.
+- **`--gps PATH` pins one receiver**, when several are attached or the search picks wrong. Baud
+  rates are still tried unless `--gps-baud` names one, and one valid sentence settles a named port.
+- **`--gps` with `--gps-baud` skips the probe.** Nothing is left to detect, and a terse receiver
+  could otherwise be refused for saying too little in one window.
+- **`--no-gps` turns the search off; `--sim` implies it unless `--gps` is given.** A simulated fleet
+  is for working with nothing plugged in, not for opening every serial port.
+- **Any NMEA 0183 serial receiver works.** Only `GGA` and `RMC` are read. Altitude, satellite count,
+  and an accuracy estimated from HDOP reach the export.
+- **A named receiver that is missing is a fault; an unfound one is not.** Most GPS-less captures
+  never had one, so the header stays quiet; `--gps` asks for a port, so its absence is reported.
+- **A fix must be recent.** Past `--gps-max-age` seconds the position falls back a tier and the
+  header says `gps fix is stale`. At driving speed a minute-old fix is another neighborhood, and
+  admitting the static position beats quietly claiming it.
+- **The receiver runs on its own thread; nothing waits for it.** Capture starts at once, and the
+  header shows `gps scanning /dev/… @38400`, `gps searching`, `gps ok, 8 sats`, `gps fix is stale`,
+  or the port's error. The search keeps running there, so a puck replugged into a *different* socket
+  is found under its new name.
 
 ## Reading the fleet table
 
-Each row names its node by chip and the last two octets of its address — `C5 57:84`, `C6 9D:24` —
-read off the band its heartbeats announce, so a node not yet heartbeating shows `—` in place of the
-chip.
+Rows name nodes by chip and last two address octets: `C5 57:84`, `C6 9D:24`. The chip comes from the
+band its heartbeats announce, so a node not yet heartbeating shows `—`.
 
 | State          | Meaning                                                                                                                                                |
 |----------------|--------------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -464,84 +404,71 @@ chip.
 | `refused`      | The bridge would not transmit it — nearly always a full peer table. Its heartbeats are still arriving; what is missing is a slot to address it through |
 | `rebooted xN`  | Its heartbeat counter went backwards, or its epoch went back to 0, so it has forgotten any assignment; wartui re-issues under a fresh epoch            |
 
-The `channels` column turns blue with a trailing `…` when a node's radio has acknowledged
-an assignment but its own heartbeat has not yet said it holds it — see
-[How channels are assigned](#how-channels-are-assigned). If that gap does not close, the footer
-counts it under "assignments acknowledged but not adopted", distinct from `no admin ack`'s
-count of assignments the radio never acknowledged at all.
+The `channels` column shows where an assignment stands
+([How channels are assigned](#how-channels-are-assigned)):
 
-A node that is `stale`, `refused` or `no heartbeat` is out of the plan: nothing wartui sends it
-would reach it, or nothing yet says which band its radio can tune — so a share of the pool cut for
-it is a share that may be nobody's. Pressing `b` on one says which of the three it is, because the
-next move differs for each: wait for the first heartbeat, clear the peer table, or go and find out
-why the heartbeats stopped.
+| `channels`       | Meaning                                           |
+|------------------|---------------------------------------------------|
+| yellow, with `…` | Waiting for the node's admin window               |
+| blue, with `…`   | Acknowledged by the node's radio, not yet adopted |
+| plain            | Adopted                                           |
+| cyan             | The Bluetooth node                                |
 
-**`refused` is usually not a fleet above twenty nodes.** The bridge never removes a peer, so a long
-session accumulates slots for nodes that have since gone, and a fleet of three can run out of room.
-The table starts empty on every boot, so the host clears the refusal whenever a bridge announces
-itself: `wartui reset` — or replugging — is what to try before counting nodes. The rest of the fleet
-is re-cut to cover a refused node's share in the meantime, and over twenty nodes the planner stops
-re-cutting altogether and the header says `auto — too many nodes`.
+A `stale`, `refused`, or `no heartbeat` node is out of the plan: nothing sent would reach it, or its
+band is unknown, so its share might be nobody's. `b` on one says which state it is, because the fix
+differs: wait for a heartbeat, clear the peer table, or find out why heartbeats stopped.
 
-`stale` and `no heartbeat` are deliberately distinct from silence, and from each other. A node
-streaming observations whose heartbeats are lost would otherwise age out and churn the whole fleet's
-topology; wartui keeps two clocks so the difference is visible rather than fatal.
+`stale` and `no heartbeat` are deliberately distinct from silence and from each other. wartui keeps
+two clocks, so a node that streams observations but loses heartbeats doesn't age out and churn the
+whole fleet's topology.
 
-An `alive` node that has stopped reporting is usually not broken: a node reports an address once and
-then holds it back, so a node that is standing still goes quiet once it has reported everything in
-range. That memory is on the node, not the host, so it carries over into your next session. A held
-address is reported again five minutes after it was last reported, or sooner if the node hears it at
-least 10 dB louder than it has reported it before. `r` clears the selected node's memory and `R`
-clears every assignable node's, each without a reboot and each on its next heartbeat; a node's
-memory is also emptied whenever its share or its Bluetooth role changes
-(`crates/wartui-proto/src/dedup.rs` explains why it works this way).
+**`refused` rarely means over twenty nodes.** The bridge never removes a peer, so a long session
+fills slots with departed nodes, and a fleet of three can run out. The table empties on every boot
+and the host clears refusals when a bridge announces itself, so try `wartui reset` or a replug
+before counting nodes. Meanwhile the rest of the fleet covers the refused node's share.
 
-The `lost` column is whole batches missing between a node and the host, counted from gaps in the
-sequence number every batch carries — `—` before its first one arrives, a running count after. A
-batch's sequence advances only once its node's radio gets a MAC-layer ack for it, so a gap here is
-loss after the bridge's radio took the frame — its receive queue or the USB path to the host — not
-loss on the air. Each one lost is everything a dwell or a Bluetooth scan produced, up to about a
-dozen access points, and those addresses stay hidden the same way a lost frame always has: until the
-node's own five-minute refresh reports them again. The column appears only once some node has lost
-a batch. The footer's `lost N` is the same count summed across the fleet, and follows the same rule.
-The capture keeps each gap as a row of `batch_gap`, so summing its `lost` per node after a drive
-gives the column's final value.
+**An `alive` node gone quiet is usually fine.** A node reports each address once and holds it back,
+so a stationary node falls silent after reporting everything in range. That memory lives on the node
+and survives into your next session. A held address is reported again five minutes after it was last
+reported, or sooner if heard at least 10 dB louder. `r`/`R` clear it without a reboot, and a change
+of share or Bluetooth role empties it. `crates/wartui-proto/src/dedup.rs` explains why.
 
-The footer's `dup N` is different: batches dropped because they are the same `seq`,
-byte-identical to the one just before them, and arrived within 100 ms of it — a node's radio
-retransmitting after the bridge's ack was lost rather than anything missing. A batch that
-repeats the same seq and bytes 100 ms or more later is the node's own re-send after a failed
-send, and is recorded like any other. Its observations were already recorded from the first
-copy, so nothing here is hidden and nothing is lost — `dup` and `lost` never count the same
-batch.
+| Header says                       | Meaning                                                                               |
+|-----------------------------------|---------------------------------------------------------------------------------------|
+| `auto — nothing heartbeating yet` | No node is heartbeating                                                               |
+| `auto — no node it can drive`     | Nodes are alive, but none is assignable                                               |
+| `auto — too many nodes`           | Over twenty: the planner stops re-cutting; assignments stay and capture is unaffected |
 
-A line of its own below the totals, `wifi drop N  ble drop M`, counts distinct networks and
-advertisers a node heard but had no room for in that dwell or Bluetooth scan, summed across the
-fleet for this session. It appears once either count is above zero, leaves out a kind still at
-zero, and stays for the rest of the session. It is not a fault: a turned-away address is not held
-back, so the node reports it on its next pass; only one it hears in no later pass is lost. A count
-that grows steadily means a node's buffer is too small for the area.
+The footer shows faults only once they happen, so a clean run has a clean footer:
 
-The header has three ways of saying it has nothing to drive: `auto — nothing heartbeating yet`,
-`auto — no node it can drive` (nodes are alive but none is assignable), and `auto — too many nodes`
-(over twenty, so the planner has stopped re-cutting; whatever is assigned stays assigned and capture
-is unaffected).
-
-The footer only shows faults once they have happened, so a clean run reads as a clean footer. Three
-entries there are about somebody else's equipment rather than yours: `N frames from a vendor fleet`
-and `N admin frames from another core` are another fleet transmitting on the channel these nodes
-listen on, and `N frames from an older firmware — reflash` is a fleet part-way through an upgrade —
-those nodes speak a wire format this host does not, so the footer is the only place they appear.
-`bridge dropped` counts frames lost since this host attached; `wartui status` reports the bridge's
-own total since it booted, which on a dongle left powered with nothing listening is large and not a
-fault. The capture keeps every status reply as a row of `bridge_status`, with the bridge's
-since-boot counts as it sent them.
+- **`lost`** (a column, and `lost N` summed in the footer): whole batches missing between node and
+  host, from gaps in each batch's sequence number. The column reads `—` before a node's first batch,
+  then a running count; both appear once any node loses one. A sequence advances only on a MAC-layer
+  ack, so a gap is lost after the bridge's radio took it, in its receive queue or on USB, not on the
+  air. A batch is up to about a dozen access points, hidden until the node's five-minute refresh.
+  Each gap is a `batch_gap` row; summing its `lost` per node gives the column's final value.
+- **`dup N`**: batches dropped as identical to the previous one (same `seq`, same bytes, within
+  100 ms), a radio retransmitting after the bridge's ack was lost. The first copy was recorded, so
+  nothing is lost and `dup` never overlaps `lost`. A repeat 100 ms or more later is the node's own
+  re-send after a failed send, recorded normally.
+- **`wifi drop N  ble drop M`**: a line below the totals, counting distinct networks and advertisers
+  a node heard but had no room for in that dwell or scan, fleet-wide, this session. It appears when
+  a count passes zero, omits a kind still at zero, and stays. Not a fault: a dropped address is not
+  held back, so the next pass reports it; only one never heard again is lost. A steadily growing
+  count means a buffer too small for the area.
+- **`N frames from a vendor fleet`**, **`N admin frames from another core`**: another fleet
+  transmitting on the nodes' channel.
+- **`N frames from an older firmware — reflash`**: a fleet mid-upgrade, speaking a wire format this
+  host does not, so it appears only here.
+- **`bridge dropped`**: frames lost since this host attached. `wartui status` reports the total
+  since the bridge booted, which is large and harmless on a dongle left powered with nothing
+  listening. Every status reply is kept as a `bridge_status` row, with its since-boot counts.
 
 ## The bridge panel
 
-A LilyGO T-Dongle-C5 has a screen, and a bridge flashed for it shows five lines of the capture
-while it runs. Nothing turns this on: the bridge says whether it has a panel when it announces
-itself, `wartui status` prints what it said, and a bridge without one is sent nothing at all.
+A LilyGO T-Dongle-C5 has a screen, and a bridge flashed for it shows five lines of the capture. It
+needs no setup: the bridge reports a panel when it announces itself, `wartui status` prints that,
+and a bridge without one is sent nothing.
 
 | Line              | What it says                                                         |
 |-------------------|----------------------------------------------------------------------|
@@ -551,74 +478,59 @@ itself, `wartui status` prints what it said, and a bridge without one is sent no
 | `BLE ~840`        | Distinct BLE addresses, estimated the same way                       |
 | `avg -55 min -72` | How strongly the *bridge* is hearing the fleet                       |
 
-The screen is seventeen characters wide, so the wording is terse on purpose. A fleet
-that cannot all be driven reads `nodes 2 of 5` — drivable first, alive second. The RSSI
-line drops its own label when it has two figures to name, and reads `rssi -55` when the
-average and the weakest are the same number. A reading of −100 dBm or worse prints as
-`BAD`: three digits and a sign do not fit, and the exact figure stopped meaning anything
-well above it.
+The figures are the view's, from the same snapshot, about once a second. The screen is seventeen
+characters wide, hence the terse wording. `nodes 2 of 5` means 2 drivable of 5 alive. The RSSI line
+drops its label for two figures and reads `rssi -55` when average and weakest match. −100 dBm or
+worse prints `BAD`: it does not fit, and the exact figure means nothing well before that.
 
-The numbers are the same ones the view shows, from the same snapshot, about once a second.
+**Each line is colored by its own state**, readable across a car: green fine, amber working but not
+ideal, red a fault.
 
-**Each line is colored by its own state**, so the panel can be read from across a car without
-being read closely: green for fine, amber for working but not ideal, red for a fault.
+- **GPS is green only on a live, current fix**, stricter than the view. Connecting, scanning,
+  searching, or a stale fix is amber: attached and trying. No receiver, an unreadable port, or a
+  pinned `--lat`/`--lon` is red, however deliberate: none will produce a fix, and a constant
+  position is what most needs noticing from a distance.
+- **Nodes** are amber when something heartbeating cannot be driven (so both counts print), red when
+  nothing is alive or the link is down.
+- **RSSI** is amber when the average falls below −65 dBm or any node below −70, both above the
+  −74 dBm a 24 Mbps ESP-NOW link needs. So it warns while there is time to act: close a window, move
+  the dongle off the floor, walk a node back. `rssi: none heard` is red, for live nodes the bridge
+  has not measured; `rssi n/a` means nothing is alive.
+- **AP and BLE counts** have no bad state and stay green.
 
-- **GPS is green only on a live, current fix**, which is a stricter reading than the view's.
-  A receiver that is connecting, scanning, searching, or holding a fix too old to still be
-  believed is amber — it is attached and trying. No receiver, a port that will not read, and a
-  pinned `--lat`/`--lon` are all red, however deliberate any of them was: none of the three is
-  going to produce another fix, and a capture being written against a constant position is the
-  thing most worth noticing from a distance.
-- **Nodes** turn amber when something is heartbeating that cannot be driven — the two counts
-  differ, so the line prints both — and red when nothing is alive or the link is down.
-- **RSSI** turns amber when the fleet's average falls below −65 dBm or any one node below −70.
-  Both sit above the −74 dBm a 24 Mbps ESP-NOW link needs, so the line warns while there is
-  still something to do about it: close a window, move the dongle off the floor, walk a node
-  back. It says `rssi: none heard` in red if nodes are alive and the bridge has measured none
-  of them, and `rssi n/a` when nothing is alive to measure.
-- **The AP and BLE counts have no bad state** and stay green.
-
-Before any host speaks, and for about ten seconds after one goes away, the bridge shows what it
-knows by itself instead — chip, address, channel, and uptime, all in amber, because no host is
-exactly "working but not ideal". Start a capture and it takes the panel back within a second,
-with no replug and no reflash.
+With no host, and for about ten seconds after one leaves, the bridge shows its own chip, address,
+channel, and uptime in amber, since no host is exactly "working but not ideal". A capture takes the
+panel back within a second, with no replug or reflash.
 
 ## When nothing arrives
 
-**wartui finds the bridge by asking.** With several Espressif boards attached — a node plugged in
-by USB is one — it opens each in turn and keeps the first that answers the link protocol, then
-writes that board's address to `~/.local/state/wartui/bridge` so later runs open one port and no
-others. A capture started with `--bridge` writes the board it named there too, once that board
-answers: naming it for a capture is deciding to use it. `status`, `sniff` and `reset` with
-`--bridge` write nothing, so asking one board a question does not change which board later runs
-open. A board that answers is held for the rest of the run: unplug the bridge mid-session to
-reflash a node and wartui waits for the bridge to come back rather than transmitting into the node.
+**wartui finds the bridge by asking.** It opens each attached Espressif board in turn (a USB-plugged
+node is one) and keeps the first that answers the link protocol. It saves that address to
+`~/.local/state/wartui/bridge`, so later runs open only that port. A capture given `--bridge` saves
+the named board once it answers, since naming it for a capture is choosing it. `status`, `sniff`,
+and `reset` with `--bridge` save nothing, so questioning one board changes nothing later. An
+answering board is held for the run: unplug the bridge to reflash a node, and wartui waits rather
+than transmit into it.
 
-That file is state, not settings. Deleting it is always safe and costs one slower start, and it is
-what to delete if wartui keeps opening the wrong board. It corrects itself two ways without being
-asked: whichever board answers writes its own address over it, and the remembered board, opened
-with no other to try and then silent, is dropped from it — which is what a reflashed bridge looks
-like. A
-board merely passed over during a sweep is not dropped, because being slower than the board beside
-it is not evidence of anything.
+That file is state, not settings. Deleting it is always safe, costs one slower start, and fixes
+wartui opening the wrong board. It also self-corrects: an answering board overwrites it, and the
+remembered board is dropped if, opened with no other to try, it stays silent, as a reflashed bridge
+does. A board merely passed over in a sweep is kept; being slower than its neighbor proves nothing.
 
-The header says `waiting for a bridge to announce itself` for two quite different reasons, and the
-fault box says which. `link down: could not open …` means the port is not ours — nearly always
-another `wartui`, a `screen` session, an IDE's serial monitor or ModemManager still holding it.
-ModemManager is the one that clears on its own: on a distribution that runs it, it opens every
-freshly-attached CDC-ACM device for a few seconds to ask whether it is a modem. No fault at all
-means the port opened and the dongle is not answering. `swept N boards and none answered` is the
-third: every Espressif board attached was tried and none of them was a bridge.
+The header's `waiting for a bridge to announce itself` has three causes; the fault box names it:
 
-In that second case the bridge is usually not dead but deaf in one direction: its USB transmit
-endpoint has stopped draining while it goes on reading every frame you send it. The firmware notices
-within three seconds and reboots itself, so this should clear on its own and show up afterwards as
-`bridge rebooted itself: USB transmit had stalled`. If it does not, `wartui reset` asks it to
-reboot, which works because the receive path is the half that still runs — and keeps the device
-path, where `espflash reset --port …` re-enumerates the board and can move `ttyACM0` to `ttyACM1`.
-Naming the board by its address rather than by a path is what survives that: `--bridge
-10:BD:A3:EC:44:C0` means the same board whichever node it came back on. `espflash` is the fallback
-for a bridge that answers nothing at all, and unplugging is the last resort.
+- **`link down: could not open …`**: the port is not ours. Nearly always another `wartui`, `screen`,
+  an IDE's serial monitor, or ModemManager holds it. ModemManager clears on its own: where it runs,
+  it opens each new CDC-ACM device for a few seconds to ask whether it is a modem.
+- **No fault**: the port opened and the dongle is not answering.
+- **`swept N boards and none answered`**: no attached Espressif board is a bridge.
+
+With no fault, the bridge is usually deaf in one direction: its USB transmit endpoint stopped
+draining while it keeps reading. The firmware notices within three seconds and reboots, showing
+`bridge rebooted itself: USB transmit had stalled`. Otherwise `wartui reset` reboots it, which works
+because the receive half still runs, and keeps the device path. `espflash reset --port …`
+re-enumerates and can move `ttyACM0` to `ttyACM1`; `--bridge 10:BD:A3:EC:44:C0` names the board
+either way. `espflash` is the fallback for a bridge that answers nothing; unplugging is last.
 
 ```sh
 wartui status                          # exits in 5 s with the reason
@@ -627,30 +539,27 @@ wartui --log-file wartui.log run
 rm ~/.local/state/wartui/bridge        # forget which board was the bridge
 ```
 
-`wartui reset` takes about thirty seconds to fail when it is pointed at a board that is not a
-bridge, and that is the cost of what it does: it transmits before anything has identified itself,
-because the board it is for answers nothing. A board that is not reading takes the first packet and
-leaves the rest queued, and closing the port waits for them. `run` never pays this: it asks with one
-frame and no more, however long it then waits for the answer. That one frame is also enough for a
-bridge whose transmit endpoint has wedged, which reboots itself three seconds after a frame it cannot
-answer.
+`wartui reset` takes about thirty seconds to fail on a board that is not a bridge. The board it is
+for answers nothing, so it transmits before anything has identified itself. A board that is not
+reading takes one packet and queues the rest, and closing the port waits for them.
 
-`wartui reset` never sweeps. A `Reset` reaching a node reboots it and costs it the addresses it was
-holding back, so it goes to the board named with `--bridge`, else the remembered one, else the only
-one attached — and with several attached and none of them known, it says so and asks for a
-`--bridge` rather than guessing.
+`run` never pays this cost. It asks with one frame, however long it then waits. That one frame is
+enough for a wedged bridge, which reboots three seconds after a frame it cannot answer.
 
-`--log-file` is the only way to see the transport's own account of a run: the view owns the
-terminal, so without it nothing is logged anywhere. It records which port was resolved, whether it
-opened, and the reason a link went down — once per reason rather than once per retry, since a port
-that is somebody else's is retried every 750 ms for as long as the capture runs. The GPS reader
-thread reports itself the same way. `RUST_LOG=debug` adds each individual retry, every frame that
-would not decode, and dropped bulk commands.
+`wartui reset` never sweeps, because a `Reset` reboots a node and costs it the addresses it held
+back. It goes to the `--bridge` board, else the remembered one, else the only one attached. With
+several and none known, it asks for `--bridge` rather than guessing.
+
+**`--log-file` is the only way to see the transport's own account of a run**: the view owns the
+terminal, so without it nothing is logged. It records which port was resolved, whether it opened,
+and why a link went down, once per reason, since somebody else's port is retried every 750 ms all
+capture. The GPS reader logs the same way. `RUST_LOG=debug` adds each retry, undecodable frames, and
+dropped bulk commands.
 
 ### Telling the boards apart
 
-A node plugged in by USB is the same vendor and product ID as the bridge and sits on an adjacent
-device node, so a path says nothing about which board it reaches. `wartui ports` names them:
+A USB-plugged node has the bridge's vendor and product ID and an adjacent device node, so a path
+says nothing about which board it reaches. `wartui ports` names them:
 
 ```
 $ wartui ports
@@ -660,23 +569,18 @@ $ wartui ports
   02:00:5E:10:9D:24     USB JTAG/serial debug unit  (303a:1001)
 ```
 
-**An ESP32's USB serial number is its MAC**, so the operating system has already paired each device
-node with the address that board's radio transmits from — with nothing opened, no `esp` tool, and no
-reflash. That one fact is what the whole command rests on, and it holds on Linux and macOS alike. It
-is also why every board gets a name of its own above: udev builds those from the serial number, so
-no two ESP32s share one. Everything else on the bus carries a manufacturing serial instead, and a
-device that reports none at all reads as `address not reported` and is named by its socket.
+**An ESP32's USB serial number is its MAC**, so the OS already pairs each device node with its
+radio's address: nothing opened, no `esp` tool, no reflash. The command rests on that, on Linux and
+macOS alike. It is also why each board has its own `by-id` name, built by udev from the serial.
+Other USB devices carry a manufacturing serial; one reporting none reads `address not reported` and
+is named by its socket.
 
-The bridge is the row whose address the fleet table shows as the bridge's, and a node the row whose
-heartbeats `wartui sniff` attributes to that address. Where the board generations differ, the OUI
-separates them too.
-
-Either name works as `--bridge`, and so does the end of an address — the last one to five octets,
-two hex digits each — when exactly one attached board ends that way. `--bridge 44:C0` is how a board
-is read out of the fleet table; several boards ending the same way is a refusal that lists them,
-never a guess. The address is the one worth keeping: a device node moves when the board
-re-enumerates, and a `by-path` name moves when the cable does, while an address moves only when the
-board does.
+The bridge is the row with the address the fleet table shows for the bridge; a node is a row whose
+heartbeats `wartui sniff` attributes to its address. Across board generations the OUI differs too.
+Either name works as `--bridge`, as does an address's last one to five octets (two hex digits each)
+when exactly one board matches. `--bridge 44:C0` is how a board is read off the fleet table. Several
+matches are refused with a list, never guessed. Keep the address: a device node moves when the board
+re-enumerates and a `by-path` name moves with the cable, but an address moves only with the board.
 
 ```sh
 wartui --bridge 10:BD:A3:EC:44:C0

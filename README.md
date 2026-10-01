@@ -37,7 +37,7 @@ cargo run -p wartui -- --sim 3 --lat 37.7749 --lon -122.4194
 ```
 
 The simulated nodes behave like the firmware: they idle until assigned, ignore a repeated
-assignment, dedup what they see, and heartbeat less often the more channels they sweep.
+assignment, dedup what they see, and heartbeat every 5 seconds once assigned.
 `--sim-c6 N` makes the last N nodes C6s, for testing a mixed fleet without the hardware.
 
 ### On real hardware
@@ -91,19 +91,29 @@ have no README; their `//!` module docs hold the detail.
 
 | Key                    | What it does                                                                 |
 |------------------------|------------------------------------------------------------------------------|
-| `↑` `↓` / `k` `j`      | Move the cursor down the fleet table                                         |
+| `↑` `↓` / `k` `j`      | Move the cursor through the fleet table                                      |
 | `b`                    | Make the selected node the Bluetooth scanner, or take the scan off the fleet |
 | `c`                    | Open settings: channel pool, transmit power, Bluetooth                       |
-| `r` / `R`              | Clear the selected node's dedup ring, or every heartbeating node's           |
+| `r` / `R`              | Clear the selected node's dedup ring, or every assignable node's             |
 | `q` / `Esc` / `ctrl-c` | Stop, committing the last batch                                              |
+
+### In settings (`c`)
+
+| Key               | What it does                                       |
+|-------------------|----------------------------------------------------|
+| `↑` `↓` / `k` `j` | Move between rows                                  |
+| `←` `→` / `h` `l` | Change the selected row; values stop at their ends |
+| `Enter`           | Apply every row and save it to `wartui.toml`       |
+| `Esc` / `q`       | Close without changing anything                    |
+| `ctrl-c`          | Quit                                               |
 
 wartui splits the channel pool across the fleet and re-splits it whenever the fleet changes. That
 is the reason it exists. No key or flag assigns channels to a node. `b` only picks which node scans
 Bluetooth; the planner then shares that node's channels among the rest.
 
-A node listens for assignments only during the 100 ms after each heartbeat. A new assignment can
-take up to about five seconds to land on a full sweep of the default pool. Until then, the node's
-`channels` column reads `1: 1…`.
+A node listens for assignments only during the 100 ms after each heartbeat. Heartbeats come every
+5 seconds, so a new assignment can take up to that long to land. Until then, the node's `channels`
+column reads `1: 1…`.
 
 Set the pool with the `pool` key in `wartui.toml` or from settings (`c`):
 
@@ -111,7 +121,7 @@ Set the pool with the `pool` key in `wartui.toml` or from settings (`c`):
 - `us`: 2.4 GHz 1–11 and 5 GHz 36–165
 - `eu`: 2.4 GHz 1–13 and 5 GHz 36–140
 
-At most one node scans Bluetooth, and none does by default. That node scans once a second, does no
+At most one node scans Bluetooth, and none does by default. That node scans back to back, does no
 Wi-Fi, and its `channels` column reads `bluetooth`.
 
 **Fleet states, GPS, channel-pool detail, and troubleshooting are in
@@ -181,5 +191,6 @@ The output is text, so it diffs, greps, and is readable by a coding agent withou
 on exit, unless `--db` names one to keep.
 
 `--bridge` renders the attached boards instead of the simulator, optionally naming which one is
-the bridge. Real nodes only accept an assignment at the end of a sweep, so `--after` and `--settle`
-default to much longer waits than the simulator. Read any sooner, an assignment still in flight shows as pending.
+the bridge. Real nodes take an assignment in the window after a heartbeat and confirm it on the next, so
+`--after` and `--settle` default to much longer waits than the simulator. Read any sooner, an assignment still in flight
+shows as pending.

@@ -10,7 +10,7 @@ where.
 
 Where the prose lives:
 
-- `README.md` — the front door, and stays short.
+- `README.md` — the front door, and stays short. It also carries the full keyboard list.
 - `crates/wartui/README.md` — the operator's manual: keys, fleet states, channel pools,
   GPS, troubleshooting. Read it before changing view or CLI behaviour, and **keep it true
   when that behaviour changes.**
@@ -328,6 +328,12 @@ edit stops; follow the pointer before changing the rule.
   reasoning in them is often the only record of a hardware constraint. Match that register, and
   update the reasoning when the decision changes.
 - Documentation should be clear and concise. Link documents when necessary, do not repeat.
+  Exception: `README.md` carries the full keyboard list, settings modal included, and surfaces
+  any other key usage an operator needs at a glance. Keep its tables identical to
+  `crates/wartui/README.md` § "Keyboard commands", and change both together;
+  `crates/wartui/tests/readme.rs` fails when they differ.
+- Write short sentences with one idea each. Lead with what the reader does or sees, then the
+  reason. Use a table or list when prose would enumerate flags, states, or messages.
 - **Prose says what the project does, not where it was.** Nothing before 1.0 is compatible with
   an earlier wartui, so no reader has one to reconcile this build against: "used to", "no
   longer", "previously", and notes that a thing was renamed, moved or replaced cost a reader the
