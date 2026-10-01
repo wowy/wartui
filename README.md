@@ -129,8 +129,7 @@ Wi-Fi, and its `channels` column reads `bluetooth`.
 
 ## Limits
 
-- **Maximum twenty nodes** (`plan::MAX_NODES`), the ESP-NOW peer limit. Beyond it, capture
-  continues and nothing is dropped, but the planner stops re-splitting and says so.
+- **Maximum twenty nodes** (`plan::MAX_NODES`), the ESP-NOW peer limit. More is unsupported.
 - **The Bluetooth node sniffs no Wi-Fi.** A one-node fleet scanning Bluetooth captures no Wi-Fi,
   and the footer says so.
 - **An ESP32-C6 is never assigned a 5 GHz channel.** Its radio is 2.4 GHz only.

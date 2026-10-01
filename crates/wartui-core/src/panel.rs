@@ -147,8 +147,8 @@ fn gps_line(snapshot: &Snapshot) -> (Severity, String) {
 
 /// How many nodes are heartbeating, and how many of those can be driven.
 ///
-/// Both numbers, because a fleet past the bridge's twenty peer slots is entirely
-/// alive and entirely undrivable, and one figure leaves that unsayable.
+/// Both numbers, because a node the bridge refused a peer slot, or that has not
+/// said what its radio is, is alive and undrivable.
 fn nodes_line(snapshot: &Snapshot) -> (Severity, String) {
     if !snapshot.link_up {
         return (Severity::Error, "link down".to_owned());

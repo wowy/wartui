@@ -31,10 +31,7 @@ table holds twenty entries, and `esp-radio` spends one on the broadcast peer at 
 only _receives_ broadcasts, and ESP-NOW delivers a received frame whether or not its sender is a
 peer. So the bridge gives that slot up to make room for a twentieth node.
 
-A `PeerTableFull` after that is genuine, but it need not mean a fleet above twenty. Nothing removes
-a peer, so a long session accumulates slots for nodes that have gone. A handful still on the air can
-then fill the table. The table starts empty on every boot. That is why the host clears the refusal
-on each bridge announcement, and why `wartui reset` is the cheap thing to try first.
+The host removes a node's peer (`RemovePeer`) a minute after its last heartbeat.
 
 ## Building and flashing
 

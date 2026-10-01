@@ -286,6 +286,13 @@ pub struct NodeState {
     /// to a plan; see [`FleetEngine::is_assignable`]. Cleared when a bridge
     /// announces itself, since its table starts empty.
     pub peer_refused: bool,
+    /// The bridge may hold a peer slot for this node.
+    ///
+    /// Set when a frame goes to it, cleared when its peer is removed after
+    /// [`EngineConfig::topology_timeout`]. Kept across a bridge announcing itself,
+    /// which a port reopen does too: removing a peer the bridge has already lost is
+    /// harmless.
+    pub peered: bool,
     /// What this host wants the node to be scanning.
     pub desired: Option<Assignment>,
     /// What the node acknowledged, which is a different thing. Cleared when it
@@ -390,6 +397,7 @@ impl NodeState {
             link_rssi: None,
             capabilities: None,
             peer_refused: false,
+            peered: false,
             desired: None,
             confirmed: None,
             dirty: false,
@@ -467,8 +475,7 @@ pub struct Counters {
     /// the heartbeat that revealed it, the same retry path an unacknowledged
     /// assignment takes.
     pub admin_unadopted: u64,
-    /// Assignments refused because the bridge's peer table was full, which
-    /// means the fleet is larger than the twenty nodes wartui supports.
+    /// Assignments refused because the bridge's peer table was full.
     pub peer_table_full: u64,
     /// How many times the pool has been re-partitioned across the fleet.
     pub replans: u64,
@@ -569,9 +576,9 @@ pub struct Snapshot {
     pub nodes: Vec<NodeView>,
     /// How many are heartbeating inside the topology timeout.
     ///
-    /// Deliberately different number than [`Self::assignable`]: a fleet that has
-    /// outgrown the bridge's twenty peer slots is entirely alive and entirely
-    /// undrivable.
+    /// Deliberately different number than [`Self::assignable`]: a node the
+    /// bridge has no peer slot for, or that has not said what its radio is, is
+    /// alive and undrivable.
     pub alive: usize,
     /// How many of those can actually be given an assignment.
     ///
@@ -634,6 +641,9 @@ pub struct FleetEngine {
     nodes: BTreeMap<Mac, NodeState>,
     bridge: Option<BridgeInfo>,
     link_up: bool,
+    /// When the link last came up, or `None` while it is down. See
+    /// [`Self::evict_stale_peers`].
+    link_up_since: Option<Instant>,
     link_error: Option<String>,
     counters: Counters,
     tail: VecDeque<TailEntry>,
@@ -765,6 +775,7 @@ impl FleetEngine {
             nodes: BTreeMap::new(),
             bridge: None,
             link_up: false,
+            link_up_since: None,
             link_error: None,
             counters: Counters::default(),
             tail: VecDeque::new(),
@@ -819,6 +830,7 @@ impl FleetEngine {
                 }
                 self.bridge = Some(info);
                 self.link_up = true;
+                self.link_up_since = Some(now.mono);
                 self.link_error = None;
                 // Whatever the bridge has been holding arrives now, so this host
                 // is behind the air until a frame turns up that it had to wait
@@ -843,6 +855,7 @@ impl FleetEngine {
             }
             Event::Link(LinkEvent::Disconnected { reason }) => {
                 self.link_up = false;
+                self.link_up_since = None;
                 self.link_error = Some(reason);
                 self.last_arrival = None;
                 self.backlog_lag_us = BEHIND_THE_AIR_US;
@@ -873,12 +886,52 @@ impl FleetEngine {
         // owed. If it comes back while it is the preferred node, `replan` hands
         // it the scan again; otherwise it comes back without it.
         let _ = self.ble_node.take_if(|_| ble_gone);
+        self.evict_stale_peers(now, batch);
         self.replan(now);
         let due = self
             .last_status_poll
             .is_none_or(|last| now.mono.duration_since(last) >= self.config.status_interval);
         if due && self.link_up {
             self.poll_bridge(now, batch);
+        }
+    }
+
+    /// Free the bridge's peer slot of every node past the topology timeout.
+    ///
+    /// Such a node is out of the plan and is sent nothing, so its slot costs it
+    /// nothing. On `urgent` because `bulk` drops when full, and a lost removal
+    /// leaves this host believing in a free slot; it also has to reach the bridge
+    /// before the assignment a re-admitted node gets on its next heartbeat. A node
+    /// that returns is re-peered by its next send's `ensure_peer`.
+    ///
+    /// Only once the link has been up for a whole timeout. An outage silences every
+    /// node at once, and after a reconnect the bridge's backlog of held heartbeats
+    /// may not have arrived yet, so before then a live node looks a minute silent.
+    fn evict_stale_peers(&mut self, now: Now, batch: &mut ActionBatch) {
+        let settled = self
+            .link_up_since
+            .is_some_and(|since| now.mono.duration_since(since) >= self.config.topology_timeout);
+        if !settled {
+            return;
+        }
+        let stale: Vec<Mac> = self
+            .nodes
+            .values()
+            .filter(|node| node.peered && !self.is_alive(node, now))
+            .map(|node| node.mac)
+            .collect();
+        if stale.is_empty() {
+            return;
+        }
+        for mac in stale {
+            batch.urgent.push(HostToBridge::RemovePeer { mac });
+            if let Some(node) = self.nodes.get_mut(&mac) {
+                node.peered = false;
+            }
+        }
+        // A slot has freed, so the re-cut that follows takes refused nodes back.
+        for node in self.nodes.values_mut() {
+            node.peer_refused = false;
         }
     }
 
@@ -1537,10 +1590,8 @@ impl FleetEngine {
         // scans, which is the failure the capability token exists to prevent,
         // reached by a node that is genuinely one of ours.
         let Some(plan) = plan::plan_for(self.config.pool, &jobs) else {
-            // Nothing heartbeating, or more nodes than the radio's peer table
-            // can hold. Either way there is no partition to be in, and the
-            // fleet keeps whatever it already had rather than being told
-            // something the bridge could not deliver anyway.
+            // Nothing to cut for, or more than `plan_for` accepts: there is no
+            // partition to be in, and the fleet keeps whatever it already had.
             self.plan = None;
             return;
         };
@@ -1754,11 +1805,14 @@ impl FleetEngine {
             }),
         );
         self.counters.admin_sent += 1;
+        if let Some(node) = self.nodes.get_mut(&mac) {
+            node.peered = true;
+        }
         batch.urgent.push(HostToBridge::SendEspNow {
             id,
             dst: mac,
-            // Add if absent and never remove: removing a peer races the transmit
-            // callback for the frame just sent.
+            // Add if absent. Removing it here would race the transmit callback for
+            // the frame just sent; `evict_stale_peers` removes it once the node is gone.
             ensure_peer: true,
             payload,
         });
@@ -1782,19 +1836,24 @@ impl FleetEngine {
         self.pending.insert(id, Pending::Clear { mac, sent_mono: now.mono });
         // Six bytes into a 250-byte buffer, so this cannot fail.
         let payload = EspNowPayload::from_slice(&ClearMsg.encode()).unwrap_or_default();
+        if let Some(node) = self.nodes.get_mut(&mac) {
+            node.peered = true;
+        }
         batch.urgent.push(HostToBridge::SendEspNow { id, dst: mac, ensure_peer: true, payload });
     }
 
-    /// Terminal handling for a full peer table: twenty peers is the entire
-    /// supported fleet, so there is no later heartbeat at which this becomes
-    /// possible. Shared by the assignment and the clear path, which each add
-    /// what else a full table means for what they were trying to deliver.
+    /// Handling for a full peer table, shared by the assignment and the clear
+    /// path, which each add what else a full table means for what they were
+    /// trying to deliver. The table stays full until a stale peer is evicted or
+    /// the bridge announces itself, and both clear the refusal.
     fn mark_peer_table_full(&mut self, mac: Mac) {
         self.counters.peer_table_full += 1;
         if let Some(node) = self.nodes.get_mut(&mac) {
             // And it leaves the plan, so the next re-cut spreads the pool over
             // the nodes that can actually be reached.
             node.peer_refused = true;
+            // The bridge refused the slot, so there is none to evict.
+            node.peered = false;
         }
     }
 
