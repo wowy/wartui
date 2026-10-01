@@ -33,8 +33,8 @@ pin one.
 
 Real nodes answer on their own schedule rather than an accelerated clock, which is what
 `--after` and `--settle` default differently for: an assignment lands in the node's own
-admin window at the end of a sweep, so a `b` read a second later reads as pending when
-it is merely early.
+admin window after a heartbeat, up to 5 s away, and is confirmed on the next, so a `b`
+read a second later reads as pending when it is merely early.
 
 The capture goes to a temporary database that is deleted on the way out, since `run`
 otherwise leaves a `wartui-<date>.db` wherever it was started. `--db` keeps it instead,

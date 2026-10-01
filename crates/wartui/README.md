@@ -242,7 +242,7 @@ it first. `--dry-run` resets it once, for `board-info`, and remembers nothing.
 | `↑` `↓` / `k` `j`      | Move the cursor through the fleet table                                      |
 | `b`                    | Make the selected node the Bluetooth scanner, or take the scan off the fleet |
 | `c`                    | Open settings: channel pool, transmit power, Bluetooth                       |
-| `r` / `R`              | Clear the selected node's dedup ring, or every node in the plan              |
+| `r` / `R`              | Clear the selected node's dedup ring, or every assignable node's             |
 | `q` / `Esc` / `ctrl-c` | Stop, committing the last batch                                              |
 
 Only `b`, `c`, `r`, and `R` reach the air, and no key sets channels. `b` picks _which_ node scans
@@ -374,8 +374,8 @@ wartui run --db drive.db --lat 37.7749 --lon -122.4194
   search, which transmits into whatever it opens.
 - **`--gps PATH` pins one receiver**, when several are attached or the search picks wrong. Baud
   rates are still tried unless `--gps-baud` names one, and one valid sentence settles a named port.
-- **Naming both skips the probe.** Nothing is left to detect, and a terse receiver could otherwise
-  be refused for saying too little in one window.
+- **`--gps` with `--gps-baud` skips the probe.** Nothing is left to detect, and a terse receiver
+  could otherwise be refused for saying too little in one window.
 - **`--no-gps` turns the search off; `--sim` implies it unless `--gps` is given.** A simulated fleet
   is for working with nothing plugged in, not for opening every serial port.
 - **Any NMEA 0183 serial receiver works.** Only `GGA` and `RMC` are read. Altitude, satellite count,
@@ -508,8 +508,9 @@ panel back within a second, with no replug or reflash.
 node is one) and keeps the first that answers the link protocol. It saves that address to
 `~/.local/state/wartui/bridge`, so later runs open only that port. A capture given `--bridge` saves
 the named board once it answers, since naming it for a capture is choosing it. `status`, `sniff`,
-and `reset` save nothing, so questioning one board changes nothing later. An answering board is held
-for the run: unplug the bridge to reflash a node, and wartui waits rather than transmit into it.
+and `reset` with `--bridge` save nothing, so questioning one board changes nothing later. An
+answering board is held for the run: unplug the bridge to reflash a node, and wartui waits rather
+than transmit into it.
 
 That file is state, not settings. Deleting it is always safe, costs one slower start, and fixes
 wartui opening the wrong board. It also self-corrects: an answering board overwrites it, and the

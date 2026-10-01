@@ -125,17 +125,22 @@ reads the FIFO. If that read never lands, nothing on the device can clear it.
 
 So the firmware notices and reboots itself within about three seconds.
 `wartui_proto::stall::StallWatch` times how long the endpoint has refused bytes _while somebody was
-waiting for them_. The firmware resets when all three hold:
+waiting for them_. The firmware resets only when all four hold:
 
+- something is queued and this pass moved none of it;
 - a host frame has been decoded since the last byte moved;
-- that host is still present;
-- the endpoint has refused bytes for three seconds since both.
+- a host frame arrived within the last ten seconds, so that host is still present;
+- the endpoint has refused bytes for three seconds since both the first such frame and the first
+  refusal.
 
-The first condition keeps a bridge on a bench with no host attached quiet forever. The second keeps
-it from resetting every time an operator closes a window, because a host that read what it asked for
-leaves no unanswered frame behind. The single `Identify` that `wartui` sends on connecting is
-enough to clear a bridge that wedged beforehand. The rule lives in `wartui-proto` rather than here,
-so it is tested in microseconds instead of on a bench.
+The unanswered host frame is what keeps a bridge on a bench with no host attached quiet forever. It
+also keeps the bridge from resetting every time an operator closes a window: a host that read what
+it asked for leaves no unanswered frame behind. Presence alone can't do that, because a host that
+has just quit still counts as present for longer than the three-second timeout.
+
+The single `Identify` that `wartui` sends on connecting is enough to clear a bridge that wedged
+beforehand. The rule lives in `wartui-proto` rather than here, so it is tested in microseconds
+instead of on a bench.
 
 The reset _is_ the message, since any explanation would go out through the broken path. The `Ready`
 after it says `TxStalled`.
@@ -178,12 +183,13 @@ says so by re-announcing itself, which the host already listens for.
 ## Dependency versions
 
 `esp-radio 1.0.0-beta.0` requires `esp-hal = "~1.1.0"`, and that one requirement fixes the whole
-family. It holds the family in three ways:
+family. It holds the family in two ways:
 
 - **Walled:** `esp-hal` and `esp-rtos`. Cargo enforces this one.
 - **Resolves, but doubles:** `esp-alloc`, the `esp-wifi-sys-*` bindings, and `esp-sync`.
-- **Panel crates:** `embedded-graphics`, `embedded-hal-bus`, and `mipidsi`, through `embedded-hal`
-  1.0.
+
+The panel crates (`embedded-graphics`, `embedded-hal-bus`, and `mipidsi`) are free to move. Only
+their shared `embedded-hal` 1.0 must stay a single copy.
 
 `embassy-executor`, `embassy-time`, and `embedded-io-async` are held the same way, through
 `esp-rtos` and `esp-hal`.

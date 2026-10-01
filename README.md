@@ -37,7 +37,7 @@ cargo run -p wartui -- --sim 3 --lat 37.7749 --lon -122.4194
 ```
 
 The simulated nodes behave like the firmware: they idle until assigned, ignore a repeated
-assignment, dedup what they see, and heartbeat less often the more channels they sweep.
+assignment, dedup what they see, and heartbeat every 5 seconds once assigned.
 `--sim-c6 N` makes the last N nodes C6s, for testing a mixed fleet without the hardware.
 
 ### On real hardware
@@ -94,7 +94,7 @@ have no README; their `//!` module docs hold the detail.
 | `↑` `↓` / `k` `j`      | Move the cursor through the fleet table                                      |
 | `b`                    | Make the selected node the Bluetooth scanner, or take the scan off the fleet |
 | `c`                    | Open settings: channel pool, transmit power, Bluetooth                       |
-| `r` / `R`              | Clear the selected node's dedup ring, or every node in the plan              |
+| `r` / `R`              | Clear the selected node's dedup ring, or every assignable node's             |
 | `q` / `Esc` / `ctrl-c` | Stop, committing the last batch                                              |
 
 ### In settings (`c`)
@@ -191,6 +191,6 @@ The output is text, so it diffs, greps, and is readable by a coding agent withou
 on exit, unless `--db` names one to keep.
 
 `--bridge` renders the attached boards instead of the simulator, optionally naming which one is
-the bridge. Real nodes only accept an assignment at the end of a sweep, so `--after` and `--settle`
-default to much longer waits than the simulator. Read any sooner, an assignment still in flight
+the bridge. Real nodes take an assignment in the window after a heartbeat and confirm it on the next, so
+`--after` and `--settle` default to much longer waits than the simulator. Read any sooner, an assignment still in flight
 shows as pending.
