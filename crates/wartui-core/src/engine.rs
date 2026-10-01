@@ -288,8 +288,10 @@ pub struct NodeState {
     pub peer_refused: bool,
     /// The bridge may hold a peer slot for this node.
     ///
-    /// Set when a frame goes to it, cleared when a bridge announces itself or the
-    /// node's peer is removed after [`EngineConfig::topology_timeout`].
+    /// Set when a frame goes to it, cleared when its peer is removed after
+    /// [`EngineConfig::topology_timeout`]. Kept across a bridge announcing itself,
+    /// which a port reopen does too: removing a peer the bridge has already lost is
+    /// harmless.
     pub peered: bool,
     /// What this host wants the node to be scanning.
     pub desired: Option<Assignment>,
@@ -475,8 +477,6 @@ pub struct Counters {
     pub admin_unadopted: u64,
     /// Assignments refused because the bridge's peer table was full.
     pub peer_table_full: u64,
-    /// Peers removed from the bridge because their node stopped heartbeating.
-    pub peers_evicted: u64,
     /// How many times the pool has been re-partitioned across the fleet.
     pub replans: u64,
     /// Sighting batches lost between a node and the host, summed across the
@@ -641,6 +641,9 @@ pub struct FleetEngine {
     nodes: BTreeMap<Mac, NodeState>,
     bridge: Option<BridgeInfo>,
     link_up: bool,
+    /// When the link last came up, or `None` while it is down. See
+    /// [`Self::evict_stale_peers`].
+    link_up_since: Option<Instant>,
     link_error: Option<String>,
     counters: Counters,
     tail: VecDeque<TailEntry>,
@@ -772,6 +775,7 @@ impl FleetEngine {
             nodes: BTreeMap::new(),
             bridge: None,
             link_up: false,
+            link_up_since: None,
             link_error: None,
             counters: Counters::default(),
             tail: VecDeque::new(),
@@ -826,6 +830,7 @@ impl FleetEngine {
                 }
                 self.bridge = Some(info);
                 self.link_up = true;
+                self.link_up_since = Some(now.mono);
                 self.link_error = None;
                 // Whatever the bridge has been holding arrives now, so this host
                 // is behind the air until a frame turns up that it had to wait
@@ -839,7 +844,6 @@ impl FleetEngine {
                 // may fit now.
                 for node in self.nodes.values_mut() {
                     node.peer_refused = false;
-                    node.peered = false;
                 }
                 // A new connection means a new baseline, whether the
                 // bridge itself rebooted.
@@ -851,6 +855,7 @@ impl FleetEngine {
             }
             Event::Link(LinkEvent::Disconnected { reason }) => {
                 self.link_up = false;
+                self.link_up_since = None;
                 self.link_error = Some(reason);
                 self.last_arrival = None;
                 self.backlog_lag_us = BEHIND_THE_AIR_US;
@@ -898,13 +903,21 @@ impl FleetEngine {
     /// leaves this host believing in a free slot; it also has to reach the bridge
     /// before the assignment a re-admitted node gets on its next heartbeat. A node
     /// that returns is re-peered by its next send's `ensure_peer`.
+    ///
+    /// Only once the link has been up for a whole timeout. An outage silences every
+    /// node at once, and after a reconnect the bridge's backlog of held heartbeats
+    /// may not have arrived yet, so before then a live node looks a minute silent.
     fn evict_stale_peers(&mut self, now: Now, batch: &mut ActionBatch) {
+        let settled = self
+            .link_up_since
+            .is_some_and(|since| now.mono.duration_since(since) >= self.config.topology_timeout);
+        if !settled {
+            return;
+        }
         let stale: Vec<Mac> = self
             .nodes
             .values()
-            .filter(|node| {
-                node.peered && node.last_heartbeat.is_some() && !self.is_alive(node, now)
-            })
+            .filter(|node| node.peered && !self.is_alive(node, now))
             .map(|node| node.mac)
             .collect();
         if stale.is_empty() {
@@ -915,7 +928,6 @@ impl FleetEngine {
             if let Some(node) = self.nodes.get_mut(&mac) {
                 node.peered = false;
             }
-            self.counters.peers_evicted += 1;
         }
         // A slot has freed, so the re-cut that follows takes refused nodes back.
         for node in self.nodes.values_mut() {

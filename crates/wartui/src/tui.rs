@@ -1523,7 +1523,6 @@ mod tests {
                 admin_failed: 1,
                 admin_unadopted: 0,
                 peer_table_full: 0,
-                peers_evicted: 0,
                 replans: 0,
                 batches_lost: 0,
                 duplicate_batches: 0,

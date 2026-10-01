@@ -2306,7 +2306,6 @@ fn engine_removes_peer_when_node_has_not_heartbeated_for_topology_timeout() {
     let batch = engine.handle(Event::Tick, clock.at(62));
     assert_eq!(removals(&batch), vec![NODE]);
     assert!(removals(&engine.handle(Event::Tick, clock.at(63))).is_empty(), "removed once");
-    assert_eq!(counters(&engine).peers_evicted, 1);
 }
 
 #[test]
@@ -2335,29 +2334,51 @@ fn engine_readmits_refused_node_when_stale_peer_is_evicted() {
 }
 
 #[test]
-fn engine_skips_peer_removal_when_bridge_announced_since_last_send() {
+fn engine_removes_peer_when_node_goes_silent_after_bridge_reconnects() {
     let clock = Clock::new();
     let mut engine = engine(us_config(), &clock);
     caught_up(&mut engine, &clock);
     let (id, _, _) = sent_admin(&engine.handle(heartbeat(NODE, 1), clock.at(1)));
     engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(1));
 
-    // A bridge announcing itself has an empty peer table, so there is nothing to remove.
+    // A port reopen announces the bridge too, and its peer table may still hold the
+    // slot; removing one already gone is harmless.
     engine.handle(connected(), clock.at(2));
-    assert!(removals(&engine.handle(Event::Tick, clock.at(62))).is_empty());
-    assert_eq!(counters(&engine).peers_evicted, 0);
+    assert_eq!(removals(&engine.handle(Event::Tick, clock.at(62))), vec![NODE]);
 }
 
 #[test]
-fn engine_skips_peer_removal_for_node_never_sent_to() {
+fn engine_skips_peer_removal_when_link_is_down() {
     let clock = Clock::new();
     let mut engine = engine(us_config(), &clock);
-    // Not caught up, so the heartbeat is no admin window and nothing is sent.
+    caught_up(&mut engine, &clock);
+    let (id, _, _) = sent_admin(&engine.handle(heartbeat(NODE, 1), clock.at(1)));
+    engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(1));
+
+    // An outage silences every node at once; that is not the node leaving.
+    engine.handle(
+        Event::Link(LinkEvent::Disconnected { reason: "unplugged".to_owned() }),
+        clock.at(2),
+    );
+    for at in 3..=63 {
+        assert!(removals(&engine.handle(Event::Tick, clock.at(at))).is_empty(), "at {at} s");
+    }
+    // Nor straight after the reconnect, before the bridge's backlog has said
+    // whether the node is still there.
+    engine.handle(connected(), clock.at(64));
+    assert!(removals(&engine.handle(Event::Tick, clock.at(65))).is_empty());
+}
+
+#[test]
+fn engine_skips_peer_removal_when_node_was_never_sent_to() {
+    let clock = Clock::new();
+    let mut engine = engine(us_config(), &clock);
+    // The first frame after a connect is no admin window, so nothing is sent.
+    engine.handle(connected(), clock.at(0));
     let batch = engine.handle(heartbeat(NODE, 1), clock.at(1));
     assert!(batch.urgent.is_empty());
 
     assert!(removals(&engine.handle(Event::Tick, clock.at(62))).is_empty());
-    assert_eq!(counters(&engine).peers_evicted, 0);
 }
 
 // The bridge holds what it hears while no host is attached, so a fresh connection
