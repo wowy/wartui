@@ -330,7 +330,8 @@ edit stops; follow the pointer before changing the rule.
 - Documentation should be clear and concise. Link documents when necessary, do not repeat.
   Exception: `README.md` carries the full keyboard list, settings modal included, and surfaces
   any other key usage an operator needs at a glance. Keep its tables identical to
-  `crates/wartui/README.md` § "Keyboard commands", and change both together.
+  `crates/wartui/README.md` § "Keyboard commands", and change both together;
+  `crates/wartui/tests/readme.rs` fails when they differ.
 - Write short sentences with one idea each. Lead with what the reader does or sees, then the
   reason. Use a table or list when prose would enumerate flags, states, or messages.
 - **Prose says what the project does, not where it was.** Nothing before 1.0 is compatible with
