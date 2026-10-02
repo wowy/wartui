@@ -142,6 +142,10 @@ struct Node {
     /// completed scans, a parked node's idle beats). Its going backwards is how
     /// the host notices a node has restarted and forgotten its assignment.
     counter: u32,
+    /// Heartbeats this node has tried to send since boot. Wraps. Each heartbeat carries
+    /// the count including itself, so the host reads a gap as heartbeats lost between here
+    /// and there.
+    beats: u16,
     /// When this node next sends a heartbeat and holds the admin window open.
     /// `None` while parked: an unassigned node heartbeats every
     /// [`IDLE_BEAT_MS`] instead, with no deadline of its own. Set fresh every
@@ -174,6 +178,7 @@ impl Node {
             ble: false,
             cursor: SweepCursor::new(),
             counter: 1,
+            beats: 0,
             next_beat: None,
             reported: 0,
             seq: 0,
@@ -375,7 +380,7 @@ fn main() -> ! {
             // gives below. The listen runs either way: it is what keeps this
             // loop from spinning.
             if radio::park(&manager, &sniffer, CONTROL_CHANNEL, false) {
-                heartbeat(&mut sender, node, CAPABILITIES);
+                heartbeat(&mut sender, node);
                 node.counter = node.counter.wrapping_add(1).max(1);
             } else {
                 note!("radio would not park on channel {}", CONTROL_CHANNEL);
@@ -415,7 +420,7 @@ fn main() -> ! {
                     // an admin frame that landed after the last listen was acked
                     // and queued, and this heartbeat must report its epoch.
                     drain_admin(&manager, &receiver, node);
-                    heartbeat(&mut sender, node, CAPABILITIES);
+                    heartbeat(&mut sender, node);
                     listen(&manager, &receiver, node, ADMIN_WAIT_MS);
                     node.next_beat = Some(next_beat_after(deadline));
                 }
@@ -474,7 +479,7 @@ fn main() -> ! {
             && let Some(deadline) = node.next_beat
             && Instant::now() >= deadline
         {
-            heartbeat(&mut sender, node, CAPABILITIES);
+            heartbeat(&mut sender, node);
             listen(&manager, &receiver, node, ADMIN_WAIT_MS);
             node.next_beat = Some(next_beat_after(deadline));
         }
@@ -500,18 +505,22 @@ fn next_beat_after(deadline: Instant) -> Instant {
 /// own timer, so it advances whether or not this call goes out; the host treats
 /// sixty seconds of silence as a node that has left the fleet. `node.version` is
 /// the epoch this node holds, which is how the host tells adoption from a
-/// MAC-layer ack.
-fn heartbeat(sender: &mut EspNowSender<'_>, node: &Node, capabilities: Capabilities) {
+/// MAC-layer ack. Every attempt advances `node.beats`, so a gap the host sees in
+/// it covers a send the radio refused as well as a frame lost on the air.
+fn heartbeat(sender: &mut EspNowSender<'_>, node: &mut Node) {
     // Every heartbeat carries the capabilities, not just the first: sent once they
     // would be lost to a dropped frame or stale after a reflash, and they are
-    // three bytes of eighteen.
+    // three bytes of twenty.
+    let beat = node.beats.wrapping_add(1);
     let msg = HeartbeatMsg {
         counter: node.counter,
         epoch: node.version,
-        capabilities,
+        capabilities: CAPABILITIES,
         wifi_dropped: sniff::dropped(),
         ble_dropped: ble::dropped(),
+        beat,
     };
+    node.beats = beat;
     radio::broadcast(sender, &msg.encode());
 }
 

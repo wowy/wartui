@@ -212,7 +212,7 @@ pub(crate) fn details(summary: &ExportSummary) -> String {
 }
 
 /// A node by its last two octets, the way the fleet table names it.
-fn short_mac(mac: &[u8]) -> String {
+pub(crate) fn short_mac(mac: &[u8]) -> String {
     let tail = &mac[mac.len().saturating_sub(2)..];
     tail.iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(":")
 }

@@ -64,7 +64,7 @@ pub const SSID_MAX: usize = 32;
 pub const EXT_MAX: usize = 17;
 
 /// Length of [`HeartbeatMsg`] on the wire.
-pub const HEARTBEAT_MSG_LEN: usize = OFF_BODY + 12;
+pub const HEARTBEAT_MSG_LEN: usize = OFF_BODY + 14;
 
 /// Length of [`AdminMsg`] on the wire.
 pub const ADMIN_MSG_LEN: usize = OFF_BODY + 2 + CHANNEL_SET_BYTES + 1;
@@ -319,6 +319,10 @@ pub struct HeartbeatMsg {
     /// scan. Wraps, and is read as a difference like `wifi_dropped`. 0 on a node that has
     /// never held the Bluetooth scan.
     pub ble_dropped: u16,
+    /// Heartbeats this node has sent or tried to send since boot, this one included, so the
+    /// first after boot carries 1. Wraps. A gap in `beat` is heartbeats lost between node and
+    /// host; `counter` stays the sweep count.
+    pub beat: u16,
 }
 
 impl HeartbeatMsg {
@@ -351,10 +355,11 @@ impl HeartbeatMsg {
             ),
             wifi_dropped: le(OFF_BODY + 8),
             ble_dropped: le(OFF_BODY + 10),
+            beat: le(OFF_BODY + 12),
         })
     }
 
-    /// Encode to the eighteen bytes a heartbeat is.
+    /// Encode to the twenty bytes a heartbeat is.
     #[must_use]
     pub fn encode(&self) -> [u8; HEARTBEAT_MSG_LEN] {
         let mut out = [0u8; HEARTBEAT_MSG_LEN];
@@ -366,6 +371,7 @@ impl HeartbeatMsg {
         out[OFF_BODY + 7] = self.capabilities.flags();
         out[OFF_BODY + 8..OFF_BODY + 10].copy_from_slice(&self.wifi_dropped.to_le_bytes());
         out[OFF_BODY + 10..OFF_BODY + 12].copy_from_slice(&self.ble_dropped.to_le_bytes());
+        out[OFF_BODY + 12..OFF_BODY + 14].copy_from_slice(&self.beat.to_le_bytes());
         out
     }
 }

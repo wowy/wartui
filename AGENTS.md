@@ -89,8 +89,8 @@ Four host crates, strictly layered, plus firmware that shares the bottom one.
   serial ports generally (`ports`): what is attached and what the OS says it is, with no judgement
   about which of them is a bridge, so anything else that opens a device shares one enumeration.
 - **`crates/wartui-core`** — the headless half. Draws nothing, parses no arguments.
-- **`crates/wartui`** — clap CLI (`run`/`export`/`upload`/`sniff`/`status`/`reset`/`ports`/
-  `flash-fleet`/`flash-bridge`) and the ratatui view.
+- **`crates/wartui`** — clap CLI (`run`/`export`/`analyze`/`upload`/`sniff`/`status`/`reset`/
+  `ports`/`flash-fleet`/`flash-bridge`) and the ratatui view.
 - **`firmware/bridge`** — dumb radio bridge: COBS framing and `esp-radio` calls, no protocol
   knowledge. Fixes there cost a reflash, so logic belongs on the host. A board with a screen
   draws lines the host composed and hands it, which is the same rule seen from the other side.
@@ -134,7 +134,7 @@ These bite from a distance — from a file other than the one that owns them —
 is here rather than only in a `//!`.
 
 - **The wire is ours, in both directions, and shares nothing with the vendor's.** Every frame is
-  `WTUI`, a wire version byte, a type byte and a body: `HeartbeatMsg` (18 bytes), `SightingBatch`
+  `WTUI`, a wire version byte, a type byte and a body: `HeartbeatMsg` (20 bytes), `SightingBatch`
   (9 plus records of 12 plus the SSID and the trailer), `AdminMsg` (15) and `ClearMsg` (6, header
   only). A heartbeat broadcasts, since that is how a bridge discovers a node before either
   side knows the other's address; a sighting batch unicasts to the bridge that last sent
