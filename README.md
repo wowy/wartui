@@ -104,7 +104,7 @@ have no README; their `//!` module docs hold the detail.
 | Key               | What it does                                                       |
 |-------------------|--------------------------------------------------------------------|
 | `↑` `↓` / `k` `j` | Move between rows                                                  |
-| `←` `→` / `h` `l` | Change the selected row; values stop at their ends                 |
+| `←` `→` / `h` `l` | Change the selected row; values wrap at their ends                 |
 | Type / paste      | On the `wdgwars` row: enter the key (`Backspace`, `ctrl-u` clears) |
 | `Enter`           | Apply every row and save it to `wartui.toml`                       |
 | `Esc` / `q`       | Close without changing anything                                    |
