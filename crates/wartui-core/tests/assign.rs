@@ -20,7 +20,7 @@ use wartui_bridge::sim::{SimConfig, SimTransport};
 use wartui_core::engine::{EngineConfig, FleetEngine, Snapshot, StoreStats};
 use wartui_core::record::AdminOutcome;
 use wartui_core::runtime::{drive, now};
-use wartui_core::store::{SessionInfo, Store, StoreConfig, open_readonly};
+use wartui_core::store::{CaptureInfo, Store, StoreConfig, open_readonly};
 use wartui_proto::plan::{ADMIN_WAIT_MS, ChannelPool, ChannelSet};
 
 /// How much faster than real time the fake fleet runs.
@@ -62,14 +62,10 @@ async fn settle(path: &Path, nodes: u8) -> Vec<ChannelSet> {
     .expect("starting the simulator");
 
     let started = now();
-    let session = SessionInfo { pool: ChannelPool::All, ..Default::default() };
+    let info = CaptureInfo { pool: ChannelPool::All, ..Default::default() };
     let store =
-        Store::open(&StoreConfig::new(path), &session, started.unix_ms).expect("opening the store");
-    let config = EngineConfig {
-        pool: ChannelPool::All,
-        assignment_base: store.assignment_base(),
-        ..Default::default()
-    };
+        Store::create(&StoreConfig::new(path), &info, started.unix_ms).expect("creating the store");
+    let config = EngineConfig { pool: ChannelPool::All, ..Default::default() };
     let engine = FleetEngine::new(config, started);
 
     let (snapshot_tx, snapshot_rx) =

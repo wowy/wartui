@@ -14,7 +14,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use wartui_bridge::sim::{SimConfig, SimTransport};
 use wartui_core::engine::{EngineConfig, FleetEngine, Snapshot, StoreStats};
 use wartui_core::runtime::{drive, now};
-use wartui_core::store::{SessionInfo, Store, StoreConfig, open_readonly};
+use wartui_core::store::{CaptureInfo, Store, StoreConfig, open_readonly};
 use wartui_proto::air::RecordKind;
 use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun, SCAN_CHANNELS};
 
@@ -68,14 +68,10 @@ async fn auto_partitioner_converges_on_us_pool_partition_when_fleet_joins() {
     .expect("starting the simulator");
 
     let started = now();
-    let session = SessionInfo { pool: ChannelPool::Us, ..Default::default() };
-    let store = Store::open(&StoreConfig::new(&path), &session, started.unix_ms)
-        .expect("opening the store");
-    let config = EngineConfig {
-        pool: ChannelPool::Us,
-        assignment_base: store.assignment_base(),
-        ..Default::default()
-    };
+    let info = CaptureInfo { pool: ChannelPool::Us, ..Default::default() };
+    let store = Store::create(&StoreConfig::new(&path), &info, started.unix_ms)
+        .expect("creating the store");
+    let config = EngineConfig { pool: ChannelPool::Us, ..Default::default() };
     let engine = FleetEngine::new(config, started);
 
     let (snapshot_tx, snapshot_rx) =

@@ -34,25 +34,47 @@
 //! Nothing is sent without the operator seeing what will go and saying yes, because an
 //! upload cannot be taken back. Without a terminal to ask on, that is known before the body
 //! is built, so it is refused first.
+//!
+//! The capture records each upload, so a repeat sends only what came after the last one. The
+//! cutoff is the last sighting the upload covered, in the order the capture stored them, read
+//! in the same snapshot as the CSV, so it is exactly what was considered and a capture still
+//! being written loses nothing to it. The record is written once the site has queued the job,
+//! because that is when the upload has happened. The capture is opened for writing before
+//! anything is sent, so one this user cannot write is refused with nothing uploaded rather
+//! than uploaded and left unrecorded. A job the site reports failed imported nothing and is
+//! no cutoff. `--resend` ignores the record and sends everything,
+//! which is what a decoder fix needs: an upload then sends what `export` would write now.
+//!
+//! A capture made under `--sim` is refused whatever the flags say, because its invented
+//! networks would be published as real ones and an upload cannot be taken back. The capture
+//! records that it was simulated, so the refusal holds for `upload` and for the fleet view.
+//!
+//! The steps are separate functions — [`prepare`], [`send`], [`wait`], [`finish`] — and the
+//! wait reports through a callback rather than printing, so something other than this command
+//! can drive them.
 
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
+use chrono::{DateTime, Utc};
 use clap::Args as ClapArgs;
 use flate2::Compression;
 use flate2::write::GzEncoder;
 use serde_json::{Map, Value};
 use ureq::unversioned::multipart::{Form, Part};
 use wartui_core::export::{ExportFilter, ExportSummary, wigle_csv};
-use wartui_core::store::open_readonly;
+use wartui_core::store::{
+    Connection, UploadRecord, is_simulated, last_upload, open_readonly, open_readwrite,
+    record_upload, set_upload_result,
+};
 
 use crate::config::{self, Config};
 use crate::export::{Selection, details, note_unpositioned, thousands};
 
 /// The leaderboard.
-const BASE: &str = "https://wdgwars.pl";
+pub(crate) const BASE: &str = "https://wdgwars.pl";
 
 /// The largest file the queue accepts. The site says 40 MB; the decimal reading is the
 /// smaller, so it is the safe one.
@@ -63,7 +85,7 @@ const FIRST_POLL: Duration = Duration::from_secs(2);
 const MAX_POLL: Duration = Duration::from_secs(10);
 
 /// How long to keep asking before leaving the job to the site.
-const GIVE_UP: Duration = Duration::from_secs(30);
+pub(crate) const GIVE_UP: Duration = Duration::from_secs(30);
 
 /// How long to wait for a response's headers, and then for its body.
 const RECV_TIMEOUT: Duration = Duration::from_secs(60);
@@ -87,6 +109,10 @@ pub struct Args {
     /// Upload without asking first.
     #[arg(long, short = 'y')]
     yes: bool,
+
+    /// Send everything the selection covers, ignoring what earlier uploads sent.
+    #[arg(long)]
+    resend: bool,
 }
 
 pub fn run(args: Args) -> Result<()> {
@@ -96,13 +122,27 @@ pub fn run(args: Args) -> Result<()> {
     if !args.yes && !std::io::stdin().is_terminal() {
         bail!("standard input is not a terminal, so nothing can answer; pass --yes to upload");
     }
-    let Some(prepared) = prepare(&config, config_path.as_deref(), &db, args.selection.filter())?
-    else {
-        return Ok(());
+    let filter = args.selection.filter();
+    let prepared = match prepare(&config, config_path.as_deref(), &db, filter, args.resend)? {
+        Prepare::Ready(prepared) => prepared,
+        Prepare::NothingNew { previous, summary } => {
+            eprintln!(
+                "everything in {} was uploaded (job {}, {}); --resend sends it again",
+                db.display(),
+                previous.job_id,
+                utc_minute(previous.uploaded_at_ms)
+            );
+            note_unpositioned(&summary);
+            return Ok(());
+        }
+        Prepare::NoRows(summary) => {
+            eprintln!("{} has no rows to upload", db.display());
+            note_unpositioned(&summary);
+            return Ok(());
+        }
     };
 
-    eprint!("{} rows to upload\n{}", thousands(prepared.summary.rows), details(&prepared.summary));
-    eprintln!("  {:<11}{}", "compressed", size(prepared.body.len()));
+    eprint!("{}", prepared.describe());
     note_unpositioned(&prepared.summary);
 
     if !args.yes && !confirm()? {
@@ -110,12 +150,21 @@ pub fn run(args: Args) -> Result<()> {
         return Ok(());
     }
 
-    let client = Client::new(BASE, prepared.key);
-    let job = client.submit(&prepared.body, &filename(&db))?;
+    let client = Client::new(BASE, prepared.key.clone());
+    let sent = send(&client, &prepared, &db)?;
+    let job = sent.job;
     eprintln!("uploaded; WDGWars queued it as job {job}");
     let started = Instant::now();
-    let waited = wait(job, GIVE_UP, || client.poll(job), std::thread::sleep, || started.elapsed())?;
-    match waited {
+    let waited = wait(
+        job,
+        GIVE_UP,
+        || client.poll(job),
+        std::thread::sleep,
+        || started.elapsed(),
+        on_stderr(job),
+    );
+    finish(&sent, &waited)?;
+    match waited? {
         Waited::Done(result) => print!("{}", outcome(&result)),
         Waited::Unfollowed(reason) => eprintln!(
             "WDGWars accepted the upload as job {job}. Its import carries on; check {} or your \
@@ -126,21 +175,57 @@ pub fn run(args: Args) -> Result<()> {
     Ok(())
 }
 
-/// What `run` has ready to send.
-struct Prepared {
-    key: String,
-    body: Vec<u8>,
-    summary: ExportSummary,
+/// What is ready to send.
+pub(crate) struct Prepared {
+    pub(crate) key: String,
+    pub(crate) body: Vec<u8>,
+    pub(crate) summary: ExportSummary,
+    /// The upload this one follows on from. `None` with `--resend`, which follows on from
+    /// nothing.
+    pub(crate) previous: Option<UploadRecord>,
 }
 
-/// Check the key, then build the body. `None` when the capture has no row to send, which
-/// is said on standard error. Contacts nothing, so every refusal here costs no request.
-fn prepare(
+impl Prepared {
+    /// What the operator is asked to send: the row count, the summary's details, the
+    /// compressed size and the upload this one follows on from, a line each.
+    pub(crate) fn describe(&self) -> String {
+        let mut text =
+            format!("{} rows to upload\n{}", thousands(self.summary.rows), details(&self.summary));
+        text.push_str(&format!("  {:<11}{}\n", "compressed", size(self.body.len())));
+        if let Some(previous) = &self.previous {
+            text.push_str(&format!(
+                "  {:<11}job {}, {}; sending what came after\n",
+                "previously",
+                previous.job_id,
+                utc_minute(previous.uploaded_at_ms)
+            ));
+        }
+        text
+    }
+}
+
+/// What [`prepare`] found. It prints nothing, so the fleet view can drive it; the caller
+/// says why nothing is sent.
+pub(crate) enum Prepare {
+    Ready(Prepared),
+    /// Every row was covered by `previous`.
+    NothingNew {
+        previous: UploadRecord,
+        summary: ExportSummary,
+    },
+    /// No positioned row, and no upload before this one.
+    NoRows(ExportSummary),
+}
+
+/// Check the key, then build the body from what came after the last upload, or from
+/// everything when `resend`. Contacts nothing, so every refusal here costs no request.
+pub(crate) fn prepare(
     config: &Config,
     config_path: Option<&Path>,
     db: &Path,
-    filter: ExportFilter,
-) -> Result<Option<Prepared>> {
+    mut filter: ExportFilter,
+    resend: bool,
+) -> Result<Prepare> {
     let key = config.api_keys.wdgwars.trim();
     if key.is_empty() {
         let file =
@@ -150,30 +235,89 @@ fn prepare(
              under `[api-keys]` in {file}"
         );
     }
-    let (body, summary) = body(db, filter)?;
+    filter.after_uploads = !resend;
+    let (body, summary, previous) = body(db, filter)?;
     if summary.rows == 0 {
-        eprintln!("{} has no rows to upload", db.display());
-        note_unpositioned(&summary);
-        return Ok(None);
+        return Ok(match previous {
+            Some(previous) => Prepare::NothingNew { previous, summary },
+            None => Prepare::NoRows(summary),
+        });
     }
     if body.len() > MAX_BODY {
         bail!(
-            "the upload is {} compressed, over WDGWars' {}; send one session at a time \
-             with --session ID",
+            "the upload is {} compressed, over WDGWars' limit of {}",
             size(body.len()),
             size(MAX_BODY)
         );
     }
-    Ok(Some(Prepared { key: key.to_owned(), body, summary }))
+    Ok(Prepare::Ready(Prepared { key: key.to_owned(), body, summary, previous }))
 }
 
-/// The capture's WiGLE CSV, gzipped in memory, and what went into it.
-fn body(db: &Path, filter: ExportFilter) -> Result<(Vec<u8>, ExportSummary)> {
+/// The capture's WiGLE CSV, gzipped in memory, what went into it, and the upload it follows
+/// on from when it is [`ExportFilter::after_uploads`]. [`Simulated`] for a simulated capture,
+/// before anything is built.
+fn body(db: &Path, filter: ExportFilter) -> Result<(Vec<u8>, ExportSummary, Option<UploadRecord>)> {
     let conn = open_readonly(db).with_context(|| format!("opening {}", db.display()))?;
+    if is_simulated(&conn).with_context(|| format!("reading {}", db.display()))? {
+        return Err(Simulated { db: db.to_owned() }.into());
+    }
     let mut gz = GzEncoder::new(Vec::new(), Compression::default());
     let summary = wigle_csv(&conn, filter, &mut gz, env!("CARGO_PKG_VERSION"))?;
     let body = gz.finish().context("compressing the upload")?;
-    Ok((body, summary))
+    let previous = if filter.after_uploads { last_upload(&conn)? } else { None };
+    Ok((body, summary, previous))
+}
+
+/// The capture came from the simulator, so it is not uploaded.
+#[derive(Debug)]
+pub(crate) struct Simulated {
+    db: PathBuf,
+}
+
+impl std::fmt::Display for Simulated {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} was captured from the simulator, so it is not uploaded", self.db.display())
+    }
+}
+
+impl std::error::Error for Simulated {}
+
+/// An upload the site queued.
+pub(crate) struct Sent {
+    pub(crate) job: u64,
+    /// The capture's record of it.
+    record: i64,
+    /// The capture, open for writing since before the upload went.
+    conn: Connection,
+}
+
+/// Open `db` for writing, hand `prepared` to the site, then record that the site queued it.
+pub(crate) fn send(client: &Client, prepared: &Prepared, db: &Path) -> Result<Sent> {
+    let conn = open_readwrite(db).with_context(|| format!("opening {}", db.display()))?;
+    let job = client.submit(&prepared.body, &filename(db))?;
+    let through = prepared.summary.last_id.expect("a capture with rows has a last sighting");
+    let now = Utc::now().timestamp_millis();
+    let record = record_upload(&conn, through, now, job, prepared.summary.rows)
+        .with_context(|| format!("recording job {job} in {}", db.display()))?;
+    Ok(Sent { job, record, conn })
+}
+
+/// Record how the wait for `sent` ended.
+pub(crate) fn finish(sent: &Sent, waited: &Result<Waited>) -> Result<()> {
+    let result = match waited {
+        Ok(Waited::Done(_)) => "done",
+        Ok(Waited::Unfollowed(_)) => "unfollowed",
+        Err(_) => "failed",
+    };
+    set_upload_result(&sent.conn, sent.record, result)
+        .with_context(|| format!("recording how job {} ended", sent.job))?;
+    Ok(())
+}
+
+/// Unix milliseconds in UTC to the minute, as the summary's span line gives times.
+fn utc_minute(ms: i64) -> String {
+    let at = DateTime::from_timestamp_millis(ms).unwrap_or_default();
+    at.format("%Y-%m-%d %H:%M UTC").to_string()
 }
 
 /// The name the file goes up under: the capture's, as a gzipped CSV.
@@ -191,50 +335,64 @@ fn confirm() -> Result<bool> {
     Ok(matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes"))
 }
 
+/// The site reports `job` failed, with its reason.
+#[derive(Debug)]
+pub(crate) struct JobFailed {
+    pub(crate) job: u64,
+    pub(crate) message: String,
+}
+
+impl std::fmt::Display for JobFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "WDGWars could not import job {}: {}", self.job, self.message)
+    }
+}
+
+impl std::error::Error for JobFailed {}
+
 /// How a wait for a job ended, short of the job failing.
 #[derive(Debug, PartialEq)]
-enum Waited {
+pub(crate) enum Waited {
     /// Imported, with the counts the site sent.
     Done(Map<String, Value>),
     /// Not followed to the end, and why. The upload stands.
     Unfollowed(String),
 }
 
+/// What a wait has to report while it polls.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Progress {
+    /// The job is `queued` or `processing`.
+    State(&'static str),
+    /// A poll failed, and the wait carries on.
+    PollError(String),
+}
+
 /// Poll `job` until it ends or `give_up` has passed on `elapsed`, sleeping between polls
-/// with `sleep` but never past `give_up`, and saying each change of state and each distinct poll error. An error only
-/// when the site reports the job failed.
-fn wait(
+/// with `sleep` but never past `give_up`, and telling `say` of every poll that did not end
+/// it. An error only when the site reports the job failed.
+pub(crate) fn wait(
     job: u64,
     give_up: Duration,
     mut poll: impl FnMut() -> Result<JobStatus>,
     mut sleep: impl FnMut(Duration),
     elapsed: impl Fn() -> Duration,
+    mut say: impl FnMut(Progress),
 ) -> Result<Waited> {
     let mut delay = FIRST_POLL;
     let mut said = None;
-    let mut last_error = None;
     loop {
         sleep(delay.min(give_up.saturating_sub(elapsed())));
         match poll() {
             Ok(JobStatus::Done(result)) => return Ok(Waited::Done(result)),
             Ok(JobStatus::Unreadable(reason)) => return Ok(Waited::Unfollowed(reason)),
-            Ok(JobStatus::Failed(message)) => {
-                bail!("WDGWars could not import job {job}: {message}")
-            }
+            Ok(JobStatus::Failed(message)) => return Err(JobFailed { job, message }.into()),
             Ok(state) => {
                 let name = if state == JobStatus::Queued { "queued" } else { "processing" };
-                if said != Some(name) {
-                    eprintln!("job {job}: {name}");
-                    said = Some(name);
-                }
+                said = Some(name);
+                say(Progress::State(name));
             }
-            Err(error) => {
-                let message = format!("{error:#}");
-                if last_error.as_ref() != Some(&message) {
-                    eprintln!("job {job}: asking after it failed ({message}); trying again");
-                    last_error = Some(message);
-                }
-            }
+            Err(error) => say(Progress::PollError(format!("{error:#}"))),
         }
         if elapsed() >= give_up {
             let state = said.map_or_else(String::new, |name| format!("; it is still {name}"));
@@ -247,26 +405,55 @@ fn wait(
     }
 }
 
+/// A `say` for [`wait`] that prints each change of state and each distinct poll error.
+fn on_stderr(job: u64) -> impl FnMut(Progress) {
+    let mut said = None;
+    let mut last_error = None;
+    move |progress| match progress {
+        Progress::State(name) => {
+            if said != Some(name) {
+                eprintln!("job {job}: {name}");
+                said = Some(name);
+            }
+        }
+        Progress::PollError(message) => {
+            if last_error.as_ref() != Some(&message) {
+                eprintln!("job {job}: asking after it failed ({message}); trying again");
+                last_error = Some(message);
+            }
+        }
+    }
+}
+
 /// The wait after `delay`: half as long again, up to [`MAX_POLL`].
 fn next_delay(delay: Duration) -> Duration {
     delay.mul_f64(1.5).min(MAX_POLL)
 }
 
-/// A finished job's counts, `imported`, `captured` and `updated` first, then the rest in
-/// the order the site's JSON sorts into.
-fn outcome(result: &Map<String, Value>) -> String {
+/// A finished job's counts as `(key, value)`, `imported`, `captured` and `updated` first,
+/// then the rest in the order the site's JSON sorts into.
+pub(crate) fn counts(result: &Map<String, Value>) -> Vec<(String, String)> {
     const FIRST: [&str; 3] = ["imported", "captured", "updated"];
     let ordered = FIRST
         .iter()
         .filter_map(|key| result.get_key_value(*key))
         .chain(result.iter().filter(|(key, _)| !FIRST.contains(&key.as_str())));
+    ordered
+        .map(|(key, value)| {
+            let value = match value {
+                Value::Number(n) => n.as_u64().map_or_else(|| n.to_string(), thousands),
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            (key.clone(), value)
+        })
+        .collect()
+}
+
+/// A finished job's [`counts`], a line each.
+fn outcome(result: &Map<String, Value>) -> String {
     let mut text = String::new();
-    for (key, value) in ordered {
-        let value = match value {
-            Value::Number(n) => n.as_u64().map_or_else(|| n.to_string(), thousands),
-            Value::String(s) => s.clone(),
-            other => other.to_string(),
-        };
+    for (key, value) in counts(result) {
         text.push_str(&format!("{key:<10} {value}\n"));
     }
     if text.is_empty() {
@@ -276,7 +463,7 @@ fn outcome(result: &Map<String, Value>) -> String {
 }
 
 /// `bytes` in decimal units, the ones [`MAX_BODY`] is given in.
-fn size(bytes: usize) -> String {
+pub(crate) fn size(bytes: usize) -> String {
     const MB: usize = 1_000_000;
     if bytes >= MB {
         format!("{:.1} MB", bytes as f64 / MB as f64)
@@ -424,7 +611,7 @@ fn answer(mut response: ureq::http::Response<ureq::Body>) -> Result<String> {
     let text = body.map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
     match status.as_u16() {
         401 | 403 => Err(KeyRejected { reason: site_reason(&text) }.into()),
-        413 => bail!("WDGWars refused the upload as too large; send one session with --session ID"),
+        413 => bail!("WDGWars refused the upload as too large"),
         code => bail!("WDGWars answered {code}: {}", quote(&text)),
     }
 }
@@ -504,63 +691,25 @@ fn reason(object: &Map<String, Value>) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{Read, Write};
+    use std::io::Read;
     use std::net::TcpListener;
     use std::path::Path;
     use std::time::Duration;
 
     use flate2::read::GzDecoder;
     use wartui_core::export::{ExportFilter, wigle_csv};
-    use wartui_core::position::{Fix, PositionSource};
-    use wartui_core::record::{Observation, Record};
-    use wartui_core::store::{SessionInfo, Store, StoreConfig, open_readonly};
-    use wartui_proto::air::RecordKind;
-    use wartui_proto::plan::ChannelPool;
+    use wartui_core::store::{
+        last_upload, open_readonly, open_readwrite, record_upload, set_upload_result,
+    };
 
     use super::{
-        Client, GIVE_UP, JobStatus, Waited, body, next_delay, outcome, parse_job, parse_submit,
-        prepare, size, wait,
+        Client, GIVE_UP, JobStatus, Prepare, Sent, Waited, body, finish, next_delay, outcome,
+        parse_job, parse_submit, prepare, send, size, wait,
     };
     use crate::config::Config;
-
-    const EPOCH_MS: i64 = 1_777_642_477_000;
-
-    fn sighting(bssid: [u8; 6], at_ms: i64, lat: Option<f64>) -> Record {
-        Record::Observation(Observation {
-            node_mac: [0x02, 0x00, 0x5E, 0x10, 0x57, 0x84],
-            rx_at_ms: at_ms,
-            link_rssi: Some(-41),
-            bssid,
-            ssid: b"example".to_vec(),
-            security: "[WPA2_PSK]".to_owned(),
-            channel: 6,
-            rssi: -60,
-            kind: RecordKind::Wifi,
-            rcoi: None,
-            mfgr_id: None,
-            fix: Fix {
-                lat,
-                lon: lat.map(|_| -122.0),
-                alt: None,
-                accuracy: None,
-                source: PositionSource::Static,
-                at_ms: None,
-            },
-            raw_body: Vec::new(),
-        })
-    }
-
-    /// A capture at `dir/wartui.db` holding `records`.
-    fn capture(dir: &tempfile::TempDir, records: Vec<Record>) -> std::path::PathBuf {
-        let path = dir.path().join("wartui.db");
-        let mut config = StoreConfig::new(&path);
-        config.batch_interval = Duration::from_millis(10);
-        let session = SessionInfo { pool: ChannelPool::Us, notes: None };
-        let store = Store::open(&config, &session, EPOCH_MS).expect("opening the store");
-        assert_eq!(store.submit(records), 0, "nothing should have been dropped");
-        store.close();
-        path
-    }
+    use crate::testing::{
+        EPOCH_MS, capture, capture_simulated, serve_once, serve_once_with, sighting,
+    };
 
     fn keyed() -> Config {
         let mut config = Config::default();
@@ -578,7 +727,7 @@ mod tests {
                 sighting([0x10, 0, 0, 0, 0, 2], EPOCH_MS + 1_000, Some(37.1)),
             ],
         );
-        let (gz, summary) = body(&db, ExportFilter::default()).unwrap();
+        let (gz, summary, _) = body(&db, ExportFilter::default()).unwrap();
         assert_eq!(summary.rows, 2);
 
         let mut csv = Vec::new();
@@ -599,6 +748,7 @@ mod tests {
             Some(Path::new("/home/op/.config/wartui/wartui.toml")),
             Path::new("/nonexistent/wartui.db"),
             ExportFilter::default(),
+            false,
         )
         .err()
         .unwrap()
@@ -608,11 +758,128 @@ mod tests {
     }
 
     #[test]
+    fn upload_refuses_when_capture_simulated() {
+        let dir = tempfile::tempdir().unwrap();
+        let records = vec![sighting([0x10, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0))];
+        let db = capture_simulated(&dir, records, true);
+        for resend in [false, true] {
+            let error = prepare(&keyed(), None, &db, ExportFilter::default(), resend)
+                .err()
+                .expect("refused")
+                .to_string();
+            assert_eq!(
+                error,
+                format!("{} was captured from the simulator, so it is not uploaded", db.display())
+            );
+        }
+    }
+
+    #[test]
     fn upload_sends_nothing_when_capture_has_no_positioned_rows() {
         let dir = tempfile::tempdir().unwrap();
         let db = capture(&dir, vec![sighting([0x10, 0, 0, 0, 0, 1], EPOCH_MS, None)]);
-        let prepared = prepare(&keyed(), None, &db, ExportFilter::default()).unwrap();
-        assert!(prepared.is_none());
+        let prepared = prepare(&keyed(), None, &db, ExportFilter::default(), false).unwrap();
+        assert!(matches!(prepared, Prepare::NoRows(_)));
+    }
+
+    /// Three networks heard a minute apart, positioned, with an upload recorded through
+    /// the second.
+    fn uploaded_through_second(dir: &tempfile::TempDir) -> std::path::PathBuf {
+        let db = capture(
+            dir,
+            vec![
+                sighting([0x10, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0)),
+                sighting([0x10, 0, 0, 0, 0, 2], EPOCH_MS + 60_000, Some(37.1)),
+                sighting([0x10, 0, 0, 0, 0, 3], EPOCH_MS + 120_000, Some(37.2)),
+            ],
+        );
+        let conn = open_readwrite(&db).unwrap();
+        let id = record_upload(&conn, 2, EPOCH_MS + 90_000, 7, 2).unwrap();
+        set_upload_result(&conn, id, "done").unwrap();
+        db
+    }
+
+    /// The MACs in a gzipped CSV's rows.
+    fn macs(gz: &[u8]) -> Vec<String> {
+        let mut csv = String::new();
+        GzDecoder::new(gz).read_to_string(&mut csv).unwrap();
+        csv.lines().skip(2).map(|line| line.split(',').next().unwrap().to_owned()).collect()
+    }
+
+    #[test]
+    fn upload_records_job_and_cutoff_when_submit_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = capture(&dir, vec![sighting([0x10, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0))]);
+        let prepared =
+            prepare(&keyed(), None, &db, ExportFilter::default(), false).unwrap().ready();
+        assert_eq!(prepared.previous, None);
+
+        let (base, server) = serve_once("202 Accepted", r#"{"ok":true,"job_id":42}"#);
+        let sent = send(&Client::new(&base, prepared.key.clone()), &prepared, &db).unwrap();
+        server.join().unwrap();
+        assert_eq!(sent.job, 42);
+
+        // Everything went, so a repeat has nothing to send, and the record names the job.
+        let again = prepare(&keyed(), None, &db, ExportFilter::default(), false).unwrap();
+        assert!(matches!(again, Prepare::NothingNew { .. }));
+        let previous = last_upload(&open_readonly(&db).unwrap()).unwrap().expect("a record");
+        assert_eq!((previous.job_id, previous.rows), (42, 1));
+    }
+
+    #[test]
+    fn upload_sends_nothing_when_capture_not_writable() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = capture(&dir, vec![sighting([0x10, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0))]);
+        let prepared =
+            prepare(&keyed(), None, &db, ExportFilter::default(), false).unwrap().ready();
+        let mut permissions = std::fs::metadata(&db).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&db, permissions).unwrap();
+        if std::fs::OpenOptions::new().write(true).open(&db).is_ok() {
+            // Running as root, which file permissions do not stop.
+            return;
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let client = Client::new(&base, prepared.key.clone());
+        let error = send(&client, &prepared, &db).err().expect("refused");
+        assert!(format!("{error:#}").contains("cannot be written"), "{error:#}");
+        listener.set_nonblocking(true).unwrap();
+        let accepted = listener.accept();
+        assert!(accepted.is_err(), "the upload was sent anyway");
+    }
+
+    #[test]
+    fn upload_sends_only_new_sightings_when_repeated() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = uploaded_through_second(&dir);
+        let prepared =
+            prepare(&keyed(), None, &db, ExportFilter::default(), false).unwrap().ready();
+        assert_eq!(macs(&prepared.body), ["10:00:00:00:00:03"]);
+        assert_eq!(prepared.previous.map(|p| p.job_id), Some(7));
+    }
+
+    #[test]
+    fn upload_sends_everything_when_resend() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = uploaded_through_second(&dir);
+        let prepared = prepare(&keyed(), None, &db, ExportFilter::default(), true).unwrap().ready();
+        assert_eq!(prepared.summary.rows, 3);
+        assert_eq!(prepared.previous, None);
+    }
+
+    #[test]
+    fn upload_finish_records_failed_when_job_failed() {
+        // A failed job is no cutoff, so the next upload sends what it carried again.
+        let dir = tempfile::tempdir().unwrap();
+        let db = uploaded_through_second(&dir);
+        let conn = open_readwrite(&db).unwrap();
+        let record = record_upload(&conn, 3, EPOCH_MS + 150_000, 8, 1).unwrap();
+        finish(&Sent { job: 8, record, conn }, &Err(anyhow::anyhow!("failed"))).unwrap();
+
+        let previous = last_upload(&open_readonly(&db).unwrap()).unwrap().expect("a record");
+        assert_eq!(previous.job_id, 7);
     }
 
     #[test]
@@ -666,65 +933,6 @@ mod tests {
         assert_eq!(next_delay(Duration::from_secs(10)), Duration::from_secs(10));
     }
 
-    /// A server on a free local port that answers one request with `status` and `body`,
-    /// and hands back the request it read.
-    fn serve_once(status: &str, body: &str) -> (String, std::thread::JoinHandle<Vec<u8>>) {
-        serve_once_with(status, "", body.as_bytes())
-    }
-
-    /// [`serve_once`], with `headers` (each ending `\r\n`) added to the response.
-    fn serve_once_with(
-        status: &str,
-        headers: &str,
-        body: &[u8],
-    ) -> (String, std::thread::JoinHandle<Vec<u8>>) {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let base = format!("http://{}", listener.local_addr().unwrap());
-        let mut response = format!(
-            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n{headers}\
-             Content-Length: {}\r\nConnection: close\r\n\r\n",
-            body.len()
-        )
-        .into_bytes();
-        response.extend_from_slice(body);
-        let handle = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut request = Vec::new();
-            let mut buf = [0u8; 8192];
-            let header_end = loop {
-                let n = stream.read(&mut buf).unwrap();
-                assert!(n > 0, "the client hung up mid-request");
-                request.extend_from_slice(&buf[..n]);
-                if let Some(at) = request.windows(4).position(|w| w == b"\r\n\r\n") {
-                    break at + 4;
-                }
-            };
-            let headers = String::from_utf8_lossy(&request[..header_end]).to_ascii_lowercase();
-            let length = headers
-                .lines()
-                .find_map(|line| line.strip_prefix("content-length:"))
-                .map_or(0, |n| n.trim().parse::<usize>().unwrap());
-            while request.len() < header_end + length {
-                let n = stream.read(&mut buf).unwrap();
-                assert!(n > 0, "the client hung up mid-body");
-                request.extend_from_slice(&buf[..n]);
-            }
-            stream.write_all(&response).unwrap();
-            // A followed redirect would come back for a second request; none may.
-            listener.set_nonblocking(true).unwrap();
-            std::thread::sleep(Duration::from_millis(200));
-            if let Ok((mut stream, _)) = listener.accept() {
-                let mut buf = [0u8; 8192];
-                stream.set_nonblocking(false).unwrap();
-                stream.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
-                let n = stream.read(&mut buf).unwrap_or(0);
-                panic!("a second request arrived: {}", String::from_utf8_lossy(&buf[..n]));
-            }
-            request
-        });
-        (base, handle)
-    }
-
     #[test]
     fn upload_client_sends_api_key_and_multipart_file_when_submitting() {
         let (base, server) = serve_once(
@@ -732,14 +940,14 @@ mod tests {
             r#"{"ok":true,"job_id":42,"poll_url":"/api/v2/upload-job/42"}"#,
         );
         let client = Client::new(&base, "secret".to_owned());
-        let job = client.submit(b"gzipped bytes", "wartui-2026-09-30-19-02.csv.gz").unwrap();
+        let job = client.submit(b"gzipped bytes", "wartui-2026-09-30-19-02-11.csv.gz").unwrap();
         assert_eq!(job, 42);
 
         let request = String::from_utf8_lossy(&server.join().unwrap()).into_owned();
         assert!(request.starts_with("POST /api/v2/upload-csv "), "{request}");
         assert!(request.to_ascii_lowercase().contains("x-api-key: secret\r\n"), "{request}");
         assert!(request.contains("name=\"file\""), "{request}");
-        assert!(request.contains("filename=\"wartui-2026-09-30-19-02.csv.gz\""), "{request}");
+        assert!(request.contains("filename=\"wartui-2026-09-30-19-02-11.csv.gz\""), "{request}");
         assert!(request.contains("gzipped bytes"), "{request}");
     }
 
@@ -850,6 +1058,7 @@ mod tests {
             || answers.next().unwrap_or(Ok(JobStatus::Processing)),
             |delay| clock.set(clock.get() + delay),
             || clock.get(),
+            |_| {},
         )
     }
 
@@ -885,6 +1094,7 @@ mod tests {
                 || Ok(JobStatus::Queued),
                 |delay| slept.set(slept.get() + delay),
                 || slept.get(),
+                |_| {},
             );
             assert!(matches!(waited, Ok(Waited::Unfollowed(_))), "{waited:?}");
             assert!(slept.get() <= give_up, "{secs}s: slept {:?}", slept.get());

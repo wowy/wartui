@@ -628,7 +628,7 @@ impl ChannelPool {
 /// How the pool is named on screen and in prose — "US", not the variant's `Us`.
 ///
 /// This is a label, not an identifier: `wartui-core`'s `pool_name` keeps its own
-/// lowercase spelling for the `session.channel_pool` column, which has stored
+/// lowercase spelling for the `capture.channel_pool` column, which has stored
 /// rows behind it and must not follow this.
 impl core::fmt::Display for ChannelPool {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {

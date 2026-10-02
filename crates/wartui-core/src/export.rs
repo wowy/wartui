@@ -45,6 +45,15 @@
 //! capture from before a fix still exports correctly is the whole promise of the
 //! export being a view over the store.
 //!
+//! [`ExportFilter::after_uploads`] leaves out every sighting the newest upload the site did
+//! not report failed covered, so a repeat upload sends what came after. The cutoff is the last
+//! sighting that upload walked, in the order the capture stored them: ids follow commit order,
+//! so a frame whose sightings span two commits is split exactly, and a capture still being
+//! written loses nothing to the upload. The fold starts afresh at that cutoff: a network
+//! heard on both sides of it within the recapture width gets a second row, which WDGWars
+//! skips when scoring. An unpositioned sighting walked before the cutoff counts as sent, so a
+//! fix that arrives later does not bring it back.
+//!
 //! The columns v1.6 added over v1.4 are derived or honestly blank rather than stored.
 //! `Frequency` is computed from the channel a sighting named, because the centre
 //! frequency is a function of the channel and the store already keeps the channel —
@@ -100,19 +109,19 @@ pub enum ExportError {
 /// What to export.
 #[derive(Debug, Clone, Copy)]
 pub struct ExportFilter {
-    /// Only this session. `None` exports every session, which is usually wanted:
-    /// WiGLE deduplicates its own side and more sightings is better data.
-    pub session_id: Option<i64>,
     /// How long after a window opened a sighting still belongs to it, in
     /// seconds; the first sighting later than that opens the next window.
     /// `0` folds a network's whole capture into one row.
     pub recapture_secs: u64,
+    /// Leave out sightings at or before the newest upload the capture records, short of a
+    /// failed one. Off by default, so `export` and `analyze` read the whole capture.
+    pub after_uploads: bool,
 }
 
 impl Default for ExportFilter {
-    /// Every session, folded into [`DEFAULT_RECAPTURE_SECS`] windows.
+    /// Every sighting, folded into [`DEFAULT_RECAPTURE_SECS`] windows.
     fn default() -> Self {
-        Self { session_id: None, recapture_secs: DEFAULT_RECAPTURE_SECS }
+        Self { recapture_secs: DEFAULT_RECAPTURE_SECS, after_uploads: false }
     }
 }
 
@@ -142,6 +151,8 @@ pub struct ExportSummary {
     pub first_rx: Option<i64>,
     /// The latest sighting's receive time, in unix milliseconds.
     pub last_rx: Option<i64>,
+    /// The highest observation id walked, which is what an upload records as its cutoff.
+    pub last_id: Option<i64>,
 }
 
 /// One record kind's share of an export.
@@ -226,17 +237,17 @@ pub fn wigle_csv<W: Write>(
     {
         let mut insert = tx.prepare(INSERT_EXPORT_ROW)?;
         let mut stmt = tx.prepare(SELECT_SIGHTINGS)?;
-        let mut rows = stmt.query(rusqlite::params![filter.session_id])?;
+        let mut rows = stmt.query([filter.after_uploads])?;
         let mut window: Option<Window> = None;
 
         while let Some(row) = rows.next()? {
             let mut candidate = Candidate::of(row)?;
-            let (node, pos_source) = heard_by(row)?;
+            let (node, pos_source, id) = heard_by(row)?;
             // The first sighting of the capture, or of the next network.
             let new_network = window
                 .as_ref()
                 .is_none_or(|w| w.best.bssid != candidate.bssid || w.best.kind != candidate.kind);
-            tally.see(&candidate, new_network, node, pos_source);
+            tally.see(&candidate, new_network, node, pos_source, id);
             let opens_window = new_network
                 || window.as_ref().is_some_and(|w| {
                     recapture_ms > 0 && candidate.rx_at - w.first_seen > recapture_ms
@@ -285,8 +296,8 @@ struct Tally {
 
 impl Tally {
     /// Count one sighting, the first of its network when `new_network`, heard by `node`,
-    /// positioned by the `pos_source` code [`SELECT_SIGHTINGS`] gives it.
-    fn see(&mut self, c: &Candidate, new_network: bool, node: &[u8], pos_source: i64) {
+    /// positioned by the `pos_source` code [`SELECT_SIGHTINGS`] gives it, stored as `id`.
+    fn see(&mut self, c: &Candidate, new_network: bool, node: &[u8], pos_source: i64, id: i64) {
         let ble = c.kind == "ble";
         let summary = &mut self.summary;
         let stats = if ble { &mut summary.ble } else { &mut summary.wifi };
@@ -326,6 +337,7 @@ impl Tally {
         }
         summary.first_rx = Some(summary.first_rx.map_or(c.rx_at, |t| t.min(c.rx_at)));
         summary.last_rx = Some(summary.last_rx.map_or(c.rx_at, |t| t.max(c.rx_at)));
+        summary.last_id = Some(summary.last_id.map_or(id, |t| t.max(id)));
     }
 
     /// The summary, nodes in address order.
@@ -376,19 +388,23 @@ fn close(
 /// Every sighting of every network in the filter, in fold order: address, kind,
 /// then time. The `id` tiebreaker keeps the order — and therefore which sighting a
 /// tied window submits — deterministic. Columns 0 to 12 are a [`Candidate`]; the last
-/// two feed only the [`Tally`]. The position source arrives as `0` for `gps`, `1` for
+/// three feed only the [`Tally`]. The position source arrives as `0` for `gps`, `1` for
 /// `static` and `2` otherwise rather than as its token: every column here rides through
 /// the sort of the whole table, and a small integer is the narrowest thing a sort row can
-/// carry, which measured a quarter of what the two extra columns cost the export.
+/// carry, which measured a quarter of what the node and source columns cost the export.
+///
+/// `?1` is [`ExportFilter::after_uploads`]. The cutoff is an uncorrelated scalar, so SQLite
+/// evaluates it once rather than per sighting.
 ///
 /// There is deliberately no index for this to walk: a scan and a sort read the table in
 /// order, and were faster than one random lookup per sighting
 /// (`docs/store-io-findings.md` says more).
 const SELECT_SIGHTINGS: &str = r"
 SELECT bssid, ssid, security, channel, rssi, lat, lon, alt, accuracy, kind, rcoi, mfgr_id, rx_at,
-       node_mac, CASE pos_source WHEN 'gps' THEN 0 WHEN 'static' THEN 1 ELSE 2 END
+       node_mac, CASE pos_source WHEN 'gps' THEN 0 WHEN 'static' THEN 1 ELSE 2 END, o.id
 FROM observation o
-WHERE ?1 IS NULL OR o.session_id = ?1
+WHERE ?1 = 0
+   OR o.id > (SELECT COALESCE(MAX(through_id), 0) FROM upload WHERE result IS NOT 'failed')
 ORDER BY o.bssid, o.kind, o.rx_at, o.id
 ";
 
@@ -417,10 +433,10 @@ FROM temp.export_row
 ORDER BY first_seen, bssid, kind
 ";
 
-/// The node that heard a [`SELECT_SIGHTINGS`] row and its position source, borrowed
-/// from the row rather than copied out of it.
-fn heard_by<'r>(row: &'r Row<'_>) -> rusqlite::Result<(&'r [u8], i64)> {
-    Ok((row.get_ref(13)?.as_blob()?, row.get_ref(14)?.as_i64()?))
+/// The node that heard a [`SELECT_SIGHTINGS`] row, its position source and its id, the
+/// node borrowed from the row rather than copied out of it.
+fn heard_by<'r>(row: &'r Row<'_>) -> rusqlite::Result<(&'r [u8], i64, i64)> {
+    Ok((row.get_ref(13)?.as_blob()?, row.get_ref(14)?.as_i64()?, row.get_ref(15)?.as_i64()?))
 }
 
 /// One sighting in flight through the fold, carrying everything a submitted

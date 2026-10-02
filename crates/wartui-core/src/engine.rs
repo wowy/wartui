@@ -176,7 +176,7 @@ impl ActionBatch {
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
     /// Which channels the fleet is meant to scan: the set the engine partitions
-    /// across the fleet, and shown in the UI. The session records the value it
+    /// across the fleet, and shown in the UI. The capture records the value it
     /// starts with; [`Command::SetPool`] changes it mid-run.
     pub pool: ChannelPool,
     /// How long a node may go without a heartbeat before it stops counting
@@ -194,13 +194,6 @@ pub struct EngineConfig {
     /// before writing it down as unanswered. Generous: the bridge blocks on
     /// the transmit callback, and a busy radio can take tens of milliseconds.
     pub admin_timeout: Duration,
-    /// The last assignment epoch any wartui is known to have used against this
-    /// database, from [`crate::Store::assignment_base`]. Epochs are allocated
-    /// from `base + 1` upwards.
-    ///
-    /// Persisted, so a restarted host never reissues an epoch a node already
-    /// holds: the node would acknowledge it and then discard it.
-    pub assignment_base: u64,
     /// Wi-Fi transmit power sent to every node in its assignment, in ESP-IDF
     /// quarter-dBm units.
     ///
@@ -234,7 +227,6 @@ impl Default for EngineConfig {
             record_raw: false,
             position: PositionChain::empty(),
             admin_timeout: Duration::from_secs(2),
-            assignment_base: 0,
             tx_power: DEFAULT_TX_POWER_QUARTER_DBM,
             bridge_tx_power: DEFAULT_TX_POWER_QUARTER_DBM,
             remember_ble: true,
@@ -668,7 +660,10 @@ pub struct FleetEngine {
     /// Wraps, and harmlessly: an id only has to be unique among the handful of
     /// assignments outstanding at once, not for the life of the session.
     next_send_id: u16,
-    /// The last epoch handed out. Starts at the store's persisted base.
+    /// The last epoch handed out. Starts at 0 with every capture and is not persisted:
+    /// a node may still hold an epoch from an earlier run, and [`next_epoch`] never
+    /// hands a node the epoch its heartbeat says it holds, so a repeat cannot land as a
+    /// discarded duplicate.
     last_counter: u64,
     /// The partition in force.
     plan: Option<Plan>,
@@ -808,7 +803,7 @@ impl FleetEngine {
             started_at_ms: now.unix_ms,
             pending: BTreeMap::new(),
             next_send_id: 1,
-            last_counter: config.assignment_base,
+            last_counter: 0,
             plan: None,
             plan_members: Vec::new(),
             ble_node: None,

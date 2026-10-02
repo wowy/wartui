@@ -1,7 +1,7 @@
 //! `wartui export` — turn a capture into something WiGLE will take.
 //!
 //! Separate from the capture because the store is the system of record: an
-//! export can be re-run after a decoder fix, run against a session that ended
+//! export can be re-run after a decoder fix, run against a capture that ended
 //! last week, or run against one that is still going. WAL is what makes that
 //! last case safe.
 //!
@@ -31,10 +31,6 @@ pub struct Selection {
     #[arg(long, value_name = "PATH")]
     db: Option<PathBuf>,
 
-    /// Only this session. Every session in the file by default.
-    #[arg(long, value_name = "ID")]
-    session: Option<i64>,
-
     /// How long a network's sightings fold into one row, in seconds. One
     /// hour by default, the leaderboard's scan cooldown; `0` writes one row
     /// per network.
@@ -61,9 +57,9 @@ impl Selection {
         }
     }
 
-    /// The rows `--session` and `--recapture` ask for.
+    /// The rows `--recapture` asks for.
     pub(crate) fn filter(&self) -> ExportFilter {
-        ExportFilter { session_id: self.session, recapture_secs: self.recapture }
+        ExportFilter { recapture_secs: self.recapture, after_uploads: false }
     }
 }
 
@@ -341,12 +337,13 @@ mod tests {
             // 2026-09-30 19:02 to 23:48 UTC.
             first_rx: Some(1_790_794_920_000),
             last_rx: Some(1_790_812_080_000),
+            last_id: Some(4_012_345),
         }
     }
 
     #[test]
     fn export_report_lists_nodes_by_last_two_octets_when_nodes_present() {
-        let text = report(&evening(), Some(Path::new("wartui-2026-09-30-19-02.csv")));
+        let text = report(&evening(), Some(Path::new("wartui-2026-09-30-19-02-11.csv")));
         assert!(text.contains("\n    1C:5A  ble 112,233\n"), "{text}");
         assert!(text.contains("\n    57:84  wifi 3,900,112\n"), "{text}");
         assert!(text.contains("1 heard Wi-Fi, 1 heard Bluetooth"), "{text}");
@@ -409,7 +406,7 @@ mod tests {
     #[test]
     fn export_writer_creates_destination_file_when_derived_path_does_not_exist() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("wartui-2026-09-18-14-30.csv");
+        let path = dir.path().join("wartui-2026-09-18-14-30-07.csv");
         create_csv(&path, true).unwrap().write_all(b"rows").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "rows");
     }
@@ -417,11 +414,11 @@ mod tests {
     #[test]
     fn export_mgr_refuses_overwrite_when_auto_generated_file_already_exists() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("wartui-2026-09-18-14-30.csv");
+        let path = dir.path().join("wartui-2026-09-18-14-30-07.csv");
         std::fs::write(&path, "the export that was uploaded").unwrap();
         let error = create_csv(&path, true).unwrap_err().to_string();
         assert!(error.contains("--out"), "{error}");
-        assert!(error.contains("wartui-2026-09-18-14-30.csv"), "{error}");
+        assert!(error.contains("wartui-2026-09-18-14-30-07.csv"), "{error}");
         // And the file it refused to open is the one still there.
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "the export that was uploaded");
     }
@@ -430,7 +427,7 @@ mod tests {
     fn export_writer_allows_overwrite_when_destination_path_is_explicitly_specified() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tonight.csv");
-        std::fs::write(&path, "an export of the session before").unwrap();
+        std::fs::write(&path, "an export of the capture before").unwrap();
         create_csv(&path, false).unwrap().write_all(b"rows").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "rows");
     }
@@ -438,7 +435,7 @@ mod tests {
     #[test]
     fn export_writer_deletes_partial_file_when_auto_generated_export_fails() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("wartui-2026-09-18-14-30.csv");
+        let path = dir.path().join("wartui-2026-09-18-14-30-07.csv");
         let failed: Result<(), _> = into_csv(&path, true, |_| bail!("the query went wrong"));
         assert!(failed.is_err());
         // Nothing left under the name, so the retry that fixes the fault is not
@@ -459,7 +456,7 @@ mod tests {
     #[test]
     fn export_writer_persists_full_payload_when_export_succeeds() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("wartui-2026-09-18-14-30.csv");
+        let path = dir.path().join("wartui-2026-09-18-14-30-07.csv");
         let rows = into_csv(&path, true, |writer| {
             writer.write_all(b"rows")?;
             Ok(973)

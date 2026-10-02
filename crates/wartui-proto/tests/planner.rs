@@ -441,7 +441,7 @@ fn planner_returns_none_when_fleet_size_is_zero_or_exceeds_max_nodes() {
 fn wire_epoch_cycles_non_zero_u8_range_when_epoch_counter_increments() {
     use wartui_proto::air::wire_epoch;
 
-    // The host persists a `u64`; the wire field is one byte and
+    // The host counts in a `u64`; the wire field is one byte and
     // the firmware never puts 0 in it, so a node holding a freshly-zeroed field
     // must not be mistaken for one holding an assignment.
     assert_eq!(wire_epoch(1), 1);

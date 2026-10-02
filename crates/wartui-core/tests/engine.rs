@@ -983,7 +983,7 @@ fn engine_ignores_unknown_sender_when_payload_cannot_be_decoded() {
 
 #[test]
 fn engine_emits_bridge_record_when_bridge_connected_event_arrives() {
-    // The session row is written before any bridge has announced.
+    // The capture row is written before any bridge has announced.
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
 
@@ -1135,7 +1135,7 @@ fn observed(batch: &wartui_core::ActionBatch) -> &wartui_core::record::Observati
 
 #[test]
 fn engine_updates_position_sources_dynamically_when_gps_fix_resolves() {
-    // The reason the source is a column and not a session-wide setting.
+    // The reason the source is a column and not a capture-wide setting.
     let clock = Clock::new();
     let gps = Gps::detached();
     let config = EngineConfig {
@@ -1745,18 +1745,6 @@ fn engine_counts_one_reboot_when_replayed_counter_drop_precedes_live_epoch_zero(
     // node forgetting a second, different epoch.
     engine.handle(beat_at(NODE, 2, 0, Capabilities::here(true), 1_050_000), clock.at_ms(10_102));
     assert_eq!(engine.nodes().next().expect("the node").reboots, 1, "one reboot, not two");
-}
-
-#[test]
-fn engine_resumes_epoch_counter_from_persisted_base_when_initialized() {
-    let clock = Clock::new();
-    let config = EngineConfig { assignment_base: 300, ..Default::default() };
-    let mut engine = engine(config, &clock);
-    engine.handle(heartbeat(NODE, 1), clock.at(1));
-
-    let (_, _, admin) = sent_admin(&engine.handle(heartbeat(NODE, 2), clock.at(6)));
-    // 301 narrowed to a byte that skips zero, which the firmware never sends.
-    assert_eq!(admin.epoch, 46);
 }
 
 #[test]
@@ -2876,7 +2864,7 @@ fn engine_skips_held_epoch_when_dealing_first_assignment() {
     // goes out; the second heartbeat is the one whose window is actually open.
     // By then the node has already reported holding wire epoch 1 -- exactly
     // what `deal` would allocate first under `EngineConfig::default()`
-    // (`assignment_base` 0, so the first counter is 1 and `wire_epoch(1) == 1`).
+    // (the first counter is 1, and `wire_epoch(1) == 1`).
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
     engine.handle(heartbeat_holding(NODE, 1, 1), clock.at(1));

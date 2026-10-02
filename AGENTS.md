@@ -119,10 +119,11 @@ ordered against each other. Only `b`, `c`, `r` and `R` get that far; channels ar
 
 `store` is SQLite behind one owner thread with batched transactions and a bounded queue that
 **drops rather than blocks** (a stalled engine misses everything, including an assignment racing
-a 100 ms window). `export` (WiGLE CSV) is a view over the store, re-runnable against a finished
-or still-running session. `SCHEMA` changes shape as freely as the work needs;
-`store::SCHEMA_VERSION` stays at 1 until 1.0, and a capture stamped anything else, or stamped 1
-over another build's `SCHEMA` fingerprint, is refused rather than migrated.
+a 100 ms window). A capture file holds one run: `Store::create` refuses a path that exists.
+`export` (WiGLE CSV) is a view over the store, re-runnable against a finished or still-running
+capture. `SCHEMA` changes shape as freely as the work needs; `store::SCHEMA_VERSION` stays at 1
+until 1.0, and a capture stamped anything else, or stamped 1 over another build's `SCHEMA`
+fingerprint, is refused rather than migrated.
 
 Positions resolve fresh per record through `PositionChain`: GPS (found by `discover`, or pinned with
 `--gps`; NMEA on its own thread) → static `--lat`/`--lon` → nothing. Which tier answered is stored

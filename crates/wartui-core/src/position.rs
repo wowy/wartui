@@ -7,7 +7,7 @@
 //! it can be uploaded gets asked.
 //!
 //! The tiers are tried in that order per record, which is why the source is stored
-//! per row rather than per session: one capture can begin indoors on a typed-in
+//! per row rather than per capture: one capture can begin indoors on a typed-in
 //! position, pick up satellites in the car park, and lose them in a tunnel.
 //!
 //! **A fix has to be recent to be used at all**, which is the interesting half —
@@ -31,7 +31,7 @@ pub const DEFAULT_MAX_AGE: Duration = Duration::from_secs(5);
 pub enum PositionSource {
     /// A live NMEA fix from a GPS on the host.
     Gps,
-    /// The operator's configured lat/lon. Constant for the session.
+    /// The operator's configured lat/lon. Constant for the run.
     Static,
     /// No position was available.
     None,

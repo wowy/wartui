@@ -20,9 +20,13 @@
 //! rows. `docs/store-io-findings.md` has the measurements behind the batching, the
 //! checkpoint and the lack of any index on sightings.
 //!
+//! A file holds one run. [`Store::create`] refuses a path that exists rather than
+//! appending to it, so every export, analysis and upload cutoff is a question about one
+//! file, and nothing that reads a capture has to ask which run within it is meant.
+//!
 //! A capture from another build is somebody else's file, and the version marker alone
-//! cannot say so: it stays at [`SCHEMA_VERSION`] while [`SCHEMA`] changes shape, and
-//! `CREATE TABLE IF NOT EXISTS` no-ops against tables of the wrong shape. So each file
+//! cannot say so: it stays at [`SCHEMA_VERSION`] while [`SCHEMA`] changes shape, and a
+//! query against tables of another shape fails, or worse, reads them wrongly. So each file
 //! also carries [`SCHEMA_FINGERPRINT`], a hash of the schema text, and [`check_version`]
 //! refuses a file whose fingerprint is missing or not this build's. The hash is of the
 //! text, so a change that is only whitespace or a comment refuses old files too. That is
@@ -35,7 +39,8 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use rusqlite::{Connection, OpenFlags, TransactionBehavior, params};
+pub use rusqlite::Connection;
+use rusqlite::{OpenFlags, OptionalExtension, params};
 use wartui_proto::air::RecordKind;
 use wartui_proto::plan::ChannelPool;
 
@@ -81,17 +86,20 @@ const fn fnv1a_64(bytes: &[u8]) -> u64 {
     hash
 }
 
-/// The schema, applied to any database that does not already have it.
+/// The schema, applied to every capture [`Store::create`] makes.
 const SCHEMA: &str = r"
-CREATE TABLE IF NOT EXISTS session (
-  id INTEGER PRIMARY KEY,
+-- The run this file holds, and the only one: `id` is always 1.
+CREATE TABLE IF NOT EXISTS capture (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
   started_at INTEGER NOT NULL,
   ended_at INTEGER,
   bridge_mac BLOB,
   bridge_chip TEXT,
   bridge_fw TEXT,
   channel_pool TEXT NOT NULL,
-  notes TEXT
+  notes TEXT,
+  -- 1 when the simulator made it: its networks are invented, so it is never uploaded.
+  simulated INTEGER NOT NULL
 );
 
 -- `capabilities` is the node's most recent heartbeat rendered the way the fleet
@@ -111,7 +119,6 @@ CREATE TABLE IF NOT EXISTS node (
 -- the node's since-boot heartbeat count, raw, and wraps at 2^16.
 CREATE TABLE IF NOT EXISTS heartbeat (
   id INTEGER PRIMARY KEY,
-  session_id INTEGER NOT NULL REFERENCES session(id),
   node_mac BLOB NOT NULL,
   rx_at INTEGER NOT NULL,
   counter INTEGER NOT NULL,
@@ -129,7 +136,7 @@ CREATE TABLE IF NOT EXISTS heartbeat (
 
 -- One row per transmitted assignment, written when its outcome is known, so
 -- the table is append-only and a retry is a second row rather than an update.
--- `counter` is the persisted monotonic epoch and `wire_version` the byte that
+-- `counter` is the engine's monotonic epoch and `wire_version` the byte that
 -- actually went out; they differ because the wire field is one byte wide.
 -- `channels` is the forty-two-bit SCAN_CHANNELS mask the frame carried, stored as the
 -- integer it is: the indices are what the wire said, and which channels they name is
@@ -137,7 +144,6 @@ CREATE TABLE IF NOT EXISTS heartbeat (
 -- nothing rewrites it when the table changes -- a row records what went out.
 CREATE TABLE IF NOT EXISTS assignment (
   id INTEGER PRIMARY KEY,
-  session_id INTEGER NOT NULL REFERENCES session(id),
   node_mac BLOB NOT NULL,
   counter INTEGER NOT NULL,
   wire_version INTEGER NOT NULL,
@@ -150,12 +156,11 @@ CREATE TABLE IF NOT EXISTS assignment (
 );
 CREATE INDEX IF NOT EXISTS assign_node ON assignment(node_mac, created_at);
 
--- Holds `assignment_version_counter`, the monotonic epoch of divergence 4.
+-- Holds `schema_fingerprint`, which `check_version` reads.
 CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT NOT NULL);
 
 CREATE TABLE IF NOT EXISTS observation (
   id INTEGER PRIMARY KEY,
-  session_id INTEGER NOT NULL REFERENCES session(id),
   node_mac BLOB NOT NULL,
   rx_at INTEGER NOT NULL,
   link_rssi INTEGER,
@@ -183,7 +188,6 @@ CREATE TABLE IF NOT EXISTS observation (
 -- reboot shows as the values falling.
 CREATE TABLE IF NOT EXISTS bridge_status (
   id INTEGER PRIMARY KEY,
-  session_id INTEGER NOT NULL REFERENCES session(id),
   rx_at INTEGER NOT NULL,
   peer_count INTEGER NOT NULL,
   rx_count INTEGER NOT NULL,
@@ -197,7 +201,6 @@ CREATE TABLE IF NOT EXISTS bridge_status (
 -- follows. Summing `lost` per node gives the fleet table's `lost` column.
 CREATE TABLE IF NOT EXISTS batch_gap (
   id INTEGER PRIMARY KEY,
-  session_id INTEGER NOT NULL REFERENCES session(id),
   node_mac BLOB NOT NULL,
   rx_at INTEGER NOT NULL,
   after_seq INTEGER NOT NULL,
@@ -207,12 +210,25 @@ CREATE TABLE IF NOT EXISTS batch_gap (
 
 CREATE TABLE IF NOT EXISTS raw_frame (
   id INTEGER PRIMARY KEY,
-  session_id INTEGER NOT NULL,
   rx_at INTEGER NOT NULL,
   src BLOB NOT NULL,
   dst BLOB,
   rssi INTEGER,
   bytes BLOB NOT NULL
+);
+
+-- One row per upload the site queued. `through_id` is the last observation id the upload
+-- covered; the next upload sends only observations stored after it. Ids follow commit order,
+-- so the cutoff is exact even when one frame's sightings span two commits. `result` is NULL
+-- until known, then 'done', 'failed' or 'unfollowed'. A job the site reported failed imported
+-- nothing and is no cutoff.
+CREATE TABLE IF NOT EXISTS upload (
+  id INTEGER PRIMARY KEY,
+  through_id INTEGER NOT NULL,
+  uploaded_at INTEGER NOT NULL,
+  job_id INTEGER NOT NULL,
+  rows INTEGER NOT NULL,
+  result TEXT
 );
 ";
 
@@ -225,6 +241,15 @@ pub enum StoreError {
     /// The writer thread could not be started.
     #[error("could not start the store writer thread: {0}")]
     Spawn(#[source] std::io::Error),
+    /// The path is taken. A capture holds one run, so it is never appended to.
+    #[error("{} already exists; a capture holds one run, so name a new --db", .0.display())]
+    Exists(PathBuf),
+    /// The file is there but this user cannot write it.
+    #[error("{} cannot be written", .0.display())]
+    ReadOnly(PathBuf),
+    /// The database file could not be created.
+    #[error("could not create the database file: {0}")]
+    Create(#[source] std::io::Error),
     /// The database was written by a wartui with a different schema.
     #[error(
         "database schema is v{found}, but this build writes v{ours}; captures are not \
@@ -392,19 +417,21 @@ pub struct BatchTiming {
     pub commit: Duration,
 }
 
-/// What to record about the session being opened.
+/// What to record about the capture being created.
 ///
-/// The bridge's own identity is deliberately absent: a session is opened before
+/// The bridge's own identity is deliberately absent: a capture is created before
 /// any bridge has announced itself, so it arrives later as a
 /// [`Record::Bridge`].
 #[derive(Debug, Clone, Default)]
-pub struct SessionInfo {
-    /// The pool the session started on. The operator can change it mid-run, so it
+pub struct CaptureInfo {
+    /// The pool the run started on. The operator can change it mid-run, so it
     /// is not every assignment's: each assignment row records the channels that
     /// actually went out.
     pub pool: ChannelPool,
     /// Anything the operator wants to remember about this run.
     pub notes: Option<String>,
+    /// Whether the simulator, not a fleet, produced it.
+    pub simulated: bool,
 }
 
 #[derive(Debug, Default)]
@@ -427,43 +454,48 @@ pub struct Store {
     /// those, and there is no reason to hand the two threads one cache line to argue
     /// over for the sake of saving an `Arc`.
     caught_up: Arc<AtomicU64>,
-    session_id: i64,
-    assignment_base: u64,
 }
 
 impl Store {
-    /// Open (or create) the database and start the writer.
+    /// Create the database at a path nothing occupies, and start the writer.
+    ///
+    /// The file is created with `create_new` before SQLite sees it, so a path that
+    /// exists, or that another process takes first, is refused rather than appended to.
     ///
     /// # Errors
-    /// [`StoreError`] if the file cannot be opened, the schema cannot be
-    /// applied, or the writer thread cannot be started.
-    pub fn open(
+    /// [`StoreError::Exists`] if the path is taken, and [`StoreError`] otherwise if the
+    /// file cannot be created, the schema cannot be applied, or the writer thread cannot
+    /// be started.
+    pub fn create(
         config: &StoreConfig,
-        session: &SessionInfo,
+        capture: &CaptureInfo,
         started_at_ms: i64,
     ) -> Result<Self, StoreError> {
+        std::fs::OpenOptions::new().write(true).create_new(true).open(&config.path).map_err(
+            |e| match e.kind() {
+                std::io::ErrorKind::AlreadyExists => StoreError::Exists(config.path.clone()),
+                _ => StoreError::Create(e),
+            },
+        )?;
         let mut conn = Connection::open(&config.path)?;
         prepare(&conn, config)?;
-        // Before the schema, not after: `CREATE TABLE IF NOT EXISTS` no-ops
-        // against a foreign file's tables rather than failing, so without this
-        // the build appends rows of the wrong shape and stamps the version
-        // marker to its own, leaving nothing able to tell it had happened.
-        check_version(&conn)?;
-        // All of it or none of it, version marker and fingerprint included. They are
-        // what say the tables are there, so a file stamped with half a schema under it
-        // passes `check_version` on every later open and then fails on a missing table
-        // instead of being fixed.
+        // All of it or none of it, version marker, fingerprint and capture row included.
+        // The marker and fingerprint are what say the tables are there, so a file stamped
+        // with half a schema under it would pass `check_version` and then fail on a
+        // missing table.
         let tx = conn.transaction()?;
         tx.execute_batch(SCHEMA)?;
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         tx.execute(
-            "INSERT INTO kv (k, v) VALUES (?1, ?2) ON CONFLICT(k) DO UPDATE SET v = excluded.v",
+            "INSERT INTO kv (k, v) VALUES (?1, ?2)",
             params![FINGERPRINT_KEY, format!("{SCHEMA_FINGERPRINT:016x}")],
         )?;
+        tx.execute(
+            "INSERT INTO capture (id, started_at, channel_pool, notes, simulated) \
+             VALUES (1, ?1, ?2, ?3, ?4)",
+            params![started_at_ms, pool_name(capture.pool), capture.notes, capture.simulated],
+        )?;
         tx.commit()?;
-
-        let session_id = insert_session(&mut conn, session, started_at_ms)?;
-        let assignment_base = reserve_versions(&mut conn)?;
 
         // The writer wakes the checkpointer after each commit. One wake-up waiting stands for
         // any number of commits, so the channel holds one.
@@ -482,7 +514,7 @@ impl Store {
             .spawn({
                 let stats = Arc::clone(&stats);
                 let config = config.clone();
-                move || writer(conn, &rx, session_id, &config, &stats, wake.as_ref())
+                move || writer(conn, &rx, &config, &stats, wake.as_ref())
             })
             .map_err(StoreError::Spawn)?;
 
@@ -503,28 +535,7 @@ impl Store {
             _ => None,
         };
 
-        Ok(Self {
-            tx: Some(tx),
-            stats,
-            join: Some(join),
-            checkpointer,
-            caught_up,
-            session_id,
-            assignment_base,
-        })
-    }
-
-    /// The session rows will be attributed to.
-    #[must_use]
-    pub const fn session_id(&self) -> i64 {
-        self.session_id
-    }
-
-    /// The last assignment epoch any wartui is known to have used against this
-    /// database. The engine allocates from `base + 1` upwards.
-    #[must_use]
-    pub const fn assignment_base(&self) -> u64 {
-        self.assignment_base
+        Ok(Self { tx: Some(tx), stats, join: Some(join), checkpointer, caught_up })
     }
 
     /// Queue records, dropping any that do not fit rather than waiting.
@@ -566,7 +577,7 @@ impl Store {
         self.caught_up.load(Ordering::Relaxed)
     }
 
-    /// Flush everything queued, close the session and stop the writer.
+    /// Flush everything queued, record the capture's end and stop the writer.
     ///
     /// Called explicitly rather than left to `Drop`, so a failure to finish the last
     /// transaction is reported rather than swallowed. Returns what the writer did,
@@ -622,13 +633,103 @@ pub fn open_readonly(path: &Path) -> Result<Connection, StoreError> {
     Ok(conn)
 }
 
+/// Open a second connection that may write, which is what recording an upload uses.
+///
+/// Never creates the file. WAL lets it write beside a running capture's writer thread; the
+/// busy timeout covers the moment the two commit at once. SQLite opens a file it cannot write
+/// read-only without saying so, so that is checked here rather than found at the first write.
+///
+/// # Errors
+/// [`StoreError`] if the file cannot be opened or written, or is from a different wartui.
+pub fn open_readwrite(path: &Path) -> Result<Connection, StoreError> {
+    let conn = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_URI,
+    )?;
+    if conn.is_readonly(rusqlite::MAIN_DB)? {
+        return Err(StoreError::ReadOnly(path.to_owned()));
+    }
+    conn.busy_timeout(Duration::from_secs(5))?;
+    check_version(&conn)?;
+    Ok(conn)
+}
+
+/// An upload the site queued, as [`last_upload`] reads it back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UploadRecord {
+    /// The site's job.
+    pub job_id: u64,
+    /// When the site queued it, in unix milliseconds.
+    pub uploaded_at_ms: i64,
+    /// Rows the upload sent.
+    pub rows: u64,
+}
+
+/// Record an upload the site queued as `job_id`, covering observations through id `through_id`.
+/// Returns the row's id, for [`set_upload_result`].
+///
+/// # Errors
+/// If the insert fails.
+pub fn record_upload(
+    conn: &Connection,
+    through_id: i64,
+    uploaded_at_ms: i64,
+    job_id: u64,
+    rows: u64,
+) -> rusqlite::Result<i64> {
+    conn.execute(
+        "INSERT INTO upload (through_id, uploaded_at, job_id, rows) VALUES (?1, ?2, ?3, ?4)",
+        params![through_id, uploaded_at_ms, job_id as i64, rows as i64],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Say how the upload [`record_upload`] returned `id` for ended: `done`, `failed` or
+/// `unfollowed`.
+///
+/// # Errors
+/// If the update fails.
+pub fn set_upload_result(conn: &Connection, id: i64, result: &str) -> rusqlite::Result<()> {
+    conn.execute("UPDATE upload SET result = ?1 WHERE id = ?2", params![result, id])?;
+    Ok(())
+}
+
+/// Whether the simulator made this capture.
+///
+/// # Errors
+/// If the query fails.
+pub fn is_simulated(conn: &Connection) -> rusqlite::Result<bool> {
+    conn.query_row("SELECT simulated FROM capture WHERE id = 1", [], |row| row.get(0))
+}
+
+/// The newest upload the site did not report failed, if any.
+///
+/// # Errors
+/// If the query fails.
+pub fn last_upload(conn: &Connection) -> rusqlite::Result<Option<UploadRecord>> {
+    conn.query_row(
+        "SELECT job_id, uploaded_at, rows FROM upload WHERE result IS NOT 'failed' \
+         ORDER BY id DESC LIMIT 1",
+        [],
+        |row| {
+            Ok(UploadRecord {
+                job_id: row.get::<_, i64>(0)? as u64,
+                uploaded_at_ms: row.get(1)?,
+                rows: row.get::<_, i64>(2)? as u64,
+            })
+        },
+    )
+    .optional()
+}
+
 /// Refuse a database written by any wartui but this one.
 ///
 /// Not just a newer one: there is no migration before 1.0, so a lower marker is as
 /// foreign as a higher one and guessing at it would be the compatibility this build
-/// does not claim. A fresh file reads 0 and is about to be stamped. A file with this
-/// build's marker must also carry this build's [`SCHEMA_FINGERPRINT`]; one without a
-/// fingerprint at all is from a build that did not stamp one, and as foreign.
+/// does not claim. A file reading 0 is one [`Store::create`] has not yet committed its
+/// schema to. A file with this build's marker must also carry this build's
+/// [`SCHEMA_FINGERPRINT`]; one without a fingerprint at all is from a build that did not
+/// stamp one, and as foreign.
 fn check_version(conn: &Connection) -> Result<(), StoreError> {
     let found: i32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
     match found {
@@ -660,42 +761,6 @@ fn stored_fingerprint(conn: &Connection) -> Result<Option<u64>, rusqlite::Error>
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(e) => Err(e),
     }
-}
-
-/// How far ahead of the last used epoch to move the persisted counter at open.
-///
-/// The counter is persisted because a re-used epoch is not only ignored
-/// but still acknowledged, so the host believes an assignment landed that the node
-/// discarded. Writing the counter forward before issuing anything means a crash can
-/// only ever skip epochs. Skipping is free; repeating is the bug.
-///
-/// Sixty-four holds as long as one assignment row in every sixty-four survives the
-/// store's lossy queue, since each re-books the block from its own counter. Losing
-/// sixty-four consecutively means a queue full for the whole capture, which the
-/// view is already shouting about.
-const VERSION_RESERVATION: u64 = 64;
-
-/// Read the persisted assignment epoch and immediately book a block of them.
-///
-/// Under `BEGIN IMMEDIATE`, so the read and the write cannot interleave with another
-/// wartui opening the same file: two processes reading the same base would book the
-/// same block and hand the same epoch to the same node.
-fn reserve_versions(conn: &mut Connection) -> Result<u64, StoreError> {
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let base: u64 = tx
-        .query_row("SELECT v FROM kv WHERE k = 'assignment_version_counter'", [], |row| {
-            row.get::<_, String>(0)
-        })
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
-    tx.execute(
-        "INSERT INTO kv (k, v) VALUES ('assignment_version_counter', ?1)
-         ON CONFLICT(k) DO UPDATE SET v = excluded.v",
-        params![(base + VERSION_RESERVATION).to_string()],
-    )?;
-    tx.commit()?;
-    Ok(base)
 }
 
 /// The background checkpointer's loop, woken by the writer's commits until the writer is
@@ -808,18 +873,6 @@ fn prepare(conn: &Connection, config: &StoreConfig) -> Result<(), rusqlite::Erro
     Ok(())
 }
 
-fn insert_session(
-    conn: &mut Connection,
-    session: &SessionInfo,
-    started_at_ms: i64,
-) -> Result<i64, rusqlite::Error> {
-    conn.execute(
-        "INSERT INTO session (started_at, channel_pool, notes) VALUES (?1, ?2, ?3)",
-        params![started_at_ms, pool_name(session.pool), session.notes],
-    )?;
-    Ok(conn.last_insert_rowid())
-}
-
 /// The pool's name as stored, which is not its name on screen: `ChannelPool`'s
 /// `Display` says "US", and captures already on disk say "us". Leave these.
 const fn pool_name(pool: ChannelPool) -> &'static str {
@@ -840,7 +893,6 @@ const fn kind_name(kind: RecordKind) -> &'static str {
 fn writer(
     mut conn: Connection,
     rx: &Receiver<Record>,
-    session_id: i64,
     config: &StoreConfig,
     stats: &Stats,
     wake: Option<&SyncSender<()>>,
@@ -851,7 +903,7 @@ fn writer(
     let mut report = StoreReport::default();
     let mut flush = |conn: &mut Connection, pending: &mut Vec<Record>| {
         let committing = !pending.is_empty();
-        flush(conn, session_id, pending, stats, config.timings.then_some(&mut report));
+        flush(conn, pending, stats, config.timings.then_some(&mut report));
         // A full channel already has a wake-up waiting, and that one covers this commit.
         if committing && let Some(wake) = wake {
             let _ = wake.try_send(());
@@ -882,17 +934,16 @@ fn writer(
 
     flush(&mut conn, &mut pending);
     if let Err(e) = conn.execute(
-        "UPDATE session SET ended_at = ?1 WHERE id = ?2",
-        params![chrono::Utc::now().timestamp_millis(), session_id],
+        "UPDATE capture SET ended_at = ?1 WHERE id = 1",
+        params![chrono::Utc::now().timestamp_millis()],
     ) {
-        tracing::warn!("could not close out the session row: {e}");
+        tracing::warn!("could not close out the capture row: {e}");
     }
     report
 }
 
 fn flush(
     conn: &mut Connection,
-    session_id: i64,
     pending: &mut Vec<Record>,
     stats: &Stats,
     report: Option<&mut StoreReport>,
@@ -902,7 +953,7 @@ fn flush(
     }
     let count = pending.len();
     let started = Instant::now();
-    match write_batch(conn, session_id, pending) {
+    match write_batch(conn, pending) {
         Ok(commit) => {
             if let Some(report) = report {
                 report.batches.push(BatchTiming {
@@ -925,11 +976,7 @@ fn flush(
 }
 
 /// Write one batch in one transaction, returning how long the commit alone took.
-fn write_batch(
-    conn: &mut Connection,
-    session_id: i64,
-    pending: &[Record],
-) -> Result<Duration, rusqlite::Error> {
+fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, rusqlite::Error> {
     let tx = conn.transaction()?;
     for record in pending {
         match record {
@@ -959,12 +1006,11 @@ fn write_batch(
             Record::Heartbeat(hb) => {
                 tx.prepare_cached(
                     "INSERT INTO heartbeat
-                       (session_id, node_mac, rx_at, counter, epoch, rssi, wifi_dropped,
-                        ble_dropped, beat, live)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                       (node_mac, rx_at, counter, epoch, rssi, wifi_dropped, ble_dropped,
+                        beat, live)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 )?
                 .execute(params![
-                    session_id,
                     &hb.node_mac[..],
                     hb.rx_at_ms,
                     hb.counter,
@@ -979,13 +1025,12 @@ fn write_batch(
             Record::Observation(obs) => {
                 tx.prepare_cached(
                     "INSERT INTO observation
-                       (session_id, node_mac, rx_at, link_rssi, bssid, ssid, security,
-                        channel, rssi, kind, rcoi, mfgr_id, lat, lon, alt, accuracy,
-                        pos_source, pos_at, raw_body)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
+                       (node_mac, rx_at, link_rssi, bssid, ssid, security, channel, rssi,
+                        kind, rcoi, mfgr_id, lat, lon, alt, accuracy, pos_source, pos_at,
+                        raw_body)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
                 )?
                 .execute(params![
-                    session_id,
                     &obs.node_mac[..],
                     obs.rx_at_ms,
                     obs.link_rssi,
@@ -1008,14 +1053,13 @@ fn write_batch(
             }
             Record::Bridge(bridge) => {
                 // Which dongle produced this capture. Written when the bridge
-                // announces itself, which is always after the session row
+                // announces itself, which is always after the capture row
                 // exists, and rewritten if it announces again.
                 tx.prepare_cached(
-                    "UPDATE session SET bridge_mac = ?2, bridge_chip = ?3, bridge_fw = ?4
-                     WHERE id = ?1",
+                    "UPDATE capture SET bridge_mac = ?1, bridge_chip = ?2, bridge_fw = ?3
+                     WHERE id = 1",
                 )?
                 .execute(params![
-                    session_id,
                     &bridge.mac[..],
                     bridge.chip.as_str(),
                     bridge.fw_version.as_str()
@@ -1024,12 +1068,11 @@ fn write_batch(
             Record::Assignment(a) => {
                 tx.prepare_cached(
                     "INSERT INTO assignment
-                       (session_id, node_mac, counter, wire_version,
-                        channels, ble, created_at, delivered_at, outcome, latency_us)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+                       (node_mac, counter, wire_version, channels, ble, created_at,
+                        delivered_at, outcome, latency_us)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
                 )?
                 .execute(params![
-                    session_id,
                     &a.node_mac[..],
                     // Saturating rather than wrapping, and upwards: the column records
                     // which epoch went out, and an epoch that reads as lower than one
@@ -1043,26 +1086,14 @@ fn write_batch(
                     a.outcome.as_str(),
                     a.latency_us,
                 ])?;
-                // Keep the persisted epoch ahead of what has actually been
-                // used, so the reservation taken at open is refreshed as the
-                // session spends it. `max` rather than a plain write: rows
-                // reach the writer in order, but a batch that partly failed
-                // must never walk the counter backwards.
-                tx.prepare_cached(
-                    "INSERT INTO kv (k, v) VALUES ('assignment_version_counter', ?1)
-                     ON CONFLICT(k) DO UPDATE SET
-                       v = CAST(max(CAST(v AS INTEGER), CAST(excluded.v AS INTEGER)) AS TEXT)",
-                )?
-                .execute(params![(a.counter + VERSION_RESERVATION).to_string()])?;
             }
             Record::BridgeStatus(status) => {
                 tx.prepare_cached(
                     "INSERT INTO bridge_status
-                       (session_id, rx_at, peer_count, rx_count, dropped_tx, uptime_ms)
-                     VALUES (?1,?2,?3,?4,?5,?6)",
+                       (rx_at, peer_count, rx_count, dropped_tx, uptime_ms)
+                     VALUES (?1,?2,?3,?4,?5)",
                 )?
                 .execute(params![
-                    session_id,
                     status.rx_at_ms,
                     status.peer_count,
                     status.rx_count,
@@ -1072,11 +1103,10 @@ fn write_batch(
             }
             Record::BatchGap(gap) => {
                 tx.prepare_cached(
-                    "INSERT INTO batch_gap (session_id, node_mac, rx_at, after_seq, seq, lost)
-                     VALUES (?1,?2,?3,?4,?5,?6)",
+                    "INSERT INTO batch_gap (node_mac, rx_at, after_seq, seq, lost)
+                     VALUES (?1,?2,?3,?4,?5)",
                 )?
                 .execute(params![
-                    session_id,
                     &gap.node_mac[..],
                     gap.rx_at_ms,
                     gap.after_seq,
@@ -1086,11 +1116,10 @@ fn write_batch(
             }
             Record::Raw(raw) => {
                 tx.prepare_cached(
-                    "INSERT INTO raw_frame (session_id, rx_at, src, dst, rssi, bytes)
-                     VALUES (?1,?2,?3,?4,?5,?6)",
+                    "INSERT INTO raw_frame (rx_at, src, dst, rssi, bytes)
+                     VALUES (?1,?2,?3,?4,?5)",
                 )?
                 .execute(params![
-                    session_id,
                     raw.rx_at_ms,
                     &raw.src[..],
                     &raw.dst[..],

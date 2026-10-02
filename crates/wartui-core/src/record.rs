@@ -37,7 +37,7 @@ pub struct NodeSeen {
     /// The node's full six-byte MAC. Any shorter suffix collides across a large
     /// enough fleet and silently merges two nodes' data.
     pub mac: Mac,
-    /// Unix milliseconds when this host first saw the node in this session.
+    /// Unix milliseconds when this host first saw the node in this capture.
     pub first_seen_ms: i64,
     /// Unix milliseconds of the most recent frame of any kind.
     pub last_seen_ms: i64,
@@ -180,9 +180,9 @@ pub struct RawFrame {
 
 /// Which bridge this capture came through.
 ///
-/// Separate from [`crate::store::SessionInfo`] because a session is opened before
+/// Separate from [`crate::store::CaptureInfo`] because a capture is created before
 /// any bridge has announced itself, and a capture that never finds a dongle still
-/// deserves a session row.
+/// deserves a capture row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BridgeSeen {
     /// The bridge's own MAC, which nodes see as the core's address.
@@ -256,7 +256,7 @@ pub struct AssignmentSent {
 /// Anything the engine wants written down.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Record {
-    /// Record which bridge this session is running through.
+    /// Record which bridge this capture is running through.
     Bridge(BridgeSeen),
     /// Insert or refresh a node row.
     Node(NodeSeen),
