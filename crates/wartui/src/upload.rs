@@ -35,11 +35,14 @@
 //! upload cannot be taken back. Without a terminal to ask on, that is known before the body
 //! is built, so it is refused first.
 //!
-//! The capture records each upload, so a repeat sends only sightings received after the last
-//! one. The record is written once the site has queued the job, because that is when the
-//! upload has happened; it covers through the latest sighting the CSV walked, read in the same
-//! snapshot, so the cutoff is exactly what was considered. A job the site reports failed
-//! imported nothing and is no cutoff. `--resend` ignores the record and sends everything,
+//! The capture records each upload, so a repeat sends only what came after the last one. The
+//! cutoff is the last sighting the upload covered, in the order the capture stored them, read
+//! in the same snapshot as the CSV, so it is exactly what was considered and a capture still
+//! being written loses nothing to it. The record is written once the site has queued the job,
+//! because that is when the upload has happened. The capture is opened for writing before
+//! anything is sent, so one this user cannot write is refused with nothing uploaded rather
+//! than uploaded and left unrecorded. A job the site reports failed imported nothing and is
+//! no cutoff. `--resend` ignores the record and sends everything,
 //! which is what a decoder fix needs: an upload then sends what `export` would write now.
 //!
 //! The steps are separate functions — [`prepare`], [`send`], [`wait`], [`finish`] — and the
@@ -59,7 +62,8 @@ use serde_json::{Map, Value};
 use ureq::unversioned::multipart::{Form, Part};
 use wartui_core::export::{ExportFilter, ExportSummary, wigle_csv};
 use wartui_core::store::{
-    UploadRecord, last_upload, open_readonly, open_readwrite, record_upload, set_upload_result,
+    Connection, UploadRecord, last_upload, open_readonly, open_readwrite, record_upload,
+    set_upload_result,
 };
 
 use crate::config::{self, Config};
@@ -149,7 +153,7 @@ pub fn run(args: Args) -> Result<()> {
         || started.elapsed(),
         on_stderr(job),
     );
-    finish(&db, &sent, &waited)?;
+    finish(&sent, &waited)?;
     match waited? {
         Waited::Done(result) => print!("{}", outcome(&result)),
         Waited::Unfollowed(reason) => eprintln!(
@@ -231,29 +235,30 @@ pub(crate) struct Sent {
     pub(crate) job: u64,
     /// The capture's record of it.
     record: i64,
+    /// The capture, open for writing since before the upload went.
+    conn: Connection,
 }
 
-/// Hand `prepared` to the site, then record in `db` that the site queued it.
+/// Open `db` for writing, hand `prepared` to the site, then record that the site queued it.
 pub(crate) fn send(client: &Client, prepared: &Prepared, db: &Path) -> Result<Sent> {
-    let job = client.submit(&prepared.body, &filename(db))?;
-    let through = prepared.summary.last_rx.expect("a capture with rows has a latest sighting");
-    let now = Utc::now().timestamp_millis();
     let conn = open_readwrite(db).with_context(|| format!("opening {}", db.display()))?;
+    let job = client.submit(&prepared.body, &filename(db))?;
+    let through = prepared.summary.last_id.expect("a capture with rows has a last sighting");
+    let now = Utc::now().timestamp_millis();
     let record = record_upload(&conn, through, now, job, prepared.summary.rows)
         .with_context(|| format!("recording job {job} in {}", db.display()))?;
-    Ok(Sent { job, record })
+    Ok(Sent { job, record, conn })
 }
 
-/// Record in `db` how the wait for `sent` ended.
-pub(crate) fn finish(db: &Path, sent: &Sent, waited: &Result<Waited>) -> Result<()> {
+/// Record how the wait for `sent` ended.
+pub(crate) fn finish(sent: &Sent, waited: &Result<Waited>) -> Result<()> {
     let result = match waited {
         Ok(Waited::Done(_)) => "done",
         Ok(Waited::Unfollowed(_)) => "unfollowed",
         Err(_) => "failed",
     };
-    let conn = open_readwrite(db).with_context(|| format!("opening {}", db.display()))?;
-    set_upload_result(&conn, sent.record, result)
-        .with_context(|| format!("recording how job {} ended in {}", sent.job, db.display()))?;
+    set_upload_result(&sent.conn, sent.record, result)
+        .with_context(|| format!("recording how job {} ended", sent.job))?;
     Ok(())
 }
 
@@ -739,7 +744,7 @@ mod tests {
             ],
         );
         let conn = open_readwrite(&db).unwrap();
-        let id = record_upload(&conn, EPOCH_MS + 60_000, EPOCH_MS + 90_000, 7, 2).unwrap();
+        let id = record_upload(&conn, 2, EPOCH_MS + 90_000, 7, 2).unwrap();
         set_upload_result(&conn, id, "done").unwrap();
         db
     }
@@ -772,6 +777,31 @@ mod tests {
     }
 
     #[test]
+    fn upload_sends_nothing_when_capture_not_writable() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = capture(&dir, vec![sighting([0x10, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0))]);
+        let prepared = prepare(&keyed(), None, &db, ExportFilter::default(), false)
+            .unwrap()
+            .expect("a row to send");
+        let mut permissions = std::fs::metadata(&db).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&db, permissions).unwrap();
+        if std::fs::OpenOptions::new().write(true).open(&db).is_ok() {
+            // Running as root, which file permissions do not stop.
+            return;
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let client = Client::new(&base, prepared.key.clone());
+        let error = send(&client, &prepared, &db).err().expect("refused");
+        assert!(format!("{error:#}").contains("cannot be written"), "{error:#}");
+        listener.set_nonblocking(true).unwrap();
+        let accepted = listener.accept();
+        assert!(accepted.is_err(), "the upload was sent anyway");
+    }
+
+    #[test]
     fn upload_sends_only_new_sightings_when_repeated() {
         let dir = tempfile::tempdir().unwrap();
         let db = uploaded_through_second(&dir);
@@ -799,8 +829,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db = uploaded_through_second(&dir);
         let conn = open_readwrite(&db).unwrap();
-        let record = record_upload(&conn, EPOCH_MS + 120_000, EPOCH_MS + 150_000, 8, 1).unwrap();
-        finish(&db, &Sent { job: 8, record }, &Err(anyhow::anyhow!("failed"))).unwrap();
+        let record = record_upload(&conn, 3, EPOCH_MS + 150_000, 8, 1).unwrap();
+        finish(&Sent { job: 8, record, conn }, &Err(anyhow::anyhow!("failed"))).unwrap();
 
         let previous = last_upload(&open_readonly(&db).unwrap()).unwrap().expect("a record");
         assert_eq!(previous.job_id, 7);

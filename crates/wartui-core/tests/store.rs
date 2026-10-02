@@ -1312,7 +1312,7 @@ fn export_writer_tallies_position_sources_when_fix_varies() {
     assert_eq!(summary.positions, wartui_core::export::Positions { gps: 2, fixed: 1, none: 1 });
 }
 
-/// Two networks heard a minute apart, then a third a minute later, so a cutoff can fall
+/// Three networks heard a minute apart, stored as ids 1, 2 and 3, so a cutoff can fall
 /// between any two of them.
 fn three_sightings() -> Vec<Record> {
     vec![
@@ -1338,12 +1338,12 @@ fn export_skips_sightings_at_or_before_cutoff_when_after_uploads() {
     let conn = write(&dir, three_sightings());
     let rw = open_readwrite(&dir.path().join("wartui.db")).expect("opening read-write");
     // The cutoff is the second sighting itself: it was sent, so it is not sent again.
-    let id = record_upload(&rw, EPOCH_MS + 60_000, EPOCH_MS + 90_000, 7, 2).expect("recording");
+    let id = record_upload(&rw, 2, EPOCH_MS + 90_000, 7, 2).expect("recording");
     set_upload_result(&rw, id, "done").expect("setting the result");
 
     let (csv, summary) = export_with(&conn, AFTER_UPLOADS);
     assert_eq!(macs(&csv), ["A3:A3:A3:A3:A3:A3"], "{csv}");
-    assert_eq!(summary.last_rx, Some(EPOCH_MS + 120_000));
+    assert_eq!(summary.last_id, Some(3));
 }
 
 #[test]
@@ -1351,9 +1351,9 @@ fn export_ignores_failed_upload_when_computing_cutoff() {
     let dir = tempfile::tempdir().expect("temp dir");
     let conn = write(&dir, three_sightings());
     let rw = open_readwrite(&dir.path().join("wartui.db")).expect("opening read-write");
-    record_upload(&rw, EPOCH_MS, EPOCH_MS + 30_000, 7, 1).expect("recording");
+    record_upload(&rw, 1, EPOCH_MS + 30_000, 7, 1).expect("recording");
     // A later job the site reported failed imported nothing, so the cutoff stays at job 7.
-    let failed = record_upload(&rw, EPOCH_MS + 60_000, EPOCH_MS + 90_000, 8, 1).expect("recording");
+    let failed = record_upload(&rw, 2, EPOCH_MS + 90_000, 8, 1).expect("recording");
     set_upload_result(&rw, failed, "failed").expect("setting the result");
 
     let (csv, summary) = export_with(&conn, AFTER_UPLOADS);
@@ -1366,8 +1366,28 @@ fn export_ignores_upload_record_when_after_uploads_false() {
     let dir = tempfile::tempdir().expect("temp dir");
     let conn = write(&dir, three_sightings());
     let rw = open_readwrite(&dir.path().join("wartui.db")).expect("opening read-write");
-    record_upload(&rw, EPOCH_MS + 120_000, EPOCH_MS + 150_000, 7, 3).expect("recording");
+    record_upload(&rw, 3, EPOCH_MS + 150_000, 7, 3).expect("recording");
 
     let (_, summary) = export(&conn);
     assert_eq!(summary.rows, 3);
+}
+
+#[test]
+fn export_includes_rows_sharing_cutoff_rx_when_committed_after_upload() {
+    // One frame's sightings share an rx_at, and the store can commit them in two batches.
+    // An upload that read between the commits covered only the first, so the second still
+    // goes on the next upload.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let conn = write(
+        &dir,
+        vec![
+            observation(NODE, [0xA1; 6], -60, EPOCH_MS, fixed(37.0, -122.0)),
+            observation(NODE, [0xA2; 6], -60, EPOCH_MS, fixed(37.0, -122.0)),
+        ],
+    );
+    let rw = open_readwrite(&dir.path().join("wartui.db")).expect("opening read-write");
+    record_upload(&rw, 1, EPOCH_MS + 30_000, 7, 1).expect("recording");
+
+    let (csv, _) = export_with(&conn, AFTER_UPLOADS);
+    assert_eq!(macs(&csv), ["A2:A2:A2:A2:A2:A2"], "{csv}");
 }

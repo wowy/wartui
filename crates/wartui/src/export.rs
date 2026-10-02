@@ -337,6 +337,7 @@ mod tests {
             // 2026-09-30 19:02 to 23:48 UTC.
             first_rx: Some(1_790_794_920_000),
             last_rx: Some(1_790_812_080_000),
+            last_id: Some(4_012_345),
         }
     }
 
