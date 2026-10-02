@@ -376,3 +376,18 @@ fn host_command_asks_for_reply_only_when_bridge_answers() {
         assert_eq!(command.asks_for_reply(), asks, "{command:?}");
     }
 }
+
+#[test]
+fn reset_cause_speaks_first_when_software_only() {
+    for (cause, speaks) in [
+        (ResetCause::Software, true),
+        (ResetCause::PowerOn, false),
+        (ResetCause::External, false),
+        (ResetCause::Brownout, false),
+        (ResetCause::Watchdog, false),
+        (ResetCause::Lockup, false),
+        (ResetCause::Unknown, false),
+    ] {
+        assert_eq!(cause.speaks_first(), speaks, "{cause:?}");
+    }
+}

@@ -55,7 +55,8 @@ const SETTLE_TICKS: u32 = 12;
 /// ticks.
 ///
 /// Long enough to outlast a wedged bridge's own recovery: its `StallWatch` reboots
-/// it [`TX_STALL_TIMEOUT_MS`] after the `Identify` this connection sends. Measured
+/// it [`TX_STALL_TIMEOUT_MS`] after the `Identify` this connection sends. The new
+/// life is a software reset, so it speaks first and its `Ready` needs no second ask. Measured
 /// on a C6 left unread for two minutes, the reboot was heard 3.47 s after the
 /// `Identify`; the margin covers that and a slower board. 4.5 s still lands inside
 /// the CLI's five, which is the point: a one-shot command makes one sweep, so a
@@ -694,8 +695,9 @@ async fn connect(
         })
         .map_err(|e| format!("could not start writer thread: {e}"))?;
 
-    // A bridge announces itself at boot, and the host is rarely watching at that
-    // moment: unplugging the dongle is not part of restarting the TUI. So we ask —
+    // A bridge is rarely being watched when it starts: unplugging the dongle is not
+    // part of restarting the TUI. One that reset itself speaks first, and every other
+    // holds its transmit until a host frame decodes (`ResetCause::speaks_first`). So we ask —
     // **exactly once, and then only wait.**
     //
     // Once, because a board that is not reading its USB endpoint absorbs exactly
@@ -716,7 +718,9 @@ async fn connect(
     //
     // Once is enough for a bridge whose transmit endpoint has wedged, too: its
     // `StallWatch` (`wartui_proto::stall`) reboots it 3 s after a host frame that
-    // nothing has answered, so this one `Identify` is what clears it. A board given
+    // nothing has answered, so this one `Identify` is what clears it. That reset is
+    // a software one, so the new life speaks first and its `Ready` reaches us
+    // unprompted, which is the only way this connection hears it. A board given
     // [`SETTLE_TICKS`] or [`REMEMBERED_TICKS`] hears the `Ready` behind that reboot
     // before it gives up. A plain probe gives up first, so the board the file names
     // is never given one: a one-shot command makes a single sweep, and no later

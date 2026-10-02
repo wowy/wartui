@@ -760,3 +760,27 @@ alone explains the first build's silence, so this only rules the question out:
 | before #126 | answered in 3.41 s: software reset, *its transmit path had stopped draining*, uptime 0 s |
 | this branch | answered in 3.41 s, the same |
 | this branch, no `--bridge` (sweep) | answered in 3.41 s — the bridge's stale pre-wedge packet decoded, and a board that has produced a frame is never given up on |
+
+## Speaking first, since the wedge on connect
+
+Measured on 2026-10-01, on a C6. The firmware queued a lone `0x00` and a `Ready` at boot and pumped
+both to the USB Serial/JTAG IN endpoint at once. After a replug and two minutes unread, the first
+host open found the endpoint wedged in 3 of 3 trials: a bare open read 0 bytes, and an `Identify`
+went unanswered until `StallWatch` rebooted the board with `TxStalled`.
+
+An experimental build skipped `pump` and treated `queued` as false until a host frame had decoded.
+The same test was healthy in 3 of 3, answered in 2 ms. The ROM banner still printed in that build,
+so the banner is not the cause. The cause is the firmware writing before any host has opened the
+port.
+
+That build still sent the boot `Ready` once the gate opened, so the host read `uptime_ms=0` from a
+frame built two minutes earlier, which is a lie.
+
+The rule is now by reset cause (`ResetCause::speaks_first`). `Software` — the `TxStalled`
+self-reset and `wartui reset` — announces at boot and transmits at once, because the host that
+caused it is still attached and reads the `Ready`; a connection that rode through the reset has
+already used its one `Identify`. Every other cause holds transmit until the first host frame
+decodes, and announces then: an `Identify` is answered as usual, and any other first frame gets a
+`Ready` ahead of its answer, so a host already running after a watchdog reset still sees a new life.
+That `Ready` is built when sent, so its uptime is true. The boot `0x00` stays in every life and goes
+out first when the gate opens.

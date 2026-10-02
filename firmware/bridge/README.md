@@ -151,9 +151,18 @@ The reset _is_ the message, since any explanation would go out through the broke
 after it says `TxStalled`.
 
 That `Ready` follows ~1.5 KB of ROM banner with no `0x00` in it. The banner overflows the host's
-frame buffer and would take the first frame with it. So the bridge writes a lone `0x00` at boot,
+frame buffer and would take the first frame with it. So the bridge queues a lone `0x00` at boot,
 ahead of everything (`Outbox::delimit`). That is an empty frame every receiver already skips, so it
 is not a wire change.
+
+**A bridge holds all transmit until a host speaks**, unless its reset cause is `Software`
+(`ResetCause::speaks_first`). Writing to the endpoint before any host has opened the port is what
+wedges it: after a replug and two minutes unread, 3 of 3 first opens found it dead, against 3 of 3
+healthy with transmit held. Frames still queue behind the gate, and the `0x00` goes out first when
+it opens. The first host frame opens it. If that frame is not an `Identify`, the bridge announces
+before handling it, so a host that was already running still sees a new life. A software reset
+speaks first because the host that caused it is still attached and reading, and it relies on that
+`Ready`: it sends one `Identify` per connection (`docs/phase-3-findings.md`).
 
 Reach for `wartui reset --bridge <board>` before `espflash`. The receive path is alive in this
 state, so the bridge reboots on being asked. A software reset also keeps the device path. An

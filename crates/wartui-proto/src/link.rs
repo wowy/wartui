@@ -115,6 +115,34 @@ pub enum ResetCause {
     Unknown,
 }
 
+impl ResetCause {
+    /// Whether a bridge with this cause writes to USB before any host has spoken.
+    ///
+    /// Only [`Self::Software`] does. It is the `TxStalled` self-reset and
+    /// [`HostToBridge::Reset`], and in both the host that caused it is still attached
+    /// and reading. It also relies on the unprompted `Ready`: it sends one `Identify`
+    /// per connection, so a connection that rides through the reset hears the new
+    /// life only through that `Ready`.
+    ///
+    /// Every other cause may follow a replug with nobody reading. Writing to the USB
+    /// Serial/JTAG endpoint then leaves it wedged: on a C6 replugged and left unread
+    /// for two minutes, the first open found it dead in 3 of 3 trials, and an
+    /// `Identify` went unanswered until `StallWatch` rebooted the board. A build that
+    /// held all transmit until a host frame decoded was healthy in 3 of 3, answering
+    /// in 2 ms. The ROM banner, which prints either way, is not the cause.
+    pub const fn speaks_first(self) -> bool {
+        match self {
+            Self::Software => true,
+            Self::PowerOn
+            | Self::Watchdog
+            | Self::Lockup
+            | Self::Brownout
+            | Self::External
+            | Self::Unknown => false,
+        }
+    }
+}
+
 /// Where the bridge's main loop was when it last stopped making progress.
 ///
 /// Carried across a reset in RTC memory and reported in
@@ -240,9 +268,10 @@ pub type PanelLines = Vec<PanelLine, PANEL_ROWS>;
 pub enum HostToBridge {
     /// Ask the bridge to announce itself with [`BridgeToHost::Ready`].
     ///
-    /// Sent the moment the host opens the port: without it the only announcement
-    /// is the one at boot, so restarting the TUI without unplugging the dongle
-    /// would wait forever for a frame already sent.
+    /// Sent the moment the host opens the port. A bridge that does not
+    /// [speak first](ResetCause::speaks_first) says nothing until a host frame
+    /// decodes, and one that does announced at boot, possibly to a host long gone.
+    /// Without asking, either would leave a new connection waiting for ever.
     Identify,
     /// Register a peer so unicast frames can be addressed to it.
     AddPeer {
@@ -530,7 +559,8 @@ pub fn decode_frame<T: DeserializeOwned>(frame: &mut [u8]) -> Result<T, LinkErro
 /// its own from a reset banner, a half-written frame or an unplugged cable: the
 /// junk is discarded at the next terminator and the stream carries on. That
 /// terminator is the next frame's unless the sender writes one of its own first,
-/// which is why the bridge's outbox delimits once at boot.
+/// which is why the bridge's outbox delimits once at boot, whether or not
+/// that life speaks first.
 #[derive(Debug)]
 pub struct FrameAccumulator<const N: usize = MAX_FRAME> {
     buf: [u8; N],
