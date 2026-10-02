@@ -267,6 +267,7 @@ pub async fn run(args: Args) -> Result<()> {
     let info = CaptureInfo {
         pool: POOL,
         notes: Some(format!("wartui bench, profile {}", args.profile.name())),
+        simulated: true,
     };
     let store = Store::create(&store_config, &info, started.unix_ms)
         .with_context(|| format!("creating {}", args.db.display()))?;

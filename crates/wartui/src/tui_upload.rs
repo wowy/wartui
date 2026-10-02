@@ -27,8 +27,8 @@ use wartui_core::export::ExportFilter;
 
 use crate::tui::Settings;
 use crate::upload::{
-    Client, GIVE_UP, JobFailed, Prepare, Prepared, Progress, Waited, counts, finish, prepare, send,
-    size, wait,
+    Client, GIVE_UP, JobFailed, Prepare, Prepared, Progress, Simulated, Waited, counts, finish,
+    prepare, send, size, wait,
 };
 
 /// Where `u` uploads to: this run's capture, and the site.
@@ -134,6 +134,7 @@ impl Upload {
                 Some(format!("nothing new since job {}", previous.job_id))
             }
             Ok(Prepare::NoRows(_)) => Some("no positioned rows to upload yet".to_owned()),
+            Err(error) if error.is::<Simulated>() => Some(error.to_string()),
             Err(error) => {
                 self.status = Some(format!("upload failed: {error:#}"));
                 None

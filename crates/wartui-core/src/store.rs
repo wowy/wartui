@@ -97,7 +97,9 @@ CREATE TABLE IF NOT EXISTS capture (
   bridge_chip TEXT,
   bridge_fw TEXT,
   channel_pool TEXT NOT NULL,
-  notes TEXT
+  notes TEXT,
+  -- 1 when the simulator made it: its networks are invented, so it is never uploaded.
+  simulated INTEGER NOT NULL
 );
 
 -- `capabilities` is the node's most recent heartbeat rendered the way the fleet
@@ -428,6 +430,8 @@ pub struct CaptureInfo {
     pub pool: ChannelPool,
     /// Anything the operator wants to remember about this run.
     pub notes: Option<String>,
+    /// Whether the simulator, not a fleet, produced it.
+    pub simulated: bool,
 }
 
 #[derive(Debug, Default)]
@@ -487,8 +491,9 @@ impl Store {
             params![FINGERPRINT_KEY, format!("{SCHEMA_FINGERPRINT:016x}")],
         )?;
         tx.execute(
-            "INSERT INTO capture (id, started_at, channel_pool, notes) VALUES (1, ?1, ?2, ?3)",
-            params![started_at_ms, pool_name(capture.pool), capture.notes],
+            "INSERT INTO capture (id, started_at, channel_pool, notes, simulated) \
+             VALUES (1, ?1, ?2, ?3, ?4)",
+            params![started_at_ms, pool_name(capture.pool), capture.notes, capture.simulated],
         )?;
         tx.commit()?;
 
@@ -687,6 +692,14 @@ pub fn record_upload(
 pub fn set_upload_result(conn: &Connection, id: i64, result: &str) -> rusqlite::Result<()> {
     conn.execute("UPDATE upload SET result = ?1 WHERE id = ?2", params![result, id])?;
     Ok(())
+}
+
+/// Whether the simulator made this capture.
+///
+/// # Errors
+/// If the query fails.
+pub fn is_simulated(conn: &Connection) -> rusqlite::Result<bool> {
+    conn.query_row("SELECT simulated FROM capture WHERE id = 1", [], |row| row.get(0))
 }
 
 /// The newest upload the site did not report failed, if any.

@@ -137,8 +137,9 @@ wartui upload --db tonight.db -y  # another capture, without asking
 
 It prints the same counts as `export`, plus the compressed size, then asks `Upload to WDGWars?
 [y/N]`. Without a terminal to ask on, it refuses before building the upload unless given
-`--yes`. A capture with no positioned rows is not sent. The site takes at most 40 MB (40,000,000
-bytes) compressed, and a larger capture is refused before sending. Sizes are printed in decimal units.
+`--yes`. A capture with no positioned rows is not sent, and a capture made with `--sim` is never
+uploaded. The site takes at most 40 MB (40,000,000 bytes) compressed, and a larger capture is
+refused before sending. Sizes are printed in decimal units.
 
 A repeat upload sends only sightings stored since the last upload the site queued. The cutoff is the
 last sighting that upload covered, in the order the capture stored them, so uploading a capture that

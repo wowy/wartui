@@ -45,6 +45,10 @@
 //! no cutoff. `--resend` ignores the record and sends everything,
 //! which is what a decoder fix needs: an upload then sends what `export` would write now.
 //!
+//! A capture made under `--sim` is refused whatever the flags say, because its invented
+//! networks would be published as real ones and an upload cannot be taken back. The capture
+//! records that it was simulated, so the refusal holds for `upload` and for the fleet view.
+//!
 //! The steps are separate functions — [`prepare`], [`send`], [`wait`], [`finish`] — and the
 //! wait reports through a callback rather than printing, so something other than this command
 //! can drive them.
@@ -62,8 +66,8 @@ use serde_json::{Map, Value};
 use ureq::unversioned::multipart::{Form, Part};
 use wartui_core::export::{ExportFilter, ExportSummary, wigle_csv};
 use wartui_core::store::{
-    Connection, UploadRecord, last_upload, open_readonly, open_readwrite, record_upload,
-    set_upload_result,
+    Connection, UploadRecord, is_simulated, last_upload, open_readonly, open_readwrite,
+    record_upload, set_upload_result,
 };
 
 use crate::config::{self, Config};
@@ -250,15 +254,33 @@ pub(crate) fn prepare(
 }
 
 /// The capture's WiGLE CSV, gzipped in memory, what went into it, and the upload it follows
-/// on from when it is [`ExportFilter::after_uploads`].
+/// on from when it is [`ExportFilter::after_uploads`]. [`Simulated`] for a simulated capture,
+/// before anything is built.
 fn body(db: &Path, filter: ExportFilter) -> Result<(Vec<u8>, ExportSummary, Option<UploadRecord>)> {
     let conn = open_readonly(db).with_context(|| format!("opening {}", db.display()))?;
+    if is_simulated(&conn).with_context(|| format!("reading {}", db.display()))? {
+        return Err(Simulated { db: db.to_owned() }.into());
+    }
     let mut gz = GzEncoder::new(Vec::new(), Compression::default());
     let summary = wigle_csv(&conn, filter, &mut gz, env!("CARGO_PKG_VERSION"))?;
     let body = gz.finish().context("compressing the upload")?;
     let previous = if filter.after_uploads { last_upload(&conn)? } else { None };
     Ok((body, summary, previous))
 }
+
+/// The capture came from the simulator, so it is not uploaded.
+#[derive(Debug)]
+pub(crate) struct Simulated {
+    db: PathBuf,
+}
+
+impl std::fmt::Display for Simulated {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} was captured from the simulator, so it is not uploaded", self.db.display())
+    }
+}
+
+impl std::error::Error for Simulated {}
 
 /// An upload the site queued.
 pub(crate) struct Sent {
@@ -685,7 +707,9 @@ mod tests {
         parse_job, parse_submit, prepare, send, size, wait,
     };
     use crate::config::Config;
-    use crate::testing::{EPOCH_MS, capture, serve_once, serve_once_with, sighting};
+    use crate::testing::{
+        EPOCH_MS, capture, capture_simulated, serve_once, serve_once_with, sighting,
+    };
 
     fn keyed() -> Config {
         let mut config = Config::default();
@@ -731,6 +755,23 @@ mod tests {
         .to_string();
         assert!(error.contains("no WDGWars API key"), "{error}");
         assert!(error.contains("/home/op/.config/wartui/wartui.toml"), "{error}");
+    }
+
+    #[test]
+    fn upload_refuses_when_capture_simulated() {
+        let dir = tempfile::tempdir().unwrap();
+        let records = vec![sighting([0x10, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0))];
+        let db = capture_simulated(&dir, records, true);
+        for resend in [false, true] {
+            let error = prepare(&keyed(), None, &db, ExportFilter::default(), resend)
+                .err()
+                .expect("refused")
+                .to_string();
+            assert_eq!(
+                error,
+                format!("{} was captured from the simulator, so it is not uploaded", db.display())
+            );
+        }
     }
 
     #[test]

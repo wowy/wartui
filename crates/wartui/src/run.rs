@@ -230,7 +230,7 @@ pub async fn run(args: Args) -> Result<()> {
     let link = crate::open(args.bridge.as_deref(), args.sim, args.sim_c6, memory.clone())?;
 
     let started = now();
-    let info = CaptureInfo { pool, notes: args.notes.clone() };
+    let info = CaptureInfo { pool, notes: args.notes.clone(), simulated: args.sim.is_some() };
     let store_config = StoreConfig::new(&db);
     let store = Store::create(&store_config, &info, started.unix_ms).map_err(|e| match e {
         // Already names the path and says what to do.

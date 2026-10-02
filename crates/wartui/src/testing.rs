@@ -44,10 +44,19 @@ pub(crate) fn sighting(bssid: [u8; 6], at_ms: i64, lat: Option<f64>) -> Record {
 
 /// A capture at `dir/wartui.db` holding `records`.
 pub(crate) fn capture(dir: &tempfile::TempDir, records: Vec<Record>) -> PathBuf {
+    capture_simulated(dir, records, false)
+}
+
+/// [`capture`], marked as the simulator's when `simulated`.
+pub(crate) fn capture_simulated(
+    dir: &tempfile::TempDir,
+    records: Vec<Record>,
+    simulated: bool,
+) -> PathBuf {
     let path = dir.path().join("wartui.db");
     let mut config = StoreConfig::new(&path);
     config.batch_interval = Duration::from_millis(10);
-    let info = CaptureInfo { pool: ChannelPool::Us, notes: None };
+    let info = CaptureInfo { pool: ChannelPool::Us, notes: None, simulated };
     let store = Store::create(&config, &info, EPOCH_MS).expect("creating the store");
     assert_eq!(store.submit(records), 0, "nothing should have been dropped");
     store.close();
