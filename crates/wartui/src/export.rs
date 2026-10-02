@@ -22,22 +22,16 @@ use wartui_core::store::open_readonly;
 
 use crate::capture;
 
+/// Which capture to read and which of its rows to send, shared by `export` and `upload`
+/// so both read a capture the same way.
 #[derive(ClapArgs, Debug)]
-pub struct Args {
-    /// The capture to export. The newest `wartui-<date>.db` in the working
+pub struct Selection {
+    /// The capture to read. The newest `wartui-<date>.db` in the working
     /// directory by default, which is the one a finished `run` left there.
     #[arg(long, value_name = "PATH")]
     db: Option<PathBuf>,
 
-    /// Where to write the WiGLE CSV. The capture's own name with `.csv` by
-    /// default, beside the capture itself; `-` writes to standard output. A
-    /// name chosen by default is not written over, so say it here to mean it.
-    #[arg(long, short = 'o', value_name = "PATH")]
-    out: Option<PathBuf>,
-
-    /// Only this session. By default every session in the file is exported,
-    /// which is usually right: WiGLE deduplicates its own side, and more
-    /// sightings of a network is better data rather than worse.
+    /// Only this session. Every session in the file by default.
     #[arg(long, value_name = "ID")]
     session: Option<i64>,
 
@@ -48,20 +42,45 @@ pub struct Args {
     recapture: u64,
 }
 
-pub fn run(args: Args) -> Result<()> {
-    let db = match args.db {
-        Some(path) => path,
-        None => {
-            let found = capture::newest(Path::new("."))?;
-            // Named on the way past, because which capture was picked is otherwise
-            // invisible, and the case where that matters is the quiet one: a run that
-            // opened its store and then died leaves a file newer than the evening
-            // being exported, and an export of it says nothing but `0 rows`.
-            // Standard error, because standard output may be the CSV.
-            eprintln!("exporting {}", found.display());
-            found
+impl Selection {
+    /// The capture to read: `--db`, or the newest in the working directory, named on
+    /// standard error after `verb` when it was found rather than given.
+    pub(crate) fn capture(&self, verb: &str) -> Result<PathBuf> {
+        match &self.db {
+            Some(path) => Ok(path.clone()),
+            None => {
+                let found = capture::newest(Path::new("."))?;
+                // Named on the way past, because which capture was picked is otherwise
+                // invisible, and the case where that matters is the quiet one: a run that
+                // opened its store and then died leaves a file newer than the evening
+                // being read, and the result says nothing but `0 rows`.
+                // Standard error, because standard output may be the CSV.
+                eprintln!("{verb} {}", found.display());
+                Ok(found)
+            }
         }
-    };
+    }
+
+    /// The rows `--session` and `--recapture` ask for.
+    pub(crate) fn filter(&self) -> ExportFilter {
+        ExportFilter { session_id: self.session, recapture_secs: self.recapture }
+    }
+}
+
+#[derive(ClapArgs, Debug)]
+pub struct Args {
+    #[command(flatten)]
+    selection: Selection,
+
+    /// Where to write the WiGLE CSV. The capture's own name with `.csv` by
+    /// default, beside the capture itself; `-` writes to standard output. A
+    /// name chosen by default is not written over, so say it here to mean it.
+    #[arg(long, short = 'o', value_name = "PATH")]
+    out: Option<PathBuf>,
+}
+
+pub fn run(args: Args) -> Result<()> {
+    let db = args.selection.capture("exporting")?;
     let (out, derived) = match args.out {
         Some(path) => (path, false),
         None => (capture::export_path(&db), true),
@@ -74,7 +93,7 @@ pub fn run(args: Args) -> Result<()> {
         );
     }
     let conn = open_readonly(&db).with_context(|| format!("opening {}", db.display()))?;
-    let filter = ExportFilter { session_id: args.session, recapture_secs: args.recapture };
+    let filter = args.selection.filter();
     let version = env!("CARGO_PKG_VERSION");
 
     let summary = if out.as_os_str() == "-" {
@@ -91,6 +110,12 @@ pub fn run(args: Args) -> Result<()> {
         summary
     };
 
+    note_unpositioned(&summary);
+    Ok(())
+}
+
+/// Say how many rows had no position and were left out, when any were.
+pub(crate) fn note_unpositioned(summary: &ExportSummary) {
     if summary.unpositioned > 0 {
         eprintln!(
             "{} rows were left out because no sighting in their window had a \
@@ -98,17 +123,21 @@ pub fn run(args: Args) -> Result<()> {
             thousands(summary.unpositioned)
         );
     }
-    Ok(())
 }
 
 /// What the export wrote and what the capture held, for standard error: standard output
 /// may be the CSV. `out` is `None` for standard output.
 fn report(summary: &ExportSummary, out: Option<&Path>) -> String {
+    let dest = out.map_or_else(|| "standard output".to_owned(), |p| p.display().to_string());
+    format!("{} rows written to {dest}\n{}", thousands(summary.rows), details(summary))
+}
+
+/// Everything [`report`] says after its first line: what the capture held, by kind,
+/// position source, node and span.
+pub(crate) fn details(summary: &ExportSummary) -> String {
     use std::fmt::Write as _;
 
     let mut text = String::new();
-    let dest = out.map_or_else(|| "standard output".to_owned(), |p| p.display().to_string());
-    let _ = writeln!(text, "{} rows written to {dest}", thousands(summary.rows));
 
     let (wifi, bands) = (&summary.wifi, &summary.wifi_bands);
     if wifi.sightings > 0 {
@@ -189,7 +218,7 @@ fn short_mac(mac: &[u8]) -> String {
 }
 
 /// `n` with a comma between each group of three digits.
-fn thousands(n: u64) -> String {
+pub(crate) fn thousands(n: u64) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (i, c) in digits.chars().enumerate() {

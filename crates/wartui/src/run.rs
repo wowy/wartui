@@ -71,7 +71,8 @@ pub struct Args {
 
     /// Read settings from this file instead of the default location
     /// (`~/.config/wartui/wartui.toml`, or `~/Library/Application Support/wartui/wartui.toml`
-    /// on macOS). Only `run` reads it; see `crates/wartui/README.md` § "Config file".
+    /// on macOS). Only `run` and `upload` read it; see `crates/wartui/README.md`
+    /// § "Config file".
     #[arg(long, value_name = "PATH")]
     pub(crate) config: Option<PathBuf>,
 
@@ -153,8 +154,8 @@ fn pool(file: Option<PoolArg>) -> ChannelPool {
 }
 
 pub async fn run(args: Args) -> Result<()> {
-    // Only `run` reads `--config`, so a broken `wartui.toml` cannot stop `ports` /
-    // `status` / `reset` / `export` / `sniff` from working.
+    // Only `run` and `upload` read `--config`, so a broken `wartui.toml` cannot stop
+    // `ports` / `status` / `reset` / `export` / `sniff` from working.
     let config = config::load(args.config.as_deref())?;
     // Where the settings modal saves to: the same file `load` just read.
     let config_path = config::path(args.config.as_deref());

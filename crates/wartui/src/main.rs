@@ -27,6 +27,7 @@ mod run;
 mod sniff;
 mod status;
 mod tui;
+mod upload;
 
 #[derive(Parser)]
 #[command(name = "wartui", version, about = "Fleet controller for ESP32-C5 wardriving nodes")]
@@ -53,6 +54,8 @@ enum Command {
     Run(run::Args),
     /// Write a WiGLE CSV from a capture.
     Export(export::Args),
+    /// Upload a capture to the WDGWars leaderboard.
+    Upload(upload::Args),
     /// Print every frame the bridge hears.
     Sniff(sniff::Args),
     /// Ask the bridge for its counters and uptime.
@@ -78,11 +81,12 @@ async fn main() -> Result<()> {
     // and the last thing logged before an exit is usually the interesting one.
     let _log = logging(cli.log_file.as_deref())?;
     match cli.command {
-        // `run` loads `wartui.toml` itself, so a broken config cannot stop
-        // `ports` / `status` / `reset` / `export` / `sniff` from working.
+        // `run` and `upload` load `wartui.toml` themselves, so a broken config cannot
+        // stop `ports` / `status` / `reset` / `export` / `sniff` from working.
         None => run::run(cli.run).await,
         Some(Command::Run(args)) => run::run(args).await,
         Some(Command::Export(args)) => export::run(args),
+        Some(Command::Upload(args)) => upload::run(args),
         Some(Command::Sniff(args)) => sniff::run(args).await,
         Some(Command::Status(args)) => status::run(args).await,
         Some(Command::Reset(args)) => reset::run(args).await,
