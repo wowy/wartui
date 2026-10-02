@@ -1309,38 +1309,3 @@ fn export_writer_tallies_position_sources_when_fix_varies() {
     let (_, summary) = export(&conn);
     assert_eq!(summary.positions, wartui_core::export::Positions { gps: 2, fixed: 1, none: 1 });
 }
-
-#[test]
-fn store_ignores_stale_wal_when_creating_over_deleted_capture() {
-    // A capture deleted without its `-wal` and `-shm` leaves frames of a database that
-    // is gone beside the next file of that name, and none of them may reach it.
-    let dir = tempfile::tempdir().expect("temp dir");
-    let path = dir.path().join("wartui.db");
-    let wal = dir.path().join("wartui.db-wal");
-    let mut config = StoreConfig::new(&path);
-    config.batch_interval = Duration::from_millis(10);
-    // Inline and never reached, so the WAL still holds every frame when copied.
-    config.checkpoint = Checkpoint::Inline;
-    config.wal_autocheckpoint_pages = Some(1_000_000);
-    let info = CaptureInfo { pool: ChannelPool::Us, notes: None };
-    let store = Store::create(&config, &info, EPOCH_MS).expect("creating the store");
-    let records: Vec<Record> =
-        (0..4u8).map(|n| observation(NODE, [n; 6], -60, EPOCH_MS, fixed(37.0, -122.0))).collect();
-    assert_eq!(store.submit(records), 0);
-    wait_for("the rows to be written", || store.stats().written == 4);
-    let shm = dir.path().join("wartui.db-shm");
-    let stale = std::fs::read(&wal).expect("reading the WAL");
-    let stale_shm = std::fs::read(&shm).expect("reading the shm");
-    assert!(!stale.is_empty(), "the WAL holds the rows");
-    store.close();
-
-    std::fs::remove_file(&path).expect("deleting the capture");
-    std::fs::write(&wal, &stale).expect("planting the stale WAL");
-    std::fs::write(&shm, &stale_shm).expect("planting the stale shm");
-
-    Store::create(&config, &info, EPOCH_MS).expect("creating the store again").close();
-    let conn = open_readonly(&path).expect("reopening read-only");
-    let observations: i64 =
-        conn.query_row("SELECT count(*) FROM observation", [], |r| r.get(0)).expect("counting");
-    assert_eq!(observations, 0, "nothing from the deleted capture");
-}

@@ -455,16 +455,6 @@ impl Store {
                 _ => StoreError::Create(e),
             },
         )?;
-        // The main file is new, so a `-wal` or `-shm` beside it belongs to a deleted
-        // capture. SQLite already discards a WAL beside an empty database; removing them
-        // here keeps that from resting on SQLite's behaviour alone.
-        for sidecar in [wal_path(&config.path), shm_path(&config.path)] {
-            match std::fs::remove_file(&sidecar) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(StoreError::Create(e)),
-            }
-        }
         let mut conn = Connection::open(&config.path)?;
         prepare(&conn, config)?;
         // All of it or none of it, version marker, fingerprint and capture row included.
@@ -739,17 +729,8 @@ fn checkpoint(conn: &Connection, mode: &str) -> Result<CheckpointPass, rusqlite:
 
 /// SQLite's WAL for a database: the name with `-wal` on the end, not an extension.
 fn wal_path(db: &Path) -> PathBuf {
-    with_suffix(db, "-wal")
-}
-
-/// SQLite's shared-memory index for a WAL database, named the same way.
-fn shm_path(db: &Path) -> PathBuf {
-    with_suffix(db, "-shm")
-}
-
-fn with_suffix(db: &Path, suffix: &str) -> PathBuf {
     let mut name = db.as_os_str().to_owned();
-    name.push(suffix);
+    name.push("-wal");
     PathBuf::from(name)
 }
 
