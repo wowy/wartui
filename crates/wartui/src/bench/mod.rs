@@ -47,7 +47,7 @@ use wartui_core::export::{ExportFilter, wigle_csv};
 use wartui_core::position::PositionChain;
 use wartui_core::runtime::{COMMAND_QUEUE, drive, now};
 use wartui_core::store::{
-    Checkpoint, CheckpointPass, SessionInfo, Store, StoreConfig, open_readonly,
+    CaptureInfo, Checkpoint, CheckpointPass, Store, StoreConfig, open_readonly,
 };
 use wartui_proto::link::Mac;
 use wartui_proto::plan::{ChannelPool, DEDUP_RING_C5, NUM_SCAN_CHANNELS};
@@ -115,7 +115,7 @@ pub struct Args {
     db: PathBuf,
 
     /// Delete the database and its `-wal` and `-shm` first. Without this an existing
-    /// file is refused, because appending to one measures a different thing.
+    /// file is refused, since a capture holds one run.
     #[arg(long)]
     fresh: bool,
 
@@ -264,12 +264,12 @@ pub async fn run(args: Args) -> Result<()> {
 
     let link = SimTransport::new(sim.clone()).start().context("starting the simulator")?;
     let started = now();
-    let session = SessionInfo {
+    let info = CaptureInfo {
         pool: POOL,
         notes: Some(format!("wartui bench, profile {}", args.profile.name())),
     };
-    let store = Store::open(&store_config, &session, started.unix_ms)
-        .with_context(|| format!("opening {}", args.db.display()))?;
+    let store = Store::create(&store_config, &info, started.unix_ms)
+        .with_context(|| format!("creating {}", args.db.display()))?;
     let engine = FleetEngine::new(
         EngineConfig {
             pool: POOL,
@@ -277,7 +277,6 @@ pub async fn run(args: Args) -> Result<()> {
             // Somewhere, so every row is exportable and the export timing below is of a
             // real export. Null Island, so nobody mistakes it for a place.
             position: PositionChain::fixed(0.0, 0.0, None),
-            assignment_base: store.assignment_base(),
             ..EngineConfig::default()
         },
         started,
@@ -721,8 +720,7 @@ fn make_room(db: &Path, fresh: bool) -> Result<()> {
     if !fresh {
         if db.exists() {
             bail!(
-                "{} already exists; pass --fresh to replace it, since a run into a used \
-                 file measures a different thing",
+                "{} already exists; pass --fresh to replace it, since a capture holds one run",
                 db.display()
             );
         }

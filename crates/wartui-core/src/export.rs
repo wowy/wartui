@@ -100,9 +100,6 @@ pub enum ExportError {
 /// What to export.
 #[derive(Debug, Clone, Copy)]
 pub struct ExportFilter {
-    /// Only this session. `None` exports every session, which is usually wanted:
-    /// WiGLE deduplicates its own side and more sightings is better data.
-    pub session_id: Option<i64>,
     /// How long after a window opened a sighting still belongs to it, in
     /// seconds; the first sighting later than that opens the next window.
     /// `0` folds a network's whole capture into one row.
@@ -110,9 +107,9 @@ pub struct ExportFilter {
 }
 
 impl Default for ExportFilter {
-    /// Every session, folded into [`DEFAULT_RECAPTURE_SECS`] windows.
+    /// Every sighting, folded into [`DEFAULT_RECAPTURE_SECS`] windows.
     fn default() -> Self {
-        Self { session_id: None, recapture_secs: DEFAULT_RECAPTURE_SECS }
+        Self { recapture_secs: DEFAULT_RECAPTURE_SECS }
     }
 }
 
@@ -226,7 +223,7 @@ pub fn wigle_csv<W: Write>(
     {
         let mut insert = tx.prepare(INSERT_EXPORT_ROW)?;
         let mut stmt = tx.prepare(SELECT_SIGHTINGS)?;
-        let mut rows = stmt.query(rusqlite::params![filter.session_id])?;
+        let mut rows = stmt.query([])?;
         let mut window: Option<Window> = None;
 
         while let Some(row) = rows.next()? {
@@ -388,7 +385,6 @@ const SELECT_SIGHTINGS: &str = r"
 SELECT bssid, ssid, security, channel, rssi, lat, lon, alt, accuracy, kind, rcoi, mfgr_id, rx_at,
        node_mac, CASE pos_source WHEN 'gps' THEN 0 WHEN 'static' THEN 1 ELSE 2 END
 FROM observation o
-WHERE ?1 IS NULL OR o.session_id = ?1
 ORDER BY o.bssid, o.kind, o.rx_at, o.id
 ";
 

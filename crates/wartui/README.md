@@ -31,7 +31,7 @@ new address. The same bridge reconnecting or rebooting sends nothing; nodes alre
 
 | Flag                    | Default     | What it is                                             |
 |-------------------------|-------------|--------------------------------------------------------|
-| `--db PATH`             | dated       | Where to keep the capture; see "Exporting"             |
+| `--db PATH`             | dated       | New file for the capture; an existing one is refused   |
 | `--bridge PATH\|MAC`    | detected    | Which board the bridge is, by path, address or `00:08` |
 | `--lat` `--lon` `--alt` | —           | A static position for every observation                |
 | `--gps PATH`            | detected    | An NMEA receiver, preferred over `--lat`/`--lon`       |
@@ -41,7 +41,7 @@ new address. The same bridge reconnecting or rebooting sends nothing; nodes alre
 | `--sim N`               | —           | Run a fake fleet instead of hardware                   |
 | `--sim-c6 N`            | `0`         | Make that many of them C6s, from the end of the fleet  |
 | `--record-raw`          | off         | Also keep the undecoded bytes of every frame           |
-| `--notes TEXT`          | —           | A note about this run, stored with the session         |
+| `--notes TEXT`          | —           | A note about this run, stored with the capture         |
 | `--config PATH`         | per-OS path | See "Config file"                                      |
 
 The channel pool and transmit powers have no flag; see "Config file". `--log-file PATH` is global;
@@ -49,9 +49,10 @@ see "When nothing arrives".
 
 ### Exporting
 
-Each run names its capture for the minute it started: `wartui-2026-09-18-14-30.db`. The date is in
-ISO order whatever the locale, so captures sort in the order they were made and `export` can pick
-the newest. Two runs begun in the same minute share the file, the second adding its session.
+A capture holds one run. Each run names its capture for the second it started:
+`wartui-2026-09-18-14-30-07.db`. The date is in ISO order whatever the locale, so captures sort in
+the order they were made and `export` can pick the newest. `run` refuses a `--db` that exists rather
+than adding to it, so every export, analysis and upload covers exactly one run.
 
 `export` writes the [WiGLE v1.6 format](https://api.wigle.net/csvFormat.html):
 
@@ -59,13 +60,12 @@ the newest. Two runs begun in the same minute share the file, the second adding 
 |-----------------------|--------------------------|--------------------------------------------------|
 | `--db PATH`           | newest in this directory | The capture to read                              |
 | `--out PATH`, `-o`    | the capture's name, .csv | Where to write; `--out -` writes to standard out |
-| `--session ID`        | every session            | Only this session                                |
 | `--recapture SECONDS` | `3600`                   | How wide each row's window is                    |
 
-So `wartui export` alone exports the run that just ended, `wartui-2026-09-18-14-30.db` to
-`wartui-2026-09-18-14-30.csv`. A derived name is never overwritten, since that file may be the
+So `wartui export` alone exports the run that just ended, `wartui-2026-09-18-14-30-07.db` to
+`wartui-2026-09-18-14-30-07.csv`. A derived name is never overwritten, since that file may be the
 export already uploaded; name it with `--out` to overwrite it on purpose. The CSV is a view over the
-store, so it can be re-run after a decoder fix, for last week's session, or during a capture.
+store, so it can be re-run after a decoder fix, for last week's run, or during a capture.
 
 `--recapture` writes one row per network per window: its strongest positioned sighting, with
 `FirstSeen` from the window's first sighting. WDGWars skips a re-scan of a MAC by the same user
@@ -83,7 +83,7 @@ inquiry produces, and the nodes never transmit while scanning.
 ### Analyzing a capture
 
 `analyze` prints what `export` would report for a capture, then what it lost on the way in. It
-takes `--db`, `--session` and `--recapture` as `export` does, and writes nothing but standard
+takes `--db` and `--recapture` as `export` does, and writes nothing but standard
 output. The tail of its output, after the export summary:
 
 ```
@@ -103,7 +103,7 @@ output. The tail of its output, after the export summary:
 | `heartbeats` | Heartbeats lost between node and host, read from each node's beat sequence       |
 | `ring`       | Sightings a node's full pending ring refused; most are reported on a later dwell |
 
-Every figure is exact. Each session's first bridge reply and first heartbeat per node is a
+Every figure is exact. The capture's first bridge reply and first heartbeat per node is a
 baseline, so what was dropped before the capture began is not counted. `batches` and `bridge`
 print zeros, since "0 lost" is the answer. Left out:
 
@@ -130,7 +130,6 @@ wartui upload --db tonight.db -y  # another capture, without asking
 | Flag                  | Default                  | What it is                    |
 |-----------------------|--------------------------|-------------------------------|
 | `--db PATH`           | newest in this directory | The capture to read           |
-| `--session ID`        | every session            | Only this session             |
 | `--recapture SECONDS` | `3600`                   | How wide each row's window is |
 | `--config PATH`       | per-OS path              | Where to read the API key     |
 | `--yes`, `-y`         | off                      | Upload without asking         |
@@ -138,7 +137,7 @@ wartui upload --db tonight.db -y  # another capture, without asking
 It prints the same counts as `export`, plus the compressed size, then asks `Upload to WDGWars?
 [y/N]`. Without a terminal to ask on, it refuses before building the upload unless given
 `--yes`. A capture with no positioned rows is not sent. The site takes at most 40 MB (40,000,000
-bytes) compressed; over that, send one `--session` at a time. Sizes are printed in decimal units.
+bytes) compressed, and a larger capture is refused before sending. Sizes are printed in decimal units.
 
 The site queues the file and imports it later. `upload` polls until the import ends, saying each
 change of state, then prints the site's counts (`imported`, `captured`, `updated`, and any others).

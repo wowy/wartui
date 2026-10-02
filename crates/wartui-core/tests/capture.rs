@@ -15,10 +15,10 @@ use wartui_core::export::{ExportFilter, wigle_csv};
 use wartui_core::gps::Gps;
 use wartui_core::position::PositionChain;
 use wartui_core::runtime::{drive, now};
-use wartui_core::store::{SessionInfo, Store, StoreConfig, open_readonly};
+use wartui_core::store::{CaptureInfo, Store, StoreConfig, open_readonly};
 
 #[tokio::test(start_paused = true)]
-async fn capture_session_persists_sightings_and_exports_wigle_when_simulated() {
+async fn capture_run_persists_sightings_and_exports_wigle_when_simulated() {
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().join("wartui.db");
 
@@ -28,9 +28,9 @@ async fn capture_session_persists_sightings_and_exports_wigle_when_simulated() {
         .expect("starting the simulator");
 
     let started = now();
-    let session = SessionInfo::default();
-    let store = Store::open(&StoreConfig::new(&path), &session, started.unix_ms)
-        .expect("opening the store");
+    let info = CaptureInfo::default();
+    let store = Store::create(&StoreConfig::new(&path), &info, started.unix_ms)
+        .expect("creating the store");
 
     let config = EngineConfig {
         position: PositionChain::fixed(37.7749, -122.4194, Some(16.0)),
@@ -61,9 +61,9 @@ async fn capture_session_persists_sightings_and_exports_wigle_when_simulated() {
     assert!(stored > 0, "observations should have reached the disk");
 
     let (ended, bridge): (Option<i64>, Option<Vec<u8>>) = conn
-        .query_row("SELECT ended_at, bridge_mac FROM session", [], |r| Ok((r.get(0)?, r.get(1)?)))
-        .expect("session row");
-    assert!(ended.is_some(), "a stopped capture should close its session out");
+        .query_row("SELECT ended_at, bridge_mac FROM capture", [], |r| Ok((r.get(0)?, r.get(1)?)))
+        .expect("capture row");
+    assert!(ended.is_some(), "a stopped capture should close its capture row out");
     assert!(bridge.is_some(), "and should say which bridge it came through");
 
     let mut csv = Vec::new();
@@ -96,8 +96,8 @@ const FIRST: &[u8] = b"$GPGGA,123519.00,4807.038,N,01131.000,E,1,08,0.9,545.4,M,
 const SECOND: &[u8] = b"$GPGGA,123529.00,4810.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*6C";
 
 #[tokio::test(start_paused = true)]
-async fn capture_session_attaches_dynamic_gps_positions_when_vehicle_moves() {
-    // The point of the GPS tier: not one position for the session, but the position
+async fn capture_run_attaches_dynamic_gps_positions_when_vehicle_moves() {
+    // The point of the GPS tier: not one position for the run, but the position
     // at the moment each observation arrived.
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().join("drive.db");
@@ -107,9 +107,9 @@ async fn capture_session_attaches_dynamic_gps_positions_when_vehicle_moves() {
         .expect("starting the simulator");
 
     let started = now();
-    let session = SessionInfo::default();
-    let store = Store::open(&StoreConfig::new(&path), &session, started.unix_ms)
-        .expect("opening the store");
+    let info = CaptureInfo::default();
+    let store = Store::create(&StoreConfig::new(&path), &info, started.unix_ms)
+        .expect("creating the store");
 
     let gps = Gps::detached();
     gps.feed(FIRST, started.unix_ms);

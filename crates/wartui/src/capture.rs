@@ -1,11 +1,10 @@
 //! What a capture is called, and how `export` finds the last one.
 //!
-//! A capture is a wardriving run, and the file is named for the minute the run started, so
-//! a directory of them reads as a log rather than as one file every run appends to. Two
-//! runs begun inside the same minute do share a name, and the second adds its session to
-//! the first one's file — what [`wartui_core::store::Store::open`] does for any path
-//! given twice, and what `--db` is for. The date is ISO order — year, month, day — whatever order the reader's locale
-//! would put them in: a name that begins with the year and continues in the operator's
+//! A capture is one wardriving run, and the file is named for the second the run started,
+//! so a directory of them reads as a log. Two runs begun inside the same second get the
+//! same name, and the second is refused, as any `--db` that exists is by
+//! [`wartui_core::store::Store::create`]. The date is ISO order — year, month, day —
+//! whatever order the reader's locale would put them in: a name that begins with the year and continues in the operator's
 //! own order sorts wrong for half the world and reads as an impossible date for the
 //! other half. In ISO order the names sort chronologically as text, which is the whole
 //! of [`newest`], and that is what lets `export` reach for the capture `run` just wrote
@@ -31,7 +30,7 @@ const PREFIX: &str = "wartui-";
 const SUFFIX: &str = ".db";
 
 /// The stamp in between, zero-padded throughout — which is what makes the names sort.
-const STAMP: &str = "%Y-%m-%d-%H-%M";
+const STAMP: &str = "%Y-%m-%d-%H-%M-%S";
 
 /// The name a capture started at `started` is given.
 ///
@@ -99,9 +98,9 @@ mod tests {
 
     use super::{dated_path, export_path, newest};
 
-    fn at(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> DateTime<Local> {
+    fn at(year: i32, month: u32, day: u32, hour: u32, minute: u32, second: u32) -> DateTime<Local> {
         NaiveDate::from_ymd_opt(year, month, day)
-            .and_then(|day| day.and_hms_opt(hour, minute, 0))
+            .and_then(|day| day.and_hms_opt(hour, minute, second))
             .expect("a real date")
             .and_local_timezone(Local)
             .single()
@@ -109,17 +108,21 @@ mod tests {
     }
 
     #[test]
-    fn capture_mgr_formats_filename_from_timestamp_when_session_starts() {
-        assert_eq!(dated_path(at(2026, 9, 18, 14, 30)), Path::new("wartui-2026-09-18-14-30.db"));
+    fn capture_mgr_formats_filename_with_seconds_when_run_starts() {
+        assert_eq!(
+            dated_path(at(2026, 9, 18, 14, 30, 7)),
+            Path::new("wartui-2026-09-18-14-30-07.db")
+        );
     }
 
     #[test]
-    fn capture_mgr_sorts_records_in_chronological_order_when_listing_sessions() {
+    fn capture_mgr_sorts_records_in_chronological_order_when_listing_runs() {
         let written: Vec<_> = [
-            at(2025, 12, 31, 23, 59),
-            at(2026, 1, 1, 0, 0),
-            at(2026, 9, 8, 9, 5),
-            at(2026, 9, 18, 14, 30),
+            at(2025, 12, 31, 23, 59, 59),
+            at(2026, 1, 1, 0, 0, 0),
+            at(2026, 9, 8, 9, 5, 0),
+            at(2026, 9, 18, 14, 30, 9),
+            at(2026, 9, 18, 14, 30, 10),
         ]
         .into_iter()
         .map(dated_path)
@@ -133,26 +136,29 @@ mod tests {
     fn capture_mgr_locates_most_recent_valid_capture_file_when_querying_directory() {
         let dir = tempfile::tempdir().unwrap();
         for name in [
-            "wartui-2026-09-18-14-30.db",
-            "wartui-2026-09-08-09-05.db",
-            "wartui-2025-12-31-23-59.db",
-            // Named by hand rather than for a minute: neither is the answer.
+            "wartui-2026-09-18-14-30-05.db",
+            "wartui-2026-09-18-14-30-41.db",
+            "wartui-2026-09-08-09-05-00.db",
+            "wartui-2025-12-31-23-59-59.db",
+            // Named by hand rather than for a second: neither is the answer.
             "tonight.db",
             "wartui-notes.db",
             // Unpadded, so it would sort above every real one. Not a name `run` writes.
-            "wartui-2026-9-8-9-5.db",
+            "wartui-2026-9-8-9-5-0.db",
+            // No seconds. Not a name `run` writes either.
+            "wartui-2026-12-24-00-00.db",
         ] {
             std::fs::File::create(dir.path().join(name)).unwrap();
         }
         // Carries the newest name of all and is not a capture.
-        std::fs::create_dir(dir.path().join("wartui-2026-12-25-00-00.db")).unwrap();
-        assert_eq!(newest(dir.path()).unwrap(), dir.path().join("wartui-2026-09-18-14-30.db"));
+        std::fs::create_dir(dir.path().join("wartui-2026-12-25-00-00-00.db")).unwrap();
+        assert_eq!(newest(dir.path()).unwrap(), dir.path().join("wartui-2026-09-18-14-30-41.db"));
     }
 
     #[test]
-    fn capture_mgr_finds_matching_filename_when_exporting_session() {
+    fn capture_mgr_finds_matching_filename_when_exporting_run() {
         let dir = tempfile::tempdir().unwrap();
-        let written = dir.path().join(dated_path(at(2026, 9, 18, 14, 30)));
+        let written = dir.path().join(dated_path(at(2026, 9, 18, 14, 30, 7)));
         std::fs::File::create(&written).unwrap();
         assert_eq!(newest(dir.path()).unwrap(), written);
     }
@@ -167,8 +173,8 @@ mod tests {
 
     #[test]
     fn capture_mgr_derives_adjacent_csv_path_when_given_db_path() {
-        let db = dated_path(at(2026, 9, 18, 14, 30));
-        assert_eq!(export_path(&db), Path::new("wartui-2026-09-18-14-30.csv"));
+        let db = dated_path(at(2026, 9, 18, 14, 30, 7));
+        assert_eq!(export_path(&db), Path::new("wartui-2026-09-18-14-30-07.csv"));
     }
 
     #[test]

@@ -16,7 +16,7 @@ use wartui_core::record::{
     Observation, Record,
 };
 use wartui_core::store::{
-    Checkpoint, SCHEMA_VERSION, SessionInfo, Store, StoreConfig, StoreError, open_readonly,
+    CaptureInfo, Checkpoint, SCHEMA_VERSION, Store, StoreConfig, StoreError, open_readonly,
 };
 use wartui_proto::air::RecordKind;
 use wartui_proto::link::Mac;
@@ -92,14 +92,14 @@ fn store(dir: &tempfile::TempDir) -> Store {
     open_at(&dir.path().join("wartui.db"))
 }
 
-/// A store on one named path, so a test can reopen the same database.
+/// A store on one named path, so a test can read the same database back.
 fn open_at(path: &std::path::Path) -> Store {
     let mut config = StoreConfig::new(path);
     // Small and quick, so a test does not sit waiting for a batch window.
     config.batch_rows = 8;
     config.batch_interval = Duration::from_millis(10);
-    let session = SessionInfo { pool: ChannelPool::Us, notes: None };
-    Store::open(&config, &session, EPOCH_MS).expect("opening the store")
+    let info = CaptureInfo { pool: ChannelPool::Us, notes: None };
+    Store::create(&config, &info, EPOCH_MS).expect("creating the store")
 }
 
 /// Write records and close, which is what commits the final batch.
@@ -126,7 +126,7 @@ fn export_with(
 }
 
 #[test]
-fn session_record_stores_pool_spelling_when_session_is_created() {
+fn capture_record_stores_pool_spelling_when_capture_is_created() {
     // Lowercase, and deliberately not `ChannelPool`'s `Display`: captures on
     // disk carry these strings, so the two spellings are separate on purpose.
     for (pool, spelling) in
@@ -135,13 +135,13 @@ fn session_record_stores_pool_spelling_when_session_is_created() {
         let dir = tempfile::tempdir().expect("temp dir");
         let path = dir.path().join("wartui.db");
         let config = StoreConfig::new(&path);
-        let session = SessionInfo { pool, notes: None };
-        Store::open(&config, &session, EPOCH_MS).expect("opening the store").close();
+        let info = CaptureInfo { pool, notes: None };
+        Store::create(&config, &info, EPOCH_MS).expect("creating the store").close();
 
         let conn = open_readonly(&path).expect("reopening read-only");
         let stored: String = conn
-            .query_row("SELECT channel_pool FROM session", [], |row| row.get(0))
-            .expect("the session row");
+            .query_row("SELECT channel_pool FROM capture", [], |row| row.get(0))
+            .expect("the capture row");
         assert_eq!(stored, spelling, "{pool:?}");
     }
 }
@@ -217,16 +217,14 @@ fn store_persists_every_bridge_status_column_when_round_tripped() {
         })],
     );
 
-    let session: i64 = conn.query_row("SELECT id FROM session", [], |r| r.get(0)).unwrap();
-    let row: (i64, i64, i64, i64, i64, i64) = conn
+    let row: (i64, i64, i64, i64, i64) = conn
         .query_row(
-            "SELECT session_id, rx_at, peer_count, rx_count, dropped_tx, uptime_ms
-             FROM bridge_status",
+            "SELECT rx_at, peer_count, rx_count, dropped_tx, uptime_ms FROM bridge_status",
             [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )
         .unwrap();
-    assert_eq!(row, (session, EPOCH_MS + 5_000, 3, 4_000_000_000, 1305, 3_240_000));
+    assert_eq!(row, (EPOCH_MS + 5_000, 3, 4_000_000_000, 1305, 3_240_000));
 }
 
 #[test]
@@ -243,15 +241,12 @@ fn store_persists_every_batch_gap_column_when_round_tripped() {
         })],
     );
 
-    let session: i64 = conn.query_row("SELECT id FROM session", [], |r| r.get(0)).unwrap();
-    let row: (i64, Vec<u8>, i64, i64, i64, i64) = conn
-        .query_row(
-            "SELECT session_id, node_mac, rx_at, after_seq, seq, lost FROM batch_gap",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
-        )
+    let row: (Vec<u8>, i64, i64, i64, i64) = conn
+        .query_row("SELECT node_mac, rx_at, after_seq, seq, lost FROM batch_gap", [], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        })
         .unwrap();
-    assert_eq!(row, (session, NODE.to_vec(), EPOCH_MS + 7_000, 65535, 2, 2));
+    assert_eq!(row, (NODE.to_vec(), EPOCH_MS + 7_000, 65535, 2, 2));
 }
 
 #[test]
@@ -575,8 +570,8 @@ fn store_drops_records_without_blocking_when_queue_depth_is_exceeded() {
     config.queue_depth = 1;
     config.batch_rows = 1024;
     config.batch_interval = Duration::from_secs(3600);
-    let session = SessionInfo { pool: ChannelPool::Us, notes: None };
-    let store = Store::open(&config, &session, EPOCH_MS).expect("opening the store");
+    let info = CaptureInfo { pool: ChannelPool::Us, notes: None };
+    let store = Store::create(&config, &info, EPOCH_MS).expect("creating the store");
 
     let flood: Vec<Record> =
         (0..2048).map(|n| observation(NODE, [n as u8; 6], -60, EPOCH_MS, Fix::none())).collect();
@@ -595,8 +590,8 @@ fn store_reports_committed_batch_timings_on_close_when_requested() {
     config.batch_rows = 8;
     config.batch_interval = Duration::from_secs(3600);
     config.timings = true;
-    let session = SessionInfo { pool: ChannelPool::Us, notes: None };
-    let store = Store::open(&config, &session, EPOCH_MS).expect("opening the store");
+    let info = CaptureInfo { pool: ChannelPool::Us, notes: None };
+    let store = Store::create(&config, &info, EPOCH_MS).expect("creating the store");
 
     let rows: Vec<Record> = (0..20u8)
         .map(|n| observation(NODE, [0x02, 0, 0, 0, 0, n], -60, EPOCH_MS, Fix::none()))
@@ -639,8 +634,8 @@ fn background_checkpointer_flushes_and_truncates_wal_when_configured() {
     // Any WAL at all is past the limit, so every pass that catches up is followed by a
     // truncation, and the last one, with the writer gone, always catches up.
     config.checkpoint = Checkpoint::Background { every: Duration::ZERO, truncate_at: 0 };
-    let session = SessionInfo { pool: ChannelPool::Us, notes: None };
-    let store = Store::open(&config, &session, EPOCH_MS).expect("opening the store");
+    let info = CaptureInfo { pool: ChannelPool::Us, notes: None };
+    let store = Store::create(&config, &info, EPOCH_MS).expect("creating the store");
 
     for n in 0..20u8 {
         let rows: Vec<Record> = (0..10u8)
@@ -674,8 +669,8 @@ fn store_reports_caught_up_checkpoint_count_when_running() {
     config.batch_interval = Duration::from_secs(60);
     config.timings = true;
     config.checkpoint = Checkpoint::Background { every: Duration::ZERO, truncate_at: u64::MAX };
-    let session = SessionInfo { pool: ChannelPool::Us, notes: None };
-    let store = Store::open(&config, &session, EPOCH_MS).expect("opening the store");
+    let info = CaptureInfo { pool: ChannelPool::Us, notes: None };
+    let store = Store::create(&config, &info, EPOCH_MS).expect("creating the store");
 
     assert_eq!(store.checkpoints_caught_up(), 0, "nothing has been committed yet");
     for n in 0..3u64 {
@@ -700,8 +695,8 @@ fn inline_checkpointer_has_zero_passes_when_queried_for_caught_up() {
     config.batch_rows = 10;
     config.batch_interval = Duration::from_secs(60);
     config.checkpoint = Checkpoint::Inline;
-    let session = SessionInfo { pool: ChannelPool::Us, notes: None };
-    let store = Store::open(&config, &session, EPOCH_MS).expect("opening the store");
+    let info = CaptureInfo { pool: ChannelPool::Us, notes: None };
+    let store = Store::create(&config, &info, EPOCH_MS).expect("creating the store");
 
     let rows: Vec<Record> = (0..10u8)
         .map(|m| observation(NODE, [0x02, 0, 0, 3, 0, m], -60, EPOCH_MS, Fix::none()))
@@ -736,8 +731,8 @@ fn wal_after_settled_commits(checkpoint: Checkpoint) -> u64 {
     config.wal_autocheckpoint_pages = Some(1_000_000);
     config.checkpoint = checkpoint;
     let checkpointed = matches!(checkpoint, Checkpoint::Background { .. });
-    let session = SessionInfo { pool: ChannelPool::Us, notes: None };
-    let store = Store::open(&config, &session, EPOCH_MS).expect("opening the store");
+    let info = CaptureInfo { pool: ChannelPool::Us, notes: None };
+    let store = Store::create(&config, &info, EPOCH_MS).expect("creating the store");
 
     for n in 0..20u64 {
         let caught_up = store.checkpoints_caught_up();
@@ -783,8 +778,8 @@ fn background_checkpointer_runs_deferred_pass_when_fleet_becomes_quiet() {
     config.batch_interval = Duration::from_millis(10);
     config.checkpoint =
         Checkpoint::Background { every: Duration::from_millis(200), truncate_at: u64::MAX };
-    let session = SessionInfo { pool: ChannelPool::Us, notes: None };
-    let store = Store::open(&config, &session, EPOCH_MS).expect("opening the store");
+    let info = CaptureInfo { pool: ChannelPool::Us, notes: None };
+    let store = Store::create(&config, &info, EPOCH_MS).expect("creating the store");
 
     // Two commits well inside one interval, then nothing.
     assert_eq!(store.submit(vec![observation(NODE, [0xAA; 6], -60, EPOCH_MS, Fix::none())]), 0);
@@ -827,8 +822,8 @@ fn inline_checkpointer_reports_no_passes_when_configured() {
     let mut config = StoreConfig::new(dir.path().join("wartui.db"));
     config.batch_interval = Duration::from_millis(10);
     config.checkpoint = Checkpoint::Inline;
-    let session = SessionInfo { pool: ChannelPool::Us, notes: None };
-    let store = Store::open(&config, &session, EPOCH_MS).expect("opening the store");
+    let info = CaptureInfo { pool: ChannelPool::Us, notes: None };
+    let store = Store::create(&config, &info, EPOCH_MS).expect("creating the store");
     assert_eq!(store.submit(vec![observation(NODE, [0xAA; 6], -60, EPOCH_MS, Fix::none())]), 0);
     let report = store.close();
     assert!(report.checkpoints.passes.is_empty() && report.checkpoints.truncations.is_empty());
@@ -874,8 +869,8 @@ fn store_configures_custom_page_size_when_creating_database() {
     config.page_size = Some(16_384);
     config.cache_kib = Some(32 * 1024);
     config.wal_autocheckpoint_pages = Some(4000);
-    let session = SessionInfo { pool: ChannelPool::Us, notes: None };
-    Store::open(&config, &session, EPOCH_MS).expect("opening the store").close();
+    let info = CaptureInfo { pool: ChannelPool::Us, notes: None };
+    Store::create(&config, &info, EPOCH_MS).expect("creating the store").close();
 
     let conn = open_readonly(&path).expect("reopening read-only");
     let page_size: i64 =
@@ -898,8 +893,7 @@ fn export_writer_uses_first_seen_from_earliest_unpositioned_sighting_when_window
         ],
     );
 
-    let (csv, summary) =
-        export_with(&conn, ExportFilter { recapture_secs: 0, ..ExportFilter::default() });
+    let (csv, summary) = export_with(&conn, ExportFilter { recapture_secs: 0 });
     assert_eq!(summary.rows, 1);
     assert!(
         csv.lines().nth(2).expect("a row").contains("2026-05-01 13:34:37"),
@@ -1036,9 +1030,8 @@ fn export_writer_produces_identical_output_when_run_repeatedly_on_connection() {
 
 #[test]
 fn store_refuses_database_connection_when_schema_version_mismatches() {
-    // `CREATE TABLE IF NOT EXISTS` no-ops against a foreign file's tables instead of
-    // failing, so without this the build appends rows of the wrong shape and stamps
-    // the marker to its own, leaving neither build able to tell it had happened.
+    // Reading another build's tables as this build's would export rows of the wrong
+    // shape, or values that meant something else.
     //
     // 1 is deliberately not in this list: it is the marker this build writes
     for found in [99, 2] {
@@ -1048,19 +1041,15 @@ fn store_refuses_database_connection_when_schema_version_mismatches() {
         other.pragma_update(None, "user_version", found).expect("stamping");
         drop(other);
 
-        let session = SessionInfo { pool: ChannelPool::Us, notes: None };
-        let opened = Store::open(&StoreConfig::new(&path), &session, EPOCH_MS);
+        let opened = open_readonly(&path);
         assert!(
             matches!(
                 opened,
-                Err(wartui_core::store::StoreError::SchemaMismatch { found: f, ours })
+                Err(StoreError::SchemaMismatch { found: f, ours })
                     if f == found && ours == SCHEMA_VERSION
             ),
             "expected v{found} to be refused, got {opened:?}"
         );
-
-        // The export path refuses it too, and for the same reason.
-        assert!(open_readonly(&path).is_err(), "v{found} must not export either");
 
         let still: i32 = Connection::open(&path)
             .expect("reopening")
@@ -1070,22 +1059,9 @@ fn store_refuses_database_connection_when_schema_version_mismatches() {
     }
 }
 
-/// Open a store at `path` and close it, leaving a stamped file behind.
+/// Create a store at `path` and close it, leaving a stamped file behind.
 fn create(path: &std::path::Path) {
     open_at(path).close();
-}
-
-/// The file's schema fingerprint row, raw.
-fn fingerprint_row(path: &std::path::Path) -> Option<String> {
-    Connection::open(path)
-        .expect("reopening")
-        .query_row("SELECT v FROM kv WHERE k = 'schema_fingerprint'", [], |row| row.get(0))
-        .ok()
-}
-
-fn reopen(path: &std::path::Path) -> Result<Store, StoreError> {
-    let session = SessionInfo { pool: ChannelPool::Us, notes: None };
-    Store::open(&StoreConfig::new(path), &session, EPOCH_MS)
 }
 
 #[test]
@@ -1093,8 +1069,7 @@ fn store_reopens_database_when_fingerprint_matches() {
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().join("wartui.db");
     create(&path);
-    reopen(&path).expect("reopening a file this build wrote").close();
-    open_readonly(&path).expect("and read-only");
+    open_readonly(&path).expect("reopening a file this build wrote");
 }
 
 #[test]
@@ -1109,7 +1084,7 @@ fn store_refuses_database_when_fingerprint_differs() {
         .execute("UPDATE kv SET v = '00000000deadbeef' WHERE k = 'schema_fingerprint'", [])
         .expect("overwriting the fingerprint");
 
-    let opened = reopen(&path);
+    let opened = open_readonly(&path);
     assert!(
         matches!(opened, Err(StoreError::SchemaDiffers { found: Some(0xdead_beef), ours })
             if ours != 0xdead_beef),
@@ -1129,7 +1104,7 @@ fn store_refuses_database_when_fingerprint_missing() {
         .execute("DELETE FROM kv WHERE k = 'schema_fingerprint'", [])
         .expect("deleting the fingerprint");
 
-    let opened = reopen(&path);
+    let opened = open_readonly(&path);
     assert!(
         matches!(opened, Err(StoreError::SchemaDiffers { found: None, .. })),
         "expected a file without a fingerprint to be refused, got {opened:?}"
@@ -1137,51 +1112,28 @@ fn store_refuses_database_when_fingerprint_missing() {
 }
 
 #[test]
-fn store_refuses_readonly_open_when_fingerprint_differs() {
+fn store_refuses_create_when_file_exists() {
+    // A capture holds one run, so a second run into the same path is refused rather
+    // than appended to, and the file it found is left exactly as it was.
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().join("wartui.db");
     create(&path);
-    Connection::open(&path)
-        .expect("reopening")
-        .execute("UPDATE kv SET v = '00000000deadbeef' WHERE k = 'schema_fingerprint'", [])
-        .expect("overwriting the fingerprint");
+    let before = std::fs::read(&path).expect("reading the capture");
 
-    let opened = open_readonly(&path);
+    let info = CaptureInfo { pool: ChannelPool::Us, notes: None };
+    let created = Store::create(&StoreConfig::new(&path), &info, EPOCH_MS);
     assert!(
-        matches!(opened, Err(StoreError::SchemaDiffers { found: Some(0xdead_beef), .. })),
-        "expected the export path to refuse it too, got {opened:?}"
+        matches!(&created, Err(StoreError::Exists(p)) if *p == path),
+        "expected the existing file to be refused, got {created:?}"
     );
-}
-
-#[test]
-fn store_leaves_database_untouched_when_fingerprint_differs() {
-    // A refusal is before the schema, the stamp and the session row, so the other
-    // build's file is exactly as it was.
-    let dir = tempfile::tempdir().expect("temp dir");
-    let path = dir.path().join("wartui.db");
-    create(&path);
-    Connection::open(&path)
-        .expect("reopening")
-        .execute("UPDATE kv SET v = '00000000deadbeef' WHERE k = 'schema_fingerprint'", [])
-        .expect("overwriting the fingerprint");
-
-    assert!(reopen(&path).is_err(), "the file must be refused");
-
-    let conn = Connection::open(&path).expect("reopening");
-    let version: i32 =
-        conn.pragma_query_value(None, "user_version", |row| row.get(0)).expect("the version");
-    let sessions: i64 =
-        conn.query_row("SELECT count(*) FROM session", [], |row| row.get(0)).expect("sessions");
-    assert_eq!(version, SCHEMA_VERSION);
-    assert_eq!(fingerprint_row(&path).as_deref(), Some("00000000deadbeef"));
-    assert_eq!(sessions, 1, "only the session that created the file");
+    drop(created);
+    assert_eq!(std::fs::read(&path).expect("rereading the capture"), before);
 }
 
 #[test]
 fn store_stamps_current_schema_version_when_creating_database() {
-    // 0 is what an empty file reads, and it is the one marker that is not a refusal:
-    // there is nothing in the file to be incompatible with. The stamp is what makes
-    // the next open recognise it.
+    // The stamp is what makes the next read-only open recognise the file as this
+    // build's.
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().join("wartui.db");
     open_at(&path).close();
@@ -1193,9 +1145,8 @@ fn store_stamps_current_schema_version_when_creating_database() {
 }
 
 #[test]
-fn store_persists_bridge_metadata_when_bridge_announces_in_session() {
-    // A file with several sessions from two different dongles has to be able to
-    // say which produced which.
+fn store_persists_bridge_metadata_when_bridge_announces() {
+    // A capture says which dongle produced it.
     let dir = tempfile::tempdir().expect("temp dir");
     let conn = write(
         &dir,
@@ -1207,10 +1158,10 @@ fn store_persists_bridge_metadata_when_bridge_announces_in_session() {
     );
 
     let (mac, chip, fw): (Vec<u8>, String, String) = conn
-        .query_row("SELECT bridge_mac, bridge_chip, bridge_fw FROM session", [], |r| {
+        .query_row("SELECT bridge_mac, bridge_chip, bridge_fw FROM capture", [], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?))
         })
-        .expect("the session row");
+        .expect("the capture row");
     assert_eq!(mac, vec![0x02, 0x00, 0x5E, 0x10, 0x9D, 0x24]);
     assert_eq!((chip.as_str(), fw.as_str()), ("Esp32C6", "0.1.0"));
 }
@@ -1259,34 +1210,6 @@ fn store_records_every_assignment_attempt_regardless_of_outcome_when_sent() {
         rows,
         vec![("unacked".to_owned(), None, 1), ("acked".to_owned(), Some(4_500), 1)],
         "a retry is a second row, not an update: the table is append-only"
-    );
-}
-
-#[test]
-fn store_advances_assignment_base_counter_when_session_opens_and_spends() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let path = dir.path().join("wartui.db");
-
-    // Persisting the counter only after an
-    // assignment goes out would let a crash in between hand the next run an
-    // epoch a node already holds.
-    let first = open_at(&path);
-    assert_eq!(first.assignment_base(), 0, "a fresh database starts from nothing");
-    first.close();
-
-    let second = open_at(&path);
-    assert!(
-        second.assignment_base() >= 64,
-        "opening books a block of epochs, so a crash can only skip them"
-    );
-    let base = second.assignment_base();
-    second.submit(vec![assignment(base + 1, AdminOutcome::Acked, Some(1_000))]);
-    second.close();
-
-    let third = open_at(&path);
-    assert!(
-        third.assignment_base() > base + 1,
-        "and spending one moves the reservation along with it"
     );
 }
 
@@ -1388,29 +1311,36 @@ fn export_writer_tallies_position_sources_when_fix_varies() {
 }
 
 #[test]
-fn export_writer_respects_session_filter_when_session_given() {
-    // Two runs into one file are two sessions; the summary counts only the one asked for.
+fn store_ignores_stale_wal_when_creating_over_deleted_capture() {
+    // A capture deleted without its `-wal` and `-shm` leaves frames of a database that
+    // is gone beside the next file of that name, and none of them may reach it.
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().join("wartui.db");
-    for records in [
-        vec![observation(NODE, [0xAA; 6], -60, EPOCH_MS, fixed(37.0, -122.0))],
-        vec![
-            observation(OTHER, [0xBB; 6], -60, EPOCH_MS, fixed(37.0, -122.0)),
-            ble_observation(OTHER, [0xCC; 6], EPOCH_MS, fixed(37.0, -122.0)),
-        ],
-    ] {
-        let store = open_at(&path);
-        assert_eq!(store.submit(records), 0);
-        store.close();
-    }
-    let conn = open_readonly(&path).expect("reopening read-only");
-    let second: i64 =
-        conn.query_row("SELECT max(id) FROM session", [], |row| row.get(0)).expect("a session");
+    let wal = dir.path().join("wartui.db-wal");
+    let mut config = StoreConfig::new(&path);
+    config.batch_interval = Duration::from_millis(10);
+    // Inline and never reached, so the WAL still holds every frame when copied.
+    config.checkpoint = Checkpoint::Inline;
+    config.wal_autocheckpoint_pages = Some(1_000_000);
+    let info = CaptureInfo { pool: ChannelPool::Us, notes: None };
+    let store = Store::create(&config, &info, EPOCH_MS).expect("creating the store");
+    let records: Vec<Record> =
+        (0..4u8).map(|n| observation(NODE, [n; 6], -60, EPOCH_MS, fixed(37.0, -122.0))).collect();
+    assert_eq!(store.submit(records), 0);
+    wait_for("the rows to be written", || store.stats().written == 4);
+    let shm = dir.path().join("wartui.db-shm");
+    let stale = std::fs::read(&wal).expect("reading the WAL");
+    let stale_shm = std::fs::read(&shm).expect("reading the shm");
+    assert!(!stale.is_empty(), "the WAL holds the rows");
+    store.close();
 
-    let filter = ExportFilter { session_id: Some(second), ..ExportFilter::default() };
-    let (_, summary) = export_with(&conn, filter);
-    assert_eq!(summary.wifi.networks, 1);
-    assert_eq!(summary.ble.networks, 1);
-    assert_eq!(summary.nodes.len(), 1);
-    assert_eq!(summary.nodes[0].mac, OTHER);
+    std::fs::remove_file(&path).expect("deleting the capture");
+    std::fs::write(&wal, &stale).expect("planting the stale WAL");
+    std::fs::write(&shm, &stale_shm).expect("planting the stale shm");
+
+    Store::create(&config, &info, EPOCH_MS).expect("creating the store again").close();
+    let conn = open_readonly(&path).expect("reopening read-only");
+    let observations: i64 =
+        conn.query_row("SELECT count(*) FROM observation", [], |r| r.get(0)).expect("counting");
+    assert_eq!(observations, 0, "nothing from the deleted capture");
 }

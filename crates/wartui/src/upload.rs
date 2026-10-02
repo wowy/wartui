@@ -158,8 +158,7 @@ fn prepare(
     }
     if body.len() > MAX_BODY {
         bail!(
-            "the upload is {} compressed, over WDGWars' {}; send one session at a time \
-             with --session ID",
+            "the upload is {} compressed, over WDGWars' limit of {}",
             size(body.len()),
             size(MAX_BODY)
         );
@@ -424,7 +423,7 @@ fn answer(mut response: ureq::http::Response<ureq::Body>) -> Result<String> {
     let text = body.map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
     match status.as_u16() {
         401 | 403 => Err(KeyRejected { reason: site_reason(&text) }.into()),
-        413 => bail!("WDGWars refused the upload as too large; send one session with --session ID"),
+        413 => bail!("WDGWars refused the upload as too large"),
         code => bail!("WDGWars answered {code}: {}", quote(&text)),
     }
 }
@@ -513,7 +512,7 @@ mod tests {
     use wartui_core::export::{ExportFilter, wigle_csv};
     use wartui_core::position::{Fix, PositionSource};
     use wartui_core::record::{Observation, Record};
-    use wartui_core::store::{SessionInfo, Store, StoreConfig, open_readonly};
+    use wartui_core::store::{CaptureInfo, Store, StoreConfig, open_readonly};
     use wartui_proto::air::RecordKind;
     use wartui_proto::plan::ChannelPool;
 
@@ -555,8 +554,8 @@ mod tests {
         let path = dir.path().join("wartui.db");
         let mut config = StoreConfig::new(&path);
         config.batch_interval = Duration::from_millis(10);
-        let session = SessionInfo { pool: ChannelPool::Us, notes: None };
-        let store = Store::open(&config, &session, EPOCH_MS).expect("opening the store");
+        let info = CaptureInfo { pool: ChannelPool::Us, notes: None };
+        let store = Store::create(&config, &info, EPOCH_MS).expect("creating the store");
         assert_eq!(store.submit(records), 0, "nothing should have been dropped");
         store.close();
         path
@@ -732,14 +731,14 @@ mod tests {
             r#"{"ok":true,"job_id":42,"poll_url":"/api/v2/upload-job/42"}"#,
         );
         let client = Client::new(&base, "secret".to_owned());
-        let job = client.submit(b"gzipped bytes", "wartui-2026-09-30-19-02.csv.gz").unwrap();
+        let job = client.submit(b"gzipped bytes", "wartui-2026-09-30-19-02-11.csv.gz").unwrap();
         assert_eq!(job, 42);
 
         let request = String::from_utf8_lossy(&server.join().unwrap()).into_owned();
         assert!(request.starts_with("POST /api/v2/upload-csv "), "{request}");
         assert!(request.to_ascii_lowercase().contains("x-api-key: secret\r\n"), "{request}");
         assert!(request.contains("name=\"file\""), "{request}");
-        assert!(request.contains("filename=\"wartui-2026-09-30-19-02.csv.gz\""), "{request}");
+        assert!(request.contains("filename=\"wartui-2026-09-30-19-02-11.csv.gz\""), "{request}");
         assert!(request.contains("gzipped bytes"), "{request}");
     }
 

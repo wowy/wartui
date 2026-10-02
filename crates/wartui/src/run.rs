@@ -22,7 +22,7 @@ use wartui_core::engine::{EngineConfig, FleetEngine, StoreStats};
 use wartui_core::gps::{Gps, GpsConfig};
 use wartui_core::position::PositionChain;
 use wartui_core::runtime::{COMMAND_QUEUE, drive, now};
-use wartui_core::store::{SessionInfo, Store, StoreConfig};
+use wartui_core::store::{CaptureInfo, Store, StoreConfig, StoreError};
 use wartui_proto::plan::{ChannelPool, DEFAULT_TX_POWER_QUARTER_DBM};
 
 use crate::{capture, config, tui};
@@ -124,7 +124,7 @@ pub struct Args {
     #[arg(long)]
     record_raw: bool,
 
-    /// A note about this run, stored with the session.
+    /// A note about this run, stored with the capture.
     #[arg(long)]
     notes: Option<String>,
 }
@@ -167,6 +167,16 @@ pub async fn run(args: Args) -> Result<()> {
         && let Err(error) = config::create_if_missing(path)
     {
         eprintln!("warning: could not create {}: {error:#}", path.display());
+    }
+
+    // Whether the capture was named by hand decides what the parting line can tell them
+    // to type: a dated name is the newest in this directory, which is what `export`
+    // finds on its own, and one chosen by hand has to be given back.
+    let named_db = args.db.is_some();
+    let db = args.db.unwrap_or_else(|| capture::dated_path(Local::now()));
+    // So a run doomed to be refused never transmits; `Store::create` is the atomic guard.
+    if db.exists() {
+        return Err(StoreError::Exists(db).into());
     }
 
     let position = match (args.lat, args.lon) {
@@ -220,15 +230,13 @@ pub async fn run(args: Args) -> Result<()> {
     let link = crate::open(args.bridge.as_deref(), args.sim, args.sim_c6, memory.clone())?;
 
     let started = now();
-    // Whether the capture was named by hand decides what the parting line can tell them
-    // to type: a dated name is the newest in this directory, which is what `export`
-    // finds on its own, and one chosen by hand has to be given back.
-    let named_db = args.db.is_some();
-    let db = args.db.unwrap_or_else(|| capture::dated_path(Local::now()));
-    let session = SessionInfo { pool, notes: args.notes.clone() };
+    let info = CaptureInfo { pool, notes: args.notes.clone() };
     let store_config = StoreConfig::new(&db);
-    let store = Store::open(&store_config, &session, started.unix_ms)
-        .with_context(|| format!("opening {}", db.display()))?;
+    let store = Store::create(&store_config, &info, started.unix_ms).map_err(|e| match e {
+        // Already names the path and says what to do.
+        StoreError::Exists(_) => anyhow::Error::new(e),
+        e => anyhow::Error::new(e).context(format!("creating {}", db.display())),
+    })?;
 
     let (tx_power, bridge_tx_power) = tx_powers(&config.tx_power);
     let remember_ble = config.bluetooth.remember.unwrap_or(true);
@@ -242,10 +250,6 @@ pub async fn run(args: Args) -> Result<()> {
         bridge_tx_power,
         remember_ble,
         preferred_ble,
-        // Epochs continue from wherever this database left off. Reusing one a
-        // node already holds would be ignored on the air and acknowledged
-        // anyway, which is indistinguishable from success.
-        assignment_base: store.assignment_base(),
         ..Default::default()
     };
     let engine = FleetEngine::new(config, started);
@@ -258,7 +262,7 @@ pub async fn run(args: Args) -> Result<()> {
     let capture = tokio::spawn(drive(link, store, engine, snapshot_tx, command_rx, stop_rx));
     let outcome = tui::run(snapshot_rx, command_tx, stop_tx, settings).await;
     // Always waited on, even when the view failed: this is what commits the
-    // last batch and writes the session's end time.
+    // last batch and writes the capture's end time.
     capture.await.context("the capture task panicked")?;
     if let Some(gps) = &gps {
         // Worth having even though the reader's timeout is short: a thread left

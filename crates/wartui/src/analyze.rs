@@ -24,7 +24,7 @@ pub fn run(args: Args) -> Result<()> {
     let conn = open_readonly(&db).with_context(|| format!("opening {}", db.display()))?;
     let filter = args.selection.filter();
     let summary = wigle_csv(&conn, filter, &mut std::io::sink(), env!("CARGO_PKG_VERSION"))?;
-    let loss = losses(&conn, filter.session_id).context("reading what the capture lost")?;
+    let loss = losses(&conn).context("reading what the capture lost")?;
     print!(
         "{} rows to export\n{}{}",
         thousands(summary.rows),

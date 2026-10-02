@@ -52,13 +52,14 @@ With a bridge plugged in, start a capture and export it. `run` is the default su
 be omitted.
 
 ```sh
-wartui run --lat 37.7749 --lon -122.4194   # captures to wartui-2026-10-01-21-30.db
-wartui export                              # writes wartui-2026-10-01-21-30.csv beside it
+wartui run --lat 37.7749 --lon -122.4194   # captures to wartui-2026-10-01-21-30-15.db
+wartui export                              # writes wartui-2026-10-01-21-30-15.csv beside it
 wartui upload                              # sends it to WDGWars, after confirming
 ```
 
-Each run creates a new `wartui-YYYY-MM-DD-HH-MM.db` in the working directory, named for the minute
-it started. `export` reads the newest one; pass `--db` to pick another.
+Each run creates a new `wartui-YYYY-MM-DD-HH-MM-SS.db` in the working directory, named for the
+second it started. A capture holds one run, so `run` refuses a `--db` that exists. `export` reads the
+newest one; pass `--db` to pick another.
 
 `q` stops a capture and commits the last batch. The database is the record; `export` can rebuild
 the CSV at any time, even while a capture is still running.

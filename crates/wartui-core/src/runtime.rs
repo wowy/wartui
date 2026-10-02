@@ -63,7 +63,7 @@ pub const COMMAND_QUEUE: usize = 8;
 
 /// Run the fleet until the link closes or `stop` fires.
 ///
-/// Consumes the store so the last batch is committed and the session's
+/// Consumes the store so the last batch is committed and the capture's
 /// `ended_at` written before this returns — an interrupted capture should still
 /// be a complete database. Returns what the store's writer did, which `wartui bench`
 /// reports and nothing else reads.
