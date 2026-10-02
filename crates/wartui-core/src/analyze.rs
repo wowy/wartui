@@ -10,6 +10,11 @@
 //! restart, and so can a `counter` (sweeps, not heartbeats) that falls. `beat` restarts at 1,
 //! so the first heartbeat heard after a restart proves `beat - 1` earlier ones were lost.
 //!
+//! A gap counts as missed only when the heartbeat before it arrived live. One replayed from
+//! the bridge's backlog can be minutes older than the next, and the heartbeats between them
+//! were sent while no host was reading: the bridge's `dropped` covers those, and they fall
+//! before the capture's baseline. The few lost at the replay-to-live handoff go uncounted.
+//!
 //! Ring refusals are reported beside the losses, not as one. A node's pending ring turns a
 //! sighting away once per dwell, and the same network is usually heard again on a later
 //! dwell and reported then. The count is the ring's pressure, not sightings the capture
@@ -57,7 +62,8 @@ pub struct NodeLoss {
     pub batches_lost: u64,
     /// Distinct heartbeats the capture holds. A duplicate counts once.
     pub heartbeats: u64,
-    /// Heartbeats lost between the node and the host. Exact, from gaps in `beat`.
+    /// Heartbeats lost between the node and the host. Exact, from gaps in `beat` after a
+    /// heartbeat that arrived live; a gap after a replayed one is not counted.
     pub heartbeats_missed: u64,
     /// Access points the node's pending ring refused. Most are reported on a later dwell.
     pub wifi_refused: u64,
@@ -122,6 +128,7 @@ struct Beat {
     beat: u16,
     wifi: u64,
     ble: u64,
+    live: bool,
 }
 
 fn heartbeats(
@@ -130,7 +137,7 @@ fn heartbeats(
     nodes: &mut BTreeMap<Vec<u8>, NodeLoss>,
 ) -> rusqlite::Result<()> {
     let mut stmt = conn.prepare(
-        "SELECT session_id, node_mac, counter, beat, wifi_dropped, ble_dropped
+        "SELECT session_id, node_mac, counter, beat, wifi_dropped, ble_dropped, live
          FROM heartbeat
          WHERE ?1 IS NULL OR session_id = ?1
          ORDER BY session_id, node_mac, id",
@@ -145,6 +152,7 @@ fn heartbeats(
             beat: row.get(3)?,
             wifi: count(row.get(4)?),
             ble: count(row.get(5)?),
+            live: row.get(6)?,
         };
         let node = nodes
             .entry(beat.mac.clone())
@@ -157,7 +165,10 @@ fn heartbeats(
                 node.ble_refused += advance_since_boot(beat.ble, Some(prev.ble), rebooted);
                 let (heard, missed) = beat_gap(prev.beat, beat.beat, rebooted);
                 node.heartbeats += heard;
-                node.heartbeats_missed += missed;
+                // A gap after a replayed heartbeat spans time no host was reading.
+                if prev.live {
+                    node.heartbeats_missed += missed;
+                }
             }
             // The first heartbeat of a node in a session is a baseline only.
             _ => node.heartbeats += 1,

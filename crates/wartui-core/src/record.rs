@@ -80,6 +80,8 @@ pub struct Heartbeat {
     pub ble_dropped: u16,
     /// Heartbeats the node has sent since its boot, this one included. Wraps.
     pub beat: u16,
+    /// Whether it arrived live rather than replayed from the bridge's backlog.
+    pub live: bool,
 }
 
 /// One status reply from the bridge, as it sent it.

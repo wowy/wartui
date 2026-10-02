@@ -120,6 +120,8 @@ CREATE TABLE IF NOT EXISTS heartbeat (
   wifi_dropped INTEGER NOT NULL,
   ble_dropped INTEGER NOT NULL,
   beat INTEGER NOT NULL,
+  -- Whether the heartbeat arrived live or was replayed from the bridge's backlog.
+  live INTEGER NOT NULL,
   admin_sent INTEGER NOT NULL DEFAULT 0,
   admin_acked INTEGER,
   admin_latency_us INTEGER
@@ -958,8 +960,8 @@ fn write_batch(
                 tx.prepare_cached(
                     "INSERT INTO heartbeat
                        (session_id, node_mac, rx_at, counter, epoch, rssi, wifi_dropped,
-                        ble_dropped, beat)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                        ble_dropped, beat, live)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 )?
                 .execute(params![
                     session_id,
@@ -970,7 +972,8 @@ fn write_batch(
                     hb.link_rssi,
                     hb.wifi_dropped,
                     hb.ble_dropped,
-                    hb.beat
+                    hb.beat,
+                    hb.live
                 ])?;
             }
             Record::Observation(obs) => {

@@ -45,6 +45,7 @@ fn status(at_s: i64, rx_count: u32, dropped_tx: u32, uptime_ms: u32) -> Record {
     })
 }
 
+/// A live heartbeat.
 fn beat(node: Mac, at_ms: i64, counter: u32, seq: u16, wifi: u16, ble: u16) -> Record {
     Record::Heartbeat(Heartbeat {
         node_mac: node,
@@ -55,7 +56,14 @@ fn beat(node: Mac, at_ms: i64, counter: u32, seq: u16, wifi: u16, ble: u16) -> R
         wifi_dropped: wifi,
         ble_dropped: ble,
         beat: seq,
+        live: true,
     })
+}
+
+/// A heartbeat replayed from the bridge's backlog.
+fn replayed(node: Mac, at_ms: i64, counter: u32, seq: u16) -> Record {
+    let Record::Heartbeat(hb) = beat(node, at_ms, counter, seq, 0, 0) else { unreachable!() };
+    Record::Heartbeat(Heartbeat { live: false, ..hb })
 }
 
 fn gap(node: Mac, seq: u16, lost: u16) -> Record {
@@ -252,4 +260,36 @@ fn analyze_counts_beats_lost_after_reboot_when_first_beat_heard_is_late() {
     let (_dir, conn) = capture(vec![beat(NODE, 0, 40, 20, 0, 0), beat(NODE, 60_000, 1, 12, 0, 0)]);
     let node = &losses(&conn, None).unwrap().nodes[0];
     assert_eq!((node.heartbeats, node.heartbeats_missed), (2, 11));
+}
+
+#[test]
+fn analyze_ignores_beat_gap_when_previous_heartbeat_was_replayed() {
+    // Beat 17 was replayed from the bridge's backlog; 140 is the first live one. The beats
+    // between were sent while no host was reading, which the bridge's drop count covers.
+    let (_dir, conn) = capture(vec![
+        replayed(NODE, 0, 30, 17),
+        beat(NODE, 1_000, 240, 140, 0, 0),
+        beat(NODE, 6_000, 241, 141, 0, 0),
+    ]);
+    let node = &losses(&conn, None).unwrap().nodes[0];
+    assert_eq!((node.heartbeats, node.heartbeats_missed), (3, 0));
+}
+
+#[test]
+fn analyze_counts_beat_gap_when_previous_heartbeat_was_live() {
+    let (_dir, conn) = capture(vec![
+        replayed(NODE, 0, 30, 17),
+        beat(NODE, 1_000, 240, 140, 0, 0),
+        beat(NODE, 21_000, 244, 144, 0, 0),
+    ]);
+    let node = &losses(&conn, None).unwrap().nodes[0];
+    assert_eq!((node.heartbeats, node.heartbeats_missed), (3, 3));
+}
+
+#[test]
+fn analyze_ignores_beats_lost_after_reboot_when_previous_heartbeat_was_replayed() {
+    // The node rebooted while no host was reading; beats 1 to 11 fall in that time.
+    let (_dir, conn) = capture(vec![replayed(NODE, 0, 40, 20), beat(NODE, 60_000, 1, 12, 0, 0)]);
+    let node = &losses(&conn, None).unwrap().nodes[0];
+    assert_eq!((node.heartbeats, node.heartbeats_missed), (2, 0));
 }

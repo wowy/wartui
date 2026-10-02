@@ -381,6 +381,7 @@ fn engine_produces_one_node_seen_and_three_observations_when_batch_of_three_arri
 fn engine_counts_batches_lost_when_sequence_gap_of_two_arrives() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
+    caught_up(&mut engine, &clock);
 
     let msg = SightingMsg {
         kind: RecordKind::Wifi,
@@ -460,6 +461,7 @@ fn seq_batch(seq: u16, bssid_tail: u8) -> Vec<u8> {
 fn engine_records_one_batch_gap_when_sequence_jumps_from_five_to_eight() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
+    caught_up(&mut engine, &clock);
 
     assert!(gaps(&engine.handle(rx(NODE, &seq_batch(5, 1)), clock.at(1))).is_empty());
     let found = gaps(&engine.handle(rx(NODE, &seq_batch(8, 2)), clock.at(2)));
@@ -475,6 +477,42 @@ fn engine_records_one_batch_gap_when_sequence_jumps_from_five_to_eight() {
         }]
     );
     assert_eq!(counters(&engine).batches_lost, 2, "the live count is unchanged");
+}
+
+#[test]
+fn engine_ignores_batch_gap_when_previous_batch_was_replayed() {
+    // On connect the bridge replays its backlog. Batch 25 is a stale frame from long before;
+    // what the node sent between it and batch 84 went while no host was reading, and the
+    // bridge's own drop count covers that.
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(connected(), clock.at(0));
+
+    let replayed = engine.handle(rx_at(NODE, &seq_batch(25, 1), 1_000_000), clock.at_ms(10));
+    // The host out-waits the bridge, so this one is live.
+    let live = engine.handle(rx_at(NODE, &seq_batch(84, 2), 1_500_000), clock.at_ms(1_010));
+
+    assert!(gaps(&replayed).is_empty());
+    assert!(gaps(&live).is_empty(), "the gap starts at a replayed batch");
+    let node = engine.nodes().find(|n| n.mac == NODE).expect("the node");
+    assert_eq!(node.batches_lost, 0);
+    assert_eq!(counters(&engine).batches_lost, 0);
+    assert_eq!(node.last_seq, Some(84), "the baseline still moves");
+}
+
+#[test]
+fn engine_counts_batch_gap_when_previous_batch_was_live() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(connected(), clock.at(0));
+
+    engine.handle(rx_at(NODE, &seq_batch(25, 1), 1_000_000), clock.at_ms(10));
+    engine.handle(rx_at(NODE, &seq_batch(84, 2), 1_500_000), clock.at_ms(1_010));
+    let found = gaps(&engine.handle(rx_at(NODE, &seq_batch(87, 3), 2_000_000), clock.at_ms(1_510)));
+
+    assert_eq!(found.len(), 1);
+    assert_eq!((found[0].after_seq, found[0].seq, found[0].lost), (84, 87, 2));
+    assert_eq!(counters(&engine).batches_lost, 2);
 }
 
 #[test]
@@ -494,6 +532,7 @@ fn engine_records_no_batch_gap_when_sequence_repeats() {
 fn engine_records_no_batch_gap_when_sequence_jumps_by_1024_or_more() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
+    caught_up(&mut engine, &clock);
 
     engine.handle(rx(NODE, &seq_batch(5, 1)), clock.at(1));
     // 1030 - 5 - 1 = 1024: the first gap the live count also refuses.
@@ -510,6 +549,7 @@ fn engine_records_no_batch_gap_when_sequence_jumps_by_1024_or_more() {
 fn engine_records_batch_gap_of_one_when_sequence_wraps_from_65535_to_1() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
+    caught_up(&mut engine, &clock);
 
     engine.handle(rx(NODE, &seq_batch(65535, 1)), clock.at(1));
     let found = gaps(&engine.handle(rx(NODE, &seq_batch(1, 2)), clock.at(2)));
@@ -639,6 +679,7 @@ fn engine_records_raw_frame_when_duplicate_batch_arrives() {
 fn engine_resets_batch_sequence_baseline_when_node_reboots() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
+    caught_up(&mut engine, &clock);
 
     let msg = SightingMsg {
         kind: RecordKind::Wifi,

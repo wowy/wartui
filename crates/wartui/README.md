@@ -113,7 +113,8 @@ print zeros, since "0 lost" is the answer. Left out:
 
 Each heartbeat carries a sequence number that restarts at 1 when the node boots, so a gap in it is
 heartbeats lost. A repeated heartbeat counts once. Across a node's reboot, only the heartbeats
-before the first one heard since boot are counted.
+before the first one heard since boot are counted. A gap after a heartbeat or batch replayed from
+the bridge's backlog is not counted, because those frames were dropped while no host was reading.
 
 ### Uploading to WDGWars
 
@@ -534,7 +535,9 @@ The footer shows faults only once they happen, so a clean run has a clean footer
   then a running count; both appear once any node loses one. A sequence advances only on a MAC-layer
   ack, so a gap is lost after the bridge's radio took it, in its receive queue or on USB, not on the
   air. A batch is up to about a dozen access points, hidden until the node's five-minute refresh.
-  Each gap is a `batch_gap` row; summing its `lost` per node gives the column's final value.
+  Each gap is a `batch_gap` row; summing its `lost` per node gives the column's final value. A gap
+  after a batch replayed from the bridge's backlog is not counted, because those batches were
+  dropped while no host was reading.
 - **`dup N`**: batches dropped as identical to the previous one (same `seq`, same bytes, within
   100 ms), a radio retransmitting after the bridge's ack was lost. The first copy was recorded, so
   nothing is lost and `dup` never overlaps `lost`. A repeat 100 ms or more later is the node's own

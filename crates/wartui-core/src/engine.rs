@@ -332,6 +332,10 @@ pub struct NodeState {
     /// first, and reset on a detected reboot: the counter restarts at boot,
     /// and a gap across one is history rather than a loss.
     pub last_seq: Option<u16>,
+    /// Whether the batch that set `last_seq` arrived live rather than replayed
+    /// from the bridge's backlog. A gap after a replayed batch is not counted;
+    /// see [`FleetEngine::note_batch_seq`].
+    last_seq_live: bool,
     /// Bytes of this node's most recent sighting-batch frame, kept only to
     /// recognise a MAC-layer retransmission of it: same `seq`, same bytes.
     /// `None` before its first batch, and reset alongside `last_seq` on a
@@ -343,8 +347,9 @@ pub struct NodeState {
     /// detected reboot.
     last_batch_rx_us: Option<u32>,
     /// Batches lost between this node and the host, counted from gaps in
-    /// `seq`. Each one is everything one dwell or Bluetooth scan produced,
-    /// hidden until the node's dedup ring next refreshes them.
+    /// `seq` that follow a live batch. Each one is everything one dwell or
+    /// Bluetooth scan produced, hidden until the node's dedup ring next
+    /// refreshes them.
     pub batches_lost: u64,
     /// Batches from this node dropped as MAC-layer retransmissions; see
     /// [`Counters::duplicate_batches`].
@@ -409,6 +414,7 @@ impl NodeState {
             held_epoch: None,
             unadopted: 0,
             last_seq: None,
+            last_seq_live: false,
             last_batch: None,
             last_batch_rx_us: None,
             batches_lost: 0,
@@ -480,7 +486,8 @@ pub struct Counters {
     /// How many times the pool has been re-partitioned across the fleet.
     pub replans: u64,
     /// Sighting batches lost between a node and the host, summed across the
-    /// fleet, from gaps in each node's `seq`.
+    /// fleet, from gaps in each node's `seq` that follow a live batch. Frames
+    /// the bridge evicted while no host was reading are its `dropped_tx`.
     pub batches_lost: u64,
     /// Sighting batches dropped as MAC-layer retransmissions, summed across
     /// the fleet: same `seq`, byte-identical to the batch immediately before
@@ -1092,6 +1099,7 @@ impl FleetEngine {
                     // bytes go with it: an identical batch after a reboot is a new
                     // observation, not a retransmission of what was sent before.
                     node.last_seq = None;
+                    node.last_seq_live = false;
                     node.last_batch = None;
                     node.last_batch_rx_us = None;
                     // The node's epoch went back to a boot value too; what it
@@ -1132,6 +1140,7 @@ impl FleetEngine {
                     wifi_dropped: heartbeat.wifi_dropped,
                     ble_dropped: heartbeat.ble_dropped,
                     beat: heartbeat.beat,
+                    live,
                 }));
 
                 if rebooted && node.desired.is_some() {
@@ -1285,9 +1294,17 @@ impl FleetEngine {
     /// wrapped or the frame arrived out of order, and guessing at a loss that
     /// large would invent history rather than report it. Each gap it counts is also
     /// recorded as a [`Record::BatchGap`], so the store's sum matches the live count.
+    ///
+    /// A gap counts only when the batch before it arrived live. A gap after a
+    /// batch replayed from the bridge's backlog spans time when no host was
+    /// reading, and what went missing then is the bridge's `dropped_tx`, not
+    /// this count. The few batches lost at the replay-to-live handoff go
+    /// uncounted.
     fn note_batch_seq(&mut self, src: Mac, seq: u16, now: Now, batch: &mut ActionBatch) {
+        // Read before the node is borrowed. See `air_is_live`.
+        let live = self.air_is_live();
         let Some(node) = self.nodes.get_mut(&src) else { return };
-        if let Some(last) = node.last_seq {
+        if let Some(last) = node.last_seq.filter(|_| node.last_seq_live) {
             let gap = seq.wrapping_sub(last.wrapping_add(1));
             if gap < 1024 {
                 node.batches_lost += u64::from(gap);
@@ -1304,6 +1321,7 @@ impl FleetEngine {
             }
         }
         node.last_seq = Some(seq);
+        node.last_seq_live = live;
     }
 
     /// Whether `payload` arriving at `rx_us` is a MAC-layer retransmission of
