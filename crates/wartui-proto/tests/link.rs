@@ -356,3 +356,40 @@ fn link_decoder_rejects_payload_when_frame_is_truncated() {
     let mut tiny = [1u8, 2];
     assert!(decode_frame::<HostToBridge>(&mut tiny).is_err());
 }
+
+#[test]
+fn host_command_asks_for_reply_only_when_bridge_answers() {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&[0; 8]).expect("8 fits in 250");
+    let mac = [1, 2, 3, 4, 5, 6];
+    let cases: [(HostToBridge, bool); 8] = [
+        (HostToBridge::Identify, true),
+        (HostToBridge::GetStatus, true),
+        (HostToBridge::SendEspNow { id: 1, dst: mac, ensure_peer: false, payload }, true),
+        (HostToBridge::ShowPanel { lines: full_panel() }, false),
+        (HostToBridge::SetTxPower { power: 8 }, false),
+        (HostToBridge::AddPeer { mac }, false),
+        (HostToBridge::RemovePeer { mac }, false),
+        (HostToBridge::Reset, false),
+    ];
+    for (command, asks) in cases {
+        assert_eq!(command.asks_for_reply(), asks, "{command:?}");
+    }
+}
+
+#[test]
+fn reset_cause_speaks_first_when_a_host_was_present_unless_power_on() {
+    for cause in [
+        ResetCause::PowerOn,
+        ResetCause::Software,
+        ResetCause::External,
+        ResetCause::Brownout,
+        ResetCause::Watchdog,
+        ResetCause::Lockup,
+        ResetCause::Unknown,
+    ] {
+        let after_host = !matches!(cause, ResetCause::PowerOn);
+        assert_eq!(cause.speaks_first(true), after_host, "{cause:?}");
+        assert!(!cause.speaks_first(false), "{cause:?}");
+    }
+}

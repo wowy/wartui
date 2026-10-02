@@ -50,14 +50,14 @@ pub const HOST_PRESENT_WINDOW_MS: u64 = 10_000;
 ///
 /// - something is queued and this pass moved none of it, so silence is not
 ///   simply having nothing to say;
-/// - a host frame has decoded since the last byte moved, so somebody has asked
-///   for something the endpoint has not delivered;
+/// - a host frame *that asks for a reply* has decoded since the last byte moved,
+///   so somebody has asked for something the endpoint has not delivered;
 /// - a host frame decoded inside [`HOST_PRESENT_WINDOW_MS`], so that host is
 ///   still there;
 /// - and [`TX_STALL_TIMEOUT_MS`] has passed since *both* the first such frame and
 ///   the first refusal, so the endpoint is not merely slow.
 ///
-/// One unanswered frame is enough. The host sends a single `Identify` per
+/// One unanswered asking frame is enough. The host sends a single `Identify` per
 /// connection (`crates/wartui-bridge/src/serial.rs`, `connect`), so a bridge that
 /// wedged before it connected reboots three seconds after that frame decodes.
 ///
@@ -67,8 +67,8 @@ pub const HOST_PRESENT_WINDOW_MS: u64 = 10_000;
 /// powered beside a talkative fleet fills its rings with nobody reading, so by the
 /// time an operator attaches the last byte moved *hours* ago — and all of it would
 /// count against a transmit path with nothing wrong with it. So the clock runs
-/// from the later of the first refusal and the first host frame since the last
-/// byte moved: neither half alone is a contradiction. The *first* such frame, not
+/// from the later of the first refusal and the first asking host frame since the
+/// last byte moved: neither half alone is a contradiction. The *first* such frame, not
 /// the latest, because a host polling twice a second through a wedge would
 /// otherwise push the clock forward for ever.
 ///
@@ -83,8 +83,15 @@ pub const HOST_PRESENT_WINDOW_MS: u64 = 10_000;
 /// quit has no frame to time against. A slow host that lets a byte through just
 /// inside every timeout clears it the same way, and is never reset.
 ///
-/// The cost is a host that sends a frame and leaves before any byte moves after
-/// it — killed mid-handshake, say. If something is queued, that bridge reboots
+/// A frame that asks for nothing cannot be left unanswered, so it never starts the
+/// clock: it proves presence and no more. That matters because a panel push, sent
+/// up to once a second to a bridge with a screen, is often the last thing a TUI sends
+/// before it quits, and no byte follows it. Counting it would reset the board a few
+/// seconds after an ordinary quit, as soon as a node frame was queued behind the dead
+/// endpoint. A quiet `AddPeer` or `RemovePeer` would do the same.
+///
+/// The cost is a host that sends a frame that asks and leaves before any byte moves
+/// after it — killed mid-handshake, say. If something is queued, that bridge reboots
 /// three seconds later, and only while the frame is inside
 /// [`HOST_PRESENT_WINDOW_MS`]. The next connection reads `TxStalled` in its
 /// `Ready`, and nothing else is lost.
@@ -101,8 +108,8 @@ pub struct StallWatch {
     /// When the transmit path first refused a byte with something queued, or
     /// `None` if it is not refusing them now.
     stall_since: Option<u64>,
-    /// When the first host frame since the last byte moved decoded, or `None` if
-    /// none has.
+    /// When the first host frame that asks for a reply decoded since the last byte
+    /// moved, or `None` if none has.
     host_since_move: Option<u64>,
     /// When a frame from the host last decoded, or `None` if none ever has.
     last_host: Option<u64>,
@@ -118,10 +125,12 @@ impl StallWatch {
     /// Record proof of a host: a frame that decoded, at `now_ms`.
     ///
     /// Only a frame that *decoded* may be reported: a board running node firmware
-    /// talks constantly down the same wire and none of it is a frame.
-    pub const fn note_host(&mut self, now_ms: u64) {
+    /// talks constantly down the same wire and none of it is a frame. `asks` is
+    /// [`HostToBridge::asks_for_reply`](crate::link::HostToBridge::asks_for_reply):
+    /// every frame proves presence, but only one that asks can start the clock.
+    pub const fn note_host(&mut self, now_ms: u64, asks: bool) {
         self.last_host = Some(now_ms);
-        if self.host_since_move.is_none() {
+        if asks && self.host_since_move.is_none() {
             self.host_since_move = Some(now_ms);
         }
     }
@@ -174,7 +183,7 @@ mod tests {
     /// One pass of the loop: the host spoke, then the pump moved nothing
     /// against a queue that is not empty. The wedge, in other words.
     fn wedged(watch: &mut StallWatch, now_ms: u64) -> bool {
-        watch.note_host(now_ms);
+        watch.note_host(now_ms, true);
         watch.note_tx(false, true, now_ms)
     }
 
@@ -203,7 +212,7 @@ mod tests {
         // port, and the fleet fills the rings behind it. Presence goes on
         // believing in it for the whole window, and the answered frame is what
         // stands in the way.
-        watch.note_host(0);
+        watch.note_host(0, true);
         assert!(!watch.note_tx(true, true, 0));
         for ms in 1..60_000 {
             assert!(!watch.note_tx(false, true, ms), "reset {ms} ms after the host quit");
@@ -220,7 +229,7 @@ mod tests {
             let base = round * TX_STALL_TIMEOUT_MS;
             assert!(!wedged(&mut watch, base));
             assert!(!wedged(&mut watch, base + TX_STALL_TIMEOUT_MS - 1));
-            watch.note_host(base + TX_STALL_TIMEOUT_MS);
+            watch.note_host(base + TX_STALL_TIMEOUT_MS, true);
             assert!(!watch.note_tx(true, true, base + TX_STALL_TIMEOUT_MS));
         }
     }
@@ -231,7 +240,7 @@ mod tests {
         // A quiet fleet and an attentive host: nothing to say, and saying it
         // for an hour is not evidence of anything.
         for second in 0..3_600 {
-            watch.note_host(second * 1_000);
+            watch.note_host(second * 1_000, true);
             assert!(!watch.note_tx(false, false, second * 1_000));
         }
     }
@@ -255,7 +264,7 @@ mod tests {
         // The host's frame at 0 is answered, then it says nothing for longer
         // than the window while the endpoint refuses throughout, ticked at the
         // millisecond the loop really runs at.
-        watch.note_host(0);
+        watch.note_host(0, true);
         assert!(!watch.note_tx(true, true, 0));
         let back = HOST_PRESENT_WINDOW_MS + 1_000;
         for ms in 1..back {
@@ -263,7 +272,7 @@ mod tests {
         }
         // Its return is a frame nothing answers, and the clock runs from that
         // frame rather than from the refusal that began a window ago.
-        watch.note_host(back);
+        watch.note_host(back, true);
         for ms in back..back + TX_STALL_TIMEOUT_MS {
             assert!(!watch.note_tx(false, true, ms), "reset {} ms after the return", ms - back);
         }
@@ -276,7 +285,7 @@ mod tests {
         // waiting, with the bridge's loop passing every 100 ms against an
         // endpoint that refuses.
         let mut watch = StallWatch::new();
-        watch.note_host(0);
+        watch.note_host(0, true);
         assert!(!watch.note_tx(false, true, 0));
         for ms in (100..TX_STALL_TIMEOUT_MS).step_by(100) {
             assert!(!watch.note_tx(false, true, ms), "reset {ms} ms after one ask");
@@ -302,7 +311,7 @@ mod tests {
         // empty for two seconds. Nothing was refused in that time, so the clock
         // runs from the first refusal and not from the frame.
         let mut watch = StallWatch::new();
-        watch.note_host(0);
+        watch.note_host(0, true);
         for ms in 0..2_000 {
             assert!(!watch.note_tx(false, false, ms));
         }
@@ -319,7 +328,7 @@ mod tests {
         // endpoint refusing from the window's end onwards. The frame is still
         // unanswered, but nobody is there to be answered.
         let mut watch = StallWatch::new();
-        watch.note_host(0);
+        watch.note_host(0, true);
         for ms in HOST_PRESENT_WINDOW_MS..HOST_PRESENT_WINDOW_MS + 60_000 {
             assert!(!watch.note_tx(false, true, ms));
         }
@@ -328,10 +337,41 @@ mod tests {
     #[test]
     fn stall_watch_ignores_stale_host_when_presence_window_has_elapsed() {
         let mut watch = StallWatch::new();
-        watch.note_host(0);
+        watch.note_host(0, true);
         assert!(!watch.note_tx(true, false, 0));
         for ms in HOST_PRESENT_WINDOW_MS..HOST_PRESENT_WINDOW_MS + 60_000 {
             assert!(!watch.note_tx(false, true, ms));
         }
+    }
+
+    #[test]
+    fn stall_watch_remains_clear_when_host_quits_after_frame_without_reply() {
+        // A panel push is the last thing a quitting TUI sends and nothing answers
+        // it, so no byte ever moves after it. It proves presence and starts no clock.
+        let mut watch = StallWatch::new();
+        watch.note_host(0, false);
+        for ms in 0..1_000 {
+            assert!(!watch.note_tx(false, false, ms));
+        }
+        for ms in 1_000..60_000 {
+            assert!(!watch.note_tx(false, true, ms), "reset {ms} ms after the host quit");
+        }
+    }
+
+    #[test]
+    fn stall_watch_trips_reboot_when_asking_frame_follows_silent_one() {
+        let mut watch = StallWatch::new();
+        watch.note_host(0, false);
+        for ms in 0..2_000 {
+            assert!(!watch.note_tx(false, true, ms));
+        }
+        watch.note_host(2_000, true);
+        for ms in 2_000..5_000 {
+            assert!(
+                !watch.note_tx(false, true, ms),
+                "reset {ms} ms in, before the asking frame aged"
+            );
+        }
+        assert!(watch.note_tx(false, true, 5_000));
     }
 }

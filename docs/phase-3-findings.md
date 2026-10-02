@@ -187,6 +187,39 @@ Row three is the false positive the first version had, and it survives the move:
 during the eight seconds the loop is blocked the detector is not consulted at
 all, and the pass that follows moves bytes, which is what clears the clock.
 
+### A frame that asks for nothing cannot go unanswered
+
+Found by reading the code, not measured on the bench yet. The firmware fed
+`StallWatch::note_host` every decoded frame, including `ShowPanel` (sent up to
+once a second on a panel bridge), `SetTxPower`, `AddPeer` and `RemovePeer`, none
+of which gets a reply. `SetTxPower` always travels with a `GetStatus`, whose
+answer clears it, but the others can be the host's last frame. If one was,
+no byte moved after it, so it stood as an unanswered frame. Once a node frame
+queued within the presence window the endpoint refused it with nobody reading,
+and the bridge reset itself with `TxStalled` three seconds later: a spurious
+reset after an ordinary quit. The existing quit test only covered an answered
+frame.
+
+`note_host` now takes whether the frame asks for a reply
+(`HostToBridge::asks_for_reply`: `Identify`, `GetStatus` and `SendEspNow`).
+Every frame still proves presence; only an asking frame starts the clock. The
+new tests pin both halves. Bench confirmation is still to do.
+
+### The sweep's probe gave up before the reset landed
+
+Measured on an ESP32-C6 bridge left plugged in and unread for two minutes. It had
+stopped draining its transmit endpoint: a bare open read nothing in 5 s, though its
+boot `Ready` was queued. `wartui status --bridge <mac>` sent one `Identify`, and
+the bridge rebooted itself (`reset=Software phase=TxStalled uptime_ms=0`) 3.47 s
+later, with no USB re-enumeration.
+
+A plain `wartui status` with two nodes also attached failed with "nothing has
+identified itself as a bridge". The sweep opened the remembered bridge first but
+gave it a probe's 1.5 s because other boards were attached, and the CLI stops at
+5 s, so no later pass came back to it. The remembered board now gets 4.5 s
+(`REMEMBERED_TICKS`, derived from `TX_STALL_TIMEOUT_MS`) when others are attached;
+only a board heard out for the full settle is forgotten.
+
 ## The RTC watchdog does not work here, and was removed
 
 A watchdog was the obvious companion fix: `esp_hal::init` disables every
@@ -727,3 +760,36 @@ alone explains the first build's silence, so this only rules the question out:
 | before #126 | answered in 3.41 s: software reset, *its transmit path had stopped draining*, uptime 0 s |
 | this branch | answered in 3.41 s, the same |
 | this branch, no `--bridge` (sweep) | answered in 3.41 s — the bridge's stale pre-wedge packet decoded, and a board that has produced a frame is never given up on |
+
+## Speaking first, since the wedge on connect
+
+Measured on 2026-10-01, on a C6. The firmware queued a lone `0x00` and a `Ready` at boot and pumped
+both to the USB Serial/JTAG IN endpoint at once. After a replug and two minutes unread, the first
+host open found the endpoint wedged in 3 of 3 trials: a bare open read 0 bytes, and an `Identify`
+went unanswered until `StallWatch` rebooted the board with `TxStalled`.
+
+An experimental build skipped `pump` and treated `queued` as false until a host frame had decoded.
+The same test was healthy in 3 of 3, answered in 2 ms. The ROM banner still printed in that build,
+so the banner is not the cause. The cause is the firmware writing before any host has opened the
+port.
+
+That build still sent the boot `Ready` once the gate opened, so the host read `uptime_ms=0` from a
+frame built two minutes earlier, which is a lie.
+
+The rule is `ResetCause::speaks_first`. A life that follows one in which a host was present
+announces at boot and transmits at once, because that host is still attached and reads the
+`Ready`; a connection that rode through the reset has already used its one `Identify`. Every other
+life holds transmit until the first host frame
+decodes, and announces then: an `Identify` is answered as usual, and any other first frame gets a
+`Ready` ahead of its answer, so a host already running after a watchdog reset still sees a new life.
+That `Ready` is built when sent, so its uptime is true. The boot `0x00` stays in every life and goes
+out first when the gate opens.
+
+The first cut keyed this on the reset cause, `Software` only. That is the wrong signal in both
+directions. A panic or a `StallWatch` reset after the host left is `Software` with nobody reading,
+so it wrote into an unread endpoint. A watchdog or lockup reset while a host keeps the port open
+is not `Software`, so that life stayed silent, and a host that never sends again (`wartui sniff`)
+heard nothing for ever. The rule now keys on presence: each pass of the main loop records in RTC
+memory whether a host frame decoded within `HOST_PRESENT_WINDOW_MS`, and the next life reads it
+back, never after a power-on, where RTC memory is garbage. A frame that decodes with a mismatched
+link version also opens the gate, since only a host writes to the bridge's input.

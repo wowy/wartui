@@ -115,6 +115,41 @@ pub enum ResetCause {
     Unknown,
 }
 
+impl ResetCause {
+    /// Whether a bridge writes to USB before any host has spoken.
+    ///
+    /// It does iff a host was present when the previous life ended
+    /// (`host_was_present`, kept in RTC memory), and never after a
+    /// [`Self::PowerOn`], where that memory is garbage. A host that was reading
+    /// across the reset relies on the unprompted `Ready`: it sends one `Identify`
+    /// per connection, so a connection that rides through the reset hears the new
+    /// life only through that `Ready`.
+    ///
+    /// With no host reading, writing to the USB Serial/JTAG endpoint leaves it
+    /// wedged: on a C6 replugged and left unread for two minutes, the first open
+    /// found it dead in 3 of 3 trials, and an `Identify` went unanswered until
+    /// `StallWatch` rebooted the board. A build that held all transmit until a host
+    /// frame decoded was healthy in 3 of 3, answering in 2 ms. The ROM banner, which
+    /// prints either way, is not the cause.
+    ///
+    /// The cause alone is not enough, because it says who asked for the reset and
+    /// not whether anybody was reading. A panic or a `StallWatch` reset after the
+    /// host left is [`Self::Software`] with nobody there, and a watchdog or lockup
+    /// reset can land while a host keeps the port open and never sends again.
+    #[must_use]
+    pub const fn speaks_first(self, host_was_present: bool) -> bool {
+        match self {
+            Self::PowerOn => false,
+            Self::Software
+            | Self::Watchdog
+            | Self::Lockup
+            | Self::Brownout
+            | Self::External
+            | Self::Unknown => host_was_present,
+        }
+    }
+}
+
 /// Where the bridge's main loop was when it last stopped making progress.
 ///
 /// Carried across a reset in RTC memory and reported in
@@ -240,9 +275,10 @@ pub type PanelLines = Vec<PanelLine, PANEL_ROWS>;
 pub enum HostToBridge {
     /// Ask the bridge to announce itself with [`BridgeToHost::Ready`].
     ///
-    /// Sent the moment the host opens the port: without it the only announcement
-    /// is the one at boot, so restarting the TUI without unplugging the dongle
-    /// would wait forever for a frame already sent.
+    /// Sent the moment the host opens the port. A bridge that does not
+    /// [speak first](ResetCause::speaks_first) says nothing until a host frame
+    /// decodes, and one that does announced at boot, possibly to a host long gone.
+    /// Without asking, either would leave a new connection waiting for ever.
     Identify,
     /// Register a peer so unicast frames can be addressed to it.
     AddPeer {
@@ -294,6 +330,28 @@ pub enum HostToBridge {
         /// ESP-IDF quarter-dBm units.
         power: i8,
     },
+}
+
+impl HostToBridge {
+    /// Whether the bridge answers this command with a frame of its own.
+    ///
+    /// Exists for [`crate::stall::StallWatch`], which times a transmit path that
+    /// refuses bytes while a host *waits*. Only a command that asks for a reply can
+    /// leave a host waiting. A variant that merely may log or report an error does
+    /// not ask: that is not an answer the host is owed.
+    ///
+    /// Exhaustive on purpose, so that a new command has to say which it is.
+    #[must_use]
+    pub const fn asks_for_reply(&self) -> bool {
+        match self {
+            Self::Identify | Self::GetStatus | Self::SendEspNow { .. } => true,
+            Self::AddPeer { .. }
+            | Self::RemovePeer { .. }
+            | Self::Reset
+            | Self::ShowPanel { .. }
+            | Self::SetTxPower { .. } => false,
+        }
+    }
 }
 
 /// Events and replies the bridge sends to the host.
@@ -508,7 +566,8 @@ pub fn decode_frame<T: DeserializeOwned>(frame: &mut [u8]) -> Result<T, LinkErro
 /// its own from a reset banner, a half-written frame or an unplugged cable: the
 /// junk is discarded at the next terminator and the stream carries on. That
 /// terminator is the next frame's unless the sender writes one of its own first,
-/// which is why the bridge's outbox delimits once at boot.
+/// which is why the bridge's outbox delimits once at boot, whether or not
+/// that life speaks first.
 #[derive(Debug)]
 pub struct FrameAccumulator<const N: usize = MAX_FRAME> {
     buf: [u8; N],

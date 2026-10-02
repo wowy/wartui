@@ -53,9 +53,9 @@ use portable_atomic::{AtomicU8, AtomicU32, Ordering};
 use static_cell::StaticCell;
 use wartui_proto::heapless::Vec;
 use wartui_proto::link::{
-    BROADCAST, BridgeToHost, Chip, FrameAccumulator, HostToBridge, LINK_PROTO_VERSION, LogLevel,
-    LogStr, LoopPhase, MAX_FRAME, Mac, Panel, PanelLines, ResetCause, SendStatus, ShortStr,
-    decode_frame,
+    BROADCAST, BridgeToHost, Chip, FrameAccumulator, HostToBridge, LINK_PROTO_VERSION, LinkError,
+    LogLevel, LogStr, LoopPhase, MAX_FRAME, Mac, Panel, PanelLines, ResetCause, SendStatus,
+    ShortStr, decode_frame,
 };
 use wartui_proto::outbox::{ByteSink, Outbox};
 /// The channel the fleet speaks on, and the only one this bridge ever sits on. Shared
@@ -63,7 +63,7 @@ use wartui_proto::outbox::{ByteSink, Outbox};
 /// on the air negotiates this number, so the only thing keeping the three ends on the
 /// same channel is that they read it from the same place.
 use wartui_proto::plan::CONTROL_CHANNEL;
-use wartui_proto::stall::StallWatch;
+use wartui_proto::stall::{HOST_PRESENT_WINDOW_MS, StallWatch};
 
 // This creates the app descriptor the esp-idf bootloader expects.
 esp_bootloader_esp_idf::esp_app_desc!();
@@ -198,9 +198,32 @@ static PHASE_VALID: AtomicU32 = AtomicU32::new(0);
 /// Arbitrary, and only has to be unlikely. Reads as `war1` in a memory dump.
 const PHASE_MAGIC: u32 = 0x7761_7231;
 
+/// Whether a host frame had decoded within [`HOST_PRESENT_WINDOW_MS`] at the last pass
+/// of the loop, kept for the next life to decide whether it speaks first
+/// ([`ResetCause::speaks_first`]).
+///
+/// Persistent RTC memory for the reason [`PHASE`] is, and only believed under the same
+/// conditions, see [`boot_speaks_first`]. An `AtomicU8` for the same reason too.
+#[esp_hal::ram(unstable(rtc_fast, persistent))]
+static HOST_PRESENT: AtomicU8 = AtomicU8::new(0);
+
 /// Record where the loop is, for the next life to report.
 fn mark(phase: LoopPhase) {
     PHASE.store(phase as u8, Ordering::Relaxed);
+}
+
+/// Whether the previous life ended with a host present, and so whether this one
+/// speaks first.
+///
+/// Read before [`PHASE_VALID`] is claimed, and trusted on the same terms as
+/// [`boot_phase`]. The flag is then cleared, so a life that never sees a host
+/// records "absent".
+fn boot_speaks_first(cause: ResetCause) -> bool {
+    let valid =
+        !matches!(cause, ResetCause::PowerOn) && PHASE_VALID.load(Ordering::Relaxed) == PHASE_MAGIC;
+    let was_present = valid && HOST_PRESENT.load(Ordering::Relaxed) == 1;
+    HOST_PRESENT.store(0, Ordering::Relaxed);
+    cause.speaks_first(was_present)
 }
 
 /// What the marker said, if this reset is one that preserved it.
@@ -358,6 +381,9 @@ struct Bridge {
     /// and repeated in every `Ready`, because the host is usually not watching
     /// at the moment a bridge restarts underneath it.
     cause: ResetCause,
+    /// Whether this life transmits before a host has spoken, decided once at boot
+    /// by [`ResetCause::speaks_first`].
+    speaks_first: bool,
     phase: LoopPhase,
     /// Whether the USB transmit endpoint has stopped draining while a host
     /// waited, which is the one failure this firmware recovers from by itself.
@@ -386,9 +412,9 @@ struct Bridge {
     tx_power: Option<i8>,
     /// Why there is no screen on a board built to have one.
     ///
-    /// Sent with every announcement rather than once at boot. A host is usually not
+    /// Sent with every announcement rather than once. A host is usually not
     /// attached when this firmware starts — that is the whole reason `Identify`
-    /// exists — so a fault reported only at boot is a fault nobody ever reads.
+    /// exists — so a fault reported once is a fault nobody ever reads.
     panel_fault: Option<&'static str>,
 }
 
@@ -409,10 +435,19 @@ impl Bridge {
         self.boot.elapsed().as_millis()
     }
 
+    /// Whether a host frame has decoded within [`HOST_PRESENT_WINDOW_MS`], on the
+    /// clock [`StallWatch`] already keeps.
+    fn host_present(&self) -> bool {
+        let now = self.now_ms();
+        self.stall.last_host().is_some_and(|at| now - at < HOST_PRESENT_WINDOW_MS)
+    }
+
     /// Say who we are.
     ///
-    /// Sent at boot and again whenever the host asks, since the host is usually not
-    /// attached at boot and this is how it learns the chip, MAC and link revision.
+    /// Sent at boot by a life that [speaks first](ResetCause::speaks_first), and
+    /// otherwise when the first host frame decodes. Sent again whenever the host
+    /// asks. The host is usually not attached at boot, and this is how it learns the
+    /// chip, MAC and link revision.
     fn announce(&mut self, mac: Mac) {
         self.outbox.send(&BridgeToHost::Ready {
             chip: CHIP,
@@ -470,6 +505,7 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     // and `esp_hal::init` has already latched the reset reason to read it against.
     let cause = reset_cause();
     let phase = boot_phase(cause);
+    let speaks_first = boot_speaks_first(cause);
     mark(LoopPhase::Boot);
     // Claimed only after the previous life's marker has been read, so a reset
     // between the two cannot make the next boot trust a phase nobody wrote.
@@ -524,6 +560,7 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
         rx_count: 0,
         boot: now,
         cause,
+        speaks_first,
         phase,
         stall: StallWatch::new(),
         #[cfg(feature = "t-dongle-c5")]
@@ -532,9 +569,10 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
         panel_fault: None,
         tx_power: tx_power.is_ok().then_some(wartui_proto::plan::DEFAULT_TX_POWER_QUARTER_DBM),
     });
-    // Ahead of every frame this life sends. The ROM banner a reset prints has no
-    // `0x00` in it and overflows the host's frame buffer, so without a terminator of
-    // our own it runs into the first frame — `Ready` — and the host drops both.
+    // Ahead of every frame this life sends, whenever transmit opens. The ROM banner
+    // a reset prints has no `0x00` in it and overflows the host's frame buffer, so
+    // without a terminator of our own it runs into the first frame — `Ready` — and
+    // the host drops both.
     bridge.outbox.delimit();
 
     // After the radio, so a panel that refuses its init sequence cannot stop a bridge
@@ -565,7 +603,10 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     }
 
     let mac = esp_radio::wifi::Interface::station().mac_address();
-    bridge.announce(mac);
+    // A life that does not speak first announces when a host does; see `take_link_byte`.
+    if bridge.speaks_first {
+        bridge.announce(mac);
+    }
     finish_radio_setup(&manager, bridge, tx_power.is_ok());
 
     let link_buf = LINK_BUF.init_with(|| [0; LINK_CHUNK]);
@@ -580,7 +621,11 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
         worked |= drain_link(&mut usb_rx, &manager, &mut sender, bridge, mac);
 
         mark(LoopPhase::Pump);
-        let moved = bridge.outbox.pump(&mut sink);
+        // Writing before any host has opened the port wedges the endpoint, so a life
+        // that does not speak first leaves its frames queued until a host frame has
+        // decoded. `ResetCause::speaks_first` has the bench numbers.
+        let open = bridge.speaks_first || bridge.stall.last_host().is_some();
+        let moved = open && bridge.outbox.pump(&mut sink);
         worked |= moved;
 
         // Named as its own phase for the reason `Transmit` is: it is a call that can
@@ -600,11 +645,18 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
         // end, and every way of telling the host goes out through the broken path.
         // So the reset *is* the message — the link drops, comes back, and the
         // `Ready` behind it says `TxStalled`.
-        let queued = !bridge.outbox.is_empty();
+        //
+        // Nothing is refused while held, so `queued` is false then: the watch must not
+        // see a refusal that is really a closed gate, and an armed flush on an empty
+        // FIFO busy-spins in `idle_wait`.
+        let queued = open && !bridge.outbox.is_empty();
         if bridge.stall.note_tx(moved, queued, bridge.now_ms()) {
             mark(LoopPhase::TxStalled);
             reboot();
         }
+
+        // Recorded every pass for the next life, whatever ends this one.
+        HOST_PRESENT.store(u8::from(bridge.host_present()), Ordering::Relaxed);
 
         if !worked {
             mark(LoopPhase::Idle);
@@ -762,11 +814,25 @@ fn take_link_byte(
         Ok(command) => {
             // Proof of a host, and only a frame that decoded counts: a board
             // running node firmware talks constantly and none of it is a
-            // frame, which `StallWatch` must not read as somebody waiting.
-            bridge.stall.note_host(bridge.now_ms());
+            // frame, which `StallWatch` must not read as somebody waiting. Whether
+            // this one asks for a reply decides if it can start the stall clock.
+            note_host_frame(
+                bridge,
+                mac,
+                command.asks_for_reply(),
+                matches!(command, HostToBridge::Identify),
+            );
             handle(command, manager, sender, bridge, mac);
         }
         Err(err) => {
+            // A frame that passed framing and its checksum but carries another
+            // protocol version is still a host writing, since only a host writes to
+            // this input. It opens transmit, and the `Ready` it earns carries our
+            // version so the host can report the mismatch. It asks for nothing this
+            // end can answer.
+            if matches!(err, LinkError::VersionMismatch { .. }) {
+                note_host_frame(bridge, mac, false, false);
+            }
             // Expected after a reset, when the ROM banner arrives down the
             // same pipe. At debug, so a real version mismatch still shows.
             let mut message = LogStr::new();
@@ -774,6 +840,21 @@ fn take_link_byte(
             bridge.outbox.send(&BridgeToHost::Log { level: LogLevel::Debug, message });
         }
     }
+}
+
+/// Record proof of a host, opening transmit if this is the first.
+///
+/// The first frame of a life opens transmit for one that does not speak first.
+/// Anything but `Identify` still earns a `Ready` ahead of its own answer, so a host
+/// that was already running can tell this is a new life. `asks` is
+/// [`HostToBridge::asks_for_reply`], which decides whether the frame can start the
+/// stall clock.
+fn note_host_frame(bridge: &mut Bridge, mac: Mac, asks: bool, identify: bool) {
+    let first = bridge.stall.last_host().is_none();
+    if first && !bridge.speaks_first && !identify {
+        bridge.announce(mac);
+    }
+    bridge.stall.note_host(bridge.now_ms(), asks);
 }
 
 /// Carry out one host command.

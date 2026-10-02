@@ -16,6 +16,7 @@ use wartui_proto::link::{
     BridgeToHost, FrameAccumulator, HostToBridge, LINK_PROTO_VERSION, LinkError, MAX_FRAME, Mac,
     decode_frame, encode_frame,
 };
+use wartui_proto::stall::TX_STALL_TIMEOUT_MS;
 
 use crate::ports::{self, BRIDGE_PID, PortCandidate};
 use crate::remember::BridgeMemory;
@@ -29,7 +30,10 @@ const READ_TIMEOUT: Duration = Duration::from_millis(50);
 
 /// How long one tick of the patience below is. The first tick of a tokio interval
 /// fires immediately, which is when the single `Identify` goes out.
-const IDENTIFY_INTERVAL: Duration = Duration::from_millis(500);
+const IDENTIFY_INTERVAL: Duration = Duration::from_millis(IDENTIFY_INTERVAL_MS);
+
+/// [`IDENTIFY_INTERVAL`] in milliseconds, for the const arithmetic on the patiences.
+const IDENTIFY_INTERVAL_MS: u64 = 500;
 
 /// How long to wait for a board when there is no other to try, in ticks of
 /// [`IDENTIFY_INTERVAL`].
@@ -39,19 +43,42 @@ const IDENTIFY_INTERVAL: Duration = Duration::from_millis(500);
 /// because a dongle still bringing its radio up is not a wedged one, and the
 /// remedy for the wedge (`wartui reset`) is worth being sure about.
 ///
-/// Patience is about how long a board is worth *before another is tried*, which is
-/// why this is not what a board answered last time gets when something else is
-/// attached: opening the other board costs a second and a half and settles it, and
-/// waiting six for the first would put the answer past the notice the CLI prints at
-/// five. A board passed over that way is tried again on the next pass, 750 ms later.
+/// Patience is about how long a board is worth *before another is tried*. A board
+/// that answered last time gets [`REMEMBERED_TICKS`] when something else is
+/// attached, and any other board gets [`PROBE_TICKS`]: opening the others costs a
+/// second and a half each, and waiting the full six for a board that may not be the
+/// bridge would put the answer past the notice the CLI prints at five. A board
+/// passed over that way is tried again on the next pass, 750 ms later.
 const SETTLE_TICKS: u32 = 12;
 
-/// How long a board gets when there is another to try, in the same ticks.
+/// How long the remembered board gets when there is another to try, in the same
+/// ticks.
+///
+/// Long enough to outlast a wedged bridge's own recovery: its `StallWatch` reboots
+/// it [`TX_STALL_TIMEOUT_MS`] after the `Identify` this connection sends. The new
+/// life speaks first, because a host was present when the last one ended, so its `Ready`
+/// needs no second ask. Measured on a C6 left unread for two minutes, the reboot was heard 3.47 s after the
+/// `Identify`; the margin covers that and a slower board. 4.5 s still lands inside
+/// the CLI's five, which is the point: a one-shot command makes one sweep, so a
+/// probe that gave up first would leave no later pass to hear the `Ready`.
+///
+/// The cost is a replaced or reflashed remembered board holding the sweep for 4.5 s
+/// rather than 1.5 s before the others are tried, and only until another board
+/// answers and overwrites the file.
+const REMEMBERED_TICKS: u32 = ((TX_STALL_TIMEOUT_MS + 1_500) / IDENTIFY_INTERVAL_MS) as u32;
+
+const _: () = assert!(
+    REMEMBERED_TICKS as u64 * IDENTIFY_INTERVAL_MS > TX_STALL_TIMEOUT_MS + 470
+        && REMEMBERED_TICKS < SETTLE_TICKS,
+    "REMEMBERED_TICKS must outlast the stall reset and its reboot, and stay under SETTLE_TICKS",
+);
+
+/// How long any other board gets when there is another to try, in the same ticks.
 ///
 /// 1.5 s, because a healthy bridge answers in about two milliseconds
-/// (`docs/phase-3-findings.md`) and a sweep pays this for every board attached.
-/// Passing over the real bridge costs a retry rather than a failure, which is the
-/// trade [`SETTLE_TICKS`] explains.
+/// (`docs/phase-3-findings.md`) and a sweep pays this for every board attached that
+/// the file does not name. Passing over the real bridge costs a retry rather than a
+/// failure, which is the trade [`SETTLE_TICKS`] explains.
 const PROBE_TICKS: u32 = 3;
 
 /// How many undecodable frames from an unproven board before it is passed over.
@@ -243,7 +270,7 @@ pub fn select(
             let mut ordered = candidates.to_vec();
             ordered.sort_by_key(|candidate| {
                 (
-                    candidate.mac().is_none() || candidate.mac() != remembered,
+                    !is_remembered(candidate, remembered),
                     candidate.pid != Some(BRIDGE_PID),
                     candidate.path.clone(),
                 )
@@ -495,7 +522,7 @@ async fn sweep(
         let state = Arc::new(Attempt::default());
         let attempt = connect(
             &candidate.path,
-            if alone { SETTLE_TICKS } else { PROBE_TICKS },
+            patience(alone, remembered, candidate),
             alone,
             &state,
             &transport.memory,
@@ -668,8 +695,10 @@ async fn connect(
         })
         .map_err(|e| format!("could not start writer thread: {e}"))?;
 
-    // A bridge announces itself at boot, and the host is rarely watching at that
-    // moment: unplugging the dongle is not part of restarting the TUI. So we ask —
+    // A bridge is rarely being watched when it starts: unplugging the dongle is not
+    // part of restarting the TUI. One that restarted with a host attached speaks first,
+    // and every other holds its transmit until a host frame decodes
+    // (`ResetCause::speaks_first`). So we ask —
     // **exactly once, and then only wait.**
     //
     // Once, because a board that is not reading its USB endpoint absorbs exactly
@@ -690,9 +719,13 @@ async fn connect(
     //
     // Once is enough for a bridge whose transmit endpoint has wedged, too: its
     // `StallWatch` (`wartui_proto::stall`) reboots it 3 s after a host frame that
-    // nothing has answered, so this one `Identify` is what clears it. A board given
-    // [`SETTLE_TICKS`] hears the `Ready` behind that reboot before it gives up; a
-    // probe gives up first, and the next connection hears it.
+    // nothing has answered, so this one `Identify` is what clears it. A host was present
+    // when that life ended, so the new one speaks first and its `Ready` reaches us
+    // unprompted, which is the only way this connection hears it. A board given
+    // [`SETTLE_TICKS`] or [`REMEMBERED_TICKS`] hears the `Ready` behind that reboot
+    // before it gives up. A plain probe gives up first, so the board the file names
+    // is never given one: a one-shot command makes a single sweep, and no later
+    // connection would hear it.
     let mut identify = tokio::time::interval(IDENTIFY_INTERVAL);
     let mut waited = 0_u32;
 
@@ -985,8 +1018,9 @@ fn write_loop(
 ///   nothing was asked of it: ModemManager holds a fresh CDC-ACM device for a few
 ///   seconds on some distributions, and a missing `dialout` group holds it for ever.
 /// - **There has to have been nothing else to try.** A board with another waiting
-///   gets [`PROBE_TICKS`], and a bridge still bringing its radio up takes longer
-///   than that. Concluding from a probe is concluding from impatience.
+///   gets [`REMEMBERED_TICKS`] at most, which is still not the full
+///   [`SETTLE_TICKS`], and a bridge still bringing its radio up can take longer.
+///   Concluding from less than a full settle is concluding from impatience.
 ///
 /// This is not the usual way the file is corrected, and not the important one:
 /// whatever board does answer writes its own address over it. This is for the case
@@ -998,7 +1032,29 @@ fn silence_disowns_it(
     remembered: Option<Mac>,
     candidate: &PortCandidate,
 ) -> bool {
-    alone && opened && remembered.is_some() && candidate.mac() == remembered
+    alone && opened && is_remembered(candidate, remembered)
+}
+
+/// Whether this candidate is the board the file names. One with no address of its
+/// own (named by path) never is.
+fn is_remembered(candidate: &PortCandidate, remembered: Option<Mac>) -> bool {
+    candidate.mac().is_some() && candidate.mac() == remembered
+}
+
+/// How many ticks of [`IDENTIFY_INTERVAL`] this candidate is worth.
+///
+/// A board with nowhere else to go is settled on. With company, the board the file
+/// names gets [`REMEMBERED_TICKS`], long enough for a wedged bridge to reset itself,
+/// and everything else gets a brief probe. A candidate with no address of its own
+/// (named by path) is never the remembered one.
+fn patience(alone: bool, remembered: Option<Mac>, candidate: &PortCandidate) -> u32 {
+    if alone {
+        SETTLE_TICKS
+    } else if is_remembered(candidate, remembered) {
+        REMEMBERED_TICKS
+    } else {
+        PROBE_TICKS
+    }
 }
 
 /// Whether a `Ready` came from a life that started after the last one seen.
@@ -1012,7 +1068,9 @@ fn is_a_new_life(uptime_ms: u32, last_seen: Option<u32>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_a_new_life, silence_disowns_it};
+    use super::{
+        PROBE_TICKS, REMEMBERED_TICKS, SETTLE_TICKS, is_a_new_life, patience, silence_disowns_it,
+    };
     use crate::ports::{BRIDGE_PID, ESPRESSIF_VID, PortCandidate, candidate, parse_mac};
 
     const BRIDGE_MAC: &str = "10:BD:A3:EC:44:C0";
@@ -1037,8 +1095,9 @@ mod tests {
 
     #[test]
     fn serial_link_preserves_remembered_board_when_only_short_probe_completed() {
-        // A bridge power-cycled alongside a node takes longer than `PROBE_TICKS` to
-        // bring its radio up, and would otherwise be forgotten for being slow.
+        // A bridge power-cycled alongside a node can take longer than the short
+        // patience to bring its radio up, and would otherwise be forgotten for
+        // being slow.
         assert!(!silence_disowns_it(false, true, parse_mac(BRIDGE_MAC), &board(BRIDGE_MAC)));
     }
 
@@ -1072,6 +1131,27 @@ mod tests {
         // Named or not, it was opened, heard out in full and said nothing, which is
         // the same evidence an unnamed run forgets it on.
         assert!(silence_disowns_it(true, true, parse_mac(BRIDGE_MAC), &board(BRIDGE_MAC)));
+    }
+
+    #[test]
+    fn serial_link_outlasts_stall_reset_when_remembered_bridge_has_company() {
+        let ticks = patience(false, parse_mac(BRIDGE_MAC), &board(BRIDGE_MAC));
+        assert_eq!(ticks, REMEMBERED_TICKS);
+        assert!(ticks > PROBE_TICKS);
+    }
+
+    #[test]
+    fn serial_link_probes_briefly_when_board_is_not_remembered() {
+        assert_eq!(patience(false, parse_mac(BRIDGE_MAC), &board(NODE_MAC)), PROBE_TICKS);
+        assert_eq!(patience(false, None, &board(BRIDGE_MAC)), PROBE_TICKS);
+        let named = candidate("/dev/ttyACM0", None, None, None);
+        assert_eq!(patience(false, None, &named), PROBE_TICKS, "no address is no match");
+    }
+
+    #[test]
+    fn serial_link_settles_when_board_is_alone() {
+        assert_eq!(patience(true, parse_mac(BRIDGE_MAC), &board(BRIDGE_MAC)), SETTLE_TICKS);
+        assert_eq!(patience(true, None, &board(NODE_MAC)), SETTLE_TICKS);
     }
 
     #[test]
