@@ -7,6 +7,13 @@
 //! on the command line where it can be read. Anything that wants to be remembered
 //! *and* decided belongs on the command line or in `wartui.toml`, not here.
 //!
+//! **Whether to keep the file at all is the operator's decision**, made in
+//! `wartui.toml` as `[bridge] remember` or from the settings modal, and off means
+//! no file: turning it off deletes the one there, and nothing reads or writes it
+//! while it stays off. The switch is shared by every clone of one handle, because
+//! the transport and the view each hold one and a change from the view has to
+//! reach the next reconnect.
+//!
 //! **Every failure to read or write it is ignored.** A read-only home, no `$HOME`
 //! at all, a directory where the file should be — each costs a sweep and nothing
 //! else. A capture must never fail over a cached address, and the view owns the
@@ -21,40 +28,73 @@
 //! be ceremony over a value rebuilt in seconds.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use wartui_proto::link::Mac;
 
 use crate::ports;
 
 /// Where the address is kept between runs.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct BridgeMemory {
     /// `None` when the host offers nowhere to keep it, which is not an error.
     path: Option<PathBuf>,
+    /// Whether the operator wants the file kept. Shared by every clone.
+    enabled: Arc<AtomicBool>,
+}
+
+impl Default for BridgeMemory {
+    fn default() -> Self {
+        Self::none()
+    }
 }
 
 impl BridgeMemory {
+    fn with(path: Option<PathBuf>) -> Self {
+        Self { path, enabled: Arc::new(AtomicBool::new(true)) }
+    }
+
     /// The file under this host's state directory.
     #[must_use]
     pub fn discover() -> Self {
-        Self { path: state_dir().map(|dir| dir.join("bridge")) }
+        Self::with(state_dir().map(|dir| dir.join("bridge")))
     }
 
     /// A file at a path of your choosing, which is how this is tested.
     #[must_use]
     pub fn at(path: impl Into<PathBuf>) -> Self {
-        Self { path: Some(path.into()) }
+        Self::with(Some(path.into()))
     }
 
     /// Remember nothing, and go on remembering nothing.
     #[must_use]
-    pub const fn none() -> Self {
-        Self { path: None }
+    pub fn none() -> Self {
+        Self::with(None)
+    }
+
+    /// Turn remembering on or off for this handle and every clone of it. Off also
+    /// deletes the file, because off means no file.
+    pub fn set_enabled(&self, on: bool) {
+        self.enabled.store(on, Ordering::Relaxed);
+        if !on {
+            self.forget();
+        }
+    }
+
+    /// Whether remembering is on.
+    #[must_use]
+    pub fn is_enabled(&self) -> bool {
+        self.enabled.load(Ordering::Relaxed)
     }
 
     /// The address last written, when it is still readable and still an address.
+    /// Nothing while remembering is off.
     #[must_use]
     pub fn recall(&self) -> Option<Mac> {
+        if !self.is_enabled() {
+            return None;
+        }
         let path = self.path.as_ref()?;
         let text = std::fs::read_to_string(path).ok()?;
         ports::parse_mac(text.trim())
@@ -64,8 +104,12 @@ impl BridgeMemory {
     ///
     /// Writing the same address again is skipped rather than done: this is called
     /// once per connection, and a capture that reconnects across a loose cable
-    /// would otherwise rewrite the file all evening for no change.
+    /// would otherwise rewrite the file all evening for no change. Nothing is
+    /// written while remembering is off.
     pub fn remember(&self, mac: Mac) {
+        if !self.is_enabled() {
+            return;
+        }
         let Some(path) = &self.path else { return };
         if self.recall() == Some(mac) {
             return;

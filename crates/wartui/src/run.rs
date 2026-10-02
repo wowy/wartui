@@ -17,6 +17,7 @@ use anyhow::{Context, Result, bail};
 use chrono::Local;
 use clap::Args as ClapArgs;
 use tokio::sync::{mpsc, oneshot, watch};
+use wartui_bridge::remember::BridgeMemory;
 use wartui_core::engine::{EngineConfig, FleetEngine, StoreStats};
 use wartui_core::gps::{Gps, GpsConfig};
 use wartui_core::position::PositionChain;
@@ -198,7 +199,15 @@ pub async fn run(args: Args) -> Result<()> {
     };
 
     let pool = pool(config.pool);
-    let link = crate::open(args.bridge.as_deref(), args.sim, args.sim_c6, crate::Remember::Named)?;
+    // The simulator never touches the real file. Elsewhere the operator decides whether
+    // there is one at all, and a `remember = false` written by hand forgets it here.
+    let memory = if args.sim.is_some() {
+        BridgeMemory::none()
+    } else {
+        crate::memory(args.bridge.as_deref(), crate::Remember::Named)
+    };
+    memory.set_enabled(config.bridge.remember.unwrap_or(true));
+    let link = crate::open(args.bridge.as_deref(), args.sim, args.sim_c6, memory.clone())?;
 
     let started = now();
     // Whether the capture was named by hand decides what the parting line can tell them
@@ -214,7 +223,7 @@ pub async fn run(args: Args) -> Result<()> {
     let (tx_power, bridge_tx_power) = tx_powers(&config.tx_power);
     let remember_ble = config.bluetooth.remember.unwrap_or(true);
     let preferred_ble = config.bluetooth.node;
-    let settings = tui::Settings { config_path, saved: config };
+    let settings = tui::Settings { config_path, saved: config, bridge_memory: memory };
     let config = EngineConfig {
         pool,
         record_raw: args.record_raw,

@@ -82,7 +82,8 @@ pub async fn run(args: Args) -> Result<()> {
             BridgeMemory::discover().recall(),
         )?,
     };
-    let mut link = super::open(Some(&board), None, 0, super::Remember::Detected)?;
+    let mut link =
+        super::open(Some(&board), None, 0, super::memory(Some(&board), super::Remember::Detected))?;
 
     // Sent immediately, without waiting to be told the bridge is there: the case
     // this command is for is the one where nothing ever announces itself, and the
