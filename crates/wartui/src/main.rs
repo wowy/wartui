@@ -204,7 +204,7 @@ fn ports() -> Result<()> {
 /// Whether opening the link may write down which board answered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Remember {
-    /// Only a board found without being named: `status`, `sniff` and `reset`.
+    /// Only a board found without being named: `status`, `sniff`, `reset` and `flash-bridge`.
     Detected,
     /// A named board as well: `run`.
     Named,
@@ -216,8 +216,8 @@ enum Remember {
 /// a capture. A capture against a named bridge *is* the decision to use that
 /// board, and the next unnamed run, `flash-fleet` and `flash-bridge` should act
 /// on it rather than on whichever board answered before. A one-off
-/// `wartui status --bridge X` is asked in order to find something out, and
-/// must not quietly decide what every later run opens.
+/// `wartui status --bridge X` or `wartui flash-bridge --bridge X` is asked
+/// once, and must not quietly decide what every later run opens.
 fn memory(bridge: Option<&str>, rule: Remember) -> BridgeMemory {
     match (bridge, rule) {
         (None, _) | (Some(_), Remember::Named) => BridgeMemory::discover(),
