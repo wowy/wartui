@@ -98,6 +98,7 @@ have no README; their `//!` module docs hold the detail.
 | `b`                    | Toggle Bluetooth scanning on the selected node                               |
 | `c`                    | Open config (settings)                                                       |
 | `r` / `R`              | Clear the selected node's dedup ring, or every assignable node's             |
+| `u`                    | Upload this capture to WDGWars, after asking                                 |
 | `q` / `Esc` / `ctrl-c` | Stop, committing the last batch                                              |
 
 ### In settings (`c`)
@@ -114,6 +115,9 @@ have no README; their `//!` module docs hold the detail.
 wartui splits the channel pool across the fleet and re-splits it whenever the fleet changes. That
 is the reason it exists. No key or flag assigns channels to a node. `b` only picks which node scans
 Bluetooth; the planner then shares that node's channels among the rest.
+
+`u` asks before it uploads to WDGWars, sends only what is new since the last upload, and leaves the
+capture running.
 
 A node listens for assignments only during the 100 ms after each heartbeat. Heartbeats come every
 5 seconds, so a new assignment can take up to that long to land. Until then, the node's `channels`

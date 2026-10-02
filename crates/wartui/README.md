@@ -167,6 +167,15 @@ result. The wait is short because someone sits at the terminal for it and nothin
 to finish. Each poll gets 10 seconds; sending the file has no time limit. Before queuing, a refused key (with the site's reason), an oversized file and any other
 error status are reported in plain words and exit non-zero. Redirects are not followed.
 
+#### From the fleet view
+
+`u` uploads the capture `run` is writing, with the key in settings when `u` is pressed. It shows
+the same summary in a box; `y` sends and any other key cancels. The capture keeps running
+throughout. The footer follows the upload on a line of its own (`upload: sending 1.2 MB`,
+`upload: job 42 queued`, the site's counts or why it stopped), which stays until the next `u`. A
+second `u` while one is under way is refused. Quitting abandons an upload still being sent, and the
+site queues nothing; one the site already queued is recorded in the capture.
+
 ### Config file
 
 `wartui.toml` holds settings an operator wants to stop typing every run:
@@ -343,12 +352,16 @@ it and `run` opens it first; one named with `--bridge` is not. `--dry-run` reset
 | `b`                    | Toggle Bluetooth scanning on the selected node                               |
 | `c`                    | Open config (settings)                                                       |
 | `r` / `R`              | Clear the selected node's dedup ring, or every assignable node's             |
+| `u`                    | Upload this capture to WDGWars, after asking                                 |
 | `q` / `Esc` / `ctrl-c` | Stop, committing the last batch                                              |
 
 Only `b`, `c`, `r`, and `R` reach the air, and no key sets channels. `b` picks _which_ node scans
 Bluetooth; the planner still authors every share. With `remember bt node` on, `b` also writes its
 choice, or its absence, to `[bluetooth]` in `wartui.toml`, leaving the rest of the file alone. `r`
 and `R` make a node forget every address it has reported, on its next heartbeat.
+
+`u` asks before it sends, sends only what is new since the last upload, and leaves the capture
+running; see "Uploading to WDGWars".
 
 ### In settings (`c`)
 

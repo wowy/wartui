@@ -39,6 +39,8 @@ use wartui_proto::plan::{self, ChannelPool, ChannelSet, Radio, SCAN_CHANNELS};
 
 use crate::config;
 use crate::run::PoolArg;
+use crate::tui_upload::Upload;
+pub use crate::tui_upload::UploadTarget;
 
 /// How long the input thread waits for a keypress before checking whether it
 /// should stop. Long enough not to spin, short enough that quitting is instant.
@@ -63,6 +65,8 @@ pub struct Settings {
     /// Whether `run` remembers the bridge: the handle the transport also holds,
     /// so the modal's switch reaches the next reconnect.
     pub bridge_memory: BridgeMemory,
+    /// Where `u` uploads to.
+    pub upload: UploadTarget,
 }
 
 /// Run the view until the operator quits or the engine stops.
@@ -110,6 +114,7 @@ async fn view(
     let outcome = loop {
         let current = snapshot.borrow_and_update().clone();
         ui.clamp(current.nodes.len());
+        ui.poll_upload(&current);
         if let Err(e) = terminal.draw(|frame| draw(frame, &current, &mut ui)) {
             break Err(e).context("drawing the fleet view");
         }
@@ -118,6 +123,9 @@ async fn view(
             input = inputs.recv() => match input {
                 // ctrl-c always quits, modal or not.
                 Some(Input::Key(key)) if is_ctrl_c(key) => break Ok(()),
+                // The upload's confirm opens over anything, settings included, so it
+                // answers first.
+                Some(Input::Key(key)) if ui.upload.confirming() => ui.on_confirm_key(key, &current),
                 // An open modal gets the key ahead of `quits()`: `esc`/`q` close
                 // it rather than the view while it is open.
                 Some(Input::Key(key)) if ui.modal.is_some() => {
@@ -161,6 +169,8 @@ struct Ui {
     modal: Option<ConfigModal>,
     /// Where to save, and what was last saved there.
     settings: Settings,
+    /// The upload `u` started.
+    upload: Upload,
 }
 
 /// One row the settings modal can move between. A new setting adds a variant
@@ -297,6 +307,11 @@ impl Ui {
             // sends shift+r as `'R'`, not `'r'` with a modifier flag.
             KeyCode::Char('r') => self.clear_ring(snapshot, commands),
             KeyCode::Char('R') => self.clear_fleet_ring(snapshot, commands),
+            KeyCode::Char('u') => {
+                if let Some(text) = self.upload.press(&self.settings) {
+                    self.say(text, snapshot);
+                }
+            }
             // Anything else leaves the notice alone: a key bound to nothing must
             // not clear the one message saying why nothing happened.
             _ => {}
@@ -561,6 +576,20 @@ impl Ui {
         self.say(said, snapshot);
     }
 
+    /// Take what the upload threads have reported since the last frame.
+    fn poll_upload(&mut self, snapshot: &Snapshot) {
+        if let Some(text) = self.upload.poll() {
+            self.say(text, snapshot);
+        }
+    }
+
+    /// A key while the upload's confirm is open: only `y` sends.
+    fn on_confirm_key(&mut self, key: KeyEvent, snapshot: &Snapshot) {
+        if let Some(text) = self.upload.on_confirm_key(key, &self.settings.upload) {
+            self.say(text, snapshot);
+        }
+    }
+
     fn say(&mut self, text: String, snapshot: &Snapshot) {
         self.notice = Some((text, snapshot.now_ms));
     }
@@ -700,7 +729,8 @@ fn draw(frame: &mut Frame<'_>, snapshot: &Snapshot, ui: &mut Ui) {
     // with the counters pushed the last of them off the terminal.
     let faults = fault_lines(&faults(snapshot), frame.area().width);
     let drops = u16::from(drop_line(&snapshot.counters).is_some());
-    let footer_height = 1 + drops + u16::try_from(faults.len()).unwrap_or(u16::MAX);
+    let upload = u16::from(ui.upload.status().is_some());
+    let footer_height = 1 + drops + upload + u16::try_from(faults.len()).unwrap_or(u16::MAX);
     let [header, body, footer] = Layout::vertical([
         Constraint::Length(4),
         Constraint::Min(6),
@@ -724,6 +754,23 @@ fn draw(frame: &mut Frame<'_>, snapshot: &Snapshot, ui: &mut Ui) {
     if let Some(modal) = &ui.modal {
         draw_settings_modal(frame, modal);
     }
+    if let Some(lines) = ui.upload.confirm_lines() {
+        draw_confirm_modal(frame, &lines);
+    }
+}
+
+/// The upload's confirm, centred the way settings is, sized to what it says.
+fn draw_confirm_modal(frame: &mut Frame<'_>, lines: &[String]) {
+    let widest = lines.iter().map(|line| line.chars().count()).max().unwrap_or(0);
+    let width = u16::try_from(widest + 4).unwrap_or(u16::MAX);
+    let height = u16::try_from(lines.len() + 2).unwrap_or(u16::MAX);
+    let area = centered_rect(width, height, frame.area());
+    frame.render_widget(Clear, area);
+    let block = Block::bordered().title(" upload to WDGWars ");
+    let inner = block.inner(area).inner(ratatui::layout::Margin::new(1, 0));
+    frame.render_widget(block, area);
+    let lines: Vec<Line<'_>> = lines.iter().map(|line| Line::from(line.as_str())).collect();
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 /// The settings modal, centred over the live view behind it.
@@ -1269,7 +1316,7 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot, ui: &Ui, 
         )));
     } else {
         let mut spans = vec![Span::styled(
-            " q quit  ↑↓ select  b bluetooth  c settings  r clear  R clear fleet ",
+            " q quit  ↑↓ select  b bluetooth  c settings  r clear  R clear fleet  u upload ",
             Style::new().fg(Color::Black).bg(Color::Gray).add_modifier(Modifier::BOLD),
         )];
         spans.push(Span::raw(format!(
@@ -1301,6 +1348,11 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot, ui: &Ui, 
     // it; plain rather than yellow, since a full ring is expected in a dense area.
     if let Some(drops) = drop_line(&c) {
         lines.push(Line::from(drops));
+    }
+
+    // Its own line for the same reason, kept after the upload ends until the next `u`.
+    if let Some(status) = ui.upload.status() {
+        lines.push(Line::from(format!("  {status}")));
     }
 
     // Already fitted to the width by `fault_lines`, so nothing here can be
@@ -3482,5 +3534,136 @@ mod tests {
         let rendered = modal_rendered("abc123def456", Field::RememberBridge);
         assert!(!rendered.contains("ctrl-u"), "{rendered}");
         assert!(rendered.contains("enter save · esc cancel"), "{rendered}");
+    }
+
+    /// A view whose `u` uploads `db`, with a key, to a local server at `base`.
+    fn uploading(db: PathBuf, base: String) -> Ui {
+        let mut saved = config::Config::default();
+        saved.api_keys.wdgwars = "secret".to_owned();
+        let upload = UploadTarget { db, base };
+        Ui { settings: Settings { saved, upload, ..Settings::default() }, ..Ui::default() }
+    }
+
+    /// A capture holding two positioned networks.
+    fn two_rows(dir: &tempfile::TempDir) -> PathBuf {
+        use crate::testing::{capture, sighting};
+        capture(
+            dir,
+            vec![
+                sighting([0x10, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0)),
+                sighting([0x10, 0, 0, 0, 0, 2], EPOCH_MS + 1_000, Some(37.1)),
+            ],
+        )
+    }
+
+    /// Drain the upload threads, as each frame does, until `done` holds or ten seconds
+    /// pass (twenty when `wait`'s first poll is in the way).
+    fn poll_until(ui: &mut Ui, snapshot: &Snapshot, secs: u64, done: impl Fn(&Ui) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(secs);
+        while !done(ui) {
+            assert!(Instant::now() < deadline, "timed out: {:?}", ui.upload);
+            std::thread::sleep(Duration::from_millis(20));
+            ui.poll_upload(snapshot);
+        }
+    }
+
+    fn press_u(ui: &mut Ui, snapshot: &Snapshot) {
+        let (tx, _rx) = mpsc::channel(4);
+        ui.on_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE), snapshot, &tx);
+    }
+
+    #[test]
+    fn upload_key_shows_notice_when_no_api_key() {
+        let snapshot = busy();
+        let mut ui = Ui::default();
+        press_u(&mut ui, &snapshot);
+        assert_eq!(
+            ui.notice(snapshot.now_ms),
+            Some("no WDGWars API key; paste one in settings (c)")
+        );
+        assert!(!ui.upload.confirming());
+    }
+
+    #[test]
+    fn upload_key_opens_confirm_with_row_count_when_capture_has_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let snapshot = busy();
+        let mut ui = uploading(two_rows(&dir), "http://127.0.0.1:9".to_owned());
+        press_u(&mut ui, &snapshot);
+        assert_eq!(ui.upload.status(), Some("upload: preparing…"));
+        poll_until(&mut ui, &snapshot, 10, |ui| ui.upload.confirming());
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("test backend");
+        terminal.draw(|frame| draw(frame, &snapshot, &mut ui)).expect("drawing");
+        let rendered = terminal.backend().to_string();
+        assert!(rendered.contains("2 rows to upload"), "{rendered}");
+        assert!(rendered.contains("compressed"), "{rendered}");
+        assert!(rendered.contains("y upload · any other key cancels"), "{rendered}");
+    }
+
+    #[test]
+    fn upload_confirm_sends_nothing_when_cancelled() {
+        let dir = tempfile::tempdir().unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let snapshot = busy();
+        let mut ui = uploading(two_rows(&dir), base);
+        press_u(&mut ui, &snapshot);
+        poll_until(&mut ui, &snapshot, 10, |ui| ui.upload.confirming());
+
+        ui.on_confirm_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE), &snapshot);
+        assert!(!ui.upload.confirming());
+        assert_eq!(ui.notice(snapshot.now_ms), Some("not uploaded"));
+        std::thread::sleep(Duration::from_millis(200));
+        listener.set_nonblocking(true).unwrap();
+        assert!(listener.accept().is_err(), "the upload was sent anyway");
+    }
+
+    #[test]
+    fn upload_footer_shows_job_result_when_import_done() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, server) = crate::testing::serve_sequence(&[
+            ("202 Accepted", r#"{"ok":true,"job_id":42}"#),
+            (
+                "200 OK",
+                r#"{"ok":true,"job_id":42,"status":"done","result":{"imported":1200,"captured":17}}"#,
+            ),
+        ]);
+        let snapshot = busy();
+        let mut ui = uploading(two_rows(&dir), base);
+        press_u(&mut ui, &snapshot);
+        poll_until(&mut ui, &snapshot, 10, |ui| ui.upload.confirming());
+        ui.on_confirm_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE), &snapshot);
+        assert!(ui.upload.status().is_some_and(|s| s.starts_with("upload: sending ")));
+        // Through `wait`'s first poll, two seconds in.
+        poll_until(&mut ui, &snapshot, 20, |ui| {
+            ui.upload.status().is_some_and(|s| s.contains("imported"))
+        });
+
+        let mut terminal = Terminal::new(TestBackend::new(200, 40)).expect("test backend");
+        terminal.draw(|frame| draw(frame, &snapshot, &mut ui)).expect("drawing");
+        let rendered = terminal.backend().to_string();
+        assert!(rendered.contains("upload: job 42 imported 1,200  captured 17"), "{rendered}");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn upload_footer_shows_error_when_send_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, server) =
+            crate::testing::serve_once("401 Unauthorized", r#"{"ok":false,"error":"bad key"}"#);
+        let snapshot = busy();
+        let mut ui = uploading(two_rows(&dir), base);
+        press_u(&mut ui, &snapshot);
+        poll_until(&mut ui, &snapshot, 10, |ui| ui.upload.confirming());
+        ui.on_confirm_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE), &snapshot);
+        poll_until(&mut ui, &snapshot, 10, |ui| {
+            ui.upload.status().is_some_and(|s| s.starts_with("upload failed:"))
+        });
+        assert_eq!(
+            ui.upload.status(),
+            Some("upload failed: WDGWars rejected the API key: bad key")
+        );
+        server.join().unwrap();
     }
 }

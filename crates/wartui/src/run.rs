@@ -25,7 +25,7 @@ use wartui_core::runtime::{COMMAND_QUEUE, drive, now};
 use wartui_core::store::{CaptureInfo, Store, StoreConfig, StoreError};
 use wartui_proto::plan::{ChannelPool, DEFAULT_TX_POWER_QUARTER_DBM};
 
-use crate::{capture, config, tui};
+use crate::{capture, config, tui, upload};
 
 /// Which channels the fleet is meant to scan.
 ///
@@ -241,7 +241,8 @@ pub async fn run(args: Args) -> Result<()> {
     let (tx_power, bridge_tx_power) = tx_powers(&config.tx_power);
     let remember_ble = config.bluetooth.remember.unwrap_or(true);
     let preferred_ble = config.bluetooth.node;
-    let settings = tui::Settings { config_path, saved: config, bridge_memory: memory };
+    let upload = tui::UploadTarget { db: db.clone(), base: upload::BASE.to_owned() };
+    let settings = tui::Settings { config_path, saved: config, bridge_memory: memory, upload };
     let config = EngineConfig {
         pool,
         record_raw: args.record_raw,
