@@ -99,13 +99,14 @@ have no README; their `//!` module docs hold the detail.
 
 ### In settings (`c`)
 
-| Key               | What it does                                       |
-|-------------------|----------------------------------------------------|
-| `↑` `↓` / `k` `j` | Move between rows                                  |
-| `←` `→` / `h` `l` | Change the selected row; values stop at their ends |
-| `Enter`           | Apply every row and save it to `wartui.toml`       |
-| `Esc` / `q`       | Close without changing anything                    |
-| `ctrl-c`          | Quit                                               |
+| Key               | What it does                                                       |
+|-------------------|--------------------------------------------------------------------|
+| `↑` `↓` / `k` `j` | Move between rows                                                  |
+| `←` `→` / `h` `l` | Change the selected row; values stop at their ends                 |
+| Type / paste      | On the `wdgwars` row: enter the key (`Backspace`, `ctrl-u` clears) |
+| `Enter`           | Apply every row and save it to `wartui.toml`                       |
+| `Esc` / `q`       | Close without changing anything                                    |
+| `ctrl-c`          | Quit                                                               |
 
 wartui splits the channel pool across the fleet and re-splits it whenever the fleet changes. That
 is the reason it exists. No key or flag assigns channels to a node. `b` only picks which node scans
