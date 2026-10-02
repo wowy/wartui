@@ -21,6 +21,7 @@ use ratatui::widgets::{Block, Cell, Clear, Paragraph, Row, Table, TableState};
 use ratatui::{DefaultTerminal, Frame};
 use tokio::sync::{mpsc, oneshot, watch};
 use wartui_bridge::BridgeInfo;
+use wartui_bridge::remember::BridgeMemory;
 use wartui_core::engine::{Command, Counters, NodeView, Snapshot, TailEntry};
 use wartui_core::gps::{GpsStatus, GpsView};
 // Shared with the bridge's panel rather than written twice: the two reporting
@@ -55,6 +56,9 @@ pub struct Settings {
     /// Bluetooth node, so it never writes the running pool or powers over what
     /// the file holds.
     pub saved: config::Config,
+    /// Whether `run` remembers the bridge: the handle the transport also holds,
+    /// so the modal's switch reaches the next reconnect.
+    pub bridge_memory: BridgeMemory,
 }
 
 /// Run the view until the operator quits or the engine stops.
@@ -149,10 +153,12 @@ enum Field {
     Fleet,
     Bridge,
     RememberBle,
+    RememberBridge,
 }
 
 /// Every row of the settings modal, top to bottom, as `next`/`prev` walk them.
-const FIELDS: [Field; 4] = [Field::Pool, Field::Fleet, Field::Bridge, Field::RememberBle];
+const FIELDS: [Field; 5] =
+    [Field::Pool, Field::Fleet, Field::Bridge, Field::RememberBle, Field::RememberBridge];
 
 impl Field {
     /// The row below this one, clamped: the last row stays put rather than
@@ -184,6 +190,8 @@ struct ConfigModal {
     pool: PoolArg,
     /// Whether `b` remembers the node it gives the scan to.
     remember_ble: bool,
+    /// Whether `run` remembers the bridge it connected to.
+    remember_bridge: bool,
 }
 
 /// `All → Eu → Us`, the order the pool row steps through.
@@ -206,7 +214,7 @@ fn step_pool(current: PoolArg, delta: i8) -> PoolArg {
 impl ConfigModal {
     /// Step the selected row by one: a tx-power row moves by one dBm, clamped
     /// to the range the file and the flags share; the pool row moves through
-    /// [`POOL_STEPS`]; the remember row is off to the left and on to the right.
+    /// [`POOL_STEPS`]; the remember rows are off to the left and on to the right.
     /// All stop at their ends rather than wrapping.
     fn step(&mut self, delta: i8) {
         let value = match self.selected {
@@ -219,6 +227,12 @@ impl ConfigModal {
             Field::RememberBle => {
                 if delta != 0 {
                     self.remember_ble = delta > 0;
+                }
+                return;
+            }
+            Field::RememberBridge => {
+                if delta != 0 {
+                    self.remember_bridge = delta > 0;
                 }
                 return;
             }
@@ -273,6 +287,8 @@ impl Ui {
             bridge_dbm,
             pool: snapshot.pool.into(),
             remember_ble: snapshot.remember_ble,
+            // The engine knows nothing of this one, so it comes from the handle.
+            remember_bridge: self.settings.bridge_memory.is_enabled(),
         });
     }
 
@@ -337,6 +353,20 @@ impl Ui {
                 ));
             }
         }
+        let memory = &self.settings.bridge_memory;
+        if modal.remember_bridge != memory.is_enabled() {
+            memory.set_enabled(modal.remember_bridge);
+            if modal.remember_bridge {
+                // Turning it on remembers the bridge connected now, rather than
+                // waiting for a reconnect that may never come.
+                if let Some(bridge) = &snapshot.bridge {
+                    memory.remember(bridge.mac);
+                }
+                text.push_str("; bridge remembered");
+            } else {
+                text.push_str("; bridge forgotten — each start scans for it");
+            }
+        }
         text.push_str(&self.save_outcome(modal, snapshot));
         self.say(text, snapshot);
     }
@@ -371,6 +401,7 @@ impl Ui {
                     None
                 },
             },
+            bridge: config::Bridge { remember: Some(modal.remember_bridge) },
         };
         match config::save(&path, &written) {
             Err(error) => format!("; could not save: {error}"),
@@ -644,11 +675,20 @@ fn draw_settings_modal(frame: &mut Frame<'_>, modal: &ConfigModal) {
         format!("{:<18}◂ {} ▸", "remember bt node", if modal.remember_ble { "on" } else { "off" }),
         styled(modal.selected == Field::RememberBle),
     ));
+    let remember_bridge_row = Line::from(Span::styled(
+        format!(
+            "{:<18}◂ {} ▸",
+            "remember bridge",
+            if modal.remember_bridge { "on" } else { "off" }
+        ),
+        styled(modal.selected == Field::RememberBridge),
+    ));
     let lines = vec![
         pool_row,
         row("fleet tx power", modal.fleet_dbm, modal.selected == Field::Fleet),
         row("bridge tx power", modal.bridge_dbm, modal.selected == Field::Bridge),
         remember_row,
+        remember_bridge_row,
         Line::default(),
         Line::from("enter save · esc cancel"),
     ];
@@ -2687,8 +2727,10 @@ mod tests {
         let snapshot = busy();
         let node = snapshot.nodes[0].state.mac;
         let (tx, mut rx) = mpsc::channel(4);
-        let mut ui =
-            Ui { settings: Settings { config_path: Some(target.clone()), saved }, ..Ui::default() };
+        let mut ui = Ui {
+            settings: Settings { config_path: Some(target.clone()), saved, ..Settings::default() },
+            ..Ui::default()
+        };
 
         ui.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE), &snapshot, &tx);
 
@@ -2807,11 +2849,11 @@ mod tests {
         let (tx, _rx) = mpsc::channel(4);
         let mut ui = Ui::default();
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
-        for _ in 0..5 {
+        for _ in 0..3 {
             ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &snapshot, &tx);
         }
         let modal = ui.modal.expect("still open");
-        assert_eq!(modal.selected, Field::RememberBle, "the last row");
+        assert_eq!(modal.selected, Field::RememberBle, "the row under the powers");
         assert!(modal.remember_ble, "seeded from the snapshot");
 
         for _ in 0..2 {
@@ -2956,6 +2998,115 @@ mod tests {
         );
     }
 
+    /// A view saving to `dir/wartui.toml`, remembering the bridge in `dir/bridge`.
+    fn ui_with_bridge_memory(dir: &std::path::Path, memory: &BridgeMemory) -> Ui {
+        Ui {
+            settings: Settings {
+                config_path: Some(dir.join("wartui.toml")),
+                bridge_memory: memory.clone(),
+                ..Settings::default()
+            },
+            ..Ui::default()
+        }
+    }
+
+    /// Open the modal and walk down to the `remember bridge` row.
+    fn select_remember_bridge(ui: &mut Ui, snapshot: &Snapshot, tx: &mpsc::Sender<Command>) {
+        ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), snapshot, tx);
+        for _ in 0..FIELDS.len() {
+            ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), snapshot, tx);
+        }
+    }
+
+    #[test]
+    fn ui_toggles_remember_bridge_row_when_h_or_l_pressed() {
+        let snapshot = busy();
+        let (tx, _rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+        select_remember_bridge(&mut ui, &snapshot, &tx);
+        let modal = ui.modal.expect("still open");
+        assert_eq!(modal.selected, Field::RememberBridge, "the last row");
+        assert!(modal.remember_bridge, "seeded from the handle, on by default");
+
+        for _ in 0..2 {
+            ui.on_modal_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE), &snapshot, &tx);
+            assert!(!ui.modal.expect("still open").remember_bridge, "off, and stays off");
+        }
+        for _ in 0..2 {
+            ui.on_modal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &snapshot, &tx);
+            assert!(ui.modal.expect("still open").remember_bridge, "on, and stays on");
+        }
+    }
+
+    #[test]
+    fn ui_forgets_bridge_and_saves_off_when_remember_bridge_turned_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("bridge");
+        let memory = BridgeMemory::at(&file);
+        memory.remember([0x02, 0x00, 0x5E, 0x10, 0x9D, 0x24]);
+        assert!(file.exists());
+        let snapshot = busy();
+        let (tx, _rx) = mpsc::channel(4);
+        let mut ui = ui_with_bridge_memory(dir.path(), &memory);
+        select_remember_bridge(&mut ui, &snapshot, &tx);
+        ui.on_modal_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE), &snapshot, &tx);
+
+        ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
+
+        assert!(!file.exists(), "off means no file");
+        assert!(!memory.is_enabled(), "the transport's clone sees it too");
+        let saved = config::load(Some(&dir.path().join("wartui.toml"))).expect("a valid file");
+        assert_eq!(saved.bridge.remember, Some(false));
+        let notice = ui.notice(snapshot.now_ms).expect("a notice");
+        assert!(notice.contains("bridge forgotten"), "{notice}");
+    }
+
+    #[test]
+    fn ui_remembers_connected_bridge_when_remember_bridge_turned_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("bridge");
+        let memory = BridgeMemory::at(&file);
+        memory.set_enabled(false);
+        let snapshot = busy();
+        let bridge = snapshot.bridge.as_ref().expect("a bridge").mac;
+        let (tx, _rx) = mpsc::channel(4);
+        let mut ui = ui_with_bridge_memory(dir.path(), &memory);
+        select_remember_bridge(&mut ui, &snapshot, &tx);
+        assert!(!ui.modal.expect("still open").remember_bridge, "seeded off");
+        ui.on_modal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &snapshot, &tx);
+
+        ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
+
+        assert!(memory.is_enabled());
+        assert_eq!(BridgeMemory::at(&file).recall(), Some(bridge), "the bridge connected now");
+        let saved = config::load(Some(&dir.path().join("wartui.toml"))).expect("a valid file");
+        assert_eq!(saved.bridge.remember, Some(true));
+        let notice = ui.notice(snapshot.now_ms).expect("a notice");
+        assert!(notice.contains("bridge remembered"), "{notice}");
+    }
+
+    #[test]
+    fn ui_leaves_bridge_file_alone_when_remember_bridge_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("bridge");
+        let memory = BridgeMemory::at(&file);
+        // A board other than the one connected: an unchanged row must not rewrite it.
+        let other = [0x10, 0xBD, 0xA3, 0xEC, 0x44, 0xC0];
+        memory.remember(other);
+        let snapshot = busy();
+        let (tx, _rx) = mpsc::channel(4);
+        let mut ui = ui_with_bridge_memory(dir.path(), &memory);
+        ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
+
+        ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
+
+        assert!(memory.is_enabled());
+        assert_eq!(memory.recall(), Some(other));
+        let notice = ui.notice(snapshot.now_ms).expect("a notice");
+        assert!(!notice.contains("bridge forgotten"), "{notice}");
+        assert!(!notice.contains("bridge remembered"), "{notice}");
+    }
+
     #[test]
     fn draw_renders_settings_modal_over_the_live_view_when_open() {
         let snapshot = busy();
@@ -2971,6 +3122,7 @@ mod tests {
         assert!(rendered.contains("fleet tx power"), "{rendered}");
         assert!(rendered.contains("bridge tx power"), "{rendered}");
         assert!(rendered.contains("pool"), "{rendered}");
+        assert!(rendered.contains("remember bridge"), "{rendered}");
         // The view behind it is still live, not blanked out.
         assert!(rendered.contains("C5 57:84"), "{rendered}");
     }

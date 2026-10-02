@@ -331,7 +331,7 @@ impl Default for SerialTransport {
 impl SerialTransport {
     /// Find a bridge automatically.
     #[must_use]
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             spec: None,
             memory: BridgeMemory::none(),

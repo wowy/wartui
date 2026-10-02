@@ -92,8 +92,8 @@ have no README; their `//!` module docs hold the detail.
 | Key                    | What it does                                                                 |
 |------------------------|------------------------------------------------------------------------------|
 | `↑` `↓` / `k` `j`      | Move the cursor through the fleet table                                      |
-| `b`                    | Make the selected node the Bluetooth scanner, or take the scan off the fleet |
-| `c`                    | Open settings: channel pool, transmit power, Bluetooth                       |
+| `b`                    | Toggle Bluetooth scanning on the selected node                               |
+| `c`                    | Open config (settings)                                                       |
 | `r` / `R`              | Clear the selected node's dedup ring, or every assignable node's             |
 | `q` / `Esc` / `ctrl-c` | Stop, committing the last batch                                              |
 

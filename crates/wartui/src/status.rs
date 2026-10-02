@@ -35,7 +35,12 @@ pub struct Args {
 }
 
 pub async fn run(args: Args) -> Result<()> {
-    let mut link = super::open(args.bridge.as_deref(), args.sim, 0, super::Remember::Detected)?;
+    let mut link = super::open(
+        args.bridge.as_deref(),
+        args.sim,
+        0,
+        super::memory(args.bridge.as_deref(), super::Remember::Detected),
+    )?;
 
     // The bridge announces itself on connect, so waiting for that keeps a status
     // request from going into a port nobody is listening on. The timeout is itself an

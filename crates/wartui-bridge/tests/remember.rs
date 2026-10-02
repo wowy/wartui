@@ -77,3 +77,61 @@ fn bridge_memory_clears_persisted_mac_when_forget_is_called() {
     assert_eq!(memory.recall(), None);
     memory.forget(); // Idempotent: a missing file is the state being asked for.
 }
+
+#[test]
+fn bridge_memory_recalls_nothing_when_disabled() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("bridge");
+    let memory = BridgeMemory::at(&path);
+    memory.set_enabled(false);
+    // A file put back behind its back is still not read.
+    std::fs::write(&path, format!("{BRIDGE_MAC}\n")).expect("writing the file");
+    assert_eq!(memory.recall(), None);
+}
+
+#[test]
+fn bridge_memory_writes_nothing_when_disabled() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("bridge");
+    let memory = BridgeMemory::at(&path);
+    memory.set_enabled(false);
+    memory.remember(address());
+    assert!(!path.exists());
+}
+
+#[test]
+fn bridge_memory_deletes_file_when_disabled() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("bridge");
+    let memory = BridgeMemory::at(&path);
+    memory.remember(address());
+    assert!(path.exists());
+    memory.set_enabled(false);
+    assert!(!path.exists());
+    assert!(!memory.is_enabled());
+}
+
+#[test]
+fn bridge_memory_shares_switch_when_cloned() {
+    // The transport and the view hold clones of one handle; the view's switch has
+    // to reach the transport's next reconnect.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let memory = BridgeMemory::at(dir.path().join("bridge"));
+    let transport = memory.clone();
+    memory.set_enabled(false);
+    assert!(!transport.is_enabled());
+    transport.remember(address());
+    assert_eq!(BridgeMemory::at(dir.path().join("bridge")).recall(), None);
+    memory.set_enabled(true);
+    assert!(transport.is_enabled());
+}
+
+#[test]
+fn bridge_memory_recalls_again_when_reenabled_after_remember() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let memory = BridgeMemory::at(dir.path().join("bridge"));
+    memory.set_enabled(false);
+    memory.set_enabled(true);
+    memory.remember(address());
+    assert_eq!(memory.recall(), Some(address()));
+}

@@ -92,6 +92,9 @@ bridge = 15
 [bluetooth]
 remember = true
 node = "AA:BB:CC:DD:EE:FF"
+
+[bridge]
+remember = true
 ```
 
 | Key                    | Default | What it is                                                             |
@@ -101,6 +104,7 @@ node = "AA:BB:CC:DD:EE:FF"
 | `[tx-power] bridge`    | `2`     | Bridge transmit power (assignments), whole dBm 2–20                    |
 | `[bluetooth] remember` | on      | Whether `b` remembers the Bluetooth node; see "Bluetooth"              |
 | `[bluetooth] node`     | —       | The MAC `b` last gave the scan to, written as `wartui ports` prints it |
+| `[bridge] remember`    | on      | Whether `run` remembers the bridge; see "When nothing arrives"         |
 
 Each power defaults on its own; neither falls back to the other. The firmware accepts 21 dBm, but
 nothing above 20 is verified to work. wartui refuses to start on an unknown key or table, naming the
@@ -240,8 +244,8 @@ it first. `--dry-run` resets it once, for `board-info`, and remembers nothing.
 | Key                    | What it does                                                                 |
 |------------------------|------------------------------------------------------------------------------|
 | `↑` `↓` / `k` `j`      | Move the cursor through the fleet table                                      |
-| `b`                    | Make the selected node the Bluetooth scanner, or take the scan off the fleet |
-| `c`                    | Open settings: channel pool, transmit power, Bluetooth                       |
+| `b`                    | Toggle Bluetooth scanning on the selected node                               |
+| `c`                    | Open config (settings)                                                       |
 | `r` / `R`              | Clear the selected node's dedup ring, or every assignable node's             |
 | `q` / `Esc` / `ctrl-c` | Stop, committing the last batch                                              |
 
@@ -261,10 +265,11 @@ and `R` make a node forget every address it has reported, on its next heartbeat.
 | `ctrl-c`          | Quit                                               |
 
 The rows are the pool (`all → eu → us`), the nodes' transmit power and the bridge's (1 dBm steps),
-and `remember bt node` (`off`, `on`). `Enter` sends them all to the engine, or none, and writes
-every row shown to `pool`, `[tx-power]`, and `[bluetooth]`, whatever was there. The bridge takes its
-power on its next status poll, and settings closes. A moved pool re-cuts the fleet. Each node takes
-its new share and power on its next heartbeat, emptying its dedup ring when its share changes.
+`remember bt node` (`off`, `on`), and `remember bridge` (`off`, `on`). `Enter` sends them all to
+the engine, or none, and writes every row shown to `pool`, `[tx-power]`, `[bluetooth]`, and
+`[bridge]`, whatever was there. The bridge takes its power on its next status poll, and settings
+closes. A moved pool re-cuts the fleet. Each node takes its new share and power on its next
+heartbeat, emptying its dedup ring when its share changes.
 
 ## How channels are assigned
 
@@ -510,6 +515,8 @@ That file is state, not settings. Deleting it is always safe, costs one slower s
 wartui opening the wrong board. It also self-corrects: an answering board overwrites it, and the
 remembered board is dropped if, opened with no other to try, it stays silent, as a reflashed bridge
 does. A board merely passed over in a sweep is kept; being slower than its neighbor proves nothing.
+With `remember bridge` off (settings, or `[bridge] remember = false`), `run` deletes the file, saves
+nothing, and sweeps on every start.
 
 The header's `waiting for a bridge to announce itself` has three causes; the fault box names it:
 

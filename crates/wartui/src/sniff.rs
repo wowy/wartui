@@ -35,7 +35,12 @@ pub struct Args {
 }
 
 pub async fn run(args: Args) -> Result<()> {
-    let mut link = super::open(args.bridge.as_deref(), args.sim, 0, super::Remember::Detected)?;
+    let mut link = super::open(
+        args.bridge.as_deref(),
+        args.sim,
+        0,
+        super::memory(args.bridge.as_deref(), super::Remember::Detected),
+    )?;
     println!("# waiting for the bridge; ctrl-c to stop");
 
     let mut counts = Counts::default();

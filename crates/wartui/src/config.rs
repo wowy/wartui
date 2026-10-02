@@ -40,6 +40,8 @@ pub struct Config {
     pub tx_power: TxPower,
     #[serde(default, skip_serializing_if = "Bluetooth::is_empty")]
     pub bluetooth: Bluetooth,
+    #[serde(default, skip_serializing_if = "Bridge::is_empty")]
+    pub bridge: Bridge,
 }
 
 /// The `[tx-power]` table: `fleet` covers the nodes and `bridge` the bridge, each
@@ -81,6 +83,22 @@ impl Bluetooth {
     /// Whether neither key is set, so `save` writes no `[bluetooth]` table at all.
     fn is_empty(&self) -> bool {
         self.remember.is_none() && self.node.is_none()
+    }
+}
+
+/// The `[bridge]` table: whether `run` remembers the bridge it connected to, so the
+/// next start opens that board rather than sweeping. `remember` absent means on.
+#[derive(Debug, Default, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct Bridge {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remember: Option<bool>,
+}
+
+impl Bridge {
+    /// Whether no key is set, so `save` writes no `[bridge]` table at all.
+    fn is_empty(&self) -> bool {
+        self.remember.is_none()
     }
 }
 
@@ -268,7 +286,7 @@ fn resolve_symlink_target(path: &Path) -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Bluetooth, Config, TxPower, default_path_in, load, load_from, path, save};
+    use super::{Bluetooth, Bridge, Config, TxPower, default_path_in, load, load_from, path, save};
     use crate::run::PoolArg;
     use std::ffi::OsStr;
 
@@ -463,6 +481,7 @@ mod tests {
             pool: Some(pool),
             tx_power: TxPower { fleet: Some(fleet), bridge: Some(bridge) },
             bluetooth: Bluetooth { remember: Some(true), node: Some([0xAA, 0xBB, 0xCC, 1, 2, 3]) },
+            bridge: Bridge { remember: Some(true) },
         }
     }
 
@@ -472,6 +491,7 @@ mod tests {
             pool: None,
             tx_power: TxPower { fleet: Some(fleet), bridge: None },
             bluetooth: Bluetooth::default(),
+            bridge: Bridge::default(),
         }
     }
 
@@ -529,6 +549,38 @@ mod tests {
 
         let text = std::fs::read_to_string(&target).unwrap();
         assert!(!text.contains("tx-power"), "{text}");
+    }
+
+    #[test]
+    fn config_save_omits_bridge_table_when_remember_is_unset() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wartui.toml");
+
+        save(&target, &fleet_only(10)).unwrap();
+
+        let text = std::fs::read_to_string(&target).unwrap();
+        assert!(!text.contains("[bridge]"), "{text}");
+    }
+
+    #[test]
+    fn config_save_writes_bridge_table_that_reloads_when_remember_is_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wartui.toml");
+        let config = Config { bridge: Bridge { remember: Some(false) }, ..Config::default() };
+
+        save(&target, &config).unwrap();
+
+        let text = std::fs::read_to_string(&target).unwrap();
+        assert!(text.contains("[bridge]\nremember = false"), "{text}");
+        assert_eq!(load(Some(&target)).unwrap().bridge.remember, Some(false));
+    }
+
+    #[test]
+    fn config_loader_rejects_unknown_key_when_under_bridge_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wartui.toml");
+        std::fs::write(&path, "[bridge]\nremember = true\nmac = \"AA:BB:CC:01:02:03\"\n").unwrap();
+        assert!(load(Some(&path)).is_err());
     }
 
     #[test]

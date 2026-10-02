@@ -202,23 +202,33 @@ enum Remember {
     Named,
 }
 
+/// Where the transport writes down which board answered.
+///
+/// Detection always writes to the file, and a named board writes to it only from
+/// a capture. A capture against a named bridge *is* the decision to use that
+/// board, and the next unnamed run, `flash-fleet` and `flash-bridge` should act
+/// on it rather than on whichever board answered before. A one-off
+/// `wartui status --bridge X` is asked in order to find something out, and
+/// must not quietly decide what every later run opens.
+fn memory(bridge: Option<&str>, rule: Remember) -> BridgeMemory {
+    match (bridge, rule) {
+        (None, _) | (Some(_), Remember::Named) => BridgeMemory::discover(),
+        (Some(_), Remember::Detected) => BridgeMemory::none(),
+    }
+}
+
 /// Open whichever transport the arguments called for.
-fn open(bridge: Option<&str>, sim: Option<u8>, sim_c6: u8, rule: Remember) -> Result<LinkHandle> {
+fn open(
+    bridge: Option<&str>,
+    sim: Option<u8>,
+    sim_c6: u8,
+    memory: BridgeMemory,
+) -> Result<LinkHandle> {
     if let Some(node_count) = sim {
         let config =
             SimConfig { node_count, c6_nodes: sim_c6.min(node_count), ..SimConfig::default() };
         return SimTransport::new(config).start().context("starting the simulator");
     }
-    // Detection always writes to the file, and a named board writes to it only from
-    // a capture. A capture against a named bridge *is* the decision to use that
-    // board, and the next unnamed run, `flash-fleet` and `flash-bridge` should act
-    // on it rather than on whichever board answered before. A one-off
-    // `wartui status --bridge X` is asked in order to find something out, and
-    // must not quietly decide what every later run opens.
-    let memory = match (bridge, rule) {
-        (None, _) | (Some(_), Remember::Named) => BridgeMemory::discover(),
-        (Some(_), Remember::Detected) => BridgeMemory::none(),
-    };
     match bridge.map(spec) {
         Some(spec) => SerialTransport::with_spec(spec),
         None => SerialTransport::new(),
