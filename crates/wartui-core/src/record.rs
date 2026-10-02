@@ -78,6 +78,8 @@ pub struct Heartbeat {
     /// Advertisers the node's full pending buffer turned away since its boot,
     /// once per scan each, as the frame carried it.
     pub ble_dropped: u16,
+    /// Heartbeats the node has sent since its boot, this one included. Wraps.
+    pub beat: u16,
 }
 
 /// One status reply from the bridge, as it sent it.

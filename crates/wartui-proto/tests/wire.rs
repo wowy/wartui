@@ -22,6 +22,7 @@ const HEARTBEAT: &[u8] = &[
     0x01, 0x00, 0x01, // capabilities: major 1, minor 0, 5g
     0x2A, 0x00, // wifi_dropped 42, little-endian
     0x04, 0x03, // ble_dropped 0x0304, little-endian
+    0x02, 0x01, // beat 0x0102, little-endian
 ];
 
 /// A heartbeat from a node parked since boot: epoch 0, never sent by the host.
@@ -32,6 +33,7 @@ const HEARTBEAT_NO_EPOCH: &[u8] = &[
     0x01, 0x00, 0x01, // capabilities: major 1, minor 0, 5g
     0x00, 0x00, // wifi_dropped 0
     0x00, 0x00, // ble_dropped 0
+    0x01, 0x00, // beat 1: the first heartbeat since boot
 ];
 
 /// A Wi-Fi record: no header of its own, since [`SightingBatch`] carries one
@@ -217,6 +219,7 @@ fn heartbeat_msg_serializes_byte_for_byte_when_encoded_and_decoded() {
         capabilities: Capabilities { major: 1, minor: 0, five_ghz: true },
         wifi_dropped: 42,
         ble_dropped: 0x0304,
+        beat: 0x0102,
     };
     assert_eq!(msg.encode().as_slice(), HEARTBEAT);
     assert_eq!(HeartbeatMsg::decode(HEARTBEAT), Ok(msg));
@@ -230,6 +233,7 @@ fn heartbeat_msg_serializes_epoch_zero_when_node_holds_no_assignment() {
         capabilities: Capabilities { major: 1, minor: 0, five_ghz: true },
         wifi_dropped: 0,
         ble_dropped: 0,
+        beat: 1,
     };
     assert_eq!(msg.encode().as_slice(), HEARTBEAT_NO_EPOCH);
     assert_eq!(HeartbeatMsg::decode(HEARTBEAT_NO_EPOCH), Ok(msg));
@@ -254,16 +258,28 @@ fn heartbeat_msg_serializes_drop_counts_as_little_endian_when_encoded() {
 }
 
 #[test]
-fn heartbeat_msg_rejects_frame_when_node_sends_fourteen_byte_heartbeat() {
-    // A node flashed from a tree whose heartbeat carries no drop counts. The
+fn heartbeat_msg_round_trips_beat_when_encoded_at_its_offset() {
+    let decoded = HeartbeatMsg::decode(HEARTBEAT).expect("valid");
+    assert_eq!(decoded.beat, 0x0102);
+    assert_eq!(&HEARTBEAT[18..20], &[0x02, 0x01]);
+
+    let msg = HeartbeatMsg { beat: u16::MAX, ..decoded };
+    let frame = msg.encode();
+    assert_eq!(&frame[18..20], &[0xFF, 0xFF]);
+    assert_eq!(HeartbeatMsg::decode(&frame), Ok(msg));
+}
+
+#[test]
+fn heartbeat_msg_rejects_frame_when_node_sends_eighteen_byte_heartbeat() {
+    // A node flashed from a tree whose heartbeat carries no beat sequence. The
     // engine counts this as incompatible and asks for a reflash.
     assert_eq!(
-        HeartbeatMsg::decode(&HEARTBEAT[..14]),
-        Err(DecodeError::BadLength { need: HEARTBEAT_MSG_LEN, got: 14 })
+        HeartbeatMsg::decode(&HEARTBEAT[..18]),
+        Err(DecodeError::BadLength { need: HEARTBEAT_MSG_LEN, got: 18 })
     );
     assert_eq!(
-        Frame::decode(&HEARTBEAT[..14]),
-        Err(DecodeError::BadLength { need: HEARTBEAT_MSG_LEN, got: 14 })
+        Frame::decode(&HEARTBEAT[..18]),
+        Err(DecodeError::BadLength { need: HEARTBEAT_MSG_LEN, got: 18 })
     );
 }
 

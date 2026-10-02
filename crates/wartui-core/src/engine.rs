@@ -1124,6 +1124,7 @@ impl FleetEngine {
                     link_rssi: Some(rssi),
                     wifi_dropped: heartbeat.wifi_dropped,
                     ble_dropped: heartbeat.ble_dropped,
+                    beat: heartbeat.beat,
                 }));
 
                 if rebooted && node.desired.is_some() {

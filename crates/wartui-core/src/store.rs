@@ -107,7 +107,8 @@ CREATE TABLE IF NOT EXISTS node (
 );
 
 -- `wifi_dropped` and `ble_dropped` are the node's since-boot refusal counts as
--- the frame carried them: raw, so a reboot shows as the value falling.
+-- the frame carried them: raw, so a reboot shows as the value falling. `beat` is
+-- the node's since-boot heartbeat count, raw, and wraps at 2^16.
 CREATE TABLE IF NOT EXISTS heartbeat (
   id INTEGER PRIMARY KEY,
   session_id INTEGER NOT NULL REFERENCES session(id),
@@ -118,6 +119,7 @@ CREATE TABLE IF NOT EXISTS heartbeat (
   rssi INTEGER,
   wifi_dropped INTEGER NOT NULL,
   ble_dropped INTEGER NOT NULL,
+  beat INTEGER NOT NULL,
   admin_sent INTEGER NOT NULL DEFAULT 0,
   admin_acked INTEGER,
   admin_latency_us INTEGER
@@ -956,8 +958,8 @@ fn write_batch(
                 tx.prepare_cached(
                     "INSERT INTO heartbeat
                        (session_id, node_mac, rx_at, counter, epoch, rssi, wifi_dropped,
-                        ble_dropped)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                        ble_dropped, beat)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 )?
                 .execute(params![
                     session_id,
@@ -967,7 +969,8 @@ fn write_batch(
                     hb.epoch,
                     hb.link_rssi,
                     hb.wifi_dropped,
-                    hb.ble_dropped
+                    hb.ble_dropped,
+                    hb.beat
                 ])?;
             }
             Record::Observation(obs) => {

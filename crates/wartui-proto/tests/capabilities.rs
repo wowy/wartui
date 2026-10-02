@@ -9,9 +9,15 @@ use wartui_proto::air::{
 };
 
 fn round_trip(caps: Capabilities) -> Capabilities {
-    let frame =
-        HeartbeatMsg { counter: 0, epoch: 0, capabilities: caps, wifi_dropped: 0, ble_dropped: 0 }
-            .encode();
+    let frame = HeartbeatMsg {
+        counter: 0,
+        epoch: 0,
+        capabilities: caps,
+        wifi_dropped: 0,
+        ble_dropped: 0,
+        beat: 1,
+    }
+    .encode();
     HeartbeatMsg::decode(&frame).expect("we just encoded it").capabilities
 }
 

@@ -13,15 +13,16 @@ It shares no wire format with the vendor firmware either. A node sends and recei
 
 | Frame          | Direction           | Size                    |
 |----------------|---------------------|-------------------------|
-| Heartbeat      | Broadcast           | 18 bytes                |
+| Heartbeat      | Broadcast           | 20 bytes                |
 | Sighting batch | Unicast, to bridge  | Up to 250 bytes         |
 | Admin          | Unicast, to node    | 15 bytes                |
 | Clear          | Unicast, to node    | 6 bytes                 |
 
 - **Heartbeat**: every 5 s once assigned. It is broadcast because that is how a bridge discovers a
   node before either knows the other's address. It carries a counter of completed sweeps (scans,
-  on the Bluetooth node), the epoch of the assignment held or 0, the capability bytes below, and
-  running counts of Wi-Fi and BLE sightings turned away by a full buffer.
+  on the Bluetooth node), the epoch of the assignment held or 0, the capability bytes below,
+  running counts of Wi-Fi and BLE sightings turned away by a full buffer, and the count of
+  heartbeats attempted since boot, so the host can count the ones it missed.
 - **Sighting batch**: sent at the end of each dwell or scan, to the bridge that last sent an admin
   or clear frame. A 9-byte header, then one 12-plus-SSID record per newly seen BSSID or
   advertiser, packed to fill the 250-byte ESP-NOW payload. A record's trailer carries a Passpoint

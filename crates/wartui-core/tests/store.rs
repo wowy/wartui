@@ -166,6 +166,7 @@ fn store_persists_and_reads_all_record_types_when_round_tripped() {
                 link_rssi: Some(-41),
                 wifi_dropped: 12,
                 ble_dropped: 3,
+                beat: 61,
             }),
             observation(NODE, [0xAA; 6], -60, EPOCH_MS, fixed(37.7749, -122.4194)),
         ],
@@ -185,6 +186,9 @@ fn store_persists_and_reads_all_record_types_when_round_tripped() {
         })
         .unwrap();
     assert_eq!(dropped, (12, 3), "the since-boot counts as the frame carried them");
+
+    let beat: i64 = conn.query_row("SELECT beat FROM heartbeat", [], |r| r.get(0)).unwrap();
+    assert_eq!(beat, 61, "the since-boot heartbeat count as the frame carried it");
 
     let (mac, source): (Vec<u8>, String) = conn
         .query_row("SELECT node_mac, pos_source FROM observation", [], |r| {

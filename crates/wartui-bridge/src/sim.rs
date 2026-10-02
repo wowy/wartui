@@ -348,6 +348,9 @@ struct SimNode {
     /// same way the firmware's does: on the sweep or scan completing, whether or
     /// not a heartbeat goes out then.
     hb_counter: u32,
+    /// Heartbeats tried since boot, mirroring `Node::beats` on the firmware: every
+    /// attempt advances it.
+    beats: u16,
     /// When this node next sends a heartbeat and holds the admin window open.
     /// `None` while parked. Set fresh every time an assignment is adopted
     /// while parked, not only the first, so a stale deadline from before this
@@ -377,6 +380,7 @@ impl SimNode {
             // 1, not 0, matching the firmware's `Node::new`: the counter is never
             // zero, so a fresh node's first heartbeat already carries a value.
             hb_counter: 1,
+            beats: 0,
             next_beat: None,
             seq: 0,
             seen: Seen::new(five_ghz),
@@ -490,7 +494,7 @@ async fn run_node(
             // nothing. Heartbeat first and listen after, because the host only
             // transmits in answer to one — so this is how long joining takes. One
             // idle beat is this node's whole cycle, so the counter advances here too.
-            if beat(&events, &node, started).await.is_err() {
+            if beat(&events, &mut node, started).await.is_err() {
                 return;
             }
             node.hb_counter = node.hb_counter.wrapping_add(1);
@@ -544,7 +548,7 @@ async fn run_node(
             if let Some(deadline) = node.next_beat
                 && tokio::time::Instant::now() >= deadline
             {
-                if beat(&events, &node, started).await.is_err() {
+                if beat(&events, &mut node, started).await.is_err() {
                     return;
                 }
                 if nap(scaled(u64::from(ADMIN_WAIT_MS), speed), &mut admin_rx, &mut node)
@@ -589,7 +593,7 @@ async fn run_node(
             if let Some(deadline) = node.next_beat
                 && tokio::time::Instant::now() >= deadline
             {
-                if beat(&events, &node, started).await.is_err() {
+                if beat(&events, &mut node, started).await.is_err() {
                     return;
                 }
                 if nap(scaled(u64::from(ADMIN_WAIT_MS), speed), &mut admin_rx, &mut node)
@@ -618,10 +622,11 @@ fn next_beat_after(deadline: tokio::time::Instant, speed: f64) -> tokio::time::I
 /// Broadcast one heartbeat, carrying the node's current counter and held epoch.
 ///
 /// The counter tracks completed sweeps or scans on its own, so it advances
-/// whether or not this call goes out; this only ever reads it.
+/// whether or not this call goes out; this only ever reads it. The beat count
+/// advances on every attempt.
 async fn beat(
     events: &mpsc::Sender<LinkEvent>,
-    node: &SimNode,
+    node: &mut SimNode,
     started: tokio::time::Instant,
 ) -> Result<(), ()> {
     // Capabilities are what tell the host this is a node it can drive, so a fleet
@@ -635,7 +640,9 @@ async fn beat(
         // A simulated node's rings never fill.
         wifi_dropped: 0,
         ble_dropped: 0,
+        beat: node.beats.wrapping_add(1),
     };
+    node.beats = msg.beat;
     send_frame(events, node.mac, &msg.encode(), started).await
 }
 
