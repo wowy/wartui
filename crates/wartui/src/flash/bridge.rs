@@ -11,8 +11,10 @@
 //! cross-check (`super`) needs one; with a single target, a failed cross-check is an error rather
 //! than a skip.
 //!
-//! **A flashed board is remembered as the bridge.** It now runs bridge firmware, so `flash-fleet`
-//! spares it and `run` opens it first, without either being told.
+//! **A board found without `--bridge` is remembered as the bridge.** It now runs bridge firmware,
+//! so `flash-fleet` spares it and `run` opens it first, without either being told. A board named
+//! with `--bridge` is flashed and nothing is written: naming a board is a manual flash of some
+//! other device, and must not disturb which bridge the main fleet's `run` and `flash-fleet` use.
 //!
 //! There is no `--skip`, `--jobs` or `--no-bridge`: there is one target. There is no
 //! `--no-default-features` either, because the bridge firmware has no default features.
@@ -41,7 +43,8 @@ pub struct Args {
 
     /// Which board to flash, by path, by address or by the end of it (`00:08`), which must match
     /// one board. It must be attached. Without it, the bridge `run` last found, which must be
-    /// attached; else, with none remembered, the only Espressif board attached.
+    /// attached; else, with none remembered, the only Espressif board attached. Naming a board
+    /// remembers nothing.
     #[arg(long, value_name = "PATH|MAC")]
     pub bridge: Option<String>,
 
@@ -64,7 +67,7 @@ pub fn run(args: Args) -> Result<()> {
     let features = features(&args.features);
     let chip = chip_of(&BRIDGE, &features)?;
     espflash_present()?;
-    let memory = BridgeMemory::discover();
+    let memory = memory(args.bridge.as_deref());
     let named = args.bridge.as_deref().map(|given| (given, canonical(spec(given))));
     let found = discover_ports().context("listing serial ports")?;
     let board =
@@ -109,6 +112,11 @@ pub fn run(args: Args) -> Result<()> {
     memory.remember(expected);
     println!("{:<6} flashed", name(&board));
     Ok(())
+}
+
+/// Where a flash writes down the board it flashed: nowhere when `--bridge` named it.
+fn memory(bridge: Option<&str>) -> BridgeMemory {
+    crate::memory(bridge, crate::Remember::Detected)
 }
 
 /// The one board to flash. Reads nothing and opens nothing.
@@ -227,6 +235,13 @@ mod tests {
         let error = target(&found, Some((given, &spec)), Some(BRIDGE_MAC)).unwrap_err().to_string();
         assert!(error.contains("--bridge 44:C0 matches 2 attached boards"), "{error}");
         assert!(error.contains(&mac(&BRIDGE_MAC)) && error.contains(&mac(&twin)), "{error}");
+    }
+
+    #[test]
+    fn flash_bridge_remembers_nothing_when_bridge_is_named() {
+        let memory = memory(Some("00:08"));
+        memory.remember(BRIDGE_MAC);
+        assert_eq!(memory.recall(), None);
     }
 
     #[test]

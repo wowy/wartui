@@ -322,8 +322,9 @@ The image comes from the same three sources as `flash-fleet`'s, with `firmware/b
 `esp32c6,xiao-external-antenna`, under the same `images/<tag>/`.
 
 The board prints one line by its last two octets: would flash, flashed, or failed with espflash's
-full output. A flashed board is remembered as the bridge, so `flash-fleet` spares it and `run` opens
-it first. `--dry-run` resets it once, for `board-info`, and remembers nothing.
+full output. A board flashed without `--bridge` is remembered as the bridge, so `flash-fleet` spares
+it and `run` opens it first; one named with `--bridge` is not. `--dry-run` resets it once, for
+`board-info`, and remembers nothing.
 
 ## Keyboard commands
 
