@@ -11,6 +11,10 @@
 //! `wartui.toml` cannot stop `ports`, `status` or `reset` from working. Within `run`,
 //! the file beats the built-in default.
 //!
+//! `run` creates the file once when it is absent, holding only the empty API key, so a
+//! first-time operator has a place to paste one. It never rewrites an existing file at
+//! startup; only the settings modal does that.
+//!
 //! This lives in `crates/wartui` rather than `wartui-core`: the core crate parses no
 //! arguments, and a config file is operator input just like a flag is.
 
@@ -27,7 +31,8 @@ use crate::run::PoolArg;
 
 /// Everything `wartui.toml` can hold. Add a field and a table to grow it; every
 /// struct denies unknown fields, so a typo in the file is caught rather than
-/// silently ignored.
+/// silently ignored. `save` omits a table with nothing set, except `[api-keys]`,
+/// which is always written so a hand edit only has to fill in the quotes.
 #[derive(Debug, Default, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct Config {
@@ -42,6 +47,8 @@ pub struct Config {
     pub bluetooth: Bluetooth,
     #[serde(default, skip_serializing_if = "Bridge::is_empty")]
     pub bridge: Bridge,
+    #[serde(default)]
+    pub api_keys: ApiKeys,
 }
 
 /// The `[tx-power]` table: `fleet` covers the nodes and `bridge` the bridge, each
@@ -100,6 +107,14 @@ impl Bridge {
     fn is_empty(&self) -> bool {
         self.remember.is_none()
     }
+}
+
+/// The `[api-keys]` table. An empty string means not set, and is written anyway.
+#[derive(Debug, Default, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct ApiKeys {
+    #[serde(default)]
+    pub wdgwars: String,
 }
 
 fn write_mac<S: Serializer>(mac: &Option<Mac>, serializer: S) -> Result<S::Ok, S::Error> {
@@ -225,15 +240,29 @@ fn default_path_in(macos: bool, home: Option<&OsStr>, xdg: Option<&OsStr>) -> Op
 /// rather than `path` itself, so a `path` that is a symlink stays one: the rename
 /// replaces what it points at, not the link, even a dangling one. A file that
 /// existed keeps its permissions, copied onto the temp file before the rename; a
-/// new file gets whatever the process umask gives it.
+/// new file is readable only by its owner on unix, since it can hold an API key.
+/// Saving a key into an existing file also drops its group and other bits, so a
+/// file written world-readable before it held a key stops being so. The temp file is
+/// created fresh at `0600` on unix and loosened only after it is written, so the key is
+/// never readable by others in passing.
 ///
-/// Skipped entirely when the file already holds exactly this text: no temp file
-/// and no rename.
+/// Skipped when the file already holds exactly this text: no temp file and no
+/// rename, though a key still has its permissions tightened in place.
 pub fn save(path: &Path, config: &Config) -> Result<()> {
     config.validate().context("the settings to save are invalid")?;
     let written = toml::to_string(config).context("serialising the settings")?;
 
+    let secret = !config.api_keys.wdgwars.is_empty();
+
     if std::fs::read_to_string(path).is_ok_and(|text| text == written) {
+        // Same text, but a key in a file others can read still has to be shut away.
+        if secret
+            && let Ok(meta) = std::fs::metadata(path)
+            && let Some(tight) = owner_only_if(meta.permissions(), secret)
+        {
+            std::fs::set_permissions(path, tight)
+                .with_context(|| format!("setting permissions on {}", path.display()))?;
+        }
         return Ok(());
     }
 
@@ -249,14 +278,69 @@ pub fn save(path: &Path, config: &Config) -> Result<()> {
     let mut temp_name = target.as_os_str().to_owned();
     temp_name.push(".tmp");
     let temp_path = PathBuf::from(temp_name);
-    std::fs::write(&temp_path, &written)
+    match std::fs::remove_file(&temp_path) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            return Err(error).with_context(|| format!("removing {}", temp_path.display()));
+        }
+        _ => {}
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options
+        .open(&temp_path)
+        .and_then(|mut file| std::io::Write::write_all(&mut file, written.as_bytes()))
         .with_context(|| format!("writing {}", temp_path.display()))?;
+    let permissions = match permissions {
+        Some(existing) => Some(owner_only_if(existing.clone(), secret).unwrap_or(existing)),
+        None => owner_only(),
+    };
     if let Some(permissions) = permissions {
         std::fs::set_permissions(&temp_path, permissions)
             .with_context(|| format!("setting permissions on {}", temp_path.display()))?;
     }
     std::fs::rename(&temp_path, &target).with_context(|| format!("saving {}", target.display()))?;
     Ok(())
+}
+
+/// Write a default `wartui.toml` at `path` when nothing is there, and say whether it
+/// did. A dangling symlink counts as missing, and `save` creates its target.
+pub fn create_if_missing(path: &Path) -> Result<bool> {
+    if path.try_exists().with_context(|| format!("checking {}", path.display()))? {
+        return Ok(false);
+    }
+    save(path, &Config::default())?;
+    Ok(true)
+}
+
+/// Mode `0600` for a new file, on unix; elsewhere, whatever the platform gives it.
+fn owner_only() -> Option<std::fs::Permissions> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        Some(std::fs::Permissions::from_mode(0o600))
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
+/// `permissions` without group and other bits when `secret` and either is set, or
+/// `None` when nothing needs to change. Never anything on non-unix platforms.
+fn owner_only_if(permissions: std::fs::Permissions, secret: bool) -> Option<std::fs::Permissions> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = permissions.mode();
+        (secret && mode & 0o077 != 0).then(|| std::fs::Permissions::from_mode(mode & !0o077))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (permissions, secret);
+        None
+    }
 }
 
 /// Follow `path` through however many symlinks it is, to the file a write
@@ -286,7 +370,10 @@ fn resolve_symlink_target(path: &Path) -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Bluetooth, Bridge, Config, TxPower, default_path_in, load, load_from, path, save};
+    use super::{
+        ApiKeys, Bluetooth, Bridge, Config, TxPower, create_if_missing, default_path_in, load,
+        load_from, path, save,
+    };
     use crate::run::PoolArg;
     use std::ffi::OsStr;
 
@@ -482,6 +569,7 @@ mod tests {
             tx_power: TxPower { fleet: Some(fleet), bridge: Some(bridge) },
             bluetooth: Bluetooth { remember: Some(true), node: Some([0xAA, 0xBB, 0xCC, 1, 2, 3]) },
             bridge: Bridge { remember: Some(true) },
+            api_keys: ApiKeys { wdgwars: "abc123def456".to_owned() },
         }
     }
 
@@ -492,6 +580,7 @@ mod tests {
             tx_power: TxPower { fleet: Some(fleet), bridge: None },
             bluetooth: Bluetooth::default(),
             bridge: Bridge::default(),
+            api_keys: ApiKeys::default(),
         }
     }
 
@@ -703,5 +792,170 @@ mod tests {
 
         let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "the mode survives the rewrite");
+    }
+
+    #[test]
+    fn config_save_writes_empty_api_key_when_config_is_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wartui.toml");
+
+        save(&target, &Config::default()).unwrap();
+
+        let text = std::fs::read_to_string(&target).unwrap();
+        assert_eq!(text, "[api-keys]\nwdgwars = \"\"\n");
+    }
+
+    #[test]
+    fn config_loader_reads_api_keys_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wartui.toml");
+        std::fs::write(&path, "[api-keys]\nwdgwars = \"abc\"\n").unwrap();
+        assert_eq!(load(Some(&path)).unwrap().api_keys.wdgwars, "abc");
+    }
+
+    #[test]
+    fn config_loader_returns_empty_api_key_when_table_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wartui.toml");
+        std::fs::write(&path, "[tx-power]\nfleet = 10\n").unwrap();
+        assert_eq!(load(Some(&path)).unwrap().api_keys.wdgwars, "");
+    }
+
+    #[test]
+    fn config_loader_rejects_unknown_key_when_under_api_keys_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wartui.toml");
+        std::fs::write(&path, "[api-keys]\nwigle = \"abc\"\n").unwrap();
+        assert!(load(Some(&path)).is_err());
+    }
+
+    #[test]
+    fn config_save_writes_api_key_that_reloads_when_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wartui.toml");
+
+        save(&target, &full(PoolArg::Us, 8, 12)).unwrap();
+
+        assert_eq!(load(Some(&target)).unwrap().api_keys.wdgwars, "abc123def456");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn config_save_creates_owner_only_file_when_file_is_new() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wartui.toml");
+
+        save(&target, &Config::default()).unwrap();
+
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "the file can hold an API key");
+    }
+
+    #[test]
+    fn config_create_if_missing_writes_default_file_when_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("nested/wartui.toml");
+
+        assert!(create_if_missing(&target).unwrap());
+
+        let config = load(Some(&target)).unwrap();
+        assert_eq!(config.api_keys.wdgwars, "");
+        assert_eq!(config.pool, None);
+        assert!(config.tx_power.fleet.is_none());
+    }
+
+    #[test]
+    fn config_create_if_missing_leaves_file_untouched_when_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wartui.toml");
+        let original = "# mine\n[tx-power]\nfleet = 6\n";
+        std::fs::write(&target, original).unwrap();
+
+        assert!(!create_if_missing(&target).unwrap());
+
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), original);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn config_create_if_missing_creates_target_when_path_is_a_dangling_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("real.toml");
+        let link = dir.path().join("wartui.toml");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        assert!(create_if_missing(&link).unwrap());
+
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "still a link");
+        assert_eq!(load(Some(&target)).unwrap().api_keys.wdgwars, "");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn config_save_drops_group_and_other_bits_when_key_saved_into_open_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wartui.toml");
+        std::fs::write(&target, "[tx-power]\nfleet = 6\n").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        save(&target, &full(PoolArg::Us, 8, 12)).unwrap();
+
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "a key is readable only by its owner");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn config_save_drops_group_and_other_bits_when_text_unchanged_and_key_set() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wartui.toml");
+        save(&target, &full(PoolArg::Us, 8, 12)).unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        save(&target, &full(PoolArg::Us, 8, 12)).unwrap();
+
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "the skipped write still tightens the mode");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn config_save_keeps_open_mode_when_key_is_empty() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wartui.toml");
+        std::fs::write(&target, "[tx-power]\nfleet = 6\n").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        save(&target, &fleet_only(10)).unwrap();
+
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o644, "no key, nothing to hide");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn config_save_replaces_stale_temp_file_when_one_is_left_over() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wartui.toml");
+        let stale = dir.path().join("wartui.toml.tmp");
+        std::fs::write(&stale, "junk from an earlier save").unwrap();
+        std::fs::set_permissions(&stale, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        save(&target, &full(PoolArg::Us, 8, 12)).unwrap();
+
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "the stale file's mode is not inherited");
+        assert!(!stale.exists(), "no temp file is left behind");
+        assert_eq!(load(Some(&target)).unwrap().api_keys.wdgwars, "abc123def456");
     }
 }

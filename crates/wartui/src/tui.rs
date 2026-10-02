@@ -13,7 +13,11 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Local};
-use ratatui::crossterm::event::{self, Event as TermEvent, KeyCode, KeyEvent, KeyModifiers};
+use ratatui::crossterm::event::{
+    self, DisableBracketedPaste, EnableBracketedPaste, Event as TermEvent, KeyCode, KeyEvent,
+    KeyModifiers,
+};
+use ratatui::crossterm::execute;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
@@ -73,7 +77,18 @@ pub async fn run(
     settings: Settings,
 ) -> Result<()> {
     let mut terminal = ratatui::try_init().context("preparing the terminal")?;
+    // A paste arrives as one event rather than as keystrokes, so a pasted newline
+    // cannot press `Enter`. A terminal that refuses it still types the paste in.
+    let _ = execute!(std::io::stdout(), EnableBracketedPaste);
+    // ratatui's panic hook restores raw mode and the alternate screen but not this,
+    // which would leave the operator's shell wrapping every paste in escape codes.
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = execute!(std::io::stdout(), DisableBracketedPaste);
+        previous(info);
+    }));
     let result = view(&mut terminal, &mut snapshot, &commands, settings).await;
+    let _ = execute!(std::io::stdout(), DisableBracketedPaste);
     ratatui::restore();
     // The engine is told to stop only once the terminal is back to normal, so
     // anything it logs on the way out lands on a screen the user can read.
@@ -87,8 +102,8 @@ async fn view(
     commands: &mpsc::Sender<Command>,
     settings: Settings,
 ) -> Result<()> {
-    let (keys, running) = spawn_input();
-    let mut keys = keys;
+    let (inputs, running) = spawn_input();
+    let mut inputs = inputs;
     let mut ui = Ui { settings, ..Ui::default() };
     // Built before the loop, not inside the arm below: see `crate::Terminate`.
     let mut terminate = crate::Terminate::new();
@@ -100,14 +115,17 @@ async fn view(
         }
 
         tokio::select! {
-            key = keys.recv() => match key {
+            input = inputs.recv() => match input {
                 // ctrl-c always quits, modal or not.
-                Some(key) if is_ctrl_c(key) => break Ok(()),
+                Some(Input::Key(key)) if is_ctrl_c(key) => break Ok(()),
                 // An open modal gets the key ahead of `quits()`: `esc`/`q` close
                 // it rather than the view while it is open.
-                Some(key) if ui.modal.is_some() => ui.on_modal_key(key, &current, commands),
-                Some(key) if quits(key) => break Ok(()),
-                Some(key) => ui.on_key(key, &current, commands),
+                Some(Input::Key(key)) if ui.modal.is_some() => {
+                    ui.on_modal_key(key, &current, commands);
+                }
+                Some(Input::Key(key)) if quits(key) => break Ok(()),
+                Some(Input::Key(key)) => ui.on_key(key, &current, commands),
+                Some(Input::Paste(text)) => ui.on_modal_paste(&text),
                 // The input thread died; carrying on would leave a view nobody
                 // can quit.
                 None => break Ok(()),
@@ -154,11 +172,18 @@ enum Field {
     Bridge,
     RememberBle,
     RememberBridge,
+    WdgwarsKey,
 }
 
 /// Every row of the settings modal, top to bottom, as `next`/`prev` walk them.
-const FIELDS: [Field; 5] =
-    [Field::Pool, Field::Fleet, Field::Bridge, Field::RememberBle, Field::RememberBridge];
+const FIELDS: [Field; 6] = [
+    Field::Pool,
+    Field::Fleet,
+    Field::Bridge,
+    Field::RememberBle,
+    Field::RememberBridge,
+    Field::WdgwarsKey,
+];
 
 impl Field {
     /// The row below this one, clamped: the last row stays put rather than
@@ -178,7 +203,7 @@ impl Field {
 
 /// The settings modal's own state while it is open, seeded from the snapshot
 /// that was current when it opened and edited independently of it from then on.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct ConfigModal {
     selected: Field,
     /// Whole dBm, the units the operator sees and `config::TX_POWER_DBM` bounds.
@@ -192,6 +217,8 @@ struct ConfigModal {
     remember_ble: bool,
     /// Whether `run` remembers the bridge it connected to.
     remember_bridge: bool,
+    /// The WDGWars API key, typed or pasted; empty means not set.
+    wdgwars_key: String,
 }
 
 /// `All → Eu → Us`, the order the pool row steps through.
@@ -236,6 +263,8 @@ impl ConfigModal {
                 }
                 return;
             }
+            // A text row: `on_modal_key` types into it rather than stepping.
+            Field::WdgwarsKey => return,
         };
         *value = (*value + delta).clamp(*config::TX_POWER_DBM.start(), *config::TX_POWER_DBM.end());
     }
@@ -289,6 +318,8 @@ impl Ui {
             remember_ble: snapshot.remember_ble,
             // The engine knows nothing of this one, so it comes from the handle.
             remember_bridge: self.settings.bridge_memory.is_enabled(),
+            // Nor this one: it is whatever the file holds, hand edits included.
+            wdgwars_key: self.settings.saved.api_keys.wdgwars.clone(),
         });
     }
 
@@ -301,6 +332,26 @@ impl Ui {
         commands: &mpsc::Sender<Command>,
     ) {
         let Some(modal) = self.modal.as_mut() else { return };
+        // The key row is a text field: letters type rather than move or close.
+        if modal.selected == Field::WdgwarsKey {
+            let control = key.modifiers.contains(KeyModifiers::CONTROL);
+            match key.code {
+                KeyCode::Char('u') if control => {
+                    modal.wdgwars_key.clear();
+                    return;
+                }
+                KeyCode::Char(c) if !control => {
+                    modal.wdgwars_key.push(c);
+                    return;
+                }
+                KeyCode::Backspace => {
+                    modal.wdgwars_key.pop();
+                    return;
+                }
+                KeyCode::Char(_) => return,
+                _ => {}
+            }
+        }
         match key.code {
             KeyCode::Down | KeyCode::Char('j') => modal.selected = modal.selected.next(),
             KeyCode::Up | KeyCode::Char('k') => modal.selected = modal.selected.prev(),
@@ -312,6 +363,17 @@ impl Ui {
             // alone.
             _ => {}
         }
+    }
+
+    /// A bracketed paste: appended to the key when the modal is open on its row, and
+    /// ignored anywhere else. Whitespace and control characters are dropped, so a
+    /// copied line's trailing newline or a wrapped key's breaks never reach the file.
+    fn on_modal_paste(&mut self, text: &str) {
+        let Some(modal) = self.modal.as_mut() else { return };
+        if modal.selected != Field::WdgwarsKey {
+            return;
+        }
+        modal.wdgwars_key.extend(text.chars().filter(|c| !c.is_whitespace() && !c.is_control()));
     }
 
     /// Send the modal's values to the engine, write them to `wartui.toml`,
@@ -402,6 +464,7 @@ impl Ui {
                 },
             },
             bridge: config::Bridge { remember: Some(modal.remember_bridge) },
+            api_keys: config::ApiKeys { wdgwars: modal.wdgwars_key.trim().to_owned() },
         };
         match config::save(&path, &written) {
             Err(error) => format!("; could not save: {error}"),
@@ -576,10 +639,16 @@ fn channel_cell(set: ChannelSet, width: usize) -> String {
     format!("{head}{kept}…")
 }
 
+/// What the input thread forwards: a keypress, or a bracketed paste whole.
+enum Input {
+    Key(KeyEvent),
+    Paste(String),
+}
+
 /// Keys are read on their own thread rather than through an async stream: a
 /// blocking `poll` on stdin is exactly what the crossterm API is built for, and
 /// it keeps the terminal off the tokio runtime entirely.
-fn spawn_input() -> (mpsc::Receiver<KeyEvent>, Arc<AtomicBool>) {
+fn spawn_input() -> (mpsc::Receiver<Input>, Arc<AtomicBool>) {
     let (tx, rx) = mpsc::channel(16);
     let running = Arc::new(AtomicBool::new(true));
     std::thread::Builder::new()
@@ -593,9 +662,12 @@ fn spawn_input() -> (mpsc::Receiver<KeyEvent>, Arc<AtomicBool>) {
                         Ok(false) => continue,
                         Err(_) => return,
                     }
-                    if let Ok(TermEvent::Key(key)) = event::read()
-                        && tx.blocking_send(key).is_err()
-                    {
+                    let input = match event::read() {
+                        Ok(TermEvent::Key(key)) => Input::Key(key),
+                        Ok(TermEvent::Paste(text)) => Input::Paste(text),
+                        _ => continue,
+                    };
+                    if tx.blocking_send(input).is_err() {
                         return;
                     }
                 }
@@ -654,7 +726,7 @@ fn draw(frame: &mut Frame<'_>, snapshot: &Snapshot, ui: &mut Ui) {
 
 /// The settings modal, centred over the live view behind it.
 fn draw_settings_modal(frame: &mut Frame<'_>, modal: &ConfigModal) {
-    let area = centered_rect(44, 10, frame.area());
+    let area = centered_rect(48, 13, frame.area());
     frame.render_widget(Clear, area);
 
     let block = Block::bordered().title(" settings ");
@@ -690,9 +762,40 @@ fn draw_settings_modal(frame: &mut Frame<'_>, modal: &ConfigModal) {
         remember_row,
         remember_bridge_row,
         Line::default(),
-        Line::from("enter save · esc cancel"),
+        Line::from("api keys"),
+        Line::from(Span::styled(
+            format!("{:<18}  {}", "wdgwars", mask_key(&modal.wdgwars_key)),
+            styled(modal.selected == Field::WdgwarsKey),
+        )),
+        Line::default(),
+        // The one key the row needs that nothing else on screen says.
+        Line::from(if modal.selected == Field::WdgwarsKey && !modal.wdgwars_key.is_empty() {
+            "ctrl-u clear · enter save · esc cancel"
+        } else {
+            "enter save · esc cancel"
+        }),
     ];
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// A key as the modal shows it, so a screen share or a photo of the laptop does not
+/// leak it. The last three characters always show, so the operator sees what they just
+/// typed. Up to six bullets cover the rest, and from ten characters the first one to
+/// three show too, so a long key reads as which key it is while its middle and its
+/// length stay hidden. A key of three characters or fewer shows whole.
+fn mask_key(key: &str) -> String {
+    let chars: Vec<char> = key.chars().collect();
+    let n = chars.len();
+    if n == 0 {
+        return "(not set, type or paste)".to_owned();
+    }
+    let tail = n.min(3);
+    let head = n.saturating_sub(9).min(3);
+    let dots = (n - head - tail).min(6);
+    let mut shown: String = chars[..head].iter().collect();
+    shown.push_str(&"•".repeat(dots));
+    shown.extend(&chars[n - tail..]);
+    shown
 }
 
 /// A box `width` by `height`, centred in `area` and clipped to it when it does
@@ -2519,7 +2622,7 @@ mod tests {
 
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
 
-        let modal = ui.modal.expect("the modal opened");
+        let modal = ui.modal.as_ref().expect("the modal opened");
         assert_eq!(modal.selected, Field::Pool);
         assert_eq!(modal.fleet_dbm, 10);
         assert_eq!(modal.bridge_dbm, 15);
@@ -2535,7 +2638,7 @@ mod tests {
 
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
 
-        let modal = ui.modal.expect("the modal opened");
+        let modal = ui.modal.as_ref().expect("the modal opened");
         assert_eq!(modal.pool, PoolArg::Eu);
     }
 
@@ -2546,11 +2649,11 @@ mod tests {
         let mut ui = Ui::default();
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
         ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &snapshot, &tx);
-        assert_eq!(ui.modal.expect("still open").selected, Field::Fleet);
+        assert_eq!(ui.modal.as_ref().expect("still open").selected, Field::Fleet);
 
         ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &snapshot, &tx);
 
-        assert_eq!(ui.modal.expect("still open").selected, Field::Bridge);
+        assert_eq!(ui.modal.as_ref().expect("still open").selected, Field::Bridge);
     }
 
     #[test]
@@ -2560,20 +2663,28 @@ mod tests {
         let (tx, _rx) = mpsc::channel(4);
         let mut ui = Ui::default();
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
-        assert_eq!(ui.modal.expect("still open").selected, Field::Pool, "opens on the pool row");
+        assert_eq!(
+            ui.modal.as_ref().expect("still open").selected,
+            Field::Pool,
+            "opens on the pool row"
+        );
 
         for _ in 0..3 {
             ui.on_modal_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE), &snapshot, &tx);
         }
-        assert_eq!(ui.modal.expect("still open").pool, PoolArg::All, "stops at the start");
+        assert_eq!(ui.modal.as_ref().expect("still open").pool, PoolArg::All, "stops at the start");
 
         ui.on_modal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &snapshot, &tx);
-        assert_eq!(ui.modal.expect("still open").pool, PoolArg::Eu, "steps forward one at a time");
+        assert_eq!(
+            ui.modal.as_ref().expect("still open").pool,
+            PoolArg::Eu,
+            "steps forward one at a time"
+        );
 
         for _ in 0..5 {
             ui.on_modal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &snapshot, &tx);
         }
-        assert_eq!(ui.modal.expect("still open").pool, PoolArg::Us, "stops at the end");
+        assert_eq!(ui.modal.as_ref().expect("still open").pool, PoolArg::Us, "stops at the end");
     }
 
     #[test]
@@ -2603,12 +2714,12 @@ mod tests {
         for _ in 0..30 {
             ui.on_modal_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE), &snapshot, &tx);
         }
-        assert_eq!(ui.modal.expect("still open").fleet_dbm, 2, "stops at the floor");
+        assert_eq!(ui.modal.as_ref().expect("still open").fleet_dbm, 2, "stops at the floor");
 
         for _ in 0..40 {
             ui.on_modal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &snapshot, &tx);
         }
-        assert_eq!(ui.modal.expect("still open").fleet_dbm, 20, "stops at the ceiling");
+        assert_eq!(ui.modal.as_ref().expect("still open").fleet_dbm, 20, "stops at the ceiling");
     }
 
     #[test]
@@ -2852,17 +2963,17 @@ mod tests {
         for _ in 0..3 {
             ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &snapshot, &tx);
         }
-        let modal = ui.modal.expect("still open");
+        let modal = ui.modal.as_ref().expect("still open");
         assert_eq!(modal.selected, Field::RememberBle, "the row under the powers");
         assert!(modal.remember_ble, "seeded from the snapshot");
 
         for _ in 0..2 {
             ui.on_modal_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE), &snapshot, &tx);
-            assert!(!ui.modal.expect("still open").remember_ble, "off, and stays off");
+            assert!(!ui.modal.as_ref().expect("still open").remember_ble, "off, and stays off");
         }
         for _ in 0..2 {
             ui.on_modal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &snapshot, &tx);
-            assert!(ui.modal.expect("still open").remember_ble, "on, and stays on");
+            assert!(ui.modal.as_ref().expect("still open").remember_ble, "on, and stays on");
         }
     }
 
@@ -3010,12 +3121,18 @@ mod tests {
         }
     }
 
+    /// Open the modal and walk down to `field`. `↓` rather than `j`, which the key row
+    /// would type.
+    fn select(field: Field, ui: &mut Ui, snapshot: &Snapshot, tx: &mpsc::Sender<Command>) {
+        ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), snapshot, tx);
+        while ui.modal.as_ref().expect("open").selected != field {
+            ui.on_modal_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), snapshot, tx);
+        }
+    }
+
     /// Open the modal and walk down to the `remember bridge` row.
     fn select_remember_bridge(ui: &mut Ui, snapshot: &Snapshot, tx: &mpsc::Sender<Command>) {
-        ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), snapshot, tx);
-        for _ in 0..FIELDS.len() {
-            ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), snapshot, tx);
-        }
+        select(Field::RememberBridge, ui, snapshot, tx);
     }
 
     #[test]
@@ -3024,17 +3141,17 @@ mod tests {
         let (tx, _rx) = mpsc::channel(4);
         let mut ui = Ui::default();
         select_remember_bridge(&mut ui, &snapshot, &tx);
-        let modal = ui.modal.expect("still open");
-        assert_eq!(modal.selected, Field::RememberBridge, "the last row");
+        let modal = ui.modal.as_ref().expect("still open");
+        assert_eq!(modal.selected, Field::RememberBridge, "the row under remember bt node");
         assert!(modal.remember_bridge, "seeded from the handle, on by default");
 
         for _ in 0..2 {
             ui.on_modal_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE), &snapshot, &tx);
-            assert!(!ui.modal.expect("still open").remember_bridge, "off, and stays off");
+            assert!(!ui.modal.as_ref().expect("still open").remember_bridge, "off, and stays off");
         }
         for _ in 0..2 {
             ui.on_modal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &snapshot, &tx);
-            assert!(ui.modal.expect("still open").remember_bridge, "on, and stays on");
+            assert!(ui.modal.as_ref().expect("still open").remember_bridge, "on, and stays on");
         }
     }
 
@@ -3072,7 +3189,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel(4);
         let mut ui = ui_with_bridge_memory(dir.path(), &memory);
         select_remember_bridge(&mut ui, &snapshot, &tx);
-        assert!(!ui.modal.expect("still open").remember_bridge, "seeded off");
+        assert!(!ui.modal.as_ref().expect("still open").remember_bridge, "seeded off");
         ui.on_modal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &snapshot, &tx);
 
         ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
@@ -3125,5 +3242,237 @@ mod tests {
         assert!(rendered.contains("remember bridge"), "{rendered}");
         // The view behind it is still live, not blanked out.
         assert!(rendered.contains("C5 57:84"), "{rendered}");
+    }
+
+    /// Open the modal and walk down to the `wdgwars` row.
+    fn select_wdgwars(ui: &mut Ui, snapshot: &Snapshot, tx: &mpsc::Sender<Command>) {
+        select(Field::WdgwarsKey, ui, snapshot, tx);
+    }
+
+    fn press(ui: &mut Ui, code: KeyCode, modifiers: KeyModifiers, snapshot: &Snapshot) {
+        let (tx, _rx) = mpsc::channel(4);
+        ui.on_modal_key(KeyEvent::new(code, modifiers), snapshot, &tx);
+    }
+
+    #[test]
+    fn ui_types_letters_into_key_when_wdgwars_row_selected() {
+        let snapshot = busy();
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+        select_wdgwars(&mut ui, &snapshot, &tx);
+        assert_eq!(FIELDS.last(), Some(&Field::WdgwarsKey), "the last row");
+
+        for c in "hjkq".chars() {
+            press(&mut ui, KeyCode::Char(c), KeyModifiers::NONE, &snapshot);
+        }
+
+        let modal = ui.modal.as_ref().expect("q types rather than closes");
+        assert_eq!(modal.selected, Field::WdgwarsKey, "j and k type rather than move");
+        assert_eq!(modal.wdgwars_key, "hjkq");
+        assert!(rx.try_recv().is_err(), "nothing was sent");
+    }
+
+    #[test]
+    fn ui_edits_key_when_backspace_or_ctrl_u_pressed() {
+        let snapshot = busy();
+        let (tx, _rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+        select_wdgwars(&mut ui, &snapshot, &tx);
+        for c in "abc".chars() {
+            press(&mut ui, KeyCode::Char(c), KeyModifiers::NONE, &snapshot);
+        }
+
+        press(&mut ui, KeyCode::Backspace, KeyModifiers::NONE, &snapshot);
+        assert_eq!(ui.modal.as_ref().expect("open").wdgwars_key, "ab");
+
+        press(&mut ui, KeyCode::Char('u'), KeyModifiers::CONTROL, &snapshot);
+        assert_eq!(ui.modal.as_ref().expect("open").wdgwars_key, "");
+    }
+
+    #[test]
+    fn ui_leaves_key_row_when_up_pressed() {
+        let snapshot = busy();
+        let (tx, _rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+        select_wdgwars(&mut ui, &snapshot, &tx);
+
+        press(&mut ui, KeyCode::Up, KeyModifiers::NONE, &snapshot);
+
+        assert_eq!(ui.modal.as_ref().expect("open").selected, Field::RememberBridge);
+    }
+
+    #[test]
+    fn ui_appends_paste_without_whitespace_when_wdgwars_row_selected() {
+        let snapshot = busy();
+        let (tx, _rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+        select_wdgwars(&mut ui, &snapshot, &tx);
+        press(&mut ui, KeyCode::Char('x'), KeyModifiers::NONE, &snapshot);
+
+        ui.on_modal_paste(" abc\tdef\r\n");
+
+        let modal = ui.modal.as_ref().expect("a pasted newline does not save");
+        assert_eq!(modal.wdgwars_key, "xabcdef");
+    }
+
+    #[test]
+    fn ui_ignores_paste_when_another_row_is_selected_or_modal_closed() {
+        let snapshot = busy();
+        let (tx, _rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+
+        ui.on_modal_paste("abc");
+        assert!(ui.modal.is_none(), "a paste opens nothing");
+
+        ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
+        ui.on_modal_paste("abc");
+
+        let modal = ui.modal.as_ref().expect("open");
+        assert_eq!(modal.selected, Field::Pool);
+        assert_eq!(modal.wdgwars_key, "");
+    }
+
+    #[test]
+    fn ui_saves_key_that_reloads_when_enter_pressed() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wartui.toml");
+        let snapshot = busy();
+        let (tx, _rx) = mpsc::channel(4);
+        let mut ui = Ui {
+            settings: Settings { config_path: Some(target.clone()), ..Settings::default() },
+            ..Ui::default()
+        };
+        select_wdgwars(&mut ui, &snapshot, &tx);
+        ui.on_modal_paste("abc123def456");
+
+        press(&mut ui, KeyCode::Enter, KeyModifiers::NONE, &snapshot);
+
+        assert!(ui.modal.is_none(), "Enter saves and closes on the key row too");
+        let saved = config::load(Some(&target)).expect("a valid file");
+        assert_eq!(saved.api_keys.wdgwars, "abc123def456");
+        assert_eq!(ui.settings.saved.api_keys.wdgwars, "abc123def456", "the view knows it too");
+    }
+
+    #[test]
+    fn ui_keeps_hand_written_key_when_enter_pressed_without_touching_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wartui.toml");
+        std::fs::write(&target, "[api-keys]\nwdgwars = \"by-hand-key\"\n").unwrap();
+        let saved = config::load(Some(&target)).unwrap();
+        let snapshot = busy();
+        let (tx, _rx) = mpsc::channel(4);
+        let mut ui = Ui {
+            settings: Settings { config_path: Some(target.clone()), saved, ..Settings::default() },
+            ..Ui::default()
+        };
+        ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
+        assert_eq!(ui.modal.as_ref().expect("open").wdgwars_key, "by-hand-key", "seeded");
+
+        press(&mut ui, KeyCode::Enter, KeyModifiers::NONE, &snapshot);
+
+        let file = config::load(Some(&target)).expect("a valid file");
+        assert_eq!(file.api_keys.wdgwars, "by-hand-key");
+    }
+
+    #[test]
+    fn ui_keeps_key_in_file_when_b_pressed() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wartui.toml");
+        let saved = config::Config {
+            api_keys: config::ApiKeys { wdgwars: "kept-key".to_owned() },
+            ..config::Config::default()
+        };
+        config::save(&target, &saved).unwrap();
+        let snapshot = busy();
+        let (tx, _rx) = mpsc::channel(4);
+        let mut ui = Ui {
+            settings: Settings { config_path: Some(target.clone()), saved, ..Settings::default() },
+            ..Ui::default()
+        };
+
+        ui.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE), &snapshot, &tx);
+
+        let file = config::load(Some(&target)).expect("a valid file");
+        assert_eq!(file.bluetooth.node, Some(snapshot.nodes[0].state.mac), "b saved");
+        assert_eq!(file.api_keys.wdgwars, "kept-key");
+    }
+
+    #[test]
+    fn mask_key_says_not_set_when_key_is_empty() {
+        assert_eq!(mask_key(""), "(not set, type or paste)");
+    }
+
+    #[test]
+    fn mask_key_shows_tail_and_grows_head_when_key_lengthens() {
+        for (key, shown) in [
+            ("a", "a"),
+            ("abc", "abc"),
+            ("abcde", "••cde"),
+            ("abcdefghi", "••••••ghi"),
+            ("abcdefghij", "a••••••hij"),
+            ("abcdefghijk", "ab••••••ijk"),
+            ("abcdefghijkl", "abc••••••jkl"),
+            ("abcdefghijklmnopqrst", "abc••••••rst"),
+        ] {
+            assert_eq!(mask_key(key), shown, "{} characters", key.len());
+        }
+    }
+
+    #[test]
+    fn draw_shows_masked_key_and_never_the_whole_key_when_modal_open() {
+        let snapshot = busy();
+        let saved = config::Config {
+            api_keys: config::ApiKeys { wdgwars: "abcSECRETxyz".to_owned() },
+            ..config::Config::default()
+        };
+        let mut ui = Ui { settings: Settings { saved, ..Settings::default() }, ..Ui::default() };
+        let (tx, _rx) = mpsc::channel(4);
+        ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("test backend");
+        terminal.draw(|frame| draw(frame, &snapshot, &mut ui)).expect("drawing");
+        let rendered = terminal.backend().to_string();
+
+        assert!(rendered.contains("api keys"), "{rendered}");
+        assert!(rendered.contains("wdgwars"), "{rendered}");
+        assert!(rendered.contains("abc••••••xyz"), "{rendered}");
+        assert!(!rendered.contains("SECRET"), "{rendered}");
+        assert!(rendered.contains("enter save"), "the modal is tall enough: {rendered}");
+    }
+
+    /// The modal drawn at 120×30, opened with `key` saved and the cursor on `field`.
+    fn modal_rendered(key: &str, field: Field) -> String {
+        let snapshot = busy();
+        let saved = config::Config {
+            api_keys: config::ApiKeys { wdgwars: key.to_owned() },
+            ..config::Config::default()
+        };
+        let mut ui = Ui { settings: Settings { saved, ..Settings::default() }, ..Ui::default() };
+        let (tx, _rx) = mpsc::channel(4);
+        select(field, &mut ui, &snapshot, &tx);
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("test backend");
+        terminal.draw(|frame| draw(frame, &snapshot, &mut ui)).expect("drawing");
+        terminal.backend().to_string()
+    }
+
+    #[test]
+    fn draw_shows_ctrl_u_tip_when_key_row_selected_with_key_entered() {
+        let rendered = modal_rendered("abc123def456", Field::WdgwarsKey);
+        assert!(rendered.contains("ctrl-u clear · enter save · esc cancel"), "{rendered}");
+    }
+
+    #[test]
+    fn draw_omits_ctrl_u_tip_when_key_row_selected_with_key_empty() {
+        let rendered = modal_rendered("", Field::WdgwarsKey);
+        assert!(rendered.contains("(not set, type or paste)"), "fits unclipped: {rendered}");
+        assert!(!rendered.contains("ctrl-u"), "{rendered}");
+        assert!(rendered.contains("enter save · esc cancel"), "{rendered}");
+    }
+
+    #[test]
+    fn draw_omits_ctrl_u_tip_when_another_row_selected_with_key_entered() {
+        let rendered = modal_rendered("abc123def456", Field::RememberBridge);
+        assert!(!rendered.contains("ctrl-u"), "{rendered}");
+        assert!(rendered.contains("enter save · esc cancel"), "{rendered}");
     }
 }

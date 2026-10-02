@@ -158,6 +158,15 @@ pub async fn run(args: Args) -> Result<()> {
     let config = config::load(args.config.as_deref())?;
     // Where the settings modal saves to: the same file `load` just read.
     let config_path = config::path(args.config.as_deref());
+    // A first run gets a file holding the empty API key, so there is a place to paste
+    // one. Not under `--sim`, which leaves no files behind, and a directory that cannot
+    // be written is no reason to stop a capture.
+    if let Some(path) = &config_path
+        && args.sim.is_none()
+        && let Err(error) = config::create_if_missing(path)
+    {
+        eprintln!("warning: could not create {}: {error:#}", path.display());
+    }
 
     let position = match (args.lat, args.lon) {
         (Some(lat), Some(lon)) => PositionChain::fixed(lat, lon, args.alt),

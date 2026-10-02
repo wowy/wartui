@@ -95,23 +95,28 @@ node = "AA:BB:CC:DD:EE:FF"
 
 [bridge]
 remember = true
+
+[api-keys]
+wdgwars = ""
 ```
 
-| Key                    | Default | What it is                                                             |
-|------------------------|---------|------------------------------------------------------------------------|
-| `pool`                 | `all`   | The channel pool: `us`, `eu`, or `all`; see "Channel pools"            |
-| `[tx-power] fleet`     | `2`     | Node transmit power (heartbeats, sightings), whole dBm 2–20            |
-| `[tx-power] bridge`    | `2`     | Bridge transmit power (assignments), whole dBm 2–20                    |
-| `[bluetooth] remember` | on      | Whether `b` remembers the Bluetooth node; see "Bluetooth"              |
-| `[bluetooth] node`     | —       | The MAC `b` last gave the scan to, written as `wartui ports` prints it |
-| `[bridge] remember`    | on      | Whether `run` remembers the bridge; see "When nothing arrives"         |
+| Key                    | Default | What it is                                                                     |
+|------------------------|---------|--------------------------------------------------------------------------------|
+| `pool`                 | `all`   | The channel pool: `us`, `eu`, or `all`; see "Channel pools"                    |
+| `[tx-power] fleet`     | `2`     | Node transmit power (heartbeats, sightings), whole dBm 2–20                    |
+| `[tx-power] bridge`    | `2`     | Bridge transmit power (assignments), whole dBm 2–20                            |
+| `[bluetooth] remember` | on      | Whether `b` remembers the Bluetooth node; see "Bluetooth"                      |
+| `[bluetooth] node`     | —       | The MAC `b` last gave the scan to, written as `wartui ports` prints it         |
+| `[bridge] remember`    | on      | Whether `run` remembers the bridge; see "When nothing arrives"                 |
+| `[api-keys] wdgwars`   | `""`    | WDGWars API key; settings writes the empty key so there is a place to paste it |
 
 Each power defaults on its own; neither falls back to the other. The firmware accepts 21 dBm, but
 nothing above 20 is verified to work. wartui refuses to start on an unknown key or table, naming the
 file and line. An out-of-range value, an unknown `pool`, a malformed `node`, or a `node` beside
 `remember = false` is refused too, naming the file and key. Only `run` reads the file, so a broken
 one cannot stop `ports`, `status`, or `reset`. Settings (`c`) rewrites the whole file on save, and
-`b` writes the Bluetooth node; see "Keyboard commands".
+`b` writes the Bluetooth node; see "Keyboard commands". When the file is missing, `run` creates it
+holding only `wdgwars = ""`, except under `--sim`. A new file is readable only by its owner.
 
 | OS               | Default path                                                                                                     |
 |------------------|------------------------------------------------------------------------------------------------------------------|
@@ -256,18 +261,22 @@ and `R` make a node forget every address it has reported, on its next heartbeat.
 
 ### In settings (`c`)
 
-| Key               | What it does                                       |
-|-------------------|----------------------------------------------------|
-| `↑` `↓` / `k` `j` | Move between rows                                  |
-| `←` `→` / `h` `l` | Change the selected row; values stop at their ends |
-| `Enter`           | Apply every row and save it to `wartui.toml`       |
-| `Esc` / `q`       | Close without changing anything                    |
-| `ctrl-c`          | Quit                                               |
+| Key               | What it does                                                       |
+|-------------------|--------------------------------------------------------------------|
+| `↑` `↓` / `k` `j` | Move between rows                                                  |
+| `←` `→` / `h` `l` | Change the selected row; values stop at their ends                 |
+| Type / paste      | On the `wdgwars` row: enter the key (`Backspace`, `ctrl-u` clears) |
+| `Enter`           | Apply every row and save it to `wartui.toml`                       |
+| `Esc` / `q`       | Close without changing anything                                    |
+| `ctrl-c`          | Quit                                                               |
 
 The rows are the pool (`all → eu → us`), the nodes' transmit power and the bridge's (1 dBm steps),
-`remember bt node` (`off`, `on`), and `remember bridge` (`off`, `on`). `Enter` sends them all to
-the engine, or none, and writes every row shown to `pool`, `[tx-power]`, `[bluetooth]`, and
-`[bridge]`, whatever was there. The bridge takes its power on its next status poll, and settings
+`remember bt node` (`off`, `on`), `remember bridge` (`off`, `on`), and the `wdgwars` API key. On the
+key row, letters type, so `h` `j` `k` `l` `q` neither move nor close; `↑` leaves it, and the footer
+shows the `ctrl-u` tip while a key is entered. The key shows its last three characters, up to six
+bullets before them, and from ten characters its first one to three. `Enter` sends the rows to the
+engine, or none, and writes every row shown to `pool`, `[tx-power]`, `[bluetooth]`, `[bridge]`, and
+`[api-keys]`, whatever was there. The bridge takes its power on its next status poll, and settings
 closes. A moved pool re-cuts the fleet. Each node takes its new share and power on its next
 heartbeat, emptying its dedup ring when its share changes.
 
