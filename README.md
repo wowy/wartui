@@ -54,6 +54,7 @@ be omitted.
 ```sh
 wartui run --lat 37.7749 --lon -122.4194   # captures to wartui-2026-10-01-21-30.db
 wartui export                              # writes wartui-2026-10-01-21-30.csv beside it
+wartui upload                              # sends it to WDGWars, after confirming
 ```
 
 Each run creates a new `wartui-YYYY-MM-DD-HH-MM.db` in the working directory, named for the minute

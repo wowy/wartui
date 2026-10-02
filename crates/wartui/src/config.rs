@@ -7,9 +7,10 @@
 //! and rebuilt when it is wrong — and the distinction is why that file is silent about
 //! failures and this one is not.
 //!
-//! Only `run` loads the file — `--config` is one of its own arguments — so a broken
-//! `wartui.toml` cannot stop `ports`, `status` or `reset` from working. Within `run`,
-//! the file beats the built-in default.
+//! Only `run` and `upload` load the file — `--config` is one of each's own arguments — so
+//! a broken `wartui.toml` cannot stop `ports`, `status` or `reset` from working. Within
+//! `run`, the file beats the built-in default. `upload` only reads the API key from it,
+//! and never creates or saves the file.
 //!
 //! `run` creates the file once when it is absent, holding only the empty API key, so a
 //! first-time operator has a place to paste one. It never rewrites an existing file at

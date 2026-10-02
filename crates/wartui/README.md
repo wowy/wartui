@@ -13,6 +13,7 @@ This is the operator's manual. The root [`README.md`](../../README.md) is the sh
 |----------------|-------------------------------------------------------------------------------------|
 | `run`          | Capture a fleet into the store and watch it live                                    |
 | `export`       | Write a WiGLE CSV from a capture                                                    |
+| `upload`       | Upload a capture to the WDGWars leaderboard; see "Uploading to WDGWars"             |
 | `sniff`        | Print every frame the bridge hears, decoded, a line per record                      |
 | `status`       | Ask the bridge for its counters and uptime                                          |
 | `reset`        | Reboot a bridge that has stopped answering                                          |
@@ -78,6 +79,48 @@ advertiser's manufacturer identifier, both blank (NULL in the store) when none w
 row's `Frequency` is blank on purpose: that column is a Bluetooth "device type" code only an active
 inquiry produces, and the nodes never transmit while scanning.
 
+### Uploading to WDGWars
+
+`upload` sends a capture to the [WDGWars](https://wdgwars.pl) leaderboard. It builds the same CSV
+`export` would, gzips it in memory, and writes nothing to disk. Paste the site's API key in settings
+(`c`), or set `wdgwars` under `[api-keys]` in `wartui.toml`; see "Config file".
+
+```sh
+wartui upload                     # the newest capture in this directory
+wartui upload --db tonight.db -y  # another capture, without asking
+```
+
+| Flag                  | Default                  | What it is                    |
+|-----------------------|--------------------------|-------------------------------|
+| `--db PATH`           | newest in this directory | The capture to read           |
+| `--session ID`        | every session            | Only this session             |
+| `--recapture SECONDS` | `3600`                   | How wide each row's window is |
+| `--config PATH`       | per-OS path              | Where to read the API key     |
+| `--yes`, `-y`         | off                      | Upload without asking         |
+
+It prints the same counts as `export`, plus the compressed size, then asks `Upload to WDGWars?
+[y/N]`. Without a terminal to ask on, it refuses before building the upload unless given
+`--yes`. A capture with no positioned rows is not sent. The site takes at most 40 MB (40,000,000
+bytes) compressed; over that, send one `--session` at a time. Sizes are printed in decimal units.
+
+The site queues the file and imports it later. `upload` polls until the import ends, saying each
+change of state, then prints the site's counts (`imported`, `captured`, `updated`, and any others).
+
+Once the site has queued the job, the upload has happened, so `upload` exits zero unless the site
+reports the import failed. Rerunning it would send a duplicate.
+
+| After queuing                                          | What `upload` does                                 |
+|--------------------------------------------------------|----------------------------------------------------|
+| The import fails                                       | Exits non-zero with the site's reason              |
+| A poll errors (network, timeout, 5xx)                  | Says so once per distinct error, and keeps polling |
+| A poll redirects to the login page, or answers 401/403 | Stops polling, prints the job's URL, exits zero    |
+| 30 seconds pass                                        | Stops polling, prints the job's URL, exits zero    |
+
+When it stops early the import carries on; the job's URL or your profile on wdgwars.pl shows the
+result. The wait is short because someone sits at the terminal for it and nothing needs the result
+to finish. Each poll gets 10 seconds; sending the file has no time limit. Before queuing, a refused key (with the site's reason), an oversized file and any other
+error status are reported in plain words and exit non-zero. Redirects are not followed.
+
 ### Config file
 
 `wartui.toml` holds settings an operator wants to stop typing every run:
@@ -113,18 +156,19 @@ wdgwars = ""
 Each power defaults on its own; neither falls back to the other. The firmware accepts 21 dBm, but
 nothing above 20 is verified to work. wartui refuses to start on an unknown key or table, naming the
 file and line. An out-of-range value, an unknown `pool`, a malformed `node`, or a `node` beside
-`remember = false` is refused too, naming the file and key. Only `run` reads the file, so a broken
-one cannot stop `ports`, `status`, or `reset`. Settings (`c`) rewrites the whole file on save, and
-`b` writes the Bluetooth node; see "Keyboard commands". When the file is missing, `run` creates it
-holding only `wdgwars = ""`, except under `--sim`. A new file is readable only by its owner.
+`remember = false` is refused too, naming the file and key. Only `run` and `upload` read the file,
+so a broken one cannot stop `ports`, `status`, or `reset`. Settings (`c`) rewrites the whole file
+on save, and `b` writes the Bluetooth node; see "Keyboard commands". When the file is missing, `run`
+creates it holding only `wdgwars = ""`, except under `--sim`. A new file is readable only by its
+owner.
 
 | OS               | Default path                                                                                                     |
 |------------------|------------------------------------------------------------------------------------------------------------------|
 | macOS            | `~/Library/Application Support/wartui/wartui.toml`                                                               |
 | Linux and others | `$XDG_CONFIG_HOME/wartui/wartui.toml`, or `~/.config/wartui/wartui.toml` when that variable is unset or relative |
 
-`--config PATH` (a `run` flag) reads another file, for testing and debugging. A named file that is
-missing is refused; a missing default file silently means the built-in defaults.
+`--config PATH` (a `run` and `upload` flag) reads another file, for testing and debugging. A named
+file that is missing is refused; a missing default file silently means the built-in defaults.
 
 ### Benchmarking the store
 
