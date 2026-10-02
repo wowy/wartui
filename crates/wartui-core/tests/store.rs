@@ -17,6 +17,7 @@ use wartui_core::record::{
 };
 use wartui_core::store::{
     CaptureInfo, Checkpoint, SCHEMA_VERSION, Store, StoreConfig, StoreError, open_readonly,
+    open_readwrite, record_upload, set_upload_result,
 };
 use wartui_proto::air::RecordKind;
 use wartui_proto::link::Mac;
@@ -893,7 +894,8 @@ fn export_writer_uses_first_seen_from_earliest_unpositioned_sighting_when_window
         ],
     );
 
-    let (csv, summary) = export_with(&conn, ExportFilter { recapture_secs: 0 });
+    let (csv, summary) =
+        export_with(&conn, ExportFilter { recapture_secs: 0, ..ExportFilter::default() });
     assert_eq!(summary.rows, 1);
     assert!(
         csv.lines().nth(2).expect("a row").contains("2026-05-01 13:34:37"),
@@ -1308,4 +1310,64 @@ fn export_writer_tallies_position_sources_when_fix_varies() {
 
     let (_, summary) = export(&conn);
     assert_eq!(summary.positions, wartui_core::export::Positions { gps: 2, fixed: 1, none: 1 });
+}
+
+/// Two networks heard a minute apart, then a third a minute later, so a cutoff can fall
+/// between any two of them.
+fn three_sightings() -> Vec<Record> {
+    vec![
+        observation(NODE, [0xA1; 6], -60, EPOCH_MS, fixed(37.0, -122.0)),
+        observation(NODE, [0xA2; 6], -60, EPOCH_MS + 60_000, fixed(37.0, -122.0)),
+        observation(NODE, [0xA3; 6], -60, EPOCH_MS + 120_000, fixed(37.0, -122.0)),
+    ]
+}
+
+/// The MACs a CSV's rows name, in order.
+fn macs(csv: &str) -> Vec<&str> {
+    csv.lines().skip(2).filter_map(|line| line.split(',').next()).collect()
+}
+
+const AFTER_UPLOADS: ExportFilter = ExportFilter {
+    recapture_secs: wartui_core::export::DEFAULT_RECAPTURE_SECS,
+    after_uploads: true,
+};
+
+#[test]
+fn export_skips_sightings_at_or_before_cutoff_when_after_uploads() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let conn = write(&dir, three_sightings());
+    let rw = open_readwrite(&dir.path().join("wartui.db")).expect("opening read-write");
+    // The cutoff is the second sighting itself: it was sent, so it is not sent again.
+    let id = record_upload(&rw, EPOCH_MS + 60_000, EPOCH_MS + 90_000, 7, 2).expect("recording");
+    set_upload_result(&rw, id, "done").expect("setting the result");
+
+    let (csv, summary) = export_with(&conn, AFTER_UPLOADS);
+    assert_eq!(macs(&csv), ["A3:A3:A3:A3:A3:A3"], "{csv}");
+    assert_eq!(summary.last_rx, Some(EPOCH_MS + 120_000));
+}
+
+#[test]
+fn export_ignores_failed_upload_when_computing_cutoff() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let conn = write(&dir, three_sightings());
+    let rw = open_readwrite(&dir.path().join("wartui.db")).expect("opening read-write");
+    record_upload(&rw, EPOCH_MS, EPOCH_MS + 30_000, 7, 1).expect("recording");
+    // A later job the site reported failed imported nothing, so the cutoff stays at job 7.
+    let failed = record_upload(&rw, EPOCH_MS + 60_000, EPOCH_MS + 90_000, 8, 1).expect("recording");
+    set_upload_result(&rw, failed, "failed").expect("setting the result");
+
+    let (csv, summary) = export_with(&conn, AFTER_UPLOADS);
+    assert_eq!(macs(&csv), ["A2:A2:A2:A2:A2:A2", "A3:A3:A3:A3:A3:A3"], "{csv}");
+    assert_eq!(summary.rows, 2);
+}
+
+#[test]
+fn export_ignores_upload_record_when_after_uploads_false() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let conn = write(&dir, three_sightings());
+    let rw = open_readwrite(&dir.path().join("wartui.db")).expect("opening read-write");
+    record_upload(&rw, EPOCH_MS + 120_000, EPOCH_MS + 150_000, 7, 3).expect("recording");
+
+    let (_, summary) = export(&conn);
+    assert_eq!(summary.rows, 3);
 }

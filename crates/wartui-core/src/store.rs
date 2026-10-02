@@ -39,7 +39,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use rusqlite::{Connection, OpenFlags, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use wartui_proto::air::RecordKind;
 use wartui_proto::plan::ChannelPool;
 
@@ -212,6 +212,19 @@ CREATE TABLE IF NOT EXISTS raw_frame (
   dst BLOB,
   rssi INTEGER,
   bytes BLOB NOT NULL
+);
+
+-- One row per upload the site queued. `through_ms` is the latest sighting rx_at the upload
+-- covered; the next upload sends only sightings after it. `result` is NULL until known, then
+-- 'done', 'failed' or 'unfollowed'. A job the site reported failed imported nothing and is
+-- no cutoff.
+CREATE TABLE IF NOT EXISTS upload (
+  id INTEGER PRIMARY KEY,
+  through_ms INTEGER NOT NULL,
+  uploaded_at INTEGER NOT NULL,
+  job_id INTEGER NOT NULL,
+  rows INTEGER NOT NULL,
+  result TEXT
 );
 ";
 
@@ -608,6 +621,83 @@ pub fn open_readonly(path: &Path) -> Result<Connection, StoreError> {
     conn.busy_timeout(Duration::from_secs(5))?;
     check_version(&conn)?;
     Ok(conn)
+}
+
+/// Open a second connection that may write, which is what recording an upload uses.
+///
+/// Never creates the file. WAL lets it write beside a running capture's writer thread; the
+/// busy timeout covers the moment the two commit at once.
+///
+/// # Errors
+/// [`StoreError`] if the file cannot be opened or is from a different wartui.
+pub fn open_readwrite(path: &Path) -> Result<Connection, StoreError> {
+    let conn = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_URI,
+    )?;
+    conn.busy_timeout(Duration::from_secs(5))?;
+    check_version(&conn)?;
+    Ok(conn)
+}
+
+/// An upload the site queued, as [`last_upload`] reads it back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UploadRecord {
+    /// The site's job.
+    pub job_id: u64,
+    /// When the site queued it, in unix milliseconds.
+    pub uploaded_at_ms: i64,
+    /// Rows the upload sent.
+    pub rows: u64,
+}
+
+/// Record an upload the site queued as `job_id`, covering sightings through `through_ms`.
+/// Returns the row's id, for [`set_upload_result`].
+///
+/// # Errors
+/// If the insert fails.
+pub fn record_upload(
+    conn: &Connection,
+    through_ms: i64,
+    uploaded_at_ms: i64,
+    job_id: u64,
+    rows: u64,
+) -> rusqlite::Result<i64> {
+    conn.execute(
+        "INSERT INTO upload (through_ms, uploaded_at, job_id, rows) VALUES (?1, ?2, ?3, ?4)",
+        params![through_ms, uploaded_at_ms, job_id as i64, rows as i64],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Say how the upload [`record_upload`] returned `id` for ended: `done`, `failed` or
+/// `unfollowed`.
+///
+/// # Errors
+/// If the update fails.
+pub fn set_upload_result(conn: &Connection, id: i64, result: &str) -> rusqlite::Result<()> {
+    conn.execute("UPDATE upload SET result = ?1 WHERE id = ?2", params![result, id])?;
+    Ok(())
+}
+
+/// The newest upload the site did not report failed, if any.
+///
+/// # Errors
+/// If the query fails.
+pub fn last_upload(conn: &Connection) -> rusqlite::Result<Option<UploadRecord>> {
+    conn.query_row(
+        "SELECT job_id, uploaded_at, rows FROM upload WHERE result IS NOT 'failed' \
+         ORDER BY id DESC LIMIT 1",
+        [],
+        |row| {
+            Ok(UploadRecord {
+                job_id: row.get::<_, i64>(0)? as u64,
+                uploaded_at_ms: row.get(1)?,
+                rows: row.get::<_, i64>(2)? as u64,
+            })
+        },
+    )
+    .optional()
 }
 
 /// Refuse a database written by any wartui but this one.

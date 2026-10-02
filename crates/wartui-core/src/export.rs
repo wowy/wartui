@@ -45,6 +45,12 @@
 //! capture from before a fix still exports correctly is the whole promise of the
 //! export being a view over the store.
 //!
+//! [`ExportFilter::after_uploads`] leaves out every sighting at or before the newest
+//! upload the site did not report failed, so a repeat upload sends what came after. The fold
+//! starts afresh at that cutoff: a network heard on both sides of it within the recapture
+//! width gets a second row, which WDGWars skips when scoring. An unpositioned sighting walked
+//! before the cutoff counts as sent, so a fix that arrives later does not bring it back.
+//!
 //! The columns v1.6 added over v1.4 are derived or honestly blank rather than stored.
 //! `Frequency` is computed from the channel a sighting named, because the centre
 //! frequency is a function of the channel and the store already keeps the channel —
@@ -104,12 +110,15 @@ pub struct ExportFilter {
     /// seconds; the first sighting later than that opens the next window.
     /// `0` folds a network's whole capture into one row.
     pub recapture_secs: u64,
+    /// Leave out sightings at or before the newest upload the capture records, short of a
+    /// failed one. Off by default, so `export` and `analyze` read the whole capture.
+    pub after_uploads: bool,
 }
 
 impl Default for ExportFilter {
     /// Every sighting, folded into [`DEFAULT_RECAPTURE_SECS`] windows.
     fn default() -> Self {
-        Self { recapture_secs: DEFAULT_RECAPTURE_SECS }
+        Self { recapture_secs: DEFAULT_RECAPTURE_SECS, after_uploads: false }
     }
 }
 
@@ -223,7 +232,7 @@ pub fn wigle_csv<W: Write>(
     {
         let mut insert = tx.prepare(INSERT_EXPORT_ROW)?;
         let mut stmt = tx.prepare(SELECT_SIGHTINGS)?;
-        let mut rows = stmt.query([])?;
+        let mut rows = stmt.query([filter.after_uploads])?;
         let mut window: Option<Window> = None;
 
         while let Some(row) = rows.next()? {
@@ -378,6 +387,9 @@ fn close(
 /// the sort of the whole table, and a small integer is the narrowest thing a sort row can
 /// carry, which measured a quarter of what the two extra columns cost the export.
 ///
+/// `?1` is [`ExportFilter::after_uploads`]. The cutoff is an uncorrelated scalar, so SQLite
+/// evaluates it once rather than per sighting.
+///
 /// There is deliberately no index for this to walk: a scan and a sort read the table in
 /// order, and were faster than one random lookup per sighting
 /// (`docs/store-io-findings.md` says more).
@@ -385,6 +397,8 @@ const SELECT_SIGHTINGS: &str = r"
 SELECT bssid, ssid, security, channel, rssi, lat, lon, alt, accuracy, kind, rcoi, mfgr_id, rx_at,
        node_mac, CASE pos_source WHEN 'gps' THEN 0 WHEN 'static' THEN 1 ELSE 2 END
 FROM observation o
+WHERE ?1 = 0
+   OR o.rx_at > (SELECT COALESCE(MAX(through_ms), -1) FROM upload WHERE result IS NOT 'failed')
 ORDER BY o.bssid, o.kind, o.rx_at, o.id
 ";
 

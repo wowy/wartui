@@ -59,7 +59,7 @@ impl Selection {
 
     /// The rows `--recapture` asks for.
     pub(crate) fn filter(&self) -> ExportFilter {
-        ExportFilter { recapture_secs: self.recapture }
+        ExportFilter { recapture_secs: self.recapture, after_uploads: false }
     }
 }
 

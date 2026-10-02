@@ -133,11 +133,18 @@ wartui upload --db tonight.db -y  # another capture, without asking
 | `--recapture SECONDS` | `3600`                   | How wide each row's window is |
 | `--config PATH`       | per-OS path              | Where to read the API key     |
 | `--yes`, `-y`         | off                      | Upload without asking         |
+| `--resend`            | off                      | Send everything, not just new |
 
 It prints the same counts as `export`, plus the compressed size, then asks `Upload to WDGWars?
 [y/N]`. Without a terminal to ask on, it refuses before building the upload unless given
 `--yes`. A capture with no positioned rows is not sent. The site takes at most 40 MB (40,000,000
 bytes) compressed, and a larger capture is refused before sending. Sizes are printed in decimal units.
+
+A repeat upload sends only sightings received since the last upload the site queued. A job the
+site reports failed does not count. The confirm summary names the last job (`previously`), and
+`--resend` sends everything again, which a decoder fix needs. A network heard within the recapture
+width on both sides of the last upload gets a second row, which WDGWars skips when scoring. A
+sighting with no position counts as sent once an upload has covered it.
 
 The site queues the file and imports it later. `upload` polls until the import ends, saying each
 change of state, then prints the site's counts (`imported`, `captured`, `updated`, and any others).
