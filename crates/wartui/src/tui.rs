@@ -224,25 +224,23 @@ struct ConfigModal {
 /// `All → Eu → Us`, the order the pool row steps through.
 const POOL_STEPS: [PoolArg; 3] = [PoolArg::All, PoolArg::Eu, PoolArg::Us];
 
-/// Step `current` by one position in [`POOL_STEPS`], with no wrap-around: the
-/// same rule [`ConfigModal::step`] uses for the tx-power rows.
+/// Step `current` by one position in [`POOL_STEPS`], wrapping past either end:
+/// the same rule [`ConfigModal::step`] uses for the tx-power rows.
 fn step_pool(current: PoolArg, delta: i8) -> PoolArg {
+    let len = POOL_STEPS.len();
     let index = POOL_STEPS.iter().position(|&pool| pool == current).unwrap_or(0);
-    let index = if delta > 0 {
-        (index + 1).min(POOL_STEPS.len() - 1)
-    } else if delta < 0 {
-        index.saturating_sub(1)
-    } else {
-        index
+    let index = match delta.signum() {
+        1 => (index + 1) % len,
+        -1 => (index + len - 1) % len,
+        _ => index,
     };
     POOL_STEPS[index]
 }
 
 impl ConfigModal {
-    /// Step the selected row by one: a tx-power row moves by one dBm, clamped
-    /// to the range the file and the flags share; the pool row moves through
-    /// [`POOL_STEPS`]; the remember rows are off to the left and on to the right.
-    /// All stop at their ends rather than wrapping.
+    /// Step the selected row by one: a tx-power row moves by one dBm within the
+    /// range the file and the flags share; the pool row moves through
+    /// [`POOL_STEPS`]; a remember row flips. All wrap past their ends.
     fn step(&mut self, delta: i8) {
         let value = match self.selected {
             Field::Fleet => &mut self.fleet_dbm,
@@ -253,20 +251,24 @@ impl ConfigModal {
             }
             Field::RememberBle => {
                 if delta != 0 {
-                    self.remember_ble = delta > 0;
+                    self.remember_ble = !self.remember_ble;
                 }
                 return;
             }
             Field::RememberBridge => {
                 if delta != 0 {
-                    self.remember_bridge = delta > 0;
+                    self.remember_bridge = !self.remember_bridge;
                 }
                 return;
             }
             // A text row: `on_modal_key` types into it rather than stepping.
             Field::WdgwarsKey => return,
         };
-        *value = (*value + delta).clamp(*config::TX_POWER_DBM.start(), *config::TX_POWER_DBM.end());
+        // In i16, so stepping past either end of the i8 range cannot overflow.
+        let start = i16::from(*config::TX_POWER_DBM.start());
+        let len = i16::from(*config::TX_POWER_DBM.end()) - start + 1;
+        let stepped = start + (i16::from(*value) + i16::from(delta) - start).rem_euclid(len);
+        *value = i8::try_from(stepped).expect("wraps within TX_POWER_DBM, which is i8");
     }
 }
 
@@ -2657,7 +2659,7 @@ mod tests {
     }
 
     #[test]
-    fn ui_steps_pool_and_stops_at_ends_when_h_or_l_pressed() {
+    fn ui_steps_pool_and_wraps_at_ends_when_h_or_l_pressed() {
         let mut snapshot = busy();
         snapshot.pool = ChannelPool::All;
         let (tx, _rx) = mpsc::channel(4);
@@ -2669,22 +2671,28 @@ mod tests {
             "opens on the pool row"
         );
 
-        for _ in 0..3 {
-            ui.on_modal_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE), &snapshot, &tx);
-        }
-        assert_eq!(ui.modal.as_ref().expect("still open").pool, PoolArg::All, "stops at the start");
+        ui.on_modal_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE), &snapshot, &tx);
+        assert_eq!(
+            ui.modal.as_ref().expect("still open").pool,
+            PoolArg::Us,
+            "wraps from the start to the end"
+        );
 
         ui.on_modal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &snapshot, &tx);
         assert_eq!(
             ui.modal.as_ref().expect("still open").pool,
-            PoolArg::Eu,
-            "steps forward one at a time"
+            PoolArg::All,
+            "wraps from the end to the start"
         );
 
-        for _ in 0..5 {
+        for expected in [PoolArg::Eu, PoolArg::Us, PoolArg::All] {
             ui.on_modal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &snapshot, &tx);
+            assert_eq!(
+                ui.modal.as_ref().expect("still open").pool,
+                expected,
+                "steps forward one at a time"
+            );
         }
-        assert_eq!(ui.modal.as_ref().expect("still open").pool, PoolArg::Us, "stops at the end");
     }
 
     #[test]
@@ -2704,22 +2712,22 @@ mod tests {
     }
 
     #[test]
-    fn ui_modal_clamps_step_to_two_and_twenty_dbm_when_stepping_past_the_range() {
+    fn ui_modal_wraps_dbm_between_two_and_twenty_when_stepping_past_the_range() {
         let snapshot = busy();
         let (tx, _rx) = mpsc::channel(4);
         let mut ui = Ui::default();
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
         ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &snapshot, &tx);
 
-        for _ in 0..30 {
+        while ui.modal.as_ref().expect("still open").fleet_dbm > 2 {
             ui.on_modal_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE), &snapshot, &tx);
         }
-        assert_eq!(ui.modal.as_ref().expect("still open").fleet_dbm, 2, "stops at the floor");
 
-        for _ in 0..40 {
-            ui.on_modal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &snapshot, &tx);
-        }
-        assert_eq!(ui.modal.as_ref().expect("still open").fleet_dbm, 20, "stops at the ceiling");
+        ui.on_modal_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE), &snapshot, &tx);
+        assert_eq!(ui.modal.as_ref().expect("still open").fleet_dbm, 20, "wraps below the floor");
+
+        ui.on_modal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &snapshot, &tx);
+        assert_eq!(ui.modal.as_ref().expect("still open").fleet_dbm, 2, "wraps past the ceiling");
     }
 
     #[test]
@@ -2967,13 +2975,13 @@ mod tests {
         assert_eq!(modal.selected, Field::RememberBle, "the row under the powers");
         assert!(modal.remember_ble, "seeded from the snapshot");
 
-        for _ in 0..2 {
-            ui.on_modal_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE), &snapshot, &tx);
-            assert!(!ui.modal.as_ref().expect("still open").remember_ble, "off, and stays off");
-        }
-        for _ in 0..2 {
-            ui.on_modal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &snapshot, &tx);
-            assert!(ui.modal.as_ref().expect("still open").remember_ble, "on, and stays on");
+        for (key, expected) in [('h', false), ('h', true), ('l', false), ('l', true)] {
+            ui.on_modal_key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE), &snapshot, &tx);
+            assert_eq!(
+                ui.modal.as_ref().expect("still open").remember_ble,
+                expected,
+                "{key} flips it"
+            );
         }
     }
 
@@ -3145,13 +3153,13 @@ mod tests {
         assert_eq!(modal.selected, Field::RememberBridge, "the row under remember bt node");
         assert!(modal.remember_bridge, "seeded from the handle, on by default");
 
-        for _ in 0..2 {
-            ui.on_modal_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE), &snapshot, &tx);
-            assert!(!ui.modal.as_ref().expect("still open").remember_bridge, "off, and stays off");
-        }
-        for _ in 0..2 {
-            ui.on_modal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &snapshot, &tx);
-            assert!(ui.modal.as_ref().expect("still open").remember_bridge, "on, and stays on");
+        for (key, expected) in [('h', false), ('h', true), ('l', false), ('l', true)] {
+            ui.on_modal_key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE), &snapshot, &tx);
+            assert_eq!(
+                ui.modal.as_ref().expect("still open").remember_bridge,
+                expected,
+                "{key} flips it"
+            );
         }
     }
 
