@@ -776,11 +776,20 @@ port.
 That build still sent the boot `Ready` once the gate opened, so the host read `uptime_ms=0` from a
 frame built two minutes earlier, which is a lie.
 
-The rule is now by reset cause (`ResetCause::speaks_first`). `Software` — the `TxStalled`
-self-reset and `wartui reset` — announces at boot and transmits at once, because the host that
-caused it is still attached and reads the `Ready`; a connection that rode through the reset has
-already used its one `Identify`. Every other cause holds transmit until the first host frame
+The rule is `ResetCause::speaks_first`. A life that follows one in which a host was present
+announces at boot and transmits at once, because that host is still attached and reads the
+`Ready`; a connection that rode through the reset has already used its one `Identify`. Every other
+life holds transmit until the first host frame
 decodes, and announces then: an `Identify` is answered as usual, and any other first frame gets a
 `Ready` ahead of its answer, so a host already running after a watchdog reset still sees a new life.
 That `Ready` is built when sent, so its uptime is true. The boot `0x00` stays in every life and goes
 out first when the gate opens.
+
+The first cut keyed this on the reset cause, `Software` only. That is the wrong signal in both
+directions. A panic or a `StallWatch` reset after the host left is `Software` with nobody reading,
+so it wrote into an unread endpoint. A watchdog or lockup reset while a host keeps the port open
+is not `Software`, so that life stayed silent, and a host that never sends again (`wartui sniff`)
+heard nothing for ever. The rule now keys on presence: each pass of the main loop records in RTC
+memory whether a host frame decoded within `HOST_PRESENT_WINDOW_MS`, and the next life reads it
+back, never after a power-on, where RTC memory is garbage. A frame that decodes with a mismatched
+link version also opens the gate, since only a host writes to the bridge's input.

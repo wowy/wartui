@@ -116,29 +116,36 @@ pub enum ResetCause {
 }
 
 impl ResetCause {
-    /// Whether a bridge with this cause writes to USB before any host has spoken.
+    /// Whether a bridge writes to USB before any host has spoken.
     ///
-    /// Only [`Self::Software`] does. It is the `TxStalled` self-reset and
-    /// [`HostToBridge::Reset`], and in both the host that caused it is still attached
-    /// and reading. It also relies on the unprompted `Ready`: it sends one `Identify`
+    /// It does iff a host was present when the previous life ended
+    /// (`host_was_present`, kept in RTC memory), and never after a
+    /// [`Self::PowerOn`], where that memory is garbage. A host that was reading
+    /// across the reset relies on the unprompted `Ready`: it sends one `Identify`
     /// per connection, so a connection that rides through the reset hears the new
     /// life only through that `Ready`.
     ///
-    /// Every other cause may follow a replug with nobody reading. Writing to the USB
-    /// Serial/JTAG endpoint then leaves it wedged: on a C6 replugged and left unread
-    /// for two minutes, the first open found it dead in 3 of 3 trials, and an
-    /// `Identify` went unanswered until `StallWatch` rebooted the board. A build that
-    /// held all transmit until a host frame decoded was healthy in 3 of 3, answering
-    /// in 2 ms. The ROM banner, which prints either way, is not the cause.
-    pub const fn speaks_first(self) -> bool {
+    /// With no host reading, writing to the USB Serial/JTAG endpoint leaves it
+    /// wedged: on a C6 replugged and left unread for two minutes, the first open
+    /// found it dead in 3 of 3 trials, and an `Identify` went unanswered until
+    /// `StallWatch` rebooted the board. A build that held all transmit until a host
+    /// frame decoded was healthy in 3 of 3, answering in 2 ms. The ROM banner, which
+    /// prints either way, is not the cause.
+    ///
+    /// The cause alone is not enough, because it says who asked for the reset and
+    /// not whether anybody was reading. A panic or a `StallWatch` reset after the
+    /// host left is [`Self::Software`] with nobody there, and a watchdog or lockup
+    /// reset can land while a host keeps the port open and never sends again.
+    #[must_use]
+    pub const fn speaks_first(self, host_was_present: bool) -> bool {
         match self {
-            Self::Software => true,
-            Self::PowerOn
+            Self::PowerOn => false,
+            Self::Software
             | Self::Watchdog
             | Self::Lockup
             | Self::Brownout
             | Self::External
-            | Self::Unknown => false,
+            | Self::Unknown => host_was_present,
         }
     }
 }

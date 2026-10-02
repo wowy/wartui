@@ -86,9 +86,9 @@ pub const HOST_PRESENT_WINDOW_MS: u64 = 10_000;
 /// A frame that asks for nothing cannot be left unanswered, so it never starts the
 /// clock: it proves presence and no more. That matters because a panel push, sent
 /// up to once a second to a bridge with a screen, is often the last thing a TUI sends
-/// before it quits, and no byte follows it. Counting it reset the board a few seconds
-/// after an ordinary quit, as soon as a node frame was queued behind the dead
-/// endpoint. A quiet `AddPeer` or `RemovePeer` could do the same.
+/// before it quits, and no byte follows it. Counting it would reset the board a few
+/// seconds after an ordinary quit, as soon as a node frame was queued behind the dead
+/// endpoint. A quiet `AddPeer` or `RemovePeer` would do the same.
 ///
 /// The cost is a host that sends a frame that asks and leaves before any byte moves
 /// after it — killed mid-handshake, say. If something is queued, that bridge reboots

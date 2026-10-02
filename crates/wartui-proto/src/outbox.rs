@@ -36,8 +36,8 @@
 //! the next frame and fail the checksum on both.
 //!
 //! The same lone `0x00` is what [`Outbox::delimit`] queues at boot. It goes out first
-//! when transmit opens, which for most resets is the first host frame rather than
-//! boot ([`ResetCause::speaks_first`]). A reset prints
+//! when transmit opens, which is the first host frame rather than boot unless the
+//! life speaks first ([`ResetCause::speaks_first`]). A reset prints
 //! the ROM banner down this endpoint with no `0x00` in it, so without a terminator
 //! of our own the host reads banner and first frame as one overlong frame and
 //! drops both. A lone `0x00` is an empty frame, which every receiver already
@@ -259,8 +259,8 @@ impl Outbox {
     /// Called once at boot, before anything is queued: the ROM banner a reset
     /// prints carries no `0x00`, so it would otherwise run into the first frame
     /// and take it down with it. The `0x00` is sent when transmit opens, which a
-    /// life that does not speak first holds until a host has. A frame already part-way out needs nothing,
-    /// since its own terminator follows it.
+    /// life that does not speak first holds until a host has. A frame already
+    /// part-way out needs nothing, since its own terminator follows it.
     pub const fn delimit(&mut self) {
         if self.cursor == 0 {
             self.orphan = true;

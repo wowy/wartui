@@ -56,11 +56,11 @@ const SETTLE_TICKS: u32 = 12;
 ///
 /// Long enough to outlast a wedged bridge's own recovery: its `StallWatch` reboots
 /// it [`TX_STALL_TIMEOUT_MS`] after the `Identify` this connection sends. The new
-/// life is a software reset, so it speaks first and its `Ready` needs no second ask. Measured
-/// on a C6 left unread for two minutes, the reboot was heard 3.47 s after the
+/// life speaks first, because a host was present when the last one ended, so its `Ready`
+/// needs no second ask. Measured on a C6 left unread for two minutes, the reboot was heard 3.47 s after the
 /// `Identify`; the margin covers that and a slower board. 4.5 s still lands inside
 /// the CLI's five, which is the point: a one-shot command makes one sweep, so a
-/// probe that gave up first meant no later pass ever heard the `Ready`.
+/// probe that gave up first would leave no later pass to hear the `Ready`.
 ///
 /// The cost is a replaced or reflashed remembered board holding the sweep for 4.5 s
 /// rather than 1.5 s before the others are tried, and only until another board
@@ -270,7 +270,7 @@ pub fn select(
             let mut ordered = candidates.to_vec();
             ordered.sort_by_key(|candidate| {
                 (
-                    candidate.mac().is_none() || candidate.mac() != remembered,
+                    !is_remembered(candidate, remembered),
                     candidate.pid != Some(BRIDGE_PID),
                     candidate.path.clone(),
                 )
@@ -696,8 +696,9 @@ async fn connect(
         .map_err(|e| format!("could not start writer thread: {e}"))?;
 
     // A bridge is rarely being watched when it starts: unplugging the dongle is not
-    // part of restarting the TUI. One that reset itself speaks first, and every other
-    // holds its transmit until a host frame decodes (`ResetCause::speaks_first`). So we ask —
+    // part of restarting the TUI. One that restarted with a host attached speaks first,
+    // and every other holds its transmit until a host frame decodes
+    // (`ResetCause::speaks_first`). So we ask —
     // **exactly once, and then only wait.**
     //
     // Once, because a board that is not reading its USB endpoint absorbs exactly
@@ -718,8 +719,8 @@ async fn connect(
     //
     // Once is enough for a bridge whose transmit endpoint has wedged, too: its
     // `StallWatch` (`wartui_proto::stall`) reboots it 3 s after a host frame that
-    // nothing has answered, so this one `Identify` is what clears it. That reset is
-    // a software one, so the new life speaks first and its `Ready` reaches us
+    // nothing has answered, so this one `Identify` is what clears it. A host was present
+    // when that life ended, so the new one speaks first and its `Ready` reaches us
     // unprompted, which is the only way this connection hears it. A board given
     // [`SETTLE_TICKS`] or [`REMEMBERED_TICKS`] hears the `Ready` behind that reboot
     // before it gives up. A plain probe gives up first, so the board the file names
@@ -1031,7 +1032,13 @@ fn silence_disowns_it(
     remembered: Option<Mac>,
     candidate: &PortCandidate,
 ) -> bool {
-    alone && opened && remembered.is_some() && candidate.mac() == remembered
+    alone && opened && is_remembered(candidate, remembered)
+}
+
+/// Whether this candidate is the board the file names. One with no address of its
+/// own (named by path) never is.
+fn is_remembered(candidate: &PortCandidate, remembered: Option<Mac>) -> bool {
+    candidate.mac().is_some() && candidate.mac() == remembered
 }
 
 /// How many ticks of [`IDENTIFY_INTERVAL`] this candidate is worth.
@@ -1043,7 +1050,7 @@ fn silence_disowns_it(
 fn patience(alone: bool, remembered: Option<Mac>, candidate: &PortCandidate) -> u32 {
     if alone {
         SETTLE_TICKS
-    } else if candidate.mac().is_some() && candidate.mac() == remembered {
+    } else if is_remembered(candidate, remembered) {
         REMEMBERED_TICKS
     } else {
         PROBE_TICKS
@@ -1127,14 +1134,14 @@ mod tests {
     }
 
     #[test]
-    fn patience_outlasts_stall_reset_when_remembered_bridge_has_company() {
+    fn serial_link_outlasts_stall_reset_when_remembered_bridge_has_company() {
         let ticks = patience(false, parse_mac(BRIDGE_MAC), &board(BRIDGE_MAC));
         assert_eq!(ticks, REMEMBERED_TICKS);
         assert!(ticks > PROBE_TICKS);
     }
 
     #[test]
-    fn patience_probes_briefly_when_board_is_not_remembered() {
+    fn serial_link_probes_briefly_when_board_is_not_remembered() {
         assert_eq!(patience(false, parse_mac(BRIDGE_MAC), &board(NODE_MAC)), PROBE_TICKS);
         assert_eq!(patience(false, None, &board(BRIDGE_MAC)), PROBE_TICKS);
         let named = candidate("/dev/ttyACM0", None, None, None);
@@ -1142,7 +1149,7 @@ mod tests {
     }
 
     #[test]
-    fn patience_settles_when_board_is_alone() {
+    fn serial_link_settles_when_board_is_alone() {
         assert_eq!(patience(true, parse_mac(BRIDGE_MAC), &board(BRIDGE_MAC)), SETTLE_TICKS);
         assert_eq!(patience(true, None, &board(NODE_MAC)), SETTLE_TICKS);
     }

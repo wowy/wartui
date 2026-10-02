@@ -378,16 +378,18 @@ fn host_command_asks_for_reply_only_when_bridge_answers() {
 }
 
 #[test]
-fn reset_cause_speaks_first_when_software_only() {
-    for (cause, speaks) in [
-        (ResetCause::Software, true),
-        (ResetCause::PowerOn, false),
-        (ResetCause::External, false),
-        (ResetCause::Brownout, false),
-        (ResetCause::Watchdog, false),
-        (ResetCause::Lockup, false),
-        (ResetCause::Unknown, false),
+fn reset_cause_speaks_first_when_a_host_was_present_unless_power_on() {
+    for cause in [
+        ResetCause::PowerOn,
+        ResetCause::Software,
+        ResetCause::External,
+        ResetCause::Brownout,
+        ResetCause::Watchdog,
+        ResetCause::Lockup,
+        ResetCause::Unknown,
     ] {
-        assert_eq!(cause.speaks_first(), speaks, "{cause:?}");
+        let after_host = !matches!(cause, ResetCause::PowerOn);
+        assert_eq!(cause.speaks_first(true), after_host, "{cause:?}");
+        assert!(!cause.speaks_first(false), "{cause:?}");
     }
 }

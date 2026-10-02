@@ -155,13 +155,15 @@ frame buffer and would take the first frame with it. So the bridge queues a lone
 ahead of everything (`Outbox::delimit`). That is an empty frame every receiver already skips, so it
 is not a wire change.
 
-**A bridge holds all transmit until a host speaks**, unless its reset cause is `Software`
-(`ResetCause::speaks_first`). Writing to the endpoint before any host has opened the port is what
-wedges it: after a replug and two minutes unread, 3 of 3 first opens found it dead, against 3 of 3
+**A bridge holds all transmit until a host speaks**, unless a host was present when the previous
+life ended (`ResetCause::speaks_first`). Each pass of the main loop records in RTC memory whether
+a host frame decoded in the last ten seconds, and the next life reads it back, except after a
+power-on. Writing to the endpoint before any host has opened the port is what wedges it: after a replug and two minutes unread, 3 of 3 first opens found it dead, against 3 of 3
 healthy with transmit held. Frames still queue behind the gate, and the `0x00` goes out first when
 it opens. The first host frame opens it. If that frame is not an `Identify`, the bridge announces
-before handling it, so a host that was already running still sees a new life. A software reset
-speaks first because the host that caused it is still attached and reading, and it relies on that
+before handling it, so a host that was already running still sees a new life. A frame that decodes
+but carries another link version counts as a host and opens the gate too. A life that follows a
+present host speaks first because that host is still attached and reading, and it relies on that
 `Ready`: it sends one `Identify` per connection (`docs/phase-3-findings.md`).
 
 Reach for `wartui reset --bridge <board>` before `espflash`. The receive path is alive in this

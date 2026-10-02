@@ -283,9 +283,10 @@ edit stops; follow the pointer before changing the rule.
 - **Neither firmware may block on the USB endpoint.** The bridge's rings evict oldest-first and
   resynchronise COBS behind a truncated frame; a node loses a line rather than a sweep.
   → `crates/wartui-proto/src/outbox.rs` `//!`, `firmware/node/src/main.rs`, `note!`
-- **The bridge writes nothing to USB until a host has spoken, unless its reset cause is `Software`.**
-  Writing before any host opens the port wedges the endpoint, and a software reset's host is
-  already reading. → `crates/wartui-proto/src/link.rs`, `ResetCause::speaks_first`;
+- **The bridge writes nothing to USB until a host has spoken, unless a host was present when the
+  previous life ended** (an RTC flag, never trusted after a power-on). Writing before any host
+  opens the port wedges the endpoint, and a host that was present across the reset is already
+  reading. → `crates/wartui-proto/src/link.rs`, `ResetCause::speaks_first`;
   `docs/phase-3-findings.md`
 - **Never link `esp-println` with `jtag-serial` in the *bridge*** — its link protocol shares that
   endpoint, and diagnostics go out as `Log` frames instead. → `firmware/bridge/README.md`
