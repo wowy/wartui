@@ -763,6 +763,20 @@ fn next_epoch(last: &mut u64, held: Option<u8>) -> u64 {
     *last
 }
 
+/// A since-boot count's contribution: nothing for a baseline, the whole value after a
+/// restart or a fall, the difference otherwise.
+///
+/// A since-boot count only falls when the device restarts, so a fall is read as a restart
+/// even when `restarted` misses it. A genuine u16 wrap reads the same way and undercounts by
+/// at most one heartbeat's worth once every 65536, where a difference would add ~65000.
+pub(crate) fn advance_since_boot(value: u64, prev: Option<u64>, restarted: bool) -> u64 {
+    match prev {
+        None => 0,
+        Some(prev) if restarted || value < prev => value,
+        Some(prev) => value - prev,
+    }
+}
+
 impl FleetEngine {
     /// Start an engine. `now` fixes the session's start time.
     #[must_use]
@@ -1094,18 +1108,11 @@ impl FleetEngine {
                 // node's first heartbeat is only a baseline, the same rule as the
                 // bridge's `dropped_baseline`: what it refused before this capture
                 // is not this capture's. A reboot restarted the count at 0, so the
-                // whole value is new. A since-boot count only falls when the node
-                // restarts, so a falling one is read as a restart too, even when the
-                // counter and epoch checks miss it: a node that reboots out of range
-                // can come back with a higher counter. It only decides how drops are
-                // counted, not `reboots`. A genuine u16 wrap reads the same way and
-                // undercounts by the drops between `prev` and the wrap, at most one
-                // heartbeat's worth once every 65536, where a difference would add
-                // ~65000 after a missed reboot.
-                let advance = |value: u16, prev: Option<u16>| match prev {
-                    None => 0,
-                    Some(prev) if rebooted || value < prev => u64::from(value),
-                    Some(prev) => u64::from(value - prev),
+                // whole value is new. A falling count is read as a restart too: a
+                // node that reboots out of range can come back with a higher
+                // counter. That only decides how drops are counted, not `reboots`.
+                let advance = |value: u16, prev: Option<u16>| {
+                    advance_since_boot(u64::from(value), prev.map(u64::from), rebooted)
                 };
                 self.counters.wifi_dropped +=
                     advance(heartbeat.wifi_dropped, node.last_wifi_dropped);

@@ -13,6 +13,7 @@ This is the operator's manual. The root [`README.md`](../../README.md) is the sh
 |----------------|-------------------------------------------------------------------------------------|
 | `run`          | Capture a fleet into the store and watch it live                                    |
 | `export`       | Write a WiGLE CSV from a capture                                                    |
+| `analyze`      | Summarise a capture and what it lost; see "Analyzing a capture"                     |
 | `upload`       | Upload a capture to the WDGWars leaderboard; see "Uploading to WDGWars"             |
 | `sniff`        | Print every frame the bridge hears, decoded, a line per record                      |
 | `status`       | Ask the bridge for its counters and uptime                                          |
@@ -78,6 +79,41 @@ sightings by position source, what each node heard, and the capture's span.
 advertiser's manufacturer identifier, both blank (NULL in the store) when none was offered. A BLE
 row's `Frequency` is blank on purpose: that column is a Bluetooth "device type" code only an active
 inquiry produces, and the nodes never transmit while scanning.
+
+### Analyzing a capture
+
+`analyze` prints what `export` would report for a capture, then what it lost on the way in. It
+takes `--db`, `--session` and `--recapture` as `export` does, and writes nothing but standard
+output. The tail of its output, after the export summary:
+
+```
+  bridge     1,203,551 frames received  1,300 dropped (0.1%)  1 reboot
+  batches    212 lost between node and host
+  heartbeats 41 missed of 3,497 expected (1.2%)
+  ring       wifi 18,220 refused  ble 1,203 refused
+  loss by node
+    1C:5A  batches 12  heartbeats 3/702  ring ble 1,203
+    57:84  batches 200  heartbeats 38/2,795  ring wifi 18,220
+```
+
+| Line         | What it counts                                                                   |
+|--------------|----------------------------------------------------------------------------------|
+| `bridge`     | Frames the bridge received, and dropped because the host fell behind reading     |
+| `batches`    | Sighting batches lost between node and host; the fleet table's `lost`            |
+| `heartbeats` | Heartbeats lost between node and host, read from each node's beat sequence       |
+| `ring`       | Sightings a node's full pending ring refused; most are reported on a later dwell |
+
+Every figure is exact. Each session's first bridge reply and first heartbeat per node is a
+baseline, so what was dropped before the capture began is not counted. `batches` and `bridge`
+print zeros, since "0 lost" is the answer. Left out:
+
+- the `bridge` line, when the capture holds no status reply
+- ring figures that are zero, and the `ring` line when all are
+- the reboot clause, when the bridge never restarted
+
+Each heartbeat carries a sequence number that restarts at 1 when the node boots, so a gap in it is
+heartbeats lost. A repeated heartbeat counts once. Across a node's reboot, only the heartbeats
+before the first one heard since boot are counted.
 
 ### Uploading to WDGWars
 

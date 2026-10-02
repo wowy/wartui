@@ -1,0 +1,255 @@
+//! Loss figures read back from a capture the store wrote.
+
+use std::path::Path;
+use std::time::Duration;
+
+use rusqlite::Connection;
+use wartui_core::analyze::{BridgeLoss, losses};
+use wartui_core::record::{BatchGap, BridgeStatusSeen, Heartbeat, Record};
+use wartui_core::store::{SessionInfo, Store, StoreConfig, open_readonly};
+use wartui_proto::link::Mac;
+use wartui_proto::plan::ChannelPool;
+
+const NODE: Mac = [0x02, 0x00, 0x5E, 0x10, 0x57, 0x84];
+const OTHER: Mac = [0x02, 0x00, 0x5E, 0x10, 0x1C, 0x5A];
+const EPOCH_MS: i64 = 1_777_642_477_000;
+
+/// Write one session of `records` into the capture at `path`, appending a session when
+/// the file is already there.
+fn session(path: &Path, records: Vec<Record>) {
+    let mut config = StoreConfig::new(path);
+    config.batch_rows = 8;
+    config.batch_interval = Duration::from_millis(10);
+    let info = SessionInfo { pool: ChannelPool::Us, notes: None };
+    let store = Store::open(&config, &info, EPOCH_MS).expect("opening the store");
+    assert_eq!(store.submit(records), 0, "nothing should have been dropped");
+    store.close();
+}
+
+/// One session of `records` in a fresh capture.
+fn capture(records: Vec<Record>) -> (tempfile::TempDir, Connection) {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("wartui.db");
+    session(&path, records);
+    let conn = open_readonly(&path).expect("reopening read-only");
+    (dir, conn)
+}
+
+fn status(at_s: i64, rx_count: u32, dropped_tx: u32, uptime_ms: u32) -> Record {
+    Record::BridgeStatus(BridgeStatusSeen {
+        rx_at_ms: EPOCH_MS + at_s * 1000,
+        peer_count: 2,
+        rx_count,
+        dropped_tx,
+        uptime_ms,
+    })
+}
+
+fn beat(node: Mac, at_ms: i64, counter: u32, seq: u16, wifi: u16, ble: u16) -> Record {
+    Record::Heartbeat(Heartbeat {
+        node_mac: node,
+        rx_at_ms: EPOCH_MS + at_ms,
+        counter,
+        epoch: 3,
+        link_rssi: Some(-40),
+        wifi_dropped: wifi,
+        ble_dropped: ble,
+        beat: seq,
+    })
+}
+
+fn gap(node: Mac, seq: u16, lost: u16) -> Record {
+    Record::BatchGap(BatchGap {
+        node_mac: node,
+        rx_at_ms: EPOCH_MS,
+        after_seq: seq - lost - 1,
+        seq,
+        lost,
+    })
+}
+
+/// Assigned heartbeats every 5 s, from `from_s`, with nothing refused.
+fn steady(node: Mac, from_s: i64, count: u32) -> Vec<Record> {
+    (0..count)
+        .map(|i| {
+            let seq = u16::try_from(i + 1).expect("a short run");
+            beat(node, (from_s + i64::from(i) * 5) * 1000, i + 1, seq, 0, 0)
+        })
+        .collect()
+}
+
+#[test]
+fn analyze_counts_bridge_drops_from_baseline_when_session_starts_with_drops() {
+    // 500 dropped before the capture began are not the capture's.
+    let (_dir, conn) = capture(vec![
+        status(0, 10_000, 500, 60_000),
+        status(5, 10_400, 520, 65_000),
+        status(10, 10_900, 530, 70_000),
+    ]);
+    let loss = losses(&conn, None).unwrap();
+    assert_eq!(loss.bridge, Some(BridgeLoss { received: 900, dropped: 30, reboots: 0 }));
+}
+
+#[test]
+fn analyze_adds_whole_value_when_bridge_dropped_count_falls() {
+    // The bridge restarted between the second and third reply, so the third's counts
+    // are all new.
+    let (_dir, conn) = capture(vec![
+        status(0, 10_000, 500, 60_000),
+        status(5, 10_400, 520, 65_000),
+        status(10, 300, 7, 4_000),
+    ]);
+    let loss = losses(&conn, None).unwrap();
+    assert_eq!(loss.bridge, Some(BridgeLoss { received: 700, dropped: 27, reboots: 1 }));
+}
+
+#[test]
+fn analyze_omits_bridge_when_no_status_rows() {
+    let (_dir, conn) = capture(steady(NODE, 0, 3));
+    assert_eq!(losses(&conn, None).unwrap().bridge, None);
+}
+
+#[test]
+fn analyze_sums_batch_gaps_per_node_when_gaps_recorded() {
+    let (_dir, conn) = capture(vec![
+        gap(NODE, 10, 2),
+        gap(NODE, 50, 5),
+        gap(OTHER, 20, 1),
+        beat(OTHER, 0, 1, 1, 0, 0),
+    ]);
+    let loss = losses(&conn, None).unwrap();
+    // Sorted by address, and a node with batch gaps but no heartbeat is still listed.
+    let summary: Vec<_> =
+        loss.nodes.iter().map(|n| (n.mac.clone(), n.batches_lost, n.heartbeats)).collect();
+    assert_eq!(summary, vec![(OTHER.to_vec(), 1, 1), (NODE.to_vec(), 7, 0)]);
+}
+
+#[test]
+fn analyze_counts_missed_heartbeats_when_beat_skips() {
+    // Beats 3 and 4 never arrived. The counter jumps further, since it counts sweeps.
+    let (_dir, conn) = capture(vec![
+        beat(NODE, 0, 1, 1, 0, 0),
+        beat(NODE, 5_000, 4, 2, 0, 0),
+        beat(NODE, 20_000, 13, 5, 0, 0),
+        beat(NODE, 25_000, 16, 6, 0, 0),
+    ]);
+    let node = &losses(&conn, None).unwrap().nodes[0];
+    assert_eq!((node.heartbeats, node.heartbeats_missed), (4, 2));
+}
+
+#[test]
+fn analyze_ignores_duplicate_heartbeat_when_beat_repeats() {
+    // A radio retransmit or a replay: the same beat twice is one heartbeat and no loss.
+    let (_dir, conn) = capture(vec![
+        beat(NODE, 0, 1, 1, 0, 0),
+        beat(NODE, 5_000, 4, 2, 0, 0),
+        beat(NODE, 5_010, 4, 2, 0, 0),
+        beat(NODE, 10_000, 7, 3, 0, 0),
+    ]);
+    let node = &losses(&conn, None).unwrap().nodes[0];
+    assert_eq!((node.heartbeats, node.heartbeats_missed), (3, 0));
+}
+
+#[test]
+fn analyze_counts_across_wrap_when_beat_wraps() {
+    // 65535 then 1: beat 0 was lost.
+    let (_dir, conn) =
+        capture(vec![beat(NODE, 0, 900, u16::MAX, 0, 0), beat(NODE, 10_000, 903, 1, 0, 0)]);
+    let node = &losses(&conn, None).unwrap().nodes[0];
+    assert_eq!((node.heartbeats, node.heartbeats_missed), (2, 1));
+}
+
+#[test]
+fn analyze_ignores_gap_when_heartbeat_counter_falls() {
+    // The node rebooted during the silence, so the beat restarted and the gap is not loss.
+    let (_dir, conn) = capture(vec![beat(NODE, 0, 40, 20, 0, 0), beat(NODE, 60_000, 1, 1, 0, 0)]);
+    let node = &losses(&conn, None).unwrap().nodes[0];
+    assert_eq!((node.heartbeats, node.heartbeats_missed), (2, 0));
+}
+
+#[test]
+fn analyze_rebases_ring_refusals_when_node_reboots() {
+    let (_dir, conn) = capture(vec![
+        // 100 refused before the capture began: a baseline.
+        beat(NODE, 0, 10, 5, 100, 4),
+        beat(NODE, 5_000, 11, 6, 130, 6),
+        // Rebooted: the counts restarted, so all of each is new.
+        beat(NODE, 10_000, 1, 1, 20, 1),
+        beat(NODE, 11_000, 2, 2, 25, 1),
+    ]);
+    let node = &losses(&conn, None).unwrap().nodes[0];
+    assert_eq!((node.wifi_refused, node.ble_refused), (30 + 20 + 5, 2 + 1));
+}
+
+#[test]
+fn analyze_keeps_sessions_apart_when_session_filter_absent() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("wartui.db");
+    session(&path, vec![beat(NODE, 0, 1, 1, 10, 0), status(0, 100, 5, 10_000)]);
+    // The second session starts later with higher counts. Spanning the two would read the
+    // jump in beat as missed heartbeats and the difference as drops.
+    session(
+        &path,
+        vec![
+            beat(NODE, 600_000, 200, 120, 90, 0),
+            beat(NODE, 605_000, 201, 121, 95, 0),
+            status(600, 9_000, 400, 610_000),
+            status(605, 9_100, 410, 615_000),
+        ],
+    );
+    let conn = open_readonly(&path).unwrap();
+    let loss = losses(&conn, None).unwrap();
+    assert_eq!(loss.bridge, Some(BridgeLoss { received: 100, dropped: 10, reboots: 0 }));
+    let node = &loss.nodes[0];
+    assert_eq!((node.heartbeats, node.heartbeats_missed, node.wifi_refused), (3, 0, 5));
+}
+
+#[test]
+fn analyze_filters_rows_when_session_given() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("wartui.db");
+    session(&path, vec![beat(NODE, 0, 1, 1, 0, 0), gap(NODE, 10, 4)]);
+    session(&path, [steady(OTHER, 0, 2), vec![gap(OTHER, 10, 1)]].concat());
+    let conn = open_readonly(&path).unwrap();
+    let second: i64 = conn.query_row("SELECT max(id) FROM session", [], |r| r.get(0)).unwrap();
+
+    let loss = losses(&conn, Some(second)).unwrap();
+    assert_eq!(loss.nodes.len(), 1);
+    assert_eq!(loss.nodes[0].mac, OTHER);
+    assert_eq!((loss.nodes[0].heartbeats, loss.nodes[0].batches_lost), (2, 1));
+}
+
+#[test]
+fn analyze_walks_arrival_order_when_clock_steps_back() {
+    // The host clock steps back 30 s after the second heartbeat. Arrival order still has the
+    // beats rising by one, so nothing was missed and nothing restarted.
+    let (_dir, conn) = capture(vec![
+        beat(NODE, 0, 1, 1, 10, 0),
+        beat(NODE, 5_000, 2, 2, 12, 0),
+        beat(NODE, -25_000, 3, 3, 15, 0),
+        beat(NODE, -20_000, 4, 4, 16, 0),
+    ]);
+    let node = &losses(&conn, None).unwrap().nodes[0];
+    assert_eq!((node.heartbeats, node.heartbeats_missed, node.wifi_refused), (4, 0, 6));
+}
+
+#[test]
+fn analyze_treats_falling_beat_as_reboot_when_counter_rises() {
+    // The node rebooted out of range and came back with a higher sweep counter. The falling
+    // beat is the restart, so the ring counts are all new and beat 1 follows no loss.
+    let (_dir, conn) = capture(vec![
+        beat(NODE, 0, 10, 40, 100, 0),
+        beat(NODE, 5_000, 11, 41, 110, 0),
+        beat(NODE, 60_000, 50, 1, 30, 0),
+    ]);
+    let node = &losses(&conn, None).unwrap().nodes[0];
+    assert_eq!((node.heartbeats, node.heartbeats_missed, node.wifi_refused), (3, 0, 10 + 30));
+}
+
+#[test]
+fn analyze_counts_beats_lost_after_reboot_when_first_beat_heard_is_late() {
+    // Rebooted, and beats 1 to 11 since boot never arrived.
+    let (_dir, conn) = capture(vec![beat(NODE, 0, 40, 20, 0, 0), beat(NODE, 60_000, 1, 12, 0, 0)]);
+    let node = &losses(&conn, None).unwrap().nodes[0];
+    assert_eq!((node.heartbeats, node.heartbeats_missed), (2, 11));
+}

@@ -68,6 +68,7 @@ wartui ports      # list attached boards and their addresses
 wartui status     # check the link and count dropped frames
 wartui sniff      # decode every frame the fleet sends
 wartui reset      # reboot an unresponsive bridge
+wartui analyze    # summarise a capture and what it lost
 ```
 
 ## Subprojects

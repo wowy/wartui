@@ -17,6 +17,7 @@ use wartui_bridge::sim::{SimConfig, SimTransport};
 use wartui_bridge::{BridgeInfo, LinkEvent, LinkHandle, TransportError};
 use wartui_proto::link::{LoopPhase, Mac, ResetCause};
 
+mod analyze;
 mod bench;
 mod capture;
 mod config;
@@ -54,6 +55,8 @@ enum Command {
     Run(run::Args),
     /// Write a WiGLE CSV from a capture.
     Export(export::Args),
+    /// Summarise a capture: what it holds and what it lost on the way in.
+    Analyze(analyze::Args),
     /// Upload a capture to the WDGWars leaderboard.
     Upload(upload::Args),
     /// Print every frame the bridge hears.
@@ -86,6 +89,7 @@ async fn main() -> Result<()> {
         None => run::run(cli.run).await,
         Some(Command::Run(args)) => run::run(args).await,
         Some(Command::Export(args)) => export::run(args),
+        Some(Command::Analyze(args)) => analyze::run(args),
         Some(Command::Upload(args)) => upload::run(args),
         Some(Command::Sniff(args)) => sniff::run(args).await,
         Some(Command::Status(args)) => status::run(args).await,
