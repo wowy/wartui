@@ -762,8 +762,9 @@ fn take_link_byte(
         Ok(command) => {
             // Proof of a host, and only a frame that decoded counts: a board
             // running node firmware talks constantly and none of it is a
-            // frame, which `StallWatch` must not read as somebody waiting.
-            bridge.stall.note_host(bridge.now_ms());
+            // frame, which `StallWatch` must not read as somebody waiting. Whether
+            // this one asks for a reply decides if it can start the stall clock.
+            bridge.stall.note_host(bridge.now_ms(), command.asks_for_reply());
             handle(command, manager, sender, bridge, mac);
         }
         Err(err) => {

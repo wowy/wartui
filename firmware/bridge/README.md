@@ -125,10 +125,14 @@ So the firmware notices and reboots itself within about three seconds.
 waiting for them_. The firmware resets only when all four hold:
 
 - something is queued and this pass moved none of it;
-- a host frame has been decoded since the last byte moved;
+- a host frame that asks for a reply has been decoded since the last byte moved;
 - a host frame arrived within the last ten seconds, so that host is still present;
 - the endpoint has refused bytes for three seconds since both the first such frame and the first
   refusal.
+
+A panel push or a peer change asks for nothing, so it proves a host is present but cannot start the
+clock. A panel push is often the last thing the TUI sends before it quits, and counting it would
+reset the bridge after an ordinary quit.
 
 The unanswered host frame is what keeps a bridge on a bench with no host attached quiet forever. It
 also keeps the bridge from resetting every time an operator closes a window: a host that read what
@@ -138,6 +142,10 @@ has just quit still counts as present for longer than the three-second timeout.
 The single `Identify` that `wartui` sends on connecting is enough to clear a bridge that wedged
 beforehand. The rule lives in `wartui-proto` rather than here, so it is tested in microseconds
 instead of on a bench.
+
+Measured on a C6 left unread for two minutes: the reboot was heard 3.47 s after that `Identify`. The
+host sweep gives the remembered board 4.5 s when other boards are attached, so it outlasts the reset
+(`docs/phase-3-findings.md`).
 
 The reset _is_ the message, since any explanation would go out through the broken path. The `Ready`
 after it says `TxStalled`.

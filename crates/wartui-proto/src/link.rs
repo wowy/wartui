@@ -296,6 +296,28 @@ pub enum HostToBridge {
     },
 }
 
+impl HostToBridge {
+    /// Whether the bridge answers this command with a frame of its own.
+    ///
+    /// Exists for [`crate::stall::StallWatch`], which times a transmit path that
+    /// refuses bytes while a host *waits*. Only a command that asks for a reply can
+    /// leave a host waiting. A variant that merely may log or report an error does
+    /// not ask: that is not an answer the host is owed.
+    ///
+    /// Exhaustive on purpose, so that a new command has to say which it is.
+    #[must_use]
+    pub const fn asks_for_reply(&self) -> bool {
+        match self {
+            Self::Identify | Self::GetStatus | Self::SendEspNow { .. } => true,
+            Self::AddPeer { .. }
+            | Self::RemovePeer { .. }
+            | Self::Reset
+            | Self::ShowPanel { .. }
+            | Self::SetTxPower { .. } => false,
+        }
+    }
+}
+
 /// Events and replies the bridge sends to the host.
 // Unboxed for the reason `HostToBridge` gives.
 #[allow(clippy::large_enum_variant)]

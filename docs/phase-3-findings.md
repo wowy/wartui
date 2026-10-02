@@ -187,6 +187,39 @@ Row three is the false positive the first version had, and it survives the move:
 during the eight seconds the loop is blocked the detector is not consulted at
 all, and the pass that follows moves bytes, which is what clears the clock.
 
+### A frame that asks for nothing cannot go unanswered
+
+Found by reading the code, not measured on the bench yet. The firmware fed
+`StallWatch::note_host` every decoded frame, including `ShowPanel` (sent up to
+once a second on a panel bridge), `SetTxPower`, `AddPeer` and `RemovePeer`, none
+of which gets a reply. `SetTxPower` always travels with a `GetStatus`, whose
+answer clears it, but the others can be the host's last frame. If one was,
+no byte moved after it, so it stood as an unanswered frame. Once a node frame
+queued within the presence window the endpoint refused it with nobody reading,
+and the bridge reset itself with `TxStalled` three seconds later: a spurious
+reset after an ordinary quit. The existing quit test only covered an answered
+frame.
+
+`note_host` now takes whether the frame asks for a reply
+(`HostToBridge::asks_for_reply`: `Identify`, `GetStatus` and `SendEspNow`).
+Every frame still proves presence; only an asking frame starts the clock. The
+new tests pin both halves. Bench confirmation is still to do.
+
+### The sweep's probe gave up before the reset landed
+
+Measured on an ESP32-C6 bridge left plugged in and unread for two minutes. It had
+stopped draining its transmit endpoint: a bare open read nothing in 5 s, though its
+boot `Ready` was queued. `wartui status --bridge <mac>` sent one `Identify`, and
+the bridge rebooted itself (`reset=Software phase=TxStalled uptime_ms=0`) 3.47 s
+later, with no USB re-enumeration.
+
+A plain `wartui status` with two nodes also attached failed with "nothing has
+identified itself as a bridge". The sweep opened the remembered bridge first but
+gave it a probe's 1.5 s because other boards were attached, and the CLI stops at
+5 s, so no later pass came back to it. The remembered board now gets 4.5 s
+(`REMEMBERED_TICKS`, derived from `TX_STALL_TIMEOUT_MS`) when others are attached;
+only a board heard out for the full settle is forgotten.
+
 ## The RTC watchdog does not work here, and was removed
 
 A watchdog was the obvious companion fix: `esp_hal::init` disables every
