@@ -39,7 +39,22 @@ short packet. A lone `0x00` is an empty frame, which every receiver skips. If th
 full, the zero is owed and goes out first on the next pump.
 → `crates/wartui-proto/src/outbox.rs`
 
-## Open
+## The change on the bench
 
-- The change has not been measured on hardware yet. A capture on the CM5 host should show
-  no 64-byte frame held, and no lag spell that pairs frames microseconds apart.
+Measured on 2026-10-03 with the same host, bridge `9D:24` reflashed with the change, and the
+same two nodes: an 11.5-minute capture with `--record-raw` and `--log-file`.
+
+| | before | after |
+| --- | --- | --- |
+| frames of exactly 64 bytes on USB held until the next frame | 8 of 8 | 0 of 3 |
+| other frames held | 0 of 1,356 | 0 of 564 |
+| lag spells pairing frames microseconds apart | 7 in 29 min | none in 11.5 min |
+
+- Each of the three 64-byte frames arrived on its own, 263–785 ms ahead of the next frame,
+  and none logged a spell. Unchanged, all three would have: before the change every such
+  frame was held.
+- The one spell logged was the bridge's backlog at connect. The host attached 18.8 s after the
+  bridge booted, and the buffered frames, stamped from 0.2 s of uptime, arrived together. That
+  is what the lag estimate exists to catch.
+- Nothing was lost: 570 frames received and 570 read, no batch gaps, and 141 of 141 heartbeats
+  from each node.
