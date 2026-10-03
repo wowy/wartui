@@ -148,13 +148,15 @@ fn gps_line(snapshot: &Snapshot) -> (Severity, String) {
 /// How many nodes are heartbeating, and how many of those can be driven.
 ///
 /// Both numbers, because a node the bridge refused a peer slot, or that has not
-/// said what its radio is, is alive and undrivable.
+/// said what its radio is, is alive and undrivable. With none alive, a session that
+/// has seen no node yet is waiting, and one that has seen nodes has lost them.
 fn nodes_line(snapshot: &Snapshot) -> (Severity, String) {
     if !snapshot.link_up {
         return (Severity::Error, "link down".to_owned());
     }
     match (snapshot.alive, snapshot.assignable) {
-        (0, _) => (Severity::Error, "no nodes alive".to_owned()),
+        (0, _) if snapshot.nodes.is_empty() => (Severity::Warn, "waiting for nodes".to_owned()),
+        (0, _) => (Severity::Error, "all nodes silent".to_owned()),
         // Drivable first, so it reads as "nine of twenty" — the plain-English order,
         // and the one that puts the number an operator can act on at the front.
         (alive, drivable) if alive > drivable => {
@@ -341,7 +343,7 @@ mod tests {
         // Not a blank screen and not a zero pretending to be a measurement: each
         // line says which kind of nothing this is.
         assert_eq!(lines[0].text.as_str(), "gps: none");
-        assert_eq!(lines[1].text.as_str(), "no nodes alive");
+        assert_eq!(lines[1].text.as_str(), "waiting for nodes");
         assert_eq!(lines[4].text.as_str(), "rssi n/a");
     }
 
@@ -405,6 +407,26 @@ mod tests {
         let (level, text) = row(&fleet(&[Some(-40), Some(-45)]), 1);
         assert_eq!(level, Severity::Ok);
         assert_eq!(text, "nodes 2");
+    }
+
+    #[test]
+    fn panel_view_sets_warn_severity_for_nodes_when_none_seen_yet() {
+        let (level, text) = row(&quiet(), 1);
+        assert_eq!(level, Severity::Warn);
+        assert_eq!(text, "waiting for nodes");
+    }
+
+    #[test]
+    fn panel_view_sets_error_severity_for_nodes_when_all_seen_nodes_are_silent() {
+        let mut snapshot = fleet(&[Some(-50), Some(-60)]);
+        for node in &mut snapshot.nodes {
+            node.alive = false;
+        }
+        snapshot.alive = 0;
+        snapshot.assignable = 0;
+        let (level, text) = row(&snapshot, 1);
+        assert_eq!(level, Severity::Error);
+        assert_eq!(text, "all nodes silent");
     }
 
     #[test]
@@ -533,7 +555,13 @@ mod tests {
         });
         worst.position = Fix { source: PositionSource::Gps, ..Fix::none() };
 
-        for snapshot in [&worst, &quiet(), &gps(GpsStatus::NoReceiver, PositionSource::Static)] {
+        let mut silent = fleet(&[Some(-50)]);
+        silent.alive = 0;
+        silent.assignable = 0;
+
+        for snapshot in
+            [&worst, &quiet(), &silent, &gps(GpsStatus::NoReceiver, PositionSource::Static)]
+        {
             for line in &render(snapshot, wide) {
                 assert!(
                     line.text.len() <= usize::from(SCREEN.cols),
@@ -600,7 +628,7 @@ mod tests {
         let lines = render(&quiet(), short);
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].text.as_str(), "gps: none");
-        assert_eq!(lines[1].text.as_str(), "no nodes alive");
+        assert_eq!(lines[1].text.as_str(), "waiting for nodes");
     }
 
     #[test]
