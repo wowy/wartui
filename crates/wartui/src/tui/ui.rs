@@ -1,13 +1,14 @@
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use tokio::sync::mpsc;
 use wartui_core::engine::{Command, Snapshot};
-use wartui_proto::link::Mac;
 
 use super::Settings;
 use super::fleet::why_not_assignable;
-use super::settings::ConfigModal;
+use super::settings::{ConfigModal, ModalAction, apply, save_ble_node};
 use super::upload::Upload;
-use crate::{config, mac};
+#[cfg(test)]
+use crate::config;
+use crate::mac;
 
 /// The notice when the engine takes no command: its queue is full, or it has stopped
 /// and closed the channel.
@@ -18,24 +19,50 @@ pub(super) const ENGINE_BUSY: &str = "the engine is not accepting commands";
 #[derive(Debug, Default)]
 pub(super) struct Ui {
     /// The fleet table row under the cursor.
-    pub(super) selected: usize,
+    selected: usize,
     /// Scroll offset from the last frame. Recomputing from row 0 pins the cursor to
     /// the bottom edge, so `k` would scroll instead of move.
-    pub(super) fleet_offset: usize,
-    /// The notice, and the snapshot time it was sent.
-    pub(super) notice: Option<(String, i64)>,
+    fleet_offset: usize,
+    /// The notice, and the snapshot time it was sent. Set by [`Self::say`], read by
+    /// [`Self::notice`].
+    notice: Option<(String, i64)>,
     /// The settings modal, while open.
-    pub(super) modal: Option<ConfigModal>,
+    modal: Option<ConfigModal>,
     /// Where to save, and what was last saved there.
-    pub(super) settings: Settings,
+    settings: Settings,
     /// The upload `u` started.
-    pub(super) upload: Upload,
+    upload: Upload,
 }
 
 /// How long a notice replaces the footer's key help and totals.
 const NOTICE_MS: i64 = 4_000;
 
 impl Ui {
+    /// A fresh view that saves through `settings`.
+    pub(super) fn new(settings: Settings) -> Self {
+        Self { settings, ..Self::default() }
+    }
+
+    /// The fleet table row under the cursor.
+    pub(super) fn selected(&self) -> usize {
+        self.selected
+    }
+
+    /// The fleet table's scroll offset, for `draw_fleet` to read and update.
+    pub(super) fn fleet_offset_mut(&mut self) -> &mut usize {
+        &mut self.fleet_offset
+    }
+
+    /// The settings modal, while open.
+    pub(super) fn modal(&self) -> Option<&ConfigModal> {
+        self.modal.as_ref()
+    }
+
+    /// The upload `u` started.
+    pub(super) fn upload(&self) -> &Upload {
+        &self.upload
+    }
+
     /// Keep the cursor on a real row as the table grows and shrinks.
     pub(super) fn clamp(&mut self, node_count: usize) {
         self.selected = self.selected.min(node_count.saturating_sub(1));
@@ -100,31 +127,9 @@ impl Ui {
             }
         };
         if snapshot.remember_ble {
-            said.push_str(&self.remember_outcome(assigned));
+            said.push_str(&save_ble_node(&mut self.settings, assigned));
         }
         self.say(said, snapshot);
-    }
-
-    /// Save the Bluetooth node `b` just chose to `wartui.toml`, and return the notice
-    /// suffix in the style of [`Self::save_outcome`]. Nothing outside `[bluetooth]`
-    /// changes.
-    fn remember_outcome(&mut self, node: Option<Mac>) -> String {
-        let Some(path) = self.settings.config_path.clone() else {
-            return "; nowhere to save it — use --config".to_owned();
-        };
-        // Force `remember = true`. `b` saves only while the engine remembers, but
-        // after a failed save `saved` may still say off, and `load` rejects off
-        // beside a node.
-        let mut written = self.settings.saved.clone();
-        written.bluetooth = config::Bluetooth { remember: Some(true), node };
-        match config::save(&path, &written) {
-            Err(error) => format!("; could not save: {error}"),
-            Ok(()) => {
-                self.settings.saved = written;
-                let done = if node.is_some() { "remembered" } else { "forgotten" };
-                format!("; {done} in {}", path.display())
-            }
-        }
     }
 
     /// Clear the selected node's dedup ring on its next heartbeat.
@@ -162,6 +167,40 @@ impl Ui {
         self.say(said, snapshot);
     }
 
+    /// Open the settings modal, seeded from what is in force.
+    fn open_modal(&mut self, snapshot: &Snapshot) {
+        self.notice = None;
+        self.modal = Some(ConfigModal::open(snapshot, &self.settings));
+    }
+
+    /// A key while the settings modal is open. `view` routes each key to this or to
+    /// [`Self::on_key`], never both.
+    pub(super) fn on_modal_key(
+        &mut self,
+        key: KeyEvent,
+        snapshot: &Snapshot,
+        commands: &mpsc::Sender<Command>,
+    ) {
+        let Some(modal) = self.modal.as_mut() else { return };
+        match modal.on_key(key) {
+            // As in `on_key`, unbound keys leave the notice alone.
+            ModalAction::Stay => {}
+            ModalAction::Close => self.modal = None,
+            ModalAction::Apply => {
+                let text = apply(modal, snapshot, commands, &mut self.settings);
+                self.modal = None;
+                self.say(text, snapshot);
+            }
+        }
+    }
+
+    /// A bracketed paste, which only the settings modal's key row takes.
+    pub(super) fn on_modal_paste(&mut self, text: &str) {
+        if let Some(modal) = self.modal.as_mut() {
+            modal.paste(text);
+        }
+    }
+
     /// Take what the upload threads have reported since the last frame.
     pub(super) fn poll_upload(&mut self, snapshot: &Snapshot) {
         if let Some(text) = self.upload.poll() {
@@ -179,6 +218,18 @@ impl Ui {
     /// Show `text` as the notice.
     pub(super) fn say(&mut self, text: String, snapshot: &Snapshot) {
         self.notice = Some((text, snapshot.now_ms));
+    }
+
+    /// The file as last loaded or saved.
+    #[cfg(test)]
+    pub(super) fn saved(&self) -> &config::Config {
+        &self.settings.saved
+    }
+
+    /// The fleet table's scroll offset.
+    #[cfg(test)]
+    pub(super) fn fleet_offset(&self) -> usize {
+        self.fleet_offset
     }
 
     /// The notice, while it is recent enough to be about what just happened: a key, or
@@ -354,10 +405,8 @@ mod tests {
         let snapshot = busy();
         let node = snapshot.nodes[0].state.mac;
         let (tx, mut rx) = mpsc::channel(4);
-        let mut ui = Ui {
-            settings: Settings { config_path: Some(target.clone()), saved, ..Settings::default() },
-            ..Ui::default()
-        };
+        let mut ui =
+            Ui::new(Settings { config_path: Some(target.clone()), saved, ..Settings::default() });
 
         ui.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE), &snapshot, &tx);
 
@@ -385,10 +434,7 @@ mod tests {
         let target = dir.path().join("wartui.toml");
         let snapshot = Snapshot { remember_ble: false, ..busy() };
         let (tx, mut rx) = mpsc::channel(4);
-        let mut ui = Ui {
-            settings: Settings { config_path: Some(target.clone()), ..Settings::default() },
-            ..Ui::default()
-        };
+        let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
 
         ui.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE), &snapshot, &tx);
 
@@ -409,10 +455,8 @@ mod tests {
         config::save(&target, &saved).unwrap();
         let snapshot = busy();
         let (tx, _rx) = mpsc::channel(4);
-        let mut ui = Ui {
-            settings: Settings { config_path: Some(target.clone()), saved, ..Settings::default() },
-            ..Ui::default()
-        };
+        let mut ui =
+            Ui::new(Settings { config_path: Some(target.clone()), saved, ..Settings::default() });
 
         ui.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE), &snapshot, &tx);
 

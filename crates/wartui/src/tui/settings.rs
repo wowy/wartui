@@ -13,11 +13,12 @@ use ratatui::widgets::{Block, Clear, Paragraph};
 use tokio::sync::mpsc;
 use wartui_bridge::remember::BridgeMemory;
 use wartui_core::engine::{Command, Snapshot};
+use wartui_proto::link::Mac;
 use wartui_proto::plan::ChannelPool;
 
 use super::UploadTarget;
 use super::centered_rect;
-use super::ui::{ENGINE_BUSY, Ui};
+use super::ui::ENGINE_BUSY;
 use crate::config;
 use crate::run::PoolArg;
 
@@ -153,172 +154,187 @@ impl ConfigModal {
     }
 }
 
-impl Ui {
-    /// Open the settings modal, seeded from what is in force.
-    pub(super) fn open_modal(&mut self, snapshot: &Snapshot) {
-        self.notice = None;
-        let fleet_dbm = snapshot.tx_power / 4;
-        let bridge_dbm = snapshot.bridge_tx_power / 4;
-        self.modal = Some(ConfigModal {
+/// What a key did to the open modal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ModalAction {
+    /// Still open: a row moved, stepped or was typed into, or the key was unbound.
+    Stay,
+    /// `Esc` or `q`: close without applying.
+    Close,
+    /// `Enter`: apply every row, save, and close.
+    Apply,
+}
+
+impl ConfigModal {
+    /// Open the modal, seeded from what is in force.
+    pub(super) fn open(snapshot: &Snapshot, settings: &Settings) -> Self {
+        Self {
             selected: Field::Pool,
-            fleet_dbm,
-            bridge_dbm,
+            fleet_dbm: snapshot.tx_power / 4,
+            bridge_dbm: snapshot.bridge_tx_power / 4,
             pool: snapshot.pool.into(),
             remember_ble: snapshot.remember_ble,
             // The engine does not hold this one, so it comes from the handle.
-            remember_bridge: self.settings.bridge_memory.is_enabled(),
+            remember_bridge: settings.bridge_memory.is_enabled(),
             // Nor this one. It is what the file holds, hand edits included.
-            wdgwars_key: self.settings.saved.api_keys.wdgwars.clone(),
-        });
+            wdgwars_key: settings.saved.api_keys.wdgwars.clone(),
+        }
     }
 
-    /// A key while the settings modal is open. `view` routes each key to this or to
-    /// [`Self::on_key`], never both.
-    pub(super) fn on_modal_key(
-        &mut self,
-        key: KeyEvent,
-        snapshot: &Snapshot,
-        commands: &mpsc::Sender<Command>,
-    ) {
-        let Some(modal) = self.modal.as_mut() else { return };
+    /// A key while the modal is open.
+    pub(super) fn on_key(&mut self, key: KeyEvent) -> ModalAction {
         // The key row is a text field. Letters type there rather than move or close.
-        if modal.selected == Field::WdgwarsKey {
+        if self.selected == Field::WdgwarsKey {
             let control = key.modifiers.contains(KeyModifiers::CONTROL);
             match key.code {
                 KeyCode::Char('u') if control => {
-                    modal.wdgwars_key.clear();
-                    return;
+                    self.wdgwars_key.clear();
+                    return ModalAction::Stay;
                 }
                 KeyCode::Char(c) if !control => {
-                    modal.wdgwars_key.push(c);
-                    return;
+                    self.wdgwars_key.push(c);
+                    return ModalAction::Stay;
                 }
                 KeyCode::Backspace => {
-                    modal.wdgwars_key.pop();
-                    return;
+                    self.wdgwars_key.pop();
+                    return ModalAction::Stay;
                 }
-                KeyCode::Char(_) => return,
+                KeyCode::Char(_) => return ModalAction::Stay,
                 _ => {}
             }
         }
         match key.code {
-            KeyCode::Down | KeyCode::Char('j') => modal.selected = modal.selected.next(),
-            KeyCode::Up | KeyCode::Char('k') => modal.selected = modal.selected.prev(),
-            KeyCode::Left | KeyCode::Char('h') => modal.step(-1),
-            KeyCode::Right | KeyCode::Char('l') => modal.step(1),
-            KeyCode::Esc | KeyCode::Char('q') => self.modal = None,
-            KeyCode::Enter => self.apply(snapshot, commands),
-            // As in `on_key`, unbound keys leave the notice alone.
+            KeyCode::Down | KeyCode::Char('j') => self.selected = self.selected.next(),
+            KeyCode::Up | KeyCode::Char('k') => self.selected = self.selected.prev(),
+            KeyCode::Left | KeyCode::Char('h') => self.step(-1),
+            KeyCode::Right | KeyCode::Char('l') => self.step(1),
+            KeyCode::Esc | KeyCode::Char('q') => return ModalAction::Close,
+            KeyCode::Enter => return ModalAction::Apply,
             _ => {}
         }
+        ModalAction::Stay
     }
 
     /// A bracketed paste. Appended to the key when the modal is on its row, ignored
     /// anywhere else. Whitespace and control characters are dropped, so a trailing
     /// newline or a wrapped key's line breaks never reach the file.
-    pub(super) fn on_modal_paste(&mut self, text: &str) {
-        let Some(modal) = self.modal.as_mut() else { return };
-        if modal.selected != Field::WdgwarsKey {
+    pub(super) fn paste(&mut self, text: &str) {
+        if self.selected != Field::WdgwarsKey {
             return;
         }
-        modal.wdgwars_key.extend(text.chars().filter(|c| !c.is_whitespace() && !c.is_control()));
+        self.wdgwars_key.extend(text.chars().filter(|c| !c.is_whitespace() && !c.is_control()));
     }
+}
 
-    /// Send the modal's values to the engine, save them to `wartui.toml`, and close
-    /// the modal.
-    fn apply(&mut self, snapshot: &Snapshot, commands: &mpsc::Sender<Command>) {
-        let Some(modal) = self.modal.take() else { return };
-        // Reserve all three slots first, so a full queue applies none of the modal
-        // rather than part of it.
-        let Ok(mut permits) = commands.try_reserve_many(3) else {
-            self.say(ENGINE_BUSY.to_owned(), snapshot);
-            return;
-        };
-        let pool = ChannelPool::from(modal.pool);
-        for command in [
-            Command::SetPool { pool },
-            Command::SetTxPower { nodes: modal.fleet_dbm * 4, bridge: modal.bridge_dbm * 4 },
-            Command::RememberBle { on: modal.remember_ble },
-        ] {
-            if let Some(permit) = permits.next() {
-                permit.send(command);
-            }
+/// Send the modal's values to the engine and save them to `wartui.toml`. Returns the
+/// notice saying what happened.
+pub(super) fn apply(
+    modal: &ConfigModal,
+    snapshot: &Snapshot,
+    commands: &mpsc::Sender<Command>,
+    settings: &mut Settings,
+) -> String {
+    // Reserve all three slots first, so a full queue applies none of the modal rather
+    // than part of it.
+    let Ok(mut permits) = commands.try_reserve_many(3) else {
+        return ENGINE_BUSY.to_owned();
+    };
+    let pool = ChannelPool::from(modal.pool);
+    for command in [
+        Command::SetPool { pool },
+        Command::SetTxPower { nodes: modal.fleet_dbm * 4, bridge: modal.bridge_dbm * 4 },
+        Command::RememberBle { on: modal.remember_ble },
+    ] {
+        if let Some(permit) = permits.next() {
+            permit.send(command);
         }
-        // Same rule as `toggle_ble`. Power and pool reach a node in an assignment,
-        // and a fleet with no plan has none to send.
-        let planned = snapshot.plan.is_some();
-        let when = if planned { "on their next heartbeat" } else { "once the fleet is in a plan" };
-        let mut text = format!(
-            "tx power: fleet {} dBm, bridge {} dBm — nodes take it {when}",
-            modal.fleet_dbm, modal.bridge_dbm
-        );
-        if pool != snapshot.pool {
-            if planned {
-                text.push_str(&format!(
-                    "; pool {pool} — the fleet re-cuts on each node's next heartbeat"
-                ));
-            } else {
-                text.push_str(&format!(
-                    "; pool {pool} — nodes take it once the fleet is in a plan"
-                ));
-            }
-        }
-        let memory = &self.settings.bridge_memory;
-        if modal.remember_bridge != memory.is_enabled() {
-            memory.set_enabled(modal.remember_bridge);
-            if modal.remember_bridge {
-                // Remember the bridge connected now. A reconnect may never come.
-                if let Some(bridge) = &snapshot.bridge {
-                    memory.remember(bridge.mac);
-                }
-                text.push_str("; bridge remembered");
-            } else {
-                text.push_str("; bridge forgotten — each start scans for it");
-            }
-        }
-        text.push_str(&self.save_outcome(modal, snapshot));
-        self.say(text, snapshot);
     }
+    // Same rule as `toggle_ble`. Power and pool reach a node in an assignment, and a
+    // fleet with no plan has none to send.
+    let planned = snapshot.plan.is_some();
+    let when = if planned { "on their next heartbeat" } else { "once the fleet is in a plan" };
+    let mut text = format!(
+        "tx power: fleet {} dBm, bridge {} dBm — nodes take it {when}",
+        modal.fleet_dbm, modal.bridge_dbm
+    );
+    if pool != snapshot.pool {
+        if planned {
+            text.push_str(&format!(
+                "; pool {pool} — the fleet re-cuts on each node's next heartbeat"
+            ));
+        } else {
+            text.push_str(&format!("; pool {pool} — nodes take it once the fleet is in a plan"));
+        }
+    }
+    let memory = &settings.bridge_memory;
+    if modal.remember_bridge != memory.is_enabled() {
+        memory.set_enabled(modal.remember_bridge);
+        if modal.remember_bridge {
+            // Remember the bridge connected now. A reconnect may never come.
+            if let Some(bridge) = &snapshot.bridge {
+                memory.remember(bridge.mac);
+            }
+            text.push_str("; bridge remembered");
+        } else {
+            text.push_str("; bridge forgotten — each start scans for it");
+        }
+    }
+    text.push_str(&save_outcome(modal, snapshot, settings));
+    text
+}
 
-    /// Write every modal row to `wartui.toml`, and return the notice suffix: where it
-    /// saved, or why it did not.
-    ///
-    /// Overwrites the whole file, hand edits included. The rows are already applied,
-    /// so a failed save loses only the file.
-    ///
-    /// With remember on, the node saved is the remembered one, else the current holder
-    /// of the scan. The engine makes the same choice when the row turns on, and it
-    /// keeps a remembered node that has not been heard from yet. On success the written
-    /// config becomes [`Settings::saved`].
-    fn save_outcome(&mut self, modal: ConfigModal, snapshot: &Snapshot) -> String {
-        let Some(path) = self.settings.config_path.clone() else {
-            return "; nowhere to save it — use --config".to_owned();
-        };
-        let written = config::Config {
-            pool: Some(modal.pool),
-            tx_power: config::TxPower {
-                fleet: Some(modal.fleet_dbm),
-                bridge: Some(modal.bridge_dbm),
+/// Write every modal row to `wartui.toml`, and return the notice suffix: where it
+/// saved, or why it did not.
+///
+/// Overwrites the whole file, hand edits included. The rows are already applied, so a
+/// failed save loses only the file.
+///
+/// With remember on, the node saved is the remembered one, else the current holder of
+/// the scan. The engine makes the same choice when the row turns on, and it keeps a
+/// remembered node that has not been heard from yet. On success the written config
+/// becomes [`Settings::saved`].
+fn save_outcome(modal: &ConfigModal, snapshot: &Snapshot, settings: &mut Settings) -> String {
+    let written = config::Config {
+        pool: Some(modal.pool),
+        tx_power: config::TxPower { fleet: Some(modal.fleet_dbm), bridge: Some(modal.bridge_dbm) },
+        bluetooth: config::Bluetooth {
+            remember: Some(modal.remember_ble),
+            node: if modal.remember_ble {
+                snapshot.preferred_ble.or(snapshot.ble_node)
+            } else {
+                None
             },
-            bluetooth: config::Bluetooth {
-                remember: Some(modal.remember_ble),
-                node: if modal.remember_ble {
-                    snapshot.preferred_ble.or(snapshot.ble_node)
-                } else {
-                    None
-                },
-            },
-            bridge: config::Bridge { remember: Some(modal.remember_bridge) },
-            api_keys: config::ApiKeys { wdgwars: modal.wdgwars_key.trim().to_owned() },
-        };
-        match config::save(&path, &written) {
-            Err(error) => format!("; could not save: {error}"),
-            Ok(()) => {
-                self.settings.saved = written;
-                format!("; saved to {}", path.display())
-            }
-        }
-    }
+        },
+        bridge: config::Bridge { remember: Some(modal.remember_bridge) },
+        api_keys: config::ApiKeys { wdgwars: modal.wdgwars_key.trim().to_owned() },
+    };
+    save(settings, written)
+        .map(|path| format!("; saved to {}", path.display()))
+        .unwrap_or_else(|error| error)
+}
+
+/// Save the Bluetooth node `b` just chose to `wartui.toml`, and return the notice
+/// suffix in the style of [`save_outcome`]. Nothing outside `[bluetooth]` changes.
+pub(super) fn save_ble_node(settings: &mut Settings, node: Option<Mac>) -> String {
+    // Force `remember = true`. `b` saves only while the engine remembers, but after a
+    // failed save `saved` may still say off, and `load` rejects off beside a node.
+    let mut written = settings.saved.clone();
+    written.bluetooth = config::Bluetooth { remember: Some(true), node };
+    let done = if node.is_some() { "remembered" } else { "forgotten" };
+    save(settings, written)
+        .map(|path| format!("; {done} in {}", path.display()))
+        .unwrap_or_else(|error| error)
+}
+
+/// Write `written` to the config path, and on success make it [`Settings::saved`].
+/// Returns the path, or the notice suffix saying why nothing was written.
+fn save(settings: &mut Settings, written: config::Config) -> Result<PathBuf, String> {
+    let Some(path) = settings.config_path.clone() else {
+        return Err("; nowhere to save it — use --config".to_owned());
+    };
+    config::save(&path, &written).map_err(|error| format!("; could not save: {error}"))?;
+    settings.saved = written;
+    Ok(path)
 }
 
 /// The settings modal, centred over the live view behind it.
@@ -401,6 +417,7 @@ mod tests {
     use super::*;
     use crate::tui::draw;
     use crate::tui::fixtures::*;
+    use crate::tui::ui::Ui;
 
     #[test]
     fn ui_opens_modal_with_snapshot_values_when_c_key_is_pressed() {
@@ -412,7 +429,7 @@ mod tests {
 
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
 
-        let modal = ui.modal.as_ref().expect("the modal opened");
+        let modal = ui.modal().expect("the modal opened");
         assert_eq!(modal.selected, Field::Pool);
         assert_eq!(modal.fleet_dbm, 10);
         assert_eq!(modal.bridge_dbm, 15);
@@ -428,7 +445,7 @@ mod tests {
 
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
 
-        let modal = ui.modal.as_ref().expect("the modal opened");
+        let modal = ui.modal().expect("the modal opened");
         assert_eq!(modal.pool, PoolArg::Eu);
     }
 
@@ -439,11 +456,11 @@ mod tests {
         let mut ui = Ui::default();
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
         ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &snapshot, &tx);
-        assert_eq!(ui.modal.as_ref().expect("still open").selected, Field::Fleet);
+        assert_eq!(ui.modal().expect("still open").selected, Field::Fleet);
 
         ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &snapshot, &tx);
 
-        assert_eq!(ui.modal.as_ref().expect("still open").selected, Field::Bridge);
+        assert_eq!(ui.modal().expect("still open").selected, Field::Bridge);
     }
 
     #[test]
@@ -453,22 +470,18 @@ mod tests {
         let (tx, _rx) = mpsc::channel(4);
         let mut ui = Ui::default();
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
-        assert_eq!(
-            ui.modal.as_ref().expect("still open").selected,
-            Field::Pool,
-            "opens on the pool row"
-        );
+        assert_eq!(ui.modal().expect("still open").selected, Field::Pool, "opens on the pool row");
 
         ui.on_modal_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE), &snapshot, &tx);
         assert_eq!(
-            ui.modal.as_ref().expect("still open").pool,
+            ui.modal().expect("still open").pool,
             PoolArg::Us,
             "wraps from the start to the end"
         );
 
         ui.on_modal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &snapshot, &tx);
         assert_eq!(
-            ui.modal.as_ref().expect("still open").pool,
+            ui.modal().expect("still open").pool,
             PoolArg::All,
             "wraps from the end to the start"
         );
@@ -476,7 +489,7 @@ mod tests {
         for expected in [PoolArg::Eu, PoolArg::Us, PoolArg::All] {
             ui.on_modal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &snapshot, &tx);
             assert_eq!(
-                ui.modal.as_ref().expect("still open").pool,
+                ui.modal().expect("still open").pool,
                 expected,
                 "steps forward one at a time"
             );
@@ -490,11 +503,11 @@ mod tests {
         for closer in [KeyCode::Esc, KeyCode::Char('q')] {
             let mut ui = Ui::default();
             ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
-            assert!(ui.modal.is_some(), "the modal is open");
+            assert!(ui.modal().is_some(), "the modal is open");
 
             ui.on_modal_key(KeyEvent::new(closer, KeyModifiers::NONE), &snapshot, &tx);
 
-            assert!(ui.modal.is_none(), "{closer:?} closes it");
+            assert!(ui.modal().is_none(), "{closer:?} closes it");
             assert!(rx.try_recv().is_err(), "{closer:?} cancels rather than applies");
         }
     }
@@ -507,15 +520,15 @@ mod tests {
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
         ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &snapshot, &tx);
 
-        while ui.modal.as_ref().expect("still open").fleet_dbm > 2 {
+        while ui.modal().expect("still open").fleet_dbm > 2 {
             ui.on_modal_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE), &snapshot, &tx);
         }
 
         ui.on_modal_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE), &snapshot, &tx);
-        assert_eq!(ui.modal.as_ref().expect("still open").fleet_dbm, 20, "wraps below the floor");
+        assert_eq!(ui.modal().expect("still open").fleet_dbm, 20, "wraps below the floor");
 
         ui.on_modal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &snapshot, &tx);
-        assert_eq!(ui.modal.as_ref().expect("still open").fleet_dbm, 2, "wraps past the ceiling");
+        assert_eq!(ui.modal().expect("still open").fleet_dbm, 2, "wraps past the ceiling");
     }
 
     #[test]
@@ -533,7 +546,7 @@ mod tests {
 
         assert_eq!(rx.try_recv().unwrap(), Command::SetPool { pool: snapshot.pool });
         assert_eq!(rx.try_recv().unwrap(), Command::SetTxPower { nodes: 44, bridge: 60 });
-        assert!(ui.modal.is_none(), "applying closes the modal");
+        assert!(ui.modal().is_none(), "applying closes the modal");
         let notice = ui.notice(snapshot.now_ms).expect("a notice");
         assert!(notice.contains("fleet 11 dBm, bridge 15 dBm"), "{notice}");
     }
@@ -574,10 +587,7 @@ mod tests {
         let mut snapshot = busy();
         snapshot.pool = ChannelPool::All;
         let (tx, mut rx) = mpsc::channel(4);
-        let mut ui = Ui {
-            settings: Settings { config_path: Some(target.clone()), ..Settings::default() },
-            ..Ui::default()
-        };
+        let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
         ui.on_modal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &snapshot, &tx);
 
@@ -605,10 +615,7 @@ mod tests {
         // Holds the scan but is not remembered, so the save falls back on the holder.
         snapshot.ble_node = Some(snapshot.nodes[0].state.mac);
         let (tx, mut rx) = mpsc::channel(4);
-        let mut ui = Ui {
-            settings: Settings { config_path: Some(target.clone()), ..Settings::default() },
-            ..Ui::default()
-        };
+        let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
 
         ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
@@ -631,10 +638,7 @@ mod tests {
         let snapshot = busy();
         let (tx, mut rx) = mpsc::channel(2);
         tx.try_send(Command::ClearRing { mac: None }).unwrap();
-        let mut ui = Ui {
-            settings: Settings { config_path: Some(target.clone()), ..Settings::default() },
-            ..Ui::default()
-        };
+        let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
 
         ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
@@ -653,10 +657,7 @@ mod tests {
         let target = dir.path().join("wartui.toml");
         let snapshot = busy();
         let (tx, mut rx) = mpsc::channel(2);
-        let mut ui = Ui {
-            settings: Settings { config_path: Some(target.clone()), ..Settings::default() },
-            ..Ui::default()
-        };
+        let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
 
         ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
@@ -675,10 +676,7 @@ mod tests {
         snapshot.ble_node = Some(snapshot.nodes[0].state.mac);
         snapshot.preferred_ble = snapshot.ble_node;
         let (tx, mut rx) = mpsc::channel(4);
-        let mut ui = Ui {
-            settings: Settings { config_path: Some(target.clone()), ..Settings::default() },
-            ..Ui::default()
-        };
+        let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
         for _ in 0..3 {
             ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &snapshot, &tx);
@@ -693,7 +691,7 @@ mod tests {
         let file = config::load(Some(&target)).expect("a valid file");
         assert_eq!(file.bluetooth.remember, Some(false));
         assert_eq!(file.bluetooth.node, None, "turning it off forgets the node");
-        assert_eq!(ui.settings.saved.bluetooth.remember, Some(false), "the view knows it too");
+        assert_eq!(ui.saved().bluetooth.remember, Some(false), "the view knows it too");
     }
 
     #[test]
@@ -705,17 +703,13 @@ mod tests {
         for _ in 0..3 {
             ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &snapshot, &tx);
         }
-        let modal = ui.modal.as_ref().expect("still open");
+        let modal = ui.modal().expect("still open");
         assert_eq!(modal.selected, Field::RememberBle, "the row under the powers");
         assert!(modal.remember_ble, "seeded from the snapshot");
 
         for (key, expected) in [('h', false), ('h', true), ('l', false), ('l', true)] {
             ui.on_modal_key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE), &snapshot, &tx);
-            assert_eq!(
-                ui.modal.as_ref().expect("still open").remember_ble,
-                expected,
-                "{key} flips it"
-            );
+            assert_eq!(ui.modal().expect("still open").remember_ble, expected, "{key} flips it");
         }
     }
 
@@ -731,10 +725,7 @@ mod tests {
         snapshot.tx_power = 40; // 10 dBm
         snapshot.bridge_tx_power = 60; // 15 dBm
         let (tx, _rx) = mpsc::channel(4);
-        let mut ui = Ui {
-            settings: Settings { config_path: Some(target.clone()), ..Settings::default() },
-            ..Ui::default()
-        };
+        let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
 
         // Hand-edited while the modal is open: a different pool, fleet and bridge.
@@ -753,10 +744,7 @@ mod tests {
         let target = dir.path().join("wartui.toml");
         let snapshot = busy();
         let (tx, _rx) = mpsc::channel(4);
-        let mut ui = Ui {
-            settings: Settings { config_path: Some(target.clone()), ..Settings::default() },
-            ..Ui::default()
-        };
+        let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
         ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
         let after_first = std::fs::read_to_string(&target).expect("written by the first save");
@@ -774,10 +762,7 @@ mod tests {
         let target = dir.path().join("wartui.toml");
         let snapshot = busy();
         let (tx, _rx) = mpsc::channel(4);
-        let mut ui = Ui {
-            settings: Settings { config_path: Some(target.clone()), ..Settings::default() },
-            ..Ui::default()
-        };
+        let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
         // Only the fleet row moves. The pool row is left alone.
         ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &snapshot, &tx);
@@ -793,7 +778,7 @@ mod tests {
     fn ui_reports_nowhere_to_save_when_no_config_path_is_set() {
         let snapshot = busy();
         let (tx, _rx) = mpsc::channel(4);
-        let mut ui = Ui { settings: Settings::default(), ..Ui::default() };
+        let mut ui = Ui::new(Settings::default());
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
         ui.on_modal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &snapshot, &tx);
 
@@ -813,13 +798,10 @@ mod tests {
         std::fs::write(&blocker, "").unwrap();
         let snapshot = busy();
         let (tx, mut rx) = mpsc::channel(4);
-        let mut ui = Ui {
-            settings: Settings {
-                config_path: Some(blocker.join("wartui.toml")),
-                ..Settings::default()
-            },
-            ..Ui::default()
-        };
+        let mut ui = Ui::new(Settings {
+            config_path: Some(blocker.join("wartui.toml")),
+            ..Settings::default()
+        });
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
         ui.on_modal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &snapshot, &tx);
 
@@ -852,21 +834,18 @@ mod tests {
 
     /// A view saving to `dir/wartui.toml`, remembering the bridge in `dir/bridge`.
     fn ui_with_bridge_memory(dir: &std::path::Path, memory: &BridgeMemory) -> Ui {
-        Ui {
-            settings: Settings {
-                config_path: Some(dir.join("wartui.toml")),
-                bridge_memory: memory.clone(),
-                ..Settings::default()
-            },
-            ..Ui::default()
-        }
+        Ui::new(Settings {
+            config_path: Some(dir.join("wartui.toml")),
+            bridge_memory: memory.clone(),
+            ..Settings::default()
+        })
     }
 
     /// Open the modal and walk down to `field`. `↓` rather than `j`, which the key row
     /// would type.
     fn select(field: Field, ui: &mut Ui, snapshot: &Snapshot, tx: &mpsc::Sender<Command>) {
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), snapshot, tx);
-        while ui.modal.as_ref().expect("open").selected != field {
+        while ui.modal().expect("open").selected != field {
             ui.on_modal_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), snapshot, tx);
         }
     }
@@ -882,17 +861,13 @@ mod tests {
         let (tx, _rx) = mpsc::channel(4);
         let mut ui = Ui::default();
         select_remember_bridge(&mut ui, &snapshot, &tx);
-        let modal = ui.modal.as_ref().expect("still open");
+        let modal = ui.modal().expect("still open");
         assert_eq!(modal.selected, Field::RememberBridge, "the row under remember bt node");
         assert!(modal.remember_bridge, "seeded from the handle, on by default");
 
         for (key, expected) in [('h', false), ('h', true), ('l', false), ('l', true)] {
             ui.on_modal_key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE), &snapshot, &tx);
-            assert_eq!(
-                ui.modal.as_ref().expect("still open").remember_bridge,
-                expected,
-                "{key} flips it"
-            );
+            assert_eq!(ui.modal().expect("still open").remember_bridge, expected, "{key} flips it");
         }
     }
 
@@ -930,7 +905,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel(4);
         let mut ui = ui_with_bridge_memory(dir.path(), &memory);
         select_remember_bridge(&mut ui, &snapshot, &tx);
-        assert!(!ui.modal.as_ref().expect("still open").remember_bridge, "seeded off");
+        assert!(!ui.modal().expect("still open").remember_bridge, "seeded off");
         ui.on_modal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &snapshot, &tx);
 
         ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
@@ -1007,7 +982,7 @@ mod tests {
             press(&mut ui, KeyCode::Char(c), KeyModifiers::NONE, &snapshot);
         }
 
-        let modal = ui.modal.as_ref().expect("q types rather than closes");
+        let modal = ui.modal().expect("q types rather than closes");
         assert_eq!(modal.selected, Field::WdgwarsKey, "j and k type rather than move");
         assert_eq!(modal.wdgwars_key, "hjkq");
         assert!(rx.try_recv().is_err(), "nothing was sent");
@@ -1024,10 +999,10 @@ mod tests {
         }
 
         press(&mut ui, KeyCode::Backspace, KeyModifiers::NONE, &snapshot);
-        assert_eq!(ui.modal.as_ref().expect("open").wdgwars_key, "ab");
+        assert_eq!(ui.modal().expect("open").wdgwars_key, "ab");
 
         press(&mut ui, KeyCode::Char('u'), KeyModifiers::CONTROL, &snapshot);
-        assert_eq!(ui.modal.as_ref().expect("open").wdgwars_key, "");
+        assert_eq!(ui.modal().expect("open").wdgwars_key, "");
     }
 
     #[test]
@@ -1039,7 +1014,7 @@ mod tests {
 
         press(&mut ui, KeyCode::Up, KeyModifiers::NONE, &snapshot);
 
-        assert_eq!(ui.modal.as_ref().expect("open").selected, Field::RememberBridge);
+        assert_eq!(ui.modal().expect("open").selected, Field::RememberBridge);
     }
 
     #[test]
@@ -1052,7 +1027,7 @@ mod tests {
 
         ui.on_modal_paste(" abc\tdef\r\n");
 
-        let modal = ui.modal.as_ref().expect("a pasted newline does not save");
+        let modal = ui.modal().expect("a pasted newline does not save");
         assert_eq!(modal.wdgwars_key, "xabcdef");
     }
 
@@ -1063,12 +1038,12 @@ mod tests {
         let mut ui = Ui::default();
 
         ui.on_modal_paste("abc");
-        assert!(ui.modal.is_none(), "a paste opens nothing");
+        assert!(ui.modal().is_none(), "a paste opens nothing");
 
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
         ui.on_modal_paste("abc");
 
-        let modal = ui.modal.as_ref().expect("open");
+        let modal = ui.modal().expect("open");
         assert_eq!(modal.selected, Field::Pool);
         assert_eq!(modal.wdgwars_key, "");
     }
@@ -1079,19 +1054,16 @@ mod tests {
         let target = dir.path().join("wartui.toml");
         let snapshot = busy();
         let (tx, _rx) = mpsc::channel(4);
-        let mut ui = Ui {
-            settings: Settings { config_path: Some(target.clone()), ..Settings::default() },
-            ..Ui::default()
-        };
+        let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
         select_wdgwars(&mut ui, &snapshot, &tx);
         ui.on_modal_paste("abc123def456");
 
         press(&mut ui, KeyCode::Enter, KeyModifiers::NONE, &snapshot);
 
-        assert!(ui.modal.is_none(), "Enter saves and closes on the key row too");
+        assert!(ui.modal().is_none(), "Enter saves and closes on the key row too");
         let saved = config::load(Some(&target)).expect("a valid file");
         assert_eq!(saved.api_keys.wdgwars, "abc123def456");
-        assert_eq!(ui.settings.saved.api_keys.wdgwars, "abc123def456", "the view knows it too");
+        assert_eq!(ui.saved().api_keys.wdgwars, "abc123def456", "the view knows it too");
     }
 
     #[test]
@@ -1102,12 +1074,10 @@ mod tests {
         let saved = config::load(Some(&target)).unwrap();
         let snapshot = busy();
         let (tx, _rx) = mpsc::channel(4);
-        let mut ui = Ui {
-            settings: Settings { config_path: Some(target.clone()), saved, ..Settings::default() },
-            ..Ui::default()
-        };
+        let mut ui =
+            Ui::new(Settings { config_path: Some(target.clone()), saved, ..Settings::default() });
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
-        assert_eq!(ui.modal.as_ref().expect("open").wdgwars_key, "by-hand-key", "seeded");
+        assert_eq!(ui.modal().expect("open").wdgwars_key, "by-hand-key", "seeded");
 
         press(&mut ui, KeyCode::Enter, KeyModifiers::NONE, &snapshot);
 
@@ -1143,7 +1113,7 @@ mod tests {
             api_keys: config::ApiKeys { wdgwars: "abcSECRETxyz".to_owned() },
             ..config::Config::default()
         };
-        let mut ui = Ui { settings: Settings { saved, ..Settings::default() }, ..Ui::default() };
+        let mut ui = Ui::new(Settings { saved, ..Settings::default() });
         let (tx, _rx) = mpsc::channel(4);
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
 
@@ -1165,7 +1135,7 @@ mod tests {
             api_keys: config::ApiKeys { wdgwars: key.to_owned() },
             ..config::Config::default()
         };
-        let mut ui = Ui { settings: Settings { saved, ..Settings::default() }, ..Ui::default() };
+        let mut ui = Ui::new(Settings { saved, ..Settings::default() });
         let (tx, _rx) = mpsc::channel(4);
         select(field, &mut ui, &snapshot, &tx);
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("test backend");

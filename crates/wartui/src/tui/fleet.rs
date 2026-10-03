@@ -19,11 +19,17 @@ use wartui_core::record::AdminOutcome;
 use wartui_proto::plan::{ChannelSet, Radio, SCAN_CHANNELS};
 
 use super::format::ago;
-use super::ui::Ui;
 use crate::short_mac;
 
-/// Draw the fleet table into `area`, keeping the cursor row in view.
-pub(super) fn draw_fleet(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot, ui: &mut Ui) {
+/// Draw the fleet table into `area` with row `selected` under the cursor. `offset` is
+/// the scroll offset from the last frame, updated to keep the cursor in view.
+pub(super) fn draw_fleet(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    snapshot: &Snapshot,
+    selected: usize,
+    offset: &mut usize,
+) {
     // The `lost` column appears once a node has lost a batch, like the footer's
     // `lost N`. A column of zeros wastes width.
     let show_lost = snapshot.nodes.iter().any(|n| n.state.batches_lost > 0);
@@ -75,10 +81,10 @@ pub(super) fn draw_fleet(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot,
         .row_highlight_style(Style::new().add_modifier(Modifier::REVERSED));
 
     let mut state = TableState::new()
-        .with_offset(ui.fleet_offset)
-        .with_selected((!snapshot.nodes.is_empty()).then_some(ui.selected));
+        .with_offset(*offset)
+        .with_selected((!snapshot.nodes.is_empty()).then_some(selected));
     frame.render_stateful_widget(table, area, &mut state);
-    ui.fleet_offset = state.offset();
+    *offset = state.offset();
 }
 
 /// The channels column's width, which caps how much of the list fits.
@@ -275,12 +281,15 @@ fn channel_cell(set: ChannelSet, width: usize) -> String {
 mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use tokio::sync::mpsc;
     use wartui_core::engine::Assignment;
     use wartui_proto::plan::{ChannelPool, IndexRun};
 
     use super::*;
     use crate::tui::draw;
     use crate::tui::fixtures::*;
+    use crate::tui::ui::Ui;
 
     #[test]
     fn fleet_table_displays_chip_and_mac_suffix_when_rendering_nodes() {
@@ -515,7 +524,14 @@ mod tests {
         // Wide enough for the side-by-side layout. Short enough that the fleet box has
         // fewer data rows than the fifteen nodes above.
         let mut terminal = Terminal::new(TestBackend::new(200, 16)).expect("test backend");
-        let mut ui = Ui { selected: 14, ..Default::default() };
+        let (tx, _rx) = mpsc::channel(4);
+        let press = |ui: &mut Ui, code| {
+            ui.on_key(KeyEvent::new(code, KeyModifiers::NONE), &snapshot, &tx);
+        };
+        let mut ui = Ui::default();
+        for _ in 0..14 {
+            press(&mut ui, KeyCode::Down);
+        }
         terminal.draw(|frame| draw(frame, &snapshot, &mut ui)).expect("drawing");
         let rendered = terminal.backend().to_string();
         assert!(rendered.contains("57:0E"), "the selected node scrolled into view: {rendered}");
@@ -523,11 +539,12 @@ mod tests {
 
         // Moving the cursor up one row inside the window must not move the window.
         // The offset kept in `Ui` is what stops a recompute from row 0.
-        let offset_at_bottom = ui.fleet_offset;
-        ui.selected -= 1;
+        let offset_at_bottom = ui.fleet_offset();
+        press(&mut ui, KeyCode::Up);
         terminal.draw(|frame| draw(frame, &snapshot, &mut ui)).expect("drawing");
         assert_eq!(
-            ui.fleet_offset, offset_at_bottom,
+            ui.fleet_offset(),
+            offset_at_bottom,
             "the window moved for a cursor move inside it"
         );
     }

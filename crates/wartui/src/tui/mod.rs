@@ -79,7 +79,7 @@ async fn view(
     settings: Settings,
 ) -> Result<()> {
     let (mut inputs, running) = spawn_input();
-    let mut ui = Ui { settings, ..Ui::default() };
+    let mut ui = Ui::new(settings);
     // Built before the loop, not inside the arm below. See `crate::Terminate`.
     let mut terminate = crate::Terminate::new();
     let outcome = loop {
@@ -96,10 +96,10 @@ async fn view(
                 Some(Input::Key(key)) if is_ctrl_c(key) => break Ok(()),
                 // The upload's confirm opens over everything, settings included, so
                 // it answers first.
-                Some(Input::Key(key)) if ui.upload.confirming() => ui.on_confirm_key(key, &current),
+                Some(Input::Key(key)) if ui.upload().confirming() => ui.on_confirm_key(key, &current),
                 // An open modal gets the key ahead of `quits()`, so `esc` and `q`
                 // close the modal, not the view.
-                Some(Input::Key(key)) if ui.modal.is_some() => {
+                Some(Input::Key(key)) if ui.modal().is_some() => {
                     ui.on_modal_key(key, &current, commands);
                 }
                 Some(Input::Key(key)) if quits(key) => break Ok(()),
@@ -129,7 +129,7 @@ fn draw(frame: &mut Frame<'_>, snapshot: &Snapshot, ui: &mut Ui) {
     // cannot push them off screen.
     let faults = fault_lines(&faults(snapshot), frame.area().width);
     let drops = u16::from(drop_line(&snapshot.counters).is_some());
-    let upload = u16::from(ui.upload.status().is_some());
+    let upload = u16::from(ui.upload().status().is_some());
     let footer_height = 1 + drops + upload + u16::try_from(faults.len()).unwrap_or(u16::MAX);
     let [header, body, footer] = Layout::vertical([
         Constraint::Length(4),
@@ -147,14 +147,14 @@ fn draw(frame: &mut Frame<'_>, snapshot: &Snapshot, ui: &mut Ui) {
     } else {
         Layout::vertical([Constraint::Percentage(45), Constraint::Percentage(55)]).areas(body)
     };
-    draw_fleet(frame, fleet, snapshot, ui);
+    draw_fleet(frame, fleet, snapshot, ui.selected(), ui.fleet_offset_mut());
     draw_stream(frame, stream, snapshot);
     draw_footer(frame, footer, snapshot, ui, &faults);
 
-    if let Some(modal) = &ui.modal {
+    if let Some(modal) = ui.modal() {
         draw_settings_modal(frame, modal);
     }
-    if let Some(lines) = ui.upload.confirm_lines() {
+    if let Some(lines) = ui.upload().confirm_lines() {
         draw_confirm_modal(frame, &lines);
     }
 }

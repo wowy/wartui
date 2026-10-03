@@ -69,7 +69,7 @@ pub(super) fn draw_footer(
 
     // Its own line for the same reason. It stays after the upload ends, until the
     // next `u`.
-    if let Some(status) = ui.upload.status() {
+    if let Some(status) = ui.upload().status() {
         lines.push(Line::from(format!("  {status}")));
     }
 
@@ -536,7 +536,8 @@ mod tests {
         let mut snapshot = busy();
         snapshot.counters.wifi_dropped = 12;
         snapshot.counters.ble_dropped = 4;
-        let mut ui = Ui { notice: Some(("a notice".to_owned(), snapshot.now_ms)), ..Ui::default() };
+        let mut ui = Ui::default();
+        ui.say("a notice".to_owned(), &snapshot);
         let mut terminal = Terminal::new(TestBackend::new(200, 40)).expect("test backend");
         terminal.draw(|frame| draw(frame, &snapshot, &mut ui)).expect("drawing");
         let screen = terminal.backend().to_string();

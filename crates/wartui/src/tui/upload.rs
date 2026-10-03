@@ -273,7 +273,7 @@ mod tests {
         let mut saved = config::Config::default();
         saved.api_keys.wdgwars = "secret".to_owned();
         let upload = UploadTarget { db, base };
-        Ui { settings: Settings { saved, upload, ..Settings::default() }, ..Ui::default() }
+        Ui::new(Settings { saved, upload, ..Settings::default() })
     }
 
     /// A capture holding two positioned networks.
@@ -293,7 +293,7 @@ mod tests {
     fn poll_until(ui: &mut Ui, snapshot: &Snapshot, secs: u64, done: impl Fn(&Ui) -> bool) {
         let deadline = Instant::now() + Duration::from_secs(secs);
         while !done(ui) {
-            assert!(Instant::now() < deadline, "timed out: {:?}", ui.upload);
+            assert!(Instant::now() < deadline, "timed out: {:?}", ui.upload());
             std::thread::sleep(Duration::from_millis(20));
             ui.poll_upload(snapshot);
         }
@@ -313,7 +313,7 @@ mod tests {
             ui.notice(snapshot.now_ms),
             Some("no WDGWars API key; paste one in settings (c)")
         );
-        assert!(!ui.upload.confirming());
+        assert!(!ui.upload().confirming());
     }
 
     #[test]
@@ -322,8 +322,8 @@ mod tests {
         let snapshot = busy();
         let mut ui = uploading(two_rows(&dir), "http://127.0.0.1:9".to_owned());
         press_u(&mut ui, &snapshot);
-        assert_eq!(ui.upload.status(), Some("upload: preparing…"));
-        poll_until(&mut ui, &snapshot, 10, |ui| ui.upload.confirming());
+        assert_eq!(ui.upload().status(), Some("upload: preparing…"));
+        poll_until(&mut ui, &snapshot, 10, |ui| ui.upload().confirming());
 
         let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("test backend");
         terminal.draw(|frame| draw(frame, &snapshot, &mut ui)).expect("drawing");
@@ -341,10 +341,10 @@ mod tests {
         let snapshot = busy();
         let mut ui = uploading(two_rows(&dir), base);
         press_u(&mut ui, &snapshot);
-        poll_until(&mut ui, &snapshot, 10, |ui| ui.upload.confirming());
+        poll_until(&mut ui, &snapshot, 10, |ui| ui.upload().confirming());
 
         ui.on_confirm_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE), &snapshot);
-        assert!(!ui.upload.confirming());
+        assert!(!ui.upload().confirming());
         assert_eq!(ui.notice(snapshot.now_ms), Some("not uploaded"));
         std::thread::sleep(Duration::from_millis(200));
         listener.set_nonblocking(true).unwrap();
@@ -364,12 +364,12 @@ mod tests {
         let snapshot = busy();
         let mut ui = uploading(two_rows(&dir), base);
         press_u(&mut ui, &snapshot);
-        poll_until(&mut ui, &snapshot, 10, |ui| ui.upload.confirming());
+        poll_until(&mut ui, &snapshot, 10, |ui| ui.upload().confirming());
         ui.on_confirm_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE), &snapshot);
-        assert!(ui.upload.status().is_some_and(|s| s.starts_with("upload: sending ")));
+        assert!(ui.upload().status().is_some_and(|s| s.starts_with("upload: sending ")));
         // Through `wait`'s first poll, two seconds in.
         poll_until(&mut ui, &snapshot, 20, |ui| {
-            ui.upload.status().is_some_and(|s| s.contains("imported"))
+            ui.upload().status().is_some_and(|s| s.contains("imported"))
         });
 
         let mut terminal = Terminal::new(TestBackend::new(200, 40)).expect("test backend");
@@ -387,13 +387,13 @@ mod tests {
         let snapshot = busy();
         let mut ui = uploading(two_rows(&dir), base);
         press_u(&mut ui, &snapshot);
-        poll_until(&mut ui, &snapshot, 10, |ui| ui.upload.confirming());
+        poll_until(&mut ui, &snapshot, 10, |ui| ui.upload().confirming());
         ui.on_confirm_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE), &snapshot);
         poll_until(&mut ui, &snapshot, 10, |ui| {
-            ui.upload.status().is_some_and(|s| s.starts_with("upload failed:"))
+            ui.upload().status().is_some_and(|s| s.starts_with("upload failed:"))
         });
         assert_eq!(
-            ui.upload.status(),
+            ui.upload().status(),
             Some("upload failed: WDGWars rejected the API key: bad key")
         );
         server.join().unwrap();
