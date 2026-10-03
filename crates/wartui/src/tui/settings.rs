@@ -228,16 +228,19 @@ impl ConfigModal {
 
 /// Send the modal's values to the engine and save them to `wartui.toml`. Returns the
 /// notice saying what happened.
+///
+/// Fails with [`ENGINE_BUSY`] when the engine takes no command, and then saves
+/// nothing: the file would claim settings the engine is not running.
 pub(super) fn apply(
     modal: &ConfigModal,
     snapshot: &Snapshot,
     commands: &mpsc::Sender<Command>,
     settings: &mut Settings,
-) -> String {
+) -> Result<String, &'static str> {
     // Reserve all three slots first, so a full queue applies none of the modal rather
     // than part of it.
     let Ok(mut permits) = commands.try_reserve_many(3) else {
-        return ENGINE_BUSY.to_owned();
+        return Err(ENGINE_BUSY);
     };
     let pool = ChannelPool::from(modal.pool);
     for command in [
@@ -280,7 +283,7 @@ pub(super) fn apply(
         }
     }
     text.push_str(&save_outcome(modal, snapshot, settings));
-    text
+    Ok(text)
 }
 
 /// Write every modal row to `wartui.toml`, and return the notice suffix: where it
@@ -649,6 +652,28 @@ mod tests {
         assert!(!target.exists(), "nothing was written");
         let notice = ui.notice(snapshot.now_ms).expect("a notice");
         assert!(notice.contains("not accepting commands"), "{notice}");
+    }
+
+    #[test]
+    fn ui_keeps_modal_open_with_edits_when_enter_pressed_with_engine_busy() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wartui.toml");
+        let snapshot = busy();
+        let (tx, _rx) = mpsc::channel(2);
+        tx.try_send(Command::ClearRing { mac: None }).unwrap();
+        let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
+        ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
+        ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &snapshot, &tx);
+        ui.on_modal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &snapshot, &tx);
+
+        ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
+
+        // Open with the edit, so the operator can press Enter again once the engine
+        // takes commands.
+        let modal = ui.modal().expect("still open");
+        assert_eq!(modal.fleet_dbm, 3, "the edit survives");
+        assert!(!target.exists(), "nothing was written");
+        assert_eq!(ui.notice(snapshot.now_ms), Some(ENGINE_BUSY));
     }
 
     #[test]

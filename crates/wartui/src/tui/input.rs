@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use anyhow::{Context, Result};
 use ratatui::crossterm::event::{self, Event as TermEvent, KeyCode, KeyEvent, KeyModifiers};
 use tokio::sync::mpsc;
 
@@ -20,7 +21,10 @@ pub(super) enum Input {
 }
 
 /// Start the input thread. Clear the returned flag to stop it.
-pub(super) fn spawn_input() -> (mpsc::Receiver<Input>, Arc<AtomicBool>) {
+///
+/// Fails when the thread cannot start. Without it no key reaches the view, not even
+/// ctrl-c, which raw mode delivers as a key.
+pub(super) fn spawn_input() -> Result<(mpsc::Receiver<Input>, Arc<AtomicBool>)> {
     let (tx, rx) = mpsc::channel(16);
     let running = Arc::new(AtomicBool::new(true));
     std::thread::Builder::new()
@@ -45,14 +49,8 @@ pub(super) fn spawn_input() -> (mpsc::Receiver<Input>, Arc<AtomicBool>) {
                 }
             }
         })
-        .map_or_else(|_| warn_no_input_thread(), |_| ());
-    (rx, running)
-}
-
-/// Say the input thread did not start. ctrl-c still quits, but without this the
-/// operator would press `q` at a view that never closes.
-fn warn_no_input_thread() {
-    eprintln!("could not start the keyboard thread; use ctrl-c to quit");
+        .context("starting the keyboard thread")?;
+    Ok((rx, running))
 }
 
 /// Whether `key` quits the view: `q`, `Esc` or ctrl-c.

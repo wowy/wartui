@@ -411,9 +411,10 @@ The rows are the pool (`all → eu → us`), the nodes' transmit power and the b
 key row, letters type, so `h` `j` `k` `l` `q` neither move nor close; `↑` leaves it, and the footer
 shows the `ctrl-u` tip while a key is entered. The key shows its last three characters, up to six
 bullets before them, and from ten characters its first one to three. `Enter` sends the rows to the
-engine, or none, and writes every row shown to `pool`, `[tx-power]`, `[bluetooth]`, `[bridge]`, and
+engine and writes every row shown to `pool`, `[tx-power]`, `[bluetooth]`, `[bridge]`, and
 `[api-keys]`, whatever was there. The bridge takes its power on its next status poll, and settings
-closes. A moved pool re-cuts the fleet. Each node takes its new share and power on its next
+closes. If the engine is not accepting commands, nothing is sent or written, and settings stays
+open with its edits. A moved pool re-cuts the fleet. Each node takes its new share and power on its next
 heartbeat, emptying its dedup ring when its share changes.
 
 ## How channels are assigned

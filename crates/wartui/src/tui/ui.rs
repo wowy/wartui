@@ -186,11 +186,14 @@ impl Ui {
             // As in `on_key`, unbound keys leave the notice alone.
             ModalAction::Stay => {}
             ModalAction::Close => self.modal = None,
-            ModalAction::Apply => {
-                let text = apply(modal, snapshot, commands, &mut self.settings);
-                self.modal = None;
-                self.say(text, snapshot);
-            }
+            ModalAction::Apply => match apply(modal, snapshot, commands, &mut self.settings) {
+                Ok(text) => {
+                    self.modal = None;
+                    self.say(text, snapshot);
+                }
+                // The modal stays open with its edits, for another `Enter`.
+                Err(busy) => self.say(busy.to_owned(), snapshot),
+            },
         }
     }
 

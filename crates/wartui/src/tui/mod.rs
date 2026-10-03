@@ -78,7 +78,8 @@ async fn view(
     commands: &mpsc::Sender<Command>,
     settings: Settings,
 ) -> Result<()> {
-    let (mut inputs, running) = spawn_input();
+    // Inside `view`, so a failure still restores the terminal and stops the engine.
+    let (mut inputs, running) = spawn_input()?;
     let mut ui = Ui::new(settings);
     // Built before the loop, not inside the arm below. See `crate::Terminate`.
     let mut terminate = crate::Terminate::new();
