@@ -870,7 +870,7 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot) {
                 bridge.chip,
                 bridge.fw_version
             ),
-            Color::Green,
+            if snapshot.position.is_located() { Color::Green } else { Color::Red },
         )
     } else {
         ("waiting for bridge".to_owned(), Color::Red)
@@ -902,12 +902,12 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot) {
 ///
 /// Displays how many nodes are healthy, or error states around planning the fleet.
 fn planning(snapshot: &Snapshot) -> Span<'static> {
-    let text = match snapshot.plan {
-        Some(plan) => format!("{} of {}", plan.node_count(), snapshot.nodes.len()),
-        None if snapshot.alive > 0 => "no node it can drive".to_owned(),
-        None => "no nodes detected".to_owned(),
+    let (text, color) = match snapshot.plan {
+        Some(plan) => (format!("{} of {}", plan.node_count(), snapshot.nodes.len()), Color::Green),
+        None if snapshot.alive > 0 => ("no node it can drive".to_owned(), Color::Red),
+        None => ("no nodes detected".to_owned(), Color::Yellow),
     };
-    Span::styled(text, Style::new().fg(Color::Green))
+    Span::styled(text, Style::new().fg(color))
 }
 
 /// Current GPS position, or a warning
@@ -1206,7 +1206,8 @@ fn observation_row(entry: &TailEntry) -> Row<'static> {
         RecordKind::Ble => Style::new().fg(Color::Blue),
     };
     let ssid = if entry.ssid.is_empty() {
-        Span::styled("<hidden>", Style::new().fg(Color::DarkGray))
+        let text = if entry.kind == RecordKind::Wifi { "<hidden>" } else { "<n/a>" };
+        Span::styled(text, Style::new().fg(Color::DarkGray))
     } else {
         Span::raw(entry.ssid.clone())
     };
@@ -1221,7 +1222,7 @@ fn observation_row(entry: &TailEntry) -> Row<'static> {
     ])
 }
 
-/// How many lines of faults the footer may take before it starts summarising.
+/// How many lines of faults the footer may take before it starts summarizing.
 ///
 /// The fleet table has to keep some of the terminal.
 const MAX_FAULT_LINES: usize = 3;
