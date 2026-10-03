@@ -21,8 +21,14 @@
 //! lacks.
 //!
 //! Frames are accounted for from bridge to store. Each `bridge_status` row carries
-//! `host_frames`, the frames this host had read when the reply arrived, so `host_read`
-//! pairs exactly with `received`: the difference is frames lost on USB. What the host read
+//! `host_frames`, the frames this host had read when the reply arrived, so `host_read` is
+//! the frames the host read between the first status reply and the last. `received` less
+//! the bridge's own drops less `host_read` is the frames lost between the bridge's queue and
+//! the host. That figure is approximate: a status reply is a priority frame and overtakes
+//! the frames queued in the bridge's bulk ring, which `rx_count` counts and `host_frames`
+//! does not yet. So it is off by up to the frames queued at the first and last row, at most
+//! the ring's 24 each, and saturates at 0 when a baseline taken mid-backlog makes the host
+//! appear to have read more than the bridge passed on. What the host read
 //! and chose not to store is broken down in [`HostLoss`] from the `host_status` rows,
 //! whose counts run from the engine's start and are read as the difference between the
 //! first row, written as the capture starts, and the last. Their peaks are per row, so [`HostLoss`] takes the largest, and
@@ -53,7 +59,7 @@ pub struct LossSummary {
     pub host: Option<HostLoss>,
 }
 
-/// What the bridge received and dropped during the capture. Exact.
+/// What the bridge received and dropped during the capture. Exact but for `usb_lost`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct BridgeLoss {
     /// Frames the bridge received over the air.
@@ -62,9 +68,13 @@ pub struct BridgeLoss {
     pub dropped: u64,
     /// Times the bridge's uptime fell, which is a restart.
     pub reboots: u64,
-    /// Frames the host read off the link over the same replies as `received`. Less than
-    /// `received` by the frames lost on USB.
+    /// Frames the host read off the link between the first status reply and the last.
     pub host_read: u64,
+    /// Frames lost between the bridge's queue and the host: `received` less `dropped` less
+    /// `host_read`, saturating at 0. Approximate to within the frames queued in the bridge's
+    /// bulk ring at the first and last reply, at most 24 each, because a status reply
+    /// overtakes them.
+    pub usb_lost: u64,
 }
 
 /// What the host did with the frames it read, and how it held up. Counts run from the
@@ -165,6 +175,9 @@ fn bridge(conn: &Connection) -> rusqlite::Result<Option<BridgeLoss>> {
             loss.host_read += host_frames.saturating_sub(prev_host);
         }
         prev = Some((received, dropped, uptime, host_frames));
+    }
+    if let Some(loss) = &mut loss {
+        loss.usb_lost = loss.received.saturating_sub(loss.dropped).saturating_sub(loss.host_read);
     }
     Ok(loss)
 }

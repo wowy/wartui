@@ -96,7 +96,7 @@ fn analyze_counts_bridge_drops_from_baseline_when_capture_starts_with_drops() {
     let loss = losses(&conn).unwrap();
     assert_eq!(
         loss.bridge,
-        Some(BridgeLoss { received: 900, dropped: 30, reboots: 0, host_read: 0 })
+        Some(BridgeLoss { received: 900, dropped: 30, reboots: 0, host_read: 0, usb_lost: 870 })
     );
 }
 
@@ -112,7 +112,7 @@ fn analyze_adds_whole_value_when_bridge_dropped_count_falls() {
     let loss = losses(&conn).unwrap();
     assert_eq!(
         loss.bridge,
-        Some(BridgeLoss { received: 700, dropped: 27, reboots: 1, host_read: 0 })
+        Some(BridgeLoss { received: 700, dropped: 27, reboots: 1, host_read: 0, usb_lost: 673 })
     );
 }
 
@@ -303,8 +303,36 @@ fn analyze_sums_host_read_from_baseline_when_status_rows_carry_host_frames() {
     let loss = losses(&conn).unwrap();
     assert_eq!(
         loss.bridge,
-        Some(BridgeLoss { received: 700, dropped: 0, reboots: 1, host_read: 670 })
+        Some(BridgeLoss { received: 700, dropped: 0, reboots: 1, host_read: 670, usb_lost: 30 })
     );
+}
+
+#[test]
+fn analyze_excludes_bridge_drops_from_usb_lost_when_bridge_dropped_frames() {
+    // 1,000 received, 10 of them evicted from the bridge's outbox and never sent, and 985
+    // read: 5 were lost on USB.
+    let (_dir, conn) = capture(vec![
+        read_status(0, 10_000, 100, 60_000, 9_000),
+        read_status(5, 10_400, 104, 65_000, 9_394),
+        read_status(10, 11_000, 110, 70_000, 9_985),
+    ]);
+    let bridge = losses(&conn).unwrap().bridge.unwrap();
+    assert_eq!((bridge.received, bridge.dropped, bridge.host_read), (1_000, 10, 985));
+    assert_eq!(bridge.usb_lost, 5);
+}
+
+#[test]
+fn analyze_reports_no_usb_lost_when_baseline_taken_mid_backlog() {
+    // The first reply overtook 24 frames still queued in the bridge, so the host had read
+    // 24 fewer than `rx_count` says and reads them after the baseline: over the capture it
+    // reads more than the bridge received.
+    let (_dir, conn) = capture(vec![
+        read_status(0, 10_000, 0, 60_000, 9_976),
+        read_status(5, 10_400, 0, 65_000, 10_400),
+    ]);
+    let bridge = losses(&conn).unwrap().bridge.unwrap();
+    assert_eq!((bridge.received, bridge.host_read), (400, 424));
+    assert_eq!(bridge.usb_lost, 0);
 }
 
 #[test]

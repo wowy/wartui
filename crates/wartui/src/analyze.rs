@@ -35,7 +35,8 @@ pub fn run(args: Args) -> Result<()> {
     Ok(())
 }
 
-/// The loss lines, in the layout of [`details`]. Every figure is an exact count.
+/// The loss lines, in the layout of [`details`]. Every figure is an exact count but
+/// `lost on USB`, which [`BridgeLoss::usb_lost`] says is approximate.
 fn losses_text(loss: &LossSummary) -> String {
     use std::fmt::Write as _;
 
@@ -56,6 +57,9 @@ fn losses_text(loss: &LossSummary) -> String {
         }
         if bridge.host_read > 0 {
             let _ = write!(line, "  host read {}", thousands(bridge.host_read));
+        }
+        if bridge.usb_lost > 0 {
+            let _ = write!(line, "  {} lost on USB", thousands(bridge.usb_lost));
         }
         let _ = writeln!(text, "{line}");
     }
@@ -218,6 +222,7 @@ mod tests {
                 dropped: 1_300,
                 reboots: 1,
                 host_read: 0,
+                usb_lost: 0,
             }),
             nodes: vec![
                 NodeLoss {
@@ -249,6 +254,7 @@ mod tests {
                 dropped: 0,
                 reboots: 0,
                 host_read: 31_821,
+                usb_lost: 0,
             }),
             nodes: Vec::new(),
             host: Some(HostLoss {
@@ -307,9 +313,47 @@ mod tests {
     #[test]
     fn analyze_report_omits_reboot_clause_when_bridge_never_restarted() {
         let mut loss = evening();
-        loss.bridge = Some(BridgeLoss { received: 10, dropped: 0, reboots: 0, host_read: 0 });
+        loss.bridge =
+            Some(BridgeLoss { received: 10, dropped: 0, reboots: 0, host_read: 0, usb_lost: 0 });
         let text = losses_text(&loss);
         assert!(text.starts_with("  bridge     10 frames received  0 dropped (0.0%)\n"), "{text}");
+    }
+
+    /// A bridge line for `received`, `dropped` and `host_read`, `usb_lost` taken as
+    /// analyze takes it.
+    fn bridge_line(received: u64, dropped: u64, host_read: u64) -> String {
+        let usb_lost = received.saturating_sub(dropped).saturating_sub(host_read);
+        let loss = LossSummary {
+            bridge: Some(BridgeLoss { received, dropped, reboots: 0, host_read, usb_lost }),
+            ..Default::default()
+        };
+        losses_text(&loss)
+    }
+
+    #[test]
+    fn analyze_report_prints_usb_clause_when_frames_lost_on_usb() {
+        let text = bridge_line(1_000, 10, 985);
+        assert_eq!(
+            text,
+            "  bridge     1,000 frames received  10 dropped (1.0%)  host read 985  5 lost on USB\n"
+        );
+    }
+
+    #[test]
+    fn analyze_report_omits_usb_clause_when_host_read_all_the_bridge_sent() {
+        let text = bridge_line(1_000, 10, 990);
+        assert_eq!(text, "  bridge     1,000 frames received  10 dropped (1.0%)  host read 990\n");
+    }
+
+    #[test]
+    fn analyze_report_omits_usb_clause_when_host_read_exceeds_what_the_bridge_sent() {
+        // A baseline taken while a backlog drained: the host reads frames the first reply
+        // overtook.
+        let text = bridge_line(1_000, 10, 1_004);
+        assert_eq!(
+            text,
+            "  bridge     1,000 frames received  10 dropped (1.0%)  host read 1,004\n"
+        );
     }
 
     #[test]

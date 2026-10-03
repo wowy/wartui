@@ -101,8 +101,9 @@ pub struct BridgeStatusSeen {
     /// Milliseconds since its boot.
     pub uptime_ms: u32,
     /// Frames this host had read off the link when the reply arrived: the engine's
-    /// `Counters::frames`, taken at the same moment as `rx_count`. Between two rows,
-    /// the difference in `rx_count` less the difference in this is frames lost on USB.
+    /// `Counters::frames`. Between two rows, the difference in `rx_count` less the
+    /// difference in this is frames lost on USB plus `dropped_tx`, give or take the frames
+    /// still queued in the bridge, which the reply overtakes.
     pub host_frames: u64,
 }
 

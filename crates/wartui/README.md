@@ -88,7 +88,7 @@ takes `--db` and `--recapture` as `export` does, and writes nothing but standard
 output. The tail of its output, after the export summary:
 
 ```
-  bridge     1,203,551 frames received  1,300 dropped (0.1%)  1 reboot  host read 1,203,404
+  bridge     1,203,551 frames received  1,300 dropped (0.1%)  1 reboot  host read 1,202,240  11 lost on USB
   host       147 not stored: 140 retries  7 foreign  0 store dropped  behind ≥100 ms 31 times (worst 412 ms)  slowest commit 58 ms  queue peak 1,204
   health     under-voltage in 3 samples  throttled in 0  since boot: under-voltage  temp max 71.2 °C  battery min 3.62 V
   batches    212 lost between node and host
@@ -101,28 +101,30 @@ output. The tail of its output, after the export summary:
 
 | Line         | What it counts                                                                   |
 |--------------|----------------------------------------------------------------------------------|
-| `bridge`     | Frames the bridge received, and dropped because the host fell behind reading     |
+| `bridge`     | Frames the bridge received, dropped as the host fell behind, and lost on USB     |
 | `host`       | Frames the host read but did not store, and how the host and its store held up   |
 | `health`     | Under-voltage and throttling the Pi firmware reported, temperature, battery      |
 | `batches`    | Sighting batches lost between node and host; the fleet table's `lost`            |
 | `heartbeats` | Heartbeats lost between node and host, read from each node's beat sequence       |
 | `ring`       | Sightings a node's full pending ring refused; most are reported on a later dwell |
 
-Every figure is exact. The capture's first bridge reply and first heartbeat per node is a
-baseline, so what was dropped before the capture began is not counted. `batches` and `bridge`
-print zeros, since "0 lost" is the answer, and so do `store dropped` and, on a Pi, the `health`
-counts. Left out:
+Every figure is exact but `lost on USB`. The capture's first bridge reply and first heartbeat
+per node is a baseline, so what was dropped before the capture began is not counted. `batches`
+and `bridge` print zeros, since "0 lost" is the answer, and so do `store dropped` and, on a Pi,
+the `health` counts. Left out:
 
 - the `bridge` line, when the capture holds no status reply
 - ring figures that are zero, and the `ring` line when all are
 - the reboot clause, when the bridge never restarted
+- the `lost on USB` clause, when it is zero
 - `host` clauses that are zero, and the `host` and `health` lines when the capture holds no host row
 - the `health` line, when nothing could be read; off a Pi it holds only the temperature
 - the `battery min` clause, when the host has no hwmon device named `battery`
 
 The host records a `host_status` row when the capture starts, every 5 s, and at shutdown. Each
-`bridge_status` row records the frames the host had read when the reply arrived, so `host read`
-falls short of `frames received` by exactly the frames lost on USB. On the `host` line:
+`bridge_status` row records the frames the host had read when the reply arrived. `frames
+received` less `dropped` less `host read` is `lost on USB`, to within the frames queued in the
+bridge at the first and last reply, since a reply overtakes them. On the `host` line:
 
 | Clause                 | What it counts                                                            |
 |------------------------|---------------------------------------------------------------------------|
@@ -696,7 +698,9 @@ several and none known, it asks for `--bridge` rather than guessing.
 terminal, so without it nothing is logged. It records which port was resolved, whether it opened,
 and why a link went down, once per reason, since somebody else's port is retried every 750 ms all
 capture. The GPS reader logs the same way. The log also records each time the host falls 100 ms or
-more behind the bridge and when it catches up, with both frames' bridge stamps. `RUST_LOG=debug`
+more behind the bridge and when it catches up, with both frames' bridge stamps. A reconnect
+while frames are arriving can log one spell of about 100 ms, because the lag after a connect
+starts from the 100 ms the engine assumes rather than from a measurement. `RUST_LOG=debug`
 adds each retry, undecodable frames, and dropped bulk commands.
 
 ### Telling the boards apart
