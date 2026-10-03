@@ -11,11 +11,12 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use wartui_bridge::ports::mac_text;
 use wartui_bridge::remember::BridgeMemory;
 use wartui_bridge::serial::{self, BridgeSpec, SerialTransport, discover_ports};
 use wartui_bridge::sim::{SimConfig, SimTransport};
 use wartui_bridge::{BridgeInfo, LinkEvent, LinkHandle, TransportError};
-use wartui_proto::link::{LoopPhase, Mac, ResetCause};
+use wartui_proto::link::{LoopPhase, ResetCause};
 
 mod analyze;
 mod bench;
@@ -30,7 +31,6 @@ mod status;
 #[cfg(test)]
 mod testing;
 mod tui;
-mod tui_upload;
 mod upload;
 
 #[derive(Parser)]
@@ -194,7 +194,7 @@ fn ports() -> Result<()> {
         // column on its own row.
         let address = candidate
             .mac()
-            .map_or_else(|| "address not reported".to_owned(), |address| mac(&address));
+            .map_or_else(|| "address not reported".to_owned(), |address| mac_text(&address));
         let product = candidate.product.as_deref().unwrap_or("unknown device");
         match (candidate.vid, candidate.pid) {
             (Some(vid), Some(pid)) => println!("  {address:<20}  {product}  ({vid:04x}:{pid:04x})"),
@@ -272,7 +272,7 @@ fn describe(event: &LinkEvent) -> Option<String> {
     match event {
         LinkEvent::Connected(info) => Some(format!(
             "bridge {} on {:?}, firmware {}",
-            mac(&info.mac),
+            mac_text(&info.mac),
             info.chip,
             info.fw_version
         )),
@@ -280,12 +280,6 @@ fn describe(event: &LinkEvent) -> Option<String> {
         LinkEvent::Garbled(err) => Some(format!("undecodable frame: {err}")),
         LinkEvent::Message(_) => None,
     }
-}
-
-/// A MAC in the form the firmware's own logs and the sniffer captures use, so
-/// an address can be grepped for across all three.
-pub fn mac(mac: &Mac) -> String {
-    wartui_bridge::ports::mac_text(mac)
 }
 
 /// One line saying how the bridge came to be running this life.

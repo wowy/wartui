@@ -45,6 +45,7 @@
 use std::collections::BTreeMap;
 
 use rusqlite::Connection;
+use wartui_proto::link::Mac;
 
 use crate::engine::{BEHIND_THE_AIR_US, advance_since_boot};
 
@@ -121,7 +122,7 @@ pub struct HostLoss {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NodeLoss {
     /// The node's address.
-    pub mac: Vec<u8>,
+    pub mac: Mac,
     /// Sighting batches lost between the node and the host. Exact, from `batch_gap`.
     pub batches_lost: u64,
     /// Distinct heartbeats the capture holds. A duplicate counts once.
@@ -141,7 +142,7 @@ pub struct NodeLoss {
 /// sequence; see the module docs for restarts and duplicates.
 pub fn losses(conn: &Connection) -> rusqlite::Result<LossSummary> {
     let bridge = bridge(conn)?;
-    let mut nodes: BTreeMap<Vec<u8>, NodeLoss> = BTreeMap::new();
+    let mut nodes: BTreeMap<Mac, NodeLoss> = BTreeMap::new();
     heartbeats(conn, &mut nodes)?;
     batches(conn, &mut nodes)?;
     Ok(LossSummary { bridge, nodes: nodes.into_values().collect(), host: host(conn)? })
@@ -239,7 +240,7 @@ fn host(conn: &Connection) -> rusqlite::Result<Option<HostLoss>> {
 
 /// One heartbeat row, as the walk needs it.
 struct Beat {
-    mac: Vec<u8>,
+    mac: Mac,
     counter: u64,
     beat: u16,
     wifi: u64,
@@ -247,7 +248,7 @@ struct Beat {
     live: bool,
 }
 
-fn heartbeats(conn: &Connection, nodes: &mut BTreeMap<Vec<u8>, NodeLoss>) -> rusqlite::Result<()> {
+fn heartbeats(conn: &Connection, nodes: &mut BTreeMap<Mac, NodeLoss>) -> rusqlite::Result<()> {
     let mut stmt = conn.prepare(
         "SELECT node_mac, counter, beat, wifi_dropped, ble_dropped, live
          FROM heartbeat
@@ -265,8 +266,8 @@ fn heartbeats(conn: &Connection, nodes: &mut BTreeMap<Vec<u8>, NodeLoss>) -> rus
             live: row.get(5)?,
         };
         let node = nodes
-            .entry(beat.mac.clone())
-            .or_insert_with(|| NodeLoss { mac: beat.mac.clone(), ..Default::default() });
+            .entry(beat.mac)
+            .or_insert_with(|| NodeLoss { mac: beat.mac, ..Default::default() });
         match &prev {
             Some(prev) if prev.mac == beat.mac => {
                 let rebooted =
@@ -302,14 +303,13 @@ fn beat_gap(prev: u16, beat: u16, rebooted: bool) -> (u64, u64) {
     }
 }
 
-fn batches(conn: &Connection, nodes: &mut BTreeMap<Vec<u8>, NodeLoss>) -> rusqlite::Result<()> {
+fn batches(conn: &Connection, nodes: &mut BTreeMap<Mac, NodeLoss>) -> rusqlite::Result<()> {
     let mut stmt = conn.prepare("SELECT node_mac, SUM(lost) FROM batch_gap GROUP BY node_mac")?;
     let mut rows = stmt.query([])?;
     while let Some(row) = rows.next()? {
-        let mac: Vec<u8> = row.get(0)?;
+        let mac: Mac = row.get(0)?;
         let lost = count(row.get(1)?);
-        let node =
-            nodes.entry(mac.clone()).or_insert_with(|| NodeLoss { mac, ..Default::default() });
+        let node = nodes.entry(mac).or_insert_with(|| NodeLoss { mac, ..Default::default() });
         node.batches_lost += lost;
     }
     Ok(())

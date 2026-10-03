@@ -36,7 +36,8 @@ use super::{
     espflash_present, features, flash_args, judge_probe, mac_arg, matches, name, obtain,
     probe_args, read, source,
 };
-use crate::{mac, spec};
+use crate::spec;
+use wartui_bridge::ports::mac_text;
 
 #[derive(ClapArgs, Debug)]
 pub struct Args {
@@ -218,7 +219,7 @@ fn named_bridge_attached(candidates: &[PortCandidate], spare: &Spare) -> Result<
         named.len(),
         named
             .iter()
-            .map(|board| board.mac().map_or_else(|| board.path.clone(), |a| mac(&a)))
+            .map(|board| board.mac().map_or_else(|| board.path.clone(), |a| mac_text(&a)))
             .collect::<Vec<_>>()
             .join(", ")
     );
@@ -431,7 +432,10 @@ mod tests {
         let spare = bridge_to_spare(Some("44:C0"), None, false).unwrap();
         let error = named_bridge_attached(&found, &spare).unwrap_err().to_string();
         assert!(error.contains("--bridge 44:C0 matches 2 attached boards"), "{error}");
-        assert!(error.contains(&mac(&BRIDGE_MAC)) && error.contains(&mac(&twin)), "{error}");
+        assert!(
+            error.contains(&mac_text(&BRIDGE_MAC)) && error.contains(&mac_text(&twin)),
+            "{error}"
+        );
     }
 
     #[test]

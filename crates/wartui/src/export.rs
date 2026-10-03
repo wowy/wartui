@@ -24,6 +24,7 @@ use wartui_core::export::{DEFAULT_RECAPTURE_SECS, ExportFilter, ExportSummary, w
 use wartui_core::store::{Connection, is_simulated, open_readonly};
 
 use crate::capture;
+use wartui_bridge::ports::short_mac_text;
 
 /// Which capture to read and which of its rows to send, shared by `export` and `upload`
 /// so both read a capture the same way.
@@ -213,7 +214,7 @@ pub(crate) fn details(summary: &ExportSummary) -> String {
     }
     let _ = writeln!(text, "  {:<11}{}", "nodes", heard.join(", "));
     for node in &summary.nodes {
-        let mut line = format!("    {}", short_mac(&node.mac));
+        let mut line = format!("    {}", short_mac_text(&node.mac));
         if node.wifi > 0 {
             let _ = write!(line, "  wifi {}", thousands(node.wifi));
         }
@@ -227,12 +228,6 @@ pub(crate) fn details(summary: &ExportSummary) -> String {
         let _ = writeln!(text, "  {:<11}{}", "span", span(first, last));
     }
     text
-}
-
-/// A node by its last two octets, the way the fleet table names it.
-pub(crate) fn short_mac(mac: &[u8]) -> String {
-    let tail = &mac[mac.len().saturating_sub(2)..];
-    tail.iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(":")
 }
 
 /// `n` with a comma between each group of three digits.
@@ -357,8 +352,8 @@ mod tests {
             wifi_bands: Bands { ghz2_4: 30_100, ghz5: 9_804, other: 0 },
             positions: Positions { gps: 3_896_000, fixed: 0, none: 116_345 },
             nodes: vec![
-                NodeStats { mac: vec![0x02, 0, 0x5E, 0x10, 0x1C, 0x5A], wifi: 0, ble: 112_233 },
-                NodeStats { mac: vec![0x02, 0, 0x5E, 0x10, 0x57, 0x84], wifi: 3_900_112, ble: 0 },
+                NodeStats { mac: [0x02, 0, 0x5E, 0x10, 0x1C, 0x5A], wifi: 0, ble: 112_233 },
+                NodeStats { mac: [0x02, 0, 0x5E, 0x10, 0x57, 0x84], wifi: 3_900_112, ble: 0 },
             ],
             // 2026-09-30 19:02 to 23:48 UTC.
             first_rx: Some(1_790_794_920_000),

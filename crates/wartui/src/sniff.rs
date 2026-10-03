@@ -12,7 +12,7 @@ use wartui_proto::air::{DecodeError, Frame, RecordKind, SightingMsg, foreign};
 use wartui_proto::beacon::rcoi_text;
 use wartui_proto::link::{BROADCAST, BridgeToHost};
 
-use super::mac;
+use wartui_bridge::ports::mac_text;
 
 #[derive(ClapArgs)]
 pub struct Args {
@@ -188,7 +188,7 @@ fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
         BridgeToHost::Rx { src, dst, rssi, rx_us, payload, .. } => {
             counts.total += 1;
             let addressing = if *dst == BROADCAST { "bcast" } else { "unicast" };
-            let head = format!("{:>10}us  {}  {rssi:>4}dBm  {addressing:>7}", rx_us, mac(src));
+            let head = format!("{:>10}us  {}  {rssi:>4}dBm  {addressing:>7}", rx_us, mac_text(src));
 
             match Frame::decode(payload) {
                 Ok(Frame::Heartbeat(heartbeat)) => {
@@ -224,14 +224,14 @@ fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
                         admin.epoch,
                         if admin.scan_ble() { " +ble" } else { "" },
                         indices,
-                        mac(dst),
+                        mac_text(dst),
                     );
                 }
                 // A clear this host did not send is the same fact as an assignment
                 // it did not send: something else is driving these nodes.
                 Ok(Frame::Clear(_)) => {
                     counts.admin += 1;
-                    println!("{head}  CLEAR  -> {}", mac(dst));
+                    println!("{head}  CLEAR  -> {}", mac_text(dst));
                 }
                 // Named rather than left as "undecodable": a fleet half-way
                 // through a reflash is exactly what this looks like.
@@ -244,7 +244,7 @@ fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
                 Err(DecodeError::BadMagic) => match foreign::classify(payload) {
                     Some(foreign::Foreign::Admin) => {
                         counts.foreign_admin += 1;
-                        println!("{head}  ADMIN from a vendor core  -> {}", mac(dst));
+                        println!("{head}  ADMIN from a vendor core  -> {}", mac_text(dst));
                     }
                     Some(foreign::Foreign::Node) => {
                         counts.foreign_fleet += 1;
@@ -273,7 +273,7 @@ fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
             // over the wire format rather than over what happens to arrive.
             println!(
                 "# bridge ready: {chip:?} {} firmware {fw_version} link v{proto_version}",
-                mac(bridge_mac)
+                mac_text(bridge_mac)
             );
         }
 
@@ -320,7 +320,7 @@ fn render(sighting: &SightingMsg<'_>) -> String {
     };
     format!(
         "{kind}  {}  ch {:>3}  {:>4}dBm  {:<16}  {}{trailer}",
-        mac(&sighting.bssid),
+        mac_text(&sighting.bssid),
         sighting.channel,
         sighting.rssi,
         sighting.security.to_string(),

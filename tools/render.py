@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Print what the running view drew, as text.
 
-`crates/wartui/src/tui.rs`'s tests render widgets through ratatui's `TestBackend`:
+The tests in `crates/wartui/src/tui/` render widgets through ratatui's `TestBackend`:
 a `Snapshot` built by hand, one frame drawn, assertions against the text. That is
 the regression net and it stays the first thing to reach for. It also never runs
 the event loop, never runs `ratatui::try_init()`, and never sees the simulator, so

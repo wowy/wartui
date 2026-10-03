@@ -133,8 +133,8 @@ fn analyze_sums_batch_gaps_per_node_when_gaps_recorded() {
     let loss = losses(&conn).unwrap();
     // Sorted by address, and a node with batch gaps but no heartbeat is still listed.
     let summary: Vec<_> =
-        loss.nodes.iter().map(|n| (n.mac.clone(), n.batches_lost, n.heartbeats)).collect();
-    assert_eq!(summary, vec![(OTHER.to_vec(), 1, 1), (NODE.to_vec(), 7, 0)]);
+        loss.nodes.iter().map(|n| (n.mac, n.batches_lost, n.heartbeats)).collect();
+    assert_eq!(summary, vec![(OTHER, 1, 1), (NODE, 7, 0)]);
 }
 
 #[test]

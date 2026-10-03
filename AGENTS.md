@@ -46,7 +46,7 @@ cargo run -p wartui -- --log-file wartui.log run     # the only way to see trans
 See what the view draws without a terminal: `tools/render.py --cols 120 --rows 30` runs the
 binary on a pty and prints the screen as text, `--keys jb` presses keys first, and `--bridge`
 points it at the boards attached rather than the simulator. `README.md` § "Suggested tools" says
-when to reach for it over the `TestBackend` tests in `crates/wartui/src/tui.rs`.
+when to reach for it over the `TestBackend` tests in `crates/wartui/src/tui/`.
 
 Refer to boards by their last two octets; `wartui ports` names each attached board by its
 address, and `crates/wartui/README.md` § "Telling the boards apart" says why that works.

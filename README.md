@@ -178,7 +178,7 @@ logged.
 There are two ways to see what the view draws:
 
 - **ratatui's `TestBackend`** draws one frame from a hand-built `Snapshot` and returns the text.
-  The tests in `crates/wartui/src/tui.rs` use it. It is fast, deterministic, and committed, so reach
+  The tests in `crates/wartui/src/tui/` use it. It is fast, deterministic, and committed, so reach
   for it first. It does not run the event loop, terminal setup, or simulator.
 - **[pyte](https://github.com/selectel/pyte)** is a headless VT100 emulator. `tools/render.py` runs
   the real binary on a pty at a chosen size and prints pyte's screen. This covers what `TestBackend`

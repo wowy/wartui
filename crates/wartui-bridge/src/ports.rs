@@ -136,11 +136,24 @@ pub fn is_usable_path(path: &str) -> bool {
     !path.starts_with("/dev/tty.")
 }
 
-/// Write a MAC the one way this crate writes one, so that what it prints can be
-/// pasted straight back in as `--bridge`.
+/// Write a MAC the one way wartui writes one: uppercase, colon-separated. What it
+/// prints pastes straight back in as `--bridge`. The WiGLE CSV, the node firmware's
+/// logs and `wartui sniff` use the same form, so an address greps across all of them,
+/// and changing it changes the export.
 #[must_use]
 pub fn mac_text(mac: &Mac) -> String {
-    mac.iter().map(|byte| format!("{byte:02X}")).collect::<Vec<_>>().join(":")
+    octets_text(mac)
+}
+
+/// The last two octets, `57:84`: how the boards are told apart (see AGENTS.md).
+#[must_use]
+pub fn short_mac_text(mac: &Mac) -> String {
+    octets_text(&mac[4..])
+}
+
+/// Octets in [`mac_text`]'s form, for a whole address or part of one.
+pub(crate) fn octets_text(octets: &[u8]) -> String {
+    octets.iter().map(|byte| format!("{byte:02X}")).collect::<Vec<_>>().join(":")
 }
 
 /// Read a MAC written the way an ESP32's USB serial number and [`mac_text`] both
@@ -297,6 +310,13 @@ fn from_port_infos(ports: Vec<serialport::SerialPortInfo>) -> Vec<PortCandidate>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mac_formatter_writes_whole_and_short_forms_when_given_address() {
+        let address = [0x02, 0x00, 0x5E, 0x10, 0x57, 0x84];
+        assert_eq!(mac_text(&address), "02:00:5E:10:57:84");
+        assert_eq!(short_mac_text(&address), "57:84");
+    }
 
     #[test]
     fn ports_scanner_extracts_mac_address_when_serial_number_is_esp32_format() {
