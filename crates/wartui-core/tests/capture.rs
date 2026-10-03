@@ -174,3 +174,49 @@ async fn capture_run_attaches_dynamic_gps_positions_when_vehicle_moves() {
         "the simulated advertisers carry their manufacturer identifiers: {csv}"
     );
 }
+
+#[tokio::test(start_paused = true)]
+async fn capture_run_ends_on_host_row_holding_final_counts_when_stopped() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("wartui.db");
+
+    let link = SimTransport::new(SimConfig { node_count: 2, speed: 60.0, ..Default::default() })
+        .start()
+        .expect("starting the simulator");
+    let started = now();
+    let store = Store::create(&StoreConfig::new(&path), &CaptureInfo::default(), started.unix_ms)
+        .expect("creating the store");
+    let engine = FleetEngine::new(EngineConfig::default(), started);
+    let (snapshot_tx, snapshot_rx) =
+        watch::channel(Arc::new(engine.snapshot(started, StoreStats::default())));
+    let (stop_tx, stop_rx) = oneshot::channel();
+    let (_command_tx, command_rx) = tokio::sync::mpsc::channel(4);
+
+    let capture = tokio::spawn(drive(link, store, engine, snapshot_tx, command_rx, stop_rx));
+    // One sample at the start, two more on the timer, then the one at shutdown.
+    tokio::time::sleep(Duration::from_secs(12)).await;
+    stop_tx.send(()).expect("the capture is still running");
+    capture.await.expect("the capture task should not panic");
+
+    let counters = snapshot_rx.borrow().counters;
+    let conn = open_readonly(&path).expect("reopening the capture");
+    let rows: i64 =
+        conn.query_row("SELECT COUNT(*) FROM host_status", [], |r| r.get(0)).expect("counting");
+    assert_eq!(rows, 4, "one at the start, one every 5 s and one at shutdown");
+    let last: (i64, i64, i64) = conn
+        .query_row(
+            "SELECT frames, duplicate_batches, admin_windows_missed
+             FROM host_status ORDER BY id DESC LIMIT 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .expect("the last host row");
+    let expected = (counters.frames, counters.duplicate_batches, counters.admin_windows_missed);
+    assert_eq!(last, (expected.0 as i64, expected.1 as i64, expected.2 as i64));
+    assert!(counters.frames > 0, "the fleet was heard");
+
+    let host_frames: i64 = conn
+        .query_row("SELECT MAX(host_frames) FROM bridge_status", [], |r| r.get(0))
+        .expect("a bridge status row");
+    assert!(host_frames > 0, "status replies carry the frames read so far");
+}

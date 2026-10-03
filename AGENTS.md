@@ -227,9 +227,10 @@ is here rather than only in a `//!`.
   changes when fleet membership changes, when the Bluetooth scan moves, when the operator changes the
   pool, and at no other time.
 - **`clippy::all` is denied workspace-wide, in both firmwares too, and so is `unsafe_code`.** The
-  host workspace forbids it outright. Each firmware allows the two IDF calls `esp-radio` cannot
-  express after its long-lived handles borrow the controller: the ESP-NOW peer-rate call and the
-  runtime transmit-power call. Any further `#[allow(unsafe_code)]` is a decision to make in
+  host allows it on one function, the Raspberry Pi firmware mailbox ioctl
+  (`crates/wartui-core/src/health.rs`, `mailbox_call`). Each firmware allows the two IDF calls
+  `esp-radio` cannot express after its long-lived handles borrow the controller: the ESP-NOW
+  peer-rate call and the runtime transmit-power call. Any further `#[allow(unsafe_code)]` is a decision to make in
   review, not a convenience.
 
 ### Load-bearing, and reasoned where they live

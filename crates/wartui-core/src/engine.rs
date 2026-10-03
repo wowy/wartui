@@ -38,10 +38,11 @@ use wartui_proto::plan::{
 };
 
 use crate::distinct::Distinct;
+use crate::health::Health;
 use crate::position::PositionChain;
 use crate::record::{
-    AdminOutcome, AssignmentSent, BatchGap, BridgeStatusSeen, Heartbeat, NodeSeen, Observation,
-    RawFrame, Record, ssid_text,
+    AdminOutcome, AssignmentSent, BatchGap, BridgeStatusSeen, Heartbeat, HostStatus, NodeSeen,
+    Observation, RawFrame, Record, ssid_text,
 };
 
 /// The time, in both of the forms this code needs.
@@ -71,6 +72,10 @@ pub enum Event {
     Tick,
     /// Something the operator asked for.
     Command(Command),
+    /// The runtime's periodic reading of what only it can see: the store and the
+    /// host's own health. The engine adds its counters and lag peak and records the
+    /// lot as a [`Record::HostStatus`].
+    HostSample(HostSample),
 }
 
 /// An operator's instruction to the fleet.
@@ -509,6 +514,26 @@ pub struct StoreStats {
     pub dropped: u64,
 }
 
+/// The store's largest figures since they were last taken, for a [`HostSample`].
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct StorePeaks {
+    /// The deepest the queue got, in records.
+    pub queue: u64,
+    /// The slowest batch, statements and commit together, in microseconds.
+    pub commit_us: u64,
+}
+
+/// What the runtime read for one [`Event::HostSample`].
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct HostSample {
+    /// The store's running totals.
+    pub store: StoreStats,
+    /// The store's peaks since the previous sample.
+    pub peaks: StorePeaks,
+    /// The host's own health.
+    pub health: Health,
+}
+
 /// A node as of one snapshot.
 ///
 /// Both flags are carried rather than left for the UI to re-derive, because neither
@@ -695,11 +720,17 @@ pub struct FleetEngine {
     /// whenever the link is read live; it climbs only while frames arrive faster
     /// than wall-clock time can account for.
     backlog_lag_us: u64,
+    /// The largest [`Self::backlog_lag_us`] measured since the last
+    /// [`Event::HostSample`]. Taken only where a lag is computed from two arrivals,
+    /// so the [`BEHIND_THE_AIR_US`] assumed on connecting is never reported on its
+    /// own. The first lag measured after a connect builds on that assumption, so a
+    /// backlog drained then reports at least it, which is what it was.
+    lag_peak_us: u64,
 }
 
 /// A lag large enough that [`FleetEngine::air_is_live`] says no, used as the
 /// starting assumption on a connection whose backlog has not been seen yet.
-const BEHIND_THE_AIR_US: u64 = plan::ADMIN_WAIT_MS as u64 * 1_000;
+pub(crate) const BEHIND_THE_AIR_US: u64 = plan::ADMIN_WAIT_MS as u64 * 1_000;
 
 /// How long after a batch a byte-identical repeat under the same `seq` is still
 /// an 802.11 retry rather than a node's own later re-send.
@@ -813,6 +844,7 @@ impl FleetEngine {
             // Pessimistic from the start, as on `Connected`: the port opens onto a
             // backlog, and its frames reach the engine before the bridge's `Ready`.
             backlog_lag_us: BEHIND_THE_AIR_US,
+            lag_peak_us: 0,
             config,
         }
     }
@@ -824,6 +856,7 @@ impl FleetEngine {
         match event {
             Event::Tick => self.on_tick(now, &mut batch),
             Event::Command(command) => self.on_command(command, now, &mut batch),
+            Event::HostSample(sample) => self.on_host_sample(sample, now, &mut batch),
             Event::Link(LinkEvent::Connected(info)) => {
                 batch.records.push(Record::Bridge(crate::record::BridgeSeen {
                     mac: info.mac,
@@ -880,6 +913,32 @@ impl FleetEngine {
             Event::Link(LinkEvent::Message(msg)) => self.on_message(&msg, now, &mut batch),
         }
         batch
+    }
+
+    /// Record the host's state: the runtime's sample, this engine's counters, and the
+    /// lag peak, which starts again from nothing for the next sample.
+    fn on_host_sample(&mut self, sample: HostSample, now: Now, batch: &mut ActionBatch) {
+        let c = &self.counters;
+        batch.records.push(Record::HostStatus(HostStatus {
+            at_ms: now.unix_ms,
+            frames: c.frames,
+            duplicate_batches: c.duplicate_batches,
+            garbled: c.garbled,
+            undecodable: c.undecodable,
+            incompatible: c.incompatible,
+            foreign_fleet: c.foreign_fleet,
+            foreign_admin: c.foreign_admin,
+            admin_windows_missed: c.admin_windows_missed,
+            lag_peak_us: std::mem::take(&mut self.lag_peak_us),
+            store_written: sample.store.written,
+            store_dropped: sample.store.dropped,
+            store_queue_peak: sample.peaks.queue,
+            store_commit_peak_us: sample.peaks.commit_us,
+            throttled: sample.health.throttled,
+            soc_temp_mc: sample.health.soc_temp_mc,
+            battery_mv: sample.health.battery_mv,
+            battery_ma: sample.health.battery_ma,
+        }));
     }
 
     fn on_tick(&mut self, now: Now, batch: &mut ActionBatch) {
@@ -1000,6 +1059,7 @@ impl FleetEngine {
                     rx_count: *rx_count,
                     dropped_tx: *dropped_tx,
                     uptime_ms: *uptime_ms,
+                    host_frames: self.counters.frames,
                 }));
             }
             // `Ready` reaches the engine as `LinkEvent::Connected`; the bridge's
@@ -1769,6 +1829,7 @@ impl FleetEngine {
                 bridge_elapsed_us,
                 host_elapsed_us,
             );
+            self.lag_peak_us = self.lag_peak_us.max(self.backlog_lag_us);
         }
         self.last_arrival = Some((rx_us, now.mono));
     }

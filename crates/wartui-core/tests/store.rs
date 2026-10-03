@@ -9,11 +9,12 @@
 use std::time::Duration;
 
 use rusqlite::Connection;
+use wartui_core::engine::StorePeaks;
 use wartui_core::export::{ExportFilter, wigle_csv};
 use wartui_core::position::{Fix, PositionSource};
 use wartui_core::record::{
-    AdminOutcome, AssignmentSent, BatchGap, BridgeSeen, BridgeStatusSeen, Heartbeat, NodeSeen,
-    Observation, Record,
+    AdminOutcome, AssignmentSent, BatchGap, BridgeSeen, BridgeStatusSeen, Heartbeat, HostStatus,
+    NodeSeen, Observation, Record,
 };
 use wartui_core::store::{
     CaptureInfo, Checkpoint, SCHEMA_VERSION, Store, StoreConfig, StoreError, is_simulated,
@@ -230,17 +231,104 @@ fn store_persists_every_bridge_status_column_when_round_tripped() {
             rx_count: 4_000_000_000,
             dropped_tx: 1305,
             uptime_ms: 3_240_000,
+            host_frames: 3_999_999_000,
         })],
     );
 
-    let row: (i64, i64, i64, i64, i64) = conn
+    let row: (i64, i64, i64, i64, i64, i64) = conn
         .query_row(
-            "SELECT rx_at, peer_count, rx_count, dropped_tx, uptime_ms FROM bridge_status",
+            "SELECT rx_at, peer_count, rx_count, dropped_tx, uptime_ms, host_frames
+             FROM bridge_status",
             [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
         )
         .unwrap();
-    assert_eq!(row, (EPOCH_MS + 5_000, 3, 4_000_000_000, 1305, 3_240_000));
+    assert_eq!(row, (EPOCH_MS + 5_000, 3, 4_000_000_000, 1305, 3_240_000, 3_999_999_000));
+}
+
+fn host_status(
+    throttled: Option<u32>,
+    soc_temp_mc: Option<i32>,
+    battery_mv: Option<i32>,
+    battery_ma: Option<i32>,
+) -> HostStatus {
+    HostStatus {
+        at_ms: EPOCH_MS + 5_000,
+        frames: 1,
+        duplicate_batches: 2,
+        garbled: 3,
+        undecodable: 4,
+        incompatible: 5,
+        foreign_fleet: 6,
+        foreign_admin: 7,
+        admin_windows_missed: 8,
+        lag_peak_us: 9,
+        store_written: 10,
+        store_dropped: 11,
+        store_queue_peak: 12,
+        store_commit_peak_us: 13,
+        throttled,
+        soc_temp_mc,
+        battery_mv,
+        battery_ma,
+    }
+}
+
+#[test]
+fn store_persists_every_host_status_column_when_round_tripped() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let conn = write(
+        &dir,
+        vec![
+            Record::HostStatus(host_status(Some(0x50005), Some(61_234), Some(4_185), Some(-21))),
+            Record::HostStatus(host_status(None, None, None, None)),
+        ],
+    );
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT at, frames, duplicate_batches, garbled, undecodable, incompatible,
+                    foreign_fleet, foreign_admin, admin_windows_missed, lag_peak_us,
+                    store_written, store_dropped, store_queue_peak, store_commit_peak_us,
+                    throttled, soc_temp_mc, battery_mv, battery_ma
+             FROM host_status ORDER BY id",
+        )
+        .unwrap();
+    let rows: Vec<HostStatus> = stmt
+        .query_map([], |r| {
+            let count = |i| r.get::<_, i64>(i).map(|v| u64::try_from(v).unwrap());
+            Ok(HostStatus {
+                at_ms: r.get(0)?,
+                frames: count(1)?,
+                duplicate_batches: count(2)?,
+                garbled: count(3)?,
+                undecodable: count(4)?,
+                incompatible: count(5)?,
+                foreign_fleet: count(6)?,
+                foreign_admin: count(7)?,
+                admin_windows_missed: count(8)?,
+                lag_peak_us: count(9)?,
+                store_written: count(10)?,
+                store_dropped: count(11)?,
+                store_queue_peak: count(12)?,
+                store_commit_peak_us: count(13)?,
+                throttled: r.get(14)?,
+                soc_temp_mc: r.get(15)?,
+                battery_mv: r.get(16)?,
+                battery_ma: r.get(17)?,
+            })
+        })
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            host_status(Some(0x50005), Some(61_234), Some(4_185), Some(-21)),
+            host_status(None, None, None, None)
+        ],
+        "NULL health reads back as None"
+    );
 }
 
 #[test]
@@ -595,6 +683,26 @@ fn store_drops_records_without_blocking_when_queue_depth_is_exceeded() {
 
     assert!(dropped > 0, "a depth-1 queue and no draining should overflow");
     assert_eq!(store.stats().dropped, dropped as u64, "and say so in the stats");
+}
+
+#[test]
+fn store_reports_and_resets_peaks_when_taken() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = store(&dir);
+    assert_eq!(store.take_peaks(), StorePeaks::default(), "nothing queued or written yet");
+
+    let flood: Vec<Record> =
+        (0..512).map(|n| observation(NODE, [n as u8; 6], -60, EPOCH_MS, Fix::none())).collect();
+    assert_eq!(store.submit(flood), 0);
+    wait_for("every row to be written", || store.stats().written == 512);
+
+    // The writer drains as the records go in, so how deep the queue got depends on the
+    // machine; it held at least one record and never more than were sent.
+    let peaks = store.take_peaks();
+    assert!((1..=512).contains(&peaks.queue), "{peaks:?}");
+    assert!(peaks.commit_us > 0, "a batch was written: {peaks:?}");
+    assert_eq!(store.take_peaks(), StorePeaks::default(), "taking them starts again from 0");
+    store.close();
 }
 
 #[test]

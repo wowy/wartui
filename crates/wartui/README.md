@@ -88,7 +88,9 @@ takes `--db` and `--recapture` as `export` does, and writes nothing but standard
 output. The tail of its output, after the export summary:
 
 ```
-  bridge     1,203,551 frames received  1,300 dropped (0.1%)  1 reboot
+  bridge     1,203,551 frames received  1,300 dropped (0.1%)  1 reboot  host read 1,203,404
+  host       147 not stored: 140 retries  7 foreign  0 store dropped  behind ≥100 ms 31 times (worst 412 ms)  slowest commit 58 ms  queue peak 1,204
+  health     under-voltage in 3 samples  throttled in 0  since boot: under-voltage  temp max 71.2 °C  battery min 3.62 V
   batches    212 lost between node and host
   heartbeats 41 missed of 3,497 expected (1.2%)
   ring       wifi 18,220 refused  ble 1,203 refused
@@ -100,17 +102,42 @@ output. The tail of its output, after the export summary:
 | Line         | What it counts                                                                   |
 |--------------|----------------------------------------------------------------------------------|
 | `bridge`     | Frames the bridge received, and dropped because the host fell behind reading     |
+| `host`       | Frames the host read but did not store, and how the host and its store held up   |
+| `health`     | Under-voltage and throttling the Pi firmware reported, temperature, battery      |
 | `batches`    | Sighting batches lost between node and host; the fleet table's `lost`            |
 | `heartbeats` | Heartbeats lost between node and host, read from each node's beat sequence       |
 | `ring`       | Sightings a node's full pending ring refused; most are reported on a later dwell |
 
 Every figure is exact. The capture's first bridge reply and first heartbeat per node is a
 baseline, so what was dropped before the capture began is not counted. `batches` and `bridge`
-print zeros, since "0 lost" is the answer. Left out:
+print zeros, since "0 lost" is the answer, and so do `store dropped` and, on a Pi, the `health`
+counts. Left out:
 
 - the `bridge` line, when the capture holds no status reply
 - ring figures that are zero, and the `ring` line when all are
 - the reboot clause, when the bridge never restarted
+- `host` clauses that are zero, and the `host` and `health` lines when the capture holds no host row
+- the `health` line, when nothing could be read; off a Pi it holds only the temperature
+- the `battery min` clause, when the host has no hwmon device named `battery`
+
+The host records a `host_status` row when the capture starts, every 5 s, and at shutdown. Each
+`bridge_status` row records the frames the host had read when the reply arrived, so `host read`
+falls short of `frames received` by exactly the frames lost on USB. On the `host` line:
+
+| Clause                 | What it counts                                                            |
+|------------------------|---------------------------------------------------------------------------|
+| `not stored`           | Frames read and deliberately dropped: radio retries, undecodable, foreign |
+| `store dropped`        | Rows lost because the store's queue was full or a write failed            |
+| `garbled`              | USB frames that failed their checksum                                     |
+| `behind ≥100 ms`       | Samples in which the host fell far enough behind the air to miss windows  |
+| `admin windows missed` | Assignments held back because the heartbeat behind them was stale         |
+| `slowest commit`       | The slowest batch the store wrote                                         |
+| `queue peak`           | The deepest the store's queue got                                         |
+
+`under-voltage` and `throttled` count samples with that bit of `vcgencmd get_throttled` set now;
+`since boot` lists what the last sample says happened at any time since the Pi booted.
+`battery min` is the lowest voltage the battery's fuel gauge read; its current draw is stored as
+`battery_ma` for queries but not printed.
 
 Each heartbeat carries a sequence number that restarts at 1 when the node boots, so a gap in it is
 heartbeats lost. A repeated heartbeat counts once. Across a node's reboot, only the heartbeats

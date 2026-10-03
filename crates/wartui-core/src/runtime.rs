@@ -12,7 +12,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use wartui_bridge::LinkHandle;
 use wartui_proto::link::{HostToBridge, PanelLines};
 
-use crate::engine::{Command, Event, FleetEngine, Now, Snapshot};
+use crate::engine::{Command, Event, FleetEngine, HostSample, Now, Snapshot};
 use crate::store::{Store, StoreReport};
 
 /// How often the engine ages liveness and republishes the snapshot.
@@ -46,6 +46,14 @@ pub const PANEL_INTERVAL: Duration = Duration::from_millis(1_000);
 /// of them, so a repaint nothing needed costs a frame on the wire and no SPI at all.
 pub const PANEL_REPAINT: Duration = Duration::from_secs(10);
 
+/// How often the host records its own state as a `host_status` row.
+///
+/// Five seconds, the bridge's status poll (`EngineConfig::status_interval`), so the
+/// host's timeline and the bridge's have one resolution. A timer of its own rather
+/// than the poll's replies, so the host keeps recording while the bridge is gone,
+/// which is when a sagging supply matters most.
+pub const HOST_SAMPLE: Duration = Duration::from_secs(5);
+
 /// The current time, in both forms the engine needs.
 #[must_use]
 pub fn now() -> Now {
@@ -77,6 +85,15 @@ pub async fn drive(
 ) -> StoreReport {
     let mut ticker = tokio::time::interval(TICK);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut host_ticker = tokio::time::interval(HOST_SAMPLE);
+    host_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // The first tick is immediate, so a capture opens on a host row that `analyze` reads
+    // the rest against, and its figures cover the capture from the start.
+    let sample = |store: &Store| HostSample {
+        store: store.stats(),
+        peaks: store.take_peaks(),
+        health: crate::health::read(),
+    };
     // Once the UI is gone this branch is disabled rather than polled. A closed
     // receiver is permanently ready, so leaving it in the `select!` would spin
     // the loop as fast as the scheduler allows for the rest of the capture.
@@ -104,6 +121,7 @@ pub async fn drive(
                 }
             },
             _ = ticker.tick() => Event::Tick,
+            _ = host_ticker.tick() => Event::HostSample(sample(&store)),
             event = link.recv() => match event {
                 Some(event) => Event::Link(event),
                 // The transport gave up entirely, which is different from a
@@ -203,6 +221,9 @@ pub async fn drive(
         }
     }
 
-    let _ = snapshot.send(Arc::new(engine.snapshot(now(), store.stats())));
+    // So a capture always ends on a host row holding its final counts.
+    let now = now();
+    store.submit(engine.handle(Event::HostSample(sample(&store)), now).records);
+    let _ = snapshot.send(Arc::new(engine.snapshot(now, store.stats())));
     store.close()
 }

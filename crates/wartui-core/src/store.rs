@@ -44,7 +44,7 @@ use rusqlite::{OpenFlags, OptionalExtension, params};
 use wartui_proto::air::RecordKind;
 use wartui_proto::plan::ChannelPool;
 
-use crate::engine::StoreStats;
+use crate::engine::{StorePeaks, StoreStats};
 use crate::record::Record;
 
 /// The schema shape this build writes and reads — the only one it will touch.
@@ -186,14 +186,48 @@ CREATE TABLE IF NOT EXISTS observation (
 -- One row per bridge status reply, which the host polls for every few seconds.
 -- `rx_count`, `dropped_tx` and `uptime_ms` are the bridge's since-boot counts as
 -- the reply carried them: raw, as `heartbeat` keeps its drop counts, so a bridge
--- reboot shows as the values falling.
+-- reboot shows as the values falling. `host_frames` is how many frames this host had
+-- read off the link when the reply arrived, taken with `rx_count` so the two pair
+-- exactly: between two rows, the `rx_count` difference less the `host_frames`
+-- difference is frames lost on USB.
 CREATE TABLE IF NOT EXISTS bridge_status (
   id INTEGER PRIMARY KEY,
   rx_at INTEGER NOT NULL,
   peer_count INTEGER NOT NULL,
   rx_count INTEGER NOT NULL,
   dropped_tx INTEGER NOT NULL,
-  uptime_ms INTEGER NOT NULL
+  uptime_ms INTEGER NOT NULL,
+  host_frames INTEGER NOT NULL
+);
+
+-- One row at the start, every 5 s, and at shutdown: the host's own state, sampled on a timer of
+-- its own so it carries on while the bridge is gone. `frames` through
+-- `admin_windows_missed` and `store_written`/`store_dropped` are counts since the
+-- capture began. `lag_peak_us`, `store_queue_peak` and `store_commit_peak_us` are the
+-- largest since the previous row. `throttled` is the Raspberry Pi firmware's
+-- `get_throttled` word, NULL off a Pi; `soc_temp_mc` is thermal zone 0 in milli-degrees
+-- Celsius, NULL when unreadable. `battery_mv` and `battery_ma` are the `battery` hwmon's
+-- voltage and current as its driver reports them, NULL on a host without one.
+CREATE TABLE IF NOT EXISTS host_status (
+  id INTEGER PRIMARY KEY,
+  at INTEGER NOT NULL,
+  frames INTEGER NOT NULL,
+  duplicate_batches INTEGER NOT NULL,
+  garbled INTEGER NOT NULL,
+  undecodable INTEGER NOT NULL,
+  incompatible INTEGER NOT NULL,
+  foreign_fleet INTEGER NOT NULL,
+  foreign_admin INTEGER NOT NULL,
+  admin_windows_missed INTEGER NOT NULL,
+  lag_peak_us INTEGER NOT NULL,
+  store_written INTEGER NOT NULL,
+  store_dropped INTEGER NOT NULL,
+  store_queue_peak INTEGER NOT NULL,
+  store_commit_peak_us INTEGER NOT NULL,
+  throttled INTEGER,
+  soc_temp_mc INTEGER,
+  battery_mv INTEGER,
+  battery_ma INTEGER
 );
 
 -- One row per gap in a node's batch `seq`. `rx_at` is when the batch after the gap
@@ -439,6 +473,13 @@ pub struct CaptureInfo {
 struct Stats {
     written: AtomicU64,
     dropped: AtomicU64,
+    /// Records in the queue: counted in by [`Store::submit`], out by the writer as it
+    /// receives each one.
+    queued: AtomicU64,
+    /// The largest `queued` since [`Store::take_peaks`].
+    queue_peak: AtomicU64,
+    /// The slowest batch since [`Store::take_peaks`], in microseconds.
+    commit_peak_us: AtomicU64,
 }
 
 /// A handle to the writer thread.
@@ -547,7 +588,13 @@ impl Store {
         let Some(tx) = &self.tx else { return records.len() };
         let mut dropped = 0usize;
         for record in records {
-            if tx.try_send(record).is_err() {
+            // Counted in before the send, so the writer's count out can never run
+            // ahead of it and wrap; a record that does not fit is counted back out.
+            let ahead = self.stats.queued.fetch_add(1, Ordering::Relaxed);
+            if tx.try_send(record).is_ok() {
+                self.stats.queue_peak.fetch_max(ahead + 1, Ordering::Relaxed);
+            } else {
+                self.stats.queued.fetch_sub(1, Ordering::Relaxed);
                 dropped += 1;
             }
         }
@@ -563,6 +610,19 @@ impl Store {
         StoreStats {
             written: self.stats.written.load(Ordering::Relaxed),
             dropped: self.stats.dropped.load(Ordering::Relaxed),
+        }
+    }
+
+    /// The deepest the queue got and the slowest batch written since the last call,
+    /// both starting again from 0.
+    ///
+    /// Peaks rather than current values because a sample every few seconds would
+    /// almost never land on the moment a slow commit backed the queue up.
+    #[must_use]
+    pub fn take_peaks(&self) -> StorePeaks {
+        StorePeaks {
+            queue: self.stats.queue_peak.swap(0, Ordering::Relaxed),
+            commit_us: self.stats.commit_peak_us.swap(0, Ordering::Relaxed),
         }
     }
 
@@ -914,6 +974,7 @@ fn writer(
     loop {
         match rx.recv_timeout(batch_interval) {
             Ok(record) => {
+                stats.queued.fetch_sub(1, Ordering::Relaxed);
                 pending.push(record);
                 // Both conditions matter. Without the row count a burst commits
                 // one enormous transaction; without the elapsed check a steady
@@ -956,6 +1017,8 @@ fn flush(
     let started = Instant::now();
     match write_batch(conn, pending) {
         Ok(commit) => {
+            let batch_us = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+            stats.commit_peak_us.fetch_max(batch_us, Ordering::Relaxed);
             if let Some(report) = report {
                 report.batches.push(BatchTiming {
                     committed_at: Instant::now(),
@@ -974,6 +1037,11 @@ fn flush(
         }
     }
     pending.clear();
+}
+
+/// A count as SQLite's signed integer, saturating: no count here comes near the limit.
+fn column(count: u64) -> i64 {
+    i64::try_from(count).unwrap_or(i64::MAX)
 }
 
 /// Write one batch in one transaction, returning how long the commit alone took.
@@ -1091,8 +1159,8 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
             Record::BridgeStatus(status) => {
                 tx.prepare_cached(
                     "INSERT INTO bridge_status
-                       (rx_at, peer_count, rx_count, dropped_tx, uptime_ms)
-                     VALUES (?1,?2,?3,?4,?5)",
+                       (rx_at, peer_count, rx_count, dropped_tx, uptime_ms, host_frames)
+                     VALUES (?1,?2,?3,?4,?5,?6)",
                 )?
                 .execute(params![
                     status.rx_at_ms,
@@ -1100,6 +1168,37 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
                     status.rx_count,
                     status.dropped_tx,
                     status.uptime_ms,
+                    column(status.host_frames),
+                ])?;
+            }
+            Record::HostStatus(host) => {
+                tx.prepare_cached(
+                    "INSERT INTO host_status
+                       (at, frames, duplicate_batches, garbled, undecodable, incompatible,
+                        foreign_fleet, foreign_admin, admin_windows_missed, lag_peak_us,
+                        store_written, store_dropped, store_queue_peak, store_commit_peak_us,
+                        throttled, soc_temp_mc, battery_mv, battery_ma)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
+                )?
+                .execute(params![
+                    host.at_ms,
+                    column(host.frames),
+                    column(host.duplicate_batches),
+                    column(host.garbled),
+                    column(host.undecodable),
+                    column(host.incompatible),
+                    column(host.foreign_fleet),
+                    column(host.foreign_admin),
+                    column(host.admin_windows_missed),
+                    column(host.lag_peak_us),
+                    column(host.store_written),
+                    column(host.store_dropped),
+                    column(host.store_queue_peak),
+                    column(host.store_commit_peak_us),
+                    host.throttled,
+                    host.soc_temp_mc,
+                    host.battery_mv,
+                    host.battery_ma,
                 ])?;
             }
             Record::BatchGap(gap) => {
