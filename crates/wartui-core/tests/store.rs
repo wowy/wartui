@@ -356,7 +356,7 @@ fn export_writer_emits_valid_wigle_header_when_generating_csv() {
 #[test]
 fn export_writer_increments_unpositioned_counter_when_sighting_lacks_fix() {
     // Not an error and not silent: the operator needs to know how much of a capture
-    // is waiting on a `--lat`/`--lon` before uploading.
+    // is waiting on a GPS before uploading.
     let dir = tempfile::tempdir().expect("temp dir");
     let conn = write(
         &dir,

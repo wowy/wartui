@@ -98,7 +98,8 @@ CREATE TABLE IF NOT EXISTS capture (
   bridge_fw TEXT,
   channel_pool TEXT NOT NULL,
   notes TEXT,
-  -- 1 when the simulator made it: its networks are invented, so it is never uploaded.
+  -- 1 for test data: made with --sim (invented networks) or --lat/--lon (a fixed
+  -- position). WDGWars and WiGLE ban both, so it is never uploaded.
   simulated INTEGER NOT NULL
 );
 
@@ -430,7 +431,7 @@ pub struct CaptureInfo {
     pub pool: ChannelPool,
     /// Anything the operator wants to remember about this run.
     pub notes: Option<String>,
-    /// Whether the simulator, not a fleet, produced it.
+    /// Whether it holds test data: made with `--sim` or `--lat`/`--lon`.
     pub simulated: bool,
 }
 
@@ -694,7 +695,7 @@ pub fn set_upload_result(conn: &Connection, id: i64, result: &str) -> rusqlite::
     Ok(())
 }
 
-/// Whether the simulator made this capture.
+/// Whether this capture holds test data: made with `--sim` or `--lat`/`--lon`.
 ///
 /// # Errors
 /// If the query fails.

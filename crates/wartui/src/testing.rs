@@ -47,7 +47,7 @@ pub(crate) fn capture(dir: &tempfile::TempDir, records: Vec<Record>) -> PathBuf 
     capture_simulated(dir, records, false)
 }
 
-/// [`capture`], marked as the simulator's when `simulated`.
+/// [`capture`], marked as test data when `simulated`.
 pub(crate) fn capture_simulated(
     dir: &tempfile::TempDir,
     records: Vec<Record>,

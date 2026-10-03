@@ -33,7 +33,7 @@ new address. The same bridge reconnecting or rebooting sends nothing; nodes alre
 |-------------------------|-------------|--------------------------------------------------------|
 | `--db PATH`             | dated       | New file for the capture; an existing one is refused   |
 | `--bridge PATH\|MAC`    | detected    | Which board the bridge is, by path, address or `00:08` |
-| `--lat` `--lon` `--alt` | —           | A static position for every observation                |
+| `--lat` `--lon` `--alt` | —           | A fixed test position; the capture is never uploaded   |
 | `--gps PATH`            | detected    | An NMEA receiver, preferred over `--lat`/`--lon`       |
 | `--no-gps`              | off         | Do not look for a receiver at all                      |
 | `--gps-baud N`          | detected    | Line rate of that receiver                             |
@@ -73,7 +73,8 @@ within an hour from scoring, though its GPS may still refine the entry. The defa
 re-hearing within the hour can still improve its row's position, and one past it is a new row.
 `--recapture 0` writes one row per network. On finishing, `export` prints exact counts to standard
 error: rows written, distinct Wi-Fi networks (per band) and Bluetooth devices, sightings of each,
-sightings by position source, what each node heard, and the capture's span.
+sightings by position source, what each node heard, and the capture's span. A capture made with
+`--sim` or `--lat`/`--lon` still exports, with a warning not to submit the CSV anywhere.
 
 `RCOIs` holds a Passpoint access point's roaming consortium identifiers and `MfgrId` a BLE
 advertiser's manufacturer identifier, both blank (NULL in the store) when none was offered. A BLE
@@ -137,9 +138,10 @@ wartui upload --db tonight.db -y  # another capture, without asking
 
 It prints the same counts as `export`, plus the compressed size, then asks `Upload to WDGWars?
 [y/N]`. Without a terminal to ask on, it refuses before building the upload unless given
-`--yes`. A capture with no positioned rows is not sent, and a capture made with `--sim` is never
-uploaded. The site takes at most 40 MB (40,000,000 bytes) compressed, and a larger capture is
-refused before sending. Sizes are printed in decimal units.
+`--yes`. A capture with no positioned rows is not sent, and a capture made with `--sim` or
+`--lat`/`--lon` is never uploaded; `export` warns about such a capture too. The site takes at most
+40 MB (40,000,000 bytes) compressed, and a larger capture is refused before sending. Sizes are
+printed in decimal units.
 
 A repeat upload sends only sightings stored since the last upload the site queued. The cutoff is the
 last sighting that upload covered, in the order the capture stored them, so uploading a capture that
@@ -479,12 +481,8 @@ none. Rows record which tier answered, so a garage-to-road capture is honest abo
 is dropped for lack of a position, but **WiGLE rejects rows without coordinates**: a capture with
 none exports nothing and says how many networks it left out.
 
-```sh
-wartui run --db drive.db --lat 37.7749 --lon -122.4194
-```
-
-- **`--lat`/`--lon` beside a receiver is the useful combination.** It fills in whenever the receiver
-  has no fix, including while it is still finding itself.
+- **`--lat`/`--lon` is for testing only.** WDGWars and WiGLE ban fixed positions, so the capture is
+  marked as test data: `upload` refuses it, and `export` warns.
 - **A receiver is found without being named.** Each serial port that is not a fleet board is tried
   at 9600, 38400, 4800, then 115200 baud. The first with two checksum-valid sentences is kept.
 - **Self-naming ports (`u-blox`, `GPS`, `GNSS`) only go first.** Common pucks sit behind a generic
@@ -503,7 +501,7 @@ wartui run --db drive.db --lat 37.7749 --lon -122.4194
   never had one, so the header stays quiet; `--gps` asks for a port, so its absence is reported.
 - **A fix must be recent.** Past `--gps-max-age` seconds the position falls back a tier and the
   header says `gps fix is stale`. At driving speed a minute-old fix is another neighborhood, and
-  admitting the static position beats quietly claiming it.
+  falling back beats quietly claiming it.
 - **The receiver runs on its own thread; nothing waits for it.** Capture starts at once, and the
   header shows `gps scanning /dev/… @38400`, `gps searching`, `gps ok, 8 sats`, `gps fix is stale`,
   or the port's error. The search keeps running there, so a puck replugged into a *different* socket

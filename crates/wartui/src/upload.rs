@@ -45,9 +45,10 @@
 //! no cutoff. `--resend` ignores the record and sends everything,
 //! which is what a decoder fix needs: an upload then sends what `export` would write now.
 //!
-//! A capture made under `--sim` is refused whatever the flags say, because its invented
-//! networks would be published as real ones and an upload cannot be taken back. The capture
-//! records that it was simulated, so the refusal holds for `upload` and for the fleet view.
+//! A capture of test data — made with `--sim` or `--lat`/`--lon` — is refused whatever the
+//! flags say: invented networks or a fixed position would be published as real, WDGWars and
+//! WiGLE ban both, and an upload cannot be taken back. The capture records that it holds test
+//! data, so the refusal holds for `upload` and for the fleet view.
 //!
 //! The steps are separate functions — [`prepare`], [`send`], [`wait`], [`finish`] — and the
 //! wait reports through a callback rather than printing, so something other than this command
@@ -254,7 +255,7 @@ pub(crate) fn prepare(
 }
 
 /// The capture's WiGLE CSV, gzipped in memory, what went into it, and the upload it follows
-/// on from when it is [`ExportFilter::after_uploads`]. [`Simulated`] for a simulated capture,
+/// on from when it is [`ExportFilter::after_uploads`]. [`Simulated`] for a capture of test data,
 /// before anything is built.
 fn body(db: &Path, filter: ExportFilter) -> Result<(Vec<u8>, ExportSummary, Option<UploadRecord>)> {
     let conn = open_readonly(db).with_context(|| format!("opening {}", db.display()))?;
@@ -268,7 +269,7 @@ fn body(db: &Path, filter: ExportFilter) -> Result<(Vec<u8>, ExportSummary, Opti
     Ok((body, summary, previous))
 }
 
-/// The capture came from the simulator, so it is not uploaded.
+/// The capture holds test data (`--sim` or `--lat`/`--lon`), so it is not uploaded.
 #[derive(Debug)]
 pub(crate) struct Simulated {
     db: PathBuf,
@@ -276,7 +277,11 @@ pub(crate) struct Simulated {
 
 impl std::fmt::Display for Simulated {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} was captured from the simulator, so it is not uploaded", self.db.display())
+        write!(
+            f,
+            "{} holds test data (made with --sim or --lat/--lon), so it is not uploaded",
+            self.db.display()
+        )
     }
 }
 
@@ -769,7 +774,10 @@ mod tests {
                 .to_string();
             assert_eq!(
                 error,
-                format!("{} was captured from the simulator, so it is not uploaded", db.display())
+                format!(
+                    "{} holds test data (made with --sim or --lat/--lon), so it is not uploaded",
+                    db.display()
+                )
             );
         }
     }

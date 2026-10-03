@@ -91,7 +91,8 @@ pub struct Args {
     db: Option<PathBuf>,
 
     /// Serial port of an NMEA GPS. One is searched for when this is omitted, and
-    /// whichever is read is preferred over `--lat`/`--lon` while its fix is recent.
+    /// whichever is read is preferred over a `--lat`/`--lon` test position while its
+    /// fix is recent.
     #[arg(long, value_name = "PATH", conflicts_with = "no_gps")]
     gps: Option<String>,
 
@@ -104,19 +105,21 @@ pub struct Args {
     #[arg(long, value_name = "BAUD")]
     gps_baud: Option<u32>,
 
-    /// How old a GPS fix may be before the position falls back to `--lat`.
+    /// How old a GPS fix may be before the position falls back to a `--lat`/`--lon`
+    /// test position, or to none.
     #[arg(long, value_name = "SECONDS", default_value_t = 5)]
     gps_max_age: u64,
 
-    /// Latitude to record against every observation.
+    /// Latitude to record against every observation. For testing only: a capture
+    /// given a fixed position is marked as test data and never uploaded.
     #[arg(long, requires = "lon", allow_hyphen_values = true)]
     lat: Option<f64>,
 
-    /// Longitude to record against every observation.
+    /// Longitude to record against every observation. For testing only, as `--lat`.
     #[arg(long, requires = "lat", allow_hyphen_values = true)]
     lon: Option<f64>,
 
-    /// Altitude in metres, recorded alongside a static position.
+    /// Altitude in metres, recorded alongside a fixed test position.
     #[arg(long, allow_hyphen_values = true)]
     alt: Option<f64>,
 
@@ -151,6 +154,11 @@ fn tx_powers(file: &config::TxPower) -> (i8, i8) {
 /// [`tx_powers`] resolves the transmit powers.
 fn pool(file: Option<PoolArg>) -> ChannelPool {
     file.unwrap_or_default().into()
+}
+
+/// Whether the capture holds test data: invented networks or a fixed position.
+fn test_data(sim: Option<u8>, lat: Option<f64>) -> bool {
+    sim.is_some() || lat.is_some()
 }
 
 pub async fn run(args: Args) -> Result<()> {
@@ -230,7 +238,8 @@ pub async fn run(args: Args) -> Result<()> {
     let link = crate::open(args.bridge.as_deref(), args.sim, args.sim_c6, memory.clone())?;
 
     let started = now();
-    let info = CaptureInfo { pool, notes: args.notes.clone(), simulated: args.sim.is_some() };
+    let info =
+        CaptureInfo { pool, notes: args.notes.clone(), simulated: test_data(args.sim, args.lat) };
     let store_config = StoreConfig::new(&db);
     let store = Store::create(&store_config, &info, started.unix_ms).map_err(|e| match e {
         // Already names the path and says what to do.
@@ -273,6 +282,12 @@ pub async fn run(args: Args) -> Result<()> {
 
     outcome?;
     println!("Capture written to {}", db.display());
+    if info.simulated {
+        println!(
+            "It holds test data (made with --sim or --lat/--lon), so it is never uploaded. \n\
+             Do not submit its export to WiGLE, WDGWars or any other service."
+        );
+    }
     // Without a GPS fix the capture isn't usable by WiGLE.
     let fixes = gps.as_ref().map_or(0, |gps| gps.view().counters.fixes);
     if args.lat.is_none() && fixes == 0 {
@@ -282,13 +297,12 @@ pub async fn run(args: Args) -> Result<()> {
         match (args.no_gps, &args.gps, found) {
             (true, _, _) => println!(
                 "No position was given, so nothing in it can go to WiGLE. Drop --no-gps to \n\
-                 look for a receiver, or run again with --lat and --lon."
+                 look for a receiver."
             ),
             // Receiver found; no fix.
             (_, _, Some((port, baud))) => println!(
                 "The receiver on {port} at {baud} never reported a fix, so nothing in this \n\
-                 capture can go to WiGLE. Check that it can see the sky, and run with --lat \n\
-                 and --lon as well so a run like this still has a position."
+                 capture can go to WiGLE. Check that it can see the sky."
             ),
             // No receiver found at specified port
             (_, Some(port), None) => println!(
@@ -297,7 +311,7 @@ pub async fn run(args: Args) -> Result<()> {
             ),
             (_, None, None) => println!(
                 "No receiver was found and no position was given, so nothing in it can go to \n\
-                 WiGLE. Attach a receiver, or run again with --lat and --lon."
+                 WiGLE. Attach a receiver and run again."
             ),
         }
     }
@@ -311,7 +325,7 @@ pub async fn run(args: Args) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{PoolArg, pool, tx_powers};
+    use super::{PoolArg, pool, test_data, tx_powers};
     use crate::config::TxPower;
     use wartui_proto::plan::{ChannelPool, DEFAULT_TX_POWER_QUARTER_DBM};
 
@@ -351,5 +365,25 @@ mod tests {
     #[test]
     fn run_cmd_applies_default_pool_when_file_names_none() {
         assert_eq!(pool(None), ChannelPool::All);
+    }
+
+    #[test]
+    fn run_cmd_marks_test_data_when_simulated() {
+        assert!(test_data(Some(3), None));
+    }
+
+    #[test]
+    fn run_cmd_marks_test_data_when_position_fixed() {
+        assert!(test_data(None, Some(37.0)));
+    }
+
+    #[test]
+    fn run_cmd_marks_test_data_when_simulated_with_position_fixed() {
+        assert!(test_data(Some(3), Some(37.0)));
+    }
+
+    #[test]
+    fn run_cmd_leaves_capture_unmarked_when_neither_given() {
+        assert!(!test_data(None, None));
     }
 }
