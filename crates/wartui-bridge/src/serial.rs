@@ -172,18 +172,11 @@ fn parse_tail(text: &str) -> Option<Vec<u8>> {
 
 impl std::fmt::Display for BridgeSpec {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let octets = match self {
-            Self::Path(path) => return f.write_str(path),
-            Self::Mac(mac) => mac.as_slice(),
-            Self::Tail(tail) => tail.as_slice(),
-        };
-        for (i, byte) in octets.iter().enumerate() {
-            if i > 0 {
-                f.write_str(":")?;
-            }
-            write!(f, "{byte:02X}")?;
+        match self {
+            Self::Path(path) => f.write_str(path),
+            Self::Mac(mac) => f.write_str(&ports::mac_text(mac)),
+            Self::Tail(tail) => f.write_str(&ports::octets_text(tail)),
         }
-        Ok(())
     }
 }
 

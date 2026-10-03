@@ -23,7 +23,8 @@ use clap::Args as ClapArgs;
 use wartui_core::export::{DEFAULT_RECAPTURE_SECS, ExportFilter, ExportSummary, wigle_csv};
 use wartui_core::store::{Connection, is_simulated, open_readonly};
 
-use crate::{capture, short_mac};
+use crate::capture;
+use wartui_bridge::ports::short_mac_text;
 
 /// Which capture to read and which of its rows to send, shared by `export` and `upload`
 /// so both read a capture the same way.
@@ -213,7 +214,7 @@ pub(crate) fn details(summary: &ExportSummary) -> String {
     }
     let _ = writeln!(text, "  {:<11}{}", "nodes", heard.join(", "));
     for node in &summary.nodes {
-        let mut line = format!("    {}", short_mac(&node.mac));
+        let mut line = format!("    {}", short_mac_text(&node.mac));
         if node.wifi > 0 {
             let _ = write!(line, "  wifi {}", thousands(node.wifi));
         }

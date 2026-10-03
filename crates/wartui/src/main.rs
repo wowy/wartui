@@ -11,11 +11,12 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use wartui_bridge::ports::mac_text;
 use wartui_bridge::remember::BridgeMemory;
 use wartui_bridge::serial::{self, BridgeSpec, SerialTransport, discover_ports};
 use wartui_bridge::sim::{SimConfig, SimTransport};
 use wartui_bridge::{BridgeInfo, LinkEvent, LinkHandle, TransportError};
-use wartui_proto::link::{LoopPhase, Mac, ResetCause};
+use wartui_proto::link::{LoopPhase, ResetCause};
 
 mod analyze;
 mod bench;
@@ -193,7 +194,7 @@ fn ports() -> Result<()> {
         // column on its own row.
         let address = candidate
             .mac()
-            .map_or_else(|| "address not reported".to_owned(), |address| mac(&address));
+            .map_or_else(|| "address not reported".to_owned(), |address| mac_text(&address));
         let product = candidate.product.as_deref().unwrap_or("unknown device");
         match (candidate.vid, candidate.pid) {
             (Some(vid), Some(pid)) => println!("  {address:<20}  {product}  ({vid:04x}:{pid:04x})"),
@@ -271,7 +272,7 @@ fn describe(event: &LinkEvent) -> Option<String> {
     match event {
         LinkEvent::Connected(info) => Some(format!(
             "bridge {} on {:?}, firmware {}",
-            mac(&info.mac),
+            mac_text(&info.mac),
             info.chip,
             info.fw_version
         )),
@@ -279,17 +280,6 @@ fn describe(event: &LinkEvent) -> Option<String> {
         LinkEvent::Garbled(err) => Some(format!("undecodable frame: {err}")),
         LinkEvent::Message(_) => None,
     }
-}
-
-/// A MAC in the form the firmware's own logs and the sniffer captures use, so
-/// an address can be grepped for across all three.
-pub fn mac(mac: &Mac) -> String {
-    wartui_bridge::ports::mac_text(mac)
-}
-
-/// The last two octets, `57:84`: how the boards are told apart (see AGENTS.md).
-pub fn short_mac(mac: &Mac) -> String {
-    format!("{:02X}:{:02X}", mac[4], mac[5])
 }
 
 /// One line saying how the bridge came to be running this life.
@@ -468,14 +458,7 @@ pub fn no_bridge_notice(bridge: Option<&str>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{BridgeSpec, Command, mac, no_bridge_notice, parse, short_mac, spec};
-
-    #[test]
-    fn mac_formatter_writes_whole_and_short_forms_when_given_address() {
-        let address = [0x02, 0x00, 0x5E, 0x10, 0x57, 0x84];
-        assert_eq!(mac(&address), "02:00:5E:10:57:84");
-        assert_eq!(short_mac(&address), "57:84");
-    }
+    use super::{BridgeSpec, Command, no_bridge_notice, parse, spec};
 
     #[test]
     fn cli_parser_rejects_global_bridge_flag_when_placed_before_subcommand() {

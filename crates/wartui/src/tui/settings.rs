@@ -122,7 +122,7 @@ impl ConfigModal {
     /// | tx power | 1 dBm, within `config::TX_POWER_DBM` |
     /// | pool | one place in [`POOL_STEPS`] |
     /// | remember | flips |
-    /// | key | none; `on_modal_key` types into it |
+    /// | key | none; [`Self::on_key`] types into it |
     fn step(&mut self, delta: i8) {
         let value = match self.selected {
             Field::Fleet => &mut self.fleet_dbm,
@@ -143,7 +143,7 @@ impl ConfigModal {
                 }
                 return;
             }
-            // A text row. `on_modal_key` types into it.
+            // A text row. `on_key` types into it.
             Field::WdgwarsKey => return,
         };
         // In i16, so stepping past either end of i8 cannot overflow.

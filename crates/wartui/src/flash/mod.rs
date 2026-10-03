@@ -37,7 +37,7 @@ use wartui_bridge::remember::state_dir;
 use wartui_bridge::serial::BridgeSpec;
 use wartui_proto::link::Mac;
 
-use crate::{mac, short_mac};
+use wartui_bridge::ports::{mac_text, short_mac_text};
 
 /// The release this binary was built for, when it was built for one.
 const RELEASE_TAG: Option<&str> = option_env!("WARTUI_RELEASE_TAG");
@@ -202,7 +202,7 @@ impl fmt::Display for Skip {
             Self::ProbeFailed(line) => write!(f, "espflash board-info failed: {line}"),
             Self::Unreadable => f.write_str("espflash board-info said nothing readable"),
             Self::OtherChip(chip) => write!(f, "an {chip}"),
-            Self::OtherAddress(read) => write!(f, "espflash read {} from it", mac(read)),
+            Self::OtherAddress(read) => write!(f, "espflash read {} from it", mac_text(read)),
         }
     }
 }
@@ -261,7 +261,7 @@ fn judge_probe(expected: Mac, chip: Chip, probe: &Ran) -> Result<(), Skip> {
 /// A board by its last two octets, as the fleet table names it, or by path without an address.
 fn name(candidate: &PortCandidate) -> String {
     match candidate.mac() {
-        Some(address) => short_mac(&address),
+        Some(address) => short_mac_text(&address),
         None => candidate.path.clone(),
     }
 }
@@ -562,7 +562,7 @@ mod testing {
     use wartui_proto::link::Mac;
 
     use super::Ran;
-    use crate::mac;
+    use wartui_bridge::ports::mac_text;
 
     pub(super) const BRIDGE_MAC: Mac = [0x10, 0xBD, 0xA3, 0xEC, 0x44, 0xC0];
     pub(super) const NODE_MAC: Mac = [0x3C, 0xDC, 0x75, 0x84, 0xA1, 0xB0];
@@ -596,7 +596,7 @@ Chip ID: 23
 ";
 
     pub(super) fn board(device: &str, address: Option<&Mac>) -> PortCandidate {
-        let serial = address.map(mac);
+        let serial = address.map(mac_text);
         candidate(device, Some(ESPRESSIF_VID), Some(BRIDGE_PID), serial.as_deref())
     }
 

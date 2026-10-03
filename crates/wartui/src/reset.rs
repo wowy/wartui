@@ -25,6 +25,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::Args as ClapArgs;
+use wartui_bridge::ports::mac_text;
 use wartui_bridge::remember::BridgeMemory;
 use wartui_bridge::serial::{self, BridgeSpec, discover_ports};
 use wartui_bridge::{BridgeInfo, LinkEvent};
@@ -180,7 +181,7 @@ fn report(info: Option<&BridgeInfo>, uptime_ms: u32) {
     match info {
         Some(info) => println!(
             "back up: {} on {:?}, firmware {}",
-            super::mac(&info.mac),
+            mac_text(&info.mac),
             info.chip,
             info.fw_version
         ),

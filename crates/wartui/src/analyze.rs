@@ -12,7 +12,7 @@ use wartui_core::export::wigle_csv;
 use wartui_core::store::open_readonly;
 
 use crate::export::{Selection, details, note_unpositioned, thousands};
-use crate::short_mac;
+use wartui_bridge::ports::short_mac_text;
 
 #[derive(ClapArgs, Debug)]
 pub struct Args {
@@ -101,7 +101,7 @@ fn losses_text(loss: &LossSummary) -> String {
     let _ = writeln!(text, "  loss by node");
     for node in &loss.nodes {
         let mut line =
-            format!("    {}  batches {}", short_mac(&node.mac), thousands(node.batches_lost));
+            format!("    {}  batches {}", short_mac_text(&node.mac), thousands(node.batches_lost));
         if node.heartbeats > 0 {
             let _ = write!(
                 line,

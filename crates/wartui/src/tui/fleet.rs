@@ -19,7 +19,7 @@ use wartui_core::record::AdminOutcome;
 use wartui_proto::plan::{ChannelSet, Radio, SCAN_CHANNELS};
 
 use super::format::ago;
-use crate::short_mac;
+use wartui_bridge::ports::short_mac_text;
 
 /// Draw the fleet table into `area` with row `selected` under the cursor. `offset` is
 /// the scroll offset from the last frame, updated to keep the cursor in view.
@@ -160,7 +160,7 @@ fn node_label(node: &NodeView) -> String {
         Some(Radio::TwoPointFour) => "C6",
         None => "— ",
     };
-    format!("{chip} {}", short_mac(&node.state.mac))
+    format!("{chip} {}", short_mac_text(&node.state.mac))
 }
 
 /// Why a node cannot be given an assignment, or `None` if it can.
