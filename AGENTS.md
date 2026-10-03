@@ -126,8 +126,8 @@ until 1.0, and a capture stamped anything else, or stamped 1 over another build'
 fingerprint, is refused rather than migrated.
 
 Positions resolve fresh per record through `PositionChain`: GPS (found by `discover`, or pinned with
-`--gps`; NMEA on its own thread) → static `--lat`/`--lon` → nothing. Which tier answered is stored
-per row.
+`--gps`; NMEA on its own thread) → static `--lat`/`--lon` (test only: it marks the capture as test
+data, which is never uploaded) → nothing. Which tier answered is stored per row.
 
 ## Invariants that are easy to break
 

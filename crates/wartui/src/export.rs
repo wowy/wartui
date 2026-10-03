@@ -10,6 +10,9 @@
 //! name with `.csv` where the `.db` was. A name chosen that way is never written over —
 //! the reader did not pick it, and the file it would replace may be the one already
 //! uploaded — so `--out` is how to say another name, or the same one again and mean it.
+//!
+//! A capture of test data — made with `--sim` or `--lat`/`--lon` — still exports, since
+//! testing is what it is for, but with a warning not to submit the CSV anywhere.
 
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -18,7 +21,7 @@ use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use clap::Args as ClapArgs;
 use wartui_core::export::{DEFAULT_RECAPTURE_SECS, ExportFilter, ExportSummary, wigle_csv};
-use wartui_core::store::open_readonly;
+use wartui_core::store::{Connection, is_simulated, open_readonly};
 
 use crate::capture;
 
@@ -89,6 +92,7 @@ pub fn run(args: Args) -> Result<()> {
         );
     }
     let conn = open_readonly(&db).with_context(|| format!("opening {}", db.display()))?;
+    let warning = test_data_note(&conn, &db)?;
     let filter = args.selection.filter();
     let version = env!("CARGO_PKG_VERSION");
 
@@ -107,7 +111,25 @@ pub fn run(args: Args) -> Result<()> {
     };
 
     note_unpositioned(&summary);
+    if let Some(warning) = warning {
+        eprintln!("{warning}");
+    }
     Ok(())
+}
+
+/// [`test_data_warning`] when the capture holds test data.
+fn test_data_note(conn: &Connection, db: &Path) -> Result<Option<String>> {
+    let marked = is_simulated(conn).with_context(|| format!("reading {}", db.display()))?;
+    Ok(marked.then(|| test_data_warning(db)))
+}
+
+/// What `export` says about a capture of test data, whose CSV must go nowhere.
+pub(crate) fn test_data_warning(db: &Path) -> String {
+    format!(
+        "warning: {} holds test data (made with --sim or --lat/--lon). Do not submit this CSV \
+         to WiGLE, WDGWars or any other service.",
+        db.display()
+    )
 }
 
 /// Say how many rows had no position and were left out, when any were.
@@ -115,7 +137,7 @@ pub(crate) fn note_unpositioned(summary: &ExportSummary) {
     if summary.unpositioned > 0 {
         eprintln!(
             "{} rows were left out because no sighting in their window had a \
-             position. Capture with --lat and --lon to include them.",
+             position. Capture with a GPS receiver attached to include them.",
             thousands(summary.unpositioned)
         );
     }
@@ -319,7 +341,11 @@ mod tests {
 
     use wartui_core::export::{Bands, ExportSummary, KindStats, NodeStats, Positions};
 
-    use super::{create_csv, into_csv, is_the_capture, report};
+    use super::{
+        Args, Selection, create_csv, into_csv, is_the_capture, report, test_data_note,
+        test_data_warning,
+    };
+    use crate::testing::{EPOCH_MS, capture, capture_simulated, sighting};
 
     /// A capture of two nodes, one on each kind, with sightings over an evening.
     fn evening() -> ExportSummary {
@@ -475,5 +501,43 @@ mod tests {
         assert!(!is_the_capture(&dir.path().join("tonight.csv"), &db));
         // Standard output is not a path at all, and asking the filesystem says so.
         assert!(!is_the_capture(Path::new("-"), &db));
+    }
+
+    #[test]
+    fn export_writes_rows_when_capture_holds_test_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let records = vec![sighting([0x10, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0))];
+        let db = capture_simulated(&dir, records, true);
+        let out = dir.path().join("tonight.csv");
+        let args =
+            Args { selection: Selection { db: Some(db), recapture: 0 }, out: Some(out.clone()) };
+        super::run(args).unwrap();
+        let csv = std::fs::read_to_string(&out).unwrap();
+        assert!(csv.contains("10:00:00:00:00:01"), "{csv}");
+    }
+
+    #[test]
+    fn export_warns_when_capture_holds_test_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = capture_simulated(&dir, Vec::new(), true);
+        let conn = wartui_core::store::open_readonly(&db).unwrap();
+        assert_eq!(test_data_note(&conn, &db).unwrap(), Some(test_data_warning(&db)));
+    }
+
+    #[test]
+    fn export_stays_quiet_when_capture_holds_no_test_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = capture(&dir, Vec::new());
+        let conn = wartui_core::store::open_readonly(&db).unwrap();
+        assert_eq!(test_data_note(&conn, &db).unwrap(), None);
+    }
+
+    #[test]
+    fn export_names_capture_and_services_when_warning_of_test_data() {
+        assert_eq!(
+            test_data_warning(Path::new("tonight.db")),
+            "warning: tonight.db holds test data (made with --sim or --lat/--lon). Do not \
+             submit this CSV to WiGLE, WDGWars or any other service."
+        );
     }
 }

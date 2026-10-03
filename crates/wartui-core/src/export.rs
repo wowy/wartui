@@ -134,7 +134,7 @@ pub struct ExportSummary {
     /// Rows left out because no sighting in their window had a position.
     ///
     /// Not an error and not silent: the operator should know how much of a capture is
-    /// waiting on a GPS or a `--lat`/`--lon`.
+    /// waiting on a GPS.
     pub unpositioned: u64,
     /// Wi-Fi networks, sightings and rows.
     pub wifi: KindStats,
