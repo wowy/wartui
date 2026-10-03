@@ -25,7 +25,11 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::{Map, Value};
 use wartui_core::export::ExportFilter;
 
-use crate::tui::Settings;
+use ratatui::Frame;
+use ratatui::text::Line;
+use ratatui::widgets::{Block, Clear, Paragraph};
+
+use super::{Settings, centered_rect};
 use crate::upload::{
     Client, GIVE_UP, JobFailed, Prepare, Prepared, Progress, Simulated, Waited, counts, finish,
     prepare, send, size, wait,
@@ -233,4 +237,166 @@ fn done_line(job: u64, result: &Map<String, Value>) -> String {
         return format!("upload: job {job} done; WDGWars sent no counts");
     }
     format!("upload: job {job} {}", counts.join("  "))
+}
+
+/// The upload's confirm, centred the way settings is, sized to what it says.
+pub(super) fn draw_confirm_modal(frame: &mut Frame<'_>, lines: &[String]) {
+    let widest = lines.iter().map(|line| line.chars().count()).max().unwrap_or(0);
+    let width = u16::try_from(widest + 4).unwrap_or(u16::MAX);
+    let height = u16::try_from(lines.len() + 2).unwrap_or(u16::MAX);
+    let area = centered_rect(width, height, frame.area());
+    frame.render_widget(Clear, area);
+    let block = Block::bordered().title(" upload to WDGWars ");
+    let inner = block.inner(area).inner(ratatui::layout::Margin::new(1, 0));
+    frame.render_widget(block, area);
+    let lines: Vec<Line<'_>> = lines.iter().map(|line| Line::from(line.as_str())).collect();
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use tokio::sync::mpsc;
+    use wartui_core::engine::Snapshot;
+
+    use crate::config;
+    use crate::tui::ui::Ui;
+
+    use super::*;
+    use crate::tui::draw;
+    use crate::tui::fixtures::*;
+
+    /// A view whose `u` uploads `db`, with a key, to a local server at `base`.
+    fn uploading(db: PathBuf, base: String) -> Ui {
+        let mut saved = config::Config::default();
+        saved.api_keys.wdgwars = "secret".to_owned();
+        let upload = UploadTarget { db, base };
+        Ui { settings: Settings { saved, upload, ..Settings::default() }, ..Ui::default() }
+    }
+
+    /// A capture holding two positioned networks.
+    fn two_rows(dir: &tempfile::TempDir) -> PathBuf {
+        use crate::testing::{capture, sighting};
+        capture(
+            dir,
+            vec![
+                sighting([0x10, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0)),
+                sighting([0x10, 0, 0, 0, 0, 2], EPOCH_MS + 1_000, Some(37.1)),
+            ],
+        )
+    }
+
+    /// Drain the upload threads, as each frame does, until `done` holds or ten seconds
+    /// pass (twenty when `wait`'s first poll is in the way).
+    fn poll_until(ui: &mut Ui, snapshot: &Snapshot, secs: u64, done: impl Fn(&Ui) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(secs);
+        while !done(ui) {
+            assert!(Instant::now() < deadline, "timed out: {:?}", ui.upload);
+            std::thread::sleep(Duration::from_millis(20));
+            ui.poll_upload(snapshot);
+        }
+    }
+
+    fn press_u(ui: &mut Ui, snapshot: &Snapshot) {
+        let (tx, _rx) = mpsc::channel(4);
+        ui.on_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE), snapshot, &tx);
+    }
+
+    #[test]
+    fn upload_key_shows_notice_when_no_api_key() {
+        let snapshot = busy();
+        let mut ui = Ui::default();
+        press_u(&mut ui, &snapshot);
+        assert_eq!(
+            ui.notice(snapshot.now_ms),
+            Some("no WDGWars API key; paste one in settings (c)")
+        );
+        assert!(!ui.upload.confirming());
+    }
+
+    #[test]
+    fn upload_key_opens_confirm_with_row_count_when_capture_has_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let snapshot = busy();
+        let mut ui = uploading(two_rows(&dir), "http://127.0.0.1:9".to_owned());
+        press_u(&mut ui, &snapshot);
+        assert_eq!(ui.upload.status(), Some("upload: preparing…"));
+        poll_until(&mut ui, &snapshot, 10, |ui| ui.upload.confirming());
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("test backend");
+        terminal.draw(|frame| draw(frame, &snapshot, &mut ui)).expect("drawing");
+        let rendered = terminal.backend().to_string();
+        assert!(rendered.contains("2 rows to upload"), "{rendered}");
+        assert!(rendered.contains("compressed"), "{rendered}");
+        assert!(rendered.contains("y upload · any other key cancels"), "{rendered}");
+    }
+
+    #[test]
+    fn upload_confirm_sends_nothing_when_cancelled() {
+        let dir = tempfile::tempdir().unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let snapshot = busy();
+        let mut ui = uploading(two_rows(&dir), base);
+        press_u(&mut ui, &snapshot);
+        poll_until(&mut ui, &snapshot, 10, |ui| ui.upload.confirming());
+
+        ui.on_confirm_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE), &snapshot);
+        assert!(!ui.upload.confirming());
+        assert_eq!(ui.notice(snapshot.now_ms), Some("not uploaded"));
+        std::thread::sleep(Duration::from_millis(200));
+        listener.set_nonblocking(true).unwrap();
+        assert!(listener.accept().is_err(), "the upload was sent anyway");
+    }
+
+    #[test]
+    fn upload_footer_shows_job_result_when_import_done() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, server) = crate::testing::serve_sequence(&[
+            ("202 Accepted", r#"{"ok":true,"job_id":42}"#),
+            (
+                "200 OK",
+                r#"{"ok":true,"job_id":42,"status":"done","result":{"imported":1200,"captured":17}}"#,
+            ),
+        ]);
+        let snapshot = busy();
+        let mut ui = uploading(two_rows(&dir), base);
+        press_u(&mut ui, &snapshot);
+        poll_until(&mut ui, &snapshot, 10, |ui| ui.upload.confirming());
+        ui.on_confirm_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE), &snapshot);
+        assert!(ui.upload.status().is_some_and(|s| s.starts_with("upload: sending ")));
+        // Through `wait`'s first poll, two seconds in.
+        poll_until(&mut ui, &snapshot, 20, |ui| {
+            ui.upload.status().is_some_and(|s| s.contains("imported"))
+        });
+
+        let mut terminal = Terminal::new(TestBackend::new(200, 40)).expect("test backend");
+        terminal.draw(|frame| draw(frame, &snapshot, &mut ui)).expect("drawing");
+        let rendered = terminal.backend().to_string();
+        assert!(rendered.contains("upload: job 42 imported 1,200  captured 17"), "{rendered}");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn upload_footer_shows_error_when_send_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, server) =
+            crate::testing::serve_once("401 Unauthorized", r#"{"ok":false,"error":"bad key"}"#);
+        let snapshot = busy();
+        let mut ui = uploading(two_rows(&dir), base);
+        press_u(&mut ui, &snapshot);
+        poll_until(&mut ui, &snapshot, 10, |ui| ui.upload.confirming());
+        ui.on_confirm_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE), &snapshot);
+        poll_until(&mut ui, &snapshot, 10, |ui| {
+            ui.upload.status().is_some_and(|s| s.starts_with("upload failed:"))
+        });
+        assert_eq!(
+            ui.upload.status(),
+            Some("upload failed: WDGWars rejected the API key: bad key")
+        );
+        server.join().unwrap();
+    }
 }
