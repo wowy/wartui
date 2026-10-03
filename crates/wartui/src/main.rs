@@ -192,10 +192,12 @@ fn ports() -> Result<()> {
         // Padded to the width of the longer of the two, which is the words rather
         // than an address: an unaddressed board in the list must not shift every
         // column on its own row.
-        let address = candidate.mac().map_or_else(
-            || "address not reported".to_owned(),
-            |address| mac::full(&address).to_string(),
-        );
+        let full = candidate.mac();
+        let full = full.as_ref().map(mac::full);
+        let address: &dyn std::fmt::Display = match &full {
+            Some(text) => text,
+            None => &"address not reported",
+        };
         let product = candidate.product.as_deref().unwrap_or("unknown device");
         match (candidate.vid, candidate.pid) {
             (Some(vid), Some(pid)) => println!("  {address:<20}  {product}  ({vid:04x}:{pid:04x})"),

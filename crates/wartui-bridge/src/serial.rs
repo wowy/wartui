@@ -160,14 +160,7 @@ impl std::str::FromStr for BridgeSpec {
 
 /// One to five colon-separated pairs of hex digits, as the octets they spell.
 fn parse_tail(text: &str) -> Option<Vec<u8>> {
-    let octets = text
-        .split(':')
-        .map(|pair| {
-            // Checked by hand: `from_str_radix` also takes a sign, and `+8` is not a pair.
-            let digits = pair.len() == 2 && pair.bytes().all(|b| b.is_ascii_hexdigit());
-            digits.then(|| u8::from_str_radix(pair, 16).ok()).flatten()
-        })
-        .collect::<Option<Vec<u8>>>()?;
+    let octets = text.split(':').map(mac::pair).collect::<Option<Vec<u8>>>()?;
     (1..=5).contains(&octets.len()).then_some(octets)
 }
 
@@ -176,7 +169,7 @@ impl std::fmt::Display for BridgeSpec {
         match self {
             Self::Path(path) => f.write_str(path),
             Self::Mac(mac) => write!(f, "{}", mac::full(mac)),
-            Self::Tail(tail) => write!(f, "{}", mac::Octets(tail)),
+            Self::Tail(tail) => write!(f, "{}", mac::octets(tail)),
         }
     }
 }
@@ -299,11 +292,7 @@ pub fn unambiguous_bridge(
         several => Err(TransportError::AmbiguousBridge {
             boards: several
                 .iter()
-                .map(|candidate| {
-                    candidate
-                        .mac()
-                        .map_or_else(|| candidate.path.clone(), |mac| mac::full(&mac).to_string())
-                })
+                .map(|candidate| candidate.label())
                 .collect::<Vec<_>>()
                 .join(", "),
         }),

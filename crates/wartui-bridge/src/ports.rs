@@ -79,6 +79,12 @@ impl PortCandidate {
     pub fn mac(&self) -> Option<Mac> {
         self.serial.as_deref().and_then(mac::parse)
     }
+
+    /// The board's address if it reported one, else its path.
+    #[must_use]
+    pub fn label(&self) -> String {
+        self.mac().map_or_else(|| self.path.clone(), |address| mac::full(&address).to_string())
+    }
 }
 
 /// Build a candidate by hand.

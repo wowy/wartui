@@ -1,4 +1,4 @@
-use wartui_proto::mac::{self, Mac, Octets};
+use wartui_proto::mac::{self, Mac};
 
 const ADDRESS: Mac = [0x10, 0xBD, 0xA3, 0xEC, 0x44, 0xC0];
 
@@ -11,7 +11,20 @@ fn mac_formatter_writes_whole_and_short_forms_when_given_address() {
 
 #[test]
 fn mac_formatter_joins_octets_when_given_three_octet_tail() {
-    assert_eq!(Octets(&[0xEC, 0x44, 0xC0]).to_string(), "EC:44:C0");
+    assert_eq!(mac::octets(&[0xEC, 0x44, 0xC0]).to_string(), "EC:44:C0");
+}
+
+#[test]
+fn mac_formatter_prints_first_six_octets_when_given_longer_slice() {
+    let bytes = [0x10, 0xBD, 0xA3, 0xEC, 0x44, 0xC0, 0xFF];
+    assert_eq!(mac::octets(&bytes).to_string(), "10:BD:A3:EC:44:C0");
+}
+
+#[test]
+fn mac_formatter_pads_address_when_given_width() {
+    // `wartui ports` lines addresses up in a column this way.
+    assert_eq!(format!("{:<20}|", mac::full(&ADDRESS)), "10:BD:A3:EC:44:C0   |");
+    assert_eq!(format!("{:>7}|", mac::short(&ADDRESS)), "  44:C0|");
 }
 
 #[test]
@@ -49,6 +62,22 @@ fn mac_parser_rejects_text_when_seven_pairs() {
 #[test]
 fn mac_parser_rejects_text_when_a_pair_has_one_digit() {
     assert_eq!(mac::parse("1:BD:A3:EC:44:C0"), None);
+}
+
+#[test]
+fn mac_parser_rejects_text_when_a_pair_has_a_sign() {
+    // `from_str_radix` alone takes a sign, so this is a check of our own.
+    assert_eq!(mac::parse("+0:BD:A3:EC:44:C0"), None);
+    assert_eq!(mac::parse("-0:BD:A3:EC:44:C0"), None);
+}
+
+#[test]
+fn mac_pair_reads_octet_when_exactly_two_hex_digits() {
+    assert_eq!(mac::pair("c0"), Some(0xC0));
+    assert_eq!(mac::pair("0F"), Some(0x0F));
+    for text in ["", "8", "+8", "-8", "0g", "000"] {
+        assert_eq!(mac::pair(text), None, "{text}");
+    }
 }
 
 #[test]

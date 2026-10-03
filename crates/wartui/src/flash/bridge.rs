@@ -136,13 +136,7 @@ fn target(
                     "--bridge {given} matches {} attached boards: {}. Name the bridge by more of \
                      its address",
                     named.len(),
-                    named
-                        .iter()
-                        .map(|board| board
-                            .mac()
-                            .map_or_else(|| board.path.clone(), |a| mac::full(&a).to_string()))
-                        .collect::<Vec<_>>()
-                        .join(", ")
+                    named.iter().map(|board| board.label()).collect::<Vec<_>>().join(", ")
                 ),
                 named => named.first().copied().ok_or_else(|| {
                     anyhow!(
@@ -168,13 +162,7 @@ fn target(
                 "{} boards are attached and none is known to be the bridge: {}. Name it with \
                      --bridge (`wartui ports` lists each board's address)",
                 several.len(),
-                several
-                    .iter()
-                    .map(|board| board
-                        .mac()
-                        .map_or_else(|| board.path.clone(), |a| mac::full(&a).to_string()))
-                    .collect::<Vec<_>>()
-                    .join(", "),
+                several.iter().map(|board| board.label()).collect::<Vec<_>>().join(", "),
             ),
         },
     };
