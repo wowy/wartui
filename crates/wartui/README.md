@@ -574,11 +574,11 @@ and survives into your next session. A held address is reported again five minut
 reported, or sooner if heard at least 10 dB louder. `r`/`R` clear it without a reboot, and a change
 of share or Bluetooth role empties it. `crates/wartui-proto/src/dedup.rs` explains why.
 
-| Header says            | Meaning                                                                                                                                 |
-|------------------------|-----------------------------------------------------------------------------------------------------------------------------------------|
-| `waiting for nodes`    | No node has heartbeated yet this session                                                                                                |
-| `all nodes silent`     | Nodes were seen, but none is heartbeating now                                                                                           |
-| `N alive, none usable` | Nodes are heartbeating, but none can be assigned channels (refused a peer slot, or hasn't reported its radio); the node table says which |
+| Header says            | Meaning                                                                  |
+|------------------------|--------------------------------------------------------------------------|
+| `waiting for nodes`    | No node has heartbeated yet this session                                 |
+| `all nodes silent`     | Nodes were seen, but none is heartbeating now                            |
+| `N alive, none usable` | Heartbeating, but none can be assigned channels; the node table says why |
 
 The footer shows faults only once they happen, so a clean run has a clean footer:
 
