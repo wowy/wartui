@@ -288,7 +288,7 @@ pub async fn run(args: Args) -> Result<()> {
              Do not submit its export to WiGLE, WDGWars or any other service."
         );
     }
-    // Without a GPS fix the capture isn't usable by WiGLE.
+    // Without a GPS fix the capture cannot be uploaded.
     let fixes = gps.as_ref().map_or(0, |gps| gps.view().counters.fixes);
     if args.lat.is_none() && fixes == 0 {
         // The view says so throughout as well; this is for a terminal that never
@@ -296,22 +296,22 @@ pub async fn run(args: Args) -> Result<()> {
         let found = gps.as_ref().and_then(|gps| gps.view().settled);
         match (args.no_gps, &args.gps, found) {
             (true, _, _) => println!(
-                "No position was given, so nothing in it can go to WiGLE. Drop --no-gps to \n\
+                "No position was given, so nothing in it can be uploaded. Drop --no-gps to \n\
                  look for a receiver."
             ),
             // Receiver found; no fix.
             (_, _, Some((port, baud))) => println!(
                 "The receiver on {port} at {baud} never reported a fix, so nothing in this \n\
-                 capture can go to WiGLE. Check that it can see the sky."
+                 capture can be uploaded. Check that it can see the sky."
             ),
             // No receiver found at specified port
             (_, Some(port), None) => println!(
                 "Nothing on {port} answered as an NMEA receiver, so nothing in this capture \n\
-                 can go to WiGLE. Check the path, or leave --gps off and let wartui look."
+                 can be uploaded. Check the path, or leave --gps off and let wartui look."
             ),
             (_, None, None) => println!(
-                "No receiver was found and no position was given, so nothing in it can go to \n\
-                 WiGLE. Attach a receiver and run again."
+                "No receiver was found and no position was given, so nothing in this capture \n\
+                 can be uploaded. Attach a receiver and run again."
             ),
         }
     }

@@ -870,7 +870,11 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot) {
                 bridge.chip,
                 bridge.fw_version
             ),
-            Color::Green,
+            if snapshot.link_up && snapshot.position.is_located() {
+                Color::Green
+            } else {
+                Color::Red
+            },
         )
     } else {
         ("waiting for bridge".to_owned(), Color::Red)
@@ -900,14 +904,18 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot) {
 
 /// The fleet planner status.
 ///
-/// Displays how many nodes are healthy, or error states around planning the fleet.
+/// Displays how many nodes are healthy, or why none is planned: none seen yet
+/// (normal at startup), all seen gone silent, or alive but none assignable.
 fn planning(snapshot: &Snapshot) -> Span<'static> {
-    let text = match snapshot.plan {
-        Some(plan) => format!("{} of {}", plan.node_count(), snapshot.nodes.len()),
-        None if snapshot.alive > 0 => "no node it can drive".to_owned(),
-        None => "no nodes detected".to_owned(),
+    let (text, color) = match snapshot.plan {
+        Some(plan) => (format!("{} of {}", plan.node_count(), snapshot.nodes.len()), Color::Green),
+        None if snapshot.alive > 0 => {
+            (format!("{} alive, none usable", snapshot.alive), Color::Red)
+        }
+        None if snapshot.nodes.is_empty() => ("waiting for nodes".to_owned(), Color::Yellow),
+        None => ("all nodes silent".to_owned(), Color::Red),
     };
-    Span::styled(text, Style::new().fg(Color::Green))
+    Span::styled(text, Style::new().fg(color))
 }
 
 /// Current GPS position, or a warning
@@ -1206,7 +1214,8 @@ fn observation_row(entry: &TailEntry) -> Row<'static> {
         RecordKind::Ble => Style::new().fg(Color::Blue),
     };
     let ssid = if entry.ssid.is_empty() {
-        Span::styled("<hidden>", Style::new().fg(Color::DarkGray))
+        let text = if entry.kind == RecordKind::Wifi { "<hidden>" } else { "<n/a>" };
+        Span::styled(text, Style::new().fg(Color::DarkGray))
     } else {
         Span::raw(entry.ssid.clone())
     };
@@ -1221,7 +1230,7 @@ fn observation_row(entry: &TailEntry) -> Row<'static> {
     ])
 }
 
-/// How many lines of faults the footer may take before it starts summarising.
+/// How many lines of faults the footer may take before it starts summarizing.
 ///
 /// The fleet table has to keep some of the terminal.
 const MAX_FAULT_LINES: usize = 3;
@@ -2357,8 +2366,8 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(200, 40)).expect("test backend");
         terminal.draw(|frame| draw(frame, &snapshot, &mut Ui::default())).expect("drawing");
         let rendered = terminal.backend().to_string();
-        assert!(rendered.contains("no node it can drive"), "got {rendered}");
-        assert!(!rendered.contains("nothing heartbeating"), "they are all heartbeating");
+        assert!(rendered.contains("3 alive, none usable"), "got {rendered}");
+        assert!(!rendered.contains("all nodes silent"), "they are all heartbeating");
     }
 
     #[test]
@@ -2448,7 +2457,7 @@ mod tests {
         empty.assignable = 0;
         let mut waiting = Terminal::new(TestBackend::new(150, 20)).expect("test backend");
         waiting.draw(|frame| draw(frame, &empty, &mut Ui::default())).expect("drawing");
-        assert!(waiting.backend().to_string().contains("no nodes detected"));
+        assert!(waiting.backend().to_string().contains("waiting for nodes"));
 
         let mut snapshot = busy();
         snapshot.plan = plan(ChannelPool::Us, 4);
@@ -2465,6 +2474,47 @@ mod tests {
         let rendered = terminal.backend().to_string();
         assert!(rendered.contains("1 of 5"));
         assert!(!rendered.contains("rotating"));
+    }
+
+    /// The colour of the header's top-left border corner.
+    fn header_border(snapshot: &Snapshot) -> Option<Color> {
+        let mut terminal = Terminal::new(TestBackend::new(150, 20)).expect("test backend");
+        terminal.draw(|frame| draw(frame, snapshot, &mut Ui::default())).expect("drawing");
+        terminal.backend().buffer()[(0, 0)].style().fg
+    }
+
+    #[test]
+    fn header_border_is_red_when_link_is_down_with_position_held() {
+        let mut snapshot = busy();
+        assert!(snapshot.bridge.is_some() && snapshot.position.is_located());
+        assert_eq!(header_border(&snapshot), Some(Color::Green), "the baseline");
+
+        snapshot.link_up = false;
+        assert_eq!(header_border(&snapshot), Some(Color::Red));
+    }
+
+    #[test]
+    fn planning_reports_waiting_in_yellow_when_no_node_has_been_seen() {
+        let mut snapshot = busy();
+        snapshot.plan = None;
+        snapshot.nodes.clear();
+        snapshot.alive = 0;
+        snapshot.assignable = 0;
+        let span = planning(&snapshot);
+        assert_eq!(span.content, "waiting for nodes");
+        assert_eq!(span.style.fg, Some(Color::Yellow));
+    }
+
+    #[test]
+    fn planning_reports_silence_in_red_when_seen_nodes_stop_heartbeating() {
+        let mut snapshot = busy();
+        snapshot.plan = None;
+        assert!(!snapshot.nodes.is_empty());
+        snapshot.alive = 0;
+        snapshot.assignable = 0;
+        let span = planning(&snapshot);
+        assert_eq!(span.content, "all nodes silent");
+        assert_eq!(span.style.fg, Some(Color::Red));
     }
 
     #[test]
