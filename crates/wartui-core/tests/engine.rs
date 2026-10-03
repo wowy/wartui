@@ -2552,9 +2552,9 @@ fn engine_skips_peer_removal_when_link_is_down() {
 fn engine_skips_peer_removal_when_node_was_never_sent_to() {
     let clock = Clock::new();
     let mut engine = engine(us_config(), &clock);
-    // The first frame after a connect is no admin window, so nothing is sent.
+    // A first frame hard on the connect is no admin window, so nothing is sent.
     engine.handle(connected(), clock.at(0));
-    let batch = engine.handle(heartbeat(NODE, 1), clock.at(1));
+    let batch = engine.handle(heartbeat(NODE, 1), clock.at_ms(10));
     assert!(batch.urgent.is_empty());
 
     assert!(removals(&engine.handle(Event::Tick, clock.at(62))).is_empty());
@@ -2637,6 +2637,96 @@ fn engine_withholds_admin_window_when_heartbeat_precedes_bridge_announcement() {
         .handle(beat_at(NODE, 307, 0, Capabilities::here(true), 359_000_000), clock.at_ms(31));
     assert!(engine.nodes().next().expect("admitted").dirty, "the plan owes it a share");
     assert!(first.urgent.is_empty(), "no assignment into a window that shut long ago");
+}
+
+/// Whether the one heartbeat stored in a batch was stored as live.
+fn stored_live(batch: &ActionBatch) -> bool {
+    let rows: Vec<bool> = batch
+        .records
+        .iter()
+        .filter_map(|r| match r {
+            Record::Heartbeat(h) => Some(h.live),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(rows.len(), 1, "exactly one heartbeat row");
+    rows[0]
+}
+
+// A backlog arrives within milliseconds of the port opening, so a link up for a
+// second with nothing on it has nothing queued: its first frame is the present.
+#[test]
+fn engine_opens_admin_window_when_first_heartbeat_follows_quiet_connect() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(connected(), clock.at(0));
+    for at in 1..=9 {
+        engine.handle(Event::Tick, clock.at_ms(at * 100));
+    }
+
+    let first =
+        engine.handle(beat_at(NODE, 1, 0, Capabilities::here(true), 560_000_000), clock.at(1));
+    let (_, dst, _) = sent_admin(&first);
+    assert_eq!(dst, NODE);
+    assert!(stored_live(&first), "stored as live");
+    assert_eq!(counters(&engine).admin_windows_missed, 0);
+    let row = host_status(&engine.handle(Event::HostSample(HostSample::default()), clock.at(2)));
+    assert_eq!(row.lag_peak_us, 0, "the quiet link is not a measured lag");
+}
+
+#[test]
+fn engine_withholds_admin_window_when_first_heartbeat_follows_connect_promptly() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(connected(), clock.at(0));
+
+    let first =
+        engine.handle(beat_at(NODE, 1, 0, Capabilities::here(true), 560_000_000), clock.at_ms(10));
+    assert!(first.urgent.is_empty(), "it may be the first frame of a backlog");
+    assert!(!stored_live(&first));
+    assert_eq!(counters(&engine).admin_windows_missed, 1);
+}
+
+// Before `Connected` there is no connect to have been quiet since: the port has
+// only just opened onto whatever the bridge held.
+#[test]
+fn engine_withholds_admin_window_when_heartbeat_precedes_connect_however_late() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+
+    let first =
+        engine.handle(beat_at(NODE, 1, 0, Capabilities::here(true), 560_000_000), clock.at(600));
+    assert!(first.urgent.is_empty());
+    assert!(!stored_live(&first));
+}
+
+#[test]
+fn engine_measures_quiet_connect_from_reconnect_when_link_drops_and_returns() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(connected(), clock.at(0));
+    engine.handle(
+        Event::Link(LinkEvent::Disconnected { reason: "unplugged".to_owned() }),
+        clock.at(10),
+    );
+    engine.handle(connected(), clock.at(20));
+
+    // Twenty seconds after the first connect, but hard on the second.
+    let prompt = engine
+        .handle(beat_at(NODE, 1, 0, Capabilities::here(true), 560_000_000), clock.at_ms(20_010));
+    assert!(prompt.urgent.is_empty(), "the second connect may have a backlog of its own");
+    assert!(!stored_live(&prompt));
+
+    engine.handle(
+        Event::Link(LinkEvent::Disconnected { reason: "unplugged".to_owned() }),
+        clock.at(30),
+    );
+    engine.handle(connected(), clock.at(40));
+    let quiet =
+        engine.handle(beat_at(NODE, 2, 0, Capabilities::here(true), 600_000_000), clock.at(41));
+    let (_, dst, _) = sent_admin(&quiet);
+    assert_eq!(dst, NODE);
+    assert!(stored_live(&quiet));
 }
 
 // A latency measures one thing — how long an assignment took to land inside the

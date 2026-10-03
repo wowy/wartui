@@ -695,8 +695,9 @@ several and none known, it asks for `--bridge` rather than guessing.
 **`--log-file` is the only way to see the transport's own account of a run**: the view owns the
 terminal, so without it nothing is logged. It records which port was resolved, whether it opened,
 and why a link went down, once per reason, since somebody else's port is retried every 750 ms all
-capture. The GPS reader logs the same way. `RUST_LOG=debug` adds each retry, undecodable frames, and
-dropped bulk commands.
+capture. The GPS reader logs the same way. The log also records each time the host falls 100 ms or
+more behind the bridge and when it catches up, with both frames' bridge stamps. `RUST_LOG=debug`
+adds each retry, undecodable frames, and dropped bulk commands.
 
 ### Telling the boards apart
 
