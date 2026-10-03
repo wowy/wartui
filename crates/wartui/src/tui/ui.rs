@@ -1,6 +1,7 @@
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use tokio::sync::mpsc;
 use wartui_core::engine::{Command, Snapshot};
+use wartui_proto::mac;
 
 use super::Settings;
 use super::fleet::why_not_assignable;
@@ -8,7 +9,6 @@ use super::settings::{ConfigModal, ModalAction, apply, save_ble_node};
 use super::upload::Upload;
 #[cfg(test)]
 use crate::config;
-use wartui_bridge::ports::mac_text;
 
 /// The notice when the engine takes no command: its queue is full, or it has stopped
 /// and closed the channel.
@@ -112,15 +112,15 @@ impl Ui {
         // Same rule as an assignment. The flag travels in the admin frame, and only a
         // heartbeat opens its window.
         if !holds && let Some(why) = why_not_assignable(node) {
-            self.say(format!("{} {why}", mac_text(&target)), snapshot);
+            self.say(format!("{} {why}", mac::full(&target)), snapshot);
             return;
         }
         let assigned = if holds { None } else { Some(target) };
         let mut said = match commands.try_send(Command::AssignBle { mac: assigned }) {
             Ok(()) if holds => {
-                format!("{}: bluetooth off on its next heartbeat", mac_text(&target))
+                format!("{}: bluetooth off on its next heartbeat", mac::full(&target))
             }
-            Ok(()) => format!("{}: bluetooth on its next heartbeat", mac_text(&target)),
+            Ok(()) => format!("{}: bluetooth on its next heartbeat", mac::full(&target)),
             Err(_) => {
                 self.say(ENGINE_BUSY.to_owned(), snapshot);
                 return;
@@ -139,12 +139,12 @@ impl Ui {
         // Same refusal as `toggle_ble`. The frame travels in the admin window, and
         // only a heartbeat opens one.
         if let Some(why) = why_not_assignable(node) {
-            self.say(format!("{} {why}", mac_text(&target)), snapshot);
+            self.say(format!("{} {why}", mac::full(&target)), snapshot);
             return;
         }
         let said = match commands.try_send(Command::ClearRing { mac: Some(target) }) {
             Ok(()) => {
-                format!("{}: clearing its dedup ring on its next heartbeat", mac_text(&target))
+                format!("{}: clearing its dedup ring on its next heartbeat", mac::full(&target))
             }
             Err(_) => ENGINE_BUSY.to_owned(),
         };

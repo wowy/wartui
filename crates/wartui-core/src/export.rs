@@ -71,9 +71,8 @@ use std::io::Write;
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use rusqlite::{Connection, Row, Statement};
-use wartui_bridge::ports::mac_text;
 use wartui_proto::beacon::rcoi_text;
-use wartui_proto::link::Mac;
+use wartui_proto::mac::{self, Mac};
 
 use crate::record::ssid_text;
 
@@ -541,7 +540,7 @@ fn write_row<W: Write>(row: &Window, out: &mut W) -> Result<(), ExportError> {
         out,
         "{},{},{},{},{channel},{frequency},{rssi},{lat},{lon},{},{},{rcois},{mfgr},{}",
         // Uppercase and colon-separated, as WiGLE and the node firmware's SD logs write it.
-        mac_text(&best.bssid),
+        mac::full(&best.bssid),
         quote(&ssid_text(best.ssid.as_deref().unwrap_or_default())),
         quote(&best.security),
         timestamp(row.first_seen),
@@ -618,8 +617,11 @@ mod tests {
 
     #[test]
     fn mac_formatter_formats_uppercase_hex_with_colons_when_rendering_address() {
-        // The `MAC` column WiGLE reads. A change to `mac_text` must not change it.
-        assert_eq!(mac_text(&[0x02, 0x00, 0x5E, 0x10, 0x57, 0x84]), "02:00:5E:10:57:84");
+        // The `MAC` column WiGLE reads. A change to `mac::full` must not change it.
+        assert_eq!(
+            mac::full(&[0x02, 0x00, 0x5E, 0x10, 0x57, 0x84]).to_string(),
+            "02:00:5E:10:57:84"
+        );
     }
 
     #[test]

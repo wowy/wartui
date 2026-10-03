@@ -1,12 +1,12 @@
 //! Carrying the bridge's address from one run to the next.
 
-use wartui_bridge::ports;
 use wartui_bridge::remember::BridgeMemory;
+use wartui_proto::mac;
 
 const BRIDGE_MAC: &str = "10:BD:A3:EC:44:C0";
 
 fn address() -> [u8; 6] {
-    ports::parse_mac(BRIDGE_MAC).expect("an address")
+    mac::parse(BRIDGE_MAC).expect("an address")
 }
 
 #[test]

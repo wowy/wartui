@@ -49,7 +49,7 @@ use wartui_core::runtime::{COMMAND_QUEUE, drive, now};
 use wartui_core::store::{
     CaptureInfo, Checkpoint, CheckpointPass, Store, StoreConfig, open_readonly,
 };
-use wartui_proto::link::Mac;
+use wartui_proto::mac::Mac;
 use wartui_proto::plan::{ChannelPool, DEDUP_RING_C5, NUM_SCAN_CHANNELS};
 
 use self::timeline::{Mark, Slice, Timeline};

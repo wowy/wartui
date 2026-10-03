@@ -1,4 +1,5 @@
-//! Wire formats for the ESP32-C5 wardriver mesh.
+//! Wire formats for the ESP32-C5 wardriver mesh, and the text form of the addresses that
+//! cross it.
 //!
 //! This crate is `no_std` and allocation-free because it is compiled into both
 //! the host TUI and the bridge firmware. Defining the wire types once is the
@@ -14,6 +15,7 @@ pub mod beacon;
 pub mod dedup;
 pub mod hci;
 pub mod link;
+pub mod mac;
 mod mac_index;
 pub mod outbox;
 pub mod plan;

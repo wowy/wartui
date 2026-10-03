@@ -35,7 +35,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use wartui_proto::link::Mac;
+use wartui_proto::mac::{self, Mac};
 
 use crate::TransportError;
 
@@ -77,7 +77,13 @@ impl PortCandidate {
     /// The board's address, when its serial number is one.
     #[must_use]
     pub fn mac(&self) -> Option<Mac> {
-        self.serial.as_deref().and_then(parse_mac)
+        self.serial.as_deref().and_then(mac::parse)
+    }
+
+    /// The board's address if it reported one, else its path.
+    #[must_use]
+    pub fn label(&self) -> String {
+        self.mac().map_or_else(|| self.path.clone(), |address| mac::full(&address).to_string())
     }
 }
 
@@ -134,42 +140,6 @@ pub fn could_be_a_receiver(candidate: &PortCandidate) -> bool {
 #[must_use]
 pub fn is_usable_path(path: &str) -> bool {
     !path.starts_with("/dev/tty.")
-}
-
-/// Write a MAC the one way wartui writes one: uppercase, colon-separated. What it
-/// prints pastes straight back in as `--bridge`. The WiGLE CSV, the node firmware's
-/// logs and `wartui sniff` use the same form, so an address greps across all of them,
-/// and changing it changes the export.
-#[must_use]
-pub fn mac_text(mac: &Mac) -> String {
-    octets_text(mac)
-}
-
-/// The last two octets, `57:84`: how the boards are told apart (see AGENTS.md).
-#[must_use]
-pub fn short_mac_text(mac: &Mac) -> String {
-    octets_text(&mac[4..])
-}
-
-/// Octets in [`mac_text`]'s form, for a whole address or part of one.
-pub(crate) fn octets_text(octets: &[u8]) -> String {
-    octets.iter().map(|byte| format!("{byte:02X}")).collect::<Vec<_>>().join(":")
-}
-
-/// Read a MAC written the way an ESP32's USB serial number and [`mac_text`] both
-/// write it: six colon-separated hex pairs.
-#[must_use]
-pub fn parse_mac(text: &str) -> Option<Mac> {
-    let mut mac = [0u8; 6];
-    let mut octets = text.split(':');
-    for slot in &mut mac {
-        let octet = octets.next()?;
-        if octet.len() != 2 {
-            return None;
-        }
-        *slot = u8::from_str_radix(octet, 16).ok()?;
-    }
-    octets.next().is_none().then_some(mac)
 }
 
 /// The stable names udev keeps for a device node.
@@ -310,30 +280,6 @@ fn from_port_infos(ports: Vec<serialport::SerialPortInfo>) -> Vec<PortCandidate>
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn mac_formatter_writes_whole_and_short_forms_when_given_address() {
-        let address = [0x02, 0x00, 0x5E, 0x10, 0x57, 0x84];
-        assert_eq!(mac_text(&address), "02:00:5E:10:57:84");
-        assert_eq!(short_mac_text(&address), "57:84");
-    }
-
-    #[test]
-    fn ports_scanner_extracts_mac_address_when_serial_number_is_esp32_format() {
-        assert_eq!(parse_mac("10:BD:A3:EC:44:C0"), Some([0x10, 0xBD, 0xA3, 0xEC, 0x44, 0xC0]));
-        assert_eq!(parse_mac("10:bd:a3:ec:44:c0"), Some([0x10, 0xBD, 0xA3, 0xEC, 0x44, 0xC0]));
-    }
-
-    #[test]
-    fn ports_scanner_returns_none_when_serial_number_is_not_mac_address() {
-        // Everything on the bus that is not an ESP32 carries one of these.
-        assert_eq!(parse_mac("0001"), None);
-        assert_eq!(parse_mac(""), None);
-        assert_eq!(parse_mac("10:BD:A3:EC:44"), None, "five octets");
-        assert_eq!(parse_mac("10:BD:A3:EC:44:C0:FF"), None, "seven");
-        assert_eq!(parse_mac("10:BD:A3:EC:44:CG"), None, "not hex");
-        assert_eq!(parse_mac("1:BD:A3:EC:44:C0"), None, "an octet written short");
-    }
 
     #[test]
     fn ports_scanner_partitions_bridge_and_gps_ports_when_enumerating_usb_devices() {

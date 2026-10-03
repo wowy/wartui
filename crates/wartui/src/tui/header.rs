@@ -9,9 +9,9 @@ use ratatui::widgets::{Block, Paragraph};
 use wartui_core::engine::Snapshot;
 use wartui_core::gps::{GpsStatus, GpsView};
 use wartui_core::position::PositionSource;
+use wartui_proto::mac;
 
 use super::format::elapsed;
-use wartui_bridge::ports::short_mac_text;
 
 /// Draw the header box into `area`.
 pub(super) fn draw_header(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot) {
@@ -20,7 +20,7 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot
         (
             format!(
                 "bridge {} ({:?}), fw v{} — link {state}",
-                short_mac_text(&bridge.mac),
+                mac::short(&bridge.mac),
                 bridge.chip,
                 bridge.fw_version
             ),

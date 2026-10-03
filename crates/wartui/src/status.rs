@@ -14,8 +14,8 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use clap::Args as ClapArgs;
 use wartui_bridge::LinkEvent;
-use wartui_bridge::ports::mac_text;
 use wartui_proto::link::{BridgeToHost, HostToBridge};
+use wartui_proto::mac;
 use wartui_proto::plan::CONTROL_CHANNEL;
 
 /// Generous enough for a bridge that is busy forwarding a fleet, short enough
@@ -50,7 +50,12 @@ pub async fn run(args: Args) -> Result<()> {
         Ok(ready) => ready?,
         Err(_) => bail!("{}", super::no_bridge_notice(args.bridge.as_deref())),
     };
-    println!("bridge     {} on {:?}, firmware {}", mac_text(&info.mac), info.chip, info.fw_version);
+    println!(
+        "bridge     {} on {:?}, firmware {}",
+        mac::full(&info.mac),
+        info.chip,
+        info.fw_version
+    );
     println!("{}", super::last_reset_line(&info));
     // A board fact rather than a chip fact, and the one that decides whether `wartui
     // run` pushes anything at a screen. Said either way, so an absent line never has

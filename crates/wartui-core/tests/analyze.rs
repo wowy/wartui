@@ -6,7 +6,7 @@ use rusqlite::Connection;
 use wartui_core::analyze::{BridgeLoss, HostLoss, losses};
 use wartui_core::record::{BatchGap, BridgeStatusSeen, Heartbeat, HostStatus, Record};
 use wartui_core::store::{CaptureInfo, Store, StoreConfig, open_readonly};
-use wartui_proto::link::Mac;
+use wartui_proto::mac::Mac;
 use wartui_proto::plan::ChannelPool;
 
 const NODE: Mac = [0x02, 0x00, 0x5E, 0x10, 0x57, 0x84];

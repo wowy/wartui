@@ -45,7 +45,7 @@
 use std::collections::BTreeMap;
 
 use rusqlite::Connection;
-use wartui_proto::link::Mac;
+use wartui_proto::mac::Mac;
 
 use crate::engine::{BEHIND_THE_AIR_US, advance_since_boot};
 

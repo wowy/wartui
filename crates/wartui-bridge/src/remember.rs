@@ -19,7 +19,7 @@
 //! else. A capture must never fail over a cached address, and the view owns the
 //! terminal, so there is nowhere to complain to but the log.
 //!
-//! The file holds one line: an address spelled the way [`ports::mac_text`] spells
+//! The file holds one line: an address spelled the way [`mac::full`] spells
 //! it and the way a `by-id` symlink carries it, so it can be grepped against
 //! `wartui sniff` output and against `/dev/serial/by-id`. There is no format and
 //! no version field — the parse is "does this line hold an address", and a line
@@ -31,9 +31,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use wartui_proto::link::Mac;
-
-use crate::ports;
+use wartui_proto::mac::{self, Mac};
 
 /// Where the address is kept between runs.
 #[derive(Debug, Clone)]
@@ -97,7 +95,7 @@ impl BridgeMemory {
         }
         let path = self.path.as_ref()?;
         let text = std::fs::read_to_string(path).ok()?;
-        ports::parse_mac(text.trim())
+        mac::parse(text.trim())
     }
 
     /// Write `mac` over whatever was there.
@@ -134,7 +132,7 @@ fn write(path: &Path, mac: Mac) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(path, format!("{}\n", ports::mac_text(&mac)))
+    std::fs::write(path, format!("{}\n", mac::full(&mac)))
 }
 
 /// This host's directory for state a program rebuilds when it has to.

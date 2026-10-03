@@ -54,9 +54,10 @@ use static_cell::StaticCell;
 use wartui_proto::heapless::Vec;
 use wartui_proto::link::{
     BROADCAST, BridgeToHost, Chip, FrameAccumulator, HostToBridge, LINK_PROTO_VERSION, LinkError,
-    LogLevel, LogStr, LoopPhase, MAX_FRAME, Mac, Panel, PanelLines, ResetCause, SendStatus,
-    ShortStr, decode_frame,
+    LogLevel, LogStr, LoopPhase, MAX_FRAME, Panel, PanelLines, ResetCause, SendStatus, ShortStr,
+    decode_frame,
 };
+use wartui_proto::mac::Mac;
 use wartui_proto::outbox::{ByteSink, Outbox};
 /// The channel the fleet speaks on, and the only one this bridge ever sits on. Shared
 /// with the node firmware and the host planner rather than spelled again here: nothing
