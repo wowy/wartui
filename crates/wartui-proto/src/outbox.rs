@@ -43,6 +43,15 @@
 //! drops both. A lone `0x00` is an empty frame, which every receiver already
 //! skips, so this is not a wire change.
 //!
+//! The same byte keeps a transfer from ending on a full USB packet. The endpoint
+//! sends a packet on every [`USB_PACKET`]th byte by itself, and a flush with
+//! nothing left in the FIFO sends nothing, so a pump whose bytes end exactly on a
+//! packet boundary ends the transfer with no short packet. Linux `cdc_acm` then
+//! holds those bytes in a read that has not completed until the next frame arrives,
+//! seconds later on a quiet fleet: 8 of 8 frames of exactly 64 bytes were held so,
+//! against none of 1,356 others (`docs/usb-boundary-findings.md`). So a pump that
+//! would end on a boundary writes one `0x00` more, and the transfer ends short.
+//!
 //! The count surfaces in [`BridgeToHost::Status`] as `dropped_tx`, where a non-zero
 //! value means frames arrived faster than the host took them: a host not reading,
 //! or a burst bigger than the bulk ring plus what USB drains while it arrives.
@@ -61,6 +70,9 @@ const BULK_DEPTH: usize = 24;
 /// Frames that answer a host request. Short, because the host asks for one at a time.
 const PRIORITY_DEPTH: usize = 8;
 
+/// The full-speed bulk max packet size of the USB-Serial-JTAG on both the C5 and the C6.
+const USB_PACKET: usize = 64;
+
 /// Somewhere to put bytes that may refuse them.
 ///
 /// Exists so the ring logic below is about queueing rather than about esp-hal.
@@ -69,7 +81,8 @@ pub trait ByteSink {
     fn write_byte(&mut self, byte: u8) -> nb::Result<(), ()>;
 
     /// Push a partial USB packet out. The hardware sends automatically on every
-    /// 64th byte; this is what releases the remainder.
+    /// 64th byte; this is what releases the remainder, and it sends nothing when no
+    /// remainder is left.
     fn flush(&mut self);
 }
 
@@ -184,9 +197,12 @@ pub struct Outbox {
     current: Option<Source>,
     cursor: usize,
     /// A lone terminator is owed ahead of the next frame: to close off a frame
-    /// abandoned part-way onto the wire, or because [`Outbox::delimit`] asked.
+    /// abandoned part-way onto the wire, because [`Outbox::delimit`] asked, or to
+    /// end a transfer that stopped on a full packet.
     orphan: bool,
     unflushed: bool,
+    /// Bytes written into the current USB packet since one last ended.
+    packet_fill: usize,
     dropped: u32,
 }
 
@@ -210,6 +226,7 @@ impl Outbox {
             cursor: 0,
             orphan: false,
             unflushed: false,
+            packet_fill: 0,
             dropped: 0,
         }
     }
@@ -315,7 +332,7 @@ impl Outbox {
                 match sink.write_byte(0x00) {
                     Ok(()) => {
                         self.orphan = false;
-                        self.unflushed = true;
+                        self.wrote();
                         progressed = true;
                     }
                     Err(nb::Error::WouldBlock) => break,
@@ -350,7 +367,7 @@ impl Outbox {
             match sink.write_byte(byte) {
                 Ok(()) => {
                     self.cursor += 1;
-                    self.unflushed = true;
+                    self.wrote();
                     progressed = true;
                 }
                 Err(nb::Error::WouldBlock) => break,
@@ -362,12 +379,42 @@ impl Outbox {
             }
         }
 
+        // A transfer that ends on a full packet is not delivered until more bytes
+        // follow, so end it with a lone `0x00` instead. Only when nothing follows:
+        // the loop leaves `current` empty only once both rings are, and a frame still
+        // in flight ends the transfer with its own remaining bytes. That also keeps
+        // `orphan` owed only between frames, as `abandon` and `delimit` do, so the
+        // zero never lands inside one. An owed orphan is already that byte: one zero
+        // both terminates a fragment and starts a packet, so the flag serves both and
+        // an orphan still owed needs no second.
+        if self.unflushed && self.packet_fill == 0 && self.current.is_none() && !self.orphan {
+            match sink.write_byte(0x00) {
+                Ok(()) => {
+                    self.wrote();
+                    progressed = true;
+                }
+                // The FIFO is full, which is the boundary itself: owe the zero, so it
+                // goes out first on the next pump and `is_empty` keeps that pump coming.
+                Err(nb::Error::WouldBlock) => self.orphan = true,
+                // Refused outright, as for any orphan: there is no zero to be had.
+                Err(nb::Error::Other(())) => {}
+            }
+        }
+
         if self.unflushed {
             sink.flush();
             self.unflushed = false;
+            // A flush ends the packet.
+            self.packet_fill = 0;
         }
 
         progressed
+    }
+
+    /// Account for one byte the sink accepted.
+    const fn wrote(&mut self) {
+        self.unflushed = true;
+        self.packet_fill = (self.packet_fill + 1) % USB_PACKET;
     }
 
     fn next_source(&self) -> Option<Source> {
@@ -406,24 +453,26 @@ mod tests {
     extern crate std;
     use std::vec::Vec;
 
-    use super::{BULK_DEPTH, ByteSink, Outbox, PRIORITY_DEPTH, Ring};
+    use super::{BULK_DEPTH, ByteSink, Outbox, PRIORITY_DEPTH, Ring, USB_PACKET};
     use crate::link::{
         BridgeToHost, Chip, FrameAccumulator, LINK_PROTO_VERSION, LogLevel, LogStr, LoopPhase,
-        ResetCause, ShortStr, decode_frame,
+        MAX_FRAME, ResetCause, ShortStr, decode_frame, encode_frame,
     };
 
     /// A sink with a settable ceiling, so a wedged host can be simulated by
     /// letting exactly `capacity` more bytes through. `refuse_at` makes the
     /// endpoint refuse outright once, when that many bytes have gone out.
+    /// `flushes` holds how many bytes had gone out at each flush.
     struct Fake {
         out: Vec<u8>,
         capacity: usize,
         refuse_at: Option<usize>,
+        flushes: Vec<usize>,
     }
 
     impl Fake {
         fn new(capacity: usize) -> Self {
-            Self { out: Vec::new(), capacity, refuse_at: None }
+            Self { out: Vec::new(), capacity, refuse_at: None, flushes: Vec::new() }
         }
 
         fn wedged() -> Self {
@@ -449,7 +498,9 @@ mod tests {
             Ok(())
         }
 
-        fn flush(&mut self) {}
+        fn flush(&mut self) {
+            self.flushes.push(self.out.len());
+        }
     }
 
     fn log(n: u8) -> BridgeToHost {
@@ -458,6 +509,24 @@ mod tests {
         // frames survived rather than only how many.
         message.push((b'a' + n) as char).unwrap();
         BridgeToHost::Log { level: LogLevel::Info, message }
+    }
+
+    /// A `Log` frame whose encoding is exactly `len` bytes, terminator included, its
+    /// message `id` repeated so [`bodies`] can tell frames apart.
+    fn log_encoding_to(len: usize, id: u8) -> (BridgeToHost, Vec<u8>) {
+        for n in 1..=LogStr::new().capacity() {
+            let mut message = LogStr::new();
+            for _ in 0..n {
+                message.push((b'a' + id) as char).unwrap();
+            }
+            let msg = BridgeToHost::Log { level: LogLevel::Info, message };
+            let mut buf = [0; MAX_FRAME];
+            let used = encode_frame(&msg, &mut buf).unwrap();
+            if used == len {
+                return (msg, buf[..used].to_vec());
+            }
+        }
+        panic!("no log message encodes to {len} bytes");
     }
 
     fn ready() -> BridgeToHost {
@@ -752,5 +821,145 @@ mod tests {
         let mut open = Fake::open();
         assert!(outbox.pump(&mut open));
         assert_eq!(bodies(&received(&open.out)), [b'a']);
+    }
+    #[test]
+    fn outbox_pads_transfer_when_frame_ends_on_full_packet() {
+        let (msg, frame) = log_encoding_to(USB_PACKET, 0);
+        assert_eq!(frame.len(), 64);
+        let mut outbox = Outbox::new();
+        outbox.send(&msg);
+        let mut sink = Fake::open();
+        outbox.pump(&mut sink);
+
+        // Ending on the boundary would leave the host's read open until the next
+        // frame; the lone `0x00` makes the transfer end on a short packet.
+        let mut expected = frame;
+        expected.push(0x00);
+        assert_eq!(sink.out, expected);
+        assert_eq!(sink.flushes, [65]);
+        assert_eq!(bodies(&received(&sink.out)), [b'a']);
+        assert!(outbox.is_empty());
+    }
+
+    #[test]
+    fn outbox_writes_no_pad_when_frame_ends_short_of_packet_boundary() {
+        for len in [USB_PACKET - 1, USB_PACKET + 1] {
+            let (msg, frame) = log_encoding_to(len, 0);
+            let mut outbox = Outbox::new();
+            outbox.send(&msg);
+            let mut sink = Fake::open();
+            outbox.pump(&mut sink);
+
+            assert_eq!(sink.out, frame, "{len}-byte frame");
+            assert_eq!(bodies(&received(&sink.out)), [b'a']);
+        }
+    }
+
+    #[test]
+    fn outbox_pads_once_at_end_when_two_frames_fill_two_packets() {
+        let (first, a) = log_encoding_to(USB_PACKET, 0);
+        let (second, b) = log_encoding_to(USB_PACKET, 1);
+        let mut outbox = Outbox::new();
+        outbox.send(&first);
+        outbox.send(&second);
+        let mut sink = Fake::open();
+        outbox.pump(&mut sink);
+
+        // The boundary between them is not the end of the transfer, so it needs none.
+        let mut expected = a;
+        expected.extend_from_slice(&b);
+        expected.push(0x00);
+        assert_eq!(sink.out, expected);
+        assert_eq!(sink.flushes, [2 * USB_PACKET + 1]);
+        assert_eq!(bodies(&received(&sink.out)), [b'a', b'b']);
+    }
+
+    #[test]
+    fn outbox_owes_pad_to_next_pump_when_fifo_fills_on_packet_boundary() {
+        let (msg, frame) = log_encoding_to(USB_PACKET, 0);
+        let mut outbox = Outbox::new();
+        outbox.send(&msg);
+        let mut sink = Fake::new(USB_PACKET);
+        outbox.pump(&mut sink);
+
+        assert_eq!(sink.out, frame, "the full FIFO takes no pad");
+        // Still pending, so the bridge keeps pumping rather than idling.
+        assert!(!outbox.is_empty());
+
+        sink.capacity = usize::MAX;
+        assert!(outbox.pump(&mut sink));
+        let mut expected = frame;
+        expected.push(0x00);
+        assert_eq!(sink.out, expected);
+        assert_eq!(sink.flushes, [USB_PACKET, USB_PACKET + 1]);
+        assert_eq!(bodies(&received(&sink.out)), [b'a']);
+        assert!(outbox.is_empty());
+    }
+
+    #[test]
+    fn outbox_gives_up_pad_when_endpoint_refuses_it() {
+        let (msg, frame) = log_encoding_to(USB_PACKET, 0);
+        let mut outbox = Outbox::new();
+        outbox.send(&msg);
+        let mut sink = Fake::open();
+        sink.refuse_at = Some(USB_PACKET);
+        outbox.pump(&mut sink);
+
+        assert_eq!(sink.out, frame);
+        assert_eq!(sink.flushes, [USB_PACKET]);
+        assert!(outbox.is_empty(), "a refused pad is not owed");
+    }
+
+    #[test]
+    fn outbox_writes_no_pad_when_flush_ends_packet_between_pumps() {
+        let (first, a) = log_encoding_to(40, 0);
+        let (second, b) = log_encoding_to(USB_PACKET - 40, 1);
+        let mut outbox = Outbox::new();
+        let mut sink = Fake::open();
+        outbox.send(&first);
+        outbox.pump(&mut sink);
+        outbox.send(&second);
+        outbox.pump(&mut sink);
+
+        // 64 bytes in all, but the flush between them sent the first 40 as a short
+        // packet of its own, so neither transfer ends on a boundary.
+        let mut expected = a;
+        expected.extend_from_slice(&b);
+        assert_eq!(sink.out, expected);
+        assert_eq!(sink.flushes, [40, USB_PACKET]);
+        assert_eq!(bodies(&received(&sink.out)), [b'a', b'b']);
+    }
+    #[test]
+    fn outbox_keeps_frame_whole_when_fifo_fills_on_packet_boundary_mid_frame() {
+        let (msg, frame) = log_encoding_to(80, 0);
+        let mut outbox = Outbox::new();
+        outbox.send(&msg);
+        let mut sink = Fake::new(USB_PACKET);
+        outbox.pump(&mut sink);
+
+        // The frame's last 16 bytes end the transfer, so no zero is owed here.
+        sink.capacity = usize::MAX;
+        outbox.pump(&mut sink);
+
+        assert_eq!(sink.out, frame, "no 0x00 inside the frame");
+        assert_eq!(bodies(&received(&sink.out)), [b'a']);
+        assert!(outbox.is_empty());
+    }
+
+    #[test]
+    fn outbox_delivers_both_frames_when_fifo_fills_on_boundary_between_frames() {
+        let (first, _) = log_encoding_to(USB_PACKET, 0);
+        let (second, _) = log_encoding_to(30, 1);
+        let mut outbox = Outbox::new();
+        outbox.send(&first);
+        outbox.send(&second);
+        let mut sink = Fake::new(USB_PACKET);
+        outbox.pump(&mut sink);
+
+        sink.capacity = usize::MAX;
+        outbox.pump(&mut sink);
+
+        assert_eq!(bodies(&received(&sink.out)), [b'a', b'b']);
+        assert!(outbox.is_empty());
     }
 }
