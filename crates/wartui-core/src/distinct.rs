@@ -17,7 +17,7 @@
 
 use std::hash::{DefaultHasher, Hash, Hasher};
 
-use wartui_proto::link::Mac;
+use wartui_proto::mac::Mac;
 
 /// Bits of the hash that choose a register.
 const PRECISION: u32 = 14;

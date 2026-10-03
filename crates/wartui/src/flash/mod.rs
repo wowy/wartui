@@ -32,12 +32,10 @@ use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail, ensure};
 use sha2::{Digest, Sha256};
-use wartui_bridge::ports::{PortCandidate, parse_mac};
+use wartui_bridge::ports::PortCandidate;
 use wartui_bridge::remember::state_dir;
 use wartui_bridge::serial::BridgeSpec;
-use wartui_proto::link::Mac;
-
-use wartui_bridge::ports::{mac_text, short_mac_text};
+use wartui_proto::mac::{self, Mac};
 
 /// The release this binary was built for, when it was built for one.
 const RELEASE_TAG: Option<&str> = option_env!("WARTUI_RELEASE_TAG");
@@ -96,7 +94,7 @@ const BRIDGE: Firmware = Firmware {
 };
 
 fn mac_arg(text: &str) -> Result<Mac, String> {
-    parse_mac(text).ok_or_else(|| format!("'{text}' is not an address like 10:BD:A3:EC:44:C0"))
+    mac::parse(text).ok_or_else(|| format!("'{text}' is not an address like 10:BD:A3:EC:44:C0"))
 }
 
 /// The chips either firmware is built for.
@@ -202,7 +200,7 @@ impl fmt::Display for Skip {
             Self::ProbeFailed(line) => write!(f, "espflash board-info failed: {line}"),
             Self::Unreadable => f.write_str("espflash board-info said nothing readable"),
             Self::OtherChip(chip) => write!(f, "an {chip}"),
-            Self::OtherAddress(read) => write!(f, "espflash read {} from it", mac_text(read)),
+            Self::OtherAddress(read) => write!(f, "espflash read {} from it", mac::full(read)),
         }
     }
 }
@@ -239,7 +237,7 @@ fn parse_board_info(text: &str) -> Option<BoardInfo> {
     let field =
         |label: &str| text.lines().find_map(|line| line.trim().strip_prefix(label).map(str::trim));
     let chip = field("Chip type:")?.split_whitespace().next()?.to_owned();
-    let mac = parse_mac(field("MAC address:")?)?;
+    let mac = mac::parse(field("MAC address:")?)?;
     Some(BoardInfo { chip, mac })
 }
 
@@ -261,7 +259,7 @@ fn judge_probe(expected: Mac, chip: Chip, probe: &Ran) -> Result<(), Skip> {
 /// A board by its last two octets, as the fleet table names it, or by path without an address.
 fn name(candidate: &PortCandidate) -> String {
     match candidate.mac() {
-        Some(address) => short_mac_text(&address),
+        Some(address) => mac::short(&address).to_string(),
         None => candidate.path.clone(),
     }
 }
@@ -559,10 +557,9 @@ fn espflash<S: AsRef<std::ffi::OsStr>>(args: &[S]) -> Ran {
 #[cfg(test)]
 mod testing {
     use wartui_bridge::ports::{BRIDGE_PID, ESPRESSIF_VID, PortCandidate, candidate};
-    use wartui_proto::link::Mac;
+    use wartui_proto::mac::{self, Mac};
 
     use super::Ran;
-    use wartui_bridge::ports::mac_text;
 
     pub(super) const BRIDGE_MAC: Mac = [0x10, 0xBD, 0xA3, 0xEC, 0x44, 0xC0];
     pub(super) const NODE_MAC: Mac = [0x3C, 0xDC, 0x75, 0x84, 0xA1, 0xB0];
@@ -596,7 +593,7 @@ Chip ID: 23
 ";
 
     pub(super) fn board(device: &str, address: Option<&Mac>) -> PortCandidate {
-        let serial = address.map(mac_text);
+        let serial = address.map(|a| mac::full(a).to_string());
         candidate(device, Some(ESPRESSIF_VID), Some(BRIDGE_PID), serial.as_deref())
     }
 

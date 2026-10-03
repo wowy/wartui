@@ -20,9 +20,10 @@ use wartui_proto::air::{
     SightingMsg, wire_epoch,
 };
 use wartui_proto::link::{
-    BROADCAST, BridgeToHost, Chip, EspNowPayload, HostToBridge, LinkError, LoopPhase, Mac,
-    ResetCause, SendStatus,
+    BROADCAST, BridgeToHost, Chip, EspNowPayload, HostToBridge, LinkError, LoopPhase, ResetCause,
+    SendStatus,
 };
+use wartui_proto::mac::Mac;
 use wartui_proto::plan::{
     ChannelPool, ChannelSet, DEFAULT_TX_POWER_QUARTER_DBM, IndexRun, Radio, plan,
 };

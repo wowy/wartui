@@ -13,7 +13,7 @@ use ratatui::widgets::{Block, Clear, Paragraph};
 use tokio::sync::mpsc;
 use wartui_bridge::remember::BridgeMemory;
 use wartui_core::engine::{Command, Snapshot};
-use wartui_proto::link::Mac;
+use wartui_proto::mac::Mac;
 use wartui_proto::plan::ChannelPool;
 
 use super::UploadTarget;

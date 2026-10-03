@@ -18,8 +18,9 @@ pub mod sim;
 use thiserror::Error;
 use tokio::sync::mpsc;
 use wartui_proto::link::{
-    BridgeToHost, Chip, HostToBridge, LinkError, LoopPhase, Mac, Panel, ResetCause,
+    BridgeToHost, Chip, HostToBridge, LinkError, LoopPhase, Panel, ResetCause,
 };
+use wartui_proto::mac::Mac;
 
 /// Inbound event queue depth.
 ///

@@ -15,6 +15,7 @@
 //! hardware; it is there to reject half-written frames and the ROM bootloader
 //! banner that a reset sprays down the same pipe.
 
+use crate::mac::Mac;
 use heapless::{String, Vec};
 use serde::{Serialize, de::DeserializeOwned};
 
@@ -42,9 +43,6 @@ pub const MAX_ESPNOW_PAYLOAD: usize = 250;
 
 /// Buffer size both ends allocate for one encoded frame.
 pub const MAX_FRAME: usize = 512;
-
-/// A MAC address.
-pub type Mac = [u8; 6];
 
 /// An ESP-NOW payload in transit over USB.
 pub type EspNowPayload = Vec<u8, MAX_ESPNOW_PAYLOAD>;

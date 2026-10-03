@@ -80,10 +80,10 @@ Four host crates, strictly layered, plus firmware that shares the bottom one.
 
 - **`crates/wartui-proto`** — `no_std`, allocation-free wire formats and the parsing that goes
   with them: `air` (the four ESP-NOW frames, and `air::foreign` for recognising somebody
-  else's), `beacon`, `hci`, `dedup`, `link`, `outbox`, `stall`, `plan` (channel pools, timings
-  and the partitioning planner). Compiled into *both* the host and the firmware by path
-  dependency, which is the only thing keeping the ends in step — and the reason a node's
-  parsers are testable with `cargo test` rather than a reflash.
+  else's), `beacon`, `hci`, `dedup`, `link`, `mac` (the text form of an address), `outbox`,
+  `stall`, `plan` (channel pools, timings and the partitioning planner). Compiled into *both*
+  the host and the firmware by path dependency, which is the only thing keeping the ends in
+  step — and the reason a node's parsers are testable with `cargo test` rather than a reflash.
 - **`crates/wartui-bridge`** — host side of the USB link. Everything above talks to a `LinkHandle`
   and cannot tell a real dongle (`serial`) from the fake fleet (`sim`). It also owns the host's
   serial ports generally (`ports`): what is attached and what the OS says it is, with no judgement

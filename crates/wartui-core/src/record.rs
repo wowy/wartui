@@ -9,7 +9,7 @@
 
 use wartui_proto::air::RecordKind;
 use wartui_proto::beacon::visible_ssid;
-use wartui_proto::link::Mac;
+use wartui_proto::mac::Mac;
 use wartui_proto::plan::ChannelSet;
 
 use crate::position::Fix;

@@ -13,9 +13,10 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 use wartui_proto::link::{
-    BridgeToHost, FrameAccumulator, HostToBridge, LINK_PROTO_VERSION, LinkError, MAX_FRAME, Mac,
+    BridgeToHost, FrameAccumulator, HostToBridge, LINK_PROTO_VERSION, LinkError, MAX_FRAME,
     decode_frame, encode_frame,
 };
+use wartui_proto::mac::{self, Mac};
 use wartui_proto::stall::TX_STALL_TIMEOUT_MS;
 
 use crate::ports::{self, BRIDGE_PID, PortCandidate};
@@ -150,7 +151,7 @@ impl std::str::FromStr for BridgeSpec {
     /// that way. Each pair is exactly two hex digits, so `0:08` stays a path rather
     /// than being read as a guess at what was meant.
     fn from_str(text: &str) -> Result<Self, Self::Err> {
-        if let Some(mac) = ports::parse_mac(text) {
+        if let Some(mac) = mac::parse(text) {
             return Ok(Self::Mac(mac));
         }
         Ok(parse_tail(text).map_or_else(|| Self::Path(text.to_owned()), Self::Tail))
@@ -174,8 +175,8 @@ impl std::fmt::Display for BridgeSpec {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Path(path) => f.write_str(path),
-            Self::Mac(mac) => f.write_str(&ports::mac_text(mac)),
-            Self::Tail(tail) => f.write_str(&ports::octets_text(tail)),
+            Self::Mac(mac) => write!(f, "{}", mac::full(mac)),
+            Self::Tail(tail) => write!(f, "{}", mac::Octets(tail)),
         }
     }
 }
@@ -221,7 +222,7 @@ pub fn resolve_in(
             spec: spec.to_string(),
             boards: several
                 .iter()
-                .filter_map(|candidate| candidate.mac().as_ref().map(ports::mac_text))
+                .filter_map(|candidate| candidate.mac().map(|mac| mac::full(&mac).to_string()))
                 .collect::<Vec<_>>()
                 .join(", "),
         }),
@@ -299,7 +300,9 @@ pub fn unambiguous_bridge(
             boards: several
                 .iter()
                 .map(|candidate| {
-                    candidate.mac().as_ref().map_or_else(|| candidate.path.clone(), ports::mac_text)
+                    candidate
+                        .mac()
+                        .map_or_else(|| candidate.path.clone(), |mac| mac::full(&mac).to_string())
                 })
                 .collect::<Vec<_>>()
                 .join(", "),
@@ -483,7 +486,7 @@ async fn sweep(
     };
     if candidates.is_empty() {
         let reason = match (settled, &transport.spec) {
-            (Some(mac), _) => format!("the bridge {} is no longer attached", ports::mac_text(&mac)),
+            (Some(mac), _) => format!("the bridge {} is no longer attached", mac::full(&mac)),
             // Asked of the same list rather than assumed, because a tail selects
             // nothing for two reasons — no board ends that way, or several do — and
             // "not attached" is the wrong thing to say about the second.
@@ -538,7 +541,7 @@ async fn sweep(
                 // A board that announced itself and then went away is not a failed
                 // candidate: the sweep is over and what is left is a reconnection.
                 if let Some(mac) = announced {
-                    tracing::warn!(reason = %reason, mac = %ports::mac_text(&mac), "link down");
+                    tracing::warn!(reason = %reason, mac = %mac::full(&mac), "link down");
                     if plumbing.events.send(LinkEvent::Disconnected { reason }).await.is_err() {
                         return Pass::HandleDropped;
                     }
@@ -911,7 +914,7 @@ fn read_loop(
                     // at "opening the bridge" — as does one that never did.
                     tracing::info!(
                         chip = ?chip,
-                        mac = %ports::mac_text(&mac),
+                        mac = %mac::full(&mac),
                         fw = %fw_version.as_str(),
                         reset = ?reset_cause,
                         phase = ?last_phase,
@@ -1063,7 +1066,9 @@ mod tests {
     use super::{
         PROBE_TICKS, REMEMBERED_TICKS, SETTLE_TICKS, is_a_new_life, patience, silence_disowns_it,
     };
-    use crate::ports::{BRIDGE_PID, ESPRESSIF_VID, PortCandidate, candidate, parse_mac};
+    use wartui_proto::mac;
+
+    use crate::ports::{BRIDGE_PID, ESPRESSIF_VID, PortCandidate, candidate};
 
     const BRIDGE_MAC: &str = "10:BD:A3:EC:44:C0";
     const NODE_MAC: &str = "02:00:5E:10:9D:24";
@@ -1074,7 +1079,7 @@ mod tests {
 
     #[test]
     fn serial_link_disowns_remembered_board_when_device_fails_to_respond() {
-        assert!(silence_disowns_it(true, true, parse_mac(BRIDGE_MAC), &board(BRIDGE_MAC)));
+        assert!(silence_disowns_it(true, true, mac::parse(BRIDGE_MAC), &board(BRIDGE_MAC)));
     }
 
     #[test]
@@ -1082,7 +1087,7 @@ mod tests {
         // It said nothing because nothing was asked of it — ModemManager holding a
         // fresh device, or a missing `dialout` group. Forgetting the bridge over
         // either throws away the right answer for a reason that is not the board's.
-        assert!(!silence_disowns_it(true, false, parse_mac(BRIDGE_MAC), &board(BRIDGE_MAC)));
+        assert!(!silence_disowns_it(true, false, mac::parse(BRIDGE_MAC), &board(BRIDGE_MAC)));
     }
 
     #[test]
@@ -1090,12 +1095,12 @@ mod tests {
         // A bridge power-cycled alongside a node can take longer than the short
         // patience to bring its radio up, and would otherwise be forgotten for
         // being slow.
-        assert!(!silence_disowns_it(false, true, parse_mac(BRIDGE_MAC), &board(BRIDGE_MAC)));
+        assert!(!silence_disowns_it(false, true, mac::parse(BRIDGE_MAC), &board(BRIDGE_MAC)));
     }
 
     #[test]
     fn serial_link_ignores_unrelated_board_silence_when_evaluating_disown() {
-        assert!(!silence_disowns_it(true, true, parse_mac(BRIDGE_MAC), &board(NODE_MAC)));
+        assert!(!silence_disowns_it(true, true, mac::parse(BRIDGE_MAC), &board(NODE_MAC)));
     }
 
     #[test]
@@ -1108,33 +1113,33 @@ mod tests {
         // A board named by path reports no address, so its silence says nothing
         // about which board the file names.
         let named = candidate("/dev/ttyACM0", None, None, None);
-        assert!(!silence_disowns_it(true, true, parse_mac(BRIDGE_MAC), &named));
+        assert!(!silence_disowns_it(true, true, mac::parse(BRIDGE_MAC), &named));
     }
 
     #[test]
     fn serial_link_preserves_remembered_board_when_another_named_board_is_silent() {
         // `run --bridge` attaches the memory, so a named node's silence must not
         // erase the bridge the file names.
-        assert!(!silence_disowns_it(true, true, parse_mac(BRIDGE_MAC), &board(NODE_MAC)));
+        assert!(!silence_disowns_it(true, true, mac::parse(BRIDGE_MAC), &board(NODE_MAC)));
     }
 
     #[test]
     fn serial_link_disowns_remembered_board_when_it_is_named_and_silent() {
         // Named or not, it was opened, heard out in full and said nothing, which is
         // the same evidence an unnamed run forgets it on.
-        assert!(silence_disowns_it(true, true, parse_mac(BRIDGE_MAC), &board(BRIDGE_MAC)));
+        assert!(silence_disowns_it(true, true, mac::parse(BRIDGE_MAC), &board(BRIDGE_MAC)));
     }
 
     #[test]
     fn serial_link_outlasts_stall_reset_when_remembered_bridge_has_company() {
-        let ticks = patience(false, parse_mac(BRIDGE_MAC), &board(BRIDGE_MAC));
+        let ticks = patience(false, mac::parse(BRIDGE_MAC), &board(BRIDGE_MAC));
         assert_eq!(ticks, REMEMBERED_TICKS);
         assert!(ticks > PROBE_TICKS);
     }
 
     #[test]
     fn serial_link_probes_briefly_when_board_is_not_remembered() {
-        assert_eq!(patience(false, parse_mac(BRIDGE_MAC), &board(NODE_MAC)), PROBE_TICKS);
+        assert_eq!(patience(false, mac::parse(BRIDGE_MAC), &board(NODE_MAC)), PROBE_TICKS);
         assert_eq!(patience(false, None, &board(BRIDGE_MAC)), PROBE_TICKS);
         let named = candidate("/dev/ttyACM0", None, None, None);
         assert_eq!(patience(false, None, &named), PROBE_TICKS, "no address is no match");
@@ -1142,7 +1147,7 @@ mod tests {
 
     #[test]
     fn serial_link_settles_when_board_is_alone() {
-        assert_eq!(patience(true, parse_mac(BRIDGE_MAC), &board(BRIDGE_MAC)), SETTLE_TICKS);
+        assert_eq!(patience(true, mac::parse(BRIDGE_MAC), &board(BRIDGE_MAC)), SETTLE_TICKS);
         assert_eq!(patience(true, None, &board(NODE_MAC)), SETTLE_TICKS);
     }
 

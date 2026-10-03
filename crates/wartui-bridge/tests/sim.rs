@@ -10,7 +10,8 @@ use tokio::time::Instant;
 use wartui_bridge::sim::{SimConfig, SimTransport};
 use wartui_bridge::{LinkEvent, LinkHandle};
 use wartui_proto::air::{AdminMsg, ClearMsg, Frame, HeartbeatMsg, RecordKind};
-use wartui_proto::link::{BridgeToHost, EspNowPayload, HostToBridge, Mac, SendStatus};
+use wartui_proto::link::{BridgeToHost, EspNowPayload, HostToBridge, SendStatus};
+use wartui_proto::mac::Mac;
 use wartui_proto::plan::{
     ASSIGNED_BEAT_MS, CHANNEL_DWELL_MS, ChannelPool, ChannelSet, IDLE_BEAT_MS, IndexRun,
 };

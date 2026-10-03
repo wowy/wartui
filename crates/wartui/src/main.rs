@@ -11,12 +11,12 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use wartui_bridge::ports::mac_text;
 use wartui_bridge::remember::BridgeMemory;
 use wartui_bridge::serial::{self, BridgeSpec, SerialTransport, discover_ports};
 use wartui_bridge::sim::{SimConfig, SimTransport};
 use wartui_bridge::{BridgeInfo, LinkEvent, LinkHandle, TransportError};
 use wartui_proto::link::{LoopPhase, ResetCause};
+use wartui_proto::mac;
 
 mod analyze;
 mod bench;
@@ -192,9 +192,10 @@ fn ports() -> Result<()> {
         // Padded to the width of the longer of the two, which is the words rather
         // than an address: an unaddressed board in the list must not shift every
         // column on its own row.
-        let address = candidate
-            .mac()
-            .map_or_else(|| "address not reported".to_owned(), |address| mac_text(&address));
+        let address = candidate.mac().map_or_else(
+            || "address not reported".to_owned(),
+            |address| mac::full(&address).to_string(),
+        );
         let product = candidate.product.as_deref().unwrap_or("unknown device");
         match (candidate.vid, candidate.pid) {
             (Some(vid), Some(pid)) => println!("  {address:<20}  {product}  ({vid:04x}:{pid:04x})"),
@@ -272,7 +273,7 @@ fn describe(event: &LinkEvent) -> Option<String> {
     match event {
         LinkEvent::Connected(info) => Some(format!(
             "bridge {} on {:?}, firmware {}",
-            mac_text(&info.mac),
+            mac::full(&info.mac),
             info.chip,
             info.fw_version
         )),

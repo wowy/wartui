@@ -26,14 +26,13 @@ use clap::Args as ClapArgs;
 use wartui_bridge::ports::{BRIDGE_PID, PortCandidate};
 use wartui_bridge::remember::BridgeMemory;
 use wartui_bridge::serial::{BridgeSpec, discover_ports};
-use wartui_proto::link::Mac;
+use wartui_proto::mac::{self, Mac};
 
 use super::{
     BRIDGE, RELEASE_TAG, Skip, Source, canonical, check_image, chip_of, espflash, espflash_present,
     features, flash_args, judge_probe, matches, name, obtain, probe_args, read, source,
 };
 use crate::spec;
-use wartui_bridge::ports::mac_text;
 
 #[derive(ClapArgs, Debug)]
 pub struct Args {
@@ -141,7 +140,7 @@ fn target(
                         .iter()
                         .map(|board| board
                             .mac()
-                            .map_or_else(|| board.path.clone(), |a| mac_text(&a)))
+                            .map_or_else(|| board.path.clone(), |a| mac::full(&a).to_string()))
                         .collect::<Vec<_>>()
                         .join(", ")
                 ),
@@ -159,7 +158,7 @@ fn target(
                     anyhow!(
                         "the remembered bridge {} is not attached. Name the board to flash with \
                          --bridge (`wartui ports` lists each board's address)",
-                        mac_text(&wanted)
+                        mac::full(&wanted)
                     )
                 })?
             }
@@ -171,7 +170,9 @@ fn target(
                 several.len(),
                 several
                     .iter()
-                    .map(|board| board.mac().map_or_else(|| board.path.clone(), |a| mac_text(&a)))
+                    .map(|board| board
+                        .mac()
+                        .map_or_else(|| board.path.clone(), |a| mac::full(&a).to_string()))
                     .collect::<Vec<_>>()
                     .join(", "),
             ),
@@ -238,7 +239,8 @@ mod tests {
         let error = target(&found, Some((given, &spec)), Some(BRIDGE_MAC)).unwrap_err().to_string();
         assert!(error.contains("--bridge 44:C0 matches 2 attached boards"), "{error}");
         assert!(
-            error.contains(&mac_text(&BRIDGE_MAC)) && error.contains(&mac_text(&twin)),
+            error.contains(&mac::full(&BRIDGE_MAC).to_string())
+                && error.contains(&mac::full(&twin).to_string()),
             "{error}"
         );
     }
@@ -268,7 +270,7 @@ mod tests {
         // The one board present is known not to be the bridge.
         let found = [board("/dev/ttyACM0", Some(&BRIDGE_MAC))];
         let error = target(&found, None, Some(NODE_MAC)).unwrap_err().to_string();
-        assert!(error.contains(&mac_text(&NODE_MAC)), "{error}");
+        assert!(error.contains(&mac::full(&NODE_MAC).to_string()), "{error}");
         assert!(error.contains("--bridge"), "{error}");
     }
 
@@ -278,7 +280,8 @@ mod tests {
             [board("/dev/ttyACM0", Some(&BRIDGE_MAC)), board("/dev/ttyACM1", Some(&NODE_MAC))];
         let error = target(&found, None, None).unwrap_err().to_string();
         assert!(
-            error.contains(&mac_text(&BRIDGE_MAC)) && error.contains(&mac_text(&NODE_MAC)),
+            error.contains(&mac::full(&BRIDGE_MAC).to_string())
+                && error.contains(&mac::full(&NODE_MAC).to_string()),
             "{error}"
         );
         assert!(error.contains("--bridge"), "{error}");

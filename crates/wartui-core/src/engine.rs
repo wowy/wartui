@@ -34,13 +34,13 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
 
-use wartui_bridge::ports::mac_text;
 use wartui_bridge::{BridgeInfo, LinkEvent};
 use wartui_proto::air::{
     AdminMsg, Capabilities, ClearMsg, DecodeError, Frame, RecordKind, SightingMsg, foreign,
     wire_epoch,
 };
-use wartui_proto::link::{BridgeToHost, EspNowPayload, HostToBridge, Mac, SendStatus};
+use wartui_proto::link::{BridgeToHost, EspNowPayload, HostToBridge, SendStatus};
+use wartui_proto::mac::{self, Mac};
 use wartui_proto::plan::{
     self, ChannelPool, ChannelSet, DEFAULT_TX_POWER_QUARTER_DBM, Job, Plan, Radio, clamp_tx_power,
 };
@@ -1893,7 +1893,7 @@ impl FleetEngine {
                         self.behind_since = Some(now.mono);
                         self.behind_peak_us = lag_us;
                         tracing::info!(
-                            src = %mac_text(&src),
+                            src = %mac::full(&src),
                             last_rx_us,
                             rx_us,
                             bridge_elapsed_us,

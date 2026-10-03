@@ -29,7 +29,7 @@ use clap::Args as ClapArgs;
 use wartui_bridge::ports::{BRIDGE_PID, PortCandidate};
 use wartui_bridge::remember::BridgeMemory;
 use wartui_bridge::serial::{BridgeSpec, discover_ports};
-use wartui_proto::link::Mac;
+use wartui_proto::mac::{self, Mac};
 
 use super::{
     NODE, RELEASE_TAG, Ran, Skip, Source, canonical, check_image, chip_of, espflash,
@@ -37,7 +37,6 @@ use super::{
     probe_args, read, source,
 };
 use crate::spec;
-use wartui_bridge::ports::mac_text;
 
 #[derive(ClapArgs, Debug)]
 pub struct Args {
@@ -219,7 +218,9 @@ fn named_bridge_attached(candidates: &[PortCandidate], spare: &Spare) -> Result<
         named.len(),
         named
             .iter()
-            .map(|board| board.mac().map_or_else(|| board.path.clone(), |a| mac_text(&a)))
+            .map(|board| board
+                .mac()
+                .map_or_else(|| board.path.clone(), |a| mac::full(&a).to_string()))
             .collect::<Vec<_>>()
             .join(", ")
     );
@@ -433,7 +434,8 @@ mod tests {
         let error = named_bridge_attached(&found, &spare).unwrap_err().to_string();
         assert!(error.contains("--bridge 44:C0 matches 2 attached boards"), "{error}");
         assert!(
-            error.contains(&mac_text(&BRIDGE_MAC)) && error.contains(&mac_text(&twin)),
+            error.contains(&mac::full(&BRIDGE_MAC).to_string())
+                && error.contains(&mac::full(&twin).to_string()),
             "{error}"
         );
     }

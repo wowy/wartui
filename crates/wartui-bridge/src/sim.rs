@@ -31,9 +31,10 @@ use wartui_proto::air::{
 };
 use wartui_proto::dedup::{C5DedupRing, C6DedupRing};
 use wartui_proto::link::{
-    BROADCAST, BridgeToHost, Chip, EspNowPayload, HostToBridge, LogLevel, LogStr, LoopPhase, Mac,
-    Panel, ResetCause, SendStatus,
+    BROADCAST, BridgeToHost, Chip, EspNowPayload, HostToBridge, LogLevel, LogStr, LoopPhase, Panel,
+    ResetCause, SendStatus,
 };
+use wartui_proto::mac::Mac;
 use wartui_proto::plan::{
     ADMIN_WAIT_MS, ASSIGNED_BEAT_MS, CHANNEL_DWELL_MS, ChannelSet, IDLE_BEAT_MS, NUM_SCAN_CHANNELS,
     SCAN_CHANNELS,

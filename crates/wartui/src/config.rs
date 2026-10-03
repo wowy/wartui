@@ -25,8 +25,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use wartui_bridge::ports::{mac_text, parse_mac};
-use wartui_proto::link::Mac;
+use wartui_proto::mac::{self, Mac};
 
 use crate::run::PoolArg;
 
@@ -120,14 +119,14 @@ pub struct ApiKeys {
 
 fn write_mac<S: Serializer>(mac: &Option<Mac>, serializer: S) -> Result<S::Ok, S::Error> {
     match mac {
-        Some(mac) => serializer.serialize_str(&mac_text(mac)),
+        Some(mac) => serializer.collect_str(&mac::full(mac)),
         None => serializer.serialize_none(),
     }
 }
 
 fn read_mac<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Mac>, D::Error> {
     let text = String::deserialize(deserializer)?;
-    parse_mac(&text).map(Some).ok_or_else(|| {
+    mac::parse(&text).map(Some).ok_or_else(|| {
         serde::de::Error::custom(format!(
             "bluetooth.node = \"{text}\" is not a MAC written like AA:BB:CC:DD:EE:FF"
         ))
