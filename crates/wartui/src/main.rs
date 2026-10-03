@@ -30,7 +30,6 @@ mod status;
 #[cfg(test)]
 mod testing;
 mod tui;
-mod tui_upload;
 mod upload;
 
 #[derive(Parser)]

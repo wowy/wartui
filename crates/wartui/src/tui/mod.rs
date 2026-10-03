@@ -6,6 +6,8 @@
 //! from a stream of observations: a busy fleet produces tens of rows a second in
 //! bursts, and a UI redrawing per row would back-pressure the link.
 
+mod upload;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -39,8 +41,8 @@ use wartui_proto::plan::{self, ChannelPool, ChannelSet, Radio, SCAN_CHANNELS};
 
 use crate::config;
 use crate::run::PoolArg;
-use crate::tui_upload::Upload;
-pub use crate::tui_upload::UploadTarget;
+use upload::Upload;
+pub use upload::UploadTarget;
 
 /// How long the input thread waits for a keypress before checking whether it
 /// should stop. Long enough not to spin, short enough that quitting is instant.
