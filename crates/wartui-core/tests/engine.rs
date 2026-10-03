@@ -8,17 +8,20 @@ use std::time::{Duration, Instant};
 
 use wartui_bridge::{BridgeInfo, LinkEvent};
 use wartui_core::ActionBatch;
-use wartui_core::engine::{Command, Counters, EngineConfig, Event, FleetEngine, Now, StoreStats};
+use wartui_core::engine::{
+    Command, Counters, EngineConfig, Event, FleetEngine, HostSample, Now, StorePeaks, StoreStats,
+};
 use wartui_core::gps::Gps;
+use wartui_core::health::Health;
 use wartui_core::position::{DEFAULT_MAX_AGE, PositionChain, PositionSource};
-use wartui_core::record::{AdminOutcome, BatchGap, BridgeStatusSeen, Record};
+use wartui_core::record::{AdminOutcome, BatchGap, BridgeStatusSeen, HostStatus, Record};
 use wartui_proto::air::{
     AdminMsg, Capabilities, Frame, HeartbeatMsg, RecordKind, Security, SightingBatchWriter,
     SightingMsg, wire_epoch,
 };
 use wartui_proto::link::{
-    BROADCAST, BridgeToHost, Chip, EspNowPayload, HostToBridge, LoopPhase, Mac, ResetCause,
-    SendStatus,
+    BROADCAST, BridgeToHost, Chip, EspNowPayload, HostToBridge, LinkError, LoopPhase, Mac,
+    ResetCause, SendStatus,
 };
 use wartui_proto::plan::{
     ChannelPool, ChannelSet, DEFAULT_TX_POWER_QUARTER_DBM, IndexRun, Radio, plan,
@@ -1283,6 +1286,7 @@ fn engine_records_raw_bridge_status_when_each_status_reply_arrives() {
             rx_count: 1363,
             dropped_tx: 1300,
             uptime_ms: 3_240_000,
+            host_frames: 0,
         }]
     );
     assert_eq!(
@@ -1293,8 +1297,151 @@ fn engine_records_raw_bridge_status_when_each_status_reply_arrives() {
             rx_count: 1363,
             dropped_tx: 2,
             uptime_ms: 4_000,
+            host_frames: 0,
         }]
     );
+}
+
+#[test]
+fn engine_records_frames_read_so_far_when_status_reply_arrives() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(connected(), clock.at(1));
+    engine.handle(heartbeat(NODE, 1), clock.at(2));
+    engine.handle(rx(GONE, b"not a frame"), clock.at(2));
+    engine.handle(observation(NODE, "AA:BB:CC:DD:EE:FF", -60), clock.at(3));
+
+    let batch = engine.handle(
+        Event::Link(LinkEvent::Message(BridgeToHost::Status {
+            peer_count: 1,
+            rx_count: 10,
+            dropped_tx: 0,
+            uptime_ms: 9_000,
+        })),
+        clock.at(4),
+    );
+    let host_frames: Vec<u64> = batch
+        .records
+        .iter()
+        .filter_map(|r| match r {
+            Record::BridgeStatus(s) => Some(s.host_frames),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(host_frames, vec![3], "every frame read off the link, ours or not");
+    assert_eq!(counters(&engine).frames, 3);
+}
+
+/// The one host row in a batch.
+fn host_status(batch: &ActionBatch) -> HostStatus {
+    let rows: Vec<HostStatus> = batch
+        .records
+        .iter()
+        .filter_map(|r| match r {
+            Record::HostStatus(h) => Some(*h),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(rows.len(), 1, "exactly one host row");
+    rows[0]
+}
+
+#[test]
+fn engine_records_counters_and_sample_when_host_sample_arrives() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    let msg = SightingMsg {
+        kind: RecordKind::Wifi,
+        bssid: [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF],
+        channel: 6,
+        rssi: -60,
+        security: Security::Open,
+        ssid: b"",
+        ext: &[],
+    };
+    let frame = batch(1, &[msg]);
+    engine.handle(rx_at(NODE, &frame, 0), clock.at(1));
+    engine.handle(rx_at(NODE, &frame, 4_000), clock.at(1));
+    engine.handle(Event::Link(LinkEvent::Garbled(LinkError::Corrupt)), clock.at(1));
+
+    let sample = HostSample {
+        store: StoreStats { written: 40, dropped: 2 },
+        peaks: StorePeaks { queue: 17, commit_us: 5_300 },
+        health: Health {
+            throttled: Some(0x50005),
+            soc_temp_mc: Some(61_234),
+            battery_mv: Some(4_185),
+            battery_ma: Some(-21),
+        },
+    };
+    let row = host_status(&engine.handle(Event::HostSample(sample), clock.at(5)));
+    assert_eq!(
+        row,
+        HostStatus {
+            at_ms: clock.at(5).unix_ms,
+            frames: 2,
+            duplicate_batches: 1,
+            garbled: 1,
+            store_written: 40,
+            store_dropped: 2,
+            store_queue_peak: 17,
+            store_commit_peak_us: 5_300,
+            throttled: Some(0x50005),
+            soc_temp_mc: Some(61_234),
+            battery_mv: Some(4_185),
+            battery_ma: Some(-21),
+            ..row
+        }
+    );
+    assert_eq!(
+        (row.undecodable, row.incompatible, row.foreign_fleet, row.foreign_admin),
+        (0, 0, 0, 0)
+    );
+}
+
+#[test]
+fn engine_reports_lag_peak_once_when_backlog_drains() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    caught_up(&mut engine, &clock);
+    // Live: a second on both clocks.
+    engine.handle(beat_at(NODE, 1, 0, Capabilities::here(true), 1_000_000), clock.at_ms(1_000));
+    // Then three seconds of bridge time inside 3 ms of host time.
+    for i in 1..=3u32 {
+        engine.handle(
+            beat_at(NODE, 1 + i, 0, Capabilities::here(true), 1_000_000 + i * 1_000_000),
+            clock.at_ms(1_000 + u64::from(i)),
+        );
+    }
+    // Caught up again.
+    engine.handle(beat_at(NODE, 5, 0, Capabilities::here(true), 4_100_000), clock.at_ms(2_000));
+
+    let sample = || Event::HostSample(HostSample::default());
+    let first = host_status(&engine.handle(sample(), clock.at(3)));
+    assert_eq!(first.lag_peak_us, 3_000_000 - 3_000, "three seconds ahead, less 3 ms waited");
+    let second = host_status(&engine.handle(sample(), clock.at(8)));
+    assert_eq!(second.lag_peak_us, 0, "the peak starts again with each row");
+}
+
+#[test]
+fn engine_reports_no_lag_peak_when_only_connected() {
+    // On connecting the engine assumes it is behind the air until a frame says
+    // otherwise. That is an assumption, not a measurement, and is not a peak.
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(connected(), clock.at(0));
+    let row = host_status(&engine.handle(Event::HostSample(HostSample::default()), clock.at(5)));
+    assert_eq!(row.lag_peak_us, 0);
+
+    engine.handle(
+        Event::Link(LinkEvent::Disconnected { reason: "unplugged".to_owned() }),
+        clock.at(6),
+    );
+    engine.handle(connected(), clock.at(7));
+    // The first frame after a connect has nothing to be timed against.
+    engine.handle(rx(GONE, b"not a frame"), clock.at(7));
+    let row = host_status(&engine.handle(Event::HostSample(HostSample::default()), clock.at(10)));
+    assert_eq!(row.lag_peak_us, 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -2405,9 +2552,9 @@ fn engine_skips_peer_removal_when_link_is_down() {
 fn engine_skips_peer_removal_when_node_was_never_sent_to() {
     let clock = Clock::new();
     let mut engine = engine(us_config(), &clock);
-    // The first frame after a connect is no admin window, so nothing is sent.
+    // A first frame hard on the connect is no admin window, so nothing is sent.
     engine.handle(connected(), clock.at(0));
-    let batch = engine.handle(heartbeat(NODE, 1), clock.at(1));
+    let batch = engine.handle(heartbeat(NODE, 1), clock.at_ms(10));
     assert!(batch.urgent.is_empty());
 
     assert!(removals(&engine.handle(Event::Tick, clock.at(62))).is_empty());
@@ -2490,6 +2637,96 @@ fn engine_withholds_admin_window_when_heartbeat_precedes_bridge_announcement() {
         .handle(beat_at(NODE, 307, 0, Capabilities::here(true), 359_000_000), clock.at_ms(31));
     assert!(engine.nodes().next().expect("admitted").dirty, "the plan owes it a share");
     assert!(first.urgent.is_empty(), "no assignment into a window that shut long ago");
+}
+
+/// Whether the one heartbeat stored in a batch was stored as live.
+fn stored_live(batch: &ActionBatch) -> bool {
+    let rows: Vec<bool> = batch
+        .records
+        .iter()
+        .filter_map(|r| match r {
+            Record::Heartbeat(h) => Some(h.live),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(rows.len(), 1, "exactly one heartbeat row");
+    rows[0]
+}
+
+// A backlog arrives within milliseconds of the port opening, so a link up for a
+// second with nothing on it has nothing queued: its first frame is the present.
+#[test]
+fn engine_opens_admin_window_when_first_heartbeat_follows_quiet_connect() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(connected(), clock.at(0));
+    for at in 1..=9 {
+        engine.handle(Event::Tick, clock.at_ms(at * 100));
+    }
+
+    let first =
+        engine.handle(beat_at(NODE, 1, 0, Capabilities::here(true), 560_000_000), clock.at(1));
+    let (_, dst, _) = sent_admin(&first);
+    assert_eq!(dst, NODE);
+    assert!(stored_live(&first), "stored as live");
+    assert_eq!(counters(&engine).admin_windows_missed, 0);
+    let row = host_status(&engine.handle(Event::HostSample(HostSample::default()), clock.at(2)));
+    assert_eq!(row.lag_peak_us, 0, "the quiet link is not a measured lag");
+}
+
+#[test]
+fn engine_withholds_admin_window_when_first_heartbeat_follows_connect_promptly() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(connected(), clock.at(0));
+
+    let first =
+        engine.handle(beat_at(NODE, 1, 0, Capabilities::here(true), 560_000_000), clock.at_ms(10));
+    assert!(first.urgent.is_empty(), "it may be the first frame of a backlog");
+    assert!(!stored_live(&first));
+    assert_eq!(counters(&engine).admin_windows_missed, 1);
+}
+
+// Before `Connected` there is no connect to have been quiet since: the port has
+// only just opened onto whatever the bridge held.
+#[test]
+fn engine_withholds_admin_window_when_heartbeat_precedes_connect_however_late() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+
+    let first =
+        engine.handle(beat_at(NODE, 1, 0, Capabilities::here(true), 560_000_000), clock.at(600));
+    assert!(first.urgent.is_empty());
+    assert!(!stored_live(&first));
+}
+
+#[test]
+fn engine_measures_quiet_connect_from_reconnect_when_link_drops_and_returns() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(connected(), clock.at(0));
+    engine.handle(
+        Event::Link(LinkEvent::Disconnected { reason: "unplugged".to_owned() }),
+        clock.at(10),
+    );
+    engine.handle(connected(), clock.at(20));
+
+    // Twenty seconds after the first connect, but hard on the second.
+    let prompt = engine
+        .handle(beat_at(NODE, 1, 0, Capabilities::here(true), 560_000_000), clock.at_ms(20_010));
+    assert!(prompt.urgent.is_empty(), "the second connect may have a backlog of its own");
+    assert!(!stored_live(&prompt));
+
+    engine.handle(
+        Event::Link(LinkEvent::Disconnected { reason: "unplugged".to_owned() }),
+        clock.at(30),
+    );
+    engine.handle(connected(), clock.at(40));
+    let quiet =
+        engine.handle(beat_at(NODE, 2, 0, Capabilities::here(true), 600_000_000), clock.at(41));
+    let (_, dst, _) = sent_admin(&quiet);
+    assert_eq!(dst, NODE);
+    assert!(stored_live(&quiet));
 }
 
 // A latency measures one thing — how long an assignment took to land inside the

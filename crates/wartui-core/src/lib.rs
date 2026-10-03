@@ -20,6 +20,7 @@ pub mod distinct;
 pub mod engine;
 pub mod export;
 pub mod gps;
+pub mod health;
 pub mod nmea;
 pub mod panel;
 pub mod position;

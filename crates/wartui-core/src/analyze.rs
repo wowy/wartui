@@ -20,6 +20,21 @@
 //! dwell and reported then. The count is the ring's pressure, not sightings the capture
 //! lacks.
 //!
+//! Frames are accounted for from bridge to store. Each `bridge_status` row carries
+//! `host_frames`, the frames this host had read when the reply arrived, so `host_read` is
+//! the frames the host read between the first status reply and the last. `received` less
+//! the bridge's own drops less `host_read` is the frames lost between the bridge's queue and
+//! the host. That figure is approximate: a status reply is a priority frame and overtakes
+//! the frames queued in the bridge's bulk ring, which `rx_count` counts and `host_frames`
+//! does not yet. So it is off by up to the frames queued at the first and last row, at most
+//! the ring's 24 each, and saturates at 0 when a baseline taken mid-backlog makes the host
+//! appear to have read more than the bridge passed on. What the host read
+//! and chose not to store is broken down in [`HostLoss`] from the `host_status` rows,
+//! whose counts run from the engine's start and are read as the difference between the
+//! first row, written as the capture starts, and the last. Their peaks are per row, so [`HostLoss`] takes the largest, and
+//! counts the rows whose lag peak reached the 100 ms that makes a heartbeat too stale to
+//! answer.
+//!
 //! Every since-boot count is rebased by the engine's `advance_since_boot`, the rule it
 //! applies to the live figures, and the first row in the file is a baseline only (per node,
 //! for heartbeats): what a bridge or node dropped before the capture began is not the
@@ -31,7 +46,7 @@ use std::collections::BTreeMap;
 
 use rusqlite::Connection;
 
-use crate::engine::advance_since_boot;
+use crate::engine::{BEHIND_THE_AIR_US, advance_since_boot};
 
 /// What a capture lost.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -40,9 +55,11 @@ pub struct LossSummary {
     pub bridge: Option<BridgeLoss>,
     /// One entry per node that sent a heartbeat or lost a batch, sorted by address.
     pub nodes: Vec<NodeLoss>,
+    /// The host's own figures, or `None` when the capture holds no `host_status` row.
+    pub host: Option<HostLoss>,
 }
 
-/// What the bridge received and dropped during the capture. Exact.
+/// What the bridge received and dropped during the capture. Exact but for `usb_lost`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct BridgeLoss {
     /// Frames the bridge received over the air.
@@ -51,6 +68,53 @@ pub struct BridgeLoss {
     pub dropped: u64,
     /// Times the bridge's uptime fell, which is a restart.
     pub reboots: u64,
+    /// Frames the host read off the link between the first status reply and the last.
+    pub host_read: u64,
+    /// Frames lost between the bridge's queue and the host: `received` less `dropped` less
+    /// `host_read`, saturating at 0. Approximate to within the frames queued in the bridge's
+    /// bulk ring at the first and last reply, at most 24 each, because a status reply
+    /// overtakes them.
+    pub usb_lost: u64,
+}
+
+/// What the host did with the frames it read, and how it held up. Counts run from the
+/// first `host_status` row to the last.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HostLoss {
+    /// Sighting batches dropped as radio retransmits.
+    pub duplicates: u64,
+    /// USB frames that failed their checksum.
+    pub garbled: u64,
+    /// Frames that were nobody's recognisable format.
+    pub undecodable: u64,
+    /// Frames from another fleet, another core, or a build speaking another wire version.
+    pub foreign: u64,
+    /// Assignments held back because the heartbeat that would have carried them was stale.
+    pub admin_windows_missed: u64,
+    /// Rows the store dropped.
+    pub store_dropped: u64,
+    /// Rows whose lag peak reached 100 ms: samples in which the host fell behind the air.
+    pub lag_over_100ms: u64,
+    /// The furthest behind the air the host fell, in microseconds.
+    pub lag_peak_us: u64,
+    /// The slowest batch the store wrote, in microseconds.
+    pub commit_peak_us: u64,
+    /// The deepest the store's queue got.
+    pub queue_peak: u64,
+    /// Rows reporting under-voltage now (bit 0), or `None` when no row read the Pi's
+    /// throttle word.
+    pub under_voltage: Option<u64>,
+    /// Rows reporting a capped frequency, throttling or the soft temperature limit now
+    /// (bits 1–3), or `None` as for `under_voltage`.
+    pub throttled: Option<u64>,
+    /// The last throttle word's since-boot bits (16–19), shifted down to 0–3 so they read
+    /// as the "now" bits do, or `None` as for `under_voltage`. Trouble before the capture
+    /// began still shows here.
+    pub since_boot: Option<u32>,
+    /// The highest SoC temperature, in milli-degrees Celsius, or `None` when no row read one.
+    pub temp_max_mc: Option<i32>,
+    /// The lowest battery voltage, in millivolts, or `None` when no row read one.
+    pub battery_min_mv: Option<i32>,
 }
 
 /// What one node lost during the capture.
@@ -80,7 +144,7 @@ pub fn losses(conn: &Connection) -> rusqlite::Result<LossSummary> {
     let mut nodes: BTreeMap<Vec<u8>, NodeLoss> = BTreeMap::new();
     heartbeats(conn, &mut nodes)?;
     batches(conn, &mut nodes)?;
-    Ok(LossSummary { bridge, nodes: nodes.into_values().collect() })
+    Ok(LossSummary { bridge, nodes: nodes.into_values().collect(), host: host(conn)? })
 }
 
 /// An integer column as a count. Every count the store writes is unsigned.
@@ -89,25 +153,88 @@ fn count(value: i64) -> u64 {
 }
 
 fn bridge(conn: &Connection) -> rusqlite::Result<Option<BridgeLoss>> {
-    let mut stmt =
-        conn.prepare("SELECT rx_count, dropped_tx, uptime_ms FROM bridge_status ORDER BY id")?;
+    let mut stmt = conn.prepare(
+        "SELECT rx_count, dropped_tx, uptime_ms, host_frames FROM bridge_status ORDER BY id",
+    )?;
     let mut rows = stmt.query([])?;
     let mut loss: Option<BridgeLoss> = None;
-    // The previous row's received, dropped and uptime. The first row is a baseline only.
-    let mut prev: Option<(u64, u64, u64)> = None;
+    // The previous row's received, dropped, uptime and host frames. The first row is a
+    // baseline only.
+    let mut prev: Option<(u64, u64, u64, u64)> = None;
     while let Some(row) = rows.next()? {
-        let (received, dropped, uptime) =
-            (count(row.get(0)?), count(row.get(1)?), count(row.get(2)?));
+        let (received, dropped, uptime, host_frames) =
+            (count(row.get(0)?), count(row.get(1)?), count(row.get(2)?), count(row.get(3)?));
         let loss = loss.get_or_insert_default();
-        if let Some((prev_received, prev_dropped, prev_uptime)) = prev {
+        if let Some((prev_received, prev_dropped, prev_uptime, prev_host)) = prev {
             let restarted = uptime < prev_uptime;
             loss.reboots += u64::from(restarted);
             loss.received += advance_since_boot(received, Some(prev_received), restarted);
             loss.dropped += advance_since_boot(dropped, Some(prev_dropped), restarted);
+            // The host's count runs from the engine's start, so a bridge restart leaves it
+            // rising.
+            loss.host_read += host_frames.saturating_sub(prev_host);
         }
-        prev = Some((received, dropped, uptime));
+        prev = Some((received, dropped, uptime, host_frames));
+    }
+    if let Some(loss) = &mut loss {
+        loss.usb_lost = loss.received.saturating_sub(loss.dropped).saturating_sub(loss.host_read);
     }
     Ok(loss)
+}
+
+/// The engine's counts in one `host_status` row, in column order.
+type HostCounts = [u64; 8];
+
+fn host(conn: &Connection) -> rusqlite::Result<Option<HostLoss>> {
+    let mut stmt = conn.prepare(
+        "SELECT duplicate_batches, garbled, undecodable, incompatible, foreign_fleet,
+                foreign_admin, admin_windows_missed, store_dropped,
+                lag_peak_us, store_commit_peak_us, store_queue_peak, throttled, soc_temp_mc,
+                battery_mv
+         FROM host_status
+         ORDER BY id",
+    )?;
+    let mut rows = stmt.query([])?;
+    let mut loss: Option<HostLoss> = None;
+    let mut first: Option<HostCounts> = None;
+    let mut last: HostCounts = [0; 8];
+    let mut last_throttled: Option<u32> = None;
+    while let Some(row) = rows.next()? {
+        let mut counts: HostCounts = [0; 8];
+        for (i, value) in counts.iter_mut().enumerate() {
+            *value = count(row.get(i)?);
+        }
+        first.get_or_insert(counts);
+        last = counts;
+
+        let loss = loss.get_or_insert_default();
+        let lag = count(row.get(8)?);
+        loss.lag_over_100ms += u64::from(lag >= BEHIND_THE_AIR_US);
+        loss.lag_peak_us = loss.lag_peak_us.max(lag);
+        loss.commit_peak_us = loss.commit_peak_us.max(count(row.get(9)?));
+        loss.queue_peak = loss.queue_peak.max(count(row.get(10)?));
+        if let Some(word) = row.get::<_, Option<u32>>(11)? {
+            *loss.under_voltage.get_or_insert(0) += u64::from(word & 0x1 != 0);
+            *loss.throttled.get_or_insert(0) += u64::from(word & 0xE != 0);
+            last_throttled = Some(word);
+        }
+        if let Some(temp) = row.get::<_, Option<i32>>(12)? {
+            loss.temp_max_mc = Some(loss.temp_max_mc.map_or(temp, |max| max.max(temp)));
+        }
+        if let Some(mv) = row.get::<_, Option<i32>>(13)? {
+            loss.battery_min_mv = Some(loss.battery_min_mv.map_or(mv, |min| min.min(mv)));
+        }
+    }
+    let (Some(mut loss), Some(first)) = (loss, first) else { return Ok(None) };
+    let delta = |i: usize| last[i].saturating_sub(first[i]);
+    loss.duplicates = delta(0);
+    loss.garbled = delta(1);
+    loss.undecodable = delta(2);
+    loss.foreign = delta(3) + delta(4) + delta(5);
+    loss.admin_windows_missed = delta(6);
+    loss.store_dropped = delta(7);
+    loss.since_boot = last_throttled.map(|word| (word >> 16) & 0xF);
+    Ok(Some(loss))
 }
 
 /// One heartbeat row, as the walk needs it.

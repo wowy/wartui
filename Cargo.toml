@@ -10,7 +10,7 @@ license = "MIT"
 repository = "https://github.com/wowy/wartui"
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+unsafe_code = "deny"
 
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }

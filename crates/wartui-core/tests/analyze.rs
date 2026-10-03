@@ -3,8 +3,8 @@
 use std::time::Duration;
 
 use rusqlite::Connection;
-use wartui_core::analyze::{BridgeLoss, losses};
-use wartui_core::record::{BatchGap, BridgeStatusSeen, Heartbeat, Record};
+use wartui_core::analyze::{BridgeLoss, HostLoss, losses};
+use wartui_core::record::{BatchGap, BridgeStatusSeen, Heartbeat, HostStatus, Record};
 use wartui_core::store::{CaptureInfo, Store, StoreConfig, open_readonly};
 use wartui_proto::link::Mac;
 use wartui_proto::plan::ChannelPool;
@@ -29,12 +29,18 @@ fn capture(records: Vec<Record>) -> (tempfile::TempDir, Connection) {
 }
 
 fn status(at_s: i64, rx_count: u32, dropped_tx: u32, uptime_ms: u32) -> Record {
+    read_status(at_s, rx_count, dropped_tx, uptime_ms, 0)
+}
+
+/// A status reply beside the frames the host had read when it arrived.
+fn read_status(at_s: i64, rx_count: u32, dropped_tx: u32, uptime_ms: u32, host: u64) -> Record {
     Record::BridgeStatus(BridgeStatusSeen {
         rx_at_ms: EPOCH_MS + at_s * 1000,
         peer_count: 2,
         rx_count,
         dropped_tx,
         uptime_ms,
+        host_frames: host,
     })
 }
 
@@ -88,7 +94,10 @@ fn analyze_counts_bridge_drops_from_baseline_when_capture_starts_with_drops() {
         status(10, 10_900, 530, 70_000),
     ]);
     let loss = losses(&conn).unwrap();
-    assert_eq!(loss.bridge, Some(BridgeLoss { received: 900, dropped: 30, reboots: 0 }));
+    assert_eq!(
+        loss.bridge,
+        Some(BridgeLoss { received: 900, dropped: 30, reboots: 0, host_read: 0, usb_lost: 870 })
+    );
 }
 
 #[test]
@@ -101,7 +110,10 @@ fn analyze_adds_whole_value_when_bridge_dropped_count_falls() {
         status(10, 300, 7, 4_000),
     ]);
     let loss = losses(&conn).unwrap();
-    assert_eq!(loss.bridge, Some(BridgeLoss { received: 700, dropped: 27, reboots: 1 }));
+    assert_eq!(
+        loss.bridge,
+        Some(BridgeLoss { received: 700, dropped: 27, reboots: 1, host_read: 0, usb_lost: 673 })
+    );
 }
 
 #[test]
@@ -247,4 +259,127 @@ fn analyze_ignores_beats_lost_after_reboot_when_previous_heartbeat_was_replayed(
     let (_dir, conn) = capture(vec![replayed(NODE, 0, 40, 20), beat(NODE, 60_000, 1, 12, 0, 0)]);
     let node = &losses(&conn).unwrap().nodes[0];
     assert_eq!((node.heartbeats, node.heartbeats_missed), (2, 0));
+}
+
+/// A host row with every count at `n` and the given peaks and health.
+fn host_row(
+    n: u64,
+    lag_us: u64,
+    throttled: Option<u32>,
+    temp: Option<i32>,
+    battery_mv: Option<i32>,
+) -> Record {
+    Record::HostStatus(HostStatus {
+        at_ms: EPOCH_MS,
+        frames: n,
+        duplicate_batches: n,
+        garbled: n,
+        undecodable: n,
+        incompatible: n,
+        foreign_fleet: n,
+        foreign_admin: n,
+        admin_windows_missed: n,
+        lag_peak_us: lag_us,
+        store_written: n,
+        store_dropped: n,
+        store_queue_peak: n,
+        store_commit_peak_us: n * 10,
+        throttled,
+        soc_temp_mc: temp,
+        battery_mv,
+        battery_ma: battery_mv.map(|_| 21),
+    })
+}
+
+#[test]
+fn analyze_sums_host_read_from_baseline_when_status_rows_carry_host_frames() {
+    // 30 frames the bridge received never reached the host; a bridge restart leaves the
+    // host's own count rising.
+    let (_dir, conn) = capture(vec![
+        read_status(0, 10_000, 0, 60_000, 4_000),
+        read_status(5, 10_400, 0, 65_000, 4_390),
+        read_status(10, 300, 0, 4_000, 4_670),
+    ]);
+    let loss = losses(&conn).unwrap();
+    assert_eq!(
+        loss.bridge,
+        Some(BridgeLoss { received: 700, dropped: 0, reboots: 1, host_read: 670, usb_lost: 30 })
+    );
+}
+
+#[test]
+fn analyze_excludes_bridge_drops_from_usb_lost_when_bridge_dropped_frames() {
+    // 1,000 received, 10 of them evicted from the bridge's outbox and never sent, and 985
+    // read: 5 were lost on USB.
+    let (_dir, conn) = capture(vec![
+        read_status(0, 10_000, 100, 60_000, 9_000),
+        read_status(5, 10_400, 104, 65_000, 9_394),
+        read_status(10, 11_000, 110, 70_000, 9_985),
+    ]);
+    let bridge = losses(&conn).unwrap().bridge.unwrap();
+    assert_eq!((bridge.received, bridge.dropped, bridge.host_read), (1_000, 10, 985));
+    assert_eq!(bridge.usb_lost, 5);
+}
+
+#[test]
+fn analyze_reports_no_usb_lost_when_baseline_taken_mid_backlog() {
+    // The first reply overtook 24 frames still queued in the bridge, so the host had read
+    // 24 fewer than `rx_count` says and reads them after the baseline: over the capture it
+    // reads more than the bridge received.
+    let (_dir, conn) = capture(vec![
+        read_status(0, 10_000, 0, 60_000, 9_976),
+        read_status(5, 10_400, 0, 65_000, 10_400),
+    ]);
+    let bridge = losses(&conn).unwrap().bridge.unwrap();
+    assert_eq!((bridge.received, bridge.host_read), (400, 424));
+    assert_eq!(bridge.usb_lost, 0);
+}
+
+#[test]
+fn analyze_reads_host_deltas_and_maxima_when_host_rows_present() {
+    let (_dir, conn) = capture(vec![
+        host_row(10, 0, Some(0x0000), Some(55_000), Some(4_185)),
+        host_row(15, 150_000, Some(0x50005), Some(71_200), Some(3_620)),
+        host_row(25, 99_999, Some(0x50002), None, None),
+        host_row(40, 100_000, Some(0x50000), Some(60_000), Some(3_900)),
+    ]);
+    let host = losses(&conn).unwrap().host.expect("host rows");
+    assert_eq!(
+        host,
+        HostLoss {
+            duplicates: 30,
+            garbled: 30,
+            undecodable: 30,
+            foreign: 90,
+            admin_windows_missed: 30,
+            store_dropped: 30,
+            lag_over_100ms: 2,
+            lag_peak_us: 150_000,
+            commit_peak_us: 400,
+            queue_peak: 40,
+            under_voltage: Some(1),
+            throttled: Some(2),
+            since_boot: Some(0b0101),
+            temp_max_mc: Some(71_200),
+            battery_min_mv: Some(3_620),
+        }
+    );
+}
+
+#[test]
+fn analyze_reads_no_pi_figures_when_health_columns_are_null() {
+    let (_dir, conn) =
+        capture(vec![host_row(1, 0, None, None, None), host_row(2, 0, None, None, None)]);
+    let host = losses(&conn).unwrap().host.expect("host rows");
+    assert_eq!(
+        (host.under_voltage, host.throttled, host.since_boot, host.temp_max_mc),
+        (None, None, None, None)
+    );
+    assert_eq!(host.battery_min_mv, None);
+}
+
+#[test]
+fn analyze_omits_host_when_no_host_rows() {
+    let (_dir, conn) = capture(steady(NODE, 0, 3));
+    assert_eq!(losses(&conn).unwrap().host, None);
 }

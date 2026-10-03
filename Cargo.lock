@@ -2478,6 +2478,7 @@ name = "wartui-core"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "libc",
  "rusqlite",
  "serialport",
  "tempfile",

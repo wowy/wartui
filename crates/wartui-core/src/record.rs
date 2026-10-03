@@ -100,6 +100,62 @@ pub struct BridgeStatusSeen {
     pub dropped_tx: u32,
     /// Milliseconds since its boot.
     pub uptime_ms: u32,
+    /// Frames this host had read off the link when the reply arrived: the engine's
+    /// `Counters::frames`. Between two rows, the difference in `rx_count` less the
+    /// difference in this is frames lost on USB plus `dropped_tx`, give or take the frames
+    /// still queued in the bridge, which the reply overtakes.
+    pub host_frames: u64,
+}
+
+/// The host's own state, sampled every few seconds and once more at shutdown.
+///
+/// Counts are the engine's since it started, so two rows are read as a difference.
+/// Peaks are the largest since the previous row, so a run of rows says *when* the host
+/// struggled. A row lost to a full store queue costs that window's peaks and nothing
+/// else, since the next row's counts carry on from the same start.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HostStatus {
+    /// Unix milliseconds of the sample.
+    pub at_ms: i64,
+    /// `Counters::frames`: ESP-NOW frames read off the link.
+    pub frames: u64,
+    /// `Counters::duplicate_batches`: radio retransmits dropped rather than stored.
+    pub duplicate_batches: u64,
+    /// `Counters::garbled`: USB frames that failed their checksum.
+    pub garbled: u64,
+    /// `Counters::undecodable`.
+    pub undecodable: u64,
+    /// `Counters::incompatible`.
+    pub incompatible: u64,
+    /// `Counters::foreign_fleet`.
+    pub foreign_fleet: u64,
+    /// `Counters::foreign_admin`.
+    pub foreign_admin: u64,
+    /// `Counters::admin_windows_missed`.
+    pub admin_windows_missed: u64,
+    /// The furthest behind the air this host fell since the previous row, in
+    /// microseconds. Only lags measured from arriving frames count: the assumption
+    /// made on connecting, before any frame has been timed, is not one.
+    pub lag_peak_us: u64,
+    /// Rows the store has written.
+    pub store_written: u64,
+    /// Rows the store has dropped.
+    pub store_dropped: u64,
+    /// The deepest the store's queue got since the previous row.
+    pub store_queue_peak: u64,
+    /// The slowest batch the store wrote since the previous row, statements and
+    /// commit together, in microseconds.
+    pub store_commit_peak_us: u64,
+    /// The Raspberry Pi firmware's throttle word, or `None` off a Pi; see
+    /// [`crate::health`] for its bits.
+    pub throttled: Option<u32>,
+    /// SoC temperature in thousandths of a degree Celsius, or `None` when unreadable.
+    pub soc_temp_mc: Option<i32>,
+    /// Battery voltage in millivolts, or `None` when the host has no `battery` hwmon.
+    pub battery_mv: Option<i32>,
+    /// Battery current in milliamps, signed as the driver reports it, or `None` as for
+    /// `battery_mv`.
+    pub battery_ma: Option<i32>,
 }
 
 /// A run of batches missing from one node's sequence, found when the batch after it
@@ -272,6 +328,8 @@ pub enum Record {
     BridgeStatus(BridgeStatusSeen),
     /// Append a gap in a node's batch sequence.
     BatchGap(BatchGap),
+    /// Append a sample of the host's own state.
+    HostStatus(HostStatus),
 }
 
 #[cfg(test)]

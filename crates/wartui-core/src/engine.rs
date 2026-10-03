@@ -24,9 +24,17 @@
 //! - [`Command::RememberBle`]: Turns on or off remembering the node last given the Bluetooth scan,
 //!   which the engine hands the scan back to whenever that node is assignable and none holds it.
 //! - [`Command::SetPool`]: Changes the channel pool and re-cuts the whole fleet against it.
+//!
+//! # Logging
+//!
+//! `tracing` is the one side channel the engine writes to. It logs each time the host falls
+//! behind the bridge and each time it catches up, with the pair of bridge stamps that decided
+//! it ([`FleetEngine::note_arrival`]): those stamps are stored nowhere else, so a lag spike in a
+//! capture is otherwise unexplainable.
 use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
 
+use wartui_bridge::ports::mac_text;
 use wartui_bridge::{BridgeInfo, LinkEvent};
 use wartui_proto::air::{
     AdminMsg, Capabilities, ClearMsg, DecodeError, Frame, RecordKind, SightingMsg, foreign,
@@ -38,10 +46,11 @@ use wartui_proto::plan::{
 };
 
 use crate::distinct::Distinct;
+use crate::health::Health;
 use crate::position::PositionChain;
 use crate::record::{
-    AdminOutcome, AssignmentSent, BatchGap, BridgeStatusSeen, Heartbeat, NodeSeen, Observation,
-    RawFrame, Record, ssid_text,
+    AdminOutcome, AssignmentSent, BatchGap, BridgeStatusSeen, Heartbeat, HostStatus, NodeSeen,
+    Observation, RawFrame, Record, ssid_text,
 };
 
 /// The time, in both of the forms this code needs.
@@ -71,6 +80,10 @@ pub enum Event {
     Tick,
     /// Something the operator asked for.
     Command(Command),
+    /// The runtime's periodic reading of what only it can see: the store and the
+    /// host's own health. The engine adds its counters and lag peak and records the
+    /// lot as a [`Record::HostStatus`].
+    HostSample(HostSample),
 }
 
 /// An operator's instruction to the fleet.
@@ -509,6 +522,26 @@ pub struct StoreStats {
     pub dropped: u64,
 }
 
+/// The store's largest figures since they were last taken, for a [`HostSample`].
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct StorePeaks {
+    /// The deepest the queue got, in records.
+    pub queue: u64,
+    /// The slowest batch, statements and commit together, in microseconds.
+    pub commit_us: u64,
+}
+
+/// What the runtime read for one [`Event::HostSample`].
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct HostSample {
+    /// The store's running totals.
+    pub store: StoreStats,
+    /// The store's peaks since the previous sample.
+    pub peaks: StorePeaks,
+    /// The host's own health.
+    pub health: Health,
+}
+
 /// A node as of one snapshot.
 ///
 /// Both flags are carried rather than left for the UI to re-derive, because neither
@@ -689,17 +722,63 @@ pub struct FleetEngine {
     preferred_ble: Option<Mac>,
     /// The previous frame's bridge stamp and the host instant it was handled
     /// on, which together say whether this host is reading the link in real
-    /// time or working through a backlog. See [`FleetEngine::note_arrival`].
+    /// time or working through a backlog. `None` until the first frame since the
+    /// engine started or the link last came up or went down. See
+    /// [`FleetEngine::note_arrival`].
     last_arrival: Option<(u32, Instant)>,
     /// How far behind the air this host currently is, in microseconds. Zero
     /// whenever the link is read live; it climbs only while frames arrive faster
-    /// than wall-clock time can account for.
+    /// than wall-clock time can account for. [`BEHIND_THE_AIR_US`] on start and on
+    /// every connect or disconnect, until a frame proves otherwise: one the host
+    /// waited for, or a first frame after [`QUIET_CONNECT`] of silence.
     backlog_lag_us: u64,
+    /// The largest [`Self::backlog_lag_us`] measured since the last
+    /// [`Event::HostSample`]. Taken only where a lag is computed from two arrivals,
+    /// so the [`BEHIND_THE_AIR_US`] assumed on connecting is never reported on its
+    /// own. The first lag measured after a connect builds on that assumption, so a
+    /// backlog drained then reports at least it, which is what it was.
+    lag_peak_us: u64,
+    /// When the current measured spell behind the air began, or `None` while the
+    /// host is live or behind only by assumption. Opens and closes the log lines
+    /// [`FleetEngine::note_arrival`] writes.
+    behind_since: Option<Instant>,
+    /// The largest lag measured during the spell [`Self::behind_since`] opened.
+    behind_peak_us: u64,
 }
 
 /// A lag large enough that [`FleetEngine::air_is_live`] says no, used as the
 /// starting assumption on a connection whose backlog has not been seen yet.
-const BEHIND_THE_AIR_US: u64 = plan::ADMIN_WAIT_MS as u64 * 1_000;
+pub(crate) const BEHIND_THE_AIR_US: u64 = plan::ADMIN_WAIT_MS as u64 * 1_000;
+
+/// How long a link has to have been up with no frame at all before its first frame
+/// is taken as live.
+///
+/// A bridge's backlog reaches the host within milliseconds of the port opening:
+/// twenty-five frames spanning 8.5 minutes of bridge time arrived inside 17 ms of host
+/// time (`docs/phase-4-findings.md`). A link silent for longer than that has nothing
+/// queued, so the first frame it carries is the present. One second is generous.
+pub(crate) const QUIET_CONNECT: Duration = Duration::from_secs(1);
+
+/// A change in whether the host is measurably behind the air.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LagTransition {
+    FellBehind,
+    CaughtUp,
+}
+
+/// What a lag measured from two arrivals changes, given whether a spell behind the
+/// air is already open.
+///
+/// Only a measured lag opens a spell. The lag assumed on connect never does, so the
+/// first frame of a session logs nothing; the second frame of a backlog measures
+/// the lag and opens one.
+fn lag_transition(behind: bool, lag_us: u64) -> Option<LagTransition> {
+    match (behind, lag_us >= BEHIND_THE_AIR_US) {
+        (false, true) => Some(LagTransition::FellBehind),
+        (true, false) => Some(LagTransition::CaughtUp),
+        _ => None,
+    }
+}
 
 /// How long after a batch a byte-identical repeat under the same `seq` is still
 /// an 802.11 retry rather than a node's own later re-send.
@@ -813,6 +892,9 @@ impl FleetEngine {
             // Pessimistic from the start, as on `Connected`: the port opens onto a
             // backlog, and its frames reach the engine before the bridge's `Ready`.
             backlog_lag_us: BEHIND_THE_AIR_US,
+            lag_peak_us: 0,
+            behind_since: None,
+            behind_peak_us: 0,
             config,
         }
     }
@@ -824,6 +906,7 @@ impl FleetEngine {
         match event {
             Event::Tick => self.on_tick(now, &mut batch),
             Event::Command(command) => self.on_command(command, now, &mut batch),
+            Event::HostSample(sample) => self.on_host_sample(sample, now, &mut batch),
             Event::Link(LinkEvent::Connected(info)) => {
                 batch.records.push(Record::Bridge(crate::record::BridgeSeen {
                     mac: info.mac,
@@ -850,11 +933,11 @@ impl FleetEngine {
                 self.link_error = None;
                 // Whatever the bridge has been holding arrives now, so this host
                 // is behind the air until a frame turns up that it had to wait
-                // for. Starting pessimistic costs at most one admin window and
-                // keeps the first frame of a long backlog from being the one
-                // stale window this cannot recognize.
-                self.last_arrival = None;
-                self.backlog_lag_us = BEHIND_THE_AIR_US;
+                // for, or until the link has sat quiet for `QUIET_CONNECT` with
+                // nothing arriving. Starting pessimistic costs at most one admin
+                // window and keeps the first frame of a long backlog from being
+                // the one stale window this cannot recognize.
+                self.reset_arrivals();
                 // Its peer table starts empty, whether this is a new bridge or
                 // the same one rebooted, so a node it had no room for before
                 // may fit now.
@@ -873,13 +956,38 @@ impl FleetEngine {
                 self.link_up = false;
                 self.link_up_since = None;
                 self.link_error = Some(reason);
-                self.last_arrival = None;
-                self.backlog_lag_us = BEHIND_THE_AIR_US;
+                self.reset_arrivals();
             }
             Event::Link(LinkEvent::Garbled(_)) => self.counters.garbled += 1,
             Event::Link(LinkEvent::Message(msg)) => self.on_message(&msg, now, &mut batch),
         }
         batch
+    }
+
+    /// Record the host's state: the runtime's sample, this engine's counters, and the
+    /// lag peak, which starts again from nothing for the next sample.
+    fn on_host_sample(&mut self, sample: HostSample, now: Now, batch: &mut ActionBatch) {
+        let c = &self.counters;
+        batch.records.push(Record::HostStatus(HostStatus {
+            at_ms: now.unix_ms,
+            frames: c.frames,
+            duplicate_batches: c.duplicate_batches,
+            garbled: c.garbled,
+            undecodable: c.undecodable,
+            incompatible: c.incompatible,
+            foreign_fleet: c.foreign_fleet,
+            foreign_admin: c.foreign_admin,
+            admin_windows_missed: c.admin_windows_missed,
+            lag_peak_us: std::mem::take(&mut self.lag_peak_us),
+            store_written: sample.store.written,
+            store_dropped: sample.store.dropped,
+            store_queue_peak: sample.peaks.queue,
+            store_commit_peak_us: sample.peaks.commit_us,
+            throttled: sample.health.throttled,
+            soc_temp_mc: sample.health.soc_temp_mc,
+            battery_mv: sample.health.battery_mv,
+            battery_ma: sample.health.battery_ma,
+        }));
     }
 
     fn on_tick(&mut self, now: Now, batch: &mut ActionBatch) {
@@ -973,7 +1081,8 @@ impl FleetEngine {
     fn on_message(&mut self, msg: &BridgeToHost, now: Now, batch: &mut ActionBatch) {
         match msg {
             BridgeToHost::Rx { src, dst, rssi, rx_us, payload } => {
-                self.note_arrival(*rx_us, now);
+                // Before `on_rx`: the heartbeat it handles reads `air_is_live`.
+                self.note_arrival(*src, *rx_us, now);
                 self.on_rx(*src, *dst, *rssi, *rx_us, payload, now, batch);
             }
             BridgeToHost::SendResult { id, status, tx_us } => {
@@ -1000,6 +1109,7 @@ impl FleetEngine {
                     rx_count: *rx_count,
                     dropped_tx: *dropped_tx,
                     uptime_ms: *uptime_ms,
+                    host_frames: self.counters.frames,
                 }));
             }
             // `Ready` reaches the engine as `LinkEvent::Connected`; the bridge's
@@ -1757,20 +1867,75 @@ impl FleetEngine {
     /// resets the moment the host waits longer for a frame than the bridge spent
     /// producing one, which can only happen with nothing queued.
     ///
+    /// A first frame has no earlier one to be timed against. It is taken as live
+    /// only when the link has been up for [`QUIET_CONNECT`] without a frame, since
+    /// a backlog would have arrived by then; otherwise the assumption that the host
+    /// is behind stands.
+    ///
     /// Deliberately an estimate rather than a clock synchronization. It has one
     /// job: to keep [`Self::send_admin`] from mistaking the past for the present.
-    fn note_arrival(&mut self, rx_us: u32, now: Now) {
-        if let Some((last_rx_us, last_mono)) = self.last_arrival {
-            let bridge_elapsed_us = u64::from(rx_us.wrapping_sub(last_rx_us));
-            let host_elapsed_us = now.mono.saturating_duration_since(last_mono).as_micros() as u64;
+    fn note_arrival(&mut self, src: Mac, rx_us: u32, now: Now) {
+        match self.last_arrival {
+            Some((last_rx_us, last_mono)) => {
+                let bridge_elapsed_us = u64::from(rx_us.wrapping_sub(last_rx_us));
+                let host_elapsed_us =
+                    now.mono.saturating_duration_since(last_mono).as_micros() as u64;
 
-            self.backlog_lag_us = Self::calculate_updated_lag(
-                self.backlog_lag_us,
-                bridge_elapsed_us,
-                host_elapsed_us,
-            );
+                self.backlog_lag_us = Self::calculate_updated_lag(
+                    self.backlog_lag_us,
+                    bridge_elapsed_us,
+                    host_elapsed_us,
+                );
+                self.lag_peak_us = self.lag_peak_us.max(self.backlog_lag_us);
+                let lag_us = self.backlog_lag_us;
+                match lag_transition(self.behind_since.is_some(), lag_us) {
+                    Some(LagTransition::FellBehind) => {
+                        self.behind_since = Some(now.mono);
+                        self.behind_peak_us = lag_us;
+                        tracing::info!(
+                            src = %mac_text(&src),
+                            last_rx_us,
+                            rx_us,
+                            bridge_elapsed_us,
+                            host_elapsed_us,
+                            lag_us,
+                            "host fell behind the bridge"
+                        );
+                    }
+                    Some(LagTransition::CaughtUp) => self.close_behind(now),
+                    None => self.behind_peak_us = self.behind_peak_us.max(lag_us),
+                }
+            }
+            None => {
+                let quiet = self
+                    .link_up_since
+                    .is_some_and(|since| now.mono.duration_since(since) >= QUIET_CONNECT);
+                if quiet {
+                    // Not a measurement, so not counted into `lag_peak_us`. No spell
+                    // is open either: `reset_arrivals` closed it on the connect.
+                    self.backlog_lag_us = 0;
+                }
+            }
         }
         self.last_arrival = Some((rx_us, now.mono));
+    }
+
+    /// End the spell behind the air that [`Self::note_arrival`] opened, and say so.
+    fn close_behind(&mut self, now: Now) {
+        let Some(since) = self.behind_since.take() else { return };
+        let peak_us = std::mem::take(&mut self.behind_peak_us);
+        let lasted_ms = now.mono.saturating_duration_since(since).as_millis() as u64;
+        tracing::info!(peak_us, lasted_ms, "host caught up with the bridge");
+    }
+
+    /// Forget every arrival and assume the host is behind, as on start: the link has
+    /// just come up or gone down, and a backlog may be on its way. A spell behind the
+    /// air ends here unlogged, since no frame said the host caught up.
+    fn reset_arrivals(&mut self) {
+        self.last_arrival = None;
+        self.backlog_lag_us = BEHIND_THE_AIR_US;
+        self.behind_since = None;
+        self.behind_peak_us = 0;
     }
 
     /// Whether a frame being handled now is recent enough to act on.
@@ -2139,5 +2304,29 @@ impl FleetEngine {
     /// The nodes seen so far, ordered by MAC.
     pub fn nodes(&self) -> impl Iterator<Item = &NodeState> {
         self.nodes.values()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BEHIND_THE_AIR_US, LagTransition, lag_transition};
+
+    #[test]
+    fn lag_transition_falls_behind_when_measured_lag_reaches_threshold() {
+        assert_eq!(lag_transition(false, BEHIND_THE_AIR_US), Some(LagTransition::FellBehind));
+        assert_eq!(lag_transition(false, BEHIND_THE_AIR_US - 1), None);
+    }
+
+    #[test]
+    fn lag_transition_catches_up_when_lag_drops_below_threshold() {
+        assert_eq!(lag_transition(true, 0), Some(LagTransition::CaughtUp));
+        assert_eq!(lag_transition(true, BEHIND_THE_AIR_US - 1), Some(LagTransition::CaughtUp));
+    }
+
+    #[test]
+    fn lag_transition_reports_nothing_when_spell_continues() {
+        // One line per transition, never per frame.
+        assert_eq!(lag_transition(true, BEHIND_THE_AIR_US * 30), None);
+        assert_eq!(lag_transition(false, 0), None);
     }
 }
