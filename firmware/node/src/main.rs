@@ -45,6 +45,7 @@ use wartui_proto::air::{
     SightingBatchWriter, SightingMsg,
 };
 use wartui_proto::link::BROADCAST;
+use wartui_proto::mac;
 use wartui_proto::plan::{
     ADMIN_WAIT_MS, ASSIGNED_BEAT_MS, CHANNEL_DWELL_MS, CONTROL_CHANNEL, ChannelSet, IDLE_BEAT_MS,
     NUM_SCAN_CHANNELS, SCAN_CHANNELS, SweepCursor,
@@ -362,7 +363,7 @@ fn main() -> ! {
     let mac = esp_radio::wifi::Interface::station().mac_address();
     note!(
         "wartui node {} v{}, control channel {}",
-        MacFmt(mac),
+        mac::full(&mac),
         env!("CARGO_PKG_VERSION"),
         CONTROL_CHANNEL
     );
@@ -778,9 +779,11 @@ fn note_core(manager: &EspNowManager<'_>, node: &mut Node, src: [u8; 6]) {
     match radio::set_core_peer(manager, node.core, src) {
         Ok(()) => {
             node.core = Some(src);
-            note!("core is now {}", MacFmt(src));
+            note!("core is now {}", mac::full(&src));
         }
-        Err(_) => note!("could not register {} as the core peer; keeping the old one", MacFmt(src)),
+        Err(_) => {
+            note!("could not register {} as the core peer; keeping the old one", mac::full(&src))
+        }
     }
 }
 
@@ -803,21 +806,6 @@ impl core::fmt::Display for Channels {
                 f.write_str(",")?;
             }
             write!(f, "{}", SCAN_CHANNELS[usize::from(idx)])?;
-        }
-        Ok(())
-    }
-}
-
-/// A MAC address, for the one line that prints one.
-struct MacFmt([u8; 6]);
-
-impl core::fmt::Display for MacFmt {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        for (i, octet) in self.0.iter().enumerate() {
-            if i > 0 {
-                f.write_str(":")?;
-            }
-            write!(f, "{octet:02X}")?;
         }
         Ok(())
     }

@@ -77,6 +77,7 @@ use mipidsi::options::{ColorInversion, ColorOrder, Orientation, Rotation};
 use mipidsi::{Builder, Display};
 use static_cell::{ConstStaticCell, StaticCell};
 use wartui_proto::link::{PANEL_ROWS, PanelLine, PanelLines, Severity, ShortStr};
+use wartui_proto::mac;
 use wartui_proto::plan::CONTROL_CHANNEL;
 
 use crate::Bridge;
@@ -363,7 +364,7 @@ impl Screen {
         };
 
         let mut who = ShortStr::new();
-        let _ = write!(who, "{:?} {:02X}:{:02X}", crate::CHIP, mac[4], mac[5]);
+        let _ = write!(who, "{:?} {}", crate::CHIP, mac::short(&mac));
         push(who);
 
         push(ShortStr::try_from("no host").unwrap_or_default());
