@@ -1,3 +1,8 @@
+//! The header: the bridge and its link, then pool, plan, session time and position.
+//!
+//! The border is green only while a bridge's link is up and rows have a position, and
+//! red otherwise. A glance at it says whether the capture is working.
+
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -9,6 +14,7 @@ use wartui_core::position::PositionSource;
 
 use super::format::{elapsed, short_mac};
 
+/// Draw the header box into `area`.
 pub(super) fn draw_header(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot) {
     let (link, border_color) = if let Some(bridge) = &snapshot.bridge {
         let state = if snapshot.link_up { "up" } else { "down" };
@@ -29,16 +35,14 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot
         ("waiting for bridge".to_owned(), Color::Red)
     };
 
-    // The reason a link is down belongs in the fault box, which is vertical and
-    // wraps, rather than on this line, which shares its width with the bridge's
-    // identity — appended here, the single most useful thing on screen is the
-    // part a narrow terminal clips.
+    // The link-down reason goes in the fault box, which wraps. Here a narrow
+    // terminal would clip it.
     let first = vec![Span::raw(link)];
 
     let mut second = vec![
         Span::raw(format!("pool {}  ", snapshot.pool)),
         planning(snapshot),
-        Span::raw(format!("  session {}  ", elapsed(snapshot.now_ms - snapshot.started_at_ms),)),
+        Span::raw(format!("  session {}  ", elapsed(snapshot.now_ms - snapshot.started_at_ms))),
     ];
     second.extend(position(snapshot));
 
@@ -51,10 +55,14 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot
     );
 }
 
-/// The fleet planner status.
+/// Planner status: `N of M` nodes in the plan, or why there is no plan.
 ///
-/// Displays how many nodes are healthy, or why none is planned: none seen yet
-/// (normal at startup), all seen gone silent, or alive but none assignable.
+/// | Shown | Colour | Meaning |
+/// |---|---|---|
+/// | `N of M` | green | `N` of the `M` nodes heard are in the plan |
+/// | `N alive, none usable` | red | heartbeating, but none assignable |
+/// | `waiting for nodes` | yellow | none heard yet, normal at startup |
+/// | `all nodes silent` | red | every node heard has stopped heartbeating |
 fn planning(snapshot: &Snapshot) -> Span<'static> {
     let (text, color) = match snapshot.plan {
         Some(plan) => (format!("{} of {}", plan.node_count(), snapshot.nodes.len()), Color::Green),
@@ -67,7 +75,7 @@ fn planning(snapshot: &Snapshot) -> Span<'static> {
     Span::styled(text, Style::new().fg(color))
 }
 
-/// Current GPS position, or a warning
+/// The header's no-position warning, then the receiver's state.
 fn position(snapshot: &Snapshot) -> Vec<Span<'static>> {
     let fix = if snapshot.position.is_located() {
         Span::default()
@@ -86,20 +94,16 @@ fn position(snapshot: &Snapshot) -> Vec<Span<'static>> {
     spans
 }
 
-/// What the receiver is doing, said only when it is not the thing answering.
+/// The receiver's state: `gps ok` while it supplies positions, otherwise why not.
 ///
-/// A configured GPS that is not producing the rows' positions is this tier's one
-/// failure, and it is otherwise silent — the rows keep coming, carrying the
-/// position from before the drive started. The note stays up until it is fixed.
+/// A GPS that stops supplying positions is otherwise easy to miss, because rows keep
+/// arriving with the fallback position. The note stays up until it is fixed.
 ///
-/// Returns nothing at all when the search found no receiver. Looking for one is the
-/// default, so most captures that say nothing about a GPS are captures where there
-/// was never going to be one, and a line reporting that on every one of them would
-/// be a fault where there is no fault.
+/// `None` when the search found no receiver, which is the usual case. The search runs
+/// by default, so saying so on every capture would be noise.
 fn receiver(gps: &GpsView, source: PositionSource) -> Option<Span<'static>> {
-    // Checked before the source: a fix stays usable for `max_age` after the puck
-    // is unplugged, so for those seconds the rows really are coming from the GPS
-    // and the port really is dead.
+    // Checked first: for `max_age` after an unplug, the source is still GPS but the
+    // port is dead.
     if let GpsStatus::Failed(reason) = &gps.status {
         return Some(Span::styled(format!("  gps: {reason}"), Style::new().fg(Color::Yellow)));
     }
@@ -112,8 +116,8 @@ fn receiver(gps: &GpsView, source: PositionSource) -> Option<Span<'static>> {
     }
     let text = match &gps.status {
         GpsStatus::Connecting => "  gps connecting".to_owned(),
-        // Named, so the port is worth saying: the operator is watching the ladder
-        // work through the rates their receiver might be at.
+        // The port and rate show because the operator is watching the search try
+        // each rate their receiver might use.
         GpsStatus::Scanning { port, baud } => format!("  gps scanning {port} @{baud}"),
         GpsStatus::Searching => "  gps searching".to_owned(),
         GpsStatus::Fixed { .. } => "  gps fix is stale".to_owned(),
@@ -149,8 +153,8 @@ mod tests {
 
     #[test]
     fn header_displays_pool_name_when_rendering_active_channel_pool() {
-        // The header is the only place the pool is named on screen, and it
-        // spells each one the way the manual does.
+        // The header is the only place the pool is named. It spells each one as the
+        // manual does.
         let mut snapshot = busy();
         snapshot.pool = ChannelPool::Us;
         assert!(rendered(&snapshot).contains("pool US"));
@@ -190,14 +194,14 @@ mod tests {
 
     #[test]
     fn view_omits_gps_status_when_no_receiver_is_present() {
-        // Most captures are static, and a permanent "gps: none" would be noise.
+        // Most captures are static, so a permanent "gps: none" would be noise.
         assert!(!rendered(&busy()).contains("gps"));
     }
 
     #[test]
     fn view_displays_failure_message_when_receiver_disconnects_mid_capture() {
-        // The seconds after the puck falls out: the rows are still the GPS's,
-        // and the port is gone.
+        // The seconds after the receiver is unplugged. Rows still carry its fix, but
+        // the port is gone.
         let unplugged = with_gps(
             GpsStatus::Failed("/dev/cu.gps: Device not configured".to_owned()),
             GpsCounters { sentences: 400, fixes: 200, rejected: 0 },
@@ -250,8 +254,7 @@ mod tests {
         terminal.draw(|frame| draw(frame, &snapshot, &mut Ui::default())).expect("drawing");
         assert!(terminal.backend().to_string().contains("4 of 5"));
 
-        // A lone node holds the whole pool, and the header has nothing extra to
-        // say about it.
+        // A lone node holds the whole pool. The header says nothing extra about it.
         let mut lone = busy();
         lone.plan = plan(ChannelPool::Us, 1);
         let mut terminal = Terminal::new(TestBackend::new(150, 20)).expect("test backend");

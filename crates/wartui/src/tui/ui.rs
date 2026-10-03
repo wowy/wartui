@@ -1,3 +1,5 @@
+//! Key handling, and the view state it changes.
+
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use tokio::sync::mpsc;
 use wartui_core::engine::{Command, Snapshot};
@@ -5,24 +7,26 @@ use wartui_proto::link::Mac;
 
 use super::Settings;
 use super::fleet::why_not_assignable;
-use super::format::mac;
+use super::format::full_mac;
 use super::settings::ConfigModal;
 use super::upload::Upload;
 use crate::config;
 
-/// Which row the operator is looking at, and whether they have been notified of a key
-/// press that cannot work.
+/// The notice when the engine's command queue is full.
+pub(super) const ENGINE_BUSY: &str = "the engine is not accepting commands";
+
+/// View state that outlives a frame: cursor, scroll offset, notice, settings modal,
+/// saved settings and upload.
 #[derive(Debug, Default)]
 pub(super) struct Ui {
+    /// The fleet table row under the cursor.
     pub(super) selected: usize,
-    /// The fleet table's scroll offset, carried from the previous frame so a
-    /// stateful `Table` moves the window only when the cursor reaches its
-    /// edge rather than recomputing from row 0 — which would pin the cursor
-    /// to the bottom of the box and turn `k` into a scroll instead of a move.
+    /// Scroll offset from the last frame. Recomputing from row 0 pins the cursor to
+    /// the bottom edge, so `k` would scroll instead of move.
     pub(super) fleet_offset: usize,
-    /// The notice and the snapshot time it was sent.
+    /// The notice, and the snapshot time it was sent.
     pub(super) notice: Option<(String, i64)>,
-    /// The settings modal, open or closed.
+    /// The settings modal, while open.
     pub(super) modal: Option<ConfigModal>,
     /// Where to save, and what was last saved there.
     pub(super) settings: Settings,
@@ -30,15 +34,16 @@ pub(super) struct Ui {
     pub(super) upload: Upload,
 }
 
-/// How long a notice stays on the footer before the counters have it back.
+/// How long a notice replaces the footer's key help and totals.
 const NOTICE_MS: i64 = 4_000;
 
 impl Ui {
-    /// Keep the cursor on a real row as nodes appear and the table grows.
+    /// Keep the cursor on a real row as the table grows and shrinks.
     pub(super) fn clamp(&mut self, node_count: usize) {
         self.selected = self.selected.min(node_count.saturating_sub(1));
     }
 
+    /// A key while no modal is open.
     pub(super) fn on_key(
         &mut self,
         key: KeyEvent,
@@ -56,8 +61,8 @@ impl Ui {
             }
             KeyCode::Char('b') => self.toggle_ble(snapshot, commands),
             KeyCode::Char('c') => self.open_modal(snapshot),
-            // Matched on the character rather than a shift modifier: crossterm
-            // sends shift+r as `'R'`, not `'r'` with a modifier flag.
+            // Matched on the character: crossterm sends shift+r as `'R'`, not as
+            // `'r'` with a modifier.
             KeyCode::Char('r') => self.clear_ring(snapshot, commands),
             KeyCode::Char('R') => self.clear_fleet_ring(snapshot, commands),
             KeyCode::Char('u') => {
@@ -65,32 +70,34 @@ impl Ui {
                     self.say(text, snapshot);
                 }
             }
-            // Anything else leaves the notice alone: a key bound to nothing must
-            // not clear the one message saying why nothing happened.
+            // Unbound keys leave the notice alone. It may be saying why the last key
+            // did nothing.
             _ => {}
         }
     }
 
     /// Move the Bluetooth scan onto the selected node, or off it.
     ///
-    /// While the engine remembers the Bluetooth node, the choice is also written
-    /// to `wartui.toml`, so a restart hands the scan back to the same node.
-    pub(super) fn toggle_ble(&mut self, snapshot: &Snapshot, commands: &mpsc::Sender<Command>) {
+    /// While the engine remembers the Bluetooth node, the choice is also saved to
+    /// `wartui.toml`, so a restart gives the scan back to the same node.
+    fn toggle_ble(&mut self, snapshot: &Snapshot, commands: &mpsc::Sender<Command>) {
         let Some(node) = snapshot.nodes.get(self.selected) else { return };
         let target = node.state.mac;
         let holds = snapshot.ble_node == Some(target);
-        // Same rule as an assignment: the flag travels in the admin frame, and
-        // only a heartbeat opens the window it needs.
+        // Same rule as an assignment. The flag travels in the admin frame, and only a
+        // heartbeat opens its window.
         if !holds && let Some(why) = why_not_assignable(node) {
-            self.say(format!("{} {why}", mac(&target)), snapshot);
+            self.say(format!("{} {why}", full_mac(&target)), snapshot);
             return;
         }
         let assigned = if holds { None } else { Some(target) };
         let mut said = match commands.try_send(Command::AssignBle { mac: assigned }) {
-            Ok(()) if holds => format!("{}: bluetooth off on its next heartbeat", mac(&target)),
-            Ok(()) => format!("{}: bluetooth on its next heartbeat", mac(&target)),
+            Ok(()) if holds => {
+                format!("{}: bluetooth off on its next heartbeat", full_mac(&target))
+            }
+            Ok(()) => format!("{}: bluetooth on its next heartbeat", full_mac(&target)),
             Err(_) => {
-                self.say("the engine is not accepting commands".to_owned(), snapshot);
+                self.say(ENGINE_BUSY.to_owned(), snapshot);
                 return;
             }
         };
@@ -100,16 +107,16 @@ impl Ui {
         self.say(said, snapshot);
     }
 
-    /// Write the Bluetooth node `b` just chose to `wartui.toml`, changing nothing
-    /// outside `[bluetooth]`, and say what became of it in the style of
-    /// [`Self::save_outcome`].
-    pub(super) fn remember_outcome(&mut self, node: Option<Mac>) -> String {
+    /// Save the Bluetooth node `b` just chose to `wartui.toml`, and return the notice
+    /// suffix in the style of [`Self::save_outcome`]. Nothing outside `[bluetooth]`
+    /// changes.
+    fn remember_outcome(&mut self, node: Option<Mac>) -> String {
         let Some(path) = self.settings.config_path.clone() else {
             return "; nowhere to save it — use --config".to_owned();
         };
-        // `b` saves only while the engine remembers, so `remember` is written as
-        // on beside the node: a `saved` left at off by a failed save would
-        // otherwise pair the two into a file `load` refuses.
+        // Force `remember = true`. `b` saves only while the engine remembers, but
+        // after a failed save `saved` may still say off, and `load` rejects off
+        // beside a node.
         let mut written = self.settings.saved.clone();
         written.bluetooth = config::Bluetooth { remember: Some(true), node };
         match config::save(&path, &written) {
@@ -123,28 +130,26 @@ impl Ui {
     }
 
     /// Clear the selected node's dedup ring on its next heartbeat.
-    pub(super) fn clear_ring(&mut self, snapshot: &Snapshot, commands: &mpsc::Sender<Command>) {
+    fn clear_ring(&mut self, snapshot: &Snapshot, commands: &mpsc::Sender<Command>) {
         let Some(node) = snapshot.nodes.get(self.selected) else { return };
         let target = node.state.mac;
-        // Same refusal `toggle_ble` makes: the frame travels in the admin window,
-        // and only a heartbeat opens one.
+        // Same refusal as `toggle_ble`. The frame travels in the admin window, and
+        // only a heartbeat opens one.
         if let Some(why) = why_not_assignable(node) {
-            self.say(format!("{} {why}", mac(&target)), snapshot);
+            self.say(format!("{} {why}", full_mac(&target)), snapshot);
             return;
         }
         let said = match commands.try_send(Command::ClearRing { mac: Some(target) }) {
-            Ok(()) => format!("{}: clearing its dedup ring on its next heartbeat", mac(&target)),
-            Err(_) => "the engine is not accepting commands".to_owned(),
+            Ok(()) => {
+                format!("{}: clearing its dedup ring on its next heartbeat", full_mac(&target))
+            }
+            Err(_) => ENGINE_BUSY.to_owned(),
         };
         self.say(said, snapshot);
     }
 
     /// Clear every assignable node's dedup ring, each on its own next heartbeat.
-    pub(super) fn clear_fleet_ring(
-        &mut self,
-        snapshot: &Snapshot,
-        commands: &mpsc::Sender<Command>,
-    ) {
+    fn clear_fleet_ring(&mut self, snapshot: &Snapshot, commands: &mpsc::Sender<Command>) {
         if snapshot.assignable == 0 {
             self.say("no node is heartbeating, so there is no ring to clear".to_owned(), snapshot);
             return;
@@ -154,7 +159,7 @@ impl Ui {
                 "clearing the dedup ring on {} nodes, each on its next heartbeat",
                 snapshot.assignable
             ),
-            Err(_) => "the engine is not accepting commands".to_owned(),
+            Err(_) => ENGINE_BUSY.to_owned(),
         };
         self.say(said, snapshot);
     }
@@ -166,19 +171,19 @@ impl Ui {
         }
     }
 
-    /// A key while the upload's confirm is open: only `y` sends.
+    /// A key while the upload's confirm is open. Only `y` sends.
     pub(super) fn on_confirm_key(&mut self, key: KeyEvent, snapshot: &Snapshot) {
         if let Some(text) = self.upload.on_confirm_key(key, &self.settings.upload) {
             self.say(text, snapshot);
         }
     }
 
+    /// Show `text` as the notice.
     pub(super) fn say(&mut self, text: String, snapshot: &Snapshot) {
         self.notice = Some((text, snapshot.now_ms));
     }
 
-    /// The notice, while it is still recent enough to be about what the
-    /// operator just did.
+    /// The notice, while it is recent enough to be about the last keypress.
     pub(super) fn notice(&self, now_ms: i64) -> Option<&str> {
         self.notice
             .as_ref()
@@ -199,15 +204,14 @@ mod tests {
 
     #[test]
     fn ui_displays_specific_refusal_notice_when_toggling_ble_on_unassignable_node() {
-        // Three faults all end in a refused `b` and the operator's next move
-        // differs for each, so one wording for all three misdirects two.
+        // Three faults refuse `b`, and each needs a different fix, so each gets its
+        // own wording.
         let mut snapshot = busy();
         snapshot.nodes.push(unannounced(0x21));
         snapshot.nodes.push(stale_node(0x22));
         snapshot.nodes.push(refused(0x23));
         snapshot.nodes.sort_by_key(|n| n.state.mac);
-        // `expect`, not a skip: written as a `continue` the fourth reason went
-        // silently unasserted, which is how it came to be missing.
+        // `expect`, not `continue`, so every reason is asserted.
         let row = |mac_suffix: u8| {
             snapshot
                 .nodes
@@ -232,9 +236,9 @@ mod tests {
 
     #[test]
     fn ui_displays_next_heartbeat_notice_when_assigning_ble_to_surplus_node() {
-        // A node the planner dealt nothing is still in the plan, so giving it the scan
-        // deals it the empty share the flag travels in and it hears on its next
-        // heartbeat like any other.
+        // A node the planner dealt nothing is still in the plan. Giving it the scan
+        // deals it an empty share to carry the flag, which it hears on its next
+        // heartbeat.
         let mut snapshot = busy();
         snapshot.plan = plan_for(ChannelPool::Us, &[Job::Wifi(Radio::TwoPointFour); 12]);
         let surplus = snapshot
@@ -260,8 +264,8 @@ mod tests {
         ui.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE), &snapshot, &tx);
         assert_eq!(rx.try_recv().expect("a command"), Command::AssignBle { mac: Some(node) });
 
-        // And pressing it on the node that already holds it is how it comes off
-        // the fleet, which is the only route back to nobody scanning.
+        // Pressed on the node holding the scan, it takes the scan off the fleet. This
+        // is the only way back to no node scanning.
         let mut holding = busy();
         holding.ble_node = Some(node);
         ui.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE), &holding, &tx);
@@ -289,7 +293,7 @@ mod tests {
         let snapshot = busy();
         let (tx, mut rx) = mpsc::channel(4);
         let mut ui = Ui::default();
-        // Crossterm sends shift+r as `'R'`, not `'r'` with a shift modifier.
+        // crossterm sends shift+r as `'R'`, not `'r'` with a shift modifier.
         ui.on_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT), &snapshot, &tx);
         assert_eq!(rx.try_recv().expect("a command"), Command::ClearRing { mac: None });
         let notice = ui.notice(snapshot.now_ms).expect("a notice");
@@ -337,8 +341,7 @@ mod tests {
         }
         assert_eq!(ui.selected, snapshot.nodes.len() - 1);
 
-        // A node ageing out of the table must not leave the cursor pointing
-        // past the end of it.
+        // A node ageing out of the table must not leave the cursor past its end.
         ui.clamp(1);
         assert_eq!(ui.selected, 0);
     }
@@ -347,7 +350,7 @@ mod tests {
     fn ui_saves_preferred_node_when_b_pressed_with_remember_on() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wartui.toml");
-        // A pool already in the file, which `b` saves around rather than over.
+        // A pool already in the file. `b` saves around it, not over it.
         let saved = config::Config { pool: Some(PoolArg::Us), ..config::Config::default() };
         config::save(&target, &saved).unwrap();
         let snapshot = busy();

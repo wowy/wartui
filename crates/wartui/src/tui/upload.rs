@@ -1,20 +1,21 @@
 //! Uploading from the fleet view: `u`.
 //!
-//! The steps are `wartui upload`'s own — [`prepare`], [`send`], [`wait`], [`finish`] — so the
-//! view sends what the command would and records it the same way. Each runs on its own
-//! thread: building the body takes seconds on a long capture and sending it takes as long as
-//! the uplink does, and the view has to keep drawing the capture meanwhile. The threads report
-//! over a channel the view drains before each frame, and the view redraws on every snapshot,
-//! so a report shows within a quarter of a second.
+//! The steps are `wartui upload`'s own: [`prepare`], [`send`], [`wait`], [`finish`]. The
+//! view sends what the command would and records it the same way.
 //!
-//! Nothing here reaches the engine. An upload is between the capture file and the site; the
-//! store's WAL gives the read its snapshot, as it does for `export` against a running capture.
+//! Each step runs on its own thread, so the view keeps drawing. Building the body takes
+//! seconds on a long capture, and sending takes as long as the uplink. The threads report
+//! over a channel the view drains before each frame, so a report shows within a quarter of a
+//! second.
 //!
-//! The key is read when `u` is pressed rather than at startup, so a key pasted in settings
-//! works without a restart. Nothing is sent without the operator pressing `y` on what will go.
+//! Nothing here reaches the engine. An upload is between the capture file and the site. The
+//! store's WAL gives the read its snapshot, as it does for `export` on a running capture.
 //!
-//! Quitting needs no handling. A send still in flight is abandoned, and the site has queued
-//! nothing; a job the site queued is already recorded in the capture.
+//! The key is read when `u` is pressed, not at startup, so a key pasted in settings works
+//! without a restart. Nothing is sent until the operator presses `y` on what will go.
+//!
+//! Quitting needs no handling. A send still in flight is abandoned with nothing queued at
+//! the site, and a job the site queued is already recorded in the capture.
 
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
@@ -57,7 +58,7 @@ enum Stage {
     Idle,
     Preparing(Receiver<Result<Prepare>>),
     Confirming(Box<Prepared>),
-    /// Each line the thread sends replaces the status; it hangs up when done.
+    /// Each line the thread sends replaces the status. It hangs up when done.
     Sending(Receiver<String>),
 }
 
@@ -239,7 +240,7 @@ fn done_line(job: u64, result: &Map<String, Value>) -> String {
     format!("upload: job {job} {}", counts.join("  "))
 }
 
-/// The upload's confirm, centred the way settings is, sized to what it says.
+/// The upload's confirm, centred like settings and sized to its text.
 pub(super) fn draw_confirm_modal(frame: &mut Frame<'_>, lines: &[String]) {
     let widest = lines.iter().map(|line| line.chars().count()).max().unwrap_or(0);
     let width = u16::try_from(widest + 4).unwrap_or(u16::MAX);
@@ -289,8 +290,8 @@ mod tests {
         )
     }
 
-    /// Drain the upload threads, as each frame does, until `done` holds or ten seconds
-    /// pass (twenty when `wait`'s first poll is in the way).
+    /// Drain the upload threads, as each frame does, until `done` holds. Fails after
+    /// `secs` seconds.
     fn poll_until(ui: &mut Ui, snapshot: &Snapshot, secs: u64, done: impl Fn(&Ui) -> bool) {
         let deadline = Instant::now() + Duration::from_secs(secs);
         while !done(ui) {

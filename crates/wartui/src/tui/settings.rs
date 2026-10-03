@@ -1,3 +1,9 @@
+//! The settings modal (`c`): its rows, its keys, and saving it to `wartui.toml`.
+//!
+//! The modal shows what is in force, not what the file holds. `Enter` puts every row
+//! in force, then writes every row to the file.
+
+use std::fmt::Display;
 use std::path::PathBuf;
 
 use ratatui::Frame;
@@ -12,35 +18,32 @@ use wartui_proto::plan::ChannelPool;
 
 use super::UploadTarget;
 use super::centered_rect;
-use super::ui::Ui;
+use super::ui::{ENGINE_BUSY, Ui};
 use crate::config;
 use crate::run::PoolArg;
 
-/// What saving settings needs beyond what a [`Snapshot`] carries.
+/// What saving settings needs that a [`Snapshot`] lacks.
 ///
-/// Resolved once, in `main`, and carried into the view rather than re-derived
-/// from a snapshot: where to save is a fact about how this process was
-/// started, and what the file holds is not always what is running: a save
-/// that failed leaves the two apart.
+/// `run` builds it once at startup. The snapshot cannot supply it: the config path
+/// depends on how the process started, and a failed save leaves the file out of step
+/// with what is running.
 #[derive(Debug, Clone, Default)]
 pub struct Settings {
-    /// Where `wartui.toml` would be written, or `None` when there is nowhere
-    /// to save it — no default location found and no `--config` given.
+    /// Where `wartui.toml` is written. `None` when there is no default location and no
+    /// `--config`.
     pub config_path: Option<PathBuf>,
-    /// What the file holds as far as this view knows: loaded at startup, then
-    /// replaced by each successful save. `b` saves from this, changing only the
-    /// Bluetooth node, so it never writes the running pool or powers over what
-    /// the file holds.
+    /// The file as last loaded or saved. `b` rewrites only the Bluetooth node from this
+    /// copy, so it never puts the running pool or powers into the file.
     pub saved: config::Config,
-    /// Whether `run` remembers the bridge: the handle the transport also holds,
-    /// so the modal's switch reaches the next reconnect.
+    /// Whether `run` remembers the bridge. Shared with the transport, so the
+    /// remember-bridge switch takes effect on the next reconnect.
     pub bridge_memory: BridgeMemory,
     /// Where `u` uploads to.
     pub upload: UploadTarget,
 }
 
-/// One row the settings modal can move between. A new setting adds a variant
-/// here and a row in [`draw_settings_modal`].
+/// One row of the settings modal. A new setting adds a variant here and a row in
+/// [`draw_settings_modal`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Field {
     Pool,
@@ -51,7 +54,7 @@ enum Field {
     WdgwarsKey,
 }
 
-/// Every row of the settings modal, top to bottom, as `next`/`prev` walk them.
+/// Every row of the settings modal, top to bottom, in the order `next` and `prev` walk.
 const FIELDS: [Field; 6] = [
     Field::Pool,
     Field::Fleet,
@@ -62,30 +65,28 @@ const FIELDS: [Field; 6] = [
 ];
 
 impl Field {
-    /// The row below this one, clamped: the last row stays put rather than
-    /// wrapping to the first.
+    /// The row below. The last row stays put rather than wrapping.
     fn next(self) -> Self {
         let index = FIELDS.iter().position(|&field| field == self).unwrap_or(0);
         FIELDS[(index + 1).min(FIELDS.len() - 1)]
     }
 
-    /// The row above this one, clamped: the first row stays put rather than
-    /// wrapping to the last.
+    /// The row above. The first row stays put rather than wrapping.
     fn prev(self) -> Self {
         let index = FIELDS.iter().position(|&field| field == self).unwrap_or(0);
         FIELDS[index.saturating_sub(1)]
     }
 }
 
-/// The settings modal's own state while it is open, seeded from the snapshot
-/// that was current when it opened and edited independently of it from then on.
+/// The settings modal's state while open. Seeded from the snapshot at opening, then
+/// edited independently of it.
 #[derive(Debug, Clone)]
 pub(super) struct ConfigModal {
     selected: Field,
-    /// Whole dBm, the units the operator sees and `config::TX_POWER_DBM` bounds.
+    /// Whole dBm, the unit the operator sees and `config::TX_POWER_DBM` bounds.
     fleet_dbm: i8,
-    /// Whole dBm, the bridge's effective power — always a number, since the
-    /// bridge row shows what is in force rather than whether anything holds it.
+    /// Whole dBm, the bridge's effective power. Always a number: the row shows what is
+    /// in force, not whether anything set it.
     bridge_dbm: i8,
     /// The pool row's current value, edited by `step`.
     pool: PoolArg,
@@ -93,15 +94,15 @@ pub(super) struct ConfigModal {
     remember_ble: bool,
     /// Whether `run` remembers the bridge it connected to.
     remember_bridge: bool,
-    /// The WDGWars API key, typed or pasted; empty means not set.
+    /// The WDGWars API key, typed or pasted. Empty means not set.
     wdgwars_key: String,
 }
 
 /// `All → Eu → Us`, the order the pool row steps through.
 const POOL_STEPS: [PoolArg; 3] = [PoolArg::All, PoolArg::Eu, PoolArg::Us];
 
-/// Step `current` by one position in [`POOL_STEPS`], wrapping past either end:
-/// the same rule [`ConfigModal::step`] uses for the tx-power rows.
+/// Step `current` one place through [`POOL_STEPS`], wrapping past either end like the
+/// tx-power rows in [`ConfigModal::step`].
 fn step_pool(current: PoolArg, delta: i8) -> PoolArg {
     let len = POOL_STEPS.len();
     let index = POOL_STEPS.iter().position(|&pool| pool == current).unwrap_or(0);
@@ -114,9 +115,14 @@ fn step_pool(current: PoolArg, delta: i8) -> PoolArg {
 }
 
 impl ConfigModal {
-    /// Step the selected row by one: a tx-power row moves by one dBm within the
-    /// range the file and the flags share; the pool row moves through
-    /// [`POOL_STEPS`]; a remember row flips. All wrap past their ends.
+    /// Step the selected row by one. Every row wraps past its ends.
+    ///
+    /// | Row | Step |
+    /// |---|---|
+    /// | tx power | 1 dBm, within `config::TX_POWER_DBM` |
+    /// | pool | one place in [`POOL_STEPS`] |
+    /// | remember | flips |
+    /// | key | none; `on_modal_key` types into it |
     fn step(&mut self, delta: i8) {
         let value = match self.selected {
             Field::Fleet => &mut self.fleet_dbm,
@@ -137,10 +143,10 @@ impl ConfigModal {
                 }
                 return;
             }
-            // A text row: `on_modal_key` types into it rather than stepping.
+            // A text row. `on_modal_key` types into it.
             Field::WdgwarsKey => return,
         };
-        // In i16, so stepping past either end of the i8 range cannot overflow.
+        // In i16, so stepping past either end of i8 cannot overflow.
         let start = i16::from(*config::TX_POWER_DBM.start());
         let len = i16::from(*config::TX_POWER_DBM.end()) - start + 1;
         let stepped = start + (i16::from(*value) + i16::from(delta) - start).rem_euclid(len);
@@ -149,11 +155,7 @@ impl ConfigModal {
 }
 
 impl Ui {
-    /// Open the settings modal, seeded from the snapshot's current powers.
-    ///
-    /// Unreachable while a modal is already open: `view`'s main loop routes
-    /// every key to [`Self::on_modal_key`] instead, once `self.modal` is
-    /// `Some`, so `c` pressed again is simply not bound there.
+    /// Open the settings modal, seeded from what is in force.
     pub(super) fn open_modal(&mut self, snapshot: &Snapshot) {
         self.notice = None;
         let fleet_dbm = snapshot.tx_power / 4;
@@ -164,15 +166,15 @@ impl Ui {
             bridge_dbm,
             pool: snapshot.pool.into(),
             remember_ble: snapshot.remember_ble,
-            // The engine knows nothing of this one, so it comes from the handle.
+            // The engine does not hold this one, so it comes from the handle.
             remember_bridge: self.settings.bridge_memory.is_enabled(),
-            // Nor this one: it is whatever the file holds, hand edits included.
+            // Nor this one. It is what the file holds, hand edits included.
             wdgwars_key: self.settings.saved.api_keys.wdgwars.clone(),
         });
     }
 
-    /// Keys while the settings modal is open. Nothing here reaches [`Self::on_key`]:
-    /// `view`'s main loop chooses between them before either runs.
+    /// A key while the settings modal is open. `view` routes each key to this or to
+    /// [`Self::on_key`], never both.
     pub(super) fn on_modal_key(
         &mut self,
         key: KeyEvent,
@@ -180,7 +182,7 @@ impl Ui {
         commands: &mpsc::Sender<Command>,
     ) {
         let Some(modal) = self.modal.as_mut() else { return };
-        // The key row is a text field: letters type rather than move or close.
+        // The key row is a text field. Letters type there rather than move or close.
         if modal.selected == Field::WdgwarsKey {
             let control = key.modifiers.contains(KeyModifiers::CONTROL);
             match key.code {
@@ -207,15 +209,14 @@ impl Ui {
             KeyCode::Right | KeyCode::Char('l') => modal.step(1),
             KeyCode::Esc | KeyCode::Char('q') => self.modal = None,
             KeyCode::Enter => self.apply(snapshot, commands),
-            // Same rule as `on_key`: a key bound to nothing leaves the notice
-            // alone.
+            // As in `on_key`, unbound keys leave the notice alone.
             _ => {}
         }
     }
 
-    /// A bracketed paste: appended to the key when the modal is open on its row, and
-    /// ignored anywhere else. Whitespace and control characters are dropped, so a
-    /// copied line's trailing newline or a wrapped key's breaks never reach the file.
+    /// A bracketed paste. Appended to the key when the modal is on its row, ignored
+    /// anywhere else. Whitespace and control characters are dropped, so a trailing
+    /// newline or a wrapped key's line breaks never reach the file.
     pub(super) fn on_modal_paste(&mut self, text: &str) {
         let Some(modal) = self.modal.as_mut() else { return };
         if modal.selected != Field::WdgwarsKey {
@@ -224,14 +225,14 @@ impl Ui {
         modal.wdgwars_key.extend(text.chars().filter(|c| !c.is_whitespace() && !c.is_control()));
     }
 
-    /// Send the modal's values to the engine, write them to `wartui.toml`,
-    /// and close it.
+    /// Send the modal's values to the engine, save them to `wartui.toml`, and close
+    /// the modal.
     fn apply(&mut self, snapshot: &Snapshot, commands: &mpsc::Sender<Command>) {
         let Some(modal) = self.modal.take() else { return };
-        // Every slot is reserved before any command goes out, so a queue with room
-        // for fewer cannot apply part of the modal while the notice says nothing was.
+        // Reserve all three slots first, so a full queue applies none of the modal
+        // rather than part of it.
         let Ok(mut permits) = commands.try_reserve_many(3) else {
-            self.say("the engine is not accepting commands".to_owned(), snapshot);
+            self.say(ENGINE_BUSY.to_owned(), snapshot);
             return;
         };
         let pool = ChannelPool::from(modal.pool);
@@ -244,8 +245,8 @@ impl Ui {
                 permit.send(command);
             }
         }
-        // Same rule as `toggle_ble`: the power and the re-cut share arrive as an
-        // assignment, so a fleet with no plan has nothing for them to arrive in yet.
+        // Same rule as `toggle_ble`. Power and pool reach a node in an assignment,
+        // and a fleet with no plan has none to send.
         let planned = snapshot.plan.is_some();
         let when = if planned { "on their next heartbeat" } else { "once the fleet is in a plan" };
         let mut text = format!(
@@ -267,8 +268,7 @@ impl Ui {
         if modal.remember_bridge != memory.is_enabled() {
             memory.set_enabled(modal.remember_bridge);
             if modal.remember_bridge {
-                // Turning it on remembers the bridge connected now, rather than
-                // waiting for a reconnect that may never come.
+                // Remember the bridge connected now. A reconnect may never come.
                 if let Some(bridge) = &snapshot.bridge {
                     memory.remember(bridge.mac);
                 }
@@ -281,18 +281,16 @@ impl Ui {
         self.say(text, snapshot);
     }
 
-    /// What to append to the notice once `Enter` is pressed: where the save
-    /// landed, or why it did not happen.
+    /// Write every modal row to `wartui.toml`, and return the notice suffix: where it
+    /// saved, or why it did not.
     ///
-    /// The modal shows what is in force, and this writes every row of it to
-    /// `wartui.toml`, replacing whatever the file held — a hand edit made
-    /// while the modal was open included. Every row is already applied by the
-    /// time this runs, so a save that does not happen costs only the file.
+    /// Overwrites the whole file, hand edits included. The rows are already applied,
+    /// so a failed save loses only the file.
     ///
-    /// The Bluetooth node saved is the one remembered, falling back on the one
-    /// holding the scan, which is what the engine remembers when the row turns
-    /// on; a node remembered from the file and not yet heard from survives.
-    /// A successful save becomes [`Settings::saved`].
+    /// With remember on, the node saved is the remembered one, else the current holder
+    /// of the scan. The engine makes the same choice when the row turns on, and it
+    /// keeps a remembered node that has not been heard from yet. On success the written
+    /// config becomes [`Settings::saved`].
     fn save_outcome(&mut self, modal: ConfigModal, snapshot: &Snapshot) -> String {
         let Some(path) = self.settings.config_path.clone() else {
             return "; nowhere to save it — use --config".to_owned();
@@ -333,39 +331,29 @@ pub(super) fn draw_settings_modal(frame: &mut Frame<'_>, modal: &ConfigModal) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let styled = |selected: bool| {
-        if selected { Style::new().add_modifier(Modifier::REVERSED) } else { Style::new() }
+    let styled = |field: Field| {
+        if modal.selected == field {
+            Style::new().add_modifier(Modifier::REVERSED)
+        } else {
+            Style::new()
+        }
     };
-    let row = |label: &str, dbm: i8, selected: bool| {
-        Line::from(Span::styled(format!("{label:<18}◂ {dbm:>2} dBm ▸"), styled(selected)))
+    let row = |label: &str, value: &dyn Display, field: Field| {
+        Line::from(Span::styled(format!("{label:<18}◂ {value} ▸"), styled(field)))
     };
-    let pool_row = Line::from(Span::styled(
-        format!("{:<18}◂ {} ▸", "pool", ChannelPool::from(modal.pool)),
-        styled(modal.selected == Field::Pool),
-    ));
-    let remember_row = Line::from(Span::styled(
-        format!("{:<18}◂ {} ▸", "remember bt node", if modal.remember_ble { "on" } else { "off" }),
-        styled(modal.selected == Field::RememberBle),
-    ));
-    let remember_bridge_row = Line::from(Span::styled(
-        format!(
-            "{:<18}◂ {} ▸",
-            "remember bridge",
-            if modal.remember_bridge { "on" } else { "off" }
-        ),
-        styled(modal.selected == Field::RememberBridge),
-    ));
+    let dbm = |dbm: i8| format!("{dbm:>2} dBm");
+    let on_off = |on: bool| if on { "on" } else { "off" };
     let lines = vec![
-        pool_row,
-        row("fleet tx power", modal.fleet_dbm, modal.selected == Field::Fleet),
-        row("bridge tx power", modal.bridge_dbm, modal.selected == Field::Bridge),
-        remember_row,
-        remember_bridge_row,
+        row("pool", &ChannelPool::from(modal.pool), Field::Pool),
+        row("fleet tx power", &dbm(modal.fleet_dbm), Field::Fleet),
+        row("bridge tx power", &dbm(modal.bridge_dbm), Field::Bridge),
+        row("remember bt node", &on_off(modal.remember_ble), Field::RememberBle),
+        row("remember bridge", &on_off(modal.remember_bridge), Field::RememberBridge),
         Line::default(),
         Line::from("api keys"),
         Line::from(Span::styled(
             format!("{:<18}  {}", "wdgwars", mask_key(&modal.wdgwars_key)),
-            styled(modal.selected == Field::WdgwarsKey),
+            styled(Field::WdgwarsKey),
         )),
         Line::default(),
         // The one key the row needs that nothing else on screen says.
@@ -378,11 +366,18 @@ pub(super) fn draw_settings_modal(frame: &mut Frame<'_>, modal: &ConfigModal) {
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-/// A key as the modal shows it, so a screen share or a photo of the laptop does not
-/// leak it. The last three characters always show, so the operator sees what they just
-/// typed. Up to six bullets cover the rest, and from ten characters the first one to
-/// three show too, so a long key reads as which key it is while its middle and its
-/// length stay hidden. A key of three characters or fewer shows whole.
+/// A key as the modal shows it, so a screen share or a photo does not leak it.
+///
+/// | Length | Shown |
+/// |---|---|
+/// | 0 | `(not set, type or paste)` |
+/// | 1–3 | the whole key |
+/// | 4–9 | `•` × (length − 3), then the last 3 |
+/// | 10+ | the first 1–3, `•` × 6, then the last 3 |
+///
+/// The last three show so the operator sees what they typed. On a long key the first
+/// few show too, so it reads as which key it is, while its middle and length stay
+/// hidden.
 fn mask_key(key: &str) -> String {
     let chars: Vec<char> = key.chars().collect();
     let n = chars.len();
@@ -546,8 +541,8 @@ mod tests {
 
     #[test]
     fn ui_says_nodes_take_it_once_fleet_is_in_a_plan_when_no_plan_exists() {
-        // Same rule as `toggle_ble`: the power arrives as an assignment, so it
-        // has nowhere to arrive until the fleet is in a plan.
+        // Same rule as `toggle_ble`. The power arrives in an assignment, so it waits
+        // for a plan.
         let snapshot = busy(); // `busy()`'s plan is `None`.
         let (tx, _rx) = mpsc::channel(4);
         let mut ui = Ui::default();
@@ -608,7 +603,7 @@ mod tests {
         snapshot.pool = ChannelPool::Eu;
         snapshot.tx_power = 40; // 10 dBm
         snapshot.bridge_tx_power = 60; // 15 dBm
-        // Holding the scan and not yet remembered, so the save falls back on the holder.
+        // Holds the scan but is not remembered, so the save falls back on the holder.
         snapshot.ble_node = Some(snapshot.nodes[0].state.mac);
         let (tx, mut rx) = mpsc::channel(4);
         let mut ui = Ui {
@@ -645,7 +640,7 @@ mod tests {
 
         ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
 
-        // Room for one of the modal's three commands: none goes out.
+        // Room for one of the modal's three commands, so none goes out.
         assert_eq!(rx.try_recv().unwrap(), Command::ClearRing { mac: None });
         assert!(rx.try_recv().is_err(), "nothing else was sent");
         assert!(!target.exists(), "nothing was written");
@@ -727,9 +722,8 @@ mod tests {
 
     #[test]
     fn ui_overwrites_hand_edit_made_mid_run_when_enter_pressed() {
-        // Enter saves what the modal shows, not what the file holds: a hand
-        // edit made while the modal is open is overwritten just the same as
-        // whatever was there when it opened.
+        // Enter saves what the modal shows, not what the file holds. A hand edit made
+        // while the modal is open is overwritten like anything else.
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wartui.toml");
         std::fs::write(&target, "pool = \"us\"\n[tx-power]\nfleet = 5\nbridge = 6\n").unwrap();
@@ -786,7 +780,7 @@ mod tests {
             ..Ui::default()
         };
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
-        // Only the fleet row moves; the pool row is left alone.
+        // Only the fleet row moves. The pool row is left alone.
         ui.on_modal_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &snapshot, &tx);
         ui.on_modal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &snapshot, &tx);
 
@@ -955,7 +949,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("bridge");
         let memory = BridgeMemory::at(&file);
-        // A board other than the one connected: an unchanged row must not rewrite it.
+        // A board other than the one connected. An unchanged row must not rewrite it.
         let other = [0x10, 0xBD, 0xA3, 0xEC, 0x44, 0xC0];
         memory.remember(other);
         let snapshot = busy();

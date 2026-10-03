@@ -1,3 +1,17 @@
+//! The fleet table: one row per node heard.
+//!
+//! The channels column shows how far each node's assignment has got:
+//!
+//! | State | Wi-Fi share | Bluetooth node |
+//! |---|---|---|
+//! | pending: sent, not acked | yellow, the desired set then `…` | yellow `bluetooth…` |
+//! | acked, not adopted | blue, the confirmed set then `…` | blue `bluetooth…` |
+//! | adopted | plain, the confirmed set | cyan `bluetooth` |
+//! | nothing confirmed | grey `unassigned` | grey `unassigned` |
+//!
+//! A MAC-layer ack is not adoption. Only the node's heartbeat, carrying the epoch it
+//! holds, shows it took the frame (`NodeState::adopted`).
+
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -10,9 +24,10 @@ use wartui_proto::plan::{ChannelSet, Radio, SCAN_CHANNELS};
 use super::format::{ago, short_mac};
 use super::ui::Ui;
 
+/// Draw the fleet table into `area`, keeping the cursor row in view.
 pub(super) fn draw_fleet(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot, ui: &mut Ui) {
-    // The `lost` column is drawn only once some node has lost a batch, the
-    // footer's `lost N` rule: a column of zeros is width spent saying nothing.
+    // The `lost` column appears once a node has lost a batch, like the footer's
+    // `lost N`. A column of zeros wastes width.
     let show_lost = snapshot.nodes.iter().any(|n| n.state.batches_lost > 0);
     let lost_at = 4;
 
@@ -68,21 +83,14 @@ pub(super) fn draw_fleet(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot,
     ui.fleet_offset = state.offset();
 }
 
-/// How wide the channels column is, and therefore how much of the list fits.
+/// The channels column's width, which caps how much of the list fits.
 const CHANNELS_WIDTH: u16 = 18;
 
-/// What the node is scanning, and whether that is known, acknowledged, or
-/// adopted.
+/// The channels cell: what the node scans, coloured by how far the assignment has
+/// got. The module docs list the states.
 ///
-/// Three states: pending (`dirty`, yellow `…`) is a share sent but not yet
-/// acknowledged; acked-not-adopted (`!dirty`, confirmed, but the node's own
-/// heartbeat has not yet said it holds it) is the confirmed set with a blue
-/// `…`, since a MAC-layer ack is not proof the frame was actually taken —
-/// [`NodeState::adopted`] is; adopted is the confirmed set plain.
-///
-/// An empty set is the Bluetooth node's and says so in words. The count-and-list
-/// form would render it `0: none`, which reads as a fault rather than as the job it
-/// is; a value of a different kind belongs in a different shape.
+/// An empty set is the Bluetooth node's, and says so in words. As a count and list it
+/// would read `0: none`, which looks like a fault rather than a job.
 fn channels_cell(node: &NodeView) -> Span<'static> {
     let state = &node.state;
     if state.dirty
@@ -91,18 +99,7 @@ fn channels_cell(node: &NodeView) -> Span<'static> {
         if desired.channels.is_empty() {
             return Span::styled("bluetooth…", Style::new().fg(Color::Yellow));
         }
-        // One character of the column is spent on the ellipsis, which is the
-        // pending marker as well as the truncation marker — they cannot be
-        // confused, because a pending cell is the yellow one. A cut-short list
-        // ends in one already and it does both jobs at once; appending a second
-        // would be the ordinary rendering rather than the rare one, because a
-        // round-robin share is scattered enough to overflow the column nearly
-        // always.
-        let mut cell = channel_cell(desired.channels, usize::from(CHANNELS_WIDTH) - 1);
-        if !cell.ends_with('…') {
-            cell.push('…');
-        }
-        return Span::styled(cell, Style::new().fg(Color::Yellow));
+        return Span::styled(waiting_cell(desired.channels), Style::new().fg(Color::Yellow));
     }
     state.confirmed.map_or_else(
         || Span::styled("unassigned", Style::new().fg(Color::DarkGray)),
@@ -118,22 +115,29 @@ fn channels_cell(node: &NodeView) -> Span<'static> {
             if adopted {
                 Span::raw(channel_cell(confirmed.channels, usize::from(CHANNELS_WIDTH)))
             } else {
-                let mut cell = channel_cell(confirmed.channels, usize::from(CHANNELS_WIDTH) - 1);
-                if !cell.ends_with('…') {
-                    cell.push('…');
-                }
-                Span::styled(cell, Style::new().fg(Color::Blue))
+                Span::styled(waiting_cell(confirmed.channels), Style::new().fg(Color::Blue))
             }
         },
     )
 }
 
-/// Whole batches missing between this node and the host, or `—` before its
-/// first one has arrived — which is not the same thing as zero: a node that
-/// has never sent a batch has nothing to have lost yet.
+/// A set the node has not yet adopted: the channel cell with a trailing `…`.
 ///
-/// Read off `observations` rather than `last_seq`: every batch carries at least one
-/// record, and a reboot clears `last_seq` but not the losses counted before it.
+/// A truncated list already ends in `…`, so it gets no second. A round-robin share
+/// nearly always overflows the column, so a second would be the usual case.
+fn waiting_cell(set: ChannelSet) -> String {
+    let mut cell = channel_cell(set, usize::from(CHANNELS_WIDTH) - 1);
+    if !cell.ends_with('…') {
+        cell.push('…');
+    }
+    cell
+}
+
+/// Batches lost between this node and the host. Shows `—`, not 0, until the first
+/// batch arrives.
+///
+/// Tests `observations` because every batch carries a record, and a reboot clears
+/// `last_seq` but keeps the losses.
 fn lost_cell(node: &NodeView) -> String {
     if node.state.observations == 0 {
         "—".to_owned()
@@ -142,10 +146,10 @@ fn lost_cell(node: &NodeView) -> String {
     }
 }
 
-/// Which chip a node is and the last two octets of its address: `C5 57:84`.
+/// The node's chip and the last two octets of its address: `C5 57:84`.
 ///
-/// The chip is read off the band its heartbeats announce, so a node heard only
-/// through its sightings is `—` until its first heartbeat says.
+/// The chip comes from the band its heartbeats announce. A node heard only through
+/// sightings shows `—` until its first heartbeat.
 fn node_label(node: &NodeView) -> String {
     let chip = match node.state.capabilities.map(Radio::from) {
         Some(Radio::DualBand) => "C5",
@@ -157,8 +161,8 @@ fn node_label(node: &NodeView) -> String {
 
 /// Why a node cannot be given an assignment, or `None` if it can.
 ///
-/// The wording is the message the operator sees when `b` or `r` is refused, so it
-/// says what is wrong rather than naming a state.
+/// The text is the notice shown when `b` or `r` is refused, so it says what is wrong
+/// rather than naming a state.
 pub(super) fn why_not_assignable(node: &NodeView) -> Option<&'static str> {
     let state = &node.state;
     if state.capabilities.is_none() {
@@ -173,32 +177,31 @@ pub(super) fn why_not_assignable(node: &NodeView) -> Option<&'static str> {
     None
 }
 
-/// What the operator most needs to know about a node, in one column.
+/// The state column: what the operator most needs to know about a node.
 ///
-/// "stale" is the one worth explaining: observations are arriving and heartbeats
-/// are not, so the node cannot be given a range. A different fault from silence,
-/// with a different cause — most often BLE holding the antenna.
+/// `stale`: sightings arrive, heartbeats do not, usually because BLE holds the
+/// antenna. The node cannot be assigned. This differs from silence, which has other
+/// causes.
 fn node_state(node: &NodeView) -> (String, Style) {
     let state = &node.state;
     if state.last_heartbeat.is_none() {
         return ("no heartbeat".to_owned(), Style::new().fg(Color::Yellow));
     }
-    // Ahead of `stale`: a peer refusal makes a node unassignable while its
-    // heartbeats keep arriving, and the fix is on the fleet, not the node.
+    // Ahead of `stale`. A peer refusal makes a heartbeating node unassignable, and
+    // the fix is on the fleet, not the node.
     if state.peer_refused {
         return ("refused".to_owned(), Style::new().fg(Color::Red));
     }
     if !node.assignable {
         return ("stale".to_owned(), Style::new().fg(Color::Yellow));
     }
-    // The most actionable thing this column can say, and nearly always the same
-    // cause: the radio was not on the control channel in its own admin window.
+    // The most actionable state. The cause is nearly always the radio being off the
+    // control channel during its admin window.
     if matches!(state.last_outcome, Some(AdminOutcome::Unacked | AdminOutcome::Silent)) {
         return ("no admin ack".to_owned(), Style::new().fg(Color::Red));
     }
-    // The bridge would not put it on the air, and not for the peer table — that
-    // is caught above and is terminal. `NoPeer` or a rejection, which a reconnect
-    // can clear, so the node is still assignable.
+    // The bridge refused this send for a reason a reconnect clears (`NoPeer`, a
+    // rejection), so the node stays assignable. Peer-table refusal is handled above.
     if state.last_outcome == Some(AdminOutcome::Refused) {
         return ("refused".to_owned(), Style::new().fg(Color::Red));
     }
@@ -208,13 +211,10 @@ fn node_state(node: &NodeView) -> (String, Style) {
     ("alive".to_owned(), Style::new().fg(Color::Green))
 }
 
-/// A set of indices, said in channel numbers, which is what is written on the
-/// node's own web UI and on every other tool the operator owns.
+/// Format a set as channel numbers, the units every other tool uses.
 ///
-/// Consecutive indices collapse into `first-last`, so a contiguous assignment
-/// reads as `1-11`. The planner deals round-robin, so scattered is the ordinary
-/// case for a fleet of more than one — hence [`channel_cell`] leading with the
-/// count.
+/// Runs collapse to `first-last`, so a contiguous set reads `1-11`. Round-robin shares
+/// are usually scattered, so [`channel_cell`] leads with the count.
 fn channel_list(set: ChannelSet) -> String {
     let mut out = String::new();
     let mut run: Option<(u8, u8)> = None;
@@ -234,6 +234,7 @@ fn channel_list(set: ChannelSet) -> String {
     if out.is_empty() { "none".to_owned() } else { out }
 }
 
+/// Append one run to `out`: `6`, or `36-48`.
 fn push_run(out: &mut String, start: u8, end: u8) {
     use core::fmt::Write as _;
     let first = SCAN_CHANNELS.get(usize::from(start)).copied().unwrap_or(0);
@@ -245,20 +246,18 @@ fn push_run(out: &mut String, start: u8, end: u8) {
     let _ = if first == last { write!(out, "{first}") } else { write!(out, "{first}-{last}") };
 }
 
-/// The channel set as it goes in a fixed-width table cell.
+/// A channel set for a fixed-width cell: the count, then as much of the list as fits.
 ///
-/// The count comes first: it always fits. The list after it is truncated
-/// rather than wrapped, because a round-robin share is a dozen scattered
-/// channels.
+/// The count always fits. The list is truncated rather than wrapped, because a
+/// round-robin share is a dozen scattered channels.
 fn channel_cell(set: ChannelSet, width: usize) -> String {
     let head = format!("{}: ", set.len());
     let list = channel_list(set);
     if head.len() + list.len() <= width {
         return head + &list;
     }
-    // Cut at a comma rather than a character: truncating `1-11,36-165` by width
-    // alone can end `1-1`, a range that does not exist. All ASCII, so byte
-    // lengths and column widths are the same thing.
+    // Cut at a comma. Cutting `1-11,36-165` by width alone can leave `1-1`, a range
+    // that does not exist. All ASCII, so bytes and columns match.
     let budget = width.saturating_sub(head.len() + 1);
     let mut kept = String::new();
     for group in list.split(',') {
@@ -316,7 +315,7 @@ mod tests {
 
     #[test]
     fn channel_list_formats_indices_as_channel_numbers_when_given_index_runs() {
-        // Indices into SCAN_CHANNELS are an artefact of the wire format.
+        // Indices into SCAN_CHANNELS belong to the wire format, not the screen.
         assert_eq!(channel_list(ChannelSet::from_run(IndexRun::new(0, 0))), "1");
         assert_eq!(channel_list(ChannelSet::from_run(IndexRun::new(0, 10))), "1-11");
         assert_eq!(channel_list(ChannelSet::from_run(IndexRun::new(14, 38))), "36-165");
@@ -343,9 +342,8 @@ mod tests {
 
     #[test]
     fn channels_cell_emits_single_ellipsis_when_pending_channel_list_is_truncated() {
-        // The "asked for, not yet acknowledged" marker and the "more than
-        // fitted" marker are the same character, and two in a row is not a
-        // different meaning, just a worse-looking cell.
+        // The pending marker and the truncation marker are the same character. Two in
+        // a row mean nothing more.
         let mut view = pending(0x11);
         assert_eq!(channels_cell(&view).content, "25: 36-165…");
 
@@ -389,9 +387,9 @@ mod tests {
 
     #[test]
     fn channels_cell_renders_plain_when_desired_is_cleared_and_confirmed_is_held() {
-        // A node that departs the plan (`replan`'s departed loop, or
-        // `PeerTableFull`) keeps `confirmed` while `desired` clears.
-        // `adopted` has to read against what it still holds, not nothing.
+        // A node that leaves the plan (`replan`'s departed loop, or `PeerTableFull`)
+        // keeps `confirmed` while `desired` clears. `adopted` must check what it
+        // still holds.
         let mut view = assigned(0x11);
         view.state.desired = None;
         assert!(view.state.adopted(), "confirmed is still held, and its epoch still matches");
@@ -402,7 +400,7 @@ mod tests {
 
     #[test]
     fn channels_cell_displays_bluetooth_when_node_is_assigned_bluetooth_scan() {
-        // `0: none` would read as a fault rather than as the job it is.
+        // `0: none` would read as a fault rather than a job.
         let mut view = assigned(0x11);
         let assignment =
             Assignment { channels: ChannelSet::empty(), ble: true, tx_power: 8, counter: 1 };
@@ -424,8 +422,8 @@ mod tests {
 
     #[test]
     fn node_state_returns_no_heartbeat_label_when_node_is_only_heard_via_observations() {
-        // The honest case: observations have arrived and no heartbeat yet, so
-        // there has been no window to send anything through.
+        // Sightings have arrived but no heartbeat, so no window has opened to send
+        // anything through.
         let view = unannounced(0x21);
         let (label, _) = node_state(&view);
         assert_eq!(label, "no heartbeat");
@@ -439,8 +437,8 @@ mod tests {
         snapshot.tail = Vec::new();
         let mac = snapshot.nodes[0].state.mac;
 
-        // Adopted: confirmed and desired agree on the Bluetooth assignment,
-        // and the node's own heartbeat has said it holds it.
+        // Adopted: confirmed and desired agree on the Bluetooth assignment, and the
+        // node's heartbeat says it holds it.
         let existing = snapshot.nodes[0].state.confirmed.expect("assigned() sets one");
         let ble = Assignment { channels: ChannelSet::empty(), ble: true, ..existing };
         snapshot.nodes[0].state.confirmed = Some(ble);
@@ -501,9 +499,8 @@ mod tests {
         assert!(!header.contains("lost"), "{header}");
     }
 
-    /// The fleet table's header line, found by `rssi` and `beats` (the tail's
-    /// header has an `rssi` too): "lost" can appear elsewhere on screen (see
-    /// `totals_line`).
+    /// The fleet table's header line. Found by `rssi` and `beats`, since the stream's
+    /// header has an `rssi` too and "lost" can appear elsewhere on screen.
     fn fleet_header(screen: &str) -> String {
         let header = |line: &&str| line.contains("rssi") && line.contains("beats");
         screen.lines().find(header).unwrap_or_default().to_owned()
@@ -517,9 +514,8 @@ mod tests {
         snapshot.assignable = 15;
         snapshot.tail = Vec::new();
 
-        // Wide enough for the side-by-side layout, short enough that the fleet
-        // box has only a handful of data rows once its header and borders are
-        // paid for — fewer than the fifteen nodes above.
+        // Wide enough for the side-by-side layout. Short enough that the fleet box has
+        // fewer data rows than the fifteen nodes above.
         let mut terminal = Terminal::new(TestBackend::new(200, 16)).expect("test backend");
         let mut ui = Ui { selected: 14, ..Default::default() };
         terminal.draw(|frame| draw(frame, &snapshot, &mut ui)).expect("drawing");
@@ -527,9 +523,8 @@ mod tests {
         assert!(rendered.contains("57:0E"), "the selected node scrolled into view: {rendered}");
         assert!(!rendered.contains("57:00"), "the first node should have scrolled off: {rendered}");
 
-        // Moving the cursor up one row, still well inside the window, must not
-        // move the window: the offset persisted in `Ui` is what keeps scrolling
-        // minimal rather than recomputed from row 0 every frame.
+        // Moving the cursor up one row inside the window must not move the window.
+        // The offset kept in `Ui` is what stops a recompute from row 0.
         let offset_at_bottom = ui.fleet_offset;
         ui.selected -= 1;
         terminal.draw(|frame| draw(frame, &snapshot, &mut ui)).expect("drawing");

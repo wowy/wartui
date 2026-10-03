@@ -2,9 +2,9 @@
 //!
 //! See the operator's manual (`crates/wartui/README.md`) for a usage guide.
 //!
-//! Rebuilt from a [`Snapshot`] the engine publishes four times a second, never
-//! from a stream of observations: a busy fleet produces tens of rows a second in
-//! bursts, and a UI redrawing per row would back-pressure the link.
+//! Each frame is drawn from the latest [`Snapshot`], published four times a second.
+//! Drawing per observation would back-pressure the link, since a busy fleet sends tens
+//! of rows a second.
 
 mod fleet;
 mod footer;
@@ -43,9 +43,9 @@ use upload::draw_confirm_modal;
 
 /// Run the view until the operator quits or the engine stops.
 ///
-/// Takes ownership of `stop` so leaving by any route — a keypress, ctrl-c, or
-/// the engine ending on its own — shuts the capture down the same way, with the
-/// store's last batch committed.
+/// Takes ownership of `stop`, so every way out shuts the capture down the same way and
+/// commits the store's last batch. The ways out are a keypress, ctrl-c, or the engine
+/// ending on its own.
 pub async fn run(
     mut snapshot: watch::Receiver<Arc<Snapshot>>,
     commands: mpsc::Sender<Command>,
@@ -56,8 +56,8 @@ pub async fn run(
     // A paste arrives as one event rather than as keystrokes, so a pasted newline
     // cannot press `Enter`. A terminal that refuses it still types the paste in.
     let _ = execute!(std::io::stdout(), EnableBracketedPaste);
-    // ratatui's panic hook restores raw mode and the alternate screen but not this,
-    // which would leave the operator's shell wrapping every paste in escape codes.
+    // ratatui's panic hook restores raw mode and the alternate screen, but not this.
+    // Left on, the operator's shell would wrap every paste in escape codes.
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = execute!(std::io::stdout(), DisableBracketedPaste);
@@ -66,8 +66,8 @@ pub async fn run(
     let result = view(&mut terminal, &mut snapshot, &commands, settings).await;
     let _ = execute!(std::io::stdout(), DisableBracketedPaste);
     ratatui::restore();
-    // The engine is told to stop only once the terminal is back to normal, so
-    // anything it logs on the way out lands on a screen the user can read.
+    // Stop the engine only once the terminal is restored, so anything it logs on the
+    // way out lands on a readable screen.
     let _ = stop.send(());
     result
 }
@@ -78,10 +78,9 @@ async fn view(
     commands: &mpsc::Sender<Command>,
     settings: Settings,
 ) -> Result<()> {
-    let (inputs, running) = spawn_input();
-    let mut inputs = inputs;
+    let (mut inputs, running) = spawn_input();
     let mut ui = Ui { settings, ..Ui::default() };
-    // Built before the loop, not inside the arm below: see `crate::Terminate`.
+    // Built before the loop, not inside the arm below. See `crate::Terminate`.
     let mut terminate = crate::Terminate::new();
     let outcome = loop {
         let current = snapshot.borrow_and_update().clone();
@@ -95,19 +94,19 @@ async fn view(
             input = inputs.recv() => match input {
                 // ctrl-c always quits, modal or not.
                 Some(Input::Key(key)) if is_ctrl_c(key) => break Ok(()),
-                // The upload's confirm opens over anything, settings included, so it
-                // answers first.
+                // The upload's confirm opens over everything, settings included, so
+                // it answers first.
                 Some(Input::Key(key)) if ui.upload.confirming() => ui.on_confirm_key(key, &current),
-                // An open modal gets the key ahead of `quits()`: `esc`/`q` close
-                // it rather than the view while it is open.
+                // An open modal gets the key ahead of `quits()`, so `esc` and `q`
+                // close the modal, not the view.
                 Some(Input::Key(key)) if ui.modal.is_some() => {
                     ui.on_modal_key(key, &current, commands);
                 }
                 Some(Input::Key(key)) if quits(key) => break Ok(()),
                 Some(Input::Key(key)) => ui.on_key(key, &current, commands),
                 Some(Input::Paste(text)) => ui.on_modal_paste(&text),
-                // The input thread died; carrying on would leave a view nobody
-                // can quit.
+                // The input thread died. Carrying on would leave a view nobody can
+                // quit.
                 None => break Ok(()),
             },
             changed = snapshot.changed() => {
@@ -115,9 +114,9 @@ async fn view(
                     break Ok(());   // The engine stopped.
                 }
             }
-            // Deliberately the same exit as `q`: the terminal is restored, the
-            // engine is told to stop, the last batch is committed and the port
-            // is released. See `crate::Terminate`.
+            // The same exit as `q`. The terminal is restored, the engine stops, the
+            // last batch is committed and the port is released. See
+            // `crate::Terminate`.
             () = terminate.recv() => break Ok(()),
         }
     };
@@ -126,8 +125,8 @@ async fn view(
 }
 
 fn draw(frame: &mut Frame<'_>, snapshot: &Snapshot, ui: &mut Ui) {
-    // Faults get their own lines, and only when there are any: sharing the footer
-    // with the counters pushed the last of them off the terminal.
+    // Faults get their own lines, and only when there are any, so the counters
+    // cannot push them off screen.
     let faults = fault_lines(&faults(snapshot), frame.area().width);
     let drops = u16::from(drop_line(&snapshot.counters).is_some());
     let upload = u16::from(ui.upload.status().is_some());
@@ -141,8 +140,8 @@ fn draw(frame: &mut Frame<'_>, snapshot: &Snapshot, ui: &mut Ui) {
 
     draw_header(frame, header, snapshot);
 
-    // Side by side when there is room for both, stacked when there is not: the
-    // fleet table needs 74 columns before its state column starts clipping.
+    // Side by side when both fit, stacked otherwise. The fleet table needs 74
+    // columns before its state column clips.
     let [fleet, stream] = if body.width >= 114 {
         Layout::horizontal([Constraint::Length(74), Constraint::Min(40)]).areas(body)
     } else {
@@ -160,8 +159,7 @@ fn draw(frame: &mut Frame<'_>, snapshot: &Snapshot, ui: &mut Ui) {
     }
 }
 
-/// A box `width` by `height`, centred in `area` and clipped to it when it does
-/// not fit.
+/// A `width` by `height` box centred in `area`, clipped to it when too big.
 fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
     let width = width.min(area.width);
     let height = height.min(area.height);
@@ -183,9 +181,9 @@ mod tests {
 
     /// Rendering must not panic at any size the terminal might be.
     ///
-    /// A layout that divides by a zero-width area or indexes past a short one
-    /// takes the whole capture down with it, in the alternate screen, where the
-    /// backtrace is unreadable. These sizes are cheap insurance against that.
+    /// A layout that divides by a zero-width area or indexes past a short one panics.
+    /// That ends the capture inside the alternate screen, where the backtrace is
+    /// unreadable.
     #[test]
     fn view_renders_without_panicking_when_given_various_terminal_sizes() {
         for snapshot in [busy(), empty()] {

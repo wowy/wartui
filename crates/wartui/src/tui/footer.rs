@@ -1,3 +1,16 @@
+//! The footer: key help or a notice, the running totals, then the fault box.
+//!
+//! | Line | Shown |
+//! |---|---|
+//! | first | key help and totals, or a notice for a few seconds after a key |
+//! | drops | sightings the nodes had no ring room for, once there are any |
+//! | upload | how the last `u` stands, until the next one |
+//! | faults | everything that has gone wrong, most urgent first, wrapped |
+//!
+//! The fault box is empty on a clean run. Counts a healthy capture also produces, such
+//! as dropped sightings and missed admin windows, sit outside it, so a clean run looks
+//! clean.
+
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style, Stylize};
@@ -11,6 +24,7 @@ use wartui_proto::plan;
 
 use super::ui::Ui;
 
+/// Draw the footer into `area`. `faults` are already wrapped by [`fault_lines`].
 pub(super) fn draw_footer(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -21,10 +35,8 @@ pub(super) fn draw_footer(
     let c = snapshot.counters;
     let mut lines = Vec::new();
 
-    // What just happened, when it was the operator who made it happen. This
-    // takes the first line outright: a key that was refused, and why, matters
-    // more in that moment than a running total that will still be there next
-    // frame.
+    // A notice replaces the key help and totals: it explains the last keypress, and
+    // the totals will still be there next frame.
     if let Some(notice) = ui.notice(snapshot.now_ms) {
         lines.push(Line::from(Span::styled(
             format!(" {notice}"),
@@ -48,31 +60,28 @@ pub(super) fn draw_footer(
         if c.duplicate_batches > 0 {
             spans.push(Span::raw(format!("  dup {}", c.duplicate_batches)));
         }
-        // Beside the totals rather than in the fault box: connecting to a
-        // bridge that has been buffering beside a fleet produces these as a
-        // matter of course, and a line in the fault box would make the
-        // ordinary case look like a broken one. It still shows before the
-        // first assignment goes out, because that is the case where it is the
-        // whole answer to "why has nothing been assigned yet".
+        // Missed windows sit with the totals, not the faults: connecting to a bridge
+        // that has been buffering produces them normally. It shows before the first
+        // assignment too, where it explains why nothing has been assigned yet.
         if c.admin_windows_missed > 0 {
             spans.push(Span::raw(format!("  {} held for a live window", c.admin_windows_missed)));
         }
         lines.push(Line::from(spans));
     }
 
-    // A line of its own rather than a span of the totals, so a notice never hides
-    // it; plain rather than yellow, since a full ring is expected in a dense area.
+    // Its own line, so a notice never hides it. Plain, not yellow, because a full
+    // ring is normal in a dense area.
     if let Some(drops) = drop_line(&c) {
         lines.push(Line::from(drops));
     }
 
-    // Its own line for the same reason, kept after the upload ends until the next `u`.
+    // Its own line for the same reason. It stays after the upload ends, until the
+    // next `u`.
     if let Some(status) = ui.upload.status() {
         lines.push(Line::from(format!("  {status}")));
     }
 
-    // Already fitted to the width by `fault_lines`, so nothing here can be
-    // clipped and no fault can push another one off the end.
+    // Already fitted by `fault_lines`, so nothing here is clipped.
     for fault in faults {
         lines.push(Line::from(Span::styled(fault.clone(), Style::new().fg(Color::Yellow))));
     }
@@ -80,9 +89,8 @@ pub(super) fn draw_footer(
     frame.render_widget(Paragraph::new(lines).dim(), area);
 }
 
-/// Sightings the fleet's nodes had no ring room for this session, or `None` while
-/// there are none. Most are reported on the next dwell or scan, so this reads as
-/// a measure of the rings against the area rather than as a fault.
+/// Sightings dropped for lack of ring room this session, or `None`. Most are
+/// re-reported on the next dwell, so this measures how dense the area is, not a fault.
 pub(super) fn drop_line(c: &Counters) -> Option<String> {
     if c.wifi_dropped == 0 && c.ble_dropped == 0 {
         return None;
@@ -97,13 +105,11 @@ pub(super) fn drop_line(c: &Counters) -> Option<String> {
     Some(line)
 }
 
-/// Everything that has gone wrong so far, in the order an operator would want
-/// to hear it. Empty on a clean run, which is what keeps a clean run looking
-/// clean.
+/// Every fault so far, most urgent first. Empty on a clean run.
 pub(super) fn faults(snapshot: &Snapshot) -> Vec<String> {
     let c = snapshot.counters;
     let mut faults = Vec::new();
-    // First: with the link down nothing else here is being updated.
+    // First, because with the link down nothing else here updates.
     if let Some(error) = &snapshot.link_error
         && !snapshot.link_up
     {
@@ -121,13 +127,9 @@ pub(super) fn faults(snapshot: &Snapshot) -> Vec<String> {
     if c.peer_table_full > 0 {
         faults.push("peer table full".to_owned());
     }
-    // Channels that went into no share. The planner leaving them out is right and
-    // completely invisible, since what remains is an ordinary partition of the part
-    // the fleet can reach — so the only account of them is here.
-    //
-    // Two causes, told apart the way `Plan::unreachable` says they can be: every
-    // radio tunes 2.4 GHz, so a 2.4 GHz channel is in there only when no node is
-    // sniffing at all.
+    // The planner leaves out channels no radio here can tune, and nothing else
+    // reports them. Every radio tunes 2.4 GHz, so a 2.4 GHz channel is missing only
+    // when no node is sniffing.
     if let Some(plan) = snapshot.plan
         && !plan.unreachable().is_empty()
     {
@@ -152,11 +154,9 @@ pub(super) fn faults(snapshot: &Snapshot) -> Vec<String> {
         if let GpsStatus::Failed(reason) = &gps.status {
             faults.push(format!("gps unreadable: {reason}"));
         }
-        // Every line failing its checksum is a receiver talking at a rate nobody is
-        // listening at. Worth saying only when the rate was the operator's: one the
-        // ladder chose already produced valid sentences at that rate, so a flood of
-        // rejects afterwards is a receiver that changed or a cable that is failing,
-        // and `--gps-baud` is not the answer to either.
+        // Lines failing their checksum with no fix suggest the wrong baud rate. Blame
+        // `--gps-baud` only when the operator set it. An auto-detected rate already
+        // decoded, so later rejects mean a changed receiver or a bad cable.
         if gps.counters.fixes == 0 && gps.counters.rejected > 20 {
             let rejected = gps.counters.rejected;
             faults.push(if gps.pinned_baud {
@@ -177,8 +177,8 @@ pub(super) fn faults(snapshot: &Snapshot) -> Vec<String> {
     if c.garbled > 0 {
         faults.push(format!("garbled {}", c.garbled));
     }
-    // The one fault naming a node the operator owns: a fleet half-way through a
-    // reflash is invisible to the table above.
+    // A fleet half-way through a reflash is invisible to the fleet table, so this
+    // is the only place it shows.
     if c.incompatible > 0 {
         faults.push(format!("{} frames from an older firmware — reflash", c.incompatible));
     }
@@ -188,16 +188,16 @@ pub(super) fn faults(snapshot: &Snapshot) -> Vec<String> {
     if c.foreign_admin > 0 {
         faults.push(format!("{} admin frames from another core", c.foreign_admin));
     }
-    // The bridge's own count runs from its boot and is dominated by what it
-    // dropped before anyone was listening; only this capture's loss belongs here.
+    // Only this capture's loss. The bridge's own count runs from its boot, mostly
+    // frames dropped before anyone was listening.
     if let Some(status) = snapshot.bridge_status
         && status.dropped_since_attach > 0
     {
         faults.push(format!("bridge dropped {}", status.dropped_since_attach));
     }
-    // A restart underneath a running capture is a fault even with nothing failing
-    // now: the peer table came back empty and the gap is in the data. A power-on
-    // is not one — that is how a capture starts.
+    // A restart under a running capture is a fault even when nothing fails now: the
+    // peer table came back empty and the data has a gap. A power-on is how a capture
+    // starts, so it is not one.
     if let Some(bridge) = &snapshot.bridge
         && let Some(reason) = restart_fault(bridge)
     {
@@ -206,60 +206,53 @@ pub(super) fn faults(snapshot: &Snapshot) -> Vec<String> {
     faults
 }
 
-/// How to name a bridge restart in the fault box, or `None` for the one that
-/// is not a fault.
+/// The fault-box line for a bridge restart, or `None` for a power-on.
 fn restart_fault(bridge: &BridgeInfo) -> Option<String> {
-    // Ahead of the cause, being the more specific statement: it reset itself.
+    // Ahead of the cause, because it is more specific: the bridge reset itself.
     if matches!(bridge.last_phase, LoopPhase::TxStalled) {
         return Some("bridge rebooted itself: USB transmit had stalled".to_owned());
     }
-    match bridge.reset_cause {
+    let reason = match bridge.reset_cause {
         ResetCause::PowerOn => None,
-        ResetCause::Software => Some("bridge rebooted (firmware reset)".to_owned()),
-        ResetCause::Watchdog => Some("bridge rebooted (watchdog)".to_owned()),
-        ResetCause::Lockup => Some("bridge rebooted (CPU lockup)".to_owned()),
-        ResetCause::Brownout => Some("bridge rebooted (brownout)".to_owned()),
-        ResetCause::External => Some("bridge rebooted (reset over USB)".to_owned()),
-        ResetCause::Unknown => Some("bridge rebooted (cause unknown)".to_owned()),
-    }
+        ResetCause::Software => Some("bridge rebooted (firmware reset)"),
+        ResetCause::Watchdog => Some("bridge rebooted (watchdog)"),
+        ResetCause::Lockup => Some("bridge rebooted (CPU lockup)"),
+        ResetCause::Brownout => Some("bridge rebooted (brownout)"),
+        ResetCause::External => Some("bridge rebooted (reset over USB)"),
+        ResetCause::Unknown => Some("bridge rebooted (cause unknown)"),
+    };
+    reason.map(str::to_owned)
 }
 
-/// How many lines of faults the footer may take before it starts summarizing.
-///
-/// The fleet table has to keep some of the terminal.
+/// The most lines the fault box takes before it summarises, so the fleet table keeps
+/// its room.
 const MAX_FAULT_LINES: usize = 3;
 
-/// Fit the faults into lines no wider than the terminal.
+/// Wrap faults to the terminal width rather than let it clip them.
 ///
-/// Joining them all with two spaces and letting the terminal clip the overflow
-/// is how the most important fault ends up invisible — and the most important
-/// fault is usually the longest, because it carries an error string from the
-/// operating system.
+/// The most important fault is usually the longest, because it carries an OS error.
+/// Clipped, it would be the one that disappears.
 pub(super) fn fault_lines(faults: &[String], width: u16) -> Vec<String> {
-    // A width this small is not a terminal anyone is reading, but the
-    // arithmetic below still has to terminate.
+    // Nobody reads a terminal this narrow, but the arithmetic must still terminate.
     let width = usize::from(width).max(8);
     let (mut lines, ends) = pack(faults, width);
     if lines.len() <= MAX_FAULT_LINES {
         return lines;
     }
-    // Something has to give, and it is a whole line rather than the tail of one.
-    // Gluing "+2 more" onto half of "Permission denied (os error 13)" leaves a
-    // message that looks complete and says something else.
+    // Drop whole lines, never part of one. "+2 more" glued onto half of "Permission
+    // denied (os error 13)" looks complete and says something else.
     let kept = MAX_FAULT_LINES - 1;
-    // A fault the cut lands in the middle of is not being shown either, so it
-    // counts. Otherwise the notice claims nothing is missing while the line
-    // above it stops mid-word.
+    // A fault the cut splits counts as hidden.
     let hidden = ends.iter().filter(|end| **end >= kept).count();
     lines.truncate(kept);
     lines.push(marker(hidden, width));
     lines
 }
 
-/// Lay the faults out, in however many lines that takes.
+/// Lay the faults out in as many lines as they take.
 ///
-/// Returns the lines, and for each fault the last line it reaches — which is
-/// what tells the caller what a cut would cost.
+/// Returns the lines, and for each fault the last line it reaches. That tells the
+/// caller which faults a cut would hide.
 fn pack(faults: &[String], width: usize) -> (Vec<String>, Vec<usize>) {
     let mut lines: Vec<String> = Vec::new();
     let mut ends = Vec::with_capacity(faults.len());
@@ -286,12 +279,12 @@ fn marker(hidden: usize, width: usize) -> String {
             return wording;
         }
     }
-    // Narrower than "+1" is not a terminal either, but the notice that something
-    // is missing must not itself become the thing that gets clipped.
+    // Narrower than "+1" is not a real terminal either, but the marker itself must
+    // not be clipped.
     count.chars().take(width).collect()
 }
 
-/// One fault, split across as many lines as its own length needs.
+/// One fault, split across as many lines as its length needs.
 fn chunks(fault: &str, width: usize) -> Vec<String> {
     let room = width.saturating_sub(2).max(1);
     let mut out = Vec::new();
@@ -335,8 +328,7 @@ mod tests {
 
     #[test]
     fn fault_lines_wraps_long_message_when_fault_exceeds_terminal_width() {
-        // Unwrapped, a reason this long would show its first clause on a narrow
-        // terminal and nothing else, so `fault_lines` breaks it up instead.
+        // Unwrapped, a narrow terminal would show only the first clause.
         let fault = format!("link down: {BUSY}");
         let lines = fault_lines(std::slice::from_ref(&fault), 40);
         assert!(lines.len() > 1, "it does not fit on one line: {lines:?}");
@@ -363,8 +355,8 @@ mod tests {
 
     #[test]
     fn fault_lines_appends_truncated_indicator_when_single_fault_exceeds_box_capacity() {
-        // Three lines of a twenty-column terminal cannot hold this, and the half
-        // naming what to do about it is the half that would go.
+        // Three lines of twenty columns cannot hold this, and the half that names
+        // the fix is the half that goes.
         let fault = format!("link down: {BUSY}");
         let lines = fault_lines(std::slice::from_ref(&fault), 20);
         assert_eq!(lines.len(), MAX_FAULT_LINES, "{lines:?}");
@@ -376,9 +368,8 @@ mod tests {
 
     #[test]
     fn fault_lines_preserves_preceding_messages_when_overflow_notice_is_added() {
-        // The notice takes a line of its own: taking its room out of the last fault
-        // would leave a sentence that reads as complete and says something the OS
-        // never said.
+        // The marker takes its own line. Taking its room from the last fault would
+        // leave a sentence that looks complete and says something the OS never said.
         let faults = [format!("link down: {BUSY}"), "store dropped 4".to_owned()];
         let lines = fault_lines(&faults, 30);
         let last = lines.last().expect("a line");
@@ -393,8 +384,8 @@ mod tests {
 
     #[test]
     fn fault_lines_keeps_overflow_notice_within_bounds_when_terminal_width_is_narrow() {
-        // Not a terminal anyone uses, but nothing the footer draws may be wider
-        // than the frame.
+        // Nobody uses a terminal this narrow, but nothing the footer draws may be
+        // wider than the frame.
         let faults: Vec<String> = (0..2000).map(|n| format!("fault {n}")).collect();
         for width in [1_u16, 8, 12] {
             let lines = fault_lines(&faults, width);
@@ -412,7 +403,7 @@ mod tests {
         terminal.draw(|frame| draw(frame, &snapshot, &mut Ui::default())).expect("drawing");
         let screen = terminal.backend().to_string();
         assert!(screen.contains("link down"), "{screen}");
-        // The tail of the reason is the part that names what to do about it.
+        // The tail of the reason names the fix.
         assert!(screen.contains("busy"), "{screen}");
     }
 
@@ -435,7 +426,7 @@ mod tests {
         );
         assert!(rendered(&failed).contains("gps unreadable"));
 
-        // A rate the operator chose is the one that `--gps-baud` can answer for.
+        // `--gps-baud` is the answer only when the operator chose the rate.
         let mistuned = with_pinned_gps(
             GpsStatus::Searching,
             GpsCounters { sentences: 0, fixes: 0, rejected: 300 },
@@ -445,9 +436,9 @@ mod tests {
 
     #[test]
     fn view_reports_unreadable_lines_without_blaming_baud_flag_when_baud_rate_was_auto_detected() {
-        // The ladder settles on a rate by getting valid sentences out of it, so
-        // unreadable lines afterwards are a receiver that changed or a cable that is
-        // failing. Sending the operator to `--gps-baud` would send them nowhere.
+        // The search settles on a rate only after valid sentences at it, so later
+        // unreadable lines mean a changed receiver or a failing cable. `--gps-baud`
+        // would not help.
         let noisy = with_gps(
             GpsStatus::Searching,
             GpsCounters { sentences: 0, fixes: 0, rejected: 300 },
@@ -460,9 +451,8 @@ mod tests {
 
     #[test]
     fn view_suppresses_gps_fault_line_when_no_receiver_was_found() {
-        // Searching is the default, so most captures with no receiver are captures
-        // where there was never going to be one. Saying so on every one of them
-        // would put a fault on the view where there is no fault.
+        // The search runs by default, and most captures have no receiver. Saying so
+        // every time would show a fault where there is none.
         let none = with_gps(GpsStatus::NoReceiver, GpsCounters::default(), PositionSource::Static);
         let drawn = rendered(&none);
         assert!(!drawn.contains("gps"), "{drawn}");
@@ -472,10 +462,9 @@ mod tests {
 
     /// A capture whose only fault is the bridge dropping frames.
     ///
-    /// The other counters are cleared deliberately. The bridge's fault is
-    /// pushed last and the footer summarises everything past
-    /// `MAX_FAULT_LINES`, so a fixture carrying `busy()`'s other seven faults
-    /// would be testing the packing rather than the branch.
+    /// The other counters are cleared. The bridge's fault is pushed last, and the footer
+    /// summarises past `MAX_FAULT_LINES`, so `busy()`'s other seven faults would test
+    /// the packing rather than this branch.
     fn with_bridge_drops(dropped_since_attach: u32) -> Snapshot {
         let mut snapshot = busy();
         snapshot.counters = Counters::default();
@@ -495,9 +484,8 @@ mod tests {
         assert!(!screen.contains("bridge dropped"), "{screen}");
     }
 
-    /// The footer's running-totals line, identified by `frames` rather than
-    /// position: the fleet table's `lost` column header, drawn once any node
-    /// has lost a batch, would otherwise match a plain substring search for "lost".
+    /// The footer's totals line, found by `frames`. A plain search for "lost" would
+    /// also match the fleet table's `lost` column header.
     fn totals_line(screen: &str) -> String {
         screen.lines().find(|line| line.contains("frames")).unwrap_or_default().to_owned()
     }
@@ -509,7 +497,7 @@ mod tests {
         let screen = rendered(&snapshot);
         assert!(totals_line(&screen).contains("lost 7"), "{screen}");
 
-        // `busy()` itself has nothing lost, the same rule `admin` follows.
+        // `busy()` has nothing lost, so the total is left out, as `admin` is.
         let screen = rendered(&busy());
         assert!(!totals_line(&screen).contains("lost"), "{screen}");
     }
@@ -521,7 +509,7 @@ mod tests {
         let screen = rendered(&snapshot);
         assert!(totals_line(&screen).contains("dup 3"), "{screen}");
 
-        // `busy()` itself has nothing duplicated, the same rule `lost` follows.
+        // `busy()` has nothing duplicated, so the total is left out, as `lost` is.
         let screen = rendered(&busy());
         assert!(!totals_line(&screen).contains("dup"), "{screen}");
     }
@@ -540,7 +528,7 @@ mod tests {
         let screen = rendered(&snapshot);
         let line = screen.lines().find(|l| l.contains("wifi drop")).expect("a drop line");
         assert!(line.contains("wifi drop 12"), "{screen}");
-        // A kind with nothing dropped is left out rather than shown as 0.
+        // A kind with nothing dropped is left out, not shown as 0.
         assert!(!line.contains("ble drop"), "{screen}");
         assert!(!line.contains("frames"), "a line of its own, not a span of the totals");
 
@@ -550,8 +538,8 @@ mod tests {
 
     #[test]
     fn footer_keeps_drop_line_when_notice_shown() {
-        // The notice takes the totals line; the drops are on their own line so
-        // they stay.
+        // The notice takes the totals line. The drops have their own line, so they
+        // stay.
         let mut snapshot = busy();
         snapshot.counters.wifi_dropped = 12;
         snapshot.counters.ble_dropped = 4;
@@ -581,8 +569,8 @@ mod tests {
         let screen = rendered(&with_restart(ResetCause::Watchdog, LoopPhase::Transmit));
         assert!(screen.contains("watchdog"), "{screen}");
 
-        // Every capture starts with a bridge that was powered on. Matched on the
-        // full phrase: nodes have their own `rebooted` column.
+        // Every capture starts with a powered-on bridge. Matched on the full phrase,
+        // because nodes have their own `rebooted` state.
         let screen = rendered(&with_restart(ResetCause::PowerOn, LoopPhase::Unknown));
         assert!(!screen.contains("bridge rebooted"), "{screen}");
     }

@@ -1,3 +1,5 @@
+//! Nodes and snapshots the view's tests draw.
+
 use std::time::Instant;
 
 use ratatui::Terminal;
@@ -16,8 +18,10 @@ use wartui_proto::plan::{ChannelPool, ChannelSet, DEFAULT_TX_POWER_QUARTER_DBM, 
 use super::draw;
 use super::ui::Ui;
 
+/// The fixtures' wall-clock start, in unix milliseconds.
 pub(super) const EPOCH_MS: i64 = 1_777_642_477_000;
 
+/// A heartbeating node with no assignment, ending in `last`.
 pub(super) fn node(last: u8, reboots: u32, assignable: bool) -> NodeView {
     let now = Now { mono: Instant::now(), unix_ms: EPOCH_MS };
     let mut state = NodeState::new([0x02, 0x00, 0x5E, 0x10, 0x57, last], now);
@@ -28,17 +32,14 @@ pub(super) fn node(last: u8, reboots: u32, assignable: bool) -> NodeView {
     state.heartbeats = 12;
     state.observations = 340;
     state.link_rssi = Some(-41);
-    // Heartbeating unless a test says otherwise. A node that has not
-    // heartbeated is not assignable at all, so building the ordinary case
-    // that way would make every assignment test below a test of a refusal.
+    // Heartbeating unless a test says otherwise. A node that has not heartbeated
+    // cannot be assigned, so every assignment test would become a refusal test.
     state.capabilities = Some(Capabilities::here(true));
     NodeView { state, alive: true, assignable }
 }
 
-/// A node heard only through its observations, which is an ordinary few
-/// seconds in the life of one that is about to be perfectly drivable: it
-/// reports what it found on a channel before it gets back to the control
-/// channel to heartbeat.
+/// Heard only through sightings. Normal for a few seconds after boot: a node reports
+/// what it found on a channel before it returns to the control channel to heartbeat.
 pub(super) fn unannounced(last: u8) -> NodeView {
     let mut view = node(last, 0, false);
     view.state.capabilities = None;
@@ -54,17 +55,16 @@ pub(super) fn narrowband(last: u8) -> NodeView {
     view
 }
 
-/// Heartbeating stopped and nothing else is wrong. The only one of the
-/// four refusals whose cause is on the node rather than in this host.
+/// Heartbeating stopped and nothing else is wrong. The only refusal whose cause is on
+/// the node rather than this host.
 pub(super) fn stale_node(last: u8) -> NodeView {
     let mut view = node(last, 0, false);
-    // Still being heard, and no longer heartbeating, which is what `stale` means.
+    // Heard, but not heartbeating: what `stale` means.
     view.alive = false;
     view
 }
 
-/// Heartbeating perfectly well, with nowhere in the bridge's peer table to
-/// put it.
+/// Heartbeating, but with no slot in the bridge's peer table.
 pub(super) fn refused(last: u8) -> NodeView {
     let mut view = node(last, 0, false);
     view.state.peer_refused = true;
@@ -72,16 +72,14 @@ pub(super) fn refused(last: u8) -> NodeView {
     view
 }
 
-/// Set `held_epoch` to match what `desired` (or, absent that, `confirmed`)
-/// carries, the way a node's own heartbeat would once it actually adopted
-/// the frame. [`NodeState::adopted`] is true after this.
+/// Set `held_epoch` to the epoch `desired` carries, or `confirmed` without one, as
+/// the node's heartbeat would after adopting it. [`NodeState::adopted`] is then true.
 pub(super) fn adopt(state: &mut NodeState) {
     let assignment = state.desired.or(state.confirmed).expect("something to adopt");
     state.held_epoch = Some(wire_epoch(assignment.counter));
 }
 
-/// A node that has been given channels, has acknowledged them, and whose
-/// own heartbeat has confirmed it holds them: fully settled.
+/// Given channels, acked, and adopted: fully settled.
 pub(super) fn assigned(last: u8) -> NodeView {
     let mut view = node(last, 0, true);
     let assignment = Assignment {
@@ -98,16 +96,15 @@ pub(super) fn assigned(last: u8) -> NodeView {
     view
 }
 
-/// A node whose radio acknowledged its assignment, but whose own
-/// heartbeat has not yet said it holds it.
+/// Acked its assignment, but its heartbeat does not yet say it holds it.
 pub(super) fn acked_not_adopted(last: u8) -> NodeView {
     let mut view = assigned(last);
     view.state.held_epoch = None;
     view
 }
 
-/// A node that was sent an assignment and whose radio never acknowledged
-/// it — in practice, BLE holding the antenna through the admin window.
+/// Sent an assignment that its radio never acked. In practice BLE held the antenna
+/// through the admin window.
 pub(super) fn unacked(last: u8) -> NodeView {
     let mut view = pending(last);
     view.state.last_outcome = Some(AdminOutcome::Unacked);
@@ -115,8 +112,8 @@ pub(super) fn unacked(last: u8) -> NodeView {
     view
 }
 
-/// A node that has been given channels and has not yet had the chance to
-/// take them: the window only opens on its next heartbeat.
+/// Given channels it has not had the chance to take. The window opens on its next
+/// heartbeat.
 pub(super) fn pending(last: u8) -> NodeView {
     let mut view = node(last, 0, true);
     view.state.desired = Some(Assignment {
@@ -129,6 +126,8 @@ pub(super) fn pending(last: u8) -> NodeView {
     view
 }
 
+/// A running capture: five nodes in every assignment state, a full stream, and some
+/// faults.
 pub(super) fn busy() -> Snapshot {
     Snapshot {
         bridge: Some(BridgeInfo {
@@ -143,9 +142,8 @@ pub(super) fn busy() -> Snapshot {
         }),
         link_up: true,
         link_error: None,
-        // The built-in default, the same reason `tx_power`/`bridge_tx_power`
-        // below are the built-in default: an unrelated test must not trip
-        // the pool row's save rule just by calling `busy()`.
+        // Defaults, like `tx_power` and `bridge_tx_power` below, so an unrelated test
+        // cannot trip the pool row's save rule.
         pool: ChannelPool::All,
         plan: None,
         ble_node: None,
@@ -219,6 +217,7 @@ pub(super) fn busy() -> Snapshot {
     }
 }
 
+/// No bridge, no nodes, no position.
 pub(super) fn empty() -> Snapshot {
     Snapshot {
         bridge: None,
@@ -238,7 +237,7 @@ pub(super) fn empty() -> Snapshot {
     }
 }
 
-/// A capture with a receiver attached, in whatever state it is in.
+/// [`busy`] with a receiver attached, in `status`.
 pub(super) fn with_gps(
     status: GpsStatus,
     counters: GpsCounters,
@@ -260,7 +259,7 @@ pub(super) fn with_gps(
     snapshot
 }
 
-/// The same, for a receiver the operator named a rate for.
+/// [`with_gps`], for a receiver whose rate the operator set.
 pub(super) fn with_pinned_gps(status: GpsStatus, counters: GpsCounters) -> Snapshot {
     let mut snapshot = with_gps(status, counters, PositionSource::Static);
     if let Some(gps) = snapshot.gps.as_mut() {
@@ -269,6 +268,7 @@ pub(super) fn with_pinned_gps(status: GpsStatus, counters: GpsCounters) -> Snaps
     snapshot
 }
 
+/// `snapshot` drawn at 200×40, as text.
 pub(super) fn rendered(snapshot: &Snapshot) -> String {
     let mut terminal = Terminal::new(TestBackend::new(200, 40)).expect("test backend");
     terminal.draw(|frame| draw(frame, snapshot, &mut Ui::default())).expect("drawing");
