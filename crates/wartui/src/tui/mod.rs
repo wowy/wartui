@@ -6,6 +6,7 @@
 //! Drawing per observation would back-pressure the link, since a busy fleet sends tens
 //! of rows a second.
 
+mod bignum;
 mod fleet;
 mod footer;
 mod format;
