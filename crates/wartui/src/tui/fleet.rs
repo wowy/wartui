@@ -1,6 +1,6 @@
-//! The fleet table: one row per node heard.
-//!
-//! The channels column shows how far each node's assignment has got:
+//! The channels column colours each node's share by how far its assignment has got,
+//! because a MAC-layer ack is not adoption. Only the node's heartbeat, carrying the
+//! epoch it holds, shows it took the frame (`NodeState::adopted`).
 //!
 //! | State | Wi-Fi share | Bluetooth node |
 //! |---|---|---|
@@ -8,9 +8,6 @@
 //! | acked, not adopted | blue, the confirmed set then `…` | blue `bluetooth…` |
 //! | adopted | plain, the confirmed set | cyan `bluetooth` |
 //! | nothing confirmed | grey `unassigned` | grey `unassigned` |
-//!
-//! A MAC-layer ack is not adoption. Only the node's heartbeat, carrying the epoch it
-//! holds, shows it took the frame (`NodeState::adopted`).
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Rect};

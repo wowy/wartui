@@ -1,4 +1,6 @@
-//! Keyboard input, read on its own thread.
+//! Keyboard input, read on its own thread rather than through an async stream.
+//! crossterm's API is built for a blocking `poll` on stdin, and a thread keeps the
+//! terminal off the tokio runtime.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -18,9 +20,6 @@ pub(super) enum Input {
 }
 
 /// Start the input thread. Clear the returned flag to stop it.
-///
-/// A thread, not an async stream: crossterm's API is built for a blocking `poll` on
-/// stdin, and a thread keeps the terminal off the tokio runtime.
 pub(super) fn spawn_input() -> (mpsc::Receiver<Input>, Arc<AtomicBool>) {
     let (tx, rx) = mpsc::channel(16);
     let running = Arc::new(AtomicBool::new(true));

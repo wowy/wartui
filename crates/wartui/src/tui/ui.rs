@@ -1,5 +1,3 @@
-//! Key handling, and the view state it changes.
-
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use tokio::sync::mpsc;
 use wartui_core::engine::{Command, Snapshot};
@@ -12,7 +10,8 @@ use super::settings::ConfigModal;
 use super::upload::Upload;
 use crate::config;
 
-/// The notice when the engine's command queue is full.
+/// The notice when the engine takes no command: its queue is full, or it has stopped
+/// and closed the channel.
 pub(super) const ENGINE_BUSY: &str = "the engine is not accepting commands";
 
 /// View state that outlives a frame: cursor, scroll offset, notice, settings modal,
@@ -183,7 +182,8 @@ impl Ui {
         self.notice = Some((text, snapshot.now_ms));
     }
 
-    /// The notice, while it is recent enough to be about the last keypress.
+    /// The notice, while it is recent enough to be about what just happened: a key, or
+    /// a report from the upload thread.
     pub(super) fn notice(&self, now_ms: i64) -> Option<&str> {
         self.notice
             .as_ref()
@@ -197,9 +197,8 @@ mod tests {
     use ratatui::crossterm::event::KeyModifiers;
     use wartui_proto::plan::{ChannelPool, Job, Radio, plan_for};
 
-    use crate::run::PoolArg;
-
     use super::*;
+    use crate::run::PoolArg;
     use crate::tui::fixtures::*;
 
     #[test]

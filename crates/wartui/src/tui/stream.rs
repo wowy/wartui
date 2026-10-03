@@ -1,5 +1,3 @@
-//! The observation stream: the newest sightings, one per row.
-
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Rect};
 use ratatui::style::{Color, Modifier, Style};

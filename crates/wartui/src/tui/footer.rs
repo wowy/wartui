@@ -1,12 +1,3 @@
-//! The footer: key help or a notice, the running totals, then the fault box.
-//!
-//! | Line | Shown |
-//! |---|---|
-//! | first | key help and totals, or a notice for a few seconds after a key |
-//! | drops | sightings the nodes had no ring room for, once there are any |
-//! | upload | how the last `u` stands, until the next one |
-//! | faults | everything that has gone wrong, most urgent first, wrapped |
-//!
 //! The fault box is empty on a clean run. Counts a healthy capture also produces, such
 //! as dropped sightings and missed admin windows, sit outside it, so a clean run looks
 //! clean.
@@ -35,8 +26,9 @@ pub(super) fn draw_footer(
     let c = snapshot.counters;
     let mut lines = Vec::new();
 
-    // A notice replaces the key help and totals: it explains the last keypress, and
-    // the totals will still be there next frame.
+    // A notice replaces the key help and totals for a few seconds. It says what just
+    // happened, a refused key or an upload's progress, and the totals will still be
+    // there next frame.
     if let Some(notice) = ui.notice(snapshot.now_ms) {
         lines.push(Line::from(Span::styled(
             format!(" {notice}"),
@@ -127,9 +119,10 @@ pub(super) fn faults(snapshot: &Snapshot) -> Vec<String> {
     if c.peer_table_full > 0 {
         faults.push("peer table full".to_owned());
     }
-    // The planner leaves out channels no radio here can tune, and nothing else
-    // reports them. Every radio tunes 2.4 GHz, so a 2.4 GHz channel is missing only
-    // when no node is sniffing.
+    // Channels in no share, which nothing else reports. There are two causes. No
+    // sniffing radio can tune them: 5 GHz channels in a fleet of C6s. Or every node is
+    // scanning Bluetooth, so nothing sniffs at all. Every radio tunes 2.4 GHz, so a
+    // missing 2.4 GHz channel means the second.
     if let Some(plan) = snapshot.plan
         && !plan.unreachable().is_empty()
     {

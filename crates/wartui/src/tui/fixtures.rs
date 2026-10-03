@@ -1,5 +1,3 @@
-//! Nodes and snapshots the view's tests draw.
-
 use std::time::Instant;
 
 use ratatui::Terminal;

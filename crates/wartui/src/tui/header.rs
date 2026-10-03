@@ -1,5 +1,3 @@
-//! The header: the bridge and its link, then pool, plan, session time and position.
-//!
 //! The border is green only while a bridge's link is up and rows have a position, and
 //! red otherwise. A glance at it says whether the capture is working.
 
@@ -134,11 +132,10 @@ mod tests {
     use wartui_core::gps::GpsCounters;
     use wartui_proto::plan::{ChannelPool, plan};
 
-    use crate::tui::ui::Ui;
-
     use super::*;
     use crate::tui::draw;
     use crate::tui::fixtures::*;
+    use crate::tui::ui::Ui;
 
     #[test]
     fn view_displays_pos_none_indicator_when_capture_lacks_position_fix() {

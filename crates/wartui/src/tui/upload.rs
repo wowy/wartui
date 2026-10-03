@@ -22,13 +22,12 @@ use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::time::Instant;
 
 use anyhow::Result;
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use serde_json::{Map, Value};
-use wartui_core::export::ExportFilter;
-
 use ratatui::Frame;
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Clear, Paragraph};
+use serde_json::{Map, Value};
+use wartui_core::export::ExportFilter;
 
 use super::{Settings, centered_rect};
 use crate::upload::{
@@ -46,7 +45,7 @@ pub struct UploadTarget {
 
 /// The upload `u` started, and the footer line saying how it stands.
 #[derive(Default)]
-pub(crate) struct Upload {
+pub(super) struct Upload {
     stage: Stage,
     /// Kept after the upload ends, until the next `u`.
     status: Option<String>,
@@ -77,7 +76,7 @@ impl std::fmt::Debug for Upload {
 
 impl Upload {
     /// `u`: start preparing, or say why not. Returns the notice to show, if any.
-    pub(crate) fn press(&mut self, settings: &Settings) -> Option<String> {
+    pub(super) fn press(&mut self, settings: &Settings) -> Option<String> {
         if !matches!(self.stage, Stage::Idle) {
             return Some("an upload is already under way".to_owned());
         }
@@ -100,7 +99,7 @@ impl Upload {
     }
 
     /// Take what the threads have reported. Returns the notice to show, if any.
-    pub(crate) fn poll(&mut self) -> Option<String> {
+    pub(super) fn poll(&mut self) -> Option<String> {
         match &self.stage {
             Stage::Preparing(rx) => match rx.try_recv() {
                 Ok(prepared) => self.prepared(prepared),
@@ -148,13 +147,13 @@ impl Upload {
     }
 
     /// Whether the confirm modal is open, and so takes every key.
-    pub(crate) fn confirming(&self) -> bool {
+    pub(super) fn confirming(&self) -> bool {
         matches!(self.stage, Stage::Confirming(_))
     }
 
     /// A key while the confirm modal is open: `y` sends, anything else cancels. Returns the
     /// notice to show, if any.
-    pub(crate) fn on_confirm_key(
+    pub(super) fn on_confirm_key(
         &mut self,
         key: KeyEvent,
         target: &UploadTarget,
@@ -172,7 +171,7 @@ impl Upload {
     }
 
     /// The confirm modal's lines, while it is open.
-    pub(crate) fn confirm_lines(&self) -> Option<Vec<String>> {
+    pub(super) fn confirm_lines(&self) -> Option<Vec<String>> {
         let Stage::Confirming(prepared) = &self.stage else { return None };
         let mut lines: Vec<String> = prepared.describe().lines().map(str::to_owned).collect();
         lines.push(String::new());
@@ -181,7 +180,7 @@ impl Upload {
     }
 
     /// The footer line, while there is one.
-    pub(crate) fn status(&self) -> Option<&str> {
+    pub(super) fn status(&self) -> Option<&str> {
         self.status.as_deref()
     }
 }
@@ -263,12 +262,11 @@ mod tests {
     use tokio::sync::mpsc;
     use wartui_core::engine::Snapshot;
 
-    use crate::config;
-    use crate::tui::ui::Ui;
-
     use super::*;
+    use crate::config;
     use crate::tui::draw;
     use crate::tui::fixtures::*;
+    use crate::tui::ui::Ui;
 
     /// A view whose `u` uploads `db`, with a key, to a local server at `base`.
     fn uploading(db: PathBuf, base: String) -> Ui {

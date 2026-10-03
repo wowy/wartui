@@ -1,7 +1,6 @@
-//! The settings modal (`c`): its rows, its keys, and saving it to `wartui.toml`.
-//!
-//! The modal shows what is in force, not what the file holds. `Enter` puts every row
-//! in force, then writes every row to the file.
+//! The settings modal shows what is in force, not what `wartui.toml` holds. The two
+//! differ after a hand edit or a failed save, and the operator is changing the running
+//! capture. `Enter` puts every row in force, then writes every row to the file.
 
 use std::fmt::Display;
 use std::path::PathBuf;

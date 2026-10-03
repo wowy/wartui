@@ -1,5 +1,3 @@
-//! Text formatting shared by the panes.
-
 use chrono::{DateTime, Local};
 use wartui_proto::link::Mac;
 
