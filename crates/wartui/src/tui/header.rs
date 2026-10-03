@@ -10,7 +10,8 @@ use wartui_core::engine::Snapshot;
 use wartui_core::gps::{GpsStatus, GpsView};
 use wartui_core::position::PositionSource;
 
-use super::format::{elapsed, short_mac};
+use super::format::elapsed;
+use crate::short_mac;
 
 /// Draw the header box into `area`.
 pub(super) fn draw_header(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot) {

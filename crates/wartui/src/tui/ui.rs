@@ -5,10 +5,9 @@ use wartui_proto::link::Mac;
 
 use super::Settings;
 use super::fleet::why_not_assignable;
-use super::format::full_mac;
 use super::settings::ConfigModal;
 use super::upload::Upload;
-use crate::config;
+use crate::{config, mac};
 
 /// The notice when the engine takes no command: its queue is full, or it has stopped
 /// and closed the channel.
@@ -86,15 +85,15 @@ impl Ui {
         // Same rule as an assignment. The flag travels in the admin frame, and only a
         // heartbeat opens its window.
         if !holds && let Some(why) = why_not_assignable(node) {
-            self.say(format!("{} {why}", full_mac(&target)), snapshot);
+            self.say(format!("{} {why}", mac(&target)), snapshot);
             return;
         }
         let assigned = if holds { None } else { Some(target) };
         let mut said = match commands.try_send(Command::AssignBle { mac: assigned }) {
             Ok(()) if holds => {
-                format!("{}: bluetooth off on its next heartbeat", full_mac(&target))
+                format!("{}: bluetooth off on its next heartbeat", mac(&target))
             }
-            Ok(()) => format!("{}: bluetooth on its next heartbeat", full_mac(&target)),
+            Ok(()) => format!("{}: bluetooth on its next heartbeat", mac(&target)),
             Err(_) => {
                 self.say(ENGINE_BUSY.to_owned(), snapshot);
                 return;
@@ -135,12 +134,12 @@ impl Ui {
         // Same refusal as `toggle_ble`. The frame travels in the admin window, and
         // only a heartbeat opens one.
         if let Some(why) = why_not_assignable(node) {
-            self.say(format!("{} {why}", full_mac(&target)), snapshot);
+            self.say(format!("{} {why}", mac(&target)), snapshot);
             return;
         }
         let said = match commands.try_send(Command::ClearRing { mac: Some(target) }) {
             Ok(()) => {
-                format!("{}: clearing its dedup ring on its next heartbeat", full_mac(&target))
+                format!("{}: clearing its dedup ring on its next heartbeat", mac(&target))
             }
             Err(_) => ENGINE_BUSY.to_owned(),
         };

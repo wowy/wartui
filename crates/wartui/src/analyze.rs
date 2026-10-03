@@ -11,7 +11,8 @@ use wartui_core::analyze::{HostLoss, LossSummary, NodeLoss, losses};
 use wartui_core::export::wigle_csv;
 use wartui_core::store::open_readonly;
 
-use crate::export::{Selection, details, note_unpositioned, short_mac, thousands};
+use crate::export::{Selection, details, note_unpositioned, thousands};
+use crate::short_mac;
 
 #[derive(ClapArgs, Debug)]
 pub struct Args {
@@ -226,7 +227,7 @@ mod tests {
             }),
             nodes: vec![
                 NodeLoss {
-                    mac: vec![0x02, 0, 0x5E, 0x10, 0x1C, 0x5A],
+                    mac: [0x02, 0, 0x5E, 0x10, 0x1C, 0x5A],
                     batches_lost: 12,
                     heartbeats: 699,
                     heartbeats_missed: 3,
@@ -234,7 +235,7 @@ mod tests {
                     ble_refused: 1_203,
                 },
                 NodeLoss {
-                    mac: vec![0x02, 0, 0x5E, 0x10, 0x57, 0x84],
+                    mac: [0x02, 0, 0x5E, 0x10, 0x57, 0x84],
                     batches_lost: 200,
                     heartbeats: 2_757,
                     heartbeats_missed: 38,

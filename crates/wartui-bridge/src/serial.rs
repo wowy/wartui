@@ -916,10 +916,9 @@ fn read_loop(
                     }
                     // Without it, a log of a link that dropped and came back ends
                     // at "opening the bridge" — as does one that never did.
-                    let hex = mac.map(|byte| format!("{byte:02X}")).join(":");
                     tracing::info!(
                         chip = ?chip,
-                        mac = %hex,
+                        mac = %ports::mac_text(&mac),
                         fw = %fw_version.as_str(),
                         reset = ?reset_cause,
                         phase = ?last_phase,

@@ -18,8 +18,9 @@ use wartui_core::engine::{NodeView, Snapshot};
 use wartui_core::record::AdminOutcome;
 use wartui_proto::plan::{ChannelSet, Radio, SCAN_CHANNELS};
 
-use super::format::{ago, short_mac};
+use super::format::ago;
 use super::ui::Ui;
+use crate::short_mac;
 
 /// Draw the fleet table into `area`, keeping the cursor row in view.
 pub(super) fn draw_fleet(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot, ui: &mut Ui) {

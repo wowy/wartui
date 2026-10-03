@@ -37,7 +37,7 @@ use wartui_bridge::remember::state_dir;
 use wartui_bridge::serial::BridgeSpec;
 use wartui_proto::link::Mac;
 
-use crate::mac;
+use crate::{mac, short_mac};
 
 /// The release this binary was built for, when it was built for one.
 const RELEASE_TAG: Option<&str> = option_env!("WARTUI_RELEASE_TAG");
@@ -261,7 +261,7 @@ fn judge_probe(expected: Mac, chip: Chip, probe: &Ran) -> Result<(), Skip> {
 /// A board by its last two octets, as the fleet table names it, or by path without an address.
 fn name(candidate: &PortCandidate) -> String {
     match candidate.mac() {
-        Some(address) => mac(&address)[12..].to_owned(),
+        Some(address) => short_mac(&address),
         None => candidate.path.clone(),
     }
 }

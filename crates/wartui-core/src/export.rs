@@ -71,7 +71,9 @@ use std::io::Write;
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use rusqlite::{Connection, Row, Statement};
+use wartui_bridge::ports::mac_text;
 use wartui_proto::beacon::rcoi_text;
+use wartui_proto::link::Mac;
 
 use crate::record::ssid_text;
 
@@ -193,7 +195,7 @@ pub struct Positions {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NodeStats {
     /// The node's address.
-    pub mac: Vec<u8>,
+    pub mac: Mac,
     /// Wi-Fi sightings it reported.
     pub wifi: u64,
     /// Bluetooth sightings it reported.
@@ -297,7 +299,7 @@ struct Tally {
 impl Tally {
     /// Count one sighting, the first of its network when `new_network`, heard by `node`,
     /// positioned by the `pos_source` code [`SELECT_SIGHTINGS`] gives it, stored as `id`.
-    fn see(&mut self, c: &Candidate, new_network: bool, node: &[u8], pos_source: i64, id: i64) {
+    fn see(&mut self, c: &Candidate, new_network: bool, node: Mac, pos_source: i64, id: i64) {
         let ble = c.kind == "ble";
         let summary = &mut self.summary;
         let stats = if ble { &mut summary.ble } else { &mut summary.wifi };
@@ -326,7 +328,7 @@ impl Tally {
         let at = match summary.nodes.iter().position(|n| n.mac == node) {
             Some(at) => at,
             None => {
-                summary.nodes.push(NodeStats { mac: node.to_vec(), wifi: 0, ble: 0 });
+                summary.nodes.push(NodeStats { mac: node, wifi: 0, ble: 0 });
                 summary.nodes.len() - 1
             }
         };
@@ -343,7 +345,7 @@ impl Tally {
     /// The summary, nodes in address order.
     fn finish(self) -> ExportSummary {
         let mut summary = self.summary;
-        summary.nodes.sort_by(|a, b| a.mac.cmp(&b.mac));
+        summary.nodes.sort_by_key(|node| node.mac);
         summary
     }
 }
@@ -433,17 +435,16 @@ FROM temp.export_row
 ORDER BY first_seen, bssid, kind
 ";
 
-/// The node that heard a [`SELECT_SIGHTINGS`] row, its position source and its id, the
-/// node borrowed from the row rather than copied out of it.
-fn heard_by<'r>(row: &'r Row<'_>) -> rusqlite::Result<(&'r [u8], i64, i64)> {
-    Ok((row.get_ref(13)?.as_blob()?, row.get_ref(14)?.as_i64()?, row.get_ref(15)?.as_i64()?))
+/// The node that heard a [`SELECT_SIGHTINGS`] row, its position source and its id.
+fn heard_by(row: &Row<'_>) -> rusqlite::Result<(Mac, i64, i64)> {
+    Ok((row.get(13)?, row.get_ref(14)?.as_i64()?, row.get_ref(15)?.as_i64()?))
 }
 
 /// One sighting in flight through the fold, carrying everything a submitted
 /// row needs so the winner of a window can be written without going back to
 /// the database.
 struct Candidate {
-    bssid: Vec<u8>,
+    bssid: Mac,
     ssid: Option<Vec<u8>>,
     security: String,
     channel: i64,
@@ -539,7 +540,8 @@ fn write_row<W: Write>(row: &Window, out: &mut W) -> Result<(), ExportError> {
     writeln!(
         out,
         "{},{},{},{},{channel},{frequency},{rssi},{lat},{lon},{},{},{rcois},{mfgr},{}",
-        mac(&best.bssid),
+        // Uppercase and colon-separated, as WiGLE and the node firmware's SD logs write it.
+        mac_text(&best.bssid),
         quote(&ssid_text(best.ssid.as_deref().unwrap_or_default())),
         quote(&best.security),
         timestamp(row.first_seen),
@@ -571,12 +573,6 @@ fn frequency_column(channel: i64, kind: &str) -> String {
         32..=177 => format!("{}", 5000 + 5 * channel),
         _ => String::new(),
     }
-}
-
-/// Uppercase colon-separated, which is what WiGLE and the node firmware's own
-/// SD logs both use.
-fn mac(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(":")
 }
 
 /// Zero-padded UTC, to the second.
@@ -622,7 +618,8 @@ mod tests {
 
     #[test]
     fn mac_formatter_formats_uppercase_hex_with_colons_when_rendering_address() {
-        assert_eq!(mac(&[0x02, 0x00, 0x5E, 0x10, 0x57, 0x84]), "02:00:5E:10:57:84");
+        // The `MAC` column WiGLE reads. A change to `mac_text` must not change it.
+        assert_eq!(mac_text(&[0x02, 0x00, 0x5E, 0x10, 0x57, 0x84]), "02:00:5E:10:57:84");
     }
 
     #[test]

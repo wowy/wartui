@@ -287,6 +287,11 @@ pub fn mac(mac: &Mac) -> String {
     wartui_bridge::ports::mac_text(mac)
 }
 
+/// The last two octets, `57:84`: how the boards are told apart (see AGENTS.md).
+pub fn short_mac(mac: &Mac) -> String {
+    format!("{:02X}:{:02X}", mac[4], mac[5])
+}
+
 /// One line saying how the bridge came to be running this life.
 ///
 /// Every command that has a [`BridgeInfo`] prints this, because a bridge that
@@ -463,7 +468,14 @@ pub fn no_bridge_notice(bridge: Option<&str>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{BridgeSpec, Command, no_bridge_notice, parse, spec};
+    use super::{BridgeSpec, Command, mac, no_bridge_notice, parse, short_mac, spec};
+
+    #[test]
+    fn mac_formatter_writes_whole_and_short_forms_when_given_address() {
+        let address = [0x02, 0x00, 0x5E, 0x10, 0x57, 0x84];
+        assert_eq!(mac(&address), "02:00:5E:10:57:84");
+        assert_eq!(short_mac(&address), "57:84");
+    }
 
     #[test]
     fn cli_parser_rejects_global_bridge_flag_when_placed_before_subcommand() {

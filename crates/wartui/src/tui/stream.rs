@@ -9,7 +9,8 @@ use wartui_core::engine::{Snapshot, TailEntry};
 use wartui_core::panel::approx;
 use wartui_proto::air::RecordKind;
 
-use super::format::{clock, full_mac, short_mac};
+use super::format::clock;
+use crate::{mac, short_mac};
 
 pub(super) fn draw_stream(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot) {
     let header = Row::new(["time", "node", "bssid", "ch", "rssi", "ssid"])
@@ -56,7 +57,7 @@ fn observation_row(entry: &TailEntry) -> Row<'static> {
         Cell::from(clock(entry.rx_at_ms)),
         // The same octets the fleet table names the node by.
         Cell::from(short_mac(&entry.node_mac)),
-        Cell::from(full_mac(&entry.bssid)).style(kind),
+        Cell::from(mac(&entry.bssid)).style(kind),
         Cell::from(if entry.channel == 0 { "—".to_owned() } else { entry.channel.to_string() }),
         Cell::from(entry.rssi.to_string()),
         Cell::from(Line::from(ssid)),
