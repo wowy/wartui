@@ -76,13 +76,14 @@ CREATE TABLE IF NOT EXISTS capture (
   bridge_fw TEXT,
   channel_pool TEXT NOT NULL,
   notes TEXT,
-  -- 1 for test data (--sim's invented networks, or --lat/--lon's fixed position), which WDGWars and
-  -- WiGLE ban, so it is never uploaded.
+  -- 1 for test data: made with --sim (invented networks) or --lat/--lon (a fixed
+  -- position). WDGWars and WiGLE ban both, so it is never uploaded.
   simulated INTEGER NOT NULL
 );
 
--- `capabilities` is the node's latest token as the fleet table shows it (`wartui/1.0;5g`). Null
--- until a heartbeat arrives (see `record::NodeSeen`).
+-- `capabilities` is the node's most recent heartbeat rendered the way the fleet
+-- table shows it (`wartui/1.0;5g`). Null means only that nothing but an
+-- observation has been heard yet; see `record::NodeSeen`.
 CREATE TABLE IF NOT EXISTS node (
   mac BLOB PRIMARY KEY,
   label TEXT,
@@ -92,8 +93,9 @@ CREATE TABLE IF NOT EXISTS node (
   capabilities TEXT
 );
 
--- `wifi_dropped`, `ble_dropped` and `beat` are the node's raw since-boot counts, so a reboot shows
--- as the value falling. `beat` wraps at 2^16.
+-- `wifi_dropped` and `ble_dropped` are the node's since-boot refusal counts as
+-- the frame carried them: raw, so a reboot shows as the value falling. `beat` is
+-- the node's since-boot heartbeat count, raw, and wraps at 2^16.
 CREATE TABLE IF NOT EXISTS heartbeat (
   id INTEGER PRIMARY KEY,
   node_mac BLOB NOT NULL,
@@ -111,10 +113,14 @@ CREATE TABLE IF NOT EXISTS heartbeat (
   admin_latency_us INTEGER
 );
 
--- One row per assignment, written once its outcome is known: append-only, so a retry is a second
--- row. `wire_version` is the one-byte wire epoch `counter` went out as. `channels` is the 42-bit
--- SCAN_CHANNELS mask the frame carried, naming channels in the writing build's scan table. Nothing
--- reads or rewrites it.
+-- One row per transmitted assignment, written when its outcome is known, so
+-- the table is append-only and a retry is a second row rather than an update.
+-- `counter` is the engine's monotonic epoch and `wire_version` the byte that
+-- actually went out; they differ because the wire field is one byte wide.
+-- `channels` is the forty-two-bit SCAN_CHANNELS mask the frame carried, stored as the
+-- integer it is: the indices are what the wire said, and which channels they name is
+-- the scan table of the build that wrote the row. Nothing reads the column back, and
+-- nothing rewrites it when the table changes -- a row records what went out.
 CREATE TABLE IF NOT EXISTS assignment (
   id INTEGER PRIMARY KEY,
   node_mac BLOB NOT NULL,
@@ -150,15 +156,19 @@ CREATE TABLE IF NOT EXISTS observation (
   pos_at INTEGER,
   raw_body BLOB
 );
--- No unique constraint on bssid: every sighting is kept with the node that made it and the signal
--- it saw, which is the coverage data. No index either, though export groups by bssid:
--- `docs/store-io-findings.md` has the measurements.
+-- Deliberately no unique constraint on bssid: every sighting is kept, with the node
+-- that made it and the signal it saw. Deduplicating at ingest would throw away the
+-- coverage data. Nor does the table have an index of any kind, though export groups by
+-- bssid: `docs/store-io-findings.md` has the measurements that took both of them out.
 
--- One row per bridge status reply, polled every few seconds. `rx_count`, `dropped_tx` and
--- `uptime_ms` are raw since-boot counts, so a reboot shows as values falling. `host_frames` is the
--- frames this host had read when the reply arrived. Between two rows, the `rx_count` difference
--- less the `host_frames` difference is USB loss plus `dropped_tx`, give or take frames queued
--- behind the reply, which overtakes them.
+-- One row per bridge status reply, which the host polls for every few seconds.
+-- `rx_count`, `dropped_tx` and `uptime_ms` are the bridge's since-boot counts as
+-- the reply carried them: raw, as `heartbeat` keeps its drop counts, so a bridge
+-- reboot shows as the values falling. `host_frames` is how many frames this host had
+-- read off the link when the reply arrived, taken with `rx_count` so the two pair
+-- closely but not exactly: between two rows, the `rx_count` difference less the
+-- `host_frames` difference is frames lost on USB plus the bridge's `dropped_tx`, give
+-- or take the frames queued behind the reply, which overtakes them.
 CREATE TABLE IF NOT EXISTS bridge_status (
   id INTEGER PRIMARY KEY,
   rx_at INTEGER NOT NULL,
@@ -169,12 +179,14 @@ CREATE TABLE IF NOT EXISTS bridge_status (
   host_frames INTEGER NOT NULL
 );
 
--- One row at the start, every 5 s, and at shutdown, on a timer of its own so it carries on without
--- a bridge. `frames` through `admin_windows_missed` and `store_written`/`store_dropped` count since
--- the capture began. The `_peak` columns are the largest since the previous row. `throttled` is the
--- Pi firmware's `get_throttled` word, NULL off a Pi. `soc_temp_mc` is thermal zone 0 in
--- milli-degrees Celsius, NULL when unreadable. `battery_mv` and `battery_ma` are the `battery`
--- hwmon's readings, NULL without one.
+-- One row at the start, every 5 s, and at shutdown: the host's own state, sampled on a timer of
+-- its own so it carries on while the bridge is gone. `frames` through
+-- `admin_windows_missed` and `store_written`/`store_dropped` are counts since the
+-- capture began. `lag_peak_us`, `store_queue_peak` and `store_commit_peak_us` are the
+-- largest since the previous row. `throttled` is the Raspberry Pi firmware's
+-- `get_throttled` word, NULL off a Pi; `soc_temp_mc` is thermal zone 0 in milli-degrees
+-- Celsius, NULL when unreadable. `battery_mv` and `battery_ma` are the `battery` hwmon's
+-- voltage and current as its driver reports them, NULL on a host without one.
 CREATE TABLE IF NOT EXISTS host_status (
   id INTEGER PRIMARY KEY,
   at INTEGER NOT NULL,
@@ -197,9 +209,10 @@ CREATE TABLE IF NOT EXISTS host_status (
   battery_ma INTEGER
 );
 
--- One row per gap in a node's batch `seq`. `rx_at` is when the batch after it arrived. `lost` is
--- `seq - after_seq - 1` modulo 2^16, recorded only under 1024 like the live count. Summed per node,
--- it is the fleet table's `lost` column.
+-- One row per gap in a node's batch `seq`. `rx_at` is when the batch after the gap
+-- arrived, not when the lost batches were sent. `lost` is `seq - after_seq - 1`
+-- modulo 2^16, and only gaps under 1024 are recorded, the rule the live count
+-- follows. Summing `lost` per node gives the fleet table's `lost` column.
 CREATE TABLE IF NOT EXISTS batch_gap (
   id INTEGER PRIMARY KEY,
   node_mac BLOB NOT NULL,
@@ -218,9 +231,10 @@ CREATE TABLE IF NOT EXISTS raw_frame (
   bytes BLOB NOT NULL
 );
 
--- One row per upload the site queued. The next upload sends only observations after `through_id`.
--- Ids follow commit order, so the cutoff is exact even when one frame's sightings span two commits.
--- `result` is NULL until known, then 'done', 'failed' or 'unfollowed'. A failed job imported
+-- One row per upload the site queued. `through_id` is the last observation id the upload
+-- covered; the next upload sends only observations stored after it. Ids follow commit order,
+-- so the cutoff is exact even when one frame's sightings span two commits. `result` is NULL
+-- until known, then 'done', 'failed' or 'unfollowed'. A job the site reported failed imported
 -- nothing and is no cutoff.
 CREATE TABLE IF NOT EXISTS upload (
   id INTEGER PRIMARY KEY,
