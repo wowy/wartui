@@ -21,7 +21,8 @@
 //! stays at [`SCHEMA_VERSION`] while [`SCHEMA`] changes shape, and queries against another shape
 //! fail or misread. So each file also carries [`SCHEMA_FINGERPRINT`], a hash of the schema text,
 //! and [`check_version`] refuses a file whose fingerprint is missing or different. Even a
-//! whitespace or comment change refuses old files: the safe direction, with no migration to offer.
+//! whitespace or comment change refuses other builds' files: the safe direction, with no migration
+//! to offer.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -858,8 +859,8 @@ fn prepare(conn: &Connection, config: &StoreConfig) -> Result<(), rusqlite::Erro
     Ok(())
 }
 
-/// The pool's name as stored, which is not its name on screen: `ChannelPool`'s
-/// `Display` says "US", and captures already on disk say "us". Leave these.
+/// The pool's name as stored, which is not its name on screen: `ChannelPool`'s `Display` says "US",
+/// and the `channel_pool` column says "us".
 const fn pool_name(pool: ChannelPool) -> &'static str {
     match pool {
         ChannelPool::Us => "us",

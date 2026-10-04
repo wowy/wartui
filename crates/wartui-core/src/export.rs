@@ -29,10 +29,8 @@
 //!
 //! WiGLE rejects files without two details: a zero-padded timestamp (`2026-05-01 13:34:37`, where
 //! the node firmware emits `2026-5-1 13:34:37`), and RFC-4180 quoting of the SSID, which may hold a
-//! comma or quote and need not be text. A third exists because the store is never rewritten: a
-//! capture from before `beacon::visible_ssid` holds a cloaked network's NUL padding, so
-//! [`record::ssid_text`](crate::record::ssid_text) applies on the way out. An old capture exporting
-//! correctly is the point of export being a view over the store.
+//! comma or quote and need not be text. [`record::ssid_text`](crate::record::ssid_text) also strips
+//! a cloaked network's NUL padding on the way out, so no SSID reaches the file padded.
 //!
 //! [`ExportFilter::after_uploads`] leaves out everything the newest non-failed upload covered, so a
 //! repeat upload sends only what came after. The cutoff is the last sighting that upload walked, in
@@ -41,13 +39,12 @@
 //! on both sides within the recapture width gets a second row, which WDGWars skips when scoring. An
 //! unpositioned sighting before the cutoff counts as sent, so a later fix does not bring it back.
 //!
-//! The columns v1.6 added over v1.4 are derived or blank, never stored. `Frequency` comes from the
-//! stored channel, so every capture on disk exports it. `RCOIs` and `MfgrId` carry a Passpoint
-//! access point's roaming consortium identifiers and a BLE advertiser's manufacturer identifier.
-//! They are blank when the capture holds none, including captures from builds that did not collect
-//! them: the store's NULL becomes a blank without claiming the beacon carried nothing. A BLE row's
-//! `Frequency` is blank on purpose: WiGLE wants a Bluetooth class-of-device code there, which only
-//! an active inquiry produces, and a node never transmits while scanning.
+//! The columns v1.6 added over v1.4 are derived or blank, never stored. `Frequency` is a function
+//! of the stored channel. `RCOIs` and `MfgrId` carry a Passpoint access point's roaming consortium
+//! identifiers and a BLE advertiser's manufacturer identifier. They are blank when the capture
+//! holds none: the store's NULL becomes a blank without claiming the beacon carried nothing. A BLE
+//! row's `Frequency` is blank on purpose: WiGLE wants a Bluetooth class-of-device code there, which
+//! only an active inquiry produces, and a node never transmits while scanning.
 
 use std::io::Write;
 
@@ -456,9 +453,14 @@ impl Candidate {
         }
     }
 
-    /// Whether this sighting is a BLE advertiser rather than a Wi-Fi network.
+    /// Whether this sighting is a BLE advertiser.
     fn is_ble(&self) -> bool {
         self.kind == "ble"
+    }
+
+    /// Whether this sighting is a Wi-Fi network. A kind that is neither gets no frequency.
+    fn is_wifi(&self) -> bool {
+        self.kind == "wifi"
     }
 
     /// Whether this sighting has coordinates for a WiGLE row.
@@ -490,9 +492,9 @@ fn write_row<W: Write>(row: &Window, out: &mut W) -> Result<(), ExportError> {
     let rssi = best.rssi;
     let lat = best.lat.unwrap_or(0.0);
     let lon = best.lon.unwrap_or(0.0);
-    let frequency = frequency_column(channel, best.is_ble());
+    let frequency = frequency_column(channel, best.is_wifi());
     // WiGLE's spellings: the roaming consortium body as hex identifiers, the company identifier as
-    // a number. Captures from before they were collected store NULL, and a blank says so.
+    // a number. NULL in the store is a blank here.
     let rcois = best.rcoi.as_deref().map_or_else(String::new, |body| rcoi_text(body).to_string());
     let mfgr = best.mfgr_id.map_or_else(String::new, |id| id.to_string());
 
@@ -511,15 +513,15 @@ fn write_row<W: Write>(row: &Window, out: &mut W) -> Result<(), ExportError> {
     Ok(())
 }
 
-/// The centre frequency of a sighting's channel, for WiGLE's `Frequency` column. Derived on the way
-/// out, so captures from before the column existed fill it too.
+/// The centre frequency of a sighting's channel, for WiGLE's `Frequency` column, derived from the
+/// stored channel.
 ///
 /// The channel is the one the access point announces, or the node's parked channel when it
 /// announces none (`wartui_proto::beacon::parse_mgmt`). An access point can announce a channel no
 /// pool tunes, so this covers the 2.4 GHz channels (14 the odd one out) and the 5 GHz ladder from
 /// 32 to 177. Blank off both ladders, and for every BLE row (see the module docs).
-fn frequency_column(channel: i64, ble: bool) -> String {
-    if ble {
+fn frequency_column(channel: i64, wifi: bool) -> String {
+    if !wifi {
         return String::new();
     }
     match channel {
@@ -579,30 +581,30 @@ mod tests {
 
     #[test]
     fn frequency_column_maps_wifi_channels_to_mhz() {
-        assert_eq!(frequency_column(1, false), "2412");
-        assert_eq!(frequency_column(6, false), "2437");
-        assert_eq!(frequency_column(13, false), "2472");
+        assert_eq!(frequency_column(1, true), "2412");
+        assert_eq!(frequency_column(6, true), "2437");
+        assert_eq!(frequency_column(13, true), "2472");
         // Channel 14 is the one 2.4 GHz channel that breaks the 5 MHz ladder.
-        assert_eq!(frequency_column(14, false), "2484");
+        assert_eq!(frequency_column(14, true), "2484");
         // An access point can announce these below the pools' 36.
-        assert_eq!(frequency_column(32, false), "5160");
-        assert_eq!(frequency_column(33, false), "5165");
-        assert_eq!(frequency_column(34, false), "5170");
-        assert_eq!(frequency_column(35, false), "5175");
-        assert_eq!(frequency_column(36, false), "5180");
-        assert_eq!(frequency_column(165, false), "5825");
-        assert_eq!(frequency_column(177, false), "5885");
+        assert_eq!(frequency_column(32, true), "5160");
+        assert_eq!(frequency_column(33, true), "5165");
+        assert_eq!(frequency_column(34, true), "5170");
+        assert_eq!(frequency_column(35, true), "5175");
+        assert_eq!(frequency_column(36, true), "5180");
+        assert_eq!(frequency_column(165, true), "5825");
+        assert_eq!(frequency_column(177, true), "5885");
     }
 
     #[test]
     fn frequency_column_is_blank_for_ble_or_unmapped_channel() {
         // A BLE row's frequency column means a "device type" code a passive scan
         // cannot produce, so it is blank whatever the channel field holds.
-        assert_eq!(frequency_column(0, true), "");
-        // A channel on neither band's ladder is not something to guess a frequency for.
         assert_eq!(frequency_column(0, false), "");
-        assert_eq!(frequency_column(15, false), "");
-        assert_eq!(frequency_column(31, false), "");
-        assert_eq!(frequency_column(200, false), "");
+        // A channel on neither band's ladder is not something to guess a frequency for.
+        assert_eq!(frequency_column(0, true), "");
+        assert_eq!(frequency_column(15, true), "");
+        assert_eq!(frequency_column(31, true), "");
+        assert_eq!(frequency_column(200, true), "");
     }
 }

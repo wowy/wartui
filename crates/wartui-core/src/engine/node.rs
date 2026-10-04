@@ -25,7 +25,8 @@ pub struct NodeState {
     pub last_heartbeat: Option<Instant>,
     /// The node's most recent heartbeat counter.
     pub counter: Option<u32>,
-    /// Times the counter went backwards: reboots, each forgetting the assignment held.
+    /// Reboots detected: the heartbeat counter went backwards, or a live heartbeat's epoch fell
+    /// back to 0 after a real one. Each forgets the assignment held.
     pub reboots: u32,
     /// Heartbeats received in this session.
     pub heartbeats: u64,
@@ -51,7 +52,9 @@ pub struct NodeState {
     /// What the node acknowledged. Cleared on reboot, because the node has forgotten.
     pub confirmed: Option<Assignment>,
     /// Whether [`Self::desired`] still needs delivering. Set when the plan changes, the Bluetooth
-    /// scan moves or the node reboots. Cleared only on an acknowledgement, never on enqueue.
+    /// scan moves, the node reboots, or its heartbeat shows an acked assignment not adopted.
+    /// Cleared on an acknowledgement, on a full peer table, and when the node departs the plan.
+    /// Never cleared on enqueue.
     pub dirty: bool,
     /// Whether to clear this node's dedup ring in its next admin window. Set by
     /// [`Command::ClearRing`]. Cleared on the clear's `AckOk`, on a full peer table (as for an

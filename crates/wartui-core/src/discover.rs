@@ -34,8 +34,7 @@ pub const BAUD_LADDER: [u32; 4] = [9_600, 38_400, 4_800, 115_200];
 /// Two, not one. The checksum is an eight-bit XOR, so text spew passes about once in 256 lines,
 /// often enough with four rates tried on every port. Two in one window is not chance. A port the
 /// operator named needs only its rate found, and one valid sentence answers that. Two would rule
-/// out a receiver set to one sentence a second, a real configuration the reader handled before it
-/// could search.
+/// out a receiver set to one sentence a second, a real configuration.
 pub const SENTENCES_TO_BELIEVE: usize = 2;
 
 /// How many are enough on a port the operator named. See [`SENTENCES_TO_BELIEVE`].

@@ -30,9 +30,9 @@ const _: () = assert!(
     "the shortest time between two reports of one channel is one dwell"
 );
 
-/// The smallest `seq` gap read as a wrap or reordering rather than a loss
+/// The smallest `seq` gap not counted as loss: one this large is read as a wrap or reordering
 /// ([`FleetEngine::note_batch_seq`]).
-const MAX_COUNTED_GAP: u16 = 1024;
+const UNCOUNTED_GAP: u16 = 1024;
 
 /// A since-boot count's contribution: nothing for a baseline, the whole value after a restart or a
 /// fall, the difference otherwise.
@@ -308,8 +308,8 @@ impl FleetEngine {
     /// retries though the frame arrived. The node reuses that `seq` for its next batch, so no loss
     /// is counted.
     ///
-    /// A gap under [`MAX_COUNTED_GAP`] is that many batches lost. At or past it the count wrapped or the frame
-    /// came out of order, and guessing would invent history. Each counted gap is also a
+    /// A gap under [`UNCOUNTED_GAP`] is that many batches lost. At or past it the count wrapped or
+    /// the frame came out of order, and guessing would invent history. Each counted gap is also a
     /// [`Record::BatchGap`], so the store's sum matches the live count.
     ///
     /// Only a gap after a live batch counts. One after a replayed batch spans time with no host
@@ -321,7 +321,7 @@ impl FleetEngine {
         let Some(node) = self.nodes.get_mut(&src) else { return };
         if let Some(last) = node.last_seq.filter(|_| node.last_seq_live) {
             let gap = seq.wrapping_sub(last.wrapping_add(1));
-            let counted = gap < MAX_COUNTED_GAP;
+            let counted = gap < UNCOUNTED_GAP;
             if counted {
                 node.batches_lost += u64::from(gap);
                 self.counters.batches_lost += u64::from(gap);

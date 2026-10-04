@@ -15,8 +15,9 @@ use crate::position::Fix;
 /// Raw SSID bytes as text, for showing to a person or writing into a column parsed as text.
 ///
 /// One rule for the view and the export. [`visible_ssid`] strips a cloaked access point's padding
-/// here as well as in the parser, because older captures are still read back through this. Any NUL
-/// left is interior, and gets what `from_utf8_lossy` gives any byte it cannot represent: a raw NUL
+/// here as well as in the parser, so every path from bytes to text gets it. Any NUL left is
+/// interior, and gets what `from_utf8_lossy` gives any byte it cannot represent: a raw NUL is no
+/// more use to a terminal than to WiGLE's parser. The store keeps whatever arrived.
 /// is no more use to a terminal than to WiGLE's parser. The store keeps whatever arrived.
 #[must_use]
 pub fn ssid_text(bytes: &[u8]) -> String {
@@ -250,7 +251,7 @@ pub struct AssignmentSent {
     pub node_mac: Mac,
     /// The engine's epoch counter it was allocated from: monotonic within a capture, not persisted.
     pub counter: u64,
-    /// The byte that went on the wire, `air::wire_epoch(counter)`, under the column's older name.
+    /// The byte that went on the wire, `air::wire_epoch(counter)`.
     pub wire_version: u8,
     /// Which `SCAN_CHANNELS` indices the node was told to dwell on.
     pub channels: ChannelSet,
