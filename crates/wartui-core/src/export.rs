@@ -266,7 +266,7 @@ impl Tally {
     /// Count one sighting, the first of its network when `new_network`, heard by `node`,
     /// positioned by the `pos_source` code [`SELECT_SIGHTINGS`] gives it, stored as `id`.
     fn see(&mut self, c: &Candidate, new_network: bool, node: Mac, pos_source: i64, id: i64) {
-        let ble = c.kind == "ble";
+        let ble = c.is_ble();
         let summary = &mut self.summary;
         let stats = if ble { &mut summary.ble } else { &mut summary.wifi };
         stats.sightings += 1;
@@ -342,7 +342,7 @@ fn close(
             first_seen,
         ])?;
         summary.rows += 1;
-        if best.kind == "ble" {
+        if best.is_ble() {
             summary.ble.rows += 1;
         } else {
             summary.wifi.rows += 1;
@@ -456,6 +456,11 @@ impl Candidate {
         }
     }
 
+    /// Whether this sighting is a BLE advertiser rather than a Wi-Fi network.
+    fn is_ble(&self) -> bool {
+        self.kind == "ble"
+    }
+
     /// Whether this sighting has coordinates for a WiGLE row.
     const fn positioned(&self) -> bool {
         self.lat.is_some() && self.lon.is_some()
@@ -485,7 +490,7 @@ fn write_row<W: Write>(row: &Window, out: &mut W) -> Result<(), ExportError> {
     let rssi = best.rssi;
     let lat = best.lat.unwrap_or(0.0);
     let lon = best.lon.unwrap_or(0.0);
-    let frequency = frequency_column(channel, &best.kind);
+    let frequency = frequency_column(channel, best.is_ble());
     // WiGLE's spellings: the roaming consortium body as hex identifiers, the company identifier as
     // a number. Captures from before they were collected store NULL, and a blank says so.
     let rcois = best.rcoi.as_deref().map_or_else(String::new, |body| rcoi_text(body).to_string());
@@ -501,7 +506,7 @@ fn write_row<W: Write>(row: &Window, out: &mut W) -> Result<(), ExportError> {
         timestamp(row.first_seen),
         best.alt.unwrap_or(0.0),
         best.accuracy.unwrap_or(0.0),
-        if best.kind == "ble" { "BLE" } else { "WIFI" },
+        if best.is_ble() { "BLE" } else { "WIFI" },
     )?;
     Ok(())
 }
@@ -513,8 +518,8 @@ fn write_row<W: Write>(row: &Window, out: &mut W) -> Result<(), ExportError> {
 /// announces none (`wartui_proto::beacon::parse_mgmt`). An access point can announce a channel no
 /// pool tunes, so this covers the 2.4 GHz channels (14 the odd one out) and the 5 GHz ladder from
 /// 32 to 177. Blank off both ladders, and for every BLE row (see the module docs).
-fn frequency_column(channel: i64, kind: &str) -> String {
-    if kind != "wifi" {
+fn frequency_column(channel: i64, ble: bool) -> String {
+    if ble {
         return String::new();
     }
     match channel {
@@ -574,30 +579,30 @@ mod tests {
 
     #[test]
     fn frequency_column_computes_mhz_from_wifi_channels_when_generating_export() {
-        assert_eq!(frequency_column(1, "wifi"), "2412");
-        assert_eq!(frequency_column(6, "wifi"), "2437");
-        assert_eq!(frequency_column(13, "wifi"), "2472");
+        assert_eq!(frequency_column(1, false), "2412");
+        assert_eq!(frequency_column(6, false), "2437");
+        assert_eq!(frequency_column(13, false), "2472");
         // Channel 14 is the one 2.4 GHz channel that breaks the 5 MHz ladder.
-        assert_eq!(frequency_column(14, "wifi"), "2484");
+        assert_eq!(frequency_column(14, false), "2484");
         // An access point can announce these below the pools' 36.
-        assert_eq!(frequency_column(32, "wifi"), "5160");
-        assert_eq!(frequency_column(33, "wifi"), "5165");
-        assert_eq!(frequency_column(34, "wifi"), "5170");
-        assert_eq!(frequency_column(35, "wifi"), "5175");
-        assert_eq!(frequency_column(36, "wifi"), "5180");
-        assert_eq!(frequency_column(165, "wifi"), "5825");
-        assert_eq!(frequency_column(177, "wifi"), "5885");
+        assert_eq!(frequency_column(32, false), "5160");
+        assert_eq!(frequency_column(33, false), "5165");
+        assert_eq!(frequency_column(34, false), "5170");
+        assert_eq!(frequency_column(35, false), "5175");
+        assert_eq!(frequency_column(36, false), "5180");
+        assert_eq!(frequency_column(165, false), "5825");
+        assert_eq!(frequency_column(177, false), "5885");
     }
 
     #[test]
     fn frequency_column_returns_empty_string_when_given_ble_or_unmapped_channels() {
         // A BLE row's frequency column means a "device type" code a passive scan
         // cannot produce, so it is blank whatever the channel field holds.
-        assert_eq!(frequency_column(0, "ble"), "");
+        assert_eq!(frequency_column(0, true), "");
         // A channel on neither band's ladder is not something to guess a frequency for.
-        assert_eq!(frequency_column(0, "wifi"), "");
-        assert_eq!(frequency_column(15, "wifi"), "");
-        assert_eq!(frequency_column(31, "wifi"), "");
-        assert_eq!(frequency_column(200, "wifi"), "");
+        assert_eq!(frequency_column(0, false), "");
+        assert_eq!(frequency_column(15, false), "");
+        assert_eq!(frequency_column(31, false), "");
+        assert_eq!(frequency_column(200, false), "");
     }
 }

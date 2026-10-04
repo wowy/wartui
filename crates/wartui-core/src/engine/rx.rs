@@ -30,6 +30,10 @@ const _: () = assert!(
     "the shortest time between two reports of one channel is one dwell"
 );
 
+/// The smallest `seq` gap read as a wrap or reordering rather than a loss
+/// ([`FleetEngine::note_batch_seq`]).
+const MAX_COUNTED_GAP: u16 = 1024;
+
 /// A since-boot count's contribution: nothing for a baseline, the whole value after a restart or a
 /// fall, the difference otherwise.
 ///
@@ -44,21 +48,20 @@ pub(crate) fn advance_since_boot(value: u64, prev: Option<u64>, restarted: bool)
     }
 }
 
+/// One frame the bridge received, as it reported it.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Rx<'a> {
+    pub(super) src: Mac,
+    pub(super) dst: Mac,
+    pub(super) rssi: i8,
+    /// The bridge's microsecond stamp on arrival.
+    pub(super) rx_us: u32,
+    pub(super) payload: &'a [u8],
+}
+
 impl FleetEngine {
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "the fields of one Rx frame, destructured at the call site"
-    )]
-    pub(super) fn on_rx(
-        &mut self,
-        src: Mac,
-        dst: Mac,
-        rssi: i8,
-        rx_us: u32,
-        payload: &[u8],
-        now: Now,
-        batch: &mut ActionBatch,
-    ) {
+    pub(super) fn on_rx(&mut self, rx: &Rx<'_>, now: Now, batch: &mut ActionBatch) {
+        let Rx { src, dst, rssi, payload, .. } = *rx;
         self.counters.frames += 1;
 
         if self.config.record_raw {
@@ -99,10 +102,10 @@ impl FleetEngine {
             // know. Foreign clears count the same as foreign assignments.
             Frame::Admin(_) | Frame::Clear(_) => self.counters.foreign_admin += 1,
             Frame::Heartbeat(heartbeat) => {
-                self.on_heartbeat(src, rssi, rx_us, heartbeat, now, batch);
+                self.on_heartbeat(rx, heartbeat, now, batch);
             }
             Frame::Sightings(sightings) => {
-                self.on_sightings(src, rssi, rx_us, payload, sightings, now, batch);
+                self.on_sightings(rx, sightings, now, batch);
             }
         }
     }
@@ -110,13 +113,12 @@ impl FleetEngine {
     /// A heartbeat: proof of life, and the one moment the node's admin window is open.
     fn on_heartbeat(
         &mut self,
-        src: Mac,
-        rssi: i8,
-        rx_us: u32,
+        rx: &Rx<'_>,
         heartbeat: HeartbeatMsg,
         now: Now,
         batch: &mut ActionBatch,
     ) {
+        let Rx { src, rssi, rx_us, .. } = *rx;
         self.see_node(src, now, rssi, Some(heartbeat.capabilities), batch);
         self.counters.heartbeats += 1;
         // Read before borrowing the node: liveness decides whether its epoch is believed.
@@ -217,20 +219,14 @@ impl FleetEngine {
     }
 
     /// A batch of sightings, recorded unless it retransmits the batch before it.
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "the fields of one Rx frame, destructured at the call site"
-    )]
     fn on_sightings(
         &mut self,
-        src: Mac,
-        rssi: i8,
-        rx_us: u32,
-        payload: &[u8],
+        rx: &Rx<'_>,
         sightings: SightingBatch<'_>,
         now: Now,
         batch: &mut ActionBatch,
     ) {
+        let Rx { src, rssi, rx_us, payload, .. } = *rx;
         // Once per frame, not once per sighting.
         self.see_node(src, now, rssi, None, batch);
         if self.is_duplicate_batch(src, sightings.seq, payload, rx_us) {
@@ -243,7 +239,7 @@ impl FleetEngine {
         } else {
             self.note_batch_seq(src, sightings.seq, now, batch);
             for (sighting, raw) in sightings.iter() {
-                self.on_sighting(src, now, rssi, sighting, raw, batch);
+                self.on_sighting(rx, sighting, raw, now, batch);
             }
         }
         self.remember_batch(src, payload, rx_us);
@@ -251,16 +247,15 @@ impl FleetEngine {
 
     /// One record of a [`Frame::Sightings`] batch, after [`Self::see_node`] and
     /// [`Self::note_batch_seq`] ran for its frame.
-    #[allow(clippy::too_many_arguments, reason = "the pieces of one record, at the call site")]
     fn on_sighting(
         &mut self,
-        src: Mac,
-        now: Now,
-        rssi: i8,
+        rx: &Rx<'_>,
         sighting: SightingMsg<'_>,
         raw: &[u8],
+        now: Now,
         batch: &mut ActionBatch,
     ) {
+        let Rx { src, rssi, .. } = *rx;
         self.counters.observations += 1;
         match sighting.kind {
             RecordKind::Wifi => {
@@ -313,7 +308,7 @@ impl FleetEngine {
     /// retries though the frame arrived. The node reuses that `seq` for its next batch, so no loss
     /// is counted.
     ///
-    /// A gap under 1024 is that many batches lost. At or past it the count wrapped or the frame
+    /// A gap under [`MAX_COUNTED_GAP`] is that many batches lost. At or past it the count wrapped or the frame
     /// came out of order, and guessing would invent history. Each counted gap is also a
     /// [`Record::BatchGap`], so the store's sum matches the live count.
     ///
@@ -326,11 +321,12 @@ impl FleetEngine {
         let Some(node) = self.nodes.get_mut(&src) else { return };
         if let Some(last) = node.last_seq.filter(|_| node.last_seq_live) {
             let gap = seq.wrapping_sub(last.wrapping_add(1));
-            if gap < 1024 {
+            let counted = gap < MAX_COUNTED_GAP;
+            if counted {
                 node.batches_lost += u64::from(gap);
                 self.counters.batches_lost += u64::from(gap);
             }
-            if gap > 0 && gap < 1024 {
+            if counted && gap > 0 {
                 batch.records.push(Record::BatchGap(BatchGap {
                     node_mac: src,
                     rx_at_ms: now.unix_ms,

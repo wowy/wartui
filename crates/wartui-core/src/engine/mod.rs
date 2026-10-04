@@ -51,6 +51,7 @@ use admin::Pending;
 use lag::QUIET_CONNECT;
 #[cfg(doc)]
 use replan::next_epoch;
+use rx::Rx;
 
 /// The fleet's state and the rules that advance it.
 #[derive(Debug)]
@@ -191,9 +192,7 @@ impl FleetEngine {
                 self.reset_arrivals();
                 // Its peer table starts empty, new bridge or rebooted, so refused nodes may fit
                 // now.
-                for node in self.nodes.values_mut() {
-                    node.peer_refused = false;
-                }
+                self.forget_peer_refusals();
                 // A new connection means a new baseline, whether or not the bridge rebooted.
                 self.dropped_baseline = None;
                 // Poll now: a restarted bridge is back at its firmware fallback power, and there is
@@ -293,6 +292,11 @@ impl FleetEngine {
             }
         }
         // A slot has freed, so the re-cut that follows takes refused nodes back.
+        self.forget_peer_refusals();
+    }
+
+    /// Let the next re-cut try every node the bridge's peer table refused.
+    fn forget_peer_refusals(&mut self) {
         for node in self.nodes.values_mut() {
             node.peer_refused = false;
         }
@@ -316,9 +320,10 @@ impl FleetEngine {
     fn on_message(&mut self, msg: &BridgeToHost, now: Now, batch: &mut ActionBatch) {
         match msg {
             BridgeToHost::Rx { src, dst, rssi, rx_us, payload } => {
+                let rx = Rx { src: *src, dst: *dst, rssi: *rssi, rx_us: *rx_us, payload };
                 // Before `on_rx`: heartbeats read `air_is_live`.
-                self.note_arrival(*src, *rx_us, now);
-                self.on_rx(*src, *dst, *rssi, *rx_us, payload, now, batch);
+                self.note_arrival(rx.src, rx.rx_us, now);
+                self.on_rx(&rx, now, batch);
             }
             BridgeToHost::SendResult { id, status, tx_us } => {
                 self.on_send_result(*id, *status, *tx_us, now, batch);

@@ -40,7 +40,7 @@
 
 use std::collections::BTreeMap;
 
-use rusqlite::Connection;
+use rusqlite::{Connection, Row};
 use wartui_proto::mac::Mac;
 
 use crate::engine::{BEHIND_THE_AIR_US, advance_since_boot};
@@ -171,8 +171,46 @@ fn bridge(conn: &Connection) -> rusqlite::Result<Option<BridgeLoss>> {
     Ok(loss)
 }
 
-/// The engine's counts in one `host_status` row, in column order.
-type HostCounts = [u64; 8];
+/// One `host_status` row, as [`host`] reads it.
+#[derive(Debug, Clone, Copy)]
+struct HostRow {
+    duplicate_batches: u64,
+    garbled: u64,
+    undecodable: u64,
+    incompatible: u64,
+    foreign_fleet: u64,
+    foreign_admin: u64,
+    admin_windows_missed: u64,
+    store_dropped: u64,
+    lag_peak_us: u64,
+    commit_peak_us: u64,
+    queue_peak: u64,
+    throttled: Option<u32>,
+    soc_temp_mc: Option<i32>,
+    battery_mv: Option<i32>,
+}
+
+impl HostRow {
+    /// Read a row of [`host`]'s query.
+    fn read(row: &Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            duplicate_batches: count(row.get(0)?),
+            garbled: count(row.get(1)?),
+            undecodable: count(row.get(2)?),
+            incompatible: count(row.get(3)?),
+            foreign_fleet: count(row.get(4)?),
+            foreign_admin: count(row.get(5)?),
+            admin_windows_missed: count(row.get(6)?),
+            store_dropped: count(row.get(7)?),
+            lag_peak_us: count(row.get(8)?),
+            commit_peak_us: count(row.get(9)?),
+            queue_peak: count(row.get(10)?),
+            throttled: row.get(11)?,
+            soc_temp_mc: row.get(12)?,
+            battery_mv: row.get(13)?,
+        })
+    }
+}
 
 fn host(conn: &Connection) -> rusqlite::Result<Option<HostLoss>> {
     let mut stmt = conn.prepare(
@@ -185,43 +223,42 @@ fn host(conn: &Connection) -> rusqlite::Result<Option<HostLoss>> {
     )?;
     let mut rows = stmt.query([])?;
     let mut loss: Option<HostLoss> = None;
-    let mut first: Option<HostCounts> = None;
-    let mut last: HostCounts = [0; 8];
+    let mut first: Option<HostRow> = None;
+    let mut last: Option<HostRow> = None;
     let mut last_throttled: Option<u32> = None;
     while let Some(row) = rows.next()? {
-        let mut counts: HostCounts = [0; 8];
-        for (i, value) in counts.iter_mut().enumerate() {
-            *value = count(row.get(i)?);
-        }
-        first.get_or_insert(counts);
-        last = counts;
+        let row = HostRow::read(row)?;
+        first.get_or_insert(row);
+        last = Some(row);
 
         let loss = loss.get_or_insert_default();
-        let lag = count(row.get(8)?);
+        let lag = row.lag_peak_us;
         loss.lag_over_100ms += u64::from(lag >= BEHIND_THE_AIR_US);
         loss.lag_peak_us = loss.lag_peak_us.max(lag);
-        loss.commit_peak_us = loss.commit_peak_us.max(count(row.get(9)?));
-        loss.queue_peak = loss.queue_peak.max(count(row.get(10)?));
-        if let Some(word) = row.get::<_, Option<u32>>(11)? {
+        loss.commit_peak_us = loss.commit_peak_us.max(row.commit_peak_us);
+        loss.queue_peak = loss.queue_peak.max(row.queue_peak);
+        if let Some(word) = row.throttled {
             *loss.under_voltage.get_or_insert(0) += u64::from(word & 0x1 != 0);
             *loss.throttled.get_or_insert(0) += u64::from(word & 0xE != 0);
             last_throttled = Some(word);
         }
-        if let Some(temp) = row.get::<_, Option<i32>>(12)? {
+        if let Some(temp) = row.soc_temp_mc {
             loss.temp_max_mc = Some(loss.temp_max_mc.map_or(temp, |max| max.max(temp)));
         }
-        if let Some(mv) = row.get::<_, Option<i32>>(13)? {
+        if let Some(mv) = row.battery_mv {
             loss.battery_min_mv = Some(loss.battery_min_mv.map_or(mv, |min| min.min(mv)));
         }
     }
-    let (Some(mut loss), Some(first)) = (loss, first) else { return Ok(None) };
-    let delta = |i: usize| last[i].saturating_sub(first[i]);
-    loss.duplicates = delta(0);
-    loss.garbled = delta(1);
-    loss.undecodable = delta(2);
-    loss.foreign = delta(3) + delta(4) + delta(5);
-    loss.admin_windows_missed = delta(6);
-    loss.store_dropped = delta(7);
+    let (Some(mut loss), Some(first), Some(last)) = (loss, first, last) else { return Ok(None) };
+    // The engine's counts run from its start, so what the capture saw is last less first.
+    let delta = |count: fn(&HostRow) -> u64| count(&last).saturating_sub(count(&first));
+    loss.duplicates = delta(|r| r.duplicate_batches);
+    loss.garbled = delta(|r| r.garbled);
+    loss.undecodable = delta(|r| r.undecodable);
+    loss.foreign =
+        delta(|r| r.incompatible) + delta(|r| r.foreign_fleet) + delta(|r| r.foreign_admin);
+    loss.admin_windows_missed = delta(|r| r.admin_windows_missed);
+    loss.store_dropped = delta(|r| r.store_dropped);
     loss.since_boot = last_throttled.map(|word| (word >> 16) & 0xF);
     Ok(Some(loss))
 }

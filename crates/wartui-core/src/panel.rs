@@ -286,14 +286,19 @@ mod tests {
     fn gps(status: GpsStatus, source: PositionSource) -> Snapshot {
         let mut snapshot = quiet();
         snapshot.position = Fix { source, ..Fix::none() };
-        snapshot.gps = Some(GpsView {
+        snapshot.gps = Some(gps_view(status));
+        snapshot
+    }
+
+    /// A receiver doing `status`, with nothing else to say.
+    fn gps_view(status: GpsStatus) -> GpsView {
+        GpsView {
             status,
             counters: GpsCounters::default(),
             last_fix_ms: None,
             settled: None,
             pinned_baud: false,
-        });
-        snapshot
+        }
     }
 
     /// The text of the line at `row`, so a test can read what an operator would.
@@ -513,13 +518,7 @@ mod tests {
         worst.assignable = 9;
         worst.unique_wifi_aps = 9_999_999;
         worst.unique_ble_aps = 9_999_999;
-        worst.gps = Some(GpsView {
-            status: GpsStatus::Fixed { satellites: Some(24) },
-            counters: GpsCounters::default(),
-            last_fix_ms: None,
-            settled: None,
-            pinned_baud: false,
-        });
+        worst.gps = Some(gps_view(GpsStatus::Fixed { satellites: Some(24) }));
         worst.position = Fix { source: PositionSource::Gps, ..Fix::none() };
 
         let mut silent = fleet(&[Some(-50)]);
