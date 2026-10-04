@@ -171,7 +171,7 @@ is here rather than only in a `//!`.
   `Frame::Sightings` arm, per record; keeping `air` byte-transparent over the trailer is what lets
   a change to how an identifier is *read* cost a re-export rather than a reflash.
   → `crates/wartui-proto/src/air.rs`, `SightingMsg::ext`; `crates/wartui-proto/src/beacon.rs`,
-  `rcoi_text`; `crates/wartui-core/src/engine.rs`
+  `rcoi_text`; `crates/wartui-core/src/engine/rx.rs`
 - **Nothing here is compatible with an earlier wartui, and that is the policy until 1.0.** No
   migration path is built for a fleet mid-upgrade and no code reads an older wire format to be
   helpful about it; a node on a previous build is somebody else's traffic as far as this host is
@@ -221,7 +221,8 @@ is here rather than only in a `//!`.
   and the host re-sends it on that heartbeat's window rather than waiting. The host never sends a
   node the epoch its heartbeat says it already holds, because a fresh capture restarts the counter
   while a running node keeps its epoch across it.
-  → `crates/wartui-core/src/engine.rs`, `NodeState::adopted` / `Counters::admin_unadopted`
+  → `crates/wartui-core/src/engine/node.rs`, `NodeState::adopted`;
+  `crates/wartui-core/src/engine/snapshot.rs`, `Counters::admin_unadopted`
 - **`IndexRun` describes a *pool*, never the shape of an assignment.** An assignment is a
   `ChannelSet` naming any subset of `SCAN_CHANNELS`, so the planner flattens the pool and deals
   round-robin rather than steering around run boundaries. The plan has no phases and no timer; it
@@ -272,12 +273,12 @@ edit stops; follow the pointer before changing the rule.
   is sent only with the flag beside it; without it, a node told to scan nothing parks
   while the host believes it is sweeping, and `Plan::admin_for` refuses to build that frame.
   → `crates/wartui-proto/src/plan.rs`, `Job` / `Plan::channels_for` / `admin_for`;
-  `crates/wartui-core/src/engine.rs`, `Command::AssignBle` / `on_assign_ble` /
-  `Command::RememberBle` / `replan`;
+  `crates/wartui-core/src/engine/event.rs`, `Command::AssignBle` / `Command::RememberBle`;
+  `crates/wartui-core/src/engine/replan.rs`, `on_assign_ble` / `replan`;
   `docs/phase-2-findings.md`
 - **A heartbeat replayed out of the bridge's backlog is not an admin window.** Delete either
   half of the check and the symptom is a plausible-looking lie rather than an error.
-  → `crates/wartui-core/src/engine.rs`, `note_arrival` / `air_is_live` / `BEHIND_THE_AIR`
+  → `crates/wartui-core/src/engine/lag.rs`, `note_arrival` / `air_is_live` / `BEHIND_THE_AIR`
 - **The bridge's USB transmit endpoint can die on its own, and the bridge reboots when it does.**
   `StallWatch` times the *contradiction*, and **every one of its four facts is load-bearing**:
   delete any and a bridge reboots for ever, or never. There is no watchdog behind the hang case.
@@ -323,7 +324,8 @@ edit stops; follow the pointer before changing the rule.
   under fresh epochs rather than asking the planner to re-cut anything, since it changes what the
   fleet transmits at and never what it scans.
   → `crates/wartui-proto/src/plan.rs`, `clamp_tx_power` / `DEFAULT_TX_POWER_QUARTER_DBM`;
-  `crates/wartui-core/src/engine.rs`, `poll_bridge` / `Command::SetTxPower` / `on_set_tx_power`
+  `crates/wartui-core/src/engine/mod.rs`, `poll_bridge`; `crates/wartui-core/src/engine/event.rs`,
+  `Command::SetTxPower`; `crates/wartui-core/src/engine/replan.rs`, `on_set_tx_power`
 - **ESP-NOW goes out at 802.11g 24 Mbps, set per peer through IDF directly** — `esp-radio`'s
   `set_rate` is refused on the C5 and C6, and misnumbered besides.
   → `firmware/bridge/src/main.rs`, `set_peer_rate`; `firmware/node/src/radio.rs`
