@@ -5,12 +5,13 @@ use wartui_proto::plan::{self, ChannelPool, Job, Plan, Radio, clamp_tx_power};
 
 use super::{ActionBatch, Assignment, Command, FleetEngine, Now};
 
-/// Allocate the next monotonic counter, skipping the one whose wire epoch
-/// collides with what a node's heartbeat says it already holds — otherwise a
-/// fresh capture's first assignment can carry the same wire epoch a node kept
-/// from a previous run, which the node acks and silently discards. Consecutive
-/// counters map to distinct wire epochs (`wire_epoch`'s `% 255`), so at most one
-/// skip is ever needed. `Some(0)` never matches: `wire_epoch` never returns it.
+/// Allocate the next monotonic counter, skipping one whose wire epoch matches what the node's
+/// heartbeat says it holds.
+///
+/// Otherwise a fresh capture's first assignment can repeat the wire epoch a node kept from a
+/// previous run, and the node acks and silently discards it. Consecutive counters have distinct
+/// wire epochs (`wire_epoch`'s `% 255`), so one skip suffices. `Some(0)` never matches:
+/// `wire_epoch` never returns 0.
 pub(super) fn next_epoch(last: &mut u64, held: Option<u8>) -> u64 {
     *last += 1;
     if Some(wire_epoch(*last)) == held {
@@ -20,9 +21,8 @@ pub(super) fn next_epoch(last: &mut u64, held: Option<u8>) -> u64 {
 }
 
 impl FleetEngine {
-    /// Take an operator's instruction. Nothing goes out from here except a
-    /// bridge transmit power, which cannot wait for a heartbeat the way an
-    /// assignment can.
+    /// Take an operator's instruction. Only a bridge transmit power goes out from here, since it
+    /// cannot wait for a heartbeat.
     pub(super) fn on_command(&mut self, command: Command, now: Now, batch: &mut ActionBatch) {
         match command {
             Command::AssignBle { mac } => self.on_assign_ble(mac),
@@ -33,12 +33,9 @@ impl FleetEngine {
         }
     }
 
-    /// Change the pool and re-cut the fleet in force against it.
-    ///
-    /// Membership is unchanged, so this re-cuts `plan_members` rather than going through
-    /// [`Self::replan`], which returns early on an unchanged membership. With nobody in
-    /// the plan there is nothing to cut, and the next membership change cuts against the
-    /// new pool.
+    /// Change the pool and re-cut the current members against it. [`Self::replan`] would return
+    /// early, since membership is unchanged. With no members, the next membership change cuts
+    /// against the new pool.
     fn on_set_pool(&mut self, pool: ChannelPool) {
         if pool == self.config.pool {
             return;
@@ -48,24 +45,17 @@ impl FleetEngine {
         self.cut(&members);
     }
 
-    /// Change what the fleet transmits at, without touching what it scans.
-    ///
-    /// Both values are clamped exactly as [`FleetEngine::new`] clamps them.
-    ///
-    /// - **Bridge power**: Dispatched immediately ahead of the next status poll.
-    ///   Because `bulk` drops rather than blocks and a dropped `SetTxPower` has
-    ///   no retry until the next poll, dispatching here saves up to `status_interval`
-    ///   of running at the previous power level.
-    /// - **Nodes power**: Folded into the active plan via [`Self::deal`], re-issuing
-    ///   member assignments under a fresh epoch to be adopted on each node's next
-    ///   heartbeat. If no plan is active, transmission is deferred until the next plan.
-    /// - If a value is already held, it is a no-op: no frame is sent and no epoch is spent.
+    /// Change what the fleet transmits at, clamped as [`FleetEngine::new`] clamps.
+    /// [`Self::update_bridge_tx_power`] and [`Self::update_nodes_tx_power`] say how each power goes
+    /// out.
     fn on_set_tx_power(&mut self, nodes: i8, bridge: i8, batch: &mut ActionBatch) {
         self.update_bridge_tx_power(clamp_tx_power(bridge), batch);
         self.update_nodes_tx_power(clamp_tx_power(nodes));
     }
 
-    /// Update the bridge transmit power and immediately queue a control frame if connected.
+    /// Set the bridge's transmit power, sending it at once if the link is up. Every status poll
+    /// also carries it ([`Self::poll_bridge`]). Sending now saves up to `status_interval` at the
+    /// old power. The current value is a no-op.
     fn update_bridge_tx_power(&mut self, power: i8, batch: &mut ActionBatch) {
         if power == self.config.bridge_tx_power {
             return;
@@ -77,7 +67,10 @@ impl FleetEngine {
         }
     }
 
-    /// Update the fleet node transmit power and re-deal assignments under current plan members.
+    /// Set the nodes' transmit power and re-deal the plan in force. [`Self::deal`] re-issues each
+    /// member's assignment under a fresh epoch, picked up on the node's next heartbeat. Nothing is
+    /// re-cut: power changes what the fleet transmits at, never what it scans. With no plan, the
+    /// power waits for the next one. The current value is a no-op and spends no epoch.
     fn update_nodes_tx_power(&mut self, power: i8) {
         if power == self.config.tx_power {
             return;
@@ -90,20 +83,15 @@ impl FleetEngine {
         }
     }
 
-    /// Move the Bluetooth scan, or take it off the fleet entirely.
+    /// Move the Bluetooth scan, or take it off the fleet.
     ///
-    /// Nothing is sent from here, and nothing is decided either. Moving the scan
-    /// changes what *two* nodes scan — the one taking it stops sniffing Wi-Fi and
-    /// the one giving it up takes a share of the pool back — so it is a re-cut
-    /// rather than a flag flipped on an existing assignment, and the planner is
-    /// still the only author of one. [`Self::replan`] runs on every heartbeat and
-    /// every tick and reads this, so each end takes its new assignment in its own
-    /// window, under one epoch carrying both the share and the flag.
+    /// Nothing is sent here. Moving the scan changes what *two* nodes scan, so it is a re-cut, and
+    /// only the planner re-cuts. [`Self::replan`] reads this on every heartbeat and tick, and each
+    /// end takes its new assignment in its own window, share and flag under one epoch.
     ///
-    /// While remembering is on, the preferred node follows the target, `None` included:
-    /// a scan taken off the fleet stays off rather than going straight back to the
-    /// preferred node on the next re-cut. It is set before the no-op check, so naming
-    /// the node that already holds the scan still records it.
+    /// While remembering is on, the preferred node follows the target, `None` included, so a
+    /// withdrawn scan stays withdrawn. It is set before the no-op check, so naming the current
+    /// holder still records it.
     fn on_assign_ble(&mut self, target: Option<Mac>) {
         if self.remember_ble {
             self.preferred_ble = target;
@@ -112,16 +100,12 @@ impl FleetEngine {
             return;
         }
 
-        // Each end's frame waits on its own node's next heartbeat, so a new holder
-        // that heartbeats first holds the scan alongside the old one until that
-        // one's window comes round: the overlap is bounded by a heartbeat rather
-        // than excluded, and "at most one node scans Bluetooth" is about what the
-        // host asks for.
+        // Each end changes on its own heartbeat, so old and new holders can overlap for up to one
+        // heartbeat. "At most one node scans Bluetooth" is about what the host asks for.
         self.ble_node = target;
     }
 
-    /// Turn remembering the preferred Bluetooth node on or off, leaving the scan
-    /// itself where it is.
+    /// Turn remembering the preferred Bluetooth node on or off, leaving the scan where it is.
     fn on_remember_ble(&mut self, on: bool) {
         if on == self.remember_ble {
             return;
@@ -130,12 +114,9 @@ impl FleetEngine {
         self.preferred_ble = if on { self.ble_node } else { None };
     }
 
-    /// Mark a node, or every assignable node, as owing a cleared dedup ring.
-    ///
-    /// `Some` sets the flag only if that node is in the table at all — naming one
-    /// that has never been heard from is a no-op rather than a row created for
-    /// it. `None` reads [`Self::is_assignable`] at the moment the command
-    /// arrives, the same set the planner would partition over right now.
+    /// Mark a node, or every assignable node, as owing a cleared dedup ring. A node never heard
+    /// from is ignored rather than given a row. `None` reads [`Self::is_assignable`] now: the set
+    /// the planner would partition.
     fn on_clear_dedup_ring(&mut self, mac: Option<Mac>, now: Now) {
         match mac {
             Some(mac) => {
@@ -161,16 +142,10 @@ impl FleetEngine {
 
     /// Re-mark a node's assignment for delivery under a new epoch.
     ///
-    /// For a node that rebooted, which has forgotten what it holds, or one still
-    /// addressing a bridge that is gone: either way, what it was last given is
-    /// re-sent under an epoch it cannot already match. Routed through
-    /// [`next_epoch`] for the same reason: the epoch it is about to be re-sent
-    /// under must not be the one it already reports holding.
-    ///
-    /// Deliberately does not touch the Bluetooth flag. A change to the flag is
-    /// always a change to the channels too, so it is always a re-cut and always
-    /// [`Self::replan`]'s — and clearing the flag here without the channels beside
-    /// it would leave a Bluetooth node holding an empty set with nothing to scan.
+    /// For a node that rebooted and forgot it, or one still addressing a bridge that is gone.
+    /// [`next_epoch`] avoids the epoch the node reports holding. Leaves the Bluetooth flag alone:
+    /// changing it changes the channels too, which is [`Self::replan`]'s job, and clearing it alone
+    /// would leave a Bluetooth node an empty set with nothing to scan.
     pub(super) fn reissue(&mut self, mac: Mac) {
         let held = self.nodes.get(&mac).and_then(|node| node.held_epoch);
         let counter = next_epoch(&mut self.last_counter, held);
@@ -182,35 +157,27 @@ impl FleetEngine {
         }
     }
 
-    /// Hold the fleet on a partition of the pool, re-cutting it when the set of
-    /// nodes changes. [`Self::on_set_pool`] is the only other re-cut.
+    /// Hold the fleet on a partition of the pool, re-cutting when the set of nodes changes.
+    /// [`Self::on_set_pool`] is the only other re-cut.
     ///
-    /// Membership is every node currently heartbeating; see
-    /// [`Self::is_assignable`]. Nodes are ordered by MAC, which is the order the
-    /// planner slots them into, so each node's share is a function of who is
-    /// present rather than of the order they turned up in.
-    ///
-    /// Cheap on the common path: an unchanged membership returns without touching
-    /// anything, which is what keeps this off a heartbeat's critical path. It is
-    /// called from every tick, so that has to stay true.
+    /// Members are the assignable nodes in MAC order, the planner's slot order, so a share depends
+    /// on who is present, not on arrival order. An unchanged membership returns at once, keeping
+    /// this cheap enough for every tick and off a heartbeat's critical path.
     pub(super) fn replan(&mut self, now: Now) {
-        // The preferred node takes the scan back whenever nothing holds it and it is
-        // drivable — at startup, and after ageing out. One map lookup on the path
-        // where it applies, none otherwise.
+        // The preferred node retakes the scan when nobody holds it and it is drivable: at startup,
+        // and after ageing out.
         if self.ble_node.is_none()
             && let Some(mac) = self.preferred_ble
             && self.nodes.get(&mac).is_some_and(|node| self.is_assignable(node, now))
         {
             self.ble_node = Some(mac);
         }
-        // One value, read once per member below, so a node's channels and its
-        // Bluetooth flag cannot disagree.
+        // Read once, so a node's channels and Bluetooth flag cannot disagree.
         let scanner = self.ble_node;
         let members: Vec<(Mac, Job)> = self
             .nodes
             .values()
-            // Taken rather than defaulted, so no node reaches the planner with
-            // a band it did not claim.
+            // Taken, not defaulted: no node reaches the planner with a band it did not claim.
             .filter_map(|node| {
                 node.capabilities.filter(|_| self.is_assignable(node, now)).map(|capabilities| {
                     let job = if scanner == Some(node.mac) {
@@ -227,10 +194,8 @@ impl FleetEngine {
             return;
         }
 
-        // What a departed node was owed was computed for a fleet that no longer
-        // exists, so it is dropped rather than queued against a node that has
-        // stopped opening windows. What it last acknowledged stays, being still
-        // the best guess at what it is scanning.
+        // A departed node's dues were computed for a fleet that no longer exists, so they are
+        // dropped. What it last acknowledged stays, as the best guess at what it scans.
         let departed = std::mem::replace(&mut self.plan_members, members.clone());
         for (mac, _) in departed.iter().filter(|(mac, _)| !members.iter().any(|(m, _)| m == mac)) {
             if let Some(node) = self.nodes.get_mut(mac) {
@@ -242,18 +207,14 @@ impl FleetEngine {
         self.cut(&members);
     }
 
-    /// Cut the pool among `members` and deal each its share.
-    ///
-    /// Split out of [`Self::replan`] so [`Self::on_set_pool`] can re-cut an unchanged
-    /// membership against a new pool.
+    /// Cut the pool among `members` and deal each its share. Split out so [`Self::on_set_pool`] can
+    /// re-cut an unchanged membership.
     fn cut(&mut self, members: &[(Mac, Job)]) {
         let jobs: Vec<Job> = members.iter().map(|(_, job)| *job).collect();
-        // Not `plan`: a share of 5 GHz cut for an ESP32-C6 is a share nobody
-        // scans, which is the failure the capability token exists to prevent,
-        // reached by a node that is genuinely one of ours.
+        // `plan_for`, not `plan`: a 5 GHz share cut for an ESP32-C6 is one nobody scans, the
+        // failure the capability token prevents.
         let Some(plan) = plan::plan_for(self.config.pool, &jobs) else {
-            // Nothing to cut for, or more than `plan_for` accepts: there is no
-            // partition to be in, and the fleet keeps whatever it already had.
+            // Nothing to cut for, or more than `plan_for` accepts. The fleet keeps what it has.
             self.plan = None;
             return;
         };
@@ -262,43 +223,30 @@ impl FleetEngine {
         self.deal(&plan, members);
     }
 
-    /// Give every member of `plan` its share, marking a node dirty only when
-    /// what it is told to hold has actually changed.
-    ///
-    /// Split out of [`Self::cut`] so [`Self::on_set_tx_power`] can re-send the
-    /// plan already in force under fresh epochs without asking the planner to
-    /// re-cut anything. `members` is the same list `plan` was cut against,
-    /// in the same order, so each member's slot still lines up with the plan's.
+    /// Give every member of `plan` its share, marking a node dirty only when its share changed.
+    /// Split out so [`Self::update_nodes_tx_power`] can re-send the plan in force without a re-cut.
+    /// `members` is the list and order `plan` was cut against, so slots line up.
     fn deal(&mut self, plan: &Plan, members: &[(Mac, Job)]) {
-        // One epoch per node that actually needs telling, through `next_epoch` so
-        // it never collides with what the node's own heartbeat says it holds.
-        // Held locally because the decision needs the node in hand, and `self`
-        // is borrowed for it.
+        // One epoch per node that needs telling, via `next_epoch`. Held locally because the node is
+        // borrowed from `self` while deciding.
         let mut counter = self.last_counter;
         let pool = self.config.pool;
         for (index, (mac, job)) in members.iter().enumerate() {
             let index = u8::try_from(index).unwrap_or(u8::MAX);
             let Some(node) = self.nodes.get_mut(mac) else { continue };
-            // Nothing for this node: more nodes than the pool has channels *this
-            // fleet* can reach, which with the radios read out of the tokens
-            // means as few as twelve nodes with no 5 GHz between them. There is
-            // no frame meaning "scan nothing", so it keeps what it holds —
-            // duplicating another share rather than leaving a gap — and the
-            // footer's unreachable line says the fleet is short of the pool.
+            // No share: more nodes than channels this fleet can reach, which can be as few as
+            // twelve nodes with no 5 GHz between them. No frame means "scan nothing", so the node
+            // keeps what it holds, duplicating a share rather than leaving a gap. The footer's
+            // unreachable line reports the shortfall.
             //
-            // Unless what it holds is nothing to scan, or reaches outside the pool.
-            // Nothing to scan is the assignment of a node that *was* the Bluetooth
-            // scanner and no longer is: it is not duplicating a share, it is blind
-            // and still holding the antenna, and leaving it alone would mean the
-            // scan could never be taken off it. Channels outside the pool are what
-            // a node holds after the operator narrows the pool: keeping them would
-            // scan what the operator just took out. Either way it is dealt
-            // everything its own radio can reach in the pool — the surplus rule at
-            // its limit, and never empty, because every pool has 2.4 GHz in it and
-            // every radio tunes 2.4 GHz.
+            // Except when it holds nothing to scan, or channels outside the pool. Nothing to scan
+            // means a former Bluetooth node: blind, still holding the antenna, and the scan could
+            // never be taken off it. Outside channels follow the operator narrowing the pool, and
+            // would scan what was just removed. Either way it gets everything its radio reaches in
+            // the pool: the surplus rule at its limit, never empty, since every pool and every
+            // radio has 2.4 GHz.
             //
-            // An empty set from the plan itself is neither case: it is the
-            // Bluetooth node's, and it goes out with the flag beside it.
+            // An empty set from the plan is the Bluetooth node's, sent with its flag.
             let held = node.desired.or(node.confirmed);
             let channels = match plan.channels_for(index) {
                 Some(channels) => channels,
@@ -313,11 +261,9 @@ impl FleetEngine {
                         None => continue,
                     }
                 }
-                // The plain surplus case: nothing changes about what it scans, so
-                // it keeps `held` exactly, but `SetTxPower` still has to reach it —
-                // nothing else will re-send an assignment nobody re-cut. During an
-                // ordinary re-cut `held`'s power already matches, so this is a
-                // no-op then, same as before this arm existed.
+                // Plain surplus: the node keeps `held`, but a `SetTxPower` change must still reach
+                // it, since nothing else re-sends an assignment nobody re-cut. In an ordinary
+                // re-cut the power already matches, so this is a no-op.
                 None => {
                     if let Some(assignment) = held
                         && assignment.tx_power != self.config.tx_power
@@ -333,26 +279,21 @@ impl FleetEngine {
                     continue;
                 }
             };
-            // `replan` builds `job` from `scanner`, so `channels.is_empty()` and
-            // `ble` always agree.
+            // `job` comes from `scanner`, so `channels.is_empty()` and `ble` agree.
             let ble = *job == Job::Bluetooth;
 
             let wanted = |a: Assignment| {
                 a.channels == channels && a.ble == ble && a.tx_power == self.config.tx_power
             };
-            // Already scanning exactly this, or already queued to. Re-issuing
-            // either would burn an epoch to tell a node what it already knows.
+            // Already holds or is queued for exactly this. Re-issuing would burn an epoch.
             if node.dirty {
                 if node.desired.is_some_and(wanted) {
                     continue;
                 }
             } else if node.confirmed.is_some_and(wanted) {
-                // Nothing goes out, but what the plan wants and what the node
-                // holds are now the same and have to be recorded as such. A node
-                // rejoining a plan it already satisfies would otherwise have
-                // nothing wanted of it, so its reboot re-issue would have nothing
-                // to re-issue — and a node that has forgotten its assignment
-                // parks on the control channel and goes silently blind.
+                // Record that the node already holds what the plan wants. Otherwise a rejoining
+                // node would have no `desired`, its reboot re-issue would have nothing to send, and
+                // it would park on the control channel, silently blind.
                 node.desired = node.confirmed;
                 continue;
             }

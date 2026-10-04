@@ -18,18 +18,14 @@ pub struct NodeState {
     pub first_seen_ms: i64,
     /// Unix milliseconds of the most recent frame of any kind.
     pub last_seen_ms: i64,
-    /// Monotonic time of the most recent frame of any kind.
-    ///
-    /// Any frame refreshes this; only a heartbeat refreshes `last_heartbeat`.
-    /// Two clocks, because they answer different questions.
+    /// Monotonic time of the most recent frame of any kind. Only a heartbeat refreshes
+    /// `last_heartbeat`, which answers a different question.
     pub last_seen: Instant,
-    /// Monotonic time of the most recent heartbeat, which is what decides
-    /// whether this node can still be given a channel assignment.
+    /// Monotonic time of the most recent heartbeat, which decides whether the node can be assigned.
     pub last_heartbeat: Option<Instant>,
     /// The node's most recent heartbeat counter.
     pub counter: Option<u32>,
-    /// How many times the counter has gone backwards, meaning the node
-    /// rebooted and has forgotten whatever assignment it held.
+    /// Times the counter went backwards: reboots, each forgetting the assignment held.
     pub reboots: u32,
     /// Heartbeats received in this session.
     pub heartbeats: u64,
@@ -37,117 +33,86 @@ pub struct NodeState {
     pub observations: u64,
     /// Most recent link RSSI, as the bridge measured it.
     pub link_rssi: Option<i8>,
-    /// What the node said it is, from its most recent heartbeat.
-    ///
-    /// `None` means only that nothing but a sighting has been heard from this
-    /// address yet — a node reports what it found on a channel before it gets
-    /// back to the control channel. Such a node is left out of the plan; see
-    /// [`FleetEngine::is_assignable`]. Taken from every heartbeat rather than
-    /// remembered from the first, so a node reflashed with a different build
-    /// stops claiming the old one's features.
+    /// What the node said it is, from its latest heartbeat, so a reflashed node stops claiming the
+    /// old build's features. `None` until a heartbeat arrives, because a node reports a channel's
+    /// sightings before returning to the control channel. Such a node is left out of the plan
+    /// ([`FleetEngine::is_assignable`]).
     pub capabilities: Option<Capabilities>,
-    /// The bridge's peer table had no room for this node.
-    ///
-    /// It cannot be transmitted to at all until a slot frees up, so it is no use
-    /// to a plan; see [`FleetEngine::is_assignable`]. Cleared when a bridge
-    /// announces itself, since its table starts empty.
+    /// The bridge's peer table had no room for this node, so it cannot be sent anything and is left
+    /// out of the plan ([`FleetEngine::is_assignable`]). Cleared when a bridge announces itself,
+    /// since its table starts empty.
     pub peer_refused: bool,
-    /// The bridge may hold a peer slot for this node.
-    ///
-    /// Set when a frame goes to it, cleared when its peer is removed after
-    /// [`EngineConfig::topology_timeout`]. Kept across a bridge announcing itself,
-    /// which a port reopen does too: removing a peer the bridge has already lost is
-    /// harmless.
+    /// The bridge may hold a peer slot for this node. Set when a frame goes to it, cleared when the
+    /// peer is removed after [`EngineConfig::topology_timeout`]. Kept across a bridge announcing
+    /// itself, as on a port reopen: removing a peer the bridge already lost is harmless.
     pub peered: bool,
     /// What this host wants the node to be scanning.
     pub desired: Option<Assignment>,
-    /// What the node acknowledged, which is a different thing. Cleared when it
-    /// reboots, because a reboot means it has forgotten.
+    /// What the node acknowledged. Cleared on reboot, because the node has forgotten.
     pub confirmed: Option<Assignment>,
-    /// Whether [`Self::desired`] still needs to be delivered. Set when the plan
-    /// changes, when the Bluetooth scan moves and when the node reboots; cleared
-    /// only on an acknowledgement, never on a successful enqueue.
+    /// Whether [`Self::desired`] still needs delivering. Set when the plan changes, the Bluetooth
+    /// scan moves or the node reboots. Cleared only on an acknowledgement, never on enqueue.
     pub dirty: bool,
-    /// Whether this node's dedup ring should be cleared on its next admin window.
-    ///
-    /// Set by [`Command::ClearRing`]. Cleared on the clear's own `AckOk`, on a full
-    /// peer table (the same terminal handling an assignment gets), and when the
-    /// node reboots — a node that has just booted already holds an empty ring.
+    /// Whether to clear this node's dedup ring in its next admin window. Set by
+    /// [`Command::ClearRing`]. Cleared on the clear's `AckOk`, on a full peer table (as for an
+    /// assignment), and on reboot, which empties the ring anyway.
     pub clear_dedup_ring: bool,
     /// How many times an assignment has been put on the air for this node.
     pub admin_attempts: u32,
     /// What happened to the most recent attempt.
     pub last_outcome: Option<AdminOutcome>,
-    /// Heartbeat-to-transmit-callback microseconds of the most recent
-    /// acknowledged assignment, as the bridge measured it.
+    /// Heartbeat-to-transmit-callback microseconds of the latest acknowledged assignment, by the
+    /// bridge's clock.
     pub last_latency_us: Option<u32>,
-    /// Bridge-local microsecond stamp of the most recent heartbeat, which is
-    /// the near end of that measurement.
+    /// Bridge-local microsecond stamp of the latest heartbeat: the near end of
+    /// [`Self::last_latency_us`].
     pub(super) last_heartbeat_rx_us: Option<u32>,
-    /// The assignment epoch this node's most recent *live* heartbeat reported
-    /// it holds, or `0` for none. `None` before any live heartbeat has arrived;
-    /// a replayed heartbeat never sets this, since it says what the node held
-    /// when it was sent rather than what it holds now. See
-    /// [`FleetEngine::air_is_live`].
+    /// The epoch this node's latest *live* heartbeat reported holding, `0` for none. A replayed
+    /// heartbeat never sets it, since it says what the node held then, not now
+    /// ([`FleetEngine::air_is_live`]).
     pub held_epoch: Option<u8>,
-    /// How many times this node's heartbeat has reported an epoch other than
-    /// the one it acknowledged: acked but not adopted, and re-sent on the
-    /// heartbeat that revealed it.
+    /// Times this node's heartbeat reported an epoch other than the one it acknowledged. Each was
+    /// re-sent on that heartbeat.
     pub unadopted: u32,
-    /// The `seq` of this node's most recent sighting batch. `None` before its
-    /// first, and reset on a detected reboot: the counter restarts at boot,
-    /// and a gap across one is history rather than a loss.
+    /// The `seq` of this node's latest sighting batch. Reset on reboot, since `seq` restarts at
+    /// boot and a gap across one is not a loss.
     pub last_seq: Option<u16>,
-    /// Whether the batch that set `last_seq` arrived live rather than replayed
-    /// from the bridge's backlog. A gap after a replayed batch is not counted;
-    /// see [`FleetEngine::note_batch_seq`].
+    /// Whether the batch that set `last_seq` arrived live. A gap after a replayed batch is not
+    /// counted ([`FleetEngine::note_batch_seq`]).
     pub(super) last_seq_live: bool,
-    /// Bytes of this node's most recent sighting-batch frame, kept only to
-    /// recognise a MAC-layer retransmission of it: same `seq`, same bytes.
-    /// `None` before its first batch, and reset alongside `last_seq` on a
-    /// detected reboot.
+    /// Bytes of this node's latest sighting batch, kept to recognise a MAC-layer retransmission of
+    /// it. Reset with `last_seq` on reboot.
     pub(super) last_batch: Option<Vec<u8>>,
-    /// Bridge-local microsecond stamp of [`Self::last_batch`], the near end
-    /// of [`FleetEngine::is_duplicate_batch`]'s retransmission window. `None`
-    /// before its first batch, and reset alongside `last_batch` on a
-    /// detected reboot.
+    /// Bridge-local stamp of [`Self::last_batch`], the near end of
+    /// [`FleetEngine::is_duplicate_batch`]'s window. Reset with it on reboot.
     pub(super) last_batch_rx_us: Option<u32>,
-    /// Batches lost between this node and the host, counted from gaps in
-    /// `seq` that follow a live batch. Each one is everything one dwell or
-    /// Bluetooth scan produced, hidden until the node's dedup ring next
-    /// refreshes them.
+    /// Batches lost between this node and the host, from `seq` gaps after a live batch. Each is a
+    /// whole dwell's or Bluetooth scan's output, hidden until the node's dedup ring refreshes it.
     pub batches_lost: u64,
-    /// Batches from this node dropped as MAC-layer retransmissions; see
-    /// [`Counters::duplicate_batches`].
+    /// Batches from this node dropped as retransmissions ([`Counters::duplicate_batches`]).
     pub duplicate_batches: u64,
-    /// The `wifi_dropped` this node's most recent heartbeat carried, the baseline
-    /// [`Counters::wifi_dropped`] advances from. `None` before its first heartbeat.
+    /// The `wifi_dropped` of this node's latest heartbeat: the baseline [`Counters::wifi_dropped`]
+    /// advances from.
     pub(super) last_wifi_dropped: Option<u16>,
     /// The same for `ble_dropped` and [`Counters::ble_dropped`].
     pub(super) last_ble_dropped: Option<u16>,
 }
 
-/// What one node was told to do, and the fleet arithmetic it was computed
-/// against.
+/// What one node was told to do, and the fleet arithmetic it was computed against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Assignment {
-    /// Which [`wartui_proto::plan::SCAN_CHANNELS`] indices to dwell on.
-    ///
-    /// Empty exactly when [`ble`](Self::ble) is set, and never otherwise:
-    /// Bluetooth is a node's whole job, and an empty set without the flag is the
-    /// one thing a node cannot be told, since it would park while this host
-    /// believed it was sweeping. [`FleetEngine::replan`] reads both off one value
-    /// so they cannot drift.
+    /// Which [`wartui_proto::plan::SCAN_CHANNELS`] indices to dwell on. Empty exactly when
+    /// [`ble`](Self::ble) is set. An empty set without the flag would park a node while this host
+    /// believed it was sweeping. [`FleetEngine::replan`] reads both off one value so they cannot
+    /// drift.
     pub channels: ChannelSet,
-    /// Whether this node's job is Bluetooth, and so whether it sniffs no Wi-Fi.
-    ///
-    /// Part of the assignment rather than beside it: it travels in the same frame
-    /// and is adopted by the same epoch comparison, so treating them separately
-    /// would make "acknowledged" ambiguous.
+    /// Whether this node's job is Bluetooth, sniffing no Wi-Fi. Part of the assignment: it travels
+    /// in the same frame under the same epoch, so "acknowledged" stays unambiguous.
     pub ble: bool,
     /// Wi-Fi transmit power for this node in ESP-IDF quarter-dBm units.
     pub tx_power: i8,
-    /// The persisted monotonic epoch it was allocated from.
+    /// The epoch counter it was allocated from: monotonic within a capture, not persisted
+    /// (`FleetEngine::last_counter`).
     pub counter: u64,
 }
 
@@ -190,16 +155,12 @@ impl NodeState {
         }
     }
 
-    /// Whether this node's heartbeat has confirmed it holds what this host
-    /// currently cares about: [`Self::desired`] when there is one, since that
-    /// is newer than anything acknowledged; [`Self::confirmed`] otherwise, so
-    /// a node that departed the plan (`desired` cleared, `confirmed` kept) is
-    /// read against what it actually holds rather than nothing at all.
+    /// Whether this node's heartbeat confirms it holds the assignment this host cares about.
     ///
-    /// The stronger fact layered on top of [`Self::confirmed`]: a MAC-layer ack
-    /// says the frame was delivered, this says the node actually took it. `false`
-    /// with no live heartbeat yet, or while [`Self::held_epoch`] and that
-    /// assignment's epoch disagree.
+    /// That is [`Self::desired`], which is newer, or else [`Self::confirmed`], so a node that left
+    /// the plan is read against what it holds. Stronger than [`Self::confirmed`]: an ack says the
+    /// frame arrived, this says the node took it. `false` before a live heartbeat, or while
+    /// [`Self::held_epoch`] disagrees.
     #[must_use]
     pub fn adopted(&self) -> bool {
         self.desired

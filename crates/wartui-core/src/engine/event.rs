@@ -9,12 +9,11 @@ use super::{EngineConfig, FleetEngine};
 use crate::health::Health;
 use crate::record::Record;
 
-/// The time, in both of the forms this code needs.
+/// The time, in both forms this code needs.
 ///
-/// Durations are measured on the monotonic clock, which cannot jump backwards
-/// over an NTP correction and declare the fleet dead; stored timestamps use the
-/// wall clock, because a capture has to line up against something else. Both
-/// travel together so a caller cannot reach for whichever is nearest.
+/// Durations use the monotonic clock, so an NTP correction cannot declare the fleet dead. Stored
+/// timestamps use the wall clock, so a capture lines up against other records. Both travel together
+/// so a caller cannot reach for whichever is nearest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Now {
     /// Monotonic, for elapsed-time decisions.
@@ -24,9 +23,8 @@ pub struct Now {
 }
 
 /// Something the engine must react to.
-// `Link` dwarfs `Tick` because it carries an inline ESP-NOW payload. Boxing it
-// would mean an allocation for every frame received to shrink a value
-// that is created, matched on and dropped inside one call to `handle`.
+// `Link` carries an inline ESP-NOW payload. Boxing it would allocate per frame to shrink a value
+// that lives inside one `handle` call.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum Event {
@@ -36,37 +34,26 @@ pub enum Event {
     Tick,
     /// Something the operator asked for.
     Command(Command),
-    /// The runtime's periodic reading of what only it can see: the store and the
-    /// host's own health. The engine adds its counters and lag peak and records the
-    /// lot as a [`Record::HostStatus`].
+    /// The runtime's periodic reading of the store and host health. The engine adds its counters
+    /// and lag peak and records a [`Record::HostStatus`].
     HostSample(HostSample),
 }
 
-/// An operator's instruction to the fleet.
-///
-/// Deliberately an event like any other rather than a method on the engine: a
-/// keypress and a heartbeat have to be ordered against each other, and routing
-/// both through [`FleetEngine::handle`] is what makes that ordering testable.
+/// An operator's instruction. An event rather than a method, so [`FleetEngine::handle`] orders
+/// keypresses against heartbeats, testably.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
-    /// Give one node the Bluetooth scan as its whole job, or take it away from the
-    /// fleet.
+    /// Give one node the Bluetooth scan as its whole job, or take the scan off the fleet.
     ///
-    /// At most one node, and by default none. The two radios share the one 2.4 GHz
-    /// antenna, and a scan holds it through exactly the window a node has to be
-    /// listening in — which cost a stock node every assignment sent to it
-    /// (`docs/phase-0-findings.md`). A node that sniffs no Wi-Fi has nothing to
-    /// hold the antenna against, which is why Bluetooth is a whole node's job
-    /// rather than a slice of one's: it costs the fleet a sniffer and buys a scan
-    /// run back to back with the next.
+    /// At most one node, and by default none. The two radios share one 2.4 GHz antenna, and a scan
+    /// holds it through the window a node listens in. That cost a stock node every assignment sent
+    /// to it (`docs/phase-0-findings.md`). A node sniffing no Wi-Fi has nothing to hold the antenna
+    /// against, so Bluetooth costs the fleet a whole sniffer and buys back-to-back scans.
     ///
-    /// Nothing goes out now, and nothing is decided now: the planner reads this on
-    /// its next re-cut, which takes that node's channels away and deals them round
-    /// the rest. Moving it costs two frames, because the node giving it up has a
-    /// share of the pool coming back to it.
-    ///
-    /// While remembering is on, the target also becomes the preferred Bluetooth node,
-    /// `None` included, so a scan taken off the fleet is not handed straight back.
+    /// Nothing is sent now. The planner's next re-cut deals that node's channels to the rest.
+    /// Moving the scan costs two frames, since the old holder gets a share back. While remembering
+    /// is on, the target also becomes the preferred node, `None` included, so a withdrawn scan
+    /// stays withdrawn.
     AssignBle {
         /// Which node, or `None` to stop scanning BLE anywhere.
         mac: Option<Mac>,
@@ -74,10 +61,8 @@ pub enum Command {
 
     /// Turn remembering the preferred Bluetooth node on or off.
     ///
-    /// Off forgets the preferred node and leaves the scan where it is: the setting is
-    /// about what happens the next time the scan has no holder, not a way to stop it.
-    /// On from off adopts whichever node holds the scan now. Setting the value the
-    /// engine already holds is a no-op.
+    /// Off forgets the preferred node but leaves the scan where it is. On from off adopts the
+    /// current holder. Setting the current value is a no-op.
     RememberBle {
         /// Whether to remember.
         on: bool,
@@ -85,13 +70,9 @@ pub enum Command {
 
     /// Change the fleet's transmit powers, in ESP-IDF quarter-dBm units.
     ///
-    /// Clamped the same way [`FleetEngine::new`] clamps [`EngineConfig::tx_power`] and
-    /// [`EngineConfig::bridge_tx_power`]. The bridge's power goes out at once, over the
-    /// same `bulk` channel the status poll uses, when the link is up and the value
-    /// changed — nothing here waits for the next poll. The nodes' power is never sent
-    /// from here: it re-sends each member's share of the plan already in force under a
-    /// fresh epoch, and each node picks it up on its own next heartbeat. Setting a
-    /// value the engine already holds is a no-op.
+    /// Both are clamped as [`FleetEngine::new`] clamps them. The bridge's power goes out at once
+    /// (`FleetEngine::update_bridge_tx_power`), the nodes' in re-sent assignments
+    /// (`FleetEngine::update_nodes_tx_power`). Setting the current values is a no-op.
     SetTxPower {
         /// Wi-Fi transmit power for the nodes.
         nodes: i8,
@@ -99,22 +80,18 @@ pub enum Command {
         bridge: i8,
     },
 
-    /// Ask a node, or every assignable node, to empty its dedup ring.
-    ///
-    /// Each node's clear goes out in its own next admin window, the same as an
-    /// assignment does.
+    /// Ask a node, or every assignable node, to empty its dedup ring. Each clear goes out in that
+    /// node's next admin window, like an assignment.
     ClearRing {
-        /// Which node, or `None` for every node [`FleetEngine::is_assignable`]
-        /// counts as of the moment this command arrives.
+        /// Which node, or `None` for every node [`FleetEngine::is_assignable`] when this arrives.
         mac: Option<Mac>,
     },
 
     /// Change the channel pool the fleet partitions.
     ///
-    /// Nothing goes out from here: the planner re-cuts the whole fleet against the new
-    /// pool, and each node takes its new share in its own next admin window under a
-    /// fresh epoch. A node adopting a share that differs from the one it holds empties
-    /// its dedup ring on its own. Setting the pool already in force is a no-op.
+    /// The planner re-cuts the fleet, and each node takes its new share in its next admin window
+    /// under a fresh epoch. A node whose share changes empties its own dedup ring. Setting the
+    /// current pool is a no-op.
     SetPool {
         /// The pool to partition from now on.
         pool: ChannelPool,
@@ -128,14 +105,14 @@ pub struct ActionBatch {
     pub records: Vec<Record>,
     /// Commands that can wait behind anything else.
     pub bulk: Vec<wartui_proto::link::HostToBridge>,
-    /// Commands racing a node's 100 ms admin window, sent ahead of anything
-    /// in `bulk`. In practice: assignments, and only ever in the moment after
-    /// a heartbeat.
+    /// Commands sent ahead of `bulk`. Assignments and dedup-ring clears race a node's 100 ms admin
+    /// window straight after a heartbeat. Peer removals come here because `bulk` can drop them
+    /// (`FleetEngine::evict_stale_peers`).
     pub urgent: Vec<wartui_proto::link::HostToBridge>,
 }
 
 impl ActionBatch {
-    /// Whether there is anything at all to do.
+    /// Whether there is anything to do.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.records.is_empty() && self.bulk.is_empty() && self.urgent.is_empty()
@@ -147,8 +124,8 @@ impl ActionBatch {
 pub struct StoreStats {
     /// Rows written.
     pub written: u64,
-    /// Rows dropped because the store could not keep up. Losing an observation
-    /// beats stalling the engine, but it must be visible when it happens.
+    /// Rows dropped because the store fell behind. Losing an observation beats stalling the engine,
+    /// but it must show.
     pub dropped: u64,
 }
 
