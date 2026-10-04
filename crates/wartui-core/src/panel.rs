@@ -1,41 +1,33 @@
 //! The bridge's panel, composed here.
 //!
-//! A bridge with a screen is sent finished lines and blits them. It never composes
-//! one, never parses an air frame to find out what to say, and owns nothing about the
-//! panel but the three colours a [`Severity`] maps to. That is the same division that
-//! keeps the planner on the host: everything likely to be wrong lives where `cargo
-//! test` can reach it and a fix costs a `cargo run`, and what is left on the board is
-//! small enough to be finished.
+//! A bridge with a screen is sent finished lines and blits them. It composes nothing, parses no air
+//! frame, and owns only the three colours a [`Severity`] maps to. The same division keeps the
+//! planner on the host: what is likely wrong lives where `cargo test` reaches and a fix costs a
+//! `cargo run`, and the board keeps only what is small enough to finish.
 //!
-//! So this module is a pure function of one [`Snapshot`] and the geometry the bridge
-//! announced. No clock — a snapshot already carries the only times that matter, and
-//! the liveness question a line would otherwise ask was answered by the engine and
-//! carried in [`crate::engine::NodeView`]. No I/O, and nothing here decides *when* a
-//! panel is pushed; [`crate::runtime`] owns that.
+//! So this module is a pure function of one [`Snapshot`] and the bridge's announced geometry. No
+//! clock: the snapshot carries the times that matter, and liveness comes from the engine in
+//! [`crate::engine::NodeView`]. No I/O, and [`crate::runtime`] decides *when* a panel is pushed.
 //!
-//! Five lines of the eight a panel has, which leaves room to add one without
-//! rearranging anything. Each is coloured by its own state, so the panel reads at a
-//! glance without being read.
+//! Five of the panel's eight lines, leaving room to add one. Each is coloured by its own state, so
+//! the panel reads at a glance.
 //!
 //! # The GPS line is green only on a live, current fix
 //!
-//! Stricter than the view's reading of the same facts, and deliberately so. [`crate::gps`]
-//! argues that a receiver nobody attached is not a *fault*, and it is not — but this
-//! line is grading the capture rather than the subsystem, and a capture being written
-//! against a constant position is the thing an operator most needs to notice from
-//! across a car. So [`PositionSource::Gps`] and nothing else is green.
+//! Stricter than the view, on purpose. [`crate::gps`] holds that a receiver nobody attached is not
+//! a *fault*, but this line grades the capture, not the subsystem, and a capture written against a
+//! constant position is what an operator most needs to see from across a car. So only
+//! [`PositionSource::Gps`] is green.
 //!
-//! What is left splits on whether a receiver is contributing at all. One that is
-//! attached and trying — connecting, scanning, searching, or holding a fix the chain
-//! has stopped believing — is working but not ideal, and yellow. Nothing attached, a
-//! port that will not read, and a pinned `--lat`/`--lon` are red however deliberate
-//! any of them was, because none of the three is going to produce another fix.
+//! A receiver attached and trying (connecting, scanning, searching, or holding a fix the chain
+//! stopped believing) is yellow. Nothing attached, a port that will not read, and a pinned
+//! `--lat`/`--lon` are red however deliberate, since none will produce another fix.
 //!
 //! # The RSSI line is link health, not signal strength
 //!
-//! [`crate::engine::NodeState::link_rssi`] is how strongly *the bridge* heard a node,
-//! not how strongly a node heard an access point. It is the number that says whether
-//! an assignment will land, which is why it is worth one of five lines.
+//! [`crate::engine::NodeState::link_rssi`] is how strongly *the bridge* heard a node, not how
+//! strongly a node heard an access point. It says whether an assignment will land, which earns it
+//! one of five lines.
 
 use wartui_proto::link::{Panel, PanelLine, PanelLines, Severity, ShortStr};
 
@@ -45,33 +37,24 @@ use crate::position::PositionSource;
 
 /// Mean link RSSI, in dBm, below which the fleet is worth looking at.
 ///
-/// Not a stock link budget. Every radio in the fleet defaults to 2 dBm
-/// ([`wartui_proto::plan::DEFAULT_TX_POWER_QUARTER_DBM`]) and ESP-NOW goes out at 802.11g
-/// 24 Mbps, whose specified receiver sensitivity is about −74 dBm — so that is the
-/// floor, and a threshold set at it would warn at the moment nodes started missing
-/// their admin windows rather than before. These two sit above it on purpose, while
-/// there is still something an operator can do: close a window, move the dongle off
-/// the floor, walk a node back.
+/// Not a stock link budget. Every radio defaults to 2 dBm
+/// ([`wartui_proto::plan::DEFAULT_TX_POWER_QUARTER_DBM`]), and ESP-NOW goes out at 802.11g 24 Mbps,
+/// rated at about −74 dBm sensitivity. That is the floor, and a threshold there would warn only as
+/// nodes started missing admin windows. These sit above it while the operator can still act: close
+/// a window, lift the dongle off the floor, walk a node back.
 pub const RSSI_WEAK_AVG: i8 = -65;
 
-/// The reading below which a figure stops being worth printing.
-///
-/// Well under both thresholds, because this is not a judgement about the link —
-/// [`RSSI_WEAK_MIN`] already makes that one — but about the number. See [`dbm`].
+/// The reading below which a figure stops being worth printing. Well under both thresholds:
+/// [`RSSI_WEAK_MIN`] judges the link, and this judges the number ([`dbm`]).
 const RSSI_FLOOR: i32 = -100;
 
-/// Weakest link RSSI, in dBm, below which one node is worth looking at.
-///
-/// The more negative of the pair, because one node at the edge of a fleet that is
-/// otherwise fine is exactly the case an average cannot show. See [`RSSI_WEAK_AVG`]
-/// for where both numbers come from.
+/// Weakest link RSSI, in dBm, below which one node is worth looking at. More negative than
+/// [`RSSI_WEAK_AVG`], which says where both come from, because one edge node in a fine fleet is
+/// what an average cannot show.
 pub const RSSI_WEAK_MIN: i8 = -70;
 
-/// Lay out a panel for one snapshot.
-///
-/// The lines are truncated to `panel.cols` and capped at `panel.rows`, so a narrower
-/// or shorter screen loses the end of a line rather than overflowing it. The caller
-/// sends the result verbatim.
+/// Lay out a panel for one snapshot. Lines are cut to `panel.cols` and capped at `panel.rows`, so a
+/// smaller screen loses line ends rather than overflowing. The caller sends the result verbatim.
 #[must_use]
 pub fn render(snapshot: &Snapshot, panel: Panel) -> PanelLines {
     let composed = [
@@ -84,8 +67,8 @@ pub fn render(snapshot: &Snapshot, panel: Panel) -> PanelLines {
 
     let mut lines = PanelLines::new();
     for (level, text) in composed.into_iter().take(panel.rows as usize) {
-        // The vector's own capacity is `PANEL_ROWS`, so a bridge claiming more rows
-        // than the wire can carry gets what fits rather than a truncated frame.
+        // Capacity is `PANEL_ROWS`, so a bridge claiming more rows than the wire carries gets what
+        // fits, not a truncated frame.
         if lines.push(PanelLine { level, text: fit(&text, panel.cols) }).is_err() {
             break;
         }
@@ -93,14 +76,12 @@ pub fn render(snapshot: &Snapshot, panel: Panel) -> PanelLines {
     lines
 }
 
-/// One line's worth of text, cut to the panel's width.
+/// One line's text, cut to the panel's width.
 ///
-/// By characters rather than bytes: everything composed here is ASCII, and a slice at a
-/// byte that is not a boundary would be a panic rather than a short line the first time
-/// that stopped being true. `nothing_composed_here_leaves_ascii` holds the antecedent,
-/// and it is not only about panics — the bridge draws with a font whose glyph mapping
-/// covers U+0020 to U+007F and silently substitutes `?` for everything else, so a
-/// non-ASCII character here reaches the glass as a question mark and no host test sees it.
+/// By characters, not bytes: a slice at a non-boundary byte would panic the first time something
+/// non-ASCII slipped in. Unpanicked it would still be wrong: the bridge's font covers U+0020 to
+/// U+007F and draws `?` for anything else, which no host test sees.
+/// `render_composes_only_ascii_when_any_state_rendered` holds the line.
 fn fit(text: &str, cols: u8) -> ShortStr {
     let mut out = ShortStr::new();
     for c in text.chars().take(cols as usize) {
@@ -114,16 +95,16 @@ fn fit(text: &str, cols: u8) -> ShortStr {
 /// Where the position is coming from, and whether anything is still trying.
 fn gps_line(snapshot: &Snapshot) -> (Severity, String) {
     let Some(gps) = &snapshot.gps else {
-        // No receiver was ever configured, so the chain's other tiers are the whole
-        // story. Both are red: a pinned position is not wardriving data.
+        // No receiver configured, so the chain's other tiers are the story. Both red: a pinned
+        // position is not wardriving data.
         return match snapshot.position.source {
             PositionSource::Static => (Severity::Error, "gps: pinned".to_owned()),
             _ => (Severity::Error, "gps: none".to_owned()),
         };
     };
 
-    // Checked first: the chain answering from the GPS is the only thing that makes
-    // this line green, and it stays true for `max_age` after a receiver stops talking.
+    // First: only the chain answering from the GPS makes this green, and that holds for `max_age`
+    // after a receiver stops talking.
     if snapshot.position.source == PositionSource::Gps {
         let sats = match gps.status {
             GpsStatus::Fixed { satellites: Some(n) } => format!(", {n} sats"),
@@ -136,8 +117,8 @@ fn gps_line(snapshot: &Snapshot) -> (Severity, String) {
         // Nothing is coming, however hard the thread keeps retrying.
         GpsStatus::NoReceiver => (Severity::Error, "gps: no receiver".to_owned()),
         GpsStatus::Failed(_) => (Severity::Error, "gps: unreadable".to_owned()),
-        // Attached and trying. `Fixed` lands here once the chain has fallen through
-        // to a staler tier, which is a receiver that had a fix and has lost it.
+        // Attached and trying. `Fixed` lands here once the chain fell through to a staler tier: a
+        // receiver that lost its fix.
         GpsStatus::Connecting => (Severity::Warn, "gps connecting".to_owned()),
         GpsStatus::Scanning { .. } => (Severity::Warn, "gps scanning".to_owned()),
         GpsStatus::Searching => (Severity::Warn, "gps searching".to_owned()),
@@ -145,11 +126,9 @@ fn gps_line(snapshot: &Snapshot) -> (Severity, String) {
     }
 }
 
-/// How many nodes are heartbeating, and how many of those can be driven.
-///
-/// Both numbers, because a node the bridge refused a peer slot, or that has not
-/// said what its radio is, is alive and undrivable. With none alive, a session that
-/// has seen no node yet is waiting, and one that has seen nodes has lost them.
+/// How many nodes are heartbeating, and how many can be driven. Both, because a node refused a peer
+/// slot, or with no declared radio, is alive but undrivable. With none alive, a session that has
+/// seen none is waiting, and one that has seen some has lost them.
 fn nodes_line(snapshot: &Snapshot) -> (Severity, String) {
     if !snapshot.link_up {
         return (Severity::Error, "link down".to_owned());
@@ -157,8 +136,8 @@ fn nodes_line(snapshot: &Snapshot) -> (Severity, String) {
     match (snapshot.alive, snapshot.assignable) {
         (0, _) if snapshot.nodes.is_empty() => (Severity::Warn, "waiting for nodes".to_owned()),
         (0, _) => (Severity::Error, "all nodes silent".to_owned()),
-        // Drivable first, so it reads as "nine of twenty" — the plain-English order,
-        // and the one that puts the number an operator can act on at the front.
+        // Drivable first, "nine of twenty": the plain-English order, with the actionable number in
+        // front.
         (alive, drivable) if alive > drivable => {
             (Severity::Warn, format!("nodes {drivable} of {alive}"))
         }
@@ -182,9 +161,8 @@ fn rssi_line(snapshot: &Snapshot) -> (Severity, String) {
         snapshot.nodes.iter().filter(|n| n.alive).filter_map(|n| n.state.link_rssi).collect();
 
     let Some(&min) = heard.iter().min() else {
-        // Say which of the two silences this is rather than printing a zero. With
-        // nothing alive the line above has already said so, and a second fault
-        // colour for one fact reads as two.
+        // Say which silence this is rather than print zero. With nothing alive the line above says
+        // so, and a second fault colour for one fact reads as two.
         return if snapshot.alive == 0 {
             (Severity::Ok, "rssi n/a".to_owned())
         } else {
@@ -192,21 +170,17 @@ fn rssi_line(snapshot: &Snapshot) -> (Severity, String) {
         };
     };
 
-    // Floored rather than truncated, which for a negative dBm is the pessimistic
-    // direction: `/` rounds towards zero, so a fleet at -65 and -66 would average to
-    // -65 and sit exactly on the right side of a threshold set to catch it.
+    // Floored, the pessimistic direction for negative dBm. `/` rounds towards zero, so -65 and -66
+    // would average -65, just the safe side of a threshold meant to catch them.
     let total: i32 = heard.iter().map(|&r| i32::from(r)).sum();
     let mean = total.div_euclid(heard.len() as i32);
 
     let weak = mean < i32::from(RSSI_WEAK_AVG) || min < RSSI_WEAK_MIN;
     let level = if weak { Severity::Warn } else { Severity::Ok };
-    // Two shapes, because a subject, two figures and two labels do not fit seventeen
-    // columns together. When the figures differ the labels earn the room — an
-    // unlabelled pair is an order the reader has to have been told, and this is a line
-    // meant to be read at a glance rather than learnt. When they agree there is one
-    // number, no order to describe, and the subject takes the room back. A fleet the
-    // bridge hears equally well is the ordinary case on a bench, and one node is
-    // always this case.
+    // Two shapes: a subject, two figures and two labels do not fit seventeen columns. When the
+    // figures differ, labels earn the room, because an unlabelled pair's order must be learnt. When
+    // they agree there is one number, and the subject takes the room back. That is the bench case,
+    // and always the one-node case.
     let text = if mean == i32::from(min) {
         format!("rssi {}", dbm(mean))
     } else {
@@ -215,24 +189,17 @@ fn rssi_line(snapshot: &Snapshot) -> (Severity, String) {
     (level, text)
 }
 
-/// One RSSI reading, in the three characters the line can spare for it.
-///
-/// [`RSSI_FLOOR`] and below is `BAD` rather than the figure. Three digits and a sign is
-/// one character more than the panel has, and the exact number stopped meaning anything
-/// well above it: a link this weak is not one that is nearly working, and what an
-/// operator does about -104 dBm is what they do about -100. The word is the width of an
-/// ordinary reading, so the line does not change shape as a node crosses.
+/// One RSSI reading, in the three characters the line can spare. [`RSSI_FLOOR`] and below reads
+/// `BAD`: three digits and a sign is a character too wide, and the exact figure stopped meaning
+/// anything well above it. An operator does the same about -104 dBm as about -100. The word is as
+/// wide as a reading, so the line keeps its shape.
 fn dbm(value: i32) -> String {
     if value <= RSSI_FLOOR { "BAD".to_owned() } else { value.to_string() }
 }
 
-/// A count rendered short enough for a narrow line.
-///
-/// Three significant figures, because these are estimates: [`crate::distinct`] puts
-/// the standard error at about 0.8%, so the digits past three are noise once there
-/// are enough of them to matter. Shared with the view rather than written twice —
-/// the panel and the terminal reporting different numbers for one estimate is a bug
-/// nobody would think to look for.
+/// A count rendered short for a narrow line. Three significant figures, because these are estimates
+/// with about 0.8% standard error ([`crate::distinct`]), so later digits are noise. Shared with the
+/// view, since the panel and terminal disagreeing on one estimate is a bug nobody would look for.
 #[must_use]
 pub fn approx(n: u64) -> String {
     if n < 10_000 {
@@ -319,14 +286,19 @@ mod tests {
     fn gps(status: GpsStatus, source: PositionSource) -> Snapshot {
         let mut snapshot = quiet();
         snapshot.position = Fix { source, ..Fix::none() };
-        snapshot.gps = Some(GpsView {
+        snapshot.gps = Some(gps_view(status));
+        snapshot
+    }
+
+    /// A receiver doing `status`, with nothing else to say.
+    fn gps_view(status: GpsStatus) -> GpsView {
+        GpsView {
             status,
             counters: GpsCounters::default(),
             last_fix_ms: None,
             settled: None,
             pinned_baud: false,
-        });
-        snapshot
+        }
     }
 
     /// The text of the line at `row`, so a test can read what an operator would.
@@ -337,7 +309,7 @@ mod tests {
     }
 
     #[test]
-    fn panel_view_populates_all_lines_when_snapshot_is_empty() {
+    fn render_fills_every_line_when_snapshot_empty() {
         let lines = render(&quiet(), SCREEN);
         assert_eq!(lines.len(), 5);
         // Not a blank screen and not a zero pretending to be a measurement: each
@@ -348,7 +320,7 @@ mod tests {
     }
 
     #[test]
-    fn panel_view_sets_ok_severity_for_gps_when_fix_is_live() {
+    fn render_marks_gps_ok_when_fix_live() {
         // The chain answering from the receiver is the whole of the rule, and it is
         // what the satellite count hangs off too.
         let (level, text) =
@@ -364,7 +336,7 @@ mod tests {
     }
 
     #[test]
-    fn panel_view_sets_warn_severity_for_gps_when_receiver_is_searching_or_connecting() {
+    fn render_marks_gps_warn_when_receiver_trying() {
         for status in [
             GpsStatus::Connecting,
             GpsStatus::Scanning { port: "/dev/ttyUSB0".to_owned(), baud: 9_600 },
@@ -379,7 +351,7 @@ mod tests {
     }
 
     #[test]
-    fn panel_view_sets_error_severity_for_gps_when_receiver_failed_or_position_pinned() {
+    fn render_marks_gps_error_when_receiver_gone_or_position_pinned() {
         for status in [GpsStatus::NoReceiver, GpsStatus::Failed("no such port".to_owned())] {
             let (level, _) = row(&gps(status.clone(), PositionSource::None), 0);
             assert_eq!(level, Severity::Error, "{status:?} is not going to answer");
@@ -395,7 +367,7 @@ mod tests {
     }
 
     #[test]
-    fn panel_view_formats_node_counts_when_fleet_has_undrivable_nodes() {
+    fn render_shows_drivable_of_alive_when_some_undrivable() {
         let mut snapshot = fleet(&[Some(-40), Some(-45)]);
         snapshot.alive = 5;
         snapshot.assignable = 2;
@@ -410,14 +382,14 @@ mod tests {
     }
 
     #[test]
-    fn panel_view_sets_warn_severity_for_nodes_when_none_seen_yet() {
+    fn render_marks_nodes_warn_when_none_seen() {
         let (level, text) = row(&quiet(), 1);
         assert_eq!(level, Severity::Warn);
         assert_eq!(text, "waiting for nodes");
     }
 
     #[test]
-    fn panel_view_sets_error_severity_for_nodes_when_all_seen_nodes_are_silent() {
+    fn render_marks_nodes_error_when_all_silent() {
         let mut snapshot = fleet(&[Some(-50), Some(-60)]);
         for node in &mut snapshot.nodes {
             node.alive = false;
@@ -430,7 +402,7 @@ mod tests {
     }
 
     #[test]
-    fn panel_view_displays_link_down_error_when_link_is_inactive() {
+    fn render_shows_link_down_when_link_down() {
         let mut snapshot = fleet(&[Some(-40)]);
         snapshot.link_up = false;
         let (level, text) = row(&snapshot, 1);
@@ -439,7 +411,7 @@ mod tests {
     }
 
     #[test]
-    fn panel_view_formats_approximate_counts_when_rendering_network_totals() {
+    fn render_shows_unique_counts_approximately_when_large() {
         let mut snapshot = quiet();
         snapshot.unique_wifi_aps = 12_345;
         snapshot.unique_ble_aps = 42;
@@ -448,7 +420,7 @@ mod tests {
     }
 
     #[test]
-    fn panel_view_formats_single_rssi_value_when_all_nodes_have_identical_signal() {
+    fn render_shows_one_rssi_when_figures_agree() {
         // One node is the obvious case.
         let (level, text) = row(&fleet(&[Some(-52)]), 4);
         assert_eq!(level, Severity::Ok);
@@ -461,7 +433,7 @@ mod tests {
     }
 
     #[test]
-    fn panel_view_sets_warn_severity_for_rssi_when_signal_is_weak() {
+    fn render_marks_rssi_warn_when_link_weak() {
         // Every node weak: the average carries it.
         let (level, _) = row(&fleet(&[Some(-68), Some(-67)]), 4);
         assert_eq!(level, Severity::Warn);
@@ -487,7 +459,7 @@ mod tests {
     }
 
     #[test]
-    fn panel_view_ignores_unmeasured_nodes_when_calculating_rssi_stats() {
+    fn render_skips_node_in_rssi_when_link_rssi_unknown() {
         // A node heard only through its observations has no link RSSI yet. Folding
         // its absence in as a nought would read as a perfect link.
         let (level, text) = row(&fleet(&[Some(-60), None]), 4);
@@ -501,7 +473,7 @@ mod tests {
     }
 
     #[test]
-    fn panel_view_excludes_stale_nodes_when_calculating_rssi_stats() {
+    fn render_skips_node_in_rssi_when_not_alive() {
         // Its last measurement is real and long past; the fleet's link health is
         // the fleet that is still here.
         let mut snapshot = fleet(&[Some(-40), Some(-90)]);
@@ -514,7 +486,7 @@ mod tests {
     }
 
     #[test]
-    fn panel_view_displays_bad_label_when_rssi_falls_below_floor() {
+    fn render_shows_bad_when_rssi_below_floor() {
         // Three digits and a sign is a character more than the line has, and the exact
         // figure stopped meaning anything long before this: what an operator does about
         // -104 dBm is what they do about -100.
@@ -534,7 +506,7 @@ mod tests {
     }
 
     #[test]
-    fn panel_view_constrains_line_lengths_when_rendering_to_hardware_geometry() {
+    fn render_fits_every_line_when_figures_widest() {
         // `firmware/bridge/src/panel.rs` gets seventeen columns out of its font, and the
         // RSSI line fills every one of them. Rendered wide and measured, so a reworded
         // line that would arrive truncated on the bench fails here instead — the
@@ -546,13 +518,7 @@ mod tests {
         worst.assignable = 9;
         worst.unique_wifi_aps = 9_999_999;
         worst.unique_ble_aps = 9_999_999;
-        worst.gps = Some(GpsView {
-            status: GpsStatus::Fixed { satellites: Some(24) },
-            counters: GpsCounters::default(),
-            last_fix_ms: None,
-            settled: None,
-            pinned_baud: false,
-        });
+        worst.gps = Some(gps_view(GpsStatus::Fixed { satellites: Some(24) }));
         worst.position = Fix { source: PositionSource::Gps, ..Fix::none() };
 
         let mut silent = fleet(&[Some(-50)]);
@@ -575,7 +541,7 @@ mod tests {
     }
 
     #[test]
-    fn panel_view_emits_strict_ascii_characters_when_rendering_all_screens() {
+    fn render_composes_only_ascii_when_any_state_rendered() {
         // The bridge draws with `FONT_9X15`, whose glyph mapping covers U+0020 to
         // U+007F and quietly substitutes `?` for anything else. So a tidy typographic
         // dash composed here does not reach the glass as a dash — it reaches it as
@@ -613,7 +579,7 @@ mod tests {
     }
 
     #[test]
-    fn panel_view_truncates_lines_when_screen_width_is_narrow() {
+    fn render_cuts_lines_when_screen_narrow() {
         let narrow = Panel { cols: 8, rows: 8 };
         let lines = render(&fleet(&[Some(-40), Some(-72)]), narrow);
         for line in &lines {
@@ -623,7 +589,7 @@ mod tests {
     }
 
     #[test]
-    fn panel_view_truncates_rows_from_top_when_screen_height_is_short() {
+    fn render_keeps_top_rows_when_screen_short() {
         let short = Panel { cols: 26, rows: 2 };
         let lines = render(&quiet(), short);
         assert_eq!(lines.len(), 2);
@@ -632,7 +598,7 @@ mod tests {
     }
 
     #[test]
-    fn approx_formats_abbreviated_counts_when_given_various_magnitudes() {
+    fn approx_shortens_to_three_figures_when_count_has_more() {
         assert_eq!(approx(0), "0");
         assert_eq!(approx(9_999), "9999");
         assert_eq!(approx(12_345), "12.3k");

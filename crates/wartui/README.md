@@ -74,7 +74,8 @@ re-hearing within the hour can still improve its row's position, and one past it
 `--recapture 0` writes one row per network. On finishing, `export` prints exact counts to standard
 error: rows written, distinct Wi-Fi networks (per band) and Bluetooth devices, sightings of each,
 sightings by position source, what each node heard, and the capture's span. A capture made with
-`--sim` or `--lat`/`--lon` still exports, with a warning not to submit the CSV anywhere.
+`--sim` or `--lat`/`--lon` still exports, with a warning not to submit the CSV anywhere. A sighting
+whose stored kind is neither Wi-Fi nor BLE is left out, and a note says how many.
 
 `RCOIs` holds a Passpoint access point's roaming consortium identifiers and `MfgrId` a BLE
 advertiser's manufacturer identifier, both blank (NULL in the store) when none was offered. A BLE

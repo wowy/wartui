@@ -36,7 +36,7 @@ pub const TX_STALL_TIMEOUT_MS: u64 = 3_000;
 /// How recently the host must have spoken to count as still being there.
 ///
 /// Deliberately longer than the host's own five-second `status_interval`
-/// (`crates/wartui-core/src/engine.rs`), because a connected host with a quiet
+/// (`crates/wartui-core/src/engine/config.rs`), because a connected host with a quiet
 /// fleet says nothing in between. Below that interval, an established capture
 /// reads as an absent host for two seconds in every five and no wedge is ever
 /// noticed.

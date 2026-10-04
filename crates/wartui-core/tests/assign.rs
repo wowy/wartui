@@ -128,7 +128,7 @@ async fn settle(path: &Path, nodes: u8) -> Vec<ChannelSet> {
 }
 
 #[tokio::test(start_paused = true)]
-async fn assignment_flow_reports_new_epoch_when_second_node_narrows_the_share() {
+async fn drive_sends_new_epoch_when_second_node_narrows_share() {
     let dir = tempfile::tempdir().expect("temp dir");
 
     let alone = settle(&dir.path().join("lone.db"), 1).await;

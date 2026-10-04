@@ -1,99 +1,76 @@
 //! WiGLE CSV export, in the v1.6 file format.
 //!
-//! A network's sightings are folded into recapture windows, and one row is
-//! submitted per window: the strongest positioned sighting, with `FirstSeen`
-//! from the window's own first sighting — positioned or not, which is a
-//! different row and the reason the fold carries both. The window is anchored
-//! at that first sighting and closes on the first sighting more than
-//! [`ExportFilter::recapture_secs`] after it opened, so a network watched for
-//! three hours yields a row an hour, rather than a row for ever (which would
-//! score one capture on a leaderboard that counts re-captures) or a row per
-//! sighting (which WiGLE would deduplicate its own side anyway). `0` keeps the
-//! older shape: one row per network for the whole capture.
+//! A network's sightings fold into recapture windows, one row each: the strongest positioned
+//! sighting, with `FirstSeen` from the window's first sighting, positioned or not. Those can be
+//! different sightings, so the fold carries both. A window opens at its first sighting and closes
+//! on the first sighting more than [`ExportFilter::recapture_secs`] later. A network watched for
+//! three hours yields a row an hour. One row in all would score one capture on a leaderboard that
+//! counts re-captures, and a row per sighting WiGLE would deduplicate anyway. `0` gives one row per
+//! network for the whole capture.
 //!
-//! A network is an address and a kind. One address can be both a Wi-Fi network and a
-//! BLE advertiser, and WiGLE records those as two things (the `Type` column), so each
-//! kind folds into windows of its own and lends identifiers only to its own row.
+//! A network is an address and a kind. One address can be both a Wi-Fi network and a BLE
+//! advertiser, which WiGLE records as two things (the `Type` column), so each kind has its own
+//! windows and lends identifiers only to its own row. A sighting stored with any other kind is left
+//! out, counted in [`ExportSummary::unknown_kind`] and warned about once.
 //!
-//! The fold is in Rust rather than SQL because the anchor rule is sequential —
-//! where a window ends decides where the next begins, which no window function
-//! can compute without recursion. It streams sightings in address, kind, then time
-//! order and holds one window's state at a time.
+//! The fold is in Rust, not SQL, because the anchor rule is sequential: where one window ends
+//! decides where the next begins, which no window function computes without recursion. It streams
+//! sightings in address, kind, then time order, holding one window at a time.
 //!
-//! The file is ordered by when each window opened, not by network, and that sort is
-//! left to SQLite: submitted rows go into a temporary table on the export's own
-//! connection and come back out in order. SQLite sorts within its page cache and spills
-//! the rest to a temporary file, so a longer capture costs temporary disk rather than
-//! memory. Held in a `Vec` instead, a full drive's rows took 183 MiB
-//! (`docs/store-io-findings.md`). That file goes to `SQLITE_TMPDIR`, then `TMPDIR`,
-//! then `/var/tmp`, which on a Pi that boots from its card is the card. Nothing in the
-//! store is written: a temporary table belongs to the connection, not the file.
+//! The file is ordered by window start, not network, and SQLite does that sort: submitted rows go
+//! into a temporary table on the export's connection and come back in order. SQLite spills past its
+//! page cache to a temporary file, so a longer capture costs temporary disk, not memory. In a
+//! `Vec`, a full drive's rows took 183 MiB (`docs/store-io-findings.md`). The file goes to
+//! `SQLITE_TMPDIR`, then `TMPDIR`, then `/var/tmp`, which on a Pi booting from its card is the
+//! card. The store is not written: a temporary table belongs to the connection.
 //!
-//! The [`ExportSummary`] counts are exact rather than estimated, because the fold already
-//! walks networks in order and knows where each begins. Their cost is the node and
-//! position-source columns riding through the whole-table sort, which
-//! [`SELECT_SIGHTINGS`] explains.
+//! The [`ExportSummary`] counts are exact, because the fold walks networks in order and knows where
+//! each begins. Their cost is the node and position-source columns riding through the sort
+//! ([`SELECT_SIGHTINGS`]).
 //!
-//! Two details are here because WiGLE rejects files without them: the timestamp
-//! must be zero-padded (`2026-05-01 13:34:37`, where the node firmware emits
-//! `2026-5-1 13:34:37`), and the SSID must be RFC-4180 quoted, since an SSID
-//! may contain a comma or a quote and is not required to be text at all.
+//! WiGLE rejects files without two details: a zero-padded timestamp (`2026-05-01 13:34:37`, where
+//! the node firmware emits `2026-5-1 13:34:37`), and RFC-4180 quoting of the SSID, which may hold a
+//! comma or quote and need not be text. [`record::ssid_text`](crate::record::ssid_text) also strips
+//! a cloaked network's NUL padding on the way out, so no SSID reaches the file padded.
 //!
-//! A third is here because the store is not rewritten: a capture taken before
-//! `beacon::visible_ssid` existed holds a cloaked network's NUL padding verbatim, so
-//! [`record::ssid_text`](crate::record::ssid_text) is applied on the way out. That a
-//! capture from before a fix still exports correctly is the whole promise of the
-//! export being a view over the store.
+//! [`ExportFilter::after_uploads`] leaves out everything the newest non-failed upload covered, so a
+//! repeat upload sends only what came after. The cutoff is the last sighting that upload walked, in
+//! stored order. Ids follow commit order, so a frame split across two commits is cut exactly, and a
+//! capture still being written loses nothing. The fold restarts at the cutoff, so a network heard
+//! on both sides within the recapture width gets a second row, which WDGWars skips when scoring. An
+//! unpositioned sighting before the cutoff counts as sent, so a later fix does not bring it back.
 //!
-//! [`ExportFilter::after_uploads`] leaves out every sighting the newest upload the site did
-//! not report failed covered, so a repeat upload sends what came after. The cutoff is the last
-//! sighting that upload walked, in the order the capture stored them: ids follow commit order,
-//! so a frame whose sightings span two commits is split exactly, and a capture still being
-//! written loses nothing to the upload. The fold starts afresh at that cutoff: a network
-//! heard on both sides of it within the recapture width gets a second row, which WDGWars
-//! skips when scoring. An unpositioned sighting walked before the cutoff counts as sent, so a
-//! fix that arrives later does not bring it back.
-//!
-//! The columns v1.6 added over v1.4 are derived or honestly blank rather than stored.
-//! `Frequency` is computed from the channel a sighting named, because the centre
-//! frequency is a function of the channel and the store already keeps the channel —
-//! deriving it means every capture already on disk exports with the column filled.
-//! `RCOIs` and `MfgrId` carry what the capture actually holds — a Passpoint access
-//! point's roaming consortium identifiers, a BLE advertiser's manufacturer
-//! identifier — and are blank when it holds none, or when the capture was taken by a
-//! build that did not collect them: the store says that with NULL, and a blank
-//! column repeats it without claiming the beacon carried nothing. A BLE
-//! row's `Frequency` stays blank on purpose: what WiGLE asks for there is a
-//! Bluetooth "device type" code, a class-of-device value that only an active inquiry
-//! produces, and a node that never transmits while scanning has none to report.
+//! The columns v1.6 added over v1.4 are derived or blank, never stored. `Frequency` is a function
+//! of the stored channel. `RCOIs` and `MfgrId` carry a Passpoint access point's roaming consortium
+//! identifiers and a BLE advertiser's manufacturer identifier. They are blank when the capture
+//! holds none: the store's NULL becomes a blank without claiming the beacon carried nothing. A BLE
+//! row's `Frequency` is blank on purpose: WiGLE wants a Bluetooth class-of-device code there, which
+//! only an active inquiry produces, and a node never transmits while scanning.
 
 use std::io::Write;
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use rusqlite::{Connection, Row, Statement};
+use wartui_proto::air::RecordKind;
 use wartui_proto::beacon::rcoi_text;
 use wartui_proto::mac::{self, Mac};
 
 use crate::record::ssid_text;
+use crate::store::{kind_name, parse_kind};
 
 /// The pre-header WiGLE reads for provenance, then the column header.
 const COLUMNS: &str = "MAC,SSID,AuthMode,FirstSeen,Channel,Frequency,RSSI,\
 CurrentLatitude,CurrentLongitude,AltitudeMeters,AccuracyMeters,RCOIs,MfgrId,Type";
 
-/// The recapture window an export folds a network's sightings into, by
-/// default: exactly one hour.
+/// The default recapture window: exactly one hour.
 ///
-/// WDGWars, the leaderboard this default is cut for, scores a capture of a
-/// network once per hour per user — "re-scanning the same AP within 1h is
-/// silently skipped from scoring; GPS may still be refined" — and this is
-/// that cooldown verbatim, with no slack in either direction: the site is
-/// the authority on its own rule, and the export's job is to say when the AP
-/// was actually scanned. A re-hearing within the hour stays in the row
-/// already submitted, where its stronger reading can still refine the row's
-/// position — the refinement the rule itself allows — and the hour is
-/// inclusive like the rule's, because a sighting opens the next window only
-/// *past* the width. Slack under the hour would write rows the site skips
-/// anyway; slack over it would fold away re-hearings it counts.
+/// WDGWars, the leaderboard this default is cut for, scores a network once per hour per user:
+/// "re-scanning the same AP within 1h is silently skipped from scoring; GPS may still be refined".
+/// This is that cooldown verbatim. The site is the authority on its rule, and the export's job is
+/// to say when the AP was scanned. A re-hearing within the hour stays in the row already submitted,
+/// where a stronger reading can still refine its position, as the rule allows. The hour is
+/// inclusive like the rule's: only a sighting *past* the width opens the next window. Less would
+/// write rows the site skips. More would fold away re-hearings it counts.
 pub const DEFAULT_RECAPTURE_SECS: u64 = 3600;
 
 /// Why an export failed.
@@ -110,12 +87,11 @@ pub enum ExportError {
 /// What to export.
 #[derive(Debug, Clone, Copy)]
 pub struct ExportFilter {
-    /// How long after a window opened a sighting still belongs to it, in
-    /// seconds; the first sighting later than that opens the next window.
-    /// `0` folds a network's whole capture into one row.
+    /// How long after a window opened a sighting still belongs to it, in seconds. `0` folds a
+    /// network's whole capture into one row.
     pub recapture_secs: u64,
-    /// Leave out sightings at or before the newest upload the capture records, short of a
-    /// failed one. Off by default, so `export` and `analyze` read the whole capture.
+    /// Leave out sightings covered by the newest non-failed upload. Off by default, so `export` and
+    /// `analyze` read the whole capture.
     pub after_uploads: bool,
 }
 
@@ -129,14 +105,14 @@ impl Default for ExportFilter {
 /// What an export did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ExportSummary {
-    /// Rows written — one per network, per recapture window that closed on a
-    /// positioned sighting.
+    /// Rows written: one per network per window with a positioned sighting.
     pub rows: u64,
-    /// Rows left out because no sighting in their window had a position.
-    ///
-    /// Not an error and not silent: the operator should know how much of a capture is
-    /// waiting on a GPS.
+    /// Rows left out because no sighting in their window had a position. Not an error, and not
+    /// silent: the operator should know how much is waiting on a GPS.
     pub unpositioned: u64,
+    /// Sightings left out because their stored kind is neither Wi-Fi nor BLE. They count towards
+    /// nothing else here except [`Self::last_id`].
+    pub unknown_kind: u64,
     /// Wi-Fi networks, sightings and rows.
     pub wifi: KindStats,
     /// Bluetooth devices, sightings and rows.
@@ -147,8 +123,7 @@ pub struct ExportSummary {
     pub positions: Positions,
     /// Sightings per node, sorted by address.
     pub nodes: Vec<NodeStats>,
-    /// The earliest sighting's receive time, in unix milliseconds. `None` when there
-    /// are no sightings.
+    /// The earliest sighting's receive time, in unix milliseconds, or `None` with no sightings.
     pub first_rx: Option<i64>,
     /// The latest sighting's receive time, in unix milliseconds.
     pub last_rx: Option<i64>,
@@ -159,8 +134,7 @@ pub struct ExportSummary {
 /// One record kind's share of an export.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct KindStats {
-    /// Distinct addresses heard as this kind. An address heard as both kinds counts
-    /// once in each.
+    /// Distinct addresses heard as this kind. One heard as both counts once in each.
     pub networks: u64,
     /// Sightings of this kind.
     pub sightings: u64,
@@ -211,9 +185,8 @@ pub fn wigle_csv<W: Write>(
     out: &mut W,
     app_version: &str,
 ) -> Result<ExportSummary, ExportError> {
-    // `star=Sol,body=3,subBody=0` is Earth in the notation the pre-header
-    // requires: body 3 is the third orbit, subBody 0 no satellite. Captures are
-    // taken from the ground.
+    // `star=Sol,body=3,subBody=0` is Earth in the pre-header's notation: the third orbit, no
+    // satellite.
     writeln!(
         out,
         "WigleWifi-1.6,appRelease={app_version},model=wartui,release={app_version},\
@@ -221,16 +194,14 @@ pub fn wigle_csv<W: Write>(
     )?;
     writeln!(out, "{COLUMNS}")?;
 
-    // A window wide enough to overflow the millisecond clock is the same as no
-    // window at all: nothing in one capture can be that far apart.
+    // A window wide enough to overflow the millisecond clock means no window.
     let recapture_ms =
         i64::try_from(filter.recapture_secs.saturating_mul(1000)).unwrap_or(i64::MAX);
 
-    // Set before the table exists, since changing it discards the connection's temporary
-    // tables. A file is the bundled build's default already; the memory bound rests on it.
+    // Set before the table exists, since changing it discards temporary tables. The bundled build
+    // defaults to a file, and the memory bound rests on it.
     conn.pragma_update(None, "temp_store", "FILE")?;
-    // One transaction, so the inserts are one commit rather than one each. A failed
-    // export rolls the table's creation back with it.
+    // One transaction, so the inserts are one commit and a failed export rolls back the table too.
     let tx = conn.unchecked_transaction()?;
     tx.execute_batch(CREATE_EXPORT_ROWS)?;
 
@@ -242,8 +213,11 @@ pub fn wigle_csv<W: Write>(
         let mut window: Option<Window> = None;
 
         while let Some(row) = rows.next()? {
-            let mut candidate = Candidate::of(row)?;
             let (node, pos_source, id) = heard_by(row)?;
+            let Some(mut candidate) = Candidate::of(row)? else {
+                tally.skip(id);
+                continue;
+            };
             // The first sighting of the capture, or of the next network.
             let new_network = window
                 .as_ref()
@@ -257,8 +231,8 @@ pub fn wigle_csv<W: Write>(
                 close(&mut window, &mut insert, &mut tally.summary)?;
                 window = Some(Window { first_seen: candidate.rx_at, best: candidate });
             } else if let Some(w) = window.as_mut() {
-                // Which sighting submits is decided by position and signal alone;
-                // the identifiers are the window's, so a loser still lends them.
+                // Position and signal alone pick the submitted sighting. The identifiers are the
+                // window's, so a loser still lends them.
                 if candidate.submits_over(&w.best) {
                     candidate.inherit_identifiers(&mut w.best);
                     w.best = candidate;
@@ -268,13 +242,21 @@ pub fn wigle_csv<W: Write>(
             }
         }
         close(&mut window, &mut insert, &mut tally.summary)?;
+        if tally.summary.unknown_kind > 0 {
+            tracing::warn!(
+                sightings = tally.summary.unknown_kind,
+                "left out sightings whose kind is neither wifi nor ble"
+            );
+        }
 
-        // By when each row's window opened, so a file re-exported after a decoder
-        // fix diffs cleanly against the one before it; the network breaks ties.
+        // By window start, so a re-export after a decoder fix diffs cleanly. The network breaks
+        // ties.
         let mut sorted = tx.prepare(SELECT_EXPORT_ROWS)?;
         let mut rows = sorted.query([])?;
         while let Some(row) = rows.next()? {
-            write_row(&Window { first_seen: row.get(13)?, best: Candidate::of(row)? }, out)?;
+            // Every row here was written by `close` with `kind_name`, so it parses.
+            let Some(best) = Candidate::of(row)? else { continue };
+            write_row(&Window { first_seen: row.get(13)?, best }, out)?;
         }
     }
     tx.execute_batch("DROP TABLE temp.export_row")?;
@@ -284,10 +266,9 @@ pub fn wigle_csv<W: Write>(
 
 /// Counts what the export walked over, for its [`ExportSummary`].
 ///
-/// Exact, because the fold walks networks (address and kind) in order and tells the
-/// tally where each begins. Memory is bounded by the fleet rather than the capture: the
-/// node list holds one entry per node that reported, and the per-network band bits reset
-/// when the network changes. Nothing here allocates per sighting.
+/// Exact, because the fold walks networks (address and kind) in order and says where each begins.
+/// Memory is bounded by the fleet, not the capture: one entry per reporting node, and band bits
+/// reset per network. Nothing allocates per sighting.
 #[derive(Default)]
 struct Tally {
     summary: ExportSummary,
@@ -299,7 +280,7 @@ impl Tally {
     /// Count one sighting, the first of its network when `new_network`, heard by `node`,
     /// positioned by the `pos_source` code [`SELECT_SIGHTINGS`] gives it, stored as `id`.
     fn see(&mut self, c: &Candidate, new_network: bool, node: Mac, pos_source: i64, id: i64) {
-        let ble = c.kind == "ble";
+        let ble = c.kind == RecordKind::Ble;
         let summary = &mut self.summary;
         let stats = if ble { &mut summary.ble } else { &mut summary.wifi };
         stats.sightings += 1;
@@ -341,6 +322,14 @@ impl Tally {
         summary.last_id = Some(summary.last_id.map_or(id, |t| t.max(id)));
     }
 
+    /// Count a sighting stored as `id` whose kind did not parse. It still moves
+    /// [`ExportSummary::last_id`], so an upload's cutoff covers it rather than walking it again.
+    fn skip(&mut self, id: i64) {
+        let summary = &mut self.summary;
+        summary.unknown_kind += 1;
+        summary.last_id = Some(summary.last_id.map_or(id, |t| t.max(id)));
+    }
+
     /// The summary, nodes in address order.
     fn finish(self) -> ExportSummary {
         let mut summary = self.summary;
@@ -368,17 +357,16 @@ fn close(
             best.lon,
             best.alt,
             best.accuracy,
-            best.kind,
+            kind_name(best.kind),
             best.rcoi,
             best.mfgr_id,
             best.rx_at,
             first_seen,
         ])?;
         summary.rows += 1;
-        if best.kind == "ble" {
-            summary.ble.rows += 1;
-        } else {
-            summary.wifi.rows += 1;
+        match best.kind {
+            RecordKind::Wifi => summary.wifi.rows += 1,
+            RecordKind::Ble => summary.ble.rows += 1,
         }
     } else {
         summary.unpositioned += 1;
@@ -386,20 +374,16 @@ fn close(
     Ok(())
 }
 
-/// Every sighting of every network in the filter, in fold order: address, kind,
-/// then time. The `id` tiebreaker keeps the order — and therefore which sighting a
-/// tied window submits — deterministic. Columns 0 to 12 are a [`Candidate`]; the last
-/// three feed only the [`Tally`]. The position source arrives as `0` for `gps`, `1` for
-/// `static` and `2` otherwise rather than as its token: every column here rides through
-/// the sort of the whole table, and a small integer is the narrowest thing a sort row can
-/// carry, which measured a quarter of what the node and source columns cost the export.
+/// Every sighting in the filter, in fold order: address, kind, then time, with `id` breaking ties
+/// so the submitted sighting is deterministic. Columns 0 to 12 are a [`Candidate`], and the last
+/// three feed only the [`Tally`]. The position source arrives as `0` for `gps`, `1` for `static`
+/// and `2` otherwise: every column rides through the whole-table sort, and a small integer is the
+/// narrowest a sort row carries. That measured a quarter of what the node and source columns cost
+/// the export.
 ///
-/// `?1` is [`ExportFilter::after_uploads`]. The cutoff is an uncorrelated scalar, so SQLite
-/// evaluates it once rather than per sighting.
-///
-/// There is deliberately no index for this to walk: a scan and a sort read the table in
-/// order, and were faster than one random lookup per sighting
-/// (`docs/store-io-findings.md` says more).
+/// `?1` is [`ExportFilter::after_uploads`], an uncorrelated scalar evaluated once, not per
+/// sighting. No index on purpose: a scan and a sort beat one random lookup per sighting
+/// (`docs/store-io-findings.md`).
 const SELECT_SIGHTINGS: &str = r"
 SELECT bssid, ssid, security, channel, rssi, lat, lon, alt, accuracy, kind, rcoi, mfgr_id, rx_at,
        node_mac, CASE pos_source WHEN 'gps' THEN 0 WHEN 'static' THEN 1 ELSE 2 END, o.id
@@ -409,10 +393,9 @@ WHERE ?1 = 0
 ORDER BY o.bssid, o.kind, o.rx_at, o.id
 ";
 
-/// The rows waiting for the sort by window start: a submitted sighting in
-/// [`SELECT_SIGHTINGS`]'s column order, so [`Candidate::of`] reads it back, then when
-/// its window opened. Dropped first in case an earlier export on this connection
-/// left one behind.
+/// Rows waiting for the sort by window start: a submitted sighting in [`SELECT_SIGHTINGS`]'s column
+/// order, for [`Candidate::of`] to read back, then its window's start. Dropped first in case an
+/// earlier export on this connection left one.
 const CREATE_EXPORT_ROWS: &str = r"
 DROP TABLE IF EXISTS temp.export_row;
 CREATE TEMP TABLE export_row (
@@ -439,9 +422,8 @@ fn heard_by(row: &Row<'_>) -> rusqlite::Result<(Mac, i64, i64)> {
     Ok((row.get(13)?, row.get_ref(14)?.as_i64()?, row.get_ref(15)?.as_i64()?))
 }
 
-/// One sighting in flight through the fold, carrying everything a submitted
-/// row needs so the winner of a window can be written without going back to
-/// the database.
+/// One sighting in flight through the fold, carrying all a submitted row needs, so the winner is
+/// written without another query.
 struct Candidate {
     bssid: Mac,
     ssid: Option<Vec<u8>>,
@@ -452,16 +434,19 @@ struct Candidate {
     lon: Option<f64>,
     alt: Option<f64>,
     accuracy: Option<f64>,
-    kind: String,
+    kind: RecordKind,
     rcoi: Option<Vec<u8>>,
     mfgr_id: Option<u16>,
     rx_at: i64,
 }
 
 impl Candidate {
-    /// Read one sighting off a query row.
-    fn of(row: &Row<'_>) -> rusqlite::Result<Self> {
-        Ok(Self {
+    /// Read one sighting off a query row, or `None` when its kind does not parse.
+    fn of(row: &Row<'_>) -> rusqlite::Result<Option<Self>> {
+        let Some(kind) = row.get_ref(9)?.as_str().ok().and_then(parse_kind) else {
+            return Ok(None);
+        };
+        Ok(Some(Self {
             bssid: row.get(0)?,
             ssid: row.get(1)?,
             security: row.get(2)?,
@@ -471,22 +456,21 @@ impl Candidate {
             lon: row.get(6)?,
             alt: row.get(7)?,
             accuracy: row.get(8)?,
-            kind: row.get(9)?,
+            kind,
             rcoi: row.get(10)?,
             mfgr_id: row.get(11)?,
             rx_at: row.get(12)?,
-        })
+        }))
     }
 
-    /// Take `other`'s roaming consortium and manufacturer identifier wherever this
-    /// sighting has none of its own. The fold only pairs sightings of one kind.
+    /// Take `other`'s roaming consortium and manufacturer identifier where this sighting has none.
+    /// The fold only pairs sightings of one kind.
     ///
-    /// The sighting that wins a window is picked for its position and signal, and
-    /// whether a packet carried a trailer has nothing to do with either: a beacon
-    /// or probe response may omit the element, and one advertisement of many
-    /// carries the manufacturer data. Without this a stronger sighting that lacked
-    /// them would blank a column the store can fill — the loss the node's own BLE
-    /// ring already guards against by merging a later report's identifier in.
+    /// The winner is picked by position and signal, which have nothing to do with trailers: a
+    /// beacon or probe response may omit the element, and only some advertisements carry
+    /// manufacturer data. Without this, a stronger sighting lacking them would blank a column the
+    /// store can fill, the loss the node's BLE ring already guards against by merging in a later
+    /// report's identifier.
     fn inherit_identifiers(&mut self, other: &mut Self) {
         if self.rcoi.is_none() {
             self.rcoi = other.rcoi.take();
@@ -496,17 +480,14 @@ impl Candidate {
         }
     }
 
-    /// Whether this sighting carries coordinates a WiGLE row can be written
-    /// from.
+    /// Whether this sighting has coordinates for a WiGLE row.
     const fn positioned(&self) -> bool {
         self.lat.is_some() && self.lon.is_some()
     }
 
-    /// Whether this sighting is the one to submit over `other`: a positioned
-    /// one beats an unpositioned one, then the stronger signal, then the
-    /// earlier one. Position-first is what keeps a network with one good weaker
-    /// sighting from losing it to a stronger sighting that had no fix; the
-    /// strongest signal is the sighting closest to the transmitter.
+    /// Whether to submit this sighting over `other`: positioned beats unpositioned, then stronger
+    /// signal, then earlier. Position first keeps a network's one good weaker sighting from losing
+    /// to a stronger unfixed one. The strongest signal is the closest to the transmitter.
     fn submits_over(&self, other: &Self) -> bool {
         match (self.positioned(), other.positioned()) {
             (true, false) => true,
@@ -516,8 +497,7 @@ impl Candidate {
     }
 }
 
-/// The fold's state for one network's current window: when it opened, and the
-/// sighting that would be submitted if the window closed now.
+/// The fold's state for one network's window: when it opened, and the sighting it would submit now.
 struct Window {
     first_seen: i64,
     best: Candidate,
@@ -529,10 +509,9 @@ fn write_row<W: Write>(row: &Window, out: &mut W) -> Result<(), ExportError> {
     let rssi = best.rssi;
     let lat = best.lat.unwrap_or(0.0);
     let lon = best.lon.unwrap_or(0.0);
-    let frequency = frequency_column(channel, &best.kind);
-    // The WiGLE spellings of the two captured columns: the roaming consortium
-    // body as hex identifiers, the company identifier as a number. A capture
-    // from before they were collected stores NULL, and a blank column says so.
+    let frequency = frequency_column(channel, best.kind);
+    // WiGLE's spellings: the roaming consortium body as hex identifiers, the company identifier as
+    // a number. NULL in the store is a blank here.
     let rcois = best.rcoi.as_deref().map_or_else(String::new, |body| rcoi_text(body).to_string());
     let mfgr = best.mfgr_id.map_or_else(String::new, |id| id.to_string());
 
@@ -546,24 +525,23 @@ fn write_row<W: Write>(row: &Window, out: &mut W) -> Result<(), ExportError> {
         timestamp(row.first_seen),
         best.alt.unwrap_or(0.0),
         best.accuracy.unwrap_or(0.0),
-        if best.kind == "ble" { "BLE" } else { "WIFI" },
+        match best.kind {
+            RecordKind::Wifi => "WIFI",
+            RecordKind::Ble => "BLE",
+        },
     )?;
     Ok(())
 }
 
-/// The centre frequency of the channel a sighting named, as WiGLE's `Frequency`
-/// column wants it: a function of the channel, so derived on the way out rather
-/// than stored, which fills the column for captures recorded before it existed.
+/// The centre frequency of a sighting's channel, for WiGLE's `Frequency` column, derived from the
+/// stored channel.
 ///
-/// The channel is the one the access point announces in its own beacon, or the
-/// one the node was parked on when the beacon announces none
-/// (`wartui_proto::beacon::parse_mgmt`). An access point can announce a channel
-/// no pool tunes, so the column covers the 2.4 GHz channels — 14 the odd one out — and the
-/// 5 GHz ladder from 32 to 177. Blank for a channel on neither ladder, and
-/// blank for every BLE row, where the column means something only an active
-/// inquiry could produce (see the module docs).
-fn frequency_column(channel: i64, kind: &str) -> String {
-    if kind != "wifi" {
+/// The channel is the one the access point announces, or the node's parked channel when it
+/// announces none (`wartui_proto::beacon::parse_mgmt`). An access point can announce a channel no
+/// pool tunes, so this covers the 2.4 GHz channels (14 the odd one out) and the 5 GHz ladder from
+/// 32 to 177. Blank off both ladders, and for every BLE row (see the module docs).
+fn frequency_column(channel: i64, kind: RecordKind) -> String {
+    if kind == RecordKind::Ble {
         return String::new();
     }
     match channel {
@@ -574,11 +552,8 @@ fn frequency_column(channel: i64, kind: &str) -> String {
     }
 }
 
-/// Zero-padded UTC, to the second.
-///
-/// The node firmware writes `2026-5-1 13:34:37` straight from `getDatetime()`,
-/// which WiGLE rejects. Building it from a real timestamp rather than
-/// reformatting a string is what keeps that from happening again.
+/// Zero-padded UTC, to the second. Built from a real timestamp, not by reformatting the firmware's
+/// `2026-5-1 13:34:37`, which WiGLE rejects.
 fn timestamp(unix_ms: i64) -> String {
     DateTime::<Utc>::from_timestamp_millis(unix_ms).map_or_else(
         || "1970-01-01 00:00:00".to_owned(),
@@ -600,7 +575,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn timestamp_formatter_pads_zeros_when_formatting_utc_datetime() {
+    fn timestamp_zero_pads_fields_when_month_day_or_time_single_digit() {
         // The whole reason this function exists. The node firmware emits
         // `2026-5-1 13:34:37` for this instant, which WiGLE rejects.
         assert_eq!(timestamp(1_777_642_477_000), "2026-05-01 13:34:37");
@@ -608,7 +583,7 @@ mod tests {
     }
 
     #[test]
-    fn csv_quoter_quotes_only_special_characters_when_formatting_fields() {
+    fn quote_quotes_only_when_needed() {
         assert_eq!(quote("plain"), "plain");
         assert_eq!(quote("has,comma"), "\"has,comma\"");
         assert_eq!(quote("say \"hi\""), "\"say \"\"hi\"\"\"");
@@ -616,7 +591,7 @@ mod tests {
     }
 
     #[test]
-    fn mac_formatter_formats_uppercase_hex_with_colons_when_rendering_address() {
+    fn mac_full_writes_uppercase_colon_hex_when_formatting_bssid() {
         // The `MAC` column WiGLE reads. A change to `mac::full` must not change it.
         assert_eq!(
             mac::full(&[0x02, 0x00, 0x5E, 0x10, 0x57, 0x84]).to_string(),
@@ -625,31 +600,31 @@ mod tests {
     }
 
     #[test]
-    fn frequency_column_computes_mhz_from_wifi_channels_when_generating_export() {
-        assert_eq!(frequency_column(1, "wifi"), "2412");
-        assert_eq!(frequency_column(6, "wifi"), "2437");
-        assert_eq!(frequency_column(13, "wifi"), "2472");
+    fn frequency_column_gives_centre_mhz_when_wifi_channel_on_a_ladder() {
+        assert_eq!(frequency_column(1, RecordKind::Wifi), "2412");
+        assert_eq!(frequency_column(6, RecordKind::Wifi), "2437");
+        assert_eq!(frequency_column(13, RecordKind::Wifi), "2472");
         // Channel 14 is the one 2.4 GHz channel that breaks the 5 MHz ladder.
-        assert_eq!(frequency_column(14, "wifi"), "2484");
+        assert_eq!(frequency_column(14, RecordKind::Wifi), "2484");
         // An access point can announce these below the pools' 36.
-        assert_eq!(frequency_column(32, "wifi"), "5160");
-        assert_eq!(frequency_column(33, "wifi"), "5165");
-        assert_eq!(frequency_column(34, "wifi"), "5170");
-        assert_eq!(frequency_column(35, "wifi"), "5175");
-        assert_eq!(frequency_column(36, "wifi"), "5180");
-        assert_eq!(frequency_column(165, "wifi"), "5825");
-        assert_eq!(frequency_column(177, "wifi"), "5885");
+        assert_eq!(frequency_column(32, RecordKind::Wifi), "5160");
+        assert_eq!(frequency_column(33, RecordKind::Wifi), "5165");
+        assert_eq!(frequency_column(34, RecordKind::Wifi), "5170");
+        assert_eq!(frequency_column(35, RecordKind::Wifi), "5175");
+        assert_eq!(frequency_column(36, RecordKind::Wifi), "5180");
+        assert_eq!(frequency_column(165, RecordKind::Wifi), "5825");
+        assert_eq!(frequency_column(177, RecordKind::Wifi), "5885");
     }
 
     #[test]
-    fn frequency_column_returns_empty_string_when_given_ble_or_unmapped_channels() {
+    fn frequency_column_is_blank_when_ble_or_channel_unmapped() {
         // A BLE row's frequency column means a "device type" code a passive scan
         // cannot produce, so it is blank whatever the channel field holds.
-        assert_eq!(frequency_column(0, "ble"), "");
+        assert_eq!(frequency_column(0, RecordKind::Ble), "");
         // A channel on neither band's ladder is not something to guess a frequency for.
-        assert_eq!(frequency_column(0, "wifi"), "");
-        assert_eq!(frequency_column(15, "wifi"), "");
-        assert_eq!(frequency_column(31, "wifi"), "");
-        assert_eq!(frequency_column(200, "wifi"), "");
+        assert_eq!(frequency_column(0, RecordKind::Wifi), "");
+        assert_eq!(frequency_column(15, RecordKind::Wifi), "");
+        assert_eq!(frequency_column(31, RecordKind::Wifi), "");
+        assert_eq!(frequency_column(200, RecordKind::Wifi), "");
     }
 }

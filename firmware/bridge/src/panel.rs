@@ -148,7 +148,7 @@ const MIN_REDRAW_MS: u64 = 500;
 /// How long the host may go quiet before the panel says so.
 ///
 /// Measured against the host's `status_interval` of five seconds
-/// (`crates/wartui-core/src/engine.rs`), not against the 1 Hz panel rate: a push only
+/// (`crates/wartui-core/src/engine/config.rs`), not against the 1 Hz panel rate: a push only
 /// goes out when a line's text or colour changed, so a capture with nothing moving
 /// sends nothing but that five-second `GetStatus`. At five this would go false in the
 /// gap before every one of them and a working capture would flash "no host" for ever.

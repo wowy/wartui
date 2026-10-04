@@ -1,18 +1,16 @@
-//! The headless half of wartui: what the fleet is doing, what gets written
-//! down, and what comes back out.
+//! The headless half of wartui: what the fleet does, what gets written down, and what comes back
+//! out.
 //!
-//! Nothing here draws a terminal or parses an argument. The split is what makes
-//! `wartui export` and the TUI two front ends over one implementation, and what
-//! lets the fleet's behaviour be tested without either.
+//! Nothing here draws a terminal or parses an argument, so `wartui export` and the TUI are two
+//! front ends over one implementation, and the fleet's behaviour is testable without either.
 //!
-//! [`engine`] is a pure synchronous state machine, [`runtime`] owns the clock and
-//! performs what it asks for, [`store`] is the system of record, and [`export`] and
-//! [`analyze`] are views of it. [`panel`] is a view of a snapshot rather than the store,
-//! and exists here for the reason `export` does: it is formatting with a rule in it, and
-//! a rule belongs where `cargo test` can reach it.
+//! [`engine`] is a pure state machine, [`runtime`] owns the clock and does what it asks, [`store`]
+//! is the system of record, and [`export`] and [`analyze`] are views of it. [`panel`] views a
+//! snapshot instead. It lives here because it is formatting with a rule in it, and rules belong
+//! where `cargo test` reaches.
 //!
-//! The only thing wartui transmits is a channel assignment, to one node, in the 100 ms
-//! it holds open after a heartbeat.
+//! wartui transmits to a node only in the 100 ms admin window it holds open after a heartbeat:
+//! channel assignments and dedup-ring clears.
 
 pub mod analyze;
 pub mod discover;

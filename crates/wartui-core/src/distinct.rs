@@ -1,19 +1,16 @@
 //! How many distinct addresses a session has heard, in memory that does not grow with it.
 //!
-//! Answering exactly means holding every address heard, and a set of them is the one
-//! thing in the process that would grow with the drive: about 18 bytes an address, 9 MiB
-//! for a day's 500 k networks and 42 MiB for a twenty-node burst
-//! (`docs/store-io-findings.md`). The store cannot answer instead without undoing what
-//! makes capture cheap. A `COUNT(DISTINCT bssid)` scans and sorts a table that has no
-//! index, on the card, and its read snapshot holds back the checkpoint that keeps the WAL
-//! one commit long. A table or index keyed by address is a random-key B-tree, which the
-//! schema has no room for at fourteen times the writes.
+//! An exact answer means holding every address: about 18 bytes each, 9 MiB for a day's 500 k
+//! networks and 42 MiB for a twenty-node burst (`docs/store-io-findings.md`). The store cannot
+//! answer instead without undoing what makes capture cheap. `COUNT(DISTINCT bssid)` scans and sorts
+//! an unindexed table on the card, and its read snapshot holds back the checkpoint that keeps the
+//! WAL one commit long. A table or index keyed by address is a random-key B-tree, and the one the
+//! schema dropped (`obs_bssid`) made capture write fourteen times as much.
 //!
-//! So the figure is an estimate: a HyperLogLog of 2^14 one-byte registers, 16 KiB whatever
-//! the session hears, with a standard error of about 0.8%. Below a few tens of thousands
-//! of addresses linear counting takes over, and the figure is off by a handful. It is a
-//! number for a person watching a capture; the store still holds every sighting, and
-//! export counts networks exactly.
+//! So the figure is an estimate: a HyperLogLog of 2^14 one-byte registers, 16 KiB whatever the
+//! session hears, with about 0.8% standard error. Below a few tens of thousands of addresses linear
+//! counting takes over, off by a handful. It is for a person watching a capture. The store holds
+//! every sighting, and export counts networks exactly.
 
 use std::hash::{DefaultHasher, Hash, Hasher};
 
@@ -46,9 +43,8 @@ impl Distinct {
 
     /// Note one address. Hearing it again changes nothing.
     pub fn insert(&mut self, mac: &Mac) {
-        // `DefaultHasher::new()` has fixed keys, so the same address always lands in the
-        // same register. Nothing here is persisted, so a change of algorithm across Rust
-        // releases would cost nothing.
+        // `DefaultHasher::new()` has fixed keys, so an address always lands in the same register.
+        // Nothing is persisted, so a hash change across Rust releases costs nothing.
         let mut hasher = DefaultHasher::new();
         mac.hash(&mut hasher);
         let hash = hasher.finish();
@@ -74,9 +70,8 @@ impl Distinct {
         }
         let alpha = 0.7213 / (1.0 + 1.079 / m);
         let raw = alpha * m * m / sum;
-        // Small counts leave registers empty, where the raw estimate is biased high and
-        // counting the empties is far closer. A 64-bit hash needs no correction at the
-        // top end.
+        // Small counts leave registers empty, where the raw estimate runs high and counting empties
+        // is far closer. A 64-bit hash needs no top-end correction.
         let estimate = if raw <= 2.5 * m && zeros > 0 { m * (m / zeros as f64).ln() } else { raw };
         estimate.round() as u64
     }
@@ -97,12 +92,12 @@ mod tests {
     }
 
     #[test]
-    fn distinct_tracker_returns_zero_when_no_addresses_observed() {
+    fn distinct_estimates_zero_when_empty() {
         assert_eq!(Distinct::new().estimate(), 0);
     }
 
     #[test]
-    fn distinct_tracker_counts_network_once_when_duplicate_bssid_observed() {
+    fn distinct_counts_address_once_when_heard_repeatedly() {
         let mut distinct = Distinct::new();
         for _ in 0..10_000 {
             distinct.insert(&mac(7));
@@ -111,7 +106,7 @@ mod tests {
     }
 
     #[test]
-    fn distinct_tracker_estimates_accurately_when_counting_small_sample_sizes() {
+    fn distinct_stays_within_a_handful_when_under_a_thousand_addresses() {
         // Linear counting's own noise is about five addresses at a thousand, so a
         // bound much tighter than this would be testing the hash, not the estimator.
         let mut distinct = Distinct::new();
@@ -124,7 +119,7 @@ mod tests {
     }
 
     #[test]
-    fn distinct_tracker_maintains_error_bounds_in_fixed_memory_when_scaling_to_millions() {
+    fn distinct_stays_within_two_percent_when_millions_heard() {
         let mut distinct = Distinct::new();
         for n in 0..2_000_000 {
             distinct.insert(&mac(n));

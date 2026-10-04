@@ -12,7 +12,7 @@ use wartui_core::export::wigle_csv;
 use wartui_core::store::open_readonly;
 use wartui_proto::mac;
 
-use crate::export::{Selection, details, note_unpositioned, thousands};
+use crate::export::{Selection, details, note_unknown_kind, note_unpositioned, thousands};
 
 #[derive(ClapArgs, Debug)]
 pub struct Args {
@@ -33,6 +33,7 @@ pub fn run(args: Args) -> Result<()> {
         losses_text(&loss)
     );
     note_unpositioned(&summary);
+    note_unknown_kind(&summary);
     Ok(())
 }
 

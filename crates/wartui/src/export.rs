@@ -112,6 +112,7 @@ pub fn run(args: Args) -> Result<()> {
     };
 
     note_unpositioned(&summary);
+    note_unknown_kind(&summary);
     if let Some(warning) = warning {
         eprintln!("{warning}");
     }
@@ -140,6 +141,17 @@ pub(crate) fn note_unpositioned(summary: &ExportSummary) {
             "{} rows were left out because no sighting in their window had a \
              position. Capture with a GPS receiver attached to include them.",
             thousands(summary.unpositioned)
+        );
+    }
+}
+
+/// Say how many sightings were left out for a kind that is neither Wi-Fi nor BLE, if any.
+pub(crate) fn note_unknown_kind(summary: &ExportSummary) {
+    if summary.unknown_kind > 0 {
+        eprintln!(
+            "warning: {} sightings were left out because their kind is neither Wi-Fi nor BLE. \
+             The capture holds a record this build cannot export.",
+            thousands(summary.unknown_kind)
         );
     }
 }
@@ -359,6 +371,7 @@ mod tests {
             first_rx: Some(1_790_794_920_000),
             last_rx: Some(1_790_812_080_000),
             last_id: Some(4_012_345),
+            unknown_kind: 0,
         }
     }
 

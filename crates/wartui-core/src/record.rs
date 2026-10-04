@@ -1,11 +1,9 @@
-//! What the engine hands to the store.
+//! What the engine hands to the store: plain owned data with no database types, so the engine stays
+//! free of `rusqlite` and testable without it. The store turns these into rows. The engine decides
+//! what is worth recording.
 //!
-//! Plain owned data with no database types in it, so the engine stays free of
-//! `rusqlite` and can be tested without one. The store's job is to turn these
-//! into rows; deciding what is worth recording is the engine's.
-//!
-//! [`ssid_text`] lives here rather than beside either caller because both read this
-//! module's bytes, and written out twice the two answers drifted apart.
+//! [`ssid_text`] lives here, not beside either caller, because both read this module's bytes and
+//! two copies drifted apart.
 
 use wartui_proto::air::RecordKind;
 use wartui_proto::beacon::visible_ssid;
@@ -14,17 +12,13 @@ use wartui_proto::plan::ChannelSet;
 
 use crate::position::Fix;
 
-/// Raw SSID bytes as text, for anything that has to show them to a person or
-/// write them into a column that has to be parsed as text.
+/// Raw SSID bytes as text, for showing to a person or writing into a column parsed as text.
 ///
-/// One rule in one place, because the view and the export were quietly disagreeing
-/// about the same bytes. [`visible_ssid`] strips a cloaked access point's padding,
-/// applied here as well as in the parser because captures recorded before that rule
-/// existed are still read back through this. Any NUL left standing is an interior
-/// one, and gets what `from_utf8_lossy` gives any byte it cannot represent — a raw
-/// NUL is worth no more to a terminal than to WiGLE's parser.
-///
-/// The store keeps whatever arrived; this is only how it is read back out.
+/// One rule for the view and the export. [`visible_ssid`] strips a cloaked access point's padding
+/// here as well as in the parser, so every path from bytes to text gets it. Any NUL left is
+/// interior, and gets what `from_utf8_lossy` gives any byte it cannot represent: a raw NUL is no
+/// more use to a terminal than to WiGLE's parser. The store keeps whatever arrived.
+/// is no more use to a terminal than to WiGLE's parser. The store keeps whatever arrived.
 #[must_use]
 pub fn ssid_text(bytes: &[u8]) -> String {
     let text = String::from_utf8_lossy(visible_ssid(bytes));
@@ -34,27 +28,21 @@ pub fn ssid_text(bytes: &[u8]) -> String {
 /// A node was heard from, which is enough to keep its row current.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodeSeen {
-    /// The node's full six-byte MAC. Any shorter suffix collides across a large
-    /// enough fleet and silently merges two nodes' data.
+    /// The node's full six-byte MAC. A shorter suffix collides in a large enough fleet and merges
+    /// two nodes' data.
     pub mac: Mac,
     /// Unix milliseconds when this host first saw the node in this capture.
     pub first_seen_ms: i64,
     /// Unix milliseconds of the most recent frame of any kind.
     pub last_seen_ms: i64,
-    /// The capability token from this node's most recent heartbeat, verbatim,
-    /// or `None` for a frame that carried none.
+    /// The capability token from this node's most recent heartbeat, verbatim, or `None` for a frame
+    /// without one.
     ///
-    /// Kept as the text that was on the wire rather than the parsed value, so a
-    /// capture can answer "what did this node say it was" for a version this build
-    /// did not understand. It is also the only record of *why* a node was never
-    /// assigned anything: heartbeats, no token and no assignments is the diagnosis.
-    ///
-    /// `None` does not erase what an earlier heartbeat said. Most frames are
-    /// observations and carry no token, so the store coalesces rather than
-    /// overwriting, and the stored column is the last token *ever* seen from this
-    /// node rather than the last one it sent — so a board reflashed mid-capture
-    /// keeps its old token in the file while the engine stops believing it. Every
-    /// other site that needs this rule points here.
+    /// Kept as wire text, so a capture says what a node claimed to be even in a version this build
+    /// cannot parse. It is also the only record of why a node was never assigned: heartbeats, no
+    /// token and no assignments is the diagnosis. The store coalesces `None` rather than
+    /// overwriting, so the column holds the last token ever seen (the `node` upsert in
+    /// `write_batch` says why).
     pub capabilities: Option<String>,
 }
 
@@ -67,16 +55,14 @@ pub struct Heartbeat {
     pub rx_at_ms: i64,
     /// The node's own counter, monotonic from its boot.
     pub counter: u32,
-    /// The assignment epoch the node says it holds, or 0 for none. Recorded as
-    /// the frame carried it, replay included.
+    /// The assignment epoch the node says it holds, 0 for none, as the frame carried it, replay
+    /// included.
     pub epoch: u8,
     /// How strongly the bridge heard it.
     pub link_rssi: Option<i8>,
-    /// Access points the node's full pending ring turned away since its boot,
-    /// once per dwell each, as the frame carried it.
+    /// Access points the node's full pending ring turned away since boot, once per dwell each.
     pub wifi_dropped: u16,
-    /// Advertisers the node's full pending buffer turned away since its boot,
-    /// once per scan each, as the frame carried it.
+    /// Advertisers the node's full pending buffer turned away since boot, once per scan each.
     pub ble_dropped: u16,
     /// Heartbeats the node has sent since its boot, this one included. Wraps.
     pub beat: u16,
@@ -84,10 +70,8 @@ pub struct Heartbeat {
     pub live: bool,
 }
 
-/// One status reply from the bridge, as it sent it.
-///
-/// Every counter is the bridge's own since its boot, so a bridge reboot shows as the
-/// values falling. The engine's since-attach figure is derived and not recorded.
+/// One status reply from the bridge, as sent. Counters are the bridge's since boot, so a reboot
+/// shows as values falling. The engine's since-attach figure is not recorded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BridgeStatusSeen {
     /// Unix milliseconds of receipt.
@@ -100,19 +84,17 @@ pub struct BridgeStatusSeen {
     pub dropped_tx: u32,
     /// Milliseconds since its boot.
     pub uptime_ms: u32,
-    /// Frames this host had read off the link when the reply arrived: the engine's
-    /// `Counters::frames`. Between two rows, the difference in `rx_count` less the
-    /// difference in this is frames lost on USB plus `dropped_tx`, give or take the frames
-    /// still queued in the bridge, which the reply overtakes.
+    /// Frames this host had read off the link when the reply arrived (`Counters::frames`). Between
+    /// two rows, the `rx_count` difference less this one's is USB loss plus `dropped_tx`, give or
+    /// take frames still queued in the bridge, which the reply overtakes.
     pub host_frames: u64,
 }
 
-/// The host's own state, sampled every few seconds and once more at shutdown.
+/// The host's own state, sampled every few seconds and at shutdown.
 ///
-/// Counts are the engine's since it started, so two rows are read as a difference.
-/// Peaks are the largest since the previous row, so a run of rows says *when* the host
-/// struggled. A row lost to a full store queue costs that window's peaks and nothing
-/// else, since the next row's counts carry on from the same start.
+/// Counts run from the engine's start, so two rows are read as a difference. Peaks are the largest
+/// since the previous row, so rows show *when* the host struggled. A row lost to a full queue costs
+/// only that window's peaks.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct HostStatus {
     /// Unix milliseconds of the sample.
@@ -133,9 +115,8 @@ pub struct HostStatus {
     pub foreign_admin: u64,
     /// `Counters::admin_windows_missed`.
     pub admin_windows_missed: u64,
-    /// The furthest behind the air this host fell since the previous row, in
-    /// microseconds. Only lags measured from arriving frames count: the assumption
-    /// made on connecting, before any frame has been timed, is not one.
+    /// The furthest behind the air this host fell since the previous row, in microseconds. Only
+    /// lags measured from arriving frames count, not the assumption made on connecting.
     pub lag_peak_us: u64,
     /// Rows the store has written.
     pub store_written: u64,
@@ -143,36 +124,30 @@ pub struct HostStatus {
     pub store_dropped: u64,
     /// The deepest the store's queue got since the previous row.
     pub store_queue_peak: u64,
-    /// The slowest batch the store wrote since the previous row, statements and
-    /// commit together, in microseconds.
+    /// The slowest batch since the previous row, statements and commit together, in microseconds.
     pub store_commit_peak_us: u64,
-    /// The Raspberry Pi firmware's throttle word, or `None` off a Pi; see
-    /// [`crate::health`] for its bits.
+    /// The Raspberry Pi firmware's throttle word, `None` off a Pi ([`crate::health`] has its bits).
     pub throttled: Option<u32>,
     /// SoC temperature in thousandths of a degree Celsius, or `None` when unreadable.
     pub soc_temp_mc: Option<i32>,
     /// Battery voltage in millivolts, or `None` when the host has no `battery` hwmon.
     pub battery_mv: Option<i32>,
-    /// Battery current in milliamps, signed as the driver reports it, or `None` as for
-    /// `battery_mv`.
+    /// Battery current in milliamps, signed as the driver reports it, `None` as for `battery_mv`.
     pub battery_ma: Option<i32>,
 }
 
-/// A run of batches missing from one node's sequence, found when the batch after it
-/// arrived.
+/// A run of batches missing from one node's sequence, found when the next batch arrived.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BatchGap {
     /// Which node.
     pub node_mac: Mac,
-    /// Unix milliseconds the batch after the gap arrived, not when the lost ones
-    /// were sent.
+    /// Unix milliseconds the batch after the gap arrived, not when the lost ones were sent.
     pub rx_at_ms: i64,
     /// The `seq` of the last batch before the gap.
     pub after_seq: u16,
     /// The `seq` of the batch that revealed it.
     pub seq: u16,
-    /// Batches missing between the two: `seq - after_seq - 1` modulo 2^16, always
-    /// between 1 and 1023.
+    /// Batches missing between the two: `seq - after_seq - 1` modulo 2^16, from 1 to 1023.
     pub lost: u16,
 }
 
@@ -183,15 +158,13 @@ pub struct Observation {
     pub node_mac: Mac,
     /// Unix milliseconds of receipt by the bridge.
     pub rx_at_ms: i64,
-    /// How strongly the bridge heard the reporting node, not the observed network:
-    /// a node at the edge of the mesh is worth spotting in the data afterwards.
+    /// How strongly the bridge heard the reporting node, not the network, to spot nodes at the
+    /// mesh's edge.
     pub link_rssi: Option<i8>,
     /// The observed BSSID, six raw bytes.
     pub bssid: [u8; 6],
-    /// Raw SSID bytes. Not a `String`: an SSID is whatever the access point
-    /// beaconed, and forcing it through UTF-8 here would lose the original.
-    /// [`ssid_text`] is how it becomes text again, wherever something has to
-    /// show it or write it down.
+    /// Raw SSID bytes. An SSID is whatever the access point beaconed, so UTF-8 here would lose the
+    /// original. [`ssid_text`] turns it into text.
     pub ssid: Vec<u8>,
     /// The `AuthMode` token exactly as the node wrote it.
     pub security: String,
@@ -201,21 +174,17 @@ pub struct Observation {
     pub rssi: i16,
     /// Wi-Fi or BLE.
     pub kind: RecordKind,
-    /// The roaming consortium element's body, verbatim as the beacon carried
-    /// it. `None` for BLE, and for the Wi-Fi that beaconed no such element —
-    /// which is most of it.
+    /// The roaming consortium element's body, verbatim. `None` for BLE, and for the Wi-Fi without
+    /// one, which is most.
     pub rcoi: Option<Vec<u8>>,
-    /// The Bluetooth SIG company identifier a BLE advertiser carried in its
-    /// manufacturer-specific data. `None` for Wi-Fi, and for the advertiser
-    /// that sent none — many do not.
+    /// The Bluetooth SIG company identifier from a BLE advertiser's manufacturer data. `None` for
+    /// Wi-Fi, and for the many advertisers that send none.
     pub mfgr_id: Option<u16>,
     /// Where the host believed it was when this arrived.
     pub fix: Fix,
-    /// The frame exactly as it came off the air, header and all.
-    ///
-    /// A couple of dozen bytes a row, and the reason a decoder fix can reach history
-    /// rather than only what arrives afterwards. The header says which version wrote
-    /// the row, so a file spanning a format change is still readable.
+    /// This record's own bytes, without the batch header, which a re-parse does not need. A couple
+    /// of dozen bytes a row, and the reason a decoder fix can reach history, not only what arrives
+    /// later. `--record-raw` keeps whole frames as [`RawFrame`]s.
     pub raw_body: Vec<u8>,
 }
 
@@ -234,11 +203,9 @@ pub struct RawFrame {
     pub bytes: Vec<u8>,
 }
 
-/// Which bridge this capture came through.
-///
-/// Separate from [`crate::store::CaptureInfo`] because a capture is created before
-/// any bridge has announced itself, and a capture that never finds a dongle still
-/// deserves a capture row.
+/// Which bridge this capture came through. Separate from [`crate::store::CaptureInfo`] because a
+/// capture is created before any bridge announces itself, and one that never finds a dongle still
+/// gets a capture row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BridgeSeen {
     /// The bridge's own MAC, which nodes see as the core's address.
@@ -249,10 +216,8 @@ pub struct BridgeSeen {
     pub fw_version: String,
 }
 
-/// What became of one assignment this host put on the air.
-///
-/// Every attempt gets a row, successful or not, which is what turns "the fleet keeps
-/// drifting off its channels" into a query.
+/// What became of one assignment this host put on the air. Every attempt gets a row, so "the fleet
+/// keeps drifting off its channels" becomes a query.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdminOutcome {
     /// The node's radio acknowledged the frame at the MAC layer.
@@ -261,8 +226,8 @@ pub enum AdminOutcome {
     Unacked,
     /// The bridge could not transmit it at all.
     Refused,
-    /// No answer came back from the bridge inside the timeout, so we do not
-    /// know. Distinct from `Unacked`, where the radio did report.
+    /// No answer from the bridge inside the timeout, so unknown. Unlike `Unacked`, where the radio
+    /// did report.
     Silent,
 }
 
@@ -284,10 +249,9 @@ impl AdminOutcome {
 pub struct AssignmentSent {
     /// Which node it was addressed to.
     pub node_mac: Mac,
-    /// The persisted monotonic counter this assignment was allocated from.
+    /// The engine's epoch counter it was allocated from: monotonic within a capture, not persisted.
     pub counter: u64,
-    /// The byte that actually went on the wire, `air::wire_epoch(counter)`.
-    /// The column keeps its older name; what it holds has not changed.
+    /// The byte that went on the wire, `air::wire_epoch(counter)`.
     pub wire_version: u8,
     /// Which `SCAN_CHANNELS` indices the node was told to dwell on.
     pub channels: ChannelSet,
@@ -299,13 +263,10 @@ pub struct AssignmentSent {
     pub delivered_at_ms: Option<i64>,
     /// What the radio said.
     pub outcome: AdminOutcome,
-    /// Bridge-measured microseconds from the heartbeat that opened the node's admin
-    /// window to the transmit callback, stamped at both ends by the bridge so the
-    /// host's scheduling noise never enters it.
-    ///
-    /// `None` when there is no such measurement to make: no heartbeat stamp yet, or
-    /// a difference longer than the window, which means the heartbeat behind it did
-    /// not open one. The outcome is recorded either way.
+    /// Bridge-measured microseconds from the heartbeat that opened the node's window to the
+    /// transmit callback, both ends stamped by the bridge. `None` with no heartbeat stamp, or a
+    /// difference longer than the window, meaning that heartbeat opened none. The outcome is
+    /// recorded either way.
     pub latency_us: Option<u32>,
 }
 
@@ -337,7 +298,7 @@ mod tests {
     use super::ssid_text;
 
     #[test]
-    fn ssid_text_strips_padding_when_ssid_is_cloaked() {
+    fn ssid_text_strips_padding_when_ssid_cloaked() {
         assert_eq!(ssid_text(&[0u8; 8]), "");
         assert_eq!(ssid_text(b"Home\0\0\0"), "Home");
         assert_eq!(ssid_text(b""), "");
@@ -345,10 +306,9 @@ mod tests {
     }
 
     #[test]
-    fn ssid_text_replaces_interior_null_bytes_with_replacement_character_when_formatting() {
-        // An interior NUL is left alone by the trim, so this is the last thing
-        // standing between it and a column WiGLE has to parse, or a terminal
-        // that would swallow it and show a shorter name than the one on air.
+    fn ssid_text_replaces_nul_when_interior() {
+        // The trim leaves an interior NUL, so this is the last guard before a column WiGLE parses,
+        // or a terminal that would swallow it and show a shorter name.
         assert_eq!(ssid_text(b"a\0b"), "a\u{FFFD}b");
     }
 }
