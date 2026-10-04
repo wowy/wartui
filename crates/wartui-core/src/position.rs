@@ -1,18 +1,14 @@
 //! Where an observation was made.
 //!
-//! A fallback chain, resolved fresh for every record: a live GPS on the host,
-//! then a static configured position, then nothing. **A record is never dropped
-//! for want of a position** — an observation with no coordinates is still
-//! evidence a network exists, and the export is where the question of whether
-//! it can be uploaded gets asked.
+//! A fallback chain resolved per record: a live GPS on the host, then a static configured position,
+//! then nothing. **A record is never dropped for want of a position**: an unpositioned observation
+//! still proves a network exists, and export decides whether it can be uploaded.
 //!
-//! The tiers are tried in that order per record, which is why the source is stored
-//! per row rather than per capture: one capture can begin indoors on a typed-in
-//! position, pick up satellites in the car park, and lose them in a tunnel.
+//! Tiers are tried per record, so the source is stored per row: one capture can start indoors on a
+//! typed-in position, gain satellites in the car park, and lose them in a tunnel.
 //!
-//! **A fix has to be recent to be used at all**, which is the interesting half —
-//! past [`PositionChain::max_age`] the chain falls through to the tier below. See
-//! [`DEFAULT_MAX_AGE`] for what recent means and why.
+//! **A fix must be recent to be used**: past [`PositionChain::max_age`] the chain falls through to
+//! the next tier. [`DEFAULT_MAX_AGE`] says what recent means.
 
 use std::time::Duration;
 
@@ -20,10 +16,9 @@ use crate::gps::Gps;
 
 /// How old a GPS fix may be and still be believed.
 ///
-/// Receivers emit at 1 Hz, so this is five missed sentences — long enough to
-/// ride out a tunnel or a burst of dropped serial, short enough that at 50 km/h
-/// the position is wrong by at most about seventy metres, which is inside what
-/// a Wi-Fi observation means anyway.
+/// Receivers emit at 1 Hz, so this is five missed sentences: enough to ride out a tunnel or dropped
+/// serial, short enough that at 50 km/h the position is off by about seventy metres at most, inside
+/// what a Wi-Fi observation means anyway.
 pub const DEFAULT_MAX_AGE: Duration = Duration::from_secs(5);
 
 /// Which tier of the chain produced a fix.
@@ -64,8 +59,8 @@ pub struct Fix {
     pub source: PositionSource,
     /// When the fix itself was taken, in Unix milliseconds.
     ///
-    /// Separate from the observation's receive time, which is what makes a stale fix
-    /// attached to a fresh observation visible rather than invisible.
+    /// Separate from the observation's receive time, so a stale fix on a fresh observation is
+    /// visible.
     pub at_ms: Option<i64>,
 }
 
@@ -160,9 +155,8 @@ impl PositionChain {
     pub fn resolve(&self, now_ms: i64) -> Fix {
         if let Some((fix, received_at_ms)) = self.gps.as_ref().and_then(Gps::latest) {
             let age_ms = now_ms.saturating_sub(received_at_ms);
-            // A negative age is a host clock that stepped backwards, not a fix
-            // from the future; treating it as fresh keeps the position of
-            // everything captured across an NTP correction.
+            // A negative age is a host clock stepping back, not a fix from the future. Treating it
+            // as fresh keeps positions across an NTP correction.
             if age_ms <= max_age_ms(self.max_age) {
                 return fix;
             }

@@ -1,15 +1,13 @@
 //! Reading a position out of an NMEA 0183 stream.
 //!
-//! A deliberately small parser: two sentence types, because those two carry
-//! everything the store has a column for. `GGA` has the altitude, the satellite
-//! count and the dilution of precision; `RMC` has the date, without which a
-//! timestamp cannot be built at all. Everything else a receiver emits — `GSV`,
-//! `GSA`, `VTG`, proprietary `PMTK` chatter — parses as valid and unused.
+//! A small parser: two sentence types, which carry everything the store has a column for. `GGA` has
+//! altitude, satellite count and dilution of precision. `RMC` has the date, without which no
+//! timestamp can be built. Everything else (`GSV`, `GSA`, `VTG`, proprietary `PMTK` chatter) parses
+//! as valid and unused.
 //!
-//! **The checksum is mandatory.** It is not there to catch line noise on a USB
-//! CDC endpoint that already has CRCs; it is there because the first read after
-//! opening a port lands mid-sentence, and half of `$GPGGA,123519,4807.038,N,…`
-//! is a well-formed sentence describing somewhere else entirely.
+//! **The checksum is mandatory.** Not for line noise on a USB CDC endpoint that has CRCs already,
+//! but because the first read after opening lands mid-sentence, and half of
+//! `$GPGGA,123519,4807.038,N,…` is a well-formed sentence about somewhere else.
 
 use std::str::from_utf8;
 
@@ -56,16 +54,15 @@ pub struct GpsFix {
     pub satellites: Option<u8>,
     /// UTC of the fix in Unix milliseconds, when the date is known.
     ///
-    /// `GGA` carries a time but no date, so this stays `None` until an `RMC` has been
-    /// seen. A fix is usable without it, and this is what keeps the receiver's own
-    /// clock visible rather than silently replaced by the host's.
+    /// `GGA` has a time but no date, so this stays `None` until an `RMC` arrives. A fix is usable
+    /// without it, and it keeps the receiver's clock visible rather than silently replaced by the
+    /// host's.
     pub at_ms: Option<i64>,
 }
 
-/// Horizontal dilution of precision is a multiplier rather than a distance: how much
-/// the satellite geometry amplifies ranging error. Multiplying by a nominal 5 m
-/// user-equivalent range error is the usual way to get metres out of it, and WiGLE's
-/// `AccuracyMeters` column wants a number — an honest estimate beats a 0.
+/// HDOP is a multiplier, not a distance: how much satellite geometry amplifies ranging error. Times
+/// a nominal 5 m user-equivalent range error gives metres, and WiGLE's `AccuracyMeters` wants a
+/// number: an honest estimate beats 0.
 #[must_use]
 pub fn accuracy_from_hdop(hdop: f64) -> f64 {
     hdop * 5.0
@@ -77,9 +74,7 @@ const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 const HALF_DAY_MS: i64 = DAY_MS / 2;
 
 /// A running parse of one receiver's output.
-///
-/// Holds only the date, which arrives in `RMC` and is needed to stamp the `GGA`
-/// sentences between them.
+/// Holds only the date, which arrives in `RMC` and stamps the `GGA` sentences between.
 #[derive(Debug, Clone, Default)]
 pub struct Nmea {
     date: Option<NaiveDate>,
@@ -116,8 +111,7 @@ impl Nmea {
     /// `$--GGA,time,lat,N,lon,E,quality,sats,hdop,alt,M,…`
     fn gga(&mut self, f: &[&str]) -> Result<Report, NmeaError> {
         let time = field(f, 0);
-        // Quality 0 is "fix not available"; anything non-zero is a position the
-        // receiver stands behind.
+        // Quality 0 is no fix. Anything else is a position the receiver stands behind.
         if integer(field(f, 5))?.unwrap_or(0) == 0 {
             return Ok(Report::NoFix);
         }
@@ -171,9 +165,8 @@ impl Nmea {
             if milli >= 60_000 { (59, milli - 59_000) } else { (milli / 1000, milli % 1000) };
         let at_ms =
             date.and_hms_milli_opt(hour, minute, secs, millis)?.and_utc().timestamp_millis();
-        // A `GGA` borrows the date from the `RMC` before it, so sentences between
-        // midnight and that cycle's `RMC` land a day in the past. Time only runs
-        // backwards by hours for that reason.
+        // A `GGA` borrows the previous `RMC`'s date, so sentences between midnight and that cycle's
+        // `RMC` land a day early. Only that runs time backwards by hours.
         let at_ms = match self.last_stamp_ms {
             Some(last) if at_ms < last - HALF_DAY_MS => at_ms + DAY_MS,
             _ => at_ms,
@@ -206,9 +199,8 @@ fn checked_body(line: &[u8]) -> Result<&str, NmeaError> {
     Ok(body)
 }
 
-/// A field by index, or the empty string. NMEA omits what it does not know by
-/// leaving the field empty, and a short sentence is the same thing said by
-/// stopping early.
+/// A field by index, or empty. NMEA leaves unknown fields empty, and a short sentence says the same
+/// by stopping early.
 fn field<'a>(fields: &[&'a str], index: usize) -> &'a str {
     fields.get(index).copied().unwrap_or_default()
 }
@@ -261,9 +253,8 @@ fn coord(fields: &[&str], index: usize) -> Result<Option<f64>, NmeaError> {
     Ok(Some(signed))
 }
 
-/// `ddmmyy`, which is a two-digit year and therefore a choice about centuries.
-/// These receivers are not from the 1900s and this program is not for the
-/// 2100s.
+/// `ddmmyy`: a two-digit year, so a choice of century. These receivers are not from the 1900s, nor
+/// is this program for the 2100s.
 fn date(text: &str) -> Result<Option<NaiveDate>, NmeaError> {
     if text.is_empty() {
         return Ok(None);

@@ -1,24 +1,20 @@
 //! The host's own health: firmware throttling, SoC temperature and battery.
 //!
-//! The capture host is a HackberryPi CM5 (a Raspberry Pi CM5) in a car: on its own
-//! battery, usually also plugged in. A battery or charger sagging under load and a SoC
-//! cooking in a parked car are the things that can go wrong with the host itself, and
-//! none of them shows anywhere else in a capture.
+//! The capture host is a HackberryPi CM5 (a Raspberry Pi CM5) in a car, on its own battery and
+//! usually plugged in too. A battery or charger sagging under load and a SoC cooking in a parked
+//! car are what can go wrong with the host, and nothing else in a capture shows them.
 //!
-//! `throttled` is the Raspberry Pi firmware's `get_throttled` word, the one
-//! `vcgencmd get_throttled` prints. It comes from the firmware's property mailbox, asked
-//! the same question `vcgencmd` asks it: a `GET_GENCMD_RESULT` message through the
-//! `_IOWR(100, 0, char *)` ioctl on `/dev/vcio_gencmd`. The route is fixed by what the
-//! CM5 kernel offers an unprivileged user:
+//! `throttled` is the Raspberry Pi firmware's `get_throttled` word, as `vcgencmd get_throttled`
+//! prints it. It is asked the way `vcgencmd` asks: a `GET_GENCMD_RESULT` property-mailbox message
+//! through the `_IOWR(100, 0, char *)` ioctl on `/dev/vcio_gencmd`. That is the only route the CM5
+//! kernel gives an unprivileged user:
 //!
 //! - sysfs has no `get_throttled` attribute on it.
 //! - `/dev/vcio` answers the same ioctl but is root-only.
 //! - `/dev/vcio_gencmd` is the gencmd-only node, and opens for an unprivileged user.
 //!
-//! Spawning `vcgencmd` would give the same answer through a fork and exec every sample and
-//! a dependency on its install. The ioctl is the one `unsafe` call in the host workspace,
-//! kept to [`mailbox_call`]; building the message and reading the reply are plain code.
-//! `analyze` reads these bits:
+//! Spawning `vcgencmd` would fork and exec every sample and depend on its install. The ioctl is the
+//! one `unsafe` call in the host workspace, kept to [`mailbox_call`]. `analyze` reads these bits:
 //!
 //! | bit   | meaning                               |
 //! |-------|---------------------------------------|
@@ -31,10 +27,9 @@
 //! `soc_temp_mc` is thermal zone 0, which is the SoC on a Pi and some sensor or other
 //! on anything else running Linux, so a laptop records it too.
 //!
-//! `battery_mv` and `battery_ma` are the HackberryPi's MAX17048 fuel gauge, the hwmon
-//! device named `battery`: `in0_input` in millivolts and `curr1_input` in milliamps,
-//! recorded as the driver reports them. hwmon numbers change between boots, so the device
-//! is found by its `name` file on every sample.
+//! `battery_mv` and `battery_ma` are the HackberryPi's MAX17048 fuel gauge, hwmon device `battery`:
+//! `in0_input` in millivolts and `curr1_input` in milliamps, as the driver reports them. hwmon
+//! numbers change between boots, so each sample finds it by its `name` file.
 //!
 //! Anything missing or unreadable is `None` rather than an error: off a Pi, or off Linux,
 //! there is nothing to say, and the capture carries on either way.
@@ -44,8 +39,7 @@ use std::path::Path;
 /// One reading of the host's health. Every field is `None` where it cannot be read.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Health {
-    /// The Raspberry Pi firmware's `get_throttled` word; see the module docs for its
-    /// bits. `None` off a Pi.
+    /// The Raspberry Pi firmware's `get_throttled` word (bits in the module docs). `None` off a Pi.
     pub throttled: Option<u32>,
     /// Thermal zone 0, in thousandths of a degree Celsius.
     pub soc_temp_mc: Option<i32>,
@@ -145,9 +139,8 @@ fn parse_throttled(reply: &[u32]) -> Option<u32> {
     u32::from_str_radix(hex, 16).ok()
 }
 
-/// The firmware's throttle word, asked through `/dev/vcio_gencmd`. The device is opened
-/// afresh on each sample: an open is cheap next to the five seconds between them, and a
-/// node that appears or gains permissions mid-capture is picked up.
+/// The firmware's throttle word via `/dev/vcio_gencmd`, opened afresh each sample: cheap next to
+/// five seconds, and a node that appears or gains permissions mid-capture is picked up.
 #[cfg(target_os = "linux")]
 fn throttled() -> Option<u32> {
     let device = std::fs::File::open("/dev/vcio_gencmd").ok()?;

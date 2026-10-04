@@ -1,36 +1,27 @@
 //! The observation store: SQLite, one writer thread, batched transactions.
 //!
-//! SQLite is the system of record and the WiGLE CSV is an export from it, not
-//! the other way round. A capture that only ever existed as a CSV cannot be
-//! re-exported after a decoder fix, cannot be queried while it is still
-//! running, and cannot answer "which node saw this, and how strongly".
+//! SQLite is the system of record and the WiGLE CSV an export from it. A CSV-only capture cannot be
+//! re-exported after a decoder fix, queried mid-run, or asked which node saw a network.
 //!
-//! One thread owns the connection, because SQLite serialises writes regardless and
-//! sharing one buys contention rather than throughput. Writes are batched to
-//! [`StoreConfig::batch_rows`] or [`StoreConfig::batch_interval`], whichever comes
-//! first: committing per row means an fsync per row, which is the difference
-//! between a hundred inserts a second and a hundred thousand, and the interval is
-//! what keeps a quiet fleet's rows from sitting unwritten. The queue is bounded and
-//! drops rather than blocks, because a lost observation is one row while a stalled
-//! engine misses everything. Drops are counted and shown.
+//! One thread owns the connection: SQLite serialises writes anyway, so sharing one buys contention,
+//! not throughput. Writes are batched to [`StoreConfig::batch_rows`] or
+//! [`StoreConfig::batch_interval`], whichever comes first. A commit per row is an fsync per row, a
+//! hundred inserts a second instead of a hundred thousand. The interval keeps a quiet fleet's rows
+//! from sitting unwritten. The queue is bounded and drops rather than blocks, because a lost
+//! observation is one row while a stalled engine misses everything. Drops are counted and shown.
 //!
-//! A second thread, with a connection of its own, copies the WAL back into the file right
-//! after each commit ([`Checkpoint::Background`]), so no commit waits for the card while a
-//! checkpoint syncs. It only copies pages: the writer is still the one thing that writes
-//! rows. `docs/store-io-findings.md` has the measurements behind the batching, the
-//! checkpoint and the lack of any index on sightings.
+//! A second thread with its own connection copies the WAL back into the file after each commit
+//! ([`Checkpoint::Background`]), so no commit waits for the card. `docs/store-io-findings.md` has
+//! the measurements behind the batching, the checkpoint and the lack of any index on sightings.
 //!
-//! A file holds one run. [`Store::create`] refuses a path that exists rather than
-//! appending to it, so every export, analysis and upload cutoff is a question about one
-//! file, and nothing that reads a capture has to ask which run within it is meant.
+//! A file holds one run. [`Store::create`] refuses a path that exists, so every export, analysis
+//! and upload cutoff is about one file, with no run to pick.
 //!
-//! A capture from another build is somebody else's file, and the version marker alone
-//! cannot say so: it stays at [`SCHEMA_VERSION`] while [`SCHEMA`] changes shape, and a
-//! query against tables of another shape fails, or worse, reads them wrongly. So each file
-//! also carries [`SCHEMA_FINGERPRINT`], a hash of the schema text, and [`check_version`]
-//! refuses a file whose fingerprint is missing or not this build's. The hash is of the
-//! text, so a change that is only whitespace or a comment refuses old files too. That is
-//! the safe direction, and there is no migration to offer instead.
+//! A capture from another build is somebody else's file, and the version marker cannot say so: it
+//! stays at [`SCHEMA_VERSION`] while [`SCHEMA`] changes shape, and queries against another shape
+//! fail or misread. So each file also carries [`SCHEMA_FINGERPRINT`], a hash of the schema text,
+//! and [`check_version`] refuses a file whose fingerprint is missing or different. Even a
+//! whitespace or comment change refuses old files: the safe direction, with no migration to offer.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -47,28 +38,15 @@ use wartui_proto::plan::ChannelPool;
 use crate::engine::{StorePeaks, StoreStats};
 use crate::record::Record;
 
-/// The schema shape this build writes and reads — the only one it will touch.
-///
-/// 1 until wartui 1.0, the same rule as [`wartui_proto::air::WIRE_VERSION`] and
-/// for the same reason: nothing here is compatible with an earlier wartui, so a
-/// marker distinguishing the two marks a difference the policy has already
-/// settled. There is no migration and nothing reads an older file to be helpful
-/// about it. [`SCHEMA`] changes as freely as the project needs, and a database
-/// stamped anything but this is somebody else's — refused by [`check_version`]
-/// rather than adapted, because adapting it would mean deciding what an older
-/// build meant, and a mask of scan-table indices means what the build that wrote
-/// it meant.
-///
-/// The marker is the lever held for the first capture that has to be read in an
-/// earlier build's terms. Nothing before 1.0 is, so it does not move before then.
-/// [`SCHEMA_FINGERPRINT`] is what tells two builds apart meanwhile.
+/// The schema version this build writes and reads: 1 until wartui 1.0, as
+/// [`wartui_proto::air::WIRE_VERSION`] is. It is the lever for the first capture that must be read
+/// in an earlier build's terms, and none is before 1.0. Meanwhile [`SCHEMA_FINGERPRINT`] tells
+/// builds apart (see the module docs).
 pub const SCHEMA_VERSION: i32 = 1;
 
 /// FNV-1a over [`SCHEMA`], stamped into `kv` as `schema_fingerprint` and checked by
-/// [`check_version`] on every open.
-///
-/// FNV-1a rather than `std::hash::DefaultHasher`, whose output may change between Rust
-/// releases: a toolchain update would then refuse every capture the same schema wrote.
+/// [`check_version`] on every open. Not `DefaultHasher`, whose output may change between Rust
+/// releases, so a toolchain update would refuse every capture.
 const SCHEMA_FINGERPRINT: u64 = fnv1a_64(SCHEMA.as_bytes());
 
 /// The `kv` key [`SCHEMA_FINGERPRINT`] is stored under.
@@ -98,14 +76,13 @@ CREATE TABLE IF NOT EXISTS capture (
   bridge_fw TEXT,
   channel_pool TEXT NOT NULL,
   notes TEXT,
-  -- 1 for test data: made with --sim (invented networks) or --lat/--lon (a fixed
-  -- position). WDGWars and WiGLE ban both, so it is never uploaded.
+  -- 1 for test data (--sim's invented networks, or --lat/--lon's fixed position), which WDGWars and
+  -- WiGLE ban, so it is never uploaded.
   simulated INTEGER NOT NULL
 );
 
--- `capabilities` is the node's most recent heartbeat rendered the way the fleet
--- table shows it (`wartui/1.0;5g`). Null means only that nothing but an
--- observation has been heard yet; see `record::NodeSeen`.
+-- `capabilities` is the node's latest token as the fleet table shows it (`wartui/1.0;5g`). Null
+-- until a heartbeat arrives (see `record::NodeSeen`).
 CREATE TABLE IF NOT EXISTS node (
   mac BLOB PRIMARY KEY,
   label TEXT,
@@ -115,9 +92,8 @@ CREATE TABLE IF NOT EXISTS node (
   capabilities TEXT
 );
 
--- `wifi_dropped` and `ble_dropped` are the node's since-boot refusal counts as
--- the frame carried them: raw, so a reboot shows as the value falling. `beat` is
--- the node's since-boot heartbeat count, raw, and wraps at 2^16.
+-- `wifi_dropped`, `ble_dropped` and `beat` are the node's raw since-boot counts, so a reboot shows
+-- as the value falling. `beat` wraps at 2^16.
 CREATE TABLE IF NOT EXISTS heartbeat (
   id INTEGER PRIMARY KEY,
   node_mac BLOB NOT NULL,
@@ -135,14 +111,10 @@ CREATE TABLE IF NOT EXISTS heartbeat (
   admin_latency_us INTEGER
 );
 
--- One row per transmitted assignment, written when its outcome is known, so
--- the table is append-only and a retry is a second row rather than an update.
--- `counter` is the engine's monotonic epoch and `wire_version` the byte that
--- actually went out; they differ because the wire field is one byte wide.
--- `channels` is the forty-two-bit SCAN_CHANNELS mask the frame carried, stored as the
--- integer it is: the indices are what the wire said, and which channels they name is
--- the scan table of the build that wrote the row. Nothing reads the column back, and
--- nothing rewrites it when the table changes -- a row records what went out.
+-- One row per assignment, written once its outcome is known: append-only, so a retry is a second
+-- row. `wire_version` is the one-byte wire epoch `counter` went out as. `channels` is the 42-bit
+-- SCAN_CHANNELS mask the frame carried, naming channels in the writing build's scan table. Nothing
+-- reads or rewrites it.
 CREATE TABLE IF NOT EXISTS assignment (
   id INTEGER PRIMARY KEY,
   node_mac BLOB NOT NULL,
@@ -178,19 +150,15 @@ CREATE TABLE IF NOT EXISTS observation (
   pos_at INTEGER,
   raw_body BLOB
 );
--- Deliberately no unique constraint on bssid: every sighting is kept, with the node
--- that made it and the signal it saw. Deduplicating at ingest would throw away the
--- coverage data. Nor does the table have an index of any kind, though export groups by
--- bssid: `docs/store-io-findings.md` has the measurements that took both of them out.
+-- No unique constraint on bssid: every sighting is kept with the node that made it and the signal
+-- it saw, which is the coverage data. No index either, though export groups by bssid:
+-- `docs/store-io-findings.md` has the measurements.
 
--- One row per bridge status reply, which the host polls for every few seconds.
--- `rx_count`, `dropped_tx` and `uptime_ms` are the bridge's since-boot counts as
--- the reply carried them: raw, as `heartbeat` keeps its drop counts, so a bridge
--- reboot shows as the values falling. `host_frames` is how many frames this host had
--- read off the link when the reply arrived, taken with `rx_count` so the two pair
--- closely but not exactly: between two rows, the `rx_count` difference less the
--- `host_frames` difference is frames lost on USB plus the bridge's `dropped_tx`, give
--- or take the frames queued behind the reply, which overtakes them.
+-- One row per bridge status reply, polled every few seconds. `rx_count`, `dropped_tx` and
+-- `uptime_ms` are raw since-boot counts, so a reboot shows as values falling. `host_frames` is the
+-- frames this host had read when the reply arrived. Between two rows, the `rx_count` difference
+-- less the `host_frames` difference is USB loss plus `dropped_tx`, give or take frames queued
+-- behind the reply, which overtakes them.
 CREATE TABLE IF NOT EXISTS bridge_status (
   id INTEGER PRIMARY KEY,
   rx_at INTEGER NOT NULL,
@@ -201,14 +169,12 @@ CREATE TABLE IF NOT EXISTS bridge_status (
   host_frames INTEGER NOT NULL
 );
 
--- One row at the start, every 5 s, and at shutdown: the host's own state, sampled on a timer of
--- its own so it carries on while the bridge is gone. `frames` through
--- `admin_windows_missed` and `store_written`/`store_dropped` are counts since the
--- capture began. `lag_peak_us`, `store_queue_peak` and `store_commit_peak_us` are the
--- largest since the previous row. `throttled` is the Raspberry Pi firmware's
--- `get_throttled` word, NULL off a Pi; `soc_temp_mc` is thermal zone 0 in milli-degrees
--- Celsius, NULL when unreadable. `battery_mv` and `battery_ma` are the `battery` hwmon's
--- voltage and current as its driver reports them, NULL on a host without one.
+-- One row at the start, every 5 s, and at shutdown, on a timer of its own so it carries on without
+-- a bridge. `frames` through `admin_windows_missed` and `store_written`/`store_dropped` count since
+-- the capture began. The `_peak` columns are the largest since the previous row. `throttled` is the
+-- Pi firmware's `get_throttled` word, NULL off a Pi. `soc_temp_mc` is thermal zone 0 in
+-- milli-degrees Celsius, NULL when unreadable. `battery_mv` and `battery_ma` are the `battery`
+-- hwmon's readings, NULL without one.
 CREATE TABLE IF NOT EXISTS host_status (
   id INTEGER PRIMARY KEY,
   at INTEGER NOT NULL,
@@ -231,10 +197,9 @@ CREATE TABLE IF NOT EXISTS host_status (
   battery_ma INTEGER
 );
 
--- One row per gap in a node's batch `seq`. `rx_at` is when the batch after the gap
--- arrived, not when the lost batches were sent. `lost` is `seq - after_seq - 1`
--- modulo 2^16, and only gaps under 1024 are recorded, the rule the live count
--- follows. Summing `lost` per node gives the fleet table's `lost` column.
+-- One row per gap in a node's batch `seq`. `rx_at` is when the batch after it arrived. `lost` is
+-- `seq - after_seq - 1` modulo 2^16, recorded only under 1024 like the live count. Summed per node,
+-- it is the fleet table's `lost` column.
 CREATE TABLE IF NOT EXISTS batch_gap (
   id INTEGER PRIMARY KEY,
   node_mac BLOB NOT NULL,
@@ -253,10 +218,9 @@ CREATE TABLE IF NOT EXISTS raw_frame (
   bytes BLOB NOT NULL
 );
 
--- One row per upload the site queued. `through_id` is the last observation id the upload
--- covered; the next upload sends only observations stored after it. Ids follow commit order,
--- so the cutoff is exact even when one frame's sightings span two commits. `result` is NULL
--- until known, then 'done', 'failed' or 'unfollowed'. A job the site reported failed imported
+-- One row per upload the site queued. The next upload sends only observations after `through_id`.
+-- Ids follow commit order, so the cutoff is exact even when one frame's sightings span two commits.
+-- `result` is NULL until known, then 'done', 'failed' or 'unfollowed'. A failed job imported
 -- nothing and is no cutoff.
 CREATE TABLE IF NOT EXISTS upload (
   id INTEGER PRIMARY KEY,
@@ -325,16 +289,13 @@ pub struct StoreConfig {
     pub queue_depth: usize,
     /// The writer's page cache, in KiB. `None` leaves SQLite's default, about 2 MiB.
     pub cache_kib: Option<u32>,
-    /// How many pages the WAL may reach before a commit checkpoints it into the
-    /// main file. `None` leaves SQLite's default of 1000.
+    /// WAL pages before a commit checkpoints it. `None` leaves SQLite's 1000.
     pub wal_autocheckpoint_pages: Option<u32>,
-    /// Page size in bytes. Only a new file takes it: a WAL database keeps the size
-    /// it was created with. `None` leaves SQLite's default of 4096.
+    /// Page size in bytes, taken only by a new file since WAL keeps its size. `None` leaves
+    /// SQLite's 4096.
     pub page_size: Option<u32>,
-    /// Keep the wall time of every batch for [`Store::close`] to report.
-    ///
-    /// Off unless asked, because the list grows with every commit for as long as the
-    /// capture runs. `wartui bench` asks.
+    /// Keep every batch's wall time for [`Store::close`]. Off unless `wartui bench` asks: it grows
+    /// per commit.
     pub timings: bool,
     /// When the WAL is copied back into the database file.
     pub checkpoint: Checkpoint,
@@ -349,14 +310,12 @@ pub enum Checkpoint {
     Inline,
     /// A thread of its own with a connection of its own, so the writer does not wait.
     ///
-    /// Woken by each commit, at most once every `every`, it copies the WAL back with a
-    /// `PASSIVE` checkpoint, which runs beside the writer instead of holding it up. Right
-    /// after a commit is the moment that matters: SQLite rewinds the WAL to its start only
-    /// when a writer begins a transaction and finds every frame already copied, so a pass
-    /// that finishes before the next commit keeps the WAL the size of a commit. Run on a
-    /// timer instead, a pass lands across commits, never catches up, and the WAL only grows
-    /// (`docs/store-io-findings.md`). If commits still outpace the card, the file grows
-    /// anyway; once it passes `truncate_at` bytes, and a pass has caught up so nothing is
+    /// Woken by each commit, at most once every `every`, it copies the WAL back with a `PASSIVE`
+    /// checkpoint that runs beside the writer. Timing matters: SQLite rewinds the WAL only when a
+    /// writer starts a transaction and finds every frame copied. A pass that finishes before the
+    /// next commit keeps the WAL one commit long. On a timer, passes straddle commits, never catch
+    /// up, and the WAL only grows (`docs/store-io-findings.md`). If commits still outpace the card,
+    /// the file grows anyway. Past `truncate_at` bytes, once a pass has caught up so nothing is
     /// left to copy under the writer's lock, a `TRUNCATE` rewinds it.
     Background {
         /// The least time between passes. Zero is a pass after every commit.
@@ -366,8 +325,8 @@ pub enum Checkpoint {
     },
 }
 
-/// What the background checkpointer did. Empty under [`Checkpoint::Inline`], whose
-/// checkpoints happen inside commits and are part of their timings.
+/// What the background checkpointer did. Empty under [`Checkpoint::Inline`], whose checkpoints sit
+/// inside commit timings.
 #[derive(Debug, Clone, Default)]
 pub struct CheckpointReport {
     /// Every passive pass, in order.
@@ -392,18 +351,17 @@ pub struct CheckpointPass {
 }
 
 impl StoreConfig {
-    /// Defaults tuned for a live capture on a microSD card: commit every second or 16,384
-    /// rows, queue up to 16,384 records, and checkpoint the WAL from a thread of its own
-    /// right after each commit. SQLite's own cache and page size.
+    /// Defaults for a live capture on a microSD card: commit every second or 16,384 rows, queue up
+    /// to 16,384 records, checkpoint from its own thread after each commit, and SQLite's cache and
+    /// page size.
     ///
-    /// Measured on a Raspberry Pi writing a full drive to a card
-    /// (`docs/store-io-findings.md`). A commit a second rewrites the pages every commit
-    /// touches once a second, not ten times, and checkpointing right after it lets the
-    /// writer rewind the WAL itself: together they took the bytes written from 2.8× the
-    /// database to 2.2× and the slowest batch from 149 ms to 58 ms. The queue is about
-    /// 1.4 s of a drive's rows for about 2 MiB, against that 58 ms. The price is the
-    /// loss window: a crash loses at most the second not yet committed plus the queue.
-    /// The checkpoint also syncs the WAL once a second, so a power cut loses no more.
+    /// Measured on a Raspberry Pi writing a full drive to a card (`docs/store-io-findings.md`). A
+    /// commit a second rewrites each touched page once a second, not ten times, and checkpointing
+    /// right after lets the writer rewind the WAL. Together they cut bytes written from 2.8× the
+    /// database to 2.2×, and the slowest batch from 149 ms to 58 ms. The queue is about 1.4 s of a
+    /// drive's rows for about 2 MiB, against that 58 ms. A crash loses at most the uncommitted
+    /// second plus the queue. The checkpoint syncs the WAL once a second, so a power cut loses no
+    /// more.
     #[must_use]
     pub fn new(path: impl Into<PathBuf>) -> Self {
         Self {
@@ -415,25 +373,21 @@ impl StoreConfig {
             wal_autocheckpoint_pages: None,
             page_size: None,
             timings: false,
-            // A pass after every commit, and the truncation a safety valve that a WAL the
-            // size of one commit never reaches.
+            // A pass after every commit. Truncation is a valve a one-commit WAL never reaches.
             checkpoint: Checkpoint::Background { every: Duration::ZERO, truncate_at: 64 << 20 },
         }
     }
 }
 
-/// What the writer did over the store's life, returned by [`Store::close`].
-///
-/// For `wartui bench`, which is how a change to the store is judged on the slow cards
-/// it matters on. The view only ever needs [`StoreStats`].
+/// What the writer did over the store's life, from [`Store::close`]. For `wartui bench`, which
+/// judges store changes on the slow cards they matter on. The view needs only [`StoreStats`].
 #[derive(Debug, Clone, Default)]
 pub struct StoreReport {
     /// Rows written.
     pub written: u64,
     /// Rows dropped, whether by a full queue or a failed batch.
     pub dropped: u64,
-    /// Every committed batch, in order. Empty unless [`StoreConfig::timings`] asked
-    /// for it.
+    /// Every committed batch, in order, if [`StoreConfig::timings`] asked.
     pub batches: Vec<BatchTiming>,
     /// What the background checkpointer did, if there was one.
     pub checkpoints: CheckpointReport,
@@ -448,21 +402,16 @@ pub struct BatchTiming {
     pub rows: usize,
     /// Statements and commit together.
     pub batch: Duration,
-    /// The `COMMIT` alone: where the WAL is written, and where SQLite runs an
-    /// automatic checkpoint.
+    /// The `COMMIT` alone, where the WAL is written and SQLite runs any automatic checkpoint.
     pub commit: Duration,
 }
 
-/// What to record about the capture being created.
-///
-/// The bridge's own identity is deliberately absent: a capture is created before
-/// any bridge has announced itself, so it arrives later as a
-/// [`Record::Bridge`].
+/// What to record about the capture being created. Not the bridge's identity: a capture is created
+/// before any bridge announces itself, so that arrives later as a [`Record::Bridge`].
 #[derive(Debug, Clone, Default)]
 pub struct CaptureInfo {
-    /// The pool the run started on. The operator can change it mid-run, so it
-    /// is not every assignment's: each assignment row records the channels that
-    /// actually went out.
+    /// The pool the run started on. The operator can change it mid-run, so each assignment row
+    /// records the channels actually sent.
     pub pool: ChannelPool,
     /// Anything the operator wants to remember about this run.
     pub notes: Option<String>,
@@ -474,8 +423,7 @@ pub struct CaptureInfo {
 struct Stats {
     written: AtomicU64,
     dropped: AtomicU64,
-    /// Records in the queue: counted in by [`Store::submit`], out by the writer as it
-    /// receives each one.
+    /// Records in the queue, counted in by [`Store::submit`] and out by the writer.
     queued: AtomicU64,
     /// The largest `queued` since [`Store::take_peaks`].
     queue_peak: AtomicU64,
@@ -489,26 +437,21 @@ pub struct Store {
     tx: Option<SyncSender<Record>>,
     stats: Arc<Stats>,
     join: Option<JoinHandle<StoreReport>>,
-    /// The background checkpointer, under [`Checkpoint::Background`]. It stops when the
-    /// writer does, because the writer holds the only thing that wakes it.
+    /// The background checkpointer, under [`Checkpoint::Background`]. It stops with the writer,
+    /// which holds the only thing that wakes it.
     checkpointer: Option<JoinHandle<CheckpointReport>>,
-    /// Passes that caught up, counted as they happen. Its own allocation rather than a
-    /// third field in [`Stats`]: the checkpointer writes this and the writer writes
-    /// those, and there is no reason to hand the two threads one cache line to argue
-    /// over for the sake of saving an `Arc`.
+    /// Passes that caught up, counted live. Not a third field in [`Stats`], so the two threads
+    /// writing them do not share a cache line.
     caught_up: Arc<AtomicU64>,
 }
 
 impl Store {
-    /// Create the database at a path nothing occupies, and start the writer.
-    ///
-    /// The file is created with `create_new` before SQLite sees it, so a path that
-    /// exists, or that another process takes first, is refused rather than appended to.
+    /// Create the database at an unoccupied path and start the writer. `create_new` makes the file
+    /// before SQLite sees it, so a taken path, even one another process takes first, is refused.
     ///
     /// # Errors
-    /// [`StoreError::Exists`] if the path is taken, and [`StoreError`] otherwise if the
-    /// file cannot be created, the schema cannot be applied, or the writer thread cannot
-    /// be started.
+    /// [`StoreError::Exists`] if the path is taken, otherwise [`StoreError`] if creating the file,
+    /// applying the schema or starting the writer fails.
     pub fn create(
         config: &StoreConfig,
         capture: &CaptureInfo,
@@ -522,10 +465,8 @@ impl Store {
         )?;
         let mut conn = Connection::open(&config.path)?;
         prepare(&conn, config)?;
-        // All of it or none of it, version marker, fingerprint and capture row included.
-        // The marker and fingerprint are what say the tables are there, so a file stamped
-        // with half a schema under it would pass `check_version` and then fail on a
-        // missing table.
+        // All or nothing. The marker and fingerprint say the tables exist, so a half-applied schema
+        // would pass `check_version` and fail on a missing table.
         let tx = conn.transaction()?;
         tx.execute_batch(SCHEMA)?;
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -540,8 +481,7 @@ impl Store {
         )?;
         tx.commit()?;
 
-        // The writer wakes the checkpointer after each commit. One wake-up waiting stands for
-        // any number of commits, so the channel holds one.
+        // One waiting wake-up stands for any number of commits, so the channel holds one.
         let (wake, woken) = match config.checkpoint {
             Checkpoint::Inline => (None, None),
             Checkpoint::Background { .. } => {
@@ -581,16 +521,14 @@ impl Store {
         Ok(Self { tx: Some(tx), stats, join: Some(join), checkpointer, caught_up })
     }
 
-    /// Queue records, dropping any that do not fit rather than waiting.
-    ///
-    /// Never blocks. Returns how many were dropped, also counted into
-    /// [`Self::stats`] so the UI need not thread it back through.
+    /// Queue records, dropping what does not fit rather than waiting. Never blocks. Returns how
+    /// many were dropped, also counted into [`Self::stats`].
     pub fn submit(&self, records: Vec<Record>) -> usize {
         let Some(tx) = &self.tx else { return records.len() };
         let mut dropped = 0usize;
         for record in records {
-            // Counted in before the send, so the writer's count out can never run
-            // ahead of it and wrap; a record that does not fit is counted back out.
+            // Counted in before the send, so the writer's count out never runs ahead and wraps. A
+            // record that does not fit is counted back out.
             let ahead = self.stats.queued.fetch_add(1, Ordering::Relaxed);
             if tx.try_send(record).is_ok() {
                 self.stats.queue_peak.fetch_max(ahead + 1, Ordering::Relaxed);
@@ -614,11 +552,8 @@ impl Store {
         }
     }
 
-    /// The deepest the queue got and the slowest batch written since the last call,
-    /// both starting again from 0.
-    ///
-    /// Peaks rather than current values because a sample every few seconds would
-    /// almost never land on the moment a slow commit backed the queue up.
+    /// The deepest queue and slowest batch since the last call, both then reset. Peaks, because a
+    /// sample every few seconds would rarely land on the moment a slow commit backed the queue up.
     #[must_use]
     pub fn take_peaks(&self) -> StorePeaks {
         StorePeaks {
@@ -627,23 +562,16 @@ impl Store {
         }
     }
 
-    /// How many background checkpoints have caught up with the writer so far.
-    ///
-    /// A pass that caught up is one that copied every frame the WAL held, which is what
-    /// lets the next commit rewind the file rather than extend it. Counted live because
-    /// [`StoreReport::checkpoints`] only arrives once the store is closed, and whether
-    /// the WAL is being kept short is a question worth asking of a capture still running.
-    /// Under [`Checkpoint::Inline`] there is no checkpointer and this stays 0.
+    /// Background checkpoints that have caught up so far, each letting the next commit rewind the
+    /// WAL. Counted live because [`StoreReport::checkpoints`] arrives only at close. 0 under
+    /// [`Checkpoint::Inline`].
     #[must_use]
     pub fn checkpoints_caught_up(&self) -> u64 {
         self.caught_up.load(Ordering::Relaxed)
     }
 
-    /// Flush everything queued, record the capture's end and stop the writer.
-    ///
-    /// Called explicitly rather than left to `Drop`, so a failure to finish the last
-    /// transaction is reported rather than swallowed. Returns what the writer did,
-    /// which only the benchmark reads.
+    /// Flush the queue, record the capture's end and stop the writer. Explicit, not `Drop`, so a
+    /// failed last transaction is reported. Returns what the writer did, for the benchmark.
     pub fn close(mut self) -> StoreReport {
         self.shutdown()
     }
@@ -658,8 +586,7 @@ impl Store {
             }
             None => StoreReport::default(),
         };
-        // After the writer, whose end is what stops it, so its last batch has a checkpoint
-        // to land in.
+        // After the writer, whose end stops it, so the last batch gets a checkpoint.
         if let Some(join) = self.checkpointer.take() {
             match join.join() {
                 Ok(checkpoints) => report.checkpoints = checkpoints,
@@ -678,10 +605,8 @@ impl Drop for Store {
     }
 }
 
-/// Open a second connection for reading, which is what export uses.
-///
-/// WAL is what makes this safe while a capture is running: exporting an hour of data
-/// mid-run cannot stall ingest.
+/// Open a second connection for reading, as export does. WAL makes this safe mid-capture: exporting
+/// an hour of data cannot stall ingest.
 ///
 /// # Errors
 /// [`StoreError`] if the file cannot be opened or is from a different wartui.
@@ -695,11 +620,9 @@ pub fn open_readonly(path: &Path) -> Result<Connection, StoreError> {
     Ok(conn)
 }
 
-/// Open a second connection that may write, which is what recording an upload uses.
-///
-/// Never creates the file. WAL lets it write beside a running capture's writer thread; the
-/// busy timeout covers the moment the two commit at once. SQLite opens a file it cannot write
-/// read-only without saying so, so that is checked here rather than found at the first write.
+/// Open a second connection that may write, as recording an upload does. Never creates the file.
+/// WAL and the busy timeout let it write beside a running capture. SQLite silently opens an
+/// unwritable file read-only, so that is checked here.
 ///
 /// # Errors
 /// [`StoreError`] if the file cannot be opened or written, or is from a different wartui.
@@ -746,8 +669,7 @@ pub fn record_upload(
     Ok(conn.last_insert_rowid())
 }
 
-/// Say how the upload [`record_upload`] returned `id` for ended: `done`, `failed` or
-/// `unfollowed`.
+/// Record how upload `id` ended: `done`, `failed` or `unfollowed`.
 ///
 /// # Errors
 /// If the update fails.
@@ -784,14 +706,10 @@ pub fn last_upload(conn: &Connection) -> rusqlite::Result<Option<UploadRecord>> 
     .optional()
 }
 
-/// Refuse a database written by any wartui but this one.
-///
-/// Not just a newer one: there is no migration before 1.0, so a lower marker is as
-/// foreign as a higher one and guessing at it would be the compatibility this build
-/// does not claim. A file reading 0 is one [`Store::create`] has not yet committed its
-/// schema to. A file with this build's marker must also carry this build's
-/// [`SCHEMA_FINGERPRINT`]; one without a fingerprint at all is from a build that did not
-/// stamp one, and as foreign.
+/// Refuse a database written by any wartui but this one. With no migration before 1.0, a lower
+/// marker is as foreign as a higher one. A file reading 0 has not had [`Store::create`] commit its
+/// schema yet. A file with this build's marker must also carry this build's [`SCHEMA_FINGERPRINT`],
+/// and one with none is as foreign.
 fn check_version(conn: &Connection) -> Result<(), StoreError> {
     let found: i32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
     match found {
@@ -804,8 +722,7 @@ fn check_version(conn: &Connection) -> Result<(), StoreError> {
     }
 }
 
-/// The fingerprint a file carries: `None` if it has no `kv` table, no row, or a value
-/// that is not a hex `u64`.
+/// The fingerprint a file carries. `None` without a `kv` table, its row, or a hex `u64` value.
 fn stored_fingerprint(conn: &Connection) -> Result<Option<u64>, rusqlite::Error> {
     let has_kv: bool = conn.query_row(
         "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'kv')",
@@ -825,11 +742,8 @@ fn stored_fingerprint(conn: &Connection) -> Result<Option<u64>, rusqlite::Error>
     }
 }
 
-/// The background checkpointer's loop, woken by the writer's commits until the writer is
-/// gone.
-///
-/// Always one last pass on the way out, so a stopped store does not leave behind a WAL
-/// the next open has to replay.
+/// The background checkpointer's loop, woken by commits until the writer is gone. It always makes
+/// one last pass, so a stopped store leaves no WAL for the next open to replay.
 fn checkpointer(
     conn: &Connection,
     wal: &Path,
@@ -840,22 +754,19 @@ fn checkpointer(
 ) -> CheckpointReport {
     let mut report = CheckpointReport::default();
     let mut last_pass: Option<Instant> = None;
-    // A wake-up that came too soon after the last pass. It is still owed one: otherwise
-    // the last commit before the fleet goes quiet sits uncopied, and unsynced, until the
-    // next commit or the store closes, since the writer's own checkpoint is off.
+    // Too soon after the last pass, but still owed one, or the last commit before the fleet goes
+    // quiet sits uncopied and unsynced, since the writer's own checkpoint is off.
     let mut owed = false;
     loop {
         let stopping = if owed {
-            // Another commit may wake it first, and still be too soon; the wait then
-            // resumes for whatever of the interval is left.
+            // A commit may wake it early again. The wait resumes for what is left.
             let left =
                 last_pass.map_or(Duration::ZERO, |last| every.saturating_sub(last.elapsed()));
             matches!(woken.recv_timeout(left), Err(RecvTimeoutError::Disconnected))
         } else {
             woken.recv().is_err()
         };
-        // Put off rather than run at once: a pass straight after the last one would copy
-        // next to nothing and sync the file again for it.
+        // Put off: a pass straight after the last would copy almost nothing and sync again for it.
         if !stopping && last_pass.is_some_and(|last| last.elapsed() < every) {
             owed = true;
             continue;
@@ -876,8 +787,7 @@ fn checkpointer(
         if caught_up {
             caught_up_count.fetch_add(1, Ordering::Relaxed);
         }
-        // Only once a pass has caught up: the truncation then holds the writer's lock to
-        // rewind the file, not to copy and sync whatever the pass left behind.
+        // Only once a pass caught up, so the truncation holds the writer's lock only to rewind.
         if caught_up && std::fs::metadata(wal).is_ok_and(|m| m.len() > truncate_at) {
             match checkpoint(conn, "TRUNCATE") {
                 Ok(pass) => report.truncations.push(pass),
@@ -922,8 +832,7 @@ fn prepare(conn: &Connection, config: &StoreConfig) -> Result<(), rusqlite::Erro
     conn.busy_timeout(Duration::from_secs(5))?;
     conn.pragma_update(None, "foreign_keys", true)?;
     if let Some(kib) = config.cache_kib {
-        // Negative means KiB rather than pages, so the figure holds whatever the
-        // page size is.
+        // Negative means KiB, not pages, whatever the page size.
         conn.pragma_update(None, "cache_size", -i64::from(kib))?;
     }
     if matches!(config.checkpoint, Checkpoint::Background { .. }) {
@@ -977,11 +886,9 @@ fn writer(
             Ok(record) => {
                 stats.queued.fetch_sub(1, Ordering::Relaxed);
                 pending.push(record);
-                // Both conditions matter. Without the row count a burst commits
-                // one enormous transaction; without the elapsed check a steady
-                // trickle that never reaches the count would sit in memory
-                // indefinitely, because the timeout only fires when the queue
-                // goes quiet.
+                // Without the row count a burst commits one enormous transaction. Without the
+                // elapsed check a trickle below the count sits in memory forever, since the timeout
+                // fires only when the queue goes quiet.
                 if pending.len() >= batch_rows || last_flush.elapsed() >= batch_interval {
                     flush(&mut conn, &mut pending);
                     last_flush = Instant::now();
@@ -1031,8 +938,7 @@ fn flush(
             stats.written.fetch_add(count as u64, Ordering::Relaxed);
         }
         Err(e) => {
-            // The alternative is retrying forever behind a queue that is still
-            // filling, which turns a full disk into a wedged capture.
+            // Retrying forever behind a filling queue would turn a full disk into a wedged capture.
             stats.dropped.fetch_add(count as u64, Ordering::Relaxed);
             tracing::error!("dropping {count} rows: {e}");
         }
@@ -1056,14 +962,10 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
                        VALUES (?1, ?2, ?3, ?4)
                      ON CONFLICT(mac) DO UPDATE SET
                        last_seen = excluded.last_seen,
-                       -- Most frames are observations and carry no token, so
-                       -- writing `excluded` straight in would erase what the
-                       -- last heartbeat said on the very next line collected.
-                       -- The column is therefore the last token ever seen from
-                       -- this node rather than the last one it sent: a board
-                       -- reflashed to stock keeps it here for the rest of the
-                       -- capture, while the engine, which re-reads it from
-                       -- every heartbeat, correctly stops believing it.
+                       -- Most frames are observations with no token, so writing `excluded` would
+                       -- erase the last heartbeat's token at once. The column is the last token
+                       -- ever seen: a board reflashed to stock keeps it here all capture, while the
+                       -- engine, re-reading each heartbeat, stops believing it.
                        capabilities = coalesce(excluded.capabilities, node.capabilities)",
                 )?
                 .execute(params![
@@ -1122,9 +1024,8 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
                 ])?;
             }
             Record::Bridge(bridge) => {
-                // Which dongle produced this capture. Written when the bridge
-                // announces itself, which is always after the capture row
-                // exists, and rewritten if it announces again.
+                // Which dongle produced this capture. Written when the bridge announces itself,
+                // always after the capture row exists, and again if it re-announces.
                 tx.prepare_cached(
                     "UPDATE capture SET bridge_mac = ?1, bridge_chip = ?2, bridge_fw = ?3
                      WHERE id = 1",
@@ -1144,9 +1045,8 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
                 )?
                 .execute(params![
                     &a.node_mac[..],
-                    // Saturating rather than wrapping, and upwards: the column records
-                    // which epoch went out, and an epoch that reads as lower than one
-                    // already spent is the failure this counter exists to prevent.
+                    // Saturating upwards: the column records which epoch went out, and one reading
+                    // lower than an epoch already spent is the failure this counter prevents.
                     i64::try_from(a.counter).unwrap_or(i64::MAX),
                     a.wire_version,
                     i64::try_from(a.channels.bits()).unwrap_or(0),

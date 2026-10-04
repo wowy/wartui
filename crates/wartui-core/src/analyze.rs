@@ -1,46 +1,42 @@
 //! What a capture lost on the way in, read back from the tables the store already writes.
 //!
 //! Heartbeat loss is exact. Every heartbeat carries `beat`, the node's since-boot count of
-//! heartbeats sent, so a gap between consecutive beats is heartbeats lost between node and
-//! host. A beat that repeats is a duplicate, a radio retransmit or a replay, and is neither a
-//! received heartbeat nor a loss.
+//! heartbeats sent, so a gap between consecutive beats is heartbeats lost. A repeated beat, a radio
+//! retransmit or a replay, is neither received nor lost.
 //!
-//! Rows are walked in arrival order (`id`, since the store has one writer), not by `rx_at`:
-//! the host's wall clock can step backwards. In arrival order a beat that falls can only be a
-//! restart, and so can a `counter` (sweeps, not heartbeats) that falls. `beat` restarts at 1,
-//! so the first heartbeat heard after a restart proves `beat - 1` earlier ones were lost.
+//! Rows are walked in arrival order (`id`, since the store has one writer), not by `rx_at`, which
+//! the wall clock can step back. In that order a falling `beat` or `counter` (sweeps, not
+//! heartbeats) can only be a restart. `beat` restarts at 1, so the first heartbeat after a restart
+//! proves `beat - 1` were lost.
 //!
-//! A gap counts as missed only when the heartbeat before it arrived live. One replayed from
-//! the bridge's backlog can be minutes older than the next, and the heartbeats between them
-//! were sent while no host was reading: the bridge's `dropped` covers those, and they fall
-//! before the capture's baseline. The few lost at the replay-to-live handoff go uncounted.
+//! A gap counts only after a heartbeat that arrived live. One replayed from the bridge's backlog
+//! can be minutes older than the next, and the heartbeats between were sent while no host read. The
+//! bridge's `dropped` covers those, before the capture's baseline. The few lost at the
+//! replay-to-live handoff go uncounted.
 //!
-//! Ring refusals are reported beside the losses, not as one. A node's pending ring turns a
-//! sighting away once per dwell, and the same network is usually heard again on a later
-//! dwell and reported then. The count is the ring's pressure, not sightings the capture
-//! lacks.
+//! Ring refusals are reported beside the losses, not as one. A pending ring turns a sighting away
+//! once per dwell, and the network is usually reported on a later dwell. The count is ring
+//! pressure, not missing sightings.
 //!
-//! Frames are accounted for from bridge to store. Each `bridge_status` row carries
-//! `host_frames`, the frames this host had read when the reply arrived, so `host_read` is
-//! the frames the host read between the first status reply and the last. `received` less
-//! the bridge's own drops less `host_read` is the frames lost between the bridge's queue and
-//! the host. That figure is approximate: a status reply is a priority frame and overtakes
-//! the frames queued in the bridge's bulk ring, which `rx_count` counts and `host_frames`
-//! does not yet. So it is off by up to the frames queued at the first and last row, at most
-//! the ring's 24 each, and saturates at 0 when a baseline taken mid-backlog makes the host
-//! appear to have read more than the bridge passed on. What the host read
-//! and chose not to store is broken down in [`HostLoss`] from the `host_status` rows,
-//! whose counts run from the engine's start and are read as the difference between the
-//! first row, written as the capture starts, and the last. Their peaks are per row, so [`HostLoss`] takes the largest, and
-//! counts the rows whose lag peak reached the 100 ms that makes a heartbeat too stale to
+//! On the bridge side, each `bridge_status` row carries `host_frames`, the frames the host had read
+//! when the reply arrived. `host_read` is the frames read between the first reply and the last.
+//! `received` less the bridge's drops less `host_read` is the frames lost between the bridge's
+//! queue and the host. It is approximate: a status reply is a priority frame and overtakes the
+//! frames queued in the bulk ring, which `rx_count` counts and `host_frames` does not yet. So it is
+//! off by up to the ring's 24 frames at each end, and saturates at 0 when a baseline taken
+//! mid-backlog shows the host reading more than the bridge passed on.
+//!
+//! On the host side, [`HostLoss`] breaks down what the host read and did not store, from the
+//! `host_status` rows. Their counts run from the engine's start and are read as the last row less
+//! the first, which is written as the capture starts. Peaks are per row, so it takes the largest,
+//! and counts the rows whose lag peak reached the 100 ms that makes a heartbeat too stale to
 //! answer.
 //!
-//! Every since-boot count is rebased by the engine's `advance_since_boot`, the rule it
-//! applies to the live figures, and the first row in the file is a baseline only (per node,
-//! for heartbeats): what a bridge or node dropped before the capture began is not the
-//! capture's. The restart signal differs: analyze reads it from `counter` and `beat`, and
-//! `beat` is exact. The engine's epoch check stands in for `beat` live, so the two can
-//! disagree after a restart the epoch check misses.
+//! Every since-boot count is rebased by the engine's `advance_since_boot`, and the first row is a
+//! baseline only (per node, for heartbeats): what was dropped before the capture is not the
+//! capture's. Analyze reads restarts from `counter` and `beat`, which is exact. Live, the engine's
+//! epoch check stands in for `beat`, so the two can disagree after a restart the epoch check
+//! misses.
 
 use std::collections::BTreeMap;
 
@@ -72,14 +68,12 @@ pub struct BridgeLoss {
     /// Frames the host read off the link between the first status reply and the last.
     pub host_read: u64,
     /// Frames lost between the bridge's queue and the host: `received` less `dropped` less
-    /// `host_read`, saturating at 0. Approximate to within the frames queued in the bridge's
-    /// bulk ring at the first and last reply, at most 24 each, because a status reply
-    /// overtakes them.
+    /// `host_read`, saturating at 0. Approximate to the 24 frames the bulk ring can queue at each
+    /// end, which a status reply overtakes.
     pub usb_lost: u64,
 }
 
-/// What the host did with the frames it read, and how it held up. Counts run from the
-/// first `host_status` row to the last.
+/// What the host did with the frames it read, and how it held up, first `host_status` row to last.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct HostLoss {
     /// Sighting batches dropped as radio retransmits.
@@ -108,9 +102,8 @@ pub struct HostLoss {
     /// Rows reporting a capped frequency, throttling or the soft temperature limit now
     /// (bits 1–3), or `None` as for `under_voltage`.
     pub throttled: Option<u64>,
-    /// The last throttle word's since-boot bits (16–19), shifted down to 0–3 so they read
-    /// as the "now" bits do, or `None` as for `under_voltage`. Trouble before the capture
-    /// began still shows here.
+    /// The last throttle word's since-boot bits (16–19), shifted to 0–3 like the "now" bits, so
+    /// trouble from before the capture shows too. `None` as for `under_voltage`.
     pub since_boot: Option<u32>,
     /// The highest SoC temperature, in milli-degrees Celsius, or `None` when no row read one.
     pub temp_max_mc: Option<i32>,
@@ -127,8 +120,7 @@ pub struct NodeLoss {
     pub batches_lost: u64,
     /// Distinct heartbeats the capture holds. A duplicate counts once.
     pub heartbeats: u64,
-    /// Heartbeats lost between the node and the host. Exact, from gaps in `beat` after a
-    /// heartbeat that arrived live; a gap after a replayed one is not counted.
+    /// Heartbeats lost between the node and the host: exact gaps in `beat` after a live heartbeat.
     pub heartbeats_missed: u64,
     /// Access points the node's pending ring refused. Most are reported on a later dwell.
     pub wifi_refused: u64,
@@ -136,10 +128,8 @@ pub struct NodeLoss {
     pub ble_refused: u64,
 }
 
-/// What the capture lost.
-///
-/// Every figure is exact. Missed heartbeats are read from gaps in each node's `beat`
-/// sequence; see the module docs for restarts and duplicates.
+/// What the capture lost. Exact except the bridge's `usb_lost`. Missed heartbeats come from gaps in
+/// each node's `beat` (see the module docs).
 pub fn losses(conn: &Connection) -> rusqlite::Result<LossSummary> {
     let bridge = bridge(conn)?;
     let mut nodes: BTreeMap<Mac, NodeLoss> = BTreeMap::new();
@@ -159,8 +149,7 @@ fn bridge(conn: &Connection) -> rusqlite::Result<Option<BridgeLoss>> {
     )?;
     let mut rows = stmt.query([])?;
     let mut loss: Option<BridgeLoss> = None;
-    // The previous row's received, dropped, uptime and host frames. The first row is a
-    // baseline only.
+    // The previous row's figures. The first row is only a baseline.
     let mut prev: Option<(u64, u64, u64, u64)> = None;
     while let Some(row) = rows.next()? {
         let (received, dropped, uptime, host_frames) =
@@ -171,8 +160,7 @@ fn bridge(conn: &Connection) -> rusqlite::Result<Option<BridgeLoss>> {
             loss.reboots += u64::from(restarted);
             loss.received += advance_since_boot(received, Some(prev_received), restarted);
             loss.dropped += advance_since_boot(dropped, Some(prev_dropped), restarted);
-            // The host's count runs from the engine's start, so a bridge restart leaves it
-            // rising.
+            // The host's count runs from the engine's start, so it survives a bridge restart.
             loss.host_read += host_frames.saturating_sub(prev_host);
         }
         prev = Some((received, dropped, uptime, host_frames));
@@ -289,10 +277,8 @@ fn heartbeats(conn: &Connection, nodes: &mut BTreeMap<Mac, NodeLoss>) -> rusqlit
     Ok(())
 }
 
-/// What one heartbeat adds after `prev`: heartbeats heard, then heartbeats missed.
-///
-/// After a restart, the beats before this one since boot were lost. A repeat is a duplicate
-/// and adds nothing. See the module docs.
+/// What one heartbeat adds after `prev`: heartbeats heard, then missed. After a restart, every
+/// earlier beat since boot was lost. A repeat adds nothing.
 fn beat_gap(prev: u16, beat: u16, rebooted: bool) -> (u64, u64) {
     if rebooted {
         return (1, u64::from(beat.saturating_sub(1)));

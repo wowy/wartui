@@ -1,12 +1,11 @@
 //! A GPS on the host, read as NMEA over a serial port.
 //!
-//! The receiver runs on its own thread and publishes the last fix it saw into a
-//! shared cell. Nothing above it blocks on a satellite: [`Gps::latest`] is a
-//! mutex and a copy, so [`crate::PositionChain::resolve`] stays the cheap
-//! synchronous call the engine needs it to be.
+//! The receiver runs on its own thread and publishes its last fix into a shared cell. Nothing above
+//! blocks on a satellite: [`Gps::latest`] is a mutex and a copy, so
+//! [`crate::PositionChain::resolve`] stays cheap and synchronous for the engine.
 //!
-//! **The reader stamps arrival time itself**, being the only thing that knows when a
-//! byte turned up. Whether that age is too much is [`crate::PositionChain`]'s.
+//! **The reader stamps arrival time itself**, as the only thing that knows when a byte turned up.
+//! [`crate::PositionChain`] decides whether that age is too much.
 
 use std::io::ErrorKind;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -17,9 +16,9 @@ use crate::discover::{self, BAUD_LADDER, PROBE_WINDOW};
 use crate::nmea::{Nmea, NmeaError, Report};
 use crate::position::{Fix, PositionSource};
 
-/// Longest line worth assembling. NMEA 0183 caps a sentence at 82 characters;
-/// this leaves room for the proprietary sentences that ignore that, and is
-/// still short enough that a receiver spewing binary cannot grow the buffer.
+/// Longest line worth assembling. NMEA 0183 caps a sentence at 82 characters. This leaves room for
+/// proprietary sentences that ignore that, yet stops a receiver spewing binary from growing the
+/// buffer.
 const MAX_LINE: usize = 256;
 
 /// How long to block in a read before looking at the stop flag again.
@@ -31,21 +30,17 @@ const MIN_BACKOFF: Duration = Duration::from_millis(250);
 /// Slowest retry: an unplugged puck is worth checking for every few seconds.
 const MAX_BACKOFF: Duration = Duration::from_secs(5);
 
-/// How long a port has to stay readable before the backoff is forgiven.
-///
-/// Opening is not the same as working: a device node left behind after an unplug
-/// opens and then fails on the first read, and resetting on the open alone would
-/// retry that four times a second for the rest of the capture.
+/// How long a port must stay readable before the backoff is forgiven. A device node left behind
+/// after an unplug opens and then fails its first read, so forgiving on open would retry it four
+/// times a second all capture.
 const HEALTHY: Duration = Duration::from_secs(2);
 
-/// How many times a port that has worked is retried before the search reopens.
-///
-/// A receiver put back into the same socket keeps its `by-id` name, so the common
-/// unplug costs a reconnection rather than another walk of the ladder. The search
-/// resumes when the path is gone from the enumeration, or when these are spent.
+/// How many times a port that has worked is retried before searching again. A receiver put back in
+/// the same socket keeps its `by-id` name, so the common unplug costs a reconnection, not a walk of
+/// the ladder. The search resumes when the path leaves the enumeration or these are spent.
 const RETRIES_BEFORE_SEARCHING: u32 = 3;
 
-/// Which port to read, and how fast — or neither, and go and find out.
+/// Which port to read, and how fast, or neither, and go and find out.
 #[derive(Debug, Clone, Default)]
 pub struct GpsConfig {
     /// A device path the operator named. `None` searches for one.
@@ -101,12 +96,8 @@ pub enum GpsStatus {
         /// The rate being tried.
         baud: u32,
     },
-    /// Every port was listened to and none of them was a receiver.
-    ///
-    /// Distinct from [`GpsStatus::Failed`], and the distinction is the whole of
-    /// what makes searching by default bearable: a receiver nobody asked for and
-    /// nobody attached is not a fault, and must not put a line on a view that has
-    /// one line to say anything on.
+    /// Every port was listened to and none was a receiver. Distinct from [`GpsStatus::Failed`]
+    /// because it is not a fault and shows nothing (`nothing_found` says why).
     NoReceiver,
     /// Sentences are arriving and the receiver says it has no fix. Normal for
     /// the first half-minute after a cold start, and for indoors forever.
@@ -145,11 +136,9 @@ pub struct GpsView {
     pub last_fix_ms: Option<i64>,
     /// The port and rate being read, once the search has settled on one.
     pub settled: Option<(String, u32)>,
-    /// Whether the rate was the operator's choice rather than the ladder's.
-    ///
-    /// The view needs it to know whether `--gps-baud` is worth mentioning: a rate
-    /// the ladder chose is a rate that already produced valid sentences, so
-    /// unreadable lines afterwards mean something else entirely.
+    /// Whether the operator chose the rate rather than the ladder. Only then is `--gps-baud` worth
+    /// mentioning: a rate the ladder chose already produced valid sentences, so later unreadable
+    /// lines mean something else.
     pub pinned_baud: bool,
 }
 
@@ -190,10 +179,9 @@ impl Gps {
         }
     }
 
-    /// Open `config.port` on a background thread and keep it open, reconnecting
-    /// on its own if the receiver is unplugged and put back.
-    ///
-    /// Returns immediately: observations with no position are still worth having.
+    /// Open `config.port` on a background thread and keep it open, reconnecting if the receiver is
+    /// unplugged and put back. Returns at once: observations with no position are still worth
+    /// having.
     #[must_use]
     pub fn spawn(config: GpsConfig) -> Self {
         let gps = Self::detached();
@@ -208,8 +196,7 @@ impl Gps {
         gps
     }
 
-    /// Ask the reader thread to finish. Idempotent, and harmless on a detached
-    /// receiver.
+    /// Ask the reader thread to finish. Idempotent, and harmless when detached.
     pub fn stop(&self) {
         self.stop.store(true, Ordering::Relaxed);
     }
@@ -234,19 +221,17 @@ impl Gps {
         }
     }
 
-    /// Offer one line to the parser, as of `now_ms`.
-    ///
-    /// Public because it is the seam the reader thread and the tests share.
+    /// Offer one line to the parser, as of `now_ms`. Public as the seam the reader thread and the
+    /// tests share.
     pub fn feed(&self, line: &[u8], now_ms: i64) {
         let mut inner = self.lock();
         match inner.nmea.parse(line) {
             Ok(Report::Fix(new)) => {
                 inner.counters.sentences += 1;
                 inner.counters.fixes += 1;
-                // A cycle is two sentences describing the same instant, and only
-                // GGA carries altitude, satellite count and dilution. So the
-                // position is replaced and the rest carried: what a sentence does
-                // not mention, it is not contradicting.
+                // A cycle is two sentences about one instant, and only GGA carries altitude,
+                // satellites and dilution. So the position is replaced and the rest carried: what a
+                // sentence omits, it does not contradict.
                 let previous = inner.fix;
                 let satellites = new.satellites.or(match inner.status {
                     GpsStatus::Fixed { satellites } => satellites,
@@ -265,9 +250,8 @@ impl Gps {
             }
             Ok(Report::NoFix) => {
                 inner.counters.sentences += 1;
-                // Deliberately leaves the last fix in place: a receiver that loses
-                // lock under a bridge has not moved the host, and the chain's
-                // staleness rule decides when to stop believing it.
+                // Keep the last fix: losing lock under a bridge has not moved the host, and the
+                // chain's staleness rule decides when to stop believing it.
                 if !matches!(inner.status, GpsStatus::Fixed { .. }) {
                     inner.status = GpsStatus::Searching;
                 }
@@ -295,21 +279,18 @@ impl Gps {
         self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// Find a receiver, read it, and go back to looking when it goes away.
+    /// Find a receiver, read it, and look again when it goes away.
     ///
-    /// The search lives on this thread because nothing above waits for it: a
-    /// capture starts the moment it is asked to and takes whatever position is
-    /// available when each row is written, so a few seconds spent listening to
-    /// ports costs the capture nothing. It is also what makes a receiver survive
-    /// being unplugged and put back into a different socket, which a reader given
-    /// one literal path cannot do.
+    /// The search runs here because nothing waits for it: a capture starts at once and takes
+    /// whatever position exists as each row is written, so seconds spent listening cost nothing. It
+    /// also lets a receiver survive moving to another socket, which a reader given one literal path
+    /// cannot.
     fn read_forever(&self, config: &GpsConfig) {
         let mut backoff = MIN_BACKOFF;
-        // What the search settled on. Kept across reconnections, because a puck put
-        // back where it came from is the same port at the same rate.
+        // What the search settled on, kept across reconnections: a puck put back is the same port
+        // at the same rate.
         let mut settled: Option<(String, u32)> = None;
-        // Why the search stopped reading the port it had. A receiver that was
-        // working and has stopped is news, whichever way it stopped; one that was
+        // Why reading stopped. A working receiver that stopped is news, either way. One that was
         // never there is not.
         let mut lost: Option<String> = None;
         let mut retries = 0_u32;
@@ -351,17 +332,15 @@ impl Gps {
                 Err(e) => self.set_status(GpsStatus::Failed(format!("{port}: {e}"))),
             }
 
-            // A port that keeps failing, or that is no longer there at all, is worth
-            // looking past. A named one never is: the operator said which, and
+            // Look past a port that keeps failing or has gone, unless the operator named it:
             // searching would answer a question they did not ask.
             retries += 1;
             let gone = !still_there(&port);
             if config.port.is_none() && (retries > RETRIES_BEFORE_SEARCHING || gone) {
-                // Said in the terms that were actually established. A port that has
-                // left the enumeration was unplugged; one that is still there and has
-                // stopped talking is a receiver reconfigured, a cable failing, or
-                // another program holding it — and telling an operator to check a
-                // cable that is plugged in wastes the only thing the note buys them.
+                // Say what was established. A port that left the enumeration was unplugged. One
+                // still there that stopped talking is reconfigured, a failing cable, or held by
+                // another program, and sending the operator to check a plugged-in cable wastes the
+                // one thing the note buys.
                 lost = Some(if gone {
                     format!("{port} is no longer attached")
                 } else {
@@ -375,26 +354,20 @@ impl Gps {
         }
     }
 
-    /// Listen to each candidate port at each rate until one of them is a receiver.
-    ///
-    /// `announce` is false while re-searching after a receiver was lost, so that the
-    /// note saying it has gone stays up rather than being overwritten by the scan
-    /// that is looking for it — the scan is most of every cycle, and the operator
-    /// needs the reason, not the activity.
+    /// Listen to each candidate port at each rate until one is a receiver. `announce` is false
+    /// while re-searching after a loss, so the note saying it has gone stays up. The scan is most
+    /// of each cycle, and the operator needs the reason, not the activity.
     fn search(&self, config: &GpsConfig, announce: bool) -> Option<(String, u32)> {
-        // Both named leaves detection nothing to decide. Reading the port is then the
-        // operator's instruction rather than a question, and putting a probe in front
-        // of it would refuse a working receiver for emitting too little inside one
-        // window — which is what a receiver configured for a single sentence a second
-        // does, and which this reader handled before it was ever asked to search.
+        // Port and rate both named leaves detection nothing to decide. Reading is then the
+        // operator's instruction, and a probe would refuse a working receiver for saying too little
+        // in one window, as one set to a single sentence a second does.
         if let (Some(path), Some(baud)) = (&config.port, config.baud) {
             return Some((path.clone(), baud));
         }
         let ladder = config.ladder();
         let (ports, needed) = match &config.port {
-            // Named: the ladder still runs, because a path says nothing about a rate.
-            // One sentence settles it, since the operator has already said what the
-            // device is; the question is only which rate it speaks at.
+            // A named path says nothing about rate, so the ladder still runs. One sentence settles
+            // each rate, since the operator has said what the device is.
             Some(path) => (
                 vec![wartui_bridge::ports::candidate(path, None, None, None)],
                 discover::SENTENCES_ON_A_NAMED_PORT,
@@ -427,9 +400,8 @@ impl Gps {
         let mut sample = Vec::new();
         let mut buf = [0u8; 512];
         let until = Instant::now() + PROBE_WINDOW;
-        // Accumulated across short reads rather than taken in one long one, so that
-        // `stop` is noticed within the read timeout and a capture being shut down
-        // does not wait out the window.
+        // Short reads accumulated, so `stop` is noticed within the read timeout and shutdown does
+        // not wait out the window.
         while Instant::now() < until && !self.stop.load(Ordering::Relaxed) {
             match port.read(&mut buf) {
                 Ok(0) => break,
@@ -454,8 +426,7 @@ impl Gps {
                     let now_ms = chrono::Utc::now().timestamp_millis();
                     lines.push(&buf[..n], |line| self.feed(line, now_ms));
                 }
-                // The read timeout exists to get back here and check the stop
-                // flag; a silent receiver is not a broken one.
+                // The timeout exists to check the stop flag. A silent receiver is not a broken one.
                 Err(e) if e.kind() == ErrorKind::TimedOut => {}
                 Err(e) if e.kind() == ErrorKind::Interrupted => {}
                 Err(e) => return e.to_string(),
@@ -467,16 +438,14 @@ impl Gps {
 
 /// What to say when a search came back with nothing.
 ///
-/// The whole of what makes searching by default bearable. A receiver nobody asked
-/// for and nobody attached is not a fault, and a view with one line to say anything
-/// on must not spend it saying that most captures have no GPS — so that case is
-/// silent, and the search quietly runs again in case one is plugged in mid-capture.
+/// This is what makes searching by default bearable. A receiver nobody asked for or attached is not
+/// a fault, and a view with one line to say anything on must not spend it saying most captures have
+/// no GPS. So that case is silent, and the search runs again in case one is plugged in mid-capture.
 ///
-/// A receiver the operator *named* is the opposite: they asked for that port, and
-/// silence about it would leave a capture recording no position for a reason nobody
-/// mentioned. So is one that *was* being read and has gone — a puck out of its
-/// socket halfway down a road is the difference between a capture that uploads and
-/// one that does not, and the operator is the only one who can put it back.
+/// A receiver the operator *named* is the opposite: silence would leave a capture recording no
+/// position for no stated reason. So is one that *was* being read and has gone. A puck out of its
+/// socket halfway down a road decides whether a capture uploads, and only the operator can put it
+/// back.
 fn nothing_found(
     named: Option<&str>,
     lost: Option<&str>,
@@ -509,12 +478,10 @@ fn open_port(path: &str, baud: u32) -> serialport::Result<Box<dyn serialport::Se
         .open()
 }
 
-/// Whether a path the search settled on is still among the ports attached.
-///
-/// A receiver unplugged and put back into another socket comes back under another
-/// name, and looking for the old one for ever is what a reader given one literal
-/// path does. Enumeration failing counts as "still there": a failure to list is not
-/// evidence that a working port has gone.
+/// Whether the search's path is still among the attached ports. A receiver moved to another socket
+/// returns under another name, and waiting for the old one is what a reader given one literal path
+/// does. A failed enumeration counts as present: failing to list is no evidence a working port has
+/// gone.
 fn still_there(path: &str) -> bool {
     wartui_bridge::ports::list().map_or(true, |attached| {
         attached.iter().any(|candidate| candidate.path == path || candidate.device == path)
