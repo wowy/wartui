@@ -10,7 +10,8 @@
 //!
 //! A network is an address and a kind. One address can be both a Wi-Fi network and a BLE
 //! advertiser, which WiGLE records as two things (the `Type` column), so each kind has its own
-//! windows and lends identifiers only to its own row.
+//! windows and lends identifiers only to its own row. A sighting stored with any other kind is left
+//! out, counted in [`ExportSummary::unknown_kind`] and warned about once.
 //!
 //! The fold is in Rust, not SQL, because the anchor rule is sequential: where one window ends
 //! decides where the next begins, which no window function computes without recursion. It streams
@@ -50,10 +51,12 @@ use std::io::Write;
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use rusqlite::{Connection, Row, Statement};
+use wartui_proto::air::RecordKind;
 use wartui_proto::beacon::rcoi_text;
 use wartui_proto::mac::{self, Mac};
 
 use crate::record::ssid_text;
+use crate::store::{kind_name, parse_kind};
 
 /// The pre-header WiGLE reads for provenance, then the column header.
 const COLUMNS: &str = "MAC,SSID,AuthMode,FirstSeen,Channel,Frequency,RSSI,\
@@ -107,6 +110,9 @@ pub struct ExportSummary {
     /// Rows left out because no sighting in their window had a position. Not an error, and not
     /// silent: the operator should know how much is waiting on a GPS.
     pub unpositioned: u64,
+    /// Sightings left out because their stored kind is neither Wi-Fi nor BLE. They count towards
+    /// nothing else here except [`Self::last_id`].
+    pub unknown_kind: u64,
     /// Wi-Fi networks, sightings and rows.
     pub wifi: KindStats,
     /// Bluetooth devices, sightings and rows.
@@ -207,8 +213,11 @@ pub fn wigle_csv<W: Write>(
         let mut window: Option<Window> = None;
 
         while let Some(row) = rows.next()? {
-            let mut candidate = Candidate::of(row)?;
             let (node, pos_source, id) = heard_by(row)?;
+            let Some(mut candidate) = Candidate::of(row)? else {
+                tally.skip(id);
+                continue;
+            };
             // The first sighting of the capture, or of the next network.
             let new_network = window
                 .as_ref()
@@ -233,13 +242,21 @@ pub fn wigle_csv<W: Write>(
             }
         }
         close(&mut window, &mut insert, &mut tally.summary)?;
+        if tally.summary.unknown_kind > 0 {
+            tracing::warn!(
+                sightings = tally.summary.unknown_kind,
+                "left out sightings whose kind is neither wifi nor ble"
+            );
+        }
 
         // By window start, so a re-export after a decoder fix diffs cleanly. The network breaks
         // ties.
         let mut sorted = tx.prepare(SELECT_EXPORT_ROWS)?;
         let mut rows = sorted.query([])?;
         while let Some(row) = rows.next()? {
-            write_row(&Window { first_seen: row.get(13)?, best: Candidate::of(row)? }, out)?;
+            // Every row here was written by `close` with `kind_name`, so it parses.
+            let Some(best) = Candidate::of(row)? else { continue };
+            write_row(&Window { first_seen: row.get(13)?, best }, out)?;
         }
     }
     tx.execute_batch("DROP TABLE temp.export_row")?;
@@ -263,7 +280,7 @@ impl Tally {
     /// Count one sighting, the first of its network when `new_network`, heard by `node`,
     /// positioned by the `pos_source` code [`SELECT_SIGHTINGS`] gives it, stored as `id`.
     fn see(&mut self, c: &Candidate, new_network: bool, node: Mac, pos_source: i64, id: i64) {
-        let ble = c.is_ble();
+        let ble = c.kind == RecordKind::Ble;
         let summary = &mut self.summary;
         let stats = if ble { &mut summary.ble } else { &mut summary.wifi };
         stats.sightings += 1;
@@ -305,6 +322,14 @@ impl Tally {
         summary.last_id = Some(summary.last_id.map_or(id, |t| t.max(id)));
     }
 
+    /// Count a sighting stored as `id` whose kind did not parse. It still moves
+    /// [`ExportSummary::last_id`], so an upload's cutoff covers it rather than walking it again.
+    fn skip(&mut self, id: i64) {
+        let summary = &mut self.summary;
+        summary.unknown_kind += 1;
+        summary.last_id = Some(summary.last_id.map_or(id, |t| t.max(id)));
+    }
+
     /// The summary, nodes in address order.
     fn finish(self) -> ExportSummary {
         let mut summary = self.summary;
@@ -332,17 +357,16 @@ fn close(
             best.lon,
             best.alt,
             best.accuracy,
-            best.kind,
+            kind_name(best.kind),
             best.rcoi,
             best.mfgr_id,
             best.rx_at,
             first_seen,
         ])?;
         summary.rows += 1;
-        if best.is_ble() {
-            summary.ble.rows += 1;
-        } else {
-            summary.wifi.rows += 1;
+        match best.kind {
+            RecordKind::Wifi => summary.wifi.rows += 1,
+            RecordKind::Ble => summary.ble.rows += 1,
         }
     } else {
         summary.unpositioned += 1;
@@ -410,16 +434,19 @@ struct Candidate {
     lon: Option<f64>,
     alt: Option<f64>,
     accuracy: Option<f64>,
-    kind: String,
+    kind: RecordKind,
     rcoi: Option<Vec<u8>>,
     mfgr_id: Option<u16>,
     rx_at: i64,
 }
 
 impl Candidate {
-    /// Read one sighting off a query row.
-    fn of(row: &Row<'_>) -> rusqlite::Result<Self> {
-        Ok(Self {
+    /// Read one sighting off a query row, or `None` when its kind does not parse.
+    fn of(row: &Row<'_>) -> rusqlite::Result<Option<Self>> {
+        let Some(kind) = row.get_ref(9)?.as_str().ok().and_then(parse_kind) else {
+            return Ok(None);
+        };
+        Ok(Some(Self {
             bssid: row.get(0)?,
             ssid: row.get(1)?,
             security: row.get(2)?,
@@ -429,11 +456,11 @@ impl Candidate {
             lon: row.get(6)?,
             alt: row.get(7)?,
             accuracy: row.get(8)?,
-            kind: row.get(9)?,
+            kind,
             rcoi: row.get(10)?,
             mfgr_id: row.get(11)?,
             rx_at: row.get(12)?,
-        })
+        }))
     }
 
     /// Take `other`'s roaming consortium and manufacturer identifier where this sighting has none.
@@ -451,16 +478,6 @@ impl Candidate {
         if self.mfgr_id.is_none() {
             self.mfgr_id = other.mfgr_id;
         }
-    }
-
-    /// Whether this sighting is a BLE advertiser.
-    fn is_ble(&self) -> bool {
-        self.kind == "ble"
-    }
-
-    /// Whether this sighting is a Wi-Fi network. A kind that is neither gets no frequency.
-    fn is_wifi(&self) -> bool {
-        self.kind == "wifi"
     }
 
     /// Whether this sighting has coordinates for a WiGLE row.
@@ -492,7 +509,7 @@ fn write_row<W: Write>(row: &Window, out: &mut W) -> Result<(), ExportError> {
     let rssi = best.rssi;
     let lat = best.lat.unwrap_or(0.0);
     let lon = best.lon.unwrap_or(0.0);
-    let frequency = frequency_column(channel, best.is_wifi());
+    let frequency = frequency_column(channel, best.kind);
     // WiGLE's spellings: the roaming consortium body as hex identifiers, the company identifier as
     // a number. NULL in the store is a blank here.
     let rcois = best.rcoi.as_deref().map_or_else(String::new, |body| rcoi_text(body).to_string());
@@ -508,7 +525,10 @@ fn write_row<W: Write>(row: &Window, out: &mut W) -> Result<(), ExportError> {
         timestamp(row.first_seen),
         best.alt.unwrap_or(0.0),
         best.accuracy.unwrap_or(0.0),
-        if best.is_ble() { "BLE" } else { "WIFI" },
+        match best.kind {
+            RecordKind::Wifi => "WIFI",
+            RecordKind::Ble => "BLE",
+        },
     )?;
     Ok(())
 }
@@ -520,8 +540,8 @@ fn write_row<W: Write>(row: &Window, out: &mut W) -> Result<(), ExportError> {
 /// announces none (`wartui_proto::beacon::parse_mgmt`). An access point can announce a channel no
 /// pool tunes, so this covers the 2.4 GHz channels (14 the odd one out) and the 5 GHz ladder from
 /// 32 to 177. Blank off both ladders, and for every BLE row (see the module docs).
-fn frequency_column(channel: i64, wifi: bool) -> String {
-    if !wifi {
+fn frequency_column(channel: i64, kind: RecordKind) -> String {
+    if kind == RecordKind::Ble {
         return String::new();
     }
     match channel {
@@ -581,30 +601,30 @@ mod tests {
 
     #[test]
     fn frequency_column_gives_centre_mhz_when_wifi_channel_on_a_ladder() {
-        assert_eq!(frequency_column(1, true), "2412");
-        assert_eq!(frequency_column(6, true), "2437");
-        assert_eq!(frequency_column(13, true), "2472");
+        assert_eq!(frequency_column(1, RecordKind::Wifi), "2412");
+        assert_eq!(frequency_column(6, RecordKind::Wifi), "2437");
+        assert_eq!(frequency_column(13, RecordKind::Wifi), "2472");
         // Channel 14 is the one 2.4 GHz channel that breaks the 5 MHz ladder.
-        assert_eq!(frequency_column(14, true), "2484");
+        assert_eq!(frequency_column(14, RecordKind::Wifi), "2484");
         // An access point can announce these below the pools' 36.
-        assert_eq!(frequency_column(32, true), "5160");
-        assert_eq!(frequency_column(33, true), "5165");
-        assert_eq!(frequency_column(34, true), "5170");
-        assert_eq!(frequency_column(35, true), "5175");
-        assert_eq!(frequency_column(36, true), "5180");
-        assert_eq!(frequency_column(165, true), "5825");
-        assert_eq!(frequency_column(177, true), "5885");
+        assert_eq!(frequency_column(32, RecordKind::Wifi), "5160");
+        assert_eq!(frequency_column(33, RecordKind::Wifi), "5165");
+        assert_eq!(frequency_column(34, RecordKind::Wifi), "5170");
+        assert_eq!(frequency_column(35, RecordKind::Wifi), "5175");
+        assert_eq!(frequency_column(36, RecordKind::Wifi), "5180");
+        assert_eq!(frequency_column(165, RecordKind::Wifi), "5825");
+        assert_eq!(frequency_column(177, RecordKind::Wifi), "5885");
     }
 
     #[test]
-    fn frequency_column_is_blank_when_not_wifi_or_channel_unmapped() {
+    fn frequency_column_is_blank_when_ble_or_channel_unmapped() {
         // A BLE row's frequency column means a "device type" code a passive scan
         // cannot produce, so it is blank whatever the channel field holds.
-        assert_eq!(frequency_column(0, false), "");
+        assert_eq!(frequency_column(0, RecordKind::Ble), "");
         // A channel on neither band's ladder is not something to guess a frequency for.
-        assert_eq!(frequency_column(0, true), "");
-        assert_eq!(frequency_column(15, true), "");
-        assert_eq!(frequency_column(31, true), "");
-        assert_eq!(frequency_column(200, true), "");
+        assert_eq!(frequency_column(0, RecordKind::Wifi), "");
+        assert_eq!(frequency_column(15, RecordKind::Wifi), "");
+        assert_eq!(frequency_column(31, RecordKind::Wifi), "");
+        assert_eq!(frequency_column(200, RecordKind::Wifi), "");
     }
 }

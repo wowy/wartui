@@ -1380,6 +1380,42 @@ fn wigle_csv_counts_wifi_and_ble_apart_when_capture_holds_both() {
 }
 
 #[test]
+fn wigle_csv_skips_sighting_when_kind_is_neither_wifi_nor_ble() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let conn = write(
+        &dir,
+        vec![
+            observation(NODE, [0xAA; 6], -60, EPOCH_MS, fixed(37.0, -122.0)),
+            ble_observation(NODE, [0xCC; 6], EPOCH_MS, fixed(37.0, -122.0)),
+        ],
+    );
+    let (before_csv, before) = export(&conn);
+
+    // No build writes this kind, so only an edited file holds one.
+    let rw = Connection::open(dir.path().join("wartui.db")).expect("opening for writing");
+    rw.execute(
+        "INSERT INTO observation (node_mac, rx_at, link_rssi, bssid, ssid, security, channel, rssi,
+                                  kind, rcoi, mfgr_id, lat, lon, alt, accuracy, pos_source, pos_at,
+                                  raw_body)
+         SELECT node_mac, rx_at + 500, link_rssi, X'DDDDDDDDDDDD', ssid, security, channel, rssi,
+                'zigbee', rcoi, mfgr_id, lat, lon, alt, accuracy, pos_source, pos_at, raw_body
+         FROM observation WHERE bssid = X'AAAAAAAAAAAA'",
+        [],
+    )
+    .expect("inserting the foreign row");
+    let zigbee_id = rw.last_insert_rowid();
+
+    let (csv, summary) = export(&conn);
+    assert!(!csv.contains("DD:DD:DD:DD:DD:DD"), "{csv}");
+    assert_eq!(csv, before_csv, "the other rows are unchanged");
+    assert_eq!(summary.unknown_kind, 1);
+    assert_eq!((summary.wifi, summary.ble), (before.wifi, before.ble));
+    assert_eq!(summary.positions, before.positions);
+    // The skipped row is still walked, so an upload's cutoff covers it.
+    assert_eq!(summary.last_id, Some(zigbee_id));
+}
+
+#[test]
 fn wigle_csv_counts_sightings_per_node_when_two_nodes_report() {
     let dir = tempfile::tempdir().expect("temp dir");
     let conn = write(

@@ -869,10 +869,20 @@ const fn pool_name(pool: ChannelPool) -> &'static str {
     }
 }
 
-const fn kind_name(kind: RecordKind) -> &'static str {
+/// The `kind` column's token for `kind`.
+pub(crate) const fn kind_name(kind: RecordKind) -> &'static str {
     match kind {
         RecordKind::Wifi => "wifi",
         RecordKind::Ble => "ble",
+    }
+}
+
+/// The kind a `kind` column token names, or `None` for a token [`kind_name`] never writes.
+pub(crate) fn parse_kind(name: &str) -> Option<RecordKind> {
+    match name {
+        "wifi" => Some(RecordKind::Wifi),
+        "ble" => Some(RecordKind::Ble),
+        _ => None,
     }
 }
 
