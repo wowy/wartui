@@ -198,7 +198,7 @@ mod tests {
     }
 
     #[test]
-    fn gencmd_message_lays_out_header_command_and_end_tag_when_built() {
+    fn gencmd_message_lays_out_header_command_and_end_tag() {
         let message = gencmd_message("get_throttled");
         assert_eq!(message[0] as usize, size_of_val(&message));
         assert_eq!(message[..6], [message[0], 0, GET_GENCMD_RESULT, MAX_STRING as u32, 0, 0]);
@@ -244,7 +244,7 @@ mod tests {
     }
 
     #[test]
-    fn health_reads_battery_by_name_when_hwmon_number_differs() {
+    fn read_from_finds_battery_by_name_when_hwmon_number_differs() {
         let dir = tempfile::tempdir().expect("temp dir");
         put(dir.path(), "sys/class/hwmon/hwmon0/name", "nvme\n");
         put(dir.path(), "sys/class/hwmon/hwmon0/in0_input", "1\n");
@@ -264,7 +264,7 @@ mod tests {
     }
 
     #[test]
-    fn health_reads_no_battery_when_no_hwmon_is_named_battery() {
+    fn read_from_reads_no_battery_when_none_named_battery() {
         let dir = tempfile::tempdir().expect("temp dir");
         put(dir.path(), "sys/class/hwmon/hwmon5/name", "max17048_mains\n");
         put(dir.path(), "sys/class/hwmon/hwmon5/in0_input", "5000\n");
@@ -273,13 +273,13 @@ mod tests {
     }
 
     #[test]
-    fn health_reads_none_when_files_missing() {
+    fn read_from_reads_none_when_files_missing() {
         let dir = tempfile::tempdir().expect("temp dir");
         assert_eq!(read_from(dir.path()), Health::default());
     }
 
     #[test]
-    fn health_reads_none_when_contents_are_garbage() {
+    fn read_from_reads_none_when_contents_garbage() {
         let dir = tempfile::tempdir().expect("temp dir");
         put(dir.path(), "sys/class/hwmon/hwmon4/name", "battery\n");
         put(dir.path(), "sys/class/hwmon/hwmon4/in0_input", "full\n");

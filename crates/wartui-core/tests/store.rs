@@ -128,7 +128,7 @@ fn export_with(
 }
 
 #[test]
-fn capture_record_stores_pool_spelling_when_capture_is_created() {
+fn store_records_pool_spelling_in_capture_row() {
     // Lowercase, and deliberately not `ChannelPool`'s `Display`: captures on
     // disk carry these strings, so the two spellings are separate on purpose.
     for (pool, spelling) in
@@ -149,7 +149,7 @@ fn capture_record_stores_pool_spelling_when_capture_is_created() {
 }
 
 #[test]
-fn capture_record_stores_simulated_flag_when_created() {
+fn store_records_simulated_flag_in_capture_row() {
     for simulated in [false, true] {
         let dir = tempfile::tempdir().expect("temp dir");
         let path = dir.path().join("wartui.db");
@@ -164,7 +164,7 @@ fn capture_record_stores_simulated_flag_when_created() {
 }
 
 #[test]
-fn store_persists_and_reads_all_record_types_when_round_tripped() {
+fn store_round_trips_every_record_type() {
     let dir = tempfile::tempdir().expect("temp dir");
     let conn = write(
         &dir,
@@ -221,7 +221,7 @@ fn store_persists_and_reads_all_record_types_when_round_tripped() {
 }
 
 #[test]
-fn store_persists_every_bridge_status_column_when_round_tripped() {
+fn store_round_trips_every_bridge_status_column() {
     let dir = tempfile::tempdir().expect("temp dir");
     let conn = write(
         &dir,
@@ -275,7 +275,7 @@ fn host_status(
 }
 
 #[test]
-fn store_persists_every_host_status_column_when_round_tripped() {
+fn store_round_trips_every_host_status_column() {
     let dir = tempfile::tempdir().expect("temp dir");
     let conn = write(
         &dir,
@@ -332,7 +332,7 @@ fn store_persists_every_host_status_column_when_round_tripped() {
 }
 
 #[test]
-fn store_persists_every_batch_gap_column_when_round_tripped() {
+fn store_round_trips_every_batch_gap_column() {
     let dir = tempfile::tempdir().expect("temp dir");
     let conn = write(
         &dir,
@@ -354,7 +354,7 @@ fn store_persists_every_batch_gap_column_when_round_tripped() {
 }
 
 #[test]
-fn node_tracker_updates_last_seen_and_preserves_first_seen_when_re_observed() {
+fn store_keeps_first_seen_and_token_when_node_seen_again() {
     let dir = tempfile::tempdir().expect("temp dir");
     let conn = write(
         &dir,
@@ -386,7 +386,7 @@ fn node_tracker_updates_last_seen_and_preserves_first_seen_when_re_observed() {
 }
 
 #[test]
-fn store_persists_all_sightings_without_early_deduplication_when_inserted() {
+fn store_keeps_every_sighting_without_deduplicating() {
     // Two nodes seeing one access point is coverage data, not a duplicate.
     let dir = tempfile::tempdir().expect("temp dir");
     let conn = write(
@@ -402,7 +402,7 @@ fn store_persists_all_sightings_without_early_deduplication_when_inserted() {
 }
 
 #[test]
-fn export_writer_selects_strongest_sighting_and_earliest_first_seen_when_generating_row() {
+fn wigle_csv_takes_strongest_sighting_and_earliest_first_seen() {
     // The strongest signal is the sighting closest to the transmitter, and
     // `FirstSeen` comes from a different row — hence the window query.
     let dir = tempfile::tempdir().expect("temp dir");
@@ -425,7 +425,7 @@ fn export_writer_selects_strongest_sighting_and_earliest_first_seen_when_generat
 }
 
 #[test]
-fn export_writer_emits_valid_wigle_header_when_generating_csv() {
+fn wigle_csv_writes_wigle_header() {
     let dir = tempfile::tempdir().expect("temp dir");
     let conn = write(&dir, vec![]);
     let (csv, _) = export(&conn);
@@ -442,7 +442,7 @@ fn export_writer_emits_valid_wigle_header_when_generating_csv() {
 }
 
 #[test]
-fn export_writer_increments_unpositioned_counter_when_sighting_lacks_fix() {
+fn wigle_csv_counts_unpositioned_when_no_fix() {
     // Not an error and not silent: the operator needs to know how much of a capture
     // is waiting on a GPS before uploading.
     let dir = tempfile::tempdir().expect("temp dir");
@@ -460,7 +460,7 @@ fn export_writer_increments_unpositioned_counter_when_sighting_lacks_fix() {
 }
 
 #[test]
-fn export_writer_exports_positioned_sighting_when_stronger_sighting_lacks_fix() {
+fn wigle_csv_prefers_positioned_over_stronger_unfixed() {
     let dir = tempfile::tempdir().expect("temp dir");
     let conn = write(
         &dir,
@@ -478,7 +478,7 @@ fn export_writer_exports_positioned_sighting_when_stronger_sighting_lacks_fix() 
 }
 
 #[test]
-fn export_writer_quotes_special_characters_when_exporting_ssid() {
+fn wigle_csv_quotes_ssid_special_characters() {
     // The node firmware replaces commas in SSIDs, but the export must not depend on
     // that: the store also holds text from older captures.
     let dir = tempfile::tempdir().expect("temp dir");
@@ -495,7 +495,7 @@ fn export_writer_quotes_special_characters_when_exporting_ssid() {
 }
 
 #[test]
-fn export_writer_strips_null_padding_when_exporting_legacy_cloaked_ssid() {
+fn wigle_csv_strips_stored_cloaked_padding() {
     // What a node flashed before `beacon::visible_ssid` existed put in the file: the
     // name's real length, every byte zero.
     let dir = tempfile::tempdir().expect("temp dir");
@@ -511,7 +511,7 @@ fn export_writer_strips_null_padding_when_exporting_legacy_cloaked_ssid() {
 }
 
 #[test]
-fn export_writer_formats_ble_record_with_blank_frequency_when_sighting_is_ble() {
+fn wigle_csv_writes_ble_row_with_blank_frequency() {
     let dir = tempfile::tempdir().expect("temp dir");
     let mut ble = observation(NODE, [0xAA; 6], -60, EPOCH_MS, fixed(37.0, -122.0));
     let Record::Observation(obs) = &mut ble else { unreachable!() };
@@ -540,7 +540,7 @@ const OPEN_ROAMING: [u8; 17] = [
 ];
 
 #[test]
-fn export_writer_formats_roaming_consortium_when_passpoint_sighting_exported() {
+fn wigle_csv_writes_passpoint_rcois() {
     let dir = tempfile::tempdir().expect("temp dir");
     let mut passpoint = observation(NODE, [0xAA; 6], -60, EPOCH_MS, fixed(37.0, -122.0));
     let Record::Observation(obs) = &mut passpoint else { unreachable!() };
@@ -556,7 +556,7 @@ fn export_writer_formats_roaming_consortium_when_passpoint_sighting_exported() {
 }
 
 #[test]
-fn export_writer_preserves_roaming_consortium_when_strongest_sighting_lacked_element() {
+fn wigle_csv_keeps_rcois_when_strongest_lacks_them() {
     // A beacon without the element outshouts a weaker one with it. The row's
     // position and signal are the strong sighting's; its identifiers are the
     // window's.
@@ -578,7 +578,7 @@ fn export_writer_preserves_roaming_consortium_when_strongest_sighting_lacked_ele
 }
 
 #[test]
-fn export_writer_preserves_manufacturer_id_when_subsequent_weaker_sighting_carries_it() {
+fn wigle_csv_keeps_mfgr_id_from_weaker_later_sighting() {
     // The other order: the best sighting is already held when a weaker
     // advertisement with the manufacturer data arrives.
     let dir = tempfile::tempdir().expect("temp dir");
@@ -603,7 +603,7 @@ fn export_writer_preserves_manufacturer_id_when_subsequent_weaker_sighting_carri
 }
 
 #[test]
-fn export_writer_formats_ble_record_with_manufacturer_id_when_sighting_exported() {
+fn wigle_csv_writes_ble_mfgr_id() {
     let dir = tempfile::tempdir().expect("temp dir");
     let mut ble = observation(NODE, [0xAA; 6], -60, EPOCH_MS, fixed(37.0, -122.0));
     let Record::Observation(obs) = &mut ble else { unreachable!() };
@@ -633,7 +633,7 @@ fn as_ble(mut record: Record, mfgr_id: Option<u16>) -> Record {
 }
 
 #[test]
-fn export_writer_writes_row_per_kind_when_address_heard_as_wifi_and_ble() {
+fn wigle_csv_writes_row_per_kind_when_address_is_both() {
     // One address can be a Wi-Fi network and a BLE advertiser at once; WiGLE
     // records each, so neither may win the other's window.
     let dir = tempfile::tempdir().expect("temp dir");
@@ -650,7 +650,7 @@ fn export_writer_writes_row_per_kind_when_address_heard_as_wifi_and_ble() {
 }
 
 #[test]
-fn export_writer_keeps_identifiers_within_kind_when_address_heard_as_wifi_and_ble() {
+fn wigle_csv_keeps_identifiers_within_kind_when_address_is_both() {
     let dir = tempfile::tempdir().expect("temp dir");
     let wifi = observation(NODE, [0xAA; 6], -50, EPOCH_MS, fixed(37.0, -122.0));
     let ble =
@@ -666,7 +666,7 @@ fn export_writer_keeps_identifiers_within_kind_when_address_heard_as_wifi_and_bl
 }
 
 #[test]
-fn store_drops_records_without_blocking_when_queue_depth_is_exceeded() {
+fn store_drops_without_blocking_when_queue_full() {
     // A stalled engine misses everything, including an assignment racing a node's
     // window. One lost observation is the cheaper failure, but must be visible.
     let dir = tempfile::tempdir().expect("temp dir");
@@ -686,7 +686,7 @@ fn store_drops_records_without_blocking_when_queue_depth_is_exceeded() {
 }
 
 #[test]
-fn store_reports_and_resets_peaks_when_taken() {
+fn store_take_peaks_reports_and_resets() {
     let dir = tempfile::tempdir().expect("temp dir");
     let store = store(&dir);
     assert_eq!(store.take_peaks(), StorePeaks::default(), "nothing queued or written yet");
@@ -706,7 +706,7 @@ fn store_reports_and_resets_peaks_when_taken() {
 }
 
 #[test]
-fn store_reports_committed_batch_timings_on_close_when_requested() {
+fn store_reports_batch_timings_on_close_when_asked() {
     // The benchmark divides rows by these, so a batch counted twice or not at all
     // would show up as a store that got better or worse for no reason.
     let dir = tempfile::tempdir().expect("temp dir");
@@ -738,7 +738,7 @@ fn store_reports_committed_batch_timings_on_close_when_requested() {
 }
 
 #[test]
-fn store_omits_batch_timings_when_not_explicitly_requested() {
+fn store_omits_batch_timings_unless_asked() {
     // The list grows per commit for as long as a capture runs.
     let dir = tempfile::tempdir().expect("temp dir");
     let store = store(&dir);
@@ -749,7 +749,7 @@ fn store_omits_batch_timings_when_not_explicitly_requested() {
 }
 
 #[test]
-fn background_checkpointer_flushes_and_truncates_wal_when_configured() {
+fn store_background_checkpoint_copies_and_truncates_wal() {
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().join("wartui.db");
     let mut config = StoreConfig::new(&path);
@@ -780,7 +780,7 @@ fn background_checkpointer_flushes_and_truncates_wal_when_configured() {
 }
 
 #[test]
-fn store_reports_caught_up_checkpoint_count_when_running() {
+fn store_counts_caught_up_checkpoints_while_running() {
     let dir = tempfile::tempdir().expect("temp dir");
     let mut config = StoreConfig::new(dir.path().join("wartui.db"));
     config.batch_rows = 10;
@@ -813,7 +813,7 @@ fn store_reports_caught_up_checkpoint_count_when_running() {
 }
 
 #[test]
-fn inline_checkpointer_has_zero_passes_when_queried_for_caught_up() {
+fn store_inline_checkpoint_counts_no_caught_up_passes() {
     let dir = tempfile::tempdir().expect("temp dir");
     let mut config = StoreConfig::new(dir.path().join("wartui.db"));
     config.batch_rows = 10;
@@ -878,7 +878,7 @@ fn wal_after_settled_commits(checkpoint: Checkpoint) -> u64 {
 }
 
 #[test]
-fn background_checkpointer_reduces_wal_growth_when_running_after_each_commit() {
+fn store_background_checkpoint_keeps_wal_one_commit_long() {
     let inline = wal_after_settled_commits(Checkpoint::Inline);
     // Never truncated, so a small WAL can only be the writer rewinding it.
     let background = wal_after_settled_commits(Checkpoint::Background {
@@ -894,7 +894,7 @@ fn background_checkpointer_reduces_wal_growth_when_running_after_each_commit() {
 }
 
 #[test]
-fn background_checkpointer_runs_deferred_pass_when_fleet_becomes_quiet() {
+fn store_background_checkpoint_runs_owed_pass_when_fleet_quiet() {
     // The writer's own checkpoint is off, so a wake-up the checkpointer passes over would
     // leave that commit unsynced until the next commit, which a quiet fleet never sends.
     let dir = tempfile::tempdir().expect("temp dir");
@@ -921,7 +921,7 @@ fn background_checkpointer_runs_deferred_pass_when_fleet_becomes_quiet() {
 }
 
 #[test]
-fn store_defaults_to_background_checkpointer_when_initialized() {
+fn store_config_defaults_to_background_checkpoint() {
     // What the card measured best: see `StoreConfig::new`.
     let config = StoreConfig::new("unused.db");
     assert_eq!(
@@ -941,7 +941,7 @@ fn store_defaults_to_background_checkpointer_when_initialized() {
 }
 
 #[test]
-fn inline_checkpointer_reports_no_passes_when_configured() {
+fn store_inline_checkpoint_reports_no_passes_on_close() {
     let dir = tempfile::tempdir().expect("temp dir");
     let mut config = StoreConfig::new(dir.path().join("wartui.db"));
     config.batch_interval = Duration::from_millis(10);
@@ -966,7 +966,7 @@ fn has_bssid_index(path: &std::path::Path) -> bool {
 }
 
 #[test]
-fn store_exports_all_networks_without_bssid_index_when_queried() {
+fn store_exports_every_network_without_bssid_index() {
     // The index cost the card fourteen times the writes and made export slower; the
     // export's scan and sort must still find every network without it.
     let dir = tempfile::tempdir().expect("temp dir");
@@ -986,7 +986,7 @@ fn store_exports_all_networks_without_bssid_index_when_queried() {
 }
 
 #[test]
-fn store_configures_custom_page_size_when_creating_database() {
+fn store_creates_file_with_configured_page_size() {
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().join("wartui.db");
     let mut config = StoreConfig::new(&path);
@@ -1003,7 +1003,7 @@ fn store_configures_custom_page_size_when_creating_database() {
 }
 
 #[test]
-fn export_writer_uses_first_seen_from_earliest_unpositioned_sighting_when_window_is_zero() {
+fn wigle_csv_takes_first_seen_from_unpositioned_when_window_zero() {
     // A capture without --lat then a positioned one hours later is a normal way to
     // end up with both in one file. Pinned to the zero window, which folds a
     // network's whole capture into one row; the default window splits these
@@ -1027,7 +1027,7 @@ fn export_writer_uses_first_seen_from_earliest_unpositioned_sighting_when_window
 }
 
 #[test]
-fn export_writer_uses_window_first_sighting_timestamp_when_window_is_unpositioned() {
+fn wigle_csv_takes_first_seen_from_window_start_when_unpositioned() {
     // The default window splits these three hours apart, so the second window's
     // row says when *it* opened, and the first window — heard, never positioned —
     // is counted rather than written.
@@ -1050,7 +1050,7 @@ fn export_writer_uses_window_first_sighting_timestamp_when_window_is_unpositione
 }
 
 #[test]
-fn export_writer_splits_sightings_into_new_row_when_window_interval_exceeded() {
+fn wigle_csv_opens_new_row_past_recapture_window() {
     // WDGWars skips a re-scan of the same AP within the hour from scoring, so
     // a sighting just past the hour after the window opened has to be a row
     // of its own — the first re-hearing the site will count.
@@ -1072,7 +1072,7 @@ fn export_writer_splits_sightings_into_new_row_when_window_interval_exceeded() {
 }
 
 #[test]
-fn export_writer_keeps_sighting_in_same_window_when_exactly_at_one_hour_boundary() {
+fn wigle_csv_keeps_sighting_at_exactly_one_hour_in_window() {
     // The site's cooldown is one hour per user and MAC — "re-scanning the
     // same AP within 1h is silently skipped from scoring; GPS may still be
     // refined" — and the window is that rule, inclusive at the boundary,
@@ -1097,7 +1097,7 @@ fn export_writer_keeps_sighting_in_same_window_when_exactly_at_one_hour_boundary
 }
 
 #[test]
-fn export_writer_orders_rows_by_window_open_timestamp_when_generating_export() {
+fn wigle_csv_orders_rows_by_window_start() {
     // The fold visits networks in address order; the file must not.
     let dir = tempfile::tempdir().expect("temp dir");
     let conn = write(
@@ -1115,7 +1115,7 @@ fn export_writer_orders_rows_by_window_open_timestamp_when_generating_export() {
 }
 
 #[test]
-fn export_writer_interleaves_network_windows_in_chronological_order_when_exported() {
+fn wigle_csv_interleaves_networks_by_window_start() {
     // The fold finishes AA's windows before it reaches BB, so an order by network
     // would write AA, AA, BB. The file is ordered by window start.
     let dir = tempfile::tempdir().expect("temp dir");
@@ -1135,7 +1135,7 @@ fn export_writer_interleaves_network_windows_in_chronological_order_when_exporte
 }
 
 #[test]
-fn export_writer_produces_identical_output_when_run_repeatedly_on_connection() {
+fn wigle_csv_repeats_identically_on_one_connection() {
     // The sort goes through a temporary table on the caller's connection, which a
     // second export must start afresh rather than add to.
     let dir = tempfile::tempdir().expect("temp dir");
@@ -1154,7 +1154,7 @@ fn export_writer_produces_identical_output_when_run_repeatedly_on_connection() {
 }
 
 #[test]
-fn store_refuses_database_connection_when_schema_version_mismatches() {
+fn store_refuses_database_when_schema_version_differs() {
     // Reading another build's tables as this build's would export rows of the wrong
     // shape, or values that meant something else.
     //
@@ -1256,7 +1256,7 @@ fn store_refuses_create_when_file_exists() {
 }
 
 #[test]
-fn store_stamps_current_schema_version_when_creating_database() {
+fn store_stamps_schema_version_on_create() {
     // The stamp is what makes the next read-only open recognise the file as this
     // build's.
     let dir = tempfile::tempdir().expect("temp dir");
@@ -1270,7 +1270,7 @@ fn store_stamps_current_schema_version_when_creating_database() {
 }
 
 #[test]
-fn store_persists_bridge_metadata_when_bridge_announces() {
+fn store_records_bridge_when_bridge_announces() {
     // A capture says which dongle produced it.
     let dir = tempfile::tempdir().expect("temp dir");
     let conn = write(
@@ -1310,7 +1310,7 @@ fn assignment(counter: u64, outcome: AdminOutcome, latency_us: Option<u32>) -> R
 }
 
 #[test]
-fn store_records_every_assignment_attempt_regardless_of_outcome_when_sent() {
+fn store_records_every_assignment_attempt_whatever_outcome() {
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().join("wartui.db");
     let store = open_at(&path);
@@ -1339,7 +1339,7 @@ fn store_records_every_assignment_attempt_regardless_of_outcome_when_sent() {
 }
 
 #[test]
-fn export_writer_counts_distinct_networks_when_network_heard_repeatedly() {
+fn wigle_csv_counts_network_once_when_heard_repeatedly() {
     let dir = tempfile::tempdir().expect("temp dir");
     let at = |n: i64| EPOCH_MS + n * 1000;
     let conn = write(
@@ -1360,7 +1360,7 @@ fn export_writer_counts_distinct_networks_when_network_heard_repeatedly() {
 }
 
 #[test]
-fn export_writer_separates_wifi_and_ble_when_capture_holds_both() {
+fn wigle_csv_counts_wifi_and_ble_apart() {
     let dir = tempfile::tempdir().expect("temp dir");
     let conn = write(
         &dir,
@@ -1380,7 +1380,7 @@ fn export_writer_separates_wifi_and_ble_when_capture_holds_both() {
 }
 
 #[test]
-fn export_writer_counts_sightings_per_node_when_two_nodes_capture() {
+fn wigle_csv_counts_sightings_per_node() {
     let dir = tempfile::tempdir().expect("temp dir");
     let conn = write(
         &dir,
@@ -1399,7 +1399,7 @@ fn export_writer_counts_sightings_per_node_when_two_nodes_capture() {
 }
 
 #[test]
-fn export_writer_counts_network_once_per_band_when_seen_on_both_bands() {
+fn wigle_csv_counts_network_once_per_band() {
     let dir = tempfile::tempdir().expect("temp dir");
     let conn = write(
         &dir,
@@ -1418,7 +1418,7 @@ fn export_writer_counts_network_once_per_band_when_seen_on_both_bands() {
 }
 
 #[test]
-fn export_writer_tallies_position_sources_when_fix_varies() {
+fn wigle_csv_tallies_position_sources() {
     let dir = tempfile::tempdir().expect("temp dir");
     let gps = Fix { source: PositionSource::Gps, ..fixed(37.0, -122.0) };
     let conn = write(
@@ -1456,7 +1456,7 @@ const AFTER_UPLOADS: ExportFilter = ExportFilter {
 };
 
 #[test]
-fn export_skips_sightings_at_or_before_cutoff_when_after_uploads() {
+fn wigle_csv_skips_sightings_through_cutoff_when_after_uploads() {
     let dir = tempfile::tempdir().expect("temp dir");
     let conn = write(&dir, three_sightings());
     let rw = open_readwrite(&dir.path().join("wartui.db")).expect("opening read-write");
@@ -1470,7 +1470,7 @@ fn export_skips_sightings_at_or_before_cutoff_when_after_uploads() {
 }
 
 #[test]
-fn export_ignores_failed_upload_when_computing_cutoff() {
+fn wigle_csv_ignores_failed_upload_for_cutoff() {
     let dir = tempfile::tempdir().expect("temp dir");
     let conn = write(&dir, three_sightings());
     let rw = open_readwrite(&dir.path().join("wartui.db")).expect("opening read-write");
@@ -1485,7 +1485,7 @@ fn export_ignores_failed_upload_when_computing_cutoff() {
 }
 
 #[test]
-fn export_ignores_upload_record_when_after_uploads_false() {
+fn wigle_csv_ignores_uploads_when_after_uploads_off() {
     let dir = tempfile::tempdir().expect("temp dir");
     let conn = write(&dir, three_sightings());
     let rw = open_readwrite(&dir.path().join("wartui.db")).expect("opening read-write");
@@ -1496,7 +1496,7 @@ fn export_ignores_upload_record_when_after_uploads_false() {
 }
 
 #[test]
-fn export_includes_rows_sharing_cutoff_rx_when_committed_after_upload() {
+fn wigle_csv_includes_rows_sharing_cutoff_time_stored_after_upload() {
     // One frame's sightings share an rx_at, and the store can commit them in two batches.
     // An upload that read between the commits covered only the first, so the second still
     // goes on the next upload.

@@ -81,7 +81,7 @@ pub fn render(snapshot: &Snapshot, panel: Panel) -> PanelLines {
 /// By characters, not bytes: a slice at a non-boundary byte would panic the first time something
 /// non-ASCII slipped in. Unpanicked it would still be wrong: the bridge's font covers U+0020 to
 /// U+007F and draws `?` for anything else, which no host test sees.
-/// `nothing_composed_here_leaves_ascii` holds the line.
+/// `render_composes_only_ascii` holds the line.
 fn fit(text: &str, cols: u8) -> ShortStr {
     let mut out = ShortStr::new();
     for c in text.chars().take(cols as usize) {
@@ -309,7 +309,7 @@ mod tests {
     }
 
     #[test]
-    fn panel_view_populates_all_lines_when_snapshot_is_empty() {
+    fn render_fills_every_line_when_snapshot_empty() {
         let lines = render(&quiet(), SCREEN);
         assert_eq!(lines.len(), 5);
         // Not a blank screen and not a zero pretending to be a measurement: each
@@ -320,7 +320,7 @@ mod tests {
     }
 
     #[test]
-    fn panel_view_sets_ok_severity_for_gps_when_fix_is_live() {
+    fn render_marks_gps_ok_when_fix_live() {
         // The chain answering from the receiver is the whole of the rule, and it is
         // what the satellite count hangs off too.
         let (level, text) =
@@ -336,7 +336,7 @@ mod tests {
     }
 
     #[test]
-    fn panel_view_sets_warn_severity_for_gps_when_receiver_is_searching_or_connecting() {
+    fn render_marks_gps_warn_when_receiver_trying() {
         for status in [
             GpsStatus::Connecting,
             GpsStatus::Scanning { port: "/dev/ttyUSB0".to_owned(), baud: 9_600 },
@@ -351,7 +351,7 @@ mod tests {
     }
 
     #[test]
-    fn panel_view_sets_error_severity_for_gps_when_receiver_failed_or_position_pinned() {
+    fn render_marks_gps_error_when_receiver_gone_or_position_pinned() {
         for status in [GpsStatus::NoReceiver, GpsStatus::Failed("no such port".to_owned())] {
             let (level, _) = row(&gps(status.clone(), PositionSource::None), 0);
             assert_eq!(level, Severity::Error, "{status:?} is not going to answer");
@@ -367,7 +367,7 @@ mod tests {
     }
 
     #[test]
-    fn panel_view_formats_node_counts_when_fleet_has_undrivable_nodes() {
+    fn render_shows_drivable_of_alive_when_some_undrivable() {
         let mut snapshot = fleet(&[Some(-40), Some(-45)]);
         snapshot.alive = 5;
         snapshot.assignable = 2;
@@ -382,14 +382,14 @@ mod tests {
     }
 
     #[test]
-    fn panel_view_sets_warn_severity_for_nodes_when_none_seen_yet() {
+    fn render_marks_nodes_warn_when_none_seen() {
         let (level, text) = row(&quiet(), 1);
         assert_eq!(level, Severity::Warn);
         assert_eq!(text, "waiting for nodes");
     }
 
     #[test]
-    fn panel_view_sets_error_severity_for_nodes_when_all_seen_nodes_are_silent() {
+    fn render_marks_nodes_error_when_all_silent() {
         let mut snapshot = fleet(&[Some(-50), Some(-60)]);
         for node in &mut snapshot.nodes {
             node.alive = false;
@@ -402,7 +402,7 @@ mod tests {
     }
 
     #[test]
-    fn panel_view_displays_link_down_error_when_link_is_inactive() {
+    fn render_shows_link_down_when_link_down() {
         let mut snapshot = fleet(&[Some(-40)]);
         snapshot.link_up = false;
         let (level, text) = row(&snapshot, 1);
@@ -411,7 +411,7 @@ mod tests {
     }
 
     #[test]
-    fn panel_view_formats_approximate_counts_when_rendering_network_totals() {
+    fn render_shows_unique_counts_approximately() {
         let mut snapshot = quiet();
         snapshot.unique_wifi_aps = 12_345;
         snapshot.unique_ble_aps = 42;
@@ -420,7 +420,7 @@ mod tests {
     }
 
     #[test]
-    fn panel_view_formats_single_rssi_value_when_all_nodes_have_identical_signal() {
+    fn render_shows_one_rssi_when_figures_agree() {
         // One node is the obvious case.
         let (level, text) = row(&fleet(&[Some(-52)]), 4);
         assert_eq!(level, Severity::Ok);
@@ -433,7 +433,7 @@ mod tests {
     }
 
     #[test]
-    fn panel_view_sets_warn_severity_for_rssi_when_signal_is_weak() {
+    fn render_marks_rssi_warn_when_link_weak() {
         // Every node weak: the average carries it.
         let (level, _) = row(&fleet(&[Some(-68), Some(-67)]), 4);
         assert_eq!(level, Severity::Warn);
@@ -459,7 +459,7 @@ mod tests {
     }
 
     #[test]
-    fn panel_view_ignores_unmeasured_nodes_when_calculating_rssi_stats() {
+    fn render_skips_unmeasured_nodes_in_rssi() {
         // A node heard only through its observations has no link RSSI yet. Folding
         // its absence in as a nought would read as a perfect link.
         let (level, text) = row(&fleet(&[Some(-60), None]), 4);
@@ -473,7 +473,7 @@ mod tests {
     }
 
     #[test]
-    fn panel_view_excludes_stale_nodes_when_calculating_rssi_stats() {
+    fn render_skips_dead_nodes_in_rssi() {
         // Its last measurement is real and long past; the fleet's link health is
         // the fleet that is still here.
         let mut snapshot = fleet(&[Some(-40), Some(-90)]);
@@ -486,7 +486,7 @@ mod tests {
     }
 
     #[test]
-    fn panel_view_displays_bad_label_when_rssi_falls_below_floor() {
+    fn render_shows_bad_when_rssi_below_floor() {
         // Three digits and a sign is a character more than the line has, and the exact
         // figure stopped meaning anything long before this: what an operator does about
         // -104 dBm is what they do about -100.
@@ -506,7 +506,7 @@ mod tests {
     }
 
     #[test]
-    fn panel_view_constrains_line_lengths_when_rendering_to_hardware_geometry() {
+    fn render_fits_every_line_on_the_bridge_panel() {
         // `firmware/bridge/src/panel.rs` gets seventeen columns out of its font, and the
         // RSSI line fills every one of them. Rendered wide and measured, so a reworded
         // line that would arrive truncated on the bench fails here instead — the
@@ -541,7 +541,7 @@ mod tests {
     }
 
     #[test]
-    fn panel_view_emits_strict_ascii_characters_when_rendering_all_screens() {
+    fn render_composes_only_ascii() {
         // The bridge draws with `FONT_9X15`, whose glyph mapping covers U+0020 to
         // U+007F and quietly substitutes `?` for anything else. So a tidy typographic
         // dash composed here does not reach the glass as a dash — it reaches it as
@@ -579,7 +579,7 @@ mod tests {
     }
 
     #[test]
-    fn panel_view_truncates_lines_when_screen_width_is_narrow() {
+    fn render_cuts_lines_to_narrow_screen() {
         let narrow = Panel { cols: 8, rows: 8 };
         let lines = render(&fleet(&[Some(-40), Some(-72)]), narrow);
         for line in &lines {
@@ -589,7 +589,7 @@ mod tests {
     }
 
     #[test]
-    fn panel_view_truncates_rows_from_top_when_screen_height_is_short() {
+    fn render_keeps_top_rows_when_screen_short() {
         let short = Panel { cols: 26, rows: 2 };
         let lines = render(&quiet(), short);
         assert_eq!(lines.len(), 2);
@@ -598,7 +598,7 @@ mod tests {
     }
 
     #[test]
-    fn approx_formats_abbreviated_counts_when_given_various_magnitudes() {
+    fn approx_shortens_to_three_figures() {
         assert_eq!(approx(0), "0");
         assert_eq!(approx(9_999), "9999");
         assert_eq!(approx(12_345), "12.3k");

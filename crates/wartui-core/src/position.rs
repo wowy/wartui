@@ -185,7 +185,7 @@ mod tests {
     }
 
     #[test]
-    fn position_chain_returns_unlocated_fix_when_chain_is_empty() {
+    fn position_chain_resolves_none_when_empty() {
         // Never dropping a record is the point; the empty fix is how that is
         // expressed rather than an `Option` every caller has to unwrap.
         let fix = PositionChain::empty().resolve(0);
@@ -194,7 +194,7 @@ mod tests {
     }
 
     #[test]
-    fn position_chain_returns_unlocated_fix_when_position_is_old() {
+    fn position_chain_resolves_unlocated_when_gps_fix_old() {
         let gps = Gps::detached();
         let chain = PositionChain::empty().with_gps(gps.clone(), DEFAULT_MAX_AGE);
         gps.feed(GGA, 0);
@@ -203,7 +203,7 @@ mod tests {
     }
 
     #[test]
-    fn position_chain_returns_static_coordinates_when_configured_with_fixed_location() {
+    fn position_chain_resolves_static_when_fixed() {
         let fix = PositionChain::fixed(37.7749, -122.4194, Some(16.0)).resolve(0);
         assert_eq!(fix.source, PositionSource::Static);
         assert!(fix.is_located());
@@ -213,13 +213,13 @@ mod tests {
     }
 
     #[test]
-    fn position_chain_falls_back_to_static_coordinates_when_gps_fix_is_unavailable() {
+    fn position_chain_falls_back_to_static_before_first_fix() {
         let (_gps, chain) = chain_with_gps();
         assert_eq!(chain.resolve(0).source, PositionSource::Static);
     }
 
     #[test]
-    fn position_chain_prefers_live_gps_over_static_coordinates_when_fix_is_fresh() {
+    fn position_chain_prefers_fresh_gps_over_static() {
         let (gps, chain) = chain_with_gps();
         gps.feed(GGA, 10_000);
         let fix = chain.resolve(12_000);
@@ -229,7 +229,7 @@ mod tests {
     }
 
     #[test]
-    fn position_chain_falls_back_to_static_when_gps_fix_exceeds_max_age() {
+    fn position_chain_falls_back_to_static_past_max_age() {
         // The whole reason the chain takes a clock; `DEFAULT_MAX_AGE` has the
         // arithmetic.
         let (gps, chain) = chain_with_gps();
@@ -239,7 +239,7 @@ mod tests {
     }
 
     #[test]
-    fn position_chain_falls_back_to_none_when_gps_is_stale_and_no_static_position() {
+    fn position_chain_falls_back_to_none_when_stale_and_no_static() {
         let gps = Gps::detached();
         let chain = PositionChain::empty().with_gps(gps.clone(), DEFAULT_MAX_AGE);
         gps.feed(GGA, 10_000);
@@ -247,7 +247,7 @@ mod tests {
     }
 
     #[test]
-    fn position_chain_preserves_gps_fix_when_system_clock_steps_backward() {
+    fn position_chain_keeps_gps_when_clock_steps_back() {
         let (gps, chain) = chain_with_gps();
         gps.feed(GGA, 10_000);
         assert_eq!(chain.resolve(9_000).source, PositionSource::Gps);

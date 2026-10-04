@@ -52,7 +52,7 @@ fn covered_runs(runs: &[IndexRun]) -> Vec<u8> {
 }
 
 #[tokio::test(start_paused = true)]
-async fn auto_partitioner_converges_on_us_pool_partition_when_fleet_joins() {
+async fn drive_partitions_us_pool_when_fleet_joins() {
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().join("wartui.db");
 

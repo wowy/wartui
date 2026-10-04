@@ -287,7 +287,7 @@ mod tests {
     }
 
     #[test]
-    fn nmea_parser_extracts_lat_lon_and_altitude_when_given_valid_gga_sentence() {
+    fn nmea_reads_position_and_altitude_from_gga() {
         let fix = fix(GGA);
         assert!((fix.lat - 48.117_3).abs() < 1e-4, "{}", fix.lat);
         assert!((fix.lon - 11.516_666).abs() < 1e-4, "{}", fix.lon);
@@ -298,7 +298,7 @@ mod tests {
     }
 
     #[test]
-    fn nmea_parser_negates_coordinates_when_hemisphere_is_south_or_west() {
+    fn nmea_negates_south_and_west() {
         // The single most consequential thing this parser can get wrong: a
         // sign error puts every observation on the wrong side of the planet
         // and WiGLE will happily accept it.
@@ -308,20 +308,20 @@ mod tests {
     }
 
     #[test]
-    fn nmea_parser_returns_no_fix_when_status_field_indicates_searching() {
+    fn nmea_reports_no_fix_when_receiver_searching() {
         assert_eq!(Nmea::new().parse(GGA_NO_FIX), Ok(Report::NoFix));
         assert_eq!(Nmea::new().parse(RMC_NO_FIX), Ok(Report::NoFix));
     }
 
     #[test]
-    fn nmea_parser_returns_other_when_processing_unhandled_sentence_types() {
+    fn nmea_reports_other_for_unused_sentence() {
         // A receiver emits far more GSV and GSA than GGA. Counting those as
         // failures would make a working GPS look broken.
         assert_eq!(Nmea::new().parse(GSV), Ok(Report::Other));
     }
 
     #[test]
-    fn nmea_parser_attaches_timestamp_only_when_date_sentence_has_been_received() {
+    fn nmea_stamps_fix_only_after_rmc_date() {
         let mut nmea = Nmea::new();
         // GGA has a time of day and no date, so on its own it cannot say when.
         let Ok(Report::Fix(before)) = nmea.parse(GGA) else { panic!("a fix") };
@@ -335,7 +335,7 @@ mod tests {
     }
 
     #[test]
-    fn nmea_parser_advances_date_to_next_day_when_gga_crosses_midnight() {
+    fn nmea_rolls_date_forward_when_gga_crosses_midnight() {
         // GGA has a time and no date, so for the fraction of a second between
         // midnight and that cycle's RMC it borrows a date that has just
         // expired. Left alone the fix would claim to be a day old, which is
@@ -350,7 +350,7 @@ mod tests {
     }
 
     #[test]
-    fn nmea_parser_rejects_truncated_sentence_or_checksum_mismatch() {
+    fn nmea_rejects_truncated_sentence_or_bad_checksum() {
         // This is the normal first read after opening a port, and the whole
         // reason the checksum is mandatory: the prefix below is a perfectly
         // well-formed position off the coast of Somalia.
@@ -367,7 +367,7 @@ mod tests {
     }
 
     #[test]
-    fn nmea_parser_rejects_sentence_when_numeric_fields_are_malformed() {
+    fn nmea_rejects_malformed_number() {
         let bad_hdop = b"$GPGGA,123521.00,4807.038,N,01131.000,E,1,08,zz,545.4,M,46.9,M,,*45";
         assert_eq!(Nmea::new().parse(bad_hdop), Err(NmeaError::Malformed));
         // 67 minutes of arc is not a coordinate, however well it checksums.
