@@ -81,7 +81,7 @@ pub fn render(snapshot: &Snapshot, panel: Panel) -> PanelLines {
 /// By characters, not bytes: a slice at a non-boundary byte would panic the first time something
 /// non-ASCII slipped in. Unpanicked it would still be wrong: the bridge's font covers U+0020 to
 /// U+007F and draws `?` for anything else, which no host test sees.
-/// `render_composes_only_ascii` holds the line.
+/// `render_composes_only_ascii_when_any_state_rendered` holds the line.
 fn fit(text: &str, cols: u8) -> ShortStr {
     let mut out = ShortStr::new();
     for c in text.chars().take(cols as usize) {
@@ -411,7 +411,7 @@ mod tests {
     }
 
     #[test]
-    fn render_shows_unique_counts_approximately() {
+    fn render_shows_unique_counts_approximately_when_large() {
         let mut snapshot = quiet();
         snapshot.unique_wifi_aps = 12_345;
         snapshot.unique_ble_aps = 42;
@@ -459,7 +459,7 @@ mod tests {
     }
 
     #[test]
-    fn render_skips_unmeasured_nodes_in_rssi() {
+    fn render_skips_node_in_rssi_when_link_rssi_unknown() {
         // A node heard only through its observations has no link RSSI yet. Folding
         // its absence in as a nought would read as a perfect link.
         let (level, text) = row(&fleet(&[Some(-60), None]), 4);
@@ -473,7 +473,7 @@ mod tests {
     }
 
     #[test]
-    fn render_skips_dead_nodes_in_rssi() {
+    fn render_skips_node_in_rssi_when_not_alive() {
         // Its last measurement is real and long past; the fleet's link health is
         // the fleet that is still here.
         let mut snapshot = fleet(&[Some(-40), Some(-90)]);
@@ -506,7 +506,7 @@ mod tests {
     }
 
     #[test]
-    fn render_fits_every_line_on_the_bridge_panel() {
+    fn render_fits_every_line_when_figures_widest() {
         // `firmware/bridge/src/panel.rs` gets seventeen columns out of its font, and the
         // RSSI line fills every one of them. Rendered wide and measured, so a reworded
         // line that would arrive truncated on the bench fails here instead — the
@@ -541,7 +541,7 @@ mod tests {
     }
 
     #[test]
-    fn render_composes_only_ascii() {
+    fn render_composes_only_ascii_when_any_state_rendered() {
         // The bridge draws with `FONT_9X15`, whose glyph mapping covers U+0020 to
         // U+007F and quietly substitutes `?` for anything else. So a tidy typographic
         // dash composed here does not reach the glass as a dash — it reaches it as
@@ -579,7 +579,7 @@ mod tests {
     }
 
     #[test]
-    fn render_cuts_lines_to_narrow_screen() {
+    fn render_cuts_lines_when_screen_narrow() {
         let narrow = Panel { cols: 8, rows: 8 };
         let lines = render(&fleet(&[Some(-40), Some(-72)]), narrow);
         for line in &lines {
@@ -598,7 +598,7 @@ mod tests {
     }
 
     #[test]
-    fn approx_shortens_to_three_figures() {
+    fn approx_shortens_to_three_figures_when_count_has_more() {
         assert_eq!(approx(0), "0");
         assert_eq!(approx(9_999), "9999");
         assert_eq!(approx(12_345), "12.3k");

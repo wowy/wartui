@@ -298,7 +298,7 @@ mod tests {
     use super::ssid_text;
 
     #[test]
-    fn ssid_text_strips_cloaked_padding() {
+    fn ssid_text_strips_padding_when_ssid_cloaked() {
         assert_eq!(ssid_text(&[0u8; 8]), "");
         assert_eq!(ssid_text(b"Home\0\0\0"), "Home");
         assert_eq!(ssid_text(b""), "");
@@ -306,7 +306,7 @@ mod tests {
     }
 
     #[test]
-    fn ssid_text_replaces_interior_nul() {
+    fn ssid_text_replaces_nul_when_interior() {
         // The trim leaves an interior NUL, so this is the last guard before a column WiGLE parses,
         // or a terminal that would swallow it and show a shorter name.
         assert_eq!(ssid_text(b"a\0b"), "a\u{FFFD}b");

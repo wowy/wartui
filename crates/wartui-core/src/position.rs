@@ -213,13 +213,13 @@ mod tests {
     }
 
     #[test]
-    fn position_chain_falls_back_to_static_before_first_fix() {
+    fn position_chain_falls_back_to_static_when_gps_has_no_fix_yet() {
         let (_gps, chain) = chain_with_gps();
         assert_eq!(chain.resolve(0).source, PositionSource::Static);
     }
 
     #[test]
-    fn position_chain_prefers_fresh_gps_over_static() {
+    fn position_chain_prefers_gps_over_static_when_fix_fresh() {
         let (gps, chain) = chain_with_gps();
         gps.feed(GGA, 10_000);
         let fix = chain.resolve(12_000);
@@ -229,7 +229,7 @@ mod tests {
     }
 
     #[test]
-    fn position_chain_falls_back_to_static_past_max_age() {
+    fn position_chain_falls_back_to_static_when_fix_past_max_age() {
         // The whole reason the chain takes a clock; `DEFAULT_MAX_AGE` has the
         // arithmetic.
         let (gps, chain) = chain_with_gps();

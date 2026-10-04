@@ -97,7 +97,7 @@ mod tests {
     }
 
     #[test]
-    fn distinct_counts_repeat_once() {
+    fn distinct_counts_address_once_when_heard_repeatedly() {
         let mut distinct = Distinct::new();
         for _ in 0..10_000 {
             distinct.insert(&mac(7));
@@ -106,7 +106,7 @@ mod tests {
     }
 
     #[test]
-    fn distinct_stays_within_a_handful_below_a_thousand() {
+    fn distinct_stays_within_a_handful_when_under_a_thousand_addresses() {
         // Linear counting's own noise is about five addresses at a thousand, so a
         // bound much tighter than this would be testing the hash, not the estimator.
         let mut distinct = Distinct::new();
@@ -119,7 +119,7 @@ mod tests {
     }
 
     #[test]
-    fn distinct_stays_within_two_percent_at_millions_in_fixed_memory() {
+    fn distinct_stays_within_two_percent_when_millions_heard() {
         let mut distinct = Distinct::new();
         for n in 0..2_000_000 {
             distinct.insert(&mac(n));

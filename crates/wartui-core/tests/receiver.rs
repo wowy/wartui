@@ -28,19 +28,19 @@ fn board(device: &str) -> PortCandidate {
 }
 
 #[test]
-fn discover_recognises_receiver_from_valid_sentences() {
+fn discover_recognises_receiver_when_sentences_valid() {
     assert!(looks_like_nmea(NMEA));
 }
 
 #[test]
-fn discover_recognises_receiver_without_a_fix() {
+fn discover_recognises_receiver_when_it_has_no_fix() {
     // Indoors, or thirty seconds into a cold start. It is the receiver either way,
     // and refusing it would mean never finding one in a garage.
     assert!(looks_like_nmea(NO_LOCK));
 }
 
 #[test]
-fn discover_rejects_log_chatter() {
+fn discover_rejects_port_when_it_prints_log_lines() {
     let chatter = b"I (443) wifi: mode : sta\r\nI (451) phy_init: phy ver 970\r\n\
                     E (462) radio: no peer\r\n"
         .as_slice();
@@ -48,7 +48,7 @@ fn discover_rejects_log_chatter() {
 }
 
 #[test]
-fn discover_rejects_stream_at_wrong_baud() {
+fn discover_rejects_stream_when_baud_wrong() {
     // What a 38400 receiver looks like read at 9600: the bytes are mangled, so the
     // checksums do not hold even where a `$` survives.
     let mangled: Vec<u8> = NMEA.iter().map(|byte| byte.rotate_left(3)).collect();
@@ -56,7 +56,7 @@ fn discover_rejects_stream_at_wrong_baud() {
 }
 
 #[test]
-fn discover_needs_two_sentences_on_unnamed_port() {
+fn discover_needs_two_sentences_when_port_unnamed() {
     // The checksum is an eight-bit XOR, so a device emitting text agrees with one
     // about once in 256 lines. Two in a window is not luck.
     let one = b"$GPGGA,123519.00,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*69\r\n";
@@ -66,7 +66,7 @@ fn discover_needs_two_sentences_on_unnamed_port() {
 }
 
 #[test]
-fn discover_rejects_fragment_split_across_window() {
+fn discover_rejects_fragment_when_sentence_split_across_window() {
     // A probe joins the stream wherever it happens to be, so the first line is
     // normally a fragment. It has to fail rather than be patched up.
     let tail = &NMEA[30..];
@@ -74,7 +74,7 @@ fn discover_rejects_fragment_split_across_window() {
 }
 
 #[test]
-fn discover_candidates_leave_out_espressif_boards() {
+fn discover_candidates_leave_out_board_when_espressif() {
     // The one thing that must never be opened by something looking for a GPS: the
     // other half of wartui is transmitting into whatever it opens.
     let attached = vec![board("/dev/ttyACM0"), puck("/dev/ttyACM1")];
@@ -84,7 +84,7 @@ fn discover_candidates_leave_out_espressif_boards() {
 }
 
 #[test]
-fn discover_candidates_leave_out_reserved_bridge_port() {
+fn discover_candidates_leave_out_port_when_reserved_for_bridge() {
     // `--bridge /dev/ttyUSB0` opens that path whatever it is, so it is named here
     // as well — the vendor filter cannot see it.
     let attached = vec![uart("/dev/ttyUSB0"), puck("/dev/ttyACM1")];
@@ -94,7 +94,7 @@ fn discover_candidates_leave_out_reserved_bridge_port() {
 }
 
 #[test]
-fn discover_candidates_put_named_gps_first() {
+fn discover_candidates_put_port_first_when_product_names_gps() {
     let mut named = uart("/dev/ttyUSB1");
     named.product = Some("u-blox 7 - GPS/GNSS Receiver".to_owned());
     let attached = vec![uart("/dev/ttyUSB0"), named];
@@ -103,7 +103,7 @@ fn discover_candidates_put_named_gps_first() {
 }
 
 #[test]
-fn discover_candidates_keep_bare_uart() {
+fn discover_candidates_keep_bare_uart_when_it_names_nothing() {
     // The common pucks sit behind one, so a hint can order the search and can never
     // decide it. Reading the port is what decides it.
     let found = candidates(vec![uart("/dev/ttyUSB0")], &[]);
@@ -111,7 +111,7 @@ fn discover_candidates_keep_bare_uart() {
 }
 
 #[test]
-fn discover_settle_picks_first_matching_baud() {
+fn discover_settle_picks_baud_when_only_it_answers() {
     let ports = [puck("/dev/ttyACM1")];
     let settled = settle(&ports, &BAUD_LADDER, SENTENCES_TO_BELIEVE, |_, baud| {
         if baud == 38_400 { NMEA.to_vec() } else { b"\xff\xfe junk\r\n".to_vec() }
@@ -132,7 +132,7 @@ fn discover_settle_tries_one_baud_when_rate_pinned() {
 }
 
 #[test]
-fn discover_settle_skips_silent_port() {
+fn discover_settle_skips_port_when_silent() {
     let ports = [uart("/dev/ttyUSB0"), puck("/dev/ttyACM1")];
     let settled = settle(&ports, &BAUD_LADDER, SENTENCES_TO_BELIEVE, |path, _| {
         if path == "/dev/ttyACM1" { NMEA.to_vec() } else { Vec::new() }
@@ -150,7 +150,7 @@ fn discover_settle_returns_none_when_no_port_speaks_nmea() {
 }
 
 #[test]
-fn discover_settle_tries_every_port_and_baud() {
+fn discover_settle_tries_every_port_and_baud_when_none_answers() {
     let ports = [uart("/dev/ttyUSB0"), uart("/dev/ttyUSB1")];
     let mut tried = 0;
     let settled = settle(&ports, &BAUD_LADDER, SENTENCES_TO_BELIEVE, |_, _| {
@@ -162,7 +162,7 @@ fn discover_settle_tries_every_port_and_baud() {
 }
 
 #[test]
-fn discover_settle_accepts_one_sentence_on_named_port() {
+fn discover_settle_accepts_one_sentence_when_port_named() {
     // The operator has already said what the device is; only the rate is in
     // question. A receiver emitting a single sentence a second is a real
     // configuration, and asking it for two inside one window would refuse it.

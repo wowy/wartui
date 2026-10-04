@@ -18,7 +18,7 @@ use wartui_core::runtime::{drive, now};
 use wartui_core::store::{CaptureInfo, Store, StoreConfig, open_readonly};
 
 #[tokio::test(start_paused = true)]
-async fn drive_stores_sightings_that_export_to_wigle_csv() {
+async fn drive_stores_sightings_that_export_when_fleet_simulated() {
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().join("wartui.db");
 
@@ -96,7 +96,7 @@ const FIRST: &[u8] = b"$GPGGA,123519.00,4807.038,N,01131.000,E,1,08,0.9,545.4,M,
 const SECOND: &[u8] = b"$GPGGA,123529.00,4810.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*6C";
 
 #[tokio::test(start_paused = true)]
-async fn drive_attaches_moving_gps_positions() {
+async fn drive_attaches_gps_positions_when_receiver_moves() {
     // The point of the GPS tier: not one position for the run, but the position
     // at the moment each observation arrived.
     let dir = tempfile::tempdir().expect("temp dir");
@@ -176,7 +176,7 @@ async fn drive_attaches_moving_gps_positions() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn drive_ends_on_host_row_with_final_counts() {
+async fn drive_ends_on_host_row_with_final_counts_when_stopped() {
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().join("wartui.db");
 

@@ -555,7 +555,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn timestamp_zero_pads_utc() {
+    fn timestamp_zero_pads_fields_when_month_day_or_time_single_digit() {
         // The whole reason this function exists. The node firmware emits
         // `2026-5-1 13:34:37` for this instant, which WiGLE rejects.
         assert_eq!(timestamp(1_777_642_477_000), "2026-05-01 13:34:37");
@@ -571,7 +571,7 @@ mod tests {
     }
 
     #[test]
-    fn mac_full_writes_uppercase_colon_hex() {
+    fn mac_full_writes_uppercase_colon_hex_when_formatting_bssid() {
         // The `MAC` column WiGLE reads. A change to `mac::full` must not change it.
         assert_eq!(
             mac::full(&[0x02, 0x00, 0x5E, 0x10, 0x57, 0x84]).to_string(),
@@ -580,7 +580,7 @@ mod tests {
     }
 
     #[test]
-    fn frequency_column_maps_wifi_channels_to_mhz() {
+    fn frequency_column_gives_centre_mhz_when_wifi_channel_on_a_ladder() {
         assert_eq!(frequency_column(1, true), "2412");
         assert_eq!(frequency_column(6, true), "2437");
         assert_eq!(frequency_column(13, true), "2472");
@@ -597,7 +597,7 @@ mod tests {
     }
 
     #[test]
-    fn frequency_column_is_blank_for_ble_or_unmapped_channel() {
+    fn frequency_column_is_blank_when_not_wifi_or_channel_unmapped() {
         // A BLE row's frequency column means a "device type" code a passive scan
         // cannot produce, so it is blank whatever the channel field holds.
         assert_eq!(frequency_column(0, false), "");

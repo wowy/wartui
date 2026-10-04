@@ -198,7 +198,7 @@ mod tests {
     }
 
     #[test]
-    fn gencmd_message_lays_out_header_command_and_end_tag() {
+    fn gencmd_message_lays_out_header_command_and_end_tag_when_built() {
         let message = gencmd_message("get_throttled");
         assert_eq!(message[0] as usize, size_of_val(&message));
         assert_eq!(message[..6], [message[0], 0, GET_GENCMD_RESULT, MAX_STRING as u32, 0, 0]);

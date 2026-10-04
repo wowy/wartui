@@ -270,7 +270,7 @@ fn engine_records_node_and_observation_when_sighting_arrives() {
 }
 
 #[test]
-fn engine_counts_unique_addresses_once_per_kind() {
+fn engine_counts_unique_addresses_once_per_kind_when_heard_repeatedly() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
 
@@ -305,7 +305,7 @@ fn engine_counts_unique_addresses_once_per_kind() {
 }
 
 #[test]
-fn engine_keeps_record_bytes_in_raw_body() {
+fn engine_keeps_record_bytes_in_raw_body_when_sighting_recorded() {
     // If this decoder turns out to be wrong, the frame as it arrived is what lets
     // the fix reach history rather than only what comes afterwards.
     let clock = Clock::new();
@@ -323,7 +323,7 @@ fn engine_keeps_record_bytes_in_raw_body() {
 }
 
 #[test]
-fn engine_records_one_node_and_each_observation_of_a_batch() {
+fn engine_records_one_node_and_each_observation_when_batch_arrives() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
 
@@ -484,7 +484,7 @@ fn engine_records_batch_gap_when_seq_jumps() {
 }
 
 #[test]
-fn engine_ignores_batch_gap_after_replayed_batch() {
+fn engine_ignores_batch_gap_when_previous_batch_replayed() {
     // On connect the bridge replays its backlog. Batch 25 is a stale frame from long before;
     // what the node sent between it and batch 84 went while no host was reading, and the
     // bridge's own drop count covers that.
@@ -505,7 +505,7 @@ fn engine_ignores_batch_gap_after_replayed_batch() {
 }
 
 #[test]
-fn engine_counts_batch_gap_after_live_batch() {
+fn engine_counts_batch_gap_when_previous_batch_live() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
     engine.handle(connected(), clock.at(0));
@@ -533,7 +533,7 @@ fn engine_records_no_batch_gap_when_seq_repeats() {
 }
 
 #[test]
-fn engine_records_no_batch_gap_at_max_counted_gap() {
+fn engine_records_no_batch_gap_when_gap_reaches_uncounted_gap() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
     caught_up(&mut engine, &clock);
@@ -550,7 +550,7 @@ fn engine_records_no_batch_gap_at_max_counted_gap() {
 }
 
 #[test]
-fn engine_records_batch_gap_across_seq_wrap() {
+fn engine_records_batch_gap_when_seq_wraps() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
     caught_up(&mut engine, &clock);
@@ -656,7 +656,7 @@ fn engine_records_batch_when_repeat_after_window() {
 }
 
 #[test]
-fn engine_records_raw_frame_of_duplicate_batch() {
+fn engine_records_raw_frame_when_batch_duplicate() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig { record_raw: true, ..Default::default() }, &clock);
 
@@ -708,7 +708,7 @@ fn engine_resets_seq_baseline_when_node_reboots() {
 }
 
 #[test]
-fn engine_records_batch_repeated_after_reboot() {
+fn engine_records_batch_when_it_repeats_after_reboot() {
     // The reboot arm clears the stored batch bytes along with last_seq, so a
     // batch that happens to repeat the pre-reboot seq and bytes is a fresh
     // observation rather than a retransmission of what came before the boot.
@@ -753,7 +753,7 @@ fn engine_increments_reboot_counter_when_heartbeat_counter_decreases() {
 }
 
 #[test]
-fn engine_ignores_ring_drops_in_first_heartbeat() {
+fn engine_ignores_ring_drops_when_first_heartbeat_of_session() {
     // What a node refused before this capture started is not this capture's.
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
@@ -764,7 +764,7 @@ fn engine_ignores_ring_drops_in_first_heartbeat() {
 }
 
 #[test]
-fn engine_sums_ring_drops_across_nodes() {
+fn engine_sums_ring_drops_across_nodes_when_heartbeats_advance() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
 
@@ -778,7 +778,7 @@ fn engine_sums_ring_drops_across_nodes() {
 }
 
 #[test]
-fn engine_keeps_wifi_and_ble_drops_apart() {
+fn engine_keeps_wifi_and_ble_drops_apart_when_both_advance() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
 
@@ -790,7 +790,7 @@ fn engine_keeps_wifi_and_ble_drops_apart() {
 }
 
 #[test]
-fn engine_counts_since_boot_ring_drops_after_reboot() {
+fn engine_counts_since_boot_ring_drops_when_node_reboots() {
     // A reboot restarts the node's count at 0, so everything it carries after
     // one was refused this session.
     let clock = Clock::new();
@@ -807,7 +807,7 @@ fn engine_counts_since_boot_ring_drops_after_reboot() {
 }
 
 #[test]
-fn engine_reads_falling_ring_drops_as_restart() {
+fn engine_reads_restart_when_ring_drops_fall_without_reboot() {
     // Heard soon after boot, then rebooted out of range and heard again at a
     // higher counter: neither the counter nor the epoch shows the reboot, but a
     // since-boot count that falls does.
@@ -842,7 +842,7 @@ fn engine_undercounts_ring_drops_when_count_wraps() {
 }
 
 #[test]
-fn engine_keeps_node_seen_but_not_alive_on_observations_alone() {
+fn engine_keeps_node_seen_but_not_alive_when_only_sightings_arrive() {
     // Two questions: is this node there, and can it still be given a range.
     let clock = Clock::new();
     let config = EngineConfig { topology_timeout: Duration::from_secs(60), ..Default::default() };
@@ -966,7 +966,7 @@ fn engine_counts_foreign_admin_when_another_core_transmits() {
 }
 
 #[test]
-fn engine_ignores_unknown_sender_of_undecodable_frame() {
+fn engine_ignores_sender_when_frame_undecodable() {
     // A transmitter we cannot understand is counted, not adopted.
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
@@ -1002,7 +1002,7 @@ fn engine_records_bridge_when_connected() {
 }
 
 #[test]
-fn engine_polls_bridge_on_connect_and_each_interval() {
+fn engine_polls_bridge_when_connected_and_each_interval() {
     let clock = Clock::new();
     let config = EngineConfig {
         status_interval: Duration::from_secs(5),
@@ -1027,7 +1027,7 @@ fn engine_polls_bridge_on_connect_and_each_interval() {
 }
 
 #[test]
-fn engine_clamps_configured_tx_power() {
+fn engine_clamps_tx_power_when_configured_out_of_range() {
     let clock = Clock::new();
     let mut too_high =
         engine(EngineConfig { tx_power: 120, bridge_tx_power: 120, ..Default::default() }, &clock);
@@ -1050,7 +1050,7 @@ fn engine_clamps_configured_tx_power() {
 }
 
 #[test]
-fn engine_carries_tx_power_in_assignment() {
+fn engine_carries_tx_power_when_assignment_sent() {
     let clock = Clock::new();
     let mut engine =
         engine(EngineConfig { tx_power: 52, bridge_tx_power: 20, ..Default::default() }, &clock);
@@ -1091,7 +1091,7 @@ fn engine_drops_oldest_tail_entry_when_tail_full() {
 }
 
 #[test]
-fn engine_renders_tail_ssid_with_ssid_text() {
+fn engine_renders_tail_ssid_as_text_when_ssid_cloaked_or_has_nul() {
     // An interior NUL is not padding: it survives the trim, and a terminal handed
     // one silently shows a shorter name than the one on the air.
     let clock = Clock::new();
@@ -1106,7 +1106,7 @@ fn engine_renders_tail_ssid_with_ssid_text() {
 }
 
 #[test]
-fn engine_attaches_position_to_observation() {
+fn engine_attaches_position_when_sighting_arrives() {
     let clock = Clock::new();
     let config = EngineConfig {
         position: PositionChain::fixed(37.7749, -122.4194, Some(16.0)),
@@ -1204,7 +1204,7 @@ fn engine_records_raw_frame_only_when_record_raw() {
 }
 
 #[test]
-fn engine_snapshot_orders_nodes_by_mac() {
+fn engine_snapshot_orders_nodes_by_mac_when_heard_out_of_order() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
 
@@ -1218,7 +1218,7 @@ fn engine_snapshot_orders_nodes_by_mac() {
 }
 
 #[test]
-fn engine_counts_bridge_drops_since_attach() {
+fn engine_counts_bridge_drops_since_attach_when_status_arrives() {
     // A bridge left powered with nothing attached drops everything it hears, so
     // its own counter is dominated by history. What matters is *this* capture.
     let clock = Clock::new();
@@ -1252,7 +1252,7 @@ fn engine_counts_bridge_drops_since_attach() {
 }
 
 #[test]
-fn engine_records_bridge_status_as_sent() {
+fn engine_records_bridge_status_when_reply_arrives() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
     let status = |dropped_tx, uptime_ms| {
@@ -1304,7 +1304,7 @@ fn engine_records_bridge_status_as_sent() {
 }
 
 #[test]
-fn engine_records_host_frames_with_bridge_status() {
+fn engine_records_host_frames_when_status_reply_arrives() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
     engine.handle(connected(), clock.at(1));
@@ -1348,7 +1348,7 @@ fn host_status(batch: &ActionBatch) -> HostStatus {
 }
 
 #[test]
-fn engine_records_host_status_on_host_sample() {
+fn engine_records_host_status_when_host_sample_arrives() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
     let msg = SightingMsg {
@@ -1450,7 +1450,7 @@ fn engine_reports_no_lag_peak_when_only_connected() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn engine_sends_assignment_only_in_heartbeat_window() {
+fn engine_sends_assignment_only_when_heartbeat_opens_window() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
     caught_up(&mut engine, &clock);
@@ -1477,7 +1477,7 @@ fn engine_sends_assignment_only_in_heartbeat_window() {
 }
 
 #[test]
-fn engine_withholds_assignment_from_node_heard_only_by_sightings() {
+fn engine_withholds_assignment_when_node_heard_only_by_sightings() {
     // A node reports what it found on a channel before it gets back to the control
     // channel, so until its heartbeat nothing says which band its radio reaches.
     let clock = Clock::new();
@@ -1494,7 +1494,7 @@ fn engine_withholds_assignment_from_node_heard_only_by_sightings() {
 }
 
 #[test]
-fn engine_leaves_foreign_fleet_out_of_plan() {
+fn engine_leaves_node_out_of_plan_when_frames_are_foreign() {
     // The failure this exists to prevent, in the smallest form that shows it: two
     // nodes plus a stranger must partition the pool two ways, not three. Three
     // would leave a third of it assigned to a node that will never scan it.
@@ -1525,7 +1525,7 @@ fn engine_leaves_foreign_fleet_out_of_plan() {
 }
 
 #[test]
-fn engine_gives_single_band_node_only_2_4_ghz() {
+fn engine_gives_only_2_4_ghz_when_node_is_single_band() {
     // A C6 adopts a 5 GHz share, acknowledges it, and scans the part it can reach
     // — leaving a hole with an assignment sitting on top of it.
     let clock = Clock::new();
@@ -1556,7 +1556,7 @@ fn engine_gives_single_band_node_only_2_4_ghz() {
 }
 
 #[test]
-fn engine_holds_ble_for_named_node_until_it_heartbeats() {
+fn engine_holds_ble_for_named_node_when_it_has_not_heartbeated() {
     // Nothing is ever removed from the node table, so an absent MAC has never been
     // heard rather than having gone away. Reading absence as departure took the
     // scan back before the node's first heartbeat could arrive.
@@ -1590,7 +1590,7 @@ fn engine_holds_ble_for_named_node_until_it_heartbeats() {
 }
 
 #[test]
-fn engine_confirms_assignment_on_mac_ack() {
+fn engine_confirms_assignment_when_mac_ack_arrives() {
     let clock = Clock::new();
     let mut engine = engine(us_config(), &clock);
     engine.handle(heartbeat(NODE, 1), clock.at(1));
@@ -1689,7 +1689,7 @@ fn engine_keeps_ack_when_older_attempt_times_out() {
 }
 
 #[test]
-fn engine_records_assignment_latency() {
+fn engine_records_assignment_latency_when_ack_stamped() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
     engine.handle(heartbeat(NODE, 1), clock.at(1));
@@ -1707,7 +1707,7 @@ fn engine_records_assignment_latency() {
 }
 
 #[test]
-fn engine_records_latency_across_bridge_clock_wrap() {
+fn engine_records_latency_when_bridge_clock_wraps() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
     // Both heartbeats are stamped just short of the wrap, a millisecond apart,
@@ -1848,7 +1848,7 @@ fn engine_counts_reboot_when_epoch_returns_to_zero() {
 }
 
 #[test]
-fn engine_ignores_epoch_of_replayed_heartbeat() {
+fn engine_ignores_epoch_when_heartbeat_replayed() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
     engine.handle(heartbeat(NODE, 1), clock.at(1));
@@ -1934,7 +1934,7 @@ fn engine_gives_up_when_peer_table_full() {
 }
 
 #[test]
-fn engine_ignores_ack_of_superseded_epoch() {
+fn engine_ignores_ack_when_epoch_superseded() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
     engine.handle(heartbeat(NODE, 1), clock.at(1));
@@ -1983,7 +1983,7 @@ fn wanted(engine: &FleetEngine) -> Vec<ChannelSet> {
 }
 
 #[test]
-fn engine_partitions_whole_pool_across_fleet() {
+fn engine_partitions_whole_pool_when_nodes_join() {
     let clock = Clock::new();
     let mut engine = engine(us_config(), &clock);
     for n in 0..3 {
@@ -2062,7 +2062,7 @@ fn engine_reissues_every_share_when_node_joins() {
 }
 
 #[test]
-fn engine_redeals_silent_nodes_share() {
+fn engine_redeals_share_when_node_falls_silent() {
     let clock = Clock::new();
     let mut engine = engine(us_config(), &clock);
     engine.handle(heartbeat(peer(0), 1), clock.at(1));
@@ -2084,7 +2084,7 @@ fn engine_redeals_silent_nodes_share() {
 }
 
 #[test]
-fn engine_gives_lone_node_whole_pool_once() {
+fn engine_gives_whole_pool_once_when_fleet_is_one_node() {
     let clock = Clock::new();
     let mut engine = engine(us_config(), &clock);
     caught_up(&mut engine, &clock);
@@ -2157,7 +2157,7 @@ fn engine_recuts_both_ends_when_ble_scan_moves() {
 }
 
 #[test]
-fn engine_sends_empty_channels_only_with_ble_flag() {
+fn engine_sends_empty_channels_only_with_ble_flag_when_ble_moves_in_three_node_fleet() {
     // The one frame that must never exist: a node told to scan nothing parks, and
     // this host goes on believing it is sweeping. Every path that can produce one
     // is in here — a join, the scan given, the scan moved, the holder rebooting,
@@ -2200,7 +2200,7 @@ fn engine_sends_empty_channels_only_with_ble_flag() {
 }
 
 #[test]
-fn engine_sends_empty_channels_only_with_ble_flag_in_surplus_fleet() {
+fn engine_sends_empty_channels_only_with_ble_flag_when_ble_moves_in_surplus_fleet() {
     // The same invariant on an oversubscribed fleet, where the scanner's slot is also
     // the one the deal has nothing for — the arrangement in which the two halves of
     // the frame came apart. `channels_for` says `None` and what the node holds is the
@@ -2436,7 +2436,7 @@ fn engine_reissues_under_new_epoch_when_rebooted_node_rejoins() {
 }
 
 #[test]
-fn engine_leaves_peer_refused_node_out_of_plan() {
+fn engine_leaves_node_out_of_plan_when_peer_slot_refused() {
     let clock = Clock::new();
     let mut engine = engine(us_config(), &clock);
     for n in 0..3 {
@@ -2476,7 +2476,7 @@ fn removals(batch: &ActionBatch) -> Vec<Mac> {
 }
 
 #[test]
-fn engine_removes_peer_after_topology_timeout() {
+fn engine_removes_peer_when_silent_past_topology_timeout() {
     let clock = Clock::new();
     let mut engine = engine(us_config(), &clock);
     caught_up(&mut engine, &clock);
@@ -2514,7 +2514,7 @@ fn engine_readmits_refused_node_when_peer_evicted() {
 }
 
 #[test]
-fn engine_removes_peer_of_node_silent_since_reconnect() {
+fn engine_removes_peer_when_node_silent_since_reconnect() {
     let clock = Clock::new();
     let mut engine = engine(us_config(), &clock);
     caught_up(&mut engine, &clock);
@@ -2566,7 +2566,7 @@ fn engine_skips_peer_removal_when_never_sent_to() {
 // every one of those heartbeats names a window that shut long ago
 // (`docs/phase-4-findings.md`).
 #[test]
-fn engine_ignores_windows_of_backlog_heartbeats() {
+fn engine_ignores_window_when_heartbeat_from_backlog() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
     engine.handle(connected(), clock.at_ms(0));
@@ -2604,7 +2604,7 @@ fn engine_ignores_windows_of_backlog_heartbeats() {
 // The other half of the same rule: once the host is reading live, every heartbeat
 // opens a window again. Without it the fix would never assign anything.
 #[test]
-fn engine_uses_window_of_live_heartbeat_after_backlog() {
+fn engine_uses_window_when_live_heartbeat_follows_backlog() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
     engine.handle(connected(), clock.at_ms(0));
@@ -2629,7 +2629,7 @@ fn engine_uses_window_of_live_heartbeat_after_backlog() {
 // heartbeats above the bridge's own header. The very first frame of a session has
 // no arrival before it to measure against, and must not be taken as live for that.
 #[test]
-fn engine_ignores_window_of_heartbeat_before_ready() {
+fn engine_ignores_window_when_heartbeat_precedes_ready() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
 
@@ -2657,7 +2657,7 @@ fn stored_live(batch: &ActionBatch) -> bool {
 // A backlog arrives within milliseconds of the port opening, so a link up for a
 // second with nothing on it has nothing queued: its first frame is the present.
 #[test]
-fn engine_uses_window_of_first_heartbeat_after_quiet_connect() {
+fn engine_uses_window_when_first_heartbeat_follows_quiet_connect() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
     engine.handle(connected(), clock.at(0));
@@ -2676,7 +2676,7 @@ fn engine_uses_window_of_first_heartbeat_after_quiet_connect() {
 }
 
 #[test]
-fn engine_ignores_window_of_first_heartbeat_right_after_connect() {
+fn engine_ignores_window_when_first_heartbeat_follows_connect_promptly() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
     engine.handle(connected(), clock.at(0));
@@ -2691,7 +2691,7 @@ fn engine_ignores_window_of_first_heartbeat_right_after_connect() {
 // Before `Connected` there is no connect to have been quiet since: the port has
 // only just opened onto whatever the bridge held.
 #[test]
-fn engine_ignores_window_of_heartbeat_before_connect() {
+fn engine_ignores_window_when_heartbeat_precedes_connect() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
 
@@ -2702,7 +2702,7 @@ fn engine_ignores_window_of_heartbeat_before_connect() {
 }
 
 #[test]
-fn engine_times_quiet_connect_from_latest_connect() {
+fn engine_times_quiet_connect_from_latest_connect_when_link_reconnects() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
     engine.handle(connected(), clock.at(0));
@@ -2735,7 +2735,7 @@ fn engine_times_quiet_connect_from_latest_connect() {
 // measurement, however honest the two stamps behind it
 // (`docs/phase-4-findings.md`).
 #[test]
-fn engine_drops_latency_longer_than_admin_window() {
+fn engine_drops_latency_when_longer_than_admin_window() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
     engine.handle(beat_at(NODE, 1, 0, Capabilities::here(true), 1_000_000), clock.at(1));
@@ -2756,7 +2756,7 @@ fn engine_drops_latency_longer_than_admin_window() {
 // A latency exactly at the window is still a latency: the node was listening for
 // that whole 100 ms, so the boundary belongs inside.
 #[test]
-fn engine_keeps_latency_equal_to_admin_window() {
+fn engine_keeps_latency_when_equal_to_admin_window() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
     engine.handle(beat_at(NODE, 1, 0, Capabilities::here(true), 1_000_000), clock.at(1));
@@ -2780,7 +2780,7 @@ fn set_tx_power(nodes: i8, bridge: i8) -> Event {
 }
 
 #[test]
-fn engine_reissues_with_new_tx_power_on_set_tx_power() {
+fn engine_reissues_with_new_tx_power_when_tx_power_changes() {
     let clock = Clock::new();
     let mut engine = engine(us_config(), &clock);
     caught_up(&mut engine, &clock);
@@ -2831,7 +2831,7 @@ fn engine_reissues_nothing_when_same_bridge_reconnects() {
 }
 
 #[test]
-fn engine_sends_bridge_tx_power_at_once_on_set_tx_power() {
+fn engine_sends_bridge_tx_power_at_once_when_tx_power_changes() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
     engine.handle(connected(), clock.at(1));
@@ -2846,7 +2846,7 @@ fn engine_sends_bridge_tx_power_at_once_on_set_tx_power() {
 }
 
 #[test]
-fn engine_keeps_plan_on_set_tx_power() {
+fn engine_keeps_plan_when_tx_power_changes() {
     let clock = Clock::new();
     let mut engine = engine(us_config(), &clock);
     caught_up(&mut engine, &clock);
@@ -2884,7 +2884,7 @@ fn engine_sends_nothing_when_set_tx_power_unchanged() {
 }
 
 #[test]
-fn engine_clamps_set_tx_power() {
+fn engine_clamps_tx_power_when_set_tx_power_out_of_range() {
     let clock = Clock::new();
     let config = EngineConfig { bridge_tx_power: 40, ..us_config() };
     let mut engine = engine(config, &clock);
@@ -2904,7 +2904,7 @@ fn engine_clamps_set_tx_power() {
 }
 
 #[test]
-fn engine_snapshot_carries_tx_powers() {
+fn engine_snapshot_carries_tx_powers_when_set() {
     let clock = Clock::new();
     let config = EngineConfig { tx_power: 40, bridge_tx_power: 60, ..Default::default() };
     let engine = engine(config, &clock);
@@ -2916,7 +2916,7 @@ fn engine_snapshot_carries_tx_powers() {
 }
 
 #[test]
-fn engine_reissues_surplus_node_on_set_tx_power() {
+fn engine_reissues_surplus_node_when_tx_power_changes() {
     let clock = Clock::new();
     let config = EngineConfig { pool: ChannelPool::Us, ..EngineConfig::default() };
     let mut engine = engine(config, &clock);
@@ -2975,7 +2975,7 @@ fn clear_ring(mac: Option<Mac>) -> Event {
 }
 
 #[test]
-fn engine_sends_clear_in_next_window() {
+fn engine_sends_clear_in_next_window_when_node_clear_requested() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
     caught_up(&mut engine, &clock);
@@ -3063,7 +3063,7 @@ fn engine_holds_clear_when_heartbeat_replayed() {
     let mut engine = engine(EngineConfig::default(), &clock);
     engine.handle(connected(), clock.at_ms(0));
 
-    // The same shape as `engine_ignores_windows_of_backlog_heartbeats`:
+    // The same shape as `engine_ignores_window_when_heartbeat_from_backlog`:
     // nine heartbeats a second apart on the bridge's clock, two milliseconds apart
     // on the host's, so only the first is real time and none of the windows they
     // open are live.
@@ -3087,7 +3087,7 @@ fn engine_holds_clear_when_heartbeat_replayed() {
     // Once the host is reading live, the next heartbeat's window carries it. The
     // reset is about the *last* step alone (`Self::note_arrival`): the host has to
     // wait at least as long as the bridge's own clock says this step took, the
-    // same gap `engine_uses_window_of_live_heartbeat_after_backlog`
+    // same gap `engine_uses_window_when_live_heartbeat_follows_backlog`
     // uses for an assignment.
     let live = engine
         .handle(beat_at(NODE, 10, 0, Capabilities::here(true), 10_000_000), clock.at_ms(1_020));
@@ -3096,7 +3096,7 @@ fn engine_holds_clear_when_heartbeat_replayed() {
 }
 
 #[test]
-fn engine_skips_held_epoch_in_first_assignment() {
+fn engine_skips_held_epoch_when_dealing_first_assignment() {
     // The node's first heartbeat is not itself a live window (nothing to compare
     // the bridge's clock against yet), so `deal` runs against it but nothing
     // goes out; the second heartbeat is the one whose window is actually open.
@@ -3151,7 +3151,7 @@ fn ble_state(engine: &FleetEngine, now: Now) -> (Option<Mac>, Option<Mac>, bool)
 }
 
 #[test]
-fn engine_gives_ble_to_preferred_node_on_first_heartbeat() {
+fn engine_gives_ble_to_preferred_node_when_it_first_heartbeats() {
     // Remembered from the file: no command is sent this run.
     let clock = Clock::new();
     let config = EngineConfig { preferred_ble: Some(peer(0)), ..EngineConfig::default() };
@@ -3168,7 +3168,7 @@ fn engine_gives_ble_to_preferred_node_on_first_heartbeat() {
 }
 
 #[test]
-fn engine_gives_ble_back_to_preferred_node_on_return() {
+fn engine_gives_ble_back_to_preferred_node_when_it_returns() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
     engine.handle(heartbeat(peer(0), 1), clock.at(1));
@@ -3186,7 +3186,7 @@ fn engine_gives_ble_back_to_preferred_node_on_return() {
 }
 
 #[test]
-fn engine_remembers_assign_ble_target() {
+fn engine_remembers_target_when_assign_ble_commanded() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
 
@@ -3293,7 +3293,7 @@ fn settled_pair(clock: &Clock) -> FleetEngine {
 }
 
 #[test]
-fn engine_recuts_fleet_on_set_pool() {
+fn engine_recuts_fleet_when_pool_changes() {
     let clock = Clock::new();
     let mut engine = settled_pair(&clock);
     let replans_before = counters(&engine).replans;
@@ -3335,7 +3335,7 @@ fn engine_ignores_set_pool_when_pool_unchanged() {
 }
 
 #[test]
-fn engine_cuts_new_pool_on_first_heartbeat_after_set_pool() {
+fn engine_cuts_new_pool_when_first_node_heartbeats_after_set_pool() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
     caught_up(&mut engine, &clock);
@@ -3350,7 +3350,7 @@ fn engine_cuts_new_pool_on_first_heartbeat_after_set_pool() {
 }
 
 #[test]
-fn engine_moves_surplus_node_into_narrowed_pool() {
+fn engine_moves_surplus_node_into_pool_when_pool_narrowed() {
     // Twelve C6s on `all` share its thirteen 2.4 GHz channels, so every node holds
     // one and the last holds channel 12. On `us` there are eleven for twelve, and
     // that last node is the surplus slot: keeping what it holds would go on
@@ -3381,7 +3381,7 @@ fn engine_moves_surplus_node_into_narrowed_pool() {
 }
 
 #[test]
-fn engine_keeps_ble_node_unchanged_on_set_pool() {
+fn engine_keeps_ble_node_unchanged_when_pool_changes() {
     let clock = Clock::new();
     let mut engine = settled_pair(&clock);
     engine.handle(Event::Command(Command::AssignBle { mac: Some(peer(0)) }), clock.at(3));

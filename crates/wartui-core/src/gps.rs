@@ -553,7 +553,7 @@ mod tests {
     const GGA_NO_FIX: &[u8] = b"$GPGGA,123520.00,4807.038,N,01131.000,E,0,00,,,M,,M,,*76";
 
     #[test]
-    fn gps_has_no_fix_while_receiver_searches() {
+    fn gps_has_no_fix_when_receiver_reports_none() {
         let gps = Gps::detached();
         assert_eq!(gps.latest(), None);
         gps.feed(GGA_NO_FIX, 1_000);
@@ -562,7 +562,7 @@ mod tests {
     }
 
     #[test]
-    fn gps_stamps_fix_with_arrival_time() {
+    fn gps_stamps_fix_with_arrival_time_when_fix_parsed() {
         // The two differ, and only the arrival time can say how stale a fix
         // is: the receiver's own clock is the thing being reported on.
         let gps = Gps::detached();
@@ -574,7 +574,7 @@ mod tests {
     }
 
     #[test]
-    fn gps_keeps_gga_altitude_and_accuracy_across_rmc() {
+    fn gps_keeps_gga_altitude_and_accuracy_when_rmc_follows() {
         // Receivers emit GGA and RMC every cycle, RMC normally last, so
         // whatever the RMC does not carry is what the fix spends its life as.
         // Only GGA has an altitude or an HDOP, and both have a column waiting
@@ -612,7 +612,7 @@ mod tests {
     }
 
     #[test]
-    fn lines_reassembles_sentence_from_fragments() {
+    fn lines_reassembles_sentence_when_stream_arrives_in_fragments() {
         // A USB serial read returns whatever happened to be in the buffer, so
         // this is the normal case rather than an edge one.
         let gps = Gps::detached();
@@ -625,7 +625,7 @@ mod tests {
     }
 
     #[test]
-    fn lines_caps_buffer_at_max_line() {
+    fn lines_caps_buffer_when_line_exceeds_max_line() {
         let gps = Gps::detached();
         let mut lines = Lines::default();
         lines.push(&vec![b'x'; MAX_LINE * 4], |line| gps.feed(line, 1_000));

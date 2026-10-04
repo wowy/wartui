@@ -86,7 +86,7 @@ fn steady(node: Mac, from_s: i64, count: u32) -> Vec<Record> {
 }
 
 #[test]
-fn analyze_counts_bridge_drops_from_first_row() {
+fn analyze_counts_bridge_drops_from_first_row_when_capture_starts_with_drops() {
     // 500 dropped before the capture began are not the capture's.
     let (_dir, conn) = capture(vec![
         status(0, 10_000, 500, 60_000),
@@ -123,7 +123,7 @@ fn analyze_omits_bridge_when_no_status_rows() {
 }
 
 #[test]
-fn analyze_sums_batch_gaps_per_node() {
+fn analyze_sums_batch_gaps_per_node_when_gaps_recorded() {
     let (_dir, conn) = capture(vec![
         gap(NODE, 10, 2),
         gap(NODE, 50, 5),
@@ -230,7 +230,7 @@ fn analyze_counts_beats_lost_since_boot_when_first_heard_late() {
 }
 
 #[test]
-fn analyze_ignores_beat_gap_after_replayed_heartbeat() {
+fn analyze_ignores_beat_gap_when_previous_heartbeat_replayed() {
     // Beat 17 was replayed from the bridge's backlog; 140 is the first live one. The beats
     // between were sent while no host was reading, which the bridge's drop count covers.
     let (_dir, conn) = capture(vec![
@@ -243,7 +243,7 @@ fn analyze_ignores_beat_gap_after_replayed_heartbeat() {
 }
 
 #[test]
-fn analyze_counts_beat_gap_after_live_heartbeat() {
+fn analyze_counts_beat_gap_when_previous_heartbeat_live() {
     let (_dir, conn) = capture(vec![
         replayed(NODE, 0, 30, 17),
         beat(NODE, 1_000, 240, 140, 0, 0),
@@ -254,7 +254,7 @@ fn analyze_counts_beat_gap_after_live_heartbeat() {
 }
 
 #[test]
-fn analyze_ignores_beats_lost_since_boot_after_replayed_heartbeat() {
+fn analyze_ignores_beats_lost_since_boot_when_previous_heartbeat_replayed() {
     // The node rebooted while no host was reading; beats 1 to 11 fall in that time.
     let (_dir, conn) = capture(vec![replayed(NODE, 0, 40, 20), beat(NODE, 60_000, 1, 12, 0, 0)]);
     let node = &losses(&conn).unwrap().nodes[0];
@@ -292,7 +292,7 @@ fn host_row(
 }
 
 #[test]
-fn analyze_sums_host_read_from_first_row() {
+fn analyze_sums_host_read_from_first_row_when_status_rows_carry_host_frames() {
     // 30 frames the bridge received never reached the host; a bridge restart leaves the
     // host's own count rising.
     let (_dir, conn) = capture(vec![
@@ -308,7 +308,7 @@ fn analyze_sums_host_read_from_first_row() {
 }
 
 #[test]
-fn analyze_excludes_bridge_drops_from_usb_lost() {
+fn analyze_excludes_bridge_drops_from_usb_lost_when_bridge_dropped_frames() {
     // 1,000 received, 10 of them evicted from the bridge's outbox and never sent, and 985
     // read: 5 were lost on USB.
     let (_dir, conn) = capture(vec![
@@ -336,7 +336,7 @@ fn analyze_saturates_usb_lost_when_baseline_taken_mid_backlog() {
 }
 
 #[test]
-fn analyze_reads_host_deltas_and_peaks() {
+fn analyze_reads_host_deltas_and_peaks_when_host_rows_present() {
     let (_dir, conn) = capture(vec![
         host_row(10, 0, Some(0x0000), Some(55_000), Some(4_185)),
         host_row(15, 150_000, Some(0x50005), Some(71_200), Some(3_620)),

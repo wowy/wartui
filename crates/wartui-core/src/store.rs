@@ -1155,7 +1155,7 @@ mod tests {
     use super::fnv1a_64;
 
     #[test]
-    fn fnv1a_64_matches_reference_vectors() {
+    fn fnv1a_64_matches_reference_when_hashing_known_vectors() {
         assert_eq!(fnv1a_64(b""), 0xcbf2_9ce4_8422_2325);
         assert_eq!(fnv1a_64(b"a"), 0xaf63_dc4c_8601_ec8c);
         assert_eq!(fnv1a_64(b"foobar"), 0x8594_4171_f739_67e8);

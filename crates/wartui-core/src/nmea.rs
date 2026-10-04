@@ -287,7 +287,7 @@ mod tests {
     }
 
     #[test]
-    fn nmea_reads_position_and_altitude_from_gga() {
+    fn nmea_reads_position_and_altitude_when_gga_has_fix() {
         let fix = fix(GGA);
         assert!((fix.lat - 48.117_3).abs() < 1e-4, "{}", fix.lat);
         assert!((fix.lon - 11.516_666).abs() < 1e-4, "{}", fix.lon);
@@ -298,7 +298,7 @@ mod tests {
     }
 
     #[test]
-    fn nmea_negates_south_and_west() {
+    fn nmea_negates_coordinates_when_hemisphere_south_or_west() {
         // The single most consequential thing this parser can get wrong: a
         // sign error puts every observation on the wrong side of the planet
         // and WiGLE will happily accept it.
@@ -314,14 +314,14 @@ mod tests {
     }
 
     #[test]
-    fn nmea_reports_other_for_unused_sentence() {
+    fn nmea_reports_other_when_sentence_type_unused() {
         // A receiver emits far more GSV and GSA than GGA. Counting those as
         // failures would make a working GPS look broken.
         assert_eq!(Nmea::new().parse(GSV), Ok(Report::Other));
     }
 
     #[test]
-    fn nmea_stamps_fix_only_after_rmc_date() {
+    fn nmea_stamps_fix_only_when_rmc_date_seen() {
         let mut nmea = Nmea::new();
         // GGA has a time of day and no date, so on its own it cannot say when.
         let Ok(Report::Fix(before)) = nmea.parse(GGA) else { panic!("a fix") };
@@ -350,7 +350,7 @@ mod tests {
     }
 
     #[test]
-    fn nmea_rejects_truncated_sentence_or_bad_checksum() {
+    fn nmea_rejects_sentence_when_truncated_or_checksum_wrong() {
         // This is the normal first read after opening a port, and the whole
         // reason the checksum is mandatory: the prefix below is a perfectly
         // well-formed position off the coast of Somalia.
@@ -367,7 +367,7 @@ mod tests {
     }
 
     #[test]
-    fn nmea_rejects_malformed_number() {
+    fn nmea_rejects_sentence_when_numeric_field_malformed() {
         let bad_hdop = b"$GPGGA,123521.00,4807.038,N,01131.000,E,1,08,zz,545.4,M,46.9,M,,*45";
         assert_eq!(Nmea::new().parse(bad_hdop), Err(NmeaError::Malformed));
         // 67 minutes of arc is not a coordinate, however well it checksums.
