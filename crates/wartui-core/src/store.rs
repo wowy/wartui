@@ -454,7 +454,7 @@ pub struct CaptureProvenance {
 struct Stats {
     written: AtomicU64,
     dropped: AtomicU64,
-    /// Records in the queue, counted in by [`Store::submit`] and out by the writer.
+    /// Records in the queue, counted in by [`Store::offer`] and out by the writer.
     queued: AtomicU64,
     /// The largest `queued` since [`Store::take_peaks`].
     queue_peak: AtomicU64,
@@ -585,23 +585,34 @@ impl Store {
     /// Queue records, dropping what does not fit rather than waiting. Never blocks. Returns how
     /// many were dropped, also counted into [`Self::stats`].
     pub fn submit(&self, records: Vec<Record>) -> usize {
-        let Some(tx) = &self.tx else { return records.len() };
-        let mut dropped = 0usize;
-        for record in records {
-            // Counted in before the send, so the writer's count out never runs ahead and wraps. A
-            // record that does not fit is counted back out.
-            let ahead = self.stats.queued.fetch_add(1, Ordering::Relaxed);
-            if tx.try_send(record).is_ok() {
-                self.stats.queue_peak.fetch_max(ahead + 1, Ordering::Relaxed);
-            } else {
-                self.stats.queued.fetch_sub(1, Ordering::Relaxed);
-                dropped += 1;
-            }
-        }
-        if dropped > 0 {
-            self.stats.dropped.fetch_add(dropped as u64, Ordering::Relaxed);
-        }
+        let dropped =
+            records.into_iter().map(|record| self.offer(record)).filter(|&ok| !ok).count();
+        self.count_dropped(dropped as u64);
         dropped
+    }
+
+    /// Queue one record if it fits, without counting a refusal as a drop. Never blocks. For a
+    /// caller that retries, and counts the record lost only once it gives up
+    /// ([`Self::count_dropped`]).
+    pub fn offer(&self, record: Record) -> bool {
+        let Some(tx) = &self.tx else { return false };
+        // Counted in before the send, so the writer's count out never runs ahead and wraps. A
+        // record that does not fit is counted back out.
+        let ahead = self.stats.queued.fetch_add(1, Ordering::Relaxed);
+        if tx.try_send(record).is_ok() {
+            self.stats.queue_peak.fetch_max(ahead + 1, Ordering::Relaxed);
+            true
+        } else {
+            self.stats.queued.fetch_sub(1, Ordering::Relaxed);
+            false
+        }
+    }
+
+    /// Count records the caller gave up on into [`Self::stats`].
+    pub fn count_dropped(&self, count: u64) {
+        if count > 0 {
+            self.stats.dropped.fetch_add(count, Ordering::Relaxed);
+        }
     }
 
     /// Rows written and rows dropped so far.
@@ -635,6 +646,20 @@ impl Store {
     /// failed last transaction is reported. Returns what the writer did, for the benchmark.
     pub fn close(mut self) -> StoreReport {
         self.shutdown()
+    }
+
+    /// A store with no writer, whose queue only the test drains: a full queue on demand.
+    #[cfg(test)]
+    pub(crate) fn detached(queue_depth: usize) -> (Self, Receiver<Record>) {
+        let (tx, rx) = sync_channel(queue_depth);
+        let store = Self {
+            tx: Some(tx),
+            stats: Arc::new(Stats::default()),
+            join: None,
+            checkpointer: None,
+            caught_up: Arc::new(AtomicU64::new(0)),
+        };
+        (store, rx)
     }
 
     fn shutdown(&mut self) -> StoreReport {
@@ -1240,7 +1265,30 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
 
 #[cfg(test)]
 mod tests {
-    use super::fnv1a_64;
+    use super::{Store, fnv1a_64};
+    use crate::record::{BridgeStatusSeen, Record};
+
+    fn status(rx_at_ms: i64) -> Record {
+        Record::BridgeStatus(BridgeStatusSeen {
+            rx_at_ms,
+            peer_count: 0,
+            rx_count: 0,
+            dropped_tx: 0,
+            uptime_ms: 0,
+            host_frames: 0,
+        })
+    }
+
+    #[test]
+    fn store_offer_leaves_drops_uncounted_when_queue_is_full() {
+        let (store, _rx) = Store::detached(1);
+        assert!(store.offer(status(0)));
+        assert!(!store.offer(status(1)));
+        assert_eq!(store.stats().dropped, 0);
+        // `submit` still counts what it could not queue.
+        assert_eq!(store.submit(vec![status(2)]), 1);
+        assert_eq!(store.stats().dropped, 1);
+    }
 
     #[test]
     fn fnv1a_64_matches_reference_when_hashing_known_vectors() {
