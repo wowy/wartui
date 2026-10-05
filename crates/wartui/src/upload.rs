@@ -72,7 +72,9 @@ use wartui_core::store::{
 };
 
 use crate::config::{self, Config};
-use crate::export::{Selection, details, note_unknown_kind, note_unpositioned, thousands};
+use crate::export::{
+    Selection, details, note_quality, note_unknown_kind, note_unpositioned, thousands,
+};
 
 /// The leaderboard.
 pub(crate) const BASE: &str = "https://wdgwars.pl";
@@ -135,12 +137,14 @@ pub fn run(args: Args) -> Result<()> {
             );
             note_unpositioned(&summary);
             note_unknown_kind(&summary);
+            note_quality(&summary);
             return Ok(());
         }
         Prepare::NoRows(summary) => {
             eprintln!("{} has no rows to upload", db.display());
             note_unpositioned(&summary);
             note_unknown_kind(&summary);
+            note_quality(&summary);
             return Ok(());
         }
     };
@@ -148,6 +152,7 @@ pub fn run(args: Args) -> Result<()> {
     eprint!("{}", prepared.describe());
     note_unpositioned(&prepared.summary);
     note_unknown_kind(&prepared.summary);
+    note_quality(&prepared.summary);
 
     if !args.yes && !confirm()? {
         eprintln!("not uploaded");

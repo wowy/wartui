@@ -5,10 +5,12 @@
 //! [`ssid_text`] lives here, not beside either caller, because both read this module's bytes and
 //! two copies drifted apart.
 
+use std::time::Duration;
+
 use wartui_proto::air::RecordKind;
 use wartui_proto::beacon::visible_ssid;
 use wartui_proto::mac::Mac;
-use wartui_proto::plan::ChannelSet;
+use wartui_proto::plan::{ChannelPool, ChannelSet};
 
 use crate::position::Fix;
 
@@ -270,9 +272,43 @@ pub struct AssignmentSent {
     pub latency_us: Option<u32>,
 }
 
-/// Anything the engine wants written down.
+/// Host settings that affect capture interpretation, not proof that a radio adopted them.
+///
+/// Kept separately from assignments: power and pool can change before any node is assignable,
+/// and the bridge's configured power never rides a node assignment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CaptureSettings {
+    /// Pool the planner partitions.
+    pub pool: ChannelPool,
+    /// Normalized desired node power, in quarter-dBm.
+    pub tx_power: i8,
+    /// Normalized desired bridge power, in quarter-dBm.
+    pub bridge_tx_power: i8,
+    /// Whether undecoded frames are retained.
+    pub record_raw: bool,
+    /// Whether the position chain has a GPS receiver.
+    pub gps: bool,
+    /// Fix arrival-age limit, independent of receiver timestamps.
+    pub gps_max_age: Duration,
+    /// Whether Bluetooth choices are remembered.
+    pub remember_ble: bool,
+    /// Remembered Bluetooth node, if enabled.
+    pub preferred_ble: Option<Mac>,
+    /// Node the host currently gives the Bluetooth job, if any.
+    pub ble_node: Option<Mac>,
+    /// Heartbeat age that removes a node from the topology.
+    pub topology_timeout: Duration,
+    /// Bridge counter polling cadence.
+    pub status_interval: Duration,
+    /// Assignment outcome timeout.
+    pub admin_timeout: Duration,
+}
+
+/// Anything the engine or runtime wants written down.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Record {
+    /// Append applied host settings. Sequence is arrival order even if the wall clock steps back.
+    CaptureSettings { sequence: u64, at_ms: i64, settings: CaptureSettings },
     /// Record which bridge this capture is running through.
     Bridge(BridgeSeen),
     /// Insert or refresh a node row.

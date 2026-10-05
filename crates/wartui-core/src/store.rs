@@ -33,11 +33,11 @@ use std::time::{Duration, Instant};
 
 pub use rusqlite::Connection;
 use rusqlite::{OpenFlags, OptionalExtension, params};
-use wartui_proto::air::RecordKind;
-use wartui_proto::plan::ChannelPool;
+use wartui_proto::air::{RecordKind, WIRE_VERSION};
+use wartui_proto::plan::{ChannelPool, SCAN_CHANNELS};
 
 use crate::engine::{StorePeaks, StoreStats};
-use crate::record::Record;
+use crate::record::{CaptureSettings, Record};
 
 /// The schema version this build writes and reads: 1 until wartui 1.0, as
 /// [`wartui_proto::air::WIRE_VERSION`] is. It is the lever for the first capture that must be read
@@ -434,6 +434,22 @@ pub struct CaptureInfo {
     pub simulated: bool,
 }
 
+/// Host identity and applied initial settings, supplied by the executable creating a capture.
+///
+/// Missing values are unknown, never inferred from a shared package or firmware version. The
+/// scan table is recorded independently by the store; it describes the host, not a node build.
+#[derive(Debug, Clone, Default)]
+pub struct CaptureProvenance {
+    /// Executable's package version.
+    pub host_version: Option<String>,
+    /// Build-time source identity, including local source changes.
+    pub host_build: Option<String>,
+    /// Release tag, if this is a tagged executable.
+    pub release_tag: Option<String>,
+    /// Applied settings before the runtime begins, committed atomically with capture metadata.
+    pub initial_settings: Option<CaptureSettings>,
+}
+
 #[derive(Debug, Default)]
 struct Stats {
     written: AtomicU64,
@@ -472,6 +488,19 @@ impl Store {
         capture: &CaptureInfo,
         started_at_ms: i64,
     ) -> Result<Self, StoreError> {
+        Self::create_with_provenance(config, capture, started_at_ms, &CaptureProvenance::default())
+    }
+
+    /// Create a capture with durable host provenance in the existing key/value table.
+    ///
+    /// # Errors
+    /// Same as [`Self::create`]. No existing file is altered or migrated.
+    pub fn create_with_provenance(
+        config: &StoreConfig,
+        capture: &CaptureInfo,
+        started_at_ms: i64,
+        provenance: &CaptureProvenance,
+    ) -> Result<Self, StoreError> {
         std::fs::OpenOptions::new().write(true).create_new(true).open(&config.path).map_err(
             |e| match e.kind() {
                 std::io::ErrorKind::AlreadyExists => StoreError::Exists(config.path.clone()),
@@ -494,6 +523,23 @@ impl Store {
              VALUES (1, ?1, ?2, ?3, ?4)",
             params![started_at_ms, pool_name(capture.pool), capture.notes, capture.simulated],
         )?;
+        let scan_channels = SCAN_CHANNELS.iter().map(u8::to_string).collect::<Vec<_>>().join(",");
+        for (key, value) in [
+            ("capture.scan_channels", Some(scan_channels)),
+            ("capture.wire_version", Some(WIRE_VERSION.to_string())),
+            ("capture.core_version", Some(env!("CARGO_PKG_VERSION").to_owned())),
+            ("capture.host_version", provenance.host_version.clone()),
+            ("capture.host_build", provenance.host_build.clone()),
+            ("capture.release_tag", provenance.release_tag.clone()),
+            (
+                "capture.settings.initial",
+                provenance.initial_settings.map(|settings| settings_text(started_at_ms, settings)),
+            ),
+        ] {
+            if let Some(value) = value {
+                tx.execute("INSERT INTO kv (k, v) VALUES (?1, ?2)", params![key, value])?;
+            }
+        }
         tx.commit()?;
 
         // One waiting wake-up stands for any number of commits, so the channel holds one.
@@ -869,6 +915,32 @@ const fn pool_name(pool: ChannelPool) -> &'static str {
     }
 }
 
+/// Versioned key/value text, with no arbitrary strings needing escaping. Sequence lives in the
+/// key so equal or reversed timestamps cannot overwrite a settings change.
+fn settings_text(at_ms: i64, settings: CaptureSettings) -> String {
+    let mac = |value: Option<wartui_proto::mac::Mac>| {
+        value.map_or_else(|| "none".to_owned(), |mac| wartui_proto::mac::full(&mac).to_string())
+    };
+    format!(
+        "version=1;at_ms={at_ms};pool={};nodes_tx_power_quarter_dbm={};\
+         bridge_tx_power_quarter_dbm={};record_raw={};gps={};gps_max_age_ms={};\
+         remember_ble={};preferred_ble={};ble_node={};topology_timeout_ms={};\
+         status_interval_ms={};admin_timeout_ms={}",
+        pool_name(settings.pool),
+        settings.tx_power,
+        settings.bridge_tx_power,
+        settings.record_raw,
+        settings.gps,
+        settings.gps_max_age.as_millis(),
+        settings.remember_ble,
+        mac(settings.preferred_ble),
+        mac(settings.ble_node),
+        settings.topology_timeout.as_millis(),
+        settings.status_interval.as_millis(),
+        settings.admin_timeout.as_millis(),
+    )
+}
+
 /// The `kind` column's token for `kind`.
 pub(crate) const fn kind_name(kind: RecordKind) -> &'static str {
     match kind {
@@ -998,6 +1070,12 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
                     node.first_seen_ms,
                     node.last_seen_ms,
                     node.capabilities
+                ])?;
+            }
+            Record::CaptureSettings { sequence, at_ms, settings } => {
+                tx.prepare_cached("INSERT INTO kv (k, v) VALUES (?1, ?2)")?.execute(params![
+                    format!("capture.settings.{sequence:020}"),
+                    settings_text(*at_ms, *settings),
                 ])?;
             }
             Record::Heartbeat(hb) => {

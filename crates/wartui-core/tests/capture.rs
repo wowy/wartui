@@ -66,6 +66,11 @@ async fn drive_stores_sightings_that_export_when_fleet_simulated() {
     assert!(ended.is_some(), "a stopped capture should close its capture row out");
     assert!(bridge.is_some(), "and should say which bridge it came through");
 
+    let settings: i64 = conn
+        .query_row("SELECT COUNT(*) FROM kv WHERE k LIKE 'capture.settings.%'", [], |r| r.get(0))
+        .expect("counting settings history");
+    assert_eq!(settings, 1, "runtime records initial settings, not every event or tick");
+
     let mut csv = Vec::new();
     let summary = wigle_csv(&conn, ExportFilter::default(), &mut csv, "0.1.0").expect("exporting");
     let csv = String::from_utf8(csv).expect("the CSV is UTF-8");
@@ -87,6 +92,46 @@ async fn drive_stores_sightings_that_export_when_fleet_simulated() {
         csv.contains("5A03BA0000 BAA2D00000 BAA2D02000"),
         "the simulated Passpoint networks carry their roaming consortium: {csv}"
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn drive_records_settings_history_when_operator_changes_power_and_pool() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("settings.db");
+    let link = SimTransport::new(SimConfig { node_count: 1, speed: 60.0, ..Default::default() })
+        .start()
+        .expect("simulator");
+    let started = now();
+    let store = Store::create(&StoreConfig::new(&path), &CaptureInfo::default(), started.unix_ms)
+        .expect("store");
+    let engine = FleetEngine::new(EngineConfig::default(), started);
+    let (snapshot_tx, _snapshot_rx) =
+        watch::channel(Arc::new(engine.snapshot(started, StoreStats::default())));
+    let (stop_tx, stop_rx) = oneshot::channel();
+    let (command_tx, command_rx) = tokio::sync::mpsc::channel(4);
+    let capture = tokio::spawn(drive(link, store, engine, snapshot_tx, command_rx, stop_rx));
+    command_tx.send(Command::SetTxPower { nodes: 40, bridge: 60 }).await.expect("power command");
+    command_tx.send(Command::SetTxPower { nodes: 40, bridge: 60 }).await.expect("same power");
+    command_tx
+        .send(Command::SetPool { pool: wartui_proto::plan::ChannelPool::Us })
+        .await
+        .expect("pool command");
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    stop_tx.send(()).expect("stop");
+    assert_eq!(capture.await.expect("capture").dropped, 0);
+    let conn = open_readonly(&path).expect("read-only capture");
+    let mut stmt = conn
+        .prepare("SELECT v FROM kv WHERE k LIKE 'capture.settings.%' ORDER BY k")
+        .expect("history");
+    let values = stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .expect("rows")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("settings strings");
+    assert_eq!(values.len(), 3, "initial settings and two changes, not the repeated request");
+    assert!(values[0].contains("nodes_tx_power_quarter_dbm=8;"));
+    assert!(values[1].contains("nodes_tx_power_quarter_dbm=40;bridge_tx_power_quarter_dbm=60;"));
+    assert!(values[2].contains("pool=us;"));
 }
 
 /// Two fixes a few streets apart, so a row can be told which one it was written

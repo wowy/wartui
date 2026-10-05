@@ -6,18 +6,24 @@
 //! because nothing else is written there.
 
 use anyhow::{Context, Result};
+use chrono::{DateTime, SecondsFormat, Utc};
 use clap::Args as ClapArgs;
 use wartui_core::analyze::{HostLoss, LossSummary, NodeLoss, losses};
 use wartui_core::export::wigle_csv;
 use wartui_core::store::open_readonly;
 use wartui_proto::mac;
 
-use crate::export::{Selection, details, note_unknown_kind, note_unpositioned, thousands};
+use crate::export::{
+    Selection, details, note_quality, note_unknown_kind, note_unpositioned, thousands,
+};
 
 #[derive(ClapArgs, Debug)]
 pub struct Args {
     #[command(flatten)]
     selection: Selection,
+    /// Show UTC arrival brackets for missing heartbeats, including uncertain restart intervals.
+    #[arg(long)]
+    heartbeat_windows: bool,
 }
 
 pub fn run(args: Args) -> Result<()> {
@@ -32,13 +38,17 @@ pub fn run(args: Args) -> Result<()> {
         details(&summary),
         losses_text(&loss)
     );
+    if args.heartbeat_windows {
+        print!("{}", heartbeat_windows_text(&loss));
+    }
     note_unpositioned(&summary);
     note_unknown_kind(&summary);
+    note_quality(&summary);
     Ok(())
 }
 
-/// The loss lines, in the layout of [`details`]. Every figure is an exact count but
-/// `lost on USB`, which [`BridgeLoss::usb_lost`] says is approximate.
+/// The loss lines, in the layout of [`details`]. Heartbeats follow the core's modulo assumptions;
+/// `lost on USB` is approximate to the bridge's queued frames.
 fn losses_text(loss: &LossSummary) -> String {
     use std::fmt::Write as _;
 
@@ -106,9 +116,10 @@ fn losses_text(loss: &LossSummary) -> String {
         if node.heartbeats > 0 {
             let _ = write!(
                 line,
-                "  heartbeats {}/{}",
+                "  heartbeats {}/{} ({})",
                 thousands(node.heartbeats_missed),
-                thousands(node.heartbeats + node.heartbeats_missed)
+                thousands(node.heartbeats + node.heartbeats_missed),
+                percent(node.heartbeats_missed, node.heartbeats + node.heartbeats_missed)
             );
         }
         let refused = ring(node.wifi_refused, node.ble_refused, "");
@@ -118,6 +129,48 @@ fn losses_text(loss: &LossSummary) -> String {
         let _ = writeln!(text, "{line}");
     }
     text
+}
+
+/// Arrival brackets keep row order; wall-clock reversals must not look like elapsed time.
+fn heartbeat_windows_text(loss: &LossSummary) -> String {
+    use std::fmt::Write as _;
+
+    let mut text =
+        String::from("  heartbeat windows (UTC arrival brackets, not transmission times)\n");
+    let mut any = false;
+    for node in &loss.nodes {
+        for window in &node.heartbeat_windows {
+            any = true;
+            let _ = write!(
+                text,
+                "    {}  {} -> {}  rows {} -> {}  {} missed",
+                mac::short(&node.mac),
+                utc_arrival(window.start_rx_at_ms),
+                utc_arrival(window.end_rx_at_ms),
+                window.start_id,
+                window.end_id,
+                thousands(window.missed)
+            );
+            if window.restarted {
+                text.push_str(" since boot; restart-associated, uncertain interval");
+            }
+            if window.end_rx_at_ms < window.start_rx_at_ms {
+                text.push_str("; wall clock reversed");
+            }
+            text.push('\n');
+        }
+    }
+    if !any {
+        text.push_str("    no counted gaps\n");
+    }
+    text
+}
+
+fn utc_arrival(ms: i64) -> String {
+    DateTime::<Utc>::from_timestamp_millis(ms).map_or_else(
+        || format!("{ms} unix ms (outside UTC date range)"),
+        |at| at.to_rfc3339_opts(SecondsFormat::Millis, true),
+    )
 }
 
 /// The host's figures, each clause only when non-zero but `store dropped`, which is the
@@ -212,9 +265,10 @@ fn percent(part: u64, whole: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use wartui_core::analyze::{BridgeLoss, HostLoss, LossSummary, NodeLoss};
+    use clap::Parser;
+    use wartui_core::analyze::{BridgeLoss, HeartbeatWindow, HostLoss, LossSummary, NodeLoss};
 
-    use super::losses_text;
+    use super::{heartbeat_windows_text, losses_text, utc_arrival};
 
     /// Two nodes over an evening, behind a bridge that restarted once.
     fn evening() -> LossSummary {
@@ -234,6 +288,7 @@ mod tests {
                     heartbeats_missed: 3,
                     wifi_refused: 0,
                     ble_refused: 1_203,
+                    heartbeat_windows: Vec::new(),
                 },
                 NodeLoss {
                     mac: [0x02, 0, 0x5E, 0x10, 0x57, 0x84],
@@ -242,6 +297,7 @@ mod tests {
                     heartbeats_missed: 38,
                     wifi_refused: 18_220,
                     ble_refused: 0,
+                    heartbeat_windows: Vec::new(),
                 },
             ],
             host: None,
@@ -280,11 +336,13 @@ mod tests {
     fn analyze_report_lists_node_lines_when_nodes_present() {
         let text = losses_text(&evening());
         assert!(
-            text.contains("\n    1C:5A  batches 12  heartbeats 3/702  ring ble 1,203\n"),
+            text.contains("\n    1C:5A  batches 12  heartbeats 3/702 (0.4%)  ring ble 1,203\n"),
             "{text}"
         );
         assert!(
-            text.contains("\n    57:84  batches 200  heartbeats 38/2,795  ring wifi 18,220\n"),
+            text.contains(
+                "\n    57:84  batches 200  heartbeats 38/2,795 (1.4%)  ring wifi 18,220\n"
+            ),
             "{text}"
         );
         assert!(text.contains("  batches    212 lost between node and host\n"), "{text}");
@@ -301,6 +359,72 @@ mod tests {
         let text = losses_text(&evening());
         assert!(text.contains("  heartbeats 41 missed of 3,497 expected (1.2%)\n"), "{text}");
         assert!(!text.contains('~'), "{text}");
+    }
+
+    #[test]
+    fn analyze_report_prints_node_loss_rates_when_nodes_have_heartbeats() {
+        let text = losses_text(&evening());
+        assert!(text.contains("heartbeats 3/702 (0.4%)"), "{text}");
+        assert!(text.contains("heartbeats 38/2,795 (1.4%)"), "{text}");
+    }
+
+    #[test]
+    fn analyze_enables_windows_when_flag_is_present() {
+        for (flags, expected) in [
+            (vec!["wartui", "analyze", "--db", "synthetic.db"], false),
+            (vec!["wartui", "analyze", "--db", "synthetic.db", "--heartbeat-windows"], true),
+        ] {
+            let cli = crate::Cli::try_parse_from(flags).unwrap();
+            let Some(crate::Command::Analyze(args)) = cli.command else { panic!("analyze") };
+            assert_eq!(args.heartbeat_windows, expected);
+        }
+    }
+
+    #[test]
+    fn analyze_report_brackets_gaps_when_windows_requested() {
+        let mut loss = evening();
+        loss.nodes[0].heartbeat_windows = vec![HeartbeatWindow {
+            start_id: 3,
+            end_id: 7,
+            start_rx_at_ms: 1_000,
+            end_rx_at_ms: 16_123,
+            missed: 3,
+            restarted: false,
+        }];
+        assert!(!losses_text(&loss).contains("1970-"));
+        assert_eq!(
+            heartbeat_windows_text(&loss),
+            "  heartbeat windows (UTC arrival brackets, not transmission times)\n\
+             \x20   1C:5A  1970-01-01T00:00:01.000Z -> 1970-01-01T00:00:16.123Z  rows 3 -> 7  3 missed\n"
+        );
+    }
+
+    #[test]
+    fn analyze_report_marks_uncertainty_when_window_crosses_restart_and_clock_reversal() {
+        let mut loss = evening();
+        loss.nodes[1].heartbeat_windows = vec![HeartbeatWindow {
+            start_id: 10,
+            end_id: 11,
+            start_rx_at_ms: 1_000,
+            end_rx_at_ms: -1_000,
+            missed: 11,
+            restarted: true,
+        }];
+        let text = heartbeat_windows_text(&loss);
+        assert!(text.contains("1970-01-01T00:00:01.000Z -> 1969-12-31T23:59:59.000Z"), "{text}");
+        assert!(text.contains("rows 10 -> 11  11 missed since boot; restart-associated, uncertain interval; wall clock reversed\n"), "{text}");
+    }
+
+    #[test]
+    fn analyze_report_prints_no_gaps_when_windows_empty() {
+        let text = heartbeat_windows_text(&evening());
+        assert!(text.ends_with("    no counted gaps\n"), "{text}");
+        assert_eq!(heartbeat_windows_text(&LossSummary::default()), text);
+    }
+
+    #[test]
+    fn analyze_report_preserves_timestamp_when_utc_date_is_out_of_range() {
+        assert_eq!(utc_arrival(i64::MAX), format!("{} unix ms (outside UTC date range)", i64::MAX));
     }
 
     #[test]
@@ -367,7 +491,7 @@ mod tests {
         }
         let text = losses_text(&loss);
         assert!(!text.contains("ring"), "{text}");
-        assert!(text.contains("\n    1C:5A  batches 12  heartbeats 3/702\n"), "{text}");
+        assert!(text.contains("\n    1C:5A  batches 12  heartbeats 3/702 (0.4%)\n"), "{text}");
 
         let text = losses_text(&evening());
         assert!(text.contains("  ring       wifi 18,220 refused  ble 1,203 refused\n"), "{text}");

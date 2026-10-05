@@ -45,7 +45,7 @@ pub(crate) use lag::BEHIND_THE_AIR_US;
 pub(crate) use rx::advance_since_boot;
 
 use crate::distinct::Distinct;
-use crate::record::{BridgeStatusSeen, HostStatus, Record};
+use crate::record::{BridgeStatusSeen, CaptureSettings, HostStatus, Record};
 use admin::Pending;
 #[cfg(doc)]
 use lag::QUIET_CONNECT;
@@ -118,6 +118,24 @@ pub struct FleetEngine {
 }
 
 impl FleetEngine {
+    /// Applied host settings for capture provenance. Radio adoption is recorded independently.
+    #[must_use]
+    pub fn capture_settings(&self) -> CaptureSettings {
+        CaptureSettings {
+            pool: self.config.pool,
+            tx_power: self.config.tx_power,
+            bridge_tx_power: self.config.bridge_tx_power,
+            record_raw: self.config.record_raw,
+            gps: self.config.position.gps().is_some(),
+            gps_max_age: self.config.position.max_age(),
+            remember_ble: self.remember_ble,
+            preferred_ble: self.preferred_ble,
+            ble_node: self.ble_node,
+            topology_timeout: self.config.topology_timeout,
+            status_interval: self.config.status_interval,
+            admin_timeout: self.config.admin_timeout,
+        }
+    }
     /// Start an engine. `now` fixes the session's start time.
     #[must_use]
     pub fn new(mut config: EngineConfig, now: Now) -> Self {

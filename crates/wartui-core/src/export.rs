@@ -12,6 +12,10 @@
 //! advertiser, which WiGLE records as two things (the `Type` column), so each kind has its own
 //! windows and lends identifiers only to its own row. A sighting stored with any other kind is left
 //! out, counted in [`ExportSummary::unknown_kind`] and warned about once.
+//! Wi-Fi zero and group addresses cannot name an access point, so export leaves them out without
+//! removing the stored evidence. The local-administration bit is not grounds for rejection, and
+//! BLE addresses follow no Wi-Fi rule. Channel zero is reported, not filtered: the export does not
+//! confuse an advertised channel with the planner's pool of channels to listen on.
 //!
 //! The fold is in Rust, not SQL, because the anchor rule is sequential: where one window ends
 //! decides where the next begins, which no window function computes without recursion. It streams
@@ -103,6 +107,11 @@ impl Default for ExportFilter {
 }
 
 /// What an export did.
+///
+/// Kind, band, position, node and time-span totals cover accepted Wi-Fi and BLE sightings,
+/// including unpositioned ones. Skipped sightings count only in their diagnostic and `last_id`.
+/// Channel-zero diagnostics cover all Wi-Fi sightings, including invalid addresses, so diagnostic
+/// counts can overlap. Neither diagnostic counts CSV rows or distinct networks.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ExportSummary {
     /// Rows written: one per network per window with a positioned sighting.
@@ -113,6 +122,11 @@ pub struct ExportSummary {
     /// Sightings left out because their stored kind is neither Wi-Fi nor BLE. They count towards
     /// nothing else here except [`Self::last_id`].
     pub unknown_kind: u64,
+    /// Wi-Fi sightings left out for a zero, broadcast or multicast address. BLE is not checked.
+    pub invalid_address: u64,
+    /// Wi-Fi sightings with channel zero, including those left out for an invalid address.
+    /// Otherwise valid sightings remain eligible for export; BLE channel zero does not count.
+    pub wifi_channel_zero: u64,
     /// Wi-Fi networks, sightings and rows.
     pub wifi: KindStats,
     /// Bluetooth devices, sightings and rows.
@@ -218,6 +232,16 @@ pub fn wigle_csv<W: Write>(
                 tally.skip(id);
                 continue;
             };
+            if candidate.kind == RecordKind::Wifi {
+                if candidate.channel == 0 {
+                    tally.summary.wifi_channel_zero += 1;
+                }
+                if candidate.bssid == [0; 6] || candidate.bssid[0] & 1 != 0 {
+                    tally.summary.invalid_address += 1;
+                    tally.summary.last_id = Some(tally.summary.last_id.map_or(id, |t| t.max(id)));
+                    continue;
+                }
+            }
             // The first sighting of the capture, or of the next network.
             let new_network = window
                 .as_ref()

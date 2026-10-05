@@ -13,6 +13,7 @@ use wartui_bridge::LinkHandle;
 use wartui_proto::link::{HostToBridge, PanelLines};
 
 use crate::engine::{Command, Event, FleetEngine, HostSample, Now, Snapshot};
+use crate::record::{CaptureSettings, Record};
 use crate::store::{Store, StoreReport};
 
 /// How often the engine ages liveness and republishes the snapshot.
@@ -73,6 +74,9 @@ pub async fn drive(
     mut commands: mpsc::Receiver<Command>,
     mut stop: oneshot::Receiver<()>,
 ) -> StoreReport {
+    let mut settings_recorded: Option<CaptureSettings> = None;
+    let mut settings_sequence = 0_u64;
+    record_settings(&store, &mut settings_recorded, &mut settings_sequence, &engine, now());
     let mut ticker = tokio::time::interval(TICK);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut host_ticker = tokio::time::interval(HOST_SAMPLE);
@@ -133,6 +137,7 @@ pub async fn drive(
 
         let now = now();
         let batch = engine.handle(event, now);
+        record_settings(&store, &mut settings_recorded, &mut settings_sequence, &engine, now);
 
         if !batch.records.is_empty() {
             store.submit(batch.records);
@@ -205,4 +210,77 @@ pub async fn drive(
     store.submit(engine.handle(Event::HostSample(sample(&store)), now).records);
     let _ = snapshot.send(Arc::new(engine.snapshot(now, store.stats())));
     store.close()
+}
+
+/// Record applied settings rather than requested commands: clamps and no-ops belong to the
+/// engine. Retry the latest snapshot after a full queue without ever blocking the engine. A
+/// sequence gap and store drop count expose the missing transition; neither claims adoption.
+fn record_settings(
+    store: &Store,
+    recorded: &mut Option<CaptureSettings>,
+    sequence: &mut u64,
+    engine: &FleetEngine,
+    now: Now,
+) {
+    let settings = engine.capture_settings();
+    if *recorded == Some(settings) {
+        return;
+    }
+    let record = Record::CaptureSettings { sequence: *sequence, at_ms: now.unix_ms, settings };
+    *sequence += 1;
+    if store.submit(vec![record]) == 0 {
+        *recorded = Some(settings);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::EngineConfig;
+    use crate::store::{CaptureInfo, StoreConfig, open_readonly};
+    use wartui_proto::plan::ChannelPool;
+
+    #[test]
+    fn runtime_records_settings_when_applied_values_change() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("settings.db");
+        let clock = Now { mono: Instant::now(), unix_ms: 1000 };
+        let mut engine = FleetEngine::new(EngineConfig::default(), clock);
+        let store = Store::create(&StoreConfig::new(&path), &CaptureInfo::default(), clock.unix_ms)
+            .expect("store");
+        let mut recorded = None;
+        let mut sequence = 0;
+        record_settings(&store, &mut recorded, &mut sequence, &engine, clock);
+        record_settings(&store, &mut recorded, &mut sequence, &engine, clock);
+        assert_eq!(sequence, 1, "unchanged settings are not per-tick records");
+
+        engine.handle(Event::Command(Command::SetTxPower { nodes: 127, bridge: -1 }), clock);
+        record_settings(&store, &mut recorded, &mut sequence, &engine, clock);
+        // A repeated request is a no-op even when the supplied values need clamping.
+        engine.handle(Event::Command(Command::SetTxPower { nodes: 127, bridge: -1 }), clock);
+        record_settings(&store, &mut recorded, &mut sequence, &engine, clock);
+        assert_eq!(sequence, 2);
+
+        let reversed = Now { unix_ms: 999, ..clock };
+        engine.handle(Event::Command(Command::SetPool { pool: ChannelPool::Us }), reversed);
+        record_settings(&store, &mut recorded, &mut sequence, &engine, reversed);
+        engine.handle(Event::Command(Command::RememberBle { on: false }), reversed);
+        record_settings(&store, &mut recorded, &mut sequence, &engine, reversed);
+        assert_eq!(sequence, 4);
+        assert_eq!(store.close().dropped, 0);
+        let conn = open_readonly(&path).expect("read-only");
+        let mut stmt = conn
+            .prepare("SELECT v FROM kv WHERE k LIKE 'capture.settings.%' ORDER BY k")
+            .expect("settings query");
+        let values = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .expect("settings")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("rows");
+        assert_eq!(values.len(), 4);
+        assert!(values[0].contains("nodes_tx_power_quarter_dbm=8;"));
+        assert!(values[1].contains("nodes_tx_power_quarter_dbm=80;bridge_tx_power_quarter_dbm=8;"));
+        assert!(values[2].contains("at_ms=999;pool=us;"));
+        assert!(values[3].contains("remember_ble=false;"));
+    }
 }
