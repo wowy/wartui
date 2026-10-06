@@ -22,7 +22,7 @@ use wartui_core::engine::{EngineConfig, FleetEngine, StoreStats};
 use wartui_core::gps::{Gps, GpsConfig};
 use wartui_core::position::PositionChain;
 use wartui_core::runtime::{COMMAND_QUEUE, drive, now};
-use wartui_core::store::{CaptureInfo, Store, StoreConfig, StoreError};
+use wartui_core::store::{CaptureInfo, CaptureProvenance, Store, StoreConfig, StoreError};
 use wartui_proto::plan::{ChannelPool, DEFAULT_TX_POWER_QUARTER_DBM};
 
 use crate::{capture, config, tui, upload};
@@ -219,6 +219,7 @@ pub async fn run(args: Args) -> Result<()> {
             Some(baud) => config.at_baud(baud),
             None => config,
         };
+        let config = GpsConfig { max_age: Duration::from_secs(args.gps_max_age), ..config };
         Gps::spawn(config)
     });
     let position = match &gps {
@@ -241,11 +242,6 @@ pub async fn run(args: Args) -> Result<()> {
     let info =
         CaptureInfo { pool, notes: args.notes.clone(), simulated: test_data(args.sim, args.lat) };
     let store_config = StoreConfig::new(&db);
-    let store = Store::create(&store_config, &info, started.unix_ms).map_err(|e| match e {
-        // Already names the path and says what to do.
-        StoreError::Exists(_) => anyhow::Error::new(e),
-        e => anyhow::Error::new(e).context(format!("creating {}", db.display())),
-    })?;
 
     let (tx_power, bridge_tx_power) = tx_powers(&config.tx_power);
     let remember_ble = config.bluetooth.remember.unwrap_or(true);
@@ -263,6 +259,18 @@ pub async fn run(args: Args) -> Result<()> {
         ..Default::default()
     };
     let engine = FleetEngine::new(config, started);
+    let provenance = CaptureProvenance {
+        host_version: Some(env!("CARGO_PKG_VERSION").to_owned()),
+        host_build: Some(env!("WARTUI_BUILD_ID").to_owned()),
+        release_tag: option_env!("WARTUI_RELEASE_TAG").map(str::to_owned),
+        initial_settings: Some(engine.capture_settings()),
+    };
+    let store = Store::create_with_provenance(&store_config, &info, started.unix_ms, &provenance)
+        .map_err(|e| match e {
+        // Already names the path and says what to do.
+        StoreError::Exists(_) => anyhow::Error::new(e),
+        e => anyhow::Error::new(e).context(format!("creating {}", db.display())),
+    })?;
 
     let (snapshot_tx, snapshot_rx) =
         watch::channel(Arc::new(engine.snapshot(started, StoreStats::default())));

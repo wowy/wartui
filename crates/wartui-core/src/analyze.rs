@@ -1,13 +1,20 @@
 //! What a capture lost on the way in, read back from the tables the store already writes.
 //!
-//! Heartbeat loss is exact. Every heartbeat carries `beat`, the node's since-boot count of
+//! Heartbeat loss comes from sequences. Every heartbeat carries `beat`, the node's since-boot count of
 //! heartbeats sent, so a gap between consecutive beats is heartbeats lost. A repeated beat, a radio
 //! retransmit or a replay, is neither received nor lost.
 //!
 //! Rows are walked in arrival order (`id`, since the store has one writer), not by `rx_at`, which
-//! the wall clock can step back. In that order a falling `beat` or `counter` (sweeps, not
-//! heartbeats) can only be a restart. `beat` restarts at 1, so the first heartbeat after a restart
-//! proves `beat - 1` were lost.
+//! the wall clock can step back. Forward modulo deltas below half-range in `beat` (u16) and
+//! `counter` (u32 sweeps, not heartbeats) include wraps; a delta at least half-range indicates a
+//! restart. This assumes fewer than 32,768 beats and 2^31 sweeps between observations. A restart
+//! whose counters both look forward cannot be detected. `beat` restarts at 1, so the first
+//! heartbeat after a detected restart contributes `beat - 1` missed beats since boot.
+//!
+//! Each counted gap keeps the two observed arrival timestamps and row IDs. These bracket missing
+//! beats, not their exact transmission times. A restart-associated interval is uncertain: the
+//! boot time and any loss before that boot are unknown. Clock reversals remain visible, never
+//! sorted away. Windows and lifetime totals use the same `beat_gap` result in the same walk.
 //!
 //! A gap counts only after a heartbeat that arrived live. One replayed from the bridge's backlog
 //! can be minutes older than the next, and the heartbeats between were sent while no host read. The
@@ -34,7 +41,7 @@
 //!
 //! Every since-boot count is rebased by the engine's `advance_since_boot`, and the first row is a
 //! baseline only (per node, for heartbeats): what was dropped before the capture is not the
-//! capture's. Analyze reads restarts from `counter` and `beat`, which is exact. Live, the engine's
+//! capture's. Analyze infers restarts from `counter` and `beat`. Live, the engine's
 //! epoch check stands in for `beat`, so the two can disagree after a restart the epoch check
 //! misses.
 
@@ -120,16 +127,35 @@ pub struct NodeLoss {
     pub batches_lost: u64,
     /// Distinct heartbeats the capture holds. A duplicate counts once.
     pub heartbeats: u64,
-    /// Heartbeats lost between the node and the host: exact gaps in `beat` after a live heartbeat.
+    /// Heartbeats lost between the node and the host: gaps in `beat` after a live heartbeat.
     pub heartbeats_missed: u64,
+    /// Counted gaps in arrival order. Their missed counts sum to `heartbeats_missed`.
+    pub heartbeat_windows: Vec<HeartbeatWindow>,
     /// Access points the node's pending ring refused. Most are reported on a later dwell.
     pub wifi_refused: u64,
     /// Advertisers the node's pending buffer refused.
     pub ble_refused: u64,
 }
 
-/// What the capture lost. Exact except the bridge's `usb_lost`. Missed heartbeats come from gaps in
-/// each node's `beat` (see the module docs).
+/// Observed arrivals bracketing a counted heartbeat gap, not exact transmission times.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeartbeatWindow {
+    /// Previous heartbeat row ID, which preserves arrival order even if the clock reverses.
+    pub start_id: i64,
+    /// Current heartbeat row ID.
+    pub end_id: i64,
+    /// Previous heartbeat's UTC arrival time, in unix milliseconds.
+    pub start_rx_at_ms: i64,
+    /// Current heartbeat's UTC arrival time; it can be earlier than `start_rx_at_ms`.
+    pub end_rx_at_ms: i64,
+    /// Missing beats, from the same sequence accounting as the lifetime total.
+    pub missed: u64,
+    /// A detected restart makes the interval uncertain: only missing beats since boot count.
+    pub restarted: bool,
+}
+
+/// What the capture lost. Missed heartbeats follow the module's modulo assumptions;
+/// the bridge's `usb_lost` is approximate.
 pub fn losses(conn: &Connection) -> rusqlite::Result<LossSummary> {
     let bridge = bridge(conn)?;
     let mut nodes: BTreeMap<Mac, NodeLoss> = BTreeMap::new();
@@ -266,16 +292,18 @@ fn host(conn: &Connection) -> rusqlite::Result<Option<HostLoss>> {
 /// One heartbeat row, as the walk needs it.
 struct Beat {
     mac: Mac,
-    counter: u64,
+    counter: u32,
     beat: u16,
     wifi: u64,
     ble: u64,
     live: bool,
+    id: i64,
+    rx_at_ms: i64,
 }
 
 fn heartbeats(conn: &Connection, nodes: &mut BTreeMap<Mac, NodeLoss>) -> rusqlite::Result<()> {
     let mut stmt = conn.prepare(
-        "SELECT node_mac, counter, beat, wifi_dropped, ble_dropped, live
+        "SELECT node_mac, counter, beat, wifi_dropped, ble_dropped, live, id, rx_at
          FROM heartbeat
          ORDER BY node_mac, id",
     )?;
@@ -284,26 +312,36 @@ fn heartbeats(conn: &Connection, nodes: &mut BTreeMap<Mac, NodeLoss>) -> rusqlit
     while let Some(row) = rows.next()? {
         let beat = Beat {
             mac: row.get(0)?,
-            counter: count(row.get(1)?),
+            counter: row.get(1)?,
             beat: row.get(2)?,
             wifi: count(row.get(3)?),
             ble: count(row.get(4)?),
             live: row.get(5)?,
+            id: row.get(6)?,
+            rx_at_ms: row.get(7)?,
         };
         let node = nodes
             .entry(beat.mac)
             .or_insert_with(|| NodeLoss { mac: beat.mac, ..Default::default() });
         match &prev {
             Some(prev) if prev.mac == beat.mac => {
-                let rebooted =
-                    beat.counter < prev.counter || beat.beat.wrapping_sub(prev.beat) >= 0x8000;
+                let rebooted = beat.counter.wrapping_sub(prev.counter) >= 0x8000_0000
+                    || beat.beat.wrapping_sub(prev.beat) >= 0x8000;
                 node.wifi_refused += advance_since_boot(beat.wifi, Some(prev.wifi), rebooted);
                 node.ble_refused += advance_since_boot(beat.ble, Some(prev.ble), rebooted);
                 let (heard, missed) = beat_gap(prev.beat, beat.beat, rebooted);
                 node.heartbeats += heard;
                 // A gap after a replayed heartbeat spans time no host was reading.
-                if prev.live {
+                if prev.live && missed > 0 {
                     node.heartbeats_missed += missed;
+                    node.heartbeat_windows.push(HeartbeatWindow {
+                        start_id: prev.id,
+                        end_id: beat.id,
+                        start_rx_at_ms: prev.rx_at_ms,
+                        end_rx_at_ms: beat.rx_at_ms,
+                        missed,
+                        restarted: rebooted,
+                    });
                 }
             }
             // A node's first heartbeat is a baseline only.

@@ -9,7 +9,7 @@
 use std::time::Duration;
 
 use rusqlite::Connection;
-use wartui_core::engine::StorePeaks;
+use wartui_core::engine::{EngineConfig, FleetEngine, Now, StorePeaks};
 use wartui_core::export::{ExportFilter, wigle_csv};
 use wartui_core::position::{Fix, PositionSource};
 use wartui_core::record::{
@@ -17,8 +17,8 @@ use wartui_core::record::{
     NodeSeen, Observation, Record,
 };
 use wartui_core::store::{
-    CaptureInfo, Checkpoint, SCHEMA_VERSION, Store, StoreConfig, StoreError, is_simulated,
-    open_readonly, open_readwrite, record_upload, set_upload_result,
+    CaptureInfo, CaptureProvenance, Checkpoint, SCHEMA_VERSION, Store, StoreConfig, StoreError,
+    is_simulated, open_readonly, open_readwrite, record_upload, set_upload_result,
 };
 use wartui_proto::air::RecordKind;
 use wartui_proto::mac::Mac;
@@ -102,6 +102,103 @@ fn open_at(path: &std::path::Path) -> Store {
     config.batch_interval = Duration::from_millis(10);
     let info = CaptureInfo { pool: ChannelPool::Us, notes: None, simulated: false };
     Store::create(&config, &info, EPOCH_MS).expect("creating the store")
+}
+
+#[test]
+fn store_records_scan_table_when_capture_created() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    store(&dir).close();
+    let conn = open_readonly(&dir.path().join("wartui.db")).expect("read-only capture");
+    let channels: String = conn
+        .query_row("SELECT v FROM kv WHERE k = 'capture.scan_channels'", [], |r| r.get(0))
+        .expect("ordered scan table provenance");
+    let expected =
+        wartui_proto::plan::SCAN_CHANNELS.iter().map(u8::to_string).collect::<Vec<_>>().join(",");
+    assert_eq!(channels, expected);
+    let version: String = conn
+        .query_row("SELECT v FROM kv WHERE k = 'capture.wire_version'", [], |r| r.get(0))
+        .expect("wire version provenance");
+    assert_eq!(version, wartui_proto::air::WIRE_VERSION.to_string());
+}
+
+#[test]
+fn store_records_initial_provenance_when_capture_created() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("provenance.db");
+    let engine = FleetEngine::new(
+        EngineConfig { tx_power: 127, bridge_tx_power: -1, record_raw: true, ..Default::default() },
+        Now { mono: std::time::Instant::now(), unix_ms: EPOCH_MS },
+    );
+    let provenance = CaptureProvenance {
+        host_version: Some("0.1.0".to_owned()),
+        host_build: Some("fnv1a64:0123456789abcdef".to_owned()),
+        release_tag: Some("v-test".to_owned()),
+        initial_settings: Some(engine.capture_settings()),
+    };
+    let store = Store::create_with_provenance(
+        &StoreConfig::new(&path),
+        &CaptureInfo::default(),
+        EPOCH_MS,
+        &provenance,
+    )
+    .expect("capture with provenance");
+    // Metadata must be committed before the writer has flushed any records.
+    let conn = open_readonly(&path).expect("open while writer is running");
+    let get = |key| {
+        conn.query_row("SELECT v FROM kv WHERE k = ?1", [key], |r| r.get::<_, String>(0))
+            .expect("metadata")
+    };
+    assert_eq!(get("capture.host_version"), "0.1.0");
+    assert_eq!(get("capture.host_build"), "fnv1a64:0123456789abcdef");
+    assert_eq!(get("capture.release_tag"), "v-test");
+    let settings = get("capture.settings.initial");
+    assert!(settings.contains(&format!("at_ms={EPOCH_MS};")), "{settings}");
+    assert!(settings.contains("nodes_tx_power_quarter_dbm=80;"), "{settings}");
+    assert!(settings.contains("bridge_tx_power_quarter_dbm=8;"), "{settings}");
+    assert!(settings.contains("record_raw=true;gps=false;gps_max_age_ms=5000;"), "{settings}");
+    assert!(settings.contains("preferred_ble=none;ble_node=none;"), "{settings}");
+    assert_eq!(store.close().dropped, 0);
+}
+
+#[test]
+fn store_preserves_settings_order_when_timestamps_repeat_or_reverse() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let engine = FleetEngine::new(
+        EngineConfig::default(),
+        Now { mono: std::time::Instant::now(), unix_ms: EPOCH_MS },
+    );
+    let settings = engine.capture_settings();
+    let records = [EPOCH_MS, EPOCH_MS, EPOCH_MS - 1]
+        .into_iter()
+        .enumerate()
+        .map(|(sequence, at_ms)| Record::CaptureSettings {
+            sequence: sequence as u64,
+            at_ms,
+            settings: wartui_core::record::CaptureSettings {
+                tx_power: 8 + sequence as i8,
+                ..settings
+            },
+        })
+        .collect();
+    let conn = write(&dir, records);
+    let mut stmt = conn
+        .prepare("SELECT k, v FROM kv WHERE k LIKE 'capture.settings.%' ORDER BY k")
+        .expect("settings query");
+    let rows = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .expect("settings rows")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("metadata strings");
+    assert_eq!(rows.len(), 3);
+    for (i, (key, value)) in rows.iter().enumerate() {
+        assert_eq!(key, &format!("capture.settings.{i:020}"));
+        assert!(value.contains(&format!("nodes_tx_power_quarter_dbm={};", 8 + i)), "{value}");
+    }
+    assert!(rows[2].1.contains(&format!("at_ms={};", EPOCH_MS - 1)));
+    let unknown: i64 = conn
+        .query_row("SELECT COUNT(*) FROM kv WHERE k = 'capture.host_build'", [], |r| r.get(0))
+        .expect("unknown host identity");
+    assert_eq!(unknown, 0, "a core-created capture must not invent executable identity");
 }
 
 /// Write records and close, which is what commits the final batch.
@@ -450,13 +547,13 @@ fn wigle_csv_counts_unpositioned_when_no_fix() {
         &dir,
         vec![
             observation(NODE, [0xAA; 6], -60, EPOCH_MS, fixed(37.0, -122.0)),
-            observation(NODE, [0xBB; 6], -60, EPOCH_MS, Fix::none()),
+            observation(NODE, [0xBA; 6], -60, EPOCH_MS, Fix::none()),
         ],
     );
 
     let (csv, summary) = export(&conn);
     assert_eq!((summary.rows, summary.unpositioned), (1, 1));
-    assert!(!csv.contains("BB:BB:BB:BB:BB:BB"));
+    assert!(!csv.contains("BA:BA:BA:BA:BA:BA"));
 }
 
 #[test]
@@ -975,7 +1072,7 @@ fn store_exports_every_network_when_bssid_unindexed() {
         vec![
             observation(NODE, [0xAA; 6], -70, EPOCH_MS, fixed(37.0, -122.0)),
             observation(OTHER, [0xAA; 6], -50, EPOCH_MS + 1_000, fixed(37.1, -122.1)),
-            observation(NODE, [0xBB; 6], -60, EPOCH_MS, fixed(37.0, -122.0)),
+            observation(NODE, [0xBA; 6], -60, EPOCH_MS, fixed(37.0, -122.0)),
         ],
     );
     assert!(!has_bssid_index(&dir.path().join("wartui.db")));
@@ -1103,7 +1200,7 @@ fn wigle_csv_orders_rows_by_window_start_when_stored_out_of_order() {
     let conn = write(
         &dir,
         vec![
-            observation(OTHER, [0xBB; 6], -60, EPOCH_MS + 60_000, fixed(37.0, -122.0)),
+            observation(OTHER, [0xBA; 6], -60, EPOCH_MS + 60_000, fixed(37.0, -122.0)),
             observation(NODE, [0xAA; 6], -60, EPOCH_MS, fixed(37.0, -122.0)),
         ],
     );
@@ -1111,19 +1208,19 @@ fn wigle_csv_orders_rows_by_window_start_when_stored_out_of_order() {
     let (csv, _) = export(&conn);
     let rows: Vec<&str> = csv.lines().skip(2).collect();
     assert!(rows[0].starts_with("AA:AA:AA:AA:AA:AA,"), "{}", rows[0]);
-    assert!(rows[1].starts_with("BB:BB:BB:BB:BB:BB,"), "{}", rows[1]);
+    assert!(rows[1].starts_with("BA:BA:BA:BA:BA:BA,"), "{}", rows[1]);
 }
 
 #[test]
 fn wigle_csv_interleaves_networks_by_window_start_when_windows_alternate() {
-    // The fold finishes AA's windows before it reaches BB, so an order by network
-    // would write AA, AA, BB. The file is ordered by window start.
+    // The fold finishes AA's windows before it reaches BA, so an order by network
+    // would write AA, AA, BA. The file is ordered by window start.
     let dir = tempfile::tempdir().expect("temp dir");
     let conn = write(
         &dir,
         vec![
             observation(NODE, [0xAA; 6], -60, EPOCH_MS, fixed(37.0, -122.0)),
-            observation(NODE, [0xBB; 6], -60, EPOCH_MS + 1_800_000, fixed(37.0, -122.0)),
+            observation(NODE, [0xBA; 6], -60, EPOCH_MS + 1_800_000, fixed(37.0, -122.0)),
             observation(NODE, [0xAA; 6], -60, EPOCH_MS + 7_200_000, fixed(37.0, -122.0)),
         ],
     );
@@ -1131,7 +1228,7 @@ fn wigle_csv_interleaves_networks_by_window_start_when_windows_alternate() {
     let (csv, summary) = export(&conn);
     assert_eq!(summary.rows, 3, "{csv}");
     let macs: Vec<&str> = csv.lines().skip(2).map(|row| &row[..17]).collect();
-    assert_eq!(macs, ["AA:AA:AA:AA:AA:AA", "BB:BB:BB:BB:BB:BB", "AA:AA:AA:AA:AA:AA"]);
+    assert_eq!(macs, ["AA:AA:AA:AA:AA:AA", "BA:BA:BA:BA:BA:BA", "AA:AA:AA:AA:AA:AA"]);
 }
 
 #[test]
@@ -1143,7 +1240,7 @@ fn wigle_csv_writes_identical_file_when_run_twice_on_one_connection() {
         &dir,
         vec![
             observation(NODE, [0xAA; 6], -60, EPOCH_MS, fixed(37.0, -122.0)),
-            observation(NODE, [0xBB; 6], -60, EPOCH_MS + 60_000, fixed(37.0, -122.0)),
+            observation(NODE, [0xBA; 6], -60, EPOCH_MS + 60_000, fixed(37.0, -122.0)),
         ],
     );
 
@@ -1346,7 +1443,7 @@ fn wigle_csv_counts_network_once_when_heard_repeatedly() {
         &dir,
         vec![
             observation(NODE, [0xAA; 6], -60, at(0), fixed(37.0, -122.0)),
-            observation(NODE, [0xBB; 6], -60, at(1), fixed(37.0, -122.0)),
+            observation(NODE, [0xBA; 6], -60, at(1), fixed(37.0, -122.0)),
             observation(NODE, [0xAA; 6], -60, at(2), fixed(37.0, -122.0)),
             observation(NODE, [0xAA; 6], -60, at(3), fixed(37.0, -122.0)),
         ],
@@ -1357,6 +1454,102 @@ fn wigle_csv_counts_network_once_when_heard_repeatedly() {
     assert_eq!(summary.wifi.sightings, 4);
     assert_eq!(summary.wifi.rows, 2);
     assert_eq!((summary.first_rx, summary.last_rx), (Some(at(0)), Some(at(3))));
+}
+
+#[test]
+fn wigle_csv_skips_invalid_wifi_addresses_when_capture_preserves_them() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let conn = write(
+        &dir,
+        vec![
+            observation(NODE, [0x02; 6], -60, EPOCH_MS, fixed(37.0, -122.0)),
+            ble_observation(OTHER, [0xC3; 6], EPOCH_MS + 1000, fixed(37.0, -122.0)),
+            observation(NODE, [0; 6], -20, EPOCH_MS - 1000, fixed(37.0, -122.0)),
+            observation(NODE, [0xFF; 6], -20, EPOCH_MS + 3000, fixed(37.0, -122.0)),
+            observation(OTHER, [0x01; 6], -20, EPOCH_MS + 4000, Fix::none()),
+            observation(NODE, [0x01; 6], -20, EPOCH_MS + 5000, fixed(37.0, -122.0)),
+        ],
+    );
+
+    let (csv, summary) = export(&conn);
+    assert_eq!(macs(&csv), ["02:02:02:02:02:02", "C3:C3:C3:C3:C3:C3"], "{csv}");
+    assert_eq!(summary.rows, 2);
+    assert_eq!((summary.wifi.networks, summary.wifi.sightings), (1, 1));
+    assert_eq!((summary.ble.networks, summary.ble.sightings), (1, 1));
+    assert_eq!(summary.positions, wartui_core::export::Positions { gps: 0, fixed: 2, none: 0 });
+    assert_eq!(summary.unpositioned, 0);
+    assert_eq!(summary.unknown_kind, 0);
+    assert_eq!(summary.invalid_address, 4);
+    assert_eq!(summary.wifi_channel_zero, 0);
+    assert_eq!(
+        summary.nodes.iter().map(|n| (n.mac, n.wifi, n.ble)).collect::<Vec<_>>(),
+        [(NODE, 1, 0), (OTHER, 0, 1)]
+    );
+    assert_eq!((summary.first_rx, summary.last_rx), (Some(EPOCH_MS), Some(EPOCH_MS + 1000)));
+    assert_eq!(summary.last_id, Some(6));
+    let stored: i64 = conn.query_row("SELECT COUNT(*) FROM observation", [], |r| r.get(0)).unwrap();
+    assert_eq!(stored, 6, "export does not remove evidence from the store");
+
+    let rw = open_readwrite(&dir.path().join("wartui.db")).expect("opening read-write");
+    record_upload(&rw, summary.last_id.unwrap(), EPOCH_MS + 6000, 7, summary.rows)
+        .expect("recording the cutoff locally");
+    let (csv, summary) = export_with(&conn, AFTER_UPLOADS);
+    assert!(macs(&csv).is_empty());
+    assert_eq!(summary.last_id, None);
+    assert_eq!((summary.invalid_address, summary.wifi_channel_zero), (0, 0));
+}
+
+#[test]
+fn wigle_csv_preserves_channels_when_wifi_is_zero_or_off_pool() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let conn = write(
+        &dir,
+        vec![
+            on_channel([0x02; 6], 0, EPOCH_MS),
+            on_channel([0x04; 6], 13, EPOCH_MS + 1000),
+            on_channel([0x06; 6], 14, EPOCH_MS + 2000),
+            on_channel([0x08; 6], 169, EPOCH_MS + 3000),
+            ble_observation(NODE, [0xC3; 6], EPOCH_MS + 4000, fixed(37.0, -122.0)),
+            on_channel([0; 6], 0, EPOCH_MS + 5000),
+            on_channel([0x02; 6], 0, EPOCH_MS + 6000),
+        ],
+    );
+
+    let (csv, summary) = export(&conn);
+    let channels: Vec<_> =
+        csv.lines().skip(2).map(|line| line.split(',').nth(4).unwrap()).collect();
+    assert_eq!(channels, ["0", "13", "14", "169", "0"], "{csv}");
+    assert_eq!(summary.rows, 5);
+    assert_eq!(summary.wifi.sightings, 5);
+    assert_eq!(summary.invalid_address, 1);
+    assert_eq!(summary.wifi_channel_zero, 3);
+    assert_eq!(summary.last_id, Some(7));
+    assert_eq!(summary.wifi_bands, wartui_core::export::Bands { ghz2_4: 2, ghz5: 1, other: 1 });
+}
+
+#[test]
+fn wigle_csv_counts_only_quality_and_cutoff_when_all_wifi_addresses_invalid() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let conn = write(
+        &dir,
+        vec![
+            on_channel([0; 6], 0, EPOCH_MS),
+            observation(NODE, [0xFF; 6], -60, EPOCH_MS + 1000, Fix::none()),
+            on_channel([0x01; 6], 0, EPOCH_MS + 2000),
+        ],
+    );
+
+    let (csv, summary) = export(&conn);
+    assert!(macs(&csv).is_empty(), "{csv}");
+    assert_eq!(
+        summary,
+        wartui_core::export::ExportSummary {
+            invalid_address: 3,
+            wifi_channel_zero: 2,
+            last_id: Some(3),
+            ..wartui_core::export::ExportSummary::default()
+        }
+    );
 }
 
 #[test]
@@ -1423,7 +1616,7 @@ fn wigle_csv_counts_sightings_per_node_when_two_nodes_report() {
         vec![
             observation(OTHER, [0xAA; 6], -60, EPOCH_MS, fixed(37.0, -122.0)),
             observation(NODE, [0xAA; 6], -60, EPOCH_MS + 1000, fixed(37.0, -122.0)),
-            observation(NODE, [0xBB; 6], -60, EPOCH_MS, fixed(37.0, -122.0)),
+            observation(NODE, [0xBA; 6], -60, EPOCH_MS, fixed(37.0, -122.0)),
             ble_observation(OTHER, [0xCC; 6], EPOCH_MS, fixed(37.0, -122.0)),
         ],
     );
@@ -1443,8 +1636,8 @@ fn wigle_csv_counts_network_once_per_band_when_heard_on_both() {
             on_channel([0xAA; 6], 6, EPOCH_MS),
             on_channel([0xAA; 6], 36, EPOCH_MS + 1000),
             on_channel([0xAA; 6], 6, EPOCH_MS + 2000),
-            on_channel([0xBB; 6], 149, EPOCH_MS),
-            on_channel([0xBB; 6], 149, EPOCH_MS + 1000),
+            on_channel([0xBA; 6], 149, EPOCH_MS),
+            on_channel([0xBA; 6], 149, EPOCH_MS + 1000),
         ],
     );
 
@@ -1462,7 +1655,7 @@ fn wigle_csv_tallies_position_sources_when_fix_source_varies() {
         vec![
             observation(NODE, [0xAA; 6], -60, EPOCH_MS, gps),
             observation(NODE, [0xAA; 6], -60, EPOCH_MS + 1000, gps),
-            observation(NODE, [0xBB; 6], -60, EPOCH_MS, fixed(37.0, -122.0)),
+            observation(NODE, [0xBA; 6], -60, EPOCH_MS, fixed(37.0, -122.0)),
             observation(NODE, [0xCC; 6], -60, EPOCH_MS, Fix::none()),
         ],
     );
@@ -1475,9 +1668,9 @@ fn wigle_csv_tallies_position_sources_when_fix_source_varies() {
 /// between any two of them.
 fn three_sightings() -> Vec<Record> {
     vec![
-        observation(NODE, [0xA1; 6], -60, EPOCH_MS, fixed(37.0, -122.0)),
+        observation(NODE, [0xA0; 6], -60, EPOCH_MS, fixed(37.0, -122.0)),
         observation(NODE, [0xA2; 6], -60, EPOCH_MS + 60_000, fixed(37.0, -122.0)),
-        observation(NODE, [0xA3; 6], -60, EPOCH_MS + 120_000, fixed(37.0, -122.0)),
+        observation(NODE, [0xA4; 6], -60, EPOCH_MS + 120_000, fixed(37.0, -122.0)),
     ]
 }
 
@@ -1501,7 +1694,7 @@ fn wigle_csv_skips_sightings_through_cutoff_when_after_uploads() {
     set_upload_result(&rw, id, "done").expect("setting the result");
 
     let (csv, summary) = export_with(&conn, AFTER_UPLOADS);
-    assert_eq!(macs(&csv), ["A3:A3:A3:A3:A3:A3"], "{csv}");
+    assert_eq!(macs(&csv), ["A4:A4:A4:A4:A4:A4"], "{csv}");
     assert_eq!(summary.last_id, Some(3));
 }
 
@@ -1516,7 +1709,7 @@ fn wigle_csv_ignores_upload_for_cutoff_when_it_failed() {
     set_upload_result(&rw, failed, "failed").expect("setting the result");
 
     let (csv, summary) = export_with(&conn, AFTER_UPLOADS);
-    assert_eq!(macs(&csv), ["A2:A2:A2:A2:A2:A2", "A3:A3:A3:A3:A3:A3"], "{csv}");
+    assert_eq!(macs(&csv), ["A2:A2:A2:A2:A2:A2", "A4:A4:A4:A4:A4:A4"], "{csv}");
     assert_eq!(summary.rows, 2);
 }
 
@@ -1540,7 +1733,7 @@ fn wigle_csv_includes_row_when_stored_after_upload_at_cutoff_time() {
     let conn = write(
         &dir,
         vec![
-            observation(NODE, [0xA1; 6], -60, EPOCH_MS, fixed(37.0, -122.0)),
+            observation(NODE, [0xA0; 6], -60, EPOCH_MS, fixed(37.0, -122.0)),
             observation(NODE, [0xA2; 6], -60, EPOCH_MS, fixed(37.0, -122.0)),
         ],
     );

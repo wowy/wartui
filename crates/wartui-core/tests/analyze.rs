@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use rusqlite::Connection;
-use wartui_core::analyze::{BridgeLoss, HostLoss, losses};
+use wartui_core::analyze::{BridgeLoss, HeartbeatWindow, HostLoss, losses};
 use wartui_core::record::{BatchGap, BridgeStatusSeen, Heartbeat, HostStatus, Record};
 use wartui_core::store::{CaptureInfo, Store, StoreConfig, open_readonly};
 use wartui_proto::mac::Mac;
@@ -178,6 +178,176 @@ fn analyze_ignores_gap_when_counter_falls() {
     let (_dir, conn) = capture(vec![beat(NODE, 0, 40, 20, 0, 0), beat(NODE, 60_000, 1, 1, 0, 0)]);
     let node = &losses(&conn).unwrap().nodes[0];
     assert_eq!((node.heartbeats, node.heartbeats_missed), (2, 0));
+}
+
+#[test]
+fn analyze_counts_gap_when_sweep_counter_wraps() {
+    // A small forward modulo delta is a wrap, not a reboot. Beats 101 and 102 were lost.
+    let (_dir, conn) =
+        capture(vec![beat(NODE, 0, u32::MAX - 1, 100, 10, 0), beat(NODE, 15_000, 2, 103, 12, 0)]);
+    let node = &losses(&conn).unwrap().nodes[0];
+    assert_eq!((node.heartbeats, node.heartbeats_missed, node.wifi_refused), (2, 2, 2));
+}
+
+#[test]
+fn analyze_brackets_windows_when_beats_skip_and_repeat() {
+    let (_dir, conn) = capture(vec![
+        beat(NODE, 0, 100, 80, 0, 0),
+        beat(NODE, 5_000, 101, 81, 0, 0),
+        beat(NODE, 5_010, 101, 81, 0, 0),
+        beat(NODE, 20_000, 104, 84, 0, 0),
+        beat(NODE, 20_010, 104, 84, 0, 0),
+        beat(NODE, 30_000, 106, 86, 0, 0),
+    ]);
+    let node = &losses(&conn).unwrap().nodes[0];
+    assert_eq!((node.heartbeats, node.heartbeats_missed), (4, 3));
+    assert_eq!(
+        node.heartbeat_windows,
+        vec![
+            HeartbeatWindow {
+                start_id: 3,
+                end_id: 4,
+                start_rx_at_ms: EPOCH_MS + 5_010,
+                end_rx_at_ms: EPOCH_MS + 20_000,
+                missed: 2,
+                restarted: false,
+            },
+            HeartbeatWindow {
+                start_id: 5,
+                end_id: 6,
+                start_rx_at_ms: EPOCH_MS + 20_010,
+                end_rx_at_ms: EPOCH_MS + 30_000,
+                missed: 1,
+                restarted: false,
+            },
+        ]
+    );
+}
+
+#[test]
+fn analyze_marks_windows_when_restart_beats_are_missing() {
+    let (_dir, conn) = capture(vec![
+        beat(NODE, 0, 40, 20, 0, 0),
+        beat(NODE, 60_000, 1, 12, 0, 0),
+        beat(NODE, 65_000, 2, 13, 0, 0),
+        beat(NODE, 120_000, 10, 3, 0, 0),
+    ]);
+    let node = &losses(&conn).unwrap().nodes[0];
+    assert_eq!((node.heartbeats, node.heartbeats_missed), (4, 13));
+    assert_eq!(node.heartbeat_windows.len(), 2);
+    assert_eq!(
+        node.heartbeat_windows[0],
+        HeartbeatWindow {
+            start_id: 1,
+            end_id: 2,
+            start_rx_at_ms: EPOCH_MS,
+            end_rx_at_ms: EPOCH_MS + 60_000,
+            missed: 11,
+            restarted: true,
+        }
+    );
+    assert_eq!(node.heartbeat_windows[1].missed, 2);
+    assert!(node.heartbeat_windows[1].restarted);
+}
+
+#[test]
+fn analyze_preserves_window_arrival_order_when_clock_reverses() {
+    let (_dir, conn) =
+        capture(vec![beat(NODE, 5_000, 1, 1, 0, 0), beat(NODE, -25_000, 4, 4, 0, 0)]);
+    let node = &losses(&conn).unwrap().nodes[0];
+    assert_eq!(
+        node.heartbeat_windows,
+        vec![HeartbeatWindow {
+            start_id: 1,
+            end_id: 2,
+            start_rx_at_ms: EPOCH_MS + 5_000,
+            end_rx_at_ms: EPOCH_MS - 25_000,
+            missed: 2,
+            restarted: false,
+        }]
+    );
+}
+
+#[test]
+fn analyze_excludes_windows_when_first_beats_and_handoff_are_baselines() {
+    let (_dir, conn) = capture(vec![
+        replayed(NODE, 0, 30, 17),
+        beat(NODE, 1_000, 240, 140, 0, 0),
+        beat(NODE, 21_000, 244, 144, 0, 0),
+        replayed(OTHER, 0, 40, 20),
+        beat(OTHER, 60_000, 1, 12, 0, 0),
+    ]);
+    let loss = losses(&conn).unwrap();
+    assert!(loss.nodes[0].heartbeat_windows.is_empty());
+    let node = &loss.nodes[1];
+    assert_eq!(node.heartbeats_missed, 3);
+    assert_eq!(
+        node.heartbeat_windows,
+        vec![HeartbeatWindow {
+            start_id: 2,
+            end_id: 3,
+            start_rx_at_ms: EPOCH_MS + 1_000,
+            end_rx_at_ms: EPOCH_MS + 21_000,
+            missed: 3,
+            restarted: false,
+        }]
+    );
+}
+
+#[test]
+fn analyze_counts_windows_when_both_counters_wrap() {
+    let (_dir, conn) = capture(vec![
+        beat(NODE, 0, u32::MAX - 1, u16::MAX, 0, 0),
+        beat(NODE, 10_000, 2, 1, 0, 0),
+        beat(NODE, 15_000, 3, 2, 0, 0),
+    ]);
+    let node = &losses(&conn).unwrap().nodes[0];
+    assert_eq!((node.heartbeats, node.heartbeats_missed), (3, 1));
+    assert_eq!(node.heartbeat_windows.len(), 1);
+    assert_eq!(node.heartbeat_windows[0].missed, 1);
+    assert!(!node.heartbeat_windows[0].restarted);
+}
+
+#[test]
+fn analyze_classifies_restart_when_modulo_delta_reaches_half_range() {
+    for (counter, seq, missed, restarted) in [
+        (1, 10 + 0x7fff, 0x7ffe, false),
+        (1, 10 + 0x8000, 10 + 0x8000 - 1, true),
+        (0x7fff_ffff, 12, 1, false),
+        (0x8000_0000, 12, 11, true),
+    ] {
+        let (_dir, conn) =
+            capture(vec![beat(NODE, 0, 0, 10, 0, 0), beat(NODE, 10_000, counter, seq, 0, 0)]);
+        let node = &losses(&conn).unwrap().nodes[0];
+        assert_eq!(node.heartbeats_missed, missed);
+        assert_eq!(node.heartbeat_windows.len(), 1);
+        assert_eq!(node.heartbeat_windows[0].missed, missed);
+        assert_eq!(node.heartbeat_windows[0].restarted, restarted);
+    }
+}
+
+#[test]
+fn analyze_keeps_windows_per_node_when_arrivals_are_interleaved() {
+    let (_dir, conn) = capture(vec![
+        beat(NODE, 0, 1, 1, 0, 0),
+        beat(OTHER, 1_000, 100, 100, 0, 0),
+        beat(NODE, 10_000, 3, 3, 0, 0),
+        beat(OTHER, 21_000, 104, 104, 0, 0),
+        beat(NODE, 15_000, 1, 1, 0, 0),
+    ]);
+    let loss = losses(&conn).unwrap();
+    assert_eq!(loss.nodes[0].heartbeats_missed, 3);
+    assert_eq!(loss.nodes[1].heartbeats_missed, 1);
+    assert_eq!(loss.nodes[0].heartbeat_windows[0].start_id, 2);
+    assert_eq!(loss.nodes[0].heartbeat_windows[0].end_id, 4);
+    assert_eq!(loss.nodes[1].heartbeat_windows[0].start_id, 1);
+    assert_eq!(loss.nodes[1].heartbeat_windows[0].end_id, 3);
+    for node in &loss.nodes {
+        assert_eq!(
+            node.heartbeats_missed,
+            node.heartbeat_windows.iter().map(|window| window.missed).sum::<u64>()
+        );
+    }
 }
 
 #[test]

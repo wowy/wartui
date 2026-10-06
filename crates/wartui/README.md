@@ -47,6 +47,34 @@ new address. The same bridge reconnecting or rebooting sends nothing; nodes alre
 The channel pool and transmit powers have no flag; see "Config file". `--log-file PATH` is global;
 see "When nothing arrives".
 
+### Capture metadata
+
+The capture records the host build and its settings in SQLite metadata:
+
+| Key | Meaning |
+|-----|---------|
+| `capture.host_version` | Host crate version |
+| `capture.host_build` | Content-derived host source identity, including uncommitted edits |
+| `capture.core_version` | Core crate version |
+| `capture.release_tag` | Release tag, when the host was built with one |
+| `capture.scan_channels` | The host's ordered scan table, which gives stored channel indices their meaning |
+| `capture.wire_version` | The wire version the host understands |
+| `capture.settings.initial` | Initial host settings, normalized by the engine |
+| `capture.settings.NNN` | Runtime's first settings snapshot and subsequent changes, in capture order |
+
+Settings include the channel pool, transmit powers, raw recording, positioning configuration and
+Bluetooth preference. They describe desired host settings, not a radio's acknowledgment or adoption.
+The initial metadata is committed with capture creation. Runtime settings use zero-padded sequence
+keys, so repeated or reversed timestamps cannot overwrite a change. They share the bounded store
+queue: sequence gaps and store drops mean the history may be incomplete.
+The source identity hashes sorted workspace-relative host Rust files, manifests and the lockfile
+with noncryptographic FNV-1a. It excludes firmware and generated files. Neither it nor the saved scan
+table proves which firmware a node ran: the table records only the host's interpretation.
+
+An absent metadata field means unknown, not a default, in an older compatible capture. There are no
+migrations before 1.0. A capture with another schema version or fingerprint is refused; start a new
+capture at a new `--db` path.
+
 ### Exporting
 
 A capture holds one run. Each run names its capture for the second it started:
@@ -73,9 +101,17 @@ within an hour from scoring, though its GPS may still refine the entry. The defa
 re-hearing within the hour can still improve its row's position, and one past it is a new row.
 `--recapture 0` writes one row per network. On finishing, `export` prints exact counts to standard
 error: rows written, distinct Wi-Fi networks (per band) and Bluetooth devices, sightings of each,
-sightings by position source, what each node heard, and the capture's span. A capture made with
+sightings by position source, what each node heard, and the capture's span. These totals cover
+accepted Wi-Fi and BLE sightings, including those without a position. A capture made with
 `--sim` or `--lat`/`--lon` still exports, with a warning not to submit the CSV anywhere. A sighting
-whose stored kind is neither Wi-Fi nor BLE is left out, and a note says how many.
+whose stored kind is neither Wi-Fi nor BLE is left out, and a note says how many. Wi-Fi sightings
+with zero, broadcast or multicast addresses are also left out and counted in a warning. They
+remain in the store and count towards the upload cutoff, but not the totals above. Locally
+administered unicast Wi-Fi and BLE random addresses remain exportable. `export`, `analyze` and
+`upload` also warn about channel-zero Wi-Fi sightings, including those with invalid addresses:
+the warning counts can overlap and count sightings, not networks or rows. Channel zero alone
+does not exclude a sighting, and BLE channel zero is not counted. Advertised channels outside
+the scan pool remain exportable.
 
 `RCOIs` holds a Passpoint access point's roaming consortium identifiers and `MfgrId` a BLE
 advertiser's manufacturer identifier, both blank (NULL in the store) when none was offered. A BLE
@@ -85,8 +121,8 @@ inquiry produces, and the nodes never transmit while scanning.
 ### Analyzing a capture
 
 `analyze` prints what `export` would report for a capture, then what it lost on the way in. It
-takes `--db` and `--recapture` as `export` does, and writes nothing but standard
-output. The tail of its output, after the export summary:
+takes `--db` and `--recapture` as `export` does. Reports go to standard output and quality warnings
+to standard error; no output file is written. The tail of its output, after the export summary:
 
 ```
   bridge     1,203,551 frames received  1,300 dropped (0.1%)  1 reboot  host read 1,202,240  11 lost on USB
@@ -96,8 +132,8 @@ output. The tail of its output, after the export summary:
   heartbeats 41 missed of 3,497 expected (1.2%)
   ring       wifi 18,220 refused  ble 1,203 refused
   loss by node
-    1C:5A  batches 12  heartbeats 3/702  ring ble 1,203
-    57:84  batches 200  heartbeats 38/2,795  ring wifi 18,220
+    1C:5A  batches 12  heartbeats 3/702 (0.4%)  ring ble 1,203
+    57:84  batches 200  heartbeats 38/2,795 (1.4%)  ring wifi 18,220
 ```
 
 | Line         | What it counts                                                                   |
@@ -109,10 +145,10 @@ output. The tail of its output, after the export summary:
 | `heartbeats` | Heartbeats lost between node and host, read from each node's beat sequence       |
 | `ring`       | Sightings a node's full pending ring refused; most are reported on a later dwell |
 
-Every figure is exact but `lost on USB`. The capture's first bridge reply and first heartbeat
-per node is a baseline, so what was dropped before the capture began is not counted. `batches`
-and `bridge` print zeros, since "0 lost" is the answer, and so do `store dropped` and, on a Pi,
-the `health` counts. Left out:
+Counts follow the assumptions below; `lost on USB` is approximate. The capture's first bridge
+reply and first heartbeat per node are baselines, so what was dropped before the capture began
+is not counted. `batches` and `bridge` print zeros, since "0 lost" is the answer. So do
+`store dropped` and, on a Pi, the `health` counts. Left out:
 
 - the `bridge` line, when the capture holds no status reply
 - ring figures that are zero, and the `ring` line when all are
@@ -142,10 +178,31 @@ bridge at the first and last reply, since a reply overtakes them. On the `host` 
 `battery min` is the lowest voltage the battery's fuel gauge read; its current draw is stored as
 `battery_ma` for queries but not printed.
 
-Each heartbeat carries a sequence number that restarts at 1 when the node boots, so a gap in it is
-heartbeats lost. A repeated heartbeat counts once. Across a node's reboot, only the heartbeats
-before the first one heard since boot are counted. A gap after a heartbeat or batch replayed from
-the bridge's backlog is not counted, because those frames were dropped while no host was reading.
+Compare the per-node heartbeat percentages to spot disproportionate loss. Each is missed beats
+divided by distinct received plus missed beats, including the received baseline. The totals cover
+the whole capture; `--recapture` selects export rows, not heartbeat intervals.
+
+Each heartbeat carries a 16-bit sequence number that starts at 1 when the node boots and wraps.
+The 32-bit sweep counter wraps too. Forward modulo deltas below half-range are progress, including
+wraps; a delta at least half-range in either counter indicates a restart. This assumes fewer than
+32,768 beats and 2^31 sweeps between observations. A restart whose counters both look forward is
+undetectable. A repeated heartbeat counts once. Across a detected restart, only missing beats
+since boot are counted, not any loss before that boot. A gap after a heartbeat replayed from the
+bridge's backlog is not counted, including the replay-to-live handoff.
+
+Add `--heartbeat-windows` to list each counted gap after the normal summary:
+
+```sh
+wartui analyze --db tonight.db --heartbeat-windows
+```
+
+Each line gives the node, two UTC arrival timestamps with milliseconds, heartbeat row IDs, and
+missed count. These observed arrivals bracket missing beats; they are not exact transmission
+times. Rows stay in arrival order even when the wall clock steps back; a reversed clock is labelled.
+Repeats add no gap, and the first heartbeat per node is only a baseline. A `restart-associated,
+uncertain interval` counts only missing beats since boot: neither the boot time nor pre-boot loss
+is known. Window counts sum to the lifetime missed total. With no counted gaps, the flag prints
+`no counted gaps`; without the flag, no windows are printed.
 
 ### Uploading to WDGWars
 
@@ -532,7 +589,8 @@ none exports nothing and says how many networks it left out.
   never had one, so the header stays quiet; `--gps` asks for a port, so its absence is reported.
 - **A fix must be recent.** Past `--gps-max-age` seconds the position falls back a tier and the
   header says `gps fix is stale`. At driving speed a minute-old fix is another neighborhood, and
-  falling back beats quietly claiming it.
+  falling back beats quietly claiming it. The reader logs that age limit too, even when the receiver
+  is silent. The last fix is retained; a new fix logs recovery.
 - **The receiver runs on its own thread; nothing waits for it.** Capture starts at once, and the
   header shows `gps scanning /dev/… @38400`, `gps searching`, `gps ok, 8 sats`, `gps fix is stale`,
   or the port's error. The search keeps running there, so a puck replugged into a *different* socket
@@ -700,11 +758,13 @@ several and none known, it asks for `--bridge` rather than guessing.
 **`--log-file` is the only way to see the transport's own account of a run**: the view owns the
 terminal, so without it nothing is logged. It records which port was resolved, whether it opened,
 and why a link went down, once per reason, since somebody else's port is retried every 750 ms all
-capture. The GPS reader logs the same way. The log also records each time the host falls 100 ms or
-more behind the bridge and when it catches up, with both frames' bridge stamps. A reconnect
-while frames are arriving can log one spell of about 100 ms, because the lag after a connect
-starts from the 100 ms the engine assumes rather than from a measurement. `RUST_LOG=debug`
-adds each retry, undecodable frames, and dropped bulk commands.
+capture. The GPS reader logs searching, its first fix, stale fixes, recovery, and unreadable or
+removed receivers on transitions, not every sentence or satellite-count change. Reopening a failed
+port does not count as recovery until a valid fix or no-fix report arrives. The log also records each
+time the host falls 100 ms or more behind the bridge and when it catches up, with both frames' bridge
+stamps. A reconnect while frames are arriving can log one spell of about 100 ms, because the lag after
+a connect starts from the 100 ms the engine assumes rather than from a measurement. `RUST_LOG=debug`
+adds GPS probe attempts, each retry, undecodable frames, and dropped bulk commands.
 
 ### Telling the boards apart
 

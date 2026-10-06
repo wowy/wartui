@@ -113,6 +113,7 @@ pub fn run(args: Args) -> Result<()> {
 
     note_unpositioned(&summary);
     note_unknown_kind(&summary);
+    note_quality(&summary);
     if let Some(warning) = warning {
         eprintln!("{warning}");
     }
@@ -154,6 +155,35 @@ pub(crate) fn note_unknown_kind(summary: &ExportSummary) {
             thousands(summary.unknown_kind)
         );
     }
+}
+
+/// Report sighting quality separately from accepted-sighting totals, even when no rows export.
+pub(crate) fn note_quality(summary: &ExportSummary) {
+    eprint!("{}", quality_warnings(summary));
+}
+
+fn quality_warnings(summary: &ExportSummary) -> String {
+    use std::fmt::Write as _;
+
+    let mut text = String::new();
+    if summary.invalid_address > 0 {
+        let _ = writeln!(
+            text,
+            "warning: {} Wi-Fi sightings were left out for zero, broadcast or multicast addresses. \
+             They remain in the capture but are excluded from network, sighting, position, node \
+             and span totals.",
+            thousands(summary.invalid_address)
+        );
+    }
+    if summary.wifi_channel_zero > 0 {
+        let _ = writeln!(
+            text,
+            "warning: {} Wi-Fi sightings have channel zero (unknown), including any with invalid \
+             addresses. Otherwise valid sightings remain exportable; BLE channel zero is not counted.",
+            thousands(summary.wifi_channel_zero)
+        );
+    }
+    text
 }
 
 /// What the export wrote and what the capture held, for standard error: standard output
@@ -349,8 +379,8 @@ mod tests {
     use wartui_core::export::{Bands, ExportSummary, KindStats, NodeStats, Positions};
 
     use super::{
-        Args, Selection, create_csv, into_csv, is_the_capture, report, test_data_note,
-        test_data_warning,
+        Args, Selection, create_csv, into_csv, is_the_capture, quality_warnings, report,
+        test_data_note, test_data_warning,
     };
     use crate::testing::{EPOCH_MS, capture, capture_simulated, sighting};
 
@@ -372,7 +402,33 @@ mod tests {
             last_rx: Some(1_790_812_080_000),
             last_id: Some(4_012_345),
             unknown_kind: 0,
+            invalid_address: 0,
+            wifi_channel_zero: 0,
         }
+    }
+
+    #[test]
+    fn export_warns_about_quality_when_sightings_have_invalid_addresses_or_channel_zero() {
+        let summary = ExportSummary {
+            invalid_address: 1_234,
+            wifi_channel_zero: 5_678,
+            ..ExportSummary::default()
+        };
+        let text = quality_warnings(&summary);
+        assert!(text.contains("1,234 Wi-Fi sightings were left out"), "{text}");
+        assert!(
+            text.contains("excluded from network, sighting, position, node and span totals"),
+            "{text}"
+        );
+        assert!(text.contains("5,678 Wi-Fi sightings have channel zero"), "{text}");
+        assert!(text.contains("including any with invalid addresses"), "{text}");
+        assert!(text.contains("BLE channel zero is not counted"), "{text}");
+        assert!(text.contains("Otherwise valid sightings remain exportable"), "{text}");
+    }
+
+    #[test]
+    fn export_omits_quality_warnings_when_no_quality_issues() {
+        assert!(quality_warnings(&ExportSummary::default()).is_empty());
     }
 
     #[test]

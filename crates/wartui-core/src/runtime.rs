@@ -13,6 +13,7 @@ use wartui_bridge::LinkHandle;
 use wartui_proto::link::{HostToBridge, PanelLines};
 
 use crate::engine::{Command, Event, FleetEngine, HostSample, Now, Snapshot};
+use crate::record::{CaptureSettings, Record};
 use crate::store::{Store, StoreReport};
 
 /// How often the engine ages liveness and republishes the snapshot.
@@ -73,6 +74,8 @@ pub async fn drive(
     mut commands: mpsc::Receiver<Command>,
     mut stop: oneshot::Receiver<()>,
 ) -> StoreReport {
+    let mut settings = SettingsLog::default();
+    settings.record(&store, engine.capture_settings(), now());
     let mut ticker = tokio::time::interval(TICK);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut host_ticker = tokio::time::interval(HOST_SAMPLE);
@@ -133,6 +136,7 @@ pub async fn drive(
 
         let now = now();
         let batch = engine.handle(event, now);
+        settings.record(&store, engine.capture_settings(), now);
 
         if !batch.records.is_empty() {
             store.submit(batch.records);
@@ -200,9 +204,192 @@ pub async fn drive(
         }
     }
 
+    // Before the last host row, so its drop count includes a lost settings change.
+    settings.finish(&store);
     // So a capture always ends on a host row holding its final counts.
     let now = now();
     store.submit(engine.handle(Event::HostSample(sample(&store)), now).records);
     let _ = snapshot.send(Arc::new(engine.snapshot(now, store.stats())));
     store.close()
+}
+
+/// Applied settings as `capture_settings` rows: applied rather than requested, because clamps and
+/// no-ops belong to the engine.
+///
+/// A change takes its sequence number and time when first seen, and a full queue retries that same
+/// row on later passes without blocking the engine. A refused retry is not a drop. A change is
+/// counted as one store drop only once it is lost: replaced by a different change before it was
+/// written, or still unwritten when the run ends. The sequence gap and that one drop expose the
+/// missing transition; neither claims adoption.
+#[derive(Debug, Default)]
+struct SettingsLog {
+    /// The last settings written.
+    written: Option<CaptureSettings>,
+    /// A change seen but not yet accepted by the store: its sequence, time and settings.
+    pending: Option<(u64, i64, CaptureSettings)>,
+    /// The sequence number the next change takes.
+    next_sequence: u64,
+}
+
+impl SettingsLog {
+    /// Offer the current settings once per pass, if they differ from the last written.
+    fn record(&mut self, store: &Store, settings: CaptureSettings, now: Now) {
+        if let Some((_, _, waiting)) = self.pending
+            && waiting != settings
+        {
+            self.pending = None;
+            store.count_dropped(1);
+        }
+        if self.pending.is_none() {
+            if self.written == Some(settings) {
+                return;
+            }
+            self.pending = Some((self.next_sequence, now.unix_ms, settings));
+            self.next_sequence += 1;
+        }
+        let Some((sequence, at_ms, settings)) = self.pending else { return };
+        if store.offer(Record::CaptureSettings { sequence, at_ms, settings }) {
+            self.written = Some(settings);
+            self.pending = None;
+        }
+    }
+
+    /// Count a change still unwritten when the run ends as one drop.
+    fn finish(self, store: &Store) {
+        if self.pending.is_some() {
+            store.count_dropped(1);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::EngineConfig;
+    use crate::store::{CaptureInfo, StoreConfig, open_readonly};
+    use wartui_proto::plan::ChannelPool;
+
+    #[test]
+    fn runtime_records_settings_when_applied_values_change() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("settings.db");
+        let clock = Now { mono: Instant::now(), unix_ms: 1000 };
+        let mut engine = FleetEngine::new(EngineConfig::default(), clock);
+        let store = Store::create(&StoreConfig::new(&path), &CaptureInfo::default(), clock.unix_ms)
+            .expect("store");
+        let mut log = SettingsLog::default();
+        log.record(&store, engine.capture_settings(), clock);
+        log.record(&store, engine.capture_settings(), clock);
+        assert_eq!(log.next_sequence, 1, "unchanged settings are not per-tick records");
+
+        engine.handle(Event::Command(Command::SetTxPower { nodes: 127, bridge: -1 }), clock);
+        log.record(&store, engine.capture_settings(), clock);
+        // A repeated request is a no-op even when the supplied values need clamping.
+        engine.handle(Event::Command(Command::SetTxPower { nodes: 127, bridge: -1 }), clock);
+        log.record(&store, engine.capture_settings(), clock);
+        assert_eq!(log.next_sequence, 2);
+
+        let reversed = Now { unix_ms: 999, ..clock };
+        engine.handle(Event::Command(Command::SetPool { pool: ChannelPool::Us }), reversed);
+        log.record(&store, engine.capture_settings(), reversed);
+        engine.handle(Event::Command(Command::RememberBle { on: false }), reversed);
+        log.record(&store, engine.capture_settings(), reversed);
+        assert_eq!(log.next_sequence, 4);
+        log.finish(&store);
+        assert_eq!(store.close().dropped, 0);
+        let conn = open_readonly(&path).expect("read-only");
+        let mut stmt = conn
+            .prepare("SELECT v FROM kv WHERE k LIKE 'capture.settings.%' ORDER BY k")
+            .expect("settings query");
+        let values = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .expect("settings")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("rows");
+        assert_eq!(values.len(), 4);
+        assert!(values[0].contains("nodes_tx_power_quarter_dbm=8;"));
+        assert!(values[1].contains("nodes_tx_power_quarter_dbm=80;bridge_tx_power_quarter_dbm=8;"));
+        assert!(values[2].contains("at_ms=999;pool=us;"));
+        assert!(values[3].contains("remember_ble=false;"));
+    }
+
+    /// A store whose one-slot queue is full, and the receiver that frees it.
+    fn full_store(clock: Now) -> (Store, std::sync::mpsc::Receiver<Record>) {
+        let (store, rx) = Store::detached(1);
+        assert!(store.offer(Record::CaptureSettings {
+            sequence: u64::MAX,
+            at_ms: clock.unix_ms,
+            settings: settings(clock),
+        }));
+        (store, rx)
+    }
+
+    fn settings(clock: Now) -> CaptureSettings {
+        FleetEngine::new(EngineConfig::default(), clock).capture_settings()
+    }
+
+    /// Everything the store accepted after the filler, in order.
+    fn written(rx: &std::sync::mpsc::Receiver<Record>) -> Vec<(u64, i64, CaptureSettings)> {
+        rx.try_iter()
+            .filter_map(|record| match record {
+                Record::CaptureSettings { sequence, at_ms, settings } if sequence != u64::MAX => {
+                    Some((sequence, at_ms, settings))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn runtime_writes_settings_once_without_drops_when_retry_succeeds() {
+        let clock = Now { mono: Instant::now(), unix_ms: 1000 };
+        let (store, rx) = full_store(clock);
+        let applied = settings(clock);
+        let mut log = SettingsLog::default();
+        for pass in 0..5 {
+            log.record(&store, applied, Now { unix_ms: 1000 + pass, ..clock });
+        }
+        assert_eq!(store.stats().dropped, 0, "a refused retry is not a drop");
+        assert_eq!(log.next_sequence, 1, "retries reuse the sequence number");
+
+        let _filler = rx.try_recv().expect("filler");
+        log.record(&store, applied, Now { unix_ms: 2000, ..clock });
+        log.record(&store, applied, Now { unix_ms: 2001, ..clock });
+        log.finish(&store);
+        assert_eq!(written(&rx), vec![(0, 1000, applied)], "first sighting's time is kept");
+        assert_eq!(store.close().dropped, 0);
+    }
+
+    #[test]
+    fn runtime_counts_one_drop_and_leaves_gap_when_unwritten_change_is_superseded() {
+        let clock = Now { mono: Instant::now(), unix_ms: 1000 };
+        let (store, rx) = full_store(clock);
+        let first = settings(clock);
+        let second = CaptureSettings { tx_power: first.tx_power + 4, ..first };
+        let mut log = SettingsLog::default();
+        for _ in 0..3 {
+            log.record(&store, first, clock);
+        }
+
+        let _filler = rx.try_recv().expect("filler");
+        let later = Now { unix_ms: 2000, ..clock };
+        log.record(&store, second, later);
+        log.record(&store, second, later);
+        log.finish(&store);
+        assert_eq!(written(&rx), vec![(1, 2000, second)], "sequence 0 is the gap");
+        assert_eq!(store.close().dropped, 1);
+    }
+
+    #[test]
+    fn runtime_counts_one_drop_when_change_is_unwritten_at_finish() {
+        let clock = Now { mono: Instant::now(), unix_ms: 1000 };
+        let (store, rx) = full_store(clock);
+        let mut log = SettingsLog::default();
+        for _ in 0..10 {
+            log.record(&store, settings(clock), clock);
+        }
+        log.finish(&store);
+        assert!(written(&rx).is_empty());
+        assert_eq!(store.close().dropped, 1);
+    }
 }
