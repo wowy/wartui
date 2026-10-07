@@ -2,8 +2,9 @@
 //! what a full one turns away. Only the node firmware uses this; the crate docs say why it
 //! lives here.
 //!
-//! [`WifiPending`] holds one dwell's access points and [`BlePending`] one scan's
-//! advertisers. Both follow the same rules:
+//! [`Pending`] is the buffer. [`WifiPending`] holds one dwell's access points in it and
+//! [`BlePending`] one scan's advertisers. They differ only in what [`Entry`] supplies, and
+//! both follow the same rules:
 //!
 //! - **One entry per address.** A repeat hearing never takes a second slot.
 //! - **Slots go only to addresses the caller says are due.** An address the host already
@@ -31,109 +32,72 @@ use crate::beacon::Sighting;
 use crate::hci::AdvReport;
 use crate::mac_index::MacIndex;
 
-/// The sightings of one dwell, one per BSSID. The module docs give the rules it follows.
-///
+/// What a [`Pending`] holds: the part of a buffer's rules that depends on the kind of
+/// hearing.
+pub trait Entry: Copy {
+    /// The fill for slots nothing has taken. A constant rather than `Default`, so
+    /// [`Pending::new`] stays a `const fn` and the buffer can sit in a `static`.
+    const BLANK: Self;
+
+    /// The address the buffer keeps one entry for.
+    fn address(&self) -> [u8; 6];
+
+    /// Whether the entry is worth holding at all. An entry ruled out here is never
+    /// looked up, merged, asked `due` or counted as dropped, since it is no reading of
+    /// anything.
+    fn is_usable(&self) -> bool {
+        true
+    }
+
+    /// Fold a repeat hearing of the same address into the held entry. Nothing by default:
+    /// the first hearing is kept as it is.
+    fn merge(&mut self, _repeat: &Self) {}
+}
+
 /// An access point beacons about ten times a dwell, and only its first sighting is kept.
 /// A beacon carries the whole record, so nothing is merged from the repeats.
+impl Entry for Sighting {
+    const BLANK: Self = Sighting::BLANK;
+
+    fn address(&self) -> [u8; 6] {
+        self.bssid
+    }
+}
+
+/// An advertiser's identifier can arrive after its first hearing, so a repeat merges into
+/// the held report. A report without a reading is not held.
+impl Entry for AdvReport {
+    const BLANK: Self = AdvReport { address: [0; 6], rssi: 0, mfgr: None };
+
+    fn address(&self) -> [u8; 6] {
+        self.address
+    }
+
+    fn is_usable(&self) -> bool {
+        self.has_rssi()
+    }
+
+    /// The strongest reading wins. The first identifier stays, because a later one is
+    /// not a better reading of it.
+    fn merge(&mut self, repeat: &Self) {
+        self.rssi = self.rssi.max(repeat.rssi);
+        if self.mfgr.is_none() {
+            self.mfgr = repeat.mfgr;
+        }
+    }
+}
+
+/// One dwell's access points, one per BSSID.
+pub type WifiPending<const N: usize, const S: usize> = Pending<Sighting, N, S>;
+
+/// One scan's advertisers, one per address.
+pub type BlePending<const N: usize, const S: usize> = Pending<AdvReport, N, S>;
+
+/// The entries of one dwell or scan, one per address. The module docs give the rules it
+/// follows.
 #[derive(Debug, Clone)]
-pub struct WifiPending<const N: usize, const S: usize> {
-    items: [Sighting; N],
-    len: usize,
-    taken: usize,
-    dropped: Refused,
-    /// Where each held BSSID sits in `items`. Nothing is ever evicted, so entries
-    /// leave it only all at once, in [`Self::clear`].
-    index: MacIndex<S>,
-}
-
-impl<const N: usize, const S: usize> Default for WifiPending<N, S> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<const N: usize, const S: usize> WifiPending<N, S> {
-    /// An empty buffer, `const` so it can sit in a `static`.
-    #[must_use]
-    pub const fn new() -> Self {
-        Self {
-            items: [Sighting::BLANK; N],
-            len: 0,
-            taken: 0,
-            dropped: Refused::new(),
-            index: MacIndex::new::<N>(),
-        }
-    }
-
-    /// Keep `sighting` if its BSSID is new this dwell and `due`.
-    ///
-    /// A held BSSID is ignored without asking `due`, which saves the caller's lookup on
-    /// every repeat beacon. `due` is asked before the room check.
-    pub fn record(&mut self, sighting: Sighting, due: impl FnOnce(&Sighting) -> bool) {
-        if self.index.find(&sighting.bssid, |pos| self.items[pos].bssid).is_some() {
-            return;
-        }
-        if !due(&sighting) {
-            return;
-        }
-        if self.len == N {
-            self.dropped.note(&sighting.bssid);
-            return;
-        }
-        self.items[self.len] = sighting;
-        self.index.insert(&sighting.bssid, self.len);
-        self.len += 1;
-    }
-
-    /// Take the oldest sighting not yet taken, if there is one.
-    ///
-    /// The bound is `len`, not the array. The slots past `len` are an earlier dwell's
-    /// leavings or the blank fill, and would go on the air as if heard.
-    pub fn take(&mut self) -> Option<Sighting> {
-        if self.taken >= self.len {
-            return None;
-        }
-        let sighting = self.items[self.taken];
-        self.taken += 1;
-        Some(sighting)
-    }
-
-    /// Empty the buffer for a new dwell. [`Self::dropped`] carries on, and an access
-    /// point turned away last dwell counts again if it is turned away in this one.
-    pub fn clear(&mut self) {
-        self.len = 0;
-        self.taken = 0;
-        self.dropped.reset();
-        self.index.clear();
-    }
-
-    /// Distinct BSSIDs held this dwell, at most `N`.
-    #[must_use]
-    pub const fn len(&self) -> usize {
-        self.len
-    }
-
-    /// Whether this dwell holds nothing.
-    #[must_use]
-    pub const fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
-    /// Access points a full buffer turned away since construction, each once per dwell.
-    /// Wraps. [`Refused`] says how it slightly undercounts.
-    #[must_use]
-    pub const fn dropped(&self) -> u16 {
-        self.dropped.total()
-    }
-}
-
-/// The reports of one scan, one per address. The module docs give the rules it follows.
-///
-/// Unlike [`WifiPending`], a repeat merges into the held report, because an advertiser's
-/// identifier can arrive after its first hearing.
-#[derive(Debug, Clone)]
-pub struct BlePending<const N: usize, const S: usize> {
-    items: [AdvReport; N],
+pub struct Pending<T: Entry, const N: usize, const S: usize> {
+    items: [T; N],
     len: usize,
     taken: usize,
     dropped: Refused,
@@ -142,18 +106,18 @@ pub struct BlePending<const N: usize, const S: usize> {
     index: MacIndex<S>,
 }
 
-impl<const N: usize, const S: usize> Default for BlePending<N, S> {
+impl<T: Entry, const N: usize, const S: usize> Default for Pending<T, N, S> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<const N: usize, const S: usize> BlePending<N, S> {
+impl<T: Entry, const N: usize, const S: usize> Pending<T, N, S> {
     /// An empty buffer, `const` so it can sit in a `static`.
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            items: [AdvReport { address: [0; 6], rssi: 0, mfgr: None }; N],
+            items: [T::BLANK; N],
             len: 0,
             taken: 0,
             dropped: Refused::new(),
@@ -161,54 +125,50 @@ impl<const N: usize, const S: usize> BlePending<N, S> {
         }
     }
 
-    /// Keep `report` if its address is new and `due`, or merge it into the
-    /// reading already held for that address.
+    /// Keep `entry` if its address is new this dwell or scan and `due`, or merge it into
+    /// the entry already held for that address.
     ///
-    /// A held address merges without asking `due`. An advertiser that led with its
-    /// flags and followed with its manufacturer data is still one advertiser. `due` is
-    /// asked only when the report would take a new slot, and before the room check.
-    pub fn record(&mut self, report: AdvReport, due: impl FnOnce(&AdvReport) -> bool) {
-        if !report.has_rssi() {
+    /// A held address merges without asking `due`, which saves the caller's lookup on
+    /// every repeat hearing. `due` is asked only when the entry would take a new slot,
+    /// and before the room check.
+    pub fn record(&mut self, entry: T, due: impl FnOnce(&T) -> bool) {
+        if !entry.is_usable() {
             return;
         }
-        if let Some(i) = self.index.find(&report.address, |pos| self.items[pos].address) {
-            let held = &mut self.items[i];
-            held.rssi = held.rssi.max(report.rssi);
-            if held.mfgr.is_none() {
-                held.mfgr = report.mfgr;
-            }
+        let address = entry.address();
+        if let Some(i) = self.index.find(&address, |pos| self.items[pos].address()) {
+            self.items[i].merge(&entry);
             return;
         }
-        if !due(&report) {
+        if !due(&entry) {
             return;
         }
         if self.len == N {
-            self.dropped.note(&report.address);
+            self.dropped.note(&address);
             return;
         }
-        self.items[self.len] = report;
-        self.index.insert(&report.address, self.len);
+        self.items[self.len] = entry;
+        self.index.insert(&address, self.len);
         self.len += 1;
     }
 
-    /// Take the oldest report not yet taken, if there is one.
+    /// Take the oldest entry not yet taken, if there is one.
     ///
-    /// The bound is `len`, not the array. The slots past `len` are an earlier scan's
-    /// leavings or the zero fill, a `00:00:00:00:00:00` advertiser at 0 dBm that would
-    /// go on the air as if heard.
-    pub fn take(&mut self) -> Option<AdvReport> {
+    /// The bound is `len`, not the array. The slots past `len` are an earlier dwell's or
+    /// scan's leavings or the blank fill, and would go on the air as if heard.
+    pub fn take(&mut self) -> Option<T> {
         if self.taken >= self.len {
             return None;
         }
-        let report = self.items[self.taken];
+        let entry = self.items[self.taken];
         self.taken += 1;
-        Some(report)
+        Some(entry)
     }
 
-    /// Empty the buffer for a new scan. [`Self::dropped`] carries on, and an
-    /// advertiser turned away last scan counts again if it is turned away in this one.
+    /// Empty the buffer for a new dwell or scan. [`Self::dropped`] carries on, and an
+    /// address turned away last time counts again if it is turned away in this one.
     ///
-    /// Resetting the index writes all `S` slots, which is cheap at once per scan.
+    /// Resetting the index writes all `S` slots, which is cheap at once per dwell or scan.
     pub fn clear(&mut self) {
         self.len = 0;
         self.taken = 0;
@@ -216,20 +176,20 @@ impl<const N: usize, const S: usize> BlePending<N, S> {
         self.index.clear();
     }
 
-    /// Distinct addresses held this scan, at most `N`.
+    /// Distinct addresses held this dwell or scan, at most `N`.
     #[must_use]
     pub const fn len(&self) -> usize {
         self.len
     }
 
-    /// Whether this scan holds nothing.
+    /// Whether this dwell or scan holds nothing.
     #[must_use]
     pub const fn is_empty(&self) -> bool {
         self.len == 0
     }
 
-    /// Advertisers a full buffer turned away since construction, each once per scan.
-    /// Wraps. [`Refused`] says how it slightly undercounts.
+    /// Addresses a full buffer turned away since construction, each once per dwell or
+    /// scan. Wraps. [`Refused`] says how it slightly undercounts.
     #[must_use]
     pub const fn dropped(&self) -> u16 {
         self.dropped.total()

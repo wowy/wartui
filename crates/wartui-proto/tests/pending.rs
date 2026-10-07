@@ -1,13 +1,96 @@
 //! The buffers one dwell's sightings and one scan's reports wait in, and the count of
 //! what a full one turns away.
 
+use wartui_proto::pending::{Entry, Pending, Refused};
+
+/// Multiplicative hash matching the index `Pending` builds, used only to find addresses
+/// that collide.
+fn hash_for_test(address: &[u8; 6], bits: u32) -> usize {
+    let hi = u32::from_be_bytes([address[0], address[1], address[2], address[3]]);
+    let lo = u32::from_be_bytes([0, 0, address[4], address[5]]);
+    let h = (hi ^ lo).wrapping_mul(0x9E37_79B1);
+    (h >> (32 - bits)) as usize
+}
+
+/// A minimal deterministic PRNG (MMIX's LCG), so the random tests are reproducible
+/// without a new dependency.
+struct Lcg(u64);
+
+impl Lcg {
+    fn next_u32(&mut self) -> u32 {
+        self.0 =
+            self.0.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+        (self.0 >> 32) as u32
+    }
+}
+
+fn due<T>(_: &T) -> bool {
+    true
+}
+
+fn not_due<T>(_: &T) -> bool {
+    false
+}
+
+fn drain<T: Entry, const N: usize, const S: usize>(pending: &mut Pending<T, N, S>) -> Vec<T> {
+    std::iter::from_fn(|| pending.take()).collect()
+}
+
+/// `Pending`'s rules over a linear search, the model the hashed buffer is checked against.
+/// It counts drops with the same `Refused` and merges through the same `Entry::merge`,
+/// because what is under test is finding the address. The merge rules are pinned by their
+/// own tests.
+struct NaivePending<T: Entry> {
+    items: Vec<T>,
+    cap: usize,
+    taken: usize,
+    dropped: Refused,
+}
+
+impl<T: Entry> NaivePending<T> {
+    fn new(cap: usize) -> Self {
+        Self { items: Vec::new(), cap, taken: 0, dropped: Refused::new() }
+    }
+
+    fn record(&mut self, entry: T, due: bool) {
+        if !entry.is_usable() {
+            return;
+        }
+        if let Some(held) = self.items.iter_mut().find(|e| e.address() == entry.address()) {
+            held.merge(&entry);
+            return;
+        }
+        if !due {
+            return;
+        }
+        if self.items.len() == self.cap {
+            self.dropped.note(&entry.address());
+            return;
+        }
+        self.items.push(entry);
+    }
+
+    fn take(&mut self) -> Option<T> {
+        let entry = self.items.get(self.taken).copied();
+        self.taken += usize::from(entry.is_some());
+        entry
+    }
+
+    fn clear(&mut self) {
+        self.items.clear();
+        self.taken = 0;
+        self.dropped.reset();
+    }
+}
+
 /// The buffer one dwell's Wi-Fi sightings wait in.
 ///
 /// Sightings are parsed from assembled beacons rather than built directly, since
 /// `Sighting` has no public constructor and the parser is what the node uses.
 mod wifi_pending {
+    use super::*;
     use wartui_proto::beacon::{Sighting, parse_mgmt};
-    use wartui_proto::pending::{Refused, WifiPending};
+    use wartui_proto::pending::WifiPending;
 
     /// A beacon from `bssid` naming `ssid`, parsed as heard at `rssi` on channel 6.
     fn sighting(bssid: [u8; 6], ssid: &[u8], rssi: i8) -> Sighting {
@@ -31,18 +114,6 @@ mod wifi_pending {
 
     fn ap(n: u8, rssi: i8) -> Sighting {
         sighting(bssid(n), &[b'a', n], rssi)
-    }
-
-    fn due(_: &Sighting) -> bool {
-        true
-    }
-
-    fn not_due(_: &Sighting) -> bool {
-        false
-    }
-
-    fn drain<const N: usize, const S: usize>(pending: &mut WifiPending<N, S>) -> Vec<Sighting> {
-        std::iter::from_fn(|| pending.take()).collect()
     }
 
     #[test]
@@ -130,15 +201,6 @@ mod wifi_pending {
         assert_eq!(pending.take(), None, "last dwell's leavings are not handed out");
     }
 
-    /// Multiplicative hash matching the index `WifiPending` builds, used only to find
-    /// BSSIDs that collide.
-    fn hash_for_test(address: &[u8; 6], bits: u32) -> usize {
-        let hi = u32::from_be_bytes([address[0], address[1], address[2], address[3]]);
-        let lo = u32::from_be_bytes([0, 0, address[4], address[5]]);
-        let h = (hi ^ lo).wrapping_mul(0x9E37_79B1);
-        (h >> (32 - bits)) as usize
-    }
-
     #[test]
     fn wifi_pending_deduplicates_each_bssid_when_bssids_share_a_hash_slot() {
         let home = |n: u8| hash_for_test(&bssid(n), 3);
@@ -157,66 +219,13 @@ mod wifi_pending {
         assert_eq!(drain(&mut pending), expected);
     }
 
-    /// `WifiPending`'s rules over a linear search, the model the hashed buffer is checked
-    /// against. It counts drops with the same `Refused`, since what is under test is finding
-    /// the BSSID, not counting it.
-    struct NaivePending {
-        items: Vec<Sighting>,
-        cap: usize,
-        taken: usize,
-        dropped: Refused,
-    }
-
-    impl NaivePending {
-        fn record(&mut self, sighting: Sighting, due: bool) {
-            if self.items.iter().any(|s| s.bssid == sighting.bssid) {
-                return;
-            }
-            if !due {
-                return;
-            }
-            if self.items.len() == self.cap {
-                self.dropped.note(&sighting.bssid);
-                return;
-            }
-            self.items.push(sighting);
-        }
-
-        fn take(&mut self) -> Option<Sighting> {
-            let sighting = self.items.get(self.taken).copied();
-            self.taken += usize::from(sighting.is_some());
-            sighting
-        }
-
-        fn clear(&mut self) {
-            self.items.clear();
-            self.taken = 0;
-            self.dropped.reset();
-        }
-    }
-
-    /// A minimal deterministic PRNG (MMIX's LCG), so the random test is reproducible
-    /// without a new dependency.
-    struct Lcg(u64);
-
-    impl Lcg {
-        fn next_u32(&mut self) -> u32 {
-            self.0 = self
-                .0
-                .wrapping_mul(6_364_136_223_846_793_005)
-                .wrapping_add(1_442_695_040_888_963_407);
-            (self.0 >> 32) as u32
-        }
-    }
-
     #[test]
     fn wifi_pending_matches_a_naive_model_when_driven_by_a_long_random_sequence() {
         const N: usize = 12;
         const ADDRESSES: u32 = 40;
 
         let mut pending = WifiPending::<N, 32>::new();
-        let mut model =
-            NaivePending { items: Vec::new(), cap: N, taken: 0, dropped: Refused::new() };
+        let mut model = NaivePending::new(N);
         let mut rng = Lcg(0x5EED_BEAC);
 
         for step in 0..5_000 {
@@ -244,24 +253,13 @@ mod wifi_pending {
 }
 
 mod ble_pending {
+    use super::*;
     use wartui_proto::hci::AdvReport;
-    use wartui_proto::pending::{BlePending, Refused};
+    use wartui_proto::pending::BlePending;
 
     /// A report from the advertiser whose address ends in `n`.
     fn report(n: u8, rssi: i8, mfgr: Option<u16>) -> AdvReport {
         AdvReport { address: [0x11, 0x22, 0x33, 0x44, 0x55, n], rssi, mfgr }
-    }
-
-    fn due(_: &AdvReport) -> bool {
-        true
-    }
-
-    fn not_due(_: &AdvReport) -> bool {
-        false
-    }
-
-    fn drain<const N: usize, const S: usize>(pending: &mut BlePending<N, S>) -> Vec<AdvReport> {
-        std::iter::from_fn(|| pending.take()).collect()
     }
 
     #[test]
@@ -388,15 +386,6 @@ mod ble_pending {
         assert_eq!(drain(&mut pending), [report(1, -70, None)]);
     }
 
-    /// Multiplicative hash matching the index `BlePending` builds, used only to find
-    /// addresses that collide.
-    fn hash_for_test(address: &[u8; 6], bits: u32) -> usize {
-        let hi = u32::from_be_bytes([address[0], address[1], address[2], address[3]]);
-        let lo = u32::from_be_bytes([0, 0, address[4], address[5]]);
-        let h = (hi ^ lo).wrapping_mul(0x9E37_79B1);
-        (h >> (32 - bits)) as usize
-    }
-
     #[test]
     fn ble_pending_merges_each_address_when_addresses_share_a_hash_slot() {
         let home = |n: u8| hash_for_test(&report(n, 0, None).address, 3);
@@ -417,71 +406,13 @@ mod ble_pending {
         assert_eq!(drain(&mut pending), expected);
     }
 
-    /// `BlePending`'s rules over a linear search, the model the hashed buffer is
-    /// checked against. It counts drops with the same `Refused`, since what is under
-    /// test is finding the address, not counting it.
-    struct NaivePending {
-        items: Vec<AdvReport>,
-        cap: usize,
-        taken: usize,
-        dropped: Refused,
-    }
-
-    impl NaivePending {
-        fn record(&mut self, report: AdvReport, due: bool) {
-            if report.rssi == 127 {
-                return;
-            }
-            if let Some(held) = self.items.iter_mut().find(|r| r.address == report.address) {
-                held.rssi = held.rssi.max(report.rssi);
-                held.mfgr = held.mfgr.or(report.mfgr);
-                return;
-            }
-            if !due {
-                return;
-            }
-            if self.items.len() == self.cap {
-                self.dropped.note(&report.address);
-                return;
-            }
-            self.items.push(report);
-        }
-
-        fn take(&mut self) -> Option<AdvReport> {
-            let report = self.items.get(self.taken).copied();
-            self.taken += usize::from(report.is_some());
-            report
-        }
-
-        fn clear(&mut self) {
-            self.items.clear();
-            self.taken = 0;
-            self.dropped.reset();
-        }
-    }
-
-    /// A minimal deterministic PRNG (MMIX's LCG), so the random test is reproducible
-    /// without a new dependency.
-    struct Lcg(u64);
-
-    impl Lcg {
-        fn next_u32(&mut self) -> u32 {
-            self.0 = self
-                .0
-                .wrapping_mul(6_364_136_223_846_793_005)
-                .wrapping_add(1_442_695_040_888_963_407);
-            (self.0 >> 32) as u32
-        }
-    }
-
     #[test]
     fn ble_pending_matches_a_naive_model_when_driven_by_a_long_random_sequence() {
         const N: usize = 12;
         const ADDRESSES: u32 = 40;
 
         let mut pending = BlePending::<N, 32>::new();
-        let mut model =
-            NaivePending { items: Vec::new(), cap: N, taken: 0, dropped: Refused::new() };
+        let mut model = NaivePending::new(N);
         let mut rng = Lcg(0xB1E5_EED5);
 
         for step in 0..5_000 {
