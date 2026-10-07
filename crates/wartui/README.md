@@ -143,7 +143,7 @@ to standard error; no output file is written. The tail of its output, after the 
 | `health`      | Under-voltage and throttling the Pi firmware reported, temperature, battery     |
 | `batches`     | Sighting batches lost between node and host; the fleet table's `lost`           |
 | `heartbeats`  | Heartbeats lost between node and host, and how many of them were `unsent`       |
-| `buffer full` | Sightings a node's full pending buffer refused; most are reported a dwell later |
+| `buffer full` | Sightings a full pending buffer refused; most reappear in a later dwell or scan |
 
 Counts follow the assumptions below; `lost on USB` is approximate. The capture's first bridge
 reply and first heartbeat per node are baselines, so what was dropped before the capture began

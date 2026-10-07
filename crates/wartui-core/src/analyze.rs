@@ -33,8 +33,8 @@
 //! and `beat`, never from `unsent` falling, as `advance_since_boot` would.
 //!
 //! Refusals are reported beside the losses, not as one. A full pending buffer turns a sighting away
-//! once per dwell, and the network is usually reported on a later dwell. The count is buffer
-//! pressure, not missing sightings.
+//! once per dwell or scan, and the address is usually reported on a later one. The count is
+//! buffer pressure, not missing sightings.
 //!
 //! On the bridge side, each `bridge_status` row carries `host_frames`, the frames the host had read
 //! when the reply arrived. `host_read` is the frames read between the first reply and the last.

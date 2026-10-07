@@ -13,9 +13,8 @@ use wartui_core::export::wigle_csv;
 use wartui_core::store::open_readonly;
 use wartui_proto::mac;
 
-use crate::export::{
-    Selection, details, note_quality, note_unknown_kind, note_unpositioned, thousands,
-};
+use crate::export::{Selection, details, note_quality, note_unknown_kind, note_unpositioned};
+use crate::text::{buffer_full, thousands};
 
 #[derive(ClapArgs, Debug)]
 pub struct Args {
@@ -257,17 +256,6 @@ fn millis(us: u64) -> String {
     } else {
         format!("{} ms", thousands((us + 500) / 1000))
     }
-}
-
-/// `buffer full` and the non-zero counts of sightings a full pending buffer refused, or
-/// `None` when both are zero. The TUI footer prints the same text.
-pub(crate) fn buffer_full(wifi: u64, ble: u64) -> Option<String> {
-    let figures: Vec<String> = [("wifi", wifi), ("ble", ble)]
-        .into_iter()
-        .filter(|(_, n)| *n > 0)
-        .map(|(kind, n)| format!("{kind} {}", thousands(n)))
-        .collect();
-    (!figures.is_empty()).then(|| format!("buffer full {}", figures.join("  ")))
 }
 
 /// `part` as a share of a non-zero `whole`, to one decimal place.

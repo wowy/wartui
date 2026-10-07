@@ -30,6 +30,7 @@ mod sniff;
 mod status;
 #[cfg(test)]
 mod testing;
+mod text;
 mod tui;
 mod upload;
 

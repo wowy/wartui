@@ -25,6 +25,7 @@ use wartui_core::store::{Connection, is_simulated, open_readonly};
 use wartui_proto::mac;
 
 use crate::capture;
+use crate::text::thousands;
 
 /// Which capture to read and which of its rows to send, shared by `export` and `upload`
 /// so both read a capture the same way.
@@ -272,19 +273,6 @@ pub(crate) fn details(summary: &ExportSummary) -> String {
     text
 }
 
-/// `n` with a comma between each group of three digits.
-pub(crate) fn thousands(n: u64) -> String {
-    let digits = n.to_string();
-    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
-    for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    out
-}
-
 /// The capture's first and last sighting in UTC, and how long lay between them. The
 /// end carries its date only when it is not the start's. The length is measured between
 /// the minutes shown, so it agrees with them.
@@ -488,9 +476,6 @@ mod tests {
             text.contains("  BLE         6,402 devices  112,233 sightings  6,950 rows"),
             "{text}"
         );
-        assert_eq!(super::thousands(0), "0");
-        assert_eq!(super::thousands(999), "999");
-        assert_eq!(super::thousands(1_000), "1,000");
     }
 
     #[test]

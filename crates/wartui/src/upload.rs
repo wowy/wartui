@@ -72,9 +72,8 @@ use wartui_core::store::{
 };
 
 use crate::config::{self, Config};
-use crate::export::{
-    Selection, details, note_quality, note_unknown_kind, note_unpositioned, thousands,
-};
+use crate::export::{Selection, details, note_quality, note_unknown_kind, note_unpositioned};
+use crate::text::thousands;
 
 /// The leaderboard.
 pub(crate) const BASE: &str = "https://wdgwars.pl";
