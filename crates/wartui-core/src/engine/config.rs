@@ -1,7 +1,8 @@
 use std::time::Duration;
 
 use wartui_proto::mac::Mac;
-use wartui_proto::plan::{ChannelPool, DEFAULT_TX_POWER_QUARTER_DBM};
+use wartui_proto::plan::ChannelPool;
+use wartui_proto::tx_power::DEFAULT_TX_POWER_QUARTER_DBM;
 
 #[cfg(doc)]
 use super::{Command, FleetEngine};

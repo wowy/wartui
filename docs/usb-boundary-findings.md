@@ -37,7 +37,7 @@ The bridge's outbox counts the bytes written into the current USB packet. A pump
 end on a packet boundary writes one lone `0x00` before it flushes, so the transfer ends on a
 short packet. A lone `0x00` is an empty frame, which every receiver skips. If the FIFO is
 full, the zero is owed and goes out first on the next pump.
-→ `crates/wartui-proto/src/outbox.rs`
+→ `crates/wartui-proto/src/outbox/mod.rs`
 
 ## The change on the bench
 

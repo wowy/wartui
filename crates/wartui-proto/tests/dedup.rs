@@ -1,7 +1,9 @@
 //! The ring that keeps a node from reporting the same access point forever.
 
-use wartui_proto::dedup::{C5DedupRing, C6DedupRing, MacRing, Refused};
-use wartui_proto::plan::{DEDUP_REFRESH_MS, DEDUP_RING_C5, DEDUP_RING_C6, DEDUP_RSSI_GAIN_DB};
+use wartui_proto::dedup::{
+    C5DedupRing, C6DedupRing, DEDUP_REFRESH_MS, DEDUP_RING_C5, DEDUP_RING_C6, DEDUP_RSSI_GAIN_DB,
+    MacRing,
+};
 
 const T0: u32 = 1_000;
 
@@ -384,37 +386,4 @@ fn mac_ring_matches_a_naive_model_when_driven_by_a_long_random_sequence() {
             "final state diverges for mac {n}"
         );
     }
-}
-
-#[test]
-fn refused_counts_address_once_when_repeated_within_dwell() {
-    let mut refused = Refused::new();
-    for _ in 0..10 {
-        refused.note(&mac(1));
-    }
-    assert_eq!(refused.total(), 1, "ten beacons from one access point are one address");
-}
-
-#[test]
-fn refused_counts_again_when_reset_between_dwells() {
-    let mut refused = Refused::new();
-    refused.note(&mac(1));
-    refused.reset();
-    refused.note(&mac(1));
-    refused.note(&mac(1));
-    assert_eq!(refused.total(), 2, "the total carries across a reset and the address counts anew");
-}
-
-#[test]
-fn refused_counts_distinct_addresses_when_many_refused() {
-    // Addresses that share a bit in one dwell count once, so a dense dwell may
-    // undercount by a few, never overcount.
-    let mut refused = Refused::new();
-    for n in 0..50u16 {
-        let x = n.wrapping_mul(0x9E37) ^ 0x5A5A;
-        let [a, b] = x.to_be_bytes();
-        refused.note(&[0x3C, a, 0x71, b, 0x08, 0xC4]);
-    }
-    let total = refused.total();
-    assert!((47..=50).contains(&total), "50 distinct addresses counted as {total}");
 }

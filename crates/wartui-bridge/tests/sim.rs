@@ -12,9 +12,8 @@ use wartui_bridge::{LinkEvent, LinkHandle};
 use wartui_proto::air::{AdminMsg, ClearMsg, Frame, HeartbeatMsg, RecordKind};
 use wartui_proto::link::{BridgeToHost, EspNowPayload, HostToBridge, SendStatus};
 use wartui_proto::mac::Mac;
-use wartui_proto::plan::{
-    ASSIGNED_BEAT_MS, CHANNEL_DWELL_MS, ChannelPool, ChannelSet, IDLE_BEAT_MS, IndexRun,
-};
+use wartui_proto::node::{ASSIGNED_BEAT_MS, CHANNEL_DWELL_MS, IDLE_BEAT_MS};
+use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun};
 
 /// The next node → core frame, as (source, the bytes it arrived as).
 ///

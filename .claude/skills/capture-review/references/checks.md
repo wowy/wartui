@@ -14,11 +14,11 @@ reasoning.
 | `unsent` is a large share of a node's missed beats | The node's radio refused the broadcast: a full send queue or a failed send callback. It is not air loss, so link RSSI and placement do not explain it. | `firmware/node/src/radio.rs` `broadcast` |
 | `miss spacing` peaks at 2 or more beats rather than at 1 (survey flags "misses heartbeats periodically") | The loss is not independent. Something recurring every N beats lines up with the heartbeat. Candidates: the beat deadline drifting against the sweep, or a periodic transmitter near the bridge or node. No cause is established. Compare the period with the node's sweep length and its beat deadline, and check whether other nodes in the same capture share it. | `firmware/node/src/main.rs` (`next_beat` / `next_beat_after`, the dwell loop) |
 | Heartbeat gaps only on sweeping nodes, none on the BLE node | Hypothesis: a beat sent just after a node parks back on the control channel is lost. Heartbeats are broadcast with no retry. | `firmware/node/src/main.rs` (dwell loop), `firmware/node/src/radio.rs` `park` |
-| Rows in `batch_gap` | Unicast sighting batches the bridge never passed up. The MAC layer retried and gave up, or the bridge ring evicted them. | `docs/batch-loss-findings.md`, `crates/wartui-proto/src/outbox.rs` |
-| Bridge `dropped_tx` rising | The bridge's ring to the host overflowed because the host was not reading fast enough. | `crates/wartui-proto/src/outbox.rs` `//!`, `docs/usb-boundary-findings.md` |
+| Rows in `batch_gap` | Unicast sighting batches the bridge never passed up. The MAC layer retried and gave up, or the bridge ring evicted them. | `docs/batch-loss-findings.md`, `crates/wartui-proto/src/outbox/mod.rs` |
+| Bridge `dropped_tx` rising | The bridge's ring to the host overflowed because the host was not reading fast enough. | `crates/wartui-proto/src/outbox/mod.rs` `//!`, `docs/usb-boundary-findings.md` |
 | `~lost on USB` > 0 | Frames lost between the bridge queue and the host read. It is approximate to ±24 frames. | `crates/wartui-core/src/analyze.rs` `//!`, `docs/usb-boundary-findings.md` |
 | `store_dropped` > 0 | The store queue was full and rows were dropped by design rather than blocking the engine. Check the commit peak and the SD card. | `crates/wartui-core/src/store.rs` `//!`, `docs/store-io-findings.md` |
-| Ring refusals (`wifi_dropped`/`ble_dropped` deltas) | Ring pressure on the node: a sighting was turned away once per dwell. Usually reported on a later dwell, so not loss. | `crates/wartui-proto/src/outbox.rs`, `crates/wartui-core/src/analyze.rs` `//!` |
+| Ring refusals (`wifi_dropped`/`ble_dropped` deltas) | Ring pressure on the node: a sighting was turned away once per dwell. Usually reported on a later dwell, so not loss. | `crates/wartui-proto/src/outbox/mod.rs`, `crates/wartui-core/src/analyze.rs` `//!` |
 | `duplicate_batches` | Retransmits the dedup caught. The batch was stored once, so this is not loss. | `crates/wartui-proto/src/dedup.rs` |
 
 ## Admin and plan
@@ -43,18 +43,18 @@ reasoning.
 | `peer_count` = nodes + 1 | Expected. The bridge registers a broadcast peer at init, which is why it reads 1 before any node joins. | `firmware/bridge/src/main.rs` (broadcast peer setup) |
 | `peer_count` above nodes + 1 | Peers not yet aged out (they are removed one `topology_timeout` after the last heartbeat), or nodes that never sent a heartbeat. | `crates/wartui-core/src/engine/mod.rs` |
 | `rx_count` flat while `uptime_ms` keeps rising | The bridge was up but heard nothing over the air. At the start of a capture this means the fleet was powered after the host. Mid-drive, together with every node restarting, it means the nodes lost power. | `bridge_status` rows; the survey prints the longest such stretch |
-| `garbled` | COBS or link frames that did not decode, usually resynchronisation after a truncated USB write. | `crates/wartui-proto/src/link.rs`, `crates/wartui-proto/src/outbox.rs` |
-| `undecodable` | Counts two things: a frame without our magic that `air::foreign` does not recognise (most often a stranger's ESP-NOW device), and a frame with our magic and version whose body would not parse. Only the second is our bug. A short burst at one place is usually the first. The capture cannot tell them apart without raw frames. | `crates/wartui-core/src/engine/rx.rs` (both increments), `crates/wartui-proto/src/air.rs` |
-| `incompatible` | Frames carrying our magic with an unknown wire version: a node on another build. The fix is to reflash the fleet together. | `crates/wartui-proto/src/air.rs` `WIRE_VERSION` |
-| `foreign_fleet` / `foreign_admin` | Somebody else's wartui-like fleet nearby. It is reported, never accommodated. | `crates/wartui-proto/src/air.rs` `air::foreign` |
+| `garbled` | COBS or link frames that did not decode, usually resynchronisation after a truncated USB write. | `crates/wartui-proto/src/link/frame.rs`, `crates/wartui-proto/src/outbox/mod.rs` |
+| `undecodable` | Counts two things: a frame without our magic that `air::foreign` does not recognise (most often a stranger's ESP-NOW device), and a frame with our magic and version whose body would not parse. Only the second is our bug. A short burst at one place is usually the first. The capture cannot tell them apart without raw frames. | `crates/wartui-core/src/engine/rx.rs` (both increments), `crates/wartui-proto/src/air/mod.rs` |
+| `incompatible` | Frames carrying our magic with an unknown wire version: a node on another build. The fix is to reflash the fleet together. | `crates/wartui-proto/src/air/mod.rs` `WIRE_VERSION` |
+| `foreign_fleet` / `foreign_admin` | Somebody else's wartui-like fleet nearby. It is reported, never accommodated. | `crates/wartui-proto/src/air/foreign.rs` `air::foreign` |
 
 ## Sightings and decode
 
 | Symptom | Usual meaning | Read |
 |---|---|---|
 | A channel outside the scan table (0, odd 5 GHz numbers) | The channel comes from the frame's own element (DS Parameter Set or HT operation) when present, otherwise from the parked channel. A garbled or vendor-odd element yields a nonsense channel. | `crates/wartui-proto/src/beacon.rs` (channel parsing) |
-| 5 GHz rows on a channel never assigned to the node | Usually an adjacent or HT40-secondary beacon heard while parked nearby. It is a bug if a node repeatedly reports a whole band it was not given; check `park`. | `firmware/node/src/radio.rs` `park`, `crates/wartui-proto/src/plan.rs` |
-| No 5 GHz rows at all | The planner found 5 GHz unreachable (the only 5G radio held the BLE job), or the regulatory domain is wrong. | `crates/wartui-proto/src/plan.rs` `Plan::unreachable`; AGENTS.md (the `US` domain rule) |
+| 5 GHz rows on a channel never assigned to the node | Usually an adjacent or HT40-secondary beacon heard while parked nearby. It is a bug if a node repeatedly reports a whole band it was not given; check `park`. | `firmware/node/src/radio.rs` `park`, `crates/wartui-proto/src/plan/mod.rs` |
+| No 5 GHz rows at all | The planner found 5 GHz unreachable (the only 5G radio held the BLE job), or the regulatory domain is wrong. | `crates/wartui-proto/src/plan/mod.rs` `Plan::unreachable`; AGENTS.md (the `US` domain rule) |
 | Zero BSSID, or the multicast bit set on a BSSID | Parsing took the wrong address field, or the frame was not a beacon or probe response. | `crates/wartui-proto/src/beacon.rs`, `firmware/node/src/sniff.rs` |
 | Security `[UNDEFINED]` | No RSN or WPA element, and the privacy bit is ambiguous. Check which frame types produce it. | `crates/wartui-proto/src/beacon.rs` |
 | Unknown `kind` | A kind this build does not know. The export skips it. | `crates/wartui-core/src/export.rs`, `crates/wartui-core/src/store.rs` (kind mapping) |
@@ -70,7 +70,7 @@ reasoning.
 | Fix age above `gps_max_age_ms` | The chain handed out a stale fix, which would be a bug. | `crates/wartui-core/src/position.rs` |
 | Position jumps above 250 km/h | NMEA glitches or a cold-start fix. The exported rows carry the bad position. | `crates/wartui-core/src/nmea.rs`, `crates/wartui-core/src/gps.rs` |
 | `rx_at` steps backwards | The host wall clock was set mid-run by NTP or GPS time. Analysis walks rows by `id` for this reason. | `crates/wartui-core/src/analyze.rs` `//!` |
-| Every node restarts within seconds while the bridge stays up | A shared supply to the nodes was cut, for example engine off or a socket. A panic on all boards at once is very unlikely. The heartbeat carries no reset reason, so the capture cannot prove it. | `crates/wartui-core/src/engine/rx.rs` (reboot detection), `crates/wartui-proto/src/air.rs` `HeartbeatMsg` |
+| Every node restarts within seconds while the bridge stays up | A shared supply to the nodes was cut, for example engine off or a socket. A panic on all boards at once is very unlikely. The heartbeat carries no reset reason, so the capture cannot prove it. | `crates/wartui-core/src/engine/rx.rs` (reboot detection), `crates/wartui-proto/src/air/heartbeat.rs` `HeartbeatMsg` |
 | `battery_ma` negative throughout, voltage falling | The host ran on its own battery and was not charging. This affects range, not data. | `crates/wartui-core/src/health.rs` |
 | `upload.result` is `unfollowed` | The host stopped waiting before the site said done or failed. Whether it imported is unknown; check the job on the site. Never re-upload without asking. | `crates/wartui/src/upload.rs` |
 | An uploaded row count differs from what `wartui export` gives today | The build that uploaded exports differently from this one, for example one that keeps zero or group BSSIDs. Find the rows that differ before blaming the site. | `crates/wartui-core/src/export.rs` `//!` |

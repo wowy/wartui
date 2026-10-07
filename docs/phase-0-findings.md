@@ -24,7 +24,7 @@ them at all.
 > the time. It is no longer true of wartui in either direction: every frame now
 > carries wartui's own magic, and the vendor vectors and the C++ generator that
 > produced them have been deleted along with `tools/golden`. The reason is in
-> `crates/wartui-proto/src/air.rs` and comes straight out of this document's own
+> `crates/wartui-proto/src/air/mod.rs` and comes straight out of this document's own
 > measurements — two fleets that share a format share one conversation. What
 > survives here is the record of what the vendor firmware puts on the air, which
 > is what `air::foreign` recognises in order to report it.

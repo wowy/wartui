@@ -1,13 +1,13 @@
 use std::time::Duration;
 
 use wartui_proto::mac::{self, Mac};
-use wartui_proto::plan;
+use wartui_proto::node;
 
 use super::{FleetEngine, Now};
 
 /// A lag large enough that [`FleetEngine::air_is_live`] says no: the assumption on a connection
 /// whose backlog has not been seen yet.
-pub(crate) const BEHIND_THE_AIR_US: u64 = plan::ADMIN_WAIT_MS as u64 * 1_000;
+pub(crate) const BEHIND_THE_AIR_US: u64 = node::ADMIN_WAIT_MS as u64 * 1_000;
 
 /// How long a link must be up with no frame before its first frame counts as live.
 ///

@@ -34,7 +34,8 @@ use std::time::Instant;
 use wartui_bridge::{BridgeInfo, LinkEvent};
 use wartui_proto::link::{BridgeToHost, HostToBridge};
 use wartui_proto::mac::Mac;
-use wartui_proto::plan::{Job, Plan, clamp_tx_power};
+use wartui_proto::plan::{Job, Plan};
+use wartui_proto::tx_power::clamp_tx_power;
 
 pub use config::EngineConfig;
 pub use event::{ActionBatch, Command, Event, HostSample, Now, StorePeaks, StoreStats};
@@ -139,7 +140,7 @@ impl FleetEngine {
     /// Start an engine. `now` fixes the session's start time.
     #[must_use]
     pub fn new(mut config: EngineConfig, now: Now) -> Self {
-        // Clamped once here, not where each power reaches a radio. `plan::clamp_tx_power` says why.
+        // Clamped once here, not where each power reaches a radio. `tx_power::clamp_tx_power` says why.
         config.tx_power = clamp_tx_power(config.tx_power);
         config.bridge_tx_power = clamp_tx_power(config.bridge_tx_power);
         Self {

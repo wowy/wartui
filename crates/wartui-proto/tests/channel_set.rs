@@ -5,9 +5,9 @@
 //! iteration order is the order a node sweeps in, and the out-of-range
 //! behaviour is what stops a frame from a newer host stranding an older node.
 
+use wartui_proto::node::SweepCursor;
 use wartui_proto::plan::{
     CHANNEL_SET_BYTES, ChannelPool, ChannelSet, IndexRun, NUM_SCAN_CHANNELS, SCAN_CHANNELS,
-    SweepCursor,
 };
 
 #[test]

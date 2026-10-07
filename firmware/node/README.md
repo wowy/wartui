@@ -154,7 +154,7 @@ one node's Wi-Fi coverage. Which node is the operator's decision, not a property
 the board.
 
 Scans run back to back: the controller off, the new advertisers reported, and straight into the next
-scan, with no deadline of its own. A `plan::ASSIGNED_BEAT_MS` timer runs alongside, independent of
+scan, with no deadline of its own. A `node::ASSIGNED_BEAT_MS` timer runs alongside, independent of
 the scan cadence. When it comes due, the node's next dwell-free pass sends a heartbeat and holds a
 full admin window open before resuming scans. A const-assert beside `SCAN_MS` in `src/ble.rs` keeps
 a scan shorter than that timer, so the timer is always checked between scans. A scan that overruns

@@ -17,9 +17,12 @@ pub mod hci;
 pub mod link;
 pub mod mac;
 mod mac_index;
+pub mod node;
 pub mod outbox;
+pub mod pending;
 pub mod plan;
 pub mod stall;
+pub mod tx_power;
 
 /// Re-exported so consumers can build link payloads without depending on
 /// `heapless` themselves, and can never end up on a mismatched version.

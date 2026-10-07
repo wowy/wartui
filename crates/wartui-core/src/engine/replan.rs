@@ -1,7 +1,8 @@
 use wartui_proto::air::wire_epoch;
 use wartui_proto::link::HostToBridge;
 use wartui_proto::mac::Mac;
-use wartui_proto::plan::{self, ChannelPool, Job, Plan, Radio, clamp_tx_power};
+use wartui_proto::plan::{self, ChannelPool, Job, Plan, Radio};
+use wartui_proto::tx_power::clamp_tx_power;
 
 use super::{ActionBatch, Assignment, Command, FleetEngine, Now};
 
