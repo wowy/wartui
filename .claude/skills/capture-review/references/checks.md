@@ -73,5 +73,4 @@ reasoning.
 | `battery_ma` negative throughout, voltage falling | The host ran on its own battery and was not charging. This affects range, not data. | `crates/wartui-core/src/health.rs` |
 | `upload.result` is `unfollowed` | The host stopped waiting before the site said done or failed. Whether it imported is unknown; check the job on the site. Never re-upload without asking. | `crates/wartui/src/upload.rs` |
 | An uploaded row count differs from what `wartui export` gives today | The build that uploaded exports differently from this one, for example one that keeps zero or group BSSIDs. Find the rows that differ before blaming the site. | `crates/wartui-core/src/export.rs` `//!` |
-| `heartbeat.admin_sent` / `admin_acked` / `admin_latency_us` all 0 or NULL | Builds before PR #157 declared these columns but never wrote them, so their values mean nothing. Current builds do not declare them. The `assignment` table records each admin frame with its outcome and latency. | `crates/wartui-core/src/store.rs` (`assignment` schema) |
 | `ended_at` NULL | The host died or was killed before shutdown. Check the log tail. | `crates/wartui-core/src/store.rs` |
