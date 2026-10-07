@@ -1,5 +1,5 @@
 //! The fault box is empty on a clean run. Counts a healthy capture also produces, such
-//! as dropped sightings and missed admin windows, sit outside it, so a clean run looks
+//! as refused sightings and missed admin windows, sit outside it, so a clean run looks
 //! clean.
 
 use ratatui::Frame;
@@ -63,8 +63,8 @@ pub(super) fn draw_footer(
 
     // Its own line, so a notice never hides it. Plain, not yellow, because a full
     // pending buffer is normal in a dense area.
-    if let Some(drops) = drop_line(&c) {
-        lines.push(Line::from(drops));
+    if let Some(refused) = refused_line(&c) {
+        lines.push(Line::from(refused));
     }
 
     // Its own line for the same reason. It stays after the upload ends, until the
@@ -81,20 +81,16 @@ pub(super) fn draw_footer(
     frame.render_widget(Paragraph::new(lines).dim(), area);
 }
 
-/// Sightings dropped for lack of pending-buffer room this session, or `None`. Most are
-/// re-reported on the next dwell, so this measures how dense the area is, not a fault.
-pub(super) fn drop_line(c: &Counters) -> Option<String> {
-    if c.wifi_dropped == 0 && c.ble_dropped == 0 {
-        return None;
-    }
-    let mut line = String::new();
-    if c.wifi_dropped > 0 {
-        line.push_str(&format!("  wifi drop {}", c.wifi_dropped));
-    }
-    if c.ble_dropped > 0 {
-        line.push_str(&format!("  ble drop {}", c.ble_dropped));
-    }
-    Some(line)
+/// Sightings a full pending buffer refused this session, or `None`. Most are re-reported
+/// on the next dwell, so this measures how dense the area is, not a fault. Named as
+/// `wartui analyze` names it.
+pub(super) fn refused_line(c: &Counters) -> Option<String> {
+    let figures: Vec<String> = [("wifi", c.wifi_dropped), ("ble", c.ble_dropped)]
+        .into_iter()
+        .filter(|(_, n)| *n > 0)
+        .map(|(kind, n)| format!("{kind} {n}"))
+        .collect();
+    (!figures.is_empty()).then(|| format!("  refused {}", figures.join("  ")))
 }
 
 /// Every fault so far, most urgent first. Empty on a clean run.
@@ -508,30 +504,39 @@ mod tests {
     }
 
     #[test]
-    fn footer_hides_drop_line_when_both_counts_zero() {
+    fn footer_hides_refused_line_when_both_counts_zero() {
         let screen = rendered(&busy());
-        assert!(!screen.contains("wifi drop"), "{screen}");
-        assert!(!screen.contains("ble drop"), "{screen}");
+        assert!(!screen.contains("refused"), "{screen}");
     }
 
     #[test]
-    fn footer_displays_drop_line_when_wifi_count_nonzero() {
+    fn footer_displays_refused_line_when_wifi_count_nonzero() {
         let mut snapshot = busy();
         snapshot.counters.wifi_dropped = 12;
         let screen = rendered(&snapshot);
-        let line = screen.lines().find(|l| l.contains("wifi drop")).expect("a drop line");
-        assert!(line.contains("wifi drop 12"), "{screen}");
-        // A kind with nothing dropped is left out, not shown as 0.
-        assert!(!line.contains("ble drop"), "{screen}");
+        let line = screen.lines().find(|l| l.contains("refused")).expect("a refused line");
+        assert!(line.contains("  refused wifi 12"), "{screen}");
+        // A kind with nothing refused is left out, not shown as 0.
+        assert!(!line.contains("ble"), "{screen}");
         assert!(!line.contains("frames"), "a line of its own, not a span of the totals");
 
         snapshot.counters.ble_dropped = 4;
-        assert!(rendered(&snapshot).contains("wifi drop 12  ble drop 4"));
+        assert!(rendered(&snapshot).contains("  refused wifi 12  ble 4"));
     }
 
     #[test]
-    fn footer_keeps_drop_line_when_notice_shown() {
-        // The notice takes the totals line. The drops have their own line, so they
+    fn footer_displays_refused_line_when_only_ble_count_nonzero() {
+        let mut snapshot = busy();
+        snapshot.counters.ble_dropped = 4;
+        let screen = rendered(&snapshot);
+        let line = screen.lines().find(|l| l.contains("refused")).expect("a refused line");
+        assert!(line.contains("  refused ble 4"), "{screen}");
+        assert!(!line.contains("wifi"), "{screen}");
+    }
+
+    #[test]
+    fn footer_keeps_refused_line_when_notice_shown() {
+        // The notice takes the totals line. The refusals have their own line, so they
         // stay.
         let mut snapshot = busy();
         snapshot.counters.wifi_dropped = 12;
@@ -543,7 +548,7 @@ mod tests {
         let screen = terminal.backend().to_string();
         assert!(screen.contains("a notice"), "{screen}");
         assert!(!screen.contains("stored 800"), "the notice replaced the totals: {screen}");
-        assert!(screen.contains("wifi drop 12  ble drop 4"), "{screen}");
+        assert!(screen.contains("  refused wifi 12  ble 4"), "{screen}");
     }
 
     /// A capture whose only fault is that the bridge restarted underneath it.

@@ -660,9 +660,9 @@ The footer shows faults only once they happen, so a clean run has a clean footer
   100 ms), a radio retransmitting after the bridge's ack was lost. The first copy was recorded, so
   nothing is lost and `dup` never overlaps `lost`. A repeat 100 ms or more later is the node's own
   re-send after a failed send, recorded normally.
-- **`wifi drop N  ble drop M`**: a line below the totals, counting distinct networks and advertisers
+- **`refused wifi N  ble M`**: a line below the totals, counting distinct networks and advertisers
   a node heard but had no room for in that dwell or scan, fleet-wide, this session. It appears when
-  a count passes zero, omits a kind still at zero, and stays. Not a fault: a dropped address is not
+  a count passes zero, omits a kind still at zero, and stays. Not a fault: a refused address is not
   held back, so the next pass reports it; only one never heard again is lost. A steadily growing
   count means a buffer too small for the area.
 - **`N frames from a vendor fleet`**, **`N admin frames from another core`**: another fleet

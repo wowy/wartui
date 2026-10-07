@@ -65,7 +65,7 @@ const _: () = assert!(
 /// of 128 reports costs up to 18 µs there.
 /// [`dropped`] counts those advertisers, once per scan each, and it is the only
 /// sign of saturation: the console's `heard` is capped here. The heartbeat carries
-/// it to the host, which shows the fleet's total as `ble drop`.
+/// it to the host, which shows the fleet's total in the footer's `refused` line.
 ///
 /// It is also the ceiling on the burst: `report_ble` drains the sweep into
 /// `Outgoing` batches unicast to the core before the next scan starts, so this is
