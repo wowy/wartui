@@ -224,8 +224,17 @@ def provenance(db, ctx):
                 ctx.setdefault("settings_changes", []).append((at, changed))
             prev = v
         ctx["settings_final"] = dict(p.split("=", 1) for p in v.split(";") if "=" in p)
-    s = ctx.get("settings", {})
-    if s.get("record_raw") == "false":
+    # Thresholds read ctx["settings"]: the initial row overlaid with every later change, so a value
+    # changed mid-run is judged by what was in force at the end. The changes are listed above.
+    if "settings_final" in ctx:
+        ctx["settings"] = {**ctx.get("settings", {}), **ctx["settings_final"]}
+    raw_values = {c[1] for _, ch in ctx.get("settings_changes", []) for k, c in ch.items()
+                  if k == "record_raw"}
+    if raw_values:
+        flag("INFO", "capture",
+             "record_raw changed during the run, so raw_frame covers only part of it (see the "
+             "settings changes above)")
+    elif ctx.get("settings", {}).get("record_raw") == "false":
         flag(
             "INFO",
             "capture",
@@ -259,12 +268,12 @@ def nodes(db, ctx):
     pref = ctx.get("settings", {}).get("preferred_ble")
     if pref and pref != "none":
         present = any(full(m) == pref.upper() for m in ctx["nodes"])
-        if not present:
+        if not present and not ctx.get("ble_nodes"):
             flag(
                 "INFO",
                 "config",
-                f"preferred_ble={pref} (the remembered Bluetooth node) never appeared, so no "
-                "node scanned Bluetooth",
+                f"preferred_ble={pref} (the remembered Bluetooth node) never appeared, and no "
+                "assignment gave another node the Bluetooth job, so no node scanned Bluetooth",
                 "SELECT k, v FROM kv WHERE k LIKE 'capture.settings%'",
             )
     if len(rows) > 20:
@@ -292,8 +301,6 @@ def heartbeats(db, ctx):
     beats_by_job = Counter()
     total_reversals = 0
     for mac, hs in per.items():
-        if ctx["only"] and short(mac) != ctx["only"]:
-            continue
         heard = missed = reboots = replayed = dups = 0
         wifi_ref = ble_ref = 0
         silences = []
@@ -334,6 +341,8 @@ def heartbeats(db, ctx):
         job = "ble" if mac in ble_nodes else "wifi"
         miss_by_job[job] += missed
         beats_by_job[job] += heard + missed
+        if ctx["only"] and short(mac) != ctx["only"]:
+            continue  # walked anyway: its restarts feed the grouping and the adoption check
         rssis = [r[5] for r in hs if r[5] is not None]
         half = len(rssis) // 2
         trend = ""
@@ -534,31 +543,35 @@ def assignments(db, ctx):
             print(f"    {short(mac)}  " + " ".join(f"{c}*" if c == 6 else str(c) for c in chans)
                   + ("  BLE" if r[4] else ""))
 
-    # Adoption: a heartbeat well after an acked assignment should carry its wire epoch.
+    # Adoption: a live heartbeat well after an acked assignment should carry that assignment's wire
+    # epoch, or the epoch of any assignment sent since. An unacked or silent one may still have
+    # landed (the frame arrived, its ack did not), which the engine allows for too.
     hb = ctx.get("hb", {})
     grace = 15_000
     for mac in {r[0] for r in rows}:
-        acked = sorted((r[6], r[2]) for r in rows if r[0] == mac and r[7] == "acked" and r[6])
-        if not acked:
+        sent = sorted((r[5], r[2], r[7], r[6]) for r in rows if r[0] == mac)
+        if not any(o == "acked" for _, _, o, _ in sent):
             continue
         mismatched = 0
         first = None
         restarted_at = [r[0] for r in ctx.get("restarts", []) if r[1] == mac]
         for h in hb.get(mac, []):
+            if h[7] == 0:
+                continue  # replayed from the backlog: its epoch is history, its rx_at is late
             if any(0 <= h[2] - t <= 30_000 for t in restarted_at):
                 continue  # a restarted node holds no epoch until the host re-sends one
-            settled = [i for i, (t, _) in enumerate(acked) if t <= h[2] - grace]
+            settled = [i for i, (_, _, o, d) in enumerate(sent)
+                       if o == "acked" and d and d <= h[2] - grace]
             if not settled:
                 continue
-            # The epoch settled by now, or any acked after it: a newer one may have just landed.
-            fine = {w for t, w in acked[settled[-1]:] if t <= h[2]}
+            fine = {w for t, w, _, _ in sent[settled[-1]:] if t <= h[2]}
             if h[4] not in fine:
                 mismatched += 1
                 first = first or h[2]
         if mismatched:
             flag("WARN", "admin",
-                 f"{short(mac)}: {mismatched} heartbeats >15 s after an acked assignment report a "
-                 f"different epoch (first at {rel(first)}): acked but not adopted",
+                 f"{short(mac)}: {mismatched} live heartbeats >15 s after an acked assignment carry an "
+                 f"epoch it was never sent since (first at {rel(first)}): acked but not adopted",
                  f"SELECT id, rx_at, epoch FROM heartbeat WHERE hex(node_mac)='{mac.hex().upper()}'")
 
 
@@ -796,7 +809,7 @@ def observations(db, ctx):
         flag("WARN", "startup",
              f"nothing was stored for {dur(first_obs - ctx['start'])} after the capture began "
              f"(first heartbeat {rel(first_hb)})",
-             "SELECT MIN(rx_at) - (SELECT started_at FROM capture) FROM heartbeat")
+             "SELECT MIN(rx_at) - (SELECT started_at FROM capture) FROM observation")
     heartbeating = set(ctx.get("hb", {}))
     for mac in heartbeating - {r[0] for r in per_node}:
         if mac not in ctx.get("ble_nodes", set()):
@@ -957,15 +970,23 @@ def uploads(db, ctx):
     for at, job, n, through, result in rows:
         print(f"  job {job}  {utc(at)} ({rel(at)})  {n} rows  through observation {through} "
               f"of {total}  result {result}")
-        if result in (None, "unfollowed", "failed"):
-            flag("WARN" if result == "failed" else "INFO", "upload",
+        if result == "failed":
+            flag("WARN", "upload",
+                 f"upload job {job} failed: the site imported nothing, so it is no cutoff and its "
+                 f"{n} rows are still unsent",
+                 "SELECT * FROM upload")
+        elif result in (None, "unfollowed"):
+            flag("INFO", "upload",
                  f"upload job {job} result is {result!r}: whether the site imported it is not "
                  "recorded (check the job on the site; never re-upload without asking)",
                  "SELECT * FROM upload")
+    cutoffs = [r[3] for r in rows if r[4] != "failed"]
+    if not cutoffs:
+        return
     junk = db.one(
         "SELECT COUNT(DISTINCT bssid) FROM observation WHERE kind='wifi' AND id <= ? AND "
         "(bssid = zeroblob(6) OR instr('13579BDF', substr(hex(bssid), 2, 1)) > 0)",
-        (rows[-1][3],))
+        (cutoffs[-1],))
     if junk:
         print(f"  {junk} zero/group BSSIDs lie inside the uploaded range; the current export "
               "drops them, but compare the uploaded row count with `wartui export` to see whether "
@@ -993,8 +1014,10 @@ def raw_frames(db, ctx):
             heads["other"] += 1
     print("  headers " + "  ".join(f"{k}: {v}" for k, v in heads.most_common()))
     # Type 1 is a heartbeat. Equal counts mean any heartbeat loss happened before the bridge.
+    wire = int(ctx.get("kv", {}).get("capture.wire_version", 1))
+    header = b"WTUI".hex().upper() + f"{wire:02X}01"  # magic, wire version, type 1 (heartbeat)
     raw_hb = dict(db.q("SELECT src, COUNT(*) FROM raw_frame "
-                       "WHERE hex(substr(bytes, 1, 6)) = '575455490101' GROUP BY 1"))
+                       "WHERE hex(substr(bytes, 1, 6)) = ? GROUP BY 1", (header,)))
     stored = {m: len(h) for m, h in ctx.get("hb", {}).items()}
     if raw_hb:
         print("  heartbeat frames raw/stored per node: " + "  ".join(
@@ -1114,11 +1137,11 @@ def main():
     print(f"survey of {args.db} (read-only)")
     print(f"tables: {', '.join(sorted(db.tables))}")
     provenance(db, ctx)
-    nodes(db, ctx)
-    # assignments first, quietly, so heartbeats can tell the Bluetooth node from the sweepers
+    # The Bluetooth node, read early so nodes() and heartbeats() can tell it from the sweepers.
     if db.has("assignment", "ble"):
         ctx["ble_nodes"] = {m for (m,) in db.q("SELECT DISTINCT node_mac FROM assignment "
                                               "WHERE ble=1")}
+    nodes(db, ctx)
     heartbeats(db, ctx)
     assignments(db, ctx)
     batch_gaps(db, ctx)
