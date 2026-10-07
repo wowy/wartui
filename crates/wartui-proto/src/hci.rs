@@ -96,6 +96,9 @@ pub struct AdvReport {
 }
 
 impl AdvReport {
+    /// An all-zero report, for filling a buffer before anything is heard.
+    pub(crate) const BLANK: Self = Self { address: [0; 6], rssi: 0, mfgr: None };
+
     /// The sighting as the record the wire carries, with `ext` as the trailer: the
     /// company identifier's two little-endian bytes, or nothing.
     ///

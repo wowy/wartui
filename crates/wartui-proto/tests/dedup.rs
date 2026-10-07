@@ -1,5 +1,8 @@
 //! The ring that keeps a node from reporting the same access point forever.
 
+mod common;
+
+use common::{Lcg, hash_for_test};
 use wartui_proto::dedup::{
     C5DedupRing, C6DedupRing, DEDUP_REFRESH_MS, DEDUP_RING_C5, DEDUP_RING_C6, DEDUP_RSSI_GAIN_DB,
     MacRing,
@@ -189,15 +192,6 @@ fn mac_ring_removes_only_the_evicted_mac_from_the_index_when_ring_overflows() {
     assert_eq!(ring.len(), 4);
 }
 
-/// Multiplicative hash matching [`wartui_proto::dedup`]'s documented contract, used
-/// here only to find MACs that collide — the ring itself never exposes it.
-fn hash_for_test(mac: &[u8; 6], bits: u32) -> usize {
-    let hi = u32::from_be_bytes([mac[0], mac[1], mac[2], mac[3]]);
-    let lo = u32::from_be_bytes([0, 0, mac[4], mac[5]]);
-    let h = (hi ^ lo).wrapping_mul(0x9E37_79B1);
-    (h >> (32 - bits)) as usize
-}
-
 /// Three MACs landing in the same hash slot of a `MacRing<_, 8>`, in the order that
 /// puts the first at the head of the probe run and the rest behind it.
 fn colliding_macs() -> [[u8; 6]; 3] {
@@ -316,22 +310,6 @@ impl NaiveRing {
     fn clear(&mut self) {
         self.entries.clear();
         self.cursor = 0;
-    }
-}
-
-/// A minimal deterministic PRNG (MMIX's LCG), so the random test is reproducible
-/// without a new dependency.
-struct Lcg(u64);
-
-impl Lcg {
-    fn new(seed: u64) -> Self {
-        Self(seed)
-    }
-
-    fn next_u32(&mut self) -> u32 {
-        self.0 =
-            self.0.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
-        (self.0 >> 32) as u32
     }
 }
 

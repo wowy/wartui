@@ -3,8 +3,8 @@
 //! lives here.
 //!
 //! [`Pending`] is the buffer. [`WifiPending`] holds one dwell's access points in it and
-//! [`BlePending`] one scan's advertisers. They differ only in what [`Entry`] supplies, and
-//! both follow the same rules:
+//! [`BlePending`] one scan's advertisers. They differ only in what the crate-private
+//! `Entry` trait supplies for each, and both follow the same rules:
 //!
 //! - **One entry per address.** A repeat hearing never takes a second slot.
 //! - **Slots go only to addresses the caller says are due.** An address the host already
@@ -32,26 +32,34 @@ use crate::beacon::Sighting;
 use crate::hci::AdvReport;
 use crate::mac_index::MacIndex;
 
-/// What a [`Pending`] holds: the part of a buffer's rules that depends on the kind of
-/// hearing.
-pub trait Entry: Copy {
-    /// The fill for slots nothing has taken. A constant rather than `Default`, so
-    /// [`Pending::new`] stays a `const fn` and the buffer can sit in a `static`.
-    const BLANK: Self;
+use entry::Entry;
 
-    /// The address the buffer keeps one entry for.
-    fn address(&self) -> [u8; 6];
+/// `pub` in a private module, so no other crate can name, call or implement it. The blank
+/// fill and the merge rules are the buffer's business, not API, and no outside type has a
+/// reason to be buffered.
+mod entry {
+    /// What a [`Pending`](super::Pending) holds: the part of a buffer's rules that depends
+    /// on the kind of hearing.
+    pub trait Entry: Copy {
+        /// The fill for slots nothing has taken. A constant rather than `Default`, so
+        /// [`Pending::new`](super::Pending::new) stays a `const fn` and the buffer can sit
+        /// in a `static`.
+        const BLANK: Self;
 
-    /// Whether the entry is worth holding at all. An entry ruled out here is never
-    /// looked up, merged, asked `due` or counted as dropped, since it is no reading of
-    /// anything.
-    fn is_usable(&self) -> bool {
-        true
+        /// The address the buffer keeps one entry for.
+        fn address(&self) -> [u8; 6];
+
+        /// Whether the entry is worth holding at all. An entry ruled out here is never
+        /// looked up, merged, asked `due` or counted as dropped, since it is no reading of
+        /// anything.
+        fn is_usable(&self) -> bool {
+            true
+        }
+
+        /// Fold a repeat hearing of the same address into the held entry. Nothing by
+        /// default: the first hearing is kept as it is.
+        fn merge(&mut self, _repeat: &Self) {}
     }
-
-    /// Fold a repeat hearing of the same address into the held entry. Nothing by default:
-    /// the first hearing is kept as it is.
-    fn merge(&mut self, _repeat: &Self) {}
 }
 
 /// An access point beacons about ten times a dwell, and only its first sighting is kept.
@@ -67,7 +75,7 @@ impl Entry for Sighting {
 /// An advertiser's identifier can arrive after its first hearing, so a repeat merges into
 /// the held report. A report without a reading is not held.
 impl Entry for AdvReport {
-    const BLANK: Self = AdvReport { address: [0; 6], rssi: 0, mfgr: None };
+    const BLANK: Self = AdvReport::BLANK;
 
     fn address(&self) -> [u8; 6] {
         self.address
