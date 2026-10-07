@@ -352,7 +352,10 @@ def heartbeats(db, ctx):
             print(f"        interval ms  {spread(intervals)}")
         print(f"        link rssi    {spread(rssis, ' dBm')}{trend}")
         if wifi_ref or ble_ref:
-            print(f"        ring refused wifi {wifi_ref}  ble {ble_ref}  (ring pressure, not loss)")
+            print(
+                f"        buffer full wifi {wifi_ref}  ble {ble_ref}  "
+                "(pending-buffer pressure, not loss)"
+            )
         epochs = Counter(r[4] for r in hs)
         print(f"        epochs held  {dict(sorted(epochs.items()))}")
         for a, b in silences[:5]:

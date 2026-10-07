@@ -32,7 +32,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use wartui_core::engine::{Command, Snapshot};
 
 use fleet::draw_fleet;
-use footer::{draw_footer, drop_line, fault_lines, faults};
+use footer::{buffer_full_line, draw_footer, fault_lines, faults};
 use header::draw_header;
 use input::{Input, is_ctrl_c, quits, spawn_input};
 pub use settings::Settings;
@@ -130,9 +130,9 @@ fn draw(frame: &mut Frame<'_>, snapshot: &Snapshot, ui: &mut Ui) {
     // Faults get their own lines, and only when there are any, so the counters
     // cannot push them off screen.
     let faults = fault_lines(&faults(snapshot), frame.area().width);
-    let drops = u16::from(drop_line(&snapshot.counters).is_some());
+    let buffer_full = u16::from(buffer_full_line(&snapshot.counters).is_some());
     let upload = u16::from(ui.upload().status().is_some());
-    let footer_height = 1 + drops + upload + u16::try_from(faults.len()).unwrap_or(u16::MAX);
+    let footer_height = 1 + buffer_full + upload + u16::try_from(faults.len()).unwrap_or(u16::MAX);
     let [header, body, footer] = Layout::vertical([
         Constraint::Length(4),
         Constraint::Min(6),

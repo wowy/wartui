@@ -130,20 +130,20 @@ to standard error; no output file is written. The tail of its output, after the 
   health     under-voltage in 3 samples  throttled in 0  since boot: under-voltage  temp max 71.2 °C  battery min 3.62 V
   batches    212 lost between node and host
   heartbeats 41 missed of 3,497 expected (1.2%)  12 unsent
-  ring       wifi 18,220 refused  ble 1,203 refused
+  buffer full wifi 18,220  ble 1,203
   loss by node
-    1C:5A  batches 12  heartbeats 3/702 (0.4%)  ring ble 1,203
-    57:84  batches 200  heartbeats 38/2,795 (1.4%)  12 unsent  ring wifi 18,220
+    1C:5A  batches 12  heartbeats 3/702 (0.4%)  buffer full ble 1,203
+    57:84  batches 200  heartbeats 38/2,795 (1.4%)  12 unsent  buffer full wifi 18,220
 ```
 
-| Line         | What it counts                                                                   |
-|--------------|----------------------------------------------------------------------------------|
-| `bridge`     | Frames the bridge received, dropped as the host fell behind, and lost on USB     |
-| `host`       | Frames the host read but did not store, and how the host and its store held up   |
-| `health`     | Under-voltage and throttling the Pi firmware reported, temperature, battery      |
-| `batches`    | Sighting batches lost between node and host; the fleet table's `lost`            |
-| `heartbeats` | Heartbeats lost between node and host, and how many of them were `unsent`        |
-| `ring`       | Sightings a node's full pending ring refused; most are reported on a later dwell |
+| Line          | What it counts                                                                  |
+|---------------|---------------------------------------------------------------------------------|
+| `bridge`      | Frames the bridge received, dropped as the host fell behind, and lost on USB    |
+| `host`        | Frames the host read but did not store, and how the host and its store held up  |
+| `health`      | Under-voltage and throttling the Pi firmware reported, temperature, battery     |
+| `batches`     | Sighting batches lost between node and host; the fleet table's `lost`           |
+| `heartbeats`  | Heartbeats lost between node and host, and how many of them were `unsent`       |
+| `buffer full` | Sightings a full pending buffer refused; most reappear in a later dwell or scan |
 
 Counts follow the assumptions below; `lost on USB` is approximate. The capture's first bridge
 reply and first heartbeat per node are baselines, so what was dropped before the capture began
@@ -152,7 +152,7 @@ is not counted. `batches` and `bridge` print zeros, since "0 lost" is the answer
 
 - the `bridge` line, when the capture holds no status reply
 - the `unsent` clause, total or per node, when it is zero
-- ring figures that are zero, and the `ring` line when all are
+- `buffer full` figures that are zero, and the `buffer full` line when all are
 - the reboot clause, when the bridge never restarted
 - the `lost on USB` clause, when it is zero
 - `host` clauses that are zero, and the `host` and `health` lines when the capture holds no host row
@@ -660,11 +660,11 @@ The footer shows faults only once they happen, so a clean run has a clean footer
   100 ms), a radio retransmitting after the bridge's ack was lost. The first copy was recorded, so
   nothing is lost and `dup` never overlaps `lost`. A repeat 100 ms or more later is the node's own
   re-send after a failed send, recorded normally.
-- **`wifi drop N  ble drop M`**: a line below the totals, counting distinct networks and advertisers
-  a node heard but had no room for in that dwell or scan, fleet-wide, this session. It appears when
-  a count passes zero, omits a kind still at zero, and stays. Not a fault: a dropped address is not
-  held back, so the next pass reports it; only one never heard again is lost. A steadily growing
-  count means a buffer too small for the area.
+- **`buffer full wifi N  ble M`**: a line below the totals, counting distinct networks and
+  advertisers a node heard but had no room for in that dwell or scan, fleet-wide, this session. It
+  appears when a count passes zero, omits a kind still at zero, and stays. Not a fault: an address
+  turned away is not held back, so the next pass reports it; only one never heard again is lost.
+  A steadily growing count means a buffer too small for the area.
 - **`N frames from a vendor fleet`**, **`N admin frames from another core`**: another fleet
   transmitting on the nodes' channel.
 - **`N frames from an older firmware — reflash`**: a fleet mid-upgrade, speaking a wire format this

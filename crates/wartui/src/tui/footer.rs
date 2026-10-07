@@ -1,5 +1,5 @@
 //! The fault box is empty on a clean run. Counts a healthy capture also produces, such
-//! as dropped sightings and missed admin windows, sit outside it, so a clean run looks
+//! as refused sightings and missed admin windows, sit outside it, so a clean run looks
 //! clean.
 
 use ratatui::Frame;
@@ -14,6 +14,7 @@ use wartui_proto::link::{LoopPhase, ResetCause};
 use wartui_proto::plan;
 
 use super::ui::Ui;
+use crate::text::thousands;
 
 /// Draw the footer into `area`. `faults` are already wrapped by [`fault_lines`].
 pub(super) fn draw_footer(
@@ -41,30 +42,40 @@ pub(super) fn draw_footer(
         )];
         spans.push(Span::raw(format!(
             "  frames {}  obs {}  beats {}  stored {}",
-            c.frames, c.observations, c.heartbeats, snapshot.store.written
+            thousands(c.frames),
+            thousands(c.observations),
+            thousands(c.heartbeats),
+            thousands(snapshot.store.written)
         )));
         if c.admin_sent > 0 {
-            spans.push(Span::raw(format!("  admin {}/{}", c.admin_acked, c.admin_sent)));
+            spans.push(Span::raw(format!(
+                "  admin {}/{}",
+                thousands(c.admin_acked),
+                thousands(c.admin_sent)
+            )));
         }
         if c.batches_lost > 0 {
-            spans.push(Span::raw(format!("  lost {}", c.batches_lost)));
+            spans.push(Span::raw(format!("  lost {}", thousands(c.batches_lost))));
         }
         if c.duplicate_batches > 0 {
-            spans.push(Span::raw(format!("  dup {}", c.duplicate_batches)));
+            spans.push(Span::raw(format!("  dup {}", thousands(c.duplicate_batches))));
         }
         // Missed windows sit with the totals, not the faults: connecting to a bridge
         // that has been buffering produces them normally. It shows before the first
         // assignment too, where it explains why nothing has been assigned yet.
         if c.admin_windows_missed > 0 {
-            spans.push(Span::raw(format!("  {} held for a live window", c.admin_windows_missed)));
+            spans.push(Span::raw(format!(
+                "  {} held for a live window",
+                thousands(c.admin_windows_missed)
+            )));
         }
         lines.push(Line::from(spans));
     }
 
     // Its own line, so a notice never hides it. Plain, not yellow, because a full
-    // ring is normal in a dense area.
-    if let Some(drops) = drop_line(&c) {
-        lines.push(Line::from(drops));
+    // pending buffer is normal in a dense area.
+    if let Some(buffer_full) = buffer_full_line(&c) {
+        lines.push(Line::from(buffer_full));
     }
 
     // Its own line for the same reason. It stays after the upload ends, until the
@@ -81,20 +92,11 @@ pub(super) fn draw_footer(
     frame.render_widget(Paragraph::new(lines).dim(), area);
 }
 
-/// Sightings dropped for lack of ring room this session, or `None`. Most are
-/// re-reported on the next dwell, so this measures how dense the area is, not a fault.
-pub(super) fn drop_line(c: &Counters) -> Option<String> {
-    if c.wifi_dropped == 0 && c.ble_dropped == 0 {
-        return None;
-    }
-    let mut line = String::new();
-    if c.wifi_dropped > 0 {
-        line.push_str(&format!("  wifi drop {}", c.wifi_dropped));
-    }
-    if c.ble_dropped > 0 {
-        line.push_str(&format!("  ble drop {}", c.ble_dropped));
-    }
-    Some(line)
+/// Sightings a full pending buffer refused this session, or `None`. Most are re-reported
+/// on a later dwell or scan, so this measures how dense the area is, not a fault. Worded
+/// as `wartui analyze` words it.
+pub(super) fn buffer_full_line(c: &Counters) -> Option<String> {
+    crate::text::buffer_full(c.wifi_dropped, c.ble_dropped).map(|line| format!("  {line}"))
 }
 
 /// Every fault so far, most urgent first. Empty on a clean run.
@@ -108,13 +110,16 @@ pub(super) fn faults(snapshot: &Snapshot) -> Vec<String> {
         faults.push(format!("link down: {error}"));
     }
     if snapshot.store.dropped > 0 {
-        faults.push(format!("store dropped {}", snapshot.store.dropped));
+        faults.push(format!("store dropped {}", thousands(snapshot.store.dropped)));
     }
     if c.admin_failed > 0 {
-        faults.push(format!("{} assignments unacknowledged", c.admin_failed));
+        faults.push(format!("{} assignments unacknowledged", thousands(c.admin_failed)));
     }
     if c.admin_unadopted > 0 {
-        faults.push(format!("{} assignments acknowledged but not adopted", c.admin_unadopted));
+        faults.push(format!(
+            "{} assignments acknowledged but not adopted",
+            thousands(c.admin_unadopted)
+        ));
     }
     if c.peer_table_full > 0 {
         faults.push("peer table full".to_owned());
@@ -131,14 +136,14 @@ pub(super) fn faults(snapshot: &Snapshot) -> Vec<String> {
             format!(
                 "every node in this fleet is scanning Bluetooth, so none of the {} channels of \
                  the {} pool is being swept",
-                plan.unreachable().len(),
+                thousands(u64::from(plan.unreachable().len())),
                 snapshot.pool
             )
         } else {
             format!(
                 "{} channels of the {} pool are 5 GHz and no node in this fleet is sniffing with \
                  a 5 GHz radio, so they are not being scanned",
-                plan.unreachable().len(),
+                thousands(u64::from(plan.unreachable().len())),
                 snapshot.pool
             )
         });
@@ -151,7 +156,7 @@ pub(super) fn faults(snapshot: &Snapshot) -> Vec<String> {
         // `--gps-baud` only when the operator set it. An auto-detected rate already
         // decoded, so later rejects mean a changed receiver or a bad cable.
         if gps.counters.fixes == 0 && gps.counters.rejected > 20 {
-            let rejected = gps.counters.rejected;
+            let rejected = thousands(gps.counters.rejected);
             faults.push(if gps.pinned_baud {
                 format!("gps: {rejected} unreadable lines and no fix — wrong --gps-baud?")
             } else {
@@ -165,28 +170,30 @@ pub(super) fn faults(snapshot: &Snapshot) -> Vec<String> {
         }
     }
     if c.undecodable > 0 {
-        faults.push(format!("undecodable {}", c.undecodable));
+        faults.push(format!("undecodable {}", thousands(c.undecodable)));
     }
     if c.garbled > 0 {
-        faults.push(format!("garbled {}", c.garbled));
+        faults.push(format!("garbled {}", thousands(c.garbled)));
     }
     // A fleet half-way through a reflash is invisible to the fleet table, so this
     // is the only place it shows.
     if c.incompatible > 0 {
-        faults.push(format!("{} frames from an older firmware — reflash", c.incompatible));
+        faults
+            .push(format!("{} frames from an older firmware — reflash", thousands(c.incompatible)));
     }
     if c.foreign_fleet > 0 {
-        faults.push(format!("{} frames from a vendor fleet", c.foreign_fleet));
+        faults.push(format!("{} frames from a vendor fleet", thousands(c.foreign_fleet)));
     }
     if c.foreign_admin > 0 {
-        faults.push(format!("{} admin frames from another core", c.foreign_admin));
+        faults.push(format!("{} admin frames from another core", thousands(c.foreign_admin)));
     }
     // Only this capture's loss. The bridge's own count runs from its boot, mostly
     // frames dropped before anyone was listening.
     if let Some(status) = snapshot.bridge_status
         && status.dropped_since_attach > 0
     {
-        faults.push(format!("bridge dropped {}", status.dropped_since_attach));
+        faults
+            .push(format!("bridge dropped {}", thousands(u64::from(status.dropped_since_attach))));
     }
     // A restart under a running capture is a fault even when nothing fails now: the
     // peer table came back empty and the data has a gap. A power-on is how a capture
@@ -508,31 +515,59 @@ mod tests {
     }
 
     #[test]
-    fn footer_hides_drop_line_when_both_counts_zero() {
+    fn footer_hides_buffer_full_line_when_both_counts_zero() {
         let screen = rendered(&busy());
-        assert!(!screen.contains("wifi drop"), "{screen}");
-        assert!(!screen.contains("ble drop"), "{screen}");
+        assert!(!screen.contains("buffer full"), "{screen}");
+    }
+
+    /// The footer's `buffer full` line, without the quotes and padding `TestBackend` adds.
+    fn buffer_full_row(screen: &str) -> &str {
+        let row = screen.lines().find(|l| l.contains("buffer full")).expect("a buffer full line");
+        row.trim_matches('"').trim_end()
     }
 
     #[test]
-    fn footer_displays_drop_line_when_wifi_count_nonzero() {
+    fn footer_displays_buffer_full_line_when_wifi_count_nonzero() {
         let mut snapshot = busy();
         snapshot.counters.wifi_dropped = 12;
         let screen = rendered(&snapshot);
-        let line = screen.lines().find(|l| l.contains("wifi drop")).expect("a drop line");
-        assert!(line.contains("wifi drop 12"), "{screen}");
-        // A kind with nothing dropped is left out, not shown as 0.
-        assert!(!line.contains("ble drop"), "{screen}");
-        assert!(!line.contains("frames"), "a line of its own, not a span of the totals");
-
-        snapshot.counters.ble_dropped = 4;
-        assert!(rendered(&snapshot).contains("wifi drop 12  ble drop 4"));
+        // A kind with nothing turned away is left out, not shown as 0, and the line is
+        // its own, not a span of the totals.
+        assert_eq!(buffer_full_row(&screen), "  buffer full wifi 12", "{screen}");
     }
 
     #[test]
-    fn footer_keeps_drop_line_when_notice_shown() {
-        // The notice takes the totals line. The drops have their own line, so they
-        // stay.
+    fn footer_displays_both_kinds_when_wifi_and_ble_counts_nonzero() {
+        let mut snapshot = busy();
+        snapshot.counters.wifi_dropped = 12;
+        snapshot.counters.ble_dropped = 4;
+        let screen = rendered(&snapshot);
+        assert_eq!(buffer_full_row(&screen), "  buffer full wifi 12  ble 4", "{screen}");
+    }
+
+    #[test]
+    fn footer_separates_thousands_when_count_large() {
+        // Every count is separated, as `wartui analyze` separates them.
+        let mut snapshot = busy();
+        snapshot.counters.frames = 12_345;
+        snapshot.counters.wifi_dropped = 1_234;
+        let screen = rendered(&snapshot);
+        assert!(totals_line(&screen).contains("frames 12,345"), "{screen}");
+        assert_eq!(buffer_full_row(&screen), "  buffer full wifi 1,234", "{screen}");
+    }
+
+    #[test]
+    fn footer_displays_buffer_full_line_when_only_ble_count_nonzero() {
+        let mut snapshot = busy();
+        snapshot.counters.ble_dropped = 4;
+        let screen = rendered(&snapshot);
+        assert_eq!(buffer_full_row(&screen), "  buffer full ble 4", "{screen}");
+    }
+
+    #[test]
+    fn footer_keeps_buffer_full_line_when_notice_shown() {
+        // The notice takes the totals line. The buffer full counts have their own line,
+        // so they stay.
         let mut snapshot = busy();
         snapshot.counters.wifi_dropped = 12;
         snapshot.counters.ble_dropped = 4;
@@ -543,7 +578,7 @@ mod tests {
         let screen = terminal.backend().to_string();
         assert!(screen.contains("a notice"), "{screen}");
         assert!(!screen.contains("stored 800"), "the notice replaced the totals: {screen}");
-        assert!(screen.contains("wifi drop 12  ble drop 4"), "{screen}");
+        assert_eq!(buffer_full_row(&screen), "  buffer full wifi 12  ble 4", "{screen}");
     }
 
     /// A capture whose only fault is that the bridge restarted underneath it.
