@@ -21,6 +21,16 @@
 //! bridge's `dropped` covers those, before the capture's baseline. The few lost at the
 //! replay-to-live handoff go uncounted.
 //!
+//! Each counted gap splits into unsent and lost on the air. Every heartbeat carries `unsent`, the
+//! node's since-boot count of heartbeats its radio refused to send. It excludes the heartbeat
+//! carrying it, which cannot know its own outcome. So the current count less the previous one is
+//! the refusals among the previous beat and the missed beats between. The previous beat arrived,
+//! so the difference is capped at `missed`: a send can report failure and still reach the bridge.
+//! A byte is enough. The refusals in a gap cannot outnumber the beats sent in it, so the wrapping
+//! difference is exact for any gap under 256 beats. That u8 wraps often, so the walk takes the
+//! wrapping difference and decides restarts from `counter` and `beat`, never from `unsent`
+//! falling, as `advance_since_boot` would.
+//!
 //! Ring refusals are reported beside the losses, not as one. A pending ring turns a sighting away
 //! once per dwell, and the network is usually reported on a later dwell. The count is ring
 //! pressure, not missing sightings.
@@ -129,6 +139,9 @@ pub struct NodeLoss {
     pub heartbeats: u64,
     /// Heartbeats lost between the node and the host: gaps in `beat` after a live heartbeat.
     pub heartbeats_missed: u64,
+    /// Of `heartbeats_missed`, those the node's radio refused to send. The rest were lost on the
+    /// air or past the bridge.
+    pub heartbeats_unsent: u64,
     /// Counted gaps in arrival order. Their missed counts sum to `heartbeats_missed`.
     pub heartbeat_windows: Vec<HeartbeatWindow>,
     /// Access points the node's pending ring refused. Most are reported on a later dwell.
@@ -150,6 +163,8 @@ pub struct HeartbeatWindow {
     pub end_rx_at_ms: i64,
     /// Missing beats, from the same sequence accounting as the lifetime total.
     pub missed: u64,
+    /// Of `missed`, the beats the node's radio refused to send.
+    pub unsent: u64,
     /// A detected restart makes the interval uncertain: only missing beats since boot count.
     pub restarted: bool,
 }
@@ -294,6 +309,7 @@ struct Beat {
     mac: Mac,
     counter: u32,
     beat: u16,
+    unsent: u8,
     wifi: u64,
     ble: u64,
     live: bool,
@@ -303,7 +319,7 @@ struct Beat {
 
 fn heartbeats(conn: &Connection, nodes: &mut BTreeMap<Mac, NodeLoss>) -> rusqlite::Result<()> {
     let mut stmt = conn.prepare(
-        "SELECT node_mac, counter, beat, wifi_dropped, ble_dropped, live, id, rx_at
+        "SELECT node_mac, counter, beat, wifi_dropped, ble_dropped, live, id, rx_at, unsent
          FROM heartbeat
          ORDER BY node_mac, id",
     )?;
@@ -319,6 +335,7 @@ fn heartbeats(conn: &Connection, nodes: &mut BTreeMap<Mac, NodeLoss>) -> rusqlit
             live: row.get(5)?,
             id: row.get(6)?,
             rx_at_ms: row.get(7)?,
+            unsent: row.get(8)?,
         };
         let node = nodes
             .entry(beat.mac)
@@ -331,15 +348,24 @@ fn heartbeats(conn: &Connection, nodes: &mut BTreeMap<Mac, NodeLoss>) -> rusqlit
                 node.ble_refused += advance_since_boot(beat.ble, Some(prev.ble), rebooted);
                 let (heard, missed) = beat_gap(prev.beat, beat.beat, rebooted);
                 node.heartbeats += heard;
+                // Not `advance_since_boot`: a u8 wraps often, and its falling is not a restart.
+                let refused = u64::from(if rebooted {
+                    beat.unsent
+                } else {
+                    beat.unsent.wrapping_sub(prev.unsent)
+                });
                 // A gap after a replayed heartbeat spans time no host was reading.
                 if prev.live && missed > 0 {
+                    let unsent = refused.min(missed);
                     node.heartbeats_missed += missed;
+                    node.heartbeats_unsent += unsent;
                     node.heartbeat_windows.push(HeartbeatWindow {
                         start_id: prev.id,
                         end_id: beat.id,
                         start_rx_at_ms: prev.rx_at_ms,
                         end_rx_at_ms: beat.rx_at_ms,
                         missed,
+                        unsent,
                         restarted: rebooted,
                     });
                 }

@@ -55,6 +55,7 @@ fn beat(node: Mac, at_ms: i64, counter: u32, seq: u16, wifi: u16, ble: u16) -> R
         wifi_dropped: wifi,
         ble_dropped: ble,
         beat: seq,
+        unsent: 0,
         live: true,
     })
 }
@@ -63,6 +64,12 @@ fn beat(node: Mac, at_ms: i64, counter: u32, seq: u16, wifi: u16, ble: u16) -> R
 fn replayed(node: Mac, at_ms: i64, counter: u32, seq: u16) -> Record {
     let Record::Heartbeat(hb) = beat(node, at_ms, counter, seq, 0, 0) else { unreachable!() };
     Record::Heartbeat(Heartbeat { live: false, ..hb })
+}
+
+/// `record`, a heartbeat, carrying `unsent` heartbeats the node's radio refused since boot.
+fn unsent(record: Record, unsent: u8) -> Record {
+    let Record::Heartbeat(hb) = record else { unreachable!() };
+    Record::Heartbeat(Heartbeat { unsent, ..hb })
 }
 
 fn gap(node: Mac, seq: u16, lost: u16) -> Record {
@@ -210,6 +217,7 @@ fn analyze_brackets_windows_when_beats_skip_and_repeat() {
                 start_rx_at_ms: EPOCH_MS + 5_010,
                 end_rx_at_ms: EPOCH_MS + 20_000,
                 missed: 2,
+                unsent: 0,
                 restarted: false,
             },
             HeartbeatWindow {
@@ -218,6 +226,7 @@ fn analyze_brackets_windows_when_beats_skip_and_repeat() {
                 start_rx_at_ms: EPOCH_MS + 20_010,
                 end_rx_at_ms: EPOCH_MS + 30_000,
                 missed: 1,
+                unsent: 0,
                 restarted: false,
             },
         ]
@@ -243,6 +252,7 @@ fn analyze_marks_windows_when_restart_beats_are_missing() {
             start_rx_at_ms: EPOCH_MS,
             end_rx_at_ms: EPOCH_MS + 60_000,
             missed: 11,
+            unsent: 0,
             restarted: true,
         }
     );
@@ -263,6 +273,7 @@ fn analyze_preserves_window_arrival_order_when_clock_reverses() {
             start_rx_at_ms: EPOCH_MS + 5_000,
             end_rx_at_ms: EPOCH_MS - 25_000,
             missed: 2,
+            unsent: 0,
             restarted: false,
         }]
     );
@@ -289,6 +300,7 @@ fn analyze_excludes_windows_when_first_beats_and_handoff_are_baselines() {
             start_rx_at_ms: EPOCH_MS + 1_000,
             end_rx_at_ms: EPOCH_MS + 21_000,
             missed: 3,
+            unsent: 0,
             restarted: false,
         }]
     );
@@ -429,6 +441,67 @@ fn analyze_ignores_beats_lost_since_boot_when_previous_heartbeat_replayed() {
     let (_dir, conn) = capture(vec![replayed(NODE, 0, 40, 20), beat(NODE, 60_000, 1, 12, 0, 0)]);
     let node = &losses(&conn).unwrap().nodes[0];
     assert_eq!((node.heartbeats, node.heartbeats_missed), (2, 0));
+}
+
+#[test]
+fn analyze_splits_missed_heartbeats_into_unsent_when_unsent_advances_across_gap() {
+    // Beats 3 to 5 are missing, and the radio refused two of them.
+    let (_dir, conn) = capture(vec![
+        beat(NODE, 0, 1, 1, 0, 0),
+        beat(NODE, 5_000, 2, 2, 0, 0),
+        unsent(beat(NODE, 30_000, 7, 6, 0, 0), 2),
+    ]);
+    let node = &losses(&conn).unwrap().nodes[0];
+    assert_eq!((node.heartbeats_missed, node.heartbeats_unsent), (3, 2));
+    assert_eq!(node.heartbeat_windows[0].unsent, 2);
+}
+
+#[test]
+fn analyze_counts_unsent_since_boot_when_node_restarts() {
+    // Rebooted: beats 1 to 11 since boot are missing, and the radio refused 3 of them.
+    let (_dir, conn) = capture(vec![
+        unsent(beat(NODE, 0, 40, 20, 0, 0), 5),
+        unsent(beat(NODE, 60_000, 1, 12, 0, 0), 3),
+    ]);
+    let node = &losses(&conn).unwrap().nodes[0];
+    assert_eq!((node.heartbeats_missed, node.heartbeats_unsent), (11, 3));
+    assert!(node.heartbeat_windows[0].restarted);
+    assert_eq!(node.heartbeat_windows[0].unsent, 3);
+}
+
+#[test]
+fn analyze_ignores_unsent_when_gap_follows_replayed_heartbeat() {
+    // The 50 refused between the replayed beat and the first live one fall in time no host was
+    // reading. Only the one refused between live beats 140 and 144 counts.
+    let (_dir, conn) = capture(vec![
+        replayed(NODE, 0, 30, 17),
+        unsent(beat(NODE, 1_000, 240, 140, 0, 0), 50),
+        unsent(beat(NODE, 21_000, 244, 144, 0, 0), 51),
+    ]);
+    let node = &losses(&conn).unwrap().nodes[0];
+    assert_eq!((node.heartbeats_missed, node.heartbeats_unsent), (3, 1));
+}
+
+#[test]
+fn analyze_caps_unsent_at_missed_when_refused_beat_still_arrived() {
+    // Beat 1's send reported failure but reached the bridge, so two refusals cover one missed beat.
+    let (_dir, conn) =
+        capture(vec![beat(NODE, 0, 1, 1, 0, 0), unsent(beat(NODE, 10_000, 3, 3, 0, 0), 2)]);
+    let node = &losses(&conn).unwrap().nodes[0];
+    assert_eq!((node.heartbeats_missed, node.heartbeats_unsent), (1, 1));
+    assert_eq!(node.heartbeat_windows[0].unsent, 1);
+}
+
+#[test]
+fn analyze_counts_unsent_across_wrap_when_count_passes_255() {
+    // 250 to 3 is nine refusals, not a restart.
+    let (_dir, conn) = capture(vec![
+        unsent(beat(NODE, 0, 10, 10, 0, 0), 250),
+        unsent(beat(NODE, 60_000, 22, 22, 0, 0), 3),
+    ]);
+    let node = &losses(&conn).unwrap().nodes[0];
+    assert_eq!((node.heartbeats_missed, node.heartbeats_unsent), (11, 9));
+    assert!(!node.heartbeat_windows[0].restarted);
 }
 
 /// A host row with every count at `n` and the given peaks and health.

@@ -23,6 +23,7 @@ const HEARTBEAT: &[u8] = &[
     0x2A, 0x00, // wifi_dropped 42, little-endian
     0x04, 0x03, // ble_dropped 0x0304, little-endian
     0x02, 0x01, // beat 0x0102, little-endian
+    0x07, // unsent 7
 ];
 
 /// A heartbeat from a node parked since boot: epoch 0, never sent by the host.
@@ -34,6 +35,7 @@ const HEARTBEAT_NO_EPOCH: &[u8] = &[
     0x00, 0x00, // wifi_dropped 0
     0x00, 0x00, // ble_dropped 0
     0x01, 0x00, // beat 1: the first heartbeat since boot
+    0x00, // unsent 0
 ];
 
 /// A Wi-Fi record: no header of its own, since [`SightingBatch`] carries one
@@ -220,6 +222,7 @@ fn heartbeat_msg_serializes_byte_for_byte_when_encoded_and_decoded() {
         wifi_dropped: 42,
         ble_dropped: 0x0304,
         beat: 0x0102,
+        unsent: 7,
     };
     assert_eq!(msg.encode().as_slice(), HEARTBEAT);
     assert_eq!(HeartbeatMsg::decode(HEARTBEAT), Ok(msg));
@@ -234,6 +237,7 @@ fn heartbeat_msg_serializes_epoch_zero_when_node_holds_no_assignment() {
         wifi_dropped: 0,
         ble_dropped: 0,
         beat: 1,
+        unsent: 0,
     };
     assert_eq!(msg.encode().as_slice(), HEARTBEAT_NO_EPOCH);
     assert_eq!(HeartbeatMsg::decode(HEARTBEAT_NO_EPOCH), Ok(msg));
@@ -270,16 +274,40 @@ fn heartbeat_msg_round_trips_beat_when_encoded_at_its_offset() {
 }
 
 #[test]
-fn heartbeat_msg_rejects_frame_when_node_sends_eighteen_byte_heartbeat() {
-    // A node flashed from a tree whose heartbeat carries no beat sequence. The
-    // engine counts this as incompatible and asks for a reflash.
+fn heartbeat_msg_round_trips_unsent_when_encoded_at_its_offset() {
+    let decoded = HeartbeatMsg::decode(HEARTBEAT).expect("valid");
+    assert_eq!(decoded.unsent, 7);
+    assert_eq!(HEARTBEAT[20], 0x07);
+
+    let msg = HeartbeatMsg { unsent: u8::MAX, ..decoded };
+    let frame = msg.encode();
+    assert_eq!(frame[20], 0xFF);
+    assert_eq!(HeartbeatMsg::decode(&frame), Ok(msg));
+}
+
+#[test]
+fn heartbeat_msg_rejects_frame_when_node_sends_twenty_byte_heartbeat() {
+    // A node flashed from another tree, whose heartbeat is shorter. The engine counts
+    // this as incompatible and asks for a reflash.
     assert_eq!(
-        HeartbeatMsg::decode(&HEARTBEAT[..18]),
-        Err(DecodeError::BadLength { need: HEARTBEAT_MSG_LEN, got: 18 })
+        HeartbeatMsg::decode(&HEARTBEAT[..20]),
+        Err(DecodeError::BadLength { need: HEARTBEAT_MSG_LEN, got: 20 })
     );
     assert_eq!(
-        Frame::decode(&HEARTBEAT[..18]),
-        Err(DecodeError::BadLength { need: HEARTBEAT_MSG_LEN, got: 18 })
+        Frame::decode(&HEARTBEAT[..20]),
+        Err(DecodeError::BadLength { need: HEARTBEAT_MSG_LEN, got: 20 })
+    );
+    // A longer heartbeat carries every field this build reads, so only the length check
+    // refuses it.
+    let mut longer = HEARTBEAT.to_vec();
+    longer.push(0);
+    assert_eq!(
+        HeartbeatMsg::decode(&longer),
+        Err(DecodeError::BadLength { need: HEARTBEAT_MSG_LEN, got: 22 })
+    );
+    assert_eq!(
+        Frame::decode(&longer),
+        Err(DecodeError::BadLength { need: HEARTBEAT_MSG_LEN, got: 22 })
     );
 }
 

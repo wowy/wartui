@@ -147,6 +147,9 @@ struct Node {
     /// the count including itself, so the host reads a gap as heartbeats lost between here
     /// and there.
     beats: u16,
+    /// Heartbeats the radio refused to send since boot. Wraps at 256. Each heartbeat
+    /// carries the count before its own send, since it cannot know its own outcome.
+    unsent: u8,
     /// When this node next sends a heartbeat and holds the admin window open.
     /// `None` while parked: an unassigned node heartbeats every
     /// [`IDLE_BEAT_MS`] instead, with no deadline of its own. Set fresh every
@@ -180,6 +183,7 @@ impl Node {
             cursor: SweepCursor::new(),
             counter: 1,
             beats: 0,
+            unsent: 0,
             next_beat: None,
             reported: 0,
             seq: 0,
@@ -507,11 +511,12 @@ fn next_beat_after(deadline: Instant) -> Instant {
 /// sixty seconds of silence as a node that has left the fleet. `node.version` is
 /// the epoch this node holds, which is how the host tells adoption from a
 /// MAC-layer ack. Every attempt advances `node.beats`, so a gap the host sees in
-/// it covers a send the radio refused as well as a frame lost on the air.
+/// it covers both a send the radio refused and a frame lost on the air. `node.unsent`
+/// counts the refusals, and is what tells the two apart.
 fn heartbeat(sender: &mut EspNowSender<'_>, node: &mut Node) {
     // Every heartbeat carries the capabilities, not just the first: sent once they
     // would be lost to a dropped frame or stale after a reflash, and they are
-    // three bytes of twenty.
+    // three bytes of twenty-one.
     let beat = node.beats.wrapping_add(1);
     let msg = HeartbeatMsg {
         counter: node.counter,
@@ -520,9 +525,12 @@ fn heartbeat(sender: &mut EspNowSender<'_>, node: &mut Node) {
         wifi_dropped: sniff::dropped(),
         ble_dropped: ble::dropped(),
         beat,
+        unsent: node.unsent,
     };
     node.beats = beat;
-    radio::broadcast(sender, &msg.encode());
+    if !radio::broadcast(sender, &msg.encode()) {
+        node.unsent = node.unsent.wrapping_add(1);
+    }
 }
 
 /// Packs every sighting one dwell or Bluetooth scan produces into as few unicasts

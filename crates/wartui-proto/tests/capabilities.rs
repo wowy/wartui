@@ -16,6 +16,7 @@ fn round_trip(caps: Capabilities) -> Capabilities {
         wifi_dropped: 0,
         ble_dropped: 0,
         beat: 1,
+        unsent: 0,
     }
     .encode();
     HeartbeatMsg::decode(&frame).expect("we just encoded it").capabilities
