@@ -1,57 +1,52 @@
-//! The ring that decides whether an observation is worth transmitting.
+//! The ring that decides whether a sighting is worth transmitting.
 //!
-//! The ring is what keeps a node's airtime down, and airtime is the scarce thing on a
-//! shared control channel: an access point beacons ten times a dwell and a node
-//! returns to it every sweep. The store keeps every sighting it is given, so what the
-//! ring suppresses is lost for good — which is why suppression is not permanent.
+//! The ring keeps a node's airtime down, and airtime is the scarce thing on a shared
+//! control channel. An access point beacons ten times a dwell, and a node returns to it
+//! every sweep. The store keeps every sighting it is given, so what the ring suppresses
+//! is lost for good. That is why suppression is not permanent.
 //!
 //! An address held in the ring is reported again for two reasons, and no others:
 //!
-//! - **It has been [`DEDUP_REFRESH_MS`] since it was last reported.** Without this a
-//!   node goes silent once it has reported its neighbourhood, and stays silent across
-//!   host sessions because the ring outlives them (`docs/phase-4-findings.md`). A
-//!   stationary node's quiet table then reads as a fault, and a second capture from
-//!   the same spot is empty.
+//! - **It has been [`DEDUP_REFRESH_MS`] since it was last reported.** Without this a node
+//!   goes silent once it has reported its neighbourhood. It stays silent across host
+//!   sessions, because the ring outlives them (`docs/phase-4-findings.md`). A stationary
+//!   node's quiet table then reads as a fault, and a second capture from the same spot is
+//!   empty.
 //! - **It is at least [`DEDUP_RSSI_GAIN_DB`] stronger than anything reported for it.**
 //!   The export writes the strongest sighting's position, so a node driving towards an
 //!   access point it first heard at the edge of range has a better fix to offer. The
-//!   margin is wide enough that ordinary jitter between beacons does not cross it, and
-//!   the baseline only ever rises, so an access point is re-reported for getting
-//!   closer and never for wobbling.
+//!   margin is wider than ordinary jitter between beacons, and the baseline only rises.
+//!   An access point is re-reported for getting closer, never for wobbling.
 //!
 //! [`MacRing::clear`] empties the ring outright, for two further reasons:
 //!
 //! - **The node's job changed.** Entries built under the old share describe a
-//!   neighbourhood the node no longer listens to and only take up slots.
+//!   neighbourhood the node no longer listens to, and only take up slots.
 //! - **The operator asked.** This gives a fresh capture from a stationary spot without
 //!   waiting out the refresh or rebooting the node.
 //!
-//! Eviction is still oldest-*inserted* first, and a re-report updates its entry in
-//! place rather than moving it to the front. A constantly-beaconing access point
-//! therefore still ages out on schedule, and a busy neighbourhood refreshes itself
-//! through the ring faster than the timer would.
+//! Eviction is oldest-*inserted* first, and a re-report updates its entry in place rather
+//! than moving it to the front. A constantly-beaconing access point therefore ages out on
+//! schedule, and a busy neighbourhood refreshes itself through the ring faster than the
+//! timer would.
 //!
-//! Time arrives as a `u32` of milliseconds rather than being read, for the same reason
-//! the host engine takes `Now`: the rules are testable against a clock the test
-//! invents. It wraps after 49 days and the comparisons wrap with it.
+//! Time arrives as a `u32` of milliseconds rather than being read, for the reason the host
+//! engine takes `Now`: tests drive the rules with a clock they invent. It wraps after 49
+//! days, and the comparisons wrap with it.
 //!
 //! # Why the ring is hashed
 //!
-//! The node checks the ring from its Wi-Fi receive callback, once for every beacon
-//! and probe response it hears, inside a lock that holds interrupts off
-//! (`esp-sync`'s `NonReentrantMutex`). Timed on the ESP32-C5 and C6, a linear scan of
-//! a 256-entry ring there took 18-37 µs a frame. A hash lookup takes under 1 µs, and
-//! measured the same at 512 entries as at 256, so the ring is sized for the
-//! neighbourhood and the chip's RAM rather than for the lookup. The index is the shared
-//! `mac_index` table, twice the ring's size in slots.
+//! The node checks the ring from its Wi-Fi receive callback, once for every beacon and
+//! probe response, inside a lock that holds interrupts off (`esp-sync`'s
+//! `NonReentrantMutex`). Timed on the ESP32-C5 and C6, a linear scan of a 256-entry ring
+//! there took 18-37 µs a frame. A hash lookup takes under 1 µs, the same at 512 entries
+//! as at 256. The ring is therefore sized for the neighbourhood and the chip's RAM, not
+//! for the lookup. The index has twice the ring's entries in slots.
 //!
-//! That is why there are two sizes. [`C5DedupRing`] holds 512 addresses in 8 KB.
-//! [`C6DedupRing`] holds 4,096 in 64 KB: the C6 has 128 KB more SRAM and no 5 GHz
-//! radio, so in a mixed fleet it is the likely Bluetooth node, and the RAM comes out
-//! of a main stack that has never used more than about 2 KB of what it is given.
-//!
-//! [`DEDUP_REFRESH_MS`]: crate::dedup::DEDUP_REFRESH_MS
-//! [`DEDUP_RSSI_GAIN_DB`]: crate::dedup::DEDUP_RSSI_GAIN_DB
+//! So there are two sizes. [`C5DedupRing`] holds 512 addresses in 8 KB. [`C6DedupRing`]
+//! holds 4,096 in 64 KB. The C6 has 128 KB more SRAM and no 5 GHz radio, so in a mixed
+//! fleet it is the likely Bluetooth node. The RAM comes out of a main stack that has never
+//! used more than about 2 KB.
 
 use crate::mac_index::MacIndex;
 
@@ -62,11 +57,8 @@ pub const DEDUP_RING_C5: usize = 512;
 /// index [`crate::dedup::MacRing`] builds over it is never more than half full.
 pub const DEDUP_INDEX_C5: usize = 2 * DEDUP_RING_C5;
 
-/// How many recently-reported addresses an ESP32-C6 node holds. See [`crate::dedup`].
-///
-/// Eight times the C5's. The C6 has 128 KB more SRAM and no 5 GHz radio, so in a
-/// mixed fleet it is the node likely to be given the Bluetooth scan, and the room
-/// costs it 64 KB of a main stack that has never used more than 2 KB.
+/// How many recently-reported addresses an ESP32-C6 node holds: eight times the C5's.
+/// [`crate::dedup`] says why.
 pub const DEDUP_RING_C6: usize = 4096;
 
 /// Hash slots behind [`DEDUP_RING_C6`], for the reason [`DEDUP_INDEX_C5`] gives.
@@ -74,8 +66,8 @@ pub const DEDUP_INDEX_C6: usize = 2 * DEDUP_RING_C6;
 
 /// How long a node suppresses an address it has reported before reporting it again.
 ///
-/// Five minutes: long enough that a stationary node's whole neighbourhood costs a few
-/// sightings a minute, short enough that a fresh host session hears it without a reboot.
+/// Five minutes. A stationary node's whole neighbourhood then costs a few sightings a
+/// minute, and a fresh host session hears it without a reboot.
 pub const DEDUP_REFRESH_MS: u32 = 5 * 60 * 1000;
 
 /// How much stronger a sighting must be than any reported for its address to be
@@ -93,9 +85,9 @@ struct Entry {
 
 /// A fixed-capacity ring of recently reported addresses, oldest evicted first.
 ///
-/// `N` is the number of addresses held; [`C5DedupRing`] and [`C6DedupRing`] are the
-/// sizes the firmware uses. `S` is the number of hash slots behind it — a separate parameter
-/// because stable Rust cannot write `[u16; 2 * N]` for a generic `N`.
+/// `N` is the number of addresses held; [`C5DedupRing`] and [`C6DedupRing`] are the sizes
+/// the firmware uses. `S` is the number of hash slots behind it. It is a separate
+/// parameter because stable Rust cannot write `[u16; 2 * N]` for a generic `N`.
 #[derive(Debug, Clone)]
 pub struct MacRing<const N: usize, const S: usize> {
     entries: [Entry; N],
@@ -150,10 +142,9 @@ impl<const N: usize, const S: usize> MacRing<N, S> {
 
     /// Record that `mac` was reported at `now_ms`.
     ///
-    /// Call it once the sighting is on the air, not before: suppressing an address the
+    /// Call it once the sighting is on the air, not before. Suppressing an address the
     /// host never received hides it until the refresh. A held address is updated in
-    /// place and keeps its place in the eviction order — and in the index, which an
-    /// in-place update never touches.
+    /// place, and keeps its place in the eviction order and in the index.
     pub fn record(&mut self, mac: [u8; 6], rssi: Option<i8>, now_ms: u32) {
         let rssi = rssi.unwrap_or(i8::MIN);
         if let Some(i) = self.find(&mac) {
@@ -167,9 +158,9 @@ impl<const N: usize, const S: usize> MacRing<N, S> {
             return;
         }
         if self.len == N {
-            // The ring is full, so this insert overwrites `cursor`'s entry: unindex
-            // it first, or the index would go on pointing a stale slot at the MAC
-            // that now lives there.
+            // The ring is full, so this insert overwrites `cursor`'s entry. Unindex
+            // it first, or a stale slot would go on pointing at the MAC that now
+            // lives there.
             let evicted = self.entries[self.cursor].mac;
             self.index.remove(&evicted, |pos| self.entries[pos].mac);
         }
@@ -203,11 +194,10 @@ impl<const N: usize, const S: usize> MacRing<N, S> {
 
     /// Empty the ring outright, so every address held is due again.
     ///
-    /// The entries themselves are left as they are — a lookup never reaches one
-    /// through a cleared `index` — but `index` itself is reset to empty, since
-    /// a stale slot would otherwise go on pointing at an entry this call means to
-    /// forget. That is `S` halfwords, 2 KB at the firmware's size, and this only
-    /// runs on a share change or an operator clear.
+    /// The entries are left as they are, since a lookup never reaches one through a
+    /// cleared `index`. The index is reset, or a stale slot would go on pointing at an
+    /// entry this call means to forget. That writes `S` halfwords, 2 KB on a C5 and
+    /// 16 KB on a C6, and runs only on a share change or an operator clear.
     pub fn clear(&mut self) {
         self.len = 0;
         self.cursor = 0;

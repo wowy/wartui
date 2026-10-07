@@ -10,23 +10,22 @@ pub const CAP_FLAG_5G: u8 = 1 << 0;
 
 /// What a node says it is, in every heartbeat it sends.
 ///
-/// A version, and the one capability this particular board has; the magic is
-/// what separates one of ours from a stock node.
+/// A version, and the one capability that varies by board.
 ///
-/// `five_ghz` is a refusal rather than a request: a node without it is never
-/// dealt a 5 GHz index, because a share it cannot tune is a share nobody
-/// scans. Bluetooth is not a capability at all — every node can scan it, and
-/// [`ADMIN_FLAG_BLE`] is the operator's decision, off at every boot.
+/// `five_ghz` is a refusal, not a request. A node without it is never dealt a 5 GHz
+/// index, because a share it cannot tune is a share nobody scans. Bluetooth is not a
+/// capability: every node can scan it, and [`ADMIN_FLAG_BLE`] is the operator's
+/// decision.
 ///
 /// [`ADMIN_FLAG_BLE`]: super::ADMIN_FLAG_BLE
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Capabilities {
-    /// Bumped when node → core changes shape in a way an older host cannot
-    /// read. Distinct from [`WIRE_VERSION`], which covers the frame around it.
+    /// The node protocol's major version. Distinct from [`WIRE_VERSION`], which covers
+    /// the frame around it.
     ///
     /// [`WIRE_VERSION`]: super::WIRE_VERSION
     pub major: u8,
-    /// Bumped for additions an older host can ignore.
+    /// The node protocol's minor version.
     pub minor: u8,
     /// The radio reaches 5 GHz. False on an ESP32-C6, which is 2.4 GHz only.
     pub five_ghz: bool,
@@ -52,17 +51,16 @@ impl Capabilities {
 
     /// Rebuild from the three bytes a heartbeat carries.
     ///
-    /// Unknown flag bits are ignored rather than refused, because a node from a
-    /// later build must not stop being a node just because it can do something
-    /// this host has never heard of.
+    /// Unknown flag bits are ignored, not refused. A node must not stop being a node
+    /// because it sets a bit this build does not know.
     #[must_use]
     pub const fn from_parts(major: u8, minor: u8, flags: u8) -> Self {
         Self { major, minor, five_ghz: flags & CAP_FLAG_5G != 0 }
     }
 }
 
-/// The form the fleet table and the store column show: `wartui/1.0;5g`. The
-/// three bytes a heartbeat carries are what travels; this is for reading.
+/// The form the fleet table and the store column show: `wartui/1.0;5g`. Only the three
+/// bytes travel; this is for reading.
 impl fmt::Display for Capabilities {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "wartui/{}.{}", self.major, self.minor)?;
@@ -73,34 +71,39 @@ impl fmt::Display for Capabilities {
     }
 }
 
-/// Node → core, once per completed channel sweep.
+/// Node → host: a node's liveness, broadcast from the control channel.
+///
+/// Sent every [`IDLE_BEAT_MS`] while parked and every [`ASSIGNED_BEAT_MS`] while
+/// assigned. Each one opens the node's admin window.
+///
+/// [`IDLE_BEAT_MS`]: crate::node::IDLE_BEAT_MS
+/// [`ASSIGNED_BEAT_MS`]: crate::node::ASSIGNED_BEAT_MS
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HeartbeatMsg {
-    /// Monotonic from node boot, so a value below the last one means the node
-    /// restarted and has forgotten whatever assignment it held.
+    /// Counts up from node boot: once per sweep, Bluetooth scan or idle beat. A value
+    /// below the last one means the node restarted and has forgotten its assignment.
     pub counter: u32,
-    /// The assignment epoch this node currently holds, or 0 for none — parked
-    /// since boot. The host never puts 0 on the wire, so 0 is unambiguous.
+    /// The assignment epoch this node holds, or 0 for none (parked since boot). The
+    /// host never puts 0 on the wire, so 0 is unambiguous.
     pub epoch: u8,
     /// What that node is.
     pub capabilities: Capabilities,
-    /// Access points a full pending ring turned away since boot, each counted once per
-    /// dwell (`pending::Refused`). Wraps. Most are reported on a later dwell, so this
-    /// measures the ring against the neighbourhood rather than counting losses; the host
-    /// reads it as a difference between heartbeats.
+    /// Access points a full pending buffer turned away since boot, each once per dwell
+    /// ([`crate::pending::Refused`]). Wraps. Most are reported on a later dwell, so this
+    /// measures the buffer against the neighbourhood rather than counting losses. The
+    /// host reads it as a difference between heartbeats.
     pub wifi_dropped: u16,
-    /// Advertisers a full pending buffer turned away since boot, each counted once per
-    /// scan. Wraps, and is read as a difference like `wifi_dropped`. 0 on a node that has
-    /// never held the Bluetooth scan.
+    /// Advertisers a full pending buffer turned away since boot, each once per scan.
+    /// Wraps, and is read like `wifi_dropped`. 0 on a node that has never held the
+    /// Bluetooth scan.
     pub ble_dropped: u16,
-    /// Heartbeats this node has sent or tried to send since boot, this one included, so the
-    /// first after boot carries 1. Wraps. A gap in `beat` is heartbeats lost between node and
-    /// host; `counter` stays the sweep count.
+    /// Heartbeats this node has tried to send since boot, this one included, so the first
+    /// carries 1. Wraps. A gap in `beat` is heartbeats lost between node and host.
     pub beat: u16,
-    /// Heartbeats the radio refused to send since boot, this one excluded, since a heartbeat
+    /// Heartbeats the radio refused to send since boot, this one excluded: a heartbeat
     /// cannot know its own outcome. Wraps at 256, and is read as a difference between
-    /// received heartbeats. A byte is enough: the refusals in a gap cannot outnumber the
-    /// beats sent in it, so the difference is exact for any gap under 256 beats.
+    /// received heartbeats. A byte is enough. The refusals in a gap cannot outnumber the
+    /// beats in it, so the difference is exact for any gap under 256 beats.
     pub unsent: u8,
 }
 

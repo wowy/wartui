@@ -2,17 +2,16 @@ use serde::{Serialize, de::DeserializeOwned};
 
 use super::{LINK_PROTO_VERSION, MAX_ESPNOW_PAYLOAD, MAX_FRAME, PANEL_ROWS};
 
-// A frame is the version byte, the payload and the CRC, then COBS overhead of one
-// byte per 254 plus a leading marker, plus the terminator. Checked here so a
-// payload that outgrew the buffer is a build error rather than a silent truncation.
+// A frame is the version byte, the payload and the CRC, plus COBS overhead (one byte
+// per 254 and a leading marker) and the terminator. Checked here so a payload that
+// outgrew the buffer is a build error, not a silent truncation.
 const MAX_BODY: usize = MAX_FRAME - 8;
 const _: () = assert!(MAX_ESPNOW_PAYLOAD + 32 < MAX_BODY);
-// The other frame with a size worth checking. A whole-panel push carries every row every
-// time, so the worst case is fixed rather than traffic-dependent: `PANEL_ROWS` lines of a
-// full `ShortStr`, each with a severity byte and postcard's length prefix, plus the
-// variant index and the vector's own length. Checked here so a panel that grew a row or a
-// wider `ShortStr` is a build error rather than a bridge quietly losing the bottom of its
-// screen.
+// The other frame worth checking. A panel push carries every row every time, so its
+// worst case is fixed: `PANEL_ROWS` lines of a full `ShortStr`, each with a severity
+// byte and a length prefix, plus the variant index and the vector's length. A panel that
+// grew a row or a wider `ShortStr` is then a build error, not a bridge silently losing
+// the bottom of its screen.
 const _: () = assert!(
     PANEL_ROWS * (32 + 2) + 2 < MAX_BODY,
     "a whole-panel push must fit one frame, or a bridge would silently lose rows"
@@ -67,8 +66,8 @@ impl core::error::Error for LinkError {}
 /// CRC-16/CCITT-FALSE: polynomial `0x1021`, initial value `0xFFFF`, no
 /// reflection and no final XOR.
 ///
-/// Implemented here rather than pulled in as a dependency: it is a dozen lines,
-/// and the bridge firmware's dependency budget is worth defending.
+/// Written here rather than pulled in as a dependency: it is a dozen lines, and the
+/// firmware's dependency budget is worth defending.
 #[must_use]
 pub const fn crc16(data: &[u8]) -> u16 {
     let mut crc: u16 = 0xFFFF;
@@ -133,12 +132,11 @@ pub fn decode_frame<T: DeserializeOwned>(frame: &mut [u8]) -> Result<T, LinkErro
 
 /// Reassembles frames from a byte stream.
 ///
-/// Both ends use this. A zero byte ends a frame, so the accumulator recovers on
-/// its own from a reset banner, a half-written frame or an unplugged cable: the
-/// junk is discarded at the next terminator and the stream carries on. That
-/// terminator is the next frame's unless the sender writes one of its own first,
-/// which is why the bridge's outbox delimits once at boot, whether or not
-/// that life speaks first.
+/// Both ends use this. A zero byte ends a frame, so the accumulator recovers on its own
+/// from a reset banner, a half-written frame or an unplugged cable. The junk is
+/// discarded at the next terminator, and the stream carries on. Without a terminator of
+/// the sender's own, that is the next frame's, so the bridge writes one at boot (see
+/// [`crate::outbox`]).
 #[derive(Debug)]
 pub struct FrameAccumulator<const N: usize = MAX_FRAME> {
     buf: [u8; N],
@@ -167,9 +165,9 @@ impl<const N: usize> FrameAccumulator<N> {
 
     /// Feed one byte.
     ///
-    /// Returns the raw COBS-encoded frame when a terminator completes one; pass
-    /// it to [`decode_frame`]. Empty frames and frames that overran the buffer
-    /// yield `None`, having resynchronised.
+    /// Returns the raw COBS-encoded frame when a terminator completes one; pass it to
+    /// [`decode_frame`]. Empty frames and frames that overran the buffer yield `None`,
+    /// having resynchronised.
     pub fn push(&mut self, byte: u8) -> Option<&mut [u8]> {
         if byte != 0x00 {
             if self.len < N {
@@ -185,8 +183,8 @@ impl<const N: usize> FrameAccumulator<N> {
         let overflowed = self.overflowed;
         self.reset();
         if overflowed || len == 0 {
-            // A run of zeros, or a frame too big to be ours. Either way the
-            // next terminator gives us a clean start.
+            // A run of zeros, or a frame too big to be ours. Either way the next
+            // terminator gives a clean start.
             return None;
         }
         Some(&mut self.buf[..len])

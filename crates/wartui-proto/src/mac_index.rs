@@ -1,18 +1,18 @@
 //! A linear-probing hash index from MAC address to a position in somebody else's array.
 //!
-//! [`crate::dedup::MacRing`], [`crate::pending::BlePending`] and [`crate::pending::WifiPending`]
-//! each look an address up from inside a lock that holds interrupts off, once per frame
-//! or report heard, and a linear scan there costs microseconds per lookup that the
-//! radio's callback does not have. Each keeps its entries where they are and builds this
-//! index over them, so the index stores only positions and asks its owner, through a
-//! `mac_at` closure, which MAC a position holds.
+//! [`crate::dedup::MacRing`], [`crate::pending::BlePending`] and
+//! [`crate::pending::WifiPending`] each look an address up once per frame or report heard,
+//! inside a lock that holds interrupts off. A linear scan there costs microseconds the
+//! radio's callback does not have (`crate::dedup` has the timings). Each owner keeps its
+//! entries where they are and builds this index over them. The index stores only
+//! positions, and asks its owner through a `mac_at` closure which MAC a position holds.
 //!
-//! Positions are `u16` and [`EMPTY`] is `u16::MAX`, which halves the index against
-//! `usize` and is why [`MacIndex::new`] demands fewer than `u16::MAX` entries. The table
-//! is never more than half full, so probe runs stay short; MACs that collide degrade to a
-//! probe run no longer than the entries held, which is a linear scan and no worse.
-//! Deletion is backward-shift rather than tombstones, so a table that churns forever
-//! never fills with dead slots.
+//! Positions are `u16`, and [`EMPTY`] is `u16::MAX`. That halves the index against
+//! `usize`, and is why [`MacIndex::new`] demands fewer than `u16::MAX` entries. The table
+//! is never more than half full, so probe runs stay short. MACs that collide degrade to a
+//! probe run no longer than the entries held: a linear scan, and no worse. Deletion is
+//! backward-shift rather than tombstones, so a table that churns for ever never fills
+//! with dead slots.
 
 /// Marks a slot as holding nothing.
 const EMPTY: u16 = u16::MAX;

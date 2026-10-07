@@ -1,62 +1,49 @@
-//! Bounded outbound queues for the bridge's USB link.
+//! Bounded outbound queues for the bridge's USB link. Only the firmware uses this; the
+//! crate docs say why it lives here.
 //!
-//! Only the firmware instantiates this, but it lives here because a `no_std` binary
-//! built for `riscv32imac` cannot run a test, and decision logic belongs where
-//! `cargo test` reaches it. That is why the other `no_std` modules in this crate are
-//! here too, and they point at this paragraph rather than repeating it.
+//! `UsbSerialJtag` stops accepting bytes when its endpoint FIFO fills, and only a reading
+//! host drains that FIFO. A blocking write from the receive path would stall the radio for
+//! as long as the TUI is wedged or the cable is out. That is the commonest way this class
+//! of firmware fails in the field, and it fails silently.
 //!
-//! `UsbSerialJtag` stops accepting bytes the moment its endpoint FIFO fills,
-//! and nothing drains that FIFO unless a host is reading. A blocking write from
-//! the receive path would therefore stall the radio for as long as the TUI is
-//! wedged or the cable is out — which is the most common way this class of
-//! firmware fails in the field, and it fails silently.
+//! So the bridge never blocks on the link. It encodes everything it wants to say into one
+//! of two rings, and drains them a byte at a time into whatever the FIFO will take:
 //!
-//! So the bridge never blocks on the link. Everything it wants to say is
-//! encoded into one of two rings and drained a byte at a time by whatever the
-//! FIFO will take:
+//! - **priority**: [`BridgeToHost::Ready`], [`BridgeToHost::SendResult`],
+//!   [`BridgeToHost::Status`] and [`BridgeToHost::Error`]. Each answers a host request
+//!   or says something the host cannot re-derive, so they go first.
+//! - **bulk**: [`BridgeToHost::Rx`] and [`BridgeToHost::Log`]. A host that has fallen
+//!   behind is better served by the newest frames than the oldest.
 //!
-//! - **priority** — [`BridgeToHost::Ready`], [`BridgeToHost::SendResult`],
-//!   [`BridgeToHost::Status`] and [`BridgeToHost::Error`]. Each one answers a
-//!   question the host asked, or tells it something it cannot re-derive, so
-//!   they are served ahead of everything else.
-//! - **bulk** — [`BridgeToHost::Rx`] and [`BridgeToHost::Log`]. A host that has
-//!   fallen behind is better served by the newest observations than the oldest.
+//! A full ring evicts its oldest frame not yet started, never the newest. Either way a
+//! frame is lost, and refusing the newest would answer a host that stopped reading from
+//! behind eight stale `Ready` frames. The frame part-way onto the wire is finished: a
+//! sustained burst keeps the ring full, and abandoning the frame in flight would abandon
+//! nearly every frame.
 //!
-//! Both rings evict rather than refuse their newest: whichever end is dropped the
-//! frame is gone, and a host that stopped reading while still sending would
-//! otherwise be answered from behind eight stale `Ready` frames.
+//! # The lone `0x00`
 //!
-//! A full ring evicts its oldest frame not yet started. The one part-way onto the
-//! wire is finished, because abandoning it wastes the bytes already sent, and a
-//! sustained burst keeps the ring full, so it would abandon nearly every frame.
+//! COBS resynchronises at a terminator and only there. The outbox writes a lone `0x00`,
+//! an empty frame every receiver already skips, in three places:
 //!
-//! A frame the endpoint refuses outright is already truncated on the wire, so a
-//! lone `0x00` is written behind it. COBS resynchronises at a terminator and only
-//! at a terminator: without one the host would glue the fragment to the whole of
-//! the next frame and fail the checksum on both.
+//! - **Behind a frame the endpoint refused outright.** The frame is truncated on the
+//!   wire. Without a terminator the host glues the fragment to the next frame and fails
+//!   the checksum on both.
+//! - **At boot, from [`Outbox::delimit`].** A reset prints the ROM banner down this
+//!   endpoint with no `0x00` in it, and the host would read banner and first frame as
+//!   one overlong frame. The byte goes out when transmit opens: at boot if the life
+//!   [speaks first](crate::link::ResetCause::speaks_first), otherwise after the first
+//!   host frame.
+//! - **When a pump would end exactly on a USB packet boundary.** The endpoint sends a
+//!   packet on every `USB_PACKET`th byte by itself, and a flush with nothing left
+//!   sends nothing. The transfer then ends with no short packet, and Linux `cdc_acm`
+//!   holds the bytes until the next frame arrives, seconds later on a quiet fleet. 8 of
+//!   8 frames of exactly 64 bytes were held, against none of 1,356 others
+//!   (`docs/usb-boundary-findings.md`). One `0x00` more makes the transfer end short.
 //!
-//! The same lone `0x00` is what [`Outbox::delimit`] queues at boot. It goes out first
-//! when transmit opens, which is the first host frame rather than boot unless the
-//! life speaks first ([`ResetCause::speaks_first`]). A reset prints
-//! the ROM banner down this endpoint with no `0x00` in it, so without a terminator
-//! of our own the host reads banner and first frame as one overlong frame and
-//! drops both. A lone `0x00` is an empty frame, which every receiver already
-//! skips, so this is not a wire change.
-//!
-//! The same byte keeps a transfer from ending on a full USB packet. The endpoint
-//! sends a packet on every `USB_PACKET`th byte by itself, and a flush with
-//! nothing left in the FIFO sends nothing, so a pump whose bytes end exactly on a
-//! packet boundary ends the transfer with no short packet. Linux `cdc_acm` then
-//! holds those bytes in a read that has not completed until the next frame arrives,
-//! seconds later on a quiet fleet: 8 of 8 frames of exactly 64 bytes were held so,
-//! against none of 1,356 others (`docs/usb-boundary-findings.md`). So a pump that
-//! would end on a boundary writes one `0x00` more, and the transfer ends short.
-//!
-//! The count surfaces in [`BridgeToHost::Status`] as `dropped_tx`, where a non-zero
-//! value means frames arrived faster than the host took them: a host not reading,
-//! or a burst bigger than the bulk ring plus what USB drains while it arrives.
-//!
-//! [`ResetCause::speaks_first`]: crate::link::ResetCause::speaks_first
+//! Every drop is counted, and surfaces in [`BridgeToHost::Status`] as `dropped_tx`. A
+//! non-zero value means frames arrived faster than the host took them: a host not
+//! reading, or a burst bigger than the bulk ring plus what USB drains meanwhile.
 
 use crate::link::BridgeToHost;
 
@@ -68,11 +55,10 @@ use ring::Ring;
 
 /// Frames held for the host while it is not reading.
 ///
-/// Deep enough to cover a stalled host across several nodes' heartbeat bursts —
-/// esp-radio's own receive queue is only ten frames deep and silently discards
-/// its oldest, so the useful buffering has to live here. What fills it is a node's
-/// back-to-back burst: a batch every ~0.5 ms on the air against ~0.8 ms per frame
-/// to USB, so the ring holds the difference for as long as the burst lasts.
+/// The useful buffering has to live here: `esp-radio`'s own receive queue is ten frames
+/// deep and silently discards its oldest. What fills this ring is a node's back-to-back
+/// burst, a batch every ~0.5 ms on the air against ~0.8 ms per frame to USB. The ring
+/// holds the difference for as long as the burst lasts.
 const BULK_DEPTH: usize = 24;
 
 /// Frames that answer a host request. Short, because the host asks for one at a time.
@@ -83,14 +69,15 @@ const USB_PACKET: usize = 64;
 
 /// Somewhere to put bytes that may refuse them.
 ///
-/// Exists so the ring logic below is about queueing rather than about esp-hal.
+/// Keeps the outbox about queueing rather than about esp-hal.
 pub trait ByteSink {
     /// Accept one byte, or report that the FIFO is full.
     fn write_byte(&mut self, byte: u8) -> nb::Result<(), ()>;
 
-    /// Push a partial USB packet out. The hardware sends automatically on every
-    /// 64th byte; this is what releases the remainder, and it sends nothing when no
-    /// remainder is left.
+    /// Push a partial USB packet out.
+    ///
+    /// The hardware sends a packet on every 64th byte by itself. This releases the
+    /// remainder, and sends nothing when there is none.
     fn flush(&mut self);
 }
 
@@ -121,9 +108,11 @@ pub struct Outbox {
 }
 
 impl Outbox {
-    /// The rings are sixteen kilobytes, so on RISC-V this returns through a hidden
-    /// out-pointer by ABI rather than by optimisation, and the only caller passes it
-    /// to `StaticCell::init_with` — so the pointer is into `.bss`. Clippy reads the
+    /// An empty outbox.
+    ///
+    /// The rings are sixteen kilobytes. On RISC-V the ABI returns a value that size
+    /// through a hidden out-pointer, and the only caller passes it to
+    /// `StaticCell::init_with`, so the pointer is into `.bss`. Clippy reads the
     /// signature rather than the calling convention.
     #[allow(clippy::large_stack_frames, reason = "returned indirectly, straight into .bss")]
     #[allow(
@@ -152,20 +141,19 @@ impl Outbox {
 
     /// Whether there is anything the host has not been told yet.
     ///
-    /// The bridge uses this to tell two silences apart. Nothing queued and
-    /// nothing moving is a quiet fleet. Something queued and nothing moving,
-    /// while the host is still sending commands, is a transmit path that has
-    /// stopped draining — which is not a state this end can talk its way out
-    /// of, since talking is the part that is broken.
+    /// The bridge uses this to tell two silences apart. Nothing queued and nothing
+    /// moving is a quiet fleet. Something queued and nothing moving, while the host
+    /// still sends commands, is a transmit path that has stopped draining. See
+    /// [`crate::stall`].
     pub const fn is_empty(&self) -> bool {
         self.priority.is_empty() && self.bulk.is_empty() && self.current.is_none() && !self.orphan
     }
 
     /// Queue `msg`, evicting an older bulk frame if that is what it takes.
     ///
-    /// Returns whether it was queued. Callers generally ignore the result: the
-    /// drop counter is the signal that matters, and there is nowhere better to
-    /// report a failure to report something.
+    /// Returns whether it was queued. Callers generally ignore the result. The drop
+    /// counter is the signal that matters, and there is nowhere better to report a
+    /// failure to report something.
     pub fn send(&mut self, msg: &BridgeToHost) -> bool {
         let queued = if is_priority(msg) {
             if self.priority.is_full() {
@@ -187,11 +175,9 @@ impl Outbox {
 
     /// Owe the host a lone `0x00` ahead of the next frame.
     ///
-    /// Called once at boot, before anything is queued: the ROM banner a reset
-    /// prints carries no `0x00`, so it would otherwise run into the first frame
-    /// and take it down with it. The `0x00` is sent when transmit opens, which a
-    /// life that does not speak first holds until a host has. A frame already
-    /// part-way out needs nothing, since its own terminator follows it.
+    /// Called once at boot, before anything is queued, to cut the ROM banner off the
+    /// first frame (see the module docs). A frame already part-way out needs nothing:
+    /// its own terminator follows it.
     pub const fn delimit(&mut self) {
         if self.cursor == 0 {
             self.orphan = true;
@@ -213,9 +199,8 @@ impl Outbox {
 
     /// Drop the frame being written after the endpoint refused a byte of it.
     ///
-    /// The frame is already truncated on the wire, so a terminator is owed to
-    /// the host so it can discard the fragment on its own rather than run it
-    /// into the next frame.
+    /// The frame is already truncated on the wire. A terminator is owed, so the host
+    /// discards the fragment on its own rather than running it into the next frame.
     fn abandon_front(&mut self, source: Source) {
         self.abandon();
         match source {
@@ -225,8 +210,8 @@ impl Outbox {
         self.dropped = self.dropped.saturating_add(1);
     }
 
-    /// Give up on the frame being written. Owes a terminator if any of it has
-    /// already gone out; owes nothing if it had not started.
+    /// Give up on the frame being written. Owes a terminator if any of it has gone
+    /// out, and nothing if it had not started.
     fn abandon(&mut self) {
         if self.cursor > 0 {
             self.orphan = true;
@@ -294,13 +279,11 @@ impl Outbox {
         }
 
         // A transfer that ends on a full packet is not delivered until more bytes
-        // follow, so end it with a lone `0x00` instead. Only when nothing follows:
-        // the loop leaves `current` empty only once both rings are, and a frame still
-        // in flight ends the transfer with its own remaining bytes. That also keeps
-        // `orphan` owed only between frames, as `abandon` and `delimit` do, so the
-        // zero never lands inside one. An owed orphan is already that byte: one zero
-        // both terminates a fragment and starts a packet, so the flag serves both and
-        // an orphan still owed needs no second.
+        // follow, so end it with a lone `0x00`. Only when nothing follows: the loop
+        // leaves `current` empty only once both rings are, and a frame still in flight
+        // ends the transfer with its own bytes. This keeps `orphan` owed only between
+        // frames, so the zero never lands inside one. An orphan already owed is that
+        // byte, and needs no second.
         if self.unflushed && self.packet_fill == 0 && self.current.is_none() && !self.orphan {
             match sink.write_byte(0x00) {
                 Ok(()) => {

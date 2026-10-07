@@ -2,10 +2,9 @@ use super::Radio;
 
 /// The node's scan order.
 ///
-/// Indices 0..=13 are the 2.4 GHz channels 1..=14; 14..=41 are 5 GHz. Every bit of
-/// the [`ChannelSet`] on the wire indexes this table, so the order must never be
-/// sorted or deduplicated: reordering it silently repoints every assignment in
-/// flight and every stored row.
+/// Indices 0..=13 are the 2.4 GHz channels 1..=14; 14..=41 are 5 GHz. Every bit of the
+/// [`ChannelSet`] on the wire indexes this table, so never sort or deduplicate it.
+/// Reordering it silently repoints every assignment in flight and every stored row.
 pub const SCAN_CHANNELS: [u8; 42] = [
     // 2.4 GHz
     1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, //
@@ -19,8 +18,8 @@ pub const SCAN_CHANNELS: [u8; 42] = [
 /// How many entries [`SCAN_CHANNELS`] has.
 pub const NUM_SCAN_CHANNELS: u8 = 42;
 
-/// Upper bound on runs in any pool. Two today; the headroom is for a
-/// "US non-DFS" pool, which would be three.
+/// Upper bound on runs in any pool. Every pool has two; the headroom is for a
+/// "US non-DFS" pool, which would have three.
 const MAX_RUNS: usize = 4;
 
 /// An inclusive run of [`SCAN_CHANNELS`] indices.
@@ -45,8 +44,8 @@ impl IndexRun {
         self.end - self.start + 1
     }
 
-    /// Always false; a run is inclusive and so covers at least one channel.
-    /// Present because clippy asks for it alongside [`Self::len`].
+    /// Always false: a run is inclusive, so covers at least one channel. Present
+    /// because clippy asks for it alongside [`Self::len`].
     #[must_use]
     pub const fn is_empty(&self) -> bool {
         false
@@ -64,10 +63,9 @@ impl IndexRun {
 /// One bit per entry of the table, index `i` in bit `i`, so the set is exactly as
 /// expressive as the wire field.
 ///
-/// Bits at or above [`NUM_SCAN_CHANNELS`] are dropped on the way in rather than
-/// rejected: such a frame came from a build that knows channels this one does
-/// not, the indices it *does* share are still right, and refusing the whole
-/// assignment would strand the node on whatever it held.
+/// Bits at or above [`NUM_SCAN_CHANNELS`] name channels this build does not know. They
+/// are dropped on the way in, not rejected: the indices below them are still right, and
+/// refusing the whole assignment would strand the node on whatever it held.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub struct ChannelSet(u64);
 
@@ -79,11 +77,9 @@ const CHANNEL_SET_MASK: u64 = (1u64 << NUM_SCAN_CHANNELS) - 1;
 impl ChannelSet {
     /// The empty set.
     ///
-    /// Sent only alongside [`crate::air::ADMIN_FLAG_BLE`], where it does not mean
-    /// "scan nothing" but "Bluetooth is the whole of the job" — see
-    /// [`Job::Bluetooth`]. Without the flag there is no frame meaning "scan
-    /// nothing", so the planner skips a node it has nothing for rather than
-    /// telling it to stop: a node sent one would park.
+    /// Sent only alongside [`crate::air::ADMIN_FLAG_BLE`], where it means "Bluetooth is
+    /// the whole of the job" (see [`Job::Bluetooth`]). Without the flag a node sent it
+    /// would park, so the planner skips a node it has nothing for instead.
     ///
     /// [`Job::Bluetooth`]: super::Job::Bluetooth
     #[must_use]
@@ -223,13 +219,12 @@ const ALL_RUNS: [IndexRun; 2] = [
 
 /// Channel 14, which no pool contains and no node can tune.
 ///
-/// `esp-radio` hardcodes `schan: 1, nchan: 13` in the country blob and exposes
-/// neither, so a node handed this index refuses the hop once per sweep, silently,
-/// for the life of the assignment (`docs/phase-1-findings.md`). Reaching the field
-/// needs `esp_wifi_set_country` called directly, and so `unsafe`.
+/// `esp-radio` hardcodes `schan: 1, nchan: 13` in the country blob and exposes neither.
+/// A node handed this index silently refuses the hop once per sweep, for the life of the
+/// assignment (`docs/phase-1-findings.md`). Reaching the field needs a direct
+/// `esp_wifi_set_country` call, and so `unsafe`.
 ///
-/// Unsupported rather than merely unused, and so excluded from every pool. It
-/// stays in [`SCAN_CHANNELS`] because that table's indices are the wire format.
+/// It stays in [`SCAN_CHANNELS`] because that table's indices are the wire format.
 pub const UNSUPPORTED_INDEX: u8 = 13;
 
 const _: () = assert!(
@@ -239,8 +234,8 @@ const _: () = assert!(
 
 /// The first [`SCAN_CHANNELS`] entry that needs a 5 GHz radio.
 ///
-/// The table is 2.4 GHz then 5 GHz, so band membership is a comparison rather than
-/// a lookup — asserted against the table rather than written down as 14.
+/// The table is 2.4 GHz then 5 GHz, so band membership is a comparison rather than a
+/// lookup. The assert below checks the value against the table.
 pub const FIRST_FIVE_GHZ_INDEX: u8 = 14;
 
 const _: () = assert!(
@@ -255,9 +250,9 @@ pub const fn is_five_ghz(idx: u8) -> bool {
     idx >= FIRST_FIVE_GHZ_INDEX
 }
 
-// The planner deals out of a flattened iterator and indexes nothing by run, but
-// a pool exceeding `MAX_RUNS` is a pool nobody thought about. A new one goes here
-// as well as in `ChannelPool::runs`.
+// The planner deals from a flattened iterator and indexes nothing by run, but a pool
+// exceeding `MAX_RUNS` is a pool nobody thought about. A new pool goes here as well as
+// in `ChannelPool::runs`.
 const _: () = assert!(
     US_RUNS.len() <= MAX_RUNS && EU_RUNS.len() <= MAX_RUNS && ALL_RUNS.len() <= MAX_RUNS,
     "a channel pool has more runs than MAX_RUNS; raise it"
@@ -265,35 +260,33 @@ const _: () = assert!(
 
 /// Which channels the fleet is allowed to scan.
 ///
-/// For a wartui node this bounds where the radio *listens*: it parks and reads
-/// beacons rather than probing, so a restricted pool is a choice about coverage
-/// rather than about legality.
+/// A pool bounds where a node *listens*. The node parks and reads beacons rather than
+/// probing, so a restricted pool is a choice about coverage, not legality.
 ///
-/// A pool cannot make a node quiet; only the node's own firmware can, which is why
-/// that half of the project is in `firmware/node` rather than here. See
-/// [`crate::beacon`] for why an active scan does not belong on DFS channels.
+/// A pool cannot make a node quiet; only the node firmware can. [`crate::beacon`] says
+/// why an active scan does not belong on DFS channels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ChannelPool {
     /// FCC-permitted unlicensed WLAN channels: 2.4 GHz 1-11 and 5 GHz 36-165.
     ///
     /// 5 GHz 52-144 are DFS channels, where the rules require passive scanning. A
-    /// wartui node always listens and so is welcome there.
+    /// wartui node only listens, so is welcome there.
     Us,
     /// ETSI-permitted unlicensed WLAN channels: 2.4 GHz 1-13 and 5 GHz 36-140.
     ///
-    /// The 5 GHz half is 5150-5350 and 5470-5725, ending at channel 140: 144's
-    /// twenty megahertz run past 5725, and 149 upwards is another band again.
-    /// The 2.4 GHz half is wider than [`Self::Us`] by channels 12 and 13.
+    /// The 5 GHz half is 5150-5350 and 5470-5725, ending at channel 140. Channel 144's
+    /// twenty megahertz run past 5725, and 149 upwards is another band. The 2.4 GHz half
+    /// adds channels 12 and 13 to [`Self::Us`]'s.
     Eu,
     /// Every channel a node can actually tune: 2.4 GHz 1-13 and all of 5 GHz.
     ///
     /// The unrestricted pool, including the UNII-4 channels 169, 173 and 177 that
-    /// [`Self::Us`] leaves out. 41 channels and not 42, and two runs rather than
-    /// one, because channel 14 is unsupported — see [`UNSUPPORTED_INDEX`].
+    /// [`Self::Us`] leaves out. It has 41 channels in two runs, not 42 in one, because
+    /// channel 14 is unsupported (see [`UNSUPPORTED_INDEX`]).
     ///
-    /// The default. A pool bounds where a node listens rather than what it emits,
-    /// so narrowing it to one regulatory domain is a choice about coverage that
-    /// an operator in another domain pays for in channels never swept.
+    /// The default. A pool bounds where a node listens, not what it emits. Narrowing
+    /// the default to one regulatory domain would cost an operator in another domain
+    /// channels never swept.
     #[default]
     All,
 }
@@ -331,9 +324,9 @@ impl ChannelPool {
 
     /// Every channel of the pool that `radio` can tune.
     ///
-    /// Never empty: every pool has 2.4 GHz in it and every [`Radio`] reaches 2.4 GHz.
-    /// That is what makes this a usable answer for a node the deal had nothing for —
-    /// see [`Plan::channels_for`].
+    /// Never empty: every pool has 2.4 GHz in it, and every [`Radio`] reaches 2.4 GHz.
+    /// That makes it a usable share for a node the deal had nothing for (see
+    /// [`Plan::channels_for`]).
     ///
     /// [`Plan::channels_for`]: super::Plan::channels_for
     #[must_use]
@@ -348,9 +341,9 @@ impl ChannelPool {
 
 /// How the pool is named on screen and in prose — "US", not the variant's `Us`.
 ///
-/// This is a label, not an identifier: `wartui-core`'s `pool_name` keeps its own
-/// lowercase spelling for the `capture.channel_pool` column, which has stored
-/// rows behind it and must not follow this.
+/// A label, not an identifier. `wartui-core`'s `pool_name` keeps its own lowercase
+/// spelling for the `capture.channel_pool` column, which has stored rows behind it and
+/// must not follow this.
 impl core::fmt::Display for ChannelPool {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str(match self {

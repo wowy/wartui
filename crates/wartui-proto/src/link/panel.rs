@@ -6,10 +6,9 @@ use super::ShortStr;
 /// The most rows a [`Panel`] may have, and so the most lines one
 /// [`HostToBridge::ShowPanel`] carries.
 ///
-/// A ceiling rather than a count: what a bridge actually has depends on the font it
-/// draws in, it says so in [`BridgeToHost::Ready`], and a panel that reports fewer is
-/// sent fewer. Eight leaves room above any font that fits five lines on the 80-pixel
-/// screen this was written for, and the frame is sized against it.
+/// A ceiling, not a count. A bridge's real row count depends on its font, and it reports
+/// that in [`BridgeToHost::Ready`]. Eight leaves room above any font that fits five lines
+/// on an 80-pixel screen, and the link frame is sized against it.
 ///
 /// [`HostToBridge::ShowPanel`]: super::HostToBridge::ShowPanel
 /// [`BridgeToHost::Ready`]: super::BridgeToHost::Ready
@@ -17,9 +16,9 @@ pub const PANEL_ROWS: usize = 8;
 
 /// A panel the bridge can draw lines of text on.
 ///
-/// Announced in [`BridgeToHost::Ready`] rather than configured, so the host formats to the
-/// geometry that is actually there and sends nothing at all to a bridge without a screen.
-/// That is also why there is no operator flag for any of this.
+/// Announced in [`BridgeToHost::Ready`] rather than configured. The host formats to the
+/// geometry that is there, and sends nothing to a bridge without a screen. That is why
+/// there is no operator flag for it.
 ///
 /// [`BridgeToHost::Ready`]: super::BridgeToHost::Ready
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
@@ -32,10 +31,9 @@ pub struct Panel {
 
 /// How a line is going.
 ///
-/// The bridge maps this to a colour and the host decides which one a line has, because the
-/// thresholds are the host's to know: what counts as a weak link is arithmetic over a
-/// snapshot, and retuning it must not cost a reflash. The colours themselves are a property
-/// of the panel and live in the firmware.
+/// The host picks a line's severity and the bridge maps it to a colour. What counts as a
+/// weak link is arithmetic over a snapshot, and retuning it must not cost a reflash. The
+/// colours are a property of the panel, and live in the firmware.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub enum Severity {
     /// Fine.
