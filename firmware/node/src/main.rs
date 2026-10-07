@@ -41,15 +41,15 @@ use esp_radio::wifi::{ControllerConfig, WifiController};
 use esp_rtos::CurrentThreadHandle;
 use static_cell::{ConstStaticCell, StaticCell};
 use wartui_proto::air::{
-    AdminMsg, Capabilities, DecodeError, Frame, HeartbeatMsg, SIGHTINGS_PER_BATCH_MAX,
-    SightingBatchWriter, SightingMsg,
+    AdminMsg, CONTROL_CHANNEL, Capabilities, DecodeError, Frame, HeartbeatMsg,
+    SIGHTINGS_PER_BATCH_MAX, SightingBatchWriter, SightingMsg,
 };
 use wartui_proto::link::BROADCAST;
 use wartui_proto::mac;
-use wartui_proto::plan::{
-    ADMIN_WAIT_MS, ASSIGNED_BEAT_MS, CHANNEL_DWELL_MS, CONTROL_CHANNEL, ChannelSet, IDLE_BEAT_MS,
-    NUM_SCAN_CHANNELS, SCAN_CHANNELS, SweepCursor,
+use wartui_proto::node::{
+    ADMIN_WAIT_MS, ASSIGNED_BEAT_MS, CHANNEL_DWELL_MS, IDLE_BEAT_MS, SweepCursor,
 };
+use wartui_proto::plan::{ChannelSet, NUM_SCAN_CHANNELS, SCAN_CHANNELS};
 
 mod ble;
 mod radio;
@@ -336,7 +336,7 @@ fn main() -> ! {
 
     // The standalone fallback is 2 dBm. A host replaces it through the first
     // assignment it sends; `DEFAULT_TX_POWER_QUARTER_DBM` documents the default.
-    match controller.set_max_tx_power(wartui_proto::plan::DEFAULT_TX_POWER_QUARTER_DBM) {
+    match controller.set_max_tx_power(wartui_proto::tx_power::DEFAULT_TX_POWER_QUARTER_DBM) {
         Ok(()) => {}
         Err(err) => note!("could not cap transmit power: {:?}", err),
     }

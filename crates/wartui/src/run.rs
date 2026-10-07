@@ -23,7 +23,8 @@ use wartui_core::gps::{Gps, GpsConfig};
 use wartui_core::position::PositionChain;
 use wartui_core::runtime::{COMMAND_QUEUE, drive, now};
 use wartui_core::store::{CaptureInfo, CaptureProvenance, Store, StoreConfig, StoreError};
-use wartui_proto::plan::{ChannelPool, DEFAULT_TX_POWER_QUARTER_DBM};
+use wartui_proto::plan::ChannelPool;
+use wartui_proto::tx_power::DEFAULT_TX_POWER_QUARTER_DBM;
 
 use crate::{capture, config, tui, upload};
 
@@ -335,7 +336,8 @@ pub async fn run(args: Args) -> Result<()> {
 mod tests {
     use super::{PoolArg, pool, test_data, tx_powers};
     use crate::config::TxPower;
-    use wartui_proto::plan::{ChannelPool, DEFAULT_TX_POWER_QUARTER_DBM};
+    use wartui_proto::plan::ChannelPool;
+    use wartui_proto::tx_power::DEFAULT_TX_POWER_QUARTER_DBM;
 
     #[test]
     fn run_cmd_applies_default_tx_power_when_file_names_none() {

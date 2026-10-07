@@ -35,10 +35,8 @@ use wartui_proto::link::{
     ResetCause, SendStatus,
 };
 use wartui_proto::mac::Mac;
-use wartui_proto::plan::{
-    ADMIN_WAIT_MS, ASSIGNED_BEAT_MS, CHANNEL_DWELL_MS, ChannelSet, IDLE_BEAT_MS, NUM_SCAN_CHANNELS,
-    SCAN_CHANNELS,
-};
+use wartui_proto::node::{ADMIN_WAIT_MS, ASSIGNED_BEAT_MS, CHANNEL_DWELL_MS, IDLE_BEAT_MS};
+use wartui_proto::plan::{ChannelSet, NUM_SCAN_CHANNELS, SCAN_CHANNELS};
 
 use crate::{BridgeInfo, LinkEvent, LinkHandle, TransportError, link_pair};
 

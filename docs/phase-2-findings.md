@@ -89,8 +89,8 @@ lowest assigned channel was first heard 1.1 s after the acknowledgement, well
 inside a 4.7 s sweep.
 
 The bug was not new to the channel-set work; the bounds-based cursor had the
-same shape. It is fixed in `plan::SweepCursor`, on the host side of the split,
-where four tests hold it.
+same shape. It is fixed in `node::SweepCursor`, in wartui-proto, where `cargo test`
+reaches it and four tests hold it.
 
 ## Bluetooth by assignment, and the node still acknowledges
 

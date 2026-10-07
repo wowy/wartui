@@ -51,6 +51,11 @@ use esp_radio::esp_now::{
 };
 use portable_atomic::{AtomicU8, AtomicU32, Ordering};
 use static_cell::StaticCell;
+/// The channel the fleet speaks on, and the only one this bridge ever sits on. Shared
+/// with the node firmware and the host planner rather than spelled again here: nothing
+/// on the air negotiates this number, so the only thing keeping the three ends on the
+/// same channel is that they read it from the same place.
+use wartui_proto::air::CONTROL_CHANNEL;
 use wartui_proto::heapless::Vec;
 use wartui_proto::link::{
     BROADCAST, BridgeToHost, Chip, FrameAccumulator, HostToBridge, LINK_PROTO_VERSION, LinkError,
@@ -59,11 +64,6 @@ use wartui_proto::link::{
 };
 use wartui_proto::mac::Mac;
 use wartui_proto::outbox::{ByteSink, Outbox};
-/// The channel the fleet speaks on, and the only one this bridge ever sits on. Shared
-/// with the node firmware and the host planner rather than spelled again here: nothing
-/// on the air negotiates this number, so the only thing keeping the three ends on the
-/// same channel is that they read it from the same place.
-use wartui_proto::plan::CONTROL_CHANNEL;
 use wartui_proto::stall::{HOST_PRESENT_WINDOW_MS, StallWatch};
 
 // This creates the app descriptor the esp-idf bootloader expects.
@@ -549,7 +549,8 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     // every connection. Set this before the split, which borrows the controller for
     // the rest of the program, and report a failure in `finish_radio_setup`, once the
     // outbox exists to carry it.
-    let tx_power = controller.set_max_tx_power(wartui_proto::plan::DEFAULT_TX_POWER_QUARTER_DBM);
+    let tx_power =
+        controller.set_max_tx_power(wartui_proto::tx_power::DEFAULT_TX_POWER_QUARTER_DBM);
     // Split rather than kept whole: `EspNowSender::send` needs `&mut`, so holding
     // the parts separately keeps a transmit from borrowing the receive path.
     let (manager, mut sender, mut receiver) = controller.esp_now().split();
@@ -568,7 +569,7 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
         panel_lines: PanelLines::new(),
         panel: PANEL,
         panel_fault: None,
-        tx_power: tx_power.is_ok().then_some(wartui_proto::plan::DEFAULT_TX_POWER_QUARTER_DBM),
+        tx_power: tx_power.is_ok().then_some(wartui_proto::tx_power::DEFAULT_TX_POWER_QUARTER_DBM),
     });
     // Ahead of every frame this life sends, whenever transmit opens. The ROM banner
     // a reset prints has no `0x00` in it and overflows the host's frame buffer, so
@@ -990,9 +991,9 @@ fn add_peer(manager: &EspNowManager<'_>, mac: &Mac) -> Result<bool, EspNowError>
 /// any 802.11b/g rate decodes unannounced.
 ///
 /// The price is sensitivity, roughly 10 dB against 1 Mbps, which a fleet sharing a
-/// car has at the 2 dBm default (`plan::DEFAULT_TX_POWER_QUARTER_DBM`): on the bench, a C5 and a C6
-/// beside this bridge arrived at −43 and −58 dBm and lost 0% and 2.3% of their
-/// heartbeats over ten minutes.
+/// car has at the 2 dBm default (`tx_power::DEFAULT_TX_POWER_QUARTER_DBM`): on the
+/// bench, a C5 and a C6 beside this bridge arrived at −43 and −58 dBm and lost 0%
+/// and 2.3% of their heartbeats over ten minutes.
 ///
 /// Straight into IDF, one of this firmware's two `unsafe` calls. `esp-radio`
 /// 1.0.0-beta.0 wraps only the interface-wide `esp_wifi_config_espnow_rate`, which the

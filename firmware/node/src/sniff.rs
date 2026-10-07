@@ -9,7 +9,7 @@
 //! ten times in a 125 ms dwell, so without that the ring fills with copies of the
 //! loudest network and drops the ones not yet seen. That lookup runs once per beacon
 //! with interrupts held off, so [`WifiPending`] finds a BSSID by hash rather than by
-//! scanning; `wartui_proto::hci::BlePending`'s "Why it is hashed" has the timings.
+//! scanning; `wartui_proto::pending::BlePending`'s "Why it is hashed" has the timings.
 //!
 //! And it deduplicates against [`SEEN`], the dedup ring itself: an access point already
 //! reported and not yet due to be reported again is worth nothing, but without this
@@ -23,7 +23,7 @@
 //! never across a transmit.
 //!
 //! An access point that finds the ring full is counted in
-//! [`Refused`](wartui_proto::dedup::Refused), once per dwell however often it beacons,
+//! [`Refused`](wartui_proto::pending::Refused), once per dwell however often it beacons,
 //! so [`dropped`] counts addresses rather than packets. It is not in [`SEEN`], so the
 //! next dwell reports it: a refusal is mostly delay.
 //!
@@ -38,11 +38,12 @@
 use esp_hal::time::Instant;
 use esp_radio::wifi::sniffer::PromiscuousPkt;
 use esp_sync::NonReentrantMutex;
-use wartui_proto::beacon::{Sighting, WifiPending, is_report, parse_mgmt};
+use wartui_proto::beacon::{Sighting, is_report, parse_mgmt};
 #[cfg(feature = "esp32c5")]
 use wartui_proto::dedup::C5DedupRing as ChipDedupRing;
 #[cfg(feature = "esp32c6")]
 use wartui_proto::dedup::C6DedupRing as ChipDedupRing;
+use wartui_proto::pending::WifiPending;
 
 /// The dedup ring: addresses already reported and not yet due again.
 ///

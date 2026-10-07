@@ -14,9 +14,9 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use clap::Args as ClapArgs;
 use wartui_bridge::LinkEvent;
+use wartui_proto::air::CONTROL_CHANNEL;
 use wartui_proto::link::{BridgeToHost, HostToBridge};
 use wartui_proto::mac;
-use wartui_proto::plan::CONTROL_CHANNEL;
 
 /// Generous enough for a bridge that is busy forwarding a fleet, short enough
 /// that a wedged one is reported rather than waited on. The same figure the

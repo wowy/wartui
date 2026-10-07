@@ -24,9 +24,8 @@ use wartui_proto::link::{
     SendStatus,
 };
 use wartui_proto::mac::Mac;
-use wartui_proto::plan::{
-    ChannelPool, ChannelSet, DEFAULT_TX_POWER_QUARTER_DBM, IndexRun, Radio, plan,
-};
+use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun, Radio, plan};
+use wartui_proto::tx_power::DEFAULT_TX_POWER_QUARTER_DBM;
 
 const NODE: Mac = [0x02, 0x00, 0x5E, 0x10, 0x57, 0x84];
 const OTHER: Mac = [0x02, 0x00, 0x5E, 0x10, 0x57, 0x85];

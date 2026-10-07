@@ -3,7 +3,7 @@ use std::time::Instant;
 use wartui_proto::air::{AdminMsg, ClearMsg, wire_epoch};
 use wartui_proto::link::{EspNowPayload, HostToBridge, SendStatus};
 use wartui_proto::mac::Mac;
-use wartui_proto::plan;
+use wartui_proto::node;
 
 use super::{ActionBatch, Assignment, FleetEngine, Now};
 use crate::record::{AdminOutcome, AssignmentSent, Record};
@@ -187,7 +187,7 @@ impl FleetEngine {
         let latency_us = pending
             .heartbeat_rx_us
             .map(|rx_us| tx_us.wrapping_sub(rx_us))
-            .filter(|us| *us <= plan::ADMIN_WAIT_MS * 1_000);
+            .filter(|us| *us <= node::ADMIN_WAIT_MS * 1_000);
 
         self.resolve(&pending, outcome, latency_us, now, batch);
     }

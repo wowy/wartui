@@ -50,14 +50,37 @@
 //! radio, so in a mixed fleet it is the likely Bluetooth node, and the RAM comes out
 //! of a main stack that has never used more than about 2 KB of what it is given.
 //!
-//! [`DEDUP_REFRESH_MS`]: crate::plan::DEDUP_REFRESH_MS
-//! [`DEDUP_RSSI_GAIN_DB`]: crate::plan::DEDUP_RSSI_GAIN_DB
+//! [`DEDUP_REFRESH_MS`]: crate::dedup::DEDUP_REFRESH_MS
+//! [`DEDUP_RSSI_GAIN_DB`]: crate::dedup::DEDUP_RSSI_GAIN_DB
 
 use crate::mac_index::MacIndex;
-use crate::plan::{
-    DEDUP_INDEX_C5, DEDUP_INDEX_C6, DEDUP_REFRESH_MS, DEDUP_RING_C5, DEDUP_RING_C6,
-    DEDUP_RSSI_GAIN_DB,
-};
+
+/// How many recently-reported addresses an ESP32-C5 node holds. See [`crate::dedup`].
+pub const DEDUP_RING_C5: usize = 512;
+
+/// Hash slots behind [`DEDUP_RING_C5`]. A power of two at least twice the ring, so the
+/// index [`crate::dedup::MacRing`] builds over it is never more than half full.
+pub const DEDUP_INDEX_C5: usize = 2 * DEDUP_RING_C5;
+
+/// How many recently-reported addresses an ESP32-C6 node holds. See [`crate::dedup`].
+///
+/// Eight times the C5's. The C6 has 128 KB more SRAM and no 5 GHz radio, so in a
+/// mixed fleet it is the node likely to be given the Bluetooth scan, and the room
+/// costs it 64 KB of a main stack that has never used more than 2 KB.
+pub const DEDUP_RING_C6: usize = 4096;
+
+/// Hash slots behind [`DEDUP_RING_C6`], for the reason [`DEDUP_INDEX_C5`] gives.
+pub const DEDUP_INDEX_C6: usize = 2 * DEDUP_RING_C6;
+
+/// How long a node suppresses an address it has reported before reporting it again.
+///
+/// Five minutes: long enough that a stationary node's whole neighbourhood costs a few
+/// sightings a minute, short enough that a fresh host session hears it without a reboot.
+pub const DEDUP_REFRESH_MS: u32 = 5 * 60 * 1000;
+
+/// How much stronger a sighting must be than any reported for its address to be
+/// reported again before the refresh.
+pub const DEDUP_RSSI_GAIN_DB: i8 = 10;
 
 #[derive(Debug, Clone, Copy)]
 struct Entry {
@@ -193,68 +216,6 @@ impl<const N: usize, const S: usize> MacRing<N, S> {
 }
 
 impl<const N: usize, const S: usize> Default for MacRing<N, S> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Addresses a full buffer turned away, counted once per dwell or scan.
-///
-/// A pending buffer that is full turns an address away on every frame it sends, and an
-/// access point beacons about ten times a dwell, so a count of refused packets measures
-/// how loud the neighbourhood is rather than how many networks went unreported. This
-/// counts each address once until [`Self::reset`], which the caller runs at the start of
-/// each dwell or scan.
-///
-/// [`Self::note`] runs inside the Wi-Fi receive callback's lock, so its cost is fixed:
-/// one hash and one bit, however many addresses are refused. The price is that two
-/// addresses sharing one of the 1024 bits in a dwell count once — about 1 in 50 at 50
-/// refusals — so the total slightly undercounts. The hash is fixed; radio addresses are
-/// not an adversary worth defending a diagnostic count against.
-#[derive(Debug, Clone)]
-pub struct Refused {
-    /// One bit per hash of an address refused since the last [`Self::reset`].
-    seen: [u32; 32],
-    /// Addresses counted since construction. Wraps.
-    total: u16,
-}
-
-impl Refused {
-    /// Nothing refused, `const` so it can sit in a `static`.
-    #[must_use]
-    pub const fn new() -> Self {
-        Self { seen: [0; 32], total: 0 }
-    }
-
-    /// Count `addr` as refused, unless it already was since the last [`Self::reset`].
-    pub fn note(&mut self, addr: &[u8; 6]) {
-        // FNV-1a over the address, folded to the bitset's 10 bits.
-        let mut h: u32 = 0x811C_9DC5;
-        for &b in addr {
-            h = (h ^ u32::from(b)).wrapping_mul(0x0100_0193);
-        }
-        let bit = (h ^ (h >> 10) ^ (h >> 20)) & 0x3FF;
-        let word = &mut self.seen[(bit >> 5) as usize];
-        let mask = 1 << (bit & 31);
-        if *word & mask == 0 {
-            *word |= mask;
-            self.total = self.total.wrapping_add(1);
-        }
-    }
-
-    /// Start a new dwell or scan: every address counts again. The total carries on.
-    pub fn reset(&mut self) {
-        self.seen = [0; 32];
-    }
-
-    /// Addresses refused since construction, once per dwell or scan each. Wraps.
-    #[must_use]
-    pub const fn total(&self) -> u16 {
-        self.total
-    }
-}
-
-impl Default for Refused {
     fn default() -> Self {
         Self::new()
     }

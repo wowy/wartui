@@ -46,7 +46,7 @@ fn sample_commands() -> Vec<HostToBridge, 16> {
     v
 }
 
-/// Every row full, which is the worst case the const assert in `link.rs` is checked against.
+/// Every row full, which is the worst case the const assert in `link/frame.rs` is checked against.
 fn full_panel() -> PanelLines {
     let levels = [Severity::Ok, Severity::Warn, Severity::Error];
     let mut lines = PanelLines::new();
@@ -157,7 +157,7 @@ fn link_codec_fits_max_esp_now_payload_when_encoding_frame() {
 
 #[test]
 fn link_codec_fits_full_panel_display_when_encoding_show_panel_command() {
-    // The const assert in `link.rs` says this arithmetically; this says it through the
+    // The const assert in `link/frame.rs` says this arithmetically; this says it through the
     // encoder, which is the thing that would actually truncate.
     let cmd = HostToBridge::ShowPanel { lines: full_panel() };
     let mut out = [0u8; MAX_FRAME];

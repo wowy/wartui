@@ -49,8 +49,9 @@ use wartui_core::runtime::{COMMAND_QUEUE, drive, now};
 use wartui_core::store::{
     CaptureInfo, Checkpoint, CheckpointPass, Store, StoreConfig, open_readonly,
 };
+use wartui_proto::dedup::DEDUP_RING_C5;
 use wartui_proto::mac::Mac;
-use wartui_proto::plan::{ChannelPool, DEDUP_RING_C5, NUM_SCAN_CHANNELS};
+use wartui_proto::plan::{ChannelPool, NUM_SCAN_CHANNELS};
 
 use self::timeline::{Mark, Slice, Timeline};
 
@@ -923,7 +924,8 @@ fn json_string(s: &str) -> String {
 mod tests {
     use std::time::Duration;
 
-    use wartui_proto::plan::{ChannelPool, DEDUP_RING_C5, MAX_NODES, NUM_SCAN_CHANNELS};
+    use wartui_proto::dedup::DEDUP_RING_C5;
+    use wartui_proto::plan::{ChannelPool, MAX_NODES, NUM_SCAN_CHANNELS};
 
     use super::{Report, Value, busy_networks, percentile, table};
 

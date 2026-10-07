@@ -76,9 +76,9 @@ use mipidsi::models::ST7735s;
 use mipidsi::options::{ColorInversion, ColorOrder, Orientation, Rotation};
 use mipidsi::{Builder, Display};
 use static_cell::{ConstStaticCell, StaticCell};
+use wartui_proto::air::CONTROL_CHANNEL;
 use wartui_proto::link::{PANEL_ROWS, PanelLine, PanelLines, Severity, ShortStr};
 use wartui_proto::mac;
-use wartui_proto::plan::CONTROL_CHANNEL;
 
 use crate::Bridge;
 

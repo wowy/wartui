@@ -18,7 +18,7 @@
 //! And the node **sniffs no Wi-Fi at all** while it holds the scan, so there is no
 //! sweep for the scan to collide with: it runs one scan after another, back to
 //! back, and the only thing that wants the antenna is that node's own heartbeat —
-//! sent, at most once every [`wartui_proto::plan::ASSIGNED_BEAT_MS`], after a scan
+//! sent, at most once every [`wartui_proto::node::ASSIGNED_BEAT_MS`], after a scan
 //! has finished rather than during one.
 //!
 //! There is no host stack. `esp-radio` exposes the controller as a raw HCI pipe and
@@ -32,10 +32,11 @@ use esp_radio::ble::controller::BleConnector;
 use esp_rtos::CurrentThreadHandle;
 use esp_sync::NonReentrantMutex;
 use wartui_proto::hci::{
-    AdvReport, BlePending, PACKET_MAX, RESET, SCAN_UNIT_US, SET_EVENT_MASK, adv_reports,
-    set_scan_enable, set_scan_parameters,
+    AdvReport, PACKET_MAX, RESET, SCAN_UNIT_US, SET_EVENT_MASK, adv_reports, set_scan_enable,
+    set_scan_parameters,
 };
-use wartui_proto::plan::ASSIGNED_BEAT_MS;
+use wartui_proto::node::ASSIGNED_BEAT_MS;
+use wartui_proto::pending::BlePending;
 
 use crate::sniff;
 

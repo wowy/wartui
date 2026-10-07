@@ -1,6 +1,6 @@
 //! A linear-probing hash index from MAC address to a position in somebody else's array.
 //!
-//! [`crate::dedup::MacRing`], [`crate::hci::BlePending`] and [`crate::beacon::WifiPending`]
+//! [`crate::dedup::MacRing`], [`crate::pending::BlePending`] and [`crate::pending::WifiPending`]
 //! each look an address up from inside a lock that holds interrupts off, once per frame
 //! or report heard, and a linear scan there costs microseconds per lookup that the
 //! radio's callback does not have. Each keeps its entries where they are and builds this

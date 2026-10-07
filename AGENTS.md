@@ -81,10 +81,11 @@ Four host crates, strictly layered, plus firmware that shares the bottom one.
 - **`crates/wartui-proto`** — `no_std`, allocation-free wire formats and the parsing that goes
   with them: `air` (the four ESP-NOW frames, and `air::foreign` for recognising somebody
   else's), `beacon`, `hci`, `dedup`, `link`, `mac` (the `Mac` type and its text form),
-  `outbox`, `stall`, `plan` (channel pools, timings and the partitioning planner). Compiled
-  into *both* the host and the firmware by path dependency, which is the only thing keeping
-  the ends in step — and the reason a node's parsers are testable with `cargo test` rather
-  than a reflash.
+  `outbox`, `stall`, `plan` (channel pools and the partitioning planner), `node` (a node's
+  timings and sweep cursor), `tx_power`, `pending` (the buffers sightings wait in on a node).
+  Compiled into *both* the host and the firmware by path dependency, which is the only thing
+  keeping the ends in step — and the reason a node's parsers are testable with `cargo test`
+  rather than a reflash.
 - **`crates/wartui-bridge`** — host side of the USB link. Everything above talks to a `LinkHandle`
   and cannot tell a real dongle (`serial`) from the fake fleet (`sim`). It also owns the host's
   serial ports generally (`ports`): what is attached and what the OS says it is, with no judgement
@@ -158,7 +159,7 @@ is here rather than only in a `//!`.
   `Ready` is what removes the operator flag: a board without a screen reports `None` and is
   sent nothing at all.
   → `crates/wartui-core/src/panel.rs`, `firmware/bridge/src/panel.rs`,
-  `crates/wartui-proto/src/link.rs`, `HostToBridge::ShowPanel`
+  `crates/wartui-proto/src/link/mod.rs`, `HostToBridge::ShowPanel`
 - **`link::LINK_PROTO_VERSION` does not move before 1.0 either**, and for the reason
   `air::WIRE_VERSION` does not: there is no older peer for it to protect when the policy is to
   flash both ends from one tree. The cost is that a host and a bridge built from different
@@ -170,8 +171,8 @@ is here rather than only in a `//!`.
   bytes of company identifier, or nothing. The split is made once, in the engine's
   `Frame::Sightings` arm, per record; keeping `air` byte-transparent over the trailer is what lets
   a change to how an identifier is *read* cost a re-export rather than a reflash.
-  → `crates/wartui-proto/src/air.rs`, `SightingMsg::ext`; `crates/wartui-proto/src/beacon.rs`,
-  `rcoi_text`; `crates/wartui-core/src/engine/rx.rs`
+  → `crates/wartui-proto/src/air/sighting.rs`, `SightingMsg::ext`;
+  `crates/wartui-proto/src/beacon.rs`, `rcoi_text`; `crates/wartui-core/src/engine/rx.rs`
 - **Nothing here is compatible with an earlier wartui, and that is the policy until 1.0.** No
   migration path is built for a fleet mid-upgrade and no code reads an older wire format to be
   helpful about it; a node on a previous build is somebody else's traffic as far as this host is
@@ -241,7 +242,7 @@ Each of these is enforced in one place and explained there at length. The claim 
 edit stops; follow the pointer before changing the rule.
 
 - **Somebody else's fleet is recognised in order to be reported, never to be accommodated.**
-  → `crates/wartui-proto/src/air.rs` `//!`, `air::foreign`
+  → `crates/wartui-proto/src/air/mod.rs` `//!`, `air::foreign`
 - **Finding the bridge means transmitting into what is opened**, so the sweep opens Espressif
   vendor IDs and nothing else, and `wartui reset` — which transmits before anything has identified
   itself — never sweeps at all. The GPS search is the complement: it opens everything *but* those,
@@ -262,9 +263,9 @@ edit stops; follow the pointer before changing the rule.
   reach comes back in `Plan::unreachable` rather than being dealt anyway. A `Job::Bluetooth` slot
   can tune nothing, so a fleet whose only 5 GHz radio holds the scan reports 5 GHz unreachable, and
   a fleet of one that holds it reports the whole pool.
-  → `crates/wartui-proto/src/plan.rs`, `plan_for`; `crates/wartui/README.md` § "Channel pools"
+  → `crates/wartui-proto/src/plan/mod.rs`, `plan_for`; `crates/wartui/README.md` § "Channel pools"
 - **Channel 14 is in no pool and is never dealt**, and stays in the scan table because that table's
-  indices are the wire format. → `crates/wartui-proto/src/plan.rs`, `UNSUPPORTED_INDEX`
+  indices are the wire format. → `crates/wartui-proto/src/plan/channels.rs`, `UNSUPPORTED_INDEX`
 - **At most one node scans Bluetooth, by default none does, and it is that node's whole job.**
   `ADMIN_FLAG_BLE` is an operator's decision, not a property of the flashed firmware — made with
   `b`, or carried forward from the node `b` last chose, which `wartui.toml` remembers. The node
@@ -272,7 +273,7 @@ edit stops; follow the pointer before changing the rule.
   the fleet size the plan was cut for rather than a census of who is sniffing. An empty `ChannelSet`
   is sent only with the flag beside it; without it, a node told to scan nothing parks
   while the host believes it is sweeping, and `Plan::admin_for` refuses to build that frame.
-  → `crates/wartui-proto/src/plan.rs`, `Job` / `Plan::channels_for` / `admin_for`;
+  → `crates/wartui-proto/src/plan/mod.rs`, `Job` / `Plan::channels_for` / `admin_for`;
   `crates/wartui-core/src/engine/event.rs`, `Command::AssignBle` / `Command::RememberBle`;
   `crates/wartui-core/src/engine/replan.rs`, `on_assign_ble` / `replan`;
   `docs/phase-2-findings.md`
@@ -291,11 +292,11 @@ edit stops; follow the pointer before changing the rule.
   not re-enumerate the USB device. → `crates/wartui-bridge/src/serial.rs`, the `Ready` arm
 - **Neither firmware may block on the USB endpoint.** The bridge's rings evict oldest-first and
   resynchronise COBS behind a truncated frame; a node loses a line rather than a sweep.
-  → `crates/wartui-proto/src/outbox.rs` `//!`, `firmware/node/src/main.rs`, `note!`
+  → `crates/wartui-proto/src/outbox/mod.rs` `//!`, `firmware/node/src/main.rs`, `note!`
 - **The bridge writes nothing to USB until a host has spoken, unless a host was present when the
   previous life ended** (an RTC flag, never trusted after a power-on). Writing before any host
   opens the port wedges the endpoint, and a host that was present across the reset is already
-  reading. → `crates/wartui-proto/src/link.rs`, `ResetCause::speaks_first`;
+  reading. → `crates/wartui-proto/src/link/mod.rs`, `ResetCause::speaks_first`;
   `docs/phase-3-findings.md`
 - **Never link `esp-println` with `jtag-serial` in the *bridge*** — its link protocol shares that
   endpoint, and diagnostics go out as `Log` frames instead. → `firmware/bridge/README.md`
@@ -323,7 +324,7 @@ edit stops; follow the pointer before changing the rule.
   modal (`c`): clamped the same way, and — for the nodes — by re-sending the plan already in force
   under fresh epochs rather than asking the planner to re-cut anything, since it changes what the
   fleet transmits at and never what it scans.
-  → `crates/wartui-proto/src/plan.rs`, `clamp_tx_power` / `DEFAULT_TX_POWER_QUARTER_DBM`;
+  → `crates/wartui-proto/src/tx_power.rs`, `clamp_tx_power` / `DEFAULT_TX_POWER_QUARTER_DBM`;
   `crates/wartui-core/src/engine/mod.rs`, `poll_bridge`; `crates/wartui-core/src/engine/event.rs`,
   `Command::SetTxPower`; `crates/wartui-core/src/engine/replan.rs`, `on_set_tx_power`
 - **ESP-NOW goes out at 802.11g 24 Mbps, set per peer through IDF directly** — `esp-radio`'s

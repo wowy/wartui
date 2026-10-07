@@ -3,7 +3,7 @@ use wartui_proto::air::{
     foreign, wire_epoch,
 };
 use wartui_proto::mac::Mac;
-use wartui_proto::plan;
+use wartui_proto::node;
 
 #[cfg(doc)]
 use super::Counters;
@@ -21,12 +21,12 @@ use crate::record::{BatchGap, Heartbeat, NodeSeen, Observation, RawFrame, Record
 /// 100 ms, compared with a strict `<`. The radio's retries arrived about 4 ms after the original,
 /// all within 100 ms (`docs/batch-loss-findings.md`). A re-send takes at least a whole sweep, which
 /// has no admin window, so two reports of one channel are at least a dwell apart
-/// (`plan::CHANNEL_DWELL_MS`). A one-channel share re-reports every ~130 ms. A bridge reboot resets
+/// (`node::CHANNEL_DWELL_MS`). A one-channel share re-reports every ~130 ms. A bridge reboot resets
 /// `rx_us`, so the wrapped difference is huge and the batch is recorded: the safe direction.
 pub(super) const DUPLICATE_BATCH_WINDOW_US: u64 = 100_000;
 
 const _: () = assert!(
-    DUPLICATE_BATCH_WINDOW_US < plan::CHANNEL_DWELL_MS as u64 * 1_000,
+    DUPLICATE_BATCH_WINDOW_US < node::CHANNEL_DWELL_MS as u64 * 1_000,
     "the shortest time between two reports of one channel is one dwell"
 );
 

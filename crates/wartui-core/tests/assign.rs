@@ -21,7 +21,8 @@ use wartui_core::engine::{EngineConfig, FleetEngine, Snapshot, StoreStats};
 use wartui_core::record::AdminOutcome;
 use wartui_core::runtime::{drive, now};
 use wartui_core::store::{CaptureInfo, Store, StoreConfig, open_readonly};
-use wartui_proto::plan::{ADMIN_WAIT_MS, ChannelPool, ChannelSet};
+use wartui_proto::node::ADMIN_WAIT_MS;
+use wartui_proto::plan::{ChannelPool, ChannelSet};
 
 /// How much faster than real time the fake fleet runs.
 const SPEED: u32 = 60;
