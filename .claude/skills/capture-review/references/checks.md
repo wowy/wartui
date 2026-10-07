@@ -18,7 +18,7 @@ reasoning.
 | Bridge `dropped_tx` rising | The bridge's ring to the host overflowed because the host was not reading fast enough. | `crates/wartui-proto/src/outbox/mod.rs` `//!`, `docs/usb-boundary-findings.md` |
 | `~lost on USB` > 0 | Frames lost between the bridge queue and the host read. It is approximate to ±24 frames. | `crates/wartui-core/src/analyze.rs` `//!`, `docs/usb-boundary-findings.md` |
 | `store_dropped` > 0 | The store queue was full and rows were dropped by design rather than blocking the engine. Check the commit peak and the SD card. | `crates/wartui-core/src/store.rs` `//!`, `docs/store-io-findings.md` |
-| Ring refusals (`wifi_dropped`/`ble_dropped` deltas) | Ring pressure on the node: a sighting was turned away once per dwell. Usually reported on a later dwell, so not loss. | `crates/wartui-proto/src/pending.rs`, `crates/wartui-core/src/analyze.rs` `//!` |
+| Pending-buffer refusals (`wifi_dropped`/`ble_dropped` deltas) | Pending-buffer pressure on the node: a sighting was turned away once per dwell. Usually reported on a later dwell, so not loss. | `crates/wartui-proto/src/pending.rs`, `crates/wartui-core/src/analyze.rs` `//!` |
 | `duplicate_batches` | Retransmits the dedup caught. The batch was stored once, so this is not loss. | `crates/wartui-proto/src/dedup.rs` |
 
 ## Admin and plan

@@ -493,8 +493,8 @@ impl Candidate {
     /// The winner is picked by position and signal, which have nothing to do with trailers: a
     /// beacon or probe response may omit the element, and only some advertisements carry
     /// manufacturer data. Without this, a stronger sighting lacking them would blank a column the
-    /// store can fill, the loss the node's BLE ring already guards against by merging in a later
-    /// report's identifier.
+    /// store can fill, the loss the node's BLE pending buffer already guards against by merging in
+    /// a later report's identifier.
     fn inherit_identifiers(&mut self, other: &mut Self) {
         if self.rcoi.is_none() {
             self.rcoi = other.rcoi.take();

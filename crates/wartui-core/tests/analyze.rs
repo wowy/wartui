@@ -363,7 +363,7 @@ fn analyze_keeps_windows_per_node_when_arrivals_are_interleaved() {
 }
 
 #[test]
-fn analyze_rebases_ring_refusals_when_node_reboots() {
+fn analyze_rebases_refusals_when_node_reboots() {
     let (_dir, conn) = capture(vec![
         // 100 refused before the capture began: a baseline.
         beat(NODE, 0, 10, 5, 100, 4),
@@ -393,7 +393,7 @@ fn analyze_walks_arrival_order_when_clock_steps_back() {
 #[test]
 fn analyze_reads_falling_beat_as_reboot_when_counter_rises() {
     // The node rebooted out of range and came back with a higher sweep counter. The falling
-    // beat is the restart, so the ring counts are all new and beat 1 follows no loss.
+    // beat is the restart, so the refusal counts are all new and beat 1 follows no loss.
     let (_dir, conn) = capture(vec![
         beat(NODE, 0, 10, 40, 100, 0),
         beat(NODE, 5_000, 11, 41, 110, 0),

@@ -573,7 +573,7 @@ impl Outgoing {
     /// which is zero unless it had to make room.
     ///
     /// Once `failed` is set, this stops packing anything: `report`/`report_ble`
-    /// still call it for every address so their rings drain, but it discards
+    /// still call it for every address so their buffers drain, but it discards
     /// rather than filling a batch nobody would acknowledge. The address is never
     /// entered in `SEEN`, so it is due again next time it is heard.
     fn offer(
@@ -681,7 +681,7 @@ fn report_ble(sender: &mut EspNowSender<'_>, node: &mut Node, scanner: &mut ble:
     let now = sniff::now_ms();
     let mut outgoing = Outgoing::new(node.seq);
     let mut lines = 0u32;
-    // One report at a time out of the ring, so the lock is never held across a
+    // One report at a time out of the buffer, so the lock is never held across a
     // transmit — the same shape the Wi-Fi sightings are drained in.
     while let Some(report) = ble::take() {
         let rssi = report.has_rssi().then_some(report.rssi);

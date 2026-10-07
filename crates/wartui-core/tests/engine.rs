@@ -118,7 +118,7 @@ fn beat_at(src: Mac, counter: u32, epoch: u8, capabilities: Capabilities, rx_us:
     rx_at(src, &msg.encode(), rx_us)
 }
 
-/// A heartbeat carrying the node's since-boot ring refusals, Wi-Fi then BLE.
+/// A heartbeat carrying the node's since-boot pending-buffer refusals, Wi-Fi then BLE.
 fn heartbeat_dropping(src: Mac, counter: u32, wifi_dropped: u16, ble_dropped: u16) -> Event {
     let msg = HeartbeatMsg {
         counter,
@@ -760,7 +760,7 @@ fn engine_increments_reboot_counter_when_heartbeat_counter_decreases() {
 }
 
 #[test]
-fn engine_ignores_ring_drops_when_first_heartbeat_of_session() {
+fn engine_ignores_refusals_when_first_heartbeat_of_session() {
     // What a node refused before this capture started is not this capture's.
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
@@ -771,7 +771,7 @@ fn engine_ignores_ring_drops_when_first_heartbeat_of_session() {
 }
 
 #[test]
-fn engine_sums_ring_drops_across_nodes_when_heartbeats_advance() {
+fn engine_sums_refusals_across_nodes_when_heartbeats_advance() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
 
@@ -797,7 +797,7 @@ fn engine_keeps_wifi_and_ble_drops_apart_when_both_advance() {
 }
 
 #[test]
-fn engine_counts_since_boot_ring_drops_when_node_reboots() {
+fn engine_counts_since_boot_refusals_when_node_reboots() {
     // A reboot restarts the node's count at 0, so everything it carries after
     // one was refused this session.
     let clock = Clock::new();
@@ -814,7 +814,7 @@ fn engine_counts_since_boot_ring_drops_when_node_reboots() {
 }
 
 #[test]
-fn engine_reads_restart_when_ring_drops_fall_without_reboot() {
+fn engine_reads_restart_when_refusals_fall_without_reboot() {
     // Heard soon after boot, then rebooted out of range and heard again at a
     // higher counter: neither the counter nor the epoch shows the reboot, but a
     // since-boot count that falls does.
@@ -834,7 +834,7 @@ fn engine_reads_restart_when_ring_drops_fall_without_reboot() {
 }
 
 #[test]
-fn engine_undercounts_ring_drops_when_count_wraps() {
+fn engine_undercounts_refusals_when_count_wraps() {
     // A wrap looks like a restart, so the drops between the last count and the
     // wrap are lost. That is at most one heartbeat's worth once every 65536
     // refusals, where reading a missed reboot as a wrap would add ~65000.

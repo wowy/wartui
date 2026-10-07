@@ -51,9 +51,9 @@ pub struct Counters {
     /// Sighting batches dropped as MAC-layer retransmissions ([`DUPLICATE_BATCH_WINDOW_US`]). Not
     /// in `batches_lost`, since nothing was lost.
     pub duplicate_batches: u64,
-    /// Access points heard with no pending-ring room, once per dwell. Mostly delay, not loss: an
+    /// Access points heard with no pending-buffer room, once per dwell. Mostly delay, not loss: an
     /// address turned away is not in the dedup ring, so the next dwell reports it. Steady growth
-    /// means the ring is too small for the area.
+    /// means the buffer is too small for the area.
     pub wifi_dropped: u64,
     /// The same for advertisers and the Bluetooth scan's buffer, once per scan.
     pub ble_dropped: u64,

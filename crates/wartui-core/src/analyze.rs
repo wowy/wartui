@@ -32,8 +32,8 @@
 //! u8 wraps often, so the walk takes the wrapping difference and decides restarts from `counter`
 //! and `beat`, never from `unsent` falling, as `advance_since_boot` would.
 //!
-//! Ring refusals are reported beside the losses, not as one. A pending ring turns a sighting away
-//! once per dwell, and the network is usually reported on a later dwell. The count is ring
+//! Refusals are reported beside the losses, not as one. A full pending buffer turns a sighting away
+//! once per dwell, and the network is usually reported on a later dwell. The count is buffer
 //! pressure, not missing sightings.
 //!
 //! On the bridge side, each `bridge_status` row carries `host_frames`, the frames the host had read
@@ -145,7 +145,7 @@ pub struct NodeLoss {
     pub heartbeats_unsent: u64,
     /// Counted gaps in arrival order. Their missed counts sum to `heartbeats_missed`.
     pub heartbeat_windows: Vec<HeartbeatWindow>,
-    /// Access points the node's pending ring refused. Most are reported on a later dwell.
+    /// Access points the node's pending buffer refused. Most are reported on a later dwell.
     pub wifi_refused: u64,
     /// Advertisers the node's pending buffer refused.
     pub ble_refused: u64,

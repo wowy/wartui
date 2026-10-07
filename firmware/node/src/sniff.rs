@@ -3,33 +3,33 @@
 //! Everything here runs in the Wi-Fi driver's own task, on a buffer that dies when
 //! the callback returns, with no way to pass state in — `set_receive_cb` takes a bare
 //! `fn` pointer. So the callback parses into a fixed-size [`Sighting`] and leaves it
-//! in a `static` ring for the main loop.
+//! in a `static` buffer for the main loop.
 //!
 //! It also deduplicates against what is already pending: an access point beacons about
-//! ten times in a 125 ms dwell, so without that the ring fills with copies of the
+//! ten times in a 125 ms dwell, so without that the buffer fills with copies of the
 //! loudest network and drops the ones not yet seen. That lookup runs once per beacon
 //! with interrupts held off, so [`WifiPending`] finds a BSSID by hash rather than by
 //! scanning; the `wartui_proto::pending` docs' "Why the lookup is hashed" has the timings.
 //!
 //! And it deduplicates against [`SEEN`], the dedup ring itself: an access point already
 //! reported and not yet due to be reported again is worth nothing, but without this
-//! check it takes a [`PENDING`] slot, and a dense channel fills that ring with
+//! check it takes a [`PENDING`] slot, and a dense channel fills that buffer with
 //! addresses `report` would go on to discard anyway — starving the access points not
 //! yet seen this dwell. `SEEN` is asked only for a BSSID not already pending, which
 //! spares the lookup on every repeat beacon and changes nothing: a pending BSSID is
-//! ignored whatever `SEEN` would say. It is asked from inside [`PENDING_RING`]'s lock,
+//! ignored whatever `SEEN` would say. It is asked from inside [`DWELL`]'s lock,
 //! which is the one place the two nest, and `ble::Scanner::sweep` nests it the same way
 //! inside `ble::PENDING`; every other caller takes `SEEN` on its own, per sighting, and
 //! never across a transmit.
 //!
-//! An access point that finds the ring full is counted in
+//! An access point that finds the buffer full is counted in
 //! [`Refused`](wartui_proto::pending::Refused), once per dwell however often it beacons,
 //! so [`dropped`] counts addresses rather than packets. It is not in [`SEEN`], so the
 //! next dwell reports it: a refusal is mostly delay.
 //!
 //! Capture is opened and closed around the dwell rather than left running, because
 //! promiscuous mode is on across every channel change (`radio::park`). A frame
-//! arriving inside one of those toggles was heard on a channel the ring is not stamped
+//! arriving inside one of those toggles was heard on a channel the buffer is not stamped
 //! for — control traffic filed under the dwell channel on the way out, the dwell
 //! channel's stragglers under control on the way back — so an access point would end
 //! up named against a frequency it was never on, which is the one thing a fleet's
@@ -52,7 +52,7 @@ use wartui_proto::pending::WifiPending;
 ///
 /// A `static` rather than a field of `Node`, because the receive callback needs to
 /// reach it and cannot borrow anything (see the module doc). Nests inside
-/// [`PENDING_RING`]'s lock in [`on_frame`] and inside `ble::PENDING`'s in
+/// [`DWELL`]'s lock in [`on_frame`] and inside `ble::PENDING`'s in
 /// `ble::Scanner::sweep`; every other caller in `main.rs` takes it on its own, per
 /// sighting, and that lock order must hold everywhere `SEEN` is used.
 pub static SEEN: NonReentrantMutex<ChipDedupRing> = NonReentrantMutex::new(ChipDedupRing::new());
@@ -80,18 +80,19 @@ const PENDING_INDEX: usize = (2 * PENDING).next_power_of_two();
 /// and a plausible-looking channel at worst.
 const FCS_LEN: usize = 4;
 
-struct Pending {
+/// What the dwell in progress has heard, and where it is listening.
+struct Dwell {
     /// This dwell's sightings, one per BSSID.
     sightings: WifiPending<PENDING, PENDING_INDEX>,
-    /// Whether the radio is settled on [`Pending::channel`]. False through
+    /// Whether the radio is settled on [`Dwell::channel`]. False through
     /// every channel change, and false from boot until the first dwell.
     armed: bool,
     /// The channel the radio is parked on, for frames that name none.
     channel: u8,
 }
 
-static PENDING_RING: NonReentrantMutex<Pending> =
-    NonReentrantMutex::new(Pending { sightings: WifiPending::new(), armed: false, channel: 0 });
+static DWELL: NonReentrantMutex<Dwell> =
+    NonReentrantMutex::new(Dwell { sightings: WifiPending::new(), armed: false, channel: 0 });
 
 /// Start collecting on `channel`, discarding anything left from the last one.
 ///
@@ -99,10 +100,10 @@ static PENDING_RING: NonReentrantMutex<Pending> =
 /// did not get to belongs to a channel already left, and one arriving mid-hop to
 /// neither.
 pub fn arm(channel: u8) {
-    PENDING_RING.with(|pending| {
-        pending.sightings.clear();
-        pending.channel = channel;
-        pending.armed = true;
+    DWELL.with(|dwell| {
+        dwell.sightings.clear();
+        dwell.channel = channel;
+        dwell.armed = true;
     });
 }
 
@@ -111,7 +112,7 @@ pub fn arm(channel: u8) {
 /// The counterpart to [`arm`], called before leaving the channel. It does not clear:
 /// everything pending was heard while the radio was genuinely parked.
 pub fn disarm() {
-    PENDING_RING.with(|pending| pending.armed = false);
+    DWELL.with(|dwell| dwell.armed = false);
 }
 
 /// The callback itself. Registered once, at boot.
@@ -125,10 +126,10 @@ pub fn on_frame(pkt: PromiscuousPkt<'_>) {
         return;
     }
 
-    PENDING_RING.with(|pending| {
+    DWELL.with(|dwell| {
         // Mid-hop, or before the first dwell. There is no channel to file this
         // under that would be true.
-        if !pending.armed {
+        if !dwell.armed {
             return;
         }
 
@@ -137,12 +138,12 @@ pub fn on_frame(pkt: PromiscuousPkt<'_>) {
         #[allow(clippy::cast_possible_truncation)]
         let rssi = (pkt.rx_cntl.rssi as u8) as i8;
 
-        let Some(sighting) = parse_mgmt(frame, rssi, pending.channel) else { return };
+        let Some(sighting) = parse_mgmt(frame, rssi, dwell.channel) else { return };
 
         // Already reported and not due again: a pending slot spent on it is one taken
         // from an access point not yet seen this dwell. Asked only for a BSSID not
         // already pending; see the module doc for why that order is safe.
-        pending.sightings.record(sighting, |s| {
+        dwell.sightings.record(sighting, |s| {
             let now = now_ms();
             SEEN.with(|seen| seen.is_due(&s.bssid, Some(rssi), now))
         });
@@ -154,12 +155,12 @@ pub fn on_frame(pkt: PromiscuousPkt<'_>) {
 /// One at a time rather than a bulk drain, so nothing holds a several-kilobyte buffer
 /// on the stack and the lock is never held across a transmit.
 pub fn take() -> Option<Sighting> {
-    PENDING_RING.with(|pending| pending.sightings.take())
+    DWELL.with(|dwell| dwell.sightings.take())
 }
 
-/// Access points turned away by a full ring since boot, each counted once per dwell.
+/// Access points turned away by a full buffer since boot, each counted once per dwell.
 /// Wraps. The heartbeat carries it to the host. A number that climbs means [`PENDING`]
 /// is too small for the neighbourhood, not that the dwell is wrong.
 pub fn dropped() -> u16 {
-    PENDING_RING.with(|pending| pending.sightings.dropped())
+    DWELL.with(|dwell| dwell.sightings.dropped())
 }

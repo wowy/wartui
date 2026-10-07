@@ -130,10 +130,10 @@ to standard error; no output file is written. The tail of its output, after the 
   health     under-voltage in 3 samples  throttled in 0  since boot: under-voltage  temp max 71.2 °C  battery min 3.62 V
   batches    212 lost between node and host
   heartbeats 41 missed of 3,497 expected (1.2%)  12 unsent
-  ring       wifi 18,220 refused  ble 1,203 refused
+  refused    wifi 18,220  ble 1,203
   loss by node
-    1C:5A  batches 12  heartbeats 3/702 (0.4%)  ring ble 1,203
-    57:84  batches 200  heartbeats 38/2,795 (1.4%)  12 unsent  ring wifi 18,220
+    1C:5A  batches 12  heartbeats 3/702 (0.4%)  refused ble 1,203
+    57:84  batches 200  heartbeats 38/2,795 (1.4%)  12 unsent  refused wifi 18,220
 ```
 
 | Line         | What it counts                                                                   |
@@ -143,7 +143,7 @@ to standard error; no output file is written. The tail of its output, after the 
 | `health`     | Under-voltage and throttling the Pi firmware reported, temperature, battery      |
 | `batches`    | Sighting batches lost between node and host; the fleet table's `lost`            |
 | `heartbeats` | Heartbeats lost between node and host, and how many of them were `unsent`        |
-| `ring`       | Sightings a node's full pending ring refused; most are reported on a later dwell |
+| `refused`    | Sightings a node's full pending buffer refused; most are reported a dwell later  |
 
 Counts follow the assumptions below; `lost on USB` is approximate. The capture's first bridge
 reply and first heartbeat per node are baselines, so what was dropped before the capture began
@@ -152,7 +152,7 @@ is not counted. `batches` and `bridge` print zeros, since "0 lost" is the answer
 
 - the `bridge` line, when the capture holds no status reply
 - the `unsent` clause, total or per node, when it is zero
-- ring figures that are zero, and the `ring` line when all are
+- `refused` figures that are zero, and the `refused` line when all are
 - the reboot clause, when the bridge never restarted
 - the `lost on USB` clause, when it is zero
 - `host` clauses that are zero, and the `host` and `health` lines when the capture holds no host row

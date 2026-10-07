@@ -62,7 +62,7 @@ pub(super) fn draw_footer(
     }
 
     // Its own line, so a notice never hides it. Plain, not yellow, because a full
-    // ring is normal in a dense area.
+    // pending buffer is normal in a dense area.
     if let Some(drops) = drop_line(&c) {
         lines.push(Line::from(drops));
     }
@@ -81,7 +81,7 @@ pub(super) fn draw_footer(
     frame.render_widget(Paragraph::new(lines).dim(), area);
 }
 
-/// Sightings dropped for lack of ring room this session, or `None`. Most are
+/// Sightings dropped for lack of pending-buffer room this session, or `None`. Most are
 /// re-reported on the next dwell, so this measures how dense the area is, not a fault.
 pub(super) fn drop_line(c: &Counters) -> Option<String> {
     if c.wifi_dropped == 0 && c.ble_dropped == 0 {

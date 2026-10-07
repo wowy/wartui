@@ -34,7 +34,7 @@ const CAP_PRIVACY: u16 = 0x0010;
 ///
 /// Fixed-size and [`Copy`] on purpose: the firmware builds these inside the
 /// promiscuous receive callback, whose buffer dies when it returns, and parks them
-/// in a `static` ring for the main loop.
+/// in a `static` buffer for the main loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Sighting {
     /// The BSSID, from `addr3` of the management header.

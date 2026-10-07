@@ -62,7 +62,7 @@ pub struct Heartbeat {
     pub epoch: u8,
     /// How strongly the bridge heard it.
     pub link_rssi: Option<i8>,
-    /// Access points the node's full pending ring turned away since boot, once per dwell each.
+    /// Access points the node's full pending buffer turned away since boot, once per dwell each.
     pub wifi_dropped: u16,
     /// Advertisers the node's full pending buffer turned away since boot, once per scan each.
     pub ble_dropped: u16,

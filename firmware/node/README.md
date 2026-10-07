@@ -222,9 +222,9 @@ the wrong frequency and hear no assignment at all. It would read as a dead node.
 **The promiscuous callback runs in the Wi-Fi driver's task, on a buffer that dies when it returns.**
 It can't capture state, because `set_receive_cb` takes a bare `fn`, and it can't block. So it
 rejects non-management frames before touching a lock, parses what it needs into a fixed-size
-`Sighting`, and leaves it in a `static` ring for the main loop. It also drops an access point
-already pending. One beacons roughly ten times in a 125 ms dwell. Without the check, the ring would
-fill with copies of the loudest network and drop the ones not yet seen.
+`Sighting`, and leaves it in a `static` buffer for the main loop. It also drops an access point
+already pending. One beacons roughly ten times in a 125 ms dwell. Without the check, the buffer
+would fill with copies of the loudest network and drop the ones not yet seen.
 
 ## Dependency versions
 
