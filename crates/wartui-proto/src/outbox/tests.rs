@@ -1,6 +1,7 @@
 extern crate std;
 use std::vec::Vec;
 
+use super::ring::Ring;
 use super::{BULK_DEPTH, ByteSink, Outbox, PRIORITY_DEPTH, USB_PACKET};
 use crate::link::{
     BridgeToHost, Chip, FrameAccumulator, LINK_PROTO_VERSION, LogLevel, LogStr, LoopPhase,
@@ -51,7 +52,7 @@ impl ByteSink for Fake {
     }
 }
 
-pub(super) fn log(n: u8) -> BridgeToHost {
+fn log(n: u8) -> BridgeToHost {
     let mut message = LogStr::new();
     // One distinct, decodable body per frame, so a test can say which
     // frames survived rather than only how many.
@@ -96,7 +97,7 @@ fn status(rx_count: u32) -> BridgeToHost {
 }
 
 /// Every complete frame the host would recover from these bytes.
-pub(super) fn received(bytes: &[u8]) -> Vec<BridgeToHost> {
+fn received(bytes: &[u8]) -> Vec<BridgeToHost> {
     let mut acc = FrameAccumulator::<{ MAX_FRAME }>::new();
     let mut out = Vec::new();
     for &byte in bytes {
@@ -109,7 +110,7 @@ pub(super) fn received(bytes: &[u8]) -> Vec<BridgeToHost> {
     out
 }
 
-pub(super) fn bodies(frames: &[BridgeToHost]) -> Vec<u8> {
+fn bodies(frames: &[BridgeToHost]) -> Vec<u8> {
     frames
         .iter()
         .filter_map(|f| match f {
@@ -486,4 +487,27 @@ fn outbox_delivers_both_frames_when_fifo_fills_on_boundary_between_frames() {
 
     assert_eq!(bodies(&received(&sink.out)), [b'a', b'b']);
     assert!(outbox.is_empty());
+}
+
+#[test]
+fn ring_keeps_front_bytes_when_evicting_behind_front_across_wrap() {
+    let mut ring = Ring::<3>::new();
+    for n in 0..3 {
+        ring.push(&log(n)).unwrap();
+    }
+    ring.pop();
+    ring.pop();
+    ring.push(&log(3)).unwrap();
+    ring.push(&log(4)).unwrap();
+    // The front, log(2), sits in the last slot; the one behind it wraps to 0.
+    let front: Vec<u8> = (0..).map_while(|i| ring.byte_at(i)).collect();
+
+    ring.evict_behind_front();
+
+    let kept: Vec<u8> = (0..).map_while(|i| ring.byte_at(i)).collect();
+    assert_eq!(kept, front);
+    assert_eq!(bodies(&received(&kept)), [b'c']);
+    ring.pop();
+    let next: Vec<u8> = (0..).map_while(|i| ring.byte_at(i)).collect();
+    assert_eq!(bodies(&received(&next)), [b'e']);
 }

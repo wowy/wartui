@@ -93,35 +93,3 @@ impl<const N: usize> Ring<N> {
         self.len -= 1;
     }
 }
-
-#[cfg(test)]
-mod tests {
-    extern crate std;
-    use std::vec::Vec;
-
-    use super::Ring;
-    use crate::outbox::tests::{bodies, log, received};
-
-    #[test]
-    fn ring_keeps_front_bytes_when_evicting_behind_front_across_wrap() {
-        let mut ring = Ring::<3>::new();
-        for n in 0..3 {
-            ring.push(&log(n)).unwrap();
-        }
-        ring.pop();
-        ring.pop();
-        ring.push(&log(3)).unwrap();
-        ring.push(&log(4)).unwrap();
-        // The front, log(2), sits in the last slot; the one behind it wraps to 0.
-        let front: Vec<u8> = (0..).map_while(|i| ring.byte_at(i)).collect();
-
-        ring.evict_behind_front();
-
-        let kept: Vec<u8> = (0..).map_while(|i| ring.byte_at(i)).collect();
-        assert_eq!(kept, front);
-        assert_eq!(bodies(&received(&kept)), [b'c']);
-        ring.pop();
-        let next: Vec<u8> = (0..).map_while(|i| ring.byte_at(i)).collect();
-        assert_eq!(bodies(&received(&next)), [b'e']);
-    }
-}
