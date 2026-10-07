@@ -96,7 +96,8 @@ CREATE TABLE IF NOT EXISTS node (
 
 -- `wifi_dropped` and `ble_dropped` are the node's since-boot refusal counts as
 -- the frame carried them: raw, so a reboot shows as the value falling. `beat` is
--- the node's since-boot heartbeat count, raw, and wraps at 2^16.
+-- the node's since-boot heartbeat count, raw, and wraps at 2^16. An admin frame
+-- sent on a heartbeat's window is recorded in `assignment`, not here.
 CREATE TABLE IF NOT EXISTS heartbeat (
   id INTEGER PRIMARY KEY,
   node_mac BLOB NOT NULL,
@@ -108,10 +109,7 @@ CREATE TABLE IF NOT EXISTS heartbeat (
   ble_dropped INTEGER NOT NULL,
   beat INTEGER NOT NULL,
   -- Whether the heartbeat arrived live or was replayed from the bridge's backlog.
-  live INTEGER NOT NULL,
-  admin_sent INTEGER NOT NULL DEFAULT 0,
-  admin_acked INTEGER,
-  admin_latency_us INTEGER
+  live INTEGER NOT NULL
 );
 
 -- One row per transmitted assignment, written when its outcome is known, so
