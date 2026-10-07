@@ -319,8 +319,8 @@ fn store_round_trips_record_when_each_type_written() {
 
 #[test]
 fn store_writes_every_heartbeat_column_when_heartbeat_recorded() {
-    // A column the insert never names is NULL in every row, so a value in each proves the insert
-    // writes them all. A column with a DEFAULT would slip past; the table declares none.
+    // A column the insert omits is NULL, or holds its declared default. No column may be NULL and
+    // none may declare a default, so the insert names every column.
     let dir = tempfile::tempdir().expect("temp dir");
     let conn = write(
         &dir,
@@ -351,6 +351,15 @@ fn store_writes_every_heartbeat_column_when_heartbeat_recorded() {
             .unwrap();
         assert!(!null, "the heartbeat insert leaves `{column}` NULL");
     }
+
+    let defaulted: Vec<String> = conn
+        .prepare("SELECT name FROM pragma_table_info('heartbeat') WHERE dflt_value IS NOT NULL")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert!(defaulted.is_empty(), "heartbeat columns declare a default: {defaulted:?}");
 }
 
 #[test]

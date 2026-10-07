@@ -96,8 +96,9 @@ CREATE TABLE IF NOT EXISTS node (
 
 -- `wifi_dropped` and `ble_dropped` are the node's since-boot refusal counts as
 -- the frame carried them: raw, so a reboot shows as the value falling. `beat` is
--- the node's since-boot heartbeat count, raw, and wraps at 2^16. An admin frame
--- sent on a heartbeat's window is recorded in `assignment`, not here.
+-- the node's since-boot heartbeat count, raw, and wraps at 2^16. An assignment
+-- sent on a heartbeat's window is recorded in `assignment`; a dedup-ring clear
+-- is not recorded.
 CREATE TABLE IF NOT EXISTS heartbeat (
   id INTEGER PRIMARY KEY,
   node_mac BLOB NOT NULL,
