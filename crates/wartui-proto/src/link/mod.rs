@@ -1,19 +1,16 @@
 //! The USB link between the host and the bridge dongle.
 //!
-//! This is wartui's own protocol, not the firmware's, so it gets the discipline
-//! the on-air format lacks: an explicit version byte, a checksum, and framing
-//! that resynchronises from arbitrary junk.
+//! Unlike the air format, the link has a version byte, a checksum, and framing that
+//! resynchronises from arbitrary junk.
 //!
 //! ```text
 //! COBS( version:u8 || postcard(message) || crc16:u16le ) || 0x00
 //! ```
 //!
-//! The version byte sits *outside* the postcard blob so a mismatched bridge
-//! flash is detectable without a successful deserialize — which is exactly the
-//! situation where deserializing cannot be trusted. The CRC is not there for
-//! line integrity, since USB bulk transfers are already checked and retried in
-//! hardware; it is there to reject half-written frames and the ROM bootloader
-//! banner that a reset sprays down the same pipe.
+//! The version byte sits *outside* the postcard blob, so a mismatch is detectable without
+//! a deserialize that cannot be trusted. The CRC is not for line integrity: USB bulk
+//! transfers are checked and retried in hardware. It rejects half-written frames, and
+//! the ROM banner a reset prints down the same pipe.
 
 use crate::mac::Mac;
 use heapless::{String, Vec};
@@ -27,24 +24,17 @@ pub use panel::{PANEL_ROWS, Panel, PanelLine, PanelLines, Severity};
 
 /// The revision of this protocol both ends must agree on.
 ///
-/// Held at 1 until 1.0, whatever the message enums do, and for the reason
-/// [`crate::air::WIRE_VERSION`] is: nothing before 1.0 is compatible with an earlier
-/// wartui and the policy is to flash both ends from one tree, so there is no older peer
-/// for the byte to protect. It is the lever kept for the first change a build in the field
-/// has to survive, and spending it on a shape change nobody can still be running would
-/// leave nothing to spend then.
+/// Held at 1 until 1.0, whatever the message enums do, for the reason
+/// [`crate::air::WIRE_VERSION`] is: both ends are flashed from one tree.
 ///
-/// The cost is real and belongs where it will be read. The byte sits *outside* the postcard
-/// blob so a mismatched flash is detectable without a successful deserialize, and holding it
-/// gives that up: a host and a bridge built from different trees meet as an undecodable
-/// frame rather than a named mismatch. Postcard writes an enum variant as its index and a
-/// struct's fields in order, so a new variant is a byte with no case and a new field on
-/// [`BridgeToHost::Ready`] shifts everything after it — met inside the very frame meant to
-/// introduce the bridge, which reads as a bridge that answered nothing. That is also why
-/// every addition to these enums goes on the end.
+/// The cost is that a host and a bridge built from different trees meet as an
+/// undecodable frame, not a named mismatch. Postcard writes an enum variant as its index
+/// and a struct's fields in order. A new variant is an index the old build has no case
+/// for. A new field on [`BridgeToHost::Ready`] shifts everything after it, so the bridge
+/// reads as one that answered nothing. Every addition to these enums goes on the end.
 pub const LINK_PROTO_VERSION: u8 = 1;
 
-/// ESP-NOW's own payload ceiling. The 212-byte wardriver frames fit inside it.
+/// ESP-NOW's own payload ceiling. A [`crate::air::SightingBatch`] fills it exactly.
 pub const MAX_ESPNOW_PAYLOAD: usize = 250;
 
 /// Buffer size both ends allocate for one encoded frame.
@@ -59,8 +49,8 @@ pub type ShortStr = String<32>;
 /// A log line from the bridge.
 pub type LogStr = String<96>;
 
-/// Broadcast address. Nodes send heartbeats and observations here in plaintext
-/// mode, so the bridge hears them without any peer registration.
+/// Broadcast address. Nodes send heartbeats here in plaintext, so a bridge hears a node
+/// before either knows the other's address. Sighting batches unicast to the bridge.
 pub const BROADCAST: Mac = [0xFF; 6];
 
 /// Which chip the bridge firmware is running on.
@@ -68,15 +58,15 @@ pub const BROADCAST: Mac = [0xFF; 6];
 pub enum Chip {
     /// Dual-band, same radio as the nodes.
     Esp32C5,
-    /// 2.4 GHz only, which is all ESP-NOW needs at the default channel.
+    /// 2.4 GHz only, which is all ESP-NOW needs on the control channel.
     Esp32C6,
 }
 
 /// Why the bridge is running this life rather than the last one.
 ///
-/// A flattening of `esp_hal`'s per-chip `SocResetReason`, which names silicon
-/// blocks rather than causes and differs between the two parts. What an operator
-/// needs is which story this was, and the ones that matter are not [`Self::PowerOn`].
+/// A flattening of `esp_hal`'s per-chip `SocResetReason`, which names silicon blocks
+/// rather than causes and differs between the two parts. An operator needs to know
+/// which story this was, and the ones that matter are not [`Self::PowerOn`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub enum ResetCause {
     /// The board was plugged in, or the button was pressed.
@@ -88,16 +78,14 @@ pub enum ResetCause {
     Watchdog,
     /// The CPU locked up and the silicon reset it.
     ///
-    /// Reported by the C5 alone, and not to be folded into
-    /// [`ResetCause::Watchdog`]: no watchdog on any of these parts actually fires
-    /// (`docs/phase-3-findings.md`), so `Watchdog` here would name a mechanism
-    /// known not to work. The corollary, worth stating where it will be read: on a
-    /// C6 the hang class has *no* signal and the board has to be unplugged.
+    /// Reported by the C5 alone. Not folded into [`ResetCause::Watchdog`], because no
+    /// watchdog on these parts fires (`docs/phase-3-findings.md`). On a C6 a hang has
+    /// *no* signal, and the board must be unplugged.
     Lockup,
     /// The supply sagged. Usually a hub or a cable rather than the board.
     Brownout,
-    /// A reset the firmware did not ask for and cannot attribute, which
-    /// includes the one `espflash` drives over DTR/RTS.
+    /// A reset the firmware did not ask for and cannot attribute, including the one
+    /// `espflash` drives over DTR/RTS.
     External,
     /// The chip reported something this build does not have a name for.
     Unknown,
@@ -107,23 +95,22 @@ impl ResetCause {
     /// Whether a bridge writes to USB before any host has spoken.
     ///
     /// It does iff a host was present when the previous life ended
-    /// (`host_was_present`, kept in RTC memory), and never after a
-    /// [`Self::PowerOn`], where that memory is garbage. A host that was reading
-    /// across the reset relies on the unprompted `Ready`: it sends one `Identify`
-    /// per connection, so a connection that rides through the reset hears the new
-    /// life only through that `Ready`.
+    /// (`host_was_present`, kept in RTC memory). Never after a [`Self::PowerOn`], where
+    /// that memory is garbage.
     ///
-    /// With no host reading, writing to the USB Serial/JTAG endpoint leaves it
-    /// wedged: on a C6 replugged and left unread for two minutes, the first open
-    /// found it dead in 3 of 3 trials, and an `Identify` went unanswered until
-    /// `StallWatch` rebooted the board. A build that held all transmit until a host
-    /// frame decoded was healthy in 3 of 3, answering in 2 ms. The ROM banner, which
-    /// prints either way, is not the cause.
-    ///
-    /// The cause alone is not enough, because it says who asked for the reset and
-    /// not whether anybody was reading. A panic or a `StallWatch` reset after the
-    /// host left is [`Self::Software`] with nobody there, and a watchdog or lockup
-    /// reset can land while a host keeps the port open and never sends again.
+    /// - **Why not always.** Writing to the USB Serial/JTAG endpoint with no host
+    ///   reading wedges it. A C6 replugged and left unread for two minutes was dead at
+    ///   first open in 3 of 3 trials, until `StallWatch` rebooted it. A build holding all
+    ///   transmit until a host frame decoded was healthy in 3 of 3, answering in 2 ms
+    ///   (`docs/phase-3-findings.md`). The ROM banner prints either way and is not the
+    ///   cause.
+    /// - **Why not never.** A host sends one `Identify` per connection. A connection
+    ///   that rides through the reset hears the new life only through the unprompted
+    ///   `Ready`.
+    /// - **Why not by cause.** The cause says who asked for the reset, not whether
+    ///   anybody was reading. A panic or `StallWatch` reset after the host left is
+    ///   [`Self::Software`] with nobody there. A watchdog or lockup reset can land while
+    ///   a host keeps the port open and never sends again.
     #[must_use]
     pub const fn speaks_first(self, host_was_present: bool) -> bool {
         match self {
@@ -140,16 +127,14 @@ impl ResetCause {
 
 /// Where the bridge's main loop was when it last stopped making progress.
 ///
-/// Carried across a reset in RTC memory and reported in
-/// [`BridgeToHost::Ready`], because the interesting resets are the ones nobody
-/// was watching. On its own it is a hint rather than a diagnosis — the loop
-/// visits most of these at least ten times a second — but paired with a
-/// [`ResetCause::Watchdog`] or [`ResetCause::Software`] it says which of the
-/// blocking calls in the loop was the one that did not come back.
+/// Carried across a reset in RTC memory and reported in [`BridgeToHost::Ready`],
+/// because the interesting resets are the ones nobody was watching. Alone it is a hint:
+/// the loop visits most phases ten times a second. Paired with a
+/// [`ResetCause::Watchdog`] or [`ResetCause::Software`], it names the blocking call that
+/// did not come back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub enum LoopPhase {
-    /// Nothing to report: a power-on, or a reset that did not preserve the
-    /// marker.
+    /// Nothing to report: a power-on, or a reset that did not preserve the marker.
     Unknown,
     /// Still in `main` before the loop started.
     Boot,
@@ -165,11 +150,11 @@ pub enum LoopPhase {
     Pump,
     /// Idle, with neither radio nor link asking for anything.
     Idle,
-    /// The transmit path stopped draining while the host was still talking, so
-    /// the bridge reset itself. See [`BridgeToHost::Ready`].
+    /// The transmit path stopped draining while the host was still talking, so the
+    /// bridge reset itself. See [`crate::stall`].
     TxStalled,
-    /// Pushing pixels at the panel, which is the other call in the loop that
-    /// blocks for longer than a memcpy.
+    /// Pushing pixels at the panel, the other call in the loop that blocks for longer
+    /// than a memcpy.
     Render,
 }
 
@@ -186,8 +171,8 @@ pub enum LogLevel {
 /// What became of a [`HostToBridge::SendEspNow`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub enum SendStatus {
-    /// The radio confirmed delivery. Unicast ESP-NOW is MAC-acknowledged, so this
-    /// is real delivery rather than a successful enqueue.
+    /// The radio confirmed delivery. Unicast ESP-NOW is MAC-acknowledged, so this is
+    /// real delivery, not a successful enqueue.
     AckOk,
     /// The frame went out but no acknowledgement came back.
     AckFail,
@@ -203,28 +188,28 @@ pub enum SendStatus {
 
 /// Commands the host sends to the bridge.
 ///
-/// The bridge understands framing and the radio, and nothing about what the bytes
-/// mean; see `firmware/bridge/src/main.rs`.
-// The payload variants dwarf the rest, but boxing them would mean an allocator
-// in the bridge firmware, which is exactly what this crate avoids. These values
-// are transient — built, serialized and dropped — never stored in bulk.
+/// The bridge understands framing and the radio, and nothing about what the bytes mean;
+/// see `firmware/bridge/src/main.rs`.
+// The payload variants dwarf the rest, but boxing them would need an allocator in the
+// bridge firmware, which this crate avoids. These values are built, serialized and
+// dropped, never stored in bulk.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub enum HostToBridge {
     /// Ask the bridge to announce itself with [`BridgeToHost::Ready`].
     ///
     /// Sent the moment the host opens the port. A bridge that does not
-    /// [speak first](ResetCause::speaks_first) says nothing until a host frame
-    /// decodes, and one that does announced at boot, possibly to a host long gone.
-    /// Without asking, either would leave a new connection waiting for ever.
+    /// [speak first](ResetCause::speaks_first) says nothing until a host frame decodes.
+    /// One that does announced at boot, possibly to a host long gone. Either way, a new
+    /// connection that did not ask would wait for ever.
     Identify,
     /// Register a peer so unicast frames can be addressed to it.
     AddPeer {
         /// Peer address.
         mac: Mac,
     },
-    /// Drop a peer registration. Never issued as a side effect of sending, which
-    /// would race the transmit callback for the frame just sent.
+    /// Drop a peer registration. Never a side effect of sending, which would race the
+    /// transmit callback for the frame just sent.
     RemovePeer {
         /// Peer address.
         mac: Mac,
@@ -235,8 +220,7 @@ pub enum HostToBridge {
         id: u16,
         /// Destination, or [`BROADCAST`].
         dst: Mac,
-        /// Register the peer first if it is not already known. Add-if-absent
-        /// only; it never removes anything.
+        /// Register the peer first if it is not already known. It never removes one.
         ensure_peer: bool,
         /// Frame bytes, already encoded by [`crate::air`].
         payload: EspNowPayload,
@@ -247,22 +231,20 @@ pub enum HostToBridge {
     Reset,
     /// Lines to display, already laid out by the host.
     ///
-    /// Every line, every time, so a push is idempotent: a bridge that reboots mid-session
-    /// repaints correctly on the next one with no resync protocol to get wrong. At the
-    /// host's redraw rate that costs a few hundred bytes a second, which is not worth
-    /// trading that property for.
+    /// Every line, every time, so a push is idempotent. A bridge that reboots
+    /// mid-session repaints correctly on the next push, with no resync protocol to get
+    /// wrong. That costs a few hundred bytes a second at the host's redraw rate.
     ///
-    /// The host composes the text and decides each line's [`Severity`]; the bridge blits
-    /// what it is handed. That is what keeps the bridge format-blind, and what makes a
-    /// change to what the panel says cost a `cargo run` rather than a reflash.
+    /// The host composes the text and picks each line's [`Severity`]; the bridge blits
+    /// it. A change to what the panel says then costs a `cargo run`, not a reflash.
     ShowPanel {
         /// One per row, top to bottom. Never more than the [`Panel`] announced.
         lines: PanelLines,
     },
     /// Set the bridge radio's Wi-Fi transmit power in ESP-IDF quarter-dBm units.
     ///
-    /// Sent after every connection so a bridge that restarted under a running host is
-    /// restored without an operator control. The bridge reports a hardware rejection and
+    /// Sent with every status poll, so a bridge that restarted under a running host is
+    /// restored without operator action. The bridge reports a hardware rejection and
     /// keeps its prior setting.
     SetTxPower {
         /// ESP-IDF quarter-dBm units.
@@ -273,12 +255,12 @@ pub enum HostToBridge {
 impl HostToBridge {
     /// Whether the bridge answers this command with a frame of its own.
     ///
-    /// Exists for [`crate::stall::StallWatch`], which times a transmit path that
-    /// refuses bytes while a host *waits*. Only a command that asks for a reply can
-    /// leave a host waiting. A variant that merely may log or report an error does
-    /// not ask: that is not an answer the host is owed.
+    /// For [`crate::stall::StallWatch`], which times a transmit path that refuses bytes
+    /// while a host *waits*. Only a command that asks for a reply leaves a host waiting.
+    /// A command that may log or report an error does not ask: the host is not owed
+    /// that answer.
     ///
-    /// Exhaustive on purpose, so that a new command has to say which it is.
+    /// Exhaustive on purpose, so a new command has to say which it is.
     #[must_use]
     pub const fn asks_for_reply(&self) -> bool {
         match self {
@@ -297,13 +279,13 @@ impl HostToBridge {
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub enum BridgeToHost {
-    /// Sent at startup and in answer to [`HostToBridge::Identify`]. The host
-    /// checks `proto_version` and refuses to continue against a bridge it does
-    /// not understand.
+    /// Sent at startup when the life [speaks first](ResetCause::speaks_first), and in
+    /// answer to [`HostToBridge::Identify`]. The host checks `proto_version` and refuses
+    /// a bridge it does not understand.
     Ready {
         /// Which chip this is.
         chip: Chip,
-        /// The bridge's own MAC, which nodes will see as the core's address.
+        /// The bridge's own MAC, which nodes see as the host's address.
         mac: Mac,
         /// Bridge firmware version.
         fw_version: ShortStr,
@@ -314,36 +296,34 @@ pub enum BridgeToHost {
         reset_cause: ResetCause,
         /// Where the previous life stopped, when the reset preserved it.
         last_phase: LoopPhase,
-        /// Bytes free in the radio blobs' heap. Nothing wartui writes allocates, so
-        /// a figure that falls across a long capture is the blobs leaking.
+        /// Bytes free in the radio blobs' heap. Nothing wartui writes allocates, so a
+        /// figure that falls across a long capture is the blobs leaking.
         heap_free: u32,
         /// Milliseconds since this life started, at the moment of announcing.
         ///
-        /// Carried so the host can tell a *new* life from a second answer to an
-        /// [`HostToBridge::Identify`] it sent twice: a software reset does not
-        /// re-enumerate the USB device, so both arrive on one connection and
-        /// nothing else in the frame separates them. See
-        /// `crates/wartui-bridge/src/serial.rs`.
+        /// Lets the host tell a *new* life from a second answer to an
+        /// [`HostToBridge::Identify`] sent twice. A software reset does not re-enumerate
+        /// the USB device, so both arrive on one connection, and nothing else in the
+        /// frame separates them. See `crates/wartui-bridge/src/serial.rs`.
         uptime_ms: u32,
         /// The screen this bridge has, if it has one.
         ///
-        /// The bridge advertising its own geometry is what removes the operator flag: a
-        /// board with no panel reports `None` and is sent no [`HostToBridge::ShowPanel`]
-        /// at all, and one with a panel is formatted to the width it really has rather
-        /// than to a number the host guessed.
+        /// `None` for a board with no screen, which is then sent no
+        /// [`HostToBridge::ShowPanel`]. See [`Panel`].
         panel: Option<Panel>,
     },
     /// An ESP-NOW frame arrived.
     Rx {
         /// Transmitting node.
         src: Mac,
-        /// Destination, usually [`BROADCAST`].
+        /// Destination: [`BROADCAST`] for a heartbeat, the bridge's own MAC for a
+        /// sighting batch.
         dst: Mac,
         /// Signal strength in dBm.
         rssi: i8,
-        /// Bridge-local microsecond timestamp. Against the one on
-        /// [`Self::SendResult`] this measures the heartbeat-to-assignment latency
-        /// without the host's own scheduling noise.
+        /// Bridge-local microsecond timestamp. Against the one on [`Self::SendResult`],
+        /// it measures heartbeat-to-assignment latency without the host's scheduling
+        /// noise.
         rx_us: u32,
         /// The frame.
         payload: EspNowPayload,
@@ -363,15 +343,13 @@ pub enum BridgeToHost {
         peer_count: u8,
         /// Frames received since boot.
         rx_count: u32,
-        /// Frames the outbound ring dropped because they arrived faster than the
-        /// host took them: a host not reading, or a burst bigger than the ring plus
-        /// what USB drains during it.
+        /// Frames the outbox dropped. See [`crate::outbox`].
         dropped_tx: u32,
         /// Bridge uptime.
         uptime_ms: u32,
     },
-    /// Diagnostics, routed through the link rather than printed: `esp-println`
-    /// would interleave into the same endpoint and corrupt the framing.
+    /// Diagnostics, routed through the link rather than printed. `esp-println` would
+    /// interleave into the same endpoint and corrupt the framing.
     Log {
         /// Severity.
         level: LogLevel,

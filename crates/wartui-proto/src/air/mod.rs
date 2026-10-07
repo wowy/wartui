@@ -1,36 +1,26 @@
 //! The on-air ESP-NOW frames.
 //!
-//! Little-endian, no CRC. Encoding and decoding are written out by hand rather
-//! than transmuting a `#[repr(packed)]` struct: the byte layout is a contract
-//! between two separately compiled programs, so it deserves to be spelled out
-//! and tested against real bytes.
+//! Little-endian, no CRC. Encoding and decoding are written out by hand rather than
+//! transmuting a `#[repr(packed)]` struct. The byte layout is a contract between separately
+//! compiled programs, so it is spelled out and tested against real bytes.
 //!
-//! Every frame in both directions is wartui's own. ESP-NOW has no addressing
-//! above the MAC layer and a node broadcasts to `FF:FF:FF:FF:FF:FF`, so anything
-//! sharing a format on the control channel is in everybody's conversation at
-//! once.
+//! Every frame in both directions is wartui's own. ESP-NOW has no addressing above the MAC
+//! layer, and a node's heartbeat broadcasts to `FF:FF:FF:FF:FF:FF`. Anything sharing a
+//! format on the control channel is in everybody's conversation at once.
 //!
-//! A magic of our own solves it. It is checked before anything else, so another
-//! firmware's frame costs one `memcmp`. [`foreign`] recognises one such format,
-//! `ENOW`, in order to *report* it.
+//! A magic of our own solves that. It is checked before anything else, so another
+//! firmware's frame costs one `memcmp`. [`foreign`] recognises one such format, `ENOW`, in
+//! order to *report* it.
 //!
-//! The header carries a version. It is the lever held for the first change a
-//! fleet in the field has to survive: a node speaking a version this host does
-//! not know is counted and named rather than half-decoded. Until wartui 1.0
-//! nothing is such a change, so the byte does not move — see
-//! [`WIRE_VERSION`].
+//! The header carries a version byte. A frame of ours with a version this build does not
+//! know is counted and named, never half-decoded. The byte does not move before 1.0 (see
+//! [`WIRE_VERSION`]).
 //!
-//! A sighting never travels alone. A node packs every access point or
-//! advertiser it has to report into one [`SightingBatch`], filling it to
-//! [`SIGHTING_BATCH_MAX`] bytes — ESP-NOW's own payload ceiling — and sends
-//! what it has at the end of a dwell or a Bluetooth scan rather than holding
-//! any of it for the next one: the host stamps each record's position on
-//! arrival, so a sighting held across a dwell would carry the car's next
-//! position instead of the one it was heard at. [`SightingMsg`] is what one
-//! record of the batch holds; [`SightingBatch::decode`] validates the whole
-//! frame — every record within its limits and no trailing bytes — before
-//! yielding any of it, the same "never half-decoded" rule every other frame
-//! here follows.
+//! A node packs every sighting from one dwell or Bluetooth scan into one [`SightingBatch`],
+//! up to [`SIGHTING_BATCH_MAX`] bytes. It sends the batch when the dwell ends and holds
+//! nothing over. The host stamps a position on each record as it arrives, so a held
+//! sighting would get the wrong position. [`SightingBatch::decode`] checks the whole frame
+//! before it yields any record.
 
 use core::fmt;
 
@@ -55,42 +45,37 @@ pub const MAGIC: [u8; 4] = *b"WTUI";
 
 /// The frame version this build speaks and the only one it decodes.
 ///
-/// 1 until wartui 1.0, whatever the layouts below do. Nothing here is
-/// compatible with an earlier wartui and the fleet is flashed together, so a
-/// byte telling the two apart marks a difference nothing acts on and costs a
-/// re-pin of every fixture in `tests/wire.rs` to say it. This is held for the
-/// first change a fleet in the field has to survive; a layout that changes
-/// shape before then simply changes shape. Anything else is reported as
-/// incompatible rather than guessed at — see the module docs.
+/// 1 until wartui 1.0, whatever the layouts do. It is held for the first change a fleet
+/// in the field has to survive. Before then the fleet is flashed together, and a layout
+/// simply changes shape. `AGENTS.md` § "Invariants that are easy to break" gives the
+/// policy.
 pub const WIRE_VERSION: u8 = 1;
 
-/// The channel every node returns to in order to speak to the controller.
+/// The channel every air frame is sent on, and every node returns to.
 ///
-/// Nothing negotiates this: a node that
-/// picked a different one would be transmitting into an empty room.
+/// Nothing negotiates it: a node on a different channel would transmit into an empty
+/// room.
 pub const CONTROL_CHANNEL: u8 = 6;
 
 const OFF_VERSION: usize = 4;
 const OFF_TYPE: usize = 5;
 const OFF_BODY: usize = 6;
 
-/// The header alone: enough to know whether a frame is ours and what shape it
-/// claims to be.
+/// The header alone: enough to know whether a frame is ours and what shape it claims.
 const HEADER_LEN: usize = OFF_BODY;
 
-/// What a frame is, with the direction in the high bit so a misrouted frame is a
-/// decode error rather than a plausible one of something else.
+/// What a frame is. The high bit is the direction, so a misrouted frame is a decode error
+/// rather than a plausible frame of another type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum MsgType {
-    /// Node → core, once per completed channel sweep.
+    /// Node → host: [`HeartbeatMsg`].
     Heartbeat = 0x01,
-    /// Node → core, every newly-seen BSSID or advertiser from one dwell or
-    /// Bluetooth scan, packed into [`SightingBatch`].
+    /// Node → host: [`SightingBatch`].
     SightingBatch = 0x02,
-    /// Core → node. Carries a channel and Bluetooth assignment.
+    /// Host → node: [`AdminMsg`].
     Admin = 0x81,
-    /// Core → node. Asks the node to forget every address it has reported.
+    /// Host → node: [`ClearMsg`].
     Clear = 0x82,
 }
 
@@ -126,17 +111,13 @@ pub enum DecodeError {
         /// Bytes actually present.
         got: usize,
     },
-    /// A fixed-length frame that was not its own length, or a [`SightingBatch`]
-    /// carrying bytes past its last record.
+    /// A fixed-length frame that was not its own length, or a [`SightingBatch`] with
+    /// bytes past its last record.
     ///
-    /// [`HeartbeatMsg`] and [`AdminMsg`] are each exactly one size, so anything
-    /// else carrying their type byte came from a build whose layout differs from
-    /// this one's. Longer is the dangerous half: the leading bytes would parse,
-    /// and the frame would be adopted as a plausible wrong assignment. Since
-    /// [`WIRE_VERSION`] does not move before 1.0, this is what says a fleet is
-    /// half-way through a reflash. A batch is not fixed-length, but `count`
-    /// records fully accounts for its bytes or it is the same fault: a frame
-    /// claiming to be something this build's layout is not.
+    /// Either way the frame came from a build whose layout differs from this one's.
+    /// Since [`WIRE_VERSION`] does not move before 1.0, this is what says a fleet is
+    /// half-way through a reflash. Longer is the dangerous case: the leading bytes would
+    /// parse, and the frame would be adopted as a plausible wrong assignment.
     BadLength {
         /// Bytes this build's layout is.
         need: usize,
@@ -145,17 +126,16 @@ pub enum DecodeError {
     },
     /// First four bytes were not [`MAGIC`].
     BadMagic,
-    /// A frame of ours, from a build speaking a version this one does not.
-    /// Reported rather than guessed at: the whole point of the version byte is
-    /// that a layout change must not decode as a plausible older frame.
+    /// A frame of ours, from a build speaking a version this one does not. Reported,
+    /// never guessed at: a layout change must not decode as a plausible frame.
     BadVersion(u8),
     /// Type byte named no frame this build knows.
     UnknownType(u8),
-    /// `ssid_len` exceeded [`SSID_MAX`], which 802.11 makes impossible, so the
-    /// frame is malformed rather than merely unusual.
+    /// `ssid_len` exceeded [`SSID_MAX`]. 802.11 makes that impossible, so the frame is
+    /// malformed.
     SsidTooLong(u8),
-    /// `ext_len` exceeded [`EXT_MAX`], which no parser this build knows will
-    /// produce, so the frame is malformed rather than merely unusual.
+    /// `ext_len` exceeded [`EXT_MAX`]. No parser in this build produces that, so the
+    /// frame is malformed.
     ExtTooLong(u8),
 }
 
@@ -177,8 +157,8 @@ impl core::error::Error for DecodeError {}
 
 /// Check the header and return the type it names.
 ///
-/// Every decoder starts here, so magic, version and type are rejected in the
-/// same order and with the same errors wherever a frame arrives.
+/// Every decoder starts here, so magic, version and type are rejected in the same order
+/// and with the same errors wherever a frame arrives.
 fn header(buf: &[u8]) -> Result<MsgType, DecodeError> {
     if buf.len() < HEADER_LEN {
         return Err(DecodeError::TooShort { need: HEADER_LEN, got: buf.len() });
@@ -202,15 +182,13 @@ fn write_header(out: &mut [u8], msg_type: MsgType) {
 /// Any frame, dispatched on the type byte.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Frame<'a> {
-    /// Node → core.
+    /// Node → host.
     Heartbeat(HeartbeatMsg),
-    /// Node → core.
+    /// Node → host.
     Sightings(SightingBatch<'a>),
-    /// Core → node. Seeing one this host did not send means another core is
-    /// driving this fleet.
+    /// Host → node. One this host did not send means another host is driving the fleet.
     Admin(AdminMsg),
-    /// Core → node. Seeing one this host did not send means another core is
-    /// driving this fleet, the same as [`Frame::Admin`].
+    /// Host → node. One this host did not send means the same as for [`Frame::Admin`].
     Clear(ClearMsg),
 }
 
@@ -231,13 +209,11 @@ impl<'a> Frame<'a> {
 
 /// Recognising the vendor's traffic, in order to report it.
 ///
-/// Nothing here decodes a byte. The fields are another fleet's idea of another
-/// fleet and acting on them would be adopting it. But a vendor core or node on
-/// the control channel is an operational fact — it is transmitting where these
-/// nodes are listening, and on a stock fleet the probe requests are active
-/// scans — so counting it as line noise would hide the one clue an operator has
-/// for a channel that is busier than the fleet can explain.
+/// Nothing here decodes a byte: acting on another fleet's fields would be adopting
+/// them. But a vendor host or node on the control channel transmits where these nodes
+/// listen, and a stock fleet's nodes scan actively. Counting it as line noise would hide
+/// the one clue an operator has for a channel busier than the fleet explains.
 ///
-/// The vendor magic is all that is matched. wartui's own frames carry [`MAGIC`],
-/// so anything carrying `ENOW` belongs to somebody else by definition.
+/// Only the vendor magic is matched. wartui's own frames carry [`MAGIC`], so anything
+/// carrying `ENOW` is somebody else's.
 pub mod foreign;

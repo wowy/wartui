@@ -2,16 +2,14 @@ use core::fmt;
 
 /// What a network's information elements amount to.
 ///
-/// One byte on the wire, and the WiGLE `AuthMode` spelling only at the edge
-/// where WiGLE wants it — [`Display`](fmt::Display), which the store row and
-/// the exported column both go through. Spelling it on the wire would
-/// cost seventy bytes a record to carry a handful of values, and make the parser
-/// on this end a string comparison.
+/// One byte on the wire. The WiGLE `AuthMode` spelling appears only where WiGLE wants
+/// it, through [`Display`](fmt::Display), which the store row and the exported column
+/// both use. Spelling it on the wire would cost up to fifteen bytes a record rather than
+/// one, and make decoding a string comparison.
 ///
-/// The set is open-ended, so a discriminant this build does not know is carried
-/// through as [`Security::Unknown`] rather than failing the frame: a node from
-/// a later build must not lose an observation to a security mode this host has
-/// never heard of.
+/// A discriminant this build does not know is carried as [`Security::Unknown`] rather
+/// than failing the frame. A sighting must not be lost to a security mode this build
+/// has no name for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(missing_docs)]
 pub enum Security {
@@ -28,7 +26,7 @@ pub enum Security {
     Undefined,
     /// The placeholder the BLE path reports.
     Ble,
-    /// A discriminant this build did not have when it was written.
+    /// A discriminant this build does not name.
     Unknown(u8),
 }
 
@@ -52,8 +50,8 @@ impl Security {
         }
     }
 
-    /// The inverse. Never yields [`Security::Unknown`] holding a value one of
-    /// the named variants already has, so `as_u8` and `from_u8` round-trip.
+    /// The inverse. Never yields [`Security::Unknown`] holding a value a named variant
+    /// has, so `as_u8` and `from_u8` round-trip.
     #[must_use]
     pub const fn from_u8(raw: u8) -> Self {
         match raw {
@@ -96,9 +94,8 @@ impl fmt::Display for Security {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.token() {
             Some(token) => f.write_str(token),
-            // Said in a shape that still reads as an AuthMode token and still
-            // says which one, so an export from an older host is a lead rather
-            // than a shrug.
+            // Still shaped like an AuthMode token, and still says which value it
+            // was, so the export gives a lead rather than a shrug.
             None => write!(f, "[UNKNOWN:{}]", self.as_u8()),
         }
     }

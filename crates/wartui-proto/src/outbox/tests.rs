@@ -348,6 +348,7 @@ fn outbox_preserves_queued_frames_without_progress_when_sink_is_wedged() {
     assert!(outbox.pump(&mut open));
     assert_eq!(bodies(&received(&open.out)), [b'a']);
 }
+
 #[test]
 fn outbox_pads_transfer_when_frame_ends_on_full_packet() {
     let (msg, frame) = log_encoding_to(USB_PACKET, 0);
@@ -455,6 +456,7 @@ fn outbox_writes_no_pad_when_flush_ends_packet_between_pumps() {
     assert_eq!(sink.flushes, [40, USB_PACKET]);
     assert_eq!(bodies(&received(&sink.out)), [b'a', b'b']);
 }
+
 #[test]
 fn outbox_keeps_frame_whole_when_fifo_fills_on_packet_boundary_mid_frame() {
     let (msg, frame) = log_encoding_to(80, 0);

@@ -1,61 +1,52 @@
 //! Deciding when the bridge's USB transmit endpoint has stopped draining.
 //!
-//! Only the firmware acts on this, and it lives here for the reason
-//! [`crate::outbox`] does: a `no_std` binary cannot run a test. The rule below
-//! has shipped three defects, none found by review — the first took a bridge on a
-//! bench beside a talking fleet, the second an operator quitting a session and
-//! watching the board reset three seconds later, the third a fault build that a
-//! host asking once could never clear. Each is one line of arithmetic against a
-//! clock, and each is now a test a few microseconds long.
+//! Only the firmware acts on this; the crate docs say why it lives here. Each rule below
+//! is one line of arithmetic against a clock. Review does not catch a wrong one, so each
+//! has a test.
 //!
 //! ## The failure this exists for
 //!
-//! The USB Serial/JTAG IN endpoint answers every write with "not now" and never
-//! stops: `SERIAL_IN_EP_DATA_FREE` goes to zero when `WR_DONE` is set and, per the
-//! TRM, comes back only "until data in UART Tx FIFO is read by USB Host". If that
-//! read never lands the flag never clears and the device end cannot make it. The
-//! receive path is untouched, so the bridge goes on decoding and executing
-//! commands it cannot answer — from the host, a port that opens, writes that
-//! succeed, and silence. Nothing subtler than a reset is available.
+//! The USB Serial/JTAG IN endpoint can answer every write with "not now" and never stop.
+//! `SERIAL_IN_EP_DATA_FREE` goes to zero when `WR_DONE` is set and, per the TRM, comes
+//! back only "until data in UART Tx FIFO is read by USB Host". If that read never lands,
+//! the device end cannot clear the flag. The receive path still works, so the bridge goes
+//! on decoding and executing commands it cannot answer. The host sees a port that opens,
+//! writes that succeed, and silence. Only a reset recovers it.
 //!
-//! ## What is actually being measured
+//! ## What is measured
 //!
-//! Not "how long since a byte moved", but how long the *contradiction* has lasted:
-//! a host demonstrably asking and a transmit path demonstrably refusing. That
-//! distinction is the whole of this module, and `docs/phase-3-findings.md` has the
-//! bench measurement behind each clause.
+//! Not how long since a byte moved, but how long the *contradiction* has lasted: a host
+//! demonstrably asking and a transmit path demonstrably refusing. `docs/phase-3-findings.md`
+//! has the bench measurement behind each clause.
 
 /// How long the transmit path may refuse every byte while a host waits.
 ///
-/// Chosen against the host's clock rather than the bridge's: `wartui` gives up
-/// after six seconds (`crates/wartui-bridge/src/serial.rs`), so resetting at three
-/// leaves room for the reboot and a fresh `Ready` to land inside that window. Also
-/// far longer than any legitimate gap — the test is for *no* progress at all.
+/// Chosen against the host's clock. `wartui` gives up after six seconds
+/// (`crates/wartui-bridge/src/serial.rs`), so resetting at three leaves room for the
+/// reboot and a fresh `Ready` inside that window. It is also far longer than any
+/// legitimate gap: the test is for *no* progress at all.
 pub const TX_STALL_TIMEOUT_MS: u64 = 3_000;
 
 /// How recently the host must have spoken to count as still being there.
 ///
-/// Deliberately longer than the host's own five-second `status_interval`
+/// Longer than the host's five-second `status_interval`
 /// (`crates/wartui-core/src/engine/config.rs`), because a connected host with a quiet
-/// fleet says nothing in between. Below that interval, an established capture
-/// reads as an absent host for two seconds in every five and no wedge is ever
-/// noticed.
+/// fleet says nothing in between. A shorter window reads an established capture as an
+/// absent host for part of every interval, and a wedge then is never noticed.
 pub const HOST_PRESENT_WINDOW_MS: u64 = 10_000;
 
 /// Whether the transmit endpoint has stopped draining while a host waited.
 ///
-/// Fed one observation per pass of the bridge's main loop, and asked after each
-/// one whether to give up. Four facts have to hold together, and no three of
-/// them are enough:
+/// Fed one observation per pass of the bridge's main loop, and asked after each one
+/// whether to give up. Four facts must hold together, and no three are enough:
 ///
-/// - something is queued and this pass moved none of it, so silence is not
-///   simply having nothing to say;
-/// - a host frame *that asks for a reply* has decoded since the last byte moved,
-///   so somebody has asked for something the endpoint has not delivered;
-/// - a host frame decoded inside [`HOST_PRESENT_WINDOW_MS`], so that host is
-///   still there;
-/// - and [`TX_STALL_TIMEOUT_MS`] has passed since *both* the first such frame and
-///   the first refusal, so the endpoint is not merely slow.
+/// - Something is queued and this pass moved none of it. Silence is not simply
+///   having nothing to say.
+/// - A host frame *that asks for a reply* has decoded since the last byte moved.
+///   Somebody asked for something the endpoint has not delivered.
+/// - A host frame decoded inside [`HOST_PRESENT_WINDOW_MS`]. That host is still there.
+/// - [`TX_STALL_TIMEOUT_MS`] has passed since *both* the first such frame and the
+///   first refusal. The endpoint is not merely slow.
 ///
 /// One unanswered asking frame is enough. The host sends a single `Identify` per
 /// connection (`crates/wartui-bridge/src/serial.rs`, `connect`), so a bridge that
@@ -63,46 +54,45 @@ pub const HOST_PRESENT_WINDOW_MS: u64 = 10_000;
 ///
 /// # Why the clock starts at the contradiction
 ///
-/// Timing from the last byte written looks equivalent and is not. A bridge left
-/// powered beside a talkative fleet fills its rings with nobody reading, so by the
-/// time an operator attaches the last byte moved *hours* ago — and all of it would
-/// count against a transmit path with nothing wrong with it. So the clock runs
-/// from the later of the first refusal and the first asking host frame since the
-/// last byte moved: neither half alone is a contradiction. The *first* such frame, not
-/// the latest, because a host polling twice a second through a wedge would
+/// Timing from the last byte written looks equivalent and is not. A bridge powered
+/// beside a talkative fleet fills its rings with nobody reading. When an operator
+/// attaches, the last byte moved *hours* ago, and all of that would count against a
+/// healthy transmit path.
+///
+/// So the clock runs from the later of the first refusal and the first asking host frame
+/// since the last byte moved. Neither half alone is a contradiction. It is the *first*
+/// such frame, not the latest: a host polling twice a second through a wedge would
 /// otherwise push the clock forward for ever.
 ///
 /// # Why a frame must be unanswered, not merely recent
 ///
-/// A host that has *quit* satisfies "spoke inside the window" for a further
-/// [`HOST_PRESENT_WINDOW_MS`], and quitting is exactly what stops the endpoint
-/// draining — so with a fleet in earshot the rings fill the moment it lets go, and
-/// since [`TX_STALL_TIMEOUT_MS`] is the shorter of the two a presence test alone
-/// resets the board after every session. A host that was reading moved bytes after
-/// its last frame, which clears the unanswered frame, so the stall that follows its
-/// quit has no frame to time against. A slow host that lets a byte through just
-/// inside every timeout clears it the same way, and is never reset.
+/// A host that has *quit* still counts as present for [`HOST_PRESENT_WINDOW_MS`]. Quitting
+/// is also what stops the endpoint draining, so with a fleet in earshot the rings fill at
+/// once. [`TX_STALL_TIMEOUT_MS`] is the shorter of the two, so a presence test alone would
+/// reset the board after every session.
 ///
-/// A frame that asks for nothing cannot be left unanswered, so it never starts the
-/// clock: it proves presence and no more. That matters because a panel push, sent
-/// up to once a second to a bridge with a screen, is often the last thing a TUI sends
-/// before it quits, and no byte follows it. Counting it would reset the board a few
-/// seconds after an ordinary quit, as soon as a node frame was queued behind the dead
+/// A host that was reading moved bytes after its last frame, and a moved byte clears the
+/// unanswered frame. The stall after it quits then has no frame to time against. A slow
+/// host that lets a byte through inside every timeout clears it the same way, and is
+/// never reset.
+///
+/// A frame that asks for nothing cannot be left unanswered, so it proves presence and
+/// never starts the clock. A panel push, sent up to once a second, is often the last
+/// thing a TUI sends before it quits, and no byte follows it. Counting it would reset the
+/// board seconds after an ordinary quit, once a node frame queued behind the dead
 /// endpoint. A quiet `AddPeer` or `RemovePeer` would do the same.
 ///
-/// The cost is a host that sends a frame that asks and leaves before any byte moves
-/// after it — killed mid-handshake, say. If something is queued, that bridge reboots
-/// three seconds later, and only while the frame is inside
-/// [`HOST_PRESENT_WINDOW_MS`]. The next connection reads `TxStalled` in its
-/// `Ready`, and nothing else is lost.
+/// The cost is a host that sends an asking frame and leaves before any byte moves, such
+/// as one killed mid-handshake. If something is queued, that bridge reboots three seconds
+/// later, while the frame is inside [`HOST_PRESENT_WINDOW_MS`]. The next connection reads
+/// `TxStalled` in its `Ready`, and nothing else is lost.
 ///
 /// # Why there is no default host
 ///
-/// Seeded with a time instead of `None`, this reads as a host present for the first
-/// [`HOST_PRESENT_WINDOW_MS`] of *every* life — so a bridge powered beside a
-/// talking fleet with nothing attached fills its rings, resets, and comes back into
-/// the same window for ever. Presence is something a host demonstrates by sending a
-/// frame, and there is no such thing as a default.
+/// Seeded with a time instead of `None`, this would read as a host present for the first
+/// [`HOST_PRESENT_WINDOW_MS`] of *every* life. A bridge beside a talking fleet with
+/// nothing attached would fill its rings, reset, and come back into the same window for
+/// ever. A host demonstrates presence by sending a frame.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct StallWatch {
     /// When the transmit path first refused a byte with something queued, or
@@ -124,10 +114,10 @@ impl StallWatch {
 
     /// Record proof of a host: a frame that decoded, at `now_ms`.
     ///
-    /// Only a frame that *decoded* may be reported: a board running node firmware
-    /// talks constantly down the same wire and none of it is a frame. `asks` is
-    /// [`HostToBridge::asks_for_reply`](crate::link::HostToBridge::asks_for_reply):
-    /// every frame proves presence, but only one that asks can start the clock.
+    /// Report only a frame that *decoded*: a board running node firmware talks
+    /// constantly down the same wire, and none of it is a frame. `asks` is
+    /// [`HostToBridge::asks_for_reply`](crate::link::HostToBridge::asks_for_reply).
+    /// Every frame proves presence, but only one that asks can start the clock.
     pub const fn note_host(&mut self, now_ms: u64, asks: bool) {
         self.last_host = Some(now_ms);
         if asks && self.host_since_move.is_none() {
@@ -137,10 +127,9 @@ impl StallWatch {
 
     /// When a frame from the host last decoded, or `None` if none ever has.
     ///
-    /// Exposed so that anything else needing to know whether a host is there reads the
-    /// clock that is already kept rather than starting a second one. The bridge's panel
-    /// does: it falls back to what it knows on its own when the host stops talking, and
-    /// two clocks for one fact would disagree the moment either changed.
+    /// Anything else that needs to know whether a host is there reads this clock rather
+    /// than keeping a second one, which would disagree with it. The bridge's panel does,
+    /// to fall back to its own screen when the host stops talking.
     #[must_use]
     pub const fn last_host(&self) -> Option<u64> {
         self.last_host
@@ -148,13 +137,13 @@ impl StallWatch {
 
     /// Account for one pass of the outbox, and say whether to give up.
     ///
-    /// `moved` is whether that pass placed any byte at all; `queued` is whether
-    /// anything is still waiting to go. `true` means the four facts above all
-    /// hold and the only remedy left is a reset.
+    /// `moved` is whether that pass placed any byte. `queued` is whether anything is
+    /// still waiting to go. `true` means the four facts on [`StallWatch`] all hold, and
+    /// only a reset is left.
     ///
-    /// `now_ms` must never go backwards. The firmware reads it from the boot
-    /// instant, which cannot, and a caller that breaks the rule is caught by the
-    /// subtraction below rather than mistaken for a host that is present.
+    /// `now_ms` must never go backwards. The firmware reads it from the boot instant,
+    /// which cannot. A caller that breaks the rule is caught by the subtraction below
+    /// rather than mistaken for a present host.
     pub fn note_tx(&mut self, moved: bool, queued: bool, now_ms: u64) -> bool {
         if moved {
             // Delivered: every frame so far has been answered as far as this end

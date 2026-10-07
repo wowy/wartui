@@ -389,7 +389,7 @@ struct Bridge {
     /// Whether the USB transmit endpoint has stopped draining while a host
     /// waited, which is the one failure this firmware recovers from by itself.
     ///
-    /// The rule has been wrong three times, so it lives in [`wartui_proto::stall`].
+    /// The rule lives in [`wartui_proto::stall`], where `cargo test` reaches it.
     stall: StallWatch,
     /// The lines the host last sent.
     ///

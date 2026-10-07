@@ -1,12 +1,13 @@
-//! Wire formats for the ESP32-C5 wardriver mesh, and the text form of the addresses that
-//! cross it.
+//! Wire formats for the wartui ESP32-C5/C6 wardriver mesh, the decision logic both
+//! firmwares run, and the text form of the addresses that cross the wire.
 //!
-//! This crate is `no_std` and allocation-free because it is compiled into both
-//! the host TUI and the bridge firmware. Defining the wire types once is the
-//! only thing that keeps the two ends from drifting apart.
+//! The host, the bridge firmware and the node firmware all compile this crate. Defining
+//! the wire types once keeps the three in step. The formats are wartui's own and
+//! interoperate with no other firmware.
 //!
-//! The wire formats are wartui's own, and nothing here interoperates with any other
-//! firmware.
+//! The crate is `no_std` and allocation-free so the firmware can use it. Firmware-only
+//! logic lives here too, such as [`outbox`], [`stall`] and [`pending`], because a
+//! `riscv32imac` binary cannot run a test and this crate can.
 
 #![no_std]
 

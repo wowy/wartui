@@ -1,23 +1,21 @@
-//! Turning 802.11 management frames into observations.
+//! Turning 802.11 management frames into sightings.
 //!
-//! An active scan transmits a probe request on every channel it visits — including
-//! the DFS channels, where the rules say listen and do not speak. A wartui node
-//! parks the radio and listens instead, which means it has to do for itself the
-//! one thing the scan API was buying: work out what a beacon is advertising.
+//! An active scan transmits a probe request on every channel it visits, including the
+//! DFS channels, where the rules say listen and do not speak. A wartui node parks the
+//! radio and listens instead. It must therefore do the one thing the scan API did for
+//! it: work out what a beacon advertises.
 //!
-//! An RSN/WPA information-element parser and the `wifi_auth_mode_t` table it feeds,
-//! collapsed into one pass yielding a [`Security`]. The set of values has to stay
-//! faithful to that table even though the spelling never travels on the wire — a
-//! frame carries the discriminant as one byte — because it is what the WiGLE
-//! `AuthMode` column says.
+//! This module parses the RSN and WPA information elements and maps them onto the
+//! `wifi_auth_mode_t` table in one pass, yielding a [`Security`]. The wire carries only
+//! the discriminant, but the set of values must stay faithful to that table, because it
+//! is what the WiGLE `AuthMode` column says.
 //!
-//! [`visible_ssid`] exists because an access point hides its name in either of two
-//! ways and only one of them looks hidden: an SSID element of length zero, or the
-//! element at the name's real length with every byte zero. The second form is a
-//! well-formed SSID made of NULs and survives everything downstream — `air` is
-//! byte-transparent, the store keeps what arrived, and NUL is valid UTF-8 — so it
-//! reached a WiGLE export as a column of them. Stripping it here rather than at each
-//! place that shows an SSID is what makes `ssid_len == 0` mean hidden.
+//! An access point hides its name in either of two ways: an SSID element of length zero,
+//! or the element at the name's real length with every byte zero. Only the first looks
+//! hidden. The second is a well-formed SSID made of NULs, and survives everything
+//! downstream: `air` is byte-transparent, the store keeps what arrived, and NUL is valid
+//! UTF-8. [`visible_ssid`] strips it here, once, so `ssid_len == 0` means hidden
+//! everywhere.
 
 use core::fmt;
 
@@ -66,25 +64,25 @@ impl Sighting {
         rssi: 0,
     };
 
-    /// The SSID bytes, which are whatever the access point beaconed and so may
-    /// not be UTF-8. Empty for a hidden network, in either of the two ways an
-    /// access point has of being one — see [`visible_ssid`].
+    /// The SSID bytes, whatever the access point beaconed, so not necessarily UTF-8.
+    /// Empty for a hidden network, in either form [`visible_ssid`] describes.
     #[must_use]
     pub fn ssid(&self) -> &[u8] {
         &self.ssid[..usize::from(self.ssid_len)]
     }
 
-    /// The roaming consortium element's body, verbatim as the beacon carried
-    /// it. Empty when the access point beaconed none — most do not — or when
-    /// what it beaconed was longer than the wire can carry, in which case it is
-    /// dropped whole rather than truncated: a partly-arrived identifier is
-    /// nobody's. What the bytes mean is [`rcoi_text`]'s to say.
+    /// The roaming consortium element's body, verbatim as the beacon carried it.
+    ///
+    /// Empty when the access point beaconed none, as most do not. Also empty when the
+    /// element was longer than the wire carries: it is dropped whole rather than
+    /// truncated, since a partly-arrived identifier is nobody's. [`rcoi_text`] reads the
+    /// bytes.
     #[must_use]
     pub fn rcoi(&self) -> &[u8] {
         &self.rcoi[..usize::from(self.rcoi_len)]
     }
 
-    /// The same observation in the shape the wire carries.
+    /// The same sighting as the record the wire carries.
     #[must_use]
     pub fn as_msg(&self) -> SightingMsg<'_> {
         SightingMsg {
@@ -99,11 +97,11 @@ impl Sighting {
     }
 }
 
-/// The name an access point actually beaconed, with a cloaked one's zero
-/// padding stripped, and empty if there was nothing but padding.
+/// The name an access point beaconed, with a cloaked one's zero padding stripped.
+/// Empty if there was nothing but padding.
 ///
-/// Trailing zeros are padding and nothing else. An *interior* NUL is left alone: it
-/// is not padding, and nothing here says what it was meant to be.
+/// Only trailing zeros are padding. An *interior* NUL is left alone: nothing here says
+/// what it was meant to be.
 #[must_use]
 pub fn visible_ssid(bytes: &[u8]) -> &[u8] {
     match bytes.iter().rposition(|&b| b != 0) {
@@ -112,23 +110,21 @@ pub fn visible_ssid(bytes: &[u8]) -> &[u8] {
     }
 }
 
-/// The roaming consortium element's body as WiGLE's `RCOIs` column spells it:
-/// each identifier in hex — six digits for the three-byte form, ten for the
-/// five-byte one — separated by single spaces.
+/// The roaming consortium element's body as WiGLE's `RCOIs` column spells it: each
+/// identifier in hex, separated by single spaces.
 ///
-/// The body is one count byte, one byte holding the first two identifiers'
-/// lengths in its nibbles, then the identifiers themselves, the third (if any)
-/// being whatever is left. A body whose claimed lengths do not fit is rendered
-/// as nothing rather than in part: an identifier half-arrived is nobody's.
+/// The body is a count byte, then a byte holding the first two identifiers' lengths in
+/// its nibbles, then the identifiers. A third identifier, if any, is whatever is left. A
+/// body whose claimed lengths do not fit renders as nothing rather than in part.
 #[must_use]
 pub fn rcoi_text(body: &[u8]) -> RcoiText<'_> {
     RcoiText(body)
 }
 
-/// The rendering [`rcoi_text`] returns. A `Display` rather than a function
-/// returning a `String`, because this crate is `no_std` and allocation-free —
-/// the same dodge `Security`'s WiGLE token uses — and the host asks for the
-/// string where it has one to ask with.
+/// The rendering [`rcoi_text`] returns.
+///
+/// A `Display` rather than a `String`, because this crate is `no_std` and
+/// allocation-free. The host formats it into a string where it has one.
 pub struct RcoiText<'a>(&'a [u8]);
 
 impl fmt::Display for RcoiText<'_> {
@@ -159,9 +155,9 @@ impl fmt::Display for RcoiText<'_> {
     }
 }
 
-/// One identifier: six hex digits for the three-byte form and ten for the
-/// five-byte one, which are the two forms Hotspot 2.0 actually uses. Any other
-/// length is spelled out plainly rather than padded into a shape it is not.
+/// One identifier: six hex digits for the three-byte form and ten for the five-byte
+/// one, the two forms Hotspot 2.0 uses. Any other length is spelled out byte by byte
+/// rather than padded into a shape it is not.
 fn write_oi(f: &mut fmt::Formatter<'_>, oi: &[u8]) -> fmt::Result {
     match oi {
         [a, b, c] => write!(f, "{:06X}", u32::from_be_bytes([0, *a, *b, *c])),
@@ -174,10 +170,9 @@ fn write_oi(f: &mut fmt::Formatter<'_>, oi: &[u8]) -> fmt::Result {
 
 /// Whether a frame is worth handing to [`parse_mgmt`].
 ///
-/// Split out because promiscuous mode delivers every frame on the channel and most
-/// are data, so a caller rejects them before doing anything that costs — taking a
-/// lock, most of all. Type 0 is management, and only these two subtypes carry the
-/// elements.
+/// Promiscuous mode delivers every frame on the channel, and most are data. This lets a
+/// caller reject them before anything that costs, above all taking a lock. It passes
+/// beacons and probe responses, the two management subtypes that carry the elements.
 #[must_use]
 pub const fn is_report(frame: &[u8]) -> bool {
     let Some(&fc0) = frame.first() else { return false };
@@ -186,14 +181,14 @@ pub const fn is_report(frame: &[u8]) -> bool {
 
 /// Decode a beacon or probe response into a [`Sighting`].
 ///
-/// `frame` is the whole 802.11 frame as promiscuous mode delivers it, starting
-/// at the MAC header. `parked` is the channel the radio was tuned to, used when
-/// the frame carries no channel of its own.
+/// `frame` is the whole 802.11 frame as promiscuous mode delivers it, from the MAC
+/// header on. `parked` is the channel the radio was tuned to, used when the frame names
+/// no channel of its own.
 ///
-/// Returns `None` for anything that is not a beacon (subtype 8) or probe response
-/// (subtype 5), and for a frame too short to hold the fixed fields. Past that it is
-/// best-effort: a malformed element ends the walk rather than discarding an access
-/// point whose frame was received well enough to have a BSSID.
+/// Returns `None` for anything but a beacon (subtype 8) or probe response (subtype 5),
+/// and for a frame too short for the fixed fields. Past that it is best-effort. A
+/// malformed element ends the walk rather than discarding an access point whose BSSID
+/// arrived intact.
 #[must_use]
 pub fn parse_mgmt(frame: &[u8], rssi: i8, parked: u8) -> Option<Sighting> {
     if frame.len() < HDR_LEN + FIXED_LEN || !is_report(frame) {
@@ -266,10 +261,9 @@ impl Elements {
             let Some(data) = ies.get(2..2 + len) else { break };
             match id {
                 // SSID. Longer than 32 bytes is not legal; keep what fits rather
-                // than dropping the access point. Clamp first and trim second —
-                // the other order turns an over-long element whose only non-zero
-                // byte is past the 32nd into a name made of padding, where
-                // clamping first makes it the hidden network it is.
+                // than drop the access point. Clamp first, then trim. Trimming first
+                // turns an over-long element whose only non-zero byte is past the
+                // 32nd into a name made of padding, rather than a hidden network.
                 0 => {
                     let take = visible_ssid(&data[..len.min(SSID_MAX)]).len();
                     self.ssid[..take].copy_from_slice(&data[..take]);
@@ -281,27 +275,23 @@ impl Elements {
                 }
                 // DS Parameter Set: the primary channel, on 2.4 GHz.
                 //
-                // First wins, here and for HT Operation below. Elements arrive
-                // in ascending tag order so this is DS-then-HT anyway, and it
-                // means a stray trailing element — four bytes of frame check
-                // sequence read as `03 01 xx`, say — cannot rewrite a channel
-                // the access point actually named.
+                // First wins, here and for HT Operation below. Elements arrive in
+                // ascending tag order, so this is DS then HT anyway. It also stops a
+                // stray trailing element, such as the frame check sequence read as
+                // `03 01 xx`, from rewriting a channel the access point named.
                 3 if len >= 1 && self.channel.is_none() => self.channel = Some(data[0]),
                 // RSN.
                 48 if len >= 8 => {
                     self.has_rsn = true;
                     self.read_suites(data, true);
                 }
-                // Roaming Consortium: what a Passpoint access point says about
-                // which hotspot operators will authenticate you. Kept verbatim —
-                // the count byte and the nibble-packed lengths byte included —
-                // because the walk's job is to find it, not to read it;
-                // [`rcoi_text`] does that, on the host, where a fix costs a
-                // re-export rather than a reflash.
+                // Roaming Consortium: which hotspot operators a Passpoint access
+                // point says will authenticate you. Kept verbatim, count and lengths
+                // bytes included. The walk finds it; `rcoi_text` reads it on the
+                // host, where a fix costs a re-export rather than a reflash.
                 //
-                // Dropped whole rather than truncated when it exceeds what the
-                // wire can carry: the pieces of an identifier say nothing the
-                // whole one does. First wins, like the channel elements.
+                // Dropped whole when longer than the wire carries, because part of
+                // an identifier says nothing. First wins, like the channel elements.
                 111 if (2..=EXT_MAX).contains(&len) && self.rcoi_len == 0 => {
                     self.rcoi[..len].copy_from_slice(data);
                     // Cast is safe: `len` is at most EXT_MAX, which is 17.
@@ -310,9 +300,8 @@ impl Elements {
                         self.rcoi_len = len as u8;
                     }
                 }
-                // HT Operation, whose first byte is the primary channel: how a
-                // 5 GHz access point says where it is, DS Parameter Set being a
-                // 2.4 GHz element that 5 GHz beacons omit.
+                // HT Operation, whose first byte is the primary channel. A 5 GHz
+                // beacon names its channel here, since it omits DS Parameter Set.
                 61 if len >= 1 && self.channel.is_none() => self.channel = Some(data[0]),
                 // Vendor specific; WPA is Microsoft's OUI with type 1.
                 221 if len >= 8 && data[..4] == [0x00, 0x50, 0xF2, 0x01] => {
@@ -327,9 +316,8 @@ impl Elements {
         }
     }
 
-    /// Skip the version, group cipher and pairwise list, then read the AKM
-    /// suites. The RSN and WPA bodies are the same shape once the OUI and type are
-    /// stripped.
+    /// Skip the version, group cipher and pairwise list, then read the AKM suites.
+    /// RSN and WPA bodies are the same shape once the OUI and type are stripped.
     fn read_suites(&mut self, body: &[u8], rsn: bool) {
         // Version (2) + group cipher (4).
         let Some(rest) = body.get(6..) else { return };
@@ -357,11 +345,10 @@ impl Elements {
 
     /// The classification ladder, mapped straight onto WiGLE's `AuthMode` tokens.
     ///
-    /// Order matters, including the two rungs that fall
-    /// through to [`Security::Undefined`]: the auth-mode table has no token for
-    /// `WIFI_AUTH_OWE` or for WPA3-Enterprise, so both reach the WiGLE column as
-    /// `[UNDEFINED]`. The column is a contract with an exporter rather than a
-    /// description of the network.
+    /// Order matters, including the two rungs that fall through to
+    /// [`Security::Undefined`]. The auth-mode table has no token for `WIFI_AUTH_OWE` or
+    /// WPA3-Enterprise, so both reach the WiGLE column as `[UNDEFINED]`. The column is a
+    /// contract with an exporter, not a description of the network.
     fn classify(&self) -> Security {
         if self.has_wapi {
             return Security::WapiPsk;
@@ -375,9 +362,9 @@ impl Elements {
         // `[WPA2]` is `WIFI_AUTH_WPA2_ENTERPRISE` despite the spelling, and a
         // WPA-only enterprise network lands here too.
         //
-        // `!has_rsn` on the second arm is deliberate, not a simplification: an
-        // access point advertising 802.1X in its legacy WPA element and PSK in its
-        // RSN element will negotiate the RSN one.
+        // `!has_rsn` on the second arm is deliberate. An access point advertising
+        // 802.1X in its legacy WPA element and PSK in its RSN element negotiates the
+        // RSN one.
         if (self.has_rsn && self.rsn_8021x) || (self.has_wpa && self.wpa_8021x && !self.has_rsn) {
             return Security::Wpa2Enterprise;
         }
@@ -387,8 +374,8 @@ impl Elements {
             (true, false) => return Security::WpaPsk,
             (false, false) => {}
         }
-        // Nothing named a cipher suite, so the privacy bit is all there is to
-        // go on, and WEP is what it used to mean.
+        // Nothing named a cipher suite, so the privacy bit is all there is, and on
+        // its own it means WEP.
         if self.privacy { Security::Wep } else { Security::Open }
     }
 }

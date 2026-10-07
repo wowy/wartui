@@ -1,10 +1,11 @@
 //! Enough of the Bluetooth host-controller interface to run a scan.
 //!
-//! All a scan wants from Bluetooth is an address, a signal strength and — if
-//! the advertiser volunteered it — a manufacturer identifier, and a full
-//! host stack such as NimBLE is a lot of code to be wrong in. `esp-radio` hands out the controller as a raw HCI
-//! packet pipe, so four commands and one event are the whole of it, and this module
-//! is the byte layouts with nothing that talks to hardware.
+//! A scan wants three things from Bluetooth: an address, a signal strength, and a
+//! manufacturer identifier when the advertiser sends one. A full host stack such as
+//! NimBLE is a lot of code to be wrong in. `esp-radio` hands out the controller as a raw
+//! HCI packet pipe, and four commands and one event cover the scan. This module holds
+//! their byte layouts and nothing that talks to hardware; the crate docs say why it
+//! lives here.
 //!
 //! Layouts are Bluetooth Core Specification v5.3, Vol 4 Part E — the H4
 //! transport in §2, `HCI_Reset` in §7.3.2, `HCI_Set_Event_Mask` in §7.3.1,
@@ -16,9 +17,8 @@ use crate::air::{RecordKind, Security, SightingMsg};
 /// Largest HCI packet, so a read buffer can never be short.
 ///
 /// One H4 type byte, a two-byte event header and up to 255 bytes of parameters.
-/// `esp-radio`'s `BleConnector::next` copies a whole queued packet into the
-/// buffer it is given without checking that it fits, so this is a floor rather
-/// than a suggestion.
+/// `esp-radio`'s `BleConnector::next` copies a whole queued packet into the buffer it
+/// is given without checking that it fits, so this is a floor, not a suggestion.
 pub const PACKET_MAX: usize = 258;
 
 const _: () = assert!(
@@ -37,28 +37,27 @@ const ADV_REPORT: u8 = 0x02;
 /// Scan interval and window are counted in units of 625 microseconds.
 pub const SCAN_UNIT_US: u32 = 625;
 
-/// `HCI_Reset`. Sent once, because the controller comes up in whatever state
-/// the last run left it and a scan enabled twice is an error.
+/// `HCI_Reset`. Sent once, because the controller comes up in whatever state the last
+/// run left it, and enabling a scan twice is an error.
 pub const RESET: [u8; 4] = [CMD, 0x03, 0x0C, 0x00];
 
 /// `HCI_Set_Event_Mask`, with the LE Meta Event bit set.
 ///
-/// Without this a scan is enabled, acknowledged, and reports nothing: an advertising
-/// report is an LE Meta Event, which is bit 61, and [`RESET`] restores the
-/// specification's default mask with that bit clear. The value is that default plus
-/// bit 61 rather than all ones, because events nothing here drains cost queue space
-/// in the controller.
+/// Without this a scan is enabled, acknowledged, and reports nothing. An advertising
+/// report is an LE Meta Event, bit 61, and [`RESET`] restores the specification's
+/// default mask with that bit clear. The value is that default plus bit 61, not all
+/// ones: events nothing here drains cost queue space in the controller.
 pub const SET_EVENT_MASK: [u8; 12] =
     [CMD, 0x01, 0x0C, 0x08, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x1F, 0x00, 0x20];
 
 /// `HCI_LE_Set_Scan_Parameters`, passive.
 ///
-/// Passive rather than active: an active scan transmits to pull back a scan response
-/// whose every field is thrown away before the wire, so it buys nothing and not
-/// transmitting is the point of the firmware.
+/// Passive, because not transmitting is the point of the firmware. An active scan
+/// transmits to pull back a scan response, and every field of that response is thrown
+/// away before the wire.
 ///
-/// `interval` and `window` are in [`SCAN_UNIT_US`] units; equal values mean the
-/// radio listens continuously while scanning is enabled.
+/// `interval` and `window` are in [`SCAN_UNIT_US`] units. Equal values mean the radio
+/// listens continuously while scanning is enabled.
 #[must_use]
 pub const fn set_scan_parameters(interval: u16, window: u16) -> [u8; 11] {
     let [ilo, ihi] = interval.to_le_bytes();
@@ -74,8 +73,8 @@ pub const fn set_scan_parameters(interval: u16, window: u16) -> [u8; 11] {
 
 /// `HCI_LE_Set_Scan_Enable`.
 ///
-/// Duplicate filtering is left off: the controller's filter is a small fixed table
-/// that would silently compete with [`crate::dedup::MacRing`] for the same job.
+/// Duplicate filtering is off. The controller's filter is a small fixed table that
+/// would silently compete with [`crate::dedup::MacRing`] for the same job.
 #[must_use]
 pub const fn set_scan_enable(enable: bool) -> [u8; 6] {
     [CMD, 0x0C, 0x20, 0x02, enable as u8, 0x00]
@@ -84,25 +83,23 @@ pub const fn set_scan_enable(enable: bool) -> [u8; 6] {
 /// One advertiser, heard once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AdvReport {
-    /// The advertiser's address, in the order it is written and displayed.
-    /// HCI carries it least-significant byte first; this is reversed already.
+    /// The advertiser's address, in the order it is written and displayed. HCI
+    /// carries it least-significant byte first, and this is already reversed.
     pub address: [u8; 6],
-    /// Signal strength in dBm. `127` means the controller had no reading, which
-    /// the Core Specification defines and which is not a plausible dBm value.
+    /// Signal strength in dBm. The Core Specification defines `127` as no reading,
+    /// which is not a plausible dBm value.
     pub rssi: i8,
     /// The Bluetooth SIG company identifier from the advertiser's
-    /// manufacturer-specific data, if it carried any. `None` when it did not —
-    /// which is common, and not a fault.
+    /// manufacturer-specific data. `None` when it carried none, which is common and
+    /// not a fault.
     pub mfgr: Option<u16>,
 }
 
 impl AdvReport {
-    /// The observation in the shape the wire carries, with `ext` as the
-    /// trailer — for a BLE sighting, the company identifier's two
-    /// little-endian bytes or nothing.
+    /// The sighting as the record the wire carries, with `ext` as the trailer: the
+    /// company identifier's two little-endian bytes, or nothing.
     ///
-    /// BLE records have no SSID and no channel, and the exporter depends on
-    /// both being empty and zero rather than absent.
+    /// A BLE record has an empty SSID and channel 0. The exporter depends on both.
     #[must_use]
     pub const fn as_msg<'a>(&self, ext: &'a [u8]) -> SightingMsg<'a> {
         SightingMsg {
@@ -118,11 +115,10 @@ impl AdvReport {
 
     /// Hand `f` the record this report becomes, trailer and all.
     ///
-    /// The company identifier is the trailer, so the rule that turns one into
-    /// the other lives here — once, where the identifier was read — rather
-    /// than at each caller. A callback rather than a returned [`SightingMsg`]
-    /// because the identifier's two bytes need somewhere to live for the
-    /// borrow, and that somewhere cannot outlive this call.
+    /// The company identifier is the trailer. The rule that turns one into the other
+    /// lives here, where the identifier was read, rather than at each caller. It takes
+    /// a callback rather than returning a [`SightingMsg`], because the record borrows
+    /// the identifier's two bytes, and they live only for this call.
     pub fn with_msg<R>(&self, f: impl FnOnce(SightingMsg<'_>) -> R) -> R {
         match self.mfgr {
             Some(id) => f(self.as_msg(&id.to_le_bytes())),
@@ -140,12 +136,11 @@ impl AdvReport {
 /// The company identifier out of a report's advertising data, if it holds
 /// manufacturer-specific data.
 ///
-/// Advertising data is a run of structures — a length that counts the type
-/// byte and the payload, then that type byte, then the payload — and the
-/// manufacturer-specific type is `0xFF`, whose payload begins with the two
-/// little-endian bytes WiGLE's `MfgrId` column wants. First such structure
-/// wins; a run that stops making sense ends the walk with nothing, which is
-/// the same deal the beacon parser gives a malformed element.
+/// Advertising data is a run of structures: a length that counts the type byte and the
+/// payload, then the type byte, then the payload. The manufacturer-specific type is
+/// `0xFF`, and its payload begins with the two little-endian bytes WiGLE's `MfgrId`
+/// column wants. The first such structure wins. A run that stops making sense ends the
+/// walk with nothing, as a malformed element ends the beacon parser's.
 fn manufacturer_id(data: &[u8]) -> Option<u16> {
     let mut rest = data;
     while let Some((&len, tail)) = rest.split_first() {
@@ -166,7 +161,7 @@ fn manufacturer_id(data: &[u8]) -> Option<u16> {
 /// Walk the advertising reports in one HCI packet.
 ///
 /// Yields nothing for any other packet, so a caller can hand it everything the
-/// controller says — command completions, unknown events, the lot.
+/// controller says: command completions, unknown events and all.
 #[must_use]
 pub fn adv_reports(packet: &[u8]) -> AdvReports<'_> {
     let empty = AdvReports { rest: &[], remaining: 0 };
@@ -191,10 +186,10 @@ impl Iterator for AdvReports<'_> {
         }
         self.remaining -= 1;
 
-        // Event type, address type, address, advertising data whose length is
-        // declared inline, then RSSI. Reports are laid out one after another rather
-        // than as parallel arrays per parameter: the specification's table reads
-        // either way, and every controller and host stack agrees on this reading.
+        // Event type, address type, address, advertising data with its length
+        // inline, then RSSI. Reports are laid out one after another, not as parallel
+        // arrays per parameter. The specification's table reads either way, and every
+        // controller and host stack agrees on this reading.
         let mut address = *self.rest.get(2..8)?.first_chunk::<6>()?;
         address.reverse();
         let data_len = usize::from(*self.rest.get(8)?);
