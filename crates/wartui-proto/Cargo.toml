@@ -1,6 +1,6 @@
 [package]
 name = "wartui-proto"
-description = "Wire formats and node logic for the wartui ESP32-C5/C6 wardriver mesh, shared by the host and both firmwares."
+description = "Wire formats and node logic shared by the wartui host and its ESP32-C5/C6 firmware."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
