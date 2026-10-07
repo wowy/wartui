@@ -295,6 +295,9 @@ def heartbeats(db, ctx):
     for r in rows:
         per[r[0]].append(r)
     ctx["hb"] = per
+    # Builds before PR #157 declared heartbeat.admin_* but never wrote them; their values mean
+    # nothing, so the per-node admin summary runs only when some row sets them.
+    admin_written = "admin_sent" in cols and any(r[10] for r in rows)
     timeout = int(ctx.get("settings", {}).get("topology_timeout_ms", 60000))
     ble_nodes = ctx.get("ble_nodes", set())
     miss_by_job = Counter()
@@ -435,7 +438,7 @@ def heartbeats(db, ctx):
                          f"between misses are exactly {mode} beats, against {spacing.get(1, 0)} "
                          "back-to-back (independent loss would make 1 the most common)",
                          f"-- beat numbers of misses for {short(mac)}: walk heartbeat.beat by id")
-        admin = [r for r in hs if r[10]]
+        admin = [r for r in hs if r[10]] if admin_written else []
         if admin:
             acked = sum(1 for r in admin if r[11] == 1)
             lat = [r[12] for r in admin if r[12] is not None]
@@ -468,12 +471,13 @@ def heartbeats(db, ctx):
                 if len(macs) > 1 else ""),
              f"-- {detail}\nSELECT id, node_mac, rx_at, counter, beat FROM heartbeat WHERE rx_at "
              f"BETWEEN {at - 60000} AND {at + 30000} ORDER BY id")
-    if "admin_sent" in cols and rows and not any(r[10] for r in rows) and db.has("assignment"):
+    if "admin_sent" in cols and rows and not admin_written and db.has("assignment"):
         if db.one("SELECT COUNT(*) FROM assignment"):
             flag("INFO", "host",
-                 "heartbeat.admin_sent/admin_acked/admin_latency_us are never set although "
-                 "assignments went out: the columns are declared but not written",
-                 "SELECT admin_sent, admin_acked, COUNT(*) FROM heartbeat GROUP BY 1, 2")
+                 "heartbeat.admin_sent/admin_acked/admin_latency_us are never set: an artefact "
+                 "of a build before PR #157, which declared them but never wrote them, not a "
+                 "host bug. Read admin outcomes and latency from `assignment`",
+                 "SELECT outcome, COUNT(*) FROM assignment GROUP BY 1")
     end = ctx.get("end")
     lasts = [hs[-1][2] for hs in per.values() if hs]
     if end and len(lasts) > 1 and end - max(lasts) > 30_000 and max(lasts) - min(lasts) < 15_000:
