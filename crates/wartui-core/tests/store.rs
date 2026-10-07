@@ -363,6 +363,47 @@ fn store_writes_every_heartbeat_column_when_heartbeat_recorded() {
 }
 
 #[test]
+fn store_writes_every_node_column_when_node_recorded() {
+    // A column the insert omits is NULL, or holds its declared default. No column may be NULL and
+    // none may declare a default, so the insert names every column. `capabilities` is NULL for a
+    // node heard only by observation, so the record sets it.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let conn = write(
+        &dir,
+        vec![Record::Node(NodeSeen {
+            mac: NODE,
+            first_seen_ms: EPOCH_MS,
+            last_seen_ms: EPOCH_MS,
+            capabilities: Some("wartui/0.1;5g".to_owned()),
+        })],
+    );
+
+    let columns: Vec<String> = conn
+        .prepare("SELECT name FROM pragma_table_info('node')")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert!(!columns.is_empty(), "the node table has columns");
+    for column in &columns {
+        let null: bool = conn
+            .query_row(&format!("SELECT \"{column}\" IS NULL FROM node"), [], |r| r.get(0))
+            .unwrap();
+        assert!(!null, "the node insert leaves `{column}` NULL");
+    }
+
+    let defaulted: Vec<String> = conn
+        .prepare("SELECT name FROM pragma_table_info('node') WHERE dflt_value IS NOT NULL")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert!(defaulted.is_empty(), "node columns declare a default: {defaulted:?}");
+}
+
+#[test]
 fn store_round_trips_every_column_when_bridge_status_written() {
     let dir = tempfile::tempdir().expect("temp dir");
     let conn = write(

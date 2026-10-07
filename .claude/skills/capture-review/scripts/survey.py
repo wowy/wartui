@@ -248,14 +248,14 @@ def nodes(db, ctx):
     if not db.has("node", "mac"):
         absent("node table")
         return
-    rows = db.q("SELECT mac, label, first_seen, last_seen, capabilities FROM node ORDER BY mac")
+    rows = db.q("SELECT mac, first_seen, last_seen, capabilities FROM node ORDER BY mac")
     ctx["nodes"] = {r[0]: r for r in rows}
-    for mac, label, first, last, caps in rows:
+    for mac, first, last, caps in rows:
         if ctx["only"] and short(mac) != ctx["only"]:
             continue
         print(
             f"  {short(mac)}  {full(mac)}  {caps or 'no capabilities'}  "
-            f"seen {rel(first)} .. {rel(last)}" + (f"  label {label}" if label else "")
+            f"seen {rel(first)} .. {rel(last)}"
         )
         if caps is None:
             flag(
