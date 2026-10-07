@@ -63,8 +63,8 @@ pub(super) fn draw_footer(
 
     // Its own line, so a notice never hides it. Plain, not yellow, because a full
     // pending buffer is normal in a dense area.
-    if let Some(refused) = refused_line(&c) {
-        lines.push(Line::from(refused));
+    if let Some(buffer_full) = buffer_full_line(&c) {
+        lines.push(Line::from(buffer_full));
     }
 
     // Its own line for the same reason. It stays after the upload ends, until the
@@ -82,15 +82,10 @@ pub(super) fn draw_footer(
 }
 
 /// Sightings a full pending buffer refused this session, or `None`. Most are re-reported
-/// on the next dwell, so this measures how dense the area is, not a fault. Named as
-/// `wartui analyze` names it.
-pub(super) fn refused_line(c: &Counters) -> Option<String> {
-    let figures: Vec<String> = [("wifi", c.wifi_dropped), ("ble", c.ble_dropped)]
-        .into_iter()
-        .filter(|(_, n)| *n > 0)
-        .map(|(kind, n)| format!("{kind} {n}"))
-        .collect();
-    (!figures.is_empty()).then(|| format!("  refused {}", figures.join("  ")))
+/// on the next dwell, so this measures how dense the area is, not a fault. Worded as
+/// `wartui analyze` words it.
+pub(super) fn buffer_full_line(c: &Counters) -> Option<String> {
+    crate::analyze::buffer_full(c.wifi_dropped, c.ble_dropped).map(|line| format!("  {line}"))
 }
 
 /// Every fault so far, most urgent first. Empty on a clean run.
@@ -504,40 +499,48 @@ mod tests {
     }
 
     #[test]
-    fn footer_hides_refused_line_when_both_counts_zero() {
+    fn footer_hides_buffer_full_line_when_both_counts_zero() {
         let screen = rendered(&busy());
-        assert!(!screen.contains("refused"), "{screen}");
+        assert!(!screen.contains("buffer full"), "{screen}");
+    }
+
+    /// The footer's `buffer full` line, without the quotes and padding `TestBackend` adds.
+    fn buffer_full_row(screen: &str) -> &str {
+        let row = screen.lines().find(|l| l.contains("buffer full")).expect("a buffer full line");
+        row.trim_matches('"').trim_end()
     }
 
     #[test]
-    fn footer_displays_refused_line_when_wifi_count_nonzero() {
+    fn footer_displays_buffer_full_line_when_wifi_count_nonzero() {
         let mut snapshot = busy();
         snapshot.counters.wifi_dropped = 12;
         let screen = rendered(&snapshot);
-        let line = screen.lines().find(|l| l.contains("refused")).expect("a refused line");
-        assert!(line.contains("  refused wifi 12"), "{screen}");
-        // A kind with nothing refused is left out, not shown as 0.
-        assert!(!line.contains("ble"), "{screen}");
-        assert!(!line.contains("frames"), "a line of its own, not a span of the totals");
+        // A kind with nothing turned away is left out, not shown as 0, and the line is
+        // its own, not a span of the totals.
+        assert_eq!(buffer_full_row(&screen), "  buffer full wifi 12", "{screen}");
 
         snapshot.counters.ble_dropped = 4;
-        assert!(rendered(&snapshot).contains("  refused wifi 12  ble 4"));
+        let screen = rendered(&snapshot);
+        assert_eq!(buffer_full_row(&screen), "  buffer full wifi 12  ble 4", "{screen}");
+
+        // Thousands are separated, as `wartui analyze` separates them.
+        snapshot.counters.wifi_dropped = 1_234;
+        let screen = rendered(&snapshot);
+        assert_eq!(buffer_full_row(&screen), "  buffer full wifi 1,234  ble 4", "{screen}");
     }
 
     #[test]
-    fn footer_displays_refused_line_when_only_ble_count_nonzero() {
+    fn footer_displays_buffer_full_line_when_only_ble_count_nonzero() {
         let mut snapshot = busy();
         snapshot.counters.ble_dropped = 4;
         let screen = rendered(&snapshot);
-        let line = screen.lines().find(|l| l.contains("refused")).expect("a refused line");
-        assert!(line.contains("  refused ble 4"), "{screen}");
-        assert!(!line.contains("wifi"), "{screen}");
+        assert_eq!(buffer_full_row(&screen), "  buffer full ble 4", "{screen}");
     }
 
     #[test]
-    fn footer_keeps_refused_line_when_notice_shown() {
-        // The notice takes the totals line. The refusals have their own line, so they
-        // stay.
+    fn footer_keeps_buffer_full_line_when_notice_shown() {
+        // The notice takes the totals line. The buffer full counts have their own line,
+        // so they stay.
         let mut snapshot = busy();
         snapshot.counters.wifi_dropped = 12;
         snapshot.counters.ble_dropped = 4;
@@ -548,7 +551,7 @@ mod tests {
         let screen = terminal.backend().to_string();
         assert!(screen.contains("a notice"), "{screen}");
         assert!(!screen.contains("stored 800"), "the notice replaced the totals: {screen}");
-        assert!(screen.contains("  refused wifi 12  ble 4"), "{screen}");
+        assert_eq!(buffer_full_row(&screen), "  buffer full wifi 12  ble 4", "{screen}");
     }
 
     /// A capture whose only fault is that the bridge restarted underneath it.

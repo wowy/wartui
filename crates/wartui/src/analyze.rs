@@ -109,9 +109,9 @@ fn losses_text(loss: &LossSummary) -> String {
         }
         text.push('\n');
     }
-    let figures = refused(total(|n| n.wifi_refused), total(|n| n.ble_refused));
-    if !figures.is_empty() {
-        let _ = writeln!(text, "  {:<11}{}", "refused", figures.join("  "));
+    // `buffer full` fills the label column, so it carries its own space.
+    if let Some(figures) = buffer_full(total(|n| n.wifi_refused), total(|n| n.ble_refused)) {
+        let _ = writeln!(text, "  {figures}");
     }
 
     let _ = writeln!(text, "  loss by node");
@@ -130,9 +130,8 @@ fn losses_text(loss: &LossSummary) -> String {
                 let _ = write!(line, "  {} unsent", thousands(node.heartbeats_unsent));
             }
         }
-        let figures = refused(node.wifi_refused, node.ble_refused);
-        if !figures.is_empty() {
-            let _ = write!(line, "  refused {}", figures.join("  "));
+        if let Some(figures) = buffer_full(node.wifi_refused, node.ble_refused) {
+            let _ = write!(line, "  {figures}");
         }
         let _ = writeln!(text, "{line}");
     }
@@ -260,13 +259,15 @@ fn millis(us: u64) -> String {
     }
 }
 
-/// The non-zero figures for sightings a full pending buffer refused.
-fn refused(wifi: u64, ble: u64) -> Vec<String> {
-    [("wifi", wifi), ("ble", ble)]
+/// `buffer full` and the non-zero counts of sightings a full pending buffer refused, or
+/// `None` when both are zero. The TUI footer prints the same text.
+pub(crate) fn buffer_full(wifi: u64, ble: u64) -> Option<String> {
+    let figures: Vec<String> = [("wifi", wifi), ("ble", ble)]
         .into_iter()
         .filter(|(_, n)| *n > 0)
         .map(|(kind, n)| format!("{kind} {}", thousands(n)))
-        .collect()
+        .collect();
+    (!figures.is_empty()).then(|| format!("buffer full {}", figures.join("  ")))
 }
 
 /// `part` as a share of a non-zero `whole`, to one decimal place.
@@ -349,12 +350,14 @@ mod tests {
     fn analyze_report_lists_node_lines_when_nodes_present() {
         let text = losses_text(&evening());
         assert!(
-            text.contains("\n    1C:5A  batches 12  heartbeats 3/702 (0.4%)  refused ble 1,203\n"),
+            text.contains(
+                "\n    1C:5A  batches 12  heartbeats 3/702 (0.4%)  buffer full ble 1,203\n"
+            ),
             "{text}"
         );
         assert!(
             text.contains(
-                "\n    57:84  batches 200  heartbeats 38/2,795 (1.4%)  refused wifi 18,220\n"
+                "\n    57:84  batches 200  heartbeats 38/2,795 (1.4%)  buffer full wifi 18,220\n"
             ),
             "{text}"
         );
@@ -402,13 +405,13 @@ mod tests {
         assert!(
             text.contains(
                 "\n    57:84  batches 200  heartbeats 38/2,795 (1.4%)  12 unsent  \
-                 refused wifi 18,220\n"
+                 buffer full wifi 18,220\n"
             ),
             "{text}"
         );
         // A node whose radio refused nothing says nothing about it.
         assert!(
-            text.contains("\n    1C:5A  batches 12  heartbeats 3/702 (0.4%)  refused ble"),
+            text.contains("\n    1C:5A  batches 12  heartbeats 3/702 (0.4%)  buffer full ble"),
             "{text}"
         );
         let text = heartbeat_windows_text(&loss);
@@ -533,18 +536,18 @@ mod tests {
     }
 
     #[test]
-    fn analyze_report_omits_refused_figures_when_zero() {
+    fn analyze_report_omits_buffer_full_figures_when_zero() {
         let mut loss = evening();
         for node in &mut loss.nodes {
             node.wifi_refused = 0;
             node.ble_refused = 0;
         }
         let text = losses_text(&loss);
-        assert!(!text.contains("refused"), "{text}");
+        assert!(!text.contains("buffer full"), "{text}");
         assert!(text.contains("\n    1C:5A  batches 12  heartbeats 3/702 (0.4%)\n"), "{text}");
 
         let text = losses_text(&evening());
-        assert!(text.contains("  refused    wifi 18,220  ble 1,203\n"), "{text}");
+        assert!(text.contains("  buffer full wifi 18,220  ble 1,203\n"), "{text}");
     }
 
     #[test]
