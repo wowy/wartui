@@ -243,10 +243,10 @@ impl<const N: usize, const S: usize> BlePending<N, S> {
 /// neighbourhood is, not how many addresses went unreported. This counts each address
 /// once until [`Self::reset`], which the caller runs at the start of each dwell or scan.
 ///
-/// [`Self::note`] runs inside the Wi-Fi receive callback's lock, so its cost is fixed:
-/// one hash and one bit. Two addresses that share one of the 1024 bits in a dwell count
-/// once, about 1 in 50 at 50 refusals, so the total slightly undercounts. The hash is
-/// fixed; radio addresses are not an adversary worth defending a diagnostic count
+/// [`Self::note`] runs inside the lock both pending buffers record under, so its cost is
+/// fixed: one hash and one bit. Two addresses that share one of the 1024 bits in a dwell
+/// count once, about 1 in 50 at 50 refusals, so the total slightly undercounts. The hash
+/// is fixed; radio addresses are not an adversary worth defending a diagnostic count
 /// against.
 #[derive(Debug, Clone)]
 pub struct Refused {

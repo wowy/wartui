@@ -1,4 +1,5 @@
-//! The timings of a node's sweep and its heartbeat cycle.
+//! A node's sweep and heartbeat timings, and the cursor that steps it through its assigned
+//! channels.
 
 use crate::plan::ChannelSet;
 

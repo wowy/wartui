@@ -47,9 +47,6 @@
 //! holds 4,096 in 64 KB. The C6 has 128 KB more SRAM and no 5 GHz radio, so in a mixed
 //! fleet it is the likely Bluetooth node. The RAM comes out of a main stack that has never
 //! used more than about 2 KB.
-//!
-//! [`DEDUP_REFRESH_MS`]: crate::dedup::DEDUP_REFRESH_MS
-//! [`DEDUP_RSSI_GAIN_DB`]: crate::dedup::DEDUP_RSSI_GAIN_DB
 
 use crate::mac_index::MacIndex;
 
