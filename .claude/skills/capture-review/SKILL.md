@@ -30,10 +30,8 @@ python3 -I .claude/skills/capture-review/scripts/survey.py <db> [--log <log>] [-
 cargo run --release -q -p wartui -- analyze --db <db> --heartbeat-windows
 ```
 
-The survey opens the file read-only, tolerates schemas from other builds, and ends with a
-`FLAGS` list, each with the SQL that reproduces it. `wartui analyze` is the project's own loss
-accounting; if it refuses the file (another build's schema fingerprint), say so and carry on
-with the survey — a refusal is expected for older captures, not a finding.
+The survey opens the file read-only and ends with a `FLAGS` list, each with the SQL that
+reproduces it. `wartui analyze` is the project's own loss accounting.
 
 The survey is a starting point, not the review. Its thresholds are blunt: read every section, not
 just the flags, and look for what it does not check (a node whose numbers are unlike its

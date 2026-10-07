@@ -87,10 +87,8 @@ CREATE TABLE IF NOT EXISTS capture (
 -- observation has been heard yet; see `record::NodeSeen`.
 CREATE TABLE IF NOT EXISTS node (
   mac BLOB PRIMARY KEY,
-  label TEXT,
   first_seen INTEGER NOT NULL,
   last_seen INTEGER NOT NULL,
-  pinned_channels INTEGER,
   capabilities TEXT
 );
 

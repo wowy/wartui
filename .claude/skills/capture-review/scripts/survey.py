@@ -22,12 +22,6 @@ from datetime import datetime, timezone
 
 FLAGS = []  # (severity, area, text, sql)
 
-# crates/wartui-proto/src/plan.rs SCAN_CHANNELS at the time of writing; used only when a capture
-# predates the `capture.scan_channels` kv row. Indices are the wire format, so order matters.
-SCAN_CHANNELS_FALLBACK = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 36, 40, 44, 48, 52, 56,
-                          60, 64, 100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144, 149,
-                          153, 157, 161, 165, 169, 173, 177]
-
 
 def flag(sev, area, text, sql=""):
     FLAGS.append((sev, area, text, sql.strip()))
@@ -184,7 +178,6 @@ def provenance(db, ctx):
         flag("WARN", "capture", "simulated=1: test data (--sim or --lat/--lon); never uploaded")
 
     if "kv" not in db.tables:
-        ctx["scan"] = SCAN_CHANNELS_FALLBACK
         return
     kv = dict(db.q("SELECT k, v FROM kv"))
     ctx["kv"] = kv
@@ -193,10 +186,6 @@ def provenance(db, ctx):
             print(f"  kv        {k} = {kv[k]}")
     if "capture.scan_channels" in kv:
         ctx["scan"] = [int(c) for c in kv["capture.scan_channels"].split(",") if c]
-    else:
-        ctx["scan"] = SCAN_CHANNELS_FALLBACK
-        print("  kv        no capture.scan_channels or settings rows (older build); channel "
-              "checks assume this tree's SCAN_CHANNELS")
 
     settings = sorted(
         (k, v) for k, v in kv.items() if k.startswith("capture.settings.") and k.endswith(
@@ -248,14 +237,14 @@ def nodes(db, ctx):
     if not db.has("node", "mac"):
         absent("node table")
         return
-    rows = db.q("SELECT mac, label, first_seen, last_seen, capabilities FROM node ORDER BY mac")
+    rows = db.q("SELECT mac, first_seen, last_seen, capabilities FROM node ORDER BY mac")
     ctx["nodes"] = {r[0]: r for r in rows}
-    for mac, label, first, last, caps in rows:
+    for mac, first, last, caps in rows:
         if ctx["only"] and short(mac) != ctx["only"]:
             continue
         print(
             f"  {short(mac)}  {full(mac)}  {caps or 'no capabilities'}  "
-            f"seen {rel(first)} .. {rel(last)}" + (f"  label {label}" if label else "")
+            f"seen {rel(first)} .. {rel(last)}"
         )
         if caps is None:
             flag(
@@ -287,8 +276,7 @@ def heartbeats(db, ctx):
         return
     cols = db.cols("heartbeat")
     want = ["node_mac", "id", "rx_at", "counter", "epoch", "rssi", "beat"]
-    for c in ("live", "wifi_dropped", "ble_dropped", "admin_sent", "admin_acked",
-              "admin_latency_us"):
+    for c in ("live", "wifi_dropped", "ble_dropped"):
         want.append(c if c in cols else "NULL")
     rows = db.q(f"SELECT {', '.join(want)} FROM heartbeat ORDER BY node_mac, id")
     per = defaultdict(list)
@@ -435,17 +423,6 @@ def heartbeats(db, ctx):
                          f"between misses are exactly {mode} beats, against {spacing.get(1, 0)} "
                          "back-to-back (independent loss would make 1 the most common)",
                          f"-- beat numbers of misses for {short(mac)}: walk heartbeat.beat by id")
-        admin = [r for r in hs if r[10]]
-        if admin:
-            acked = sum(1 for r in admin if r[11] == 1)
-            lat = [r[12] for r in admin if r[12] is not None]
-            print(f"        admin windows sent {len(admin)}  acked {acked}  latency "
-                  f"{spread(lat, ' us')}")
-            if acked < len(admin):
-                flag("WARN", "admin",
-                     f"{short(mac)}: {len(admin) - acked} of {len(admin)} admin frames sent on "
-                     "a heartbeat window were not acked",
-                     "SELECT * FROM heartbeat WHERE admin_sent=1 AND admin_acked IS NOT 1")
     restarts = sorted(ctx.get("restarts", []))
     groups = []
     for r in restarts:
@@ -468,12 +445,6 @@ def heartbeats(db, ctx):
                 if len(macs) > 1 else ""),
              f"-- {detail}\nSELECT id, node_mac, rx_at, counter, beat FROM heartbeat WHERE rx_at "
              f"BETWEEN {at - 60000} AND {at + 30000} ORDER BY id")
-    if "admin_sent" in cols and rows and not any(r[10] for r in rows) and db.has("assignment"):
-        if db.one("SELECT COUNT(*) FROM assignment"):
-            flag("INFO", "host",
-                 "heartbeat.admin_sent/admin_acked/admin_latency_us are never set although "
-                 "assignments went out: the columns are declared but not written",
-                 "SELECT admin_sent, admin_acked, COUNT(*) FROM heartbeat GROUP BY 1, 2")
     end = ctx.get("end")
     lasts = [hs[-1][2] for hs in per.values() if hs]
     if end and len(lasts) > 1 and end - max(lasts) > 30_000 and max(lasts) - min(lasts) < 15_000:
