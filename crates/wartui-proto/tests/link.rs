@@ -25,6 +25,7 @@ fn sample_commands() -> Vec<HostToBridge, 16> {
                 wifi_dropped: 0,
                 ble_dropped: 0,
                 beat: 1,
+                unsent: 0,
             }
             .encode(),
         )

@@ -278,6 +278,7 @@ def heartbeats(db, ctx):
     want = ["node_mac", "id", "rx_at", "counter", "epoch", "rssi", "beat"]
     for c in ("live", "wifi_dropped", "ble_dropped"):
         want.append(c if c in cols else "NULL")
+    want.append("unsent")
     rows = db.q(f"SELECT {', '.join(want)} FROM heartbeat ORDER BY node_mac, id")
     per = defaultdict(list)
     for r in rows:
@@ -289,18 +290,18 @@ def heartbeats(db, ctx):
     beats_by_job = Counter()
     total_reversals = 0
     for mac, hs in per.items():
-        heard = missed = reboots = replayed = dups = 0
+        heard = missed = unsent = reboots = replayed = dups = 0
         wifi_ref = ble_ref = 0
         silences = []
         reversals = 0
         prev = None
         intervals = []
         for r in hs:
-            (_, rid, rx, counter, epoch, rssi, beat, live, wd, bd, *_rest) = r
+            (_, rid, rx, counter, epoch, rssi, beat, live, wd, bd, us, *_rest) = r
             replayed += live == 0
             if prev is not None:
-                p_rx, p_counter, p_beat, p_live, p_wd, p_bd = (
-                    prev[2], prev[3], prev[6], prev[7], prev[8], prev[9])
+                p_rx, p_counter, p_beat, p_live, p_wd, p_bd, p_us = (
+                    prev[2], prev[3], prev[6], prev[7], prev[8], prev[9], prev[10])
                 rebooted = ((counter - p_counter) % 2**32 >= 2**31
                             or (beat - p_beat) % 2**16 >= 2**15)
                 if rebooted:
@@ -315,6 +316,10 @@ def heartbeats(db, ctx):
                 heard += gap_h
                 if p_live != 0:  # a gap after a replayed beat spans time no host read
                     missed += gap_m
+                    # `unsent` excludes the beat carrying it and wraps at 256. The previous beat
+                    # arrived, so it was not refused; the cap only guards against a bad row.
+                    refused = us if rebooted else (us - p_us) % 256
+                    unsent += min(refused, gap_m)
                 if wd is not None and p_wd is not None:
                     wifi_ref += since_boot_delta(wd, p_wd, rebooted)
                     ble_ref += since_boot_delta(bd, p_bd, rebooted)
@@ -337,9 +342,10 @@ def heartbeats(db, ctx):
         if half > 10:
             trend = (f"  (first half p50 {statistics.median(rssis[:half])}, "
                      f"second half p50 {statistics.median(rssis[half:])})")
+        split = f": {unsent} unsent, {missed - unsent} lost after sending" if missed else ""
         print(
             f"  {short(mac)} [{job}]  rows {len(hs)}  missed {missed}/{heard + missed} "
-            f"({pct(missed, heard + missed)})  restarts {reboots}  replayed {replayed}  "
+            f"({pct(missed, heard + missed)}){split}  restarts {reboots}  replayed {replayed}  "
             f"repeats {dups}"
         )
         if intervals:
@@ -365,7 +371,7 @@ def heartbeats(db, ctx):
             flag(
                 "WARN",
                 "loss",
-                f"{short(mac)} missed {missed} of {heard + missed} heartbeats ({rate:.1%})",
+                f"{short(mac)} missed {missed} of {heard + missed} heartbeats ({rate:.1%}){split}",
                 "-- wartui analyze --db <db> --heartbeat-windows",
             )
         if reversals:

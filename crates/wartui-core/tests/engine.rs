@@ -107,8 +107,15 @@ fn heartbeat_holding(src: Mac, counter: u32, epoch: u8) -> Event {
 }
 
 fn beat_at(src: Mac, counter: u32, epoch: u8, capabilities: Capabilities, rx_us: u32) -> Event {
-    let msg =
-        HeartbeatMsg { counter, epoch, capabilities, wifi_dropped: 0, ble_dropped: 0, beat: 1 };
+    let msg = HeartbeatMsg {
+        counter,
+        epoch,
+        capabilities,
+        wifi_dropped: 0,
+        ble_dropped: 0,
+        beat: 1,
+        unsent: 0,
+    };
     rx_at(src, &msg.encode(), rx_us)
 }
 
@@ -121,6 +128,7 @@ fn heartbeat_dropping(src: Mac, counter: u32, wifi_dropped: u16, ble_dropped: u1
         wifi_dropped,
         ble_dropped,
         beat: 1,
+        unsent: 0,
     };
     rx(src, &msg.encode())
 }
@@ -931,6 +939,7 @@ fn engine_counts_incompatible_when_wire_version_differs() {
         wifi_dropped: 0,
         ble_dropped: 0,
         beat: 1,
+        unsent: 0,
     }
     .encode()
     .to_vec();

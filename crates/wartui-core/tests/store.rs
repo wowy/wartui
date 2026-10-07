@@ -281,6 +281,7 @@ fn store_round_trips_record_when_each_type_written() {
                 wifi_dropped: 12,
                 ble_dropped: 3,
                 beat: 61,
+                unsent: 4,
                 live: false,
             }),
             observation(NODE, [0xAA; 6], -60, EPOCH_MS, fixed(37.7749, -122.4194)),
@@ -304,6 +305,9 @@ fn store_round_trips_record_when_each_type_written() {
 
     let beat: i64 = conn.query_row("SELECT beat FROM heartbeat", [], |r| r.get(0)).unwrap();
     assert_eq!(beat, 61, "the since-boot heartbeat count as the frame carried it");
+
+    let unsent: i64 = conn.query_row("SELECT unsent FROM heartbeat", [], |r| r.get(0)).unwrap();
+    assert_eq!(unsent, 4, "the since-boot refused-send count as the frame carried it");
 
     let live: bool = conn.query_row("SELECT live FROM heartbeat", [], |r| r.get(0)).unwrap();
     assert!(!live, "replayed from the bridge's backlog");
@@ -364,6 +368,7 @@ fn store_writes_every_heartbeat_column_when_heartbeat_recorded() {
             wifi_dropped: 12,
             ble_dropped: 3,
             beat: 61,
+            unsent: 4,
             live: true,
         })],
     );

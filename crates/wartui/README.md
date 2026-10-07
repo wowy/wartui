@@ -129,11 +129,11 @@ to standard error; no output file is written. The tail of its output, after the 
   host       147 not stored: 140 retries  7 foreign  0 store dropped  behind ≥100 ms 31 times (worst 412 ms)  slowest commit 58 ms  queue peak 1,204
   health     under-voltage in 3 samples  throttled in 0  since boot: under-voltage  temp max 71.2 °C  battery min 3.62 V
   batches    212 lost between node and host
-  heartbeats 41 missed of 3,497 expected (1.2%)
+  heartbeats 41 missed of 3,497 expected (1.2%)  12 unsent
   ring       wifi 18,220 refused  ble 1,203 refused
   loss by node
     1C:5A  batches 12  heartbeats 3/702 (0.4%)  ring ble 1,203
-    57:84  batches 200  heartbeats 38/2,795 (1.4%)  ring wifi 18,220
+    57:84  batches 200  heartbeats 38/2,795 (1.4%)  12 unsent  ring wifi 18,220
 ```
 
 | Line         | What it counts                                                                   |
@@ -142,7 +142,7 @@ to standard error; no output file is written. The tail of its output, after the 
 | `host`       | Frames the host read but did not store, and how the host and its store held up   |
 | `health`     | Under-voltage and throttling the Pi firmware reported, temperature, battery      |
 | `batches`    | Sighting batches lost between node and host; the fleet table's `lost`            |
-| `heartbeats` | Heartbeats lost between node and host, read from each node's beat sequence       |
+| `heartbeats` | Heartbeats lost between node and host, and how many of them were `unsent`        |
 | `ring`       | Sightings a node's full pending ring refused; most are reported on a later dwell |
 
 Counts follow the assumptions below; `lost on USB` is approximate. The capture's first bridge
@@ -151,6 +151,7 @@ is not counted. `batches` and `bridge` print zeros, since "0 lost" is the answer
 `store dropped` and, on a Pi, the `health` counts. Left out:
 
 - the `bridge` line, when the capture holds no status reply
+- the `unsent` clause, total or per node, when it is zero
 - ring figures that are zero, and the `ring` line when all are
 - the reboot clause, when the bridge never restarted
 - the `lost on USB` clause, when it is zero
@@ -182,6 +183,10 @@ Compare the per-node heartbeat percentages to spot disproportionate loss. Each i
 divided by distinct received plus missed beats, including the received baseline. The totals cover
 the whole capture; `--recapture` selects export rows, not heartbeat intervals.
 
+`unsent` is the missed beats the node's own radio refused to send: a full send queue or a failed
+send callback. Each heartbeat carries the node's count of them since boot. The rest were lost on
+the air or past the bridge. A large `unsent` share points at the node, not the air.
+
 Each heartbeat carries a 16-bit sequence number that starts at 1 when the node boots and wraps.
 The 32-bit sweep counter wraps too. Forward modulo deltas below half-range are progress, including
 wraps; a delta at least half-range in either counter indicates a restart. This assumes fewer than
@@ -197,8 +202,9 @@ wartui analyze --db tonight.db --heartbeat-windows
 ```
 
 Each line gives the node, two UTC arrival timestamps with milliseconds, heartbeat row IDs, and
-missed count. These observed arrivals bracket missing beats; they are not exact transmission
-times. Rows stay in arrival order even when the wall clock steps back; a reversed clock is labelled.
+missed count, with `(N unsent)` when the node's radio refused some of them. These observed
+arrivals bracket missing beats; they are not exact transmission times. Rows stay in arrival order
+even when the wall clock steps back; a reversed clock is labelled.
 Repeats add no gap, and the first heartbeat per node is only a baseline. A `restart-associated,
 uncertain interval` counts only missing beats since boot: neither the boot time nor pre-boot loss
 is known. Window counts sum to the lifetime missed total. With no counted gaps, the flag prints

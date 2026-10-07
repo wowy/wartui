@@ -194,8 +194,12 @@ fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
                 Ok(Frame::Heartbeat(heartbeat)) => {
                     counts.heartbeat += 1;
                     println!(
-                        "{head}  HEARTBEAT #{} b{} e{}  {}",
-                        heartbeat.counter, heartbeat.beat, heartbeat.epoch, heartbeat.capabilities
+                        "{head}  HEARTBEAT #{} b{} e{} u{}  {}",
+                        heartbeat.counter,
+                        heartbeat.beat,
+                        heartbeat.epoch,
+                        heartbeat.unsent,
+                        heartbeat.capabilities
                     );
                 }
                 Ok(Frame::Sightings(sightings)) => {

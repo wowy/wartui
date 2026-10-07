@@ -175,6 +175,7 @@ impl FleetEngine {
             wifi_dropped: heartbeat.wifi_dropped,
             ble_dropped: heartbeat.ble_dropped,
             beat: heartbeat.beat,
+            unsent: heartbeat.unsent,
             live,
         }));
 

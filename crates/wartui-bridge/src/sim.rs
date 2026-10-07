@@ -642,6 +642,8 @@ async fn beat(
         wifi_dropped: 0,
         ble_dropped: 0,
         beat: node.beats.wrapping_add(1),
+        // A simulated node's radio never refuses a send.
+        unsent: 0,
     };
     node.beats = msg.beat;
     send_frame(events, node.mac, &msg.encode(), started).await

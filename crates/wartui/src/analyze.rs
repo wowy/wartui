@@ -95,7 +95,7 @@ fn losses_text(loss: &LossSummary) -> String {
     let (beats, missed) = (total(|n| n.heartbeats), total(|n| n.heartbeats_missed));
     if beats > 0 {
         let expected = beats + missed;
-        let _ = writeln!(
+        let _ = write!(
             text,
             "  {:<11}{} missed of {} expected ({})",
             "heartbeats",
@@ -103,6 +103,11 @@ fn losses_text(loss: &LossSummary) -> String {
             thousands(expected),
             percent(missed, expected)
         );
+        let unsent = total(|n| n.heartbeats_unsent);
+        if unsent > 0 {
+            let _ = write!(text, "  {} unsent", thousands(unsent));
+        }
+        text.push('\n');
     }
     let refused = ring(total(|n| n.wifi_refused), total(|n| n.ble_refused), " refused");
     if !refused.is_empty() {
@@ -121,6 +126,9 @@ fn losses_text(loss: &LossSummary) -> String {
                 thousands(node.heartbeats + node.heartbeats_missed),
                 percent(node.heartbeats_missed, node.heartbeats + node.heartbeats_missed)
             );
+            if node.heartbeats_unsent > 0 {
+                let _ = write!(line, "  {} unsent", thousands(node.heartbeats_unsent));
+            }
         }
         let refused = ring(node.wifi_refused, node.ble_refused, "");
         if !refused.is_empty() {
@@ -153,6 +161,9 @@ fn heartbeat_windows_text(loss: &LossSummary) -> String {
             );
             if window.restarted {
                 text.push_str(" since boot; restart-associated, uncertain interval");
+            }
+            if window.unsent > 0 {
+                let _ = write!(text, " ({} unsent)", thousands(window.unsent));
             }
             if window.end_rx_at_ms < window.start_rx_at_ms {
                 text.push_str("; wall clock reversed");
@@ -286,6 +297,7 @@ mod tests {
                     batches_lost: 12,
                     heartbeats: 699,
                     heartbeats_missed: 3,
+                    heartbeats_unsent: 0,
                     wifi_refused: 0,
                     ble_refused: 1_203,
                     heartbeat_windows: Vec::new(),
@@ -295,6 +307,7 @@ mod tests {
                     batches_lost: 200,
                     heartbeats: 2_757,
                     heartbeats_missed: 38,
+                    heartbeats_unsent: 0,
                     wifi_refused: 18_220,
                     ble_refused: 0,
                     heartbeat_windows: Vec::new(),
@@ -369,6 +382,39 @@ mod tests {
     }
 
     #[test]
+    fn analyze_report_prints_unsent_heartbeats_when_node_refused_broadcasts() {
+        let mut loss = evening();
+        loss.nodes[1].heartbeats_unsent = 12;
+        loss.nodes[1].heartbeat_windows = vec![HeartbeatWindow {
+            start_id: 3,
+            end_id: 7,
+            start_rx_at_ms: 1_000,
+            end_rx_at_ms: 16_123,
+            missed: 3,
+            unsent: 1,
+            restarted: false,
+        }];
+        let text = losses_text(&loss);
+        assert!(
+            text.contains("  heartbeats 41 missed of 3,497 expected (1.2%)  12 unsent\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "\n    57:84  batches 200  heartbeats 38/2,795 (1.4%)  12 unsent  ring wifi 18,220\n"
+            ),
+            "{text}"
+        );
+        // A node whose radio refused nothing says nothing about it.
+        assert!(
+            text.contains("\n    1C:5A  batches 12  heartbeats 3/702 (0.4%)  ring ble"),
+            "{text}"
+        );
+        let text = heartbeat_windows_text(&loss);
+        assert!(text.contains("rows 3 -> 7  3 missed (1 unsent)\n"), "{text}");
+    }
+
+    #[test]
     fn analyze_enables_windows_when_flag_is_present() {
         for (flags, expected) in [
             (vec!["wartui", "analyze", "--db", "synthetic.db"], false),
@@ -389,6 +435,7 @@ mod tests {
             start_rx_at_ms: 1_000,
             end_rx_at_ms: 16_123,
             missed: 3,
+            unsent: 0,
             restarted: false,
         }];
         assert!(!losses_text(&loss).contains("1970-"));
@@ -408,11 +455,13 @@ mod tests {
             start_rx_at_ms: 1_000,
             end_rx_at_ms: -1_000,
             missed: 11,
+            unsent: 3,
             restarted: true,
         }];
         let text = heartbeat_windows_text(&loss);
         assert!(text.contains("1970-01-01T00:00:01.000Z -> 1969-12-31T23:59:59.000Z"), "{text}");
-        assert!(text.contains("rows 10 -> 11  11 missed since boot; restart-associated, uncertain interval; wall clock reversed\n"), "{text}");
+        // "since boot" qualifies the missed count, so the unsent clause follows the restart text.
+        assert!(text.contains("rows 10 -> 11  11 missed since boot; restart-associated, uncertain interval (3 unsent); wall clock reversed\n"), "{text}");
     }
 
     #[test]
