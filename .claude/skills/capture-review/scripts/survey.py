@@ -22,12 +22,6 @@ from datetime import datetime, timezone
 
 FLAGS = []  # (severity, area, text, sql)
 
-# crates/wartui-proto/src/plan.rs SCAN_CHANNELS at the time of writing; used only when a capture
-# predates the `capture.scan_channels` kv row. Indices are the wire format, so order matters.
-SCAN_CHANNELS_FALLBACK = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 36, 40, 44, 48, 52, 56,
-                          60, 64, 100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144, 149,
-                          153, 157, 161, 165, 169, 173, 177]
-
 
 def flag(sev, area, text, sql=""):
     FLAGS.append((sev, area, text, sql.strip()))
@@ -184,7 +178,6 @@ def provenance(db, ctx):
         flag("WARN", "capture", "simulated=1: test data (--sim or --lat/--lon); never uploaded")
 
     if "kv" not in db.tables:
-        ctx["scan"] = SCAN_CHANNELS_FALLBACK
         return
     kv = dict(db.q("SELECT k, v FROM kv"))
     ctx["kv"] = kv
@@ -193,10 +186,6 @@ def provenance(db, ctx):
             print(f"  kv        {k} = {kv[k]}")
     if "capture.scan_channels" in kv:
         ctx["scan"] = [int(c) for c in kv["capture.scan_channels"].split(",") if c]
-    else:
-        ctx["scan"] = SCAN_CHANNELS_FALLBACK
-        print("  kv        no capture.scan_channels or settings rows (older build); channel "
-              "checks assume this tree's SCAN_CHANNELS")
 
     settings = sorted(
         (k, v) for k, v in kv.items() if k.startswith("capture.settings.") and k.endswith(
