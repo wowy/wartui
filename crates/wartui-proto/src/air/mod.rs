@@ -16,10 +16,11 @@
 //! know is counted and named, never half-decoded. The byte does not move before 1.0 (see
 //! [`WIRE_VERSION`]).
 //!
-//! A node packs every sighting from one dwell or Bluetooth scan into one [`SightingBatch`],
-//! up to [`SIGHTING_BATCH_MAX`] bytes. It sends the batch when the dwell ends and holds
-//! nothing over. The host stamps a position on each record as it arrives, so a held
-//! sighting would get the wrong position. [`SightingBatch::decode`] checks the whole frame
+//! A node packs a dwell's or Bluetooth scan's sightings into [`SightingBatch`]es of up to
+//! [`SIGHTING_BATCH_MAX`] bytes. A full batch goes out at once and a new one starts. What
+//! is left goes out when the dwell or scan ends, so nothing is held past it. The host
+//! stamps a position on each record as it arrives, so a held sighting would get the wrong
+//! position. [`SightingBatch::decode`] checks the whole frame
 //! before it yields any record.
 
 use core::fmt;

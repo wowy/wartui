@@ -5,8 +5,8 @@
 //! the wire types once keeps the three in step. The formats are wartui's own and
 //! interoperate with no other firmware.
 //!
-//! The crate is `no_std` and allocation-free so the firmware can use it. Firmware-only
-//! logic lives here too, such as [`outbox`], [`stall`] and [`pending`], because a
+//! The crate is `no_std` and allocation-free so the firmware can use it. Logic the
+//! firmware runs lives here too, such as [`outbox`], [`stall`] and [`pending`], because a
 //! `riscv32imac` binary cannot run a test and this crate can.
 
 #![no_std]

@@ -188,7 +188,10 @@ impl<'a> SightingMsg<'a> {
     }
 }
 
-/// Node → host: the sightings of one dwell or Bluetooth scan, unicast to the bridge.
+/// Node → host: sightings from one dwell or Bluetooth scan, unicast to the bridge.
+///
+/// A dwell or scan sends as many batches as its sightings fill, and none outlives it. The
+/// [`crate::air`] docs say why.
 ///
 /// `"WTUI" | ver | 0x02 | seq:u16le | count:u8 | records…`, each record a
 /// [`SightingMsg`].
@@ -275,8 +278,10 @@ impl<'a> SightingBatch<'a> {
 /// Packs [`SightingMsg`] records into one [`SightingBatch`] frame, up to
 /// [`SIGHTING_BATCH_MAX`] bytes.
 ///
-/// Built for each dwell or Bluetooth scan and sent at its end; the [`crate::air`] docs
-/// say why nothing is held across one.
+/// [`Self::push`] writes nothing when a record does not fit. The caller then sends what is
+/// packed and starts a new batch with the record that did not fit. Whatever is packed
+/// goes out when the dwell or Bluetooth scan ends; the [`crate::air`] docs say why
+/// nothing is held past it.
 #[derive(Debug, Clone)]
 pub struct SightingBatchWriter {
     buf: [u8; SIGHTING_BATCH_MAX],

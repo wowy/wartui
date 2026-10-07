@@ -2,9 +2,10 @@
 
 /// The default Wi-Fi transmit power, in ESP-IDF's quarter-dBm units.
 ///
-/// 8 is 2 dBm, the lowest value `set_max_tx_power` accepts. The host sends it to every
-/// bridge it connects and in every node assignment, so no firmware hard-codes the fleet
-/// policy.
+/// 8 is 2 dBm, the lowest value `set_max_tx_power` accepts. It is the default for the
+/// host's fleet and bridge settings. The host sends the configured bridge power with every
+/// status poll. It sends the configured fleet power in every assignment. So no firmware
+/// hard-codes the fleet policy.
 pub const DEFAULT_TX_POWER_QUARTER_DBM: i8 = 8;
 
 /// The lowest transmit power `set_max_tx_power` accepts: 2 dBm.

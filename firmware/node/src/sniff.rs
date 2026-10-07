@@ -9,7 +9,7 @@
 //! ten times in a 125 ms dwell, so without that the ring fills with copies of the
 //! loudest network and drops the ones not yet seen. That lookup runs once per beacon
 //! with interrupts held off, so [`WifiPending`] finds a BSSID by hash rather than by
-//! scanning; `wartui_proto::pending::BlePending`'s "Why it is hashed" has the timings.
+//! scanning; the `wartui_proto::pending` docs' "Why the lookup is hashed" has the timings.
 //!
 //! And it deduplicates against [`SEEN`], the dedup ring itself: an access point already
 //! reported and not yet due to be reported again is worth nothing, but without this

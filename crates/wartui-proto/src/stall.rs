@@ -1,8 +1,8 @@
 //! Deciding when the bridge's USB transmit endpoint has stopped draining.
 //!
-//! Only the firmware acts on this; the crate docs say why it lives here. Each rule below
-//! is one line of arithmetic against a clock. Review does not catch a wrong one, so each
-//! has a test.
+//! The bridge firmware acts on this. The host reads [`TX_STALL_TIMEOUT_MS`] so both ends
+//! agree on the timeout. The crate docs say why it lives here. Each rule below is one line
+//! of arithmetic against a clock. Review does not catch a wrong one, so each has a test.
 //!
 //! ## The failure this exists for
 //!
