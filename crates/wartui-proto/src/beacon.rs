@@ -41,10 +41,10 @@ const CAP_PRIVACY: u16 = 0x0010;
 pub struct Sighting {
     /// The BSSID, from `addr3` of the management header.
     pub bssid: [u8; 6],
-    pub(crate) ssid: [u8; SSID_MAX],
-    pub(crate) ssid_len: u8,
-    pub(crate) rcoi: [u8; EXT_MAX],
-    pub(crate) rcoi_len: u8,
+    ssid: [u8; SSID_MAX],
+    ssid_len: u8,
+    rcoi: [u8; EXT_MAX],
+    rcoi_len: u8,
     /// The `AuthMode` token this frame's elements amount to.
     pub security: Security,
     /// The channel the access point says it is on, or the one we were parked on.
@@ -54,6 +54,18 @@ pub struct Sighting {
 }
 
 impl Sighting {
+    /// An all-zero sighting, for filling a buffer before anything is heard.
+    pub(crate) const BLANK: Self = Self {
+        bssid: [0; 6],
+        ssid: [0; SSID_MAX],
+        ssid_len: 0,
+        rcoi: [0; EXT_MAX],
+        rcoi_len: 0,
+        security: Security::Open,
+        channel: 0,
+        rssi: 0,
+    };
+
     /// The SSID bytes, which are whatever the access point beaconed and so may
     /// not be UTF-8. Empty for a hidden network, in either of the two ways an
     /// access point has of being one — see [`visible_ssid`].

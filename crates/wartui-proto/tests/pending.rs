@@ -349,7 +349,7 @@ mod ble_pending {
     }
 
     #[test]
-    fn ble_pending_take_stops_at_len_when_reset() {
+    fn ble_pending_stops_take_at_len_when_cleared() {
         let mut pending = BlePending::<4, 8>::new();
         pending.record(report(1, -60, None), due);
         pending.record(report(2, -60, None), due);

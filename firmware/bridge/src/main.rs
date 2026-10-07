@@ -991,9 +991,9 @@ fn add_peer(manager: &EspNowManager<'_>, mac: &Mac) -> Result<bool, EspNowError>
 /// any 802.11b/g rate decodes unannounced.
 ///
 /// The price is sensitivity, roughly 10 dB against 1 Mbps, which a fleet sharing a
-/// car has at the 2 dBm default (`tx_power::DEFAULT_TX_POWER_QUARTER_DBM`): on the bench, a C5 and a C6
-/// beside this bridge arrived at −43 and −58 dBm and lost 0% and 2.3% of their
-/// heartbeats over ten minutes.
+/// car has at the 2 dBm default (`tx_power::DEFAULT_TX_POWER_QUARTER_DBM`): on the
+/// bench, a C5 and a C6 beside this bridge arrived at −43 and −58 dBm and lost 0%
+/// and 2.3% of their heartbeats over ten minutes.
 ///
 /// Straight into IDF, one of this firmware's two `unsafe` calls. `esp-radio`
 /// 1.0.0-beta.0 wraps only the interface-wide `esp_wifi_config_espnow_rate`, which the

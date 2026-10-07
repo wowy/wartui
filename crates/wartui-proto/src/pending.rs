@@ -1,7 +1,6 @@
 //! The buffers one dwell's sightings and one scan's reports wait in, and the count of what a
 //! full one turns away.
 
-use crate::air::{EXT_MAX, SSID_MAX, Security};
 use crate::beacon::Sighting;
 use crate::hci::AdvReport;
 use crate::mac_index::MacIndex;
@@ -47,18 +46,8 @@ impl<const N: usize, const S: usize> WifiPending<N, S> {
     /// An empty buffer, `const` so it can sit in a `static`.
     #[must_use]
     pub const fn new() -> Self {
-        const BLANK: Sighting = Sighting {
-            bssid: [0; 6],
-            ssid: [0; SSID_MAX],
-            ssid_len: 0,
-            rcoi: [0; EXT_MAX],
-            rcoi_len: 0,
-            security: Security::Open,
-            channel: 0,
-            rssi: 0,
-        };
         Self {
-            items: [BLANK; N],
+            items: [Sighting::BLANK; N],
             len: 0,
             taken: 0,
             dropped: Refused::new(),

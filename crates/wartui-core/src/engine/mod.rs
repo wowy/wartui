@@ -140,7 +140,8 @@ impl FleetEngine {
     /// Start an engine. `now` fixes the session's start time.
     #[must_use]
     pub fn new(mut config: EngineConfig, now: Now) -> Self {
-        // Clamped once here, not where each power reaches a radio. `tx_power::clamp_tx_power` says why.
+        // Clamped once here, not where each power reaches a radio. `tx_power::clamp_tx_power` says
+        // why.
         config.tx_power = clamp_tx_power(config.tx_power);
         config.bridge_tx_power = clamp_tx_power(config.bridge_tx_power);
         Self {

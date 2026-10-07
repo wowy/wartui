@@ -38,10 +38,10 @@ use crate::position::PositionSource;
 /// Mean link RSSI, in dBm, below which the fleet is worth looking at.
 ///
 /// Not a stock link budget. Every radio defaults to 2 dBm
-/// ([`wartui_proto::tx_power::DEFAULT_TX_POWER_QUARTER_DBM`]), and ESP-NOW goes out at 802.11g 24 Mbps,
-/// rated at about −74 dBm sensitivity. That is the floor, and a threshold there would warn only as
-/// nodes started missing admin windows. These sit above it while the operator can still act: close
-/// a window, lift the dongle off the floor, walk a node back.
+/// ([`wartui_proto::tx_power::DEFAULT_TX_POWER_QUARTER_DBM`]), and ESP-NOW goes out at 802.11g
+/// 24 Mbps, rated at about −74 dBm sensitivity. That is the floor, and a threshold there would warn
+/// only as nodes started missing admin windows. These sit above it while the operator can still
+/// act: close a window, lift the dongle off the floor, walk a node back.
 pub const RSSI_WEAK_AVG: i8 = -65;
 
 /// The reading below which a figure stops being worth printing. Well under both thresholds:
