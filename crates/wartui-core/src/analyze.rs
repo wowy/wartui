@@ -24,12 +24,13 @@
 //! Each counted gap splits into unsent and lost on the air. Every heartbeat carries `unsent`, the
 //! node's since-boot count of heartbeats its radio refused to send. It excludes the heartbeat
 //! carrying it, which cannot know its own outcome. So the current count less the previous one is
-//! the refusals among the previous beat and the missed beats between. The previous beat arrived,
-//! so the difference is capped at `missed`: a send can report failure and still reach the bridge.
-//! A byte is enough. The refusals in a gap cannot outnumber the beats sent in it, so the wrapping
-//! difference is exact for any gap under 256 beats. That u8 wraps often, so the walk takes the
-//! wrapping difference and decides restarts from `counter` and `beat`, never from `unsent`
-//! falling, as `advance_since_boot` would.
+//! the refusals among the previous beat and the missed beats between. The previous beat arrived, so
+//! it was not refused, and the difference never exceeds `missed` from honest rows. The cap at
+//! `missed` only guards against a corrupt or repeated row. A byte is enough. The refusals in a gap
+//! cannot outnumber the beats sent in it, so the wrapping difference is exact for any gap under 256
+//! beats. A gap of 256 or more beats, or more than 255 refusals before a restart, undercounts. That
+//! u8 wraps often, so the walk takes the wrapping difference and decides restarts from `counter`
+//! and `beat`, never from `unsent` falling, as `advance_since_boot` would.
 //!
 //! Ring refusals are reported beside the losses, not as one. A pending ring turns a sighting away
 //! once per dwell, and the network is usually reported on a later dwell. The count is ring
@@ -348,14 +349,14 @@ fn heartbeats(conn: &Connection, nodes: &mut BTreeMap<Mac, NodeLoss>) -> rusqlit
                 node.ble_refused += advance_since_boot(beat.ble, Some(prev.ble), rebooted);
                 let (heard, missed) = beat_gap(prev.beat, beat.beat, rebooted);
                 node.heartbeats += heard;
-                // Not `advance_since_boot`: a u8 wraps often, and its falling is not a restart.
-                let refused = u64::from(if rebooted {
-                    beat.unsent
-                } else {
-                    beat.unsent.wrapping_sub(prev.unsent)
-                });
                 // A gap after a replayed heartbeat spans time no host was reading.
                 if prev.live && missed > 0 {
+                    // Not `advance_since_boot`: a u8 wraps often, and its falling is not a restart.
+                    let refused = u64::from(if rebooted {
+                        beat.unsent
+                    } else {
+                        beat.unsent.wrapping_sub(prev.unsent)
+                    });
                     let unsent = refused.min(missed);
                     node.heartbeats_missed += missed;
                     node.heartbeats_unsent += unsent;

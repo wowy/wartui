@@ -483,8 +483,8 @@ fn analyze_ignores_unsent_when_gap_follows_replayed_heartbeat() {
 }
 
 #[test]
-fn analyze_caps_unsent_at_missed_when_refused_beat_still_arrived() {
-    // Beat 1's send reported failure but reached the bridge, so two refusals cover one missed beat.
+fn analyze_caps_unsent_at_missed_when_count_exceeds_gap() {
+    // Two refusals across one missed beat cannot come from honest rows; the count caps at the gap.
     let (_dir, conn) =
         capture(vec![beat(NODE, 0, 1, 1, 0, 0), unsent(beat(NODE, 10_000, 3, 3, 0, 0), 2)]);
     let node = &losses(&conn).unwrap().nodes[0];

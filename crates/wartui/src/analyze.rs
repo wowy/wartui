@@ -159,11 +159,11 @@ fn heartbeat_windows_text(loss: &LossSummary) -> String {
                 window.end_id,
                 thousands(window.missed)
             );
-            if window.unsent > 0 {
-                let _ = write!(text, " ({} unsent)", thousands(window.unsent));
-            }
             if window.restarted {
                 text.push_str(" since boot; restart-associated, uncertain interval");
+            }
+            if window.unsent > 0 {
+                let _ = write!(text, " ({} unsent)", thousands(window.unsent));
             }
             if window.end_rx_at_ms < window.start_rx_at_ms {
                 text.push_str("; wall clock reversed");
@@ -455,12 +455,13 @@ mod tests {
             start_rx_at_ms: 1_000,
             end_rx_at_ms: -1_000,
             missed: 11,
-            unsent: 0,
+            unsent: 3,
             restarted: true,
         }];
         let text = heartbeat_windows_text(&loss);
         assert!(text.contains("1970-01-01T00:00:01.000Z -> 1969-12-31T23:59:59.000Z"), "{text}");
-        assert!(text.contains("rows 10 -> 11  11 missed since boot; restart-associated, uncertain interval; wall clock reversed\n"), "{text}");
+        // "since boot" qualifies the missed count, so the unsent clause follows the restart text.
+        assert!(text.contains("rows 10 -> 11  11 missed since boot; restart-associated, uncertain interval (3 unsent); wall clock reversed\n"), "{text}");
     }
 
     #[test]

@@ -316,8 +316,8 @@ def heartbeats(db, ctx):
                 heard += gap_h
                 if p_live != 0:  # a gap after a replayed beat spans time no host read
                     missed += gap_m
-                    # `unsent` excludes the beat carrying it and wraps at 256; a refused send
-                    # can still arrive, so it is capped at the gap.
+                    # `unsent` excludes the beat carrying it and wraps at 256. The previous beat
+                    # arrived, so it was not refused; the cap only guards against a bad row.
                     refused = us if rebooted else (us - p_us) % 256
                     unsent += min(refused, gap_m)
                 if wd is not None and p_wd is not None:

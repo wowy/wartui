@@ -297,8 +297,11 @@ fn heartbeat_msg_rejects_frame_when_node_sends_twenty_byte_heartbeat() {
         Frame::decode(&HEARTBEAT[..20]),
         Err(DecodeError::BadLength { need: HEARTBEAT_MSG_LEN, got: 20 })
     );
-    // A longer heartbeat carries every field this build reads, so only the length check
-    // refuses it.
+}
+
+#[test]
+fn heartbeat_msg_rejects_frame_when_node_sends_twenty_two_byte_heartbeat() {
+    // A longer frame is the dangerous half, because its leading bytes would parse.
     let mut longer = HEARTBEAT.to_vec();
     longer.push(0);
     assert_eq!(
