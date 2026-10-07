@@ -95,14 +95,20 @@ impl Entry for AdvReport {
     }
 }
 
-/// One dwell's access points, one per BSSID.
+/// One dwell's access points, one per BSSID. The first sighting of a BSSID is kept whole,
+/// and repeats are ignored.
 pub type WifiPending<const N: usize, const S: usize> = Pending<Sighting, N, S>;
 
-/// One scan's advertisers, one per address.
+/// One scan's advertisers, one per address. A repeat merges into the held report, keeping
+/// the strongest RSSI and the first manufacturer ID. A report without an RSSI reading is not
+/// held.
 pub type BlePending<const N: usize, const S: usize> = Pending<AdvReport, N, S>;
 
 /// The entries of one dwell or scan, one per address. The module docs give the rules it
 /// follows.
+///
+/// `T` is only ever `Sighting` or `AdvReport`, used through [`WifiPending`] and
+/// [`BlePending`]. The per-entry rules are crate-private.
 #[derive(Debug, Clone)]
 pub struct Pending<T: Entry, const N: usize, const S: usize> {
     items: [T; N],

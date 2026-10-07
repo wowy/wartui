@@ -452,7 +452,10 @@ mod ble_pending {
                     } else {
                         i8::try_from(rng.next_u32() % 60).expect("fits") - 100
                     };
-                    let mfgr = rng.next_u32().is_multiple_of(3).then_some(u16::from(n));
+                    let mfgr = rng
+                        .next_u32()
+                        .is_multiple_of(3)
+                        .then(|| u16::try_from(rng.next_u32() % 4).expect("fits"));
                     let is_due = !rng.next_u32().is_multiple_of(4);
                     let report = report(n, rssi, mfgr);
                     pending.record(report, |_| is_due);
