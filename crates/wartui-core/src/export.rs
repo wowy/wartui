@@ -36,6 +36,8 @@
 //! the node firmware emits `2026-5-1 13:34:37`), and RFC-4180 quoting of the SSID, which may hold a
 //! comma or quote and need not be text. [`record::ssid_text`](crate::record::ssid_text) also strips
 //! a cloaked network's NUL padding on the way out, so no SSID reaches the file padded.
+//! Coordinates are rounded to seven decimals and `AccuracyMeters` to centimeters, because values
+//! derived from NMEA minutes and HDOP would otherwise print float noise.
 //!
 //! [`ExportFilter::after_uploads`] leaves out everything the newest non-failed upload covered, so a
 //! repeat upload sends only what came after. The cutoff is the last sighting that upload walked, in
@@ -531,8 +533,8 @@ fn write_row<W: Write>(row: &Window, out: &mut W) -> Result<(), ExportError> {
     let best = &row.best;
     let channel = best.channel;
     let rssi = best.rssi;
-    let lat = best.lat.unwrap_or(0.0);
-    let lon = best.lon.unwrap_or(0.0);
+    let lat = degrees(best.lat.unwrap_or(0.0));
+    let lon = degrees(best.lon.unwrap_or(0.0));
     let frequency = frequency_column(channel, best.kind);
     // WiGLE's spellings: the roaming consortium body as hex identifiers, the company identifier as
     // a number. NULL in the store is a blank here.
@@ -548,7 +550,7 @@ fn write_row<W: Write>(row: &Window, out: &mut W) -> Result<(), ExportError> {
         quote(&best.security),
         timestamp(row.first_seen),
         best.alt.unwrap_or(0.0),
-        best.accuracy.unwrap_or(0.0),
+        meters(best.accuracy.unwrap_or(0.0)),
         match best.kind {
             RecordKind::Wifi => "WIFI",
             RecordKind::Ble => "BLE",
@@ -574,6 +576,25 @@ fn frequency_column(channel: i64, kind: RecordKind) -> String {
         32..=177 => format!("{}", 5000 + 5 * channel),
         _ => String::new(),
     }
+}
+
+/// A coordinate to seven decimals, for WiGLE's `CurrentLatitude` and `CurrentLongitude` columns.
+///
+/// NMEA gives degrees and decimal minutes, and dividing the minutes by sixty prints with noise such
+/// as `45.02772083333333`. A u-blox receiver gives minutes to five decimals, a step of about
+/// 1.7e-7 degrees, so seven decimals (about a centimeter) keeps all of it. Rounded, the value
+/// prints in its shortest form.
+fn degrees(value: f64) -> f64 {
+    (value * 1e7).round() / 1e7
+}
+
+/// An accuracy to the centimeter, for WiGLE's `AccuracyMeters` column.
+///
+/// An accuracy estimated from HDOP is a float product, and prints with noise such as
+/// `6.6000000000000005`. Hundredths is the receiver's own resolution: HDOP has two decimals, and
+/// the factor of five adds none. Rounded, the value prints in its shortest form.
+fn meters(value: f64) -> f64 {
+    (value * 100.0).round() / 100.0
 }
 
 /// Zero-padded UTC, to the second. Built from a real timestamp, not by reformatting the firmware's
