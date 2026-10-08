@@ -3410,3 +3410,136 @@ fn engine_keeps_ble_node_unchanged_when_pool_changes() {
     assert_eq!(dst, peer(1));
     assert_eq!(admin.channels, ChannelPool::Us.channels(), "the only sniffer takes the new pool");
 }
+
+/// The engine's node-membership log lines, each as `field=value` pairs.
+#[derive(Clone, Default)]
+struct Logs(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+impl tracing::Subscriber for Logs {
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+    fn event(&self, event: &tracing::Event<'_>) {
+        struct Fields(String);
+        impl tracing::field::Visit for Fields {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                use std::fmt::Write;
+                write!(&mut self.0, "{}={value:?} ", field.name()).unwrap();
+            }
+        }
+        if *event.metadata().level() > tracing::Level::INFO {
+            return;
+        }
+        let mut fields = Fields(String::new());
+        event.record(&mut fields);
+        // Lag lines are not about membership.
+        if fields.0.starts_with("message=node ") {
+            self.0.lock().unwrap().push(fields.0);
+        }
+    }
+
+    fn enter(&self, _: &tracing::span::Id) {}
+
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+impl Logs {
+    /// Runs `f` with this capturing every event, then returns the lines captured.
+    fn during(f: impl FnOnce()) -> Vec<String> {
+        let logs = Self::default();
+        tracing::subscriber::with_default(logs.clone(), f);
+        logs.0.lock().unwrap().clone()
+    }
+}
+
+#[test]
+fn engine_logs_node_joined_when_first_heartbeat_arrives() {
+    let clock = Clock::new();
+    let mut engine = engine(us_config(), &clock);
+
+    let lines = Logs::during(|| {
+        engine.handle(heartbeat(NODE, 1), clock.at(1));
+    });
+
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].contains("message=node joined"), "{lines:?}");
+    assert!(lines[0].contains("rssi=-41"), "{lines:?}");
+}
+
+#[test]
+fn engine_logs_node_left_when_heartbeats_stop_for_topology_timeout() {
+    let clock = Clock::new();
+    let mut engine = engine(us_config(), &clock);
+    caught_up(&mut engine, &clock);
+    let (id, _, _) = sent_admin(&engine.handle(heartbeat(NODE, 1), clock.at(1)));
+    engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(1));
+
+    // Eviction waits until the link has been up a whole timeout, which it has by 62 s.
+    let lines = Logs::during(|| {
+        engine.handle(Event::Tick, clock.at(62));
+        engine.handle(Event::Tick, clock.at(63));
+    });
+
+    assert_eq!(lines.len(), 1, "logged once: {lines:?}");
+    assert!(lines[0].contains("message=node left the fleet"), "{lines:?}");
+    assert!(lines[0].contains("silent_ms=61000"), "{lines:?}");
+}
+
+#[test]
+fn engine_logs_node_returned_when_heartbeat_follows_timeout() {
+    let clock = Clock::new();
+    let mut engine = engine(us_config(), &clock);
+    engine.handle(heartbeat(NODE, 1), clock.at(1));
+
+    let lines = Logs::during(|| {
+        engine.handle(heartbeat(NODE, 2), clock.at(421));
+        engine.handle(heartbeat(NODE, 3), clock.at(422));
+    });
+
+    assert_eq!(lines.len(), 1, "logged once: {lines:?}");
+    assert!(lines[0].contains("message=node returned"), "{lines:?}");
+    assert!(lines[0].contains("silent_ms=420000"), "{lines:?}");
+}
+
+#[test]
+fn engine_logs_node_restarted_when_heartbeat_counter_decreases() {
+    let clock = Clock::new();
+    let mut engine = engine(us_config(), &clock);
+    engine.handle(heartbeat(NODE, 175), clock.at(1));
+
+    let lines = Logs::during(|| {
+        engine.handle(heartbeat(NODE, 2), clock.at(2));
+        engine.handle(heartbeat(NODE, 3), clock.at(3));
+    });
+
+    assert_eq!(lines.len(), 1, "logged once: {lines:?}");
+    assert!(lines[0].contains("message=node restarted"), "{lines:?}");
+    assert!(lines[0].contains("counter_before=175 counter_after=2"), "{lines:?}");
+}
+
+#[test]
+fn engine_logs_nothing_when_heartbeats_arrive_on_time() {
+    let clock = Clock::new();
+    let mut engine = engine(us_config(), &clock);
+    caught_up(&mut engine, &clock);
+    let (id, _, _) = sent_admin(&engine.handle(heartbeat(NODE, 1), clock.at(1)));
+    engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(1));
+
+    let lines = Logs::during(|| {
+        for (counter, at) in (2..).zip((31..=181).step_by(30)) {
+            engine.handle(heartbeat(NODE, counter), clock.at(at));
+            engine.handle(Event::Tick, clock.at(at));
+        }
+    });
+
+    assert!(lines.is_empty(), "{lines:?}");
+}

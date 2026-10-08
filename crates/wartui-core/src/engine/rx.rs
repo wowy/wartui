@@ -2,7 +2,7 @@ use wartui_proto::air::{
     Capabilities, DecodeError, Frame, HeartbeatMsg, RecordKind, SightingBatch, SightingMsg,
     foreign, wire_epoch,
 };
-use wartui_proto::mac::Mac;
+use wartui_proto::mac::{self, Mac};
 use wartui_proto::node;
 
 #[cfg(doc)]
@@ -131,7 +131,28 @@ impl FleetEngine {
         let epoch_rebooted =
             live && heartbeat.epoch == 0 && node.held_epoch.is_some_and(|previous| previous != 0);
         let rebooted = counter_rebooted || epoch_rebooted;
+        // `see_node` leaves `last_heartbeat` alone, so this is still the previous beat.
+        match node.last_heartbeat {
+            None => tracing::info!(
+                mac = %mac::full(&src),
+                capabilities = %heartbeat.capabilities,
+                rssi,
+                "node joined"
+            ),
+            Some(last) if now.mono.duration_since(last) >= self.config.topology_timeout => {
+                let silent_ms = now.mono.duration_since(last).as_millis() as u64;
+                tracing::info!(mac = %mac::full(&src), silent_ms, "node returned");
+            }
+            Some(_) => {}
+        }
         if rebooted {
+            tracing::info!(
+                mac = %mac::full(&src),
+                counter_before = node.counter,
+                counter_after = heartbeat.counter,
+                beat = heartbeat.beat,
+                "node restarted"
+            );
             node.reboots += 1;
             // The node forgot it. `reissue` below re-sends it.
             node.confirmed = None;
