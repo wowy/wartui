@@ -350,6 +350,11 @@ struct SimNode {
     /// Heartbeats tried since boot, mirroring `Node::beats` on the firmware: every
     /// attempt advances it.
     beats: u16,
+    /// The scan channel number this node last dwelt on, or 0 when its last step was
+    /// not a dwell, mirroring `Node::last_dwell` on the firmware. Each heartbeat carries it.
+    last_dwell: u8,
+    /// The `dwell` the previous heartbeat carried, mirroring `Node::beat_dwell`.
+    beat_dwell: u8,
     /// When this node next sends a heartbeat and holds the admin window open.
     /// `None` while parked. Set fresh every time an assignment is adopted
     /// while parked, not only the first, so a stale deadline from before this
@@ -380,6 +385,8 @@ impl SimNode {
             // zero, so a fresh node's first heartbeat already carries a value.
             hb_counter: 1,
             beats: 0,
+            last_dwell: 0,
+            beat_dwell: 0,
             next_beat: None,
             seq: 0,
             seen: Seen::new(five_ghz),
@@ -493,6 +500,7 @@ async fn run_node(
             // nothing. Heartbeat first and listen after, because the host only
             // transmits in answer to one — so this is how long joining takes. One
             // idle beat is this node's whole cycle, so the counter advances here too.
+            node.last_dwell = 0;
             if beat(&events, &mut node, started).await.is_err() {
                 return;
             }
@@ -544,6 +552,7 @@ async fn run_node(
                 return;
             }
             node.hb_counter = node.hb_counter.wrapping_add(1);
+            node.last_dwell = 0;
             if let Some(deadline) = node.next_beat
                 && tokio::time::Instant::now() >= deadline
             {
@@ -571,6 +580,8 @@ async fn run_node(
                 return;
             }
             let channel = SCAN_CHANNELS[usize::from(idx)];
+            // A simulated hop never fails, so every dwell names its channel.
+            node.last_dwell = channel;
             let mut writer = SightingBatchWriter::new(node.seq);
             for slot in world.on_channel(channel) {
                 let net = world.hear(slot);
@@ -622,7 +633,7 @@ fn next_beat_after(deadline: tokio::time::Instant, speed: f64) -> tokio::time::I
 ///
 /// The counter tracks completed sweeps or scans on its own, so it advances
 /// whether or not this call goes out; this only ever reads it. The beat count
-/// advances on every attempt.
+/// and the dwell carried forward advance on every attempt.
 async fn beat(
     events: &mpsc::Sender<LinkEvent>,
     node: &mut SimNode,
@@ -642,8 +653,11 @@ async fn beat(
         beat: node.beats.wrapping_add(1),
         // A simulated node's radio never fails a send.
         unsent: 0,
+        dwell: node.last_dwell,
+        prev_dwell: node.beat_dwell,
     };
     node.beats = msg.beat;
+    node.beat_dwell = node.last_dwell;
     send_frame(events, node.mac, &msg.encode(), started).await
 }
 

@@ -24,6 +24,8 @@ const HEARTBEAT: &[u8] = &[
     0x04, 0x03, // ble_refused 0x0304, little-endian
     0x02, 0x01, // beat 0x0102, little-endian
     0x07, // unsent 7
+    0x95, // dwell: channel 149
+    0x24, // prev_dwell: channel 36
 ];
 
 /// A heartbeat from a node parked since boot: epoch 0, never sent by the host.
@@ -36,6 +38,8 @@ const HEARTBEAT_NO_EPOCH: &[u8] = &[
     0x00, 0x00, // ble_refused 0
     0x01, 0x00, // beat 1: the first heartbeat since boot
     0x00, // unsent 0
+    0x00, // dwell: none, the node is parked
+    0x00, // prev_dwell: none, the first heartbeat since boot
 ];
 
 /// A Wi-Fi record: no header of its own, since [`SightingBatch`] carries one
@@ -223,6 +227,8 @@ fn heartbeat_msg_serializes_byte_for_byte_when_encoded_and_decoded() {
         ble_refused: 0x0304,
         beat: 0x0102,
         unsent: 7,
+        dwell: 149,
+        prev_dwell: 36,
     };
     assert_eq!(msg.encode().as_slice(), HEARTBEAT);
     assert_eq!(HeartbeatMsg::decode(HEARTBEAT), Ok(msg));
@@ -238,6 +244,8 @@ fn heartbeat_msg_serializes_epoch_zero_when_node_holds_no_assignment() {
         ble_refused: 0,
         beat: 1,
         unsent: 0,
+        dwell: 0,
+        prev_dwell: 0,
     };
     assert_eq!(msg.encode().as_slice(), HEARTBEAT_NO_EPOCH);
     assert_eq!(HeartbeatMsg::decode(HEARTBEAT_NO_EPOCH), Ok(msg));
@@ -286,31 +294,43 @@ fn heartbeat_msg_round_trips_unsent_when_encoded_at_its_offset() {
 }
 
 #[test]
-fn heartbeat_msg_rejects_frame_when_node_sends_twenty_byte_heartbeat() {
-    // A node flashed from another tree, whose heartbeat is shorter. The engine counts
-    // this as incompatible and asks for a reflash.
-    assert_eq!(
-        HeartbeatMsg::decode(&HEARTBEAT[..20]),
-        Err(DecodeError::BadLength { need: HEARTBEAT_MSG_LEN, got: 20 })
-    );
-    assert_eq!(
-        Frame::decode(&HEARTBEAT[..20]),
-        Err(DecodeError::BadLength { need: HEARTBEAT_MSG_LEN, got: 20 })
-    );
+fn heartbeat_msg_round_trips_dwell_when_encoded_at_its_offset() {
+    let decoded = HeartbeatMsg::decode(HEARTBEAT).expect("valid");
+    assert_eq!((decoded.dwell, decoded.prev_dwell), (149, 36));
+    assert_eq!(&HEARTBEAT[21..23], &[0x95, 0x24]);
+
+    let msg = HeartbeatMsg { dwell: 6, prev_dwell: 165, ..decoded };
+    let frame = msg.encode();
+    assert_eq!(&frame[21..23], &[0x06, 0xA5]);
+    assert_eq!(HeartbeatMsg::decode(&frame), Ok(msg));
 }
 
 #[test]
 fn heartbeat_msg_rejects_frame_when_node_sends_twenty_two_byte_heartbeat() {
+    // A node flashed from another tree, whose heartbeat is shorter. The engine counts
+    // this as incompatible and asks for a reflash.
+    assert_eq!(
+        HeartbeatMsg::decode(&HEARTBEAT[..22]),
+        Err(DecodeError::BadLength { need: HEARTBEAT_MSG_LEN, got: 22 })
+    );
+    assert_eq!(
+        Frame::decode(&HEARTBEAT[..22]),
+        Err(DecodeError::BadLength { need: HEARTBEAT_MSG_LEN, got: 22 })
+    );
+}
+
+#[test]
+fn heartbeat_msg_rejects_frame_when_node_sends_twenty_four_byte_heartbeat() {
     // A longer frame is the dangerous half, because its leading bytes would parse.
     let mut longer = HEARTBEAT.to_vec();
     longer.push(0);
     assert_eq!(
         HeartbeatMsg::decode(&longer),
-        Err(DecodeError::BadLength { need: HEARTBEAT_MSG_LEN, got: 22 })
+        Err(DecodeError::BadLength { need: HEARTBEAT_MSG_LEN, got: 24 })
     );
     assert_eq!(
         Frame::decode(&longer),
-        Err(DecodeError::BadLength { need: HEARTBEAT_MSG_LEN, got: 22 })
+        Err(DecodeError::BadLength { need: HEARTBEAT_MSG_LEN, got: 24 })
     );
 }
 

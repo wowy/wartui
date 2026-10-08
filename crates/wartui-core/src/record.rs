@@ -70,6 +70,10 @@ pub struct Heartbeat {
     pub beat: u16,
     /// Heartbeats the node's radio could not send since its boot, this one excluded. Wraps.
     pub unsent: u8,
+    /// The scan channel the node dwelt on just before this heartbeat, 0 for none.
+    pub dwell: u8,
+    /// The `dwell` the node's previous heartbeat carried, arrived or not; 0 after boot.
+    pub prev_dwell: u8,
     /// Whether it arrived live rather than replayed from the bridge's backlog.
     pub live: bool,
 }

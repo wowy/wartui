@@ -56,6 +56,8 @@ fn beat(node: Mac, at_ms: i64, counter: u32, seq: u16, wifi: u16, ble: u16) -> R
         ble_refused: ble,
         beat: seq,
         unsent: 0,
+        dwell: 0,
+        prev_dwell: 0,
         live: true,
     })
 }

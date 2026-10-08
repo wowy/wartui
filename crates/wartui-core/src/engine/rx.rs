@@ -200,6 +200,8 @@ impl FleetEngine {
             ble_refused: heartbeat.ble_refused,
             beat: heartbeat.beat,
             unsent: heartbeat.unsent,
+            dwell: heartbeat.dwell,
+            prev_dwell: heartbeat.prev_dwell,
             live,
         }));
 

@@ -26,6 +26,8 @@ fn sample_commands() -> Vec<HostToBridge, 16> {
                 ble_refused: 0,
                 beat: 1,
                 unsent: 0,
+                dwell: 0,
+                prev_dwell: 0,
             }
             .encode(),
         )

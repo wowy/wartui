@@ -114,6 +114,8 @@ fn beat_at(src: Mac, counter: u32, epoch: u8, capabilities: Capabilities, rx_us:
         ble_refused: 0,
         beat: 1,
         unsent: 0,
+        dwell: 0,
+        prev_dwell: 0,
     };
     rx_at(src, &msg.encode(), rx_us)
 }
@@ -128,6 +130,8 @@ fn heartbeat_refusing(src: Mac, counter: u32, wifi_refused: u16, ble_refused: u1
         ble_refused,
         beat: 1,
         unsent: 0,
+        dwell: 0,
+        prev_dwell: 0,
     };
     rx(src, &msg.encode())
 }
@@ -925,6 +929,35 @@ fn engine_counts_foreign_fleet_when_vendor_frames_arrive() {
 }
 
 #[test]
+fn engine_records_dwell_when_heartbeat_arrives() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+
+    let msg = HeartbeatMsg {
+        counter: 1,
+        epoch: 0,
+        capabilities: Capabilities::here(true),
+        wifi_refused: 0,
+        ble_refused: 0,
+        beat: 1,
+        unsent: 0,
+        dwell: 149,
+        prev_dwell: 36,
+    };
+    let batch = engine.handle(rx(NODE, &msg.encode()), clock.at(1));
+
+    let dwells: Vec<(u8, u8)> = batch
+        .records
+        .iter()
+        .filter_map(|r| match r {
+            Record::Heartbeat(h) => Some((h.dwell, h.prev_dwell)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(dwells, [(149, 36)], "the channel numbers as the frame carried them");
+}
+
+#[test]
 fn engine_counts_incompatible_when_wire_version_differs() {
     // A fleet half-way through a reflash looks like this and nothing else would
     // say so: ours, from a build speaking a wire version this host does not.
@@ -939,6 +972,8 @@ fn engine_counts_incompatible_when_wire_version_differs() {
         ble_refused: 0,
         beat: 1,
         unsent: 0,
+        dwell: 0,
+        prev_dwell: 0,
     }
     .encode()
     .to_vec();
