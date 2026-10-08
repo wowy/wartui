@@ -92,17 +92,17 @@ pub struct HeartbeatMsg {
     /// ([`crate::pending::Refused`]). Wraps. Most are reported on a later dwell, so this
     /// measures the buffer against the neighborhood rather than counting losses. The
     /// host reads it as a difference between heartbeats.
-    pub wifi_dropped: u16,
+    pub wifi_refused: u16,
     /// Advertisers a full pending buffer turned away since boot, each once per scan.
-    /// Wraps, and is read like `wifi_dropped`. 0 on a node that has never held the
+    /// Wraps, and is read like `wifi_refused`. 0 on a node that has never held the
     /// Bluetooth scan.
-    pub ble_dropped: u16,
+    pub ble_refused: u16,
     /// Heartbeats this node has tried to send since boot, this one included, so the first
     /// carries 1. Wraps. A gap in `beat` is heartbeats lost between node and host.
     pub beat: u16,
-    /// Heartbeats the radio refused to send since boot, this one excluded: a heartbeat
+    /// Heartbeats the radio could not send since boot, this one excluded: a heartbeat
     /// cannot know its own outcome. Wraps at 256, and is read as a difference between
-    /// received heartbeats. A byte is enough. The refusals in a gap cannot outnumber the
+    /// received heartbeats. A byte is enough. The failed sends in a gap cannot outnumber the
     /// beats in it, so the difference is exact for any gap under 256 beats.
     pub unsent: u8,
 }
@@ -135,8 +135,8 @@ impl HeartbeatMsg {
                 buf[OFF_BODY + 6],
                 buf[OFF_BODY + 7],
             ),
-            wifi_dropped: le(OFF_BODY + 8),
-            ble_dropped: le(OFF_BODY + 10),
+            wifi_refused: le(OFF_BODY + 8),
+            ble_refused: le(OFF_BODY + 10),
             beat: le(OFF_BODY + 12),
             unsent: buf[OFF_BODY + 14],
         })
@@ -152,8 +152,8 @@ impl HeartbeatMsg {
         out[OFF_BODY + 5] = self.capabilities.major;
         out[OFF_BODY + 6] = self.capabilities.minor;
         out[OFF_BODY + 7] = self.capabilities.flags();
-        out[OFF_BODY + 8..OFF_BODY + 10].copy_from_slice(&self.wifi_dropped.to_le_bytes());
-        out[OFF_BODY + 10..OFF_BODY + 12].copy_from_slice(&self.ble_dropped.to_le_bytes());
+        out[OFF_BODY + 8..OFF_BODY + 10].copy_from_slice(&self.wifi_refused.to_le_bytes());
+        out[OFF_BODY + 10..OFF_BODY + 12].copy_from_slice(&self.ble_refused.to_le_bytes());
         out[OFF_BODY + 12..OFF_BODY + 14].copy_from_slice(&self.beat.to_le_bytes());
         out[OFF_BODY + 14] = self.unsent;
         out

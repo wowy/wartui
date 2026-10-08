@@ -373,7 +373,7 @@ mod tests {
     }
 
     #[test]
-    fn analyze_report_prints_unsent_heartbeats_when_node_refused_broadcasts() {
+    fn analyze_report_prints_unsent_heartbeats_when_node_could_not_send() {
         let mut loss = evening();
         loss.nodes[1].heartbeats_unsent = 12;
         loss.nodes[1].heartbeat_windows = vec![HeartbeatWindow {
@@ -397,7 +397,7 @@ mod tests {
             ),
             "{text}"
         );
-        // A node whose radio refused nothing says nothing about it.
+        // A node whose radio sent every heartbeat says nothing about it.
         assert!(
             text.contains("\n    1C:5A  batches 12  heartbeats 3/702 (0.4%)  buffer full ble"),
             "{text}"

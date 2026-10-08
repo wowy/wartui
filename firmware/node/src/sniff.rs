@@ -24,7 +24,7 @@
 //!
 //! An access point that finds the buffer full is counted in
 //! [`Refused`](wartui_proto::pending::Refused), once per dwell however often it beacons,
-//! so [`dropped`] counts addresses rather than packets. It is not in [`SEEN`], so the
+//! so [`refused`] counts addresses rather than packets. It is not in [`SEEN`], so the
 //! next dwell reports it: a refusal is mostly delay.
 //!
 //! Capture is opened and closed around the dwell rather than left running, because
@@ -161,6 +161,6 @@ pub fn take() -> Option<Sighting> {
 /// Access points turned away by a full buffer since boot, each counted once per dwell.
 /// Wraps. The heartbeat carries it to the host. A number that climbs means [`PENDING`]
 /// is too small for the neighborhood, not that the dwell is wrong.
-pub fn dropped() -> u16 {
-    DWELL.with(|dwell| dwell.sightings.dropped())
+pub fn refused() -> u16 {
+    DWELL.with(|dwell| dwell.sightings.refused())
 }

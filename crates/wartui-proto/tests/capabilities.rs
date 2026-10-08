@@ -13,8 +13,8 @@ fn round_trip(caps: Capabilities) -> Capabilities {
         counter: 0,
         epoch: 0,
         capabilities: caps,
-        wifi_dropped: 0,
-        ble_dropped: 0,
+        wifi_refused: 0,
+        ble_refused: 0,
         beat: 1,
         unsent: 0,
     }

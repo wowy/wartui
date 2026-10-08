@@ -110,8 +110,8 @@ fn beat_at(src: Mac, counter: u32, epoch: u8, capabilities: Capabilities, rx_us:
         counter,
         epoch,
         capabilities,
-        wifi_dropped: 0,
-        ble_dropped: 0,
+        wifi_refused: 0,
+        ble_refused: 0,
         beat: 1,
         unsent: 0,
     };
@@ -119,13 +119,13 @@ fn beat_at(src: Mac, counter: u32, epoch: u8, capabilities: Capabilities, rx_us:
 }
 
 /// A heartbeat carrying the node's since-boot pending-buffer refusals, Wi-Fi then BLE.
-fn heartbeat_dropping(src: Mac, counter: u32, wifi_dropped: u16, ble_dropped: u16) -> Event {
+fn heartbeat_refusing(src: Mac, counter: u32, wifi_refused: u16, ble_refused: u16) -> Event {
     let msg = HeartbeatMsg {
         counter,
         epoch: 0,
         capabilities: Capabilities::here(true),
-        wifi_dropped,
-        ble_dropped,
+        wifi_refused,
+        ble_refused,
         beat: 1,
         unsent: 0,
     };
@@ -765,9 +765,9 @@ fn engine_ignores_refusals_when_first_heartbeat_of_session() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
 
-    engine.handle(heartbeat_dropping(NODE, 10, 500, 70), clock.at(1));
+    engine.handle(heartbeat_refusing(NODE, 10, 500, 70), clock.at(1));
 
-    assert_eq!((counters(&engine).wifi_dropped, counters(&engine).ble_dropped), (0, 0));
+    assert_eq!((counters(&engine).wifi_refused, counters(&engine).ble_refused), (0, 0));
 }
 
 #[test]
@@ -775,25 +775,25 @@ fn engine_sums_refusals_across_nodes_when_heartbeats_advance() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
 
-    engine.handle(heartbeat_dropping(NODE, 10, 100, 0), clock.at(1));
-    engine.handle(heartbeat_dropping(OTHER, 20, 7, 0), clock.at(1));
-    engine.handle(heartbeat_dropping(NODE, 11, 103, 0), clock.at(2));
-    engine.handle(heartbeat_dropping(OTHER, 21, 12, 0), clock.at(2));
-    engine.handle(heartbeat_dropping(NODE, 12, 104, 0), clock.at(3));
+    engine.handle(heartbeat_refusing(NODE, 10, 100, 0), clock.at(1));
+    engine.handle(heartbeat_refusing(OTHER, 20, 7, 0), clock.at(1));
+    engine.handle(heartbeat_refusing(NODE, 11, 103, 0), clock.at(2));
+    engine.handle(heartbeat_refusing(OTHER, 21, 12, 0), clock.at(2));
+    engine.handle(heartbeat_refusing(NODE, 12, 104, 0), clock.at(3));
 
-    assert_eq!(counters(&engine).wifi_dropped, 3 + 5 + 1);
+    assert_eq!(counters(&engine).wifi_refused, 3 + 5 + 1);
 }
 
 #[test]
-fn engine_keeps_wifi_and_ble_drops_apart_when_both_advance() {
+fn engine_keeps_wifi_and_ble_refusals_apart_when_both_advance() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
 
-    engine.handle(heartbeat_dropping(NODE, 10, 100, 40), clock.at(1));
-    engine.handle(heartbeat_dropping(NODE, 11, 102, 49), clock.at(2));
+    engine.handle(heartbeat_refusing(NODE, 10, 100, 40), clock.at(1));
+    engine.handle(heartbeat_refusing(NODE, 11, 102, 49), clock.at(2));
 
-    assert_eq!(counters(&engine).wifi_dropped, 2);
-    assert_eq!(counters(&engine).ble_dropped, 9);
+    assert_eq!(counters(&engine).wifi_refused, 2);
+    assert_eq!(counters(&engine).ble_refused, 9);
 }
 
 #[test]
@@ -803,14 +803,14 @@ fn engine_counts_since_boot_refusals_when_node_reboots() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
 
-    engine.handle(heartbeat_dropping(NODE, 174, 100, 40), clock.at(1));
-    engine.handle(heartbeat_dropping(NODE, 175, 110, 41), clock.at(2));
-    engine.handle(heartbeat_dropping(NODE, 2, 6, 1), clock.at(3));
-    engine.handle(heartbeat_dropping(NODE, 3, 8, 1), clock.at(4));
+    engine.handle(heartbeat_refusing(NODE, 174, 100, 40), clock.at(1));
+    engine.handle(heartbeat_refusing(NODE, 175, 110, 41), clock.at(2));
+    engine.handle(heartbeat_refusing(NODE, 2, 6, 1), clock.at(3));
+    engine.handle(heartbeat_refusing(NODE, 3, 8, 1), clock.at(4));
 
     assert_eq!(engine.nodes().next().expect("a node").reboots, 1);
-    assert_eq!(counters(&engine).wifi_dropped, 10 + 6 + 2);
-    assert_eq!(counters(&engine).ble_dropped, 1 + 1);
+    assert_eq!(counters(&engine).wifi_refused, 10 + 6 + 2);
+    assert_eq!(counters(&engine).ble_refused, 1 + 1);
 }
 
 #[test]
@@ -821,31 +821,31 @@ fn engine_reads_restart_when_refusals_fall_without_reboot() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
 
-    engine.handle(heartbeat_dropping(NODE, 3, 40, 9), clock.at(1));
-    engine.handle(heartbeat_dropping(NODE, 10, 2, 1), clock.at(2));
+    engine.handle(heartbeat_refusing(NODE, 3, 40, 9), clock.at(1));
+    engine.handle(heartbeat_refusing(NODE, 10, 2, 1), clock.at(2));
 
-    assert_eq!(counters(&engine).wifi_dropped, 2);
-    assert_eq!(counters(&engine).ble_dropped, 1);
+    assert_eq!(counters(&engine).wifi_refused, 2);
+    assert_eq!(counters(&engine).ble_refused, 1);
     assert_eq!(
         engine.nodes().next().expect("a node").reboots,
         0,
-        "drops are not the reboot detector"
+        "refusals are not the reboot detector"
     );
 }
 
 #[test]
 fn engine_undercounts_refusals_when_count_wraps() {
-    // A wrap looks like a restart, so the drops between the last count and the
+    // A wrap looks like a restart, so the refusals between the last count and the
     // wrap are lost. That is at most one heartbeat's worth once every 65536
     // refusals, where reading a missed reboot as a wrap would add ~65000.
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
 
-    engine.handle(heartbeat_dropping(NODE, 10, u16::MAX - 1, u16::MAX), clock.at(1));
-    engine.handle(heartbeat_dropping(NODE, 11, 3, 0), clock.at(2));
+    engine.handle(heartbeat_refusing(NODE, 10, u16::MAX - 1, u16::MAX), clock.at(1));
+    engine.handle(heartbeat_refusing(NODE, 11, 3, 0), clock.at(2));
 
-    assert_eq!(counters(&engine).wifi_dropped, 3);
-    assert_eq!(counters(&engine).ble_dropped, 0);
+    assert_eq!(counters(&engine).wifi_refused, 3);
+    assert_eq!(counters(&engine).ble_refused, 0);
 }
 
 #[test]
@@ -935,8 +935,8 @@ fn engine_counts_incompatible_when_wire_version_differs() {
         counter: 1,
         epoch: 0,
         capabilities: Capabilities::here(true),
-        wifi_dropped: 0,
-        ble_dropped: 0,
+        wifi_refused: 0,
+        ble_refused: 0,
         beat: 1,
         unsent: 0,
     }

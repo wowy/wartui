@@ -276,7 +276,7 @@ def heartbeats(db, ctx):
         return
     cols = db.cols("heartbeat")
     want = ["node_mac", "id", "rx_at", "counter", "epoch", "rssi", "beat"]
-    for c in ("live", "wifi_dropped", "ble_dropped"):
+    for c in ("live", "wifi_refused", "ble_refused"):
         want.append(c if c in cols else "NULL")
     want.append("unsent")
     rows = db.q(f"SELECT {', '.join(want)} FROM heartbeat ORDER BY node_mac, id")
@@ -297,10 +297,10 @@ def heartbeats(db, ctx):
         prev = None
         intervals = []
         for r in hs:
-            (_, rid, rx, counter, epoch, rssi, beat, live, wd, bd, us, *_rest) = r
+            (_, rid, rx, counter, epoch, rssi, beat, live, wr, br, us, *_rest) = r
             replayed += live == 0
             if prev is not None:
-                p_rx, p_counter, p_beat, p_live, p_wd, p_bd, p_us = (
+                p_rx, p_counter, p_beat, p_live, p_wr, p_br, p_us = (
                     prev[2], prev[3], prev[6], prev[7], prev[8], prev[9], prev[10])
                 rebooted = ((counter - p_counter) % 2**32 >= 2**31
                             or (beat - p_beat) % 2**16 >= 2**15)
@@ -317,12 +317,12 @@ def heartbeats(db, ctx):
                 if p_live != 0:  # a gap after a replayed beat spans time no host read
                     missed += gap_m
                     # `unsent` excludes the beat carrying it and wraps at 256. The previous beat
-                    # arrived, so it was not refused; the cap only guards against a bad row.
-                    refused = us if rebooted else (us - p_us) % 256
-                    unsent += min(refused, gap_m)
-                if wd is not None and p_wd is not None:
-                    wifi_ref += since_boot_delta(wd, p_wd, rebooted)
-                    ble_ref += since_boot_delta(bd, p_bd, rebooted)
+                    # arrived, so its send did not fail; the cap only guards against a bad row.
+                    unsent_since = us if rebooted else (us - p_us) % 256
+                    unsent += min(unsent_since, gap_m)
+                if wr is not None and p_wr is not None:
+                    wifi_ref += since_boot_delta(wr, p_wr, rebooted)
+                    ble_ref += since_boot_delta(br, p_br, rebooted)
                 dt = rx - p_rx
                 if dt < 0:
                     reversals += 1
@@ -1008,7 +1008,7 @@ LOG_LINE = re.compile(
     r"^(?P<ts>\d{4}-\d\d-\d\dT[\d:.]+Z?)\s+(?P<level>TRACE|DEBUG|INFO|WARN|ERROR)\s+"
     r"(?P<target>[\w:]+):\s?(?P<msg>.*)$")
 KEYWORDS = re.compile(r"reconnect|identify|stall|reset|reboot|disconnect|timed? ?out|panic|"
-                      r"wedge|Ready|uptime|gps|nmea|dropped|error", re.I)
+                      r"wedge|Ready|uptime|gps|nmea|dropped|refused|error", re.I)
 
 
 def template(msg):

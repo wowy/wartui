@@ -637,10 +637,10 @@ async fn beat(
         epoch: node.epoch,
         capabilities: Capabilities::here(node.five_ghz),
         // A simulated node's pending buffers never fill.
-        wifi_dropped: 0,
-        ble_dropped: 0,
+        wifi_refused: 0,
+        ble_refused: 0,
         beat: node.beats.wrapping_add(1),
-        // A simulated node's radio never refuses a send.
+        // A simulated node's radio never fails a send.
         unsent: 0,
     };
     node.beats = msg.beat;

@@ -52,8 +52,8 @@ fn beat(node: Mac, at_ms: i64, counter: u32, seq: u16, wifi: u16, ble: u16) -> R
         counter,
         epoch: 3,
         link_rssi: Some(-40),
-        wifi_dropped: wifi,
-        ble_dropped: ble,
+        wifi_refused: wifi,
+        ble_refused: ble,
         beat: seq,
         unsent: 0,
         live: true,
@@ -66,7 +66,7 @@ fn replayed(node: Mac, at_ms: i64, counter: u32, seq: u16) -> Record {
     Record::Heartbeat(Heartbeat { live: false, ..hb })
 }
 
-/// `record`, a heartbeat, carrying `unsent` heartbeats the node's radio refused since boot.
+/// `record`, a heartbeat, carrying `unsent` heartbeats the node's radio could not send since boot.
 fn unsent(record: Record, unsent: u8) -> Record {
     let Record::Heartbeat(hb) = record else { unreachable!() };
     Record::Heartbeat(Heartbeat { unsent, ..hb })
@@ -82,7 +82,7 @@ fn gap(node: Mac, seq: u16, lost: u16) -> Record {
     })
 }
 
-/// Assigned heartbeats every 5 s, from `from_s`, with nothing refused.
+/// Assigned heartbeats every 5 s, from `from_s`, every one sent.
 fn steady(node: Mac, from_s: i64, count: u32) -> Vec<Record> {
     (0..count)
         .map(|i| {
@@ -445,7 +445,7 @@ fn analyze_ignores_beats_lost_since_boot_when_previous_heartbeat_replayed() {
 
 #[test]
 fn analyze_splits_missed_heartbeats_into_unsent_when_unsent_advances_across_gap() {
-    // Beats 3 to 5 are missing, and the radio refused two of them.
+    // Beats 3 to 5 are missing, and the radio could not send two of them.
     let (_dir, conn) = capture(vec![
         beat(NODE, 0, 1, 1, 0, 0),
         beat(NODE, 5_000, 2, 2, 0, 0),
@@ -458,7 +458,7 @@ fn analyze_splits_missed_heartbeats_into_unsent_when_unsent_advances_across_gap(
 
 #[test]
 fn analyze_counts_unsent_since_boot_when_node_restarts() {
-    // Rebooted: beats 1 to 11 since boot are missing, and the radio refused 3 of them.
+    // Rebooted: beats 1 to 11 since boot are missing, and the radio could not send 3 of them.
     let (_dir, conn) = capture(vec![
         unsent(beat(NODE, 0, 40, 20, 0, 0), 5),
         unsent(beat(NODE, 60_000, 1, 12, 0, 0), 3),
@@ -471,8 +471,8 @@ fn analyze_counts_unsent_since_boot_when_node_restarts() {
 
 #[test]
 fn analyze_ignores_unsent_when_gap_follows_replayed_heartbeat() {
-    // The 50 refused between the replayed beat and the first live one fall in time no host was
-    // reading. Only the one refused between live beats 140 and 144 counts.
+    // The 50 unsent between the replayed beat and the first live one fall in time no host was
+    // reading. Only the one unsent between live beats 140 and 144 counts.
     let (_dir, conn) = capture(vec![
         replayed(NODE, 0, 30, 17),
         unsent(beat(NODE, 1_000, 240, 140, 0, 0), 50),
@@ -484,7 +484,8 @@ fn analyze_ignores_unsent_when_gap_follows_replayed_heartbeat() {
 
 #[test]
 fn analyze_caps_unsent_at_missed_when_count_exceeds_gap() {
-    // Two refusals across one missed beat cannot come from honest rows; the count caps at the gap.
+    // Two failed sends across one missed beat cannot come from honest rows; the count caps at
+    // the gap.
     let (_dir, conn) =
         capture(vec![beat(NODE, 0, 1, 1, 0, 0), unsent(beat(NODE, 10_000, 3, 3, 0, 0), 2)]);
     let node = &losses(&conn).unwrap().nodes[0];
@@ -494,7 +495,7 @@ fn analyze_caps_unsent_at_missed_when_count_exceeds_gap() {
 
 #[test]
 fn analyze_counts_unsent_across_wrap_when_count_passes_255() {
-    // 250 to 3 is nine refusals, not a restart.
+    // 250 to 3 is nine failed sends, not a restart.
     let (_dir, conn) = capture(vec![
         unsent(beat(NODE, 0, 10, 10, 0, 0), 250),
         unsent(beat(NODE, 60_000, 22, 22, 0, 0), 3),

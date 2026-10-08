@@ -183,7 +183,7 @@ Compare the per-node heartbeat percentages to spot disproportionate loss. Each i
 divided by distinct received plus missed beats, including the received baseline. The totals cover
 the whole capture; `--recapture` selects export rows, not heartbeat intervals.
 
-`unsent` is the missed beats the node's own radio refused to send: a full send queue or a failed
+`unsent` is the missed beats the node's own radio could not send: a full send queue or a failed
 send callback. Each heartbeat carries the node's count of them since boot. The rest were lost on
 the air or past the bridge. A large `unsent` share points at the node, not the air.
 
@@ -202,7 +202,7 @@ wartui analyze --db tonight.db --heartbeat-windows
 ```
 
 Each line gives the node, two UTC arrival timestamps with milliseconds, heartbeat row IDs, and
-missed count, with `(N unsent)` when the node's radio refused some of them. These observed
+missed count, with `(N unsent)` when the node's radio could not send some of them. These observed
 arrivals bracket missing beats; they are not exact transmission times. Rows stay in arrival order
 even when the wall clock steps back; a reversed clock is labeled.
 Repeats add no gap, and the first heartbeat per node is only a baseline. A `restart-associated,

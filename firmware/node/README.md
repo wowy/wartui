@@ -23,7 +23,7 @@ It shares no wire format with the vendor firmware either. A node sends and recei
   on the Bluetooth node), the epoch of the assignment held or 0, the capability bytes below,
   running counts of Wi-Fi and BLE sightings turned away by a full buffer, the count of
   heartbeats attempted since boot, so the host can count the ones it missed, and the count the
-  radio refused to send, so it can tell those from loss on the air.
+  radio could not send, so it can tell those from loss on the air.
 - **Sighting batch**: sent at the end of each dwell or scan, to the bridge that last sent an admin
   or clear frame. A 9-byte header, then one 12-plus-SSID record per newly seen BSSID or
   advertiser, packed to fill the 250-byte ESP-NOW payload. A record's trailer carries a Passpoint

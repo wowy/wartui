@@ -34,12 +34,12 @@ struct NaivePending<T: Model> {
     items: Vec<T>,
     cap: usize,
     taken: usize,
-    dropped: Refused,
+    refused: Refused,
 }
 
 impl<T: Model> NaivePending<T> {
     fn new(cap: usize) -> Self {
-        Self { items: Vec::new(), cap, taken: 0, dropped: Refused::new() }
+        Self { items: Vec::new(), cap, taken: 0, refused: Refused::new() }
     }
 
     fn record(&mut self, entry: T, due: bool) {
@@ -54,7 +54,7 @@ impl<T: Model> NaivePending<T> {
             return;
         }
         if self.items.len() == self.cap {
-            self.dropped.note(&entry.address());
+            self.refused.note(&entry.address());
             return;
         }
         self.items.push(entry);
@@ -69,7 +69,7 @@ impl<T: Model> NaivePending<T> {
     fn clear(&mut self) {
         self.items.clear();
         self.taken = 0;
-        self.dropped.reset();
+        self.refused.reset();
     }
 }
 
@@ -140,7 +140,7 @@ mod wifi_pending {
         pending.record(ap(2, -60), due);
         pending.record(ap(3, -60), not_due);
         assert_eq!(pending.len(), 1);
-        assert_eq!(pending.dropped(), 0, "a sighting not due is not turned away");
+        assert_eq!(pending.refused(), 0, "a sighting not due is not turned away");
     }
 
     #[test]
@@ -160,7 +160,7 @@ mod wifi_pending {
             pending.record(ap(3, -60), due);
             pending.record(ap(4, -60), due);
         }
-        assert_eq!(pending.dropped(), 2, "each address once, however often it beacons");
+        assert_eq!(pending.refused(), 2, "each address once, however often it beacons");
         assert_eq!(drain(|| pending.take()), [ap(1, -60), ap(2, -60)]);
 
         pending.clear();
@@ -168,7 +168,7 @@ mod wifi_pending {
         pending.record(ap(2, -60), due);
         pending.record(ap(3, -60), due);
         assert_eq!(
-            pending.dropped(),
+            pending.refused(),
             3,
             "a new dwell counts the address again, and the total carries on"
         );
@@ -248,9 +248,9 @@ mod wifi_pending {
                 }
             }
             assert_eq!(pending.len(), model.items.len(), "len at step {step}");
-            assert_eq!(pending.dropped(), model.dropped.total(), "dropped at step {step}");
+            assert_eq!(pending.refused(), model.refused.total(), "refused at step {step}");
         }
-        assert!(model.dropped.total() > 50, "the sequence fills the buffer often enough to matter");
+        assert!(model.refused.total() > 50, "the sequence fills the buffer often enough to matter");
         assert_eq!(
             drain(|| pending.take()),
             std::iter::from_fn(|| model.take()).collect::<Vec<_>>()
@@ -290,7 +290,7 @@ mod ble_pending {
         let mut pending = BlePending::<4, 8>::new();
         pending.record(report(1, -60, None), not_due);
         assert!(pending.is_empty());
-        assert_eq!(pending.dropped(), 0, "a report not due is not a report lost");
+        assert_eq!(pending.refused(), 0, "a report not due is not a report lost");
         assert_eq!(pending.take(), None);
     }
 
@@ -322,9 +322,9 @@ mod ble_pending {
         pending.record(report(1, -60, None), due);
         pending.record(report(2, -60, None), due);
         pending.record(report(3, -60, None), not_due);
-        assert_eq!(pending.dropped(), 0, "only a due address counts against a full buffer");
+        assert_eq!(pending.refused(), 0, "only a due address counts against a full buffer");
         pending.record(report(4, -60, None), due);
-        assert_eq!(pending.dropped(), 1);
+        assert_eq!(pending.refused(), 1);
         assert_eq!(drain(|| pending.take()), [report(1, -60, None), report(2, -60, None)]);
     }
 
@@ -337,13 +337,13 @@ mod ble_pending {
         for _ in 0..3 {
             pending.record(report(2, -60, None), due);
         }
-        assert_eq!(pending.dropped(), 1);
+        assert_eq!(pending.refused(), 1);
         assert_eq!(pending.len(), 1);
 
         pending.clear();
         pending.record(report(1, -60, None), due);
         pending.record(report(2, -60, None), due);
-        assert_eq!(pending.dropped(), 2, "a new scan counts it again");
+        assert_eq!(pending.refused(), 2, "a new scan counts it again");
     }
 
     #[test]
@@ -351,7 +351,7 @@ mod ble_pending {
         let mut pending = BlePending::<4, 8>::new();
         pending.record(report(1, 127, Some(0x004C)), |_| panic!("no reading is never considered"));
         assert!(pending.is_empty());
-        assert_eq!(pending.dropped(), 0);
+        assert_eq!(pending.refused(), 0);
     }
 
     #[test]
@@ -366,7 +366,7 @@ mod ble_pending {
         }
         let landed: Vec<u8> = drain(|| pending.take()).iter().map(|r| r.address[5]).collect();
         assert_eq!(landed, fresh.collect::<Vec<_>>());
-        assert_eq!(pending.dropped(), 0);
+        assert_eq!(pending.refused(), 0);
     }
 
     #[test]
@@ -463,9 +463,9 @@ mod ble_pending {
                 }
             }
             assert_eq!(pending.len(), model.items.len(), "len at step {step}");
-            assert_eq!(pending.dropped(), model.dropped.total(), "dropped at step {step}");
+            assert_eq!(pending.refused(), model.refused.total(), "refused at step {step}");
         }
-        assert!(model.dropped.total() > 50, "the sequence fills the buffer often enough to matter");
+        assert!(model.refused.total() > 50, "the sequence fills the buffer often enough to matter");
         assert_eq!(
             drain(|| pending.take()),
             std::iter::from_fn(|| model.take()).collect::<Vec<_>>()
