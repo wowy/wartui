@@ -150,6 +150,14 @@ struct Node {
     /// Heartbeats the radio could not send since boot. Wraps at 256. Each heartbeat
     /// carries the count before its own send, since it cannot know its own outcome.
     unsent: u8,
+    /// The scan channel number this node last dwelt on, or 0 when its last step before a
+    /// heartbeat was not a dwell: parked, the Bluetooth scan, or a hop the radio refused.
+    /// Each heartbeat carries it, so loss that depends on the channel before the beat can
+    /// be read per channel.
+    last_dwell: u8,
+    /// The `last_dwell` the previous heartbeat carried, sent or not. Each heartbeat
+    /// carries it too, so a single lost beat gets its channel from the next one.
+    beat_dwell: u8,
     /// When this node next sends a heartbeat and holds the admin window open.
     /// `None` while parked: an unassigned node heartbeats every
     /// [`IDLE_BEAT_MS`] instead, with no deadline of its own. Set fresh every
@@ -184,6 +192,8 @@ impl Node {
             counter: 1,
             beats: 0,
             unsent: 0,
+            last_dwell: 0,
+            beat_dwell: 0,
             next_beat: None,
             reported: 0,
             seq: 0,
@@ -385,6 +395,7 @@ fn main() -> ! {
             // gives below. The listen runs either way: it is what keeps this
             // loop from spinning.
             if radio::park(&manager, &sniffer, CONTROL_CHANNEL, false) {
+                node.last_dwell = 0;
                 heartbeat(&mut sender, node);
                 node.counter = node.counter.wrapping_add(1).max(1);
             } else {
@@ -425,6 +436,7 @@ fn main() -> ! {
                     // an admin frame that landed after the last listen was acked
                     // and queued, and this heartbeat must report its epoch.
                     drain_admin(&manager, &receiver, node);
+                    node.last_dwell = 0;
                     heartbeat(&mut sender, node);
                     listen(&manager, &receiver, node, ADMIN_WAIT_MS);
                     node.next_beat = Some(next_beat_after(deadline));
@@ -454,10 +466,12 @@ fn main() -> ! {
             continue;
         };
         if radio::park(&manager, &sniffer, channel, true) {
+            node.last_dwell = channel;
             sniff::arm(channel);
             CurrentThreadHandle::get().delay(Duration::from_millis(u64::from(CHANNEL_DWELL_MS)));
             sniff::disarm();
         } else {
+            node.last_dwell = 0;
             note!("radio refused channel {}", channel);
         }
 
@@ -512,11 +526,13 @@ fn next_beat_after(deadline: Instant) -> Instant {
 /// the epoch this node holds, which is how the host tells adoption from a
 /// MAC-layer ack. Every attempt advances `node.beats`, so a gap the host sees in
 /// it covers both a send the radio could not make and a frame lost on the air. `node.unsent`
-/// counts the failed sends, and is what tells the two apart.
+/// counts the failed sends, and is what tells the two apart. `node.beat_dwell` takes
+/// this beat's dwell on every attempt too, so the next beat names it whether or not this
+/// one arrives.
 fn heartbeat(sender: &mut EspNowSender<'_>, node: &mut Node) {
     // Every heartbeat carries the capabilities, not just the first: sent once they
     // would be lost to a dropped frame or stale after a reflash, and they are
-    // three bytes of twenty-one.
+    // three bytes of twenty-three.
     let beat = node.beats.wrapping_add(1);
     let msg = HeartbeatMsg {
         counter: node.counter,
@@ -526,8 +542,11 @@ fn heartbeat(sender: &mut EspNowSender<'_>, node: &mut Node) {
         ble_refused: ble::refused(),
         beat,
         unsent: node.unsent,
+        dwell: node.last_dwell,
+        prev_dwell: node.beat_dwell,
     };
     node.beats = beat;
+    node.beat_dwell = node.last_dwell;
     if !radio::broadcast(sender, &msg.encode()) {
         node.unsent = node.unsent.wrapping_add(1);
     }

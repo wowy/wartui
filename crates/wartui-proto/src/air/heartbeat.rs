@@ -3,7 +3,7 @@ use core::fmt;
 use super::{DecodeError, MsgType, OFF_BODY, header, write_header};
 
 /// Length of [`HeartbeatMsg`] on the wire.
-pub const HEARTBEAT_MSG_LEN: usize = OFF_BODY + 15;
+pub const HEARTBEAT_MSG_LEN: usize = OFF_BODY + 17;
 
 /// [`Capabilities::flags`] bit 0: this radio reaches 5 GHz.
 pub const CAP_FLAG_5G: u8 = 1 << 0;
@@ -105,6 +105,18 @@ pub struct HeartbeatMsg {
     /// received heartbeats. A byte is enough. The failed sends in a gap cannot outnumber the
     /// beats in it, so the difference is exact for any gap under 256 beats.
     pub unsent: u8,
+    /// The scan channel number (a [`SCAN_CHANNELS`] value, not an index) the node dwelt on
+    /// just before this heartbeat, or 0 when no dwell preceded it: a parked node, the
+    /// Bluetooth node, or a hop the radio refused. A sweep and a beat drift against each
+    /// other, so loss that depends on the channel before the beat shows as a period in
+    /// which beats go missing; this names that channel.
+    ///
+    /// [`SCAN_CHANNELS`]: crate::plan::SCAN_CHANNELS
+    pub dwell: u8,
+    /// The `dwell` the previous heartbeat carried, whether or not that heartbeat arrived,
+    /// and 0 for the first heartbeat after boot. A single missed beat gets its channel from
+    /// the next one that arrives.
+    pub prev_dwell: u8,
 }
 
 impl HeartbeatMsg {
@@ -139,10 +151,12 @@ impl HeartbeatMsg {
             ble_refused: le(OFF_BODY + 10),
             beat: le(OFF_BODY + 12),
             unsent: buf[OFF_BODY + 14],
+            dwell: buf[OFF_BODY + 15],
+            prev_dwell: buf[OFF_BODY + 16],
         })
     }
 
-    /// Encode to the twenty-one bytes a heartbeat is.
+    /// Encode to the twenty-three bytes a heartbeat is.
     #[must_use]
     pub fn encode(&self) -> [u8; HEARTBEAT_MSG_LEN] {
         let mut out = [0u8; HEARTBEAT_MSG_LEN];
@@ -156,6 +170,8 @@ impl HeartbeatMsg {
         out[OFF_BODY + 10..OFF_BODY + 12].copy_from_slice(&self.ble_refused.to_le_bytes());
         out[OFF_BODY + 12..OFF_BODY + 14].copy_from_slice(&self.beat.to_le_bytes());
         out[OFF_BODY + 14] = self.unsent;
+        out[OFF_BODY + 15] = self.dwell;
+        out[OFF_BODY + 16] = self.prev_dwell;
         out
     }
 }

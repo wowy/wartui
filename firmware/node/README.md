@@ -13,7 +13,7 @@ It shares no wire format with the vendor firmware either. A node sends and recei
 
 | Frame          | Direction           | Size                    |
 |----------------|---------------------|-------------------------|
-| Heartbeat      | Broadcast           | 21 bytes                |
+| Heartbeat      | Broadcast           | 23 bytes                |
 | Sighting batch | Unicast, to bridge  | Up to 250 bytes         |
 | Admin          | Unicast, to node    | 15 bytes                |
 | Clear          | Unicast, to node    | 6 bytes                 |

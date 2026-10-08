@@ -96,7 +96,10 @@ CREATE TABLE IF NOT EXISTS node (
 -- the frame carried them: raw, so a reboot shows as the value falling. `beat` is
 -- the node's since-boot heartbeat count, raw, and wraps at 2^16. `unsent` is the
 -- heartbeats its radio could not send since boot, this one excluded, raw, and
--- wraps at 2^8. An assignment
+-- wraps at 2^8. `dwell` is the scan channel number the node dwelt on just
+-- before this heartbeat, 0 when none did (parked, Bluetooth, or a refused hop).
+-- `prev_dwell` is the `dwell` its previous heartbeat carried, arrived or not, so
+-- a single missed beat gets its channel from the next row. An assignment
 -- sent on a heartbeat's window is recorded in `assignment`; a dedup-ring clear
 -- is not recorded.
 CREATE TABLE IF NOT EXISTS heartbeat (
@@ -110,6 +113,8 @@ CREATE TABLE IF NOT EXISTS heartbeat (
   ble_refused INTEGER NOT NULL,
   beat INTEGER NOT NULL,
   unsent INTEGER NOT NULL,
+  dwell INTEGER NOT NULL,
+  prev_dwell INTEGER NOT NULL,
   -- Whether the heartbeat arrived live or was replayed from the bridge's backlog.
   live INTEGER NOT NULL
 );
@@ -1107,8 +1112,8 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
                 tx.prepare_cached(
                     "INSERT INTO heartbeat
                        (node_mac, rx_at, counter, epoch, rssi, wifi_refused, ble_refused,
-                        beat, unsent, live)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                        beat, unsent, dwell, prev_dwell, live)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 )?
                 .execute(params![
                     &hb.node_mac[..],
@@ -1120,6 +1125,8 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
                     hb.ble_refused,
                     hb.beat,
                     hb.unsent,
+                    hb.dwell,
+                    hb.prev_dwell,
                     hb.live
                 ])?;
             }
