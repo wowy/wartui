@@ -17,7 +17,8 @@
 //!
 //! `tracing` is the engine's one side channel. It logs each fall behind the bridge and each
 //! catch-up, with the pair of bridge stamps that decided it ([`FleetEngine::note_arrival`]). Those
-//! stamps are stored nowhere else, so without the log a lag spike cannot be explained.
+//! stamps are stored nowhere else, so without the log a lag spike cannot be explained. It also
+//! logs each node joining, leaving, returning and restarting, so a log alone tells a run's story.
 
 mod admin;
 mod config;
@@ -33,7 +34,7 @@ use std::time::Instant;
 
 use wartui_bridge::{BridgeInfo, LinkEvent};
 use wartui_proto::link::{BridgeToHost, HostToBridge};
-use wartui_proto::mac::Mac;
+use wartui_proto::mac::{self, Mac};
 use wartui_proto::plan::{Job, Plan};
 use wartui_proto::tx_power::clamp_tx_power;
 
@@ -296,19 +297,24 @@ impl FleetEngine {
         if !settled {
             return;
         }
-        let stale: Vec<Mac> = self
+        let stale: Vec<(Mac, Option<u64>)> = self
             .nodes
             .values()
             .filter(|node| node.peered && !self.is_alive(node, now))
-            .map(|node| node.mac)
+            .map(|node| {
+                let silent = node.last_heartbeat.map(|last| now.mono.duration_since(last));
+                (node.mac, silent.map(|silent| silent.as_millis() as u64))
+            })
             .collect();
         if stale.is_empty() {
             return;
         }
-        for mac in stale {
+        for (mac, silent_ms) in stale {
+            tracing::info!(mac = %mac::full(&mac), silent_ms, "node left the fleet");
             batch.urgent.push(HostToBridge::RemovePeer { mac });
             if let Some(node) = self.nodes.get_mut(&mac) {
                 node.peered = false;
+                node.departed = true;
             }
         }
         // A slot has freed, so the re-cut that follows takes refused nodes back.

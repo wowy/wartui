@@ -769,8 +769,18 @@ removed receivers on transitions, not every sentence or satellite-count change. 
 port does not count as recovery until a valid fix or no-fix report arrives. The log also records each
 time the host falls 100 ms or more behind the bridge and when it catches up, with both frames' bridge
 stamps. A reconnect while frames are arriving can log one spell of about 100 ms, because the lag after
-a connect starts from the 100 ms the engine assumes rather than from a measurement. `RUST_LOG=debug`
-adds GPS probe attempts, each retry, undecodable frames, and dropped bulk commands.
+a connect starts from the 100 ms the engine assumes rather than from a measurement. Each node's
+membership changes are logged once each:
+
+| Message               | When                                              |
+| --------------------- | ------------------------------------------------- |
+| `node joined`         | its first heartbeat this run                      |
+| `node left the fleet` | its peer is removed after a minute of silence     |
+| `node returned`       | its first heartbeat after `node left the fleet`   |
+| `node restarted`      | its heartbeat counter fell, or its epoch reset    |
+
+`RUST_LOG=debug` adds GPS probe attempts, each retry, undecodable frames, and dropped bulk
+commands.
 
 ### Telling the boards apart
 
