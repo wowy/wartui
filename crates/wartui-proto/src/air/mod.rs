@@ -9,7 +9,7 @@
 //! format on the control channel is in everybody's conversation at once.
 //!
 //! A magic of our own solves that. It is checked before anything else, so another
-//! firmware's frame costs one `memcmp`. [`foreign`] recognises one such format, `ENOW`, in
+//! firmware's frame costs one `memcmp`. [`foreign`] recognizes one such format, `ENOW`, in
 //! order to *report* it.
 //!
 //! The header carries a version byte. A frame of ours with a version this build does not
@@ -208,7 +208,7 @@ impl<'a> Frame<'a> {
     }
 }
 
-/// Recognising the vendor's traffic, in order to report it.
+/// Recognizing the vendor's traffic, in order to report it.
 ///
 /// Nothing here decodes a byte: acting on another fleet's fields would be adopting
 /// them. But a vendor host or node on the control channel transmits where these nodes

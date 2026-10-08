@@ -3,7 +3,7 @@
 Written 2026-09-10, before the bench; the measurements were added the same day,
 after it. The reasoning below was written down first on purpose, so that what
 the hardware said could be compared against what the change claimed rather than
-summarised alongside it.
+summarized alongside it.
 
 `file:line` citations below point into
 [wowy/ESP32DualBandWardriver](https://github.com/wowy/ESP32DualBandWardriver) on
@@ -25,7 +25,7 @@ safely be.
 ESP-NOW has no addressing above the MAC layer and a node broadcasts to
 `FF:FF:FF:FF:FF:FF`, so two fleets speaking one format are in one conversation.
 Both directions of that were live, and Phase 2's own bench measured one of them
-without recognising it as symmetric:
+without recognizing it as symmetric:
 
 - **Ours mis-planned theirs.** Run F of `docs/phase-2-findings.md` is a vendor
   node in a wartui fleet: it heartbeated, was planned for, acknowledged its
@@ -83,7 +83,7 @@ Two things fall out that are worth measuring for their own sake:
   Nothing was built to fix that, deliberately. A pre-1.0 wartui gets no
   compatibility from a later one, so a node on the older build is exactly what
   the footer says it is: traffic this host cannot read, indistinguishable from a
-  neighbour's because it *is* the vendor's format. The answer is to flash the
+  neighbor's because it *is* the vendor's format. The answer is to flash the
   fleet, not to teach the host a format it is trying to stop speaking.
 
 ## What the bench answered

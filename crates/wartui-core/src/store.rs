@@ -3,7 +3,7 @@
 //! SQLite is the system of record and the WiGLE CSV an export from it. A CSV-only capture cannot be
 //! re-exported after a decoder fix, queried mid-run, or asked which node saw a network.
 //!
-//! One thread owns the connection: SQLite serialises writes anyway, so sharing one buys contention,
+//! One thread owns the connection: SQLite serializes writes anyway, so sharing one buys contention,
 //! not throughput. Writes are batched to [`StoreConfig::batch_rows`] or
 //! [`StoreConfig::batch_interval`], whichever comes first. A commit per row is an fsync per row, a
 //! hundred inserts a second instead of a hundred thousand. The interval keeps a quiet fleet's rows

@@ -30,7 +30,7 @@ pub struct Now {
 pub enum Event {
     /// Traffic, or the lack of it, from the bridge.
     Link(LinkEvent),
-    /// The periodic tick. Drives liveness ageing and the status poll.
+    /// The periodic tick. Drives liveness aging and the status poll.
     Tick,
     /// Something the operator asked for.
     Command(Command),

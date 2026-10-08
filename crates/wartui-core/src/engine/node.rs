@@ -83,7 +83,7 @@ pub struct NodeState {
     /// Whether the batch that set `last_seq` arrived live. A gap after a replayed batch is not
     /// counted ([`FleetEngine::note_batch_seq`]).
     pub(super) last_seq_live: bool,
-    /// Bytes of this node's latest sighting batch, kept to recognise a MAC-layer retransmission of
+    /// Bytes of this node's latest sighting batch, kept to recognize a MAC-layer retransmission of
     /// it. Reset with `last_seq` on reboot.
     pub(super) last_batch: Option<Vec<u8>>,
     /// Bridge-local stamp of [`Self::last_batch`], the near end of

@@ -182,7 +182,7 @@ mod tests {
     use wartui_bridge::ports::{ESPRESSIF_VID, candidate};
 
     use super::super::testing::{BRIDGE_MAC, NODE_MAC, board};
-    use super::super::{normalise, release_asset};
+    use super::super::{normalize, release_asset};
     use super::*;
 
     fn named(given: &str) -> (&str, BridgeSpec) {
@@ -317,7 +317,7 @@ mod tests {
         let found = source(&BRIDGE, None, Some(dir), &c6, false, Some("v1")).unwrap();
         assert_eq!(found, Source::Build(dir.to_owned()));
         let found = source(&BRIDGE, None, None, &c6, false, None).unwrap();
-        assert_eq!(found, Source::Build(normalise(Path::new(BRIDGE.dir))));
+        assert_eq!(found, Source::Build(normalize(Path::new(BRIDGE.dir))));
         let Source::Build(default) = found else { panic!("not a build") };
         assert!(default.ends_with("firmware/bridge"), "{}", default.display());
         let found = source(&BRIDGE, None, None, &c6, false, Some("v1")).unwrap();

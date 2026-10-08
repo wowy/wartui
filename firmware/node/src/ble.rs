@@ -12,7 +12,7 @@
 //!
 //! The scan is **bounded and switched off** rather than left running.
 //! `HCI_LE_Set_Scan_Enable(0)` stops the controller taking the antenna at all,
-//! which is stronger than waiting for a scan to finish: an initialised host stack
+//! which is stronger than waiting for a scan to finish: an initialized host stack
 //! left behind a finished scan can keep the radio.
 //!
 //! And the node **sniffs no Wi-Fi at all** while it holds the scan, so there is no

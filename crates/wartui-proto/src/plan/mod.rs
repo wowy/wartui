@@ -221,7 +221,7 @@ pub fn plan(pool: ChannelPool, node_count: u8) -> Option<Plan> {
 ///   order instead would give the dual-band nodes a full 2.4 GHz share plus all of
 ///   5 GHz. A uniform fleet has nothing to deal first, and gets a plan byte-identical
 ///   to [`plan`]'s.
-/// - **Shares can then differ by more than one.** The planner minimises the *largest*
+/// - **Shares can then differ by more than one.** The planner minimizes the *largest*
 ///   share, which sets how stale the slowest node's sightings get.
 /// - **Channels no radio present can tune go in no share**, and are reported by
 ///   [`Plan::unreachable`]. When the whole fleet scans Bluetooth, that is every channel.

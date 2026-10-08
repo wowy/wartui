@@ -8,7 +8,7 @@
 //! An address held in the ring is reported again for two reasons, and no others:
 //!
 //! - **It has been [`DEDUP_REFRESH_MS`] since it was last reported.** Without this a node
-//!   goes silent once it has reported its neighbourhood. It stays silent across host
+//!   goes silent once it has reported its neighborhood. It stays silent across host
 //!   sessions, because the ring outlives them (`docs/phase-4-findings.md`). A stationary
 //!   node's quiet table then reads as a fault, and a second capture from the same spot is
 //!   empty.
@@ -21,13 +21,13 @@
 //! [`MacRing::clear`] empties the ring outright, for two further reasons:
 //!
 //! - **The node's job changed.** Entries built under the old share describe a
-//!   neighbourhood the node no longer listens to, and only take up slots.
+//!   neighborhood the node no longer listens to, and only take up slots.
 //! - **The operator asked.** This gives a fresh capture from a stationary spot without
 //!   waiting out the refresh or rebooting the node.
 //!
 //! Eviction is oldest-*inserted* first, and a re-report updates its entry in place rather
 //! than moving it to the front. A constantly-beaconing access point therefore ages out on
-//! schedule, and a busy neighbourhood refreshes itself through the ring faster than the
+//! schedule, and a busy neighborhood refreshes itself through the ring faster than the
 //! timer would.
 //!
 //! Time arrives as a `u32` of milliseconds rather than being read, for the reason the host
@@ -40,7 +40,7 @@
 //! probe response, inside a lock that holds interrupts off (`esp-sync`'s
 //! `NonReentrantMutex`). Timed on the ESP32-C5 and C6, a linear scan of a 256-entry ring
 //! there took 18-37 µs a frame. A hash lookup takes under 1 µs, the same at 512 entries
-//! as at 256. The ring is therefore sized for the neighbourhood and the chip's RAM, not
+//! as at 256. The ring is therefore sized for the neighborhood and the chip's RAM, not
 //! for the lookup. The index has twice the ring's entries in slots.
 //!
 //! So there are two sizes. [`C5DedupRing`] holds 512 addresses in 8 KB. [`C6DedupRing`]
@@ -66,7 +66,7 @@ pub const DEDUP_INDEX_C6: usize = 2 * DEDUP_RING_C6;
 
 /// How long a node suppresses an address it has reported before reporting it again.
 ///
-/// Five minutes. A stationary node's whole neighbourhood then costs a few sightings a
+/// Five minutes. A stationary node's whole neighborhood then costs a few sightings a
 /// minute, and a fresh host session hears it without a reboot.
 pub const DEDUP_REFRESH_MS: u32 = 5 * 60 * 1000;
 

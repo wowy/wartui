@@ -38,7 +38,7 @@ pub enum PoolArg {
     Us,
     /// ETSI-permitted unlicensed channels: 2.4 GHz 1–13 and 5 GHz 36–140.
     Eu,
-    /// Every channel the node firmware knows about, matching stock behaviour.
+    /// Every channel the node firmware knows about, matching stock behavior.
     #[default]
     All,
 }
@@ -120,7 +120,7 @@ pub struct Args {
     #[arg(long, requires = "lat", allow_hyphen_values = true)]
     lon: Option<f64>,
 
-    /// Altitude in metres, recorded alongside a fixed test position.
+    /// Altitude in meters, recorded alongside a fixed test position.
     #[arg(long, allow_hyphen_values = true)]
     alt: Option<f64>,
 

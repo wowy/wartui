@@ -239,7 +239,7 @@ fn done_line(job: u64, result: &Map<String, Value>) -> String {
     format!("upload: job {job} {}", counts.join("  "))
 }
 
-/// The upload's confirm, centred like settings and sized to its text.
+/// The upload's confirm, centered like settings and sized to its text.
 pub(super) fn draw_confirm_modal(frame: &mut Frame<'_>, lines: &[String]) {
     let widest = lines.iter().map(|line| line.chars().count()).max().unwrap_or(0);
     let width = u16::try_from(widest + 4).unwrap_or(u16::MAX);
@@ -334,7 +334,7 @@ mod tests {
     }
 
     #[test]
-    fn upload_confirm_sends_nothing_when_cancelled() {
+    fn upload_confirm_sends_nothing_when_canceled() {
         let dir = tempfile::tempdir().unwrap();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());

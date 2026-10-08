@@ -59,11 +59,11 @@ Every node is busy for the whole measured window, and the report proves it.
 `drive` is ten nodes in real time and `burst` is twenty, the fleet maximum. In both,
 one node scans Bluetooth.
 
-- **Neighbourhood size.** The simulator's nodes dedup through the same 200-entry ring
+- **Neighborhood size.** The simulator's nodes dedup through the same 200-entry ring
   the firmware links, so a node hearing no more networks than that reports them once
   and falls silent. Once it hears more, it re-reports everything on every sweep:
   eviction is oldest-first in a fixed sweep order. So the bench sizes the
-  neighbourhood from the node count, giving the node with the fewest channels one and
+  neighborhood from the node count, giving the node with the fewest channels one and
   a half rings' worth: 4000 networks for ten nodes, 12000 for twenty.
 - **Warm-up.** Nodes park until assigned, and each join re-cuts every assignment. The
   clock, the kernel counters and the commit figures start only once every node holds
@@ -76,7 +76,7 @@ one node scans Bluetooth.
   500 k is the most WDGWars accepts in a day. So a network's slot takes a new address
   after four hearings (`--sightings-per-address`, 0 to turn it off). At about 5,750
   sightings a second, a 350 s run is one such drive. Runs recorded before this was
-  added had a fixed neighbourhood of about 5,300 addresses.
+  added had a fixed neighborhood of about 5,300 addresses.
 
 ## Baseline
 
@@ -357,7 +357,7 @@ a temporary B-tree:
 | networks | `SCAN o USING INDEX obs_bssid`, temp B-tree for the rest of the order | `SCAN o`, temp B-tree for the order |
 | unpositioned | `SCAN observation USING INDEX obs_bssid` | `SCAN observation`, temp B-tree for the `GROUP BY` |
 
-A smoke test on the Mac used one capture from the fixed-neighbourhood `burst` profile
+A smoke test on the Mac used one capture from the fixed-neighborhood `burst` profile
 (798 k sightings, 10,263 addresses), exported twice each way:
 
 | | with `obs_bssid` | without |
@@ -500,7 +500,7 @@ What it says:
 
 - **Without `obs_bssid` the card takes a full drive.** The export of 509 k addresses
   takes 13 s on the card, and peak RSS is up by about 8 MiB on the earlier fixed
-  neighbourhood's, which is about what the engine's set of half a million addresses
+  neighborhood's, which is about what the engine's set of half a million addresses
   should cost.
 - **One-second commits halve the bytes.** The pages every commit touches, the table's
   last page and each node's tail, are rewritten once a second instead of 22 times, so

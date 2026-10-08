@@ -3,7 +3,7 @@
 //! It is a small type, and every one of these properties is load-bearing
 //! somewhere: the wire encoding is a contract with the node firmware, the
 //! iteration order is the order a node sweeps in, and the out-of-range
-//! behaviour is what stops a frame from a newer host stranding an older node.
+//! behavior is what stops a frame from a newer host stranding an older node.
 
 use wartui_proto::node::SweepCursor;
 use wartui_proto::plan::{

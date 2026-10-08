@@ -1429,7 +1429,7 @@ fn store_refuses_create_when_file_exists() {
 
 #[test]
 fn store_stamps_schema_version_when_creating_file() {
-    // The stamp is what makes the next read-only open recognise the file as this
+    // The stamp is what makes the next read-only open recognize the file as this
     // build's.
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().join("wartui.db");

@@ -15,7 +15,7 @@ used two C5s at once: `4F:98` alongside that same board, as does
 `feat/node-interference-mitigation`, the vendor firmware.
 
 Access point addresses and names are left out deliberately: these were real
-captures of a real neighbourhood, and a BSSID is exactly what a geolocation
+captures of a real neighborhood, and a BSSID is exactly what a geolocation
 database is built from. Counts and channels are the whole of what was being
 checked, and they carry none of that.
 
@@ -23,7 +23,7 @@ checked, and they carry none of that.
 
 The design's largest open risk — that promiscuous mode would starve the ESP-NOW
 receive path, and that the whole `sniffer()`/`esp_now()` shared-borrow shape
-would have to be abandoned for `scan_async` — did not materialise. A node
+would have to be abandoned for `scan_async` — did not materialize. A node
 holding both for the life of the program reported observations and acknowledged
 assignments in the same sweep, repeatedly, across three captures — one `sniff`
 and the two `run` sessions the rest of this document draws on.
@@ -56,7 +56,7 @@ assignment, and the re-issue after a reboot — measured 6141 µs and 5908 µs
 heartbeat-to-callback on the bridge's own clock, against a 300 ms admin window.
 
 **Six identical assignments went out in one 9 ms burst at connect.** This is
-host behaviour, not node behaviour, and it is benign: a bridge left powered
+host behavior, not node behavior, and it is benign: a bridge left powered
 buffers heartbeats, so `run` attaching to one that has been up for half an hour
 processes a backlog of them before any acknowledgement can return, and emits an
 assignment per heartbeat. All six carried epoch 1, the node adopted the first
@@ -70,7 +70,7 @@ all six or none — the burst separates nothing. And epoch 1 is by definition th
 first assignment, so the node was still unassigned and parked on the control
 channel, listening continuously for reasons that have nothing to do with the
 sniffing design. The evidence for that claim is the sustained observe-and-
-acknowledge behaviour above, not this.
+acknowledge behavior above, not this.
 
 The six frames' `latency_us` reads 7.4–9.6 s because the paired
 heartbeats genuinely were that old; the metric is correct and the backlog is
@@ -93,7 +93,7 @@ not compile in, and Phase 0 is explicit that the overhead is fixed rather than
 proportional to channel count.
 
 What the numbers do establish without a comparison is that the 300 ms
-admin window is being honoured and is the dominant cost at a narrow
+admin window is being honored and is the dominant cost at a narrow
 assignment — 125 ms of dwell against 300 ms of listening — which is the shape
 the design intends and the reason a one-channel node is the case the BLE rate
 limit had to be safe for.
@@ -140,7 +140,7 @@ undecodable-frame line. It is always the same thing, and always immediate:
 
 Half a millisecond after the port opens, and before the bridge announces itself
 — the tail of a frame that was already in flight when the host attached. The
-framing resynchronises immediately and nothing is lost but that one frame, so
+framing resynchronizes immediately and nothing is lost but that one frame, so
 this is a counter and not a fault, exactly as `serial.rs` says.
 
 It is recorded here because it was very nearly worse than that. The
@@ -218,7 +218,7 @@ same 130 s capture:
 The difference is 1.267 s, which is 10.1 dwells at `CHANNEL_DWELL_MS`. Both
 figures reconcile against the 300 ms admin window: (2.031 − 0.3) / 0.125 ≈ 13.8
 and (3.298 − 0.3) / 0.125 ≈ 24.0. **No observations came back on 100–144** —
-nothing in this neighbourhood beacons on UNII-2C — so the evidence that those
+nothing in this neighborhood beacons on UNII-2C — so the evidence that those
 channels are now dwelt on is the timing and the silent log, not a sighting.
 
 ### One channel is still refused, and the country code cannot reach it
@@ -330,11 +330,11 @@ heartbeat arrival order shows all of them:
 - **v1** is `4F:98` alone: one node known, `node 0 of 1`.
 - **v2/v3** are the fleet changing. `57:84` becomes a member, `replan` sees
   `members != plan_members`, and the whole plan is re-cut — the documented
-  behaviour that every fleet change re-cuts everything, not just the new node.
+  behavior that every fleet change re-cuts everything, not just the new node.
 - **v4/v5** are reboot detection. The counters at t=0–1 are from before the
   monitors attached; `espflash monitor` resets the chip on connect, so the nodes
   restarted at 1 and the host saw a counter go backwards. That is `reissue`,
-  which mints a fresh epoch. The reset is an artefact of the measuring harness
+  which mints a fresh epoch. The reset is an artifact of the measuring harness
   rather than anything the firmware did, and it re-confirms reboot detection on
   two nodes at once as a side effect.
 
@@ -582,11 +582,11 @@ Every checkpoint item now has a hardware answer. What is left is narrower:
 - **Whether the advertiser count moves with the room.** Three runs give means of
   52.4, 51.8 and 43.8 per scan with identical firmware in the third, so the count
   is dominated by something the bench does not control.
-- **What an initialised-but-disabled Bluetooth controller costs.** Phase 2 makes
+- **What an initialized-but-disabled Bluetooth controller costs.** Phase 2 makes
   the scan a per-node assignment rather than a build flag, so a `ble` build
   ordinarily runs with `BleConnector::new` done and `HCI_LE_Set_Scan_Enable`
   never sent. Every measurement above had scanning *on*, so this state had never
-  been on a bench. The Phase 0 failure was blamed on an initialised NimBLE stack
+  been on a bench. The Phase 0 failure was blamed on an initialized NimBLE stack
   keeping the radio, which is uncomfortably close to the same shape; the
   difference is that nothing here has a host stack and no scan is enabled.
 

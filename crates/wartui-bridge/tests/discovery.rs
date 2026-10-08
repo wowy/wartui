@@ -200,7 +200,7 @@ fn serial_discovery_accepts_raw_path_verbatim_when_specified_by_path() {
 }
 
 #[test]
-fn serial_discovery_prioritises_remembered_mac_when_ordering_probe_candidates() {
+fn serial_discovery_prioritizes_remembered_mac_when_ordering_probe_candidates() {
     // The ordinary run: one port opened, and it is the right one.
     let boards = [esp("/dev/ttyACM0", NODE_MAC), esp("/dev/ttyACM1", BRIDGE_MAC)];
     let order = serial::select(&boards, None, mac::parse(BRIDGE_MAC));

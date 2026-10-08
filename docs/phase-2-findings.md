@@ -10,7 +10,7 @@ D are one node; run E is both. Pool `us`, plaintext, control channel 6.
 `feat/node-interference-mitigation`, the vendor firmware.
 
 Access point addresses and names are left out deliberately, as in Phase 1:
-these were real captures of a real neighbourhood, and a BSSID is exactly what a
+these were real captures of a real neighborhood, and a BSSID is exactly what a
 geolocation database is built from. Counts and channels carry none of that and
 are the whole of what was being checked.
 
@@ -158,13 +158,13 @@ the control channel and the report after each dwell. `BLE_INTERVAL_MS` is
 runs on essentially every one: 21 scans over 20 sweeps in run B's loaded
 stretch, each hearing about 50 advertisers.
 
-## An initialised-but-disabled controller costs nothing measurable
+## An initialized-but-disabled controller costs nothing measurable
 
 `docs/phase-1-findings.md` closes on this, and it is the state Phase 2 makes
 ordinary: a `ble` build now spends its whole life with `BleConnector::new` done
 and `HCI_LE_Set_Scan_Enable` never sent, because the scan is a per-node
 assignment that defaults to off. Phase 0 blamed the vendor node's lost
-assignments on an initialised NimBLE stack holding the radio, which is
+assignments on an initialized NimBLE stack holding the radio, which is
 uncomfortably the same shape.
 
 Run C is the control: the same board, the same assignment, the same room, on a
@@ -183,7 +183,7 @@ than the furthest. But the four `ble` rows are *the same binary on the same
 board*, and they span 57 ms between themselves. A build difference that is
 smaller than the spread of identical firmware is not a measurement of the build.
 
-So: an initialised controller with no scan enabled costs nothing this bench can
+So: an initialized controller with no scan enabled costs nothing this bench can
 see, and the Phase 1 suggestion — bring the controller up on the first
 assignment rather than at boot — is not warranted. Bringing it up at boot keeps
 the surprise out of the moment an assignment arrives, which is what
@@ -227,19 +227,19 @@ hold, and every one is 2.4 GHz.** Not a single 5 GHz observation landed outside
 a mask in any run. (Run G later produced one stray at *two* channels out, which
 the geometry also allows — see "What the bleed rate actually depends on".)
 
-That is adjacent-channel capture, and it is correct behaviour rather than a
+That is adjacent-channel capture, and it is correct behavior rather than a
 sweep escaping its assignment. 2.4 GHz channels are 5 MHz apart and 20 MHz
 wide, so a radio parked on channel 2 hears beacons transmitted on 1 and 3; the
 node then reads the transmitting channel out of the beacon's own DS Parameter
 Set (tag 3) and reports *that*, which is the truth about the access point. The
-alternative — labelling it with the parked channel — would be the bug Phase 1's
+alternative — labeling it with the parked channel — would be the bug Phase 1's
 narrow-assignment check exists to catch. 5 GHz channels in this pool are 20 MHz
 apart and do not overlap, which is why the effect is one-sided.
 
 Phase 1 saw none of this because its two-node split was contiguous: `4F:98` took
-all of 2.4 GHz and `57:84` all of 5 GHz, so there was no 2.4 GHz neighbour in
+all of 2.4 GHz and `57:84` all of 5 GHz, so there was no 2.4 GHz neighbor in
 anyone else's share to bleed from. The round-robin deal interleaves adjacent
-2.4 GHz channels *between* nodes, which is the arrangement that maximises it.
+2.4 GHz channels *between* nodes, which is the arrangement that maximizes it.
 
 The cost is duplication, not error: **23 of 101 distinct access points were
 reported by both nodes**, and all 23 sit on 2.4 GHz channels. The dedup ring is
@@ -409,7 +409,7 @@ because it is the one that costs anything:
 
 Unchanged from two nodes to three. A third node splits the same overlap three
 ways rather than adding more of it, which makes sense: an access point on
-channel 6 is heard by whoever holds 6 and by whoever holds its neighbours, and
+channel 6 is heard by whoever holds 6 and by whoever holds its neighbors, and
 that is two or three nodes either way.
 
 **One stray was two channels out**, not one — `59:50` reporting a channel 11
@@ -437,7 +437,7 @@ the same reason.
 Run H is the mixed fleet, which the bench produced without being asked: `57:84`
 carries the token and `59:50` is still on the build before it, sending the empty
 text field that is byte-for-byte a stock node's. (Since 2026-09-10 an older
-build is not byte-for-byte anything: it is recognised by its wire version and
+build is not byte-for-byte anything: it is recognized by its wire version and
 counted as `incompatible`, which is a fault-box line rather than a table row.
 The shape of the failure — flash the host, forget the nodes, get a fleet that
 does nothing — is unchanged, and so is the reason it has to be visible.)
@@ -566,7 +566,7 @@ the first whose shares cannot come out within one of each other.
 Eight, eight, seven, six, five. The union is the pool and the overlap is zero,
 but the shares differ by three rather than by one: two C6s have eleven channels
 to divide and three C5s have twenty-three, and no arrangement makes those equal.
-`plan_for` minimises the largest share instead of equalising them, and this is
+`plan_for` minimizes the largest share instead of equalizing them, and this is
 the first fleet on which those two rules would have given different answers.
 
 Pulling `C5:B8` off the bench mid-capture re-cut the plan:
@@ -654,7 +654,7 @@ nothing at t=62.8 s, twenty-six seconds before the reflash, because `MacRing` is
 shared with Wi-Fi and never cleared. The reboot is what makes the question
 answerable, because a reboot empties that ring. The Wi-Fi stream shows it
 emptying: twenty-six records in the ten seconds after the reboot against one to
-four in every neighbouring bucket, the node re-reporting a neighbourhood it had
+four in every neighboring bucket, the node re-reporting a neighborhood it had
 already reported once. Bluetooth records in that same window: none, and none in
 the remaining 190 s. A node still scanning would have re-reported all
 sixty-seven.
@@ -712,7 +712,7 @@ over 107 sweeps is 1.762 s.
 - **Duplication beyond three nodes.** It is 23% at two and 23% at three, which
   is the number that costs store rows. Whether it stays flat at ten is a guess:
   the argument that it should — an access point is heard by whoever holds its
-  channel and whoever holds the neighbours, which is two or three nodes however
+  channel and whoever holds the neighbors, which is two or three nodes however
   many there are — is reasoning, not a measurement. Run I's zero neither
   contradicts nor extends it: a mixed fleet small enough to put all of 2.4 GHz
   on one node has no second node positioned to hear the bleed, which is a

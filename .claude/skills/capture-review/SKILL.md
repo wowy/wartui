@@ -66,7 +66,7 @@ For every flag or anomaly worth mentioning:
    in them as well. A pattern that repeats across drives is worth more than one capture's numbers.
 2. **Read the code that owns it** before naming a cause. `references/checks.md` maps each symptom
    to the module and findings doc to read; AGENTS.md § "Invariants that are easy to break" says
-   which behaviours are deliberate. Cite `path:line`.
+   which behaviors are deliberate. Cite `path:line`.
 3. **Classify** it as one of:
    - *environment* — RF, distance, mounting, GPS sky view, power supply
    - *host software* — fixable with a `cargo run`

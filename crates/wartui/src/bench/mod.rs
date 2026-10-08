@@ -14,7 +14,7 @@
 //!
 //! - **The dedup ring.** The simulator's nodes suppress repeats through the same ring the
 //!   firmware links, so a node that hears no more networks than the ring holds reports
-//!   them once and goes quiet. [`busy_networks`] sizes the neighbourhood from the node
+//!   them once and goes quiet. [`busy_networks`] sizes the neighborhood from the node
 //!   count so the node with the thinnest share still overflows its ring.
 //! - **Joining.** A node parks until assigned, and every node that joins re-cuts the
 //!   plan for all of them. [`settle`] waits for the whole fleet to hold its assignment
@@ -92,7 +92,7 @@ pub enum Profile {
 }
 
 impl Profile {
-    /// Nodes, time scale and Bluetooth chance. The neighbourhood follows from the
+    /// Nodes, time scale and Bluetooth chance. The neighborhood follows from the
     /// node count; see [`busy_networks`].
     const fn load(self) -> (u8, f64, f64) {
         match self {
@@ -136,7 +136,7 @@ pub struct Args {
     #[arg(long, value_name = "X")]
     speed: Option<f64>,
 
-    /// Wi-Fi networks in the simulated neighbourhood. By default, enough that every
+    /// Wi-Fi networks in the simulated neighborhood. By default, enough that every
     /// node overflows its dedup ring on every sweep.
     #[arg(long, value_name = "N")]
     networks: Option<u16>,
@@ -147,12 +147,12 @@ pub struct Args {
     #[arg(long, value_name = "P")]
     ble_chance: Option<f64>,
 
-    /// Seed for the simulated neighbourhood.
+    /// Seed for the simulated neighborhood.
     #[arg(long, value_name = "N")]
     seed: Option<u64>,
 
     /// Sightings of a network before it gives way to a new address, as a moving fleet
-    /// leaves networks behind. 4 by default; 0 keeps the neighbourhood fixed.
+    /// leaves networks behind. 4 by default; 0 keeps the neighborhood fixed.
     #[arg(long, value_name = "N")]
     sightings_per_address: Option<u32>,
 

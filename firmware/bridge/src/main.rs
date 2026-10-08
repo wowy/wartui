@@ -229,7 +229,7 @@ fn boot_speaks_first(cause: ResetCause) -> bool {
 
 /// What the marker said, if this reset is one that preserved it.
 ///
-/// A power-on gives uninitialised RTC memory; anything else reached us through a
+/// A power-on gives uninitialized RTC memory; anything else reached us through a
 /// reset that left the RTC domain alone, so the marker is real.
 fn boot_phase(cause: ResetCause) -> LoopPhase {
     if matches!(cause, ResetCause::PowerOn) || PHASE_VALID.load(Ordering::Relaxed) != PHASE_MAGIC {
@@ -1018,8 +1018,8 @@ fn set_peer_rate(_manager: &EspNowManager<'_>, mac: &Mac) -> bool {
         ersu: false,
         dcm: false,
     };
-    // SAFETY: `mac` is six readable bytes and `config` is a fully initialised
-    // `esp_now_rate_config_t`, both alive for the whole call. ESP-NOW is initialised,
+    // SAFETY: `mac` is six readable bytes and `config` is a fully initialized
+    // `esp_now_rate_config_t`, both alive for the whole call. ESP-NOW is initialized,
     // since an `EspNowManager` exists. 0 is `ESP_OK`.
     unsafe { sys::esp_now_set_peer_rate_config(mac.as_ptr(), &mut config) == 0 }
 }

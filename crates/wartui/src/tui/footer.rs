@@ -224,7 +224,7 @@ fn restart_fault(bridge: &BridgeInfo) -> Option<String> {
     reason.map(str::to_owned)
 }
 
-/// The most lines the fault box takes before it summarises, so the fleet table keeps
+/// The most lines the fault box takes before it summarizes, so the fleet table keeps
 /// its room.
 const MAX_FAULT_LINES: usize = 3;
 
@@ -463,7 +463,7 @@ mod tests {
     /// A capture whose only fault is the bridge dropping frames.
     ///
     /// The other counters are cleared. The bridge's fault is pushed last, and the footer
-    /// summarises past `MAX_FAULT_LINES`, so `busy()`'s other seven faults would test
+    /// summarizes past `MAX_FAULT_LINES`, so `busy()`'s other seven faults would test
     /// the packing rather than this branch.
     fn with_bridge_drops(dropped_since_attach: u32) -> Snapshot {
         let mut snapshot = busy();

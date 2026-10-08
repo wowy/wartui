@@ -2,7 +2,7 @@
 //!
 //! Nothing here knows the link protocol. It answers "what is attached, and what
 //! does the OS say it is", which is [`serial`](crate::serial)'s input. It is kept
-//! separate from the judgement made on that answer so that a second thing looking
+//! separate from the judgment made on that answer so that a second thing looking
 //! for a device shares one enumeration rather than writing another: `wartui-proto`
 //! is `no_std` and cannot hold `serialport`, and `wartui-core` already depends on
 //! this crate, so this module is reachable from either without inverting a layer.
@@ -89,7 +89,7 @@ impl PortCandidate {
 
 /// Build a candidate by hand.
 ///
-/// The normalisation from `serialport`'s own types is deliberately private, so that
+/// The normalization from `serialport`'s own types is deliberately private, so that
 /// nothing outside this module names `UsbPortInfo` — its shape depends on Cargo
 /// features any dependent crate can turn on, and a test written against it would
 /// break for a reason that has nothing to do with wartui.
@@ -129,7 +129,7 @@ pub fn could_be_a_bridge(candidate: &PortCandidate) -> bool {
 /// Whether this port could be an NMEA receiver.
 ///
 /// The complement of [`could_be_a_bridge`], and that is the whole rule: a receiver
-/// is recognised by what it says when read, not by what it is called.
+/// is recognized by what it says when read, not by what it is called.
 #[must_use]
 pub fn could_be_a_receiver(candidate: &PortCandidate) -> bool {
     candidate.vid != Some(ESPRESSIF_VID) && is_usable_path(&candidate.path)

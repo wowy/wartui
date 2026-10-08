@@ -167,7 +167,7 @@ impl<const N: usize> FrameAccumulator<N> {
     ///
     /// Returns the raw COBS-encoded frame when a terminator completes one; pass it to
     /// [`decode_frame`]. Empty frames and frames that overran the buffer yield `None`,
-    /// having resynchronised.
+    /// having resynchronized.
     pub fn push(&mut self, byte: u8) -> Option<&mut [u8]> {
         if byte != 0x00 {
             if self.len < N {

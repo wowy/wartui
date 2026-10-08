@@ -27,7 +27,7 @@ them at all.
 > `crates/wartui-proto/src/air/mod.rs` and comes straight out of this document's own
 > measurements — two fleets that share a format share one conversation. What
 > survives here is the record of what the vendor firmware puts on the air, which
-> is what `air::foreign` recognises in order to report it.
+> is what `air::foreign` recognizes in order to report it.
 
 129 captured frames decode and re-encode identically, and are checked in as
 golden vectors in `crates/wartui-proto/tests/golden_vectors.txt`. They confirm
@@ -112,7 +112,7 @@ each other's work — precisely what the channel assignment exists to prevent.
 
 So the vendor firmware's fleet coordination did not function on this fleet. A
 wartui bridge that retries an assignment until the radio confirms delivery is
-not a refinement on the existing behaviour; it is the difference between the
+not a refinement on the existing behavior; it is the difference between the
 feature working and not working.
 
 Every node in this capture had BLE enabled, which the next section shows is the

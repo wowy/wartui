@@ -14,7 +14,7 @@
 // `CONTROL_CHANNEL` in wartui-proto.
 static const uint8_t MESH_CHANNEL = 6;
 
-// Both are recognised because both are worth capturing: one is the fleet under test
+// Both are recognized because both are worth capturing: one is the fleet under test
 // and the other is whatever else is on the channel it has to share.
 static const char WARTUI_MAGIC[4] = {'W', 'T', 'U', 'I'};
 static const char VENDOR_MAGIC[4] = {'E', 'N', 'O', 'W'};

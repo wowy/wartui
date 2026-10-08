@@ -21,7 +21,7 @@ pub const ADMIN_FLAG_BLE: u8 = 1 << 0;
 /// it in one frame, and lets the planner deal round-robin so every node carries some of
 /// both bands.
 ///
-/// Delivery follows measured behaviour (`docs/phase-0-findings.md`). The radio retries
+/// Delivery follows measured behavior (`docs/phase-0-findings.md`). The radio retries
 /// an unacknowledged unicast 31 times, all inside the one window that failed. An 802.11
 /// acknowledgement comes from the receiver's MAC hardware, so a missing one means the
 /// node's radio was not on the channel, for instance because Bluetooth held the shared

@@ -250,7 +250,7 @@ fn default_path_in(macos: bool, home: Option<&OsStr>, xdg: Option<&OsStr>) -> Op
 /// rename, though a key still has its permissions tightened in place.
 pub fn save(path: &Path, config: &Config) -> Result<()> {
     config.validate().context("the settings to save are invalid")?;
-    let written = toml::to_string(config).context("serialising the settings")?;
+    let written = toml::to_string(config).context("serializing the settings")?;
 
     let secret = !config.api_keys.wdgwars.is_empty();
 

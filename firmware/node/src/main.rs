@@ -226,7 +226,7 @@ impl Node {
     ///
     /// Forgets every reported address first when the new share changes what this
     /// node scans or its Bluetooth flag: entries built under the old share describe
-    /// a neighbourhood this node no longer listens to. A first assignment after
+    /// a neighborhood this node no longer listens to. A first assignment after
     /// boot finds the ring already empty, so that case costs nothing.
     fn adopt(&mut self, admin: &AdminMsg) -> bool {
         if admin.epoch == self.version {
@@ -243,7 +243,7 @@ impl Node {
     }
 
     /// Empty the dedup ring, so the next sweep reports this node's whole
-    /// neighbourhood again.
+    /// neighborhood again.
     ///
     /// The one way the ring gets emptied: anything else that should empty it —
     /// an adopted share change, a clear from the host — calls this rather than
@@ -348,7 +348,7 @@ fn main() -> ! {
         note!("could not set the ESP-NOW rate; broadcasting at 1 Mbps");
     }
 
-    // Brought up before the loop rather than on demand: initialising a radio
+    // Brought up before the loop rather than on demand: initializing a radio
     // between a dwell and an admin window is the kind of surprise to avoid.
     let mut scanner = match ble::Scanner::new(peripherals.BT) {
         Some(scanner) => Some(SCANNER.init(scanner)),
@@ -473,7 +473,7 @@ fn main() -> ! {
         }
 
         // `advance` runs either way, so a radio that refused one hop does not leave
-        // the node dwelling there for ever, and the counter it bumps on a completed
+        // the node dwelling there forever, and the counter it bumps on a completed
         // sweep counts every one of them, whether or not a heartbeat goes out on
         // this pass. Only the heartbeat itself needs the control channel: sent
         // from a dwell channel it would not be heard.

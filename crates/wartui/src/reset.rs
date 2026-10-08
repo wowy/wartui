@@ -16,7 +16,7 @@
 //! until `close` gives up on them thirty seconds later, so `wartui reset` aimed at a
 //! node takes about that long to say it failed. That is the cost of asking a board
 //! that answers nothing, and the reason `run`'s sweep — which asks with one frame
-//! and may be pointed at anything — is not allowed to share this command's licence.
+//! and may be pointed at anything — is not allowed to share this command's license.
 //!
 //! Rebooting is confirmed by uptime and by uptime alone; [`rebooted`] is the rule.
 //! [`FRESH_UPTIME_MS`] covers the one case with no earlier figure to compare

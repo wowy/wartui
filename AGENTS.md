@@ -12,8 +12,8 @@ Where the prose lives:
 
 - `README.md` — the front door, and stays short. It also carries the full keyboard list.
 - `crates/wartui/README.md` — the operator's manual: keys, fleet states, channel pools,
-  GPS, troubleshooting. Read it before changing view or CLI behaviour, and **keep it true
-  when that behaviour changes.**
+  GPS, troubleshooting. Read it before changing view or CLI behavior, and **keep it true
+  when that behavior changes.**
 - `firmware/*/README.md` — each firmware's own constraints, including the esp-hal version
   wall (`firmware/bridge/README.md`).
 - `docs/*-findings.md` — what each bench actually measured, and why several invariants
@@ -79,7 +79,7 @@ directory, so a `wartui-proto` change that reaches the firmware is checked there
 Four host crates, strictly layered, plus firmware that shares the bottom one.
 
 - **`crates/wartui-proto`** — `no_std`, allocation-free wire formats and the parsing that goes
-  with them: `air` (the four ESP-NOW frames, and `air::foreign` for recognising somebody
+  with them: `air` (the four ESP-NOW frames, and `air::foreign` for recognizing somebody
   else's), `beacon`, `hci`, `dedup`, `link`, `mac` (the `Mac` type and its text form),
   `outbox`, `stall`, `plan` (channel pools and the partitioning planner), `node` (a node's
   timings and sweep cursor), `tx_power`, `pending` (the buffers sightings wait in on a node).
@@ -88,7 +88,7 @@ Four host crates, strictly layered, plus firmware that shares the bottom one.
   rather than a reflash.
 - **`crates/wartui-bridge`** — host side of the USB link. Everything above talks to a `LinkHandle`
   and cannot tell a real dongle (`serial`) from the fake fleet (`sim`). It also owns the host's
-  serial ports generally (`ports`): what is attached and what the OS says it is, with no judgement
+  serial ports generally (`ports`): what is attached and what the OS says it is, with no judgment
   about which of them is a bridge, so anything else that opens a device shares one enumeration.
 - **`crates/wartui-core`** — the headless half. Draws nothing, parses no arguments.
 - **`crates/wartui`** — clap CLI (`run`/`export`/`analyze`/`upload`/`sniff`/`status`/`reset`/
@@ -152,7 +152,7 @@ is here rather than only in a `//!`.
   need the reflash.
 - **The bridge displays what it is handed and never composes it.** A board with a panel is
   sent finished lines with a severity on each, blits them, and owns nothing about them but the
-  three colours a `Severity` means and the fallback screen it draws when no host is talking —
+  three colors a `Severity` means and the fallback screen it draws when no host is talking —
   link-local facts, which is why they cost the format-blind rule nothing. It reads no air
   frame to find out what to say, so a change to what the panel says or how it is arranged
   costs a `cargo run` rather than a reflash. The bridge advertising its own geometry in
@@ -241,7 +241,7 @@ is here rather than only in a `//!`.
 Each of these is enforced in one place and explained there at length. The claim is here so an
 edit stops; follow the pointer before changing the rule.
 
-- **Somebody else's fleet is recognised in order to be reported, never to be accommodated.**
+- **Somebody else's fleet is recognized in order to be reported, never to be accommodated.**
   → `crates/wartui-proto/src/air/mod.rs` `//!`, `air::foreign`
 - **Finding the bridge means transmitting into what is opened**, so the sweep opens Espressif
   vendor IDs and nothing else, and `wartui reset` — which transmits before anything has identified
@@ -282,7 +282,7 @@ edit stops; follow the pointer before changing the rule.
   → `crates/wartui-core/src/engine/lag.rs`, `note_arrival` / `air_is_live` / `BEHIND_THE_AIR`
 - **The bridge's USB transmit endpoint can die on its own, and the bridge reboots when it does.**
   `StallWatch` times the *contradiction*, and **every one of its four facts is load-bearing**:
-  delete any and a bridge reboots for ever, or never. There is no watchdog behind the hang case.
+  delete any and a bridge reboots forever, or never. There is no watchdog behind the hang case.
   → `crates/wartui-proto/src/stall.rs`, `StallWatch`; `docs/phase-3-findings.md`
 - **Every reset goes through `reboot()`, and on a C5 that funnel *is* the reset** — a bare
   `software_reset()` there does not reboot the board, it stops it. Each firmware has its own copy,
@@ -291,7 +291,7 @@ edit stops; follow the pointer before changing the rule.
 - **A bridge reboot is invisible unless the host compares uptimes**, because a software reset does
   not re-enumerate the USB device. → `crates/wartui-bridge/src/serial.rs`, the `Ready` arm
 - **Neither firmware may block on the USB endpoint.** The bridge's rings evict oldest-first and
-  resynchronise COBS behind a truncated frame; a node loses a line rather than a sweep.
+  resynchronize COBS behind a truncated frame; a node loses a line rather than a sweep.
   → `crates/wartui-proto/src/outbox/mod.rs` `//!`, `firmware/node/src/main.rs`, `note!`
 - **The bridge writes nothing to USB until a host has spoken, unless a host was present when the
   previous life ended** (an RTC flag, never trusted after a power-on). Writing before any host
@@ -348,6 +348,8 @@ edit stops; follow the pointer before changing the rule.
   any other key usage an operator needs at a glance. Keep its tables identical to
   `crates/wartui/README.md` § "Keyboard commands", and change both together;
   `crates/wartui/tests/readme.rs` fails when they differ.
+- Use American spellings at all times: in prose, doc comments, identifiers, test names and
+  commit messages (`meters`, `behavior`, `color`, `recognize`).
 - Write short sentences with one idea each. Lead with what the reader does or sees, then the
   reason. Use a table or list when prose would enumerate flags, states, or messages.
 - **Prose says what the project does, not where it was.** Nothing before 1.0 is compatible with

@@ -300,9 +300,9 @@ fn span(first_ms: i64, last_ms: i64) -> String {
 /// a real command now that `-o` follows `--db` — truncates the store while the export
 /// holds it open, and the capture is the one thing here that cannot be taken again.
 ///
-/// Canonicalised, so `./tonight.db` and `tonight.db` are one answer rather than two, and
-/// so a link to the capture is recognised as the capture. A path that is not there yet
-/// cannot be it, which is the ordinary case and is what the failed canonicalise means.
+/// Canonicalized, so `./tonight.db` and `tonight.db` are one answer rather than two, and
+/// so a link to the capture is recognized as the capture. A path that is not there yet
+/// cannot be it, which is the ordinary case and is what the failed canonicalize means.
 fn is_the_capture(out: &Path, db: &Path) -> bool {
     match (out.canonicalize(), db.canonicalize()) {
         (Ok(out), Ok(db)) => out == db,

@@ -31,9 +31,9 @@ pub struct Panel {
 
 /// How a line is going.
 ///
-/// The host picks a line's severity and the bridge maps it to a colour. What counts as a
+/// The host picks a line's severity and the bridge maps it to a color. What counts as a
 /// weak link is arithmetic over a snapshot, and retuning it must not cost a reflash. The
-/// colours are a property of the panel, and live in the firmware.
+/// colors are a property of the panel, and live in the firmware.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub enum Severity {
     /// Fine.

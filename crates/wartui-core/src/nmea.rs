@@ -46,9 +46,9 @@ pub struct GpsFix {
     pub lat: f64,
     /// Degrees east, negative for west.
     pub lon: f64,
-    /// Metres above mean sea level, when the sentence carried it.
+    /// Meters above mean sea level, when the sentence carried it.
     pub alt: Option<f64>,
-    /// Estimated horizontal accuracy in metres. See [`accuracy_from_hdop`].
+    /// Estimated horizontal accuracy in meters. See [`accuracy_from_hdop`].
     pub accuracy: Option<f64>,
     /// Satellites used in the solution, when reported.
     pub satellites: Option<u8>,
@@ -61,7 +61,7 @@ pub struct GpsFix {
 }
 
 /// HDOP is a multiplier, not a distance: how much satellite geometry amplifies ranging error. Times
-/// a nominal 5 m user-equivalent range error gives metres, and WiGLE's `AccuracyMeters` wants a
+/// a nominal 5 m user-equivalent range error gives meters, and WiGLE's `AccuracyMeters` wants a
 /// number: an honest estimate beats 0.
 #[must_use]
 pub fn accuracy_from_hdop(hdop: f64) -> f64 {

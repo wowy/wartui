@@ -1,4 +1,4 @@
-# Symptom catalogue
+# Symptom catalog
 
 For each symptom the survey can flag, this table gives what it usually means and where to read
 before naming a cause. The "usual meaning" column is the opening hypothesis. Only the code and the
@@ -43,8 +43,8 @@ reasoning.
 | `peer_count` = nodes + 1 | Expected. The bridge registers a broadcast peer at init, which is why it reads 1 before any node joins. | `firmware/bridge/src/main.rs` (broadcast peer setup) |
 | `peer_count` above nodes + 1 | Peers not yet aged out (they are removed one `topology_timeout` after the last heartbeat), or nodes that never sent a heartbeat. | `crates/wartui-core/src/engine/mod.rs` |
 | `rx_count` flat while `uptime_ms` keeps rising | The bridge was up but heard nothing over the air. At the start of a capture this means the fleet was powered after the host. Mid-drive, together with every node restarting, it means the nodes lost power. | `bridge_status` rows; the survey prints the longest such stretch |
-| `garbled` | COBS or link frames that did not decode, usually resynchronisation after a truncated USB write. | `crates/wartui-proto/src/link/frame.rs`, `crates/wartui-proto/src/outbox/mod.rs` |
-| `undecodable` | Counts two things: a frame without our magic that `air::foreign` does not recognise (most often a stranger's ESP-NOW device), and a frame with our magic and version whose body would not parse. Only the second is our bug. A short burst at one place is usually the first. The capture cannot tell them apart without raw frames. | `crates/wartui-core/src/engine/rx.rs` (both increments), `crates/wartui-proto/src/air/mod.rs` |
+| `garbled` | COBS or link frames that did not decode, usually resynchronization after a truncated USB write. | `crates/wartui-proto/src/link/frame.rs`, `crates/wartui-proto/src/outbox/mod.rs` |
+| `undecodable` | Counts two things: a frame without our magic that `air::foreign` does not recognize (most often a stranger's ESP-NOW device), and a frame with our magic and version whose body would not parse. Only the second is our bug. A short burst at one place is usually the first. The capture cannot tell them apart without raw frames. | `crates/wartui-core/src/engine/rx.rs` (both increments), `crates/wartui-proto/src/air/mod.rs` |
 | `incompatible` | Frames carrying our magic with an unknown wire version: a node on another build. The fix is to reflash the fleet together. | `crates/wartui-proto/src/air/mod.rs` `WIRE_VERSION` |
 | `foreign_fleet` / `foreign_admin` | Somebody else's wartui-like fleet nearby. It is reported, never accommodated. | `crates/wartui-proto/src/air/foreign.rs` `air::foreign` |
 

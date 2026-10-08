@@ -239,7 +239,7 @@ fn frame_accumulator_delivers_sequential_frames_when_processing_continuous_strea
 }
 
 #[test]
-fn frame_accumulator_resynchronises_cleanly_when_stream_contains_bootloader_noise() {
+fn frame_accumulator_resynchronizes_cleanly_when_stream_contains_bootloader_noise() {
     // A bridge reset sprays ROM bootloader chatter down the same pipe before
     // the first real frame. Nothing before the next terminator should survive,
     // and everything after it should.
