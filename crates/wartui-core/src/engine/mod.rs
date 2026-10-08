@@ -314,6 +314,7 @@ impl FleetEngine {
             batch.urgent.push(HostToBridge::RemovePeer { mac });
             if let Some(node) = self.nodes.get_mut(&mac) {
                 node.peered = false;
+                node.departed = true;
             }
         }
         // A slot has freed, so the re-cut that follows takes refused nodes back.

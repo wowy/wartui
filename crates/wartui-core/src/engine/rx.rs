@@ -139,7 +139,10 @@ impl FleetEngine {
                 rssi,
                 "node joined"
             ),
-            Some(last) if now.mono.duration_since(last) >= self.config.topology_timeout => {
+            // Only after a logged departure: a backlog held through a link outage arrives late
+            // from nodes that never left.
+            Some(last) if node.departed => {
+                node.departed = false;
                 let silent_ms = now.mono.duration_since(last).as_millis() as u64;
                 tracing::info!(mac = %mac::full(&src), silent_ms, "node returned");
             }

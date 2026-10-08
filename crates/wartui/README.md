@@ -776,7 +776,7 @@ membership changes are logged once each:
 | --------------------- | ------------------------------------------------- |
 | `node joined`         | its first heartbeat this run                      |
 | `node left the fleet` | its peer is removed after a minute of silence     |
-| `node returned`       | a heartbeat after a minute or more of silence     |
+| `node returned`       | its first heartbeat after `node left the fleet`   |
 | `node restarted`      | its heartbeat counter fell, or its epoch reset    |
 
 `RUST_LOG=debug` adds GPS probe attempts, each retry, undecodable frames, and dropped bulk

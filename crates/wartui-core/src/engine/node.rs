@@ -47,6 +47,8 @@ pub struct NodeState {
     /// peer is removed after [`EngineConfig::topology_timeout`]. Kept across a bridge announcing
     /// itself, as on a port reopen: removing a peer the bridge already lost is harmless.
     pub peered: bool,
+    /// The host logged this node leaving the fleet, so its next heartbeat logs it returning.
+    pub departed: bool,
     /// What this host wants the node to be scanning.
     pub desired: Option<Assignment>,
     /// What the node acknowledged. Cleared on reboot, because the node has forgotten.
@@ -137,6 +139,7 @@ impl NodeState {
             capabilities: None,
             peer_refused: false,
             peered: false,
+            departed: false,
             desired: None,
             confirmed: None,
             dirty: false,
