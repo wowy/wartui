@@ -94,11 +94,11 @@ pub struct NodeState {
     pub batches_lost: u64,
     /// Batches from this node dropped as retransmissions ([`Counters::duplicate_batches`]).
     pub duplicate_batches: u64,
-    /// The `wifi_dropped` of this node's latest heartbeat: the baseline [`Counters::wifi_dropped`]
+    /// The `wifi_refused` of this node's latest heartbeat: the baseline [`Counters::wifi_refused`]
     /// advances from.
-    pub(super) last_wifi_dropped: Option<u16>,
-    /// The same for `ble_dropped` and [`Counters::ble_dropped`].
-    pub(super) last_ble_dropped: Option<u16>,
+    pub(super) last_wifi_refused: Option<u16>,
+    /// The same for `ble_refused` and [`Counters::ble_refused`].
+    pub(super) last_ble_refused: Option<u16>,
 }
 
 /// What one node was told to do, and the fleet arithmetic it was computed against.
@@ -153,8 +153,8 @@ impl NodeState {
             last_batch_rx_us: None,
             batches_lost: 0,
             duplicate_batches: 0,
-            last_wifi_dropped: None,
-            last_ble_dropped: None,
+            last_wifi_refused: None,
+            last_ble_refused: None,
         }
     }
 

@@ -96,7 +96,7 @@ pub(super) fn draw_footer(
 /// on a later dwell or scan, so this measures how dense the area is, not a fault. Worded
 /// as `wartui analyze` words it.
 pub(super) fn buffer_full_line(c: &Counters) -> Option<String> {
-    crate::text::buffer_full(c.wifi_dropped, c.ble_dropped).map(|line| format!("  {line}"))
+    crate::text::buffer_full(c.wifi_refused, c.ble_refused).map(|line| format!("  {line}"))
 }
 
 /// Every fault so far, most urgent first. Empty on a clean run.
@@ -529,7 +529,7 @@ mod tests {
     #[test]
     fn footer_displays_buffer_full_line_when_wifi_count_nonzero() {
         let mut snapshot = busy();
-        snapshot.counters.wifi_dropped = 12;
+        snapshot.counters.wifi_refused = 12;
         let screen = rendered(&snapshot);
         // A kind with nothing turned away is left out, not shown as 0, and the line is
         // its own, not a span of the totals.
@@ -539,8 +539,8 @@ mod tests {
     #[test]
     fn footer_displays_both_kinds_when_wifi_and_ble_counts_nonzero() {
         let mut snapshot = busy();
-        snapshot.counters.wifi_dropped = 12;
-        snapshot.counters.ble_dropped = 4;
+        snapshot.counters.wifi_refused = 12;
+        snapshot.counters.ble_refused = 4;
         let screen = rendered(&snapshot);
         assert_eq!(buffer_full_row(&screen), "  buffer full wifi 12  ble 4", "{screen}");
     }
@@ -550,7 +550,7 @@ mod tests {
         // Every count is separated, as `wartui analyze` separates them.
         let mut snapshot = busy();
         snapshot.counters.frames = 12_345;
-        snapshot.counters.wifi_dropped = 1_234;
+        snapshot.counters.wifi_refused = 1_234;
         let screen = rendered(&snapshot);
         assert!(totals_line(&screen).contains("frames 12,345"), "{screen}");
         assert_eq!(buffer_full_row(&screen), "  buffer full wifi 1,234", "{screen}");
@@ -559,7 +559,7 @@ mod tests {
     #[test]
     fn footer_displays_buffer_full_line_when_only_ble_count_nonzero() {
         let mut snapshot = busy();
-        snapshot.counters.ble_dropped = 4;
+        snapshot.counters.ble_refused = 4;
         let screen = rendered(&snapshot);
         assert_eq!(buffer_full_row(&screen), "  buffer full ble 4", "{screen}");
     }
@@ -569,8 +569,8 @@ mod tests {
         // The notice takes the totals line. The buffer full counts have their own line,
         // so they stay.
         let mut snapshot = busy();
-        snapshot.counters.wifi_dropped = 12;
-        snapshot.counters.ble_dropped = 4;
+        snapshot.counters.wifi_refused = 12;
+        snapshot.counters.ble_refused = 4;
         let mut ui = Ui::default();
         ui.say("a notice".to_owned(), &snapshot);
         let mut terminal = Terminal::new(TestBackend::new(200, 40)).expect("test backend");

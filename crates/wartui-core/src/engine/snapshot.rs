@@ -54,9 +54,9 @@ pub struct Counters {
     /// Access points heard with no pending-buffer room, once per dwell. Mostly delay, not loss: an
     /// address turned away is not in the dedup ring, so the next dwell reports it. Steady growth
     /// means the buffer is too small for the area.
-    pub wifi_dropped: u64,
+    pub wifi_refused: u64,
     /// The same for advertisers and the Bluetooth scan's buffer, once per scan.
-    pub ble_dropped: u64,
+    pub ble_refused: u64,
 }
 
 /// A node as of one snapshot.

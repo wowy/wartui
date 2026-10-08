@@ -11,7 +11,7 @@
 //!   has is heard again every dwell or scan. Given a slot, it is thrown away by the drain,
 //!   and a crowded neighborhood fills the buffer with such repeats and turns new
 //!   addresses away. The `due` check runs before the room check, so an address that is
-//!   not due neither takes a slot nor counts as dropped.
+//!   not due neither takes a slot nor counts as refused.
 //! - **A full buffer never wraps.** It turns the newest address away and counts it in
 //!   [`Refused`], once per dwell or scan. Everything held is a distinct address not yet
 //!   reported, so evicting one would trade a certain sighting for a possible one.
@@ -50,7 +50,7 @@ mod entry {
         fn address(&self) -> [u8; 6];
 
         /// Whether the entry is worth holding at all. An entry ruled out here is never
-        /// looked up, merged, asked `due` or counted as dropped, since it is no reading of
+        /// looked up, merged, asked `due` or counted as refused, since it is no reading of
         /// anything.
         fn is_usable(&self) -> bool {
             true
@@ -114,7 +114,7 @@ pub struct Pending<T: Entry, const N: usize, const S: usize> {
     items: [T; N],
     len: usize,
     taken: usize,
-    dropped: Refused,
+    refused: Refused,
     /// Where each held address sits in `items`. Nothing is ever evicted, so entries
     /// leave it only all at once, in [`Self::clear`].
     index: MacIndex<S>,
@@ -134,7 +134,7 @@ impl<T: Entry, const N: usize, const S: usize> Pending<T, N, S> {
             items: [T::BLANK; N],
             len: 0,
             taken: 0,
-            dropped: Refused::new(),
+            refused: Refused::new(),
             index: MacIndex::new::<N>(),
         }
     }
@@ -158,7 +158,7 @@ impl<T: Entry, const N: usize, const S: usize> Pending<T, N, S> {
             return;
         }
         if self.len == N {
-            self.dropped.note(&address);
+            self.refused.note(&address);
             return;
         }
         self.items[self.len] = entry;
@@ -179,14 +179,14 @@ impl<T: Entry, const N: usize, const S: usize> Pending<T, N, S> {
         Some(entry)
     }
 
-    /// Empty the buffer for a new dwell or scan. [`Self::dropped`] carries on, and an
+    /// Empty the buffer for a new dwell or scan. [`Self::refused`] carries on, and an
     /// address turned away last time counts again if it is turned away in this one.
     ///
     /// Resetting the index writes all `S` slots, which is cheap at once per dwell or scan.
     pub fn clear(&mut self) {
         self.len = 0;
         self.taken = 0;
-        self.dropped.reset();
+        self.refused.reset();
         self.index.clear();
     }
 
@@ -205,8 +205,8 @@ impl<T: Entry, const N: usize, const S: usize> Pending<T, N, S> {
     /// Addresses a full buffer turned away since construction, each once per dwell or
     /// scan. Wraps. [`Refused`] says how it slightly undercounts.
     #[must_use]
-    pub const fn dropped(&self) -> u16 {
-        self.dropped.total()
+    pub const fn refused(&self) -> u16 {
+        self.refused.total()
     }
 }
 

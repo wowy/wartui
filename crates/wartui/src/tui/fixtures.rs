@@ -189,8 +189,8 @@ pub(super) fn busy() -> Snapshot {
             replans: 0,
             batches_lost: 0,
             duplicate_batches: 0,
-            wifi_dropped: 0,
-            ble_dropped: 0,
+            wifi_refused: 0,
+            ble_refused: 0,
         },
         store: StoreStats { written: 800, dropped: 7 },
         bridge_status: Some(BridgeStatus {

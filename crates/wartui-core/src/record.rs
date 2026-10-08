@@ -63,9 +63,9 @@ pub struct Heartbeat {
     /// How strongly the bridge heard it.
     pub link_rssi: Option<i8>,
     /// Access points the node's full pending buffer turned away since boot, once per dwell each.
-    pub wifi_dropped: u16,
+    pub wifi_refused: u16,
     /// Advertisers the node's full pending buffer turned away since boot, once per scan each.
-    pub ble_dropped: u16,
+    pub ble_refused: u16,
     /// Heartbeats the node has sent since its boot, this one included. Wraps.
     pub beat: u16,
     /// Heartbeats the node's radio refused to send since its boot, this one excluded. Wraps.

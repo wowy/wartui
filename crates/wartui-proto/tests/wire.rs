@@ -20,8 +20,8 @@ const HEARTBEAT: &[u8] = &[
     0x78, 0x56, 0x34, 0x12, // counter 0x1234_5678, little-endian
     0x05, // epoch
     0x01, 0x00, 0x01, // capabilities: major 1, minor 0, 5g
-    0x2A, 0x00, // wifi_dropped 42, little-endian
-    0x04, 0x03, // ble_dropped 0x0304, little-endian
+    0x2A, 0x00, // wifi_refused 42, little-endian
+    0x04, 0x03, // ble_refused 0x0304, little-endian
     0x02, 0x01, // beat 0x0102, little-endian
     0x07, // unsent 7
 ];
@@ -32,8 +32,8 @@ const HEARTBEAT_NO_EPOCH: &[u8] = &[
     0x78, 0x56, 0x34, 0x12, // counter 0x1234_5678, little-endian
     0x00, // epoch: none held
     0x01, 0x00, 0x01, // capabilities: major 1, minor 0, 5g
-    0x00, 0x00, // wifi_dropped 0
-    0x00, 0x00, // ble_dropped 0
+    0x00, 0x00, // wifi_refused 0
+    0x00, 0x00, // ble_refused 0
     0x01, 0x00, // beat 1: the first heartbeat since boot
     0x00, // unsent 0
 ];
@@ -219,8 +219,8 @@ fn heartbeat_msg_serializes_byte_for_byte_when_encoded_and_decoded() {
         counter: 0x1234_5678,
         epoch: 5,
         capabilities: Capabilities { major: 1, minor: 0, five_ghz: true },
-        wifi_dropped: 42,
-        ble_dropped: 0x0304,
+        wifi_refused: 42,
+        ble_refused: 0x0304,
         beat: 0x0102,
         unsent: 7,
     };
@@ -234,8 +234,8 @@ fn heartbeat_msg_serializes_epoch_zero_when_node_holds_no_assignment() {
         counter: 0x1234_5678,
         epoch: 0,
         capabilities: Capabilities { major: 1, minor: 0, five_ghz: true },
-        wifi_dropped: 0,
-        ble_dropped: 0,
+        wifi_refused: 0,
+        ble_refused: 0,
         beat: 1,
         unsent: 0,
     };
@@ -253,10 +253,10 @@ fn heartbeat_msg_serializes_counter_as_little_endian_when_encoded() {
 }
 
 #[test]
-fn heartbeat_msg_serializes_drop_counts_as_little_endian_when_encoded() {
+fn heartbeat_msg_serializes_refusal_counts_as_little_endian_when_encoded() {
     let decoded = HeartbeatMsg::decode(HEARTBEAT).expect("valid");
-    assert_eq!(decoded.wifi_dropped, 42);
-    assert_eq!(decoded.ble_dropped, 0x0304);
+    assert_eq!(decoded.wifi_refused, 42);
+    assert_eq!(decoded.ble_refused, 0x0304);
     assert_eq!(&HEARTBEAT[14..16], &[0x2A, 0]);
     assert_eq!(&HEARTBEAT[16..18], &[0x04, 0x03]);
 }

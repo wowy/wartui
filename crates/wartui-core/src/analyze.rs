@@ -320,7 +320,7 @@ struct Beat {
 
 fn heartbeats(conn: &Connection, nodes: &mut BTreeMap<Mac, NodeLoss>) -> rusqlite::Result<()> {
     let mut stmt = conn.prepare(
-        "SELECT node_mac, counter, beat, wifi_dropped, ble_dropped, live, id, rx_at, unsent
+        "SELECT node_mac, counter, beat, wifi_refused, ble_refused, live, id, rx_at, unsent
          FROM heartbeat
          ORDER BY node_mac, id",
     )?;

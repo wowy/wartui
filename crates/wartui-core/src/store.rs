@@ -92,7 +92,7 @@ CREATE TABLE IF NOT EXISTS node (
   capabilities TEXT
 );
 
--- `wifi_dropped` and `ble_dropped` are the node's since-boot refusal counts as
+-- `wifi_refused` and `ble_refused` are the node's since-boot refusal counts as
 -- the frame carried them: raw, so a reboot shows as the value falling. `beat` is
 -- the node's since-boot heartbeat count, raw, and wraps at 2^16. `unsent` is the
 -- heartbeats its radio refused to send since boot, this one excluded, raw, and
@@ -106,8 +106,8 @@ CREATE TABLE IF NOT EXISTS heartbeat (
   counter INTEGER NOT NULL,
   epoch INTEGER NOT NULL,
   rssi INTEGER,
-  wifi_dropped INTEGER NOT NULL,
-  ble_dropped INTEGER NOT NULL,
+  wifi_refused INTEGER NOT NULL,
+  ble_refused INTEGER NOT NULL,
   beat INTEGER NOT NULL,
   unsent INTEGER NOT NULL,
   -- Whether the heartbeat arrived live or was replayed from the bridge's backlog.
@@ -1106,7 +1106,7 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
             Record::Heartbeat(hb) => {
                 tx.prepare_cached(
                     "INSERT INTO heartbeat
-                       (node_mac, rx_at, counter, epoch, rssi, wifi_dropped, ble_dropped,
+                       (node_mac, rx_at, counter, epoch, rssi, wifi_refused, ble_refused,
                         beat, unsent, live)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 )?
@@ -1116,8 +1116,8 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
                     hb.counter,
                     hb.epoch,
                     hb.link_rssi,
-                    hb.wifi_dropped,
-                    hb.ble_dropped,
+                    hb.wifi_refused,
+                    hb.ble_refused,
                     hb.beat,
                     hb.unsent,
                     hb.live

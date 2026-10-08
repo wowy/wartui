@@ -22,8 +22,8 @@ fn sample_commands() -> Vec<HostToBridge, 16> {
                 counter: 42,
                 epoch: 0,
                 capabilities: Capabilities::here(true),
-                wifi_dropped: 0,
-                ble_dropped: 0,
+                wifi_refused: 0,
+                ble_refused: 0,
                 beat: 1,
                 unsent: 0,
             }

@@ -279,8 +279,8 @@ fn store_round_trips_record_when_each_type_written() {
                 counter: 174,
                 epoch: 5,
                 link_rssi: Some(-41),
-                wifi_dropped: 12,
-                ble_dropped: 3,
+                wifi_refused: 12,
+                ble_refused: 3,
                 beat: 61,
                 unsent: 4,
                 live: false,
@@ -297,12 +297,12 @@ fn store_round_trips_record_when_each_type_written() {
     let epoch: i64 = conn.query_row("SELECT epoch FROM heartbeat", [], |r| r.get(0)).unwrap();
     assert_eq!(epoch, 5, "the epoch the frame said the node held");
 
-    let dropped: (i64, i64) = conn
-        .query_row("SELECT wifi_dropped, ble_dropped FROM heartbeat", [], |r| {
+    let refused: (i64, i64) = conn
+        .query_row("SELECT wifi_refused, ble_refused FROM heartbeat", [], |r| {
             Ok((r.get(0)?, r.get(1)?))
         })
         .unwrap();
-    assert_eq!(dropped, (12, 3), "the since-boot counts as the frame carried them");
+    assert_eq!(refused, (12, 3), "the since-boot counts as the frame carried them");
 
     let beat: i64 = conn.query_row("SELECT beat FROM heartbeat", [], |r| r.get(0)).unwrap();
     assert_eq!(beat, 61, "the since-boot heartbeat count as the frame carried it");
@@ -366,8 +366,8 @@ fn store_writes_every_heartbeat_column_when_heartbeat_recorded() {
             counter: 174,
             epoch: 5,
             link_rssi: Some(-41),
-            wifi_dropped: 12,
-            ble_dropped: 3,
+            wifi_refused: 12,
+            ble_refused: 3,
             beat: 61,
             unsent: 4,
             live: true,

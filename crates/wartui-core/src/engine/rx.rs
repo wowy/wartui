@@ -158,10 +158,10 @@ impl FleetEngine {
         let advance = |value: u16, prev: Option<u16>| {
             advance_since_boot(u64::from(value), prev.map(u64::from), rebooted)
         };
-        self.counters.wifi_dropped += advance(heartbeat.wifi_dropped, node.last_wifi_dropped);
-        self.counters.ble_dropped += advance(heartbeat.ble_dropped, node.last_ble_dropped);
-        node.last_wifi_dropped = Some(heartbeat.wifi_dropped);
-        node.last_ble_dropped = Some(heartbeat.ble_dropped);
+        self.counters.wifi_refused += advance(heartbeat.wifi_refused, node.last_wifi_refused);
+        self.counters.ble_refused += advance(heartbeat.ble_refused, node.last_ble_refused);
+        node.last_wifi_refused = Some(heartbeat.wifi_refused);
+        node.last_ble_refused = Some(heartbeat.ble_refused);
         node.counter = Some(heartbeat.counter);
         node.last_heartbeat = Some(now.mono);
         node.last_heartbeat_rx_us = Some(rx_us);
@@ -172,8 +172,8 @@ impl FleetEngine {
             counter: heartbeat.counter,
             epoch: heartbeat.epoch,
             link_rssi: Some(rssi),
-            wifi_dropped: heartbeat.wifi_dropped,
-            ble_dropped: heartbeat.ble_dropped,
+            wifi_refused: heartbeat.wifi_refused,
+            ble_refused: heartbeat.ble_refused,
             beat: heartbeat.beat,
             unsent: heartbeat.unsent,
             live,

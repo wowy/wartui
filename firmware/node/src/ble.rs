@@ -63,7 +63,7 @@ const _: () = assert!(
 /// is affordable because [`BlePending`] finds a held address by hash: every report
 /// heard is checked against the buffer with interrupts held off, and a linear search
 /// of 128 reports costs up to 18 µs there.
-/// [`dropped`] counts those advertisers, once per scan each, and it is the only
+/// [`refused`] counts those advertisers, once per scan each, and it is the only
 /// sign of saturation: the console's `heard` is capped here. The heartbeat carries
 /// it to the host, which shows the fleet's total in the footer's `buffer full` line.
 ///
@@ -114,8 +114,8 @@ pub fn take() -> Option<AdvReport> {
 
 /// Advertisers turned away by a full buffer since boot, each counted once per
 /// sweep however often it repeats. Wraps.
-pub fn dropped() -> u16 {
-    PENDING.with(|pending| pending.dropped())
+pub fn refused() -> u16 {
+    PENDING.with(|pending| pending.refused())
 }
 
 /// Listen continuously while enabled: interval and window equal, at 30 ms.

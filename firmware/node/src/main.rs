@@ -522,8 +522,8 @@ fn heartbeat(sender: &mut EspNowSender<'_>, node: &mut Node) {
         counter: node.counter,
         epoch: node.version,
         capabilities: CAPABILITIES,
-        wifi_dropped: sniff::dropped(),
-        ble_dropped: ble::dropped(),
+        wifi_refused: sniff::refused(),
+        ble_refused: ble::refused(),
         beat,
         unsent: node.unsent,
     };
@@ -660,11 +660,11 @@ fn report(sender: &mut EspNowSender<'_>, node: &mut Node, channel: u8) {
     if sent > 0 || outgoing.failed {
         node.reported = node.reported.wrapping_add(sent);
         note!(
-            "ch {}: {} new, {} total, {} dropped, {} unacked",
+            "ch {}: {} new, {} total, {} refused, {} unacked",
             channel,
             sent,
             node.reported,
-            sniff::dropped(),
+            sniff::refused(),
             node.unacked
         );
     }
@@ -695,10 +695,10 @@ fn report_ble(sender: &mut EspNowSender<'_>, node: &mut Node, scanner: &mut ble:
     if heard > 0 || outgoing.failed {
         node.reported = node.reported.wrapping_add(lines);
         note!(
-            "ble: {} heard, {} new, {} dropped, {} unacked",
+            "ble: {} heard, {} new, {} refused, {} unacked",
             heard,
             lines,
-            ble::dropped(),
+            ble::refused(),
             node.unacked
         );
     }
