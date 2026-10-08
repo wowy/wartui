@@ -302,8 +302,11 @@ def heartbeats(db, ctx):
         for r in hs:
             (_, rid, rx, counter, epoch, rssi, beat, live, wr, br, us, dw, p_dw, *_rest) = r
             replayed += live == 0
-            if prev is None or (beat - prev[6]) % 2**16 != 0 or counter != prev[3]:
-                by_dwell[dw][1] += 1  # arrived, so sent after its own dwell; a repeat counts once
+            if live != 0 and (prev is None or (beat - prev[6]) % 2**16 != 0
+                              or counter != prev[3]):
+                # Arrived live, so sent after its own dwell; a repeat counts once. A replayed
+                # beat is left out, as the misses after one are.
+                by_dwell[dw][1] += 1
             if prev is not None:
                 p_rx, p_counter, p_beat, p_live, p_wr, p_br, p_us = (
                     prev[2], prev[3], prev[6], prev[7], prev[8], prev[9], prev[10])
@@ -375,18 +378,26 @@ def heartbeats(db, ctx):
             if unplaced:
                 line += f"  unplaced {unplaced}"
             print(f"        miss by dwell {line}  (misses/beats sent after that channel)")
-            median = statistics.median(m / n for m, n in placed.values())
+            # Each channel against the pooled rate of the node's other channels: a median of
+            # per-channel rates is 0 whenever half of them lose nothing.
+            all_m = sum(m for m, _ in placed.values())
+            all_n = sum(n for _, n in placed.values())
             for ch, (m, n) in sorted(placed.items()):
-                if m >= 5 and m / n >= 3 * median:
+                rest_n = all_n - n
+                rest = (all_m - m) / rest_n if rest_n else 0.0
+                if m >= 5 and m / n >= 0.02 and m / n >= 3 * rest:
                     flag("WARN", "loss",
                          f"{short(mac)} loses heartbeats sent after a dwell on channel {ch}: "
-                         f"{m} of {n} ({m / n:.1%}), against a median {median:.1%} across its "
+                         f"{m} of {n} ({m / n:.1%}), against {rest:.1%} across its other "
                          "channels",
-                         f"SELECT dwell, COUNT(*) FROM heartbeat WHERE hex(node_mac)="
-                         f"'{mac.hex().upper()}' GROUP BY dwell;\n"
-                         f"SELECT prev_dwell, COUNT(*) FROM (SELECT prev_dwell, beat - LAG(beat) "
-                         f"OVER (ORDER BY id) AS d FROM heartbeat WHERE hex(node_mac)="
-                         f"'{mac.hex().upper()}') WHERE d >= 2 GROUP BY prev_dwell")
+                         f"WITH hb AS (SELECT dwell, prev_dwell, (beat - LAG(beat) OVER "
+                         f"(ORDER BY id) + 65536) % 65536 AS d FROM heartbeat WHERE "
+                         f"hex(node_mac)='{mac.hex().upper()}' AND COALESCE(live, 1) != 0)\n"
+                         "SELECT ch, SUM(m) AS misses, SUM(n) AS sent FROM (\n"
+                         "  SELECT prev_dwell AS ch, 1 AS m, 1 AS n FROM hb "
+                         "WHERE d BETWEEN 2 AND 32767\n"
+                         "  UNION ALL SELECT dwell, 0, 1 FROM hb WHERE d IS NULL OR d != 0\n"
+                         ") WHERE ch != 0 GROUP BY ch ORDER BY ch")
         epochs = Counter(r[4] for r in hs)
         print(f"        epochs held  {dict(sorted(epochs.items()))}")
         for a, b in silences[:5]:
