@@ -1,11 +1,11 @@
-use super::{DecodeError, MsgType, OFF_BODY, header, write_header};
+use super::{DecodeError, MsgType, OFFSET_BODY, header, write_header};
 use crate::plan::{CHANNEL_SET_BYTES, ChannelSet};
 
 /// Length of [`AdminMsg`] on the wire.
-pub const ADMIN_MSG_LEN: usize = OFF_BODY + 2 + CHANNEL_SET_BYTES + 1;
+pub const ADMIN_MSG_LEN: usize = OFFSET_BODY + 2 + CHANNEL_SET_BYTES + 1;
 
 /// Length of [`ClearMsg`] on the wire: the header, and nothing else.
-pub const CLEAR_MSG_LEN: usize = OFF_BODY;
+pub const CLEAR_MSG_LEN: usize = OFFSET_BODY;
 
 /// [`AdminMsg::flags`] bit 0: scan Bluetooth as well as Wi-Fi.
 pub const ADMIN_FLAG_BLE: u8 = 1 << 0;
@@ -82,12 +82,12 @@ impl AdminMsg {
             return Err(DecodeError::BadLength { need: ADMIN_MSG_LEN, got: buf.len() });
         }
         let mut channels = [0u8; CHANNEL_SET_BYTES];
-        channels.copy_from_slice(&buf[OFF_BODY + 2..OFF_BODY + 2 + CHANNEL_SET_BYTES]);
+        channels.copy_from_slice(&buf[OFFSET_BODY + 2..OFFSET_BODY + 2 + CHANNEL_SET_BYTES]);
         Ok(Self {
-            epoch: buf[OFF_BODY],
-            flags: buf[OFF_BODY + 1],
+            epoch: buf[OFFSET_BODY],
+            flags: buf[OFFSET_BODY + 1],
             channels: ChannelSet::from_bytes(channels),
-            tx_power: i8::from_le_bytes([buf[OFF_BODY + 2 + CHANNEL_SET_BYTES]]),
+            tx_power: i8::from_le_bytes([buf[OFFSET_BODY + 2 + CHANNEL_SET_BYTES]]),
         })
     }
 
@@ -96,11 +96,11 @@ impl AdminMsg {
     pub fn encode(&self) -> [u8; ADMIN_MSG_LEN] {
         let mut out = [0u8; ADMIN_MSG_LEN];
         write_header(&mut out, MsgType::Admin);
-        out[OFF_BODY] = self.epoch;
-        out[OFF_BODY + 1] = self.flags;
-        out[OFF_BODY + 2..OFF_BODY + 2 + CHANNEL_SET_BYTES]
+        out[OFFSET_BODY] = self.epoch;
+        out[OFFSET_BODY + 1] = self.flags;
+        out[OFFSET_BODY + 2..OFFSET_BODY + 2 + CHANNEL_SET_BYTES]
             .copy_from_slice(&self.channels.to_bytes());
-        out[OFF_BODY + 2 + CHANNEL_SET_BYTES] = self.tx_power.to_le_bytes()[0];
+        out[OFFSET_BODY + 2 + CHANNEL_SET_BYTES] = self.tx_power.to_le_bytes()[0];
         out
     }
 }

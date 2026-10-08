@@ -1,4 +1,4 @@
-use super::{DecodeError, MsgType, OFF_BODY, Security, header, write_header};
+use super::{DecodeError, MsgType, OFFSET_BODY, Security, header, write_header};
 use crate::link::MAX_ESPNOW_PAYLOAD;
 
 /// Longest SSID 802.11 allows, and so the most a record carries.
@@ -21,7 +21,7 @@ pub const SIGHTING_RECORD_MIN: usize = 12;
 pub const SIGHTING_RECORD_MAX: usize = SIGHTING_RECORD_MIN + SSID_MAX + EXT_MAX;
 
 /// Length of a [`SightingBatch`] header: magic, version, type, `seq` and `count`.
-pub const SIGHTING_BATCH_HEADER: usize = OFF_BODY + 3;
+pub const SIGHTING_BATCH_HEADER: usize = OFFSET_BODY + 3;
 
 /// The most a [`SightingBatch`] may be on the wire: ESP-NOW's own payload ceiling, so a
 /// batch fills exactly one frame.
@@ -227,8 +227,8 @@ impl<'a> SightingBatch<'a> {
         if buf.len() < SIGHTING_BATCH_HEADER {
             return Err(DecodeError::TooShort { need: SIGHTING_BATCH_HEADER, got: buf.len() });
         }
-        let seq = u16::from_le_bytes([buf[OFF_BODY], buf[OFF_BODY + 1]]);
-        let count = buf[OFF_BODY + 2];
+        let seq = u16::from_le_bytes([buf[OFFSET_BODY], buf[OFFSET_BODY + 1]]);
+        let count = buf[OFFSET_BODY + 2];
         let records = &buf[SIGHTING_BATCH_HEADER..];
         // An empty batch is the same fault as one claiming records it does not
         // carry: a frame this layout cannot produce.
@@ -307,14 +307,14 @@ impl SightingBatchWriter {
             return false;
         };
         self.len += written;
-        self.buf[OFF_BODY + 2] += 1;
+        self.buf[OFFSET_BODY + 2] += 1;
         true
     }
 
     /// How many records have been packed in.
     #[must_use]
     pub fn len(&self) -> usize {
-        usize::from(self.buf[OFF_BODY + 2])
+        usize::from(self.buf[OFFSET_BODY + 2])
     }
 
     /// Whether nothing has been packed in yet.
@@ -332,8 +332,8 @@ impl SightingBatchWriter {
     /// Empty the writer and start a new batch carrying `seq`.
     pub fn reset(&mut self, seq: u16) {
         write_header(&mut self.buf, MsgType::SightingBatch);
-        self.buf[OFF_BODY..OFF_BODY + 2].copy_from_slice(&seq.to_le_bytes());
-        self.buf[OFF_BODY + 2] = 0;
+        self.buf[OFFSET_BODY..OFFSET_BODY + 2].copy_from_slice(&seq.to_le_bytes());
+        self.buf[OFFSET_BODY + 2] = 0;
         self.len = SIGHTING_BATCH_HEADER;
     }
 }

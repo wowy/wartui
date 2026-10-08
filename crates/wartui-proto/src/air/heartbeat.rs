@@ -1,9 +1,9 @@
 use core::fmt;
 
-use super::{DecodeError, MsgType, OFF_BODY, header, write_header};
+use super::{DecodeError, MsgType, OFFSET_BODY, header, write_header};
 
 /// Length of [`HeartbeatMsg`] on the wire.
-pub const HEARTBEAT_MSG_LEN: usize = OFF_BODY + 17;
+pub const HEARTBEAT_MSG_LEN: usize = OFFSET_BODY + 17;
 
 /// [`Capabilities::flags`] bit 0: this radio reaches 5 GHz.
 pub const CAP_FLAG_5G: u8 = 1 << 0;
@@ -133,26 +133,26 @@ impl HeartbeatMsg {
             return Err(DecodeError::BadLength { need: HEARTBEAT_MSG_LEN, got: buf.len() });
         }
         let counter = u32::from_le_bytes([
-            buf[OFF_BODY],
-            buf[OFF_BODY + 1],
-            buf[OFF_BODY + 2],
-            buf[OFF_BODY + 3],
+            buf[OFFSET_BODY],
+            buf[OFFSET_BODY + 1],
+            buf[OFFSET_BODY + 2],
+            buf[OFFSET_BODY + 3],
         ]);
         let le = |at: usize| u16::from_le_bytes([buf[at], buf[at + 1]]);
         Ok(Self {
             counter,
-            epoch: buf[OFF_BODY + 4],
+            epoch: buf[OFFSET_BODY + 4],
             capabilities: Capabilities::from_parts(
-                buf[OFF_BODY + 5],
-                buf[OFF_BODY + 6],
-                buf[OFF_BODY + 7],
+                buf[OFFSET_BODY + 5],
+                buf[OFFSET_BODY + 6],
+                buf[OFFSET_BODY + 7],
             ),
-            wifi_refused: le(OFF_BODY + 8),
-            ble_refused: le(OFF_BODY + 10),
-            beat: le(OFF_BODY + 12),
-            unsent: buf[OFF_BODY + 14],
-            dwell: buf[OFF_BODY + 15],
-            prev_dwell: buf[OFF_BODY + 16],
+            wifi_refused: le(OFFSET_BODY + 8),
+            ble_refused: le(OFFSET_BODY + 10),
+            beat: le(OFFSET_BODY + 12),
+            unsent: buf[OFFSET_BODY + 14],
+            dwell: buf[OFFSET_BODY + 15],
+            prev_dwell: buf[OFFSET_BODY + 16],
         })
     }
 
@@ -161,17 +161,17 @@ impl HeartbeatMsg {
     pub fn encode(&self) -> [u8; HEARTBEAT_MSG_LEN] {
         let mut out = [0u8; HEARTBEAT_MSG_LEN];
         write_header(&mut out, MsgType::Heartbeat);
-        out[OFF_BODY..OFF_BODY + 4].copy_from_slice(&self.counter.to_le_bytes());
-        out[OFF_BODY + 4] = self.epoch;
-        out[OFF_BODY + 5] = self.capabilities.major;
-        out[OFF_BODY + 6] = self.capabilities.minor;
-        out[OFF_BODY + 7] = self.capabilities.flags();
-        out[OFF_BODY + 8..OFF_BODY + 10].copy_from_slice(&self.wifi_refused.to_le_bytes());
-        out[OFF_BODY + 10..OFF_BODY + 12].copy_from_slice(&self.ble_refused.to_le_bytes());
-        out[OFF_BODY + 12..OFF_BODY + 14].copy_from_slice(&self.beat.to_le_bytes());
-        out[OFF_BODY + 14] = self.unsent;
-        out[OFF_BODY + 15] = self.dwell;
-        out[OFF_BODY + 16] = self.prev_dwell;
+        out[OFFSET_BODY..OFFSET_BODY + 4].copy_from_slice(&self.counter.to_le_bytes());
+        out[OFFSET_BODY + 4] = self.epoch;
+        out[OFFSET_BODY + 5] = self.capabilities.major;
+        out[OFFSET_BODY + 6] = self.capabilities.minor;
+        out[OFFSET_BODY + 7] = self.capabilities.flags();
+        out[OFFSET_BODY + 8..OFFSET_BODY + 10].copy_from_slice(&self.wifi_refused.to_le_bytes());
+        out[OFFSET_BODY + 10..OFFSET_BODY + 12].copy_from_slice(&self.ble_refused.to_le_bytes());
+        out[OFFSET_BODY + 12..OFFSET_BODY + 14].copy_from_slice(&self.beat.to_le_bytes());
+        out[OFFSET_BODY + 14] = self.unsent;
+        out[OFFSET_BODY + 15] = self.dwell;
+        out[OFFSET_BODY + 16] = self.prev_dwell;
         out
     }
 }
