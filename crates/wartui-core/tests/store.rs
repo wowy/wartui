@@ -695,6 +695,30 @@ fn wigle_csv_writes_accuracy_without_float_noise() {
 }
 
 #[test]
+fn wigle_csv_writes_coordinates_to_seven_decimals_when_fix_from_nmea_minutes() {
+    // A stored fix from the 2026-10-07 drive: degrees plus minutes over sixty, as the parser
+    // computes them, with more digits than the receiver resolves.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let conn = write(
+        &dir,
+        vec![observation(
+            NODE,
+            [0xAA; 6],
+            -60,
+            EPOCH_MS,
+            fixed(45.02772083333333, -93.80174716666667),
+        )],
+    );
+
+    let (csv, _) = export(&conn);
+    let row = csv.lines().find(|line| line.starts_with("AA:AA:AA:AA:AA:AA")).expect("a row");
+    // `CurrentLatitude` and `CurrentLongitude` are the eighth and ninth columns; no field before
+    // them holds a comma here.
+    let columns: Vec<&str> = row.split(',').collect();
+    assert_eq!((columns[7], columns[8]), ("45.0277208", "-93.8017472"), "{row}");
+}
+
+#[test]
 fn wigle_csv_strips_padding_when_stored_ssid_cloaked() {
     // What a node flashed before `beacon::visible_ssid` existed put in the file: the
     // name's real length, every byte zero.
