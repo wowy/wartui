@@ -11,6 +11,7 @@ use std::time::Duration;
 use rusqlite::Connection;
 use wartui_core::engine::{EngineConfig, FleetEngine, Now, StorePeaks};
 use wartui_core::export::{ExportFilter, wigle_csv};
+use wartui_core::nmea::accuracy_from_hdop;
 use wartui_core::position::{Fix, PositionSource};
 use wartui_core::record::{
     AdminOutcome, AssignmentSent, BatchGap, BridgeSeen, BridgeStatusSeen, Heartbeat, HostStatus,
@@ -664,6 +665,33 @@ fn wigle_csv_quotes_ssid_when_it_holds_comma_or_quote() {
         csv.contains(r#""cafe, ""the"" one""#),
         "the SSID should be quoted and its quotes doubled: {csv}"
     );
+}
+
+#[test]
+fn wigle_csv_writes_accuracy_without_float_noise() {
+    // Accuracies from the parser's own conversion, so the noise is real: HDOP 1.32 gives
+    // 6.6000000000000005 and 0.53 gives 2.6500000000000004 in f64.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut first = fixed(37.0, -122.0);
+    first.accuracy = Some(accuracy_from_hdop(1.32));
+    let mut second = fixed(37.0, -122.0);
+    second.accuracy = Some(accuracy_from_hdop(0.53));
+    let conn = write(
+        &dir,
+        vec![
+            observation(NODE, [0xAA; 6], -60, EPOCH_MS, first),
+            observation(NODE, [0xCC; 6], -60, EPOCH_MS, second),
+        ],
+    );
+
+    let (csv, _) = export(&conn);
+    // `AccuracyMeters` is the eleventh column; no field before it holds a comma here.
+    let accuracy = |bssid: &str| {
+        let row = csv.lines().find(|line| line.starts_with(bssid)).expect("a row");
+        row.split(',').nth(10).expect("an AccuracyMeters column").to_owned()
+    };
+    assert_eq!(accuracy("AA:AA:AA:AA:AA:AA"), "6.6");
+    assert_eq!(accuracy("CC:CC:CC:CC:CC:CC"), "2.65");
 }
 
 #[test]

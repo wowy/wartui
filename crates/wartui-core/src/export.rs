@@ -36,6 +36,8 @@
 //! the node firmware emits `2026-5-1 13:34:37`), and RFC-4180 quoting of the SSID, which may hold a
 //! comma or quote and need not be text. [`record::ssid_text`](crate::record::ssid_text) also strips
 //! a cloaked network's NUL padding on the way out, so no SSID reaches the file padded.
+//! `AccuracyMeters` is rounded to centimeters, because an estimate derived from HDOP would
+//! otherwise print float noise.
 //!
 //! [`ExportFilter::after_uploads`] leaves out everything the newest non-failed upload covered, so a
 //! repeat upload sends only what came after. The cutoff is the last sighting that upload walked, in
@@ -548,7 +550,7 @@ fn write_row<W: Write>(row: &Window, out: &mut W) -> Result<(), ExportError> {
         quote(&best.security),
         timestamp(row.first_seen),
         best.alt.unwrap_or(0.0),
-        best.accuracy.unwrap_or(0.0),
+        meters(best.accuracy.unwrap_or(0.0)),
         match best.kind {
             RecordKind::Wifi => "WIFI",
             RecordKind::Ble => "BLE",
@@ -574,6 +576,15 @@ fn frequency_column(channel: i64, kind: RecordKind) -> String {
         32..=177 => format!("{}", 5000 + 5 * channel),
         _ => String::new(),
     }
+}
+
+/// An accuracy to the centimeter, for WiGLE's `AccuracyMeters` column.
+///
+/// An accuracy estimated from HDOP is a float product, and prints with noise such as
+/// `6.6000000000000005`. Hundredths is the receiver's own resolution: HDOP has two decimals, and
+/// the factor of five adds none. Rounded, the value prints in its shortest form.
+fn meters(value: f64) -> f64 {
+    (value * 100.0).round() / 100.0
 }
 
 /// Zero-padded UTC, to the second. Built from a real timestamp, not by reformatting the firmware's
