@@ -95,7 +95,7 @@ CREATE TABLE IF NOT EXISTS node (
 -- `wifi_refused` and `ble_refused` are the node's since-boot refusal counts as
 -- the frame carried them: raw, so a reboot shows as the value falling. `beat` is
 -- the node's since-boot heartbeat count, raw, and wraps at 2^16. `unsent` is the
--- heartbeats its radio refused to send since boot, this one excluded, raw, and
+-- heartbeats its radio could not send since boot, this one excluded, raw, and
 -- wraps at 2^8. An assignment
 -- sent on a heartbeat's window is recorded in `assignment`; a dedup-ring clear
 -- is not recorded.

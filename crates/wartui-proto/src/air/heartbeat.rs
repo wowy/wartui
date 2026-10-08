@@ -100,9 +100,9 @@ pub struct HeartbeatMsg {
     /// Heartbeats this node has tried to send since boot, this one included, so the first
     /// carries 1. Wraps. A gap in `beat` is heartbeats lost between node and host.
     pub beat: u16,
-    /// Heartbeats the radio refused to send since boot, this one excluded: a heartbeat
+    /// Heartbeats the radio could not send since boot, this one excluded: a heartbeat
     /// cannot know its own outcome. Wraps at 256, and is read as a difference between
-    /// received heartbeats. A byte is enough. The refusals in a gap cannot outnumber the
+    /// received heartbeats. A byte is enough. The failed sends in a gap cannot outnumber the
     /// beats in it, so the difference is exact for any gap under 256 beats.
     pub unsent: u8,
 }

@@ -22,15 +22,15 @@
 //! replay-to-live handoff go uncounted.
 //!
 //! Each counted gap splits into unsent and lost on the air. Every heartbeat carries `unsent`, the
-//! node's since-boot count of heartbeats its radio refused to send. It excludes the heartbeat
+//! node's since-boot count of heartbeats its radio could not send. It excludes the heartbeat
 //! carrying it, which cannot know its own outcome. So the current count less the previous one is
-//! the refusals among the previous beat and the missed beats between. The previous beat arrived, so
-//! it was not refused, and the difference never exceeds `missed` from honest rows. The cap at
-//! `missed` only guards against a corrupt or repeated row. A byte is enough. The refusals in a gap
-//! cannot outnumber the beats sent in it, so the wrapping difference is exact for any gap under 256
-//! beats. A gap of 256 or more beats, or more than 255 refusals before a restart, undercounts. That
-//! u8 wraps often, so the walk takes the wrapping difference and decides restarts from `counter`
-//! and `beat`, never from `unsent` falling, as `advance_since_boot` would.
+//! the failed sends among the previous beat and the missed beats between. The previous beat
+//! arrived, so it did not fail, and the difference never exceeds `missed` from honest rows. The cap
+//! at `missed` only guards against a corrupt or repeated row. A byte is enough. The failed sends in
+//! a gap cannot outnumber the beats sent in it, so the wrapping difference is exact for any gap
+//! under 256 beats. A gap of 256 or more beats, or more than 255 failed sends before a restart,
+//! undercounts. That u8 wraps often, so the walk takes the wrapping difference and decides restarts
+//! from `counter` and `beat`, never from `unsent` falling, as `advance_since_boot` would.
 //!
 //! Refusals are reported beside the losses, not as one. A full pending buffer turns a sighting away
 //! once per dwell or scan, and the address is usually reported on a later one. The count is
@@ -140,7 +140,7 @@ pub struct NodeLoss {
     pub heartbeats: u64,
     /// Heartbeats lost between the node and the host: gaps in `beat` after a live heartbeat.
     pub heartbeats_missed: u64,
-    /// Of `heartbeats_missed`, those the node's radio refused to send. The rest were lost on the
+    /// Of `heartbeats_missed`, those the node's radio could not send. The rest were lost on the
     /// air or past the bridge.
     pub heartbeats_unsent: u64,
     /// Counted gaps in arrival order. Their missed counts sum to `heartbeats_missed`.
@@ -164,7 +164,7 @@ pub struct HeartbeatWindow {
     pub end_rx_at_ms: i64,
     /// Missing beats, from the same sequence accounting as the lifetime total.
     pub missed: u64,
-    /// Of `missed`, the beats the node's radio refused to send.
+    /// Of `missed`, the beats the node's radio could not send.
     pub unsent: u64,
     /// A detected restart makes the interval uncertain: only missing beats since boot count.
     pub restarted: bool,
@@ -352,12 +352,12 @@ fn heartbeats(conn: &Connection, nodes: &mut BTreeMap<Mac, NodeLoss>) -> rusqlit
                 // A gap after a replayed heartbeat spans time no host was reading.
                 if prev.live && missed > 0 {
                     // Not `advance_since_boot`: a u8 wraps often, and its falling is not a restart.
-                    let refused = u64::from(if rebooted {
+                    let unsent_since = u64::from(if rebooted {
                         beat.unsent
                     } else {
                         beat.unsent.wrapping_sub(prev.unsent)
                     });
-                    let unsent = refused.min(missed);
+                    let unsent = unsent_since.min(missed);
                     node.heartbeats_missed += missed;
                     node.heartbeats_unsent += unsent;
                     node.heartbeat_windows.push(HeartbeatWindow {

@@ -317,9 +317,9 @@ def heartbeats(db, ctx):
                 if p_live != 0:  # a gap after a replayed beat spans time no host read
                     missed += gap_m
                     # `unsent` excludes the beat carrying it and wraps at 256. The previous beat
-                    # arrived, so it was not refused; the cap only guards against a bad row.
-                    refused = us if rebooted else (us - p_us) % 256
-                    unsent += min(refused, gap_m)
+                    # arrived, so its send did not fail; the cap only guards against a bad row.
+                    unsent_since = us if rebooted else (us - p_us) % 256
+                    unsent += min(unsent_since, gap_m)
                 if wr is not None and p_wr is not None:
                     wifi_ref += since_boot_delta(wr, p_wr, rebooted)
                     ble_ref += since_boot_delta(br, p_br, rebooted)

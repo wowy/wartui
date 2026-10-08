@@ -308,7 +308,7 @@ fn store_round_trips_record_when_each_type_written() {
     assert_eq!(beat, 61, "the since-boot heartbeat count as the frame carried it");
 
     let unsent: i64 = conn.query_row("SELECT unsent FROM heartbeat", [], |r| r.get(0)).unwrap();
-    assert_eq!(unsent, 4, "the since-boot refused-send count as the frame carried it");
+    assert_eq!(unsent, 4, "the since-boot failed-send count as the frame carried it");
 
     let live: bool = conn.query_row("SELECT live FROM heartbeat", [], |r| r.get(0)).unwrap();
     assert!(!live, "replayed from the bridge's backlog");

@@ -147,7 +147,7 @@ struct Node {
     /// the count including itself, so the host reads a gap as heartbeats lost between here
     /// and there.
     beats: u16,
-    /// Heartbeats the radio refused to send since boot. Wraps at 256. Each heartbeat
+    /// Heartbeats the radio could not send since boot. Wraps at 256. Each heartbeat
     /// carries the count before its own send, since it cannot know its own outcome.
     unsent: u8,
     /// When this node next sends a heartbeat and holds the admin window open.
@@ -511,8 +511,8 @@ fn next_beat_after(deadline: Instant) -> Instant {
 /// sixty seconds of silence as a node that has left the fleet. `node.version` is
 /// the epoch this node holds, which is how the host tells adoption from a
 /// MAC-layer ack. Every attempt advances `node.beats`, so a gap the host sees in
-/// it covers both a send the radio refused and a frame lost on the air. `node.unsent`
-/// counts the refusals, and is what tells the two apart.
+/// it covers both a send the radio could not make and a frame lost on the air. `node.unsent`
+/// counts the failed sends, and is what tells the two apart.
 fn heartbeat(sender: &mut EspNowSender<'_>, node: &mut Node) {
     // Every heartbeat carries the capabilities, not just the first: sent once they
     // would be lost to a dropped frame or stale after a reflash, and they are

@@ -68,7 +68,7 @@ pub struct Heartbeat {
     pub ble_refused: u16,
     /// Heartbeats the node has sent since its boot, this one included. Wraps.
     pub beat: u16,
-    /// Heartbeats the node's radio refused to send since its boot, this one excluded. Wraps.
+    /// Heartbeats the node's radio could not send since its boot, this one excluded. Wraps.
     pub unsent: u8,
     /// Whether it arrived live rather than replayed from the bridge's backlog.
     pub live: bool,
