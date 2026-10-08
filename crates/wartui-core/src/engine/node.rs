@@ -53,7 +53,7 @@ pub struct NodeState {
     pub confirmed: Option<Assignment>,
     /// Whether [`Self::desired`] still needs delivering. Set when the plan changes, the Bluetooth
     /// scan moves, the node reboots, or its heartbeat shows an acked assignment not adopted.
-    /// Cleared on an acknowledgement, on a full peer table, and when the node departs the plan.
+    /// Cleared on an acknowledgment, on a full peer table, and when the node departs the plan.
     /// Never cleared on enqueue.
     pub dirty: bool,
     /// Whether to clear this node's dedup ring in its next admin window. Set by

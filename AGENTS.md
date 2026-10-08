@@ -109,7 +109,7 @@ Four host crates, strictly layered, plus firmware that shares the bottom one.
 `wartui_core::engine::FleetEngine::handle` is a **pure synchronous state machine**: `Event` in,
 `ActionBatch` out. It reads no clock (time arrives as `Now`, carrying both a monotonic `Instant`
 and unix millis), touches no socket, opens no file. `wartui_core::runtime::drive` is the only
-place that reads a clock and performs actions. This is what makes liveness ageing, reboot
+place that reads a clock and performs actions. This is what makes liveness aging, reboot
 detection, assignment timing and auto-partitioning testable in microseconds against a clock the
 test invents (`crates/wartui-core/tests/engine.rs`). Do not reach for `Instant::now()`, I/O or
 `async` inside `engine`.

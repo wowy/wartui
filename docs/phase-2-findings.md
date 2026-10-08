@@ -85,7 +85,7 @@ Channel 1 is index 0, the lowest index of the assignment and precisely the one
 the old cursor stepped past: adoption set the cursor *to* the first index and
 the foot of the loop advanced off it before it was ever dwelt on. It is now the
 first channel of the first sweep. The store agrees from the other end — the
-lowest assigned channel was first heard 1.1 s after the acknowledgement, well
+lowest assigned channel was first heard 1.1 s after the acknowledgment, well
 inside a 4.7 s sweep.
 
 The bug was not new to the channel-set work; the bounds-based cursor had the
@@ -113,7 +113,7 @@ node was actively scanning Bluetooth* — the state in which a vendor node
 acknowledges nothing at all. Run D reproduces it after a reflash: 5845 µs to
 turn the scan on, 5874 µs to turn it off.
 
-The node's console confirms adoption rather than merely acknowledgement:
+The node's console confirms adoption rather than merely acknowledgment:
 
 ```
 assigned v1: 34 channels (1,2,...,165), ble off, node 0 of 1
@@ -123,7 +123,7 @@ assigned v2: 34 channels (1,2,...,165), ble on,  node 0 of 1
 ## Revoking the scan stops it, one sweep later
 
 Run B recorded 89 Bluetooth observations and run D 85, and in both every one of
-them falls inside the window between the enabling acknowledgement and the
+them falls inside the window between the enabling acknowledgment and the
 revoking one. Zero before, zero after.
 
 The edges are one sweep wide in each direction: the first BLE row arrived 5.2 s
@@ -265,7 +265,7 @@ already collapses.
 Run E gave the scan to `4F:98` while `57:84` ran the identical binary, `ble`
 feature and all. `4F:98` produced 81 Bluetooth observations; `57:84` produced
 **none at all**, at any point in the capture. Zero arrived before the enabling
-acknowledgement or after the revoking one, on either node.
+acknowledgment or after the revoking one, on either node.
 
 Both frames were acknowledged — 5852 µs to turn the scan on and 5831 µs to turn
 it off, the latter sent while the node was scanning. That is the same result as

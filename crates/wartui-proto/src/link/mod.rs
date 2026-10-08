@@ -174,7 +174,7 @@ pub enum SendStatus {
     /// The radio confirmed delivery. Unicast ESP-NOW is MAC-acknowledged, so this is
     /// real delivery, not a successful enqueue.
     AckOk,
-    /// The frame went out but no acknowledgement came back.
+    /// The frame went out but no acknowledgment came back.
     AckFail,
     /// Broadcast, which is never acknowledged.
     Broadcast,

@@ -1,6 +1,6 @@
 //! Bluetooth scanning, run only while the core has set `ADMIN_FLAG_BLE` for this
 //! node — at most one node in a fleet, and none by default. On a stock node BLE
-//! cost it every channel assignment sent to it, because an 802.11 acknowledgement
+//! cost it every channel assignment sent to it, because an 802.11 acknowledgment
 //! comes from the receiver's MAC hardware and its absence means the radio was
 //! simply not on the channel: NimBLE and Wi-Fi share the one 2.4 GHz antenna, and
 //! the admin window is precisely when the node is otherwise idle and the

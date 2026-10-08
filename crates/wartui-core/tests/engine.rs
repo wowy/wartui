@@ -1604,7 +1604,7 @@ fn engine_confirms_assignment_when_mac_ack_arrives() {
     engine.handle(heartbeat(NODE, 1), clock.at(1));
     let (id, _, admin) = sent_admin(&engine.handle(heartbeat(NODE, 2), clock.at(6)));
 
-    // Only the MAC-layer acknowledgement clears the dirty flag.
+    // Only the MAC-layer acknowledgment clears the dirty flag.
     let batch = engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(6));
     let node = engine.nodes().next().expect("the node");
     assert!(!node.dirty, "acknowledged, so there is nothing left to deliver");

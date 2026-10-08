@@ -718,7 +718,7 @@ async fn sim_node_fails_to_ack_assignments_when_ble_coexistence_failure_is_simul
     assert_eq!(next_send_result(&mut link).await, SendStatus::AckOk);
     next_heartbeat_from(&mut link, node).await;
 
-    // Nothing after it is. An 802.11 acknowledgement comes from the receiver's
+    // Nothing after it is. An 802.11 acknowledgment comes from the receiver's
     // MAC hardware, so this is indistinguishable from a node that is not there
     // — and the frame really is dropped, which is why the operator cannot take
     // the assignment back.

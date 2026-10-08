@@ -72,7 +72,7 @@ static volatile uint32_t dropped = 0;
 // An 802.11 ACK names only the station being acknowledged, so an ACK whose
 // receiver address is the core's MAC means the node did answer the core's
 // unicast. That separates "nobody received it" from "it was received but the
-// acknowledgement never got back", which look identical from the retry bit
+// acknowledgment never got back", which look identical from the retry bit
 // alone and have very different consequences.
 struct Talker {
   uint8_t mac[6];
@@ -109,9 +109,9 @@ static void noteAck(const uint8_t *receiver) {
   }
 }
 
-// Total acknowledgements seen, whoever they were for. This is the control
+// Total acknowledgments seen, whoever they were for. This is the control
 // that makes a zero per-transmitter count meaningful: without it, "nobody
-// acknowledged" and "no acknowledgement ever reached this callback" are the
+// acknowledged" and "no acknowledgment ever reached this callback" are the
 // same reading, and the second is far more likely to be a mistake of mine.
 static volatile uint32_t ack_frames = 0;
 
@@ -179,7 +179,7 @@ static void onPromiscuous(void *buf, wifi_promiscuous_pkt_type_t type) {
   const uint8_t *p = pkt->payload;
   const int len = pkt->rx_ctrl.sig_len;
 
-  // Acknowledgement: subtype 13 of the control type, carrying only the address
+  // Acknowledgment: subtype 13 of the control type, carrying only the address
   // of the station being acknowledged. Counted, never queued -- a busy channel
   // produces far too many to print.
   if (type == WIFI_PKT_CTRL) {
@@ -261,7 +261,7 @@ static void report(uint8_t channel) {
                 (unsigned long)dropped, (unsigned long)(millis() / 1000));
 
   if (ack_frames == 0) {
-    Serial.println("#   NO acknowledgements captured at all, so the per-transmitter counts "
+    Serial.println("#   NO acknowledgments captured at all, so the per-transmitter counts "
                    "below mean nothing -- control-frame capture is not working");
   }
 
@@ -300,13 +300,13 @@ void setup() {
   esp_now_register_recv_cb(onEspNowRecv);
 
   wifi_promiscuous_filter_t filter = {};
-  // Action frames carry ESP-NOW; control frames carry the acknowledgements.
+  // Action frames carry ESP-NOW; control frames carry the acknowledgments.
   filter.filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT | WIFI_PROMIS_FILTER_MASK_CTRL;
   esp_wifi_set_promiscuous_filter(&filter);
 
   // Control frames are gated a second time by their own subtype filter, and
   // setting only the mask above delivers none of them. Missing this made an
-  // earlier capture report zero acknowledgements from an instrument that was
+  // earlier capture report zero acknowledgments from an instrument that was
   // never switched on.
   wifi_promiscuous_filter_t ctrl_filter = {};
   ctrl_filter.filter_mask = WIFI_PROMIS_CTRL_FILTER_MASK_ACK;

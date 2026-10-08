@@ -47,7 +47,7 @@ the failure Phase 0 exists to document, inverted:
 | Acknowledged | **0** | **8** |
 
 No sniffer was running, so there is no sequence-number or retry-bit column to
-set against Phase 0's; the acknowledgement itself is the measurement, and it
+set against Phase 0's; the acknowledgment itself is the measurement, and it
 comes from the receiver's MAC hardware either way.
 
 Delivery, measured host-side from `created_at` to the transmit callback, was
@@ -58,7 +58,7 @@ heartbeat-to-callback on the bridge's own clock, against a 300 ms admin window.
 **Six identical assignments went out in one 9 ms burst at connect.** This is
 host behavior, not node behavior, and it is benign: a bridge left powered
 buffers heartbeats, so `run` attaching to one that has been up for half an hour
-processes a backlog of them before any acknowledgement can return, and emits an
+processes a backlog of them before any acknowledgment can return, and emits an
 assignment per heartbeat. All six carried epoch 1, the node adopted the first
 and discarded five on the `!=` rule, and all six were acknowledged.
 
@@ -438,7 +438,7 @@ reports in a `static`, as `sniff` already keeps its sightings.
 A review after the run found that `sweep` enabled its scan through the same
 helper the setup commands use, which drains the controller's queue until two
 reads come back empty — so it was discarding whatever advertising reports
-arrived while it waited for the acknowledgement of the command that started the
+arrived while it waited for the acknowledgment of the command that started the
 scan. The fix writes the command and lets the collect loop absorb the completion
 instead. The section below is what that changed, which is less than this
 paragraph originally predicted.
