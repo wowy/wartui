@@ -166,7 +166,7 @@ impl FleetEngine {
     /// this cheap enough for every tick and off a heartbeat's critical path.
     pub(super) fn replan(&mut self, now: Now) {
         // The preferred node retakes the scan when nobody holds it and it is drivable: at startup,
-        // and after ageing out.
+        // and after aging out.
         if self.ble_node.is_none()
             && let Some(mac) = self.preferred_ble
             && self.nodes.get(&mac).is_some_and(|node| self.is_assignable(node, now))

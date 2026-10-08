@@ -39,7 +39,7 @@ before anything reset the board:
 `esp_hal::system::software_reset()` at `firmware/bridge/src/main.rs`, reached
 through `HostToBridge::Reset`. So at the moment the bridge appeared dead it was
 reading the USB OUT endpoint, framing with `FrameAccumulator`, passing the CRC
-and the version byte, deserialising, and dispatching a command. **Every part of
+and the version byte, deserializing, and dispatching a command. **Every part of
 the receive path was alive. Only the transmit direction was gone.** It came back
 healthy — `Ready` in 3 ms, channel 6 — and `espflash` was never needed.
 
@@ -64,7 +64,7 @@ Nothing the firmware can do clears it. So if that read never lands — a host th
 stops fetching at the wrong moment, a `WR_DONE` against a FIFO the host has just
 emptied — the endpoint is closed for the rest of that power cycle, silently,
 while the receive endpoint carries on. Which silicon path gets there was not
-pinned down; doing so needs a logic analyser on the USB lines rather than more
+pinned down; doing so needs a logic analyzer on the USB lines rather than more
 reading, and it does not change the response.
 
 The outbox is *not* the cause and was left alone. `Outbox::pump` only calls
@@ -79,7 +79,7 @@ have to hold together (`StallWatch::note_tx`): something is queued, a host frame
 decoded recently, another decoded since the stall began, and the endpoint has
 refused every byte for three seconds since all of that first became true. The
 host-present half is what keeps a bridge sitting on a bench with nothing attached
-quiet for ever, which is the case that must never be reset; the fourth fact is
+quiet forever, which is the case that must never be reset; the fourth fact is
 what keeps it quiet after an operator quits, which cost a section of its own
 below; and the section immediately after this one is about the clock.
 
@@ -286,13 +286,13 @@ one is a case the bench did not cover — the bench had no nodes on it, and ever
 run started from a host that was already attached. The first of them has since
 been reproduced, and the measurement is under it.
 
-**The stall detector rebooted a healthy hostless bridge for ever.** `last_host`
+**The stall detector rebooted a healthy hostless bridge forever.** `last_host`
 was seeded with the boot instant rather than with "nothing has been heard".
 `note_tx` reads presence as `last_host.elapsed() < HOST_PRESENT_WINDOW`, so
 every life believed a host was there for its first ten seconds. Put that bridge
 on a battery beside a running fleet: `drain_radio` fills the bulk ring, the IN
 endpoint is draining to nobody, `pump` moves nothing, and at 3.1 s it resets —
-into another ten-second window, and another reset, for ever. The bench never saw
+into another ten-second window, and another reset, forever. The bench never saw
 it because the bench had no fleet: with nothing being received the outbox stays
 empty and the first of the three conditions never holds. It is now
 `Option<Instant>`, and presence is something a host demonstrates rather than
@@ -529,7 +529,7 @@ was wrong twice.
 
 **Measured on a Waveshare ESP32-S3-LCD-1.47** (S3 rev v0.2, 16 MB flash, MAC
 `…6A:4C`), flashed with the generic bridge firmware — the board's screen, LED and
-SD slot are simply never initialised:
+SD slot are simply never initialized:
 
 | what | result |
 | --- | --- |
@@ -789,7 +789,7 @@ The first cut keyed this on the reset cause, `Software` only. That is the wrong 
 directions. A panic or a `StallWatch` reset after the host left is `Software` with nobody reading,
 so it wrote into an unread endpoint. A watchdog or lockup reset while a host keeps the port open
 is not `Software`, so that life stayed silent, and a host that never sends again (`wartui sniff`)
-heard nothing for ever. The rule now keys on presence: each pass of the main loop records in RTC
+heard nothing forever. The rule now keys on presence: each pass of the main loop records in RTC
 memory whether a host frame decoded within `HOST_PRESENT_WINDOW_MS`, and the next life reads it
 back, never after a power-on, where RTC memory is garbage. A frame that decodes with a mismatched
 link version also opens the gate, since only a host writes to the bridge's input.

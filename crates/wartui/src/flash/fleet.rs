@@ -304,7 +304,7 @@ mod tests {
 
     use wartui_bridge::ports::{ESPRESSIF_VID, candidate};
 
-    use super::super::normalise;
+    use super::super::normalize;
     use super::super::release_asset;
     use super::super::testing::{BRIDGE_MAC, NODE_MAC, board};
     use super::*;
@@ -480,9 +480,9 @@ mod tests {
         let found = source(&NODE, None, Some(dir), &c5, false, Some("v1")).unwrap();
         assert_eq!(found, Source::Build(dir.to_owned()));
         let found = source(&NODE, None, None, &c5, false, None).unwrap();
-        assert_eq!(found, Source::Build(normalise(Path::new(NODE.dir))));
+        assert_eq!(found, Source::Build(normalize(Path::new(NODE.dir))));
         let found = source(&NODE, None, None, &c5, false, Some("")).unwrap();
-        assert_eq!(found, Source::Build(normalise(Path::new(NODE.dir))));
+        assert_eq!(found, Source::Build(normalize(Path::new(NODE.dir))));
         let found = source(&NODE, None, None, &c5, false, Some("v1")).unwrap();
         let asset = "wartui-node-fw-esp32c5.bin";
         assert_eq!(found, Source::Release { tag: "v1".to_owned(), asset });

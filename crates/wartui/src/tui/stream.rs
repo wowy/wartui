@@ -102,7 +102,7 @@ fn big_count(text: &str, style: Style, labels: [&str; 3]) -> Vec<Vec<Span<'stati
         .collect()
 }
 
-/// The colour a record's kind is drawn in.
+/// The color a record's kind is drawn in.
 fn kind_style(kind: RecordKind) -> Style {
     match kind {
         RecordKind::Wifi => Style::new().fg(Color::Green),

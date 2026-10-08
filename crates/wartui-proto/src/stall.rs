@@ -62,7 +62,7 @@ pub const HOST_PRESENT_WINDOW_MS: u64 = 10_000;
 /// So the clock runs from the later of the first refusal and the first asking host frame
 /// since the last byte moved. Neither half alone is a contradiction. It is the *first*
 /// such frame, not the latest: a host polling twice a second through a wedge would
-/// otherwise push the clock forward for ever.
+/// otherwise push the clock forward forever.
 ///
 /// # Why a frame must be unanswered, not merely recent
 ///
@@ -213,7 +213,7 @@ mod tests {
         let mut watch = StallWatch::new();
         // A congested endpoint that keeps almost catching up: it refuses for
         // just under the timeout, lets one byte through, and does it again.
-        // That is a slow host, not a wedged one, and it may go on for ever.
+        // That is a slow host, not a wedged one, and it may go on forever.
         for round in 0..100 {
             let base = round * TX_STALL_TIMEOUT_MS;
             assert!(!wedged(&mut watch, base));

@@ -62,8 +62,8 @@ pub fn set_peer_rate(_manager: &EspNowManager<'_>, mac: &[u8; 6]) -> bool {
         ersu: false,
         dcm: false,
     };
-    // SAFETY: `mac` is six readable bytes and `config` is a fully initialised
-    // `esp_now_rate_config_t`, both alive for the whole call. ESP-NOW is initialised,
+    // SAFETY: `mac` is six readable bytes and `config` is a fully initialized
+    // `esp_now_rate_config_t`, both alive for the whole call. ESP-NOW is initialized,
     // since an `EspNowManager` exists. 0 is `ESP_OK`.
     unsafe { sys::esp_now_set_peer_rate_config(mac.as_ptr(), &mut config) == 0 }
 }

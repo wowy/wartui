@@ -340,7 +340,7 @@ fn save(settings: &mut Settings, written: config::Config) -> Result<PathBuf, Str
     Ok(path)
 }
 
-/// The settings modal, centred over the live view behind it.
+/// The settings modal, centered over the live view behind it.
 pub(super) fn draw_settings_modal(frame: &mut Frame<'_>, modal: &ConfigModal) {
     let area = centered_rect(48, 13, frame.area());
     frame.render_widget(Clear, area);

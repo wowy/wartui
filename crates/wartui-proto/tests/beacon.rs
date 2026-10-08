@@ -118,7 +118,7 @@ fn beacon_parser_classifies_network_as_wpa2_enterprise_when_wpa_specifies_enterp
 }
 
 #[test]
-fn beacon_parser_prioritises_rsn_psk_over_legacy_wpa_when_both_elements_present() {
+fn beacon_parser_prioritizes_rsn_psk_over_legacy_wpa_when_both_elements_present() {
     // The WPA element names 802.1X and the RSN element names PSK. The enterprise
     // rung is guarded with `!has_rsn`, so RSN decides and this is `[WPA2_PSK]`.
     // Without that guard it reads as `[WPA2]`, for an access point that will
@@ -138,7 +138,7 @@ fn beacon_parser_classifies_network_as_undefined_when_given_unmapped_akm_suite()
 }
 
 #[test]
-fn beacon_parser_prioritises_wapi_security_when_multiple_security_ies_present() {
+fn beacon_parser_prioritizes_wapi_security_when_multiple_security_ies_present() {
     // It is tested first, before RSN is consulted.
     let mut ies = ie(48, &rsn(&[2]));
     ies.extend_from_slice(&ie(68, &[]));
@@ -155,7 +155,7 @@ fn beacon_parser_extracts_bssid_when_ssid_element_is_empty() {
 }
 
 #[test]
-fn beacon_parser_recognises_hidden_network_when_ssid_contains_only_zero_bytes() {
+fn beacon_parser_recognizes_hidden_network_when_ssid_contains_only_zero_bytes() {
     // The other way of cloaking: the element carries the name's real length
     // with every byte zeroed. This is the exact shape that reached a WiGLE
     // export as eight NULs in the SSID column.
@@ -182,7 +182,7 @@ fn beacon_parser_preserves_interior_null_bytes_when_parsing_ssid() {
 }
 
 #[test]
-fn beacon_parser_recognises_hidden_network_when_overlong_ssid_contains_only_zeros() {
+fn beacon_parser_recognizes_hidden_network_when_overlong_ssid_contains_only_zeros() {
     let ap = parse_mgmt(&beacon(&ie(0, &[0u8; 40])), -50, 6).expect("a beacon");
     assert!(ap.ssid().is_empty());
 }
@@ -217,7 +217,7 @@ fn beacon_parser_extracts_channel_from_ds_or_ht_elements_when_present() {
 }
 
 #[test]
-fn beacon_parser_prioritises_ds_parameter_set_over_ht_operation_when_both_present() {
+fn beacon_parser_prioritizes_ds_parameter_set_over_ht_operation_when_both_present() {
     let mut ies = ie(3, &[6]);
     ies.extend_from_slice(&ie(61, &[36, 0, 0, 0, 0]));
     assert_eq!(parse_mgmt(&beacon(&ies), -50, 1).expect("beacon").channel, 6);

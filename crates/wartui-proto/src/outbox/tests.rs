@@ -178,7 +178,7 @@ fn outbox_drops_oldest_priority_frames_when_priority_ring_capacity_is_exceeded()
     let frames = received(&sink.out);
     assert!(
         frames.iter().any(|f| matches!(f, BridgeToHost::Status { rx_count: 99, .. })),
-        "the newest priority frame was dropped in favour of a stale one"
+        "the newest priority frame was dropped in favor of a stale one"
     );
     assert_eq!(frames.len(), PRIORITY_DEPTH);
 }
@@ -263,7 +263,7 @@ fn outbox_keeps_in_flight_priority_frame_when_priority_ring_overflows_mid_write(
 }
 
 #[test]
-fn outbox_resynchronises_cobs_stream_when_endpoint_refuses_mid_frame() {
+fn outbox_resynchronizes_cobs_stream_when_endpoint_refuses_mid_frame() {
     let mut outbox = Outbox::new();
     for n in 0..3 {
         outbox.send(&log(n));

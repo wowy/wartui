@@ -90,7 +90,7 @@ pub struct HeartbeatMsg {
     pub capabilities: Capabilities,
     /// Access points a full pending buffer turned away since boot, each once per dwell
     /// ([`crate::pending::Refused`]). Wraps. Most are reported on a later dwell, so this
-    /// measures the buffer against the neighbourhood rather than counting losses. The
+    /// measures the buffer against the neighborhood rather than counting losses. The
     /// host reads it as a difference between heartbeats.
     pub wifi_dropped: u16,
     /// Advertisers a full pending buffer turned away since boot, each once per scan.

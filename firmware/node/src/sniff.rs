@@ -160,7 +160,7 @@ pub fn take() -> Option<Sighting> {
 
 /// Access points turned away by a full buffer since boot, each counted once per dwell.
 /// Wraps. The heartbeat carries it to the host. A number that climbs means [`PENDING`]
-/// is too small for the neighbourhood, not that the dwell is wrong.
+/// is too small for the neighborhood, not that the dwell is wrong.
 pub fn dropped() -> u16 {
     DWELL.with(|dwell| dwell.sightings.dropped())
 }

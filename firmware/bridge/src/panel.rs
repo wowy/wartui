@@ -8,17 +8,17 @@
 //! `crates/wartui-core/src/panel.rs` — which is why a change to what the panel says
 //! costs a `cargo run` rather than a reflash, and why the bridge stays as ignorant of
 //! what the bytes mean as the rest of this crate. What is decided here is only what
-//! cannot be: the three colours a [`Severity`] means, which are a property of this
+//! cannot be: the three colors a [`Severity`] means, which are a property of this
 //! panel rather than of the fleet, and the fallback screen, which is link-local state
 //! the host could not know.
 //!
-//! # Get the colour order wrong and red renders blue
+//! # Get the color order wrong and red renders blue
 //!
 //! The vendor's `setRotation` ORs `0x08` into MADCTL on every rotation, so this panel
 //! is BGR. On a screen whose whole job is red against green against yellow that is not
 //! a cosmetic default to inherit, so [`ColorOrder::Bgr`] is set explicitly. The same
 //! goes for the rest of the init list, none of which any pinout carries and all of
-//! which is the difference between a working screen and a shifted, wrong-coloured one:
+//! which is the difference between a working screen and a shifted, wrong-colored one:
 //! inversion on, the vendor's `(26, 1)` offset into the controller's larger
 //! framebuffer, and rotation 3 for 160x80 the way round its own examples use.
 //!
@@ -149,9 +149,9 @@ const MIN_REDRAW_MS: u64 = 500;
 ///
 /// Measured against the host's `status_interval` of five seconds
 /// (`crates/wartui-core/src/engine/config.rs`), not against the 1 Hz panel rate: a push only
-/// goes out when a line's text or colour changed, so a capture with nothing moving
+/// goes out when a line's text or color changed, so a capture with nothing moving
 /// sends nothing but that five-second `GetStatus`. At five this would go false in the
-/// gap before every one of them and a working capture would flash "no host" for ever.
+/// gap before every one of them and a working capture would flash "no host" forever.
 /// Ten is two of those polls, which is the same margin and the same reasoning as
 /// `stall::HOST_PRESENT_WINDOW_MS`; the cost of waiting is only that a screen is
 /// briefly out of date rather than briefly wrong.
@@ -167,7 +167,7 @@ const TRANSFER_BYTES: usize = WIDTH as usize * ROW_HEIGHT as usize * 2;
 ///
 /// Picked for legibility on this IPS panel rather than taken as a pure primary — a
 /// fully saturated green on a backlit 0.96" screen reads as a glare rather than a
-/// colour, and the point is to be readable at arm's length in a car.
+/// color, and the point is to be readable at arm's length in a car.
 const OK: Rgb565 = Rgb565::new(6, 54, 10);
 
 /// Amber: working, but not as it should be.
@@ -285,7 +285,7 @@ impl Screen {
             // Not a default to inherit. See the module doc.
             .color_order(ColorOrder::Bgr)
             // Reverses rows and swaps them with columns, so MADCTL comes out 0xA0 —
-            // 0xA8 with the colour order — which is the vendor's rotation 3.
+            // 0xA8 with the color order — which is the vendor's rotation 3.
             .orientation(Orientation::new().rotate(Rotation::Deg270))
             .init(&mut delay)
             .map_err(|_| "the panel refused its init sequence")?;
@@ -336,8 +336,8 @@ impl Screen {
         // costs a transfer per row for pixels that are past the bottom of the glass.
         for row in 0..ROWS as usize {
             let wanted = lines.get(row);
-            // Severity as well as text: a line whose number held while its colour
-            // changed is the whole point of having colours.
+            // Severity as well as text: a line whose number held while its color
+            // changed is the whole point of having colors.
             if !crossed && self.shown[row].as_ref() == wanted {
                 continue;
             }
@@ -403,7 +403,7 @@ impl Screen {
         let _ = self.display.fill_solid(&strip, BACKGROUND);
 
         let Some(line) = line else { return };
-        let style = MonoTextStyle::new(&FONT, colour(line.level));
+        let style = MonoTextStyle::new(&FONT, color(line.level));
         let _ = Text::with_baseline(
             line.text.as_str(),
             Point::new(0, i32::from(top)),
@@ -415,7 +415,7 @@ impl Screen {
 }
 
 /// What a severity looks like on this panel.
-const fn colour(level: Severity) -> Rgb565 {
+const fn color(level: Severity) -> Rgb565 {
     match level {
         Severity::Ok => OK,
         Severity::Warn => WARN,

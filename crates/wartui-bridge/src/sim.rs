@@ -50,7 +50,7 @@ pub struct SimConfig {
     pub speed: f64,
     /// Seeds the fake world, so a run is reproducible.
     pub seed: u64,
-    /// Size of the imaginary neighbourhood.
+    /// Size of the imaginary neighborhood.
     pub wifi_networks: u16,
     /// Chance per advertiser slot in a scan that a BLE advertiser shows up, for the
     /// one node holding the Bluetooth assignment. BLE addresses rotate for privacy,
@@ -86,7 +86,7 @@ pub struct SimConfig {
     /// Give a network a new address once it has been heard this many times, as a moving
     /// fleet leaves networks behind and meets new ones.
     ///
-    /// `None`, the default, keeps the neighbourhood the same for ever, which is a parked
+    /// `None`, the default, keeps the neighborhood the same forever, which is a parked
     /// fleet. Counted per network across the whole fleet, and on every hearing rather than
     /// every report, so a node whose ring suppresses a network still moves it on.
     pub sightings_per_address: Option<u32>,
@@ -225,7 +225,7 @@ async fn run_bridge(
         // here is a fault on screen that no amount of looking could explain.
         reset_cause: ResetCause::PowerOn,
         last_phase: LoopPhase::Unknown,
-        // Not modelled: nothing in the simulator allocates on a device heap,
+        // Not modeled: nothing in the simulator allocates on a device heap,
         // and a made-up figure would be read as a measurement.
         heap_free: 0,
         // Announced the instant it came up, and it never reboots.
@@ -728,7 +728,7 @@ fn elapsed_ms(started: tokio::time::Instant) -> u32 {
     u32::try_from(started.elapsed().as_millis() % WRAP).unwrap_or(0)
 }
 
-/// A fake neighbourhood, generated once and shared by every node — so two nodes
+/// A fake neighborhood, generated once and shared by every node — so two nodes
 /// scanning the same channel really do see the same access point, which is what
 /// makes cross-node deduplication testable.
 #[derive(Debug)]
@@ -785,7 +785,7 @@ impl World {
     ///
     /// With [`SimConfig::sightings_per_address`], every that-many hearings the slot holds a
     /// different device: the same channel, signal and name under a new address. The count
-    /// is the world's, shared by the fleet, so it is the neighbourhood that moves on rather
+    /// is the world's, shared by the fleet, so it is the neighborhood that moves on rather
     /// than one node's view of it.
     fn hear(&self, slot: usize) -> Network {
         let network = &self.networks[slot];
@@ -818,7 +818,7 @@ impl World {
 ///
 /// Mixed rather than counted, so consecutive devices in a slot look no more related than
 /// any two real ones, and derived from the slot's first address rather than drawn from the
-/// world's generator, so turning over cannot change the neighbourhood a seed produces.
+/// world's generator, so turning over cannot change the neighborhood a seed produces.
 /// Locally administered, like every simulated address.
 fn moved(bssid: Mac, generation: u32) -> Mac {
     let mut first = [0u8; 8];
@@ -827,7 +827,7 @@ fn moved(bssid: Mac, generation: u32) -> Mac {
     [0x02, v[1], v[2], v[3], v[4], v[5]]
 }
 
-/// SplitMix64's finaliser: every input bit reaches every output bit.
+/// SplitMix64's finalizer: every input bit reaches every output bit.
 const fn mix(mut z: u64) -> u64 {
     z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -849,7 +849,7 @@ struct Network {
 }
 
 /// The OpenRoaming roaming consortium triple, so a simulated Passpoint
-/// neighbourhood exercises the trailer the way a real one would.
+/// neighborhood exercises the trailer the way a real one would.
 const OPEN_ROAMING: [u8; 17] = [
     0x02, 0x55, //
     0x5A, 0x03, 0xBA, 0x00, 0x00, //

@@ -177,7 +177,7 @@ def stop(proc):
 
 
 def quit_cleanly(master, proc):
-    """`q` commits the last batch; anything still running after that is signalled."""
+    """`q` commits the last batch; anything still running after that is signaled."""
     try:
         os.write(master, b"q")
     except OSError:
@@ -188,7 +188,7 @@ def quit_cleanly(master, proc):
 def styled_runs(screen):
     """Every run of cells drawn in something other than the default style.
 
-    The fleet table says what a node is doing in colour as much as in words, so
+    The fleet table says what a node is doing in color as much as in words, so
     the grid on its own is only most of what was drawn.
     """
     for y in range(screen.lines):
@@ -316,7 +316,7 @@ if __name__ == "__main__":
     parser.add_argument("--settle", type=float, metavar="SECONDS",
                         help=f"how long to let a key land; {SIM_SETTLE:g}s, or "
                              f"{BRIDGE_SETTLE:g}s with --bridge")
-    parser.add_argument("--attrs", action="store_true", help="also list everything drawn in colour")
+    parser.add_argument("--attrs", action="store_true", help="also list everything drawn in color")
     parser.add_argument("--lat", type=float, help="position to record; both halves or neither")
     parser.add_argument("--lon", type=float)
     parser.add_argument("--bin", metavar="PATH", help="an existing binary, instead of building")

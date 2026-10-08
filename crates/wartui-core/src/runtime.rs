@@ -35,7 +35,7 @@ pub const PANEL_INTERVAL: Duration = Duration::from_millis(1_000);
 /// what the dongle shows load-bearing, and only a `Ready` corrects it. A bridge that reboots
 /// mid-session comes up on its fallback screen. If its `Ready` is lost, the lines never change,
 /// nothing is pushed, and the dongle says "no host" with a host attached. So the whole panel goes
-/// out on this interval regardless. Every frame is idempotent, so resynchronising is sending one.
+/// out on this interval regardless. Every frame is idempotent, so resynchronizing is sending one.
 /// The bridge redraws only rows that differ, so an unneeded repaint costs one frame and no SPI.
 pub const PANEL_REPAINT: Duration = Duration::from_secs(10);
 
@@ -191,7 +191,7 @@ pub async fn drive(
                         );
                         match link.send_bulk(HostToBridge::ShowPanel { lines: lines.clone() }) {
                             // Cached only once really sent. A dropped push that still updated the
-                            // cache would be suppressed for ever by the comparison above.
+                            // cache would be suppressed forever by the comparison above.
                             Ok(()) => {
                                 panel_lines = Some(lines);
                                 panel_drawn = Some(now.mono);

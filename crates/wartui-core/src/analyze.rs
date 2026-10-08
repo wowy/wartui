@@ -98,7 +98,7 @@ pub struct HostLoss {
     pub duplicates: u64,
     /// USB frames that failed their checksum.
     pub garbled: u64,
-    /// Frames that were nobody's recognisable format.
+    /// Frames that were nobody's recognizable format.
     pub undecodable: u64,
     /// Frames from another fleet, another core, or a build speaking another wire version.
     pub foreign: u64,

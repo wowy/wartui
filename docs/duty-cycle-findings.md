@@ -88,7 +88,7 @@ in its ROM bootloader (`espflash board-info --after no-reset`) past the 60 s tim
 - Heartbeats kept their interval with no drift. Each gap stayed within one dwell (sweeping) or
   one scan (Bluetooth) of 5 s, which is how often each checks the deadline. 3 of 483 heartbeats
   were lost.
-- A sweep costs about 131 ms a channel with the window amortised in: a dwell, the hop, and
+- A sweep costs about 131 ms a channel with the window amortized in: a dwell, the hop, and
   100 ms of window every 5 s.
 - The Bluetooth node scanned every ~514 ms, 613 scans in its log. Its batches come as often as
   it hears a new advertiser, so the median gap is 2.7 s, but the shortest are one scan apart.

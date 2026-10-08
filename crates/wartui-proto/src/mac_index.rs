@@ -11,7 +11,7 @@
 //! `usize`, and is why [`MacIndex::new`] demands fewer than `u16::MAX` entries. The table
 //! is never more than half full, so probe runs stay short. MACs that collide degrade to a
 //! probe run no longer than the entries held: a linear scan, and no worse. Deletion is
-//! backward-shift rather than tombstones, so a table that churns for ever never fills
+//! backward-shift rather than tombstones, so a table that churns forever never fills
 //! with dead slots.
 
 /// Marks a slot as holding nothing.

@@ -1,7 +1,7 @@
 //! The USB link between the host and the bridge dongle.
 //!
 //! Unlike the air format, the link has a version byte, a checksum, and framing that
-//! resynchronises from arbitrary junk.
+//! resynchronizes from arbitrary junk.
 //!
 //! ```text
 //! COBS( version:u8 || postcard(message) || crc16:u16le ) || 0x00
@@ -174,7 +174,7 @@ pub enum SendStatus {
     /// The radio confirmed delivery. Unicast ESP-NOW is MAC-acknowledged, so this is
     /// real delivery, not a successful enqueue.
     AckOk,
-    /// The frame went out but no acknowledgement came back.
+    /// The frame went out but no acknowledgment came back.
     AckFail,
     /// Broadcast, which is never acknowledged.
     Broadcast,
@@ -201,7 +201,7 @@ pub enum HostToBridge {
     /// Sent the moment the host opens the port. A bridge that does not
     /// [speak first](ResetCause::speaks_first) says nothing until a host frame decodes.
     /// One that does announced at boot, possibly to a host long gone. Either way, a new
-    /// connection that did not ask would wait for ever.
+    /// connection that did not ask would wait forever.
     Identify,
     /// Register a peer so unicast frames can be addressed to it.
     AddPeer {

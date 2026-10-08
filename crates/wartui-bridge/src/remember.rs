@@ -137,7 +137,7 @@ fn write(path: &Path, mac: Mac) -> std::io::Result<()> {
 
 /// This host's directory for state a program rebuilds when it has to.
 ///
-/// `XDG_STATE_HOME` is honoured only when it is absolute: the specification says a
+/// `XDG_STATE_HOME` is honored only when it is absolute: the specification says a
 /// relative value is invalid, and taking one literally would scatter a `wartui`
 /// directory through whichever directory a capture was started from.
 #[must_use]

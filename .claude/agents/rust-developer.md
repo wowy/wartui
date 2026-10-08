@@ -18,7 +18,7 @@ While working:
 
 - Put unit tests in a `#[cfg(test)]` module beside the code, and tests that go through a crate's
   public API under `crates/*/tests/`. Either way, name them `component_action_when_condition`.
-- If view or CLI behaviour changes, keep `crates/wartui/README.md` true.
+- If view or CLI behavior changes, keep `crates/wartui/README.md` true.
 - Keep prose — docs, comments, `//!` reasoning, your report — clear and concise: state the point
   and stop. No extended descriptions or discussion. Present tense, per AGENTS.md § Conventions.
 

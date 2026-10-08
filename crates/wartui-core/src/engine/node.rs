@@ -53,7 +53,7 @@ pub struct NodeState {
     pub confirmed: Option<Assignment>,
     /// Whether [`Self::desired`] still needs delivering. Set when the plan changes, the Bluetooth
     /// scan moves, the node reboots, or its heartbeat shows an acked assignment not adopted.
-    /// Cleared on an acknowledgement, on a full peer table, and when the node departs the plan.
+    /// Cleared on an acknowledgment, on a full peer table, and when the node departs the plan.
     /// Never cleared on enqueue.
     pub dirty: bool,
     /// Whether to clear this node's dedup ring in its next admin window. Set by
@@ -83,7 +83,7 @@ pub struct NodeState {
     /// Whether the batch that set `last_seq` arrived live. A gap after a replayed batch is not
     /// counted ([`FleetEngine::note_batch_seq`]).
     pub(super) last_seq_live: bool,
-    /// Bytes of this node's latest sighting batch, kept to recognise a MAC-layer retransmission of
+    /// Bytes of this node's latest sighting batch, kept to recognize a MAC-layer retransmission of
     /// it. Reset with `last_seq` on reboot.
     pub(super) last_batch: Option<Vec<u8>>,
     /// Bridge-local stamp of [`Self::last_batch`], the near end of

@@ -1,6 +1,6 @@
 //! Finding an NMEA receiver among the host's serial ports.
 //!
-//! **A receiver is recognised by what it says, not what it is called.** Common pucks sit behind a
+//! **A receiver is recognized by what it says, not what it is called.** Common pucks sit behind a
 //! general-purpose USB-to-UART bridge (a Globalsat BU-353 is a Prolific, a bare module usually a
 //! CP210x or CH340), and those vendor IDs are shared with every other adapter. So a vendor table
 //! can order the search but never decide it. Reading NMEA off the port decides it.

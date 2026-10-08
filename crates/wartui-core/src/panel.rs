@@ -1,7 +1,7 @@
 //! The bridge's panel, composed here.
 //!
 //! A bridge with a screen is sent finished lines and blits them. It composes nothing, parses no air
-//! frame, and owns only the three colours a [`Severity`] maps to. The same division keeps the
+//! frame, and owns only the three colors a [`Severity`] maps to. The same division keeps the
 //! planner on the host: what is likely wrong lives where `cargo test` reaches and a fix costs a
 //! `cargo run`, and the board keeps only what is small enough to finish.
 //!
@@ -9,7 +9,7 @@
 //! clock: the snapshot carries the times that matter, and liveness comes from the engine in
 //! [`crate::engine::NodeView`]. No I/O, and [`crate::runtime`] decides *when* a panel is pushed.
 //!
-//! Five of the panel's eight lines, leaving room to add one. Each is coloured by its own state, so
+//! Five of the panel's eight lines, leaving room to add one. Each is colored by its own state, so
 //! the panel reads at a glance.
 //!
 //! # The GPS line is green only on a live, current fix
@@ -162,7 +162,7 @@ fn rssi_line(snapshot: &Snapshot) -> (Severity, String) {
 
     let Some(&min) = heard.iter().min() else {
         // Say which silence this is rather than print zero. With nothing alive the line above says
-        // so, and a second fault colour for one fact reads as two.
+        // so, and a second fault color for one fact reads as two.
         return if snapshot.alive == 0 {
             (Severity::Ok, "rssi n/a".to_owned())
         } else {
@@ -178,7 +178,7 @@ fn rssi_line(snapshot: &Snapshot) -> (Severity, String) {
     let weak = mean < i32::from(RSSI_WEAK_AVG) || min < RSSI_WEAK_MIN;
     let level = if weak { Severity::Warn } else { Severity::Ok };
     // Two shapes: a subject, two figures and two labels do not fit seventeen columns. When the
-    // figures differ, labels earn the room, because an unlabelled pair's order must be learnt. When
+    // figures differ, labels earn the room, because an unlabeled pair's order must be learned. When
     // they agree there is one number, and the subject takes the room back. That is the bench case,
     // and always the one-node case.
     let text = if mean == i32::from(min) {
@@ -511,7 +511,7 @@ mod tests {
         // `firmware/bridge/src/panel.rs` gets seventeen columns out of its font, and the
         // RSSI line fills every one of them. Rendered wide and measured, so a reworded
         // line that would arrive truncated on the bench fails here instead — the
-        // truncation in `fit` is a backstop for an unfamiliar screen, not a licence to
+        // truncation in `fit` is a backstop for an unfamiliar screen, not a license to
         // write past this one.
         let wide = Panel { cols: 32, rows: 8 };
         let mut worst = fleet(&[Some(-100), Some(-40), None]);

@@ -1,4 +1,4 @@
-//! The channels column colours each node's share by how far its assignment has got,
+//! The channels column colors each node's share by how far its assignment has got,
 //! because a MAC-layer ack is not adoption. Only the node's heartbeat, carrying the
 //! epoch it holds, shows it took the frame (`NodeState::adopted`).
 //!
@@ -7,7 +7,7 @@
 //! | pending: sent, not acked | yellow, the desired set then `…` | yellow `bluetooth…` |
 //! | acked, not adopted | blue, the confirmed set then `…` | blue `bluetooth…` |
 //! | adopted | plain, the confirmed set | cyan `bluetooth` |
-//! | nothing confirmed | grey `unassigned` | grey `unassigned` |
+//! | nothing confirmed | gray `unassigned` | gray `unassigned` |
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Rect};
@@ -90,7 +90,7 @@ pub(super) fn draw_fleet(
 /// The channels column's width, which caps how much of the list fits.
 const CHANNELS_WIDTH: u16 = 18;
 
-/// The channels cell: what the node scans, coloured by how far the assignment has
+/// The channels cell: what the node scans, colored by how far the assignment has
 /// got. The module docs list the states.
 ///
 /// An empty set is the Bluetooth node's, and says so in words. As a count and list it
@@ -389,7 +389,7 @@ mod tests {
         assert!(view.state.adopted());
         let cell = channels_cell(&view);
         assert!(!cell.content.ends_with('…'), "nothing left to wait for");
-        assert_eq!(cell.style.fg, None, "plain, not coloured");
+        assert_eq!(cell.style.fg, None, "plain, not colored");
     }
 
     #[test]
@@ -402,7 +402,7 @@ mod tests {
         assert!(view.state.adopted(), "confirmed is still held, and its epoch still matches");
         let cell = channels_cell(&view);
         assert!(!cell.content.ends_with('…'), "adopted, not stuck waiting");
-        assert_eq!(cell.style.fg, None, "plain, not coloured");
+        assert_eq!(cell.style.fg, None, "plain, not colored");
     }
 
     #[test]

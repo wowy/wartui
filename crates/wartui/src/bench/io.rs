@@ -124,7 +124,7 @@ impl Device {
         Some(Self { name, major, minor })
     }
 
-    /// The device at a path such as `/dev/nvme0n1p3`. Canonicalised first, because
+    /// The device at a path such as `/dev/nvme0n1p3`. Canonicalized first, because
     /// `/dev/mapper/root` is a link and sysfs knows the device as `dm-0`.
     fn named(source: &str) -> Option<Self> {
         let path = std::fs::canonicalize(source).ok()?;

@@ -17,7 +17,7 @@ use crate::gps::Gps;
 /// How old a GPS fix may be and still be believed.
 ///
 /// Receivers emit at 1 Hz, so this is five missed sentences: enough to ride out a tunnel or dropped
-/// serial, short enough that at 50 km/h the position is off by about seventy metres at most, inside
+/// serial, short enough that at 50 km/h the position is off by about seventy meters at most, inside
 /// what a Wi-Fi observation means anyway.
 pub const DEFAULT_MAX_AGE: Duration = Duration::from_secs(5);
 
@@ -51,9 +51,9 @@ pub struct Fix {
     pub lat: Option<f64>,
     /// Degrees east, if known.
     pub lon: Option<f64>,
-    /// Metres above the ellipsoid, if known.
+    /// Meters above the ellipsoid, if known.
     pub alt: Option<f64>,
-    /// Horizontal accuracy in metres, if known.
+    /// Horizontal accuracy in meters, if known.
     pub accuracy: Option<f64>,
     /// Which tier of the chain this came from.
     pub source: PositionSource,

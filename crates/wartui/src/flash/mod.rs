@@ -163,7 +163,7 @@ fn matches(spec: &BridgeSpec, candidate: &PortCandidate) -> bool {
 }
 
 /// A path named as the bridge, as the device node it resolves to, so a `by-id` link and the
-/// node it points at are recognised as one board.
+/// node it points at are recognized as one board.
 fn canonical(spec: BridgeSpec) -> BridgeSpec {
     match spec {
         BridgeSpec::Path(path) => match std::fs::canonicalize(&path) {
@@ -290,7 +290,7 @@ impl Source {
 /// `path` with `.` dropped and each `..` taken out with the component before it, without asking
 /// the filesystem, so a directory that does not exist still reads cleanly in an error. A `..` with
 /// nothing before it to remove is kept on a relative path and dropped at the root.
-fn normalise(path: &Path) -> PathBuf {
+fn normalize(path: &Path) -> PathBuf {
     use std::path::Component;
     let mut out = PathBuf::new();
     for component in path.components() {
@@ -324,7 +324,7 @@ fn source(
     }
     let tag = tag.filter(|tag| !tag.is_empty());
     let Some(tag) = tag.filter(|_| firmware_dir.is_none()) else {
-        return Ok(Source::Build(normalise(firmware_dir.unwrap_or(Path::new(firmware.dir)))));
+        return Ok(Source::Build(normalize(firmware_dir.unwrap_or(Path::new(firmware.dir)))));
     };
     let asset = release_asset(firmware, features).filter(|_| !no_default_features);
     let Some(asset) = asset else {
@@ -719,14 +719,14 @@ mod tests {
     }
 
     #[test]
-    fn flash_normalises_firmware_dir_when_path_has_parent_segments() {
+    fn flash_normalizes_firmware_dir_when_path_has_parent_segments() {
         assert_eq!(
-            normalise(Path::new("/a/b/crates/wartui/../../firmware/node")),
+            normalize(Path::new("/a/b/crates/wartui/../../firmware/node")),
             Path::new("/a/b/firmware/node")
         );
-        assert_eq!(normalise(Path::new("./fw/./node/")), Path::new("fw/node"));
-        assert_eq!(normalise(Path::new("../fw/x/..")), Path::new("../fw"));
-        assert_eq!(normalise(Path::new("/../fw")), Path::new("/fw"));
+        assert_eq!(normalize(Path::new("./fw/./node/")), Path::new("fw/node"));
+        assert_eq!(normalize(Path::new("../fw/x/..")), Path::new("../fw"));
+        assert_eq!(normalize(Path::new("/../fw")), Path::new("/fw"));
         let dir =
             source(&NODE, None, Some(Path::new("/x/y/../fw")), &["esp32c5"], false, None).unwrap();
         assert_eq!(dir, Source::Build("/x/fw".into()));

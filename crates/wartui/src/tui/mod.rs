@@ -161,7 +161,7 @@ fn draw(frame: &mut Frame<'_>, snapshot: &Snapshot, ui: &mut Ui) {
     }
 }
 
-/// A `width` by `height` box centred in `area`, clipped to it when too big.
+/// A `width` by `height` box centered in `area`, clipped to it when too big.
 fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
     let width = width.min(area.width);
     let height = height.min(area.height);

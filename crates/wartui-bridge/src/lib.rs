@@ -6,7 +6,7 @@
 //! in.
 //!
 //! It also owns the host's serial ports generally, in [`ports`]: what is attached
-//! and what the OS says it is, with no judgement about which of them is a bridge.
+//! and what the OS says it is, with no judgment about which of them is a bridge.
 //! Keeping that in one place is what lets anything else that opens a device share
 //! the enumeration rather than write a second one.
 
@@ -245,7 +245,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn link_handle_prioritises_urgent_commands_when_bulk_commands_are_backlogged() {
+    async fn link_handle_prioritizes_urgent_commands_when_bulk_commands_are_backlogged() {
         // Without this bias a burst of status polls can queue ahead of a channel
         // assignment and push it past the node's 100 ms admin window.
         let (handle, mut plumbing) = link_pair();

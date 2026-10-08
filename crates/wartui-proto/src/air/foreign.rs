@@ -11,7 +11,7 @@ const VENDOR_OFF_TYPE: usize = 4;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Foreign {
     /// Another host is assigning channels nearby. Worth its own count: it tells a
-    /// neighbouring fleet apart from a second host contending for this one.
+    /// neighboring fleet apart from a second host contending for this one.
     Admin,
     /// A vendor node's heartbeat or sighting, or the encrypted-pairing frames only a
     /// node with encryption switched on sends.

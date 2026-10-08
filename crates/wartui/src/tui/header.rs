@@ -56,7 +56,7 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot
 
 /// Planner status: `N of M` nodes in the plan, or why there is no plan.
 ///
-/// | Shown | Colour | Meaning |
+/// | Shown | Color | Meaning |
 /// |---|---|---|
 /// | `N of M` | green | `N` of the `M` nodes heard are in the plan |
 /// | `N alive, none usable` | red | heartbeating, but none assignable |
@@ -262,7 +262,7 @@ mod tests {
         assert!(!rendered.contains("rotating"));
     }
 
-    /// The colour of the header's top-left border corner.
+    /// The color of the header's top-left border corner.
     fn header_border(snapshot: &Snapshot) -> Option<Color> {
         let mut terminal = Terminal::new(TestBackend::new(150, 20)).expect("test backend");
         terminal.draw(|frame| draw(frame, snapshot, &mut Ui::default())).expect("drawing");

@@ -365,7 +365,7 @@ impl SerialTransport {
 ///
 /// The sweep is why this is a loop over a list rather than over one path. A node
 /// plugged in by USB is the same vendor and product as the bridge, so the board
-/// that sorts first is not reliably the one that answers — and opening it for ever
+/// that sorts first is not reliably the one that answers — and opening it forever
 /// is a capture that never starts, with a log that says nothing but the same line.
 ///
 /// Once a board *has* answered, this stops sweeping and waits for that board.
@@ -928,7 +928,7 @@ fn read_loop(
                     LinkEvent::Message(msg)
                 }
                 // Reset banners and half-frames land here; the framing has already
-                // resynchronised, so this is a counter rather than a fault. At
+                // resynchronized, so this is a counter rather than a fault. At
                 // `debug`, or a bad cable writes the log as fast as the bridge talks.
                 Err(e) => {
                     state.garbled.fetch_add(1, Ordering::Relaxed);
@@ -1000,7 +1000,7 @@ fn write_loop(
 ///   board that was never the bridge.
 /// - **The port has to have opened.** One that would not said nothing because
 ///   nothing was asked of it: ModemManager holds a fresh CDC-ACM device for a few
-///   seconds on some distributions, and a missing `dialout` group holds it for ever.
+///   seconds on some distributions, and a missing `dialout` group holds it forever.
 /// - **There has to have been nothing else to try.** A board with another waiting
 ///   gets [`REMEMBERED_TICKS`] at most, which is still not the full
 ///   [`SETTLE_TICKS`], and a bridge still bringing its radio up can take longer.
@@ -1141,7 +1141,7 @@ mod tests {
     }
 
     #[test]
-    fn serial_link_recognises_new_life_when_receiving_initial_ready_frame() {
+    fn serial_link_recognizes_new_life_when_receiving_initial_ready_frame() {
         assert!(is_a_new_life(0, None));
         assert!(is_a_new_life(10_800_000, None), "attaching to one already up for hours");
     }

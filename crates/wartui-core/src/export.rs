@@ -559,7 +559,7 @@ fn write_row<W: Write>(row: &Window, out: &mut W) -> Result<(), ExportError> {
     Ok(())
 }
 
-/// The centre frequency of a sighting's channel, for WiGLE's `Frequency` column, derived from the
+/// The center frequency of a sighting's channel, for WiGLE's `Frequency` column, derived from the
 /// stored channel.
 ///
 /// The channel is the one the access point announces, or the node's parked channel when it
@@ -645,7 +645,7 @@ mod tests {
     }
 
     #[test]
-    fn frequency_column_gives_centre_mhz_when_wifi_channel_on_a_ladder() {
+    fn frequency_column_gives_center_mhz_when_wifi_channel_on_a_ladder() {
         assert_eq!(frequency_column(1, RecordKind::Wifi), "2412");
         assert_eq!(frequency_column(6, RecordKind::Wifi), "2437");
         assert_eq!(frequency_column(13, RecordKind::Wifi), "2472");

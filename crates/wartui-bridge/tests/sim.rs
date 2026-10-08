@@ -107,7 +107,7 @@ fn assign(link: &LinkHandle, version: u8, channels: ChannelSet, ble: bool) {
 }
 
 /// How many distinct Wi-Fi addresses are among the first `sightings` a lone node reports
-/// from a neighbourhood of forty networks.
+/// from a neighborhood of forty networks.
 async fn distinct_addresses(sightings_per_address: Option<u32>, sightings: usize) -> usize {
     let mut link = SimTransport::new(SimConfig {
         node_count: 1,
@@ -137,7 +137,7 @@ async fn distinct_addresses(sightings_per_address: Option<u32>, sightings: usize
 }
 
 #[tokio::test(start_paused = true)]
-async fn sim_transport_tracks_distinct_macs_when_neighbourhood_is_moving_vs_parked() {
+async fn sim_transport_tracks_distinct_macs_when_neighborhood_is_moving_vs_parked() {
     // Parked, forty networks fit the dedup ring, so whatever is reported again is one of
     // the same forty: the ring's refresh, not a new device.
     assert!(distinct_addresses(None, 120).await <= 40);
@@ -224,7 +224,7 @@ async fn sim_bridge_emits_valid_sightings_with_negative_rssi_when_nodes_sniff() 
 }
 
 #[tokio::test(start_paused = true)]
-async fn sim_node_deduplicates_wifi_sightings_when_operating_in_static_neighbourhood() {
+async fn sim_node_deduplicates_wifi_sightings_when_operating_in_static_neighborhood() {
     // A simulator that streamed the same networks forever would leave the fleet view
     // wrong about observation rates.
     let config = SimConfig { node_count: 1, ble_chance: 0.0, ..SimConfig::default() };
@@ -245,7 +245,7 @@ async fn sim_node_deduplicates_wifi_sightings_when_operating_in_static_neighbour
             _ => {}
         }
     }
-    assert!(!counts.is_empty(), "the fake neighbourhood should not be empty");
+    assert!(!counts.is_empty(), "the fake neighborhood should not be empty");
     let repeats: Vec<_> = counts.iter().filter(|(_, n)| **n > 1).collect();
     assert!(repeats.is_empty(), "networks reported more than once over 3 sweeps: {repeats:?}");
 }
@@ -718,7 +718,7 @@ async fn sim_node_fails_to_ack_assignments_when_ble_coexistence_failure_is_simul
     assert_eq!(next_send_result(&mut link).await, SendStatus::AckOk);
     next_heartbeat_from(&mut link, node).await;
 
-    // Nothing after it is. An 802.11 acknowledgement comes from the receiver's
+    // Nothing after it is. An 802.11 acknowledgment comes from the receiver's
     // MAC hardware, so this is indistinguishable from a node that is not there
     // — and the frame really is dropped, which is why the operator cannot take
     // the assignment back.

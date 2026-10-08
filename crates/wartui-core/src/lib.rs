@@ -2,7 +2,7 @@
 //! out.
 //!
 //! Nothing here draws a terminal or parses an argument, so `wartui export` and the TUI are two
-//! front ends over one implementation, and the fleet's behaviour is testable without either.
+//! front ends over one implementation, and the fleet's behavior is testable without either.
 //!
 //! [`engine`] is a pure state machine, [`runtime`] owns the clock and does what it asks, [`store`]
 //! is the system of record, and [`export`] and [`analyze`] are views of it. [`panel`] views a

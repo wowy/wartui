@@ -393,7 +393,7 @@ mod tests {
         }
         assert_eq!(ui.selected, snapshot.nodes.len() - 1);
 
-        // A node ageing out of the table must not leave the cursor past its end.
+        // A node aging out of the table must not leave the cursor past its end.
         ui.clamp(1);
         assert_eq!(ui.selected, 0);
     }

@@ -59,7 +59,7 @@ enum Command {
     Run(run::Args),
     /// Write a WiGLE CSV from a capture.
     Export(export::Args),
-    /// Summarise a capture: what it holds and what it lost on the way in.
+    /// Summarize a capture: what it holds and what it lost on the way in.
     Analyze(analyze::Args),
     /// Upload a capture to the WDGWars leaderboard.
     Upload(upload::Args),

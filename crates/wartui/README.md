@@ -13,7 +13,7 @@ This is the operator's manual. The root [`README.md`](../../README.md) is the sh
 |----------------|-------------------------------------------------------------------------------------|
 | `run`          | Capture a fleet into the store and watch it live                                    |
 | `export`       | Write a WiGLE CSV from a capture                                                    |
-| `analyze`      | Summarise a capture and what it lost; see "Analyzing a capture"                     |
+| `analyze`      | Summarize a capture and what it lost; see "Analyzing a capture"                     |
 | `upload`       | Upload a capture to the WDGWars leaderboard; see "Uploading to WDGWars"             |
 | `sniff`        | Print every frame the bridge hears, decoded, a line per record                      |
 | `status`       | Ask the bridge for its counters and uptime                                          |
@@ -204,7 +204,7 @@ wartui analyze --db tonight.db --heartbeat-windows
 Each line gives the node, two UTC arrival timestamps with milliseconds, heartbeat row IDs, and
 missed count, with `(N unsent)` when the node's radio refused some of them. These observed
 arrivals bracket missing beats; they are not exact transmission times. Rows stay in arrival order
-even when the wall clock steps back; a reversed clock is labelled.
+even when the wall clock steps back; a reversed clock is labeled.
 Repeats add no gap, and the first heartbeat per node is only a baseline. A `restart-associated,
 uncertain interval` counts only missing beats since boot: neither the boot time nor pre-boot loss
 is known. Window counts sum to the lifetime missed total. With no counted gaps, the flag prints

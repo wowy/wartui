@@ -9,7 +9,7 @@
 //! - **One entry per address.** A repeat hearing never takes a second slot.
 //! - **Slots go only to addresses the caller says are due.** An address the host already
 //!   has is heard again every dwell or scan. Given a slot, it is thrown away by the drain,
-//!   and a crowded neighbourhood fills the buffer with such repeats and turns new
+//!   and a crowded neighborhood fills the buffer with such repeats and turns new
 //!   addresses away. The `due` check runs before the room check, so an address that is
 //!   not due neither takes a slot nor counts as dropped.
 //! - **A full buffer never wraps.** It turns the newest address away and counts it in
@@ -214,7 +214,7 @@ impl<T: Entry, const N: usize, const S: usize> Pending<T, N, S> {
 ///
 /// A full buffer turns an address away on every frame it sends, and an access point
 /// beacons about ten times a dwell. A count of refused frames would measure how loud the
-/// neighbourhood is, not how many addresses went unreported. This counts each address
+/// neighborhood is, not how many addresses went unreported. This counts each address
 /// once until [`Self::reset`], which the caller runs at the start of each dwell or scan.
 ///
 /// [`Self::note`] runs inside the lock both pending buffers record under, so its cost is

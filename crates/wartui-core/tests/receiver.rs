@@ -28,12 +28,12 @@ fn board(device: &str) -> PortCandidate {
 }
 
 #[test]
-fn discover_recognises_receiver_when_sentences_valid() {
+fn discover_recognizes_receiver_when_sentences_valid() {
     assert!(looks_like_nmea(NMEA));
 }
 
 #[test]
-fn discover_recognises_receiver_when_it_has_no_fix() {
+fn discover_recognizes_receiver_when_it_has_no_fix() {
     // Indoors, or thirty seconds into a cold start. It is the receiver either way,
     // and refusing it would mean never finding one in a garage.
     assert!(looks_like_nmea(NO_LOCK));

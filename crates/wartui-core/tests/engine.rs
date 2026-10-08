@@ -1604,7 +1604,7 @@ fn engine_confirms_assignment_when_mac_ack_arrives() {
     engine.handle(heartbeat(NODE, 1), clock.at(1));
     let (id, _, admin) = sent_admin(&engine.handle(heartbeat(NODE, 2), clock.at(6)));
 
-    // Only the MAC-layer acknowledgement clears the dirty flag.
+    // Only the MAC-layer acknowledgment clears the dirty flag.
     let batch = engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(6));
     let node = engine.nodes().next().expect("the node");
     assert!(!node.dirty, "acknowledged, so there is nothing left to deliver");
@@ -2198,7 +2198,7 @@ fn engine_sends_empty_channels_only_with_ble_flag_when_ble_moves_in_three_node_f
     for n in 0..3 {
         check(&engine.handle(heartbeat(peer(n), 3), clock.at(5)), &mut seen_empty);
     }
-    // The holder rebooting, and then the fleet ageing out around it — both leave
+    // The holder rebooting, and then the fleet aging out around it — both leave
     // the scan in place rather than moving it, so the invariant still has to hold.
     check(&engine.handle(narrowband_heartbeat(peer(2), 1), clock.at(6)), &mut seen_empty);
     check(&engine.handle(Event::Tick, clock.at(7)), &mut seen_empty);
@@ -2301,7 +2301,7 @@ fn engine_returns_surplus_scanner_to_wifi_when_scan_taken_off() {
     // Twelve C6s on `us` is eleven reachable channels across twelve nodes, so one
     // slot is dealt nothing. A node the plan has nothing for keeps what it holds —
     // but the Bluetooth node holds *nothing to scan*, so keeping it would mean the
-    // scan could never be taken off it: it would go on holding the antenna for ever
+    // scan could never be taken off it: it would go on holding the antenna forever
     // while the fleet table showed a node the host no longer thinks is the holder,
     // and `b` would report a withdrawal that never happened.
     let clock = Clock::new();

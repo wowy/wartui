@@ -23,7 +23,7 @@
 //!
 //! # The lone `0x00`
 //!
-//! COBS resynchronises at a terminator and only there. The outbox writes a lone `0x00`,
+//! COBS resynchronizes at a terminator and only there. The outbox writes a lone `0x00`,
 //! an empty frame every receiver already skips, in three places:
 //!
 //! - **Behind a frame the endpoint refused outright.** The frame is truncated on the
@@ -272,7 +272,7 @@ impl Outbox {
                 Err(nb::Error::WouldBlock) => break,
                 Err(nb::Error::Other(())) => {
                     // Refused outright, so this frame is already truncated on the
-                    // wire: abandon it and let the host resynchronise.
+                    // wire: abandon it and let the host resynchronize.
                     self.abandon_front(source);
                 }
             }
