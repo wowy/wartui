@@ -13,6 +13,17 @@ can be a C5 or a C6, but only the C5 supports 5 GHz. The bridge stays on 2.4 GHz
 control messages, so it never needs 5 GHz. C6 support exists because I had both on hand and the
 firmware toolchain is the same.
 
+## Disclaimers
+
+**Be cool! This project is for fun and maybe some learning along the way.**
+
+This project is meant for _passive_ scanning of Wi-Fi networks and Bluetooth devices. The only active
+transmissions are ESP-NOW control messages, which are very low power and do not interfere with Wi-Fi
+or Bluetooth.
+
+It is not intended for any malicious or unauthorized use. By using this project, you agree to use it
+responsibly and in accordance with all applicable laws and regulations. 
+
 ## History
 
 **tl;dr - the initial ESP32 firmware and wire format is from JustCallMeKoko's
