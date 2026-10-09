@@ -2,16 +2,16 @@
 
 A terminal-based fleet controller for ESP32-C5 and ESP32-C6 wardriving nodes.
 
-![wartui running in simulator mode](./docs/images/wartui-example.png "The wartui application running in simulator mode.")
+Wartui runs on Linux and macOS, with the goal being good performance on something as low-powered as
+a Raspberry Pi 5 using a microSD card (like the [HackberryPi5](https://github.com/ZitaoTech/HackberryPi5)).
+Using an NVMe drive is preferred, but not a requirement. If you're running into poor performance on a microSD card,
+please open an [issue](https://github.com/yourusername/wartui/issues).
 
-The nodes talk [ESP-NOW](https://www.espressif.com/en/solutions/low-power-solutions/esp-now), which
-most laptops can't. wartui uses a USB-attached ESP32 as a radio bridge. It tracks the nodes, assigns
-their channels, and stores everything they see.
+The UI scales from something as big as a full laptop screen, to the 4" 720x720 display of the HackberryPi5.
 
-The nodes run `firmware/node` and the bridge runs `firmware/bridge`, both in this repository. Either
-can be a C5 or a C6, but only the C5 supports 5 GHz. The bridge stays on 2.4 GHz channel 6 for
-control messages, so it never needs 5 GHz. C6 support exists because I had both on hand and the
-firmware toolchain is the same.
+| Laptop (138x38)                                                                                                                           | HackberryPi5 (58x26)                                                                                                                                  |
+|-------------------------------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------|
+| <img src="docs/images/wartui-laptop.png" alt="The wartui application running in simulator mode on a laptop-sized terminal." width="500"/> | <img src="docs/images/wartui-hackberrypi5.png" alt="The wartui application running in simulator mode on a HackberryPi5-sized terminal." width="400"/> |
 
 ## Disclaimers
 
@@ -97,8 +97,17 @@ wartui analyze    # summarize a capture and what it lost
 | `tools/beacons`                                          | Turns a monitor-mode capture into fixtures for the beacon parser                                              |
 | `tools/render.py`                                        | Renders the running view as text, for a diff or an agent                                                      |
 
+The nodes talk [ESP-NOW](https://www.espressif.com/en/solutions/low-power-solutions/esp-now), which
+most laptops can't. wartui uses a USB-attached ESP32 as a radio bridge. It tracks the nodes, assigns
+their channels, and stores everything they see.
+
+The nodes run `firmware/node` and the bridge runs `firmware/bridge`, both in this repository. Either
+can be a C5 or a C6, but only the C5 supports 5 GHz. The bridge stays on 2.4 GHz channel 6 for
+control messages, so it never needs 5 GHz. C6 support exists because I had both on hand, and the
+firmware toolchain is the same.
+
 Each firmware is its own Cargo workspace, with its own target, toolchain pin, and lockfile. Both
-depend on `crates/wartui-proto`, which keeps the two ends of the wire in step. The library crates
+depend on `crates/wartui-proto`, which keeps the two ends of the wire consistent. The library crates
 have no README; their `//!` module docs hold the detail.
 
 ## Keyboard commands
