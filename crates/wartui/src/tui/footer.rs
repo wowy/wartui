@@ -39,7 +39,7 @@ pub(super) fn draw_footer(
         )));
     } else {
         let mut spans = vec![Span::styled(
-            " q quit  ↑↓ select  b bluetooth  c settings  r clear  R clear fleet  u upload ",
+            " q quit  ↑↓ select  b bluetooth  c settings  u upload ",
             Style::new().fg(Color::Black).bg(Color::Gray).add_modifier(Modifier::BOLD),
         )];
         spans.push(Span::raw(format!(
