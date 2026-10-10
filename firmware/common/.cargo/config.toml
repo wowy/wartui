@@ -1,0 +1,3 @@
+[build]
+# The firmwares' target: this crate is checked for the chips it runs on, never the host.
+target = "riscv32imac-unknown-none-elf"

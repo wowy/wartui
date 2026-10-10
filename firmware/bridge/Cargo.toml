@@ -25,6 +25,7 @@ esp32c5 = [
   "esp-radio/esp32c5",
   "esp-rtos/esp32c5",
   "dep:esp-wifi-sys-esp32c5",
+  "wartui-firmware/esp32c5",
 ]
 esp32c6 = [
   "esp-alloc/esp32c6",
@@ -33,6 +34,7 @@ esp32c6 = [
   "esp-radio/esp32c6",
   "esp-rtos/esp32c6",
   "dep:esp-wifi-sys-esp32c6",
+  "wartui-firmware/esp32c6",
 ]
 
 # A Seeed XIAO ESP32-C6 with an antenna on its U.FL connector. The board's RF
@@ -85,6 +87,8 @@ mipidsi = { version = "0.10.0", default-features = false, optional = true }
 nb = "1.1.0"
 portable-atomic = { version = "1.15.0", default-features = false }
 static_cell = "2.1.1"
+# The reset funnel and the reset cause, shared with the other firmware.
+wartui-firmware = { path = "../common" }
 wartui-proto = { path = "../../crates/wartui-proto" }
 
 [lints.rust]

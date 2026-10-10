@@ -7,8 +7,17 @@ use wartui_proto::node;
 
 #[cfg(doc)]
 use super::Counters;
-use super::{ActionBatch, FleetEngine, NodeState, Now};
+use super::{ActionBatch, FleetEngine, NodeState, Now, PowerMismatch};
 use crate::record::{BatchGap, Heartbeat, NodeSeen, Observation, RawFrame, Record};
+
+/// Log a node's boot at `warn!` when its [`ResetCause`](wartui_proto::reset::ResetCause) is a
+/// fault, so a brownout, watchdog, lockup or panic mid-drive reaches the operator, and at
+/// `info!` when it was a power-on or a reset over USB.
+macro_rules! by_reset {
+    ($cause:expr, $($arg:tt)*) => {
+        if $cause.is_fault() { tracing::warn!($($arg)*) } else { tracing::info!($($arg)*) }
+    };
+}
 
 /// How long after a batch a byte-identical same-`seq` repeat still counts as an 802.11 retry, not a
 /// node's own re-send.
@@ -133,10 +142,13 @@ impl FleetEngine {
         let rebooted = counter_rebooted || epoch_rebooted;
         // `see_node` leaves `last_heartbeat` alone, so this is still the previous beat.
         match node.last_heartbeat {
-            None => tracing::info!(
+            None => by_reset!(
+                heartbeat.reset_cause,
                 mac = %mac::full(&src),
                 capabilities = %heartbeat.capabilities,
                 rssi,
+                reset = %heartbeat.reset_cause,
+                tx_power = heartbeat.tx_power,
                 "node joined"
             ),
             // Only after a logged departure: a backlog held through a link outage arrives late
@@ -149,14 +161,22 @@ impl FleetEngine {
             Some(_) => {}
         }
         if rebooted {
-            tracing::info!(
+            by_reset!(
+                heartbeat.reset_cause,
                 mac = %mac::full(&src),
                 counter_before = node.counter,
                 counter_after = heartbeat.counter,
                 beat = heartbeat.beat,
+                reset = %heartbeat.reset_cause,
+                tx_power = heartbeat.tx_power,
                 "node restarted"
             );
             node.reboots += 1;
+            // Only restarts seen here: a join's boot may predate the run.
+            if heartbeat.reset_cause.is_fault() {
+                node.fault_restart = Some(heartbeat.reset_cause);
+                node.fault_restarts += 1;
+            }
             // The node forgot it. `reissue` below re-sends it.
             node.confirmed = None;
             // Booting empties the ring.
@@ -169,11 +189,46 @@ impl FleetEngine {
             node.last_batch_rx_us = None;
             // The epoch reset too, so what it holds is unknown.
             node.held_epoch = None;
+            // So did its transmit power, which the next adopted heartbeat reports afresh.
+            node.power_mismatch = None;
         }
         node.capabilities = Some(heartbeat.capabilities);
         // A replayed heartbeat's epoch is history and must not overwrite a live one.
         if live {
             node.held_epoch = Some(heartbeat.epoch);
+        }
+        // Read against this heartbeat's epoch, recorded just above, and only once the node holds
+        // the assignment: one that has not adopted it is the re-send's business, not a power
+        // fault. A node reporting another power had `set_tx_power` refused, so its radio kept its
+        // previous power (the 2 dBm boot default or an earlier assignment's), or something reset
+        // the cap since. 0 means the node could not read its power.
+        if live && node.adopted() {
+            let assigned = node.desired.or(node.confirmed).map(|a| a.tx_power);
+            if let Some(assigned) = assigned {
+                let reported = heartbeat.tx_power;
+                let epoch = heartbeat.epoch;
+                if reported != assigned {
+                    let mismatch = PowerMismatch { epoch, reported, assigned };
+                    if node.power_mismatch != Some(mismatch) {
+                        tracing::warn!(
+                            mac = %mac::full(&src),
+                            reported,
+                            assigned,
+                            epoch,
+                            "node transmit power differs from its assignment"
+                        );
+                        node.power_mismatch = Some(mismatch);
+                    }
+                } else if node.power_mismatch.take().is_some() {
+                    tracing::info!(
+                        mac = %mac::full(&src),
+                        reported,
+                        assigned,
+                        epoch,
+                        "node transmit power matches its assignment"
+                    );
+                }
+            }
         }
         // Since-boot counts to session counts (`advance_since_boot`). The first heartbeat is a
         // baseline, like the bridge's `dropped_baseline`: earlier refusals are not this capture's.
@@ -202,6 +257,8 @@ impl FleetEngine {
             unsent: heartbeat.unsent,
             dwell: heartbeat.dwell,
             prev_dwell: heartbeat.prev_dwell,
+            tx_power: heartbeat.tx_power,
+            reset_cause: heartbeat.reset_cause,
             live,
         }));
 

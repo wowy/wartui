@@ -10,8 +10,10 @@ use ratatui::widgets::Paragraph;
 use wartui_bridge::BridgeInfo;
 use wartui_core::engine::{Counters, Snapshot};
 use wartui_core::gps::GpsStatus;
-use wartui_proto::link::{LoopPhase, ResetCause};
+use wartui_proto::link::LoopPhase;
+use wartui_proto::mac;
 use wartui_proto::plan;
+use wartui_proto::reset::ResetCause;
 
 use super::ui::Ui;
 use crate::text::thousands;
@@ -203,7 +205,47 @@ pub(super) fn faults(snapshot: &Snapshot) -> Vec<String> {
     {
         faults.push(reason);
     }
+    // Each node's own faults come after the bridge's: a bridge fault touches every node,
+    // and these touch one. The operator sees neither in the car any other way, since the
+    // log goes only to `--log-file`.
+    for view in &snapshot.nodes {
+        let node = &view.state;
+        let name = mac::short(&node.mac);
+        if let Some(mismatch) = node.power_mismatch {
+            faults.push(if mismatch.reported == 0 {
+                format!("{name} cannot read its transmit power")
+            } else {
+                format!(
+                    "{name} at {} dBm, assigned {} dBm",
+                    dbm(mismatch.reported),
+                    dbm(mismatch.assigned)
+                )
+            });
+        }
+        if let Some(cause) = node.fault_restart {
+            let times = if node.fault_restarts > 1 {
+                format!(" (×{})", node.fault_restarts)
+            } else {
+                String::new()
+            };
+            faults.push(format!("{name} restarted: {cause}{times}"));
+        }
+    }
     faults
+}
+
+/// A quarter-dBm power in dBm: whole when it divides by four, else to the quarter.
+fn dbm(quarter_dbm: i8) -> String {
+    let q = i16::from(quarter_dbm);
+    let sign = if q < 0 { "-" } else { "" };
+    let (whole, quarters) = (q.abs() / 4, q.abs() % 4);
+    let frac = match quarters {
+        1 => ".25",
+        2 => ".5",
+        3 => ".75",
+        _ => "",
+    };
+    format!("{sign}{whole}{frac}")
 }
 
 /// The fault-box line for a bridge restart, or `None` for a power-on.
@@ -308,6 +350,7 @@ mod tests {
     use super::*;
     use crate::tui::draw;
     use crate::tui::fixtures::*;
+    use wartui_core::engine::PowerMismatch;
 
     #[test]
     fn view_displays_faults_only_when_they_have_occurred() {
@@ -602,6 +645,60 @@ mod tests {
         // because nodes have their own `rebooted` state.
         let screen = rendered(&with_restart(ResetCause::PowerOn, LoopPhase::Unknown));
         assert!(!screen.contains("bridge rebooted"), "{screen}");
+    }
+
+    /// A capture with no fault of its own, for the node faults to stand alone in.
+    fn quiet() -> Snapshot {
+        with_restart(ResetCause::PowerOn, LoopPhase::Unknown)
+    }
+
+    /// `quiet()` with node `57:84` reporting `reported` against an assignment of `assigned`.
+    fn with_mismatch(reported: i8, assigned: i8) -> Snapshot {
+        let mut snapshot = quiet();
+        snapshot.nodes[0].state.power_mismatch =
+            Some(PowerMismatch { epoch: 3, reported, assigned });
+        snapshot
+    }
+
+    #[test]
+    fn footer_reports_node_power_when_it_differs_from_assignment() {
+        let screen = rendered(&with_mismatch(8, 24));
+        assert!(screen.contains("57:84 at 2 dBm, assigned 6 dBm"), "{screen}");
+    }
+
+    #[test]
+    fn footer_reports_unreadable_power_when_node_reports_zero() {
+        let lines = faults(&with_mismatch(0, 24));
+        assert_eq!(lines, ["57:84 cannot read its transmit power"]);
+    }
+
+    #[test]
+    fn footer_prints_quarter_dbm_when_power_not_whole() {
+        let lines = faults(&with_mismatch(9, 26));
+        assert_eq!(lines, ["57:84 at 2.25 dBm, assigned 6.5 dBm"]);
+        assert_eq!(dbm(31), "7.75");
+    }
+
+    #[test]
+    fn footer_reports_node_restart_when_cause_is_fault() {
+        let mut snapshot = quiet();
+        snapshot.nodes[2].state.fault_restart = Some(ResetCause::Brownout);
+        snapshot.nodes[2].state.fault_restarts = 1;
+        let screen = rendered(&snapshot);
+        assert!(screen.contains("57:86 restarted: brownout"), "{screen}");
+        assert!(!screen.contains("(×"), "{screen}");
+
+        snapshot.nodes[2].state.fault_restarts = 3;
+        assert_eq!(faults(&snapshot), ["57:86 restarted: brownout (×3)"]);
+    }
+
+    #[test]
+    fn footer_reports_no_node_fault_when_fleet_clean() {
+        assert!(faults(&quiet()).is_empty(), "{:?}", faults(&quiet()));
+        let screen = rendered(&quiet());
+        assert!(!screen.contains("transmit power"), "{screen}");
+        assert!(!screen.contains("dBm, assigned"), "{screen}");
+        assert!(!screen.contains("restarted:"), "{screen}");
     }
 
     #[test]

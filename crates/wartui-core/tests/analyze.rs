@@ -8,6 +8,7 @@ use wartui_core::record::{BatchGap, BridgeStatusSeen, Heartbeat, HostStatus, Rec
 use wartui_core::store::{CaptureInfo, Store, StoreConfig, open_readonly};
 use wartui_proto::mac::Mac;
 use wartui_proto::plan::ChannelPool;
+use wartui_proto::reset::ResetCause;
 
 const NODE: Mac = [0x02, 0x00, 0x5E, 0x10, 0x57, 0x84];
 const OTHER: Mac = [0x02, 0x00, 0x5E, 0x10, 0x1C, 0x5A];
@@ -58,6 +59,8 @@ fn beat(node: Mac, at_ms: i64, counter: u32, seq: u16, wifi: u16, ble: u16) -> R
         unsent: 0,
         dwell: 0,
         prev_dwell: 0,
+        tx_power: 8,
+        reset_cause: ResetCause::PowerOn,
         live: true,
     })
 }

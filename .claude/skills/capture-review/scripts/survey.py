@@ -22,6 +22,14 @@ from datetime import datetime, timezone
 
 FLAGS = []  # (severity, area, text, sql)
 
+# Reset causes that are the operator's own doing; every other stored cause is a fault.
+# Mirrors `ResetCause::is_fault` in crates/wartui-proto/src/reset.rs.
+NOT_FAULTS = ("power_on", "external")
+
+
+def is_fault(cause):
+    return cause is not None and cause not in NOT_FAULTS
+
 
 def flag(sev, area, text, sql=""):
     FLAGS.append((sev, area, text, sql.strip()))
@@ -279,6 +287,8 @@ def heartbeats(db, ctx):
     for c in ("live", "wifi_refused", "ble_refused"):
         want.append(c if c in cols else "NULL")
     want += ["unsent", "dwell", "prev_dwell"]
+    for c in ("tx_power", "reset_cause"):
+        want.append(c if c in cols else "NULL")
     rows = db.q(f"SELECT {', '.join(want)} FROM heartbeat ORDER BY node_mac, id")
     per = defaultdict(list)
     for r in rows:
@@ -299,8 +309,11 @@ def heartbeats(db, ctx):
         # Per scan channel: [misses, beats sent] after a dwell on it. 0 is no dwell.
         by_dwell = defaultdict(lambda: [0, 0])
         unplaced = 0
+        # The reset cause of each boot seen: the first beat's, then each restart's.
+        boots = [hs[0][14]] if hs else []
         for r in hs:
-            (_, rid, rx, counter, epoch, rssi, beat, live, wr, br, us, dw, p_dw, *_rest) = r
+            (_, rid, rx, counter, epoch, rssi, beat, live, wr, br, us, dw, p_dw, tx, cause,
+             *_rest) = r
             replayed += live == 0
             if live != 0 and (prev is None or (beat - prev[6]) % 2**16 != 0
                               or counter != prev[3]):
@@ -314,8 +327,9 @@ def heartbeats(db, ctx):
                             or (beat - p_beat) % 2**16 >= 2**15)
                 if rebooted:
                     reboots += 1
+                    boots.append(cause)
                     ctx.setdefault("restarts", []).append((rx, mac, p_counter, counter, p_beat,
-                                                           beat, p_rx))
+                                                           beat, p_rx, cause))
                     gap_h, gap_m = 1, max(0, beat - 1)
                 else:
                     d = (beat - p_beat) % 2**16
@@ -400,6 +414,31 @@ def heartbeats(db, ctx):
                          ") WHERE ch != 0 GROUP BY ch ORDER BY ch")
         epochs = Counter(r[4] for r in hs)
         print(f"        epochs held  {dict(sorted(epochs.items()))}")
+        powers = Counter(r[13] for r in hs if r[13] is not None)
+        if powers:
+            print(f"        tx power seen {dict(sorted(powers.items(), reverse=True))}  "
+                  "(quarter-dBm the radio reported; 0 = read failed)")
+        if any(c is not None for c in boots):
+            # The first beat names a boot that may predate the capture; the rest are restarts
+            # this capture saw.
+            before, during = boots[0], boots[1:]
+            print(f"        boots        before capture: {before}"
+                  + (f"; in capture: {', '.join(str(c) for c in during)}" if during else ""))
+            node_sql = f"hex(node_mac)='{mac.hex().upper()}'"
+            if is_fault(before):
+                flag("INFO", "node",
+                     f"{short(mac)} last booted before the capture started, for {before}",
+                     f"SELECT id, rx_at, counter, beat, reset_cause FROM heartbeat WHERE "
+                     f"{node_sql} ORDER BY id LIMIT 1")
+            faults = [c for c in during if is_fault(c)]
+            if faults:
+                not_faults = ", ".join(f"'{c}'" for c in NOT_FAULTS)
+                flag("WARN", "node",
+                     f"{short(mac)} restarted {len(faults)} time(s) in the capture for a cause "
+                     f"other than power-on or an external reset: {', '.join(faults)}",
+                     f"SELECT id, rx_at, counter, beat, reset_cause FROM (SELECT *, LAG(counter) "
+                     f"OVER (ORDER BY id) AS pc FROM heartbeat WHERE {node_sql}) WHERE counter < pc "
+                     f"AND reset_cause NOT IN ({not_faults}) ORDER BY id")
         for a, b in silences[:5]:
             print(f"        silent       {rel(a)} -> {rel(b)}  ({dur(b - a)})")
         if silences:
@@ -486,8 +525,11 @@ def heartbeats(db, ctx):
         macs = sorted({short(r[1]) for r in g})
         at = g[0][0]
         silent = max(r[0] - r[6] for r in g)
-        detail = ", ".join(f"{short(r[1])} counter {r[2]}->{r[3]} beat {r[4]}->{r[5]}" for r in g)
-        print(f"  restart near {rel(at)}: {', '.join(macs)}  (longest silence {dur(silent)})")
+        detail = ", ".join(f"{short(r[1])} counter {r[2]}->{r[3]} beat {r[4]}->{r[5]}"
+                           + (f" reset {r[7]}" if r[7] is not None else "") for r in g)
+        causes = sorted({f"{short(r[1])} {r[7]}" for r in g if r[7] is not None})
+        print(f"  restart near {rel(at)}: {', '.join(macs)}  (longest silence {dur(silent)})"
+              + (f"  reset {', '.join(causes)}" if causes else ""))
         who = (f"all {fleet} nodes restarted together" if len(macs) == fleet and fleet > 1
                else f"{', '.join(macs)} restarted")
         flag("WARN", "node",
@@ -496,6 +538,7 @@ def heartbeats(db, ctx):
                 if len(macs) > 1 else ""),
              f"-- {detail}\nSELECT id, node_mac, rx_at, counter, beat FROM heartbeat WHERE rx_at "
              f"BETWEEN {at - 60000} AND {at + 30000} ORDER BY id")
+    tx_power_siblings(per, ctx)
     end = ctx.get("end")
     lasts = [hs[-1][2] for hs in per.values() if hs]
     if end and len(lasts) > 1 and end - max(lasts) > 30_000 and max(lasts) - min(lasts) < 15_000:
@@ -512,6 +555,48 @@ def heartbeats(db, ctx):
              "host wall clock moved (NTP/GPS time set?)",
              "SELECT id, rx_at, rx_at - LAG(rx_at) OVER (ORDER BY id) d FROM heartbeat "
              "ORDER BY d LIMIT 10")
+
+
+def tx_power_siblings(per, ctx):
+    """Flag a node whose radio reports a transmit power its siblings do not, minute by minute.
+
+    Compared against the siblings rather than the configured power, because the IDF may round
+    what it was asked for. Each node's most common reading in a minute stands for that minute.
+    """
+    by_minute = defaultdict(dict)  # minute -> mac -> (modal tx_power, first rx_at)
+    for mac, hs in per.items():
+        minutes = defaultdict(Counter)
+        firsts = {}
+        for r in hs:
+            # A replayed beat carries the power of when it was sent, not of the minute it arrived.
+            if r[13] is not None and r[7] != 0:
+                minutes[r[2] // 60_000][r[13]] += 1
+                firsts.setdefault(r[2] // 60_000, r[2])
+        for m, c in minutes.items():
+            by_minute[m][mac] = (c.most_common(1)[0][0], firsts[m])
+    odd = defaultdict(list)  # mac -> [(first rx_at, its power, siblings' power)]
+    for powers in by_minute.values():
+        for mac, (p, at) in powers.items():
+            others = Counter(v for k, (v, _) in powers.items() if k != mac)
+            if not others:
+                continue
+            common, n = others.most_common(1)[0]
+            if n * 2 > sum(others.values()) and p != common:
+                odd[mac].append((at, p, common))
+    for mac, minutes in sorted(odd.items()):
+        if ctx["only"] and short(mac) != ctx["only"]:
+            continue
+        if len(minutes) < 2:
+            continue  # one minute is a fleet-wide power change landing on different beats
+        pairs = Counter((p, c) for _, p, c in minutes)
+        (p, c), _ = pairs.most_common(1)[0]
+        first = min(at for at, _, _ in minutes)
+        flag("WARN", "node",
+             f"{short(mac)} reports tx_power {p} in {len(minutes)} minute(s) where most of its "
+             f"siblings report {c} (quarter-dBm), first near {rel(first)}",
+             f"SELECT rx_at / 60000 AS minute, hex(node_mac) AS node, tx_power, COUNT(*) AS beats "
+             f"FROM heartbeat WHERE rx_at BETWEEN {first - 60000} AND {first + 120000} "
+             "AND COALESCE(live, 1) != 0 GROUP BY 1, 2, 3 ORDER BY 1, 2")
 
 
 def assignments(db, ctx):

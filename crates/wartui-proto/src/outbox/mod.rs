@@ -32,7 +32,7 @@
 //! - **At boot, from [`Outbox::delimit`].** A reset prints the ROM banner down this
 //!   endpoint with no `0x00` in it, and the host would read banner and first frame as
 //!   one overlong frame. The byte goes out when transmit opens: at boot if the life
-//!   [speaks first](crate::link::ResetCause::speaks_first), otherwise after the first
+//!   [speaks first](crate::reset::ResetCause::speaks_first), otherwise after the first
 //!   host frame.
 //! - **When a pump would end exactly on a USB packet boundary.** The endpoint sends a
 //!   packet on every `USB_PACKET`th byte by itself, and a flush with nothing left

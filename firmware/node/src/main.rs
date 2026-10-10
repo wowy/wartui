@@ -40,6 +40,7 @@ use esp_radio::esp_now::{EspNowManager, EspNowReceiver, EspNowSender};
 use esp_radio::wifi::{ControllerConfig, WifiController};
 use esp_rtos::CurrentThreadHandle;
 use static_cell::{ConstStaticCell, StaticCell};
+use wartui_firmware::{reboot, reset_cause};
 use wartui_proto::air::{
     AdminMsg, CONTROL_CHANNEL, Capabilities, DecodeError, Frame, HeartbeatMsg,
     SIGHTINGS_PER_BATCH_MAX, SightingBatchWriter, SightingMsg,
@@ -50,6 +51,7 @@ use wartui_proto::node::{
     ADMIN_WAIT_MS, ASSIGNED_BEAT_MS, CHANNEL_DWELL_MS, IDLE_BEAT_MS, SweepCursor,
 };
 use wartui_proto::plan::{ChannelSet, NUM_SCAN_CHANNELS, SCAN_CHANNELS};
+use wartui_proto::reset::ResetCause;
 
 mod ble;
 mod radio;
@@ -92,26 +94,14 @@ macro_rules! note {
 /// meaningfully shortened, coarse enough not to spin the core.
 const POLL_MS: u64 = 2;
 
-/// Reset the chip, undoing first what the C5's ROM leaves behind.
-///
-/// The same funnel the bridge has, with the same one register in it;
-/// `firmware/bridge/src/main.rs` carries the reasoning. The exposure is quieter on
-/// this end — a node that never comes back reads as `no heartbeat`, which is also
-/// what a node out of range reads as — and quieter is why it would go unexplained
-/// for longer.
-fn reboot() -> ! {
-    #[cfg(feature = "esp32c5")]
-    esp_hal::peripherals::PCR::regs()
-        .reset_event_bypass()
-        .modify(|_, w| w.reset_event_bypass().clear_bit());
-
-    esp_hal::system::software_reset()
-}
-
 /// Resets rather than hanging, for the same reason the bridge does: a node that
 /// has stopped is indistinguishable from one out of range, and a reset at least
 /// restarts the heartbeat counter, which the host reads as `rebooted` and
 /// answers with a fresh assignment.
+///
+/// The C5 failure [`reboot`] guards against is quieter on this end: a node that never
+/// comes back reads as `no heartbeat`, as one out of range does, so it would go
+/// unexplained for longer.
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
     note!("panic: {}", info);
@@ -177,6 +167,8 @@ struct Node {
     core: Option<[u8; 6]>,
     /// Sighting batches this node sent that the core never acknowledged.
     unacked: u32,
+    /// Why this boot happened, read once in `main`. Every heartbeat carries it.
+    reset_cause: ResetCause,
 }
 
 impl Node {
@@ -199,6 +191,8 @@ impl Node {
             seq: 0,
             core: None,
             unacked: 0,
+            // `main` replaces it before the first heartbeat.
+            reset_cause: ResetCause::Unknown,
         }
     }
 
@@ -293,7 +287,8 @@ static SCANNER: StaticCell<ble::Scanner<'static>> = StaticCell::new();
 #[esp_hal::main]
 fn main() -> ! {
     let peripherals = esp_hal::init(esp_hal::Config::default().with_cpu_clock(CpuClock::max()));
-    note!("reset reason: {:?}", esp_hal::system::reset_reason());
+    let cause = reset_cause();
+    note!("reset reason: {:?} ({})", esp_hal::system::reset_reason(), cause);
 
     // The radio blobs allocate; nothing in wartui's own code does.
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 64 * 1024);
@@ -374,6 +369,7 @@ fn main() -> ! {
     let scanning = scanner.is_some();
 
     let node = NODE.take();
+    node.reset_cause = cause;
     let mac = esp_radio::wifi::Interface::station().mac_address();
     note!(
         "wartui node {} v{}, control channel {}",
@@ -396,7 +392,7 @@ fn main() -> ! {
             // loop from spinning.
             if radio::park(&manager, &sniffer, CONTROL_CHANNEL, false) {
                 node.last_dwell = 0;
-                heartbeat(&mut sender, node);
+                heartbeat(&manager, &mut sender, node);
                 node.counter = node.counter.wrapping_add(1).max(1);
             } else {
                 note!("radio would not park on channel {}", CONTROL_CHANNEL);
@@ -437,7 +433,7 @@ fn main() -> ! {
                     // and queued, and this heartbeat must report its epoch.
                     drain_admin(&manager, &receiver, node);
                     node.last_dwell = 0;
-                    heartbeat(&mut sender, node);
+                    heartbeat(&manager, &mut sender, node);
                     listen(&manager, &receiver, node, ADMIN_WAIT_MS);
                     node.next_beat = Some(next_beat_after(deadline));
                 }
@@ -498,7 +494,7 @@ fn main() -> ! {
             && let Some(deadline) = node.next_beat
             && Instant::now() >= deadline
         {
-            heartbeat(&mut sender, node);
+            heartbeat(&manager, &mut sender, node);
             listen(&manager, &receiver, node, ADMIN_WAIT_MS);
             node.next_beat = Some(next_beat_after(deadline));
         }
@@ -528,11 +524,13 @@ fn next_beat_after(deadline: Instant) -> Instant {
 /// it covers both a send the radio could not make and a frame lost on the air. `node.unsent`
 /// counts the failed sends, and is what tells the two apart. `node.beat_dwell` takes
 /// this beat's dwell on every attempt too, so the next beat names it whether or not this
-/// one arrives.
-fn heartbeat(sender: &mut EspNowSender<'_>, node: &mut Node) {
+/// one arrives. The transmit power is read from the radio on every beat rather than
+/// remembered from adoption, so the beat reports what a refused `set_tx_power` kept (the
+/// boot default, or an earlier assignment's power) or what something reset it to since.
+fn heartbeat(manager: &EspNowManager<'_>, sender: &mut EspNowSender<'_>, node: &mut Node) {
     // Every heartbeat carries the capabilities, not just the first: sent once they
     // would be lost to a dropped frame or stale after a reflash, and they are
-    // three bytes of twenty-three.
+    // three bytes of twenty-five.
     let beat = node.beats.wrapping_add(1);
     let msg = HeartbeatMsg {
         counter: node.counter,
@@ -544,6 +542,8 @@ fn heartbeat(sender: &mut EspNowSender<'_>, node: &mut Node) {
         unsent: node.unsent,
         dwell: node.last_dwell,
         prev_dwell: node.beat_dwell,
+        tx_power: radio::tx_power(manager),
+        reset_cause: node.reset_cause,
     };
     node.beats = beat;
     node.beat_dwell = node.last_dwell;

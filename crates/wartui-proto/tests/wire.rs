@@ -13,6 +13,7 @@ use wartui_proto::air::{
     SSID_MAX, Security, SightingBatch, SightingBatchWriter, SightingMsg, WIRE_VERSION, foreign,
 };
 use wartui_proto::plan::{ChannelSet, IndexRun};
+use wartui_proto::reset::ResetCause;
 
 /// `WTUI`, version 1, then the type byte.
 const HEARTBEAT: &[u8] = &[
@@ -26,6 +27,8 @@ const HEARTBEAT: &[u8] = &[
     0x07, // unsent 7
     0x95, // dwell: channel 149
     0x24, // prev_dwell: channel 36
+    0x18, // tx_power: 24 quarter-dBm, 6 dBm
+    0x05, // reset_cause: brownout
 ];
 
 /// A heartbeat from a node parked since boot: epoch 0, never sent by the host.
@@ -40,6 +43,8 @@ const HEARTBEAT_NO_EPOCH: &[u8] = &[
     0x00, // unsent 0
     0x00, // dwell: none, the node is parked
     0x00, // prev_dwell: none, the first heartbeat since boot
+    0x08, // tx_power: 8 quarter-dBm, the 2 dBm boot default
+    0x01, // reset_cause: power on
 ];
 
 /// A Wi-Fi record: no header of its own, since [`SightingBatch`] carries one
@@ -229,6 +234,8 @@ fn heartbeat_msg_serializes_byte_for_byte_when_encoded_and_decoded() {
         unsent: 7,
         dwell: 149,
         prev_dwell: 36,
+        tx_power: 24,
+        reset_cause: ResetCause::Brownout,
     };
     assert_eq!(msg.encode().as_slice(), HEARTBEAT);
     assert_eq!(HeartbeatMsg::decode(HEARTBEAT), Ok(msg));
@@ -246,6 +253,8 @@ fn heartbeat_msg_serializes_epoch_zero_when_node_holds_no_assignment() {
         unsent: 0,
         dwell: 0,
         prev_dwell: 0,
+        tx_power: 8,
+        reset_cause: ResetCause::PowerOn,
     };
     assert_eq!(msg.encode().as_slice(), HEARTBEAT_NO_EPOCH);
     assert_eq!(HeartbeatMsg::decode(HEARTBEAT_NO_EPOCH), Ok(msg));
@@ -306,31 +315,77 @@ fn heartbeat_msg_round_trips_dwell_when_encoded_at_its_offset() {
 }
 
 #[test]
-fn heartbeat_msg_rejects_frame_when_node_sends_twenty_two_byte_heartbeat() {
+fn heartbeat_msg_round_trips_tx_power_when_encoded_at_its_offset() {
+    let decoded = HeartbeatMsg::decode(HEARTBEAT).expect("valid");
+    assert_eq!(decoded.tx_power, 24);
+    assert_eq!(HEARTBEAT[23], 0x18);
+
+    // 0 is what a node sends when it could not read its radio's power.
+    for tx_power in [8, 80, 0] {
+        let msg = HeartbeatMsg { tx_power, ..decoded };
+        let frame = msg.encode();
+        assert_eq!(frame[23], tx_power.to_le_bytes()[0]);
+        assert_eq!(HeartbeatMsg::decode(&frame), Ok(msg));
+    }
+}
+
+#[test]
+fn heartbeat_msg_round_trips_reset_cause_when_encoded_at_its_offset() {
+    let decoded = HeartbeatMsg::decode(HEARTBEAT).expect("valid");
+    assert_eq!(decoded.reset_cause, ResetCause::Brownout);
+    assert_eq!(HEARTBEAT[24], 0x05);
+
+    for reset_cause in [
+        ResetCause::PowerOn,
+        ResetCause::Software,
+        ResetCause::Watchdog,
+        ResetCause::Lockup,
+        ResetCause::Brownout,
+        ResetCause::External,
+        ResetCause::Unknown,
+    ] {
+        let msg = HeartbeatMsg { reset_cause, ..decoded };
+        let frame = msg.encode();
+        assert_eq!(frame[24], reset_cause.as_u8());
+        assert_eq!(HeartbeatMsg::decode(&frame), Ok(msg));
+    }
+}
+
+#[test]
+fn heartbeat_msg_decodes_unknown_reset_cause_when_byte_unassigned() {
+    // A node naming a cause this build has no name for is still a node.
+    let mut frame = HEARTBEAT.to_vec();
+    frame[24] = 0xEE;
+    let decoded = HeartbeatMsg::decode(&frame).expect("valid");
+    assert_eq!(decoded.reset_cause, ResetCause::Unknown);
+}
+
+#[test]
+fn heartbeat_msg_rejects_frame_when_node_sends_twenty_three_byte_heartbeat() {
     // A node flashed from another tree, whose heartbeat is shorter. The engine counts
     // this as incompatible and asks for a reflash.
     assert_eq!(
-        HeartbeatMsg::decode(&HEARTBEAT[..22]),
-        Err(DecodeError::BadLength { need: HEARTBEAT_MSG_LEN, got: 22 })
+        HeartbeatMsg::decode(&HEARTBEAT[..23]),
+        Err(DecodeError::BadLength { need: HEARTBEAT_MSG_LEN, got: 23 })
     );
     assert_eq!(
-        Frame::decode(&HEARTBEAT[..22]),
-        Err(DecodeError::BadLength { need: HEARTBEAT_MSG_LEN, got: 22 })
+        Frame::decode(&HEARTBEAT[..23]),
+        Err(DecodeError::BadLength { need: HEARTBEAT_MSG_LEN, got: 23 })
     );
 }
 
 #[test]
-fn heartbeat_msg_rejects_frame_when_node_sends_twenty_four_byte_heartbeat() {
+fn heartbeat_msg_rejects_frame_when_node_sends_twenty_six_byte_heartbeat() {
     // A longer frame is the dangerous half, because its leading bytes would parse.
     let mut longer = HEARTBEAT.to_vec();
     longer.push(0);
     assert_eq!(
         HeartbeatMsg::decode(&longer),
-        Err(DecodeError::BadLength { need: HEARTBEAT_MSG_LEN, got: 24 })
+        Err(DecodeError::BadLength { need: HEARTBEAT_MSG_LEN, got: 26 })
     );
     assert_eq!(
         Frame::decode(&longer),
-        Err(DecodeError::BadLength { need: HEARTBEAT_MSG_LEN, got: 24 })
+        Err(DecodeError::BadLength { need: HEARTBEAT_MSG_LEN, got: 26 })
     );
 }
 

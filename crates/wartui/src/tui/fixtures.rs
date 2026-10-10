@@ -10,8 +10,9 @@ use wartui_core::gps::{GpsCounters, GpsStatus, GpsView};
 use wartui_core::position::{Fix, PositionSource};
 use wartui_core::record::AdminOutcome;
 use wartui_proto::air::{Capabilities, RecordKind, wire_epoch};
-use wartui_proto::link::{Chip, LoopPhase, ResetCause};
+use wartui_proto::link::{Chip, LoopPhase};
 use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun};
+use wartui_proto::reset::ResetCause;
 use wartui_proto::tx_power::DEFAULT_TX_POWER_QUARTER_DBM;
 
 use super::draw;

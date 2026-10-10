@@ -672,6 +672,14 @@ The footer shows faults only once they happen, so a clean run has a clean footer
 - **`bridge dropped`**: frames lost since this host attached. `wartui status` reports the total
   since the bridge booted, which is large and harmless on a dongle left powered with nothing
   listening. Every status reply is kept as a `bridge_status` row, with its since-boot counts.
+- **`57:84 at 2 dBm, assigned 6 dBm`**: that node's radio reports a transmit power other than the
+  assignment it holds. It refused the power and kept its previous one. `57:84 cannot read its
+  transmit power` means it could not report one at all. Power-cycle that node; if it persists, it
+  is that board. The line goes once the node reports its assigned power.
+- **`4F:08 restarted: brownout`**, with `(×3)` after repeats: a node restarted during the run for a
+  fault, and the line stays for the run. `brownout` means check that node's supply; `software`,
+  `watchdog` or `lockup` is the firmware; `unknown` is a cause this build cannot name. A power-on
+  or a reset over USB is not shown.
 
 ## The bridge panel
 

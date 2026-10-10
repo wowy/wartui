@@ -29,6 +29,7 @@ esp32c5 = [
   "esp-rtos/esp32c5",
   "esp-println?/esp32c5",
   "dep:esp-wifi-sys-esp32c5",
+  "wartui-firmware/esp32c5",
 ]
 esp32c6 = [
   "esp-alloc/esp32c6",
@@ -38,6 +39,7 @@ esp32c6 = [
   "esp-rtos/esp32c6",
   "esp-println?/esp32c6",
   "dep:esp-wifi-sys-esp32c6",
+  "wartui-firmware/esp32c6",
 ]
 
 # Diagnostics on the USB serial port. Unlike the bridge, a node has no link
@@ -82,6 +84,8 @@ esp-sync = "0.2.1"
 esp-wifi-sys-esp32c5 = { version = "0.2.0", optional = true }
 esp-wifi-sys-esp32c6 = { version = "0.2.0", optional = true }
 static_cell = "2.1.1"
+# The reset funnel and the reset cause, shared with the other firmware.
+wartui-firmware = { path = "../common" }
 wartui-proto = { path = "../../crates/wartui-proto" }
 
 [lints.rust]

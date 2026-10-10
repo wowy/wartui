@@ -32,11 +32,13 @@ use wartui_proto::air::{
 use wartui_proto::dedup::{C5DedupRing, C6DedupRing};
 use wartui_proto::link::{
     BROADCAST, BridgeToHost, Chip, EspNowPayload, HostToBridge, LogLevel, LogStr, LoopPhase, Panel,
-    ResetCause, SendStatus,
+    SendStatus,
 };
 use wartui_proto::mac::Mac;
 use wartui_proto::node::{ADMIN_WAIT_MS, ASSIGNED_BEAT_MS, CHANNEL_DWELL_MS, IDLE_BEAT_MS};
 use wartui_proto::plan::{ChannelSet, NUM_SCAN_CHANNELS, SCAN_CHANNELS};
+use wartui_proto::reset::ResetCause;
+use wartui_proto::tx_power::DEFAULT_TX_POWER_QUARTER_DBM;
 
 use crate::{BridgeInfo, LinkEvent, LinkHandle, TransportError, link_pair};
 
@@ -355,6 +357,9 @@ struct SimNode {
     last_dwell: u8,
     /// The `dwell` the previous heartbeat carried, mirroring `Node::beat_dwell`.
     beat_dwell: u8,
+    /// The transmit power of the last adopted assignment, in quarter-dBm, or the boot
+    /// default before one. A simulated radio never refuses it. Each heartbeat carries it.
+    tx_power: i8,
     /// When this node next sends a heartbeat and holds the admin window open.
     /// `None` while parked. Set fresh every time an assignment is adopted
     /// while parked, not only the first, so a stale deadline from before this
@@ -387,6 +392,7 @@ impl SimNode {
             beats: 0,
             last_dwell: 0,
             beat_dwell: 0,
+            tx_power: DEFAULT_TX_POWER_QUARTER_DBM,
             next_beat: None,
             seq: 0,
             seen: Seen::new(five_ghz),
@@ -425,6 +431,7 @@ impl SimNode {
         }
         self.epoch = admin.epoch;
         self.channels = admin.channels;
+        self.tx_power = admin.tx_power;
         self.holds_ble.store(admin.scan_ble(), Ordering::Relaxed);
     }
 
@@ -655,6 +662,9 @@ async fn beat(
         unsent: 0,
         dwell: node.last_dwell,
         prev_dwell: node.beat_dwell,
+        tx_power: node.tx_power,
+        // A simulated node boots only by being started.
+        reset_cause: ResetCause::PowerOn,
     };
     node.beats = msg.beat;
     node.beat_dwell = node.last_dwell;

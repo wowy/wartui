@@ -214,12 +214,13 @@ their shared `embedded-hal` 1.0 must stay a single copy.
 
 `esp-hal 1.2.0` and `esp-rtos 0.4` are published. Neither has a resolution alongside `esp-radio`,
 so nothing can pull one in by accident. The same dependency holds both firmwares at the same set.
-Keep that true: they share `wartui-proto`.
+Keep that true: they share `wartui-proto` and `firmware/common`, which states the same `esp-hal`
+requirement.
 
 The pin is not free. Upstream `esp-hal` fixes a C5 software reset that leaves the board unbootable
-until it loses power, from 1.2.0-rc.0 (esp-rs/esp-hal#5703). This firmware cannot take that fix, so
-`reboot()` writes that register out by hand on the C5. Cargo cannot be talked around the pin
-either. `SoftwareInterruptControl` is gone in 1.2.1, so `esp-rtos 0.3.0` and this firmware's
+until it loses power, from 1.2.0-rc.0 (esp-rs/esp-hal#5703). Neither firmware can take that fix,
+so `reboot()` in `firmware/common` writes that register out by hand on the C5. Cargo cannot be
+talked around the pin either. `SoftwareInterruptControl` is gone in 1.2.1, so `esp-rtos 0.3.0` and this firmware's
 `esp_rtos::start` would both stop compiling against a version faked into range. Issue #16 has the
 shape of the real upgrade: `[patch.crates-io]` across the family at one monorepo rev. It also lists
 what to delete when that lands.

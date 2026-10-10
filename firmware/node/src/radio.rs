@@ -4,9 +4,9 @@
 //! promiscuous mode on for its own reasons, so that falls out for free on the dwell
 //! side; the hop back to the control channel is the one to check on hardware.
 //!
-//! [`set_peer_rate`] and [`set_tx_power`] are the two direct IDF calls this firmware
-//! needs because `esp-radio` does not expose them once its long-lived handles borrow
-//! the controller.
+//! [`set_peer_rate`], [`set_tx_power`] and [`tx_power`] are the direct IDF calls this
+//! firmware needs because `esp-radio` does not expose them once its long-lived handles
+//! borrow the controller.
 //!
 //! A heartbeat broadcasts: it is how a bridge discovers a node in the first place,
 //! before either side knows the other's address. A sighting batch unicasts, to
@@ -91,6 +91,29 @@ pub fn set_tx_power(_manager: &EspNowManager<'_>, power: i8) -> bool {
     // passes the scalar ESP-IDF expects. The function changes only the radio's
     // maximum transmit power.
     unsafe { sys::esp_wifi_set_max_tx_power(power) == 0 }
+}
+
+/// The radio's maximum transmit power in quarter-dBm, as the IDF reports it now, or 0
+/// when the read fails. The IDF floor is 8, so 0 cannot be a real reading.
+///
+/// What a heartbeat reports, read fresh each time: the value [`set_tx_power`] last
+/// asked for is not evidence that the radio holds it. The manager is the same witness
+/// it is there.
+#[allow(
+    unsafe_code,
+    reason = "esp-radio requires a mutable controller after long-lived handles borrow it"
+)]
+pub fn tx_power(_manager: &EspNowManager<'_>) -> i8 {
+    #[cfg(feature = "esp32c5")]
+    use esp_wifi_sys_esp32c5::include as sys;
+    #[cfg(feature = "esp32c6")]
+    use esp_wifi_sys_esp32c6::include as sys;
+
+    let mut power: i8 = 0;
+    // SAFETY: Wi-Fi has started before the node enters its receive loop, and `power`
+    // is a writable `i8` alive for the whole call. The function only reads the radio's
+    // maximum transmit power. 0 is `ESP_OK`.
+    if unsafe { sys::esp_wifi_get_max_tx_power(&mut power) } == 0 { power } else { 0 }
 }
 
 /// A plaintext station peer on whatever channel the radio is already using.

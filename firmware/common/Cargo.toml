@@ -1,0 +1,36 @@
+# Its own workspace, for the reasons the firmwares are: a different target, a
+# different toolchain pin and a lockfile that must not be resolved together with
+# the host crates. Being one also lets `cargo clippy` run from here, which is
+# what lints this crate: a firmware's clippy compiles a path dependency outside
+# its workspace without linting it.
+[workspace]
+
+[package]
+name = "wartui-firmware"
+description = "Chip-level code both wartui firmwares need: the reset funnel and the reset cause."
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/wowy/wartui"
+
+[features]
+# Exactly one chip must be selected; src/lib.rs enforces it with compile_error!.
+# Each firmware forwards its own chip feature here.
+esp32c5 = ["esp-hal/esp32c5"]
+esp32c6 = ["esp-hal/esp32c6"]
+
+[dependencies]
+# The firmwares are held on esp-hal 1.1 by `esp-radio`'s `~1.1.0`; this crate
+# does not depend on `esp-radio`, so it states that wall itself. Without it, this
+# workspace's own lockfile could move to 1.2 and its clippy would lint against an
+# esp-hal neither firmware builds. `firmware/bridge/README.md` § "Dependency versions".
+esp-hal = { version = "~1.1.2", features = ["unstable"] }
+wartui-proto = { path = "../../crates/wartui-proto" }
+
+[lints.rust]
+# AGENTS.md's project-wide rule; the root workspace excludes `firmware`, so it is
+# stated here too. Nothing in this crate allows it.
+unsafe_code = "deny"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
