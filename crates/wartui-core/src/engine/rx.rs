@@ -7,7 +7,7 @@ use wartui_proto::node;
 
 #[cfg(doc)]
 use super::Counters;
-use super::{ActionBatch, FleetEngine, NodeState, Now};
+use super::{ActionBatch, FleetEngine, NodeState, Now, PowerMismatch};
 use crate::record::{BatchGap, Heartbeat, NodeSeen, Observation, RawFrame, Record};
 
 /// Log a node's boot at `warn!` when its [`ResetCause`](wartui_proto::reset::ResetCause) is a
@@ -172,6 +172,11 @@ impl FleetEngine {
                 "node restarted"
             );
             node.reboots += 1;
+            // Only restarts seen here: a join's boot may predate the run.
+            if heartbeat.reset_cause.is_fault() {
+                node.fault_restart = Some(heartbeat.reset_cause);
+                node.fault_restarts += 1;
+            }
             // The node forgot it. `reissue` below re-sends it.
             node.confirmed = None;
             // Booting empties the ring.
@@ -203,7 +208,8 @@ impl FleetEngine {
                 let reported = heartbeat.tx_power;
                 let epoch = heartbeat.epoch;
                 if reported != assigned {
-                    if node.power_mismatch != Some((epoch, reported)) {
+                    let mismatch = PowerMismatch { epoch, reported, assigned };
+                    if node.power_mismatch != Some(mismatch) {
                         tracing::warn!(
                             mac = %mac::full(&src),
                             reported,
@@ -211,7 +217,7 @@ impl FleetEngine {
                             epoch,
                             "node transmit power differs from its assignment"
                         );
-                        node.power_mismatch = Some((epoch, reported));
+                        node.power_mismatch = Some(mismatch);
                     }
                 } else if node.power_mismatch.take().is_some() {
                     tracing::info!(

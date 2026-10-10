@@ -9,7 +9,8 @@ use std::time::{Duration, Instant};
 use wartui_bridge::{BridgeInfo, LinkEvent};
 use wartui_core::ActionBatch;
 use wartui_core::engine::{
-    Command, Counters, EngineConfig, Event, FleetEngine, HostSample, Now, StorePeaks, StoreStats,
+    Command, Counters, EngineConfig, Event, FleetEngine, HostSample, Now, PowerMismatch,
+    StorePeaks, StoreStats,
 };
 use wartui_core::gps::Gps;
 use wartui_core::health::Health;
@@ -3765,6 +3766,98 @@ fn engine_logs_nothing_about_power_when_heartbeat_epoch_not_adopted() {
     }));
 
     assert!(lines.is_empty(), "{lines:?}");
+}
+
+#[test]
+fn engine_tracks_power_mismatch_when_adopted_node_reports_other_power() {
+    let clock = Clock::new();
+    let (mut engine, epoch) = adopted_at_24(&clock);
+    let node = |engine: &FleetEngine| engine.nodes().next().expect("the node").clone();
+    assert_eq!(node(&engine).power_mismatch, None);
+
+    engine.handle(powered_beat(NODE, 4, epoch, 8, 0), clock.at(15));
+    assert_eq!(
+        node(&engine).power_mismatch,
+        Some(PowerMismatch { epoch, reported: 8, assigned: 24 })
+    );
+
+    engine.handle(powered_beat(NODE, 5, epoch, 24, 0), clock.at(20));
+    assert_eq!(node(&engine).power_mismatch, None, "cleared once it matches");
+}
+
+/// A heartbeat from a node that booted for `cause`.
+fn booted_beat(src: Mac, counter: u32, cause: ResetCause) -> Event {
+    let msg = HeartbeatMsg {
+        counter,
+        epoch: 0,
+        capabilities: Capabilities::here(true),
+        wifi_refused: 0,
+        ble_refused: 0,
+        beat: 1,
+        unsent: 0,
+        dwell: 0,
+        prev_dwell: 0,
+        tx_power: 8,
+        reset_cause: cause,
+    };
+    rx(src, &msg.encode())
+}
+
+#[test]
+fn engine_records_fault_restart_when_node_restarts_for_brownout() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(heartbeat(NODE, 175), clock.at(1));
+    engine.handle(booted_beat(NODE, 2, ResetCause::Brownout), clock.at(2));
+
+    let node = engine.nodes().next().expect("the node");
+    assert_eq!(node.fault_restart, Some(ResetCause::Brownout));
+    assert_eq!(node.fault_restarts, 1);
+}
+
+#[test]
+fn engine_ignores_restart_when_operator_reset_node() {
+    for cause in [ResetCause::PowerOn, ResetCause::External] {
+        let clock = Clock::new();
+        let mut engine = engine(EngineConfig::default(), &clock);
+        engine.handle(heartbeat(NODE, 175), clock.at(1));
+        engine.handle(booted_beat(NODE, 2, cause), clock.at(2));
+
+        let node = engine.nodes().next().expect("the node");
+        assert_eq!(node.reboots, 1, "{cause}: still a restart");
+        assert_eq!(node.fault_restart, None, "{cause}");
+        assert_eq!(node.fault_restarts, 0, "{cause}");
+    }
+}
+
+#[test]
+fn engine_ignores_fault_cause_when_node_joins() {
+    // The boot a first heartbeat names may predate the run.
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(booted_beat(NODE, 175, ResetCause::Watchdog), clock.at(1));
+
+    let node = engine.nodes().next().expect("the node");
+    assert_eq!(node.fault_restart, None);
+    assert_eq!(node.fault_restarts, 0);
+}
+
+#[test]
+fn engine_counts_fault_restarts_when_node_restarts_for_faults_again() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(heartbeat(NODE, 175), clock.at(1));
+    engine.handle(booted_beat(NODE, 2, ResetCause::Brownout), clock.at(2));
+    engine.handle(booted_beat(NODE, 50, ResetCause::Brownout), clock.at(3));
+    // A power cycle in between neither clears the fault nor counts as one.
+    engine.handle(booted_beat(NODE, 3, ResetCause::PowerOn), clock.at(4));
+    engine.handle(booted_beat(NODE, 50, ResetCause::Brownout), clock.at(5));
+    engine.handle(booted_beat(NODE, 2, ResetCause::Watchdog), clock.at(6));
+
+    let node = engine.nodes().next().expect("the node");
+    assert_eq!(node.reboots, 3);
+    assert_eq!(node.fault_restart, Some(ResetCause::Watchdog), "the latest");
+    assert_eq!(node.fault_restarts, 2);
 }
 
 #[test]

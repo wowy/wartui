@@ -3,6 +3,7 @@ use std::time::Instant;
 use wartui_proto::air::{Capabilities, wire_epoch};
 use wartui_proto::mac::Mac;
 use wartui_proto::plan::ChannelSet;
+use wartui_proto::reset::ResetCause;
 
 use super::Now;
 #[cfg(doc)]
@@ -76,11 +77,17 @@ pub struct NodeState {
     /// heartbeat never sets it, since it says what the node held then, not now
     /// ([`FleetEngine::air_is_live`]).
     pub held_epoch: Option<u8>,
-    /// The `(epoch, tx_power)` of the last live heartbeat logged as reporting a transmit power
-    /// other than its adopted assignment's, so a mismatch is logged once rather than every beat
-    /// and its end is logged too. `None` while the node reports its assigned power. Cleared on
-    /// reboot.
-    pub(super) power_mismatch: Option<(u8, i8)>,
+    /// The transmit power this node's latest live adopted heartbeat reported, when it differs
+    /// from its assignment's. Logged once per new value rather than every beat, with its end
+    /// logged too. `None` while the node reports its assigned power. Cleared on reboot.
+    pub power_mismatch: Option<PowerMismatch>,
+    /// The cause of this node's latest restart the host saw that was a fault
+    /// ([`ResetCause::is_fault`]). Never set by the first heartbeat, whose boot may predate the
+    /// run, nor cleared by a later restart that is not a fault: it stays for the run, as a bridge
+    /// restart does.
+    pub fault_restart: Option<ResetCause>,
+    /// How many restarts the host saw were faults. [`Self::fault_restart`] is the latest.
+    pub fault_restarts: u32,
     /// Times this node's heartbeat reported an epoch other than the one it acknowledged. Each was
     /// re-sent on that heartbeat.
     pub unadopted: u32,
@@ -106,6 +113,20 @@ pub struct NodeState {
     pub(super) last_wifi_refused: Option<u16>,
     /// The same for `ble_refused` and [`Counters::ble_refused`].
     pub(super) last_ble_refused: Option<u16>,
+}
+
+/// A node reporting a transmit power other than the assignment it holds.
+///
+/// Its `set_tx_power` was refused, so the radio kept its previous power (the 2 dBm boot default
+/// or an earlier assignment's), or something reset the cap since.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PowerMismatch {
+    /// The epoch of the assignment the node holds.
+    pub epoch: u8,
+    /// What the node's radio reports, in quarter-dBm; 0 when it could not read it.
+    pub reported: i8,
+    /// What that assignment set, in quarter-dBm.
+    pub assigned: i8,
 }
 
 /// What one node was told to do, and the fleet arithmetic it was computed against.
@@ -155,6 +176,8 @@ impl NodeState {
             last_heartbeat_rx_us: None,
             held_epoch: None,
             power_mismatch: None,
+            fault_restart: None,
+            fault_restarts: 0,
             unadopted: 0,
             last_seq: None,
             last_seq_live: false,
