@@ -76,6 +76,11 @@ pub struct NodeState {
     /// heartbeat never sets it, since it says what the node held then, not now
     /// ([`FleetEngine::air_is_live`]).
     pub held_epoch: Option<u8>,
+    /// The `(epoch, tx_power)` of the last live heartbeat logged as reporting a transmit power
+    /// other than its adopted assignment's, so a mismatch is logged once rather than every beat
+    /// and its end is logged too. `None` while the node reports its assigned power. Cleared on
+    /// reboot.
+    pub(super) power_mismatch: Option<(u8, i8)>,
     /// Times this node's heartbeat reported an epoch other than the one it acknowledged. Each was
     /// re-sent on that heartbeat.
     pub unadopted: u32,
@@ -149,6 +154,7 @@ impl NodeState {
             last_latency_us: None,
             last_heartbeat_rx_us: None,
             held_epoch: None,
+            power_mismatch: None,
             unadopted: 0,
             last_seq: None,
             last_seq_live: false,

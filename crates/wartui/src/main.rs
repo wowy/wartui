@@ -15,8 +15,9 @@ use wartui_bridge::remember::BridgeMemory;
 use wartui_bridge::serial::{self, BridgeSpec, SerialTransport, discover_ports};
 use wartui_bridge::sim::{SimConfig, SimTransport};
 use wartui_bridge::{BridgeInfo, LinkEvent, LinkHandle, TransportError};
-use wartui_proto::link::{LoopPhase, ResetCause};
+use wartui_proto::link::LoopPhase;
 use wartui_proto::mac;
+use wartui_proto::reset::ResetCause;
 
 mod analyze;
 mod bench;

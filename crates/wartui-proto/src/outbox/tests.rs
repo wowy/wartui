@@ -5,8 +5,9 @@ use super::ring::Ring;
 use super::{BULK_DEPTH, ByteSink, Outbox, PRIORITY_DEPTH, USB_PACKET};
 use crate::link::{
     BridgeToHost, Chip, FrameAccumulator, LINK_PROTO_VERSION, LogLevel, LogStr, LoopPhase,
-    MAX_FRAME, ResetCause, ShortStr, decode_frame, encode_frame,
+    MAX_FRAME, ShortStr, decode_frame, encode_frame,
 };
+use crate::reset::ResetCause;
 
 /// A sink with a settable ceiling, so a wedged host can be simulated by
 /// letting exactly `capacity` more bytes through. `refuse_at` makes the

@@ -1,10 +1,10 @@
 name: Firmware - Node
 
 # Path-filtered: this builds only when something the node firmware compiles
-# changes — its own sources, `crates/wartui-proto` (the path dependency both
-# firmwares compile; a wire change is a firmware change), `rustfmt.toml` (fmt
-# resolves it from the repo root), or this file. One workflow per firmware
-# because GitHub's path filter is workflow-wide, never per-job.
+# changes — its own sources, `firmware/common` and `crates/wartui-proto` (the
+# path dependencies both firmwares compile; a wire change is a firmware change),
+# `rustfmt.toml` (fmt resolves it from the repo root), or this file. One workflow
+# per firmware because GitHub's path filter is workflow-wide, never per-job.
 
 on:
   push:
@@ -12,6 +12,7 @@ on:
     paths:
       - firmware/node/**
       - '!firmware/node/README.md'
+      - firmware/common/**
       - crates/wartui-proto/**
       - .github/workflows/firmware-node.yml
       - rustfmt.toml
@@ -19,6 +20,7 @@ on:
     paths:
       - firmware/node/**
       - '!firmware/node/README.md'
+      - firmware/common/**
       - crates/wartui-proto/**
       - .github/workflows/firmware-node.yml
       - rustfmt.toml

@@ -41,7 +41,6 @@ use esp_hal::clock::CpuClock;
 #[cfg(feature = "xiao-external-antenna")]
 use esp_hal::gpio::{Level, Output, OutputConfig};
 use esp_hal::interrupt::software::SoftwareInterruptControl;
-use esp_hal::rtc_cntl::SocResetReason;
 use esp_hal::time::Instant;
 use esp_hal::timer::timg::TimerGroup;
 use esp_hal::usb_serial_jtag::{UsbSerialJtag, UsbSerialJtagRx, UsbSerialJtagTx};
@@ -51,6 +50,7 @@ use esp_radio::esp_now::{
 };
 use portable_atomic::{AtomicU8, AtomicU32, Ordering};
 use static_cell::StaticCell;
+use wartui_firmware::{reboot, reset_cause};
 /// The channel the fleet speaks on, and the only one this bridge ever sits on. Shared
 /// with the node firmware and the host planner rather than spelled again here: nothing
 /// on the air negotiates this number, so the only thing keeping the three ends on the
@@ -59,11 +59,11 @@ use wartui_proto::air::CONTROL_CHANNEL;
 use wartui_proto::heapless::Vec;
 use wartui_proto::link::{
     BROADCAST, BridgeToHost, Chip, FrameAccumulator, HostToBridge, LINK_PROTO_VERSION, LinkError,
-    LogLevel, LogStr, LoopPhase, MAX_FRAME, Panel, PanelLines, ResetCause, SendStatus, ShortStr,
-    decode_frame,
+    LogLevel, LogStr, LoopPhase, MAX_FRAME, Panel, PanelLines, SendStatus, ShortStr, decode_frame,
 };
 use wartui_proto::mac::Mac;
 use wartui_proto::outbox::{ByteSink, Outbox};
+use wartui_proto::reset::ResetCause;
 use wartui_proto::stall::{HOST_PRESENT_WINDOW_MS, StallWatch};
 
 // This creates the app descriptor the esp-idf bootloader expects.
@@ -247,82 +247,6 @@ fn boot_phase(cause: ResetCause) -> LoopPhase {
         9 => LoopPhase::Render,
         _ => LoopPhase::Unknown,
     }
-}
-
-/// Flatten the chip's reset reason into the handful of stories worth telling.
-///
-/// `SocResetReason` names silicon blocks rather than causes, and the two chips
-/// disagree about which blocks exist: the C5 has `PowerGlitch` and `CpuLockup`
-/// alone.
-///
-/// The numeric codes behind the shared names are identical on both parts, so the
-/// temptation to match on `reason as u8` and be done should be resisted: the enum
-/// is the only thing that makes the next chip's differences visible. Matching only
-/// the variants every chip defines silently costs the C5 both of its own.
-///
-/// What is left unmapped is deliberate. `CoreDeepSleep` cannot happen: nothing
-/// here sleeps. `CoreSDIO` and `CoreEfuseCrc` say nothing an operator could act on
-/// beyond "this board is unwell", which [`ResetCause::Unknown`] already says.
-fn reset_cause() -> ResetCause {
-    let Some(reason) = esp_hal::system::reset_reason() else {
-        return ResetCause::Unknown;
-    };
-    match reason {
-        SocResetReason::ChipPowerOn => ResetCause::PowerOn,
-        // Both the panic handler and `HostToBridge::Reset` arrive here, and so
-        // does the reset `StallWatch` asks for. Which of the three it was is
-        // what the phase marker is for.
-        SocResetReason::CoreSw | SocResetReason::Cpu0Sw => ResetCause::Software,
-        SocResetReason::CoreMwdt0
-        | SocResetReason::CoreMwdt1
-        | SocResetReason::CoreRtcWdt
-        | SocResetReason::Cpu0Mwdt0
-        | SocResetReason::Cpu0Mwdt1
-        | SocResetReason::Cpu0RtcWdt
-        | SocResetReason::SysRtcWdt
-        | SocResetReason::SysSuperWdt => ResetCause::Watchdog,
-        // A glitch on the supply rail is a brownout to anyone holding the board,
-        // and the remedy printed for it is the right one.
-        #[cfg(feature = "esp32c5")]
-        SocResetReason::PowerGlitch => ResetCause::Brownout,
-        // The only signal either part gives for the hang class, and only the C5
-        // gives it — with no working watchdog behind it, a C6 simply does not
-        // report that class at all.
-        #[cfg(feature = "esp32c5")]
-        SocResetReason::CpuLockup => ResetCause::Lockup,
-        SocResetReason::SysBrownOut => ResetCause::Brownout,
-        // `espflash reset` drives this pair over DTR/RTS, so an operator who
-        // reached for the tool sees that they did.
-        SocResetReason::CoreUsbUart | SocResetReason::CoreUsbJtag | SocResetReason::Cpu0JtagCpu => {
-            ResetCause::External
-        }
-        _ => ResetCause::Unknown,
-    }
-}
-
-/// Reset the chip, undoing first what the C5's ROM leaves behind.
-///
-/// Every reset this firmware takes comes through here — the panic handler, the
-/// stall detector and [`HostToBridge::Reset`] — because on the C5 a bare
-/// `software_reset()` does not reboot the board, it ends it. The part comes up
-/// with `PCR.RESET_EVENT_BYPASS.reset_event_bypass` set, which keeps a core reset
-/// from also resetting the system bus; the ROM's own MSPI core reset then leaves
-/// the AXI bus frozen. The banner prints, `SPI mode:` never does, and nothing
-/// recovers the board until it loses power — measured four ways. That is strictly
-/// worse than the wedge the stall detector exists to clear.
-///
-/// Clearing the bit is what ESP-IDF does on every boot and what `esp-hal` does in
-/// its C5 `pre_init` from 1.2 onwards (esp-rs/esp-hal#5703), which the version
-/// wall in `README.md` keeps out of reach. Written here rather than in `main`
-/// because a panic can land before `main` reaches a line of its own, and one
-/// funnel is one place to delete when that pin moves — see issue #16.
-fn reboot() -> ! {
-    #[cfg(feature = "esp32c5")]
-    esp_hal::peripherals::PCR::regs()
-        .reset_event_bypass()
-        .modify(|_, w| w.reset_event_bypass().clear_bit());
-
-    esp_hal::system::software_reset()
 }
 
 /// Resets rather than hanging.

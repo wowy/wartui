@@ -10,9 +10,10 @@ use wartui_proto::air::{
 };
 use wartui_proto::link::{
     BROADCAST, BridgeToHost, Chip, FrameAccumulator, HostToBridge, LINK_PROTO_VERSION, LinkError,
-    LogLevel, LoopPhase, MAX_FRAME, PANEL_ROWS, Panel, PanelLine, PanelLines, ResetCause,
-    SendStatus, Severity, ShortStr, crc16, decode_frame, encode_frame,
+    LogLevel, LoopPhase, MAX_FRAME, PANEL_ROWS, Panel, PanelLine, PanelLines, SendStatus, Severity,
+    ShortStr, crc16, decode_frame, encode_frame,
 };
+use wartui_proto::reset::ResetCause;
 
 fn sample_commands() -> Vec<HostToBridge, 16> {
     let mut payload = Vec::new();
@@ -28,6 +29,8 @@ fn sample_commands() -> Vec<HostToBridge, 16> {
                 unsent: 0,
                 dwell: 0,
                 prev_dwell: 0,
+                tx_power: 8,
+                reset_cause: ResetCause::PowerOn,
             }
             .encode(),
         )

@@ -1532,6 +1532,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6a02e4885ed3bc0f2de90ea6dd45ebcbb66dacffe03547fadbb0eeae2770887d"
 
 [[package]]
+name = "wartui-firmware"
+version = "0.1.0"
+dependencies = [
+ "esp-hal",
+ "wartui-proto",
+]
+
+[[package]]
 name = "wartui-node-fw"
 version = "0.1.0"
 dependencies = [
@@ -1545,6 +1553,7 @@ dependencies = [
  "esp-wifi-sys-esp32c5",
  "esp-wifi-sys-esp32c6",
  "static_cell",
+ "wartui-firmware",
  "wartui-proto",
 ]
 

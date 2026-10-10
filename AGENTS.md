@@ -56,8 +56,8 @@ address, and `crates/wartui/README.md` § "Telling the boards apart" says why th
 An upload publishes to the user's profile and cannot be taken back. Approval for one upload is
 not approval for the next. Tests use a local listener, never the real site.
 
-Each firmware is a **separate workspace** (`exclude = ["firmware"]`): different target, own
-toolchain pin, own lockfile. `cargo test --workspace` never touches them.
+Each firmware, and `firmware/common` beside them, is a **separate workspace**
+(`exclude = ["firmware"]`): different target, own toolchain pin, own lockfile. `cargo test --workspace` never touches them.
 
 ```sh
 cd firmware/bridge
@@ -68,15 +68,21 @@ cargo run --release --features esp32c6        # runner is `espflash flash --moni
 cd firmware/node
 cargo fmt --all -- --check
 cargo clippy --release --features esp32c6     # and esp32c5
+
+cd firmware/common                            # a firmware's clippy does not lint it
+cargo fmt --all -- --check
+cargo clippy --release --features esp32c6     # and esp32c5
 ```
 
 CI mirrors the workspace split: host crates on every push and PR; each firmware only
-when something it compiles changes. It runs `fmt` and `clippy` in each firmware
-directory, so a `wartui-proto` change that reaches the firmware is checked there too.
+when something it compiles changes, and `firmware/common` when it or `wartui-proto` does. It
+runs `fmt` and `clippy` in each firmware directory, so a `wartui-proto` change that reaches the
+firmware is checked there too.
 
 ## Architecture
 
-Four host crates, strictly layered, plus firmware that shares the bottom one.
+Four host crates, strictly layered, plus firmware that shares the bottom one and a crate of its
+own.
 
 - **`crates/wartui-proto`** — `no_std`, allocation-free wire formats and the parsing that goes
   with them: `air` (the four ESP-NOW frames, and `air::foreign` for recognizing somebody
@@ -103,6 +109,10 @@ Four host crates, strictly layered, plus firmware that shares the bottom one.
   scan never leaves the control channel at all: it sniffs nothing and runs one scan after
   another, back to back. Same rule as the bridge: the logic lives in `wartui-proto`, and
   this crate is the conversation with the radio.
+- **`firmware/common`** (`wartui-firmware`) — chip-level code both firmwares need and that needs
+  `esp-hal`, so it cannot live in `wartui-proto`: the reset funnel `reboot()` and `reset_cause()`.
+  A path dependency of both, forwarding each firmware's chip feature, and its own workspace so
+  its own clippy lints it; a firmware's clippy compiles it without linting it.
 
 ### The engine/runtime split is load-bearing
 
@@ -137,7 +147,7 @@ These bite from a distance — from a file other than the one that owns them —
 is here rather than only in a `//!`.
 
 - **The wire is ours, in both directions, and shares nothing with the vendor's.** Every frame is
-  `WTUI`, a wire version byte, a type byte and a body: `HeartbeatMsg` (23 bytes), `SightingBatch`
+  `WTUI`, a wire version byte, a type byte and a body: `HeartbeatMsg` (25 bytes), `SightingBatch`
   (9 plus records of 12 plus the SSID and the trailer), `AdminMsg` (15) and `ClearMsg` (6, header
   only). A heartbeat broadcasts, since that is how a bridge discovers a node before either
   side knows the other's address; a sighting batch unicasts to the bridge that last sent
@@ -231,10 +241,11 @@ is here rather than only in a `//!`.
   pool, and at no other time.
 - **`clippy::all` is denied workspace-wide, in both firmwares too, and so is `unsafe_code`.** The
   host allows it on one function, the Raspberry Pi firmware mailbox ioctl
-  (`crates/wartui-core/src/health.rs`, `mailbox_call`). Each firmware allows the two IDF calls
+  (`crates/wartui-core/src/health.rs`, `mailbox_call`). Each firmware allows the IDF calls
   `esp-radio` cannot express after its long-lived handles borrow the controller: the ESP-NOW
-  peer-rate call and the runtime transmit-power call. Any further `#[allow(unsafe_code)]` is a decision to make in
-  review, not a convenience.
+  peer-rate call and the runtime transmit-power call, and on a node the transmit-power read each
+  heartbeat carries. Any further `#[allow(unsafe_code)]` is a decision to make in review, not a
+  convenience.
 
 ### Load-bearing, and reasoned where they live
 
@@ -285,9 +296,9 @@ edit stops; follow the pointer before changing the rule.
   delete any and a bridge reboots forever, or never. There is no watchdog behind the hang case.
   → `crates/wartui-proto/src/stall.rs`, `StallWatch`; `docs/phase-3-findings.md`
 - **Every reset goes through `reboot()`, and on a C5 that funnel *is* the reset** — a bare
-  `software_reset()` there does not reboot the board, it stops it. Each firmware has its own copy,
-  so the esp-hal 1.2 cleanup (issue #16) has to remove both.
-  → `firmware/bridge/src/main.rs`, `fn reboot`, which `firmware/node/src/main.rs` points at
+  `software_reset()` there does not reboot the board, it stops it. Both firmwares share the one
+  funnel, which is what the esp-hal 1.2 cleanup (issue #16) removes.
+  → `firmware/common/src/lib.rs`, `reboot`
 - **A bridge reboot is invisible unless the host compares uptimes**, because a software reset does
   not re-enumerate the USB device. → `crates/wartui-bridge/src/serial.rs`, the `Ready` arm
 - **Neither firmware may block on the USB endpoint.** The bridge's rings evict oldest-first and
@@ -296,7 +307,7 @@ edit stops; follow the pointer before changing the rule.
 - **The bridge writes nothing to USB until a host has spoken, unless a host was present when the
   previous life ended** (an RTC flag, never trusted after a power-on). Writing before any host
   opens the port wedges the endpoint, and a host that was present across the reset is already
-  reading. → `crates/wartui-proto/src/link/mod.rs`, `ResetCause::speaks_first`;
+  reading. → `crates/wartui-proto/src/reset.rs`, `ResetCause::speaks_first`;
   `docs/phase-3-findings.md`
 - **Never link `esp-println` with `jtag-serial` in the *bridge*** — its link protocol shares that
   endpoint, and diagnostics go out as `Log` frames instead. → `firmware/bridge/README.md`

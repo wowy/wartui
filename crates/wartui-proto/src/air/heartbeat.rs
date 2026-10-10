@@ -1,9 +1,10 @@
 use core::fmt;
 
 use super::{DecodeError, MsgType, OFFSET_BODY, header, write_header};
+use crate::reset::ResetCause;
 
 /// Length of [`HeartbeatMsg`] on the wire.
-pub const HEARTBEAT_MSG_LEN: usize = OFFSET_BODY + 17;
+pub const HEARTBEAT_MSG_LEN: usize = OFFSET_BODY + 19;
 
 /// [`Capabilities::flags`] bit 0: this radio reaches 5 GHz.
 pub const CAP_FLAG_5G: u8 = 1 << 0;
@@ -117,6 +118,16 @@ pub struct HeartbeatMsg {
     /// and 0 for the first heartbeat after boot. A single missed beat gets its channel from
     /// the next one that arrives.
     pub prev_dwell: u8,
+    /// The radio's maximum transmit power in quarter-dBm, as `esp_wifi_get_max_tx_power`
+    /// reports it just before this heartbeat, or 0 when the read failed. The IDF floor is
+    /// 8, so 0 is unambiguous. Read on every beat rather than remembered from adoption, so
+    /// a cap that a refused `set_max_tx_power` kept, or that something reset mid-boot,
+    /// shows here. A refusal keeps whatever the radio already had: the 2 dBm boot default
+    /// (8) if no earlier assignment set one, otherwise that assignment's power. [`crate::tx_power`] has the range the host configures.
+    pub tx_power: i8,
+    /// Why the node is running this boot. Read once at boot, so every heartbeat of a boot
+    /// carries the same one.
+    pub reset_cause: ResetCause,
 }
 
 impl HeartbeatMsg {
@@ -153,10 +164,12 @@ impl HeartbeatMsg {
             unsent: buf[OFFSET_BODY + 14],
             dwell: buf[OFFSET_BODY + 15],
             prev_dwell: buf[OFFSET_BODY + 16],
+            tx_power: i8::from_le_bytes([buf[OFFSET_BODY + 17]]),
+            reset_cause: ResetCause::from_u8(buf[OFFSET_BODY + 18]),
         })
     }
 
-    /// Encode to the twenty-three bytes a heartbeat is.
+    /// Encode to the twenty-five bytes a heartbeat is.
     #[must_use]
     pub fn encode(&self) -> [u8; HEARTBEAT_MSG_LEN] {
         let mut out = [0u8; HEARTBEAT_MSG_LEN];
@@ -172,6 +185,8 @@ impl HeartbeatMsg {
         out[OFFSET_BODY + 14] = self.unsent;
         out[OFFSET_BODY + 15] = self.dwell;
         out[OFFSET_BODY + 16] = self.prev_dwell;
+        out[OFFSET_BODY + 17] = self.tx_power.to_le_bytes()[0];
+        out[OFFSET_BODY + 18] = self.reset_cause.as_u8();
         out
     }
 }

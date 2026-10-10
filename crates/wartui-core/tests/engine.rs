@@ -20,11 +20,11 @@ use wartui_proto::air::{
     SightingMsg, wire_epoch,
 };
 use wartui_proto::link::{
-    BROADCAST, BridgeToHost, Chip, EspNowPayload, HostToBridge, LinkError, LoopPhase, ResetCause,
-    SendStatus,
+    BROADCAST, BridgeToHost, Chip, EspNowPayload, HostToBridge, LinkError, LoopPhase, SendStatus,
 };
 use wartui_proto::mac::Mac;
 use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun, Radio, plan};
+use wartui_proto::reset::ResetCause;
 use wartui_proto::tx_power::DEFAULT_TX_POWER_QUARTER_DBM;
 
 const NODE: Mac = [0x02, 0x00, 0x5E, 0x10, 0x57, 0x84];
@@ -116,6 +116,8 @@ fn beat_at(src: Mac, counter: u32, epoch: u8, capabilities: Capabilities, rx_us:
         unsent: 0,
         dwell: 0,
         prev_dwell: 0,
+        tx_power: 8,
+        reset_cause: ResetCause::PowerOn,
     };
     rx_at(src, &msg.encode(), rx_us)
 }
@@ -132,6 +134,8 @@ fn heartbeat_refusing(src: Mac, counter: u32, wifi_refused: u16, ble_refused: u1
         unsent: 0,
         dwell: 0,
         prev_dwell: 0,
+        tx_power: 8,
+        reset_cause: ResetCause::PowerOn,
     };
     rx(src, &msg.encode())
 }
@@ -943,6 +947,8 @@ fn engine_records_dwell_when_heartbeat_arrives() {
         unsent: 0,
         dwell: 149,
         prev_dwell: 36,
+        tx_power: 8,
+        reset_cause: ResetCause::PowerOn,
     };
     let batch = engine.handle(rx(NODE, &msg.encode()), clock.at(1));
 
@@ -955,6 +961,40 @@ fn engine_records_dwell_when_heartbeat_arrives() {
         })
         .collect();
     assert_eq!(dwells, [(149, 36)], "the channel numbers as the frame carried them");
+}
+
+#[test]
+fn engine_records_reset_cause_when_node_restarts() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(heartbeat(NODE, 175), clock.at(1));
+
+    // The counter falling is the restart; the cause is what the new boot says it was.
+    let msg = HeartbeatMsg {
+        counter: 2,
+        epoch: 0,
+        capabilities: Capabilities::here(true),
+        wifi_refused: 0,
+        ble_refused: 0,
+        beat: 1,
+        unsent: 0,
+        dwell: 0,
+        prev_dwell: 0,
+        tx_power: 24,
+        reset_cause: ResetCause::Brownout,
+    };
+    let batch = engine.handle(rx(NODE, &msg.encode()), clock.at(2));
+
+    let beats: Vec<(i8, ResetCause)> = batch
+        .records
+        .iter()
+        .filter_map(|r| match r {
+            Record::Heartbeat(h) => Some((h.tx_power, h.reset_cause)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(beats, [(24, ResetCause::Brownout)]);
+    assert_eq!(engine.nodes().next().expect("one node").reboots, 1);
 }
 
 #[test]
@@ -974,6 +1014,8 @@ fn engine_counts_incompatible_when_wire_version_differs() {
         unsent: 0,
         dwell: 0,
         prev_dwell: 0,
+        tx_power: 8,
+        reset_cause: ResetCause::PowerOn,
     }
     .encode()
     .to_vec();
@@ -3571,6 +3613,158 @@ fn engine_logs_node_restarted_when_heartbeat_counter_decreases() {
     assert_eq!(lines.len(), 1, "logged once: {lines:?}");
     assert!(lines[0].contains("message=node restarted"), "{lines:?}");
     assert!(lines[0].contains("counter_before=175 counter_after=2"), "{lines:?}");
+}
+
+#[test]
+fn engine_logs_reset_cause_when_node_restarts() {
+    let clock = Clock::new();
+    let mut engine = engine(us_config(), &clock);
+    engine.handle(heartbeat(NODE, 175), clock.at(1));
+
+    let msg = HeartbeatMsg {
+        counter: 2,
+        epoch: 0,
+        capabilities: Capabilities::here(true),
+        wifi_refused: 0,
+        ble_refused: 0,
+        beat: 1,
+        unsent: 0,
+        dwell: 0,
+        prev_dwell: 0,
+        tx_power: 8,
+        reset_cause: ResetCause::Brownout,
+    };
+    let lines = Logs::during(|| {
+        engine.handle(rx(NODE, &msg.encode()), clock.at(2));
+    });
+
+    assert_eq!(lines.len(), 1, "logged once: {lines:?}");
+    assert!(lines[0].contains("message=node restarted"), "{lines:?}");
+    assert!(lines[0].contains("reset=brownout tx_power=8"), "{lines:?}");
+}
+
+/// A heartbeat holding `epoch` whose radio reports `tx_power`, stamped `rx_us` by the bridge.
+fn powered_beat(src: Mac, counter: u32, epoch: u8, tx_power: i8, rx_us: u32) -> Event {
+    let msg = HeartbeatMsg {
+        counter,
+        epoch,
+        capabilities: Capabilities::here(true),
+        wifi_refused: 0,
+        ble_refused: 0,
+        beat: 1,
+        unsent: 0,
+        dwell: 0,
+        prev_dwell: 0,
+        tx_power,
+        reset_cause: ResetCause::PowerOn,
+    };
+    rx_at(src, &msg.encode(), rx_us)
+}
+
+/// An engine whose node has adopted an assignment at 24 quarter-dBm, reporting 24, by ten
+/// seconds in. Returns the adopted epoch.
+fn adopted_at_24(clock: &Clock) -> (FleetEngine, u8) {
+    let mut engine = engine(EngineConfig { tx_power: 24, ..Default::default() }, clock);
+    engine.handle(powered_beat(NODE, 1, 0, 8, 0), clock.at(1));
+    let (id, _, admin) = sent_admin(&engine.handle(powered_beat(NODE, 2, 0, 8, 0), clock.at(6)));
+    assert_eq!(admin.tx_power, 24);
+    engine.handle(send_result(id, SendStatus::AckOk, 900), clock.at(6));
+    engine.handle(powered_beat(NODE, 3, admin.epoch, 24, 0), clock.at(10));
+    assert!(engine.nodes().next().expect("the node").adopted());
+    (engine, admin.epoch)
+}
+
+/// The lines about a node's transmit power among those logged.
+fn power_lines(lines: Vec<String>) -> Vec<String> {
+    lines.into_iter().filter(|l| l.contains("transmit power")).collect()
+}
+
+#[test]
+fn engine_logs_power_mismatch_once_when_adopted_node_reports_other_power() {
+    let clock = Clock::new();
+    let (mut engine, epoch) = adopted_at_24(&clock);
+
+    let lines = power_lines(Logs::during(|| {
+        for (i, at) in (15..30).step_by(5).enumerate() {
+            let counter = 4 + u32::try_from(i).expect("small");
+            engine.handle(powered_beat(NODE, counter, epoch, 8, 0), clock.at(at));
+        }
+    }));
+
+    assert_eq!(lines.len(), 1, "logged once: {lines:?}");
+    assert!(lines[0].contains("message=node transmit power differs from its assignment"));
+    assert!(lines[0].contains("reported=8 assigned=24"), "{lines:?}");
+}
+
+#[test]
+fn engine_logs_power_mismatch_again_when_reported_power_changes() {
+    let clock = Clock::new();
+    let (mut engine, epoch) = adopted_at_24(&clock);
+    engine.handle(powered_beat(NODE, 4, epoch, 8, 0), clock.at(15));
+
+    // 0 is a node that could not read its power: a different story from 8.
+    let lines = power_lines(Logs::during(|| {
+        engine.handle(powered_beat(NODE, 5, epoch, 0, 0), clock.at(20));
+        engine.handle(powered_beat(NODE, 6, epoch, 0, 0), clock.at(25));
+    }));
+
+    assert_eq!(lines.len(), 1, "logged once: {lines:?}");
+    assert!(lines[0].contains("reported=0 assigned=24"), "{lines:?}");
+}
+
+#[test]
+fn engine_logs_power_match_once_when_mismatched_node_reports_assigned_power() {
+    let clock = Clock::new();
+    let (mut engine, epoch) = adopted_at_24(&clock);
+    engine.handle(powered_beat(NODE, 4, epoch, 8, 0), clock.at(15));
+
+    let lines = power_lines(Logs::during(|| {
+        engine.handle(powered_beat(NODE, 5, epoch, 24, 0), clock.at(20));
+        engine.handle(powered_beat(NODE, 6, epoch, 24, 0), clock.at(25));
+    }));
+
+    assert_eq!(lines.len(), 1, "logged once: {lines:?}");
+    assert!(lines[0].contains("message=node transmit power matches its assignment"));
+    assert!(lines[0].contains("reported=24 assigned=24"), "{lines:?}");
+}
+
+#[test]
+fn engine_logs_nothing_about_power_when_node_reports_assigned_power() {
+    let clock = Clock::new();
+    let lines = power_lines(Logs::during(|| {
+        let (mut engine, epoch) = adopted_at_24(&clock);
+        engine.handle(powered_beat(NODE, 4, epoch, 24, 0), clock.at(15));
+        engine.handle(powered_beat(NODE, 5, epoch, 24, 0), clock.at(20));
+    }));
+
+    assert!(lines.is_empty(), "{lines:?}");
+}
+
+#[test]
+fn engine_logs_nothing_about_power_when_mismatched_heartbeat_replayed() {
+    let clock = Clock::new();
+    let (mut engine, epoch) = adopted_at_24(&clock);
+
+    // Out of the bridge's backlog: its clock jumps far ahead of the host's. The power it
+    // carries is from when it was sent.
+    let lines = power_lines(Logs::during(|| {
+        engine.handle(powered_beat(NODE, 4, epoch, 8, 1_000_000), clock.at_ms(10_002));
+    }));
+
+    assert!(lines.is_empty(), "{lines:?}");
+}
+
+#[test]
+fn engine_logs_nothing_about_power_when_heartbeat_epoch_not_adopted() {
+    let clock = Clock::new();
+    let (mut engine, epoch) = adopted_at_24(&clock);
+
+    // An epoch other than the one acked: the re-send's business, not a power fault.
+    let lines = power_lines(Logs::during(|| {
+        engine.handle(powered_beat(NODE, 4, epoch.wrapping_add(1), 8, 0), clock.at(15));
+    }));
+
+    assert!(lines.is_empty(), "{lines:?}");
 }
 
 #[test]

@@ -24,6 +24,7 @@ use wartui_core::store::{
 use wartui_proto::air::RecordKind;
 use wartui_proto::mac::Mac;
 use wartui_proto::plan::ChannelPool;
+use wartui_proto::reset::ResetCause;
 
 const NODE: Mac = [0x02, 0x00, 0x5E, 0x10, 0x57, 0x84];
 const OTHER: Mac = [0x02, 0x00, 0x5E, 0x10, 0x57, 0x85];
@@ -285,6 +286,8 @@ fn store_round_trips_record_when_each_type_written() {
                 unsent: 4,
                 dwell: 0,
                 prev_dwell: 0,
+                tx_power: 8,
+                reset_cause: ResetCause::PowerOn,
                 live: false,
             }),
             observation(NODE, [0xAA; 6], -60, EPOCH_MS, fixed(37.7749, -122.4194)),
@@ -374,6 +377,8 @@ fn store_writes_every_heartbeat_column_when_heartbeat_recorded() {
             unsent: 4,
             dwell: 11,
             prev_dwell: 1,
+            tx_power: 8,
+            reset_cause: ResetCause::PowerOn,
             live: true,
         })],
     );
@@ -397,6 +402,8 @@ fn store_writes_dwell_when_heartbeat_recorded() {
             unsent: 4,
             dwell: 149,
             prev_dwell: 36,
+            tx_power: 8,
+            reset_cause: ResetCause::PowerOn,
             live: true,
         })],
     );
@@ -404,6 +411,36 @@ fn store_writes_dwell_when_heartbeat_recorded() {
         .query_row("SELECT dwell, prev_dwell FROM heartbeat", [], |r| Ok((r.get(0)?, r.get(1)?)))
         .unwrap();
     assert_eq!(dwell, (149, 36), "the channel numbers as the frame carried them");
+}
+
+#[test]
+fn store_writes_tx_power_and_reset_cause_when_heartbeat_recorded() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let conn = write(
+        &dir,
+        vec![Record::Heartbeat(Heartbeat {
+            node_mac: NODE,
+            rx_at_ms: EPOCH_MS,
+            counter: 174,
+            epoch: 5,
+            link_rssi: Some(-41),
+            wifi_refused: 12,
+            ble_refused: 3,
+            beat: 61,
+            unsent: 4,
+            dwell: 149,
+            prev_dwell: 36,
+            tx_power: 24,
+            reset_cause: ResetCause::Brownout,
+            live: true,
+        })],
+    );
+    let row: (i64, String) = conn
+        .query_row("SELECT tx_power, reset_cause FROM heartbeat", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap();
+    assert_eq!(row, (24, "brownout".to_owned()), "quarter-dBm as sent, the cause by name");
 }
 
 #[test]

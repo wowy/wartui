@@ -19,6 +19,7 @@ updates:
     directories:
       - "/firmware/bridge"
       - "/firmware/node"
+      - "/firmware/common"
     schedule:
       interval: "daily"
     # Minor and major only, which for a 0.x crate is the whole of what is

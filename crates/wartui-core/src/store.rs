@@ -99,7 +99,11 @@ CREATE TABLE IF NOT EXISTS node (
 -- wraps at 2^8. `dwell` is the scan channel number the node dwelt on just
 -- before this heartbeat, 0 when none did (parked, Bluetooth, or a refused hop).
 -- `prev_dwell` is the `dwell` its previous heartbeat carried, arrived or not, so
--- a single missed beat gets its channel from the next row. An assignment
+-- a single missed beat gets its channel from the next row. `tx_power` is the
+-- radio's maximum transmit power in quarter-dBm as the node read it just before
+-- this heartbeat, 0 when the read failed. `reset_cause` is why the node is
+-- running this boot (`power_on`, `brownout`, ...), the same on every row of a
+-- boot. An assignment
 -- sent on a heartbeat's window is recorded in `assignment`; a dedup-ring clear
 -- is not recorded.
 CREATE TABLE IF NOT EXISTS heartbeat (
@@ -115,6 +119,8 @@ CREATE TABLE IF NOT EXISTS heartbeat (
   unsent INTEGER NOT NULL,
   dwell INTEGER NOT NULL,
   prev_dwell INTEGER NOT NULL,
+  tx_power INTEGER NOT NULL,
+  reset_cause TEXT NOT NULL,
   -- Whether the heartbeat arrived live or was replayed from the bridge's backlog.
   live INTEGER NOT NULL
 );
@@ -1112,8 +1118,8 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
                 tx.prepare_cached(
                     "INSERT INTO heartbeat
                        (node_mac, rx_at, counter, epoch, rssi, wifi_refused, ble_refused,
-                        beat, unsent, dwell, prev_dwell, live)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                        beat, unsent, dwell, prev_dwell, tx_power, reset_cause, live)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                 )?
                 .execute(params![
                     &hb.node_mac[..],
@@ -1127,6 +1133,8 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
                     hb.unsent,
                     hb.dwell,
                     hb.prev_dwell,
+                    hb.tx_power,
+                    hb.reset_cause.as_str(),
                     hb.live
                 ])?;
             }

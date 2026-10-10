@@ -10,8 +10,9 @@ use ratatui::widgets::Paragraph;
 use wartui_bridge::BridgeInfo;
 use wartui_core::engine::{Counters, Snapshot};
 use wartui_core::gps::GpsStatus;
-use wartui_proto::link::{LoopPhase, ResetCause};
+use wartui_proto::link::LoopPhase;
 use wartui_proto::plan;
+use wartui_proto::reset::ResetCause;
 
 use super::ui::Ui;
 use crate::text::thousands;

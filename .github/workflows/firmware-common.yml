@@ -1,0 +1,56 @@
+name: Firmware - Common
+
+# `firmware/common` is a path dependency of both firmwares, and their clippy
+# compiles it without linting it: it is outside their workspaces. So it is
+# linted here, from its own workspace, for each chip. Path-filtered like the
+# firmware workflows: its own sources, `crates/wartui-proto` (which it depends
+# on), `rustfmt.toml`, or this file.
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - firmware/common/**
+      - crates/wartui-proto/**
+      - .github/workflows/firmware-common.yml
+      - rustfmt.toml
+  pull_request:
+    paths:
+      - firmware/common/**
+      - crates/wartui-proto/**
+      - .github/workflows/firmware-common.yml
+      - rustfmt.toml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  common:
+    strategy:
+      matrix:
+        target: [esp32c5, esp32c6]
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Lint
+        run: |
+          pushd firmware/common
+          cargo fmt --all -- --check
+          popd
+
+      - name: Clippy
+        run: |
+          pushd firmware/common
+          cargo clippy --release --features ${{matrix.target}} --locked -- -D warnings
+          popd

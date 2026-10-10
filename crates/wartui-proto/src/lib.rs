@@ -22,6 +22,7 @@ pub mod node;
 pub mod outbox;
 pub mod pending;
 pub mod plan;
+pub mod reset;
 pub mod stall;
 pub mod tx_power;
 

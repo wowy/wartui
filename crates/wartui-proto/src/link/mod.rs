@@ -13,6 +13,7 @@
 //! the ROM banner a reset prints down the same pipe.
 
 use crate::mac::Mac;
+use crate::reset::ResetCause;
 use heapless::{String, Vec};
 use serde::Serialize;
 
@@ -60,69 +61,6 @@ pub enum Chip {
     Esp32C5,
     /// 2.4 GHz only, which is all ESP-NOW needs on the control channel.
     Esp32C6,
-}
-
-/// Why the bridge is running this life rather than the last one.
-///
-/// A flattening of `esp_hal`'s per-chip `SocResetReason`, which names silicon blocks
-/// rather than causes and differs between the two parts. An operator needs to know
-/// which story this was, and the ones that matter are not [`Self::PowerOn`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
-pub enum ResetCause {
-    /// The board was plugged in, or the button was pressed.
-    PowerOn,
-    /// The firmware reset itself: the panic handler, or a
-    /// [`HostToBridge::Reset`].
-    Software,
-    /// A watchdog fired, so the main loop stopped turning over.
-    Watchdog,
-    /// The CPU locked up and the silicon reset it.
-    ///
-    /// Reported by the C5 alone. Not folded into [`ResetCause::Watchdog`], because no
-    /// watchdog on these parts fires (`docs/phase-3-findings.md`). On a C6 a hang has
-    /// *no* signal, and the board must be unplugged.
-    Lockup,
-    /// The supply sagged. Usually a hub or a cable rather than the board.
-    Brownout,
-    /// A reset the firmware did not ask for and cannot attribute, including the one
-    /// `espflash` drives over DTR/RTS.
-    External,
-    /// The chip reported something this build does not have a name for.
-    Unknown,
-}
-
-impl ResetCause {
-    /// Whether a bridge writes to USB before any host has spoken.
-    ///
-    /// It does iff a host was present when the previous life ended
-    /// (`host_was_present`, kept in RTC memory). Never after a [`Self::PowerOn`], where
-    /// that memory is garbage.
-    ///
-    /// - **Why not always.** Writing to the USB Serial/JTAG endpoint with no host
-    ///   reading wedges it. A C6 replugged and left unread for two minutes was dead at
-    ///   first open in 3 of 3 trials, until `StallWatch` rebooted it. A build holding all
-    ///   transmit until a host frame decoded was healthy in 3 of 3, answering in 2 ms
-    ///   (`docs/phase-3-findings.md`). The ROM banner prints either way and is not the
-    ///   cause.
-    /// - **Why not never.** A host sends one `Identify` per connection. A connection
-    ///   that rides through the reset hears the new life only through the unprompted
-    ///   `Ready`.
-    /// - **Why not by cause.** The cause says who asked for the reset, not whether
-    ///   anybody was reading. A panic or `StallWatch` reset after the host left is
-    ///   [`Self::Software`] with nobody there. A watchdog or lockup reset can land while
-    ///   a host keeps the port open and never sends again.
-    #[must_use]
-    pub const fn speaks_first(self, host_was_present: bool) -> bool {
-        match self {
-            Self::PowerOn => false,
-            Self::Software
-            | Self::Watchdog
-            | Self::Lockup
-            | Self::Brownout
-            | Self::External
-            | Self::Unknown => host_was_present,
-        }
-    }
 }
 
 /// Where the bridge's main loop was when it last stopped making progress.

@@ -7,6 +7,7 @@
 use wartui_proto::air::{
     CAP_FLAG_5G, CAPABILITY_MAJOR, CAPABILITY_MINOR, Capabilities, HeartbeatMsg,
 };
+use wartui_proto::reset::ResetCause;
 
 fn round_trip(caps: Capabilities) -> Capabilities {
     let frame = HeartbeatMsg {
@@ -19,6 +20,8 @@ fn round_trip(caps: Capabilities) -> Capabilities {
         unsent: 0,
         dwell: 0,
         prev_dwell: 0,
+        tx_power: 8,
+        reset_cause: ResetCause::PowerOn,
     }
     .encode();
     HeartbeatMsg::decode(&frame).expect("we just encoded it").capabilities

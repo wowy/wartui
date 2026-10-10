@@ -11,6 +11,7 @@ use wartui_proto::air::RecordKind;
 use wartui_proto::beacon::visible_ssid;
 use wartui_proto::mac::Mac;
 use wartui_proto::plan::{ChannelPool, ChannelSet};
+use wartui_proto::reset::ResetCause;
 
 use crate::position::Fix;
 
@@ -74,6 +75,11 @@ pub struct Heartbeat {
     pub dwell: u8,
     /// The `dwell` the node's previous heartbeat carried, arrived or not; 0 after boot.
     pub prev_dwell: u8,
+    /// The node radio's maximum transmit power in quarter-dBm as it read it just before this
+    /// heartbeat, 0 when the read failed.
+    pub tx_power: i8,
+    /// Why the node is running this boot; the same on every heartbeat of a boot.
+    pub reset_cause: ResetCause,
     /// Whether it arrived live rather than replayed from the bridge's backlog.
     pub live: bool,
 }
