@@ -10,6 +10,7 @@ mod bignum;
 mod fleet;
 mod footer;
 mod format;
+mod gps;
 mod header;
 mod input;
 mod settings;
@@ -33,6 +34,7 @@ use wartui_core::engine::{Command, Snapshot};
 
 use fleet::draw_fleet;
 use footer::{buffer_full_line, draw_footer, fault_lines, faults};
+use gps::draw_gps_modal;
 use header::draw_header;
 use input::{Input, is_ctrl_c, quits, spawn_input};
 pub use settings::Settings;
@@ -99,6 +101,8 @@ async fn view(
                 // The upload's confirm opens over everything, settings included, so
                 // it answers first.
                 Some(Input::Key(key)) if ui.upload().confirming() => ui.on_confirm_key(key, &current),
+                // Ahead of `quits()`, so `q` closes the modal rather than the view.
+                Some(Input::Key(key)) if ui.gps_open() => ui.on_gps_key(key),
                 // An open modal gets the key ahead of `quits()`, so `esc` and `q`
                 // close the modal, not the view.
                 Some(Input::Key(key)) if ui.modal().is_some() => {
@@ -156,6 +160,9 @@ fn draw(frame: &mut Frame<'_>, snapshot: &Snapshot, ui: &mut Ui) {
     if let Some(modal) = ui.modal() {
         draw_settings_modal(frame, modal);
     }
+    if ui.gps_open() {
+        draw_gps_modal(frame, snapshot);
+    }
     if let Some(lines) = ui.upload().confirm_lines() {
         draw_confirm_modal(frame, &lines);
     }
@@ -188,11 +195,15 @@ mod tests {
     /// unreadable.
     #[test]
     fn view_renders_without_panicking_when_given_various_terminal_sizes() {
-        for snapshot in [busy(), empty()] {
+        let mut gps = Ui::default();
+        gps.open_gps();
+        for snapshot in [busy(), empty(), with_sky(40)] {
             for (width, height) in [(200, 50), (120, 30), (80, 24), (40, 10), (20, 5), (6, 3)] {
-                let mut terminal =
-                    Terminal::new(TestBackend::new(width, height)).expect("test backend");
-                terminal.draw(|frame| draw(frame, &snapshot, &mut Ui::default())).expect("drawing");
+                for ui in [&mut Ui::default(), &mut gps] {
+                    let mut terminal =
+                        Terminal::new(TestBackend::new(width, height)).expect("test backend");
+                    terminal.draw(|frame| draw(frame, &snapshot, ui)).expect("drawing");
+                }
             }
         }
     }

@@ -8,6 +8,9 @@
 //! [`crate::PositionChain`] decides whether that age is too much.
 //! Diagnostics use the same age limit, including on read timeouts, without changing the retained
 //! fix or the screen status. Logging belongs here so resolving a position stays free of effects.
+//!
+//! The sky starts over whenever the reader settles on a port or gives one up, so a lost or replaced
+//! receiver shows none of the old one's satellites. The retained fix is not reset: the chain ages it.
 
 use std::io::ErrorKind;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::discover::{self, BAUD_LADDER, PROBE_WINDOW};
-use crate::nmea::{Nmea, NmeaError, Report};
+use crate::nmea::{Nmea, NmeaError, Report, Sky};
 use crate::position::{Fix, PositionSource};
 
 /// Longest line worth assembling. NMEA 0183 caps a sentence at 82 characters. This leaves room for
@@ -136,7 +139,7 @@ pub struct GpsCounters {
 }
 
 /// The receiver's state as of a snapshot.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct GpsView {
     /// What it is doing.
     pub status: GpsStatus,
@@ -150,6 +153,12 @@ pub struct GpsView {
     /// mentioning: a rate the ladder chose already produced valid sentences, so later unreadable
     /// lines mean something else.
     pub pinned_baud: bool,
+    /// What the receiver says about its fix and its sky, for the view's GPS modal.
+    pub sky: Sky,
+    /// Unix milliseconds the last sentence parsed, if one ever has. The sky is as of then.
+    pub heard_ms: Option<i64>,
+    /// How long the receiver may go quiet before its sentences count as stale (`--gps-max-age`).
+    pub max_age: Duration,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -164,6 +173,7 @@ struct Inner {
     nmea: Nmea,
     fix: Option<Fix>,
     received_at_ms: Option<i64>,
+    heard_ms: Option<i64>,
     status: GpsStatus,
     counters: GpsCounters,
     settled: Option<(String, u32)>,
@@ -214,6 +224,13 @@ impl Inner {
         }
     }
 
+    /// Drop what the last receiver said about its sky, so a lost or replaced one shows no
+    /// satellites it is not reporting. The retained fix and status belong to the position chain.
+    fn forget_receiver(&mut self) {
+        self.nmea = Nmea::new();
+        self.heard_ms = None;
+    }
+
     fn note_fix(&mut self) {
         self.last_failure = None;
         if self.diagnostic != Some(Diagnostic::Fresh) {
@@ -244,6 +261,7 @@ impl Gps {
                 nmea: Nmea::new(),
                 fix: None,
                 received_at_ms: None,
+                heard_ms: None,
                 status: GpsStatus::Connecting,
                 counters: GpsCounters::default(),
                 settled: None,
@@ -299,6 +317,9 @@ impl Gps {
             last_fix_ms: inner.received_at_ms,
             settled: inner.settled.clone(),
             pinned_baud: inner.pinned_baud,
+            sky: inner.nmea.sky().clone(),
+            heard_ms: inner.heard_ms,
+            max_age: inner.max_age,
         }
     }
 
@@ -307,7 +328,11 @@ impl Gps {
     pub fn feed(&self, line: &[u8], now_ms: i64) {
         let mut inner = self.lock();
         inner.tick(now_ms);
-        match inner.nmea.parse(line) {
+        let parsed = inner.nmea.parse(line);
+        if parsed.is_ok() {
+            inner.heard_ms = Some(now_ms);
+        }
+        match parsed {
             Ok(Report::Fix(new)) => {
                 inner.note_fix();
                 inner.counters.sentences += 1;
@@ -392,7 +417,9 @@ impl Gps {
                 settled = Some((port.clone(), baud));
                 lost = None;
                 retries = 0;
-                self.lock().settled = Some((port.clone(), baud));
+                let mut inner = self.lock();
+                inner.settled = Some((port.clone(), baud));
+                inner.forget_receiver();
                 tracing::info!(port = %port, baud, "reading a receiver");
             }
 
@@ -430,7 +457,9 @@ impl Gps {
                     format!("{port} stopped sending NMEA")
                 });
                 settled = None;
-                self.lock().settled = None;
+                let mut inner = self.lock();
+                inner.settled = None;
+                inner.forget_receiver();
             }
             std::thread::sleep(backoff);
             backoff = (backoff * 2).min(MAX_BACKOFF);
@@ -946,6 +975,36 @@ mod tests {
         assert_eq!(view.counters.rejected, 1);
         assert_eq!(view.counters.fixes, 1);
         assert_eq!(view.last_fix_ms, Some(2_000));
+    }
+
+    #[test]
+    fn gps_exposes_sky_in_view_when_sentences_fed() {
+        let gps = Gps::detached();
+        assert_eq!(gps.view().heard_ms, None);
+        gps.feed(GGA, 1_000);
+        gps.feed(b"$GPGSV,1,1,02,10,63,137,17,08,49,090,26,1*69", 1_100);
+        gps.feed(b"$GNGSA,A,3,10,08,,,,,,,,,,,1.5,0.9,1.2,1*36", 1_200);
+        gps.feed(b"not NMEA", 1_300);
+        let view = gps.view();
+        assert_eq!(view.heard_ms, Some(1_200), "a rejected line is not hearing the receiver");
+        assert_eq!(view.sky.used_count, Some(8));
+        assert_eq!(view.sky.satellites.len(), 2);
+        assert!(view.sky.satellites.iter().all(|s| s.used));
+    }
+
+    #[test]
+    fn gps_forgets_sky_when_receiver_is_lost() {
+        let gps = Gps::detached();
+        gps.feed(GGA, 1_000);
+        gps.feed(b"$GPGSV,1,1,02,10,63,137,17,08,49,090,26,1*69", 1_100);
+        gps.feed(b"$GNGSA,A,3,10,08,,,,,,,,,,,1.5,0.9,1.2,1*36", 1_200);
+        let latest = gps.latest();
+        assert!(latest.is_some());
+        gps.lock().forget_receiver();
+        let view = gps.view();
+        assert_eq!(view.sky, Sky::default());
+        assert_eq!(view.heard_ms, None);
+        assert_eq!(gps.latest(), latest);
     }
 
     #[test]

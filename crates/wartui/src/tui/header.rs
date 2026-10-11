@@ -193,7 +193,8 @@ mod tests {
     #[test]
     fn view_omits_gps_status_when_no_receiver_is_present() {
         // Most captures are static, so a permanent "gps: none" would be noise.
-        assert!(!rendered(&busy()).contains("gps"));
+        // The key help names `g gps` on every screen.
+        assert!(!rendered(&busy()).replace("g gps", "").contains("gps"));
     }
 
     #[test]

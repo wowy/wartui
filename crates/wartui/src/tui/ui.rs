@@ -15,7 +15,7 @@ use crate::config;
 pub(super) const ENGINE_BUSY: &str = "the engine is not accepting commands";
 
 /// View state that outlives a frame: cursor, scroll offset, notice, settings modal,
-/// saved settings and upload.
+/// GPS modal, saved settings and upload.
 #[derive(Debug, Default)]
 pub(super) struct Ui {
     /// The fleet table row under the cursor.
@@ -28,6 +28,8 @@ pub(super) struct Ui {
     notice: Option<(String, i64)>,
     /// The settings modal, while open.
     modal: Option<ConfigModal>,
+    /// Whether the GPS modal is open.
+    gps_open: bool,
     /// Where to save, and what was last saved there.
     settings: Settings,
     /// The upload `u` started.
@@ -58,6 +60,25 @@ impl Ui {
         self.modal.as_ref()
     }
 
+    /// Whether the GPS modal is open.
+    pub(super) fn gps_open(&self) -> bool {
+        self.gps_open
+    }
+
+    /// Open the GPS modal.
+    pub(super) fn open_gps(&mut self) {
+        self.notice = None;
+        self.gps_open = true;
+    }
+
+    /// A key while the GPS modal is open. It is read-only, so `esc`, `q` and `g` close it
+    /// and every other key does nothing.
+    pub(super) fn on_gps_key(&mut self, key: KeyEvent) {
+        if matches!(key.code, KeyCode::Esc | KeyCode::Char('q' | 'g')) {
+            self.gps_open = false;
+        }
+    }
+
     /// The upload `u` started.
     pub(super) fn upload(&self) -> &Upload {
         &self.upload
@@ -86,6 +107,7 @@ impl Ui {
             }
             KeyCode::Char('b') => self.toggle_ble(snapshot, commands),
             KeyCode::Char('c') => self.open_modal(snapshot),
+            KeyCode::Char('g') => self.open_gps(),
             // Matched on the character: crossterm sends shift+r as `'R'`, not as
             // `'r'` with a modifier.
             KeyCode::Char('r') => self.clear_ring(snapshot, commands),
@@ -381,6 +403,29 @@ mod tests {
         assert!(rx.try_recv().is_err(), "nothing was queued");
         let notice = ui.notice(snapshot.now_ms).expect("a reason");
         assert!(notice.contains("no node is heartbeating"), "got {notice}");
+    }
+
+    #[test]
+    fn ui_opens_gps_modal_when_g_pressed() {
+        let snapshot = busy();
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+        ui.say("an old notice".to_owned(), &snapshot);
+        ui.on_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE), &snapshot, &tx);
+        assert!(ui.gps_open());
+        assert!(rx.try_recv().is_err(), "nothing reaches the engine");
+        assert_eq!(ui.notice(snapshot.now_ms), None);
+    }
+
+    #[test]
+    fn ui_closes_gps_modal_when_esc_q_or_g_pressed() {
+        for code in [KeyCode::Esc, KeyCode::Char('q'), KeyCode::Char('g')] {
+            let mut ui = Ui { gps_open: true, ..Default::default() };
+            ui.on_gps_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+            assert!(ui.gps_open(), "other keys leave it open");
+            ui.on_gps_key(KeyEvent::new(code, KeyModifiers::NONE));
+            assert!(!ui.gps_open(), "{code:?} closes it");
+        }
     }
 
     #[test]

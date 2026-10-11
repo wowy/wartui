@@ -117,6 +117,7 @@ have no README; their `//!` module docs hold the detail.
 | `↑` `↓` / `k` `j`      | Move the cursor through the fleet table                                      |
 | `b`                    | Toggle Bluetooth scanning on the selected node                               |
 | `c`                    | Open config (settings)                                                       |
+| `g`                    | Show GPS diagnostics: fix and satellites                                     |
 | `r` / `R`              | Clear the selected node's dedup ring, or every assignable node's             |
 | `u`                    | Upload this capture to WDGWars, after asking                                 |
 | `q` / `Esc` / `ctrl-c` | Stop, committing the last batch                                              |

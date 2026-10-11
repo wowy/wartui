@@ -39,7 +39,7 @@ pub(super) fn draw_footer(
         )));
     } else {
         let mut spans = vec![Span::styled(
-            " q quit  ↑↓ select  b bluetooth  c settings  u upload ",
+            " q quit  ↑↓ select  b bt  c settings  g gps  u upload ",
             Style::new().fg(Color::Black).bg(Color::Gray).add_modifier(Modifier::BOLD),
         )];
         spans.push(Span::raw(format!(
@@ -498,7 +498,8 @@ mod tests {
         // every time would show a fault where there is none.
         let none = with_gps(GpsStatus::NoReceiver, GpsCounters::default(), PositionSource::Static);
         let drawn = rendered(&none);
-        assert!(!drawn.contains("gps"), "{drawn}");
+        // The key help names `g gps` on every screen.
+        assert!(!drawn.replace("g gps", "").contains("gps"), "{drawn}");
         // A static position still keeps the unpositioned warning off screen.
         assert!(!drawn.contains("pos none"), "{drawn}");
     }
