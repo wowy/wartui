@@ -447,6 +447,7 @@ it and `run` opens it first; one named with `--bridge` is not. `--dry-run` reset
 | `↑` `↓` / `k` `j`      | Move the cursor through the fleet table                                      |
 | `b`                    | Toggle Bluetooth scanning on the selected node                               |
 | `c`                    | Open config (settings)                                                       |
+| `g`                    | Show GPS diagnostics: fix and satellites                                     |
 | `r` / `R`              | Clear the selected node's dedup ring, or every assignable node's             |
 | `u`                    | Upload this capture to WDGWars, after asking                                 |
 | `q` / `Esc` / `ctrl-c` | Stop, committing the last batch                                              |
@@ -589,8 +590,12 @@ none exports nothing and says how many networks it left out.
   could otherwise be refused for saying too little in one window.
 - **`--no-gps` turns the search off; `--sim` implies it unless `--gps` is given.** A simulated fleet
   is for working with nothing plugged in, not for opening every serial port.
-- **Any NMEA 0183 serial receiver works.** Only `GGA` and `RMC` are read. Altitude, satellite count,
-  and an accuracy estimated from HDOP reach the export.
+- **Any NMEA 0183 serial receiver works.** `GGA` and `RMC` give the position. Altitude, satellite
+  count, and an accuracy estimated from HDOP reach the export. `GSA` and `GSV` are read for `g` only.
+- **`g` shows why a receiver will not lock.** The left side has the fix: 2D or 3D, satellites used,
+  time, position, speed, the HDOP accuracy estimate (not a measurement), and the port. The right side
+  lists each satellite in view with its signal strength and whether the fix uses it. `Esc`, `q` or
+  `g` closes it.
 - **A named receiver that is missing is a fault; an unfound one is not.** Most GPS-less captures
   never had one, so the header stays quiet; `--gps` asks for a port, so its absence is reported.
 - **A fix must be recent.** Past `--gps-max-age` seconds the position falls back a tier and the

@@ -229,6 +229,7 @@ mod tests {
     use super::*;
     use crate::engine::{Counters, NodeState, NodeView, Now, StoreStats};
     use crate::gps::{GpsCounters, GpsView};
+    use crate::nmea::Sky;
     use crate::position::Fix;
 
     const EPOCH_MS: i64 = 1_777_642_477_000;
@@ -299,6 +300,9 @@ mod tests {
             last_fix_ms: None,
             settled: None,
             pinned_baud: false,
+            sky: Sky::default(),
+            heard_ms: None,
+            max_age: std::time::Duration::from_secs(5),
         }
     }
 

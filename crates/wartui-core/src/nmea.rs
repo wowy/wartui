@@ -5,13 +5,26 @@
 //! timestamp can be built. Everything else (`GSV`, `GSA`, `VTG`, proprietary `PMTK` chatter) parses
 //! as valid and unused.
 //!
+//! **`GSA` and `GSV` feed diagnostics only.** They build the [`Sky`] the view's GPS modal shows:
+//! which satellites are in view, how strong, and which the solution uses. Nothing in the store or
+//! the position chain reads it, so they still report [`Report::Other`], and a malformed one is
+//! skipped rather than rejected.
+//!
+//! A `GSV` group is keyed by constellation and signal ID, so a dual-band receiver's L1 and L5 lists
+//! do not overwrite each other, and it replaces the last one only once its final message arrives.
+//! A run of consecutive `GSA` sentences is one epoch's used set. Each names its constellation with
+//! the NMEA 4.10 system ID, or with its talker, or not at all: an NMEA 4.0 receiver sends `GNGSA`
+//! with neither, and matching those on the PRN alone is correct because its PRN ranges are
+//! disjoint.
+//!
 //! **The checksum is mandatory.** Not for line noise on a USB CDC endpoint that has CRCs already,
 //! but because the first read after opening lands mid-sentence, and half of
 //! `$GPGGA,123519,4807.038,N,…` is a well-formed sentence about somewhere else.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::str::from_utf8;
 
-use chrono::NaiveDate;
+use chrono::{NaiveDate, NaiveTime};
 
 /// Why a line was not a usable sentence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -68,24 +81,169 @@ pub fn accuracy_from_hdop(hdop: f64) -> f64 {
     hdop * 5.0
 }
 
+/// What the receiver says about its fix and its sky, for diagnostics.
+///
+/// Position fields are the receiver's current report and clear when it reports no fix. They never
+/// fall back to a retained fix; that is the position chain's concern.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Sky {
+    /// `GGA` fix quality: 0 none, 1 GPS, 2 DGPS, 4 RTK fixed, 5 RTK float, 6 dead reckoning.
+    pub quality: Option<u8>,
+    /// `GSA` fix mode.
+    pub mode: Option<FixMode>,
+    /// Satellites in the solution, from `GGA`.
+    pub used_count: Option<u8>,
+    /// UTC time of the last `GGA` or `RMC`, fix or not.
+    pub time: Option<NaiveTime>,
+    /// The last `RMC` date.
+    pub date: Option<NaiveDate>,
+    /// Degrees north, from the current `GGA`.
+    pub lat: Option<f64>,
+    /// Degrees east, from the current `GGA`.
+    pub lon: Option<f64>,
+    /// Meters above mean sea level, from the current `GGA`.
+    pub alt: Option<f64>,
+    /// Horizontal dilution of precision, from `GGA`.
+    pub hdop: Option<f64>,
+    /// Ground speed from `RMC`, in km/h.
+    pub speed_kmh: Option<f64>,
+    /// Every satellite in view, one entry per constellation and PRN, ordered by both.
+    pub satellites: Vec<Satellite>,
+}
+
+impl Sky {
+    const fn new() -> Self {
+        Self {
+            quality: None,
+            mode: None,
+            used_count: None,
+            time: None,
+            date: None,
+            lat: None,
+            lon: None,
+            alt: None,
+            hdop: None,
+            speed_kmh: None,
+            satellites: Vec::new(),
+        }
+    }
+}
+
+/// One satellite in view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Satellite {
+    /// Its constellation. PRNs repeat across constellations.
+    pub system: Constellation,
+    /// Its PRN within that constellation.
+    pub prn: u16,
+    /// Signal to noise in dB-Hz. `None` when in view but not tracked.
+    pub snr: Option<u8>,
+    /// Whether the solution uses it.
+    pub used: bool,
+}
+
+/// A satellite navigation system.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Constellation {
+    /// The US system.
+    Gps,
+    /// The Russian system.
+    Glonass,
+    /// The European system.
+    Galileo,
+    /// The Chinese system.
+    BeiDou,
+    /// The Japanese regional system.
+    Qzss,
+    /// The Indian regional system.
+    NavIc,
+}
+
+impl Constellation {
+    /// A sentence's talker, or `None` for `GN` (combined) and anything unknown.
+    fn from_talker(talker: &str) -> Option<Self> {
+        Some(match talker {
+            "GP" => Self::Gps,
+            "GL" => Self::Glonass,
+            "GA" => Self::Galileo,
+            "GB" | "BD" => Self::BeiDou,
+            "GQ" => Self::Qzss,
+            "GI" => Self::NavIc,
+            _ => return None,
+        })
+    }
+
+    /// An NMEA 4.10 system ID.
+    fn from_system_id(id: &str) -> Option<Self> {
+        Some(match id {
+            "1" => Self::Gps,
+            "2" => Self::Glonass,
+            "3" => Self::Galileo,
+            "4" => Self::BeiDou,
+            "5" => Self::Qzss,
+            "6" => Self::NavIc,
+            _ => return None,
+        })
+    }
+}
+
+/// The `GSA` fix mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FixMode {
+    /// No fix.
+    NoFix,
+    /// A 2D fix: no altitude.
+    TwoD,
+    /// A 3D fix.
+    ThreeD,
+}
+
+/// One constellation and signal's `GSV` lists: the group being assembled and the last whole one.
+#[derive(Debug, Clone, Default)]
+struct GsvGroup {
+    /// The group being assembled and the message number it expects next.
+    pending: Option<(Vec<Satellite>, u8)>,
+    /// The last group whose final message arrived.
+    committed: Vec<Satellite>,
+}
+
 /// Milliseconds in a day, and in the half day that separates "the clock has
 /// wrapped past midnight" from "this receiver is confused".
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 const HALF_DAY_MS: i64 = DAY_MS / 2;
 
 /// A running parse of one receiver's output.
-/// Holds only the date, which arrives in `RMC` and stamps the `GGA` sentences between.
+/// Holds the date, which arrives in `RMC` and stamps the `GGA` sentences between, and the [`Sky`].
 #[derive(Debug, Clone, Default)]
 pub struct Nmea {
     date: Option<NaiveDate>,
     last_stamp_ms: Option<i64>,
+    sky: Sky,
+    gsv: BTreeMap<(Constellation, Option<u8>), GsvGroup>,
+    /// The current epoch's used satellites. `None` system matches any constellation.
+    used: BTreeSet<(Option<Constellation>, u16)>,
+    /// Whether the last sentence was a `GSA`, so the next one continues the run.
+    in_gsa_run: bool,
 }
 
 impl Nmea {
     /// A parser that has not yet seen a date.
     #[must_use]
     pub const fn new() -> Self {
-        Self { date: None, last_stamp_ms: None }
+        Self {
+            date: None,
+            last_stamp_ms: None,
+            sky: Sky::new(),
+            gsv: BTreeMap::new(),
+            used: BTreeSet::new(),
+            in_gsa_run: false,
+        }
+    }
+
+    /// What the receiver has said about its fix and its sky.
+    #[must_use]
+    pub const fn sky(&self) -> &Sky {
+        &self.sky
     }
 
     /// Parse one line.
@@ -100,12 +258,126 @@ impl Nmea {
         // Talker IDs vary by constellation and a receiver changes its own as
         // satellites come and go, so only the last three characters decide.
         let kind = id.get(id.len().saturating_sub(3)..).ok_or(NmeaError::NotASentence)?;
+        let talker = id.get(..id.len().saturating_sub(3)).unwrap_or_default();
         let fields: Vec<&str> = fields.collect();
+        if kind != "GSA" {
+            self.in_gsa_run = false;
+        }
         match kind {
-            "GGA" => self.gga(&fields),
-            "RMC" => self.rmc(&fields),
+            "GGA" => {
+                let report = self.gga(&fields)?;
+                self.sky_gga(&fields);
+                Ok(report)
+            }
+            "RMC" => {
+                let report = self.rmc(&fields)?;
+                self.sky_rmc(&fields);
+                Ok(report)
+            }
+            "GSA" => {
+                self.gsa(talker, &fields);
+                Ok(Report::Other)
+            }
+            "GSV" => {
+                self.gsv(talker, &fields);
+                Ok(Report::Other)
+            }
             _ => Ok(Report::Other),
         }
+    }
+
+    /// The [`Sky`] half of a `GGA` that parsed.
+    fn sky_gga(&mut self, f: &[&str]) {
+        let sky = &mut self.sky;
+        sky.time = time(field(f, 0));
+        sky.quality = integer(field(f, 5)).ok().flatten();
+        sky.used_count = integer(field(f, 6)).ok().flatten();
+        let fixed = sky.quality.is_some_and(|q| q != 0);
+        let lenient = |c: Result<Option<f64>, NmeaError>| c.ok().flatten().filter(|_| fixed);
+        // A receiver with no fix reports a placeholder HDOP (u-blox sends 99.99).
+        sky.hdop = lenient(number(field(f, 7)));
+        sky.lat = lenient(coord(f, 1));
+        sky.lon = lenient(coord(f, 3));
+        sky.alt = lenient(number(field(f, 8)));
+    }
+
+    /// The [`Sky`] half of an `RMC` that parsed.
+    fn sky_rmc(&mut self, f: &[&str]) {
+        self.sky.time = time(field(f, 0));
+        self.sky.date = self.date;
+        self.sky.speed_kmh = if field(f, 1) == "A" {
+            number(field(f, 6)).ok().flatten().map(|knots| knots * 1.852)
+        } else {
+            None
+        };
+    }
+
+    /// `$--GSA,mode,fix,prn×12,pdop,hdop,vdop[,system]`
+    fn gsa(&mut self, talker: &str, f: &[&str]) {
+        if !self.in_gsa_run {
+            self.used.clear();
+            self.in_gsa_run = true;
+        }
+        self.sky.mode = match field(f, 1) {
+            "1" => Some(FixMode::NoFix),
+            "2" => Some(FixMode::TwoD),
+            "3" => Some(FixMode::ThreeD),
+            _ => self.sky.mode,
+        };
+        let system = Constellation::from_system_id(field(f, 17))
+            .or_else(|| Constellation::from_talker(talker));
+        for prn in (2..14).filter_map(|i| field(f, i).parse::<u16>().ok()) {
+            self.used.insert((system, prn));
+        }
+        self.merge();
+    }
+
+    /// `$--GSV,total,number,in_view,{prn,elevation,azimuth,snr}×n[,signal]`
+    fn gsv(&mut self, talker: &str, f: &[&str]) {
+        let Some(system) = Constellation::from_talker(talker) else { return };
+        let (Ok(total), Ok(number)) = (field(f, 0).parse::<u8>(), field(f, 1).parse::<u8>()) else {
+            return;
+        };
+        // NMEA 4.10 appends a signal ID, which leaves one field over the satellite quads.
+        let signal_id = f.len() >= 3 && (f.len() - 3) % 4 == 1;
+        let signal = if signal_id { f.last().and_then(|s| s.parse().ok()) } else { None };
+        let quads = f.get(3..f.len() - usize::from(signal_id)).unwrap_or_default();
+        let satellites = quads.as_chunks::<4>().0.iter().filter_map(|[prn, _, _, snr]| {
+            let prn = prn.parse().ok()?;
+            Some(Satellite { system, prn, snr: snr.parse().ok(), used: false })
+        });
+
+        let group = self.gsv.entry((system, signal)).or_default();
+        let mut pending = match group.pending.take() {
+            _ if number == 1 => Vec::new(),
+            Some((list, next)) if next == number => list,
+            // Out of sequence: a lost message would leave the group short.
+            _ => return,
+        };
+        pending.extend(satellites);
+        if number >= total {
+            group.committed = pending;
+            self.merge();
+        } else {
+            group.pending = Some((pending, number + 1));
+        }
+    }
+
+    /// Rebuild [`Sky::satellites`] from the committed `GSV` groups and the `GSA` used set.
+    fn merge(&mut self) {
+        let mut merged: BTreeMap<(Constellation, u16), Satellite> = BTreeMap::new();
+        for satellite in self.gsv.values().flat_map(|group| &group.committed) {
+            let entry = merged.entry((satellite.system, satellite.prn)).or_insert(*satellite);
+            entry.snr = entry.snr.max(satellite.snr);
+        }
+        self.sky.satellites = merged
+            .into_values()
+            .map(|mut s| {
+                s.used = self.used.contains(&(Some(s.system), s.prn))
+                    || self.used.contains(&(None, s.prn));
+                s
+            })
+            .collect();
     }
 
     /// `$--GGA,time,lat,N,lon,E,quality,sats,hdop,alt,M,…`
@@ -174,6 +446,14 @@ impl Nmea {
         self.last_stamp_ms = Some(at_ms);
         Some(at_ms)
     }
+}
+
+/// `hhmmss.ss`, or `None` when empty or unreadable.
+fn time(text: &str) -> Option<NaiveTime> {
+    let hour = text.get(0..2)?.parse().ok()?;
+    let minute = text.get(2..4)?.parse().ok()?;
+    let second: f64 = text.get(4..)?.parse().ok()?;
+    NaiveTime::from_hms_milli_opt(hour, minute, second as u32, (second.fract() * 1000.0) as u32)
 }
 
 /// Verify the `*HH` checksum and hand back the part it covers.
@@ -318,6 +598,176 @@ mod tests {
         // A receiver emits far more GSV and GSA than GGA. Counting those as
         // failures would make a working GPS look broken.
         assert_eq!(Nmea::new().parse(GSV), Ok(Report::Other));
+    }
+
+    /// `body` framed as a sentence, with its checksum.
+    fn sentence(body: &str) -> Vec<u8> {
+        let sum = body.bytes().fold(0u8, |acc, b| acc ^ b);
+        format!("${body}*{sum:02X}").into_bytes()
+    }
+
+    /// Parse each body in turn, asserting each is a valid sentence.
+    fn feed(nmea: &mut Nmea, bodies: &[&str]) {
+        for body in bodies {
+            assert!(nmea.parse(&sentence(body)).is_ok(), "{body}");
+        }
+    }
+
+    /// `(system, prn, snr, used)` for each satellite in view.
+    fn sats(nmea: &Nmea) -> Vec<(Constellation, u16, Option<u8>, bool)> {
+        nmea.sky().satellites.iter().map(|s| (s.system, s.prn, s.snr, s.used)).collect()
+    }
+
+    #[test]
+    fn nmea_assembles_satellites_when_gsv_spans_messages() {
+        let mut nmea = Nmea::new();
+        assert_eq!(nmea.parse(GSV), Ok(Report::Other));
+        assert!(nmea.sky().satellites.is_empty(), "nothing until the group's last message");
+        feed(
+            &mut nmea,
+            &[
+                "GPGSV,3,2,11,13,06,292,,15,30,050,47,18,22,091,32,21,12,033,28",
+                "GPGSV,3,3,11,24,15,165,,26,34,248,35,29,21,210,40",
+            ],
+        );
+        let sky = sats(&nmea);
+        assert_eq!(sky.len(), 11, "{sky:?}");
+        assert!(sky.contains(&(Constellation::Gps, 15, Some(47), false)));
+        assert!(sky.contains(&(Constellation::Gps, 10, Some(17), false)));
+        // In view, not tracked.
+        assert!(sky.contains(&(Constellation::Gps, 13, None, false)));
+    }
+
+    #[test]
+    fn nmea_marks_used_satellites_when_gsa_lists_prns() {
+        let mut nmea = Nmea::new();
+        feed(
+            &mut nmea,
+            &[
+                "GPGSV,1,1,03,10,63,137,17,08,49,090,26,05,45,300,22,1",
+                "GNGSA,A,3,10,08,,,,,,,,,,,1.5,0.9,1.2,1",
+            ],
+        );
+        assert_eq!(
+            sats(&nmea),
+            [
+                (Constellation::Gps, 5, Some(22), false),
+                (Constellation::Gps, 8, Some(26), true),
+                (Constellation::Gps, 10, Some(17), true),
+            ]
+        );
+    }
+
+    #[test]
+    fn nmea_matches_used_by_prn_when_gsa_has_no_system_id() {
+        // NMEA 4.0, as an older u-blox sends it: GNGSA with no system ID. Its GLONASS PRNs
+        // start at 65, so the PRN alone says which satellite.
+        let mut nmea = Nmea::new();
+        feed(
+            &mut nmea,
+            &["GLGSV,1,1,02,65,40,100,30,66,20,200,25", "GNGSA,A,3,65,,,,,,,,,,,,1.5,0.9,1.2"],
+        );
+        assert_eq!(
+            sats(&nmea),
+            [
+                (Constellation::Glonass, 65, Some(30), true),
+                (Constellation::Glonass, 66, Some(25), false),
+            ]
+        );
+    }
+
+    #[test]
+    fn nmea_keeps_separate_constellations_when_prns_collide() {
+        let mut nmea = Nmea::new();
+        feed(
+            &mut nmea,
+            &[
+                "GPGSV,1,1,01,05,45,300,22,1",
+                "GAGSV,1,1,01,05,30,120,33,7",
+                "GNGSA,A,3,05,,,,,,,,,,,,1.5,0.9,1.2,3",
+            ],
+        );
+        assert_eq!(
+            sats(&nmea),
+            [(Constellation::Gps, 5, Some(22), false), (Constellation::Galileo, 5, Some(33), true)]
+        );
+    }
+
+    #[test]
+    fn nmea_replaces_used_set_when_new_gsa_run_starts() {
+        let mut nmea = Nmea::new();
+        feed(
+            &mut nmea,
+            &[
+                "GPGSV,1,1,02,10,63,137,17,08,49,090,26,1",
+                "GLGSV,1,1,01,65,40,100,30,1",
+                // One epoch: a GSA per constellation, which add up.
+                "GNGSA,A,3,10,,,,,,,,,,,,1.5,0.9,1.2,1",
+                "GNGSA,A,3,65,,,,,,,,,,,,1.5,0.9,1.2,2",
+            ],
+        );
+        let used = |nmea: &Nmea| {
+            nmea.sky().satellites.iter().filter(|s| s.used).map(|s| s.prn).collect::<Vec<_>>()
+        };
+        assert_eq!(used(&nmea), [10, 65]);
+        // Another sentence ends the run, so the next GSA starts a fresh set.
+        feed(&mut nmea, &["GPGSV,1,1,02,10,63,137,17,08,49,090,26,1"]);
+        feed(&mut nmea, &["GNGSA,A,3,08,,,,,,,,,,,,1.5,0.9,1.2,1"]);
+        assert_eq!(used(&nmea), [8]);
+    }
+
+    #[test]
+    fn nmea_drops_partial_group_when_gsv_out_of_sequence() {
+        let mut nmea = Nmea::new();
+        feed(&mut nmea, &["GPGSV,1,1,01,01,45,300,22,1"]);
+        // Message 2 of 3 lost: the group would be short, so the last whole one stands.
+        feed(&mut nmea, &["GPGSV,3,1,09,02,45,300,22,03,45,300,22,04,45,300,22,05,45,300,22,1"]);
+        feed(&mut nmea, &["GPGSV,3,3,09,10,45,300,22,1"]);
+        assert_eq!(sats(&nmea), [(Constellation::Gps, 1, Some(22), false)]);
+    }
+
+    #[test]
+    fn nmea_reports_fix_mode_when_gsa_says_2d_or_3d() {
+        let mut nmea = Nmea::new();
+        feed(&mut nmea, &["GNGSA,A,3,10,,,,,,,,,,,,1.5,0.9,1.2,1"]);
+        assert_eq!(nmea.sky().mode, Some(FixMode::ThreeD));
+        feed(&mut nmea, &["GNGSA,A,2,10,,,,,,,,,,,,1.5,0.9,1.2,1"]);
+        assert_eq!(nmea.sky().mode, Some(FixMode::TwoD));
+
+        // The attached u-blox, indoors: every field empty, and still unambiguous.
+        let mut nmea = Nmea::new();
+        for line in [
+            &b"$GNRMC,,V,,,,,,,,,,N,V*37"[..],
+            b"$GNVTG,,,,,,,,,N*2E",
+            b"$GNGGA,,,,,,0,00,99.99,,,,,,*56",
+            b"$GNGSA,A,1,,,,,,,,,,,,,99.99,99.99,99.99,1*33",
+            b"$GNGSA,A,1,,,,,,,,,,,,,99.99,99.99,99.99,2*30",
+            b"$GPGSV,1,1,00,1*64",
+            b"$GLGSV,1,1,00,1*78",
+            b"$GAGSV,1,1,00,7*73",
+            b"$GBGSV,1,1,00,1*76",
+            b"$GNGLL,,,,,,V,N*7A",
+        ] {
+            assert!(nmea.parse(line).is_ok(), "{}", String::from_utf8_lossy(line));
+        }
+        let sky = nmea.sky();
+        assert_eq!(sky.mode, Some(FixMode::NoFix));
+        assert_eq!(sky.quality, Some(0));
+        assert_eq!(sky.used_count, Some(0));
+        assert_eq!((sky.lat, sky.lon, sky.hdop, sky.speed_kmh), (None, None, None, None));
+        assert!(sky.satellites.is_empty());
+    }
+
+    #[test]
+    fn nmea_reads_speed_when_rmc_has_fix() {
+        let mut nmea = Nmea::new();
+        feed(&mut nmea, &["GNRMC,123519.00,A,4807.038,N,01131.000,E,10.0,31.66,050926,,,A"]);
+        let sky = nmea.sky();
+        assert!((sky.speed_kmh.expect("a speed") - 18.52).abs() < 1e-9);
+        assert_eq!(sky.time, NaiveTime::from_hms_opt(12, 35, 19));
+        assert_eq!(sky.date, NaiveDate::from_ymd_opt(2026, 9, 5));
+        assert_eq!(nmea.parse(RMC_NO_FIX), Ok(Report::NoFix));
+        assert_eq!(nmea.sky().speed_kmh, None);
     }
 
     #[test]

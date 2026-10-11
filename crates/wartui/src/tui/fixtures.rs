@@ -1,5 +1,6 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
+use chrono::{NaiveDate, NaiveTime};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use wartui_bridge::BridgeInfo;
@@ -7,6 +8,7 @@ use wartui_core::engine::{
     Assignment, BridgeStatus, Counters, NodeState, NodeView, Now, Snapshot, StoreStats, TailEntry,
 };
 use wartui_core::gps::{GpsCounters, GpsStatus, GpsView};
+use wartui_core::nmea::{Constellation, FixMode, Satellite, Sky};
 use wartui_core::position::{Fix, PositionSource};
 use wartui_core::record::AdminOutcome;
 use wartui_proto::air::{Capabilities, RecordKind, wire_epoch};
@@ -255,7 +257,44 @@ pub(super) fn with_gps(
         last_fix_ms: Some(EPOCH_MS),
         settled: Some(("/dev/ttyACM1".to_owned(), 9600)),
         pinned_baud: false,
+        sky: Sky::default(),
+        heard_ms: Some(EPOCH_MS),
+        max_age: Duration::from_secs(5),
     });
+    snapshot
+}
+
+/// [`with_gps`] with a 3D DGPS fix, heard half a second ago, and `in_view` GPS satellites, the
+/// first eight of them used.
+pub(super) fn with_sky(in_view: u16) -> Snapshot {
+    let mut snapshot = with_gps(
+        GpsStatus::Fixed { satellites: Some(8) },
+        GpsCounters { sentences: 1_234, fixes: 400, rejected: 0 },
+        PositionSource::Gps,
+    );
+    let now_ms = snapshot.now_ms;
+    let gps = snapshot.gps.as_mut().expect("a receiver");
+    gps.heard_ms = Some(now_ms - 500);
+    gps.sky = Sky {
+        quality: Some(2),
+        mode: Some(FixMode::ThreeD),
+        used_count: Some(8),
+        time: NaiveTime::from_hms_opt(15, 40, 12),
+        date: NaiveDate::from_ymd_opt(2026, 10, 10),
+        lat: Some(48.1173),
+        lon: Some(11.5167),
+        alt: Some(545.4),
+        hdop: Some(0.9),
+        speed_kmh: Some(42.3),
+        satellites: (1..=in_view)
+            .map(|prn| Satellite {
+                system: Constellation::Gps,
+                prn,
+                snr: u8::try_from(46_u16.saturating_sub(prn)).ok(),
+                used: prn <= 8,
+            })
+            .collect(),
+    };
     snapshot
 }
 
