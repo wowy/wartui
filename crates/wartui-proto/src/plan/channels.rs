@@ -250,6 +250,54 @@ pub const fn is_five_ghz(idx: u8) -> bool {
     idx >= FIRST_FIVE_GHZ_INDEX
 }
 
+/// The [`SCAN_CHANNELS`] index of `channel`, or `None` when the table lacks it.
+const fn index_of(channel: u8) -> Option<u8> {
+    let mut idx = 0;
+    while idx < NUM_SCAN_CHANNELS {
+        if SCAN_CHANNELS[idx as usize] == channel {
+            return Some(idx);
+        }
+        idx += 1;
+    }
+    None
+}
+
+/// The band a channel of [`SCAN_CHANNELS`] lies in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Band {
+    /// 2.4 GHz: channels 1 to 14, the band every [`Radio`] reaches.
+    Ghz2_4,
+    /// 5 GHz: channels 36 to 177, the band only a [`Radio::DualBand`] reaches.
+    Ghz5,
+}
+
+/// What the radio needs to know about one channel of [`SCAN_CHANNELS`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChannelInfo {
+    /// Center frequency in MHz. Channel 14 is 2484, the one 2.4 GHz channel off the
+    /// 5 MHz ladder.
+    pub center_mhz: u16,
+    /// The band the channel lies in, and so the radio it needs.
+    pub band: Band,
+}
+
+/// What [`ChannelInfo`] says about `channel`, or `None` when it is not in [`SCAN_CHANNELS`].
+///
+/// One scan of the table answers every field, so a caller on the firmware's promiscuous
+/// callback pays for one lookup per channel.
+#[must_use]
+pub const fn channel_info(channel: u8) -> Option<ChannelInfo> {
+    let Some(idx) = index_of(channel) else { return None };
+    let band = if is_five_ghz(idx) { Band::Ghz5 } else { Band::Ghz2_4 };
+    let ch = channel as u16;
+    let center_mhz = match band {
+        Band::Ghz2_4 if channel == 14 => 2484,
+        Band::Ghz2_4 => 2407 + 5 * ch,
+        Band::Ghz5 => 5000 + 5 * ch,
+    };
+    Some(ChannelInfo { center_mhz, band })
+}
+
 // The planner deals from a flattened iterator and indexes nothing by run, but a pool
 // exceeding `MAX_RUNS` is a pool nobody thought about. A new pool goes here as well as
 // in `ChannelPool::runs`.

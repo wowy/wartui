@@ -60,6 +60,7 @@ use rusqlite::{Connection, Row, Statement};
 use wartui_proto::air::RecordKind;
 use wartui_proto::beacon::rcoi_text;
 use wartui_proto::mac::{self, Mac};
+use wartui_proto::plan::{Band, ChannelInfo, channel_info};
 
 use crate::record::ssid_text;
 use crate::store::{kind_name, parse_kind};
@@ -161,11 +162,11 @@ pub struct KindStats {
 /// Wi-Fi networks per band, each counted once in every band it was heard on.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Bands {
-    /// Channels 1 to 14.
+    /// 2.4 GHz channels in the scan table.
     pub ghz2_4: u64,
-    /// Channels 32 to 177.
+    /// 5 GHz channels in the scan table.
     pub ghz5: u64,
-    /// Any other channel.
+    /// Any channel outside the scan table.
     pub other: u64,
 }
 
@@ -315,11 +316,10 @@ impl Tally {
             stats.networks += 1;
         }
         if !ble {
-            // The ranges `frequency_column` puts on each ladder.
-            let (bit, count) = match c.channel {
-                1..=14 => (1, &mut summary.wifi_bands.ghz2_4),
-                32..=177 => (2, &mut summary.wifi_bands.ghz5),
-                _ => (4, &mut summary.wifi_bands.other),
+            let (bit, count) = match info(c.channel).map(|i| i.band) {
+                Some(Band::Ghz2_4) => (1, &mut summary.wifi_bands.ghz2_4),
+                Some(Band::Ghz5) => (2, &mut summary.wifi_bands.ghz5),
+                None => (4, &mut summary.wifi_bands.other),
             };
             if self.bands & bit == 0 {
                 self.bands |= bit;
@@ -562,20 +562,18 @@ fn write_row<W: Write>(row: &Window, out: &mut W) -> Result<(), ExportError> {
 /// The center frequency of a sighting's channel, for WiGLE's `Frequency` column, derived from the
 /// stored channel.
 ///
-/// The channel is the one the access point announces, or the node's parked channel when it
-/// announces none (`wartui_proto::beacon::parse_mgmt`). An access point can announce a channel no
-/// pool tunes, so this covers the 2.4 GHz channels (14 the odd one out) and the 5 GHz ladder from
-/// 32 to 177. Blank off both ladders, and for every BLE row (see the module docs).
+/// A channel `wartui_proto::beacon::parse_mgmt` stores is in the scan table. Anything else, such as
+/// channel 0, gets a blank rather than a guess, as does every BLE row (see the module docs).
 fn frequency_column(channel: i64, kind: RecordKind) -> String {
     if kind == RecordKind::Ble {
         return String::new();
     }
-    match channel {
-        1..=13 => format!("{}", 2407 + 5 * channel),
-        14 => "2484".to_owned(),
-        32..=177 => format!("{}", 5000 + 5 * channel),
-        _ => String::new(),
-    }
+    info(channel).map_or_else(String::new, |i| i.center_mhz.to_string())
+}
+
+/// What the scan table says about `channel`, or `None` when it is not in `SCAN_CHANNELS`.
+fn info(channel: i64) -> Option<ChannelInfo> {
+    channel_info(u8::try_from(channel).ok()?)
 }
 
 /// A coordinate to seven decimals, for WiGLE's `CurrentLatitude` and `CurrentLongitude` columns.
@@ -645,31 +643,30 @@ mod tests {
     }
 
     #[test]
-    fn frequency_column_gives_center_mhz_when_wifi_channel_on_a_ladder() {
+    fn frequency_column_gives_center_mhz_when_wifi_channel_in_scan_table() {
         assert_eq!(frequency_column(1, RecordKind::Wifi), "2412");
         assert_eq!(frequency_column(6, RecordKind::Wifi), "2437");
         assert_eq!(frequency_column(13, RecordKind::Wifi), "2472");
         // Channel 14 is the one 2.4 GHz channel that breaks the 5 MHz ladder.
         assert_eq!(frequency_column(14, RecordKind::Wifi), "2484");
-        // An access point can announce these below the pools' 36.
-        assert_eq!(frequency_column(32, RecordKind::Wifi), "5160");
-        assert_eq!(frequency_column(33, RecordKind::Wifi), "5165");
-        assert_eq!(frequency_column(34, RecordKind::Wifi), "5170");
-        assert_eq!(frequency_column(35, RecordKind::Wifi), "5175");
         assert_eq!(frequency_column(36, RecordKind::Wifi), "5180");
         assert_eq!(frequency_column(165, RecordKind::Wifi), "5825");
         assert_eq!(frequency_column(177, RecordKind::Wifi), "5885");
     }
 
     #[test]
-    fn frequency_column_is_blank_when_ble_or_channel_unmapped() {
+    fn frequency_column_is_blank_when_ble_or_channel_not_in_scan_table() {
         // A BLE row's frequency column means a "device type" code a passive scan
         // cannot produce, so it is blank whatever the channel field holds.
         assert_eq!(frequency_column(0, RecordKind::Ble), "");
-        // A channel on neither band's ladder is not something to guess a frequency for.
+        // A channel outside the scan table is not something to guess a frequency for.
         assert_eq!(frequency_column(0, RecordKind::Wifi), "");
         assert_eq!(frequency_column(15, RecordKind::Wifi), "");
         assert_eq!(frequency_column(31, RecordKind::Wifi), "");
+        assert_eq!(frequency_column(32, RecordKind::Wifi), "");
+        assert_eq!(frequency_column(33, RecordKind::Wifi), "");
+        assert_eq!(frequency_column(41, RecordKind::Wifi), "");
+        assert_eq!(frequency_column(68, RecordKind::Wifi), "");
         assert_eq!(frequency_column(200, RecordKind::Wifi), "");
     }
 }

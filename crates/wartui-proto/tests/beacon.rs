@@ -210,17 +210,124 @@ fn beacon_parser_extracts_channel_from_ds_or_ht_elements_when_present() {
     // what says where a dual-band access point actually is.
     let mut ies = ie(0, b"n");
     ies.extend_from_slice(&ie(61, &[149, 0, 0, 0, 0]));
-    assert_eq!(parse_mgmt(&beacon(&ies), -50, 36).expect("beacon").channel, 149);
+    assert_eq!(parse_mgmt(&beacon(&ies), -50, 153).expect("beacon").channel, 149);
 
     // With neither, the channel we were parked on is the honest answer.
     assert_eq!(parse_mgmt(&beacon(&ie(0, b"n")), -50, 44).expect("beacon").channel, 44);
 }
 
 #[test]
-fn beacon_parser_prioritizes_ds_parameter_set_over_ht_operation_when_both_present() {
+fn beacon_parser_keeps_ht_channel_when_ds_parameter_set_trails_it() {
+    // A trailing tag 3, such as the frame check sequence read as an element, does
+    // not override the channel named before it. Both channels are plausible, so
+    // only arrival order decides.
+    let mut ies = ie(61, &[149, 0, 0, 0, 0]);
+    ies.extend_from_slice(&ie(3, &[153]));
+    assert_eq!(parse_mgmt(&beacon(&ies), -50, 149).expect("beacon").channel, 149);
+}
+
+#[test]
+fn beacon_parser_keeps_ds_channel_when_ht_operation_trails_it() {
     let mut ies = ie(3, &[6]);
-    ies.extend_from_slice(&ie(61, &[36, 0, 0, 0, 0]));
-    assert_eq!(parse_mgmt(&beacon(&ies), -50, 1).expect("beacon").channel, 6);
+    ies.extend_from_slice(&ie(61, &[1, 0, 0, 0, 0]));
+    assert_eq!(parse_mgmt(&beacon(&ies), -50, 6).expect("beacon").channel, 6);
+}
+
+#[test]
+fn beacon_parser_falls_back_to_ds_channel_when_earlier_ht_channel_is_implausible() {
+    let mut ies = ie(61, &[41, 0, 0, 0, 0]);
+    ies.extend_from_slice(&ie(3, &[36]));
+    assert_eq!(parse_mgmt(&beacon(&ies), -50, 36).expect("beacon").channel, 36);
+}
+
+#[test]
+fn beacon_parser_uses_parked_channel_when_parked_channel_is_off_the_table() {
+    // With no center to measure from, no element channel is plausible.
+    let frame = beacon(&ie(3, &[6]));
+    assert_eq!(parse_mgmt(&frame, -50, 0).expect("beacon").channel, 0);
+}
+
+#[test]
+fn beacon_parser_uses_parked_channel_when_ds_channel_is_off_the_ladder() {
+    // Some outdoor gear announces numbers no regulator assigns.
+    let frame = beacon(&ie(3, &[33]));
+    assert_eq!(parse_mgmt(&frame, -50, 9).expect("beacon").channel, 9);
+}
+
+#[test]
+fn beacon_parser_uses_parked_channel_when_ds_channel_is_zero() {
+    let frame = beacon(&ie(3, &[0]));
+    assert_eq!(parse_mgmt(&frame, -50, 2).expect("beacon").channel, 2);
+}
+
+#[test]
+fn beacon_parser_uses_parked_channel_when_ht_channel_is_in_other_band() {
+    // A radio parked on 2.4 GHz cannot hear a 5 GHz transmission.
+    let frame = beacon(&ie(61, &[36, 0, 0, 0, 0]));
+    assert_eq!(parse_mgmt(&frame, -50, 6).expect("beacon").channel, 6);
+}
+
+#[test]
+fn beacon_parser_uses_parked_channel_when_ds_channel_is_in_other_band() {
+    let frame = beacon(&ie(3, &[6]));
+    assert_eq!(parse_mgmt(&frame, -50, 149).expect("beacon").channel, 149);
+}
+
+/// The channel parsed from a beacon whose only channel element is `tag` naming `named`,
+/// heard while parked on `parked`.
+fn channel_named(tag: u8, named: u8, parked: u8) -> u8 {
+    let body = if tag == 61 { vec![named, 0, 0, 0, 0] } else { vec![named] };
+    parse_mgmt(&beacon(&ie(tag, &body)), -50, parked).expect("beacon").channel
+}
+
+#[test]
+fn beacon_parser_uses_parked_channel_when_ht_channel_is_beyond_widest_5ghz_bss() {
+    // 149 is 345 MHz from 36, past any 160 MHz BSS.
+    assert_eq!(channel_named(61, 149, 36), 36);
+    // 100 is 180 MHz from 64: the limit is 160 MHz, not the UNII band.
+    assert_eq!(channel_named(61, 100, 64), 64);
+}
+
+#[test]
+fn beacon_parser_keeps_ht_channel_when_within_widest_5ghz_bss() {
+    // 52 is 80 MHz from 36, and 64 is 140 MHz: both inside one 160 MHz block.
+    assert_eq!(channel_named(61, 52, 36), 52);
+    assert_eq!(channel_named(61, 64, 36), 64);
+}
+
+#[test]
+fn beacon_parser_uses_parked_channel_when_ht_channel_is_off_the_table_but_near() {
+    // 68 is 160 MHz from 36, but no scan table channel.
+    assert_eq!(channel_named(61, 68, 36), 36);
+}
+
+#[test]
+fn beacon_parser_keeps_ds_channel_when_parked_anywhere_in_2_4ghz_band() {
+    // A strong access point is heard across the whole 2.4 GHz band, so distance rules
+    // out no 2.4 GHz table channel. Drives show 1 and 11, 50 MHz apart, each heard from
+    // the other.
+    assert_eq!(channel_named(3, 11, 1), 11);
+    assert_eq!(channel_named(3, 1, 11), 1);
+    assert_eq!(channel_named(3, 10, 1), 10);
+    assert_eq!(channel_named(3, 9, 1), 9);
+    // 14 sits off the 5 MHz ladder at 2484, the far end of the band.
+    assert_eq!(channel_named(3, 14, 6), 14);
+    assert_eq!(channel_named(3, 14, 13), 14);
+}
+
+#[test]
+fn beacon_parser_falls_back_to_ht_channel_when_ds_channel_is_implausible() {
+    // An implausible DS channel must not hide a plausible HT one. Parked on 3, so 1 can
+    // only come from the HT element, not from the fallback.
+    let mut ies = ie(3, &[40]);
+    ies.extend_from_slice(&ie(61, &[1, 0, 0, 0, 0]));
+    assert_eq!(parse_mgmt(&beacon(&ies), -50, 3).expect("beacon").channel, 1);
+}
+
+#[test]
+fn beacon_parser_uses_parked_channel_when_ht_channel_is_off_the_ladder() {
+    let frame = beacon(&ie(61, &[41, 0, 0, 0, 0]));
+    assert_eq!(parse_mgmt(&frame, -50, 44).expect("beacon").channel, 44);
 }
 
 #[test]
