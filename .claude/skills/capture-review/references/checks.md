@@ -53,7 +53,7 @@ reasoning.
 
 | Symptom | Usual meaning | Read |
 |---|---|---|
-| A channel outside the scan table (0, odd 5 GHz numbers) | The channel comes from the frame's own element (DS Parameter Set or HT operation) when present, otherwise from the parked channel. A garbled or vendor-odd element yields a nonsense channel. | `crates/wartui-proto/src/beacon.rs` (channel parsing) |
+| A channel outside the scan table (0, odd 5 GHz numbers) | The node takes the channel from the frame's DS Parameter Set or HT Operation element, and replaces any element channel that is not in the scan table or not in the parked band with the parked channel. An off-table channel in a capture points at a bug in `beacon.rs` channel parsing. | `crates/wartui-proto/src/beacon.rs` (channel parsing) |
 | 5 GHz rows on a channel never assigned to the node | Usually an adjacent or HT40-secondary beacon heard while parked nearby. It is a bug if a node repeatedly reports a whole band it was not given; check `park`. | `firmware/node/src/radio.rs` `park`, `crates/wartui-proto/src/plan/mod.rs` |
 | No 5 GHz rows at all | The planner found 5 GHz unreachable (the only 5G radio held the BLE job), or the regulatory domain is wrong. | `crates/wartui-proto/src/plan/mod.rs` `Plan::unreachable`; AGENTS.md (the `US` domain rule) |
 | Zero BSSID, or the multicast bit set on a BSSID | Parsing took the wrong address field, or the frame was not a beacon or probe response. | `crates/wartui-proto/src/beacon.rs`, `firmware/node/src/sniff.rs` |

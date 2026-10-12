@@ -224,6 +224,76 @@ fn beacon_parser_prioritizes_ds_parameter_set_over_ht_operation_when_both_presen
 }
 
 #[test]
+fn beacon_parser_keeps_ht_channel_when_ds_parameter_set_trails_it() {
+    // A trailing tag 3, such as the frame check sequence read as an element, does
+    // not override the channel named before it.
+    let mut ies = ie(61, &[149, 0, 0, 0, 0]);
+    ies.extend_from_slice(&ie(3, &[36]));
+    assert_eq!(parse_mgmt(&beacon(&ies), -50, 149).expect("beacon").channel, 149);
+}
+
+#[test]
+fn beacon_parser_keeps_ds_channel_when_ht_operation_trails_it() {
+    let mut ies = ie(3, &[6]);
+    ies.extend_from_slice(&ie(61, &[1, 0, 0, 0, 0]));
+    assert_eq!(parse_mgmt(&beacon(&ies), -50, 6).expect("beacon").channel, 6);
+}
+
+#[test]
+fn beacon_parser_falls_back_to_ds_channel_when_earlier_ht_channel_is_implausible() {
+    let mut ies = ie(61, &[41, 0, 0, 0, 0]);
+    ies.extend_from_slice(&ie(3, &[36]));
+    assert_eq!(parse_mgmt(&beacon(&ies), -50, 36).expect("beacon").channel, 36);
+}
+
+#[test]
+fn beacon_parser_uses_parked_channel_when_parked_channel_is_off_the_table() {
+    // With no band to compare against, no element channel is plausible.
+    let frame = beacon(&ie(3, &[6]));
+    assert_eq!(parse_mgmt(&frame, -50, 0).expect("beacon").channel, 0);
+}
+
+#[test]
+fn beacon_parser_uses_parked_channel_when_ds_channel_is_off_the_ladder() {
+    // Some outdoor gear announces numbers no regulator assigns.
+    let frame = beacon(&ie(3, &[33]));
+    assert_eq!(parse_mgmt(&frame, -50, 9).expect("beacon").channel, 9);
+}
+
+#[test]
+fn beacon_parser_uses_parked_channel_when_ds_channel_is_zero() {
+    let frame = beacon(&ie(3, &[0]));
+    assert_eq!(parse_mgmt(&frame, -50, 2).expect("beacon").channel, 2);
+}
+
+#[test]
+fn beacon_parser_uses_parked_channel_when_ht_channel_is_in_other_band() {
+    // A radio parked on 2.4 GHz cannot hear a 5 GHz transmission.
+    let frame = beacon(&ie(61, &[36, 0, 0, 0, 0]));
+    assert_eq!(parse_mgmt(&frame, -50, 6).expect("beacon").channel, 6);
+}
+
+#[test]
+fn beacon_parser_uses_parked_channel_when_ds_channel_is_in_other_band() {
+    let frame = beacon(&ie(3, &[6]));
+    assert_eq!(parse_mgmt(&frame, -50, 149).expect("beacon").channel, 149);
+}
+
+#[test]
+fn beacon_parser_falls_back_to_ht_channel_when_ds_channel_is_implausible() {
+    // An implausible DS channel must not hide a plausible HT one.
+    let mut ies = ie(3, &[40]);
+    ies.extend_from_slice(&ie(61, &[1, 0, 0, 0, 0]));
+    assert_eq!(parse_mgmt(&beacon(&ies), -50, 1).expect("beacon").channel, 1);
+}
+
+#[test]
+fn beacon_parser_uses_parked_channel_when_ht_channel_is_off_the_ladder() {
+    let frame = beacon(&ie(61, &[41, 0, 0, 0, 0]));
+    assert_eq!(parse_mgmt(&frame, -50, 44).expect("beacon").channel, 44);
+}
+
+#[test]
 fn beacon_parser_accepts_probe_responses_and_rejects_other_frames_when_parsing_mgmt() {
     assert!(parse_mgmt(&mgmt(5, 0x0001, &ie(0, b"n")), -50, 6).is_some(), "probe response");
     assert!(parse_mgmt(&mgmt(4, 0x0001, &ie(0, b"n")), -50, 6).is_none(), "probe request");

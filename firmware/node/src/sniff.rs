@@ -87,7 +87,8 @@ struct Dwell {
     /// Whether the radio is settled on [`Dwell::channel`]. False through
     /// every channel change, and false from boot until the first dwell.
     armed: bool,
-    /// The channel the radio is parked on, for frames that name none.
+    /// The channel the radio is parked on, for frames that name none or name one
+    /// `parse_mgmt` judges implausible.
     channel: u8,
 }
 
