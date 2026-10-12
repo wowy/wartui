@@ -268,16 +268,21 @@ pub struct ChannelInfo {
     /// Center frequency in MHz. Channel 14 is 2484, the one 2.4 GHz channel off the
     /// 5 MHz ladder.
     pub center_mhz: u16,
-    /// The widest BSS the band allows, in MHz: 40 on 2.4 GHz (802.11n, ax, be) and 160 on
-    /// 5 GHz (802.11ac, ax, be). 802.11be's 320 MHz is 6 GHz only.
+    /// How far, center to center in MHz, a beacon's named channel may lie from this
+    /// channel, when parked here, and still count as heard here.
     ///
-    /// It bounds what the radio could plausibly hear, not a model of it. An access point
-    /// may send its beacons as non-HT duplicates across its width, so a node parked
-    /// anywhere inside a BSS this wide can hear one naming the primary. A single BSS spans
-    /// at most `width - 20` MHz between centers; comparing centers against `width` allows
-    /// one more channel of adjacent-channel spill-over. Anything farther the radio could
-    /// not have heard.
-    pub max_width_mhz: u16,
+    /// On 2.4 GHz it is 72, the whole band in the table (2484 - 2412). A strong access
+    /// point is heard across the band: drives show channels 1 and 11, 50 MHz apart, each
+    /// heard from the other. So any 2.4 GHz channel in the table is plausible.
+    ///
+    /// On 5 GHz it is 160, the widest BSS the band allows (802.11ac, ax, be; 320 MHz is
+    /// 6 GHz only). It bounds what the radio could plausibly hear rather than modelling
+    /// it. An access point may send non-HT duplicate beacons across its width. A single
+    /// BSS spans at most `width - 20` MHz between centers, so comparing against the full
+    /// width allows one channel of adjacent-channel spill-over.
+    ///
+    /// Two bands are always farther apart than either reach.
+    pub reach_mhz: u16,
     /// Whether tuning the channel needs a 5 GHz radio.
     pub five_ghz: bool,
 }
@@ -298,7 +303,7 @@ pub const fn channel_info(channel: u8) -> Option<ChannelInfo> {
     } else {
         2407 + 5 * ch
     };
-    Some(ChannelInfo { center_mhz, max_width_mhz: if five_ghz { 160 } else { 40 }, five_ghz })
+    Some(ChannelInfo { center_mhz, reach_mhz: if five_ghz { 160 } else { 72 }, five_ghz })
 }
 
 // The planner deals from a flattened iterator and indexes nothing by run, but a pool

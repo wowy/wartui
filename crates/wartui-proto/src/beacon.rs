@@ -188,16 +188,16 @@ pub const fn is_report(frame: &[u8]) -> bool {
 /// header on. `parked` is the channel the radio was tuned to.
 ///
 /// The sighting's channel is the first DS Parameter Set or HT Operation channel, in
-/// the order the elements arrive, that is in [`SCAN_CHANNELS`] and whose center lies
-/// within the band's widest BSS of `parked`'s; failing both, it is `parked`. That width
-/// bounds what the radio could plausibly hear: an access point may send non-HT duplicate
-/// beacons across its width, and the bound allows one channel of spill-over besides (see
-/// [`ChannelInfo::max_width_mhz`]). Anything farther the radio could not have heard, and
+/// the order the elements arrive, that is in [`SCAN_CHANNELS`] and within reach of
+/// `parked`; failing both, it is `parked`. Parked on 2.4 GHz, any 2.4 GHz channel in the
+/// table is within reach, because a strong access point is heard across the band. Parked
+/// on 5 GHz, the reach is 160 MHz between centers, the band's widest BSS (see
+/// [`ChannelInfo::reach_mhz`]). Anything farther the radio could not have heard, and
 /// some vendor gear announces numbers off the channel ladder, so an element that fails
 /// the test is not where the access point is.
 ///
 /// [`SCAN_CHANNELS`]: crate::plan::SCAN_CHANNELS
-/// [`ChannelInfo::max_width_mhz`]: crate::plan::ChannelInfo::max_width_mhz
+/// [`ChannelInfo::reach_mhz`]: crate::plan::ChannelInfo::reach_mhz
 ///
 /// Returns `None` for anything but a beacon (subtype 8) or probe response (subtype 5),
 /// and for a frame too short for the fixed fields. Past that it is best-effort. A
@@ -235,17 +235,18 @@ pub fn parse_mgmt(frame: &[u8], rssi: i8, parked: u8) -> Option<Sighting> {
     })
 }
 
-/// `channel`, if it is in [`SCAN_CHANNELS`] and its center lies no more than `parked`'s
-/// band's widest BSS from `parked`'s. Two bands are farther apart than that. `parked` is
-/// the parked channel's entry in the table; `None`, for a channel not in it, fails every
-/// candidate.
+/// `channel`, if it is in [`SCAN_CHANNELS`] and its center lies within `parked`'s
+/// [`ChannelInfo::reach_mhz`] of `parked`'s: any 2.4 GHz table channel when parked on
+/// 2.4 GHz, within 160 MHz when parked on 5 GHz. Two bands are farther apart than either
+/// reach. `parked` is the parked channel's entry in the table; `None`, for a channel not
+/// in it, fails every candidate.
 ///
 /// [`SCAN_CHANNELS`]: crate::plan::SCAN_CHANNELS
 fn plausible(channel: Option<u8>, parked: Option<ChannelInfo>) -> Option<u8> {
     let channel = channel?;
     let p = parked?;
     let c = channel_info(channel)?;
-    (c.center_mhz.abs_diff(p.center_mhz) <= p.max_width_mhz).then_some(channel)
+    (c.center_mhz.abs_diff(p.center_mhz) <= p.reach_mhz).then_some(channel)
 }
 
 /// What one walk over a frame's information elements found.
@@ -314,8 +315,8 @@ impl Elements {
                 }
                 // DS Parameter Set: the primary channel, on 2.4 GHz. Kept apart from
                 // HT Operation's so `parse_mgmt` can fall back to one when the other
-                // names a channel the radio could not have heard: off the table, or
-                // farther from the parked channel than the band's widest BSS.
+                // names a channel the radio could not have heard: off the table, in
+                // the other band, or more than 160 MHz from a 5 GHz parked channel.
                 //
                 // First wins within each tag, here and for HT Operation below, and
                 // `parse_mgmt` tries the earlier of the two elements first. A later

@@ -302,22 +302,17 @@ fn beacon_parser_uses_parked_channel_when_ht_channel_is_off_the_table_but_near()
 }
 
 #[test]
-fn beacon_parser_keeps_ds_channel_when_within_widest_2_4ghz_bss() {
-    // 9 is 40 MHz from 1, exactly the limit.
+fn beacon_parser_keeps_ds_channel_when_parked_anywhere_in_2_4ghz_band() {
+    // A strong access point is heard across the whole 2.4 GHz band, so distance rules
+    // out no 2.4 GHz table channel. Drives show 1 and 11, 50 MHz apart, each heard from
+    // the other.
+    assert_eq!(channel_named(3, 11, 1), 11);
+    assert_eq!(channel_named(3, 1, 11), 1);
+    assert_eq!(channel_named(3, 10, 1), 10);
     assert_eq!(channel_named(3, 9, 1), 9);
-    // 14 sits off the 5 MHz ladder, 12 MHz from 13.
+    // 14 sits off the 5 MHz ladder at 2484, the far end of the band.
+    assert_eq!(channel_named(3, 14, 6), 14);
     assert_eq!(channel_named(3, 14, 13), 14);
-}
-
-#[test]
-fn beacon_parser_uses_parked_channel_when_ds_channel_is_beyond_widest_2_4ghz_bss() {
-    // 10 is 45 MHz from 1.
-    assert_eq!(channel_named(3, 10, 1), 1);
-    // 11 while parked on 1 is the case captures show, at signal levels too weak to be
-    // spill-over from 50 MHz away.
-    assert_eq!(channel_named(3, 11, 1), 1);
-    // 14 is 47 MHz from 6, measured from its real center rather than its number.
-    assert_eq!(channel_named(3, 14, 6), 6);
 }
 
 #[test]

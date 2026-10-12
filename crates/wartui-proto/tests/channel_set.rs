@@ -198,10 +198,10 @@ fn channel_info_is_none_when_channel_not_in_table() {
 }
 
 #[test]
-fn channel_info_follows_band_when_channel_in_table() {
-    let band = |c| channel_info(c).map(|i| (i.max_width_mhz, i.five_ghz));
-    assert_eq!(band(1), Some((40, false)));
-    assert_eq!(band(14), Some((40, false)));
+fn channel_info_gives_band_reach_when_channel_in_table() {
+    let band = |c| channel_info(c).map(|i| (i.reach_mhz, i.five_ghz));
+    assert_eq!(band(1), Some((72, false)));
+    assert_eq!(band(14), Some((72, false)));
     assert_eq!(band(36), Some((160, true)));
     assert_eq!(band(177), Some((160, true)));
 }
