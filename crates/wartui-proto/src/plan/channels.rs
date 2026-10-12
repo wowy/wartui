@@ -262,33 +262,43 @@ const fn index_of(channel: u8) -> Option<u8> {
     None
 }
 
-/// The center frequency of `channel` in MHz, or `None` when it is not in [`SCAN_CHANNELS`].
+/// What the radio needs to know about one channel of [`SCAN_CHANNELS`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChannelInfo {
+    /// Center frequency in MHz. Channel 14 is 2484, the one 2.4 GHz channel off the
+    /// 5 MHz ladder.
+    pub center_mhz: u16,
+    /// The widest BSS the band allows, in MHz: 40 on 2.4 GHz (802.11n, ax, be) and 160 on
+    /// 5 GHz (802.11ac, ax, be). 802.11be's 320 MHz is 6 GHz only.
+    ///
+    /// It bounds what the radio could plausibly hear, not a model of it. An access point
+    /// may send its beacons as non-HT duplicates across its width, so a node parked
+    /// anywhere inside a BSS this wide can hear one naming the primary. A single BSS spans
+    /// at most `width - 20` MHz between centers; comparing centers against `width` allows
+    /// one more channel of adjacent-channel spill-over. Anything farther the radio could
+    /// not have heard.
+    pub max_width_mhz: u16,
+    /// Whether tuning the channel needs a 5 GHz radio.
+    pub five_ghz: bool,
+}
+
+/// What [`ChannelInfo`] says about `channel`, or `None` when it is not in [`SCAN_CHANNELS`].
 ///
-/// Channel 14 is 2484 MHz, the one 2.4 GHz channel off the 5 MHz ladder.
+/// One scan of the table answers every field, so a caller on the firmware's promiscuous
+/// callback pays for one lookup per channel.
 #[must_use]
-pub const fn center_mhz(channel: u8) -> Option<u16> {
+pub const fn channel_info(channel: u8) -> Option<ChannelInfo> {
     let Some(idx) = index_of(channel) else { return None };
+    let five_ghz = is_five_ghz(idx);
     let ch = channel as u16;
-    Some(if is_five_ghz(idx) {
+    let center_mhz = if five_ghz {
         5000 + 5 * ch
     } else if channel == 14 {
         2484
     } else {
         2407 + 5 * ch
-    })
-}
-
-/// The widest BSS `channel`'s band allows, in MHz, or `None` when it is not in
-/// [`SCAN_CHANNELS`].
-///
-/// 40 MHz on 2.4 GHz, the most 802.11n, ax and be allow there; 160 MHz on 5 GHz, the most
-/// 802.11ac, ax and be allow there. 802.11be's 320 MHz is 6 GHz only. A wide BSS sends its
-/// beacons as non-HT duplicates on every 20 MHz sub-channel, so a radio parked anywhere
-/// within that width hears a beacon naming the primary channel.
-#[must_use]
-pub const fn max_width_mhz(channel: u8) -> Option<u16> {
-    let Some(idx) = index_of(channel) else { return None };
-    Some(if is_five_ghz(idx) { 160 } else { 40 })
+    };
+    Some(ChannelInfo { center_mhz, max_width_mhz: if five_ghz { 160 } else { 40 }, five_ghz })
 }
 
 // The planner deals from a flattened iterator and indexes nothing by run, but a pool
@@ -397,32 +407,32 @@ impl core::fmt::Display for ChannelPool {
 
 #[cfg(test)]
 mod tests {
-    use super::{center_mhz, max_width_mhz};
+    use super::channel_info;
 
     #[test]
-    fn center_mhz_gives_ladder_frequency_when_channel_in_table() {
-        assert_eq!(center_mhz(1), Some(2412));
-        assert_eq!(center_mhz(13), Some(2472));
+    fn channel_info_gives_ladder_frequency_when_channel_in_table() {
+        let center = |c| channel_info(c).map(|i| i.center_mhz);
+        assert_eq!(center(1), Some(2412));
+        assert_eq!(center(13), Some(2472));
         // Channel 14 is off the 5 MHz ladder.
-        assert_eq!(center_mhz(14), Some(2484));
-        assert_eq!(center_mhz(36), Some(5180));
-        assert_eq!(center_mhz(177), Some(5885));
+        assert_eq!(center(14), Some(2484));
+        assert_eq!(center(36), Some(5180));
+        assert_eq!(center(177), Some(5885));
     }
 
     #[test]
-    fn center_mhz_is_none_when_channel_not_in_table() {
-        for channel in [0, 15, 32, 41] {
-            assert_eq!(center_mhz(channel), None, "channel {channel}");
+    fn channel_info_is_none_when_channel_not_in_table() {
+        for channel in [0, 15, 32, 41, 68] {
+            assert_eq!(channel_info(channel), None, "channel {channel}");
         }
     }
 
     #[test]
-    fn max_width_mhz_follows_band_when_channel_in_table() {
-        assert_eq!(max_width_mhz(1), Some(40));
-        assert_eq!(max_width_mhz(14), Some(40));
-        assert_eq!(max_width_mhz(36), Some(160));
-        assert_eq!(max_width_mhz(177), Some(160));
-        assert_eq!(max_width_mhz(0), None);
-        assert_eq!(max_width_mhz(68), None);
+    fn channel_info_follows_band_when_channel_in_table() {
+        let band = |c| channel_info(c).map(|i| (i.max_width_mhz, i.five_ghz));
+        assert_eq!(band(1), Some((40, false)));
+        assert_eq!(band(14), Some((40, false)));
+        assert_eq!(band(36), Some((160, true)));
+        assert_eq!(band(177), Some((160, true)));
     }
 }

@@ -20,7 +20,7 @@
 use core::fmt;
 
 use crate::air::{EXT_MAX, RecordKind, SSID_MAX, Security, SightingMsg};
-use crate::plan::{center_mhz, max_width_mhz};
+use crate::plan::channel_info;
 
 /// 802.11 MAC header length for a management frame: no QoS, no HT control.
 const HDR_LEN: usize = 24;
@@ -189,13 +189,15 @@ pub const fn is_report(frame: &[u8]) -> bool {
 ///
 /// The sighting's channel is the first DS Parameter Set or HT Operation channel, in
 /// the order the elements arrive, that is in [`SCAN_CHANNELS`] and whose center lies
-/// within [`max_width_mhz`] of `parked`'s; failing both, it is `parked`. A wide BSS
-/// duplicates its beacons on every 20 MHz sub-channel, so a radio parked anywhere in
-/// that width hears them. Anything farther the radio could not have heard, and some
-/// vendor gear announces numbers off the channel ladder, so an element that fails the
-/// test is not where the access point is.
+/// within the band's widest BSS of `parked`'s; failing both, it is `parked`. That width
+/// bounds what the radio could plausibly hear: an access point may send non-HT duplicate
+/// beacons across its width, and the bound allows one channel of spill-over besides (see
+/// [`ChannelInfo::max_width_mhz`]). Anything farther the radio could not have heard, and
+/// some vendor gear announces numbers off the channel ladder, so an element that fails
+/// the test is not where the access point is.
 ///
 /// [`SCAN_CHANNELS`]: crate::plan::SCAN_CHANNELS
+/// [`ChannelInfo::max_width_mhz`]: crate::plan::ChannelInfo::max_width_mhz
 ///
 /// Returns `None` for anything but a beacon (subtype 8) or probe response (subtype 5),
 /// and for a frame too short for the fixed fields. Past that it is best-effort. A
@@ -235,9 +237,10 @@ pub fn parse_mgmt(frame: &[u8], rssi: i8, parked: u8) -> Option<Sighting> {
 ///
 /// [`SCAN_CHANNELS`]: crate::plan::SCAN_CHANNELS
 fn plausible(channel: Option<u8>, parked: u8) -> Option<u8> {
-    let p = center_mhz(parked)?;
-    let width = max_width_mhz(parked)?;
-    channel.filter(|&c| center_mhz(c).is_some_and(|f| f.abs_diff(p) <= width))
+    let channel = channel?;
+    let p = channel_info(parked)?;
+    let c = channel_info(channel)?;
+    (c.center_mhz.abs_diff(p.center_mhz) <= p.max_width_mhz).then_some(channel)
 }
 
 /// What one walk over a frame's information elements found.
