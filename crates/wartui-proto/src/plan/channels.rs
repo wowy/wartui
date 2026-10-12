@@ -250,6 +250,47 @@ pub const fn is_five_ghz(idx: u8) -> bool {
     idx >= FIRST_FIVE_GHZ_INDEX
 }
 
+/// The [`SCAN_CHANNELS`] index of `channel`, or `None` when the table lacks it.
+const fn index_of(channel: u8) -> Option<u8> {
+    let mut idx = 0;
+    while idx < NUM_SCAN_CHANNELS {
+        if SCAN_CHANNELS[idx as usize] == channel {
+            return Some(idx);
+        }
+        idx += 1;
+    }
+    None
+}
+
+/// The center frequency of `channel` in MHz, or `None` when it is not in [`SCAN_CHANNELS`].
+///
+/// Channel 14 is 2484 MHz, the one 2.4 GHz channel off the 5 MHz ladder.
+#[must_use]
+pub const fn center_mhz(channel: u8) -> Option<u16> {
+    let Some(idx) = index_of(channel) else { return None };
+    let ch = channel as u16;
+    Some(if is_five_ghz(idx) {
+        5000 + 5 * ch
+    } else if channel == 14 {
+        2484
+    } else {
+        2407 + 5 * ch
+    })
+}
+
+/// The widest BSS `channel`'s band allows, in MHz, or `None` when it is not in
+/// [`SCAN_CHANNELS`].
+///
+/// 40 MHz on 2.4 GHz, the most 802.11n, ax and be allow there; 160 MHz on 5 GHz, the most
+/// 802.11ac, ax and be allow there. 802.11be's 320 MHz is 6 GHz only. A wide BSS sends its
+/// beacons as non-HT duplicates on every 20 MHz sub-channel, so a radio parked anywhere
+/// within that width hears a beacon naming the primary channel.
+#[must_use]
+pub const fn max_width_mhz(channel: u8) -> Option<u16> {
+    let Some(idx) = index_of(channel) else { return None };
+    Some(if is_five_ghz(idx) { 160 } else { 40 })
+}
+
 // The planner deals from a flattened iterator and indexes nothing by run, but a pool
 // exceeding `MAX_RUNS` is a pool nobody thought about. A new pool goes here as well as
 // in `ChannelPool::runs`.
@@ -351,5 +392,37 @@ impl core::fmt::Display for ChannelPool {
             Self::Eu => "EU",
             Self::All => "All",
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{center_mhz, max_width_mhz};
+
+    #[test]
+    fn center_mhz_gives_ladder_frequency_when_channel_in_table() {
+        assert_eq!(center_mhz(1), Some(2412));
+        assert_eq!(center_mhz(13), Some(2472));
+        // Channel 14 is off the 5 MHz ladder.
+        assert_eq!(center_mhz(14), Some(2484));
+        assert_eq!(center_mhz(36), Some(5180));
+        assert_eq!(center_mhz(177), Some(5885));
+    }
+
+    #[test]
+    fn center_mhz_is_none_when_channel_not_in_table() {
+        for channel in [0, 15, 32, 41] {
+            assert_eq!(center_mhz(channel), None, "channel {channel}");
+        }
+    }
+
+    #[test]
+    fn max_width_mhz_follows_band_when_channel_in_table() {
+        assert_eq!(max_width_mhz(1), Some(40));
+        assert_eq!(max_width_mhz(14), Some(40));
+        assert_eq!(max_width_mhz(36), Some(160));
+        assert_eq!(max_width_mhz(177), Some(160));
+        assert_eq!(max_width_mhz(0), None);
+        assert_eq!(max_width_mhz(68), None);
     }
 }

@@ -60,7 +60,7 @@ use rusqlite::{Connection, Row, Statement};
 use wartui_proto::air::RecordKind;
 use wartui_proto::beacon::rcoi_text;
 use wartui_proto::mac::{self, Mac};
-use wartui_proto::plan::{SCAN_CHANNELS, is_five_ghz};
+use wartui_proto::plan::center_mhz;
 
 use crate::record::ssid_text;
 use crate::store::{kind_name, parse_kind};
@@ -568,13 +568,12 @@ fn frequency_column(channel: i64, kind: RecordKind) -> String {
     if kind == RecordKind::Ble {
         return String::new();
     }
-    match band(channel) {
-        // Channel 14 is the one 2.4 GHz channel off the 5 MHz ladder.
-        Some(Band::Ghz2_4) if channel == 14 => "2484".to_owned(),
-        Some(Band::Ghz2_4) => format!("{}", 2407 + 5 * channel),
-        Some(Band::Ghz5) => format!("{}", 5000 + 5 * channel),
-        None => String::new(),
-    }
+    channel_mhz(channel).map_or_else(String::new, |mhz| mhz.to_string())
+}
+
+/// The center frequency of `channel`, or `None` when it is not in `SCAN_CHANNELS`.
+fn channel_mhz(channel: i64) -> Option<u16> {
+    center_mhz(u8::try_from(channel).ok()?)
 }
 
 /// A Wi-Fi band, as the scan table splits it.
@@ -584,13 +583,11 @@ enum Band {
     Ghz5,
 }
 
-/// The band of `channel`, or `None` when it is not in `SCAN_CHANNELS`. The export summary and the
-/// `Frequency` column both read it, so they agree on every channel.
+/// The band of `channel`, or `None` when it is not in `SCAN_CHANNELS`. It reads the same
+/// `center_mhz` as the `Frequency` column, so the export summary and the column agree on every
+/// channel.
 fn band(channel: i64) -> Option<Band> {
-    let channel = u8::try_from(channel).ok()?;
-    let idx = SCAN_CHANNELS.iter().position(|&c| c == channel)?;
-    let five = is_five_ghz(u8::try_from(idx).ok()?);
-    Some(if five { Band::Ghz5 } else { Band::Ghz2_4 })
+    Some(if channel_mhz(channel)? >= 5000 { Band::Ghz5 } else { Band::Ghz2_4 })
 }
 
 /// A coordinate to seven decimals, for WiGLE's `CurrentLatitude` and `CurrentLongitude` columns.

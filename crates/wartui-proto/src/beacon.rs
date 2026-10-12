@@ -20,7 +20,7 @@
 use core::fmt;
 
 use crate::air::{EXT_MAX, RecordKind, SSID_MAX, Security, SightingMsg};
-use crate::plan::{SCAN_CHANNELS, is_five_ghz};
+use crate::plan::{center_mhz, max_width_mhz};
 
 /// 802.11 MAC header length for a management frame: no QoS, no HT control.
 const HDR_LEN: usize = 24;
@@ -46,8 +46,9 @@ pub struct Sighting {
     rcoi_len: u8,
     /// The `AuthMode` token this frame's elements amount to.
     pub security: Security,
-    /// The channel the access point names, when that is a real channel in the band the
-    /// radio was parked in; otherwise the parked channel. See [`parse_mgmt`].
+    /// The channel the access point names, when that is a real channel the radio could
+    /// have heard from where it was parked; otherwise the parked channel. See
+    /// [`parse_mgmt`].
     pub channel: u8,
     /// Signal strength in dBm, as the receiver reported it.
     pub rssi: i8,
@@ -187,10 +188,14 @@ pub const fn is_report(frame: &[u8]) -> bool {
 /// header on. `parked` is the channel the radio was tuned to.
 ///
 /// The sighting's channel is the first DS Parameter Set or HT Operation channel, in
-/// the order the elements arrive, that is in [`SCAN_CHANNELS`] and in `parked`'s band;
-/// failing both, it is `parked`. A radio cannot hear another band, and some vendor
-/// gear announces numbers off the channel ladder, so an element that fails the test is
-/// not where the access point is.
+/// the order the elements arrive, that is in [`SCAN_CHANNELS`] and whose center lies
+/// within [`max_width_mhz`] of `parked`'s; failing both, it is `parked`. A wide BSS
+/// duplicates its beacons on every 20 MHz sub-channel, so a radio parked anywhere in
+/// that width hears them. Anything farther the radio could not have heard, and some
+/// vendor gear announces numbers off the channel ladder, so an element that fails the
+/// test is not where the access point is.
+///
+/// [`SCAN_CHANNELS`]: crate::plan::SCAN_CHANNELS
 ///
 /// Returns `None` for anything but a beacon (subtype 8) or probe response (subtype 5),
 /// and for a frame too short for the fixed fields. Past that it is best-effort. A
@@ -225,18 +230,14 @@ pub fn parse_mgmt(frame: &[u8], rssi: i8, parked: u8) -> Option<Sighting> {
     })
 }
 
-/// `channel`, if it and `parked` are both in [`SCAN_CHANNELS`] and in the same band.
+/// `channel`, if it and `parked` are both in [`SCAN_CHANNELS`] and their centers lie no
+/// more than `parked`'s band's widest BSS apart. Two bands are farther apart than that.
+///
+/// [`SCAN_CHANNELS`]: crate::plan::SCAN_CHANNELS
 fn plausible(channel: Option<u8>, parked: u8) -> Option<u8> {
-    let band = |ch: u8| SCAN_CHANNELS.iter().position(|&s| s == ch).map(index_is_five_ghz);
-    let parked_band = band(parked)?;
-    channel.filter(|&c| band(c) == Some(parked_band))
-}
-
-/// Whether table index `idx` is a 5 GHz channel.
-fn index_is_five_ghz(idx: usize) -> bool {
-    // Cast is safe: `idx` indexes SCAN_CHANNELS, which holds 42 entries.
-    #[allow(clippy::cast_possible_truncation)]
-    is_five_ghz(idx as u8)
+    let p = center_mhz(parked)?;
+    let width = max_width_mhz(parked)?;
+    channel.filter(|&c| center_mhz(c).is_some_and(|f| f.abs_diff(p) <= width))
 }
 
 /// What one walk over a frame's information elements found.
@@ -305,7 +306,8 @@ impl Elements {
                 }
                 // DS Parameter Set: the primary channel, on 2.4 GHz. Kept apart from
                 // HT Operation's so `parse_mgmt` can fall back to one when the other
-                // names a channel the radio could not have heard.
+                // names a channel the radio could not have heard: off the table, or
+                // farther from the parked channel than the band's widest BSS.
                 //
                 // First wins within each tag, here and for HT Operation below, and
                 // `parse_mgmt` tries the earlier of the two elements first. A later

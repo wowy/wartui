@@ -18,7 +18,7 @@ mod channels;
 
 pub use channels::{
     CHANNEL_SET_BYTES, ChannelPool, ChannelSet, ChannelSetIter, FIRST_FIVE_GHZ_INDEX, IndexRun,
-    NUM_SCAN_CHANNELS, SCAN_CHANNELS, UNSUPPORTED_INDEX, is_five_ghz,
+    NUM_SCAN_CHANNELS, SCAN_CHANNELS, UNSUPPORTED_INDEX, center_mhz, is_five_ghz, max_width_mhz,
 };
 
 /// The largest fleet wartui supports.
