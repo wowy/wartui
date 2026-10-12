@@ -262,6 +262,15 @@ const fn index_of(channel: u8) -> Option<u8> {
     None
 }
 
+/// The band a channel of [`SCAN_CHANNELS`] lies in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Band {
+    /// 2.4 GHz: channels 1 to 14, the band every [`Radio`] reaches.
+    Ghz2_4,
+    /// 5 GHz: channels 36 to 177, the band only a [`Radio::DualBand`] reaches.
+    Ghz5,
+}
+
 /// What the radio needs to know about one channel of [`SCAN_CHANNELS`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChannelInfo {
@@ -283,8 +292,8 @@ pub struct ChannelInfo {
     ///
     /// Two bands are always farther apart than either reach.
     pub reach_mhz: u16,
-    /// Whether tuning the channel needs a 5 GHz radio.
-    pub five_ghz: bool,
+    /// The band the channel lies in, and so the radio it needs.
+    pub band: Band,
 }
 
 /// What [`ChannelInfo`] says about `channel`, or `None` when it is not in [`SCAN_CHANNELS`].
@@ -294,16 +303,14 @@ pub struct ChannelInfo {
 #[must_use]
 pub const fn channel_info(channel: u8) -> Option<ChannelInfo> {
     let Some(idx) = index_of(channel) else { return None };
-    let five_ghz = is_five_ghz(idx);
+    let band = if is_five_ghz(idx) { Band::Ghz5 } else { Band::Ghz2_4 };
     let ch = channel as u16;
-    let center_mhz = if five_ghz {
-        5000 + 5 * ch
-    } else if channel == 14 {
-        2484
-    } else {
-        2407 + 5 * ch
+    let (center_mhz, reach_mhz) = match band {
+        Band::Ghz2_4 if channel == 14 => (2484, 72),
+        Band::Ghz2_4 => (2407 + 5 * ch, 72),
+        Band::Ghz5 => (5000 + 5 * ch, 160),
     };
-    Some(ChannelInfo { center_mhz, reach_mhz: if five_ghz { 160 } else { 72 }, five_ghz })
+    Some(ChannelInfo { center_mhz, reach_mhz, band })
 }
 
 // The planner deals from a flattened iterator and indexes nothing by run, but a pool

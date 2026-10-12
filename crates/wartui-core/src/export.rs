@@ -60,7 +60,7 @@ use rusqlite::{Connection, Row, Statement};
 use wartui_proto::air::RecordKind;
 use wartui_proto::beacon::rcoi_text;
 use wartui_proto::mac::{self, Mac};
-use wartui_proto::plan::{ChannelInfo, channel_info};
+use wartui_proto::plan::{Band, ChannelInfo, channel_info};
 
 use crate::record::ssid_text;
 use crate::store::{kind_name, parse_kind};
@@ -316,9 +316,9 @@ impl Tally {
             stats.networks += 1;
         }
         if !ble {
-            let (bit, count) = match info(c.channel).map(|i| i.five_ghz) {
-                Some(false) => (1, &mut summary.wifi_bands.ghz2_4),
-                Some(true) => (2, &mut summary.wifi_bands.ghz5),
+            let (bit, count) = match info(c.channel).map(|i| i.band) {
+                Some(Band::Ghz2_4) => (1, &mut summary.wifi_bands.ghz2_4),
+                Some(Band::Ghz5) => (2, &mut summary.wifi_bands.ghz5),
                 None => (4, &mut summary.wifi_bands.other),
             };
             if self.bands & bit == 0 {

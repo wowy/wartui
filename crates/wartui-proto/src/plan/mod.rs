@@ -17,8 +17,9 @@ use crate::air::AdminMsg;
 mod channels;
 
 pub use channels::{
-    CHANNEL_SET_BYTES, ChannelInfo, ChannelPool, ChannelSet, ChannelSetIter, FIRST_FIVE_GHZ_INDEX,
-    IndexRun, NUM_SCAN_CHANNELS, SCAN_CHANNELS, UNSUPPORTED_INDEX, channel_info, is_five_ghz,
+    Band, CHANNEL_SET_BYTES, ChannelInfo, ChannelPool, ChannelSet, ChannelSetIter,
+    FIRST_FIVE_GHZ_INDEX, IndexRun, NUM_SCAN_CHANNELS, SCAN_CHANNELS, UNSUPPORTED_INDEX,
+    channel_info, is_five_ghz,
 };
 
 /// The largest fleet wartui supports.
