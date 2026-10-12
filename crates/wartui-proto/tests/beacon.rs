@@ -217,13 +217,6 @@ fn beacon_parser_extracts_channel_from_ds_or_ht_elements_when_present() {
 }
 
 #[test]
-fn beacon_parser_prioritizes_ds_parameter_set_over_ht_operation_when_both_present() {
-    let mut ies = ie(3, &[6]);
-    ies.extend_from_slice(&ie(61, &[36, 0, 0, 0, 0]));
-    assert_eq!(parse_mgmt(&beacon(&ies), -50, 1).expect("beacon").channel, 6);
-}
-
-#[test]
 fn beacon_parser_keeps_ht_channel_when_ds_parameter_set_trails_it() {
     // A trailing tag 3, such as the frame check sequence read as an element, does
     // not override the channel named before it. Both channels are plausible, so

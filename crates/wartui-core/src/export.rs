@@ -316,9 +316,9 @@ impl Tally {
             stats.networks += 1;
         }
         if !ble {
-            let (bit, count) = match band(c.channel) {
-                Some(Band::Ghz2_4) => (1, &mut summary.wifi_bands.ghz2_4),
-                Some(Band::Ghz5) => (2, &mut summary.wifi_bands.ghz5),
+            let (bit, count) = match info(c.channel).map(|i| i.five_ghz) {
+                Some(false) => (1, &mut summary.wifi_bands.ghz2_4),
+                Some(true) => (2, &mut summary.wifi_bands.ghz5),
                 None => (4, &mut summary.wifi_bands.other),
             };
             if self.bands & bit == 0 {
@@ -574,20 +574,6 @@ fn frequency_column(channel: i64, kind: RecordKind) -> String {
 /// What the scan table says about `channel`, or `None` when it is not in `SCAN_CHANNELS`.
 fn info(channel: i64) -> Option<ChannelInfo> {
     channel_info(u8::try_from(channel).ok()?)
-}
-
-/// A Wi-Fi band, as the scan table splits it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Band {
-    Ghz2_4,
-    Ghz5,
-}
-
-/// The band of `channel`, or `None` when it is not in `SCAN_CHANNELS`. It reads the same
-/// `channel_info` as the `Frequency` column, so the export summary and the column agree on every
-/// channel.
-fn band(channel: i64) -> Option<Band> {
-    Some(if info(channel)?.five_ghz { Band::Ghz5 } else { Band::Ghz2_4 })
 }
 
 /// A coordinate to seven decimals, for WiGLE's `CurrentLatitude` and `CurrentLongitude` columns.

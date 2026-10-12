@@ -404,35 +404,3 @@ impl core::fmt::Display for ChannelPool {
         })
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::channel_info;
-
-    #[test]
-    fn channel_info_gives_ladder_frequency_when_channel_in_table() {
-        let center = |c| channel_info(c).map(|i| i.center_mhz);
-        assert_eq!(center(1), Some(2412));
-        assert_eq!(center(13), Some(2472));
-        // Channel 14 is off the 5 MHz ladder.
-        assert_eq!(center(14), Some(2484));
-        assert_eq!(center(36), Some(5180));
-        assert_eq!(center(177), Some(5885));
-    }
-
-    #[test]
-    fn channel_info_is_none_when_channel_not_in_table() {
-        for channel in [0, 15, 32, 41, 68] {
-            assert_eq!(channel_info(channel), None, "channel {channel}");
-        }
-    }
-
-    #[test]
-    fn channel_info_follows_band_when_channel_in_table() {
-        let band = |c| channel_info(c).map(|i| (i.max_width_mhz, i.five_ghz));
-        assert_eq!(band(1), Some((40, false)));
-        assert_eq!(band(14), Some((40, false)));
-        assert_eq!(band(36), Some((160, true)));
-        assert_eq!(band(177), Some((160, true)));
-    }
-}

@@ -20,7 +20,7 @@
 use core::fmt;
 
 use crate::air::{EXT_MAX, RecordKind, SSID_MAX, Security, SightingMsg};
-use crate::plan::channel_info;
+use crate::plan::{ChannelInfo, channel_info};
 
 /// 802.11 MAC header length for a management frame: no QoS, no HT control.
 const HDR_LEN: usize = 24;
@@ -216,6 +216,13 @@ pub fn parse_mgmt(frame: &[u8], rssi: i8, parked: u8) -> Option<Sighting> {
     let mut scan = Elements::new(capability & CAP_PRIVACY != 0);
     scan.walk(&frame[HDR_LEN + FIXED_LEN..]);
 
+    let parked_info = channel_info(parked);
+    let channel = scan
+        .channels_in_order()
+        .into_iter()
+        .find_map(|c| plausible(c, parked_info))
+        .unwrap_or(parked);
+
     Some(Sighting {
         bssid,
         ssid: scan.ssid,
@@ -223,22 +230,20 @@ pub fn parse_mgmt(frame: &[u8], rssi: i8, parked: u8) -> Option<Sighting> {
         rcoi: scan.rcoi,
         rcoi_len: scan.rcoi_len,
         security: scan.classify(),
-        channel: scan
-            .channels_in_order()
-            .into_iter()
-            .find_map(|c| plausible(c, parked))
-            .unwrap_or(parked),
+        channel,
         rssi,
     })
 }
 
-/// `channel`, if it and `parked` are both in [`SCAN_CHANNELS`] and their centers lie no
-/// more than `parked`'s band's widest BSS apart. Two bands are farther apart than that.
+/// `channel`, if it is in [`SCAN_CHANNELS`] and its center lies no more than `parked`'s
+/// band's widest BSS from `parked`'s. Two bands are farther apart than that. `parked` is
+/// the parked channel's entry in the table; `None`, for a channel not in it, fails every
+/// candidate.
 ///
 /// [`SCAN_CHANNELS`]: crate::plan::SCAN_CHANNELS
-fn plausible(channel: Option<u8>, parked: u8) -> Option<u8> {
+fn plausible(channel: Option<u8>, parked: Option<ChannelInfo>) -> Option<u8> {
     let channel = channel?;
-    let p = channel_info(parked)?;
+    let p = parked?;
     let c = channel_info(channel)?;
     (c.center_mhz.abs_diff(p.center_mhz) <= p.max_width_mhz).then_some(channel)
 }
