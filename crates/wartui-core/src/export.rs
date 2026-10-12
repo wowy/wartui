@@ -643,7 +643,7 @@ mod tests {
     }
 
     #[test]
-    fn frequency_column_gives_center_mhz_when_wifi_channel_on_a_ladder() {
+    fn frequency_column_gives_center_mhz_when_wifi_channel_in_scan_table() {
         assert_eq!(frequency_column(1, RecordKind::Wifi), "2412");
         assert_eq!(frequency_column(6, RecordKind::Wifi), "2437");
         assert_eq!(frequency_column(13, RecordKind::Wifi), "2472");
@@ -655,7 +655,7 @@ mod tests {
     }
 
     #[test]
-    fn frequency_column_is_blank_when_ble_or_channel_unmapped() {
+    fn frequency_column_is_blank_when_ble_or_channel_not_in_scan_table() {
         // A BLE row's frequency column means a "device type" code a passive scan
         // cannot produce, so it is blank whatever the channel field holds.
         assert_eq!(frequency_column(0, RecordKind::Ble), "");

@@ -20,7 +20,7 @@
 use core::fmt;
 
 use crate::air::{EXT_MAX, RecordKind, SSID_MAX, Security, SightingMsg};
-use crate::plan::{ChannelInfo, channel_info};
+use crate::plan::{Band, ChannelInfo, channel_info};
 
 /// 802.11 MAC header length for a management frame: no QoS, no HT control.
 const HDR_LEN: usize = 24;
@@ -30,6 +30,15 @@ const FIXED_LEN: usize = 12;
 
 /// `Capability Information` bit 4.
 const CAP_PRIVACY: u16 = 0x0010;
+
+/// How far, center to center, a 5 GHz beacon's named channel may lie from the parked
+/// channel and still count as heard there.
+///
+/// It is the widest BSS 5 GHz allows (802.11ac, ax, be; 320 MHz is 6 GHz only), and bounds
+/// what the radio could plausibly hear rather than modelling it. An access point may send
+/// non-HT duplicate beacons across its width. A single BSS spans at most 140 MHz between
+/// centers, so 160 allows one channel of spill-over.
+const FIVE_GHZ_REACH_MHZ: u16 = 160;
 
 /// One access point, as heard on the air.
 ///
@@ -188,16 +197,14 @@ pub const fn is_report(frame: &[u8]) -> bool {
 /// header on. `parked` is the channel the radio was tuned to.
 ///
 /// The sighting's channel is the first DS Parameter Set or HT Operation channel, in
-/// the order the elements arrive, that is in [`SCAN_CHANNELS`] and within reach of
-/// `parked`; failing both, it is `parked`. Parked on 2.4 GHz, any 2.4 GHz channel in the
-/// table is within reach, because a strong access point is heard across the band. Parked
-/// on 5 GHz, the reach is 160 MHz between centers, the band's widest BSS (see
-/// [`ChannelInfo::reach_mhz`]). Anything farther the radio could not have heard, and
-/// some vendor gear announces numbers off the channel ladder, so an element that fails
-/// the test is not where the access point is.
+/// the order the elements arrive, that is in [`SCAN_CHANNELS`] and one the radio could
+/// have heard from `parked`; failing both, it is `parked`. Parked on 2.4 GHz, any 2.4 GHz
+/// table channel is kept, because a strong access point is heard across the band. Parked
+/// on 5 GHz, only channels within 160 MHz (`FIVE_GHZ_REACH_MHZ`) are kept. A channel in
+/// the other band is never kept. Some vendor gear announces numbers off the channel list,
+/// so an element that fails the test is not where the access point is.
 ///
 /// [`SCAN_CHANNELS`]: crate::plan::SCAN_CHANNELS
-/// [`ChannelInfo::reach_mhz`]: crate::plan::ChannelInfo::reach_mhz
 ///
 /// Returns `None` for anything but a beacon (subtype 8) or probe response (subtype 5),
 /// and for a frame too short for the fixed fields. Past that it is best-effort. A
@@ -235,18 +242,27 @@ pub fn parse_mgmt(frame: &[u8], rssi: i8, parked: u8) -> Option<Sighting> {
     })
 }
 
-/// `channel`, if it is in [`SCAN_CHANNELS`] and its center lies within `parked`'s
-/// [`ChannelInfo::reach_mhz`] of `parked`'s: any 2.4 GHz table channel when parked on
-/// 2.4 GHz, within 160 MHz when parked on 5 GHz. Two bands are farther apart than either
-/// reach. `parked` is the parked channel's entry in the table; `None`, for a channel not
-/// in it, fails every candidate.
+/// `channel`, if it is in [`SCAN_CHANNELS`] and the radio could have heard it from
+/// `parked`. `parked` is the parked channel's entry in the table; `None`, for a channel
+/// not in it, fails every candidate.
+///
+/// - Parked on 2.4 GHz, any 2.4 GHz table channel is kept. A strong access point is heard
+///   across the band: drives show channels 1 and 11, 50 MHz apart, each heard from the
+///   other.
+/// - Parked on 5 GHz, only channels within [`FIVE_GHZ_REACH_MHZ`] are kept.
+/// - A channel in the other band is never kept.
 ///
 /// [`SCAN_CHANNELS`]: crate::plan::SCAN_CHANNELS
 fn plausible(channel: Option<u8>, parked: Option<ChannelInfo>) -> Option<u8> {
     let channel = channel?;
     let p = parked?;
     let c = channel_info(channel)?;
-    (c.center_mhz.abs_diff(p.center_mhz) <= p.reach_mhz).then_some(channel)
+    let heard = match (p.band, c.band) {
+        (Band::Ghz2_4, Band::Ghz2_4) => true,
+        (Band::Ghz5, Band::Ghz5) => c.center_mhz.abs_diff(p.center_mhz) <= FIVE_GHZ_REACH_MHZ,
+        _ => false,
+    };
+    heard.then_some(channel)
 }
 
 /// What one walk over a frame's information elements found.
@@ -316,7 +332,8 @@ impl Elements {
                 // DS Parameter Set: the primary channel, on 2.4 GHz. Kept apart from
                 // HT Operation's so `parse_mgmt` can fall back to one when the other
                 // names a channel the radio could not have heard: off the table, in
-                // the other band, or more than 160 MHz from a 5 GHz parked channel.
+                // the other band, or farther than `FIVE_GHZ_REACH_MHZ` from a 5 GHz
+                // parked channel.
                 //
                 // First wins within each tag, here and for HT Operation below, and
                 // `parse_mgmt` tries the earlier of the two elements first. A later

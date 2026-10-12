@@ -277,21 +277,6 @@ pub struct ChannelInfo {
     /// Center frequency in MHz. Channel 14 is 2484, the one 2.4 GHz channel off the
     /// 5 MHz ladder.
     pub center_mhz: u16,
-    /// How far, center to center in MHz, a beacon's named channel may lie from this
-    /// channel, when parked here, and still count as heard here.
-    ///
-    /// On 2.4 GHz it is 72, the whole band in the table (2484 - 2412). A strong access
-    /// point is heard across the band: drives show channels 1 and 11, 50 MHz apart, each
-    /// heard from the other. So any 2.4 GHz channel in the table is plausible.
-    ///
-    /// On 5 GHz it is 160, the widest BSS the band allows (802.11ac, ax, be; 320 MHz is
-    /// 6 GHz only). It bounds what the radio could plausibly hear rather than modelling
-    /// it. An access point may send non-HT duplicate beacons across its width. A single
-    /// BSS spans at most `width - 20` MHz between centers, so comparing against the full
-    /// width allows one channel of adjacent-channel spill-over.
-    ///
-    /// Two bands are always farther apart than either reach.
-    pub reach_mhz: u16,
     /// The band the channel lies in, and so the radio it needs.
     pub band: Band,
 }
@@ -305,12 +290,12 @@ pub const fn channel_info(channel: u8) -> Option<ChannelInfo> {
     let Some(idx) = index_of(channel) else { return None };
     let band = if is_five_ghz(idx) { Band::Ghz5 } else { Band::Ghz2_4 };
     let ch = channel as u16;
-    let (center_mhz, reach_mhz) = match band {
-        Band::Ghz2_4 if channel == 14 => (2484, 72),
-        Band::Ghz2_4 => (2407 + 5 * ch, 72),
-        Band::Ghz5 => (5000 + 5 * ch, 160),
+    let center_mhz = match band {
+        Band::Ghz2_4 if channel == 14 => 2484,
+        Band::Ghz2_4 => 2407 + 5 * ch,
+        Band::Ghz5 => 5000 + 5 * ch,
     };
-    Some(ChannelInfo { center_mhz, reach_mhz, band })
+    Some(ChannelInfo { center_mhz, band })
 }
 
 // The planner deals from a flattened iterator and indexes nothing by run, but a pool

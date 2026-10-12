@@ -558,10 +558,14 @@ window, so the fleet converges within one heartbeat interval. A node adopts only
 differs from its own, so an unchanged fleet is left alone. Two consequences:
 
 - **A node can report a channel outside its share.** 2.4 GHz channels are interleaved (one node 1,
-  3, 5; the next 2, 4, 6), 5 MHz apart but 20 MHz wide, so a node on 2 hears 1 and 3. It reports the
-  channel the beacon names, the access point's real one, not a wrong frequency. About a quarter of
-  access points reach more than one node. `export` keeps the strongest per recapture window, so this
-  costs only store rows. 5 GHz channels do not overlap.
+  3, 5; the next 2, 4, 6), 5 MHz apart but 20 MHz wide, so a node on 2 hears 1 and 3. A strong
+  access point is heard well beyond its own channel, and an access point may send copies of its
+  beacon across its width. A node reports the channel the beacon names when it is a scan-table
+  channel the node could have heard: any 2.4 GHz channel when parked on 2.4 GHz, or one within
+  160 MHz on 5 GHz, so a 5 GHz node can report a nearby 5 GHz channel too. Otherwise it reports the
+  channel it was parked on, which covers vendor gear that names a number off the channel list.
+  About a quarter of access points reach more than one node. `export` keeps the strongest per
+  recapture window, so this costs only store rows.
 - **A fleet with no 5 GHz radio covers only 2.4 GHz**: 13 channels on `all` and `eu`, 11 on `us`.
   From fourteen such nodes (twelve on `us`), nodes outnumber channels. Surplus nodes keep what they
   last held and double up, because the only channel-less frame means "Bluetooth is the whole job",
