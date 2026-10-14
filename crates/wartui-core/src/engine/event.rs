@@ -41,7 +41,7 @@ pub enum Event {
 
 /// An operator's instruction. An event rather than a method, so [`FleetEngine::handle`] orders
 /// keypresses against heartbeats, testably.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     /// Give one node the Bluetooth scan as its whole job, or take the scan off the fleet.
     ///
@@ -95,6 +95,13 @@ pub enum Command {
     SetPool {
         /// The pool to partition from now on.
         pool: ChannelPool,
+    },
+
+    /// Replace the SSIDs never captured ([`EngineConfig::excluded_ssids`]). Takes effect from the
+    /// next sighting; nothing goes out on the air.
+    SetExcludedSsids {
+        /// Each SSID's bytes, matched exactly.
+        ssids: Vec<Vec<u8>>,
     },
 }
 

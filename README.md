@@ -124,14 +124,27 @@ have no README; their `//!` module docs hold the detail.
 
 ### In settings (`c`)
 
-| Key               | What it does                                                       |
-|-------------------|--------------------------------------------------------------------|
-| `↑` `↓` / `k` `j` | Move between rows                                                  |
-| `←` `→` / `h` `l` | Change the selected row; values wrap at their ends                 |
-| Type / paste      | On the `wdgwars` row: enter the key (`Backspace`, `ctrl-u` clears) |
-| `Enter`           | Apply every row and save it to `wartui.toml`                       |
-| `Esc` / `q`       | Close without changing anything                                    |
-| `ctrl-c`          | Quit                                                               |
+| Key                 | What it does                                                       |
+|---------------------|--------------------------------------------------------------------|
+| `↑` `↓` / `k` `j`   | Move between rows                                                  |
+| `←` `→` / `h` `l`   | Change the selected row; values wrap at their ends                 |
+| Type / paste        | On the `wdgwars` row: enter the key (`Backspace`, `ctrl-u` clears) |
+| `Enter` / `→` / `l` | On the `excluded ssids` row: open its page                         |
+| `Enter`             | Apply every row and save it to `wartui.toml`                       |
+| `Esc` / `q`         | Close without changing anything                                    |
+| `ctrl-c`            | Quit                                                               |
+
+On the `excluded ssids` page:
+
+| Key                    | What it does                                                      |
+|------------------------|-------------------------------------------------------------------|
+| `↑` `↓` / `k` `j`      | Move through the list                                             |
+| `a`                    | Start typing an SSID; type or paste it, then `Enter` adds it      |
+| `Backspace` / `ctrl-u` | While typing: delete a character, or clear the line               |
+| `Esc`                  | While typing: stop without adding                                 |
+| `d` / `Delete`         | Remove the selected SSID                                          |
+| `Enter`                | Apply every row and save it to `wartui.toml`, as on the main rows |
+| `Esc` / `q`            | Back to the rows, dropping this page's edits                      |
 
 wartui splits the channel pool across the fleet and re-splits it whenever the fleet changes. That
 is the reason it exists. No key or flag assigns channels to a node. `b` only picks which node scans

@@ -342,6 +342,84 @@ fn engine_keeps_record_bytes_in_raw_body_when_sighting_recorded() {
     assert_eq!(decoded.ssid, b"example");
 }
 
+/// An engine that never captures `HomeNet`.
+fn excluding_home(clock: &Clock) -> FleetEngine {
+    engine(EngineConfig { excluded_ssids: vec![b"HomeNet".to_vec()], ..Default::default() }, clock)
+}
+
+fn observations(batch: &ActionBatch) -> usize {
+    batch.records.iter().filter(|record| matches!(record, Record::Observation(_))).count()
+}
+
+#[test]
+fn engine_drops_wifi_sighting_when_ssid_is_excluded() {
+    let clock = Clock::new();
+    let mut engine = excluding_home(&clock);
+
+    let batch =
+        engine.handle(named_observation(NODE, "AA:BB:CC:DD:EE:FF", -60, b"HomeNet"), clock.at(1));
+
+    assert_eq!(observations(&batch), 0, "nothing reaches the store");
+    assert!(matches!(batch.records[..], [Record::Node(_)]), "the node is still heard");
+    assert_eq!(counters(&engine).observations, 0);
+    let snapshot = engine.snapshot(clock.at(1), StoreStats::default());
+    assert!(snapshot.tail.is_empty(), "nothing reaches the live stream");
+    assert_eq!(snapshot.unique_wifi_aps, 0);
+    assert_eq!(snapshot.excluded_ssids, ["HomeNet"], "the modal sees what is in force");
+}
+
+#[test]
+fn engine_keeps_sighting_when_ssid_differs_only_in_case() {
+    let clock = Clock::new();
+    let mut engine = excluding_home(&clock);
+
+    let batch =
+        engine.handle(named_observation(NODE, "AA:BB:CC:DD:EE:FF", -60, b"homenet"), clock.at(1));
+
+    assert_eq!(observations(&batch), 1, "the match is exact");
+    assert_eq!(counters(&engine).observations, 1);
+}
+
+#[test]
+fn engine_keeps_ble_sighting_when_name_matches_excluded_ssid() {
+    // A Bluetooth name is not an SSID, so the list never applies to one.
+    let clock = Clock::new();
+    let mut engine = excluding_home(&clock);
+    let msg = SightingMsg {
+        kind: RecordKind::Ble,
+        bssid: [0x02, 0x00, 0x00, 0x00, 0x01, 0x01],
+        channel: 6,
+        rssi: -60,
+        security: Security::Wpa2Psk,
+        ssid: b"HomeNet",
+        ext: &[],
+    };
+
+    let batch = engine.handle(rx(NODE, &batch(1, &[msg])), clock.at(1));
+
+    assert_eq!(observations(&batch), 1);
+    assert_eq!(counters(&engine).observations, 1);
+}
+
+#[test]
+fn engine_drops_sighting_when_ssid_excluded_mid_run_by_command() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    let before =
+        engine.handle(named_observation(NODE, "AA:BB:CC:DD:EE:01", -60, b"HomeNet"), clock.at(1));
+    assert_eq!(observations(&before), 1, "captured until excluded");
+
+    engine.handle(
+        Event::Command(Command::SetExcludedSsids { ssids: vec![b"HomeNet".to_vec()] }),
+        clock.at(2),
+    );
+    let after =
+        engine.handle(named_observation(NODE, "AA:BB:CC:DD:EE:02", -60, b"HomeNet"), clock.at(3));
+
+    assert_eq!(observations(&after), 0);
+    assert_eq!(counters(&engine).observations, 1, "only the sighting before the command");
+}
+
 #[test]
 fn engine_records_one_node_and_each_observation_when_batch_arrives() {
     let clock = Clock::new();

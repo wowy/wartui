@@ -247,6 +247,8 @@ pub async fn run(args: Args) -> Result<()> {
     let (tx_power, bridge_tx_power) = tx_powers(&config.tx_power);
     let remember_ble = config.bluetooth.remember.unwrap_or(true);
     let preferred_ble = config.bluetooth.node;
+    let excluded_ssids =
+        config.excluded_ssids.iter().map(|ssid| ssid.as_bytes().to_vec()).collect();
     let upload = tui::UploadTarget { db: db.clone(), base: upload::BASE.to_owned() };
     let settings = tui::Settings { config_path, saved: config, bridge_memory: memory, upload };
     let config = EngineConfig {
@@ -257,6 +259,7 @@ pub async fn run(args: Args) -> Result<()> {
         bridge_tx_power,
         remember_ble,
         preferred_ble,
+        excluded_ssids,
         ..Default::default()
     };
     let engine = FleetEngine::new(config, started);

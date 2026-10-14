@@ -348,6 +348,13 @@ impl FleetEngine {
         batch: &mut ActionBatch,
     ) {
         let Rx { src, rssi, .. } = *rx;
+        // An excluded network is never captured: dropped before it counts, reaches the tail or is
+        // recorded. Its batch already counted for liveness and sequence.
+        if sighting.kind == RecordKind::Wifi
+            && self.config.excluded_ssids.iter().any(|ssid| ssid.as_slice() == sighting.ssid)
+        {
+            return;
+        }
         self.counters.observations += 1;
         match sighting.kind {
             RecordKind::Wifi => {

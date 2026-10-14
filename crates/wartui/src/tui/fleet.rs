@@ -192,10 +192,11 @@ fn waiting_cell(set: ChannelSet) -> String {
 /// Batches lost between this node and the host. Shows `—`, not 0, until the first
 /// batch arrives.
 ///
-/// Tests `observations` because every batch carries a record, and a reboot clears
-/// `last_seq` but keeps the losses.
+/// Tests `observations` because nearly every batch carries a recorded sighting, and a
+/// reboot clears `last_seq` but keeps the losses. A batch of only excluded SSIDs
+/// records nothing, so a loss shows whether or not anything was recorded.
 fn lost_cell(node: &NodeView) -> String {
-    if node.state.observations == 0 {
+    if node.state.observations == 0 && node.state.batches_lost == 0 {
         "—".to_owned()
     } else {
         node.state.batches_lost.to_string()
@@ -524,6 +525,17 @@ mod tests {
         let pending_row =
             rendered.lines().find(|line| line.contains("57:87")).expect("the pending node's row");
         assert!(pending_row.contains("bluetooth…"), "got {pending_row}");
+    }
+
+    #[test]
+    fn fleet_table_shows_losses_when_node_has_recorded_nothing() {
+        // Every sighting it sent was an excluded SSID, so nothing was recorded, yet
+        // its batches arrived and a gap between them was counted.
+        let mut excluded_only = node(0x84, 0, true);
+        excluded_only.state.observations = 0;
+        excluded_only.state.batches_lost = 5;
+
+        assert_eq!(lost_cell(&excluded_only), "5");
     }
 
     #[test]

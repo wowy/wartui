@@ -219,7 +219,7 @@ impl Ui {
         }
     }
 
-    /// A bracketed paste, which only the settings modal's key row takes.
+    /// A bracketed paste, which only the settings modal's text fields take.
     pub(super) fn on_modal_paste(&mut self, text: &str) {
         if let Some(modal) = self.modal.as_mut() {
             modal.paste(text);

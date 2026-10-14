@@ -264,6 +264,7 @@ mod tests {
             gps: None,
             tx_power: DEFAULT_TX_POWER_QUARTER_DBM,
             bridge_tx_power: DEFAULT_TX_POWER_QUARTER_DBM,
+            excluded_ssids: Vec::new(),
         }
     }
 

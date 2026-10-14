@@ -41,6 +41,10 @@ pub struct Config {
     /// file said nothing, and `run::pool` falls back on the default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pool: Option<PoolArg>,
+    /// The root `excluded-ssids` key: Wi-Fi networks never captured, matched
+    /// byte-for-byte. Declared before the tables, since TOML root keys must come first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded_ssids: Vec<String>,
     #[serde(default, skip_serializing_if = "TxPower::is_empty")]
     pub tx_power: TxPower,
     #[serde(default, skip_serializing_if = "Bluetooth::is_empty")]
@@ -145,8 +149,31 @@ impl Config {
         if self.bluetooth.remember == Some(false) && self.bluetooth.node.is_some() {
             bail!("bluetooth.node is set while bluetooth.remember = false, which forgets it");
         }
+        for (index, ssid) in self.excluded_ssids.iter().enumerate() {
+            check_ssid(ssid).map_err(|problem| anyhow::anyhow!("excluded-ssids: {problem}"))?;
+            if self.excluded_ssids[..index].contains(ssid) {
+                bail!("excluded-ssids: \"{ssid}\" is listed twice");
+            }
+        }
         Ok(())
     }
+}
+
+/// The most bytes an SSID holds, per 802.11.
+pub const SSID_MAX_BYTES: usize = 32;
+
+/// Why `ssid` cannot be an excluded SSID, or `Ok` when it can. The settings modal
+/// refuses the same entries inline.
+fn check_ssid(ssid: &str) -> std::result::Result<(), String> {
+    if ssid.is_empty() {
+        return Err("an entry is empty".to_owned());
+    }
+    if ssid.len() > SSID_MAX_BYTES {
+        return Err(format!(
+            "\"{ssid}\" is longer than {SSID_MAX_BYTES} bytes, the most an SSID holds"
+        ));
+    }
+    Ok(())
 }
 
 fn check_power(key: &str, value: Option<i8>) -> Result<()> {
@@ -566,6 +593,7 @@ mod tests {
     fn full(pool: PoolArg, fleet: i8, bridge: i8) -> Config {
         Config {
             pool: Some(pool),
+            excluded_ssids: vec!["HomeNet".to_owned(), "Pixel 9".to_owned()],
             tx_power: TxPower { fleet: Some(fleet), bridge: Some(bridge) },
             bluetooth: Bluetooth { remember: Some(true), node: Some([0xAA, 0xBB, 0xCC, 1, 2, 3]) },
             bridge: Bridge { remember: Some(true) },
@@ -577,6 +605,7 @@ mod tests {
     fn fleet_only(fleet: i8) -> Config {
         Config {
             pool: None,
+            excluded_ssids: Vec::new(),
             tx_power: TxPower { fleet: Some(fleet), bridge: None },
             bluetooth: Bluetooth::default(),
             bridge: Bridge::default(),
@@ -626,6 +655,56 @@ mod tests {
             text.contains("node = \"AA:BB:CC:01:02:03\""),
             "as `wartui ports` prints it: {text}"
         );
+    }
+
+    #[test]
+    fn config_save_writes_excluded_ssids_that_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wartui.toml");
+
+        save(&target, &full(PoolArg::Us, 8, 12)).unwrap();
+
+        let saved = load(Some(&target)).unwrap();
+        assert_eq!(saved.excluded_ssids, ["HomeNet", "Pixel 9"]);
+        let text = std::fs::read_to_string(&target).unwrap();
+        assert!(text.contains("excluded-ssids = [\"HomeNet\", \"Pixel 9\"]"), "{text}");
+    }
+
+    #[test]
+    fn config_save_omits_excluded_ssids_when_list_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wartui.toml");
+
+        save(&target, &fleet_only(10)).unwrap();
+
+        let text = std::fs::read_to_string(&target).unwrap();
+        assert!(!text.contains("excluded-ssids"), "{text}");
+    }
+
+    /// The error chain from loading a file holding `text`.
+    fn load_error(text: &str) -> String {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wartui.toml");
+        std::fs::write(&path, text).unwrap();
+        format!("{:#}", load(Some(&path)).unwrap_err())
+    }
+
+    #[test]
+    fn config_loader_rejects_excluded_ssid_when_entry_is_empty() {
+        let chain = load_error("excluded-ssids = [\"HomeNet\", \"\"]\n");
+        assert!(chain.contains("excluded-ssids: an entry is empty"), "{chain}");
+    }
+
+    #[test]
+    fn config_loader_rejects_excluded_ssid_when_entry_is_over_32_bytes() {
+        let chain = load_error(&format!("excluded-ssids = [\"{}\"]\n", "x".repeat(33)));
+        assert!(chain.contains("longer than 32 bytes"), "{chain}");
+    }
+
+    #[test]
+    fn config_loader_rejects_excluded_ssid_when_entry_is_listed_twice() {
+        let chain = load_error("excluded-ssids = [\"HomeNet\", \"Pixel 9\", \"HomeNet\"]\n");
+        assert!(chain.contains("\"HomeNet\" is listed twice"), "{chain}");
     }
 
     #[test]

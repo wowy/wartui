@@ -13,7 +13,8 @@
 //! [`Command::RememberBle`] hands the scan back to the last node given it whenever that node is
 //! assignable and none holds it. [`Command::SetTxPower`] re-sends the plan in force under fresh
 //! epochs. [`Command::ClearRing`] empties dedup rings. [`Command::SetPool`] re-cuts the fleet
-//! against a new pool.
+//! against a new pool. [`Command::SetExcludedSsids`] changes which Wi-Fi networks are never
+//! captured.
 //!
 //! `tracing` is the engine's one side channel. It logs each fall behind the bridge and each
 //! catch-up, with the pair of bridge stamps that decided it ([`FleetEngine::note_arrival`]). Those

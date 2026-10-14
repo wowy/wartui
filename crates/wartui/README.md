@@ -278,6 +278,7 @@ site queues nothing; one the site already queued is recorded in the capture.
 
 ```toml
 pool = "us"
+excluded-ssids = ["HomeNet", "Pixel 9"]
 
 [tx-power]
 fleet = 10
@@ -297,6 +298,7 @@ wdgwars = ""
 | Key                    | Default | What it is                                                                     |
 |------------------------|---------|--------------------------------------------------------------------------------|
 | `pool`                 | `all`   | The channel pool: `us`, `eu`, or `all`; see "Channel pools"                    |
+| `excluded-ssids`       | `[]`    | Wi-Fi networks never captured, matched exactly; see below                      |
 | `[tx-power] fleet`     | `2`     | Node transmit power (heartbeats, sightings), whole dBm 2–20                    |
 | `[tx-power] bridge`    | `2`     | Bridge transmit power (assignments), whole dBm 2–20                            |
 | `[bluetooth] remember` | on      | Whether `b` remembers the Bluetooth node; see "Bluetooth"                      |
@@ -306,12 +308,20 @@ wdgwars = ""
 
 Each power defaults on its own; neither falls back to the other. The firmware accepts 21 dBm, but
 nothing above 20 is verified to work. wartui refuses to start on an unknown key or table, naming the
-file and line. An out-of-range value, an unknown `pool`, a malformed `node`, or a `node` beside
-`remember = false` is refused too, naming the file and key. Only `run` and `upload` read the file,
+file and line. An out-of-range value, an unknown `pool`, a malformed `node`, a `node` beside
+`remember = false`, or an `excluded-ssids` entry that is empty, over 32 bytes, or listed twice is
+refused too, naming the file and key. Only `run` and `upload` read the file,
 so a broken one cannot stop `ports`, `status`, or `reset`. Settings (`c`) rewrites the whole file
 on save, and `b` writes the Bluetooth node; see "Keyboard commands". When the file is missing, `run`
 creates it holding only `wdgwars = ""`, except under `--sim`. A new file is readable only by its
 owner.
+
+A Wi-Fi sighting whose SSID equals an `excluded-ssids` entry is dropped before wartui counts or
+records it, so it never reaches the capture, the live stream, an export, or an upload. An SSID
+excluded mid-run is dropped from its next sighting on. Sightings recorded before then stay in the
+capture, and export and upload include them. The match is
+exact and case-sensitive: `homenet` does not exclude `HomeNet`. Bluetooth names are never matched.
+`--record-raw` keeps whole frames, so those still hold an excluded network's bytes.
 
 | OS               | Default path                                                                                                     |
 |------------------|------------------------------------------------------------------------------------------------------------------|
@@ -462,25 +472,42 @@ running; see "Uploading to WDGWars".
 
 ### In settings (`c`)
 
-| Key               | What it does                                                       |
-|-------------------|--------------------------------------------------------------------|
-| `↑` `↓` / `k` `j` | Move between rows                                                  |
-| `←` `→` / `h` `l` | Change the selected row; values wrap at their ends                 |
-| Type / paste      | On the `wdgwars` row: enter the key (`Backspace`, `ctrl-u` clears) |
-| `Enter`           | Apply every row and save it to `wartui.toml`                       |
-| `Esc` / `q`       | Close without changing anything                                    |
-| `ctrl-c`          | Quit                                                               |
+| Key                 | What it does                                                       |
+|---------------------|--------------------------------------------------------------------|
+| `↑` `↓` / `k` `j`   | Move between rows                                                  |
+| `←` `→` / `h` `l`   | Change the selected row; values wrap at their ends                 |
+| Type / paste        | On the `wdgwars` row: enter the key (`Backspace`, `ctrl-u` clears) |
+| `Enter` / `→` / `l` | On the `excluded ssids` row: open its page                         |
+| `Enter`             | Apply every row and save it to `wartui.toml`                       |
+| `Esc` / `q`         | Close without changing anything                                    |
+| `ctrl-c`            | Quit                                                               |
+
+On the `excluded ssids` page:
+
+| Key                    | What it does                                                      |
+|------------------------|-------------------------------------------------------------------|
+| `↑` `↓` / `k` `j`      | Move through the list                                             |
+| `a`                    | Start typing an SSID; type or paste it, then `Enter` adds it      |
+| `Backspace` / `ctrl-u` | While typing: delete a character, or clear the line               |
+| `Esc`                  | While typing: stop without adding                                 |
+| `d` / `Delete`         | Remove the selected SSID                                          |
+| `Enter`                | Apply every row and save it to `wartui.toml`, as on the main rows |
+| `Esc` / `q`            | Back to the rows, dropping this page's edits                      |
 
 The rows are the pool (`all → eu → us`), the nodes' transmit power and the bridge's (1 dBm steps),
-`remember bt node` (`off`, `on`), `remember bridge` (`off`, `on`), and the `wdgwars` API key. On the
-key row, letters type, so `h` `j` `k` `l` `q` neither move nor close; `↑` leaves it, and the footer
-shows the `ctrl-u` tip while a key is entered. The key shows its last three characters, up to six
-bullets before them, and from ten characters its first one to three. `Enter` sends the rows to the
-engine and writes every row shown to `pool`, `[tx-power]`, `[bluetooth]`, `[bridge]`, and
-`[api-keys]`, whatever was there. The bridge takes its power on its next status poll, and settings
-closes. If the engine is not accepting commands, nothing is sent or written, and settings stays
-open with its edits. A moved pool re-cuts the fleet. Each node takes its new share and power on its next
-heartbeat, emptying its dedup ring when its share changes.
+`remember bt node` (`off`, `on`), `remember bridge` (`off`, `on`), `excluded ssids`, and the
+`wdgwars` API key. `excluded ssids` shows how many are listed, or `none`, and opens a page that
+lists them. While an SSID is being typed there, every letter types, spaces included. `Enter` refuses
+one that is empty, over 32 bytes, or already listed, and says why. On the key row, letters type, so
+`h` `j` `k` `l` `q` neither move nor close; `↑` leaves it, and the footer shows the `ctrl-u` tip
+while a key is entered. The key shows its last three characters, up to six bullets before them, and
+from ten characters its first one to three. `Enter` sends the rows to the engine and writes every
+row shown to `pool`, `excluded-ssids`, `[tx-power]`, `[bluetooth]`, `[bridge]`, and `[api-keys]`,
+whatever was there. The bridge takes its power on its next status poll, an excluded SSID stops
+being captured from the next sighting, and settings closes. If the engine is not accepting
+commands, nothing is sent or written, and settings stays open with its edits. A moved pool re-cuts
+the fleet. Each node takes its new share and power on its next heartbeat, emptying its dedup ring
+when its share changes.
 
 ## How channels are assigned
 
