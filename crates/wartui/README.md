@@ -492,7 +492,7 @@ On the `excluded ssids` page:
 | `Esc`                  | While typing: stop without adding                                 |
 | `d` / `Delete`         | Remove the selected SSID                                          |
 | `Enter`                | Apply and save the list to `wartui.toml`, then return to the rows |
-| `Esc` / `q`            | Back to the rows, dropping this page's edits                      |
+| `Esc` / `q`            | Exit this menu, dropping this page's edits                        |
 
 The rows are the pool (`all → eu → us`), the nodes' transmit power and the bridge's (1 dBm steps),
 `remember bt node` (`off`, `on`), `remember bridge` (`off`, `on`), `excluded ssids`, and the
