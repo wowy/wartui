@@ -8,9 +8,10 @@
 
 use wartui_proto::air::{
     ADMIN_FLAG_BLE, ADMIN_MSG_LEN, AdminMsg, CLEAR_MSG_LEN, Capabilities, ClearMsg, DecodeError,
-    EXT_MAX, Frame, HEARTBEAT_MSG_LEN, HeartbeatMsg, MAGIC, RecordKind, SIGHTING_BATCH_HEADER,
-    SIGHTING_BATCH_MAX, SIGHTING_RECORD_MAX, SIGHTING_RECORD_MIN, SIGHTINGS_PER_BATCH_MAX,
-    SSID_MAX, Security, SightingBatch, SightingBatchWriter, SightingMsg, WIRE_VERSION, foreign,
+    DieTemp, EXT_MAX, Frame, HEARTBEAT_MSG_LEN, HeartbeatMsg, MAGIC, RecordKind,
+    SIGHTING_BATCH_HEADER, SIGHTING_BATCH_MAX, SIGHTING_RECORD_MAX, SIGHTING_RECORD_MIN,
+    SIGHTINGS_PER_BATCH_MAX, SSID_MAX, Security, SightingBatch, SightingBatchWriter, SightingMsg,
+    Vdd, WIRE_VERSION, foreign,
 };
 use wartui_proto::plan::{ChannelSet, IndexRun};
 use wartui_proto::reset::ResetCause;
@@ -29,6 +30,8 @@ const HEARTBEAT: &[u8] = &[
     0x24, // prev_dwell: channel 36
     0x18, // tx_power: 24 quarter-dBm, 6 dBm
     0x05, // reset_cause: brownout
+    0x43, // vdd: code 67, 3304 mV
+    0x53, // die_temp: code 83, 41.5 °C
 ];
 
 /// A heartbeat from a node parked since boot: epoch 0, never sent by the host.
@@ -45,6 +48,8 @@ const HEARTBEAT_NO_EPOCH: &[u8] = &[
     0x00, // prev_dwell: none, the first heartbeat since boot
     0x08, // tx_power: 8 quarter-dBm, the 2 dBm boot default
     0x01, // reset_cause: power on
+    0x00, // vdd: no reading
+    0xFF, // die_temp: no reading
 ];
 
 /// A Wi-Fi record: no header of its own, since [`SightingBatch`] carries one
@@ -236,6 +241,8 @@ fn heartbeat_msg_serializes_byte_for_byte_when_encoded_and_decoded() {
         prev_dwell: 36,
         tx_power: 24,
         reset_cause: ResetCause::Brownout,
+        vdd: Vdd(67),
+        die_temp: DieTemp(83),
     };
     assert_eq!(msg.encode().as_slice(), HEARTBEAT);
     assert_eq!(HeartbeatMsg::decode(HEARTBEAT), Ok(msg));
@@ -255,6 +262,8 @@ fn heartbeat_msg_serializes_epoch_zero_when_node_holds_no_assignment() {
         prev_dwell: 0,
         tx_power: 8,
         reset_cause: ResetCause::PowerOn,
+        vdd: Vdd::NONE,
+        die_temp: DieTemp::NONE,
     };
     assert_eq!(msg.encode().as_slice(), HEARTBEAT_NO_EPOCH);
     assert_eq!(HeartbeatMsg::decode(HEARTBEAT_NO_EPOCH), Ok(msg));
@@ -352,6 +361,74 @@ fn heartbeat_msg_round_trips_reset_cause_when_encoded_at_its_offset() {
 }
 
 #[test]
+fn heartbeat_msg_round_trips_health_when_encoded_at_its_offsets() {
+    let decoded = HeartbeatMsg::decode(HEARTBEAT).expect("valid");
+    assert_eq!((decoded.vdd.mv(), decoded.die_temp.half_c()), (Some(3304), Some(83)));
+    assert_eq!(&HEARTBEAT[25..27], &[0x43, 0x53]);
+
+    let msg = HeartbeatMsg { vdd: Vdd::NONE, die_temp: DieTemp::NONE, ..decoded };
+    let frame = msg.encode();
+    assert_eq!(&frame[25..27], &[0x00, 0xFF]);
+    assert_eq!(HeartbeatMsg::decode(&frame), Ok(msg));
+}
+
+#[test]
+fn vdd_encodes_no_reading_when_read_returns_zero() {
+    assert_eq!(Vdd::from_mv(0), Vdd::NONE);
+    assert_eq!(Vdd::NONE.mv(), None);
+}
+
+#[test]
+fn vdd_rounds_to_nearest_step_when_encoding_millivolts() {
+    // 800 mV above the base is 66.7 steps, so 67: 3304 mV.
+    assert_eq!(Vdd::from_mv(3300), Vdd(67));
+    assert_eq!(Vdd::from_mv(3300).mv(), Some(3304));
+}
+
+#[test]
+fn vdd_clamps_to_encodable_range_when_reading_is_outside_it() {
+    // A real reading never becomes the no-reading code.
+    assert_eq!(Vdd::from_mv(2500), Vdd(1));
+    assert_eq!(Vdd::from_mv(1), Vdd(1));
+    assert_eq!(Vdd::from_mv(5560), Vdd(255));
+    assert_eq!(Vdd::from_mv(9000), Vdd(255));
+    assert_eq!(Vdd(255).mv(), Some(5560));
+}
+
+#[test]
+fn vdd_displays_volts_when_formatted() {
+    assert_eq!(Vdd::from_mv(3300).to_string(), "3.30 V");
+    assert_eq!(Vdd::NONE.to_string(), "—");
+}
+
+#[test]
+fn die_temp_rounds_to_half_degree_when_encoding_centidegrees() {
+    assert_eq!(DieTemp::from_centi_c(4150).half_c(), Some(83));
+    assert_eq!(DieTemp::from_centi_c(4140).half_c(), Some(83));
+    assert_eq!(DieTemp::from_centi_c(4120).half_c(), Some(82));
+}
+
+#[test]
+fn die_temp_clamps_to_encodable_range_when_reading_is_outside_it() {
+    assert_eq!(DieTemp::from_centi_c(-500), DieTemp(0));
+    assert_eq!(DieTemp::from_centi_c(0), DieTemp(0));
+    // Above 127 °C is 254, never the no-reading code.
+    assert_eq!(DieTemp::from_centi_c(20000), DieTemp(254));
+}
+
+#[test]
+fn die_temp_decodes_no_reading_when_code_is_0xff() {
+    assert_eq!(DieTemp(0xFF).half_c(), None);
+    assert_eq!(DieTemp::NONE.to_string(), "—");
+}
+
+#[test]
+fn die_temp_displays_celsius_when_formatted() {
+    assert_eq!(DieTemp(83).to_string(), "41.5 °C");
+    assert_eq!(DieTemp(82).to_string(), "41.0 °C");
+}
+
+#[test]
 fn heartbeat_msg_decodes_unknown_reset_cause_when_byte_unassigned() {
     // A node naming a cause this build has no name for is still a node.
     let mut frame = HEARTBEAT.to_vec();
@@ -375,17 +452,17 @@ fn heartbeat_msg_rejects_frame_when_node_sends_twenty_three_byte_heartbeat() {
 }
 
 #[test]
-fn heartbeat_msg_rejects_frame_when_node_sends_twenty_six_byte_heartbeat() {
+fn heartbeat_msg_rejects_frame_when_node_sends_twenty_eight_byte_heartbeat() {
     // A longer frame is the dangerous half, because its leading bytes would parse.
     let mut longer = HEARTBEAT.to_vec();
     longer.push(0);
     assert_eq!(
         HeartbeatMsg::decode(&longer),
-        Err(DecodeError::BadLength { need: HEARTBEAT_MSG_LEN, got: 26 })
+        Err(DecodeError::BadLength { need: HEARTBEAT_MSG_LEN, got: 28 })
     );
     assert_eq!(
         Frame::decode(&longer),
-        Err(DecodeError::BadLength { need: HEARTBEAT_MSG_LEN, got: 26 })
+        Err(DecodeError::BadLength { need: HEARTBEAT_MSG_LEN, got: 28 })
     );
 }
 

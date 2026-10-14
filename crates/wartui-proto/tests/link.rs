@@ -6,7 +6,8 @@
 
 use heapless::{String, Vec};
 use wartui_proto::air::{
-    Capabilities, HeartbeatMsg, RecordKind, Security, SightingBatchWriter, SightingMsg,
+    Capabilities, DieTemp, HeartbeatMsg, RecordKind, Security, SightingBatchWriter, SightingMsg,
+    Vdd,
 };
 use wartui_proto::link::{
     BROADCAST, BridgeToHost, Chip, FrameAccumulator, HostToBridge, LINK_PROTO_VERSION, LinkError,
@@ -31,6 +32,8 @@ fn sample_commands() -> Vec<HostToBridge, 16> {
                 prev_dwell: 0,
                 tx_power: 8,
                 reset_cause: ResetCause::PowerOn,
+                vdd: Vdd::NONE,
+                die_temp: DieTemp::NONE,
             }
             .encode(),
         )

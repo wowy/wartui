@@ -5,7 +5,7 @@
 //! something this host has never heard of is still a node.
 
 use wartui_proto::air::{
-    CAP_FLAG_5G, CAPABILITY_MAJOR, CAPABILITY_MINOR, Capabilities, HeartbeatMsg,
+    CAP_FLAG_5G, CAPABILITY_MAJOR, CAPABILITY_MINOR, Capabilities, DieTemp, HeartbeatMsg, Vdd,
 };
 use wartui_proto::reset::ResetCause;
 
@@ -22,6 +22,8 @@ fn round_trip(caps: Capabilities) -> Capabilities {
         prev_dwell: 0,
         tx_power: 8,
         reset_cause: ResetCause::PowerOn,
+        vdd: Vdd::NONE,
+        die_temp: DieTemp::NONE,
     }
     .encode();
     HeartbeatMsg::decode(&frame).expect("we just encoded it").capabilities

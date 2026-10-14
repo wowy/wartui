@@ -6,8 +6,11 @@
 //! a host workspace member built with `--all-features`, which would select both chips'
 //! `esp-hal` features at once.
 //!
-//! Each firmware forwards its chip feature here, so one build selects one chip.
+//! Each firmware forwards its chip feature here, so one build selects one chip. Only the
+//! node uses [`health`].
 #![no_std]
+
+pub mod health;
 
 use esp_hal::rtc_cntl::SocResetReason;
 use wartui_proto::reset::ResetCause;

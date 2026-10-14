@@ -61,6 +61,8 @@ fn beat(node: Mac, at_ms: i64, counter: u32, seq: u16, wifi: u16, ble: u16) -> R
         prev_dwell: 0,
         tx_power: 8,
         reset_cause: ResetCause::PowerOn,
+        vdd_mv: None,
+        die_temp_half_c: None,
         live: true,
     })
 }

@@ -35,6 +35,12 @@ pub struct NodeState {
     pub observations: u64,
     /// Most recent link RSSI, as the bridge measured it.
     pub link_rssi: Option<i8>,
+    /// The node chip's 3.3 V rail in millivolts, from its latest heartbeat. `None` before one,
+    /// or when that heartbeat's read failed.
+    pub vdd_mv: Option<u16>,
+    /// The node's die temperature in half degrees Celsius, from its latest heartbeat. `None`
+    /// before one, or when that heartbeat's read failed.
+    pub die_temp_half_c: Option<u8>,
     /// What the node said it is, from its latest heartbeat, so a reflashed node stops claiming the
     /// old build's features. `None` until a heartbeat arrives, because a node reports a channel's
     /// sightings before returning to the control channel. Such a node is left out of the plan
@@ -147,6 +153,14 @@ pub struct Assignment {
     pub counter: u64,
 }
 
+/// The C5's and C6's minimum recommended supply, in millivolts. Their brown-out detector resets
+/// the chip at 2.7 V by default, and nothing here changes that, so a rail below this is close.
+pub const LOW_VDD_MV: u16 = 3000;
+/// 70 °C in half degrees: a warning short of 85 °C, the XIAO C6's rated ambient limit. The chips
+/// are rated to 105 °C ambient, and the die runs above ambient, so on the die this warns well
+/// before either limit.
+pub const HOT_DIE_HALF_C: u8 = 140;
+
 impl NodeState {
     /// A node that has just been heard from for the first time.
     #[must_use]
@@ -162,6 +176,8 @@ impl NodeState {
             heartbeats: 0,
             observations: 0,
             link_rssi: None,
+            vdd_mv: None,
+            die_temp_half_c: None,
             capabilities: None,
             peer_refused: false,
             peered: false,
@@ -201,5 +217,18 @@ impl NodeState {
         self.desired
             .or(self.confirmed)
             .is_some_and(|d| self.held_epoch == Some(wire_epoch(d.counter)))
+    }
+
+    /// Whether the latest heartbeat's rail reading is below [`LOW_VDD_MV`]. `false` without one.
+    #[must_use]
+    pub fn low_vdd(&self) -> bool {
+        self.vdd_mv.is_some_and(|mv| mv < LOW_VDD_MV)
+    }
+
+    /// Whether the latest heartbeat's die reading is at or above [`HOT_DIE_HALF_C`]. `false`
+    /// without one.
+    #[must_use]
+    pub fn hot(&self) -> bool {
+        self.die_temp_half_c.is_some_and(|half| half >= HOT_DIE_HALF_C)
     }
 }

@@ -10,12 +10,13 @@
 //! | nothing confirmed | gray `unassigned` | gray `unassigned` |
 
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Rect};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::Span;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Cell, Row, Table, TableState};
 use wartui_core::engine::{NodeView, Snapshot};
 use wartui_core::record::AdminOutcome;
+use wartui_proto::air::{DieTemp, Vdd};
 use wartui_proto::mac;
 use wartui_proto::plan::{ChannelSet, Radio, SCAN_CHANNELS};
 
@@ -45,7 +46,11 @@ pub(super) fn draw_fleet(
         .nodes
         .iter()
         .map(|node| {
-            let (state, style) = node_state(node);
+            let (state, mut style) = node_state(node);
+            // A fault's red outranks a reading's warning.
+            if (node.state.low_vdd() || node.state.hot()) && style.fg != Some(Color::Red) {
+                style = WARNING;
+            }
             let mut cells = vec![
                 Cell::from(node_label(node)),
                 Cell::from(node.state.link_rssi.map_or_else(|| "—".to_owned(), |r| format!("{r}"))),
@@ -75,16 +80,42 @@ pub(super) fn draw_fleet(
         widths.insert(lost_at, Constraint::Length(5));
     }
     let title = format!(" fleet — {} of {} alive ", snapshot.alive, snapshot.nodes.len());
+    let block = Block::bordered().title(title);
+    let [table_area, health_area] =
+        Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(block.inner(area));
+    frame.render_widget(block, area);
     let table = Table::new(rows, widths)
         .header(header)
-        .block(Block::bordered().title(title))
         .row_highlight_style(Style::new().add_modifier(Modifier::REVERSED));
 
     let mut state = TableState::new()
         .with_offset(*offset)
         .with_selected((!snapshot.nodes.is_empty()).then_some(selected));
-    frame.render_stateful_widget(table, area, &mut state);
+    frame.render_stateful_widget(table, table_area, &mut state);
     *offset = state.offset();
+    if let Some(node) = snapshot.nodes.get(selected) {
+        frame.render_widget(health_line(node), health_area);
+    }
+}
+
+/// The style a reading out of range gives the state cell and the reading itself: the
+/// yellow every other warning in the table uses.
+const WARNING: Style = Style::new().fg(Color::Yellow);
+
+/// The selected node's latest supply and die readings, `—` for none, each out-of-range
+/// one in [`WARNING`]. The table has no width left for them, so they show for one node
+/// at a time.
+fn health_line(node: &NodeView) -> Line<'static> {
+    let state = &node.state;
+    let vdd = state.vdd_mv.map_or(Vdd::NONE, Vdd::from_mv).to_string();
+    let temp = state.die_temp_half_c.map_or(DieTemp::NONE, DieTemp).to_string();
+    let warn = |bad: bool| if bad { WARNING } else { Style::new() };
+    Line::from(vec![
+        Span::raw(format!("{}  ", node_label(node))),
+        Span::styled(vdd, warn(state.low_vdd())),
+        Span::raw("  "),
+        Span::styled(temp, warn(state.hot())),
+    ])
 }
 
 /// The channels column's width, which caps how much of the list fits.
@@ -504,6 +535,68 @@ mod tests {
         let header = fleet_header(&screen);
         assert!(header.contains("obs"), "the header line itself: {screen}");
         assert!(!header.contains("lost"), "{header}");
+    }
+
+    #[test]
+    fn fleet_health_line_shows_selected_node_readings_when_cursor_moves() {
+        let mut reading = node(0x84, 0, true);
+        reading.state.vdd_mv = Some(3304);
+        reading.state.die_temp_half_c = Some(83);
+        let silent = node(0x85, 0, true);
+        let snapshot = Snapshot { nodes: vec![reading, silent], tail: Vec::new(), ..busy() };
+
+        let mut terminal = Terminal::new(TestBackend::new(200, 40)).expect("test backend");
+        let mut ui = Ui::default();
+        terminal.draw(|frame| draw(frame, &snapshot, &mut ui)).expect("drawing");
+        let screen = terminal.backend().to_string();
+        assert!(screen.contains("C5 57:84  3.30 V  41.5 °C"), "{screen}");
+
+        let (tx, _rx) = mpsc::channel(4);
+        ui.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &snapshot, &tx);
+        terminal.draw(|frame| draw(frame, &snapshot, &mut ui)).expect("drawing");
+        let screen = terminal.backend().to_string();
+        assert!(screen.contains("C5 57:85  —  —"), "no reading is a dash: {screen}");
+    }
+
+    #[test]
+    fn fleet_table_warns_on_state_when_vdd_is_low() {
+        let mut low = node(0x84, 0, true);
+        low.state.vdd_mv = Some(2996);
+        assert_eq!(state_fg(low, "alive"), Some(Color::Yellow));
+    }
+
+    #[test]
+    fn fleet_table_warns_on_state_when_die_is_hot() {
+        let mut hot = node(0x84, 0, true);
+        hot.state.die_temp_half_c = Some(140);
+        assert_eq!(state_fg(hot, "alive"), Some(Color::Yellow));
+    }
+
+    #[test]
+    fn fleet_table_keeps_state_style_when_readings_are_in_range() {
+        let mut normal = node(0x84, 0, true);
+        normal.state.vdd_mv = Some(3000);
+        normal.state.die_temp_half_c = Some(139);
+        assert_eq!(state_fg(normal, "alive"), Some(Color::Green));
+    }
+
+    /// The foreground of `label` in the only node's row, as the view draws it.
+    fn state_fg(node: NodeView, label: &str) -> Option<Color> {
+        let snapshot = Snapshot { nodes: vec![node], tail: Vec::new(), ..busy() };
+        let mut terminal = Terminal::new(TestBackend::new(200, 40)).expect("test backend");
+        terminal.draw(|frame| draw(frame, &snapshot, &mut Ui::default())).expect("drawing");
+        let buffer = terminal.backend().buffer();
+        let area = buffer.area;
+        (area.top()..area.bottom()).find_map(|y| {
+            let line: Vec<&str> =
+                (area.left()..area.right()).map(|x| buffer[(x, y)].symbol()).collect();
+            let text = line.concat();
+            if !text.contains("57:84") || !text.contains(label) {
+                return None;
+            }
+            let x = line.windows(label.len()).position(|w| w.concat() == label)?;
+            buffer[(area.left() + u16::try_from(x).ok()?, y)].fg.into()
+        })
     }
 
     /// The fleet table's header line. Found by `rssi` and `beats`, since the stream's

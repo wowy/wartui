@@ -40,10 +40,11 @@ use esp_radio::esp_now::{EspNowManager, EspNowReceiver, EspNowSender};
 use esp_radio::wifi::{ControllerConfig, WifiController};
 use esp_rtos::CurrentThreadHandle;
 use static_cell::{ConstStaticCell, StaticCell};
+use wartui_firmware::health;
 use wartui_firmware::{reboot, reset_cause};
 use wartui_proto::air::{
-    AdminMsg, CONTROL_CHANNEL, Capabilities, DecodeError, Frame, HeartbeatMsg,
-    SIGHTINGS_PER_BATCH_MAX, SightingBatchWriter, SightingMsg,
+    AdminMsg, CONTROL_CHANNEL, Capabilities, DecodeError, DieTemp, Frame, HeartbeatMsg,
+    SIGHTINGS_PER_BATCH_MAX, SightingBatchWriter, SightingMsg, Vdd,
 };
 use wartui_proto::link::BROADCAST;
 use wartui_proto::mac;
@@ -527,10 +528,12 @@ fn next_beat_after(deadline: Instant) -> Instant {
 /// one arrives. The transmit power is read from the radio on every beat rather than
 /// remembered from adoption, so the beat reports what a refused `set_tx_power` kept (the
 /// boot default, or an earlier assignment's power) or what something reset it to since.
+/// The rail voltage and die temperature are read beside it, on the control channel where
+/// every heartbeat goes out, so the voltage read's PBUS excursion never lands in a dwell.
 fn heartbeat(manager: &EspNowManager<'_>, sender: &mut EspNowSender<'_>, node: &mut Node) {
     // Every heartbeat carries the capabilities, not just the first: sent once they
     // would be lost to a dropped frame or stale after a reflash, and they are
-    // three bytes of twenty-five.
+    // three bytes of twenty-seven.
     let beat = node.beats.wrapping_add(1);
     let msg = HeartbeatMsg {
         counter: node.counter,
@@ -544,6 +547,8 @@ fn heartbeat(manager: &EspNowManager<'_>, sender: &mut EspNowSender<'_>, node: &
         prev_dwell: node.beat_dwell,
         tx_power: radio::tx_power(manager),
         reset_cause: node.reset_cause,
+        vdd: Vdd::from_mv(health::vdd_mv()),
+        die_temp: DieTemp::from_centi_c(i32::from(health::die_temp_c()) * 100),
     };
     node.beats = beat;
     node.beat_dwell = node.last_dwell;

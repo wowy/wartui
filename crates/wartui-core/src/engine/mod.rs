@@ -40,7 +40,7 @@ use wartui_proto::tx_power::clamp_tx_power;
 
 pub use config::EngineConfig;
 pub use event::{ActionBatch, Command, Event, HostSample, Now, StorePeaks, StoreStats};
-pub use node::{Assignment, NodeState, PowerMismatch};
+pub use node::{Assignment, HOT_DIE_HALF_C, LOW_VDD_MV, NodeState, PowerMismatch};
 pub use snapshot::{BridgeStatus, Counters, NodeView, Snapshot, TailEntry};
 
 pub(crate) use lag::BEHIND_THE_AIR_US;

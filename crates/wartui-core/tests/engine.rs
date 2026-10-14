@@ -17,8 +17,8 @@ use wartui_core::health::Health;
 use wartui_core::position::{DEFAULT_MAX_AGE, PositionChain, PositionSource};
 use wartui_core::record::{AdminOutcome, BatchGap, BridgeStatusSeen, HostStatus, Record};
 use wartui_proto::air::{
-    AdminMsg, Capabilities, Frame, HeartbeatMsg, RecordKind, Security, SightingBatchWriter,
-    SightingMsg, wire_epoch,
+    AdminMsg, Capabilities, DieTemp, Frame, HeartbeatMsg, RecordKind, Security,
+    SightingBatchWriter, SightingMsg, Vdd, wire_epoch,
 };
 use wartui_proto::link::{
     BROADCAST, BridgeToHost, Chip, EspNowPayload, HostToBridge, LinkError, LoopPhase, SendStatus,
@@ -119,6 +119,8 @@ fn beat_at(src: Mac, counter: u32, epoch: u8, capabilities: Capabilities, rx_us:
         prev_dwell: 0,
         tx_power: 8,
         reset_cause: ResetCause::PowerOn,
+        vdd: Vdd::NONE,
+        die_temp: DieTemp::NONE,
     };
     rx_at(src, &msg.encode(), rx_us)
 }
@@ -137,6 +139,8 @@ fn heartbeat_refusing(src: Mac, counter: u32, wifi_refused: u16, ble_refused: u1
         prev_dwell: 0,
         tx_power: 8,
         reset_cause: ResetCause::PowerOn,
+        vdd: Vdd::NONE,
+        die_temp: DieTemp::NONE,
     };
     rx(src, &msg.encode())
 }
@@ -950,6 +954,8 @@ fn engine_records_dwell_when_heartbeat_arrives() {
         prev_dwell: 36,
         tx_power: 8,
         reset_cause: ResetCause::PowerOn,
+        vdd: Vdd::NONE,
+        die_temp: DieTemp::NONE,
     };
     let batch = engine.handle(rx(NODE, &msg.encode()), clock.at(1));
 
@@ -983,6 +989,8 @@ fn engine_records_reset_cause_when_node_restarts() {
         prev_dwell: 0,
         tx_power: 24,
         reset_cause: ResetCause::Brownout,
+        vdd: Vdd::NONE,
+        die_temp: DieTemp::NONE,
     };
     let batch = engine.handle(rx(NODE, &msg.encode()), clock.at(2));
 
@@ -1017,6 +1025,8 @@ fn engine_counts_incompatible_when_wire_version_differs() {
         prev_dwell: 0,
         tx_power: 8,
         reset_cause: ResetCause::PowerOn,
+        vdd: Vdd::NONE,
+        die_temp: DieTemp::NONE,
     }
     .encode()
     .to_vec();
@@ -3634,6 +3644,8 @@ fn engine_logs_reset_cause_when_node_restarts() {
         prev_dwell: 0,
         tx_power: 8,
         reset_cause: ResetCause::Brownout,
+        vdd: Vdd::NONE,
+        die_temp: DieTemp::NONE,
     };
     let lines = Logs::during(|| {
         engine.handle(rx(NODE, &msg.encode()), clock.at(2));
@@ -3658,6 +3670,8 @@ fn powered_beat(src: Mac, counter: u32, epoch: u8, tx_power: i8, rx_us: u32) -> 
         prev_dwell: 0,
         tx_power,
         reset_cause: ResetCause::PowerOn,
+        vdd: Vdd::NONE,
+        die_temp: DieTemp::NONE,
     };
     rx_at(src, &msg.encode(), rx_us)
 }
@@ -3799,6 +3813,8 @@ fn booted_beat(src: Mac, counter: u32, cause: ResetCause) -> Event {
         prev_dwell: 0,
         tx_power: 8,
         reset_cause: cause,
+        vdd: Vdd::NONE,
+        die_temp: DieTemp::NONE,
     };
     rx(src, &msg.encode())
 }
