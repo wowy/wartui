@@ -491,17 +491,18 @@ On the `excluded ssids` page:
 | `Backspace` / `ctrl-u` | While typing: delete a character, or clear the line               |
 | `Esc`                  | While typing: stop without adding                                 |
 | `d` / `Delete`         | Remove the selected SSID                                          |
-| `Enter`                | Apply every row and save it to `wartui.toml`, as on the main rows |
+| `Enter`                | Apply and save the list to `wartui.toml`, then return to the rows |
 | `Esc` / `q`            | Back to the rows, dropping this page's edits                      |
 
 The rows are the pool (`all → eu → us`), the nodes' transmit power and the bridge's (1 dBm steps),
 `remember bt node` (`off`, `on`), `remember bridge` (`off`, `on`), `excluded ssids`, and the
 `wdgwars` API key. `excluded ssids` shows how many are listed, or `none`, and opens a page that
 lists them. While an SSID is being typed there, every letter types, spaces included. `Enter` refuses
-one that is empty, over 32 bytes, or already listed, and says why. On the key row, letters type, so
-`h` `j` `k` `l` `q` neither move nor close; `↑` leaves it, and the footer shows the `ctrl-u` tip
-while a key is entered. The key shows its last three characters, up to six bullets before them, and
-from ten characters its first one to three. `Enter` sends the rows to the engine and writes every
+one that is empty, over 32 bytes, or already listed, and says why. `Enter` in the list sends it to
+the engine, writes only `excluded-ssids`, and returns to the rows; edits to the rows stay pending.
+On the key row, letters type, so `h` `j` `k` `l` `q` neither move nor close; `↑` leaves it, and the
+footer shows the `ctrl-u` tip while a key is entered. The key shows its last three characters, up
+to six bullets before them, and from ten characters its first one to three. `Enter` sends the rows to the engine and writes every
 row shown to `pool`, `excluded-ssids`, `[tx-power]`, `[bluetooth]`, `[bridge]`, and `[api-keys]`,
 whatever was there. The bridge takes its power on its next status poll, an excluded SSID stops
 being captured from the next sighting, and settings closes. If the engine is not accepting

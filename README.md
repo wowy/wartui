@@ -143,7 +143,7 @@ On the `excluded ssids` page:
 | `Backspace` / `ctrl-u` | While typing: delete a character, or clear the line               |
 | `Esc`                  | While typing: stop without adding                                 |
 | `d` / `Delete`         | Remove the selected SSID                                          |
-| `Enter`                | Apply every row and save it to `wartui.toml`, as on the main rows |
+| `Enter`                | Apply and save the list to `wartui.toml`, then return to the rows |
 | `Esc` / `q`            | Back to the rows, dropping this page's edits                      |
 
 wartui splits the channel pool across the fleet and re-splits it whenever the fleet changes. That

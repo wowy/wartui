@@ -5,7 +5,7 @@ use wartui_proto::mac;
 
 use super::Settings;
 use super::fleet::why_not_assignable;
-use super::settings::{ConfigModal, ModalAction, apply, save_ble_node};
+use super::settings::{ConfigModal, ModalAction, apply, apply_excluded, save_ble_node};
 use super::upload::Upload;
 #[cfg(test)]
 use crate::config;
@@ -216,6 +216,16 @@ impl Ui {
                 // The modal stays open with its edits, for another `Enter`.
                 Err(busy) => self.say(busy.to_owned(), snapshot),
             },
+            ModalAction::SaveExcluded => {
+                match apply_excluded(modal, commands, &mut self.settings) {
+                    Ok(text) => {
+                        modal.leave_page();
+                        self.say(text, snapshot);
+                    }
+                    // The page stays open with its edits, for another `Enter`.
+                    Err(busy) => self.say(busy.to_owned(), snapshot),
+                }
+            }
         }
     }
 

@@ -2,9 +2,10 @@
 //! differ after a hand edit or a failed save, and the operator is changing the running
 //! capture. `Enter` puts every row in force, then writes every row to the file.
 //!
-//! The excluded-SSIDs page is part of the same modal, so `Enter` there means what it
-//! means on every row: apply and save everything. `Esc` on the page drops only the
-//! page's edits, so backing out of a list never costs the rows above it.
+//! `Enter` on the excluded-SSIDs page applies and saves only the list, then returns to
+//! the rows. The operator opened the page to change the list, not the rows above it, so
+//! their pending edits stay pending for the main `Enter` or `Esc`. `Esc` on the page drops
+//! only the page's edits, so backing out of a list never costs the rows above it either.
 
 use std::fmt::Display;
 use std::path::PathBuf;
@@ -190,6 +191,9 @@ pub(super) enum ModalAction {
     Close,
     /// `Enter`: apply every row, save, and close.
     Apply,
+    /// `Enter` on the excluded-SSIDs page: apply and save only the list, then return to
+    /// the rows.
+    SaveExcluded,
 }
 
 impl ConfigModal {
@@ -306,10 +310,15 @@ impl ConfigModal {
                 self.excluded = std::mem::take(before);
                 self.page = Page::Main;
             }
-            KeyCode::Enter => return ModalAction::Apply,
+            KeyCode::Enter => return ModalAction::SaveExcluded,
             _ => {}
         }
         ModalAction::Stay
+    }
+
+    /// Return from the excluded-SSIDs page to the rows, keeping the list as edited.
+    pub(super) fn leave_page(&mut self) {
+        self.page = Page::Main;
     }
 
     /// A bracketed paste. Appended to the key when the modal is on its row, or to the
@@ -409,6 +418,29 @@ pub(super) fn apply(
     }
     text.push_str(&save_outcome(modal, snapshot, settings));
     Ok(text)
+}
+
+/// Send the modal's excluded SSIDs to the engine and save them to `wartui.toml`.
+/// Returns the notice saying what happened. Nothing outside `excluded-ssids` changes in
+/// the file, and no other row goes to the engine.
+///
+/// Fails with [`ENGINE_BUSY`] when the engine takes no command, and then saves
+/// nothing, as [`apply`] does.
+pub(super) fn apply_excluded(
+    modal: &ConfigModal,
+    commands: &mpsc::Sender<Command>,
+    settings: &mut Settings,
+) -> Result<String, &'static str> {
+    let ssids = modal.excluded.iter().map(|ssid| ssid.as_bytes().to_vec()).collect();
+    if commands.try_send(Command::SetExcludedSsids { ssids }).is_err() {
+        return Err(ENGINE_BUSY);
+    }
+    let mut written = settings.saved.clone();
+    written.excluded_ssids = modal.excluded.clone();
+    let saved = save(settings, written)
+        .map(|path| format!("; saved to {}", path.display()))
+        .unwrap_or_else(|error| error);
+    Ok(format!("excluded ssids: {}{saved}", excluded_count(&modal.excluded)))
 }
 
 /// Write every modal row to `wartui.toml`, and return the notice suffix: where it
@@ -1522,29 +1554,77 @@ mod tests {
     }
 
     #[test]
-    fn ui_sends_excluded_ssids_saves_and_closes_when_enter_pressed_on_excluded_page() {
+    fn ui_sends_and_saves_only_excluded_ssids_and_returns_to_rows_when_enter_pressed_on_excluded_page()
+     {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wartui.toml");
-        let snapshot = excluded_snapshot(&["HomeNet"]);
-        let settings = Settings { config_path: Some(target.clone()), ..Settings::default() };
-        let mut ui = open_excluded_page(&snapshot, settings);
-        add_ssid(&mut ui, "Pixel 9", &snapshot);
+        let mut snapshot = excluded_snapshot(&["HomeNet"]);
+        snapshot.pool = ChannelPool::All;
+        let saved = config::Config { pool: Some(PoolArg::Us), ..config::Config::default() };
+        let settings = Settings { config_path: Some(target.clone()), saved, ..Settings::default() };
         let (tx, mut rx) = mpsc::channel(4);
+        let mut ui = Ui::new(settings);
+        ui.on_key(key(KeyCode::Char('c')), &snapshot, &tx);
+        // A pool edit left pending on the rows.
+        ui.on_modal_key(key(KeyCode::Char('l')), &snapshot, &tx);
+        while ui.modal().expect("open").selected != Field::ExcludedSsids {
+            ui.on_modal_key(key(KeyCode::Down), &snapshot, &tx);
+        }
+        ui.on_modal_key(key(KeyCode::Enter), &snapshot, &tx);
+        add_ssid(&mut ui, "Pixel 9", &snapshot);
 
         ui.on_modal_key(key(KeyCode::Enter), &snapshot, &tx);
 
-        assert!(ui.modal().is_none(), "Enter on the page applies and closes the modal");
-        let sent: Vec<Command> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
         assert_eq!(
-            sent.last(),
-            Some(&Command::SetExcludedSsids {
-                ssids: vec![b"HomeNet".to_vec(), b"Pixel 9".to_vec()]
-            })
+            rx.try_recv().unwrap(),
+            Command::SetExcludedSsids { ssids: vec![b"HomeNet".to_vec(), b"Pixel 9".to_vec()] }
         );
-        let saved = config::load(Some(&target)).expect("a valid file");
-        assert_eq!(saved.excluded_ssids, ["HomeNet", "Pixel 9"]);
+        assert!(rx.try_recv().is_err(), "the pending pool edit is not sent");
+        let file = config::load(Some(&target)).expect("a valid file");
+        assert_eq!(file.excluded_ssids, ["HomeNet", "Pixel 9"]);
+        assert_eq!(file.pool, Some(PoolArg::Us), "the rest of the file is as `saved` held it");
+        let modal = ui.modal().expect("the modal stays open");
+        assert_eq!(modal.page, Page::Main);
+        assert_eq!(modal.selected, Field::ExcludedSsids);
+        assert_eq!(modal.pool, PoolArg::Eu, "the pool edit stays pending");
         let notice = ui.notice(snapshot.now_ms).expect("a notice");
-        assert!(notice.contains("; 2 excluded ssids"), "{notice}");
+        assert!(notice.starts_with("excluded ssids: 2; saved to "), "{notice}");
+    }
+
+    #[test]
+    fn ui_says_none_when_enter_pressed_on_excluded_page_with_list_emptied() {
+        let snapshot = excluded_snapshot(&["HomeNet"]);
+        let mut ui = open_excluded_page(&snapshot, Settings::default());
+        press(&mut ui, KeyCode::Char('d'), KeyModifiers::NONE, &snapshot);
+        let (tx, _rx) = mpsc::channel(4);
+
+        ui.on_modal_key(key(KeyCode::Enter), &snapshot, &tx);
+
+        let notice = ui.notice(snapshot.now_ms).expect("a notice");
+        assert_eq!(notice, "excluded ssids: none; nowhere to save it — use --config");
+    }
+
+    #[test]
+    fn ui_keeps_excluded_list_in_force_when_esc_pressed_after_enter_on_excluded_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wartui.toml");
+        let snapshot = busy();
+        let settings = Settings { config_path: Some(target.clone()), ..Settings::default() };
+        let mut ui = open_excluded_page(&snapshot, settings);
+        add_ssid(&mut ui, "HomeNet", &snapshot);
+        let (tx, mut rx) = mpsc::channel(4);
+        ui.on_modal_key(key(KeyCode::Enter), &snapshot, &tx);
+
+        ui.on_modal_key(key(KeyCode::Esc), &snapshot, &tx);
+
+        assert!(ui.modal().is_none(), "Esc on the rows closes");
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            Command::SetExcludedSsids { ssids: vec![b"HomeNet".to_vec()] }
+        );
+        assert!(rx.try_recv().is_err(), "Esc sends nothing to undo it");
+        let file = config::load(Some(&target)).expect("a valid file");
+        assert_eq!(file.excluded_ssids, ["HomeNet"]);
     }
 
     #[test]
@@ -1562,13 +1642,20 @@ mod tests {
 
     #[test]
     fn ui_keeps_excluded_page_open_with_edits_when_enter_pressed_with_engine_busy() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wartui.toml");
         let snapshot = busy();
-        let mut ui = open_excluded_page(&snapshot, Settings::default());
+        let settings = Settings { config_path: Some(target.clone()), ..Settings::default() };
+        let mut ui = open_excluded_page(&snapshot, settings);
         add_ssid(&mut ui, "HomeNet", &snapshot);
-        let (tx, _rx) = mpsc::channel(2);
+        let (tx, mut rx) = mpsc::channel(1);
+        tx.try_send(Command::ClearRing { mac: None }).unwrap();
 
         ui.on_modal_key(key(KeyCode::Enter), &snapshot, &tx);
 
+        assert_eq!(rx.try_recv().unwrap(), Command::ClearRing { mac: None });
+        assert!(rx.try_recv().is_err(), "nothing else was sent");
+        assert!(!target.exists(), "nothing was written");
         let modal = ui.modal().expect("still open");
         assert!(matches!(modal.page, Page::Excluded { .. }), "still on the page");
         assert_eq!(modal.excluded, ["HomeNet"]);
