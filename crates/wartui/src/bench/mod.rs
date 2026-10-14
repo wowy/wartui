@@ -369,8 +369,12 @@ pub async fn run(args: Args) -> Result<()> {
     let observation_rows: i64 =
         conn.query_row("SELECT COUNT(*) FROM observation", [], |r| r.get(0))?;
     let exporting = Instant::now();
-    let exported =
-        wigle_csv(&conn, ExportFilter::default(), &mut std::io::sink(), env!("CARGO_PKG_VERSION"))?;
+    let exported = wigle_csv(
+        &conn,
+        &ExportFilter::default(),
+        &mut std::io::sink(),
+        env!("CARGO_PKG_VERSION"),
+    )?;
     let export_time = exporting.elapsed();
     // The high-water mark never falls, so this is the higher of the capture's peak and the
     // export's. An export that stays under the capture's peak reads the same as the capture.

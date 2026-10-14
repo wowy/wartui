@@ -423,7 +423,7 @@ pub(super) fn apply_excluded(
     commands: &mpsc::Sender<Command>,
     settings: &mut Settings,
 ) -> Result<String, &'static str> {
-    let ssids = modal.excluded.iter().map(|ssid| ssid.as_bytes().to_vec()).collect();
+    let ssids = config::excluded_ssid_bytes(&modal.excluded).collect();
     if commands.try_send(Command::SetExcludedSsids { ssids }).is_err() {
         return Err(ENGINE_BUSY);
     }
