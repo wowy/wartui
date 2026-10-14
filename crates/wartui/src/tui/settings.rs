@@ -1568,7 +1568,9 @@ mod tests {
 
         assert_eq!(
             rx.try_recv().unwrap(),
-            Command::SetExcludedSsids { ssids: vec![b"HomeNet".to_vec(), b"Pixel 9".to_vec()] }
+            Command::SetExcludedSsids {
+                ssids: [b"HomeNet".to_vec(), b"Pixel 9".to_vec()].into_iter().collect()
+            }
         );
         assert!(rx.try_recv().is_err(), "the pending pool edit is not sent");
         let file = config::load(Some(&target)).expect("a valid file");
@@ -1611,7 +1613,7 @@ mod tests {
         assert!(ui.modal().is_none(), "Esc on the rows closes");
         assert_eq!(
             rx.try_recv().unwrap(),
-            Command::SetExcludedSsids { ssids: vec![b"HomeNet".to_vec()] }
+            Command::SetExcludedSsids { ssids: [b"HomeNet".to_vec()].into_iter().collect() }
         );
         assert!(rx.try_recv().is_err(), "Esc sends nothing to undo it");
         let file = config::load(Some(&target)).expect("a valid file");

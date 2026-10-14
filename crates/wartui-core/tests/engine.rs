@@ -6,6 +6,7 @@
 
 use std::time::{Duration, Instant};
 
+use indexmap::IndexSet;
 use wartui_bridge::{BridgeInfo, LinkEvent};
 use wartui_core::ActionBatch;
 use wartui_core::engine::{
@@ -344,7 +345,13 @@ fn engine_keeps_record_bytes_in_raw_body_when_sighting_recorded() {
 
 /// An engine that never captures `HomeNet`.
 fn excluding_home(clock: &Clock) -> FleetEngine {
-    engine(EngineConfig { excluded_ssids: vec![b"HomeNet".to_vec()], ..Default::default() }, clock)
+    engine(
+        EngineConfig {
+            excluded_ssids: IndexSet::from([b"HomeNet".to_vec()]),
+            ..Default::default()
+        },
+        clock,
+    )
 }
 
 fn observations(batch: &ActionBatch) -> usize {
@@ -410,7 +417,7 @@ fn engine_drops_sighting_when_ssid_excluded_mid_run_by_command() {
     assert_eq!(observations(&before), 1, "captured until excluded");
 
     engine.handle(
-        Event::Command(Command::SetExcludedSsids { ssids: vec![b"HomeNet".to_vec()] }),
+        Event::Command(Command::SetExcludedSsids { ssids: IndexSet::from([b"HomeNet".to_vec()]) }),
         clock.at(2),
     );
     let after =

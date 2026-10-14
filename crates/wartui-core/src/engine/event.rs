@@ -1,5 +1,6 @@
 use std::time::Instant;
 
+use indexmap::IndexSet;
 use wartui_bridge::LinkEvent;
 use wartui_proto::mac::Mac;
 use wartui_proto::plan::ChannelPool;
@@ -100,8 +101,8 @@ pub enum Command {
     /// Replace the SSIDs never captured ([`EngineConfig::excluded_ssids`]). Takes effect from the
     /// next sighting; nothing goes out on the air.
     SetExcludedSsids {
-        /// Each SSID's bytes, matched exactly.
-        ssids: Vec<Vec<u8>>,
+        /// Each SSID's bytes, matched exactly, in the operator's order.
+        ssids: IndexSet<Vec<u8>>,
     },
 }
 

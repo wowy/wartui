@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use indexmap::IndexSet;
 use wartui_proto::mac::Mac;
 use wartui_proto::plan::ChannelPool;
 use wartui_proto::tx_power::DEFAULT_TX_POWER_QUARTER_DBM;
@@ -43,8 +44,10 @@ pub struct EngineConfig {
     pub preferred_ble: Option<Mac>,
     /// SSIDs never captured. A Wi-Fi sighting whose SSID equals an entry byte-for-byte is dropped
     /// before anything counts or records it. A Bluetooth name is not an SSID, so BLE is never
-    /// dropped. [`Command::SetExcludedSsids`] replaces the list mid-run.
-    pub excluded_ssids: Vec<Vec<u8>>,
+    /// dropped. [`Command::SetExcludedSsids`] replaces the list mid-run. A set for the lookup
+    /// every Wi-Fi sighting makes, and one that keeps the operator's order, which the settings
+    /// modal shows.
+    pub excluded_ssids: IndexSet<Vec<u8>>,
 }
 
 impl Default for EngineConfig {
@@ -61,7 +64,7 @@ impl Default for EngineConfig {
             bridge_tx_power: DEFAULT_TX_POWER_QUARTER_DBM,
             remember_ble: true,
             preferred_ble: None,
-            excluded_ssids: Vec::new(),
+            excluded_ssids: IndexSet::new(),
         }
     }
 }

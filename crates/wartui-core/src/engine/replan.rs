@@ -31,10 +31,7 @@ impl FleetEngine {
             Command::SetTxPower { nodes, bridge } => self.on_set_tx_power(nodes, bridge, batch),
             Command::ClearRing { mac } => self.on_clear_dedup_ring(mac, now),
             Command::SetPool { pool } => self.on_set_pool(pool),
-            Command::SetExcludedSsids { ssids } => {
-                self.excluded_ssids = ssids.iter().cloned().collect();
-                self.config.excluded_ssids = ssids;
-            }
+            Command::SetExcludedSsids { ssids } => self.config.excluded_ssids = ssids,
         }
     }
 
