@@ -548,13 +548,19 @@ fn heartbeat(manager: &EspNowManager<'_>, sender: &mut EspNowSender<'_>, node: &
         tx_power: radio::tx_power(manager),
         reset_cause: node.reset_cause,
         vdd: Vdd::from_mv(health::vdd_mv()),
-        die_temp: DieTemp::from_centi_c(i32::from(health::die_temp_c()) * 100),
+        die_temp: die_temp(health::die_temp_c()),
     };
     node.beats = beat;
     node.beat_dwell = node.last_dwell;
     if !radio::broadcast(sender, &msg.encode()) {
         node.unsent = node.unsent.wrapping_add(1);
     }
+}
+
+/// Encode a die reading, sending a failed one as no reading.
+fn die_temp(c: i16) -> DieTemp {
+    // The PHY floors a failed read at −200 °C, and no running die is below −40 °C.
+    if c < -40 { DieTemp::NONE } else { DieTemp::from_c(c) }
 }
 
 /// Packs every sighting one dwell or Bluetooth scan produces into as few unicasts

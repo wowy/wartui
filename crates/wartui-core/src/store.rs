@@ -104,7 +104,7 @@ CREATE TABLE IF NOT EXISTS node (
 -- this heartbeat, 0 when the read failed. `reset_cause` is why the node is
 -- running this boot (`power_on`, `brownout`, ...), the same on every row of a
 -- boot. `vdd_mv` is the node chip's 3.3 V rail in millivolts and
--- `die_temp_half_c` its die temperature in half degrees Celsius, each NULL when
+-- `die_temp_c` its die temperature in whole degrees Celsius, each NULL when
 -- the node's read failed. An assignment
 -- sent on a heartbeat's window is recorded in `assignment`; a dedup-ring clear
 -- is not recorded.
@@ -124,7 +124,7 @@ CREATE TABLE IF NOT EXISTS heartbeat (
   tx_power INTEGER NOT NULL,
   reset_cause TEXT NOT NULL,
   vdd_mv INTEGER,
-  die_temp_half_c INTEGER,
+  die_temp_c INTEGER,
   -- Whether the heartbeat arrived live or was replayed from the bridge's backlog.
   live INTEGER NOT NULL
 );
@@ -1123,7 +1123,7 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
                     "INSERT INTO heartbeat
                        (node_mac, rx_at, counter, epoch, rssi, wifi_refused, ble_refused,
                         beat, unsent, dwell, prev_dwell, tx_power, reset_cause, vdd_mv,
-                        die_temp_half_c, live)
+                        die_temp_c, live)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
                              ?16)",
                 )?
@@ -1142,7 +1142,7 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
                     hb.tx_power,
                     hb.reset_cause.as_str(),
                     hb.vdd_mv,
-                    hb.die_temp_half_c,
+                    hb.die_temp_c,
                     hb.live
                 ])?;
             }

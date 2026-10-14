@@ -31,7 +31,7 @@ const HEARTBEAT: &[u8] = &[
     0x18, // tx_power: 24 quarter-dBm, 6 dBm
     0x05, // reset_cause: brownout
     0x43, // vdd: code 67, 3304 mV
-    0x53, // die_temp: code 83, 41.5 °C
+    0x51, // die_temp: code 81, 41 °C
 ];
 
 /// A heartbeat from a node parked since boot: epoch 0, never sent by the host.
@@ -242,7 +242,7 @@ fn heartbeat_msg_serializes_byte_for_byte_when_encoded_and_decoded() {
         tx_power: 24,
         reset_cause: ResetCause::Brownout,
         vdd: Vdd(67),
-        die_temp: DieTemp(83),
+        die_temp: DieTemp(81),
     };
     assert_eq!(msg.encode().as_slice(), HEARTBEAT);
     assert_eq!(HeartbeatMsg::decode(HEARTBEAT), Ok(msg));
@@ -363,8 +363,8 @@ fn heartbeat_msg_round_trips_reset_cause_when_encoded_at_its_offset() {
 #[test]
 fn heartbeat_msg_round_trips_health_when_encoded_at_its_offsets() {
     let decoded = HeartbeatMsg::decode(HEARTBEAT).expect("valid");
-    assert_eq!((decoded.vdd.mv(), decoded.die_temp.half_c()), (Some(3304), Some(83)));
-    assert_eq!(&HEARTBEAT[25..27], &[0x43, 0x53]);
+    assert_eq!((decoded.vdd.mv(), decoded.die_temp.c()), (Some(3304), Some(41)));
+    assert_eq!(&HEARTBEAT[25..27], &[0x43, 0x51]);
 
     let msg = HeartbeatMsg { vdd: Vdd::NONE, die_temp: DieTemp::NONE, ..decoded };
     let frame = msg.encode();
@@ -402,30 +402,31 @@ fn vdd_displays_volts_when_formatted() {
 }
 
 #[test]
-fn die_temp_rounds_to_half_degree_when_encoding_centidegrees() {
-    assert_eq!(DieTemp::from_centi_c(4150).half_c(), Some(83));
-    assert_eq!(DieTemp::from_centi_c(4140).half_c(), Some(83));
-    assert_eq!(DieTemp::from_centi_c(4120).half_c(), Some(82));
+fn die_temp_encodes_whole_degrees_when_reading_is_in_range() {
+    assert_eq!(DieTemp::from_c(-40), DieTemp(0));
+    assert_eq!(DieTemp::from_c(41), DieTemp(81));
+    assert_eq!(DieTemp::from_c(214), DieTemp(254));
+    assert_eq!(DieTemp(81).c(), Some(41));
+    assert_eq!(DieTemp(0).c(), Some(-40));
 }
 
 #[test]
 fn die_temp_clamps_to_encodable_range_when_reading_is_outside_it() {
-    assert_eq!(DieTemp::from_centi_c(-500), DieTemp(0));
-    assert_eq!(DieTemp::from_centi_c(0), DieTemp(0));
-    // Above 127 °C is 254, never the no-reading code.
-    assert_eq!(DieTemp::from_centi_c(20000), DieTemp(254));
+    assert_eq!(DieTemp::from_c(-41), DieTemp(0));
+    // Above 214 °C is 254, never the no-reading code.
+    assert_eq!(DieTemp::from_c(300), DieTemp(254));
 }
 
 #[test]
 fn die_temp_decodes_no_reading_when_code_is_0xff() {
-    assert_eq!(DieTemp(0xFF).half_c(), None);
+    assert_eq!(DieTemp(0xFF).c(), None);
     assert_eq!(DieTemp::NONE.to_string(), "—");
 }
 
 #[test]
 fn die_temp_displays_celsius_when_formatted() {
-    assert_eq!(DieTemp(83).to_string(), "41.5 °C");
-    assert_eq!(DieTemp(82).to_string(), "41.0 °C");
+    assert_eq!(DieTemp::from_c(41).to_string(), "41 °C");
+    assert_eq!(DieTemp::from_c(-5).to_string(), "-5 °C");
 }
 
 #[test]

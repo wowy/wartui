@@ -25,8 +25,8 @@ pub fn vdd_mv() -> u16 {
     // taking no arguments and touching no memory of ours. Disassembled, it switches the
     // PBUS into debug mode, routes VDD3P3 to SAR2 over the analog I2C bus, reads SAR2,
     // restores the PBUS, and scales the reading (×206/100 on the C6, ×236/100 on the
-    // C5). It returns 0 before the PHY is initialized. The unit is millivolts by every
-    // sign the disassembly gives, and unconfirmed until a bench compares it with a meter.
+    // C5). It returns 0 before the PHY is initialized. The unit is millivolts, reading
+    // 50 to 100 mV below a multimeter on the board's 3V3 pin.
     unsafe { phy_get_vdd33() }
 }
 

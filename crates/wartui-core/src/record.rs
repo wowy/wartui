@@ -82,8 +82,8 @@ pub struct Heartbeat {
     pub reset_cause: ResetCause,
     /// The node chip's 3.3 V rail in millivolts, `None` when the read failed.
     pub vdd_mv: Option<u16>,
-    /// The node's die temperature in half degrees Celsius, `None` when the read failed.
-    pub die_temp_half_c: Option<u8>,
+    /// The node's die temperature in whole degrees Celsius, `None` when the read failed.
+    pub die_temp_c: Option<i16>,
     /// Whether it arrived live rather than replayed from the bridge's backlog.
     pub live: bool,
 }

@@ -131,8 +131,8 @@ pub struct HeartbeatMsg {
     /// The chip's 3.3 V rail just before this heartbeat, or [`Vdd::NONE`] when the read
     /// failed.
     pub vdd: Vdd,
-    /// The die temperature just before this heartbeat, or [`DieTemp::NONE`] when the read
-    /// failed. The die runs well above the air around it.
+    /// The die temperature in whole degrees just before this heartbeat, offset by 40, or
+    /// [`DieTemp::NONE`] when the read failed. The die runs well above the air around it.
     pub die_temp: DieTemp,
 }
 

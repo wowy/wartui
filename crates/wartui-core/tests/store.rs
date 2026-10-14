@@ -289,7 +289,7 @@ fn store_round_trips_record_when_each_type_written() {
                 tx_power: 8,
                 reset_cause: ResetCause::PowerOn,
                 vdd_mv: None,
-                die_temp_half_c: None,
+                die_temp_c: None,
                 live: false,
             }),
             observation(NODE, [0xAA; 6], -60, EPOCH_MS, fixed(37.7749, -122.4194)),
@@ -382,7 +382,7 @@ fn store_writes_every_heartbeat_column_when_heartbeat_recorded() {
             tx_power: 8,
             reset_cause: ResetCause::PowerOn,
             vdd_mv: Some(3304),
-            die_temp_half_c: Some(83),
+            die_temp_c: Some(41),
             live: true,
         })],
     );
@@ -409,7 +409,7 @@ fn store_writes_dwell_when_heartbeat_recorded() {
             tx_power: 8,
             reset_cause: ResetCause::PowerOn,
             vdd_mv: None,
-            die_temp_half_c: None,
+            die_temp_c: None,
             live: true,
         })],
     );
@@ -439,7 +439,7 @@ fn store_writes_tx_power_and_reset_cause_when_heartbeat_recorded() {
             tx_power: 24,
             reset_cause: ResetCause::Brownout,
             vdd_mv: None,
-            die_temp_half_c: None,
+            die_temp_c: None,
             live: true,
         })],
     );
@@ -454,7 +454,7 @@ fn store_writes_tx_power_and_reset_cause_when_heartbeat_recorded() {
 #[test]
 fn store_writes_health_readings_when_heartbeat_recorded() {
     let dir = tempfile::tempdir().expect("temp dir");
-    let beat = |vdd_mv, die_temp_half_c| {
+    let beat = |vdd_mv, die_temp_c| {
         Record::Heartbeat(Heartbeat {
             node_mac: NODE,
             rx_at_ms: EPOCH_MS,
@@ -470,20 +470,20 @@ fn store_writes_health_readings_when_heartbeat_recorded() {
             tx_power: 24,
             reset_cause: ResetCause::PowerOn,
             vdd_mv,
-            die_temp_half_c,
+            die_temp_c,
             live: true,
         })
     };
-    let conn = write(&dir, vec![beat(Some(3304), Some(83)), beat(None, None)]);
+    let conn = write(&dir, vec![beat(Some(3304), Some(41)), beat(None, None)]);
     let rows: Vec<(Option<i64>, Option<i64>)> = conn
-        .prepare("SELECT vdd_mv, die_temp_half_c FROM heartbeat ORDER BY id")
+        .prepare("SELECT vdd_mv, die_temp_c FROM heartbeat ORDER BY id")
         .unwrap()
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
     // A failed read is NULL rather than a sentinel a query would average in.
-    assert_eq!(rows, vec![(Some(3304), Some(83)), (None, None)]);
+    assert_eq!(rows, vec![(Some(3304), Some(41)), (None, None)]);
 }
 
 #[test]

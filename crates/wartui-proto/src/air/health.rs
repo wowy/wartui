@@ -64,11 +64,14 @@ impl fmt::Display for Vdd {
     }
 }
 
-/// The die temperature in half degrees Celsius.
+/// The lowest temperature [`DieTemp`] encodes, as code 0.
+const DIE_TEMP_BASE_C: i16 = -40;
+
+/// The die temperature in whole degrees Celsius, offset by 40.
 ///
-/// `°C = code / 2` for codes 0 to 254, so 0.0 °C to 127.0 °C. 0xFF is no reading. The
-/// die runs well above the air around it, so the range starts at freezing and leaves the
-/// headroom above.
+/// `°C = code − 40` for codes 0 to 254, so −40 °C to 214 °C. 0xFF is no reading. The PHY
+/// reads whole degrees, so a finer step would carry nothing, and the range spans every
+/// temperature the chip is rated for with the die's headroom above ambient.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DieTemp(pub u8);
 
@@ -76,30 +79,31 @@ impl DieTemp {
     /// No reading.
     pub const NONE: Self = Self(0xFF);
 
-    /// Encode a reading in hundredths of a degree, rounding to the nearest half degree.
-    ///
-    /// At or below 0 °C is code 0, and above 127 °C is code 254.
+    /// Encode a reading in whole degrees, clamped to −40 °C to 214 °C.
     #[must_use]
-    pub const fn from_centi_c(centi_c: i32) -> Self {
-        if centi_c <= 0 {
-            return Self(0);
-        }
-        let code = (centi_c + 25) / 50;
-        Self(if code > 254 { 254 } else { code as u8 })
+    pub const fn from_c(c: i16) -> Self {
+        let code = c as i32 - DIE_TEMP_BASE_C as i32;
+        Self(if code < 0 {
+            0
+        } else if code > 254 {
+            254
+        } else {
+            code as u8
+        })
     }
 
-    /// The reading in half degrees Celsius, or `None` when there was none.
+    /// The reading in whole degrees Celsius, or `None` when there was none.
     #[must_use]
-    pub const fn half_c(self) -> Option<u8> {
-        if self.0 == Self::NONE.0 { None } else { Some(self.0) }
+    pub const fn c(self) -> Option<i16> {
+        if self.0 == Self::NONE.0 { None } else { Some(self.0 as i16 + DIE_TEMP_BASE_C) }
     }
 }
 
-/// `41.5 °C`, or `—` for no reading.
+/// `41 °C`, or `—` for no reading.
 impl fmt::Display for DieTemp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.half_c() {
-            Some(half) => write!(f, "{}.{} °C", half / 2, (half % 2) * 5),
+        match self.c() {
+            Some(c) => write!(f, "{c} °C"),
             None => f.write_str("—"),
         }
     }

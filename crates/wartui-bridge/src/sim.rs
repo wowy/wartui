@@ -398,7 +398,7 @@ impl SimNode {
             beat_dwell: 0,
             tx_power: DEFAULT_TX_POWER_QUARTER_DBM,
             vdd: Vdd::from_mv(3300 - 12 * u16::from(index % 4)),
-            die_temp: DieTemp::from_centi_c(4000 + 150 * i32::from(index % 8)),
+            die_temp: DieTemp::from_c(40 + i16::from(index % 8)),
             next_beat: None,
             seq: 0,
             seen: Seen::new(five_ghz),

@@ -249,8 +249,8 @@ impl FleetEngine {
         node.last_heartbeat = Some(now.mono);
         node.last_heartbeat_rx_us = Some(rx_us);
         node.heartbeats += 1;
-        node.vdd_mv = heartbeat.vdd.mv();
-        node.die_temp_half_c = heartbeat.die_temp.half_c();
+        node.vdd = heartbeat.vdd;
+        node.die_temp = heartbeat.die_temp;
         batch.records.push(Record::Heartbeat(Heartbeat {
             node_mac: src,
             rx_at_ms: now.unix_ms,
@@ -266,7 +266,7 @@ impl FleetEngine {
             tx_power: heartbeat.tx_power,
             reset_cause: heartbeat.reset_cause,
             vdd_mv: heartbeat.vdd.mv(),
-            die_temp_half_c: heartbeat.die_temp.half_c(),
+            die_temp_c: heartbeat.die_temp.c(),
             live,
         }));
 
