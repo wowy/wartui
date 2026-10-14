@@ -270,7 +270,10 @@ impl ConfigModal {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         if let Some(text) = input {
             match key.code {
-                KeyCode::Char('u') if control => text.clear(),
+                KeyCode::Char('u') if control => {
+                    text.clear();
+                    *error = None;
+                }
                 KeyCode::Char(c) if !control => {
                     text.push(c);
                     *error = None;
@@ -365,8 +368,9 @@ pub(super) fn apply(
     settings: &mut Settings,
 ) -> Result<String, &'static str> {
     // Reserve every slot first, so a full queue applies none of the modal rather than
-    // part of it.
-    let Ok(mut permits) = commands.try_reserve_many(4) else {
+    // part of it. The excluded list is not among them: its page sends it on its own
+    // `Enter` and restores it on `Esc`, so on the rows it is always what is in force.
+    let Ok(mut permits) = commands.try_reserve_many(3) else {
         return Err(ENGINE_BUSY);
     };
     let pool = ChannelPool::from(modal.pool);
@@ -374,9 +378,6 @@ pub(super) fn apply(
         Command::SetPool { pool },
         Command::SetTxPower { nodes: modal.fleet_dbm * 4, bridge: modal.bridge_dbm * 4 },
         Command::RememberBle { on: modal.remember_ble },
-        Command::SetExcludedSsids {
-            ssids: modal.excluded.iter().map(|ssid| ssid.as_bytes().to_vec()).collect(),
-        },
     ] {
         if let Some(permit) = permits.next() {
             permit.send(command);
@@ -398,10 +399,6 @@ pub(super) fn apply(
         } else {
             text.push_str(&format!("; pool {pool} — nodes take it once the fleet is in a plan"));
         }
-    }
-    if modal.excluded != snapshot.excluded_ssids {
-        let count = modal.excluded.len();
-        text.push_str(&format!("; {count} excluded ssid{}", if count == 1 { "" } else { "s" }));
     }
     let memory = &settings.bridge_memory;
     if modal.remember_bridge != memory.is_enabled() {
@@ -823,7 +820,6 @@ mod tests {
         assert_eq!(rx.try_recv().unwrap(), Command::SetPool { pool: ChannelPool::Eu });
         assert_eq!(rx.try_recv().unwrap(), Command::SetTxPower { nodes: 8, bridge: 8 });
         assert_eq!(rx.try_recv().unwrap(), Command::RememberBle { on: true });
-        assert_eq!(rx.try_recv().unwrap(), Command::SetExcludedSsids { ssids: Vec::new() });
         assert!(rx.try_recv().is_err(), "nothing else was sent");
         // `busy()`'s plan is `None`, so the re-cut waits on one.
         let notice = ui.notice(snapshot.now_ms).expect("a notice");
@@ -860,18 +856,18 @@ mod tests {
     }
 
     #[test]
-    fn ui_sends_nothing_and_saves_nothing_when_enter_pressed_with_three_queue_slots_free() {
+    fn ui_sends_nothing_and_saves_nothing_when_enter_pressed_with_one_queue_slot_free() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wartui.toml");
         let snapshot = busy();
-        let (tx, mut rx) = mpsc::channel(4);
+        let (tx, mut rx) = mpsc::channel(2);
         tx.try_send(Command::ClearRing { mac: None }).unwrap();
         let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
 
         ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
 
-        // Room for three of the modal's four commands, so none goes out.
+        // Room for one of the modal's three commands, so none goes out.
         assert_eq!(rx.try_recv().unwrap(), Command::ClearRing { mac: None });
         assert!(rx.try_recv().is_err(), "nothing else was sent");
         assert!(!target.exists(), "nothing was written");
@@ -902,11 +898,11 @@ mod tests {
     }
 
     #[test]
-    fn ui_sends_nothing_and_saves_nothing_when_enter_pressed_with_queue_smaller_than_four() {
+    fn ui_sends_nothing_and_saves_nothing_when_enter_pressed_with_queue_smaller_than_three() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wartui.toml");
         let snapshot = busy();
-        let (tx, mut rx) = mpsc::channel(3);
+        let (tx, mut rx) = mpsc::channel(2);
         let mut ui = Ui::new(Settings { config_path: Some(target.clone()), ..Settings::default() });
         ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
 
@@ -1628,16 +1624,26 @@ mod tests {
     }
 
     #[test]
-    fn ui_omits_excluded_ssids_from_notice_when_list_unchanged() {
+    fn ui_clears_refusal_when_ctrl_u_pressed_while_typing_ssid() {
         let snapshot = excluded_snapshot(&["HomeNet"]);
-        let (tx, _rx) = mpsc::channel(4);
-        let mut ui = Ui::default();
-        ui.on_key(key(KeyCode::Char('c')), &snapshot, &tx);
+        let mut ui = open_excluded_page(&snapshot, Settings::default());
+        press(&mut ui, KeyCode::Char('a'), KeyModifiers::NONE, &snapshot);
+        for c in "HomeNet".chars() {
+            press(&mut ui, KeyCode::Char(c), KeyModifiers::NONE, &snapshot);
+        }
+        press(&mut ui, KeyCode::Enter, KeyModifiers::NONE, &snapshot);
+        let Page::Excluded { error, .. } = &ui.modal().expect("open").page else {
+            panic!("still on the page");
+        };
+        assert_eq!(*error, Some("already listed"));
 
-        ui.on_modal_key(key(KeyCode::Enter), &snapshot, &tx);
+        press(&mut ui, KeyCode::Char('u'), KeyModifiers::CONTROL, &snapshot);
 
-        let notice = ui.notice(snapshot.now_ms).expect("a notice");
-        assert!(!notice.contains("excluded"), "{notice}");
+        let Page::Excluded { input, error, .. } = &ui.modal().expect("open").page else {
+            panic!("still on the page");
+        };
+        assert_eq!(input.as_deref(), Some(""));
+        assert_eq!(*error, None, "the refusal was about the text just cleared");
     }
 
     #[test]

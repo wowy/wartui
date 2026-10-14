@@ -501,14 +501,13 @@ lists them. While an SSID is being typed there, every letter types, spaces inclu
 one that is empty, over 32 bytes, or already listed, and says why. `Enter` in the list sends it to
 the engine, writes only `excluded-ssids`, and returns to the rows; edits to the rows stay pending.
 On the key row, letters type, so `h` `j` `k` `l` `q` neither move nor close; `↑` leaves it, and the
-footer shows the `ctrl-u` tip while a key is entered. The key shows its last three characters, up
-to six bullets before them, and from ten characters its first one to three. `Enter` sends the rows to the engine and writes every
-row shown to `pool`, `excluded-ssids`, `[tx-power]`, `[bluetooth]`, `[bridge]`, and `[api-keys]`,
-whatever was there. The bridge takes its power on its next status poll, an excluded SSID stops
-being captured from the next sighting, and settings closes. If the engine is not accepting
-commands, nothing is sent or written, and settings stays open with its edits. A moved pool re-cuts
-the fleet. Each node takes its new share and power on its next heartbeat, emptying its dedup ring
-when its share changes.
+footer shows the `ctrl-u` tip while a key is entered. The key shows its last three characters, up to
+six bullets before them, and from ten characters its first one to three. `Enter` sends the rows to
+the engine and writes every row shown to `pool`, `excluded-ssids`, `[tx-power]`, `[bluetooth]`,
+`[bridge]`, and `[api-keys]`, whatever was there. The bridge takes its power on its next status
+poll, and settings closes. If the engine is not accepting commands, nothing is sent or written, and
+settings stays open with its edits. A moved pool re-cuts the fleet. Each node takes its new share
+and power on its next heartbeat, emptying its dedup ring when its share changes.
 
 ## How channels are assigned
 
