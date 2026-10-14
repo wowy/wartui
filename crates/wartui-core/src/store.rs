@@ -103,7 +103,9 @@ CREATE TABLE IF NOT EXISTS node (
 -- radio's maximum transmit power in quarter-dBm as the node read it just before
 -- this heartbeat, 0 when the read failed. `reset_cause` is why the node is
 -- running this boot (`power_on`, `brownout`, ...), the same on every row of a
--- boot. An assignment
+-- boot. `vdd_mv` is the node chip's 3.3 V rail in millivolts and
+-- `die_temp_c` its die temperature in whole degrees Celsius, each NULL when
+-- the node's read failed. An assignment
 -- sent on a heartbeat's window is recorded in `assignment`; a dedup-ring clear
 -- is not recorded.
 CREATE TABLE IF NOT EXISTS heartbeat (
@@ -121,6 +123,8 @@ CREATE TABLE IF NOT EXISTS heartbeat (
   prev_dwell INTEGER NOT NULL,
   tx_power INTEGER NOT NULL,
   reset_cause TEXT NOT NULL,
+  vdd_mv INTEGER,
+  die_temp_c INTEGER,
   -- Whether the heartbeat arrived live or was replayed from the bridge's backlog.
   live INTEGER NOT NULL
 );
@@ -1118,8 +1122,10 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
                 tx.prepare_cached(
                     "INSERT INTO heartbeat
                        (node_mac, rx_at, counter, epoch, rssi, wifi_refused, ble_refused,
-                        beat, unsent, dwell, prev_dwell, tx_power, reset_cause, live)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                        beat, unsent, dwell, prev_dwell, tx_power, reset_cause, vdd_mv,
+                        die_temp_c, live)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
+                             ?16)",
                 )?
                 .execute(params![
                     &hb.node_mac[..],
@@ -1135,6 +1141,8 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
                     hb.prev_dwell,
                     hb.tx_power,
                     hb.reset_cause.as_str(),
+                    hb.vdd_mv,
+                    hb.die_temp_c,
                     hb.live
                 ])?;
             }

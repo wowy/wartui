@@ -635,6 +635,17 @@ The `channels` column shows where an assignment stands
 | plain            | Adopted                                           |
 | cyan             | The Bluetooth node                                |
 
+The line under the table shows the selected node's latest supply and die readings:
+`C5 57:84  3.30 V  41 °C`, with `—` for a node that has sent none or whose read failed. The voltage
+is the chip's 3.3 V rail, not the board's 5 V input, and the die runs well above the air around it.
+A reading out of range is yellow on that line, and turns an `alive` node's `state` yellow too; any
+other state keeps its own color:
+
+| Reading | Warns at       | Why                                                                                 |
+|---------|----------------|-------------------------------------------------------------------------------------|
+| Voltage | below 3.00 V   | The C5's and C6's minimum recommended supply; the chip resets at 2.7 V              |
+| Die     | 70 °C or above | Short of 85 °C, the XIAO C6's rated ambient limit; the die runs hotter than ambient |
+
 A `stale`, `refused`, or `no heartbeat` node is out of the plan: nothing sent would reach it, or its
 band is unknown, so its share might be nobody's. `b` on one says which state it is, because the fix
 differs: wait for a heartbeat, or find out why heartbeats stopped.

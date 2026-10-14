@@ -10,9 +10,9 @@
 //! | nothing confirmed | gray `unassigned` | gray `unassigned` |
 
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Rect};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::Span;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Cell, Row, Table, TableState};
 use wartui_core::engine::{NodeView, Snapshot};
 use wartui_core::record::AdminOutcome;
@@ -45,7 +45,13 @@ pub(super) fn draw_fleet(
         .nodes
         .iter()
         .map(|node| {
-            let (state, style) = node_state(node);
+            let (state, mut severity) = node_state(node);
+            // A reading out of range warns only on an otherwise healthy node; any state
+            // of its own says more.
+            if severity == Severity::Ok && (node.state.low_vdd() || node.state.hot()) {
+                severity = Severity::Warning;
+            }
+            let style = severity.style();
             let mut cells = vec![
                 Cell::from(node_label(node)),
                 Cell::from(node.state.link_rssi.map_or_else(|| "—".to_owned(), |r| format!("{r}"))),
@@ -75,16 +81,62 @@ pub(super) fn draw_fleet(
         widths.insert(lost_at, Constraint::Length(5));
     }
     let title = format!(" fleet — {} of {} alive ", snapshot.alive, snapshot.nodes.len());
+    let block = Block::bordered().title(title);
+    let [table_area, health_area] =
+        Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(block.inner(area));
+    frame.render_widget(block, area);
     let table = Table::new(rows, widths)
         .header(header)
-        .block(Block::bordered().title(title))
         .row_highlight_style(Style::new().add_modifier(Modifier::REVERSED));
 
     let mut state = TableState::new()
         .with_offset(*offset)
         .with_selected((!snapshot.nodes.is_empty()).then_some(selected));
-    frame.render_stateful_widget(table, area, &mut state);
+    frame.render_stateful_widget(table, table_area, &mut state);
     *offset = state.offset();
+    if let Some(node) = snapshot.nodes.get(selected) {
+        frame.render_widget(health_line(node), health_area);
+    }
+}
+
+/// How much a node's state asks of the operator, which decides its color.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Severity {
+    /// `alive`: nothing to do.
+    Ok,
+    /// Worth knowing, needing nothing: `rebooted xN`.
+    Notice,
+    /// Out of the plan for now, or a reading out of range.
+    Warning,
+    /// Something to fix.
+    Fault,
+}
+
+impl Severity {
+    const fn style(self) -> Style {
+        Style::new().fg(match self {
+            Self::Ok => Color::Green,
+            Self::Notice => Color::Cyan,
+            Self::Warning => Color::Yellow,
+            Self::Fault => Color::Red,
+        })
+    }
+}
+
+/// The selected node's latest supply and die readings, `—` for none, each out-of-range
+/// one in the warning style. The table has no width left for them, so they show for one
+/// node at a time.
+fn health_line(node: &NodeView) -> Line<'static> {
+    let state = &node.state;
+    let vdd = state.vdd.to_string();
+    let temp = state.die_temp.to_string();
+    let warn = |bad: bool| if bad { Severity::Warning.style() } else { Style::new() };
+    Line::from(vec![
+        Span::raw(format!("{}  ", node_label(node))),
+        Span::styled(vdd, warn(state.low_vdd())),
+        Span::raw("  "),
+        Span::styled(temp, warn(state.hot())),
+    ])
 }
 
 /// The channels column's width, which caps how much of the list fits.
@@ -186,33 +238,33 @@ pub(super) fn why_not_assignable(node: &NodeView) -> Option<&'static str> {
 /// `stale`: sightings arrive, heartbeats do not, usually because BLE holds the
 /// antenna. The node cannot be assigned. This differs from silence, which has other
 /// causes.
-fn node_state(node: &NodeView) -> (String, Style) {
+fn node_state(node: &NodeView) -> (String, Severity) {
     let state = &node.state;
     if state.last_heartbeat.is_none() {
-        return ("no heartbeat".to_owned(), Style::new().fg(Color::Yellow));
+        return ("no heartbeat".to_owned(), Severity::Warning);
     }
     // Ahead of `stale`. A peer refusal makes a heartbeating node unassignable, and
     // the fix is on the fleet, not the node.
     if state.peer_refused {
-        return ("refused".to_owned(), Style::new().fg(Color::Red));
+        return ("refused".to_owned(), Severity::Fault);
     }
     if !node.assignable {
-        return ("stale".to_owned(), Style::new().fg(Color::Yellow));
+        return ("stale".to_owned(), Severity::Warning);
     }
     // The most actionable state. The cause is nearly always the radio being off the
     // control channel during its admin window.
     if matches!(state.last_outcome, Some(AdminOutcome::Unacked | AdminOutcome::Silent)) {
-        return ("no admin ack".to_owned(), Style::new().fg(Color::Red));
+        return ("no admin ack".to_owned(), Severity::Fault);
     }
     // The bridge refused this send for a reason a reconnect clears (`NoPeer`, a
     // rejection), so the node stays assignable. Peer-table refusal is handled above.
     if state.last_outcome == Some(AdminOutcome::Refused) {
-        return ("refused".to_owned(), Style::new().fg(Color::Red));
+        return ("refused".to_owned(), Severity::Fault);
     }
     if state.reboots > 0 {
-        return (format!("rebooted x{}", state.reboots), Style::new().fg(Color::Cyan));
+        return (format!("rebooted x{}", state.reboots), Severity::Notice);
     }
-    ("alive".to_owned(), Style::new().fg(Color::Green))
+    ("alive".to_owned(), Severity::Ok)
 }
 
 /// Format a set as channel numbers, the units every other tool uses.
@@ -284,6 +336,7 @@ mod tests {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use tokio::sync::mpsc;
     use wartui_core::engine::Assignment;
+    use wartui_proto::air::{DieTemp, Vdd};
     use wartui_proto::plan::{ChannelPool, IndexRun};
 
     use super::*;
@@ -504,6 +557,76 @@ mod tests {
         let header = fleet_header(&screen);
         assert!(header.contains("obs"), "the header line itself: {screen}");
         assert!(!header.contains("lost"), "{header}");
+    }
+
+    #[test]
+    fn fleet_health_line_shows_selected_node_readings_when_cursor_moves() {
+        let mut reading = node(0x84, 0, true);
+        reading.state.vdd = Vdd::from_mv(3304);
+        reading.state.die_temp = DieTemp::from_c(41);
+        let silent = node(0x85, 0, true);
+        let snapshot = Snapshot { nodes: vec![reading, silent], tail: Vec::new(), ..busy() };
+
+        let mut terminal = Terminal::new(TestBackend::new(200, 40)).expect("test backend");
+        let mut ui = Ui::default();
+        terminal.draw(|frame| draw(frame, &snapshot, &mut ui)).expect("drawing");
+        let screen = terminal.backend().to_string();
+        assert!(screen.contains("C5 57:84  3.30 V  41 °C"), "{screen}");
+
+        let (tx, _rx) = mpsc::channel(4);
+        ui.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &snapshot, &tx);
+        terminal.draw(|frame| draw(frame, &snapshot, &mut ui)).expect("drawing");
+        let screen = terminal.backend().to_string();
+        assert!(screen.contains("C5 57:85  —  —"), "no reading is a dash: {screen}");
+    }
+
+    #[test]
+    fn fleet_table_warns_on_state_when_vdd_is_low() {
+        let mut low = node(0x84, 0, true);
+        low.state.vdd = Vdd::from_mv(2996);
+        assert_eq!(state_fg(low, "alive"), Some(Color::Yellow));
+    }
+
+    #[test]
+    fn fleet_table_warns_on_state_when_die_is_hot() {
+        let mut hot = node(0x84, 0, true);
+        hot.state.die_temp = DieTemp::from_c(70);
+        assert_eq!(state_fg(hot, "alive"), Some(Color::Yellow));
+    }
+
+    #[test]
+    fn fleet_table_keeps_state_style_when_readings_are_in_range() {
+        let mut normal = node(0x84, 0, true);
+        normal.state.vdd = Vdd::from_mv(3000);
+        normal.state.die_temp = DieTemp::from_c(69);
+        assert_eq!(state_fg(normal, "alive"), Some(Color::Green));
+    }
+
+    #[test]
+    fn fleet_table_keeps_notice_style_when_rebooted_node_has_low_vdd() {
+        // The reboot is the more useful news; the health line still shows the reading.
+        let mut rebooted = node(0x84, 1, true);
+        rebooted.state.vdd = Vdd::from_mv(2996);
+        assert_eq!(state_fg(rebooted, "rebooted x1"), Some(Color::Cyan));
+    }
+
+    /// The foreground of `label` in the only node's row, as the view draws it.
+    fn state_fg(node: NodeView, label: &str) -> Option<Color> {
+        let snapshot = Snapshot { nodes: vec![node], tail: Vec::new(), ..busy() };
+        let mut terminal = Terminal::new(TestBackend::new(200, 40)).expect("test backend");
+        terminal.draw(|frame| draw(frame, &snapshot, &mut Ui::default())).expect("drawing");
+        let buffer = terminal.backend().buffer();
+        let area = buffer.area;
+        (area.top()..area.bottom()).find_map(|y| {
+            let line: Vec<&str> =
+                (area.left()..area.right()).map(|x| buffer[(x, y)].symbol()).collect();
+            let text = line.concat();
+            if !text.contains("57:84") || !text.contains(label) {
+                return None;
+            }
+            let x = line.windows(label.len()).position(|w| w.concat() == label)?;
+            buffer[(area.left() + u16::try_from(x).ok()?, y)].fg.into()
+        })
     }
 
     /// The fleet table's header line. Found by `rssi` and `beats`, since the stream's

@@ -17,8 +17,8 @@ use wartui_core::health::Health;
 use wartui_core::position::{DEFAULT_MAX_AGE, PositionChain, PositionSource};
 use wartui_core::record::{AdminOutcome, BatchGap, BridgeStatusSeen, HostStatus, Record};
 use wartui_proto::air::{
-    AdminMsg, Capabilities, Frame, HeartbeatMsg, RecordKind, Security, SightingBatchWriter,
-    SightingMsg, wire_epoch,
+    AdminMsg, Capabilities, DieTemp, Frame, HeartbeatMsg, RecordKind, Security,
+    SightingBatchWriter, SightingMsg, Vdd, wire_epoch,
 };
 use wartui_proto::link::{
     BROADCAST, BridgeToHost, Chip, EspNowPayload, HostToBridge, LinkError, LoopPhase, SendStatus,
@@ -119,6 +119,8 @@ fn beat_at(src: Mac, counter: u32, epoch: u8, capabilities: Capabilities, rx_us:
         prev_dwell: 0,
         tx_power: 8,
         reset_cause: ResetCause::PowerOn,
+        vdd: Vdd::NONE,
+        die_temp: DieTemp::NONE,
     };
     rx_at(src, &msg.encode(), rx_us)
 }
@@ -137,6 +139,8 @@ fn heartbeat_refusing(src: Mac, counter: u32, wifi_refused: u16, ble_refused: u1
         prev_dwell: 0,
         tx_power: 8,
         reset_cause: ResetCause::PowerOn,
+        vdd: Vdd::NONE,
+        die_temp: DieTemp::NONE,
     };
     rx(src, &msg.encode())
 }
@@ -950,6 +954,8 @@ fn engine_records_dwell_when_heartbeat_arrives() {
         prev_dwell: 36,
         tx_power: 8,
         reset_cause: ResetCause::PowerOn,
+        vdd: Vdd::NONE,
+        die_temp: DieTemp::NONE,
     };
     let batch = engine.handle(rx(NODE, &msg.encode()), clock.at(1));
 
@@ -983,6 +989,8 @@ fn engine_records_reset_cause_when_node_restarts() {
         prev_dwell: 0,
         tx_power: 24,
         reset_cause: ResetCause::Brownout,
+        vdd: Vdd::NONE,
+        die_temp: DieTemp::NONE,
     };
     let batch = engine.handle(rx(NODE, &msg.encode()), clock.at(2));
 
@@ -996,6 +1004,63 @@ fn engine_records_reset_cause_when_node_restarts() {
         .collect();
     assert_eq!(beats, [(24, ResetCause::Brownout)]);
     assert_eq!(engine.nodes().next().expect("one node").reboots, 1);
+}
+
+/// A heartbeat carrying the given health readings.
+fn heartbeat_reading(src: Mac, counter: u32, vdd: Vdd, die_temp: DieTemp) -> Event {
+    let msg = HeartbeatMsg {
+        counter,
+        epoch: 0,
+        capabilities: Capabilities::here(true),
+        wifi_refused: 0,
+        ble_refused: 0,
+        beat: 1,
+        unsent: 0,
+        dwell: 0,
+        prev_dwell: 0,
+        tx_power: 8,
+        reset_cause: ResetCause::PowerOn,
+        vdd,
+        die_temp,
+    };
+    rx(src, &msg.encode())
+}
+
+/// The health readings each heartbeat record in `batch` carries.
+fn recorded_health(batch: &wartui_core::ActionBatch) -> Vec<(Option<u16>, Option<i16>)> {
+    batch
+        .records
+        .iter()
+        .filter_map(|r| match r {
+            Record::Heartbeat(h) => Some((h.vdd_mv, h.die_temp_c)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn engine_records_health_readings_when_heartbeat_carries_them() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    let batch = engine
+        .handle(heartbeat_reading(NODE, 1, Vdd::from_mv(3304), DieTemp::from_c(41)), clock.at(1));
+
+    assert_eq!(recorded_health(&batch), [(Some(3304), Some(41))]);
+    let node = engine.nodes().find(|n| n.mac == NODE).expect("the node");
+    assert_eq!((node.vdd, node.die_temp), (Vdd::from_mv(3304), DieTemp::from_c(41)));
+}
+
+#[test]
+fn engine_clears_health_readings_when_later_heartbeat_carries_none() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(heartbeat_reading(NODE, 1, Vdd::from_mv(3304), DieTemp::from_c(41)), clock.at(1));
+    // A failed read is not the last good one: the node state shows what was sent.
+    let batch = engine.handle(heartbeat_reading(NODE, 2, Vdd::NONE, DieTemp::NONE), clock.at(2));
+
+    assert_eq!(recorded_health(&batch), [(None, None)]);
+    let node = engine.nodes().find(|n| n.mac == NODE).expect("the node");
+    assert_eq!((node.vdd, node.die_temp), (Vdd::NONE, DieTemp::NONE));
 }
 
 #[test]
@@ -1017,6 +1082,8 @@ fn engine_counts_incompatible_when_wire_version_differs() {
         prev_dwell: 0,
         tx_power: 8,
         reset_cause: ResetCause::PowerOn,
+        vdd: Vdd::NONE,
+        die_temp: DieTemp::NONE,
     }
     .encode()
     .to_vec();
@@ -3634,6 +3701,8 @@ fn engine_logs_reset_cause_when_node_restarts() {
         prev_dwell: 0,
         tx_power: 8,
         reset_cause: ResetCause::Brownout,
+        vdd: Vdd::NONE,
+        die_temp: DieTemp::NONE,
     };
     let lines = Logs::during(|| {
         engine.handle(rx(NODE, &msg.encode()), clock.at(2));
@@ -3658,6 +3727,8 @@ fn powered_beat(src: Mac, counter: u32, epoch: u8, tx_power: i8, rx_us: u32) -> 
         prev_dwell: 0,
         tx_power,
         reset_cause: ResetCause::PowerOn,
+        vdd: Vdd::NONE,
+        die_temp: DieTemp::NONE,
     };
     rx_at(src, &msg.encode(), rx_us)
 }
@@ -3799,6 +3870,8 @@ fn booted_beat(src: Mac, counter: u32, cause: ResetCause) -> Event {
         prev_dwell: 0,
         tx_power: 8,
         reset_cause: cause,
+        vdd: Vdd::NONE,
+        die_temp: DieTemp::NONE,
     };
     rx(src, &msg.encode())
 }

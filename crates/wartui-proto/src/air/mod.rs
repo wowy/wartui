@@ -26,11 +26,13 @@
 use core::fmt;
 
 mod admin;
+mod health;
 mod heartbeat;
 mod security;
 mod sighting;
 
 pub use admin::{ADMIN_FLAG_BLE, ADMIN_MSG_LEN, AdminMsg, CLEAR_MSG_LEN, ClearMsg, wire_epoch};
+pub use health::{DieTemp, Vdd};
 pub use heartbeat::{
     CAP_FLAG_5G, CAPABILITY_MAJOR, CAPABILITY_MINOR, Capabilities, HEARTBEAT_MSG_LEN, HeartbeatMsg,
 };

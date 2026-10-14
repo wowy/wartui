@@ -26,8 +26,8 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 use wartui_proto::air::{
-    AdminMsg, Capabilities, Frame, HeartbeatMsg, RecordKind, Security, SightingBatchWriter,
-    SightingMsg,
+    AdminMsg, Capabilities, DieTemp, Frame, HeartbeatMsg, RecordKind, Security,
+    SightingBatchWriter, SightingMsg, Vdd,
 };
 use wartui_proto::dedup::{C5DedupRing, C6DedupRing};
 use wartui_proto::link::{
@@ -360,6 +360,10 @@ struct SimNode {
     /// The transmit power of the last adopted assignment, in quarter-dBm, or the boot
     /// default before one. A simulated radio never refuses it. Each heartbeat carries it.
     tx_power: i8,
+    /// The supply and die readings each heartbeat carries. Fixed, and a little different
+    /// on each node, so the fleet table's rows differ.
+    vdd: Vdd,
+    die_temp: DieTemp,
     /// When this node next sends a heartbeat and holds the admin window open.
     /// `None` while parked. Set fresh every time an assignment is adopted
     /// while parked, not only the first, so a stale deadline from before this
@@ -393,6 +397,8 @@ impl SimNode {
             last_dwell: 0,
             beat_dwell: 0,
             tx_power: DEFAULT_TX_POWER_QUARTER_DBM,
+            vdd: Vdd::from_mv(3300 - 12 * u16::from(index % 4)),
+            die_temp: DieTemp::from_c(40 + i16::from(index % 8)),
             next_beat: None,
             seq: 0,
             seen: Seen::new(five_ghz),
@@ -665,6 +671,8 @@ async fn beat(
         tx_power: node.tx_power,
         // A simulated node boots only by being started.
         reset_cause: ResetCause::PowerOn,
+        vdd: node.vdd,
+        die_temp: node.die_temp,
     };
     node.beats = msg.beat;
     node.beat_dwell = node.last_dwell;

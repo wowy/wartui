@@ -109,8 +109,9 @@ own.
   scan never leaves the control channel at all: it sniffs nothing and runs one scan after
   another, back to back. Same rule as the bridge: the logic lives in `wartui-proto`, and
   this crate is the conversation with the radio.
-- **`firmware/common`** (`wartui-firmware`) — chip-level code both firmwares need and that needs
-  `esp-hal`, so it cannot live in `wartui-proto`: the reset funnel `reboot()` and `reset_cause()`.
+- **`firmware/common`** (`wartui-firmware`) — chip-level code the firmwares need and that needs
+  `esp-hal`, so it cannot live in `wartui-proto`: the reset funnel `reboot()` and `reset_cause()`,
+  and the supply and die readings a node's heartbeat carries (`health`).
   A path dependency of both, forwarding each firmware's chip feature, and its own workspace so
   its own clippy lints it; a firmware's clippy compiles it without linting it.
 
@@ -147,7 +148,7 @@ These bite from a distance — from a file other than the one that owns them —
 is here rather than only in a `//!`.
 
 - **The wire is ours, in both directions, and shares nothing with the vendor's.** Every frame is
-  `WTUI`, a wire version byte, a type byte and a body: `HeartbeatMsg` (25 bytes), `SightingBatch`
+  `WTUI`, a wire version byte, a type byte and a body: `HeartbeatMsg` (27 bytes), `SightingBatch`
   (9 plus records of 12 plus the SSID and the trailer), `AdminMsg` (15) and `ClearMsg` (6, header
   only). A heartbeat broadcasts, since that is how a bridge discovers a node before either
   side knows the other's address; a sighting batch unicasts to the bridge that last sent
@@ -244,8 +245,9 @@ is here rather than only in a `//!`.
   (`crates/wartui-core/src/health.rs`, `mailbox_call`). Each firmware allows the IDF calls
   `esp-radio` cannot express after its long-lived handles borrow the controller: the ESP-NOW
   peer-rate call and the runtime transmit-power call, and on a node the transmit-power read each
-  heartbeat carries. Any further `#[allow(unsafe_code)]` is a decision to make in review, not a
-  convenience.
+  heartbeat carries. `firmware/common` allows two more for the node's heartbeat, both PHY blob
+  reads: the rail voltage (`health::vdd_mv`) and the die temperature (`health::die_temp_c`). Any
+  further `#[allow(unsafe_code)]` is a decision to make in review, not a convenience.
 
 ### Load-bearing, and reasoned where they live
 

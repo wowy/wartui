@@ -149,6 +149,8 @@ impl FleetEngine {
                 rssi,
                 reset = %heartbeat.reset_cause,
                 tx_power = heartbeat.tx_power,
+                vdd = %heartbeat.vdd,
+                die_temp = %heartbeat.die_temp,
                 "node joined"
             ),
             // Only after a logged departure: a backlog held through a link outage arrives late
@@ -169,6 +171,8 @@ impl FleetEngine {
                 beat = heartbeat.beat,
                 reset = %heartbeat.reset_cause,
                 tx_power = heartbeat.tx_power,
+                vdd = %heartbeat.vdd,
+                die_temp = %heartbeat.die_temp,
                 "node restarted"
             );
             node.reboots += 1;
@@ -245,6 +249,8 @@ impl FleetEngine {
         node.last_heartbeat = Some(now.mono);
         node.last_heartbeat_rx_us = Some(rx_us);
         node.heartbeats += 1;
+        node.vdd = heartbeat.vdd;
+        node.die_temp = heartbeat.die_temp;
         batch.records.push(Record::Heartbeat(Heartbeat {
             node_mac: src,
             rx_at_ms: now.unix_ms,
@@ -259,6 +265,8 @@ impl FleetEngine {
             prev_dwell: heartbeat.prev_dwell,
             tx_power: heartbeat.tx_power,
             reset_cause: heartbeat.reset_cause,
+            vdd_mv: heartbeat.vdd.mv(),
+            die_temp_c: heartbeat.die_temp.c(),
             live,
         }));
 

@@ -1,10 +1,10 @@
 use core::fmt;
 
-use super::{DecodeError, MsgType, OFFSET_BODY, header, write_header};
+use super::{DecodeError, DieTemp, MsgType, OFFSET_BODY, Vdd, header, write_header};
 use crate::reset::ResetCause;
 
 /// Length of [`HeartbeatMsg`] on the wire.
-pub const HEARTBEAT_MSG_LEN: usize = OFFSET_BODY + 19;
+pub const HEARTBEAT_MSG_LEN: usize = OFFSET_BODY + 21;
 
 /// [`Capabilities::flags`] bit 0: this radio reaches 5 GHz.
 pub const CAP_FLAG_5G: u8 = 1 << 0;
@@ -128,6 +128,12 @@ pub struct HeartbeatMsg {
     /// Why the node is running this boot. Read once at boot, so every heartbeat of a boot
     /// carries the same one.
     pub reset_cause: ResetCause,
+    /// The chip's 3.3 V rail just before this heartbeat, or [`Vdd::NONE`] when the read
+    /// failed.
+    pub vdd: Vdd,
+    /// The die temperature in whole degrees just before this heartbeat, offset by 40, or
+    /// [`DieTemp::NONE`] when the read failed. The die runs well above the air around it.
+    pub die_temp: DieTemp,
 }
 
 impl HeartbeatMsg {
@@ -166,10 +172,12 @@ impl HeartbeatMsg {
             prev_dwell: buf[OFFSET_BODY + 16],
             tx_power: i8::from_le_bytes([buf[OFFSET_BODY + 17]]),
             reset_cause: ResetCause::from_u8(buf[OFFSET_BODY + 18]),
+            vdd: Vdd(buf[OFFSET_BODY + 19]),
+            die_temp: DieTemp(buf[OFFSET_BODY + 20]),
         })
     }
 
-    /// Encode to the twenty-five bytes a heartbeat is.
+    /// Encode to the twenty-seven bytes a heartbeat is.
     #[must_use]
     pub fn encode(&self) -> [u8; HEARTBEAT_MSG_LEN] {
         let mut out = [0u8; HEARTBEAT_MSG_LEN];
@@ -187,6 +195,8 @@ impl HeartbeatMsg {
         out[OFFSET_BODY + 16] = self.prev_dwell;
         out[OFFSET_BODY + 17] = self.tx_power.to_le_bytes()[0];
         out[OFFSET_BODY + 18] = self.reset_cause.as_u8();
+        out[OFFSET_BODY + 19] = self.vdd.0;
+        out[OFFSET_BODY + 20] = self.die_temp.0;
         out
     }
 }

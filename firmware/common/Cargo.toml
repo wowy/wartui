@@ -7,7 +7,7 @@
 
 [package]
 name = "wartui-firmware"
-description = "Chip-level code both wartui firmwares need: the reset funnel and the reset cause."
+description = "Chip-level code the wartui firmwares need: the reset funnel, the reset cause and the node's health readings."
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
@@ -29,7 +29,7 @@ wartui-proto = { path = "../../crates/wartui-proto" }
 
 [lints.rust]
 # AGENTS.md's project-wide rule; the root workspace excludes `firmware`, so it is
-# stated here too. Nothing in this crate allows it.
+# stated here too. Only the PHY blob reads in `health` allow it.
 unsafe_code = "deny"
 
 [lints.clippy]
