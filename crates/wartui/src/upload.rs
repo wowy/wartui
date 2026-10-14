@@ -71,8 +71,10 @@ use wartui_core::store::{
     record_upload, set_upload_result,
 };
 
-use crate::config::{self, Config};
-use crate::export::{Selection, details, note_quality, note_unknown_kind, note_unpositioned};
+use crate::config::Config;
+use crate::export::{
+    Selection, details, note_excluded, note_quality, note_unknown_kind, note_unpositioned,
+};
 use crate::text::thousands;
 
 /// The leaderboard.
@@ -103,11 +105,6 @@ pub struct Args {
     #[command(flatten)]
     selection: Selection,
 
-    /// Read the API key from this file instead of the default `wartui.toml`. Never
-    /// written; see `crates/wartui/README.md` § "Config file".
-    #[arg(long, value_name = "PATH")]
-    config: Option<PathBuf>,
-
     /// Upload without asking first.
     #[arg(long, short = 'y')]
     yes: bool,
@@ -118,13 +115,12 @@ pub struct Args {
 }
 
 pub fn run(args: Args) -> Result<()> {
-    let config = config::load(args.config.as_deref())?;
-    let config_path = config::path(args.config.as_deref());
+    let (config, config_path) = args.selection.config()?;
     let db = args.selection.capture("reading")?;
     if !args.yes && !std::io::stdin().is_terminal() {
         bail!("standard input is not a terminal, so nothing can answer; pass --yes to upload");
     }
-    let filter = args.selection.filter();
+    let filter = args.selection.filter(&config);
     let prepared = match prepare(&config, config_path.as_deref(), &db, filter, args.resend)? {
         Prepare::Ready(prepared) => prepared,
         Prepare::NothingNew { previous, summary } => {
@@ -136,6 +132,7 @@ pub fn run(args: Args) -> Result<()> {
             );
             note_unpositioned(&summary);
             note_unknown_kind(&summary);
+            note_excluded(&summary);
             note_quality(&summary);
             return Ok(());
         }
@@ -143,6 +140,7 @@ pub fn run(args: Args) -> Result<()> {
             eprintln!("{} has no rows to upload", db.display());
             note_unpositioned(&summary);
             note_unknown_kind(&summary);
+            note_excluded(&summary);
             note_quality(&summary);
             return Ok(());
         }
@@ -151,6 +149,7 @@ pub fn run(args: Args) -> Result<()> {
     eprint!("{}", prepared.describe());
     note_unpositioned(&prepared.summary);
     note_unknown_kind(&prepared.summary);
+    note_excluded(&prepared.summary);
     note_quality(&prepared.summary);
 
     if !args.yes && !confirm()? {
@@ -244,7 +243,7 @@ pub(crate) fn prepare(
         );
     }
     filter.after_uploads = !resend;
-    let (body, summary, previous) = body(db, filter)?;
+    let (body, summary, previous) = body(db, &filter)?;
     if summary.rows == 0 {
         return Ok(match previous {
             Some(previous) => Prepare::NothingNew { previous, summary },
@@ -264,7 +263,10 @@ pub(crate) fn prepare(
 /// The capture's WiGLE CSV, gzipped in memory, what went into it, and the upload it follows
 /// on from when it is [`ExportFilter::after_uploads`]. [`Simulated`] for a capture of test data,
 /// before anything is built.
-fn body(db: &Path, filter: ExportFilter) -> Result<(Vec<u8>, ExportSummary, Option<UploadRecord>)> {
+fn body(
+    db: &Path,
+    filter: &ExportFilter,
+) -> Result<(Vec<u8>, ExportSummary, Option<UploadRecord>)> {
     let conn = open_readonly(db).with_context(|| format!("opening {}", db.display()))?;
     if is_simulated(&conn).with_context(|| format!("reading {}", db.display()))? {
         return Err(Simulated { db: db.to_owned() }.into());
@@ -739,14 +741,14 @@ mod tests {
                 sighting([0x10, 0, 0, 0, 0, 2], EPOCH_MS + 1_000, Some(37.1)),
             ],
         );
-        let (gz, summary, _) = body(&db, ExportFilter::default()).unwrap();
+        let (gz, summary, _) = body(&db, &ExportFilter::default()).unwrap();
         assert_eq!(summary.rows, 2);
 
         let mut csv = Vec::new();
         GzDecoder::new(gz.as_slice()).read_to_end(&mut csv).unwrap();
         let mut expected = Vec::new();
         let conn = open_readonly(&db).unwrap();
-        wigle_csv(&conn, ExportFilter::default(), &mut expected, env!("CARGO_PKG_VERSION"))
+        wigle_csv(&conn, &ExportFilter::default(), &mut expected, env!("CARGO_PKG_VERSION"))
             .unwrap();
         assert_eq!(csv, expected);
     }
@@ -795,6 +797,24 @@ mod tests {
         let db = capture(&dir, vec![sighting([0x10, 0, 0, 0, 0, 1], EPOCH_MS, None)]);
         let prepared = prepare(&keyed(), None, &db, ExportFilter::default(), false).unwrap();
         assert!(matches!(prepared, Prepare::NoRows(_)));
+    }
+
+    #[test]
+    fn upload_prepare_reports_no_rows_when_every_ssid_is_excluded() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = capture(
+            &dir,
+            vec![
+                sighting([0x10, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0)),
+                sighting([0x10, 0, 0, 0, 0, 2], EPOCH_MS + 1_000, Some(37.1)),
+            ],
+        );
+        // `sighting` stores every network as `example`.
+        let excluded_ssids = std::collections::HashSet::from([b"example".to_vec()]);
+        let filter = ExportFilter { excluded_ssids, ..ExportFilter::default() };
+        let prepared = prepare(&keyed(), None, &db, filter, false).unwrap();
+        let Prepare::NoRows(summary) = prepared else { panic!("rows to upload") };
+        assert_eq!(summary.excluded_ssid, 2);
     }
 
     /// Three networks heard a minute apart, positioned, with an upload recorded through

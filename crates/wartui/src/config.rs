@@ -7,10 +7,11 @@
 //! and rebuilt when it is wrong — and the distinction is why that file is silent about
 //! failures and this one is not.
 //!
-//! Only `run` and `upload` load the file — `--config` is one of each's own arguments — so
-//! a broken `wartui.toml` cannot stop `ports`, `status` or `reset` from working. Within
-//! `run`, the file beats the built-in default. `upload` only reads the API key from it,
-//! and never creates or saves the file.
+//! Only `run`, `export`, `analyze` and `upload` load the file — `--config` is one of each's
+//! own arguments — so a broken `wartui.toml` cannot stop `ports`, `status` or `reset` from
+//! working. Within `run`, the file beats the built-in default. `export`, `analyze` and
+//! `upload` read the excluded SSIDs, `upload` the API key too, and none of them creates or
+//! saves the file.
 //!
 //! `run` creates the file once when it is absent, holding only the empty API key, so a
 //! first-time operator has a place to paste one. It never rewrites an existing file at
@@ -141,6 +142,11 @@ fn read_mac<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Mac>, D
 /// is the ceiling because whether anything above it works correctly is unverified,
 /// per `AGENTS.md`'s tx-power invariant.
 pub const TX_POWER_DBM: RangeInclusive<i8> = 2..=20;
+
+/// Each excluded SSID as the bytes a sighting's SSID is matched against.
+pub fn excluded_ssid_bytes(ssids: &[String]) -> impl Iterator<Item = Vec<u8>> + '_ {
+    ssids.iter().map(|ssid| ssid.as_bytes().to_vec())
+}
 
 impl Config {
     fn validate(&self) -> Result<()> {
@@ -415,8 +421,8 @@ fn resolve_symlink_target(path: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ApiKeys, Bluetooth, Bridge, Config, TxPower, create_if_missing, default_path_in, load,
-        load_from, path, save,
+        ApiKeys, Bluetooth, Bridge, Config, TxPower, create_if_missing, default_path_in,
+        excluded_ssid_bytes, load, load_from, path, save,
     };
     use crate::run::PoolArg;
     use std::ffi::OsStr;
@@ -685,6 +691,13 @@ mod tests {
         assert_eq!(saved.excluded_ssids, ["HomeNet", "Pixel 9"]);
         let text = std::fs::read_to_string(&target).unwrap();
         assert!(text.contains("excluded-ssids = [\"HomeNet\", \"Pixel 9\"]"), "{text}");
+    }
+
+    #[test]
+    fn config_excluded_ssid_bytes_yields_each_entry_as_bytes_when_list_is_set() {
+        let config = full(PoolArg::Us, 8, 12);
+        let bytes: Vec<Vec<u8>> = excluded_ssid_bytes(&config.excluded_ssids).collect();
+        assert_eq!(bytes, [b"HomeNet".to_vec(), b"Pixel 9".to_vec()]);
     }
 
     #[test]

@@ -89,6 +89,7 @@ than adding to it, so every export, analysis and upload covers exactly one run.
 | `--db PATH`           | newest in this directory | The capture to read                              |
 | `--out PATH`, `-o`    | the capture's name, .csv | Where to write; `--out -` writes to standard out |
 | `--recapture SECONDS` | `3600`                   | How wide each row's window is                    |
+| `--config PATH`       | per-OS path              | Where to read the excluded SSIDs                 |
 
 So `wartui export` alone exports the run that just ended, `wartui-2026-09-18-14-30-07.db` to
 `wartui-2026-09-18-14-30-07.csv`. A derived name is never overwritten, since that file may be the
@@ -111,7 +112,8 @@ administered unicast Wi-Fi and BLE random addresses remain exportable. `export`,
 `upload` also warn about channel-zero Wi-Fi sightings, including those with invalid addresses:
 the warning counts can overlap and count sightings, not networks or rows. Channel zero alone
 does not exclude a sighting, and BLE channel zero is not counted. Advertised channels outside
-the scan pool remain exportable.
+the scan pool remain exportable. Wi-Fi sightings of an `excluded-ssids` entry are left out too, and
+a note says how many; see "Config file".
 
 `RCOIs` holds a Passpoint access point's roaming consortium identifiers and `MfgrId` a BLE
 advertiser's manufacturer identifier, both blank (NULL in the store) when none was offered. A BLE
@@ -121,8 +123,9 @@ inquiry produces, and the nodes never transmit while scanning.
 ### Analyzing a capture
 
 `analyze` prints what `export` would report for a capture, then what it lost on the way in. It
-takes `--db` and `--recapture` as `export` does. Reports go to standard output and quality warnings
-to standard error; no output file is written. The tail of its output, after the export summary:
+takes `--db`, `--recapture` and `--config` as `export` does. Reports go to standard output and
+quality warnings to standard error; no output file is written. The tail of its output, after the
+export summary:
 
 ```
   bridge     1,203,551 frames received  1,300 dropped (0.1%)  1 reboot  host read 1,202,240  11 lost on USB
@@ -225,7 +228,7 @@ wartui upload --db tonight.db -y  # another capture, without asking
 |-----------------------|--------------------------|-------------------------------|
 | `--db PATH`           | newest in this directory | The capture to read           |
 | `--recapture SECONDS` | `3600`                   | How wide each row's window is |
-| `--config PATH`       | per-OS path              | Where to read the API key     |
+| `--config PATH`       | per-OS path              | Where to read the settings    |
 | `--yes`, `-y`         | off                      | Upload without asking         |
 | `--resend`            | off                      | Send everything, not just new |
 
@@ -319,17 +322,19 @@ owner.
 A Wi-Fi sighting whose SSID equals an `excluded-ssids` entry is dropped before wartui counts or
 records it, so it never reaches the capture, the live stream, an export, or an upload. An SSID
 excluded mid-run is dropped from its next sighting on. Sightings recorded before then stay in the
-capture, and export and upload include them. The match is
-exact and case-sensitive: `homenet` does not exclude `HomeNet`. Bluetooth names are never matched.
-`--record-raw` keeps whole frames, so those still hold an excluded network's bytes.
+capture, but `export`, `analyze` and `upload` leave out every sighting of an SSID excluded when they
+run. The match is exact and case-sensitive: `homenet` does not exclude `HomeNet`. Bluetooth names
+are never matched. `--record-raw` keeps whole frames, so those still hold an excluded network's
+bytes.
 
 | OS               | Default path                                                                                                     |
 |------------------|------------------------------------------------------------------------------------------------------------------|
 | macOS            | `~/Library/Application Support/wartui/wartui.toml`                                                               |
 | Linux and others | `$XDG_CONFIG_HOME/wartui/wartui.toml`, or `~/.config/wartui/wartui.toml` when that variable is unset or relative |
 
-`--config PATH` (a `run` and `upload` flag) reads another file, for testing and debugging. A named
-file that is missing is refused; a missing default file silently means the built-in defaults.
+`--config PATH` (a `run`, `export`, `analyze` and `upload` flag) reads another file, for testing
+and debugging. A named file that is missing is refused; a missing default file silently means the
+built-in defaults.
 
 ### Benchmarking the store
 

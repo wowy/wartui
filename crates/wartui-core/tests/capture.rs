@@ -72,7 +72,7 @@ async fn drive_stores_sightings_that_export_when_fleet_simulated() {
     assert_eq!(settings, 1, "runtime records initial settings, not every event or tick");
 
     let mut csv = Vec::new();
-    let summary = wigle_csv(&conn, ExportFilter::default(), &mut csv, "0.1.0").expect("exporting");
+    let summary = wigle_csv(&conn, &ExportFilter::default(), &mut csv, "0.1.0").expect("exporting");
     let csv = String::from_utf8(csv).expect("the CSV is UTF-8");
 
     assert!(summary.rows > 0);
@@ -204,7 +204,7 @@ async fn drive_attaches_gps_positions_when_receiver_moves() {
     );
 
     let mut csv = Vec::new();
-    let summary = wigle_csv(&conn, ExportFilter::default(), &mut csv, "0.1.0").expect("exporting");
+    let summary = wigle_csv(&conn, &ExportFilter::default(), &mut csv, "0.1.0").expect("exporting");
     let csv = String::from_utf8(csv).expect("the CSV is UTF-8");
     assert!(summary.rows > 0);
     for row in csv.lines().skip(2) {

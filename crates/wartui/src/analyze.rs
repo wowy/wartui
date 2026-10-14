@@ -13,7 +13,9 @@ use wartui_core::export::wigle_csv;
 use wartui_core::store::open_readonly;
 use wartui_proto::mac;
 
-use crate::export::{Selection, details, note_quality, note_unknown_kind, note_unpositioned};
+use crate::export::{
+    Selection, details, note_excluded, note_quality, note_unknown_kind, note_unpositioned,
+};
 use crate::text::{buffer_full, thousands};
 
 #[derive(ClapArgs, Debug)]
@@ -26,10 +28,11 @@ pub struct Args {
 }
 
 pub fn run(args: Args) -> Result<()> {
+    let (config, _) = args.selection.config()?;
     let db = args.selection.capture("analyzing")?;
     let conn = open_readonly(&db).with_context(|| format!("opening {}", db.display()))?;
-    let filter = args.selection.filter();
-    let summary = wigle_csv(&conn, filter, &mut std::io::sink(), env!("CARGO_PKG_VERSION"))?;
+    let filter = args.selection.filter(&config);
+    let summary = wigle_csv(&conn, &filter, &mut std::io::sink(), env!("CARGO_PKG_VERSION"))?;
     let loss = losses(&conn).context("reading what the capture lost")?;
     print!(
         "{} rows to export\n{}{}",
@@ -42,6 +45,7 @@ pub fn run(args: Args) -> Result<()> {
     }
     note_unpositioned(&summary);
     note_unknown_kind(&summary);
+    note_excluded(&summary);
     note_quality(&summary);
     Ok(())
 }

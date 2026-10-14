@@ -6,6 +6,7 @@
 //! from the outside — a file WiGLE rejects looks exactly like a file it
 //! accepts until it is uploaded.
 
+use std::collections::HashSet;
 use std::time::Duration;
 
 use rusqlite::Connection;
@@ -212,14 +213,14 @@ fn write(dir: &tempfile::TempDir, records: Vec<Record>) -> Connection {
 }
 
 fn export(conn: &Connection) -> (String, wartui_core::export::ExportSummary) {
-    export_with(conn, ExportFilter::default())
+    export_with(conn, &ExportFilter::default())
 }
 
 /// Export with an explicit filter, for the tests that pin a window of their
 /// own rather than the default one.
 fn export_with(
     conn: &Connection,
-    filter: ExportFilter,
+    filter: &ExportFilter,
 ) -> (String, wartui_core::export::ExportSummary) {
     let mut out = Vec::new();
     let summary = wigle_csv(conn, filter, &mut out, "0.1.0").expect("exporting");
@@ -1352,7 +1353,7 @@ fn wigle_csv_takes_first_seen_from_unpositioned_when_window_zero() {
     );
 
     let (csv, summary) =
-        export_with(&conn, ExportFilter { recapture_secs: 0, ..ExportFilter::default() });
+        export_with(&conn, &ExportFilter { recapture_secs: 0, ..ExportFilter::default() });
     assert_eq!(summary.rows, 1);
     assert!(
         csv.lines().nth(2).expect("a row").contains("2026-05-01 13:34:37"),
@@ -1730,7 +1731,7 @@ fn wigle_csv_skips_invalid_wifi_addresses_when_capture_preserves_them() {
     let rw = open_readwrite(&dir.path().join("wartui.db")).expect("opening read-write");
     record_upload(&rw, summary.last_id.unwrap(), EPOCH_MS + 6000, 7, summary.rows)
         .expect("recording the cutoff locally");
-    let (csv, summary) = export_with(&conn, AFTER_UPLOADS);
+    let (csv, summary) = export_with(&conn, &after_uploads());
     assert!(macs(&csv).is_empty());
     assert_eq!(summary.last_id, None);
     assert_eq!((summary.invalid_address, summary.wifi_channel_zero), (0, 0));
@@ -1916,10 +1917,77 @@ fn macs(csv: &str) -> Vec<&str> {
     csv.lines().skip(2).filter_map(|line| line.split(',').next()).collect()
 }
 
-const AFTER_UPLOADS: ExportFilter = ExportFilter {
-    recapture_secs: wartui_core::export::DEFAULT_RECAPTURE_SECS,
-    after_uploads: true,
-};
+/// The filter an upload exports with: everything after the newest non-failed upload.
+fn after_uploads() -> ExportFilter {
+    ExportFilter { after_uploads: true, ..ExportFilter::default() }
+}
+
+/// The default filter, leaving out Wi-Fi sightings of `ssid`.
+fn excluding(ssid: &[u8]) -> ExportFilter {
+    ExportFilter { excluded_ssids: HashSet::from([ssid.to_vec()]), ..ExportFilter::default() }
+}
+
+/// A Wi-Fi sighting of `ssid`, otherwise as [`observation`].
+fn named(bssid: [u8; 6], ssid: &[u8], at_ms: i64) -> Record {
+    let mut record = observation(NODE, bssid, -60, at_ms, fixed(37.0, -122.0));
+    let Record::Observation(obs) = &mut record else { unreachable!() };
+    obs.ssid = ssid.to_vec();
+    record
+}
+
+#[test]
+fn wigle_csv_leaves_out_wifi_sightings_when_ssid_is_excluded() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let conn = write(
+        &dir,
+        vec![
+            named([0xA0; 6], b"HomeNet", EPOCH_MS),
+            named([0xA2; 6], b"Cafe", EPOCH_MS + 1000),
+            named([0xA0; 6], b"HomeNet", EPOCH_MS + 2000),
+            named([0xA4; 6], b"HomeNet", EPOCH_MS + 3000),
+        ],
+    );
+
+    let (csv, summary) = export_with(&conn, &excluding(b"HomeNet"));
+    assert_eq!(macs(&csv), ["A2:A2:A2:A2:A2:A2"], "{csv}");
+    assert_eq!(summary.excluded_ssid, 3);
+    assert_eq!(summary.rows, 1);
+    assert_eq!((summary.wifi.networks, summary.wifi.sightings, summary.wifi.rows), (1, 1, 1));
+    assert_eq!(summary.positions, wartui_core::export::Positions { gps: 0, fixed: 1, none: 0 });
+}
+
+#[test]
+fn wigle_csv_keeps_ble_sighting_when_name_matches_excluded_ssid() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let conn = write(&dir, vec![ble_observation(NODE, [0xC3; 6], EPOCH_MS, fixed(37.0, -122.0))]);
+
+    // `ble_observation` stores the name `example`, and the exclusion is for Wi-Fi only.
+    let (csv, summary) = export_with(&conn, &excluding(b"example"));
+    assert_eq!(macs(&csv), ["C3:C3:C3:C3:C3:C3"], "{csv}");
+    assert_eq!(summary.excluded_ssid, 0);
+    assert_eq!(summary.ble.rows, 1);
+}
+
+#[test]
+fn wigle_csv_moves_last_id_when_final_sighting_is_excluded() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let conn = write(
+        &dir,
+        vec![named([0xA0; 6], b"Cafe", EPOCH_MS), named([0xA2; 6], b"HomeNet", EPOCH_MS + 1000)],
+    );
+
+    let (csv, summary) = export_with(&conn, &excluding(b"HomeNet"));
+    assert_eq!(macs(&csv), ["A0:A0:A0:A0:A0:A0"], "{csv}");
+    // The excluded sighting is the last one stored, and an upload's cutoff covers it.
+    assert_eq!(summary.last_id, Some(2));
+
+    let rw = open_readwrite(&dir.path().join("wartui.db")).expect("opening read-write");
+    record_upload(&rw, summary.last_id.unwrap(), EPOCH_MS + 2000, 7, summary.rows)
+        .expect("recording the cutoff");
+    let (csv, summary) = export_with(&conn, &after_uploads());
+    assert!(macs(&csv).is_empty(), "{csv}");
+    assert_eq!(summary.last_id, None);
+}
 
 #[test]
 fn wigle_csv_skips_sightings_through_cutoff_when_after_uploads() {
@@ -1930,7 +1998,7 @@ fn wigle_csv_skips_sightings_through_cutoff_when_after_uploads() {
     let id = record_upload(&rw, 2, EPOCH_MS + 90_000, 7, 2).expect("recording");
     set_upload_result(&rw, id, "done").expect("setting the result");
 
-    let (csv, summary) = export_with(&conn, AFTER_UPLOADS);
+    let (csv, summary) = export_with(&conn, &after_uploads());
     assert_eq!(macs(&csv), ["A4:A4:A4:A4:A4:A4"], "{csv}");
     assert_eq!(summary.last_id, Some(3));
 }
@@ -1945,7 +2013,7 @@ fn wigle_csv_ignores_upload_for_cutoff_when_it_failed() {
     let failed = record_upload(&rw, 2, EPOCH_MS + 90_000, 8, 1).expect("recording");
     set_upload_result(&rw, failed, "failed").expect("setting the result");
 
-    let (csv, summary) = export_with(&conn, AFTER_UPLOADS);
+    let (csv, summary) = export_with(&conn, &after_uploads());
     assert_eq!(macs(&csv), ["A2:A2:A2:A2:A2:A2", "A4:A4:A4:A4:A4:A4"], "{csv}");
     assert_eq!(summary.rows, 2);
 }
@@ -1977,6 +2045,6 @@ fn wigle_csv_includes_row_when_stored_after_upload_at_cutoff_time() {
     let rw = open_readwrite(&dir.path().join("wartui.db")).expect("opening read-write");
     record_upload(&rw, 1, EPOCH_MS + 30_000, 7, 1).expect("recording");
 
-    let (csv, _) = export_with(&conn, AFTER_UPLOADS);
+    let (csv, _) = export_with(&conn, &after_uploads());
     assert_eq!(macs(&csv), ["A2:A2:A2:A2:A2:A2"], "{csv}");
 }

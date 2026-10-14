@@ -30,6 +30,7 @@ use serde_json::{Map, Value};
 use wartui_core::export::ExportFilter;
 
 use super::{Settings, centered_rect};
+use crate::config;
 use crate::upload::{
     Client, GIVE_UP, JobFailed, Prepare, Prepared, Progress, Simulated, Waited, counts, finish,
     prepare, send, size, wait,
@@ -76,7 +77,10 @@ impl std::fmt::Debug for Upload {
 
 impl Upload {
     /// `u`: start preparing, or say why not. Returns the notice to show, if any.
-    pub(super) fn press(&mut self, settings: &Settings) -> Option<String> {
+    ///
+    /// `excluded` is the engine's list in force, not `settings.saved`'s, which is stale
+    /// when saving `wartui.toml` failed.
+    pub(super) fn press(&mut self, settings: &Settings, excluded: &[String]) -> Option<String> {
         if !matches!(self.stage, Stage::Idle) {
             return Some("an upload is already under way".to_owned());
         }
@@ -87,10 +91,13 @@ impl Upload {
         let config = settings.saved.clone();
         let config_path = settings.config_path.clone();
         let db = settings.upload.db.clone();
+        let filter = ExportFilter {
+            excluded_ssids: config::excluded_ssid_bytes(excluded).collect(),
+            ..ExportFilter::default()
+        };
         let (tx, rx) = channel();
         std::thread::spawn(move || {
-            let prepared =
-                prepare(&config, config_path.as_deref(), &db, ExportFilter::default(), false);
+            let prepared = prepare(&config, config_path.as_deref(), &db, filter, false);
             let _ = tx.send(prepared);
         });
         self.stage = Stage::Preparing(rx);

@@ -113,7 +113,7 @@ impl Ui {
             KeyCode::Char('r') => self.clear_ring(snapshot, commands),
             KeyCode::Char('R') => self.clear_fleet_ring(snapshot, commands),
             KeyCode::Char('u') => {
-                if let Some(text) = self.upload.press(&self.settings) {
+                if let Some(text) = self.upload.press(&self.settings, &snapshot.excluded_ssids) {
                     self.say(text, snapshot);
                 }
             }

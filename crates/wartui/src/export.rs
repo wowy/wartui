@@ -25,10 +25,11 @@ use wartui_core::store::{Connection, is_simulated, open_readonly};
 use wartui_proto::mac;
 
 use crate::capture;
+use crate::config::{self, Config};
 use crate::text::thousands;
 
-/// Which capture to read and which of its rows to send, shared by `export` and `upload`
-/// so both read a capture the same way.
+/// Which capture to read and which of its rows to send, shared by `export`, `analyze` and
+/// `upload` so all three read a capture the same way.
 #[derive(ClapArgs, Debug)]
 pub struct Selection {
     /// The capture to read. The newest `wartui-<date>.db` in the working
@@ -41,6 +42,11 @@ pub struct Selection {
     /// per network.
     #[arg(long, value_name = "SECONDS", default_value_t = DEFAULT_RECAPTURE_SECS)]
     recapture: u64,
+
+    /// Read settings from this file instead of the default `wartui.toml`. Never
+    /// written; see `crates/wartui/README.md` § "Config file".
+    #[arg(long, value_name = "PATH")]
+    config: Option<PathBuf>,
 }
 
 impl Selection {
@@ -62,9 +68,18 @@ impl Selection {
         }
     }
 
-    /// The rows `--recapture` asks for.
-    pub(crate) fn filter(&self) -> ExportFilter {
-        ExportFilter { recapture_secs: self.recapture, after_uploads: false }
+    /// The settings file `--config` names, or the default one, and where it is.
+    pub(crate) fn config(&self) -> Result<(Config, Option<PathBuf>)> {
+        Ok((config::load(self.config.as_deref())?, config::path(self.config.as_deref())))
+    }
+
+    /// The rows `--recapture` asks for, leaving out `config`'s excluded SSIDs.
+    pub(crate) fn filter(&self, config: &Config) -> ExportFilter {
+        ExportFilter {
+            recapture_secs: self.recapture,
+            after_uploads: false,
+            excluded_ssids: config::excluded_ssid_bytes(&config.excluded_ssids).collect(),
+        }
     }
 }
 
@@ -81,6 +96,7 @@ pub struct Args {
 }
 
 pub fn run(args: Args) -> Result<()> {
+    let (config, _) = args.selection.config()?;
     let db = args.selection.capture("exporting")?;
     let (out, derived) = match args.out {
         Some(path) => (path, false),
@@ -95,25 +111,26 @@ pub fn run(args: Args) -> Result<()> {
     }
     let conn = open_readonly(&db).with_context(|| format!("opening {}", db.display()))?;
     let warning = test_data_note(&conn, &db)?;
-    let filter = args.selection.filter();
+    let filter = args.selection.filter(&config);
     let version = env!("CARGO_PKG_VERSION");
 
     let summary = if out.as_os_str() == "-" {
         let stdout = std::io::stdout();
         let mut writer = BufWriter::new(stdout.lock());
-        let summary = wigle_csv(&conn, filter, &mut writer, version)?;
+        let summary = wigle_csv(&conn, &filter, &mut writer, version)?;
         writer.flush().context("flushing the export")?;
         eprint!("{}", report(&summary, None));
         summary
     } else {
         let summary =
-            into_csv(&out, derived, |writer| Ok(wigle_csv(&conn, filter, writer, version)?))?;
+            into_csv(&out, derived, |writer| Ok(wigle_csv(&conn, &filter, writer, version)?))?;
         eprint!("{}", report(&summary, Some(&out)));
         summary
     };
 
     note_unpositioned(&summary);
     note_unknown_kind(&summary);
+    note_excluded(&summary);
     note_quality(&summary);
     if let Some(warning) = warning {
         eprintln!("{warning}");
@@ -154,6 +171,16 @@ pub(crate) fn note_unknown_kind(summary: &ExportSummary) {
             "warning: {} sightings were left out because their kind is neither Wi-Fi nor BLE. \
              The capture holds a record this build cannot export.",
             thousands(summary.unknown_kind)
+        );
+    }
+}
+
+/// Say how many Wi-Fi sightings were left out for an excluded SSID, if any.
+pub(crate) fn note_excluded(summary: &ExportSummary) {
+    if summary.excluded_ssid > 0 {
+        eprintln!(
+            "{} sightings of excluded SSIDs were left out.",
+            thousands(summary.excluded_ssid)
         );
     }
 }
@@ -391,6 +418,7 @@ mod tests {
             last_id: Some(4_012_345),
             unknown_kind: 0,
             invalid_address: 0,
+            excluded_ssid: 0,
             wifi_channel_zero: 0,
         }
     }
@@ -558,8 +586,11 @@ mod tests {
         let records = vec![sighting([0x10, 0, 0, 0, 0, 1], EPOCH_MS, Some(37.0))];
         let db = capture_simulated(&dir, records, true);
         let out = dir.path().join("tonight.csv");
-        let args =
-            Args { selection: Selection { db: Some(db), recapture: 0 }, out: Some(out.clone()) };
+        // An empty file of its own, so the operator's `wartui.toml` plays no part.
+        let config = dir.path().join("wartui.toml");
+        std::fs::write(&config, "").unwrap();
+        let selection = Selection { db: Some(db), recapture: 0, config: Some(config) };
+        let args = Args { selection, out: Some(out.clone()) };
         super::run(args).unwrap();
         let csv = std::fs::read_to_string(&out).unwrap();
         assert!(csv.contains("10:00:00:00:00:01"), "{csv}");

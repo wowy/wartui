@@ -46,6 +46,10 @@
 //! on both sides within the recapture width gets a second row, which WDGWars skips when scoring. An
 //! unpositioned sighting before the cutoff counts as sent, so a later fix does not bring it back.
 //!
+//! [`ExportFilter::excluded_ssids`] leaves out every Wi-Fi sighting of an excluded SSID, including
+//! what a network sent before it was excluded mid-run; removing the exclusion brings them back to
+//! `export`, and to an upload only with `--resend`, because they sit behind the cutoff.
+//!
 //! The columns v1.6 added over v1.4 are derived or blank, never stored. `Frequency` is a function
 //! of the stored channel. `RCOIs` and `MfgrId` carry a Passpoint access point's roaming consortium
 //! identifiers and a BLE advertiser's manufacturer identifier. They are blank when the capture
@@ -53,6 +57,7 @@
 //! row's `Frequency` is blank on purpose: WiGLE wants a Bluetooth class-of-device code there, which
 //! only an active inquiry produces, and a node never transmits while scanning.
 
+use std::collections::HashSet;
 use std::io::Write;
 
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -92,7 +97,7 @@ pub enum ExportError {
 }
 
 /// What to export.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct ExportFilter {
     /// How long after a window opened a sighting still belongs to it, in seconds. `0` folds a
     /// network's whole capture into one row.
@@ -100,12 +105,19 @@ pub struct ExportFilter {
     /// Leave out sightings covered by the newest non-failed upload. Off by default, so `export` and
     /// `analyze` read the whole capture.
     pub after_uploads: bool,
+    /// Wi-Fi SSIDs left out, matched on the stored bytes exactly like
+    /// `EngineConfig::excluded_ssids`. BLE names are never matched. Empty by default.
+    pub excluded_ssids: HashSet<Vec<u8>>,
 }
 
 impl Default for ExportFilter {
     /// Every sighting, folded into [`DEFAULT_RECAPTURE_SECS`] windows.
     fn default() -> Self {
-        Self { recapture_secs: DEFAULT_RECAPTURE_SECS, after_uploads: false }
+        Self {
+            recapture_secs: DEFAULT_RECAPTURE_SECS,
+            after_uploads: false,
+            excluded_ssids: HashSet::new(),
+        }
     }
 }
 
@@ -127,6 +139,9 @@ pub struct ExportSummary {
     pub unknown_kind: u64,
     /// Wi-Fi sightings left out for a zero, broadcast or multicast address. BLE is not checked.
     pub invalid_address: u64,
+    /// Wi-Fi sightings left out because their SSID is excluded. They count only here and in
+    /// [`Self::last_id`].
+    pub excluded_ssid: u64,
     /// Wi-Fi sightings with channel zero, including those left out for an invalid address.
     /// Otherwise valid sightings remain eligible for export; BLE channel zero does not count.
     pub wifi_channel_zero: u64,
@@ -198,7 +213,7 @@ pub struct NodeStats {
 /// [`ExportError`] if the query or the write fails.
 pub fn wigle_csv<W: Write>(
     conn: &Connection,
-    filter: ExportFilter,
+    filter: &ExportFilter,
     out: &mut W,
     app_version: &str,
 ) -> Result<ExportSummary, ExportError> {
@@ -241,6 +256,11 @@ pub fn wigle_csv<W: Write>(
                 }
                 if candidate.bssid == [0; 6] || candidate.bssid[0] & 1 != 0 {
                     tally.summary.invalid_address += 1;
+                    tally.summary.last_id = Some(tally.summary.last_id.map_or(id, |t| t.max(id)));
+                    continue;
+                }
+                if filter.excluded_ssids.contains(candidate.ssid.as_deref().unwrap_or_default()) {
+                    tally.summary.excluded_ssid += 1;
                     tally.summary.last_id = Some(tally.summary.last_id.map_or(id, |t| t.max(id)));
                     continue;
                 }
