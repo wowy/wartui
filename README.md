@@ -144,7 +144,7 @@ On the `excluded ssids` page:
 | `Esc`                  | While typing: stop without adding                                 |
 | `d` / `Delete`         | Remove the selected SSID                                          |
 | `Enter`                | Apply and save the list to `wartui.toml`, then return to the rows |
-| `Esc` / `q`            | Back to the rows, dropping this page's edits                      |
+| `Esc` / `q`            | Exit this menu, dropping this page's edits                        |
 
 wartui splits the channel pool across the fleet and re-splits it whenever the fleet changes. That
 is the reason it exists. No key or flag assigns channels to a node. `b` only picks which node scans
