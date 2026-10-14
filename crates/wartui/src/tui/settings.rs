@@ -1706,7 +1706,7 @@ mod tests {
     }
 
     #[test]
-    fn excluded_page_keeps_cursor_in_view_when_list_is_longer_than_page() {
+    fn excluded_page_lines_keeps_cursor_in_view_when_list_is_longer_than_page() {
         let names: Vec<String> = (0..20).map(|n| format!("net-{n:02}")).collect();
         let lines = excluded_page_lines(&names, 19, None, None, 12);
 
