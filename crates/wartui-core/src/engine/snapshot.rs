@@ -149,6 +149,8 @@ pub struct Snapshot {
     pub tx_power: i8,
     /// The bridge's Wi-Fi transmit power, in ESP-IDF quarter-dBm units, for the settings modal.
     pub bridge_tx_power: i8,
+    /// The SSIDs never captured, as text for the settings modal to edit.
+    pub excluded_ssids: Vec<String>,
 }
 
 /// The bridge's self-report.
@@ -207,6 +209,12 @@ impl FleetEngine {
             gps: self.config.position.gps().map(crate::gps::Gps::view),
             tx_power: self.config.tx_power,
             bridge_tx_power: self.config.bridge_tx_power,
+            excluded_ssids: self
+                .config
+                .excluded_ssids
+                .iter()
+                .map(|ssid| String::from_utf8_lossy(ssid).into_owned())
+                .collect(),
         }
     }
 

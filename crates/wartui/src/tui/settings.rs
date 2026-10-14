@@ -1,6 +1,11 @@
 //! The settings modal shows what is in force, not what `wartui.toml` holds. The two
 //! differ after a hand edit or a failed save, and the operator is changing the running
 //! capture. `Enter` puts every row in force, then writes every row to the file.
+//!
+//! `Enter` on the excluded-SSIDs page applies and saves only the list, then returns to
+//! the rows. The operator opened the page to change the list, not the rows above it, so
+//! their pending edits stay pending for the main `Enter` or `Esc`. `Esc` on the page drops
+//! only the page's edits, so backing out of a list never costs the rows above it either.
 
 use std::fmt::Display;
 use std::path::PathBuf;
@@ -51,16 +56,18 @@ enum Field {
     Bridge,
     RememberBle,
     RememberBridge,
+    ExcludedSsids,
     WdgwarsKey,
 }
 
 /// Every row of the settings modal, top to bottom, in the order `next` and `prev` walk.
-const FIELDS: [Field; 6] = [
+const FIELDS: [Field; 7] = [
     Field::Pool,
     Field::Fleet,
     Field::Bridge,
     Field::RememberBle,
     Field::RememberBridge,
+    Field::ExcludedSsids,
     Field::WdgwarsKey,
 ];
 
@@ -96,6 +103,26 @@ pub(super) struct ConfigModal {
     remember_bridge: bool,
     /// The WDGWars API key, typed or pasted. Empty means not set.
     wdgwars_key: String,
+    /// The SSIDs never captured, edited on [`Page::Excluded`].
+    excluded: Vec<String>,
+    /// Which page of the modal is showing.
+    page: Page,
+}
+
+/// The modal's pages. The main rows, or the list one row opens.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Page {
+    Main,
+    Excluded {
+        /// The selected entry of [`ConfigModal::excluded`].
+        cursor: usize,
+        /// The SSID being typed after `a`, or `None` while moving through the list.
+        input: Option<String>,
+        /// Why the last `Enter` in the input refused it.
+        error: Option<&'static str>,
+        /// The list as the page opened, restored when `Esc` backs out.
+        before: Vec<String>,
+    },
 }
 
 /// `All → Eu → Us`, the order the pool row steps through.
@@ -122,6 +149,7 @@ impl ConfigModal {
     /// | tx power | 1 dBm, within `config::TX_POWER_DBM` |
     /// | pool | one place in [`POOL_STEPS`] |
     /// | remember | flips |
+    /// | excluded ssids | none; [`Self::on_key`] opens its page |
     /// | key | none; [`Self::on_key`] types into it |
     fn step(&mut self, delta: i8) {
         let value = match self.selected {
@@ -143,8 +171,8 @@ impl ConfigModal {
                 }
                 return;
             }
-            // A text row. `on_key` types into it.
-            Field::WdgwarsKey => return,
+            // A text row, and a row that opens a page. `on_key` handles both.
+            Field::WdgwarsKey | Field::ExcludedSsids => return,
         };
         // In i16, so stepping past either end of i8 cannot overflow.
         let start = i16::from(*config::TX_POWER_DBM.start());
@@ -163,6 +191,9 @@ pub(super) enum ModalAction {
     Close,
     /// `Enter`: apply every row, save, and close.
     Apply,
+    /// `Enter` on the excluded-SSIDs page: apply and save only the list, then return to
+    /// the rows.
+    SaveExcluded,
 }
 
 impl ConfigModal {
@@ -178,11 +209,27 @@ impl ConfigModal {
             remember_bridge: settings.bridge_memory.is_enabled(),
             // Nor this one. It is what the file holds, hand edits included.
             wdgwars_key: settings.saved.api_keys.wdgwars.clone(),
+            excluded: snapshot.excluded_ssids.clone(),
+            page: Page::Main,
         }
     }
 
     /// A key while the modal is open.
     pub(super) fn on_key(&mut self, key: KeyEvent) -> ModalAction {
+        if matches!(self.page, Page::Excluded { .. }) {
+            return self.on_page_key(key);
+        }
+        if self.selected == Field::ExcludedSsids
+            && matches!(key.code, KeyCode::Enter | KeyCode::Right | KeyCode::Char('l'))
+        {
+            self.page = Page::Excluded {
+                cursor: 0,
+                input: None,
+                error: None,
+                before: self.excluded.clone(),
+            };
+            return ModalAction::Stay;
+        }
         // The key row is a text field. Letters type there rather than move or close.
         if self.selected == Field::WdgwarsKey {
             let control = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -215,14 +262,92 @@ impl ConfigModal {
         ModalAction::Stay
     }
 
-    /// A bracketed paste. Appended to the key when the modal is on its row, ignored
-    /// anywhere else. Whitespace and control characters are dropped, so a trailing
-    /// newline or a wrapped key's line breaks never reach the file.
+    /// A key on the excluded-SSIDs page.
+    fn on_page_key(&mut self, key: KeyEvent) -> ModalAction {
+        let Page::Excluded { cursor, input, error, before } = &mut self.page else {
+            return ModalAction::Stay;
+        };
+        let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        if let Some(text) = input {
+            match key.code {
+                KeyCode::Char('u') if control => {
+                    text.clear();
+                    *error = None;
+                }
+                KeyCode::Char(c) if !control => {
+                    text.push(c);
+                    *error = None;
+                }
+                KeyCode::Backspace => {
+                    text.pop();
+                    *error = None;
+                }
+                KeyCode::Enter => match config::check_excluded_ssid(text, &self.excluded) {
+                    Err(why) => *error = Some(refusal_text(why)),
+                    Ok(()) => {
+                        self.excluded.push(std::mem::take(text));
+                        *cursor = self.excluded.len() - 1;
+                        *input = None;
+                        *error = None;
+                    }
+                },
+                KeyCode::Esc => {
+                    *input = None;
+                    *error = None;
+                }
+                _ => {}
+            }
+            return ModalAction::Stay;
+        }
+        match key.code {
+            KeyCode::Down | KeyCode::Char('j') => {
+                *cursor = (*cursor + 1).min(self.excluded.len().saturating_sub(1));
+            }
+            KeyCode::Up | KeyCode::Char('k') => *cursor = cursor.saturating_sub(1),
+            KeyCode::Char('a') => *input = Some(String::new()),
+            KeyCode::Char('d') | KeyCode::Delete if *cursor < self.excluded.len() => {
+                self.excluded.remove(*cursor);
+                *cursor = (*cursor).min(self.excluded.len().saturating_sub(1));
+            }
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.excluded = std::mem::take(before);
+                self.page = Page::Main;
+            }
+            KeyCode::Enter => return ModalAction::SaveExcluded,
+            _ => {}
+        }
+        ModalAction::Stay
+    }
+
+    /// Return from the excluded-SSIDs page to the rows, keeping the list as edited.
+    pub(super) fn leave_page(&mut self) {
+        self.page = Page::Main;
+    }
+
+    /// A bracketed paste. Appended to the key when the modal is on its row, or to the
+    /// SSID being typed on the excluded-SSIDs page, and ignored anywhere else. Control
+    /// characters are dropped from both, so a trailing newline never reaches the file.
+    /// The key drops whitespace too, which an SSID may hold.
     pub(super) fn paste(&mut self, text: &str) {
-        if self.selected != Field::WdgwarsKey {
+        if let Page::Excluded { input: Some(input), error, .. } = &mut self.page {
+            input.extend(text.chars().filter(|c| !c.is_control()));
+            *error = None;
+            return;
+        }
+        if self.page != Page::Main || self.selected != Field::WdgwarsKey {
             return;
         }
         self.wdgwars_key.extend(text.chars().filter(|c| !c.is_whitespace() && !c.is_control()));
+    }
+}
+
+/// A refusal as the page's one-line error shows it. Short, to fit the modal's width;
+/// the file's messages quote the entry, which a 32-byte SSID would overflow.
+fn refusal_text(refusal: config::SsidRefusal) -> &'static str {
+    match refusal {
+        config::SsidRefusal::Empty => "type an ssid first",
+        config::SsidRefusal::TooLong => "over 32 bytes, the most an ssid holds",
+        config::SsidRefusal::Listed => "already listed",
     }
 }
 
@@ -237,8 +362,9 @@ pub(super) fn apply(
     commands: &mpsc::Sender<Command>,
     settings: &mut Settings,
 ) -> Result<String, &'static str> {
-    // Reserve all three slots first, so a full queue applies none of the modal rather
-    // than part of it.
+    // Reserve every slot first, so a full queue applies none of the modal rather than
+    // part of it. The excluded list is not among them: its page sends it on its own
+    // `Enter` and restores it on `Esc`, so on the rows it is always what is in force.
     let Ok(mut permits) = commands.try_reserve_many(3) else {
         return Err(ENGINE_BUSY);
     };
@@ -286,6 +412,29 @@ pub(super) fn apply(
     Ok(text)
 }
 
+/// Send the modal's excluded SSIDs to the engine and save them to `wartui.toml`.
+/// Returns the notice saying what happened. Nothing outside `excluded-ssids` changes in
+/// the file, and no other row goes to the engine.
+///
+/// Fails with [`ENGINE_BUSY`] when the engine takes no command, and then saves
+/// nothing, as [`apply`] does.
+pub(super) fn apply_excluded(
+    modal: &ConfigModal,
+    commands: &mpsc::Sender<Command>,
+    settings: &mut Settings,
+) -> Result<String, &'static str> {
+    let ssids = modal.excluded.iter().map(|ssid| ssid.as_bytes().to_vec()).collect();
+    if commands.try_send(Command::SetExcludedSsids { ssids }).is_err() {
+        return Err(ENGINE_BUSY);
+    }
+    let mut written = settings.saved.clone();
+    written.excluded_ssids = modal.excluded.clone();
+    let saved = save(settings, written)
+        .map(|path| format!("; saved to {}", path.display()))
+        .unwrap_or_else(|error| error);
+    Ok(format!("excluded ssids: {}{saved}", excluded_count(&modal.excluded)))
+}
+
 /// Write every modal row to `wartui.toml`, and return the notice suffix: where it
 /// saved, or why it did not.
 ///
@@ -299,6 +448,7 @@ pub(super) fn apply(
 fn save_outcome(modal: &ConfigModal, snapshot: &Snapshot, settings: &mut Settings) -> String {
     let written = config::Config {
         pool: Some(modal.pool),
+        excluded_ssids: modal.excluded.clone(),
         tx_power: config::TxPower { fleet: Some(modal.fleet_dbm), bridge: Some(modal.bridge_dbm) },
         bluetooth: config::Bluetooth {
             remember: Some(modal.remember_ble),
@@ -342,8 +492,23 @@ fn save(settings: &mut Settings, written: config::Config) -> Result<PathBuf, Str
 
 /// The settings modal, centered over the live view behind it.
 pub(super) fn draw_settings_modal(frame: &mut Frame<'_>, modal: &ConfigModal) {
-    let area = centered_rect(48, 13, frame.area());
+    let area = centered_rect(48, 14, frame.area());
     frame.render_widget(Clear, area);
+
+    if let Page::Excluded { cursor, input, error, .. } = &modal.page {
+        let block = Block::bordered().title(" settings › excluded ssids ");
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        let lines = excluded_page_lines(
+            &modal.excluded,
+            *cursor,
+            input.as_deref(),
+            *error,
+            usize::from(inner.height),
+        );
+        frame.render_widget(Paragraph::new(lines), inner);
+        return;
+    }
 
     let block = Block::bordered().title(" settings ");
     let inner = block.inner(area);
@@ -367,6 +532,10 @@ pub(super) fn draw_settings_modal(frame: &mut Frame<'_>, modal: &ConfigModal) {
         row("bridge tx power", &dbm(modal.bridge_dbm), Field::Bridge),
         row("remember bt node", &on_off(modal.remember_ble), Field::RememberBle),
         row("remember bridge", &on_off(modal.remember_bridge), Field::RememberBridge),
+        Line::from(Span::styled(
+            format!("{:<18}  {} ›", "excluded ssids", excluded_count(&modal.excluded)),
+            styled(Field::ExcludedSsids),
+        )),
         Line::default(),
         Line::from("api keys"),
         Line::from(Span::styled(
@@ -375,13 +544,60 @@ pub(super) fn draw_settings_modal(frame: &mut Frame<'_>, modal: &ConfigModal) {
         )),
         Line::default(),
         // The one key the row needs that nothing else on screen says.
-        Line::from(if modal.selected == Field::WdgwarsKey && !modal.wdgwars_key.is_empty() {
-            "ctrl-u clear · enter save · esc cancel"
-        } else {
-            "enter save · esc cancel"
+        Line::from(match modal.selected {
+            Field::WdgwarsKey if !modal.wdgwars_key.is_empty() => {
+                "ctrl-u clear · enter save · esc cancel"
+            }
+            Field::ExcludedSsids => "enter open · esc cancel",
+            _ => "enter save · esc cancel",
         }),
     ];
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// The excluded-SSIDs row's value: how many, or `none`.
+fn excluded_count(excluded: &[String]) -> String {
+    if excluded.is_empty() { "none".to_owned() } else { excluded.len().to_string() }
+}
+
+/// The excluded-SSIDs page in `height` lines: the list, scrolled to keep `cursor` in
+/// view, then a line for a refusal, a line for the SSID being typed, and the keys.
+fn excluded_page_lines(
+    excluded: &[String],
+    cursor: usize,
+    input: Option<&str>,
+    error: Option<&'static str>,
+    height: usize,
+) -> Vec<Line<'static>> {
+    let rows = height.saturating_sub(3).max(1);
+    let mut lines: Vec<Line<'static>> = if excluded.is_empty() {
+        vec![Line::from("(none)")]
+    } else {
+        let top = cursor.saturating_sub(rows - 1);
+        excluded
+            .iter()
+            .enumerate()
+            .skip(top)
+            .take(rows)
+            .map(|(index, ssid)| {
+                let style = if index == cursor && input.is_none() {
+                    Style::new().add_modifier(Modifier::REVERSED)
+                } else {
+                    Style::new()
+                };
+                Line::from(Span::styled(ssid.clone(), style))
+            })
+            .collect()
+    };
+    lines.resize(rows, Line::default());
+    lines.push(error.map(Line::from).unwrap_or_default());
+    lines.push(input.map(|text| Line::from(format!("add: {text}▏"))).unwrap_or_default());
+    lines.push(Line::from(if input.is_some() {
+        "enter add · ctrl-u clear · esc cancel"
+    } else {
+        "a add · d remove · enter save · esc cancel"
+    }));
+    lines
 }
 
 /// A key as the modal shows it, so a screen share or a photo does not leak it.
@@ -1039,7 +1255,7 @@ mod tests {
 
         press(&mut ui, KeyCode::Up, KeyModifiers::NONE, &snapshot);
 
-        assert_eq!(ui.modal().expect("open").selected, Field::RememberBridge);
+        assert_eq!(ui.modal().expect("open").selected, Field::ExcludedSsids);
     }
 
     #[test]
@@ -1187,5 +1403,316 @@ mod tests {
         let rendered = modal_rendered("abc123def456", Field::RememberBridge);
         assert!(!rendered.contains("ctrl-u"), "{rendered}");
         assert!(rendered.contains("enter save · esc cancel"), "{rendered}");
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    /// Type `text` and press `Enter` in the page's input, starting it with `a`.
+    fn add_ssid(ui: &mut Ui, text: &str, snapshot: &Snapshot) {
+        press(ui, KeyCode::Char('a'), KeyModifiers::NONE, snapshot);
+        for c in text.chars() {
+            press(ui, KeyCode::Char(c), KeyModifiers::NONE, snapshot);
+        }
+        press(ui, KeyCode::Enter, KeyModifiers::NONE, snapshot);
+    }
+
+    /// The modal opened on `snapshot` with its excluded-SSIDs page open.
+    fn open_excluded_page(snapshot: &Snapshot, settings: Settings) -> Ui {
+        let (tx, _rx) = mpsc::channel(4);
+        let mut ui = Ui::new(settings);
+        select(Field::ExcludedSsids, &mut ui, snapshot, &tx);
+        press(&mut ui, KeyCode::Enter, KeyModifiers::NONE, snapshot);
+        ui
+    }
+
+    fn excluded_snapshot(ssids: &[&str]) -> Snapshot {
+        let mut snapshot = busy();
+        snapshot.excluded_ssids = ssids.iter().map(|&ssid| ssid.to_owned()).collect();
+        snapshot
+    }
+
+    #[test]
+    fn ui_opens_excluded_page_when_enter_right_or_l_pressed_on_its_row() {
+        let snapshot = excluded_snapshot(&["HomeNet"]);
+        for opener in [KeyCode::Enter, KeyCode::Right, KeyCode::Char('l')] {
+            let (tx, mut rx) = mpsc::channel(4);
+            let mut ui = Ui::default();
+            select(Field::ExcludedSsids, &mut ui, &snapshot, &tx);
+
+            ui.on_modal_key(key(opener), &snapshot, &tx);
+
+            let modal = ui.modal().expect("still open");
+            assert!(matches!(modal.page, Page::Excluded { .. }), "{opener:?} opens the page");
+            assert_eq!(modal.excluded, ["HomeNet"], "seeded from the snapshot");
+            assert!(rx.try_recv().is_err(), "{opener:?} sends nothing");
+        }
+    }
+
+    #[test]
+    fn ui_adds_ssid_with_spaces_when_typed_and_enter_pressed_on_excluded_page() {
+        let snapshot = busy();
+        let mut ui = open_excluded_page(&snapshot, Settings::default());
+
+        add_ssid(&mut ui, "Pixel 9", &snapshot);
+
+        let modal = ui.modal().expect("still open");
+        assert_eq!(modal.excluded, ["Pixel 9"]);
+        assert!(matches!(modal.page, Page::Excluded { input: None, error: None, .. }));
+    }
+
+    #[test]
+    fn ui_refuses_ssid_with_error_when_duplicate_empty_or_over_32_bytes() {
+        let snapshot = excluded_snapshot(&["HomeNet"]);
+        for (typed, why) in [
+            ("HomeNet", "already listed"),
+            ("", "type an ssid first"),
+            (&"x".repeat(33), "over 32 bytes, the most an ssid holds"),
+        ] {
+            let mut ui = open_excluded_page(&snapshot, Settings::default());
+
+            add_ssid(&mut ui, typed, &snapshot);
+
+            let modal = ui.modal().expect("still open");
+            assert_eq!(modal.excluded, ["HomeNet"], "{typed:?} is not added");
+            assert!(
+                matches!(&modal.page, Page::Excluded { input: Some(_), error: Some(e), .. } if *e == why),
+                "{typed:?}: {:?}",
+                modal.page
+            );
+        }
+    }
+
+    #[test]
+    fn ui_cancels_only_the_input_when_esc_pressed_while_typing_on_excluded_page() {
+        let snapshot = excluded_snapshot(&["HomeNet"]);
+        let mut ui = open_excluded_page(&snapshot, Settings::default());
+        add_ssid(&mut ui, "Pixel 9", &snapshot);
+        press(&mut ui, KeyCode::Char('a'), KeyModifiers::NONE, &snapshot);
+        press(&mut ui, KeyCode::Char('x'), KeyModifiers::NONE, &snapshot);
+
+        press(&mut ui, KeyCode::Esc, KeyModifiers::NONE, &snapshot);
+
+        let modal = ui.modal().expect("still open");
+        assert!(matches!(modal.page, Page::Excluded { input: None, .. }), "still on the page");
+        assert_eq!(modal.excluded, ["HomeNet", "Pixel 9"], "the earlier add survives");
+    }
+
+    #[test]
+    fn ui_removes_selected_ssid_when_d_or_delete_pressed_on_excluded_page() {
+        let snapshot = excluded_snapshot(&["HomeNet", "Pixel 9", "Work"]);
+        let mut ui = open_excluded_page(&snapshot, Settings::default());
+        press(&mut ui, KeyCode::Down, KeyModifiers::NONE, &snapshot);
+
+        press(&mut ui, KeyCode::Char('d'), KeyModifiers::NONE, &snapshot);
+        assert_eq!(ui.modal().expect("open").excluded, ["HomeNet", "Work"]);
+
+        press(&mut ui, KeyCode::Delete, KeyModifiers::NONE, &snapshot);
+        assert_eq!(ui.modal().expect("open").excluded, ["HomeNet"], "the cursor stays in range");
+    }
+
+    #[test]
+    fn ui_discards_page_edits_and_returns_to_rows_when_esc_or_q_pressed_on_excluded_page() {
+        let snapshot = excluded_snapshot(&["HomeNet"]);
+        for closer in [KeyCode::Esc, KeyCode::Char('q')] {
+            let mut ui = open_excluded_page(&snapshot, Settings::default());
+            add_ssid(&mut ui, "Pixel 9", &snapshot);
+            press(&mut ui, KeyCode::Up, KeyModifiers::NONE, &snapshot);
+            press(&mut ui, KeyCode::Char('d'), KeyModifiers::NONE, &snapshot);
+
+            press(&mut ui, closer, KeyModifiers::NONE, &snapshot);
+
+            let modal = ui.modal().expect("the modal stays open");
+            assert_eq!(modal.page, Page::Main, "{closer:?} backs out");
+            assert_eq!(modal.selected, Field::ExcludedSsids);
+            assert_eq!(modal.excluded, ["HomeNet"], "{closer:?} drops the page's edits");
+        }
+    }
+
+    #[test]
+    fn ui_appends_paste_without_control_characters_when_typing_on_excluded_page() {
+        let snapshot = busy();
+        let mut ui = open_excluded_page(&snapshot, Settings::default());
+        press(&mut ui, KeyCode::Char('a'), KeyModifiers::NONE, &snapshot);
+
+        ui.on_modal_paste("My Net\r\n");
+
+        let modal = ui.modal().expect("open");
+        assert!(
+            matches!(&modal.page, Page::Excluded { input: Some(text), .. } if text == "My Net")
+        );
+    }
+
+    #[test]
+    fn ui_sends_and_saves_only_excluded_ssids_and_returns_to_rows_when_enter_pressed_on_excluded_page()
+     {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wartui.toml");
+        let mut snapshot = excluded_snapshot(&["HomeNet"]);
+        snapshot.pool = ChannelPool::All;
+        let saved = config::Config { pool: Some(PoolArg::Us), ..config::Config::default() };
+        let settings = Settings { config_path: Some(target.clone()), saved, ..Settings::default() };
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut ui = Ui::new(settings);
+        ui.on_key(key(KeyCode::Char('c')), &snapshot, &tx);
+        // A pool edit left pending on the rows.
+        ui.on_modal_key(key(KeyCode::Char('l')), &snapshot, &tx);
+        while ui.modal().expect("open").selected != Field::ExcludedSsids {
+            ui.on_modal_key(key(KeyCode::Down), &snapshot, &tx);
+        }
+        ui.on_modal_key(key(KeyCode::Enter), &snapshot, &tx);
+        add_ssid(&mut ui, "Pixel 9", &snapshot);
+
+        ui.on_modal_key(key(KeyCode::Enter), &snapshot, &tx);
+
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            Command::SetExcludedSsids {
+                ssids: [b"HomeNet".to_vec(), b"Pixel 9".to_vec()].into_iter().collect()
+            }
+        );
+        assert!(rx.try_recv().is_err(), "the pending pool edit is not sent");
+        let file = config::load(Some(&target)).expect("a valid file");
+        assert_eq!(file.excluded_ssids, ["HomeNet", "Pixel 9"]);
+        assert_eq!(file.pool, Some(PoolArg::Us), "the rest of the file is as `saved` held it");
+        let modal = ui.modal().expect("the modal stays open");
+        assert_eq!(modal.page, Page::Main);
+        assert_eq!(modal.selected, Field::ExcludedSsids);
+        assert_eq!(modal.pool, PoolArg::Eu, "the pool edit stays pending");
+        let notice = ui.notice(snapshot.now_ms).expect("a notice");
+        assert!(notice.starts_with("excluded ssids: 2; saved to "), "{notice}");
+    }
+
+    #[test]
+    fn ui_says_none_when_enter_pressed_on_excluded_page_with_list_emptied() {
+        let snapshot = excluded_snapshot(&["HomeNet"]);
+        let mut ui = open_excluded_page(&snapshot, Settings::default());
+        press(&mut ui, KeyCode::Char('d'), KeyModifiers::NONE, &snapshot);
+        let (tx, _rx) = mpsc::channel(4);
+
+        ui.on_modal_key(key(KeyCode::Enter), &snapshot, &tx);
+
+        let notice = ui.notice(snapshot.now_ms).expect("a notice");
+        assert_eq!(notice, "excluded ssids: none; nowhere to save it — use --config");
+    }
+
+    #[test]
+    fn ui_keeps_excluded_list_in_force_when_esc_pressed_after_enter_on_excluded_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wartui.toml");
+        let snapshot = busy();
+        let settings = Settings { config_path: Some(target.clone()), ..Settings::default() };
+        let mut ui = open_excluded_page(&snapshot, settings);
+        add_ssid(&mut ui, "HomeNet", &snapshot);
+        let (tx, mut rx) = mpsc::channel(4);
+        ui.on_modal_key(key(KeyCode::Enter), &snapshot, &tx);
+
+        ui.on_modal_key(key(KeyCode::Esc), &snapshot, &tx);
+
+        assert!(ui.modal().is_none(), "Esc on the rows closes");
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            Command::SetExcludedSsids { ssids: [b"HomeNet".to_vec()].into_iter().collect() }
+        );
+        assert!(rx.try_recv().is_err(), "Esc sends nothing to undo it");
+        let file = config::load(Some(&target)).expect("a valid file");
+        assert_eq!(file.excluded_ssids, ["HomeNet"]);
+    }
+
+    #[test]
+    fn ui_clears_refusal_when_ctrl_u_pressed_while_typing_ssid() {
+        let snapshot = excluded_snapshot(&["HomeNet"]);
+        let mut ui = open_excluded_page(&snapshot, Settings::default());
+        press(&mut ui, KeyCode::Char('a'), KeyModifiers::NONE, &snapshot);
+        for c in "HomeNet".chars() {
+            press(&mut ui, KeyCode::Char(c), KeyModifiers::NONE, &snapshot);
+        }
+        press(&mut ui, KeyCode::Enter, KeyModifiers::NONE, &snapshot);
+        let Page::Excluded { error, .. } = &ui.modal().expect("open").page else {
+            panic!("still on the page");
+        };
+        assert_eq!(*error, Some("already listed"));
+
+        press(&mut ui, KeyCode::Char('u'), KeyModifiers::CONTROL, &snapshot);
+
+        let Page::Excluded { input, error, .. } = &ui.modal().expect("open").page else {
+            panic!("still on the page");
+        };
+        assert_eq!(input.as_deref(), Some(""));
+        assert_eq!(*error, None, "the refusal was about the text just cleared");
+    }
+
+    #[test]
+    fn ui_keeps_excluded_page_open_with_edits_when_enter_pressed_with_engine_busy() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wartui.toml");
+        let snapshot = busy();
+        let settings = Settings { config_path: Some(target.clone()), ..Settings::default() };
+        let mut ui = open_excluded_page(&snapshot, settings);
+        add_ssid(&mut ui, "HomeNet", &snapshot);
+        let (tx, mut rx) = mpsc::channel(1);
+        tx.try_send(Command::ClearRing { mac: None }).unwrap();
+
+        ui.on_modal_key(key(KeyCode::Enter), &snapshot, &tx);
+
+        assert_eq!(rx.try_recv().unwrap(), Command::ClearRing { mac: None });
+        assert!(rx.try_recv().is_err(), "nothing else was sent");
+        assert!(!target.exists(), "nothing was written");
+        let modal = ui.modal().expect("still open");
+        assert!(matches!(modal.page, Page::Excluded { .. }), "still on the page");
+        assert_eq!(modal.excluded, ["HomeNet"]);
+        assert_eq!(ui.notice(snapshot.now_ms), Some(ENGINE_BUSY));
+    }
+
+    #[test]
+    fn draw_shows_excluded_ssids_count_when_modal_open() {
+        let snapshot = excluded_snapshot(&["HomeNet", "Pixel 9", "Work"]);
+        let (tx, _rx) = mpsc::channel(4);
+        let mut ui = Ui::default();
+        select(Field::ExcludedSsids, &mut ui, &snapshot, &tx);
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("test backend");
+        terminal.draw(|frame| draw(frame, &snapshot, &mut ui)).expect("drawing");
+        let rendered = terminal.backend().to_string();
+
+        assert!(rendered.contains("excluded ssids      3 ›"), "{rendered}");
+        assert!(rendered.contains("enter open · esc cancel"), "{rendered}");
+    }
+
+    #[test]
+    fn draw_shows_none_on_excluded_ssids_row_when_list_empty() {
+        let rendered = modal_rendered("", Field::Pool);
+        assert!(rendered.contains("excluded ssids      none ›"), "{rendered}");
+        assert!(
+            rendered.contains("enter save · esc cancel"),
+            "the modal is tall enough: {rendered}"
+        );
+    }
+
+    #[test]
+    fn draw_shows_excluded_page_with_list_and_keys_when_page_open() {
+        let snapshot = excluded_snapshot(&["HomeNet", "Pixel 9"]);
+        let mut ui = open_excluded_page(&snapshot, Settings::default());
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("test backend");
+        terminal.draw(|frame| draw(frame, &snapshot, &mut ui)).expect("drawing");
+        let rendered = terminal.backend().to_string();
+
+        assert!(rendered.contains("settings › excluded ssids"), "{rendered}");
+        assert!(rendered.contains("HomeNet"), "{rendered}");
+        assert!(rendered.contains("Pixel 9"), "{rendered}");
+        assert!(rendered.contains("a add · d remove · enter save · esc cancel"), "{rendered}");
+    }
+
+    #[test]
+    fn excluded_page_keeps_cursor_in_view_when_list_is_longer_than_page() {
+        let names: Vec<String> = (0..20).map(|n| format!("net-{n:02}")).collect();
+        let lines = excluded_page_lines(&names, 19, None, None, 12);
+
+        let text: Vec<String> = lines.iter().map(ToString::to_string).collect();
+        assert_eq!(text.len(), 12, "fills the page exactly");
+        assert_eq!(text[8], "net-19", "the cursor's row is the last one listed");
+        assert_eq!(text[0], "net-11");
     }
 }
