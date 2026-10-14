@@ -30,7 +30,7 @@ mod replan;
 mod rx;
 mod snapshot;
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::time::Instant;
 
 use wartui_bridge::{BridgeInfo, LinkEvent};
@@ -60,6 +60,9 @@ use rx::Rx;
 #[derive(Debug)]
 pub struct FleetEngine {
     config: EngineConfig,
+    /// [`EngineConfig::excluded_ssids`] as a set, for the lookup every Wi-Fi sighting makes. The
+    /// config keeps the list in the operator's order, which the settings modal shows.
+    excluded_ssids: HashSet<Vec<u8>>,
     nodes: BTreeMap<Mac, NodeState>,
     bridge: Option<BridgeInfo>,
     link_up: bool,
@@ -147,6 +150,7 @@ impl FleetEngine {
         config.tx_power = clamp_tx_power(config.tx_power);
         config.bridge_tx_power = clamp_tx_power(config.bridge_tx_power);
         Self {
+            excluded_ssids: config.excluded_ssids.iter().cloned().collect(),
             nodes: BTreeMap::new(),
             bridge: None,
             link_up: false,

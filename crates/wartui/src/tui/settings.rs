@@ -282,9 +282,9 @@ impl ConfigModal {
                     text.pop();
                     *error = None;
                 }
-                KeyCode::Enter => match refusal(text, &self.excluded) {
-                    Some(why) => *error = Some(why),
-                    None => {
+                KeyCode::Enter => match config::check_excluded_ssid(text, &self.excluded) {
+                    Err(why) => *error = Some(refusal_text(why)),
+                    Ok(()) => {
                         self.excluded.push(std::mem::take(text));
                         *cursor = self.excluded.len() - 1;
                         *input = None;
@@ -341,18 +341,13 @@ impl ConfigModal {
     }
 }
 
-/// Why `ssid` cannot join `listed`, or `None` when it can. The same rules
-/// `config::Config::validate` applies to the file, so the modal never saves a list
-/// `load` would refuse.
-fn refusal(ssid: &str, listed: &[String]) -> Option<&'static str> {
-    if ssid.is_empty() {
-        Some("type an ssid first")
-    } else if ssid.len() > config::SSID_MAX_BYTES {
-        Some("over 32 bytes, the most an ssid holds")
-    } else if listed.iter().any(|entry| entry == ssid) {
-        Some("already listed")
-    } else {
-        None
+/// A refusal as the page's one-line error shows it. Short, to fit the modal's width;
+/// the file's messages quote the entry, which a 32-byte SSID would overflow.
+fn refusal_text(refusal: config::SsidRefusal) -> &'static str {
+    match refusal {
+        config::SsidRefusal::Empty => "type an ssid first",
+        config::SsidRefusal::TooLong => "over 32 bytes, the most an ssid holds",
+        config::SsidRefusal::Listed => "already listed",
     }
 }
 

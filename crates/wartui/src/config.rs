@@ -150,9 +150,14 @@ impl Config {
             bail!("bluetooth.node is set while bluetooth.remember = false, which forgets it");
         }
         for (index, ssid) in self.excluded_ssids.iter().enumerate() {
-            check_ssid(ssid).map_err(|problem| anyhow::anyhow!("excluded-ssids: {problem}"))?;
-            if self.excluded_ssids[..index].contains(ssid) {
-                bail!("excluded-ssids: \"{ssid}\" is listed twice");
+            match check_excluded_ssid(ssid, &self.excluded_ssids[..index]) {
+                Ok(()) => {}
+                Err(SsidRefusal::Empty) => bail!("excluded-ssids: an entry is empty"),
+                Err(SsidRefusal::TooLong) => bail!(
+                    "excluded-ssids: \"{ssid}\" is longer than {SSID_MAX_BYTES} bytes, the most an \
+                     SSID holds"
+                ),
+                Err(SsidRefusal::Listed) => bail!("excluded-ssids: \"{ssid}\" is listed twice"),
             }
         }
         Ok(())
@@ -162,18 +167,30 @@ impl Config {
 /// The most bytes an SSID holds, per 802.11.
 pub const SSID_MAX_BYTES: usize = 32;
 
-/// Why `ssid` cannot be an excluded SSID, or `Ok` when it can. The settings modal
-/// refuses the same entries inline.
-fn check_ssid(ssid: &str) -> std::result::Result<(), String> {
+/// Why an SSID cannot join the excluded list. The file and the settings page refuse
+/// the same entries, so the page never saves a list `load` would refuse; each words
+/// the refusal its own way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SsidRefusal {
+    /// Nothing typed. A hidden network's empty SSID is not excludable.
+    Empty,
+    /// Over [`SSID_MAX_BYTES`], so no sighting could match it.
+    TooLong,
+    /// Already in the list.
+    Listed,
+}
+
+/// Whether `ssid` can join `listed`, the entries before it.
+pub fn check_excluded_ssid(ssid: &str, listed: &[String]) -> std::result::Result<(), SsidRefusal> {
     if ssid.is_empty() {
-        return Err("an entry is empty".to_owned());
+        Err(SsidRefusal::Empty)
+    } else if ssid.len() > SSID_MAX_BYTES {
+        Err(SsidRefusal::TooLong)
+    } else if listed.iter().any(|entry| entry == ssid) {
+        Err(SsidRefusal::Listed)
+    } else {
+        Ok(())
     }
-    if ssid.len() > SSID_MAX_BYTES {
-        return Err(format!(
-            "\"{ssid}\" is longer than {SSID_MAX_BYTES} bytes, the most an SSID holds"
-        ));
-    }
-    Ok(())
 }
 
 fn check_power(key: &str, value: Option<i8>) -> Result<()> {
