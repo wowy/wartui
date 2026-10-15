@@ -486,8 +486,9 @@ wartui ota --image wartui-node-app-esp32c5.bin --yes
 
 **The image is app-only**: what one app slot holds, not the merged image `flash-fleet` writes.
 Its board and version come from the app descriptor inside it, never from its file name. A merged
-image, one built for no node board, or one over 1920 KiB is refused. Each board gets its own
-image, from the first source that applies:
+image, one built for no node board, or one over 1920 KiB is refused. So is a corrupt one: its
+segment checksum and appended SHA-256 are checked as the bootloader checks them, before anything
+is sent. Each board gets its own image, from the first source that applies:
 
 - `--image BIN`, sent only to nodes of the board its descriptor names.
 - `--firmware-dir DIR`, or the checkout's `firmware/node` when this binary was built from one:
@@ -516,10 +517,11 @@ one `ota` reaches. Without `--yes`, `ota` asks `[y/N]` before sending anything.
 
 **Each node then gets a progress line**: how much of the image it holds, the rate, and the phase
 (`waiting for the node`, `sending`, `verifying`, `rebooting`, `confirming`). It ends `done 0.1.1
-(confirmed)` or `failed:` with the reason. Any failure makes the run exit non-zero, and ctrl-c
-aborts the node being updated and stops. With `--log-file` and `RUST_LOG=wartui_core=debug`, the
-log holds every frame sent, every send result, every status from the node and every phase change,
-as `key=value` fields.
+(confirmed)` or `failed:` with the reason. A node that reboots mid-transfer is picked up again
+on its next heartbeat, and the image starts over from the beginning. Any failure makes the run
+exit non-zero, and ctrl-c aborts the node being updated and stops. With `--log-file` and
+`RUST_LOG=wartui_core=debug`, the log holds every frame sent, every send result, every status
+from the node and every phase change, as `key=value` fields.
 
 **How long it takes.** The first frame waits for the node's next heartbeat: up to 5 s on an
 assigned node, a second on a parked one. Each 1 KB chunk then costs about 3.5 ms on the link, and
@@ -545,7 +547,7 @@ runs, and the new one goes into its other slot.
 | `the image is larger than the node's …`       | Build a smaller image; the slot holds 1920 KiB                                   |
 | `the node could not write its flash`          | Run again; if it repeats, `flash-fleet` it                                       |
 | `the image arrived corrupted …`               | Run again                                                                        |
-| `node not answering`                          | Move it nearer the bridge, check its power, and run again                        |
+| `node not answering`                          | It kept dropping the update; move it nearer the bridge, check its power, rerun   |
 | `the node could not switch to the new image`  | `flash-fleet` it                                                                 |
 | `no heartbeat from the new image within 60 s` | Power-cycle it; after three boots without the host it returns to the old image   |
 | `still running …`, `rolled back to …`         | The new image did not run on that node, which is back on the old one             |

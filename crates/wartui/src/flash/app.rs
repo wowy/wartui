@@ -8,6 +8,13 @@
 //! nor announced as a version it is not. A merged image opens with a bootloader, whose first
 //! segment holds no app descriptor, so it is refused rather than written into an app slot.
 //!
+//! **The image is checked against itself before it is sent.** The ESP image format carries a
+//! one-byte XOR checksum over every segment's data and, when the header's `hash_appended` flag
+//! is set, a SHA-256 of everything before it. The bootloader checks both and refuses to boot an
+//! image that fails either, falling back to the old slot. The update's own hash only proves the
+//! node holds the file it was handed, so a corrupt file would otherwise cost a full transfer and
+//! a reboot to find out.
+//!
 //! **Each board gets its own image**, from the sources `flash-fleet` uses: `--image`, a build
 //! of the checkout (with that board's features, saved without `--merge`), or this binary's
 //! release, checked against its `SHA256SUMS`.
@@ -35,6 +42,16 @@ const DESC_FIELD_LEN: usize = 32;
 
 /// The length of a segment header: load address, then data length.
 const SEGMENT_HEADER_LEN: usize = 8;
+
+/// The seed of the image's segment checksum (`ESP_CHECKSUM_MAGIC`).
+const CHECKSUM_SEED: u8 = 0xEF;
+
+/// Where the header says how many segments follow, and whether a SHA-256 is appended.
+const SEGMENT_COUNT_AT: usize = 1;
+const HASH_APPENDED_AT: usize = 23;
+
+/// The length of the appended SHA-256.
+const DIGEST_LEN: usize = 32;
 
 /// Where a partition table sits in a merged image, and its entries' first two bytes.
 const PARTITION_TABLE_AT: usize = 0x8000;
@@ -126,9 +143,51 @@ pub fn parse(bytes: Vec<u8>) -> Result<AppImage> {
     let id = u16::from_le_bytes([bytes[CHIP_ID_AT], bytes[CHIP_ID_AT + 1]]);
     let want = chip(board).map(Chip::image_id);
     ensure!(want == Some(id), "its header names chip ID {id}, and {project} is not that chip");
+    check_integrity(&bytes)?;
     ensure!(bytes.len() <= SLOT_LEN, "{} bytes, and an app slot holds {SLOT_LEN}", bytes.len());
     let sha256 = Sha256::digest(&bytes).into();
     Ok(AppImage { bytes, sha256, version, board })
+}
+
+/// Check the segment checksum and, when the header says one is appended, the SHA-256, as the
+/// bootloader will. The checksum is the XOR of every segment's data, seeded with
+/// [`CHECKSUM_SEED`], in the last byte of the padding that takes the segments to a 16-byte
+/// boundary. The SHA-256 covers every byte before it, checksum included.
+fn check_integrity(bytes: &[u8]) -> Result<()> {
+    let mut at = HEADER_LEN;
+    let mut checksum = CHECKSUM_SEED;
+    for segment in 0..bytes[SEGMENT_COUNT_AT] {
+        let Some(header) = bytes.get(at..at + SEGMENT_HEADER_LEN) else {
+            bail!("the image is truncated: segment {segment} has no header");
+        };
+        let len = le_u32(header, 4) as usize;
+        let start = at + SEGMENT_HEADER_LEN;
+        let Some(data) = bytes.get(start..start + len) else {
+            bail!("the image is truncated: segment {segment} runs past its end");
+        };
+        checksum = data.iter().fold(checksum, |sum, byte| sum ^ byte);
+        at = start + len;
+    }
+    let stored_at = at + 15 - at % 16;
+    let Some(stored) = bytes.get(stored_at) else {
+        bail!("the image is truncated: no checksum after its segments");
+    };
+    ensure!(
+        *stored == checksum,
+        "the image is corrupt: its checksum byte is {stored:#04x}, and its segments give \
+         {checksum:#04x}"
+    );
+    if bytes[HASH_APPENDED_AT] == 1 {
+        let end = stored_at + 1;
+        let Some(digest) = bytes.get(end..end + DIGEST_LEN) else {
+            bail!("the image is truncated: no SHA-256 after its checksum");
+        };
+        ensure!(
+            Sha256::digest(&bytes[..end])[..] == *digest,
+            "the image is corrupt: its appended SHA-256 does not match its contents"
+        );
+    }
+    Ok(())
 }
 
 /// Read and parse the image at `path`.
@@ -136,7 +195,7 @@ pub fn parse(bytes: Vec<u8>) -> Result<AppImage> {
 /// # Errors
 /// When it cannot be read, or [`parse`] refuses it.
 pub fn load(path: &Path) -> Result<AppImage> {
-    parse(read(path)?).with_context(|| format!("reading {}", path.display()))
+    parse(read(path)?).with_context(|| format!("checking {}", path.display()))
 }
 
 /// Where `board`'s image comes from: a build of `firmware_dir` or the checkout, else this
@@ -190,25 +249,49 @@ fn parse_version(text: &str) -> Option<Version> {
     Some(Version::new(major, minor, patch))
 }
 
-/// A hand-built app-only image, for tests.
+/// A hand-built app-only image of `len` bytes, a multiple of 16, for tests: one segment holding
+/// the descriptor, then the checksum and the SHA-256.
 #[cfg(test)]
 pub fn fixture(board: Board, version: &str, len: usize) -> Vec<u8> {
-    let mut image = vec![0u8; len.max(0x200)];
+    let mut image = vec![0u8; HEADER_LEN];
     image[0] = IMAGE_MAGIC;
-    image[1] = 1;
+    image[SEGMENT_COUNT_AT] = 1;
+    image[HASH_APPENDED_AT] = 1;
     let id = chip(board).map_or(0, Chip::image_id);
     image[CHIP_ID_AT..CHIP_ID_AT + 2].copy_from_slice(&id.to_le_bytes());
-    // The first segment: a load address, then its length, then the descriptor.
-    image[HEADER_LEN..HEADER_LEN + 4].copy_from_slice(&0x4200_0020u32.to_le_bytes());
-    image[HEADER_LEN + 4..HEADER_LEN + 8].copy_from_slice(&0x100u32.to_le_bytes());
-    let desc = HEADER_LEN + SEGMENT_HEADER_LEN;
+    // Header, segment header, checksum padding and digest take 80 bytes.
+    let segment = len.max(0x200) - 80;
+    image.extend_from_slice(&0x4200_0020u32.to_le_bytes());
+    image.extend_from_slice(&u32::try_from(segment).unwrap_or(0).to_le_bytes());
+    let desc = image.len();
+    image.resize(desc + segment, 0x5A);
+    image[desc..desc + 0x100].fill(0);
     image[desc..desc + 4].copy_from_slice(&APP_DESC_MAGIC.to_le_bytes());
     let put = |image: &mut Vec<u8>, at: usize, value: &str| {
         image[desc + at..desc + at + value.len()].copy_from_slice(value.as_bytes());
     };
     put(&mut image, DESC_VERSION_AT, version);
     put(&mut image, DESC_PROJECT_AT, project_name(board).unwrap_or("not-a-node"));
+    seal(&mut image);
     image
+}
+
+/// Append the checksum padding, the checksum and the SHA-256 to a header and its segments.
+#[cfg(test)]
+fn seal(image: &mut Vec<u8>) {
+    let mut at = HEADER_LEN;
+    let mut checksum = CHECKSUM_SEED;
+    for _ in 0..image[SEGMENT_COUNT_AT] {
+        let len = le_u32(image, at + 4) as usize;
+        let start = at + SEGMENT_HEADER_LEN;
+        checksum = image[start..start + len].iter().fold(checksum, |sum, byte| sum ^ byte);
+        at = start + len;
+    }
+    image.truncate(at);
+    image.resize(at + 15 - at % 16, 0);
+    image.push(checksum);
+    let digest = Sha256::digest(&image[..]);
+    image.extend_from_slice(&digest);
 }
 
 #[cfg(test)]
@@ -226,7 +309,8 @@ mod tests {
 
     #[test]
     fn app_image_reads_espflash_layout_when_given_real_header() {
-        // The first 0x60 bytes `espflash save-image` wrote for a C5 node, without `--merge`.
+        // The first 0x35 bytes `espflash save-image` wrote for a C5 node, without `--merge`,
+        // cut to one short segment and sealed again.
         let mut bytes = vec![0u8; 0x400];
         let head: [u8; 0x34] = [
             0xe9, 0x05, 0x02, 0x20, 0xfe, 0x77, 0x01, 0x42, 0xee, 0x00, 0x00, 0x00, 0x17, 0x00,
@@ -237,6 +321,9 @@ mod tests {
         bytes[..head.len()].copy_from_slice(&head);
         bytes[0x34] = b'1';
         bytes[0x50..0x63].copy_from_slice(b"wartui-node-esp32c5");
+        bytes[SEGMENT_COUNT_AT] = 1;
+        bytes[HEADER_LEN + 4..HEADER_LEN + 8].copy_from_slice(&0x3D0u32.to_le_bytes());
+        seal(&mut bytes);
         let image = parse(bytes).unwrap();
         assert_eq!((image.board, image.version), (Board::Esp32c5, Version::new(0, 1, 1)));
     }
@@ -285,7 +372,7 @@ mod tests {
     #[test]
     fn app_image_refuses_image_when_larger_than_a_slot() {
         assert!(parse(fixture(Board::Esp32c5, "0.1.1", SLOT_LEN)).is_ok());
-        let error = parse(fixture(Board::Esp32c5, "0.1.1", SLOT_LEN + 1)).unwrap_err();
+        let error = parse(fixture(Board::Esp32c5, "0.1.1", SLOT_LEN + 16)).unwrap_err();
         assert!(error.to_string().contains("an app slot holds"), "{error}");
     }
 
@@ -309,5 +396,29 @@ mod tests {
             assert_eq!(found.unwrap(), expected);
         }
         assert!(source_for(Board::Unknown(7), None).is_err());
+    }
+
+    #[test]
+    fn app_image_refuses_image_when_segment_byte_is_flipped() {
+        let mut bytes = fixture(Board::Esp32c6, "0.1.1", 0x1000);
+        bytes[0x800] ^= 0x01;
+        let error = parse(bytes).unwrap_err().to_string();
+        assert!(error.contains("corrupt") && error.contains("checksum"), "{error}");
+    }
+
+    #[test]
+    fn app_image_refuses_image_when_appended_hash_byte_is_flipped() {
+        let mut bytes = fixture(Board::Esp32c6, "0.1.1", 0x1000);
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0x01;
+        let error = parse(bytes).unwrap_err().to_string();
+        assert!(error.contains("SHA-256"), "{error}");
+    }
+
+    #[test]
+    fn app_image_refuses_image_when_truncated() {
+        let bytes = fixture(Board::Esp32c6, "0.1.1", 0x1000);
+        let error = parse(bytes[..0x800].to_vec()).unwrap_err().to_string();
+        assert!(error.contains("truncated"), "{error}");
     }
 }
