@@ -45,7 +45,7 @@ use wartui_firmware::health;
 use wartui_firmware::{reboot, reset_cause};
 use wartui_proto::air::{
     AdminMsg, Board, CONTROL_CHANNEL, Capabilities, DecodeError, DieTemp, Frame, HeartbeatMsg,
-    OtaState, OtaStatusMsg, SIGHTINGS_PER_BATCH_MAX, SightingBatchWriter, SightingMsg, Vdd,
+    OtaState, SIGHTINGS_PER_BATCH_MAX, SightingBatchWriter, SightingMsg, Vdd,
 };
 use wartui_proto::link::BROADCAST;
 use wartui_proto::mac;
@@ -818,8 +818,8 @@ fn listen(
 /// Take whatever the radio has queued: adopt any assignment, and hand update frames to
 /// `ota`.
 ///
-/// An admin, clear or update-confirm frame confirms an image on trial: decoding one is
-/// hearing the host over the air, which is the whole test.
+/// Any frame from the host confirms an image on trial — admin, clear, update-confirm or an
+/// update frame: decoding one is hearing the host over the air, which is the whole test.
 fn drain_admin(
     manager: &EspNowManager<'_>,
     sender: &mut EspNowSender<'_>,
@@ -845,15 +845,20 @@ fn drain_admin(
                 confirm(node, ota);
                 continue;
             }
-            Ok(
-                frame @ (Frame::OtaBegin(_)
-                | Frame::OtaChunk(_)
-                | Frame::OtaCommit(_)
-                | Frame::OtaAbort(_)),
-            ) => {
-                if let Some(status) = ota.on_frame(&frame) {
-                    answer_update(manager, sender, node, ota, src, status);
-                }
+            Ok(Frame::OtaBegin(msg)) => {
+                update(manager, sender, node, ota, src, &ota::Update::Begin(msg));
+                continue;
+            }
+            Ok(Frame::OtaChunk(msg)) => {
+                update(manager, sender, node, ota, src, &ota::Update::Chunk(msg));
+                continue;
+            }
+            Ok(Frame::OtaCommit(msg)) => {
+                update(manager, sender, node, ota, src, &ota::Update::Commit(msg));
+                continue;
+            }
+            Ok(Frame::OtaAbort(msg)) => {
+                update(manager, sender, node, ota, src, &ota::Update::Abort(msg));
                 continue;
             }
             // A host whose frame is not the shape this build reads — a different
@@ -904,31 +909,51 @@ fn confirm(node: &mut Node, ota: &mut ota::Ota) {
     }
 }
 
-/// Unicast an update status to the host that sent the frame it answers.
+/// Act on an update frame from `src`, confirming a trial image first.
 ///
-/// A `Verified` status is followed by the switch to the new image and a reboot. Its
-/// send is best effort: the host also learns of the update from the reboot.
-fn answer_update(
+/// Confirming first matters: an update accepted while this image is on trial would write
+/// over the only slot known to work, so `ota` refuses a `begin` until the trial is over.
+///
+/// The core moves to `src` only for a frame of the session the receiver accepted. A
+/// refusal is answered only when `src` is the core already: a stray `begin` from another
+/// host must not re-point sightings, and answering it would need a peer slot for it.
+///
+/// A `Verified` status is followed by the switch to the new image and a reboot. Its send is
+/// best effort: the host also learns of the update from the reboot. A switch that fails
+/// sends one `FlashError` instead.
+fn update(
     manager: &EspNowManager<'_>,
     sender: &mut EspNowSender<'_>,
     node: &mut Node,
     ota: &mut ota::Ota,
     src: [u8; 6],
-    status: OtaStatusMsg,
+    frame: &ota::Update<'_>,
 ) {
-    note_core(manager, node, src);
+    confirm(node, ota);
+    let answer = ota.on_update(frame, node.trial);
+    if answer.accepted {
+        note_core(manager, node, src);
+    }
+    let Some(status) = answer.status else { return };
+    if node.core != Some(src) {
+        return;
+    }
     if !radio::unicast(sender, &src, &status.encode()) {
         note!("update status {:?} unacknowledged", status.state);
     }
     if status.state == OtaState::Verified {
-        ota.install();
+        let failed = ota.install();
+        if !radio::unicast(sender, &src, &failed.encode()) {
+            note!("update status {:?} unacknowledged", failed.state);
+        }
     }
 }
 
 /// Point sighting batches at `src`, if that is not the core already held.
 ///
-/// Runs before [`Node::adopt`]'s epoch check, on every admin or clear frame, not
-/// only ones that change the assignment: a bridge that swapped and re-sent the same
+/// Runs on every admin or clear frame, and on an update frame of the session the update
+/// receiver accepted. For an admin frame it runs before [`Node::adopt`]'s epoch check, not
+/// only on ones that change the assignment: a bridge that swapped and re-sent the same
 /// epoch still has to move the core, or every sighting after it unicasts into
 /// silence forever. Registration failure is left as a note — the old peer, and the
 /// old `node.core`, are still there to unicast to.

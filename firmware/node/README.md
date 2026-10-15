@@ -187,25 +187,44 @@ flash: the app slot that is not booted, found in the partition table at boot.
 The node keeps its assignment throughout and returns to it when the session ends. An abort ends
 it at once. So does 30 s without an update frame, which also drops the session.
 
-**The switch.** A commit whose hash matches sends `Verified`, then writes `otadata` to select the
-new slot in state `New`, erases `trial`, and reboots. If a flash step fails, the node stays on the
-running image and reports `FlashError` for that session. Before selecting the new slot, the node
-points `otadata` at the running one if it names another. A USB flash leaves `otadata` erased, and
-that step leaves the entry a rollback returns to.
+Only frames of the accepted session make their sender the core, where sightings go. A refused
+frame is answered only if its sender is the core already. A node whose table has no `trial`
+sector refuses every begin with `FlashError`, so it never runs an update untrialed.
 
-**Trial boots.** The bootloader has no rollback, so the node does it. Every boot in state `New` or
-`PendingVerify` is a trial boot. The node marks it `PendingVerify`, sets the heartbeat's trial
-flag, and counts the boot by clearing one more bit of the `trial` sector. That needs no erase and
-survives the power cuts these nodes see routinely, which RTC memory does not.
+**The `trial` sector decides.** The bootloader has no rollback and reads no image state, so the
+node does it. The sector records which slot is on trial and how many times it has booted: an
+armed record naming the slot, then one cleared bit per boot. Clearing a bit needs no erase and
+survives the power cuts these nodes see routinely, which RTC memory does not. The node also writes
+the `otadata` states (`New`, `PendingVerify`, `Valid`, `Aborted`) but never decides from them.
 
-**Rollback.** The third trial boot marks the image `Aborted`, selects the other slot, erases
-`trial` and reboots. Three, not one, because a USB-C PD supply can reset a node once at startup.
-There is no watchdog, so a hung image rolls back too: each power cycle counts a boot.
+Each step's flash writes come in an order a power cut cannot turn into an untrialed image:
 
-**Confirmation.** The first admin, clear or update-confirm frame the node decodes marks the image
-`Valid`, erases `trial` and clears the trial flag. A confirmed image is one that has heard the host
-over the air, which is the whole test. A USB-flashed image has no update state and is never on
-trial.
+| Step     | Writes, in order                                                                 |
+|----------|----------------------------------------------------------------------------------|
+| Install  | erase `trial`; arm it for the new slot; select the new slot; `New`; reboot       |
+| Trial    | `PendingVerify`; clear one count bit; set the heartbeat's trial flag             |
+| Rollback | `Aborted`; select the other slot; erase `trial`; reboot                          |
+| Confirm  | `Valid`; erase `trial`; clear the trial flag                                     |
+
+**The switch.** A commit whose hash matches sends `Verified` and installs. Before selecting the new
+slot, the node points `otadata` at the running one if it names another. A USB flash leaves
+`otadata` erased, and that step leaves the entry a rollback returns to. If the install fails
+before the new slot is selected, the node stays on the running image, sends `FlashError` once and
+drops the session, so a re-sent begin starts afresh.
+
+**Trial boots.** A boot armed for the booted slot is a trial. One armed for the other slot is left
+over from an interrupted install or rollback, and is erased. With `otadata` erased, the node was
+flashed over USB and nothing is on trial.
+
+**Rollback.** The third trial boot rolls back, and so does a trial boot the node cannot count.
+Three, not one, because a USB-C PD supply can reset a node once at startup. There is no watchdog,
+so a hung image rolls back too: each power cycle counts a boot. A power cut mid-rollback leaves
+the sector armed and over the count, so the next boot rolls back again.
+
+**Confirmation.** The first frame from the host the node decodes confirms the image: admin,
+clear, update confirm, or any update frame. A confirmed image is one that has heard the host over
+the air, which is the whole test. An update frame confirms before the receiver sees it, because
+an update taken on trial would write over the only slot known to work.
 
 ## The regulatory domain is set here
 
