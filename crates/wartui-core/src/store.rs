@@ -182,11 +182,11 @@ CREATE TABLE IF NOT EXISTS observation (
 -- counts as the reply carried them: raw, as `heartbeat` keeps its drop counts, so a
 -- bridge reboot shows as the values falling. `rx_count` is the frames the bridge
 -- accepted to forward; `rx_oversize` is those it dropped for being longer than any
--- node's, which are somebody else's traffic and not in `rx_count`. `host_frames` is how many frames this host had
--- read off the link when the reply arrived, taken with `rx_count` so the two pair
--- closely but not exactly: between two rows, the `rx_count` difference less the
--- `host_frames` difference is frames lost on USB plus the bridge's `dropped_tx`, give
--- or take the frames queued behind the reply, which overtakes them.
+-- node's, which are somebody else's traffic and not in `rx_count`. `host_frames` is
+-- how many frames this host had read off the link when the reply arrived, taken with
+-- `rx_count` so the two pair closely but not exactly: between two rows, the `rx_count`
+-- difference less the `host_frames` difference is frames lost on USB plus the bridge's
+-- `dropped_tx`, give or take the frames queued behind the reply, which overtakes them.
 CREATE TABLE IF NOT EXISTS bridge_status (
   id INTEGER PRIMARY KEY,
   rx_at INTEGER NOT NULL,
