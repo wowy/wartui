@@ -119,8 +119,16 @@ impl FleetEngine {
         // Decode before admitting anyone to the fleet.
         match frame {
             // Nothing to do, but an operator chasing a fleet that keeps changing its mind needs to
-            // know. Foreign clears count the same as foreign assignments.
-            Frame::Admin(_) | Frame::Clear(_) => self.counters.foreign_admin += 1,
+            // know. Foreign clears and updates count the same as foreign assignments.
+            Frame::Admin(_)
+            | Frame::Clear(_)
+            | Frame::OtaBegin(_)
+            | Frame::OtaChunk(_)
+            | Frame::OtaCommit(_)
+            | Frame::OtaAbort(_)
+            | Frame::OtaConfirm(_) => self.counters.foreign_admin += 1,
+            // A node's update status is not the engine's to act on.
+            Frame::OtaStatus(_) => {}
             // The right length is no guarantee of the right layout: a minor version may move
             // fields without resizing the frame.
             Frame::Heartbeat(heartbeat)

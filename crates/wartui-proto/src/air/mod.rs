@@ -19,10 +19,12 @@
 //! One part of the wire is frozen until 1.0, the single exception to flashing the fleet
 //! together: the frame header, the heartbeat's type byte and the first
 //! [`HEARTBEAT_PREFIX_LEN`] bytes of its body, which carry the node's [`Version`], [`Board`]
-//! and flags. Everything after them may change with a minor version. A host reads that
-//! prefix from a heartbeat of any length ([`Capabilities::decode_prefix`]), so a node a
-//! minor version behind is named and marked for an update rather than lost among
-//! undecodable frames.
+//! and flags, and the update frames ([`OtaBeginMsg`], [`OtaChunkMsg`], [`OtaCommitMsg`],
+//! [`OtaAbortMsg`], [`OtaConfirmMsg`] and [`OtaStatusMsg`]), type bytes and layouts both.
+//! Everything else may change with a minor version. A host reads that prefix from a
+//! heartbeat of any length ([`Capabilities::decode_prefix`]), so a node a minor version
+//! behind is named and marked for an update rather than lost among undecodable frames, and
+//! the update frames are how it then updates that node.
 //!
 //! A node packs a dwell's or Bluetooth scan's sightings into [`SightingBatch`]es of up to
 //! [`SIGHTING_BATCH_MAX`] bytes. A full batch goes out at once and a new one starts. What
@@ -36,6 +38,7 @@ use core::fmt;
 mod admin;
 mod health;
 mod heartbeat;
+mod ota;
 mod security;
 mod sighting;
 mod version;
@@ -45,6 +48,11 @@ pub use health::{DieTemp, Vdd};
 pub use heartbeat::{
     Board, CAP_FLAG_5G, CAP_FLAG_TRIAL, Capabilities, HEARTBEAT_MSG_LEN, HEARTBEAT_PREFIX_LEN,
     HeartbeatMsg,
+};
+pub use ota::{
+    OTA_ABORT_MSG_LEN, OTA_BEGIN_MSG_LEN, OTA_CHUNK, OTA_CHUNK_HEADER, OTA_CHUNK_MSG_MAX,
+    OTA_COMMIT_MSG_LEN, OTA_CONFIRM_MSG_LEN, OTA_STATUS_MSG_LEN, OtaAbortMsg, OtaBeginMsg,
+    OtaChunkMsg, OtaCommitMsg, OtaConfirmMsg, OtaState, OtaStatusMsg,
 };
 pub use security::Security;
 pub use sighting::{
@@ -82,10 +90,22 @@ pub enum MsgType {
     Heartbeat = 0x01,
     /// Node → host: [`SightingBatch`].
     SightingBatch = 0x02,
+    /// Node → host: [`OtaStatusMsg`].
+    OtaStatus = 0x03,
     /// Host → node: [`AdminMsg`].
     Admin = 0x81,
     /// Host → node: [`ClearMsg`].
     Clear = 0x82,
+    /// Host → node: [`OtaBeginMsg`].
+    OtaBegin = 0x83,
+    /// Host → node: [`OtaChunkMsg`].
+    OtaChunk = 0x84,
+    /// Host → node: [`OtaCommitMsg`].
+    OtaCommit = 0x85,
+    /// Host → node: [`OtaAbortMsg`].
+    OtaAbort = 0x86,
+    /// Host → node: [`OtaConfirmMsg`].
+    OtaConfirm = 0x87,
 }
 
 impl MsgType {
@@ -103,8 +123,14 @@ impl TryFrom<u8> for MsgType {
         match v {
             0x01 => Ok(Self::Heartbeat),
             0x02 => Ok(Self::SightingBatch),
+            0x03 => Ok(Self::OtaStatus),
             0x81 => Ok(Self::Admin),
             0x82 => Ok(Self::Clear),
+            0x83 => Ok(Self::OtaBegin),
+            0x84 => Ok(Self::OtaChunk),
+            0x85 => Ok(Self::OtaCommit),
+            0x86 => Ok(Self::OtaAbort),
+            0x87 => Ok(Self::OtaConfirm),
             other => Err(DecodeError::UnknownType(other)),
         }
     }
@@ -181,6 +207,24 @@ fn header(buf: &[u8]) -> Result<MsgType, DecodeError> {
     MsgType::try_from(buf[OFFSET_TYPE])
 }
 
+/// Check the header names `want` and the frame is exactly `len` bytes, which is every
+/// fixed-length frame's whole validation.
+fn fixed(buf: &[u8], want: MsgType, len: usize) -> Result<(), DecodeError> {
+    let got = header(buf)?;
+    if got != want {
+        return Err(DecodeError::UnknownType(got.as_u8()));
+    }
+    if buf.len() != len {
+        return Err(DecodeError::BadLength { need: len, got: buf.len() });
+    }
+    Ok(())
+}
+
+/// The little-endian `u32` at `at`.
+fn le_u32(buf: &[u8], at: usize) -> u32 {
+    u32::from_le_bytes([buf[at], buf[at + 1], buf[at + 2], buf[at + 3]])
+}
+
 /// Write the header for `msg_type` into the front of `out`.
 fn write_header(out: &mut [u8], msg_type: MsgType) {
     out[..4].copy_from_slice(&MAGIC);
@@ -199,6 +243,18 @@ pub enum Frame<'a> {
     Admin(AdminMsg),
     /// Host → node. One this host did not send means the same as for [`Frame::Admin`].
     Clear(ClearMsg),
+    /// Host → node: open an update session.
+    OtaBegin(OtaBeginMsg),
+    /// Host → node: image bytes.
+    OtaChunk(OtaChunkMsg<'a>),
+    /// Host → node: check the image.
+    OtaCommit(OtaCommitMsg),
+    /// Host → node: drop the session.
+    OtaAbort(OtaAbortMsg),
+    /// Host → node: confirm the image on trial, ending its trial.
+    OtaConfirm(OtaConfirmMsg),
+    /// Node → host: where an update session stands.
+    OtaStatus(OtaStatusMsg),
 }
 
 impl<'a> Frame<'a> {
@@ -212,6 +268,12 @@ impl<'a> Frame<'a> {
             MsgType::SightingBatch => SightingBatch::decode(buf).map(Frame::Sightings),
             MsgType::Admin => AdminMsg::decode(buf).map(Frame::Admin),
             MsgType::Clear => ClearMsg::decode(buf).map(Frame::Clear),
+            MsgType::OtaBegin => OtaBeginMsg::decode(buf).map(Frame::OtaBegin),
+            MsgType::OtaChunk => OtaChunkMsg::decode(buf).map(Frame::OtaChunk),
+            MsgType::OtaCommit => OtaCommitMsg::decode(buf).map(Frame::OtaCommit),
+            MsgType::OtaAbort => OtaAbortMsg::decode(buf).map(Frame::OtaAbort),
+            MsgType::OtaConfirm => OtaConfirmMsg::decode(buf).map(Frame::OtaConfirm),
+            MsgType::OtaStatus => OtaStatusMsg::decode(buf).map(Frame::OtaStatus),
         }
     }
 }

@@ -6,8 +6,8 @@
 //! interoperate with no other firmware.
 //!
 //! The crate is `no_std` and allocation-free so the firmware can use it. Logic the
-//! firmware runs lives here too, such as [`outbox`], [`stall`] and [`pending`], because a
-//! `riscv32imac` binary cannot run a test and this crate can.
+//! firmware runs lives here too, such as [`outbox`], [`stall`], [`pending`] and [`ota`],
+//! because a `riscv32imac` binary cannot run a test and this crate can.
 
 #![no_std]
 
@@ -19,6 +19,7 @@ pub mod link;
 pub mod mac;
 mod mac_index;
 pub mod node;
+pub mod ota;
 pub mod outbox;
 pub mod pending;
 pub mod plan;
