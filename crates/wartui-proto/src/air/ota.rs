@@ -222,10 +222,11 @@ impl OtaAbortMsg {
     }
 }
 
-/// Host → node: keep the image on trial.
+/// Host → node: confirm the image on trial, ending its trial.
 ///
-/// Header only. A node runs a fresh image on trial ([`CAP_FLAG_TRIAL`]) until this
-/// arrives. It names no session, because the session ended with the reboot.
+/// Header only. A node runs a fresh image on trial ([`CAP_FLAG_TRIAL`]) until it hears
+/// the host; this is the frame an update sends to say so. It names no session, because
+/// the session ended with the reboot.
 ///
 /// [`CAP_FLAG_TRIAL`]: super::CAP_FLAG_TRIAL
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
