@@ -82,3 +82,6 @@ was `docs/phase-3-findings.md`'s:
   is the reboot to the main loop.
 - **A burst never kept the stall clock from starting.** Against a refusing endpoint the burst
   writes nothing, so its pass reports `moved` false.
+- **Run again after the review fixes** (f8f63ae: the burst reports a write to the watch only if
+  no later poll read host bytes). All four rows behaved the same. The polled reset's `Ready`
+  landed at 23.89 s and the silent-host one's at 34.39 s.
