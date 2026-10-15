@@ -183,6 +183,8 @@ pub(super) fn busy() -> Snapshot {
         ],
         alive: 4,
         assignable: 4,
+        needs_update: 0,
+        host_behind: 0,
         tail: (0..40)
             .map(|n| TailEntry {
                 node_mac: [0x02, 0x00, 0x5E, 0x10, 0x57, 0x84],
@@ -252,6 +254,8 @@ pub(super) fn empty() -> Snapshot {
         nodes: Vec::new(),
         alive: 0,
         assignable: 0,
+        needs_update: 0,
+        host_behind: 0,
         tail: Vec::new(),
         unique_wifi_aps: 0,
         unique_ble_aps: 0,

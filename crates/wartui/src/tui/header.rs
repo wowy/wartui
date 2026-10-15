@@ -61,6 +61,7 @@ pub(super) fn draw_header(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot
 /// | `N of M` | green | `N` of the `M` nodes heard are in the plan |
 /// | `N alive, none usable` | red | heartbeating, but none assignable |
 /// | `waiting for nodes` | yellow | none heard yet, normal at startup |
+/// | `2 need update` | red | heartbeating on another major or minor, nothing drivable |
 /// | `all nodes silent` | red | every node heard has stopped heartbeating |
 fn planning(snapshot: &Snapshot) -> Span<'static> {
     let (text, color) = match snapshot.plan {
@@ -69,6 +70,7 @@ fn planning(snapshot: &Snapshot) -> Span<'static> {
             (format!("{} alive, none usable", snapshot.alive), Color::Red)
         }
         None if snapshot.nodes.is_empty() => ("waiting for nodes".to_owned(), Color::Yellow),
+        None if let Some(text) = snapshot.undrivable_text() => (text, Color::Red),
         None => ("all nodes silent".to_owned(), Color::Red),
     };
     Span::styled(text, Style::new().fg(color))
@@ -235,6 +237,23 @@ mod tests {
         let rendered = terminal.backend().to_string();
         assert!(rendered.contains("3 alive, none usable"), "got {rendered}");
         assert!(!rendered.contains("all nodes silent"), "they are all heartbeating");
+    }
+
+    #[test]
+    fn view_names_undrivable_nodes_when_only_nodes_heard_run_another_minor() {
+        // Heartbeating, so not silent, though none of them is alive to this host.
+        let mut snapshot = busy();
+        snapshot.plan = None;
+        snapshot.nodes = vec![outdated(0x21), outdated(0x22)];
+        snapshot.alive = 0;
+        snapshot.assignable = 0;
+        snapshot.needs_update = 2;
+
+        let mut terminal = Terminal::new(TestBackend::new(200, 40)).expect("test backend");
+        terminal.draw(|frame| draw(frame, &snapshot, &mut Ui::default())).expect("drawing");
+        let rendered = terminal.backend().to_string();
+        assert!(rendered.contains("2 need update"), "got {rendered}");
+        assert!(!rendered.contains("all nodes silent"), "they are heartbeating: {rendered}");
     }
 
     #[test]

@@ -1045,6 +1045,25 @@ fn heartbeat_prefix_rejects_frame_when_body_is_shorter_than_prefix() {
 }
 
 #[test]
+fn heartbeat_prefix_rejects_frame_when_board_is_zero() {
+    // No build sends board 0; a heartbeat without the prefix puts its sweep counter's high
+    // byte there.
+    let mut frame = HEARTBEAT.to_vec();
+    frame[9] = 0;
+    assert_eq!(Capabilities::decode_prefix(&frame), Err(DecodeError::NoBoard));
+    assert_eq!(HeartbeatMsg::decode(&frame), Err(DecodeError::NoBoard));
+    assert_eq!(Capabilities::decode_prefix(&frame[..11]), Err(DecodeError::NoBoard));
+}
+
+#[test]
+fn heartbeat_prefix_accepts_unknown_flag_bits_when_board_is_named() {
+    // A later minor may define a flag; its nodes must still be found.
+    let mut frame = HEARTBEAT.to_vec();
+    frame[10] = 0b1000_0001;
+    assert!(Capabilities::decode_prefix(&frame).is_ok_and(|caps| caps.five_ghz));
+}
+
+#[test]
 fn heartbeat_prefix_rejects_frame_when_not_a_heartbeat() {
     assert_eq!(Capabilities::decode_prefix(ADMIN), Err(DecodeError::UnknownType(0x81)));
     let mut bad_version = HEARTBEAT.to_vec();

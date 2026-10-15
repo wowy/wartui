@@ -108,9 +108,9 @@ refuses half the channel pool. Both parts are RISC-V and build on stable.
 
 Diagnostics are on by default and go out over USB serial-JTAG. Turning them off saves a few
 kilobytes and nothing else: a silent node is hard to tell from a broken one. The cargo runner is
-`espflash flash --monitor --partition-table partitions.csv` with no `--chip`, so espflash detects
-the part. Run it from this directory, since the table's path is relative. Unlike the bridge's, this
-monitor is worth watching, because nothing but diagnostics goes down that pipe.
+`espflash flash --monitor --partition-table partitions.csv --erase-parts otadata` with no `--chip`,
+so espflash detects the part. Run it from this directory, since the table's path is relative. Unlike
+the bridge's, this monitor is worth watching, because nothing but diagnostics goes down that pipe.
 
 Every node can scan Bluetooth. It does so only if the core sets the flag, and a node that does scans
 nothing else.
@@ -150,11 +150,11 @@ The app descriptor carries the version and a project name for the board: `wartui
 | trial    | data | undefined | 0x3D0000 | 0x1000   |
 
 There is no factory slot. Two app slots of 1920 KiB each leave no room for a third on 4 MB, and the
-app is about 845 KB. With `otadata` erased, the bootloader boots `ota_0`, which is where a USB
-flash puts the app. `wartui flash-fleet` erases `otadata` after writing each node, so an earlier
-over-the-air update cannot leave the bootloader pointing at the other slot. `trial` is reserved
-for counting unconfirmed boots. Its subtype is `undefined` because espflash 4.6 rejects a numeric
-data subtype.
+app is about 845 KB. With `otadata` erased, the bootloader boots `ota_0`, which is where a USB flash
+puts the app. Both USB paths erase `otadata`: `wartui flash-fleet` after writing each node, and the
+cargo runner with `--erase-parts otadata`. So an earlier over-the-air update cannot leave the
+bootloader pointing at the other slot. `trial` is reserved for counting unconfirmed boots. Its
+subtype is `undefined` because espflash 4.6 rejects a numeric data subtype.
 
 The cargo runner, `wartui flash-fleet` and the release images all use this table.
 

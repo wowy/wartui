@@ -696,7 +696,8 @@ nothing sent would reach it, its band is unknown, or its frames are not this bui
 might be nobody's. `b` on one says which state it is, because the fix differs: wait for a
 heartbeat, find out why heartbeats stopped, reflash the node, or update wartui. Heartbeats from a
 `needs update` or `host behind` node are not counted among the footer's frames from an older
-firmware; its sighting batches are, since none of them is recorded.
+firmware. Once its heartbeat has named its version, its sighting batches are, since none of them
+is recorded.
 
 `stale` and `no heartbeat` are deliberately distinct from silence and from each other. wartui keeps
 two clocks, so a node that streams observations but loses heartbeats doesn't age out and churn the
@@ -711,6 +712,7 @@ of share or Bluetooth role empties it. `crates/wartui-proto/src/dedup.rs` explai
 | Header says            | Meaning                                                                  |
 |------------------------|--------------------------------------------------------------------------|
 | `waiting for nodes`    | No node has heartbeated yet this session                                 |
+| `N need update`        | Heard only from nodes on an older minor; `N host behind` for newer ones  |
 | `all nodes silent`     | Nodes were seen, but none is heartbeating now                            |
 | `N alive, none usable` | Heartbeating, but none can be assigned channels; the node table says why |
 
@@ -776,7 +778,9 @@ ideal, red a fault.
   pinned `--lat`/`--lon` is red, however deliberate: none will produce a fix, and a constant
   position is what most needs noticing from a distance.
 - **Nodes** are amber when something heartbeating cannot be driven (so both counts print), red when
-  nothing is alive or the link is down.
+  nothing is alive or the link is down. Nodes on another major or minor are named instead,
+  `2 need update` or `1 host behind` (`3 undrivable` for a mix): red when nothing can be driven,
+  amber otherwise.
 - **RSSI** is amber when the average falls below −65 dBm or any node below −70, both above the
   −74 dBm a 24 Mbps ESP-NOW link needs. So it warns while there is time to act: close a window, move
   the dongle off the floor, walk a node back. `rssi: none heard` is red, for live nodes the bridge

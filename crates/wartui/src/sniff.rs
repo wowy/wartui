@@ -5,15 +5,17 @@
 //! way, and to have something to reach for later when a node goes quiet and the
 //! question is whether the frames are arriving at all.
 
+use std::collections::HashMap;
+
 use anyhow::Result;
 use clap::Args as ClapArgs;
 use wartui_bridge::LinkEvent;
 use wartui_proto::air::{
-    Capabilities, DecodeError, Frame, NODE_VERSION, RecordKind, SightingMsg, foreign,
+    Capabilities, Compat, DecodeError, Frame, NODE_VERSION, RecordKind, SightingMsg, foreign,
 };
 use wartui_proto::beacon::rcoi_text;
 use wartui_proto::link::{BROADCAST, BridgeToHost};
-use wartui_proto::mac;
+use wartui_proto::mac::{self, Mac};
 
 #[derive(ClapArgs)]
 pub struct Args {
@@ -166,6 +168,9 @@ struct Counts {
     /// Heartbeats from nodes on a newer major or minor, read the same way.
     host_behind: u64,
     undecodable: u64,
+    /// Each source's standing from its latest heartbeat, so its sighting batches are read
+    /// only when the engine would read them.
+    compat: HashMap<Mac, Compat>,
 }
 
 fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
@@ -217,6 +222,7 @@ fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
                 .ok()
                 .filter(|caps| !caps.version.compat_with_host().drivable());
             if let Some(caps) = undrivable {
+                counts.compat.insert(*src, caps.version.compat_with_host());
                 if caps.version.compat_with_host().node_behind() {
                     counts.needs_update += 1;
                     println!("{head}  HEARTBEAT {caps}, needs update to {NODE_VERSION}");
@@ -228,6 +234,9 @@ fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
                 match Frame::decode(payload) {
                     Ok(Frame::Heartbeat(heartbeat)) => {
                         counts.heartbeat += 1;
+                        counts
+                            .compat
+                            .insert(*src, heartbeat.capabilities.version.compat_with_host());
                         println!(
                             "{head}  HEARTBEAT #{} b{} e{} u{} d{}<{} p{} {}  {}",
                             heartbeat.counter,
@@ -239,6 +248,17 @@ fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
                             heartbeat.tx_power,
                             heartbeat.reset_cause,
                             heartbeat.capabilities
+                        );
+                    }
+                    // Not this build's layout once the node's heartbeat has named another
+                    // major or minor, even when it parses, as the engine reads it.
+                    Ok(Frame::Sightings(sightings))
+                        if counts.compat.get(src).is_some_and(|compat| !compat.drivable()) =>
+                    {
+                        counts.incompatible += 1;
+                        println!(
+                            "{head}  B#{} from a node on another minor, not read",
+                            sightings.seq
                         );
                     }
                     Ok(Frame::Sightings(sightings)) => {
@@ -298,6 +318,13 @@ fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
                             println!("{head}  undecodable: not ESP-NOW wardriving traffic");
                         }
                     },
+                    // A heartbeat without the prefix: its sweep counter where the board is.
+                    Err(DecodeError::NoBoard) => {
+                        counts.incompatible += 1;
+                        println!(
+                            "{head}  heartbeat names no board, a layout this build does not read"
+                        );
+                    }
                     // Ours, from a node on this minor: a bug in one of the two builds.
                     Err(DecodeError::BadLength { need, got }) => {
                         counts.incompatible += 1;
@@ -432,6 +459,12 @@ mod tests {
     /// Count one received `payload` the way `handle` does.
     fn counted(payload: &[u8]) -> Counts {
         let mut counts = Counts::default();
+        feed(&mut counts, payload);
+        counts
+    }
+
+    /// Hand `handle` one received `payload` from the same node every time.
+    fn feed(counts: &mut Counts, payload: &[u8]) {
         let rx = BridgeToHost::Rx {
             src: [0x02, 0, 0, 0, 0x57, 0x84],
             dst: BROADCAST,
@@ -439,9 +472,55 @@ mod tests {
             rx_us: 0,
             payload: wartui_proto::link::EspNowPayload::from_slice(payload).expect("fits"),
         };
-        handle(LinkEvent::Message(rx), &args(), &mut counts);
-        counts
+        handle(LinkEvent::Message(rx), &args(), counts);
     }
+
+    fn one_sighting() -> Vec<u8> {
+        use wartui_proto::air::{Security, SightingBatchWriter};
+        let mut writer = SightingBatchWriter::new(1);
+        let msg = SightingMsg {
+            kind: RecordKind::Wifi,
+            bssid: [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF],
+            channel: 6,
+            rssi: -60,
+            security: Security::Wpa2Psk,
+            ssid: b"example",
+            ext: &[],
+        };
+        assert!(writer.push(&msg), "fits");
+        writer.as_bytes().to_vec()
+    }
+
+    #[test]
+    fn sniff_cmd_counts_batch_incompatible_when_its_node_runs_another_minor() {
+        let mut counts = Counts::default();
+        feed(&mut counts, &heartbeat_with(wartui_bridge::sim::minor_behind(NODE_VERSION)));
+        feed(&mut counts, &one_sighting());
+        assert_eq!((counts.incompatible, counts.batches, counts.sighting), (1, 0, 0));
+
+        // The same node, reflashed: its batches read again.
+        feed(&mut counts, &heartbeat_with(NODE_VERSION));
+        feed(&mut counts, &one_sighting());
+        assert_eq!((counts.incompatible, counts.batches, counts.sighting), (1, 1, 1));
+    }
+
+    #[test]
+    fn sniff_cmd_counts_incompatible_when_heartbeat_predates_the_prefix() {
+        let counts = counted(PREFIXLESS_HEARTBEAT);
+        assert_eq!((counts.incompatible, counts.host_behind, counts.undecodable), (1, 0, 0));
+    }
+
+    /// A heartbeat without the prefix: counter, epoch, protocol major and minor, flags,
+    /// then the rest, 27 bytes. A small counter puts 0 where the board is.
+    const PREFIXLESS_HEARTBEAT: &[u8] = &[
+        0x57, 0x54, 0x55, 0x49, 0x01, 0x01, // header
+        0x2A, 0x00, 0x00, 0x00, // counter 42
+        0x03, // epoch
+        0x01, 0x00, 0x01, // protocol 1.0, 5g
+        0x00, 0x00, 0x00, 0x00, // wifi_refused, ble_refused
+        0x07, 0x00, // beat
+        0x00, 0x95, 0x24, 0x08, 0x01, 0x43, 0x51, // unsent .. die_temp
+    ];
 
     fn heartbeat_with(version: wartui_proto::air::Version) -> Vec<u8> {
         use wartui_proto::air::{Board, DieTemp, HeartbeatMsg, Vdd};

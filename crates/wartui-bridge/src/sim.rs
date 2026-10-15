@@ -94,8 +94,8 @@ pub struct SimConfig {
     pub sightings_per_address: Option<u32>,
     /// The index of one node that heartbeats a minor version behind [`NODE_VERSION`].
     ///
-    /// `None` by default. The host shows such a node as `needs update` and never assigns it,
-    /// which this is the only way to see without flashing an older build.
+    /// `None` by default. A test knob: no CLI flag sets it. The host shows such a node as
+    /// `needs update` and never assigns it.
     pub outdated_node: Option<u8>,
 }
 

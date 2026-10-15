@@ -8,5 +8,6 @@ rustflags = [
 [target.riscv32imac-unknown-none-elf]
 # No --chip: espflash detects it, so the same runner serves both features. The
 # partition table path is relative to where cargo runs, so `cargo run` works from
-# this directory.
-runner = "espflash flash --monitor --partition-table partitions.csv"
+# this directory. otadata is erased so the bootloader boots ota_0, where the app
+# goes, whatever slot an over-the-air update last selected.
+runner = "espflash flash --monitor --partition-table partitions.csv --erase-parts otadata"
