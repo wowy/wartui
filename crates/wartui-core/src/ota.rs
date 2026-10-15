@@ -27,8 +27,11 @@
 //! last offset the node reported: a node that has those bytes answers the duplicate with its
 //! status, and one that lacks them takes them. One rule recovers lost chunks and lost statuses
 //! alike. `Idle` means the node dropped the session (30 s of silence, or a reboot), and so
-//! does [`MAX_STATUS_TIMEOUTS`] unanswered in a row; either returns to the `begin`, which an
-//! identical one resumes where the node's progress stands.
+//! does [`MAX_STATUS_TIMEOUTS`] unanswered in a row. So does [`MAX_SEND_FAILURES`] unacked
+//! sends in a row: a node rebooting has its radio off, and acks nothing for a second or so.
+//! Each returns to the `begin`, which an identical one resumes where the node's progress
+//! stands: from 0 after a reboot, which loses the receiver's state and the node's core.
+//! [`MAX_BEGINS`] and [`BEGIN_TIMEOUT`] are what give up on the node.
 //!
 //! **Success, rollback and silence are told apart by the heartbeat's frozen prefix**: version
 //! and trial flag, which every minor reads. A node switches slots the moment it reports
@@ -77,7 +80,8 @@ pub const MAX_STATUS_TIMEOUTS: u32 = 20;
 /// bridge answers in milliseconds; a result evicted from its ring never comes.
 pub const SEND_TIMEOUT: Duration = Duration::from_secs(1);
 
-/// Unacked sends of one frame in a row before the node is taken to be gone.
+/// Unacked chunks or commits in a row before the node is taken to have rebooted or wandered off,
+/// and the update returns to its `begin`.
 pub const MAX_SEND_FAILURES: u32 = 10;
 
 /// How long the `begin` is retried on heartbeats before the node is given up on: six admin
@@ -146,7 +150,7 @@ pub enum Failure {
     FlashError,
     /// Every byte arrived and the hash did not match.
     HashMismatch,
-    /// Frames went unacked, or the update kept losing its session.
+    /// The update returned to its `begin` more than [`MAX_BEGINS`] times.
     NotAnswering,
     /// The image verified and the node could not switch slots to it.
     SwitchFailed,
@@ -524,11 +528,12 @@ impl OtaSession {
         }
     }
 
-    /// Count an unacked send, failing the update past [`MAX_SEND_FAILURES`]. Whether to retry.
+    /// Count an unacked send, returning to the `begin` past [`MAX_SEND_FAILURES`]. Whether to
+    /// retry.
     fn note_send_failure(&mut self, now: Instant) -> bool {
         self.send_failures += 1;
         if self.send_failures > MAX_SEND_FAILURES {
-            self.fail(now, Failure::NotAnswering);
+            self.rebegin(now);
             return false;
         }
         true

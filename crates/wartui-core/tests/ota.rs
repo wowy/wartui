@@ -11,8 +11,8 @@ use wartui_bridge::sim::{SimConfig, SimTransport};
 use wartui_bridge::{LinkEvent, LinkHandle};
 use wartui_core::engine::Now;
 use wartui_core::ota::{
-    BEGIN_TIMEOUT, CONFIRM_TIMEOUT, Failure, MAX_SEND_FAILURES, OtaEvent, OtaImage, OtaSession,
-    Outcome, Phase, REBOOT_GRACE,
+    BEGIN_TIMEOUT, CONFIRM_TIMEOUT, Failure, MAX_BEGINS, MAX_SEND_FAILURES, OtaEvent, OtaImage,
+    OtaSession, Outcome, Phase, REBOOT_GRACE,
 };
 use wartui_core::runtime::{drive_ota, now};
 use wartui_proto::air::{
@@ -403,11 +403,33 @@ fn ota_session_resends_chunk_when_send_is_unacked() {
 }
 
 #[test]
-fn ota_session_fails_when_chunks_stay_unacked() {
+fn ota_session_fails_when_chunks_stay_unacked_across_every_begin() {
     let mut bench = Bench::new(&image(NEW));
     let mut fate = |out| if out == Out::Chunk(2048) { Fate::Unacked } else { Fate::Deliver };
     assert_eq!(bench.run_to_end(&mut fate), Outcome::Failed(Failure::NotAnswering));
-    assert_eq!(bench.count(Out::Chunk(2048)), MAX_SEND_FAILURES as usize + 1);
+    // Each begin resumes at 2048 and sends it until the streak gives up on it.
+    let per_begin = MAX_SEND_FAILURES as usize + 1;
+    assert_eq!(bench.count(Out::Chunk(2048)), per_begin * MAX_BEGINS as usize);
+    assert_eq!(bench.count(Out::Begin), MAX_BEGINS as usize);
+}
+
+#[test]
+fn ota_session_begins_again_and_restarts_when_node_reboots_mid_stream() {
+    let mut bench = Bench::new(&image(NEW));
+    bench.run(&mut deliver, Duration::from_secs(5), |b| b.session.progress().acked >= 8192);
+    // A hard reset: the radio acks nothing while the node boots, and the node comes back
+    // without the session or its core.
+    bench.node.reboot(OLD, false);
+    let mut fate = |_| Fate::Unacked;
+    bench.run(&mut fate, Duration::from_secs(1), |b| b.session.progress().phase == Phase::Begin);
+    assert_eq!(bench.session.progress().phase, Phase::Begin, "back to the begin, not failed");
+    assert!(bench.session.outcome().is_none());
+    let begins = bench.count(Out::Begin);
+    let zeros = bench.count(Out::Chunk(0));
+    assert_eq!(bench.run_to_end(&mut deliver), Outcome::Done(NEW));
+    assert_eq!(bench.count(Out::Begin), begins + 1, "on the next heartbeat");
+    assert_eq!(bench.count(Out::Chunk(0)), zeros + 1, "streaming restarts from 0");
+    bench.assert_image_written();
 }
 
 #[test]
