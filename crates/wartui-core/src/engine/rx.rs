@@ -127,7 +127,7 @@ impl FleetEngine {
             | Frame::OtaCommit(_)
             | Frame::OtaAbort(_)
             | Frame::OtaConfirm(_) => self.counters.foreign_admin += 1,
-            // The update session reads these, not the engine.
+            // A node's update status is not the engine's to act on.
             Frame::OtaStatus(_) => {}
             // The right length is no guarantee of the right layout: a minor version may move
             // fields without resizing the frame.

@@ -1,7 +1,8 @@
 use core::fmt;
 
 use super::{
-    DecodeError, DieTemp, MsgType, NODE_VERSION, OFFSET_BODY, Vdd, Version, header, write_header,
+    DecodeError, DieTemp, MsgType, NODE_VERSION, OFFSET_BODY, Vdd, Version, fixed, header, le_u32,
+    write_header,
 };
 use crate::reset::ResetCause;
 
@@ -247,13 +248,7 @@ impl HeartbeatMsg {
     /// # Errors
     /// See [`DecodeError`].
     pub fn decode(buf: &[u8]) -> Result<Self, DecodeError> {
-        match header(buf)? {
-            MsgType::Heartbeat => {}
-            other => return Err(DecodeError::UnknownType(other.as_u8())),
-        }
-        if buf.len() != HEARTBEAT_MSG_LEN {
-            return Err(DecodeError::BadLength { need: HEARTBEAT_MSG_LEN, got: buf.len() });
-        }
+        fixed(buf, MsgType::Heartbeat, HEARTBEAT_MSG_LEN)?;
         const P: usize = OFFSET_BODY + HEARTBEAT_PREFIX_LEN;
         let capabilities = Capabilities::from_prefix([
             buf[OFFSET_BODY],
@@ -265,7 +260,7 @@ impl HeartbeatMsg {
         let le = |at: usize| u16::from_le_bytes([buf[at], buf[at + 1]]);
         Ok(Self {
             capabilities,
-            counter: u32::from_le_bytes([buf[P], buf[P + 1], buf[P + 2], buf[P + 3]]),
+            counter: le_u32(buf, P),
             epoch: buf[P + 4],
             wifi_refused: le(P + 5),
             ble_refused: le(P + 7),

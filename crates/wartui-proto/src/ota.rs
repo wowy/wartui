@@ -18,9 +18,15 @@
 //! slot at `begin` would stall the node for seconds while the host waits on a status, and
 //! erases sectors a shorter image never reaches.
 //!
-//! **A `begin` identical to the session in progress changes nothing.** The host re-sends
-//! [`OtaBeginMsg`] when the status answering the first is lost, and restarting would throw
-//! away chunks the node already holds. A host retrying after a failure opens a new session.
+//! **A `begin` identical to a session receiving or verified changes nothing.** The host
+//! re-sends [`OtaBeginMsg`] when the status answering the first is lost, and restarting
+//! would throw away chunks the node already holds. After a hash mismatch or a flash error
+//! there is nothing to keep, so an identical `begin` starts afresh. A host that restarts
+//! and reuses its session byte is then never stuck behind a failure.
+//!
+//! **An image fills whole sectors only.** [`Receiver::begin`] measures `len` against the
+//! slot's capacity rounded down to a [`SECTOR`], so the last erase never reaches past the
+//! slot.
 //!
 //! **The hash runs as bytes arrive**, in order, so `commit` costs one comparison. Reading a
 //! 1.9 MB slot back to hash it would cost seconds, and a chunk is only accepted at
@@ -104,18 +110,21 @@ impl Receiver {
 
     /// Open a session, or answer for the one already open.
     ///
-    /// Refused with [`OtaState::WrongBoard`] or [`OtaState::TooLarge`] (an empty image too),
-    /// leaving any current session as it is. A `begin` identical to the current session
-    /// returns its status and keeps its progress. Any other starts afresh.
+    /// Refused with [`OtaState::WrongBoard`] or [`OtaState::TooLarge`] (an empty image too,
+    /// or one past the slot's last whole sector), leaving any current session as it is. A
+    /// `begin` identical to a session receiving or verified returns its status and keeps its
+    /// progress. Any other starts afresh.
     pub fn begin<S: SectorSink>(&mut self, msg: &OtaBeginMsg, sink: &S) -> OtaStatusMsg {
         if msg.board != self.board {
             return refused(msg.session, OtaState::WrongBoard);
         }
-        if msg.len == 0 || msg.len > sink.capacity() {
+        let whole_sectors = sink.capacity() / SECTOR as u32 * SECTOR as u32;
+        if msg.len == 0 || msg.len > whole_sectors {
             return refused(msg.session, OtaState::TooLarge);
         }
         if let Some(session) = &self.session
             && session.begin == *msg
+            && matches!(session.phase, Phase::Receiving | Phase::Verified)
         {
             return self.status();
         }

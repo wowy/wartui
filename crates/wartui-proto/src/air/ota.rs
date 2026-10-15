@@ -8,7 +8,9 @@
 //! v2 carries. The node answers in [`OtaStatusMsg`]s, which stay within v1's 250 bytes like
 //! everything else a node sends. [`crate::ota`] is the node's half of the conversation.
 
-use super::{Board, DecodeError, MsgType, OFFSET_BODY, Version, header, write_header};
+use super::{
+    Board, DecodeError, MsgType, OFFSET_BODY, Version, fixed, header, le_u32, write_header,
+};
 use crate::link::{MAX_ESPNOW_PAYLOAD, MAX_ESPNOW_V2_PAYLOAD};
 
 /// Image bytes in every [`OtaChunkMsg`] but the last.
@@ -39,22 +41,6 @@ const _: () = {
     assert!(OTA_CHUNK_MSG_MAX <= MAX_ESPNOW_V2_PAYLOAD);
     assert!(OTA_STATUS_MSG_LEN <= MAX_ESPNOW_PAYLOAD);
 };
-
-/// Check the header names `want` and the frame is exactly `len` bytes.
-fn fixed(buf: &[u8], want: MsgType, len: usize) -> Result<(), DecodeError> {
-    let got = header(buf)?;
-    if got != want {
-        return Err(DecodeError::UnknownType(got.as_u8()));
-    }
-    if buf.len() != len {
-        return Err(DecodeError::BadLength { need: len, got: buf.len() });
-    }
-    Ok(())
-}
-
-fn le_u32(buf: &[u8], at: usize) -> u32 {
-    u32::from_le_bytes([buf[at], buf[at + 1], buf[at + 2], buf[at + 3]])
-}
 
 /// Host → node: open an update session for one image.
 ///

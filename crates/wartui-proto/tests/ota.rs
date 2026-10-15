@@ -19,6 +19,7 @@ enum Op {
 /// A slot that behaves like NOR flash: erase sets a sector to 0xFF, and a write lands only
 /// on erased bytes. It records every operation and fails every one once told to.
 struct FakeSink {
+    capacity: u32,
     flash: Vec<u8>,
     ops: Vec<Op>,
     fail: bool,
@@ -26,7 +27,14 @@ struct FakeSink {
 
 impl FakeSink {
     fn new() -> Self {
-        Self { flash: vec![0; CAPACITY as usize], ops: Vec::new(), fail: false }
+        Self::with_capacity(CAPACITY)
+    }
+
+    /// A slot of `capacity` bytes, backed to the end of its last sector so an erase past
+    /// the slot shows as a failed assertion rather than a panic in the fake.
+    fn with_capacity(capacity: u32) -> Self {
+        let backing = (capacity as usize).next_multiple_of(SECTOR);
+        Self { capacity, flash: vec![0; backing], ops: Vec::new(), fail: false }
     }
 
     fn erases(&self) -> Vec<u32> {
@@ -44,11 +52,12 @@ impl SectorSink for FakeSink {
     type Error = ();
 
     fn capacity(&self) -> u32 {
-        CAPACITY
+        self.capacity
     }
 
     fn erase_sector(&mut self, offset: u32) -> Result<(), ()> {
         assert_eq!(offset as usize % SECTOR, 0, "erase at a sector boundary");
+        assert!(offset + SECTOR as u32 <= self.capacity, "erase within the slot");
         if self.fail {
             return Err(());
         }
@@ -364,7 +373,7 @@ fn receiver_restarts_when_begin_differs() {
 }
 
 #[test]
-fn receiver_holds_flash_error_when_messages_follow_until_a_new_begin() {
+fn receiver_holds_flash_error_when_messages_follow_until_a_begin() {
     let image = image(2 * SECTOR + 8);
     let (mut rx, mut sink) = (receiver(), FakeSink::new());
     let begin = begin_for(1, &image);
@@ -377,11 +386,56 @@ fn receiver_holds_flash_error_when_messages_follow_until_a_new_begin() {
     sink.fail = false;
     assert_eq!(rx.chunk(&chunk_at(1, &image, SECTOR), &mut sink), Some(failed));
     assert_eq!(rx.commit(&OtaCommitMsg { session: 1 }, &mut sink), failed);
-    assert_eq!(rx.begin(&begin, &sink), failed, "an identical begin is the same session");
     assert!(sink.ops.is_empty());
 
-    assert_eq!(rx.begin(&begin_for(2, &image), &sink), status(2, OtaState::Receiving, 0));
-    send_all(&mut rx, &mut sink, 2, &image);
+    // An identical begin retries the failed session from the start.
+    assert_eq!(rx.begin(&begin, &sink), status(1, OtaState::Receiving, 0));
+    send_all(&mut rx, &mut sink, 1, &image);
+    assert_eq!(rx.commit(&OtaCommitMsg { session: 1 }, &mut sink).state, OtaState::Verified);
+}
+
+#[test]
+fn receiver_restarts_when_identical_begin_follows_hash_mismatch() {
+    // A host that restarted and reused its session byte, now sending the right image.
+    let image = image(SECTOR + 3);
+    let (mut rx, mut sink) = (receiver(), FakeSink::new());
+    let begin = begin_for(1, &image);
+    let mut corrupt = image.clone();
+    corrupt[0] ^= 1;
+    rx.begin(&begin, &sink);
+    send_all(&mut rx, &mut sink, 1, &corrupt);
+    assert_eq!(rx.commit(&OtaCommitMsg { session: 1 }, &mut sink).state, OtaState::HashMismatch);
+
+    assert_eq!(rx.begin(&begin, &sink), status(1, OtaState::Receiving, 0));
+    send_all(&mut rx, &mut sink, 1, &image);
+    assert_eq!(rx.commit(&OtaCommitMsg { session: 1 }, &mut sink).state, OtaState::Verified);
+    assert_eq!(&sink.flash[..image.len()], image.as_slice());
+}
+
+#[test]
+fn receiver_keeps_verified_when_identical_begin_repeats() {
+    let image = image(OTA_CHUNK + 5);
+    let (mut rx, mut sink) = (receiver(), FakeSink::new());
+    let begin = begin_for(1, &image);
+    rx.begin(&begin, &sink);
+    send_all(&mut rx, &mut sink, 1, &image);
+    let verified = rx.commit(&OtaCommitMsg { session: 1 }, &mut sink);
+    assert_eq!(verified.state, OtaState::Verified);
+    assert_eq!(rx.begin(&begin, &sink), verified);
+    assert!(rx.is_verified());
+}
+
+#[test]
+fn receiver_refuses_begin_when_image_reaches_past_slot_last_whole_sector() {
+    // A slot 100 bytes past a sector boundary: an image there would need an erase past it.
+    let capacity = 3 * SECTOR as u32 + 100;
+    let (mut rx, mut sink) = (receiver(), FakeSink::with_capacity(capacity));
+    let past = image(3 * SECTOR + 1);
+    assert_eq!(rx.begin(&begin_for(1, &past), &sink), status(1, OtaState::TooLarge, 0));
+
+    let fits = image(3 * SECTOR);
+    assert_eq!(rx.begin(&begin_for(2, &fits), &sink), status(2, OtaState::Receiving, 0));
+    send_all(&mut rx, &mut sink, 2, &fits);
     assert_eq!(rx.commit(&OtaCommitMsg { session: 2 }, &mut sink).state, OtaState::Verified);
 }
 

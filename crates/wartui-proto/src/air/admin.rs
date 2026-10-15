@@ -1,4 +1,4 @@
-use super::{DecodeError, MsgType, OFFSET_BODY, header, write_header};
+use super::{DecodeError, MsgType, OFFSET_BODY, fixed, write_header};
 use crate::plan::{CHANNEL_SET_BYTES, ChannelSet};
 
 /// Length of [`AdminMsg`] on the wire.
@@ -74,13 +74,7 @@ impl AdminMsg {
     /// # Errors
     /// See [`DecodeError`].
     pub fn decode(buf: &[u8]) -> Result<Self, DecodeError> {
-        match header(buf)? {
-            MsgType::Admin => {}
-            other => return Err(DecodeError::UnknownType(other.as_u8())),
-        }
-        if buf.len() != ADMIN_MSG_LEN {
-            return Err(DecodeError::BadLength { need: ADMIN_MSG_LEN, got: buf.len() });
-        }
+        fixed(buf, MsgType::Admin, ADMIN_MSG_LEN)?;
         let mut channels = [0u8; CHANNEL_SET_BYTES];
         channels.copy_from_slice(&buf[OFFSET_BODY + 2..OFFSET_BODY + 2 + CHANNEL_SET_BYTES]);
         Ok(Self {
@@ -119,13 +113,7 @@ impl ClearMsg {
     /// # Errors
     /// See [`DecodeError`].
     pub fn decode(buf: &[u8]) -> Result<Self, DecodeError> {
-        match header(buf)? {
-            MsgType::Clear => {}
-            other => return Err(DecodeError::UnknownType(other.as_u8())),
-        }
-        if buf.len() != CLEAR_MSG_LEN {
-            return Err(DecodeError::BadLength { need: CLEAR_MSG_LEN, got: buf.len() });
-        }
+        fixed(buf, MsgType::Clear, CLEAR_MSG_LEN)?;
         Ok(Self)
     }
 

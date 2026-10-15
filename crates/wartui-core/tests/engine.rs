@@ -1419,7 +1419,7 @@ fn engine_counts_foreign_admin_when_another_host_sends_an_update() {
 }
 
 #[test]
-fn engine_ignores_ota_status_when_no_update_is_running() {
+fn engine_ignores_ota_status_when_node_reports_one() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
 

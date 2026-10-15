@@ -207,6 +207,24 @@ fn header(buf: &[u8]) -> Result<MsgType, DecodeError> {
     MsgType::try_from(buf[OFFSET_TYPE])
 }
 
+/// Check the header names `want` and the frame is exactly `len` bytes, which is every
+/// fixed-length frame's whole validation.
+fn fixed(buf: &[u8], want: MsgType, len: usize) -> Result<(), DecodeError> {
+    let got = header(buf)?;
+    if got != want {
+        return Err(DecodeError::UnknownType(got.as_u8()));
+    }
+    if buf.len() != len {
+        return Err(DecodeError::BadLength { need: len, got: buf.len() });
+    }
+    Ok(())
+}
+
+/// The little-endian `u32` at `at`.
+fn le_u32(buf: &[u8], at: usize) -> u32 {
+    u32::from_le_bytes([buf[at], buf[at + 1], buf[at + 2], buf[at + 3]])
+}
+
 /// Write the header for `msg_type` into the front of `out`.
 fn write_header(out: &mut [u8], msg_type: MsgType) {
     out[..4].copy_from_slice(&MAGIC);
@@ -233,7 +251,7 @@ pub enum Frame<'a> {
     OtaCommit(OtaCommitMsg),
     /// Host → node: drop the session.
     OtaAbort(OtaAbortMsg),
-    /// Host → node: keep the image on trial.
+    /// Host → node: confirm the image on trial, ending its trial.
     OtaConfirm(OtaConfirmMsg),
     /// Node → host: where an update session stands.
     OtaStatus(OtaStatusMsg),
