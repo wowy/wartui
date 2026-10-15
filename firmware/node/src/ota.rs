@@ -15,9 +15,10 @@
 //! **Rollback is this firmware's, because the bootloader has none.** The prebuilt espflash
 //! bootloader selects a slot by `otadata` sequence alone and reads no image state. So the
 //! `trial` sector, not `otadata`, decides whether a boot is a trial. It holds an armed record
-//! naming the slot on trial, then one cleared bit per boot of it. The node writes the
-//! `otadata` states too (`New`, `PendingVerify`, `Valid`, `Aborted`), for whoever reads them,
-//! but never decides from them.
+//! naming the slot on trial, then one cleared bit per boot of it, in the fixed layout
+//! [`wartui_proto::ota::trial`] defines and tests. The node writes the `otadata` states too
+//! (`New`, `PendingVerify`, `Valid`, `Aborted`), for whoever reads them, but never decides
+//! from them.
 //!
 //! **Every step is ordered so a power cut leaves a state the next boot reads correctly.**
 //!
@@ -34,11 +35,9 @@
 //! back rather than running uncounted, and a table without a `trial` sector refuses every
 //! update.
 //!
-//! **Trial boots are counted in flash, one bit each.** These nodes lose power routinely,
-//! and RTC memory does not survive that. Clearing a bit on NOR flash needs no erase, so
-//! each boot clears one more bit, and a power cut can lose at most the bit being written.
-//! There is no watchdog, so a hung image is caught the same way: each power cycle the
-//! operator gives it counts a boot.
+//! **Trial boots are counted in flash** because these nodes lose power routinely, and RTC
+//! memory does not survive that. There is no watchdog, so a hung image is caught the same
+//! way: each power cycle the operator gives it counts a boot.
 //!
 //! **Any update frame from the host confirms a trial image first**, as an admin, clear or
 //! update-confirm frame does. Hearing the host is the test, and an update accepted on trial
@@ -59,6 +58,7 @@ use wartui_firmware::reboot;
 use wartui_proto::air::{
     OtaAbortMsg, OtaBeginMsg, OtaChunkMsg, OtaCommitMsg, OtaState, OtaStatusMsg,
 };
+use wartui_proto::ota::trial::{self, Record};
 use wartui_proto::ota::{Receiver, SECTOR, SectorSink};
 
 /// Unconfirmed boots of a new image before it is rolled back.
@@ -77,11 +77,8 @@ const SILENCE: Duration = Duration::from_millis(30_000);
 
 const SECTOR_U32: u32 = SECTOR as u32;
 
-/// The first three bytes of an armed `trial` sector. The fourth names the slot on trial.
-const ARMED_MAGIC: [u8; 3] = *b"WTR";
-
-/// Where the boot count starts in the `trial` sector, past the armed record.
-const COUNT_OFFSET: u32 = 4;
+#[allow(clippy::cast_possible_truncation)]
+const COUNT_OFFSET: u32 = trial::COUNT_OFFSET as u32;
 
 static TABLE: ConstStaticCell<[u8; PARTITION_TABLE_MAX_LEN]> =
     ConstStaticCell::new([0; PARTITION_TABLE_MAX_LEN]);
@@ -183,31 +180,6 @@ pub struct Answer {
     pub accepted: bool,
 }
 
-/// What the first word of the `trial` sector says.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Record {
-    /// Erased: nothing on trial.
-    Erased,
-    /// Armed for the slot with this OTA app number.
-    Armed(u8),
-    /// Anything else.
-    Garbage,
-}
-
-/// The first word of a `trial` sector armed for OTA app slot `slot`.
-const fn armed_word(slot: u8) -> [u8; 4] {
-    [ARMED_MAGIC[0], ARMED_MAGIC[1], ARMED_MAGIC[2], slot]
-}
-
-/// Read the first word of a `trial` sector.
-fn decode_record(word: [u8; 4]) -> Record {
-    match word {
-        [0xFF, 0xFF, 0xFF, 0xFF] => Record::Erased,
-        [a, b, c, slot @ (0 | 1)] if [a, b, c] == ARMED_MAGIC => Record::Armed(slot),
-        _ => Record::Garbage,
-    }
-}
-
 /// The OTA app number of `kind`: 0 for `ota_0`, 1 for `ota_1`, `None` for any other.
 const fn app_number(kind: AppPartitionSubType) -> Option<u8> {
     match kind {
@@ -215,21 +187,6 @@ const fn app_number(kind: AppPartitionSubType) -> Option<u8> {
         AppPartitionSubType::Ota1 => Some(1),
         _ => None,
     }
-}
-
-/// Count one more boot in a word of the count: the bits already clear in it, and the word
-/// with the next one cleared. `None` when the word is full.
-///
-/// Bytes clear in order, each from its lowest set bit, so the first byte that is not zero is
-/// the one to clear next and the count is the number of clear bits.
-fn count_word(word: [u8; 4]) -> Option<(u32, [u8; 4])> {
-    let i = word.iter().position(|&byte| byte != 0)?;
-    let mut next = word;
-    next[i] &= next[i] - 1;
-    // `i` is at most 3.
-    #[allow(clippy::cast_possible_truncation)]
-    let cleared = 8 * i as u32 + word[i].count_zeros();
-    Some((cleared, next))
 }
 
 /// The node's flash, its update session, and where the slots are.
@@ -284,7 +241,7 @@ impl Ota {
             return false;
         };
         let otadata = self.updater().and_then(|mut updater| Ok(updater.current_ota_state()?));
-        let record = self.read_word(base).map(decode_record);
+        let record = self.read_word(base).map(trial::decode_record);
         match (otadata, record) {
             (Ok(_), Ok(Record::Armed(slot))) if slot == booted => {}
             (Ok(state), Err(err)) => {
@@ -447,9 +404,9 @@ impl Ota {
         else {
             return Err(Fault::Layout);
         };
-        let slot = app_number(target.kind).ok_or(Fault::Layout)?;
+        let armed = app_number(target.kind).and_then(trial::armed_word).ok_or(Fault::Layout)?;
         self.erase_trial()?;
-        NorFlash::write(&mut self.flash, base, &armed_word(slot))?;
+        NorFlash::write(&mut self.flash, base, &armed)?;
         let mut updater = self.updater()?;
         let mut otadata = updater.ota_data()?;
         otadata.set_current_app_partition(booted)?;
@@ -493,24 +450,22 @@ impl Ota {
     }
 
     /// Count this boot in the `trial` sector at `base` and return the count including it.
+    ///
+    /// [`trial::Count`] says which word to write; this only reads and writes it.
     fn count_trial_boot(&mut self, base: u32) -> Result<u32, Fault> {
-        let mut cleared = 0;
-        for at in (base + COUNT_OFFSET..base + SECTOR_U32).step_by(4) {
-            let word = self.read_word(at)?;
-            match count_word(word) {
-                Some((in_word, next)) => {
-                    NorFlash::write(&mut self.flash, at, &next)?;
-                    return Ok(cleared + in_word + 1);
-                }
-                None => cleared += 32,
+        let mut count = trial::Count::new();
+        for at in (base + COUNT_OFFSET..base + SECTOR_U32).step_by(trial::WORD) {
+            if let Some((next, boots)) = count.step(self.read_word(at)?) {
+                NorFlash::write(&mut self.flash, at, &next)?;
+                return Ok(boots);
             }
         }
         Err(Fault::CountFull)
     }
 
     /// Read the flash word at `at`.
-    fn read_word(&mut self, at: u32) -> Result<[u8; 4], Fault> {
-        let mut word = [0u8; 4];
+    fn read_word(&mut self, at: u32) -> Result<[u8; trial::WORD], Fault> {
+        let mut word = [0u8; trial::WORD];
         ReadNorFlash::read(&mut self.flash, at, &mut word)?;
         Ok(word)
     }

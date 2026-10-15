@@ -89,7 +89,7 @@ own.
   else's), `beacon`, `hci`, `dedup`, `link`, `mac` (the `Mac` type and its text form),
   `outbox`, `stall`, `plan` (channel pools and the partitioning planner), `node` (a node's
   timings and sweep cursor), `tx_power`, `pending` (the buffers sightings wait in on a node),
-  `ota` (the node's update receiver).
+  `ota` (the node's update receiver, and `ota::trial`, the record of an image on trial).
   Compiled into *both* the host and the firmware by path dependency, which is the only thing
   keeping the ends in step — and the reason a node's parsers are testable with `cargo test`
   rather than a reflash.
@@ -201,7 +201,8 @@ is here rather than only in a `//!`.
   version behind, show it as `needs update` and update it over the air: the frame header, the
   heartbeat's type byte and its 5-byte prefix of version, board and flags
   (`air::Capabilities::decode_prefix`), and the update frames, type bytes and layouts both
-  (`crates/wartui-proto/src/air/ota.rs`). **Neither version
+  (`crates/wartui-proto/src/air/ota.rs`), and the node's `trial` sector layout, which one image
+  writes and the next reads (`crates/wartui-proto/src/ota/trial.rs`). **Neither version
   marker moves until 1.0**, whatever a layout does: `air::WIRE_VERSION` is the lever held for the
   first change a fleet in the field has to survive, and `store::SCHEMA_VERSION` the same for the
   first capture that has to be read in an earlier build's terms. Nothing before 1.0 is either, so
@@ -264,7 +265,8 @@ is here rather than only in a `//!`.
   because power cycles are routine on these nodes and RTC memory does not survive them. With no
   watchdog, those power cycles are also what rolls back a hung image. Every step's flash writes
   are ordered so a power cut cannot leave an image running untrialed.
-  → `firmware/node/src/ota.rs` `//!`, `firmware/node/README.md` § "Over-the-air updates"
+  → `firmware/node/src/ota.rs` `//!`, `crates/wartui-proto/src/ota/trial.rs` (the sector's fixed
+  layout), `firmware/node/README.md` § "Over-the-air updates"
 - **`clippy::all` is denied workspace-wide, in both firmwares too, and so is `unsafe_code`.** The
   host allows it on one function, the Raspberry Pi firmware mailbox ioctl
   (`crates/wartui-core/src/health.rs`, `mailbox_call`). Each firmware allows the IDF calls

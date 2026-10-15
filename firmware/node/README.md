@@ -195,7 +195,9 @@ sector refuses every begin with `FlashError`, so it never runs an update untrial
 node does it. The sector records which slot is on trial and how many times it has booted: an
 armed record naming the slot, then one cleared bit per boot. Clearing a bit needs no erase and
 survives the power cuts these nodes see routinely, which RTC memory does not. The node also writes
-the `otadata` states (`New`, `PendingVerify`, `Valid`, `Aborted`) but never decides from them.
+the `otadata` states (`New`, `PendingVerify`, `Valid`, `Aborted`) but never decides from them. The
+sector's layout is `wartui_proto::ota::trial`, unit-tested there and fixed until 1.0, since one
+image writes it and the next reads it.
 
 Each step's flash writes come in an order a power cut cannot turn into an untrialed image:
 
