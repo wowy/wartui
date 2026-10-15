@@ -21,6 +21,7 @@ This is the operator's manual. The root [`README.md`](../../README.md) is the sh
 | `ports`        | List the Espressif boards attached, and the address of each                         |
 | `flash-fleet`  | Flash node firmware onto every attached board of one chip; see "Flashing the fleet" |
 | `flash-bridge` | Flash bridge firmware onto the bridge; see "Flashing the bridge"                    |
+| `ota`          | Update node firmware through the bridge; see "Updating over the air"                |
 
 Nodes broadcast heartbeats but unicast sighting batches to the bridge that last sent them an admin
 or clear frame. So `sniff` on a second bridge on the channel hears every heartbeat and no sightings.
@@ -460,6 +461,100 @@ full output. A board flashed without `--bridge` is remembered as the bridge, so 
 it and `run` opens it first; one named with `--bridge` is not. `--dry-run` resets it once, for
 `board-info`, and remembers nothing.
 
+### Updating over the air
+
+`ota` updates the nodes' firmware through the bridge, with no cable to them. It listens for
+heartbeats, shows what it would do with each node, asks, then updates the chosen nodes one at a
+time. Nothing else may hold the bridge meanwhile, so stop `run` first.
+
+```sh
+wartui ota                                    # every node heard
+wartui ota --node A1:B0 --node 57:84          # just these two
+wartui ota --image wartui-node-app-esp32c5.bin --yes
+```
+
+| Flag                 | Default          | What it is                                                     |
+|----------------------|------------------|----------------------------------------------------------------|
+| `--bridge PATH\|MAC` | detected         | The bridge, by path, address or `00:08`                        |
+| `--node MAC`         | every node heard | A node to update, by address or the end of one; repeatable     |
+| `--image BIN`        | —                | Send this app-only image, to the nodes of the board it is for  |
+| `--firmware-dir DIR` | the checkout's   | Build each board's image from the node firmware here           |
+| `--listen SECS`      | `6`              | How long to gather heartbeats before choosing                  |
+| `--force`            | off              | Also update a node on the image's version, or a newer one      |
+| `--yes`, `-y`        | off              | Update without asking                                          |
+| `--sim N`            | —                | Update a fake fleet, running an older version, instead         |
+
+**The image is app-only**: what one app slot holds, not the merged image `flash-fleet` writes.
+Its board and version come from the app descriptor inside it, never from its file name. A merged
+image, one built for no node board, or one over 1920 KiB is refused. So is a corrupt one: its
+segment checksum and appended SHA-256 are checked as the bootloader checks them, before anything
+is sent. Each board gets its own image, from the first source that applies:
+
+- `--image BIN`, sent only to nodes of the board its descriptor names.
+- `--firmware-dir DIR`, or the checkout's `firmware/node` when this binary was built from one:
+  `cargo build --release` with that board's features, saved with `espflash save-image` without
+  `--merge`.
+- The release this binary was built for: `wartui-node-app-<variant>.bin`, checked against its
+  `SHA256SUMS` and kept under `images/<tag>/` like `flash-fleet`'s.
+
+**The table comes first.** Each node heard, or each one `--node` names, gets a line:
+
+```
+node     board           version   image     action
+A1:B0    esp32c5         0.1.0     0.1.1     update
+57:84    esp32c6-xiao    0.1.1     0.1.1     skip: already 0.1.1
+```
+
+| Action                            | Why                                                                       |
+|-----------------------------------|---------------------------------------------------------------------------|
+| `update`                          | The image is newer than what the node runs, or `--force`                  |
+| `confirm`                         | The node runs the image's version on trial; it is confirmed, not resent   |
+| `skip: already 0.1.1`             | The node runs the image's version                                         |
+| `skip: older image (use --force)` | The node runs a newer version than the image                              |
+| `refuse: no image for <board>`    | `--image` is for another board, or no node firmware is built for this one |
+
+Only the heartbeat's version, board and flags are read, so a node `run` shows as `needs update` is
+one `ota` reaches. Without `--yes`, `ota` asks `[y/N]` before sending anything.
+
+**Each node then gets a progress line**: how much of the image it holds, the rate, and the phase
+(`waiting for the node`, `sending`, `verifying`, `rebooting`, `confirming`). It ends `done 0.1.1
+(confirmed)` or `failed:` with the reason. A node that reboots mid-transfer is picked up again
+on its next heartbeat, and the image starts over from the beginning. Any failure makes the run
+exit non-zero, and ctrl-c aborts the node being updated and stops. With `--log-file` and
+`RUST_LOG=wartui_core=debug`, the log holds every frame sent, every send result, every status
+from the node and every phase change, as `key=value` fields.
+
+**How long it takes.** The first frame waits for the node's next heartbeat: up to 5 s on an
+assigned node, a second on a parked one. Each 1 KB chunk then costs about 3.5 ms on the link, and
+at each 4 KB sector boundary the host waits for the node to erase and write the sector: about
+29 ms on a C6 and 68 ms on a C5, much less when the slot is already blank, as on a node's first
+update after a USB flash. An 850 KB image takes about 10 s to transfer to a C6 and 18 s to a C5,
+and the reboot and confirmation add a few seconds more.
+
+**Trial, confirmation and rollback.** A verified image is switched to at once, and the node
+reboots into it on trial: the fleet table shows `;trial` after its version. The first frame it
+hears from the host confirms it, and `ota` sends one, so `done` means the node heartbeated the new
+version with the trial over. A node that boots the new image three times without hearing the host
+goes back to the old one by itself. A node with no USB cable is never left without a working
+image.
+
+A node still on trial is updated like any other: the update's first frame confirms the image it
+runs, and the new one goes into its other slot. One on trial on the image's own version, as an
+update whose confirmation went unheard leaves it, is only confirmed (`confirm`).
+
+| Failure                                       | What to do                                                                       |
+|-----------------------------------------------|----------------------------------------------------------------------------------|
+| `no answer to the update request in 30 s`     | Check `wartui sniff` hears it, and run again; persisting, `flash-fleet` it       |
+| `the node refused the update: …`              | Its partition table has no `trial` sector, or its flash failed: `flash-fleet` it |
+| `the image is larger than the node's …`       | Build a smaller image; the slot holds 1920 KiB                                   |
+| `the node could not write its flash`          | Run again; if it repeats, `flash-fleet` it                                       |
+| `the image arrived corrupted …`               | Run again                                                                        |
+| `node not answering`                          | It kept dropping the update; move it nearer the bridge, check its power, rerun   |
+| `the node could not switch to the new image`  | `flash-fleet` it                                                                 |
+| `no heartbeat from the new image within 60 s` | Power-cycle it; after three boots without the host it returns to the old image   |
+| `still running …`, `rolled back to …`         | The new image did not run on that node, which is back on the old one             |
+| `the new image was never confirmed; …`        | It returns to the old image after three boots; `run` confirms it if it can       |
+
 ## Keyboard commands
 
 | Key                    | What it does                                                                 |
@@ -661,7 +756,7 @@ board this build has no name for shows `??`.
 | `no heartbeat` | Seen, but has never completed a sweep                                                                                                       |
 | `no admin ack` | An assignment went out and its radio did not answer — nearly always Bluetooth, see [How channels are assigned](#how-channels-are-assigned)  |
 | `refused`      | The bridge's peer table is full                                                                                                             |
-| `needs update` | Runs an older major or minor of the node firmware, so wartui cannot read its frames; reflash it                                             |
+| `needs update` | Runs an older major or minor of the node firmware, so wartui cannot read its frames; update it with `wartui ota`                            |
 | `host behind`  | Runs a newer major or minor of the node firmware than this wartui drives; update wartui                                                     |
 | `rebooted xN`  | Its heartbeat counter went backwards, or its epoch went back to 0, so it has forgotten any assignment; wartui re-issues under a fresh epoch |
 
@@ -694,7 +789,7 @@ yellow too; any other state keeps its own color:
 A `stale`, `refused`, `no heartbeat`, `needs update`, or `host behind` node is out of the plan:
 nothing sent would reach it, its band is unknown, or its frames are not this build's, so its share
 might be nobody's. `b` on one says which state it is, because the fix differs: wait for a
-heartbeat, find out why heartbeats stopped, reflash the node, or update wartui. Heartbeats from a
+heartbeat, find out why heartbeats stopped, update the node with `ota`, or update wartui. Heartbeats from a
 `needs update` or `host behind` node are not counted among the footer's frames from an older
 firmware. Once its heartbeat has named its version, its sighting batches are, since none of them
 is recorded.

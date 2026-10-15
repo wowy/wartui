@@ -19,6 +19,12 @@
 //! on the bench, and the only way to exercise the host's `no admin ack` path without
 //! a second radio — and [`SimConfig::c6_nodes`] a mixed fleet. Both are off unless
 //! asked for.
+//!
+//! A node takes over-the-air updates with the receiver the firmware links, into a slot held
+//! in memory, and follows the firmware's rules around it: it listens continuously in update
+//! mode, answers only the host it has accepted an update from, reboots into a verified image
+//! on trial, and confirms it on the first host frame it hears. [`SimConfig::lossy_node`] and
+//! [`SimConfig::rejecting_node`] are the failures an update has to survive or report.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -26,8 +32,8 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 use wartui_proto::air::{
-    AdminMsg, Board, Capabilities, DieTemp, Frame, HeartbeatMsg, NODE_VERSION, RecordKind,
-    Security, SightingBatchWriter, SightingMsg, Vdd, Version,
+    AdminMsg, Board, Capabilities, DieTemp, Frame, HeartbeatMsg, NODE_VERSION, OtaState,
+    OtaStatusMsg, RecordKind, Security, SightingBatchWriter, SightingMsg, Vdd, Version,
 };
 use wartui_proto::dedup::{C5DedupRing, C6DedupRing};
 use wartui_proto::link::{
@@ -36,6 +42,7 @@ use wartui_proto::link::{
 };
 use wartui_proto::mac::Mac;
 use wartui_proto::node::{ADMIN_WAIT_MS, ASSIGNED_BEAT_MS, CHANNEL_DWELL_MS, IDLE_BEAT_MS};
+use wartui_proto::ota::{Receiver, SECTOR, SectorSink};
 use wartui_proto::plan::{ChannelSet, NUM_SCAN_CHANNELS, SCAN_CHANNELS};
 use wartui_proto::reset::ResetCause;
 use wartui_proto::tx_power::DEFAULT_TX_POWER_QUARTER_DBM;
@@ -97,6 +104,22 @@ pub struct SimConfig {
     /// `None` by default. A test knob: no CLI flag sets it. The host shows such a node as
     /// `needs update` and never assigns it.
     pub outdated_node: Option<u8>,
+    /// The firmware version every node but [`Self::outdated_node`] heartbeats.
+    /// [`NODE_VERSION`] by default; `wartui ota --sim` sets an older one, so the fleet has
+    /// something to update to.
+    pub fleet_version: Version,
+    /// The index of one node that acks this share of the update chunks sent to it without
+    /// reading them, as a node whose receive queue overflowed during a flash write does.
+    /// `None` by default. A test knob, for the host's go-back.
+    pub lossy_node: Option<(u8, f64)>,
+    /// The index of one node whose updated image is never confirmed: it ignores the host
+    /// while on trial and rolls back to its old image after three boots. `None` by default.
+    /// A test knob, for the host's rollback detection.
+    pub rejecting_node: Option<u8>,
+    /// The index of one node whose `Verified` status is lost on the way to the host: it
+    /// switches and reboots all the same. `None` by default. A test knob, for the host's
+    /// recovery from a lost `Verified`.
+    pub mute_verified_node: Option<u8>,
 }
 
 impl Default for SimConfig {
@@ -111,6 +134,10 @@ impl Default for SimConfig {
             c6_nodes: 0,
             sightings_per_address: None,
             outdated_node: None,
+            fleet_version: NODE_VERSION,
+            lossy_node: None,
+            rejecting_node: None,
+            mute_verified_node: None,
         }
     }
 }
@@ -142,14 +169,38 @@ const ADVERTISERS_PER_SCAN: usize = 12;
 /// the fake scan costs nothing but a tick of the paused clock.
 const SCAN_MS: u32 = 500;
 
+/// How long a simulated node stays in update mode without an update frame, mirroring the
+/// firmware's `SILENCE`.
+const UPDATE_SILENCE_MS: u64 = 30_000;
+
+/// Boots a trial image gets before the node rolls back, mirroring the firmware's
+/// `TRIAL_BOOTS`. A [`SimConfig::rejecting_node`] spends one idle beat on each.
+const TRIAL_BOOTS: u64 = 3;
+
+/// The bytes an update slot holds, as `firmware/node/partitions.csv` sizes it.
+const SLOT_CAPACITY: u32 = 0x1E_0000;
+
 /// What a heartbeat's admin window delivers to a simulated node.
 ///
 /// Mirrors what the firmware's `drain_admin` can read off the air: an assignment to
-/// adopt (`Frame::Admin`), or a request to empty the dedup ring (`Frame::Clear`).
-#[derive(Debug, Clone, Copy)]
+/// adopt (`Frame::Admin`), a request to empty the dedup ring (`Frame::Clear`), an update
+/// frame, as received, or the confirmation of an image on trial.
+#[derive(Debug, Clone)]
 enum SimCommand {
     Assign(AdminMsg),
     Clear,
+    Update(Vec<u8>),
+    Confirm,
+}
+
+/// What the bridge needs to know to route a frame to one node.
+#[derive(Debug)]
+struct Route {
+    mac: Mac,
+    tx: mpsc::Sender<SimCommand>,
+    holds_ble: Arc<AtomicBool>,
+    /// The share of update chunks acked and not delivered ([`SimConfig::lossy_node`]).
+    chunk_loss: f64,
 }
 
 /// A simulated bridge with a simulated fleet behind it.
@@ -190,7 +241,7 @@ impl SimTransport {
         // nowhere to file that.
         let (attached_tx, attached_rx) = tokio::sync::watch::channel(false);
 
-        let mut admin_txs: Vec<(Mac, mpsc::Sender<SimCommand>, Arc<AtomicBool>)> = Vec::new();
+        let mut routes: Vec<Route> = Vec::new();
         let mut fleet = Vec::new();
         for index in 0..self.config.node_count {
             let (admin_tx, admin_rx) = mpsc::channel(8);
@@ -198,22 +249,34 @@ impl SimTransport {
             // routes: the bridge has to know the node is deaf *before* it decides
             // what to report, and nothing arrives to infer it from.
             let holds_ble = Arc::new(AtomicBool::new(false));
-            admin_txs.push((Self::node_mac(index), admin_tx, Arc::clone(&holds_ble)));
+            let chunk_loss = match self.config.lossy_node {
+                Some((lossy, rate)) if lossy == index => rate,
+                _ => 0.0,
+            };
+            routes.push(Route {
+                mac: Self::node_mac(index),
+                tx: admin_tx,
+                holds_ble: Arc::clone(&holds_ble),
+                chunk_loss,
+            });
             // Counted from the end, so the nodes below the count keep their
             // radios as the fleet grows.
             let five_ghz = self.config.node_count - index > self.config.c6_nodes;
             let version = if self.config.outdated_node == Some(index) {
                 minor_behind(NODE_VERSION)
             } else {
-                NODE_VERSION
+                self.config.fleet_version
             };
-            fleet.push((SimNode::new(index, holds_ble, five_ghz, version), admin_rx));
+            let mut node = SimNode::new(index, holds_ble, five_ghz, version);
+            node.rejecting = self.config.rejecting_node == Some(index);
+            node.mute_verified = self.config.mute_verified_node == Some(index);
+            fleet.push((node, admin_rx));
         }
 
         let events = plumbing.events.clone();
         tokio::spawn(run_bridge(
             plumbing,
-            admin_txs,
+            routes,
             started,
             self.config.node_count,
             self.config.ble_coexistence_failure,
@@ -237,7 +300,7 @@ impl SimTransport {
 /// The dongle half: announces itself, routes admin frames, answers status.
 async fn run_bridge(
     mut plumbing: crate::LinkPlumbing,
-    admin_txs: Vec<(Mac, mpsc::Sender<SimCommand>, Arc<AtomicBool>)>,
+    routes: Vec<Route>,
     started: tokio::time::Instant,
     node_count: u8,
     ble_coexistence_failure: bool,
@@ -273,6 +336,7 @@ async fn run_bridge(
     let _ = attached.send(true);
 
     let mut peers: Vec<Mac> = Vec::new();
+    let mut rng = Xorshift::new(0x0DD5_EED5);
 
     while let Some(cmd) = plumbing.commands.recv().await {
         let reply = match cmd {
@@ -310,7 +374,8 @@ async fn run_bridge(
                     peers.push(dst);
                 }
                 let status =
-                    deliver(&admin_txs, dst, &payload, &peers, ble_coexistence_failure).await;
+                    deliver(&routes, dst, &payload, &peers, ble_coexistence_failure, &mut rng)
+                        .await;
                 Some(BridgeToHost::SendResult { id, status, tx_us: elapsed_us(started) })
             }
         };
@@ -325,11 +390,12 @@ async fn run_bridge(
 
 /// Hand a transmitted frame to whichever simulated node it is addressed to.
 async fn deliver(
-    admin_txs: &[(Mac, mpsc::Sender<SimCommand>, Arc<AtomicBool>)],
+    routes: &[Route],
     dst: Mac,
     payload: &[u8],
     peers: &[Mac],
     ble_coexistence_failure: bool,
+    rng: &mut Xorshift,
 ) -> SendStatus {
     if dst == BROADCAST {
         return SendStatus::Broadcast;
@@ -337,20 +403,29 @@ async fn deliver(
     if !peers.contains(&dst) {
         return SendStatus::NoPeer;
     }
+    let route = routes.iter().find(|route| route.mac == dst);
     let command = match Frame::decode(payload) {
         Ok(Frame::Admin(admin)) => SimCommand::Assign(admin),
         Ok(Frame::Clear(_)) => SimCommand::Clear,
+        Ok(Frame::OtaConfirm(_)) => SimCommand::Confirm,
+        // Acked by the radio, and gone before the node read it.
+        Ok(Frame::OtaChunk(_)) if route.is_some_and(|route| rng.next_f64() < route.chunk_loss) => {
+            return SendStatus::AckOk;
+        }
+        Ok(Frame::OtaBegin(_) | Frame::OtaChunk(_) | Frame::OtaCommit(_) | Frame::OtaAbort(_)) => {
+            SimCommand::Update(payload.to_vec())
+        }
         // The real radio would happily transmit it; nobody is listening.
         _ => return SendStatus::AckOk,
     };
-    match admin_txs.iter().find(|(mac, _, _)| *mac == dst) {
+    match route {
         // The radio is away on the Bluetooth antenna, which is indistinguishable
         // from a node that is not there. The frame is genuinely dropped rather than
         // merely unreported, which is why the node can never be told to stop.
-        Some((_, _, holds_ble)) if ble_coexistence_failure && holds_ble.load(Ordering::Relaxed) => {
+        Some(route) if ble_coexistence_failure && route.holds_ble.load(Ordering::Relaxed) => {
             SendStatus::AckFail
         }
-        Some((_, tx, _)) if tx.send(command).await.is_ok() => SendStatus::AckOk,
+        Some(route) if route.tx.send(command).await.is_ok() => SendStatus::AckOk,
         // Addressed to a node that is not out there, so nothing acknowledges.
         _ => SendStatus::AckFail,
     }
@@ -405,6 +480,24 @@ struct SimNode {
     boot: tokio::time::Instant,
     speed: f64,
     rng: Xorshift,
+    /// What follows is the update side, mirroring `firmware/node/src/ota.rs`.
+    ///
+    /// The receiver the firmware links, boxed for its sector buffer.
+    receiver: Box<Receiver>,
+    slot: SimSlot,
+    /// When the last update frame arrived; update mode lasts [`UPDATE_SILENCE_MS`] past it
+    /// while the receiver holds a session.
+    update_heard: tokio::time::Instant,
+    /// Running an image not yet confirmed, as each heartbeat says.
+    trial: bool,
+    /// Whether the host is this node's core, the one it answers. Forgotten on a reboot.
+    core: bool,
+    /// [`SimConfig::rejecting_node`]: a trial image here is never confirmed.
+    rejecting: bool,
+    /// [`SimConfig::mute_verified_node`]: this node's `Verified` never reaches the host.
+    mute_verified: bool,
+    /// The image to roll back to, and when, while a rejected one is on trial.
+    rollback: Option<(Version, tokio::time::Instant)>,
 }
 
 impl SimNode {
@@ -434,7 +527,115 @@ impl SimNode {
             boot: tokio::time::Instant::now(),
             speed: 1.0,
             rng: Xorshift::new(0xA5A5_0000 ^ u64::from(index).wrapping_mul(0x9E37_79B9)),
+            receiver: Box::new(Receiver::new(if five_ghz {
+                Board::Esp32c5
+            } else {
+                Board::Esp32c6
+            })),
+            slot: SimSlot::default(),
+            update_heard: tokio::time::Instant::now(),
+            trial: false,
+            core: false,
+            rejecting: false,
+            mute_verified: false,
+            rollback: None,
         }
+    }
+
+    /// Whether the node is in update mode: parked, heartbeating every second, listening
+    /// throughout.
+    fn updating(&self) -> bool {
+        self.receiver.is_active()
+    }
+
+    /// Leave update mode once no update frame has come for [`UPDATE_SILENCE_MS`].
+    fn expire_update(&mut self) {
+        if self.updating() && self.update_heard.elapsed() >= scaled(UPDATE_SILENCE_MS, self.speed) {
+            self.receiver.reset();
+        }
+    }
+
+    /// End a trial on hearing the host, unless this node rejects its image.
+    fn confirm(&mut self) {
+        if self.trial && !self.rejecting {
+            self.trial = false;
+        }
+    }
+
+    /// Act on an update frame, returning the status to send back, if any. A `Verified`
+    /// image is booted once its status is sent ([`Self::boot_verified`]).
+    fn update(&mut self, frame: &[u8]) -> Option<OtaStatusMsg> {
+        self.confirm();
+        self.update_heard = tokio::time::Instant::now();
+        let held = self.receiver.is_active().then(|| self.receiver.status().session);
+        let (status, accepted) = match Frame::decode(frame).ok()? {
+            // An image on trial is the only one known to work, so nothing overwrites it.
+            Frame::OtaBegin(msg) if self.trial => {
+                let refused = OtaStatusMsg {
+                    session: msg.session,
+                    state: OtaState::FlashError,
+                    next_offset: 0,
+                };
+                (Some(refused), false)
+            }
+            Frame::OtaBegin(msg) => {
+                let status = self.receiver.begin(&msg, &self.slot);
+                (Some(status), matches!(status.state, OtaState::Receiving | OtaState::Verified))
+            }
+            Frame::OtaChunk(msg) => {
+                (self.receiver.chunk(&msg, &mut self.slot), held == Some(msg.session))
+            }
+            Frame::OtaCommit(msg) => {
+                (Some(self.receiver.commit(&msg, &mut self.slot)), held == Some(msg.session))
+            }
+            Frame::OtaAbort(msg) => (Some(self.receiver.abort(&msg)), held == Some(msg.session)),
+            _ => return None,
+        };
+        if accepted {
+            self.core = true;
+        }
+        status.filter(|_| self.core)
+    }
+
+    /// Reboot into the image the receiver verified, on trial, as the firmware's install does.
+    fn boot_verified(&mut self) {
+        let Some(version) = self.receiver.version() else { return };
+        let old = self.version;
+        self.reboot(version);
+        self.trial = true;
+        if self.rejecting {
+            let boots = scaled(TRIAL_BOOTS * u64::from(IDLE_BEAT_MS), self.speed);
+            self.rollback = Some((old, tokio::time::Instant::now() + boots));
+        }
+    }
+
+    /// Roll a rejected image back once its boots are spent.
+    fn roll_back_if_due(&mut self) {
+        if let Some((old, at)) = self.rollback
+            && tokio::time::Instant::now() >= at
+        {
+            self.reboot(old);
+        }
+    }
+
+    /// Start over on `version`, forgetting everything RAM held.
+    fn reboot(&mut self, version: Version) {
+        self.version = version;
+        self.trial = false;
+        self.rollback = None;
+        self.core = false;
+        self.receiver.reset();
+        self.epoch = 0;
+        self.channels = ChannelSet::empty();
+        self.holds_ble.store(false, Ordering::Relaxed);
+        self.hb_counter = 1;
+        self.beats = 0;
+        self.last_dwell = 0;
+        self.beat_dwell = 0;
+        self.tx_power = DEFAULT_TX_POWER_QUARTER_DBM;
+        self.next_beat = None;
+        self.forget_reported();
+        self.boot = tokio::time::Instant::now();
     }
 
     /// Whether the node has been told what to scan.
@@ -519,6 +720,42 @@ impl Seen {
     }
 }
 
+/// An update slot held in memory, grown as it is written.
+#[derive(Debug, Default)]
+struct SimSlot {
+    flash: Vec<u8>,
+}
+
+impl SimSlot {
+    fn reach(&mut self, end: usize) {
+        if self.flash.len() < end {
+            self.flash.resize(end, 0xFF);
+        }
+    }
+}
+
+impl SectorSink for SimSlot {
+    type Error = ();
+
+    fn capacity(&self) -> u32 {
+        SLOT_CAPACITY
+    }
+
+    fn erase_sector(&mut self, offset: u32) -> Result<(), ()> {
+        let at = offset as usize;
+        self.reach(at + SECTOR);
+        self.flash[at..at + SECTOR].fill(0xFF);
+        Ok(())
+    }
+
+    fn write(&mut self, offset: u32, data: &[u8]) -> Result<(), ()> {
+        let at = offset as usize;
+        self.reach(at + data.len());
+        self.flash[at..at + data.len()].copy_from_slice(data);
+        Ok(())
+    }
+}
+
 async fn run_node(
     mut node: SimNode,
     world: Arc<World>,
@@ -537,6 +774,29 @@ async fn run_node(
     node.speed = speed;
     let dwell = scaled(u64::from(CHANNEL_DWELL_MS), speed);
     loop {
+        node.roll_back_if_due();
+        if node.updating() {
+            // Update mode: parked and listening throughout, heartbeating every second
+            // whatever the assignment, which it keeps to return to.
+            node.last_dwell = 0;
+            if beat(&events, &mut node, started).await.is_err() {
+                return;
+            }
+            if nap(
+                scaled(u64::from(IDLE_BEAT_MS), speed),
+                &mut admin_rx,
+                &mut node,
+                &events,
+                started,
+            )
+            .await
+            .is_break()
+            {
+                return;
+            }
+            node.expire_update();
+            continue;
+        }
         if !node.assigned() {
             // Parked on the control channel, reachable throughout and collecting
             // nothing. Heartbeat first and listen after, because the host only
@@ -547,9 +807,15 @@ async fn run_node(
                 return;
             }
             node.hb_counter = node.hb_counter.wrapping_add(1);
-            if nap(scaled(u64::from(IDLE_BEAT_MS), speed), &mut admin_rx, &mut node)
-                .await
-                .is_break()
+            if nap(
+                scaled(u64::from(IDLE_BEAT_MS), speed),
+                &mut admin_rx,
+                &mut node,
+                &events,
+                started,
+            )
+            .await
+            .is_break()
             {
                 return;
             }
@@ -569,7 +835,10 @@ async fn run_node(
         // one scan after another, and its counter advances once a scan, regardless
         // of whether a heartbeat goes out on this pass.
         if node.bluetooth_only() {
-            if nap(scaled(u64::from(SCAN_MS), speed), &mut admin_rx, &mut node).await.is_break() {
+            if nap(scaled(u64::from(SCAN_MS), speed), &mut admin_rx, &mut node, &events, started)
+                .await
+                .is_break()
+            {
                 return;
             }
             let mut writer = SightingBatchWriter::new(node.seq);
@@ -601,9 +870,15 @@ async fn run_node(
                 if beat(&events, &mut node, started).await.is_err() {
                     return;
                 }
-                if nap(scaled(u64::from(ADMIN_WAIT_MS), speed), &mut admin_rx, &mut node)
-                    .await
-                    .is_break()
+                if nap(
+                    scaled(u64::from(ADMIN_WAIT_MS), speed),
+                    &mut admin_rx,
+                    &mut node,
+                    &events,
+                    started,
+                )
+                .await
+                .is_break()
                 {
                     return;
                 }
@@ -618,7 +893,7 @@ async fn run_node(
         // proportional to how many channels it was given regardless of how the
         // heartbeat timer lines up against it.
         for idx in node.channels.indices() {
-            if nap(dwell, &mut admin_rx, &mut node).await.is_break() {
+            if nap(dwell, &mut admin_rx, &mut node, &events, started).await.is_break() {
                 return;
             }
             let channel = SCAN_CHANNELS[usize::from(idx)];
@@ -648,9 +923,15 @@ async fn run_node(
                 if beat(&events, &mut node, started).await.is_err() {
                     return;
                 }
-                if nap(scaled(u64::from(ADMIN_WAIT_MS), speed), &mut admin_rx, &mut node)
-                    .await
-                    .is_break()
+                if nap(
+                    scaled(u64::from(ADMIN_WAIT_MS), speed),
+                    &mut admin_rx,
+                    &mut node,
+                    &events,
+                    started,
+                )
+                .await
+                .is_break()
                 {
                     return;
                 }
@@ -689,7 +970,11 @@ async fn beat(
     let msg = HeartbeatMsg {
         counter: node.hb_counter,
         epoch: node.epoch,
-        capabilities: Capabilities { version: node.version, ..Capabilities::here(board) },
+        capabilities: Capabilities {
+            version: node.version,
+            trial: node.trial,
+            ..Capabilities::here(board)
+        },
         // A simulated node's pending buffers never fill.
         wifi_refused: 0,
         ble_refused: 0,
@@ -717,25 +1002,54 @@ async fn nap(
     duration: Duration,
     admin_rx: &mut mpsc::Receiver<SimCommand>,
     node: &mut SimNode,
+    events: &mpsc::Sender<LinkEvent>,
+    started: tokio::time::Instant,
 ) -> std::ops::ControlFlow<()> {
-    nap_until(tokio::time::Instant::now() + duration, admin_rx, node).await
+    nap_until(tokio::time::Instant::now() + duration, admin_rx, node, events, started).await
 }
 
-/// Sleep until a deadline, adopting any assignment that arrives meanwhile.
+/// Sleep until a deadline, adopting any assignment that arrives meanwhile and answering
+/// update frames.
 ///
-/// The primitive [`nap`] is a wrapper over.
+/// The primitive [`nap`] is a wrapper over. A node that boots a verified image returns
+/// early, as the firmware's reboot leaves whatever it was doing.
 async fn nap_until(
     deadline: tokio::time::Instant,
     admin_rx: &mut mpsc::Receiver<SimCommand>,
     node: &mut SimNode,
+    events: &mpsc::Sender<LinkEvent>,
+    started: tokio::time::Instant,
 ) -> std::ops::ControlFlow<()> {
+    use std::ops::ControlFlow::{Break, Continue};
     loop {
         tokio::select! {
-            () = tokio::time::sleep_until(deadline) => return std::ops::ControlFlow::Continue(()),
+            () = tokio::time::sleep_until(deadline) => return Continue(()),
             received = admin_rx.recv() => match received {
-                Some(SimCommand::Assign(admin)) => node.apply(admin),
-                Some(SimCommand::Clear) => node.forget_reported(),
-                None => return std::ops::ControlFlow::Break(()),
+                Some(SimCommand::Assign(admin)) => {
+                    node.core = true;
+                    node.confirm();
+                    node.apply(admin);
+                }
+                Some(SimCommand::Clear) => {
+                    node.core = true;
+                    node.confirm();
+                    node.forget_reported();
+                }
+                Some(SimCommand::Confirm) => node.confirm(),
+                Some(SimCommand::Update(frame)) => {
+                    let Some(status) = node.update(&frame) else { continue };
+                    let verified = status.state == OtaState::Verified;
+                    if !(verified && node.mute_verified)
+                        && send_frame(events, node.mac, &status.encode(), started).await.is_err()
+                    {
+                        return Break(());
+                    }
+                    if verified {
+                        node.boot_verified();
+                        return Continue(());
+                    }
+                }
+                None => return Break(()),
             },
         }
     }

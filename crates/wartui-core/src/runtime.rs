@@ -9,10 +9,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, oneshot, watch};
-use wartui_bridge::LinkHandle;
-use wartui_proto::link::{HostToBridge, PanelLines};
+use wartui_bridge::{LinkEvent, LinkHandle};
+use wartui_proto::air::{Frame, OtaStatusMsg};
+use wartui_proto::link::{BridgeToHost, HostToBridge, PanelLines};
+use wartui_proto::mac;
 
 use crate::engine::{Command, Event, FleetEngine, HostSample, Now, Snapshot};
+use crate::ota::{Failure, OtaEvent, OtaSession, Outcome, Progress};
 use crate::record::{CaptureSettings, Record};
 use crate::store::{Store, StoreReport};
 
@@ -211,6 +214,92 @@ pub async fn drive(
     store.submit(engine.handle(Event::HostSample(sample(&store)), now).records);
     let _ = snapshot.send(Arc::new(engine.snapshot(now, store.stats())));
     store.close()
+}
+
+/// How often [`drive_ota`] ticks its session: well inside its 500 ms status timeout.
+pub const OTA_TICK: Duration = Duration::from_millis(50);
+
+/// Run one node's update to its end, or until `stop` resolves, which cancels it.
+///
+/// Frames from other nodes are handed to the session, which reads only its own node's.
+/// `progress` is called after every event, for showing.
+///
+/// Every frame sent, every send result, every status from the node and every phase change is
+/// logged at debug level with structured fields, so a bench log of an update can be read back
+/// by a script.
+pub async fn drive_ota(
+    link: &mut LinkHandle,
+    session: &mut OtaSession,
+    stop: impl std::future::Future<Output = ()>,
+    mut progress: impl FnMut(&Progress),
+) -> Outcome {
+    tokio::pin!(stop);
+    let mut ticker = tokio::time::interval(OTA_TICK);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut phase = session.progress().phase;
+    tracing::debug!(node = %mac::full(&session.node()), phase = ?phase, "ota phase");
+    loop {
+        let sends = tokio::select! {
+            () = &mut stop => session.cancel(now()),
+            _ = ticker.tick() => session.handle(now(), OtaEvent::Tick),
+            event = link.recv() => match event {
+                Some(LinkEvent::Message(BridgeToHost::SendResult { id, status, tx_us })) => {
+                    tracing::debug!(id, status = ?status, tx_us, "ota send result");
+                    session.handle(now(), OtaEvent::SendResult { id, status })
+                }
+                Some(LinkEvent::Message(BridgeToHost::Rx { src, payload, .. })) => {
+                    if src == session.node()
+                        && tracing::enabled!(tracing::Level::DEBUG)
+                        && let Ok(status) = OtaStatusMsg::decode(&payload)
+                    {
+                        tracing::debug!(
+                            session = status.session,
+                            state = ?status.state,
+                            next_offset = status.next_offset,
+                            "ota status"
+                        );
+                    }
+                    session.handle(now(), OtaEvent::Rx { src, payload: &payload })
+                }
+                Some(_) => Vec::new(),
+                None => return Outcome::Failed(Failure::LinkClosed),
+            },
+        };
+        for cmd in sends {
+            if tracing::enabled!(tracing::Level::DEBUG)
+                && let HostToBridge::SendEspNow { id, payload, .. } = &cmd
+            {
+                let (kind, offset) = match Frame::decode(payload) {
+                    Ok(Frame::OtaBegin(_)) => ("begin", None),
+                    Ok(Frame::OtaChunk(chunk)) => ("chunk", Some(chunk.offset)),
+                    Ok(Frame::OtaCommit(_)) => ("commit", None),
+                    Ok(Frame::OtaAbort(_)) => ("abort", None),
+                    Ok(Frame::OtaConfirm(_)) => ("confirm", None),
+                    _ => ("other", None),
+                };
+                tracing::debug!(id, kind, offset, len = payload.len(), "ota send");
+            }
+            if let Err(e) = link.send_urgent(cmd) {
+                // The session's own timeouts resend it.
+                tracing::warn!("dropping an update frame: {e}");
+            }
+        }
+        let now_progress = session.progress();
+        if now_progress.phase != phase {
+            phase = now_progress.phase;
+            tracing::debug!(
+                node = %mac::full(&session.node()),
+                phase = ?phase,
+                acked = now_progress.acked,
+                "ota phase"
+            );
+        }
+        progress(&now_progress);
+        if let Some(outcome) = session.outcome() {
+            tracing::debug!(outcome = ?outcome, "ota outcome");
+            return outcome.clone();
+        }
+    }
 }
 
 /// Applied settings as `capture_settings` rows: applied rather than requested, because clamps and

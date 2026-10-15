@@ -1,8 +1,9 @@
 //! wartui's command line.
 //!
-//! `run` is the tool, and `flash-fleet` and `flash-bridge` put the firmware on the boards it
-//! drives; everything else checks one link in the chain when `run` is not showing what it
-//! should, and `crates/wartui/README.md` § "When nothing arrives" has which to reach for.
+//! `run` is the tool; `flash-fleet` and `flash-bridge` put the firmware on the boards it
+//! drives, and `ota` updates the nodes' firmware over the air. Everything else checks one link
+//! in the chain when `run` is not showing what it should, and `crates/wartui/README.md`
+//! § "When nothing arrives" has which to reach for.
 //! `--log-file` is there because the TUI owns the terminal, so the transport has nowhere else
 //! to say what it tried and what the OS said.
 
@@ -25,6 +26,7 @@ mod capture;
 mod config;
 mod export;
 mod flash;
+mod ota;
 mod reset;
 mod run;
 mod sniff;
@@ -76,6 +78,8 @@ enum Command {
     FlashFleet(flash::fleet::Args),
     /// Flash bridge firmware onto the bridge.
     FlashBridge(flash::bridge::Args),
+    /// Update nodes' firmware over the air, through the bridge.
+    Ota(ota::Args),
     /// Drive the simulator into a store with nothing drawn, and report what it
     /// cost the disk.
     #[command(hide = true)]
@@ -102,6 +106,7 @@ async fn main() -> Result<()> {
         Some(Command::Ports) => ports(),
         Some(Command::FlashFleet(args)) => flash::fleet::run(args),
         Some(Command::FlashBridge(args)) => flash::bridge::run(args),
+        Some(Command::Ota(args)) => ota::run(args).await,
         Some(Command::Bench(args)) => bench::run(args).await,
     }
 }

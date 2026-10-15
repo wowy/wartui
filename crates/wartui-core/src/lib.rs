@@ -10,7 +10,8 @@
 //! where `cargo test` reaches.
 //!
 //! wartui transmits to a node only in the 100 ms admin window it holds open after a heartbeat:
-//! channel assignments and dedup-ring clears.
+//! channel assignments and dedup-ring clears. [`ota`] is the exception, and only after its first
+//! frame: a node that has accepted an update listens continuously until it ends.
 
 pub mod analyze;
 pub mod discover;
@@ -20,6 +21,7 @@ pub mod export;
 pub mod gps;
 pub mod health;
 pub mod nmea;
+pub mod ota;
 pub mod panel;
 pub mod position;
 pub mod record;

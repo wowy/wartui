@@ -99,7 +99,7 @@ own.
   about which of them is a bridge, so anything else that opens a device shares one enumeration.
 - **`crates/wartui-core`** — the headless half. Draws nothing, parses no arguments.
 - **`crates/wartui`** — clap CLI (`run`/`export`/`analyze`/`upload`/`sniff`/`status`/`reset`/
-  `ports`/`flash-fleet`/`flash-bridge`) and the ratatui view.
+  `ports`/`flash-fleet`/`flash-bridge`/`ota`) and the ratatui view.
 - **`firmware/bridge`** — dumb radio bridge: COBS framing and `esp-radio` calls, no protocol
   knowledge. Fixes there cost a reflash, so logic belongs on the host. A board with a screen
   draws lines the host composed and hands it, which is the same rule seen from the other side.
@@ -124,7 +124,8 @@ and unix millis), touches no socket, opens no file. `wartui_core::runtime::drive
 place that reads a clock and performs actions. This is what makes liveness aging, reboot
 detection, assignment timing and auto-partitioning testable in microseconds against a clock the
 test invents (`crates/wartui-core/tests/engine.rs`). Do not reach for `Instant::now()`, I/O or
-`async` inside `engine`.
+`async` inside `engine`. An over-the-air update is split the same way: `ota::OtaSession` is the
+pure state machine and `runtime::drive_ota` its driver (`crates/wartui-core/tests/ota.rs`).
 
 Operator keypresses are `Event::Command`, not methods — a keypress and a heartbeat have to be
 ordered against each other. Only `b`, `c`, `r` and `R` get that far; channels are the planner's.

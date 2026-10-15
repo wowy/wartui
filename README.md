@@ -81,6 +81,7 @@ wartui status     # check the link and count dropped frames
 wartui sniff      # decode every frame the fleet sends
 wartui reset      # reboot an unresponsive bridge
 wartui analyze    # summarize a capture and what it lost
+wartui ota        # update node firmware over the air
 ```
 
 ## Subprojects
