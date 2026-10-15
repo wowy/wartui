@@ -176,7 +176,8 @@ The cargo runner, `wartui flash-fleet` and the release images all use this table
 ## Over-the-air updates
 
 `wartui_proto::ota::Receiver` decides what to write and checks the hash. `src/ota.rs` gives it the
-flash: the app slot that is not booted, found in the partition table at boot.
+flash: the app slot that is not booted, found in the partition table at boot. `wartui ota` is the
+host's side (`crates/wartui/README.md` § "Updating over the air").
 
 **Update mode.** An update begin the receiver accepts puts the node in update mode:
 

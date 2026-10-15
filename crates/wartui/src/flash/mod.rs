@@ -1,4 +1,5 @@
-//! Flashing firmware through `espflash`: what `flash-fleet` and `flash-bridge` share.
+//! Flashing firmware through `espflash`: what `flash-fleet` and `flash-bridge` share, and where
+//! `ota` finds the node's app-only images ([`app`]).
 //!
 //! **A board's identity is cross-checked, never assumed.** Its USB serial number is its MAC
 //! (`ports.rs`), and `espflash board-info` reads the MAC out of the chip's eFuses. The two agreeing
@@ -24,6 +25,7 @@
 //! Nothing here opens a serial port. Every board is reached through `espflash`, which resets each
 //! one on purpose, so the DTR/RTS rule in `ports.rs` is not in play.
 
+pub mod app;
 pub mod bridge;
 pub mod fleet;
 
@@ -69,9 +71,12 @@ struct Firmware {
     variants: &'static [(&'static [&'static str], &'static str)],
     /// What the firmware runs on, for messages.
     what: &'static str,
-    /// The partition table its images are merged with, relative to `dir`, or `None` for
+    /// The partition table its images are made with, relative to `dir`, or `None` for
     /// espflash's default.
     partition_table: Option<&'static str>,
+    /// Whether its images are merged (bootloader, partition table and app, from address 0)
+    /// rather than the app alone, as one app slot holds it.
+    merged: bool,
 }
 
 const NODE: Firmware = Firmware {
@@ -84,6 +89,18 @@ const NODE: Firmware = Firmware {
     ],
     what: "node",
     partition_table: Some("partitions.csv"),
+    merged: true,
+};
+
+/// The node firmware's app-only images, which an over-the-air update carries.
+const NODE_APP: Firmware = Firmware {
+    variants: &[
+        (&["esp32c5"], "wartui-node-app-esp32c5.bin"),
+        (&["esp32c6"], "wartui-node-app-esp32c6.bin"),
+        (&["esp32c6", "xiao-external-antenna"], "wartui-node-app-esp32c6-xiao.bin"),
+    ],
+    merged: false,
+    ..NODE
 };
 
 const BRIDGE: Firmware = Firmware {
@@ -97,6 +114,7 @@ const BRIDGE: Firmware = Firmware {
     ],
     what: "bridge",
     partition_table: None,
+    merged: true,
 };
 
 fn mac_arg(text: &str) -> Result<Mac, String> {
@@ -331,7 +349,7 @@ fn name(candidate: &PortCandidate) -> String {
 
 /// Where the image comes from.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Source {
+pub(crate) enum Source {
     File(PathBuf),
     Build(PathBuf),
     Release { tag: String, asset: &'static str },
@@ -339,7 +357,7 @@ enum Source {
 
 impl Source {
     /// Where the image comes from, worded for whether this run will act on it.
-    fn describe(&self, dry_run: bool) -> String {
+    pub(crate) fn describe(&self, dry_run: bool) -> String {
         match (self, dry_run) {
             (Self::File(path), _) => path.display().to_string(),
             (Self::Build(dir), true) => format!("would build from {}", dir.display()),
@@ -416,7 +434,7 @@ fn release_asset(firmware: &Firmware, features: &[&str]) -> Option<&'static str>
     })
 }
 
-/// Get the image onto disk and check it is for `chip`.
+/// Get the merged image onto disk and check it is for `chip`.
 fn obtain(
     firmware: &Firmware,
     source: &Source,
@@ -424,17 +442,28 @@ fn obtain(
     no_default_features: bool,
     chip: Chip,
 ) -> Result<PathBuf> {
-    let path = match source {
-        Source::File(path) => path.clone(),
-        Source::Build(dir) => build_image(firmware, dir, features, no_default_features, chip)?,
+    let path = fetch(firmware, source, features, no_default_features, chip)?;
+    check_image(&read(&path)?, chip).with_context(|| format!("checking {}", path.display()))?;
+    Ok(path)
+}
+
+/// Get the image onto disk: named, built or downloaded.
+fn fetch(
+    firmware: &Firmware,
+    source: &Source,
+    features: &[&str],
+    no_default_features: bool,
+    chip: Chip,
+) -> Result<PathBuf> {
+    match source {
+        Source::File(path) => Ok(path.clone()),
+        Source::Build(dir) => build_image(firmware, dir, features, no_default_features, chip),
         Source::Release { tag, asset } => {
             let cache =
                 state_dir().unwrap_or_else(|| std::env::temp_dir().join("wartui")).join("images");
-            release_image(RELEASES, tag, asset, &cache, &http_get)?
+            release_image(RELEASES, tag, asset, &cache, &http_get)
         }
-    };
-    check_image(&read(&path)?, chip).with_context(|| format!("checking {}", path.display()))?;
-    Ok(path)
+    }
 }
 
 fn read(path: &Path) -> Result<Vec<u8>> {
@@ -467,7 +496,9 @@ fn check_image(image: &[u8], chip: Chip) -> Result<()> {
     Ok(())
 }
 
-/// Build the firmware in `dir` and merge it into one image beside the ELF.
+/// Build the firmware in `dir` and save its image beside the ELF: merged, or the app alone
+/// as `<elf>.app.bin`. Each build of other features writes over the last, so a caller reads
+/// the image before the next.
 fn build_image(
     firmware: &Firmware,
     dir: &Path,
@@ -493,10 +524,11 @@ fn build_image(
     );
 
     let elf = dir.join(firmware.elf);
-    let bin = elf.with_extension("bin");
+    let bin = elf.with_extension(if firmware.merged { "bin" } else { "app.bin" });
+    let merge: &[&str] = if firmware.merged { &["--merge", "--skip-padding"] } else { &[] };
     let mut args: Vec<String> = ["save-image", "--skip-update-check", "--chip", chip.name()]
         .into_iter()
-        .chain(["--merge", "--skip-padding"])
+        .chain(merge.iter().copied())
         .map(str::to_owned)
         .collect();
     if let Some(table) = firmware.partition_table {
