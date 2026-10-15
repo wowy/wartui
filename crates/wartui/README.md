@@ -527,10 +527,10 @@ from the node and every phase change, as `key=value` fields.
 **How long it takes.** The first frame waits for the node's next heartbeat: up to 5 s on an
 assigned node, a second on a parked one. Each 1 KB chunk then costs about 3.5 ms on the link, and
 at each 4 KB sector boundary the host waits for the node to erase and write the sector: about
-29 ms on a C6 and 68 ms on a C5, much less when the slot is already blank, as on a node's first
-update after a USB flash. An 850 KB image takes about 10 s to transfer to a C6 and 18 s to a C5,
-and the reboot and confirmation add a few seconds more
-([`docs/ota-findings.md`](../../docs/ota-findings.md)).
+29 ms on a C6 and 68 ms on a C5 when the slot holds an old image. An image of 850 to 880 KB takes
+about 10 s to transfer to a C6 and 18 s to a C5, and the reboot and confirmation add a few seconds
+more. A node's first update after a USB flash writes into a blank slot and runs about twice as
+fast ([`docs/ota-findings.md`](../../docs/ota-findings.md)).
 
 **Trial, confirmation and rollback.** A verified image is switched to at once, and the node
 reboots into it on trial: the fleet table shows `;trial` after its version. The first frame it
