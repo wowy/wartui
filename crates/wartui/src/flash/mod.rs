@@ -22,10 +22,12 @@
 //! share one cache directory per tag. A build without the tag is a checkout, and builds the
 //! firmware beside it.
 //!
-//! Nothing here opens a serial port. Every board is reached through `espflash`, which resets each
-//! one on purpose, so the DTR/RTS rule in `ports.rs` is not in play.
+//! **espflash flashes every board, and resets each one on purpose.** The one port opened here is a
+//! node's after `flash-fleet` flashes it, read to see it boot ([`boot`]), and it is opened without
+//! touching DTR or RTS (`ports.rs`).
 
 pub mod app;
+mod boot;
 pub mod bridge;
 pub mod fleet;
 
@@ -337,6 +339,11 @@ fn erase_otadata_args(port: &str, chip: Chip) -> Vec<&str> {
         OTADATA.0,
         OTADATA.1,
     ]
+}
+
+/// Reset a board through espflash, for one that did not reboot after it was flashed.
+fn reset_args(port: &str, chip: Chip) -> Vec<&str> {
+    vec!["reset", "--port", port, "--chip", chip.name(), "--non-interactive", "--skip-update-check"]
 }
 
 /// A board by its last two octets, as the fleet table names it, or by path without an address.
@@ -822,6 +829,13 @@ mod tests {
         let args = erase_otadata_args("/dev/ttyACM1", Chip::Esp32c6);
         assert_eq!(&args[..5], ["erase-region", "--port", "/dev/ttyACM1", "--chip", "esp32c6"]);
         assert_eq!(&args[args.len() - 2..], ["0xd000", "0x2000"]);
+    }
+
+    #[test]
+    fn flash_resets_board_when_reboot_is_not_seen() {
+        let args = reset_args("/dev/ttyACM1", Chip::Esp32c6);
+        assert_eq!(&args[..5], ["reset", "--port", "/dev/ttyACM1", "--chip", "esp32c6"]);
+        assert!(args.contains(&"--non-interactive"));
     }
 
     #[test]

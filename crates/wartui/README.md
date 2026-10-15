@@ -412,10 +412,20 @@ image comes from the first source that applies:
   `esp32c6`, and `esp32c6,xiao-external-antenna`, all with default features; anything else needs
   `--image` or `--firmware-dir`.
 
-The chip in the image's header must match `--features`, or nothing is touched. Each board prints a
-line by its last two octets: flashed, failed (espflash's last line, full output beneath), or skipped
-with the reason. Any failure fails the run; skips do not. `--dry-run` still resets each candidate
-once, since `board-info` does.
+The chip in the image's header must match `--features`, or nothing is touched. After flashing, each
+node's port is watched for up to 10 s for a line only a boot prints; a node not seen to boot is reset
+once more with `espflash reset` and watched again, since espflash's reset does not always take and
+the old image runs on until a power cycle. Each board prints a line by its last two octets:
+
+| Line                                                                    | Meaning                                         |
+|-------------------------------------------------------------------------|-------------------------------------------------|
+| `flashed`                                                               | Written, and seen to boot                       |
+| `flashed, but not seen to reboot: power-cycle it to run the new image`  | Written, but the old image may still be running |
+| `failed: …`                                                             | espflash's last line, full output beneath       |
+| `skipped: …`                                                            | Not touched, with the reason                    |
+
+A failure or a board not seen to reboot fails the run; skips do not. `--dry-run` still resets each
+candidate once, since `board-info` does.
 
 ### Flashing the bridge
 
