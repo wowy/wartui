@@ -510,7 +510,6 @@ A1:B0    esp32c5         0.1.0     0.1.1     update
 | `skip: already 0.1.1`             | The node runs the image's version                                         |
 | `skip: older image (use --force)` | The node runs a newer version than the image                              |
 | `refuse: no image for <board>`    | `--image` is for another board, or no node firmware is built for this one |
-| `refuse: trial image`             | The node runs an update it has not confirmed; see below                   |
 
 Only the heartbeat's version, board and flags are read, so a node `run` shows as `needs update` is
 one `ota` reaches. Without `--yes`, `ota` asks `[y/N]` before sending anything.
@@ -518,12 +517,16 @@ one `ota` reaches. Without `--yes`, `ota` asks `[y/N]` before sending anything.
 **Each node then gets a progress line**: how much of the image it holds, the rate, and the phase
 (`waiting for the node`, `sending`, `verifying`, `rebooting`, `confirming`). It ends `done 0.1.1
 (confirmed)` or `failed:` with the reason. Any failure makes the run exit non-zero, and ctrl-c
-aborts the node being updated and stops.
+aborts the node being updated and stops. With `--log-file` and `RUST_LOG=wartui_core=debug`, the
+log holds every frame sent, every send result, every status from the node and every phase change,
+as `key=value` fields.
 
 **How long it takes.** The first frame waits for the node's next heartbeat: up to 5 s on an
-assigned node, a second on a parked one. The radio carries about 250 KB/s, so an 850 KB image is a
-few seconds on the air; the node's flash writes set the pace beyond that. The reboot and
-confirmation add a few seconds more.
+assigned node, a second on a parked one. Each 1 KB chunk then costs about 3.5 ms on the link, and
+at each 4 KB sector boundary the host waits for the node to erase and write the sector: about
+29 ms on a C6 and 68 ms on a C5, much less when the slot is already blank, as on a node's first
+update after a USB flash. An 850 KB image takes about 10 s to transfer to a C6 and 18 s to a C5,
+and the reboot and confirmation add a few seconds more.
 
 **Trial, confirmation and rollback.** A verified image is switched to at once, and the node
 reboots into it on trial: the fleet table shows `;trial` after its version. The first frame it
@@ -532,9 +535,8 @@ version with the trial over. A node that boots the new image three times without
 goes back to the old one by itself. A node with no USB cable is never left without a working
 image.
 
-A node already on trial is refused: its other slot holds the only image known to work. `run`
-confirms it when it drives that version; otherwise it rolls back after three boots. Run `ota`
-again after either.
+A node still on trial is updated like any other: the update's first frame confirms the image it
+runs, and the new one goes into its other slot.
 
 | Failure                                       | What to do                                                                       |
 |-----------------------------------------------|----------------------------------------------------------------------------------|

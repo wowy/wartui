@@ -10,7 +10,9 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, oneshot, watch};
 use wartui_bridge::{LinkEvent, LinkHandle};
+use wartui_proto::air::{Frame, OtaStatusMsg};
 use wartui_proto::link::{BridgeToHost, HostToBridge, PanelLines};
+use wartui_proto::mac;
 
 use crate::engine::{Command, Event, FleetEngine, HostSample, Now, Snapshot};
 use crate::ota::{Failure, OtaEvent, OtaSession, Outcome, Progress};
@@ -221,6 +223,10 @@ pub const OTA_TICK: Duration = Duration::from_millis(50);
 ///
 /// Frames from other nodes are handed to the session, which reads only its own node's.
 /// `progress` is called after every event, for showing.
+///
+/// Every frame sent, every send result, every status from the node and every phase change is
+/// logged at debug level with structured fields, so a bench log of an update can be read back
+/// by a script.
 pub async fn drive_ota(
     link: &mut LinkHandle,
     session: &mut OtaSession,
@@ -230,15 +236,28 @@ pub async fn drive_ota(
     tokio::pin!(stop);
     let mut ticker = tokio::time::interval(OTA_TICK);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut phase = session.progress().phase;
+    tracing::debug!(node = %mac::full(&session.node()), phase = ?phase, "ota phase");
     loop {
         let sends = tokio::select! {
             () = &mut stop => session.cancel(now()),
             _ = ticker.tick() => session.handle(now(), OtaEvent::Tick),
             event = link.recv() => match event {
-                Some(LinkEvent::Message(BridgeToHost::SendResult { id, status, .. })) => {
+                Some(LinkEvent::Message(BridgeToHost::SendResult { id, status, tx_us })) => {
+                    tracing::debug!(id, status = ?status, tx_us, "ota send result");
                     session.handle(now(), OtaEvent::SendResult { id, status })
                 }
                 Some(LinkEvent::Message(BridgeToHost::Rx { src, payload, .. })) => {
+                    if src == session.node()
+                        && let Ok(status) = OtaStatusMsg::decode(&payload)
+                    {
+                        tracing::debug!(
+                            session = status.session,
+                            state = ?status.state,
+                            next_offset = status.next_offset,
+                            "ota status"
+                        );
+                    }
                     session.handle(now(), OtaEvent::Rx { src, payload: &payload })
                 }
                 Some(_) => Vec::new(),
@@ -246,13 +265,35 @@ pub async fn drive_ota(
             },
         };
         for cmd in sends {
+            if let HostToBridge::SendEspNow { id, payload, .. } = &cmd {
+                let (kind, offset) = match Frame::decode(payload) {
+                    Ok(Frame::OtaBegin(_)) => ("begin", None),
+                    Ok(Frame::OtaChunk(chunk)) => ("chunk", Some(chunk.offset)),
+                    Ok(Frame::OtaCommit(_)) => ("commit", None),
+                    Ok(Frame::OtaAbort(_)) => ("abort", None),
+                    Ok(Frame::OtaConfirm(_)) => ("confirm", None),
+                    _ => ("other", None),
+                };
+                tracing::debug!(id, kind, offset, len = payload.len(), "ota send");
+            }
             if let Err(e) = link.send_urgent(cmd) {
                 // The session's own timeouts resend it.
                 tracing::warn!("dropping an update frame: {e}");
             }
         }
-        progress(&session.progress());
+        let now_progress = session.progress();
+        if now_progress.phase != phase {
+            phase = now_progress.phase;
+            tracing::debug!(
+                node = %mac::full(&session.node()),
+                phase = ?phase,
+                acked = now_progress.acked,
+                "ota phase"
+            );
+        }
+        progress(&now_progress);
         if let Some(outcome) = session.outcome() {
+            tracing::debug!(outcome = ?outcome, "ota outcome");
             return outcome.clone();
         }
     }

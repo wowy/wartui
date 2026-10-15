@@ -7,9 +7,9 @@
 //! which `run` cannot drive, is exactly the node this reaches.
 //!
 //! **The table is the decision, and it is shown before anything is sent.** Each node's action
-//! follows from its version, its trial flag and whether there is an image for its board. A node
-//! on trial is refused: its running image has not proven itself, and its other slot holds the
-//! only image known to work, which an update would overwrite.
+//! follows from its version and whether there is an image for its board. A node on trial is
+//! updated like any other: it confirms its running image on the first update frame it decodes,
+//! before taking the update into its other slot.
 //!
 //! **One node at a time.** The session keeps one chunk in flight, so two would share the
 //! bridge's time anyway, and a fleet that fails one at a time fails with every other node
@@ -97,8 +97,6 @@ enum Action {
     Older,
     /// No image was found or named for its board.
     NoImage(Board),
-    /// Running an image on trial.
-    Trial,
 }
 
 impl std::fmt::Display for Action {
@@ -108,16 +106,12 @@ impl std::fmt::Display for Action {
             Self::Same(version) => write!(f, "skip: already {version}"),
             Self::Older => f.write_str("skip: older image (use --force)"),
             Self::NoImage(board) => write!(f, "refuse: no image for {}", board_name(*board)),
-            Self::Trial => f.write_str("refuse: trial image"),
         }
     }
 }
 
 /// Decide what to do with a node announcing `node`, given the image for its board.
 fn decide(node: &Capabilities, image: Option<Version>, force: bool) -> Action {
-    if node.trial {
-        return Action::Trial;
-    }
     let Some(image) = image else { return Action::NoImage(node.board) };
     match image.cmp(&node.version) {
         _ if force => Action::Update,
@@ -285,10 +279,9 @@ struct Ready {
 }
 
 /// One image per board among `targets`: `--image` for its own board, else a build or a
-/// release download per board. Nodes on trial need none.
+/// release download per board.
 async fn images(args: &Args, targets: &[(Mac, Capabilities)]) -> Result<HashMap<Board, Ready>> {
-    let mut boards: Vec<Board> =
-        targets.iter().filter(|(_, caps)| !caps.trial).map(|(_, caps)| caps.board).collect();
+    let mut boards: Vec<Board> = targets.iter().map(|(_, caps)| caps.board).collect();
     boards.sort_by_key(|board| board.as_u8());
     boards.dedup();
     let image = args.image.clone();
@@ -476,9 +469,10 @@ mod tests {
     }
 
     #[test]
-    fn ota_cmd_refuses_node_when_it_runs_a_trial_image() {
-        let action = decide(&caps(Version::new(0, 0, 9), true), Some(NEW), true);
-        assert_eq!(action.to_string(), "refuse: trial image");
+    fn ota_cmd_updates_node_when_it_runs_a_trial_image() {
+        // The node confirms its running image on the update's first frame.
+        let action = decide(&caps(Version::new(0, 0, 9), true), Some(NEW), false);
+        assert_eq!(action, Action::Update);
     }
 
     #[test]
