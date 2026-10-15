@@ -353,7 +353,7 @@ impl Bridge {
     /// The host only subtracts one of these from another, so the wrap is harmless
     /// and the narrower type keeps the frame small.
     fn now_us(&self) -> u32 {
-        self.boot.elapsed().as_micros() as u32
+        self.uptime_us() as u32
     }
 
     /// Microseconds since boot at full width, which is the clock [`LinkBurst`] runs on.
@@ -565,22 +565,17 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
         let mut worked = false;
         mark(LoopPhase::DrainRadio);
         worked |= drain_radio(&receiver, bridge);
-        mark(LoopPhase::DrainLink);
-        let read = drain_link(&mut usb_rx, link_buf, &manager, &mut sender, bridge, mac);
-        worked |= read;
-
-        mark(LoopPhase::Pump);
-        let mut moved = bridge.transmit_open() && bridge.outbox.pump(&mut sink);
-        worked |= moved;
-
-        // Only once link bytes have moved, this pass or in the wait before it. Otherwise
-        // no frame is crossing, or its host has stopped, and spinning buys nothing.
-        if read || moved || link_woke {
-            let burst =
-                link_burst(&mut usb_rx, link_buf, &mut sink, &manager, &mut sender, bridge, mac);
-            worked |= burst.read || burst.wrote;
-            moved |= burst.wrote;
-        }
+        let link = link_burst(
+            &mut usb_rx,
+            link_buf,
+            &mut sink,
+            &manager,
+            &mut sender,
+            bridge,
+            mac,
+            link_woke,
+        );
+        worked |= link.moved;
         link_woke = false;
 
         // Named as its own phase for the reason `Transmit` is: it is a call that can
@@ -605,7 +600,7 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
         // see a refusal that is really a closed gate, and an armed flush on an empty
         // FIFO busy-spins in `idle_wait`.
         let queued = bridge.transmit_open() && !bridge.outbox.is_empty();
-        if bridge.stall.note_tx(moved, queued, bridge.now_ms()) {
+        if bridge.stall.note_tx(link.wrote_since_read, queued, bridge.now_ms()) {
             mark(LoopPhase::TxStalled);
             reboot();
         }
@@ -734,50 +729,48 @@ fn forward(received: ReceivedData, bridge: &mut Bridge) {
     });
 }
 
-/// Read the packet the host has sent, if any, and act on the frames it completes.
-/// Returns whether any byte arrived.
-///
-/// One read empties the FIFO, which holds one packet ([`LINK_CHUNK`]). A frame longer
-/// than that is finished by [`link_burst`], whose budget is what keeps a host that never
-/// stops writing out of the radio's receive queue.
-fn drain_link(
-    usb_rx: &mut UsbSerialJtagRx<'_, Async>,
-    link_buf: &mut [u8; LINK_CHUNK],
-    manager: &EspNowManager<'_>,
-    sender: &mut EspNowSender<'_>,
-    bridge: &mut Bridge,
-    mac: Mac,
-) -> bool {
-    let read = usb_rx.drain_rx_fifo(link_buf);
-    take_link_bytes(&link_buf[..read], manager, sender, bridge, mac);
-    read > 0
+/// What one pass's [`link_burst`] moved.
+struct LinkMoved {
+    /// Whether any byte moved, in either direction.
+    moved: bool,
+    /// Whether bytes were written towards the host at or after the last poll that read
+    /// host bytes. This is the pass's `moved` for [`StallWatch`].
+    wrote_since_read: bool,
 }
 
-/// What a [`link_burst`] moved: host bytes read, and bytes written towards the host.
-struct BurstMoved {
-    read: bool,
-    wrote: bool,
-}
-
-/// Stay on the link while a frame is part-way across it, in either direction.
+/// Read and pump the link, and stay on it while a frame is part-way across, in either
+/// direction.
 ///
-/// The FIFOs hold one packet each way, so a pass that moves one and goes on leaves the
-/// rest of the frame a packet per pass: the host's next packet is NAKed until the OUT
-/// FIFO empties, and the next IN packet waits on the FIFO-empty wake. This polls both
-/// back to back until [`LinkBurst`] gives the pass back.
+/// One read empties the OUT FIFO, which holds one packet ([`LINK_CHUNK`]), and the IN
+/// FIFO holds one packet too. A pass that moves one and goes on leaves the rest of the
+/// frame a packet per pass: the host's next packet is NAKed until the OUT FIFO empties,
+/// and the next IN packet waits on the FIFO-empty wake. So after the first poll this
+/// polls both back to back until [`LinkBurst`] gives the pass back.
 /// `crates/wartui-proto/src/link/burst.rs` has why, and the bounds.
 ///
-/// Bounded by `BURST_BUDGET_US`, so it is a spin and never a wait on the host, which is
-/// what neither firmware may do to the USB endpoint.
+/// The first poll always runs. The polls after it run only once link bytes have moved,
+/// in that poll or in the wait before this pass (`link_woke`). Otherwise no frame is
+/// crossing, or its host has stopped, and spinning buys nothing.
 ///
-/// [`StallWatch`] still sees the truth. Only bytes written count as `wrote`, since host
-/// bytes read prove a host, not a draining endpoint. A burst against a host that has
-/// stopped reading writes nothing and ends after `BURST_GAP_US`, so the pass reports
-/// `moved` false, as it would without one.
+/// The polling is bounded by `BURST_BUDGET_US`, which keeps a host that never stops
+/// writing out of the radio's receive queue. A frame a poll completes is acted on inside
+/// the burst and adds its own time, such as a `SendEspNow`'s wait for its send-complete
+/// callback. Neither is a wait on the host, which is what neither firmware may do to the
+/// USB endpoint.
+///
+/// [`StallWatch`] sees `wrote_since_read`. Host bytes read prove a host, not a draining
+/// endpoint, so only bytes written count. And a write counts only if no later poll read
+/// host bytes: a request read after the last write is unanswered, and reporting the
+/// earlier write would clear the watch's record of it. A poll reads before it pumps, so
+/// its own write counts. A burst against a host that has stopped reading writes nothing
+/// and ends after `BURST_GAP_US`.
 ///
 /// Out of line for the reason [`forward`] is, and to keep its state out of `main`'s
 /// poll frame.
 #[inline(never)]
+// Each argument is a handle `main` holds, and bundling them would put a struct in its
+// poll frame.
+#[allow(clippy::too_many_arguments)]
 fn link_burst(
     usb_rx: &mut UsbSerialJtagRx<'_, Async>,
     link_buf: &mut [u8; LINK_CHUNK],
@@ -786,17 +779,12 @@ fn link_burst(
     sender: &mut EspNowSender<'_>,
     bridge: &mut Bridge,
     mac: Mac,
-) -> BurstMoved {
-    let mut burst = LinkBurst::start(bridge.uptime_us());
-    let mut total = BurstMoved { read: false, wrote: false };
-    let mut moved = false;
+    link_woke: bool,
+) -> LinkMoved {
+    let mut pass = LinkMoved { moved: false, wrote_since_read: false };
+    // Begun after the first poll, and only if that poll or the wait before it moved bytes.
+    let mut burst: Option<LinkBurst> = None;
     loop {
-        let mid_frame =
-            !bridge.accumulator.is_empty() || (bridge.transmit_open() && bridge.outbox.in_flight());
-        if !burst.keep_going(bridge.uptime_us(), moved, mid_frame) {
-            return total;
-        }
-
         mark(LoopPhase::DrainLink);
         let read = usb_rx.drain_rx_fifo(link_buf);
         take_link_bytes(&link_buf[..read], manager, sender, bridge, mac);
@@ -807,9 +795,24 @@ fn link_burst(
             bridge.outbox.pump(sink)
         };
 
-        moved = read > 0 || wrote;
-        total.read |= read > 0;
-        total.wrote |= wrote;
+        let moved = read > 0 || wrote;
+        pass.moved |= moved;
+        if wrote {
+            pass.wrote_since_read = true;
+        } else if read > 0 {
+            pass.wrote_since_read = false;
+        }
+
+        let now = bridge.uptime_us();
+        if burst.is_none() && !moved && !link_woke {
+            return pass;
+        }
+        let run = burst.get_or_insert(LinkBurst::start(now));
+        let mid_frame =
+            !bridge.accumulator.is_empty() || (bridge.transmit_open() && bridge.outbox.in_flight());
+        if !run.keep_going(now, moved, mid_frame) {
+            return pass;
+        }
     }
 }
 

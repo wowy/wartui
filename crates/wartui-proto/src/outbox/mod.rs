@@ -8,9 +8,10 @@
 //!
 //! So the bridge never blocks on the link. It encodes everything it wants to say into one
 //! of two rings, and drains them a byte at a time into whatever the FIFO will take. While
-//! a frame is part-way out, the bridge polls the FIFO for at most
-//! [`BURST_BUDGET_US`](crate::link::BURST_BUDGET_US) ([`LinkBurst`](crate::link::LinkBurst)):
-//! a bounded spin, never a wait on the host.
+//! a frame is part-way out, the bridge goes on polling the FIFO for at most
+//! [`BURST_BUDGET_US`](crate::link::BURST_BUDGET_US) ([`LinkBurst`](crate::link::LinkBurst)),
+//! plus the time to act on any host frame that completes meanwhile. That is a spin, never a
+//! wait on the host.
 //!
 //! The two rings:
 //!
