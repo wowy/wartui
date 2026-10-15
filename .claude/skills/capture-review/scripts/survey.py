@@ -743,7 +743,7 @@ def bridge(db, ctx):
     print(f"  ~lost on USB {max(0, received - dropped - host_read)} "
           "(inferred from counters; +/-24 frames at each end)")
     if oversize:
-        print(f"  oversize {oversize} (ESP-NOW frames over 250 bytes, not a node's; "
+        print(f"  oversize {oversize} (ESP-NOW frames over 1024 bytes, not a node's; "
               "not in received)")
     print(f"  peer_count seen {dict(sorted(peers.items()))}")
     if gaps:

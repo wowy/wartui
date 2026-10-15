@@ -57,8 +57,11 @@ use ring::Ring;
 ///
 /// The useful buffering has to live here: `esp-radio`'s own receive queue is ten frames
 /// deep and silently discards its oldest. What fills this ring is a node's back-to-back
-/// burst, a batch every ~0.5 ms on the air against ~0.8 ms per frame to USB. The ring
-/// holds the difference for as long as the burst lasts.
+/// burst, which arrives faster than USB drains it: measured with 250-byte batches, one
+/// every ~0.5 ms on the air against ~0.8 ms per frame to USB. The ring holds the
+/// difference for as long as the burst lasts. Its depth counts frames, not bytes: each
+/// slot takes a full [`MAX_FRAME`](crate::link::MAX_FRAME), so a slot holding a full
+/// 1024-byte batch carries about four times the records of a 250-byte one.
 const BULK_DEPTH: usize = 24;
 
 /// Frames that answer a host request. Short, because the host asks for one at a time.
@@ -110,7 +113,7 @@ pub struct Outbox {
 impl Outbox {
     /// An empty outbox.
     ///
-    /// The rings are sixteen kilobytes. On RISC-V the ABI returns a value that size
+    /// The rings are thirty-six kilobytes. On RISC-V the ABI returns a value that size
     /// through a hidden out-pointer, and the only caller passes it to
     /// `StaticCell::init_with`, so the pointer is into `.bss`. Clippy reads the
     /// signature rather than the calling convention.
@@ -118,7 +121,7 @@ impl Outbox {
     #[allow(
         clippy::new_without_default,
         reason = "a `Default` impl would invite `Outbox::default()`, which builds \
-                  sixteen kilobytes somewhere the caller did not choose"
+                  thirty-six kilobytes somewhere the caller did not choose"
     )]
     #[must_use]
     pub const fn new() -> Self {

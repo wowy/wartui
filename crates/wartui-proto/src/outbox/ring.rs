@@ -14,7 +14,7 @@ impl Slot {
 /// A ring of pre-allocated slots.
 ///
 /// Messages are encoded straight into the tail slot rather than built and then
-/// moved in, so a half-kilobyte frame never lands on the stack.
+/// moved in, so a frame of over a kilobyte never lands on the stack.
 pub(super) struct Ring<const N: usize> {
     slots: [Slot; N],
     head: usize,
@@ -44,7 +44,7 @@ impl<const N: usize> Ring<N> {
         }
         let idx = (self.head + self.len) % N;
         let written = encode_frame(msg, &mut self.slots[idx].buf).map_err(|_| ())?;
-        // MAX_FRAME is 512, so the cast cannot lose bits.
+        // MAX_FRAME is well under u16::MAX, so the cast cannot lose bits.
         self.slots[idx].len = written as u16;
         self.len += 1;
         Ok(())

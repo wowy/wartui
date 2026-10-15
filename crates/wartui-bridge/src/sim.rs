@@ -1079,7 +1079,7 @@ async fn send_frame(
     started: tokio::time::Instant,
 ) -> Result<(), ()> {
     let mut payload = EspNowPayload::new();
-    payload.extend_from_slice(frame).expect("the longest sighting fits the 250-byte payload");
+    payload.extend_from_slice(frame).expect("a full batch fits the 1024-byte payload");
     let rx =
         BridgeToHost::Rx { src, dst: BROADCAST, rssi: -55, rx_us: elapsed_us(started), payload };
     events.send(LinkEvent::Message(rx)).await.map_err(|_| ())

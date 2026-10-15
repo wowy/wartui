@@ -151,16 +151,16 @@ is here rather than only in a `//!`.
 
 - **The wire is ours, in both directions, and shares nothing with the vendor's.** Every frame is
   `WTUI`, a wire version byte, a type byte and a body: `HeartbeatMsg` (29 bytes), `SightingBatch`
-  (9 plus records of 12 plus the SSID and the trailer), `AdminMsg` (15) and `ClearMsg` (6, header
-  only), and the update frames `OtaBeginMsg` (47), `OtaChunkMsg` (12 to 1035), `OtaCommitMsg` (7),
-  `OtaAbortMsg` (7), `OtaConfirmMsg` (6) and, node to host, `OtaStatusMsg` (12). A heartbeat
-  broadcasts, since that is how a bridge discovers a node before either side knows the other's
-  address; a sighting batch unicasts to the bridge that last sent this node an admin or clear
-  frame, so a shared format is a shared conversation either way.
+  (9 plus records of 12 plus the SSID and the trailer, up to 1024), `AdminMsg` (15) and `ClearMsg`
+  (6, header only), and the update frames `OtaBeginMsg` (47), `OtaChunkMsg` (12 to 1035),
+  `OtaCommitMsg` (7), `OtaAbortMsg` (7), `OtaConfirmMsg` (6) and, node to host, `OtaStatusMsg`
+  (12). A heartbeat broadcasts, since that is how a bridge discovers a node before either side
+  knows the other's address; a sighting batch unicasts to the bridge that last sent this node an
+  admin or clear frame, so a shared format is a shared conversation either way.
   The magic is checked before anything else at both ends. Encode/decode is written out by
   hand, never by transmuting a packed struct, and pinned byte-for-byte in
   `crates/wartui-proto/tests/wire.rs`. Host→air frames may be up to 1470 bytes (ESP-NOW v2),
-  while everything a node sends stays ≤250, so the bridge→host link keeps 512-byte frames
+  node frames up to 1024, and bridge→host link frames up to 1152 to carry one
   ([`docs/espnow-v2-findings.md`](docs/espnow-v2-findings.md)).
 - **A wire change means reflashing every node at once.** `wartui-proto` is a path dependency of both
   firmwares. A frame carrying our magic and an unknown version byte is counted as `incompatible` and

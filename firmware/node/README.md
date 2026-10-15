@@ -14,7 +14,7 @@ It shares no wire format with the vendor firmware either. A node sends and recei
 | Frame          | Direction           | Size                    |
 |----------------|---------------------|-------------------------|
 | Heartbeat      | Broadcast           | 29 bytes                |
-| Sighting batch | Unicast, to bridge  | Up to 250 bytes         |
+| Sighting batch | Unicast, to bridge  | Up to 1024 bytes        |
 | Admin          | Unicast, to node    | 15 bytes                |
 | Clear          | Unicast, to node    | 6 bytes                 |
 
@@ -28,7 +28,7 @@ It shares no wire format with the vendor firmware either. A node sends and recei
   die temperature, one byte each.
 - **Sighting batch**: sent at the end of each dwell or scan, to the bridge that last sent an admin
   or clear frame. A 9-byte header, then one 12-plus-SSID record per newly seen BSSID or
-  advertiser, packed to fill the 250-byte ESP-NOW payload. A record's trailer carries a Passpoint
+  advertiser, packed to fill a 1024-byte ESP-NOW v2 payload. A record's trailer carries a Passpoint
   network's roaming consortium identifiers, or a BLE advertiser's manufacturer identifier, when
   there are any.
 - **Admin**: the assignment.

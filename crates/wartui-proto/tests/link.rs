@@ -10,10 +10,10 @@ use wartui_proto::air::{
     SightingMsg, Vdd,
 };
 use wartui_proto::link::{
-    BROADCAST, BridgeToHost, Chip, FrameAccumulator, HostToBridge, LINK_PROTO_VERSION, LinkError,
-    LogLevel, LoopPhase, MAX_ESPNOW_V2_PAYLOAD, MAX_FRAME, MAX_HOST_FRAME, PANEL_ROWS, Panel,
-    PanelLine, PanelLines, SendPayload, SendStatus, Severity, ShortStr, crc16, decode_frame,
-    encode_frame, encode_host_frame,
+    BROADCAST, BridgeToHost, Chip, EspNowPayload, FrameAccumulator, HostToBridge,
+    LINK_PROTO_VERSION, LinkError, LogLevel, LoopPhase, MAX_ESPNOW_V2_PAYLOAD, MAX_FRAME,
+    MAX_HOST_FRAME, MAX_NODE_PAYLOAD, PANEL_ROWS, Panel, PanelLine, PanelLines, SendPayload,
+    SendStatus, Severity, ShortStr, crc16, decode_frame, encode_frame, encode_host_frame,
 };
 use wartui_proto::reset::ResetCause;
 
@@ -38,7 +38,7 @@ fn sample_commands() -> Vec<HostToBridge, 16> {
             }
             .encode(),
         )
-        .expect("212 fits in 250");
+        .expect("a heartbeat fits a send");
 
     let mut v = Vec::new();
     v.push(HostToBridge::AddPeer { mac: [1, 2, 3, 4, 5, 6] }).expect("sample_commands has room");
@@ -47,9 +47,6 @@ fn sample_commands() -> Vec<HostToBridge, 16> {
     v.push(HostToBridge::Reset).expect("sample_commands has room");
     v.push(HostToBridge::ShowPanel { lines: full_panel() }).expect("sample_commands has room");
     v.push(HostToBridge::SetTxPower { power: 8 }).expect("sample_commands has room");
-    // Last on purpose: `a_full_212_byte_frame_fits_with_room_to_spare` takes the final case
-    // and measures it as the ESP-NOW one. Anything pushed after this silently becomes the
-    // frame that test believes it is sizing.
     v.push(HostToBridge::SendEspNow { id: 0xBEEF, dst: [0xAA; 6], ensure_peer: true, payload })
         .expect("sample_commands has room");
     v
@@ -78,7 +75,7 @@ fn sample_events() -> Vec<BridgeToHost, 16> {
         ext: &[],
     }));
     let mut payload = Vec::new();
-    payload.extend_from_slice(writer.as_bytes()).expect("a batch fits in 250");
+    payload.extend_from_slice(writer.as_bytes()).expect("a batch fits the node ceiling");
 
     let mut v = Vec::new();
     v.push(BridgeToHost::Ready {
@@ -155,14 +152,6 @@ fn link_codec_round_trips_all_bridge_events_when_encoded_and_decoded() {
         let decoded: BridgeToHost = decode_frame(&mut out[..n - 1]).expect("decodes");
         assert_eq!(decoded, event);
     }
-}
-
-#[test]
-fn link_codec_fits_max_esp_now_payload_when_encoding_frame() {
-    let cmd = sample_commands().into_iter().next_back().expect("the SendEspNow case");
-    let mut out = [0u8; MAX_FRAME];
-    let n = encode_host_frame(&cmd, &mut out).expect("encodes");
-    assert!(n < MAX_FRAME, "a full ESP-NOW frame used {n} of {MAX_FRAME} bytes");
 }
 
 #[test]
@@ -372,7 +361,7 @@ fn link_decoder_rejects_payload_when_frame_is_truncated() {
 #[test]
 fn host_command_asks_for_reply_only_when_bridge_answers() {
     let mut payload = Vec::new();
-    payload.extend_from_slice(&[0; 8]).expect("8 fits in 250");
+    payload.extend_from_slice(&[0; 8]).expect("8 fits a send");
     let mac = [1, 2, 3, 4, 5, 6];
     let cases: [(HostToBridge, bool); 8] = [
         (HostToBridge::Identify, true),
@@ -422,6 +411,26 @@ fn link_round_trips_v2_send_when_payload_is_full() {
         }
     }
     assert_eq!(decoded, Some(cmd));
+}
+
+#[test]
+fn link_round_trips_node_rx_when_payload_is_full_and_has_no_zeros() {
+    // COBS grows a frame by one byte per 254 without a zero, so a full node frame with
+    // none is the longest bridge-to-host frame there is.
+    let payload = EspNowPayload::from_slice(&[0xFF; MAX_NODE_PAYLOAD]).expect("fits");
+    let event = BridgeToHost::Rx { src: [9; 6], dst: [2; 6], rssi: -40, rx_us: u32::MAX, payload };
+    let mut out = [0u8; MAX_FRAME];
+    let n = encode_frame(&event, &mut out).expect("encodes");
+    // Through the accumulator the host uses, so a frame that outgrew it would be
+    // dropped here rather than on the bench.
+    let mut acc = FrameAccumulator::<MAX_FRAME>::new();
+    let mut decoded = None;
+    for &byte in &out[..n] {
+        if let Some(frame) = acc.push(byte) {
+            decoded = Some(decode_frame::<BridgeToHost>(frame).expect("decodes"));
+        }
+    }
+    assert_eq!(decoded, Some(event));
 }
 
 #[test]

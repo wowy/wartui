@@ -620,7 +620,7 @@ fn die_temp(c: i16) -> DieTemp {
 }
 
 /// Packs every sighting one dwell or Bluetooth scan produces into as few unicasts
-/// to `node.core` as the 250-byte ESP-NOW payload allows, and sends what it holds
+/// to `node.core` as `SIGHTING_BATCH_MAX` (1024 bytes) allows, and sends what it holds
 /// at the end rather than carrying anything into the next one — the host
 /// stamps a sighting's position on arrival, so held sightings would carry the
 /// wrong one.

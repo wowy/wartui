@@ -5,13 +5,14 @@
 //! a node that cannot read today's assignments can still be brought up to date.
 //!
 //! The host sends an image as [`OtaChunkMsg`]s of [`OTA_CHUNK`] bytes, which only ESP-NOW
-//! v2 carries. The node answers in [`OtaStatusMsg`]s, which stay within v1's 250 bytes like
-//! everything else a node sends. [`crate::ota`] is the node's half of the conversation.
+//! v2 carries. The node answers in [`OtaStatusMsg`]s, which stay within
+//! [`MAX_NODE_PAYLOAD`] like everything else a node sends. [`crate::ota`] is the node's half
+//! of the conversation.
 
 use super::{
     Board, DecodeError, MsgType, OFFSET_BODY, Version, fixed, header, le_u32, write_header,
 };
-use crate::link::{MAX_ESPNOW_PAYLOAD, MAX_ESPNOW_V2_PAYLOAD};
+use crate::link::{MAX_ESPNOW_V2_PAYLOAD, MAX_NODE_PAYLOAD};
 
 /// Image bytes in every [`OtaChunkMsg`] but the last.
 pub const OTA_CHUNK: usize = 1024;
@@ -39,7 +40,7 @@ pub const OTA_STATUS_MSG_LEN: usize = OFFSET_BODY + 1 + 1 + 4;
 
 const _: () = {
     assert!(OTA_CHUNK_MSG_MAX <= MAX_ESPNOW_V2_PAYLOAD);
-    assert!(OTA_STATUS_MSG_LEN <= MAX_ESPNOW_PAYLOAD);
+    assert!(OTA_STATUS_MSG_LEN <= MAX_NODE_PAYLOAD);
 };
 
 /// Host → node: open an update session for one image.
