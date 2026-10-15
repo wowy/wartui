@@ -140,7 +140,7 @@ fn crc16_matches_ccitt_false_standard_when_given_test_vectors() {
 fn link_codec_round_trips_all_host_commands_when_encoded_and_decoded() {
     for cmd in sample_commands() {
         let mut out = [0u8; MAX_FRAME];
-        let n = encode_frame(&cmd, &mut out).expect("encodes");
+        let n = encode_host_frame(&cmd, &mut out).expect("encodes");
         let decoded: HostToBridge =
             decode_frame(&mut out[..n - 1]).expect("decodes without the terminator");
         assert_eq!(decoded, cmd);
@@ -161,7 +161,7 @@ fn link_codec_round_trips_all_bridge_events_when_encoded_and_decoded() {
 fn link_codec_fits_max_esp_now_payload_when_encoding_frame() {
     let cmd = sample_commands().into_iter().next_back().expect("the SendEspNow case");
     let mut out = [0u8; MAX_FRAME];
-    let n = encode_frame(&cmd, &mut out).expect("encodes");
+    let n = encode_host_frame(&cmd, &mut out).expect("encodes");
     assert!(n < MAX_FRAME, "a full ESP-NOW frame used {n} of {MAX_FRAME} bytes");
 }
 
@@ -171,7 +171,7 @@ fn link_codec_fits_full_panel_display_when_encoding_show_panel_command() {
     // encoder, which is the thing that would actually truncate.
     let cmd = HostToBridge::ShowPanel { lines: full_panel() };
     let mut out = [0u8; MAX_FRAME];
-    let n = encode_frame(&cmd, &mut out).expect("encodes");
+    let n = encode_host_frame(&cmd, &mut out).expect("encodes");
     assert!(n < MAX_FRAME, "a full panel used {n} of {MAX_FRAME} bytes");
 }
 
@@ -180,7 +180,7 @@ fn link_codec_terminates_frame_with_single_null_byte_when_cobs_encoded() {
     // This is what makes the terminator unambiguous and resync possible.
     for cmd in sample_commands() {
         let mut out = [0u8; MAX_FRAME];
-        let n = encode_frame(&cmd, &mut out).expect("encodes");
+        let n = encode_host_frame(&cmd, &mut out).expect("encodes");
         assert_eq!(out[n - 1], 0, "frame must end with the terminator");
         assert!(!out[..n - 1].contains(&0), "COBS body must not contain a zero");
     }
@@ -190,7 +190,7 @@ fn link_codec_terminates_frame_with_single_null_byte_when_cobs_encoded() {
 fn link_decoder_rejects_frame_when_payload_checksum_is_corrupted() {
     let cmd = HostToBridge::AddPeer { mac: [1, 2, 3, 4, 5, 6] };
     let mut out = [0u8; MAX_FRAME];
-    let n = encode_frame(&cmd, &mut out).expect("encodes");
+    let n = encode_host_frame(&cmd, &mut out).expect("encodes");
 
     // Flip a bit in the body, avoiding the COBS length marker and terminator.
     let mut damaged = out;
@@ -205,7 +205,7 @@ fn link_decoder_rejects_frame_when_payload_checksum_is_corrupted() {
 fn link_decoder_rejects_frame_when_protocol_version_mismatches() {
     let cmd = HostToBridge::GetStatus;
     let mut out = [0u8; MAX_FRAME];
-    let n = encode_frame(&cmd, &mut out).expect("encodes");
+    let n = encode_host_frame(&cmd, &mut out).expect("encodes");
 
     // Rebuild the frame by hand with a bumped version, so the CRC stays valid
     // and the version check is genuinely what rejects it.
@@ -234,7 +234,7 @@ fn frame_accumulator_delivers_sequential_frames_when_processing_continuous_strea
     let cmds = sample_commands();
     for cmd in &cmds {
         let mut out = [0u8; MAX_FRAME];
-        let n = encode_frame(cmd, &mut out).expect("encodes");
+        let n = encode_host_frame(cmd, &mut out).expect("encodes");
         stream.extend_from_slice(&out[..n]);
     }
 
@@ -255,7 +255,7 @@ fn frame_accumulator_resynchronizes_cleanly_when_stream_contains_bootloader_nois
     // and everything after it should.
     let cmd = HostToBridge::AddPeer { mac: [0xa, 0xb, 0xc, 0xd, 0xe, 0xf] };
     let mut out = [0u8; MAX_FRAME];
-    let n = encode_frame(&cmd, &mut out).expect("encodes");
+    let n = encode_host_frame(&cmd, &mut out).expect("encodes");
 
     let mut stream = b"ESP-ROM:esp32c6-20220919\nwaiting for download\r\n".to_vec();
     stream.extend_from_slice(&out[..n]);
@@ -291,7 +291,7 @@ fn frame_accumulator_ignores_leading_zeros_when_accumulating_stream() {
     }
     let cmd = HostToBridge::Reset;
     let mut out = [0u8; MAX_FRAME];
-    let n = encode_frame(&cmd, &mut out).expect("encodes");
+    let n = encode_host_frame(&cmd, &mut out).expect("encodes");
     let mut got = None;
     for byte in out[..n].iter().copied() {
         if let Some(frame) = acc.push(byte) {
@@ -312,7 +312,7 @@ fn frame_accumulator_discards_oversized_frame_when_capacity_is_exceeded() {
     // And the accumulator is usable immediately afterwards.
     let cmd = HostToBridge::GetStatus;
     let mut out = [0u8; MAX_FRAME];
-    let n = encode_frame(&cmd, &mut out).expect("encodes");
+    let n = encode_host_frame(&cmd, &mut out).expect("encodes");
     let mut got = None;
     for byte in out[..n].iter().copied() {
         if let Some(frame) = acc.push(byte) {

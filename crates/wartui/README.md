@@ -158,6 +158,8 @@ is not counted. `batches` and `bridge` print zeros, since "0 lost" is the answer
 - `buffer full` figures that are zero, and the `buffer full` line when all are
 - the reboot clause, when the bridge never restarted
 - the `lost on USB` clause, when it is zero
+- the `oversize (not a node's)` clause, when it is zero. It counts ESP-NOW frames too long to be
+  a wartui node's, which the bridge dropped and left out of `frames received`
 - `host` clauses that are zero, and the `host` and `health` lines when the capture holds no host row
 - the `health` line, when nothing could be read; off a Pi it holds only the temperature
 - the `battery min` clause, when the host has no hwmon device named `battery`

@@ -1500,7 +1500,7 @@ fn engine_records_bridge_status_when_reply_arrives() {
             rx_count: 1363,
             dropped_tx,
             uptime_ms,
-            rx_oversize: 0,
+            rx_oversize: 17,
         }))
     };
     let statuses = |batch: &ActionBatch| -> Vec<BridgeStatusSeen> {
@@ -1528,6 +1528,7 @@ fn engine_records_bridge_status_when_reply_arrives() {
             dropped_tx: 1300,
             uptime_ms: 3_240_000,
             host_frames: 0,
+            rx_oversize: 17,
         }]
     );
     assert_eq!(
@@ -1539,6 +1540,7 @@ fn engine_records_bridge_status_when_reply_arrives() {
             dropped_tx: 2,
             uptime_ms: 4_000,
             host_frames: 0,
+            rx_oversize: 17,
         }]
     );
 }

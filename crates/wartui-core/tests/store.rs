@@ -516,18 +516,19 @@ fn store_round_trips_every_column_when_bridge_status_written() {
             dropped_tx: 1305,
             uptime_ms: 3_240_000,
             host_frames: 3_999_999_000,
+            rx_oversize: 42,
         })],
     );
 
-    let row: (i64, i64, i64, i64, i64, i64) = conn
+    let row: (i64, i64, i64, i64, i64, i64, i64) = conn
         .query_row(
-            "SELECT rx_at, peer_count, rx_count, dropped_tx, uptime_ms, host_frames
+            "SELECT rx_at, peer_count, rx_count, dropped_tx, uptime_ms, host_frames, rx_oversize
              FROM bridge_status",
             [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
         )
         .unwrap();
-    assert_eq!(row, (EPOCH_MS + 5_000, 3, 4_000_000_000, 1305, 3_240_000, 3_999_999_000));
+    assert_eq!(row, (EPOCH_MS + 5_000, 3, 4_000_000_000, 1305, 3_240_000, 3_999_999_000, 42));
 }
 
 fn host_status(

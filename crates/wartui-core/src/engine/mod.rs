@@ -355,7 +355,7 @@ impl FleetEngine {
             BridgeToHost::SendResult { id, status, tx_us } => {
                 self.on_send_result(*id, *status, *tx_us, now, batch);
             }
-            BridgeToHost::Status { peer_count, rx_count, dropped_tx, uptime_ms, .. } => {
+            BridgeToHost::Status { peer_count, rx_count, dropped_tx, uptime_ms, rx_oversize } => {
                 // Below the baseline means the bridge restarted from zero.
                 let baseline = match self.dropped_baseline {
                     Some(baseline) if baseline <= *dropped_tx => baseline,
@@ -376,6 +376,7 @@ impl FleetEngine {
                     dropped_tx: *dropped_tx,
                     uptime_ms: *uptime_ms,
                     host_frames: self.counters.frames,
+                    rx_oversize: *rx_oversize,
                 }));
             }
             // `Ready` arrives as `LinkEvent::Connected`. Bridge diagnostics are the operator's, not

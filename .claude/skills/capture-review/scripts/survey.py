@@ -716,16 +716,17 @@ def bridge(db, ctx):
     if not db.has("bridge_status", "uptime_ms"):
         absent("bridge_status table")
         return
+    oversize_col = "rx_oversize" if db.has("bridge_status", "rx_oversize") else "0"
     rows = db.q(
-        "SELECT id, rx_at, peer_count, rx_count, dropped_tx, uptime_ms, host_frames "
-        "FROM bridge_status ORDER BY id"
+        "SELECT id, rx_at, peer_count, rx_count, dropped_tx, uptime_ms, host_frames, "
+        f"{oversize_col} FROM bridge_status ORDER BY id"
     )
     if not rows:
         print("  no status replies")
         flag("WARN", "bridge", "no bridge_status rows: the bridge never answered a status poll")
         return
     reboots = []
-    received = dropped = 0
+    received = dropped = oversize = 0
     gaps = []
     for prev, cur in zip(rows, rows[1:]):
         restarted = cur[5] < prev[5]
@@ -733,6 +734,7 @@ def bridge(db, ctx):
             reboots.append(cur[1])
         received += since_boot_delta(cur[3], prev[3], restarted)
         dropped += since_boot_delta(cur[4], prev[4], restarted)
+        oversize += since_boot_delta(cur[7], prev[7], restarted)
         gaps.append(cur[1] - prev[1])
     host_read = rows[-1][6] - rows[0][6]
     peers = Counter(r[2] for r in rows)
@@ -740,6 +742,9 @@ def bridge(db, ctx):
           f"({pct(dropped, received)})  host read {host_read}")
     print(f"  ~lost on USB {max(0, received - dropped - host_read)} "
           "(inferred from counters; +/-24 frames at each end)")
+    if oversize:
+        print(f"  oversize {oversize} (ESP-NOW frames over 250 bytes, not a node's; "
+              "not in received)")
     print(f"  peer_count seen {dict(sorted(peers.items()))}")
     if gaps:
         print(f"  reply interval ms  {spread(gaps)}")

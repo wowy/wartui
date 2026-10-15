@@ -178,9 +178,11 @@ CREATE TABLE IF NOT EXISTS observation (
 -- bssid: `docs/store-io-findings.md` has the measurements that took both of them out.
 
 -- One row per bridge status reply, which the host polls for every few seconds.
--- `rx_count`, `dropped_tx` and `uptime_ms` are the bridge's since-boot counts as
--- the reply carried them: raw, as `heartbeat` keeps its drop counts, so a bridge
--- reboot shows as the values falling. `host_frames` is how many frames this host had
+-- `rx_count`, `dropped_tx`, `uptime_ms` and `rx_oversize` are the bridge's since-boot
+-- counts as the reply carried them: raw, as `heartbeat` keeps its drop counts, so a
+-- bridge reboot shows as the values falling. `rx_count` is the frames the bridge
+-- accepted to forward; `rx_oversize` is those it dropped for being longer than any
+-- node's, which are somebody else's traffic and not in `rx_count`. `host_frames` is how many frames this host had
 -- read off the link when the reply arrived, taken with `rx_count` so the two pair
 -- closely but not exactly: between two rows, the `rx_count` difference less the
 -- `host_frames` difference is frames lost on USB plus the bridge's `dropped_tx`, give
@@ -192,7 +194,8 @@ CREATE TABLE IF NOT EXISTS bridge_status (
   rx_count INTEGER NOT NULL,
   dropped_tx INTEGER NOT NULL,
   uptime_ms INTEGER NOT NULL,
-  host_frames INTEGER NOT NULL
+  host_frames INTEGER NOT NULL,
+  rx_oversize INTEGER NOT NULL
 );
 
 -- One row at the start, every 5 s, and at shutdown: the host's own state, sampled on a timer of
@@ -1212,8 +1215,9 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
             Record::BridgeStatus(status) => {
                 tx.prepare_cached(
                     "INSERT INTO bridge_status
-                       (rx_at, peer_count, rx_count, dropped_tx, uptime_ms, host_frames)
-                     VALUES (?1,?2,?3,?4,?5,?6)",
+                       (rx_at, peer_count, rx_count, dropped_tx, uptime_ms, host_frames,
+                        rx_oversize)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7)",
                 )?
                 .execute(params![
                     status.rx_at_ms,
@@ -1222,6 +1226,7 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
                     status.dropped_tx,
                     status.uptime_ms,
                     column(status.host_frames),
+                    status.rx_oversize,
                 ])?;
             }
             Record::HostStatus(host) => {
@@ -1300,6 +1305,7 @@ mod tests {
             dropped_tx: 0,
             uptime_ms: 0,
             host_frames: 0,
+            rx_oversize: 0,
         })
     }
 

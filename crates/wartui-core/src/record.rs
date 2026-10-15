@@ -106,6 +106,8 @@ pub struct BridgeStatusSeen {
     /// two rows, the `rx_count` difference less this one's is USB loss plus `dropped_tx`, give or
     /// take frames still queued in the bridge, which the reply overtakes.
     pub host_frames: u64,
+    /// Frames too long to be a node's that it dropped since its boot. Not in `rx_count`.
+    pub rx_oversize: u32,
 }
 
 /// The host's own state, sampled every few seconds and at shutdown.

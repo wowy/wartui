@@ -1,8 +1,8 @@
 use serde::{Serialize, de::DeserializeOwned};
 
 use super::{
-    LINK_PROTO_VERSION, MAX_ESPNOW_PAYLOAD, MAX_ESPNOW_V2_PAYLOAD, MAX_FRAME, MAX_HOST_FRAME,
-    PANEL_ROWS,
+    BridgeToHost, HostToBridge, LINK_PROTO_VERSION, MAX_ESPNOW_PAYLOAD, MAX_ESPNOW_V2_PAYLOAD,
+    MAX_FRAME, MAX_HOST_FRAME, PANEL_ROWS,
 };
 
 // A frame is the version byte, the payload and the CRC, plus COBS overhead (one byte
@@ -91,25 +91,29 @@ pub const fn crc16(data: &[u8]) -> u16 {
     crc
 }
 
-/// Serialize `msg` into `out` as a complete frame, terminator included.
+/// Serialize a bridge-to-host `msg` into `out` as a complete frame, terminator included,
+/// of up to [`MAX_FRAME`].
+///
+/// Each encoder takes one direction's enum, so a [`HostToBridge::SendEspNow`] can never be
+/// encoded against the smaller bridge-to-host buffer.
 ///
 /// Returns how many bytes of `out` were used.
 ///
 /// # Errors
 /// [`LinkError::BufferTooSmall`] if `out` cannot hold the encoded frame.
-pub fn encode_frame<T: Serialize>(msg: &T, out: &mut [u8]) -> Result<usize, LinkError> {
-    encode_frame_in::<T, MAX_BODY>(msg, out)
+pub fn encode_frame(msg: &BridgeToHost, out: &mut [u8]) -> Result<usize, LinkError> {
+    encode_frame_in::<_, MAX_BODY>(msg, out)
 }
 
-/// [`encode_frame`] for a host-to-bridge frame of up to [`MAX_HOST_FRAME`], which a
-/// [`super::HostToBridge::SendEspNow`] with a full v2 payload needs.
+/// Serialize a host-to-bridge `msg` into `out` as a complete frame of up to
+/// [`MAX_HOST_FRAME`], which a [`HostToBridge::SendEspNow`] with a full v2 payload needs.
 ///
 /// Host only: its body buffer is three times [`encode_frame`]'s, on the stack.
 ///
 /// # Errors
 /// [`LinkError::BufferTooSmall`] if `out` cannot hold the encoded frame.
-pub fn encode_host_frame<T: Serialize>(msg: &T, out: &mut [u8]) -> Result<usize, LinkError> {
-    encode_frame_in::<T, MAX_HOST_BODY>(msg, out)
+pub fn encode_host_frame(msg: &HostToBridge, out: &mut [u8]) -> Result<usize, LinkError> {
+    encode_frame_in::<_, MAX_HOST_BODY>(msg, out)
 }
 
 fn encode_frame_in<T: Serialize, const B: usize>(

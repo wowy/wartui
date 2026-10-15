@@ -100,14 +100,27 @@ pub async fn run(args: Args) -> Result<()> {
             human_uptime(uptime_ms)
         );
     }
-    if rx_count == 0 {
-        println!(
-            "\nThe bridge has heard nothing. Check the nodes are powered and on channel \
-             {CONTROL_CHANNEL}."
-        );
+    if let Some(note) = silence_note(rx_count, rx_oversize) {
+        println!("\n{note}");
     }
 
     Ok(())
+}
+
+/// What to say when no node's frame has reached the bridge, or `None` when one has.
+///
+/// Oversize frames are ESP-NOW from somebody else, so a bridge that has counted only those
+/// has a working radio and no fleet to hear.
+fn silence_note(rx_count: u32, rx_oversize: u32) -> Option<String> {
+    if rx_count > 0 {
+        return None;
+    }
+    let heard = if rx_oversize > 0 {
+        "The radio is hearing ESP-NOW traffic, but none of it is from a wartui node."
+    } else {
+        "The bridge has heard nothing."
+    };
+    Some(format!("{heard} Check the nodes are powered and on channel {CONTROL_CHANNEL}."))
 }
 
 async fn wait_for_ready(link: &mut wartui_bridge::LinkHandle) -> Result<wartui_bridge::BridgeInfo> {
@@ -147,7 +160,7 @@ fn human_uptime(ms: u32) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::human_uptime;
+    use super::{human_uptime, silence_note};
 
     #[test]
     fn status_cmd_formats_uptime_in_largest_unit_when_displaying_diagnostics() {
@@ -157,5 +170,23 @@ mod tests {
         assert_eq!(human_uptime(3_599_000), "59m 59s");
         assert_eq!(human_uptime(3_600_000), "1h 0m");
         assert_eq!(human_uptime(7_380_000), "2h 3m");
+    }
+
+    #[test]
+    fn status_cmd_names_foreign_traffic_when_bridge_heard_only_oversize_frames() {
+        let note = silence_note(0, 3).expect("no node was heard");
+        assert!(note.starts_with("The radio is hearing ESP-NOW traffic, but none"), "{note}");
+        assert!(note.contains("powered and on channel"), "{note}");
+    }
+
+    #[test]
+    fn status_cmd_says_heard_nothing_when_bridge_counted_no_frames() {
+        let note = silence_note(0, 0).expect("no node was heard");
+        assert!(note.starts_with("The bridge has heard nothing."), "{note}");
+    }
+
+    #[test]
+    fn status_cmd_omits_silence_note_when_a_node_frame_arrived() {
+        assert_eq!(silence_note(1, 3), None);
     }
 }
