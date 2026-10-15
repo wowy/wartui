@@ -33,7 +33,7 @@
 //! sends in a row: a node rebooting has its radio off, and acks nothing for a second or so.
 //! Each returns to the `begin`, which an identical one resumes where the node's progress
 //! stands: from 0 after a reboot, which loses the receiver's state and the node's core.
-//! [`MAX_REBEGINS`] and [`BEGIN_TIMEOUT`] are what give up on the node. A session that gives
+//! [`MAX_RESTARTS`] and [`BEGIN_TIMEOUT`] are what give up on the node. A session that gives
 //! up after the node accepted it sends [`OtaAbortMsg`] once, so the node leaves update mode at
 //! once rather than after its 30 s of silence.
 //!
@@ -103,9 +103,9 @@ pub const MAX_SEND_FAILURES: u32 = 10;
 /// windows of an assigned node, thirty of a parked one.
 pub const BEGIN_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// How many times an update may return to its `begin` before the node is given up on: the
-/// first `begin` and this many more.
-pub const MAX_REBEGINS: u32 = 5;
+/// How many times an update may start over from its `begin` after losing the node, before
+/// the node is given up on. The first `begin` is not counted.
+pub const MAX_RESTARTS: u32 = 5;
 
 /// How long after `Verified` a heartbeat from the old image is taken as one sent before the
 /// reboot, rather than as the old image running again.
@@ -166,7 +166,7 @@ pub enum Failure {
     FlashError,
     /// Every byte arrived and the hash did not match.
     HashMismatch,
-    /// The update returned to its `begin` [`MAX_REBEGINS`] times and lost the node again.
+    /// The update started over [`MAX_RESTARTS`] times and lost the node again.
     NotAnswering,
     /// The image verified and the node could not switch slots to it.
     SwitchFailed,
@@ -318,7 +318,7 @@ pub struct OtaSession {
     wait_status: Option<Instant>,
     send_failures: u32,
     status_timeouts: u32,
-    rebegins: u32,
+    restarts: u32,
     confirm_acked: bool,
     outcome: Option<Outcome>,
 }
@@ -364,7 +364,7 @@ impl OtaSession {
             wait_status: None,
             send_failures: 0,
             status_timeouts: 0,
-            rebegins: 0,
+            restarts: 0,
             confirm_acked: false,
             outcome: None,
         }
@@ -517,7 +517,7 @@ impl OtaSession {
             (_, OtaState::HashMismatch) => self.fail(now, Failure::HashMismatch),
             (_, OtaState::Unknown(byte)) => self.fail(now, Failure::UnknownState(byte)),
             (_, OtaState::Verified) => self.enter(now, Phase::AwaitReboot),
-            (Phase::Streaming | Phase::Committing, OtaState::Idle) => self.rebegin(now),
+            (Phase::Streaming | Phase::Committing, OtaState::Idle) => self.restart(now),
             (Phase::Begin, OtaState::Receiving) => {
                 // A `begin` answers from where the node stands, which a reboot sets back to 0.
                 self.high = 0;
@@ -601,7 +601,7 @@ impl OtaSession {
     fn note_send_failure(&mut self, now: Instant) -> bool {
         self.send_failures += 1;
         if self.send_failures > MAX_SEND_FAILURES {
-            self.rebegin(now);
+            self.restart(now);
             return false;
         }
         true
@@ -624,7 +624,7 @@ impl OtaSession {
                 self.wait_status = None;
                 self.status_timeouts += 1;
                 if self.status_timeouts > MAX_STATUS_TIMEOUTS {
-                    self.rebegin(now);
+                    self.restart(now);
                 } else if self.phase == Phase::Committing {
                     self.send_commit(now, out);
                 } else {
@@ -700,13 +700,13 @@ impl OtaSession {
         full.min(self.begin.len - offset)
     }
 
-    /// Return to the `begin`, which goes out on the node's next heartbeat.
-    fn rebegin(&mut self, now: Instant) {
-        if self.rebegins == MAX_REBEGINS {
+    /// Start over from the `begin`, which goes out on the node's next heartbeat.
+    fn restart(&mut self, now: Instant) {
+        if self.restarts == MAX_RESTARTS {
             self.fail(now, Failure::NotAnswering);
             return;
         }
-        self.rebegins += 1;
+        self.restarts += 1;
         self.enter(now, Phase::Begin);
     }
 

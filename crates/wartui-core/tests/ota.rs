@@ -11,7 +11,7 @@ use wartui_bridge::sim::{SimConfig, SimTransport};
 use wartui_bridge::{LinkEvent, LinkHandle};
 use wartui_core::engine::Now;
 use wartui_core::ota::{
-    BEGIN_TIMEOUT, CONFIRM_TIMEOUT, Failure, MAX_REBEGINS, MAX_SEND_FAILURES, OtaEvent, OtaImage,
+    BEGIN_TIMEOUT, CONFIRM_TIMEOUT, Failure, MAX_RESTARTS, MAX_SEND_FAILURES, OtaEvent, OtaImage,
     OtaSession, Outcome, Phase, REBOOT_GRACE,
 };
 use wartui_core::runtime::{drive_ota, now};
@@ -422,7 +422,7 @@ fn ota_session_fails_when_chunks_stay_unacked_across_every_begin() {
     assert_eq!(bench.run_to_end(&mut fate), Outcome::Failed(Failure::NotAnswering));
     // Each begin resumes at 2048 and sends it until the streak gives up on it.
     let per_begin = MAX_SEND_FAILURES as usize + 1;
-    let begins = MAX_REBEGINS as usize + 1;
+    let begins = MAX_RESTARTS as usize + 1;
     assert_eq!(bench.count(Out::Chunk(2048)), per_begin * begins);
     assert_eq!(bench.count(Out::Begin), begins, "the first begin and every return to it");
     assert_eq!(bench.sent.last(), Some(&Out::Abort), "the node is told to leave update mode");
