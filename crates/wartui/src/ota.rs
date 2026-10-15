@@ -91,6 +91,8 @@ fn node_arg(text: &str) -> Result<BridgeSpec, String> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Action {
     Update,
+    /// On trial on the image's version already: confirm it rather than send it again.
+    Confirm,
     /// Already on the image's version.
     Same(Version),
     /// On a newer version than the image.
@@ -103,6 +105,7 @@ impl std::fmt::Display for Action {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Update => f.write_str("update"),
+            Self::Confirm => f.write_str("confirm"),
             Self::Same(version) => write!(f, "skip: already {version}"),
             Self::Older => f.write_str("skip: older image (use --force)"),
             Self::NoImage(board) => write!(f, "refuse: no image for {}", board_name(*board)),
@@ -113,6 +116,9 @@ impl std::fmt::Display for Action {
 /// Decide what to do with a node announcing `node`, given the image for its board.
 fn decide(node: &Capabilities, image: Option<Version>, force: bool) -> Action {
     let Some(image) = image else { return Action::NoImage(node.board) };
+    if node.trial && image == node.version {
+        return Action::Confirm;
+    }
     match image.cmp(&node.version) {
         _ if force => Action::Update,
         std::cmp::Ordering::Greater => Action::Update,
@@ -145,10 +151,10 @@ pub async fn run(args: Args) -> Result<()> {
         .collect();
     print_table(&plan);
 
-    let chosen: Vec<(Mac, Capabilities)> = plan
+    let chosen: Vec<(Mac, Capabilities, bool)> = plan
         .iter()
-        .filter(|(.., action)| *action == Action::Update)
-        .map(|(node, caps, ..)| (*node, *caps))
+        .filter(|(.., action)| matches!(action, Action::Update | Action::Confirm))
+        .map(|(node, caps, _, action)| (*node, *caps, *action == Action::Confirm))
         .collect();
     if chosen.is_empty() {
         println!("nothing to update");
@@ -165,11 +171,15 @@ pub async fn run(args: Args) -> Result<()> {
     let base = u8::try_from(chrono::Utc::now().timestamp().rem_euclid(256)).unwrap_or(1);
     let mut next_id = 1;
     let mut terminate = crate::Terminate::new();
-    for (i, (node, caps)) in chosen.iter().enumerate() {
-        let image = &images[&caps.board];
+    for (i, (node, caps, confirm_only)) in chosen.iter().enumerate() {
         drain(&mut link).await;
         let session = base.wrapping_add(u8::try_from(i).unwrap_or(0));
-        let mut ota = OtaSession::new(*node, caps.version, &image.ota, session, next_id, now());
+        let mut ota = if *confirm_only {
+            OtaSession::confirm_trial(*node, caps.version, next_id, now())
+        } else {
+            let image = &images[&caps.board].ota;
+            OtaSession::new(*node, caps.version, image, session, next_id, now())
+        };
         let mut line = ProgressLine::new(*node);
         let stop = async {
             tokio::select! {
@@ -407,7 +417,12 @@ impl ProgressLine {
     }
 
     fn render(&self, progress: &Progress, now: Instant) -> String {
-        let percent = u64::from(progress.acked) * 100 / u64::from(progress.total.max(1));
+        // A confirm alone sends no image, and is all of what is left to do.
+        let percent = if progress.total == 0 {
+            100
+        } else {
+            u64::from(progress.acked) * 100 / u64::from(progress.total)
+        };
         let rate = self.streaming.map_or(0, |(since, from)| {
             let secs = self.streamed.unwrap_or(now).duration_since(since).as_secs_f64();
             let bytes = f64::from(progress.acked.saturating_sub(from));
@@ -466,6 +481,15 @@ mod tests {
     fn ota_cmd_refuses_node_when_no_image_for_board() {
         let action = decide(&caps(Version::new(0, 0, 9), false), None, true);
         assert_eq!(action.to_string(), "refuse: no image for esp32c6");
+    }
+
+    #[test]
+    fn ota_cmd_confirms_node_when_it_runs_the_image_version_on_trial() {
+        let action = decide(&caps(NEW, true), Some(NEW), false);
+        assert_eq!(action, Action::Confirm);
+        assert_eq!(action.to_string(), "confirm");
+        // Not sent again, even when forced.
+        assert_eq!(decide(&caps(NEW, true), Some(NEW), true), Action::Confirm);
     }
 
     #[test]

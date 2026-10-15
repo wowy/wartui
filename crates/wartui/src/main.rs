@@ -1,8 +1,9 @@
 //! wartui's command line.
 //!
 //! `run` is the tool; `flash-fleet` and `flash-bridge` put the firmware on the boards it
-//! drives, and `ota` updates the nodes' over the air; everything else checks one link in the chain when `run` is not showing what it
-//! should, and `crates/wartui/README.md` § "When nothing arrives" has which to reach for.
+//! drives, and `ota` updates the nodes' firmware over the air. Everything else checks one link
+//! in the chain when `run` is not showing what it should, and `crates/wartui/README.md`
+//! § "When nothing arrives" has which to reach for.
 //! `--log-file` is there because the TUI owns the terminal, so the transport has nowhere else
 //! to say what it tried and what the OS said.
 

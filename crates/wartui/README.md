@@ -508,6 +508,7 @@ A1:B0    esp32c5         0.1.0     0.1.1     update
 | Action                            | Why                                                                       |
 |-----------------------------------|---------------------------------------------------------------------------|
 | `update`                          | The image is newer than what the node runs, or `--force`                  |
+| `confirm`                         | The node runs the image's version on trial; it is confirmed, not resent   |
 | `skip: already 0.1.1`             | The node runs the image's version                                         |
 | `skip: older image (use --force)` | The node runs a newer version than the image                              |
 | `refuse: no image for <board>`    | `--image` is for another board, or no node firmware is built for this one |
@@ -538,7 +539,8 @@ goes back to the old one by itself. A node with no USB cable is never left witho
 image.
 
 A node still on trial is updated like any other: the update's first frame confirms the image it
-runs, and the new one goes into its other slot.
+runs, and the new one goes into its other slot. One on trial on the image's own version, as an
+update whose confirmation went unheard leaves it, is only confirmed (`confirm`).
 
 | Failure                                       | What to do                                                                       |
 |-----------------------------------------------|----------------------------------------------------------------------------------|
