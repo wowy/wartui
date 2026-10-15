@@ -421,6 +421,7 @@ the old image runs on until a power cycle. Each board prints a line by its last 
 |-------------------------------------------------------------------------|-------------------------------------------------|
 | `flashed`                                                               | Written, and seen to boot                       |
 | `flashed, but not seen to reboot: power-cycle it to run the new image`  | Written, but the old image may still be running |
+| `flashed, but not seen to reboot, and espflash reset failed: …`         | As above, with the reset's full output beneath  |
 | `failed: …`                                                             | espflash's last line, full output beneath       |
 | `skipped: …`                                                            | Not touched, with the reason                    |
 

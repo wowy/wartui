@@ -26,8 +26,8 @@
 //!
 //! **A node counts as flashed only once it is seen to boot.** espflash's reset over the USB
 //! Serial/JTAG control lines does not always take, and the old image then runs on from RAM until a
-//! power cycle. After the erase, the node's port is read for a line only a boot prints: the ROM's,
-//! the bootloader's, or the firmware's banner with this board's address (`boot.rs`). A node not
+//! power cycle. After the erase, the node's port is read for a line only a boot prints: the
+//! bootloader's, or the firmware's banner with this board's address (`boot.rs`). A node not
 //! seen to boot gets one `espflash reset` and is watched again.
 
 use std::fmt;
@@ -170,7 +170,7 @@ pub fn run(args: Args) -> Result<()> {
     report.sort_by(|a, b| a.0.path.cmp(&b.0.path));
     for (candidate, outcome) in &report {
         println!("{:<6} {outcome}", name(candidate));
-        if let Outcome::Failed(ran) = outcome {
+        if let Some(ran) = outcome.failed_run() {
             for line in ran.stdout.lines().chain(ran.stderr.lines()) {
                 println!("         {line}");
             }
@@ -203,8 +203,8 @@ fn flash_node(candidate: &PortCandidate, chip: Chip, image: &Path) -> Outcome {
     if seen_booting(address, BOOT_WAIT) {
         return Outcome::Flashed;
     }
-    espflash(&reset_args(port, chip));
-    if seen_booting(address, BOOT_WAIT) { Outcome::Flashed } else { Outcome::NotRebooted }
+    let reset = espflash(&reset_args(port, chip));
+    if seen_booting(address, BOOT_WAIT) { Outcome::Flashed } else { Outcome::NotRebooted(reset) }
 }
 
 /// Every board known to be the bridge.
@@ -290,8 +290,20 @@ enum Outcome {
     Skipped(Skip),
     WouldFlash,
     Flashed,
-    NotRebooted,
+    /// Not seen to boot, with the backup `espflash reset`'s run.
+    NotRebooted(Ran),
     Failed(Ran),
+}
+
+impl Outcome {
+    /// The espflash run whose full output belongs beneath this outcome's line.
+    fn failed_run(&self) -> Option<&Ran> {
+        match self {
+            Self::Failed(ran) => Some(ran),
+            Self::NotRebooted(ran) if !ran.ok => Some(ran),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for Outcome {
@@ -300,9 +312,15 @@ impl fmt::Display for Outcome {
             Self::Skipped(why) => write!(f, "skipped: {why}"),
             Self::WouldFlash => f.write_str("would flash"),
             Self::Flashed => f.write_str("flashed"),
-            Self::NotRebooted => {
+            Self::NotRebooted(ran) if ran.ok => {
                 f.write_str("flashed, but not seen to reboot: power-cycle it to run the new image")
             }
+            Self::NotRebooted(ran) => write!(
+                f,
+                "flashed, but not seen to reboot, and espflash reset failed: {}; power-cycle it \
+                 to run the new image",
+                ran.last_line()
+            ),
             Self::Failed(ran) => write!(f, "failed: {}", ran.last_line()),
         }
     }
@@ -344,7 +362,7 @@ mod tests {
 
     use super::super::normalize;
     use super::super::release_asset;
-    use super::super::testing::{BRIDGE_MAC, NODE_MAC, board};
+    use super::super::testing::{BRIDGE_MAC, NODE_MAC, board, ran};
     use super::*;
     use wartui_proto::mac;
 
@@ -565,7 +583,18 @@ mod tests {
 
     #[test]
     fn flash_fleet_advises_power_cycle_when_node_is_not_seen_to_reboot() {
-        let shown = Outcome::NotRebooted.to_string();
-        assert!(shown.contains("not seen to reboot") && shown.contains("power-cycle"), "{shown}");
+        let shown = Outcome::NotRebooted(ran(true, "")).to_string();
+        assert_eq!(shown, "flashed, but not seen to reboot: power-cycle it to run the new image");
+    }
+
+    #[test]
+    fn flash_fleet_names_reset_error_when_backup_reset_fails() {
+        let outcome = Outcome::NotRebooted(ran(false, "Error: port busy\n"));
+        assert_eq!(
+            outcome.to_string(),
+            "flashed, but not seen to reboot, and espflash reset failed: Error: port busy; \
+             power-cycle it to run the new image"
+        );
+        assert!(outcome.failed_run().is_some());
     }
 }
