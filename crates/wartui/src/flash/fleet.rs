@@ -23,11 +23,18 @@
 //! **Each node's `otadata` is erased after its image is written**, so it boots the `ota_0` the
 //! image went to whatever an earlier over-the-air update chose. There is no factory slot to fall
 //! back on.
+//!
+//! **A node counts as flashed only once it is seen to boot.** espflash's reset over the USB
+//! Serial/JTAG control lines does not always take, and the old image then runs on from RAM until a
+//! power cycle. After the erase, the node's port is read for a line only a boot prints: the
+//! bootloader's, or the firmware's banner with this board's address (`boot.rs`). A node not
+//! seen to boot gets one `espflash reset` and is watched again.
 
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
 use clap::Args as ClapArgs;
@@ -36,10 +43,11 @@ use wartui_bridge::remember::BridgeMemory;
 use wartui_bridge::serial::{BridgeSpec, discover_ports};
 use wartui_proto::mac::Mac;
 
+use super::boot::seen_booting;
 use super::{
-    NODE, RELEASE_TAG, Ran, Skip, Source, canonical, check_image, chip_of, erase_otadata_args,
-    espflash, espflash_present, features, flash_args, judge_node_flash, judge_probe, mac_arg,
-    matches, name, obtain, probe_args, read, source,
+    Chip, NODE, RELEASE_TAG, Ran, Skip, Source, canonical, check_image, chip_of,
+    erase_otadata_args, espflash, espflash_present, features, flash_args, judge_node_flash,
+    judge_probe, mac_arg, matches, name, obtain, probe_args, read, reset_args, source,
 };
 use crate::spec;
 
@@ -148,16 +156,10 @@ pub fn run(args: Args) -> Result<()> {
         }
         Some(image) => {
             let flashed =
-                in_parallel(&verified, jobs, |candidate| flash_node(&candidate.path, chip, image));
-            let mut failed = 0;
-            for (candidate, ran) in verified.into_iter().zip(flashed) {
-                if ran.ok {
-                    report.push((candidate, Outcome::Flashed));
-                } else {
-                    failed += 1;
-                    report.push((candidate, Outcome::Failed(ran)));
-                }
-            }
+                in_parallel(&verified, jobs, |candidate| flash_node(candidate, chip, image));
+            let failed =
+                flashed.iter().filter(|outcome| !matches!(outcome, Outcome::Flashed)).count();
+            report.extend(verified.into_iter().zip(flashed));
             failed
         }
     };
@@ -168,27 +170,41 @@ pub fn run(args: Args) -> Result<()> {
     report.sort_by(|a, b| a.0.path.cmp(&b.0.path));
     for (candidate, outcome) in &report {
         println!("{:<6} {outcome}", name(candidate));
-        if let Outcome::Failed(ran) = outcome {
+        if let Some(ran) = outcome.failed_run() {
             for line in ran.stdout.lines().chain(ran.stderr.lines()) {
                 println!("         {line}");
             }
         }
     }
-    ensure!(failed == 0, "{failed} board(s) failed to flash");
+    ensure!(failed == 0, "{failed} board(s) failed to flash or to reboot");
     Ok(())
 }
 
-/// Write the merged image, then erase `otadata`.
+/// How long a node has to be seen booting after each reset.
+const BOOT_WAIT: Duration = Duration::from_secs(10);
+
+/// Write the merged image, erase `otadata`, then watch the node boot, resetting it once more if
+/// it does not.
 ///
 /// An earlier over-the-air update leaves `otadata` pointing at whichever slot it wrote, and the
 /// merged image puts the app in `ota_0`. The erase makes the bootloader boot `ota_0`, rather
 /// than leaving that to how espflash writes the erased gap the image carries at 0xd000.
-fn flash_node(port: &str, chip: super::Chip, image: &std::path::Path) -> Ran {
+fn flash_node(candidate: &PortCandidate, chip: Chip, image: &Path) -> Outcome {
+    let address = candidate.mac().expect("select probes only boards with an address");
+    let port = candidate.path.as_str();
     let written = espflash(&flash_args(port, chip, image));
     if !written.ok {
-        return written;
+        return Outcome::Failed(written);
     }
-    espflash(&erase_otadata_args(port, chip))
+    let erased = espflash(&erase_otadata_args(port, chip));
+    if !erased.ok {
+        return Outcome::Failed(erased);
+    }
+    if seen_booting(address, BOOT_WAIT) {
+        return Outcome::Flashed;
+    }
+    let reset = espflash(&reset_args(port, chip));
+    if seen_booting(address, BOOT_WAIT) { Outcome::Flashed } else { Outcome::NotRebooted(reset) }
 }
 
 /// Every board known to be the bridge.
@@ -274,7 +290,20 @@ enum Outcome {
     Skipped(Skip),
     WouldFlash,
     Flashed,
+    /// Not seen to boot, with the backup `espflash reset`'s run.
+    NotRebooted(Ran),
     Failed(Ran),
+}
+
+impl Outcome {
+    /// The espflash run whose full output belongs beneath this outcome's line.
+    fn failed_run(&self) -> Option<&Ran> {
+        match self {
+            Self::Failed(ran) => Some(ran),
+            Self::NotRebooted(ran) if !ran.ok => Some(ran),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for Outcome {
@@ -283,6 +312,15 @@ impl fmt::Display for Outcome {
             Self::Skipped(why) => write!(f, "skipped: {why}"),
             Self::WouldFlash => f.write_str("would flash"),
             Self::Flashed => f.write_str("flashed"),
+            Self::NotRebooted(ran) if ran.ok => {
+                f.write_str("flashed, but not seen to reboot: power-cycle it to run the new image")
+            }
+            Self::NotRebooted(ran) => write!(
+                f,
+                "flashed, but not seen to reboot, and espflash reset failed: {}; power-cycle it \
+                 to run the new image",
+                ran.last_line()
+            ),
             Self::Failed(ran) => write!(f, "failed: {}", ran.last_line()),
         }
     }
@@ -324,7 +362,7 @@ mod tests {
 
     use super::super::normalize;
     use super::super::release_asset;
-    use super::super::testing::{BRIDGE_MAC, NODE_MAC, board};
+    use super::super::testing::{BRIDGE_MAC, NODE_MAC, board, ran};
     use super::*;
     use wartui_proto::mac;
 
@@ -541,5 +579,22 @@ mod tests {
         });
         assert_eq!(doubled, items.iter().map(|i| i * 2).collect::<Vec<_>>());
         assert!(most.load(Ordering::SeqCst) <= 3);
+    }
+
+    #[test]
+    fn flash_fleet_advises_power_cycle_when_node_is_not_seen_to_reboot() {
+        let shown = Outcome::NotRebooted(ran(true, "")).to_string();
+        assert_eq!(shown, "flashed, but not seen to reboot: power-cycle it to run the new image");
+    }
+
+    #[test]
+    fn flash_fleet_names_reset_error_when_backup_reset_fails() {
+        let outcome = Outcome::NotRebooted(ran(false, "Error: port busy\n"));
+        assert_eq!(
+            outcome.to_string(),
+            "flashed, but not seen to reboot, and espflash reset failed: Error: port busy; \
+             power-cycle it to run the new image"
+        );
+        assert!(outcome.failed_run().is_some());
     }
 }
