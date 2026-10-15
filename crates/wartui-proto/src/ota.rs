@@ -32,6 +32,8 @@
 //! 1.9 MB slot back to hash it would cost seconds, and a chunk is only accepted at
 //! `next_offset`, so the running hash covers exactly the bytes written.
 
+pub mod trial;
+
 use sha2::{Digest, Sha256};
 
 use crate::air::{

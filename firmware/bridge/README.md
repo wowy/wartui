@@ -214,7 +214,7 @@ says so by re-announcing itself, which the host already listens for.
 `esp-radio 1.0.0-beta.0` requires `esp-hal = "~1.1.0"`, and that one requirement fixes the whole
 family. It holds the family in two ways:
 
-- **Walled:** `esp-hal` and `esp-rtos`. Cargo enforces this one.
+- **Walled:** `esp-hal`, `esp-rtos`, and the node's `esp-storage`. Cargo enforces this one.
 - **Resolves, but doubles:** `esp-alloc`, the `esp-wifi-sys-*` bindings, and `esp-sync`.
 
 The panel crates (`embedded-graphics`, `embedded-hal-bus`, and `mipidsi`) are free to move. Only
@@ -280,7 +280,7 @@ By hand, from either firmware directory:
 ```sh
 cargo tree --locked --features esp32c6 -e normal --prefix none --format '{p}' \
   | awk '{print $1, $2}' | sort -u \
-  | grep -E '^(esp-(alloc|hal|radio|rtos|sync|wifi-sys-esp32c[56])|embedded-hal) '
+  | grep -E '^(esp-(alloc|hal|radio|rtos|storage|sync|wifi-sys-esp32c[56])|embedded-hal) '
 ```
 
 They are direct dependencies for reasons that do not go away. `esp-wifi-sys-*` is here for the two
@@ -290,6 +290,11 @@ IDF calls `esp-radio` does not wrap, which are the only `unsafe` in either firmw
 - `esp_wifi_set_max_tx_power` (`set_tx_power` beside it).
 
 `esp-alloc` is here because the firmware owns the heap and declares its regions.
+
+`esp-storage` is the node's alone, for over-the-air updates. It is held at 0.9, the release on
+`esp-hal ~1.1`; 0.10 is on `esp-hal ~1.2`. It brings no crate the tree lacks: its `esp-sync` and
+`esp-rom-sys` are the copies `esp-hal` uses, and `esp-rom-sys` is `links`-keyed besides. The node's
+CI job counts it with the rest, and Dependabot ignores its minor and major releases.
 
 ### Embassy and `embedded-io-async`
 

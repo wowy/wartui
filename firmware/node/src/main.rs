@@ -17,7 +17,8 @@
 //! sweep; an unassigned node parks rather than sweeping the whole table; the node
 //! given the Bluetooth scan sniffs nothing and holds the control channel always;
 //! and every heartbeat says what this build can do. Its wire format is wartui's
-//! own in both directions — [`wartui_proto::air`].
+//! own in both directions — [`wartui_proto::air`]. It takes a new image over the
+//! air, and boots it on trial until it hears the host — [`ota`].
 //!
 //! The runner is `espflash flash --monitor`, and unlike the bridge the monitor is
 //! worth watching: a node's USB endpoint carries nothing but diagnostics.
@@ -44,7 +45,7 @@ use wartui_firmware::health;
 use wartui_firmware::{reboot, reset_cause};
 use wartui_proto::air::{
     AdminMsg, Board, CONTROL_CHANNEL, Capabilities, DecodeError, DieTemp, Frame, HeartbeatMsg,
-    SIGHTINGS_PER_BATCH_MAX, SightingBatchWriter, SightingMsg, Vdd,
+    OtaState, SIGHTINGS_PER_BATCH_MAX, SightingBatchWriter, SightingMsg, Vdd,
 };
 use wartui_proto::link::BROADCAST;
 use wartui_proto::mac;
@@ -110,6 +111,8 @@ macro_rules! note {
         }
     }};
 }
+
+mod ota;
 
 /// Granularity of the listening loops. Fine enough that a 100 ms window is not
 /// meaningfully shortened, coarse enough not to spin the core.
@@ -190,6 +193,9 @@ struct Node {
     unacked: u32,
     /// Why this boot happened, read once in `main`. Every heartbeat carries it.
     reset_cause: ResetCause,
+    /// Whether this image is on trial, unconfirmed by the host. Every heartbeat carries it
+    /// as [`Capabilities::trial`]; `ota` has the rest.
+    trial: bool,
 }
 
 impl Node {
@@ -214,6 +220,7 @@ impl Node {
             unacked: 0,
             // `main` replaces it before the first heartbeat.
             reset_cause: ResetCause::Unknown,
+            trial: false,
         }
     }
 
@@ -319,6 +326,11 @@ fn main() -> ! {
     let cause = reset_cause();
     note!("reset reason: {:?} ({})", esp_hal::system::reset_reason(), cause);
 
+    // Before the radio, so an image that has run out of trial boots is rolled back before
+    // it does anything else.
+    let mut ota = ota::Ota::new(peripherals.FLASH);
+    let trial = ota.boot();
+
     // The radio blobs allocate; nothing in wartui's own code does.
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 64 * 1024);
     esp_alloc::heap_allocator!(size: 36 * 1024);
@@ -399,6 +411,7 @@ fn main() -> ! {
 
     let node = NODE.take();
     node.reset_cause = cause;
+    node.trial = trial;
     let mac = esp_radio::wifi::Interface::station().mac_address();
     note!(
         "wartui node {} v{}, control channel {}",
@@ -408,6 +421,21 @@ fn main() -> ! {
     );
 
     loop {
+        if ota.updating() {
+            // Update mode: parked on the control channel, sniffing nothing and scanning no
+            // Bluetooth, draining every frame. It heartbeats every second whatever the
+            // assignment, so the host sees it alive, and keeps that assignment to return to.
+            if radio::park(&manager, &sniffer, CONTROL_CHANNEL, false) {
+                node.last_dwell = 0;
+                heartbeat(&manager, &mut sender, node);
+            } else {
+                note!("radio would not park on channel {}", CONTROL_CHANNEL);
+            }
+            listen(&manager, &mut sender, &receiver, node, &mut ota, IDLE_BEAT_MS);
+            ota.expire();
+            continue;
+        }
+
         if !node.assigned(scanning) {
             // Parked: reachable the whole time, collecting nothing. Heartbeat
             // first and listen afterwards, because the host only ever transmits
@@ -426,7 +454,7 @@ fn main() -> ! {
             } else {
                 note!("radio would not park on channel {}", CONTROL_CHANNEL);
             }
-            listen(&manager, &receiver, node, IDLE_BEAT_MS);
+            listen(&manager, &mut sender, &receiver, node, &mut ota, IDLE_BEAT_MS);
             // An assignment adopted mid-listen, or moving from parked to
             // assigned generally: this node has just heartbeated and held a
             // window, so its next one is a whole interval out from here
@@ -460,10 +488,10 @@ fn main() -> ! {
                     // Drain first: this node never leaves the control channel, so
                     // an admin frame that landed after the last listen was acked
                     // and queued, and this heartbeat must report its epoch.
-                    drain_admin(&manager, &receiver, node);
+                    drain_admin(&manager, &mut sender, &receiver, node, &mut ota);
                     node.last_dwell = 0;
                     heartbeat(&manager, &mut sender, node);
-                    listen(&manager, &receiver, node, ADMIN_WAIT_MS);
+                    listen(&manager, &mut sender, &receiver, node, &mut ota, ADMIN_WAIT_MS);
                     node.next_beat = Some(next_beat_after(deadline));
                 }
             } else {
@@ -471,7 +499,7 @@ fn main() -> ! {
                 // What keeps this loop from spinning when the radio refuses:
                 // nothing else here sleeps unconditionally the way the idle
                 // branch's `listen` does.
-                listen(&manager, &receiver, node, ADMIN_WAIT_MS);
+                listen(&manager, &mut sender, &receiver, node, &mut ota, ADMIN_WAIT_MS);
             }
             // Straight into the next scan either way: a beat not yet due costs
             // this node nothing but the next check.
@@ -506,7 +534,7 @@ fn main() -> ! {
         let on_control = radio::park(&manager, &sniffer, CONTROL_CHANNEL, false);
         if on_control {
             report(&mut sender, node, channel);
-            drain_admin(&manager, &receiver, node);
+            drain_admin(&manager, &mut sender, &receiver, node, &mut ota);
         } else {
             note!("radio would not return to channel {}", CONTROL_CHANNEL);
         }
@@ -524,7 +552,7 @@ fn main() -> ! {
             && Instant::now() >= deadline
         {
             heartbeat(&manager, &mut sender, node);
-            listen(&manager, &receiver, node, ADMIN_WAIT_MS);
+            listen(&manager, &mut sender, &receiver, node, &mut ota, ADMIN_WAIT_MS);
             node.next_beat = Some(next_beat_after(deadline));
         }
     }
@@ -566,7 +594,7 @@ fn heartbeat(manager: &EspNowManager<'_>, sender: &mut EspNowSender<'_>, node: &
     let msg = HeartbeatMsg {
         counter: node.counter,
         epoch: node.version,
-        capabilities: CAPABILITIES,
+        capabilities: Capabilities { trial: node.trial, ..CAPABILITIES },
         wifi_refused: sniff::refused(),
         ble_refused: ble::refused(),
         beat,
@@ -766,29 +794,71 @@ fn report_ble(sender: &mut EspNowSender<'_>, node: &mut Node, scanner: &mut ble:
 ///
 /// This is the admin window. The radio acknowledges a unicast assignment in
 /// hardware either way, but adopting one needs the frame, read only here.
-fn listen(manager: &EspNowManager<'_>, receiver: &EspNowReceiver<'_>, node: &mut Node, ms: u32) {
+///
+/// Returns early when update mode starts or ends, so the main loop changes mode at once.
+fn listen(
+    manager: &EspNowManager<'_>,
+    sender: &mut EspNowSender<'_>,
+    receiver: &EspNowReceiver<'_>,
+    node: &mut Node,
+    ota: &mut ota::Ota,
+    ms: u32,
+) {
     let until = Instant::now() + Duration::from_millis(u64::from(ms));
+    let updating = ota.updating();
     loop {
-        drain_admin(manager, receiver, node);
-        if Instant::now() >= until {
+        drain_admin(manager, sender, receiver, node, ota);
+        if Instant::now() >= until || ota.updating() != updating {
             return;
         }
         CurrentThreadHandle::get().delay(Duration::from_millis(POLL_MS));
     }
 }
 
-/// Take whatever the radio has queued and adopt any assignment in it.
-fn drain_admin(manager: &EspNowManager<'_>, receiver: &EspNowReceiver<'_>, node: &mut Node) {
+/// Take whatever the radio has queued: adopt any assignment, and hand update frames to
+/// `ota`.
+///
+/// Any frame from the host confirms an image on trial — admin, clear, update-confirm or an
+/// update frame: decoding one is hearing the host over the air, which is the whole test.
+fn drain_admin(
+    manager: &EspNowManager<'_>,
+    sender: &mut EspNowSender<'_>,
+    receiver: &EspNowReceiver<'_>,
+    node: &mut Node,
+    ota: &mut ota::Ota,
+) {
     while let Some(received) = receiver.receive() {
         let src = received.info.src_address;
         let admin = match Frame::decode(received.data()) {
             Ok(Frame::Admin(admin)) => {
                 note_core(manager, node, src);
+                confirm(node, ota);
                 admin
             }
             Ok(Frame::Clear(_)) => {
                 note_core(manager, node, src);
+                confirm(node, ota);
                 node.forget_reported("host asked");
+                continue;
+            }
+            Ok(Frame::OtaConfirm(_)) => {
+                confirm(node, ota);
+                continue;
+            }
+            Ok(Frame::OtaBegin(msg)) => {
+                update(manager, sender, node, ota, src, &ota::Update::Begin(msg));
+                continue;
+            }
+            Ok(Frame::OtaChunk(msg)) => {
+                update(manager, sender, node, ota, src, &ota::Update::Chunk(msg));
+                continue;
+            }
+            Ok(Frame::OtaCommit(msg)) => {
+                update(manager, sender, node, ota, src, &ota::Update::Commit(msg));
+                continue;
+            }
+            Ok(Frame::OtaAbort(msg)) => {
+                update(manager, sender, node, ota, src, &ota::Update::Abort(msg));
                 continue;
             }
             // A host whose frame is not the shape this build reads — a different
@@ -831,10 +901,59 @@ fn drain_admin(manager: &EspNowManager<'_>, receiver: &EspNowReceiver<'_>, node:
     }
 }
 
+/// End this image's trial, if it is on one. Once it takes, it is a no-op for the rest of
+/// the boot.
+fn confirm(node: &mut Node, ota: &mut ota::Ota) {
+    if node.trial && ota.confirm() {
+        node.trial = false;
+    }
+}
+
+/// Act on an update frame from `src`, confirming a trial image first.
+///
+/// Confirming first matters: an update accepted while this image is on trial would write
+/// over the only slot known to work, so `ota` refuses a `begin` until the trial is over.
+///
+/// The core moves to `src` only for a frame of the session the receiver accepted. A
+/// refusal is answered only when `src` is the core already: a stray `begin` from another
+/// host must not re-point sightings, and answering it would need a peer slot for it.
+///
+/// A `Verified` status is followed by the switch to the new image and a reboot. Its send is
+/// best effort: the host also learns of the update from the reboot. A switch that fails
+/// sends one `FlashError` instead.
+fn update(
+    manager: &EspNowManager<'_>,
+    sender: &mut EspNowSender<'_>,
+    node: &mut Node,
+    ota: &mut ota::Ota,
+    src: [u8; 6],
+    frame: &ota::Update<'_>,
+) {
+    confirm(node, ota);
+    let answer = ota.on_update(frame, node.trial);
+    if answer.accepted {
+        note_core(manager, node, src);
+    }
+    let Some(status) = answer.status else { return };
+    if node.core != Some(src) {
+        return;
+    }
+    if !radio::unicast(sender, &src, &status.encode()) {
+        note!("update status {:?} unacknowledged", status.state);
+    }
+    if status.state == OtaState::Verified {
+        let failed = ota.install();
+        if !radio::unicast(sender, &src, &failed.encode()) {
+            note!("update status {:?} unacknowledged", failed.state);
+        }
+    }
+}
+
 /// Point sighting batches at `src`, if that is not the core already held.
 ///
-/// Runs before [`Node::adopt`]'s epoch check, on every admin or clear frame, not
-/// only ones that change the assignment: a bridge that swapped and re-sent the same
+/// Runs on every admin or clear frame, and on an update frame of the session the update
+/// receiver accepted. For an admin frame it runs before [`Node::adopt`]'s epoch check, not
+/// only on ones that change the assignment: a bridge that swapped and re-sent the same
 /// epoch still has to move the core, or every sighting after it unicasts into
 /// silence forever. Registration failure is left as a note — the old peer, and the
 /// old `node.core`, are still there to unicast to.

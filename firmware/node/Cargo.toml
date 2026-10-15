@@ -8,7 +8,7 @@
 [package]
 name = "wartui-node-fw"
 description = "Wardriving node firmware for wartui. Sniffs, reports, and takes channel assignments."
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/wowy/wartui"
@@ -28,6 +28,7 @@ esp32c5 = [
   "esp-radio/esp32c5",
   "esp-rtos/esp32c5",
   "esp-println?/esp32c5",
+  "esp-storage/esp32c5",
   "dep:esp-wifi-sys-esp32c5",
   "wartui-firmware/esp32c5",
 ]
@@ -38,6 +39,7 @@ esp32c6 = [
   "esp-radio/esp32c6",
   "esp-rtos/esp32c6",
   "esp-println?/esp32c6",
+  "esp-storage/esp32c6",
   "dep:esp-wifi-sys-esp32c6",
   "wartui-firmware/esp32c6",
 ]
@@ -53,6 +55,8 @@ log = ["dep:esp-println"]
 xiao-external-antenna = []
 
 [dependencies]
+# The `NorFlash` traits `esp-storage` implements, for the OTA slot and the trial sector.
+embedded-storage = "0.3.2"
 # `esp-radio` and `esp-rtos` allocate their task stacks and the Wi-Fi driver's
 # queues through their own copy's `HEAP`, which nothing here fills, so a second
 # copy is a second and empty heap. Held at the version `esp-radio` resolves;
@@ -77,6 +81,11 @@ esp-radio = { version = "1.0.0-beta.0", default-features = false, features = [
   "wifi",
 ] }
 esp-rtos = { version = "0.3.0", features = ["esp-alloc", "esp-radio"] }
+# Flash access for over-the-air updates (`src/ota.rs`). 0.9 is the release on
+# `esp-hal ~1.1`, `esp-sync 0.2` and `esp-rom-sys 0.1`, the copies already here;
+# `firmware/bridge/README.md` § "Dependency versions". Its default
+# `critical-section` feature holds interrupts off across each flash operation.
+esp-storage = "0.9.0"
 esp-sync = "0.2.1"
 # IDF's own bindings, for the one call `esp-radio` does not wrap —
 # `esp_now_set_peer_rate_config`, in `radio::set_broadcast_rate`. Held at the

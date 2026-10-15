@@ -69,7 +69,7 @@ jobs:
           pushd firmware/node
           resolved=$(cargo tree --locked --features ${{matrix.target}} -e normal \
             --prefix none --format '{p}' | awk '{print $1, $2}' | sort -u)
-          for c in esp-alloc esp-hal esp-radio esp-rtos esp-sync esp-wifi-sys-${{matrix.target}}; do
+          for c in esp-alloc esp-hal esp-radio esp-rtos esp-storage esp-sync esp-wifi-sys-${{matrix.target}}; do
             n=$(printf '%s\n' "$resolved" | grep -c "^$c " || true)
             if [ "$n" != 1 ]; then
               printf '%s\n' "$resolved" | grep "^$c " || true

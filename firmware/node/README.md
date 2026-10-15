@@ -37,7 +37,7 @@ It shares no wire format with the vendor firmware either. A node sends and recei
 All four sit behind wartui's own `WTUI` magic and a wire version byte, checked first, so neither
 fleet can reach the other.
 
-The wire also defines the over-the-air update frames, which this build receives and drops unread:
+It also takes an image over the air, in the update frames:
 
 | Frame       | Direction          | Size              |
 |-------------|--------------------|-------------------|
@@ -48,8 +48,8 @@ The wire also defines the over-the-air update frames, which this build receives 
 | OTA confirm | Unicast, to node   | 6 bytes           |
 | OTA status  | Unicast, to bridge | 12 bytes          |
 
-A chunk carries up to 1024 bytes of image and needs ESP-NOW v2. `wartui_proto::ota` is the
-receiver that writes an image into the spare app slot.
+A chunk carries up to 1024 bytes of image and needs ESP-NOW v2. A status answers the host that
+sent the frame. § "Over-the-air updates" has the rest.
 
 ## What it does differently
 
@@ -93,7 +93,7 @@ byte, shown by the host as:
 
 That is the firmware version, then `5g` if the chip has the radio for it. A C5 does; a C6 doesn't.
 The board byte is 1 for an ESP32-C5, 2 for an ESP32-C6, and 3 for a XIAO ESP32-C6 built with
-`xiao-external-antenna`. Flag bit 1 marks an image on trial; this firmware never sets it.
+`xiao-external-antenna`. Flag bit 1 marks an image on trial, shown as `;trial`.
 Bluetooth isn't a capability. Every node can scan it, and the core's `ADMIN_FLAG_BLE` decides
 whether one does, off at every boot.
 
@@ -165,13 +165,68 @@ The app descriptor carries the version and a project name for the board: `wartui
 | trial    | data | undefined | 0x3D0000 | 0x1000   |
 
 There is no factory slot. Two app slots of 1920 KiB each leave no room for a third on 4 MB, and the
-app is about 845 KB. With `otadata` erased, the bootloader boots `ota_0`, which is where a USB flash
+app is about 880 KB. With `otadata` erased, the bootloader boots `ota_0`, which is where a USB flash
 puts the app. Both USB paths erase `otadata`: `wartui flash-fleet` after writing each node, and the
 cargo runner with `--erase-parts otadata`. So an earlier over-the-air update cannot leave the
-bootloader pointing at the other slot. `trial` is reserved for counting unconfirmed boots. Its
+bootloader pointing at the other slot. `trial` counts an updated image's unconfirmed boots. Its
 subtype is `undefined` because espflash 4.6 rejects a numeric data subtype.
 
 The cargo runner, `wartui flash-fleet` and the release images all use this table.
+
+## Over-the-air updates
+
+`wartui_proto::ota::Receiver` decides what to write and checks the hash. `src/ota.rs` gives it the
+flash: the app slot that is not booted, found in the partition table at boot.
+
+**Update mode.** An update begin the receiver accepts puts the node in update mode:
+
+- parked on the control channel, sniffing nothing and scanning no Bluetooth;
+- draining every frame, and answering each update frame with a status;
+- heartbeating every second, so the host sees it alive.
+
+The node keeps its assignment throughout and returns to it when the session ends. An abort ends
+it at once. So does 30 s without an update frame, which also drops the session.
+
+Only frames of the accepted session make their sender the core, where sightings go. A refused
+frame is answered only if its sender is the core already. A node whose table has no `trial`
+sector refuses every begin with `FlashError`, so it never runs an update untrialed.
+
+**The `trial` sector decides.** The bootloader has no rollback and reads no image state, so the
+node does it. The sector records which slot is on trial and how many times it has booted: an
+armed record naming the slot, then one cleared bit per boot. Clearing a bit needs no erase and
+survives the power cuts these nodes see routinely, which RTC memory does not. The node also writes
+the `otadata` states (`New`, `PendingVerify`, `Valid`, `Aborted`) but never decides from them. The
+sector's layout is `wartui_proto::ota::trial`, unit-tested there and fixed until 1.0, since one
+image writes it and the next reads it.
+
+Each step's flash writes come in an order a power cut cannot turn into an untrialed image:
+
+| Step     | Writes, in order                                                                 |
+|----------|----------------------------------------------------------------------------------|
+| Install  | erase `trial`; arm it for the new slot; select the new slot; `New`; reboot       |
+| Trial    | `PendingVerify`; clear one count bit; set the heartbeat's trial flag             |
+| Rollback | `Aborted`; select the other slot; erase `trial`; reboot                          |
+| Confirm  | `Valid`; erase `trial`; clear the trial flag                                     |
+
+**The switch.** A commit whose hash matches sends `Verified` and installs. Before selecting the new
+slot, the node points `otadata` at the running one if it names another. A USB flash leaves
+`otadata` erased, and that step leaves the entry a rollback returns to. If the install fails
+before the new slot is selected, the node stays on the running image, sends `FlashError` once and
+drops the session, so a re-sent begin starts afresh.
+
+**Trial boots.** A boot armed for the booted slot is a trial. One armed for the other slot is left
+over from an interrupted install or rollback, and is erased. With `otadata` erased, the node was
+flashed over USB and nothing is on trial.
+
+**Rollback.** The third trial boot rolls back, and so does a trial boot the node cannot count.
+Three, not one, because a USB-C PD supply can reset a node once at startup. There is no watchdog,
+so a hung image rolls back too: each power cycle counts a boot. A power cut mid-rollback leaves
+the sector armed and over the count, so the next boot rolls back again.
+
+**Confirmation.** The first frame from the host the node decodes confirms the image: admin,
+clear, update confirm, or any update frame. A confirmed image is one that has heard the host over
+the air, which is the whole test. An update frame confirms before the receiver sees it, because
+an update taken on trial would write over the only slot known to work.
 
 ## The regulatory domain is set here
 
@@ -300,3 +355,7 @@ cargo tree -e normal --features esp32c6 | grep esp-sync   # 0.2.1 only
 Its serial-JTAG writer tries the FIFO a bounded number of times, then sets a sticky flag saying
 nobody is draining it. So a node with no monitor attached drops diagnostics rather than stalling
 mid-sweep. That is the only property this firmware needs from it, and the reason it is allowed here.
+
+`esp-storage`, the flash driver under updates, is inside the wall, and the bridge's README says
+why it is held at 0.9. Its default `critical-section` feature stays on: it holds interrupts off
+across each flash operation, through the same `esp-sync`.
