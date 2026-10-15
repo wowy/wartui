@@ -79,13 +79,14 @@ pub async fn run(args: Args) -> Result<()> {
     }
 
     println!(
-        "\n# {} frames: {} sighting in {} batches, {} heartbeat, {} admin, {} not ours, \
-         {} undecodable",
+        "\n# {} frames: {} sighting in {} batches, {} heartbeat, {} admin, {} update, \
+         {} not ours, {} undecodable",
         counts.total,
         counts.sighting,
         counts.batches,
         counts.heartbeat,
         counts.admin,
+        counts.update,
         counts.foreign_fleet + counts.foreign_admin,
         counts.undecodable
     );
@@ -107,6 +108,13 @@ pub async fn run(args: Args) -> Result<()> {
              none of them. A second wartui core is driving these nodes, and they are \
              taking assignments from both.",
             counts.admin
+        );
+    }
+    if counts.update > 0 {
+        println!(
+            "# {} update frames arrived, and this host sent none of them. Another wartui \
+             host is updating nodes on this channel.",
+            counts.update
         );
     }
     if counts.foreign_admin > 0 {
@@ -154,6 +162,8 @@ struct Counts {
     batches: u64,
     heartbeat: u64,
     admin: u64,
+    /// Update frames in either direction: another host's session and its nodes' answers.
+    update: u64,
     /// Vendor heartbeats and observations. Another fleet is on this channel,
     /// transmitting where these nodes are listening.
     foreign_fleet: u64,
@@ -295,6 +305,48 @@ fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
                     Ok(Frame::Clear(_)) => {
                         counts.admin += 1;
                         println!("{head}  CLEAR  -> {}", mac::full(dst));
+                    }
+                    // An update this host is not running, which is the same fact again.
+                    Ok(Frame::OtaBegin(begin)) => {
+                        counts.update += 1;
+                        println!(
+                            "{head}  OTA BEGIN s{} {} bytes {} {:?} sha {}  -> {}",
+                            begin.session,
+                            begin.len,
+                            begin.version,
+                            begin.board,
+                            hex(&begin.sha256[..4]),
+                            mac::full(dst),
+                        );
+                    }
+                    Ok(Frame::OtaChunk(chunk)) => {
+                        counts.update += 1;
+                        println!(
+                            "{head}  OTA CHUNK s{} @{} +{}  -> {}",
+                            chunk.session,
+                            chunk.offset,
+                            chunk.data.len(),
+                            mac::full(dst),
+                        );
+                    }
+                    Ok(Frame::OtaCommit(commit)) => {
+                        counts.update += 1;
+                        println!("{head}  OTA COMMIT s{}  -> {}", commit.session, mac::full(dst));
+                    }
+                    Ok(Frame::OtaAbort(abort)) => {
+                        counts.update += 1;
+                        println!("{head}  OTA ABORT s{}  -> {}", abort.session, mac::full(dst));
+                    }
+                    Ok(Frame::OtaConfirm(_)) => {
+                        counts.update += 1;
+                        println!("{head}  OTA CONFIRM  -> {}", mac::full(dst));
+                    }
+                    Ok(Frame::OtaStatus(status)) => {
+                        counts.update += 1;
+                        println!(
+                            "{head}  OTA STATUS s{} {:?} next @{}",
+                            status.session, status.state, status.next_offset
+                        );
                     }
                     // Named rather than left as "undecodable": a fleet half-way
                     // through a reflash is exactly what this looks like.

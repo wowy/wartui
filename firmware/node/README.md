@@ -37,6 +37,20 @@ It shares no wire format with the vendor firmware either. A node sends and recei
 All four sit behind wartui's own `WTUI` magic and a wire version byte, checked first, so neither
 fleet can reach the other.
 
+The wire also defines the over-the-air update frames, which this build receives and drops unread:
+
+| Frame       | Direction          | Size              |
+|-------------|--------------------|-------------------|
+| OTA begin   | Unicast, to node   | 47 bytes          |
+| OTA chunk   | Unicast, to node   | 12 to 1035 bytes  |
+| OTA commit  | Unicast, to node   | 7 bytes           |
+| OTA abort   | Unicast, to node   | 7 bytes           |
+| OTA confirm | Unicast, to node   | 6 bytes           |
+| OTA status  | Unicast, to bridge | 12 bytes          |
+
+A chunk carries up to 1024 bytes of image and needs ESP-NOW v2. `wartui_proto::ota` is the
+receiver that writes an image into the spare app slot.
+
 ## What it does differently
 
 **It listens instead of scanning.** It parks the radio and reads beacons and probe responses. So it
@@ -132,6 +146,7 @@ one on a newer as `host behind`, and drives neither.
 
 The frame header, the heartbeat's type byte and its five-byte prefix never change before 1.0. They
 are how a host finds a node a minor version behind, at whatever length that build's heartbeat is.
+The update frames are frozen too, so their layout is the same on every minor version.
 
 The app descriptor carries the version and a project name for the board: `wartui-node-esp32c5`,
 `wartui-node-esp32c6` or `wartui-node-esp32c6-xiao`.

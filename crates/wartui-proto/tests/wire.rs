@@ -9,10 +9,14 @@
 use wartui_proto::air::{
     ADMIN_FLAG_BLE, ADMIN_MSG_LEN, AdminMsg, Board, CLEAR_MSG_LEN, Capabilities, ClearMsg,
     DecodeError, DieTemp, EXT_MAX, Frame, HEARTBEAT_MSG_LEN, HEARTBEAT_PREFIX_LEN, HeartbeatMsg,
-    MAGIC, RecordKind, SIGHTING_BATCH_HEADER, SIGHTING_BATCH_MAX, SIGHTING_RECORD_MAX,
-    SIGHTING_RECORD_MIN, SIGHTINGS_PER_BATCH_MAX, SSID_MAX, Security, SightingBatch,
-    SightingBatchWriter, SightingMsg, Vdd, Version, WIRE_VERSION, foreign,
+    MAGIC, MsgType, OTA_ABORT_MSG_LEN, OTA_BEGIN_MSG_LEN, OTA_CHUNK, OTA_CHUNK_HEADER,
+    OTA_CHUNK_MSG_MAX, OTA_COMMIT_MSG_LEN, OTA_CONFIRM_MSG_LEN, OTA_STATUS_MSG_LEN, OtaAbortMsg,
+    OtaBeginMsg, OtaChunkMsg, OtaCommitMsg, OtaConfirmMsg, OtaState, OtaStatusMsg, RecordKind,
+    SIGHTING_BATCH_HEADER, SIGHTING_BATCH_MAX, SIGHTING_RECORD_MAX, SIGHTING_RECORD_MIN,
+    SIGHTINGS_PER_BATCH_MAX, SSID_MAX, Security, SightingBatch, SightingBatchWriter, SightingMsg,
+    Vdd, Version, WIRE_VERSION, foreign,
 };
+use wartui_proto::link::{MAX_ESPNOW_PAYLOAD, MAX_ESPNOW_V2_PAYLOAD};
 use wartui_proto::plan::{ChannelSet, IndexRun};
 use wartui_proto::reset::ResetCause;
 
@@ -173,6 +177,62 @@ const ADMIN_BLE_ONLY: &[u8] = &[
 /// Header only: the whole instruction is the type byte.
 const CLEAR: &[u8] = &[0x57, 0x54, 0x55, 0x49, 0x01, 0x82];
 
+/// An update session opening: session 7, a 0x0001_E240-byte image (123456), a hash of
+/// 0x00..=0x1F, version 0.2.3, for an ESP32-C6.
+const OTA_BEGIN: &[u8] = &[
+    0x57, 0x54, 0x55, 0x49, 0x01, 0x83, // header
+    0x07, // session
+    0x40, 0xE2, 0x01, 0x00, // len 123456, little-endian
+    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, // sha256
+    0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, //
+    0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, //
+    0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, //
+    0x00, 0x02, 0x03, // version 0.2.3
+    0x02, // board: ESP32-C6
+];
+
+/// A final chunk of three bytes. Data runs to the end of the frame; nothing says its length.
+const OTA_CHUNK_SHORT: &[u8] = &[
+    0x57, 0x54, 0x55, 0x49, 0x01, 0x84, // header
+    0x07, // session
+    0x00, 0x04, 0x01, 0x00, // offset 0x0001_0400, little-endian
+    0xAA, 0xBB, 0xCC, // data
+];
+
+/// Header and session.
+const OTA_COMMIT: &[u8] = &[0x57, 0x54, 0x55, 0x49, 0x01, 0x85, 0x07];
+
+/// Header and session.
+const OTA_ABORT: &[u8] = &[0x57, 0x54, 0x55, 0x49, 0x01, 0x86, 0x07];
+
+/// Header only: the whole instruction is the type byte.
+const OTA_CONFIRM: &[u8] = &[0x57, 0x54, 0x55, 0x49, 0x01, 0x87];
+
+/// A node answering session 7: receiving, and wanting offset 0x0000_2000 next.
+const OTA_STATUS: &[u8] = &[
+    0x57, 0x54, 0x55, 0x49, 0x01, 0x03, // header
+    0x07, // session
+    0x01, // state: receiving
+    0x00, 0x20, 0x00, 0x00, // next_offset 8192, little-endian
+];
+
+/// Every frame of ours above, for the checks that hold for all of them.
+const ALL_FRAMES: [&[u8]; 13] = [
+    HEARTBEAT,
+    SIGHTING_BATCH_1,
+    SIGHTING_BATCH_BLE,
+    SIGHTING_BATCH_3,
+    ADMIN,
+    ADMIN_BLE,
+    CLEAR,
+    OTA_BEGIN,
+    OTA_CHUNK_SHORT,
+    OTA_COMMIT,
+    OTA_ABORT,
+    OTA_CONFIRM,
+    OTA_STATUS,
+];
+
 /// A stock node's heartbeat, and a stock core's assignment. Kept only as inputs
 /// to [`foreign::classify`] — nothing here decodes either.
 const VENDOR_HEARTBEAT: &[u8] = &[0x45, 0x4E, 0x4F, 0x57, 0x03, 0x93, 0x00, 0x00, 0x00];
@@ -211,9 +271,7 @@ fn wire_codec_matches_expected_frame_lengths_when_checking_constants() {
 
 #[test]
 fn wire_codec_includes_magic_and_version_header_when_inspecting_frames() {
-    for frame in
-        [HEARTBEAT, SIGHTING_BATCH_1, SIGHTING_BATCH_BLE, SIGHTING_BATCH_3, ADMIN, ADMIN_BLE, CLEAR]
-    {
+    for frame in ALL_FRAMES {
         assert_eq!(&frame[..4], MAGIC, "magic");
         assert_eq!(frame[4], WIRE_VERSION, "version");
     }
@@ -223,9 +281,7 @@ fn wire_codec_includes_magic_and_version_header_when_inspecting_frames() {
 fn foreign_classifier_rejects_our_frames_when_checking_vendor_magic() {
     // A vendor core must not admit one of ours to its node table, nor a vendor node
     // read an assignment out of one.
-    for frame in
-        [HEARTBEAT, SIGHTING_BATCH_1, SIGHTING_BATCH_BLE, SIGHTING_BATCH_3, ADMIN, ADMIN_BLE, CLEAR]
-    {
+    for frame in ALL_FRAMES {
         assert_ne!(&frame[..4], &foreign::VENDOR_MAGIC[..]);
         assert_eq!(foreign::classify(frame), None);
     }
@@ -946,6 +1002,30 @@ fn frame_decoder_dispatches_type_byte_to_corresponding_frame_when_decoded() {
     assert!(matches!(Frame::decode(SIGHTING_BATCH_BLE), Ok(Frame::Sightings(_))));
     assert!(matches!(Frame::decode(ADMIN), Ok(Frame::Admin(_))));
     assert!(matches!(Frame::decode(CLEAR), Ok(Frame::Clear(_))));
+    assert!(matches!(Frame::decode(OTA_BEGIN), Ok(Frame::OtaBegin(_))));
+    assert!(matches!(Frame::decode(OTA_CHUNK_SHORT), Ok(Frame::OtaChunk(_))));
+    assert!(matches!(Frame::decode(OTA_COMMIT), Ok(Frame::OtaCommit(_))));
+    assert!(matches!(Frame::decode(OTA_ABORT), Ok(Frame::OtaAbort(_))));
+    assert!(matches!(Frame::decode(OTA_CONFIRM), Ok(Frame::OtaConfirm(_))));
+    assert!(matches!(Frame::decode(OTA_STATUS), Ok(Frame::OtaStatus(_))));
+}
+
+#[test]
+fn msg_type_keeps_direction_in_high_bit_when_frame_is_an_update() {
+    // The high bit is the direction, clear for node → host and set for host → node, so a
+    // misrouted frame is a decode error.
+    assert_eq!(MsgType::OtaStatus.as_u8() & 0x80, 0);
+    for host_to_node in [
+        MsgType::OtaBegin,
+        MsgType::OtaChunk,
+        MsgType::OtaCommit,
+        MsgType::OtaAbort,
+        MsgType::OtaConfirm,
+    ] {
+        assert_eq!(host_to_node.as_u8() & 0x80, 0x80);
+        assert_eq!(MsgType::try_from(host_to_node.as_u8()), Ok(host_to_node));
+    }
+    assert_eq!(MsgType::try_from(0x03), Ok(MsgType::OtaStatus));
 }
 
 #[test]
@@ -955,6 +1035,12 @@ fn frame_decoder_rejects_payload_when_frame_type_mismatches() {
     assert_eq!(AdminMsg::decode(HEARTBEAT), Err(DecodeError::UnknownType(0x01)));
     assert_eq!(HeartbeatMsg::decode(ADMIN), Err(DecodeError::UnknownType(0x81)));
     assert_eq!(SightingBatch::decode(ADMIN), Err(DecodeError::UnknownType(0x81)));
+    assert_eq!(OtaBeginMsg::decode(OTA_COMMIT), Err(DecodeError::UnknownType(0x85)));
+    assert_eq!(OtaChunkMsg::decode(OTA_BEGIN), Err(DecodeError::UnknownType(0x83)));
+    assert_eq!(OtaCommitMsg::decode(OTA_ABORT), Err(DecodeError::UnknownType(0x86)));
+    assert_eq!(OtaAbortMsg::decode(OTA_COMMIT), Err(DecodeError::UnknownType(0x85)));
+    assert_eq!(OtaConfirmMsg::decode(CLEAR), Err(DecodeError::UnknownType(0x82)));
+    assert_eq!(OtaStatusMsg::decode(OTA_COMMIT), Err(DecodeError::UnknownType(0x85)));
 }
 
 #[test]
@@ -1075,6 +1161,187 @@ fn wire_decoder_rejects_payload_when_fixed_frame_exceeds_expected_length() {
         Frame::decode(&wider),
         Err(DecodeError::BadLength { need: HEARTBEAT_MSG_LEN, got: HEARTBEAT_MSG_LEN + 1 })
     );
+}
+
+#[test]
+fn wire_codec_matches_expected_ota_frame_lengths_when_checking_constants() {
+    // Frozen until 1.0, so a host updates a node on any minor through them.
+    assert_eq!(OTA_BEGIN.len(), OTA_BEGIN_MSG_LEN);
+    assert_eq!(OTA_BEGIN_MSG_LEN, 47);
+    assert_eq!(OTA_CHUNK_HEADER, 11);
+    assert_eq!(OTA_CHUNK, 1024);
+    assert_eq!(OTA_CHUNK_MSG_MAX, 1035);
+    assert_eq!(OTA_COMMIT.len(), OTA_COMMIT_MSG_LEN);
+    assert_eq!(OTA_ABORT.len(), OTA_ABORT_MSG_LEN);
+    assert_eq!(OTA_COMMIT_MSG_LEN, 7);
+    assert_eq!(OTA_CONFIRM.len(), OTA_CONFIRM_MSG_LEN);
+    assert_eq!(OTA_CONFIRM_MSG_LEN, 6);
+    assert_eq!(OTA_STATUS.len(), OTA_STATUS_MSG_LEN);
+    assert_eq!(OTA_STATUS_MSG_LEN, 12);
+    // A chunk needs ESP-NOW v2; the status, like all a node sends, keeps to v1.
+    const {
+        assert!(OTA_CHUNK_MSG_MAX <= MAX_ESPNOW_V2_PAYLOAD);
+        assert!(OTA_CHUNK_MSG_MAX > MAX_ESPNOW_PAYLOAD);
+        assert!(OTA_STATUS_MSG_LEN <= MAX_ESPNOW_PAYLOAD);
+    };
+}
+
+fn ota_begin() -> OtaBeginMsg {
+    let mut sha256 = [0u8; 32];
+    for (i, byte) in sha256.iter_mut().enumerate() {
+        *byte = i as u8;
+    }
+    OtaBeginMsg {
+        session: 7,
+        len: 123_456,
+        sha256,
+        version: Version::new(0, 2, 3),
+        board: Board::Esp32c6,
+    }
+}
+
+#[test]
+fn ota_begin_msg_serializes_byte_for_byte_when_encoded_and_decoded() {
+    assert_eq!(ota_begin().encode().as_slice(), OTA_BEGIN);
+    assert_eq!(OtaBeginMsg::decode(OTA_BEGIN), Ok(ota_begin()));
+}
+
+#[test]
+fn ota_begin_msg_rejects_frame_when_length_differs() {
+    let mut wider = OTA_BEGIN.to_vec();
+    wider.push(0);
+    assert_eq!(
+        OtaBeginMsg::decode(&wider),
+        Err(DecodeError::BadLength { need: OTA_BEGIN_MSG_LEN, got: OTA_BEGIN_MSG_LEN + 1 })
+    );
+    assert_eq!(
+        Frame::decode(&OTA_BEGIN[..OTA_BEGIN_MSG_LEN - 1]),
+        Err(DecodeError::BadLength { need: OTA_BEGIN_MSG_LEN, got: OTA_BEGIN_MSG_LEN - 1 })
+    );
+}
+
+#[test]
+fn ota_chunk_msg_serializes_byte_for_byte_when_encoded_and_decoded() {
+    let chunk = OtaChunkMsg { session: 7, offset: 0x0001_0400, data: &[0xAA, 0xBB, 0xCC] };
+    let mut out = [0u8; OTA_CHUNK_MSG_MAX];
+    let len = chunk.encode_into(&mut out).expect("fits");
+    assert_eq!(&out[..len], OTA_CHUNK_SHORT);
+    assert_eq!(OtaChunkMsg::decode(OTA_CHUNK_SHORT), Ok(chunk));
+}
+
+#[test]
+fn ota_chunk_msg_round_trips_when_data_is_a_full_chunk() {
+    let data: Vec<u8> = (0..OTA_CHUNK).map(|i| i as u8).collect();
+    let chunk = OtaChunkMsg { session: 1, offset: 4096, data: &data };
+    let mut out = [0u8; OTA_CHUNK_MSG_MAX];
+    assert_eq!(chunk.encode_into(&mut out), Some(OTA_CHUNK_MSG_MAX));
+    assert_eq!(OtaChunkMsg::decode(&out), Ok(chunk));
+}
+
+#[test]
+fn ota_chunk_msg_rejects_frame_when_data_is_empty_or_longer_than_a_chunk() {
+    assert_eq!(
+        OtaChunkMsg::decode(&OTA_CHUNK_SHORT[..OTA_CHUNK_HEADER]),
+        Err(DecodeError::TooShort { need: OTA_CHUNK_HEADER + 1, got: OTA_CHUNK_HEADER })
+    );
+    let mut wider = [0u8; OTA_CHUNK_MSG_MAX + 1];
+    wider[..OTA_CHUNK_HEADER].copy_from_slice(&OTA_CHUNK_SHORT[..OTA_CHUNK_HEADER]);
+    assert_eq!(
+        Frame::decode(&wider),
+        Err(DecodeError::BadLength { need: OTA_CHUNK_MSG_MAX, got: OTA_CHUNK_MSG_MAX + 1 })
+    );
+}
+
+#[test]
+fn ota_chunk_msg_refuses_to_encode_when_data_is_empty_or_too_long() {
+    let mut out = [0x5Au8; OTA_CHUNK_MSG_MAX];
+    let empty = OtaChunkMsg { session: 1, offset: 0, data: &[] };
+    assert_eq!(empty.encode_into(&mut out), None);
+    let long = [0u8; OTA_CHUNK + 1];
+    let long = OtaChunkMsg { session: 1, offset: 0, data: &long };
+    assert_eq!(long.encode_into(&mut out), None);
+    let short_out = &mut [0u8; OTA_CHUNK_HEADER + 2];
+    let three = OtaChunkMsg { session: 1, offset: 0, data: &[1, 2, 3] };
+    assert_eq!(three.encode_into(short_out), None);
+    assert!(out.iter().all(|&b| b == 0x5A), "nothing written on a refusal");
+}
+
+#[test]
+fn ota_commit_and_abort_msgs_serialize_byte_for_byte_when_encoded_and_decoded() {
+    assert_eq!(OtaCommitMsg { session: 7 }.encode().as_slice(), OTA_COMMIT);
+    assert_eq!(OtaCommitMsg::decode(OTA_COMMIT), Ok(OtaCommitMsg { session: 7 }));
+    assert_eq!(OtaAbortMsg { session: 7 }.encode().as_slice(), OTA_ABORT);
+    assert_eq!(OtaAbortMsg::decode(OTA_ABORT), Ok(OtaAbortMsg { session: 7 }));
+
+    let mut wider = OTA_COMMIT.to_vec();
+    wider.push(0);
+    assert_eq!(
+        Frame::decode(&wider),
+        Err(DecodeError::BadLength { need: OTA_COMMIT_MSG_LEN, got: OTA_COMMIT_MSG_LEN + 1 })
+    );
+    assert_eq!(
+        Frame::decode(&OTA_ABORT[..OTA_ABORT_MSG_LEN - 1]),
+        Err(DecodeError::BadLength { need: OTA_ABORT_MSG_LEN, got: OTA_ABORT_MSG_LEN - 1 })
+    );
+}
+
+#[test]
+fn ota_confirm_msg_serializes_byte_for_byte_when_encoded_and_decoded() {
+    assert_eq!(OtaConfirmMsg.encode().as_slice(), OTA_CONFIRM);
+    assert_eq!(OtaConfirmMsg::decode(OTA_CONFIRM), Ok(OtaConfirmMsg));
+    let mut wider = OTA_CONFIRM.to_vec();
+    wider.push(0);
+    assert_eq!(
+        OtaConfirmMsg::decode(&wider),
+        Err(DecodeError::BadLength { need: OTA_CONFIRM_MSG_LEN, got: OTA_CONFIRM_MSG_LEN + 1 })
+    );
+}
+
+#[test]
+fn ota_status_msg_serializes_byte_for_byte_when_encoded_and_decoded() {
+    let status = OtaStatusMsg { session: 7, state: OtaState::Receiving, next_offset: 8192 };
+    assert_eq!(status.encode().as_slice(), OTA_STATUS);
+    assert_eq!(OtaStatusMsg::decode(OTA_STATUS), Ok(status));
+    let mut wider = OTA_STATUS.to_vec();
+    wider.push(0);
+    assert_eq!(
+        Frame::decode(&wider),
+        Err(DecodeError::BadLength { need: OTA_STATUS_MSG_LEN, got: OTA_STATUS_MSG_LEN + 1 })
+    );
+}
+
+#[test]
+fn ota_state_round_trips_every_byte_when_converted() {
+    let named = [
+        (OtaState::Idle, 0),
+        (OtaState::Receiving, 1),
+        (OtaState::Verified, 2),
+        (OtaState::HashMismatch, 3),
+        (OtaState::WrongBoard, 4),
+        (OtaState::TooLarge, 5),
+        (OtaState::FlashError, 6),
+    ];
+    for (state, byte) in named {
+        assert_eq!(state.as_u8(), byte);
+        assert_eq!(OtaState::from_u8(byte), state);
+    }
+    for raw in 0..=u8::MAX {
+        assert_eq!(OtaState::from_u8(raw).as_u8(), raw);
+    }
+    assert_eq!(OtaState::from_u8(7), OtaState::Unknown(7));
+}
+
+#[test]
+fn foreign_classifier_ignores_ota_type_bytes_when_magic_is_ours() {
+    // The update type bytes are ours behind our magic, and the vendor's type byte sits
+    // where our magic is, so neither reading can take one for the other.
+    for frame in [OTA_BEGIN, OTA_CHUNK_SHORT, OTA_COMMIT, OTA_ABORT, OTA_CONFIRM, OTA_STATUS] {
+        assert_eq!(foreign::classify(frame), None);
+    }
+    let mut vendor = VENDOR_ADMIN.to_vec();
+    vendor[4] = 0x83;
+    assert_eq!(foreign::classify(&vendor), Some(foreign::Foreign::Node));
+    assert_eq!(Frame::decode(&vendor), Err(DecodeError::BadMagic));
 }
 
 #[test]

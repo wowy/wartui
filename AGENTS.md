@@ -85,10 +85,11 @@ Four host crates, strictly layered, plus firmware that shares the bottom one and
 own.
 
 - **`crates/wartui-proto`** — `no_std`, allocation-free wire formats and the parsing that goes
-  with them: `air` (the four ESP-NOW frames, and `air::foreign` for recognizing somebody
+  with them: `air` (the ESP-NOW frames, and `air::foreign` for recognizing somebody
   else's), `beacon`, `hci`, `dedup`, `link`, `mac` (the `Mac` type and its text form),
   `outbox`, `stall`, `plan` (channel pools and the partitioning planner), `node` (a node's
-  timings and sweep cursor), `tx_power`, `pending` (the buffers sightings wait in on a node).
+  timings and sweep cursor), `tx_power`, `pending` (the buffers sightings wait in on a node),
+  `ota` (the node's update receiver).
   Compiled into *both* the host and the firmware by path dependency, which is the only thing
   keeping the ends in step — and the reason a node's parsers are testable with `cargo test`
   rather than a reflash.
@@ -150,9 +151,11 @@ is here rather than only in a `//!`.
 - **The wire is ours, in both directions, and shares nothing with the vendor's.** Every frame is
   `WTUI`, a wire version byte, a type byte and a body: `HeartbeatMsg` (29 bytes), `SightingBatch`
   (9 plus records of 12 plus the SSID and the trailer), `AdminMsg` (15) and `ClearMsg` (6, header
-  only). A heartbeat broadcasts, since that is how a bridge discovers a node before either
-  side knows the other's address; a sighting batch unicasts to the bridge that last sent
-  this node an admin or clear frame, so a shared format is a shared conversation either way.
+  only), and the update frames `OtaBeginMsg` (47), `OtaChunkMsg` (12 to 1035), `OtaCommitMsg` (7),
+  `OtaAbortMsg` (7), `OtaConfirmMsg` (6) and, node to host, `OtaStatusMsg` (12). A heartbeat
+  broadcasts, since that is how a bridge discovers a node before either side knows the other's
+  address; a sighting batch unicasts to the bridge that last sent this node an admin or clear
+  frame, so a shared format is a shared conversation either way.
   The magic is checked before anything else at both ends. Encode/decode is written out by
   hand, never by transmuting a packed struct, and pinned byte-for-byte in
   `crates/wartui-proto/tests/wire.rs`. Host→air frames may be up to 1470 bytes (ESP-NOW v2),
@@ -195,8 +198,10 @@ is here rather than only in a `//!`.
   is bumped on every change: before 1.0 a minor bump may break the wire and a patch bump may not.
   `air::NODE_VERSION` mirrors it, and `crates/wartui-proto/tests/version.rs` fails when they differ.
   **The one exception is a frozen core**, unchanged until 1.0 so a host can find a node a minor
-  version behind and show it as `needs update`: the frame header, the heartbeat's type byte and its
-  5-byte prefix of version, board and flags (`air::Capabilities::decode_prefix`). **Neither version
+  version behind, show it as `needs update` and update it over the air: the frame header, the
+  heartbeat's type byte and its 5-byte prefix of version, board and flags
+  (`air::Capabilities::decode_prefix`), and the update frames, type bytes and layouts both
+  (`crates/wartui-proto/src/air/ota.rs`). **Neither version
   marker moves until 1.0**, whatever a layout does: `air::WIRE_VERSION` is the lever held for the
   first change a fleet in the field has to survive, and `store::SCHEMA_VERSION` the same for the
   first capture that has to be read in an earlier build's terms. Nothing before 1.0 is either, so

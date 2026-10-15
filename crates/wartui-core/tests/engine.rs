@@ -19,8 +19,9 @@ use wartui_core::health::Health;
 use wartui_core::position::{DEFAULT_MAX_AGE, PositionChain, PositionSource};
 use wartui_core::record::{AdminOutcome, BatchGap, BridgeStatusSeen, HostStatus, Record};
 use wartui_proto::air::{
-    AdminMsg, Board, Capabilities, DieTemp, Frame, HeartbeatMsg, NODE_VERSION, RecordKind,
-    Security, SightingBatchWriter, SightingMsg, Vdd, Version, wire_epoch,
+    AdminMsg, Board, Capabilities, DieTemp, Frame, HeartbeatMsg, NODE_VERSION, OtaCommitMsg,
+    OtaConfirmMsg, OtaState, OtaStatusMsg, RecordKind, Security, SightingBatchWriter, SightingMsg,
+    Vdd, Version, wire_epoch,
 };
 use wartui_proto::link::{
     BROADCAST, BridgeToHost, Chip, EspNowPayload, HostToBridge, LinkError, LoopPhase, SendStatus,
@@ -1392,6 +1393,43 @@ fn engine_counts_foreign_admin_when_another_core_transmits() {
     // But not one of ours. Admitting it would leave a rival core in the fleet
     // table forever as `no heartbeat`, inflating "n of m alive".
     assert_eq!(engine.nodes().count(), 0);
+}
+
+fn rx_from(src: Mac, dst: Mac, payload: &[u8]) -> Event {
+    Event::Link(LinkEvent::Message(BridgeToHost::Rx {
+        src,
+        dst,
+        rssi: -41,
+        rx_us: 0,
+        payload: EspNowPayload::from_slice(payload).expect("fits"),
+    }))
+}
+
+#[test]
+fn engine_counts_foreign_admin_when_another_host_sends_an_update() {
+    // An update this host is not running is another host driving these nodes.
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+
+    engine.handle(rx_from(OTHER, NODE, &OtaCommitMsg { session: 1 }.encode()), clock.at(1));
+    engine.handle(rx_from(OTHER, NODE, &OtaConfirmMsg.encode()), clock.at(2));
+
+    assert_eq!(counters(&engine).foreign_admin, 2);
+    assert_eq!(engine.nodes().count(), 0);
+}
+
+#[test]
+fn engine_ignores_ota_status_when_no_update_is_running() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+
+    let status = OtaStatusMsg { session: 1, state: OtaState::Idle, next_offset: 0 }.encode();
+    let batch = engine.handle(rx_from(NODE, BROADCAST, &status), clock.at(1));
+
+    let c = counters(&engine);
+    assert_eq!((c.foreign_admin, c.foreign_fleet, c.undecodable, c.incompatible), (0, 0, 0, 0));
+    assert_eq!(engine.nodes().count(), 0);
+    assert!(batch.records.is_empty());
 }
 
 #[test]
