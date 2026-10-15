@@ -222,7 +222,7 @@ pub fn approx(n: u64) -> String {
 mod tests {
     use std::time::Instant;
 
-    use wartui_proto::air::Capabilities;
+    use wartui_proto::air::{Board, Capabilities};
     use wartui_proto::plan::ChannelPool;
     use wartui_proto::tx_power::DEFAULT_TX_POWER_QUARTER_DBM;
 
@@ -272,7 +272,7 @@ mod tests {
         let now = Now { mono: Instant::now(), unix_ms: EPOCH_MS };
         let mut state = NodeState::new([0x02, 0x00, 0x5E, 0x10, 0x57, last], now);
         state.last_heartbeat = Some(now.mono);
-        state.capabilities = Some(Capabilities::here(true));
+        state.capabilities = Some(Capabilities::here(Board::Esp32c5));
         state.link_rssi = rssi;
         NodeView { state, alive: true, assignable: true }
     }

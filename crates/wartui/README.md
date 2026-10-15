@@ -390,15 +390,18 @@ refused when:
   `/dev/cu.*`. Naming the bridge by address avoids all three.
 - A short `--bridge` matches several boards.
 
-A board is flashed only when all four hold; otherwise it is skipped and listed with the reason:
+A board is flashed only when all five hold; otherwise it is skipped and listed with the reason:
 
 1. It is native USB Serial/JTAG (`303a:1001`) and reports its address as its serial number.
 2. It is not the bridge, and not named with `--skip`.
 3. `espflash board-info` reads the chip `--features` names.
 4. `espflash board-info` reads the same address from the chip that the OS reported for the port.
+5. `espflash board-info` reads at least 4 MB of flash, which the node's two app slots need.
 
-The image is merged (bootloader, partition table, app), written at `0x0` with `espflash write-bin`,
-from the first source that applies:
+The image is merged (bootloader, `firmware/node/partitions.csv`, app) and written at `0x0` with
+`espflash write-bin`. Then `espflash erase-region` erases `otadata` (`0xd000`, `0x2000`), so the
+board boots the app just written whatever slot an earlier over-the-air update left selected. The
+image comes from the first source that applies:
 
 - `--image BIN`, as given.
 - `--firmware-dir DIR`, or the checkout's `firmware/node` when this binary was built from one:
@@ -648,7 +651,8 @@ none exports nothing and says how many networks it left out.
 ## Reading the fleet table
 
 Rows name nodes by chip and last two address octets: `C5 57:84`, `C6 9D:24`. The chip comes from the
-band its heartbeats announce, so a node not yet heartbeating shows `—`.
+board its heartbeats announce, so a node not yet heartbeating shows `—`, a XIAO C6 shows `C6`, and a
+board this build has no name for shows `??`.
 
 | State          | Meaning                                                                                                                                     |
 |----------------|---------------------------------------------------------------------------------------------------------------------------------------------|
@@ -657,6 +661,7 @@ band its heartbeats announce, so a node not yet heartbeating shows `—`.
 | `no heartbeat` | Seen, but has never completed a sweep                                                                                                       |
 | `no admin ack` | An assignment went out and its radio did not answer — nearly always Bluetooth, see [How channels are assigned](#how-channels-are-assigned)  |
 | `refused`      | The bridge's peer table is full                                                                                                             |
+| `needs update` | Runs node firmware of another major or minor version, so wartui cannot read its frames; reflash it                                          |
 | `rebooted xN`  | Its heartbeat counter went backwards, or its epoch went back to 0, so it has forgotten any assignment; wartui re-issues under a fresh epoch |
 
 The `channels` column shows where an assignment stands
@@ -669,20 +674,27 @@ The `channels` column shows where an assignment stands
 | plain            | Adopted                                           |
 | cyan             | The Bluetooth node                                |
 
-The line under the table shows the selected node's latest supply and die readings:
-`C5 57:84  3.30 V  41 °C`, with `—` for a node that has sent none or whose read failed. The voltage
-is the chip's 3.3 V rail, not the board's 5 V input, and the die runs well above the air around it.
-A reading out of range is yellow on that line, and turns an `alive` node's `state` yellow too; any
-other state keeps its own color:
+The line under the table shows the selected node's firmware and its latest supply and die readings:
+`C5 57:84  0.1.0;5g  3.30 V  41 °C`, with `—` for a node that has sent none or whose read failed.
+
+The firmware is its version, then `;5g` for a radio that reaches 5 GHz. A node on an older version
+than this build's adds an arrow and this build's version: `0.1.2;5g ↑0.1.3`. A different patch is
+still driven; a different major or minor is `needs update`.
+
+The voltage is the chip's 3.3 V rail, not the board's 5 V input, and the die runs well above the
+air around it. A reading out of range is yellow on that line, and turns an `alive` node's `state`
+yellow too; any other state keeps its own color:
 
 | Reading | Warns at       | Why                                                                                 |
 |---------|----------------|-------------------------------------------------------------------------------------|
 | Voltage | below 3.00 V   | The C5's and C6's minimum recommended supply; the chip resets at 2.7 V              |
 | Die     | 70 °C or above | Short of 85 °C, the XIAO C6's rated ambient limit; the die runs hotter than ambient |
 
-A `stale`, `refused`, or `no heartbeat` node is out of the plan: nothing sent would reach it, or its
-band is unknown, so its share might be nobody's. `b` on one says which state it is, because the fix
-differs: wait for a heartbeat, or find out why heartbeats stopped.
+A `stale`, `refused`, `no heartbeat`, or `needs update` node is out of the plan: nothing sent would
+reach it, its band is unknown, or its frames are not this build's, so its share might be nobody's.
+`b` on one says which state it is, because the fix differs: wait for a heartbeat, find out why
+heartbeats stopped, or reflash it. A `needs update` node is not counted among the footer's frames
+from an older firmware, which are frames wartui cannot attribute to a node at all.
 
 `stale` and `no heartbeat` are deliberately distinct from silence and from each other. wartui keeps
 two clocks, so a node that streams observations but loses heartbeats doesn't age out and churn the

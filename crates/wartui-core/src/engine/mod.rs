@@ -34,6 +34,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::time::Instant;
 
 use wartui_bridge::{BridgeInfo, LinkEvent};
+use wartui_proto::air::NODE_VERSION;
 use wartui_proto::link::{BridgeToHost, HostToBridge};
 use wartui_proto::mac::{self, Mac};
 use wartui_proto::plan::{Job, Plan};
@@ -394,12 +395,15 @@ impl FleetEngine {
 
     /// Whether a node can be given channels.
     ///
-    /// Alive is not enough. A node with no peer slot, or that has not declared which band its radio
-    /// reaches, heartbeats fine but never scans its share. A share nobody scans is worse than one
-    /// node fewer: the fleet covers less of the pool than without it.
+    /// Alive is not enough. A node with no peer slot, that has not declared which band its radio
+    /// reaches, or whose firmware does not speak this build's layouts, heartbeats fine but never
+    /// scans its share. A share nobody scans is worse than one node fewer: the fleet covers less of
+    /// the pool than without it.
     #[must_use]
     pub fn is_assignable(&self, node: &NodeState, now: Now) -> bool {
-        self.is_alive(node, now) && node.capabilities.is_some() && !node.peer_refused
+        self.is_alive(node, now)
+            && node.capabilities.is_some_and(|caps| NODE_VERSION.speaks_with(&caps.version))
+            && !node.peer_refused
     }
 
     /// Running totals, for tests and for the CLI's non-interactive modes.

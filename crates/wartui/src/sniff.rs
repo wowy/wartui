@@ -8,7 +8,9 @@
 use anyhow::Result;
 use clap::Args as ClapArgs;
 use wartui_bridge::LinkEvent;
-use wartui_proto::air::{DecodeError, Frame, RecordKind, SightingMsg, foreign};
+use wartui_proto::air::{
+    Capabilities, DecodeError, Frame, NODE_VERSION, RecordKind, SightingMsg, foreign,
+};
 use wartui_proto::beacon::rcoi_text;
 use wartui_proto::link::{BROADCAST, BridgeToHost};
 use wartui_proto::mac;
@@ -120,6 +122,13 @@ pub async fn run(args: Args) -> Result<()> {
             counts.incompatible
         );
     }
+    if counts.needs_update > 0 {
+        println!(
+            "# {} heartbeats came from nodes on firmware other than {NODE_VERSION}. `run` \
+             shows those nodes as `needs update` and assigns them nothing.",
+            counts.needs_update
+        );
+    }
     Ok(())
 }
 
@@ -145,6 +154,8 @@ struct Counts {
     /// Frames of ours from a build speaking a wire version this one does not, which is
     /// what a fleet half-way through a reflash looks like.
     incompatible: u64,
+    /// Heartbeats from nodes on another minor version, read from their frozen prefix.
+    needs_update: u64,
     undecodable: u64,
 }
 
@@ -263,10 +274,18 @@ fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
                         println!("{head}  undecodable: not ESP-NOW wardriving traffic");
                     }
                 },
-                Err(err) => {
-                    counts.undecodable += 1;
-                    println!("{head}  undecodable: {err:?}");
-                }
+                // A heartbeat from another minor version still opens with the frozen
+                // prefix, which names the node's firmware.
+                Err(err) => match Capabilities::decode_prefix(payload) {
+                    Ok(caps) if !NODE_VERSION.speaks_with(&caps.version) => {
+                        counts.needs_update += 1;
+                        println!("{head}  HEARTBEAT {caps}, needs update to {NODE_VERSION}");
+                    }
+                    _ => {
+                        counts.undecodable += 1;
+                        println!("{head}  undecodable: {err:?}");
+                    }
+                },
             }
 
             if args.raw {

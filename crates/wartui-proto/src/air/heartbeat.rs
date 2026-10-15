@@ -1,72 +1,177 @@
 use core::fmt;
 
-use super::{DecodeError, DieTemp, MsgType, OFFSET_BODY, Vdd, header, write_header};
+use super::{
+    DecodeError, DieTemp, MsgType, NODE_VERSION, OFFSET_BODY, Vdd, Version, header, write_header,
+};
 use crate::reset::ResetCause;
 
 /// Length of [`HeartbeatMsg`] on the wire.
-pub const HEARTBEAT_MSG_LEN: usize = OFFSET_BODY + 21;
+pub const HEARTBEAT_MSG_LEN: usize = OFFSET_BODY + 23;
 
-/// [`Capabilities::flags`] bit 0: this radio reaches 5 GHz.
+/// Length of the frozen prefix that opens every heartbeat body: version, board, flags
+/// ([`Capabilities::decode_prefix`]).
+pub const HEARTBEAT_PREFIX_LEN: usize = 5;
+
+/// [`Capabilities`] flags bit 0: this radio reaches 5 GHz.
 pub const CAP_FLAG_5G: u8 = 1 << 0;
+/// [`Capabilities`] flags bit 1: the node is running an image on trial, not yet confirmed.
+pub const CAP_FLAG_TRIAL: u8 = 1 << 1;
 
-/// What a node says it is, in every heartbeat it sends.
+/// The board a node firmware was built for, from its cargo features.
 ///
-/// A version, and the one capability that varies by board.
+/// Each byte is fixed once assigned, since the heartbeat prefix that carries it is frozen.
+/// 0 is never sent. A byte this build has no name for decodes to [`Board::Unknown`]: a node
+/// on a board added later is still a node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Board {
+    /// An ESP32-C5 board: byte 1.
+    Esp32c5,
+    /// An ESP32-C6 board on its PCB antenna: byte 2.
+    Esp32c6,
+    /// A Seeed XIAO ESP32-C6 switched to its external antenna: byte 3.
+    Esp32c6Xiao,
+    /// A byte this build does not name.
+    Unknown(u8),
+}
+
+impl Board {
+    /// The byte the heartbeat carries.
+    #[must_use]
+    pub const fn as_u8(self) -> u8 {
+        match self {
+            Self::Esp32c5 => 1,
+            Self::Esp32c6 => 2,
+            Self::Esp32c6Xiao => 3,
+            Self::Unknown(byte) => byte,
+        }
+    }
+
+    /// Read the heartbeat's board byte. Never fails.
+    #[must_use]
+    pub const fn from_u8(byte: u8) -> Self {
+        match byte {
+            1 => Self::Esp32c5,
+            2 => Self::Esp32c6,
+            3 => Self::Esp32c6Xiao,
+            other => Self::Unknown(other),
+        }
+    }
+}
+
+/// What a node says it is, in every heartbeat it sends: the frozen prefix.
 ///
 /// `five_ghz` is a refusal, not a request. A node without it is never dealt a 5 GHz
-/// index, because a share it cannot tune is a share nobody scans. Bluetooth is not a
-/// capability: every node can scan it, and [`ADMIN_FLAG_BLE`] is the operator's
-/// decision.
+/// index, because a share it cannot tune is a share nobody scans. It travels as its own
+/// flag rather than being read off `board`, so a board this build does not name still
+/// says what its radio reaches. Bluetooth is not a capability: every node can scan it,
+/// and [`ADMIN_FLAG_BLE`] is the operator's decision.
+///
+/// The prefix is the first [`HEARTBEAT_PREFIX_LEN`] bytes of the body and never changes
+/// before 1.0 ([`Capabilities::decode_prefix`]).
 ///
 /// [`ADMIN_FLAG_BLE`]: super::ADMIN_FLAG_BLE
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Capabilities {
-    /// The node protocol's major version. Distinct from [`WIRE_VERSION`], which covers
-    /// the frame around it.
-    ///
-    /// [`WIRE_VERSION`]: super::WIRE_VERSION
-    pub major: u8,
-    /// The node protocol's minor version.
-    pub minor: u8,
+    /// The firmware the node runs.
+    pub version: Version,
+    /// The board it was built for.
+    pub board: Board,
     /// The radio reaches 5 GHz. False on an ESP32-C6, which is 2.4 GHz only.
     pub five_ghz: bool,
+    /// The node runs an image it has not yet confirmed ([`CAP_FLAG_TRIAL`]).
+    pub trial: bool,
 }
 
-/// The node protocol version this build speaks, written into every heartbeat.
-pub const CAPABILITY_MAJOR: u8 = 1;
-/// See [`CAPABILITY_MAJOR`].
-pub const CAPABILITY_MINOR: u8 = 0;
-
 impl Capabilities {
-    /// What this build is, for a node to announce.
+    /// What this build is on `board`, for a node to announce.
     #[must_use]
-    pub const fn here(five_ghz: bool) -> Self {
-        Self { major: CAPABILITY_MAJOR, minor: CAPABILITY_MINOR, five_ghz }
+    pub const fn here(board: Board) -> Self {
+        Self {
+            version: NODE_VERSION,
+            board,
+            five_ghz: matches!(board, Board::Esp32c5),
+            trial: false,
+        }
     }
 
     /// The feature bits as the wire carries them.
     #[must_use]
     pub const fn flags(&self) -> u8 {
-        if self.five_ghz { CAP_FLAG_5G } else { 0 }
+        let mut flags = 0;
+        if self.five_ghz {
+            flags |= CAP_FLAG_5G;
+        }
+        if self.trial {
+            flags |= CAP_FLAG_TRIAL;
+        }
+        flags
     }
 
-    /// Rebuild from the three bytes a heartbeat carries.
+    /// Rebuild from the five prefix bytes a heartbeat carries.
     ///
     /// Unknown flag bits are ignored, not refused. A node must not stop being a node
     /// because it sets a bit this build does not know.
     #[must_use]
-    pub const fn from_parts(major: u8, minor: u8, flags: u8) -> Self {
-        Self { major, minor, five_ghz: flags & CAP_FLAG_5G != 0 }
+    pub const fn from_prefix(prefix: [u8; HEARTBEAT_PREFIX_LEN]) -> Self {
+        let [major, minor, patch, board, flags] = prefix;
+        Self {
+            version: Version::new(major, minor, patch),
+            board: Board::from_u8(board),
+            five_ghz: flags & CAP_FLAG_5G != 0,
+            trial: flags & CAP_FLAG_TRIAL != 0,
+        }
+    }
+
+    /// The five prefix bytes.
+    #[must_use]
+    pub const fn to_prefix(&self) -> [u8; HEARTBEAT_PREFIX_LEN] {
+        [
+            self.version.major,
+            self.version.minor,
+            self.version.patch,
+            self.board.as_u8(),
+            self.flags(),
+        ]
+    }
+
+    /// Read the frozen prefix of any heartbeat, whatever build sent it.
+    ///
+    /// Accepts a frame with our magic, [`WIRE_VERSION`] and the heartbeat type whose body
+    /// is at least [`HEARTBEAT_PREFIX_LEN`] bytes, at any total length. The rest of the
+    /// body is a minor version's business and is not read.
+    ///
+    /// The frame header, the heartbeat type byte and this prefix never change before 1.0,
+    /// the one exception to flashing the fleet together. A host finds a node a minor
+    /// version behind through them, so it can say so and, over the air, update it.
+    ///
+    /// # Errors
+    /// [`DecodeError::TooShort`] for a body shorter than the prefix, and whatever the
+    /// header check refuses; any other type is [`DecodeError::UnknownType`].
+    ///
+    /// [`WIRE_VERSION`]: super::WIRE_VERSION
+    pub fn decode_prefix(buf: &[u8]) -> Result<Self, DecodeError> {
+        match header(buf)? {
+            MsgType::Heartbeat => {}
+            other => return Err(DecodeError::UnknownType(other.as_u8())),
+        }
+        let need = OFFSET_BODY + HEARTBEAT_PREFIX_LEN;
+        let Some(prefix) = buf.get(OFFSET_BODY..need) else {
+            return Err(DecodeError::TooShort { need, got: buf.len() });
+        };
+        Ok(Self::from_prefix([prefix[0], prefix[1], prefix[2], prefix[3], prefix[4]]))
     }
 }
 
-/// The form the fleet table and the store column show: `wartui/1.0;5g`. Only the three
-/// bytes travel; this is for reading.
+/// The form the fleet table, logs and the store column show: `0.1.0;5g`, with `;trial`
+/// for an unconfirmed image. Only the prefix bytes travel; this is for reading.
 impl fmt::Display for Capabilities {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "wartui/{}.{}", self.major, self.minor)?;
+        write!(f, "{}", self.version)?;
         if self.five_ghz {
             f.write_str(";5g")?;
+        }
+        if self.trial {
+            f.write_str(";trial")?;
         }
         Ok(())
     }
@@ -149,54 +254,51 @@ impl HeartbeatMsg {
         if buf.len() != HEARTBEAT_MSG_LEN {
             return Err(DecodeError::BadLength { need: HEARTBEAT_MSG_LEN, got: buf.len() });
         }
-        let counter = u32::from_le_bytes([
+        const P: usize = OFFSET_BODY + HEARTBEAT_PREFIX_LEN;
+        let capabilities = Capabilities::from_prefix([
             buf[OFFSET_BODY],
             buf[OFFSET_BODY + 1],
             buf[OFFSET_BODY + 2],
             buf[OFFSET_BODY + 3],
+            buf[OFFSET_BODY + 4],
         ]);
         let le = |at: usize| u16::from_le_bytes([buf[at], buf[at + 1]]);
         Ok(Self {
-            counter,
-            epoch: buf[OFFSET_BODY + 4],
-            capabilities: Capabilities::from_parts(
-                buf[OFFSET_BODY + 5],
-                buf[OFFSET_BODY + 6],
-                buf[OFFSET_BODY + 7],
-            ),
-            wifi_refused: le(OFFSET_BODY + 8),
-            ble_refused: le(OFFSET_BODY + 10),
-            beat: le(OFFSET_BODY + 12),
-            unsent: buf[OFFSET_BODY + 14],
-            dwell: buf[OFFSET_BODY + 15],
-            prev_dwell: buf[OFFSET_BODY + 16],
-            tx_power: i8::from_le_bytes([buf[OFFSET_BODY + 17]]),
-            reset_cause: ResetCause::from_u8(buf[OFFSET_BODY + 18]),
-            vdd: Vdd(buf[OFFSET_BODY + 19]),
-            die_temp: DieTemp(buf[OFFSET_BODY + 20]),
+            capabilities,
+            counter: u32::from_le_bytes([buf[P], buf[P + 1], buf[P + 2], buf[P + 3]]),
+            epoch: buf[P + 4],
+            wifi_refused: le(P + 5),
+            ble_refused: le(P + 7),
+            beat: le(P + 9),
+            unsent: buf[P + 11],
+            dwell: buf[P + 12],
+            prev_dwell: buf[P + 13],
+            tx_power: i8::from_le_bytes([buf[P + 14]]),
+            reset_cause: ResetCause::from_u8(buf[P + 15]),
+            vdd: Vdd(buf[P + 16]),
+            die_temp: DieTemp(buf[P + 17]),
         })
     }
 
-    /// Encode to the twenty-seven bytes a heartbeat is.
+    /// Encode to the twenty-nine bytes a heartbeat is.
     #[must_use]
     pub fn encode(&self) -> [u8; HEARTBEAT_MSG_LEN] {
+        const P: usize = OFFSET_BODY + HEARTBEAT_PREFIX_LEN;
         let mut out = [0u8; HEARTBEAT_MSG_LEN];
         write_header(&mut out, MsgType::Heartbeat);
-        out[OFFSET_BODY..OFFSET_BODY + 4].copy_from_slice(&self.counter.to_le_bytes());
-        out[OFFSET_BODY + 4] = self.epoch;
-        out[OFFSET_BODY + 5] = self.capabilities.major;
-        out[OFFSET_BODY + 6] = self.capabilities.minor;
-        out[OFFSET_BODY + 7] = self.capabilities.flags();
-        out[OFFSET_BODY + 8..OFFSET_BODY + 10].copy_from_slice(&self.wifi_refused.to_le_bytes());
-        out[OFFSET_BODY + 10..OFFSET_BODY + 12].copy_from_slice(&self.ble_refused.to_le_bytes());
-        out[OFFSET_BODY + 12..OFFSET_BODY + 14].copy_from_slice(&self.beat.to_le_bytes());
-        out[OFFSET_BODY + 14] = self.unsent;
-        out[OFFSET_BODY + 15] = self.dwell;
-        out[OFFSET_BODY + 16] = self.prev_dwell;
-        out[OFFSET_BODY + 17] = self.tx_power.to_le_bytes()[0];
-        out[OFFSET_BODY + 18] = self.reset_cause.as_u8();
-        out[OFFSET_BODY + 19] = self.vdd.0;
-        out[OFFSET_BODY + 20] = self.die_temp.0;
+        out[OFFSET_BODY..P].copy_from_slice(&self.capabilities.to_prefix());
+        out[P..P + 4].copy_from_slice(&self.counter.to_le_bytes());
+        out[P + 4] = self.epoch;
+        out[P + 5..P + 7].copy_from_slice(&self.wifi_refused.to_le_bytes());
+        out[P + 7..P + 9].copy_from_slice(&self.ble_refused.to_le_bytes());
+        out[P + 9..P + 11].copy_from_slice(&self.beat.to_le_bytes());
+        out[P + 11] = self.unsent;
+        out[P + 12] = self.dwell;
+        out[P + 13] = self.prev_dwell;
+        out[P + 14] = self.tx_power.to_le_bytes()[0];
+        out[P + 15] = self.reset_cause.as_u8();
+        out[P + 16] = self.vdd.0;
+        out[P + 17] = self.die_temp.0;
         out
     }
 }

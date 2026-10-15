@@ -273,7 +273,7 @@ fn store_round_trips_record_when_each_type_written() {
                 mac: NODE,
                 first_seen_ms: EPOCH_MS,
                 last_seen_ms: EPOCH_MS,
-                capabilities: Some("wartui/0.1;5g".to_owned()),
+                capabilities: Some("0.1.0;5g".to_owned()),
             }),
             Record::Heartbeat(Heartbeat {
                 node_mac: NODE,
@@ -498,7 +498,7 @@ fn store_writes_every_node_column_when_node_recorded() {
             mac: NODE,
             first_seen_ms: EPOCH_MS,
             last_seen_ms: EPOCH_MS,
-            capabilities: Some("wartui/0.1;5g".to_owned()),
+            capabilities: Some("0.1.0;5g".to_owned()),
         })],
     );
     assert_insert_names_every_column(&conn, "node");
@@ -648,7 +648,7 @@ fn store_keeps_first_seen_and_token_when_node_seen_again() {
                 mac: NODE,
                 first_seen_ms: EPOCH_MS,
                 last_seen_ms: EPOCH_MS,
-                capabilities: Some("wartui/0.1;5g".to_owned()),
+                capabilities: Some("0.1.0;5g".to_owned()),
             }),
             // The row that would erase the identity if the upsert wrote
             // `excluded.capabilities` straight in.
@@ -667,7 +667,7 @@ fn store_keeps_first_seen_and_token_when_node_seen_again() {
         })
         .unwrap();
     assert_eq!((first, last), (EPOCH_MS, EPOCH_MS + 60_000));
-    assert_eq!(caps.as_deref(), Some("wartui/0.1;5g"), "what it last said it was, kept");
+    assert_eq!(caps.as_deref(), Some("0.1.0;5g"), "what it last said it was, kept");
 }
 
 #[test]

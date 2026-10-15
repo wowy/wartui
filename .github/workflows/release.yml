@@ -5,7 +5,9 @@ name: Release
 # the release named by the tag baked into it (`WARTUI_RELEASE_TAG`), so the host, the fleet and the
 # bridge it flashes always share a tree. The asset names and feature sets below must match the
 # variant tables in `crates/wartui/src/flash/mod.rs`. Each image is merged — bootloader, partition
-# table and app, flashed at 0x0 — and `SHA256SUMS` is what the host checks a download against.
+# table and app, flashed at 0x0 — and `SHA256SUMS` is what the host checks a download against. A
+# node's is merged with `firmware/node/partitions.csv`, and each node variant is also published
+# app-only (`wartui-node-app-*.bin`): the image one app slot holds.
 
 on:
   push:
@@ -22,12 +24,21 @@ jobs:
     strategy:
       matrix:
         include:
-          - { fw: node, chip: esp32c5, features: esp32c5, asset: wartui-node-fw-esp32c5.bin }
-          - { fw: node, chip: esp32c6, features: esp32c6, asset: wartui-node-fw-esp32c6.bin }
+          - fw: node
+            chip: esp32c5
+            features: esp32c5
+            asset: wartui-node-fw-esp32c5.bin
+            app: wartui-node-app-esp32c5.bin
+          - fw: node
+            chip: esp32c6
+            features: esp32c6
+            asset: wartui-node-fw-esp32c6.bin
+            app: wartui-node-app-esp32c6.bin
           - fw: node
             chip: esp32c6
             features: esp32c6,xiao-external-antenna
             asset: wartui-node-fw-esp32c6-xiao.bin
+            app: wartui-node-app-esp32c6-xiao.bin
           - { fw: bridge, chip: esp32c5, features: esp32c5, asset: wartui-bridge-fw-esp32c5.bin }
           - fw: bridge
             chip: esp32c5
@@ -86,13 +97,32 @@ jobs:
 
       - name: Merge into one image
         run: |
+          table=()
+          if [ "${{matrix.fw}}" = node ]; then
+            table=(--partition-table firmware/node/partitions.csv)
+          fi
           espflash save-image --skip-update-check --chip ${{matrix.chip}} --merge --skip-padding \
+            "${table[@]}" \
             firmware/${{matrix.fw}}/target/riscv32imac-unknown-none-elf/release/wartui-${{matrix.fw}}-fw \
             ${{matrix.asset}}
+
+      - name: Save the app image
+        if: matrix.fw == 'node'
+        run: |
+          espflash save-image --skip-update-check --chip ${{matrix.chip}} \
+            --partition-table firmware/node/partitions.csv \
+            firmware/node/target/riscv32imac-unknown-none-elf/release/wartui-node-fw \
+            ${{matrix.app}}
 
       - uses: actions/upload-artifact@v7
         with:
           path: ${{matrix.asset}}
+          archive: false
+
+      - uses: actions/upload-artifact@v7
+        if: matrix.fw == 'node'
+        with:
+          path: ${{matrix.app}}
           archive: false
 
   host:

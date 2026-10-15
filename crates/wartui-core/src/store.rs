@@ -83,8 +83,8 @@ CREATE TABLE IF NOT EXISTS capture (
 );
 
 -- `capabilities` is the node's most recent heartbeat rendered the way the fleet
--- table shows it (`wartui/1.0;5g`). Null means only that nothing but an
--- observation has been heard yet; see `record::NodeSeen`.
+-- view shows it (`0.1.0;5g`). Null means only that nothing but an observation
+-- has been heard yet; see `record::NodeSeen`.
 CREATE TABLE IF NOT EXISTS node (
   mac BLOB PRIMARY KEY,
   first_seen INTEGER NOT NULL,

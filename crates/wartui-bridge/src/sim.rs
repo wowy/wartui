@@ -26,8 +26,8 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 use wartui_proto::air::{
-    AdminMsg, Capabilities, DieTemp, Frame, HeartbeatMsg, RecordKind, Security,
-    SightingBatchWriter, SightingMsg, Vdd,
+    AdminMsg, Board, Capabilities, DieTemp, Frame, HeartbeatMsg, NODE_VERSION, RecordKind,
+    Security, SightingBatchWriter, SightingMsg, Vdd, Version,
 };
 use wartui_proto::dedup::{C5DedupRing, C6DedupRing};
 use wartui_proto::link::{
@@ -92,6 +92,11 @@ pub struct SimConfig {
     /// fleet. Counted per network across the whole fleet, and on every hearing rather than
     /// every report, so a node whose ring suppresses a network still moves it on.
     pub sightings_per_address: Option<u32>,
+    /// The index of one node that heartbeats a minor version behind [`NODE_VERSION`].
+    ///
+    /// `None` by default. The host shows such a node as `needs update` and never assigns it,
+    /// which this is the only way to see without flashing an older build.
+    pub outdated_node: Option<u8>,
 }
 
 impl Default for SimConfig {
@@ -105,6 +110,7 @@ impl Default for SimConfig {
             ble_coexistence_failure: false,
             c6_nodes: 0,
             sightings_per_address: None,
+            outdated_node: None,
         }
     }
 }
@@ -183,7 +189,12 @@ impl SimTransport {
             // Counted from the end, so the nodes below the count keep their
             // radios as the fleet grows.
             let five_ghz = self.config.node_count - index > self.config.c6_nodes;
-            fleet.push((SimNode::new(index, holds_ble, five_ghz), admin_rx));
+            let version = if self.config.outdated_node == Some(index) {
+                Version { minor: NODE_VERSION.minor.wrapping_sub(1), ..NODE_VERSION }
+            } else {
+                NODE_VERSION
+            };
+            fleet.push((SimNode::new(index, holds_ble, five_ghz, version), admin_rx));
         }
 
         let events = plumbing.events.clone();
@@ -346,6 +357,9 @@ struct SimNode {
     /// Whether its radio reaches 5 GHz. Announced in every heartbeat, and the
     /// planner's only reason to treat one node differently from another.
     five_ghz: bool,
+    /// The firmware version its heartbeats announce: [`NODE_VERSION`], unless
+    /// [`SimConfig::outdated_node`] picked this node.
+    version: Version,
     /// Counts completed sweeps — or scans, for the node holding Bluetooth — the
     /// same way the firmware's does: on the sweep or scan completing, whether or
     /// not a heartbeat goes out then.
@@ -381,10 +395,11 @@ struct SimNode {
 }
 
 impl SimNode {
-    fn new(index: u8, holds_ble: Arc<AtomicBool>, five_ghz: bool) -> Self {
+    fn new(index: u8, holds_ble: Arc<AtomicBool>, five_ghz: bool, version: Version) -> Self {
         Self {
             mac: SimTransport::node_mac(index),
             five_ghz,
+            version,
             epoch: 0,
             // Nothing until it is told. A wartui node parks on the control channel,
             // so one that has never heard a core is not quietly duplicating the
@@ -657,10 +672,11 @@ async fn beat(
     // without them is a fleet the planner ignores. The band varies by node, because
     // a fleet where everything reaches 5 GHz never makes the planner leave a node
     // out of a channel.
+    let board = if node.five_ghz { Board::Esp32c5 } else { Board::Esp32c6 };
     let msg = HeartbeatMsg {
         counter: node.hb_counter,
         epoch: node.epoch,
-        capabilities: Capabilities::here(node.five_ghz),
+        capabilities: Capabilities { version: node.version, ..Capabilities::here(board) },
         // A simulated node's pending buffers never fill.
         wifi_refused: 0,
         ble_refused: 0,

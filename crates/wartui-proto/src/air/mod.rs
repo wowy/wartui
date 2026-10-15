@@ -16,6 +16,14 @@
 //! know is counted and named, never half-decoded. The byte does not move before 1.0 (see
 //! [`WIRE_VERSION`]).
 //!
+//! One part of the wire is frozen until 1.0, the single exception to flashing the fleet
+//! together: the frame header, the heartbeat's type byte and the first
+//! [`HEARTBEAT_PREFIX_LEN`] bytes of its body, which carry the node's [`Version`], [`Board`]
+//! and flags. Everything after them may change with a minor version. A host reads that
+//! prefix from a heartbeat of any length ([`Capabilities::decode_prefix`]), so a node a
+//! minor version behind is named and marked for an update rather than lost among
+//! undecodable frames.
+//!
 //! A node packs a dwell's or Bluetooth scan's sightings into [`SightingBatch`]es of up to
 //! [`SIGHTING_BATCH_MAX`] bytes. A full batch goes out at once and a new one starts. What
 //! is left goes out when the dwell or scan ends, so nothing is held past it. The host
@@ -30,11 +38,13 @@ mod health;
 mod heartbeat;
 mod security;
 mod sighting;
+mod version;
 
 pub use admin::{ADMIN_FLAG_BLE, ADMIN_MSG_LEN, AdminMsg, CLEAR_MSG_LEN, ClearMsg, wire_epoch};
 pub use health::{DieTemp, Vdd};
 pub use heartbeat::{
-    CAP_FLAG_5G, CAPABILITY_MAJOR, CAPABILITY_MINOR, Capabilities, HEARTBEAT_MSG_LEN, HeartbeatMsg,
+    Board, CAP_FLAG_5G, CAP_FLAG_TRIAL, Capabilities, HEARTBEAT_MSG_LEN, HEARTBEAT_PREFIX_LEN,
+    HeartbeatMsg,
 };
 pub use security::Security;
 pub use sighting::{
@@ -42,6 +52,7 @@ pub use sighting::{
     SIGHTING_RECORD_MIN, SIGHTINGS_PER_BATCH_MAX, SSID_MAX, SightingBatch, SightingBatchWriter,
     SightingMsg,
 };
+pub use version::{NODE_VERSION, Version};
 
 /// Frame preamble, `"WTUI"`. Four raw bytes, not a NUL-terminated string.
 pub const MAGIC: [u8; 4] = *b"WTUI";

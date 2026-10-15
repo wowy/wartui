@@ -6,5 +6,7 @@ rustflags = [
 ]
 
 [target.riscv32imac-unknown-none-elf]
-# No --chip: espflash detects it, so the same runner serves both features.
-runner = "espflash flash --monitor"
+# No --chip: espflash detects it, so the same runner serves both features. The
+# partition table path is relative to where cargo runs, so `cargo run` works from
+# this directory.
+runner = "espflash flash --monitor --partition-table partitions.csv"

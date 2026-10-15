@@ -1,6 +1,6 @@
 use wartui_proto::air::{
-    Capabilities, DecodeError, Frame, HeartbeatMsg, RecordKind, SightingBatch, SightingMsg,
-    foreign, wire_epoch,
+    Capabilities, DecodeError, Frame, HeartbeatMsg, NODE_VERSION, RecordKind, SightingBatch,
+    SightingMsg, foreign, wire_epoch,
 };
 use wartui_proto::mac::{self, Mac};
 use wartui_proto::node;
@@ -94,8 +94,19 @@ impl FleetEngine {
                 }
                 return;
             }
-            // Version or length mismatch.
-            Err(DecodeError::BadVersion(_) | DecodeError::BadLength { .. }) => {
+            // A heartbeat of another length still opens with the frozen prefix. From a node on
+            // another minor version that names a node to update; from one on this minor it is a
+            // bug, counted like any other mismatch.
+            Err(DecodeError::BadLength { .. }) => {
+                match Capabilities::decode_prefix(payload) {
+                    Ok(caps) if !NODE_VERSION.speaks_with(&caps.version) => {
+                        self.on_outdated_heartbeat(rx, caps, now, batch);
+                    }
+                    _ => self.counters.incompatible += 1,
+                }
+                return;
+            }
+            Err(DecodeError::BadVersion(_)) => {
                 self.counters.incompatible += 1;
                 return;
             }
@@ -110,6 +121,13 @@ impl FleetEngine {
             // Nothing to do, but an operator chasing a fleet that keeps changing its mind needs to
             // know. Foreign clears count the same as foreign assignments.
             Frame::Admin(_) | Frame::Clear(_) => self.counters.foreign_admin += 1,
+            // The right length is no guarantee of the right layout: a minor version may move
+            // fields without resizing the frame.
+            Frame::Heartbeat(heartbeat)
+                if !NODE_VERSION.speaks_with(&heartbeat.capabilities.version) =>
+            {
+                self.on_outdated_heartbeat(rx, heartbeat.capabilities, now, batch);
+            }
             Frame::Heartbeat(heartbeat) => {
                 self.on_heartbeat(rx, heartbeat, now, batch);
             }
@@ -308,6 +326,36 @@ impl FleetEngine {
         // the heartbeat is live.
         self.send_admin(src, now, batch);
         self.send_dedup_ring_clear(src, now, batch);
+    }
+
+    /// A heartbeat from a node on another minor version, of which only the frozen prefix is read.
+    ///
+    /// The node is filed and shown with its version so the operator can find it, but it is never
+    /// assignable ([`FleetEngine::is_assignable`]): nothing past the prefix is this build's
+    /// layout, so its counter, epoch and refusals mean nothing here. It opens no admin window and
+    /// sets no `last_heartbeat`.
+    fn on_outdated_heartbeat(
+        &mut self,
+        rx: &Rx<'_>,
+        capabilities: Capabilities,
+        now: Now,
+        batch: &mut ActionBatch,
+    ) {
+        let Rx { src, rssi, .. } = *rx;
+        self.see_node(src, now, rssi, Some(capabilities), batch);
+        let Some(node) = self.nodes.get_mut(&src) else { return };
+        if node.capabilities.map(|caps| caps.version) != Some(capabilities.version) {
+            tracing::warn!(
+                mac = %mac::full(&src),
+                version = %capabilities.version,
+                host = %NODE_VERSION,
+                "node needs update"
+            );
+        }
+        node.capabilities = Some(capabilities);
+        node.heartbeats += 1;
+        // A node that was in the plan on a compatible build leaves it now.
+        self.replan(now);
     }
 
     /// A batch of sightings, recorded unless it retransmits the batch before it.

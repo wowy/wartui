@@ -10,7 +10,8 @@
 //! handed, so the chip ID in the bootloader's image header is compared with the chip the features
 //! name, and the image is fetched or built before the first reset. A merged image holds flash from
 //! address 0, so the bootloader sits where the chip boots from: 0x0 on a C6, 0x2000 on a C5, with
-//! erased flash (`0xFF`) ahead of it.
+//! erased flash (`0xFF`) ahead of it. A node's image is merged with `firmware/node/partitions.csv`
+//! and a bridge's with espflash's default table.
 //!
 //! **A release pins its images by tag.** The host, the fleet and the bridge are flashed from one
 //! tree, and the crate version does not move before 1.0, so the version cannot name a tree and the
@@ -68,6 +69,9 @@ struct Firmware {
     variants: &'static [(&'static [&'static str], &'static str)],
     /// What the firmware runs on, for messages.
     what: &'static str,
+    /// The partition table its images are merged with, relative to `dir`, or `None` for
+    /// espflash's default.
+    partition_table: Option<&'static str>,
 }
 
 const NODE: Firmware = Firmware {
@@ -79,6 +83,7 @@ const NODE: Firmware = Firmware {
         (&["esp32c6", "xiao-external-antenna"], "wartui-node-fw-esp32c6-xiao.bin"),
     ],
     what: "node",
+    partition_table: Some("partitions.csv"),
 };
 
 const BRIDGE: Firmware = Firmware {
@@ -91,6 +96,7 @@ const BRIDGE: Firmware = Firmware {
         (&["esp32c6", "xiao-external-antenna"], "wartui-bridge-fw-esp32c6-xiao.bin"),
     ],
     what: "bridge",
+    partition_table: None,
 };
 
 fn mac_arg(text: &str) -> Result<Mac, String> {
@@ -185,6 +191,7 @@ enum Skip {
     Unreadable,
     OtherChip(String),
     OtherAddress(Mac),
+    SmallFlash(Option<u64>),
 }
 
 impl fmt::Display for Skip {
@@ -201,6 +208,17 @@ impl fmt::Display for Skip {
             Self::Unreadable => f.write_str("espflash board-info said nothing readable"),
             Self::OtherChip(chip) => write!(f, "an {chip}"),
             Self::OtherAddress(read) => write!(f, "espflash read {} from it", mac::full(read)),
+            Self::SmallFlash(Some(bytes)) => write!(
+                f,
+                "has {} KiB of flash, and a node needs {} KiB for two app slots",
+                bytes >> 10,
+                NODE_MIN_FLASH >> 10
+            ),
+            Self::SmallFlash(None) => write!(
+                f,
+                "espflash read no flash size, and a node needs {} KiB for two app slots",
+                NODE_MIN_FLASH >> 10
+            ),
         }
     }
 }
@@ -229,20 +247,36 @@ fn last_line(text: &str) -> Option<&str> {
 struct BoardInfo {
     chip: String,
     mac: Mac,
+    /// The flash size in bytes, or `None` when `board-info` gave none it could read.
+    flash_bytes: Option<u64>,
 }
 
-/// Read `board-info`'s `Chip type:` and `MAC address:` lines. The chip may carry a revision
-/// after it, `esp32c5 (revision v0.1)`, which is not the chip's name.
+/// Read `board-info`'s `Chip type:`, `MAC address:` and `Flash size:` lines. The chip may carry a
+/// revision after it, `esp32c5 (revision v0.1)`, which is not the chip's name.
 fn parse_board_info(text: &str) -> Option<BoardInfo> {
     let field =
         |label: &str| text.lines().find_map(|line| line.trim().strip_prefix(label).map(str::trim));
     let chip = field("Chip type:")?.split_whitespace().next()?.to_owned();
     let mac = mac::parse(field("MAC address:")?)?;
-    Some(BoardInfo { chip, mac })
+    let flash_bytes = field("Flash size:").and_then(parse_flash_size);
+    Some(BoardInfo { chip, mac, flash_bytes })
 }
 
-/// Whether a probed board is the one selection judged, and the chip being flashed.
-fn judge_probe(expected: Mac, chip: Chip, probe: &Ran) -> Result<(), Skip> {
+/// A flash size as espflash prints one, `4MB` or `512KB`, in bytes.
+fn parse_flash_size(text: &str) -> Option<u64> {
+    let text = text.trim().trim_start_matches('_').to_ascii_uppercase();
+    let (digits, unit) = text.split_at(text.find(|c: char| !c.is_ascii_digit())?);
+    let scale = match unit.trim() {
+        "KB" => 1 << 10,
+        "MB" => 1 << 20,
+        _ => return None,
+    };
+    digits.parse::<u64>().ok()?.checked_mul(scale)
+}
+
+/// Whether a probed board is the one selection judged, and the chip being flashed. Returns what
+/// the probe read, for the checks only one firmware makes.
+fn judge_probe(expected: Mac, chip: Chip, probe: &Ran) -> Result<BoardInfo, Skip> {
     if !probe.ok {
         return Err(Skip::ProbeFailed(probe.last_line().to_owned()));
     }
@@ -253,7 +287,38 @@ fn judge_probe(expected: Mac, chip: Chip, probe: &Ran) -> Result<(), Skip> {
     if info.mac != expected {
         return Err(Skip::OtherAddress(info.mac));
     }
-    Ok(())
+    Ok(info)
+}
+
+/// The least flash a node's partition table fits: two 1920 KiB app slots and the data
+/// partitions, ending at 0x3D1000 (`firmware/node/partitions.csv`).
+const NODE_MIN_FLASH: u64 = 4 << 20;
+
+/// Refuse a board whose flash cannot hold the node's partition table, or that did not say how
+/// much it has.
+fn judge_node_flash(info: &BoardInfo) -> Result<(), Skip> {
+    match info.flash_bytes {
+        Some(bytes) if bytes >= NODE_MIN_FLASH => Ok(()),
+        size => Err(Skip::SmallFlash(size)),
+    }
+}
+
+/// Where the node's `otadata` partition sits, and its size (`firmware/node/partitions.csv`).
+const OTADATA: (&str, &str) = ("0xd000", "0x2000");
+
+/// Erase a node's `otadata`, so the bootloader boots `ota_0`, where the image just went.
+fn erase_otadata_args(port: &str, chip: Chip) -> Vec<&str> {
+    vec![
+        "erase-region",
+        "--port",
+        port,
+        "--chip",
+        chip.name(),
+        "--non-interactive",
+        "--skip-update-check",
+        OTADATA.0,
+        OTADATA.1,
+    ]
 }
 
 /// A board by its last two octets, as the fleet table names it, or by path without an address.
@@ -429,17 +494,18 @@ fn build_image(
 
     let elf = dir.join(firmware.elf);
     let bin = elf.with_extension("bin");
-    let (elf_text, bin_text) = (elf.to_string_lossy(), bin.to_string_lossy());
-    let ran = espflash(&[
-        "save-image",
-        "--skip-update-check",
-        "--chip",
-        chip.name(),
-        "--merge",
-        "--skip-padding",
-        &elf_text,
-        &bin_text,
-    ]);
+    let mut args: Vec<String> = ["save-image", "--skip-update-check", "--chip", chip.name()]
+        .into_iter()
+        .chain(["--merge", "--skip-padding"])
+        .map(str::to_owned)
+        .collect();
+    if let Some(table) = firmware.partition_table {
+        args.push("--partition-table".to_owned());
+        args.push(dir.join(table).to_string_lossy().into_owned());
+    }
+    args.push(elf.to_string_lossy().into_owned());
+    args.push(bin.to_string_lossy().into_owned());
+    let ran = espflash(&args);
     if !ran.ok {
         eprint!("{}{}", ran.stdout, ran.stderr);
         bail!("espflash could not make an image of {}: {}", elf.display(), ran.last_line());
@@ -640,7 +706,8 @@ mod tests {
     #[test]
     fn flash_parses_board_info_when_given_espflash_transcript() {
         let info = parse_board_info(BOARD_INFO).unwrap();
-        assert_eq!(info, BoardInfo { chip: "esp32c5".to_owned(), mac: NODE_MAC });
+        let flash_bytes = Some(8 << 20);
+        assert_eq!(info, BoardInfo { chip: "esp32c5".to_owned(), mac: NODE_MAC, flash_bytes });
     }
 
     #[test]
@@ -652,7 +719,8 @@ mod tests {
 
     #[test]
     fn flash_accepts_probe_when_chip_and_mac_match() {
-        assert_eq!(judge_probe(NODE_MAC, Chip::Esp32c5, &ran(true, BOARD_INFO)), Ok(()));
+        let info = judge_probe(NODE_MAC, Chip::Esp32c5, &ran(true, BOARD_INFO)).unwrap();
+        assert_eq!(info.mac, NODE_MAC);
     }
 
     #[test]
@@ -673,6 +741,55 @@ mod tests {
         let judged = judge_probe(NODE_MAC, Chip::Esp32c5, &failed);
         assert_eq!(judged, Err(Skip::ProbeFailed("x timed out".to_owned())));
         assert_eq!(judge_probe(NODE_MAC, Chip::Esp32c5, &ran(true, "")), Err(Skip::Unreadable));
+    }
+
+    #[test]
+    fn flash_parses_flash_size_when_given_espflash_spellings() {
+        assert_eq!(parse_flash_size("4MB"), Some(4 << 20));
+        assert_eq!(parse_flash_size("16MB"), Some(16 << 20));
+        assert_eq!(parse_flash_size("512KB"), Some(512 << 10));
+        assert_eq!(parse_flash_size("_2MB"), Some(2 << 20), "the enum's own spelling");
+        assert_eq!(parse_flash_size("unknown"), None);
+        assert_eq!(parse_flash_size("4"), None);
+        assert_eq!(parse_flash_size("4GB"), None);
+    }
+
+    #[test]
+    fn flash_reads_no_flash_size_when_board_info_omits_it() {
+        let text = BOARD_INFO.replace("Flash size:        8MB\n", "");
+        assert_eq!(parse_board_info(&text).unwrap().flash_bytes, None);
+    }
+
+    #[test]
+    fn flash_accepts_node_board_when_flash_is_at_least_four_megabytes() {
+        let info = parse_board_info(BOARD_INFO).unwrap();
+        assert_eq!(judge_node_flash(&info), Ok(()));
+        let four = BoardInfo { flash_bytes: Some(4 << 20), ..info };
+        assert_eq!(judge_node_flash(&four), Ok(()));
+    }
+
+    #[test]
+    fn flash_refuses_node_board_when_flash_is_under_four_megabytes() {
+        let text = BOARD_INFO.replace("8MB", "2MB");
+        let info = judge_probe(NODE_MAC, Chip::Esp32c5, &ran(true, &text)).unwrap();
+        let judged = judge_node_flash(&info);
+        assert_eq!(judged, Err(Skip::SmallFlash(Some(2 << 20))));
+        let message = judged.unwrap_err().to_string();
+        assert!(message.contains("2048 KiB") && message.contains("4096 KiB"), "{message}");
+        let unknown = BoardInfo { flash_bytes: None, ..info };
+        assert_eq!(judge_node_flash(&unknown), Err(Skip::SmallFlash(None)));
+    }
+
+    #[test]
+    fn flash_erases_otadata_when_node_is_flashed() {
+        // The partition table's `otadata` row, which these must match.
+        let table = std::fs::read_to_string(Path::new(NODE.dir).join("partitions.csv")).unwrap();
+        let row = table.lines().find(|line| line.starts_with("otadata")).unwrap();
+        let cells: Vec<&str> = row.split(',').map(str::trim).collect();
+        assert_eq!((cells[3], cells[4]), OTADATA);
+        let args = erase_otadata_args("/dev/ttyACM1", Chip::Esp32c6);
+        assert_eq!(&args[..5], ["erase-region", "--port", "/dev/ttyACM1", "--chip", "esp32c6"]);
+        assert_eq!(&args[args.len() - 2..], ["0xd000", "0x2000"]);
     }
 
     #[test]

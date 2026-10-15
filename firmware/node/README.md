@@ -13,14 +13,15 @@ It shares no wire format with the vendor firmware either. A node sends and recei
 
 | Frame          | Direction           | Size                    |
 |----------------|---------------------|-------------------------|
-| Heartbeat      | Broadcast           | 27 bytes                |
+| Heartbeat      | Broadcast           | 29 bytes                |
 | Sighting batch | Unicast, to bridge  | Up to 250 bytes         |
 | Admin          | Unicast, to node    | 15 bytes                |
 | Clear          | Unicast, to node    | 6 bytes                 |
 
 - **Heartbeat**: every 5 s once assigned. It is broadcast because that is how a bridge discovers a
-  node before either knows the other's address. It carries a counter of completed sweeps (scans,
-  on the Bluetooth node), the epoch of the assignment held or 0, the capability bytes below,
+  node before either knows the other's address. Its body opens with a 5-byte prefix: the
+  firmware version (major, minor, patch), the board and the capability flags. Then come a counter
+  of completed sweeps (scans, on the Bluetooth node), the epoch of the assignment held or 0,
   running counts of Wi-Fi and BLE sightings turned away by a full buffer, the count of
   heartbeats attempted since boot, so the host can count the ones it missed, the count the
   radio could not send, so it can tell those from loss on the air, and the chip's 3.3 V rail and
@@ -69,13 +70,16 @@ carries no other instruction. `crates/wartui-proto/src/dedup.rs` has the reasoni
 
 **It says what it is, and what it holds, in every heartbeat.** One byte is the epoch of the
 assignment adopted, or 0 for none. That is how the host tells adoption from a MAC-layer ack without
-asking the node's own console. Three more are a version and a capability byte, shown by the host as:
+asking the node's own console. The five-byte prefix is the firmware version, the board and a flags
+byte, shown by the host as:
 
 ```
-wartui/1.0;5g
+0.1.0;5g
 ```
 
-That is the protocol version, then `5g` if the chip has the radio for it. A C5 does; a C6 doesn't.
+That is the firmware version, then `5g` if the chip has the radio for it. A C5 does; a C6 doesn't.
+The board byte is 1 for an ESP32-C5, 2 for an ESP32-C6, and 3 for a XIAO ESP32-C6 built with
+`xiao-external-antenna`. Flag bit 1 marks an image on trial; this firmware never sets it.
 Bluetooth isn't a capability. Every node can scan it, and the core's `ADMIN_FLAG_BLE` decides
 whether one does, off at every boot.
 
@@ -104,7 +108,8 @@ refuses half the channel pool. Both parts are RISC-V and build on stable.
 
 Diagnostics are on by default and go out over USB serial-JTAG. Turning them off saves a few
 kilobytes and nothing else: a silent node is hard to tell from a broken one. The cargo runner is
-`espflash flash --monitor` with no `--chip`, so espflash detects the part. Unlike the bridge's, this
+`espflash flash --monitor --partition-table partitions.csv` with no `--chip`, so espflash detects
+the part. Run it from this directory, since the table's path is relative. Unlike the bridge's, this
 monitor is worth watching, because nothing but diagnostics goes down that pipe.
 
 Every node can scan Bluetooth. It does so only if the core sets the flag, and a node that does scans
@@ -116,6 +121,41 @@ feature it stays on the ceramic one, so a plugged-in antenna does nothing and th
 weak. Build with it only when an antenna is fitted, since a radio pointed at an empty connector is
 close to deaf. A C5 build rejects it: the XIAO ESP32-C5 has a U.FL connector and no onboard
 antenna, so there is nothing to switch.
+
+## Versioning
+
+`version` in `Cargo.toml` is bumped on every firmware change. Before 1.0, a minor bump may change
+the wire and a patch bump may not. `wartui_proto::air::NODE_VERSION` mirrors it, and a test in
+`crates/wartui-proto/tests/version.rs` fails when the two differ. The host drives a node on its own
+major and minor at any patch, and shows any other node as `needs update`.
+
+The frame header, the heartbeat's type byte and its five-byte prefix never change before 1.0. They
+are how a host finds a node a minor version behind, at whatever length that build's heartbeat is.
+
+The app descriptor carries the version and a project name for the board: `wartui-node-esp32c5`,
+`wartui-node-esp32c6` or `wartui-node-esp32c6-xiao`.
+
+## Flash layout
+
+`partitions.csv` needs 4 MB of flash:
+
+| Name     | Type | SubType   | Offset   | Size     |
+|----------|------|-----------|----------|----------|
+| nvs      | data | nvs       | 0x9000   | 0x4000   |
+| otadata  | data | ota       | 0xd000   | 0x2000   |
+| phy_init | data | phy       | 0xf000   | 0x1000   |
+| ota_0    | app  | ota_0     | 0x10000  | 0x1E0000 |
+| ota_1    | app  | ota_1     | 0x1F0000 | 0x1E0000 |
+| trial    | data | undefined | 0x3D0000 | 0x1000   |
+
+There is no factory slot. Two app slots of 1920 KiB each leave no room for a third on 4 MB, and the
+app is about 845 KB. With `otadata` erased, the bootloader boots `ota_0`, which is where a USB
+flash puts the app. `wartui flash-fleet` erases `otadata` after writing each node, so an earlier
+over-the-air update cannot leave the bootloader pointing at the other slot. `trial` is reserved
+for counting unconfirmed boots. Its subtype is `undefined` because espflash 4.6 rejects a numeric
+data subtype.
+
+The cargo runner, `wartui flash-fleet` and the release images all use this table.
 
 ## The regulatory domain is set here
 

@@ -11,7 +11,7 @@ use wartui_core::gps::{GpsCounters, GpsStatus, GpsView};
 use wartui_core::nmea::{Constellation, FixMode, Satellite, Sky};
 use wartui_core::position::{Fix, PositionSource};
 use wartui_core::record::AdminOutcome;
-use wartui_proto::air::{Capabilities, RecordKind, wire_epoch};
+use wartui_proto::air::{Board, Capabilities, NODE_VERSION, RecordKind, Version, wire_epoch};
 use wartui_proto::link::{Chip, LoopPhase};
 use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun};
 use wartui_proto::reset::ResetCause;
@@ -36,7 +36,7 @@ pub(super) fn node(last: u8, reboots: u32, assignable: bool) -> NodeView {
     state.link_rssi = Some(-41);
     // Heartbeating unless a test says otherwise. A node that has not heartbeated
     // cannot be assigned, so every assignment test would become a refusal test.
-    state.capabilities = Some(Capabilities::here(true));
+    state.capabilities = Some(Capabilities::here(Board::Esp32c5));
     NodeView { state, alive: true, assignable }
 }
 
@@ -53,7 +53,19 @@ pub(super) fn unannounced(last: u8) -> NodeView {
 /// A node whose token says 2.4 GHz only: an ESP32-C6.
 pub(super) fn narrowband(last: u8) -> NodeView {
     let mut view = node(last, 0, true);
-    view.state.capabilities = Some(Capabilities::here(false));
+    view.state.capabilities = Some(Capabilities::here(Board::Esp32c6));
+    view
+}
+
+/// Heartbeating from firmware a minor version behind this build's: known by its
+/// heartbeat prefix, never assignable, and never counted as alive.
+pub(super) fn outdated(last: u8) -> NodeView {
+    let mut view = node(last, 0, false);
+    let caps = Capabilities::here(Board::Esp32c5);
+    let version = Version { minor: NODE_VERSION.minor.wrapping_sub(1), ..NODE_VERSION };
+    view.state.capabilities = Some(Capabilities { version, ..caps });
+    view.state.last_heartbeat = None;
+    view.alive = false;
     view
 }
 
