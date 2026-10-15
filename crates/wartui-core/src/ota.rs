@@ -23,7 +23,9 @@
 //! the frame, not that the node read it: its receive queue is ten deep and drains only between
 //! flash writes. The node reports a status on each 4 KB sector it writes, so after the chunk
 //! that completes a sector the host waits for one. Any status moves the host to the offset it
-//! names, back or forward. With no status within [`STATUS_TIMEOUT`], the host resends from the
+//! names, back or forward, except one below the highest offset the node has reported since its
+//! `begin`: that one was overtaken by a newer status, and acting on it would resend what the node
+//! already holds. With no status within [`STATUS_TIMEOUT`], the host resends from the
 //! last offset the node reported: a node that has those bytes answers the duplicate with its
 //! status, and one that lacks them takes them. One rule recovers lost chunks and lost statuses
 //! alike. `Idle` means the node dropped the session (30 s of silence, or a reboot), and so
@@ -31,7 +33,9 @@
 //! sends in a row: a node rebooting has its radio off, and acks nothing for a second or so.
 //! Each returns to the `begin`, which an identical one resumes where the node's progress
 //! stands: from 0 after a reboot, which loses the receiver's state and the node's core.
-//! [`MAX_BEGINS`] and [`BEGIN_TIMEOUT`] are what give up on the node.
+//! [`MAX_REBEGINS`] and [`BEGIN_TIMEOUT`] are what give up on the node. A session that gives
+//! up after the node accepted it sends [`OtaAbortMsg`] once, so the node leaves update mode at
+//! once rather than after its 30 s of silence.
 //!
 //! **Success, rollback and silence are told apart by the heartbeat's frozen prefix**: version
 //! and trial flag, which every minor reads. A node switches slots the moment it reports
@@ -49,10 +53,21 @@
 //! rolled back. Once a trial heartbeat has been heard, a reboot is proven, and an old-version
 //! heartbeat after it is a rollback outright.
 //!
-//! An image of the version the node already runs (`--force`) leaves the version unable to
-//! distinguish anything, and `trial` carries it alone: the new image shows `trial` and the old
-//! one never does. Done then also needs an acked [`OtaConfirmMsg`], since a rollback and a
-//! confirmed image both heartbeat that version without `trial`.
+//! **A heartbeat is the new image only once this session has sent its commit**, since nothing
+//! installs before one. That check comes first in every phase, `Begin` included: a `Verified`
+//! that is lost, then resent commits unacked while the node reboots, return the session to its
+//! `begin`, and the new image's first heartbeat must be confirmed, never answered with a
+//! `begin`. The node would take that `begin` and stream the image again into the slot holding
+//! the old one, destroying the copy a rollback returns to.
+//!
+//! After the commit, the image's version with `trial` set is the new image on trial: the old
+//! image cannot be on trial, because the node confirms a trial image on the first update frame
+//! it decodes. Without `trial`, the version says it is the new image, confirmed, when it differs
+//! from the old one. An image of the version the node already runs (`--force`) leaves the
+//! version unable to tell, so done then needs an acked [`OtaConfirmMsg`], and a heartbeat of that
+//! version without `trial` gets another confirm until one is acked. A rollback in that case is
+//! indistinguishable from a confirmed image once the old image acks a confirm, which is the cost
+//! of reinstalling one version.
 
 use std::fmt;
 use std::sync::Arc;
@@ -88,8 +103,9 @@ pub const MAX_SEND_FAILURES: u32 = 10;
 /// windows of an assigned node, thirty of a parked one.
 pub const BEGIN_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// How many times an update may return to its `begin` before the node is given up on.
-pub const MAX_BEGINS: u32 = 5;
+/// How many times an update may return to its `begin` before the node is given up on: the
+/// first `begin` and this many more.
+pub const MAX_REBEGINS: u32 = 5;
 
 /// How long after `Verified` a heartbeat from the old image is taken as one sent before the
 /// reboot, rather than as the old image running again.
@@ -150,7 +166,7 @@ pub enum Failure {
     FlashError,
     /// Every byte arrived and the hash did not match.
     HashMismatch,
-    /// The update returned to its `begin` more than [`MAX_BEGINS`] times.
+    /// The update returned to its `begin` [`MAX_REBEGINS`] times and lost the node again.
     NotAnswering,
     /// The image verified and the node could not switch slots to it.
     SwitchFailed,
@@ -289,11 +305,20 @@ pub struct OtaSession {
     next: u32,
     /// The last `next_offset` the node reported.
     reported: u32,
+    /// The highest `next_offset` the node has reported since its `begin`; a status below it is
+    /// stale.
+    high: u32,
+    /// Whether the node has accepted this session, so a failure owes it an abort.
+    accepted: bool,
+    /// Whether a failure has an abort to send.
+    abort_owed: bool,
+    /// Whether this session has sent its commit, before which no heartbeat is the new image.
+    committed: bool,
     /// When the status the host is waiting on is overdue.
     wait_status: Option<Instant>,
     send_failures: u32,
     status_timeouts: u32,
-    begins: u32,
+    rebegins: u32,
     confirm_acked: bool,
     outcome: Option<Outcome>,
 }
@@ -332,13 +357,33 @@ impl OtaSession {
             pending: None,
             next: 0,
             reported: 0,
+            high: 0,
+            accepted: false,
+            abort_owed: false,
+            committed: false,
             wait_status: None,
             send_failures: 0,
             status_timeouts: 0,
-            begins: 1,
+            rebegins: 0,
             confirm_acked: false,
             outcome: None,
         }
+    }
+
+    /// Confirm a node already running `version` on trial, as an update ends: an
+    /// [`OtaConfirmMsg`] on each heartbeat until one without `trial` follows an acked confirm.
+    #[must_use]
+    pub fn confirm_trial(node: Mac, version: Version, first_id: u16, now: Now) -> Self {
+        let image = OtaImage {
+            bytes: Arc::from(Vec::new()),
+            sha256: [0; 32],
+            version,
+            board: wartui_proto::air::Board::Unknown(0),
+        };
+        let mut session = Self::new(node, version, &image, 0, first_id, now);
+        session.committed = true;
+        session.phase = Phase::AwaitConfirm;
+        session
     }
 
     /// React to `event`, returning what to send.
@@ -361,6 +406,11 @@ impl OtaSession {
             }
             OtaEvent::Rx { .. } => {}
             OtaEvent::Tick => self.on_tick(now, &mut out),
+        }
+        if self.abort_owed {
+            self.abort_owed = false;
+            let abort = OtaAbortMsg { session: self.begin.session }.encode();
+            self.send(now, Sent::Abort, &abort, &mut out);
         }
         out
     }
@@ -407,45 +457,55 @@ impl OtaSession {
         self.next_id
     }
 
+    /// What a heartbeat says of the new image: `Some(true)` for it on trial, `Some(false)` for it
+    /// confirmed, `None` for anything else. The module docs give the rule.
+    fn new_image(&self, caps: Capabilities) -> Option<bool> {
+        if caps.version != self.begin.version || !self.committed {
+            return None;
+        }
+        if caps.trial {
+            return Some(true);
+        }
+        (self.begin.version != self.from || self.confirm_acked).then_some(false)
+    }
+
     fn on_heartbeat(&mut self, now: Instant, caps: Capabilities, out: &mut Vec<HostToBridge>) {
         let new = self.begin.version;
-        let trial_of_new = caps.version == new && caps.trial;
-        // The new version without `trial`, from a node whose old image carries another.
-        let confirmed_new = caps.version == new && !caps.trial && new != self.from;
-        match self.phase {
-            Phase::Begin => {
-                let begin = self.begin.encode();
-                self.send(now, Sent::Begin, &begin, out);
-            }
-            Phase::Streaming | Phase::Done | Phase::Failed => {}
-            Phase::Committing | Phase::AwaitReboot | Phase::AwaitConfirm if trial_of_new => {
+        match (self.new_image(caps), self.phase) {
+            (_, Phase::Done | Phase::Failed) => {}
+            (Some(true), _) => {
                 if self.phase != Phase::AwaitConfirm {
                     self.enter(now, Phase::AwaitConfirm);
                 }
                 self.send_confirm(now, out);
             }
-            // Confirmed already: in `Committing` and `AwaitReboot` by the commits resent after
-            // a lost `Verified`, which the new image heard.
-            _ if confirmed_new => self.finish(now, Outcome::Done(new)),
-            Phase::AwaitConfirm if caps.version == new && !caps.trial && self.confirm_acked => {
-                self.finish(now, Outcome::Done(new));
+            // Confirmed: by our confirm, or in `Committing` and `AwaitReboot` by the commits
+            // resent after a lost `Verified`, which the new image heard.
+            (Some(false), _) => self.finish(now, Outcome::Done(new)),
+            (None, Phase::Begin) => {
+                let begin = self.begin.encode();
+                self.send(now, Sent::Begin, &begin, out);
             }
-            // The new version without `trial` from a node whose old image carries it too, with
-            // no acked confirm: a confirm whose ack was lost, or a rollback. Left for the next
-            // heartbeat or the timeout to settle.
-            Phase::AwaitConfirm if caps.version == new => {}
-            Phase::AwaitConfirm => self.fail(now, Failure::RolledBack(caps.version)),
-            Phase::Committing => {}
-            Phase::AwaitReboot => {
+            (None, Phase::Streaming | Phase::Committing) => {}
+            (None, Phase::AwaitReboot) => {
                 if now.duration_since(self.phase_since) >= REBOOT_GRACE {
                     self.fail(now, Failure::StillOld(caps.version));
                 }
             }
+            // The image's version without `trial`, from a node whose old image carries it too,
+            // with no confirm acked: the confirm's ack was lost, so it goes again.
+            (None, Phase::AwaitConfirm) if caps.version == new && !caps.trial => {
+                self.send_confirm(now, out);
+            }
+            (None, Phase::AwaitConfirm) => self.fail(now, Failure::RolledBack(caps.version)),
         }
     }
 
     fn on_status(&mut self, now: Instant, status: OtaStatusMsg, out: &mut Vec<HostToBridge>) {
         let len = self.begin.len;
+        if matches!(status.state, OtaState::Receiving | OtaState::Verified) {
+            self.accepted = true;
+        }
         match (self.phase, status.state) {
             (Phase::AwaitReboot, OtaState::FlashError) => self.fail(now, Failure::SwitchFailed),
             (Phase::AwaitReboot | Phase::AwaitConfirm | Phase::Done | Phase::Failed, _) => {}
@@ -458,7 +518,14 @@ impl OtaSession {
             (_, OtaState::Unknown(byte)) => self.fail(now, Failure::UnknownState(byte)),
             (_, OtaState::Verified) => self.enter(now, Phase::AwaitReboot),
             (Phase::Streaming | Phase::Committing, OtaState::Idle) => self.rebegin(now),
-            (Phase::Begin, OtaState::Receiving) => self.stream_from(now, status.next_offset, out),
+            (Phase::Begin, OtaState::Receiving) => {
+                // A `begin` answers from where the node stands, which a reboot sets back to 0.
+                self.high = 0;
+                self.stream_from(now, status.next_offset, out);
+            }
+            // Overtaken by a newer status.
+            (Phase::Streaming | Phase::Committing, OtaState::Receiving)
+                if status.next_offset < self.high => {}
             // The last sector's own status, overtaken by the commit.
             (Phase::Committing, OtaState::Receiving) if status.next_offset >= len => {}
             (Phase::Committing, OtaState::Receiving) => {
@@ -466,6 +533,7 @@ impl OtaSession {
             }
             (Phase::Streaming, OtaState::Receiving) => {
                 self.reported = status.next_offset.min(len);
+                self.high = self.reported;
                 self.next = self.reported;
                 self.wait_status = None;
                 self.status_timeouts = 0;
@@ -576,6 +644,7 @@ impl OtaSession {
     fn stream_from(&mut self, now: Instant, offset: u32, out: &mut Vec<HostToBridge>) {
         self.enter(now, Phase::Streaming);
         self.reported = offset.min(self.begin.len);
+        self.high = self.reported;
         self.next = self.reported;
         self.send_next(now, out);
     }
@@ -605,6 +674,7 @@ impl OtaSession {
 
     fn send_commit(&mut self, now: Instant, out: &mut Vec<HostToBridge>) {
         let commit = OtaCommitMsg { session: self.begin.session }.encode();
+        self.committed = true;
         self.send(now, Sent::Commit, &commit, out);
         self.wait_status = Some(now + STATUS_TIMEOUT);
     }
@@ -632,11 +702,11 @@ impl OtaSession {
 
     /// Return to the `begin`, which goes out on the node's next heartbeat.
     fn rebegin(&mut self, now: Instant) {
-        self.begins += 1;
-        if self.begins > MAX_BEGINS {
+        if self.rebegins == MAX_REBEGINS {
             self.fail(now, Failure::NotAnswering);
             return;
         }
+        self.rebegins += 1;
         self.enter(now, Phase::Begin);
     }
 
@@ -655,7 +725,12 @@ impl OtaSession {
         self.outcome = Some(outcome);
     }
 
+    /// End the update, owing the node an abort when it holds the session in update mode. A
+    /// cancel sends its own.
     fn fail(&mut self, now: Instant, failure: Failure) {
+        self.abort_owed = self.accepted
+            && failure != Failure::Cancelled
+            && matches!(self.phase, Phase::Begin | Phase::Streaming | Phase::Committing);
         self.finish(now, Outcome::Failed(failure));
     }
 }

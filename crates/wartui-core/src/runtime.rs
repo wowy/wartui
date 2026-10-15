@@ -249,6 +249,7 @@ pub async fn drive_ota(
                 }
                 Some(LinkEvent::Message(BridgeToHost::Rx { src, payload, .. })) => {
                     if src == session.node()
+                        && tracing::enabled!(tracing::Level::DEBUG)
                         && let Ok(status) = OtaStatusMsg::decode(&payload)
                     {
                         tracing::debug!(
@@ -265,7 +266,9 @@ pub async fn drive_ota(
             },
         };
         for cmd in sends {
-            if let HostToBridge::SendEspNow { id, payload, .. } = &cmd {
+            if tracing::enabled!(tracing::Level::DEBUG)
+                && let HostToBridge::SendEspNow { id, payload, .. } = &cmd
+            {
                 let (kind, offset) = match Frame::decode(payload) {
                     Ok(Frame::OtaBegin(_)) => ("begin", None),
                     Ok(Frame::OtaChunk(chunk)) => ("chunk", Some(chunk.offset)),

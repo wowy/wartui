@@ -116,6 +116,10 @@ pub struct SimConfig {
     /// while on trial and rolls back to its old image after three boots. `None` by default.
     /// A test knob, for the host's rollback detection.
     pub rejecting_node: Option<u8>,
+    /// The index of one node whose `Verified` status is lost on the way to the host: it
+    /// switches and reboots all the same. `None` by default. A test knob, for the host's
+    /// recovery from a lost `Verified`.
+    pub mute_verified_node: Option<u8>,
 }
 
 impl Default for SimConfig {
@@ -133,6 +137,7 @@ impl Default for SimConfig {
             fleet_version: NODE_VERSION,
             lossy_node: None,
             rejecting_node: None,
+            mute_verified_node: None,
         }
     }
 }
@@ -264,6 +269,7 @@ impl SimTransport {
             };
             let mut node = SimNode::new(index, holds_ble, five_ghz, version);
             node.rejecting = self.config.rejecting_node == Some(index);
+            node.mute_verified = self.config.mute_verified_node == Some(index);
             fleet.push((node, admin_rx));
         }
 
@@ -488,6 +494,8 @@ struct SimNode {
     core: bool,
     /// [`SimConfig::rejecting_node`]: a trial image here is never confirmed.
     rejecting: bool,
+    /// [`SimConfig::mute_verified_node`]: this node's `Verified` never reaches the host.
+    mute_verified: bool,
     /// The image to roll back to, and when, while a rejected one is on trial.
     rollback: Option<(Version, tokio::time::Instant)>,
 }
@@ -529,6 +537,7 @@ impl SimNode {
             trial: false,
             core: false,
             rejecting: false,
+            mute_verified: false,
             rollback: None,
         }
     }
@@ -1029,10 +1038,13 @@ async fn nap_until(
                 Some(SimCommand::Confirm) => node.confirm(),
                 Some(SimCommand::Update(frame)) => {
                     let Some(status) = node.update(&frame) else { continue };
-                    if send_frame(events, node.mac, &status.encode(), started).await.is_err() {
+                    let verified = status.state == OtaState::Verified;
+                    if !(verified && node.mute_verified)
+                        && send_frame(events, node.mac, &status.encode(), started).await.is_err()
+                    {
                         return Break(());
                     }
-                    if status.state == OtaState::Verified {
+                    if verified {
                         node.boot_verified();
                         return Continue(());
                     }

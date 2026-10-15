@@ -11,7 +11,7 @@ use wartui_bridge::sim::{SimConfig, SimTransport};
 use wartui_bridge::{LinkEvent, LinkHandle};
 use wartui_core::engine::Now;
 use wartui_core::ota::{
-    BEGIN_TIMEOUT, CONFIRM_TIMEOUT, Failure, MAX_BEGINS, MAX_SEND_FAILURES, OtaEvent, OtaImage,
+    BEGIN_TIMEOUT, CONFIRM_TIMEOUT, Failure, MAX_REBEGINS, MAX_SEND_FAILURES, OtaEvent, OtaImage,
     OtaSession, Outcome, Phase, REBOOT_GRACE,
 };
 use wartui_core::runtime::{drive_ota, now};
@@ -205,6 +205,8 @@ enum Fate {
     Unacked,
     /// Acked and read, and the node's answer is lost.
     Mute,
+    /// Read, and its ack is lost.
+    Unheard,
 }
 
 fn deliver(_: Out) -> Fate {
@@ -224,11 +226,18 @@ struct Bench {
 
 impl Bench {
     fn new(image: &OtaImage) -> Self {
+        Self::from(image, OLD)
+    }
+
+    /// A bench whose node runs `from`.
+    fn from(image: &OtaImage, from: Version) -> Self {
         let start = Instant::now();
         let now = Now { mono: start, unix_ms: 0 };
+        let mut node = Node::new();
+        node.version = from;
         Self {
-            session: OtaSession::new(NODE, OLD, image, SESSION, 1, now),
-            node: Node::new(),
+            session: OtaSession::new(NODE, from, image, SESSION, 1, now),
+            node,
             start,
             elapsed: Duration::ZERO,
             next_beat: Duration::from_millis(1000),
@@ -276,10 +285,14 @@ impl Bench {
             self.sent.push(out);
             let fate = fate(out);
             let status = match fate {
-                Fate::Deliver | Fate::Mute => self.node.hear(&payload),
+                Fate::Deliver | Fate::Mute | Fate::Unheard => self.node.hear(&payload),
                 Fate::Lose | Fate::Unacked => None,
             };
-            let acked = if fate == Fate::Unacked { SendStatus::AckFail } else { SendStatus::AckOk };
+            let acked = if matches!(fate, Fate::Unacked | Fate::Unheard) {
+                SendStatus::AckFail
+            } else {
+                SendStatus::AckOk
+            };
             self.feed(OtaEvent::SendResult { id, status: acked });
             if let Some(status) = status.filter(|_| fate != Fate::Mute) {
                 self.feed(OtaEvent::Rx { src: NODE, payload: &status.encode() });
@@ -409,8 +422,10 @@ fn ota_session_fails_when_chunks_stay_unacked_across_every_begin() {
     assert_eq!(bench.run_to_end(&mut fate), Outcome::Failed(Failure::NotAnswering));
     // Each begin resumes at 2048 and sends it until the streak gives up on it.
     let per_begin = MAX_SEND_FAILURES as usize + 1;
-    assert_eq!(bench.count(Out::Chunk(2048)), per_begin * MAX_BEGINS as usize);
-    assert_eq!(bench.count(Out::Begin), MAX_BEGINS as usize);
+    let begins = MAX_REBEGINS as usize + 1;
+    assert_eq!(bench.count(Out::Chunk(2048)), per_begin * begins);
+    assert_eq!(bench.count(Out::Begin), begins, "the first begin and every return to it");
+    assert_eq!(bench.sent.last(), Some(&Out::Abort), "the node is told to leave update mode");
 }
 
 #[test]
@@ -517,6 +532,102 @@ fn ota_session_fails_when_node_reports_hash_mismatch() {
     let mut bench = Bench::new(&wrong);
     assert_eq!(bench.run_to_end(&mut deliver), Outcome::Failed(Failure::HashMismatch));
     assert_eq!(bench.node.version, OLD);
+}
+
+#[test]
+fn ota_session_sends_abort_when_failing_after_node_accepted() {
+    let mut wrong = image(NEW);
+    wrong.sha256[0] ^= 1;
+    let mut bench = Bench::new(&wrong);
+    assert_eq!(bench.run_to_end(&mut deliver), Outcome::Failed(Failure::HashMismatch));
+    // Once, so the node leaves update mode now rather than after 30 s of silence.
+    assert_eq!(bench.sent.last(), Some(&Out::Abort));
+    assert_eq!(bench.count(Out::Abort), 1);
+    assert!(!bench.node.receiver.is_active());
+}
+
+#[test]
+fn ota_session_sends_no_abort_when_begin_is_never_accepted() {
+    let mut bench = Bench::new(&image(NEW));
+    assert_eq!(bench.run_to_end(&mut |_| Fate::Lose), Outcome::Failed(Failure::NoAnswer));
+    assert_eq!(bench.count(Out::Abort), 0);
+}
+
+#[test]
+fn ota_session_confirms_instead_of_streaming_again_when_rebegun_after_install() {
+    let mut bench = Bench::new(&image(NEW));
+    let mut first = true;
+    // `Verified` is lost; every resent commit then goes unacked while the node reboots into
+    // the new image, which returns the session to its `begin`.
+    let mut fate = |out| match out {
+        Out::Commit if first => {
+            first = false;
+            Fate::Mute
+        }
+        Out::Commit => Fate::Unacked,
+        _ => Fate::Deliver,
+    };
+    bench.run(&mut fate, Duration::from_secs(5), |b| {
+        b.sent.contains(&Out::Commit) && b.session.progress().phase == Phase::Begin
+    });
+    assert_eq!(bench.session.progress().phase, Phase::Begin);
+    assert_eq!((bench.node.version, bench.node.trial), (NEW, true));
+    // The new image's first heartbeat is confirmed, never answered with a `begin`.
+    assert_eq!(bench.run_to_end(&mut deliver), Outcome::Done(NEW));
+    assert_eq!(bench.count(Out::Begin), 1, "no second begin");
+    assert_eq!(bench.count(Out::Chunk(0)), 1, "no second stream");
+    assert!(!bench.node.trial);
+}
+
+#[test]
+fn ota_session_resends_confirm_when_its_ack_is_lost_on_same_version() {
+    // `--force` onto the version the node runs: only an acked confirm says it is done.
+    let mut bench = Bench::from(&image(NEW), NEW);
+    let mut first = true;
+    let mut fate = |out| {
+        if out == Out::Confirm && first {
+            first = false;
+            return Fate::Unheard;
+        }
+        Fate::Deliver
+    };
+    assert_eq!(bench.run_to_end(&mut fate), Outcome::Done(NEW));
+    assert!(!bench.node.trial);
+    assert_eq!(bench.count(Out::Confirm), 2, "once more after the lost ack");
+}
+
+#[test]
+fn ota_session_confirms_trial_node_when_started_to_confirm() {
+    let start = Instant::now();
+    let now = |ms| Now { mono: start + Duration::from_millis(ms), unix_ms: 0 };
+    let mut session = OtaSession::confirm_trial(NODE, NEW, 1, now(0));
+    let beat = heartbeat(NEW, true);
+    let sends = session.handle(now(10), OtaEvent::Rx { src: NODE, payload: &beat });
+    let [HostToBridge::SendEspNow { id, payload, .. }] = sends.as_slice() else {
+        panic!("one confirm: {sends:?}")
+    };
+    assert_eq!(summarize(payload), Out::Confirm);
+    session.handle(now(20), OtaEvent::SendResult { id: *id, status: SendStatus::AckOk });
+    let beat = heartbeat(NEW, false);
+    session.handle(now(1000), OtaEvent::Rx { src: NODE, payload: &beat });
+    assert_eq!(session.outcome(), Some(&Outcome::Done(NEW)));
+}
+
+#[test]
+fn ota_session_ignores_stale_status_when_newer_one_arrived_first() {
+    let mut bench = Bench::new(&image(NEW));
+    // Stopped with chunk 7168 queued and the node's last status at 4096.
+    bench.run(&mut deliver, Duration::from_secs(5), |b| b.sent.contains(&Out::Chunk(6144)));
+    // Two gap statuses, the newer first: the older is stale and must not rewind the host.
+    let status = |next_offset| {
+        OtaStatusMsg { session: SESSION, state: OtaState::Receiving, next_offset }.encode()
+    };
+    bench.feed(OtaEvent::Rx { src: NODE, payload: &status(6144) });
+    bench.feed(OtaEvent::Rx { src: NODE, payload: &status(5120) });
+    assert_eq!(bench.run_to_end(&mut deliver), Outcome::Done(NEW));
+    assert_eq!(bench.count(Out::Chunk(6144)), 2, "rewound to the newer gap");
+    assert_eq!(bench.count(Out::Chunk(5120)), 1, "never to the stale one");
+    bench.assert_image_written();
 }
 
 #[test]
@@ -663,20 +774,21 @@ fn sim_image(version: Version) -> OtaImage {
 }
 
 #[tokio::test(start_paused = true)]
-async fn drive_ota_updates_sim_fleet_when_one_node_drops_chunks_and_one_rolls_back() {
+async fn drive_ota_updates_sim_fleet_when_nodes_drop_chunks_lose_verified_and_roll_back() {
     let old = wartui_bridge::sim::minor_behind(wartui_proto::air::NODE_VERSION);
     let mut link = SimTransport::new(SimConfig {
-        node_count: 3,
+        node_count: 4,
         speed: SPEED,
         fleet_version: old,
         lossy_node: Some((1, 0.2)),
         rejecting_node: Some(2),
+        mute_verified_node: Some(3),
         ..SimConfig::default()
     })
     .start()
     .expect("starting the simulator");
     connected(&mut link).await;
-    let nodes: Vec<Mac> = (0..3).map(SimTransport::node_mac).collect();
+    let nodes: Vec<Mac> = (0..4).map(SimTransport::node_mac).collect();
     for caps in versions(&mut link, &nodes).await {
         assert_eq!((caps.version, caps.trial), (old, false));
     }
@@ -695,9 +807,11 @@ async fn drive_ota_updates_sim_fleet_when_one_node_drops_chunks_and_one_rolls_ba
     assert_eq!(outcomes[0], Outcome::Done(new));
     assert_eq!(outcomes[1], Outcome::Done(new), "chunk drops are recovered");
     assert_eq!(outcomes[2], Outcome::Failed(Failure::RolledBack(old)));
+    assert_eq!(outcomes[3], Outcome::Done(new), "a lost `Verified` is recovered");
 
     let after = versions(&mut link, &nodes).await;
     assert_eq!((after[0].version, after[0].trial), (new, false));
     assert_eq!((after[1].version, after[1].trial), (new, false));
     assert_eq!((after[2].version, after[2].trial), (old, false));
+    assert_eq!((after[3].version, after[3].trial), (new, false));
 }
