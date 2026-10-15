@@ -38,11 +38,11 @@ The two directions carry different frame sizes:
 | Direction  | ESP-NOW payload                      | Link frame                    |
 | ---------- | ------------------------------------ | ----------------------------- |
 | host → air | up to 1470 bytes (`SendPayload`, v2) | up to 1600 (`MAX_HOST_FRAME`) |
-| air → host | up to 250 bytes (`EspNowPayload`)    | up to 512 (`MAX_FRAME`)       |
+| air → host | up to 1024 bytes (`EspNowPayload`)   | up to 1152 (`MAX_FRAME`)      |
 
 Both chips run ESP-NOW v2 and take 1470-byte frames intact
 ([`docs/espnow-v2-findings.md`](../../docs/espnow-v2-findings.md)). Nothing a wartui node sends is
-longer than 250 bytes, so the outbox's slots stay at 512. A received frame over 250 bytes is
+longer than 1024 bytes, so each outbox slot is 1152. A received frame over 1024 bytes is
 somebody else's: the bridge drops it without a log line and counts it in `Status.rx_oversize`,
 not in `rx_count`.
 

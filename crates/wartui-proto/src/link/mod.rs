@@ -12,13 +12,12 @@
 //! transfers are checked and retried in hardware. It rejects half-written frames, and
 //! the ROM banner a reset prints down the same pipe.
 //!
-//! The two directions carry different sizes. Host to bridge, a
-//! [`HostToBridge::SendEspNow`] holds up to [`MAX_ESPNOW_V2_PAYLOAD`] bytes, because both
-//! chips run ESP-NOW v2 and an update chunk needs more than 250 bytes; it travels in a
-//! frame of up to [`MAX_HOST_FRAME`]. Bridge to host, a [`BridgeToHost::Rx`] holds at most
-//! [`MAX_ESPNOW_PAYLOAD`], because nothing a node sends is longer, and travels in a frame
-//! of up to [`MAX_FRAME`]. That keeps the bridge's outbox slots at 512 bytes. See
-//! `docs/espnow-v2-findings.md`.
+//! The two directions carry different sizes. Both chips run ESP-NOW v2. Host to bridge, a
+//! [`HostToBridge::SendEspNow`] holds up to [`MAX_ESPNOW_V2_PAYLOAD`] (1470) bytes, so an
+//! update chunk fits, and travels in a frame of up to [`MAX_HOST_FRAME`]. Bridge to host, a
+//! [`BridgeToHost::Rx`] holds at most [`MAX_NODE_PAYLOAD`] (1024), because nothing a node
+//! sends is longer, and travels in a frame of up to [`MAX_FRAME`], which is also the size
+//! of each of the bridge's outbox slots. See `docs/espnow-v2-findings.md`.
 
 use crate::mac::Mac;
 use crate::reset::ResetCause;
@@ -45,24 +44,25 @@ pub use panel::{PANEL_ROWS, Panel, PanelLine, PanelLines, Severity};
 /// reads as one that answered nothing. Every addition to these enums goes on the end.
 pub const LINK_PROTO_VERSION: u8 = 1;
 
-/// The longest frame a node sends: ESP-NOW v1's payload ceiling. A
-/// [`crate::air::SightingBatch`] fills it exactly. The bridge drops anything longer it
-/// hears, and counts it in [`BridgeToHost::Status`]'s `rx_oversize`.
-pub const MAX_ESPNOW_PAYLOAD: usize = 250;
+/// The longest frame a node sends. A [`crate::air::SightingBatch`] fills it exactly. The
+/// bridge drops anything longer it hears, and counts it in [`BridgeToHost::Status`]'s
+/// `rx_oversize`.
+pub const MAX_NODE_PAYLOAD: usize = 1024;
 
 /// ESP-NOW v2's payload ceiling (`ESP_NOW_MAX_DATA_LEN_V2`), the longest frame the host
 /// sends. Both chips take it intact; see `docs/espnow-v2-findings.md`.
 pub const MAX_ESPNOW_V2_PAYLOAD: usize = 1470;
 
-/// Buffer size for one encoded bridge-to-host frame, and the size of each outbox slot.
-pub const MAX_FRAME: usize = 512;
+/// Buffer size for one encoded bridge-to-host frame, and the size of each outbox slot: a
+/// [`BridgeToHost::Rx`] carrying a full [`MAX_NODE_PAYLOAD`], with room for framing.
+pub const MAX_FRAME: usize = 1152;
 
 /// Buffer size for one encoded host-to-bridge frame: a [`HostToBridge::SendEspNow`]
 /// carrying a full [`MAX_ESPNOW_V2_PAYLOAD`], with room for framing.
 pub const MAX_HOST_FRAME: usize = 1600;
 
 /// An ESP-NOW payload a node sent, in transit to the host.
-pub type EspNowPayload = Vec<u8, MAX_ESPNOW_PAYLOAD>;
+pub type EspNowPayload = Vec<u8, MAX_NODE_PAYLOAD>;
 
 /// An ESP-NOW payload the host sends, in transit to the bridge.
 pub type SendPayload = Vec<u8, MAX_ESPNOW_V2_PAYLOAD>;
@@ -309,7 +309,7 @@ pub enum BridgeToHost {
         dropped_tx: u32,
         /// Bridge uptime.
         uptime_ms: u32,
-        /// Received frames longer than [`MAX_ESPNOW_PAYLOAD`], dropped since boot. No
+        /// Received frames longer than [`MAX_NODE_PAYLOAD`], dropped since boot. No
         /// wartui node sends one, so these are somebody else's traffic.
         rx_oversize: u32,
     },

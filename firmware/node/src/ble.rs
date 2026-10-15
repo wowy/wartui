@@ -73,12 +73,12 @@ const _: () = assert!(
 /// starting.
 ///
 /// The burst is also what bounds the C6's size. A full buffer drains back to back,
-/// a batch every half millisecond or so, faster than the bridge forwards frames to
-/// USB at under a millisecond each, and the difference queues in the bridge's
-/// outbox, which drops its oldest. Measured against C5 and C6 bridges,
-/// bursts of 31 batches (512 reports) arrived whole, and loss began at about 46.
-/// At 256 reports a full buffer is 16 batches, which leaves most of the outbox for
-/// the rest of the fleet arriving at the same moment. A lost batch was acknowledged
+/// faster than the bridge forwards frames to USB, and the difference queues in the
+/// bridge's outbox, which drops its oldest. Measured against C5 and C6 bridges with
+/// 250-byte batches, bursts of 31 batches (512 reports) arrived whole, and loss
+/// began at about 46. A batch fills up to 1024 bytes, so 256 reports pack into about
+/// four, which leaves most of the outbox's 24 slots for the rest of the fleet
+/// arriving at the same moment. A lost batch was acknowledged
 /// over the air, so its advertisers are already in [`sniff::SEEN`] and stay hidden
 /// until the refresh.
 ///

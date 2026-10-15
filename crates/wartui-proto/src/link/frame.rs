@@ -1,15 +1,15 @@
 use serde::{Serialize, de::DeserializeOwned};
 
 use super::{
-    BridgeToHost, HostToBridge, LINK_PROTO_VERSION, MAX_ESPNOW_PAYLOAD, MAX_ESPNOW_V2_PAYLOAD,
-    MAX_FRAME, MAX_HOST_FRAME, PANEL_ROWS,
+    BridgeToHost, HostToBridge, LINK_PROTO_VERSION, MAX_ESPNOW_V2_PAYLOAD, MAX_FRAME,
+    MAX_HOST_FRAME, MAX_NODE_PAYLOAD, PANEL_ROWS,
 };
 
 // A frame is the version byte, the payload and the CRC, plus COBS overhead (one byte
 // per 254 and a leading marker) and the terminator. Checked here so a payload that
 // outgrew the buffer is a build error, not a silent truncation.
 const MAX_BODY: usize = MAX_FRAME - 8;
-const _: () = assert!(MAX_ESPNOW_PAYLOAD + 32 < MAX_BODY);
+const _: () = assert!(MAX_NODE_PAYLOAD + 32 < MAX_BODY);
 // The same for the host-to-bridge direction, whose longest frame is a full v2 send.
 // COBS adds one byte per 254, so 16 covers it with the terminator.
 const MAX_HOST_BODY: usize = MAX_HOST_FRAME - 16;

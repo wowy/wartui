@@ -284,7 +284,7 @@ impl ByteSink for UsbSink<'_> {
     }
 }
 
-/// The outbound rings, which are sixteen kilobytes of buffers and belong in
+/// The outbound rings, which are thirty-six kilobytes of buffers and belong in
 /// `.bss` rather than being built on the stack and moved into place.
 static OUTBOX: StaticCell<Outbox> = StaticCell::new();
 
@@ -684,7 +684,7 @@ fn drain_radio(receiver: &EspNowReceiver<'_>, bridge: &mut Bridge) -> bool {
 
 /// Queue one received frame for the host.
 ///
-/// Out of line for the reason [`finish_radio_setup`] is: it builds a 276-byte
+/// Out of line for the reason [`finish_radio_setup`] is: it builds a 1048-byte
 /// [`BridgeToHost`], and `main`'s poll frame sits near `.clippy.toml`'s threshold on
 /// the C5.
 #[inline(never)]
@@ -897,7 +897,7 @@ const fn peer(mac: &Mac) -> PeerInfo {
 /// lost to it.
 ///
 /// Out of `main` because `main` sits at `.clippy.toml`'s stack threshold on the C5,
-/// and every `Error` frame built there is another 276 bytes of its frame.
+/// and every `Error` frame built there is another 1048 bytes of its frame.
 #[inline(never)]
 fn finish_radio_setup(manager: &EspNowManager<'_>, bridge: &mut Bridge, tx_power_capped: bool) {
     if !tx_power_capped {

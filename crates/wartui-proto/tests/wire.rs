@@ -16,7 +16,7 @@ use wartui_proto::air::{
     SIGHTINGS_PER_BATCH_MAX, SSID_MAX, Security, SightingBatch, SightingBatchWriter, SightingMsg,
     Vdd, Version, WIRE_VERSION, foreign,
 };
-use wartui_proto::link::{MAX_ESPNOW_PAYLOAD, MAX_ESPNOW_V2_PAYLOAD};
+use wartui_proto::link::{MAX_ESPNOW_V2_PAYLOAD, MAX_NODE_PAYLOAD};
 use wartui_proto::plan::{ChannelSet, IndexRun};
 use wartui_proto::reset::ResetCause;
 
@@ -261,11 +261,11 @@ fn wire_codec_matches_expected_frame_lengths_when_checking_constants() {
     assert_eq!(CLEAR.len(), CLEAR_MSG_LEN, "header only, nothing else");
     // The point of the whole exercise: a heartbeat was 212 bytes and a
     // sighting was 212 bytes, on a control channel every node shares. The
-    // ceiling is the 250 bytes every node frame keeps to, and a batch is packed
+    // ceiling is the 1024 bytes every node frame keeps to, and a batch is packed
     // to fill exactly that many.
     const {
         assert!(HEARTBEAT_MSG_LEN < 32 && SIGHTING_RECORD_MAX < SIGHTING_BATCH_MAX);
-        assert!(SIGHTING_BATCH_MAX == 250);
+        assert!(SIGHTING_BATCH_MAX == 1024);
     };
 }
 
@@ -808,9 +808,9 @@ fn sighting_batch_writer_packs_mixed_records_byte_for_byte_when_built() {
 
 #[test]
 fn sighting_batch_writer_fills_to_batch_ceiling_when_packing_minimal_records() {
-    // Nineteen bare records and one carrying a one-byte SSID sum to exactly
-    // 241 bytes behind the nine-byte header: 250 total, the batch ceiling,
-    // reached at exactly SIGHTINGS_PER_BATCH_MAX records.
+    // Eighty-three bare records and one carrying a seven-byte SSID sum to
+    // exactly 1015 bytes behind the nine-byte header: 1024 total, the batch
+    // ceiling, reached at exactly SIGHTINGS_PER_BATCH_MAX records.
     let minimal = SightingMsg {
         kind: RecordKind::Ble,
         bssid: [0; 6],
@@ -824,7 +824,7 @@ fn sighting_batch_writer_fills_to_batch_ceiling_when_packing_minimal_records() {
     for _ in 0..SIGHTINGS_PER_BATCH_MAX - 1 {
         assert!(writer.push(&minimal));
     }
-    assert!(writer.push(&SightingMsg { ssid: b"x", ..minimal }));
+    assert!(writer.push(&SightingMsg { ssid: b"7 bytes", ..minimal }));
     assert_eq!(writer.len(), SIGHTINGS_PER_BATCH_MAX);
     assert_eq!(writer.as_bytes().len(), SIGHTING_BATCH_MAX);
 
@@ -1178,11 +1178,11 @@ fn wire_codec_matches_expected_ota_frame_lengths_when_checking_constants() {
     assert_eq!(OTA_CONFIRM_MSG_LEN, 6);
     assert_eq!(OTA_STATUS.len(), OTA_STATUS_MSG_LEN);
     assert_eq!(OTA_STATUS_MSG_LEN, 12);
-    // A chunk needs ESP-NOW v2; the status, like all a node sends, keeps to v1.
+    // A chunk is longer than anything a node sends; the status keeps to the node ceiling.
     const {
         assert!(OTA_CHUNK_MSG_MAX <= MAX_ESPNOW_V2_PAYLOAD);
-        assert!(OTA_CHUNK_MSG_MAX > MAX_ESPNOW_PAYLOAD);
-        assert!(OTA_STATUS_MSG_LEN <= MAX_ESPNOW_PAYLOAD);
+        assert!(OTA_CHUNK_MSG_MAX > MAX_NODE_PAYLOAD);
+        assert!(OTA_STATUS_MSG_LEN <= MAX_NODE_PAYLOAD);
     };
 }
 

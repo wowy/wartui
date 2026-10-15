@@ -1,5 +1,5 @@
 use super::{DecodeError, MsgType, OFFSET_BODY, Security, header, write_header};
-use crate::link::MAX_ESPNOW_PAYLOAD;
+use crate::link::MAX_NODE_PAYLOAD;
 
 /// Longest SSID 802.11 allows, and so the most a record carries.
 pub const SSID_MAX: usize = 32;
@@ -23,11 +23,11 @@ pub const SIGHTING_RECORD_MAX: usize = SIGHTING_RECORD_MIN + SSID_MAX + EXT_MAX;
 /// Length of a [`SightingBatch`] header: magic, version, type, `seq` and `count`.
 pub const SIGHTING_BATCH_HEADER: usize = OFFSET_BODY + 3;
 
-/// The most a [`SightingBatch`] may be on the wire: ESP-NOW's own payload ceiling, so a
-/// batch fills exactly one frame.
-pub const SIGHTING_BATCH_MAX: usize = 250;
+/// The most a [`SightingBatch`] may be on the wire: the longest frame a node sends, so a
+/// full batch fills exactly one frame.
+pub const SIGHTING_BATCH_MAX: usize = 1024;
 
-const _: () = assert!(SIGHTING_BATCH_MAX == MAX_ESPNOW_PAYLOAD);
+const _: () = assert!(SIGHTING_BATCH_MAX == MAX_NODE_PAYLOAD);
 
 /// The most records a batch can carry: the header taken off the ceiling, divided by
 /// the smallest record.
