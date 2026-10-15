@@ -52,7 +52,7 @@ pub use sighting::{
     SIGHTING_RECORD_MIN, SIGHTINGS_PER_BATCH_MAX, SSID_MAX, SightingBatch, SightingBatchWriter,
     SightingMsg,
 };
-pub use version::{NODE_VERSION, Version};
+pub use version::{Compat, NODE_VERSION, Version};
 
 /// Frame preamble, `"WTUI"`. Four raw bytes, not a NUL-terminated string.
 pub const MAGIC: [u8; 4] = *b"WTUI";

@@ -127,7 +127,8 @@ antenna, so there is nothing to switch.
 `version` in `Cargo.toml` is bumped on every firmware change. Before 1.0, a minor bump may change
 the wire and a patch bump may not. `wartui_proto::air::NODE_VERSION` mirrors it, and a test in
 `crates/wartui-proto/tests/version.rs` fails when the two differ. The host drives a node on its own
-major and minor at any patch, and shows any other node as `needs update`.
+major and minor at any patch. It shows a node on an older major or minor as `needs update`, and
+one on a newer as `host behind`, and drives neither.
 
 The frame header, the heartbeat's type byte and its five-byte prefix never change before 1.0. They
 are how a host finds a node a minor version behind, at whatever length that build's heartbeat is.

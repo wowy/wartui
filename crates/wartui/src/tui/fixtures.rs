@@ -62,10 +62,21 @@ pub(super) fn narrowband(last: u8) -> NodeView {
 pub(super) fn outdated(last: u8) -> NodeView {
     let mut view = node(last, 0, false);
     let caps = Capabilities::here(Board::Esp32c5);
-    let version = Version { minor: NODE_VERSION.minor.wrapping_sub(1), ..NODE_VERSION };
+    let version = wartui_bridge::sim::minor_behind(NODE_VERSION);
     view.state.capabilities = Some(Capabilities { version, ..caps });
     view.state.last_heartbeat = None;
     view.alive = false;
+    view
+}
+
+/// Heartbeating from firmware a minor version ahead of this build's: the host is the one
+/// to update, and the node is never assignable.
+pub(super) fn ahead(last: u8) -> NodeView {
+    let mut view = outdated(last);
+    let minor = NODE_VERSION.minor.checked_add(1).expect("a minor after this one");
+    let caps = view.state.capabilities.expect("outdated sets one");
+    view.state.capabilities =
+        Some(Capabilities { version: Version { minor, ..NODE_VERSION }, ..caps });
     view
 }
 

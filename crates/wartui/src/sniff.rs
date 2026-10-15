@@ -116,17 +116,24 @@ pub async fn run(args: Args) -> Result<()> {
     }
     if counts.incompatible > 0 {
         println!(
-            "# {} frames were ours but from a build speaking a wire version this one \
-             does not. Those nodes are invisible to `run` until they are reflashed \
-             with firmware/node.",
+            "# {} frames were ours but in a wire version or layout this build does not \
+             read. Those nodes are invisible to `run` until they are reflashed with \
+             firmware/node.",
             counts.incompatible
         );
     }
     if counts.needs_update > 0 {
         println!(
-            "# {} heartbeats came from nodes on firmware other than {NODE_VERSION}. `run` \
+            "# {} heartbeats came from nodes on firmware older than {NODE_VERSION}. `run` \
              shows those nodes as `needs update` and assigns them nothing.",
             counts.needs_update
+        );
+    }
+    if counts.host_behind > 0 {
+        println!(
+            "# {} heartbeats came from nodes on firmware newer than {NODE_VERSION}. `run` \
+             shows those nodes as `host behind` and assigns them nothing; update wartui.",
+            counts.host_behind
         );
     }
     Ok(())
@@ -151,11 +158,13 @@ struct Counts {
     /// Another core's assignment. Counted apart from `foreign_fleet` because
     /// seeing any at all means something else is driving a fleet nearby.
     foreign_admin: u64,
-    /// Frames of ours from a build speaking a wire version this one does not, which is
-    /// what a fleet half-way through a reflash looks like.
+    /// Frames of ours in a wire version or layout this build does not read, as the engine
+    /// counts them, which is what a fleet half-way through a reflash looks like.
     incompatible: u64,
-    /// Heartbeats from nodes on another minor version, read from their frozen prefix.
+    /// Heartbeats from nodes on an older major or minor, read from their frozen prefix.
     needs_update: u64,
+    /// Heartbeats from nodes on a newer major or minor, read the same way.
+    host_behind: u64,
     undecodable: u64,
 }
 
@@ -201,91 +210,104 @@ fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
             let head =
                 format!("{:>10}us  {}  {rssi:>4}dBm  {addressing:>7}", rx_us, mac::full(src));
 
-            match Frame::decode(payload) {
-                Ok(Frame::Heartbeat(heartbeat)) => {
-                    counts.heartbeat += 1;
-                    println!(
-                        "{head}  HEARTBEAT #{} b{} e{} u{} d{}<{} p{} {}  {}",
-                        heartbeat.counter,
-                        heartbeat.beat,
-                        heartbeat.epoch,
-                        heartbeat.unsent,
-                        heartbeat.dwell,
-                        heartbeat.prev_dwell,
-                        heartbeat.tx_power,
-                        heartbeat.reset_cause,
-                        heartbeat.capabilities
-                    );
+            // A heartbeat from another major or minor opens with the frozen prefix, which
+            // names the node's firmware. The rest is not this build's layout, even when its
+            // length happens to match.
+            let undrivable = Capabilities::decode_prefix(payload)
+                .ok()
+                .filter(|caps| !caps.version.compat_with_host().drivable());
+            if let Some(caps) = undrivable {
+                if caps.version.compat_with_host().node_behind() {
+                    counts.needs_update += 1;
+                    println!("{head}  HEARTBEAT {caps}, needs update to {NODE_VERSION}");
+                } else {
+                    counts.host_behind += 1;
+                    println!("{head}  HEARTBEAT {caps}, newer than this host's {NODE_VERSION}");
                 }
-                Ok(Frame::Sightings(sightings)) => {
-                    counts.batches += 1;
-                    for (i, (sighting, _raw)) in sightings.iter().enumerate() {
-                        counts.sighting += 1;
+            } else {
+                match Frame::decode(payload) {
+                    Ok(Frame::Heartbeat(heartbeat)) => {
+                        counts.heartbeat += 1;
                         println!(
-                            "{head}  B#{} {}/{}  {}",
-                            sightings.seq,
-                            i + 1,
-                            sightings.count,
-                            render(&sighting)
+                            "{head}  HEARTBEAT #{} b{} e{} u{} d{}<{} p{} {}  {}",
+                            heartbeat.counter,
+                            heartbeat.beat,
+                            heartbeat.epoch,
+                            heartbeat.unsent,
+                            heartbeat.dwell,
+                            heartbeat.prev_dwell,
+                            heartbeat.tx_power,
+                            heartbeat.reset_cause,
+                            heartbeat.capabilities
                         );
                     }
-                }
-                Ok(Frame::Admin(admin)) => {
-                    counts.admin += 1;
-                    let indices: Vec<String> =
-                        admin.channels.indices().map(|idx| idx.to_string()).collect();
-                    // `none` rather than nothing: the one frame with an empty set is
-                    // the Bluetooth node's, and a blank there reads as a bug.
-                    let indices =
-                        if indices.is_empty() { "none".to_owned() } else { indices.join(",") };
-                    println!(
-                        "{head}  ADMIN e{}{} channel idx {}  -> {}",
-                        admin.epoch,
-                        if admin.scan_ble() { " +ble" } else { "" },
-                        indices,
-                        mac::full(dst),
-                    );
-                }
-                // A clear this host did not send is the same fact as an assignment
-                // it did not send: something else is driving these nodes.
-                Ok(Frame::Clear(_)) => {
-                    counts.admin += 1;
-                    println!("{head}  CLEAR  -> {}", mac::full(dst));
-                }
-                // Named rather than left as "undecodable": a fleet half-way
-                // through a reflash is exactly what this looks like.
-                Err(DecodeError::BadVersion(version)) => {
-                    counts.incompatible += 1;
-                    println!("{head}  wire version {version}, which this build does not speak");
-                }
-                // Also named: another fleet on this channel is transmitting
-                // where these nodes are listening.
-                Err(DecodeError::BadMagic) => match foreign::classify(payload) {
-                    Some(foreign::Foreign::Admin) => {
-                        counts.foreign_admin += 1;
-                        println!("{head}  ADMIN from a vendor core  -> {}", mac::full(dst));
+                    Ok(Frame::Sightings(sightings)) => {
+                        counts.batches += 1;
+                        for (i, (sighting, _raw)) in sightings.iter().enumerate() {
+                            counts.sighting += 1;
+                            println!(
+                                "{head}  B#{} {}/{}  {}",
+                                sightings.seq,
+                                i + 1,
+                                sightings.count,
+                                render(&sighting)
+                            );
+                        }
                     }
-                    Some(foreign::Foreign::Node) => {
-                        counts.foreign_fleet += 1;
-                        println!("{head}  a vendor node's frame");
+                    Ok(Frame::Admin(admin)) => {
+                        counts.admin += 1;
+                        let indices: Vec<String> =
+                            admin.channels.indices().map(|idx| idx.to_string()).collect();
+                        // `none` rather than nothing: the one frame with an empty set is
+                        // the Bluetooth node's, and a blank there reads as a bug.
+                        let indices =
+                            if indices.is_empty() { "none".to_owned() } else { indices.join(",") };
+                        println!(
+                            "{head}  ADMIN e{}{} channel idx {}  -> {}",
+                            admin.epoch,
+                            if admin.scan_ble() { " +ble" } else { "" },
+                            indices,
+                            mac::full(dst),
+                        );
                     }
-                    None => {
-                        counts.undecodable += 1;
-                        println!("{head}  undecodable: not ESP-NOW wardriving traffic");
+                    // A clear this host did not send is the same fact as an assignment
+                    // it did not send: something else is driving these nodes.
+                    Ok(Frame::Clear(_)) => {
+                        counts.admin += 1;
+                        println!("{head}  CLEAR  -> {}", mac::full(dst));
                     }
-                },
-                // A heartbeat from another minor version still opens with the frozen
-                // prefix, which names the node's firmware.
-                Err(err) => match Capabilities::decode_prefix(payload) {
-                    Ok(caps) if !NODE_VERSION.speaks_with(&caps.version) => {
-                        counts.needs_update += 1;
-                        println!("{head}  HEARTBEAT {caps}, needs update to {NODE_VERSION}");
+                    // Named rather than left as "undecodable": a fleet half-way
+                    // through a reflash is exactly what this looks like.
+                    Err(DecodeError::BadVersion(version)) => {
+                        counts.incompatible += 1;
+                        println!("{head}  wire version {version}, which this build does not speak");
                     }
-                    _ => {
+                    // Also named: another fleet on this channel is transmitting
+                    // where these nodes are listening.
+                    Err(DecodeError::BadMagic) => match foreign::classify(payload) {
+                        Some(foreign::Foreign::Admin) => {
+                            counts.foreign_admin += 1;
+                            println!("{head}  ADMIN from a vendor core  -> {}", mac::full(dst));
+                        }
+                        Some(foreign::Foreign::Node) => {
+                            counts.foreign_fleet += 1;
+                            println!("{head}  a vendor node's frame");
+                        }
+                        None => {
+                            counts.undecodable += 1;
+                            println!("{head}  undecodable: not ESP-NOW wardriving traffic");
+                        }
+                    },
+                    // Ours, from a node on this minor: a bug in one of the two builds.
+                    Err(DecodeError::BadLength { need, got }) => {
+                        counts.incompatible += 1;
+                        println!("{head}  frame is {got} bytes, not {need}");
+                    }
+                    Err(err) => {
                         counts.undecodable += 1;
                         println!("{head}  undecodable: {err:?}");
                     }
-                },
+                }
             }
 
             if args.raw {
@@ -405,5 +427,71 @@ mod tests {
     #[test]
     fn sniff_cmd_marks_bridge_heard_when_receiving_disconnected_event_with_reason() {
         assert!(heard(LinkEvent::Disconnected { reason: "could not open".to_owned() }));
+    }
+
+    /// Count one received `payload` the way `handle` does.
+    fn counted(payload: &[u8]) -> Counts {
+        let mut counts = Counts::default();
+        let rx = BridgeToHost::Rx {
+            src: [0x02, 0, 0, 0, 0x57, 0x84],
+            dst: BROADCAST,
+            rssi: -41,
+            rx_us: 0,
+            payload: wartui_proto::link::EspNowPayload::from_slice(payload).expect("fits"),
+        };
+        handle(LinkEvent::Message(rx), &args(), &mut counts);
+        counts
+    }
+
+    fn heartbeat_with(version: wartui_proto::air::Version) -> Vec<u8> {
+        use wartui_proto::air::{Board, DieTemp, HeartbeatMsg, Vdd};
+        HeartbeatMsg {
+            counter: 1,
+            epoch: 0,
+            capabilities: Capabilities { version, ..Capabilities::here(Board::Esp32c5) },
+            wifi_refused: 0,
+            ble_refused: 0,
+            beat: 1,
+            unsent: 0,
+            dwell: 0,
+            prev_dwell: 0,
+            tx_power: 8,
+            reset_cause: wartui_proto::reset::ResetCause::PowerOn,
+            vdd: Vdd::NONE,
+            die_temp: DieTemp::NONE,
+        }
+        .encode()
+        .to_vec()
+    }
+
+    #[test]
+    fn sniff_cmd_counts_heartbeat_when_node_runs_this_minor() {
+        let counts = counted(&heartbeat_with(NODE_VERSION));
+        assert_eq!((counts.heartbeat, counts.needs_update, counts.host_behind), (1, 0, 0));
+    }
+
+    #[test]
+    fn sniff_cmd_counts_needs_update_when_full_length_heartbeat_names_older_minor() {
+        // Full length, so it would decode, but past the prefix its fields are not ours.
+        let counts = counted(&heartbeat_with(wartui_bridge::sim::minor_behind(NODE_VERSION)));
+        assert_eq!((counts.heartbeat, counts.needs_update, counts.incompatible), (0, 1, 0));
+    }
+
+    #[test]
+    fn sniff_cmd_counts_host_behind_when_heartbeat_names_newer_minor() {
+        let minor = NODE_VERSION.minor + 1;
+        let ahead = wartui_proto::air::Version { minor, ..NODE_VERSION };
+        let mut frame = heartbeat_with(ahead);
+        frame.truncate(14);
+        let counts = counted(&frame);
+        assert_eq!((counts.heartbeat, counts.host_behind, counts.incompatible), (0, 1, 0));
+    }
+
+    #[test]
+    fn sniff_cmd_counts_incompatible_when_this_minor_sends_wrong_length() {
+        let mut frame = heartbeat_with(NODE_VERSION);
+        frame.push(0);
+        let counts = counted(&frame);
+        assert_eq!((counts.incompatible, counts.undecodable, counts.heartbeat), (1, 0, 0));
     }
 }

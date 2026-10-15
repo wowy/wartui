@@ -34,7 +34,6 @@ use std::collections::{BTreeMap, VecDeque};
 use std::time::Instant;
 
 use wartui_bridge::{BridgeInfo, LinkEvent};
-use wartui_proto::air::NODE_VERSION;
 use wartui_proto::link::{BridgeToHost, HostToBridge};
 use wartui_proto::mac::{self, Mac};
 use wartui_proto::plan::{Job, Plan};
@@ -402,7 +401,7 @@ impl FleetEngine {
     #[must_use]
     pub fn is_assignable(&self, node: &NodeState, now: Now) -> bool {
         self.is_alive(node, now)
-            && node.capabilities.is_some_and(|caps| NODE_VERSION.speaks_with(&caps.version))
+            && node.capabilities.is_some_and(|caps| caps.version.compat_with_host().drivable())
             && !node.peer_refused
     }
 

@@ -115,6 +115,19 @@ impl Default for SimConfig {
     }
 }
 
+/// `version` one minor back, patch kept: what [`SimConfig::outdated_node`] announces, and
+/// what tests use for a node that needs an update.
+///
+/// # Panics
+/// When `version`'s minor is 0, which has no minor before it.
+#[must_use]
+pub fn minor_behind(version: Version) -> Version {
+    let Some(minor) = version.minor.checked_sub(1) else {
+        panic!("{version} has no minor before it; give the outdated node another version");
+    };
+    Version { minor, ..version }
+}
+
 /// Advertisers one simulated scan can turn up, each subject to
 /// [`SimConfig::ble_chance`].
 ///
@@ -190,7 +203,7 @@ impl SimTransport {
             // radios as the fleet grows.
             let five_ghz = self.config.node_count - index > self.config.c6_nodes;
             let version = if self.config.outdated_node == Some(index) {
-                Version { minor: NODE_VERSION.minor.wrapping_sub(1), ..NODE_VERSION }
+                minor_behind(NODE_VERSION)
             } else {
                 NODE_VERSION
             };

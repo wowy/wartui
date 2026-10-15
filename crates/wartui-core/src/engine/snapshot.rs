@@ -19,8 +19,10 @@ pub struct Counters {
     pub heartbeats: u64,
     /// Frames that were not ours and were not the vendor's either.
     pub undecodable: u64,
-    /// Frames of ours speaking another wire version. A half-flashed fleet looks like this, and
-    /// nothing else says so.
+    /// Frames of ours in a wire version or layout this build does not read: another wire version,
+    /// a wrong length, or a sighting batch from a node on another major or minor. A half-flashed
+    /// fleet looks like this, and nothing else says so. A heartbeat naming another major or minor
+    /// is not counted: its node is shown instead.
     pub incompatible: u64,
     /// Vendor heartbeats and observations: another fleet is transmitting on this channel.
     pub foreign_fleet: u64,

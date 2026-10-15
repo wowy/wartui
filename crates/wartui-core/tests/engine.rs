@@ -7,6 +7,7 @@
 use std::time::{Duration, Instant};
 
 use indexmap::IndexSet;
+use wartui_bridge::sim::minor_behind;
 use wartui_bridge::{BridgeInfo, LinkEvent};
 use wartui_core::ActionBatch;
 use wartui_core::engine::{
@@ -1180,10 +1181,19 @@ fn engine_counts_incompatible_when_wire_version_differs() {
     assert_eq!(engine.nodes().count(), 0, "it cannot be driven, so it is not in the table");
 }
 
-/// What a node a minor version away from this build announces.
+/// What a node a minor version behind this build announces.
 fn outdated_capabilities() -> Capabilities {
-    let version = Version { minor: NODE_VERSION.minor.wrapping_add(1), ..NODE_VERSION };
+    let version = minor_behind(NODE_VERSION);
     Capabilities { version, ..Capabilities::here(Board::Esp32c5) }
+}
+
+/// What a node a minor version ahead of this build announces.
+fn ahead_capabilities() -> Capabilities {
+    let minor = NODE_VERSION.minor.checked_add(1).expect("a minor after this one");
+    Capabilities {
+        version: Version { minor, ..NODE_VERSION },
+        ..Capabilities::here(Board::Esp32c5)
+    }
 }
 
 #[test]
@@ -1251,6 +1261,77 @@ fn engine_assigns_node_when_its_patch_differs() {
 
     let node = engine.nodes().find(|n| n.mac == NODE).expect("the node");
     assert!(engine.is_assignable(node, clock.at(1)));
+}
+
+#[test]
+fn engine_files_node_as_unassignable_when_heartbeat_names_a_newer_minor() {
+    // The host is the one behind, but the node's layout is still not this build's.
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(connected(), clock.at(0));
+    let batch = engine.handle(beat_at(NODE, 1, 0, ahead_capabilities(), 0), clock.at(1));
+
+    assert!(admins(&batch).is_empty());
+    assert_eq!(counters(&engine).incompatible, 0);
+    let node = engine.nodes().find(|n| n.mac == NODE).expect("the node is filed");
+    assert_eq!(node.capabilities, Some(ahead_capabilities()));
+    assert!(!engine.is_assignable(node, clock.at(1)));
+}
+
+#[test]
+fn engine_drops_sightings_when_node_runs_another_minor() {
+    // It may still hold an assignment from a build that could drive it, and its batches are
+    // not this build's layout even when they parse.
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(beat_at(NODE, 1, 0, outdated_capabilities(), 0), clock.at(1));
+    let batch = engine.handle(observation(NODE, "AA:BB:CC:DD:EE:FF", -60), clock.at(2));
+
+    assert_eq!(observations(&batch), 0, "nothing reaches the store");
+    assert_eq!(counters(&engine).observations, 0);
+    assert_eq!(counters(&engine).incompatible, 1);
+
+    engine.handle(beat_at(OTHER, 1, 0, ahead_capabilities(), 0), clock.at(3));
+    engine.handle(observation(OTHER, "AA:BB:CC:DD:EE:FF", -60), clock.at(4));
+    assert_eq!(counters(&engine).observations, 0);
+    assert_eq!(counters(&engine).incompatible, 2);
+}
+
+#[test]
+fn engine_records_sightings_when_node_has_not_heartbeated() {
+    // Nothing yet says what it runs, so it is not presumed incompatible.
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(observation(NODE, "AA:BB:CC:DD:EE:FF", -60), clock.at(1));
+
+    assert_eq!(counters(&engine).observations, 1);
+    assert_eq!(counters(&engine).incompatible, 0);
+}
+
+#[test]
+fn engine_withdraws_ble_at_once_when_scanner_reports_another_minor() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(heartbeat(peer(0), 1), clock.at(1));
+    engine.handle(heartbeat(peer(1), 1), clock.at(1));
+    engine.handle(Event::Command(Command::AssignBle { mac: Some(peer(0)) }), clock.at(2));
+
+    // Well inside the topology timeout: the scan does not wait for the node to age out.
+    engine.handle(beat_at(peer(0), 2, 0, outdated_capabilities(), 0), clock.at(3));
+
+    assert_eq!(
+        ble_state(&engine, clock.at(3)),
+        (None, Some(peer(0)), true),
+        "withdrawn, and still the preferred node"
+    );
+    let snapshot = engine.snapshot(clock.at(3), StoreStats::default());
+    let other = snapshot.nodes.iter().find(|n| n.state.mac == peer(1)).expect("the other node");
+    assert!(other.state.desired.is_some_and(|a| !a.ble), "nobody else is handed the scan");
+
+    // Updated, it takes the scan back as a returning preferred node does.
+    let batch = engine.handle(heartbeat(peer(0), 3), clock.at(4));
+    assert_eq!(ble_state(&engine, clock.at(4)).0, Some(peer(0)));
+    assert!(admins(&batch).iter().any(|admin| admin.scan_ble()));
 }
 
 /// A heartbeat frame carrying `capabilities`, otherwise empty.

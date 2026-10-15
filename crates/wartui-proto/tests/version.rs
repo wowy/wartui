@@ -1,6 +1,6 @@
 //! The node firmware's version, and the rule tying the wire to the manifest.
 
-use wartui_proto::air::{NODE_VERSION, Version};
+use wartui_proto::air::{Compat, NODE_VERSION, Version};
 
 /// `version` under `[package]` in `firmware/node/Cargo.toml`.
 fn manifest_version() -> String {
@@ -30,18 +30,47 @@ fn node_version_matches_firmware_manifest_when_compared() {
 }
 
 #[test]
-fn version_speaks_with_when_major_and_minor_match() {
-    let here = Version::new(0, 1, 3);
-    assert!(here.speaks_with(&Version::new(0, 1, 0)), "patch never changes the wire");
-    assert!(here.speaks_with(&Version::new(0, 1, 9)));
+fn version_compat_returns_same_when_versions_are_equal() {
+    let host = Version::new(0, 2, 3);
+    assert_eq!(host.compat(&host), Compat::Same);
 }
 
 #[test]
-fn version_refuses_to_speak_with_when_minor_or_major_differs() {
-    let here = Version::new(0, 1, 0);
-    assert!(!here.speaks_with(&Version::new(0, 2, 0)));
-    assert!(!here.speaks_with(&Version::new(0, 0, 9)));
-    assert!(!here.speaks_with(&Version::new(1, 1, 0)));
+fn version_compat_returns_patch_difference_when_major_and_minor_match() {
+    // A patch never changes the wire, so either direction is still drivable.
+    let host = Version::new(0, 2, 3);
+    assert_eq!(host.compat(&Version::new(0, 2, 0)), Compat::PatchBehind);
+    assert_eq!(host.compat(&Version::new(0, 2, 9)), Compat::PatchAhead);
+    assert!(Compat::PatchBehind.drivable() && Compat::PatchAhead.drivable());
+    assert!(Compat::Same.drivable());
+}
+
+#[test]
+fn version_compat_returns_node_behind_when_minor_or_major_is_older() {
+    let host = Version::new(1, 2, 0);
+    assert_eq!(host.compat(&Version::new(1, 1, 9)), Compat::NodeBehind);
+    assert_eq!(host.compat(&Version::new(0, 9, 9)), Compat::NodeBehind, "major decides first");
+    assert!(!Compat::NodeBehind.drivable());
+}
+
+#[test]
+fn version_compat_returns_node_ahead_when_minor_or_major_is_newer() {
+    let host = Version::new(1, 2, 5);
+    assert_eq!(host.compat(&Version::new(1, 3, 0)), Compat::NodeAhead);
+    assert_eq!(host.compat(&Version::new(2, 0, 0)), Compat::NodeAhead, "major decides first");
+    assert!(!Compat::NodeAhead.drivable());
+}
+
+#[test]
+fn version_compat_marks_node_behind_when_its_version_is_older() {
+    assert!(Compat::PatchBehind.node_behind() && Compat::NodeBehind.node_behind());
+    assert!(!Compat::Same.node_behind());
+    assert!(!Compat::PatchAhead.node_behind() && !Compat::NodeAhead.node_behind());
+}
+
+#[test]
+fn version_compat_with_host_compares_against_node_version_when_called() {
+    assert_eq!(NODE_VERSION.compat_with_host(), Compat::Same);
 }
 
 #[test]

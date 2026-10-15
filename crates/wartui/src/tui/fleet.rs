@@ -16,7 +16,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Cell, Row, Table, TableState};
 use wartui_core::engine::{NodeView, Snapshot};
 use wartui_core::record::AdminOutcome;
-use wartui_proto::air::{Board, NODE_VERSION, Version};
+use wartui_proto::air::{Board, Compat, NODE_VERSION, Version};
 use wartui_proto::mac;
 use wartui_proto::plan::{ChannelSet, SCAN_CHANNELS};
 
@@ -224,16 +224,15 @@ fn node_label(node: &NodeView) -> String {
 /// heartbeat.
 fn version_label(node: &NodeView, here: Version) -> String {
     match node.state.capabilities {
-        Some(caps) if caps.version < here => format!("{caps} ↑{here}"),
+        Some(caps) if here.compat(&caps.version).node_behind() => format!("{caps} ↑{here}"),
         Some(caps) => caps.to_string(),
         None => "—".to_owned(),
     }
 }
 
-/// Whether the node's firmware is on another major or minor version, so this build
-/// cannot read its frames past the heartbeat prefix.
-fn needs_update(node: &NodeView) -> bool {
-    node.state.capabilities.is_some_and(|caps| !NODE_VERSION.speaks_with(&caps.version))
+/// How the node's firmware stands against this build's, once a heartbeat has said.
+fn compat(node: &NodeView) -> Option<Compat> {
+    node.state.capabilities.map(|caps| caps.version.compat_with_host())
 }
 
 /// Why a node cannot be given an assignment, or `None` if it can.
@@ -245,8 +244,16 @@ pub(super) fn why_not_assignable(node: &NodeView) -> Option<&'static str> {
     if state.capabilities.is_none() {
         return Some("has not heartbeated yet, so nothing says what its radio can tune");
     }
-    if needs_update(node) {
-        return Some("runs firmware of another minor version, so it needs an update first");
+    match compat(node) {
+        Some(Compat::NodeBehind) => {
+            return Some("runs older firmware than this host drives, so it needs an update first");
+        }
+        Some(Compat::NodeAhead) => {
+            return Some(
+                "runs newer firmware than this host drives, so update the host to drive it",
+            );
+        }
+        _ => {}
     }
     if state.peer_refused {
         return Some("has no slot in the bridge's peer table, so it cannot be reached");
@@ -264,10 +271,12 @@ pub(super) fn why_not_assignable(node: &NodeView) -> Option<&'static str> {
 /// causes.
 fn node_state(node: &NodeView) -> (String, Severity) {
     let state = &node.state;
-    // Ahead of `no heartbeat`: such a node's heartbeats are read only as far as its
-    // version, and never count as liveness.
-    if needs_update(node) {
-        return ("needs update".to_owned(), Severity::Fault);
+    // Ahead of `no heartbeat`: a node on another major or minor has its heartbeats read
+    // only as far as its version, and they never count as liveness.
+    match compat(node) {
+        Some(Compat::NodeBehind) => return ("needs update".to_owned(), Severity::Fault),
+        Some(Compat::NodeAhead) => return ("host behind".to_owned(), Severity::Fault),
+        _ => {}
     }
     if state.last_heartbeat.is_none() {
         return ("no heartbeat".to_owned(), Severity::Warning);
@@ -747,6 +756,32 @@ mod tests {
         assert_eq!(label, "needs update");
         assert_eq!(severity, Severity::Fault);
         assert!(why_not_assignable(&view).is_some_and(|why| why.contains("update")));
+    }
+
+    #[test]
+    fn node_state_returns_host_behind_label_when_node_runs_newer_minor() {
+        let view = ahead(0x84);
+        let (label, severity) = node_state(&view);
+        assert_eq!(label, "host behind");
+        assert_eq!(severity, Severity::Fault);
+        let why = why_not_assignable(&view).expect("refused");
+        assert!(why.contains("update the host"), "{why}");
+        assert_eq!(
+            version_label(&view, NODE_VERSION),
+            view.state.capabilities.unwrap().to_string()
+        );
+    }
+
+    #[test]
+    fn fleet_table_shows_host_behind_when_node_runs_newer_minor() {
+        let view = ahead(0x84);
+        let caps = view.state.capabilities.expect("set");
+        let snapshot = Snapshot { nodes: vec![view], tail: Vec::new(), ..busy() };
+        let screen = rendered(&snapshot);
+        assert!(screen.contains("host behind"), "{screen}");
+        assert!(!screen.contains("needs update"), "{screen}");
+        // The health line: the node's version alone, no arrow toward this build's.
+        assert!(screen.contains(&format!("C5 57:84  {caps}  ")), "{screen}");
     }
 
     #[test]

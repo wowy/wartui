@@ -661,7 +661,8 @@ board this build has no name for shows `??`.
 | `no heartbeat` | Seen, but has never completed a sweep                                                                                                       |
 | `no admin ack` | An assignment went out and its radio did not answer — nearly always Bluetooth, see [How channels are assigned](#how-channels-are-assigned)  |
 | `refused`      | The bridge's peer table is full                                                                                                             |
-| `needs update` | Runs node firmware of another major or minor version, so wartui cannot read its frames; reflash it                                          |
+| `needs update` | Runs an older major or minor of the node firmware, so wartui cannot read its frames; reflash it                                             |
+| `host behind`  | Runs a newer major or minor of the node firmware than this wartui drives; update wartui                                                     |
 | `rebooted xN`  | Its heartbeat counter went backwards, or its epoch went back to 0, so it has forgotten any assignment; wartui re-issues under a fresh epoch |
 
 The `channels` column shows where an assignment stands
@@ -679,7 +680,7 @@ The line under the table shows the selected node's firmware and its latest suppl
 
 The firmware is its version, then `;5g` for a radio that reaches 5 GHz. A node on an older version
 than this build's adds an arrow and this build's version: `0.1.2;5g ↑0.1.3`. A different patch is
-still driven; a different major or minor is `needs update`.
+still driven; an older major or minor is `needs update` and a newer one `host behind`.
 
 The voltage is the chip's 3.3 V rail, not the board's 5 V input, and the die runs well above the
 air around it. A reading out of range is yellow on that line, and turns an `alive` node's `state`
@@ -690,11 +691,12 @@ yellow too; any other state keeps its own color:
 | Voltage | below 3.00 V   | The C5's and C6's minimum recommended supply; the chip resets at 2.7 V              |
 | Die     | 70 °C or above | Short of 85 °C, the XIAO C6's rated ambient limit; the die runs hotter than ambient |
 
-A `stale`, `refused`, `no heartbeat`, or `needs update` node is out of the plan: nothing sent would
-reach it, its band is unknown, or its frames are not this build's, so its share might be nobody's.
-`b` on one says which state it is, because the fix differs: wait for a heartbeat, find out why
-heartbeats stopped, or reflash it. A `needs update` node is not counted among the footer's frames
-from an older firmware, which are frames wartui cannot attribute to a node at all.
+A `stale`, `refused`, `no heartbeat`, `needs update`, or `host behind` node is out of the plan:
+nothing sent would reach it, its band is unknown, or its frames are not this build's, so its share
+might be nobody's. `b` on one says which state it is, because the fix differs: wait for a
+heartbeat, find out why heartbeats stopped, reflash the node, or update wartui. Heartbeats from a
+`needs update` or `host behind` node are not counted among the footer's frames from an older
+firmware; its sighting batches are, since none of them is recorded.
 
 `stale` and `no heartbeat` are deliberately distinct from silence and from each other. wartui keeps
 two clocks, so a node that streams observations but loses heartbeats doesn't age out and churn the

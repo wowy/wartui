@@ -162,8 +162,9 @@ is here rather than only in a `//!`.
   firmwares. A frame carrying our magic and an unknown version byte is counted as `incompatible` and
   named in the footer (`N frames from an older firmware — reflash`), never admitted to the node
   table and never half-decoded. A heartbeat whose frozen prefix names another major or minor is the
-  exception: its node is shown as `needs update` and never assigned. The bridge is format-blind and
-  does not need the reflash.
+  exception: its node is shown as `needs update` (older) or `host behind` (newer) and never
+  assigned, and its sighting batches are counted `incompatible` and not recorded. The bridge is
+  format-blind and does not need the reflash.
 - **The bridge displays what it is handed and never composes it.** A board with a panel is
   sent finished lines with a severity on each, blits them, and owns nothing about them but the
   three colors a `Severity` means and the fallback screen it draws when no host is talking —

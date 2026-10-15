@@ -727,3 +727,17 @@ async fn sim_node_fails_to_ack_assignments_when_ble_coexistence_failure_is_simul
         assert_eq!(next_send_result(&mut link).await, SendStatus::AckFail, "epoch {epoch}");
     }
 }
+
+#[test]
+fn sim_minor_behind_steps_back_one_minor_when_minor_is_above_zero() {
+    use wartui_bridge::sim::minor_behind;
+    use wartui_proto::air::Version;
+    assert_eq!(minor_behind(Version::new(0, 3, 7)), Version::new(0, 2, 7));
+    assert_eq!(minor_behind(Version::new(2, 1, 0)), Version::new(2, 0, 0));
+}
+
+#[test]
+#[should_panic(expected = "has no minor before it")]
+fn sim_minor_behind_panics_when_minor_is_zero() {
+    let _ = wartui_bridge::sim::minor_behind(wartui_proto::air::Version::new(1, 0, 4));
+}

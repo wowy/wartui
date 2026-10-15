@@ -95,11 +95,11 @@ impl FleetEngine {
                 return;
             }
             // A heartbeat of another length still opens with the frozen prefix. From a node on
-            // another minor version that names a node to update; from one on this minor it is a
-            // bug, counted like any other mismatch.
+            // another major or minor that names a node one side must update; from one on this
+            // minor it is a bug, counted like any other mismatch.
             Err(DecodeError::BadLength { .. }) => {
                 match Capabilities::decode_prefix(payload) {
-                    Ok(caps) if !NODE_VERSION.speaks_with(&caps.version) => {
+                    Ok(caps) if !caps.version.compat_with_host().drivable() => {
                         self.on_outdated_heartbeat(rx, caps, now, batch);
                     }
                     _ => self.counters.incompatible += 1,
@@ -124,10 +124,13 @@ impl FleetEngine {
             // The right length is no guarantee of the right layout: a minor version may move
             // fields without resizing the frame.
             Frame::Heartbeat(heartbeat)
-                if !NODE_VERSION.speaks_with(&heartbeat.capabilities.version) =>
+                if !heartbeat.capabilities.version.compat_with_host().drivable() =>
             {
                 self.on_outdated_heartbeat(rx, heartbeat.capabilities, now, batch);
             }
+            // A node on another major or minor may still hold an assignment from a build that
+            // could drive it, and its batches are not this build's layout even when they parse.
+            Frame::Sightings(_) if !self.drivable(src) => self.counters.incompatible += 1,
             Frame::Heartbeat(heartbeat) => {
                 self.on_heartbeat(rx, heartbeat, now, batch);
             }
@@ -328,12 +331,23 @@ impl FleetEngine {
         self.send_dedup_ring_clear(src, now, batch);
     }
 
-    /// A heartbeat from a node on another minor version, of which only the frozen prefix is read.
+    /// Whether the node at `src` runs firmware this build can drive, as far as its last heartbeat
+    /// said. A node not yet heard from by heartbeat is given the benefit of the doubt.
+    fn drivable(&self, src: Mac) -> bool {
+        self.nodes
+            .get(&src)
+            .and_then(|node| node.capabilities)
+            .is_none_or(|caps| caps.version.compat_with_host().drivable())
+    }
+
+    /// A heartbeat from a node on another major or minor, of which only the frozen prefix is read.
     ///
     /// The node is filed and shown with its version so the operator can find it, but it is never
     /// assignable ([`FleetEngine::is_assignable`]): nothing past the prefix is this build's
     /// layout, so its counter, epoch and refusals mean nothing here. It opens no admin window and
-    /// sets no `last_heartbeat`.
+    /// sets no `last_heartbeat`. If it holds the Bluetooth scan, the scan is withdrawn now rather
+    /// than when it ages out, and the preferred node stays as it is, so the node takes the scan
+    /// back once it can be driven again.
     fn on_outdated_heartbeat(
         &mut self,
         rx: &Rx<'_>,
@@ -345,15 +359,24 @@ impl FleetEngine {
         self.see_node(src, now, rssi, Some(capabilities), batch);
         let Some(node) = self.nodes.get_mut(&src) else { return };
         if node.capabilities.map(|caps| caps.version) != Some(capabilities.version) {
-            tracing::warn!(
-                mac = %mac::full(&src),
-                version = %capabilities.version,
-                host = %NODE_VERSION,
-                "node needs update"
-            );
+            let mac = mac::full(&src);
+            let version = capabilities.version;
+            if capabilities.version.compat_with_host().node_behind() {
+                tracing::warn!(%mac, %version, host = %NODE_VERSION, "node needs update");
+            } else {
+                tracing::warn!(
+                    %mac,
+                    %version,
+                    host = %NODE_VERSION,
+                    "host needs update to drive this node"
+                );
+            }
         }
         node.capabilities = Some(capabilities);
         node.heartbeats += 1;
+        // `replan` hands the scan to the preferred node only when it is assignable, which this
+        // node is not, so it reads as absent until it can be driven again.
+        let _ = self.ble_node.take_if(|mac| *mac == src);
         // A node that was in the plan on a compatible build leaves it now.
         self.replan(now);
     }
