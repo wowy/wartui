@@ -311,6 +311,33 @@ fn frame_accumulator_discards_oversized_frame_when_capacity_is_exceeded() {
     assert_eq!(got, Some(cmd));
 }
 
+#[test]
+fn frame_accumulator_reports_empty_when_frame_completes() {
+    let mut acc = FrameAccumulator::<MAX_FRAME>::new();
+    assert!(acc.is_empty());
+    let mut out = [0u8; MAX_FRAME];
+    let n = encode_host_frame(&HostToBridge::GetStatus, &mut out).expect("encodes");
+    for &byte in &out[..n - 1] {
+        assert!(acc.push(byte).is_none());
+        assert!(!acc.is_empty(), "a partial frame reads as empty");
+    }
+    assert!(acc.push(0).is_some());
+    assert!(acc.is_empty());
+}
+
+#[test]
+fn frame_accumulator_reports_not_empty_when_overflowing_frame_awaits_terminator() {
+    // An overlong frame is still arriving until its terminator, whatever the
+    // accumulator kept of it.
+    let mut acc = FrameAccumulator::<64>::new();
+    for _ in 0..200 {
+        acc.push(0xAB);
+    }
+    assert!(!acc.is_empty());
+    assert!(acc.push(0).is_none());
+    assert!(acc.is_empty());
+}
+
 /// What the host recovers from a reset's banner, an optional lone `0x00`, then one
 /// frame. The banner is 1.5 KB with no `0x00`, as measured off a rebooting C6.
 fn after_banner(delimited: bool) -> std::vec::Vec<BridgeToHost> {

@@ -192,6 +192,16 @@ impl<const N: usize> FrameAccumulator<N> {
         self.overflowed = false;
     }
 
+    /// Whether no frame is part-way in.
+    ///
+    /// A frame that overran the buffer is still arriving until its terminator, so it
+    /// counts as part-way in. The bridge reads this to stay on the link while a host
+    /// frame is crossing it ([`LinkBurst`](super::LinkBurst)).
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0 && !self.overflowed
+    }
+
     /// Feed one byte.
     ///
     /// Returns the raw COBS-encoded frame when a terminator completes one; pass it to

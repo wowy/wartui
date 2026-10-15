@@ -332,8 +332,10 @@ edit stops; follow the pointer before changing the rule.
 - **A bridge reboot is invisible unless the host compares uptimes**, because a software reset does
   not re-enumerate the USB device. → `crates/wartui-bridge/src/serial.rs`, the `Ready` arm
 - **Neither firmware may block on the USB endpoint.** The bridge's rings evict oldest-first and
-  resynchronize COBS behind a truncated frame; a node loses a line rather than a sweep.
-  → `crates/wartui-proto/src/outbox/mod.rs` `//!`, `firmware/node/src/main.rs`, `note!`
+  resynchronize COBS behind a truncated frame, and its polling while a frame crosses the link is
+  bounded by `link::BURST_BUDGET_US`; a node loses a line rather than a sweep.
+  → `crates/wartui-proto/src/outbox/mod.rs` `//!`, `crates/wartui-proto/src/link/burst.rs`,
+  `firmware/node/src/main.rs`, `note!`
 - **The bridge writes nothing to USB until a host has spoken, unless a host was present when the
   previous life ended** (an RTC flag, never trusted after a power-on). Writing before any host
   opens the port wedges the endpoint, and a host that was present across the reset is already

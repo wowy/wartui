@@ -24,9 +24,11 @@ use crate::reset::ResetCause;
 use heapless::{String, Vec};
 use serde::Serialize;
 
+mod burst;
 mod frame;
 mod panel;
 
+pub use burst::{BURST_BUDGET_US, BURST_GAP_US, LinkBurst};
 pub use frame::{
     FrameAccumulator, LinkError, crc16, decode_frame, encode_frame, encode_host_frame,
 };

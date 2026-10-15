@@ -493,6 +493,45 @@ fn outbox_delivers_both_frames_when_fifo_fills_on_boundary_between_frames() {
 }
 
 #[test]
+fn outbox_reports_in_flight_when_frame_is_partially_written() {
+    // The bridge stays on the link while this holds, so the rest of the frame
+    // follows at USB speed rather than a pass at a time.
+    let mut outbox = Outbox::new();
+    outbox.send(&log(0));
+    let mut sink = Fake::new(3);
+    outbox.pump(&mut sink);
+    assert!(outbox.in_flight());
+
+    sink.capacity = usize::MAX;
+    outbox.pump(&mut sink);
+    assert!(!outbox.in_flight(), "fully written is no longer in flight");
+}
+
+#[test]
+fn outbox_reports_not_in_flight_when_frames_are_only_queued() {
+    // Nothing has reached the wire, so there is no frame to finish.
+    let mut outbox = Outbox::new();
+    outbox.send(&log(0));
+    assert!(!outbox.in_flight());
+}
+
+#[test]
+fn outbox_reports_in_flight_when_pad_is_owed() {
+    // A FIFO that filled on a packet boundary owes the zero that ends the
+    // transfer, and the host holds the frame until it arrives.
+    let (msg, _) = log_encoding_to(USB_PACKET, 0);
+    let mut outbox = Outbox::new();
+    outbox.send(&msg);
+    let mut sink = Fake::new(USB_PACKET);
+    outbox.pump(&mut sink);
+    assert!(outbox.in_flight());
+
+    sink.capacity = usize::MAX;
+    outbox.pump(&mut sink);
+    assert!(!outbox.in_flight());
+}
+
+#[test]
 fn ring_keeps_front_bytes_when_evicting_behind_front_across_wrap() {
     let mut ring = Ring::<3>::new();
     for n in 0..3 {
