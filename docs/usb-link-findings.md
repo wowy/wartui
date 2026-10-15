@@ -60,3 +60,25 @@ No frame failed to decode in either run.
   - the radio's send-complete wait;
   - the `SendResult` trip back;
   - the host's turnaround.
+
+## The stall reset, with the burst in place
+
+Run on 2026-10-15 on bridge `00:08` at 0.1.1, with `C5:B8` and `8B:90` heartbeating. The method
+was `docs/phase-3-findings.md`'s:
+
+- A bench-only build stood in for the endpoint stopping. Its `UsbSink` refused every byte from
+  20.0 s of the bridge's uptime, and it logged a marker 200 ms before.
+- A host sent one `Identify`, then a `GetStatus` every 500 ms. Host times below are from opening
+  the port.
+
+| scenario | result |
+| -------- | ------ |
+| wedged, host polling throughout | Endpoint stopped at 20.28 s. The reset came 3.0 s after the first poll it could not answer, and the next `Ready` arrived at 23.89 s, reporting `TxStalled`. |
+| wedged, host silent from 20.5 s to 31.0 s | No reset and no bytes while silent. The reset came 3.0 s after the host returned, with `Ready` at 34.40 s, reporting `TxStalled`. |
+| main loop blocked 8.2 s, not a wedge | No reset. Status replies resumed 8.3 s later, and one life ran to 44 s. |
+| capture quit with heartbeats arriving, then 25 s unread | No reset. The bridge was still on the life it had before the capture. |
+
+- **All four agree with the phase-3 rows.** Each `Ready` lands about 0.4 s after the reset, which
+  is the reboot to the main loop.
+- **A burst never kept the stall clock from starting.** Against a refusing endpoint the burst
+  writes nothing, so its pass reports `moved` false.
