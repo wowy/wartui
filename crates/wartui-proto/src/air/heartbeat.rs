@@ -20,7 +20,7 @@ pub const CAP_FLAG_TRIAL: u8 = 1 << 1;
 /// The board a node firmware was built for, from its cargo features.
 ///
 /// Each byte is fixed once assigned, since the heartbeat prefix that carries it is frozen.
-/// 0 is never sent, and a heartbeat naming it is refused ([`Capabilities::decode_prefix`]). A byte this build has no name for decodes to [`Board::Unknown`]: a node
+/// 0 is never sent. A byte this build has no name for decodes to [`Board::Unknown`]: a node
 /// on a board added later is still a node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Board {
@@ -144,16 +144,9 @@ impl Capabilities {
     /// the one exception to flashing the fleet together. A host finds a node a minor
     /// version behind through them, so it can say so and, over the air, update it.
     ///
-    /// A prefix naming board 0 is refused. No build sends it, and a heartbeat without the
-    /// prefix, whose body opens with its sweep counter, puts that counter's high byte
-    /// there, which is 0 for any node that has not swept 16 million times. Refusing it keeps that counter
-    /// from being read as a version. Unknown flag bits are not refused: a later minor may
-    /// define one, and its nodes must still be found.
-    ///
     /// # Errors
-    /// [`DecodeError::TooShort`] for a body shorter than the prefix,
-    /// [`DecodeError::NoBoard`] for board 0, and whatever the header check refuses; any
-    /// other type is [`DecodeError::UnknownType`].
+    /// [`DecodeError::TooShort`] for a body shorter than the prefix, and whatever the
+    /// header check refuses; any other type is [`DecodeError::UnknownType`].
     ///
     /// [`WIRE_VERSION`]: super::WIRE_VERSION
     pub fn decode_prefix(buf: &[u8]) -> Result<Self, DecodeError> {
@@ -165,9 +158,6 @@ impl Capabilities {
         let Some(prefix) = buf.get(OFFSET_BODY..need) else {
             return Err(DecodeError::TooShort { need, got: buf.len() });
         };
-        if prefix[3] == 0 {
-            return Err(DecodeError::NoBoard);
-        }
         Ok(Self::from_prefix([prefix[0], prefix[1], prefix[2], prefix[3], prefix[4]]))
     }
 }
@@ -265,7 +255,13 @@ impl HeartbeatMsg {
             return Err(DecodeError::BadLength { need: HEARTBEAT_MSG_LEN, got: buf.len() });
         }
         const P: usize = OFFSET_BODY + HEARTBEAT_PREFIX_LEN;
-        let capabilities = Capabilities::decode_prefix(buf)?;
+        let capabilities = Capabilities::from_prefix([
+            buf[OFFSET_BODY],
+            buf[OFFSET_BODY + 1],
+            buf[OFFSET_BODY + 2],
+            buf[OFFSET_BODY + 3],
+            buf[OFFSET_BODY + 4],
+        ]);
         let le = |at: usize| u16::from_le_bytes([buf[at], buf[at + 1]]);
         Ok(Self {
             capabilities,

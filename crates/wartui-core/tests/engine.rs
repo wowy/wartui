@@ -1334,38 +1334,6 @@ fn engine_withdraws_ble_at_once_when_scanner_reports_another_minor() {
     assert!(admins(&batch).iter().any(|admin| admin.scan_ble()));
 }
 
-/// A heartbeat without the prefix: counter, epoch, protocol major and minor, flags, then the
-/// rest, 27 bytes. A small counter puts 0 where the prefix's board is.
-const PREFIXLESS_HEARTBEAT: &[u8] = &[
-    0x57, 0x54, 0x55, 0x49, 0x01, 0x01, // header
-    0x2A, 0x00, 0x00, 0x00, // counter 42
-    0x03, // epoch
-    0x01, 0x00, 0x01, // protocol 1.0, 5g
-    0x00, 0x00, // wifi_refused
-    0x00, 0x00, // ble_refused
-    0x07, 0x00, // beat 7
-    0x00, // unsent
-    0x95, 0x24, // dwell 149, prev_dwell 36
-    0x08, // tx_power
-    0x01, // reset_cause
-    0x43, 0x51, // vdd, die_temp
-];
-
-#[test]
-fn engine_counts_incompatible_when_heartbeat_has_no_prefix() {
-    // Read through the prefix, its counter would be a version, changing every beat.
-    let clock = Clock::new();
-    let mut engine = engine(EngineConfig::default(), &clock);
-    assert_eq!(PREFIXLESS_HEARTBEAT.len(), 27);
-    engine.handle(rx(NODE, PREFIXLESS_HEARTBEAT), clock.at(1));
-    engine.handle(rx(NODE, PREFIXLESS_HEARTBEAT), clock.at(2));
-
-    assert_eq!(counters(&engine).incompatible, 2);
-    assert_eq!(engine.nodes().count(), 0, "no node is filed");
-    let snapshot = engine.snapshot(clock.at(2), StoreStats::default());
-    assert_eq!((snapshot.needs_update, snapshot.host_behind), (0, 0));
-}
-
 #[test]
 fn engine_snapshot_counts_undrivable_nodes_when_heard_inside_topology_timeout() {
     let clock = Clock::new();

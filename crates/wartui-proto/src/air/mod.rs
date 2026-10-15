@@ -146,9 +146,6 @@ pub enum DecodeError {
     /// `ext_len` exceeded [`EXT_MAX`]. No parser in this build produces that, so the
     /// frame is malformed.
     ExtTooLong(u8),
-    /// A heartbeat whose prefix names board 0, which no build sends. Read as a frame of ours
-    /// in a layout this build does not know, not as a node.
-    NoBoard,
 }
 
 impl fmt::Display for DecodeError {
@@ -161,7 +158,6 @@ impl fmt::Display for DecodeError {
             Self::UnknownType(t) => write!(f, "unknown message type {t:#04x}"),
             Self::SsidTooLong(n) => write!(f, "ssid length {n} exceeds {SSID_MAX}"),
             Self::ExtTooLong(n) => write!(f, "ext length {n} exceeds {EXT_MAX}"),
-            Self::NoBoard => f.write_str("heartbeat prefix names no board"),
         }
     }
 }

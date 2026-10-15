@@ -318,13 +318,6 @@ fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
                             println!("{head}  undecodable: not ESP-NOW wardriving traffic");
                         }
                     },
-                    // A heartbeat without the prefix: its sweep counter where the board is.
-                    Err(DecodeError::NoBoard) => {
-                        counts.incompatible += 1;
-                        println!(
-                            "{head}  heartbeat names no board, a layout this build does not read"
-                        );
-                    }
                     // Ours, from a node on this minor: a bug in one of the two builds.
                     Err(DecodeError::BadLength { need, got }) => {
                         counts.incompatible += 1;
@@ -503,24 +496,6 @@ mod tests {
         feed(&mut counts, &one_sighting());
         assert_eq!((counts.incompatible, counts.batches, counts.sighting), (1, 1, 1));
     }
-
-    #[test]
-    fn sniff_cmd_counts_incompatible_when_heartbeat_predates_the_prefix() {
-        let counts = counted(PREFIXLESS_HEARTBEAT);
-        assert_eq!((counts.incompatible, counts.host_behind, counts.undecodable), (1, 0, 0));
-    }
-
-    /// A heartbeat without the prefix: counter, epoch, protocol major and minor, flags,
-    /// then the rest, 27 bytes. A small counter puts 0 where the board is.
-    const PREFIXLESS_HEARTBEAT: &[u8] = &[
-        0x57, 0x54, 0x55, 0x49, 0x01, 0x01, // header
-        0x2A, 0x00, 0x00, 0x00, // counter 42
-        0x03, // epoch
-        0x01, 0x00, 0x01, // protocol 1.0, 5g
-        0x00, 0x00, 0x00, 0x00, // wifi_refused, ble_refused
-        0x07, 0x00, // beat
-        0x00, 0x95, 0x24, 0x08, 0x01, 0x43, 0x51, // unsent .. die_temp
-    ];
 
     fn heartbeat_with(version: wartui_proto::air::Version) -> Vec<u8> {
         use wartui_proto::air::{Board, DieTemp, HeartbeatMsg, Vdd};

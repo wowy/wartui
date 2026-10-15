@@ -106,8 +106,7 @@ impl FleetEngine {
                 }
                 return;
             }
-            // Board 0 is a heartbeat without the prefix: its sweep counter where the board is.
-            Err(DecodeError::BadVersion(_) | DecodeError::NoBoard) => {
+            Err(DecodeError::BadVersion(_)) => {
                 self.counters.incompatible += 1;
                 return;
             }
