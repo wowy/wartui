@@ -255,6 +255,14 @@ is here rather than only in a `//!`.
   round-robin rather than steering around run boundaries. The plan has no phases and no timer; it
   changes when fleet membership changes, when the Bluetooth scan moves, when the operator changes the
   pool, and at no other time.
+- **An updated node image is confirmed only by hearing the host over the air.** The first admin,
+  clear or update-confirm frame a trial image decodes marks it valid; nothing else does, because
+  hearing the host is the whole test. Rollback is the node app's job, since the prebuilt espflash
+  bootloader has none: the third unconfirmed boot returns `otadata` to the other slot. The count
+  lives in the `trial` flash sector, one cleared bit per boot, because power cycles are routine on
+  these nodes and RTC memory does not survive them. With no watchdog, those power cycles are also
+  what rolls back a hung image.
+  → `firmware/node/src/ota.rs` `//!`, `firmware/node/README.md` § "Over-the-air updates"
 - **`clippy::all` is denied workspace-wide, in both firmwares too, and so is `unsafe_code`.** The
   host allows it on one function, the Raspberry Pi firmware mailbox ioctl
   (`crates/wartui-core/src/health.rs`, `mailbox_call`). Each firmware allows the IDF calls

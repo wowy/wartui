@@ -40,6 +40,8 @@ updates:
         update-types: ["version-update:semver-minor", "version-update:semver-major"]
       - dependency-name: "esp-rtos"
         update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      - dependency-name: "esp-storage"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
       - dependency-name: "esp-sync"
         update-types: ["version-update:semver-minor", "version-update:semver-major"]
       - dependency-name: "esp-wifi-sys-*"
