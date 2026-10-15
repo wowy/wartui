@@ -129,9 +129,17 @@ fn gps_line(snapshot: &Snapshot) -> (Severity, String) {
 /// How many nodes are heartbeating, and how many can be driven. Both, because a node refused a peer
 /// slot, or with no declared radio, is alive but undrivable. With none alive, a session that has
 /// seen none is waiting, and one that has seen some has lost them.
+///
+/// A node on another major or minor heartbeats without being alive, so it is named ahead of the
+/// rest: it is the one fix the operator can make from here, and it is not silence. Red when
+/// nothing can be driven, yellow otherwise.
 fn nodes_line(snapshot: &Snapshot) -> (Severity, String) {
     if !snapshot.link_up {
         return (Severity::Error, "link down".to_owned());
+    }
+    if let Some(text) = snapshot.undrivable_text() {
+        let level = if snapshot.assignable == 0 { Severity::Error } else { Severity::Warn };
+        return (level, text);
     }
     match (snapshot.alive, snapshot.assignable) {
         (0, _) if snapshot.nodes.is_empty() => (Severity::Warn, "waiting for nodes".to_owned()),
@@ -222,7 +230,7 @@ pub fn approx(n: u64) -> String {
 mod tests {
     use std::time::Instant;
 
-    use wartui_proto::air::Capabilities;
+    use wartui_proto::air::{Board, Capabilities};
     use wartui_proto::plan::ChannelPool;
     use wartui_proto::tx_power::DEFAULT_TX_POWER_QUARTER_DBM;
 
@@ -252,6 +260,8 @@ mod tests {
             nodes: Vec::new(),
             alive: 0,
             assignable: 0,
+            needs_update: 0,
+            host_behind: 0,
             tail: Vec::new(),
             unique_wifi_aps: 0,
             unique_ble_aps: 0,
@@ -272,7 +282,7 @@ mod tests {
         let now = Now { mono: Instant::now(), unix_ms: EPOCH_MS };
         let mut state = NodeState::new([0x02, 0x00, 0x5E, 0x10, 0x57, last], now);
         state.last_heartbeat = Some(now.mono);
-        state.capabilities = Some(Capabilities::here(true));
+        state.capabilities = Some(Capabilities::here(Board::Esp32c5));
         state.link_rssi = rssi;
         NodeView { state, alive: true, assignable: true }
     }
@@ -405,6 +415,34 @@ mod tests {
         let (level, text) = row(&snapshot, 1);
         assert_eq!(level, Severity::Error);
         assert_eq!(text, "all nodes silent");
+    }
+
+    #[test]
+    fn render_names_undrivable_nodes_when_none_alive_heartbeat_on_another_minor() {
+        // Heartbeating, so not silence, but nothing this host can drive.
+        let mut snapshot = fleet(&[Some(-50), Some(-60)]);
+        for node in &mut snapshot.nodes {
+            node.alive = false;
+            node.assignable = false;
+        }
+        snapshot.alive = 0;
+        snapshot.assignable = 0;
+        snapshot.needs_update = 2;
+        assert_eq!(row(&snapshot, 1), (Severity::Error, "2 need update".to_owned()));
+
+        snapshot.needs_update = 0;
+        snapshot.host_behind = 1;
+        assert_eq!(row(&snapshot, 1), (Severity::Error, "1 host behind".to_owned()));
+
+        snapshot.needs_update = 1;
+        assert_eq!(row(&snapshot, 1), (Severity::Error, "2 undrivable".to_owned()));
+    }
+
+    #[test]
+    fn render_warns_of_undrivable_nodes_when_others_are_driven() {
+        let mut snapshot = fleet(&[Some(-50)]);
+        snapshot.needs_update = 1;
+        assert_eq!(row(&snapshot, 1), (Severity::Warn, "1 needs update".to_owned()));
     }
 
     #[test]

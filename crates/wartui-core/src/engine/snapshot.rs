@@ -1,5 +1,5 @@
 use wartui_bridge::BridgeInfo;
-use wartui_proto::air::RecordKind;
+use wartui_proto::air::{Compat, RecordKind};
 use wartui_proto::mac::Mac;
 use wartui_proto::plan::{ChannelPool, Plan};
 
@@ -19,8 +19,10 @@ pub struct Counters {
     pub heartbeats: u64,
     /// Frames that were not ours and were not the vendor's either.
     pub undecodable: u64,
-    /// Frames of ours speaking another wire version. A half-flashed fleet looks like this, and
-    /// nothing else says so.
+    /// Frames of ours in a wire version or layout this build does not read: another wire version,
+    /// a wrong length, or a sighting batch from a node once its heartbeat has named another major
+    /// or minor. A half-flashed fleet looks like this, and nothing else says so. A heartbeat naming
+    /// another major or minor is not counted: its node is shown instead.
     pub incompatible: u64,
     /// Vendor heartbeats and observations: another fleet is transmitting on this channel.
     pub foreign_fleet: u64,
@@ -123,6 +125,11 @@ pub struct Snapshot {
     pub alive: usize,
     /// How many can take an assignment: exactly the set the planner partitions.
     pub assignable: usize,
+    /// Nodes heard inside the topology timeout whose heartbeat named an older major or minor than
+    /// this build's. Never [`Self::alive`]: their heartbeats are not liveness.
+    pub needs_update: usize,
+    /// The same for a newer major or minor: the host is the one to update.
+    pub host_behind: usize,
     /// The most recent observations, newest last.
     pub tail: Vec<TailEntry>,
     /// Distinct Wi-Fi BSSIDs this session, estimated to about 0.8% standard error
@@ -153,12 +160,28 @@ pub struct Snapshot {
     pub excluded_ssids: Vec<String>,
 }
 
+impl Snapshot {
+    /// The nodes heard on another major or minor, as the panel and the header name them:
+    /// `2 need update`, `1 host behind`, or `3 undrivable` for both. `None` when there are none.
+    /// Short enough for the panel's seventeen columns.
+    #[must_use]
+    pub fn undrivable_text(&self) -> Option<String> {
+        match (self.needs_update, self.host_behind) {
+            (0, 0) => None,
+            (1, 0) => Some("1 needs update".to_owned()),
+            (n, 0) => Some(format!("{n} need update")),
+            (0, n) => Some(format!("{n} host behind")),
+            (older, newer) => Some(format!("{} undrivable", older + newer)),
+        }
+    }
+}
+
 /// The bridge's self-report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BridgeStatus {
     /// Registered peers.
     pub peer_count: u8,
-    /// Frames received since boot.
+    /// Frames received and accepted to forward since boot.
     pub rx_count: u32,
     /// Frames the bridge's outbound ring dropped since boot. Mostly history: a bridge powered with
     /// nothing attached drops all it hears.
@@ -185,6 +208,19 @@ impl FleetEngine {
             .collect();
         let alive = nodes.iter().filter(|n| n.alive).count();
         let assignable = nodes.iter().filter(|n| n.assignable).count();
+        let undrivable = |wanted: Compat| {
+            nodes
+                .iter()
+                .filter(|n| {
+                    now.mono.duration_since(n.state.last_seen) < self.config.topology_timeout
+                })
+                .filter(|n| {
+                    n.state.capabilities.map(|caps| caps.version.compat_with_host()) == Some(wanted)
+                })
+                .count()
+        };
+        let needs_update = undrivable(Compat::NodeBehind);
+        let host_behind = undrivable(Compat::NodeAhead);
         Snapshot {
             bridge: self.bridge.clone(),
             link_up: self.link_up,
@@ -197,6 +233,8 @@ impl FleetEngine {
             nodes,
             alive,
             assignable,
+            needs_update,
+            host_behind,
             tail: self.tail.iter().cloned().collect(),
             unique_wifi_aps: self.unique_wifi.estimate(),
             unique_ble_aps: self.unique_ble.estimate(),

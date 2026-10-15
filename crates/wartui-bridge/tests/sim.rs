@@ -10,7 +10,7 @@ use tokio::time::Instant;
 use wartui_bridge::sim::{SimConfig, SimTransport};
 use wartui_bridge::{LinkEvent, LinkHandle};
 use wartui_proto::air::{AdminMsg, ClearMsg, Frame, HeartbeatMsg, RecordKind};
-use wartui_proto::link::{BridgeToHost, EspNowPayload, HostToBridge, SendStatus};
+use wartui_proto::link::{BridgeToHost, HostToBridge, SendPayload, SendStatus};
 use wartui_proto::mac::Mac;
 use wartui_proto::node::{ASSIGNED_BEAT_MS, CHANNEL_DWELL_MS, IDLE_BEAT_MS};
 use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun};
@@ -78,13 +78,13 @@ async fn next_heartbeat_msg_from(link: &mut LinkHandle, want: Mac) -> HeartbeatM
 }
 
 fn admin_command(dst: Mac, admin: AdminMsg) -> HostToBridge {
-    let mut payload = EspNowPayload::new();
+    let mut payload = SendPayload::new();
     payload.extend_from_slice(&admin.encode()).expect("an assignment fits");
     HostToBridge::SendEspNow { id: 1, dst, ensure_peer: true, payload }
 }
 
 fn clear_command(dst: Mac, ensure_peer: bool) -> HostToBridge {
-    let mut payload = EspNowPayload::new();
+    let mut payload = SendPayload::new();
     payload.extend_from_slice(&ClearMsg.encode()).expect("a clear fits");
     HostToBridge::SendEspNow { id: 1, dst, ensure_peer, payload }
 }
@@ -726,4 +726,18 @@ async fn sim_node_fails_to_ack_assignments_when_ble_coexistence_failure_is_simul
         assign(&link, epoch, everything(), false);
         assert_eq!(next_send_result(&mut link).await, SendStatus::AckFail, "epoch {epoch}");
     }
+}
+
+#[test]
+fn sim_minor_behind_steps_back_one_minor_when_minor_is_above_zero() {
+    use wartui_bridge::sim::minor_behind;
+    use wartui_proto::air::Version;
+    assert_eq!(minor_behind(Version::new(0, 3, 7)), Version::new(0, 2, 7));
+    assert_eq!(minor_behind(Version::new(2, 1, 0)), Version::new(2, 0, 0));
+}
+
+#[test]
+#[should_panic(expected = "has no minor before it")]
+fn sim_minor_behind_panics_when_minor_is_zero() {
+    let _ = wartui_bridge::sim::minor_behind(wartui_proto::air::Version::new(1, 0, 4));
 }

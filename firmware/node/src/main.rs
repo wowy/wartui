@@ -43,7 +43,7 @@ use static_cell::{ConstStaticCell, StaticCell};
 use wartui_firmware::health;
 use wartui_firmware::{reboot, reset_cause};
 use wartui_proto::air::{
-    AdminMsg, CONTROL_CHANNEL, Capabilities, DecodeError, DieTemp, Frame, HeartbeatMsg,
+    AdminMsg, Board, CONTROL_CHANNEL, Capabilities, DecodeError, DieTemp, Frame, HeartbeatMsg,
     SIGHTINGS_PER_BATCH_MAX, SightingBatchWriter, SightingMsg, Vdd,
 };
 use wartui_proto::link::BROADCAST;
@@ -58,8 +58,28 @@ mod ble;
 mod radio;
 mod sniff;
 
-// This creates the app descriptor the esp-idf bootloader expects.
-esp_bootloader_esp_idf::esp_app_desc!();
+/// The project name in the app descriptor, naming the board as [`BOARD`] does, so an app
+/// image says which board it is for.
+#[cfg(feature = "esp32c5")]
+const PROJECT_NAME: &str = "wartui-node-esp32c5";
+#[cfg(all(feature = "esp32c6", not(feature = "xiao-external-antenna")))]
+const PROJECT_NAME: &str = "wartui-node-esp32c6";
+#[cfg(all(feature = "esp32c6", feature = "xiao-external-antenna"))]
+const PROJECT_NAME: &str = "wartui-node-esp32c6-xiao";
+
+// The app descriptor the esp-idf bootloader expects, carrying the board and the version
+// from `Cargo.toml`.
+esp_bootloader_esp_idf::esp_app_desc!(
+    env!("CARGO_PKG_VERSION"),
+    PROJECT_NAME,
+    esp_bootloader_esp_idf::BUILD_TIME,
+    esp_bootloader_esp_idf::BUILD_DATE,
+    esp_bootloader_esp_idf::ESP_IDF_COMPATIBLE_VERSION,
+    esp_bootloader_esp_idf::MMU_PAGE_SIZE,
+    0,
+    u16::MAX,
+    esp_bootloader_esp_idf::SECURE_VERSION
+);
 
 extern crate alloc;
 
@@ -274,12 +294,20 @@ impl Node {
     }
 }
 
-/// What this node is, as every heartbeat says it.
+/// The board this build is for, from its cargo features.
+#[cfg(feature = "esp32c5")]
+const BOARD: Board = Board::Esp32c5;
+#[cfg(all(feature = "esp32c6", not(feature = "xiao-external-antenna")))]
+const BOARD: Board = Board::Esp32c6;
+#[cfg(all(feature = "esp32c6", feature = "xiao-external-antenna"))]
+const BOARD: Board = Board::Esp32c6Xiao;
+
+/// What this node is, as every heartbeat says it: `NODE_VERSION`, the board and its flags.
 ///
 /// `5g` is the chip, and is what keeps the planner from dealing a C6 a share
 /// nobody scans. Bluetooth is not a capability at all: every node can scan it,
 /// and the scan is the core's decision, off at every boot.
-const CAPABILITIES: Capabilities = Capabilities::here(cfg!(feature = "esp32c5"));
+const CAPABILITIES: Capabilities = Capabilities::here(BOARD);
 
 static NODE: ConstStaticCell<Node> = ConstStaticCell::new(Node::new());
 
@@ -533,7 +561,7 @@ fn next_beat_after(deadline: Instant) -> Instant {
 fn heartbeat(manager: &EspNowManager<'_>, sender: &mut EspNowSender<'_>, node: &mut Node) {
     // Every heartbeat carries the capabilities, not just the first: sent once they
     // would be lost to a dropped frame or stale after a reflash, and they are
-    // three bytes of twenty-seven.
+    // five bytes of twenty-nine.
     let beat = node.beats.wrapping_add(1);
     let msg = HeartbeatMsg {
         counter: node.counter,

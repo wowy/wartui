@@ -148,19 +148,23 @@ These bite from a distance — from a file other than the one that owns them —
 is here rather than only in a `//!`.
 
 - **The wire is ours, in both directions, and shares nothing with the vendor's.** Every frame is
-  `WTUI`, a wire version byte, a type byte and a body: `HeartbeatMsg` (27 bytes), `SightingBatch`
+  `WTUI`, a wire version byte, a type byte and a body: `HeartbeatMsg` (29 bytes), `SightingBatch`
   (9 plus records of 12 plus the SSID and the trailer), `AdminMsg` (15) and `ClearMsg` (6, header
   only). A heartbeat broadcasts, since that is how a bridge discovers a node before either
   side knows the other's address; a sighting batch unicasts to the bridge that last sent
   this node an admin or clear frame, so a shared format is a shared conversation either way.
   The magic is checked before anything else at both ends. Encode/decode is written out by
   hand, never by transmuting a packed struct, and pinned byte-for-byte in
-  `crates/wartui-proto/tests/wire.rs`.
-- **A wire change means reflashing every node at once.** `wartui-proto` is a path dependency of
-  both firmwares. A frame carrying our magic and an unknown version byte is counted as
-  `incompatible` and named in the footer (`N frames from an older firmware — reflash`), never
-  admitted to the node table and never half-decoded. The bridge is format-blind and does not
-  need the reflash.
+  `crates/wartui-proto/tests/wire.rs`. Host→air frames may be up to 1470 bytes (ESP-NOW v2),
+  while everything a node sends stays ≤250, so the bridge→host link keeps 512-byte frames
+  ([`docs/espnow-v2-findings.md`](docs/espnow-v2-findings.md)).
+- **A wire change means reflashing every node at once.** `wartui-proto` is a path dependency of both
+  firmwares. A frame carrying our magic and an unknown version byte is counted as `incompatible` and
+  named in the footer (`N frames from an older firmware — reflash`), never admitted to the node
+  table and never half-decoded. A heartbeat whose frozen prefix names another major or minor is the
+  exception: its node is shown as `needs update` (older) or `host behind` (newer) and never
+  assigned. Once its heartbeat has named that version, its sighting batches are counted
+  `incompatible` and not recorded. The bridge is format-blind and does not need the reflash.
 - **The bridge displays what it is handed and never composes it.** A board with a panel is
   sent finished lines with a severity on each, blits them, and owns nothing about them but the
   three colors a `Severity` means and the fallback screen it draws when no host is talking —
@@ -187,20 +191,25 @@ is here rather than only in a `//!`.
 - **Nothing here is compatible with an earlier wartui, and that is the policy until 1.0.** No
   migration path is built for a fleet mid-upgrade and no code reads an older wire format to be
   helpful about it; a node on a previous build is somebody else's traffic as far as this host is
-  concerned. Flash the fleet together. **Neither version marker moves until 1.0**, whatever a
-  layout does: `air::WIRE_VERSION` is the lever held for the first change a fleet in the field has
-  to survive, and `store::SCHEMA_VERSION` the same for the first capture that has to be read in an
-  earlier build's terms. Nothing before 1.0 is either, so spending one re-pins every fixture in
-  `crates/wartui-proto/tests/wire.rs` to mark a difference the policy has already settled. **The
-  store has no migrations before 1.0 either.** `check_version` refuses any marker but its own — a
-  lower one as firmly as a higher one — and its own marker over a schema fingerprint that is not
-  this build's, or over none. A capture from another build is somebody else's file, and the fix
-  is a new `--db` path rather than a `migrate` arm. The fingerprint enforces only the shape of
-  the tables. A build that keeps that shape but changes what a stored value means still opens
-  the file, so that half rests on the policy rather than the check. Bringing one forward would
-  mean deciding what an older build meant, which is the compatibility this policy declines to
-  claim: a stored `ChannelSet` is the indices that went out, read against the scan table of the
-  build that wrote them.
+  concerned. Flash the fleet together. The node firmware's `version` in `firmware/node/Cargo.toml`
+  is bumped on every change: before 1.0 a minor bump may break the wire and a patch bump may not.
+  `air::NODE_VERSION` mirrors it, and `crates/wartui-proto/tests/version.rs` fails when they differ.
+  **The one exception is a frozen core**, unchanged until 1.0 so a host can find a node a minor
+  version behind and show it as `needs update`: the frame header, the heartbeat's type byte and its
+  5-byte prefix of version, board and flags (`air::Capabilities::decode_prefix`). **Neither version
+  marker moves until 1.0**, whatever a layout does: `air::WIRE_VERSION` is the lever held for the
+  first change a fleet in the field has to survive, and `store::SCHEMA_VERSION` the same for the
+  first capture that has to be read in an earlier build's terms. Nothing before 1.0 is either, so
+  spending one re-pins every fixture in `crates/wartui-proto/tests/wire.rs` to mark a difference the
+  policy has already settled. **The store has no migrations before 1.0 either.** `check_version`
+  refuses any marker but its own — a lower one as firmly as a higher one — and its own marker over a
+  schema fingerprint that is not this build's, or over none. A capture from another build is
+  somebody else's file, and the fix is a new `--db` path rather than a `migrate` arm. The
+  fingerprint enforces only the shape of the tables. A build that keeps that shape but changes what
+  a stored value means still opens the file, so that half rests on the policy rather than the check.
+  Bringing one forward would mean deciding what an older build meant, which is the compatibility
+  this policy declines to claim: a stored `ChannelSet` is the indices that went out, read against
+  the scan table of the build that wrote them.
 - **The planner is the only author of an assignment.** There is no operator override, no mode and
   no flag: `FleetEngine::replan` decides what every node scans and nothing else writes a node's
   `desired`. That is what lets the fleet table and the store read a node's share as the plan's
@@ -217,10 +226,11 @@ is here rather than only in a `//!`.
   states, and `SCAN_CHANNELS` order is load-bearing: never sort or deduplicate it, because those
   indices *are* the wire format.
 - **A node is only in the plan once it has said what its radio is.** `FleetEngine::is_assignable`
-  refuses a node whose heartbeats carry no `air::Capabilities`, alongside one the bridge has no
-  peer slot for. `None` means only that nothing but a sighting has been heard from that address
-  yet — an ordinary few seconds in the life of a node about to be perfectly drivable. A share cut
-  for a node whose band nothing has confirmed is a share that may be nobody's.
+  refuses a node whose heartbeats carry no `air::Capabilities`, or whose version does not speak
+  `air::NODE_VERSION` (another major or minor), alongside one the bridge has no peer slot for.
+  `None` means only that nothing but a sighting has been heard from that address yet — an ordinary
+  few seconds in the life of a node about to be perfectly drivable. A share cut for a node whose
+  band nothing has confirmed is a share that may be nobody's.
 - **Twenty nodes maximum** (`plan::MAX_NODES`), the ESP-NOW peer table. The host removes a node's
   peer after a minute without a heartbeat (`topology_timeout`). More than twenty heard within a
   minute is unsupported.

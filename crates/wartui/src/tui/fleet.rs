@@ -16,8 +16,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Cell, Row, Table, TableState};
 use wartui_core::engine::{NodeView, Snapshot};
 use wartui_core::record::AdminOutcome;
+use wartui_proto::air::{Board, Compat, NODE_VERSION, Version};
 use wartui_proto::mac;
-use wartui_proto::plan::{ChannelSet, Radio, SCAN_CHANNELS};
+use wartui_proto::plan::{ChannelSet, SCAN_CHANNELS};
 
 use super::format::ago;
 
@@ -123,16 +124,16 @@ impl Severity {
     }
 }
 
-/// The selected node's latest supply and die readings, `—` for none, each out-of-range
-/// one in the warning style. The table has no width left for them, so they show for one
-/// node at a time.
+/// The selected node's firmware and its latest supply and die readings, `—` for none,
+/// each out-of-range reading in the warning style. The table has no width left for
+/// them, so they show for one node at a time.
 fn health_line(node: &NodeView) -> Line<'static> {
     let state = &node.state;
     let vdd = state.vdd.to_string();
     let temp = state.die_temp.to_string();
     let warn = |bad: bool| if bad { Severity::Warning.style() } else { Style::new() };
     Line::from(vec![
-        Span::raw(format!("{}  ", node_label(node))),
+        Span::raw(format!("{}  {}  ", node_label(node), version_label(node, NODE_VERSION))),
         Span::styled(vdd, warn(state.low_vdd())),
         Span::raw("  "),
         Span::styled(temp, warn(state.hot())),
@@ -205,15 +206,33 @@ fn lost_cell(node: &NodeView) -> String {
 
 /// The node's chip and the last two octets of its address: `C5 57:84`.
 ///
-/// The chip comes from the band its heartbeats announce. A node heard only through
-/// sightings shows `—` until its first heartbeat.
+/// The chip comes from the board its heartbeats announce; a XIAO C6 is a `C6`. A node
+/// heard only through sightings shows `—` until its first heartbeat, and a board this
+/// build has no name for shows `??`.
 fn node_label(node: &NodeView) -> String {
-    let chip = match node.state.capabilities.map(Radio::from) {
-        Some(Radio::DualBand) => "C5",
-        Some(Radio::TwoPointFour) => "C6",
+    let chip = match node.state.capabilities.map(|caps| caps.board) {
+        Some(Board::Esp32c5) => "C5",
+        Some(Board::Esp32c6 | Board::Esp32c6Xiao) => "C6",
+        Some(Board::Unknown(_)) => "??",
         None => "— ",
     };
     format!("{chip} {}", mac::short(&node.state.mac))
+}
+
+/// The node's firmware and flags, `0.1.0;5g`, with `here` (the version this host was
+/// built with) after an arrow when the node's is older: `0.1.2;5g ↑0.1.3`. `—` before a
+/// heartbeat.
+fn version_label(node: &NodeView, here: Version) -> String {
+    match node.state.capabilities {
+        Some(caps) if here.compat(&caps.version).node_behind() => format!("{caps} ↑{here}"),
+        Some(caps) => caps.to_string(),
+        None => "—".to_owned(),
+    }
+}
+
+/// How the node's firmware stands against this build's, once a heartbeat has said.
+fn compat(node: &NodeView) -> Option<Compat> {
+    node.state.capabilities.map(|caps| caps.version.compat_with_host())
 }
 
 /// Why a node cannot be given an assignment, or `None` if it can.
@@ -224,6 +243,17 @@ pub(super) fn why_not_assignable(node: &NodeView) -> Option<&'static str> {
     let state = &node.state;
     if state.capabilities.is_none() {
         return Some("has not heartbeated yet, so nothing says what its radio can tune");
+    }
+    match compat(node) {
+        Some(Compat::NodeBehind) => {
+            return Some("runs older firmware than this host drives, so it needs an update first");
+        }
+        Some(Compat::NodeAhead) => {
+            return Some(
+                "runs newer firmware than this host drives, so update the host to drive it",
+            );
+        }
+        _ => {}
     }
     if state.peer_refused {
         return Some("has no slot in the bridge's peer table, so it cannot be reached");
@@ -241,6 +271,13 @@ pub(super) fn why_not_assignable(node: &NodeView) -> Option<&'static str> {
 /// causes.
 fn node_state(node: &NodeView) -> (String, Severity) {
     let state = &node.state;
+    // Ahead of `no heartbeat`: a node on another major or minor has its heartbeats read
+    // only as far as its version, and they never count as liveness.
+    match compat(node) {
+        Some(Compat::NodeBehind) => return ("needs update".to_owned(), Severity::Fault),
+        Some(Compat::NodeAhead) => return ("host behind".to_owned(), Severity::Fault),
+        _ => {}
+    }
     if state.last_heartbeat.is_none() {
         return ("no heartbeat".to_owned(), Severity::Warning);
     }
@@ -337,7 +374,7 @@ mod tests {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use tokio::sync::mpsc;
     use wartui_core::engine::Assignment;
-    use wartui_proto::air::{DieTemp, Vdd};
+    use wartui_proto::air::{Capabilities, DieTemp, Vdd};
     use wartui_proto::plan::{ChannelPool, IndexRun};
 
     use super::*;
@@ -583,13 +620,19 @@ mod tests {
         let mut ui = Ui::default();
         terminal.draw(|frame| draw(frame, &snapshot, &mut ui)).expect("drawing");
         let screen = terminal.backend().to_string();
-        assert!(screen.contains("C5 57:84  3.30 V  41 °C"), "{screen}");
+        assert!(
+            screen.contains(&format!("C5 57:84  {NODE_VERSION};5g  3.30 V  41 °C")),
+            "{screen}"
+        );
 
         let (tx, _rx) = mpsc::channel(4);
         ui.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &snapshot, &tx);
         terminal.draw(|frame| draw(frame, &snapshot, &mut ui)).expect("drawing");
         let screen = terminal.backend().to_string();
-        assert!(screen.contains("C5 57:85  —  —"), "no reading is a dash: {screen}");
+        assert!(
+            screen.contains(&format!("C5 57:85  {NODE_VERSION};5g  —  —")),
+            "no reading is a dash: {screen}"
+        );
     }
 
     #[test]
@@ -682,5 +725,73 @@ mod tests {
             offset_at_bottom,
             "the window moved for a cursor move inside it"
         );
+    }
+
+    #[test]
+    fn node_label_names_chip_from_board_when_node_has_heartbeated() {
+        assert!(node_label(&node(0x84, 0, true)).starts_with("C5 "));
+        assert!(node_label(&narrowband(0x84)).starts_with("C6 "));
+        let mut xiao = node(0x84, 0, true);
+        xiao.state.capabilities = Some(Capabilities::here(Board::Esp32c6Xiao));
+        assert_eq!(node_label(&xiao), "C6 57:84", "a XIAO is a C6");
+        let mut unknown = node(0x84, 0, true);
+        unknown.state.capabilities = Some(Capabilities::here(Board::Unknown(0x40)));
+        assert_eq!(node_label(&unknown), "?? 57:84");
+    }
+
+    #[test]
+    fn version_label_shows_arrow_when_node_patch_is_behind() {
+        let mut behind = node(0x84, 0, true);
+        let caps = Capabilities::here(Board::Esp32c5);
+        behind.state.capabilities = Some(Capabilities { version: Version::new(0, 1, 2), ..caps });
+        assert_eq!(version_label(&behind, Version::new(0, 1, 3)), "0.1.2;5g ↑0.1.3");
+        assert_eq!(version_label(&behind, Version::new(0, 1, 2)), "0.1.2;5g", "current: no arrow");
+        assert_eq!(version_label(&unannounced(0x84), Version::new(0, 1, 2)), "—");
+    }
+
+    #[test]
+    fn node_state_returns_needs_update_label_when_node_runs_older_minor() {
+        let view = outdated(0x84);
+        let (label, severity) = node_state(&view);
+        assert_eq!(label, "needs update");
+        assert_eq!(severity, Severity::Fault);
+        assert!(why_not_assignable(&view).is_some_and(|why| why.contains("update")));
+    }
+
+    #[test]
+    fn node_state_returns_host_behind_label_when_node_runs_newer_minor() {
+        let view = ahead(0x84);
+        let (label, severity) = node_state(&view);
+        assert_eq!(label, "host behind");
+        assert_eq!(severity, Severity::Fault);
+        let why = why_not_assignable(&view).expect("refused");
+        assert!(why.contains("update the host"), "{why}");
+        assert_eq!(
+            version_label(&view, NODE_VERSION),
+            view.state.capabilities.unwrap().to_string()
+        );
+    }
+
+    #[test]
+    fn fleet_table_shows_host_behind_when_node_runs_newer_minor() {
+        let view = ahead(0x84);
+        let caps = view.state.capabilities.expect("set");
+        let snapshot = Snapshot { nodes: vec![view], tail: Vec::new(), ..busy() };
+        let screen = rendered(&snapshot);
+        assert!(screen.contains("host behind"), "{screen}");
+        assert!(!screen.contains("needs update"), "{screen}");
+        // The health line: the node's version alone, no arrow toward this build's.
+        assert!(screen.contains(&format!("C5 57:84  {caps}  ")), "{screen}");
+    }
+
+    #[test]
+    fn fleet_table_shows_needs_update_and_version_when_node_runs_older_minor() {
+        let snapshot = Snapshot { nodes: vec![outdated(0x84)], tail: Vec::new(), ..busy() };
+        let screen = rendered(&snapshot);
+        let row = screen.lines().find(|line| line.contains("57:84  ")).unwrap_or_default();
+        assert!(screen.contains("needs update"), "{screen}");
+        assert!(row.contains("C5 57:84"), "{screen}");
+        let older = outdated(0x84).state.capabilities.expect("set").version;
+        assert!(screen.contains(&format!("{older};5g ↑{NODE_VERSION}")), "{screen}");
     }
 }

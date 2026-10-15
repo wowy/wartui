@@ -7,6 +7,7 @@
 use std::time::{Duration, Instant};
 
 use indexmap::IndexSet;
+use wartui_bridge::sim::minor_behind;
 use wartui_bridge::{BridgeInfo, LinkEvent};
 use wartui_core::ActionBatch;
 use wartui_core::engine::{
@@ -18,8 +19,8 @@ use wartui_core::health::Health;
 use wartui_core::position::{DEFAULT_MAX_AGE, PositionChain, PositionSource};
 use wartui_core::record::{AdminOutcome, BatchGap, BridgeStatusSeen, HostStatus, Record};
 use wartui_proto::air::{
-    AdminMsg, Capabilities, DieTemp, Frame, HeartbeatMsg, RecordKind, Security,
-    SightingBatchWriter, SightingMsg, Vdd, wire_epoch,
+    AdminMsg, Board, Capabilities, DieTemp, Frame, HeartbeatMsg, NODE_VERSION, RecordKind,
+    Security, SightingBatchWriter, SightingMsg, Vdd, Version, wire_epoch,
 };
 use wartui_proto::link::{
     BROADCAST, BridgeToHost, Chip, EspNowPayload, HostToBridge, LinkError, LoopPhase, SendStatus,
@@ -93,18 +94,18 @@ fn rx_at(src: Mac, frame: &[u8], rx_us: u32) -> Event {
 /// Reports epoch 0: nothing adopted, which is what every test not about
 /// adoption wants said.
 fn heartbeat(src: Mac, counter: u32) -> Event {
-    beat_at(src, counter, 0, Capabilities::here(true), 0)
+    beat_at(src, counter, 0, Capabilities::here(Board::Esp32c5), 0)
 }
 
 /// A heartbeat from an ESP32-C6: 2.4 GHz only.
 fn narrowband_heartbeat(src: Mac, counter: u32) -> Event {
-    beat_at(src, counter, 0, Capabilities::here(false), 0)
+    beat_at(src, counter, 0, Capabilities::here(Board::Esp32c6), 0)
 }
 
 /// A heartbeat reporting the epoch the node holds, for the tests about
 /// adoption.
 fn heartbeat_holding(src: Mac, counter: u32, epoch: u8) -> Event {
-    beat_at(src, counter, epoch, Capabilities::here(true), 0)
+    beat_at(src, counter, epoch, Capabilities::here(Board::Esp32c5), 0)
 }
 
 fn beat_at(src: Mac, counter: u32, epoch: u8, capabilities: Capabilities, rx_us: u32) -> Event {
@@ -131,7 +132,7 @@ fn heartbeat_refusing(src: Mac, counter: u32, wifi_refused: u16, ble_refused: u1
     let msg = HeartbeatMsg {
         counter,
         epoch: 0,
-        capabilities: Capabilities::here(true),
+        capabilities: Capabilities::here(Board::Esp32c5),
         wifi_refused,
         ble_refused,
         beat: 1,
@@ -1030,7 +1031,7 @@ fn engine_records_dwell_when_heartbeat_arrives() {
     let msg = HeartbeatMsg {
         counter: 1,
         epoch: 0,
-        capabilities: Capabilities::here(true),
+        capabilities: Capabilities::here(Board::Esp32c5),
         wifi_refused: 0,
         ble_refused: 0,
         beat: 1,
@@ -1065,7 +1066,7 @@ fn engine_records_reset_cause_when_node_restarts() {
     let msg = HeartbeatMsg {
         counter: 2,
         epoch: 0,
-        capabilities: Capabilities::here(true),
+        capabilities: Capabilities::here(Board::Esp32c5),
         wifi_refused: 0,
         ble_refused: 0,
         beat: 1,
@@ -1096,7 +1097,7 @@ fn heartbeat_reading(src: Mac, counter: u32, vdd: Vdd, die_temp: DieTemp) -> Eve
     let msg = HeartbeatMsg {
         counter,
         epoch: 0,
-        capabilities: Capabilities::here(true),
+        capabilities: Capabilities::here(Board::Esp32c5),
         wifi_refused: 0,
         ble_refused: 0,
         beat: 1,
@@ -1158,7 +1159,7 @@ fn engine_counts_incompatible_when_wire_version_differs() {
     let mut frame = HeartbeatMsg {
         counter: 1,
         epoch: 0,
-        capabilities: Capabilities::here(true),
+        capabilities: Capabilities::here(Board::Esp32c5),
         wifi_refused: 0,
         ble_refused: 0,
         beat: 1,
@@ -1178,6 +1179,196 @@ fn engine_counts_incompatible_when_wire_version_differs() {
     assert_eq!(counters(&engine).incompatible, 1);
     assert_eq!(counters(&engine).undecodable, 0);
     assert_eq!(engine.nodes().count(), 0, "it cannot be driven, so it is not in the table");
+}
+
+/// What a node a minor version behind this build announces.
+fn outdated_capabilities() -> Capabilities {
+    let version = minor_behind(NODE_VERSION);
+    Capabilities { version, ..Capabilities::here(Board::Esp32c5) }
+}
+
+/// What a node a minor version ahead of this build announces.
+fn ahead_capabilities() -> Capabilities {
+    let minor = NODE_VERSION.minor.checked_add(1).expect("a minor after this one");
+    Capabilities {
+        version: Version { minor, ..NODE_VERSION },
+        ..Capabilities::here(Board::Esp32c5)
+    }
+}
+
+#[test]
+fn engine_files_node_as_unassignable_when_heartbeat_names_another_minor() {
+    // Exactly this build's length, but a minor version may move fields without resizing
+    // the frame, so only the prefix is believed.
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(connected(), clock.at(0));
+    let batch = engine.handle(beat_at(NODE, 1, 0, outdated_capabilities(), 0), clock.at(1));
+
+    assert!(admins(&batch).is_empty(), "nothing is sent to a node that needs an update");
+    assert_eq!(counters(&engine).incompatible, 0, "a named node, not an anonymous frame");
+    assert_eq!(counters(&engine).heartbeats, 0);
+    let node = engine.nodes().find(|n| n.mac == NODE).expect("the node is filed");
+    assert_eq!(node.capabilities, Some(outdated_capabilities()));
+    assert!(!engine.is_assignable(node, clock.at(1)));
+    let snapshot = engine.snapshot(clock.at(1), StoreStats::default());
+    assert_eq!(snapshot.nodes.len(), 1, "shown in the fleet table");
+    assert!(!snapshot.nodes[0].assignable);
+}
+
+#[test]
+fn engine_files_node_from_prefix_when_heartbeat_of_another_minor_has_another_length() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    let caps = outdated_capabilities();
+    let mut frame = beat_frame(caps);
+    frame.truncate(14);
+    let batch = engine.handle(rx(NODE, &frame), clock.at(1));
+
+    assert_eq!(counters(&engine).incompatible, 0);
+    assert_eq!(counters(&engine).undecodable, 0);
+    let node = engine.nodes().find(|n| n.mac == NODE).expect("the node is filed");
+    assert_eq!(node.capabilities, Some(caps));
+    assert!(!engine.is_assignable(node, clock.at(1)));
+    let filed = batch.records.iter().find_map(|record| match record {
+        Record::Node(seen) => seen.capabilities.clone(),
+        _ => None,
+    });
+    assert_eq!(filed, Some(caps.to_string()), "the store names its version");
+}
+
+#[test]
+fn engine_counts_incompatible_when_heartbeat_of_this_minor_has_another_length() {
+    // A node on this minor that sends the wrong length is a bug, not an older node.
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    let mut frame = beat_frame(Capabilities::here(Board::Esp32c5));
+    frame.push(0);
+    engine.handle(rx(NODE, &frame), clock.at(1));
+
+    assert_eq!(counters(&engine).incompatible, 1);
+    assert_eq!(engine.nodes().count(), 0);
+}
+
+#[test]
+fn engine_assigns_node_when_its_patch_differs() {
+    // A patch never changes the wire, so a node on another patch is driven as usual.
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    let version = Version { patch: NODE_VERSION.patch.wrapping_add(3), ..NODE_VERSION };
+    let caps = Capabilities { version, ..Capabilities::here(Board::Esp32c5) };
+    engine.handle(beat_at(NODE, 1, 0, caps, 0), clock.at(1));
+
+    let node = engine.nodes().find(|n| n.mac == NODE).expect("the node");
+    assert!(engine.is_assignable(node, clock.at(1)));
+}
+
+#[test]
+fn engine_files_node_as_unassignable_when_heartbeat_names_a_newer_minor() {
+    // The host is the one behind, but the node's layout is still not this build's.
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(connected(), clock.at(0));
+    let batch = engine.handle(beat_at(NODE, 1, 0, ahead_capabilities(), 0), clock.at(1));
+
+    assert!(admins(&batch).is_empty());
+    assert_eq!(counters(&engine).incompatible, 0);
+    let node = engine.nodes().find(|n| n.mac == NODE).expect("the node is filed");
+    assert_eq!(node.capabilities, Some(ahead_capabilities()));
+    assert!(!engine.is_assignable(node, clock.at(1)));
+}
+
+#[test]
+fn engine_drops_sightings_when_node_runs_another_minor() {
+    // It may still hold an assignment from a build that could drive it, and its batches are
+    // not this build's layout even when they parse.
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(beat_at(NODE, 1, 0, outdated_capabilities(), 0), clock.at(1));
+    let batch = engine.handle(observation(NODE, "AA:BB:CC:DD:EE:FF", -60), clock.at(2));
+
+    assert_eq!(observations(&batch), 0, "nothing reaches the store");
+    assert_eq!(counters(&engine).observations, 0);
+    assert_eq!(counters(&engine).incompatible, 1);
+
+    engine.handle(beat_at(OTHER, 1, 0, ahead_capabilities(), 0), clock.at(3));
+    engine.handle(observation(OTHER, "AA:BB:CC:DD:EE:FF", -60), clock.at(4));
+    assert_eq!(counters(&engine).observations, 0);
+    assert_eq!(counters(&engine).incompatible, 2);
+}
+
+#[test]
+fn engine_records_sightings_when_node_has_not_heartbeated() {
+    // Nothing yet says what it runs, so it is not presumed incompatible.
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(observation(NODE, "AA:BB:CC:DD:EE:FF", -60), clock.at(1));
+
+    assert_eq!(counters(&engine).observations, 1);
+    assert_eq!(counters(&engine).incompatible, 0);
+}
+
+#[test]
+fn engine_withdraws_ble_at_once_when_scanner_reports_another_minor() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(heartbeat(peer(0), 1), clock.at(1));
+    engine.handle(heartbeat(peer(1), 1), clock.at(1));
+    engine.handle(Event::Command(Command::AssignBle { mac: Some(peer(0)) }), clock.at(2));
+
+    // Well inside the topology timeout: the scan does not wait for the node to age out.
+    engine.handle(beat_at(peer(0), 2, 0, outdated_capabilities(), 0), clock.at(3));
+
+    assert_eq!(
+        ble_state(&engine, clock.at(3)),
+        (None, Some(peer(0)), true),
+        "withdrawn, and still the preferred node"
+    );
+    let snapshot = engine.snapshot(clock.at(3), StoreStats::default());
+    let other = snapshot.nodes.iter().find(|n| n.state.mac == peer(1)).expect("the other node");
+    assert!(other.state.desired.is_some_and(|a| !a.ble), "nobody else is handed the scan");
+
+    // Updated, it takes the scan back as a returning preferred node does.
+    let batch = engine.handle(heartbeat(peer(0), 3), clock.at(4));
+    assert_eq!(ble_state(&engine, clock.at(4)).0, Some(peer(0)));
+    assert!(admins(&batch).iter().any(|admin| admin.scan_ble()));
+}
+
+#[test]
+fn engine_snapshot_counts_undrivable_nodes_when_heard_inside_topology_timeout() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(beat_at(NODE, 1, 0, outdated_capabilities(), 0), clock.at(1));
+    engine.handle(beat_at(OTHER, 1, 0, ahead_capabilities(), 0), clock.at(1));
+    engine.handle(heartbeat(THIRD, 1), clock.at(1));
+
+    let snapshot = engine.snapshot(clock.at(2), StoreStats::default());
+    assert_eq!((snapshot.needs_update, snapshot.host_behind, snapshot.alive), (1, 1, 1));
+
+    // Gone quiet, they stop counting, as a silent node stops being alive.
+    let later = engine.snapshot(clock.at(120), StoreStats::default());
+    assert_eq!((later.needs_update, later.host_behind), (0, 0));
+}
+
+/// A heartbeat frame carrying `capabilities`, otherwise empty.
+fn beat_frame(capabilities: Capabilities) -> Vec<u8> {
+    HeartbeatMsg {
+        counter: 1,
+        epoch: 0,
+        capabilities,
+        wifi_refused: 0,
+        ble_refused: 0,
+        beat: 1,
+        unsent: 0,
+        dwell: 0,
+        prev_dwell: 0,
+        tx_power: 8,
+        reset_cause: ResetCause::PowerOn,
+        vdd: Vdd::NONE,
+        die_temp: DieTemp::NONE,
+    }
+    .encode()
+    .to_vec()
 }
 
 #[test]
@@ -1467,6 +1658,7 @@ fn engine_counts_bridge_drops_since_attach_when_status_arrives() {
             rx_count: 1363,
             dropped_tx,
             uptime_ms: 3_240_000,
+            rx_oversize: 0,
         }))
     };
 
@@ -1499,6 +1691,7 @@ fn engine_records_bridge_status_when_reply_arrives() {
             rx_count: 1363,
             dropped_tx,
             uptime_ms,
+            rx_oversize: 17,
         }))
     };
     let statuses = |batch: &ActionBatch| -> Vec<BridgeStatusSeen> {
@@ -1526,6 +1719,7 @@ fn engine_records_bridge_status_when_reply_arrives() {
             dropped_tx: 1300,
             uptime_ms: 3_240_000,
             host_frames: 0,
+            rx_oversize: 17,
         }]
     );
     assert_eq!(
@@ -1537,6 +1731,7 @@ fn engine_records_bridge_status_when_reply_arrives() {
             dropped_tx: 2,
             uptime_ms: 4_000,
             host_frames: 0,
+            rx_oversize: 17,
         }]
     );
 }
@@ -1556,6 +1751,7 @@ fn engine_records_host_frames_when_status_reply_arrives() {
             rx_count: 10,
             dropped_tx: 0,
             uptime_ms: 9_000,
+            rx_oversize: 0,
         })),
         clock.at(4),
     );
@@ -1644,16 +1840,22 @@ fn engine_reports_lag_peak_once_when_backlog_drains() {
     let mut engine = engine(EngineConfig::default(), &clock);
     caught_up(&mut engine, &clock);
     // Live: a second on both clocks.
-    engine.handle(beat_at(NODE, 1, 0, Capabilities::here(true), 1_000_000), clock.at_ms(1_000));
+    engine.handle(
+        beat_at(NODE, 1, 0, Capabilities::here(Board::Esp32c5), 1_000_000),
+        clock.at_ms(1_000),
+    );
     // Then three seconds of bridge time inside 3 ms of host time.
     for i in 1..=3u32 {
         engine.handle(
-            beat_at(NODE, 1 + i, 0, Capabilities::here(true), 1_000_000 + i * 1_000_000),
+            beat_at(NODE, 1 + i, 0, Capabilities::here(Board::Esp32c5), 1_000_000 + i * 1_000_000),
             clock.at_ms(1_000 + u64::from(i)),
         );
     }
     // Caught up again.
-    engine.handle(beat_at(NODE, 5, 0, Capabilities::here(true), 4_100_000), clock.at_ms(2_000));
+    engine.handle(
+        beat_at(NODE, 5, 0, Capabilities::here(Board::Esp32c5), 4_100_000),
+        clock.at_ms(2_000),
+    );
 
     let sample = || Event::HostSample(HostSample::default());
     let first = host_status(&engine.handle(sample(), clock.at(3)));
@@ -1934,8 +2136,8 @@ fn engine_records_assignment_latency_when_ack_stamped() {
 
     // Stamped by the bridge at 1_000_000 µs and the callback at 1_004_500: 4.5 ms
     // from "the node is listening" to "its radio has the frame".
-    let opened =
-        engine.handle(beat_at(NODE, 2, 0, Capabilities::here(true), 1_000_000), clock.at(6));
+    let opened = engine
+        .handle(beat_at(NODE, 2, 0, Capabilities::here(Board::Esp32c5), 1_000_000), clock.at(6));
     let (id, _, _) = sent_admin(&opened);
     let batch = engine.handle(send_result(id, SendStatus::AckOk, 1_004_500), clock.at(6));
 
@@ -1950,12 +2152,17 @@ fn engine_records_latency_when_bridge_clock_wraps() {
     let mut engine = engine(EngineConfig::default(), &clock);
     // Both heartbeats are stamped just short of the wrap, a millisecond apart,
     // which is what a bridge approaching 71 minutes of uptime actually emits.
-    engine.handle(beat_at(NODE, 1, 0, Capabilities::here(true), u32::MAX - 2_000), clock.at(1));
+    engine.handle(
+        beat_at(NODE, 1, 0, Capabilities::here(Board::Esp32c5), u32::MAX - 2_000),
+        clock.at(1),
+    );
 
     // The bridge's stamp is a `u32` of microseconds and wraps every 71 minutes. A
     // heartbeat 1 ms before the wrap and a callback 3.5 ms after are 4.5 ms apart.
-    let opened =
-        engine.handle(beat_at(NODE, 2, 0, Capabilities::here(true), u32::MAX - 999), clock.at(6));
+    let opened = engine.handle(
+        beat_at(NODE, 2, 0, Capabilities::here(Board::Esp32c5), u32::MAX - 999),
+        clock.at(6),
+    );
     let (id, _, _) = sent_admin(&opened);
     let batch = engine.handle(send_result(id, SendStatus::AckOk, 3_500), clock.at(6));
 
@@ -2099,8 +2306,10 @@ fn engine_ignores_epoch_when_heartbeat_replayed() {
     // ahead of the host's, the tell that this window already shut. It reports
     // epoch 0 -- what a reboot would say -- but it is history, not now, and
     // must not be believed.
-    let batch = engine
-        .handle(beat_at(NODE, 4, 0, Capabilities::here(true), 1_000_000), clock.at_ms(10_002));
+    let batch = engine.handle(
+        beat_at(NODE, 4, 0, Capabilities::here(Board::Esp32c5), 1_000_000),
+        clock.at_ms(10_002),
+    );
     assert!(batch.urgent.is_empty(), "no assignment into a window that already shut");
 
     let node = engine.nodes().next().expect("the node");
@@ -2122,14 +2331,20 @@ fn engine_counts_one_reboot_when_replay_then_live_both_show_it() {
     // Replayed out of the backlog (a huge rx_us jump against a tiny host-time
     // one) and its counter is behind the one already seen: a reboot on its
     // own, and this alone must not also wait for an epoch to say so.
-    engine.handle(beat_at(NODE, 1, 0, Capabilities::here(true), 1_000_000), clock.at_ms(10_002));
+    engine.handle(
+        beat_at(NODE, 1, 0, Capabilities::here(Board::Esp32c5), 1_000_000),
+        clock.at_ms(10_002),
+    );
     assert_eq!(engine.nodes().next().expect("the node").reboots, 1);
 
     // The next heartbeat is live and reports epoch 0 too -- the same reboot's
     // first live word on it, not a second reboot. `held_epoch` has to have
     // been cleared already by the replayed one above, or this looks like the
     // node forgetting a second, different epoch.
-    engine.handle(beat_at(NODE, 2, 0, Capabilities::here(true), 1_050_000), clock.at_ms(10_102));
+    engine.handle(
+        beat_at(NODE, 2, 0, Capabilities::here(Board::Esp32c5), 1_050_000),
+        clock.at_ms(10_102),
+    );
     assert_eq!(engine.nodes().next().expect("the node").reboots, 1, "one reboot, not two");
 }
 
@@ -2447,7 +2662,7 @@ fn engine_sends_empty_channels_only_with_ble_flag_when_ble_moves_in_surplus_flee
     let clock = Clock::new();
     let config = EngineConfig { pool: ChannelPool::Us, ..EngineConfig::default() };
     let mut engine = engine(config, &clock);
-    let token = Capabilities::here(false);
+    let token = Capabilities::here(Board::Esp32c6);
     let mut seen_empty = 0;
     let check = |batch: &ActionBatch, seen_empty: &mut u32| {
         for admin in admins(batch) {
@@ -2517,8 +2732,8 @@ fn settle_c6_fleet(engine: &mut FleetEngine, clock: &Clock, nodes: u8, from: u64
         let at = clock.at(from + u64::from(beat));
         engine.handle(Event::Tick, at);
         for n in 0..nodes {
-            let batch =
-                engine.handle(beat_at(peer(n), beat + 1, 0, Capabilities::here(false), 0), at);
+            let batch = engine
+                .handle(beat_at(peer(n), beat + 1, 0, Capabilities::here(Board::Esp32c6), 0), at);
             if let Some(HostToBridge::SendEspNow { id, .. }) = batch.urgent.first() {
                 engine.handle(send_result(*id, SendStatus::AckOk, 900), at);
             }
@@ -2538,7 +2753,7 @@ fn engine_returns_surplus_scanner_to_wifi_when_scan_taken_off() {
     let config = EngineConfig { pool: ChannelPool::Us, ..EngineConfig::default() };
     let mut engine = engine(config, &clock);
     for n in 0..12 {
-        engine.handle(beat_at(peer(n), 1, 0, Capabilities::here(false), 0), clock.at(1));
+        engine.handle(beat_at(peer(n), 1, 0, Capabilities::here(Board::Esp32c6), 0), clock.at(1));
     }
     engine.handle(Event::Command(Command::AssignBle { mac: Some(peer(11)) }), clock.at(2));
     settle_c6_fleet(&mut engine, &clock, 12, 2);
@@ -2572,7 +2787,7 @@ fn engine_keeps_one_ble_scanner_when_scan_moves() {
     let config = EngineConfig { pool: ChannelPool::Us, ..EngineConfig::default() };
     let mut engine = engine(config, &clock);
     for n in 0..13 {
-        engine.handle(beat_at(peer(n), 1, 0, Capabilities::here(false), 0), clock.at(1));
+        engine.handle(beat_at(peer(n), 1, 0, Capabilities::here(Board::Esp32c6), 0), clock.at(1));
     }
     engine.handle(Event::Command(Command::AssignBle { mac: Some(peer(12)) }), clock.at(2));
     settle_c6_fleet(&mut engine, &clock, 13, 2);
@@ -2814,7 +3029,13 @@ fn engine_ignores_window_when_heartbeat_from_backlog() {
     let mut sent = 0;
     for beat in 0..9u32 {
         let batch = engine.handle(
-            beat_at(NODE, beat + 1, 0, Capabilities::here(true), 1_000_000 + beat * 1_000_000),
+            beat_at(
+                NODE,
+                beat + 1,
+                0,
+                Capabilities::here(Board::Esp32c5),
+                1_000_000 + beat * 1_000_000,
+            ),
             clock.at_ms(u64::from(beat) * 2),
         );
         sent += batch.urgent.len();
@@ -2851,13 +3072,21 @@ fn engine_uses_window_when_live_heartbeat_follows_backlog() {
     // clock for a frame the bridge stamped a second later.
     for beat in 0..4u32 {
         engine.handle(
-            beat_at(NODE, beat + 1, 0, Capabilities::here(true), 1_000_000 + beat * 1_000_000),
+            beat_at(
+                NODE,
+                beat + 1,
+                0,
+                Capabilities::here(Board::Esp32c5),
+                1_000_000 + beat * 1_000_000,
+            ),
             clock.at_ms(u64::from(beat) * 2),
         );
     }
 
-    let live =
-        engine.handle(beat_at(NODE, 5, 0, Capabilities::here(true), 5_000_000), clock.at_ms(1_010));
+    let live = engine.handle(
+        beat_at(NODE, 5, 0, Capabilities::here(Board::Esp32c5), 5_000_000),
+        clock.at_ms(1_010),
+    );
     let (_, dst, _) = sent_admin(&live);
     assert_eq!(dst, NODE, "the window this heartbeat opened is the live one");
 }
@@ -2872,8 +3101,10 @@ fn engine_ignores_window_when_heartbeat_precedes_ready() {
     let mut engine = engine(EngineConfig::default(), &clock);
 
     // Minutes old on the bridge's clock, and the first thing this engine sees.
-    let first = engine
-        .handle(beat_at(NODE, 307, 0, Capabilities::here(true), 359_000_000), clock.at_ms(31));
+    let first = engine.handle(
+        beat_at(NODE, 307, 0, Capabilities::here(Board::Esp32c5), 359_000_000),
+        clock.at_ms(31),
+    );
     assert!(engine.nodes().next().expect("admitted").dirty, "the plan owes it a share");
     assert!(first.urgent.is_empty(), "no assignment into a window that shut long ago");
 }
@@ -2903,8 +3134,8 @@ fn engine_uses_window_when_first_heartbeat_follows_quiet_connect() {
         engine.handle(Event::Tick, clock.at_ms(at * 100));
     }
 
-    let first =
-        engine.handle(beat_at(NODE, 1, 0, Capabilities::here(true), 560_000_000), clock.at(1));
+    let first = engine
+        .handle(beat_at(NODE, 1, 0, Capabilities::here(Board::Esp32c5), 560_000_000), clock.at(1));
     let (_, dst, _) = sent_admin(&first);
     assert_eq!(dst, NODE);
     assert!(stored_live(&first), "stored as live");
@@ -2919,8 +3150,10 @@ fn engine_ignores_window_when_first_heartbeat_follows_connect_promptly() {
     let mut engine = engine(EngineConfig::default(), &clock);
     engine.handle(connected(), clock.at(0));
 
-    let first =
-        engine.handle(beat_at(NODE, 1, 0, Capabilities::here(true), 560_000_000), clock.at_ms(10));
+    let first = engine.handle(
+        beat_at(NODE, 1, 0, Capabilities::here(Board::Esp32c5), 560_000_000),
+        clock.at_ms(10),
+    );
     assert!(first.urgent.is_empty(), "it may be the first frame of a backlog");
     assert!(!stored_live(&first));
     assert_eq!(counters(&engine).admin_windows_missed, 1);
@@ -2933,8 +3166,10 @@ fn engine_ignores_window_when_heartbeat_precedes_connect() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
 
-    let first =
-        engine.handle(beat_at(NODE, 1, 0, Capabilities::here(true), 560_000_000), clock.at(600));
+    let first = engine.handle(
+        beat_at(NODE, 1, 0, Capabilities::here(Board::Esp32c5), 560_000_000),
+        clock.at(600),
+    );
     assert!(first.urgent.is_empty());
     assert!(!stored_live(&first));
 }
@@ -2951,8 +3186,10 @@ fn engine_times_quiet_connect_from_latest_connect_when_link_reconnects() {
     engine.handle(connected(), clock.at(20));
 
     // Twenty seconds after the first connect, but hard on the second.
-    let prompt = engine
-        .handle(beat_at(NODE, 1, 0, Capabilities::here(true), 560_000_000), clock.at_ms(20_010));
+    let prompt = engine.handle(
+        beat_at(NODE, 1, 0, Capabilities::here(Board::Esp32c5), 560_000_000),
+        clock.at_ms(20_010),
+    );
     assert!(prompt.urgent.is_empty(), "the second connect may have a backlog of its own");
     assert!(!stored_live(&prompt));
 
@@ -2961,8 +3198,8 @@ fn engine_times_quiet_connect_from_latest_connect_when_link_reconnects() {
         clock.at(30),
     );
     engine.handle(connected(), clock.at(40));
-    let quiet =
-        engine.handle(beat_at(NODE, 2, 0, Capabilities::here(true), 600_000_000), clock.at(41));
+    let quiet = engine
+        .handle(beat_at(NODE, 2, 0, Capabilities::here(Board::Esp32c5), 600_000_000), clock.at(41));
     let (_, dst, _) = sent_admin(&quiet);
     assert_eq!(dst, NODE);
     assert!(stored_live(&quiet));
@@ -2976,10 +3213,10 @@ fn engine_times_quiet_connect_from_latest_connect_when_link_reconnects() {
 fn engine_drops_latency_when_longer_than_admin_window() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
-    engine.handle(beat_at(NODE, 1, 0, Capabilities::here(true), 1_000_000), clock.at(1));
+    engine.handle(beat_at(NODE, 1, 0, Capabilities::here(Board::Esp32c5), 1_000_000), clock.at(1));
 
-    let opened =
-        engine.handle(beat_at(NODE, 2, 0, Capabilities::here(true), 2_000_000), clock.at(6));
+    let opened = engine
+        .handle(beat_at(NODE, 2, 0, Capabilities::here(Board::Esp32c5), 2_000_000), clock.at(6));
     let (id, _, _) = sent_admin(&opened);
     // The callback comes back a full second after the heartbeat, ten times the
     // window the node was holding open.
@@ -2997,10 +3234,10 @@ fn engine_drops_latency_when_longer_than_admin_window() {
 fn engine_keeps_latency_when_equal_to_admin_window() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
-    engine.handle(beat_at(NODE, 1, 0, Capabilities::here(true), 1_000_000), clock.at(1));
+    engine.handle(beat_at(NODE, 1, 0, Capabilities::here(Board::Esp32c5), 1_000_000), clock.at(1));
 
-    let opened =
-        engine.handle(beat_at(NODE, 2, 0, Capabilities::here(true), 2_000_000), clock.at(6));
+    let opened = engine
+        .handle(beat_at(NODE, 2, 0, Capabilities::here(Board::Esp32c5), 2_000_000), clock.at(6));
     let (id, _, _) = sent_admin(&opened);
     let batch = engine.handle(send_result(id, SendStatus::AckOk, 2_100_000), clock.at(6));
 
@@ -3158,7 +3395,7 @@ fn engine_reissues_surplus_node_when_tx_power_changes() {
     let clock = Clock::new();
     let config = EngineConfig { pool: ChannelPool::Us, ..EngineConfig::default() };
     let mut engine = engine(config, &clock);
-    let token = Capabilities::here(false);
+    let token = Capabilities::here(Board::Esp32c6);
 
     // Eleven C6s settle first, `peer(1)` through `peer(11)`: the pool's eleven
     // 2.4 GHz channels give each of them a share of its own.
@@ -3308,7 +3545,13 @@ fn engine_holds_clear_when_heartbeat_replayed() {
     let mut sent = 0;
     for beat in 0..9u32 {
         let batch = engine.handle(
-            beat_at(NODE, beat + 1, 0, Capabilities::here(true), 1_000_000 + beat * 1_000_000),
+            beat_at(
+                NODE,
+                beat + 1,
+                0,
+                Capabilities::here(Board::Esp32c5),
+                1_000_000 + beat * 1_000_000,
+            ),
             clock.at_ms(u64::from(beat) * 2),
         );
         sent += batch.urgent.len();
@@ -3327,8 +3570,10 @@ fn engine_holds_clear_when_heartbeat_replayed() {
     // wait at least as long as the bridge's own clock says this step took, the
     // same gap `engine_uses_window_when_live_heartbeat_follows_backlog`
     // uses for an assignment.
-    let live = engine
-        .handle(beat_at(NODE, 10, 0, Capabilities::here(true), 10_000_000), clock.at_ms(1_020));
+    let live = engine.handle(
+        beat_at(NODE, 10, 0, Capabilities::here(Board::Esp32c5), 10_000_000),
+        clock.at_ms(1_020),
+    );
     let (_, dst) = sent_clear(&live);
     assert_eq!(dst, NODE);
 }
@@ -3361,8 +3606,10 @@ fn engine_reissues_when_desired_epoch_matches_held() {
 
     // NODE's first heartbeat is a backlog replay (huge bridge-side rx_us jump against
     // a tiny host-clock one): `held_epoch` stays unknown, so `deal` has nothing to skip.
-    let batch =
-        engine.handle(beat_at(NODE, 1, 0, Capabilities::here(true), 1_000_000), clock.at_ms(1_002));
+    let batch = engine.handle(
+        beat_at(NODE, 1, 0, Capabilities::here(Board::Esp32c5), 1_000_000),
+        clock.at_ms(1_002),
+    );
     assert!(batch.urgent.is_empty(), "no assignment into a window that already shut");
 
     let node = engine.nodes().find(|n| n.mac == NODE).expect("the node");
@@ -3375,7 +3622,7 @@ fn engine_reissues_when_desired_epoch_matches_held() {
     // another backlog frame; `heartbeat_holding` cannot express this because it
     // always reports rx_us 0.
     let batch = engine.handle(
-        beat_at(NODE, 2, collide_epoch, Capabilities::here(true), 5_000_000),
+        beat_at(NODE, 2, collide_epoch, Capabilities::here(Board::Esp32c5), 5_000_000),
         clock.at_ms(5_002),
     );
     let (_, _, admin) = sent_admin(&batch);
@@ -3596,7 +3843,7 @@ fn engine_moves_surplus_node_into_pool_when_pool_narrowed() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
     for n in 0..12 {
-        engine.handle(beat_at(peer(n), 1, 0, Capabilities::here(false), 0), clock.at(1));
+        engine.handle(beat_at(peer(n), 1, 0, Capabilities::here(Board::Esp32c6), 0), clock.at(1));
     }
     settle_c6_fleet(&mut engine, &clock, 12, 2);
     let outside = |set: ChannelSet| set.bits() & !ChannelPool::Us.channels().bits() != 0;
@@ -3777,7 +4024,7 @@ fn engine_logs_reset_cause_when_node_restarts() {
     let msg = HeartbeatMsg {
         counter: 2,
         epoch: 0,
-        capabilities: Capabilities::here(true),
+        capabilities: Capabilities::here(Board::Esp32c5),
         wifi_refused: 0,
         ble_refused: 0,
         beat: 1,
@@ -3803,7 +4050,7 @@ fn powered_beat(src: Mac, counter: u32, epoch: u8, tx_power: i8, rx_us: u32) -> 
     let msg = HeartbeatMsg {
         counter,
         epoch,
-        capabilities: Capabilities::here(true),
+        capabilities: Capabilities::here(Board::Esp32c5),
         wifi_refused: 0,
         ble_refused: 0,
         beat: 1,
@@ -3946,7 +4193,7 @@ fn booted_beat(src: Mac, counter: u32, cause: ResetCause) -> Event {
     let msg = HeartbeatMsg {
         counter,
         epoch: 0,
-        capabilities: Capabilities::here(true),
+        capabilities: Capabilities::here(Board::Esp32c5),
         wifi_refused: 0,
         ble_refused: 0,
         beat: 1,

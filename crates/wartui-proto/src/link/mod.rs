@@ -11,6 +11,14 @@
 //! a deserialize that cannot be trusted. The CRC is not for line integrity: USB bulk
 //! transfers are checked and retried in hardware. It rejects half-written frames, and
 //! the ROM banner a reset prints down the same pipe.
+//!
+//! The two directions carry different sizes. Host to bridge, a
+//! [`HostToBridge::SendEspNow`] holds up to [`MAX_ESPNOW_V2_PAYLOAD`] bytes, because both
+//! chips run ESP-NOW v2 and an update chunk needs more than 250 bytes; it travels in a
+//! frame of up to [`MAX_HOST_FRAME`]. Bridge to host, a [`BridgeToHost::Rx`] holds at most
+//! [`MAX_ESPNOW_PAYLOAD`], because nothing a node sends is longer, and travels in a frame
+//! of up to [`MAX_FRAME`]. That keeps the bridge's outbox slots at 512 bytes. See
+//! `docs/espnow-v2-findings.md`.
 
 use crate::mac::Mac;
 use crate::reset::ResetCause;
@@ -20,7 +28,9 @@ use serde::Serialize;
 mod frame;
 mod panel;
 
-pub use frame::{FrameAccumulator, LinkError, crc16, decode_frame, encode_frame};
+pub use frame::{
+    FrameAccumulator, LinkError, crc16, decode_frame, encode_frame, encode_host_frame,
+};
 pub use panel::{PANEL_ROWS, Panel, PanelLine, PanelLines, Severity};
 
 /// The revision of this protocol both ends must agree on.
@@ -35,14 +45,27 @@ pub use panel::{PANEL_ROWS, Panel, PanelLine, PanelLines, Severity};
 /// reads as one that answered nothing. Every addition to these enums goes on the end.
 pub const LINK_PROTO_VERSION: u8 = 1;
 
-/// ESP-NOW's own payload ceiling. A [`crate::air::SightingBatch`] fills it exactly.
+/// The longest frame a node sends: ESP-NOW v1's payload ceiling. A
+/// [`crate::air::SightingBatch`] fills it exactly. The bridge drops anything longer it
+/// hears, and counts it in [`BridgeToHost::Status`]'s `rx_oversize`.
 pub const MAX_ESPNOW_PAYLOAD: usize = 250;
 
-/// Buffer size both ends allocate for one encoded frame.
+/// ESP-NOW v2's payload ceiling (`ESP_NOW_MAX_DATA_LEN_V2`), the longest frame the host
+/// sends. Both chips take it intact; see `docs/espnow-v2-findings.md`.
+pub const MAX_ESPNOW_V2_PAYLOAD: usize = 1470;
+
+/// Buffer size for one encoded bridge-to-host frame, and the size of each outbox slot.
 pub const MAX_FRAME: usize = 512;
 
-/// An ESP-NOW payload in transit over USB.
+/// Buffer size for one encoded host-to-bridge frame: a [`HostToBridge::SendEspNow`]
+/// carrying a full [`MAX_ESPNOW_V2_PAYLOAD`], with room for framing.
+pub const MAX_HOST_FRAME: usize = 1600;
+
+/// An ESP-NOW payload a node sent, in transit to the host.
 pub type EspNowPayload = Vec<u8, MAX_ESPNOW_PAYLOAD>;
+
+/// An ESP-NOW payload the host sends, in transit to the bridge.
+pub type SendPayload = Vec<u8, MAX_ESPNOW_V2_PAYLOAD>;
 
 /// Short identifier, such as a firmware version.
 pub type ShortStr = String<32>;
@@ -161,7 +184,7 @@ pub enum HostToBridge {
         /// Register the peer first if it is not already known. It never removes one.
         ensure_peer: bool,
         /// Frame bytes, already encoded by [`crate::air`].
-        payload: EspNowPayload,
+        payload: SendPayload,
     },
     /// Ask for a [`BridgeToHost::Status`].
     GetStatus,
@@ -279,12 +302,16 @@ pub enum BridgeToHost {
     Status {
         /// Registered peers.
         peer_count: u8,
-        /// Frames received since boot.
+        /// Frames received and accepted to forward since boot. Oversize frames are
+        /// counted in `rx_oversize` instead.
         rx_count: u32,
         /// Frames the outbox dropped. See [`crate::outbox`].
         dropped_tx: u32,
         /// Bridge uptime.
         uptime_ms: u32,
+        /// Received frames longer than [`MAX_ESPNOW_PAYLOAD`], dropped since boot. No
+        /// wartui node sends one, so these are somebody else's traffic.
+        rx_oversize: u32,
     },
     /// Diagnostics, routed through the link rather than printed. `esp-println` would
     /// interleave into the same endpoint and corrupt the framing.

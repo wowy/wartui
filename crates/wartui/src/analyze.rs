@@ -76,6 +76,9 @@ fn losses_text(loss: &LossSummary) -> String {
         if bridge.usb_lost > 0 {
             let _ = write!(line, "  {} lost on USB", thousands(bridge.usb_lost));
         }
+        if bridge.oversize > 0 {
+            let _ = write!(line, "  {} oversize (not a node's)", thousands(bridge.oversize));
+        }
         let _ = writeln!(text, "{line}");
     }
     if let Some(host) = &loss.host {
@@ -283,6 +286,7 @@ mod tests {
                 reboots: 1,
                 host_read: 0,
                 usb_lost: 0,
+                oversize: 0,
             }),
             nodes: vec![
                 NodeLoss {
@@ -319,6 +323,7 @@ mod tests {
                 reboots: 0,
                 host_read: 31_821,
                 usb_lost: 0,
+                oversize: 0,
             }),
             nodes: Vec::new(),
             host: Some(HostLoss {
@@ -484,8 +489,14 @@ mod tests {
     #[test]
     fn analyze_report_omits_reboot_clause_when_bridge_never_restarted() {
         let mut loss = evening();
-        loss.bridge =
-            Some(BridgeLoss { received: 10, dropped: 0, reboots: 0, host_read: 0, usb_lost: 0 });
+        loss.bridge = Some(BridgeLoss {
+            received: 10,
+            dropped: 0,
+            reboots: 0,
+            host_read: 0,
+            usb_lost: 0,
+            oversize: 0,
+        });
         let text = losses_text(&loss);
         assert!(text.starts_with("  bridge     10 frames received  0 dropped (0.0%)\n"), "{text}");
     }
@@ -495,10 +506,43 @@ mod tests {
     fn bridge_line(received: u64, dropped: u64, host_read: u64) -> String {
         let usb_lost = received.saturating_sub(dropped).saturating_sub(host_read);
         let loss = LossSummary {
-            bridge: Some(BridgeLoss { received, dropped, reboots: 0, host_read, usb_lost }),
+            bridge: Some(BridgeLoss {
+                received,
+                dropped,
+                reboots: 0,
+                host_read,
+                usb_lost,
+                oversize: 0,
+            }),
             ..Default::default()
         };
         losses_text(&loss)
+    }
+
+    #[test]
+    fn analyze_report_prints_oversize_clause_when_bridge_dropped_oversize_frames() {
+        let loss = LossSummary {
+            bridge: Some(BridgeLoss {
+                received: 1_000,
+                dropped: 10,
+                reboots: 0,
+                host_read: 990,
+                usb_lost: 0,
+                oversize: 42,
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            losses_text(&loss),
+            "  bridge     1,000 frames received  10 dropped (1.0%)  host read 990  \
+             42 oversize (not a node's)\n"
+        );
+    }
+
+    #[test]
+    fn analyze_report_omits_oversize_clause_when_bridge_dropped_none() {
+        let text = bridge_line(1_000, 10, 990);
+        assert!(!text.contains("oversize"), "{text}");
     }
 
     #[test]

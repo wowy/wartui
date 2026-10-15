@@ -143,3 +143,52 @@ async fn drive_sends_new_epoch_when_second_node_narrows_share() {
     assert_eq!(covered.len() as u32, paired[0].len() + paired[1].len(), "disjoint shares");
     assert_eq!(covered.len() as u32, alone[0].len(), "and together the whole pool");
 }
+
+#[tokio::test(start_paused = true)]
+async fn drive_leaves_node_out_of_plan_when_it_needs_update() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let link = SimTransport::new(SimConfig {
+        node_count: 2,
+        speed: f64::from(SPEED),
+        outdated_node: Some(1),
+        ..Default::default()
+    })
+    .start()
+    .expect("starting the simulator");
+
+    let started = now();
+    let info = CaptureInfo { pool: ChannelPool::All, ..Default::default() };
+    let store =
+        Store::create(&StoreConfig::new(dir.path().join("outdated.db")), &info, started.unix_ms)
+            .expect("creating the store");
+    let config = EngineConfig { pool: ChannelPool::All, ..Default::default() };
+    let engine = FleetEngine::new(config, started);
+    let (snapshot_tx, snapshot_rx) =
+        watch::channel(Arc::new(engine.snapshot(started, StoreStats::default())));
+    let (stop_tx, stop_rx) = oneshot::channel();
+    let (_command_tx, command_rx) = mpsc::channel(4);
+    let capture = tokio::spawn(drive(link, store, engine, snapshot_tx, command_rx, stop_rx));
+
+    let outdated = SimTransport::node_mac(1);
+    let settled =
+        until(&snapshot_rx, "the current node to adopt and the outdated one to show", |s| {
+            s.nodes.len() == 2
+                && s.nodes.iter().any(|n| n.state.mac != outdated && n.state.adopted())
+                && s.nodes.iter().any(|n| n.state.mac == outdated && n.state.heartbeats >= 2)
+        })
+        .await;
+
+    let node = settled.nodes.iter().find(|n| n.state.mac == outdated).expect("visible");
+    assert!(!node.assignable);
+    assert!(node.state.desired.is_none(), "never dealt a share");
+    let current = settled.nodes.iter().find(|n| n.state.mac != outdated).expect("the other node");
+    assert_eq!(
+        current.state.desired.expect("adopted has one").channels,
+        ChannelPool::All.channels(),
+        "the current node shares the pool with nobody"
+    );
+    assert_eq!(settled.counters.incompatible, 0, "a named node, not an older frame");
+
+    stop_tx.send(()).expect("the capture is still running");
+    capture.await.expect("the capture task should not panic");
+}

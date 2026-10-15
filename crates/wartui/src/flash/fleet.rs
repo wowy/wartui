@@ -17,7 +17,12 @@
 //! remembered address that matches nothing is not an error: the bridge may simply be unplugged.
 //!
 //! **A board that fails the identity cross-check (`super`) is skipped**, neither flashed nor
-//! failed, and the rest of the fleet goes ahead.
+//! failed, and the rest of the fleet goes ahead. So is a board with under 4 MB of flash, or that
+//! does not say how much it has: the node's partition table holds two app slots and needs 4 MB.
+//!
+//! **Each node's `otadata` is erased after its image is written**, so it boots the `ota_0` the
+//! image went to whatever an earlier over-the-air update chose. There is no factory slot to fall
+//! back on.
 
 use std::fmt;
 use std::path::PathBuf;
@@ -32,9 +37,9 @@ use wartui_bridge::serial::{BridgeSpec, discover_ports};
 use wartui_proto::mac::Mac;
 
 use super::{
-    NODE, RELEASE_TAG, Ran, Skip, Source, canonical, check_image, chip_of, espflash,
-    espflash_present, features, flash_args, judge_probe, mac_arg, matches, name, obtain,
-    probe_args, read, source,
+    NODE, RELEASE_TAG, Ran, Skip, Source, canonical, check_image, chip_of, erase_otadata_args,
+    espflash, espflash_present, features, flash_args, judge_node_flash, judge_probe, mac_arg,
+    matches, name, obtain, probe_args, read, source,
 };
 use crate::spec;
 
@@ -64,8 +69,8 @@ pub struct Args {
     #[arg(long = "skip", value_name = "MAC", value_parser = mac_arg)]
     pub skip: Vec<Mac>,
 
-    /// Flash this merged image, which holds flash from address 0, rather than building or
-    /// downloading one.
+    /// Flash this merged image, which holds flash from address 0 and carries
+    /// `firmware/node/partitions.csv`, rather than building or downloading one.
     #[arg(long, value_name = "BIN", conflicts_with = "firmware_dir")]
     pub image: Option<PathBuf>,
 
@@ -126,6 +131,7 @@ pub fn run(args: Args) -> Result<()> {
     let probed = in_parallel(&probe, jobs, |candidate| {
         let expected = candidate.mac().expect("select probes only boards with an address");
         judge_probe(expected, chip, &espflash(&probe_args(&candidate.path)))
+            .and_then(|info| judge_node_flash(&info))
     });
     let mut verified = Vec::new();
     for (candidate, judged) in probe.into_iter().zip(probed) {
@@ -141,9 +147,8 @@ pub fn run(args: Args) -> Result<()> {
             0
         }
         Some(image) => {
-            let flashed = in_parallel(&verified, jobs, |candidate| {
-                espflash(&flash_args(&candidate.path, chip, image))
-            });
+            let flashed =
+                in_parallel(&verified, jobs, |candidate| flash_node(&candidate.path, chip, image));
             let mut failed = 0;
             for (candidate, ran) in verified.into_iter().zip(flashed) {
                 if ran.ok {
@@ -171,6 +176,19 @@ pub fn run(args: Args) -> Result<()> {
     }
     ensure!(failed == 0, "{failed} board(s) failed to flash");
     Ok(())
+}
+
+/// Write the merged image, then erase `otadata`.
+///
+/// An earlier over-the-air update leaves `otadata` pointing at whichever slot it wrote, and the
+/// merged image puts the app in `ota_0`. The erase makes the bootloader boot `ota_0`, rather
+/// than leaving that to how espflash writes the erased gap the image carries at 0xd000.
+fn flash_node(port: &str, chip: super::Chip, image: &std::path::Path) -> Ran {
+    let written = espflash(&flash_args(port, chip, image));
+    if !written.ok {
+        return written;
+    }
+    espflash(&erase_otadata_args(port, chip))
 }
 
 /// Every board known to be the bridge.

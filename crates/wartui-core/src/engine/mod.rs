@@ -355,7 +355,7 @@ impl FleetEngine {
             BridgeToHost::SendResult { id, status, tx_us } => {
                 self.on_send_result(*id, *status, *tx_us, now, batch);
             }
-            BridgeToHost::Status { peer_count, rx_count, dropped_tx, uptime_ms } => {
+            BridgeToHost::Status { peer_count, rx_count, dropped_tx, uptime_ms, rx_oversize } => {
                 // Below the baseline means the bridge restarted from zero.
                 let baseline = match self.dropped_baseline {
                     Some(baseline) if baseline <= *dropped_tx => baseline,
@@ -376,6 +376,7 @@ impl FleetEngine {
                     dropped_tx: *dropped_tx,
                     uptime_ms: *uptime_ms,
                     host_frames: self.counters.frames,
+                    rx_oversize: *rx_oversize,
                 }));
             }
             // `Ready` arrives as `LinkEvent::Connected`. Bridge diagnostics are the operator's, not
@@ -393,12 +394,15 @@ impl FleetEngine {
 
     /// Whether a node can be given channels.
     ///
-    /// Alive is not enough. A node with no peer slot, or that has not declared which band its radio
-    /// reaches, heartbeats fine but never scans its share. A share nobody scans is worse than one
-    /// node fewer: the fleet covers less of the pool than without it.
+    /// Alive is not enough. A node with no peer slot, that has not declared which band its radio
+    /// reaches, or whose firmware does not speak this build's layouts, heartbeats fine but never
+    /// scans its share. A share nobody scans is worse than one node fewer: the fleet covers less of
+    /// the pool than without it.
     #[must_use]
     pub fn is_assignable(&self, node: &NodeState, now: Now) -> bool {
-        self.is_alive(node, now) && node.capabilities.is_some() && !node.peer_refused
+        self.is_alive(node, now)
+            && node.capabilities.is_some_and(|caps| caps.version.compat_with_host().drivable())
+            && !node.peer_refused
     }
 
     /// Running totals, for tests and for the CLI's non-interactive modes.

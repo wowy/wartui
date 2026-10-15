@@ -89,6 +89,9 @@ pub struct BridgeLoss {
     /// `host_read`, saturating at 0. Approximate to the 24 frames the bulk ring can queue at each
     /// end, which a status reply overtakes.
     pub usb_lost: u64,
+    /// Frames the bridge dropped for being longer than any node sends: somebody else's
+    /// traffic, and not in `received`.
+    pub oversize: u64,
 }
 
 /// What the host did with the frames it read, and how it held up, first `host_status` row to last.
@@ -187,25 +190,32 @@ fn count(value: i64) -> u64 {
 
 fn bridge(conn: &Connection) -> rusqlite::Result<Option<BridgeLoss>> {
     let mut stmt = conn.prepare(
-        "SELECT rx_count, dropped_tx, uptime_ms, host_frames FROM bridge_status ORDER BY id",
+        "SELECT rx_count, dropped_tx, uptime_ms, host_frames, rx_oversize
+         FROM bridge_status ORDER BY id",
     )?;
     let mut rows = stmt.query([])?;
     let mut loss: Option<BridgeLoss> = None;
     // The previous row's figures. The first row is only a baseline.
-    let mut prev: Option<(u64, u64, u64, u64)> = None;
+    let mut prev: Option<(u64, u64, u64, u64, u64)> = None;
     while let Some(row) = rows.next()? {
-        let (received, dropped, uptime, host_frames) =
-            (count(row.get(0)?), count(row.get(1)?), count(row.get(2)?), count(row.get(3)?));
+        let (received, dropped, uptime, host_frames, oversize) = (
+            count(row.get(0)?),
+            count(row.get(1)?),
+            count(row.get(2)?),
+            count(row.get(3)?),
+            count(row.get(4)?),
+        );
         let loss = loss.get_or_insert_default();
-        if let Some((prev_received, prev_dropped, prev_uptime, prev_host)) = prev {
+        if let Some((prev_received, prev_dropped, prev_uptime, prev_host, prev_oversize)) = prev {
             let restarted = uptime < prev_uptime;
             loss.reboots += u64::from(restarted);
             loss.received += advance_since_boot(received, Some(prev_received), restarted);
             loss.dropped += advance_since_boot(dropped, Some(prev_dropped), restarted);
+            loss.oversize += advance_since_boot(oversize, Some(prev_oversize), restarted);
             // The host's count runs from the engine's start, so it survives a bridge restart.
             loss.host_read += host_frames.saturating_sub(prev_host);
         }
-        prev = Some((received, dropped, uptime, host_frames));
+        prev = Some((received, dropped, uptime, host_frames, oversize));
     }
     if let Some(loss) = &mut loss {
         loss.usb_lost = loss.received.saturating_sub(loss.dropped).saturating_sub(loss.host_read);

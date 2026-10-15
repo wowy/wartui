@@ -273,7 +273,7 @@ fn store_round_trips_record_when_each_type_written() {
                 mac: NODE,
                 first_seen_ms: EPOCH_MS,
                 last_seen_ms: EPOCH_MS,
-                capabilities: Some("wartui/0.1;5g".to_owned()),
+                capabilities: Some("0.1.0;5g".to_owned()),
             }),
             Record::Heartbeat(Heartbeat {
                 node_mac: NODE,
@@ -498,7 +498,7 @@ fn store_writes_every_node_column_when_node_recorded() {
             mac: NODE,
             first_seen_ms: EPOCH_MS,
             last_seen_ms: EPOCH_MS,
-            capabilities: Some("wartui/0.1;5g".to_owned()),
+            capabilities: Some("0.1.0;5g".to_owned()),
         })],
     );
     assert_insert_names_every_column(&conn, "node");
@@ -516,18 +516,19 @@ fn store_round_trips_every_column_when_bridge_status_written() {
             dropped_tx: 1305,
             uptime_ms: 3_240_000,
             host_frames: 3_999_999_000,
+            rx_oversize: 42,
         })],
     );
 
-    let row: (i64, i64, i64, i64, i64, i64) = conn
+    let row: (i64, i64, i64, i64, i64, i64, i64) = conn
         .query_row(
-            "SELECT rx_at, peer_count, rx_count, dropped_tx, uptime_ms, host_frames
+            "SELECT rx_at, peer_count, rx_count, dropped_tx, uptime_ms, host_frames, rx_oversize
              FROM bridge_status",
             [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
         )
         .unwrap();
-    assert_eq!(row, (EPOCH_MS + 5_000, 3, 4_000_000_000, 1305, 3_240_000, 3_999_999_000));
+    assert_eq!(row, (EPOCH_MS + 5_000, 3, 4_000_000_000, 1305, 3_240_000, 3_999_999_000, 42));
 }
 
 fn host_status(
@@ -647,7 +648,7 @@ fn store_keeps_first_seen_and_token_when_node_seen_again() {
                 mac: NODE,
                 first_seen_ms: EPOCH_MS,
                 last_seen_ms: EPOCH_MS,
-                capabilities: Some("wartui/0.1;5g".to_owned()),
+                capabilities: Some("0.1.0;5g".to_owned()),
             }),
             // The row that would erase the identity if the upsert wrote
             // `excluded.capabilities` straight in.
@@ -666,7 +667,7 @@ fn store_keeps_first_seen_and_token_when_node_seen_again() {
         })
         .unwrap();
     assert_eq!((first, last), (EPOCH_MS, EPOCH_MS + 60_000));
-    assert_eq!(caps.as_deref(), Some("wartui/0.1;5g"), "what it last said it was, kept");
+    assert_eq!(caps.as_deref(), Some("0.1.0;5g"), "what it last said it was, kept");
 }
 
 #[test]

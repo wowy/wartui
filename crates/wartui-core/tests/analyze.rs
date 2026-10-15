@@ -42,7 +42,14 @@ fn read_status(at_s: i64, rx_count: u32, dropped_tx: u32, uptime_ms: u32, host: 
         dropped_tx,
         uptime_ms,
         host_frames: host,
+        rx_oversize: 0,
     })
+}
+
+/// A status reply carrying a count of oversize frames dropped.
+fn oversize_status(at_s: i64, uptime_ms: u32, rx_oversize: u32) -> Record {
+    let Record::BridgeStatus(seen) = status(at_s, 0, 0, uptime_ms) else { unreachable!() };
+    Record::BridgeStatus(BridgeStatusSeen { rx_oversize, ..seen })
 }
 
 /// A live heartbeat.
@@ -110,7 +117,14 @@ fn analyze_counts_bridge_drops_from_first_row_when_capture_starts_with_drops() {
     let loss = losses(&conn).unwrap();
     assert_eq!(
         loss.bridge,
-        Some(BridgeLoss { received: 900, dropped: 30, reboots: 0, host_read: 0, usb_lost: 870 })
+        Some(BridgeLoss {
+            received: 900,
+            dropped: 30,
+            reboots: 0,
+            host_read: 0,
+            usb_lost: 870,
+            oversize: 0
+        })
     );
 }
 
@@ -126,8 +140,27 @@ fn analyze_adds_whole_value_when_bridge_drops_fall() {
     let loss = losses(&conn).unwrap();
     assert_eq!(
         loss.bridge,
-        Some(BridgeLoss { received: 700, dropped: 27, reboots: 1, host_read: 0, usb_lost: 673 })
+        Some(BridgeLoss {
+            received: 700,
+            dropped: 27,
+            reboots: 1,
+            host_read: 0,
+            usb_lost: 673,
+            oversize: 0
+        })
     );
+}
+
+#[test]
+fn analyze_sums_oversize_from_first_row_when_bridge_restarts() {
+    // 5 before the capture are a baseline; the restart's 4 are all new.
+    let (_dir, conn) = capture(vec![
+        oversize_status(0, 60_000, 5),
+        oversize_status(5, 65_000, 12),
+        oversize_status(10, 4_000, 4),
+    ]);
+    let loss = losses(&conn).unwrap();
+    assert_eq!(loss.bridge.map(|bridge| bridge.oversize), Some(11));
 }
 
 #[test]
@@ -554,7 +587,14 @@ fn analyze_sums_host_read_from_first_row_when_status_rows_carry_host_frames() {
     let loss = losses(&conn).unwrap();
     assert_eq!(
         loss.bridge,
-        Some(BridgeLoss { received: 700, dropped: 0, reboots: 1, host_read: 670, usb_lost: 30 })
+        Some(BridgeLoss {
+            received: 700,
+            dropped: 0,
+            reboots: 1,
+            host_read: 670,
+            usb_lost: 30,
+            oversize: 0
+        })
     );
 }
 

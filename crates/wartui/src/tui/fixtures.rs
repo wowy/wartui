@@ -11,7 +11,7 @@ use wartui_core::gps::{GpsCounters, GpsStatus, GpsView};
 use wartui_core::nmea::{Constellation, FixMode, Satellite, Sky};
 use wartui_core::position::{Fix, PositionSource};
 use wartui_core::record::AdminOutcome;
-use wartui_proto::air::{Capabilities, RecordKind, wire_epoch};
+use wartui_proto::air::{Board, Capabilities, NODE_VERSION, RecordKind, Version, wire_epoch};
 use wartui_proto::link::{Chip, LoopPhase};
 use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun};
 use wartui_proto::reset::ResetCause;
@@ -36,7 +36,7 @@ pub(super) fn node(last: u8, reboots: u32, assignable: bool) -> NodeView {
     state.link_rssi = Some(-41);
     // Heartbeating unless a test says otherwise. A node that has not heartbeated
     // cannot be assigned, so every assignment test would become a refusal test.
-    state.capabilities = Some(Capabilities::here(true));
+    state.capabilities = Some(Capabilities::here(Board::Esp32c5));
     NodeView { state, alive: true, assignable }
 }
 
@@ -53,7 +53,30 @@ pub(super) fn unannounced(last: u8) -> NodeView {
 /// A node whose token says 2.4 GHz only: an ESP32-C6.
 pub(super) fn narrowband(last: u8) -> NodeView {
     let mut view = node(last, 0, true);
-    view.state.capabilities = Some(Capabilities::here(false));
+    view.state.capabilities = Some(Capabilities::here(Board::Esp32c6));
+    view
+}
+
+/// Heartbeating from firmware a minor version behind this build's: known by its
+/// heartbeat prefix, never assignable, and never counted as alive.
+pub(super) fn outdated(last: u8) -> NodeView {
+    let mut view = node(last, 0, false);
+    let caps = Capabilities::here(Board::Esp32c5);
+    let version = wartui_bridge::sim::minor_behind(NODE_VERSION);
+    view.state.capabilities = Some(Capabilities { version, ..caps });
+    view.state.last_heartbeat = None;
+    view.alive = false;
+    view
+}
+
+/// Heartbeating from firmware a minor version ahead of this build's: the host is the one
+/// to update, and the node is never assignable.
+pub(super) fn ahead(last: u8) -> NodeView {
+    let mut view = outdated(last);
+    let minor = NODE_VERSION.minor.checked_add(1).expect("a minor after this one");
+    let caps = view.state.capabilities.expect("outdated sets one");
+    view.state.capabilities =
+        Some(Capabilities { version: Version { minor, ..NODE_VERSION }, ..caps });
     view
 }
 
@@ -160,6 +183,8 @@ pub(super) fn busy() -> Snapshot {
         ],
         alive: 4,
         assignable: 4,
+        needs_update: 0,
+        host_behind: 0,
         tail: (0..40)
             .map(|n| TailEntry {
                 node_mac: [0x02, 0x00, 0x5E, 0x10, 0x57, 0x84],
@@ -229,6 +254,8 @@ pub(super) fn empty() -> Snapshot {
         nodes: Vec::new(),
         alive: 0,
         assignable: 0,
+        needs_update: 0,
+        host_behind: 0,
         tail: Vec::new(),
         unique_wifi_aps: 0,
         unique_ble_aps: 0,

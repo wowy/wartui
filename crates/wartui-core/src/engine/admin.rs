@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use wartui_proto::air::{AdminMsg, ClearMsg, wire_epoch};
-use wartui_proto::link::{EspNowPayload, HostToBridge, SendStatus};
+use wartui_proto::link::{HostToBridge, SendPayload, SendStatus};
 use wartui_proto::mac::Mac;
 use wartui_proto::node;
 
@@ -65,8 +65,8 @@ impl FleetEngine {
             channels: assignment.channels,
             tx_power: assignment.tx_power,
         };
-        // Fifteen bytes into a 250-byte buffer, so this cannot fail.
-        let payload = EspNowPayload::from_slice(&msg.encode()).unwrap_or_default();
+        // Fifteen bytes into a 1470-byte buffer, so this cannot fail.
+        let payload = SendPayload::from_slice(&msg.encode()).unwrap_or_default();
 
         self.pending.insert(
             id,
@@ -103,8 +103,8 @@ impl FleetEngine {
 
         let id = self.next_send_id();
         self.pending.insert(id, Pending::Clear { mac, sent_mono: now.mono });
-        // Six bytes into a 250-byte buffer, so this cannot fail.
-        let payload = EspNowPayload::from_slice(&ClearMsg.encode()).unwrap_or_default();
+        // Six bytes into a 1470-byte buffer, so this cannot fail.
+        let payload = SendPayload::from_slice(&ClearMsg.encode()).unwrap_or_default();
         if let Some(node) = self.nodes.get_mut(&mac) {
             node.peered = true;
         }

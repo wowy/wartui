@@ -96,7 +96,7 @@ pub struct BridgeStatusSeen {
     pub rx_at_ms: i64,
     /// How many peers its ESP-NOW table holds.
     pub peer_count: u8,
-    /// Frames it has received since its boot.
+    /// Frames it has received and accepted to forward since its boot.
     pub rx_count: u32,
     /// Frames its outbound ring dropped on the way to the host since its boot.
     pub dropped_tx: u32,
@@ -106,6 +106,8 @@ pub struct BridgeStatusSeen {
     /// two rows, the `rx_count` difference less this one's is USB loss plus `dropped_tx`, give or
     /// take frames still queued in the bridge, which the reply overtakes.
     pub host_frames: u64,
+    /// Frames too long to be a node's that it dropped since its boot. Not in `rx_count`.
+    pub rx_oversize: u32,
 }
 
 /// The host's own state, sampled every few seconds and at shutdown.

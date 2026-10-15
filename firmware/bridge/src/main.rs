@@ -59,7 +59,8 @@ use wartui_proto::air::CONTROL_CHANNEL;
 use wartui_proto::heapless::Vec;
 use wartui_proto::link::{
     BROADCAST, BridgeToHost, Chip, FrameAccumulator, HostToBridge, LINK_PROTO_VERSION, LinkError,
-    LogLevel, LogStr, LoopPhase, MAX_FRAME, Panel, PanelLines, SendStatus, ShortStr, decode_frame,
+    LogLevel, LogStr, LoopPhase, MAX_HOST_FRAME, Panel, PanelLines, SendStatus, ShortStr,
+    decode_frame,
 };
 use wartui_proto::mac::Mac;
 use wartui_proto::outbox::{ByteSink, Outbox};
@@ -287,6 +288,11 @@ impl ByteSink for UsbSink<'_> {
 /// `.bss` rather than being built on the stack and moved into place.
 static OUTBOX: StaticCell<Outbox> = StaticCell::new();
 
+/// The host-side frame buffer, sized for a full ESP-NOW v2 send. Static for the
+/// reason `OUTBOX` is: inside `Bridge` its 1600 bytes are built on the stack twice
+/// before `BRIDGE` takes them.
+static ACCUMULATOR: StaticCell<FrameAccumulator<MAX_HOST_FRAME>> = StaticCell::new();
+
 /// Where an idle wait's read lands. Static rather than a local of `main`, whose poll
 /// frame sits at `.clippy.toml`'s threshold on the C5.
 static LINK_BUF: StaticCell<[u8; LINK_CHUNK]> = StaticCell::new();
@@ -299,8 +305,11 @@ static BRIDGE: StaticCell<Bridge> = StaticCell::new();
 /// Everything that changes while the bridge runs.
 struct Bridge {
     outbox: &'static mut Outbox,
-    accumulator: FrameAccumulator<MAX_FRAME>,
+    /// Sized for host-to-bridge frames, which carry ESP-NOW v2 sends of up to 1470 bytes.
+    accumulator: &'static mut FrameAccumulator<MAX_HOST_FRAME>,
     rx_count: u32,
+    /// Received frames too long to be a node's, dropped rather than forwarded.
+    rx_oversize: u32,
     boot: Instant,
     /// Why this life started, and where the last one stopped. Fixed at boot
     /// and repeated in every `Ready`, because the host is usually not watching
@@ -401,15 +410,15 @@ impl Bridge {
     /// Stored rather than drawn: the loop decides when pixels move, so a chatty host
     /// cannot turn a frame into a blocking SPI transfer inside the receive path.
     #[cfg(feature = "t-dongle-c5")]
-    fn show_panel(&mut self, lines: PanelLines) {
-        self.panel_lines = lines;
+    fn show_panel(&mut self, lines: &PanelLines) {
+        self.panel_lines.clone_from(lines);
     }
 
     /// Nowhere to draw them. Dropped rather than refused, because a host that has
     /// ignored a `panel: None` must not be able to wedge a bridge that has no screen.
     #[cfg(not(feature = "t-dongle-c5"))]
     #[expect(clippy::unused_self, reason = "the panel build takes `&mut self`")]
-    fn show_panel(&self, _lines: PanelLines) {}
+    fn show_panel(&self, _lines: &PanelLines) {}
 
     fn log(&mut self, level: LogLevel, message: &str) {
         let message = LogStr::try_from(message).unwrap_or_default();
@@ -482,8 +491,9 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     let now = Instant::now();
     let bridge = BRIDGE.init_with(|| Bridge {
         outbox: OUTBOX.init_with(Outbox::new),
-        accumulator: FrameAccumulator::new(),
+        accumulator: ACCUMULATOR.init_with(FrameAccumulator::new),
         rx_count: 0,
+        rx_oversize: 0,
         boot: now,
         cause,
         speaks_first,
@@ -679,14 +689,15 @@ fn drain_radio(receiver: &EspNowReceiver<'_>, bridge: &mut Bridge) -> bool {
 /// the C5.
 #[inline(never)]
 fn forward(received: ReceivedData, bridge: &mut Bridge) {
-    bridge.rx_count = bridge.rx_count.wrapping_add(1);
-
     let Ok(payload) = Vec::from_slice(received.data()) else {
-        // Longer than ESP-NOW's own 250-byte ceiling, so it cannot have
-        // come from the mesh. Say so rather than truncate it.
-        bridge.log(LogLevel::Warn, "dropped an over-long ESP-NOW frame");
+        // Longer than any frame a wartui node sends, so it is somebody else's.
+        // Counted apart from `rx_count`, which the host reads as frames headed its
+        // way, and never logged: a busy neighbor would fill the bulk ring with log
+        // lines and evict real sightings.
+        bridge.rx_oversize = bridge.rx_oversize.wrapping_add(1);
         return;
     };
+    bridge.rx_count = bridge.rx_count.wrapping_add(1);
 
     let rx_us = bridge.now_us();
     bridge.outbox.send(&BridgeToHost::Rx {
@@ -748,7 +759,7 @@ fn take_link_byte(
                 command.asks_for_reply(),
                 matches!(command, HostToBridge::Identify),
             );
-            handle(command, manager, sender, bridge, mac);
+            handle(&command, manager, sender, bridge, mac);
         }
         Err(err) => {
             // A frame that passed framing and its checksum but carries another
@@ -784,8 +795,11 @@ fn note_host_frame(bridge: &mut Bridge, mac: Mac, asks: bool, identify: bool) {
 }
 
 /// Carry out one host command.
+///
+/// By reference: a `HostToBridge` is 1488 bytes, and a by-value parameter is a second
+/// copy in this frame on top of the one `take_link_byte` decoded.
 fn handle(
-    command: HostToBridge,
+    command: &HostToBridge,
     manager: &EspNowManager<'_>,
     sender: &mut EspNowSender<'_>,
     bridge: &mut Bridge,
@@ -806,6 +820,7 @@ fn handle(
                 rx_count: bridge.rx_count,
                 dropped_tx: bridge.outbox.dropped(),
                 uptime_ms,
+                rx_oversize: bridge.rx_oversize,
             });
         }
 
@@ -813,7 +828,7 @@ fn handle(
 
         HostToBridge::ShowPanel { lines } => bridge.show_panel(lines),
 
-        HostToBridge::SetTxPower { power } => {
+        &HostToBridge::SetTxPower { power } => {
             if set_tx_power(manager, power) {
                 // Only a change is worth a line: the host re-sends this with every
                 // status poll so that a command lost to a full queue cannot leave the
@@ -827,12 +842,12 @@ fn handle(
             }
         }
 
-        HostToBridge::SendEspNow { id, dst, ensure_peer, payload } => {
+        &HostToBridge::SendEspNow { id, dst, ensure_peer, ref payload } => {
             // Named separately from `Command` because it is the one place the loop
             // can block unboundedly: `SendWaiter` busy-waits on a callback with no
             // timeout, so a `Transmit` phase says which call did not come back.
             mark(LoopPhase::Transmit);
-            let status = transmit(manager, sender, &dst, ensure_peer, &payload);
+            let status = transmit(manager, sender, &dst, ensure_peer, payload);
             // Stamped *after* the transmit callback, not before the send. Against
             // the `rx_us` of the heartbeat that opened the window, this is the real
             // time from "the node is listening" to "the radio says it has it".
@@ -840,7 +855,7 @@ fn handle(
             bridge.outbox.send(&BridgeToHost::SendResult { id, status, tx_us });
         }
 
-        HostToBridge::AddPeer { mac } => match add_peer(manager, &mac) {
+        HostToBridge::AddPeer { mac } => match add_peer(manager, mac) {
             Ok(true) => bridge.log(LogLevel::Debug, "peer added"),
             Ok(false) => bridge.error("peer added, but its rate was refused; it stays at 1 Mbps"),
             // Already known is the outcome the host wanted, not a failure.
@@ -848,7 +863,7 @@ fn handle(
             Err(_) => bridge.error("could not add that peer"),
         },
 
-        HostToBridge::RemovePeer { mac } => match manager.remove_peer(&mac) {
+        HostToBridge::RemovePeer { mac } => match manager.remove_peer(mac) {
             Ok(()) => bridge.log(LogLevel::Debug, "peer removed"),
             // Symmetric with `AddPeer` swallowing `PeerExists`: gone is the outcome
             // the host asked for, and freeing a slot is the idempotent path a full
