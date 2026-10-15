@@ -167,6 +167,8 @@ pub struct BridgeStatus {
     pub dropped_since_attach: u32,
     /// Bridge uptime.
     pub uptime_ms: u32,
+    /// Frames too long to come from a wartui node, dropped since boot.
+    pub rx_oversize: u32,
 }
 
 impl FleetEngine {

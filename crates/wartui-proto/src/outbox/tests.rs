@@ -94,7 +94,7 @@ fn ready() -> BridgeToHost {
 }
 
 fn status(rx_count: u32) -> BridgeToHost {
-    BridgeToHost::Status { peer_count: 0, rx_count, dropped_tx: 0, uptime_ms: 0 }
+    BridgeToHost::Status { peer_count: 0, rx_count, dropped_tx: 0, uptime_ms: 0, rx_oversize: 0 }
 }
 
 /// Every complete frame the host would recover from these bytes.

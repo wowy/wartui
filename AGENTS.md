@@ -155,7 +155,9 @@ is here rather than only in a `//!`.
   this node an admin or clear frame, so a shared format is a shared conversation either way.
   The magic is checked before anything else at both ends. Encode/decode is written out by
   hand, never by transmuting a packed struct, and pinned byte-for-byte in
-  `crates/wartui-proto/tests/wire.rs`.
+  `crates/wartui-proto/tests/wire.rs`. Host→air frames may be up to 1470 bytes (ESP-NOW v2),
+  while everything a node sends stays ≤250, so the bridge→host link keeps 512-byte frames
+  ([`docs/espnow-v2-findings.md`](docs/espnow-v2-findings.md)).
 - **A wire change means reflashing every node at once.** `wartui-proto` is a path dependency of
   both firmwares. A frame carrying our magic and an unknown version byte is counted as
   `incompatible` and named in the footer (`N frames from an older firmware — reflash`), never

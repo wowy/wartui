@@ -23,11 +23,14 @@ pub const SIGHTING_RECORD_MAX: usize = SIGHTING_RECORD_MIN + SSID_MAX + EXT_MAX;
 /// Length of a [`SightingBatch`] header: magic, version, type, `seq` and `count`.
 pub const SIGHTING_BATCH_HEADER: usize = OFFSET_BODY + 3;
 
-/// The most a [`SightingBatch`] may be on the wire: ESP-NOW's own payload ceiling, so a
-/// batch fills exactly one frame.
+/// The most a [`SightingBatch`] may be on the wire.
+///
+/// A node's frames stay within [`MAX_ESPNOW_PAYLOAD`], so the bridge's frames to the host
+/// stay small. ESP-NOW v2 carries longer frames, but only the host sends them; see
+/// `docs/espnow-v2-findings.md`.
 pub const SIGHTING_BATCH_MAX: usize = 250;
 
-const _: () = assert!(SIGHTING_BATCH_MAX == MAX_ESPNOW_PAYLOAD);
+const _: () = assert!(SIGHTING_BATCH_MAX <= MAX_ESPNOW_PAYLOAD);
 
 /// The most records a batch can carry: the header taken off the ceiling, divided by
 /// the smallest record.

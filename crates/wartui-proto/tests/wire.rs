@@ -197,8 +197,8 @@ fn wire_codec_matches_expected_frame_lengths_when_checking_constants() {
     assert_eq!(CLEAR.len(), CLEAR_MSG_LEN, "header only, nothing else");
     // The point of the whole exercise: a heartbeat was 212 bytes and a
     // sighting was 212 bytes, on a control channel every node shares. The
-    // ceiling is ESP-NOW's own — a payload over 250 bytes cannot be sent, and
-    // a batch is packed to fill exactly that many.
+    // ceiling is the 250 bytes every node frame keeps to, and a batch is packed
+    // to fill exactly that many.
     const {
         assert!(HEARTBEAT_MSG_LEN < 32 && SIGHTING_RECORD_MAX < SIGHTING_BATCH_MAX);
         assert!(SIGHTING_BATCH_MAX == 250);
@@ -737,9 +737,9 @@ fn sighting_batch_writer_packs_mixed_records_byte_for_byte_when_built() {
 }
 
 #[test]
-fn sighting_batch_writer_fills_to_espnow_ceiling_when_packing_minimal_records() {
+fn sighting_batch_writer_fills_to_batch_ceiling_when_packing_minimal_records() {
     // Nineteen bare records and one carrying a one-byte SSID sum to exactly
-    // 241 bytes behind the nine-byte header: 250 total, the ESP-NOW ceiling,
+    // 241 bytes behind the nine-byte header: 250 total, the batch ceiling,
     // reached at exactly SIGHTINGS_PER_BATCH_MAX records.
     let minimal = SightingMsg {
         kind: RecordKind::Ble,

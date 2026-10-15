@@ -8,6 +8,9 @@
 //! they arrived faster than the host drained the USB endpoint — a host not reading,
 //! or a burst too big to queue — so observations lost on this side of the radio
 //! rather than on the air.
+//!
+//! `oversize` counts frames the bridge heard and dropped for being longer than any
+//! wartui node sends: somebody else's ESP-NOW traffic, harmless to the capture.
 
 use std::time::Duration;
 
@@ -71,13 +74,15 @@ pub async fn run(args: Args) -> Result<()> {
         .await
         .context("the bridge did not answer a status request")??;
 
-    let BridgeToHost::Status { peer_count, rx_count, dropped_tx, uptime_ms } = status else {
+    let BridgeToHost::Status { peer_count, rx_count, dropped_tx, uptime_ms, rx_oversize } = status
+    else {
         unreachable!("wait_for_status only returns Status")
     };
 
     println!("peers      {peer_count}");
     println!("received   {rx_count} frames");
     println!("dropped    {dropped_tx} frames");
+    println!("oversize   {rx_oversize} frames");
     println!("uptime     {}", human_uptime(uptime_ms));
     // Read at the moment the bridge announced rather than now, which is close enough:
     // nothing wartui writes allocates, and what matters is the trend across captures.

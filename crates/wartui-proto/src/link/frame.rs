@@ -1,12 +1,19 @@
 use serde::{Serialize, de::DeserializeOwned};
 
-use super::{LINK_PROTO_VERSION, MAX_ESPNOW_PAYLOAD, MAX_FRAME, PANEL_ROWS};
+use super::{
+    LINK_PROTO_VERSION, MAX_ESPNOW_PAYLOAD, MAX_ESPNOW_V2_PAYLOAD, MAX_FRAME, MAX_HOST_FRAME,
+    PANEL_ROWS,
+};
 
 // A frame is the version byte, the payload and the CRC, plus COBS overhead (one byte
 // per 254 and a leading marker) and the terminator. Checked here so a payload that
 // outgrew the buffer is a build error, not a silent truncation.
 const MAX_BODY: usize = MAX_FRAME - 8;
 const _: () = assert!(MAX_ESPNOW_PAYLOAD + 32 < MAX_BODY);
+// The same for the host-to-bridge direction, whose longest frame is a full v2 send.
+// COBS adds one byte per 254, so 16 covers it with the terminator.
+const MAX_HOST_BODY: usize = MAX_HOST_FRAME - 16;
+const _: () = assert!(MAX_ESPNOW_V2_PAYLOAD + 32 < MAX_HOST_BODY);
 // The other frame worth checking. A panel push carries every row every time, so its
 // worst case is fixed: `PANEL_ROWS` lines of a full `ShortStr`, each with a severity
 // byte and a length prefix, plus the variant index and the vector's length. A panel that
@@ -91,12 +98,30 @@ pub const fn crc16(data: &[u8]) -> u16 {
 /// # Errors
 /// [`LinkError::BufferTooSmall`] if `out` cannot hold the encoded frame.
 pub fn encode_frame<T: Serialize>(msg: &T, out: &mut [u8]) -> Result<usize, LinkError> {
-    let mut body = [0u8; MAX_BODY];
+    encode_frame_in::<T, MAX_BODY>(msg, out)
+}
+
+/// [`encode_frame`] for a host-to-bridge frame of up to [`MAX_HOST_FRAME`], which a
+/// [`super::HostToBridge::SendEspNow`] with a full v2 payload needs.
+///
+/// Host only: its body buffer is three times [`encode_frame`]'s, on the stack.
+///
+/// # Errors
+/// [`LinkError::BufferTooSmall`] if `out` cannot hold the encoded frame.
+pub fn encode_host_frame<T: Serialize>(msg: &T, out: &mut [u8]) -> Result<usize, LinkError> {
+    encode_frame_in::<T, MAX_HOST_BODY>(msg, out)
+}
+
+fn encode_frame_in<T: Serialize, const B: usize>(
+    msg: &T,
+    out: &mut [u8],
+) -> Result<usize, LinkError> {
+    let mut body = [0u8; B];
     body[0] = LINK_PROTO_VERSION;
     let used =
         postcard::to_slice(msg, &mut body[1..]).map_err(|_| LinkError::BufferTooSmall)?.len();
     let end = 1 + used;
-    if end + 2 > MAX_BODY {
+    if end + 2 > B {
         return Err(LinkError::BufferTooSmall);
     }
     let crc = crc16(&body[..end]);

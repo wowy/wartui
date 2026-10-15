@@ -14,7 +14,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use wartui_proto::link::{
     BridgeToHost, FrameAccumulator, HostToBridge, LINK_PROTO_VERSION, LinkError, MAX_FRAME,
-    decode_frame, encode_frame,
+    MAX_HOST_FRAME, decode_frame, encode_host_frame,
 };
 use wartui_proto::mac::{self, Mac};
 use wartui_proto::stall::TX_STALL_TIMEOUT_MS;
@@ -954,13 +954,13 @@ fn write_loop(
     commands: &std::sync::mpsc::Receiver<HostToBridge>,
     stop: &AtomicBool,
 ) {
-    let mut buf = [0u8; MAX_FRAME];
+    let mut buf = [0u8; MAX_HOST_FRAME];
     while let Ok(cmd) = commands.recv() {
         if stop.load(Ordering::Relaxed) {
             return;
         }
-        let Ok(n) = encode_frame(&cmd, &mut buf) else {
-            // Only reachable if a command outgrew MAX_FRAME, which the
+        let Ok(n) = encode_host_frame(&cmd, &mut buf) else {
+            // Only reachable if a command outgrew MAX_HOST_FRAME, which the
             // const assertion in wartui-proto is there to prevent.
             tracing::error!("command did not fit in a frame; dropping it");
             continue;

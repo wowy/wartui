@@ -275,6 +275,7 @@ async fn run_bridge(
                 rx_count: 0,
                 dropped_tx: 0,
                 uptime_ms: elapsed_ms(started),
+                rx_oversize: 0,
             }),
             HostToBridge::Reset => Some(BridgeToHost::Log {
                 level: LogLevel::Info,

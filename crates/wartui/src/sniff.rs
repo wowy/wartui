@@ -285,10 +285,10 @@ fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
             );
         }
 
-        BridgeToHost::Status { peer_count, rx_count, dropped_tx, uptime_ms } => {
+        BridgeToHost::Status { peer_count, rx_count, dropped_tx, uptime_ms, rx_oversize } => {
             println!(
                 "# status: {peer_count} peers, {rx_count} received, \
-                 {dropped_tx} dropped, up {}s",
+                 {dropped_tx} dropped, {rx_oversize} oversize, up {}s",
                 uptime_ms / 1000
             );
         }
@@ -373,8 +373,13 @@ mod tests {
     fn sniff_cmd_increments_decoded_counter_when_sighting_arrives_without_announcement() {
         // `Ready` can be lost to the bridge's transmit rings while everything
         // else it sends arrives; frames on screen must not be contradicted.
-        let status =
-            BridgeToHost::Status { peer_count: 0, rx_count: 0, dropped_tx: 0, uptime_ms: 1_000 };
+        let status = BridgeToHost::Status {
+            peer_count: 0,
+            rx_count: 0,
+            dropped_tx: 0,
+            uptime_ms: 1_000,
+            rx_oversize: 0,
+        };
         assert!(heard(LinkEvent::Message(status)));
     }
 

@@ -11,8 +11,9 @@ use wartui_proto::air::{
 };
 use wartui_proto::link::{
     BROADCAST, BridgeToHost, Chip, FrameAccumulator, HostToBridge, LINK_PROTO_VERSION, LinkError,
-    LogLevel, LoopPhase, MAX_FRAME, PANEL_ROWS, Panel, PanelLine, PanelLines, SendStatus, Severity,
-    ShortStr, crc16, decode_frame, encode_frame,
+    LogLevel, LoopPhase, MAX_ESPNOW_V2_PAYLOAD, MAX_FRAME, MAX_HOST_FRAME, PANEL_ROWS, Panel,
+    PanelLine, PanelLines, SendPayload, SendStatus, Severity, ShortStr, crc16, decode_frame,
+    encode_frame, encode_host_frame,
 };
 use wartui_proto::reset::ResetCause;
 
@@ -117,6 +118,7 @@ fn sample_events() -> Vec<BridgeToHost, 16> {
         rx_count: 1000,
         dropped_tx: 0,
         uptime_ms: 60_000,
+        rx_oversize: 2,
     })
     .expect("sample_events has room");
     v.push(BridgeToHost::Log {
@@ -402,4 +404,42 @@ fn reset_cause_speaks_first_when_a_host_was_present_unless_power_on() {
         assert_eq!(cause.speaks_first(true), after_host, "{cause:?}");
         assert!(!cause.speaks_first(false), "{cause:?}");
     }
+}
+
+#[test]
+fn link_round_trips_v2_send_when_payload_is_full() {
+    let payload = SendPayload::from_slice(&[0xA5; MAX_ESPNOW_V2_PAYLOAD]).expect("fits");
+    let cmd = HostToBridge::SendEspNow { id: 7, dst: [1; 6], ensure_peer: true, payload };
+    let mut out = [0u8; MAX_HOST_FRAME];
+    let n = encode_host_frame(&cmd, &mut out).expect("encodes");
+    // Through the accumulator the bridge uses, so a frame that outgrew it would be
+    // dropped here rather than on the bench.
+    let mut acc = FrameAccumulator::<MAX_HOST_FRAME>::new();
+    let mut decoded = None;
+    for &byte in &out[..n] {
+        if let Some(frame) = acc.push(byte) {
+            decoded = Some(decode_frame::<HostToBridge>(frame).expect("decodes"));
+        }
+    }
+    assert_eq!(decoded, Some(cmd));
+}
+
+#[test]
+fn link_refuses_send_payload_when_longer_than_v2_ceiling() {
+    assert!(SendPayload::from_slice(&[0; MAX_ESPNOW_V2_PAYLOAD + 1]).is_err());
+}
+
+#[test]
+fn link_round_trips_status_when_rx_oversize_is_set() {
+    let status = BridgeToHost::Status {
+        peer_count: 1,
+        rx_count: 10,
+        dropped_tx: 0,
+        uptime_ms: 5_000,
+        rx_oversize: 0xDEAD_BEEF,
+    };
+    let mut out = [0u8; MAX_FRAME];
+    let n = encode_frame(&status, &mut out).expect("encodes");
+    let decoded: BridgeToHost = decode_frame(&mut out[..n - 1]).expect("decodes");
+    assert_eq!(decoded, status);
 }

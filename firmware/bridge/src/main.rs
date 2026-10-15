@@ -59,7 +59,8 @@ use wartui_proto::air::CONTROL_CHANNEL;
 use wartui_proto::heapless::Vec;
 use wartui_proto::link::{
     BROADCAST, BridgeToHost, Chip, FrameAccumulator, HostToBridge, LINK_PROTO_VERSION, LinkError,
-    LogLevel, LogStr, LoopPhase, MAX_FRAME, Panel, PanelLines, SendStatus, ShortStr, decode_frame,
+    LogLevel, LogStr, LoopPhase, MAX_HOST_FRAME, Panel, PanelLines, SendStatus, ShortStr,
+    decode_frame,
 };
 use wartui_proto::mac::Mac;
 use wartui_proto::outbox::{ByteSink, Outbox};
@@ -299,8 +300,11 @@ static BRIDGE: StaticCell<Bridge> = StaticCell::new();
 /// Everything that changes while the bridge runs.
 struct Bridge {
     outbox: &'static mut Outbox,
-    accumulator: FrameAccumulator<MAX_FRAME>,
+    /// Sized for host-to-bridge frames, which carry ESP-NOW v2 sends of up to 1470 bytes.
+    accumulator: FrameAccumulator<MAX_HOST_FRAME>,
     rx_count: u32,
+    /// Received frames too long to be a node's, dropped rather than forwarded.
+    rx_oversize: u32,
     boot: Instant,
     /// Why this life started, and where the last one stopped. Fixed at boot
     /// and repeated in every `Ready`, because the host is usually not watching
@@ -484,6 +488,7 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
         outbox: OUTBOX.init_with(Outbox::new),
         accumulator: FrameAccumulator::new(),
         rx_count: 0,
+        rx_oversize: 0,
         boot: now,
         cause,
         speaks_first,
@@ -682,8 +687,9 @@ fn forward(received: ReceivedData, bridge: &mut Bridge) {
     bridge.rx_count = bridge.rx_count.wrapping_add(1);
 
     let Ok(payload) = Vec::from_slice(received.data()) else {
-        // Longer than ESP-NOW's own 250-byte ceiling, so it cannot have
-        // come from the mesh. Say so rather than truncate it.
+        // Longer than any frame a wartui node sends, so it is somebody else's.
+        // Count it and say so rather than truncate it.
+        bridge.rx_oversize = bridge.rx_oversize.wrapping_add(1);
         bridge.log(LogLevel::Warn, "dropped an over-long ESP-NOW frame");
         return;
     };
@@ -806,6 +812,7 @@ fn handle(
                 rx_count: bridge.rx_count,
                 dropped_tx: bridge.outbox.dropped(),
                 uptime_ms,
+                rx_oversize: bridge.rx_oversize,
             });
         }
 
