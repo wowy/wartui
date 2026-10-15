@@ -158,7 +158,7 @@ pub struct Snapshot {
 pub struct BridgeStatus {
     /// Registered peers.
     pub peer_count: u8,
-    /// Frames received since boot.
+    /// Frames received and accepted to forward since boot.
     pub rx_count: u32,
     /// Frames the bridge's outbound ring dropped since boot. Mostly history: a bridge powered with
     /// nothing attached drops all it hears.
@@ -167,8 +167,6 @@ pub struct BridgeStatus {
     pub dropped_since_attach: u32,
     /// Bridge uptime.
     pub uptime_ms: u32,
-    /// Frames too long to come from a wartui node, dropped since boot.
-    pub rx_oversize: u32,
 }
 
 impl FleetEngine {

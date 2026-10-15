@@ -302,7 +302,8 @@ pub enum BridgeToHost {
     Status {
         /// Registered peers.
         peer_count: u8,
-        /// Frames received since boot.
+        /// Frames received and accepted to forward since boot. Oversize frames are
+        /// counted in `rx_oversize` instead.
         rx_count: u32,
         /// Frames the outbox dropped. See [`crate::outbox`].
         dropped_tx: u32,

@@ -43,7 +43,8 @@ The two directions carry different frame sizes:
 Both chips run ESP-NOW v2 and take 1470-byte frames intact
 ([`docs/espnow-v2-findings.md`](../../docs/espnow-v2-findings.md)). Nothing a wartui node sends is
 longer than 250 bytes, so the outbox's slots stay at 512. A received frame over 250 bytes is
-somebody else's: the bridge drops it, logs a warning and counts it in `Status.rx_oversize`.
+somebody else's: the bridge drops it without a log line and counts it in `Status.rx_oversize`,
+not in `rx_count`.
 
 ## Building and flashing
 

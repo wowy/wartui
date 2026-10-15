@@ -96,7 +96,7 @@ pub struct BridgeStatusSeen {
     pub rx_at_ms: i64,
     /// How many peers its ESP-NOW table holds.
     pub peer_count: u8,
-    /// Frames it has received since its boot.
+    /// Frames it has received and accepted to forward since its boot.
     pub rx_count: u32,
     /// Frames its outbound ring dropped on the way to the host since its boot.
     pub dropped_tx: u32,

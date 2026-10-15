@@ -355,7 +355,7 @@ impl FleetEngine {
             BridgeToHost::SendResult { id, status, tx_us } => {
                 self.on_send_result(*id, *status, *tx_us, now, batch);
             }
-            BridgeToHost::Status { peer_count, rx_count, dropped_tx, uptime_ms, rx_oversize } => {
+            BridgeToHost::Status { peer_count, rx_count, dropped_tx, uptime_ms, .. } => {
                 // Below the baseline means the bridge restarted from zero.
                 let baseline = match self.dropped_baseline {
                     Some(baseline) if baseline <= *dropped_tx => baseline,
@@ -368,7 +368,6 @@ impl FleetEngine {
                     dropped_tx: *dropped_tx,
                     dropped_since_attach: dropped_tx - baseline,
                     uptime_ms: *uptime_ms,
-                    rx_oversize: *rx_oversize,
                 });
                 batch.records.push(Record::BridgeStatus(BridgeStatusSeen {
                     rx_at_ms: now.unix_ms,

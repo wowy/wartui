@@ -3,10 +3,10 @@
 # so `HostToBridge` inlines a 1470-byte ESP-NOW v2 send (see
 # `docs/espnow-v2-findings.md`) and is 1488 bytes. `BridgeToHost` inlines a
 # 250-byte received frame and is 276. A function that takes one and builds another
-# is therefore near 5KB before it has done anything interesting: `take_link_byte`
-# measures 5141 bytes and `handle` 4790.
+# is therefore over 3KB before it has done anything interesting: `take_link_byte`,
+# which decodes one and hands `handle` a reference, measures 3664 bytes.
 #
 # So the threshold is set above the size those enums force and well under the
 # main task's stack, which the linker sizes at 216KB — anything this still
 # catches is a frame nothing in the protocol accounts for, and worth reading.
-stack-size-threshold = 6144
+stack-size-threshold = 4096
