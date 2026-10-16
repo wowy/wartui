@@ -31,6 +31,8 @@
 )]
 #![deny(clippy::large_stack_frames)]
 
+#[cfg(feature = "t-dongle-c5-gps")]
+mod gps;
 #[cfg(feature = "t-dongle-c5")]
 mod panel;
 
@@ -84,6 +86,12 @@ compile_error!("t-dongle-c5 is an ESP32-C5 in a USB-A shell; build it with esp32
 // `LCD_DC` and `USB_DP`.
 #[cfg(all(feature = "t-dongle-c5", feature = "xiao-external-antenna"))]
 compile_error!("t-dongle-c5 and xiao-external-antenna both drive GPIO3; pick one board");
+#[cfg(all(feature = "t-dongle-c5-gps", not(feature = "esp32c5")))]
+compile_error!("t-dongle-c5-gps is the T-Dongle-C5's Qwiic port; build it with esp32c5");
+// Unreachable for the same reason as the one above, and stated for the same reason: the
+// GPS port is a T-Dongle-C5's, and `xiao-external-antenna` drives that board's pins.
+#[cfg(all(feature = "t-dongle-c5-gps", feature = "xiao-external-antenna"))]
+compile_error!("t-dongle-c5-gps and xiao-external-antenna are different boards; pick one");
 
 /// Counted rather than checked pairwise.
 ///
@@ -209,6 +217,18 @@ fn mark(phase: LoopPhase) {
     PHASE.store(phase as u8, Ordering::Relaxed);
 }
 
+/// Run `f` marked as `phase`, then restore the phase it interrupted.
+///
+/// For a call that blocks inside another phase, so the marker names it only while it runs.
+#[cfg(feature = "t-dongle-c5-gps")]
+fn within<T>(phase: LoopPhase, f: impl FnOnce() -> T) -> T {
+    let before = PHASE.load(Ordering::Relaxed);
+    mark(phase);
+    let out = f();
+    PHASE.store(before, Ordering::Relaxed);
+    out
+}
+
 /// Whether the previous life ended with a host present, and so whether this one
 /// speaks first.
 ///
@@ -241,6 +261,7 @@ fn boot_phase(cause: ResetCause) -> LoopPhase {
         7 => LoopPhase::Idle,
         8 => LoopPhase::TxStalled,
         9 => LoopPhase::Render,
+        10 => LoopPhase::Gps,
         _ => LoopPhase::Unknown,
     }
 }
@@ -345,6 +366,22 @@ struct Bridge {
     /// attached when this firmware starts — that is the whole reason `Identify`
     /// exists — so a fault reported once is a fault nobody ever reads.
     panel_fault: Option<&'static str>,
+    /// The GPS receiver, when its bus came up.
+    ///
+    /// Held here rather than in `main` so that [`handle`] can write to it.
+    #[cfg(feature = "t-dongle-c5-gps")]
+    gps: Option<gps::Receiver>,
+    /// Receiver bytes read but not yet sent, batched into one frame (`gps.rs` says why).
+    ///
+    /// Here rather than in `poll_gps` so it lasts across passes, and in this static
+    /// rather than `main` so the poll frame does not grow by a frame's worth.
+    #[cfg(feature = "t-dongle-c5-gps")]
+    gps_pending: wartui_proto::link::GpsBytes,
+    /// Why no GPS receiver is being read on a board built to have one.
+    ///
+    /// Sent with every announcement for the reason `panel_fault` is, and cleared when the
+    /// receiver answers again.
+    gps_fault: Option<&'static str>,
 }
 
 impl Bridge {
@@ -408,8 +445,12 @@ impl Bridge {
             // on the same connection.
             uptime_ms: self.boot.elapsed().as_millis() as u32,
             panel: self.panel,
+            gps: cfg!(feature = "t-dongle-c5-gps"),
         });
         if let Some(why) = self.panel_fault {
+            self.error(why);
+        }
+        if let Some(why) = self.gps_fault {
             self.error(why);
         }
     }
@@ -428,6 +469,26 @@ impl Bridge {
     #[cfg(not(feature = "t-dongle-c5"))]
     #[expect(clippy::unused_self, reason = "the panel build takes `&mut self`")]
     fn show_panel(&self, _lines: &PanelLines) {}
+
+    /// Hand the host's bytes to the receiver.
+    ///
+    /// Skipped while the receiver is not answering: the host repeats its configuration,
+    /// and `gps_fault` already says why it is not arriving.
+    #[cfg(feature = "t-dongle-c5-gps")]
+    fn write_gps(&mut self, bytes: &[u8]) {
+        let Some(receiver) = self.gps.as_mut().filter(|receiver| receiver.present()) else {
+            return;
+        };
+        // Within `Command`, which `handle` marked and gets back afterwards.
+        if !within(LoopPhase::Gps, || receiver.write(bytes)) {
+            self.error("the GPS receiver refused a write");
+        }
+    }
+
+    /// No receiver to write to. Dropped for the reason `show_panel` drops lines.
+    #[cfg(not(feature = "t-dongle-c5-gps"))]
+    #[expect(clippy::unused_self, reason = "the GPS build takes `&mut self`")]
+    fn write_gps(&self, _bytes: &[u8]) {}
 
     fn log(&mut self, level: LogLevel, message: &str) {
         let message = LogStr::try_from(message).unwrap_or_default();
@@ -512,6 +573,11 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
         panel_lines: PanelLines::new(),
         panel: PANEL,
         panel_fault: None,
+        #[cfg(feature = "t-dongle-c5-gps")]
+        gps: None,
+        #[cfg(feature = "t-dongle-c5-gps")]
+        gps_pending: wartui_proto::link::GpsBytes::new(),
+        gps_fault: None,
         tx_power: tx_power.is_ok().then_some(wartui_proto::tx_power::DEFAULT_TX_POWER_QUARTER_DBM),
     });
     // Ahead of every frame this life sends, whenever transmit opens. The ROM banner
@@ -541,6 +607,18 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
             None
         }
     };
+
+    // After the radio for the reason the panel is. The receiver is not probed here: the
+    // loop's first poll does that, and reports a receiver that does not answer.
+    #[cfg(feature = "t-dongle-c5-gps")]
+    match gps::Receiver::new(gps::Pins {
+        i2c: peripherals.I2C0,
+        sda: peripherals.GPIO11,
+        scl: peripherals.GPIO12,
+    }) {
+        Ok(receiver) => bridge.gps = Some(receiver),
+        Err(why) => bridge.gps_fault = Some(why),
+    }
 
     match manager.set_channel(CONTROL_CHANNEL) {
         Ok(()) => {}
@@ -577,6 +655,12 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
         );
         worked |= link.moved;
         link_woke = false;
+
+        // Its own phase for the reason `Render` is below.
+        #[cfg(feature = "t-dongle-c5-gps")]
+        {
+            worked |= poll_gps(bridge);
+        }
 
         // Named as its own phase for the reason `Transmit` is: it is a call that can
         // block for longer than a memcpy, so a reset with nobody watching says which
@@ -727,6 +811,51 @@ fn forward(received: ReceivedData, bridge: &mut Bridge) {
         rx_us,
         payload,
     });
+}
+
+/// What [`gps::Receiver`] reports when it stops answering.
+#[cfg(feature = "t-dongle-c5-gps")]
+const NO_GPS_RECEIVER: &str = "no GPS receiver answered on the Qwiic port";
+
+/// Poll the GPS receiver, batch what it sent, and queue the batch once the receiver has
+/// drained or the batch has no room for another read. Says whether anything was read.
+///
+/// Marked [`LoopPhase::Gps`] only while the bus is in use: a poll that is not due touches
+/// nothing.
+///
+/// A change in whether it answers is said once, not at every probe: an `Error` when it
+/// stops, which `announce` then repeats, and a `Log` when it comes back.
+///
+/// Out of line for the reason [`forward`] is.
+#[cfg(feature = "t-dongle-c5-gps")]
+#[inline(never)]
+fn poll_gps(bridge: &mut Bridge) -> bool {
+    let now = bridge.now_ms();
+    let Some(receiver) = bridge.gps.as_mut() else { return false };
+    if !receiver.due(now) {
+        return false;
+    }
+    let pending = &mut bridge.gps_pending;
+    let before = pending.len();
+    let was_present = receiver.present();
+    let more = within(LoopPhase::Gps, || receiver.poll(now, pending));
+    let present = receiver.present();
+    let read = pending.len() > before;
+    let full = pending.capacity() - pending.len() < gps::READ_CHUNK;
+    if present != was_present {
+        if present {
+            bridge.gps_fault = None;
+            bridge.log(LogLevel::Info, "the GPS receiver answered on the Qwiic port");
+        } else {
+            bridge.gps_fault = Some(NO_GPS_RECEIVER);
+            bridge.error(NO_GPS_RECEIVER);
+        }
+    }
+    if (!more || full) && !bridge.gps_pending.is_empty() {
+        let bytes = core::mem::take(&mut bridge.gps_pending);
+        bridge.outbox.send(&BridgeToHost::Gps { bytes });
+    }
+    read
 }
 
 /// What one pass's [`link_burst`] moved.
@@ -921,6 +1050,8 @@ fn handle(
         HostToBridge::Reset => reboot(),
 
         HostToBridge::ShowPanel { lines } => bridge.show_panel(lines),
+
+        HostToBridge::GpsWrite { bytes } => bridge.write_gps(bytes),
 
         &HostToBridge::SetTxPower { power } => {
             if set_tx_power(manager, power) {

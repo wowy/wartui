@@ -18,8 +18,8 @@
 //! - **priority**: [`BridgeToHost::Ready`], [`BridgeToHost::SendResult`],
 //!   [`BridgeToHost::Status`] and [`BridgeToHost::Error`]. Each answers a host request
 //!   or says something the host cannot re-derive, so they go first.
-//! - **bulk**: [`BridgeToHost::Rx`] and [`BridgeToHost::Log`]. A host that has fallen
-//!   behind is better served by the newest frames than the oldest.
+//! - **bulk**: [`BridgeToHost::Rx`], [`BridgeToHost::Log`] and [`BridgeToHost::Gps`]. A
+//!   host that has fallen behind is better served by the newest frames than the oldest.
 //!
 //! A full ring evicts its oldest frame not yet started, never the newest. Either way a
 //! frame is lost, and refusing the newest would answer a host that stopped reading from
@@ -358,6 +358,6 @@ const fn is_priority(msg: &BridgeToHost) -> bool {
         | BridgeToHost::SendResult { .. }
         | BridgeToHost::Status { .. }
         | BridgeToHost::Error { .. } => true,
-        BridgeToHost::Rx { .. } | BridgeToHost::Log { .. } => false,
+        BridgeToHost::Rx { .. } | BridgeToHost::Log { .. } | BridgeToHost::Gps { .. } => false,
     }
 }

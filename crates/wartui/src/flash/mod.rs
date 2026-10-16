@@ -120,6 +120,11 @@ const BRIDGE: Firmware = Firmware {
     variants: &[
         (&["esp32c5"], "wartui-bridge-fw-esp32c5.bin"),
         (&["esp32c5", "t-dongle-c5"], "wartui-bridge-fw-esp32c5-t-dongle.bin"),
+        (&["esp32c5", "t-dongle-c5-gps"], "wartui-bridge-fw-esp32c5-t-dongle-gps.bin"),
+        (
+            &["esp32c5", "t-dongle-c5", "t-dongle-c5-gps"],
+            "wartui-bridge-fw-esp32c5-t-dongle-panel-gps.bin",
+        ),
         (&["esp32c6"], "wartui-bridge-fw-esp32c6.bin"),
         (&["esp32c6", "xiao-external-antenna"], "wartui-bridge-fw-esp32c6-xiao.bin"),
     ],
@@ -956,6 +961,19 @@ mod tests {
         let release = Source::Release { tag: "v1".to_owned(), asset: "x.bin" };
         assert_eq!(release.describe(false), "x.bin from release v1");
         assert_eq!(Source::File("fw.bin".into()).describe(false), "fw.bin");
+    }
+
+    #[test]
+    fn flash_finds_gps_bridge_assets_when_features_are_in_any_order() {
+        assert_eq!(
+            release_asset(&BRIDGE, &["t-dongle-c5-gps", "esp32c5"]),
+            Some("wartui-bridge-fw-esp32c5-t-dongle-gps.bin")
+        );
+        assert_eq!(
+            release_asset(&BRIDGE, &["t-dongle-c5-gps", "esp32c5", "t-dongle-c5"]),
+            Some("wartui-bridge-fw-esp32c5-t-dongle-panel-gps.bin")
+        );
+        assert_eq!(release_asset(&BRIDGE, &["esp32c6", "t-dongle-c5-gps"]), None);
     }
 
     #[test]

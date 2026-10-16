@@ -4,6 +4,12 @@
 //! [`crate::engine::FleetEngine`] decides what happens. It reads tokio's clock, so a paused test
 //! drives the engine and the simulator on one clock, as `FleetEngine::note_arrival` needs to
 //! compare bridge-elapsed with host-elapsed time.
+//!
+//! **The bridge's GPS bytes stop here.** They go to the bridge's receiver in the position chain
+//! ([`crate::gps::Gps::feed_bytes`]) and never reach the engine, which reads positions through the
+//! chain like any other. While the connected bridge's receiver is talking, the host's puck search
+//! stands down (`stand_host_down`); it resumes when that receiver goes quiet past the age limit
+//! or the bridge disconnects. Each connection, and each disconnect, starts the bridge's stream over.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -98,6 +104,10 @@ pub async fn drive(
     let mut panel_sent: Option<Instant> = None;
     let mut panel_drawn: Option<Instant> = None;
     let mut panel_lines: Option<PanelLines> = None;
+    let bridge_gps = engine.position().bridge_gps().cloned();
+    let host_gps = engine.position().gps().cloned();
+    // Whether the bridge connected now was built with a GPS port.
+    let mut bridge_has_gps = false;
 
     loop {
         let event = tokio::select! {
@@ -122,6 +132,43 @@ pub async fn drive(
                 None => break,
             },
         };
+
+        match &event {
+            Event::Link(LinkEvent::Message(BridgeToHost::Gps { bytes })) => {
+                let now_ms = chrono::Utc::now().timestamp_millis();
+                if let Some(gps) = &bridge_gps {
+                    gps.feed_bytes(bytes, now_ms);
+                }
+                stand_host_down(host_gps.as_ref(), bridge_gps.as_ref(), bridge_has_gps, now_ms);
+                continue;
+            }
+            Event::Link(LinkEvent::Connected(info)) => {
+                bridge_has_gps = info.gps;
+                if let Some(gps) = &bridge_gps {
+                    gps.reset_stream();
+                }
+                let now_ms = chrono::Utc::now().timestamp_millis();
+                stand_host_down(host_gps.as_ref(), bridge_gps.as_ref(), bridge_has_gps, now_ms);
+            }
+            Event::Link(LinkEvent::Disconnected { .. }) => {
+                bridge_has_gps = false;
+                if let Some(gps) = &bridge_gps {
+                    gps.reset_stream();
+                }
+                if let Some(gps) = &host_gps {
+                    gps.set_suspended(false);
+                }
+            }
+            // A quiet receiver sends nothing to age its fix by, nor to resume the host's search.
+            Event::Tick => {
+                let now_ms = chrono::Utc::now().timestamp_millis();
+                if let Some(gps) = &bridge_gps {
+                    gps.tick(now_ms);
+                }
+                stand_host_down(host_gps.as_ref(), bridge_gps.as_ref(), bridge_has_gps, now_ms);
+            }
+            _ => {}
+        }
 
         let publish = matches!(
             event,
@@ -214,6 +261,23 @@ pub async fn drive(
     store.submit(engine.handle(Event::HostSample(sample(&store)), now).records);
     let _ = snapshot.send(Arc::new(engine.snapshot(now, store.stats())));
     store.close()
+}
+
+/// Stand the host's receiver down while the connected bridge has a GPS port and its receiver has
+/// parsed a sentence within the age limit, and let it search otherwise.
+///
+/// Keyed on sentences, not on the port: a GPS-built bridge whose receiver is unplugged, broken or
+/// silent must not leave the capture without a position. [`crate::gps::Gps::set_suspended`] leaves
+/// a port named with `--gps` alone.
+fn stand_host_down(
+    host: Option<&crate::gps::Gps>,
+    bridge: Option<&crate::gps::Gps>,
+    bridge_has_gps: bool,
+    now_ms: i64,
+) {
+    if let Some(host) = host {
+        host.set_suspended(bridge_has_gps && bridge.is_some_and(|gps| gps.talking(now_ms)));
+    }
 }
 
 /// How often [`drive_ota`] ticks its session: well inside its 500 ms status timeout.
@@ -354,6 +418,32 @@ impl SettingsLog {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gps::Gps;
+    use crate::position::DEFAULT_MAX_AGE;
+
+    const GSV: &[u8] = b"$GPGSV,1,1,00*79\r\n";
+
+    #[test]
+    fn runtime_suspends_host_gps_only_while_bridge_sentences_are_fresh() {
+        let (host, bridge) = (Gps::detached(), Gps::bridged(DEFAULT_MAX_AGE));
+        stand_host_down(Some(&host), Some(&bridge), true, 1_000);
+        assert!(!host.suspended(), "a GPS-built bridge whose receiver says nothing");
+        bridge.feed_bytes(GSV, 1_000);
+        stand_host_down(Some(&host), Some(&bridge), false, 1_000);
+        assert!(!host.suspended(), "a talking receiver on a bridge without a GPS port");
+        stand_host_down(Some(&host), Some(&bridge), true, 1_000);
+        assert!(host.suspended());
+    }
+
+    #[test]
+    fn runtime_resumes_host_gps_when_bridge_sentences_go_stale() {
+        let (host, bridge) = (Gps::detached(), Gps::bridged(DEFAULT_MAX_AGE));
+        bridge.feed_bytes(GSV, 1_000);
+        stand_host_down(Some(&host), Some(&bridge), true, 6_000);
+        assert!(host.suspended());
+        stand_host_down(Some(&host), Some(&bridge), true, 6_001);
+        assert!(!host.suspended());
+    }
     use crate::engine::EngineConfig;
     use crate::store::{CaptureInfo, StoreConfig, open_readonly};
     use wartui_proto::plan::ChannelPool;

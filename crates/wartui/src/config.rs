@@ -57,6 +57,8 @@ pub struct Config {
     pub bluetooth: Bluetooth,
     #[serde(default, skip_serializing_if = "Bridge::is_empty")]
     pub bridge: Bridge,
+    #[serde(default, skip_serializing_if = "Gps::is_empty")]
+    pub gps: Gps,
     #[serde(default)]
     pub api_keys: ApiKeys,
 }
@@ -128,6 +130,22 @@ impl Bridge {
     }
 }
 
+/// The `[gps]` table: how often a bridge's GPS receiver reports a fix, in whole hertz
+/// within [`GPS_RATE_HZ`]. Absent means [`wartui_core::ubx::DEFAULT_RATE_HZ`].
+#[derive(Debug, Default, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct Gps {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bridge_rate_hz: Option<u8>,
+}
+
+impl Gps {
+    /// Whether the key is unset, so `save` writes no `[gps]` table at all.
+    fn is_empty(&self) -> bool {
+        self.bridge_rate_hz.is_none()
+    }
+}
+
 /// The `[api-keys]` table. An empty string means not set, and is written anyway.
 #[derive(Debug, Default, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
@@ -169,6 +187,9 @@ fn read_mac<'de, D: Deserializer<'de>>(
 /// per `AGENTS.md`'s tx-power invariant.
 pub const TX_POWER_DBM: RangeInclusive<i8> = 2..=20;
 
+/// Valid `[gps] bridge-rate-hz` values: the rates the receiver configuration takes.
+pub const GPS_RATE_HZ: RangeInclusive<u8> = wartui_core::ubx::RATE_HZ;
+
 /// Each excluded SSID as the bytes a sighting's SSID is matched against.
 pub fn excluded_ssid_bytes(ssids: &[String]) -> impl Iterator<Item = Vec<u8>> + '_ {
     ssids.iter().map(|ssid| ssid.as_bytes().to_vec())
@@ -178,6 +199,15 @@ impl Config {
     fn validate(&self) -> Result<()> {
         check_power("tx-power.fleet", self.tx_power.fleet)?;
         check_power("tx-power.bridge", self.tx_power.bridge)?;
+        if let Some(rate) = self.gps.bridge_rate_hz
+            && !GPS_RATE_HZ.contains(&rate)
+        {
+            bail!(
+                "gps.bridge-rate-hz = {rate} is outside {} to {} Hz",
+                GPS_RATE_HZ.start(),
+                GPS_RATE_HZ.end()
+            );
+        }
         if self.bluetooth.remember == Some(false) && self.bluetooth.node.is_some() {
             bail!("bluetooth.node is set while bluetooth.remember = false, which forgets it");
         }
@@ -480,7 +510,7 @@ fn resolve_symlink_target(path: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ApiKeys, Bluetooth, Bridge, Config, TxPower, create_if_missing, default_path_in,
+        ApiKeys, Bluetooth, Bridge, Config, Gps, TxPower, create_if_missing, default_path_in,
         excluded_ssid_bytes, load, load_from, path, remembered_bridge_from, save,
     };
     use crate::run::PoolArg;
@@ -625,6 +655,50 @@ mod tests {
     }
 
     #[test]
+    fn config_loader_reads_bridge_rate_when_gps_table_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wartui.toml");
+        std::fs::write(&path, "[gps]\nbridge-rate-hz = 2\n").unwrap();
+        assert_eq!(load(Some(&path)).unwrap().gps.bridge_rate_hz, Some(2));
+    }
+
+    #[test]
+    fn config_loader_rejects_bridge_rate_when_out_of_range() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wartui.toml");
+        for rate in [0, 6] {
+            std::fs::write(&path, format!("[gps]\nbridge-rate-hz = {rate}\n")).unwrap();
+            let chain = format!("{:#}", load(Some(&path)).unwrap_err());
+            assert!(chain.contains("gps.bridge-rate-hz"), "{chain}");
+        }
+    }
+
+    #[test]
+    fn config_loader_rejects_unknown_key_when_under_gps_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wartui.toml");
+        std::fs::write(&path, "[gps]\nrate = 2\n").unwrap();
+        assert!(load(Some(&path)).is_err());
+    }
+
+    #[test]
+    fn config_save_omits_gps_table_when_rate_is_unset() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wartui.toml");
+        save(&target, &Config::default()).unwrap();
+        let text = std::fs::read_to_string(&target).unwrap();
+        assert!(!text.contains("[gps]"), "{text}");
+    }
+
+    #[test]
+    fn config_save_writes_gps_table_that_reloads_when_rate_is_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wartui.toml");
+        save(&target, &full(PoolArg::Us, 8, 12)).unwrap();
+        assert_eq!(load(Some(&target)).unwrap().gps.bridge_rate_hz, Some(2));
+    }
+
+    #[test]
     fn config_loader_names_file_in_errors() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wartui.toml");
@@ -679,6 +753,7 @@ mod tests {
             tx_power: TxPower { fleet: Some(fleet), bridge: Some(bridge) },
             bluetooth: Bluetooth { remember: Some(true), node: Some([0xAA, 0xBB, 0xCC, 1, 2, 3]) },
             bridge: Bridge { remember: Some(true), mac: Some([0xAA, 0xBB, 0xCC, 1, 2, 3]) },
+            gps: Gps { bridge_rate_hz: Some(2) },
             api_keys: ApiKeys { wdgwars: "abc123def456".to_owned() },
         }
     }
@@ -691,6 +766,7 @@ mod tests {
             tx_power: TxPower { fleet: Some(fleet), bridge: None },
             bluetooth: Bluetooth::default(),
             bridge: Bridge::default(),
+            gps: Gps::default(),
             api_keys: ApiKeys::default(),
         }
     }

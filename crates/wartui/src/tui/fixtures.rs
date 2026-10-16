@@ -164,6 +164,7 @@ pub(super) fn busy() -> Snapshot {
             heap_free: 65_536,
             uptime_ms: 1_000,
             panel: None,
+            gps: false,
         }),
         link_up: true,
         link_error: None,
@@ -288,6 +289,7 @@ pub(super) fn with_gps(
         sky: Sky::default(),
         heard_ms: Some(EPOCH_MS),
         max_age: Duration::from_secs(5),
+        via_bridge: false,
     });
     snapshot
 }
@@ -331,6 +333,16 @@ pub(super) fn with_pinned_gps(status: GpsStatus, counters: GpsCounters) -> Snaps
     let mut snapshot = with_gps(status, counters, PositionSource::Static);
     if let Some(gps) = snapshot.gps.as_mut() {
         gps.pinned_baud = true;
+    }
+    snapshot
+}
+
+/// [`with_sky`], read from the bridge's receiver rather than a host port.
+pub(super) fn with_bridge_sky(in_view: u16) -> Snapshot {
+    let mut snapshot = with_sky(in_view);
+    if let Some(gps) = snapshot.gps.as_mut() {
+        gps.via_bridge = true;
+        gps.settled = None;
     }
     snapshot
 }

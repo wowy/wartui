@@ -1,8 +1,13 @@
 //! Where an observation was made.
 //!
-//! A fallback chain resolved per record: a live GPS on the host, then a static configured position,
-//! then nothing. **A record is never dropped for want of a position**: an unpositioned observation
-//! still proves a network exists, and export decides whether it can be uploaded.
+//! A fallback chain resolved per record: the bridge's GPS receiver, then a GPS on the host, then a
+//! static configured position, then nothing. **A record is never dropped for want of a position**:
+//! an unpositioned observation still proves a network exists, and export decides whether it can be
+//! uploaded.
+//!
+//! The bridge's receiver goes first because the host's puck search stands down while that receiver
+//! is talking ([`Gps::set_suspended`]). Either answers as [`PositionSource::Gps`]: a row
+//! records that a receiver placed it, not which one.
 //!
 //! Tiers are tried per record, so the source is stored per row: one capture can start indoors on a
 //! typed-in position, gain satellites in the car park, and lose them in a tunnel.
@@ -16,15 +21,15 @@ use crate::gps::Gps;
 
 /// How old a GPS fix may be and still be believed.
 ///
-/// Receivers emit at 1 Hz, so this is five missed sentences: enough to ride out a tunnel or dropped
-/// serial, short enough that at 50 km/h the position is off by about seventy meters at most, inside
-/// what a Wi-Fi observation means anyway.
+/// At 1 Hz this is five missed fixes, and more at a faster rate: enough to ride out a tunnel or a
+/// dropped link, short enough that at 50 km/h the position is off by about seventy meters at most,
+/// inside what a Wi-Fi observation means anyway.
 pub const DEFAULT_MAX_AGE: Duration = Duration::from_secs(5);
 
 /// Which tier of the chain produced a fix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PositionSource {
-    /// A live NMEA fix from a GPS on the host.
+    /// A live NMEA fix from a GPS receiver, the bridge's or the host's.
     Gps,
     /// The operator's configured lat/lon. Constant for the run.
     Static,
@@ -88,6 +93,7 @@ impl Fix {
 /// The configured fallback chain.
 #[derive(Debug, Clone)]
 pub struct PositionChain {
+    bridge_gps: Option<Gps>,
     gps: Option<Gps>,
     max_age: Duration,
     fixed: Option<Fix>,
@@ -103,7 +109,7 @@ impl PositionChain {
     /// A chain with no sources at all: every observation is unpositioned.
     #[must_use]
     pub const fn empty() -> Self {
-        Self { gps: None, max_age: DEFAULT_MAX_AGE, fixed: None }
+        Self { bridge_gps: None, gps: None, max_age: DEFAULT_MAX_AGE, fixed: None }
     }
 
     /// A chain whose only tier is a position the operator typed in.
@@ -112,6 +118,7 @@ impl PositionChain {
     #[must_use]
     pub const fn fixed(lat: f64, lon: f64, alt: Option<f64>) -> Self {
         Self {
+            bridge_gps: None,
             gps: None,
             max_age: DEFAULT_MAX_AGE,
             fixed: Some(Fix {
@@ -136,10 +143,25 @@ impl PositionChain {
         self
     }
 
-    /// The receiver, if this chain has one, for the UI to report on.
+    /// Put the bridge's receiver at the very top, above a host receiver. `max_age` applies to
+    /// every receiver in the chain, as [`Self::with_gps`] sets it.
+    #[must_use]
+    pub fn with_bridge_gps(mut self, gps: Gps, max_age: Duration) -> Self {
+        self.bridge_gps = Some(gps);
+        self.max_age = max_age;
+        self
+    }
+
+    /// The host's receiver, if this chain has one, for the UI to report on.
     #[must_use]
     pub const fn gps(&self) -> Option<&Gps> {
         self.gps.as_ref()
+    }
+
+    /// The bridge's receiver, if this chain has one: fed from the link by the runtime.
+    #[must_use]
+    pub const fn bridge_gps(&self) -> Option<&Gps> {
+        self.bridge_gps.as_ref()
     }
 
     /// How old a fix may be before the chain stops believing it.
@@ -153,15 +175,20 @@ impl PositionChain {
     /// Takes the time rather than reading a clock, so the engine stays pure.
     #[must_use]
     pub fn resolve(&self, now_ms: i64) -> Fix {
-        if let Some((fix, received_at_ms)) = self.gps.as_ref().and_then(Gps::latest) {
-            let age_ms = now_ms.saturating_sub(received_at_ms);
-            // A negative age is a host clock stepping back, not a fix from the future. Treating it
-            // as fresh keeps positions across an NTP correction.
-            if age_ms <= max_age_ms(self.max_age) {
-                return fix;
-            }
-        }
-        self.fixed.unwrap_or_else(Fix::none)
+        [&self.bridge_gps, &self.gps]
+            .into_iter()
+            .find_map(|gps| self.fresh(gps.as_ref()?, now_ms))
+            .or(self.fixed)
+            .unwrap_or_else(Fix::none)
+    }
+
+    /// The receiver's last fix, if it arrived within [`Self::max_age`] of `now_ms`.
+    fn fresh(&self, gps: &Gps, now_ms: i64) -> Option<Fix> {
+        let (fix, received_at_ms) = gps.latest()?;
+        let age_ms = now_ms.saturating_sub(received_at_ms);
+        // A negative age is a host clock stepping back, not a fix from the future. Treating it as
+        // fresh keeps positions across an NTP correction.
+        (age_ms <= max_age_ms(self.max_age)).then_some(fix)
     }
 }
 
@@ -244,6 +271,58 @@ mod tests {
         let chain = PositionChain::empty().with_gps(gps.clone(), DEFAULT_MAX_AGE);
         gps.feed(GGA, 10_000);
         assert_eq!(chain.resolve(60_000).source, PositionSource::None);
+    }
+
+    /// A chain with both receivers and a static position, and the two receivers.
+    fn chain_with_both() -> (Gps, Gps, PositionChain) {
+        let (host, chain) = chain_with_gps();
+        let bridge = Gps::detached();
+        (bridge.clone(), host, chain.with_bridge_gps(bridge, DEFAULT_MAX_AGE))
+    }
+
+    /// A fix whose latitude names which receiver gave it.
+    fn gga_at(lat_minutes: &str) -> Vec<u8> {
+        let body =
+            format!("GPGGA,123519.00,48{lat_minutes},N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,");
+        let sum = body.bytes().fold(0u8, |sum, byte| sum ^ byte);
+        format!("${body}*{sum:02X}").into_bytes()
+    }
+
+    #[test]
+    fn position_chain_prefers_bridge_gps_over_host_gps_when_both_fresh() {
+        let (bridge, host, chain) = chain_with_both();
+        host.feed(&gga_at("07.038"), 10_000);
+        bridge.feed(&gga_at("30.000"), 10_000);
+        let fix = chain.resolve(11_000);
+        assert_eq!(fix.source, PositionSource::Gps);
+        assert!((fix.lat.expect("a latitude") - 48.5).abs() < 1e-6, "{fix:?}");
+    }
+
+    #[test]
+    fn position_chain_falls_back_to_host_gps_when_bridge_fix_past_max_age() {
+        let (bridge, host, chain) = chain_with_both();
+        bridge.feed(&gga_at("30.000"), 1_000);
+        host.feed(&gga_at("07.038"), 10_000);
+        let fix = chain.resolve(10_000);
+        assert!((fix.lat.expect("a latitude") - 48.117_3).abs() < 1e-4, "{fix:?}");
+    }
+
+    #[test]
+    fn position_chain_falls_back_to_static_when_both_receivers_stale() {
+        let (bridge, host, chain) = chain_with_both();
+        bridge.feed(&gga_at("30.000"), 1_000);
+        host.feed(&gga_at("07.038"), 1_000);
+        assert_eq!(chain.resolve(6_001).source, PositionSource::Static);
+    }
+
+    #[test]
+    fn position_chain_uses_bridge_gps_when_chain_has_no_host_gps() {
+        let bridge = Gps::detached();
+        let chain = PositionChain::empty().with_bridge_gps(bridge.clone(), DEFAULT_MAX_AGE);
+        assert_eq!(chain.resolve(0).source, PositionSource::None);
+        bridge.feed(GGA, 1_000);
+        assert_eq!(chain.resolve(6_000).source, PositionSource::Gps);
+        assert_eq!(chain.resolve(6_001).source, PositionSource::None);
     }
 
     #[test]

@@ -54,24 +54,28 @@ cargo run --release --features esp32c6    # or --features esp32c5
 
 Exactly one chip feature is required. The toolchain is stable, and `rust-toolchain.toml` pins it.
 
-Two board features layer over a chip feature:
+Three board features layer over a chip feature:
 
-| Feature                 | Board                                      | What it does                                             |
-|-------------------------|--------------------------------------------|----------------------------------------------------------|
-| `xiao-external-antenna` | Seeed XIAO ESP32-C6 with a U.FL antenna    | Points the RF switch at the U.FL connector               |
-| `t-dongle-c5`           | LilyGO T-Dongle-C5 (`esp32c5,t-dongle-c5`) | Lights the ST7735 panel and makes the bridge announce it |
+| Feature                 | Board                                                       | What it does                                                    |
+|-------------------------|-------------------------------------------------------------|-----------------------------------------------------------------|
+| `xiao-external-antenna` | Seeed XIAO ESP32-C6 with a U.FL antenna                     | Points the RF switch at the U.FL connector                      |
+| `t-dongle-c5`           | LilyGO T-Dongle-C5 (`esp32c5,t-dongle-c5`)                  | Lights the ST7735 panel and makes the bridge announce it        |
+| `t-dongle-c5-gps`       | LilyGO T-Dongle-C5 with a u-blox M10 on its Qwiic connector | Forwards the receiver's bytes and makes the bridge announce GPS |
 
 [`../node/README.md`](../node/README.md) § "Building and flashing" has the rest on the XIAO antenna.
 
-Both board features are inert without a chip feature. They are mutually exclusive:
-`xiao-external-antenna` drives GPIO3 and GPIO14, which on a T-Dongle-C5 are `LCD_DC` and `USB_DP`.
-Built without `t-dongle-c5`, the same source reports no panel and is sent no lines. One tree covers
+Every board feature is inert without a chip feature. `xiao-external-antenna` excludes both
+T-Dongle-C5 features: it drives GPIO3 and GPIO14, which on a T-Dongle-C5 are `LCD_DC` and `USB_DP`.
+The two T-Dongle-C5 features are independent, and either builds without the other. Built without
+`t-dongle-c5`, the same source reports no panel and is sent no lines. Built without
+`t-dongle-c5-gps`, it reports no GPS port and drops what the host writes to one. One tree covers
 every board.
 
 From the host, `wartui flash-bridge --features esp32c6` (or the features for your board) flashes
 the one board it can tell is the bridge. In a checkout it builds this firmware. In a release binary
 it fetches the same release's image. Each release publishes an image for `esp32c5`,
-`esp32c5,t-dongle-c5`, `esp32c6`, and `esp32c6,xiao-external-antenna`.
+`esp32c5,t-dongle-c5`, `esp32c5,t-dongle-c5-gps`, `esp32c5,t-dongle-c5,t-dongle-c5-gps`, `esp32c6`,
+and `esp32c6,xiao-external-antenna`.
 [`crates/wartui/README.md`](../../crates/wartui/README.md) § "Flashing the bridge" has how it picks
 the board.
 
@@ -110,6 +114,42 @@ says `panel: none`, rather than panicking into a reboot nobody can read.
 The cargo runner is `espflash flash --monitor` with no `--chip`, so espflash detects the part.
 `--monitor` renders the framed link bytes as text, which looks like line noise. Use `wartui sniff`
 to read them.
+
+## The GPS
+
+A u-blox M10 receiver (a SparkFun MAX-M10S) plugs into the T-Dongle-C5's Qwiic connector, P3 on the
+vendor schematic. It answers at I2C address `0x42`, on I2C0 at 400 kHz:
+
+| P3 pin | GPIO | Signal |
+|--------|------|--------|
+| 1      | —    | GND    |
+| 2      | —    | 3.3 V  |
+| 3      | 11   | SDA    |
+| 4      | 12   | SCL    |
+
+The dongle has no pull-ups on these lines. The SparkFun board brings its own.
+
+**The bridge is a byte pipe here too.** It reads the receiver's stream and forwards it in `Gps`
+frames, and writes the bytes a `GpsWrite` carries. It parses neither. The host splits NMEA from UBX
+and composes the receiver's configuration, so a change to the rate or the sentences costs a
+`cargo run` rather than a reflash.
+
+The reads block the loop: about 38 µs a byte, so 2.5–4 ms for a full 64-byte read
+([`docs/t-dongle-c5-gps-findings.md`](../../docs/t-dongle-c5-gps-findings.md)). The bridge polls no
+more often than every 25 ms, and again straight away while the receiver has more waiting, so a
+backlog drains.
+
+The reads are batched into `Gps` frames of up to 512 bytes, each sent once the receiver has drained
+or the next read would not fit: about one frame per fix at 5 Hz, plus a few for the once-a-second
+`GSA`/`GSV` burst. Every `Gps` frame takes a whole slot of the outbox's bulk ring, the slots node
+sightings wait in, so a frame per read, 30 to 40 a second, would push sightings out whenever USB
+backs up.
+
+A receiver that stops answering is probed once a second and reported as an `Error` at each `Ready`
+until it answers again. The `Ready` field `gps` says the board has the port, not that a receiver
+answered.
+
+`wartui sniff --verbose` prints each `Gps` frame's bytes as text, which is how to check the wiring.
 
 ## Checking it works
 
@@ -197,8 +237,8 @@ will take. The only wait on the endpoint is the main loop's idle one. The FIFO e
 command, or a received frame ends it; otherwise `IDLE_TICK` bounds it. So a host that stops reading
 costs no busy passes. Under pressure both rings evict oldest-first and count it into
 `Status.dropped_tx`. Priority frames (`Ready`, `SendResult`, `Status`, `Error`) are served ahead of
-`Rx` and `Log` rather than given an unbounded queue. That module is in `wartui-proto` so those rules
-are unit-testable on the host.
+`Rx`, `Log` and `Gps` rather than given an unbounded queue. That module is in `wartui-proto` so
+those rules are unit-testable on the host.
 
 The one deliberate exception is the wait for a transmit callback in `transmit`. It is milliseconds
 against a 100 ms window, and it is what makes `AckOk` mean anything. `esp-radio`'s `SendWaiter`

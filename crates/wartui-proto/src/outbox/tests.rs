@@ -4,8 +4,8 @@ use std::vec::Vec;
 use super::ring::Ring;
 use super::{BULK_DEPTH, ByteSink, Outbox, PRIORITY_DEPTH, USB_PACKET};
 use crate::link::{
-    BridgeToHost, Chip, FrameAccumulator, LINK_PROTO_VERSION, LogLevel, LogStr, LoopPhase,
-    MAX_FRAME, ShortStr, decode_frame, encode_frame,
+    BridgeToHost, Chip, FrameAccumulator, GpsBytes, LINK_PROTO_VERSION, LogLevel, LogStr,
+    LoopPhase, MAX_FRAME, ShortStr, decode_frame, encode_frame,
 };
 use crate::reset::ResetCause;
 
@@ -90,6 +90,7 @@ fn ready() -> BridgeToHost {
         heap_free: 0,
         uptime_ms: 0,
         panel: None,
+        gps: false,
     }
 }
 
@@ -146,6 +147,19 @@ fn outbox_writes_priority_frames_before_bulk_frames_when_both_are_queued() {
     let frames = received(&sink.out);
     assert!(matches!(frames[0], BridgeToHost::Ready { .. }));
     assert!(matches!(frames[1], BridgeToHost::Log { .. }));
+}
+
+#[test]
+fn outbox_writes_priority_frames_before_gps_frames_when_both_are_queued() {
+    let mut outbox = Outbox::new();
+    let mut sink = Fake::open();
+    outbox.send(&BridgeToHost::Gps { bytes: GpsBytes::from_slice(b"$GNRMC").expect("fits") });
+    outbox.send(&ready());
+    outbox.pump(&mut sink);
+
+    let frames = received(&sink.out);
+    assert!(matches!(frames[0], BridgeToHost::Ready { .. }));
+    assert!(matches!(frames[1], BridgeToHost::Gps { .. }));
 }
 
 #[test]

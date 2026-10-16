@@ -64,6 +64,11 @@ pub struct BridgeInfo {
     /// nothing at a bridge without a screen. `None` is the ordinary case: it is a
     /// board fact, not a chip fact, and most boards have no panel.
     pub panel: Option<Panel>,
+    /// Whether this bridge was built with a GPS port.
+    ///
+    /// A board fact, like `panel`: it says the bridge forwards a receiver's bytes, not
+    /// that a receiver answered.
+    pub gps: bool,
 }
 
 /// Something that happened on the link.

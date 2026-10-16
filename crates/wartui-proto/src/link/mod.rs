@@ -75,6 +75,21 @@ pub type ShortStr = String<32>;
 /// A log line from the bridge.
 pub type LogStr = String<96>;
 
+/// The most receiver bytes one [`BridgeToHost::Gps`] carries. The bridge batches several
+/// I2C reads into one frame, since each frame takes a whole slot of the outbox's bulk ring
+/// (`firmware/bridge/src/gps.rs`). An epoch's GGA and RMC fit with room to spare.
+pub const GPS_FRAME: usize = 512;
+
+/// Bytes read from the GPS receiver, in transit to the host.
+pub type GpsBytes = Vec<u8, GPS_FRAME>;
+
+/// The most bytes one [`HostToBridge::GpsWrite`] carries. A receiver configuration
+/// message the host composes fits with room to spare.
+pub const GPS_WRITE_MAX: usize = 256;
+
+/// Bytes the host composed for the GPS receiver, in transit to the bridge.
+pub type GpsWriteBytes = Vec<u8, GPS_WRITE_MAX>;
+
 /// Broadcast address. Nodes send heartbeats here in plaintext, so a bridge hears a node
 /// before either knows the other's address. Sighting batches unicast to the bridge.
 pub const BROADCAST: Mac = [0xFF; 6];
@@ -119,6 +134,9 @@ pub enum LoopPhase {
     /// Pushing pixels at the panel, the other call in the loop that blocks for longer
     /// than a memcpy.
     Render,
+    /// Reading or writing the GPS receiver over I2C, the third call in the loop that
+    /// blocks for longer than a memcpy.
+    Gps,
 }
 
 /// Severity of a [`BridgeToHost::Log`] line.
@@ -213,6 +231,14 @@ pub enum HostToBridge {
         /// ESP-IDF quarter-dBm units.
         power: i8,
     },
+    /// Bytes to write verbatim to the GPS receiver, composed by the host.
+    ///
+    /// The bridge does not read them, so a change to the receiver's configuration costs
+    /// a `cargo run`, not a reflash. A bridge without a GPS port drops them.
+    GpsWrite {
+        /// The receiver's own protocol, typically UBX.
+        bytes: GpsWriteBytes,
+    },
 }
 
 impl HostToBridge {
@@ -232,7 +258,8 @@ impl HostToBridge {
             | Self::RemovePeer { .. }
             | Self::Reset
             | Self::ShowPanel { .. }
-            | Self::SetTxPower { .. } => false,
+            | Self::SetTxPower { .. }
+            | Self::GpsWrite { .. } => false,
         }
     }
 }
@@ -274,6 +301,11 @@ pub enum BridgeToHost {
         /// `None` for a board with no screen, which is then sent no
         /// [`HostToBridge::ShowPanel`]. See [`Panel`].
         panel: Option<Panel>,
+        /// Whether this board was built with a GPS port.
+        ///
+        /// A board fact, like `panel`. It does not mean a receiver answered: a missing
+        /// receiver is reported as an [`Self::Error`] instead.
+        gps: bool,
     },
     /// An ESP-NOW frame arrived.
     Rx {
@@ -327,5 +359,13 @@ pub enum BridgeToHost {
     Error {
         /// What went wrong.
         message: LogStr,
+    },
+    /// Bytes read from the GPS receiver, uninterpreted.
+    ///
+    /// The receiver's stream verbatim, NMEA and UBX interleaved, split wherever a batch
+    /// ended. The host reassembles and parses it.
+    Gps {
+        /// The bytes, in the order the receiver gave them.
+        bytes: GpsBytes,
     },
 }

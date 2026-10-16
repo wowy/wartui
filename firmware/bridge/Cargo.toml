@@ -49,6 +49,13 @@ xiao-external-antenna = []
 # of this board's display and USB pins; `src/main.rs` enforces both.
 t-dongle-c5 = ["dep:embedded-graphics", "dep:embedded-hal-bus", "dep:mipidsi"]
 
+# A GPS receiver on a T-Dongle-C5's Qwiic port: a u-blox M10 at I2C 0x42, on I2C0
+# with SDA on GPIO11 and SCL on GPIO12. A board fact layered over a chip feature,
+# like the two above, and independent of `t-dongle-c5`: either builds without the
+# other. C5 only, and mutually exclusive with `xiao-external-antenna`; `src/main.rs`
+# enforces both. No dependency: `esp-hal`'s I2C master covers it.
+t-dongle-c5-gps = []
+
 [dependencies]
 # `esp-radio` and `esp-rtos` allocate their task stacks and the Wi-Fi driver's
 # queues through their own copy's `HEAP`, which nothing here fills, so a second

@@ -27,9 +27,9 @@ first also puts a compile error in front of you instead of inside the grid.
 
 The simulator is what runs unless `--bridge` asks for the fleet on the desk. It needs
 no hardware, and it is also what keeps the GPS search from opening every serial port on
-the machine — so `--bridge` turns that search off itself, unless the caller names a
-receiver. A render is after a screen rather than a position, and `--lat`/`--lon` already
-pin one.
+the machine — so `--bridge` passes `--gps bridge`, unless the caller passes a GPS flag of
+their own: the bridge's own receiver is read if it has one, and no host port is opened. `--lat`/`--lon`
+pin a position for whatever that leaves unfixed.
 
 Real nodes answer on their own schedule rather than an accelerated clock, which is what
 `--after` and `--settle` default differently for: an assignment lands in the node's own
@@ -254,13 +254,17 @@ def command_for(args, binary, db, lat, lon):
         if args.bridge is not DETECT:
             command += ["--bridge", args.bridge]
         # Not simulating means `run` goes looking for a receiver, opening every attached
-        # port that is not an Espressif board. Nothing here wants one: the position is
-        # pinned below, and a search is a poor thing to run across someone's desk for the
-        # sake of a screenshot. Named on the command line, it is wanted after all —
-        # `--gps` exactly, since `--gps-baud` is a hint for the search rather than a
-        # receiver, and matching it would turn the search back on.
-        if not any(arg == "--gps" or arg.startswith("--gps=") for arg in args.rest):
-            command.append("--no-gps")
+        # port that is not an Espressif board. `--gps bridge` reads the bridge's own
+        # receiver, if it has one, and opens no host port: a search is a poor thing to run
+        # across someone's desk for the sake of a screenshot. Any GPS flag passed through
+        # means the caller has chosen: `--gps` names a receiver, `--no-gps` reads none, and
+        # `run` refuses `--gps-baud` beside `--gps bridge`.
+        gps_flags = ("--gps", "--no-gps", "--gps-baud")
+        chosen = any(
+            arg in gps_flags or arg.startswith(("--gps=", "--gps-baud=")) for arg in args.rest
+        )
+        if not chosen:
+            command += ["--gps", "bridge"]
     command += ["--lat", repr(lat), "--lon", repr(lon)]
     return command + args.rest
 

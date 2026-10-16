@@ -1,8 +1,19 @@
-//! A GPS on the host, read as NMEA over a serial port.
+//! A GPS receiver, read as NMEA: a puck on a host serial port, or the bridge's own receiver.
 //!
-//! The receiver runs on its own thread and publishes its last fix into a shared cell. Nothing above
-//! blocks on a satellite: [`Gps::latest`] is a mutex and a copy, so
+//! The puck reader runs on its own thread and publishes its last fix into a shared cell. Nothing
+//! above blocks on a satellite: [`Gps::latest`] is a mutex and a copy, so
 //! [`crate::PositionChain::resolve`] stays cheap and synchronous for the engine.
+//!
+//! **A bridge's receiver has no thread.** Its bytes arrive on the link, and the runtime hands them
+//! to [`Gps::feed_bytes`], which splits UBX from NMEA ([`crate::ubx::Demux`]) and feeds the same
+//! parser a puck does. While the connected bridge's receiver is talking, the puck reader stands
+//! down ([`Gps::set_suspended`]): it lets go of its port and opens nothing, so one capture reads one
+//! receiver. The search keys on sentences rather than on the bridge being built with a GPS port, so
+//! a receiver that is unplugged, broken or silent leaves the host's search running. A port the
+//! operator named with `--gps` never stands down: reading it is their instruction.
+//!
+//! The bridge's stream restarts with each connection ([`Gps::reset_stream`]): a sentence cut off by
+//! a disconnect must not join the first bytes after the reconnect.
 //!
 //! **The reader stamps arrival time itself**, as the only thing that knows when a byte turned up.
 //! [`crate::PositionChain`] decides whether that age is too much.
@@ -20,6 +31,7 @@ use std::time::{Duration, Instant};
 use crate::discover::{self, BAUD_LADDER, PROBE_WINDOW};
 use crate::nmea::{Nmea, NmeaError, Report, Sky};
 use crate::position::{Fix, PositionSource};
+use crate::ubx::{Demux, ValsetReply};
 
 /// Longest line worth assembling. NMEA 0183 caps a sentence at 82 characters. This leaves room for
 /// proprietary sentences that ignore that, yet stops a receiver spewing binary from growing the
@@ -159,6 +171,8 @@ pub struct GpsView {
     pub heard_ms: Option<i64>,
     /// How long the receiver may go quiet before its sentences count as stale (`--gps-max-age`).
     pub max_age: Duration,
+    /// Whether this is the bridge's receiver, read over the link rather than a host port.
+    pub via_bridge: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -181,6 +195,15 @@ struct Inner {
     diagnostic: Option<Diagnostic>,
     last_failure: Option<String>,
     max_age: Duration,
+    via_bridge: bool,
+    /// The bridge's stream, split and reassembled. Unused by the puck reader, which keeps its own
+    /// [`Lines`] on its thread.
+    demux: Demux,
+    lines: Lines,
+    /// The receiver's last answer to its rate, so a repeated answer is logged once.
+    valset: Option<ValsetReply>,
+    /// Whether the receiver has said its transmit buffer is full, so that is logged once.
+    txbuf_full: bool,
 }
 
 impl Inner {
@@ -242,6 +265,79 @@ impl Inner {
             self.diagnostic = Some(Diagnostic::Fresh);
         }
     }
+
+    /// The host writes the rate with every bridge status poll, so the receiver answers every few
+    /// seconds. Only a change is worth a line.
+    fn note_valset(&mut self, reply: ValsetReply) {
+        if self.valset == Some(reply) {
+            return;
+        }
+        match reply {
+            ValsetReply::Accepted => tracing::debug!("the GPS receiver took its rate"),
+            ValsetReply::Refused => tracing::warn!("the GPS receiver refused its rate"),
+        }
+        self.valset = Some(reply);
+    }
+
+    /// A `TXT` sentence saying `txbuf` is how a u-blox receiver reports dropping its own output.
+    fn note_txt(&mut self, line: &[u8]) {
+        let txt = line.get(3..6) == Some(b"TXT");
+        if txt && !self.txbuf_full && line.windows(5).any(|w| w == b"txbuf") {
+            tracing::warn!("the GPS receiver is dropping output: its transmit buffer is full");
+            self.txbuf_full = true;
+        }
+    }
+
+    /// Offer one line to the parser, as of `now_ms`.
+    fn feed(&mut self, line: &[u8], now_ms: i64) {
+        self.tick(now_ms);
+        let parsed = self.nmea.parse(line);
+        if parsed.is_ok() {
+            self.heard_ms = Some(now_ms);
+        }
+        match parsed {
+            Ok(Report::Fix(new)) => {
+                self.note_fix();
+                self.counters.sentences += 1;
+                self.counters.fixes += 1;
+                // A cycle is two sentences about one instant, and only GGA carries altitude,
+                // satellites and dilution. So the position is replaced and the rest carried: what a
+                // sentence omits, it does not contradict.
+                let previous = self.fix;
+                let satellites = new.satellites.or(match self.status {
+                    GpsStatus::Fixed { satellites } => satellites,
+                    _ => None,
+                });
+                self.status = GpsStatus::Fixed { satellites };
+                self.fix = Some(Fix {
+                    lat: Some(new.lat),
+                    lon: Some(new.lon),
+                    alt: new.alt.or_else(|| previous.and_then(|fix| fix.alt)),
+                    accuracy: new.accuracy.or_else(|| previous.and_then(|fix| fix.accuracy)),
+                    source: PositionSource::Gps,
+                    at_ms: new.at_ms,
+                });
+                self.received_at_ms = Some(now_ms);
+            }
+            Ok(Report::NoFix) => {
+                self.last_failure = None;
+                self.counters.sentences += 1;
+                // Keep the last fix: losing lock under a bridge has not moved the host, and the
+                // chain's staleness rule decides when to stop believing it.
+                if !matches!(self.status, GpsStatus::Fixed { .. }) {
+                    self.status = GpsStatus::Searching;
+                    self.note_status(GpsStatus::Searching);
+                }
+            }
+            Ok(Report::Other) => {
+                self.counters.sentences += 1;
+                self.note_txt(line);
+            }
+            Err(NmeaError::NotASentence | NmeaError::Checksum | NmeaError::Malformed) => {
+                self.counters.rejected += 1;
+            }
+        }
+    }
 }
 
 /// A handle on the receiver, cheap to clone and safe to share.
@@ -249,6 +345,11 @@ impl Inner {
 pub struct Gps {
     inner: Arc<Mutex<Inner>>,
     stop: Arc<AtomicBool>,
+    /// Set while the connected bridge's receiver is talking: the puck reader holds no port and
+    /// searches for none.
+    suspended: Arc<AtomicBool>,
+    /// Whether the operator named the port, which [`Gps::set_suspended`] then leaves alone.
+    pinned: bool,
 }
 
 impl Gps {
@@ -269,9 +370,29 @@ impl Gps {
                 diagnostic: None,
                 last_failure: None,
                 max_age: GpsConfig::default().max_age,
+                via_bridge: false,
+                demux: Demux::new(),
+                lines: Lines::default(),
+                valset: None,
+                txbuf_full: false,
             })),
             stop: Arc::new(AtomicBool::new(false)),
+            suspended: Arc::new(AtomicBool::new(false)),
+            pinned: false,
         }
+    }
+
+    /// The bridge's receiver: detached, and fed by the runtime through [`Gps::feed_bytes`].
+    /// `max_age` is the staleness limit, as [`GpsConfig::max_age`] is for a puck.
+    #[must_use]
+    pub fn bridged(max_age: Duration) -> Self {
+        let gps = Self::detached();
+        {
+            let mut inner = gps.lock();
+            inner.via_bridge = true;
+            inner.max_age = max_age;
+        }
+        gps
     }
 
     /// Open `config.port` on a background thread and keep it open, reconnecting if the receiver is
@@ -279,7 +400,7 @@ impl Gps {
     /// having.
     #[must_use]
     pub fn spawn(config: GpsConfig) -> Self {
-        let gps = Self::detached();
+        let gps = Self { pinned: config.port.is_some(), ..Self::detached() };
         {
             let mut inner = gps.lock();
             inner.pinned_baud = config.baud.is_some();
@@ -298,6 +419,40 @@ impl Gps {
     /// Ask the reader thread to finish. Idempotent, and harmless when detached.
     pub fn stop(&self) {
         self.stop.store(true, Ordering::Relaxed);
+    }
+
+    /// Stand the puck reader down, or let it search again. While suspended it lets go of any port
+    /// within [`READ_TIMEOUT`], opens none, and forgets the sky. Cheap and idempotent, so the
+    /// runtime calls it on every tick; only a change is logged. A no-op for a port the operator
+    /// named with `--gps`, and harmless when detached.
+    pub fn set_suspended(&self, suspended: bool) {
+        if self.pinned || self.suspended.swap(suspended, Ordering::Relaxed) == suspended {
+            return;
+        }
+        if suspended {
+            tracing::info!("gps search stands down: the bridge's receiver is talking");
+        } else {
+            tracing::info!("gps search resumes");
+        }
+    }
+
+    /// Whether a sentence parsed within the staleness limit of `now_ms`. A negative age is the host
+    /// clock stepping back, and counts as fresh, as in [`crate::PositionChain`].
+    #[must_use]
+    pub fn talking(&self, now_ms: i64) -> bool {
+        let inner = self.lock();
+        inner.heard_ms.is_some_and(|heard_ms| {
+            (now_ms.saturating_sub(heard_ms).max(0) as u128) <= inner.max_age.as_millis()
+        })
+    }
+
+    /// Start the bridge's stream over: drop a partial line or UBX packet, so bytes from before a
+    /// reconnect never join the next stream. The retained fix and the sky stay, as the chain and
+    /// the view age them.
+    pub fn reset_stream(&self) {
+        let mut inner = self.lock();
+        inner.demux = Demux::new();
+        inner.lines = Lines::default();
     }
 
     /// The last fix and the Unix milliseconds it arrived.
@@ -320,65 +475,86 @@ impl Gps {
             sky: inner.nmea.sky().clone(),
             heard_ms: inner.heard_ms,
             max_age: inner.max_age,
+            via_bridge: inner.via_bridge,
         }
     }
 
     /// Offer one line to the parser, as of `now_ms`. Public as the seam the reader thread and the
     /// tests share.
     pub fn feed(&self, line: &[u8], now_ms: i64) {
-        let mut inner = self.lock();
+        self.lock().feed(line, now_ms);
+    }
+
+    /// Offer a piece of the bridge's receiver stream, as of `now_ms`, in whatever pieces the
+    /// bridge read it. Complete NMEA lines reach the parser. The receiver's answer to its rate is
+    /// logged, and other UBX is ignored.
+    pub fn feed_bytes(&self, bytes: &[u8], now_ms: i64) {
+        let mut guard = self.lock();
+        let inner = &mut *guard;
         inner.tick(now_ms);
-        let parsed = inner.nmea.parse(line);
-        if parsed.is_ok() {
-            inner.heard_ms = Some(now_ms);
+        // Out of `inner` for the call, so the line callback can feed the parser it holds.
+        let mut demux = std::mem::take(&mut inner.demux);
+        let mut lines = std::mem::take(&mut inner.lines);
+        let mut replies = Vec::new();
+        demux.push(
+            bytes,
+            |run| lines.push(run, |line| inner.feed(line, now_ms)),
+            |packet| replies.extend(packet.valset_reply()),
+        );
+        inner.demux = demux;
+        inner.lines = lines;
+        for reply in replies {
+            inner.note_valset(reply);
         }
-        match parsed {
-            Ok(Report::Fix(new)) => {
-                inner.note_fix();
-                inner.counters.sentences += 1;
-                inner.counters.fixes += 1;
-                // A cycle is two sentences about one instant, and only GGA carries altitude,
-                // satellites and dilution. So the position is replaced and the rest carried: what a
-                // sentence omits, it does not contradict.
-                let previous = inner.fix;
-                let satellites = new.satellites.or(match inner.status {
-                    GpsStatus::Fixed { satellites } => satellites,
-                    _ => None,
-                });
-                inner.status = GpsStatus::Fixed { satellites };
-                inner.fix = Some(Fix {
-                    lat: Some(new.lat),
-                    lon: Some(new.lon),
-                    alt: new.alt.or_else(|| previous.and_then(|fix| fix.alt)),
-                    accuracy: new.accuracy.or_else(|| previous.and_then(|fix| fix.accuracy)),
-                    source: PositionSource::Gps,
-                    at_ms: new.at_ms,
-                });
-                inner.received_at_ms = Some(now_ms);
-            }
-            Ok(Report::NoFix) => {
-                inner.last_failure = None;
-                inner.counters.sentences += 1;
-                // Keep the last fix: losing lock under a bridge has not moved the host, and the
-                // chain's staleness rule decides when to stop believing it.
-                if !matches!(inner.status, GpsStatus::Fixed { .. }) {
-                    inner.status = GpsStatus::Searching;
-                    inner.note_status(GpsStatus::Searching);
-                }
-            }
-            Ok(Report::Other) => inner.counters.sentences += 1,
-            Err(NmeaError::NotASentence | NmeaError::Checksum | NmeaError::Malformed) => {
-                inner.counters.rejected += 1;
-            }
-        }
+    }
+
+    /// Age the retained fix as of `now_ms`, for the staleness log. The puck reader does this on
+    /// every read. A bridge's receiver that has gone quiet sends no bytes to do it, so the runtime
+    /// calls this on its tick.
+    pub fn tick(&self, now_ms: i64) {
+        self.lock().tick(now_ms);
     }
 
     fn set_status(&self, status: GpsStatus) {
         self.lock().set_status(status);
     }
 
-    fn tick(&self, now_ms: i64) {
-        self.lock().tick(now_ms);
+    pub(crate) fn suspended(&self) -> bool {
+        self.suspended.load(Ordering::Relaxed)
+    }
+
+    /// Whether the reader should let go of what it is doing: stopping, or standing down.
+    fn halted(&self) -> bool {
+        self.stop.load(Ordering::Relaxed) || self.suspended()
+    }
+
+    /// Sleep for `total`, in steps no longer than [`READ_TIMEOUT`], ending early when halted.
+    fn pause(&self, total: Duration) {
+        let until = Instant::now() + total;
+        while !self.halted() {
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return;
+            }
+            std::thread::sleep(left.min(READ_TIMEOUT));
+        }
+    }
+
+    /// Hold no port and search for none until resumed or stopped. The sky and the settled port
+    /// are forgotten, since the receiver read on resume may be another one. The status is left at
+    /// [`GpsStatus::Connecting`]: standing down is not a fault.
+    fn stand_down(&self) {
+        {
+            let mut inner = self.lock();
+            inner.settled = None;
+            inner.forget_receiver();
+            inner.status = GpsStatus::Connecting;
+            inner.diagnostic = None;
+            inner.last_failure = None;
+        }
+        while self.suspended() && !self.stop.load(Ordering::Relaxed) {
+            std::thread::sleep(READ_TIMEOUT);
+        }
     }
 
     /// A poisoned mutex means a previous holder panicked mid-update; what it left is
@@ -404,12 +580,24 @@ impl Gps {
         let mut retries = 0_u32;
 
         while !self.stop.load(Ordering::Relaxed) {
+            if self.suspended() {
+                self.stand_down();
+                // Resuming is a fresh search.
+                backoff = MIN_BACKOFF;
+                settled = None;
+                lost = None;
+                retries = 0;
+                continue;
+            }
             let searching = settled.is_none();
             let Some((port, baud)) =
                 settled.clone().or_else(|| self.search(config, lost.is_none() && searching))
             else {
+                if self.halted() {
+                    continue;
+                }
                 self.set_status(nothing_found(config.port.as_deref(), lost.as_deref(), why_not));
-                std::thread::sleep(backoff);
+                self.pause(backoff);
                 backoff = (backoff * 2).min(MAX_BACKOFF);
                 continue;
             };
@@ -433,12 +621,16 @@ impl Gps {
                     if self.stop.load(Ordering::Relaxed) {
                         return;
                     }
+                    if self.suspended() {
+                        continue;
+                    }
                     if opened.elapsed() >= HEALTHY {
                         backoff = MIN_BACKOFF;
                         retries = 0;
                     }
                     self.set_status(GpsStatus::Failed(reason));
                 }
+                Err(_) if self.halted() => continue,
                 Err(e) => self.set_status(GpsStatus::Failed(format!("{port}: {e}"))),
             }
 
@@ -461,7 +653,7 @@ impl Gps {
                 inner.settled = None;
                 inner.forget_receiver();
             }
-            std::thread::sleep(backoff);
+            self.pause(backoff);
             backoff = (backoff * 2).min(MAX_BACKOFF);
         }
     }
@@ -508,13 +700,17 @@ impl Gps {
     fn listen(&self, path: &str, baud: u32) -> Vec<u8> {
         use std::io::Read;
 
+        // Standing down opens nothing, so the rest of the search falls through at once.
+        if self.halted() {
+            return Vec::new();
+        }
         let Ok(mut port) = open_port(path, baud) else { return Vec::new() };
         let mut sample = Vec::new();
         let mut buf = [0u8; 512];
         let until = Instant::now() + PROBE_WINDOW;
         // Short reads accumulated, so `stop` is noticed within the read timeout and shutdown does
         // not wait out the window.
-        while Instant::now() < until && !self.stop.load(Ordering::Relaxed) {
+        while Instant::now() < until && !self.halted() {
             match port.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => sample.extend_from_slice(&buf[..n]),
@@ -531,7 +727,7 @@ impl Gps {
 
         let mut lines = Lines::default();
         let mut buf = [0u8; 512];
-        while !self.stop.load(Ordering::Relaxed) {
+        while !self.halted() {
             match port.read(&mut buf) {
                 Ok(0) => return "the receiver closed the port".to_owned(),
                 Ok(n) => {
@@ -632,6 +828,8 @@ impl Lines {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::position::DEFAULT_MAX_AGE;
+    use crate::ubx::{ACK_VALSET, NAK_VALSET};
 
     #[derive(Clone, Default)]
     struct Logs(Arc<Mutex<Vec<String>>>);
@@ -1005,6 +1203,175 @@ mod tests {
         assert_eq!(view.sky, Sky::default());
         assert_eq!(view.heard_ms, None);
         assert_eq!(gps.latest(), latest);
+    }
+
+    #[test]
+    fn gps_reads_bridge_view_when_bridged() {
+        let gps = Gps::bridged(Duration::from_secs(3));
+        let view = gps.view();
+        assert!(view.via_bridge);
+        assert_eq!(view.max_age, Duration::from_secs(3));
+        assert_eq!(view.status, GpsStatus::Connecting);
+        assert!(!Gps::detached().view().via_bridge);
+    }
+
+    #[test]
+    fn gps_fixes_from_bridge_bytes_when_sentence_spans_chunks_around_an_ack() {
+        // The bridge cuts its stream wherever an I2C read ended, and the receiver answers each
+        // rate write between sentences. Neither may cost the sentence or count as rejected.
+        let gps = Gps::bridged(DEFAULT_MAX_AGE);
+        let mut stream = GGA.to_vec();
+        stream.extend_from_slice(b"\r\n");
+        stream.extend_from_slice(&ACK_VALSET);
+        stream.extend_from_slice(GGA_NO_FIX);
+        stream.extend_from_slice(b"\r\n");
+        for chunk in stream.chunks(7) {
+            gps.feed_bytes(chunk, 2_000);
+        }
+        let view = gps.view();
+        assert_eq!(view.counters.fixes, 1);
+        assert_eq!(view.counters.sentences, 2);
+        assert_eq!(view.counters.rejected, 0);
+        assert_eq!(gps.latest().map(|(_, at)| at), Some(2_000));
+    }
+
+    #[test]
+    fn gps_logs_refused_rate_once_when_receiver_repeats_its_nak() {
+        let logs = Logs::default();
+        tracing::subscriber::with_default(logs.clone(), || {
+            let gps = Gps::bridged(DEFAULT_MAX_AGE);
+            for now_ms in 0..10 {
+                gps.feed_bytes(&NAK_VALSET, now_ms);
+            }
+            gps.feed_bytes(&ACK_VALSET, 10);
+            gps.feed_bytes(&NAK_VALSET, 11);
+            assert_eq!(gps.view().counters.rejected, 0);
+        });
+        logs.assert_messages(&[
+            "the GPS receiver refused its rate",
+            "the GPS receiver refused its rate",
+        ]);
+    }
+
+    #[test]
+    fn gps_logs_full_transmit_buffer_once_when_receiver_reports_txbuf() {
+        let logs = Logs::default();
+        tracing::subscriber::with_default(logs.clone(), || {
+            let gps = Gps::bridged(DEFAULT_MAX_AGE);
+            for now_ms in 0..3 {
+                gps.feed_bytes(b"$GNTXT,01,01,00,txbuf alloc*61\r\n", now_ms);
+            }
+            gps.feed_bytes(b"$GNTXT,01,01,02,ANTSTATUS=OK*25\r\n", 3);
+            assert_eq!(gps.view().counters.rejected, 0);
+        });
+        logs.assert_messages(&["the GPS receiver is dropping output"]);
+    }
+
+    #[test]
+    fn gps_logs_stale_when_bridge_receiver_goes_quiet_and_runtime_ticks() {
+        let logs = Logs::default();
+        tracing::subscriber::with_default(logs.clone(), || {
+            let gps = Gps::bridged(DEFAULT_MAX_AGE);
+            let mut sentence = GGA.to_vec();
+            sentence.extend_from_slice(b"\r\n");
+            gps.feed_bytes(&sentence, 1_000);
+            gps.tick(7_000);
+        });
+        logs.assert_messages(&["gps fix acquired", "gps fix stale"]);
+    }
+
+    /// Poll `done` until it holds or a few seconds pass.
+    fn eventually(mut done: impl FnMut() -> bool) -> bool {
+        let until = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < until {
+            if done() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        done()
+    }
+
+    #[test]
+    fn gps_stands_down_without_a_fault_when_suspended() {
+        // Rate and port both named skip the search, so the reader goes straight to opening a
+        // port that is not there and reports it. A named port ignores `set_suspended`, so the
+        // flag is set directly: this tests the reader standing down, not who may ask it to.
+        let gps = Gps::spawn(GpsConfig::pinned("/dev/wartui-test-no-such-port").at_baud(9_600));
+        assert!(eventually(|| matches!(gps.view().status, GpsStatus::Failed(_))));
+        gps.suspended.store(true, Ordering::Relaxed);
+        assert!(eventually(|| gps.view().status == GpsStatus::Connecting));
+        // Held there, not retried into another fault.
+        std::thread::sleep(MIN_BACKOFF * 2);
+        assert_eq!(gps.view().status, GpsStatus::Connecting);
+        assert_eq!(gps.view().settled, None);
+        gps.suspended.store(false, Ordering::Relaxed);
+        assert!(eventually(|| matches!(gps.view().status, GpsStatus::Failed(_))));
+        gps.stop();
+    }
+
+    #[test]
+    fn gps_ignores_suspension_when_port_is_pinned() {
+        let gps = Gps::spawn(GpsConfig::pinned("/dev/wartui-test-no-such-port").at_baud(9_600));
+        gps.set_suspended(true);
+        assert!(!gps.suspended());
+        gps.stop();
+    }
+
+    #[test]
+    fn gps_logs_suspension_once_when_set_repeatedly() {
+        let logs = Logs::default();
+        tracing::subscriber::with_default(logs.clone(), || {
+            let gps = Gps::detached();
+            for _ in 0..3 {
+                gps.set_suspended(true);
+            }
+            assert!(gps.suspended());
+            for _ in 0..3 {
+                gps.set_suspended(false);
+            }
+        });
+        logs.assert_messages(&["stands down", "resumes"]);
+    }
+
+    #[test]
+    fn gps_talks_only_while_sentences_are_fresh() {
+        let gps = Gps::bridged(DEFAULT_MAX_AGE);
+        assert!(!gps.talking(1_000), "nothing heard yet");
+        gps.feed_bytes(b"$GPGSV,1,1,00*79\r\n", 1_000);
+        assert!(gps.talking(6_000));
+        assert!(!gps.talking(6_001));
+        // A rejected line is not the receiver talking.
+        gps.feed_bytes(b"not NMEA\r\n", 6_001);
+        assert!(!gps.talking(6_001));
+    }
+
+    #[test]
+    fn gps_drops_partial_sentence_when_stream_is_reset() {
+        let gps = Gps::bridged(DEFAULT_MAX_AGE);
+        // Half a sentence, then a reconnect, then the tail of another: joined, the two would parse
+        // as nothing and count as rejected, or worse, as a sentence neither sent.
+        gps.feed_bytes(&GGA[..30], 1_000);
+        gps.reset_stream();
+        gps.feed_bytes(&GGA[30..], 2_000);
+        gps.feed_bytes(b"\r\n", 2_000);
+        assert_eq!(gps.view().counters.fixes, 0);
+        let mut sentence = GGA.to_vec();
+        sentence.extend_from_slice(b"\r\n");
+        gps.feed_bytes(&sentence, 3_000);
+        assert_eq!(gps.view().counters.fixes, 1);
+    }
+
+    #[test]
+    fn gps_keeps_fix_and_sky_when_stream_is_reset() {
+        let gps = Gps::bridged(DEFAULT_MAX_AGE);
+        let mut stream = GGA.to_vec();
+        stream.extend_from_slice(b"\r\n$GPGSV,1,1,02,10,63,137,17,08,49,090,26,1*69\r\n");
+        gps.feed_bytes(&stream, 1_000);
+        let (latest, sky) = (gps.latest(), gps.view().sky);
+        gps.reset_stream();
+        assert_eq!(gps.latest(), latest);
+        assert_eq!(gps.view().sky, sky);
     }
 
     #[test]
