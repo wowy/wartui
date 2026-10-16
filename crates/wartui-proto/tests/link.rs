@@ -10,10 +10,11 @@ use wartui_proto::air::{
     SightingMsg, Vdd,
 };
 use wartui_proto::link::{
-    BROADCAST, BridgeToHost, Chip, EspNowPayload, FrameAccumulator, HostToBridge,
-    LINK_PROTO_VERSION, LinkError, LogLevel, LoopPhase, MAX_ESPNOW_V2_PAYLOAD, MAX_FRAME,
-    MAX_HOST_FRAME, MAX_NODE_PAYLOAD, PANEL_ROWS, Panel, PanelLine, PanelLines, SendPayload,
-    SendStatus, Severity, ShortStr, crc16, decode_frame, encode_frame, encode_host_frame,
+    BROADCAST, BURST_BUDGET_US, BURST_GAP_US, BridgeToHost, Chip, EspNowPayload, FrameAccumulator,
+    HostToBridge, LINK_PROTO_VERSION, LinkBurst, LinkError, LogLevel, LoopPhase,
+    MAX_ESPNOW_V2_PAYLOAD, MAX_FRAME, MAX_HOST_FRAME, MAX_NODE_PAYLOAD, PANEL_ROWS, Panel,
+    PanelLine, PanelLines, SendPayload, SendStatus, Severity, ShortStr, crc16, decode_frame,
+    encode_frame, encode_host_frame,
 };
 use wartui_proto::reset::ResetCause;
 
@@ -311,6 +312,33 @@ fn frame_accumulator_discards_oversized_frame_when_capacity_is_exceeded() {
     assert_eq!(got, Some(cmd));
 }
 
+#[test]
+fn frame_accumulator_reports_empty_when_frame_completes() {
+    let mut acc = FrameAccumulator::<MAX_FRAME>::new();
+    assert!(acc.is_empty());
+    let mut out = [0u8; MAX_FRAME];
+    let n = encode_host_frame(&HostToBridge::GetStatus, &mut out).expect("encodes");
+    for &byte in &out[..n - 1] {
+        assert!(acc.push(byte).is_none());
+        assert!(!acc.is_empty(), "a partial frame reads as empty");
+    }
+    assert!(acc.push(0).is_some());
+    assert!(acc.is_empty());
+}
+
+#[test]
+fn frame_accumulator_reports_not_empty_when_overflowing_frame_awaits_terminator() {
+    // An overlong frame is still arriving until its terminator, whatever the
+    // accumulator kept of it.
+    let mut acc = FrameAccumulator::<64>::new();
+    for _ in 0..200 {
+        acc.push(0xAB);
+    }
+    assert!(!acc.is_empty());
+    assert!(acc.push(0).is_none());
+    assert!(acc.is_empty());
+}
+
 /// What the host recovers from a reset's banner, an optional lone `0x00`, then one
 /// frame. The banner is 1.5 KB with no `0x00`, as measured off a rebooting C6.
 fn after_banner(delimited: bool) -> std::vec::Vec<BridgeToHost> {
@@ -451,4 +479,59 @@ fn link_round_trips_status_when_rx_oversize_is_set() {
     let n = encode_frame(&status, &mut out).expect("encodes");
     let decoded: BridgeToHost = decode_frame(&mut out[..n - 1]).expect("decodes");
     assert_eq!(decoded, status);
+}
+
+#[test]
+fn link_burst_stops_when_no_frame_is_mid_transfer() {
+    let mut burst = LinkBurst::start(0);
+    assert!(!burst.keep_going(1, true, false));
+}
+
+#[test]
+fn link_burst_continues_when_frame_is_mid_transfer_at_start() {
+    // The first poll has moved nothing yet, and starting counts as a move.
+    let mut burst = LinkBurst::start(0);
+    assert!(burst.keep_going(0, false, true));
+}
+
+#[test]
+fn link_burst_stops_when_nothing_moves_for_the_gap() {
+    // A host that stopped reading mid-frame: nothing moves after the start.
+    let mut burst = LinkBurst::start(0);
+    assert!(burst.keep_going(BURST_GAP_US - 1, false, true));
+    assert!(!burst.keep_going(BURST_GAP_US, false, true));
+}
+
+#[test]
+fn link_burst_continues_when_bytes_keep_moving() {
+    // A packet every 150 µs, polled every 10 µs in between: inside the gap, so the
+    // burst runs until the budget.
+    let mut burst = LinkBurst::start(0);
+    for now in (0..BURST_BUDGET_US).step_by(10) {
+        assert!(burst.keep_going(now, now % 150 == 0, true), "stopped {now} µs in");
+    }
+}
+
+#[test]
+fn link_burst_times_gap_from_last_move_when_bytes_moved_late() {
+    let mut burst = LinkBurst::start(0);
+    assert!(burst.keep_going(150, true, true));
+    assert!(burst.keep_going(150 + BURST_GAP_US - 1, false, true));
+    assert!(!burst.keep_going(150 + BURST_GAP_US, false, true));
+}
+
+#[test]
+fn link_burst_stops_when_budget_is_spent_despite_progress() {
+    // A host that never stops sending: the radio still gets the pass back.
+    let mut burst = LinkBurst::start(0);
+    assert!(burst.keep_going(BURST_BUDGET_US - 1, true, true));
+    assert!(!burst.keep_going(BURST_BUDGET_US, true, true));
+}
+
+#[test]
+fn link_burst_times_budget_from_start_when_clock_starts_late() {
+    let start = 5_000_000;
+    let mut burst = LinkBurst::start(start);
+    assert!(burst.keep_going(start + BURST_BUDGET_US - 1, true, true));
+    assert!(!burst.keep_going(start + BURST_BUDGET_US, true, true));
 }

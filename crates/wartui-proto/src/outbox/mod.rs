@@ -7,7 +7,13 @@
 //! of firmware fails in the field, and it fails silently.
 //!
 //! So the bridge never blocks on the link. It encodes everything it wants to say into one
-//! of two rings, and drains them a byte at a time into whatever the FIFO will take:
+//! of two rings, and drains them a byte at a time into whatever the FIFO will take. While
+//! a frame is part-way out, the bridge goes on polling the FIFO for at most
+//! [`BURST_BUDGET_US`](crate::link::BURST_BUDGET_US) ([`LinkBurst`](crate::link::LinkBurst)),
+//! plus the time to act on any host frame that completes meanwhile. That is a spin, never a
+//! wait on the host.
+//!
+//! The two rings:
 //!
 //! - **priority**: [`BridgeToHost::Ready`], [`BridgeToHost::SendResult`],
 //!   [`BridgeToHost::Status`] and [`BridgeToHost::Error`]. Each answers a host request
@@ -57,11 +63,10 @@ use ring::Ring;
 ///
 /// The useful buffering has to live here: `esp-radio`'s own receive queue is ten frames
 /// deep and silently discards its oldest. What fills this ring is a node's back-to-back
-/// burst, which arrives faster than USB drains it: measured with 250-byte batches, one
-/// every ~0.5 ms on the air against ~0.8 ms per frame to USB. The ring holds the
-/// difference for as long as the burst lasts. Its depth counts frames, not bytes: each
-/// slot takes a full [`MAX_FRAME`](crate::link::MAX_FRAME), so a slot holding a full
-/// 1024-byte batch carries about four times the records of a 250-byte one.
+/// burst, which can arrive faster than USB drains it (`docs/usb-link-findings.md`). The
+/// ring holds the difference for as long as the burst lasts. Its depth counts frames, not
+/// bytes: each slot takes a full [`MAX_FRAME`](crate::link::MAX_FRAME), so a slot holding
+/// a full 1024-byte batch carries about four times the records of a 250-byte one.
 const BULK_DEPTH: usize = 24;
 
 /// Frames that answer a host request. Short, because the host asks for one at a time.
@@ -150,6 +155,15 @@ impl Outbox {
     /// [`crate::stall`].
     pub const fn is_empty(&self) -> bool {
         self.priority.is_empty() && self.bulk.is_empty() && self.current.is_none() && !self.orphan
+    }
+
+    /// Whether a frame is part-way onto the wire, or a lone terminator is owed.
+    ///
+    /// A frame counts once the pump has taken it up, even if the FIFO refused its first
+    /// byte. The bridge stays on the link while this holds
+    /// ([`LinkBurst`](crate::link::LinkBurst)), so the rest follows at USB speed.
+    pub const fn in_flight(&self) -> bool {
+        self.current.is_some() || self.orphan
     }
 
     /// Queue `msg`, evicting an older bulk frame if that is what it takes.
