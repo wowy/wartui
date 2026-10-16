@@ -21,6 +21,7 @@
 //! Rebooting is confirmed by uptime and by uptime alone; [`rebooted`] is the rule.
 //! [`FRESH_UPTIME_MS`] covers the one case with no earlier figure to compare
 //! against: a bridge that was wedged and never spoke at all.
+use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -61,6 +62,12 @@ pub struct Args {
     /// if omitted.
     #[arg(long, value_name = "PATH|MAC")]
     bridge: Option<String>,
+
+    /// Read the remembered bridge from this file instead of the default `wartui.toml`. A file
+    /// that does not load is no bridge remembered. Never written; see
+    /// `crates/wartui/README.md` § "Config file".
+    #[arg(long, value_name = "PATH")]
+    config: Option<PathBuf>,
 }
 
 pub async fn run(args: Args) -> Result<()> {
@@ -73,6 +80,7 @@ pub async fn run(args: Args) -> Result<()> {
     // of its address is resolved here for the same reason: a tail several boards
     // share is refused before anything is opened, rather than left to a transport
     // that would wait out the whole timeout saying nothing.
+    let remembered = crate::config::remembered_bridge(args.config.as_deref());
     let board = match args.bridge.as_deref() {
         Some(named) => match super::spec(named) {
             tail @ BridgeSpec::Tail(_) => serial::resolve(&tail)?,
@@ -80,11 +88,10 @@ pub async fn run(args: Args) -> Result<()> {
         },
         None => serial::unambiguous_bridge(
             &discover_ports().context("listing serial ports")?,
-            BridgeMemory::discover().recall(),
+            remembered,
         )?,
     };
-    let mut link =
-        super::open(Some(&board), None, 0, super::memory(Some(&board), super::Remember::Detected))?;
+    let mut link = super::open(Some(&board), None, 0, BridgeMemory::holding(remembered))?;
 
     // Sent immediately, without waiting to be told the bridge is there: the case
     // this command is for is the one where nothing ever announces itself, and the

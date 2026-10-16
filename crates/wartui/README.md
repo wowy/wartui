@@ -296,6 +296,7 @@ node = "AA:BB:CC:DD:EE:FF"
 
 [bridge]
 remember = true
+mac = "AA:BB:CC:DD:EE:FF"
 
 [api-keys]
 wdgwars = ""
@@ -309,18 +310,22 @@ wdgwars = ""
 | `[tx-power] bridge`    | `2`     | Bridge transmit power (assignments), whole dBm 2–20                            |
 | `[bluetooth] remember` | on      | Whether `b` remembers the Bluetooth node; see "Bluetooth"                      |
 | `[bluetooth] node`     | —       | The MAC `b` last gave the scan to, written as `wartui ports` prints it         |
-| `[bridge] remember`    | on      | Whether `run` remembers the bridge; see "When nothing arrives"                 |
+| `[bridge] remember`    | on      | Whether wartui remembers the bridge; see "When nothing arrives"                |
+| `[bridge] mac`         | —       | The bridge last connected to or flashed, written as `wartui ports` prints it   |
 | `[api-keys] wdgwars`   | `""`    | WDGWars API key; settings writes the empty key so there is a place to paste it |
 
 Each power defaults on its own; neither falls back to the other. The firmware accepts 21 dBm, but
 nothing above 20 is verified to work. wartui refuses to start on an unknown key or table, naming the
-file and line. An out-of-range value, an unknown `pool`, a malformed `node`, a `node` beside
-`remember = false`, or an `excluded-ssids` entry that is empty, over 32 bytes, or listed twice is
-refused too, naming the file and key. Only `run` and `upload` read the file,
-so a broken one cannot stop `ports`, `status`, or `reset`. Settings (`c`) rewrites the whole file
-on save, and `b` writes the Bluetooth node; see "Keyboard commands". When the file is missing, `run`
-creates it holding only `wdgwars = ""`, except under `--sim`. A new file is readable only by its
-owner.
+file and line. An out-of-range value, an unknown `pool`, a malformed `node` or `mac`, either beside
+its table's `remember = false`, or an `excluded-ssids` entry that is empty, over 32 bytes, or listed
+twice is refused too, naming the file and key. `status`, `sniff`, `reset` and `ota` read only
+`[bridge] mac`, and treat a broken file as no bridge remembered, so it cannot stop them.
+`flash-fleet` and `flash-bridge` read only `[bridge] mac` too, but refuse a broken file, since it
+decides which board gets firmware. Settings (`c`) rewrites the whole file on save, `b` writes the
+Bluetooth node, and `run` writes `[bridge] mac` when the bridge it remembers changes; see "Keyboard
+commands" and "When nothing arrives". `flash-bridge` writes `[bridge] mac` for a board it found and
+flashed; see "Flashing the bridge". When the file is missing, `run` creates it holding only `wdgwars = ""`, except
+under `--sim`. A new file is readable only by its owner.
 
 A Wi-Fi sighting whose SSID equals an `excluded-ssids` entry is dropped before wartui counts or
 records it, so it never reaches the capture, the live stream, an export, or an upload. An SSID
@@ -335,8 +340,9 @@ bytes.
 | macOS            | `~/Library/Application Support/wartui/wartui.toml`                                                               |
 | Linux and others | `$XDG_CONFIG_HOME/wartui/wartui.toml`, or `~/.config/wartui/wartui.toml` when that variable is unset or relative |
 
-`--config PATH` (a `run`, `export`, `analyze` and `upload` flag) reads another file, for testing
-and debugging. A named file that is missing is refused; a missing default file silently means the
+`--config PATH` reads another file, for testing and debugging. Every command that reads the file
+takes it: `run`, `export`, `analyze`, `upload`, `status`, `sniff`, `reset`, `ota`, `flash-fleet` and
+`flash-bridge`. A named file that is missing is refused; a missing default file silently means the
 built-in defaults.
 
 ### Benchmarking the store
@@ -374,6 +380,7 @@ wartui flash-fleet --features esp32c6,xiao-external-antenna --bridge 10:BD:A3:EC
 | `--no-default-features` | off            | Build without the firmware's default features                              |
 | `--bridge PATH\|MAC`    | remembered     | The bridge, which must be attached and is never flashed; `00:08` works too |
 | `--no-bridge`           | off            | No bridge is attached; a remembered one is still spared                    |
+| `--config PATH`         | per-OS path    | Where to read the remembered bridge; see "Config file"                     |
 | `--skip MAC`            | —              | Leave this board alone too; repeatable                                     |
 | `--image BIN`           | —              | Flash this merged image rather than building or fetching one               |
 | `--firmware-dir DIR`    | the checkout's | Build the image from the node firmware here                                |
@@ -381,8 +388,8 @@ wartui flash-fleet --features esp32c6,xiao-external-antenna --bridge 10:BD:A3:EC
 | `--dry-run`             | off            | Probe and report; build, fetch and flash nothing                           |
 
 **The bridge has to be known.** It shares the nodes' vendor, product, and often chip, so only its
-address tells it apart. The run spares the board `--bridge` names and the bridge `run` remembered,
-whichever are known; a remembered bridge that is not attached is unplugged, not an error. The run is
+address tells it apart. The run spares the board `--bridge` names and the bridge remembered in
+`wartui.toml`, whichever are known; a remembered bridge that is not attached is unplugged, not an error. The run is
 refused when:
 
 - Neither is known, unless `--no-bridge` says none is attached.
@@ -442,6 +449,7 @@ wartui flash-bridge --features esp32c6 --bridge 10:BD:A3:EC:44:C0
 |----------------------|----------------|-----------------------------------------------------------------------|
 | `--features LIST`    | —              | The bridge firmware's features; exactly one of `esp32c5` or `esp32c6` |
 | `--bridge PATH\|MAC` | see below      | The board to flash, which must be attached; `00:08` works too         |
+| `--config PATH`      | per-OS path    | Where to read and save the remembered bridge; see "Config file"       |
 | `--image BIN`        | —              | Flash this merged image rather than building or fetching one          |
 | `--firmware-dir DIR` | the checkout's | Build the image from the bridge firmware here                         |
 | `--dry-run`          | off            | Probe and report; build, fetch and flash nothing                      |
@@ -449,7 +457,7 @@ wartui flash-bridge --features esp32c6 --bridge 10:BD:A3:EC:44:C0
 **The board is chosen before anything is reset**, from the first that applies:
 
 1. The board `--bridge` names.
-2. The bridge `run` remembered, which must be attached.
+2. The bridge remembered in `wartui.toml`, which must be attached.
 3. With none remembered, the only Espressif board attached.
 
 The run is refused when:
@@ -468,9 +476,11 @@ The image comes from the same three sources as `flash-fleet`'s, with `firmware/b
 `esp32c6,xiao-external-antenna`, under the same `images/<tag>/`.
 
 The board prints one line by its last two octets: would flash, flashed, or failed with espflash's
-full output. A board flashed without `--bridge` is remembered as the bridge, so `flash-fleet` spares
-it and `run` opens it first; one named with `--bridge` is not. `--dry-run` resets it once, for
-`board-info`, and remembers nothing.
+full output. A board found without `--bridge` is then saved to `wartui.toml` as the bridge, so
+`flash-fleet` spares it from the next run on; with `remember bridge` off, nothing is saved. A board
+named with `--bridge` is not saved, since one flashed by name is often some other device. When the
+save fails, the flash still succeeds and a line says why, since `flash-fleet` will not spare that
+board until `run` connects to it. `--dry-run` resets it once, for `board-info`.
 
 ### Updating over the air
 
@@ -494,6 +504,7 @@ wartui ota --image wartui-node-app-esp32c5.bin --yes
 | `--force`            | off              | Also update a node on the image's version, or a newer one      |
 | `--yes`, `-y`        | off              | Update without asking                                          |
 | `--sim N`            | —                | Update a fake fleet, running an older version, instead         |
+| `--config PATH`      | per-OS path      | Where to read the remembered bridge; see "Config file"         |
 
 **The image is app-only**: what one app slot holds, not the merged image `flash-fleet` writes.
 Its board and version come from the app descriptor inside it, never from its file name. A merged
@@ -616,7 +627,8 @@ The rows are the pool (`all → eu → us`), the nodes' transmit power and the b
 `wdgwars` API key. `excluded ssids` shows how many are listed, or `none`, and opens a page that
 lists them. While an SSID is being typed there, every letter types, spaces included. `Enter` refuses
 one that is empty, over 32 bytes, or already listed, and says why. `Enter` in the list sends it to
-the engine, writes only `excluded-ssids`, and returns to the rows; edits to the rows stay pending.
+the engine, writes `excluded-ssids` and the remembered bridge but none of the rows, and returns
+to the rows; edits to the rows stay pending.
 On the key row, letters type, so `h` `j` `k` `l` `q` neither move nor close; `↑` leaves it, and the
 footer shows the `ctrl-u` tip while a key is entered. The key shows its last three characters, up to
 six bullets before them, and from ten characters its first one to three. `Enter` sends the rows to
@@ -901,19 +913,19 @@ panel back within a second, with no replug or reflash.
 ## When nothing arrives
 
 **wartui finds the bridge by asking.** It opens each attached Espressif board in turn (a USB-plugged
-node is one) and keeps the first that answers the link protocol. It saves that address to
-`~/.local/state/wartui/bridge`, so later runs open only that port. A capture given `--bridge` saves
-the named board once it answers, since naming it for a capture is choosing it. `status`, `sniff`,
-and `reset` with `--bridge` save nothing, so questioning one board changes nothing later. An
-answering board is held for the run: unplug the bridge to reflash a node, and wartui waits rather
-than transmit into it.
+node is one) and keeps the first that answers the link protocol. `run` saves that address to
+`wartui.toml` as `[bridge] mac`, so later runs open only that port. A capture given `--bridge` saves
+the named board once it answers, since naming it for a capture is choosing it. `flash-bridge` saves
+the board it found and flashed. `status`, `sniff`, `reset`, `ota` and `flash-fleet` read it and save
+nothing, so questioning a board or flashing nodes changes nothing later. An answering board is held for the run:
+unplug the bridge to reflash a node, and wartui waits rather than transmit into it.
 
-That file is state, not settings. Deleting it is always safe, costs one slower start, and fixes
-wartui opening the wrong board. It also self-corrects: an answering board overwrites it, and the
-remembered board is dropped if, opened with no other to try, it stays silent, as a reflashed bridge
-does. A board merely passed over in a sweep is kept; being slower than its neighbor proves nothing.
-With `remember bridge` off (settings, or `[bridge] remember = false`), `run` deletes the file, saves
-nothing, and sweeps on every start.
+Deleting the `mac` line is always safe, costs one slower start, and fixes wartui opening the wrong
+board. It also self-corrects: an answering board replaces it, and the remembered board is dropped
+if, opened with no other to try, it stays silent, as a reflashed bridge does. A board merely passed
+over in a sweep is kept; being slower than its neighbor proves nothing. With `remember bridge` off
+(settings, or `[bridge] remember = false`), `run` drops `mac`, saves no bridge, and sweeps on every
+start.
 
 The header's `waiting for a bridge to announce itself` has three causes; the fault box names it:
 
@@ -934,7 +946,6 @@ either way. `espflash` is the fallback for a bridge that answers nothing; unplug
 wartui status                          # exits in 5 s with the reason
 wartui reset                           # reboot a bridge that stopped answering
 wartui --log-file wartui.log run
-rm ~/.local/state/wartui/bridge        # forget which board was the bridge
 ```
 
 `wartui reset` takes about thirty seconds to fail on a board that is not a bridge. The board it is

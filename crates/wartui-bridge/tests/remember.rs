@@ -1,4 +1,4 @@
-//! Carrying the bridge's address from one run to the next.
+//! Holding the bridge's address for the transport and the view.
 
 use wartui_bridge::remember::BridgeMemory;
 use wartui_proto::mac;
@@ -10,126 +10,75 @@ fn address() -> [u8; 6] {
 }
 
 #[test]
-fn bridge_memory_persists_and_recalls_mac_when_stored_to_disk() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let memory = BridgeMemory::at(dir.path().join("bridge"));
-    assert_eq!(memory.recall(), None, "nothing has been found yet");
-    memory.remember(address());
-    assert_eq!(BridgeMemory::at(dir.path().join("bridge")).recall(), Some(address()));
+fn bridge_memory_recalls_seeded_mac_when_built_holding_one() {
+    assert_eq!(BridgeMemory::holding(Some(address())).recall(), Some(address()));
+    assert_eq!(BridgeMemory::holding(None).recall(), None);
+    assert_eq!(BridgeMemory::none().recall(), None);
 }
 
 #[test]
-fn bridge_memory_formats_mac_as_colon_separated_string_when_persisted() {
-    // So that it can be grepped against `wartui sniff` output and against the
-    // by-id symlink, which carry the same spelling.
-    let dir = tempfile::tempdir().expect("temp dir");
-    let path = dir.path().join("bridge");
-    BridgeMemory::at(&path).remember(address());
-    assert_eq!(std::fs::read_to_string(&path).expect("the file").trim(), BRIDGE_MAC);
-}
-
-#[test]
-fn bridge_memory_creates_parent_directories_when_persisting_mac() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let memory = BridgeMemory::at(dir.path().join("state/wartui/bridge"));
+fn bridge_memory_recalls_mac_when_remembered() {
+    let memory = BridgeMemory::none();
     memory.remember(address());
     assert_eq!(memory.recall(), Some(address()));
 }
 
 #[test]
-fn bridge_memory_returns_none_when_persisted_file_contains_invalid_mac() {
-    // Which is also what a torn write leaves, and why one write is enough.
-    let dir = tempfile::tempdir().expect("temp dir");
-    let path = dir.path().join("bridge");
-    for junk in ["", "10:BD:A3", "not an address", "10:BD:A3:EC:44:C0:FF"] {
-        std::fs::write(&path, junk).expect("writing the file");
-        assert_eq!(BridgeMemory::at(&path).recall(), None, "{junk:?}");
-    }
-}
-
-#[test]
-fn bridge_memory_acts_as_noop_when_configured_with_none_backend() {
-    // What a host with no state directory gets. It must cost a sweep and nothing
-    // else — never a failed capture.
-    let memory = BridgeMemory::none();
-    memory.remember(address());
+fn bridge_memory_recalls_nothing_when_forget_is_called() {
+    let memory = BridgeMemory::holding(Some(address()));
     memory.forget();
     assert_eq!(memory.recall(), None);
-}
-
-#[test]
-fn bridge_memory_fails_silently_when_storage_path_is_unwritable() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    // A file where the directory would have to go: `create_dir_all` cannot win.
-    let blocked = dir.path().join("blocked");
-    std::fs::write(&blocked, "").expect("writing the blocker");
-    let memory = BridgeMemory::at(blocked.join("bridge"));
-    memory.remember(address());
+    memory.forget(); // Idempotent: nothing held is the state being asked for.
     assert_eq!(memory.recall(), None);
-}
-
-#[test]
-fn bridge_memory_clears_persisted_mac_when_forget_is_called() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let memory = BridgeMemory::at(dir.path().join("bridge"));
-    memory.remember(address());
-    memory.forget();
-    assert_eq!(memory.recall(), None);
-    memory.forget(); // Idempotent: a missing file is the state being asked for.
 }
 
 #[test]
 fn bridge_memory_recalls_nothing_when_disabled() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let path = dir.path().join("bridge");
-    let memory = BridgeMemory::at(&path);
+    let memory = BridgeMemory::none();
     memory.set_enabled(false);
-    // A file put back behind its back is still not read.
-    std::fs::write(&path, format!("{BRIDGE_MAC}\n")).expect("writing the file");
+    memory.remember(address());
     assert_eq!(memory.recall(), None);
 }
 
 #[test]
-fn bridge_memory_writes_nothing_when_disabled() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let path = dir.path().join("bridge");
-    let memory = BridgeMemory::at(&path);
+fn bridge_memory_ignores_remember_when_disabled() {
+    let memory = BridgeMemory::none();
     memory.set_enabled(false);
     memory.remember(address());
-    assert!(!path.exists());
+    memory.set_enabled(true);
+    assert_eq!(memory.recall(), None, "nothing was held while off");
 }
 
 #[test]
-fn bridge_memory_deletes_file_when_disabled() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let path = dir.path().join("bridge");
-    let memory = BridgeMemory::at(&path);
-    memory.remember(address());
-    assert!(path.exists());
+fn bridge_memory_clears_mac_when_disabled() {
+    let memory = BridgeMemory::holding(Some(address()));
     memory.set_enabled(false);
-    assert!(!path.exists());
     assert!(!memory.is_enabled());
+    memory.set_enabled(true);
+    assert_eq!(memory.recall(), None, "off means nothing held");
 }
 
 #[test]
-fn bridge_memory_shares_switch_when_cloned() {
-    // The transport and the view hold clones of one handle; the view's switch has
-    // to reach the transport's next reconnect.
-    let dir = tempfile::tempdir().expect("temp dir");
-    let memory = BridgeMemory::at(dir.path().join("bridge"));
+fn bridge_memory_shares_slot_and_switch_when_cloned() {
+    // The transport and the view hold clones of one handle: the view's switch has
+    // to reach the transport's next reconnect, and the transport's connection has
+    // to reach the view that saves it.
+    let memory = BridgeMemory::none();
     let transport = memory.clone();
+    transport.remember(address());
+    assert_eq!(memory.recall(), Some(address()));
     memory.set_enabled(false);
     assert!(!transport.is_enabled());
+    assert_eq!(transport.recall(), None);
     transport.remember(address());
-    assert_eq!(BridgeMemory::at(dir.path().join("bridge")).recall(), None);
     memory.set_enabled(true);
     assert!(transport.is_enabled());
+    assert_eq!(memory.recall(), None);
 }
 
 #[test]
 fn bridge_memory_recalls_again_when_reenabled_after_remember() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let memory = BridgeMemory::at(dir.path().join("bridge"));
+    let memory = BridgeMemory::none();
     memory.set_enabled(false);
     memory.set_enabled(true);
     memory.remember(address());

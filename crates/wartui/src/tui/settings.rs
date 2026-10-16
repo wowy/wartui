@@ -6,6 +6,11 @@
 //! the rows. The operator opened the page to change the list, not the rows above it, so
 //! their pending edits stay pending for the main `Enter` or `Esc`. `Esc` on the page drops
 //! only the page's edits, so backing out of a list never costs the rows above it either.
+//!
+//! Every write to `wartui.toml` goes through [`save`], which also writes the bridge the
+//! transport holds in [`Settings::bridge_memory`] and whether it remembers one. The view is
+//! the file's only writer within `run`, so the transport's thread never races it on a
+//! whole-file save. `flash-bridge` is the one other writer, and runs as its own command.
 
 use std::fmt::Display;
 use std::path::PathBuf;
@@ -38,11 +43,15 @@ pub struct Settings {
     /// `--config`.
     pub config_path: Option<PathBuf>,
     /// The file as last loaded or saved. `b` rewrites only the Bluetooth node from this
-    /// copy, so it never puts the running pool or powers into the file.
+    /// copy, and a remembered bridge only the bridge, so neither puts the running pool or
+    /// powers into the file.
     pub saved: config::Config,
-    /// Whether `run` remembers the bridge. Shared with the transport, so the
-    /// remember-bridge switch takes effect on the next reconnect.
+    /// The bridge `run` remembers, and whether it remembers one. Shared with the
+    /// transport, so the remember-bridge switch takes effect on the next reconnect and
+    /// the bridge the transport connects to reaches the file.
     pub bridge_memory: BridgeMemory,
+    /// Whether the link is the simulator, whose bridge is not a board to remember.
+    pub simulated: bool,
     /// Where `u` uploads to.
     pub upload: UploadTarget,
 }
@@ -400,7 +409,9 @@ pub(super) fn apply(
         memory.set_enabled(modal.remember_bridge);
         if modal.remember_bridge {
             // Remember the bridge connected now. A reconnect may never come.
-            if let Some(bridge) = &snapshot.bridge {
+            if let Some(bridge) = &snapshot.bridge
+                && !settings.simulated
+            {
                 memory.remember(bridge.mac);
             }
             text.push_str("; bridge remembered");
@@ -458,7 +469,7 @@ fn save_outcome(modal: &ConfigModal, snapshot: &Snapshot, settings: &mut Setting
                 None
             },
         },
-        bridge: config::Bridge { remember: Some(modal.remember_bridge) },
+        bridge: config::Bridge { remember: Some(modal.remember_bridge), mac: None },
         api_keys: config::ApiKeys { wdgwars: modal.wdgwars_key.trim().to_owned() },
     };
     save(settings, written)
@@ -479,11 +490,26 @@ pub(super) fn save_ble_node(settings: &mut Settings, node: Option<Mac>) -> Strin
         .unwrap_or_else(|error| error)
 }
 
-/// Write `written` to the config path, and on success make it [`Settings::saved`].
-/// Returns the path, or the notice suffix saying why nothing was written.
-fn save(settings: &mut Settings, written: config::Config) -> Result<PathBuf, String> {
+/// Save the bridge the transport holds now, over the file as last saved. Returns the
+/// path, or why nothing was written, as [`save`] does.
+pub(super) fn save_bridge(settings: &mut Settings) -> Result<PathBuf, String> {
+    save(settings, settings.saved.clone())
+}
+
+/// Write `written` to the config path, with the bridge [`Settings::bridge_memory`] holds,
+/// and on success make it [`Settings::saved`]. Returns the path, or the notice suffix
+/// saying why nothing was written.
+fn save(settings: &mut Settings, mut written: config::Config) -> Result<PathBuf, String> {
     let Some(path) = settings.config_path.clone() else {
         return Err("; nowhere to save it — use --config".to_owned());
+    };
+    // Nothing while remembering is off, so the key drops out beside `remember = false`.
+    written.bridge.mac = settings.bridge_memory.recall();
+    // The live switch, whatever an earlier failed save left in `saved`, so `remember` never
+    // contradicts `mac`. An absent key stays absent while on, since absent means on.
+    written.bridge.remember = match (settings.bridge_memory.is_enabled(), written.bridge.remember) {
+        (true, None) => None,
+        (on, _) => Some(on),
     };
     config::save(&path, &written).map_err(|error| format!("; could not save: {error}"))?;
     settings.saved = written;
@@ -1073,7 +1099,7 @@ mod tests {
         );
     }
 
-    /// A view saving to `dir/wartui.toml`, remembering the bridge in `dir/bridge`.
+    /// A view saving to `dir/wartui.toml`, holding the bridge in `memory`.
     fn ui_with_bridge_memory(dir: &std::path::Path, memory: &BridgeMemory) -> Ui {
         Ui::new(Settings {
             config_path: Some(dir.join("wartui.toml")),
@@ -1112,13 +1138,17 @@ mod tests {
         }
     }
 
+    /// The bridge saved in `dir/wartui.toml`, which must load.
+    fn saved_bridge(dir: &std::path::Path) -> config::Bridge {
+        config::load(Some(&dir.join("wartui.toml"))).expect("a valid file").bridge
+    }
+
+    const OTHER_BRIDGE: Mac = [0x10, 0xBD, 0xA3, 0xEC, 0x44, 0xC0];
+
     #[test]
     fn ui_forgets_bridge_and_saves_off_when_remember_bridge_turned_off() {
         let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("bridge");
-        let memory = BridgeMemory::at(&file);
-        memory.remember([0x02, 0x00, 0x5E, 0x10, 0x9D, 0x24]);
-        assert!(file.exists());
+        let memory = BridgeMemory::holding(Some(OTHER_BRIDGE));
         let snapshot = busy();
         let (tx, _rx) = mpsc::channel(4);
         let mut ui = ui_with_bridge_memory(dir.path(), &memory);
@@ -1127,19 +1157,19 @@ mod tests {
 
         ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
 
-        assert!(!file.exists(), "off means no file");
         assert!(!memory.is_enabled(), "the transport's clone sees it too");
-        let saved = config::load(Some(&dir.path().join("wartui.toml"))).expect("a valid file");
-        assert_eq!(saved.bridge.remember, Some(false));
+        assert_eq!(memory.recall(), None);
+        let saved = saved_bridge(dir.path());
+        assert_eq!(saved.remember, Some(false));
+        assert_eq!(saved.mac, None, "off saves no bridge");
         let notice = ui.notice(snapshot.now_ms).expect("a notice");
         assert!(notice.contains("bridge forgotten"), "{notice}");
     }
 
     #[test]
-    fn ui_remembers_connected_bridge_when_remember_bridge_turned_on() {
+    fn ui_saves_connected_bridge_when_remember_bridge_turned_on() {
         let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("bridge");
-        let memory = BridgeMemory::at(&file);
+        let memory = BridgeMemory::none();
         memory.set_enabled(false);
         let snapshot = busy();
         let bridge = snapshot.bridge.as_ref().expect("a bridge").mac;
@@ -1152,21 +1182,19 @@ mod tests {
         ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
 
         assert!(memory.is_enabled());
-        assert_eq!(BridgeMemory::at(&file).recall(), Some(bridge), "the bridge connected now");
-        let saved = config::load(Some(&dir.path().join("wartui.toml"))).expect("a valid file");
-        assert_eq!(saved.bridge.remember, Some(true));
+        assert_eq!(memory.recall(), Some(bridge), "the bridge connected now");
+        let saved = saved_bridge(dir.path());
+        assert_eq!(saved.remember, Some(true));
+        assert_eq!(saved.mac, Some(bridge));
         let notice = ui.notice(snapshot.now_ms).expect("a notice");
         assert!(notice.contains("bridge remembered"), "{notice}");
     }
 
     #[test]
-    fn ui_leaves_bridge_file_alone_when_remember_bridge_unchanged() {
+    fn ui_keeps_remembered_bridge_when_remember_bridge_unchanged() {
         let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("bridge");
-        let memory = BridgeMemory::at(&file);
-        // A board other than the one connected. An unchanged row must not rewrite it.
-        let other = [0x10, 0xBD, 0xA3, 0xEC, 0x44, 0xC0];
-        memory.remember(other);
+        // A board other than the one connected. An unchanged row must not replace it.
+        let memory = BridgeMemory::holding(Some(OTHER_BRIDGE));
         let snapshot = busy();
         let (tx, _rx) = mpsc::channel(4);
         let mut ui = ui_with_bridge_memory(dir.path(), &memory);
@@ -1175,10 +1203,194 @@ mod tests {
         ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
 
         assert!(memory.is_enabled());
-        assert_eq!(memory.recall(), Some(other));
+        assert_eq!(memory.recall(), Some(OTHER_BRIDGE));
+        assert_eq!(saved_bridge(dir.path()).mac, Some(OTHER_BRIDGE));
         let notice = ui.notice(snapshot.now_ms).expect("a notice");
         assert!(!notice.contains("bridge forgotten"), "{notice}");
         assert!(!notice.contains("bridge remembered"), "{notice}");
+    }
+
+    #[test]
+    fn ui_keeps_remembered_bridge_when_b_saves_node() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory = BridgeMemory::holding(Some(OTHER_BRIDGE));
+        let snapshot = busy();
+        let node = snapshot.nodes[0].state.mac;
+        let (tx, _rx) = mpsc::channel(4);
+        let mut ui = ui_with_bridge_memory(dir.path(), &memory);
+
+        ui.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE), &snapshot, &tx);
+
+        let file = config::load(Some(&dir.path().join("wartui.toml"))).expect("a valid file");
+        assert_eq!(file.bluetooth.node, Some(node));
+        assert_eq!(file.bridge.mac, Some(OTHER_BRIDGE), "every save carries the bridge");
+    }
+
+    #[test]
+    fn ui_saves_bridge_when_transport_remembers_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory = BridgeMemory::none();
+        let mut ui = ui_with_bridge_memory(dir.path(), &memory);
+        ui.poll_bridge();
+        assert!(!dir.path().join("wartui.toml").exists(), "nothing changed, nothing written");
+
+        memory.remember(OTHER_BRIDGE); // As the transport does on connecting.
+        ui.poll_bridge();
+
+        assert_eq!(saved_bridge(dir.path()).mac, Some(OTHER_BRIDGE));
+        assert_eq!(ui.saved().bridge.mac, Some(OTHER_BRIDGE), "the view knows it too");
+        assert_eq!(ui.notice(busy().now_ms), None, "silent");
+    }
+
+    #[test]
+    fn ui_saves_removal_when_transport_forgets_bridge() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory = BridgeMemory::none();
+        let mut ui = ui_with_bridge_memory(dir.path(), &memory);
+        memory.remember(OTHER_BRIDGE);
+        ui.poll_bridge();
+
+        memory.forget(); // As the transport does when the remembered board goes quiet.
+        ui.poll_bridge();
+
+        assert_eq!(saved_bridge(dir.path()).mac, None);
+    }
+
+    #[test]
+    fn ui_saves_remember_on_with_bridge_when_saved_copy_still_says_off() {
+        // As after turning remember on in the modal with a save that failed.
+        let dir = tempfile::tempdir().unwrap();
+        let memory = BridgeMemory::none();
+        let saved = config::Config {
+            bridge: config::Bridge { remember: Some(false), mac: None },
+            ..config::Config::default()
+        };
+        let mut ui = Ui::new(Settings {
+            config_path: Some(dir.path().join("wartui.toml")),
+            saved,
+            bridge_memory: memory.clone(),
+            ..Settings::default()
+        });
+        memory.remember(OTHER_BRIDGE);
+
+        ui.poll_bridge();
+
+        let file = saved_bridge(dir.path());
+        assert_eq!(file.remember, Some(true));
+        assert_eq!(file.mac, Some(OTHER_BRIDGE));
+    }
+
+    #[test]
+    fn ui_saves_remember_off_without_bridge_when_saved_copy_still_says_on() {
+        // As after turning remember off in the modal with a save that failed.
+        let dir = tempfile::tempdir().unwrap();
+        let memory = BridgeMemory::holding(Some(OTHER_BRIDGE));
+        let saved = config::Config {
+            bridge: config::Bridge { remember: Some(true), mac: Some(OTHER_BRIDGE) },
+            ..config::Config::default()
+        };
+        let mut ui = Ui::new(Settings {
+            config_path: Some(dir.path().join("wartui.toml")),
+            saved,
+            bridge_memory: memory.clone(),
+            ..Settings::default()
+        });
+        memory.set_enabled(false);
+
+        ui.poll_bridge();
+
+        let file = saved_bridge(dir.path());
+        assert_eq!(file.remember, Some(false));
+        assert_eq!(file.mac, None);
+    }
+
+    #[test]
+    fn ui_saves_remember_on_without_bridge_when_link_is_simulated() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory = BridgeMemory::none();
+        memory.set_enabled(false);
+        let snapshot = busy();
+        let (tx, _rx) = mpsc::channel(4);
+        let mut ui = Ui::new(Settings {
+            config_path: Some(dir.path().join("wartui.toml")),
+            bridge_memory: memory.clone(),
+            simulated: true,
+            ..Settings::default()
+        });
+        select_remember_bridge(&mut ui, &snapshot, &tx);
+        ui.on_modal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &snapshot, &tx);
+
+        ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
+
+        assert!(memory.is_enabled());
+        assert_eq!(memory.recall(), None, "the simulator's bridge is not a board");
+        let saved = saved_bridge(dir.path());
+        assert_eq!(saved.remember, Some(true));
+        assert_eq!(saved.mac, None);
+    }
+
+    #[test]
+    fn ui_leaves_file_alone_when_remembered_bridge_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wartui.toml");
+        let memory = BridgeMemory::none();
+        let mut ui = ui_with_bridge_memory(dir.path(), &memory);
+        memory.remember(OTHER_BRIDGE);
+        ui.poll_bridge();
+        // A hand edit after the save. Only a change to the bridge rewrites the file.
+        std::fs::write(&path, "# mine\n").unwrap();
+
+        ui.poll_bridge();
+        memory.remember(OTHER_BRIDGE);
+        ui.poll_bridge();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# mine\n");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn ui_waits_for_next_change_when_bridge_save_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        // A file where the config's directory would have to go: every save fails.
+        let blocked = dir.path().join("blocked");
+        std::fs::write(&blocked, "").unwrap();
+        let memory = BridgeMemory::none();
+        let mut ui = ui_with_bridge_memory(&blocked, &memory);
+        memory.remember(OTHER_BRIDGE);
+        ui.poll_bridge();
+        assert_eq!(ui.saved().bridge.mac, None, "the save failed");
+
+        // Now the save would succeed, but the bridge has not changed since it failed.
+        std::fs::remove_file(&blocked).unwrap();
+        ui.poll_bridge();
+        assert!(!blocked.exists(), "not retried every frame");
+
+        let bridge = busy().bridge.expect("a bridge").mac;
+        memory.remember(bridge);
+        ui.poll_bridge();
+        assert_eq!(saved_bridge(&blocked).mac, Some(bridge), "a new bridge is tried again");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn ui_saves_bridge_when_it_returns_after_a_failed_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocked = dir.path().join("blocked");
+        std::fs::write(&blocked, "").unwrap();
+        let memory = BridgeMemory::none();
+        let mut ui = ui_with_bridge_memory(&blocked, &memory);
+        memory.remember(OTHER_BRIDGE);
+        ui.poll_bridge();
+        assert_eq!(ui.saved().bridge.mac, None, "the save failed");
+
+        // Back to what the file holds, which clears the failed attempt.
+        memory.forget();
+        ui.poll_bridge();
+        std::fs::remove_file(&blocked).unwrap();
+        memory.remember(OTHER_BRIDGE);
+        ui.poll_bridge();
+
+        assert_eq!(saved_bridge(&blocked).mac, Some(OTHER_BRIDGE));
     }
 
     #[test]

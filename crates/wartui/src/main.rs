@@ -7,7 +7,7 @@
 //! `--log-file` is there because the TUI owns the terminal, so the transport has nowhere else
 //! to say what it tried and what the OS said.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -93,8 +93,8 @@ async fn main() -> Result<()> {
     // and the last thing logged before an exit is usually the interesting one.
     let _log = logging(cli.log_file.as_deref())?;
     match cli.command {
-        // `run` and `upload` load `wartui.toml` themselves, so a broken config cannot
-        // stop `ports` / `status` / `reset` / `export` / `sniff` from working.
+        // Each command loads `wartui.toml` itself, if at all. `status`, `sniff`, `reset`
+        // and `ota` read a broken one as no bridge remembered, and `ports` never reads it.
         None => run::run(cli.run).await,
         Some(Command::Run(args)) => run::run(args).await,
         Some(Command::Export(args)) => export::run(args),
@@ -214,28 +214,13 @@ fn ports() -> Result<()> {
     Ok(())
 }
 
-/// Whether opening the link may write down which board answered.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Remember {
-    /// Only a board found without being named: `status`, `sniff`, `reset` and `flash-bridge`.
-    Detected,
-    /// A named board as well: `run`.
-    Named,
-}
-
-/// Where the transport writes down which board answered.
+/// The bridge saved in `wartui.toml`, from `explicit` (`--config`) or the default file, for a
+/// command that does not save it to open first.
 ///
-/// Detection always writes to the file, and a named board writes to it only from
-/// a capture. A capture against a named bridge *is* the decision to use that
-/// board, and the next unnamed run, `flash-fleet` and `flash-bridge` should act
-/// on it rather than on whichever board answered before. A one-off
-/// `wartui status --bridge X` or `wartui flash-bridge --bridge X` is asked
-/// once, and must not quietly decide what every later run opens.
-fn memory(bridge: Option<&str>, rule: Remember) -> BridgeMemory {
-    match (bridge, rule) {
-        (None, _) | (Some(_), Remember::Named) => BridgeMemory::discover(),
-        (Some(_), Remember::Detected) => BridgeMemory::none(),
-    }
+/// What the transport remembers into it is dropped at exit. Only `run` and `flash-bridge` save
+/// the bridge, so a one-off `wartui status --bridge X` never decides what every later run opens.
+fn memory(explicit: Option<&Path>) -> BridgeMemory {
+    BridgeMemory::holding(config::remembered_bridge(explicit))
 }
 
 /// Open whichever transport the arguments called for.
@@ -547,15 +532,27 @@ mod tests {
     }
 
     #[test]
-    fn cli_parser_rejects_config_flag_when_passed_to_other_subcommand() {
-        // Before the subcommand: `run`'s flags are refused ahead of another
-        // subcommand, same as `--bridge` above.
-        let error = parse(["wartui", "--config", "w.toml", "status"]).err().unwrap();
-        assert!(error.to_string().contains("'status' does not take it"), "{error}");
+    fn cli_parser_accepts_config_flag_when_passed_after_bridge_reading_subcommand() {
+        for command in ["status", "sniff", "reset", "ota"] {
+            assert!(parse(["wartui", command, "--config", "w.toml"]).is_ok(), "{command}");
+        }
+        for command in ["flash-fleet", "flash-bridge"] {
+            let args = ["wartui", command, "--features", "esp32c6", "--config", "w.toml"];
+            assert!(parse(args).is_ok(), "{command}");
+        }
+    }
 
-        // After the subcommand: `status` has no `--config` of its own, so clap
-        // refuses it as an unknown argument.
-        assert!(parse(["wartui", "status", "--config", "w.toml"]).is_err());
+    #[test]
+    fn cli_parser_rejects_config_flag_when_placed_before_other_subcommand() {
+        // `run`'s flags are refused ahead of another subcommand, same as `--bridge` above.
+        let error = parse(["wartui", "--config", "w.toml", "status"]).err().unwrap();
+        let advice = "put it after the subcommand: wartui status --config";
+        assert!(error.to_string().contains(advice), "{error}");
+
+        let error = parse(["wartui", "--config", "w.toml", "ports"]).err().unwrap();
+        assert!(error.to_string().contains("'ports' does not take it"), "{error}");
+        // After it: `ports` has no `--config` of its own, so clap refuses an unknown argument.
+        assert!(parse(["wartui", "ports", "--config", "w.toml"]).is_err());
     }
 
     #[test]

@@ -45,6 +45,12 @@ pub struct Args {
     #[arg(long, value_name = "PATH|MAC")]
     bridge: Option<String>,
 
+    /// Read the remembered bridge from this file instead of the default `wartui.toml`. A file
+    /// that does not load is no bridge remembered. Never written; see
+    /// `crates/wartui/README.md` § "Config file".
+    #[arg(long, value_name = "PATH")]
+    config: Option<PathBuf>,
+
     /// Update this node, by address or the end of it (`A1:B0`). Repeatable. Every node heard
     /// by default.
     #[arg(long = "node", value_name = "MAC", value_parser = node_arg)]
@@ -212,7 +218,7 @@ fn open(args: &Args) -> Result<LinkHandle> {
         return SimTransport::new(config).start().context("starting the simulator");
     }
     let bridge = args.bridge.as_deref();
-    super::open(bridge, None, 0, super::memory(bridge, super::Remember::Detected))
+    super::open(bridge, None, 0, super::memory(args.config.as_deref()))
 }
 
 async fn connected(link: &mut LinkHandle) -> Result<wartui_bridge::BridgeInfo> {

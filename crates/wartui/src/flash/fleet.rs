@@ -3,11 +3,11 @@
 //! **The bridge is spared before anything else happens, or nothing happens.** It is a C5 or C6
 //! with the same vendor and product ID as every node, so nothing on the bus tells it apart but its
 //! address, and a node image written over it takes the fleet's radio away until `flash-bridge`
-//! puts it back. The run therefore needs that address — `--bridge`, else the one `run` remembered —
-//! and refuses without one unless `--no-bridge` says no bridge is attached. That flag only lifts
-//! the refusal: a remembered bridge is spared all the same, since sparing it costs nothing and a
-//! board known to be the bridge is never worth the risk. The chip cannot stand in for the address:
-//! the bridge is often the same part as the nodes.
+//! puts it back. The run therefore needs that address — `--bridge`, else the one `run` or
+//! `flash-bridge` saved in `wartui.toml` — and refuses without one unless `--no-bridge` says no bridge is attached. That
+//! flag only lifts the refusal: a remembered bridge is spared all the same, since sparing it costs
+//! nothing and a board known to be the bridge is never worth the risk. The chip cannot stand in
+//! for the address: the bridge is often the same part as the nodes.
 //!
 //! **Every bridge known is spared, and a named one must be attached.** A `--bridge` value and the
 //! remembered address are both spared, not one in place of the other. A path that matches nothing
@@ -39,7 +39,6 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail, ensure};
 use clap::Args as ClapArgs;
 use wartui_bridge::ports::{BRIDGE_PID, PortCandidate};
-use wartui_bridge::remember::BridgeMemory;
 use wartui_bridge::serial::{BridgeSpec, discover_ports};
 use wartui_proto::mac::Mac;
 
@@ -64,9 +63,15 @@ pub struct Args {
 
     /// Which board is the bridge, by path, by address or by the end of it (`00:08`), so that it is
     /// never flashed. It must be attached, and the end of an address must match one board. The one
-    /// `run` last found is spared as well, and is the only one by default.
+    /// remembered in `wartui.toml` is spared as well, and is the only one by default.
     #[arg(long, value_name = "PATH|MAC", conflicts_with = "no_bridge")]
     pub bridge: Option<String>,
+
+    /// Read the remembered bridge from this file instead of the default `wartui.toml`. A file
+    /// that does not load refuses the run. Never written; see `crates/wartui/README.md`
+    /// § "Config file".
+    #[arg(long, value_name = "PATH")]
+    pub config: Option<PathBuf>,
 
     /// No bridge is attached. Without a bridge's address the run is refused, because any board
     /// could be it; this lifts that refusal. A remembered bridge is still spared.
@@ -101,8 +106,11 @@ pub fn run(args: Args) -> Result<()> {
     let features = features(&args.features);
     let chip = chip_of(&NODE, &features)?;
     espflash_present()?;
-    let mut bridge =
-        bridge_to_spare(args.bridge.as_deref(), BridgeMemory::discover().recall(), args.no_bridge)?;
+    let mut bridge = bridge_to_spare(
+        args.bridge.as_deref(),
+        super::remembered_bridge(args.config.as_deref())?,
+        args.no_bridge,
+    )?;
     bridge.named = bridge.named.map(|(given, spec)| (given, canonical(spec)));
     let source = source(
         &NODE,
@@ -212,7 +220,7 @@ fn flash_node(candidate: &PortCandidate, chip: Chip, image: &Path) -> Outcome {
 struct Spare {
     /// `--bridge`, as typed and as matched.
     named: Option<(String, BridgeSpec)>,
-    /// The address `run` last found a bridge at.
+    /// The bridge remembered in `wartui.toml`.
     remembered: Option<Mac>,
 }
 

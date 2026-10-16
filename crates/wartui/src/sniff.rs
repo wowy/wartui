@@ -6,6 +6,7 @@
 //! question is whether the frames are arriving at all.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::Args as ClapArgs;
@@ -24,6 +25,12 @@ pub struct Args {
     #[arg(long, value_name = "PATH|MAC")]
     bridge: Option<String>,
 
+    /// Read the remembered bridge from this file instead of the default `wartui.toml`. A file
+    /// that does not load is no bridge remembered. Never written; see
+    /// `crates/wartui/README.md` § "Config file".
+    #[arg(long, value_name = "PATH")]
+    config: Option<PathBuf>,
+
     /// Use the built-in simulator with this many fake nodes instead of hardware.
     #[arg(long, value_name = "NODES", num_args = 0..=1, default_missing_value = "3")]
     sim: Option<u8>,
@@ -38,12 +45,8 @@ pub struct Args {
 }
 
 pub async fn run(args: Args) -> Result<()> {
-    let mut link = super::open(
-        args.bridge.as_deref(),
-        args.sim,
-        0,
-        super::memory(args.bridge.as_deref(), super::Remember::Detected),
-    )?;
+    let mut link =
+        super::open(args.bridge.as_deref(), args.sim, 0, super::memory(args.config.as_deref()))?;
     println!("# waiting for the bridge; ctrl-c to stop");
 
     let mut counts = Counts::default();
@@ -476,7 +479,7 @@ mod tests {
     use wartui_proto::link::LinkError;
 
     fn args() -> Args {
-        Args { bridge: None, sim: None, raw: false, verbose: false }
+        Args { bridge: None, config: None, sim: None, raw: false, verbose: false }
     }
 
     fn heard(event: LinkEvent) -> bool {

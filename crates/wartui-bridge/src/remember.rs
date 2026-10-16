@@ -1,44 +1,33 @@
 //! Which board answered the link protocol last time.
 //!
-//! **State, not configuration.** Nothing in here is edited by an operator and
-//! nothing is lost by deleting it: the file is derived from what the machine
-//! found, and throwing it away costs one slower start while the boards are swept
-//! again. `--bridge` is the thing an operator chooses and keeps, and that belongs
-//! on the command line where it can be read. Anything that wants to be remembered
-//! *and* decided belongs on the command line or in `wartui.toml`, not here.
+//! **Held in memory, kept by the caller.** The transport reads the address to
+//! order its first sweep, writes it on every connection and clears it when the
+//! remembered board goes quiet, but it touches no file. Whoever seeds the handle
+//! decides whether the value outlives the process: `wartui run` keeps it in
+//! `wartui.toml` as `[bridge] mac`, and every other command lets it go at exit.
+//! `wartui flash-bridge` writes that key too, for the board it flashed, but opens
+//! no link and holds no handle. One owner for the file within a process is what
+//! keeps two threads from racing on whole-file saves.
 //!
-//! **Whether to keep the file at all is the operator's decision**, made in
-//! `wartui.toml` as `[bridge] remember` or from the settings modal, and off means
-//! no file: turning it off deletes the one there, and nothing reads or writes it
-//! while it stays off. The switch is shared by every clone of one handle, because
-//! the transport and the view each hold one and a change from the view has to
-//! reach the next reconnect.
-//!
-//! **Every failure to read or write it is ignored.** A read-only home, no `$HOME`
-//! at all, a directory where the file should be — each costs a sweep and nothing
-//! else. A capture must never fail over a cached address, and the view owns the
-//! terminal, so there is nowhere to complain to but the log.
-//!
-//! The file holds one line: an address spelled the way [`mac::full`] spells
-//! it and the way a `by-id` symlink carries it, so it can be grepped against
-//! `wartui sniff` output and against `/dev/serial/by-id`. There is no format and
-//! no version field — the parse is "does this line hold an address", and a line
-//! that does not is the same as no file, which is also what a torn write leaves.
-//! That is why one `write_all` is enough and a temporary file and a rename would
-//! be ceremony over a value rebuilt in seconds.
+//! **Whether to remember at all is the operator's decision**, made in
+//! `wartui.toml` as `[bridge] remember` or from the settings modal. Off holds
+//! nothing: turning it off clears the slot, and nothing is recalled or
+//! remembered while it stays off. The slot and the switch are shared by every
+//! clone of one handle, because the transport and the view each hold one: a
+//! change from the view has to reach the next reconnect, and a connection the
+//! transport makes has to reach the view that saves it.
 
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 
-use wartui_proto::mac::{self, Mac};
+use wartui_proto::mac::Mac;
 
-/// Where the address is kept between runs.
+/// The bridge's address, shared by every clone of one handle.
 #[derive(Debug, Clone)]
 pub struct BridgeMemory {
-    /// `None` when the host offers nowhere to keep it, which is not an error.
-    path: Option<PathBuf>,
-    /// Whether the operator wants the file kept. Shared by every clone.
+    /// The address remembered, if any. Shared by every clone.
+    mac: Arc<Mutex<Option<Mac>>>,
+    /// Whether the operator wants the address remembered. Shared by every clone.
     enabled: Arc<AtomicBool>,
 }
 
@@ -49,30 +38,20 @@ impl Default for BridgeMemory {
 }
 
 impl BridgeMemory {
-    fn with(path: Option<PathBuf>) -> Self {
-        Self { path, enabled: Arc::new(AtomicBool::new(true)) }
-    }
-
-    /// The file under this host's state directory.
+    /// A handle holding `mac`, with remembering on.
     #[must_use]
-    pub fn discover() -> Self {
-        Self::with(state_dir().map(|dir| dir.join("bridge")))
+    pub fn holding(mac: Option<Mac>) -> Self {
+        Self { mac: Arc::new(Mutex::new(mac)), enabled: Arc::new(AtomicBool::new(true)) }
     }
 
-    /// A file at a path of your choosing, which is how this is tested.
-    #[must_use]
-    pub fn at(path: impl Into<PathBuf>) -> Self {
-        Self::with(Some(path.into()))
-    }
-
-    /// Remember nothing, and go on remembering nothing.
+    /// A handle holding nothing, with remembering on.
     #[must_use]
     pub fn none() -> Self {
-        Self::with(None)
+        Self::holding(None)
     }
 
     /// Turn remembering on or off for this handle and every clone of it. Off also
-    /// deletes the file, because off means no file.
+    /// clears the address, because off means nothing held.
     pub fn set_enabled(&self, on: bool) {
         self.enabled.store(on, Ordering::Relaxed);
         if !on {
@@ -86,72 +65,31 @@ impl BridgeMemory {
         self.enabled.load(Ordering::Relaxed)
     }
 
-    /// The address last written, when it is still readable and still an address.
-    /// Nothing while remembering is off.
+    /// The address held. Nothing while remembering is off.
     #[must_use]
     pub fn recall(&self) -> Option<Mac> {
         if !self.is_enabled() {
             return None;
         }
-        let path = self.path.as_ref()?;
-        let text = std::fs::read_to_string(path).ok()?;
-        mac::parse(text.trim())
+        *self.slot()
     }
 
-    /// Write `mac` over whatever was there.
-    ///
-    /// Writing the same address again is skipped rather than done: this is called
-    /// once per connection, and a capture that reconnects across a loose cable
-    /// would otherwise rewrite the file all evening for no change. Nothing is
-    /// written while remembering is off.
+    /// Hold `mac` in place of whatever was there. Nothing changes while
+    /// remembering is off.
     pub fn remember(&self, mac: Mac) {
-        if !self.is_enabled() {
-            return;
-        }
-        let Some(path) = &self.path else { return };
-        if self.recall() == Some(mac) {
-            return;
-        }
-        if let Err(error) = write(path, mac) {
-            tracing::debug!(path = %path.display(), %error, "could not remember the bridge");
+        if self.is_enabled() {
+            *self.slot() = Some(mac);
         }
     }
 
-    /// Forget whatever was there, so the next run sweeps instead.
+    /// Forget whatever was there, so the next connection sweeps instead.
     pub fn forget(&self) {
-        let Some(path) = &self.path else { return };
-        if let Err(error) = std::fs::remove_file(path)
-            && error.kind() != std::io::ErrorKind::NotFound
-        {
-            tracing::debug!(path = %path.display(), %error, "could not forget the bridge");
-        }
+        *self.slot() = None;
     }
-}
 
-fn write(path: &Path, mac: Mac) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+    /// The slot, even after a panic elsewhere: an address is whole or absent, so a
+    /// poisoned lock holds nothing torn.
+    fn slot(&self) -> std::sync::MutexGuard<'_, Option<Mac>> {
+        self.mac.lock().unwrap_or_else(PoisonError::into_inner)
     }
-    std::fs::write(path, format!("{}\n", mac::full(&mac)))
-}
-
-/// This host's directory for state a program rebuilds when it has to.
-///
-/// `XDG_STATE_HOME` is honored only when it is absolute: the specification says a
-/// relative value is invalid, and taking one literally would scatter a `wartui`
-/// directory through whichever directory a capture was started from.
-#[must_use]
-pub fn state_dir() -> Option<PathBuf> {
-    if cfg!(target_os = "macos") {
-        let home = std::env::var_os("HOME")?;
-        return Some(Path::new(&home).join("Library/Application Support/wartui"));
-    }
-    if let Some(state) = std::env::var_os("XDG_STATE_HOME") {
-        let state = PathBuf::from(state);
-        if state.is_absolute() {
-            return Some(state.join("wartui"));
-        }
-    }
-    let home = std::env::var_os("HOME")?;
-    Some(Path::new(&home).join(".local/state/wartui"))
 }

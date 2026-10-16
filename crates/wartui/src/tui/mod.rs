@@ -90,6 +90,7 @@ async fn view(
         let current = snapshot.borrow_and_update().clone();
         ui.clamp(current.nodes.len());
         ui.poll_upload(&current);
+        ui.poll_bridge();
         if let Err(e) = terminal.draw(|frame| draw(frame, &current, &mut ui)) {
             break Err(e).context("drawing the fleet view");
         }
