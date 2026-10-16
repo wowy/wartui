@@ -65,7 +65,7 @@ const SETTLE_TICKS: u32 = 12;
 ///
 /// The cost is a replaced or reflashed remembered board holding the sweep for 4.5 s
 /// rather than 1.5 s before the others are tried, and only until another board
-/// answers and overwrites the file.
+/// answers and replaces the remembered address.
 const REMEMBERED_TICKS: u32 = ((TX_STALL_TIMEOUT_MS + 1_500) / IDENTIFY_INTERVAL_MS) as u32;
 
 const _: () = assert!(
@@ -78,7 +78,7 @@ const _: () = assert!(
 ///
 /// 1.5 s, because a healthy bridge answers in about two milliseconds
 /// (`docs/phase-3-findings.md`) and a sweep pays this for every board attached that
-/// the file does not name. Passing over the real bridge costs a retry rather than a
+/// is not the remembered one. Passing over the real bridge costs a retry rather than a
 /// failure, which is the trade [`SETTLE_TICKS`] explains.
 const PROBE_TICKS: u32 = 3;
 
@@ -330,8 +330,8 @@ impl SerialTransport {
         Self { spec: Some(spec), ..Self::new() }
     }
 
-    /// Carry what was learned into the next run, and start from what the last one
-    /// learned.
+    /// Start from the bridge `memory` holds, and hold there the bridge this transport
+    /// connects to.
     #[must_use]
     pub fn remember_in(mut self, memory: BridgeMemory) -> Self {
         self.memory = memory;
@@ -391,9 +391,9 @@ async fn supervise(transport: SerialTransport, mut plumbing: crate::LinkPlumbing
             match sweep(&transport, &mut plumbing, settled, remembered, previous.is_none()).await {
                 Pass::HandleDropped => return, // Nobody is listening.
                 Pass::Connected(mac) => {
-                    // The file was written the moment this board announced itself,
-                    // not here: a command as short as `wartui status` exits with its
-                    // connection still open and would otherwise learn nothing.
+                    // The address was remembered the moment this board announced
+                    // itself, not here: `run` holds its connection until the view
+                    // has stopped, and the view is what saves it.
                     settled = Some(mac);
                     previous = None;
                     repeats = 0;
@@ -546,8 +546,8 @@ async fn sweep(
     // before the sweep it needed anyway — and it is the one entry that can come to
     // point at a node, since a node is what a bridge becomes when it is reflashed.
     //
-    // It is not the only way the file is corrected, and not the common one: whatever
-    // board does answer writes its own address over it. This is for the case where
+    // It is not the only way the memory is corrected, and not the common one: whatever
+    // board does answer puts its own address in its place. This is for the case where
     // nothing answers at all, which is the only case that leaves a wrong entry
     // standing.
     //
@@ -708,7 +708,7 @@ async fn connect(
     // when that life ended, so the new one speaks first and its `Ready` reaches us
     // unprompted, which is the only way this connection hears it. A board given
     // [`SETTLE_TICKS`] or [`REMEMBERED_TICKS`] hears the `Ready` behind that reboot
-    // before it gives up. A plain probe gives up first, so the board the file names
+    // before it gives up. A plain probe gives up first, so the remembered board
     // is never given one: a one-shot command makes a single sweep, and no later
     // connection would hear it.
     let mut identify = tokio::time::interval(IDENTIFY_INTERVAL);
@@ -873,10 +873,10 @@ fn read_loop(
                     state.announced.store(true, Ordering::Relaxed);
                     // Read by the sweep, which stops here and holds this board for
                     // the rest of the run rather than reaching for another. The
-                    // address is written down here rather than when the connection
-                    // ends, because a command as short as `wartui status` exits with
-                    // its connection still open — and remembering the board it just
-                    // used is most of the point of keeping the file at all.
+                    // address is remembered here rather than when the connection
+                    // ends, because `run`'s view saves it while the capture goes on,
+                    // and a connection held for the whole run ends only after the
+                    // view has stopped.
                     let first =
                         state.mac.lock().unwrap_or_else(|e| e.into_inner()).replace(mac).is_none();
                     if first {
@@ -996,7 +996,7 @@ fn write_loop(
 /// Silence alone says nothing, and each of the three guards here is a way of being
 /// silent for a reason that is not the board's:
 ///
-/// - **It has to be the board the file names.** Any other board's silence is just a
+/// - **It has to be the remembered board.** Any other board's silence is just a
 ///   board that was never the bridge.
 /// - **The port has to have opened.** One that would not said nothing because
 ///   nothing was asked of it: ModemManager holds a fresh CDC-ACM device for a few
@@ -1006,8 +1006,8 @@ fn write_loop(
 ///   [`SETTLE_TICKS`], and a bridge still bringing its radio up can take longer.
 ///   Concluding from less than a full settle is concluding from impatience.
 ///
-/// This is not the usual way the file is corrected, and not the important one:
-/// whatever board does answer writes its own address over it. This is for the case
+/// This is not the usual way the memory is corrected, and not the important one:
+/// whatever board does answer puts its own address in its place. This is for the case
 /// where nothing answers at all, which is the only one that leaves a wrong entry
 /// standing.
 fn silence_disowns_it(
@@ -1019,7 +1019,7 @@ fn silence_disowns_it(
     alone && opened && is_remembered(candidate, remembered)
 }
 
-/// Whether this candidate is the board the file names. One with no address of its
+/// Whether this candidate is the remembered board. One with no address of its
 /// own (named by path) never is.
 fn is_remembered(candidate: &PortCandidate, remembered: Option<Mac>) -> bool {
     candidate.mac().is_some() && candidate.mac() == remembered
@@ -1027,8 +1027,8 @@ fn is_remembered(candidate: &PortCandidate, remembered: Option<Mac>) -> bool {
 
 /// How many ticks of [`IDENTIFY_INTERVAL`] this candidate is worth.
 ///
-/// A board with nowhere else to go is settled on. With company, the board the file
-/// names gets [`REMEMBERED_TICKS`], long enough for a wedged bridge to reset itself,
+/// A board with nowhere else to go is settled on. With company, the remembered board
+/// gets [`REMEMBERED_TICKS`], long enough for a wedged bridge to reset itself,
 /// and everything else gets a brief probe. A candidate with no address of its own
 /// (named by path) is never the remembered one.
 fn patience(alone: bool, remembered: Option<Mac>, candidate: &PortCandidate) -> u32 {
@@ -1100,7 +1100,7 @@ mod tests {
     #[test]
     fn serial_link_preserves_remembered_board_when_board_named_by_path_is_silent() {
         // A board named by path reports no address, so its silence says nothing
-        // about which board the file names.
+        // about which board is remembered.
         let named = candidate("/dev/ttyACM0", None, None, None);
         assert!(!silence_disowns_it(true, true, mac::parse(BRIDGE_MAC), &named));
     }
@@ -1108,7 +1108,7 @@ mod tests {
     #[test]
     fn serial_link_preserves_remembered_board_when_another_named_board_is_silent() {
         // `run --bridge` attaches the memory, so a named node's silence must not
-        // erase the bridge the file names.
+        // erase the remembered bridge.
         assert!(!silence_disowns_it(true, true, mac::parse(BRIDGE_MAC), &board(NODE_MAC)));
     }
 

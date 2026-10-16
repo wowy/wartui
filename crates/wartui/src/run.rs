@@ -72,8 +72,7 @@ pub struct Args {
 
     /// Read settings from this file instead of the default location
     /// (`~/.config/wartui/wartui.toml`, or `~/Library/Application Support/wartui/wartui.toml`
-    /// on macOS). Only `run` and `upload` read it; see `crates/wartui/README.md`
-    /// § "Config file".
+    /// on macOS). See `crates/wartui/README.md` § "Config file".
     #[arg(long, value_name = "PATH")]
     pub(crate) config: Option<PathBuf>,
 
@@ -163,8 +162,7 @@ fn test_data(sim: Option<u8>, lat: Option<f64>) -> bool {
 }
 
 pub async fn run(args: Args) -> Result<()> {
-    // Only `run` and `upload` read `--config`, so a broken `wartui.toml` cannot stop
-    // `ports` / `status` / `reset` / `export` / `sniff` from working.
+    // A broken `wartui.toml` stops the run, naming the file and the problem.
     let config = config::load(args.config.as_deref())?;
     // Where the settings modal saves to: the same file `load` just read.
     let config_path = config::path(args.config.as_deref());
@@ -229,13 +227,9 @@ pub async fn run(args: Args) -> Result<()> {
     };
 
     let pool = pool(config.pool);
-    // The simulator never touches the real file. Elsewhere the operator decides whether
-    // there is one at all, and a `remember = false` written by hand forgets it here.
-    let memory = if args.sim.is_some() {
-        BridgeMemory::none()
-    } else {
-        crate::memory(args.bridge.as_deref(), crate::Remember::Named)
-    };
+    // Seeded from the file, and saved back by the view when the transport changes it. The
+    // simulator never changes it, so a simulated run leaves `[bridge] mac` as it found it.
+    let memory = BridgeMemory::holding(config.bridge.mac);
     memory.set_enabled(config.bridge.remember.unwrap_or(true));
     let link = crate::open(args.bridge.as_deref(), args.sim, args.sim_c6, memory.clone())?;
 
@@ -249,7 +243,13 @@ pub async fn run(args: Args) -> Result<()> {
     let preferred_ble = config.bluetooth.node;
     let excluded_ssids = config::excluded_ssid_bytes(&config.excluded_ssids).collect();
     let upload = tui::UploadTarget { db: db.clone(), base: upload::BASE.to_owned() };
-    let settings = tui::Settings { config_path, saved: config, bridge_memory: memory, upload };
+    let settings = tui::Settings {
+        config_path,
+        saved: config,
+        bridge_memory: memory,
+        simulated: args.sim.is_some(),
+        upload,
+    };
     let config = EngineConfig {
         pool,
         record_raw: args.record_raw,

@@ -1,11 +1,13 @@
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use tokio::sync::mpsc;
 use wartui_core::engine::{Command, Snapshot};
-use wartui_proto::mac;
+use wartui_proto::mac::{self, Mac};
 
 use super::Settings;
 use super::fleet::why_not_assignable;
-use super::settings::{ConfigModal, ModalAction, apply, apply_excluded, save_ble_node};
+use super::settings::{
+    ConfigModal, ModalAction, apply, apply_excluded, save_ble_node, save_bridge,
+};
 use super::upload::Upload;
 #[cfg(test)]
 use crate::config;
@@ -34,6 +36,9 @@ pub(super) struct Ui {
     settings: Settings,
     /// The upload `u` started.
     upload: Upload,
+    /// The bridge [`Self::poll_bridge`] last tried to save, so a failed save waits for
+    /// the next change rather than repeating every frame.
+    bridge_tried: Option<Option<Mac>>,
 }
 
 /// How long a notice replaces the footer's key help and totals.
@@ -240,6 +245,27 @@ impl Ui {
     pub(super) fn poll_upload(&mut self, snapshot: &Snapshot) {
         if let Some(text) = self.upload.poll() {
             self.say(text, snapshot);
+        }
+    }
+
+    /// Save the bridge the transport remembered or forgot since the last save.
+    ///
+    /// Silent, since nothing the operator did changed it: a failure is logged at `debug`
+    /// and tried again only once the bridge changes.
+    pub(super) fn poll_bridge(&mut self) {
+        let current = self.settings.bridge_memory.recall();
+        if current == self.settings.saved.bridge.mac {
+            // In step with the file, so a bridge whose save failed is tried again when it
+            // comes back.
+            self.bridge_tried = None;
+            return;
+        }
+        if self.bridge_tried == Some(current) {
+            return;
+        }
+        self.bridge_tried = Some(current);
+        if let Err(error) = save_bridge(&mut self.settings) {
+            tracing::debug!(error = error.trim_start_matches("; "), "could not save the bridge");
         }
     }
 

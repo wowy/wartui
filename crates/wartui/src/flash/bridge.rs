@@ -3,28 +3,30 @@
 //! **The board is chosen before anything is reset, and only when the choice is certain.** A
 //! bridge image written over a node takes that node out of the fleet, and nothing on the bus tells
 //! the two apart but an address. So the target is the board `--bridge` names, which must be
-//! attached; else the remembered bridge, which must be attached; else, with none remembered, the
-//! only Espressif board there is. A remembered bridge that is not attached is a refusal even when
-//! one board is: that board is known not to be the bridge, and flashing it would also overwrite
-//! the memory `flash-fleet` spares the real bridge by. Several boards and none known is a refusal
+//! attached; else the bridge remembered in `wartui.toml`, which must be attached; else, with none
+//! remembered, the only Espressif board there is. A remembered bridge that is not attached is a
+//! refusal even when one board is: that board is known not to be the bridge. Several boards and
+//! none known is a refusal
 //! that lists them, never a guess. A board with no address is refused too, since the identity
 //! cross-check (`super`) needs one; with a single target, a failed cross-check is an error rather
 //! than a skip.
 //!
-//! **A board found without `--bridge` is remembered as the bridge.** It now runs bridge firmware,
-//! so `flash-fleet` spares it and `run` opens it first, without either being told. A board named
-//! with `--bridge` is flashed and nothing is written: naming a board is a manual flash of some
-//! other device, and must not disturb which bridge the main fleet's `run` and `flash-fleet` use.
+//! **A board found here is remembered once flashed.** `flash-bridge` saves its address to
+//! `wartui.toml` as `[bridge] mac`, the way `run` does once it connects, so a `flash-fleet` right
+//! after spares it. Otherwise the old address is still remembered and not attached, which
+//! `flash-fleet` reads as an unplugged bridge, and the new one would get node firmware. Nothing
+//! is saved with remembering off, or for a board named with `--bridge`: one flashed by name is
+//! often some other device, and must not disturb which bridge the main fleet's `run` and
+//! `flash-fleet` use. A save that fails leaves the flash a success, and says so.
 //!
 //! There is no `--skip`, `--jobs` or `--no-bridge`: there is one target. There is no
 //! `--no-default-features` either, because the bridge firmware has no default features.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Args as ClapArgs;
 use wartui_bridge::ports::{BRIDGE_PID, PortCandidate};
-use wartui_bridge::remember::BridgeMemory;
 use wartui_bridge::serial::{BridgeSpec, discover_ports};
 use wartui_proto::mac::{self, Mac};
 
@@ -32,7 +34,7 @@ use super::{
     BRIDGE, RELEASE_TAG, Skip, Source, canonical, check_image, chip_of, espflash, espflash_present,
     features, flash_args, judge_probe, matches, name, obtain, probe_args, read, source,
 };
-use crate::spec;
+use crate::{config, spec};
 
 #[derive(ClapArgs, Debug)]
 pub struct Args {
@@ -42,11 +44,16 @@ pub struct Args {
     pub features: String,
 
     /// Which board to flash, by path, by address or by the end of it (`00:08`), which must match
-    /// one board. It must be attached. Without it, the bridge `run` last found, which must be
-    /// attached; else, with none remembered, the only Espressif board attached. Naming a board
-    /// remembers nothing.
+    /// one board. It must be attached, and is not remembered. Without it, the bridge remembered
+    /// in `wartui.toml`, which must be attached; else, with none remembered, the only Espressif
+    /// board attached. A board found without it is remembered as the bridge once flashed.
     #[arg(long, value_name = "PATH|MAC")]
     pub bridge: Option<String>,
+
+    /// Read and save the remembered bridge in this file instead of the default `wartui.toml`. A
+    /// file that does not load refuses the run; see `crates/wartui/README.md` § "Config file".
+    #[arg(long, value_name = "PATH")]
+    pub config: Option<PathBuf>,
 
     /// Flash this merged image, which holds flash from address 0, rather than building or
     /// downloading one.
@@ -67,11 +74,13 @@ pub fn run(args: Args) -> Result<()> {
     let features = features(&args.features);
     let chip = chip_of(&BRIDGE, &features)?;
     espflash_present()?;
-    let memory = memory(args.bridge.as_deref());
     let named = args.bridge.as_deref().map(|given| (given, canonical(spec(given))));
     let found = discover_ports().context("listing serial ports")?;
-    let board =
-        target(&found, named.as_ref().map(|(given, spec)| (*given, spec)), memory.recall())?;
+    let board = target(
+        &found,
+        named.as_ref().map(|(given, spec)| (*given, spec)),
+        super::remembered_bridge(args.config.as_deref())?,
+    )?;
     let expected = board.mac().expect("target refuses a board without an address");
 
     let source = source(
@@ -109,20 +118,35 @@ pub fn run(args: Args) -> Result<()> {
         }
         bail!("the bridge failed to flash");
     }
-    memory.remember(expected);
     println!("{:<6} flashed", name(&board));
+    if named.is_none() {
+        let saved = config::path(args.config.as_deref())
+            .ok_or_else(|| anyhow!("there is no default location for it; use --config"))
+            .and_then(|path| remember_flashed(&path, expected));
+        if let Err(why) = saved {
+            println!(
+                "{:<6} not remembered as the bridge, so flash-fleet will not spare it: {why:#}",
+                name(&board)
+            );
+        }
+    }
     Ok(())
 }
 
-/// Where a flash writes down the board it flashed: nowhere when `--bridge` named it.
-fn memory(bridge: Option<&str>) -> BridgeMemory {
-    crate::memory(bridge, crate::Remember::Detected)
+/// Save `mac` as the bridge in the `wartui.toml` at `path`, keeping every other key. A missing
+/// file is created. Writes nothing when the file says `remember = false`.
+fn remember_flashed(path: &Path, mac: Mac) -> Result<()> {
+    let mut config = config::load_from(None, || Some(path.to_path_buf()))?;
+    if config.bridge.remember == Some(false) {
+        return Ok(());
+    }
+    config.bridge.mac = Some(mac);
+    config::save(path, &config)
 }
 
 /// The one board to flash. Reads nothing and opens nothing.
 ///
-/// `named` is `--bridge` as typed and as matched; `remembered` is the address `run` last found a
-/// bridge at.
+/// `named` is `--bridge` as typed and as matched; `remembered` is the bridge in `wartui.toml`.
 fn target(
     candidates: &[PortCandidate],
     named: Option<(&str, &BridgeSpec)>,
@@ -177,8 +201,6 @@ fn target(
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-
     use wartui_bridge::ports::{ESPRESSIF_VID, candidate};
 
     use super::super::testing::{BRIDGE_MAC, NODE_MAC, board};
@@ -234,13 +256,6 @@ mod tests {
     }
 
     #[test]
-    fn flash_bridge_remembers_nothing_when_bridge_is_named() {
-        let memory = memory(Some("00:08"));
-        memory.remember(BRIDGE_MAC);
-        assert_eq!(memory.recall(), None);
-    }
-
-    #[test]
     fn flash_bridge_targets_remembered_board_when_several_are_attached() {
         let found =
             [board("/dev/ttyACM0", Some(&NODE_MAC)), board("/dev/ttyACM1", Some(&BRIDGE_MAC))];
@@ -293,6 +308,41 @@ mod tests {
         let found = [candidate("/dev/ttyACM0", Some(ESPRESSIF_VID), Some(0x0002), Some("x"))];
         let error = target(&found, None, None).unwrap_err().to_string();
         assert!(error.contains("not native USB Serial/JTAG"), "{error}");
+    }
+
+    #[test]
+    fn flash_bridge_remembers_flashed_board_when_file_holds_other_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wartui.toml");
+        std::fs::write(&path, "pool = \"eu\"\n[bridge]\nmac = \"3C:DC:75:84:A1:B0\"\n").unwrap();
+
+        remember_flashed(&path, BRIDGE_MAC).unwrap();
+
+        let saved = config::load(Some(&path)).unwrap();
+        assert_eq!(saved.bridge.mac, Some(BRIDGE_MAC), "the new bridge replaces the old");
+        assert_eq!(saved.pool, Some(crate::run::PoolArg::Eu), "the rest is kept");
+    }
+
+    #[test]
+    fn flash_bridge_writes_nothing_when_remember_is_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wartui.toml");
+        let original = "[bridge]\nremember = false\n";
+        std::fs::write(&path, original).unwrap();
+
+        remember_flashed(&path, BRIDGE_MAC).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn flash_bridge_creates_file_when_remembering_and_none_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested/wartui.toml");
+
+        remember_flashed(&path, BRIDGE_MAC).unwrap();
+
+        assert_eq!(config::load(Some(&path)).unwrap().bridge.mac, Some(BRIDGE_MAC));
     }
 
     #[test]

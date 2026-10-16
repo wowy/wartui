@@ -12,6 +12,7 @@
 //! `oversize` counts frames the bridge heard and dropped for being longer than any
 //! wartui node sends: somebody else's ESP-NOW traffic, harmless to the capture.
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -33,18 +34,20 @@ pub struct Args {
     #[arg(long, value_name = "PATH|MAC")]
     pub(crate) bridge: Option<String>,
 
+    /// Read the remembered bridge from this file instead of the default `wartui.toml`. A file
+    /// that does not load is no bridge remembered. Never written; see
+    /// `crates/wartui/README.md` § "Config file".
+    #[arg(long, value_name = "PATH")]
+    config: Option<PathBuf>,
+
     /// Ask the simulator instead of hardware.
     #[arg(long, value_name = "NODES", num_args = 0..=1, default_missing_value = "3")]
     sim: Option<u8>,
 }
 
 pub async fn run(args: Args) -> Result<()> {
-    let mut link = super::open(
-        args.bridge.as_deref(),
-        args.sim,
-        0,
-        super::memory(args.bridge.as_deref(), super::Remember::Detected),
-    )?;
+    let mut link =
+        super::open(args.bridge.as_deref(), args.sim, 0, super::memory(args.config.as_deref()))?;
 
     // The bridge announces itself on connect, so waiting for that keeps a status
     // request from going into a port nobody is listening on. The timeout is itself an

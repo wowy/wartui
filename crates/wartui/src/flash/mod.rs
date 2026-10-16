@@ -22,6 +22,10 @@
 //! share one cache directory per tag. A build without the tag is a checkout, and builds the
 //! firmware beside it.
 //!
+//! **The remembered bridge is read strictly.** Both commands decide which board gets firmware
+//! from `[bridge] mac`, so a `wartui.toml` that does not load stops them ([`remembered_bridge`]),
+//! where `status` and the like read it as no bridge remembered.
+//!
 //! **espflash flashes every board, and resets each one on purpose.** The one port opened here is a
 //! node's after `flash-fleet` flashes it, read to see it boot ([`boot`]), and it is opened without
 //! touching DTR or RTS (`ports.rs`).
@@ -38,7 +42,6 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result, bail, ensure};
 use sha2::{Digest, Sha256};
 use wartui_bridge::ports::PortCandidate;
-use wartui_bridge::remember::state_dir;
 use wartui_bridge::serial::BridgeSpec;
 use wartui_proto::mac::{self, Mac};
 
@@ -60,6 +63,12 @@ const CHIP_ID_AT: usize = 12;
 
 /// The whole header, common and extended, which a file must hold to be read at all.
 const HEADER_LEN: usize = 24;
+
+/// The bridge saved in `wartui.toml`, from `explicit` (`--config`) or the default file. A
+/// missing default file is none remembered; a file that does not load is an error naming it.
+fn remembered_bridge(explicit: Option<&Path>) -> Result<Option<Mac>> {
+    Ok(crate::config::load(explicit)?.bridge.mac)
+}
 
 /// One firmware this checkout builds and a release publishes.
 #[derive(Debug)]
@@ -473,6 +482,26 @@ fn fetch(
     }
 }
 
+/// This host's directory for state a program rebuilds when it has to.
+///
+/// `XDG_STATE_HOME` is honored only when it is absolute: the specification says a
+/// relative value is invalid, and taking one literally would scatter a `wartui`
+/// directory through whichever directory a flash was started from.
+fn state_dir() -> Option<PathBuf> {
+    if cfg!(target_os = "macos") {
+        let home = std::env::var_os("HOME")?;
+        return Some(Path::new(&home).join("Library/Application Support/wartui"));
+    }
+    if let Some(state) = std::env::var_os("XDG_STATE_HOME") {
+        let state = PathBuf::from(state);
+        if state.is_absolute() {
+            return Some(state.join("wartui"));
+        }
+    }
+    let home = std::env::var_os("HOME")?;
+    Some(Path::new(&home).join(".local/state/wartui"))
+}
+
 fn read(path: &Path) -> Result<Vec<u8>> {
     std::fs::read(path).with_context(|| format!("reading {}", path.display()))
 }
@@ -726,6 +755,23 @@ mod tests {
 
     use super::testing::*;
     use super::*;
+
+    #[test]
+    fn flash_refuses_remembered_bridge_when_config_does_not_parse() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wartui.toml");
+        std::fs::write(&path, "this is [not toml\n").unwrap();
+        let error = remembered_bridge(Some(&path)).unwrap_err().to_string();
+        assert!(error.contains(&path.display().to_string()), "{error}");
+    }
+
+    #[test]
+    fn flash_reads_remembered_bridge_when_config_holds_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wartui.toml");
+        std::fs::write(&path, format!("[bridge]\nmac = \"{}\"\n", mac::full(&BRIDGE_MAC))).unwrap();
+        assert_eq!(remembered_bridge(Some(&path)).unwrap(), Some(BRIDGE_MAC));
+    }
 
     #[test]
     fn flash_refuses_features_when_no_chip_or_both_chips_are_named() {
