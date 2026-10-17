@@ -225,9 +225,9 @@ impl FleetEngine {
         }
         // Read against this heartbeat's epoch, recorded just above, and only once the node holds
         // the assignment: one that has not adopted it is the re-send's business, not a power
-        // fault. A node reporting another power had `set_tx_power` refused, so its radio kept its
-        // previous power (the 2 dBm boot default or an earlier assignment's), or something reset
-        // the cap since. 0 means the node could not read its power.
+        // fault. A node reporting another power had the assigned power refused, so its radio kept
+        // its previous power (the 2 dBm boot default or an earlier assignment's), or something
+        // reset the cap since. 0 means the node could not read its power.
         if live && node.adopted() {
             let assigned = node.desired.or(node.confirmed).map(|a| a.tx_power);
             if let Some(assigned) = assigned {

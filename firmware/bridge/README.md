@@ -287,10 +287,11 @@ link. A later `esp-hal` release on the newer PACs lines them up.
 
 ### Crates that double
 
-The other half of the family is the dangerous half, because it resolves. `esp-alloc` and the
-`esp-wifi-sys-*` bindings are dependencies of `esp-radio` *and* direct dependencies of both
-firmwares. A version above what `esp-radio` asks for is semver-incompatible with it, not in conflict
-with it. So Cargo adds a second copy instead of refusing, and links both:
+The other half of the family is the dangerous half, because it resolves. `esp-alloc` is a
+dependency of `esp-radio` *and* a direct dependency of both firmwares, and the `esp-wifi-sys-*`
+bindings of `esp-radio` and the node. A version above what `esp-radio` asks for is
+semver-incompatible with it, not in conflict with it. So Cargo adds a second copy instead of
+refusing, and links both:
 
 - Two `esp-wifi-sys-*` each export `__esp_radio_printf` as `no_mangle`, and each carries its own
   copy of the IDF Wi-Fi blobs. `lto = "fat"` refuses the build. That is the cheap version.
@@ -331,14 +332,15 @@ cargo tree --locked --features esp32c6 -e normal --prefix none --format '{p}' \
   | grep -E '^(esp-(alloc|hal|radio|rtos|storage|sync|wifi-sys-esp32c[56])|embedded-hal) '
 ```
 
-They are direct dependencies for reasons that do not go away. `esp-wifi-sys-*` is here for
-`esp_wifi_set_max_tx_power` (`set_tx_power` in `src/main.rs`), and on a node
-`esp_wifi_get_max_tx_power` too. Those IDF calls are the only `unsafe` in either firmware but one.
+They are direct dependencies for reasons that do not go away. `esp-wifi-sys-*` is a direct
+dependency of the node alone, for `esp_wifi_get_max_tx_power` (`tx_power` in
+`firmware/node/src/radio.rs`), which `esp-radio` does not wrap. The bridge sets its transmit power
+through `WifiController::set_max_tx_power` and reaches the bindings only through `esp-radio`.
 
-The one is not an IDF call: the GPS build takes its interrupt executor's spawner through
-`Spawner::for_current_executor` (`current_spawner` in `src/gps.rs`). `esp-hal`'s async I2C driver
-is not `Send`, and `InterruptExecutor::start` gives out only a `SendSpawner`, so nothing safe can
-start the task that owns the bus.
+The bridge's one `unsafe` is not an IDF call: the GPS build takes its interrupt executor's spawner
+through `Spawner::for_current_executor` (`current_spawner` in `src/gps.rs`). `esp-hal`'s async I2C
+driver is not `Send`, and `InterruptExecutor::start` gives out only a `SendSpawner`, so nothing safe
+can start the task that owns the bus.
 
 `esp-alloc` is here because the firmware owns the heap and declares its regions.
 

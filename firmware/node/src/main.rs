@@ -359,7 +359,8 @@ fn main() -> ! {
     // The controller is configured before `sniffer()` and `esp_now()` hand out their
     // handles, so the first frame either sees or sends is under the band and power set
     // here. The handles do not borrow the controller: each holds a reference that keeps
-    // Wi-Fi running, and both are held for the rest of the program. `README.md`
+    // Wi-Fi running, and both are held for the rest of the program, as is the controller,
+    // which sets the power each assignment carries (`drain_admin`). `README.md`
     // § "What it does differently" has why this node sniffs rather than scans.
     //
     // `US` rather than `esp-radio`'s default, which silently costs a C5 channels
@@ -429,7 +430,7 @@ fn main() -> ! {
             } else {
                 note!("radio would not park on channel {}", CONTROL_CHANNEL);
             }
-            listen(&manager, &mut sender, &receiver, node, &mut ota, IDLE_BEAT_MS);
+            listen(&mut controller, &manager, &mut sender, &receiver, node, &mut ota, IDLE_BEAT_MS);
             ota.expire();
             continue;
         }
@@ -452,7 +453,7 @@ fn main() -> ! {
             } else {
                 note!("radio would not park on channel {}", CONTROL_CHANNEL);
             }
-            listen(&manager, &mut sender, &receiver, node, &mut ota, IDLE_BEAT_MS);
+            listen(&mut controller, &manager, &mut sender, &receiver, node, &mut ota, IDLE_BEAT_MS);
             // An assignment adopted mid-listen, or moving from parked to
             // assigned generally: this node has just heartbeated and held a
             // window, so its next one is a whole interval out from here
@@ -486,10 +487,18 @@ fn main() -> ! {
                     // Drain first: this node never leaves the control channel, so
                     // an admin frame that landed after the last listen was acked
                     // and queued, and this heartbeat must report its epoch.
-                    drain_admin(&manager, &mut sender, &receiver, node, &mut ota);
+                    drain_admin(&mut controller, &manager, &mut sender, &receiver, node, &mut ota);
                     node.last_dwell = 0;
                     heartbeat(&manager, &mut sender, node);
-                    listen(&manager, &mut sender, &receiver, node, &mut ota, ADMIN_WAIT_MS);
+                    listen(
+                        &mut controller,
+                        &manager,
+                        &mut sender,
+                        &receiver,
+                        node,
+                        &mut ota,
+                        ADMIN_WAIT_MS,
+                    );
                     node.next_beat = Some(next_beat_after(deadline));
                 }
             } else {
@@ -497,7 +506,15 @@ fn main() -> ! {
                 // What keeps this loop from spinning when the radio refuses:
                 // nothing else here sleeps unconditionally the way the idle
                 // branch's `listen` does.
-                listen(&manager, &mut sender, &receiver, node, &mut ota, ADMIN_WAIT_MS);
+                listen(
+                    &mut controller,
+                    &manager,
+                    &mut sender,
+                    &receiver,
+                    node,
+                    &mut ota,
+                    ADMIN_WAIT_MS,
+                );
             }
             // Straight into the next scan either way: a beat not yet due costs
             // this node nothing but the next check.
@@ -532,7 +549,7 @@ fn main() -> ! {
         let on_control = radio::park(&manager, &sniffer, CONTROL_CHANNEL, false);
         if on_control {
             report(&mut sender, node, channel);
-            drain_admin(&manager, &mut sender, &receiver, node, &mut ota);
+            drain_admin(&mut controller, &manager, &mut sender, &receiver, node, &mut ota);
         } else {
             note!("radio would not return to channel {}", CONTROL_CHANNEL);
         }
@@ -550,7 +567,15 @@ fn main() -> ! {
             && Instant::now() >= deadline
         {
             heartbeat(&manager, &mut sender, node);
-            listen(&manager, &mut sender, &receiver, node, &mut ota, ADMIN_WAIT_MS);
+            listen(
+                &mut controller,
+                &manager,
+                &mut sender,
+                &receiver,
+                node,
+                &mut ota,
+                ADMIN_WAIT_MS,
+            );
             node.next_beat = Some(next_beat_after(deadline));
         }
     }
@@ -580,7 +605,7 @@ fn next_beat_after(deadline: Instant) -> Instant {
 /// counts the failed sends, and is what tells the two apart. `node.beat_dwell` takes
 /// this beat's dwell on every attempt too, so the next beat names it whether or not this
 /// one arrives. The transmit power is read from the radio on every beat rather than
-/// remembered from adoption, so the beat reports what a refused `set_tx_power` kept (the
+/// remembered from adoption, so the beat reports what a refused `set_max_tx_power` kept (the
 /// boot default, or an earlier assignment's power) or what something reset it to since.
 /// The rail voltage and die temperature are read beside it, on the control channel where
 /// every heartbeat goes out, so the voltage read's PBUS excursion never lands in a dwell.
@@ -795,6 +820,7 @@ fn report_ble(sender: &mut EspNowSender, node: &mut Node, scanner: &mut ble::Sca
 ///
 /// Returns early when update mode starts or ends, so the main loop changes mode at once.
 fn listen(
+    controller: &mut WifiController<'_>,
     manager: &EspNowManager,
     sender: &mut EspNowSender,
     receiver: &EspNowReceiver,
@@ -805,7 +831,7 @@ fn listen(
     let until = Instant::now() + Duration::from_millis(u64::from(ms));
     let updating = ota.updating();
     loop {
-        drain_admin(manager, sender, receiver, node, ota);
+        drain_admin(controller, manager, sender, receiver, node, ota);
         if Instant::now() >= until || ota.updating() != updating {
             return;
         }
@@ -819,6 +845,7 @@ fn listen(
 /// Any frame from the host confirms an image on trial — admin, clear, update-confirm or an
 /// update frame: decoding one is hearing the host over the air, which is the whole test.
 fn drain_admin(
+    controller: &mut WifiController<'_>,
     manager: &EspNowManager,
     sender: &mut EspNowSender,
     receiver: &EspNowReceiver,
@@ -881,7 +908,7 @@ fn drain_admin(
             _ => continue,
         };
         if node.adopt(&admin) {
-            if !radio::set_tx_power(manager, admin.tx_power) {
+            if controller.set_max_tx_power(admin.tx_power).is_err() {
                 note!(
                     "could not set transmit power to {} quarter-dBm; retaining the previous power",
                     admin.tx_power

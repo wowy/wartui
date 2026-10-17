@@ -52,6 +52,7 @@ use esp_radio::esp_now::{
     EspNowError, EspNowManager, EspNowReceiver, EspNowSender, EspNowWifiInterface, PeerInfo,
     PhyMode, RateConfig, ReceivedData, WifiPhyRate,
 };
+use esp_radio::wifi::WifiController;
 use portable_atomic::{AtomicU8, AtomicU32, Ordering};
 use static_cell::StaticCell;
 use wartui_firmware::{reboot, reset_cause};
@@ -549,15 +550,15 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     // and would never notice, but a C5 node's 5 GHz sweep would lose 100-144 under
     // that default, so the nodes pass `US` and the bridge passes it too: two halves
     // of one fleet disagreeing about what is legal is a trap.
-    let mut controller = esp_radio::wifi::WifiController::new(
+    let mut controller = WifiController::new(
         peripherals.WIFI,
         esp_radio::wifi::ControllerConfig::default().with_country_info(*b"US"),
     )
     .expect("Wi-Fi controller");
     // The standalone fallback is 2 dBm. The host restores its configured value after
-    // every connection. Set this before the split, which borrows the controller for
-    // the rest of the program, and report a failure in `finish_radio_setup`, once the
-    // outbox exists to carry it.
+    // every connection, through `handle`'s `SetTxPower`. Set before the first frame,
+    // and a failure reported in `finish_radio_setup`, once the outbox exists to carry
+    // it. The controller stays in `main`: the ESP-NOW handles do not borrow it.
     let tx_power =
         controller.set_max_tx_power(wartui_proto::tx_power::DEFAULT_TX_POWER_QUARTER_DBM);
     // Split rather than kept whole: `EspNowSender::send` needs `&mut`, so holding
@@ -652,6 +653,7 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
             &mut usb_rx,
             link_buf,
             &mut sink,
+            &mut controller,
             &manager,
             &mut sender,
             bridge,
@@ -708,7 +710,14 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
             }
             if let Idled::Read(read) = idled {
                 mark(LoopPhase::DrainLink);
-                take_link_bytes(&link_buf[..read], &manager, &mut sender, bridge, mac);
+                take_link_bytes(
+                    &link_buf[..read],
+                    &mut controller,
+                    &manager,
+                    &mut sender,
+                    bridge,
+                    mac,
+                );
                 link_woke = true;
             }
         }
@@ -929,6 +938,7 @@ fn link_burst(
     usb_rx: &mut UsbSerialJtagRx<'_, Async>,
     link_buf: &mut [u8; LINK_CHUNK],
     sink: &mut UsbSink<'_>,
+    controller: &mut WifiController<'_>,
     manager: &EspNowManager,
     sender: &mut EspNowSender,
     bridge: &mut Bridge,
@@ -941,7 +951,7 @@ fn link_burst(
     loop {
         mark(LoopPhase::DrainLink);
         let read = usb_rx.drain_rx_fifo(link_buf);
-        take_link_bytes(&link_buf[..read], manager, sender, bridge, mac);
+        take_link_bytes(&link_buf[..read], controller, manager, sender, bridge, mac);
 
         // Asked again: the bytes just read may hold the first host frame of this life.
         let wrote = bridge.transmit_open() && {
@@ -973,13 +983,14 @@ fn link_burst(
 /// Feed bytes from the host to the accumulator, acting on each frame they complete.
 fn take_link_bytes(
     bytes: &[u8],
+    controller: &mut WifiController<'_>,
     manager: &EspNowManager,
     sender: &mut EspNowSender,
     bridge: &mut Bridge,
     mac: Mac,
 ) {
     for &byte in bytes {
-        take_link_byte(byte, manager, sender, bridge, mac);
+        take_link_byte(byte, controller, manager, sender, bridge, mac);
     }
 }
 
@@ -989,6 +1000,7 @@ fn take_link_bytes(
 #[inline(never)]
 fn take_link_byte(
     byte: u8,
+    controller: &mut WifiController<'_>,
     manager: &EspNowManager,
     sender: &mut EspNowSender,
     bridge: &mut Bridge,
@@ -1007,7 +1019,7 @@ fn take_link_byte(
                 command.asks_for_reply(),
                 matches!(command, HostToBridge::Identify),
             );
-            handle(&command, manager, sender, bridge, mac);
+            handle(&command, controller, manager, sender, bridge, mac);
         }
         Err(err) => {
             // A frame that passed framing and its checksum but carries another
@@ -1048,6 +1060,7 @@ fn note_host_frame(bridge: &mut Bridge, mac: Mac, asks: bool, identify: bool) {
 /// copy in this frame on top of the one `take_link_byte` decoded.
 fn handle(
     command: &HostToBridge,
+    controller: &mut WifiController<'_>,
     manager: &EspNowManager,
     sender: &mut EspNowSender,
     bridge: &mut Bridge,
@@ -1079,7 +1092,7 @@ fn handle(
         HostToBridge::GpsWrite { bytes } => bridge.write_gps(bytes),
 
         &HostToBridge::SetTxPower { power } => {
-            if set_tx_power(manager, power) {
+            if controller.set_max_tx_power(power).is_ok() {
                 // Only a change is worth a line: the host re-sends this with every
                 // status poll so that a command lost to a full queue cannot leave the
                 // radio at its fallback for the rest of the session.
@@ -1192,31 +1205,6 @@ fn set_peer_rate(manager: &EspNowManager, mac: &Mac) -> bool {
     let config =
         RateConfig { phy_mode: PhyMode::_11g, rate: WifiPhyRate::Rate24m, ersu: false, dcm: false };
     manager.set_peer_rate(mac, config).is_ok()
-}
-
-/// Set the Wi-Fi transmit power after ESP-NOW has borrowed the controller.
-///
-/// `WifiController::set_max_tx_power` requires a mutable controller, but the bridge
-/// keeps its ESP-NOW handles alive for the rest of its process. This is the narrow
-/// direct IDF equivalent, used only for a host configuration command.
-///
-/// The manager goes unused: it is proof that `esp_wifi_start` has run, which IDF wants
-/// behind this call, and a witness is what stops it being made from somewhere in `main`
-/// that compiles and then fails on the board.
-#[allow(
-    unsafe_code,
-    reason = "esp-radio requires a mutable controller after long-lived handles borrow it"
-)]
-fn set_tx_power(_manager: &EspNowManager, power: i8) -> bool {
-    #[cfg(feature = "esp32c5")]
-    use esp_wifi_sys_esp32c5::include as sys;
-    #[cfg(feature = "esp32c6")]
-    use esp_wifi_sys_esp32c6::include as sys;
-
-    // SAFETY: Wi-Fi and ESP-NOW have started before the bridge reads host commands,
-    // and this passes the scalar ESP-IDF expects. The function changes only the
-    // radio's maximum transmit power.
-    unsafe { sys::esp_wifi_set_max_tx_power(power) == 0 }
 }
 
 /// Put one frame on the air and report what the radio made of it.

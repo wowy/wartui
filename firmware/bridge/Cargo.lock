@@ -1973,8 +1973,6 @@ dependencies = [
  "esp-hal",
  "esp-radio",
  "esp-rtos",
- "esp-wifi-sys-esp32c5",
- "esp-wifi-sys-esp32c6",
  "mipidsi",
  "nb 1.1.0",
  "portable-atomic",

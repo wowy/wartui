@@ -86,8 +86,8 @@ esp-rtos = { version = "0.4.0", features = ["esp-alloc", "esp-radio"] }
 # `critical-section` feature holds interrupts off across each flash operation.
 esp-storage = { version = "0.10.0", features = ["embedded-storage"] }
 esp-sync = "0.3.0"
-# IDF's own bindings, for the transmit-power calls in `radio::set_tx_power` and
-# `radio::tx_power`. Held at the version `esp-radio` links;
+# IDF's own bindings, for the transmit-power read in `radio::tx_power`, which
+# `esp-radio` does not wrap. Held at the version `esp-radio` links;
 # `firmware/bridge/README.md` § "Dependency versions".
 esp-wifi-sys-esp32c5 = { version = "0.3.0", optional = true }
 esp-wifi-sys-esp32c6 = { version = "0.3.0", optional = true }

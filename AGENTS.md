@@ -274,10 +274,10 @@ is here rather than only in a `//!`.
   layout), `firmware/node/README.md` § "Over-the-air updates"
 - **`clippy::all` is denied workspace-wide, in both firmwares too, and so is `unsafe_code`.** The
   host allows it on one function, the Raspberry Pi firmware mailbox ioctl
-  (`crates/wartui-core/src/health.rs`, `mailbox_call`). Each firmware allows the IDF calls
-  `esp-radio` cannot express after its long-lived handles borrow the controller: the runtime
-  transmit-power call, and on a node the transmit-power read each heartbeat carries. `firmware/common` allows two more for the node's heartbeat, both PHY blob
-  reads: the rail voltage (`health::vdd_mv`) and the die temperature (`health::die_temp_c`). The
+  (`crates/wartui-core/src/health.rs`, `mailbox_call`). The node allows one IDF call `esp-radio`
+  does not wrap: the transmit-power read each heartbeat carries (`firmware/node/src/radio.rs`,
+  `tx_power`). `firmware/common` allows two more for the node's heartbeat, both PHY blob reads:
+  the rail voltage (`health::vdd_mv`) and the die temperature (`health::die_temp_c`). The
   bridge's GPS build allows one call that is not IDF's, `Spawner::for_current_executor`
   (`firmware/bridge/src/gps.rs`, `current_spawner`): `esp-hal`'s async I2C driver is not `Send`, and
   `InterruptExecutor::start` gives out only a `SendSpawner`, so nothing safe starts the GPS task on

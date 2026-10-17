@@ -4,9 +4,8 @@
 //! promiscuous mode on for its own reasons, so that falls out for free on the dwell
 //! side; the hop back to the control channel is the one to check on hardware.
 //!
-//! [`set_tx_power`] and [`tx_power`] are the direct IDF calls this
-//! firmware needs because `esp-radio` does not expose them once its long-lived handles
-//! borrow the controller.
+//! [`tx_power`] is a direct IDF call because `esp-radio` wraps no getter for the
+//! transmit power. Setting it goes through `WifiController::set_max_tx_power`.
 //!
 //! A heartbeat broadcasts: it is how a bridge discovers a node in the first place,
 //! before either side knows the other's address. A sighting batch unicasts, to
@@ -58,41 +57,16 @@ pub fn set_peer_rate(manager: &EspNowManager, mac: &[u8; 6]) -> bool {
     manager.set_peer_rate(mac, config).is_ok()
 }
 
-/// Set the Wi-Fi transmit power after ESP-NOW has borrowed the controller.
+/// The radio's maximum transmit power in quarter-dBm, as the IDF reports it now, or 0
+/// when the read fails. The IDF floor is 8, so 0 cannot be a real reading.
 ///
-/// `WifiController::set_max_tx_power` is safe but requires `&mut self`; the node keeps
-/// the sniffer and ESP-NOW handles borrowed for its whole life, so this is the narrow
-/// direct IDF equivalent. The caller applies it only when adopting a fresh assignment.
+/// What a heartbeat reports, read fresh each time: the value last asked for is not
+/// evidence that the radio holds it.
 ///
 /// The manager goes unused: it is proof that `esp_wifi_start` has run, which IDF wants
 /// behind this call, and a witness is what stops it being made from somewhere in `main`
 /// that compiles and then fails on the board.
-#[allow(
-    unsafe_code,
-    reason = "esp-radio requires a mutable controller after long-lived handles borrow it"
-)]
-pub fn set_tx_power(_manager: &EspNowManager, power: i8) -> bool {
-    #[cfg(feature = "esp32c5")]
-    use esp_wifi_sys_esp32c5::include as sys;
-    #[cfg(feature = "esp32c6")]
-    use esp_wifi_sys_esp32c6::include as sys;
-
-    // SAFETY: Wi-Fi has started before the node enters its receive loop, and this
-    // passes the scalar ESP-IDF expects. The function changes only the radio's
-    // maximum transmit power.
-    unsafe { sys::esp_wifi_set_max_tx_power(power) == 0 }
-}
-
-/// The radio's maximum transmit power in quarter-dBm, as the IDF reports it now, or 0
-/// when the read fails. The IDF floor is 8, so 0 cannot be a real reading.
-///
-/// What a heartbeat reports, read fresh each time: the value [`set_tx_power`] last
-/// asked for is not evidence that the radio holds it. The manager is the same witness
-/// it is there.
-#[allow(
-    unsafe_code,
-    reason = "esp-radio requires a mutable controller after long-lived handles borrow it"
-)]
+#[allow(unsafe_code, reason = "esp-radio wraps no getter for the transmit power")]
 pub fn tx_power(_manager: &EspNowManager) -> i8 {
     #[cfg(feature = "esp32c5")]
     use esp_wifi_sys_esp32c5::include as sys;
