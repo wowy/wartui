@@ -282,7 +282,9 @@ is here rather than only in a `//!`.
   (`firmware/bridge/src/gps.rs`, `current_spawner`): `esp-hal`'s async I2C driver is not `Send`, and
   `InterruptExecutor::start` gives out only a `SendSpawner`, so nothing safe starts the GPS task on
   its interrupt executor. Any further `#[allow(unsafe_code)]` is a decision to make in review, not a
-  convenience.
+  convenience. Avoid `unsafe` wherever a safe route exists. An uncommitted experiment, such as a
+  throwaway build that measures what a raw register access would buy, may add it freely.
+  Committing any new `unsafe` needs the user's approval first.
 
 ### Load-bearing, and reasoned where they live
 
