@@ -50,16 +50,14 @@ impl<const N: usize> Ring<N> {
         Ok(())
     }
 
-    /// The byte at `cursor` of the front frame, or `None` once it is exhausted.
-    ///
-    /// Returning a byte rather than a slice keeps the writer from holding a
-    /// borrow on the ring across its own bookkeeping.
-    pub(super) fn byte_at(&self, cursor: usize) -> Option<u8> {
+    /// The front frame's bytes from `cursor` on. Empty when the ring is, or once
+    /// the frame is exhausted.
+    pub(super) fn rest_at(&self, cursor: usize) -> &[u8] {
         if self.is_empty() {
-            return None;
+            return &[];
         }
         let front = &self.slots[self.head];
-        if cursor >= front.len as usize { None } else { Some(front.buf[cursor]) }
+        front.buf.get(cursor..front.len as usize).unwrap_or(&[])
     }
 
     pub(super) fn pop(&mut self) {

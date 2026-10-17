@@ -125,3 +125,17 @@ codegen-units = 1
 debug = 2
 lto = "fat"
 opt-level = "s"
+
+# The crates that encode every frame the bridge forwards, built for speed while the
+# rest of the image stays small. The main loop pumps no USB while a frame encodes, so
+# encode time is drain lost while a node bursts. On a C5 this took forwarding a full
+# batch from ~270 µs to ~230 µs, for about 1 KB of image. Measured on this profile: fat
+# LTO runs its final pass at the root's opt-level, so a toolchain change can shift it.
+[profile.release.package.wartui-proto]
+opt-level = 3
+
+[profile.release.package.cobs]
+opt-level = 3
+
+[profile.release.package.postcard]
+opt-level = 3

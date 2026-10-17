@@ -76,23 +76,37 @@ impl core::error::Error for LinkError {}
 /// CRC-16/CCITT-FALSE: polynomial `0x1021`, initial value `0xFFFF`, no
 /// reflection and no final XOR.
 ///
-/// Written here rather than pulled in as a dependency: it is a dozen lines, and the
-/// firmware's dependency budget is worth defending.
+/// Written here rather than pulled in as a dependency: a 512-byte table and about 25
+/// lines cost less than another crate in the firmware's dependency budget. Table-driven,
+/// one lookup per byte, because the bridge checksums every frame it forwards and a bitwise
+/// loop over a full [`BridgeToHost::Rx`] cost ~310 µs on a C5, during which the main loop
+/// pumps no USB.
 #[must_use]
-pub const fn crc16(data: &[u8]) -> u16 {
+pub fn crc16(data: &[u8]) -> u16 {
     let mut crc: u16 = 0xFFFF;
-    let mut i = 0;
-    while i < data.len() {
-        crc ^= (data[i] as u16) << 8;
+    for &byte in data {
+        crc = (crc << 8) ^ CRC16_TABLE[usize::from((crc >> 8) as u8 ^ byte)];
+    }
+    crc
+}
+
+/// [`crc16`]'s remainder for each value of the top byte, built at compile time. A
+/// `static`, so every lookup reads the one table rather than a copy of it.
+static CRC16_TABLE: [u16; 256] = {
+    let mut table = [0u16; 256];
+    let mut n = 0;
+    while n < 256 {
+        let mut crc = (n as u16) << 8;
         let mut bit = 0;
         while bit < 8 {
             crc = if crc & 0x8000 != 0 { (crc << 1) ^ 0x1021 } else { crc << 1 };
             bit += 1;
         }
-        i += 1;
+        table[n] = crc;
+        n += 1;
     }
-    crc
-}
+    table
+};
 
 /// Serialize a bridge-to-host `msg` into `out` as a complete frame, terminator included,
 /// of up to [`MAX_FRAME`].
