@@ -44,6 +44,14 @@ jobs:
             chip: esp32c5
             features: esp32c5,t-dongle-c5
             asset: wartui-bridge-fw-esp32c5-t-dongle.bin
+          - fw: bridge
+            chip: esp32c5
+            features: esp32c5,t-dongle-c5-gps
+            asset: wartui-bridge-fw-esp32c5-t-dongle-gps.bin
+          - fw: bridge
+            chip: esp32c5
+            features: esp32c5,t-dongle-c5,t-dongle-c5-gps
+            asset: wartui-bridge-fw-esp32c5-t-dongle-panel-gps.bin
           - { fw: bridge, chip: esp32c6, features: esp32c6, asset: wartui-bridge-fw-esp32c6.bin }
           - fw: bridge
             chip: esp32c6

@@ -8,6 +8,7 @@ use wartui_proto::tx_power::DEFAULT_TX_POWER_QUARTER_DBM;
 #[cfg(doc)]
 use super::{Command, FleetEngine};
 use crate::position::PositionChain;
+use crate::ubx;
 
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
@@ -48,6 +49,9 @@ pub struct EngineConfig {
     /// every Wi-Fi sighting makes, and one that keeps the operator's order, which the settings
     /// modal shows.
     pub excluded_ssids: IndexSet<Vec<u8>>,
+    /// How often the bridge's GPS receiver reports a fix, in hertz. `FleetEngine::poll_bridge` says
+    /// why every status poll carries it.
+    pub gps_rate_hz: u8,
 }
 
 impl Default for EngineConfig {
@@ -65,6 +69,7 @@ impl Default for EngineConfig {
             remember_ble: true,
             preferred_ble: None,
             excluded_ssids: IndexSet::new(),
+            gps_rate_hz: ubx::DEFAULT_RATE_HZ,
         }
     }
 }

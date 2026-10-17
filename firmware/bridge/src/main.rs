@@ -31,10 +31,12 @@
 )]
 #![deny(clippy::large_stack_frames)]
 
+#[cfg(feature = "t-dongle-c5-gps")]
+mod gps;
 #[cfg(feature = "t-dongle-c5")]
 mod panel;
 
-use embassy_futures::select::{Either4, select4};
+use embassy_futures::select::{Either, Either4, select, select4};
 use embassy_time::Timer;
 use esp_hal::Async;
 use esp_hal::clock::CpuClock;
@@ -57,6 +59,8 @@ use wartui_firmware::{reboot, reset_cause};
 /// same channel is that they read it from the same place.
 use wartui_proto::air::CONTROL_CHANNEL;
 use wartui_proto::heapless::Vec;
+#[cfg(feature = "t-dongle-c5-gps")]
+use wartui_proto::link::GpsWriteBytes;
 use wartui_proto::link::{
     BROADCAST, BridgeToHost, Chip, FrameAccumulator, HostToBridge, LINK_PROTO_VERSION, LinkBurst,
     LinkError, LogLevel, LogStr, LoopPhase, MAX_HOST_FRAME, Panel, PanelLines, SendStatus,
@@ -84,6 +88,12 @@ compile_error!("t-dongle-c5 is an ESP32-C5 in a USB-A shell; build it with esp32
 // `LCD_DC` and `USB_DP`.
 #[cfg(all(feature = "t-dongle-c5", feature = "xiao-external-antenna"))]
 compile_error!("t-dongle-c5 and xiao-external-antenna both drive GPIO3; pick one board");
+#[cfg(all(feature = "t-dongle-c5-gps", not(feature = "esp32c5")))]
+compile_error!("t-dongle-c5-gps is the T-Dongle-C5's Qwiic port; build it with esp32c5");
+// Unreachable for the same reason as the one above, and stated for the same reason: the
+// GPS port is a T-Dongle-C5's, and `xiao-external-antenna` drives that board's pins.
+#[cfg(all(feature = "t-dongle-c5-gps", feature = "xiao-external-antenna"))]
+compile_error!("t-dongle-c5-gps and xiao-external-antenna are different boards; pick one");
 
 /// Counted rather than checked pairwise.
 ///
@@ -118,8 +128,8 @@ const PANEL: Option<Panel> = None;
 /// The longest an idle pass waits: one in which neither radio nor link had anything
 /// to do.
 ///
-/// A received frame, a host command and — while frames are queued for the host — the
-/// USB FIFO emptying each end the wait themselves. The FIFO wake is what lets the outbox
+/// A received frame, a host command, a finished GPS batch and — while frames are queued for
+/// the host — the USB FIFO emptying each end the wait themselves. The FIFO wake is what lets the outbox
 /// go on draining after a [`link_burst`] gives the pass back, without a busy loop that
 /// burns the core whenever no host is reading. `docs/usb-link-findings.md` has the
 /// rates.
@@ -142,6 +152,9 @@ enum Woken {
     Frame(ReceivedData),
     Link(usize),
     Drained,
+    /// The GPS task finished a batch.
+    #[cfg(feature = "t-dongle-c5-gps")]
+    Gps,
     Tick,
 }
 
@@ -152,7 +165,8 @@ enum Idled {
     Read(usize),
     /// The tick ended the wait, so the air was quiet for all of it.
     Quiet,
-    /// A frame or a FIFO drain ended it, and is already dealt with.
+    /// A frame, a FIFO drain or a GPS batch ended it. A frame is already dealt with, and
+    /// the next pass forwards a batch.
     Busy,
 }
 
@@ -178,7 +192,7 @@ enum Idled {
 /// reason says the RTC domain was not reset.
 ///
 /// An `AtomicU8` because a `static mut` cannot be written without `unsafe`, which is
-/// denied here everywhere but [`set_peer_rate`]. Never contended: only the main task
+/// denied here but for the calls AGENTS.md lists. Never contended: only the main task
 /// touches it.
 #[esp_hal::ram(unstable(rtc_fast, persistent))]
 static PHASE: AtomicU8 = AtomicU8::new(0);
@@ -345,6 +359,20 @@ struct Bridge {
     /// attached when this firmware starts — that is the whole reason `Identify`
     /// exists — so a fault reported once is a fault nobody ever reads.
     panel_fault: Option<&'static str>,
+    /// `main`'s end of the GPS task, when its bus came up.
+    ///
+    /// Held here rather than in `main` so that [`handle`] can write to it.
+    #[cfg(feature = "t-dongle-c5-gps")]
+    gps: Option<gps::Link>,
+    /// Whether the receiver answered when [`take_gps`] last looked, so a change is said
+    /// once.
+    #[cfg(feature = "t-dongle-c5-gps")]
+    gps_answered: bool,
+    /// Why no GPS receiver is being read on a board built to have one.
+    ///
+    /// Sent with every announcement for the reason `panel_fault` is, and cleared when the
+    /// receiver answers again.
+    gps_fault: Option<&'static str>,
 }
 
 impl Bridge {
@@ -408,8 +436,12 @@ impl Bridge {
             // on the same connection.
             uptime_ms: self.boot.elapsed().as_millis() as u32,
             panel: self.panel,
+            gps: cfg!(feature = "t-dongle-c5-gps"),
         });
         if let Some(why) = self.panel_fault {
+            self.error(why);
+        }
+        if let Some(why) = self.gps_fault {
             self.error(why);
         }
     }
@@ -428,6 +460,20 @@ impl Bridge {
     #[cfg(not(feature = "t-dongle-c5"))]
     #[expect(clippy::unused_self, reason = "the panel build takes `&mut self`")]
     fn show_panel(&self, _lines: &PanelLines) {}
+
+    /// Hand the host's bytes to the GPS task, which writes them. [`take_gps`] reports a
+    /// write the receiver refused.
+    #[cfg(feature = "t-dongle-c5-gps")]
+    fn write_gps(&mut self, bytes: &GpsWriteBytes) {
+        if let Some(link) = self.gps.as_mut() {
+            link.write(bytes);
+        }
+    }
+
+    /// No receiver to write to. Dropped for the reason `show_panel` drops lines.
+    #[cfg(not(feature = "t-dongle-c5-gps"))]
+    #[expect(clippy::unused_self, reason = "the GPS build takes `&mut self`")]
+    fn write_gps(&self, _bytes: &[u8]) {}
 
     fn log(&mut self, level: LogLevel, message: &str) {
         let message = LogStr::try_from(message).unwrap_or_default();
@@ -512,6 +558,11 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
         panel_lines: PanelLines::new(),
         panel: PANEL,
         panel_fault: None,
+        #[cfg(feature = "t-dongle-c5-gps")]
+        gps: None,
+        #[cfg(feature = "t-dongle-c5-gps")]
+        gps_answered: true,
+        gps_fault: None,
         tx_power: tx_power.is_ok().then_some(wartui_proto::tx_power::DEFAULT_TX_POWER_QUARTER_DBM),
     });
     // Ahead of every frame this life sends, whenever transmit opens. The ROM banner
@@ -541,6 +592,17 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
             None
         }
     };
+
+    // After the radio for the reason the panel is. The receiver is not probed here: the
+    // task's first poll does that, and `take_gps` reports a receiver that does not answer.
+    #[cfg(feature = "t-dongle-c5-gps")]
+    match gps::start(
+        gps::Pins { i2c: peripherals.I2C0, sda: peripherals.GPIO11, scl: peripherals.GPIO12 },
+        software_interrupt.software_interrupt1,
+    ) {
+        Ok(link) => bridge.gps = Some(link),
+        Err(why) => bridge.gps_fault = Some(why),
+    }
 
     match manager.set_channel(CONTROL_CHANNEL) {
         Ok(()) => {}
@@ -577,6 +639,13 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
         );
         worked |= link.moved;
         link_woke = false;
+
+        // Never waits: the GPS task reads the receiver, and this only forwards what it
+        // finished.
+        #[cfg(feature = "t-dongle-c5-gps")]
+        {
+            worked |= take_gps(bridge);
+        }
 
         // Named as its own phase for the reason `Transmit` is: it is a call that can
         // block for longer than a memcpy, so a reset with nobody watching says which
@@ -625,8 +694,8 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     }
 }
 
-/// Wait for a received frame, a host command, the FIFO emptying or the tick, and say
-/// which it was.
+/// Wait for a received frame, a host command, the FIFO emptying, a finished GPS batch or
+/// the tick, and say which it was.
 ///
 /// A frame that ends the wait is forwarded here and the host's bytes are handed back,
 /// each as soon as it is taken: it is older than anything the next pass's drains find
@@ -634,7 +703,11 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
 /// at `.clippy.toml`'s threshold on the C5 and has no room for a [`ReceivedData`].
 ///
 /// Every arm is cancel-safe: the radio's queue and the USB FIFO give up an item only
-/// in the poll that returns it, and the flush holds no bytes.
+/// in the poll that returns it, the flush holds no bytes, and the GPS channel gives up a
+/// batch only at `receive_done`, which only [`take_gps`] calls.
+///
+/// A batch the GPS task finishes while this waits ends it, so a batch reaches the outbox
+/// within one pass of being finished rather than a tick.
 async fn idle_wait(
     receiver: &mut EspNowReceiver<'_>,
     usb_rx: &mut UsbSerialJtagRx<'_, Async>,
@@ -659,9 +732,22 @@ async fn idle_wait(
         }
         Woken::Drained
     };
-    let woken = match select4(radio, link, flushed, Timer::after(IDLE_TICK)).await {
-        Either4::First(woken) | Either4::Second(woken) | Either4::Third(woken) => woken,
-        Either4::Fourth(()) => Woken::Tick,
+    #[cfg(feature = "t-dongle-c5-gps")]
+    let batches = bridge.gps.as_mut().map(gps::Link::batches);
+    let gps = async {
+        #[cfg(feature = "t-dongle-c5-gps")]
+        if let Some(batches) = batches {
+            batches.receive().await;
+            return Woken::Gps;
+        }
+        core::future::pending::<Woken>().await
+    };
+    let woken = match select4(radio, link, flushed, select(gps, Timer::after(IDLE_TICK))).await {
+        Either4::First(woken)
+        | Either4::Second(woken)
+        | Either4::Third(woken)
+        | Either4::Fourth(Either::First(woken)) => woken,
+        Either4::Fourth(Either::Second(())) => Woken::Tick,
     };
     // The read arms the RX-packet interrupt and the flush the TX-empty one, and
     // neither has a `Drop` to disarm it, so whichever lost would later wake this
@@ -679,6 +765,8 @@ async fn idle_wait(
         // An error reads nothing, which is no evidence of quiet air.
         Woken::Link(read) if read > 0 => Idled::Read(read),
         Woken::Link(_) | Woken::Drained => Idled::Busy,
+        #[cfg(feature = "t-dongle-c5-gps")]
+        Woken::Gps => Idled::Busy,
         Woken::Tick => Idled::Quiet,
     }
 }
@@ -727,6 +815,45 @@ fn forward(received: ReceivedData, bridge: &mut Bridge) {
         rx_us,
         payload,
     });
+}
+
+/// What the bridge reports when the GPS receiver stops answering.
+#[cfg(feature = "t-dongle-c5-gps")]
+const NO_GPS_RECEIVER: &str = "no GPS receiver answered on the Qwiic port";
+
+/// Queue every batch the GPS task has finished, and report what changed about the
+/// receiver. Says whether a batch was queued. Never waits on the task.
+///
+/// A change in whether it answers is said once, not at every probe: an `Error` when it
+/// stops, which `announce` then repeats, and a `Log` when it comes back.
+///
+/// Out of line for the reason [`forward`] is.
+#[cfg(feature = "t-dongle-c5-gps")]
+#[inline(never)]
+fn take_gps(bridge: &mut Bridge) -> bool {
+    let Some(link) = bridge.gps.as_mut() else { return false };
+    let mut queued = false;
+    while let Some(bytes) = link.batches().try_receive() {
+        bridge.outbox.send(&BridgeToHost::Gps { bytes: bytes.clone() });
+        link.batches().receive_done();
+        queued = true;
+    }
+    let present = link.present();
+    let refused = link.take_write_refused();
+    if present != bridge.gps_answered {
+        bridge.gps_answered = present;
+        if present {
+            bridge.gps_fault = None;
+            bridge.log(LogLevel::Info, "the GPS receiver answered on the Qwiic port");
+        } else {
+            bridge.gps_fault = Some(NO_GPS_RECEIVER);
+            bridge.error(NO_GPS_RECEIVER);
+        }
+    }
+    if refused {
+        bridge.error("the GPS receiver refused a write");
+    }
+    queued
 }
 
 /// What one pass's [`link_burst`] moved.
@@ -922,6 +1049,8 @@ fn handle(
 
         HostToBridge::ShowPanel { lines } => bridge.show_panel(lines),
 
+        HostToBridge::GpsWrite { bytes } => bridge.write_gps(bytes),
+
         &HostToBridge::SetTxPower { power } => {
             if set_tx_power(manager, power) {
                 // Only a change is worth a line: the host re-sends this with every
@@ -1028,7 +1157,7 @@ fn add_peer(manager: &EspNowManager<'_>, mac: &Mac) -> Result<bool, EspNowError>
 /// bench, a C5 and a C6 beside this bridge arrived at −43 and −58 dBm and lost 0%
 /// and 2.3% of their heartbeats over ten minutes.
 ///
-/// Straight into IDF, one of this firmware's two `unsafe` calls. `esp-radio`
+/// Straight into IDF, one of this firmware's `unsafe` calls. `esp-radio`
 /// 1.0.0-beta.0 wraps only the interface-wide `esp_wifi_config_espnow_rate`, which the
 /// C5 and C6 Wi-Fi libraries refuse in Wi-Fi 6 mode (esp-hal #1612) — and whose
 /// `WifiPhyRate` is numbered without IDF's gap at 4, so its `Rate24m` sends 48 Mbps.

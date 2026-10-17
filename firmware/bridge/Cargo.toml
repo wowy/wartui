@@ -49,6 +49,14 @@ xiao-external-antenna = []
 # of this board's display and USB pins; `src/main.rs` enforces both.
 t-dongle-c5 = ["dep:embedded-graphics", "dep:embedded-hal-bus", "dep:mipidsi"]
 
+# A GPS receiver on a T-Dongle-C5's Qwiic port: a u-blox M10 at I2C 0x42, on I2C0
+# with SDA on GPIO11 and SCL on GPIO12. A board fact layered over a chip feature,
+# like the two above, and independent of `t-dongle-c5`: either builds without the
+# other. C5 only, and mutually exclusive with `xiao-external-antenna`; `src/main.rs`
+# enforces both. `esp-hal`'s I2C master drives it; `embassy-sync` carries its bytes
+# between the GPS task and `main`.
+t-dongle-c5-gps = ["dep:embassy-sync"]
+
 [dependencies]
 # `esp-radio` and `esp-rtos` allocate their task stacks and the Wi-Fi driver's
 # queues through their own copy's `HEAP`, which nothing here fills, so a second
@@ -69,6 +77,9 @@ esp-rtos = { version = "0.3.0", features = ["embassy", "esp-alloc", "esp-radio"]
 # README.md § "Dependency versions".
 embassy-executor = "0.10.0"
 embassy-futures = "0.1.2"
+# The GPS task's channels to `main`. Held at the version `esp-hal` and `esp-rtos`
+# use; README.md § "Dependency versions".
+embassy-sync = { version = "0.8.0", optional = true }
 embassy-time = "0.5.1"
 embedded-io-async = "0.7.0"
 # IDF's own bindings, for the one call `esp-radio` does not wrap —
@@ -95,7 +106,7 @@ wartui-proto = { path = "../../crates/wartui-proto" }
 # Stated in AGENTS.md as a project-wide rule, but the root workspace excludes
 # `firmware`, so until this line existed the firmwares were covered by the
 # documentation and not by the compiler. `deny` rather than `forbid`,
-# so that `set_peer_rate` alone can allow it.
+# so that the few calls AGENTS.md lists can allow it.
 unsafe_code = "deny"
 
 [lints.clippy]

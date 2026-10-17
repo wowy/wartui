@@ -329,6 +329,7 @@ async fn run_bridge(
         // It tracked the font once and did not follow it to `FONT_9X15`, which left
         // the simulator rehearsing a width of 26 that nothing has.
         panel: Some(Panel { cols: 17, rows: 5 }),
+        gps: false,
     };
     if plumbing.events.send(LinkEvent::Connected(info)).await.is_err() {
         return;
@@ -348,6 +349,8 @@ async fn run_bridge(
             // claims a panel above.
             HostToBridge::ShowPanel { .. } => None,
             HostToBridge::SetTxPower { .. } => None,
+            // No GPS port to write to, as announced above.
+            HostToBridge::GpsWrite { .. } => None,
             HostToBridge::AddPeer { mac } => {
                 if !peers.contains(&mac) {
                     peers.push(mac);

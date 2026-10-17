@@ -35,8 +35,8 @@ new address. The same bridge reconnecting or rebooting sends nothing; nodes alre
 | `--db PATH`             | dated       | New file for the capture; an existing one is refused   |
 | `--bridge PATH\|MAC`    | detected    | Which board the bridge is, by path, address or `00:08` |
 | `--lat` `--lon` `--alt` | —           | A fixed test position; the capture is never uploaded   |
-| `--gps PATH`            | detected    | An NMEA receiver, preferred over `--lat`/`--lon`       |
-| `--no-gps`              | off         | Do not look for a receiver at all                      |
+| `--gps PATH\|bridge`    | detected    | An NMEA port, or `bridge` for the bridge's alone       |
+| `--no-gps`              | off         | Read no receiver, the bridge's included                |
 | `--gps-baud N`          | detected    | Line rate of that receiver                             |
 | `--gps-max-age S`       | `5`         | How old a fix may be before falling back               |
 | `--sim N`               | —           | Run a fake fleet instead of hardware                   |
@@ -45,7 +45,7 @@ new address. The same bridge reconnecting or rebooting sends nothing; nodes alre
 | `--notes TEXT`          | —           | A note about this run, stored with the capture         |
 | `--config PATH`         | per-OS path | See "Config file"                                      |
 
-The channel pool and transmit powers have no flag; see "Config file". `--log-file PATH` is global;
+The channel pool, transmit powers and the bridge GPS rate have no flag; see "Config file". `--log-file PATH` is global;
 see "When nothing arrives".
 
 ### Capture metadata
@@ -298,6 +298,9 @@ node = "AA:BB:CC:DD:EE:FF"
 remember = true
 mac = "AA:BB:CC:DD:EE:FF"
 
+[gps]
+bridge-rate-hz = 5
+
 [api-keys]
 wdgwars = ""
 ```
@@ -312,6 +315,7 @@ wdgwars = ""
 | `[bluetooth] node`     | —       | The MAC `b` last gave the scan to, written as `wartui ports` prints it         |
 | `[bridge] remember`    | on      | Whether wartui remembers the bridge; see "When nothing arrives"                |
 | `[bridge] mac`         | —       | The bridge last connected to or flashed, written as `wartui ports` prints it   |
+| `[gps] bridge-rate-hz` | `5`     | Fixes a second from a bridge's GPS receiver, 1–5; see "Positions"              |
 | `[api-keys] wdgwars`   | `""`    | WDGWars API key; settings writes the empty key so there is a place to paste it |
 
 Each power defaults on its own; neither falls back to the other. The firmware accepts 21 dBm, but
@@ -472,8 +476,9 @@ The chosen board must be native USB Serial/JTAG (`303a:1001`) reporting its addr
 `espflash board-info` must read the `--features` chip and that address, or nothing is flashed.
 
 The image comes from the same three sources as `flash-fleet`'s, with `firmware/bridge` for
-`firmware/node`. A release publishes `esp32c5`, `esp32c5,t-dongle-c5`, `esp32c6`, and
-`esp32c6,xiao-external-antenna`, under the same `images/<tag>/`.
+`firmware/node`. A release publishes `esp32c5`, `esp32c5,t-dongle-c5`, `esp32c5,t-dongle-c5-gps`,
+`esp32c5,t-dongle-c5,t-dongle-c5-gps`, `esp32c6`, and `esp32c6,xiao-external-antenna`, under the
+same `images/<tag>/`.
 
 The board prints one line by its last two octets: would flash, flashed, or failed with espflash's
 full output. A board found without `--bridge` is then saved to `wartui.toml` as the bridge, so
@@ -732,10 +737,24 @@ differs from its own, so an unchanged fleet is left alone. Two consequences:
 ## Positions
 
 Each observation gets the best position available, resolved fresh: GPS, then `--lat`/`--lon`, then
-none. Rows record which tier answered, so a garage-to-road capture is honest about both. No record
-is dropped for lack of a position, but **WiGLE rejects rows without coordinates**: a capture with
-none exports nothing and says how many networks it left out.
+none. The GPS is a receiver named with `--gps PATH`, then the bridge's receiver, then one the host
+found, each while its fix is recent. Rows
+record which tier answered, so a garage-to-road capture is honest about both. No record is dropped
+for lack of a position, but **WiGLE rejects rows without coordinates**: a capture with none exports
+nothing and says how many networks it left out.
 
+- **A bridge with a GPS receiver is the position source while it has a fix.** A T-Dongle-C5
+  flashed with `t-dongle-c5-gps` reads a u-blox M10 on its Qwiic port and forwards its bytes; see
+  [`firmware/bridge/README.md`](../../firmware/bridge/README.md) § "The GPS". The host's own search
+  stands down while the bridge's receiver has a fix, letting go of any port. Sentences without a
+  fix do not count, so a bridge receiver with no sky leaves the host's search running. The search
+  resumes once that fix is older than `--gps-max-age`, or the bridge disconnects. After a
+  reconnect it stands down again only on a new fix. A port named with `--gps` is always read, and
+  its fix goes ahead of the bridge's. wartui sets the receiver to `[gps] bridge-rate-hz` fixes a
+  second (default 5) on every bridge status poll. `g` reports on a port named with `--gps` when
+  there is one. Otherwise it reports on the bridge's receiver while it has a fix, or when no host
+  receiver is read and the bridge has a GPS port, and shows `bridge (Qwiic)` as its port.
+  `wartui sniff --verbose` prints the receiver's raw stream.
 - **`--lat`/`--lon` is for testing only.** WDGWars and WiGLE ban fixed positions, so the capture is
   marked as test data: `upload` refuses it, and `export` warns.
 - **A receiver is found without being named.** Each serial port that is not a fleet board is tried
@@ -746,10 +765,13 @@ none exports nothing and says how many networks it left out.
   search, which transmits into whatever it opens.
 - **`--gps PATH` pins one receiver**, when several are attached or the search picks wrong. Baud
   rates are still tried unless `--gps-baud` names one, and one valid sentence settles a named port.
+- **`--gps bridge` reads the bridge's receiver only.** No host port is opened or searched, so
+  `--gps-baud` is refused with it.
 - **`--gps` with `--gps-baud` skips the probe.** Nothing is left to detect, and a terse receiver
   could otherwise be refused for saying too little in one window.
-- **`--no-gps` turns the search off; `--sim` implies it unless `--gps` is given.** A simulated fleet
-  is for working with nothing plugged in, not for opening every serial port.
+- **`--no-gps` turns the search and the bridge's receiver off; `--sim` turns the search off unless
+  `--gps` is given.** A simulated fleet is for working with nothing plugged in, not for opening every
+  serial port.
 - **Any NMEA 0183 serial receiver works.** `GGA` and `RMC` give the position. Altitude, satellite
   count, and an accuracy estimated from HDOP reach the export. `GSA` and `GSV` are read for `g` only.
 - **`g` shows why a receiver will not lock.** The left side has the fix: 2D or 3D, satellites used,

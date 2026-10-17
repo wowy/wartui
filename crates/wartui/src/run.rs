@@ -1,8 +1,9 @@
 //! `wartui run` — capture a fleet into the store and watch it happen.
 //!
 //! It listens, it writes rows, and it draws what it heard — each row stamped
-//! with wherever the host believed it was at that moment: a GPS, found on its own
-//! or pinned with `--gps`, else `--lat`/`--lon`, else nothing.
+//! with wherever the host believed it was at that moment: a GPS pinned with
+//! `--gps`, else the bridge's GPS receiver, else a GPS found on its own, else
+//! `--lat`/`--lon`, else nothing.
 //!
 //! It also transmits, and without being asked: the planner partitions the pool
 //! across the fleet and re-cuts it as the fleet or the pool changes. That is the only thing
@@ -23,6 +24,7 @@ use wartui_core::gps::{Gps, GpsConfig};
 use wartui_core::position::PositionChain;
 use wartui_core::runtime::{COMMAND_QUEUE, drive, now};
 use wartui_core::store::{CaptureInfo, CaptureProvenance, Store, StoreConfig, StoreError};
+use wartui_core::ubx;
 use wartui_proto::plan::ChannelPool;
 use wartui_proto::tx_power::DEFAULT_TX_POWER_QUARTER_DBM;
 
@@ -90,13 +92,13 @@ pub struct Args {
     #[arg(long, value_name = "PATH")]
     db: Option<PathBuf>,
 
-    /// Serial port of an NMEA GPS. One is searched for when this is omitted, and
-    /// whichever is read is preferred over a `--lat`/`--lon` test position while its
-    /// fix is recent.
-    #[arg(long, value_name = "PATH", conflicts_with = "no_gps")]
+    /// Serial port of an NMEA GPS, or `bridge` to read only the bridge's receiver and
+    /// open no host port. One is searched for when this is omitted, and whichever is
+    /// read is preferred over a `--lat`/`--lon` test position while its fix is recent.
+    #[arg(long, value_name = "PATH|bridge", conflicts_with = "no_gps")]
     gps: Option<String>,
 
-    /// Do not look for a receiver at all.
+    /// Read no receiver at all: neither a host GPS nor the bridge's.
     #[arg(long)]
     no_gps: bool,
 
@@ -156,6 +158,31 @@ fn pool(file: Option<PoolArg>) -> ChannelPool {
     file.unwrap_or_default().into()
 }
 
+/// Which receivers a run reads, from `--no-gps`, `--gps` and `--gps-baud`.
+#[derive(Debug, PartialEq, Eq)]
+enum GpsChoice {
+    /// `--no-gps`: neither the host's nor the bridge's.
+    Off,
+    /// The bridge's, and a search of the host's ports.
+    Search,
+    /// The bridge's, and this host port.
+    Port(String),
+    /// `--gps bridge`: the bridge's only; no host port is opened.
+    Bridge,
+}
+
+fn gps_choice(no_gps: bool, gps: Option<&str>, baud: Option<u32>) -> Result<GpsChoice> {
+    Ok(match gps {
+        _ if no_gps => GpsChoice::Off,
+        Some("bridge") if baud.is_some() => {
+            bail!("--gps-baud sets a host port's line rate; --gps bridge opens none")
+        }
+        Some("bridge") => GpsChoice::Bridge,
+        Some(port) => GpsChoice::Port(port.to_owned()),
+        None => GpsChoice::Search,
+    })
+}
+
 /// Whether the capture holds test data: invented networks or a fixed position.
 fn test_data(sim: Option<u8>, lat: Option<f64>) -> bool {
     sim.is_some() || lat.is_some()
@@ -180,6 +207,7 @@ pub async fn run(args: Args) -> Result<()> {
     // to type: a dated name is the newest in this directory, which is what `export`
     // finds on its own, and one chosen by hand has to be given back.
     let named_db = args.db.is_some();
+    let choice = gps_choice(args.no_gps, args.gps.as_deref(), args.gps_baud)?;
     let db = args.db.unwrap_or_else(|| capture::dated_path(Local::now()));
     // So a run doomed to be refused never transmits; `Store::create` is the atomic guard.
     if db.exists() {
@@ -203,28 +231,38 @@ pub async fn run(args: Args) -> Result<()> {
     // auto-reset on DTR — is not what that command is for. Naming one with `--gps` is
     // still honored: driving the simulator against a real receiver is how the
     // position tier gets exercised without a fleet.
-    let looking = !args.no_gps && (args.sim.is_none() || args.gps.is_some());
+    let looking = match &choice {
+        GpsChoice::Search => args.sim.is_none(),
+        GpsChoice::Port(_) => true,
+        GpsChoice::Off | GpsChoice::Bridge => false,
+    };
+    let max_age = Duration::from_secs(args.gps_max_age);
     let gps = looking.then(|| {
-        let config = match &args.gps {
-            Some(port) => GpsConfig::pinned(port),
+        let config = match &choice {
+            GpsChoice::Port(port) => GpsConfig::pinned(port),
             // A `--bridge` given as a path is opened as given, whatever it is, so
             // the search is told to leave it alone. Espressif boards are already
             // outside the search: `ports::could_be_a_receiver` is the complement of
             // what the bridge sweeps by, which is what keeps a node from being read
             // by one half of wartui while the other half transmits into it.
-            None => GpsConfig::search().reserving(args.bridge.iter().cloned().collect()),
+            _ => GpsConfig::search().reserving(args.bridge.iter().cloned().collect()),
         };
         let config = match args.gps_baud {
             Some(baud) => config.at_baud(baud),
             None => config,
         };
-        let config = GpsConfig { max_age: Duration::from_secs(args.gps_max_age), ..config };
-        Gps::spawn(config)
+        Gps::spawn(GpsConfig { max_age, ..config })
     });
-    let position = match &gps {
-        Some(gps) => position.with_gps(gps.clone(), Duration::from_secs(args.gps_max_age)),
-        None => position,
-    };
+    // Built whatever the bridge turns out to be, simulated included: a bridge without a
+    // receiver sends no bytes, and this one then says nothing.
+    let bridge_gps = (choice != GpsChoice::Off).then(|| Gps::bridged(max_age));
+    let mut position = position.with_max_age(max_age);
+    if let Some(gps) = &gps {
+        position = position.with_gps(gps.clone());
+    }
+    if let Some(gps) = &bridge_gps {
+        position = position.with_bridge_gps(gps.clone());
+    }
 
     let pool = pool(config.pool);
     // Seeded from the file, and saved back by the view when the transport changes it. The
@@ -239,6 +277,7 @@ pub async fn run(args: Args) -> Result<()> {
     let store_config = StoreConfig::new(&db);
 
     let (tx_power, bridge_tx_power) = tx_powers(&config.tx_power);
+    let gps_rate_hz = config.gps.bridge_rate_hz.unwrap_or(ubx::DEFAULT_RATE_HZ);
     let remember_ble = config.bluetooth.remember.unwrap_or(true);
     let preferred_ble = config.bluetooth.node;
     let excluded_ssids = config::excluded_ssid_bytes(&config.excluded_ssids).collect();
@@ -259,6 +298,7 @@ pub async fn run(args: Args) -> Result<()> {
         remember_ble,
         preferred_ble,
         excluded_ssids,
+        gps_rate_hz,
         ..Default::default()
     };
     let engine = FleetEngine::new(config, started);
@@ -300,15 +340,33 @@ pub async fn run(args: Args) -> Result<()> {
         );
     }
     // Without a GPS fix the capture cannot be uploaded.
-    let fixes = gps.as_ref().map_or(0, |gps| gps.view().counters.fixes);
+    let counters = |gps: &Option<Gps>| gps.as_ref().map(|gps| gps.view().counters);
+    let bridge_counters = counters(&bridge_gps).unwrap_or_default();
+    let fixes = counters(&gps).unwrap_or_default().fixes + bridge_counters.fixes;
     if args.lat.is_none() && fixes == 0 {
         // The view says so throughout as well; this is for a terminal that never
         // came up, and so the last thing on screen says why the export is empty.
         let found = gps.as_ref().and_then(|gps| gps.view().settled);
-        match (args.no_gps, &args.gps, found) {
-            (true, _, _) => println!(
+        let bridge_heard = bridge_counters.sentences > 0;
+        match (&choice, bridge_heard, found) {
+            (GpsChoice::Off, ..) => println!(
                 "No position was given, so nothing in it can be uploaded. Drop --no-gps to \n\
                  look for a receiver."
+            ),
+            // Both receivers talked; neither fixed.
+            (_, true, Some((port, baud))) => println!(
+                "Neither the bridge's GPS receiver nor the one on {port} at {baud} reported a \n\
+                 fix, so nothing in this capture can be uploaded. Check that they can see the sky."
+            ),
+            // The bridge's receiver talked; no fix.
+            (_, true, None) => println!(
+                "The bridge's GPS receiver never reported a fix, so nothing in this capture \n\
+                 can be uploaded. Check that it can see the sky."
+            ),
+            (GpsChoice::Bridge, false, _) => println!(
+                "Nothing came from a GPS receiver on the bridge, so nothing in this capture \n\
+                 can be uploaded. Check that the bridge has one, or leave --gps off and let \n\
+                 wartui look on this host."
             ),
             // Receiver found; no fix.
             (_, _, Some((port, baud))) => println!(
@@ -316,11 +374,11 @@ pub async fn run(args: Args) -> Result<()> {
                  capture can be uploaded. Check that it can see the sky."
             ),
             // No receiver found at specified port
-            (_, Some(port), None) => println!(
+            (GpsChoice::Port(port), _, None) => println!(
                 "Nothing on {port} answered as an NMEA receiver, so nothing in this capture \n\
                  can be uploaded. Check the path, or leave --gps off and let wartui look."
             ),
-            (_, None, None) => println!(
+            (GpsChoice::Search, _, None) => println!(
                 "No receiver was found and no position was given, so nothing in this capture \n\
                  can be uploaded. Attach a receiver and run again."
             ),
@@ -336,7 +394,7 @@ pub async fn run(args: Args) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{PoolArg, pool, test_data, tx_powers};
+    use super::{GpsChoice, PoolArg, gps_choice, pool, test_data, tx_powers};
     use crate::config::TxPower;
     use wartui_proto::plan::ChannelPool;
     use wartui_proto::tx_power::DEFAULT_TX_POWER_QUARTER_DBM;
@@ -377,6 +435,34 @@ mod tests {
     #[test]
     fn run_cmd_applies_default_pool_when_file_names_none() {
         assert_eq!(pool(None), ChannelPool::All);
+    }
+
+    #[test]
+    fn run_cmd_reads_only_bridge_receiver_when_gps_is_bridge() {
+        assert_eq!(gps_choice(false, Some("bridge"), None).unwrap(), GpsChoice::Bridge);
+    }
+
+    #[test]
+    fn run_cmd_refuses_gps_baud_when_gps_is_bridge() {
+        assert!(gps_choice(false, Some("bridge"), Some(9600)).is_err());
+    }
+
+    #[test]
+    fn run_cmd_pins_host_port_when_gps_names_one() {
+        assert_eq!(
+            gps_choice(false, Some("/dev/ttyACM0"), Some(9600)).unwrap(),
+            GpsChoice::Port("/dev/ttyACM0".to_owned())
+        );
+    }
+
+    #[test]
+    fn run_cmd_searches_when_gps_is_omitted() {
+        assert_eq!(gps_choice(false, None, None).unwrap(), GpsChoice::Search);
+    }
+
+    #[test]
+    fn run_cmd_reads_no_receiver_when_no_gps() {
+        assert_eq!(gps_choice(true, None, None).unwrap(), GpsChoice::Off);
     }
 
     #[test]

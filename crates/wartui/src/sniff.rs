@@ -39,7 +39,7 @@ pub struct Args {
     #[arg(long)]
     raw: bool,
 
-    /// Print the bridge's own log lines.
+    /// Print the bridge's own log lines, and its GPS receiver's bytes as text.
     #[arg(long)]
     verbose: bool,
 }
@@ -222,6 +222,8 @@ fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
                 Some(panel) => println!("#   panel {}x{}", panel.cols, panel.rows),
                 None => println!("#   no panel"),
             }
+            // A port, not a receiver: one that does not answer is a bridge `Error`.
+            println!("#   {}", if info.gps { "gps port" } else { "no gps port" });
         }
         return;
     };
@@ -427,6 +429,18 @@ fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
         }
 
         BridgeToHost::Error { message } => println!("# bridge error: {message}"),
+
+        // The receiver's stream as the bridge read it, split wherever a batch ended. The
+        // text is how the wiring is checked by eye, so it is shown escaped, not parsed.
+        BridgeToHost::Gps { bytes } => {
+            println!("# gps  {} bytes", bytes.len());
+            if args.verbose {
+                println!("#   {}", String::from_utf8_lossy(bytes).escape_debug());
+            }
+            if args.raw {
+                println!("      {}", hex(bytes));
+            }
+        }
 
         // Only reachable once transmit exists; harmless to print until then.
         BridgeToHost::SendResult { id, status, tx_us } => {

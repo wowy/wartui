@@ -1,8 +1,8 @@
 use serde::{Serialize, de::DeserializeOwned};
 
 use super::{
-    BridgeToHost, HostToBridge, LINK_PROTO_VERSION, MAX_ESPNOW_V2_PAYLOAD, MAX_FRAME,
-    MAX_HOST_FRAME, MAX_NODE_PAYLOAD, PANEL_ROWS,
+    BridgeToHost, GPS_FRAME, GPS_WRITE_MAX, HostToBridge, LINK_PROTO_VERSION,
+    MAX_ESPNOW_V2_PAYLOAD, MAX_FRAME, MAX_HOST_FRAME, MAX_NODE_PAYLOAD, PANEL_ROWS,
 };
 
 // A frame is the version byte, the payload and the CRC, plus COBS overhead (one byte
@@ -14,6 +14,9 @@ const _: () = assert!(MAX_NODE_PAYLOAD + 32 < MAX_BODY);
 // COBS adds one byte per 254, so 16 covers it with the terminator.
 const MAX_HOST_BODY: usize = MAX_HOST_FRAME - 16;
 const _: () = assert!(MAX_ESPNOW_V2_PAYLOAD + 32 < MAX_HOST_BODY);
+// The GPS byte pipe, both ways, so a larger batch is a build error too.
+const _: () = assert!(GPS_FRAME + 32 < MAX_BODY);
+const _: () = assert!(GPS_WRITE_MAX + 32 < MAX_HOST_BODY);
 // The other frame worth checking. A panel push carries every row every time, so its
 // worst case is fixed: `PANEL_ROWS` lines of a full `ShortStr`, each with a severity
 // byte and a length prefix, plus the variant index and the vector's length. A panel that

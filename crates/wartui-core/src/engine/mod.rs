@@ -34,7 +34,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::time::Instant;
 
 use wartui_bridge::{BridgeInfo, LinkEvent};
-use wartui_proto::link::{BridgeToHost, HostToBridge};
+use wartui_proto::link::{BridgeToHost, GpsWriteBytes, HostToBridge};
 use wartui_proto::mac::{self, Mac};
 use wartui_proto::plan::{Job, Plan};
 use wartui_proto::tx_power::clamp_tx_power;
@@ -48,7 +48,9 @@ pub(crate) use lag::BEHIND_THE_AIR_US;
 pub(crate) use rx::advance_since_boot;
 
 use crate::distinct::Distinct;
+use crate::position::PositionChain;
 use crate::record::{BridgeStatusSeen, CaptureSettings, HostStatus, Record};
+use crate::ubx;
 use admin::Pending;
 #[cfg(doc)]
 use lag::QUIET_CONNECT;
@@ -129,7 +131,10 @@ impl FleetEngine {
             tx_power: self.config.tx_power,
             bridge_tx_power: self.config.bridge_tx_power,
             record_raw: self.config.record_raw,
-            gps: self.config.position.gps().is_some(),
+            // The bridge's receiver is built for every run, so it counts only while a bridge with
+            // a GPS port is connected.
+            gps: self.config.position.gps().is_some()
+                || (self.bridge_has_gps() && self.config.position.bridge_gps().is_some()),
             gps_max_age: self.config.position.max_age(),
             remember_ble: self.remember_ble,
             preferred_ble: self.preferred_ble,
@@ -338,10 +343,34 @@ impl FleetEngine {
     /// mid-run change also goes out at once ([`Self::update_bridge_tx_power`]).
     /// `esp_wifi_set_max_tx_power` is idempotent and the bridge logs only changes, so the repeat
     /// costs one small frame per interval.
+    ///
+    /// A bridge with a GPS receiver is also sent the receiver's rate, on the same reasoning: a
+    /// dropped write has nothing behind it, and the receiver forgets its configuration whenever
+    /// the dongle loses power ([`ubx::valset_rate`] writes RAM only). Rewriting the same values
+    /// is idempotent, and costs one 64-byte frame per interval.
     fn poll_bridge(&mut self, now: Now, batch: &mut ActionBatch) {
         self.last_status_poll = Some(now.mono);
         batch.bulk.push(HostToBridge::SetTxPower { power: self.config.bridge_tx_power });
+        if self.bridge_has_gps() && self.config.position.bridge_gps().is_some() {
+            let bytes = GpsWriteBytes::from_slice(&ubx::valset_rate(self.config.gps_rate_hz))
+                .expect("a rate write fits one GpsWrite");
+            batch.bulk.push(HostToBridge::GpsWrite { bytes });
+        }
         batch.bulk.push(HostToBridge::GetStatus);
+    }
+
+    /// Whether the bridge connected now was built with a GPS port. `self.bridge` outlives a
+    /// disconnect, so the link must be up too. The runtime reads this after each event to decide
+    /// whether the host's search stands down, so the two never disagree about the bridge.
+    #[must_use]
+    pub fn bridge_has_gps(&self) -> bool {
+        self.link_up && self.bridge.as_ref().is_some_and(|bridge| bridge.gps)
+    }
+
+    /// Where the host believes it is: the chain the runtime feeds the bridge's receiver through.
+    #[must_use]
+    pub const fn position(&self) -> &PositionChain {
+        &self.config.position
     }
 
     fn on_message(&mut self, msg: &BridgeToHost, now: Now, batch: &mut ActionBatch) {
@@ -380,8 +409,11 @@ impl FleetEngine {
                 }));
             }
             // `Ready` arrives as `LinkEvent::Connected`. Bridge diagnostics are the operator's, not
-            // the engine's.
-            BridgeToHost::Ready { .. } | BridgeToHost::Log { .. } | BridgeToHost::Error { .. } => {}
+            // the engine's. GPS bytes are the position chain's.
+            BridgeToHost::Ready { .. }
+            | BridgeToHost::Log { .. }
+            | BridgeToHost::Error { .. }
+            | BridgeToHost::Gps { .. } => {}
         }
     }
 

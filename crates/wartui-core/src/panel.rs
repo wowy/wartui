@@ -314,6 +314,7 @@ mod tests {
             sky: Sky::default(),
             heard_ms: None,
             max_age: std::time::Duration::from_secs(5),
+            via_bridge: false,
         }
     }
 

@@ -140,9 +140,12 @@ capture. `SCHEMA` changes shape as freely as the work needs; `store::SCHEMA_VERS
 until 1.0, and a capture stamped anything else, or stamped 1 over another build's `SCHEMA`
 fingerprint, is refused rather than migrated.
 
-Positions resolve fresh per record through `PositionChain`: GPS (found by `discover`, or pinned with
-`--gps`; NMEA on its own thread) → static `--lat`/`--lon` (test only: it marks the capture as test
-data, which is never uploaded) → nothing. Which tier answered is stored per row.
+Positions resolve fresh per record through `PositionChain`: a host GPS pinned with `--gps` → the
+bridge's GPS (its bytes fed in by `runtime::drive`, never the engine) → a host GPS found by
+`discover` (NMEA on its own thread, standing down while the bridge's receiver has a fresh fix) →
+static `--lat`/`--lon` (test only: it marks the capture as test data, which is never uploaded) →
+nothing.
+Which tier answered is stored per row.
 
 ## Invariants that are easy to break
 
@@ -274,8 +277,12 @@ is here rather than only in a `//!`.
   `esp-radio` cannot express after its long-lived handles borrow the controller: the ESP-NOW
   peer-rate call and the runtime transmit-power call, and on a node the transmit-power read each
   heartbeat carries. `firmware/common` allows two more for the node's heartbeat, both PHY blob
-  reads: the rail voltage (`health::vdd_mv`) and the die temperature (`health::die_temp_c`). Any
-  further `#[allow(unsafe_code)]` is a decision to make in review, not a convenience.
+  reads: the rail voltage (`health::vdd_mv`) and the die temperature (`health::die_temp_c`). The
+  bridge's GPS build allows one call that is not IDF's, `Spawner::for_current_executor`
+  (`firmware/bridge/src/gps.rs`, `current_spawner`): `esp-hal`'s async I2C driver is not `Send`, and
+  `InterruptExecutor::start` gives out only a `SendSpawner`, so nothing safe starts the GPS task on
+  its interrupt executor. Any further `#[allow(unsafe_code)]` is a decision to make in review, not a
+  convenience.
 
 ### Load-bearing, and reasoned where they live
 

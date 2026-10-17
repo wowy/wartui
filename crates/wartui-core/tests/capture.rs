@@ -162,7 +162,8 @@ async fn drive_attaches_gps_positions_when_receiver_moves() {
         // A static position underneath, to prove the receiver is what the rows
         // actually used rather than the only thing they could have used.
         position: PositionChain::fixed(37.7749, -122.4194, Some(16.0))
-            .with_gps(gps.clone(), Duration::from_secs(60)),
+            .with_max_age(Duration::from_secs(60))
+            .with_gps(gps.clone()),
         ..Default::default()
     };
     let engine = FleetEngine::new(config, started);

@@ -156,10 +156,13 @@ pub(super) fn faults(snapshot: &Snapshot) -> Vec<String> {
         }
         // Lines failing their checksum with no fix suggest the wrong baud rate. Blame
         // `--gps-baud` only when the operator set it. An auto-detected rate already
-        // decoded, so later rejects mean a changed receiver or a bad cable.
+        // decoded, so later rejects mean a changed receiver or a bad cable. The bridge's
+        // receiver has no baud rate or port to name.
         if gps.counters.fixes == 0 && gps.counters.rejected > 20 {
             let rejected = thousands(gps.counters.rejected);
-            faults.push(if gps.pinned_baud {
+            faults.push(if gps.via_bridge {
+                format!("gps: {rejected} unreadable lines and no fix from the bridge's receiver")
+            } else if gps.pinned_baud {
                 format!("gps: {rejected} unreadable lines and no fix — wrong --gps-baud?")
             } else {
                 match &gps.settled {
@@ -475,6 +478,19 @@ mod tests {
             GpsCounters { sentences: 0, fixes: 0, rejected: 300 },
         );
         assert!(rendered(&mistuned).contains("wrong --gps-baud"));
+    }
+
+    #[test]
+    fn view_reports_unreadable_lines_without_port_or_baud_when_receiver_is_the_bridges() {
+        let mut noisy = with_pinned_gps(
+            GpsStatus::Searching,
+            GpsCounters { sentences: 0, fixes: 0, rejected: 300 },
+        );
+        noisy.gps.as_mut().expect("a receiver").via_bridge = true;
+        let drawn = rendered(&noisy);
+        assert!(!drawn.contains("--gps-baud"), "{drawn}");
+        assert!(!drawn.contains("/dev/"), "{drawn}");
+        assert!(drawn.contains("300 unreadable lines and no fix from the bridge"), "{drawn}");
     }
 
     #[test]

@@ -27,6 +27,7 @@ pub mod position;
 pub mod record;
 pub mod runtime;
 pub mod store;
+pub mod ubx;
 
 pub use engine::{
     ActionBatch, Assignment, Command, Counters, Event, FleetEngine, NodeState, Now, Snapshot,

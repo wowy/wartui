@@ -45,6 +45,10 @@ jobs:
             features: esp32c5
           - chip: esp32c5
             features: esp32c5,t-dongle-c5
+          - chip: esp32c5
+            features: esp32c5,t-dongle-c5-gps
+          - chip: esp32c5
+            features: esp32c5,t-dongle-c5,t-dongle-c5-gps
           - chip: esp32c6
             features: esp32c6
           - chip: esp32c6

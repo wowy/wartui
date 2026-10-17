@@ -11,10 +11,10 @@ use wartui_proto::air::{
 };
 use wartui_proto::link::{
     BROADCAST, BURST_BUDGET_US, BURST_GAP_US, BridgeToHost, Chip, EspNowPayload, FrameAccumulator,
-    HostToBridge, LINK_PROTO_VERSION, LinkBurst, LinkError, LogLevel, LoopPhase,
-    MAX_ESPNOW_V2_PAYLOAD, MAX_FRAME, MAX_HOST_FRAME, MAX_NODE_PAYLOAD, PANEL_ROWS, Panel,
-    PanelLine, PanelLines, SendPayload, SendStatus, Severity, ShortStr, crc16, decode_frame,
-    encode_frame, encode_host_frame,
+    GPS_FRAME, GPS_WRITE_MAX, GpsBytes, GpsWriteBytes, HostToBridge, LINK_PROTO_VERSION, LinkBurst,
+    LinkError, LogLevel, LoopPhase, MAX_ESPNOW_V2_PAYLOAD, MAX_FRAME, MAX_HOST_FRAME,
+    MAX_NODE_PAYLOAD, PANEL_ROWS, Panel, PanelLine, PanelLines, SendPayload, SendStatus, Severity,
+    ShortStr, crc16, decode_frame, encode_frame, encode_host_frame,
 };
 use wartui_proto::reset::ResetCause;
 
@@ -50,6 +50,10 @@ fn sample_commands() -> Vec<HostToBridge, 16> {
     v.push(HostToBridge::SetTxPower { power: 8 }).expect("sample_commands has room");
     v.push(HostToBridge::SendEspNow { id: 0xBEEF, dst: [0xAA; 6], ensure_peer: true, payload })
         .expect("sample_commands has room");
+    v.push(HostToBridge::GpsWrite {
+        bytes: GpsWriteBytes::from_slice(&[0xB5, 0x62, 0x06, 0x8A]).expect("fits"),
+    })
+    .expect("sample_commands has room");
     v
 }
 
@@ -91,6 +95,7 @@ fn sample_events() -> Vec<BridgeToHost, 16> {
         heap_free: 61_234,
         uptime_ms: 8_675_309,
         panel: None,
+        gps: false,
     })
     .expect("sample_events has room");
     // A second one, because `Option` and the enums the first case does not reach are the
@@ -105,6 +110,7 @@ fn sample_events() -> Vec<BridgeToHost, 16> {
         heap_free: 60_000,
         uptime_ms: 1_000,
         panel: Some(Panel { cols: 26, rows: 8 }),
+        gps: true,
     })
     .expect("sample_events has room");
     v.push(BridgeToHost::Rx { src: [9; 6], dst: BROADCAST, rssi: -73, rx_us: 123_456, payload })
@@ -124,6 +130,8 @@ fn sample_events() -> Vec<BridgeToHost, 16> {
         message: String::try_from("outbound ring full").expect("short"),
     })
     .expect("sample_events has room");
+    v.push(BridgeToHost::Gps { bytes: GpsBytes::from_slice(b"$GNGGA,").expect("fits") })
+        .expect("sample_events has room");
     v
 }
 
@@ -391,7 +399,7 @@ fn host_command_asks_for_reply_only_when_bridge_answers() {
     let mut payload = Vec::new();
     payload.extend_from_slice(&[0; 8]).expect("8 fits a send");
     let mac = [1, 2, 3, 4, 5, 6];
-    let cases: [(HostToBridge, bool); 8] = [
+    let cases: [(HostToBridge, bool); 9] = [
         (HostToBridge::Identify, true),
         (HostToBridge::GetStatus, true),
         (HostToBridge::SendEspNow { id: 1, dst: mac, ensure_peer: false, payload }, true),
@@ -400,6 +408,7 @@ fn host_command_asks_for_reply_only_when_bridge_answers() {
         (HostToBridge::AddPeer { mac }, false),
         (HostToBridge::RemovePeer { mac }, false),
         (HostToBridge::Reset, false),
+        (HostToBridge::GpsWrite { bytes: GpsWriteBytes::new() }, false),
     ];
     for (command, asks) in cases {
         assert_eq!(command.asks_for_reply(), asks, "{command:?}");
@@ -464,6 +473,27 @@ fn link_round_trips_node_rx_when_payload_is_full_and_has_no_zeros() {
 #[test]
 fn link_refuses_send_payload_when_longer_than_v2_ceiling() {
     assert!(SendPayload::from_slice(&[0; MAX_ESPNOW_V2_PAYLOAD + 1]).is_err());
+}
+
+#[test]
+fn link_round_trips_gps_when_frame_is_full() {
+    let event =
+        BridgeToHost::Gps { bytes: GpsBytes::from_slice(&[0xFF; GPS_FRAME]).expect("fits") };
+    let mut out = [0u8; MAX_FRAME];
+    let n = encode_frame(&event, &mut out).expect("encodes");
+    let decoded: BridgeToHost = decode_frame(&mut out[..n - 1]).expect("decodes");
+    assert_eq!(decoded, event);
+}
+
+#[test]
+fn link_round_trips_gps_write_when_bytes_are_full() {
+    let cmd = HostToBridge::GpsWrite {
+        bytes: GpsWriteBytes::from_slice(&[0xFF; GPS_WRITE_MAX]).expect("fits"),
+    };
+    let mut out = [0u8; MAX_HOST_FRAME];
+    let n = encode_host_frame(&cmd, &mut out).expect("encodes");
+    let decoded: HostToBridge = decode_frame(&mut out[..n - 1]).expect("decodes");
+    assert_eq!(decoded, cmd);
 }
 
 #[test]

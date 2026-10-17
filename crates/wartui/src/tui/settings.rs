@@ -470,6 +470,8 @@ fn save_outcome(modal: &ConfigModal, snapshot: &Snapshot, settings: &mut Setting
             },
         },
         bridge: config::Bridge { remember: Some(modal.remember_bridge), mac: None },
+        // Not on the modal, so kept as the file last had it.
+        gps: settings.saved.gps.clone(),
         api_keys: config::ApiKeys { wdgwars: modal.wdgwars_key.trim().to_owned() },
     };
     save(settings, written)
@@ -874,6 +876,26 @@ mod tests {
         assert_eq!(saved.tx_power.bridge, Some(15));
         assert_eq!(saved.bluetooth.remember, Some(true));
         assert_eq!(saved.bluetooth.node, Some(snapshot.nodes[0].state.mac));
+    }
+
+    #[test]
+    fn ui_keeps_gps_rate_in_file_when_modal_saves() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wartui.toml");
+        let saved = config::Config {
+            gps: config::Gps { bridge_rate_hz: Some(2) },
+            ..config::Config::default()
+        };
+        let snapshot = busy();
+        let (tx, _rx) = mpsc::channel(4);
+        let mut ui =
+            Ui::new(Settings { config_path: Some(target.clone()), saved, ..Settings::default() });
+        ui.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &snapshot, &tx);
+
+        ui.on_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &snapshot, &tx);
+
+        let saved = config::load(Some(&target)).expect("a valid file");
+        assert_eq!(saved.gps.bridge_rate_hz, Some(2));
     }
 
     #[test]

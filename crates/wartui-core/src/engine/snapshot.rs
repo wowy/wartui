@@ -149,8 +149,11 @@ pub struct Snapshot {
     pub now_ms: i64,
     /// Where the host believes it is, resolved as of this snapshot.
     pub position: crate::position::Fix,
-    /// What the GPS is doing, when one is configured. Separate from [`Self::position`]: "no fix"
-    /// and "no receiver" look identical in a row but are different problems.
+    /// What the GPS is doing, when one is read: a host receiver pinned with `--gps`, else the
+    /// bridge's receiver while it has a fresh fix, else the host's, else the bridge's while the
+    /// connected bridge has a GPS port. Separate from
+    /// [`Self::position`]: "no fix" and "no receiver" look identical in a row but are different
+    /// problems.
     pub gps: Option<crate::gps::GpsView>,
     /// The nodes' Wi-Fi transmit power, in ESP-IDF quarter-dBm units, for the settings modal.
     pub tx_power: i8,
@@ -193,6 +196,25 @@ pub struct BridgeStatus {
 }
 
 impl FleetEngine {
+    /// The receiver the view reports on, which is the one positioning the rows when any is. A host
+    /// receiver pinned with `--gps` first, as the chain resolves it; else the bridge's while the
+    /// connected bridge has a GPS port and its receiver a fresh fix, the rule the host's search
+    /// stands down by
+    /// (`runtime::stand_host_down`); else the host's; else the bridge's while the connected bridge
+    /// has a GPS port, so a bridge-only run shows it connecting. A bridge without one, simulated
+    /// included, shows no receiver rather than one that never connects.
+    fn shown_gps(&self, now_ms: i64) -> Option<&crate::gps::Gps> {
+        let position = &self.config.position;
+        if let Some(pinned) = position.gps().filter(|gps| gps.is_pinned()) {
+            return Some(pinned);
+        }
+        let bridge = position.bridge_gps().filter(|_| self.bridge_has_gps());
+        match bridge {
+            Some(bridge) if bridge.has_fresh_fix(now_ms) => Some(bridge),
+            _ => position.gps().or(bridge),
+        }
+    }
+
     /// Build the view the UI renders. Taken per tick, not per event, so an observation burst is not
     /// a redraw burst.
     #[must_use]
@@ -244,7 +266,7 @@ impl FleetEngine {
             started_at_ms: self.started_at_ms,
             now_ms: now.unix_ms,
             position: self.config.position.resolve(now.unix_ms),
-            gps: self.config.position.gps().map(crate::gps::Gps::view),
+            gps: self.shown_gps(now.unix_ms).map(crate::gps::Gps::view),
             tx_power: self.config.tx_power,
             bridge_tx_power: self.config.bridge_tx_power,
             excluded_ssids: self

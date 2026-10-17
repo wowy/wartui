@@ -67,7 +67,11 @@ fn fix_lines(status: String, gps: Option<&GpsView>) -> Vec<Line<'static>> {
             sky.alt.map(|alt| format!("{alt:.1} m")),
             sky.speed_kmh.map(|kmh| format!("{kmh:.1} km/h")),
             sky.hdop.map(|hdop| format!("±{:.1} m (hdop {hdop})", accuracy_from_hdop(hdop))),
-            gps.settled.as_ref().map(|(port, baud)| format!("{port} @ {baud}")),
+            if gps.via_bridge {
+                Some("bridge (Qwiic)".to_owned())
+            } else {
+                gps.settled.as_ref().map(|(port, baud)| format!("{port} @ {baud}"))
+            },
             Some(format!("{} · {} rejected", thousands(c.sentences), thousands(c.rejected))),
         ]
     });
@@ -198,6 +202,13 @@ mod tests {
         assert!(screen.contains("GPS     1   45  Y"), "{screen}");
         assert!(screen.contains("8 used · 8 in view"), "{screen}");
         assert!(!screen.contains("silent"), "{screen}");
+    }
+
+    #[test]
+    fn gps_modal_names_bridge_as_port_when_receiver_is_the_bridges() {
+        let screen = modal(&with_bridge_sky(8));
+        assert!(screen.contains("port      bridge (Qwiic)"), "{screen}");
+        assert!(!screen.contains("/dev/"), "{screen}");
     }
 
     #[test]

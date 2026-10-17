@@ -14,10 +14,11 @@ use wartui_core::engine::{
     Command, Counters, EngineConfig, Event, FleetEngine, HostSample, Now, PowerMismatch,
     StorePeaks, StoreStats,
 };
-use wartui_core::gps::Gps;
+use wartui_core::gps::{Gps, GpsConfig};
 use wartui_core::health::Health;
 use wartui_core::position::{DEFAULT_MAX_AGE, PositionChain, PositionSource};
 use wartui_core::record::{AdminOutcome, BatchGap, BridgeStatusSeen, HostStatus, Record};
+use wartui_core::ubx::valset_rate;
 use wartui_proto::air::{
     AdminMsg, Board, Capabilities, DieTemp, Frame, HeartbeatMsg, NODE_VERSION, OtaCommitMsg,
     OtaConfirmMsg, OtaState, OtaStatusMsg, RecordKind, Security, SightingBatchWriter, SightingMsg,
@@ -246,6 +247,15 @@ fn connected() -> Event {
 
 /// A connect from a bridge at `mac`, for the tests about a bridge swap.
 fn connected_with_mac(mac: Mac) -> Event {
+    connected_bridge(mac, false)
+}
+
+/// A connect from a bridge built with a GPS port.
+fn connected_with_gps() -> Event {
+    connected_bridge([0x02, 0x00, 0x5E, 0x10, 0x9D, 0x24], true)
+}
+
+fn connected_bridge(mac: Mac, gps: bool) -> Event {
     Event::Link(LinkEvent::Connected(BridgeInfo {
         chip: Chip::Esp32C6,
         mac,
@@ -259,6 +269,7 @@ fn connected_with_mac(mac: Mac) -> Event {
         // The ordinary bridge: a board with no screen. Nothing in the engine reads
         // this — the panel is composed in `runtime` from the snapshot.
         panel: None,
+        gps,
     }))
 }
 
@@ -1516,6 +1527,180 @@ fn engine_clamps_tx_power_when_configured_out_of_range() {
     );
 }
 
+/// A config whose chain holds both receivers, the bridge's and the host's.
+fn config_with_receivers(bridge: &Gps, host: &Gps) -> EngineConfig {
+    let position = PositionChain::empty().with_gps(host.clone()).with_bridge_gps(bridge.clone());
+    EngineConfig { position, ..Default::default() }
+}
+
+/// The rate writes in `batch`.
+fn gps_writes(batch: &ActionBatch) -> Vec<Vec<u8>> {
+    batch
+        .bulk
+        .iter()
+        .filter_map(|cmd| match cmd {
+            HostToBridge::GpsWrite { bytes } => Some(bytes.to_vec()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn engine_writes_gps_rate_on_every_poll_when_bridge_has_gps() {
+    let clock = Clock::new();
+    let config = EngineConfig {
+        gps_rate_hz: 2,
+        ..config_with_receivers(&Gps::detached(), &Gps::detached())
+    };
+    let mut engine = engine(config, &clock);
+    assert_eq!(gps_writes(&engine.handle(connected_with_gps(), clock.at(1))), [valset_rate(2)]);
+    // The next poll repeats it: a dropped write has nothing else behind it.
+    assert_eq!(gps_writes(&engine.handle(Event::Tick, clock.at(7))), [valset_rate(2)]);
+}
+
+#[test]
+fn engine_writes_no_gps_rate_when_bridge_has_no_gps() {
+    let clock = Clock::new();
+    let mut engine = engine(config_with_receivers(&Gps::detached(), &Gps::detached()), &clock);
+    assert!(gps_writes(&engine.handle(connected(), clock.at(1))).is_empty());
+    assert!(gps_writes(&engine.handle(Event::Tick, clock.at(7))).is_empty());
+}
+
+#[test]
+fn engine_writes_no_gps_rate_when_chain_has_no_bridge_receiver() {
+    // `--no-gps`: the bridge's receiver is left as it booted.
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    assert!(gps_writes(&engine.handle(connected_with_gps(), clock.at(1))).is_empty());
+}
+
+/// Whether the snapshot at `now` reports on the bridge's receiver.
+fn shows_bridge_gps(engine: &FleetEngine, now: Now) -> bool {
+    engine.snapshot(now, StoreStats::default()).gps.expect("a receiver").via_bridge
+}
+
+/// A GSV with no satellites: a sentence that parses, so the receiver is talking without a fix.
+const GSV: &[u8] = b"$GPGSV,1,1,00*79\r\n";
+
+/// `GGA` as the bridge forwards it, terminated.
+fn streamed_gga() -> Vec<u8> {
+    let mut bytes = GGA.to_vec();
+    bytes.extend_from_slice(b"\r\n");
+    bytes
+}
+
+#[test]
+fn engine_snapshot_shows_host_receiver_when_bridge_receiver_is_silent() {
+    let clock = Clock::new();
+    let (bridge, host) = (Gps::bridged(DEFAULT_MAX_AGE), Gps::detached());
+    let mut engine = engine(config_with_receivers(&bridge, &host), &clock);
+    assert!(!shows_bridge_gps(&engine, clock.at(1)), "no bridge yet");
+    engine.handle(connected_with_gps(), clock.at(1));
+    // The host's search carries on while the bridge's receiver says nothing.
+    assert!(!shows_bridge_gps(&engine, clock.at(2)));
+}
+
+#[test]
+fn engine_snapshot_shows_host_receiver_when_bridge_receiver_has_no_fix() {
+    // A receiver with no sky still talks every epoch; the host's search does not stand down for it.
+    let clock = Clock::new();
+    let (bridge, host) = (Gps::bridged(DEFAULT_MAX_AGE), Gps::detached());
+    let mut engine = engine(config_with_receivers(&bridge, &host), &clock);
+    engine.handle(connected_with_gps(), clock.at(1));
+    bridge.feed_bytes(GSV, clock.at(2).unix_ms);
+    assert!(!shows_bridge_gps(&engine, clock.at(2)));
+}
+
+#[test]
+fn engine_snapshot_shows_bridge_receiver_when_its_fix_is_fresh() {
+    let clock = Clock::new();
+    let (bridge, host) = (Gps::bridged(DEFAULT_MAX_AGE), Gps::detached());
+    let mut engine = engine(config_with_receivers(&bridge, &host), &clock);
+    engine.handle(connected_with_gps(), clock.at(1));
+    bridge.feed_bytes(&streamed_gga(), clock.at(2).unix_ms);
+    assert!(shows_bridge_gps(&engine, clock.at(2)));
+    assert!(!shows_bridge_gps(&engine, clock.at(8)), "the fix is past the age limit");
+    engine.handle(
+        Event::Link(LinkEvent::Disconnected { reason: "unplugged".to_owned() }),
+        clock.at(3),
+    );
+    assert!(!shows_bridge_gps(&engine, clock.at(3)), "the host's search resumes");
+    engine.handle(connected(), clock.at(4));
+    assert!(!shows_bridge_gps(&engine, clock.at(4)), "a bridge without a GPS port");
+}
+
+#[test]
+fn engine_snapshot_shows_pinned_host_receiver_when_bridge_fix_is_fresh() {
+    // `--gps PATH` positions the rows ahead of the bridge, so the view reports on it.
+    let clock = Clock::new();
+    let bridge = Gps::bridged(DEFAULT_MAX_AGE);
+    let host = Gps::spawn(GpsConfig::pinned("/dev/wartui-test-no-such-port").at_baud(9_600));
+    let mut engine = engine(config_with_receivers(&bridge, &host), &clock);
+    engine.handle(connected_with_gps(), clock.at(1));
+    bridge.feed_bytes(&streamed_gga(), clock.at(2).unix_ms);
+    assert!(!shows_bridge_gps(&engine, clock.at(2)));
+    host.stop();
+}
+
+#[test]
+fn engine_snapshot_shows_bridge_receiver_when_chain_has_no_host_receiver_and_bridge_has_gps() {
+    // `--gps bridge`: the bridge's receiver is the only one, so it is shown connecting before its
+    // first fix.
+    let clock = Clock::new();
+    let position = PositionChain::empty().with_bridge_gps(Gps::bridged(DEFAULT_MAX_AGE));
+    let mut engine = engine(EngineConfig { position, ..Default::default() }, &clock);
+    engine.handle(connected_with_gps(), clock.at(1));
+    assert!(shows_bridge_gps(&engine, clock.at(2)));
+}
+
+#[test]
+fn engine_snapshot_shows_no_receiver_when_chain_has_no_host_receiver_and_bridge_has_no_gps() {
+    // `--sim`, or a bridge built without a GPS port: nothing is being read, so nothing is shown
+    // rather than a receiver that never connects.
+    let clock = Clock::new();
+    let position = PositionChain::empty().with_bridge_gps(Gps::bridged(DEFAULT_MAX_AGE));
+    let mut engine = engine(EngineConfig { position, ..Default::default() }, &clock);
+    let gps = |engine: &FleetEngine| engine.snapshot(clock.at(2), StoreStats::default()).gps;
+    assert_eq!(gps(&engine), None, "no bridge yet");
+    engine.handle(connected(), clock.at(1));
+    assert_eq!(gps(&engine), None);
+}
+
+#[test]
+fn engine_records_gps_setting_when_connected_bridge_has_gps() {
+    // `run` builds the bridge's receiver for every capture, so its presence in the chain alone
+    // says nothing about whether a receiver is being read.
+    let clock = Clock::new();
+    let position = PositionChain::empty().with_bridge_gps(Gps::bridged(DEFAULT_MAX_AGE));
+    let mut engine = engine(EngineConfig { position, ..Default::default() }, &clock);
+    assert!(!engine.capture_settings().gps, "no bridge yet");
+    engine.handle(connected(), clock.at(1));
+    assert!(!engine.capture_settings().gps, "a bridge without a GPS port");
+    engine.handle(connected_with_gps(), clock.at(2));
+    assert!(engine.capture_settings().gps);
+    engine.handle(
+        Event::Link(LinkEvent::Disconnected { reason: "unplugged".to_owned() }),
+        clock.at(3),
+    );
+    assert!(!engine.capture_settings().gps);
+}
+
+#[test]
+fn engine_records_gps_setting_when_chain_has_host_receiver() {
+    let clock = Clock::new();
+    let position = PositionChain::empty().with_gps(Gps::detached());
+    let engine = engine(EngineConfig { position, ..Default::default() }, &clock);
+    assert!(engine.capture_settings().gps);
+}
+
+#[test]
+fn engine_records_no_gps_setting_when_chain_has_no_receiver() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(connected_with_gps(), clock.at(1));
+    assert!(!engine.capture_settings().gps);
+}
+
 #[test]
 fn engine_carries_tx_power_when_assignment_sent() {
     let clock = Clock::new();
@@ -1610,8 +1795,7 @@ fn engine_switches_to_gps_when_fix_arrives() {
     let clock = Clock::new();
     let gps = Gps::detached();
     let config = EngineConfig {
-        position: PositionChain::fixed(37.7749, -122.4194, Some(16.0))
-            .with_gps(gps.clone(), DEFAULT_MAX_AGE),
+        position: PositionChain::fixed(37.7749, -122.4194, Some(16.0)).with_gps(gps.clone()),
         ..Default::default()
     };
     let mut engine = engine(config, &clock);
@@ -1635,8 +1819,7 @@ fn engine_falls_back_to_static_when_gps_fix_stale() {
     let clock = Clock::new();
     let gps = Gps::detached();
     let config = EngineConfig {
-        position: PositionChain::fixed(37.7749, -122.4194, Some(16.0))
-            .with_gps(gps.clone(), DEFAULT_MAX_AGE),
+        position: PositionChain::fixed(37.7749, -122.4194, Some(16.0)).with_gps(gps.clone()),
         ..Default::default()
     };
     let mut engine = engine(config, &clock);
