@@ -22,7 +22,7 @@
 //! assignment from a hopeful one. Peers are added on demand and removed when the host
 //! says so (`RemovePeer`).
 //!
-//! `README.md` has the flashing commands and the esp-hal version wall.
+//! `README.md` has the flashing commands and the `esp-*` dependency set.
 #![no_std]
 #![no_main]
 #![deny(
@@ -45,10 +45,9 @@ use esp_hal::Async;
 use esp_hal::clock::CpuClock;
 #[cfg(feature = "xiao-external-antenna")]
 use esp_hal::gpio::{Level, Output, OutputConfig};
-use esp_hal::interrupt::software::SoftwareInterruptControl;
 use esp_hal::time::Instant;
 use esp_hal::timer::timg::TimerGroup;
-use esp_hal::usb_serial_jtag::{UsbSerialJtag, UsbSerialJtagRx, UsbSerialJtagTx};
+use esp_hal::usb::usb_serial_jtag::{UsbSerialJtag, UsbSerialJtagRx, UsbSerialJtagTx};
 use esp_radio::esp_now::{
     EspNowError, EspNowManager, EspNowReceiver, EspNowSender, EspNowWifiInterface, PeerInfo,
     ReceivedData,
@@ -175,10 +174,10 @@ enum Idled {
 
 // There is no watchdog here, having built one and measured that it cannot work.
 // `esp_hal::init` disables every watchdog on the chip
-// (`esp-hal-1.1.2/src/lib.rs:751-761`), and the RWDT that would close the gap
-// provably never resets these parts on esp-hal 1.1.2 — it counts, unfed, and
-// `WDT_PROCPU_RESET_EN` is the one enable that will not be written
-// (`docs/phase-3-findings.md` has the register dumps).
+// (`esp-hal-1.2.2/src/lib.rs:768-778`), and the RWDT that would close the gap
+// provably never resets these parts — it counts, unfed, and `WDT_PROCPU_RESET_EN`
+// is the one enable that will not be written (`docs/phase-3-findings.md` has the
+// register dumps, taken on esp-hal 1.1.2).
 //
 // So a genuine hang in the loop below has nothing behind it and the board has to
 // be unplugged: a real gap, left deliberately open, because a safety net that
@@ -533,8 +532,7 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
 
     // The scheduler has to be running before the radio comes up.
     let timg0 = TimerGroup::new(peripherals.TIMG0);
-    let software_interrupt = SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
-    esp_rtos::start(timg0.timer0, software_interrupt.software_interrupt0);
+    esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
 
     // A XIAO ESP32-C6's RF switch, powered, given 100 ms, then set to the U.FL
     // connector before the radio starts and held for the life of `main`.
@@ -621,7 +619,7 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     #[cfg(feature = "t-dongle-c5-gps")]
     match gps::start(
         gps::Pins { i2c: peripherals.I2C0, sda: peripherals.GPIO11, scl: peripherals.GPIO12 },
-        software_interrupt.software_interrupt1,
+        peripherals.FROM_CPU_INTR1,
     ) {
         Ok(link) => bridge.gps = Some(link),
         Err(why) => bridge.gps_fault = Some(why),
@@ -732,7 +730,7 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
 /// A batch the GPS task finishes while this waits ends it, so a batch reaches the outbox
 /// within one pass of being finished rather than a tick.
 async fn idle_wait(
-    receiver: &mut EspNowReceiver<'_>,
+    receiver: &mut EspNowReceiver,
     usb_rx: &mut UsbSerialJtagRx<'_, Async>,
     link_buf: &mut [u8; LINK_CHUNK],
     usb_tx: &mut UsbSerialJtagTx<'_, Async>,
@@ -795,7 +793,7 @@ async fn idle_wait(
 }
 
 /// Move every wartui frame the radio has heard into the outbox.
-fn drain_radio(receiver: &EspNowReceiver<'_>, bridge: &mut Bridge) -> bool {
+fn drain_radio(receiver: &EspNowReceiver, bridge: &mut Bridge) -> bool {
     let mut worked = false;
 
     while let Some(received) = receiver.receive() {
@@ -931,8 +929,8 @@ fn link_burst(
     usb_rx: &mut UsbSerialJtagRx<'_, Async>,
     link_buf: &mut [u8; LINK_CHUNK],
     sink: &mut UsbSink<'_>,
-    manager: &EspNowManager<'_>,
-    sender: &mut EspNowSender<'_>,
+    manager: &EspNowManager,
+    sender: &mut EspNowSender,
     bridge: &mut Bridge,
     mac: Mac,
     link_woke: bool,
@@ -975,8 +973,8 @@ fn link_burst(
 /// Feed bytes from the host to the accumulator, acting on each frame they complete.
 fn take_link_bytes(
     bytes: &[u8],
-    manager: &EspNowManager<'_>,
-    sender: &mut EspNowSender<'_>,
+    manager: &EspNowManager,
+    sender: &mut EspNowSender,
     bridge: &mut Bridge,
     mac: Mac,
 ) {
@@ -991,8 +989,8 @@ fn take_link_bytes(
 #[inline(never)]
 fn take_link_byte(
     byte: u8,
-    manager: &EspNowManager<'_>,
-    sender: &mut EspNowSender<'_>,
+    manager: &EspNowManager,
+    sender: &mut EspNowSender,
     bridge: &mut Bridge,
     mac: Mac,
 ) {
@@ -1050,8 +1048,8 @@ fn note_host_frame(bridge: &mut Bridge, mac: Mac, asks: bool, identify: bool) {
 /// copy in this frame on top of the one `take_link_byte` decoded.
 fn handle(
     command: &HostToBridge,
-    manager: &EspNowManager<'_>,
-    sender: &mut EspNowSender<'_>,
+    manager: &EspNowManager,
+    sender: &mut EspNowSender,
     bridge: &mut Bridge,
     mac: Mac,
 ) {
@@ -1151,7 +1149,7 @@ const fn peer(mac: &Mac) -> PeerInfo {
 /// Out of `main` because `main` sits at `.clippy.toml`'s stack threshold on the C5,
 /// and every `Error` frame built there is another 1048 bytes of its frame.
 #[inline(never)]
-fn finish_radio_setup(manager: &EspNowManager<'_>, bridge: &mut Bridge, tx_power_capped: bool) {
+fn finish_radio_setup(manager: &EspNowManager, bridge: &mut Bridge, tx_power_capped: bool) {
     if !tx_power_capped {
         bridge.error("could not cap transmit power at 2 dBm");
     }
@@ -1167,7 +1165,7 @@ fn finish_radio_setup(manager: &EspNowManager<'_>, bridge: &mut Bridge, tx_power
 /// so a peer registered any other way — or removed and registered again — is sent to
 /// at 1 Mbps with nothing to say so. A refused rate is not an error here: that peer
 /// is slower, not unreachable.
-fn add_peer(manager: &EspNowManager<'_>, mac: &Mac) -> Result<bool, EspNowError> {
+fn add_peer(manager: &EspNowManager, mac: &Mac) -> Result<bool, EspNowError> {
     manager.add_peer(peer(mac))?;
     Ok(set_peer_rate(manager, mac))
 }
@@ -1197,7 +1195,7 @@ fn add_peer(manager: &EspNowManager<'_>, mac: &Mac) -> Result<bool, EspNowError>
 /// The manager goes unused: it is proof that `esp_wifi_start` and `esp_now_init` have
 /// both run, which IDF requires first.
 #[allow(unsafe_code, reason = "esp-radio's own espnow-rate call is refused on the C5 and C6")]
-fn set_peer_rate(_manager: &EspNowManager<'_>, mac: &Mac) -> bool {
+fn set_peer_rate(_manager: &EspNowManager, mac: &Mac) -> bool {
     #[cfg(feature = "esp32c5")]
     use esp_wifi_sys_esp32c5::include as sys;
     #[cfg(feature = "esp32c6")]
@@ -1228,7 +1226,7 @@ fn set_peer_rate(_manager: &EspNowManager<'_>, mac: &Mac) -> bool {
     unsafe_code,
     reason = "esp-radio requires a mutable controller after long-lived handles borrow it"
 )]
-fn set_tx_power(_manager: &EspNowManager<'_>, power: i8) -> bool {
+fn set_tx_power(_manager: &EspNowManager, power: i8) -> bool {
     #[cfg(feature = "esp32c5")]
     use esp_wifi_sys_esp32c5::include as sys;
     #[cfg(feature = "esp32c6")]
@@ -1248,8 +1246,8 @@ fn set_tx_power(_manager: &EspNowManager<'_>, power: i8) -> bool {
 /// fact. `SendWaiter` busy-waits and its `Drop` waits too, but the
 /// scheduler is preemptive and the wait is milliseconds against a 100 ms window.
 fn transmit(
-    manager: &EspNowManager<'_>,
-    sender: &mut EspNowSender<'_>,
+    manager: &EspNowManager,
+    sender: &mut EspNowSender,
     dst: &Mac,
     ensure_peer: bool,
     payload: &[u8],

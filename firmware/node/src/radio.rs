@@ -33,7 +33,7 @@ use wartui_proto::link::BROADCAST;
 /// A refusal is worth reporting rather than retrying: it is the blob declining a
 /// channel outright, and both known causes — an unset band mode, or a channel outside
 /// the regulatory domain — are settled before the first sweep.
-pub fn park(manager: &EspNowManager<'_>, sniffer: &Sniffer<'_>, channel: u8, listen: bool) -> bool {
+pub fn park(manager: &EspNowManager, sniffer: &Sniffer, channel: u8, listen: bool) -> bool {
     let _ = sniffer.set_promiscuous_mode(true);
     let parked = manager.set_channel(channel).is_ok();
     if !listen {
@@ -50,7 +50,7 @@ pub fn park(manager: &EspNowManager<'_>, sniffer: &Sniffer<'_>, channel: u8, lis
 /// `firmware/bridge/src/main.rs` has why 24 Mbps, what it costs, and why this cannot
 /// go through `esp-radio`.
 #[allow(unsafe_code, reason = "esp-radio's own espnow-rate call is refused on the C5 and C6")]
-pub fn set_peer_rate(_manager: &EspNowManager<'_>, mac: &[u8; 6]) -> bool {
+pub fn set_peer_rate(_manager: &EspNowManager, mac: &[u8; 6]) -> bool {
     #[cfg(feature = "esp32c5")]
     use esp_wifi_sys_esp32c5::include as sys;
     #[cfg(feature = "esp32c6")]
@@ -81,7 +81,7 @@ pub fn set_peer_rate(_manager: &EspNowManager<'_>, mac: &[u8; 6]) -> bool {
     unsafe_code,
     reason = "esp-radio requires a mutable controller after long-lived handles borrow it"
 )]
-pub fn set_tx_power(_manager: &EspNowManager<'_>, power: i8) -> bool {
+pub fn set_tx_power(_manager: &EspNowManager, power: i8) -> bool {
     #[cfg(feature = "esp32c5")]
     use esp_wifi_sys_esp32c5::include as sys;
     #[cfg(feature = "esp32c6")]
@@ -103,7 +103,7 @@ pub fn set_tx_power(_manager: &EspNowManager<'_>, power: i8) -> bool {
     unsafe_code,
     reason = "esp-radio requires a mutable controller after long-lived handles borrow it"
 )]
-pub fn tx_power(_manager: &EspNowManager<'_>) -> i8 {
+pub fn tx_power(_manager: &EspNowManager) -> i8 {
     #[cfg(feature = "esp32c5")]
     use esp_wifi_sys_esp32c5::include as sys;
     #[cfg(feature = "esp32c6")]
@@ -147,7 +147,7 @@ const fn peer(mac: [u8; 6]) -> PeerInfo {
 /// Treated as success, same as `transmit` in `firmware/bridge/src/main.rs` — the
 /// alternative is a node that can never move back onto a MAC it once left.
 pub fn set_core_peer(
-    manager: &EspNowManager<'_>,
+    manager: &EspNowManager,
     old: Option<[u8; 6]>,
     mac: [u8; 6],
 ) -> Result<(), EspNowError> {
@@ -167,7 +167,7 @@ pub fn set_core_peer(
 /// Heartbeats only: nothing acknowledges a broadcast, so the return value says only
 /// that the radio transmitted it. A node's core is learned from an admin or clear
 /// frame, and until one arrives a heartbeat is the only thing a node can send.
-pub fn broadcast(sender: &mut EspNowSender<'_>, frame: &[u8]) -> bool {
+pub fn broadcast(sender: &mut EspNowSender, frame: &[u8]) -> bool {
     // `esp-radio` registers the broadcast peer at init, and the waiter's `Drop`
     // blocks anyway, so waiting costs nothing that walking away would save.
     sender.send(&BROADCAST, frame).is_ok_and(|waiter| waiter.wait().is_ok())
@@ -180,6 +180,6 @@ pub fn broadcast(sender: &mut EspNowSender<'_>, frame: &[u8]) -> bool {
 /// send callback, the same as [`broadcast`]; the difference is what `Ok` means for a
 /// unicast destination, which `firmware/bridge/src/main.rs`'s `transmit` also relies
 /// on: the callback status is the MAC ack, not just an enqueue.
-pub fn unicast(sender: &mut EspNowSender<'_>, dst: &[u8; 6], frame: &[u8]) -> bool {
+pub fn unicast(sender: &mut EspNowSender, dst: &[u8; 6], frame: &[u8]) -> bool {
     sender.send(dst, frame).is_ok_and(|waiter| waiter.wait().is_ok())
 }

@@ -481,7 +481,7 @@ impl Ota {
     ///
     /// It borrows the flash and the table buffer for as long as it lives, so the node
     /// opens one when it needs `otadata` rather than holding one across the main loop.
-    fn updater(&mut self) -> Result<OtaUpdater<'_, FlashStorage<'static>>, Fault> {
+    fn updater(&mut self) -> Result<OtaUpdater<'_, 'static>, Fault> {
         Ok(OtaUpdater::new(&mut self.flash, self.table)?)
     }
 }

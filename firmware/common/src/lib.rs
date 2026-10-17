@@ -72,27 +72,21 @@ pub fn reset_cause() -> ResetCause {
     }
 }
 
-/// Reset the chip, undoing first what the C5's ROM leaves behind.
+/// Reset the chip: the one funnel every reset either firmware takes.
 ///
-/// Every reset either firmware takes comes through here — both panic handlers, and on
-/// the bridge its stall detector and `HostToBridge::Reset` — because on the C5 a bare
-/// `software_reset()` does not reboot the board, it ends it. The part comes up
-/// with `PCR.RESET_EVENT_BYPASS.reset_event_bypass` set, which keeps a core reset
-/// from also resetting the system bus; the ROM's own MSPI core reset then leaves
-/// the AXI bus frozen. The banner prints, `SPI mode:` never does, and nothing
-/// recovers the board until it loses power — measured four ways. On the bridge that
-/// is strictly worse than the wedge the stall detector exists to clear.
+/// Both panic handlers come here, and on the bridge its stall detector and
+/// `HostToBridge::Reset`. On the C5 a bare `software_reset()` reboots the board only
+/// once `esp_hal::init` has run. The part comes up with
+/// `PCR.RESET_EVENT_BYPASS.reset_event_bypass` set, which keeps a core reset from also
+/// resetting the system bus; the ROM's own MSPI core reset then leaves the AXI bus
+/// frozen. The banner prints, `SPI mode:` never does, and nothing recovers the board
+/// until it loses power — measured four ways (`docs/phase-3-findings.md`). On the bridge
+/// that is strictly worse than the wedge the stall detector exists to clear.
 ///
-/// Clearing the bit is what ESP-IDF does on every boot and what `esp-hal` does in
-/// its C5 `pre_init` from 1.2 onwards (esp-rs/esp-hal#5703), which the version
-/// wall in `firmware/bridge/README.md` keeps out of reach. Written here rather than
-/// in either `main` because a panic can land before `main` reaches a line of its own,
-/// and one funnel is one place to delete when that pin moves — see issue #16.
+/// `esp-hal` clears the bit in its C5 `pre_init`, the first thing `esp_hal::init` does
+/// and before anything in it can panic (esp-rs/esp-hal#5703), as ESP-IDF's bootloader
+/// does. One funnel keeps every reset on the path that was benched, and is the one
+/// place to change if a chip needs more.
 pub fn reboot() -> ! {
-    #[cfg(feature = "esp32c5")]
-    esp_hal::peripherals::PCR::regs()
-        .reset_event_bypass()
-        .modify(|_, w| w.reset_event_bypass().clear_bit());
-
     esp_hal::system::software_reset()
 }

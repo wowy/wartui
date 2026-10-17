@@ -20,11 +20,11 @@ esp32c5 = ["esp-hal/esp32c5"]
 esp32c6 = ["esp-hal/esp32c6"]
 
 [dependencies]
-# The firmwares are held on esp-hal 1.1 by `esp-radio`'s `~1.1.0`; this crate
-# does not depend on `esp-radio`, so it states that wall itself. Without it, this
-# workspace's own lockfile could move to 1.2 and its clippy would lint against an
+# The firmwares are held on esp-hal 1.2 by `esp-radio`'s `~1.2.0`; this crate
+# does not depend on `esp-radio`, so it states that range itself. Without it, this
+# workspace's own lockfile could move to 1.3 and its clippy would lint against an
 # esp-hal neither firmware builds. `firmware/bridge/README.md` § "Dependency versions".
-esp-hal = { version = "~1.1.2", features = ["unstable"] }
+esp-hal = { version = "~1.2.2", features = ["unstable"] }
 wartui-proto = { path = "../../crates/wartui-proto" }
 
 [lints.rust]

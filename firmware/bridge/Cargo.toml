@@ -64,16 +64,16 @@ t-dongle-c5-gps = ["dep:embassy-sync"]
 # queues through their own copy's `HEAP`, which nothing here fills, so a second
 # copy is a second and empty heap. Held at the version `esp-radio` resolves;
 # README.md § "Dependency versions".
-esp-alloc = "0.10.0"
-esp-bootloader-esp-idf = "0.5.0"
-esp-hal = { version = "1.1.2", features = ["unstable"] }
-esp-radio = { version = "1.0.0-beta.0", default-features = false, features = [
+esp-alloc = "0.11.0"
+esp-bootloader-esp-idf = "0.6.0"
+esp-hal = { version = "1.2.2", features = ["unstable"] }
+esp-radio = { version = "1.0.0-beta.1", default-features = false, features = [
   "esp-alloc",
   "esp-now",
   "unstable",
   "wifi",
 ] }
-esp-rtos = { version = "0.3.0", features = ["embassy", "esp-alloc", "esp-radio"] }
+esp-rtos = { version = "0.4.0", features = ["embassy", "esp-alloc", "esp-radio"] }
 # `main` is an `esp-rtos` embassy task so the idle wait can end on USB and radio
 # events. Held at the versions `esp-rtos` and `esp-hal` build against;
 # README.md § "Dependency versions".
@@ -87,8 +87,8 @@ embedded-io-async = "0.7.0"
 # IDF's own bindings, for the one call `esp-radio` does not wrap —
 # `esp_now_set_peer_rate_config`, in `set_peer_rate`. Held at the version
 # `esp-radio` links; README.md § "Dependency versions".
-esp-wifi-sys-esp32c5 = { version = "0.2.0", optional = true }
-esp-wifi-sys-esp32c6 = { version = "0.2.0", optional = true }
+esp-wifi-sys-esp32c5 = { version = "0.3.0", optional = true }
+esp-wifi-sys-esp32c6 = { version = "0.3.0", optional = true }
 # The panel, behind `t-dongle-c5`. Outside the `esp-radio` wall that holds the
 # `esp-*` family — none of these is in its dependency closure — but not outside
 # it entirely: all three sit on `embedded-hal` 1.0, which `esp-hal` also brings,

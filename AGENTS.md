@@ -14,8 +14,8 @@ Where the prose lives:
 - `crates/wartui/README.md` — the operator's manual: keys, fleet states, channel pools,
   GPS, troubleshooting. Read it before changing view or CLI behavior, and **keep it true
   when that behavior changes.**
-- `firmware/*/README.md` — each firmware's own constraints, including the esp-hal version
-  wall (`firmware/bridge/README.md`).
+- `firmware/*/README.md` — each firmware's own constraints, including the `esp-*` dependency
+  set (`firmware/bridge/README.md`).
 - `docs/*-findings.md` — what each bench actually measured, and why several invariants
   below exist. `phase-N` are the fleet's, and the rest are named for what was measured.
 
@@ -103,8 +103,8 @@ own.
   knowledge. Fixes there cost a reflash, so logic belongs on the host. A board with a screen
   draws lines the host composed and hands it, which is the same rule seen from the other side.
 - **`firmware/node`** — the nodes. Sniffs rather than scans, so it never transmits while
-  looking and can hold `sniffer()` and `esp_now()` at once (both borrow the controller
-  immutably; `scan_async` wants `&mut`). Returns to the control channel after every dwell,
+  looking, owns the channel, and holds `sniffer()` and `esp_now()` together for the life of the
+  program (`firmware/node/README.md` § "What it does differently"). Returns to the control channel after every dwell,
   and parks there doing nothing when it holds no assignment. The node given the Bluetooth
   scan never leaves the control channel at all: it sniffs nothing and runs one scan after
   another, back to back. Same rule as the bridge: the logic lives in `wartui-proto`, and
@@ -337,10 +337,10 @@ edit stops; follow the pointer before changing the rule.
   `StallWatch` times the *contradiction*, and **every one of its four facts is load-bearing**:
   delete any and a bridge reboots forever, or never. There is no watchdog behind the hang case.
   → `crates/wartui-proto/src/stall.rs`, `StallWatch`; `docs/phase-3-findings.md`
-- **Every reset goes through `reboot()`, and on a C5 that funnel *is* the reset** — a bare
-  `software_reset()` there does not reboot the board, it stops it. Both firmwares share the one
-  funnel, which is what the esp-hal 1.2 cleanup (issue #16) removes.
-  → `firmware/common/src/lib.rs`, `reboot`
+- **Every reset goes through `reboot()`.** On a C5, a bare `software_reset()` before
+  `esp_hal::init` has cleared `reset_event_bypass` does not reboot the board, it stops it.
+  `esp-hal`'s C5 `pre_init` clears it; both firmwares share the one funnel so every reset takes
+  the benched path. → `firmware/common/src/lib.rs`, `reboot`
 - **A bridge reboot is invisible unless the host compares uptimes**, because a software reset does
   not re-enumerate the USB device. → `crates/wartui-bridge/src/serial.rs`, the `Ready` arm
 - **Neither firmware may block on the USB endpoint.** The bridge's rings evict oldest-first and
@@ -360,12 +360,12 @@ edit stops; follow the pointer before changing the rule.
   defaults to China, which silently costs a C5 channels 100–144 on every sweep.
   → `firmware/bridge/src/main.rs`, `firmware/node/README.md`
 - **Every crate `esp-radio` also depends on is held at the version `esp-radio` resolves.**
-  `esp-radio 1.0.0-beta.0` requires `esp-hal ~1.1.0`, which walls off `esp-hal` and `esp-rtos`
-  outright. The others — `esp-alloc`, `esp-sync`, `esp-wifi-sys-*` — go higher perfectly happily,
-  and a higher one is a *second copy* rather than an upgrade: a duplicate `__esp_radio_printf` that
-  fat LTO refuses, or a second `esp-alloc` whose `HEAP` nothing fills, which builds and then panics
-  on the first task the radio spawns. Dependabot ignores them and each firmware's CI job counts the
-  versions; issue #16 is the real upgrade, and moves all of them at once.
+  `esp-radio 1.0.0-beta.1` requires `esp-hal ~1.2.0`, which walls off `esp-hal` and `esp-rtos`
+  outright. The others — `esp-alloc`, `esp-sync`, `esp-storage`, `esp-wifi-sys-*` — go higher
+  perfectly happily, and a higher one is a *second copy* rather than an upgrade: a duplicate
+  `__esp_radio_printf` that fat LTO refuses, or a second `esp-alloc` whose `HEAP` nothing fills,
+  which builds and then panics on the first task the radio spawns. Dependabot ignores them and each
+  firmware's CI job counts the versions; a new `esp-radio` moves all of them at once, by hand.
   → `firmware/bridge/README.md` § "Dependency versions"
 - **Every bridge and node defaults to 2 dBm**, the lowest `set_max_tx_power` accepts, and the host
   is what decides otherwise: `fleet` and `bridge` under `[tx-power]` in `wartui.toml`, or the

@@ -57,10 +57,11 @@ sent the frame. § "Over-the-air updates" has the rest.
 never transmits while looking, including on the DFS channels, where the rules say listen and don't
 speak.
 
-Listening also makes the rest possible. `WifiController::sniffer()` and `::esp_now()` both borrow
-the controller immutably, so a node holds both for the life of the program. `scan_async` wants
-`&mut`, and holding it alongside an ESP-NOW instance isn't expressible. The instance would have to
-be torn down and rebuilt around every scan.
+Listening also makes the rest possible. A node holds `WifiController::sniffer()` and `::esp_now()`
+together for the life of the program, and owns the channel: it parks where it chooses and returns
+to the control channel when it chooses. A scan from `scan_async` hops channels on its own schedule,
+sends probe requests unless asked to be passive, and returns an `AccessPointInfo` per network with
+no element bodies, so no roaming consortium trailer. The promiscuous callback sees each beacon whole.
 
 **It is on the control channel far more often.** Nothing owns the radio, so the node returns to the
 control channel after _every_ dwell, not only after a heartbeat. There it reports what it heard and
@@ -344,19 +345,18 @@ would fill with copies of the loudest network and drop the ones not yet seen.
 Same set as the bridge, pinned by the same thing. See
 [`firmware/bridge/README.md`](../bridge/README.md).
 
-`esp-println` is the one thing outside that wall. Its `esp-metadata-generated ^0.5` is a **build**
-dependency, which resolves independently of the 0.4 the rest of the graph uses. Its `esp-sync ^0.3`
-comes only with the `critical-section` feature, which is off here, so the tree has exactly one
-`esp-sync`. Verify with:
+`esp-println` is the one thing outside that set. Its `esp-sync ^0.3` is the copy `esp-hal` uses, so
+the tree has exactly one `esp-sync`. Verify with:
 
 ```sh
-cargo tree -e normal --features esp32c6 | grep esp-sync   # 0.2.1 only
+cargo tree -e normal --features esp32c6 | grep esp-sync   # 0.3.0 only
 ```
 
 Its serial-JTAG writer tries the FIFO a bounded number of times, then sets a sticky flag saying
 nobody is draining it. So a node with no monitor attached drops diagnostics rather than stalling
 mid-sweep. That is the only property this firmware needs from it, and the reason it is allowed here.
 
-`esp-storage`, the flash driver under updates, is inside the wall, and the bridge's README says
-why it is held at 0.9. Its default `critical-section` feature stays on: it holds interrupts off
-across each flash operation, through the same `esp-sync`.
+`esp-storage`, the flash driver under updates, is held at the version `esp-bootloader-esp-idf`
+resolves, with its `embedded-storage` feature on for the `NorFlash` traits `src/ota.rs` writes
+through. Its default `critical-section` feature stays on: it holds interrupts off across each flash
+operation, through the same `esp-sync`.
