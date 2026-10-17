@@ -81,16 +81,66 @@ before the SPI start and stop costs, which weren't measured.
 Even with the spike's naive single buffer, the link isn't the narrow point any more. The P4's
 host link is: the CH343 at about 500 KB/s, or the P4's own USB.
 
-## ESP-NOW receive ran alongside without loss
+## At heartbeat load, ESP-NOW receive ran alongside without loss
 
 The C6 received 278 ESP-NOW frames during the run, all wartui frames (they start with
 `air::MAGIC`). It forwarded each one as a kind-1 transfer. The forward count on the P4 tracked
 the C6's receive count in every 15 s step, and no frame was dropped from the C6's 8-entry FIFO.
 None of the SPI error counters moved while the radio was receiving.
 
-This was only heartbeat traffic, about 1.7 frames/s. **Burst load wasn't tested.** A burst
-needs the temporary burst build from `link-encode-findings.md`. The question that remains open
-is whether the radio's receive interrupts stretch `prep` under a burst.
+This was only heartbeat traffic, about 1.7 frames/s. The next section loads it with bursts.
+
+## Under burst load, 26.67 MHz and up lost nothing
+
+A second run, on the same day, loaded the C6 with real bursts.
+
+**The nodes:** both ran the `burst-test` build, ported to esp-hal 1.2 on the unmerged branch
+`bench/burst-load-1.2`. Each sends a burst of 46, 91 or 132 full sighting batches every 10 s,
+990–1,023 bytes a frame, through the real acknowledged unicast path. Their offsets put both
+nodes' bursts within a second of each other every time, so every burst was a two-node overlap.
+That is the hard case.
+
+**The C6:** a burst node sends only to its core. So the spike C6 broadcast a `ClearMsg` every
+2 s (9ec9cca), and both nodes adopted it as core within a second of it booting. It sent 135
+clears with no failures, through a `send_async` future it polls by hand, so the SPI loop never
+waits on a transmit.
+
+The run covered 4 min 28 s and just over three and a half sweeps. 4,819 batches were
+acknowledged to the C6:
+
+| Clock | Transfers/s, burst load | Transfers/s, heartbeats only | FIFO drops per 15 s step |
+| --- | --- | --- | --- |
+| 5 MHz | 491–497 | 503 | 81, 150, 39 |
+| 10 MHz | 851 | 867 | 27, 22, 21, 21 |
+| 20 MHz | 1,320 | 1,359 | 0, 7, 32, 2 |
+| 26.67 MHz | 1,529–1,532 | 1,583 | 0, 0, 0 |
+| 40 MHz | 1,820–1,822 | 1,897 | 0, 0, 0 |
+
+The first 5 MHz step also dropped 115, but that step overlapped the C6's boot, so it is left
+out.
+
+- **Below 26.67 MHz, the C6's 8-entry FIFO overflows.** Two overlapping bursts arrive faster
+  than the link drains them, as the burst rates predicted. At 20 MHz the link only just keeps
+  up, and the FIFO overflows on some overlaps.
+- **At 26.67 and 40 MHz, nothing was dropped** in any of six steps.
+- **Every frame that entered the FIFO reached the P4.** By the last report, the C6 had taken
+  in 5,181 frames and dropped 517 from the FIFO, leaving 4,664. The P4 counted 4,666 forwarded,
+  and the difference is when each side took its snapshot.
+- **The link stayed clean:** no CRC, magic, length, sequence or pattern error on either end,
+  over about 308,000 transfers.
+- **Receive interrupts cost a little:** `prep` rose from a 243 µs to a 264 µs average, and its
+  maximum from 340 to 420 µs. Transfers/s fell 3–4%. The P4's p99 READY wait peaked at 350 µs,
+  up from 190.
+
+The radio's own receive queue is a separate loss point. It holds 10 frames, a private constant
+in esp-radio 1.0.0-beta.1 (`RECEIVE_QUEUE_SIZE`, `esp_now/mod.rs:33`), and it drops its oldest
+frame without a count. The C6 received 362 more frames than the nodes had acknowledged
+batches, and those are its heartbeats. At the heartbeat-only run's 1.7 frames/s there would be
+about 455. That shortfall of about 90 frames could be queue loss, or fewer heartbeats while
+bursting. This bench can't separate the two; a sequence check per node on the P4 could.
+
+On the air, the XIAO C6 (`9A:24`) missed 23 acknowledgements over the run (its seq ended 23 behind the C5's), its own losses
+before the bridge. The C5 node (`F5:50`) missed none.
 
 ## The handshake recovery fires once per step
 
@@ -114,9 +164,11 @@ released its EN.
 - **The P4 doesn't auto-reset into the bootloader from the CH343.** `espflash` connects only
   when BOOT is held while the board is plugged in. Its hard reset after flashing doesn't start
   the app either: press RST, or replug.
-- **Opening the CH343 port can reset the P4** (`rst:0x1 (POWERON)`), even with DTR and RTS set
-  low before `open()`. One RST press with the capture's port open landed in download mode
-  (`boot:0x307`). The next, which was a replug, booted from flash.
+- **To run the app, replug the board's Type-C.** On three occasions, pressing RST landed the P4
+  in download mode (`boot:0x307 … waiting for download`). Every replug booted it from flash.
+- **The CH343's DTR and RTS don't reset the P4.** Holding each of the four combinations for
+  1.5 s drew no ROM output. Opening the port did coincide with a `rst:0x1 (POWERON)` once, but
+  never again in that session.
 - **The P4 moves to a new `/dev/ttyACM*` number when replugged.** Use
   `/dev/serial/by-id/usb-1a86_USB_Single_Serial_5C93090010-if00`.
 - **The C6 flashes through header H7.** That needs IO9 jumpered to GND, the P4 held in its ROM
@@ -129,6 +181,8 @@ released its EN.
 - SPI over the SDIO traces, with esp-hal 1.2's C6 slave, is reliable at up to at least 40 MHz.
 - It already runs faster than the burst rate of two overlapping nodes. Double-buffering should
   bring it near the wire's ~4,800 transfers/s.
-- The split bridge is no longer limited by the C6-to-P4 link. The next questions are:
+- With two nodes bursting at once, 26.67 MHz and above forwarded everything that left the
+  radio's queue. Production should run at 40 MHz and give the C6 a FIFO deeper than 8.
+- The split bridge is no longer limited by the C6-to-P4 link. What remains to measure:
   - the P4's link to the host (the CH343 or its USB)
-  - the C6 under burst receive load
+  - whether esp-radio's 10-frame receive queue drops frames under a burst
