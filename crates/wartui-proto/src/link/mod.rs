@@ -134,9 +134,6 @@ pub enum LoopPhase {
     /// Pushing pixels at the panel, the other call in the loop that blocks for longer
     /// than a memcpy.
     Render,
-    /// Reading or writing the GPS receiver over I2C, the third call in the loop that
-    /// blocks for longer than a memcpy.
-    Gps,
 }
 
 /// Severity of a [`BridgeToHost::Log`] line.

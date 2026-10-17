@@ -1895,6 +1895,7 @@ version = "0.1.1"
 dependencies = [
  "embassy-executor",
  "embassy-futures",
+ "embassy-sync 0.8.0",
  "embassy-time",
  "embedded-graphics",
  "embedded-hal-bus",

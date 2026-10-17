@@ -106,7 +106,7 @@ fn sample_events() -> Vec<BridgeToHost, 16> {
         fw_version: String::try_from("0.1.0").expect("short"),
         proto_version: LINK_PROTO_VERSION,
         reset_cause: ResetCause::Lockup,
-        last_phase: LoopPhase::Gps,
+        last_phase: LoopPhase::Render,
         heap_free: 60_000,
         uptime_ms: 1_000,
         panel: Some(Panel { cols: 26, rows: 8 }),

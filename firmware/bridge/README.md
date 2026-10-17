@@ -134,13 +134,26 @@ frames, and writes the bytes a `GpsWrite` carries. It parses neither. The host s
 and composes the receiver's configuration, so a change to the rate or the sentences costs a
 `cargo run` rather than a reflash.
 
-The reads block the loop: about 38 µs a byte, so 2.5–4 ms for a full 64-byte read
-([`docs/t-dongle-c5-gps-findings.md`](../../docs/t-dongle-c5-gps-findings.md)). The bridge polls no
-more often than every 25 ms, and again straight away while the receiver has more waiting, so a
-backlog drains.
+**The receiver is read by its own task, over interrupt-driven I2C, and the main loop never waits on
+it.** A byte costs about 38 µs, so a full 64-byte read takes 2.5–4 ms
+([`docs/t-dongle-c5-gps-findings.md`](../../docs/t-dongle-c5-gps-findings.md)). Read blocking from
+the main loop, the CPU spins for all of it while the radio's ten-deep receive queue and the USB
+outbox go unserved. With four nodes bursting, a 5 Hz receiver read that way lost 26–38 sighting
+batches a four-minute run against 0–17 without it, and the outbox dropped frames. Async I2C lets
+the peripheral clock the bytes while the CPU serves the radio and USB.
 
-The reads are batched into `Gps` frames of up to 512 bytes, each sent once the receiver has drained
-or the next read would not fit: about one frame per fix at 5 Hz, plus a few for the once-a-second
+The task runs on an interrupt executor at the lowest interrupt priority, so it preempts the main
+loop for the microseconds it takes to start or finish a transfer. The C5's 32-byte I2C FIFO splits
+a 64-byte read into three transfers. On the main loop's executor each would wait for the loop to
+go idle, and a transmit callback or a panel repaint holds it for 35 ms. [`src/gps.rs`](src/gps.rs)'s
+`//!` has the hand-off between the two.
+
+The task polls no more often than every 25 ms, and again straight away while the receiver has more
+waiting, so a backlog drains. Every transaction is bounded at 10 ms.
+
+The reads are batched into `Gps` frames of up to 512 bytes, each handed to the main loop once the
+receiver has drained or the next read would not fit. A finished batch ends the loop's idle wait, so
+it reaches the outbox within a pass: about one frame per fix at 5 Hz, plus a few for the once-a-second
 `GSA`/`GSV` burst. Every `Gps` frame takes a whole slot of the outbox's bulk ring, the slots node
 sightings wait in, so a frame per read, 30 to 40 a second, would push sightings out whenever USB
 backs up.
@@ -260,8 +273,8 @@ family. It holds the family in two ways:
 The panel crates (`embedded-graphics`, `embedded-hal-bus`, and `mipidsi`) are free to move. Only
 their shared `embedded-hal` 1.0 must stay a single copy.
 
-`embassy-executor`, `embassy-time`, and `embedded-io-async` are held the same way, through
-`esp-rtos` and `esp-hal`.
+`embassy-executor`, `embassy-sync`, `embassy-time`, and `embedded-io-async` are held the same way,
+through `esp-rtos` and `esp-hal`.
 
 ### The wall
 
@@ -324,10 +337,15 @@ cargo tree --locked --features esp32c6 -e normal --prefix none --format '{p}' \
 ```
 
 They are direct dependencies for reasons that do not go away. `esp-wifi-sys-*` is here for the two
-IDF calls `esp-radio` does not wrap, which are the only `unsafe` in either firmware:
+IDF calls `esp-radio` does not wrap, which are the only `unsafe` in either firmware but one:
 
 - `esp_now_set_peer_rate_config` (`set_peer_rate` in `src/main.rs`);
 - `esp_wifi_set_max_tx_power` (`set_tx_power` beside it).
+
+The one is not an IDF call: the GPS build takes its interrupt executor's spawner through
+`Spawner::for_current_executor` (`current_spawner` in `src/gps.rs`). `esp-hal`'s async I2C driver
+is not `Send`, and `InterruptExecutor::start` gives out only a `SendSpawner`, so nothing safe can
+start the task that owns the bus.
 
 `esp-alloc` is here because the firmware owns the heap and declares its regions.
 
@@ -338,15 +356,21 @@ CI job counts it with the rest, and Dependabot ignores its minor and major relea
 
 ### Embassy and `embedded-io-async`
 
-`embassy-executor`, `embassy-time`, and `embedded-io-async` are held at the versions `esp-rtos` and
-`esp-hal` build against, and move with them. `embedded-io-async` stays at 0.7, the only version
-`esp-hal` 1.1 implements its async traits for. None can double quietly:
+`embassy-executor`, `embassy-sync`, `embassy-time`, and `embedded-io-async` are held at the
+versions `esp-rtos` and `esp-hal` build against, and move with them. `embedded-io-async` stays at
+0.7, the only version `esp-hal` 1.1 implements its async traits for. None can double quietly:
 
 - the executor's `Spawner` would not type-check against `esp-rtos`'s;
 - `embassy-time-driver` is `links`-keyed;
 - a second `embedded-io-async` would have no implementation on the USB half.
 
 So they are not in the check, and Dependabot ignores their minor and major releases.
+
+`embassy-sync` is the GPS build's alone, for the task's channels, and held at 0.8, the copy
+`esp-hal` and `esp-rtos` use. 0.6 and 0.7 are in the lockfile too, both `esp-sync`'s, which depends
+on all three under aliases. A second 0.x would double rather than conflict, and harmlessly: the
+channels never pass through an `esp-hal` or `esp-rtos` API, and the crate keeps no global state. It
+is held so the tree adds no copy, not because one would break the build.
 
 `esp-generate` is a version behind this set. Its scaffolding (`build.rs`, `.cargo/config.toml`) is
 what was taken from it, not its dependency list.

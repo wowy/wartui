@@ -276,8 +276,12 @@ is here rather than only in a `//!`.
   `esp-radio` cannot express after its long-lived handles borrow the controller: the ESP-NOW
   peer-rate call and the runtime transmit-power call, and on a node the transmit-power read each
   heartbeat carries. `firmware/common` allows two more for the node's heartbeat, both PHY blob
-  reads: the rail voltage (`health::vdd_mv`) and the die temperature (`health::die_temp_c`). Any
-  further `#[allow(unsafe_code)]` is a decision to make in review, not a convenience.
+  reads: the rail voltage (`health::vdd_mv`) and the die temperature (`health::die_temp_c`). The
+  bridge's GPS build allows one call that is not IDF's, `Spawner::for_current_executor`
+  (`firmware/bridge/src/gps.rs`, `current_spawner`): `esp-hal`'s async I2C driver is not `Send`, and
+  `InterruptExecutor::start` gives out only a `SendSpawner`, so nothing safe starts the GPS task on
+  its interrupt executor. Any further `#[allow(unsafe_code)]` is a decision to make in review, not a
+  convenience.
 
 ### Load-bearing, and reasoned where they live
 

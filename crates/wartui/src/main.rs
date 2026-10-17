@@ -305,7 +305,6 @@ pub fn last_reset_line(info: &BridgeInfo) -> String {
         LoopPhase::Pump => Some("it was writing to the USB endpoint"),
         LoopPhase::Boot => Some("it had not reached its main loop"),
         LoopPhase::Render => Some("it was drawing its panel"),
-        LoopPhase::Gps => Some("it was talking to its GPS receiver"),
         LoopPhase::Idle | LoopPhase::Unknown => None,
     };
     match phase {

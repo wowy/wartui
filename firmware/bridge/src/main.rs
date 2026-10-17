@@ -36,7 +36,7 @@ mod gps;
 #[cfg(feature = "t-dongle-c5")]
 mod panel;
 
-use embassy_futures::select::{Either4, select4};
+use embassy_futures::select::{Either, Either4, select, select4};
 use embassy_time::Timer;
 use esp_hal::Async;
 use esp_hal::clock::CpuClock;
@@ -59,6 +59,8 @@ use wartui_firmware::{reboot, reset_cause};
 /// same channel is that they read it from the same place.
 use wartui_proto::air::CONTROL_CHANNEL;
 use wartui_proto::heapless::Vec;
+#[cfg(feature = "t-dongle-c5-gps")]
+use wartui_proto::link::GpsWriteBytes;
 use wartui_proto::link::{
     BROADCAST, BridgeToHost, Chip, FrameAccumulator, HostToBridge, LINK_PROTO_VERSION, LinkBurst,
     LinkError, LogLevel, LogStr, LoopPhase, MAX_HOST_FRAME, Panel, PanelLines, SendStatus,
@@ -126,8 +128,8 @@ const PANEL: Option<Panel> = None;
 /// The longest an idle pass waits: one in which neither radio nor link had anything
 /// to do.
 ///
-/// A received frame, a host command and — while frames are queued for the host — the
-/// USB FIFO emptying each end the wait themselves. The FIFO wake is what lets the outbox
+/// A received frame, a host command, a finished GPS batch and — while frames are queued for
+/// the host — the USB FIFO emptying each end the wait themselves. The FIFO wake is what lets the outbox
 /// go on draining after a [`link_burst`] gives the pass back, without a busy loop that
 /// burns the core whenever no host is reading. `docs/usb-link-findings.md` has the
 /// rates.
@@ -150,6 +152,9 @@ enum Woken {
     Frame(ReceivedData),
     Link(usize),
     Drained,
+    /// The GPS task finished a batch.
+    #[cfg(feature = "t-dongle-c5-gps")]
+    Gps,
     Tick,
 }
 
@@ -160,7 +165,8 @@ enum Idled {
     Read(usize),
     /// The tick ended the wait, so the air was quiet for all of it.
     Quiet,
-    /// A frame or a FIFO drain ended it, and is already dealt with.
+    /// A frame, a FIFO drain or a GPS batch ended it. A frame is already dealt with, and
+    /// the next pass forwards a batch.
     Busy,
 }
 
@@ -186,7 +192,7 @@ enum Idled {
 /// reason says the RTC domain was not reset.
 ///
 /// An `AtomicU8` because a `static mut` cannot be written without `unsafe`, which is
-/// denied here everywhere but [`set_peer_rate`]. Never contended: only the main task
+/// denied here but for the calls AGENTS.md lists. Never contended: only the main task
 /// touches it.
 #[esp_hal::ram(unstable(rtc_fast, persistent))]
 static PHASE: AtomicU8 = AtomicU8::new(0);
@@ -215,18 +221,6 @@ static HOST_PRESENT: AtomicU8 = AtomicU8::new(0);
 /// Record where the loop is, for the next life to report.
 fn mark(phase: LoopPhase) {
     PHASE.store(phase as u8, Ordering::Relaxed);
-}
-
-/// Run `f` marked as `phase`, then restore the phase it interrupted.
-///
-/// For a call that blocks inside another phase, so the marker names it only while it runs.
-#[cfg(feature = "t-dongle-c5-gps")]
-fn within<T>(phase: LoopPhase, f: impl FnOnce() -> T) -> T {
-    let before = PHASE.load(Ordering::Relaxed);
-    mark(phase);
-    let out = f();
-    PHASE.store(before, Ordering::Relaxed);
-    out
 }
 
 /// Whether the previous life ended with a host present, and so whether this one
@@ -261,7 +255,6 @@ fn boot_phase(cause: ResetCause) -> LoopPhase {
         7 => LoopPhase::Idle,
         8 => LoopPhase::TxStalled,
         9 => LoopPhase::Render,
-        10 => LoopPhase::Gps,
         _ => LoopPhase::Unknown,
     }
 }
@@ -366,17 +359,15 @@ struct Bridge {
     /// attached when this firmware starts — that is the whole reason `Identify`
     /// exists — so a fault reported once is a fault nobody ever reads.
     panel_fault: Option<&'static str>,
-    /// The GPS receiver, when its bus came up.
+    /// `main`'s end of the GPS task, when its bus came up.
     ///
     /// Held here rather than in `main` so that [`handle`] can write to it.
     #[cfg(feature = "t-dongle-c5-gps")]
-    gps: Option<gps::Receiver>,
-    /// Receiver bytes read but not yet sent, batched into one frame (`gps.rs` says why).
-    ///
-    /// Here rather than in `poll_gps` so it lasts across passes, and in this static
-    /// rather than `main` so the poll frame does not grow by a frame's worth.
+    gps: Option<gps::Link>,
+    /// Whether the receiver answered when [`take_gps`] last looked, so a change is said
+    /// once.
     #[cfg(feature = "t-dongle-c5-gps")]
-    gps_pending: wartui_proto::link::GpsBytes,
+    gps_answered: bool,
     /// Why no GPS receiver is being read on a board built to have one.
     ///
     /// Sent with every announcement for the reason `panel_fault` is, and cleared when the
@@ -470,18 +461,12 @@ impl Bridge {
     #[expect(clippy::unused_self, reason = "the panel build takes `&mut self`")]
     fn show_panel(&self, _lines: &PanelLines) {}
 
-    /// Hand the host's bytes to the receiver.
-    ///
-    /// Skipped while the receiver is not answering: the host repeats its configuration,
-    /// and `gps_fault` already says why it is not arriving.
+    /// Hand the host's bytes to the GPS task, which writes them. [`take_gps`] reports a
+    /// write the receiver refused.
     #[cfg(feature = "t-dongle-c5-gps")]
-    fn write_gps(&mut self, bytes: &[u8]) {
-        let Some(receiver) = self.gps.as_mut().filter(|receiver| receiver.present()) else {
-            return;
-        };
-        // Within `Command`, which `handle` marked and gets back afterwards.
-        if !within(LoopPhase::Gps, || receiver.write(bytes)) {
-            self.error("the GPS receiver refused a write");
+    fn write_gps(&mut self, bytes: &GpsWriteBytes) {
+        if let Some(link) = self.gps.as_mut() {
+            link.write(bytes);
         }
     }
 
@@ -576,7 +561,7 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
         #[cfg(feature = "t-dongle-c5-gps")]
         gps: None,
         #[cfg(feature = "t-dongle-c5-gps")]
-        gps_pending: wartui_proto::link::GpsBytes::new(),
+        gps_answered: true,
         gps_fault: None,
         tx_power: tx_power.is_ok().then_some(wartui_proto::tx_power::DEFAULT_TX_POWER_QUARTER_DBM),
     });
@@ -609,14 +594,13 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     };
 
     // After the radio for the reason the panel is. The receiver is not probed here: the
-    // loop's first poll does that, and reports a receiver that does not answer.
+    // task's first poll does that, and `take_gps` reports a receiver that does not answer.
     #[cfg(feature = "t-dongle-c5-gps")]
-    match gps::Receiver::new(gps::Pins {
-        i2c: peripherals.I2C0,
-        sda: peripherals.GPIO11,
-        scl: peripherals.GPIO12,
-    }) {
-        Ok(receiver) => bridge.gps = Some(receiver),
+    match gps::start(
+        gps::Pins { i2c: peripherals.I2C0, sda: peripherals.GPIO11, scl: peripherals.GPIO12 },
+        software_interrupt.software_interrupt1,
+    ) {
+        Ok(link) => bridge.gps = Some(link),
         Err(why) => bridge.gps_fault = Some(why),
     }
 
@@ -656,10 +640,11 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
         worked |= link.moved;
         link_woke = false;
 
-        // Its own phase for the reason `Render` is below.
+        // Never waits: the GPS task reads the receiver, and this only forwards what it
+        // finished.
         #[cfg(feature = "t-dongle-c5-gps")]
         {
-            worked |= poll_gps(bridge);
+            worked |= take_gps(bridge);
         }
 
         // Named as its own phase for the reason `Transmit` is: it is a call that can
@@ -709,8 +694,8 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     }
 }
 
-/// Wait for a received frame, a host command, the FIFO emptying or the tick, and say
-/// which it was.
+/// Wait for a received frame, a host command, the FIFO emptying, a finished GPS batch or
+/// the tick, and say which it was.
 ///
 /// A frame that ends the wait is forwarded here and the host's bytes are handed back,
 /// each as soon as it is taken: it is older than anything the next pass's drains find
@@ -718,7 +703,11 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
 /// at `.clippy.toml`'s threshold on the C5 and has no room for a [`ReceivedData`].
 ///
 /// Every arm is cancel-safe: the radio's queue and the USB FIFO give up an item only
-/// in the poll that returns it, and the flush holds no bytes.
+/// in the poll that returns it, the flush holds no bytes, and the GPS channel gives up a
+/// batch only at `receive_done`, which only [`take_gps`] calls.
+///
+/// A batch the GPS task finishes while this waits ends it, so a batch reaches the outbox
+/// within one pass of being finished rather than a tick.
 async fn idle_wait(
     receiver: &mut EspNowReceiver<'_>,
     usb_rx: &mut UsbSerialJtagRx<'_, Async>,
@@ -743,9 +732,22 @@ async fn idle_wait(
         }
         Woken::Drained
     };
-    let woken = match select4(radio, link, flushed, Timer::after(IDLE_TICK)).await {
-        Either4::First(woken) | Either4::Second(woken) | Either4::Third(woken) => woken,
-        Either4::Fourth(()) => Woken::Tick,
+    #[cfg(feature = "t-dongle-c5-gps")]
+    let batches = bridge.gps.as_mut().map(gps::Link::batches);
+    let gps = async {
+        #[cfg(feature = "t-dongle-c5-gps")]
+        if let Some(batches) = batches {
+            batches.receive().await;
+            return Woken::Gps;
+        }
+        core::future::pending::<Woken>().await
+    };
+    let woken = match select4(radio, link, flushed, select(gps, Timer::after(IDLE_TICK))).await {
+        Either4::First(woken)
+        | Either4::Second(woken)
+        | Either4::Third(woken)
+        | Either4::Fourth(Either::First(woken)) => woken,
+        Either4::Fourth(Either::Second(())) => Woken::Tick,
     };
     // The read arms the RX-packet interrupt and the flush the TX-empty one, and
     // neither has a `Drop` to disarm it, so whichever lost would later wake this
@@ -763,6 +765,8 @@ async fn idle_wait(
         // An error reads nothing, which is no evidence of quiet air.
         Woken::Link(read) if read > 0 => Idled::Read(read),
         Woken::Link(_) | Woken::Drained => Idled::Busy,
+        #[cfg(feature = "t-dongle-c5-gps")]
+        Woken::Gps => Idled::Busy,
         Woken::Tick => Idled::Quiet,
     }
 }
@@ -813,15 +817,12 @@ fn forward(received: ReceivedData, bridge: &mut Bridge) {
     });
 }
 
-/// What [`gps::Receiver`] reports when it stops answering.
+/// What the bridge reports when the GPS receiver stops answering.
 #[cfg(feature = "t-dongle-c5-gps")]
 const NO_GPS_RECEIVER: &str = "no GPS receiver answered on the Qwiic port";
 
-/// Poll the GPS receiver, batch what it sent, and queue the batch once the receiver has
-/// drained or the batch has no room for another read. Says whether anything was read.
-///
-/// Marked [`LoopPhase::Gps`] only while the bus is in use: a poll that is not due touches
-/// nothing.
+/// Queue every batch the GPS task has finished, and report what changed about the
+/// receiver. Says whether a batch was queued. Never waits on the task.
 ///
 /// A change in whether it answers is said once, not at every probe: an `Error` when it
 /// stops, which `announce` then repeats, and a `Log` when it comes back.
@@ -829,20 +830,18 @@ const NO_GPS_RECEIVER: &str = "no GPS receiver answered on the Qwiic port";
 /// Out of line for the reason [`forward`] is.
 #[cfg(feature = "t-dongle-c5-gps")]
 #[inline(never)]
-fn poll_gps(bridge: &mut Bridge) -> bool {
-    let now = bridge.now_ms();
-    let Some(receiver) = bridge.gps.as_mut() else { return false };
-    if !receiver.due(now) {
-        return false;
+fn take_gps(bridge: &mut Bridge) -> bool {
+    let Some(link) = bridge.gps.as_mut() else { return false };
+    let mut queued = false;
+    while let Some(bytes) = link.batches().try_receive() {
+        bridge.outbox.send(&BridgeToHost::Gps { bytes: bytes.clone() });
+        link.batches().receive_done();
+        queued = true;
     }
-    let pending = &mut bridge.gps_pending;
-    let before = pending.len();
-    let was_present = receiver.present();
-    let more = within(LoopPhase::Gps, || receiver.poll(now, pending));
-    let present = receiver.present();
-    let read = pending.len() > before;
-    let full = pending.capacity() - pending.len() < gps::READ_CHUNK;
-    if present != was_present {
+    let present = link.present();
+    let refused = link.take_write_refused();
+    if present != bridge.gps_answered {
+        bridge.gps_answered = present;
         if present {
             bridge.gps_fault = None;
             bridge.log(LogLevel::Info, "the GPS receiver answered on the Qwiic port");
@@ -851,11 +850,10 @@ fn poll_gps(bridge: &mut Bridge) -> bool {
             bridge.error(NO_GPS_RECEIVER);
         }
     }
-    if (!more || full) && !bridge.gps_pending.is_empty() {
-        let bytes = core::mem::take(&mut bridge.gps_pending);
-        bridge.outbox.send(&BridgeToHost::Gps { bytes });
+    if refused {
+        bridge.error("the GPS receiver refused a write");
     }
-    read
+    queued
 }
 
 /// What one pass's [`link_burst`] moved.
@@ -1159,7 +1157,7 @@ fn add_peer(manager: &EspNowManager<'_>, mac: &Mac) -> Result<bool, EspNowError>
 /// bench, a C5 and a C6 beside this bridge arrived at −43 and −58 dBm and lost 0%
 /// and 2.3% of their heartbeats over ten minutes.
 ///
-/// Straight into IDF, one of this firmware's two `unsafe` calls. `esp-radio`
+/// Straight into IDF, one of this firmware's `unsafe` calls. `esp-radio`
 /// 1.0.0-beta.0 wraps only the interface-wide `esp_wifi_config_espnow_rate`, which the
 /// C5 and C6 Wi-Fi libraries refuse in Wi-Fi 6 mode (esp-hal #1612) — and whose
 /// `WifiPhyRate` is numbered without IDF's gap at 4, so its `Rate24m` sends 48 Mbps.
