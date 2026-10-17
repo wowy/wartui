@@ -101,10 +101,10 @@ pub struct HostLoss {
     pub duplicates: u64,
     /// USB frames that failed their checksum.
     pub garbled: u64,
-    /// Frames that were nobody's recognizable format.
+    /// Frames of ours that would not parse.
     pub undecodable: u64,
-    /// Frames from another fleet, another core, or a build speaking another wire version.
-    pub foreign: u64,
+    /// Frames from a build speaking another wire version or layout.
+    pub incompatible: u64,
     /// Assignments held back because the heartbeat that would have carried them was stale.
     pub admin_windows_missed: u64,
     /// Rows the store dropped.
@@ -230,8 +230,6 @@ struct HostRow {
     garbled: u64,
     undecodable: u64,
     incompatible: u64,
-    foreign_fleet: u64,
-    foreign_admin: u64,
     admin_windows_missed: u64,
     store_dropped: u64,
     lag_peak_us: u64,
@@ -250,25 +248,22 @@ impl HostRow {
             garbled: count(row.get(1)?),
             undecodable: count(row.get(2)?),
             incompatible: count(row.get(3)?),
-            foreign_fleet: count(row.get(4)?),
-            foreign_admin: count(row.get(5)?),
-            admin_windows_missed: count(row.get(6)?),
-            store_dropped: count(row.get(7)?),
-            lag_peak_us: count(row.get(8)?),
-            commit_peak_us: count(row.get(9)?),
-            queue_peak: count(row.get(10)?),
-            throttled: row.get(11)?,
-            soc_temp_mc: row.get(12)?,
-            battery_mv: row.get(13)?,
+            admin_windows_missed: count(row.get(4)?),
+            store_dropped: count(row.get(5)?),
+            lag_peak_us: count(row.get(6)?),
+            commit_peak_us: count(row.get(7)?),
+            queue_peak: count(row.get(8)?),
+            throttled: row.get(9)?,
+            soc_temp_mc: row.get(10)?,
+            battery_mv: row.get(11)?,
         })
     }
 }
 
 fn host(conn: &Connection) -> rusqlite::Result<Option<HostLoss>> {
     let mut stmt = conn.prepare(
-        "SELECT duplicate_batches, garbled, undecodable, incompatible, foreign_fleet,
-                foreign_admin, admin_windows_missed, store_dropped,
-                lag_peak_us, store_commit_peak_us, store_queue_peak, throttled, soc_temp_mc,
+        "SELECT duplicate_batches, garbled, undecodable, incompatible, admin_windows_missed,
+                store_dropped, lag_peak_us, store_commit_peak_us, store_queue_peak, throttled, soc_temp_mc,
                 battery_mv
          FROM host_status
          ORDER BY id",
@@ -307,8 +302,7 @@ fn host(conn: &Connection) -> rusqlite::Result<Option<HostLoss>> {
     loss.duplicates = delta(|r| r.duplicate_batches);
     loss.garbled = delta(|r| r.garbled);
     loss.undecodable = delta(|r| r.undecodable);
-    loss.foreign =
-        delta(|r| r.incompatible) + delta(|r| r.foreign_fleet) + delta(|r| r.foreign_admin);
+    loss.incompatible = delta(|r| r.incompatible);
     loss.admin_windows_missed = delta(|r| r.admin_windows_missed);
     loss.store_dropped = delta(|r| r.store_dropped);
     loss.since_boot = last_throttled.map(|word| (word >> 16) & 0xF);

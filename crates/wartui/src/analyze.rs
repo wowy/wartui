@@ -194,12 +194,12 @@ fn utc_arrival(ms: i64) -> String {
 fn host_line(host: &HostLoss) -> String {
     let nonzero = |n: u64, what: &str| (n > 0).then(|| format!("{} {what}", thousands(n)));
     let mut clauses = Vec::new();
-    let not_stored = host.duplicates + host.undecodable + host.foreign;
+    let not_stored = host.duplicates + host.undecodable + host.incompatible;
     if not_stored > 0 {
         let why: Vec<String> = [
             nonzero(host.duplicates, "retries"),
             nonzero(host.undecodable, "undecodable"),
-            nonzero(host.foreign, "foreign"),
+            nonzero(host.incompatible, "incompatible"),
         ]
         .into_iter()
         .flatten()
@@ -328,7 +328,7 @@ mod tests {
             nodes: Vec::new(),
             host: Some(HostLoss {
                 duplicates: 140,
-                foreign: 7,
+                incompatible: 7,
                 lag_over_100ms: 31,
                 lag_peak_us: 412_300,
                 commit_peak_us: 58_000,
@@ -592,7 +592,7 @@ mod tests {
         assert_eq!(
             text,
             "  bridge     31,821 frames received  0 dropped (0.0%)  host read 31,821\n\
-             \x20 host       147 not stored: 140 retries  7 foreign  0 store dropped  \
+             \x20 host       147 not stored: 140 retries  7 incompatible  0 store dropped  \
              behind ≥100 ms 31 times (worst 412 ms)  slowest commit 58 ms  queue peak 1,204\n\
              \x20 health     under-voltage in 3 samples  throttled in 0  \
              since boot: under-voltage  temp max 71.2 °C  battery min 3.62 V\n"

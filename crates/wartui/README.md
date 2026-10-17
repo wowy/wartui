@@ -15,7 +15,7 @@ This is the operator's manual. The root [`README.md`](../../README.md) is the sh
 | `export`       | Write a WiGLE CSV from a capture                                                    |
 | `analyze`      | Summarize a capture and what it lost; see "Analyzing a capture"                     |
 | `upload`       | Upload a capture to the WDGWars leaderboard; see "Uploading to WDGWars"             |
-| `sniff`        | Print every frame the bridge hears, decoded, a line per record                      |
+| `sniff`        | Print every wartui frame the bridge hears, decoded, a line per record               |
 | `status`       | Ask the bridge for its counters and uptime                                          |
 | `reset`        | Reboot a bridge that has stopped answering                                          |
 | `ports`        | List the Espressif boards attached, and the address of each                         |
@@ -130,7 +130,7 @@ export summary:
 
 ```
   bridge     1,203,551 frames received  1,300 dropped (0.1%)  1 reboot  host read 1,202,240  11 lost on USB
-  host       147 not stored: 140 retries  7 foreign  0 store dropped  behind ≥100 ms 31 times (worst 412 ms)  slowest commit 58 ms  queue peak 1,204
+  host       147 not stored: 140 retries  7 incompatible  0 store dropped  behind ≥100 ms 31 times (worst 412 ms)  slowest commit 58 ms  queue peak 1,204
   health     under-voltage in 3 samples  throttled in 0  since boot: under-voltage  temp max 71.2 °C  battery min 3.62 V
   batches    212 lost between node and host
   heartbeats 41 missed of 3,497 expected (1.2%)  12 unsent
@@ -160,7 +160,8 @@ is not counted. `batches` and `bridge` print zeros, since "0 lost" is the answer
 - the reboot clause, when the bridge never restarted
 - the `lost on USB` clause, when it is zero
 - the `oversize (not a node's)` clause, when it is zero. It counts ESP-NOW frames too long to be
-  a wartui node's, which the bridge dropped and left out of `frames received`
+  a wartui node's, which the bridge dropped and left out of `frames received`. Frames without
+  wartui's magic are dropped there too, and counted nowhere
 - `host` clauses that are zero, and the `host` and `health` lines when the capture holds no host row
 - the `health` line, when nothing could be read; off a Pi it holds only the temperature
 - the `battery min` clause, when the host has no hwmon device named `battery`
@@ -170,15 +171,15 @@ The host records a `host_status` row when the capture starts, every 5 s, and at 
 received` less `dropped` less `host read` is `lost on USB`, to within the frames queued in the
 bridge at the first and last reply, since a reply overtakes them. On the `host` line:
 
-| Clause                 | What it counts                                                            |
-|------------------------|---------------------------------------------------------------------------|
-| `not stored`           | Frames read and deliberately dropped: radio retries, undecodable, foreign |
-| `store dropped`        | Rows lost because the store's queue was full or a write failed            |
-| `garbled`              | USB frames that failed their checksum                                     |
-| `behind ≥100 ms`       | Samples in which the host fell far enough behind the air to miss windows  |
-| `admin windows missed` | Assignments held back because the heartbeat behind them was stale         |
-| `slowest commit`       | The slowest batch the store wrote                                         |
-| `queue peak`           | The deepest the store's queue got                                         |
+| Clause                 | What it counts                                                                 |
+|------------------------|--------------------------------------------------------------------------------|
+| `not stored`           | Frames read and deliberately dropped: radio retries, undecodable, incompatible |
+| `store dropped`        | Rows lost because the store's queue was full or a write failed                 |
+| `garbled`              | USB frames that failed their checksum                                          |
+| `behind ≥100 ms`       | Samples in which the host fell far enough behind the air to miss windows       |
+| `admin windows missed` | Assignments held back because the heartbeat behind them was stale              |
+| `slowest commit`       | The slowest batch the store wrote                                              |
+| `queue peak`           | The deepest the store's queue got                                              |
 
 `under-voltage` and `throttled` count samples with that bit of `vcgencmd get_throttled` set now;
 `since boot` lists what the last sample says happened at any time since the Pi booted.
@@ -876,8 +877,6 @@ The footer shows faults only once they happen, so a clean run has a clean footer
   appears when a count passes zero, omits a kind still at zero, and stays. Not a fault: an address
   turned away is not held back, so the next pass reports it; only one never heard again is lost.
   A steadily growing count means a buffer too small for the area.
-- **`N frames from a vendor fleet`**, **`N admin frames from another core`**: another fleet
-  transmitting on the nodes' channel.
 - **`N frames from an older firmware — reflash`**: a fleet mid-upgrade, speaking a wire format this
   host does not, so it appears only here.
 - **`bridge dropped`**: frames lost since this host attached. `wartui status` reports the total

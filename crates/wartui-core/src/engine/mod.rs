@@ -248,8 +248,6 @@ impl FleetEngine {
             garbled: c.garbled,
             undecodable: c.undecodable,
             incompatible: c.incompatible,
-            foreign_fleet: c.foreign_fleet,
-            foreign_admin: c.foreign_admin,
             admin_windows_missed: c.admin_windows_missed,
             lag_peak_us: std::mem::take(&mut self.lag_peak_us),
             store_written: sample.store.written,

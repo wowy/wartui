@@ -20,7 +20,7 @@ use wartui_core::position::{DEFAULT_MAX_AGE, PositionChain, PositionSource};
 use wartui_core::record::{AdminOutcome, BatchGap, BridgeStatusSeen, HostStatus, Record};
 use wartui_core::ubx::valset_rate;
 use wartui_proto::air::{
-    AdminMsg, Board, Capabilities, DieTemp, Frame, HeartbeatMsg, NODE_VERSION, OtaCommitMsg,
+    AdminMsg, Board, Capabilities, DieTemp, Frame, HeartbeatMsg, MAGIC, NODE_VERSION, OtaCommitMsg,
     OtaConfirmMsg, OtaState, OtaStatusMsg, RecordKind, Security, SightingBatchWriter, SightingMsg,
     Vdd, Version, wire_epoch,
 };
@@ -1000,39 +1000,20 @@ fn engine_counts_undecodable_and_records_nothing_when_truncated() {
 }
 
 #[test]
-fn engine_counts_undecodable_when_magic_unknown() {
+fn engine_ignores_frame_when_magic_is_not_ours() {
+    // Somebody else's traffic: a stranger's bytes, and a stock node's heartbeat
+    // exactly as one came off the air. Neither is counted, recorded, nor admitted.
     let clock = Clock::new();
-    let mut engine = engine(EngineConfig::default(), &clock);
+    let mut engine = engine(EngineConfig { record_raw: true, ..Default::default() }, &clock);
 
-    let event = Event::Link(LinkEvent::Message(BridgeToHost::Rx {
-        src: NODE,
-        dst: BROADCAST,
-        rssi: -41,
-        rx_us: 0,
-        payload: EspNowPayload::from_slice(b"not a wartui frame").expect("fits"),
-    }));
-    engine.handle(event, clock.at(1));
-
-    assert_eq!(counters(&engine).undecodable, 1);
-    assert_eq!(counters(&engine).frames, 1);
-}
-
-#[test]
-fn engine_counts_foreign_fleet_when_vendor_frames_arrive() {
-    // The whole reason wartui speaks a format of its own: a stock node broadcasts
-    // on this channel, and a shared magic would make it indistinguishable from ours.
-    // Still counted, because a second fleet where these nodes listen matters.
-    let clock = Clock::new();
-    let mut engine = engine(EngineConfig::default(), &clock);
-
-    // A stock node's heartbeat, counter 147, exactly as one came off the air.
     let vendor = [0x45, 0x4E, 0x4F, 0x57, 0x03, 0x93, 0x00, 0x00, 0x00];
-    let batch = engine.handle(rx(OTHER, &vendor), clock.at(1));
+    for payload in [&b"not a wartui frame"[..], &vendor, b"WTU", b""] {
+        let batch = engine.handle(rx(OTHER, payload), clock.at(1));
+        assert!(batch.is_empty(), "{payload:?}");
+    }
 
-    assert_eq!(counters(&engine).foreign_fleet, 1);
-    assert_eq!(counters(&engine).undecodable, 0, "it is not line noise");
-    assert_eq!(engine.nodes().count(), 0, "and it is not a node of ours");
-    assert!(batch.records.is_empty());
+    assert_eq!(counters(&engine), Counters::default());
+    assert_eq!(engine.nodes().count(), 0);
 }
 
 #[test]
@@ -1384,7 +1365,7 @@ fn beat_frame(capabilities: Capabilities) -> Vec<u8> {
 }
 
 #[test]
-fn engine_counts_foreign_admin_when_another_core_transmits() {
+fn engine_ignores_admin_when_another_core_transmits() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
 
@@ -1398,11 +1379,12 @@ fn engine_counts_foreign_admin_when_another_core_transmits() {
         rx_us: 0,
         payload: EspNowPayload::from_slice(&admin).expect("fits"),
     }));
-    engine.handle(event, clock.at(1));
+    let batch = engine.handle(event, clock.at(1));
 
-    assert_eq!(counters(&engine).foreign_admin, 1);
-    // But not one of ours. Admitting it would leave a rival core in the fleet
-    // table forever as `no heartbeat`, inflating "n of m alive".
+    assert!(batch.is_empty());
+    assert_eq!(counters(&engine), Counters { frames: 1, ..Counters::default() });
+    // Admitting the sender would leave a rival core in the fleet table forever as
+    // `no heartbeat`, inflating "n of m alive".
     assert_eq!(engine.nodes().count(), 0);
 }
 
@@ -1417,15 +1399,16 @@ fn rx_from(src: Mac, dst: Mac, payload: &[u8]) -> Event {
 }
 
 #[test]
-fn engine_counts_foreign_admin_when_another_host_sends_an_update() {
-    // An update this host is not running is another host driving these nodes.
+fn engine_ignores_update_when_another_host_sends_one() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
 
-    engine.handle(rx_from(OTHER, NODE, &OtaCommitMsg { session: 1 }.encode()), clock.at(1));
-    engine.handle(rx_from(OTHER, NODE, &OtaConfirmMsg.encode()), clock.at(2));
+    let commit =
+        engine.handle(rx_from(OTHER, NODE, &OtaCommitMsg { session: 1 }.encode()), clock.at(1));
+    let confirm = engine.handle(rx_from(OTHER, NODE, &OtaConfirmMsg.encode()), clock.at(2));
 
-    assert_eq!(counters(&engine).foreign_admin, 2);
+    assert!(commit.is_empty() && confirm.is_empty());
+    assert_eq!(counters(&engine), Counters { frames: 2, ..Counters::default() });
     assert_eq!(engine.nodes().count(), 0);
 }
 
@@ -1438,14 +1421,14 @@ fn engine_ignores_ota_status_when_node_reports_one() {
     let batch = engine.handle(rx_from(NODE, BROADCAST, &status), clock.at(1));
 
     let c = counters(&engine);
-    assert_eq!((c.foreign_admin, c.foreign_fleet, c.undecodable, c.incompatible), (0, 0, 0, 0));
+    assert_eq!((c.undecodable, c.incompatible), (0, 0));
     assert_eq!(engine.nodes().count(), 0);
     assert!(batch.records.is_empty());
 }
 
 #[test]
 fn engine_ignores_sender_when_frame_undecodable() {
-    // A transmitter we cannot understand is counted, not adopted.
+    // A frame of ours that does not parse is counted, and its sender not adopted.
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
 
@@ -1454,7 +1437,7 @@ fn engine_ignores_sender_when_frame_undecodable() {
         dst: BROADCAST,
         rssi: -41,
         rx_us: 0,
-        payload: EspNowPayload::from_slice(b"not an ENOW frame").expect("fits"),
+        payload: EspNowPayload::from_slice(&MAGIC).expect("fits"),
     }));
     let batch = engine.handle(event, clock.at(1));
 
@@ -1984,8 +1967,8 @@ fn engine_records_host_frames_when_status_reply_arrives() {
             _ => None,
         })
         .collect();
-    assert_eq!(host_frames, vec![3], "every frame read off the link, ours or not");
-    assert_eq!(counters(&engine).frames, 3);
+    assert_eq!(host_frames, vec![2], "every frame of ours read off the link");
+    assert_eq!(counters(&engine).frames, 2);
 }
 
 /// The one host row in a batch.
@@ -2049,10 +2032,7 @@ fn engine_records_host_status_when_host_sample_arrives() {
             ..row
         }
     );
-    assert_eq!(
-        (row.undecodable, row.incompatible, row.foreign_fleet, row.foreign_admin),
-        (0, 0, 0, 0)
-    );
+    assert_eq!((row.undecodable, row.incompatible), (0, 0));
 }
 
 #[test]
@@ -2155,7 +2135,7 @@ fn engine_withholds_assignment_when_node_heard_only_by_sightings() {
 }
 
 #[test]
-fn engine_leaves_node_out_of_plan_when_frames_are_foreign() {
+fn engine_leaves_sender_out_of_plan_when_frames_are_not_ours() {
     // The failure this exists to prevent, in the smallest form that shows it: two
     // nodes plus a stranger must partition the pool two ways, not three. Three
     // would leave a third of it assigned to a node that will never scan it.
@@ -2171,7 +2151,6 @@ fn engine_leaves_node_out_of_plan_when_frames_are_foreign() {
     assert_eq!(plan.node_count(), 2, "the stranger is not one of the two");
     assert_eq!(snapshot.alive, 2, "and is not in the table to be counted alive");
     assert_eq!(snapshot.assignable, 2);
-    assert_eq!(counters(&engine).foreign_fleet, 1, "but it was heard, and it is said so");
 
     let held: Vec<ChannelSet> =
         engine.nodes().filter_map(|node| node.desired.map(|a| a.channels)).collect();

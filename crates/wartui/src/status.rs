@@ -121,7 +121,7 @@ fn silence_note(rx_count: u32, rx_oversize: u32) -> Option<String> {
     let heard = if rx_oversize > 0 {
         "The radio is hearing ESP-NOW traffic, but none of it is from a wartui node."
     } else {
-        "The bridge has heard nothing."
+        "The bridge has heard no wartui frames."
     };
     Some(format!("{heard} Check the nodes are powered and on channel {CONTROL_CHANNEL}."))
 }
@@ -183,9 +183,9 @@ mod tests {
     }
 
     #[test]
-    fn status_cmd_says_heard_nothing_when_bridge_counted_no_frames() {
+    fn status_cmd_says_heard_no_wartui_frames_when_bridge_counted_none() {
         let note = silence_note(0, 0).expect("no node was heard");
-        assert!(note.starts_with("The bridge has heard nothing."), "{note}");
+        assert!(note.starts_with("The bridge has heard no wartui frames."), "{note}");
     }
 
     #[test]

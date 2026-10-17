@@ -85,9 +85,8 @@ Four host crates, strictly layered, plus firmware that shares the bottom one and
 own.
 
 - **`crates/wartui-proto`** — `no_std`, allocation-free wire formats and the parsing that goes
-  with them: `air` (the ESP-NOW frames, and `air::foreign` for recognizing somebody
-  else's), `beacon`, `hci`, `dedup`, `link`, `mac` (the `Mac` type and its text form),
-  `outbox`, `stall`, `plan` (channel pools and the partitioning planner), `node` (a node's
+  with them: `air` (the ESP-NOW frames), `beacon`, `hci`, `dedup`, `link`, `mac` (the `Mac`
+  type and its text form), `outbox`, `stall`, `plan` (channel pools and the partitioning planner), `node` (a node's
   timings and sweep cursor), `tx_power`, `pending` (the buffers sightings wait in on a node),
   `ota` (the node's update receiver, and `ota::trial`, the record of an image on trial).
   Compiled into *both* the host and the firmware by path dependency, which is the only thing
@@ -160,7 +159,8 @@ is here rather than only in a `//!`.
   (12). A heartbeat broadcasts, since that is how a bridge discovers a node before either side
   knows the other's address; a sighting batch unicasts to the bridge that last sent this node an
   admin or clear frame, so a shared format is a shared conversation either way.
-  The magic is checked before anything else at both ends. Encode/decode is written out by
+  The magic is checked before anything else at both ends: a frame without it is dropped at the
+  bridge and ignored by the host, never reported. Encode/decode is written out by
   hand, never by transmuting a packed struct, and pinned byte-for-byte in
   `crates/wartui-proto/tests/wire.rs`. Host→air frames may be up to 1470 bytes (ESP-NOW v2),
   node frames up to 1024, and bridge→host link frames up to 1152 to carry one
@@ -171,7 +171,8 @@ is here rather than only in a `//!`.
   table and never half-decoded. A heartbeat whose frozen prefix names another major or minor is the
   exception: its node is shown as `needs update` (older) or `host behind` (newer) and never
   assigned. Once its heartbeat has named that version, its sighting batches are counted
-  `incompatible` and not recorded. The bridge is format-blind and does not need the reflash.
+  `incompatible` and not recorded. The bridge reads only the magic, which is frozen, and does not
+  need the reflash.
 - **The bridge displays what it is handed and never composes it.** A board with a panel is
   sent finished lines with a severity on each, blits them, and owns nothing about them but the
   three colors a `Severity` means and the fallback screen it draws when no host is talking —
@@ -293,8 +294,8 @@ is here rather than only in a `//!`.
 Each of these is enforced in one place and explained there at length. The claim is here so an
 edit stops; follow the pointer before changing the rule.
 
-- **Somebody else's fleet is recognized in order to be reported, never to be accommodated.**
-  → `crates/wartui-proto/src/air/mod.rs` `//!`, `air::foreign`
+- **Somebody else's ESP-NOW traffic is dropped, never reported or accommodated.**
+  → `crates/wartui-proto/src/air/mod.rs` `//!`, `firmware/bridge/src/main.rs` `forward`
 - **Finding the bridge means transmitting into what is opened**, so the sweep opens Espressif
   vendor IDs and nothing else, and `wartui reset` — which transmits before anything has identified
   itself — never sweeps at all. The GPS search is the complement: it opens everything *but* those,

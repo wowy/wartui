@@ -186,12 +186,6 @@ pub(super) fn faults(snapshot: &Snapshot) -> Vec<String> {
         faults
             .push(format!("{} frames from an older firmware — reflash", thousands(c.incompatible)));
     }
-    if c.foreign_fleet > 0 {
-        faults.push(format!("{} frames from a vendor fleet", thousands(c.foreign_fleet)));
-    }
-    if c.foreign_admin > 0 {
-        faults.push(format!("{} admin frames from another core", thousands(c.foreign_admin)));
-    }
     // Only this capture's loss. The bridge's own count runs from its boot, mostly
     // frames dropped before anyone was listening.
     if let Some(status) = snapshot.bridge_status
@@ -365,9 +359,7 @@ mod tests {
         faulty.draw(|frame| draw(frame, &busy(), &mut Ui::default())).expect("drawing");
         let rendered = faulty.backend().to_string();
         assert!(rendered.contains("store dropped 7"));
-        assert!(rendered.contains("admin frames from another core"));
         assert!(rendered.contains("older firmware"));
-        assert!(rendered.contains("vendor fleet"));
     }
 
     const BUSY: &str = "could not open /dev/cu.usbmodem101: Device or resource busy";

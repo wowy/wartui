@@ -1,6 +1,6 @@
 use wartui_proto::air::{
-    Capabilities, DecodeError, Frame, HeartbeatMsg, NODE_VERSION, RecordKind, SightingBatch,
-    SightingMsg, foreign, wire_epoch,
+    Capabilities, DecodeError, Frame, HeartbeatMsg, MAGIC, NODE_VERSION, RecordKind, SightingBatch,
+    SightingMsg, wire_epoch,
 };
 use wartui_proto::mac::{self, Mac};
 use wartui_proto::node;
@@ -71,6 +71,10 @@ pub(super) struct Rx<'a> {
 impl FleetEngine {
     pub(super) fn on_rx(&mut self, rx: &Rx<'_>, now: Now, batch: &mut ActionBatch) {
         let Rx { src, dst, rssi, payload, .. } = *rx;
+        // Not ours.
+        if !payload.starts_with(&MAGIC) {
+            return;
+        }
         self.counters.frames += 1;
 
         if self.config.record_raw {
@@ -85,15 +89,6 @@ impl FleetEngine {
 
         let frame = match Frame::decode(payload) {
             Ok(frame) => frame,
-            // Not ours: no frame preamble.
-            Err(DecodeError::BadMagic) => {
-                match foreign::classify(payload) {
-                    Some(foreign::Foreign::Admin) => self.counters.foreign_admin += 1,
-                    Some(foreign::Foreign::Node) => self.counters.foreign_fleet += 1,
-                    None => self.counters.undecodable += 1,
-                }
-                return;
-            }
             // A heartbeat of another length still opens with the frozen prefix. From a node on
             // another major or minor that names a node one side must update; from one on this
             // minor it is a bug, counted like any other mismatch.
@@ -118,17 +113,15 @@ impl FleetEngine {
 
         // Decode before admitting anyone to the fleet.
         match frame {
-            // Nothing to do, but an operator chasing a fleet that keeps changing its mind needs to
-            // know. Foreign clears and updates count the same as foreign assignments.
+            // Another host's commands, and a node's update status, are not the engine's to act on.
             Frame::Admin(_)
             | Frame::Clear(_)
             | Frame::OtaBegin(_)
             | Frame::OtaChunk(_)
             | Frame::OtaCommit(_)
             | Frame::OtaAbort(_)
-            | Frame::OtaConfirm(_) => self.counters.foreign_admin += 1,
-            // A node's update status is not the engine's to act on.
-            Frame::OtaStatus(_) => {}
+            | Frame::OtaConfirm(_)
+            | Frame::OtaStatus(_) => {}
             // The right length is no guarantee of the right layout: a minor version may move
             // fields without resizing the frame.
             Frame::Heartbeat(heartbeat)

@@ -183,7 +183,7 @@ CREATE TABLE IF NOT EXISTS observation (
 -- bridge reboot shows as the values falling. `rx_count` is the frames the bridge
 -- accepted to forward; `rx_oversize` is those it dropped for being longer than any
 -- node's, which are somebody else's traffic and not in `rx_count`. `host_frames` is
--- how many frames this host had read off the link when the reply arrived, taken with
+-- how many frames of ours this host had read off the link when the reply arrived, taken with
 -- `rx_count` so the two pair closely but not exactly: between two rows, the `rx_count`
 -- difference less the `host_frames` difference is frames lost on USB plus the bridge's
 -- `dropped_tx`, give or take the frames queued behind the reply, which overtakes them.
@@ -214,8 +214,6 @@ CREATE TABLE IF NOT EXISTS host_status (
   garbled INTEGER NOT NULL,
   undecodable INTEGER NOT NULL,
   incompatible INTEGER NOT NULL,
-  foreign_fleet INTEGER NOT NULL,
-  foreign_admin INTEGER NOT NULL,
   admin_windows_missed INTEGER NOT NULL,
   lag_peak_us INTEGER NOT NULL,
   store_written INTEGER NOT NULL,
@@ -1233,10 +1231,10 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
                 tx.prepare_cached(
                     "INSERT INTO host_status
                        (at, frames, duplicate_batches, garbled, undecodable, incompatible,
-                        foreign_fleet, foreign_admin, admin_windows_missed, lag_peak_us,
-                        store_written, store_dropped, store_queue_peak, store_commit_peak_us,
-                        throttled, soc_temp_mc, battery_mv, battery_ma)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
+                        admin_windows_missed, lag_peak_us, store_written, store_dropped,
+                        store_queue_peak, store_commit_peak_us, throttled, soc_temp_mc,
+                        battery_mv, battery_ma)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
                 )?
                 .execute(params![
                     host.at_ms,
@@ -1245,8 +1243,6 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
                     column(host.garbled),
                     column(host.undecodable),
                     column(host.incompatible),
-                    column(host.foreign_fleet),
-                    column(host.foreign_admin),
                     column(host.admin_windows_missed),
                     column(host.lag_peak_us),
                     column(host.store_written),

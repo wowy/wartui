@@ -793,9 +793,9 @@ def host(db, ctx):
     cols = db.cols("host_status")
     order = [c for c in (
         "at", "frames", "duplicate_batches", "garbled", "undecodable", "incompatible",
-        "foreign_fleet", "foreign_admin", "admin_windows_missed", "lag_peak_us", "store_written",
-        "store_dropped", "store_queue_peak", "store_commit_peak_us", "throttled", "soc_temp_mc",
-        "battery_mv", "battery_ma") if c in cols]
+        "admin_windows_missed", "lag_peak_us", "store_written", "store_dropped",
+        "store_queue_peak", "store_commit_peak_us", "throttled", "soc_temp_mc", "battery_mv",
+        "battery_ma") if c in cols]
     rows = [dict(zip(order, r)) for r in db.q(f"SELECT {', '.join(order)} FROM host_status "
                                                "ORDER BY id")]
     if not rows:
@@ -804,8 +804,7 @@ def host(db, ctx):
     first, last = rows[0], rows[-1]
     deltas = {}
     for c in ("frames", "duplicate_batches", "garbled", "undecodable", "incompatible",
-              "foreign_fleet", "foreign_admin", "admin_windows_missed", "store_written",
-              "store_dropped"):
+              "admin_windows_missed", "store_written", "store_dropped"):
         if c in first:
             deltas[c] = (last[c] or 0) - (first[c] or 0)
     print("  " + "  ".join(f"{k} {v}" for k, v in deltas.items()))
@@ -820,8 +819,7 @@ def host(db, ctx):
                  "(too stale to answer a heartbeat's admin window)",
                  "SELECT at, lag_peak_us FROM host_status WHERE lag_peak_us >= 100000")
     for c, sev in (("store_dropped", "WARN"), ("garbled", "WARN"), ("undecodable", "WARN"),
-                   ("incompatible", "WARN"), ("foreign_fleet", "INFO"), ("foreign_admin", "INFO"),
-                   ("admin_windows_missed", "WARN")):
+                   ("incompatible", "WARN"), ("admin_windows_missed", "WARN")):
         if deltas.get(c):
             flag(sev, "host", f"host_status {c} rose by {deltas[c]} over the capture",
                  f"SELECT at, {c} FROM host_status ORDER BY id")

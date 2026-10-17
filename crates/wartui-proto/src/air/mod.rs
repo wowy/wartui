@@ -9,8 +9,8 @@
 //! format on the control channel is in everybody's conversation at once.
 //!
 //! A magic of our own solves that. It is checked before anything else, so another
-//! firmware's frame costs one `memcmp`. [`foreign`] recognizes one such format, `ENOW`,
-//! to *report* it.
+//! firmware's frame costs one `memcmp`. A frame without it is dropped by the bridge and
+//! ignored by the host, never reported.
 //!
 //! The header carries a version byte. A frame of ours with a version this build does not
 //! know is counted and named, never half-decoded. The byte does not move before 1.0 (see
@@ -277,14 +277,3 @@ impl<'a> Frame<'a> {
         }
     }
 }
-
-/// Recognizing foreign traffic, to report it.
-///
-/// Nothing here decodes a byte: acting on another fleet's fields would be adopting
-/// them. But another host or node on the control channel transmits where these nodes
-/// listen, and other fleet's nodes scan actively. Counting it as line noise would hide
-/// the one clue an operator has for a channel busier than the fleet explains.
-///
-/// Only the vendor magic is matched. wartui's own frames carry [`MAGIC`], so anything
-/// carrying `ENOW` is somebody else's.
-pub mod foreign;

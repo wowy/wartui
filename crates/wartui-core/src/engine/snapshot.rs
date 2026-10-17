@@ -11,23 +11,19 @@ use crate::record::{Observation, ssid_text};
 /// Running totals, all of them since the engine started.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Counters {
-    /// ESP-NOW frames the bridge forwarded.
+    /// ESP-NOW frames of ours the bridge forwarded.
     pub frames: u64,
     /// Frames that parsed as observations.
     pub observations: u64,
     /// Frames that parsed as heartbeats.
     pub heartbeats: u64,
-    /// Frames that were not ours and were not the vendor's either.
+    /// Frames of ours that would not parse.
     pub undecodable: u64,
     /// Frames of ours in a wire version or layout this build does not read: another wire version,
     /// a wrong length, or a sighting batch from a node once its heartbeat has named another major
     /// or minor. A half-flashed fleet looks like this, and nothing else says so. A heartbeat naming
     /// another major or minor is not counted: its node is shown instead.
     pub incompatible: u64,
-    /// Vendor heartbeats and observations: another fleet is transmitting on this channel.
-    pub foreign_fleet: u64,
-    /// Assignments this host did not send: another core is driving a fleet nearby.
-    pub foreign_admin: u64,
     /// USB frames that failed their checksum.
     pub garbled: u64,
     /// Assignments held back because their heartbeat was replayed from the bridge's backlog, its

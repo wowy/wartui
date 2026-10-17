@@ -43,12 +43,11 @@ reasoning.
 | Long gaps between `bridge_status` replies | The link was down, or the host was not polling. Match against the log for reconnects. | `crates/wartui-bridge/src/serial.rs` |
 | `peer_count` = nodes + 1 | Expected. The bridge registers a broadcast peer at init, which is why it reads 1 before any node joins. | `firmware/bridge/src/main.rs` (broadcast peer setup) |
 | `peer_count` above nodes + 1 | Peers not yet aged out (they are removed one `topology_timeout` after the last heartbeat), or nodes that never sent a heartbeat. | `crates/wartui-core/src/engine/mod.rs` |
-| `rx_count` flat while `uptime_ms` keeps rising | The bridge was up but heard nothing over the air. At the start of a capture this means the fleet was powered after the host. Mid-drive, together with every node restarting, it means the nodes lost power. | `bridge_status` rows; the survey prints the longest such stretch |
+| `rx_count` flat while `uptime_ms` keeps rising | The bridge was up but heard no wartui frames over the air. At the start of a capture this means the fleet was powered after the host. Mid-drive, together with every node restarting, it means the nodes lost power. | `bridge_status` rows; the survey prints the longest such stretch |
 | Bridge `rx_oversize` rising | The bridge heard ESP-NOW frames over 1024 bytes and dropped them. No wartui node sends one, so this is a neighbor's traffic and harmless — unless a node went mute at the same time, which points at a node bug sending oversize frames. | `bridge_status` rows; `firmware/bridge/src/main.rs` `forward` |
 | `garbled` | COBS or link frames that did not decode, usually resynchronization after a truncated USB write. | `crates/wartui-proto/src/link/frame.rs`, `crates/wartui-proto/src/outbox/mod.rs` |
-| `undecodable` | Counts two things: a frame without our magic that `air::foreign` does not recognize (most often a stranger's ESP-NOW device), and a frame with our magic and version whose body would not parse. Only the second is our bug. A short burst at one place is usually the first. The capture cannot tell them apart without raw frames. | `crates/wartui-core/src/engine/rx.rs` (both increments), `crates/wartui-proto/src/air/mod.rs` |
+| `undecodable` | Frames with our magic and version whose body would not parse: always our bug. Frames without our magic are dropped at the bridge and ignored by the host, so they appear nowhere. | `crates/wartui-core/src/engine/rx.rs`, `crates/wartui-proto/src/air/mod.rs` |
 | `incompatible` | Frames carrying our magic with an unknown wire version: a node on another build. The fix is to reflash the fleet together. | `crates/wartui-proto/src/air/mod.rs` `WIRE_VERSION` |
-| `foreign_fleet` / `foreign_admin` | Somebody else's wartui-like fleet nearby. It is reported, never accommodated. | `crates/wartui-proto/src/air/foreign.rs` `air::foreign` |
 
 ## Sightings and decode
 
