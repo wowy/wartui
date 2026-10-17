@@ -6,12 +6,18 @@
 //! as long as the TUI is wedged or the cable is out. That is the commonest way this class
 //! of firmware fails in the field, and it fails silently.
 //!
-//! So the bridge never blocks on the link. It encodes everything it wants to say into one
-//! of two rings, and drains them into whatever the FIFO will take. While
-//! a frame is part-way out, the bridge goes on polling the FIFO for at most
+//! So the bridge never blocks on the link. It serializes everything it wants to say into
+//! one of two rings, and drains them into whatever the FIFO will take. While a frame is
+//! part-way out, the bridge goes on polling the FIFO for at most
 //! [`BURST_BUDGET_US`](crate::link::BURST_BUDGET_US) ([`LinkBurst`](crate::link::LinkBurst)),
 //! plus the time to act on any host frame that completes meanwhile. That is a spin, never a
 //! wait on the host.
+//!
+//! COBS happens as the frame is written, a USB packet at a time, not when it is queued.
+//! Encoding a full [`BridgeToHost::Rx`] takes longer than the host takes a packet, and the
+//! main loop pumps no USB meanwhile, so encoding a whole frame at queue time would hold the
+//! link idle for most of every forwarded frame (`docs/link-encode-findings.md`). A packet at
+//! a time, the next one is encoded while the host takes the last.
 //!
 //! The two rings:
 //!
@@ -51,7 +57,7 @@
 //! non-zero value means frames arrived faster than the host took them: a host not
 //! reading, or a burst bigger than the bulk ring plus what USB drains meanwhile.
 
-use crate::link::BridgeToHost;
+use crate::link::{BridgeToHost, CobsStream};
 
 mod ring;
 #[cfg(test)]
@@ -65,8 +71,8 @@ use ring::Ring;
 /// deep and silently discards its oldest. What fills this ring is a node's back-to-back
 /// burst, which can arrive faster than USB drains it (`docs/usb-link-findings.md`). The
 /// ring holds the difference for as long as the burst lasts. Its depth counts frames, not
-/// bytes: each slot takes a full [`MAX_FRAME`](crate::link::MAX_FRAME), so a slot holding
-/// a full 1024-byte batch carries about four times the records of a 250-byte one.
+/// bytes: each slot takes a full frame's body, so a slot holding a full 1024-byte batch
+/// carries about four times the records of a 250-byte one.
 const BULK_DEPTH: usize = 24;
 
 /// Frames that answer a host request. Short, because the host asks for one at a time.
@@ -121,7 +127,16 @@ pub struct Outbox {
     priority: Ring<PRIORITY_DEPTH>,
     bulk: Ring<BULK_DEPTH>,
     current: Option<Source>,
-    cursor: usize,
+    /// Where COBS has reached in the current frame's body.
+    stream: CobsStream,
+    /// The current frame's next encoded bytes, a packet's worth at most, and how far
+    /// into them the sink has taken.
+    stage: [u8; USB_PACKET],
+    staged: usize,
+    taken: usize,
+    /// Whether the sink has accepted any byte of the current frame. Bytes staged but
+    /// not taken have not gone out.
+    begun: bool,
     /// A lone terminator is owed ahead of the next frame: to close off a frame
     /// abandoned part-way onto the wire, because [`Outbox::delimit`] asked, or to
     /// end a transfer that stopped on a full packet.
@@ -151,7 +166,11 @@ impl Outbox {
             priority: Ring::new(),
             bulk: Ring::new(),
             current: None,
-            cursor: 0,
+            stream: CobsStream::new(),
+            stage: [0; USB_PACKET],
+            staged: 0,
+            taken: 0,
+            begun: false,
             orphan: false,
             unflushed: false,
             packet_fill: 0,
@@ -213,7 +232,7 @@ impl Outbox {
     /// first frame (see the module docs). A frame already part-way out needs nothing:
     /// its own terminator follows it.
     pub const fn delimit(&mut self) {
-        if self.cursor == 0 {
+        if !self.begun {
             self.orphan = true;
         }
     }
@@ -247,11 +266,19 @@ impl Outbox {
     /// Give up on the frame being written. Owes a terminator if any of it has gone
     /// out, and nothing if it had not started.
     fn abandon(&mut self) {
-        if self.cursor > 0 {
+        if self.begun {
             self.orphan = true;
         }
+        self.clear_frame();
+    }
+
+    /// Forget the frame being written: no current frame, nothing staged.
+    const fn clear_frame(&mut self) {
         self.current = None;
-        self.cursor = 0;
+        self.stream = CobsStream::new();
+        self.staged = 0;
+        self.taken = 0;
+        self.begun = false;
     }
 
     /// Write as much as the FIFO will take. Returns whether any byte moved.
@@ -280,30 +307,37 @@ impl Outbox {
                 None => match self.next_source() {
                     Some(source) => {
                         self.current = Some(source);
-                        self.cursor = 0;
                         source
                     }
                     None => break,
                 },
             };
 
-            // The rest of the frame goes to the sink in one call. The slice borrows a
-            // ring, so the write finishes before the bookkeeping below.
-            let attempt = {
-                let rest = match source {
-                    Source::Priority => self.priority.rest_at(self.cursor),
-                    Source::Bulk => self.bulk.rest_at(self.cursor),
+            // Encode the next packet's worth once the sink has taken the last. A stage
+            // ends where the USB packet does, so each packet is one write and the next
+            // stage is encoded while the host takes it. A stage straddling packets
+            // splits every packet into two writes with the encode between them, and
+            // costs the quiet drain about 5%.
+            if self.taken == self.staged {
+                let body = match source {
+                    Source::Priority => self.priority.front(),
+                    Source::Bulk => self.bulk.front(),
                 };
-                if rest.is_empty() { None } else { Some(sink.write_bytes(rest)) }
-            };
+                self.staged =
+                    self.stream.fill(body, &mut self.stage[..USB_PACKET - self.packet_fill]);
+                self.taken = 0;
+                if self.staged == 0 {
+                    self.finish(source);
+                    continue;
+                }
+            }
 
-            let Some((written, result)) = attempt else {
-                self.finish(source);
-                continue;
-            };
+            // What is staged goes to the sink in one call.
+            let (written, result) = sink.write_bytes(&self.stage[self.taken..self.staged]);
 
             if written > 0 {
-                self.cursor += written;
+                self.taken += written;
+                self.begun = true;
                 self.wrote(written);
                 progressed = true;
             }
@@ -370,8 +404,7 @@ impl Outbox {
             Source::Priority => self.priority.pop(),
             Source::Bulk => self.bulk.pop(),
         }
-        self.current = None;
-        self.cursor = 0;
+        self.clear_frame();
     }
 }
 

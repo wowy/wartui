@@ -8,7 +8,7 @@ use super::{
 // A frame is the version byte, the payload and the CRC, plus COBS overhead (one byte
 // per 254 and a leading marker) and the terminator. Checked here so a payload that
 // outgrew the buffer is a build error, not a silent truncation.
-const MAX_BODY: usize = MAX_FRAME - 8;
+pub(crate) const MAX_BODY: usize = MAX_FRAME - 8;
 const _: () = assert!(MAX_NODE_PAYLOAD + 32 < MAX_BODY);
 // The same for the host-to-bridge direction, whose longest frame is a full v2 send.
 // COBS adds one byte per 254, so 16 covers it with the terminator.
@@ -138,20 +138,115 @@ fn encode_frame_in<T: Serialize, const B: usize>(
     out: &mut [u8],
 ) -> Result<usize, LinkError> {
     let mut body = [0u8; B];
-    body[0] = LINK_PROTO_VERSION;
-    let used =
-        postcard::to_slice(msg, &mut body[1..]).map_err(|_| LinkError::BufferTooSmall)?.len();
-    let end = 1 + used;
-    if end + 2 > B {
-        return Err(LinkError::BufferTooSmall);
-    }
-    let crc = crc16(&body[..end]);
-    body[end..end + 2].copy_from_slice(&crc.to_le_bytes());
-
-    let encoded = cobs::try_encode(&body[..end + 2], out).map_err(|_| LinkError::BufferTooSmall)?;
+    let len = encode_body(msg, &mut body)?;
+    let encoded = cobs::try_encode(&body[..len], out).map_err(|_| LinkError::BufferTooSmall)?;
     // COBS output never contains a zero, so the terminator is unambiguous.
     *out.get_mut(encoded).ok_or(LinkError::BufferTooSmall)? = 0x00;
     Ok(encoded + 1)
+}
+
+/// Write a frame's body into `out`: the version byte, the serialized `msg` and its CRC,
+/// little-endian. COBS and the terminator are the caller's.
+///
+/// Returns how many bytes of `out` were used.
+///
+/// # Errors
+/// [`LinkError::BufferTooSmall`] if `out` cannot hold the body.
+pub(crate) fn encode_body<T: Serialize>(msg: &T, out: &mut [u8]) -> Result<usize, LinkError> {
+    let (version, payload) = out.split_first_mut().ok_or(LinkError::BufferTooSmall)?;
+    *version = LINK_PROTO_VERSION;
+    let used = postcard::to_slice(msg, payload).map_err(|_| LinkError::BufferTooSmall)?.len();
+    let end = 1 + used;
+    let crc = crc16(&out[..end]);
+    out.get_mut(end..end + 2).ok_or(LinkError::BufferTooSmall)?.copy_from_slice(&crc.to_le_bytes());
+    Ok(end + 2)
+}
+
+/// COBS-encodes a frame body a piece at a time, terminator included, producing exactly
+/// what [`cobs::try_encode`] and a `0x00` would.
+///
+/// It holds positions and never the body, which the caller passes on every call: the
+/// outbox keeps the body in a ring slot that eviction may copy elsewhere, same bytes at
+/// the same indices.
+#[derive(Debug)]
+pub(crate) struct CobsStream {
+    /// The next body byte to read.
+    at: usize,
+    step: CobsStep,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CobsStep {
+    /// A block starts at `at`, and its code byte is next.
+    Code,
+    /// `left` data bytes of the current block remain; `zero` when a zero in the body
+    /// ends it, and is skipped rather than written.
+    Data { left: u8, zero: bool },
+    /// The terminator is next.
+    Terminator,
+    /// The terminator is written.
+    Done,
+}
+
+/// The longest run of non-zero bytes one COBS block carries.
+const COBS_RUN: usize = 254;
+
+impl CobsStream {
+    /// A stream at the start of a body.
+    pub(crate) const fn new() -> Self {
+        Self { at: 0, step: CobsStep::Code }
+    }
+
+    /// Write the next encoded bytes of `body` into `out`, as many as fit. Returns how
+    /// many; 0 once the terminator has been written.
+    ///
+    /// `body` must be the same bytes on every call.
+    pub(crate) fn fill(&mut self, body: &[u8], out: &mut [u8]) -> usize {
+        let mut n = 0;
+        while n < out.len() {
+            match self.step {
+                CobsStep::Code => {
+                    let rest = &body[self.at..];
+                    let scan = &rest[..rest.len().min(COBS_RUN)];
+                    let (len, zero) = match scan.iter().position(|&b| b == 0) {
+                        Some(k) => (k, true),
+                        None => (scan.len(), false),
+                    };
+                    // `len` is at most `COBS_RUN`, so the code is at most `0xFF`.
+                    out[n] = len as u8 + 1;
+                    n += 1;
+                    self.step = CobsStep::Data { left: len as u8, zero };
+                }
+                CobsStep::Data { left, zero } => {
+                    let take = usize::from(left).min(out.len() - n);
+                    out[n..n + take].copy_from_slice(&body[self.at..self.at + take]);
+                    n += take;
+                    self.at += take;
+                    // `take` is at most `left`, so it fits a `u8`.
+                    let left = left - take as u8;
+                    self.step = if left > 0 {
+                        CobsStep::Data { left, zero }
+                    } else if zero {
+                        self.at += 1;
+                        CobsStep::Code
+                    } else if self.at == body.len() {
+                        // A full run that ends the body opens no empty block behind
+                        // it, which is how `cobs` encodes it.
+                        CobsStep::Terminator
+                    } else {
+                        CobsStep::Code
+                    };
+                }
+                CobsStep::Terminator => {
+                    out[n] = 0x00;
+                    n += 1;
+                    self.step = CobsStep::Done;
+                }
+                CobsStep::Done => break,
+            }
+        }
+        n
+    }
 }
 
 /// Decode a COBS-encoded frame body, with the terminating zero already removed.
@@ -244,5 +339,111 @@ impl<const N: usize> FrameAccumulator<N> {
             return None;
         }
         Some(&mut self.buf[..len])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    extern crate std;
+    use std::vec::Vec;
+
+    use super::{CobsStream, MAX_BODY, MAX_FRAME};
+
+    /// What `encode_frame` puts on the wire for `body`.
+    fn reference(body: &[u8]) -> Vec<u8> {
+        let mut out = std::vec![0; MAX_FRAME * 2];
+        let len = cobs::encode(body, &mut out);
+        out.truncate(len);
+        out.push(0x00);
+        out
+    }
+
+    /// Everything `CobsStream` produces for `body`, `chunk` bytes per call.
+    fn streamed(body: &[u8], chunk: usize) -> Vec<u8> {
+        let mut stream = CobsStream::new();
+        let mut out = Vec::new();
+        let mut buf = std::vec![0; chunk];
+        loop {
+            let n = stream.fill(body, &mut buf);
+            if n == 0 {
+                break;
+            }
+            out.extend_from_slice(&buf[..n]);
+        }
+        out
+    }
+
+    fn assert_matches_cobs(body: &[u8]) {
+        let expected = reference(body);
+        for chunk in [1, 7, 64, MAX_FRAME * 2] {
+            assert_eq!(streamed(body, chunk), expected, "{} bytes, {chunk} a call", body.len());
+        }
+    }
+
+    fn nonzero(len: usize) -> Vec<u8> {
+        (0..len).map(|i| (i % 255) as u8 + 1).collect()
+    }
+
+    #[test]
+    fn cobs_stream_matches_cobs_encode_when_body_is_empty() {
+        assert_matches_cobs(&[]);
+    }
+
+    #[test]
+    fn cobs_stream_matches_cobs_encode_when_body_is_one_zero() {
+        assert_matches_cobs(&[0]);
+    }
+
+    #[test]
+    fn cobs_stream_matches_cobs_encode_when_body_is_all_zeros() {
+        assert_matches_cobs(&[0; 300]);
+    }
+
+    #[test]
+    fn cobs_stream_matches_cobs_encode_when_body_has_no_zeros() {
+        // Either side of one and two full 254-byte runs.
+        for len in [253, 254, 255, 508, 509] {
+            assert_matches_cobs(&nonzero(len));
+        }
+    }
+
+    #[test]
+    fn cobs_stream_matches_cobs_encode_when_full_run_precedes_zero() {
+        let mut body = nonzero(254);
+        body.push(0);
+        body.extend_from_slice(&nonzero(10));
+        assert_matches_cobs(&body);
+    }
+
+    #[test]
+    fn cobs_stream_matches_cobs_encode_when_body_ends_in_zero() {
+        let mut body = nonzero(20);
+        body.push(0);
+        assert_matches_cobs(&body);
+    }
+
+    #[test]
+    fn cobs_stream_matches_cobs_encode_when_body_is_pseudo_random() {
+        // An xorshift, with about one byte in eight a zero and runs of every length.
+        let mut state: u32 = 0x2545_f491;
+        let body: Vec<u8> = (0..MAX_BODY)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                if state.is_multiple_of(8) { 0 } else { (state >> 8) as u8 | 1 }
+            })
+            .collect();
+        assert_matches_cobs(&body);
+    }
+
+    #[test]
+    fn cobs_stream_returns_zero_when_terminator_is_written() {
+        let body = nonzero(10);
+        let mut stream = CobsStream::new();
+        let mut buf = [0; 64];
+        assert_eq!(stream.fill(&body, &mut buf), 12);
+        assert_eq!(stream.fill(&body, &mut buf), 0);
+        assert_eq!(stream.fill(&body, &mut buf), 0);
     }
 }
