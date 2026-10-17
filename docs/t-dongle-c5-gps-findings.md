@@ -113,10 +113,11 @@ losses were drops from the bridge's outbox:
 
 In the first panel-only run, the bridge took in 8,835 frames, the host read 5,864, and
 the outbox dropped 2,973. That is about 24 full frames a second reaching the host against
-37 offered, with or without GPS. `link-encode-findings.md` traces the ceiling to the
-bridge's frame encoding. Under that saturation the GPS's own batches take bulk
-slots, which may account for the 200–400 extra lost in some GPS runs. The bridge GPS still
-supplied 99.7–99.8% of positions.
+37 offered, with or without GPS. Encode time explains part of the gap, raising the drain
+while frames arrive from 364 to 497 frames/s; the rest is the USB link's own rate and how
+the nodes' bursts overlap (`link-encode-findings.md`). Under that saturation the GPS's own
+batches take bulk slots, which may account for the 200–400 extra lost in some GPS runs. The
+bridge GPS still supplied 99.7–99.8% of positions.
 
 ## Still unmeasured
 

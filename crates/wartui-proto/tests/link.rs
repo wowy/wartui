@@ -142,6 +142,37 @@ fn crc16_matches_ccitt_false_standard_when_given_test_vectors() {
     assert_eq!(crc16(b""), 0xFFFF);
 }
 
+/// The bitwise form `crc16`'s table is built from, as the reference.
+fn crc16_bitwise(data: &[u8]) -> u16 {
+    let mut crc: u16 = 0xFFFF;
+    for &byte in data {
+        crc ^= u16::from(byte) << 8;
+        for _ in 0..8 {
+            crc = if crc & 0x8000 != 0 { (crc << 1) ^ 0x1021 } else { crc << 1 };
+        }
+    }
+    crc
+}
+
+#[test]
+fn crc16_matches_bitwise_reference_when_given_any_input() {
+    assert_eq!(crc16(&[]), crc16_bitwise(&[]));
+    for byte in 0..=u8::MAX {
+        assert_eq!(crc16(&[byte]), crc16_bitwise(&[byte]), "{byte:#04x}");
+    }
+    let all: [u8; 256] = core::array::from_fn(|i| i as u8);
+    assert_eq!(crc16(&all), crc16_bitwise(&all));
+    // A 1 KB xorshift buffer: a full node payload's worth of mixed bytes.
+    let mut state: u32 = 0x1234_5678;
+    let noise: [u8; 1024] = core::array::from_fn(|_| {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        state as u8
+    });
+    assert_eq!(crc16(&noise), crc16_bitwise(&noise));
+}
+
 #[test]
 fn link_codec_round_trips_all_host_commands_when_encoded_and_decoded() {
     for cmd in sample_commands() {

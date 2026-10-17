@@ -1,9 +1,9 @@
 //! Serde for a link message's byte payloads, through `#[serde(with = "bytes")]`.
 //!
-//! A heapless `Vec<u8, N>` serializes as a sequence, which postcard writes one element at
-//! a time. Postcard writes a byte string as the same varint length and the same bytes, so
-//! the wire is unchanged, but as one copy. On the bridge that is the difference that
-//! matters: it encodes every frame it forwards, and pumps no USB while it does.
+//! A heapless `Vec<u8, N>` serializes as a sequence of `u8`. Postcard writes a byte string
+//! with the same varint length and the same bytes, so the two are interchangeable on the
+//! wire, and this writes it in one call rather than an element at a time. The bridge
+//! encodes every frame it forwards and pumps no USB while it does, so that time counts.
 //!
 //! Decoding takes a sequence too, so a self-describing format that hands one back still
 //! works.
@@ -61,129 +61,74 @@ impl<'de, const N: usize> Visitor<'de> for BytesVisitor<N> {
 #[cfg(test)]
 mod tests {
     use heapless::Vec;
-    use serde::Serialize;
     use serde::de::value::{BytesDeserializer, Error, SeqDeserializer};
+    use serde::{Deserialize, Serialize};
 
-    use crate::link::{
-        BridgeToHost, EspNowPayload, GpsBytes, GpsWriteBytes, HostToBridge, SendPayload,
-    };
-    use crate::mac::Mac;
+    use crate::link::MAX_NODE_PAYLOAD;
 
-    // Twins of the link enums with the payloads left to heapless's own sequence encoding.
-    // Variants not under test are placeholders, kept so each index stays where it is.
-    #[allow(clippy::large_enum_variant)]
+    /// The largest payload under test: a node's, which a `BridgeToHost::Rx` carries.
+    const N: usize = MAX_NODE_PAYLOAD;
+
+    /// A payload through this module.
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    struct Bytes<const M: usize> {
+        #[serde(with = "super")]
+        payload: Vec<u8, M>,
+    }
+
+    /// The same payload left to heapless's own sequence encoding.
     #[derive(Serialize)]
-    enum SeqBridgeToHost {
-        _Ready,
-        Rx { src: Mac, dst: Mac, rssi: i8, rx_us: u32, payload: EspNowPayload },
-        _SendResult,
-        _Status,
-        _Log,
-        _Error,
-        Gps { bytes: GpsBytes },
+    struct Seq<const M: usize> {
+        payload: Vec<u8, M>,
     }
 
-    #[allow(clippy::large_enum_variant)]
-    #[derive(Serialize)]
-    enum SeqHostToBridge {
-        _Identify,
-        _AddPeer,
-        _RemovePeer,
-        SendEspNow { id: u16, dst: Mac, ensure_peer: bool, payload: SendPayload },
-        _GetStatus,
-        _Reset,
-        _ShowPanel,
-        _SetTxPower,
-        GpsWrite { bytes: GpsWriteBytes },
-    }
-
-    fn encode<T: Serialize>(msg: &T, buf: &mut [u8; 2048]) -> usize {
-        postcard::to_slice(msg, buf).expect("fits").len()
-    }
-
-    fn assert_same_wire<A: Serialize, B: Serialize>(ours: &A, seq: &B) {
-        let (mut a, mut b) = ([0u8; 2048], [0u8; 2048]);
-        let (na, nb) = (encode(ours, &mut a), encode(seq, &mut b));
-        assert_eq!(a[..na], b[..nb]);
-    }
-
-    fn filled<const N: usize>(len: usize) -> Vec<u8, N> {
+    fn filled<const M: usize>(len: usize) -> Vec<u8, M> {
         (0..len).map(|i| i as u8).collect()
     }
 
-    #[test]
-    fn bytes_encode_matches_sequence_encoding_when_payload_is_rx() {
-        // 300 bytes, so the length prefix is a two-byte varint.
-        let payload: EspNowPayload = filled(300);
-        let ours = BridgeToHost::Rx {
-            src: [1; 6],
-            dst: [2; 6],
-            rssi: -40,
-            rx_us: 7,
-            payload: payload.clone(),
-        };
-        let seq = SeqBridgeToHost::Rx { src: [1; 6], dst: [2; 6], rssi: -40, rx_us: 7, payload };
-        assert_same_wire(&ours, &seq);
-    }
-
-    #[test]
-    fn bytes_encode_matches_sequence_encoding_when_payload_is_gps() {
-        let bytes: GpsBytes = filled(200);
-        assert_same_wire(
-            &BridgeToHost::Gps { bytes: bytes.clone() },
-            &SeqBridgeToHost::Gps { bytes },
-        );
-    }
-
-    #[test]
-    fn bytes_encode_matches_sequence_encoding_when_payload_is_send() {
-        let payload: SendPayload = filled(1470);
-        let ours = HostToBridge::SendEspNow {
-            id: 9,
-            dst: [3; 6],
-            ensure_peer: true,
-            payload: payload.clone(),
-        };
-        let seq = SeqHostToBridge::SendEspNow { id: 9, dst: [3; 6], ensure_peer: true, payload };
-        assert_same_wire(&ours, &seq);
-    }
-
-    #[test]
-    fn bytes_encode_matches_sequence_encoding_when_payload_is_gps_write() {
-        let bytes: GpsWriteBytes = filled(4);
-        assert_same_wire(
-            &HostToBridge::GpsWrite { bytes: bytes.clone() },
-            &SeqHostToBridge::GpsWrite { bytes },
-        );
-    }
-
-    #[test]
-    fn bytes_encode_matches_sequence_encoding_when_payload_is_empty() {
-        assert_same_wire(
-            &BridgeToHost::Gps { bytes: GpsBytes::new() },
-            &SeqBridgeToHost::Gps { bytes: GpsBytes::new() },
-        );
-    }
-
-    #[test]
-    fn bytes_decode_refuses_payload_when_longer_than_capacity() {
-        // A twin one byte wider than `GpsWriteBytes`, filled past what the real type holds.
-        #[allow(clippy::large_enum_variant)]
-        #[derive(Serialize)]
-        enum Wide {
-            _0,
-            _1,
-            _2,
-            _3,
-            _4,
-            _5,
-            _6,
-            _7,
-            GpsWrite { bytes: Vec<u8, { crate::link::GPS_WRITE_MAX + 1 }> },
-        }
+    fn encode<T: Serialize>(msg: &T) -> Vec<u8, 2048> {
         let mut buf = [0u8; 2048];
-        let n = encode(&Wide::GpsWrite { bytes: filled(crate::link::GPS_WRITE_MAX + 1) }, &mut buf);
-        assert!(postcard::from_bytes::<HostToBridge>(&buf[..n]).is_err());
+        Vec::from_slice(postcard::to_slice(msg, &mut buf).expect("fits")).expect("fits")
+    }
+
+    #[test]
+    fn bytes_encode_matches_sequence_encoding_when_given_any_length() {
+        // 127 and 128 straddle the one-byte varint length; 300 and N take two bytes.
+        for len in [0, 1, 127, 128, 300, N] {
+            let payload: Vec<u8, N> = filled(len);
+            let ours = encode(&Bytes { payload: payload.clone() });
+            assert_eq!(ours, encode(&Seq { payload }), "length {len}");
+        }
+    }
+
+    #[test]
+    fn bytes_decode_round_trips_payload_when_given_any_length() {
+        for len in [0, 1, 127, 128, 300, N] {
+            let sent = Bytes::<N> { payload: filled(len) };
+            let got: Bytes<N> = postcard::from_bytes(&encode(&sent)).expect("decodes");
+            assert_eq!(got, sent, "length {len}");
+        }
+    }
+
+    #[test]
+    fn bytes_decode_reads_sequence_encoding_when_given_any_length() {
+        for len in [0, 1, 127, 128, 300, N] {
+            let payload: Vec<u8, N> = filled(len);
+            let got: Bytes<N> =
+                postcard::from_bytes(&encode(&Seq { payload: payload.clone() })).expect("decodes");
+            assert_eq!(got.payload, payload, "length {len}");
+        }
+    }
+
+    #[test]
+    fn bytes_decode_refuses_payload_when_one_byte_past_capacity() {
+        // Exactly N decodes, so the refusal below is the extra byte's.
+        let full = encode(&Bytes::<{ N + 1 }> { payload: filled(N) });
+        let got: Bytes<N> = postcard::from_bytes(&full).expect("N bytes fit");
+        assert_eq!(got.payload, filled::<N>(N));
+
+        let over = encode(&Bytes::<{ N + 1 }> { payload: filled(N + 1) });
+        assert!(postcard::from_bytes::<Bytes<N>>(&over).is_err());
     }
 
     #[test]
