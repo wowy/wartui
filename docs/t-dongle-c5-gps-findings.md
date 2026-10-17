@@ -113,15 +113,12 @@ losses were drops from the bridge's outbox:
 
 In the first panel-only run, the bridge took in 8,835 frames, the host read 5,864, and
 the outbox dropped 2,973. That is about 24 full frames a second reaching the host against
-37 offered, with or without GPS. Under that saturation the GPS's own batches take bulk
+37 offered, with or without GPS. `link-encode-findings.md` traces the ceiling to the
+bridge's frame encoding. Under that saturation the GPS's own batches take bulk
 slots, which may account for the 200–400 extra lost in some GPS runs. The bridge GPS still
 supplied 99.7–99.8% of positions.
 
 ## Still unmeasured
 
-- **Where the full-batch ceiling is.** `usb-link-findings.md` drained back-to-back 1 KB
-  frames at about 670 KB/s on a XIAO C6 bridge, so the USB transfer alone does not
-  explain about 25 KB/s. The candidates are the bridge's per-frame work and the host
-  taking in 36 records a frame. The load is far beyond a drive.
 - **3 and 4 Hz**, which differ from 2 and 5 only in arithmetic.
 - **A USB GPS taking over** when the Qwiic cable is pulled mid-run.

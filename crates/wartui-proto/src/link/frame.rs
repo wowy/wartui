@@ -77,22 +77,36 @@ impl core::error::Error for LinkError {}
 /// reflection and no final XOR.
 ///
 /// Written here rather than pulled in as a dependency: it is a dozen lines, and the
-/// firmware's dependency budget is worth defending.
+/// firmware's dependency budget is worth defending. Table-driven, one lookup per byte,
+/// because the bridge checksums every frame it forwards and a bitwise loop over a full
+/// [`BridgeToHost::Rx`] cost ~310 µs on a C5, during which the main loop pumps no USB.
 #[must_use]
 pub const fn crc16(data: &[u8]) -> u16 {
     let mut crc: u16 = 0xFFFF;
     let mut i = 0;
     while i < data.len() {
-        crc ^= (data[i] as u16) << 8;
+        crc = (crc << 8) ^ CRC16_TABLE[((crc >> 8) as u8 ^ data[i]) as usize];
+        i += 1;
+    }
+    crc
+}
+
+/// [`crc16`]'s remainder for each value of the top byte, built at compile time.
+const CRC16_TABLE: [u16; 256] = {
+    let mut table = [0u16; 256];
+    let mut n = 0;
+    while n < 256 {
+        let mut crc = (n as u16) << 8;
         let mut bit = 0;
         while bit < 8 {
             crc = if crc & 0x8000 != 0 { (crc << 1) ^ 0x1021 } else { crc << 1 };
             bit += 1;
         }
-        i += 1;
+        table[n] = crc;
+        n += 1;
     }
-    crc
-}
+    table
+};
 
 /// Serialize a bridge-to-host `msg` into `out` as a complete frame, terminator included,
 /// of up to [`MAX_FRAME`].
@@ -230,5 +244,46 @@ impl<const N: usize> FrameAccumulator<N> {
             return None;
         }
         Some(&mut self.buf[..len])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::crc16;
+
+    /// The bitwise form the table is built from, as the reference.
+    fn crc16_bitwise(data: &[u8]) -> u16 {
+        let mut crc: u16 = 0xFFFF;
+        for &byte in data {
+            crc ^= u16::from(byte) << 8;
+            for _ in 0..8 {
+                crc = if crc & 0x8000 != 0 { (crc << 1) ^ 0x1021 } else { crc << 1 };
+            }
+        }
+        crc
+    }
+
+    #[test]
+    fn crc16_returns_check_value_when_given_standard_input() {
+        assert_eq!(crc16(b"123456789"), 0x29B1);
+    }
+
+    #[test]
+    fn crc16_matches_bitwise_reference_when_given_any_input() {
+        assert_eq!(crc16(&[]), crc16_bitwise(&[]));
+        for byte in 0..=u8::MAX {
+            assert_eq!(crc16(&[byte]), crc16_bitwise(&[byte]), "{byte:#04x}");
+        }
+        let all: [u8; 256] = core::array::from_fn(|i| i as u8);
+        assert_eq!(crc16(&all), crc16_bitwise(&all));
+        // A 1 KB xorshift buffer: a full node payload's worth of mixed bytes.
+        let mut state: u32 = 0x1234_5678;
+        let noise: [u8; 1024] = core::array::from_fn(|_| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state as u8
+        });
+        assert_eq!(crc16(&noise), crc16_bitwise(&noise));
     }
 }

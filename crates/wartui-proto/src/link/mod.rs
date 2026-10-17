@@ -25,6 +25,7 @@ use heapless::{String, Vec};
 use serde::Serialize;
 
 mod burst;
+mod bytes;
 mod frame;
 mod panel;
 
@@ -201,6 +202,7 @@ pub enum HostToBridge {
         /// Register the peer first if it is not already known. It never removes one.
         ensure_peer: bool,
         /// Frame bytes, already encoded by [`crate::air`].
+        #[serde(with = "bytes")]
         payload: SendPayload,
     },
     /// Ask for a [`BridgeToHost::Status`].
@@ -234,6 +236,7 @@ pub enum HostToBridge {
     /// a `cargo run`, not a reflash. A bridge without a GPS port drops them.
     GpsWrite {
         /// The receiver's own protocol, typically UBX.
+        #[serde(with = "bytes")]
         bytes: GpsWriteBytes,
     },
 }
@@ -318,6 +321,7 @@ pub enum BridgeToHost {
         /// noise.
         rx_us: u32,
         /// The frame.
+        #[serde(with = "bytes")]
         payload: EspNowPayload,
     },
     /// Outcome of a [`HostToBridge::SendEspNow`].
@@ -363,6 +367,7 @@ pub enum BridgeToHost {
     /// ended. The host reassembles and parses it.
     Gps {
         /// The bytes, in the order the receiver gave them.
+        #[serde(with = "bytes")]
         bytes: GpsBytes,
     },
 }
