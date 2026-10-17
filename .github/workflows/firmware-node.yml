@@ -5,6 +5,9 @@ name: Firmware - Node
 # path dependencies both firmwares compile; a wire change is a firmware change),
 # `rustfmt.toml` (fmt resolves it from the repo root), or this file. One workflow
 # per firmware because GitHub's path filter is workflow-wide, never per-job.
+# PRs build one image per chip, while pushes to main and a manual run with
+# "full" ticked build every board variant. Push builds still honour the path
+# filters, while a manual run always builds.
 
 on:
   push:
@@ -24,6 +27,12 @@ on:
       - crates/wartui-proto/**
       - .github/workflows/firmware-node.yml
       - rustfmt.toml
+  workflow_dispatch:
+    inputs:
+      full:
+        description: Build every board variant, not just one per chip
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -38,8 +47,13 @@ env:
 jobs:
   node:
     strategy:
+      # PRs skip `xiao-external-antenna`; pushes to main and a "full" manual run
+      # compile it, and a PR that touches it can tick "full".
       matrix:
-        target: [esp32c5, esp32c6]
+        features: >-
+          ${{ fromJSON((github.event_name == 'push' || inputs.full)
+          && '["esp32c5", "esp32c6", "esp32c6,xiao-external-antenna"]'
+          || '["esp32c5","esp32c6"]') }}
 
     runs-on: ubuntu-latest
 
@@ -65,11 +79,14 @@ jobs:
       # versions" has the reasoning; `.github/dependabot.yml` is what keeps the
       # bumps from arriving.
       - name: One copy of each esp-radio-pinned crate
+        env:
+          FEATURES: ${{matrix.features}}
         run: |
+          chip=${FEATURES%%,*}  # the chip is always the first feature
           pushd firmware/node
-          resolved=$(cargo tree --locked --features ${{matrix.target}} -e normal \
+          resolved=$(cargo tree --locked --features "$FEATURES" -e normal \
             --prefix none --format '{p}' | awk '{print $1, $2}' | sort -u)
-          for c in esp-alloc esp-hal esp-radio esp-rtos esp-storage esp-sync esp-wifi-sys-${{matrix.target}}; do
+          for c in esp-alloc esp-hal esp-radio esp-rtos esp-storage esp-sync esp-wifi-sys-$chip; do
             n=$(printf '%s\n' "$resolved" | grep -c "^$c " || true)
             if [ "$n" != 1 ]; then
               printf '%s\n' "$resolved" | grep "^$c " || true
@@ -80,13 +97,17 @@ jobs:
           popd
 
       - name: Build
+        env:
+          FEATURES: ${{matrix.features}}
         run: |
           pushd firmware/node
-          cargo build --release --features ${{matrix.target}} --locked --verbose
+          cargo build --release --features "$FEATURES" --locked --verbose
           popd
 
       - name: Clippy
+        env:
+          FEATURES: ${{matrix.features}}
         run: |
           pushd firmware/node
-          cargo clippy --release --features ${{matrix.target}} --locked -- -D warnings
+          cargo clippy --release --features "$FEATURES" --locked -- -D warnings
           popd

@@ -5,6 +5,9 @@ name: Firmware - Bridge
 # path dependencies both firmwares compile; a wire change is a firmware change),
 # `rustfmt.toml` (fmt resolves it from the repo root), or this file. One workflow
 # per firmware because GitHub's path filter is workflow-wide, never per-job.
+# PRs build one image per chip, while pushes to main and a manual run with
+# "full" ticked build every board variant. Push builds still honour the path
+# filters, while a manual run always builds.
 
 on:
   push:
@@ -24,6 +27,12 @@ on:
       - crates/wartui-proto/**
       - .github/workflows/firmware-bridge.yml
       - rustfmt.toml
+  workflow_dispatch:
+    inputs:
+      full:
+        description: Build every board variant, not just one per chip
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -38,21 +47,16 @@ env:
 jobs:
   bridge:
     strategy:
-      # Two axes to cover both the chip and board features.
+      # PRs build only the bare image per chip, so code behind the board
+      # features is compiled on pushes to main and on a manual run with "full"
+      # ticked. A PR that touches it can tick "full".
       matrix:
-        include:
-          - chip: esp32c5
-            features: esp32c5
-          - chip: esp32c5
-            features: esp32c5,t-dongle-c5
-          - chip: esp32c5
-            features: esp32c5,t-dongle-c5-gps
-          - chip: esp32c5
-            features: esp32c5,t-dongle-c5,t-dongle-c5-gps
-          - chip: esp32c6
-            features: esp32c6
-          - chip: esp32c6
-            features: esp32c6,xiao-external-antenna
+        features: >-
+          ${{ fromJSON((github.event_name == 'push' || inputs.full)
+          && '["esp32c5", "esp32c5,t-dongle-c5", "esp32c5,t-dongle-c5-gps",
+          "esp32c5,t-dongle-c5,t-dongle-c5-gps", "esp32c6",
+          "esp32c6,xiao-external-antenna"]'
+          || '["esp32c5","esp32c6"]') }}
 
     runs-on: ubuntu-latest
 
@@ -78,11 +82,18 @@ jobs:
       # versions" has the reasoning; `.github/dependabot.yml` is what keeps the
       # bumps from arriving.
       - name: One copy of each esp-radio-pinned crate
+        env:
+          FEATURES: ${{matrix.features}}
         run: |
+          chip=${FEATURES%%,*}  # the chip is always the first feature
+          # `cargo tree` only resolves and compiles nothing, so the widest C5
+          # feature set costs seconds and keeps the panel crates' check on PRs.
+          tree_features=$FEATURES
+          [ "$chip" = esp32c5 ] && tree_features=esp32c5,t-dongle-c5,t-dongle-c5-gps
           pushd firmware/bridge
-          resolved=$(cargo tree --locked --features ${{matrix.features}} -e normal \
+          resolved=$(cargo tree --locked --features "$tree_features" -e normal \
             --prefix none --format '{p}' | awk '{print $1, $2}' | sort -u)
-          for c in esp-alloc esp-hal esp-radio esp-rtos esp-sync esp-wifi-sys-${{matrix.chip}}; do
+          for c in esp-alloc esp-hal esp-radio esp-rtos esp-sync esp-wifi-sys-$chip; do
             n=$(printf '%s\n' "$resolved" | grep -c "^$c " || true)
             if [ "$n" != 1 ]; then
               printf '%s\n' "$resolved" | grep "^$c " || true
@@ -104,13 +115,17 @@ jobs:
           popd
 
       - name: Build
+        env:
+          FEATURES: ${{matrix.features}}
         run: |
           pushd firmware/bridge
-          cargo build --release --features ${{matrix.features}} --locked --verbose
+          cargo build --release --features "$FEATURES" --locked --verbose
           popd
 
       - name: Clippy
+        env:
+          FEATURES: ${{matrix.features}}
         run: |
           pushd firmware/bridge
-          cargo clippy --release --features ${{matrix.features}} --locked -- -D warnings
+          cargo clippy --release --features "$FEATURES" --locked -- -D warnings
           popd
