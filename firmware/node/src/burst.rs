@@ -38,7 +38,7 @@ impl Burst {
     }
 
     /// Send a burst if one is due. Call only on the control channel.
-    pub fn poll(&mut self, sender: &mut EspNowSender<'_>, node: &mut Node) {
+    pub fn poll(&mut self, sender: &mut EspNowSender, node: &mut Node) {
         let now = Instant::now();
         if now < self.next {
             return;
