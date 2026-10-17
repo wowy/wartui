@@ -5,7 +5,8 @@ use super::ring::Ring;
 use super::{BULK_DEPTH, ByteSink, Outbox, PRIORITY_DEPTH, USB_PACKET};
 use crate::link::{
     BridgeToHost, Chip, FrameAccumulator, GpsBytes, LINK_PROTO_VERSION, LogLevel, LogStr,
-    LoopPhase, MAX_FRAME, ShortStr, decode_frame, encode_frame,
+    LoopPhase, MAX_BODY, MAX_FRAME, MAX_NODE_PAYLOAD, ShortStr, decode_frame, encode_body,
+    encode_frame,
 };
 use crate::reset::ResetCause;
 
@@ -124,6 +125,37 @@ fn ready() -> BridgeToHost {
         panel: None,
         gps: false,
     }
+}
+
+/// An `Rx` whose `len`-byte payload is byte `i` = `pattern(i)`, tagged by `rssi`.
+fn rx(rssi: i8, len: usize, pattern: fn(usize) -> u8) -> BridgeToHost {
+    let mut payload = crate::link::EspNowPayload::new();
+    for i in 0..len {
+        payload.push(pattern(i)).unwrap();
+    }
+    BridgeToHost::Rx { src: [1, 2, 3, 4, 5, 6], dst: [6, 5, 4, 3, 2, 1], rssi, rx_us: 0, payload }
+}
+
+/// A full-size `Rx`: mostly non-zero, so it has runs of every length up to COBS's 254.
+fn full_rx(rssi: i8) -> BridgeToHost {
+    rx(rssi, MAX_NODE_PAYLOAD, |i| (i % 251) as u8)
+}
+
+/// What [`encode_frame`] puts on the wire for `msg`.
+fn frame_of(msg: &BridgeToHost) -> Vec<u8> {
+    let mut buf = [0; MAX_FRAME];
+    let len = encode_frame(msg, &mut buf).unwrap();
+    buf[..len].to_vec()
+}
+
+fn rssis(frames: &[BridgeToHost]) -> Vec<i8> {
+    frames
+        .iter()
+        .filter_map(|f| match f {
+            BridgeToHost::Rx { rssi, .. } => Some(*rssi),
+            _ => None,
+        })
+        .collect()
 }
 
 fn status(rx_count: u32) -> BridgeToHost {
@@ -577,6 +609,13 @@ fn outbox_reports_in_flight_when_pad_is_owed() {
     assert!(!outbox.in_flight());
 }
 
+/// What [`Ring::push`] stores for `msg`.
+fn body_of(msg: &BridgeToHost) -> Vec<u8> {
+    let mut buf = [0; MAX_BODY];
+    let len = encode_body(msg, &mut buf).unwrap();
+    buf[..len].to_vec()
+}
+
 #[test]
 fn ring_keeps_front_bytes_when_evicting_behind_front_across_wrap() {
     let mut ring = Ring::<3>::new();
@@ -588,27 +627,27 @@ fn ring_keeps_front_bytes_when_evicting_behind_front_across_wrap() {
     ring.push(&log(3)).unwrap();
     ring.push(&log(4)).unwrap();
     // The front, log(2), sits in the last slot; the one behind it wraps to 0.
-    let front = ring.rest_at(0).to_vec();
+    assert_eq!(ring.front(), body_of(&log(2)));
 
     ring.evict_behind_front();
 
-    let kept = ring.rest_at(0).to_vec();
-    assert_eq!(kept, front);
-    assert_eq!(bodies(&received(&kept)), [b'c']);
+    assert_eq!(ring.front(), body_of(&log(2)));
+    // `body_of` shares the ring's encoder, so also decode the kept front independently.
+    let mut frame = std::vec![0; MAX_FRAME];
+    let len = cobs::encode(ring.front(), &mut frame);
+    assert_eq!(decode_frame::<BridgeToHost>(&mut frame[..len]), Ok(log(2)));
     ring.pop();
-    assert_eq!(bodies(&received(ring.rest_at(0))), [b'e']);
+    assert_eq!(ring.front(), body_of(&log(4)));
 }
 
 #[test]
-fn ring_returns_rest_of_front_frame_when_cursor_is_part_way() {
+fn ring_returns_front_body_when_frames_are_queued() {
     let mut ring = Ring::<2>::new();
-    assert!(ring.rest_at(0).is_empty(), "an empty ring has no front frame");
+    assert!(ring.front().is_empty(), "an empty ring has no front frame");
     ring.push(&log(0)).unwrap();
-    let whole = ring.rest_at(0).to_vec();
+    ring.push(&log(1)).unwrap();
 
-    assert_eq!(ring.rest_at(3), &whole[3..]);
-    assert!(ring.rest_at(whole.len()).is_empty());
-    assert!(ring.rest_at(whole.len() + 1).is_empty());
+    assert_eq!(ring.front(), body_of(&log(0)));
 }
 
 /// Drains `frames` through `sink`, letting `per_pump` bytes through each pump, and
@@ -675,5 +714,70 @@ fn outbox_pads_transfer_when_slice_ends_on_full_packet() {
     expected.push(0x00);
     assert_eq!(sink.0.out, expected);
     assert_eq!(sink.0.flushes, [USB_PACKET + 1]);
+    assert!(outbox.is_empty());
+}
+
+#[test]
+fn outbox_writes_encode_frame_bytes_when_sink_takes_any_amount_per_pump() {
+    // Priority first, so the order sent is the order written.
+    let frames = [status(7), full_rx(-40), rx(-41, 300, |i| if i % 3 == 0 { 0 } else { 0xAA })];
+    let mut expected: Vec<u8> = frames.iter().flat_map(frame_of).collect();
+    if expected.len().is_multiple_of(USB_PACKET) {
+        // The pad that ends a transfer on a packet boundary.
+        expected.push(0x00);
+    }
+    for per_pump in [1, 7, USB_PACKET, usize::MAX] {
+        let (bytewise, _) = drain_in_pumps(&frames, &mut Fake::open(), |f| f, per_pump);
+        let (sliced, _) =
+            drain_in_pumps(&frames, &mut Sliced(Fake::open()), |s| &mut s.0, per_pump);
+
+        assert_eq!(bytewise, expected, "byte at a time, {per_pump} bytes a pump");
+        assert_eq!(sliced, expected, "sliced, {per_pump} bytes a pump");
+    }
+}
+
+#[test]
+fn outbox_writes_front_frame_intact_when_frame_behind_is_evicted_mid_write() {
+    let mut outbox = Outbox::new();
+    for n in 0..BULK_DEPTH as i8 {
+        outbox.send(&full_rx(n));
+    }
+    // Past the first staged packet and into the second.
+    let mut sink = Sliced(Fake::new(100));
+    outbox.pump(&mut sink);
+
+    // Each eviction copies the front's body into the slot behind it.
+    for n in 0..3 {
+        outbox.send(&full_rx(BULK_DEPTH as i8 + n));
+    }
+    sink.0.capacity = usize::MAX;
+    outbox.pump(&mut sink);
+
+    let front = frame_of(&full_rx(0));
+    assert_eq!(sink.0.out[..front.len()], front[..]);
+    let expected: Vec<i8> = core::iter::once(0).chain(4..BULK_DEPTH as i8 + 3).collect();
+    assert_eq!(rssis(&received(&sink.0.out)), expected);
+    assert_eq!(outbox.dropped(), 3);
+}
+
+#[test]
+fn outbox_abandons_frame_with_one_terminator_when_endpoint_refuses_mid_stage() {
+    let (first, second) = (full_rx(-40), full_rx(-41));
+    let (a, b) = (frame_of(&first), frame_of(&second));
+    let mut outbox = Outbox::new();
+    outbox.send(&first);
+    outbox.send(&second);
+
+    // Partway through the second staged packet.
+    let mut sink = Sliced(Fake::open());
+    sink.0.refuse_at = Some(100);
+    outbox.pump(&mut sink);
+
+    let mut expected = a[..100].to_vec();
+    expected.push(0x00);
+    expected.extend_from_slice(&b);
+    assert_eq!(sink.0.out, expected);
+    assert_eq!(rssis(&received(&sink.0.out)), [-41]);
+    assert_eq!(outbox.dropped(), 1);
     assert!(outbox.is_empty());
 }

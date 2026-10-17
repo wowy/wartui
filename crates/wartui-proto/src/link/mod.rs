@@ -30,6 +30,7 @@ mod frame;
 mod panel;
 
 pub use burst::{BURST_BUDGET_US, BURST_GAP_US, LinkBurst};
+pub(crate) use frame::{CobsStream, MAX_BODY, encode_body};
 pub use frame::{
     FrameAccumulator, LinkError, crc16, decode_frame, encode_frame, encode_host_frame,
 };
@@ -56,8 +57,8 @@ pub const MAX_NODE_PAYLOAD: usize = 1024;
 /// sends. Both chips take it intact; see `docs/espnow-v2-findings.md`.
 pub const MAX_ESPNOW_V2_PAYLOAD: usize = 1470;
 
-/// Buffer size for one encoded bridge-to-host frame, and the size of each outbox slot: a
-/// [`BridgeToHost::Rx`] carrying a full [`MAX_NODE_PAYLOAD`], with room for framing.
+/// Buffer size for one encoded bridge-to-host frame: a [`BridgeToHost::Rx`] carrying a full
+/// [`MAX_NODE_PAYLOAD`], with room for framing.
 pub const MAX_FRAME: usize = 1152;
 
 /// Buffer size for one encoded host-to-bridge frame: a [`HostToBridge::SendEspNow`]

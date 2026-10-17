@@ -121,13 +121,34 @@ A probe that read the status once per packet and wrote the FIFO register directl
 alternated with the slice build. It needs `unsafe`, so it was not adopted. Below ~4,000 cycles a
 fill, the host's side of each packet sets the rate.
 
+## COBS-encoding a packet at a time as it is written
+
+Measured on 2026-10-17 with 2-minute `wartui sniff` runs on the T-Dongle-C5 bridge, each build
+alternated with `main` run by run. The outbox stores each frame's body, serialized and
+checksummed, and the pump COBS-encodes the next packet's worth into a 64-byte stage as it writes.
+The encode then overlaps the host taking the packet before, rather than holding the link idle
+while a whole frame encodes at queue time.
+
+| Bridge | Drain once the radio is quiet | Drain while frames arrive |
+| --- | --- | --- |
+| `main` | 718–725/s (four runs) | 518–542/s |
+| A 64-byte stage | 688–690/s (two runs) | 554–557/s |
+| A stage that ends where the USB packet does | 725–726/s (two runs) | 588–590/s |
+
+- **The stage must end at the packet boundary.** A frame rarely ends on one, so a fixed 64-byte
+  stage straddled packets after the first frame. Every packet then took two writes with an
+  encode between them, while the FIFO had room, which cost the quiet drain ~5%.
+- **No run had an undecodable frame** except the partial one at the port opening, which `main`
+  has too.
+
 ## What is left
 
-- **The USB link itself.** Once the radio is quiet the drain is ~716 frames a second, about
-  750 KB/s, and while frames arrive about 500–540. A node's burst arrives at 550–700 full
-  batches a second, and two overlapping bursts at twice that, so a long enough burst still
-  overflows the ring.
-- **About 230 µs of encoding per full batch.** Serializing, checksumming and COBS-encoding in one
-  pass, without the intermediate body buffer, was tried and bought nothing measurable.
+- **The USB link itself.** Once the radio is quiet the drain is ~725 frames a second, about
+  750 KB/s, and while frames arrive about 590. A node's burst arrives at 550–700 full batches a
+  second, and two overlapping bursts at twice that, so a long enough burst still overflows the
+  ring.
+- **Serializing and checksumming at queue time.** COBS moved to the pump; postcard and the CRC
+  still run while the link waits. Serializing, checksumming and COBS-encoding in one pass at
+  queue time, without the intermediate body buffer, was tried and bought nothing measurable.
 - **This load is far beyond a drive.** The 2026-09-26 drive averaged 1.5–3 records a batch
   (`batch-loss-findings.md`).

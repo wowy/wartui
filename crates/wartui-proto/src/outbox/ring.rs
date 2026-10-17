@@ -1,20 +1,21 @@
-use crate::link::{BridgeToHost, MAX_FRAME, encode_frame};
+use crate::link::{BridgeToHost, MAX_BODY, encode_body};
 
-/// One encoded frame, terminator included.
+/// One frame's body: version byte, serialized message and CRC, not yet COBS-encoded.
 #[derive(Clone, Copy)]
 struct Slot {
-    buf: [u8; MAX_FRAME],
+    buf: [u8; MAX_BODY],
     len: u16,
 }
 
 impl Slot {
-    const EMPTY: Self = Self { buf: [0; MAX_FRAME], len: 0 };
+    const EMPTY: Self = Self { buf: [0; MAX_BODY], len: 0 };
 }
 
-/// A ring of pre-allocated slots.
+/// A ring of pre-allocated slots, each holding a frame's body.
 ///
-/// Messages are encoded straight into the tail slot rather than built and then
-/// moved in, so a frame of over a kilobyte never lands on the stack.
+/// Messages are serialized straight into the tail slot rather than built and then
+/// moved in, so a frame of over a kilobyte never lands on the stack. COBS is the
+/// writer's, a packet at a time (see the module docs).
 pub(super) struct Ring<const N: usize> {
     slots: [Slot; N],
     head: usize,
@@ -36,28 +37,27 @@ impl<const N: usize> Ring<N> {
         self.len == N
     }
 
-    /// Encode `msg` into the slot past the tail. Fails if the ring is full or
+    /// Serialize `msg` into the slot past the tail. Fails if the ring is full or
     /// the message does not fit a frame.
     pub(super) fn push(&mut self, msg: &BridgeToHost) -> Result<(), ()> {
         if self.is_full() {
             return Err(());
         }
         let idx = (self.head + self.len) % N;
-        let written = encode_frame(msg, &mut self.slots[idx].buf).map_err(|_| ())?;
-        // MAX_FRAME is well under u16::MAX, so the cast cannot lose bits.
+        let written = encode_body(msg, &mut self.slots[idx].buf).map_err(|_| ())?;
+        // MAX_BODY is well under u16::MAX, so the cast cannot lose bits.
         self.slots[idx].len = written as u16;
         self.len += 1;
         Ok(())
     }
 
-    /// The front frame's bytes from `cursor` on. Empty when the ring is, or once
-    /// the frame is exhausted.
-    pub(super) fn rest_at(&self, cursor: usize) -> &[u8] {
+    /// The front frame's body. Empty when the ring is.
+    pub(super) fn front(&self) -> &[u8] {
         if self.is_empty() {
             return &[];
         }
         let front = &self.slots[self.head];
-        front.buf.get(cursor..front.len as usize).unwrap_or(&[])
+        &front.buf[..usize::from(front.len)]
     }
 
     pub(super) fn pop(&mut self) {
@@ -71,7 +71,7 @@ impl<const N: usize> Ring<N> {
     ///
     /// The front's used bytes move into the slot behind it, which becomes the new
     /// head. The copy is safe while that frame is part-way onto the wire: the
-    /// writer's cursor indexes the same bytes in their new slot.
+    /// writer's position in the body indexes the same bytes in their new slot.
     pub(super) fn evict_behind_front(&mut self) {
         // Called only on a full ring, and `new` asserts `N >= 2`.
         debug_assert!(self.len >= 2);
