@@ -187,6 +187,55 @@ load switch (U2) whose enable is tied high (R2). So the board always drives 5 V 
 - A production design needs a data-only cable, a board revision, or the Type-A as the board's
   only power source.
 
+## The joined pipeline lost no acknowledged batch
+
+A fourth run joined both links: C6 → SPI → P4 → USB → host. It used the same two burst nodes,
+whose bursts overlapped every time. It answers the question the burst-load run left open: does
+esp-radio's 10-frame receive queue drop frames?
+
+**The firmware:** commit 2c0cad3 on `spike/p4-spi-link`.
+
+- **The C6** now prefixes each forwarded frame with its sender's MAC. Its FIFO grew from 8 to
+  32 frames, and the transfer grew to 1,052 bytes to make room for the MAC.
+- **The P4 (`firmware/spike/p4-bridge`)** runs the SPI link at a fixed 40 MHz with esp-hal's
+  async SPI DMA. It waits for READY's rising edge with an async GPIO interrupt.
+  - It decodes each frame with `wartui_proto::air::Frame::decode` and checks every node's batch
+    `seq`. A node advances `seq` only when the radio acknowledges a batch. So a gap means a frame
+    the C6's radio acknowledged but that never reached the P4.
+  - It queues frames in a 300 KB ring in internal SRAM, which is enough for two overlapping
+    132-batch bursts, and streams them to the host over the CDC-ACM high-speed port.
+  - Its USB records carry their own sequence number and CRC.
+- **The host (`host/bridge.py`)** verifies every record. It repeats the per-node `seq` check on
+  its own, as a cross-check of the P4's.
+
+**The result,** over 5 min 12 s:
+
+| | `F5:50` (C5) | `9A:24` (XIAO C6) |
+| --- | --- | --- |
+| Batches at the P4 | 2,823 | 2,821 |
+| `seq` gaps | **0** | **0** |
+| `seq` repeats | 1 | 0 |
+| Heartbeats and other frames | 308 | 296 |
+| Acks the node missed, from its own log | 0 | 1 |
+
+- **The radio's receive queue lost nothing.** Every batch a node saw acknowledged reached the
+  host, on both nodes. The C6's FIFO dropped nothing either: `espnow_fifo_drop=0` with 32
+  entries at 40 MHz. The host's own check agreed with the P4's.
+- **`9A:24`'s one missed ack was lost on the air.** If the C6 had received that frame, the node's
+  re-send under the same `seq` would show as a repeat, and none did.
+- **`F5:50`'s one repeat wasn't explained.** Its log shows no unacknowledged batch, so it may
+  be a link-layer retry that reached the C6 twice. It wasn't pursued.
+- **The whole path stayed clean:** no SPI CRC, magic, length, sequence or pattern error in
+  548,831 transfers. On USB there were no CRC errors or sequence gaps in 6,563 records.
+- **READY's edge interrupt fixed the handshake:** `ready_stale_recover=0`, against one per step
+  with the polled handshake. The two timeouts both came at boot.
+- **The link ran at 1,762 transfers/s,** against 1,820 in the polled burst run. The transfer is
+  1.5% longer now, and the rest is async overhead.
+- **The P4's buffer** filled to 277 KB before the host opened the port. That was the first
+  burst, held until DTR came up, and then delivered intact. Once the host was reading, the
+  queue sat at 0–11 bytes at every 2 s sample. Peaks inside a burst weren't caught, because the
+  high-water mark was already set by then.
+
 ## The handshake recovery fires once per step
 
 `ready_stale_recover` counted exactly 1 in every step after the first, and `ready_timeouts`
@@ -231,6 +280,10 @@ released its EN.
   radio's queue. Production should run at 40 MHz and give the C6 a FIFO deeper than 8.
 - The P4's high-speed USB streams 7–7.7 MB/s to the host as CDC-ACM, four times what the C6
   link delivers, as long as VBUS is kept off the PC side of the cable.
-- Neither link limits the split bridge any more. What remains:
-  - whether esp-radio's 10-frame receive queue drops frames under a burst
-  - the two links joined: C6 → SPI → P4 → USB, under burst load
+- Neither link limits the split bridge any more.
+- Joined end to end under two overlapping bursts, the prototype delivered every acknowledged
+  batch to the host. Neither esp-radio's 10-frame receive queue nor any later stage lost a
+  frame.
+- A production split bridge looks feasible on this hardware. The C6 should forward frames with
+  their MAC over SPI at 40 MHz, double-buffered and edge-triggered. The P4 should buffer in
+  SRAM and talk CDC-ACM over its high-speed port. That port needs VBUS kept off the PC side.
