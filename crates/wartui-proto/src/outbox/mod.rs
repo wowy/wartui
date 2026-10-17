@@ -122,21 +122,39 @@ enum Source {
     Bulk,
 }
 
+/// How far the current frame has got onto the wire.
+struct Writing {
+    /// Where COBS has reached in the frame's body.
+    stream: CobsStream,
+    /// The frame's next encoded bytes, a packet's worth at most, and how far into them
+    /// the sink has taken.
+    stage: [u8; USB_PACKET],
+    staged: usize,
+    taken: usize,
+    /// Whether the sink has accepted any byte of the frame. Bytes staged but not taken
+    /// have not gone out.
+    begun: bool,
+}
+
+impl Writing {
+    /// Nothing of a frame written yet.
+    const fn new() -> Self {
+        Self {
+            stream: CobsStream::new(),
+            stage: [0; USB_PACKET],
+            staged: 0,
+            taken: 0,
+            begun: false,
+        }
+    }
+}
+
 /// Everything the bridge is waiting to tell the host.
 pub struct Outbox {
     priority: Ring<PRIORITY_DEPTH>,
     bulk: Ring<BULK_DEPTH>,
     current: Option<Source>,
-    /// Where COBS has reached in the current frame's body.
-    stream: CobsStream,
-    /// The current frame's next encoded bytes, a packet's worth at most, and how far
-    /// into them the sink has taken.
-    stage: [u8; USB_PACKET],
-    staged: usize,
-    taken: usize,
-    /// Whether the sink has accepted any byte of the current frame. Bytes staged but
-    /// not taken have not gone out.
-    begun: bool,
+    writing: Writing,
     /// A lone terminator is owed ahead of the next frame: to close off a frame
     /// abandoned part-way onto the wire, because [`Outbox::delimit`] asked, or to
     /// end a transfer that stopped on a full packet.
@@ -166,11 +184,7 @@ impl Outbox {
             priority: Ring::new(),
             bulk: Ring::new(),
             current: None,
-            stream: CobsStream::new(),
-            stage: [0; USB_PACKET],
-            staged: 0,
-            taken: 0,
-            begun: false,
+            writing: Writing::new(),
             orphan: false,
             unflushed: false,
             packet_fill: 0,
@@ -232,7 +246,7 @@ impl Outbox {
     /// first frame (see the module docs). A frame already part-way out needs nothing:
     /// its own terminator follows it.
     pub const fn delimit(&mut self) {
-        if !self.begun {
+        if !self.writing.begun {
             self.orphan = true;
         }
     }
@@ -266,7 +280,7 @@ impl Outbox {
     /// Give up on the frame being written. Owes a terminator if any of it has gone
     /// out, and nothing if it had not started.
     fn abandon(&mut self) {
-        if self.begun {
+        if self.writing.begun {
             self.orphan = true;
         }
         self.clear_frame();
@@ -275,10 +289,7 @@ impl Outbox {
     /// Forget the frame being written: no current frame, nothing staged.
     const fn clear_frame(&mut self) {
         self.current = None;
-        self.stream = CobsStream::new();
-        self.staged = 0;
-        self.taken = 0;
-        self.begun = false;
+        self.writing = Writing::new();
     }
 
     /// Write as much as the FIFO will take. Returns whether any byte moved.
@@ -318,26 +329,28 @@ impl Outbox {
             // stage is encoded while the host takes it. A stage straddling packets
             // splits every packet into two writes with the encode between them, and
             // costs the quiet drain about 5%.
-            if self.taken == self.staged {
+            let w = &mut self.writing;
+            if w.taken == w.staged {
+                // The sink has taken the terminator, so the frame is out.
+                if w.stream.is_done() {
+                    self.finish(source);
+                    continue;
+                }
                 let body = match source {
                     Source::Priority => self.priority.front(),
                     Source::Bulk => self.bulk.front(),
                 };
-                self.staged =
-                    self.stream.fill(body, &mut self.stage[..USB_PACKET - self.packet_fill]);
-                self.taken = 0;
-                if self.staged == 0 {
-                    self.finish(source);
-                    continue;
-                }
+                // `packet_fill` is below `USB_PACKET`, so the stage is never empty.
+                w.staged = w.stream.fill(body, &mut w.stage[..USB_PACKET - self.packet_fill]);
+                w.taken = 0;
             }
 
             // What is staged goes to the sink in one call.
-            let (written, result) = sink.write_bytes(&self.stage[self.taken..self.staged]);
+            let (written, result) = sink.write_bytes(&w.stage[w.taken..w.staged]);
 
             if written > 0 {
-                self.taken += written;
-                self.begun = true;
+                w.taken += written;
+                w.begun = true;
                 self.wrote(written);
                 progressed = true;
             }

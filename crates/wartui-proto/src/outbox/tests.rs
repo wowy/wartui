@@ -632,6 +632,10 @@ fn ring_keeps_front_bytes_when_evicting_behind_front_across_wrap() {
     ring.evict_behind_front();
 
     assert_eq!(ring.front(), body_of(&log(2)));
+    // `body_of` shares the ring's encoder, so also decode the kept front independently.
+    let mut frame = std::vec![0; MAX_FRAME];
+    let len = cobs::encode(ring.front(), &mut frame);
+    assert_eq!(decode_frame::<BridgeToHost>(&mut frame[..len]), Ok(log(2)));
     ring.pop();
     assert_eq!(ring.front(), body_of(&log(4)));
 }

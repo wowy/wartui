@@ -139,10 +139,15 @@ fn encode_frame_in<T: Serialize, const B: usize>(
 ) -> Result<usize, LinkError> {
     let mut body = [0u8; B];
     let len = encode_body(msg, &mut body)?;
-    let encoded = cobs::try_encode(&body[..len], out).map_err(|_| LinkError::BufferTooSmall)?;
-    // COBS output never contains a zero, so the terminator is unambiguous.
-    *out.get_mut(encoded).ok_or(LinkError::BufferTooSmall)? = 0x00;
-    Ok(encoded + 1)
+    if out.is_empty() {
+        return Err(LinkError::BufferTooSmall);
+    }
+    let mut stream = CobsStream::new();
+    let written = stream.fill(&body[..len], out);
+    if !stream.is_done() {
+        return Err(LinkError::BufferTooSmall);
+    }
+    Ok(written)
 }
 
 /// Write a frame's body into `out`: the version byte, the serialized `msg` and its CRC,
@@ -163,7 +168,7 @@ pub(crate) fn encode_body<T: Serialize>(msg: &T, out: &mut [u8]) -> Result<usize
 }
 
 /// COBS-encodes a frame body a piece at a time, terminator included, producing exactly
-/// what [`cobs::try_encode`] and a `0x00` would.
+/// what [`cobs::encode`] and a `0x00` would. Every frame this crate encodes goes through it.
 ///
 /// It holds positions and never the body, which the caller passes on every call: the
 /// outbox keeps the body in a ring slot that eviction may copy elsewhere, same bytes at
@@ -197,11 +202,13 @@ impl CobsStream {
         Self { at: 0, step: CobsStep::Code }
     }
 
-    /// Write the next encoded bytes of `body` into `out`, as many as fit. Returns how
-    /// many; 0 once the terminator has been written.
+    /// Write the next encoded bytes of `body` into `out`, as many as fit, and return how
+    /// many. [`CobsStream::is_done`] says when the frame is complete; after that, `fill`
+    /// writes nothing.
     ///
-    /// `body` must be the same bytes on every call.
+    /// `body` must be the same bytes on every call, and `out` must not be empty.
     pub(crate) fn fill(&mut self, body: &[u8], out: &mut [u8]) -> usize {
+        debug_assert!(!out.is_empty(), "an empty `out` makes no progress");
         let mut n = 0;
         while n < out.len() {
             match self.step {
@@ -246,6 +253,11 @@ impl CobsStream {
             }
         }
         n
+    }
+
+    /// Whether the terminator has been written.
+    pub(crate) const fn is_done(&self) -> bool {
+        matches!(self.step, CobsStep::Done)
     }
 }
 
@@ -363,11 +375,8 @@ mod tests {
         let mut stream = CobsStream::new();
         let mut out = Vec::new();
         let mut buf = std::vec![0; chunk];
-        loop {
+        while !stream.is_done() {
             let n = stream.fill(body, &mut buf);
-            if n == 0 {
-                break;
-            }
             out.extend_from_slice(&buf[..n]);
         }
         out
@@ -445,5 +454,17 @@ mod tests {
         assert_eq!(stream.fill(&body, &mut buf), 12);
         assert_eq!(stream.fill(&body, &mut buf), 0);
         assert_eq!(stream.fill(&body, &mut buf), 0);
+    }
+
+    #[test]
+    fn cobs_stream_reports_done_when_terminator_is_written() {
+        let body = nonzero(10);
+        let mut stream = CobsStream::new();
+        // The code byte, the ten data bytes, and then the terminator alone.
+        let mut buf = [0; 11];
+        assert_eq!(stream.fill(&body, &mut buf), 11);
+        assert!(!stream.is_done(), "the terminator is still owed");
+        assert_eq!(stream.fill(&body, &mut buf), 1);
+        assert!(stream.is_done());
     }
 }
