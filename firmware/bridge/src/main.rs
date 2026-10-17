@@ -33,6 +33,8 @@
 
 #[cfg(feature = "t-dongle-c5-gps")]
 mod gps;
+#[cfg(any(feature = "t-dongle-c5", feature = "t-dongle-c5-gps"))]
+mod led;
 #[cfg(feature = "t-dongle-c5")]
 mod panel;
 
@@ -509,6 +511,10 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     // Read before anything else writes it: this is the *previous* life's marker,
     // and `esp_hal::init` has already latched the reset reason to read it against.
     let cause = reset_cause();
+    // The T-Dongle-C5's LED, dark as early as it can be: the sooner, the shorter it shows at
+    // boot. Held for the life of `main` so the clock never floats.
+    #[cfg(any(feature = "t-dongle-c5", feature = "t-dongle-c5-gps"))]
+    let _led = led::darken(peripherals.GPIO4, peripherals.GPIO5);
     let phase = boot_phase(cause);
     let speaks_first = boot_speaks_first(cause);
     mark(LoopPhase::Boot);

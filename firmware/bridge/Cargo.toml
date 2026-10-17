@@ -46,7 +46,8 @@ xiao-external-antenna = []
 # SPI2. A board fact layered over a chip feature, like the one above, and inert
 # without it — a bridge built without this reports no panel and is sent no lines.
 # C5 only, and mutually exclusive with `xiao-external-antenna`, which drives two
-# of this board's display and USB pins; `src/main.rs` enforces both.
+# of this board's display and USB pins; `src/main.rs` enforces both. Also turns
+# off the board's RGB LED on GPIO4 (clock) and GPIO5 (data); see `src/led.rs`.
 t-dongle-c5 = ["dep:embedded-graphics", "dep:embedded-hal-bus", "dep:mipidsi"]
 
 # A GPS receiver on a T-Dongle-C5's Qwiic port: a u-blox M10 at I2C 0x42, on I2C0
@@ -54,7 +55,8 @@ t-dongle-c5 = ["dep:embedded-graphics", "dep:embedded-hal-bus", "dep:mipidsi"]
 # like the two above, and independent of `t-dongle-c5`: either builds without the
 # other. C5 only, and mutually exclusive with `xiao-external-antenna`; `src/main.rs`
 # enforces both. `esp-hal`'s I2C master drives it; `embassy-sync` carries its bytes
-# between the GPS task and `main`.
+# between the GPS task and `main`. Also turns off the board's RGB LED on GPIO4
+# and GPIO5, as `t-dongle-c5` does.
 t-dongle-c5-gps = ["dep:embassy-sync"]
 
 [dependencies]

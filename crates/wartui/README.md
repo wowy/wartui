@@ -896,7 +896,8 @@ The footer shows faults only once they happen, so a clean run has a clean footer
 
 A LilyGO T-Dongle-C5 has a screen, and a bridge flashed for it shows five lines of the capture. It
 needs no setup: the bridge reports a panel when it announces itself, `wartui status` prints that,
-and a bridge without one is sent nothing.
+and a bridge without one is sent nothing. A T-Dongle build turns the board's RGB LED off; a plain
+`esp32c5` build leaves it lit.
 
 | Line              | What it says                                                         |
 |-------------------|----------------------------------------------------------------------|

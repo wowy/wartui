@@ -56,16 +56,17 @@ Exactly one chip feature is required. The toolchain is stable, and `rust-toolcha
 
 Three board features layer over a chip feature:
 
-| Feature                 | Board                                                       | What it does                                                    |
-|-------------------------|-------------------------------------------------------------|-----------------------------------------------------------------|
-| `xiao-external-antenna` | Seeed XIAO ESP32-C6 with a U.FL antenna                     | Points the RF switch at the U.FL connector                      |
-| `t-dongle-c5`           | LilyGO T-Dongle-C5 (`esp32c5,t-dongle-c5`)                  | Lights the ST7735 panel and makes the bridge announce it        |
-| `t-dongle-c5-gps`       | LilyGO T-Dongle-C5 with a u-blox M10 on its Qwiic connector | Forwards the receiver's bytes and makes the bridge announce GPS |
+| Feature                 | Board                                                       | What it does                                                                            |
+|-------------------------|-------------------------------------------------------------|-----------------------------------------------------------------------------------------|
+| `xiao-external-antenna` | Seeed XIAO ESP32-C6 with a U.FL antenna                     | Points the RF switch at the U.FL connector                                              |
+| `t-dongle-c5`           | LilyGO T-Dongle-C5 (`esp32c5,t-dongle-c5`)                  | Lights the ST7735 panel, makes the bridge announce it, and turns off the RGB LED        |
+| `t-dongle-c5-gps`       | LilyGO T-Dongle-C5 with a u-blox M10 on its Qwiic connector | Forwards the receiver's bytes, makes the bridge announce GPS, and turns off the RGB LED |
 
 [`../node/README.md`](../node/README.md) § "Building and flashing" has the rest on the XIAO antenna.
 
 Every board feature is inert without a chip feature. `xiao-external-antenna` excludes both
 T-Dongle-C5 features: it drives GPIO3 and GPIO14, which on a T-Dongle-C5 are `LCD_DC` and `USB_DP`.
+Either T-Dongle-C5 feature drives GPIO4 and GPIO5, the RGB LED's clock and data, to turn it off.
 The two T-Dongle-C5 features are independent, and either builds without the other. Built without
 `t-dongle-c5`, the same source reports no panel and is sent no lines. Built without
 `t-dongle-c5-gps`, it reports no GPS port and drops what the host writes to one. One tree covers
