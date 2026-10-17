@@ -53,6 +53,38 @@ impl ByteSink for Fake {
     }
 }
 
+/// [`Fake`] behind its own `write_bytes`, which takes a slice in one call the way the
+/// bridge's sink does, rather than the default's byte at a time.
+struct Sliced(Fake);
+
+impl ByteSink for Sliced {
+    fn write_byte(&mut self, byte: u8) -> nb::Result<(), ()> {
+        self.0.write_byte(byte)
+    }
+
+    fn write_bytes(&mut self, bytes: &[u8]) -> (usize, nb::Result<(), ()>) {
+        let fake = &mut self.0;
+        let refuse = fake.refuse_at.and_then(|at| at.checked_sub(fake.out.len()));
+        let room = bytes.len().min(fake.capacity);
+        let taken = refuse.map_or(room, |refuse| room.min(refuse));
+        fake.out.extend_from_slice(&bytes[..taken]);
+        fake.capacity -= taken;
+        let result = if refuse == Some(taken) {
+            fake.refuse_at = None;
+            Err(nb::Error::Other(()))
+        } else if taken < bytes.len() {
+            Err(nb::Error::WouldBlock)
+        } else {
+            Ok(())
+        };
+        (taken, result)
+    }
+
+    fn flush(&mut self) {
+        self.0.flush();
+    }
+}
+
 fn log(n: u8) -> BridgeToHost {
     let mut message = LogStr::new();
     // One distinct, decodable body per frame, so a test can say which
@@ -556,14 +588,92 @@ fn ring_keeps_front_bytes_when_evicting_behind_front_across_wrap() {
     ring.push(&log(3)).unwrap();
     ring.push(&log(4)).unwrap();
     // The front, log(2), sits in the last slot; the one behind it wraps to 0.
-    let front: Vec<u8> = (0..).map_while(|i| ring.byte_at(i)).collect();
+    let front = ring.rest_at(0).to_vec();
 
     ring.evict_behind_front();
 
-    let kept: Vec<u8> = (0..).map_while(|i| ring.byte_at(i)).collect();
+    let kept = ring.rest_at(0).to_vec();
     assert_eq!(kept, front);
     assert_eq!(bodies(&received(&kept)), [b'c']);
     ring.pop();
-    let next: Vec<u8> = (0..).map_while(|i| ring.byte_at(i)).collect();
-    assert_eq!(bodies(&received(&next)), [b'e']);
+    assert_eq!(bodies(&received(ring.rest_at(0))), [b'e']);
+}
+
+#[test]
+fn ring_returns_rest_of_front_frame_when_cursor_is_part_way() {
+    let mut ring = Ring::<2>::new();
+    assert!(ring.rest_at(0).is_empty(), "an empty ring has no front frame");
+    ring.push(&log(0)).unwrap();
+    let whole = ring.rest_at(0).to_vec();
+
+    assert_eq!(ring.rest_at(3), &whole[3..]);
+    assert!(ring.rest_at(whole.len()).is_empty());
+    assert!(ring.rest_at(whole.len() + 1).is_empty());
+}
+
+/// Drains `frames` through `sink`, letting `per_pump` bytes through each pump, and
+/// returns the sink's bytes and flushes.
+fn drain_in_pumps<S: ByteSink>(
+    frames: &[BridgeToHost],
+    sink: &mut S,
+    fake: fn(&mut S) -> &mut Fake,
+    per_pump: usize,
+) -> (Vec<u8>, Vec<usize>) {
+    let mut outbox = Outbox::new();
+    for frame in frames {
+        assert!(outbox.send(frame));
+    }
+    while !outbox.is_empty() {
+        fake(sink).capacity = per_pump;
+        assert!(outbox.pump(sink), "every pump moves a byte");
+    }
+    let fake = fake(sink);
+    (fake.out.clone(), fake.flushes.clone())
+}
+
+#[test]
+fn outbox_writes_identical_bytes_when_sink_takes_slices() {
+    // 256 bytes in all, so the transfer ends on a packet boundary and owes its zero.
+    let frames: Vec<BridgeToHost> =
+        [(30, 0), (64, 1), (98, 2), (64, 3)].map(|(len, id)| log_encoding_to(len, id).0).into();
+    for per_pump in [7, USB_PACKET, usize::MAX] {
+        let bytewise = drain_in_pumps(&frames, &mut Fake::open(), |f| f, per_pump);
+        let sliced = drain_in_pumps(&frames, &mut Sliced(Fake::open()), |s| &mut s.0, per_pump);
+
+        assert_eq!(sliced, bytewise, "{per_pump} bytes a pump");
+        assert_eq!(bodies(&received(&sliced.0)), [b'a', b'b', b'c', b'd']);
+    }
+}
+
+#[test]
+fn outbox_resynchronizes_cobs_stream_when_sliced_endpoint_refuses_mid_frame() {
+    let mut outbox = Outbox::new();
+    for n in 0..3 {
+        outbox.send(&log(n));
+    }
+
+    let mut sink = Sliced(Fake::open());
+    sink.0.refuse_at = Some(3);
+    outbox.pump(&mut sink);
+
+    // Three bytes went before the refusal, so the frame is truncated and abandoned.
+    assert_eq!(sink.0.out[3], 0x00, "the fragment should be terminated");
+    assert_eq!(bodies(&received(&sink.0.out)), [b'b', b'c']);
+    assert_eq!(outbox.dropped(), 1);
+}
+
+#[test]
+fn outbox_pads_transfer_when_slice_ends_on_full_packet() {
+    let (msg, frame) = log_encoding_to(USB_PACKET, 0);
+    let mut outbox = Outbox::new();
+    outbox.send(&msg);
+    let mut sink = Sliced(Fake::open());
+    outbox.pump(&mut sink);
+
+    // One call wrote the whole packet, and the accounting still sees the boundary.
+    let mut expected = frame;
+    expected.push(0x00);
+    assert_eq!(sink.0.out, expected);
+    assert_eq!(sink.0.flushes, [USB_PACKET + 1]);
+    assert!(outbox.is_empty());
 }

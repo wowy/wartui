@@ -286,6 +286,22 @@ impl ByteSink for UsbSink<'_> {
         })
     }
 
+    // A packet's bytes in one call: one status read and one write per byte, with no
+    // per-byte trait call or ring lookup. Halves the cycles a 64-byte fill costs
+    // (`docs/link-encode-findings.md`).
+    fn write_bytes(&mut self, bytes: &[u8]) -> (usize, nb::Result<(), ()>) {
+        for (n, &byte) in bytes.iter().enumerate() {
+            if let Err(err) = self.tx.write_byte_nb(byte) {
+                let err = match err {
+                    nb::Error::WouldBlock => nb::Error::WouldBlock,
+                    nb::Error::Other(_) => nb::Error::Other(()),
+                };
+                return (n, Err(err));
+            }
+        }
+        (bytes.len(), Ok(()))
+    }
+
     fn flush(&mut self) {
         // WouldBlock here means the packet is still in flight, not that the
         // data was lost: `flush_tx_nb` has already set `wr_done`.

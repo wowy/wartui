@@ -7,7 +7,7 @@
 //! of firmware fails in the field, and it fails silently.
 //!
 //! So the bridge never blocks on the link. It encodes everything it wants to say into one
-//! of two rings, and drains them a byte at a time into whatever the FIFO will take. While
+//! of two rings, and drains them into whatever the FIFO will take. While
 //! a frame is part-way out, the bridge goes on polling the FIFO for at most
 //! [`BURST_BUDGET_US`](crate::link::BURST_BUDGET_US) ([`LinkBurst`](crate::link::LinkBurst)),
 //! plus the time to act on any host frame that completes meanwhile. That is a spin, never a
@@ -81,6 +81,23 @@ const USB_PACKET: usize = 64;
 pub trait ByteSink {
     /// Accept one byte, or report that the FIFO is full.
     fn write_byte(&mut self, byte: u8) -> nb::Result<(), ()>;
+
+    /// Accept as many leading bytes of `bytes` as the FIFO takes.
+    ///
+    /// Returns how many went, and `Ok(())` if all did or the error that stopped the
+    /// rest. The count travels with the error because a refusal after partial
+    /// progress still truncates the frame, and the outbox has to know to abandon it.
+    ///
+    /// The default writes a byte at a time. A sink overrides it when one call per
+    /// byte costs more than the FIFO takes to fill.
+    fn write_bytes(&mut self, bytes: &[u8]) -> (usize, nb::Result<(), ()>) {
+        for (n, &byte) in bytes.iter().enumerate() {
+            if let Err(err) = self.write_byte(byte) {
+                return (n, Err(err));
+            }
+        }
+        (bytes.len(), Ok(()))
+    }
 
     /// Push a partial USB packet out.
     ///
@@ -248,7 +265,7 @@ impl Outbox {
                 match sink.write_byte(0x00) {
                     Ok(()) => {
                         self.orphan = false;
-                        self.wrote();
+                        self.wrote(1);
                         progressed = true;
                     }
                     Err(nb::Error::WouldBlock) => break,
@@ -270,22 +287,29 @@ impl Outbox {
                 },
             };
 
-            let byte = match source {
-                Source::Priority => self.priority.byte_at(self.cursor),
-                Source::Bulk => self.bulk.byte_at(self.cursor),
+            // The rest of the frame goes to the sink in one call. The slice borrows a
+            // ring, so the write finishes before the bookkeeping below.
+            let attempt = {
+                let rest = match source {
+                    Source::Priority => self.priority.rest_at(self.cursor),
+                    Source::Bulk => self.bulk.rest_at(self.cursor),
+                };
+                if rest.is_empty() { None } else { Some(sink.write_bytes(rest)) }
             };
 
-            let Some(byte) = byte else {
+            let Some((written, result)) = attempt else {
                 self.finish(source);
                 continue;
             };
 
-            match sink.write_byte(byte) {
-                Ok(()) => {
-                    self.cursor += 1;
-                    self.wrote();
-                    progressed = true;
-                }
+            if written > 0 {
+                self.cursor += written;
+                self.wrote(written);
+                progressed = true;
+            }
+
+            match result {
+                Ok(()) => {}
                 Err(nb::Error::WouldBlock) => break,
                 Err(nb::Error::Other(())) => {
                     // Refused outright, so this frame is already truncated on the
@@ -304,7 +328,7 @@ impl Outbox {
         if self.unflushed && self.packet_fill == 0 && self.current.is_none() && !self.orphan {
             match sink.write_byte(0x00) {
                 Ok(()) => {
-                    self.wrote();
+                    self.wrote(1);
                     progressed = true;
                 }
                 // The FIFO is full, which is the boundary itself: owe the zero, so it
@@ -325,10 +349,10 @@ impl Outbox {
         progressed
     }
 
-    /// Account for one byte the sink accepted.
-    const fn wrote(&mut self) {
+    /// Account for `n` bytes the sink accepted, at least one.
+    const fn wrote(&mut self, n: usize) {
         self.unflushed = true;
-        self.packet_fill = (self.packet_fill + 1) % USB_PACKET;
+        self.packet_fill = (self.packet_fill + n) % USB_PACKET;
     }
 
     fn next_source(&self) -> Option<Source> {

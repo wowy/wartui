@@ -101,11 +101,32 @@ So a loss count measures where the bursts fell as much as the bridge. The 17.8% 
 compares runs a few hours apart and cannot be credited to the change. To compare bridge builds,
 compare the drain rate, and alternate the builds run by run so they share the same overlap.
 
+## Writing a packet's bytes in one call
+
+Measured on 2026-10-17 with 2-minute `wartui sniff` runs on the T-Dongle-C5 bridge, timed with
+`mcycle` on a temporary build. The outbox handed the sink one byte per call. Filling one 64-byte
+packet that way took ~6,600 cycles at 240 MHz, ~100 a byte. About 36 of each byte's are the FIFO
+status read `esp-hal` does before every write. The byte-per-call rows are the change above's own
+runs from earlier that day, and the slice rows three runs from later.
+
+| Bridge | Cycles per 64-byte fill | Drain once the radio is quiet | Drain while frames arrive |
+| --- | --- | --- | --- |
+| A byte per call | ~6,600 | 608–649/s | ~460–500/s |
+| The rest of the frame as a slice | ~3,400–4,500 | ~716/s | 502–543/s |
+
+The drain while frames arrive is noisy. No run had an undecodable frame.
+
+A probe that read the status once per packet and wrote the FIFO register directly cut a fill to
+~2,200 cycles but raised the quiet drain only to 733/s, about 2% more, in two pairs of runs
+alternated with the slice build. It needs `unsafe`, so it was not adopted. Below ~4,000 cycles a
+fill, the host's side of each packet sets the rate.
+
 ## What is left
 
-- **The USB link itself.** Once the radio is quiet the drain is 608–631 frames a second, about
-  640 KB/s, near the 670 KB/s `usb-link-findings.md` measured on a C6. A node can send full
-  batches faster than that, so a long enough burst still overflows the ring.
+- **The USB link itself.** Once the radio is quiet the drain is ~716 frames a second, about
+  750 KB/s, and while frames arrive about 500–540. A node's burst arrives at 550–700 full
+  batches a second, and two overlapping bursts at twice that, so a long enough burst still
+  overflows the ring.
 - **About 230 µs of encoding per full batch.** Serializing, checksumming and COBS-encoding in one
   pass, without the intermediate body buffer, was tried and bought nothing measurable.
 - **This load is far beyond a drive.** The 2026-09-26 drive averaged 1.5–3 records a batch
