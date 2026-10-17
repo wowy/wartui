@@ -112,6 +112,9 @@ macro_rules! note {
 }
 
 mod ota;
+// TEMPORARY burst-test build: never merge
+#[cfg(feature = "burst-test")]
+mod burst;
 
 /// Granularity of the listening loops. Fine enough that a 100 ms window is not
 /// meaningfully shortened, coarse enough not to spin the core.
@@ -418,6 +421,9 @@ fn main() -> ! {
         env!("CARGO_PKG_VERSION"),
         CONTROL_CHANNEL
     );
+    // TEMPORARY burst-test build: never merge
+    #[cfg(feature = "burst-test")]
+    let mut burst = burst::Burst::new(&mac);
 
     loop {
         if ota.updating() {
@@ -450,6 +456,9 @@ fn main() -> ! {
                 node.last_dwell = 0;
                 heartbeat(&manager, &mut sender, node);
                 node.counter = node.counter.wrapping_add(1).max(1);
+                // TEMPORARY burst-test build: never merge
+                #[cfg(feature = "burst-test")]
+                burst.poll(&mut sender, node);
             } else {
                 note!("radio would not park on channel {}", CONTROL_CHANNEL);
             }
@@ -501,6 +510,9 @@ fn main() -> ! {
                     );
                     node.next_beat = Some(next_beat_after(deadline));
                 }
+                // TEMPORARY burst-test build: never merge
+                #[cfg(feature = "burst-test")]
+                burst.poll(&mut sender, node);
             } else {
                 note!("radio would not park on channel {}", CONTROL_CHANNEL);
                 // What keeps this loop from spinning when the radio refuses:
@@ -577,6 +589,11 @@ fn main() -> ! {
                 ADMIN_WAIT_MS,
             );
             node.next_beat = Some(next_beat_after(deadline));
+        }
+        // TEMPORARY burst-test build: never merge
+        #[cfg(feature = "burst-test")]
+        if on_control {
+            burst.poll(&mut sender, node);
         }
     }
 }

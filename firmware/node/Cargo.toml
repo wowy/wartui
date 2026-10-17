@@ -54,6 +54,9 @@ log = ["dep:esp-println"]
 # plugged in. C6 only; `src/main.rs` rejects it with the C5 and has why.
 xiao-external-antenna = []
 
+# TEMPORARY burst-test build: never merge. Synthetic sighting bursts, `src/burst.rs`.
+burst-test = []
+
 [dependencies]
 # The `NorFlash` traits `esp-storage` implements, for the OTA slot and the trial sector.
 embedded-storage = "0.3.2"
