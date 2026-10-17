@@ -1,8 +1,8 @@
 //! `wartui run` — capture a fleet into the store and watch it happen.
 //!
 //! It listens, it writes rows, and it draws what it heard — each row stamped
-//! with wherever the host believed it was at that moment: the bridge's GPS
-//! receiver, else a GPS found on its own or pinned with `--gps`, else
+//! with wherever the host believed it was at that moment: a GPS pinned with
+//! `--gps`, else the bridge's GPS receiver, else a GPS found on its own, else
 //! `--lat`/`--lon`, else nothing.
 //!
 //! It also transmits, and without being asked: the planner partitions the pool
@@ -253,17 +253,16 @@ pub async fn run(args: Args) -> Result<()> {
         };
         Gps::spawn(GpsConfig { max_age, ..config })
     });
-    let position = match &gps {
-        Some(gps) => position.with_gps(gps.clone(), max_age),
-        None => position,
-    };
     // Built whatever the bridge turns out to be, simulated included: a bridge without a
     // receiver sends no bytes, and this one then says nothing.
     let bridge_gps = (choice != GpsChoice::Off).then(|| Gps::bridged(max_age));
-    let position = match &bridge_gps {
-        Some(gps) => position.with_bridge_gps(gps.clone(), max_age),
-        None => position,
-    };
+    let mut position = position.with_max_age(max_age);
+    if let Some(gps) = &gps {
+        position = position.with_gps(gps.clone());
+    }
+    if let Some(gps) = &bridge_gps {
+        position = position.with_bridge_gps(gps.clone());
+    }
 
     let pool = pool(config.pool);
     // Seeded from the file, and saved back by the view when the transport changes it. The
@@ -354,8 +353,13 @@ pub async fn run(args: Args) -> Result<()> {
                 "No position was given, so nothing in it can be uploaded. Drop --no-gps to \n\
                  look for a receiver."
             ),
+            // Both receivers talked; neither fixed.
+            (_, true, Some((port, baud))) => println!(
+                "Neither the bridge's GPS receiver nor the one on {port} at {baud} reported a \n\
+                 fix, so nothing in this capture can be uploaded. Check that they can see the sky."
+            ),
             // The bridge's receiver talked; no fix.
-            (_, true, _) => println!(
+            (_, true, None) => println!(
                 "The bridge's GPS receiver never reported a fix, so nothing in this capture \n\
                  can be uploaded. Check that it can see the sky."
             ),

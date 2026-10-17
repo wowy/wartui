@@ -737,20 +737,24 @@ differs from its own, so an unchanged fleet is left alone. Two consequences:
 ## Positions
 
 Each observation gets the best position available, resolved fresh: GPS, then `--lat`/`--lon`, then
-none. The GPS is the bridge's receiver while its fix is recent, else a receiver on the host. Rows
+none. The GPS is a receiver named with `--gps PATH`, then the bridge's receiver, then one the host
+found, each while its fix is recent. Rows
 record which tier answered, so a garage-to-road capture is honest about both. No record is dropped
 for lack of a position, but **WiGLE rejects rows without coordinates**: a capture with none exports
 nothing and says how many networks it left out.
 
-- **A bridge with a GPS receiver is the position source while its receiver talks.** A T-Dongle-C5
+- **A bridge with a GPS receiver is the position source while it has a fix.** A T-Dongle-C5
   flashed with `t-dongle-c5-gps` reads a u-blox M10 on its Qwiic port and forwards its bytes; see
   [`firmware/bridge/README.md`](../../firmware/bridge/README.md) § "The GPS". The host's own search
-  stands down while the bridge's receiver is talking, letting go of any port. It resumes once that
-  receiver is quiet for `--gps-max-age`, or the bridge disconnects. A port named with `--gps` is
-  always read. wartui sets the receiver to `[gps] bridge-rate-hz` fixes a second (default 5) on
-  every bridge status poll. `g` reports on the bridge's receiver while it is talking, or when no
-  host receiver is read, and shows `bridge (Qwiic)` as its port. `wartui sniff --verbose` prints
-  the receiver's raw stream.
+  stands down while the bridge's receiver has a fix, letting go of any port. Sentences without a
+  fix do not count, so a bridge receiver with no sky leaves the host's search running. The search
+  resumes once that fix is older than `--gps-max-age`, or the bridge disconnects. After a
+  reconnect it stands down again only on a new fix. A port named with `--gps` is always read, and
+  its fix goes ahead of the bridge's. wartui sets the receiver to `[gps] bridge-rate-hz` fixes a
+  second (default 5) on every bridge status poll. `g` reports on a port named with `--gps` when
+  there is one. Otherwise it reports on the bridge's receiver while it has a fix, or when no host
+  receiver is read and the bridge has a GPS port, and shows `bridge (Qwiic)` as its port.
+  `wartui sniff --verbose` prints the receiver's raw stream.
 - **`--lat`/`--lon` is for testing only.** WDGWars and WiGLE ban fixed positions, so the capture is
   marked as test data: `upload` refuses it, and `export` warns.
 - **A receiver is found without being named.** Each serial port that is not a fleet board is tried

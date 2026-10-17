@@ -360,8 +360,10 @@ impl FleetEngine {
     }
 
     /// Whether the bridge connected now was built with a GPS port. `self.bridge` outlives a
-    /// disconnect, so the link must be up too.
-    fn bridge_has_gps(&self) -> bool {
+    /// disconnect, so the link must be up too. The runtime reads this after each event to decide
+    /// whether the host's search stands down, so the two never disagree about the bridge.
+    #[must_use]
+    pub fn bridge_has_gps(&self) -> bool {
         self.link_up && self.bridge.as_ref().is_some_and(|bridge| bridge.gps)
     }
 

@@ -6,14 +6,17 @@
 //!
 //! **A bridge's receiver has no thread.** Its bytes arrive on the link, and the runtime hands them
 //! to [`Gps::feed_bytes`], which splits UBX from NMEA ([`crate::ubx::Demux`]) and feeds the same
-//! parser a puck does. While the connected bridge's receiver is talking, the puck reader stands
-//! down ([`Gps::set_suspended`]): it lets go of its port and opens nothing, so one capture reads one
-//! receiver. The search keys on sentences rather than on the bridge being built with a GPS port, so
-//! a receiver that is unplugged, broken or silent leaves the host's search running. A port the
-//! operator named with `--gps` never stands down: reading it is their instruction.
+//! parser a puck does. While the connected bridge's receiver has a fresh fix
+//! ([`Gps::has_fresh_fix`]), the puck reader stands down ([`Gps::set_suspended`]): it lets go of
+//! its port and opens nothing, so one capture reads one receiver. The rule keys on a fix rather
+//! than on sentences: a receiver with no sky still sends no-fix sentences every epoch, and standing
+//! a puck with a fix down for it would leave every row unpositioned. A port the operator named with
+//! `--gps` never stands down: reading it is their instruction.
 //!
 //! The bridge's stream restarts with each connection ([`Gps::reset_stream`]): a sentence cut off by
-//! a disconnect must not join the first bytes after the reconnect.
+//! a disconnect must not join the first bytes after the reconnect. Only a fix from the new stream
+//! counts toward standing down, so a reconnect does not stand the puck down on what the bridge said
+//! before it. The retained fix still serves the chain until it ages out.
 //!
 //! **The reader stamps arrival time itself**, as the only thing that knows when a byte turned up.
 //! [`crate::PositionChain`] decides whether that age is too much.
@@ -30,7 +33,7 @@ use std::time::{Duration, Instant};
 
 use crate::discover::{self, BAUD_LADDER, PROBE_WINDOW};
 use crate::nmea::{Nmea, NmeaError, Report, Sky};
-use crate::position::{Fix, PositionSource};
+use crate::position::{Fix, PositionSource, is_fresh};
 use crate::ubx::{Demux, ValsetReply};
 
 /// Longest line worth assembling. NMEA 0183 caps a sentence at 82 characters. This leaves room for
@@ -200,6 +203,8 @@ struct Inner {
     /// [`Lines`] on its thread.
     demux: Demux,
     lines: Lines,
+    /// Whether a fix has arrived since the stream last restarted ([`Gps::reset_stream`]).
+    fix_in_stream: bool,
     /// The receiver's last answer to its rate, so a repeated answer is logged once.
     valset: Option<ValsetReply>,
     /// Whether the receiver has said its transmit buffer is full, so that is logged once.
@@ -240,7 +245,7 @@ impl Inner {
     fn tick(&mut self, now_ms: i64) {
         if self.diagnostic == Some(Diagnostic::Fresh)
             && let Some(at_ms) = self.received_at_ms
-            && (now_ms.saturating_sub(at_ms).max(0) as u128) > self.max_age.as_millis()
+            && !is_fresh(at_ms, now_ms, self.max_age)
         {
             tracing::warn!(last_fix_ms = at_ms, max_age_ms = ?self.max_age.as_millis(), "gps fix stale");
             self.diagnostic = Some(Diagnostic::Stale);
@@ -267,16 +272,17 @@ impl Inner {
     }
 
     /// The host writes the rate with every bridge status poll, so the receiver answers every few
-    /// seconds. Only a change is worth a line.
-    fn note_valset(&mut self, reply: ValsetReply) {
-        if self.valset == Some(reply) {
+    /// seconds. Only a change is worth a line. Takes the field rather than `self`, so the demux's
+    /// packet callback can hold it while the line callback holds the parser.
+    fn note_valset(seen: &mut Option<ValsetReply>, reply: ValsetReply) {
+        if *seen == Some(reply) {
             return;
         }
         match reply {
             ValsetReply::Accepted => tracing::debug!("the GPS receiver took its rate"),
             ValsetReply::Refused => tracing::warn!("the GPS receiver refused its rate"),
         }
-        self.valset = Some(reply);
+        *seen = Some(reply);
     }
 
     /// A `TXT` sentence saying `txbuf` is how a u-blox receiver reports dropping its own output.
@@ -291,6 +297,11 @@ impl Inner {
     /// Offer one line to the parser, as of `now_ms`.
     fn feed(&mut self, line: &[u8], now_ms: i64) {
         self.tick(now_ms);
+        self.feed_line(line, now_ms);
+    }
+
+    /// [`Self::feed`] without the tick, for a batch of lines that has already ticked once.
+    fn feed_line(&mut self, line: &[u8], now_ms: i64) {
         let parsed = self.nmea.parse(line);
         if parsed.is_ok() {
             self.heard_ms = Some(now_ms);
@@ -318,6 +329,7 @@ impl Inner {
                     at_ms: new.at_ms,
                 });
                 self.received_at_ms = Some(now_ms);
+                self.fix_in_stream = true;
             }
             Ok(Report::NoFix) => {
                 self.last_failure = None;
@@ -345,7 +357,7 @@ impl Inner {
 pub struct Gps {
     inner: Arc<Mutex<Inner>>,
     stop: Arc<AtomicBool>,
-    /// Set while the connected bridge's receiver is talking: the puck reader holds no port and
+    /// Set while the connected bridge's receiver has a fresh fix: the puck reader holds no port and
     /// searches for none.
     suspended: Arc<AtomicBool>,
     /// Whether the operator named the port, which [`Gps::set_suspended`] then leaves alone.
@@ -373,6 +385,7 @@ impl Gps {
                 via_bridge: false,
                 demux: Demux::new(),
                 lines: Lines::default(),
+                fix_in_stream: false,
                 valset: None,
                 txbuf_full: false,
             })),
@@ -383,7 +396,8 @@ impl Gps {
     }
 
     /// The bridge's receiver: detached, and fed by the runtime through [`Gps::feed_bytes`].
-    /// `max_age` is the staleness limit, as [`GpsConfig::max_age`] is for a puck.
+    /// `max_age` is the staleness limit its diagnostics and [`Gps::has_fresh_fix`] use, as
+    /// [`GpsConfig::max_age`] is for a puck.
     #[must_use]
     pub fn bridged(max_age: Duration) -> Self {
         let gps = Self::detached();
@@ -430,29 +444,42 @@ impl Gps {
             return;
         }
         if suspended {
-            tracing::info!("gps search stands down: the bridge's receiver is talking");
+            tracing::info!("gps search stands down: the bridge's receiver has a fix");
         } else {
             tracing::info!("gps search resumes");
         }
     }
 
-    /// Whether a sentence parsed within the staleness limit of `now_ms`. A negative age is the host
-    /// clock stepping back, and counts as fresh, as in [`crate::PositionChain`].
+    /// Whether a fix arrived within the staleness limit of `now_ms`, and since the stream last
+    /// restarted ([`Self::reset_stream`]). Sentences without a fix do not count.
     #[must_use]
-    pub fn talking(&self, now_ms: i64) -> bool {
+    pub fn has_fresh_fix(&self, now_ms: i64) -> bool {
         let inner = self.lock();
-        inner.heard_ms.is_some_and(|heard_ms| {
-            (now_ms.saturating_sub(heard_ms).max(0) as u128) <= inner.max_age.as_millis()
-        })
+        inner.fix_in_stream
+            && inner.received_at_ms.is_some_and(|at_ms| is_fresh(at_ms, now_ms, inner.max_age))
+    }
+
+    /// Whether the operator named this receiver's port with `--gps`.
+    #[must_use]
+    pub const fn is_pinned(&self) -> bool {
+        self.pinned
+    }
+
+    /// [`Self::detached`], as if the operator had named its port.
+    #[cfg(test)]
+    pub(crate) fn detached_pinned() -> Self {
+        Self { pinned: true, ..Self::detached() }
     }
 
     /// Start the bridge's stream over: drop a partial line or UBX packet, so bytes from before a
-    /// reconnect never join the next stream. The retained fix and the sky stay, as the chain and
-    /// the view age them.
+    /// reconnect never join the next stream, and require a new fix before
+    /// [`Self::has_fresh_fix`] holds. The retained fix and the sky stay, as the chain and the view
+    /// age them.
     pub fn reset_stream(&self) {
         let mut inner = self.lock();
         inner.demux = Demux::new();
         inner.lines = Lines::default();
+        inner.fix_in_stream = false;
     }
 
     /// The last fix and the Unix milliseconds it arrived.
@@ -492,20 +519,23 @@ impl Gps {
         let mut guard = self.lock();
         let inner = &mut *guard;
         inner.tick(now_ms);
-        // Out of `inner` for the call, so the line callback can feed the parser it holds.
+        // Out of `inner` for the call, so the line callback can feed the parser it holds while the
+        // packet callback notes the receiver's answer.
         let mut demux = std::mem::take(&mut inner.demux);
         let mut lines = std::mem::take(&mut inner.lines);
-        let mut replies = Vec::new();
+        let mut valset = inner.valset.take();
         demux.push(
             bytes,
-            |run| lines.push(run, |line| inner.feed(line, now_ms)),
-            |packet| replies.extend(packet.valset_reply()),
+            |run| lines.push(run, |line| inner.feed_line(line, now_ms)),
+            |packet| {
+                if let Some(reply) = packet.valset_reply() {
+                    Inner::note_valset(&mut valset, reply);
+                }
+            },
         );
         inner.demux = demux;
         inner.lines = lines;
-        for reply in replies {
-            inner.note_valset(reply);
-        }
+        inner.valset = valset;
     }
 
     /// Age the retained fix as of `now_ms`, for the staleness log. The puck reader does this on
@@ -1334,16 +1364,52 @@ mod tests {
         logs.assert_messages(&["stands down", "resumes"]);
     }
 
+    /// `line` as the bridge forwards it, terminated.
+    fn streamed(line: &[u8]) -> Vec<u8> {
+        let mut bytes = line.to_vec();
+        bytes.extend_from_slice(b"\r\n");
+        bytes
+    }
+
     #[test]
-    fn gps_talks_only_while_sentences_are_fresh() {
+    fn gps_has_no_fresh_fix_when_receiver_sends_only_no_fix_sentences() {
+        // A receiver with no sky still sends every epoch. That is not a position.
         let gps = Gps::bridged(DEFAULT_MAX_AGE);
-        assert!(!gps.talking(1_000), "nothing heard yet");
+        gps.feed_bytes(&streamed(GGA_NO_FIX), 1_000);
         gps.feed_bytes(b"$GPGSV,1,1,00*79\r\n", 1_000);
-        assert!(gps.talking(6_000));
-        assert!(!gps.talking(6_001));
-        // A rejected line is not the receiver talking.
-        gps.feed_bytes(b"not NMEA\r\n", 6_001);
-        assert!(!gps.talking(6_001));
+        assert!(!gps.has_fresh_fix(1_000));
+    }
+
+    #[test]
+    fn gps_has_fresh_fix_when_fix_is_within_max_age() {
+        let gps = Gps::bridged(DEFAULT_MAX_AGE);
+        gps.feed_bytes(&streamed(GGA), 1_000);
+        assert!(gps.has_fresh_fix(6_000));
+        assert!(!gps.has_fresh_fix(6_001));
+        // Sentences without a fix do not refresh it.
+        gps.feed_bytes(&streamed(GGA_NO_FIX), 6_001);
+        assert!(!gps.has_fresh_fix(6_001));
+    }
+
+    #[test]
+    fn gps_has_no_fresh_fix_when_stream_resets_until_a_new_fix_arrives() {
+        let gps = Gps::bridged(DEFAULT_MAX_AGE);
+        gps.feed_bytes(&streamed(GGA), 1_000);
+        gps.reset_stream();
+        // The retained fix is within the age limit, but it is from before the reconnect.
+        assert!(!gps.has_fresh_fix(2_000));
+        assert!(gps.latest().is_some(), "the chain still ages the retained fix");
+        gps.feed_bytes(&streamed(GGA), 3_000);
+        assert!(gps.has_fresh_fix(3_000));
+    }
+
+    #[test]
+    fn gps_reports_pinned_when_operator_names_the_port() {
+        let gps = Gps::spawn(GpsConfig::pinned("/dev/wartui-test-no-such-port").at_baud(9_600));
+        assert!(gps.is_pinned());
+        gps.stop();
+        assert!(!Gps::detached().is_pinned());
+        assert!(!Gps::bridged(DEFAULT_MAX_AGE).is_pinned());
     }
 
     #[test]

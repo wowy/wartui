@@ -149,9 +149,11 @@ pub struct Snapshot {
     pub now_ms: i64,
     /// Where the host believes it is, resolved as of this snapshot.
     pub position: crate::position::Fix,
-    /// What the GPS is doing, when one is configured: the bridge's receiver while it is talking
-    /// on a connected bridge, or when there is no host receiver; else the host's. Separate from [`Self::position`]: "no fix" and "no
-    /// receiver" look identical in a row but are different problems.
+    /// What the GPS is doing, when one is read: a host receiver pinned with `--gps`, else the
+    /// bridge's receiver while it has a fresh fix, else the host's, else the bridge's while the
+    /// connected bridge has a GPS port. Separate from
+    /// [`Self::position`]: "no fix" and "no receiver" look identical in a row but are different
+    /// problems.
     pub gps: Option<crate::gps::GpsView>,
     /// The nodes' Wi-Fi transmit power, in ESP-IDF quarter-dBm units, for the settings modal.
     pub tx_power: i8,
@@ -194,17 +196,22 @@ pub struct BridgeStatus {
 }
 
 impl FleetEngine {
-    /// The receiver the view reports on, by the rule the host's search stands down by
-    /// (`runtime::stand_host_down`): the bridge's while a connected bridge with a GPS port has its
-    /// receiver talking, else the host's. With no host receiver, the bridge's is shown whatever it
-    /// is doing, so a bridge-only run shows it connecting rather than nothing.
+    /// The receiver the view reports on, which is the one positioning the rows when any is. A host
+    /// receiver pinned with `--gps` first, as the chain resolves it; else the bridge's while the
+    /// connected bridge has a GPS port and its receiver a fresh fix, the rule the host's search
+    /// stands down by
+    /// (`runtime::stand_host_down`); else the host's; else the bridge's while the connected bridge
+    /// has a GPS port, so a bridge-only run shows it connecting. A bridge without one, simulated
+    /// included, shows no receiver rather than one that never connects.
     fn shown_gps(&self, now_ms: i64) -> Option<&crate::gps::Gps> {
         let position = &self.config.position;
-        let bridge = position.bridge_gps();
-        let talking = self.bridge_has_gps() && bridge.is_some_and(|gps| gps.talking(now_ms));
-        match position.gps() {
-            Some(host) if !talking => Some(host),
-            _ => bridge,
+        if let Some(pinned) = position.gps().filter(|gps| gps.is_pinned()) {
+            return Some(pinned);
+        }
+        let bridge = position.bridge_gps().filter(|_| self.bridge_has_gps());
+        match bridge {
+            Some(bridge) if bridge.has_fresh_fix(now_ms) => Some(bridge),
+            _ => position.gps().or(bridge),
         }
     }
 
