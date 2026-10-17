@@ -331,11 +331,9 @@ cargo tree --locked --features esp32c6 -e normal --prefix none --format '{p}' \
   | grep -E '^(esp-(alloc|hal|radio|rtos|storage|sync|wifi-sys-esp32c[56])|embedded-hal) '
 ```
 
-They are direct dependencies for reasons that do not go away. `esp-wifi-sys-*` is here for the two
-IDF calls `esp-radio` does not wrap, which are the only `unsafe` in either firmware but one:
-
-- `esp_now_set_peer_rate_config` (`set_peer_rate` in `src/main.rs`);
-- `esp_wifi_set_max_tx_power` (`set_tx_power` beside it).
+They are direct dependencies for reasons that do not go away. `esp-wifi-sys-*` is here for
+`esp_wifi_set_max_tx_power` (`set_tx_power` in `src/main.rs`), and on a node
+`esp_wifi_get_max_tx_power` too. Those IDF calls are the only `unsafe` in either firmware but one.
 
 The one is not an IDF call: the GPS build takes its interrupt executor's spawner through
 `Spawner::for_current_executor` (`current_spawner` in `src/gps.rs`). `esp-hal`'s async I2C driver

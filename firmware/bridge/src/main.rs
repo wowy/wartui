@@ -50,7 +50,7 @@ use esp_hal::timer::timg::TimerGroup;
 use esp_hal::usb::usb_serial_jtag::{UsbSerialJtag, UsbSerialJtagRx, UsbSerialJtagTx};
 use esp_radio::esp_now::{
     EspNowError, EspNowManager, EspNowReceiver, EspNowSender, EspNowWifiInterface, PeerInfo,
-    ReceivedData,
+    PhyMode, RateConfig, ReceivedData, WifiPhyRate,
 };
 use portable_atomic::{AtomicU8, AtomicU32, Ordering};
 use static_cell::StaticCell;
@@ -1184,33 +1184,14 @@ fn add_peer(manager: &EspNowManager, mac: &Mac) -> Result<bool, EspNowError> {
 /// bench, a C5 and a C6 beside this bridge arrived at −43 and −58 dBm and lost 0%
 /// and 2.3% of their heartbeats over ten minutes.
 ///
-/// Straight into IDF, one of this firmware's `unsafe` calls. `esp-radio`
-/// 1.0.0-beta.0 wraps only the interface-wide `esp_wifi_config_espnow_rate`, which the
-/// C5 and C6 Wi-Fi libraries refuse in Wi-Fi 6 mode (esp-hal #1612) — and whose
-/// `WifiPhyRate` is numbered without IDF's gap at 4, so its `Rate24m` sends 48 Mbps.
-/// `esp_now_set_peer_rate_config` is the per-peer call that replaced it, and taking
-/// IDF's own constants sidesteps the numbering. `firmware/node/src/radio.rs` has the
-/// node's copy.
-///
-/// The manager goes unused: it is proof that `esp_wifi_start` and `esp_now_init` have
-/// both run, which IDF requires first.
-#[allow(unsafe_code, reason = "esp-radio's own espnow-rate call is refused on the C5 and C6")]
-fn set_peer_rate(_manager: &EspNowManager, mac: &Mac) -> bool {
-    #[cfg(feature = "esp32c5")]
-    use esp_wifi_sys_esp32c5::include as sys;
-    #[cfg(feature = "esp32c6")]
-    use esp_wifi_sys_esp32c6::include as sys;
-
-    let mut config = sys::esp_now_rate_config_t {
-        phymode: sys::wifi_phy_mode_t_WIFI_PHY_MODE_11G,
-        rate: sys::wifi_phy_rate_t_WIFI_PHY_RATE_24M,
-        ersu: false,
-        dcm: false,
-    };
-    // SAFETY: `mac` is six readable bytes and `config` is a fully initialized
-    // `esp_now_rate_config_t`, both alive for the whole call. ESP-NOW is initialized,
-    // since an `EspNowManager` exists. 0 is `ESP_OK`.
-    unsafe { sys::esp_now_set_peer_rate_config(mac.as_ptr(), &mut config) == 0 }
+/// Through `esp-radio`'s per-peer `set_peer_rate`, which wraps IDF's
+/// `esp_now_set_peer_rate_config`. The interface-wide `esp_wifi_config_espnow_rate` is
+/// refused by the C5 and C6 Wi-Fi libraries in Wi-Fi 6 mode (esp-hal #1612).
+/// `firmware/node/src/radio.rs` has the node's copy.
+fn set_peer_rate(manager: &EspNowManager, mac: &Mac) -> bool {
+    let config =
+        RateConfig { phy_mode: PhyMode::_11g, rate: WifiPhyRate::Rate24m, ersu: false, dcm: false };
+    manager.set_peer_rate(mac, config).is_ok()
 }
 
 /// Set the Wi-Fi transmit power after ESP-NOW has borrowed the controller.
@@ -1219,9 +1200,9 @@ fn set_peer_rate(_manager: &EspNowManager, mac: &Mac) -> bool {
 /// keeps its ESP-NOW handles alive for the rest of its process. This is the narrow
 /// direct IDF equivalent, used only for a host configuration command.
 ///
-/// The manager goes unused for the reason [`set_peer_rate`] takes one: IDF wants
-/// `esp_wifi_start` behind this call, and a witness is what stops it being made from
-/// somewhere in `main` that compiles and then fails on the board.
+/// The manager goes unused: it is proof that `esp_wifi_start` has run, which IDF wants
+/// behind this call, and a witness is what stops it being made from somewhere in `main`
+/// that compiles and then fails on the board.
 #[allow(
     unsafe_code,
     reason = "esp-radio requires a mutable controller after long-lived handles borrow it"

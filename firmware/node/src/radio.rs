@@ -4,7 +4,7 @@
 //! promiscuous mode on for its own reasons, so that falls out for free on the dwell
 //! side; the hop back to the control channel is the one to check on hardware.
 //!
-//! [`set_peer_rate`], [`set_tx_power`] and [`tx_power`] are the direct IDF calls this
+//! [`set_tx_power`] and [`tx_power`] are the direct IDF calls this
 //! firmware needs because `esp-radio` does not expose them once its long-lived handles
 //! borrow the controller.
 //!
@@ -14,7 +14,10 @@
 //! it and an unacknowledged batch is knowable as such — see [`unicast`] and
 //! `main.rs`'s `Outgoing`.
 
-use esp_radio::esp_now::{EspNowError, EspNowManager, EspNowSender, EspNowWifiInterface, PeerInfo};
+use esp_radio::esp_now::{
+    EspNowError, EspNowManager, EspNowSender, EspNowWifiInterface, PeerInfo, PhyMode, RateConfig,
+    WifiPhyRate,
+};
 use esp_radio::wifi::sniffer::Sniffer;
 use wartui_proto::link::BROADCAST;
 
@@ -47,25 +50,12 @@ pub fn park(manager: &EspNowManager, sniffer: &Sniffer, channel: u8, listen: boo
 ///
 /// Applied to the broadcast peer `esp-radio` registers at init, once at boot, and to
 /// the core peer whenever [`set_core_peer`] registers one. `set_peer_rate` in
-/// `firmware/bridge/src/main.rs` has why 24 Mbps, what it costs, and why this cannot
-/// go through `esp-radio`.
-#[allow(unsafe_code, reason = "esp-radio's own espnow-rate call is refused on the C5 and C6")]
-pub fn set_peer_rate(_manager: &EspNowManager, mac: &[u8; 6]) -> bool {
-    #[cfg(feature = "esp32c5")]
-    use esp_wifi_sys_esp32c5::include as sys;
-    #[cfg(feature = "esp32c6")]
-    use esp_wifi_sys_esp32c6::include as sys;
-
-    let mut config = sys::esp_now_rate_config_t {
-        phymode: sys::wifi_phy_mode_t_WIFI_PHY_MODE_11G,
-        rate: sys::wifi_phy_rate_t_WIFI_PHY_RATE_24M,
-        ersu: false,
-        dcm: false,
-    };
-    // SAFETY: `mac` is six readable bytes and `config` is a fully initialized
-    // `esp_now_rate_config_t`, both alive for the whole call. ESP-NOW is initialized,
-    // since an `EspNowManager` exists. 0 is `ESP_OK`.
-    unsafe { sys::esp_now_set_peer_rate_config(mac.as_ptr(), &mut config) == 0 }
+/// `firmware/bridge/src/main.rs` has why 24 Mbps, what it costs, and why it is set per
+/// peer.
+pub fn set_peer_rate(manager: &EspNowManager, mac: &[u8; 6]) -> bool {
+    let config =
+        RateConfig { phy_mode: PhyMode::_11g, rate: WifiPhyRate::Rate24m, ersu: false, dcm: false };
+    manager.set_peer_rate(mac, config).is_ok()
 }
 
 /// Set the Wi-Fi transmit power after ESP-NOW has borrowed the controller.
@@ -74,9 +64,9 @@ pub fn set_peer_rate(_manager: &EspNowManager, mac: &[u8; 6]) -> bool {
 /// the sniffer and ESP-NOW handles borrowed for its whole life, so this is the narrow
 /// direct IDF equivalent. The caller applies it only when adopting a fresh assignment.
 ///
-/// The manager goes unused for the reason [`set_peer_rate`] takes one: IDF wants
-/// `esp_wifi_start` behind this call, and a witness is what stops it being made from
-/// somewhere in `main` that compiles and then fails on the board.
+/// The manager goes unused: it is proof that `esp_wifi_start` has run, which IDF wants
+/// behind this call, and a witness is what stops it being made from somewhere in `main`
+/// that compiles and then fails on the board.
 #[allow(
     unsafe_code,
     reason = "esp-radio requires a mutable controller after long-lived handles borrow it"

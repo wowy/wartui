@@ -275,9 +275,8 @@ is here rather than only in a `//!`.
 - **`clippy::all` is denied workspace-wide, in both firmwares too, and so is `unsafe_code`.** The
   host allows it on one function, the Raspberry Pi firmware mailbox ioctl
   (`crates/wartui-core/src/health.rs`, `mailbox_call`). Each firmware allows the IDF calls
-  `esp-radio` cannot express after its long-lived handles borrow the controller: the ESP-NOW
-  peer-rate call and the runtime transmit-power call, and on a node the transmit-power read each
-  heartbeat carries. `firmware/common` allows two more for the node's heartbeat, both PHY blob
+  `esp-radio` cannot express after its long-lived handles borrow the controller: the runtime
+  transmit-power call, and on a node the transmit-power read each heartbeat carries. `firmware/common` allows two more for the node's heartbeat, both PHY blob
   reads: the rail voltage (`health::vdd_mv`) and the die temperature (`health::die_temp_c`). The
   bridge's GPS build allows one call that is not IDF's, `Spawner::for_current_executor`
   (`firmware/bridge/src/gps.rs`, `current_spawner`): `esp-hal`'s async I2C driver is not `Send`, and
@@ -383,9 +382,10 @@ edit stops; follow the pointer before changing the rule.
   → `crates/wartui-proto/src/tx_power.rs`, `clamp_tx_power` / `DEFAULT_TX_POWER_QUARTER_DBM`;
   `crates/wartui-core/src/engine/mod.rs`, `poll_bridge`; `crates/wartui-core/src/engine/event.rs`,
   `Command::SetTxPower`; `crates/wartui-core/src/engine/replan.rs`, `on_set_tx_power`
-- **ESP-NOW goes out at 802.11g 24 Mbps, set per peer through IDF directly** — `esp-radio`'s
-  `set_rate` is refused on the C5 and C6, and misnumbered besides.
-  → `firmware/bridge/src/main.rs`, `set_peer_rate`; `firmware/node/src/radio.rs`
+- **ESP-NOW goes out at 802.11g 24 Mbps, set per peer** through `esp-radio`'s `set_peer_rate` —
+  the interface-wide rate call is refused on the C5 and C6, and a peer registered without the
+  funnel goes out at 1 Mbps. → `firmware/bridge/src/main.rs`, `set_peer_rate`;
+  `firmware/node/src/radio.rs`
 - **The air is plaintext ESP-NOW in both directions** — no pairing handshake and no key.
   → `firmware/bridge/src/main.rs`, peer registration
 - **Setting a node's channel is not `set_channel` alone** — without promiscuous mode on across the

@@ -86,9 +86,9 @@ esp-rtos = { version = "0.4.0", features = ["esp-alloc", "esp-radio"] }
 # `critical-section` feature holds interrupts off across each flash operation.
 esp-storage = { version = "0.10.0", features = ["embedded-storage"] }
 esp-sync = "0.3.0"
-# IDF's own bindings, for the one call `esp-radio` does not wrap —
-# `esp_now_set_peer_rate_config`, in `radio::set_broadcast_rate`. Held at the
-# version `esp-radio` links; `firmware/bridge/README.md` § "Dependency versions".
+# IDF's own bindings, for the transmit-power calls in `radio::set_tx_power` and
+# `radio::tx_power`. Held at the version `esp-radio` links;
+# `firmware/bridge/README.md` § "Dependency versions".
 esp-wifi-sys-esp32c5 = { version = "0.3.0", optional = true }
 esp-wifi-sys-esp32c6 = { version = "0.3.0", optional = true }
 static_cell = "2.1.1"
@@ -100,7 +100,7 @@ wartui-proto = { path = "../../crates/wartui-proto" }
 # Stated in AGENTS.md as a project-wide rule, but the root workspace excludes
 # `firmware`, so until this line existed the firmwares were covered by the
 # documentation and not by the compiler. `deny` rather than `forbid`,
-# so that `radio::set_broadcast_rate` alone can allow it.
+# so that the few calls AGENTS.md lists can allow it.
 unsafe_code = "deny"
 
 [lints.clippy]

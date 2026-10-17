@@ -84,9 +84,8 @@ embassy-futures = "0.1.2"
 embassy-sync = { version = "0.8.0", optional = true }
 embassy-time = "0.5.1"
 embedded-io-async = "0.7.0"
-# IDF's own bindings, for the one call `esp-radio` does not wrap —
-# `esp_now_set_peer_rate_config`, in `set_peer_rate`. Held at the version
-# `esp-radio` links; README.md § "Dependency versions".
+# IDF's own bindings, for `esp_wifi_set_max_tx_power` in `set_tx_power`. Held at
+# the version `esp-radio` links; README.md § "Dependency versions".
 esp-wifi-sys-esp32c5 = { version = "0.3.0", optional = true }
 esp-wifi-sys-esp32c6 = { version = "0.3.0", optional = true }
 # The panel, behind `t-dongle-c5`. Outside the `esp-radio` wall that holds the
