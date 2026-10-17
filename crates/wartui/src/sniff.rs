@@ -12,7 +12,7 @@ use anyhow::Result;
 use clap::Args as ClapArgs;
 use wartui_bridge::LinkEvent;
 use wartui_proto::air::{
-    Capabilities, Compat, DecodeError, Frame, NODE_VERSION, RecordKind, SightingMsg, foreign,
+    Capabilities, Compat, DecodeError, Frame, MAGIC, NODE_VERSION, RecordKind, SightingMsg,
 };
 use wartui_proto::beacon::rcoi_text;
 use wartui_proto::link::{BROADCAST, BridgeToHost};
@@ -83,7 +83,7 @@ pub async fn run(args: Args) -> Result<()> {
 
     println!(
         "\n# {} frames: {} sighting in {} batches, {} heartbeat, {} admin, {} update, \
-         {} update status, {} not ours, {} undecodable",
+         {} update status, {} undecodable",
         counts.total,
         counts.sighting,
         counts.batches,
@@ -91,17 +91,8 @@ pub async fn run(args: Args) -> Result<()> {
         counts.admin,
         counts.update,
         counts.update_status,
-        counts.foreign_fleet + counts.foreign_admin,
         counts.undecodable
     );
-    if counts.foreign_fleet > 0 {
-        println!(
-            "# {} frames came from a fleet running the vendor firmware. It is not ours \
-             and cannot be driven from here, but it is transmitting on the channel these \
-             nodes listen on.",
-            counts.foreign_fleet
-        );
-    }
     // Every assignment on the air during a sniff came from somewhere else: this
     // command holds the port and a radio does not hear its own frames. One in our own
     // format is the harder to notice any other way, because our nodes obey a second
@@ -126,13 +117,6 @@ pub async fn run(args: Args) -> Result<()> {
             "# {} update statuses arrived: nodes nearby are answering a host's \
              update session.",
             counts.update_status
-        );
-    }
-    if counts.foreign_admin > 0 {
-        println!(
-            "# {} assignments arrived from a vendor core. Something other than this host \
-             is telling a fleet nearby what to scan.",
-            counts.foreign_admin
         );
     }
     if counts.incompatible > 0 {
@@ -178,12 +162,6 @@ struct Counts {
     update: u64,
     /// Update statuses nodes sent, answering some host's session.
     update_status: u64,
-    /// Vendor heartbeats and observations. Another fleet is on this channel,
-    /// transmitting where these nodes are listening.
-    foreign_fleet: u64,
-    /// Another core's assignment. Counted apart from `foreign_fleet` because
-    /// seeing any at all means something else is driving a fleet nearby.
-    foreign_admin: u64,
     /// Frames of ours in a wire version or layout this build does not read, as the engine
     /// counts them, which is what a fleet half-way through a reflash looks like.
     incompatible: u64,
@@ -236,6 +214,10 @@ fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
 
     match message {
         BridgeToHost::Rx { src, dst, rssi, rx_us, payload, .. } => {
+            // Not ours.
+            if !payload.starts_with(&MAGIC) {
+                return;
+            }
             counts.total += 1;
             let addressing = if *dst == BROADCAST { "bcast" } else { "unicast" };
             let head =
@@ -370,22 +352,6 @@ fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
                         counts.incompatible += 1;
                         println!("{head}  wire version {version}, which this build does not speak");
                     }
-                    // Also named: another fleet on this channel is transmitting
-                    // where these nodes are listening.
-                    Err(DecodeError::BadMagic) => match foreign::classify(payload) {
-                        Some(foreign::Foreign::Admin) => {
-                            counts.foreign_admin += 1;
-                            println!("{head}  ADMIN from a vendor core  -> {}", mac::full(dst));
-                        }
-                        Some(foreign::Foreign::Node) => {
-                            counts.foreign_fleet += 1;
-                            println!("{head}  a vendor node's frame");
-                        }
-                        None => {
-                            counts.undecodable += 1;
-                            println!("{head}  undecodable: not ESP-NOW wardriving traffic");
-                        }
-                    },
                     // Ours, from a node on this minor: a bug in one of the two builds.
                     Err(DecodeError::BadLength { need, got }) => {
                         counts.incompatible += 1;
@@ -638,5 +604,19 @@ mod tests {
         frame.push(0);
         let counts = counted(&frame);
         assert_eq!((counts.incompatible, counts.undecodable, counts.heartbeat), (1, 0, 0));
+    }
+
+    #[test]
+    fn sniff_cmd_counts_nothing_when_frame_lacks_magic() {
+        let vendor = [0x45, 0x4E, 0x4F, 0x57, 0x03, 0x93, 0x00, 0x00, 0x00];
+        let mut counts = Counts::default();
+        feed(&mut counts, &vendor);
+        feed(&mut counts, b"not espnow at all");
+        feed(&mut counts, b"");
+        assert_eq!(
+            (counts.total, counts.undecodable, counts.incompatible, counts.heartbeat),
+            (0, 0, 0, 0)
+        );
+        assert!(counts.compat.is_empty());
     }
 }

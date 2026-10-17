@@ -102,7 +102,7 @@ pub struct BridgeStatusSeen {
     pub dropped_tx: u32,
     /// Milliseconds since its boot.
     pub uptime_ms: u32,
-    /// Frames this host had read off the link when the reply arrived (`Counters::frames`). Between
+    /// Frames of ours this host had read off the link when the reply arrived (`Counters::frames`). Between
     /// two rows, the `rx_count` difference less this one's is USB loss plus `dropped_tx`, give or
     /// take frames still queued in the bridge, which the reply overtakes.
     pub host_frames: u64,
@@ -129,10 +129,6 @@ pub struct HostStatus {
     pub undecodable: u64,
     /// `Counters::incompatible`.
     pub incompatible: u64,
-    /// `Counters::foreign_fleet`.
-    pub foreign_fleet: u64,
-    /// `Counters::foreign_admin`.
-    pub foreign_admin: u64,
     /// `Counters::admin_windows_missed`.
     pub admin_windows_missed: u64,
     /// The furthest behind the air this host fell since the previous row, in microseconds. Only

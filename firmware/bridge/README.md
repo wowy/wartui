@@ -1,11 +1,11 @@
 # wartui bridge firmware
 
-The dongle. It parks an ESP32 radio on the fleet's ESP-NOW channel and forwards every frame it hears
-up a USB link to `wartui` on the host.
+The dongle. It parks an ESP32 radio on the fleet's ESP-NOW channel and forwards every wartui frame
+it hears up a USB link to `wartui` on the host.
 
-It knows COBS framing and `esp-radio`, and nothing else. What an air frame is, what a heartbeat
-means, and how channels are assigned all live on the host. There they are unit-testable, and a fix
-costs a `cargo run` rather than a reflash.
+It knows COBS framing, `esp-radio` and the magic that marks a frame as wartui's, and nothing else.
+What an air frame is, what a heartbeat means, and how channels are assigned all live on the host.
+There they are unit-testable, and a fix costs a `cargo run` rather than a reflash.
 
 A board with a screen follows the same rule from the other side. The host sends finished lines, each
 with a severity, and this firmware blits them. What the panel says and how it is arranged are a

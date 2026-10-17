@@ -544,8 +544,6 @@ fn host_status(
         garbled: 3,
         undecodable: 4,
         incompatible: 5,
-        foreign_fleet: 6,
-        foreign_admin: 7,
         admin_windows_missed: 8,
         lag_peak_us: 9,
         store_written: 10,
@@ -573,9 +571,9 @@ fn store_round_trips_every_column_when_host_status_written() {
     let mut stmt = conn
         .prepare(
             "SELECT at, frames, duplicate_batches, garbled, undecodable, incompatible,
-                    foreign_fleet, foreign_admin, admin_windows_missed, lag_peak_us,
-                    store_written, store_dropped, store_queue_peak, store_commit_peak_us,
-                    throttled, soc_temp_mc, battery_mv, battery_ma
+                    admin_windows_missed, lag_peak_us, store_written, store_dropped,
+                    store_queue_peak, store_commit_peak_us, throttled, soc_temp_mc,
+                    battery_mv, battery_ma
              FROM host_status ORDER BY id",
         )
         .unwrap();
@@ -589,18 +587,16 @@ fn store_round_trips_every_column_when_host_status_written() {
                 garbled: count(3)?,
                 undecodable: count(4)?,
                 incompatible: count(5)?,
-                foreign_fleet: count(6)?,
-                foreign_admin: count(7)?,
-                admin_windows_missed: count(8)?,
-                lag_peak_us: count(9)?,
-                store_written: count(10)?,
-                store_dropped: count(11)?,
-                store_queue_peak: count(12)?,
-                store_commit_peak_us: count(13)?,
-                throttled: r.get(14)?,
-                soc_temp_mc: r.get(15)?,
-                battery_mv: r.get(16)?,
-                battery_ma: r.get(17)?,
+                admin_windows_missed: count(6)?,
+                lag_peak_us: count(7)?,
+                store_written: count(8)?,
+                store_dropped: count(9)?,
+                store_queue_peak: count(10)?,
+                store_commit_peak_us: count(11)?,
+                throttled: r.get(12)?,
+                soc_temp_mc: r.get(13)?,
+                battery_mv: r.get(14)?,
+                battery_ma: r.get(15)?,
             })
         })
         .unwrap()

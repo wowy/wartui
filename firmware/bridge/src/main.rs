@@ -1,12 +1,13 @@
 //! wartui's USB ESP-NOW bridge.
 //!
 //! A laptop cannot speak ESP-NOW, so this dongle does it on the laptop's behalf:
-//! it parks a radio on the mesh's control channel, forwards every frame it hears
-//! up the USB link, and transmits frames the host hands it.
+//! it parks a radio on the mesh's control channel, forwards every wartui frame it
+//! hears up the USB link, and transmits frames the host hands it.
 //!
-//! It is deliberately dumb — COBS framing and `esp-radio`, and nothing about what
-//! the bytes mean. Every rule that could turn out to be wrong lives on the host,
-//! where it is unit-testable and a fix costs a `cargo run` rather than a reflash.
+//! It is deliberately dumb — COBS framing, `esp-radio` and the magic that marks a
+//! frame as ours, and nothing else about what the bytes mean. Every rule that
+//! could turn out to be wrong lives on the host, where it is unit-testable and a
+//! fix costs a `cargo run` rather than a reflash.
 //! The interesting property is not that the bridge is simple but that it is
 //! *finished*: the parts of this project most likely to change cannot reach it.
 //!
@@ -59,14 +60,14 @@ use wartui_firmware::{reboot, reset_cause};
 /// with the node firmware and the host planner rather than spelled again here: nothing
 /// on the air negotiates this number, so the only thing keeping the three ends on the
 /// same channel is that they read it from the same place.
-use wartui_proto::air::CONTROL_CHANNEL;
+use wartui_proto::air::{CONTROL_CHANNEL, MAGIC};
 use wartui_proto::heapless::Vec;
 #[cfg(feature = "t-dongle-c5-gps")]
 use wartui_proto::link::GpsWriteBytes;
 use wartui_proto::link::{
     BROADCAST, BridgeToHost, Chip, FrameAccumulator, HostToBridge, LINK_PROTO_VERSION, LinkBurst,
-    LinkError, LogLevel, LogStr, LoopPhase, MAX_HOST_FRAME, Panel, PanelLines, SendStatus,
-    ShortStr, decode_frame,
+    LinkError, LogLevel, LogStr, LoopPhase, MAX_HOST_FRAME, MAX_NODE_PAYLOAD, Panel, PanelLines,
+    SendStatus, ShortStr, decode_frame,
 };
 use wartui_proto::mac::Mac;
 use wartui_proto::outbox::{ByteSink, Outbox};
@@ -793,7 +794,7 @@ async fn idle_wait(
     }
 }
 
-/// Move everything the radio has heard into the outbox.
+/// Move every wartui frame the radio has heard into the outbox.
 fn drain_radio(receiver: &EspNowReceiver<'_>, bridge: &mut Bridge) -> bool {
     let mut worked = false;
 
@@ -805,14 +806,20 @@ fn drain_radio(receiver: &EspNowReceiver<'_>, bridge: &mut Bridge) -> bool {
     worked
 }
 
-/// Queue one received frame for the host.
+/// Queue one received frame for the host, if it is ours.
 ///
 /// Out of line for the reason [`finish_radio_setup`] is: it builds a 1048-byte
 /// [`BridgeToHost`], and `main`'s poll frame sits near `.clippy.toml`'s threshold on
 /// the C5.
 #[inline(never)]
 fn forward(received: ReceivedData, bridge: &mut Bridge) {
-    let Ok(payload) = Vec::from_slice(received.data()) else {
+    let data = received.data();
+    // Not ours, so never forwarded, counted or logged: `rx_count` stays frames headed
+    // the host's way. Checked before the copy, so it costs a 4-byte compare.
+    if data.len() <= MAX_NODE_PAYLOAD && !data.starts_with(&MAGIC) {
+        return;
+    }
+    let Ok(payload) = Vec::from_slice(data) else {
         // Longer than any frame a wartui node sends, so it is somebody else's.
         // Counted apart from `rx_count`, which the host reads as frames headed its
         // way, and never logged: a busy neighbor would fill the bulk ring with log

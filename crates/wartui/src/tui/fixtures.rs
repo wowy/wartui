@@ -206,8 +206,6 @@ pub(super) fn busy() -> Snapshot {
             heartbeats: 90,
             undecodable: 1,
             incompatible: 2,
-            foreign_fleet: 3,
-            foreign_admin: 4,
             garbled: 5,
             admin_windows_missed: 6,
             admin_sent: 3,

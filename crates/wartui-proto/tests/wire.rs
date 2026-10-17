@@ -14,7 +14,7 @@ use wartui_proto::air::{
     OtaBeginMsg, OtaChunkMsg, OtaCommitMsg, OtaConfirmMsg, OtaState, OtaStatusMsg, RecordKind,
     SIGHTING_BATCH_HEADER, SIGHTING_BATCH_MAX, SIGHTING_RECORD_MAX, SIGHTING_RECORD_MIN,
     SIGHTINGS_PER_BATCH_MAX, SSID_MAX, Security, SightingBatch, SightingBatchWriter, SightingMsg,
-    Vdd, Version, WIRE_VERSION, foreign,
+    Vdd, Version, WIRE_VERSION,
 };
 use wartui_proto::link::{MAX_ESPNOW_V2_PAYLOAD, MAX_NODE_PAYLOAD};
 use wartui_proto::plan::{ChannelSet, IndexRun};
@@ -233,11 +233,6 @@ const ALL_FRAMES: [&[u8]; 13] = [
     OTA_STATUS,
 ];
 
-/// A stock node's heartbeat, and a stock core's assignment. Kept only as inputs
-/// to [`foreign::classify`] — nothing here decodes either.
-const VENDOR_HEARTBEAT: &[u8] = &[0x45, 0x4E, 0x4F, 0x57, 0x03, 0x93, 0x00, 0x00, 0x00];
-const VENDOR_ADMIN: &[u8] = &[0x45, 0x4E, 0x4F, 0x57, 0x05, 0x07, 0x02, 0x05, 0x10, 0x17];
-
 #[test]
 fn wire_codec_matches_expected_frame_lengths_when_checking_constants() {
     assert_eq!(HEARTBEAT.len(), HEARTBEAT_MSG_LEN);
@@ -274,16 +269,6 @@ fn wire_codec_includes_magic_and_version_header_when_inspecting_frames() {
     for frame in ALL_FRAMES {
         assert_eq!(&frame[..4], MAGIC, "magic");
         assert_eq!(frame[4], WIRE_VERSION, "version");
-    }
-}
-
-#[test]
-fn foreign_classifier_rejects_our_frames_when_checking_vendor_magic() {
-    // A vendor core must not admit one of ours to its node table, nor a vendor node
-    // read an assignment out of one.
-    for frame in ALL_FRAMES {
-        assert_ne!(&frame[..4], &foreign::VENDOR_MAGIC[..]);
-        assert_eq!(foreign::classify(frame), None);
     }
 }
 
@@ -1329,37 +1314,4 @@ fn ota_state_round_trips_every_byte_when_converted() {
         assert_eq!(OtaState::from_u8(raw).as_u8(), raw);
     }
     assert_eq!(OtaState::from_u8(7), OtaState::Unknown(7));
-}
-
-#[test]
-fn foreign_classifier_ignores_ota_type_bytes_when_magic_is_ours() {
-    // The update type bytes are ours behind our magic, and the vendor's type byte sits
-    // where our magic is, so neither reading can take one for the other.
-    for frame in [OTA_BEGIN, OTA_CHUNK_SHORT, OTA_COMMIT, OTA_ABORT, OTA_CONFIRM, OTA_STATUS] {
-        assert_eq!(foreign::classify(frame), None);
-    }
-    let mut vendor = VENDOR_ADMIN.to_vec();
-    vendor[4] = 0x83;
-    assert_eq!(foreign::classify(&vendor), Some(foreign::Foreign::Node));
-    assert_eq!(Frame::decode(&vendor), Err(DecodeError::BadMagic));
-}
-
-#[test]
-fn foreign_classifier_identifies_vendor_traffic_when_foreign_frames_arrive() {
-    // Another fleet on the control channel is an operational fact — it is
-    // transmitting where these nodes are listening — so counting it as line
-    // noise would hide the one clue an operator has.
-    assert_eq!(foreign::classify(VENDOR_ADMIN), Some(foreign::Foreign::Admin));
-    assert_eq!(foreign::classify(VENDOR_HEARTBEAT), Some(foreign::Foreign::Node));
-
-    // And it is not decodable here, which is the point.
-    assert_eq!(Frame::decode(VENDOR_ADMIN), Err(DecodeError::BadMagic));
-    assert_eq!(Frame::decode(VENDOR_HEARTBEAT), Err(DecodeError::BadMagic));
-}
-
-#[test]
-fn foreign_classifier_returns_none_when_input_is_shorter_than_vendor_header() {
-    assert_eq!(foreign::classify(&VENDOR_ADMIN[..4]), None, "magic alone names no type");
-    assert_eq!(foreign::classify(b""), None);
-    assert_eq!(foreign::classify(b"not espnow at all"), None);
 }
