@@ -102,13 +102,13 @@ own.
 - **`firmware/bridge`** — dumb radio bridge: COBS framing and `esp-radio` calls, no protocol
   knowledge. Fixes there cost a reflash, so logic belongs on the host. A board with a screen
   draws lines the host composed and hands it, which is the same rule seen from the other side.
-- **`firmware/node`** — the nodes. Sniffs rather than scans, so it never transmits while
-  looking, owns the channel, and holds `sniffer()` and `esp_now()` together for the life of the
-  program (`firmware/node/README.md` § "What it does differently"). Returns to the control channel after every dwell,
-  and parks there doing nothing when it holds no assignment. The node given the Bluetooth
-  scan never leaves the control channel at all: it sniffs nothing and runs one scan after
-  another, back to back. Same rule as the bridge: the logic lives in `wartui-proto`, and
-  this crate is the conversation with the radio.
+- **`firmware/node`** — the nodes. Sniffs rather than scans, so it never transmits while looking,
+  owns the channel, and holds `sniffer()` and `esp_now()` together for the life of the program
+  (`firmware/node/README.md` § "What it does differently"). Returns to the control channel after
+  every dwell, and parks there doing nothing when it holds no assignment. The node given the
+  Bluetooth scan never leaves the control channel at all: it sniffs nothing and runs one scan after
+  another, back to back. Same rule as the bridge: the logic lives in `wartui-proto`, and this crate
+  is the conversation with the radio.
 - **`firmware/common`** (`wartui-firmware`) — chip-level code the firmwares need and that needs
   `esp-hal`, so it cannot live in `wartui-proto`: the reset funnel `reboot()` and `reset_cause()`,
   and the supply and die readings a node's heartbeat carries (`health`).

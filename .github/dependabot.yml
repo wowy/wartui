@@ -14,6 +14,7 @@ updates:
   # is the signal that the set can move.
   # The same holds for the crates `esp-rtos` and `esp-hal` themselves build
   # against: `embassy-executor`, `embassy-sync`, `embassy-time`, `embedded-io-async`.
+  # And for `esp-bootloader-esp-idf`, which fixes the `esp-storage` version.
   # `firmware/bridge/README.md` § "Dependency versions" has the reasoning.
   - package-ecosystem: "cargo"
     directories:
@@ -37,6 +38,8 @@ updates:
       - dependency-name: "embedded-io-async"
         update-types: ["version-update:semver-minor", "version-update:semver-major"]
       - dependency-name: "esp-alloc"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      - dependency-name: "esp-bootloader-esp-idf"
         update-types: ["version-update:semver-minor", "version-update:semver-major"]
       - dependency-name: "esp-hal"
         update-types: ["version-update:semver-minor", "version-update:semver-major"]

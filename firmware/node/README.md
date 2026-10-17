@@ -58,10 +58,11 @@ never transmits while looking, including on the DFS channels, where the rules sa
 speak.
 
 Listening also makes the rest possible. A node holds `WifiController::sniffer()` and `::esp_now()`
-together for the life of the program, and owns the channel: it parks where it chooses and returns
-to the control channel when it chooses. A scan from `scan_async` hops channels on its own schedule,
+together for the life of the program, and owns the channel: it parks where it chooses and returns to
+the control channel when it chooses. A scan from `scan_async` hops channels on its own schedule,
 sends probe requests unless asked to be passive, and returns an `AccessPointInfo` per network with
-no element bodies, so no roaming consortium trailer. The promiscuous callback sees each beacon whole.
+no element bodies, so no roaming consortium trailer. The promiscuous callback sees each beacon
+whole.
 
 **It is on the control channel far more often.** Nothing owns the radio, so the node returns to the
 control channel after _every_ dwell, not only after a heartbeat. There it reports what it heard and
@@ -345,11 +346,12 @@ would fill with copies of the loudest network and drop the ones not yet seen.
 Same set as the bridge, pinned by the same thing. See
 [`firmware/bridge/README.md`](../bridge/README.md).
 
-`esp-println` is the one thing outside that set. Its `esp-sync ^0.3` is the copy `esp-hal` uses, so
-the tree has exactly one `esp-sync`. Verify with:
+`esp-println` is the one thing outside that set, and brings in nothing of it. It depends on
+`esp-sync` only through its `critical-section` feature, a default that `Cargo.toml` turns off, so
+it pulls no `esp-sync` at all. Turning `critical-section` on would bring it in. Verify with:
 
 ```sh
-cargo tree -e normal --features esp32c6 | grep esp-sync   # 0.3.0 only
+cargo tree -e normal --features esp32c6 -i esp-sync | grep esp-println   # prints nothing
 ```
 
 Its serial-JTAG writer tries the FIFO a bounded number of times, then sets a sticky flag saying

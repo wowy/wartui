@@ -348,7 +348,7 @@ can start the task that owns the bus.
 bridge through `esp-bootloader-esp-idf`. It is held at the version `esp-bootloader-esp-idf`
 resolves, and brings no crate the tree lacks: its `esp-sync` and `esp-rom-sys` are the copies
 `esp-hal` uses, and `esp-rom-sys` is `links`-keyed besides. Both firmwares' CI jobs count it with
-the rest, and Dependabot ignores its minor and major releases.
+the rest, and Dependabot ignores its and `esp-bootloader-esp-idf`'s minor and major releases.
 
 ### Embassy and `embedded-io-async`
 

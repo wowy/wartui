@@ -10,15 +10,15 @@
 //! every kilobyte of them is a kilobyte that can go wrong where a reflash is the
 //! only way to find out.
 //!
-//! `README.md` § "What it does differently" is the longer account of its
-//! design. In short: it *listens* rather than scanning, so it
-//! never transmits on a DFS channel and holds `sniffer()` and `esp_now()` together
-//! for the life of the program; it returns to the control channel after every dwell rather than once a
-//! sweep; an unassigned node parks rather than sweeping the whole table; the node
-//! given the Bluetooth scan sniffs nothing and holds the control channel always;
-//! and every heartbeat says what this build can do. Its wire format is wartui's
-//! own in both directions — [`wartui_proto::air`]. It takes a new image over the
-//! air, and boots it on trial until it hears the host — [`ota`].
+//! `README.md` § "What it does differently" is the longer account of its design. In
+//! short: it *listens* rather than scanning, so it never transmits on a DFS channel and
+//! holds `sniffer()` and `esp_now()` together for the life of the program; it returns
+//! to the control channel after every dwell rather than once a sweep; an unassigned
+//! node parks rather than sweeping the whole table; the node given the Bluetooth scan
+//! sniffs nothing and holds the control channel always; and every heartbeat says what
+//! this build can do. Its wire format is wartui's own in both directions —
+//! [`wartui_proto::air`]. It takes a new image over the air, and boots it on trial
+//! until it hears the host — [`ota`].
 //!
 //! The runner is `espflash flash --monitor`, and unlike the bridge the monitor is
 //! worth watching: a node's USB endpoint carries nothing but diagnostics.
