@@ -10,15 +10,15 @@
 //! every kilobyte of them is a kilobyte that can go wrong where a reflash is the
 //! only way to find out.
 //!
-//! `README.md` § "What it does differently" is the longer account of its
-//! design. In short: it *listens* rather than scanning, so it
-//! never transmits on a DFS channel and can hold `sniffer()` and `esp_now()` at
-//! once; it returns to the control channel after every dwell rather than once a
-//! sweep; an unassigned node parks rather than sweeping the whole table; the node
-//! given the Bluetooth scan sniffs nothing and holds the control channel always;
-//! and every heartbeat says what this build can do. Its wire format is wartui's
-//! own in both directions — [`wartui_proto::air`]. It takes a new image over the
-//! air, and boots it on trial until it hears the host — [`ota`].
+//! `README.md` § "What it does differently" is the longer account of its design. In
+//! short: it *listens* rather than scanning, so it never transmits on a DFS channel and
+//! holds `sniffer()` and `esp_now()` together for the life of the program; it returns
+//! to the control channel after every dwell rather than once a sweep; an unassigned
+//! node parks rather than sweeping the whole table; the node given the Bluetooth scan
+//! sniffs nothing and holds the control channel always; and every heartbeat says what
+//! this build can do. Its wire format is wartui's own in both directions —
+//! [`wartui_proto::air`]. It takes a new image over the air, and boots it on trial
+//! until it hears the host — [`ota`].
 //!
 //! The runner is `espflash flash --monitor`, and unlike the bridge the monitor is
 //! worth watching: a node's USB endpoint carries nothing but diagnostics.
@@ -34,7 +34,6 @@
 use esp_hal::clock::CpuClock;
 #[cfg(feature = "xiao-external-antenna")]
 use esp_hal::gpio::{Level, Output, OutputConfig};
-use esp_hal::interrupt::software::SoftwareInterruptControl;
 use esp_hal::time::{Duration, Instant};
 use esp_hal::timer::timg::TimerGroup;
 use esp_radio::esp_now::{EspNowManager, EspNowReceiver, EspNowSender};
@@ -337,8 +336,7 @@ fn main() -> ! {
 
     // The scheduler has to be running before the radio comes up.
     let timg0 = TimerGroup::new(peripherals.TIMG0);
-    let software_interrupt = SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
-    esp_rtos::start(timg0.timer0, software_interrupt.software_interrupt0);
+    esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
 
     // A XIAO ESP32-C6 routes the chip's one RF pin through a switch between an
     // onboard ceramic antenna and a U.FL connector, and nothing in the radio stack
@@ -358,11 +356,12 @@ fn main() -> ! {
         (power, Output::new(peripherals.GPIO14, Level::High, OutputConfig::default()))
     };
 
-    // Order matters. Configuring the controller needs `&mut`, while `sniffer()` and
-    // `esp_now()` each borrow it for as long as they live — so everything mutable
-    // happens first and both handles are then held for the rest of the program.
-    // That is the whole reason this node sniffs rather than scans: `scan_async`
-    // also wants `&mut`, and holding it alongside ESP-NOW is not expressible.
+    // The controller is configured before `sniffer()` and `esp_now()` hand out their
+    // handles, so the first frame either sees or sends is under the band and power set
+    // here. The handles do not borrow the controller: each holds a reference that keeps
+    // Wi-Fi running, and both are held for the rest of the program, as is the controller,
+    // which sets the power each assignment carries (`drain_admin`). `README.md`
+    // § "What it does differently" has why this node sniffs rather than scans.
     //
     // `US` rather than `esp-radio`'s default, which silently costs a C5 channels
     // 100-144 — `firmware/bridge/src/main.rs` has the detail.
@@ -431,7 +430,7 @@ fn main() -> ! {
             } else {
                 note!("radio would not park on channel {}", CONTROL_CHANNEL);
             }
-            listen(&manager, &mut sender, &receiver, node, &mut ota, IDLE_BEAT_MS);
+            listen(&mut controller, &manager, &mut sender, &receiver, node, &mut ota, IDLE_BEAT_MS);
             ota.expire();
             continue;
         }
@@ -454,7 +453,7 @@ fn main() -> ! {
             } else {
                 note!("radio would not park on channel {}", CONTROL_CHANNEL);
             }
-            listen(&manager, &mut sender, &receiver, node, &mut ota, IDLE_BEAT_MS);
+            listen(&mut controller, &manager, &mut sender, &receiver, node, &mut ota, IDLE_BEAT_MS);
             // An assignment adopted mid-listen, or moving from parked to
             // assigned generally: this node has just heartbeated and held a
             // window, so its next one is a whole interval out from here
@@ -488,10 +487,18 @@ fn main() -> ! {
                     // Drain first: this node never leaves the control channel, so
                     // an admin frame that landed after the last listen was acked
                     // and queued, and this heartbeat must report its epoch.
-                    drain_admin(&manager, &mut sender, &receiver, node, &mut ota);
+                    drain_admin(&mut controller, &manager, &mut sender, &receiver, node, &mut ota);
                     node.last_dwell = 0;
                     heartbeat(&manager, &mut sender, node);
-                    listen(&manager, &mut sender, &receiver, node, &mut ota, ADMIN_WAIT_MS);
+                    listen(
+                        &mut controller,
+                        &manager,
+                        &mut sender,
+                        &receiver,
+                        node,
+                        &mut ota,
+                        ADMIN_WAIT_MS,
+                    );
                     node.next_beat = Some(next_beat_after(deadline));
                 }
             } else {
@@ -499,7 +506,15 @@ fn main() -> ! {
                 // What keeps this loop from spinning when the radio refuses:
                 // nothing else here sleeps unconditionally the way the idle
                 // branch's `listen` does.
-                listen(&manager, &mut sender, &receiver, node, &mut ota, ADMIN_WAIT_MS);
+                listen(
+                    &mut controller,
+                    &manager,
+                    &mut sender,
+                    &receiver,
+                    node,
+                    &mut ota,
+                    ADMIN_WAIT_MS,
+                );
             }
             // Straight into the next scan either way: a beat not yet due costs
             // this node nothing but the next check.
@@ -534,7 +549,7 @@ fn main() -> ! {
         let on_control = radio::park(&manager, &sniffer, CONTROL_CHANNEL, false);
         if on_control {
             report(&mut sender, node, channel);
-            drain_admin(&manager, &mut sender, &receiver, node, &mut ota);
+            drain_admin(&mut controller, &manager, &mut sender, &receiver, node, &mut ota);
         } else {
             note!("radio would not return to channel {}", CONTROL_CHANNEL);
         }
@@ -552,7 +567,15 @@ fn main() -> ! {
             && Instant::now() >= deadline
         {
             heartbeat(&manager, &mut sender, node);
-            listen(&manager, &mut sender, &receiver, node, &mut ota, ADMIN_WAIT_MS);
+            listen(
+                &mut controller,
+                &manager,
+                &mut sender,
+                &receiver,
+                node,
+                &mut ota,
+                ADMIN_WAIT_MS,
+            );
             node.next_beat = Some(next_beat_after(deadline));
         }
     }
@@ -582,11 +605,11 @@ fn next_beat_after(deadline: Instant) -> Instant {
 /// counts the failed sends, and is what tells the two apart. `node.beat_dwell` takes
 /// this beat's dwell on every attempt too, so the next beat names it whether or not this
 /// one arrives. The transmit power is read from the radio on every beat rather than
-/// remembered from adoption, so the beat reports what a refused `set_tx_power` kept (the
+/// remembered from adoption, so the beat reports what a refused `set_max_tx_power` kept (the
 /// boot default, or an earlier assignment's power) or what something reset it to since.
 /// The rail voltage and die temperature are read beside it, on the control channel where
 /// every heartbeat goes out, so the voltage read's PBUS excursion never lands in a dwell.
-fn heartbeat(manager: &EspNowManager<'_>, sender: &mut EspNowSender<'_>, node: &mut Node) {
+fn heartbeat(manager: &EspNowManager, sender: &mut EspNowSender, node: &mut Node) {
     // Every heartbeat carries the capabilities, not just the first: sent once they
     // would be lost to a dropped frame or stale after a reflash, and they are
     // five bytes of twenty-nine.
@@ -664,7 +687,7 @@ impl Outgoing {
     /// entered in `SEEN`, so it is due again next time it is heard.
     fn offer(
         &mut self,
-        sender: &mut EspNowSender<'_>,
+        sender: &mut EspNowSender,
         node: &mut Node,
         msg: &SightingMsg<'_>,
         addr: [u8; 6],
@@ -704,7 +727,7 @@ impl Outgoing {
     /// records it held. `SEEN` is only updated once the radio confirms the ack:
     /// recorded only once the core has it, so a batch nobody acknowledged stays
     /// due to be offered again next time its addresses are heard.
-    fn flush(&mut self, sender: &mut EspNowSender<'_>, node: &mut Node, now: u32) -> u32 {
+    fn flush(&mut self, sender: &mut EspNowSender, node: &mut Node, now: u32) -> u32 {
         if self.writer.is_empty() {
             return 0;
         }
@@ -729,7 +752,7 @@ impl Outgoing {
 }
 
 /// Report everything heard on `channel` that has not been reported lately.
-fn report(sender: &mut EspNowSender<'_>, node: &mut Node, channel: u8) {
+fn report(sender: &mut EspNowSender, node: &mut Node, channel: u8) {
     let now = sniff::now_ms();
     let mut outgoing = Outgoing::new(node.seq);
     let mut sent = 0u32;
@@ -762,7 +785,7 @@ fn report(sender: &mut EspNowSender<'_>, node: &mut Node, channel: u8) {
 /// heartbeat follows it, so the Bluetooth controller is off again well ahead of
 /// the window that heartbeat opens. The node sniffs no Wi-Fi, so the scan
 /// competes with nothing but that heartbeat for the antenna.
-fn report_ble(sender: &mut EspNowSender<'_>, node: &mut Node, scanner: &mut ble::Scanner<'_>) {
+fn report_ble(sender: &mut EspNowSender, node: &mut Node, scanner: &mut ble::Scanner<'_>) {
     let heard = scanner.sweep();
     let now = sniff::now_ms();
     let mut outgoing = Outgoing::new(node.seq);
@@ -797,9 +820,10 @@ fn report_ble(sender: &mut EspNowSender<'_>, node: &mut Node, scanner: &mut ble:
 ///
 /// Returns early when update mode starts or ends, so the main loop changes mode at once.
 fn listen(
-    manager: &EspNowManager<'_>,
-    sender: &mut EspNowSender<'_>,
-    receiver: &EspNowReceiver<'_>,
+    controller: &mut WifiController<'_>,
+    manager: &EspNowManager,
+    sender: &mut EspNowSender,
+    receiver: &EspNowReceiver,
     node: &mut Node,
     ota: &mut ota::Ota,
     ms: u32,
@@ -807,7 +831,7 @@ fn listen(
     let until = Instant::now() + Duration::from_millis(u64::from(ms));
     let updating = ota.updating();
     loop {
-        drain_admin(manager, sender, receiver, node, ota);
+        drain_admin(controller, manager, sender, receiver, node, ota);
         if Instant::now() >= until || ota.updating() != updating {
             return;
         }
@@ -821,9 +845,10 @@ fn listen(
 /// Any frame from the host confirms an image on trial — admin, clear, update-confirm or an
 /// update frame: decoding one is hearing the host over the air, which is the whole test.
 fn drain_admin(
-    manager: &EspNowManager<'_>,
-    sender: &mut EspNowSender<'_>,
-    receiver: &EspNowReceiver<'_>,
+    controller: &mut WifiController<'_>,
+    manager: &EspNowManager,
+    sender: &mut EspNowSender,
+    receiver: &EspNowReceiver,
     node: &mut Node,
     ota: &mut ota::Ota,
 ) {
@@ -883,7 +908,7 @@ fn drain_admin(
             _ => continue,
         };
         if node.adopt(&admin) {
-            if !radio::set_tx_power(manager, admin.tx_power) {
+            if controller.set_max_tx_power(admin.tx_power).is_err() {
                 note!(
                     "could not set transmit power to {} quarter-dBm; retaining the previous power",
                     admin.tx_power
@@ -922,8 +947,8 @@ fn confirm(node: &mut Node, ota: &mut ota::Ota) {
 /// best effort: the host also learns of the update from the reboot. A switch that fails
 /// sends one `FlashError` instead.
 fn update(
-    manager: &EspNowManager<'_>,
-    sender: &mut EspNowSender<'_>,
+    manager: &EspNowManager,
+    sender: &mut EspNowSender,
     node: &mut Node,
     ota: &mut ota::Ota,
     src: [u8; 6],
@@ -957,7 +982,7 @@ fn update(
 /// epoch still has to move the core, or every sighting after it unicasts into
 /// silence forever. Registration failure is left as a note — the old peer, and the
 /// old `node.core`, are still there to unicast to.
-fn note_core(manager: &EspNowManager<'_>, node: &mut Node, src: [u8; 6]) {
+fn note_core(manager: &EspNowManager, node: &mut Node, src: [u8; 6]) {
     if node.core == Some(src) {
         return;
     }

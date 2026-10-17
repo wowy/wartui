@@ -265,11 +265,15 @@ says so by re-announcing itself, which the host already listens for.
 
 ## Dependency versions
 
-`esp-radio 1.0.0-beta.0` requires `esp-hal = "~1.1.0"`, and that one requirement fixes the whole
+`esp-radio 1.0.0-beta.1` requires `esp-hal = "~1.2.0"`, and that one requirement fixes the whole
 family. It holds the family in two ways:
 
-- **Walled:** `esp-hal`, `esp-rtos`, and the node's `esp-storage`. Cargo enforces this one.
-- **Resolves, but doubles:** `esp-alloc`, the `esp-wifi-sys-*` bindings, and `esp-sync`.
+- **Walled:** `esp-hal` and `esp-rtos`. Cargo enforces this one.
+- **Resolves, but doubles:** `esp-alloc`, the `esp-wifi-sys-*` bindings, `esp-sync`, and
+  `esp-storage`.
+
+The same dependency holds both firmwares at the same set. Keep that true: they share `wartui-proto`
+and `firmware/common`, which states the same `esp-hal` requirement.
 
 The panel crates (`embedded-graphics`, `embedded-hal-bus`, and `mipidsi`) are free to move. Only
 their shared `embedded-hal` 1.0 must stay a single copy.
@@ -277,27 +281,17 @@ their shared `embedded-hal` 1.0 must stay a single copy.
 `embassy-executor`, `embassy-sync`, `embassy-time`, and `embedded-io-async` are held the same way,
 through `esp-rtos` and `esp-hal`.
 
-### The wall
-
-`esp-hal 1.2.0` and `esp-rtos 0.4` are published. Neither has a resolution alongside `esp-radio`,
-so nothing can pull one in by accident. The same dependency holds both firmwares at the same set.
-Keep that true: they share `wartui-proto` and `firmware/common`, which states the same `esp-hal`
-requirement.
-
-The pin is not free. Upstream `esp-hal` fixes a C5 software reset that leaves the board unbootable
-until it loses power, from 1.2.0-rc.0 (esp-rs/esp-hal#5703). Neither firmware can take that fix,
-so `reboot()` in `firmware/common` writes that register out by hand on the C5. Cargo cannot be
-talked around the pin either. `SoftwareInterruptControl` is gone in 1.2.1, so `esp-rtos 0.3.0` and this firmware's
-`esp_rtos::start` would both stop compiling against a version faked into range. Issue #16 has the
-shape of the real upgrade: `[patch.crates-io]` across the family at one monorepo rev. It also lists
-what to delete when that lands.
+Each chip's PAC resolves twice, and that is known: `esp-hal 1.2.2` builds against `esp32c5 0.3` and
+`esp32c6 0.24`, `esp-radio 1.0.0-beta.1` against `esp32c5 0.4` and `esp32c6 0.25`. Both build and
+link. A later `esp-hal` release on the newer PACs lines them up.
 
 ### Crates that double
 
-The other half of the family is the dangerous half, because it resolves. `esp-alloc` and the
-`esp-wifi-sys-*` bindings are dependencies of `esp-radio` *and* direct dependencies of both
-firmwares. A version above what `esp-radio` asks for is semver-incompatible with it, not in conflict
-with it. So Cargo adds a second copy instead of refusing, and links both:
+The other half of the family is the dangerous half, because it resolves. `esp-alloc` is a
+dependency of `esp-radio` *and* a direct dependency of both firmwares, and the `esp-wifi-sys-*`
+bindings of `esp-radio` and the node. A version above what `esp-radio` asks for is
+semver-incompatible with it, not in conflict with it. So Cargo adds a second copy instead of
+refusing, and links both:
 
 - Two `esp-wifi-sys-*` each export `__esp_radio_printf` as `no_mangle`, and each carries its own
   copy of the IDF Wi-Fi blobs. `lto = "fat"` refuses the build. That is the cheap version.
@@ -310,7 +304,8 @@ with it. So Cargo adds a second copy instead of refusing, and links both:
   reaching `Ready`. No host build can see any of that.
 
 A second copy does not need a manifest to arrive, either. `esp-sync` is a direct dependency of the
-node alone. It doubled in the *bridge* because `esp-alloc 0.11` brought its own.
+node alone, and `esp-storage` reaches the bridge only through `esp-bootloader-esp-idf`, yet either
+doubles in both firmwares if anything above it moves out of step.
 
 ### Panel crates
 
@@ -337,29 +332,30 @@ cargo tree --locked --features esp32c6 -e normal --prefix none --format '{p}' \
   | grep -E '^(esp-(alloc|hal|radio|rtos|storage|sync|wifi-sys-esp32c[56])|embedded-hal) '
 ```
 
-They are direct dependencies for reasons that do not go away. `esp-wifi-sys-*` is here for the two
-IDF calls `esp-radio` does not wrap, which are the only `unsafe` in either firmware but one:
+They are direct dependencies for reasons that do not go away. `esp-wifi-sys-*` is a direct
+dependency of the node alone, for `esp_wifi_get_max_tx_power` (`tx_power` in
+`firmware/node/src/radio.rs`), which `esp-radio` does not wrap. The bridge sets its transmit power
+through `WifiController::set_max_tx_power` and reaches the bindings only through `esp-radio`.
 
-- `esp_now_set_peer_rate_config` (`set_peer_rate` in `src/main.rs`);
-- `esp_wifi_set_max_tx_power` (`set_tx_power` beside it).
-
-The one is not an IDF call: the GPS build takes its interrupt executor's spawner through
-`Spawner::for_current_executor` (`current_spawner` in `src/gps.rs`). `esp-hal`'s async I2C driver
-is not `Send`, and `InterruptExecutor::start` gives out only a `SendSpawner`, so nothing safe can
-start the task that owns the bus.
+The bridge's one `unsafe` is not an IDF call: the GPS build takes its interrupt executor's spawner
+through `Spawner::for_current_executor` (`current_spawner` in `src/gps.rs`). `esp-hal`'s async I2C
+driver is not `Send`, and `InterruptExecutor::start` gives out only a `SendSpawner`, so nothing safe
+can start the task that owns the bus.
 
 `esp-alloc` is here because the firmware owns the heap and declares its regions.
 
-`esp-storage` is the node's alone, for over-the-air updates. It is held at 0.9, the release on
-`esp-hal ~1.1`; 0.10 is on `esp-hal ~1.2`. It brings no crate the tree lacks: its `esp-sync` and
-`esp-rom-sys` are the copies `esp-hal` uses, and `esp-rom-sys` is `links`-keyed besides. The node's
-CI job counts it with the rest, and Dependabot ignores its minor and major releases.
+`esp-storage` is a direct dependency of the node alone, for over-the-air updates, and reaches the
+bridge through `esp-bootloader-esp-idf`. It is held at the version `esp-bootloader-esp-idf`
+resolves, and brings no crate the tree lacks: its `esp-sync` and `esp-rom-sys` are the copies
+`esp-hal` uses, and `esp-rom-sys` is `links`-keyed besides. Both firmwares' CI jobs count it with
+the rest, and Dependabot ignores its and `esp-bootloader-esp-idf`'s minor and major releases.
 
 ### Embassy and `embedded-io-async`
 
 `embassy-executor`, `embassy-sync`, `embassy-time`, and `embedded-io-async` are held at the
 versions `esp-rtos` and `esp-hal` build against, and move with them. `embedded-io-async` stays at
-0.7, the only version `esp-hal` 1.1 implements its async traits for. None can double quietly:
+0.7, the newer of the two versions `esp-hal` 1.2 implements its async traits for. None can double
+quietly:
 
 - the executor's `Spawner` would not type-check against `esp-rtos`'s;
 - `embassy-time-driver` is `links`-keyed;

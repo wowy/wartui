@@ -14,8 +14,8 @@ Where the prose lives:
 - `crates/wartui/README.md` — the operator's manual: keys, fleet states, channel pools,
   GPS, troubleshooting. Read it before changing view or CLI behavior, and **keep it true
   when that behavior changes.**
-- `firmware/*/README.md` — each firmware's own constraints, including the esp-hal version
-  wall (`firmware/bridge/README.md`).
+- `firmware/*/README.md` — each firmware's own constraints, including the `esp-*` dependency
+  set (`firmware/bridge/README.md`).
 - `docs/*-findings.md` — what each bench actually measured, and why several invariants
   below exist. `phase-N` are the fleet's, and the rest are named for what was measured.
 
@@ -102,13 +102,13 @@ own.
 - **`firmware/bridge`** — dumb radio bridge: COBS framing and `esp-radio` calls, no protocol
   knowledge. Fixes there cost a reflash, so logic belongs on the host. A board with a screen
   draws lines the host composed and hands it, which is the same rule seen from the other side.
-- **`firmware/node`** — the nodes. Sniffs rather than scans, so it never transmits while
-  looking and can hold `sniffer()` and `esp_now()` at once (both borrow the controller
-  immutably; `scan_async` wants `&mut`). Returns to the control channel after every dwell,
-  and parks there doing nothing when it holds no assignment. The node given the Bluetooth
-  scan never leaves the control channel at all: it sniffs nothing and runs one scan after
-  another, back to back. Same rule as the bridge: the logic lives in `wartui-proto`, and
-  this crate is the conversation with the radio.
+- **`firmware/node`** — the nodes. Sniffs rather than scans, so it never transmits while looking,
+  owns the channel, and holds `sniffer()` and `esp_now()` together for the life of the program
+  (`firmware/node/README.md` § "What it does differently"). Returns to the control channel after
+  every dwell, and parks there doing nothing when it holds no assignment. The node given the
+  Bluetooth scan never leaves the control channel at all: it sniffs nothing and runs one scan after
+  another, back to back. Same rule as the bridge: the logic lives in `wartui-proto`, and this crate
+  is the conversation with the radio.
 - **`firmware/common`** (`wartui-firmware`) — chip-level code the firmwares need and that needs
   `esp-hal`, so it cannot live in `wartui-proto`: the reset funnel `reboot()` and `reset_cause()`,
   and the supply and die readings a node's heartbeat carries (`health`).
@@ -274,11 +274,10 @@ is here rather than only in a `//!`.
   layout), `firmware/node/README.md` § "Over-the-air updates"
 - **`clippy::all` is denied workspace-wide, in both firmwares too, and so is `unsafe_code`.** The
   host allows it on one function, the Raspberry Pi firmware mailbox ioctl
-  (`crates/wartui-core/src/health.rs`, `mailbox_call`). Each firmware allows the IDF calls
-  `esp-radio` cannot express after its long-lived handles borrow the controller: the ESP-NOW
-  peer-rate call and the runtime transmit-power call, and on a node the transmit-power read each
-  heartbeat carries. `firmware/common` allows two more for the node's heartbeat, both PHY blob
-  reads: the rail voltage (`health::vdd_mv`) and the die temperature (`health::die_temp_c`). The
+  (`crates/wartui-core/src/health.rs`, `mailbox_call`). The node allows one IDF call `esp-radio`
+  does not wrap: the transmit-power read each heartbeat carries (`firmware/node/src/radio.rs`,
+  `tx_power`). `firmware/common` allows two more for the node's heartbeat, both PHY blob reads:
+  the rail voltage (`health::vdd_mv`) and the die temperature (`health::die_temp_c`). The
   bridge's GPS build allows one call that is not IDF's, `Spawner::for_current_executor`
   (`firmware/bridge/src/gps.rs`, `current_spawner`): `esp-hal`'s async I2C driver is not `Send`, and
   `InterruptExecutor::start` gives out only a `SendSpawner`, so nothing safe starts the GPS task on
@@ -337,10 +336,10 @@ edit stops; follow the pointer before changing the rule.
   `StallWatch` times the *contradiction*, and **every one of its four facts is load-bearing**:
   delete any and a bridge reboots forever, or never. There is no watchdog behind the hang case.
   → `crates/wartui-proto/src/stall.rs`, `StallWatch`; `docs/phase-3-findings.md`
-- **Every reset goes through `reboot()`, and on a C5 that funnel *is* the reset** — a bare
-  `software_reset()` there does not reboot the board, it stops it. Both firmwares share the one
-  funnel, which is what the esp-hal 1.2 cleanup (issue #16) removes.
-  → `firmware/common/src/lib.rs`, `reboot`
+- **Every reset goes through `reboot()`.** On a C5, a bare `software_reset()` before
+  `esp_hal::init` has cleared `reset_event_bypass` does not reboot the board, it stops it.
+  `esp-hal`'s C5 `pre_init` clears it; both firmwares share the one funnel so every reset takes
+  the benched path. → `firmware/common/src/lib.rs`, `reboot`
 - **A bridge reboot is invisible unless the host compares uptimes**, because a software reset does
   not re-enumerate the USB device. → `crates/wartui-bridge/src/serial.rs`, the `Ready` arm
 - **Neither firmware may block on the USB endpoint.** The bridge's rings evict oldest-first and
@@ -360,12 +359,12 @@ edit stops; follow the pointer before changing the rule.
   defaults to China, which silently costs a C5 channels 100–144 on every sweep.
   → `firmware/bridge/src/main.rs`, `firmware/node/README.md`
 - **Every crate `esp-radio` also depends on is held at the version `esp-radio` resolves.**
-  `esp-radio 1.0.0-beta.0` requires `esp-hal ~1.1.0`, which walls off `esp-hal` and `esp-rtos`
-  outright. The others — `esp-alloc`, `esp-sync`, `esp-wifi-sys-*` — go higher perfectly happily,
-  and a higher one is a *second copy* rather than an upgrade: a duplicate `__esp_radio_printf` that
-  fat LTO refuses, or a second `esp-alloc` whose `HEAP` nothing fills, which builds and then panics
-  on the first task the radio spawns. Dependabot ignores them and each firmware's CI job counts the
-  versions; issue #16 is the real upgrade, and moves all of them at once.
+  `esp-radio 1.0.0-beta.1` requires `esp-hal ~1.2.0`, which walls off `esp-hal` and `esp-rtos`
+  outright. The others — `esp-alloc`, `esp-sync`, `esp-storage`, `esp-wifi-sys-*` — go higher
+  perfectly happily, and a higher one is a *second copy* rather than an upgrade: a duplicate
+  `__esp_radio_printf` that fat LTO refuses, or a second `esp-alloc` whose `HEAP` nothing fills,
+  which builds and then panics on the first task the radio spawns. Dependabot ignores them and each
+  firmware's CI job counts the versions; a new `esp-radio` moves all of them at once, by hand.
   → `firmware/bridge/README.md` § "Dependency versions"
 - **Every bridge and node defaults to 2 dBm**, the lowest `set_max_tx_power` accepts, and the host
   is what decides otherwise: `fleet` and `bridge` under `[tx-power]` in `wartui.toml`, or the
@@ -383,9 +382,10 @@ edit stops; follow the pointer before changing the rule.
   → `crates/wartui-proto/src/tx_power.rs`, `clamp_tx_power` / `DEFAULT_TX_POWER_QUARTER_DBM`;
   `crates/wartui-core/src/engine/mod.rs`, `poll_bridge`; `crates/wartui-core/src/engine/event.rs`,
   `Command::SetTxPower`; `crates/wartui-core/src/engine/replan.rs`, `on_set_tx_power`
-- **ESP-NOW goes out at 802.11g 24 Mbps, set per peer through IDF directly** — `esp-radio`'s
-  `set_rate` is refused on the C5 and C6, and misnumbered besides.
-  → `firmware/bridge/src/main.rs`, `set_peer_rate`; `firmware/node/src/radio.rs`
+- **ESP-NOW goes out at 802.11g 24 Mbps, set per peer** through `esp-radio`'s `set_peer_rate` —
+  the interface-wide rate call is refused on the C5 and C6, and a peer registered without the
+  funnel goes out at 1 Mbps. → `firmware/bridge/src/main.rs`, `set_peer_rate`;
+  `firmware/node/src/radio.rs`
 - **The air is plaintext ESP-NOW in both directions** — no pairing handshake and no key.
   → `firmware/bridge/src/main.rs`, peer registration
 - **Setting a node's channel is not `set_channel` alone** — without promiscuous mode on across the

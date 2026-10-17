@@ -123,7 +123,7 @@ pub struct NodeState {
 
 /// A node reporting a transmit power other than the assignment it holds.
 ///
-/// Its `set_tx_power` was refused, so the radio kept its previous power (the 2 dBm boot default
+/// Its radio refused the assigned power, so it kept its previous power (the 2 dBm boot default
 /// or an earlier assignment's), or something reset the cap since.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PowerMismatch {

@@ -61,17 +61,16 @@ embedded-storage = "0.3.2"
 # queues through their own copy's `HEAP`, which nothing here fills, so a second
 # copy is a second and empty heap. Held at the version `esp-radio` resolves;
 # `firmware/bridge/README.md` § "Dependency versions".
-esp-alloc = "0.10.0"
-esp-bootloader-esp-idf = "0.5.0"
-esp-hal = { version = "1.1.2", features = ["unstable"] }
+esp-alloc = "0.11.0"
+esp-bootloader-esp-idf = "0.6.0"
+esp-hal = { version = "1.2.2", features = ["unstable"] }
 # `jtag-serial` rather than `auto`, because these boards are USB and the
-# alternative costs a runtime probe per line. `critical-section` is left off: it
-# is the only feature that pulls `esp-sync`, which would land a second copy
-# beside the one `esp-hal` uses, and nothing here prints from more than one task.
+# alternative costs a runtime probe per line. `critical-section` is left off:
+# nothing here prints from more than one task.
 esp-println = { version = "0.18.0", default-features = false, features = [
   "jtag-serial",
 ], optional = true }
-esp-radio = { version = "1.0.0-beta.0", default-features = false, features = [
+esp-radio = { version = "1.0.0-beta.1", default-features = false, features = [
   "ble",
   "coex",
   "esp-alloc",
@@ -80,18 +79,18 @@ esp-radio = { version = "1.0.0-beta.0", default-features = false, features = [
   "unstable",
   "wifi",
 ] }
-esp-rtos = { version = "0.3.0", features = ["esp-alloc", "esp-radio"] }
-# Flash access for over-the-air updates (`src/ota.rs`). 0.9 is the release on
-# `esp-hal ~1.1`, `esp-sync 0.2` and `esp-rom-sys 0.1`, the copies already here;
-# `firmware/bridge/README.md` § "Dependency versions". Its default
+esp-rtos = { version = "0.4.0", features = ["esp-alloc", "esp-radio"] }
+# Flash access for over-the-air updates (`src/ota.rs`). Held at the version
+# `esp-bootloader-esp-idf` resolves; `firmware/bridge/README.md` § "Dependency
+# versions". `embedded-storage` turns on its `NorFlash` implementation. Its default
 # `critical-section` feature holds interrupts off across each flash operation.
-esp-storage = "0.9.0"
-esp-sync = "0.2.1"
-# IDF's own bindings, for the one call `esp-radio` does not wrap —
-# `esp_now_set_peer_rate_config`, in `radio::set_broadcast_rate`. Held at the
-# version `esp-radio` links; `firmware/bridge/README.md` § "Dependency versions".
-esp-wifi-sys-esp32c5 = { version = "0.2.0", optional = true }
-esp-wifi-sys-esp32c6 = { version = "0.2.0", optional = true }
+esp-storage = { version = "0.10.0", features = ["embedded-storage"] }
+esp-sync = "0.3.0"
+# IDF's own bindings, for the transmit-power read in `radio::tx_power`, which
+# `esp-radio` does not wrap. Held at the version `esp-radio` links;
+# `firmware/bridge/README.md` § "Dependency versions".
+esp-wifi-sys-esp32c5 = { version = "0.3.0", optional = true }
+esp-wifi-sys-esp32c6 = { version = "0.3.0", optional = true }
 static_cell = "2.1.1"
 # The reset funnel and the reset cause, shared with the other firmware.
 wartui-firmware = { path = "../common" }
@@ -101,7 +100,7 @@ wartui-proto = { path = "../../crates/wartui-proto" }
 # Stated in AGENTS.md as a project-wide rule, but the root workspace excludes
 # `firmware`, so until this line existed the firmwares were covered by the
 # documentation and not by the compiler. `deny` rather than `forbid`,
-# so that `radio::set_broadcast_rate` alone can allow it.
+# so that the few calls AGENTS.md lists can allow it.
 unsafe_code = "deny"
 
 [lints.clippy]

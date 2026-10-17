@@ -66,8 +66,7 @@ use embassy_sync::zerocopy_channel::{Channel, Receiver, Sender};
 use embassy_time::{Duration, Instant, Timer, with_timeout};
 use esp_hal::i2c::master::{Config, I2c};
 use esp_hal::interrupt::Priority;
-use esp_hal::interrupt::software::SoftwareInterrupt;
-use esp_hal::peripherals::{GPIO11, GPIO12, I2C0};
+use esp_hal::peripherals::{FROM_CPU_INTR1, GPIO11, GPIO12, I2C0};
 use esp_hal::time::Rate;
 use esp_hal::{Async, Blocking};
 use esp_rtos::embassy::InterruptExecutor;
@@ -163,7 +162,7 @@ impl Link {
 ///
 /// Out of line so the channel buffers are built here rather than in `main`'s poll frame.
 #[inline(never)]
-pub fn start(pins: Pins, interrupt: SoftwareInterrupt<'static, 1>) -> Result<Link, &'static str> {
+pub fn start(pins: Pins, interrupt: FROM_CPU_INTR1<'static>) -> Result<Link, &'static str> {
     let config = Config::default().with_frequency(Rate::from_khz(400));
     let i2c = I2c::new(pins.i2c, config)
         .map_err(|_| "the GPS port's I2C bus refused its configuration")?
