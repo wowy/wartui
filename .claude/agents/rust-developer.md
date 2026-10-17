@@ -36,4 +36,5 @@ If the change touches a firmware, or a `wartui-proto` change reaches one, also r
 Do not commit, push or open pull requests unless the plan says to; the main session does that.
 
 Finish with a short report: files changed, each command run and whether it passed, anything
-skipped or unresolved, and anywhere you departed from the plan and why.
+skipped or unresolved, anywhere you departed from the plan and why, and every `unsafe` block or
+`#[allow(unsafe_code)]` you added, or that you added none.

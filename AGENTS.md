@@ -281,8 +281,12 @@ is here rather than only in a `//!`.
   bridge's GPS build allows one call that is not IDF's, `Spawner::for_current_executor`
   (`firmware/bridge/src/gps.rs`, `current_spawner`): `esp-hal`'s async I2C driver is not `Send`, and
   `InterruptExecutor::start` gives out only a `SendSpawner`, so nothing safe starts the GPS task on
-  its interrupt executor. Any further `#[allow(unsafe_code)]` is a decision to make in review, not a
-  convenience.
+  its interrupt executor. Avoid `unsafe` wherever a safe route exists. Any further `unsafe` — a new
+  `#[allow(unsafe_code)]`, or a new `unsafe` block inside a function already allowed — is the
+  user's decision, made in review, never a convenience, and committing it needs their approval
+  first. An uncommitted experiment, such as a throwaway build that measures what a raw register
+  access would buy, may add it freely, through per-function allows and never by relaxing the
+  `unsafe_code` lint in a `Cargo.toml`. Check a diff for `unsafe` before committing it.
 
 ### Load-bearing, and reasoned where they live
 
