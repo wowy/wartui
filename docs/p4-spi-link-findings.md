@@ -142,6 +142,51 @@ bursting. This bench can't separate the two; a sequence check per node on the P4
 On the air, the XIAO C6 (`9A:24`) missed 23 acknowledgements over the run (its seq ended 23 behind the C5's), its own losses
 before the bridge. The C5 node (`F5:50`) missed none.
 
+## The P4's high-speed USB port carries 7 MB/s to the host
+
+A third run measured the P4's own link to the host.
+
+**What has to change:** today's bridge, and the CH343 on this board's Type-C, top out at about
+500 KB/s. The burst-load run above forwards 1.9 MB/s from the C6. So the P4 needs a faster way
+out.
+
+**The firmware:** `firmware/spike/p4-usb-hs` (5cfac1e, also on `spike/p4-spi-link`) runs the
+P4's USB 2.0 OTG controller as a device, through esp-hal 1.2.2's `Usb::new_hs`. That uses the
+internal UTMI high-speed PHY; no PHY or speed setting is needed. The firmware:
+
+- presents one CDC-ACM interface through embassy-usb 0.6, with 512-byte bulk packets
+- streams 1,036-byte records back to back once the host raises DTR: the same layout as the SPI
+  link, with a sequence number and CRC, each encoded as it goes out
+- needs no `unsafe` of its own (esp-hal's driver has some inside)
+
+**The host:** `host/rate.py` reads the port through Linux's `cdc_acm` driver, the same path the
+wartui host's serial reader takes. It checks every record.
+
+**The result:**
+
+- The device enumerated at high speed (`480M` in `lsusb -t`), behind three hubs.
+- Two runs streamed **7.12 and 7.67 MB/s**, 30 s and 18 s long, so about 6,900–7,400 records/s.
+  There were no CRC, pattern or sequence errors in 339,318 records.
+- The P4's own console reported the same rate (7,672 KB/s per 5 s window).
+- The first run's lower rate wasn't explained. The P4 had rebooted just before the second run.
+
+That is about 15 times the CH343, and four times what the C6 link delivers at 40 MHz. The host
+link is no longer the narrow point.
+
+The limit wasn't found. High-speed bulk can carry far more than 7.7 MB/s, so the limit is likely
+the driver's one-512-byte-packet-per-`await` write path, or the hubs. The rate is already
+enough, so that wasn't pursued.
+
+**The board's Type-A port is wired as a host port.** Its VBUS is `VBUS_OUT`, from a DIO7003
+load switch (U2) whose enable is tied high (R2). So the board always drives 5 V onto it.
+
+- An ordinary A-to-C cable from the Type-A to a PC ties the board's 5 V to the PC's. For this
+  run, the VBUS pin of the cable's A plug was taped over with Kapton, which leaves only data and
+  ground.
+- The driver's default `vbus_detection: false` then treats the bus as always present.
+- A production design needs a data-only cable, a board revision, or the Type-A as the board's
+  only power source.
+
 ## The handshake recovery fires once per step
 
 `ready_stale_recover` counted exactly 1 in every step after the first, and `ready_timeouts`
@@ -166,9 +211,10 @@ released its EN.
   the app either: press RST, or replug.
 - **To run the app, replug the board's Type-C.** On three occasions, pressing RST landed the P4
   in download mode (`boot:0x307 … waiting for download`). Every replug booted it from flash.
-- **The CH343's DTR and RTS don't reset the P4.** Holding each of the four combinations for
-  1.5 s drew no ROM output. Opening the port did coincide with a `rst:0x1 (POWERON)` once, but
-  never again in that session.
+- **The CH343's DTR and RTS don't reset the P4.** In the schematic, the CH343's RTS pin
+  connects to nothing. Holding each of the four DTR/RTS combinations for 1.5 s drew no ROM
+  output. Opening the port did coincide with a `rst:0x1 (POWERON)` twice, both times with the P4
+  running an app, so expect a reboot when you open the console.
 - **The P4 moves to a new `/dev/ttyACM*` number when replugged.** Use
   `/dev/serial/by-id/usb-1a86_USB_Single_Serial_5C93090010-if00`.
 - **The C6 flashes through header H7.** That needs IO9 jumpered to GND, the P4 held in its ROM
@@ -183,6 +229,8 @@ released its EN.
   bring it near the wire's ~4,800 transfers/s.
 - With two nodes bursting at once, 26.67 MHz and above forwarded everything that left the
   radio's queue. Production should run at 40 MHz and give the C6 a FIFO deeper than 8.
-- The split bridge is no longer limited by the C6-to-P4 link. What remains to measure:
-  - the P4's link to the host (the CH343 or its USB)
+- The P4's high-speed USB streams 7–7.7 MB/s to the host as CDC-ACM, four times what the C6
+  link delivers, as long as VBUS is kept off the PC side of the cable.
+- Neither link limits the split bridge any more. What remains:
   - whether esp-radio's 10-frame receive queue drops frames under a burst
+  - the two links joined: C6 → SPI → P4 → USB, under burst load
