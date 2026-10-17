@@ -68,10 +68,14 @@ cheap timers in place, except the `main` row, which is the 4-minute `sniff` run 
   bridge, with none undecodable, and `crates/wartui-proto/src/link/bytes.rs` pins the equality.
 - **The image grew 976 bytes** for all three, from `espflash save-image` at `esp32c5`.
 
+The drain rates are the result. The "Batches lost" column is not: loss depends on how the nodes'
+bursts overlap, which drifts between runs (below).
+
 ## Under `wartui run`
 
 Four minutes each with `wartui run`, a static position, and the bridge rate at 5 Hz. All
-losses but a few dozen in each run were drops from the bridge's outbox:
+losses but a few dozen in each run were drops from the bridge's outbox. These runs do not show
+what the change bought, for the reason in the next section:
 
 | Bridge | Lost, `main` | Lost, changed |
 | --- | --- | --- |
@@ -81,12 +85,28 @@ losses but a few dozen in each run were drops from the bridge's outbox:
 
 The bridge GPS supplied 99.9% of positions in both panel and GPS runs.
 
+## Loss follows burst overlap, not the build
+
+On 2026-10-17 the changed bridge, rebuilt unmodified from this branch, lost 1,729 batches
+(19.5%) in the same 4-minute `run`, as many as `main` had. Nothing on the bridge or host had
+changed. The nodes' timing had:
+
+- Each node times its bursts by its own clock, from boot plus a per-node offset, and a burst
+  that runs late restarts the period. So the four drift against each other.
+- In a 2-minute `sniff` that lost 4.8%, `8B:90`'s and `C5:B8`'s bursts started 90–450 ms
+  apart. In a later one that lost 18%, they started 10–70 ms apart, so two full bursts reached
+  the bridge at once, at twice the rate.
+
+So a loss count measures where the bursts fell as much as the bridge. The 17.8% to 4.7% above
+compares runs a few hours apart and cannot be credited to the change. To compare bridge builds,
+compare the drain rate, and alternate the builds run by run so they share the same overlap.
+
 ## What is left
 
 - **The USB link itself.** Once the radio is quiet the drain is 608–631 frames a second, about
   640 KB/s, near the 670 KB/s `usb-link-findings.md` measured on a C6. A node can send full
   batches faster than that, so a long enough burst still overflows the ring.
 - **About 230 µs of encoding per full batch.** Serializing, checksumming and COBS-encoding in one
-  pass, without the intermediate body buffer, would cut more of it. Unmeasured.
+  pass, without the intermediate body buffer, was tried and bought nothing measurable.
 - **This load is far beyond a drive.** The 2026-09-26 drive averaged 1.5–3 records a batch
   (`batch-loss-findings.md`).
