@@ -90,3 +90,22 @@ fn frame_ring_reports_high_water_in_bytes() {
     assert_eq!(ring.high_water(), 7);
     assert_eq!(ring.len_bytes(), 0);
 }
+
+#[test]
+fn frame_ring_slides_wrapped_frame_when_evicting_a_shorter_one_behind_it() {
+    let mut ring = FrameRing::<16>::new();
+    // Move the head to 12, so the next frame crosses the end of the buffer.
+    assert!(ring.push(&[0u8; 10]));
+    assert_eq!(read_all(&mut ring), [0u8; 10]);
+    assert!(ring.push(b"abcdefgh"));
+    assert!(ring.push(b"x"));
+    let mut one = [0u8; 1];
+    assert_eq!(ring.read(&mut one), (1, false));
+    // The 3-byte gap is shorter than the 10-byte frame read, so the slide overlaps itself
+    // and wraps.
+    assert!(ring.push(b"yy"));
+    assert_eq!(ring.dropped(), 1);
+    assert_eq!(read_all(&mut ring), b"bcdefgh");
+    assert_eq!(read_all(&mut ring), b"yy");
+    assert!(ring.is_empty());
+}

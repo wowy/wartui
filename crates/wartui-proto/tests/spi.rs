@@ -3,7 +3,7 @@
 use heapless::Vec;
 use wartui_proto::link::{
     BridgeToHost, Chip, HostToBridge, LogLevel, LoopPhase, MAX_ESPNOW_V2_PAYLOAD, MAX_NODE_PAYLOAD,
-    QueueId, QueueStat, ShortStr, crc16,
+    QueueId, QueueStat, SendStatus, ShortStr, crc16,
 };
 use wartui_proto::reset::ResetCause;
 use wartui_proto::spi::{
@@ -179,6 +179,24 @@ fn spi_hello_round_trips_when_chip_is_p4() {
 }
 
 #[test]
+fn spi_hello_decodes_ignoring_bytes_appended_past_layout() {
+    // A later build may append fields; this build reads the frozen 51 bytes and no more.
+    let hello = Hello {
+        link_rev: 1,
+        chip: Chip::Esp32C6,
+        mac: [1, 2, 3, 4, 5, 6],
+        fw_version: ShortStr::try_from("0.1.0").unwrap(),
+        reset_cause: ResetCause::PowerOn,
+        last_phase: LoopPhase::Boot,
+        uptime_ms: 72,
+        heap_free: 6,
+    };
+    let mut out = [0xEEu8; HELLO_LEN + 32];
+    hello.encode(&mut out);
+    assert_eq!(Hello::decode(&out), Some(hello));
+}
+
+#[test]
 fn spi_hello_decodes_unknown_reset_cause_as_unknown() {
     let mut bytes = [0u8; HELLO_LEN];
     bytes[2] = 1;
@@ -287,6 +305,68 @@ fn spi_link_revision_golden_bytes() {
     ];
     assert_eq!(out[..len], expected, "{MSG}");
     assert_eq!(decode_up(&out[..len]).unwrap(), up);
+}
+
+/// The records that carry the traffic: a change to any of their fields must move
+/// `LINK_REVISION` too.
+#[test]
+fn spi_link_revision_golden_bytes_for_traffic() {
+    const MSG: &str = "Up/Down encoding changed: bump spi::LINK_REVISION and update these bytes";
+    let mut out = [0u8; 64];
+
+    let rx = Up::Message(BridgeToHost::Rx {
+        src: [1, 2, 3, 4, 5, 6],
+        dst: [0xFF; 6],
+        rssi: -40,
+        rx_us: 1_000,
+        payload: Vec::from_slice(&[0xAA, 0xBB, 0xCC]).unwrap(),
+    });
+    let len = encode_up(&rx, &mut out).unwrap();
+    #[rustfmt::skip]
+    let expected = [
+        0,                                  // Up::Message
+        1,                                  // BridgeToHost::Rx
+        1, 2, 3, 4, 5, 6,                   // src
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // dst
+        0xD8,                               // rssi -40
+        0xE8, 0x07,                         // rx_us 1000, varint
+        3, 0xAA, 0xBB, 0xCC,                // payload, length first
+    ];
+    assert_eq!(out[..len], expected, "{MSG}");
+    assert_eq!(decode_up(&out[..len]).unwrap(), rx);
+
+    let result =
+        Up::Message(BridgeToHost::SendResult { id: 0x1234, status: SendStatus::AckOk, tx_us: 300 });
+    let len = encode_up(&result, &mut out).unwrap();
+    #[rustfmt::skip]
+    let expected = [
+        0,          // Up::Message
+        2,          // BridgeToHost::SendResult
+        0xB4, 0x24, // id 0x1234, varint
+        0,          // SendStatus::AckOk
+        0xAC, 0x02, // tx_us 300, varint
+    ];
+    assert_eq!(out[..len], expected, "{MSG}");
+    assert_eq!(decode_up(&out[..len]).unwrap(), result);
+
+    let send = Down::Command(HostToBridge::SendEspNow {
+        id: 7,
+        dst: [9; 6],
+        ensure_peer: true,
+        payload: Vec::from_slice(&[1, 2]).unwrap(),
+    });
+    let len = encode_down(&send, &mut out).unwrap();
+    #[rustfmt::skip]
+    let expected = [
+        0,                // Down::Command
+        3,                // HostToBridge::SendEspNow
+        7,                // id
+        9, 9, 9, 9, 9, 9, // dst
+        1,                // ensure_peer
+        2, 1, 2,          // payload, length first
+    ];
+    assert_eq!(out[..len], expected, "{MSG}");
+    assert_eq!(decode_down(&out[..len]).unwrap(), send);
 }
 
 #[test]

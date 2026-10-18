@@ -21,6 +21,10 @@
 //! changes meaning. A cause or phase this build cannot name reads as `Unknown`, since they
 //! are diagnostics. A chip it cannot name fails the decode: the hello is then from no peer
 //! this build can talk to.
+//!
+//! Fields may be appended past byte 51, such as an image identity for the update path.
+//! Decoders read the first [`HELLO_LEN`] bytes and ignore the rest, so the frozen part never
+//! moves.
 
 use crate::link::{Chip, LoopPhase, ShortStr};
 use crate::mac::Mac;

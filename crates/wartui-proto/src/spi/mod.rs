@@ -22,12 +22,16 @@
 //! 4. The C6 drops READY once the transfer completes.
 //!
 //! **Frozen forever, even before 1.0: the READY handshake, [`TRANSFER_LEN`], the header
-//! above with [`MAGIC`], [`CORE_VERSION`] and the CRC, the [`Kind`] codes, and
-//! [`Hello`]'s layout.** A P4 build
-//! must always be able to identify and update any C6 build, so a link change never sends
-//! the user back to a wired flash. Everything else, the [`Up`] and [`Down`] messages a
-//! [`Kind::Messages`] transfer carries, changes freely between builds and is named by
-//! [`LINK_REVISION`]. A P4 whose hello exchange finds another revision does not bridge.
+//! above with [`MAGIC`], [`CORE_VERSION`] and the CRC, the [`Kind`] codes, and [`Hello`]'s
+//! layout.** A P4 build must always be able to identify and update any C6 build, so a link
+//! change never sends the user back to a wired flash. Everything else, the [`Up`] and
+//! [`Down`] messages a [`Kind::Messages`] transfer carries, changes freely between builds
+//! and is named by [`LINK_REVISION`]. A P4 whose hello exchange finds another revision does
+//! not bridge.
+//!
+//! [`Kind::Update`] is frozen by number only, and no C6 build implements it yet, so a C6
+//! flashed from a build without single-cable updates needs one more wired flash when they
+//! land.
 //!
 //! [`TRANSFER_LEN`] is 2048 so one transfer carries the largest [`Down`], a 1,470-byte
 //! [`HostToBridge::SendEspNow`](crate::link::HostToBridge::SendEspNow), without
