@@ -36,7 +36,7 @@ fn discovery_returns_empty_list_without_error_when_no_devices_are_attached() {
     let found = discover_ports().expect("listing ports should succeed");
     for port in found {
         assert!(is_usable_path(&port.path));
-        assert_eq!(port.vid, Some(ESPRESSIF_VID));
+        assert!(ports::could_be_a_bridge(&port), "{port:?}");
     }
 }
 
