@@ -10,22 +10,31 @@ single-chip bridge, and the queue sizes are in `src/config.rs`.
 cargo build --release --features esp32c6
 ```
 
+## Boards
+
+One image serves the C6 on both the Waveshare ESP32-P4-WIFI6-POE-ETH and the ESP32-P4-WIFI6.
+
 ## First flash
 
 The C6 has no USB. Flash it through the 4-pin header with a USB-to-TTL adapter: H7 on the
 POE-ETH, H4 on the WIFI6, carrying IO9, GND, RXD and TXD.
 
-1. Hold the P4 in download mode (hold BOOT at power-on), so it stays quiet.
-2. Jumper IO9 to GND.
-3. Power the board and run, with the adapter's port:
+1. With the board unpowered, jumper IO9 to GND, so the C6 boots into its download mode.
+2. Hold the P4's BOOT button while powering the board, so the P4 stays in download mode and
+   quiet.
+3. Run, with the adapter's port:
    `cargo run --release --features esp32c6 -- --port <adapter>`
    (the runner is `espflash flash --before no-reset --after no-reset`; no reset line may toggle).
-4. Remove the jumper before the P4 next boots.
+4. Remove the jumper, then power-cycle the board so both chips run.
 
 This crate has no partition table of its own. The P4 firmware is flashed as in
 [`firmware/p4-bridge`](../p4-bridge/README.md#first-flash).
 
-The high-speed USB port on these boards always drives 5 V; see the warning in
+No C6 build implements the update path yet, so a C6 flashed from this build needs one more wired
+flash when single-cable updates (step 3 of the design) land.
+
+**The high-speed USB port always drives 5 V.** A cable from it to a PC must leave VBUS
+unconnected, or it back-feeds the PC whenever the Type-C is also connected; see
 [`firmware/p4-bridge`](../p4-bridge/README.md#usb).
 
 ## Queue sizes

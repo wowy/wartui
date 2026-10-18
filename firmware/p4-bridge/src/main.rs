@@ -10,7 +10,8 @@
 //! `RefCell` with no locking and nothing borrowed across an `.await`:
 //!
 //! - **the SPI link** (`src/link.rs`) runs from boot, so the C6's hello arrives;
-//! - **the tick** gives [`Pair`] the clock, which is how it gives up on a silent C6;
+//! - **the deadline** gives [`Pair`] the clock once, at [`RADIO_WAIT_MS`], which is how it
+//!   gives up on a silent C6;
 //! - **the USB device** (`src/usb.rs`) starts once the pair knows its serial number, and
 //!   runs the device, a reader, a writer and the `GetStatus` answer.
 //!
@@ -33,11 +34,12 @@ mod link;
 mod usb;
 
 use core::cell::{Cell, RefCell};
+use core::future::pending;
 
 use embassy_futures::join::join3;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::signal::Signal;
-use embassy_time::{Duration, Instant, Ticker, Timer};
+use embassy_time::{Duration, Instant, Timer};
 use esp_hal::clock::CpuClock;
 use esp_hal::dma::aligned::InternalMemory;
 use esp_hal::dma::{BurstConfig, DmaDescriptor, DmaRxBuf, DmaTxBuf, descriptor_count};
@@ -55,7 +57,7 @@ use wartui_proto::link::{
     BridgeToHost, LoopPhase, MAX_FRAME, QueueId, QueueStat, ShortStr, SpiStats, encode_frame,
 };
 use wartui_proto::spi::{Down, TRANSFER_LEN, encode_down};
-use wartui_proto::split::{Pair, PairEvent};
+use wartui_proto::split::{Pair, PairEvent, RADIO_WAIT_MS};
 
 use crate::config::{DOWN_QUEUE_BYTES, HOST_BULK_BYTES, HOST_PRIORITY_BYTES, SPI_KHZ};
 use crate::link::{Bus, Link, RECORD_MAX, run_link};
@@ -65,8 +67,6 @@ esp_bootloader_esp_idf::esp_app_desc!();
 
 /// How long the C6 is held in reset at boot.
 const C6_RESET_HOLD: Duration = Duration::from_millis(50);
-/// How often [`Pair`] is given the clock.
-const TICK: Duration = Duration::from_millis(100);
 
 type HostFrames = HostQueue<HOST_PRIORITY_BYTES, HOST_BULK_BYTES>;
 type DownQueue = FrameRing<DOWN_QUEUE_BYTES>;
@@ -294,21 +294,19 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     // Joined rather than spawned: all three borrow `shared`, and none ends.
     match join3(
         run_link(bus, &mut link, &shared),
-        tick(&shared),
+        radio_deadline(&shared, boot),
         usb::run(peripherals.USB_HS, &shared),
     )
     .await {}
 }
 
-/// Give [`Pair`] the clock forever, and announce the life it starts when the C6 stays
-/// silent.
-async fn tick(shared: &Shared) -> ! {
-    let mut ticker = Ticker::every(TICK);
-    loop {
-        ticker.next().await;
-        let event = shared.pair.borrow_mut().on_tick(now_ms());
-        if event == PairEvent::NewLife {
-            shared.new_life();
-        }
+/// Give [`Pair`] the clock at [`RADIO_WAIT_MS`], and announce the life it starts when the
+/// C6 stayed silent. Only `RadioState::Waiting` reads the clock, so nothing follows.
+async fn radio_deadline(shared: &Shared, boot: Instant) -> ! {
+    Timer::at(boot + Duration::from_millis(RADIO_WAIT_MS)).await;
+    let event = shared.pair.borrow_mut().on_tick(now_ms());
+    if event == PairEvent::NewLife {
+        shared.new_life();
     }
+    pending().await
 }

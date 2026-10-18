@@ -33,7 +33,8 @@ are flashed by hand.
 ## USB
 
 The bridge enumerates as `1209:0001`, product `wartui p4 bridge`, with the bridge (C6) MAC as its
-serial number. `wartui ports` lists it and `wartui flash-bridge` refuses it.
+serial number, or the P4's own MAC when the C6 never answered its hello. `wartui ports` lists it,
+`wartui flash-bridge` refuses it and `wartui flash-fleet` skips it.
 
 **The high-speed port always drives 5 V.** It is the Type-A on the POE-ETH (a load switch with its
 enable tied high) and the 4-pin MX1.25 connector `P1` on the WIFI6 (pin 1 is the board's VCC_5V

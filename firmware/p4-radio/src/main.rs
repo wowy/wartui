@@ -119,6 +119,9 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     let setup = radio::setup(&mut controller, &manager);
     let mac = Interface::station().mac_address();
 
+    // SDIO D2 and D3 are unused; both ends leave them as inputs.
+    let _d2 = Input::new(peripherals.GPIO22, InputConfig::default());
+    let _d3 = Input::new(peripherals.GPIO23, InputConfig::default());
     // Low until the first transfer is armed.
     let ready = Output::new(peripherals.GPIO2, Level::Low, OutputConfig::default());
     // One pin, two readers: the slave takes it as CS, and the link waits on its rising
