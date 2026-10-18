@@ -109,6 +109,10 @@ fn spi_header_has_frozen_layout() {
     // MAGIC "WT", core 1, kind 1, seq LE, len 3, reserved zero.
     assert_eq!(buf[..HEADER_LEN], [0x54, 0x57, 1, 1, 0x0D, 0x0C, 0x0B, 0x0A, 3, 0, 0, 0]);
     assert_eq!((MAGIC, CORE_VERSION, TRANSFER_LEN, PAYLOAD_MAX), (0x5754, 1, 2048, 2034));
+    // CRC-16/CCITT-FALSE 0x10EA, little-endian, over the header, the three payload bytes
+    // and the zeroed padding (not the 0xAA it was filled with). Worked out with a separate
+    // bitwise CRC, checked against the standard "123456789" value 0x29B1.
+    assert_eq!(buf[CRC_OFFSET..], [0xEA, 0x10]);
 }
 
 /// These bytes are the frozen hello. They must never change: any P4 build reads any C6
@@ -183,6 +187,15 @@ fn spi_hello_decodes_unknown_reset_cause_as_unknown() {
     let hello = Hello::decode(&bytes).unwrap();
     assert_eq!(hello.reset_cause, ResetCause::Unknown);
     assert_eq!(hello.last_phase, LoopPhase::Unknown);
+}
+
+#[test]
+fn spi_hello_truncates_invalid_utf8_version() {
+    let mut bytes = [0u8; HELLO_LEN];
+    bytes[2] = 1;
+    bytes[9..14].copy_from_slice(&[b'0', b'.', b'9', 0xFF, b'1']);
+    let hello = Hello::decode(&bytes).unwrap();
+    assert_eq!(hello.fw_version, "0.9");
 }
 
 #[test]

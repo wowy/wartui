@@ -14,8 +14,16 @@
 //! | 12 | len | payload; bytes past `len` are zero |
 //! | [`CRC_OFFSET`] | 2 | CRC-16/CCITT-FALSE ([`crc16`]) over bytes `0..CRC_OFFSET` |
 //!
-//! **Frozen forever, even before 1.0: [`TRANSFER_LEN`], the header above with [`MAGIC`],
-//! [`CORE_VERSION`] and the CRC, the [`Kind`] codes, and [`Hello`]'s layout.** A P4 build
+//! Every transfer follows the READY handshake:
+//!
+//! 1. The C6 drives READY high once it has armed a transfer.
+//! 2. The P4 waits for READY's rising edge.
+//! 3. The P4 clocks exactly [`TRANSFER_LEN`] bytes with CS low.
+//! 4. The C6 drops READY once the transfer completes.
+//!
+//! **Frozen forever, even before 1.0: the READY handshake, [`TRANSFER_LEN`], the header
+//! above with [`MAGIC`], [`CORE_VERSION`] and the CRC, the [`Kind`] codes, and
+//! [`Hello`]'s layout.** A P4 build
 //! must always be able to identify and update any C6 build, so a link change never sends
 //! the user back to a wired flash. Everything else, the [`Up`] and [`Down`] messages a
 //! [`Kind::Messages`] transfer carries, changes freely between builds and is named by

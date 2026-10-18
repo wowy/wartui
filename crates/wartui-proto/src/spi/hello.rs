@@ -78,14 +78,21 @@ impl Hello {
 
     /// Reads a hello from the start of `payload`.
     ///
-    /// `None` when `payload` is shorter than [`HELLO_LEN`], the chip is one this build
-    /// cannot name, or the version is not UTF-8.
+    /// `None` when `payload` is shorter than [`HELLO_LEN`] or the chip is one this build
+    /// cannot name. A version that is not UTF-8 is cut at its last valid character.
     #[must_use]
     pub fn decode(payload: &[u8]) -> Option<Self> {
         let b = payload.get(..HELLO_LEN)?;
         let version = &b[FW_VERSION..FW_VERSION + FW_VERSION_LEN];
         let version_len = version.iter().position(|&c| c == 0).unwrap_or(FW_VERSION_LEN);
-        let fw_version = core::str::from_utf8(&version[..version_len]).ok()?.try_into().ok()?;
+        let version = &version[..version_len];
+        // A version that is not UTF-8 is cut at its last valid character rather than
+        // failing the decode, so a P4 can always identify the C6.
+        let valid = match core::str::from_utf8(version) {
+            Ok(text) => text,
+            Err(error) => core::str::from_utf8(&version[..error.valid_up_to()]).ok()?,
+        };
+        let fw_version = valid.try_into().ok()?;
         Some(Self {
             link_rev: u16::from_le_bytes([b[0], b[1]]),
             chip: chip_from_code(b[2])?,
