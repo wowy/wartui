@@ -19,7 +19,9 @@ use anyhow::{Context, Result, bail};
 use clap::Args as ClapArgs;
 use wartui_bridge::LinkEvent;
 use wartui_proto::air::CONTROL_CHANNEL;
-use wartui_proto::link::{BridgeToHost, HostToBridge, QueueId, QueueStat, QueueStats, SpiStats};
+use wartui_proto::link::{
+    BridgeToHost, HostToBridge, QueueId, QueueStat, QueueStats, RadioInfo, SpiStats,
+};
 use wartui_proto::mac;
 
 /// Generous enough for a bridge that is busy forwarding a fleet, short enough
@@ -63,6 +65,10 @@ pub async fn run(args: Args) -> Result<()> {
         info.fw_version
     );
     println!("{}", super::last_reset_line(&info));
+    // A split bridge's radio restarts on its own, and this is where its reason shows.
+    if let Some(radio) = &info.radio {
+        println!("{}", radio_line(radio));
+    }
     // A board fact rather than a chip fact, and the one that decides whether `wartui
     // run` pushes anything at a screen. Said either way, so an absent line never has
     // to be interpreted.
@@ -119,6 +125,18 @@ pub async fn run(args: Args) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// The radio coprocessor behind a split bridge.
+fn radio_line(radio: &RadioInfo) -> String {
+    format!(
+        "radio      {} on {:?}, firmware {}, reset {:?}, last phase {:?}",
+        mac::full(&radio.mac),
+        radio.chip,
+        radio.fw_version,
+        radio.reset_cause,
+        radio.last_phase
+    )
 }
 
 /// One line per reported queue, then the SPI link's counters when it has any.
@@ -210,8 +228,29 @@ fn human_uptime(ms: u32) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{diagnostic_lines, human_uptime, silence_note};
-    use wartui_proto::link::{QueueId, QueueStat, QueueStats};
+    use super::{diagnostic_lines, human_uptime, radio_line, silence_note};
+    use wartui_proto::link::{Chip, LoopPhase, QueueId, QueueStat, QueueStats, RadioInfo};
+    use wartui_proto::reset::ResetCause;
+
+    #[test]
+    fn status_prints_radio_line_when_bridge_is_split() {
+        let radio = RadioInfo {
+            chip: Chip::Esp32C6,
+            mac: [0x58, 0x8c, 0x81, 0x00, 0x12, 0x34],
+            fw_version: "0.1.0".try_into().expect("short"),
+            reset_cause: ResetCause::Watchdog,
+            last_phase: LoopPhase::SpiTransfer,
+            uptime_ms: 72,
+        };
+        assert_eq!(
+            radio_line(&radio),
+            format!(
+                "radio      {} on Esp32C6, firmware 0.1.0, reset Watchdog, \
+                 last phase SpiTransfer",
+                wartui_proto::mac::full(&radio.mac)
+            )
+        );
+    }
 
     #[test]
     fn status_prints_queue_lines_when_queues_present() {

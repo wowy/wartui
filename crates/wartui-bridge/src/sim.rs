@@ -330,6 +330,8 @@ async fn run_bridge(
         // the simulator rehearsing a width of 26 that nothing has.
         panel: Some(Panel { cols: 17, rows: 5 }),
         gps: false,
+        // A single-chip bridge.
+        radio: None,
     };
     if plumbing.events.send(LinkEvent::Connected(info)).await.is_err() {
         return;

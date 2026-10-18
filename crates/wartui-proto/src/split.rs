@@ -12,7 +12,11 @@
 //!   look like a bridge restart; a hello arriving after the link was up is
 //!   [`PairEvent::NewLife`], and the firmware answers with a fresh `Ready`.
 //! - **The C6 repeats its hello** in every transfer until it hears the P4's, so [`Pair`]
-//!   tells a new life from a repeat; see [`Pair::on_hello`].
+//!   tells a new life from a repeat; see [`Pair::on_hello`]. A restarted C6 boots through
+//!   the same code to the same first hello, often within a millisecond of the last life's
+//!   uptime, so equal uptimes prove nothing.
+//! - **`Ready.reset_cause` is the C6's after a C6 restart**, since that restart is the
+//!   bridge restart the host sees. The P4's own boot reports the P4's cause.
 //! - **A link revision mismatch does not bridge.** The hello is frozen, so the P4 can
 //!   always read it and say so, but radio commands are refused.
 
@@ -28,6 +32,14 @@ use crate::spi::{Hello, LINK_REVISION, RadioStatus};
 
 /// How long the P4 waits for the C6's first hello before enumerating USB with its own MAC.
 pub const RADIO_WAIT_MS: u64 = 2_000;
+
+/// How far a repeated hello's uptime may trail the current life's, extrapolated on the P4
+/// clock, and still be the same life.
+///
+/// The C6 stamps a hello one transfer before the P4 reads it, well under a millisecond
+/// apart. A second of slack absorbs that and any scheduling jitter, while a C6 that
+/// restarted a second or more into its hello phase still reads as a new life.
+pub const SAME_LIFE_SLACK_MS: u64 = 1_000;
 
 /// What the P4 knows of its C6.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,6 +83,10 @@ pub struct Pair {
     state: RadioState,
     /// The P4 clock when the current hello arrived.
     hello_at_ms: u64,
+    /// The C6 sent something other than a hello in the current life.
+    past_hello: bool,
+    /// The current life began with a C6 restart under a running P4.
+    life_from_radio: bool,
     status: Option<RadioStatus>,
     own_mac: Mac,
     own_fw: ShortStr,
@@ -91,6 +107,8 @@ impl Pair {
         Self {
             state: RadioState::Waiting,
             hello_at_ms: boot_ms,
+            past_hello: false,
+            life_from_radio: false,
             status: None,
             own_mac,
             own_fw,
@@ -103,23 +121,46 @@ impl Pair {
     /// The C6 sent a hello at P4 time `now_ms`.
     ///
     /// The C6 repeats its hello in every transfer until it has heard the P4's, so most
-    /// calls are the same life again. Only the first hello, a changed MAC or link
-    /// revision, or an uptime that went backwards is a [`PairEvent::NewLife`]. Anything
-    /// else leaves the anchor and counters alone, so `Ready.uptime_ms` never steps back.
+    /// calls are the same life again. A hello is a [`PairEvent::NewLife`] when any of these
+    /// holds:
+    ///
+    /// - it is the first, or its MAC or link revision changed;
+    /// - the C6 had already left its hello phase ([`Pair::note_past_hello`]), and a C6
+    ///   only returns to it by restarting;
+    /// - its uptime trails the current life's, extrapolated on the P4 clock, by more than
+    ///   [`SAME_LIFE_SLACK_MS`], which catches a restart within the hello phase.
+    ///
+    /// Anything else leaves the anchor and counters alone, so `Ready.uptime_ms` never steps
+    /// back.
     pub fn on_hello(&mut self, hello: Hello, now_ms: u64) -> PairEvent {
-        if let RadioState::Up(old) | RadioState::Mismatch(old) = &self.state
-            && old.mac == hello.mac
-            && old.link_rev == hello.link_rev
-            && hello.uptime_ms >= old.uptime_ms
-        {
-            return PairEvent::None;
-        }
+        let running = match &self.state {
+            RadioState::Up(old) | RadioState::Mismatch(old) => {
+                let expected = u64::from(old.uptime_ms) + now_ms.saturating_sub(self.hello_at_ms);
+                let same = !self.past_hello
+                    && old.mac == hello.mac
+                    && old.link_rev == hello.link_rev
+                    && u64::from(hello.uptime_ms) + SAME_LIFE_SLACK_MS >= expected;
+                if same {
+                    return PairEvent::None;
+                }
+                true
+            }
+            RadioState::Waiting | RadioState::Absent => false,
+        };
         let matches = hello.link_rev == LINK_REVISION;
         self.state = if matches { RadioState::Up(hello) } else { RadioState::Mismatch(hello) };
         self.hello_at_ms = now_ms;
+        self.past_hello = false;
+        self.life_from_radio = running;
         // A new C6 life: counters from the last one no longer apply.
         self.status = None;
         PairEvent::NewLife
+    }
+
+    /// The C6 sent a transfer other than a hello: it has heard the P4's, so its next hello
+    /// begins a new life.
+    pub fn note_past_hello(&mut self) {
+        self.past_hello = true;
     }
 
     /// The P4 clock reached `now_ms`.
@@ -167,13 +208,17 @@ impl Pair {
     pub fn ready(&self, now_ms: u64) -> Option<BridgeToHost> {
         let mac = self.usb_serial_mac()?;
         let hello = self.radio_hello();
+        let (reset_cause, last_phase) = match hello {
+            Some(hello) if self.life_from_radio => (hello.reset_cause, hello.last_phase),
+            _ => (self.own_cause, self.own_phase),
+        };
         Some(BridgeToHost::Ready {
             chip: Chip::Esp32P4,
             mac,
             fw_version: self.own_fw.clone(),
             proto_version: LINK_PROTO_VERSION,
-            reset_cause: self.own_cause,
-            last_phase: self.own_phase,
+            reset_cause,
+            last_phase,
             heap_free: hello.map_or(0, |hello| hello.heap_free),
             uptime_ms: self.uptime_ms(now_ms),
             panel: None,

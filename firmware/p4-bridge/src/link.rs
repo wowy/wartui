@@ -13,7 +13,8 @@
 //!
 //! The P4 sends its hello while the C6 is sending its own, and stops once the C6 sends
 //! anything else. The C6 sends its hello until it hears the P4's, so this covers a C6
-//! that restarts under a running P4 as well as the first exchange.
+//! that restarts under a running P4 as well as the first exchange. The pair hears when the
+//! C6 leaves its hello phase, since a hello after that is a restart.
 //!
 //! Records flow only while the C6 speaks this P4's link revision: a C6 that encodes them
 //! differently is sent nothing but `Idle`, and its records are not read.
@@ -141,14 +142,14 @@ impl Link {
                 }
             }
             Kind::Messages => {
-                self.owe_hello = false;
+                self.past_hello(shared);
                 if radio_up(shared) {
                     for record in records(transfer.payload) {
                         self.relay(record, shared);
                     }
                 }
             }
-            Kind::Idle => self.owe_hello = false,
+            Kind::Idle => self.past_hello(shared),
             Kind::Update => {}
         }
         // Once per change, so a C6 sending garbage costs one line per transfer at most.
@@ -156,6 +157,15 @@ impl Link {
             self.undecoded_said = self.undecoded;
             let message = LogStr::try_from("a radio record did not decode").unwrap_or_default();
             shared.push_host(&BridgeToHost::Error { message });
+        }
+    }
+
+    /// The C6 sent something other than a hello, so it has heard this end's. The pair
+    /// hears of it once per hello phase.
+    fn past_hello(&mut self, shared: &Shared) {
+        if self.owe_hello {
+            self.owe_hello = false;
+            shared.pair.borrow_mut().note_past_hello();
         }
     }
 

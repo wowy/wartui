@@ -270,6 +270,7 @@ fn connected_bridge(mac: Mac, gps: bool) -> Event {
         // this — the panel is composed in `runtime` from the snapshot.
         panel: None,
         gps,
+        radio: None,
     }))
 }
 

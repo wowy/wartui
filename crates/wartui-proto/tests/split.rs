@@ -41,6 +41,13 @@ fn uptime(frame: Option<BridgeToHost>) -> u32 {
     }
 }
 
+fn cause(frame: Option<BridgeToHost>) -> (ResetCause, LoopPhase) {
+    match frame {
+        Some(BridgeToHost::Ready { reset_cause, last_phase, .. }) => (reset_cause, last_phase),
+        other => panic!("not a Ready: {other:?}"),
+    }
+}
+
 fn send(id: u16) -> HostToBridge {
     HostToBridge::SendEspNow {
         id,
@@ -222,6 +229,45 @@ fn pair_ignores_repeated_hellos_from_same_life() {
         BridgeToHost::Status { peer_count, .. } => assert_eq!(peer_count, 3),
         other => panic!("not a Status: {other:?}"),
     }
+}
+
+#[test]
+fn pair_ignores_repeated_hellos_when_sent_back_to_back() {
+    // A real C6's first hello lands about 72 ms into its life, then repeats per transfer.
+    let mut pair = pair();
+    assert_eq!(pair.on_hello(hello(72), 1_000), PairEvent::NewLife);
+    assert_eq!(pair.on_hello(hello(73), 1_001), PairEvent::None);
+    assert_eq!(pair.on_hello(hello(74), 1_002), PairEvent::None);
+}
+
+#[test]
+fn pair_announces_new_life_when_same_uptime_hello_arrives_much_later() {
+    // The restarted C6 booted to the same first hello; only the P4 clock tells them apart.
+    let mut pair = pair();
+    assert_eq!(pair.on_hello(hello(72), 1_000), PairEvent::NewLife);
+    assert_eq!(pair.on_hello(hello(72), 181_000), PairEvent::NewLife);
+}
+
+#[test]
+fn pair_announces_new_life_when_hello_follows_traffic() {
+    // A C6 that left its hello phase only returns to it by restarting.
+    let mut pair = pair();
+    assert_eq!(pair.on_hello(hello(72), 1_000), PairEvent::NewLife);
+    pair.note_past_hello();
+    assert_eq!(pair.on_hello(hello(72), 1_200), PairEvent::NewLife);
+}
+
+#[test]
+fn pair_announces_radio_reset_cause_when_c6_restarts() {
+    let mut pair = pair();
+    pair.on_hello(hello(72), 1_000);
+    assert_eq!(cause(pair.ready(1_000)), (ResetCause::PowerOn, LoopPhase::Unknown));
+    pair.note_past_hello();
+    let mut crashed = hello(72);
+    crashed.reset_cause = ResetCause::Watchdog;
+    crashed.last_phase = LoopPhase::SpiTransfer;
+    assert_eq!(pair.on_hello(crashed, 60_000), PairEvent::NewLife);
+    assert_eq!(cause(pair.ready(60_000)), (ResetCause::Watchdog, LoopPhase::SpiTransfer));
 }
 
 #[test]
