@@ -26,6 +26,19 @@ const _: () = assert!(
     PANEL_ROWS * (32 + 2) + 2 < MAX_BODY,
     "a whole-panel push must fit one frame, or a bridge would silently lose rows"
 );
+// The two replies that grew with the split bridge, at their fullest.
+const _: () = assert!(
+    // variant index, `peer_count`, four `u32`s, then 8 queues of a tag and three `u32`s,
+    // then the `Option` tag and nine `u32`s. Varint integers never exceed their fixed width
+    // by more than a byte each.
+    1 + 1 + 4 * 5 + 1 + 8 * (1 + 3 * 5) + 1 + 9 * 5 < MAX_BODY,
+    "a Status with every queue and SPI stats must fit one frame"
+);
+const _: () = assert!(
+    // The fixed `Ready` fields, a second `ShortStr` and MAC for the radio, and its tags.
+    2 * (32 + 1) + 2 * 6 + 8 * 5 + 24 < MAX_BODY,
+    "a Ready with radio info must fit one frame"
+);
 
 /// Why a frame could not be encoded or decoded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

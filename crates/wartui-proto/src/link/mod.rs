@@ -311,6 +311,10 @@ pub enum BridgeToHost {
         /// A board fact, like `panel`. It does not mean a receiver answered: a missing
         /// receiver is reported as an [`Self::Error`] instead.
         gps: bool,
+        /// The ESP32-C6 radio behind a bridge that has none of its own, as the C6 reported
+        /// it. `None` for a bridge with its own radio, and for a split bridge whose C6
+        /// has not answered yet.
+        radio: Option<RadioInfo>,
     },
     /// An ESP-NOW frame arrived.
     Rx {
@@ -353,6 +357,11 @@ pub enum BridgeToHost {
         /// Received frames longer than [`MAX_NODE_PAYLOAD`], dropped since boot. No
         /// wartui node sends one, so these are somebody else's traffic.
         rx_oversize: u32,
+        /// Fill level of each bounded queue the firmware has. Empty for a bridge with
+        /// none to report.
+        queues: QueueStats,
+        /// The P4–C6 SPI link's error counters. `None` for a bridge without one.
+        spi: Option<SpiStats>,
     },
     /// Diagnostics, routed through the link rather than printed. `esp-println` would
     /// interleave into the same endpoint and corrupt the framing.
@@ -404,4 +413,47 @@ pub struct QueueStat {
     pub high_water: u32,
     /// Items evicted or refused since boot.
     pub dropped: u32,
+}
+
+/// The queues a [`BridgeToHost::Status`] reports; room for every [`QueueId`] with spare.
+pub type QueueStats = Vec<QueueStat, 8>;
+
+/// The ESP32-C6 behind a split bridge, as it described itself over SPI.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct RadioInfo {
+    /// The radio chip.
+    pub chip: Chip,
+    /// The radio's MAC.
+    pub mac: Mac,
+    /// The radio firmware's version.
+    pub fw_version: ShortStr,
+    /// Why the radio's current life started.
+    pub reset_cause: ResetCause,
+    /// Where the radio's previous life stopped.
+    pub last_phase: LoopPhase,
+    /// Milliseconds since the radio started.
+    pub uptime_ms: u32,
+}
+
+/// Error counters of the P4–C6 SPI link, since boot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct SpiStats {
+    /// Transfers completed.
+    pub transfers: u32,
+    /// C6→P4 transfers whose CRC failed.
+    pub crc_fail: u32,
+    /// C6→P4 transfers with the wrong magic.
+    pub bad_magic: u32,
+    /// C6→P4 transfers whose sequence number skipped.
+    pub seq_gap: u32,
+    /// Waits for the C6's READY line that timed out.
+    pub ready_timeouts: u32,
+    /// Timeouts after which the link recovered.
+    pub ready_recovered: u32,
+    /// P4→C6 transfers the C6 saw fail their CRC, from its `RadioStatus`.
+    pub radio_crc_fail: u32,
+    /// P4→C6 transfers the C6 saw with the wrong magic.
+    pub radio_bad_magic: u32,
+    /// P4→C6 transfers the C6 saw skip a sequence number.
+    pub radio_seq_gap: u32,
 }

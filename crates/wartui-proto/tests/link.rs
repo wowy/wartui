@@ -13,8 +13,9 @@ use wartui_proto::link::{
     BROADCAST, BURST_BUDGET_US, BURST_GAP_US, BridgeToHost, Chip, EspNowPayload, FrameAccumulator,
     GPS_FRAME, GPS_WRITE_MAX, GpsBytes, GpsWriteBytes, HostToBridge, LINK_PROTO_VERSION, LinkBurst,
     LinkError, LogLevel, LoopPhase, MAX_ESPNOW_V2_PAYLOAD, MAX_FRAME, MAX_HOST_FRAME,
-    MAX_NODE_PAYLOAD, PANEL_ROWS, Panel, PanelLine, PanelLines, SendPayload, SendStatus, Severity,
-    ShortStr, crc16, decode_frame, encode_frame, encode_host_frame,
+    MAX_NODE_PAYLOAD, PANEL_ROWS, Panel, PanelLine, PanelLines, QueueId, QueueStat, QueueStats,
+    RadioInfo, SendPayload, SendStatus, Severity, ShortStr, SpiStats, crc16, decode_frame,
+    encode_frame, encode_host_frame,
 };
 use wartui_proto::reset::ResetCause;
 
@@ -96,6 +97,7 @@ fn sample_events() -> Vec<BridgeToHost, 16> {
         uptime_ms: 8_675_309,
         panel: None,
         gps: false,
+        radio: None,
     })
     .expect("sample_events has room");
     // A second one, because `Option` and the enums the first case does not reach are the
@@ -111,6 +113,7 @@ fn sample_events() -> Vec<BridgeToHost, 16> {
         uptime_ms: 1_000,
         panel: Some(Panel { cols: 26, rows: 8 }),
         gps: true,
+        radio: None,
     })
     .expect("sample_events has room");
     v.push(BridgeToHost::Rx { src: [9; 6], dst: BROADCAST, rssi: -73, rx_us: 123_456, payload })
@@ -123,6 +126,8 @@ fn sample_events() -> Vec<BridgeToHost, 16> {
         dropped_tx: 0,
         uptime_ms: 60_000,
         rx_oversize: 2,
+        queues: QueueStats::new(),
+        spi: None,
     })
     .expect("sample_events has room");
     v.push(BridgeToHost::Log {
@@ -535,6 +540,8 @@ fn link_round_trips_status_when_rx_oversize_is_set() {
         dropped_tx: 0,
         uptime_ms: 5_000,
         rx_oversize: 0xDEAD_BEEF,
+        queues: QueueStats::new(),
+        spi: None,
     };
     let mut out = [0u8; MAX_FRAME];
     let n = encode_frame(&status, &mut out).expect("encodes");
@@ -595,4 +602,77 @@ fn link_burst_times_budget_from_start_when_clock_starts_late() {
     let mut burst = LinkBurst::start(start);
     assert!(burst.keep_going(start + BURST_BUDGET_US - 1, true, true));
     assert!(!burst.keep_going(start + BURST_BUDGET_US, true, true));
+}
+
+fn round_trip(event: &BridgeToHost) -> BridgeToHost {
+    let mut out = [0u8; MAX_FRAME];
+    let n = encode_frame(event, &mut out).expect("encodes");
+    decode_frame(&mut out[..n - 1]).expect("decodes")
+}
+
+#[test]
+fn link_round_trips_status_with_queues_and_spi() {
+    const IDS: [QueueId; 5] = [
+        QueueId::RadioUp,
+        QueueId::RadioSendJobs,
+        QueueId::RadioDown,
+        QueueId::HostPriority,
+        QueueId::HostBulk,
+    ];
+    let mut queues = QueueStats::new();
+    for (i, queue) in (1u32..).zip(IDS.into_iter().cycle().take(8)) {
+        queues
+            .push(QueueStat {
+                queue,
+                capacity: 262_144 * i,
+                high_water: 0xFFFF_0000 + i,
+                dropped: u32::MAX - i,
+            })
+            .expect("eight fit");
+    }
+    let status = BridgeToHost::Status {
+        peer_count: 1,
+        rx_count: 10,
+        dropped_tx: 0,
+        uptime_ms: 5_000,
+        rx_oversize: 0,
+        queues,
+        spi: Some(SpiStats {
+            transfers: u32::MAX,
+            crc_fail: 1,
+            bad_magic: 2,
+            seq_gap: 3,
+            ready_timeouts: 4,
+            ready_recovered: 5,
+            radio_crc_fail: 6,
+            radio_bad_magic: 7,
+            radio_seq_gap: 8,
+        }),
+    };
+    assert_eq!(round_trip(&status), status);
+}
+
+#[test]
+fn link_round_trips_ready_with_radio() {
+    let ready = BridgeToHost::Ready {
+        chip: Chip::Esp32P4,
+        mac: [0x10, 0x20, 0x30, 0x40, 0x50, 0x62],
+        fw_version: String::try_from("0.1.0").expect("short"),
+        proto_version: LINK_PROTO_VERSION,
+        reset_cause: ResetCause::PowerOn,
+        last_phase: LoopPhase::SpiTransfer,
+        heap_free: 1,
+        uptime_ms: 2,
+        panel: None,
+        gps: false,
+        radio: Some(RadioInfo {
+            chip: Chip::Esp32C6,
+            mac: [0x10, 0x20, 0x30, 0x40, 0x50, 0x63],
+            fw_version: String::try_from("0.1.1").expect("short"),
+            reset_cause: ResetCause::Watchdog,
+            last_phase: LoopPhase::Transmit,
+            uptime_ms: u32::MAX,
+        }),
+    };
+    assert_eq!(round_trip(&ready), ready);
 }

@@ -456,6 +456,8 @@ impl Bridge {
             uptime_ms: self.boot.elapsed().as_millis() as u32,
             panel: self.panel,
             gps: cfg!(feature = "t-dongle-c5-gps"),
+            // The radio is this chip.
+            radio: None,
         });
         if let Some(why) = self.panel_fault {
             self.error(why);
@@ -1082,6 +1084,9 @@ fn handle(
                 dropped_tx: bridge.outbox.dropped(),
                 uptime_ms,
                 rx_oversize: bridge.rx_oversize,
+                // No queue or SPI link to report until the split bridge exists.
+                queues: wartui_proto::link::QueueStats::new(),
+                spi: None,
             });
         }
 

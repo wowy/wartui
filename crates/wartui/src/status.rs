@@ -19,7 +19,7 @@ use anyhow::{Context, Result, bail};
 use clap::Args as ClapArgs;
 use wartui_bridge::LinkEvent;
 use wartui_proto::air::CONTROL_CHANNEL;
-use wartui_proto::link::{BridgeToHost, HostToBridge};
+use wartui_proto::link::{BridgeToHost, HostToBridge, QueueId, QueueStat, QueueStats, SpiStats};
 use wartui_proto::mac;
 
 /// Generous enough for a bridge that is busy forwarding a fleet, short enough
@@ -77,7 +77,15 @@ pub async fn run(args: Args) -> Result<()> {
         .await
         .context("the bridge did not answer a status request")??;
 
-    let BridgeToHost::Status { peer_count, rx_count, dropped_tx, uptime_ms, rx_oversize } = status
+    let BridgeToHost::Status {
+        peer_count,
+        rx_count,
+        dropped_tx,
+        uptime_ms,
+        rx_oversize,
+        queues,
+        spi,
+    } = status
     else {
         unreachable!("wait_for_status only returns Status")
     };
@@ -90,6 +98,9 @@ pub async fn run(args: Args) -> Result<()> {
     // Read at the moment the bridge announced rather than now, which is close enough:
     // nothing wartui writes allocates, and what matters is the trend across captures.
     println!("heap free  {} bytes", info.heap_free);
+    for line in diagnostic_lines(&queues, spi.as_ref()) {
+        println!("{line}");
+    }
 
     if dropped_tx > 0 {
         // Cumulative since the bridge booted, and one left powered with nothing
@@ -108,6 +119,42 @@ pub async fn run(args: Args) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// One line per reported queue, then the SPI link's counters when it has any.
+fn diagnostic_lines(queues: &QueueStats, spi: Option<&SpiStats>) -> Vec<String> {
+    let mut lines: Vec<String> = queues.iter().map(queue_line).collect();
+    if let Some(s) = spi {
+        lines.push(format!(
+            "  spi  transfers {}  crc_fail {}  bad_magic {}  seq_gap {}  \
+             ready_timeouts {}  ready_recovered {}  \
+             radio_crc_fail {}  radio_bad_magic {}  radio_seq_gap {}",
+            s.transfers,
+            s.crc_fail,
+            s.bad_magic,
+            s.seq_gap,
+            s.ready_timeouts,
+            s.ready_recovered,
+            s.radio_crc_fail,
+            s.radio_bad_magic,
+            s.radio_seq_gap,
+        ));
+    }
+    lines
+}
+
+fn queue_line(stat: &QueueStat) -> String {
+    let (name, unit) = match stat.queue {
+        QueueId::RadioUp => ("radio-up", "bytes"),
+        QueueId::RadioSendJobs => ("radio-send-jobs", "entries"),
+        QueueId::RadioDown => ("radio-down", "bytes"),
+        QueueId::HostPriority => ("host-priority", "bytes"),
+        QueueId::HostBulk => ("host-bulk", "bytes"),
+    };
+    format!(
+        "  queue {name}  {}/{} {unit}  dropped {}",
+        stat.high_water, stat.capacity, stat.dropped
+    )
 }
 
 /// What to say when no node's frame has reached the bridge, or `None` when one has.
@@ -163,7 +210,41 @@ fn human_uptime(ms: u32) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{human_uptime, silence_note};
+    use super::{diagnostic_lines, human_uptime, silence_note};
+    use wartui_proto::link::{QueueId, QueueStat, QueueStats};
+
+    #[test]
+    fn status_prints_queue_lines_when_queues_present() {
+        let mut queues = QueueStats::new();
+        queues
+            .push(QueueStat {
+                queue: QueueId::HostBulk,
+                capacity: 262_144,
+                high_water: 1_024,
+                dropped: 0,
+            })
+            .expect("room");
+        queues
+            .push(QueueStat {
+                queue: QueueId::RadioSendJobs,
+                capacity: 8,
+                high_water: 3,
+                dropped: 2,
+            })
+            .expect("room");
+        assert_eq!(
+            diagnostic_lines(&queues, None),
+            [
+                "  queue host-bulk  1024/262144 bytes  dropped 0",
+                "  queue radio-send-jobs  3/8 entries  dropped 2",
+            ]
+        );
+    }
+
+    #[test]
+    fn status_prints_nothing_extra_when_queues_empty() {
+        assert!(diagnostic_lines(&QueueStats::new(), None).is_empty());
+    }
 
     #[test]
     fn status_cmd_formats_uptime_in_largest_unit_when_displaying_diagnostics() {
