@@ -30,7 +30,7 @@ fn hello(uptime_ms: u32) -> Hello {
 
 fn up_pair() -> Pair {
     let mut pair = pair();
-    pair.on_hello(hello(900), 1_000);
+    pair.on_hello(hello(900), 0, 1_000);
     pair
 }
 
@@ -67,7 +67,7 @@ fn pair_waits_then_announces_radio_mac_when_hello_arrives() {
     assert_eq!(pair.ready(10), None);
     assert_eq!(pair.usb_serial_mac(), None);
     assert_eq!(pair.on_tick(RADIO_WAIT_MS - 1), PairEvent::None);
-    assert_eq!(pair.on_hello(hello(900), 1_000), PairEvent::NewLife);
+    assert_eq!(pair.on_hello(hello(900), 0, 1_000), PairEvent::NewLife);
     match pair.ready(1_000) {
         Some(BridgeToHost::Ready { chip, mac, radio, heap_free, .. }) => {
             assert_eq!(chip, Chip::Esp32P4);
@@ -100,8 +100,9 @@ fn pair_announces_own_mac_and_error_when_radio_never_answers() {
 #[test]
 fn pair_announces_new_life_when_hello_arrives_after_link_up() {
     let mut pair = up_pair();
+    pair.note_seq(5_000);
     let before = uptime(pair.ready(59_999));
-    assert_eq!(pair.on_hello(hello(50), 60_000), PairEvent::NewLife);
+    assert_eq!(pair.on_hello(hello(50), 0, 60_000), PairEvent::NewLife);
     let after = uptime(pair.ready(60_000));
     assert_eq!(after, 50);
     assert!(after < before);
@@ -118,7 +119,7 @@ fn pair_rejects_sends_and_reports_when_link_revision_differs() {
     let mut pair = pair();
     let mut other = hello(900);
     other.link_rev = LINK_REVISION + 1;
-    assert_eq!(pair.on_hello(other, 1_000), PairEvent::NewLife);
+    assert_eq!(pair.on_hello(other, 0, 1_000), PairEvent::NewLife);
     assert_eq!(
         pair.route(&send(7)),
         Route::Refuse(Some(BridgeToHost::SendResult {
@@ -212,13 +213,20 @@ fn pair_status_sums_host_and_radio_drops() {
 }
 
 #[test]
-fn pair_ignores_repeated_hellos_from_same_life() {
+fn pair_announces_new_life_when_first_hello_arrives() {
     let mut pair = pair();
-    assert_eq!(pair.on_hello(hello(900), 1_000), PairEvent::NewLife);
+    assert_eq!(pair.on_hello(hello(72), 0, 1_000), PairEvent::NewLife);
+}
+
+#[test]
+fn pair_ignores_repeated_hellos_when_seq_rises() {
+    // A real C6's first hello lands about 72 ms into its life, then repeats per transfer.
+    let mut pair = pair();
+    assert_eq!(pair.on_hello(hello(72), 0, 1_000), PairEvent::NewLife);
     pair.note_radio_status(radio_status());
-    assert_eq!(pair.on_hello(hello(901), 1_001), PairEvent::None);
-    assert_eq!(pair.on_hello(hello(902), 1_002), PairEvent::None);
-    assert_eq!(uptime(pair.ready(1_002)), 902);
+    assert_eq!(pair.on_hello(hello(73), 1, 1_001), PairEvent::None);
+    assert_eq!(pair.on_hello(hello(74), 2, 1_002), PairEvent::None);
+    assert_eq!(uptime(pair.ready(1_002)), 74);
     match pair.status(
         1_002,
         [stat(QueueId::HostPriority, 0), stat(QueueId::HostBulk, 0)],
@@ -232,41 +240,46 @@ fn pair_ignores_repeated_hellos_from_same_life() {
 }
 
 #[test]
-fn pair_ignores_repeated_hellos_when_sent_back_to_back() {
-    // A real C6's first hello lands about 72 ms into its life, then repeats per transfer.
+fn pair_announces_new_life_when_hello_seq_restarts_with_same_uptime() {
+    // The restarted C6 booted to the same first hello at the same uptime; only the seq,
+    // back to 0 after transfers up to 40, tells the lives apart.
     let mut pair = pair();
-    assert_eq!(pair.on_hello(hello(72), 1_000), PairEvent::NewLife);
-    assert_eq!(pair.on_hello(hello(73), 1_001), PairEvent::None);
-    assert_eq!(pair.on_hello(hello(74), 1_002), PairEvent::None);
+    assert_eq!(pair.on_hello(hello(72), 0, 1_000), PairEvent::NewLife);
+    pair.note_seq(40);
+    assert_eq!(pair.on_hello(hello(72), 0, 1_040), PairEvent::NewLife);
 }
 
 #[test]
-fn pair_announces_new_life_when_same_uptime_hello_arrives_much_later() {
-    // The restarted C6 booted to the same first hello; only the P4 clock tells them apart.
+fn pair_announces_new_life_when_c6_restarts_in_hello_phase() {
+    // A panic 300 ms in, before the C6 has heard the P4's hello: hellos all the way.
     let mut pair = pair();
-    assert_eq!(pair.on_hello(hello(72), 1_000), PairEvent::NewLife);
-    assert_eq!(pair.on_hello(hello(72), 181_000), PairEvent::NewLife);
+    assert_eq!(pair.on_hello(hello(72), 0, 1_000), PairEvent::NewLife);
+    for seq in 1..=3 {
+        assert_eq!(pair.on_hello(hello(72 + seq), seq, 1_000 + u64::from(seq)), PairEvent::None);
+    }
+    assert_eq!(pair.on_hello(hello(72), 0, 1_300), PairEvent::NewLife);
 }
 
 #[test]
-fn pair_announces_new_life_when_hello_follows_traffic() {
-    // A C6 that left its hello phase only returns to it by restarting.
+fn pair_announces_new_life_when_c6_restarts_long_into_life() {
     let mut pair = pair();
-    assert_eq!(pair.on_hello(hello(72), 1_000), PairEvent::NewLife);
-    pair.note_past_hello();
-    assert_eq!(pair.on_hello(hello(72), 1_200), PairEvent::NewLife);
+    assert_eq!(pair.on_hello(hello(72), 0, 1_000), PairEvent::NewLife);
+    for seq in 1..=100_000 {
+        pair.note_seq(seq);
+    }
+    assert_eq!(pair.on_hello(hello(72), 0, 64_000), PairEvent::NewLife);
 }
 
 #[test]
 fn pair_announces_radio_reset_cause_when_c6_restarts() {
     let mut pair = pair();
-    pair.on_hello(hello(72), 1_000);
+    pair.on_hello(hello(72), 0, 1_000);
     assert_eq!(cause(pair.ready(1_000)), (ResetCause::PowerOn, LoopPhase::Unknown));
-    pair.note_past_hello();
+    pair.note_seq(96_000);
     let mut crashed = hello(72);
     crashed.reset_cause = ResetCause::Watchdog;
     crashed.last_phase = LoopPhase::SpiTransfer;
-    assert_eq!(pair.on_hello(crashed, 60_000), PairEvent::NewLife);
+    assert_eq!(pair.on_hello(crashed, 0, 60_000), PairEvent::NewLife);
     assert_eq!(cause(pair.ready(60_000)), (ResetCause::Watchdog, LoopPhase::SpiTransfer));
 }
 
@@ -295,7 +308,7 @@ fn pair_announces_new_life_when_link_revision_changes() {
     let mut pair = up_pair();
     let mut other = hello(950);
     other.link_rev = LINK_REVISION + 1;
-    assert_eq!(pair.on_hello(other, 1_050), PairEvent::NewLife);
+    assert_eq!(pair.on_hello(other, 1, 1_050), PairEvent::NewLife);
 }
 
 fn radio_status() -> RadioStatus {

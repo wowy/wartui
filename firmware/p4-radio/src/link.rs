@@ -12,8 +12,8 @@
 //! oldest record: the P4 wants the newest frames when it falls behind, as the host does.
 //!
 //! The C6 sends its hello in every transfer until it hears the P4's. The P4 tells a repeat
-//! from a new life by whether this C6 had already moved past its hello, and by the uptime
-//! it carries (`wartui_proto::split`, `Pair::on_hello`).
+//! from a new life by the transfer seq, which starts at 0 on every boot
+//! (`wartui_proto::split`, `Pair::on_hello`).
 
 use core::cell::{Cell, RefCell};
 
@@ -130,7 +130,8 @@ pub struct Link {
     /// Why this life started, and where the last one stopped, for the hello.
     cause: ResetCause,
     phase: LoopPhase,
-    /// This end's seq, +1 per transfer.
+    /// This end's seq, +1 per transfer. From 0 at every boot, which is how the P4 tells a
+    /// restart from a repeated hello.
     seq: u32,
     p4_seq: SeqCheck,
     /// The P4's link revision, once its hello has arrived. Until then every transfer

@@ -13,8 +13,8 @@
 //!
 //! The P4 sends its hello while the C6 is sending its own, and stops once the C6 sends
 //! anything else. The C6 sends its hello until it hears the P4's, so this covers a C6
-//! that restarts under a running P4 as well as the first exchange. The pair hears when the
-//! C6 leaves its hello phase, since a hello after that is a restart.
+//! that restarts under a running P4 as well as the first exchange. The pair hears the seq of
+//! every C6 transfer, since a hello whose seq falls below the last is a restart.
 //!
 //! Records flow only while the C6 speaks this P4's link revision: a C6 that encodes them
 //! differently is sent nothing but `Idle`, and its records are not read.
@@ -135,22 +135,23 @@ impl Link {
             Kind::Hello => {
                 self.owe_hello = true;
                 if let Some(hello) = Hello::decode(transfer.payload) {
-                    let event = shared.pair.borrow_mut().on_hello(hello, crate::now_ms());
+                    let now = crate::now_ms();
+                    let event = shared.pair.borrow_mut().on_hello(hello, transfer.seq, now);
                     if event == PairEvent::NewLife {
                         shared.new_life();
                     }
                 }
             }
             Kind::Messages => {
-                self.past_hello(shared);
+                self.past_hello(transfer.seq, shared);
                 if radio_up(shared) {
                     for record in records(transfer.payload) {
                         self.relay(record, shared);
                     }
                 }
             }
-            Kind::Idle => self.past_hello(shared),
-            Kind::Update => {}
+            Kind::Idle => self.past_hello(transfer.seq, shared),
+            Kind::Update => shared.pair.borrow_mut().note_seq(transfer.seq),
         }
         // Once per change, so a C6 sending garbage costs one line per transfer at most.
         if self.undecoded != self.undecoded_said {
@@ -160,13 +161,11 @@ impl Link {
         }
     }
 
-    /// The C6 sent something other than a hello, so it has heard this end's. The pair
-    /// hears of it once per hello phase.
-    fn past_hello(&mut self, shared: &Shared) {
-        if self.owe_hello {
-            self.owe_hello = false;
-            shared.pair.borrow_mut().note_past_hello();
-        }
+    /// The C6 sent something other than a hello, numbered `seq`, so it has heard this
+    /// end's.
+    fn past_hello(&mut self, seq: u32, shared: &Shared) {
+        self.owe_hello = false;
+        shared.pair.borrow_mut().note_seq(seq);
     }
 
     /// Act on one record from the C6.
