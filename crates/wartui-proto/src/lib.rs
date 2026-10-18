@@ -10,7 +10,8 @@
 //! because a `riscv32imac` binary cannot run a test and this crate can.
 //! [`config`] parses build-time buffer sizes, [`frame_ring`] holds whole frames in a bounded
 //! ring, and [`host_queue`] queues link frames for the P4's USB host port. [`spi`] is the
-//! link between a P4 bridge and the C6 that runs its radio.
+//! link between a P4 bridge and the C6 that runs its radio, and [`split`] holds the P4's
+//! decisions about that C6.
 
 #![no_std]
 
@@ -31,6 +32,7 @@ pub mod pending;
 pub mod plan;
 pub mod reset;
 pub mod spi;
+pub mod split;
 pub mod stall;
 pub mod tx_power;
 
