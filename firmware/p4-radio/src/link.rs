@@ -12,7 +12,8 @@
 //! oldest record: the P4 wants the newest frames when it falls behind, as the host does.
 //!
 //! The C6 sends its hello in every transfer until it hears the P4's. The P4 tells a repeat
-//! from a new life by the uptime it carries (`wartui_proto::split`, `Pair::on_hello`).
+//! from a new life by whether this C6 had already moved past its hello, and by the uptime
+//! it carries (`wartui_proto::split`, `Pair::on_hello`).
 
 use core::cell::{Cell, RefCell};
 
