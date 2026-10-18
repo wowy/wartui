@@ -51,6 +51,25 @@ jobs:
           cargo fmt --all -- --check
           popd
 
+      # Every crate `esp-radio` also depends on must resolve to exactly one
+      # version: a second copy is a duplicate symbol under fat LTO or a second,
+      # empty heap. `firmware/bridge/README.md` § "Dependency versions" has the
+      # reasoning, and `firmware-bridge.yml` the same check.
+      - name: One copy of each esp-radio-pinned crate
+        run: |
+          pushd firmware/p4-radio
+          resolved=$(cargo tree --locked --features esp32c6 -e normal \
+            --prefix none --format '{p}' | awk '{print $1, $2}' | sort -u)
+          for c in esp-alloc esp-hal esp-radio esp-rtos esp-storage esp-sync esp-wifi-sys-esp32c6; do
+            n=$(printf '%s\n' "$resolved" | grep -c "^$c " || true)
+            if [ "$n" != 1 ]; then
+              printf '%s\n' "$resolved" | grep "^$c " || true
+              echo "::error::$c resolves to $n versions, expected exactly 1"
+              exit 1
+            fi
+          done
+          popd
+
       - name: Build
         run: |
           pushd firmware/p4-radio
