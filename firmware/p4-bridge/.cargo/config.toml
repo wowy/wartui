@@ -1,0 +1,10 @@
+[build]
+target = "riscv32imafc-unknown-none-elf"
+rustflags = [
+  # Needed for usable backtraces out of a debugger.
+  "-C", "force-frame-pointers",
+]
+
+[target.riscv32imafc-unknown-none-elf]
+# The board's Type-C reaches the P4's UART0 through a CH343: `--port <that port>`.
+runner = "espflash flash --monitor --chip esp32p4"

@@ -1,0 +1,5 @@
+# The P4 is RISC-V with hardware floats, and this pin keeps it building on stable.
+[toolchain]
+channel = "stable"
+components = ["rust-src"]
+targets = ["riscv32imafc-unknown-none-elf"]
