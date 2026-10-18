@@ -15,8 +15,10 @@ use wartui_proto::config::env_usize;
 /// A full queue evicts its oldest record, counted in `RadioStatus.queues`.
 pub const UP_QUEUE_BYTES: usize = env_usize(option_env!("WARTUI_RADIO_UP_QUEUE_BYTES"), 96 * 1024);
 
-/// The send jobs that can wait for the radio, and the results that can wait for the link.
+/// The radio jobs — sends, and peer and power commands — that can wait for the radio, and
+/// the results that can wait for the link. Named for the queue `wartui status` reports.
 ///
-/// A job that finds the queue full is answered `Rejected` and counted in
-/// `RadioStatus.queues`.
+/// A job that finds the queue full is refused at once (a send `Rejected`, any other with an
+/// `Error` line) and counted in `RadioStatus.queues`. A peer or power command waits for the
+/// jobs ahead of it and then takes microseconds, so it holds a slot only briefly.
 pub const SEND_JOBS: usize = env_usize(option_env!("WARTUI_RADIO_SEND_JOBS"), 4);

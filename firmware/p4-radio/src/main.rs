@@ -6,7 +6,7 @@
 //! traces, with this chip as a 40 MHz SPI slave (`src/link.rs`).
 //!
 //! The ESP-NOW half is [`wartui_firmware::radio`], the single-chip bridge's own, so the two
-//! bridges cannot drift. Three futures share one task: the radio's sends, `hear_loop`
+//! bridges cannot drift. Three futures share one task: the radio's jobs, `hear_loop`
 //! draining the receive queue, and the link. Each waits on an interrupt rather than
 //! polling, but for the one call `src/link.rs` names.
 //!
@@ -36,7 +36,7 @@ use esp_radio::esp_now::{EspNowReceiver, ReceivedData};
 use esp_radio::wifi::{ControllerConfig, Interface, WifiController};
 use static_cell::ConstStaticCell;
 use wartui_firmware::phase::{boot_phase, mark};
-use wartui_firmware::radio::{self, Heard, SendDones, SendJobs};
+use wartui_firmware::radio::{self, Dones, Heard, Jobs};
 use wartui_firmware::{phase, reboot, reset_cause};
 use wartui_proto::frame_ring::FrameRing;
 use wartui_proto::link::LoopPhase;
@@ -82,12 +82,12 @@ static UP_QUEUE: ConstStaticCell<UpQueue> = ConstStaticCell::new(UpQueue::new(Fr
 /// The record that did not fit the last transfer.
 static HELD: ConstStaticCell<[u8; RECORD_MAX]> = ConstStaticCell::new([0; RECORD_MAX]);
 
-/// The send jobs [`radio::run_sends`] works through; each holds a full ESP-NOW v2 payload.
-static SEND_JOBS_QUEUE: ConstStaticCell<SendJobs<SEND_JOBS>> =
-    ConstStaticCell::new(SendJobs::new());
+/// The radio jobs [`radio::run_jobs`] works through; a send job holds a full ESP-NOW v2
+/// payload.
+static JOBS: ConstStaticCell<Jobs<SEND_JOBS>> = ConstStaticCell::new(Jobs::new());
 
-/// What became of each send, waiting for the link.
-static SEND_DONES: ConstStaticCell<SendDones<SEND_JOBS>> = ConstStaticCell::new(SendDones::new());
+/// What became of each job, waiting for the link.
+static DONES: ConstStaticCell<Dones<SEND_JOBS>> = ConstStaticCell::new(Dones::new());
 
 #[esp_rtos::main]
 async fn main(_spawner: embassy_executor::Spawner) -> ! {
@@ -146,15 +146,15 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     for said in setup.said {
         shared.say(said);
     }
-    let mut link = Link::new(boot, mac, cause, last_phase, setup.tx_power, HELD.take());
-    let jobs = SEND_JOBS_QUEUE.take();
-    let dones = SEND_DONES.take();
-    let radio = Radio { controller: &mut controller, manager: &manager, jobs };
+    let mut link = Link::new(boot, mac, cause, last_phase, HELD.take());
+    let jobs = JOBS.take();
+    let dones = DONES.take();
+    let radio = Radio { manager: &manager, jobs };
 
     // Joined rather than spawned: all three borrow the ESP-NOW handles `main` owns, and
     // none ends.
     match join3(
-        radio::run_sends(&manager, &mut sender, jobs, dones),
+        radio::run_jobs(&mut controller, &manager, &mut sender, setup.tx_power, jobs, dones),
         hear_loop(&mut receiver, &shared, boot),
         link_loop(bus, &mut link, &shared, radio, dones),
     )

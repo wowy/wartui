@@ -396,7 +396,7 @@ pub enum BridgeToHost {
 pub enum QueueId {
     /// The C6's receive queue toward the P4. Counts bytes.
     RadioUp,
-    /// The C6's queue of transmit jobs from the P4. Counts entries.
+    /// A bridge radio's queue of jobs: sends, and peer and power commands. Counts entries.
     RadioSendJobs,
     /// The P4's queue of records waiting for a transfer to the C6. Counts bytes.
     RadioDown,

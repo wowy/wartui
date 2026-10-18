@@ -8,7 +8,7 @@
 //! includes the C6's work. The spike measured that work as the link's ceiling.
 //!
 //! Records go up through [`Shared`]'s byte ring, which `hear_loop` in `main.rs` fills from
-//! the radio and [`link_loop`] fills with replies and send results. A full ring evicts its
+//! the radio and [`link_loop`] fills with replies and radio results. A full ring evicts its
 //! oldest record: the P4 wants the newest frames when it falls behind, as the host does.
 //!
 //! The C6 sends its hello in every transfer until it hears the P4's. The P4 tells a repeat
@@ -25,13 +25,12 @@ use esp_hal::gpio::{Input, Output};
 use esp_hal::spi::slave::dma::SpiDma;
 use esp_hal::time::Instant;
 use esp_radio::esp_now::EspNowManager;
-use esp_radio::wifi::WifiController;
 use wartui_firmware::phase::mark;
-use wartui_firmware::radio::{self, Said, SendDone, SendDones, SendJob, SendJobs};
+use wartui_firmware::radio::{self, Done, Dones, Job, Jobs, Said, SendDone};
 use wartui_proto::frame_ring::FrameRing;
 use wartui_proto::heapless::Vec;
 use wartui_proto::link::{
-    BridgeToHost, Chip, HostToBridge, LogStr, LoopPhase, QueueId, QueueStat, SendPayload, ShortStr,
+    BridgeToHost, Chip, HostToBridge, LogStr, LoopPhase, QueueId, QueueStat, ShortStr,
 };
 use wartui_proto::mac::Mac;
 use wartui_proto::reset::ResetCause;
@@ -119,10 +118,9 @@ pub struct Bus<'d> {
 }
 
 /// The radio handles the P4's commands reach.
-pub struct Radio<'a, 'd> {
-    pub controller: &'a mut WifiController<'d>,
+pub struct Radio<'a> {
     pub manager: &'a EspNowManager,
-    pub jobs: &'a SendJobs<SEND_JOBS>,
+    pub jobs: &'a Jobs<SEND_JOBS>,
 }
 
 /// The link's state.
@@ -147,11 +145,9 @@ pub struct Link {
     /// P4 records that did not decode, and how many of them have been reported.
     undecoded: u32,
     undecoded_said: u32,
-    /// The transmit power the radio is known to be at; see `radio::set_tx_power_command`.
-    tx_power: Option<i8>,
-    /// The most send jobs waiting at once.
+    /// The most radio jobs waiting at once.
     send_jobs_high_water: u32,
-    /// Send jobs refused because the queue was full.
+    /// Radio jobs refused because the queue was full.
     send_jobs_dropped: u32,
     /// A record read from the ring that did not fit the last transfer, sent first in the
     /// next. Static, since it holds up to [`RECORD_MAX`] bytes.
@@ -165,7 +161,6 @@ impl Link {
         mac: Mac,
         cause: ResetCause,
         phase: LoopPhase,
-        tx_power: Option<i8>,
         held: &'static mut [u8; RECORD_MAX],
     ) -> Self {
         Self {
@@ -181,7 +176,6 @@ impl Link {
             seq_gap: 0,
             undecoded: 0,
             undecoded_said: 0,
-            tx_power,
             send_jobs_high_water: 0,
             send_jobs_dropped: 0,
             held,
@@ -209,7 +203,7 @@ impl Link {
     }
 
     /// Verify a transfer from the P4 and act on it.
-    fn take(&mut self, buf: &[u8; TRANSFER_LEN], shared: &Shared, radio: &mut Radio<'_, '_>) {
+    fn take(&mut self, buf: &[u8; TRANSFER_LEN], shared: &Shared, radio: &Radio<'_>) {
         let transfer = match verify(buf) {
             Ok(transfer) => transfer,
             Err(VerifyError::BadMagic) => {
@@ -257,55 +251,42 @@ impl Link {
     ///
     /// Out of line: a decoded [`Down`] is 1.5 KB.
     #[inline(never)]
-    fn act(&mut self, record: &[u8], shared: &Shared, radio: &mut Radio<'_, '_>) {
+    fn act(&mut self, record: &[u8], shared: &Shared, radio: &Radio<'_>) {
         let Ok(down) = decode_down(record) else {
             self.undecoded = self.undecoded.wrapping_add(1);
             return;
         };
         match &down {
             Down::GetRadioStatus => shared.push(&Up::RadioStatus(self.status(shared, radio))),
-            Down::Command(HostToBridge::AddPeer { mac }) => {
-                shared.say(radio::add_peer_command(radio.manager, mac));
-            }
-            Down::Command(HostToBridge::RemovePeer { mac }) => {
-                shared.say(radio::remove_peer_command(radio.manager, mac));
-            }
-            &Down::Command(HostToBridge::SetTxPower { power }) => {
-                let said = radio::set_tx_power_command(radio.controller, power, &mut self.tx_power);
-                shared.say(said);
-            }
-            &Down::Command(HostToBridge::SendEspNow { id, dst, ensure_peer, ref payload }) => {
-                self.queue_send(id, dst, ensure_peer, payload, shared, radio);
-            }
-            // The P4 answers the rest itself.
-            Down::Command(_) => {}
+            Down::Command(command) => self.queue_command(command, shared, radio),
         }
     }
 
-    /// Hand one send to `radio::run_sends`. A full queue is answered `Rejected` now.
+    /// Hand a radio command to `radio::run_jobs`, which keeps the order commands arrive in.
+    /// A full queue is answered now, and counted. The P4 answers every other command itself.
     ///
-    /// Out of line for the reason [`Link::act`] is: the job holds a 1470-byte payload.
+    /// Out of line for the reason [`Link::act`] is: a send's job holds a 1470-byte payload.
     #[inline(never)]
-    fn queue_send(
-        &mut self,
-        id: u16,
-        dst: Mac,
-        ensure_peer: bool,
-        payload: &SendPayload,
-        shared: &Shared,
-        radio: &Radio<'_, '_>,
-    ) {
-        let job = SendJob { id, dst, ensure_peer, payload: payload.clone() };
-        if let Some(refused) = radio::queue_send(radio.jobs, job) {
+    fn queue_command(&mut self, command: &HostToBridge, shared: &Shared, radio: &Radio<'_>) {
+        let job = match *command {
+            HostToBridge::AddPeer { mac } => Job::AddPeer(mac),
+            HostToBridge::RemovePeer { mac } => Job::RemovePeer(mac),
+            HostToBridge::SetTxPower { power } => Job::SetTxPower(power),
+            HostToBridge::SendEspNow { id, dst, ensure_peer, ref payload } => {
+                Job::Send { id, dst, ensure_peer, payload: payload.clone() }
+            }
+            _ => return,
+        };
+        if let Some(refused) = radio::queue_job(radio.jobs, job) {
             self.send_jobs_dropped = self.send_jobs_dropped.wrapping_add(1);
-            self.report_send(&refused, shared);
+            self.report(&refused, shared);
         }
         let waiting = u32::try_from(radio.jobs.len()).unwrap_or(u32::MAX);
         self.send_jobs_high_water = self.send_jobs_high_water.max(waiting);
     }
 
     /// The counters the P4 folds into the host's `Status`.
-    fn status(&self, shared: &Shared, radio: &Radio<'_, '_>) -> RadioStatus {
+    fn status(&self, shared: &Shared, radio: &Radio<'_>) -> RadioStatus {
         let peer_count = radio
             .manager
             .peer_count()
@@ -348,10 +329,18 @@ impl Link {
         }));
     }
 
-    /// Queue every send `radio::run_sends` has finished.
-    fn take_send_results(&self, dones: &SendDones<SEND_JOBS>, shared: &Shared) {
+    /// Queue what became of one radio job.
+    fn report(&self, done: &Done, shared: &Shared) {
+        match done {
+            Done::Sent(sent) => self.report_send(sent, shared),
+            &Done::Said(said) => shared.say(said),
+        }
+    }
+
+    /// Queue every job `radio::run_jobs` has finished.
+    fn take_results(&self, dones: &Dones<SEND_JOBS>, shared: &Shared) {
         while let Ok(done) = dones.try_receive() {
-            self.report_send(&done, shared);
+            self.report(&done, shared);
         }
     }
 
@@ -394,8 +383,8 @@ pub async fn link_loop(
     bus: Bus<'_>,
     link: &mut Link,
     shared: &Shared,
-    mut radio: Radio<'_, '_>,
-    dones: &SendDones<SEND_JOBS>,
+    radio: Radio<'_>,
+    dones: &Dones<SEND_JOBS>,
 ) -> ! {
     let Bus {
         mut spi,
@@ -420,9 +409,9 @@ pub async fn link_loop(
         let work = async {
             ready.set_high();
             if received {
-                link.take(rx_bytes(&rx_last), shared, &mut radio);
+                link.take(rx_bytes(&rx_last), shared, &radio);
             }
-            link.take_send_results(dones, shared);
+            link.take_results(dones, shared);
             link.prepare(tx_bytes(&mut tx_spare), shared);
             mark(LoopPhase::SpiTransfer);
         };

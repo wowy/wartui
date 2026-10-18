@@ -22,7 +22,8 @@
 //! assignment from a hopeful one. Peers are added on demand and removed when the host
 //! says so (`RemovePeer`). The radio half is [`wartui_firmware::radio`], shared with every
 //! firmware that bridges a radio; sends run there in their own future, so the loop goes on
-//! draining the radio while one is in flight.
+//! draining the radio while one is in flight. Peer and power commands queue behind sends,
+//! so the radio acts in link order.
 //!
 //! `README.md` has the flashing commands and the `esp-*` dependency set.
 #![no_std]
@@ -57,14 +58,14 @@ use esp_radio::esp_now::{EspNowManager, EspNowReceiver, ReceivedData};
 use esp_radio::wifi::WifiController;
 use static_cell::{ConstStaticCell, StaticCell};
 use wartui_firmware::phase::{boot_phase, boot_speaks_first, mark};
-use wartui_firmware::radio::{self, Heard, Said, SendDone, SendDones, SendJob, SendJobs};
+use wartui_firmware::radio::{self, Done, Dones, Heard, Job, Jobs, Said, SendDone};
 use wartui_firmware::{phase, reboot, reset_cause};
 #[cfg(feature = "t-dongle-c5-gps")]
 use wartui_proto::link::GpsWriteBytes;
 use wartui_proto::link::{
     BridgeToHost, Chip, FrameAccumulator, HostToBridge, LINK_PROTO_VERSION, LinkBurst, LinkError,
     LogLevel, LogStr, LoopPhase, MAX_HOST_FRAME, Panel, PanelLines, QueueId, QueueStat, QueueStats,
-    SendPayload, ShortStr, decode_frame,
+    ShortStr, decode_frame,
 };
 use wartui_proto::mac::Mac;
 use wartui_proto::outbox::{ByteSink, Outbox};
@@ -154,7 +155,7 @@ enum Woken {
     Frame(ReceivedData),
     Link(usize),
     Drained,
-    Sent(SendDone),
+    Done(Done),
     /// The GPS task finished a batch.
     #[cfg(feature = "t-dongle-c5-gps")]
     Gps,
@@ -249,14 +250,13 @@ static ACCUMULATOR: StaticCell<FrameAccumulator<MAX_HOST_FRAME>> = StaticCell::n
 /// frame sits at `.clippy.toml`'s threshold on the C5.
 static LINK_BUF: StaticCell<[u8; LINK_CHUNK]> = StaticCell::new();
 
-/// The send jobs [`radio::run_sends`] works through. Static for the reason `LINK_BUF` is,
-/// and each job holds a full ESP-NOW v2 payload. Built at compile time, so it is never on
+/// The radio jobs [`radio::run_jobs`] works through. Static for the reason `LINK_BUF` is,
+/// and a send job holds a full ESP-NOW v2 payload. Built at compile time, so it is never on
 /// the stack at all.
-static SEND_JOBS_QUEUE: ConstStaticCell<SendJobs<SEND_JOBS>> =
-    ConstStaticCell::new(SendJobs::new());
+static JOBS: ConstStaticCell<Jobs<SEND_JOBS>> = ConstStaticCell::new(Jobs::new());
 
-/// What became of each send, waiting for the loop to report it.
-static SEND_DONES: ConstStaticCell<SendDones<SEND_JOBS>> = ConstStaticCell::new(SendDones::new());
+/// What became of each job, waiting for the loop to report it.
+static DONES: ConstStaticCell<Dones<SEND_JOBS>> = ConstStaticCell::new(Dones::new());
 
 /// The bridge's state, static for the reason `LINK_BUF` is: as a local of `main` it
 /// sits in the poll frame across every `.await`, and once `StallWatch` grew a third
@@ -271,9 +271,9 @@ struct Bridge {
     rx_count: u32,
     /// Received frames too long to be a node's, dropped rather than forwarded.
     rx_oversize: u32,
-    /// The most send jobs waiting at once, for `Status.queues`.
+    /// The most radio jobs waiting at once, for `Status.queues`.
     send_jobs_high_water: u32,
-    /// Send jobs refused because the queue was full.
+    /// Radio jobs refused because the queue was full.
     send_jobs_dropped: u32,
     boot: Instant,
     /// Why this life started, and where the last one stopped. Fixed at boot
@@ -302,13 +302,6 @@ struct Bridge {
     /// whose screen is dead tells the host there is no screen rather than inviting a
     /// line a second at one. What is announced has to be what is true.
     panel: Option<Panel>,
-    /// The transmit power the radio is known to be at, or `None` when the boot attempt
-    /// was refused and what it is at is anyone's guess.
-    ///
-    /// Held so that `SetTxPower` — which the host repeats with every status poll,
-    /// because a dropped one would be silent — logs a power that changed rather than a
-    /// line every interval.
-    tx_power: Option<i8>,
     /// Why there is no screen on a board built to have one.
     ///
     /// Sent with every announcement rather than once. A host is usually not
@@ -452,9 +445,17 @@ impl Bridge {
         }
     }
 
+    /// Report what became of one radio job.
+    fn report(&mut self, done: &Done) {
+        match done {
+            Done::Sent(sent) => self.report_send(sent),
+            &Done::Said(said) => self.say(said),
+        }
+    }
+
     /// Report what became of one send.
     ///
-    /// `tx_us` is on this bridge's clock: when `radio::run_sends` saw the transmit callback,
+    /// `tx_us` is on this bridge's clock: when `radio::run_jobs` saw the transmit callback,
     /// which can trail it (see `SendDone::done_at`), or when a full queue refused the job.
     fn report_send(&mut self, done: &SendDone) {
         let tx_us = (done.done_at - self.boot).as_micros() as u32;
@@ -510,9 +511,9 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
         esp_radio::wifi::ControllerConfig::default().with_country_info(*b"US"),
     )
     .expect("Wi-Fi controller");
-    // Split rather than kept whole: the sender goes to `radio::run_sends`, so a transmit
-    // never borrows the receive path. The controller stays in `main`: the ESP-NOW handles
-    // do not borrow it.
+    // Split rather than kept whole: the sender goes to `radio::run_jobs`, so a transmit
+    // never borrows the receive path. The controller goes there too, for `SetTxPower`: the
+    // ESP-NOW handles do not borrow it.
     let (manager, mut sender, receiver) = controller.esp_now().split();
     // Before the first frame. Its failures are reported behind `Ready`, once the outbox
     // exists to carry them.
@@ -540,7 +541,6 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
         #[cfg(feature = "t-dongle-c5-gps")]
         gps_answered: true,
         gps_fault: None,
-        tx_power: setup.tx_power,
     });
     // Ahead of every frame this life sends, whenever transmit opens. The ROM banner
     // a reset prints has no `0x00` in it and overflows the host's frame buffer, so
@@ -590,12 +590,11 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
         bridge.say(said);
     }
 
-    let jobs = SEND_JOBS_QUEUE.take();
-    let dones = SEND_DONES.take();
+    let jobs = JOBS.take();
+    let dones = DONES.take();
     let looped = main_loop(
         &mut usb_rx,
         &mut sink,
-        &mut controller,
         &manager,
         receiver,
         #[cfg(feature = "t-dongle-c5")]
@@ -607,25 +606,25 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     );
     // Joined rather than spawned: both halves borrow the ESP-NOW handles `main` owns, and
     // neither ends.
-    match join(looped, radio::run_sends(&manager, &mut sender, jobs, dones)).await {}
+    let ran = radio::run_jobs(&mut controller, &manager, &mut sender, setup.tx_power, jobs, dones);
+    match join(looped, ran).await {}
 }
 
 /// Everything the bridge does but transmit, forever: drain the radio and the link, report
-/// finished sends, and wait when there is nothing to do.
+/// finished jobs, and wait when there is nothing to do.
 // Each argument is a handle `main` holds, and bundling them would put a struct in its
 // poll frame.
 #[allow(clippy::too_many_arguments)]
 async fn main_loop(
     usb_rx: &mut UsbSerialJtagRx<'_, Async>,
     sink: &mut UsbSink<'_>,
-    controller: &mut WifiController<'_>,
     manager: &EspNowManager,
     mut receiver: EspNowReceiver,
     #[cfg(feature = "t-dongle-c5")] mut screen: Option<&mut panel::Screen>,
     bridge: &mut Bridge,
     mac: Mac,
-    jobs: &SendJobs<SEND_JOBS>,
-    dones: &SendDones<SEND_JOBS>,
+    jobs: &Jobs<SEND_JOBS>,
+    dones: &Dones<SEND_JOBS>,
 ) -> ! {
     let link_buf = LINK_BUF.init_with(|| [0; LINK_CHUNK]);
     // True only on the pass straight after a wait the tick ended.
@@ -638,9 +637,8 @@ async fn main_loop(
         let mut worked = false;
         mark(LoopPhase::DrainRadio);
         worked |= drain_radio(&receiver, bridge);
-        worked |= take_send_results(dones, bridge);
-        let link =
-            link_burst(usb_rx, link_buf, sink, controller, manager, jobs, bridge, mac, link_woke);
+        worked |= take_results(dones, bridge);
+        let link = link_burst(usb_rx, link_buf, sink, manager, jobs, bridge, mac, link_woke);
         worked |= link.moved;
         link_woke = false;
 
@@ -658,7 +656,7 @@ async fn main_loop(
         #[cfg(feature = "t-dongle-c5")]
         {
             if let Some(screen) = screen.as_mut() {
-                // A repaint holds the loop for up to 36 ms, so a send queued above starts
+                // A repaint holds the loop for up to 36 ms, so a job queued above starts
                 // first. Only `quiet` passes can repaint, which keeps this off busy ones.
                 if quiet && !jobs.is_empty() {
                     yield_now().await;
@@ -697,28 +695,28 @@ async fn main_loop(
             }
             if let Idled::Read(read) = idled {
                 mark(LoopPhase::DrainLink);
-                take_link_bytes(&link_buf[..read], controller, manager, jobs, bridge, mac);
+                take_link_bytes(&link_buf[..read], manager, jobs, bridge, mac);
                 link_woke = true;
             }
         } else if !jobs.is_empty() {
-            // A busy pass awaits nothing else, and `radio::run_sends` runs only while this
-            // future is pending. A waiting send needs that poll; yielding on every pass
+            // A busy pass awaits nothing else, and `radio::run_jobs` runs only while this
+            // future is pending. A waiting job needs that poll; yielding on every pass
             // regardless costs drain time under a burst.
             yield_now().await;
         }
     }
 }
 
-/// Wait for a received frame, a host command, the FIFO emptying, a finished send, a
+/// Wait for a received frame, a host command, the FIFO emptying, a finished job, a
 /// finished GPS batch or the tick, and say which it was.
 ///
-/// A frame or a finished send that ends the wait is reported here and the host's bytes
+/// A frame or a finished job that ends the wait is reported here and the host's bytes
 /// are handed back, each as soon as it is taken: it is older than anything the next pass's
 /// drains find behind it, so order holds. Both halves live outside `main_loop`'s poll
 /// frame, which sits at `.clippy.toml`'s threshold on the C5 and has no room for a
 /// [`ReceivedData`].
 ///
-/// Every arm is cancel-safe: the radio's queue, the USB FIFO and the send results give up
+/// Every arm is cancel-safe: the radio's queue, the USB FIFO and the job results give up
 /// an item only in the poll that returns it, the flush holds no bytes, and the GPS channel
 /// gives up a batch only at `receive_done`, which only [`take_gps`] calls.
 ///
@@ -730,7 +728,7 @@ async fn idle_wait(
     link_buf: &mut [u8; LINK_CHUNK],
     usb_tx: &mut UsbSerialJtagTx<'_, Async>,
     queued: bool,
-    dones: &SendDones<SEND_JOBS>,
+    dones: &Dones<SEND_JOBS>,
     bridge: &mut Bridge,
 ) -> Idled {
     let radio = async { Woken::Frame(receiver.receive_async().await) };
@@ -759,7 +757,7 @@ async fn idle_wait(
         }
         core::future::pending::<Woken>().await
     };
-    let sent = async { Woken::Sent(dones.receive().await) };
+    let sent = async { Woken::Done(dones.receive().await) };
     let woken =
         match select4(radio, link, flushed, select3(sent, gps, Timer::after(IDLE_TICK))).await {
             Either4::First(woken)
@@ -783,8 +781,8 @@ async fn idle_wait(
         }
         // An error reads nothing, which is no evidence of quiet air.
         Woken::Link(read) if read > 0 => Idled::Read(read),
-        Woken::Sent(done) => {
-            bridge.report_send(&done);
+        Woken::Done(done) => {
+            bridge.report(&done);
             Idled::Busy
         }
         Woken::Link(_) | Woken::Drained => Idled::Busy,
@@ -823,12 +821,12 @@ fn forward(received: &ReceivedData, bridge: &mut Bridge) {
     }
 }
 
-/// Report every send [`radio::run_sends`] has finished. Says whether there was one.
-fn take_send_results(dones: &SendDones<SEND_JOBS>, bridge: &mut Bridge) -> bool {
+/// Report every job [`radio::run_jobs`] has finished. Says whether there was one.
+fn take_results(dones: &Dones<SEND_JOBS>, bridge: &mut Bridge) -> bool {
     let mut worked = false;
     while let Ok(done) = dones.try_receive() {
         worked = true;
-        bridge.report_send(&done);
+        bridge.report(&done);
     }
     worked
 }
@@ -897,8 +895,8 @@ struct LinkMoved {
 ///
 /// The polling is bounded by `BURST_BUDGET_US`, which keeps a host that never stops
 /// writing out of the radio's receive queue. A frame a poll completes is acted on inside
-/// the burst and adds its own time. A `SendEspNow` adds only its hand-off to
-/// [`radio::run_sends`]. Neither is a wait on the host, which is what neither firmware may
+/// the burst and adds its own time. A radio command adds only its hand-off to
+/// [`radio::run_jobs`]. Neither is a wait on the host, which is what neither firmware may
 /// do to the USB endpoint.
 ///
 /// [`StallWatch`] sees `wrote_since_read`. Host bytes read prove a host, not a draining
@@ -918,9 +916,8 @@ fn link_burst(
     usb_rx: &mut UsbSerialJtagRx<'_, Async>,
     link_buf: &mut [u8; LINK_CHUNK],
     sink: &mut UsbSink<'_>,
-    controller: &mut WifiController<'_>,
     manager: &EspNowManager,
-    jobs: &SendJobs<SEND_JOBS>,
+    jobs: &Jobs<SEND_JOBS>,
     bridge: &mut Bridge,
     mac: Mac,
     link_woke: bool,
@@ -931,7 +928,7 @@ fn link_burst(
     loop {
         mark(LoopPhase::DrainLink);
         let read = usb_rx.drain_rx_fifo(link_buf);
-        take_link_bytes(&link_buf[..read], controller, manager, jobs, bridge, mac);
+        take_link_bytes(&link_buf[..read], manager, jobs, bridge, mac);
 
         // Asked again: the bytes just read may hold the first host frame of this life.
         let wrote = bridge.transmit_open() && {
@@ -963,14 +960,13 @@ fn link_burst(
 /// Feed bytes from the host to the accumulator, acting on each frame they complete.
 fn take_link_bytes(
     bytes: &[u8],
-    controller: &mut WifiController<'_>,
     manager: &EspNowManager,
-    jobs: &SendJobs<SEND_JOBS>,
+    jobs: &Jobs<SEND_JOBS>,
     bridge: &mut Bridge,
     mac: Mac,
 ) {
     for &byte in bytes {
-        take_link_byte(byte, controller, manager, jobs, bridge, mac);
+        take_link_byte(byte, manager, jobs, bridge, mac);
     }
 }
 
@@ -980,9 +976,8 @@ fn take_link_bytes(
 #[inline(never)]
 fn take_link_byte(
     byte: u8,
-    controller: &mut WifiController<'_>,
     manager: &EspNowManager,
-    jobs: &SendJobs<SEND_JOBS>,
+    jobs: &Jobs<SEND_JOBS>,
     bridge: &mut Bridge,
     mac: Mac,
 ) {
@@ -999,7 +994,7 @@ fn take_link_byte(
                 command.asks_for_reply(),
                 matches!(command, HostToBridge::Identify),
             );
-            handle(&command, controller, manager, jobs, bridge, mac);
+            handle(&command, manager, jobs, bridge, mac);
         }
         Err(err) => {
             // A frame that passed framing and its checksum but carries another
@@ -1040,9 +1035,8 @@ fn note_host_frame(bridge: &mut Bridge, mac: Mac, asks: bool, identify: bool) {
 /// copy in this frame on top of the one `take_link_byte` decoded.
 fn handle(
     command: &HostToBridge,
-    controller: &mut WifiController<'_>,
     manager: &EspNowManager,
-    jobs: &SendJobs<SEND_JOBS>,
+    jobs: &Jobs<SEND_JOBS>,
     bridge: &mut Bridge,
     mac: Mac,
 ) {
@@ -1074,45 +1068,38 @@ fn handle(
 
         HostToBridge::GpsWrite { bytes } => bridge.write_gps(bytes),
 
-        &HostToBridge::SetTxPower { power } => {
-            let said = radio::set_tx_power_command(controller, power, &mut bridge.tx_power);
-            bridge.say(said);
-        }
-
-        &HostToBridge::SendEspNow { id, dst, ensure_peer, ref payload } => {
-            queue_send(jobs, bridge, id, dst, ensure_peer, payload);
-        }
-
-        HostToBridge::AddPeer { mac } => bridge.say(radio::add_peer_command(manager, mac)),
-
-        HostToBridge::RemovePeer { mac } => bridge.say(radio::remove_peer_command(manager, mac)),
+        HostToBridge::SetTxPower { .. }
+        | HostToBridge::SendEspNow { .. }
+        | HostToBridge::AddPeer { .. }
+        | HostToBridge::RemovePeer { .. } => queue_command(command, jobs, bridge),
     }
 }
 
-/// Hand one send to [`radio::run_sends`], whose result a later pass reports. A full queue
-/// is answered `Rejected` now.
+/// Hand a radio command to [`radio::run_jobs`], which keeps the order commands arrive in
+/// and whose result a later pass reports. A full queue is answered now, and counted.
 ///
-/// Out of line for the reason [`forward`] is: the job holds a 1470-byte payload, on top of
-/// the `HostToBridge` the caller decoded.
+/// Out of line for the reason [`forward`] is: a send's job holds a 1470-byte payload, on
+/// top of the `HostToBridge` the caller decoded.
 #[inline(never)]
-fn queue_send(
-    jobs: &SendJobs<SEND_JOBS>,
-    bridge: &mut Bridge,
-    id: u16,
-    dst: Mac,
-    ensure_peer: bool,
-    payload: &SendPayload,
-) {
-    let job = SendJob { id, dst, ensure_peer, payload: payload.clone() };
-    if let Some(refused) = radio::queue_send(jobs, job) {
+fn queue_command(command: &HostToBridge, jobs: &Jobs<SEND_JOBS>, bridge: &mut Bridge) {
+    let job = match *command {
+        HostToBridge::SetTxPower { power } => Job::SetTxPower(power),
+        HostToBridge::AddPeer { mac } => Job::AddPeer(mac),
+        HostToBridge::RemovePeer { mac } => Job::RemovePeer(mac),
+        HostToBridge::SendEspNow { id, dst, ensure_peer, ref payload } => {
+            Job::Send { id, dst, ensure_peer, payload: payload.clone() }
+        }
+        _ => return,
+    };
+    if let Some(refused) = radio::queue_job(jobs, job) {
         bridge.send_jobs_dropped = bridge.send_jobs_dropped.wrapping_add(1);
-        bridge.report_send(&refused);
+        bridge.report(&refused);
     }
     let waiting = u32::try_from(jobs.len()).unwrap_or(u32::MAX);
     bridge.send_jobs_high_water = bridge.send_jobs_high_water.max(waiting);
 }
 
-/// The send-job queue's depth, for `Status.queues`.
+/// The radio-job queue's depth, for `Status.queues`.
 fn send_queue_stats(bridge: &Bridge) -> QueueStats {
     let mut queues = QueueStats::new();
     let _ = queues.push(QueueStat {

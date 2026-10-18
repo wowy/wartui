@@ -9,11 +9,16 @@
 //! The functions return what to say as a [`Said`] rather than saying it, because each
 //! caller has its own way to reach the host.
 //!
-//! A send runs in its own future, [`run_sends`], joined with the caller's loop. Its
+//! A send runs in its own future, [`run_jobs`], joined with the caller's loop. Its
 //! transmit callback takes 2–4 ms when acknowledged and up to 35 ms when not, and
 //! `esp-radio`'s receive queue holds ten frames and drops the oldest when full. So nothing
-//! here blocks while a send is in flight: [`queue_send`] hands the job over without waiting,
-//! the loop goes on draining the receive queue, and the result comes back as a [`SendDone`].
+//! here blocks while a send is in flight: [`queue_job`] hands the job over without waiting,
+//! the loop goes on draining the receive queue, and the result comes back as a [`Done`].
+//!
+//! Peer and transmit-power commands take the same queue, though each is a call of
+//! microseconds. The host orders them against its sends: a peer removed behind a send to
+//! it, or a send meant for the power before a change, depends on the radio acting in the
+//! order the link delivered.
 //!
 //! The air is plaintext ESP-NOW in both directions: no pairing handshake and no key
 //! ([`peer`]).
@@ -165,65 +170,112 @@ pub fn hear(received: &ReceivedData, rx_us: u32, forward: impl FnOnce(&BridgeToH
     Heard::Forwarded
 }
 
-/// One frame the host asked to put on the air.
-pub struct SendJob {
-    /// The host's id for the send, echoed in its result.
-    pub id: u16,
-    pub dst: Mac,
-    /// Add `dst` as a peer if it is not one.
-    pub ensure_peer: bool,
-    pub payload: SendPayload,
+/// One thing the host asked of the radio, in the order it arrived.
+// A send inlines its payload, and nothing on this path may allocate to box it: the
+// queue's slots are sized for a send either way.
+#[allow(clippy::large_enum_variant)]
+pub enum Job {
+    /// One frame to put on the air.
+    Send {
+        /// The host's id for the send, echoed in its result.
+        id: u16,
+        dst: Mac,
+        /// Add `dst` as a peer if it is not one.
+        ensure_peer: bool,
+        payload: SendPayload,
+    },
+    /// The host's `AddPeer`, through [`add_peer_command`].
+    AddPeer(Mac),
+    /// The host's `RemovePeer`, through [`remove_peer_command`].
+    RemovePeer(Mac),
+    /// The host's `SetTxPower`, through [`set_tx_power_command`].
+    SetTxPower(i8),
 }
 
-/// What became of a [`SendJob`].
+/// What became of a [`Job`].
+pub enum Done {
+    /// A send's result, for a `SendResult`.
+    Sent(SendDone),
+    /// What a peer or power command had to say.
+    Said(Said),
+}
+
+/// What became of a [`Job::Send`].
 pub struct SendDone {
     pub id: u16,
     pub status: SendStatus,
-    /// When [`run_sends`] saw the transmit callback, or when the job was refused.
+    /// When [`run_jobs`] saw the transmit callback, or when the job was refused.
     pub done_at: Instant,
 }
 
-/// The jobs waiting for [`run_sends`].
-pub type SendJobs<const N: usize> = Channel<NoopRawMutex, SendJob, N>;
+/// The jobs waiting for [`run_jobs`].
+pub type Jobs<const N: usize> = Channel<NoopRawMutex, Job, N>;
 
 /// The results waiting for the caller's loop.
-pub type SendDones<const N: usize> = Channel<NoopRawMutex, SendDone, N>;
+pub type Dones<const N: usize> = Channel<NoopRawMutex, Done, N>;
 
-/// Hand a job to [`run_sends`] without waiting.
+/// Hand a job to [`run_jobs`] without waiting.
 ///
-/// A full queue refuses it, and the refusal comes back as a `Rejected` [`SendDone`] for
-/// the caller to report like any other result.
-pub fn queue_send<const N: usize>(jobs: &SendJobs<N>, job: SendJob) -> Option<SendDone> {
+/// A full queue refuses it, and the refusal comes back as a [`Done`] for the caller to
+/// report like any other result: a `Rejected` send, or an `Error` line for a peer or power
+/// command, which the host would otherwise never learn it lost.
+pub fn queue_job<const N: usize>(jobs: &Jobs<N>, job: Job) -> Option<Done> {
     match jobs.try_send(job) {
         Ok(()) => None,
-        Err(TrySendError::Full(job)) => {
-            Some(SendDone { id: job.id, status: SendStatus::Rejected, done_at: Instant::now() })
-        }
+        Err(TrySendError::Full(job)) => Some(match job {
+            Job::Send { id, .. } => {
+                Done::Sent(SendDone { id, status: SendStatus::Rejected, done_at: Instant::now() })
+            }
+            Job::AddPeer(_) => {
+                Done::Said(Said::Error("could not add that peer: the queue was full"))
+            }
+            Job::RemovePeer(_) => {
+                Done::Said(Said::Error("could not remove that peer: the queue was full"))
+            }
+            Job::SetTxPower(_) => {
+                Done::Said(Said::Error("could not set the transmit power: the queue was full"))
+            }
+        }),
     }
 }
 
-/// Put every queued job on the air, one at a time, and report each result.
+/// Carry out every queued job, one at a time and in order, and report each result.
 ///
-/// Answers with the *transmit-callback* status rather than the enqueue result.
+/// A send answers with the *transmit-callback* status rather than the enqueue result.
 /// `esp_now_send`'s return value says only that a frame was enqueued; unicast ESP-NOW is
 /// MAC-acknowledged, so waiting for the callback turns a guess about delivery into a
 /// fact. The wait is an `.await`, so the caller's loop runs while it lasts.
-pub async fn run_sends<const N: usize>(
+///
+/// `tx_power` is what [`setup`] left the radio at. It lives here, beside the only call
+/// that changes it.
+pub async fn run_jobs<const N: usize>(
+    controller: &mut WifiController<'_>,
     manager: &EspNowManager,
     sender: &mut EspNowSender,
-    jobs: &SendJobs<N>,
-    done: &SendDones<N>,
+    mut tx_power: Option<i8>,
+    jobs: &Jobs<N>,
+    done: &Dones<N>,
 ) -> ! {
     loop {
-        let job = jobs.receive().await;
-        let status = transmit(manager, sender, &job.dst, job.ensure_peer, &job.payload).await;
-        // Stamped *after* the transmit callback, not before the send, but only when this
-        // future is next polled: at the caller's next await. The bridge's loop awaits when
-        // it idles, and on a busy pass only while a send waits, so under a burst the stamp
-        // trails the callback until the loop next idles. A T-Dongle-C5 repaint adds up to
-        // 36 ms. Against the `rx_us` of the heartbeat that opened the window, this bounds
-        // from above the time from "the node is listening" to "the radio says it has it".
-        done.send(SendDone { id: job.id, status, done_at: Instant::now() }).await;
+        let result = match jobs.receive().await {
+            Job::Send { id, dst, ensure_peer, payload } => {
+                let status = transmit(manager, sender, &dst, ensure_peer, &payload).await;
+                // Stamped *after* the transmit callback, not before the send, but only when
+                // this future is next polled: at the caller's next await. The bridge's loop
+                // awaits when it idles, and on a busy pass only while a job waits, so under a
+                // burst the stamp trails the callback until the loop next idles. A
+                // T-Dongle-C5 repaint adds up to 36 ms. Against the `rx_us` of the heartbeat
+                // that opened the window, this bounds from above the time from "the node is
+                // listening" to "the radio says it has it".
+                Done::Sent(SendDone { id, status, done_at: Instant::now() })
+            }
+            Job::AddPeer(mac) => Done::Said(add_peer_command(manager, &mac)),
+            Job::RemovePeer(mac) => Done::Said(remove_peer_command(manager, &mac)),
+            Job::SetTxPower(power) => {
+                Done::Said(set_tx_power_command(controller, power, &mut tx_power))
+            }
+        };
+        done.send(result).await;
     }
 }
 
