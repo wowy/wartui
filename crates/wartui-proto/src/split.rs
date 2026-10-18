@@ -261,13 +261,24 @@ impl Pair {
             | HostToBridge::Reset
             | HostToBridge::ShowPanel { .. }
             | HostToBridge::GpsWrite { .. } => Route::Local,
-            _ if matches!(self.state, RadioState::Up(_)) => Route::Forward,
+            // Listed rather than caught, so a new command is a compile error until it is
+            // placed.
+            HostToBridge::SendEspNow { .. }
+            | HostToBridge::AddPeer { .. }
+            | HostToBridge::RemovePeer { .. }
+            | HostToBridge::SetTxPower { .. }
+                if matches!(self.state, RadioState::Up(_)) =>
+            {
+                Route::Forward
+            }
             HostToBridge::SendEspNow { id, .. } => Route::Refuse(Some(BridgeToHost::SendResult {
                 id: *id,
                 status: SendStatus::Rejected,
                 tx_us: 0,
             })),
-            _ => Route::Refuse(None),
+            HostToBridge::AddPeer { .. }
+            | HostToBridge::RemovePeer { .. }
+            | HostToBridge::SetTxPower { .. } => Route::Refuse(None),
         }
     }
 

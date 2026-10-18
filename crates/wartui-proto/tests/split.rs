@@ -271,6 +271,26 @@ fn pair_announces_radio_reset_cause_when_c6_restarts() {
 }
 
 #[test]
+fn pair_routes_panel_and_gps_local() {
+    for pair in [pair(), up_pair()] {
+        let panel = HostToBridge::ShowPanel { lines: Vec::new() };
+        assert_eq!(pair.route(&panel), Route::Local);
+        let gps = HostToBridge::GpsWrite { bytes: Vec::from_slice(&[0xb5, 0x62]).unwrap() };
+        assert_eq!(pair.route(&gps), Route::Local);
+    }
+}
+
+#[test]
+fn pair_refuses_peer_commands_silently_when_radio_not_up() {
+    let mut absent = pair();
+    absent.on_tick(RADIO_WAIT_MS);
+    for pair in [pair(), absent] {
+        assert_eq!(pair.route(&HostToBridge::AddPeer { mac: [2; 6] }), Route::Refuse(None));
+        assert_eq!(pair.route(&HostToBridge::RemovePeer { mac: [2; 6] }), Route::Refuse(None));
+    }
+}
+
+#[test]
 fn pair_announces_new_life_when_link_revision_changes() {
     let mut pair = up_pair();
     let mut other = hello(950);
