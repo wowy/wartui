@@ -203,3 +203,59 @@ fn pair_status_sums_host_and_radio_drops() {
         other => panic!("not a Status: {other:?}"),
     }
 }
+
+#[test]
+fn pair_ignores_repeated_hellos_from_same_life() {
+    let mut pair = pair();
+    assert_eq!(pair.on_hello(hello(900), 1_000), PairEvent::NewLife);
+    pair.note_radio_status(radio_status());
+    assert_eq!(pair.on_hello(hello(901), 1_001), PairEvent::None);
+    assert_eq!(pair.on_hello(hello(902), 1_002), PairEvent::None);
+    assert_eq!(uptime(pair.ready(1_002)), 902);
+    match pair.status(
+        1_002,
+        [stat(QueueId::HostPriority, 0), stat(QueueId::HostBulk, 0)],
+        stat(QueueId::RadioDown, 0),
+        spi_zero(),
+        0,
+    ) {
+        BridgeToHost::Status { peer_count, .. } => assert_eq!(peer_count, 3),
+        other => panic!("not a Status: {other:?}"),
+    }
+}
+
+#[test]
+fn pair_announces_new_life_when_link_revision_changes() {
+    let mut pair = up_pair();
+    let mut other = hello(950);
+    other.link_rev = LINK_REVISION + 1;
+    assert_eq!(pair.on_hello(other, 1_050), PairEvent::NewLife);
+}
+
+fn radio_status() -> RadioStatus {
+    RadioStatus {
+        peer_count: 3,
+        rx_count: 0,
+        rx_oversize: 0,
+        heap_free: 0,
+        uptime_ms: 0,
+        queues: Vec::new(),
+        crc_fail: 0,
+        bad_magic: 0,
+        seq_gap: 0,
+    }
+}
+
+fn spi_zero() -> SpiStats {
+    SpiStats {
+        transfers: 0,
+        crc_fail: 0,
+        bad_magic: 0,
+        seq_gap: 0,
+        ready_timeouts: 0,
+        ready_recovered: 0,
+        radio_crc_fail: 0,
+        radio_bad_magic: 0,
+        radio_seq_gap: 0,
+    }
+}

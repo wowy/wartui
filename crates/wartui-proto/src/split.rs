@@ -11,6 +11,8 @@
 //!   A C6 restart under a running P4 loses the peer table and transmit power, so it must
 //!   look like a bridge restart; a hello arriving after the link was up is
 //!   [`PairEvent::NewLife`], and the firmware answers with a fresh `Ready`.
+//! - **The C6 repeats its hello** in every transfer until it hears the P4's, so [`Pair`]
+//!   tells a new life from a repeat; see [`Pair::on_hello`].
 //! - **A link revision mismatch does not bridge.** The hello is frozen, so the P4 can
 //!   always read it and say so, but radio commands are refused.
 
@@ -99,11 +101,23 @@ impl Pair {
     }
 
     /// The C6 sent a hello at P4 time `now_ms`.
+    ///
+    /// The C6 repeats its hello in every transfer until it has heard the P4's, so most
+    /// calls are the same life again. Only the first hello, a changed MAC or link
+    /// revision, or an uptime that went backwards is a [`PairEvent::NewLife`]. Anything
+    /// else leaves the anchor and counters alone, so `Ready.uptime_ms` never steps back.
     pub fn on_hello(&mut self, hello: Hello, now_ms: u64) -> PairEvent {
+        if let RadioState::Up(old) | RadioState::Mismatch(old) = &self.state
+            && old.mac == hello.mac
+            && old.link_rev == hello.link_rev
+            && hello.uptime_ms >= old.uptime_ms
+        {
+            return PairEvent::None;
+        }
         let matches = hello.link_rev == LINK_REVISION;
         self.state = if matches { RadioState::Up(hello) } else { RadioState::Mismatch(hello) };
         self.hello_at_ms = now_ms;
-        // A hello starts a C6 life; counters from the last one no longer apply.
+        // A new C6 life: counters from the last one no longer apply.
         self.status = None;
         PairEvent::NewLife
     }
