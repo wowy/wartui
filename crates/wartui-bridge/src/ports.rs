@@ -51,6 +51,7 @@ pub const ESPRESSIF_VID: u16 = 0x303A;
 /// a sweep: a board behind a USB-to-UART bridge chip carries the chip's vendor ID
 /// rather than Espressif's and never reaches the list at all, so anything here that
 /// is *not* this is an Espressif device of some other kind and is worth trying last.
+/// The P4 bridge ([`is_p4_bridge`]) ranks with these despite its own pair.
 pub const BRIDGE_PID: u16 = 0x1001;
 
 /// The pid.codes test vendor ID the P4 bridge enumerates under until Espressif grants it a PID.

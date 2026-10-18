@@ -258,7 +258,7 @@ pub fn select(
             ordered.sort_by_key(|candidate| {
                 (
                     !is_remembered(candidate, remembered),
-                    candidate.pid != Some(BRIDGE_PID),
+                    !(candidate.pid == Some(BRIDGE_PID) || ports::is_p4_bridge(candidate)),
                     candidate.path.clone(),
                 )
             });
