@@ -93,8 +93,9 @@ mipidsi = { version = "0.10.0", default-features = false, optional = true }
 nb = "1.1.0"
 portable-atomic = { version = "1.15.0", default-features = false }
 static_cell = "2.1.1"
-# The reset funnel and the reset cause, shared with the other firmware.
-wartui-firmware = { path = "../common" }
+# The reset funnel, the reset cause and the phase marker, shared with the other
+# firmwares, and the radio half (`radio`), shared with every firmware that bridges one.
+wartui-firmware = { path = "../common", features = ["radio"] }
 wartui-proto = { path = "../../crates/wartui-proto" }
 
 [lints.rust]

@@ -26,6 +26,13 @@ _unacknowledged_ send, where it fires only after the radio exhausts its retry ch
 than an order of magnitude in hand when a send is acknowledged. When an assignment queues behind an
 unacknowledged one, the margin is under three times.
 
+The send does not block the loop. `wartui_firmware::radio` (`firmware/common/src/radio.rs`), the
+radio half every bridging firmware shares, runs sends in their own future, joined with the main
+loop. The loop hands each `SendEspNow` to a queue of `WARTUI_BRIDGE_SEND_JOBS` jobs (default 4,
+`src/config.rs`) and goes on draining `esp-radio`'s ten-frame receive queue while the send is in
+flight. A job that finds the queue full is answered `Rejected`. `Status.queues` reports the queue's
+high-water mark and how many jobs it refused.
+
 Peers are added on demand (`ensure_peer`) and never removed as a side effect of sending. The radio's
 table holds twenty entries, and `esp-radio` spends one on the broadcast peer at init. This bridge
 only _receives_ broadcasts, and ESP-NOW delivers a received frame whether or not its sender is a
@@ -146,8 +153,8 @@ the peripheral clock the bytes while the CPU serves the radio and USB.
 The task runs on an interrupt executor at the lowest interrupt priority, so it preempts the main
 loop for the microseconds it takes to start or finish a transfer. The C5's 32-byte I2C FIFO splits
 a 64-byte read into three transfers. On the main loop's executor each would wait for the loop to
-go idle, and a transmit callback or a panel repaint holds it for 35 ms. [`src/gps.rs`](src/gps.rs)'s
-`//!` has the hand-off between the two.
+give the core back, and a panel repaint holds it for 36 ms. [`src/gps.rs`](src/gps.rs)'s `//!` has
+the hand-off between the two.
 
 The task polls no more often than every 25 ms, and again straight away while the receiver has more
 waiting, so a backlog drains. Every transaction is bounded at 10 ms.
@@ -254,9 +261,9 @@ costs no busy passes. Under pressure both rings evict oldest-first and count it 
 `Rx`, `Log` and `Gps` rather than given an unbounded queue. That module is in `wartui-proto` so
 those rules are unit-testable on the host.
 
-The one deliberate exception is the wait for a transmit callback in `transmit`. It is milliseconds
-against a 100 ms window, and it is what makes `AckOk` mean anything. `esp-radio`'s `SendWaiter`
-busy-waits in `Drop` as well as in `wait`, so there is no way to start a send and walk away.
+The wait for a transmit callback, which is what makes `AckOk` mean anything, is not on the loop
+either: `send_async` awaits it in the send future, so the loop drains the radio and the endpoint
+meanwhile.
 
 **Never link `esp-println` with `jtag-serial`.** It writes to the same USB endpoint and would
 interleave into the COBS stream. Diagnostics go out as `Log` frames instead. For the same reason the
