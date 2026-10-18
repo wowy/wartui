@@ -12,19 +12,20 @@
 //! A send runs in its own future, [`run_jobs`], joined with the caller's loop. Its
 //! transmit callback takes 2–4 ms when acknowledged and up to 35 ms when not, and
 //! `esp-radio`'s receive queue holds ten frames and drops the oldest when full. So nothing
-//! here blocks while a send is in flight: [`queue_job`] hands the job over without waiting,
+//! here blocks while a send is in flight: [`queue_send`] hands the job over without waiting,
 //! the loop goes on draining the receive queue, and the result comes back as a [`Done`].
 //!
 //! Peer and transmit-power commands take the same queue, though each is a call of
 //! microseconds. The host orders them against its sends: a peer removed behind a send to
 //! it, or a send meant for the power before a change, depends on the radio acting in the
-//! order the link delivered.
+//! order the link delivered. The queue's entries are small, so it absorbs the host removing
+//! a whole fleet's peers in one batch, and a send's payload waits in a pool of its own.
 //!
 //! The air is plaintext ESP-NOW in both directions: no pairing handshake and no key
 //! ([`peer`]).
 
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
-use embassy_sync::channel::{Channel, TrySendError};
+use embassy_sync::channel::Channel;
 use esp_hal::time::Instant;
 use esp_radio::esp_now::{
     EspNowError, EspNowManager, EspNowSender, EspNowWifiInterface, PeerInfo, PhyMode, RateConfig,
@@ -171,19 +172,25 @@ pub fn hear(received: &ReceivedData, rx_us: u32, forward: impl FnOnce(&BridgeToH
 }
 
 /// One thing the host asked of the radio, in the order it arrived.
-// A send inlines its payload, and nothing on this path may allocate to box it: the
-// queue's slots are sized for a send either way.
-#[allow(clippy::large_enum_variant)]
+///
+/// Small, so the queue holds a fleet's worth of peer commands: a send's payload waits in
+/// [`Payloads`] instead, in the same order as the sends.
 pub enum Job {
-    /// One frame to put on the air.
+    /// One frame to put on the air; its payload is the next in [`Payloads`].
     Send {
         /// The host's id for the send, echoed in its result.
         id: u16,
         dst: Mac,
         /// Add `dst` as a peer if it is not one.
         ensure_peer: bool,
-        payload: SendPayload,
     },
+    /// A peer or power command.
+    Command(Command),
+}
+
+/// The host's peer and power commands.
+#[derive(Debug, Clone, Copy)]
+pub enum Command {
     /// The host's `AddPeer`, through [`add_peer_command`].
     AddPeer(Mac),
     /// The host's `RemovePeer`, through [`remove_peer_command`].
@@ -208,35 +215,68 @@ pub struct SendDone {
     pub done_at: Instant,
 }
 
-/// The jobs waiting for [`run_jobs`].
+/// The jobs waiting for [`run_jobs`], in arrival order.
 pub type Jobs<const N: usize> = Channel<NoopRawMutex, Job, N>;
+
+/// The payloads of the sends waiting in [`Jobs`], in the same order.
+///
+/// Each slot is a full ESP-NOW v2 payload, so there are few; a slot frees when
+/// [`run_jobs`] takes its payload to transmit.
+pub type Payloads<const P: usize> = Channel<NoopRawMutex, SendPayload, P>;
 
 /// The results waiting for the caller's loop.
 pub type Dones<const N: usize> = Channel<NoopRawMutex, Done, N>;
 
-/// Hand a job to [`run_jobs`] without waiting.
+/// Which queue refused a job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Full {
+    /// [`Jobs`], which every job takes a slot of.
+    Jobs,
+    /// [`Payloads`], which only a send takes a slot of.
+    Payloads,
+}
+
+/// Hand a peer or power command to [`run_jobs`] without waiting.
 ///
-/// A full queue refuses it, and the refusal comes back as a [`Done`] for the caller to
-/// report like any other result: a `Rejected` send, or an `Error` line for a peer or power
-/// command, which the host would otherwise never learn it lost.
-pub fn queue_job<const N: usize>(jobs: &Jobs<N>, job: Job) -> Option<Done> {
-    match jobs.try_send(job) {
-        Ok(()) => None,
-        Err(TrySendError::Full(job)) => Some(match job {
-            Job::Send { id, .. } => {
-                Done::Sent(SendDone { id, status: SendStatus::Rejected, done_at: Instant::now() })
-            }
-            Job::AddPeer(_) => {
-                Done::Said(Said::Error("could not add that peer: the queue was full"))
-            }
-            Job::RemovePeer(_) => {
-                Done::Said(Said::Error("could not remove that peer: the queue was full"))
-            }
-            Job::SetTxPower(_) => {
-                Done::Said(Said::Error("could not set the transmit power: the queue was full"))
-            }
-        }),
+/// A full queue refuses it with an `Error` line for the caller to report, since the host
+/// would otherwise never learn it lost the command.
+pub fn queue_command<const N: usize>(jobs: &Jobs<N>, command: Command) -> Option<Done> {
+    if jobs.try_send(Job::Command(command)).is_ok() {
+        return None;
     }
+    Some(Done::Said(Said::Error(match command {
+        Command::AddPeer(_) => "could not add that peer: the queue was full",
+        Command::RemovePeer(_) => "could not remove that peer: the queue was full",
+        Command::SetTxPower(_) => "could not set the transmit power: the queue was full",
+    })))
+}
+
+/// Hand a send to [`run_jobs`] without waiting.
+///
+/// It needs a slot in both queues. Without one it is refused, and the refusal comes back
+/// as a `Rejected` [`SendDone`] beside the queue that was full.
+pub fn queue_send<const N: usize, const P: usize>(
+    jobs: &Jobs<N>,
+    payloads: &Payloads<P>,
+    id: u16,
+    dst: Mac,
+    ensure_peer: bool,
+    payload: &SendPayload,
+) -> Option<(Full, Done)> {
+    let full = if payloads.is_full() {
+        Full::Payloads
+    } else if jobs.is_full() {
+        Full::Jobs
+    } else {
+        // Both have room, and nothing runs between these lines and the checks: every
+        // future touching the queues shares one task. So the payload and its job enter
+        // together, and `run_jobs` finds them in step.
+        let _ = payloads.try_send(payload.clone());
+        let _ = jobs.try_send(Job::Send { id, dst, ensure_peer });
+        return None;
+    };
+    let rejected = SendDone { id, status: SendStatus::Rejected, done_at: Instant::now() };
+    Some((full, Done::Sent(rejected)))
 }
 
 /// Carry out every queued job, one at a time and in order, and report each result.
@@ -248,18 +288,23 @@ pub fn queue_job<const N: usize>(jobs: &Jobs<N>, job: Job) -> Option<Done> {
 ///
 /// `tx_power` is what [`setup`] left the radio at. It lives here, beside the only call
 /// that changes it.
-pub async fn run_jobs<const N: usize>(
+pub async fn run_jobs<const N: usize, const P: usize>(
     controller: &mut WifiController<'_>,
     manager: &EspNowManager,
     sender: &mut EspNowSender,
     mut tx_power: Option<i8>,
     jobs: &Jobs<N>,
+    payloads: &Payloads<P>,
     done: &Dones<N>,
 ) -> ! {
     loop {
         let result = match jobs.receive().await {
-            Job::Send { id, dst, ensure_peer, payload } => {
-                let status = transmit(manager, sender, &dst, ensure_peer, &payload).await;
+            Job::Send { id, dst, ensure_peer } => {
+                // `queue_send` queued it with this job, so it is always there.
+                let status = match payloads.try_receive() {
+                    Ok(payload) => transmit(manager, sender, &dst, ensure_peer, &payload).await,
+                    Err(_) => SendStatus::Rejected,
+                };
                 // Stamped *after* the transmit callback, not before the send, but only when
                 // this future is next polled: at the caller's next await. The bridge's loop
                 // awaits when it idles, and on a busy pass only while a job waits, so under a
@@ -269,9 +314,11 @@ pub async fn run_jobs<const N: usize>(
                 // listening" to "the radio says it has it".
                 Done::Sent(SendDone { id, status, done_at: Instant::now() })
             }
-            Job::AddPeer(mac) => Done::Said(add_peer_command(manager, &mac)),
-            Job::RemovePeer(mac) => Done::Said(remove_peer_command(manager, &mac)),
-            Job::SetTxPower(power) => {
+            Job::Command(Command::AddPeer(mac)) => Done::Said(add_peer_command(manager, &mac)),
+            Job::Command(Command::RemovePeer(mac)) => {
+                Done::Said(remove_peer_command(manager, &mac))
+            }
+            Job::Command(Command::SetTxPower(power)) => {
                 Done::Said(set_tx_power_command(controller, power, &mut tx_power))
             }
         };

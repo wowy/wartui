@@ -36,13 +36,13 @@ use esp_radio::esp_now::{EspNowReceiver, ReceivedData};
 use esp_radio::wifi::{ControllerConfig, Interface, WifiController};
 use static_cell::ConstStaticCell;
 use wartui_firmware::phase::{boot_phase, mark};
-use wartui_firmware::radio::{self, Dones, Heard, Jobs};
+use wartui_firmware::radio::{self, Dones, Heard, Jobs, Payloads};
 use wartui_firmware::{phase, reboot, reset_cause};
 use wartui_proto::frame_ring::FrameRing;
 use wartui_proto::link::LoopPhase;
 use wartui_proto::spi::{TRANSFER_LEN, Up};
 
-use crate::config::SEND_JOBS;
+use crate::config::{RADIO_JOBS, SEND_JOBS};
 use crate::link::{Bus, Link, RECORD_MAX, Radio, Shared, UpPriority, UpQueue, link_loop};
 
 // This creates the app descriptor the esp-idf bootloader expects.
@@ -87,12 +87,14 @@ static UP_PRIORITY: ConstStaticCell<UpPriority> =
 /// The record that did not fit the last transfer.
 static HELD: ConstStaticCell<[u8; RECORD_MAX]> = ConstStaticCell::new([0; RECORD_MAX]);
 
-/// The radio jobs [`radio::run_jobs`] works through; a send job holds a full ESP-NOW v2
-/// payload.
-static JOBS: ConstStaticCell<Jobs<SEND_JOBS>> = ConstStaticCell::new(Jobs::new());
+/// The radio jobs [`radio::run_jobs`] works through, in arrival order.
+static JOBS: ConstStaticCell<Jobs<RADIO_JOBS>> = ConstStaticCell::new(Jobs::new());
+
+/// The payloads of the sends among the jobs; each is a full ESP-NOW v2 payload.
+static PAYLOADS: ConstStaticCell<Payloads<SEND_JOBS>> = ConstStaticCell::new(Payloads::new());
 
 /// What became of each job, waiting for the link.
-static DONES: ConstStaticCell<Dones<SEND_JOBS>> = ConstStaticCell::new(Dones::new());
+static DONES: ConstStaticCell<Dones<RADIO_JOBS>> = ConstStaticCell::new(Dones::new());
 
 #[esp_rtos::main]
 async fn main(_spawner: embassy_executor::Spawner) -> ! {
@@ -153,13 +155,22 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     }
     let mut link = Link::new(boot, mac, cause, last_phase, HELD.take());
     let jobs = JOBS.take();
+    let payloads = PAYLOADS.take();
     let dones = DONES.take();
-    let radio = Radio { manager: &manager, jobs };
+    let radio = Radio { manager: &manager, jobs, payloads };
 
     // Joined rather than spawned: all three borrow the ESP-NOW handles `main` owns, and
     // none ends.
     match join3(
-        radio::run_jobs(&mut controller, &manager, &mut sender, setup.tx_power, jobs, dones),
+        radio::run_jobs(
+            &mut controller,
+            &manager,
+            &mut sender,
+            setup.tx_power,
+            jobs,
+            payloads,
+            dones,
+        ),
         hear_loop(&mut receiver, &shared, boot),
         link_loop(bus, &mut link, &shared, radio, dones),
     )

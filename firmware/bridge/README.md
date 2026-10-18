@@ -28,12 +28,13 @@ unacknowledged one, the margin is under three times.
 
 The send does not block the loop. `wartui_firmware::radio` (`firmware/common/src/radio.rs`), the
 radio half every bridging firmware shares, runs sends in their own future, joined with the main
-loop. The loop hands each `SendEspNow` to a queue of `WARTUI_BRIDGE_SEND_JOBS` jobs (default 4,
-`src/config.rs`) and goes on draining `esp-radio`'s ten-frame receive queue while the send is in
-flight. `AddPeer`, `RemovePeer` and `SetTxPower` take the same queue, so the radio acts on them in
-the order the host sent them. A send that finds the queue full is answered `Rejected`, and any other
-job an `Error` line. `Status.queues` reports the queue's high-water mark and how many jobs it
-refused.
+loop. The loop hands each `SendEspNow`, `AddPeer`, `RemovePeer` and `SetTxPower` to one queue of
+`WARTUI_BRIDGE_RADIO_JOBS` small entries (default 32, `src/config.rs`), so the radio acts on them in
+the order the host sent them, and goes on draining `esp-radio`'s ten-frame receive queue while a send
+is in flight. A send's payload waits in a pool of `WARTUI_BRIDGE_SEND_JOBS` slots (default 4) beside
+it. A send that finds either full is answered `Rejected`, and a peer or power command that finds the
+queue full gets an `Error` line. `Status.queues` reports both as `radio-jobs` and `radio-send-jobs`,
+with their high-water marks and how many jobs each refused.
 
 Peers are added on demand (`ensure_peer`) and never removed as a side effect of sending. The radio's
 table holds twenty entries, and `esp-radio` spends one on the broadcast peer at init. This bridge

@@ -612,13 +612,14 @@ fn round_trip(event: &BridgeToHost) -> BridgeToHost {
 
 #[test]
 fn link_round_trips_status_with_queues_and_spi() {
-    const IDS: [QueueId; 6] = [
+    const IDS: [QueueId; 7] = [
         QueueId::RadioUp,
         QueueId::RadioSendJobs,
         QueueId::RadioDown,
         QueueId::HostPriority,
         QueueId::HostBulk,
         QueueId::RadioUpPriority,
+        QueueId::RadioJobs,
     ];
     let mut queues = QueueStats::new();
     for (i, queue) in (1u32..).zip(IDS.into_iter().cycle().take(8)) {

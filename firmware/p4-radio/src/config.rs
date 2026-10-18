@@ -23,10 +23,19 @@ pub const UP_QUEUE_BYTES: usize = env_usize(option_env!("WARTUI_RADIO_UP_QUEUE_B
 pub const UP_PRIORITY_BYTES: usize =
     env_usize(option_env!("WARTUI_RADIO_UP_PRIORITY_BYTES"), 8 * 1024);
 
-/// The radio jobs — sends, and peer and power commands — that can wait for the radio, and
-/// the results that can wait for the link. Named for the queue `wartui status` reports.
+/// The sends whose payloads can wait for the radio: the pool `wartui status` reports as
+/// `radio-send-jobs`. Each slot holds a full ESP-NOW v2 payload.
 ///
-/// A job that finds the queue full is refused at once (a send `Rejected`, any other with an
-/// `Error` line) and counted in `RadioStatus.queues`. A peer or power command waits for the
-/// jobs ahead of it and then takes microseconds, so it holds a slot only briefly.
+/// A send that finds the pool full is answered `Rejected` and counted in
+/// `RadioStatus.queues`.
 pub const SEND_JOBS: usize = env_usize(option_env!("WARTUI_RADIO_SEND_JOBS"), 4);
+
+/// The radio jobs — sends, and peer and power commands — that can wait for the radio in
+/// arrival order, and the results that can wait for the link: `radio-jobs` in
+/// `wartui status`.
+///
+/// Each entry is a few bytes, so this holds a whole fleet's worth: the host removes every
+/// departed node's peer in one batch, which one transfer can carry whole. A job that finds
+/// the queue full is refused at once (a send `Rejected`, any other with an `Error` line) and
+/// counted in `RadioStatus.queues`.
+pub const RADIO_JOBS: usize = env_usize(option_env!("WARTUI_RADIO_JOBS"), 32);

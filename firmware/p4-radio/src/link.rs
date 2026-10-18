@@ -29,7 +29,7 @@ use esp_hal::spi::slave::dma::SpiDma;
 use esp_hal::time::Instant;
 use esp_radio::esp_now::EspNowManager;
 use wartui_firmware::phase::mark;
-use wartui_firmware::radio::{self, Done, Dones, Job, Jobs, Said, SendDone};
+use wartui_firmware::radio::{self, Command, Done, Dones, Full, Jobs, Payloads, Said, SendDone};
 use wartui_proto::frame_ring::FrameRing;
 use wartui_proto::heapless::Vec;
 use wartui_proto::link::{
@@ -42,7 +42,7 @@ use wartui_proto::spi::{
     SeqNote, TRANSFER_LEN, Up, VerifyError, decode_down, encode_up, records, seal, verify,
 };
 
-use crate::config::{SEND_JOBS, UP_PRIORITY_BYTES, UP_QUEUE_BYTES};
+use crate::config::{RADIO_JOBS, SEND_JOBS, UP_PRIORITY_BYTES, UP_QUEUE_BYTES};
 
 /// The longest encoded record: a payload less its record's length prefix.
 ///
@@ -134,7 +134,8 @@ pub struct Bus<'d> {
 /// The radio handles the P4's commands reach.
 pub struct Radio<'a> {
     pub manager: &'a EspNowManager,
-    pub jobs: &'a Jobs<SEND_JOBS>,
+    pub jobs: &'a Jobs<RADIO_JOBS>,
+    pub payloads: &'a Payloads<SEND_JOBS>,
 }
 
 /// The link's state.
@@ -160,10 +161,14 @@ pub struct Link {
     /// P4 records that did not decode, and how many of them have been reported.
     undecoded: u32,
     undecoded_said: u32,
-    /// The most radio jobs waiting at once.
+    /// The most send payloads waiting at once.
     send_jobs_high_water: u32,
-    /// Radio jobs refused because the queue was full.
+    /// Sends refused because the payload pool was full.
     send_jobs_dropped: u32,
+    /// The most radio jobs waiting at once.
+    radio_jobs_high_water: u32,
+    /// Radio jobs refused because their queue was full.
+    radio_jobs_dropped: u32,
     /// A record read from the ring that did not fit the last transfer, sent first in the
     /// next. Static, since it holds up to [`RECORD_MAX`] bytes.
     held: &'static mut [u8; RECORD_MAX],
@@ -193,6 +198,8 @@ impl Link {
             undecoded_said: 0,
             send_jobs_high_water: 0,
             send_jobs_dropped: 0,
+            radio_jobs_high_water: 0,
+            radio_jobs_dropped: 0,
             held,
             held_len: 0,
         }
@@ -280,24 +287,39 @@ impl Link {
     /// Hand a radio command to `radio::run_jobs`, which keeps the order commands arrive in.
     /// A full queue is answered now, and counted. The P4 answers every other command itself.
     ///
-    /// Out of line for the reason [`Link::act`] is: a send's job holds a 1470-byte payload.
+    /// Out of line for the reason [`Link::act`] is: a send's 1470-byte payload is copied
+    /// into the pool.
     #[inline(never)]
     fn queue_command(&mut self, command: &HostToBridge, shared: &Shared, radio: &Radio<'_>) {
-        let job = match *command {
-            HostToBridge::AddPeer { mac } => Job::AddPeer(mac),
-            HostToBridge::RemovePeer { mac } => Job::RemovePeer(mac),
-            HostToBridge::SetTxPower { power } => Job::SetTxPower(power),
+        let command = match *command {
+            HostToBridge::AddPeer { mac } => Command::AddPeer(mac),
+            HostToBridge::RemovePeer { mac } => Command::RemovePeer(mac),
+            HostToBridge::SetTxPower { power } => Command::SetTxPower(power),
             HostToBridge::SendEspNow { id, dst, ensure_peer, ref payload } => {
-                Job::Send { id, dst, ensure_peer, payload: payload.clone() }
+                let queued =
+                    radio::queue_send(radio.jobs, radio.payloads, id, dst, ensure_peer, payload);
+                return self.note_queued(queued, shared, radio);
             }
             _ => return,
         };
-        if let Some(refused) = radio::queue_job(radio.jobs, job) {
-            self.send_jobs_dropped = self.send_jobs_dropped.wrapping_add(1);
-            self.report(&refused, shared);
+        let queued = radio::queue_command(radio.jobs, command).map(|done| (Full::Jobs, done));
+        self.note_queued(queued, shared, radio);
+    }
+
+    /// Report a refusal and count it against the queue that was full, and note both
+    /// queues' depths.
+    fn note_queued(&mut self, refused: Option<(Full, Done)>, shared: &Shared, radio: &Radio<'_>) {
+        if let Some((full, done)) = refused {
+            match full {
+                Full::Jobs => self.radio_jobs_dropped = self.radio_jobs_dropped.wrapping_add(1),
+                Full::Payloads => self.send_jobs_dropped = self.send_jobs_dropped.wrapping_add(1),
+            }
+            self.report(&done, shared);
         }
-        let waiting = u32::try_from(radio.jobs.len()).unwrap_or(u32::MAX);
-        self.send_jobs_high_water = self.send_jobs_high_water.max(waiting);
+        let jobs = u32::try_from(radio.jobs.len()).unwrap_or(u32::MAX);
+        self.radio_jobs_high_water = self.radio_jobs_high_water.max(jobs);
+        let payloads = u32::try_from(radio.payloads.len()).unwrap_or(u32::MAX);
+        self.send_jobs_high_water = self.send_jobs_high_water.max(payloads);
     }
 
     /// The counters the P4 folds into the host's `Status`.
@@ -327,6 +349,12 @@ impl Link {
             capacity: UP_PRIORITY_BYTES as u32,
             high_water: priority.high_water() as u32,
             dropped: priority.dropped(),
+        });
+        let _ = queues.push(QueueStat {
+            queue: QueueId::RadioJobs,
+            capacity: RADIO_JOBS as u32,
+            high_water: self.radio_jobs_high_water,
+            dropped: self.radio_jobs_dropped,
         });
         RadioStatus {
             peer_count,
@@ -360,7 +388,7 @@ impl Link {
     }
 
     /// Queue every job `radio::run_jobs` has finished.
-    fn take_results(&self, dones: &Dones<SEND_JOBS>, shared: &Shared) {
+    fn take_results(&self, dones: &Dones<RADIO_JOBS>, shared: &Shared) {
         while let Ok(done) = dones.try_receive() {
             self.report(&done, shared);
         }
@@ -410,7 +438,7 @@ pub async fn link_loop(
     link: &mut Link,
     shared: &Shared,
     radio: Radio<'_>,
-    dones: &Dones<SEND_JOBS>,
+    dones: &Dones<RADIO_JOBS>,
 ) -> ! {
     let Bus {
         mut spi,

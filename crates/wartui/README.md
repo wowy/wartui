@@ -977,10 +977,11 @@ wartui --log-file wartui.log run
 Beyond the counters, `wartui status` prints what the bridge reports about its insides:
 
 - **`queue NAME  HIGH/CAPACITY UNIT  dropped N`**, one per queue: the high-water mark since boot
-  and what the queue threw away. A single-chip bridge reports `radio-send-jobs`; a P4 bridge also
-  reports `radio-up` (the C6's received frames for the P4), `radio-up-priority` (the C6's other
-  records for the P4: send results, lines and its status), `radio-down` (the P4's records for the
-  C6), `host-priority` and `host-bulk` (its two queues of frames for the host).
+  and what the queue threw away. Every bridge reports `radio-jobs` (sends and peer and power
+  commands waiting for the radio) and `radio-send-jobs` (the payloads of those sends). A P4 bridge
+  also reports `radio-up` (the C6's received frames for the P4), `radio-up-priority` (the C6's
+  other records for the P4: send results, lines and its status), `radio-down` (the P4's records for
+  the C6), `host-priority` and `host-bulk` (its two queues of frames for the host).
 - **`spi  …`**, on a P4 bridge: the SPI link's transfers and its error counters at each end.
   Errors other than a few `ready_timeouts` at boot mean the link is losing transfers.
 - **`radio  …`**, on a P4 bridge: the C6's address, firmware, reset cause and last phase. After a
