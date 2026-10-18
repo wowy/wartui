@@ -1,0 +1,8 @@
+# The messages this firmware moves are big by design and cannot be boxed, for the
+# reason `firmware/bridge/.clippy.toml` gives: a decoded `Down` inlines a 1470-byte
+# ESP-NOW v2 send, and the `SendJob` built from it copies that payload again.
+#
+# So the threshold is the single-chip bridge's, set above the size those messages
+# force and well under the main task's stack. Anything this still catches is a frame
+# nothing in the protocol accounts for, and worth reading.
+stack-size-threshold = 5120
