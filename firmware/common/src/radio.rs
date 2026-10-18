@@ -179,7 +179,7 @@ pub struct SendJob {
 pub struct SendDone {
     pub id: u16,
     pub status: SendStatus,
-    /// When the transmit callback fired, or when the job was refused.
+    /// When [`run_sends`] saw the transmit callback, or when the job was refused.
     pub done_at: Instant,
 }
 
@@ -217,9 +217,12 @@ pub async fn run_sends<const N: usize>(
     loop {
         let job = jobs.receive().await;
         let status = transmit(manager, sender, &job.dst, job.ensure_peer, &job.payload).await;
-        // Stamped *after* the transmit callback, not before the send. Against the `rx_us`
-        // of the heartbeat that opened the window, this is the real time from "the node is
-        // listening" to "the radio says it has it".
+        // Stamped *after* the transmit callback, not before the send, but only when this
+        // future is next polled: at the caller's next await. The bridge's loop awaits when
+        // it idles, and on a busy pass only while a send waits, so under a burst the stamp
+        // trails the callback until the loop next idles. A T-Dongle-C5 repaint adds up to
+        // 36 ms. Against the `rx_us` of the heartbeat that opened the window, this bounds
+        // from above the time from "the node is listening" to "the radio says it has it".
         done.send(SendDone { id: job.id, status, done_at: Instant::now() }).await;
     }
 }

@@ -26,9 +26,9 @@
 //! start each one. On `main`'s executor it would run only when `main` gives the core back
 //! between passes: a link burst or a panel repaint (36 ms) would leave a read paused
 //! mid-transaction with the bus held, and [`TRANSACTION_TIMEOUT_MS`] would have to outlast
-//! both to mean anything. At
-//! [`Priority::Priority1`], the lowest interrupt level, the task preempts `main` for the
-//! microseconds a transfer takes to start or finish, and no interrupt handler waits on it.
+//! both to mean anything. At [`Priority::Priority1`], the lowest interrupt level, the task
+//! preempts `main` for the microseconds a transfer takes to start or finish, and no
+//! interrupt handler waits on it.
 //!
 //! **`main` never waits on the task.** They share two zero-copy channels and two flags:
 //!

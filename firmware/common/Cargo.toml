@@ -23,7 +23,7 @@ esp32p4 = ["esp-hal/esp32p4"]
 
 # The bridge's ESP-NOW half (`src/radio.rs`), for every firmware that owns a radio
 # and bridges it.
-radio = ["dep:embassy-futures", "dep:embassy-sync", "dep:esp-radio"]
+radio = ["dep:embassy-sync", "dep:esp-radio"]
 
 [dependencies]
 # The firmwares are held on esp-hal 1.2 by `esp-radio`'s `~1.2.0`; this crate
@@ -33,7 +33,6 @@ radio = ["dep:embassy-futures", "dep:embassy-sync", "dep:esp-radio"]
 esp-hal = { version = "~1.2.2", features = ["unstable"] }
 # Behind `radio`, at the versions `firmware/bridge/Cargo.toml` pins and with its
 # `esp-radio` features, so the bridge's build unifies to the same set.
-embassy-futures = { version = "0.1.2", optional = true }
 embassy-sync = { version = "0.8.0", optional = true }
 esp-radio = { version = "1.0.0-beta.1", default-features = false, optional = true, features = [
   "esp-alloc",

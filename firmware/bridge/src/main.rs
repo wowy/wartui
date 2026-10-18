@@ -454,8 +454,8 @@ impl Bridge {
 
     /// Report what became of one send.
     ///
-    /// `tx_us` is on this bridge's clock: when the transmit callback fired, or when a full
-    /// queue refused the job.
+    /// `tx_us` is on this bridge's clock: when `radio::run_sends` saw the transmit callback,
+    /// which can trail it (see `SendDone::done_at`), or when a full queue refused the job.
     fn report_send(&mut self, done: &SendDone) {
         let tx_us = (done.done_at - self.boot).as_micros() as u32;
         self.outbox.send(&BridgeToHost::SendResult { id: done.id, status: done.status, tx_us });
@@ -658,6 +658,11 @@ async fn main_loop(
         #[cfg(feature = "t-dongle-c5")]
         {
             if let Some(screen) = screen.as_mut() {
+                // A repaint holds the loop for up to 36 ms, so a send queued above starts
+                // first. Only `quiet` passes can repaint, which keeps this off busy ones.
+                if quiet && !jobs.is_empty() {
+                    yield_now().await;
+                }
                 mark(LoopPhase::Render);
                 worked |= screen.render(bridge, mac, quiet);
             }
@@ -709,8 +714,9 @@ async fn main_loop(
 ///
 /// A frame or a finished send that ends the wait is reported here and the host's bytes
 /// are handed back, each as soon as it is taken: it is older than anything the next pass's
-/// drains find behind it, so order holds. Both halves live outside `main`'s poll frame, which sits
-/// at `.clippy.toml`'s threshold on the C5 and has no room for a [`ReceivedData`].
+/// drains find behind it, so order holds. Both halves live outside `main_loop`'s poll
+/// frame, which sits at `.clippy.toml`'s threshold on the C5 and has no room for a
+/// [`ReceivedData`].
 ///
 /// Every arm is cancel-safe: the radio's queue, the USB FIFO and the send results give up
 /// an item only in the poll that returns it, the flush holds no bytes, and the GPS channel
