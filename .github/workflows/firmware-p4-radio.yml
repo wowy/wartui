@@ -1,0 +1,64 @@
+name: Firmware - P4 radio
+
+# Path-filtered: this builds only when something the P4 radio firmware compiles
+# changes — its own sources, `firmware/common` and `crates/wartui-proto` (the
+# path dependencies it compiles), `rustfmt.toml` (fmt resolves it from the repo
+# root), or this file. One workflow per firmware because GitHub's path filter is
+# workflow-wide, never per-job.
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - firmware/p4-radio/**
+      - '!firmware/p4-radio/README.md'
+      - firmware/common/**
+      - crates/wartui-proto/**
+      - .github/workflows/firmware-p4-radio.yml
+      - rustfmt.toml
+  pull_request:
+    paths:
+      - firmware/p4-radio/**
+      - '!firmware/p4-radio/README.md'
+      - firmware/common/**
+      - crates/wartui-proto/**
+      - .github/workflows/firmware-p4-radio.yml
+      - rustfmt.toml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  p4-radio:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: riscv32imac-unknown-none-elf
+
+      - name: Lint
+        run: |
+          pushd firmware/p4-radio
+          cargo fmt --all -- --check
+          popd
+
+      - name: Build
+        run: |
+          pushd firmware/p4-radio
+          cargo build --release --features esp32c6 --locked --verbose
+          popd
+
+      - name: Clippy
+        run: |
+          pushd firmware/p4-radio
+          cargo clippy --release --features esp32c6 --locked -- -D warnings
+          popd

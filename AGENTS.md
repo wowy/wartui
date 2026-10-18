@@ -69,6 +69,14 @@ cd firmware/node
 cargo fmt --all -- --check
 cargo clippy --release --features esp32c6     # and esp32c5
 
+cd firmware/p4-radio                          # the C6 half of the P4 split bridge
+cargo fmt --all -- --check
+cargo clippy --release --features esp32c6
+
+cd firmware/p4-bridge                         # the P4 half; no features, own target
+cargo fmt --all -- --check
+cargo clippy --release
+
 cd firmware/common                            # a firmware's clippy does not lint it
 cargo fmt --all -- --check
 cargo clippy --release --features esp32c6,radio   # and esp32c5,radio
