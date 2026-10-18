@@ -174,11 +174,8 @@ async fn hear_loop(receiver: &mut EspNowReceiver, shared: &Shared, boot: Instant
 fn hear(received: &ReceivedData, shared: &Shared, boot: Instant) {
     // On this chip's clock, wrapping after roughly 71 minutes, as `tx_us` is.
     let rx_us = boot.elapsed().as_micros() as u32;
-    match radio::hear(received, rx_us) {
-        Heard::Forward(rx) => {
-            shared.note_rx();
-            shared.push(&Up::Message(rx));
-        }
+    match radio::hear(received, rx_us, |rx| shared.push(&Up::Message(rx.clone()))) {
+        Heard::Forwarded => shared.note_rx(),
         Heard::Oversize => shared.note_oversize(),
         Heard::Foreign => {}
     }

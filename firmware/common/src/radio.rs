@@ -124,13 +124,9 @@ pub fn remove_peer_command(manager: &EspNowManager, mac: &Mac) -> Said {
 }
 
 /// What a received frame is to the host.
-#[expect(
-    clippy::large_enum_variant,
-    reason = "nothing here allocates, and the frame is built once and queued at once"
-)]
 pub enum Heard {
-    /// Ours: the frame to queue for the host.
-    Forward(BridgeToHost),
+    /// Ours: the frame went to the caller's `forward`.
+    Forwarded,
     /// Longer than any frame a wartui node sends, so it is somebody else's. Counted apart
     /// from frames headed the host's way, and never logged: a busy neighbor would fill the
     /// bulk ring with log lines and evict real sightings.
@@ -139,11 +135,12 @@ pub enum Heard {
     Foreign,
 }
 
-/// Decide what one received frame is to the host, and build its `Rx` if it is ours.
+/// Decide what one received frame is to the host, and hand `forward` its `Rx` if it is ours.
 ///
-/// The magic is checked before the copy, so a foreign frame costs a 4-byte compare.
-#[must_use]
-pub fn hear(received: &ReceivedData, rx_us: u32) -> Heard {
+/// The magic is checked before the copy, so a foreign frame costs a 4-byte compare. The
+/// frame is built in the call to `forward` and passed by reference: returning it would
+/// copy the whole 1 KB message once more per frame.
+pub fn hear(received: &ReceivedData, rx_us: u32, forward: impl FnOnce(&BridgeToHost)) -> Heard {
     let data = received.data();
     if data.len() <= MAX_NODE_PAYLOAD && !data.starts_with(&MAGIC) {
         return Heard::Foreign;
@@ -151,7 +148,7 @@ pub fn hear(received: &ReceivedData, rx_us: u32) -> Heard {
     let Ok(payload) = Vec::from_slice(data) else {
         return Heard::Oversize;
     };
-    Heard::Forward(BridgeToHost::Rx {
+    forward(&BridgeToHost::Rx {
         src: received.info.src_address,
         dst: received.info.dst_address,
         // The only receive-control field every supported chip agrees on.
@@ -164,7 +161,8 @@ pub fn hear(received: &ReceivedData, rx_us: u32) -> Heard {
         rssi: (received.info.rx_control.rssi as u8) as i8,
         rx_us,
         payload,
-    })
+    });
+    Heard::Forwarded
 }
 
 /// One frame the host asked to put on the air.

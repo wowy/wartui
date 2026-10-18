@@ -695,10 +695,10 @@ async fn main_loop(
                 take_link_bytes(&link_buf[..read], controller, manager, jobs, bridge, mac);
                 link_woke = true;
             }
-        } else {
+        } else if !jobs.is_empty() {
             // A busy pass awaits nothing else, and `radio::run_sends` runs only while this
-            // future is pending. Without the yield a burst would hold a queued send, and
-            // the stamp on a finished one, until the air went quiet.
+            // future is pending. A waiting send needs that poll; yielding on every pass
+            // regardless costs drain time under a burst.
             yield_now().await;
         }
     }
@@ -806,11 +806,11 @@ fn drain_radio(receiver: &EspNowReceiver, bridge: &mut Bridge) -> bool {
 /// sits near `.clippy.toml`'s threshold on the C5. `radio::hear` has what is ours.
 #[inline(never)]
 fn forward(received: &ReceivedData, bridge: &mut Bridge) {
-    match radio::hear(received, bridge.now_us()) {
-        Heard::Forward(rx) => {
-            bridge.rx_count = bridge.rx_count.wrapping_add(1);
-            bridge.outbox.send(&rx);
-        }
+    let rx_us = bridge.now_us();
+    match radio::hear(received, rx_us, |rx| {
+        bridge.outbox.send(rx);
+    }) {
+        Heard::Forwarded => bridge.rx_count = bridge.rx_count.wrapping_add(1),
         // Counted apart from `rx_count`, which the host reads as frames headed its way.
         Heard::Oversize => bridge.rx_oversize = bridge.rx_oversize.wrapping_add(1),
         Heard::Foreign => {}
