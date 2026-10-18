@@ -162,8 +162,12 @@ fn pair_status_sums_host_and_radio_drops() {
         rx_oversize: 2,
         heap_free: 1,
         uptime_ms: 5_000,
-        queues: Vec::from_slice(&[stat(QueueId::RadioSendJobs, 9), stat(QueueId::RadioUp, 4)])
-            .unwrap(),
+        queues: Vec::from_slice(&[
+            stat(QueueId::RadioSendJobs, 9),
+            stat(QueueId::RadioUp, 4),
+            stat(QueueId::RadioUpPriority, 2),
+        ])
+        .unwrap(),
         crc_fail: 11,
         bad_magic: 12,
         seq_gap: 13,
@@ -192,7 +196,8 @@ fn pair_status_sums_host_and_radio_drops() {
             spi: Some(spi),
         } => {
             assert_eq!((peer_count, rx_count, rx_oversize), (3, 40, 2));
-            assert_eq!(dropped_tx, 10);
+            // The host's 6 and both of the C6's rings toward the P4, 4 and 2.
+            assert_eq!(dropped_tx, 12);
             assert_eq!(uptime_ms, 2_900);
             let order: std::vec::Vec<QueueId> = queues.iter().map(|q| q.queue).collect();
             assert_eq!(
@@ -200,6 +205,7 @@ fn pair_status_sums_host_and_radio_drops() {
                 [
                     QueueId::RadioSendJobs,
                     QueueId::RadioUp,
+                    QueueId::RadioUpPriority,
                     QueueId::RadioDown,
                     QueueId::HostPriority,
                     QueueId::HostBulk

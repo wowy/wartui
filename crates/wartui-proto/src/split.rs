@@ -289,11 +289,11 @@ impl Pair {
         host_dropped: u32,
     ) -> BridgeToHost {
         let mut queues = QueueStats::new();
-        let mut radio_up_drops = 0;
+        let mut radio_up_drops = 0u32;
         if let Some(status) = &self.status {
             for stat in &status.queues {
-                if stat.queue == QueueId::RadioUp {
-                    radio_up_drops = stat.dropped;
+                if matches!(stat.queue, QueueId::RadioUp | QueueId::RadioUpPriority) {
+                    radio_up_drops = radio_up_drops.saturating_add(stat.dropped);
                 }
                 let _ = queues.push(*stat);
             }

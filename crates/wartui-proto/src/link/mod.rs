@@ -404,6 +404,9 @@ pub enum QueueId {
     HostPriority,
     /// The P4's bulk ring toward the host. Counts bytes.
     HostBulk,
+    /// The C6's priority ring toward the P4: every record but a received frame. Counts
+    /// bytes.
+    RadioUpPriority,
 }
 
 /// How full a queue has been, and what it has lost.

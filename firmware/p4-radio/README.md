@@ -45,5 +45,6 @@ rebuild, for example `WARTUI_RADIO_UP_QUEUE_BYTES=65536 cargo build --release --
 
 | Variable | Default | Holds |
 | --- | --- | --- |
-| `WARTUI_RADIO_UP_QUEUE_BYTES` | 98304 | `Up` records waiting for a transfer to the P4; a full queue evicts the oldest |
+| `WARTUI_RADIO_UP_QUEUE_BYTES` | 98304 | received frames waiting for a transfer to the P4; a full queue evicts the oldest |
+| `WARTUI_RADIO_UP_PRIORITY_BYTES` | 8192 | every other `Up` record (send results, lines, the C6's status), sent ahead of received frames; a full queue evicts the oldest |
 | `WARTUI_RADIO_SEND_JOBS` | 4 | sends and peer and power commands waiting for the radio, in link order, and results waiting for the link; a full queue answers a send `Rejected` and any other job with an `Error` line |

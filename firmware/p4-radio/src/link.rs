@@ -7,9 +7,12 @@
 //! is followed at once by the next arm and READY, and the P4's wait for READY never
 //! includes the C6's work. The spike measured that work as the link's ceiling.
 //!
-//! Records go up through [`Shared`]'s byte ring, which `hear_loop` in `main.rs` fills from
-//! the radio and [`link_loop`] fills with replies and radio results. A full ring evicts its
-//! oldest record: the P4 wants the newest frames when it falls behind, as the host does.
+//! Records go up through [`Shared`]'s two byte rings. `hear_loop` in `main.rs` fills the
+//! bulk ring with received frames, and [`link_loop`] fills the priority ring with replies,
+//! lines and radio results. A full ring evicts its oldest record: the P4 wants the newest
+//! frames when it falls behind, as the host does. The priority ring keeps a backlog of
+//! frames from evicting a send result or the C6's status, and drains first, between
+//! records, as the P4's own queue toward the host does (`wartui_proto::host_queue`).
 //!
 //! The C6 sends its hello in every transfer until it hears the P4's. The P4 tells a repeat
 //! from a new life by the transfer seq, which starts at 0 on every boot
@@ -39,7 +42,7 @@ use wartui_proto::spi::{
     SeqNote, TRANSFER_LEN, Up, VerifyError, decode_down, encode_up, records, seal, verify,
 };
 
-use crate::config::{SEND_JOBS, UP_QUEUE_BYTES};
+use crate::config::{SEND_JOBS, UP_PRIORITY_BYTES, UP_QUEUE_BYTES};
 
 /// The longest encoded record: a payload less its record's length prefix.
 ///
@@ -51,13 +54,18 @@ pub const RECORD_MAX: usize = PAYLOAD_MAX - 2;
 /// was missed.
 const EDGE_TIMEOUT: Duration = Duration::from_millis(100);
 
-/// The ring of encoded [`Up`] records waiting for a transfer.
+/// The ring of encoded received frames waiting for a transfer.
 pub type UpQueue = RefCell<FrameRing<UP_QUEUE_BYTES>>;
+
+/// The ring of every other encoded [`Up`] record ([`Up::is_priority`]) waiting for a
+/// transfer.
+pub type UpPriority = RefCell<FrameRing<UP_PRIORITY_BYTES>>;
 
 /// What the radio side and the link share. They are futures joined in one task, so
 /// nothing here is borrowed across an `.await`.
 pub struct Shared {
     up: &'static UpQueue,
+    priority: &'static UpPriority,
     /// Frames received and queued for the P4.
     rx_count: Cell<u32>,
     /// Received frames too long to be a node's, dropped.
@@ -65,12 +73,14 @@ pub struct Shared {
 }
 
 impl Shared {
-    /// Nothing counted yet. `up` is static, since it is the firmware's largest buffer.
-    pub fn new(up: &'static UpQueue) -> Self {
-        Self { up, rx_count: Cell::new(0), rx_oversize: Cell::new(0) }
+    /// Nothing counted yet. The rings are static, since `up` is the firmware's largest
+    /// buffer.
+    pub fn new(up: &'static UpQueue, priority: &'static UpPriority) -> Self {
+        Self { up, priority, rx_count: Cell::new(0), rx_oversize: Cell::new(0) }
     }
 
-    /// Queue `msg` for the P4, evicting the oldest records if the ring is full.
+    /// Queue `msg` for the P4 in its ring, evicting that ring's oldest records if it is
+    /// full.
     ///
     /// Out of line, with the encode buffer, to keep both out of the callers' frames.
     #[inline(never)]
@@ -78,7 +88,11 @@ impl Shared {
         let mut record = [0; RECORD_MAX];
         // Only a record longer than any `Up` fails, and the ring counts its own drops.
         if let Ok(len) = encode_up(msg, &mut record) {
-            self.up.borrow_mut().push(&record[..len]);
+            if msg.is_priority() {
+                self.priority.borrow_mut().push(&record[..len]);
+            } else {
+                self.up.borrow_mut().push(&record[..len]);
+            }
         }
     }
 
@@ -294,6 +308,7 @@ impl Link {
             .map(|count| count.total_count.clamp(0, u8::MAX as i32) as u8)
             .unwrap_or(0);
         let up = shared.up.borrow();
+        let priority = shared.priority.borrow();
         let mut queues = Vec::new();
         let _ = queues.push(QueueStat {
             queue: QueueId::RadioUp,
@@ -306,6 +321,12 @@ impl Link {
             capacity: SEND_JOBS as u32,
             high_water: self.send_jobs_high_water,
             dropped: self.send_jobs_dropped,
+        });
+        let _ = queues.push(QueueStat {
+            queue: QueueId::RadioUpPriority,
+            capacity: UP_PRIORITY_BYTES as u32,
+            high_water: priority.high_water() as u32,
+            dropped: priority.dropped(),
         });
         RadioStatus {
             peer_count,
@@ -357,14 +378,18 @@ impl Link {
         }
         let mut packer = Packer::new(&mut buf[HEADER_LEN..HEADER_LEN + PAYLOAD_MAX]);
         let mut up = shared.up.borrow_mut();
+        let mut priority = shared.priority.borrow_mut();
         loop {
             if self.held_len == 0 {
-                if up.is_empty() {
-                    break;
-                }
                 // One read takes a whole record: `Shared::push` queues none longer than
-                // `held`.
-                let (len, _) = up.read(&mut self.held[..]);
+                // `held`. So the priority ring wins only between records.
+                let (len, _) = if !priority.is_empty() {
+                    priority.read(&mut self.held[..])
+                } else if !up.is_empty() {
+                    up.read(&mut self.held[..])
+                } else {
+                    break;
+                };
                 self.held_len = len;
             }
             if !packer.push_encoded(&self.held[..self.held_len]) {
@@ -372,7 +397,7 @@ impl Link {
             }
             self.held_len = 0;
         }
-        drop(up);
+        drop((up, priority));
         let len = packer.len();
         seal(buf, if len == 0 { Kind::Idle } else { Kind::Messages }, seq, len);
     }

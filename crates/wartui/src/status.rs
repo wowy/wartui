@@ -168,6 +168,7 @@ fn queue_line(stat: &QueueStat) -> String {
         QueueId::RadioDown => ("radio-down", "bytes"),
         QueueId::HostPriority => ("host-priority", "bytes"),
         QueueId::HostBulk => ("host-bulk", "bytes"),
+        QueueId::RadioUpPriority => ("radio-up-priority", "bytes"),
     };
     format!(
         "  queue {name}  {}/{} {unit}  dropped {}",
@@ -271,11 +272,20 @@ mod tests {
                 dropped: 2,
             })
             .expect("room");
+        queues
+            .push(QueueStat {
+                queue: QueueId::RadioUpPriority,
+                capacity: 8_192,
+                high_water: 96,
+                dropped: 0,
+            })
+            .expect("room");
         assert_eq!(
             diagnostic_lines(&queues, None),
             [
                 "  queue host-bulk  1024/262144 bytes  dropped 0",
                 "  queue radio-send-jobs  3/8 entries  dropped 2",
+                "  queue radio-up-priority  96/8192 bytes  dropped 0",
             ]
         );
     }

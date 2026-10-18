@@ -43,7 +43,7 @@ use wartui_proto::link::LoopPhase;
 use wartui_proto::spi::{TRANSFER_LEN, Up};
 
 use crate::config::SEND_JOBS;
-use crate::link::{Bus, Link, RECORD_MAX, Radio, Shared, UpQueue, link_loop};
+use crate::link::{Bus, Link, RECORD_MAX, Radio, Shared, UpPriority, UpQueue, link_loop};
 
 // This creates the app descriptor the esp-idf bootloader expects.
 esp_bootloader_esp_idf::esp_app_desc!();
@@ -76,8 +76,13 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
     reboot()
 }
 
-/// Records waiting for the P4. Built at compile time, so the ring is never on the stack.
+/// Received frames waiting for the P4. Built at compile time, so the ring is never on the
+/// stack.
 static UP_QUEUE: ConstStaticCell<UpQueue> = ConstStaticCell::new(UpQueue::new(FrameRing::new()));
+
+/// Every other record waiting for the P4, sent ahead of the received frames.
+static UP_PRIORITY: ConstStaticCell<UpPriority> =
+    ConstStaticCell::new(UpPriority::new(FrameRing::new()));
 
 /// The record that did not fit the last transfer.
 static HELD: ConstStaticCell<[u8; RECORD_MAX]> = ConstStaticCell::new([0; RECORD_MAX]);
@@ -141,7 +146,7 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
         tx: [dma_buf!(DmaTxBuf), dma_buf!(DmaTxBuf)],
     };
 
-    let shared = Shared::new(UP_QUEUE.take());
+    let shared = Shared::new(UP_QUEUE.take(), UP_PRIORITY.take());
     // Queued behind the hello exchange, for the P4 to relay once the link is up.
     for said in setup.said {
         shared.say(said);

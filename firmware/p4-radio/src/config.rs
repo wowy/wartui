@@ -10,10 +10,18 @@
 
 use wartui_proto::config::env_usize;
 
-/// Bytes of encoded `Up` records waiting for a transfer to the P4.
+/// Bytes of received frames, as encoded `Up` records, waiting for a transfer to the P4.
 ///
 /// A full queue evicts its oldest record, counted in `RadioStatus.queues`.
 pub const UP_QUEUE_BYTES: usize = env_usize(option_env!("WARTUI_RADIO_UP_QUEUE_BYTES"), 96 * 1024);
+
+/// Bytes of every other encoded `Up` record — send results, lines and the C6's status —
+/// waiting for a transfer to the P4, ahead of the received frames.
+///
+/// A full queue evicts its oldest record, counted in `RadioStatus.queues`. These records
+/// are small and few, so a backlog this deep means the link has stopped.
+pub const UP_PRIORITY_BYTES: usize =
+    env_usize(option_env!("WARTUI_RADIO_UP_PRIORITY_BYTES"), 8 * 1024);
 
 /// The radio jobs — sends, and peer and power commands — that can wait for the radio, and
 /// the results that can wait for the link. Named for the queue `wartui status` reports.

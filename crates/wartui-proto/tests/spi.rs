@@ -266,6 +266,37 @@ fn spi_largest_messages_fit_one_transfer() {
 }
 
 #[test]
+fn spi_up_is_priority_when_not_a_received_frame() {
+    // The C6 queues these apart from the traffic, so a backlog of frames evicts frames.
+    let rx = Up::Message(BridgeToHost::Rx {
+        src: [1; 6],
+        dst: [2; 6],
+        rssi: -40,
+        rx_us: 0,
+        payload: Vec::new(),
+    });
+    assert!(!rx.is_priority());
+    let result =
+        Up::Message(BridgeToHost::SendResult { id: 1, status: SendStatus::AckOk, tx_us: 0 });
+    assert!(result.is_priority());
+    assert!(log("peer added").is_priority());
+    let error = Up::Message(BridgeToHost::Error { message: "no".try_into().unwrap() });
+    assert!(error.is_priority());
+    let status = Up::RadioStatus(RadioStatus {
+        peer_count: 0,
+        rx_count: 0,
+        rx_oversize: 0,
+        heap_free: 0,
+        uptime_ms: 0,
+        queues: Vec::new(),
+        crc_fail: 0,
+        bad_magic: 0,
+        seq_gap: 0,
+    });
+    assert!(status.is_priority());
+}
+
+#[test]
 fn spi_link_revision_golden_bytes() {
     const MSG: &str = "Up/Down encoding changed: bump spi::LINK_REVISION and update these bytes";
     let mut out = [0u8; 64];
@@ -278,6 +309,14 @@ fn spi_link_revision_golden_bytes() {
     let mut queues = Vec::new();
     queues
         .push(QueueStat { queue: QueueId::RadioUp, capacity: 300, high_water: 2, dropped: 1 })
+        .unwrap();
+    queues
+        .push(QueueStat {
+            queue: QueueId::RadioUpPriority,
+            capacity: 8192,
+            high_water: 3,
+            dropped: 0,
+        })
         .unwrap();
     let up = Up::RadioStatus(RadioStatus {
         peer_count: 3,
@@ -297,10 +336,13 @@ fn spi_link_revision_golden_bytes() {
         3,          // peer_count
         0xC8, 0x01, // rx_count 200, varint
         4, 5, 6,    // rx_oversize, heap_free, uptime_ms
-        1,          // queues: one entry
+        2,          // queues: two entries
         0,          // QueueId::RadioUp
         0xAC, 0x02, // capacity 300, varint
         2, 1,       // high_water, dropped
+        5,          // QueueId::RadioUpPriority
+        0x80, 0x40, // capacity 8192, varint
+        3, 0,       // high_water, dropped
         7, 8, 9,    // crc_fail, bad_magic, seq_gap
     ];
     assert_eq!(out[..len], expected, "{MSG}");

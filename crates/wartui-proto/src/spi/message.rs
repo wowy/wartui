@@ -23,7 +23,7 @@ use crate::link::{BridgeToHost, HostToBridge, QueueStat};
 ///
 /// Not frozen. Bump it whenever this module's types or the link enums they carry change
 /// shape; `spi_link_revision_golden_bytes` in `tests/spi.rs` fails until the bump.
-pub const LINK_REVISION: u16 = 1;
+pub const LINK_REVISION: u16 = 2;
 
 /// P4 to C6.
 // Unboxed for the reason `HostToBridge` gives.
@@ -45,6 +45,16 @@ pub enum Up {
     Message(BridgeToHost),
     /// Reply to [`Down::GetRadioStatus`].
     RadioStatus(RadioStatus),
+}
+
+impl Up {
+    /// Whether this record must survive a backlog of received frames: everything but a
+    /// received frame, so a send result, a line or the C6's status is never evicted behind
+    /// the traffic.
+    #[must_use]
+    pub const fn is_priority(&self) -> bool {
+        !matches!(self, Up::Message(BridgeToHost::Rx { .. }))
+    }
 }
 
 /// The C6's counters, which the P4 reports beside its own.
