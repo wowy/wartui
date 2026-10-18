@@ -103,6 +103,8 @@ pub enum Chip {
     Esp32C5,
     /// 2.4 GHz only, which is all ESP-NOW needs on the control channel.
     Esp32C6,
+    /// No radio of its own: it bridges through an ESP32-C6 over SPI.
+    Esp32P4,
 }
 
 /// Where the bridge's main loop was when it last stopped making progress.
@@ -136,6 +138,8 @@ pub enum LoopPhase {
     /// Pushing pixels at the panel, the other call in the loop that blocks for longer
     /// than a memcpy.
     Render,
+    /// Waiting on a transfer over the P4–C6 SPI link.
+    SpiTransfer,
 }
 
 /// Severity of a [`BridgeToHost::Log`] line.
