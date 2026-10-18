@@ -152,7 +152,7 @@ After the final burst run, read with `wartui status`:
 |---|---|---|---|
 | C6 radio up | 3,118 B | 98,304 B | 0 |
 | C6 send jobs | 1 | 4 | 0 |
-| C6 radio down | 28 B | 16,384 B | 0 |
+| P4 radio down | 28 B | 16,384 B | 0 |
 | P4 host priority | 62 B | 16,384 B | 0 |
 | P4 host bulk | not measured under load | 262,144 B | 0 while a host read |
 

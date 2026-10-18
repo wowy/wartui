@@ -99,7 +99,7 @@ const PROBE_GARBLE_LIMIT: u32 = 64;
 /// port is cheap, and it is the case where something is about to be plugged in.
 const MAX_SWEEP_DELAY: Duration = Duration::from_secs(5);
 
-/// The Espressif boards attached, which are the bridge and any node on USB.
+/// The Espressif boards and P4 bridges attached, which are the bridge and any node on USB.
 ///
 /// # Errors
 /// [`TransportError::Enumerate`] if the ports cannot be listed.

@@ -38,7 +38,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
 use clap::Args as ClapArgs;
-use wartui_bridge::ports::{BRIDGE_PID, PortCandidate};
+use wartui_bridge::ports::{BRIDGE_PID, PortCandidate, is_p4_bridge};
 use wartui_bridge::serial::{BridgeSpec, discover_ports};
 use wartui_proto::mac::Mac;
 
@@ -173,7 +173,7 @@ pub fn run(args: Args) -> Result<()> {
     };
 
     if report.is_empty() {
-        println!("No Espressif board is attached.");
+        println!("No Espressif board or P4 bridge is attached.");
     }
     report.sort_by(|a, b| a.0.path.cmp(&b.0.path));
     for (candidate, outcome) in &report {
@@ -278,6 +278,8 @@ fn select(candidates: &[PortCandidate], bridge: &Spare, skips: &[Mac]) -> Vec<Ve
             let is_bridge = bridge.specs().any(|spec| matches(&spec, candidate));
             let skip = if is_bridge {
                 Some(Skip::Bridge)
+            } else if is_p4_bridge(candidate) {
+                Some(Skip::P4Bridge)
             } else if candidate.pid != Some(BRIDGE_PID) {
                 Some(Skip::NotSerialJtag(candidate.pid))
             } else if let Some(address) = candidate.mac() {
@@ -366,7 +368,7 @@ fn in_parallel<T: Sync, R: Send>(
 mod tests {
     use std::path::Path;
 
-    use wartui_bridge::ports::{ESPRESSIF_VID, candidate};
+    use wartui_bridge::ports::{ESPRESSIF_VID, TEST_PID, TEST_VID, candidate};
 
     use super::super::normalize;
     use super::super::release_asset;
@@ -417,6 +419,15 @@ mod tests {
         let found = [candidate("/dev/ttyACM1", Some(ESPRESSIF_VID), Some(0x0002), Some("x"))];
         let verdicts = select(&found, &Spare::default(), &[]);
         assert_eq!(verdicts, [Verdict::Skip(found[0].clone(), Skip::NotSerialJtag(Some(2)))]);
+    }
+
+    #[test]
+    fn flash_fleet_skips_p4_bridge_with_readme_hint() {
+        let mut p4 = candidate("/dev/ttyACM3", Some(TEST_VID), Some(TEST_PID), None);
+        p4.product = Some("wartui p4 bridge".to_owned());
+        let verdicts = select(&[p4.clone()], &Spare::default(), &[]);
+        assert_eq!(verdicts, [Verdict::Skip(p4, Skip::P4Bridge)]);
+        assert!(Skip::P4Bridge.to_string().contains("firmware/p4-bridge/README.md"));
     }
 
     #[test]

@@ -306,9 +306,9 @@ edit stops; follow the pointer before changing the rule.
 - **Somebody else's ESP-NOW traffic is dropped, never reported or accommodated.**
   → `crates/wartui-proto/src/air/mod.rs` `//!`, `firmware/common/src/radio.rs` `hear`
 - **Finding the bridge means transmitting into what is opened**, so the sweep opens Espressif
-  vendor IDs and nothing else, and `wartui reset` — which transmits before anything has identified
-  itself — never sweeps at all. The GPS search is the complement: it opens everything *but* those,
-  and writes to none of them. → `crates/wartui-bridge/src/ports.rs` `//!`,
+  vendor IDs and the P4 bridge's exact USB ID pair and nothing else, and `wartui reset` — which
+  transmits before anything has identified itself — never sweeps at all. The GPS search is the
+  complement: it opens everything *but* those, and writes to none of them. → `crates/wartui-bridge/src/ports.rs` `//!`,
   `serial::select` / `serial::unambiguous_bridge`, `crates/wartui-core/src/discover.rs` `//!`
 - **A connection asks once and then only waits.** A board that is not reading its USB endpoint
   absorbs exactly one packet and NACKs the rest, and they sit in the tty's output queue through a

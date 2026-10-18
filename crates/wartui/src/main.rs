@@ -72,7 +72,7 @@ enum Command {
     Status(status::Args),
     /// Reboot the bridge, for when it has stopped answering.
     Reset(reset::Args),
-    /// List the Espressif boards attached, and the address of each.
+    /// List the Espressif boards and P4 bridges attached, and the address of each.
     Ports,
     /// Flash node firmware onto every attached board of one chip, sparing the bridge.
     FlashFleet(flash::fleet::Args),
@@ -179,7 +179,8 @@ fn logging(
     Ok(Some(guard))
 }
 
-/// List the Espressif boards attached, each named by the address it transmits from.
+/// List the Espressif boards and P4 bridges attached, each named by the address it transmits
+/// from.
 ///
 /// The address is the point of the command. A node plugged in by USB is the same
 /// vendor and product as the bridge and sits on an adjacent device node, so a path
@@ -190,7 +191,7 @@ fn logging(
 fn ports() -> Result<()> {
     let found = discover_ports().context("listing serial ports")?;
     if found.is_empty() {
-        println!("No Espressif board is attached.");
+        println!("No Espressif board or P4 bridge is attached.");
         println!("If the bridge is plugged in, name it with --bridge.");
         return Ok(());
     }

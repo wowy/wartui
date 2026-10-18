@@ -127,6 +127,10 @@ pub enum LoopPhase {
     /// Carrying out a host command other than a transmit.
     Command,
     /// Inside an ESP-NOW send, waiting on the transmit callback.
+    ///
+    /// No firmware in this tree marks it, since sends run beside the main loop. It stays for
+    /// older builds, whose phase marker or hello can still name it, and because removing it
+    /// would shift every later variant's index.
     Transmit,
     /// Writing queued frames to the USB endpoint.
     Pump,
@@ -394,7 +398,7 @@ pub enum QueueId {
     RadioUp,
     /// The C6's queue of transmit jobs from the P4. Counts entries.
     RadioSendJobs,
-    /// The C6's queue of frames from the host. Counts bytes.
+    /// The P4's queue of records waiting for a transfer to the C6. Counts bytes.
     RadioDown,
     /// The P4's priority ring toward the host. Counts bytes.
     HostPriority,

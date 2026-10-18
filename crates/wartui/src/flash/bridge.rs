@@ -181,7 +181,7 @@ fn target(
                 })?
             }
             (None, [only]) => only,
-            (None, []) => bail!("no Espressif board is attached"),
+            (None, []) => bail!("no Espressif board or P4 bridge is attached"),
             (None, several) => bail!(
                 "{} boards are attached and none is known to be the bridge: {}. Name it with \
                      --bridge (`wartui ports` lists each board's address)",
@@ -191,11 +191,7 @@ fn target(
         },
     };
     if is_p4_bridge(chosen) {
-        bail!(
-            "{} is a P4 bridge: flash it by hand until single-cable updates land, as \
-             firmware/p4-bridge/README.md describes",
-            chosen.path
-        );
+        bail!("{} is {}", chosen.path, Skip::P4Bridge);
     }
     if chosen.pid != Some(BRIDGE_PID) {
         bail!("{} is {}", chosen.path, Skip::NotSerialJtag(chosen.pid));
@@ -300,7 +296,7 @@ mod tests {
     #[test]
     fn flash_bridge_refuses_run_when_no_board_is_attached() {
         let error = target(&[], None, None).unwrap_err().to_string();
-        assert!(error.contains("no Espressif board is attached"), "{error}");
+        assert!(error.contains("no Espressif board or P4 bridge is attached"), "{error}");
     }
 
     #[test]

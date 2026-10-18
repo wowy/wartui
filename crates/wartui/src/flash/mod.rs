@@ -218,6 +218,7 @@ fn canonical(spec: BridgeSpec) -> BridgeSpec {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Skip {
     Bridge,
+    P4Bridge,
     NotSerialJtag(Option<u16>),
     NoAddress,
     Operator,
@@ -232,6 +233,10 @@ impl fmt::Display for Skip {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Bridge => f.write_str("the bridge"),
+            Self::P4Bridge => f.write_str(
+                "a P4 bridge: flash it by hand until single-cable updates land, as \
+                 firmware/p4-bridge/README.md describes",
+            ),
             Self::NotSerialJtag(Some(pid)) => {
                 write!(f, "not native USB Serial/JTAG (product {pid:04x})")
             }

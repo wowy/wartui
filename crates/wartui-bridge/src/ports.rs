@@ -27,12 +27,13 @@
 //! **What a device is for is decided by vendor ID, plus one exact pair.**
 //! Espressif's vendor ID, or the test pair [`TEST_VID`]:[`TEST_PID`] whose product
 //! string starts with [`P4_PRODUCT_PREFIX`] (the P4 bridge, until it is granted a
-//! PID of its own). [`could_be_a_bridge`] and [`could_be_a_receiver`] are complements, so the two
-//! sets cannot overlap however either is called. That matters because looking for
-//! a bridge means *writing* into what is opened: the sweep sends `Identify` frames
-//! down every candidate until one answers, so widening that set past Espressif's
-//! vendor ID would mean transmitting into whatever else is plugged in. Exclusive
-//! opening is a backstop against two readers, not a substitute for that.
+//! PID of its own). [`could_be_a_bridge`] and [`could_be_a_receiver`] are
+//! complements, so the two sets cannot overlap however either is called. That
+//! matters because looking for a bridge means *writing* into what is opened: the
+//! sweep sends `Identify` frames down every candidate until one answers, so
+//! widening that set past Espressif's vendor ID and the P4's exact pair would mean
+//! transmitting into whatever else is plugged in. Exclusive opening is a backstop
+//! against two readers, not a substitute for that.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -149,8 +150,8 @@ pub fn could_be_a_bridge(candidate: &PortCandidate) -> bool {
 
 /// Whether this port could be an NMEA receiver.
 ///
-/// The complement of [`could_be_a_bridge`] over usable paths, and that is the whole rule: a receiver
-/// is recognized by what it says when read, not by what it is called.
+/// The complement of [`could_be_a_bridge`] over usable paths, and that is the whole rule: a
+/// receiver is recognized by what it says when read, not by what it is called.
 #[must_use]
 pub fn could_be_a_receiver(candidate: &PortCandidate) -> bool {
     is_usable_path(&candidate.path) && !could_be_a_bridge(candidate)
