@@ -8,13 +8,18 @@
 //! The crate is `no_std` and allocation-free so the firmware can use it. Logic the
 //! firmware runs lives here too, such as [`outbox`], [`stall`], [`pending`] and [`ota`],
 //! because a `riscv32imac` binary cannot run a test and this crate can.
+//! [`config`] parses build-time buffer sizes, [`frame_ring`] holds whole frames in a bounded
+//! ring, and [`host_queue`] queues link frames for the P4's USB host port.
 
 #![no_std]
 
 pub mod air;
 pub mod beacon;
+pub mod config;
 pub mod dedup;
+pub mod frame_ring;
 pub mod hci;
+pub mod host_queue;
 pub mod link;
 pub mod mac;
 mod mac_index;

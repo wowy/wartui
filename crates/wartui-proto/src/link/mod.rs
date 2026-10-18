@@ -373,3 +373,31 @@ pub enum BridgeToHost {
         bytes: GpsBytes,
     },
 }
+
+/// A bounded queue whose depth the firmware reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub enum QueueId {
+    /// The C6's receive queue toward the P4. Counts bytes.
+    RadioUp,
+    /// The C6's queue of transmit jobs from the P4. Counts entries.
+    RadioSendJobs,
+    /// The C6's queue of frames from the host. Counts bytes.
+    RadioDown,
+    /// The P4's priority ring toward the host. Counts bytes.
+    HostPriority,
+    /// The P4's bulk ring toward the host. Counts bytes.
+    HostBulk,
+}
+
+/// How full a queue has been, and what it has lost.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct QueueStat {
+    /// Which queue this describes; it also says whether the counts are bytes or entries.
+    pub queue: QueueId,
+    /// Its size.
+    pub capacity: u32,
+    /// The most it has held at once.
+    pub high_water: u32,
+    /// Items evicted or refused since boot.
+    pub dropped: u32,
+}
