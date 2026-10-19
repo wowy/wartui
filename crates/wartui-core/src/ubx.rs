@@ -1,7 +1,7 @@
 //! The u-blox side of a bridge's GPS receiver: the configuration the host writes to it, and the
 //! split of what it sends back into NMEA and UBX.
 //!
-//! The bridge is a byte pipe (`firmware/bridge/src/gps.rs`), so everything that knows the receiver
+//! The bridge is a byte pipe (`firmware/common/src/gps.rs`), so everything that knows the receiver
 //! speaks UBX lives here. A change to the rate or the sentence set then costs a `cargo run`, not a
 //! reflash.
 //!

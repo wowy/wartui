@@ -52,10 +52,10 @@ t-dongle-c5 = ["dep:embedded-graphics", "dep:embedded-hal-bus", "dep:mipidsi"]
 # with SDA on GPIO11 and SCL on GPIO12. A board fact layered over a chip feature,
 # like the two above, and independent of `t-dongle-c5`: either builds without the
 # other. C5 only, and mutually exclusive with `xiao-external-antenna`; `src/main.rs`
-# enforces both. `esp-hal`'s I2C master drives it; `embassy-sync` carries its bytes
-# between the GPS task and `main`. Also turns off the board's RGB LED on GPIO4
+# enforces both. `wartui-firmware`'s `gps` reads it; `embassy-sync` carries its
+# bytes between the GPS task and `main`. Also turns off the board's RGB LED on GPIO4
 # and GPIO5, as `t-dongle-c5` does.
-t-dongle-c5-gps = ["dep:embassy-sync"]
+t-dongle-c5-gps = ["dep:embassy-sync", "wartui-firmware/gps"]
 
 [dependencies]
 # `esp-radio` and `esp-rtos` allocate their task stacks and the Wi-Fi driver's
