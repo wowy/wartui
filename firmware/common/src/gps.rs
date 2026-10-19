@@ -1,8 +1,9 @@
 //! A u-blox GPS receiver on I2C: polled, batched, and passed through unread.
 //!
 //! One copy for every bridge with a receiver on its I2C bus. The T-Dongle-C5 reads one on
-//! its Qwiic port. Each firmware owns its pins, its channel buffers and how it runs
-//! [`run`], so this module holds only what the receiver and the host need from either.
+//! its Qwiic port, and the P4 bridge on GPIO7 and GPIO8. Each firmware owns its pins, its
+//! channel buffers and how it runs [`run`], so this module holds only what the receiver and
+//! the host need from either.
 //!
 //! **The bridge does not parse what the receiver says.** It reads the receiver's byte stream
 //! and forwards it as [`BridgeToHost::Gps`](wartui_proto::link::BridgeToHost::Gps), and
@@ -20,7 +21,7 @@
 //!
 //! - finished batches go up, [`BATCH_SLOTS`] deep;
 //! - a host write comes down one slot deep, and a write that finds it full is dropped,
-//!   since the host repeats its configuration ([`Link::write`]);
+//!   since the host repeats its configuration ([`write`]);
 //! - whether the receiver answered, and whether a write was refused, are atomics the
 //!   firmware reads ([`present`], [`take_write_refused`]), so its `Error` and `Log` lines
 //!   stay its own.
@@ -101,6 +102,15 @@ pub fn take_write_refused() -> bool {
     WRITE_REFUSED.swap(false, Ordering::Relaxed)
 }
 
+/// Hand [`run`] the host's bytes through `writes`, the write channel's sending end.
+/// Dropped when a write is already pending, since the host repeats its configuration.
+pub fn write<M: RawMutex>(writes: &mut Sender<'_, M, GpsWriteBytes>, bytes: &GpsWriteBytes) {
+    if let Some(slot) = writes.try_send() {
+        slot.clone_from(bytes);
+        writes.send_done();
+    }
+}
+
 /// Bring up the receiver's bus at 400 kHz, blocking. The caller turns it async where the
 /// driver's interrupt handler is to be bound, then wraps it in a [`Bus`].
 ///
@@ -146,10 +156,7 @@ impl<'a, M: RawMutex> Link<'a, M> {
 
     /// Hand [`run`] the host's bytes. Dropped when a write is already pending.
     pub fn write(&mut self, bytes: &GpsWriteBytes) {
-        if let Some(slot) = self.writes.try_send() {
-            slot.clone_from(bytes);
-            self.writes.send_done();
-        }
+        write(&mut self.writes, bytes);
     }
 
     /// Finished batches, oldest first. Release each with `receive_done`.

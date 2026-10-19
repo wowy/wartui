@@ -11,11 +11,11 @@
 //! shared loop runs beside a `main` that blocks.
 //!
 //! **The receiver is read by its own task, over interrupt-driven I2C.** A full
-//! [`READ_CHUNK`](gps::READ_CHUNK) takes 2.5–4 ms (`docs/t-dongle-c5-gps-findings.md`). Read blocking from
-//! `main`, the CPU spins for all of it while the radio's ten-deep receive queue and the USB
-//! outbox go unserved. With four nodes bursting, a 5 Hz receiver read that way lost 26–38
-//! sighting batches a four-minute run against 0–17 without it, and the outbox dropped
-//! frames.
+//! [`READ_CHUNK`](gps::READ_CHUNK) takes 2.5–4 ms (`docs/t-dongle-c5-gps-findings.md`).
+//! Read blocking from `main`, the CPU spins for all of it while the radio's ten-deep
+//! receive queue and the USB outbox go unserved. With four nodes bursting, a 5 Hz receiver
+//! read that way lost 26–38 sighting batches a four-minute run against 0–17 without it,
+//! and the outbox dropped frames.
 //!
 //! **The task runs on an interrupt executor, not on `main`'s.** The C5's I2C FIFO holds 32
 //! bytes, so `esp-hal` splits a 64-byte read into three transfers, and the task must run to
