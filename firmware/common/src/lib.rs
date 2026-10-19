@@ -10,8 +10,12 @@
 //! node uses [`health`]. [`phase`] is a bridge's, whatever chip it runs on. [`radio`] is the
 //! ESP-NOW half of a bridge, behind the `radio` feature, so a firmware whose chip has a
 //! radio and bridges it carries the one copy; the P4 has no radio and cannot select it.
+//! [`gps`] reads a u-blox receiver on a bridge's I2C bus, behind the `gps` feature, on any
+//! of the three chips.
 #![no_std]
 
+#[cfg(feature = "gps")]
+pub mod gps;
 pub mod health;
 pub mod phase;
 #[cfg(feature = "radio")]
