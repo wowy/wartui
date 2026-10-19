@@ -287,7 +287,7 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     let bus = Bus { spi, ready, rx: dma_buf!(DmaRxBuf), tx: dma_buf!(DmaTxBuf) };
 
     let fw_version = ShortStr::try_from(env!("CARGO_PKG_VERSION")).unwrap_or_default();
-    let pair = Pair::new(own_mac, fw_version, cause, last_phase, boot.as_millis());
+    let pair = Pair::new(own_mac, fw_version, cause, last_phase, boot.as_millis(), false);
     let shared = Shared::new(pair, HOST_QUEUE.take(), DOWN_QUEUE.take());
     let mut link = Link::new(boot, own_mac, cause, last_phase, HELD.take());
 

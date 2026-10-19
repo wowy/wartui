@@ -85,16 +85,20 @@ pub struct Pair {
     own_cause: ResetCause,
     own_phase: LoopPhase,
     boot_ms: u64,
+    /// The P4 was built to read a GPS receiver.
+    gps: bool,
 }
 
 impl Pair {
-    /// A pair that has heard nothing yet. `boot_ms` is the P4 clock at its start.
+    /// A pair that has heard nothing yet. `boot_ms` is the P4 clock at its start, and `gps`
+    /// says whether the P4 was built to read a GPS receiver, which `Ready` reports.
     pub fn new(
         own_mac: Mac,
         own_fw: ShortStr,
         own_cause: ResetCause,
         own_phase: LoopPhase,
         boot_ms: u64,
+        gps: bool,
     ) -> Self {
         Self {
             state: RadioState::Waiting,
@@ -107,6 +111,7 @@ impl Pair {
             own_cause,
             own_phase,
             boot_ms,
+            gps,
         }
     }
 
@@ -213,7 +218,7 @@ impl Pair {
             heap_free: hello.map_or(0, |hello| hello.heap_free),
             uptime_ms: self.uptime_ms(now_ms),
             panel: None,
-            gps: false,
+            gps: self.gps,
             radio: hello.map(|hello| RadioInfo {
                 chip: hello.chip,
                 mac: hello.mac,
