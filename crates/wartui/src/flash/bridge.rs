@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Args as ClapArgs;
-use wartui_bridge::ports::{BRIDGE_PID, PortCandidate};
+use wartui_bridge::ports::{BRIDGE_PID, PortCandidate, is_p4_bridge};
 use wartui_bridge::serial::{BridgeSpec, discover_ports};
 use wartui_proto::mac::{self, Mac};
 
@@ -181,7 +181,7 @@ fn target(
                 })?
             }
             (None, [only]) => only,
-            (None, []) => bail!("no Espressif board is attached"),
+            (None, []) => bail!("no Espressif board or P4 bridge is attached"),
             (None, several) => bail!(
                 "{} boards are attached and none is known to be the bridge: {}. Name it with \
                      --bridge (`wartui ports` lists each board's address)",
@@ -190,6 +190,9 @@ fn target(
             ),
         },
     };
+    if is_p4_bridge(chosen) {
+        bail!("{} is {}", chosen.path, Skip::P4Bridge);
+    }
     if chosen.pid != Some(BRIDGE_PID) {
         bail!("{} is {}", chosen.path, Skip::NotSerialJtag(chosen.pid));
     }
@@ -201,7 +204,7 @@ fn target(
 
 #[cfg(test)]
 mod tests {
-    use wartui_bridge::ports::{ESPRESSIF_VID, candidate};
+    use wartui_bridge::ports::{ESPRESSIF_VID, TEST_PID, TEST_VID, candidate};
 
     use super::super::testing::{BRIDGE_MAC, NODE_MAC, board};
     use super::super::{normalize, release_asset};
@@ -293,7 +296,7 @@ mod tests {
     #[test]
     fn flash_bridge_refuses_run_when_no_board_is_attached() {
         let error = target(&[], None, None).unwrap_err().to_string();
-        assert!(error.contains("no Espressif board is attached"), "{error}");
+        assert!(error.contains("no Espressif board or P4 bridge is attached"), "{error}");
     }
 
     #[test]
@@ -301,6 +304,15 @@ mod tests {
         let found = [board("/dev/ttyACM0", None)];
         let error = target(&found, None, None).unwrap_err().to_string();
         assert!(error.contains("reports no address"), "{error}");
+    }
+
+    #[test]
+    fn flash_bridge_refuses_p4_bridge_with_readme_hint() {
+        let mut p4 = candidate("/dev/ttyACM0", Some(TEST_VID), Some(TEST_PID), None);
+        p4.product = Some("wartui p4 bridge".to_owned());
+        let error = target(&[p4], None, None).unwrap_err().to_string();
+        assert!(error.contains("is a P4 bridge"), "{error}");
+        assert!(error.contains("firmware/p4-bridge/README.md"), "{error}");
     }
 
     #[test]

@@ -1,24 +1,38 @@
-//! Chip-level code both wartui firmwares need.
+//! Chip-level code the wartui firmwares need.
 //!
-//! What belongs here is what the bridge and the node would otherwise each carry a copy of
-//! and that needs `esp-hal` to say. Logic that needs no chip lives in `wartui-proto`,
+//! What belongs here is what two firmwares would otherwise each carry a copy of and that
+//! needs `esp-hal` to say. Logic that needs no chip lives in `wartui-proto`,
 //! where `cargo test` reaches it; this crate cannot live there, because `wartui-proto` is
 //! a host workspace member built with `--all-features`, which would select both chips'
 //! `esp-hal` features at once.
 //!
 //! Each firmware forwards its chip feature here, so one build selects one chip. Only the
-//! node uses [`health`].
+//! node uses [`health`]. [`phase`] is a bridge's, whatever chip it runs on. [`radio`] is the
+//! ESP-NOW half of a bridge, behind the `radio` feature, so a firmware whose chip has a
+//! radio and bridges it carries the one copy; the P4 has no radio and cannot select it.
 #![no_std]
 
 pub mod health;
+pub mod phase;
+#[cfg(feature = "radio")]
+pub mod radio;
 
 use esp_hal::rtc_cntl::SocResetReason;
 use wartui_proto::reset::ResetCause;
 
-#[cfg(not(any(feature = "esp32c5", feature = "esp32c6")))]
-compile_error!("select a chip: --features esp32c5 or --features esp32c6");
-#[cfg(all(feature = "esp32c5", feature = "esp32c6"))]
-compile_error!("select exactly one chip: esp32c5 and esp32c6 are mutually exclusive");
+#[cfg(not(any(feature = "esp32c5", feature = "esp32c6", feature = "esp32p4")))]
+compile_error!("select a chip: --features esp32c5, esp32c6 or esp32p4");
+// Counted rather than checked pairwise, so a fourth chip adds a term rather than a clause
+// per existing one.
+const _: () = assert!(
+    cfg!(feature = "esp32c5") as usize
+        + cfg!(feature = "esp32c6") as usize
+        + cfg!(feature = "esp32p4") as usize
+        <= 1,
+    "select exactly one chip: esp32c5, esp32c6 and esp32p4 are mutually exclusive"
+);
+#[cfg(all(feature = "radio", feature = "esp32p4"))]
+compile_error!("the ESP32-P4 has no radio; build `radio` with esp32c5 or esp32c6");
 
 /// Flatten the chip's reset reason into the handful of stories worth telling.
 ///

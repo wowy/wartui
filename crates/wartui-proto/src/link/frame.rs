@@ -5,9 +5,11 @@ use super::{
     MAX_ESPNOW_V2_PAYLOAD, MAX_FRAME, MAX_HOST_FRAME, MAX_NODE_PAYLOAD, PANEL_ROWS,
 };
 
-// A frame is the version byte, the payload and the CRC, plus COBS overhead (one byte
-// per 254 and a leading marker) and the terminator. Checked here so a payload that
-// outgrew the buffer is a build error, not a silent truncation.
+// A frame is a body (the version byte, the payload and the CRC) plus COBS overhead (one
+// byte per 254 and a leading marker, five for a body this size) and the terminator, so 8
+// bytes cover the framing. Checked here so a payload that outgrew the buffer is a build
+// error, not a silent truncation. Each `+ 32` below is room for the message's other
+// fields, its variant index, and the body's version byte and CRC.
 pub(crate) const MAX_BODY: usize = MAX_FRAME - 8;
 const _: () = assert!(MAX_NODE_PAYLOAD + 32 < MAX_BODY);
 // The same for the host-to-bridge direction, whose longest frame is a full v2 send.
@@ -25,6 +27,24 @@ const _: () = assert!(GPS_WRITE_MAX + 32 < MAX_HOST_BODY);
 const _: () = assert!(
     PANEL_ROWS * (32 + 2) + 2 < MAX_BODY,
     "a whole-panel push must fit one frame, or a bridge would silently lose rows"
+);
+// The two replies that grew with the split bridge, at their fullest.
+const _: () = assert!(
+    // variant index, `peer_count`, four `u32`s, then 8 queues of a tag and three `u32`s,
+    // then the `Option` tag and nine `u32`s. Varint integers never exceed their fixed width
+    // by more than a byte each.
+    1 + 1 + 4 * 5 + 1 + 8 * (1 + 3 * 5) + 1 + 9 * 5 < MAX_BODY,
+    "a Status with every queue and SPI stats must fit one frame"
+);
+const _: () = assert!(
+    // Two `ShortStr`s behind their lengths and two MACs, the bridge's and the radio's.
+    // `8 * 5` bounds eight varint `u32`s, against three today: `heap_free`, `uptime_ms` and
+    // the radio's `uptime_ms`. `24` bounds the one-byte fields, against 13 today: the
+    // variant index, `chip`, `proto_version`, `reset_cause`, `last_phase`, `gps`, the
+    // panel's tag, `cols` and `rows`, and the radio's tag, `chip`, `reset_cause` and
+    // `last_phase`. The slack lets either grow a little without moving the sum.
+    2 * (32 + 1) + 2 * 6 + 8 * 5 + 24 < MAX_BODY,
+    "a Ready with radio info must fit one frame"
 );
 
 /// Why a frame could not be encoded or decoded.

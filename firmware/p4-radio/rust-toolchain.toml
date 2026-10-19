@@ -1,0 +1,5 @@
+# The C6 is RISC-V, like the single-chip bridges, and this pin keeps it building on stable.
+[toolchain]
+channel = "stable"
+components = ["rust-src"]
+targets = ["riscv32imac-unknown-none-elf"]

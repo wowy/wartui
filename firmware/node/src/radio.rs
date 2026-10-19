@@ -49,7 +49,7 @@ pub fn park(manager: &EspNowManager, sniffer: &Sniffer, channel: u8, listen: boo
 ///
 /// Applied to the broadcast peer `esp-radio` registers at init, once at boot, and to
 /// the core peer whenever [`set_core_peer`] registers one. `set_peer_rate` in
-/// `firmware/bridge/src/main.rs` has why 24 Mbps, what it costs, and why it is set per
+/// `firmware/common/src/radio.rs` has why 24 Mbps, what it costs, and why it is set per
 /// peer.
 pub fn set_peer_rate(manager: &EspNowManager, mac: &[u8; 6]) -> bool {
     let config =
@@ -108,7 +108,7 @@ const fn peer(mac: [u8; 6]) -> PeerInfo {
 ///
 /// `PeerExists` is not that failure: `old`'s removal above is best-effort, so a
 /// node switching back to a core it held before can find it still registered.
-/// Treated as success, same as `transmit` in `firmware/bridge/src/main.rs` — the
+/// Treated as success, same as `transmit` in `firmware/common/src/radio.rs` — the
 /// alternative is a node that can never move back onto a MAC it once left.
 pub fn set_core_peer(
     manager: &EspNowManager,
@@ -142,7 +142,7 @@ pub fn broadcast(sender: &mut EspNowSender, frame: &[u8]) -> bool {
 /// Sighting batches go this way rather than broadcast, so the radio retries a
 /// frame nobody heard instead of it being gone after one try. `wait` blocks for the
 /// send callback, the same as [`broadcast`]; the difference is what `Ok` means for a
-/// unicast destination, which `firmware/bridge/src/main.rs`'s `transmit` also relies
+/// unicast destination, which `firmware/common/src/radio.rs`'s `transmit` also relies
 /// on: the callback status is the MAC ack, not just an enqueue.
 pub fn unicast(sender: &mut EspNowSender, dst: &[u8; 6], frame: &[u8]) -> bool {
     sender.send(dst, frame).is_ok_and(|waiter| waiter.wait().is_ok())

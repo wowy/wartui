@@ -380,7 +380,9 @@ fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
             );
         }
 
-        BridgeToHost::Status { peer_count, rx_count, dropped_tx, uptime_ms, rx_oversize } => {
+        BridgeToHost::Status {
+            peer_count, rx_count, dropped_tx, uptime_ms, rx_oversize, ..
+        } => {
             println!(
                 "# status: {peer_count} peers, {rx_count} received, \
                  {dropped_tx} dropped, {rx_oversize} oversize, up {}s",
@@ -486,6 +488,8 @@ mod tests {
             dropped_tx: 0,
             uptime_ms: 1_000,
             rx_oversize: 0,
+            queues: wartui_proto::link::QueueStats::new(),
+            spi: None,
         };
         assert!(heard(LinkEvent::Message(status)));
     }

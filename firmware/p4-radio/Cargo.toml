@@ -1,0 +1,79 @@
+# Its own workspace, for the reasons `firmware/bridge` is one: a different target, a
+# different toolchain pin and a lockfile that must not be resolved together with the
+# host crates.
+[workspace]
+
+[package]
+name = "wartui-p4-radio-fw"
+description = "The radio half of the wartui P4 split bridge: ESP-NOW on the board's ESP32-C6, an SPI slave to the P4."
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/wowy/wartui"
+
+[[bin]]
+name = "wartui-p4-radio-fw"
+path = "src/main.rs"
+
+[features]
+# The only chip: the P4 boards carry an ESP32-C6. Stated as a feature, like the other
+# firmwares, so the build command reads the same.
+esp32c6 = [
+  "esp-alloc/esp32c6",
+  "esp-bootloader-esp-idf/esp32c6",
+  "esp-hal/esp32c6",
+  "esp-radio/esp32c6",
+  "esp-rtos/esp32c6",
+  "wartui-firmware/esp32c6",
+]
+
+[dependencies]
+# Every `esp-*` crate and `embassy-*` crate is held at the version `firmware/bridge`
+# pins, for the reasons its README § "Dependency versions" gives.
+esp-alloc = "0.11.0"
+esp-bootloader-esp-idf = "0.6.0"
+esp-hal = { version = "1.2.2", features = ["unstable"] }
+esp-radio = { version = "1.0.0-beta.1", default-features = false, features = [
+  "esp-alloc",
+  "esp-now",
+  "unstable",
+  "wifi",
+] }
+esp-rtos = { version = "0.4.0", features = ["embassy", "esp-alloc", "esp-radio"] }
+embassy-executor = "0.10.0"
+embassy-futures = "0.1.2"
+embassy-time = "0.5.1"
+static_cell = "2.1.1"
+# The reset funnel, the reset cause, the phase marker and the radio half, shared with
+# the single-chip bridge.
+wartui-firmware = { path = "../common", features = ["radio"] }
+wartui-proto = { path = "../../crates/wartui-proto" }
+
+[lints.rust]
+# AGENTS.md's project-wide rule; the root workspace excludes `firmware`, so it is
+# stated here too.
+unsafe_code = "deny"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+
+[profile.dev]
+# The radio blobs misbehave below opt-level 2, and the debug profile is too big.
+opt-level = "s"
+
+[profile.dev.package.esp-radio]
+opt-level = 3
+
+[profile.release]
+codegen-units = 1
+debug = 2
+lto = "fat"
+opt-level = "s"
+
+# The crates that encode and check every record and transfer, built for speed as the
+# single-chip bridge builds them.
+[profile.release.package.wartui-proto]
+opt-level = 3
+
+[profile.release.package.postcard]
+opt-level = 3

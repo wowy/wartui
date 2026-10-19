@@ -19,7 +19,9 @@ use anyhow::{Context, Result, bail};
 use clap::Args as ClapArgs;
 use wartui_bridge::LinkEvent;
 use wartui_proto::air::CONTROL_CHANNEL;
-use wartui_proto::link::{BridgeToHost, HostToBridge};
+use wartui_proto::link::{
+    BridgeToHost, HostToBridge, QueueId, QueueStat, QueueStats, RadioInfo, SpiStats,
+};
 use wartui_proto::mac;
 
 /// Generous enough for a bridge that is busy forwarding a fleet, short enough
@@ -63,6 +65,10 @@ pub async fn run(args: Args) -> Result<()> {
         info.fw_version
     );
     println!("{}", super::last_reset_line(&info));
+    // A split bridge's radio restarts on its own, and this is where its reason shows.
+    if let Some(radio) = &info.radio {
+        println!("{}", radio_line(radio));
+    }
     // A board fact rather than a chip fact, and the one that decides whether `wartui
     // run` pushes anything at a screen. Said either way, so an absent line never has
     // to be interpreted.
@@ -77,7 +83,15 @@ pub async fn run(args: Args) -> Result<()> {
         .await
         .context("the bridge did not answer a status request")??;
 
-    let BridgeToHost::Status { peer_count, rx_count, dropped_tx, uptime_ms, rx_oversize } = status
+    let BridgeToHost::Status {
+        peer_count,
+        rx_count,
+        dropped_tx,
+        uptime_ms,
+        rx_oversize,
+        queues,
+        spi,
+    } = status
     else {
         unreachable!("wait_for_status only returns Status")
     };
@@ -90,6 +104,9 @@ pub async fn run(args: Args) -> Result<()> {
     // Read at the moment the bridge announced rather than now, which is close enough:
     // nothing wartui writes allocates, and what matters is the trend across captures.
     println!("heap free  {} bytes", info.heap_free);
+    for line in diagnostic_lines(&queues, spi.as_ref()) {
+        println!("{line}");
+    }
 
     if dropped_tx > 0 {
         // Cumulative since the bridge booted, and one left powered with nothing
@@ -108,6 +125,56 @@ pub async fn run(args: Args) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// The radio coprocessor behind a split bridge.
+fn radio_line(radio: &RadioInfo) -> String {
+    format!(
+        "radio      {} on {:?}, firmware {}, reset {:?}, last phase {:?}",
+        mac::full(&radio.mac),
+        radio.chip,
+        radio.fw_version,
+        radio.reset_cause,
+        radio.last_phase
+    )
+}
+
+/// One line per reported queue, then the SPI link's counters when it has any.
+fn diagnostic_lines(queues: &QueueStats, spi: Option<&SpiStats>) -> Vec<String> {
+    let mut lines: Vec<String> = queues.iter().map(queue_line).collect();
+    if let Some(s) = spi {
+        lines.push(format!(
+            "  spi  transfers {}  crc_fail {}  bad_magic {}  seq_gap {}  \
+             ready_timeouts {}  ready_recovered {}  \
+             radio_crc_fail {}  radio_bad_magic {}  radio_seq_gap {}",
+            s.transfers,
+            s.crc_fail,
+            s.bad_magic,
+            s.seq_gap,
+            s.ready_timeouts,
+            s.ready_recovered,
+            s.radio_crc_fail,
+            s.radio_bad_magic,
+            s.radio_seq_gap,
+        ));
+    }
+    lines
+}
+
+fn queue_line(stat: &QueueStat) -> String {
+    let (name, unit) = match stat.queue {
+        QueueId::RadioUp => ("radio-up", "bytes"),
+        QueueId::RadioSendJobs => ("radio-send-jobs", "entries"),
+        QueueId::RadioDown => ("radio-down", "bytes"),
+        QueueId::HostPriority => ("host-priority", "bytes"),
+        QueueId::HostBulk => ("host-bulk", "bytes"),
+        QueueId::RadioUpPriority => ("radio-up-priority", "bytes"),
+        QueueId::RadioJobs => ("radio-jobs", "entries"),
+    };
+    format!(
+        "  queue {name}  {}/{} {unit}  dropped {}",
+        stat.high_water, stat.capacity, stat.dropped
+    )
 }
 
 /// What to say when no node's frame has reached the bridge, or `None` when one has.
@@ -163,7 +230,75 @@ fn human_uptime(ms: u32) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{human_uptime, silence_note};
+    use super::{diagnostic_lines, human_uptime, radio_line, silence_note};
+    use wartui_proto::link::{Chip, LoopPhase, QueueId, QueueStat, QueueStats, RadioInfo};
+    use wartui_proto::reset::ResetCause;
+
+    #[test]
+    fn status_prints_radio_line_when_bridge_is_split() {
+        let radio = RadioInfo {
+            chip: Chip::Esp32C6,
+            mac: [0x58, 0x8c, 0x81, 0x00, 0x12, 0x34],
+            fw_version: "0.1.0".try_into().expect("short"),
+            reset_cause: ResetCause::Watchdog,
+            last_phase: LoopPhase::SpiTransfer,
+            uptime_ms: 72,
+        };
+        assert_eq!(
+            radio_line(&radio),
+            format!(
+                "radio      {} on Esp32C6, firmware 0.1.0, reset Watchdog, \
+                 last phase SpiTransfer",
+                wartui_proto::mac::full(&radio.mac)
+            )
+        );
+    }
+
+    #[test]
+    fn status_prints_queue_lines_when_queues_present() {
+        let mut queues = QueueStats::new();
+        queues
+            .push(QueueStat {
+                queue: QueueId::HostBulk,
+                capacity: 262_144,
+                high_water: 1_024,
+                dropped: 0,
+            })
+            .expect("room");
+        queues
+            .push(QueueStat {
+                queue: QueueId::RadioSendJobs,
+                capacity: 8,
+                high_water: 3,
+                dropped: 2,
+            })
+            .expect("room");
+        queues
+            .push(QueueStat { queue: QueueId::RadioJobs, capacity: 32, high_water: 20, dropped: 0 })
+            .expect("room");
+        queues
+            .push(QueueStat {
+                queue: QueueId::RadioUpPriority,
+                capacity: 8_192,
+                high_water: 96,
+                dropped: 0,
+            })
+            .expect("room");
+        assert_eq!(
+            diagnostic_lines(&queues, None),
+            [
+                "  queue host-bulk  1024/262144 bytes  dropped 0",
+                "  queue radio-send-jobs  3/8 entries  dropped 2",
+                "  queue radio-jobs  20/32 entries  dropped 0",
+                "  queue radio-up-priority  96/8192 bytes  dropped 0",
+            ]
+        );
+    }
+
+    #[test]
+    fn status_prints_nothing_extra_when_queues_empty() {
+        assert!(diagnostic_lines(&QueueStats::new(), None).is_empty());
+    }
 
     #[test]
     fn status_cmd_formats_uptime_in_largest_unit_when_displaying_diagnostics() {

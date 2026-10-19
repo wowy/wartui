@@ -35,13 +35,21 @@ jobs:
   common:
     strategy:
       matrix:
-        target: [esp32c5, esp32c6]
+        include:
+          - features: esp32c5,radio
+          - features: esp32c6,radio
+          # The P4 is a different target from the C-series chips.
+          - features: esp32p4
+            target: --target riscv32imafc-unknown-none-elf
 
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+
+      - name: Add the P4 target
+        run: rustup target add riscv32imafc-unknown-none-elf
 
       - name: Lint
         run: |
@@ -52,5 +60,5 @@ jobs:
       - name: Clippy
         run: |
           pushd firmware/common
-          cargo clippy --release --features ${{matrix.target}} --locked -- -D warnings
+          cargo clippy --release --features ${{matrix.features}} ${{matrix.target}} --locked -- -D warnings
           popd

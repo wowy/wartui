@@ -69,9 +69,18 @@ cd firmware/node
 cargo fmt --all -- --check
 cargo clippy --release --features esp32c6     # and esp32c5
 
+cd firmware/p4-radio                          # the C6 half of the P4 split bridge
+cargo fmt --all -- --check
+cargo clippy --release --features esp32c6
+
+cd firmware/p4-bridge                         # the P4 half; no features, own target
+cargo fmt --all -- --check
+cargo clippy --release
+
 cd firmware/common                            # a firmware's clippy does not lint it
 cargo fmt --all -- --check
-cargo clippy --release --features esp32c6     # and esp32c5
+cargo clippy --release --features esp32c6,radio   # and esp32c5,radio
+cargo clippy --release --features esp32p4 --target riscv32imafc-unknown-none-elf
 ```
 
 CI mirrors the workspace split: host crates on every push and PR; each firmware only
@@ -111,7 +120,8 @@ own.
   is the conversation with the radio.
 - **`firmware/common`** (`wartui-firmware`) — chip-level code the firmwares need and that needs
   `esp-hal`, so it cannot live in `wartui-proto`: the reset funnel `reboot()` and `reset_cause()`,
-  and the supply and die readings a node's heartbeat carries (`health`).
+  the bridge's reset-surviving phase marker (`phase`), the bridge's ESP-NOW half behind the `radio`
+  feature (`radio`), and the supply and die readings a node's heartbeat carries (`health`).
   A path dependency of both, forwarding each firmware's chip feature, and its own workspace so
   its own clippy lints it; a firmware's clippy compiles it without linting it.
 
@@ -294,11 +304,11 @@ Each of these is enforced in one place and explained there at length. The claim 
 edit stops; follow the pointer before changing the rule.
 
 - **Somebody else's ESP-NOW traffic is dropped, never reported or accommodated.**
-  → `crates/wartui-proto/src/air/mod.rs` `//!`, `firmware/bridge/src/main.rs` `forward`
+  → `crates/wartui-proto/src/air/mod.rs` `//!`, `firmware/common/src/radio.rs` `hear`
 - **Finding the bridge means transmitting into what is opened**, so the sweep opens Espressif
-  vendor IDs and nothing else, and `wartui reset` — which transmits before anything has identified
-  itself — never sweeps at all. The GPS search is the complement: it opens everything *but* those,
-  and writes to none of them. → `crates/wartui-bridge/src/ports.rs` `//!`,
+  vendor IDs and the P4 bridge's exact USB ID pair and nothing else, and `wartui reset` — which
+  transmits before anything has identified itself — never sweeps at all. The GPS search is the
+  complement: it opens everything *but* those, and writes to none of them. → `crates/wartui-bridge/src/ports.rs` `//!`,
   `serial::select` / `serial::unambiguous_bridge`, `crates/wartui-core/src/discover.rs` `//!`
 - **A connection asks once and then only waits.** A board that is not reading its USB endpoint
   absorbs exactly one packet and NACKs the rest, and they sit in the tty's output queue through a
@@ -384,10 +394,10 @@ edit stops; follow the pointer before changing the rule.
   `Command::SetTxPower`; `crates/wartui-core/src/engine/replan.rs`, `on_set_tx_power`
 - **ESP-NOW goes out at 802.11g 24 Mbps, set per peer** through `esp-radio`'s `set_peer_rate` —
   the interface-wide rate call is refused on the C5 and C6, and a peer registered without the
-  funnel goes out at 1 Mbps. → `firmware/bridge/src/main.rs`, `set_peer_rate`;
+  funnel goes out at 1 Mbps. → `firmware/common/src/radio.rs`, `set_peer_rate`;
   `firmware/node/src/radio.rs`
 - **The air is plaintext ESP-NOW in both directions** — no pairing handshake and no key.
-  → `firmware/bridge/src/main.rs`, peer registration
+  → `firmware/common/src/radio.rs`, `peer`
 - **Setting a node's channel is not `set_channel` alone** — without promiscuous mode on across the
   change it does not stick, and a node whose channel silently did not change reads as a dead node
   rather than a bug. → `firmware/node/src/radio.rs`, `park`

@@ -1,0 +1,62 @@
+# Its own workspace, for the reasons `firmware/bridge` is one: a different target, a
+# different toolchain pin and a lockfile that must not be resolved together with the
+# host crates.
+[workspace]
+
+[package]
+name = "wartui-p4-bridge-fw"
+description = "The host half of the wartui P4 split bridge: USB high speed to the host, an SPI master to the board's ESP32-C6."
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/wowy/wartui"
+
+[[bin]]
+name = "wartui-p4-bridge-fw"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+esp-bootloader-esp-idf = { version = "0.6.0", features = ["esp32p4"] }
+esp-hal = { version = "1.2.2", features = ["esp32p4", "unstable"] }
+# The executor and time driver `embassy-usb` runs on. No allocator: nothing here
+# spawns a thread or allocates.
+esp-rtos = { version = "0.4.0", features = ["embassy", "esp32p4"] }
+# Held at the versions esp-hal 1.2.2's OTG driver (`embassy-usb-driver` 0.2,
+# `embassy-sync` 0.8) and esp-rtos 0.4.0 (`embassy-executor` 0.10) build against.
+embassy-executor = "0.10.0"
+embassy-futures = "0.1.2"
+embassy-sync = "0.8.0"
+embassy-time = "0.5.1"
+embassy-usb = { version = "0.6.0", default-features = false }
+static_cell = "2.1.1"
+# The reset funnel, the reset cause and the phase marker, shared with the other
+# bridges. No `radio`: the P4 has none.
+wartui-firmware = { path = "../common", features = ["esp32p4"] }
+wartui-proto = { path = "../../crates/wartui-proto" }
+
+[lints.rust]
+# AGENTS.md's project-wide rule; the root workspace excludes `firmware`, so it is
+# stated here too.
+unsafe_code = "deny"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+
+[profile.dev]
+opt-level = "s"
+
+[profile.release]
+codegen-units = 1
+debug = 2
+lto = "fat"
+opt-level = "s"
+
+# The crates that encode and check every record and transfer, built for speed as the
+# other bridges build them.
+[profile.release.package.wartui-proto]
+opt-level = 3
+
+[profile.release.package.postcard]
+opt-level = 3

@@ -2,7 +2,8 @@
 
 use wartui_bridge::TransportError;
 use wartui_bridge::ports::{
-    self, ESPRESSIF_VID, PortCandidate, StableNames, candidate, is_usable_path, with_stable_paths,
+    self, ESPRESSIF_VID, PortCandidate, StableNames, TEST_PID, TEST_VID, candidate, is_usable_path,
+    with_stable_paths,
 };
 use wartui_bridge::serial::{self, BridgeSpec, discover_ports};
 use wartui_proto::mac;
@@ -36,7 +37,7 @@ fn discovery_returns_empty_list_without_error_when_no_devices_are_attached() {
     let found = discover_ports().expect("listing ports should succeed");
     for port in found {
         assert!(is_usable_path(&port.path));
-        assert_eq!(port.vid, Some(ESPRESSIF_VID));
+        assert!(ports::could_be_a_bridge(&port), "{port:?}");
     }
 }
 
@@ -227,6 +228,20 @@ fn serial_discovery_maintains_deterministic_sweep_order_across_runs() {
     let again = serial::select(&boards, None, None);
     assert_eq!(first, again);
     assert_eq!(first[0].path, "/dev/ttyACM0", "and by path, having nothing better");
+}
+
+#[test]
+fn serial_discovery_sweeps_p4_bridge_with_bridges_when_ordering_probe_candidates() {
+    // The P4 bridge enumerates under the test pair rather than USB Serial/JTAG's, so
+    // it ranks with the single-chip bridges by name; ranking it behind the other
+    // Espressif devices would send Identify into every node attached first.
+    let mut p4 = candidate("/dev/ttyACM9", Some(TEST_VID), Some(TEST_PID), None);
+    p4.product = Some("wartui p4 bridge".to_owned());
+    let other = candidate("/dev/ttyACM0", Some(ESPRESSIF_VID), Some(0x0002), None);
+    let boards = [other, esp("/dev/ttyACM5", NODE_MAC), p4, esp("/dev/ttyACM7", BRIDGE_MAC)];
+    let order = serial::select(&boards, None, mac::parse(BRIDGE_MAC));
+    let paths: Vec<&str> = order.iter().map(|c| c.path.as_str()).collect();
+    assert_eq!(paths, ["/dev/ttyACM7", "/dev/ttyACM5", "/dev/ttyACM9", "/dev/ttyACM0"]);
 }
 
 #[test]

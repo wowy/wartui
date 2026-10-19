@@ -1985,7 +1985,10 @@ dependencies = [
 name = "wartui-firmware"
 version = "0.1.0"
 dependencies = [
+ "embassy-sync 0.8.0",
  "esp-hal",
+ "esp-radio",
+ "portable-atomic",
  "wartui-proto",
 ]
 

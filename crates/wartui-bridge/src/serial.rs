@@ -99,7 +99,7 @@ const PROBE_GARBLE_LIMIT: u32 = 64;
 /// port is cheap, and it is the case where something is about to be plugged in.
 const MAX_SWEEP_DELAY: Duration = Duration::from_secs(5);
 
-/// The Espressif boards attached, which are the bridge and any node on USB.
+/// The Espressif boards and P4 bridges attached, which are the bridge and any node on USB.
 ///
 /// # Errors
 /// [`TransportError::Enumerate`] if the ports cannot be listed.
@@ -258,7 +258,7 @@ pub fn select(
             ordered.sort_by_key(|candidate| {
                 (
                     !is_remembered(candidate, remembered),
-                    candidate.pid != Some(BRIDGE_PID),
+                    !(candidate.pid == Some(BRIDGE_PID) || ports::is_p4_bridge(candidate)),
                     candidate.path.clone(),
                 )
             });
@@ -868,6 +868,7 @@ fn read_loop(
                     uptime_ms,
                     panel,
                     gps,
+                    radio,
                     ..
                 }) => {
                     state.decoded.store(true, Ordering::Relaxed);
@@ -912,6 +913,7 @@ fn read_loop(
                         uptime_ms,
                         panel = ?panel,
                         gps,
+                        radio = ?radio,
                         "the bridge announced itself"
                     );
                     LinkEvent::Connected(BridgeInfo {
@@ -924,6 +926,7 @@ fn read_loop(
                         uptime_ms,
                         panel,
                         gps,
+                        radio,
                     })
                 }
                 Ok(msg) => {

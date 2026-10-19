@@ -330,6 +330,8 @@ async fn run_bridge(
         // the simulator rehearsing a width of 26 that nothing has.
         panel: Some(Panel { cols: 17, rows: 5 }),
         gps: false,
+        // A single-chip bridge.
+        radio: None,
     };
     if plumbing.events.send(LinkEvent::Connected(info)).await.is_err() {
         return;
@@ -367,6 +369,8 @@ async fn run_bridge(
                 dropped_tx: 0,
                 uptime_ms: elapsed_ms(started),
                 rx_oversize: 0,
+                queues: wartui_proto::link::QueueStats::new(),
+                spi: None,
             }),
             HostToBridge::Reset => Some(BridgeToHost::Log {
                 level: LogLevel::Info,

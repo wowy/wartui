@@ -24,13 +24,16 @@
 //! routing through (1,1) to avoid the other. Leave both alone, and set
 //! `FlowControl::None` explicitly so the driver cannot toggle RTS on its own.
 //!
-//! **What a device is for is decided by vendor ID and nothing else.**
-//! [`could_be_a_bridge`] and [`could_be_a_receiver`] are complements, so the two
-//! sets cannot overlap however either is called. That matters because looking for
-//! a bridge means *writing* into what is opened: the sweep sends `Identify` frames
-//! down every candidate until one answers, so widening that set past Espressif's
-//! vendor ID would mean transmitting into whatever else is plugged in. Exclusive
-//! opening is a backstop against two readers, not a substitute for that.
+//! **What a device is for is decided by vendor ID, plus one exact pair.**
+//! Espressif's vendor ID, or the test pair [`TEST_VID`]:[`TEST_PID`] whose product
+//! string starts with [`P4_PRODUCT_PREFIX`] (the P4 bridge, until it is granted a
+//! PID of its own). [`could_be_a_bridge`] and [`could_be_a_receiver`] are
+//! complements, so the two sets cannot overlap however either is called. That
+//! matters because looking for a bridge means *writing* into what is opened: the
+//! sweep sends `Identify` frames down every candidate until one answers, so
+//! widening that set past Espressif's vendor ID and the P4's exact pair would mean
+//! transmitting into whatever else is plugged in. Exclusive opening is a backstop
+//! against two readers, not a substitute for that.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -48,7 +51,18 @@ pub const ESPRESSIF_VID: u16 = 0x303A;
 /// a sweep: a board behind a USB-to-UART bridge chip carries the chip's vendor ID
 /// rather than Espressif's and never reaches the list at all, so anything here that
 /// is *not* this is an Espressif device of some other kind and is worth trying last.
+/// The P4 bridge ([`is_p4_bridge`]) ranks with these despite its own pair.
 pub const BRIDGE_PID: u16 = 0x1001;
+
+/// The pid.codes test vendor ID the P4 bridge enumerates under until Espressif grants it a PID.
+pub const TEST_VID: u16 = 0x1209;
+
+/// The pid.codes test product ID the P4 bridge enumerates under.
+pub const TEST_PID: u16 = 0x0001;
+
+/// What the P4 bridge's product string starts with. The test pair is shared by anyone, so the
+/// pair alone is not enough to write into a port.
+pub const P4_PRODUCT_PREFIX: &str = "wartui";
 
 /// Where udev keeps the names that survive a replug.
 const BY_ID: &str = "/dev/serial/by-id";
@@ -120,19 +134,28 @@ pub fn list() -> Result<Vec<PortCandidate>, TransportError> {
     Ok(with_stable_paths(from_port_infos(ports), &StableNames::read()))
 }
 
+/// Whether this is the P4 bridge: the test pair with a `wartui` product string.
+#[must_use]
+pub fn is_p4_bridge(candidate: &PortCandidate) -> bool {
+    candidate.vid == Some(TEST_VID)
+        && candidate.pid == Some(TEST_PID)
+        && candidate.product.as_deref().is_some_and(|p| p.starts_with(P4_PRODUCT_PREFIX))
+}
+
 /// Whether this port could be the bridge — or a node, which looks identical.
 #[must_use]
 pub fn could_be_a_bridge(candidate: &PortCandidate) -> bool {
-    candidate.vid == Some(ESPRESSIF_VID) && is_usable_path(&candidate.path)
+    (candidate.vid == Some(ESPRESSIF_VID) || is_p4_bridge(candidate))
+        && is_usable_path(&candidate.path)
 }
 
 /// Whether this port could be an NMEA receiver.
 ///
-/// The complement of [`could_be_a_bridge`], and that is the whole rule: a receiver
-/// is recognized by what it says when read, not by what it is called.
+/// The complement of [`could_be_a_bridge`] over usable paths, and that is the whole rule: a
+/// receiver is recognized by what it says when read, not by what it is called.
 #[must_use]
 pub fn could_be_a_receiver(candidate: &PortCandidate) -> bool {
-    candidate.vid != Some(ESPRESSIF_VID) && is_usable_path(&candidate.path)
+    is_usable_path(&candidate.path) && !could_be_a_bridge(candidate)
 }
 
 /// On macOS every USB serial device appears twice. `/dev/tty.*` is the callout
@@ -287,5 +310,48 @@ mod tests {
         let puck = candidate("/dev/ttyACM1", Some(0x1546), Some(0x01A7), None);
         assert!(could_be_a_bridge(&bridge) && !could_be_a_receiver(&bridge));
         assert!(could_be_a_receiver(&puck) && !could_be_a_bridge(&puck));
+    }
+
+    fn p4(product: Option<&str>) -> PortCandidate {
+        let mut c = candidate("/dev/ttyACM2", Some(TEST_VID), Some(TEST_PID), None);
+        c.product = product.map(str::to_owned);
+        c
+    }
+
+    #[test]
+    fn ports_could_be_a_bridge_when_test_pair_and_wartui_product() {
+        let c = p4(Some("wartui p4 bridge"));
+        assert!(is_p4_bridge(&c) && could_be_a_bridge(&c) && !could_be_a_receiver(&c));
+    }
+
+    #[test]
+    fn ports_not_a_bridge_when_test_pair_without_wartui_product() {
+        for product in [None, Some("Other"), Some("Wartui p4")] {
+            let c = p4(product);
+            assert!(!is_p4_bridge(&c) && !could_be_a_bridge(&c) && could_be_a_receiver(&c));
+        }
+        let mut wrong_pid = p4(Some("wartui p4 bridge"));
+        wrong_pid.pid = Some(0x0002);
+        assert!(!could_be_a_bridge(&wrong_pid));
+    }
+
+    #[test]
+    fn ports_bridge_and_receiver_stay_complements() {
+        let mut tty = p4(Some("wartui p4 bridge"));
+        tty.path = "/dev/tty.usbmodem1".to_owned();
+        let table = [
+            p4(Some("wartui p4 bridge")),
+            p4(None),
+            tty,
+            candidate("/dev/ttyACM0", Some(ESPRESSIF_VID), Some(BRIDGE_PID), None),
+            candidate("/dev/ttyACM1", Some(0x1546), Some(0x01A7), None),
+            candidate("/dev/ttyACM3", None, None, None),
+            candidate("/dev/tty.usbmodem2", Some(ESPRESSIF_VID), Some(BRIDGE_PID), None),
+        ];
+        for c in &table {
+            let usable = is_usable_path(&c.path);
+            assert_eq!(could_be_a_receiver(c), usable && !could_be_a_bridge(c), "{c:?}");
+            assert!(!(could_be_a_bridge(c) && could_be_a_receiver(c)), "{c:?}");
+        }
     }
 }

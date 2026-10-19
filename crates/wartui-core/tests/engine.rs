@@ -270,6 +270,7 @@ fn connected_bridge(mac: Mac, gps: bool) -> Event {
         // this — the panel is composed in `runtime` from the snapshot.
         panel: None,
         gps,
+        radio: None,
     }))
 }
 
@@ -1863,6 +1864,8 @@ fn engine_counts_bridge_drops_since_attach_when_status_arrives() {
             dropped_tx,
             uptime_ms: 3_240_000,
             rx_oversize: 0,
+            queues: Default::default(),
+            spi: None,
         }))
     };
 
@@ -1896,6 +1899,8 @@ fn engine_records_bridge_status_when_reply_arrives() {
             dropped_tx,
             uptime_ms,
             rx_oversize: 17,
+            queues: Default::default(),
+            spi: None,
         }))
     };
     let statuses = |batch: &ActionBatch| -> Vec<BridgeStatusSeen> {
@@ -1956,6 +1961,8 @@ fn engine_records_host_frames_when_status_reply_arrives() {
             dropped_tx: 0,
             uptime_ms: 9_000,
             rx_oversize: 0,
+            queues: Default::default(),
+            spi: None,
         })),
         clock.at(4),
     );

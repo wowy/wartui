@@ -103,6 +103,8 @@ pub enum Chip {
     Esp32C5,
     /// 2.4 GHz only, which is all ESP-NOW needs on the control channel.
     Esp32C6,
+    /// No radio of its own: it bridges through an ESP32-C6 over SPI.
+    Esp32P4,
 }
 
 /// Where the bridge's main loop was when it last stopped making progress.
@@ -125,6 +127,10 @@ pub enum LoopPhase {
     /// Carrying out a host command other than a transmit.
     Command,
     /// Inside an ESP-NOW send, waiting on the transmit callback.
+    ///
+    /// No firmware in this tree marks it, since sends run beside the main loop. It stays for
+    /// older builds, whose phase marker or hello can still name it, and because removing it
+    /// would shift every later variant's index.
     Transmit,
     /// Writing queued frames to the USB endpoint.
     Pump,
@@ -136,6 +142,8 @@ pub enum LoopPhase {
     /// Pushing pixels at the panel, the other call in the loop that blocks for longer
     /// than a memcpy.
     Render,
+    /// Waiting on a transfer over the P4–C6 SPI link.
+    SpiTransfer,
 }
 
 /// Severity of a [`BridgeToHost::Log`] line.
@@ -307,6 +315,10 @@ pub enum BridgeToHost {
         /// A board fact, like `panel`. It does not mean a receiver answered: a missing
         /// receiver is reported as an [`Self::Error`] instead.
         gps: bool,
+        /// The ESP32-C6 radio behind a bridge that has none of its own, as the C6 reported
+        /// it. `None` for a bridge with its own radio, and for a split bridge whose C6
+        /// has not answered yet.
+        radio: Option<RadioInfo>,
     },
     /// An ESP-NOW frame arrived.
     Rx {
@@ -349,6 +361,11 @@ pub enum BridgeToHost {
         /// Received frames longer than [`MAX_NODE_PAYLOAD`], dropped since boot. No
         /// wartui node sends one, so these are somebody else's traffic.
         rx_oversize: u32,
+        /// Fill level of each bounded queue the firmware has. Empty for a bridge with
+        /// none to report.
+        queues: QueueStats,
+        /// The P4–C6 SPI link's error counters. `None` for a bridge without one.
+        spi: Option<SpiStats>,
     },
     /// Diagnostics, routed through the link rather than printed. `esp-println` would
     /// interleave into the same endpoint and corrupt the framing.
@@ -372,4 +389,81 @@ pub enum BridgeToHost {
         #[serde(with = "bytes")]
         bytes: GpsBytes,
     },
+}
+
+/// A bounded queue whose depth the firmware reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub enum QueueId {
+    /// The C6's receive queue toward the P4. Counts bytes.
+    RadioUp,
+    /// A bridge radio's pool of send payloads waiting for the radio. Counts entries.
+    RadioSendJobs,
+    /// The P4's queue of records waiting for a transfer to the C6. Counts bytes.
+    RadioDown,
+    /// The P4's priority ring toward the host. Counts bytes.
+    HostPriority,
+    /// The P4's bulk ring toward the host. Counts bytes.
+    HostBulk,
+    /// The C6's priority ring toward the P4: every record but a received frame. Counts
+    /// bytes.
+    RadioUpPriority,
+    /// A bridge radio's queue of jobs in arrival order: sends, and peer and power commands.
+    /// Counts entries.
+    RadioJobs,
+}
+
+/// How full a queue has been, and what it has lost.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct QueueStat {
+    /// Which queue this describes; it also says whether the counts are bytes or entries.
+    pub queue: QueueId,
+    /// Its size.
+    pub capacity: u32,
+    /// The most it has held at once.
+    pub high_water: u32,
+    /// Items evicted or refused since boot.
+    pub dropped: u32,
+}
+
+/// The queues a [`BridgeToHost::Status`] reports; room for every [`QueueId`] with spare.
+pub type QueueStats = Vec<QueueStat, 8>;
+
+/// The ESP32-C6 behind a split bridge, as it described itself over SPI.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct RadioInfo {
+    /// The radio chip.
+    pub chip: Chip,
+    /// The radio's MAC.
+    pub mac: Mac,
+    /// The radio firmware's version.
+    pub fw_version: ShortStr,
+    /// Why the radio's current life started.
+    pub reset_cause: ResetCause,
+    /// Where the radio's previous life stopped.
+    pub last_phase: LoopPhase,
+    /// Milliseconds since the radio started.
+    pub uptime_ms: u32,
+}
+
+/// Error counters of the P4–C6 SPI link, since boot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct SpiStats {
+    /// Transfers completed.
+    pub transfers: u32,
+    /// C6→P4 transfers whose CRC failed.
+    pub crc_fail: u32,
+    /// C6→P4 transfers with the wrong magic.
+    pub bad_magic: u32,
+    /// C6→P4 transfers whose sequence number skipped.
+    pub seq_gap: u32,
+    /// Waits for the C6's READY line that timed out.
+    pub ready_timeouts: u32,
+    /// Timeouts after which the link recovered.
+    pub ready_recovered: u32,
+    /// P4→C6 transfers the C6 saw fail their CRC, from its `RadioStatus`.
+    pub radio_crc_fail: u32,
+    /// P4→C6 transfers the C6 saw with the wrong magic.
+    pub radio_bad_magic: u32,
+    /// P4→C6 transfers the C6 saw skip a sequence number.
+    pub radio_seq_gap: u32,
 }

@@ -17,7 +17,9 @@ pub mod sim;
 
 use thiserror::Error;
 use tokio::sync::mpsc;
-use wartui_proto::link::{BridgeToHost, Chip, HostToBridge, LinkError, LoopPhase, Panel};
+use wartui_proto::link::{
+    BridgeToHost, Chip, HostToBridge, LinkError, LoopPhase, Panel, RadioInfo,
+};
 use wartui_proto::mac::Mac;
 use wartui_proto::reset::ResetCause;
 
@@ -69,6 +71,10 @@ pub struct BridgeInfo {
     /// A board fact, like `panel`: it says the bridge forwards a receiver's bytes, not
     /// that a receiver answered.
     pub gps: bool,
+    /// The radio coprocessor behind a split bridge, as it described itself. Its reset
+    /// cause is the only record of a radio crash under a running bridge. `None` on a
+    /// single-chip bridge.
+    pub radio: Option<RadioInfo>,
 }
 
 /// Something that happened on the link.

@@ -18,7 +18,7 @@ This is the operator's manual. The root [`README.md`](../../README.md) is the sh
 | `sniff`        | Print every wartui frame the bridge hears, decoded, a line per record               |
 | `status`       | Ask the bridge for its counters and uptime                                          |
 | `reset`        | Reboot a bridge that has stopped answering                                          |
-| `ports`        | List the Espressif boards attached, and the address of each                         |
+| `ports`        | List the Espressif boards and P4 bridges attached, and the address of each          |
 | `flash-fleet`  | Flash node firmware onto every attached board of one chip; see "Flashing the fleet" |
 | `flash-bridge` | Flash bridge firmware onto the bridge; see "Flashing the bridge"                    |
 | `ota`          | Update node firmware through the bridge; see "Updating over the air"                |
@@ -405,7 +405,8 @@ refused when:
 
 A board is flashed only when all five hold; otherwise it is skipped and listed with the reason:
 
-1. It is native USB Serial/JTAG (`303a:1001`) and reports its address as its serial number.
+1. It is native USB Serial/JTAG (`303a:1001`) and reports its address as its serial number. A P4
+   bridge is skipped with its own reason: it is flashed by hand (`firmware/p4-bridge/README.md`).
 2. It is not the bridge, and not named with `--skip`.
 3. `espflash board-info` reads the chip `--features` names.
 4. `espflash board-info` reads the same address from the chip that the OS reported for the port.
@@ -463,7 +464,7 @@ wartui flash-bridge --features esp32c6 --bridge 10:BD:A3:EC:44:C0
 
 1. The board `--bridge` names.
 2. The bridge remembered in `wartui.toml`, which must be attached.
-3. With none remembered, the only Espressif board attached.
+3. With none remembered, the only Espressif board or P4 bridge attached.
 
 The run is refused when:
 
@@ -472,6 +473,8 @@ The run is refused when:
 - Several boards are attached and none is known. The refusal lists their addresses; pick one with
   `--bridge`.
 - No board is attached.
+- The board is a P4 bridge, which is flashed by hand until single-cable updates land
+  (`firmware/p4-bridge/README.md`).
 
 The chosen board must be native USB Serial/JTAG (`303a:1001`) reporting its address, and
 `espflash board-info` must read the `--features` chip and that address, or nothing is flashed.
@@ -934,8 +937,8 @@ panel back within a second, with no replug or reflash.
 
 ## When nothing arrives
 
-**wartui finds the bridge by asking.** It opens each attached Espressif board in turn (a USB-plugged
-node is one) and keeps the first that answers the link protocol. `run` saves that address to
+**wartui finds the bridge by asking.** It opens each attached Espressif board and P4 bridge in turn
+(a USB-plugged node is an Espressif board too) and keeps the first that answers the link protocol. `run` saves that address to
 `wartui.toml` as `[bridge] mac`, so later runs open only that port. A capture given `--bridge` saves
 the named board once it answers, since naming it for a capture is choosing it. `flash-bridge` saves
 the board it found and flashed. `status`, `sniff`, `reset`, `ota` and `flash-fleet` read it and save
@@ -955,7 +958,8 @@ The header's `waiting for a bridge to announce itself` has three causes; the fau
   an IDE's serial monitor, or ModemManager holds it. ModemManager clears on its own: where it runs,
   it opens each new CDC-ACM device for a few seconds to ask whether it is a modem.
 - **No fault**: the port opened and the dongle is not answering.
-- **`swept N boards and none answered`**: no attached Espressif board is a bridge.
+- **`swept N boards and none answered`**: no attached Espressif board or P4 bridge answered as a
+  bridge.
 
 With no fault, the bridge is usually deaf in one direction: its USB transmit endpoint stopped
 draining while it keeps reading. The firmware notices within three seconds and reboots, showing
@@ -969,6 +973,19 @@ wartui status                          # exits in 5 s with the reason
 wartui reset                           # reboot a bridge that stopped answering
 wartui --log-file wartui.log run
 ```
+
+Beyond the counters, `wartui status` prints what the bridge reports about its insides:
+
+- **`queue NAME  HIGH/CAPACITY UNIT  dropped N`**, one per queue: the high-water mark since boot
+  and what the queue threw away. Every bridge reports `radio-jobs` (sends and peer and power
+  commands waiting for the radio) and `radio-send-jobs` (the payloads of those sends). A P4 bridge
+  also reports `radio-up` (the C6's received frames for the P4), `radio-up-priority` (the C6's
+  other records for the P4: send results, lines and its status), `radio-down` (the P4's records for
+  the C6), `host-priority` and `host-bulk` (its two queues of frames for the host).
+- **`spi  …`**, on a P4 bridge: the SPI link's transfers and its error counters at each end.
+  Errors other than a few `ready_timeouts` at boot mean the link is losing transfers.
+- **`radio  …`**, on a P4 bridge: the C6's address, firmware, reset cause and last phase. After a
+  C6 restart under a running P4, `last reset` names the C6's cause too.
 
 `wartui reset` takes about thirty seconds to fail on a board that is not a bridge. The board it is
 for answers nothing, so it transmits before anything has identified itself. A board that is not
@@ -1014,6 +1031,9 @@ $ wartui ports
 /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_02:00:5E:10:9D:24-if00
   02:00:5E:10:9D:24     USB JTAG/serial debug unit  (303a:1001)
 ```
+
+A P4 bridge enumerates as `1209:0001`, product `wartui p4 bridge`. Its serial number is its C6's
+MAC, the address nodes see as the bridge, or the P4's own MAC when the C6 never answered.
 
 **An ESP32's USB serial number is its MAC**, so the OS already pairs each device node with its
 radio's address: nothing opened, no `esp` tool, no reflash. The command rests on that, on Linux and

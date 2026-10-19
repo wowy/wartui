@@ -23,12 +23,12 @@
 //!
 //! **The task runs on an interrupt executor, not on `main`'s.** The C5's I2C FIFO holds 32
 //! bytes, so `esp-hal` splits a 64-byte read into three transfers, and the task must run to
-//! start each one. On `main`'s executor it would run only when `main` waits, which it does
-//! only after a pass that found nothing to do: a burst, one unacknowledged send (28–35 ms)
-//! or a panel repaint (36 ms) would leave a read paused mid-transaction with the bus held,
-//! and [`TRANSACTION_TIMEOUT_MS`] would have to outlast all of them to mean anything. At
-//! [`Priority::Priority1`], the lowest interrupt level, the task preempts `main` for the
-//! microseconds a transfer takes to start or finish, and no interrupt handler waits on it.
+//! start each one. On `main`'s executor it would run only when `main` gives the core back
+//! between passes: a link burst or a panel repaint (36 ms) would leave a read paused
+//! mid-transaction with the bus held, and [`TRANSACTION_TIMEOUT_MS`] would have to outlast
+//! both to mean anything. At [`Priority::Priority1`], the lowest interrupt level, the task
+//! preempts `main` for the microseconds a transfer takes to start or finish, and no
+//! interrupt handler waits on it.
 //!
 //! **`main` never waits on the task.** They share two zero-copy channels and two flags:
 //!

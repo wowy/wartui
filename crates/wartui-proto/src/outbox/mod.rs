@@ -57,6 +57,7 @@
 //! non-zero value means frames arrived faster than the host took them: a host not
 //! reading, or a burst bigger than the bulk ring plus what USB drains meanwhile.
 
+use crate::host_queue::is_priority;
 use crate::link::{BridgeToHost, CobsStream};
 
 mod ring;
@@ -418,16 +419,5 @@ impl Outbox {
             Source::Bulk => self.bulk.pop(),
         }
         self.clear_frame();
-    }
-}
-
-/// Whether a message must survive a backlog.
-const fn is_priority(msg: &BridgeToHost) -> bool {
-    match msg {
-        BridgeToHost::Ready { .. }
-        | BridgeToHost::SendResult { .. }
-        | BridgeToHost::Status { .. }
-        | BridgeToHost::Error { .. } => true,
-        BridgeToHost::Rx { .. } | BridgeToHost::Log { .. } | BridgeToHost::Gps { .. } => false,
     }
 }

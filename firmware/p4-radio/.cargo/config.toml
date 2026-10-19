@@ -1,0 +1,11 @@
+[build]
+target = "riscv32imac-unknown-none-elf"
+rustflags = [
+  # Needed for usable backtraces out of a debugger.
+  "-C", "force-frame-pointers",
+]
+
+[target.riscv32imac-unknown-none-elf]
+# Flashed through header H7 with IO9 jumpered to GND and the P4 parked in its ROM, so
+# nothing may toggle a reset line: pass `--port <the USB-to-TTL adapter>`.
+runner = "espflash flash --before no-reset --after no-reset"

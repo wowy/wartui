@@ -165,6 +165,7 @@ pub(super) fn busy() -> Snapshot {
             uptime_ms: 1_000,
             panel: None,
             gps: false,
+            radio: None,
         }),
         link_up: true,
         link_error: None,

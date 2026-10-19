@@ -124,6 +124,7 @@ fn ready() -> BridgeToHost {
         uptime_ms: 0,
         panel: None,
         gps: false,
+        radio: None,
     }
 }
 
@@ -159,7 +160,15 @@ fn rssis(frames: &[BridgeToHost]) -> Vec<i8> {
 }
 
 fn status(rx_count: u32) -> BridgeToHost {
-    BridgeToHost::Status { peer_count: 0, rx_count, dropped_tx: 0, uptime_ms: 0, rx_oversize: 0 }
+    BridgeToHost::Status {
+        peer_count: 0,
+        rx_count,
+        dropped_tx: 0,
+        uptime_ms: 0,
+        rx_oversize: 0,
+        queues: Default::default(),
+        spi: None,
+    }
 }
 
 /// Every complete frame the host would recover from these bytes.

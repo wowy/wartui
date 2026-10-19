@@ -1652,6 +1652,8 @@ name = "wartui-firmware"
 version = "0.1.0"
 dependencies = [
  "esp-hal",
+ "esp-radio",
+ "portable-atomic",
  "wartui-proto",
 ]
 
