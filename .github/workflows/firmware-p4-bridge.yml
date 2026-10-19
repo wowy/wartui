@@ -55,10 +55,12 @@ jobs:
         run: |
           pushd firmware/p4-bridge
           cargo build --release --locked --verbose
+          cargo build --release --locked --verbose --no-default-features
           popd
 
       - name: Clippy
         run: |
           pushd firmware/p4-bridge
           cargo clippy --release --locked -- -D warnings
+          cargo clippy --release --locked --no-default-features -- -D warnings
           popd
