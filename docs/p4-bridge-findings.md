@@ -133,6 +133,13 @@ fresh `Ready` with `uptime_ms=72` at once, and `wartui analyze` counted one rebo
 were heard again within 3 and 6 seconds and went on reporting. No frame was dropped and no
 batch was lost.
 
+After the review fixes, which tell a restart by the C6's transfer counter going backwards,
+the check was repeated (2026-10-18). The host logged a fresh `Ready` with `uptime_ms=71` and
+one reboot, and an assignment sent after the restart was acknowledged in 5.1 ms. No frame was
+dropped and no batch was lost. The SPI counters recorded one CRC failure, one sequence gap and
+5 READY timeouts, against none, none and 2 in runs without a restart. That fits resetting the
+C6 in the middle of a transfer.
+
 ### A production session behaves as on a single-chip bridge
 
 Over 10 minutes with production node firmware, both nodes joined and both assignments were
@@ -144,6 +151,12 @@ included 31 old heartbeats, each counted as a missed admin window. No live windo
 The single-chip bridge does the same thing, but its outbox is a few kilobytes, while the P4's
 bulk queue is 256 KB. That can be over a minute of old frames: 78 s at worst in these runs.
 
+### The first host query after power-up sometimes goes unanswered
+
+Twice, a `wartui status` sent about 10 seconds after the P4 powered up got no answer within
+5 s, and the next one, seconds later, answered at once. Once more, the first query answered at
+once. The cause is not known yet. A second query has always answered.
+
 ### Queue high-water marks suggest smaller C6 queues
 
 After the final burst run, read with `wartui status`:
@@ -151,7 +164,9 @@ After the final burst run, read with `wartui status`:
 | Queue | Most held | Size | Dropped |
 |---|---|---|---|
 | C6 radio up | 3,118 B | 98,304 B | 0 |
-| C6 send jobs | 1 | 4 | 0 |
+| C6 send payloads | 1 | 4 | 0 |
+| C6 radio jobs | 1 | 32 | 0 |
+| C6 priority up | 36 B | 8,192 B | 0 |
 | P4 radio down | 28 B | 16,384 B | 0 |
 | P4 host priority | 62 B | 16,384 B | 0 |
 | P4 host bulk | not measured under load | 262,144 B | 0 while a host read |
@@ -163,4 +178,7 @@ After the final burst run, read with `wartui status`:
   captures' `bridge_status` rows do not store `Status.queues`. Each status read after a run
   found the queue filled by frames that arrived once the host stopped reading. Recording the
   queue stats in captures would close this gap.
+- **The radio-jobs and priority-up rows come from the restart check above,** not the burst
+  run: those queues were added by the review fixes. The priority ring carries only the C6's
+  own records, such as `Ready` and acknowledgements, so its load does not grow with sightings.
 - The other defaults stand. They held at least ten times what they were asked to.
