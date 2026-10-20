@@ -861,10 +861,19 @@ mod tests {
     use crate::position::DEFAULT_MAX_AGE;
     use crate::ubx::{ACK_VALSET, NAK_VALSET};
 
-    #[derive(Clone, Default)]
-    struct Logs(Arc<Mutex<Vec<String>>>);
+    thread_local! {
+        /// The calling test's captured lines, while a [`Logs`] guard lives.
+        static CAPTURED: std::cell::RefCell<Option<Vec<String>>> =
+            const { std::cell::RefCell::new(None) };
+    }
 
-    impl tracing::Subscriber for Logs {
+    /// Records events as `field=value` pairs into the current thread's capture.
+    ///
+    /// One global subscriber with a per-thread capture, not `with_default` per test: a scoped
+    /// subscriber coming and going while other tests run lets tracing cache a callsite as disabled.
+    struct LogSink;
+
+    impl tracing::Subscriber for LogSink {
         fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
             true
         }
@@ -894,7 +903,7 @@ mod tests {
             }
             let mut fields = Fields(String::new());
             event.record(&mut fields);
-            self.0.lock().unwrap().push(fields.0);
+            CAPTURED.with_borrow_mut(|lines| lines.as_mut().map(|lines| lines.push(fields.0)));
         }
 
         fn enter(&self, _: &tracing::span::Id) {}
@@ -902,9 +911,21 @@ mod tests {
         fn exit(&self, _: &tracing::span::Id) {}
     }
 
+    /// The lines logged on this thread while it lives.
+    struct Logs;
+
     impl Logs {
+        fn capture() -> Self {
+            static INSTALL: std::sync::Once = std::sync::Once::new();
+            INSTALL.call_once(|| {
+                tracing::subscriber::set_global_default(LogSink).expect("no other");
+            });
+            CAPTURED.set(Some(Vec::new()));
+            Self
+        }
+
         fn entries(&self) -> Vec<String> {
-            self.0.lock().unwrap().clone()
+            CAPTURED.with_borrow(|lines| lines.clone().unwrap_or_default())
         }
 
         fn assert_messages(&self, messages: &[&str]) {
@@ -916,13 +937,17 @@ mod tests {
         }
     }
 
+    impl Drop for Logs {
+        fn drop(&mut self) {
+            CAPTURED.set(None);
+        }
+    }
+
     #[test]
     fn gps_logs_first_fix_when_successful_sentence_arrives() {
-        let logs = Logs::default();
-        tracing::subscriber::with_default(logs.clone(), || {
-            let gps = Gps::detached();
-            gps.feed(GGA, 1_000);
-        });
+        let logs = Logs::capture();
+        let gps = Gps::detached();
+        gps.feed(GGA, 1_000);
         let entries = logs.entries();
         assert_eq!(entries.len(), 1, "{entries:?}");
         assert!(entries[0].contains("gps fix acquired"), "{entries:?}");
@@ -930,136 +955,118 @@ mod tests {
 
     #[test]
     fn gps_bounds_logs_when_fixes_and_satellite_counts_repeat() {
-        let logs = Logs::default();
-        tracing::subscriber::with_default(logs.clone(), || {
-            let gps = Gps::detached();
-            for now_ms in 1_000..1_100 {
-                gps.feed(GGA, now_ms);
-                gps.feed(
-                    b"$GNRMC,123519.00,A,4807.038,N,01131.000,E,0.06,31.66,050926,,,A*73",
-                    now_ms,
-                );
-                gps.feed(
-                    b"$GPGGA,123519.00,4807.038,N,01131.000,E,1,09,0.9,545.4,M,46.9,M,,*68",
-                    now_ms,
-                );
-            }
-            assert_eq!(gps.view().counters.fixes, 300);
-            assert_eq!(gps.view().status, GpsStatus::Fixed { satellites: Some(9) });
-        });
+        let logs = Logs::capture();
+        let gps = Gps::detached();
+        for now_ms in 1_000..1_100 {
+            gps.feed(GGA, now_ms);
+            gps.feed(b"$GNRMC,123519.00,A,4807.038,N,01131.000,E,0.06,31.66,050926,,,A*73", now_ms);
+            gps.feed(
+                b"$GPGGA,123519.00,4807.038,N,01131.000,E,1,09,0.9,545.4,M,46.9,M,,*68",
+                now_ms,
+            );
+        }
+        assert_eq!(gps.view().counters.fixes, 300);
+        assert_eq!(gps.view().status, GpsStatus::Fixed { satellites: Some(9) });
         logs.assert_messages(&["gps fix acquired"]);
     }
 
     #[test]
     fn gps_logs_stale_and_recovery_when_configured_age_is_exceeded() {
-        let logs = Logs::default();
-        tracing::subscriber::with_default(logs.clone(), || {
-            let gps = Gps::detached();
-            gps.lock().max_age = Duration::from_secs(2);
-            gps.feed(GGA, 1_000);
-            let latest = gps.latest();
-            let status = gps.view().status;
-            gps.tick(999);
-            gps.tick(3_000);
-            logs.assert_messages(&["gps fix acquired"]);
-            gps.tick(3_001);
-            gps.tick(30_000);
-            logs.assert_messages(&["gps fix acquired", "gps fix stale"]);
-            assert_eq!(gps.latest(), latest);
-            assert_eq!(gps.view().status, status);
-            gps.feed(GGA, 30_001);
-            gps.feed(GGA, 30_002);
-            logs.assert_messages(&["gps fix acquired", "gps fix stale", "gps fix recovered"]);
-        });
+        let logs = Logs::capture();
+        let gps = Gps::detached();
+        gps.lock().max_age = Duration::from_secs(2);
+        gps.feed(GGA, 1_000);
+        let latest = gps.latest();
+        let status = gps.view().status;
+        gps.tick(999);
+        gps.tick(3_000);
+        logs.assert_messages(&["gps fix acquired"]);
+        gps.tick(3_001);
+        gps.tick(30_000);
+        logs.assert_messages(&["gps fix acquired", "gps fix stale"]);
+        assert_eq!(gps.latest(), latest);
+        assert_eq!(gps.view().status, status);
+        gps.feed(GGA, 30_001);
+        gps.feed(GGA, 30_002);
+        logs.assert_messages(&["gps fix acquired", "gps fix stale", "gps fix recovered"]);
     }
 
     #[test]
     fn gps_logs_stale_once_when_receiver_is_silent() {
-        let logs = Logs::default();
-        tracing::subscriber::with_default(logs.clone(), || {
-            let gps = Gps::detached();
-            assert_eq!(GpsConfig::default().max_age, Duration::from_secs(5));
-            gps.feed(GGA, 1_000);
-            gps.tick(6_000);
-            logs.assert_messages(&["gps fix acquired"]);
-            for now_ms in 6_001..6_100 {
-                gps.tick(now_ms);
-            }
-            assert_eq!(gps.latest().unwrap().1, 1_000);
-            assert_eq!(gps.view().status, GpsStatus::Fixed { satellites: Some(8) });
-        });
+        let logs = Logs::capture();
+        let gps = Gps::detached();
+        assert_eq!(GpsConfig::default().max_age, Duration::from_secs(5));
+        gps.feed(GGA, 1_000);
+        gps.tick(6_000);
+        logs.assert_messages(&["gps fix acquired"]);
+        for now_ms in 6_001..6_100 {
+            gps.tick(now_ms);
+        }
+        assert_eq!(gps.latest().unwrap().1, 1_000);
+        assert_eq!(gps.view().status, GpsStatus::Fixed { satellites: Some(8) });
         logs.assert_messages(&["gps fix acquired", "gps fix stale"]);
     }
 
     #[test]
     fn gps_bounds_searching_logs_when_receiver_reports_no_fix() {
-        let logs = Logs::default();
-        tracing::subscriber::with_default(logs.clone(), || {
-            let gps = Gps::detached();
-            for now_ms in 1_000..1_100 {
-                gps.feed(GGA_NO_FIX, now_ms);
-            }
-            gps.tick(60_000);
-            assert_eq!(gps.latest(), None);
-            assert_eq!(gps.view().status, GpsStatus::Searching);
-            gps.feed(GGA, 60_001);
-        });
+        let logs = Logs::capture();
+        let gps = Gps::detached();
+        for now_ms in 1_000..1_100 {
+            gps.feed(GGA_NO_FIX, now_ms);
+        }
+        gps.tick(60_000);
+        assert_eq!(gps.latest(), None);
+        assert_eq!(gps.view().status, GpsStatus::Searching);
+        gps.feed(GGA, 60_001);
         logs.assert_messages(&["Searching", "gps fix acquired"]);
     }
 
     #[test]
     fn gps_logs_stale_when_no_fix_sentences_outlast_retained_fix() {
-        let logs = Logs::default();
-        tracing::subscriber::with_default(logs.clone(), || {
-            let gps = Gps::detached();
-            gps.feed(GGA, 1_000);
-            for now_ms in [2_000, 6_000] {
-                gps.feed(GGA_NO_FIX, now_ms);
-            }
-            logs.assert_messages(&["gps fix acquired"]);
-            for now_ms in 6_001..6_100 {
-                gps.feed(GGA_NO_FIX, now_ms);
-            }
-            assert_eq!(gps.latest().unwrap().1, 1_000);
-            assert_eq!(gps.view().status, GpsStatus::Fixed { satellites: Some(8) });
-            gps.feed(GGA, 6_100);
-        });
+        let logs = Logs::capture();
+        let gps = Gps::detached();
+        gps.feed(GGA, 1_000);
+        for now_ms in [2_000, 6_000] {
+            gps.feed(GGA_NO_FIX, now_ms);
+        }
+        logs.assert_messages(&["gps fix acquired"]);
+        for now_ms in 6_001..6_100 {
+            gps.feed(GGA_NO_FIX, now_ms);
+        }
+        assert_eq!(gps.latest().unwrap().1, 1_000);
+        assert_eq!(gps.view().status, GpsStatus::Fixed { satellites: Some(8) });
+        gps.feed(GGA, 6_100);
         logs.assert_messages(&["gps fix acquired", "gps fix stale", "gps fix recovered"]);
     }
 
     #[test]
     fn gps_logs_gap_when_fix_returns_without_intervening_tick() {
-        let logs = Logs::default();
-        tracing::subscriber::with_default(logs.clone(), || {
-            let gps = Gps::detached();
-            gps.feed(GGA, 1_000);
-            gps.feed(GGA, 6_001);
-        });
+        let logs = Logs::capture();
+        let gps = Gps::detached();
+        gps.feed(GGA, 1_000);
+        gps.feed(GGA, 6_001);
         logs.assert_messages(&["gps fix acquired", "gps fix stale", "gps fix recovered"]);
     }
 
     #[test]
     fn gps_bounds_failure_logs_when_failed_ports_are_retried_or_removed() {
-        let logs = Logs::default();
-        tracing::subscriber::with_default(logs.clone(), || {
-            let gps = Gps::detached();
-            gps.feed(GGA, 1_000);
-            let latest = gps.latest();
-            for _ in 0..100 {
-                gps.set_status(GpsStatus::Failed("read failed".to_owned()));
-                gps.set_status(GpsStatus::Searching);
-            }
-            let gone =
-                nothing_found(None, Some("receiver is no longer attached"), |_| unreachable!());
-            for _ in 0..100 {
-                gps.set_status(gone.clone());
-                gps.tick(60_000);
-            }
-            assert_eq!(gps.latest(), latest);
-            assert_eq!(gps.view().status, gone);
-            gps.feed(GGA, 60_001);
+        let logs = Logs::capture();
+        let gps = Gps::detached();
+        gps.feed(GGA, 1_000);
+        let latest = gps.latest();
+        for _ in 0..100 {
             gps.set_status(GpsStatus::Failed("read failed".to_owned()));
-        });
+            gps.set_status(GpsStatus::Searching);
+        }
+        let gone = nothing_found(None, Some("receiver is no longer attached"), |_| unreachable!());
+        for _ in 0..100 {
+            gps.set_status(gone.clone());
+            gps.tick(60_000);
+        }
+        assert_eq!(gps.latest(), latest);
+        assert_eq!(gps.view().status, gone);
+        gps.feed(GGA, 60_001);
+        gps.set_status(GpsStatus::Failed("read failed".to_owned()));
         logs.assert_messages(&[
             "gps fix acquired",
             "read failed",
@@ -1071,46 +1078,40 @@ mod tests {
 
     #[test]
     fn gps_bounds_failure_logs_when_discovery_retries_the_same_missing_receiver() {
-        let logs = Logs::default();
-        tracing::subscriber::with_default(logs.clone(), || {
-            let gps = Gps::detached();
-            for _ in 0..100 {
-                gps.set_status(GpsStatus::Scanning { port: "missing".to_owned(), baud: 9_600 });
-                gps.set_status(GpsStatus::Failed("missing receiver".to_owned()));
-            }
-            gps.set_status(GpsStatus::Searching);
-            gps.feed(GGA_NO_FIX, 1_000);
+        let logs = Logs::capture();
+        let gps = Gps::detached();
+        for _ in 0..100 {
+            gps.set_status(GpsStatus::Scanning { port: "missing".to_owned(), baud: 9_600 });
             gps.set_status(GpsStatus::Failed("missing receiver".to_owned()));
-        });
+        }
+        gps.set_status(GpsStatus::Searching);
+        gps.feed(GGA_NO_FIX, 1_000);
+        gps.set_status(GpsStatus::Failed("missing receiver".to_owned()));
         logs.assert_messages(&["missing receiver", "Searching", "missing receiver"]);
     }
 
     #[test]
     fn gps_bounds_no_receiver_logs_when_discovery_repeats_without_a_receiver() {
-        let logs = Logs::default();
-        tracing::subscriber::with_default(logs.clone(), || {
-            let gps = Gps::detached();
-            for _ in 0..100 {
-                gps.set_status(GpsStatus::Scanning { port: "candidate".to_owned(), baud: 9_600 });
-                gps.set_status(GpsStatus::NoReceiver);
-            }
-        });
+        let logs = Logs::capture();
+        let gps = Gps::detached();
+        for _ in 0..100 {
+            gps.set_status(GpsStatus::Scanning { port: "candidate".to_owned(), baud: 9_600 });
+            gps.set_status(GpsStatus::NoReceiver);
+        }
         logs.assert_messages(&["NoReceiver"]);
     }
 
     #[test]
     fn gps_logs_stale_when_zero_age_fix_is_followed_by_unusable_sentences() {
-        let logs = Logs::default();
-        tracing::subscriber::with_default(logs.clone(), || {
-            let gps = Gps::detached();
-            gps.lock().max_age = Duration::ZERO;
-            gps.feed(GGA, 1_000);
-            gps.tick(1_000);
-            logs.assert_messages(&["gps fix acquired"]);
-            gps.feed(b"not NMEA", 1_001);
-            gps.feed(b"$GPGSV,1,1,00*79", 1_002);
-            assert_eq!(gps.latest().unwrap().1, 1_000);
-        });
+        let logs = Logs::capture();
+        let gps = Gps::detached();
+        gps.lock().max_age = Duration::ZERO;
+        gps.feed(GGA, 1_000);
+        gps.tick(1_000);
+        logs.assert_messages(&["gps fix acquired"]);
+        gps.feed(b"not NMEA", 1_001);
+        gps.feed(b"$GPGSV,1,1,00*79", 1_002);
+        assert_eq!(gps.latest().unwrap().1, 1_000);
         logs.assert_messages(&["gps fix acquired", "gps fix stale"]);
     }
 
@@ -1267,16 +1268,14 @@ mod tests {
 
     #[test]
     fn gps_logs_refused_rate_once_when_receiver_repeats_its_nak() {
-        let logs = Logs::default();
-        tracing::subscriber::with_default(logs.clone(), || {
-            let gps = Gps::bridged(DEFAULT_MAX_AGE);
-            for now_ms in 0..10 {
-                gps.feed_bytes(&NAK_VALSET, now_ms);
-            }
-            gps.feed_bytes(&ACK_VALSET, 10);
-            gps.feed_bytes(&NAK_VALSET, 11);
-            assert_eq!(gps.view().counters.rejected, 0);
-        });
+        let logs = Logs::capture();
+        let gps = Gps::bridged(DEFAULT_MAX_AGE);
+        for now_ms in 0..10 {
+            gps.feed_bytes(&NAK_VALSET, now_ms);
+        }
+        gps.feed_bytes(&ACK_VALSET, 10);
+        gps.feed_bytes(&NAK_VALSET, 11);
+        assert_eq!(gps.view().counters.rejected, 0);
         logs.assert_messages(&[
             "the GPS receiver refused its rate",
             "the GPS receiver refused its rate",
@@ -1285,28 +1284,24 @@ mod tests {
 
     #[test]
     fn gps_logs_full_transmit_buffer_once_when_receiver_reports_txbuf() {
-        let logs = Logs::default();
-        tracing::subscriber::with_default(logs.clone(), || {
-            let gps = Gps::bridged(DEFAULT_MAX_AGE);
-            for now_ms in 0..3 {
-                gps.feed_bytes(b"$GNTXT,01,01,00,txbuf alloc*61\r\n", now_ms);
-            }
-            gps.feed_bytes(b"$GNTXT,01,01,02,ANTSTATUS=OK*25\r\n", 3);
-            assert_eq!(gps.view().counters.rejected, 0);
-        });
+        let logs = Logs::capture();
+        let gps = Gps::bridged(DEFAULT_MAX_AGE);
+        for now_ms in 0..3 {
+            gps.feed_bytes(b"$GNTXT,01,01,00,txbuf alloc*61\r\n", now_ms);
+        }
+        gps.feed_bytes(b"$GNTXT,01,01,02,ANTSTATUS=OK*25\r\n", 3);
+        assert_eq!(gps.view().counters.rejected, 0);
         logs.assert_messages(&["the GPS receiver is dropping output"]);
     }
 
     #[test]
     fn gps_logs_stale_when_bridge_receiver_goes_quiet_and_runtime_ticks() {
-        let logs = Logs::default();
-        tracing::subscriber::with_default(logs.clone(), || {
-            let gps = Gps::bridged(DEFAULT_MAX_AGE);
-            let mut sentence = GGA.to_vec();
-            sentence.extend_from_slice(b"\r\n");
-            gps.feed_bytes(&sentence, 1_000);
-            gps.tick(7_000);
-        });
+        let logs = Logs::capture();
+        let gps = Gps::bridged(DEFAULT_MAX_AGE);
+        let mut sentence = GGA.to_vec();
+        sentence.extend_from_slice(b"\r\n");
+        gps.feed_bytes(&sentence, 1_000);
+        gps.tick(7_000);
         logs.assert_messages(&["gps fix acquired", "gps fix stale"]);
     }
 
@@ -1350,17 +1345,15 @@ mod tests {
 
     #[test]
     fn gps_logs_suspension_once_when_set_repeatedly() {
-        let logs = Logs::default();
-        tracing::subscriber::with_default(logs.clone(), || {
-            let gps = Gps::detached();
-            for _ in 0..3 {
-                gps.set_suspended(true);
-            }
-            assert!(gps.suspended());
-            for _ in 0..3 {
-                gps.set_suspended(false);
-            }
-        });
+        let logs = Logs::capture();
+        let gps = Gps::detached();
+        for _ in 0..3 {
+            gps.set_suspended(true);
+        }
+        assert!(gps.suspended());
+        for _ in 0..3 {
+            gps.set_suspended(false);
+        }
         logs.assert_messages(&["stands down", "resumes"]);
     }
 
