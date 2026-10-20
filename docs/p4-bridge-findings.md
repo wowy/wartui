@@ -204,3 +204,11 @@ default one, with the `gps` feature. Runs used the POE-ETH `D8:1C` and productio
   4.7% (−42 dBm) and `9A:24` at 38.1% (−68 dBm). Without GPS, earlier runs showed 2–16% and
   15–88% for these two nodes. The first run had `9A:24` at 96% and −71 dBm, with the
   receiver's wires routed past that node. With the wires moved, it was heard 3 dB stronger.
+- **GPS bytes are dropped while no host holds the port.** At first the P4 queued them like
+  any other frame. After about 15 minutes with no host, an attaching `wartui sniff` received
+  about 590 queued GPS frames in 6 s. The host stamps bridge GPS bytes with their arrival
+  time, so those would have been stored as current positions. The single-chip bridge's
+  outbox holds seconds, not minutes, so it never showed this. Now the P4 forwards a batch
+  only while a host holds DTR. After 3 minutes with no host, an attach received 18 frames in
+  6 s, the oldest from 7 s before the attach ended. Other frames still queue before a
+  host attaches (#218).
