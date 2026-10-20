@@ -749,7 +749,9 @@ nothing and says how many networks it left out.
 
 - **A bridge with a GPS receiver is the position source while it has a fix.** A T-Dongle-C5
   flashed with `t-dongle-c5-gps` reads a u-blox M10 on its Qwiic port and forwards its bytes; see
-  [`firmware/bridge/README.md`](../../firmware/bridge/README.md) § "The GPS". The host's own search
+  [`firmware/bridge/README.md`](../../firmware/bridge/README.md) § "The GPS". The P4 bridge reads
+  one on its I2C (GPIO7/GPIO8) by default; see
+  [`firmware/p4-bridge/README.md`](../../firmware/p4-bridge/README.md) § "GPS". The host's own search
   stands down while the bridge's receiver has a fix, letting go of any port. Sentences without a
   fix do not count, so a bridge receiver with no sky leaves the host's search running. The search
   resumes once that fix is older than `--gps-max-age`, or the bridge disconnects. After a
@@ -757,7 +759,7 @@ nothing and says how many networks it left out.
   its fix goes ahead of the bridge's. wartui sets the receiver to `[gps] bridge-rate-hz` fixes a
   second (default 5) on every bridge status poll. `g` reports on a port named with `--gps` when
   there is one. Otherwise it reports on the bridge's receiver while it has a fix, or when no host
-  receiver is read and the bridge has a GPS port, and shows `bridge (Qwiic)` as its port.
+  receiver is read and the bridge has a GPS port, and shows `bridge` as its port.
   `wartui sniff --verbose` prints the receiver's raw stream.
 - **`--lat`/`--lon` is for testing only.** WDGWars and WiGLE ban fixed positions, so the capture is
   marked as test data: `upload` refuses it, and `export` warns.
