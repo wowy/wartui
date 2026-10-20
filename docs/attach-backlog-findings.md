@@ -12,7 +12,7 @@ missed that were never live, and read 1 garbled frame. The P4 showed the same th
 scale, because its bulk queue is 256 KB rather than a few kilobytes
 ([`p4-bridge-findings.md`](p4-bridge-findings.md): 243 frames, 78 s at worst).
 
-## After: nothing is held for an absent host
+## After: no host reads a backlog
 
 Three pieces, each needed:
 
