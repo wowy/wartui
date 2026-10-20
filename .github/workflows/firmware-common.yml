@@ -36,10 +36,10 @@ jobs:
     strategy:
       matrix:
         include:
-          - features: esp32c5,radio
+          - features: esp32c5,radio,gps
           - features: esp32c6,radio
           # The P4 is a different target from the C-series chips.
-          - features: esp32p4
+          - features: esp32p4,gps
             target: --target riscv32imafc-unknown-none-elf
 
     runs-on: ubuntu-latest

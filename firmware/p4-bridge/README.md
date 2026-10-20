@@ -41,6 +41,25 @@ enable tied high) and the 4-pin MX1.25 connector `P1` on the WIFI6 (pin 1 is the
 rail). A cable to a PC that carries VBUS back-feeds the PC whenever the Type-C is also connected,
 so the cable must leave VBUS unconnected. A WIFI6 can instead be powered from that port alone.
 
+## GPS
+
+The default build reads a u-blox receiver over I2C and passes its bytes to the host, as the
+T-Dongle-C5 does. Bytes read while no host holds DTR are dropped, so a host that attaches late
+gets live fixes rather than a backlog. So are the lines saying the receiver stopped or came back;
+the announcement carries the current fault instead. Wire it to the P4's header:
+
+| Receiver | P4 |
+| --- | --- |
+| SDA | GPIO7 |
+| SCL | GPIO8 |
+| VCC | 3V3 |
+| GND | GND |
+
+The receiver answers at `0x42`. The board has 2.2 kΩ pull-ups on both lines, and its ES8311 codec
+shares the bus at another address. Without a receiver, every announcement carries "no GPS receiver
+answered on the I2C bus (GPIO7/GPIO8)". `cargo build --release --no-default-features` builds
+without GPS: the bridge reports none and never touches the bus.
+
 ## Queue sizes
 
 Each is read at build time from an environment variable, so a bench run resizes one with a

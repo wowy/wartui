@@ -17,6 +17,12 @@ path = "src/main.rs"
 test = false
 bench = false
 
+[features]
+default = ["gps"]
+# A u-blox receiver on I2C0, GPIO7 (SDA) and GPIO8 (SCL), passed through to the host. Off,
+# the bridge reports no GPS and never touches the bus.
+gps = ["wartui-firmware/gps"]
+
 [dependencies]
 esp-bootloader-esp-idf = { version = "0.6.0", features = ["esp32p4"] }
 esp-hal = { version = "1.2.2", features = ["esp32p4", "unstable"] }
@@ -32,7 +38,7 @@ embassy-time = "0.5.1"
 embassy-usb = { version = "0.6.0", default-features = false }
 static_cell = "2.1.1"
 # The reset funnel, the reset cause and the phase marker, shared with the other
-# bridges. No `radio`: the P4 has none.
+# bridges, and the GPS reader with `gps`. No `radio`: the P4 has none.
 wartui-firmware = { path = "../common", features = ["esp32p4"] }
 wartui-proto = { path = "../../crates/wartui-proto" }
 

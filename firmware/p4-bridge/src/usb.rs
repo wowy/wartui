@@ -153,8 +153,13 @@ fn local(cmd: &HostToBridge, shared: &Shared) {
         HostToBridge::Identify => shared.announce(),
         HostToBridge::GetStatus => shared.status_asked.signal(()),
         HostToBridge::Reset => reboot(),
-        // No panel and no GPS port.
-        HostToBridge::ShowPanel { .. } | HostToBridge::GpsWrite { .. } => {}
+        #[cfg(feature = "gps")]
+        HostToBridge::GpsWrite { bytes } => crate::gps::write(shared, bytes),
+        // No GPS port in this build.
+        #[cfg(not(feature = "gps"))]
+        HostToBridge::GpsWrite { .. } => {}
+        // No panel.
+        HostToBridge::ShowPanel { .. } => {}
         // `Pair::route` sends nothing else here.
         _ => {}
     }

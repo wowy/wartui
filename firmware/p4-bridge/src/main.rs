@@ -13,7 +13,10 @@
 //! - **the deadline** gives [`Pair`] the clock once, at [`RADIO_WAIT_MS`], which is how it
 //!   gives up on a silent C6;
 //! - **the USB device** (`src/usb.rs`) starts once the pair knows its serial number, and
-//!   runs the device, a reader, a writer and the `GetStatus` answer.
+//!   runs the device, a reader, a writer and the `GetStatus` answer;
+//! - **the GPS reader** (`src/gps.rs`, with the default `gps` feature) polls a u-blox
+//!   receiver on I2C0 and forwards its bytes. GPIO7 and GPIO8 are shared with the board's
+//!   ES8311 codec, which this firmware never addresses.
 //!
 //! The P4 resets the C6 through its enable pin at boot, so the pair always starts
 //! together. Every wait is a GPIO interrupt, a DMA completion, a USB event, a signal
@@ -30,15 +33,21 @@
 #![deny(clippy::large_stack_frames)]
 
 mod config;
+#[cfg(feature = "gps")]
+mod gps;
 mod link;
 mod usb;
 
 use core::cell::{Cell, RefCell};
 use core::future::pending;
 
+#[cfg(feature = "gps")]
+use embassy_futures::join::join;
 use embassy_futures::join::join3;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::signal::Signal;
+#[cfg(feature = "gps")]
+use embassy_sync::zerocopy_channel::Sender;
 use embassy_time::{Duration, Instant, Timer};
 use esp_hal::clock::CpuClock;
 use esp_hal::dma::aligned::InternalMemory;
@@ -56,6 +65,8 @@ use wartui_proto::host_queue::{HostQueue, is_priority};
 use wartui_proto::link::{
     BridgeToHost, LoopPhase, MAX_FRAME, QueueId, QueueStat, ShortStr, SpiStats, encode_frame,
 };
+#[cfg(feature = "gps")]
+use wartui_proto::link::{GpsBytes, GpsWriteBytes, LogLevel, LogStr};
 use wartui_proto::spi::{Down, TRANSFER_LEN, encode_down};
 use wartui_proto::split::{Pair, PairEvent, RADIO_WAIT_MS};
 
@@ -128,6 +139,13 @@ pub struct Shared {
     status_asked: Signal<NoopRawMutex, ()>,
     /// The C6's counters arrived.
     radio_status: Signal<NoopRawMutex, ()>,
+    /// Why no GPS receiver is being read. Sent with every announcement, because a host
+    /// usually attaches after boot, and cleared when the receiver answers again.
+    #[cfg(feature = "gps")]
+    gps_fault: Cell<Option<&'static str>>,
+    /// The GPS reader's write channel, once its bus is up.
+    #[cfg(feature = "gps")]
+    gps_writes: RefCell<Option<Sender<'static, NoopRawMutex, GpsWriteBytes>>>,
 }
 
 impl Shared {
@@ -153,6 +171,10 @@ impl Shared {
             paired: Signal::new(),
             status_asked: Signal::new(),
             radio_status: Signal::new(),
+            #[cfg(feature = "gps")]
+            gps_fault: Cell::new(None),
+            #[cfg(feature = "gps")]
+            gps_writes: RefCell::new(None),
         }
     }
 
@@ -196,10 +218,15 @@ impl Shared {
         queued
     }
 
-    /// Announce this bridge life: `Ready`, then the fault if the radio is not usable.
+    /// Announce this bridge life: `Ready`, then the fault if the radio is not usable, and
+    /// the GPS fault if there is one.
     fn announce(&self) {
         self.push_ready();
         self.push_fault();
+        #[cfg(feature = "gps")]
+        if let Some(why) = self.gps_fault.get() {
+            self.push_error(why);
+        }
     }
 
     /// Out of line, as each message is, so the two never share a frame.
@@ -217,6 +244,28 @@ impl Shared {
         if let Some(message) = fault {
             self.push_host(&BridgeToHost::Error { message });
         }
+    }
+
+    #[cfg(feature = "gps")]
+    #[inline(never)]
+    fn push_error(&self, message: &str) {
+        let message = LogStr::try_from(message).unwrap_or_default();
+        self.push_host(&BridgeToHost::Error { message });
+    }
+
+    #[cfg(feature = "gps")]
+    #[inline(never)]
+    fn push_log(&self, level: LogLevel, message: &str) {
+        let message = LogStr::try_from(message).unwrap_or_default();
+        self.push_host(&BridgeToHost::Log { level, message });
+    }
+
+    /// Queue a batch from the GPS receiver, copied out of its slot here rather than in the
+    /// reader's future.
+    #[cfg(feature = "gps")]
+    #[inline(never)]
+    fn push_gps(&self, bytes: &GpsBytes) {
+        self.push_host(&BridgeToHost::Gps { bytes: bytes.clone() });
     }
 
     /// A new pair life began: tell the USB side, and a host that is reading.
@@ -287,17 +336,23 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     let bus = Bus { spi, ready, rx: dma_buf!(DmaRxBuf), tx: dma_buf!(DmaTxBuf) };
 
     let fw_version = ShortStr::try_from(env!("CARGO_PKG_VERSION")).unwrap_or_default();
-    let pair = Pair::new(own_mac, fw_version, cause, last_phase, boot.as_millis());
+    let pair =
+        Pair::new(own_mac, fw_version, cause, last_phase, boot.as_millis(), cfg!(feature = "gps"));
     let shared = Shared::new(pair, HOST_QUEUE.take(), DOWN_QUEUE.take());
     let mut link = Link::new(boot, own_mac, cause, last_phase, HELD.take());
 
-    // Joined rather than spawned: all three borrow `shared`, and none ends.
-    match join3(
+    // Joined rather than spawned: all borrow `shared`, and none ends.
+    let bridge = join3(
         run_link(bus, &mut link, &shared),
         radio_deadline(&shared, boot),
         usb::run(peripherals.USB_HS, &shared),
-    )
-    .await {}
+    );
+    #[cfg(feature = "gps")]
+    let pins = gps::Pins { i2c: peripherals.I2C0, sda: peripherals.GPIO7, scl: peripherals.GPIO8 };
+    #[cfg(feature = "gps")]
+    match join(bridge, gps::run(pins, &shared)).await {}
+    #[cfg(not(feature = "gps"))]
+    match bridge.await {}
 }
 
 /// Give [`Pair`] the clock at [`RADIO_WAIT_MS`], and announce the life it starts when the

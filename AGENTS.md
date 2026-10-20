@@ -73,14 +73,14 @@ cd firmware/p4-radio                          # the C6 half of the P4 split brid
 cargo fmt --all -- --check
 cargo clippy --release --features esp32c6
 
-cd firmware/p4-bridge                         # the P4 half; no features, own target
+cd firmware/p4-bridge                         # the P4 half; default feature gps, own target
 cargo fmt --all -- --check
-cargo clippy --release
+cargo clippy --release                        # and --no-default-features
 
 cd firmware/common                            # a firmware's clippy does not lint it
 cargo fmt --all -- --check
-cargo clippy --release --features esp32c6,radio   # and esp32c5,radio
-cargo clippy --release --features esp32p4 --target riscv32imafc-unknown-none-elf
+cargo clippy --release --features esp32c6,radio   # and esp32c5,radio,gps
+cargo clippy --release --features esp32p4,gps --target riscv32imafc-unknown-none-elf
 ```
 
 CI mirrors the workspace split: host crates on every push and PR; each firmware only
@@ -121,7 +121,8 @@ own.
 - **`firmware/common`** (`wartui-firmware`) — chip-level code the firmwares need and that needs
   `esp-hal`, so it cannot live in `wartui-proto`: the reset funnel `reboot()` and `reset_cause()`,
   the bridge's reset-surviving phase marker (`phase`), the bridge's ESP-NOW half behind the `radio`
-  feature (`radio`), and the supply and die readings a node's heartbeat carries (`health`).
+  feature (`radio`), the u-blox I2C GPS reader the T-Dongle-C5 and P4 bridges share behind the
+  `gps` feature (`gps`), and the supply and die readings a node's heartbeat carries (`health`).
   A path dependency of both, forwarding each firmware's chip feature, and its own workspace so
   its own clippy lints it; a firmware's clippy compiles it without linting it.
 

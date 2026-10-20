@@ -79,7 +79,7 @@ pub type LogStr = String<96>;
 
 /// The most receiver bytes one [`BridgeToHost::Gps`] carries. The bridge batches several
 /// I2C reads into one frame, since each frame takes a whole slot of the outbox's bulk ring
-/// (`firmware/bridge/src/gps.rs`). An epoch's GGA and RMC fit with room to spare.
+/// (`firmware/common/src/gps.rs`). An epoch's GGA and RMC fit with room to spare.
 pub const GPS_FRAME: usize = 512;
 
 /// Bytes read from the GPS receiver, in transit to the host.

@@ -326,10 +326,9 @@ struct Bridge {
     /// Held here rather than in `main` so that [`handle`] can write to it.
     #[cfg(feature = "t-dongle-c5-gps")]
     gps: Option<gps::Link>,
-    /// Whether the receiver answered when [`take_gps`] last looked, so a change is said
-    /// once.
+    /// What [`take_gps`] last saw of the receiver, so a change is said once.
     #[cfg(feature = "t-dongle-c5-gps")]
-    gps_answered: bool,
+    gps_watch: gps::Watch,
     /// Why no GPS receiver is being read on a board built to have one.
     ///
     /// Sent with every announcement for the reason `panel_fault` is, and cleared when the
@@ -554,7 +553,7 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
         #[cfg(feature = "t-dongle-c5-gps")]
         gps: None,
         #[cfg(feature = "t-dongle-c5-gps")]
-        gps_answered: true,
+        gps_watch: gps::Watch::new(),
         gps_fault: None,
     });
     // Ahead of every frame this life sends, whenever transmit opens. The ROM banner
@@ -875,19 +874,19 @@ fn take_gps(bridge: &mut Bridge) -> bool {
         link.batches().receive_done();
         queued = true;
     }
-    let present = link.present();
-    let refused = link.take_write_refused();
-    if present != bridge.gps_answered {
-        bridge.gps_answered = present;
-        if present {
+    let changes = bridge.gps_watch.changes();
+    match changes.answered {
+        Some(true) => {
             bridge.gps_fault = None;
             bridge.log(LogLevel::Info, "the GPS receiver answered on the Qwiic port");
-        } else {
+        }
+        Some(false) => {
             bridge.gps_fault = Some(NO_GPS_RECEIVER);
             bridge.error(NO_GPS_RECEIVER);
         }
+        None => {}
     }
-    if refused {
+    if changes.write_refused {
         bridge.error("the GPS receiver refused a write");
     }
     queued

@@ -182,3 +182,33 @@ After the final burst run, read with `wartui status`:
   run: those queues were added by the review fixes. The priority ring carries only the C6's
   own records, such as `Ready` and acknowledgements, so its load does not grow with sightings.
 - The other defaults stand. They held at least ten times what they were asked to.
+
+## GPS over I2C on the P4 (2026-10-19)
+
+The P4 reads the user's u-blox receiver on I2C0, with SDA on GPIO7 and SCL on GPIO8, through
+the reader it now shares with the T-Dongle-C5 (`firmware/common/src/gps.rs`). The build is the
+default one, with the `gps` feature. Runs used the POE-ETH `D8:1C` and production nodes.
+
+- **Fixes reach the host.** A 10-minute `wartui run` took 100% of its positions from the
+  bridge's receiver, and the host's own GPS search stood down as soon as the first fix arrived.
+- **The configuration round-trips.** The receiver sent GGA once a second before the run and
+  every 0.2 s after it, the host's 5 Hz default. After the receiver was unplugged and plugged
+  back in, losing its settings with its power, it was again at 5 Hz.
+- **Unplugging the receiver is reported once each way.** `wartui sniff --verbose` showed one
+  `no GPS receiver answered on the I2C bus (GPIO7/GPIO8)` error after the unplug, and one
+  `the GPS receiver answered` log after the replug. The host's fix went stale 5 s after the
+  unplug and recovered within seconds of the replug. `wartui run` does not record a bridge's
+  `Error` and `Log` lines on any bridge, so its capture cannot show them.
+- **Reading the receiver lost nothing.** Every run dropped no frame and lost no batch.
+- **Heartbeat loss stayed in this board's range.** The second 10-minute run had `F5:50` at
+  4.7% (−42 dBm) and `9A:24` at 38.1% (−68 dBm). Without GPS, earlier runs showed 2–16% and
+  15–88% for these two nodes. The first run had `9A:24` at 96% and −71 dBm, with the
+  receiver's wires routed past that node. With the wires moved, it was heard 3 dB stronger.
+- **GPS bytes are dropped while no host holds the port.** At first the P4 queued them like
+  any other frame. After about 15 minutes with no host, an attaching `wartui sniff` received
+  about 590 queued GPS frames in 6 s. The host stamps bridge GPS bytes with their arrival
+  time, so those would have been stored as current positions. The single-chip bridge's
+  outbox holds seconds, not minutes, so it never showed this. Now the P4 forwards a batch
+  only while a host holds DTR. After 3 minutes with no host, an attach received 18 frames in
+  6 s, the oldest from 7 s before the attach ended. Other frames still queue before a
+  host attaches (#218).
