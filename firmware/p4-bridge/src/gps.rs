@@ -14,6 +14,12 @@
 //! **The write channel's sender sits in [`Shared`]**, where the USB reader hands it the
 //! host's bytes; [`forward`] owns the batch receiver. Neither is borrowed across an
 //! `.await`.
+//!
+//! **A batch read while no host holds DTR is dropped, not queued.** A fix is only worth
+//! anything live: the host stamps bridge GPS bytes with their arrival time, and the host
+//! queue holds minutes of them, so a backlog would land as minutes-old positions marked
+//! current. The reader keeps draining the receiver either way. Other frames still queue
+//! before a host attaches (#218).
 
 use core::future::pending;
 
@@ -86,7 +92,8 @@ fn start(pins: Pins, shared: &Shared) -> Option<Started> {
     Some(Started { bus: Bus::new(i2c.into_async()), batch_tx, write_rx, batch_rx })
 }
 
-/// Forward each finished batch to the host, and report what changed about the receiver.
+/// Forward each finished batch to a host holding DTR, drop it otherwise, and report what
+/// changed about the receiver.
 ///
 /// Wakes on a batch or every [`ABSENT_PROBE_MS`], so a receiver that stops answering is
 /// reported within about a second even with no batch flowing. A change is said once: an
@@ -97,7 +104,9 @@ async fn forward(shared: &Shared, mut batches: Receiver<'static, NoopRawMutex, G
     loop {
         let probe = Timer::after(Duration::from_millis(ABSENT_PROBE_MS));
         if let Either::First(bytes) = select(batches.receive(), probe).await {
-            shared.push_gps(bytes);
+            if shared.dtr.get() {
+                shared.push_gps(bytes);
+            }
             batches.receive_done();
         }
         let present = gps::present();
