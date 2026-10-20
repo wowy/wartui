@@ -76,7 +76,7 @@ struct Started {
 
 /// Build the bus and the channels, and give [`Shared`] the write sender.
 ///
-/// Out of line so the channels are built here rather than in the joined future's state.
+/// Out of line so the channels are built here rather than in the caller's poll frame.
 #[inline(never)]
 fn start(pins: Pins, shared: &Shared) -> Option<Started> {
     let i2c = match gps::bus(pins.i2c, pins.sda, pins.scl) {
