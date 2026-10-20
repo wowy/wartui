@@ -175,8 +175,8 @@ impl FleetEngine {
                 die_temp = %heartbeat.die_temp,
                 "node joined"
             ),
-            // Only after a logged departure: a backlog held through a link outage arrives late
-            // from nodes that never left.
+            // Only after a logged departure: nodes that never left heartbeat again after a link
+            // outage.
             Some(last) if node.departed => {
                 node.departed = false;
                 let silent_ms = now.mono.duration_since(last).as_millis() as u64;
@@ -481,9 +481,9 @@ impl FleetEngine {
     /// the frame came out of order, and guessing would invent history. Each counted gap is also a
     /// [`Record::BatchGap`], so the store's sum matches the live count.
     ///
-    /// Only a gap after a live batch counts. One after a replayed batch spans time with no host
-    /// reading, which is the bridge's `dropped_tx`. The few batches lost at the replay-to-live
-    /// handoff go uncounted.
+    /// Only a gap after a live batch counts. One after a replayed batch spans a spell the host
+    /// fell behind, whose losses are the bridge's `dropped_tx`. The few batches lost at the
+    /// replay-to-live handoff go uncounted.
     fn note_batch_seq(&mut self, src: Mac, seq: u16, now: Now, batch: &mut ActionBatch) {
         // Read before borrowing the node. See `air_is_live`.
         let live = self.air_is_live();

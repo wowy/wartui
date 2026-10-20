@@ -340,9 +340,14 @@ edit stops; follow the pointer before changing the rule.
   `crates/wartui-core/src/engine/event.rs`, `Command::AssignBle` / `Command::RememberBle`;
   `crates/wartui-core/src/engine/replan.rs`, `on_assign_ble` / `replan`;
   `docs/phase-2-findings.md`
-- **A heartbeat replayed out of the bridge's backlog is not an admin window.** Delete either
-  half of the check and the symptom is a plausible-looking lie rather than an error.
-  → `crates/wartui-core/src/engine/lag.rs`, `note_arrival` / `air_is_live` / `BEHIND_THE_AIR`
+- **A heartbeat read behind the air is not an admin window.** A host that falls behind a busy
+  fleet drains the bridge's queue late; the bridge's clock stamps run ahead of the host's, and the
+  gap is the lag. Delete either half of the check and the symptom is a plausible-looking lie
+  rather than an error. A connection starts caught up, which is safe only because nothing older
+  than it reaches the engine: the bridge holds nothing for an absent host, and the transport drops
+  what decodes ahead of a connection's first `Ready`.
+  → `crates/wartui-core/src/engine/lag.rs`, `note_arrival` / `air_is_live` / `BEHIND_THE_AIR`;
+  `crates/wartui-bridge/src/serial.rs`, `read_loop`
 - **The bridge's USB transmit endpoint can die on its own, and the bridge reboots when it does.**
   `StallWatch` times the *contradiction*, and **every one of its four facts is load-bearing**:
   delete any and a bridge reboots forever, or never. There is no watchdog behind the hang case.
@@ -362,8 +367,12 @@ edit stops; follow the pointer before changing the rule.
 - **The bridge writes nothing to USB until a host has spoken, unless a host was present when the
   previous life ended** (an RTC flag, never trusted after a power-on). Writing before any host
   opens the port wedges the endpoint, and a host that was present across the reset is already
-  reading. → `crates/wartui-proto/src/reset.rs`, `ResetCause::speaks_first`;
-  `docs/phase-3-findings.md`
+  reading. **Nor does it queue anything for an absent host**, and a connecting host's first frame
+  clears whatever is queued before it is served. Bytes already past the queue still reach the
+  port, and the host drops every frame that decodes ahead of the connection's first `Ready`. → `crates/wartui-proto/src/reset.rs`, `ResetCause::speaks_first`;
+  `docs/phase-3-findings.md`; `firmware/bridge/src/main.rs`, `Bridge::send` /
+  `note_host_frame`; `firmware/p4-bridge/src/main.rs`, `Shared::push_host`, and
+  `src/usb.rs`, `write_host`
 - **Never link `esp-println` with `jtag-serial` in the *bridge*** — its link protocol shares that
   endpoint, and diagnostics go out as `Log` frames instead. → `firmware/bridge/README.md`
 - **Both firmwares pass `US` for the regulatory domain, and that is not a preference**: `esp-radio`
