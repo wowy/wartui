@@ -4111,6 +4111,9 @@ impl Logs {
     fn during(f: impl FnOnce()) -> Vec<String> {
         static INSTALL: std::sync::Once = std::sync::Once::new();
         INSTALL.call_once(|| tracing::subscriber::set_global_default(Logs).expect("no other"));
+        // A callsite another thread registered while the sink was being installed can have
+        // cached it as disabled; recompute every callsite's interest.
+        tracing::callsite::rebuild_interest_cache();
         CAPTURED.set(Some(Vec::new()));
         f();
         CAPTURED.take().unwrap_or_default()
