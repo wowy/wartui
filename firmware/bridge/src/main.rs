@@ -361,8 +361,8 @@ impl Bridge {
     /// Whether the outbox may write to USB.
     ///
     /// Writing before any host has opened the port wedges the endpoint, so a life that
-    /// does not speak first leaves its frames queued until a host frame has decoded.
-    /// `ResetCause::speaks_first` has the bench numbers.
+    /// does not speak first writes nothing, not even its boot terminator, until a host
+    /// frame has decoded. `ResetCause::speaks_first` has the bench numbers.
     fn transmit_open(&self) -> bool {
         self.speaks_first || self.stall.last_host().is_some()
     }
@@ -374,6 +374,25 @@ impl Bridge {
         self.stall.last_host().is_some_and(|at| now - at < HOST_PRESENT_WINDOW_MS)
     }
 
+    /// Queue `msg` for the host, or drop it while transmit is shut.
+    ///
+    /// Every frame goes through here. While no host has spoken this life, and the life does
+    /// not speak first, there is nobody to read it: a backlog held then arrives late when
+    /// a host attaches, carries its current position onto old sightings and reads as
+    /// missed admin windows. Faults worth keeping are repeated by [`Bridge::announce`].
+    /// Nothing dropped here is counted: `dropped_tx` means congestion while a host reads.
+    ///
+    /// Once a host has spoken, frames queue until the life ends. USB Serial/JTAG gives no
+    /// DTR level, so this end cannot see a host leave, and a quiet host such as
+    /// `wartui sniff` sends nothing to time it by. What builds after a host quits is at
+    /// most a ring's worth, and the next connection's `Identify` clears it
+    /// ([`note_host_frame`]).
+    fn send(&mut self, msg: &BridgeToHost) {
+        if self.transmit_open() {
+            self.outbox.send(msg);
+        }
+    }
+
     /// Say who we are.
     ///
     /// Sent at boot by a life that [speaks first](ResetCause::speaks_first), and
@@ -381,7 +400,7 @@ impl Bridge {
     /// asks. The host is usually not attached at boot, and this is how it learns the
     /// chip, MAC and link revision.
     fn announce(&mut self, mac: Mac) {
-        self.outbox.send(&BridgeToHost::Ready {
+        self.send(&BridgeToHost::Ready {
             chip: CHIP,
             mac,
             fw_version: ShortStr::try_from(env!("CARGO_PKG_VERSION")).unwrap_or_default(),
@@ -440,12 +459,12 @@ impl Bridge {
 
     fn log(&mut self, level: LogLevel, message: &str) {
         let message = LogStr::try_from(message).unwrap_or_default();
-        self.outbox.send(&BridgeToHost::Log { level, message });
+        self.send(&BridgeToHost::Log { level, message });
     }
 
     fn error(&mut self, message: &str) {
         let message = LogStr::try_from(message).unwrap_or_default();
-        self.outbox.send(&BridgeToHost::Error { message });
+        self.send(&BridgeToHost::Error { message });
     }
 
     /// Pass on what a radio call had to say.
@@ -471,7 +490,7 @@ impl Bridge {
     /// which can trail it (see `SendDone::done_at`), or when a full queue refused the job.
     fn report_send(&mut self, done: &SendDone) {
         let tx_us = (done.done_at - self.boot).as_micros() as u32;
-        self.outbox.send(&BridgeToHost::SendResult { id: done.id, status: done.status, tx_us });
+        self.send(&BridgeToHost::SendResult { id: done.id, status: done.status, tx_us });
     }
 }
 
@@ -833,9 +852,7 @@ fn drain_radio(receiver: &EspNowReceiver, bridge: &mut Bridge) -> bool {
 #[inline(never)]
 fn forward(received: &ReceivedData, bridge: &mut Bridge) {
     let rx_us = bridge.now_us();
-    match radio::hear(received, rx_us, |rx| {
-        bridge.outbox.send(rx);
-    }) {
+    match radio::hear(received, rx_us, |rx| bridge.send(rx)) {
         Heard::Forwarded => bridge.rx_count = bridge.rx_count.wrapping_add(1),
         // Counted apart from `rx_count`, which the host reads as frames headed its way.
         Heard::Oversize => bridge.rx_oversize = bridge.rx_oversize.wrapping_add(1),
@@ -858,7 +875,9 @@ fn take_results(dones: &Dones<RADIO_JOBS>, bridge: &mut Bridge) -> bool {
 const NO_GPS_RECEIVER: &str = "no GPS receiver answered on the Qwiic port";
 
 /// Queue every batch the GPS task has finished, and report what changed about the
-/// receiver. Says whether a batch was queued. Never waits on the task.
+/// receiver. Says whether a batch was taken. Never waits on the task.
+///
+/// A batch is taken while transmit is shut too, and dropped, so the task never backs up.
 ///
 /// A change in whether it answers is said once, not at every probe: an `Error` when it
 /// stops, which `announce` then repeats, and a `Log` when it comes back.
@@ -867,12 +886,16 @@ const NO_GPS_RECEIVER: &str = "no GPS receiver answered on the Qwiic port";
 #[cfg(feature = "t-dongle-c5-gps")]
 #[inline(never)]
 fn take_gps(bridge: &mut Bridge) -> bool {
+    // The gate `Bridge::send` applies, read once: `link` borrows the bridge.
+    let open = bridge.transmit_open();
     let Some(link) = bridge.gps.as_mut() else { return false };
-    let mut queued = false;
+    let mut taken = false;
     while let Some(bytes) = link.batches().try_receive() {
-        bridge.outbox.send(&BridgeToHost::Gps { bytes: bytes.clone() });
+        if open {
+            bridge.outbox.send(&BridgeToHost::Gps { bytes: bytes.clone() });
+        }
         link.batches().receive_done();
-        queued = true;
+        taken = true;
     }
     let changes = bridge.gps_watch.changes();
     match changes.answered {
@@ -889,7 +912,7 @@ fn take_gps(bridge: &mut Bridge) -> bool {
     if changes.write_refused {
         bridge.error("the GPS receiver refused a write");
     }
-    queued
+    taken
 }
 
 /// What one pass's [`link_burst`] moved.
@@ -1031,7 +1054,7 @@ fn take_link_byte(
             // same pipe. At debug, so a real version mismatch still shows.
             let mut message = LogStr::new();
             let _ = core::fmt::Write::write_fmt(&mut message, format_args!("{err}"));
-            bridge.outbox.send(&BridgeToHost::Log { level: LogLevel::Debug, message });
+            bridge.send(&BridgeToHost::Log { level: LogLevel::Debug, message });
         }
     }
 }
@@ -1043,12 +1066,21 @@ fn take_link_byte(
 /// that was already running can tell this is a new life. `asks` is
 /// [`HostToBridge::asks_for_reply`], which decides whether the frame can start the
 /// stall clock.
+///
+/// An `Identify` empties the outbox before it is answered: each connection sends exactly
+/// one, first, so whatever is queued then was for a host that has gone. A first frame of
+/// any other kind finds nothing to clear, since [`Bridge::send`] drops everything until
+/// it. The presence this frame records goes ahead of the `Ready`, which
+/// [`Bridge::send`] would drop without it.
 fn note_host_frame(bridge: &mut Bridge, mac: Mac, asks: bool, identify: bool) {
     let first = bridge.stall.last_host().is_none();
+    if identify {
+        bridge.outbox.clear();
+    }
+    bridge.stall.note_host(bridge.now_ms(), asks);
     if first && !bridge.speaks_first && !identify {
         bridge.announce(mac);
     }
-    bridge.stall.note_host(bridge.now_ms(), asks);
 }
 
 /// Carry out one host command.
@@ -1072,7 +1104,7 @@ fn handle(
                 .map(|count| count.total_count.clamp(0, u8::MAX as i32) as u8)
                 .unwrap_or(0);
             let uptime_ms = bridge.boot.elapsed().as_millis() as u32;
-            bridge.outbox.send(&BridgeToHost::Status {
+            bridge.send(&BridgeToHost::Status {
                 peer_count,
                 rx_count: bridge.rx_count,
                 dropped_tx: bridge.outbox.dropped(),

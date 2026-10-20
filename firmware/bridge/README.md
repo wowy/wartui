@@ -236,12 +236,23 @@ is not a wire change.
 life ended (`ResetCause::speaks_first`). Each pass of the main loop records in RTC memory whether
 a host frame decoded in the last ten seconds, and the next life reads it back, except after a
 power-on. Writing to the endpoint before any host has opened the port is what wedges it: after a replug and two minutes unread, 3 of 3 first opens found it dead, against 3 of 3
-healthy with transmit held. Frames still queue behind the gate, and the `0x00` goes out first when
-it opens. The first host frame opens it. If that frame is not an `Identify`, the bridge announces
+healthy with transmit held. Only the `0x00` waits behind the gate, and goes out first when it
+opens. The first host frame opens it. If that frame is not an `Identify`, the bridge announces
 before handling it, so a host that was already running still sees a new life. A frame that decodes
 but carries another link version counts as a host and opens the gate too. A life that follows a
 present host speaks first because that host is still attached and reading, and it relies on that
 `Ready`: it sends one `Identify` per connection (`docs/phase-3-findings.md`).
+
+**Nothing queues before a host, and a connecting host starts from an empty queue.** Every frame
+goes through `Bridge::send`, which drops it while transmit is shut: no host has spoken this life,
+and the life does not speak first. A backlog replayed at attach arrived late, carried the host's
+current position onto old sightings and read as missed admin windows. The bridge cannot see a host
+leave, because USB Serial/JTAG gives no DTR level and a quiet host such as `wartui sniff` sends
+nothing to time it by. So after a host quits, frames queue again, at most a ring's worth. The next
+connection's `Identify` clears the outbox before it is answered (`note_host_frame`); a frame
+part-way out is abandoned behind a `0x00`. Faults worth keeping, the panel's and the GPS receiver's, are repeated by
+every `Ready`. Neither discard counts toward `Status.dropped_tx`, which keeps meaning congestion
+while a host reads.
 
 Reach for `wartui reset --bridge <board>` before `espflash`. The receive path is alive in this
 state, so the bridge reboots on being asked. A software reset also keeps the device path. An
@@ -259,8 +270,8 @@ would stall the radio for as long as the TUI is wedged or the cable is out.
 Everything outbound goes through the rings in `wartui_proto::outbox`, drained by whatever the FIFO
 will take. The only wait on the endpoint is the main loop's idle one. The FIFO emptying, a host
 command, or a received frame ends it; otherwise `IDLE_TICK` bounds it. So a host that stops reading
-costs no busy passes. Under pressure both rings evict oldest-first and count it into
-`Status.dropped_tx`. Priority frames (`Ready`, `SendResult`, `Status`, `Error`) are served ahead of
+costs no busy passes. Under
+pressure both rings evict oldest-first and count it into `Status.dropped_tx`. Priority frames (`Ready`, `SendResult`, `Status`, `Error`) are served ahead of
 `Rx`, `Log` and `Gps` rather than given an unbounded queue. That module is in `wartui-proto` so
 those rules are unit-testable on the host.
 

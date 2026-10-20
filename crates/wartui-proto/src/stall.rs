@@ -54,10 +54,9 @@ pub const HOST_PRESENT_WINDOW_MS: u64 = 10_000;
 ///
 /// # Why the clock starts at the contradiction
 ///
-/// Timing from the last byte written looks equivalent and is not. A bridge powered
-/// beside a talkative fleet fills its rings with nobody reading. When an operator
-/// attaches, the last byte moved *hours* ago, and all of that would count against a
-/// healthy transmit path.
+/// Timing from the last byte written looks equivalent and is not. A bridge can run for
+/// hours with nobody reading. When an operator attaches, the last byte moved *hours*
+/// ago, and all of that would count against a healthy transmit path.
 ///
 /// So the clock runs from the later of the first refusal and the first asking host frame
 /// since the last byte moved. Neither half alone is a contradiction. It is the *first*

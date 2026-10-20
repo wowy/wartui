@@ -150,6 +150,8 @@ At attach, the host read 243 frames the P4 had queued while nothing was reading.
 included 31 old heartbeats, each counted as a missed admin window. No live window was missed.
 The single-chip bridge does the same thing, but its outbox is a few kilobytes, while the P4's
 bulk queue is 256 KB. That can be over a minute of old frames: 78 s at worst in these runs.
+Since #218 neither bridge does: a bridge holds nothing for an absent host, and an
+attach after 7 minutes idle read no old frame ([`attach-backlog-findings.md`](attach-backlog-findings.md)).
 
 ### The first host query after power-up sometimes goes unanswered
 
@@ -210,5 +212,6 @@ default one, with the `gps` feature. Runs used the POE-ETH `D8:1C` and productio
   time, so those would have been stored as current positions. The single-chip bridge's
   outbox holds seconds, not minutes, so it never showed this. Now the P4 forwards a batch
   only while a host holds DTR. After 3 minutes with no host, an attach received 18 frames in
-  6 s, the oldest from 7 s before the attach ended. Other frames still queue before a
-  host attaches (#218).
+  6 s, the oldest from 7 s before the attach ended. The general rule from #218 has since
+  replaced this special case: nothing queues while no host holds DTR, and DTR rising clears
+  both host queues.

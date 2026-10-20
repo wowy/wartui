@@ -53,8 +53,6 @@ use crate::record::{BridgeStatusSeen, CaptureSettings, HostStatus, Record};
 use crate::ubx;
 use admin::Pending;
 #[cfg(doc)]
-use lag::QUIET_CONNECT;
-#[cfg(doc)]
 use replan::next_epoch;
 use rx::Rx;
 
@@ -106,17 +104,13 @@ pub struct FleetEngine {
     /// last connect or disconnect.
     last_arrival: Option<(u32, Instant)>,
     /// How far behind the air this host is, in microseconds. Zero while the link is read live,
-    /// climbing while frames arrive faster than wall-clock time allows. [`BEHIND_THE_AIR_US`] on
-    /// start and every connect or disconnect, until a frame the host waited for, or a first frame
-    /// after [`QUIET_CONNECT`] of silence.
+    /// climbing while frames arrive faster than wall-clock time allows. Zero on start and every
+    /// connect or disconnect ([`Self::note_arrival`] has why).
     backlog_lag_us: u64,
-    /// The largest [`Self::backlog_lag_us`] measured since the last [`Event::HostSample`]. Only
-    /// lags computed from two arrivals count, so the assumed [`BEHIND_THE_AIR_US`] is never
-    /// reported alone. A backlog drained after a connect builds on that assumption, so it reports
-    /// at least that much, which is what it was.
+    /// The largest [`Self::backlog_lag_us`] measured since the last [`Event::HostSample`].
     lag_peak_us: u64,
-    /// When the current measured spell behind the air began. `None` while live, or behind only by
-    /// assumption. Bounds the log lines of [`Self::note_arrival`].
+    /// When the current measured spell behind the air began. `None` while live. Bounds the log
+    /// lines of [`Self::note_arrival`].
     behind_since: Option<Instant>,
     /// The largest lag measured during the spell [`Self::behind_since`] opened.
     behind_peak_us: u64,
@@ -174,9 +168,8 @@ impl FleetEngine {
             remember_ble: config.remember_ble,
             preferred_ble: config.preferred_ble.filter(|_| config.remember_ble),
             last_arrival: None,
-            // Pessimistic, as on `Connected`: the port opens onto a backlog that arrives before
-            // `Ready`.
-            backlog_lag_us: BEHIND_THE_AIR_US,
+            // Caught up, as on `Connected`.
+            backlog_lag_us: 0,
             lag_peak_us: 0,
             behind_since: None,
             behind_peak_us: 0,
@@ -212,10 +205,10 @@ impl FleetEngine {
                 self.link_up = true;
                 self.link_up_since = Some(now.mono);
                 self.link_error = None;
-                // The bridge's backlog arrives now. Count as behind until a frame the host waited
-                // for, or `QUIET_CONNECT` of silence. Pessimism costs at most one admin window, and
-                // keeps a long backlog's first frame from being the one stale window this cannot
-                // recognize.
+                // Start caught up. Every frame from here on was produced after this connection
+                // began: the bridge queues nothing for an absent host and clears its queue when one
+                // connects, and the transport drops what was already past that queue, which
+                // decodes ahead of `Ready` (`wartui_bridge::serial`, `read_loop`).
                 self.reset_arrivals();
                 // Its peer table starts empty, new bridge or rebooted, so refused nodes may fit
                 // now.
@@ -293,7 +286,7 @@ impl FleetEngine {
     /// its next send's `ensure_peer`.
     ///
     /// Waits until the link has been up a whole timeout. An outage silences every node at once, and
-    /// until a reconnect's backlog of held heartbeats arrives, a live node looks a minute silent.
+    /// until heartbeats flow again after a reconnect, a live node looks a minute silent.
     fn evict_stale_peers(&mut self, now: Now, batch: &mut ActionBatch) {
         let settled = self
             .link_up_since

@@ -274,9 +274,9 @@ fn connected_bridge(mac: Mac, gps: bool) -> Event {
     }))
 }
 
-/// Connected, and past the backlog: the first frame after a connect cannot be
-/// told from a replayed one, so a test about a live window sends one first. It is
-/// not ours, so it admits nobody.
+/// Connected, with one frame in at bridge time 0, so the next frame's stamp is timed
+/// against it: a test about a host behind the air stamps its frames ahead of the
+/// host's clock. The frame is not ours, so it admits nobody.
 fn caught_up(engine: &mut FleetEngine, clock: &Clock) {
     engine.handle(connected(), clock.at(0));
     engine.handle(rx(GONE, b"not a frame"), clock.at(0));
@@ -604,12 +604,11 @@ fn engine_records_batch_gap_when_seq_jumps() {
 
 #[test]
 fn engine_ignores_batch_gap_when_previous_batch_replayed() {
-    // On connect the bridge replays its backlog. Batch 25 is a stale frame from long before;
-    // what the node sent between it and batch 84 went while no host was reading, and the
-    // bridge's own drop count covers that.
+    // A host behind the air reads batch 25 late. What the node sent between it and batch 84
+    // went while the bridge's queue overflowed, and the bridge's own drop count covers that.
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
-    engine.handle(connected(), clock.at(0));
+    caught_up(&mut engine, &clock);
 
     let replayed = engine.handle(rx_at(NODE, &seq_batch(25, 1), 1_000_000), clock.at_ms(10));
     // The host out-waits the bridge, so this one is live.
@@ -627,7 +626,7 @@ fn engine_ignores_batch_gap_when_previous_batch_replayed() {
 fn engine_counts_batch_gap_when_previous_batch_live() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
-    engine.handle(connected(), clock.at(0));
+    caught_up(&mut engine, &clock);
 
     engine.handle(rx_at(NODE, &seq_batch(25, 1), 1_000_000), clock.at_ms(10));
     engine.handle(rx_at(NODE, &seq_batch(84, 2), 1_500_000), clock.at_ms(1_010));
@@ -2074,8 +2073,7 @@ fn engine_reports_lag_peak_once_when_backlog_drains() {
 
 #[test]
 fn engine_reports_no_lag_peak_when_only_connected() {
-    // On connecting the engine assumes it is behind the air until a frame says
-    // otherwise. That is an assumption, not a measurement, and is not a peak.
+    // A connection starts caught up, and nothing measured since says otherwise.
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
     engine.handle(connected(), clock.at(0));
@@ -2289,8 +2287,7 @@ fn engine_records_silent_when_bridge_never_answers() {
     let clock = Clock::new();
     let config = EngineConfig { admin_timeout: Duration::from_secs(2), ..Default::default() };
     let mut engine = engine(config, &clock);
-    engine.handle(heartbeat(NODE, 1), clock.at(1));
-    sent_admin(&engine.handle(heartbeat(NODE, 2), clock.at(6)));
+    sent_admin(&engine.handle(heartbeat(NODE, 1), clock.at(6)));
 
     assert!(engine.handle(Event::Tick, clock.at(7)).records.is_empty(), "still in flight");
 
@@ -3203,8 +3200,8 @@ fn engine_skips_peer_removal_when_link_down() {
     for at in 3..=63 {
         assert!(removals(&engine.handle(Event::Tick, clock.at(at))).is_empty(), "at {at} s");
     }
-    // Nor straight after the reconnect, before the bridge's backlog has said
-    // whether the node is still there.
+    // Nor straight after the reconnect, before the node's next heartbeat has said
+    // whether it is still there.
     engine.handle(connected(), clock.at(64));
     assert!(removals(&engine.handle(Event::Tick, clock.at(65))).is_empty());
 }
@@ -3213,26 +3210,28 @@ fn engine_skips_peer_removal_when_link_down() {
 fn engine_skips_peer_removal_when_never_sent_to() {
     let clock = Clock::new();
     let mut engine = engine(us_config(), &clock);
-    // A first frame hard on the connect is no admin window, so nothing is sent.
-    engine.handle(connected(), clock.at(0));
-    let batch = engine.handle(heartbeat(NODE, 1), clock.at_ms(10));
+    // A heartbeat read behind the air is no admin window, so nothing is sent.
+    caught_up(&mut engine, &clock);
+    let batch = engine.handle(
+        beat_at(NODE, 1, 0, Capabilities::here(Board::Esp32c5), 5_000_000),
+        clock.at_ms(10),
+    );
     assert!(batch.urgent.is_empty());
 
     assert!(removals(&engine.handle(Event::Tick, clock.at(62))).is_empty());
 }
 
-// The bridge holds what it hears while no host is attached, so a fresh connection
-// receives a ring's worth of the recent past as fast as USB will carry it — and
-// every one of those heartbeats names a window that shut long ago
+// A host behind the air drains the bridge's queue as fast as USB will carry it, and
+// every heartbeat in it names a window that shut long ago
 // (`docs/phase-4-findings.md`).
 #[test]
 fn engine_ignores_window_when_heartbeat_from_backlog() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
-    engine.handle(connected(), clock.at_ms(0));
+    caught_up(&mut engine, &clock);
 
     // Nine heartbeats a second apart on the bridge's clock, handed to the engine
-    // two milliseconds apart on the host's. Only one of those is real time.
+    // two milliseconds apart on the host's, the first already a second behind.
     let mut sent = 0;
     for beat in 0..9u32 {
         let batch = engine.handle(
@@ -3273,7 +3272,7 @@ fn engine_ignores_window_when_heartbeat_from_backlog() {
 fn engine_uses_window_when_live_heartbeat_follows_backlog() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
-    engine.handle(connected(), clock.at_ms(0));
+    caught_up(&mut engine, &clock);
 
     // A backlog, then the host catches up: it waits a full second of its own
     // clock for a frame the bridge stamped a second later.
@@ -3298,24 +3297,6 @@ fn engine_uses_window_when_live_heartbeat_follows_backlog() {
     assert_eq!(dst, NODE, "the window this heartbeat opened is the live one");
 }
 
-// The backlog is already in the USB pipe when the port opens, so it reaches the
-// engine ahead of the bridge's answer to `Identify` — `wartui sniff` prints
-// heartbeats above the bridge's own header. The very first frame of a session has
-// no arrival before it to measure against, and must not be taken as live for that.
-#[test]
-fn engine_ignores_window_when_heartbeat_precedes_ready() {
-    let clock = Clock::new();
-    let mut engine = engine(EngineConfig::default(), &clock);
-
-    // Minutes old on the bridge's clock, and the first thing this engine sees.
-    let first = engine.handle(
-        beat_at(NODE, 307, 0, Capabilities::here(Board::Esp32c5), 359_000_000),
-        clock.at_ms(31),
-    );
-    assert!(engine.nodes().next().expect("admitted").dirty, "the plan owes it a share");
-    assert!(first.urgent.is_empty(), "no assignment into a window that shut long ago");
-}
-
 /// Whether the one heartbeat stored in a batch was stored as live.
 fn stored_live(batch: &ActionBatch) -> bool {
     let rows: Vec<bool> = batch
@@ -3330,29 +3311,11 @@ fn stored_live(batch: &ActionBatch) -> bool {
     rows[0]
 }
 
-// A backlog arrives within milliseconds of the port opening, so a link up for a
-// second with nothing on it has nothing queued: its first frame is the present.
+// Nothing older than the connection reaches the engine: the bridge clears its queue
+// when a host connects, and the transport drops what decodes ahead of `Ready`. So
+// the first frame after a connect is the present.
 #[test]
-fn engine_uses_window_when_first_heartbeat_follows_quiet_connect() {
-    let clock = Clock::new();
-    let mut engine = engine(EngineConfig::default(), &clock);
-    engine.handle(connected(), clock.at(0));
-    for at in 1..=9 {
-        engine.handle(Event::Tick, clock.at_ms(at * 100));
-    }
-
-    let first = engine
-        .handle(beat_at(NODE, 1, 0, Capabilities::here(Board::Esp32c5), 560_000_000), clock.at(1));
-    let (_, dst, _) = sent_admin(&first);
-    assert_eq!(dst, NODE);
-    assert!(stored_live(&first), "stored as live");
-    assert_eq!(counters(&engine).admin_windows_missed, 0);
-    let row = host_status(&engine.handle(Event::HostSample(HostSample::default()), clock.at(2)));
-    assert_eq!(row.lag_peak_us, 0, "the quiet link is not a measured lag");
-}
-
-#[test]
-fn engine_ignores_window_when_first_heartbeat_follows_connect_promptly() {
+fn engine_uses_window_when_first_heartbeat_follows_connect() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
     engine.handle(connected(), clock.at(0));
@@ -3361,55 +3324,56 @@ fn engine_ignores_window_when_first_heartbeat_follows_connect_promptly() {
         beat_at(NODE, 1, 0, Capabilities::here(Board::Esp32c5), 560_000_000),
         clock.at_ms(10),
     );
-    assert!(first.urgent.is_empty(), "it may be the first frame of a backlog");
-    assert!(!stored_live(&first));
-    assert_eq!(counters(&engine).admin_windows_missed, 1);
+    let (_, dst, _) = sent_admin(&first);
+    assert_eq!(dst, NODE);
+    assert!(stored_live(&first), "stored as live");
+    assert_eq!(counters(&engine).admin_windows_missed, 0);
+    let row = host_status(&engine.handle(Event::HostSample(HostSample::default()), clock.at(2)));
+    assert_eq!(row.lag_peak_us, 0, "nothing measured a lag");
 }
 
-// Before `Connected` there is no connect to have been quiet since: the port has
-// only just opened onto whatever the bridge held.
+// The two clocks jitter by microseconds. A connection that started behind by
+// assumption stayed there on an 11 µs excess, and missed every window for seconds.
 #[test]
-fn engine_ignores_window_when_heartbeat_precedes_connect() {
-    let clock = Clock::new();
-    let mut engine = engine(EngineConfig::default(), &clock);
-
-    let first = engine.handle(
-        beat_at(NODE, 1, 0, Capabilities::here(Board::Esp32c5), 560_000_000),
-        clock.at(600),
-    );
-    assert!(first.urgent.is_empty());
-    assert!(!stored_live(&first));
-}
-
-#[test]
-fn engine_times_quiet_connect_from_latest_connect_when_link_reconnects() {
+fn engine_uses_window_when_bridge_elapsed_slightly_exceeds_host_elapsed_after_connect() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
     engine.handle(connected(), clock.at(0));
+    engine.handle(rx_at(GONE, b"not a frame", 0), clock.at(0));
+
+    let beat = engine
+        .handle(beat_at(NODE, 1, 0, Capabilities::here(Board::Esp32c5), 1_000_011), clock.at(1));
+    let (_, dst, _) = sent_admin(&beat);
+    assert_eq!(dst, NODE);
+    assert!(stored_live(&beat));
+    assert_eq!(counters(&engine).admin_windows_missed, 0);
+}
+
+// A spell behind the air does not outlive its connection: the next one starts
+// caught up.
+#[test]
+fn engine_uses_window_when_link_reconnects_after_falling_behind() {
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    caught_up(&mut engine, &clock);
+    let behind = engine.handle(
+        beat_at(NODE, 1, 0, Capabilities::here(Board::Esp32c5), 5_000_000),
+        clock.at_ms(10),
+    );
+    assert!(!stored_live(&behind));
+
     engine.handle(
         Event::Link(LinkEvent::Disconnected { reason: "unplugged".to_owned() }),
         clock.at(10),
     );
     engine.handle(connected(), clock.at(20));
-
-    // Twenty seconds after the first connect, but hard on the second.
-    let prompt = engine.handle(
-        beat_at(NODE, 1, 0, Capabilities::here(Board::Esp32c5), 560_000_000),
+    let fresh = engine.handle(
+        beat_at(NODE, 2, 0, Capabilities::here(Board::Esp32c5), 600_000_000),
         clock.at_ms(20_010),
     );
-    assert!(prompt.urgent.is_empty(), "the second connect may have a backlog of its own");
-    assert!(!stored_live(&prompt));
-
-    engine.handle(
-        Event::Link(LinkEvent::Disconnected { reason: "unplugged".to_owned() }),
-        clock.at(30),
-    );
-    engine.handle(connected(), clock.at(40));
-    let quiet = engine
-        .handle(beat_at(NODE, 2, 0, Capabilities::here(Board::Esp32c5), 600_000_000), clock.at(41));
-    let (_, dst, _) = sent_admin(&quiet);
+    let (_, dst, _) = sent_admin(&fresh);
     assert_eq!(dst, NODE);
-    assert!(stored_live(&quiet));
+    assert!(stored_live(&fresh));
 }
 
 // A latency measures one thing — how long an assignment took to land inside the
@@ -3743,12 +3707,11 @@ fn engine_drops_clear_owed_when_node_reboots() {
 fn engine_holds_clear_when_heartbeat_replayed() {
     let clock = Clock::new();
     let mut engine = engine(EngineConfig::default(), &clock);
-    engine.handle(connected(), clock.at_ms(0));
+    caught_up(&mut engine, &clock);
 
     // The same shape as `engine_ignores_window_when_heartbeat_from_backlog`:
     // nine heartbeats a second apart on the bridge's clock, two milliseconds apart
-    // on the host's, so only the first is real time and none of the windows they
-    // open are live.
+    // on the host's, so none of the windows they open are live.
     let mut sent = 0;
     for beat in 0..9u32 {
         let batch = engine.handle(

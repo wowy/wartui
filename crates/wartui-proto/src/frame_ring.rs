@@ -82,6 +82,14 @@ impl<const N: usize> FrameRing<N> {
         true
     }
 
+    /// Forget every frame, including one part-way read. Counts no drop.
+    pub const fn clear(&mut self) {
+        self.head = 0;
+        self.len = 0;
+        self.reading = false;
+        self.read_off = 0;
+    }
+
     /// Copy the next bytes of the current frame into `out`, starting the next frame when
     /// none is in progress.
     ///

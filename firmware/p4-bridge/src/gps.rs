@@ -15,15 +15,9 @@
 //! host's bytes; [`forward`] owns the batch receiver. Neither is borrowed across an
 //! `.await`.
 //!
-//! **A batch read while no host holds DTR is dropped, not queued.** A fix is only worth
-//! anything live: the host stamps bridge GPS bytes with their arrival time, and the host
-//! queue holds minutes of them, so a backlog would land as minutes-old positions marked
-//! current. The reader keeps draining the receiver either way. Other frames still queue
-//! before a host attaches (#218).
-//!
-//! **GPS `Error` and `Log` lines follow the same rule.** The fault is tracked on every
-//! change, and `announce` repeats it on a host's `Identify`, so that host learns the current
-//! state once rather than a replay of stale changes followed by a duplicate.
+//! **The fault is tracked on every change**, whether or not a host holds DTR to hear it.
+//! `announce` repeats it on a host's `Identify`, so a host attached later still learns the
+//! current state.
 
 use core::future::pending;
 
@@ -96,44 +90,35 @@ fn start(pins: Pins, shared: &Shared) -> Option<Started> {
     Some(Started { bus: Bus::new(i2c.into_async()), batch_tx, write_rx, batch_rx })
 }
 
-/// Forward each finished batch to a host holding DTR, drop it otherwise, and report what
-/// changed about the receiver.
+/// Forward each finished batch to the host, and report what changed about the receiver.
 ///
 /// Wakes on a batch or every [`ABSENT_PROBE_MS`], so a receiver that stops answering is
-/// reported within about a second even with no batch flowing. A change is said once, and
-/// only to a host holding DTR: an `Error` when it stops, which `announce` then repeats, and
-/// a `Log` when it comes back.
+/// reported within about a second even with no batch flowing. A change is said once: an
+/// `Error` when it stops, which `announce` then repeats, and a `Log` when it comes back.
 async fn forward(shared: &Shared, mut batches: Receiver<'static, NoopRawMutex, GpsBytes>) -> ! {
     let mut watch = Watch::new();
     loop {
         let probe = Timer::after(Duration::from_millis(ABSENT_PROBE_MS));
         if let Either::First(bytes) = select(batches.receive(), probe).await {
-            if shared.dtr.get() {
-                shared.push_gps(bytes);
-            }
+            shared.push_gps(bytes);
             batches.receive_done();
         }
         let changes = watch.changes();
-        let attached = shared.dtr.get();
         match changes.answered {
             Some(true) => {
                 shared.gps_fault.set(None);
-                if attached {
-                    shared.push_log(
-                        LogLevel::Info,
-                        "the GPS receiver answered on the I2C bus (GPIO7/GPIO8)",
-                    );
-                }
+                shared.push_log(
+                    LogLevel::Info,
+                    "the GPS receiver answered on the I2C bus (GPIO7/GPIO8)",
+                );
             }
             Some(false) => {
                 shared.gps_fault.set(Some(NO_GPS_RECEIVER));
-                if attached {
-                    shared.push_error(NO_GPS_RECEIVER);
-                }
+                shared.push_error(NO_GPS_RECEIVER);
             }
             None => {}
         }
-        if changes.write_refused && attached {
+        if changes.write_refused {
             shared.push_error("the GPS receiver refused a write");
         }
     }

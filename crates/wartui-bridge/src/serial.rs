@@ -575,9 +575,8 @@ async fn sweep(
 
 /// What the reader thread and the connection loop share about one attempt.
 ///
-/// One value rather than five `Arc`s because they are read together and mean
-/// something only together: `announced` without `decoded` is a bridge whose
-/// `Ready` was lost, and `garbled` without either is a board running node
+/// One value rather than several `Arc`s because they are read together and mean
+/// something only together: `garbled` without `announced` is a board running node
 /// firmware. The sweep keeps it after [`connect`] returns, to read `mac`.
 #[derive(Debug, Default)]
 struct Attempt {
@@ -588,13 +587,6 @@ struct Attempt {
     opened: AtomicBool,
     /// A `Ready` has arrived, so this board is the bridge.
     announced: AtomicBool,
-    /// Any frame at all has decoded.
-    ///
-    /// Distinct from `announced`, and load-bearing: a bridge whose fleet is busy
-    /// can lose every `Ready` to its own oldest-first transmit rings while its
-    /// observations arrive perfectly well, so giving up on `announced` alone
-    /// would tear down a working link every few seconds.
-    decoded: AtomicBool,
     /// Frames that would not decode. A board running node firmware talks
     /// constantly and none of it is a frame, which is what this counts.
     garbled: std::sync::atomic::AtomicU32,
@@ -731,7 +723,11 @@ async fn connect(
                         "{path} is talking, and none of it is the link protocol"
                     ));
                 }
-                if waited >= patience && !state.decoded.load(Ordering::Relaxed) {
+                // Frames that decode ahead of a `Ready` count for nothing here: they are
+                // dropped as stale (`read_loop`), and a connection whose one `Identify`
+                // went unanswered delivers nothing until it gives up and the next one
+                // asks again.
+                if waited >= patience {
                     // Says what was observed, and stops short of concluding
                     // "it is not a bridge", which is false in the case an
                     // operator actually hits: it *is* the bridge, its transmit
@@ -824,11 +820,33 @@ fn open_failure(path: &str, error: &serialport::Error) -> String {
 }
 
 /// Blocking read loop. Returns the reason it stopped.
-fn read_loop(
-    mut port: Box<dyn serialport::SerialPort>,
+///
+/// Generic over the port only so a test can feed it bytes.
+fn read_loop<R: Read>(
+    port: R,
     events: &mpsc::Sender<LinkEvent>,
     state: &Attempt,
     memory: &BridgeMemory,
+) -> String {
+    // Frames that decoded before this connection's first `Ready`, and were not passed on.
+    let mut skipped = 0_u32;
+    let reason = read_frames(port, events, state, memory, &mut skipped);
+    // Said when the `Ready` arrives otherwise. A connection that ends without one shows
+    // what it heard here.
+    if !state.announced.load(Ordering::Relaxed) && skipped > 0 {
+        tracing::debug!("skipped {skipped} frames from before this connection");
+    }
+    reason
+}
+
+/// [`read_loop`]'s body, counting into `skipped` the frames it drops ahead of the first
+/// `Ready`.
+fn read_frames<R: Read>(
+    mut port: R,
+    events: &mpsc::Sender<LinkEvent>,
+    state: &Attempt,
+    memory: &BridgeMemory,
+    skipped: &mut u32,
 ) -> String {
     let mut acc = FrameAccumulator::<MAX_FRAME>::new();
     let mut buf = [0u8; 1024];
@@ -871,7 +889,6 @@ fn read_loop(
                     radio,
                     ..
                 }) => {
-                    state.decoded.store(true, Ordering::Relaxed);
                     state.announced.store(true, Ordering::Relaxed);
                     // Read by the sweep, which stops here and holds this board for
                     // the rest of the run rather than reaching for another. The
@@ -897,6 +914,9 @@ fn read_loop(
                     // that went backwards is the second case and cannot be the
                     // first.
                     let fresh_life = is_a_new_life(uptime_ms, last_uptime);
+                    if last_uptime.is_none() && *skipped > 0 {
+                        tracing::debug!("skipped {skipped} frames from before this connection");
+                    }
                     last_uptime = Some(uptime_ms);
                     if !fresh_life {
                         continue;
@@ -930,7 +950,17 @@ fn read_loop(
                     })
                 }
                 Ok(msg) => {
-                    state.decoded.store(true, Ordering::Relaxed);
+                    // A bridge clears its queue when a host connects and queues `Ready`
+                    // first, ahead of anything it hears afterwards. So whatever decodes
+                    // before this connection's first `Ready` was written before the
+                    // connection, out of the endpoint's FIFO or the tty's buffer, and is
+                    // stale: a heartbeat seconds old reads as a host behind the air. A
+                    // rebooted bridge's `Ready` on a connection already announced changes
+                    // nothing here.
+                    if last_uptime.is_none() {
+                        *skipped += 1;
+                        continue;
+                    }
                     LinkEvent::Message(msg)
                 }
                 // Reset banners and half-frames land here; the framing has already
@@ -1058,10 +1088,22 @@ fn is_a_new_life(uptime_ms: u32, last_seen: Option<u32>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        PROBE_TICKS, REMEMBERED_TICKS, SETTLE_TICKS, is_a_new_life, patience, silence_disowns_it,
+    use std::sync::atomic::Ordering;
+
+    use tokio::sync::mpsc;
+    use wartui_proto::link::{
+        BridgeToHost, Chip, EspNowPayload, LINK_PROTO_VERSION, LoopPhase, MAX_FRAME, ShortStr,
+        encode_frame,
     };
     use wartui_proto::mac;
+    use wartui_proto::reset::ResetCause;
+
+    use super::{
+        Attempt, PROBE_TICKS, REMEMBERED_TICKS, SETTLE_TICKS, is_a_new_life, patience, read_loop,
+        silence_disowns_it,
+    };
+    use crate::LinkEvent;
+    use crate::remember::BridgeMemory;
 
     use crate::ports::{BRIDGE_PID, ESPRESSIF_VID, PortCandidate, candidate};
 
@@ -1165,5 +1207,77 @@ mod tests {
         // the connection the old life was announced on.
         assert!(is_a_new_life(180, Some(10_800_000)), "a stall reset after hours of service");
         assert!(is_a_new_life(0, Some(3_100)), "and one only seconds into a life");
+    }
+
+    /// Hands out its bytes, then fails the read, which ends [`read_loop`].
+    struct Bytes(std::io::Cursor<Vec<u8>>);
+
+    impl std::io::Read for Bytes {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            match self.0.read(buf)? {
+                0 => Err(std::io::Error::other("end of test bytes")),
+                n => Ok(n),
+            }
+        }
+    }
+
+    fn frame(msg: &BridgeToHost) -> Vec<u8> {
+        let mut buf = [0; MAX_FRAME];
+        let len = encode_frame(msg, &mut buf).unwrap();
+        buf[..len].to_vec()
+    }
+
+    fn rx(rssi: i8) -> BridgeToHost {
+        let payload = EspNowPayload::from_slice(b"WTUI").unwrap();
+        BridgeToHost::Rx { src: [1; 6], dst: [2; 6], rssi, rx_us: 0, payload }
+    }
+
+    #[test]
+    fn serial_link_skips_frames_when_they_arrive_before_first_ready() {
+        let ready = BridgeToHost::Ready {
+            chip: Chip::Esp32C6,
+            mac: [1, 2, 3, 4, 5, 6],
+            fw_version: ShortStr::new(),
+            proto_version: LINK_PROTO_VERSION,
+            reset_cause: ResetCause::PowerOn,
+            last_phase: LoopPhase::Unknown,
+            heap_free: 0,
+            uptime_ms: 0,
+            panel: None,
+            gps: false,
+            radio: None,
+        };
+        let mut bytes = frame(&rx(-10));
+        bytes.extend(frame(&ready));
+        bytes.extend(frame(&rx(-20)));
+
+        let (events, mut received) = mpsc::channel(8);
+        let state = Attempt::default();
+        read_loop(Bytes(std::io::Cursor::new(bytes)), &events, &state, &BridgeMemory::none());
+
+        assert!(matches!(received.try_recv(), Ok(LinkEvent::Connected(_))));
+        assert!(matches!(
+            received.try_recv(),
+            Ok(LinkEvent::Message(BridgeToHost::Rx { rssi: -20, .. }))
+        ));
+        assert!(received.try_recv().is_err());
+        assert!(state.announced.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn serial_link_stays_unannounced_when_only_frames_before_ready_arrive() {
+        // Stale frames prove nothing about this connection, so `connect` still runs out of
+        // patience and the next connection asks again.
+        let mut bytes = frame(&rx(-10));
+        bytes.extend(frame(&rx(-20)));
+
+        let (events, mut received) = mpsc::channel(8);
+        let state = Attempt::default();
+        let reason =
+            read_loop(Bytes(std::io::Cursor::new(bytes)), &events, &state, &BridgeMemory::none());
+
+        assert!(received.try_recv().is_err(), "nothing passed on");
+        assert!(!state.announced.load(Ordering::Relaxed));
+        assert!(reason.starts_with("read failed"));
     }
 }

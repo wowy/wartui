@@ -56,6 +56,16 @@
 //! Every drop is counted, and surfaces in [`BridgeToHost::Status`] as `dropped_tx`. A
 //! non-zero value means frames arrived faster than the host took them: a host not
 //! reading, or a burst bigger than the bulk ring plus what USB drains meanwhile.
+//!
+//! # No host, no backlog
+//!
+//! The bridge queues nothing before a host has spoken, and [`Outbox::clear`] empties
+//! both rings when one connects. A backlog replayed at attach would arrive late, carry
+//! the host's current position onto old sightings and read as missed admin windows. The
+//! bridge cannot see a host leave, since USB Serial/JTAG gives no DTR level, so after a
+//! quit the rings fill again, and the next connection's clear empties them. The frames
+//! discarded either way are not counted: `dropped_tx` keeps meaning congestion while a
+//! host reads.
 
 use crate::host_queue::is_priority;
 use crate::link::{BridgeToHost, CobsStream};
@@ -66,7 +76,7 @@ mod tests;
 
 use ring::Ring;
 
-/// Frames held for the host while it is not reading.
+/// Frames held for a host that has fallen behind.
 ///
 /// The useful buffering has to live here: `esp-radio`'s own receive queue is ten frames
 /// deep and silently discards its oldest. What fills this ring is a node's back-to-back
@@ -250,6 +260,18 @@ impl Outbox {
         if !self.writing.begun {
             self.orphan = true;
         }
+    }
+
+    /// Discard everything queued, for a host that has just connected.
+    ///
+    /// What is queued was meant for nobody, or for a host that has gone. A frame
+    /// part-way out is abandoned with a terminator owed, so the new host's decoder starts
+    /// clean. Not counted in [`Outbox::dropped`], which means congestion while a host
+    /// reads.
+    pub fn clear(&mut self) {
+        self.abandon();
+        self.priority.clear();
+        self.bulk.clear();
     }
 
     /// Evict the oldest frame not yet started from a full ring, to make room for

@@ -188,9 +188,17 @@ impl Shared {
 
     /// Queue `msg` for the host. A full ring evicts its oldest frame and counts the drop.
     ///
+    /// Dropped, and not counted, while no host holds DTR. A backlog held for an absent host
+    /// arrives late when one attaches, carries its current position onto old sightings and
+    /// reads as missed admin windows. Faults worth keeping are repeated by
+    /// [`Shared::announce`], and the writer clears the queue when DTR rises (`src/usb.rs`).
+    ///
     /// Out of line, with the encode buffer, to keep both out of the callers' frames.
     #[inline(never)]
     fn push_host(&self, msg: &BridgeToHost) {
+        if !self.dtr.get() {
+            return;
+        }
         let mut frame = [0; MAX_FRAME];
         // Every `BridgeToHost` fits `MAX_FRAME`.
         let Ok(len) = encode_frame(msg, &mut frame) else { return };
@@ -271,9 +279,7 @@ impl Shared {
     /// A new pair life began: tell the USB side, and a host that is reading.
     fn new_life(&self) {
         self.paired.signal(());
-        if self.dtr.get() {
-            self.announce();
-        }
+        self.announce();
     }
 
     /// Queue the `Status` a poll asked for.
