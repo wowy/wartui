@@ -374,26 +374,21 @@ impl Bridge {
         self.stall.last_host().is_some_and(|at| now - at < HOST_PRESENT_WINDOW_MS)
     }
 
-    /// Whether a host is there to read what is queued, which [`Bridge::send`] asks.
+    /// Queue `msg` for the host, or drop it while transmit is shut.
     ///
-    /// A host present across a software reset is already reading, and must not have to
-    /// send a frame before sightings flow, so a life that
-    /// [speaks first](ResetCause::speaks_first) counts as reading for its first
-    /// [`HOST_PRESENT_WINDOW_MS`]. Kept apart from [`Bridge::host_present`], which is
-    /// recorded for the next life: a life that dies inside that window with no host frame
-    /// must not hand speaking first on to the next.
-    fn host_reading(&self) -> bool {
-        self.host_present() || (self.speaks_first && self.now_ms() < HOST_PRESENT_WINDOW_MS)
-    }
-
-    /// Queue `msg` for the host, or drop it when no host is reading.
-    ///
-    /// Every frame goes through here. A backlog held for an absent host arrives late
-    /// when one attaches, carries its current position onto old sightings and reads as
+    /// Every frame goes through here. While no host has spoken this life, and the life does
+    /// not speak first, there is nobody to read it: a backlog held then arrives late when
+    /// a host attaches, carries its current position onto old sightings and reads as
     /// missed admin windows. Faults worth keeping are repeated by [`Bridge::announce`].
     /// Nothing dropped here is counted: `dropped_tx` means congestion while a host reads.
+    ///
+    /// Once a host has spoken, frames queue until the life ends. USB Serial/JTAG gives no
+    /// DTR level, so this end cannot see a host leave, and a quiet host such as
+    /// `wartui sniff` sends nothing to time it by. What builds after a host quits is at
+    /// most a ring's worth, and the next connection's `Identify` clears it
+    /// ([`note_host_frame`]).
     fn send(&mut self, msg: &BridgeToHost) {
-        if self.host_reading() {
+        if self.transmit_open() {
             self.outbox.send(msg);
         }
     }
@@ -882,7 +877,7 @@ const NO_GPS_RECEIVER: &str = "no GPS receiver answered on the Qwiic port";
 /// Queue every batch the GPS task has finished, and report what changed about the
 /// receiver. Says whether a batch was taken. Never waits on the task.
 ///
-/// A batch is taken whether or not a host is reading, so the task never backs up.
+/// A batch is taken while transmit is shut too, and dropped, so the task never backs up.
 ///
 /// A change in whether it answers is said once, not at every probe: an `Error` when it
 /// stops, which `announce` then repeats, and a `Log` when it comes back.
@@ -891,13 +886,15 @@ const NO_GPS_RECEIVER: &str = "no GPS receiver answered on the Qwiic port";
 #[cfg(feature = "t-dongle-c5-gps")]
 #[inline(never)]
 fn take_gps(bridge: &mut Bridge) -> bool {
+    // The gate `Bridge::send` applies, read once: `link` borrows the bridge.
+    let open = bridge.transmit_open();
+    let Some(link) = bridge.gps.as_mut() else { return false };
     let mut taken = false;
-    loop {
-        let Some(link) = bridge.gps.as_mut() else { return false };
-        let Some(bytes) = link.batches().try_receive() else { break };
-        let batch = BridgeToHost::Gps { bytes: bytes.clone() };
+    while let Some(bytes) = link.batches().try_receive() {
+        if open {
+            bridge.outbox.send(&BridgeToHost::Gps { bytes: bytes.clone() });
+        }
         link.batches().receive_done();
-        bridge.send(&batch);
         taken = true;
     }
     let changes = bridge.gps_watch.changes();
@@ -1070,15 +1067,14 @@ fn take_link_byte(
 /// [`HostToBridge::asks_for_reply`], which decides whether the frame can start the
 /// stall clock.
 ///
-/// A host connecting empties the outbox before it is served: whatever is queued was for
-/// a host that has gone. `Identify` is a connection, since each one sends exactly one
-/// first, which catches a host restarted inside [`HOST_PRESENT_WINDOW_MS`]. So is any
-/// frame from a host not yet reading. The clear goes ahead of the presence this frame
-/// records, and that presence ahead of the `Ready`, which [`Bridge::send`] would drop
-/// without it.
+/// An `Identify` empties the outbox before it is answered: each connection sends exactly
+/// one, first, so whatever is queued then was for a host that has gone. A first frame of
+/// any other kind finds nothing to clear, since [`Bridge::send`] drops everything until
+/// it. The presence this frame records goes ahead of the `Ready`, which
+/// [`Bridge::send`] would drop without it.
 fn note_host_frame(bridge: &mut Bridge, mac: Mac, asks: bool, identify: bool) {
     let first = bridge.stall.last_host().is_none();
-    if identify || !bridge.host_reading() {
+    if identify {
         bridge.outbox.clear();
     }
     bridge.stall.note_host(bridge.now_ms(), asks);

@@ -59,11 +59,13 @@
 //!
 //! # No host, no backlog
 //!
-//! The bridge queues nothing while no host is present, and [`Outbox::clear`] empties
+//! The bridge queues nothing before a host has spoken, and [`Outbox::clear`] empties
 //! both rings when one connects. A backlog replayed at attach would arrive late, carry
 //! the host's current position onto old sightings and read as missed admin windows. The
-//! frames discarded either way are not counted: `dropped_tx` keeps meaning congestion
-//! while a host reads.
+//! bridge cannot see a host leave, since USB Serial/JTAG gives no DTR level, so after a
+//! quit the rings fill again, and the next connection's clear empties them. The frames
+//! discarded either way are not counted: `dropped_tx` keeps meaning congestion while a
+//! host reads.
 
 use crate::host_queue::is_priority;
 use crate::link::{BridgeToHost, CobsStream};

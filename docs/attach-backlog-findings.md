@@ -16,9 +16,11 @@ scale, because its bulk queue is 256 KB rather than a few kilobytes
 
 Three pieces, each needed:
 
-- **The bridge queues nothing without a host and clears its queue when one connects.** The
-  single-chip bridge treats a host as present for ten seconds after its last frame and clears the
-  queue on `Identify`. The P4 uses DTR and clears on its rising edge.
+- **The bridge queues nothing before a host and clears its queue when one connects.** The
+  single-chip bridge queues nothing until a host first speaks and clears the queue on `Identify`.
+  It cannot see a host leave, since USB Serial/JTAG gives no DTR level, so after a quit up to a
+  ring's worth queues again until the next `Identify` clears it. The P4 uses DTR and clears on its
+  rising edge.
 - **The host drops what decodes before the connection's first `Ready`.** Bytes already past the
   bridge's queue when the last host quit, in the endpoint's FIFO or the tty's buffer, still
   arrive. With only the bridge change, a restart 3 s after a quit read two heartbeats 1.3 s and

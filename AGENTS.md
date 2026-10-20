@@ -344,8 +344,8 @@ edit stops; follow the pointer before changing the rule.
   fleet drains the bridge's queue late; the bridge's clock stamps run ahead of the host's, and the
   gap is the lag. Delete either half of the check and the symptom is a plausible-looking lie
   rather than an error. A connection starts caught up, which is safe only because nothing older
-  than it reaches the engine: the bridge holds nothing for an absent host, and the transport drops
-  what decodes ahead of a connection's first `Ready`.
+  than it reaches the engine: a bridge clears its queue when a host connects, and the transport
+  drops what decodes ahead of a connection's first `Ready`.
   → `crates/wartui-core/src/engine/lag.rs`, `note_arrival` / `air_is_live` / `BEHIND_THE_AIR`;
   `crates/wartui-bridge/src/serial.rs`, `read_loop`
 - **The bridge's USB transmit endpoint can die on its own, and the bridge reboots when it does.**
@@ -367,9 +367,11 @@ edit stops; follow the pointer before changing the rule.
 - **The bridge writes nothing to USB until a host has spoken, unless a host was present when the
   previous life ended** (an RTC flag, never trusted after a power-on). Writing before any host
   opens the port wedges the endpoint, and a host that was present across the reset is already
-  reading. **Nor does it queue anything for an absent host**, and a connecting host's first frame
-  clears whatever is queued before it is served. Bytes already past the queue still reach the
-  port, and the host drops every frame that decodes ahead of the connection's first `Ready`. → `crates/wartui-proto/src/reset.rs`, `ResetCause::speaks_first`;
+  reading. **Nor does it queue anything until then**, and a connecting host's `Identify` (the P4:
+  DTR rising) clears whatever is queued before it is served. The single-chip bridge cannot see a
+  host leave, since USB Serial/JTAG gives no DTR level, so after a quit up to a ring's worth
+  queues again until the next `Identify`. Bytes already past the queue still reach the port, and
+  the host drops every frame that decodes ahead of the connection's first `Ready`. → `crates/wartui-proto/src/reset.rs`, `ResetCause::speaks_first`;
   `docs/phase-3-findings.md`; `firmware/bridge/src/main.rs`, `Bridge::send` /
   `note_host_frame`; `firmware/p4-bridge/src/main.rs`, `Shared::push_host`, and
   `src/usb.rs`, `write_host`
