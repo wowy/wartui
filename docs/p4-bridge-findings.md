@@ -150,6 +150,8 @@ At attach, the host read 243 frames the P4 had queued while nothing was reading.
 included 31 old heartbeats, each counted as a missed admin window. No live window was missed.
 The single-chip bridge does the same thing, but its outbox is a few kilobytes, while the P4's
 bulk queue is 256 KB. That can be over a minute of old frames: 78 s at worst in these runs.
+Since #218 neither bridge does: a bridge holds nothing for an absent host, and an
+attach after 7 minutes idle read no old frame ([`attach-backlog-findings.md`](attach-backlog-findings.md)).
 
 ### The first host query after power-up sometimes goes unanswered
 

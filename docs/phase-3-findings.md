@@ -568,6 +568,8 @@ backlog. Reset the bridge first and the same five assignments measure 5.5–7.8 
 Worth knowing before reading the figure as a blown window: it is an artifact of
 attaching to a long-idle bridge, it is not specific to this chip, and the
 wall-clock round trip in that first run was 5–7 ms throughout.
+Since #218 a bridge holds nothing for an absent host, so this artifact is gone
+([`attach-backlog-findings.md`](attach-backlog-findings.md)).
 
 **Does not carry over: the reset reasons.** The S3's `SocResetReason` is not a
 superset of the C6's, which is the trap `03de799` fell into from the other side.
