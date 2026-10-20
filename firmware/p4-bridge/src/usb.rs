@@ -10,6 +10,9 @@
 //! wedge, and the kernel raises DTR when a host opens the port, so DTR is the signal that
 //! someone is reading. The writer waits on the CDC class's control-change signal for it.
 //!
+//! **Nothing queues without DTR, and a rising edge empties the queue.** A host never reads
+//! a backlog from before it attached; `Shared::push_host` has why.
+//!
 //! [`Pair::usb_serial_mac`]: wartui_proto::split::Pair::usb_serial_mac
 //! [`ResetCause::speaks_first`]: wartui_proto::reset::ResetCause::speaks_first
 
@@ -187,6 +190,10 @@ async fn write_host<'d, D: UsbDriver<'d>>(
         while !control.dtr() {
             control.control_changed().await;
         }
+        // A new host: whatever is queued was for one that has gone. Cleared before the first
+        // packet, and before the reader can see this host's `Identify`, so its `Ready` is not
+        // lost with the rest.
+        shared.host.borrow_mut().clear();
         shared.dtr.set(true);
         while control.dtr() {
             let n = shared.host.borrow_mut().next_packet(&mut packet);

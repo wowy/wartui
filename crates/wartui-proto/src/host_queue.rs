@@ -16,6 +16,11 @@
 //! follows. The same hold-back that `outbox` documents at 64 bytes happens at 512, so when
 //! a packet fills exactly and nothing follows, the next call returns a lone `0x00`: an
 //! empty frame every receiver already skips.
+//!
+//! # A new host
+//!
+//! The P4 queues nothing while no host holds DTR, and [`HostQueue::clear`] empties both
+//! rings when one raises it, so a host never reads a backlog from before it attached.
 
 use crate::frame_ring::FrameRing;
 use crate::link::{BridgeToHost, QueueId, QueueStat};
@@ -40,6 +45,9 @@ pub struct HostQueue<const P: usize, const B: usize> {
     bulk: FrameRing<B>,
     /// The last packet was full, so a short one must follow.
     owes_terminator: bool,
+    /// [`HostQueue::clear`] cut a frame off part-way out, so the next packet starts with
+    /// a `0x00` that ends the fragment.
+    cut: bool,
 }
 
 impl<const P: usize, const B: usize> Default for HostQueue<P, B> {
@@ -52,7 +60,12 @@ impl<const P: usize, const B: usize> HostQueue<P, B> {
     /// An empty queue.
     #[must_use]
     pub const fn new() -> Self {
-        Self { priority: FrameRing::new(), bulk: FrameRing::new(), owes_terminator: false }
+        Self {
+            priority: FrameRing::new(),
+            bulk: FrameRing::new(),
+            owes_terminator: false,
+            cut: false,
+        }
     }
 
     /// Queue a complete COBS frame, terminator included, as `link::encode_frame` writes it.
@@ -62,11 +75,27 @@ impl<const P: usize, const B: usize> HostQueue<P, B> {
         if priority { self.priority.push(frame) } else { self.bulk.push(frame) }
     }
 
+    /// Discard everything queued, for a host that has just connected.
+    ///
+    /// What is queued was meant for nobody, or for a host that has gone. A frame part-way
+    /// out is cut off by a `0x00` at the head of the next packet, so the new host's decoder
+    /// starts clean. Counts no drop: the drop counts mean congestion while a host reads.
+    pub fn clear(&mut self) {
+        self.cut |= self.priority.mid_frame() || self.bulk.mid_frame();
+        self.priority.clear();
+        self.bulk.clear();
+    }
+
     /// Fill `out` with the next bytes for the host and return how many.
     ///
     /// Returns 0 when nothing is queued and no terminator is owed.
     pub fn next_packet(&mut self, out: &mut [u8; HS_PACKET]) -> usize {
         let mut filled = 0;
+        if self.cut {
+            self.cut = false;
+            out[0] = 0x00;
+            filled = 1;
+        }
         while filled < HS_PACKET {
             // Priority only at a boundary: a frame part-way out is finished first.
             let from_priority = if self.priority.mid_frame() {

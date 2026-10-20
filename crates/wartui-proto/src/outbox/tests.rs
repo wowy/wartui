@@ -618,6 +618,49 @@ fn outbox_reports_in_flight_when_pad_is_owed() {
     assert!(!outbox.in_flight());
 }
 
+#[test]
+fn outbox_writes_nothing_when_cleared_with_frames_queued() {
+    // A host that has just connected gets no backlog from before it.
+    let mut outbox = Outbox::new();
+    for n in 0..BULK_DEPTH as u8 + 1 {
+        outbox.send(&log(n));
+    }
+    outbox.send(&ready());
+    assert_eq!(outbox.dropped(), 1);
+
+    outbox.clear();
+    assert!(outbox.is_empty());
+    assert!(!outbox.in_flight());
+    let mut sink = Fake::open();
+    assert!(!outbox.pump(&mut sink));
+    assert!(sink.out.is_empty());
+    // What `clear` discards is not congestion.
+    assert_eq!(outbox.dropped(), 1);
+}
+
+#[test]
+fn outbox_terminates_abandoned_frame_when_cleared_mid_write() {
+    let mut outbox = Outbox::new();
+    outbox.send(&log(0));
+    outbox.send(&log(1));
+    let mut sink = Fake::new(3);
+    outbox.pump(&mut sink);
+    assert!(outbox.in_flight());
+
+    outbox.clear();
+    outbox.send(&log(2));
+    sink.capacity = usize::MAX;
+    outbox.pump(&mut sink);
+
+    // The fragment is closed off, and only the frame queued after the clear follows.
+    assert_eq!(sink.out[3], 0x00, "the fragment should be terminated");
+    assert_eq!(&sink.out[4..], frame_of(&log(2)));
+    assert_eq!(bodies(&received(&sink.out)), [b'c']);
+    assert_eq!(outbox.dropped(), 0);
+    assert!(outbox.is_empty());
+    assert!(!outbox.in_flight());
+}
+
 /// What [`Ring::push`] stores for `msg`.
 fn body_of(msg: &BridgeToHost) -> Vec<u8> {
     let mut buf = [0; MAX_BODY];

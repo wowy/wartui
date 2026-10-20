@@ -71,3 +71,39 @@ fn host_queue_classifies_message_when_deciding_priority() {
     let err = BridgeToHost::Error { message: Default::default() };
     assert!(is_priority(&err));
 }
+
+#[test]
+fn host_queue_sends_nothing_when_cleared_with_frames_queued() {
+    let mut queue = HostQueue::<1024, 4096>::new();
+    assert!(queue.push(&[1u8; 10], false));
+    assert!(queue.push(&[2u8; 10], true));
+    queue.clear();
+    assert!(packet(&mut queue).is_empty());
+    let [priority, bulk] = queue.stats();
+    assert_eq!((priority.dropped, bulk.dropped), (0, 0));
+}
+
+#[test]
+fn host_queue_starts_next_packet_with_terminator_when_cleared_mid_frame() {
+    let mut queue = HostQueue::<1024, 4096>::new();
+    assert!(queue.push(&[7u8; 600], false));
+    assert_eq!(packet(&mut queue).len(), 512);
+    queue.clear();
+    assert!(queue.push(&[8u8; 10], true));
+    let mut want = vec![0x00];
+    want.extend_from_slice(&[8u8; 10]);
+    assert_eq!(packet(&mut queue), want);
+    assert!(packet(&mut queue).is_empty());
+    let [priority, bulk] = queue.stats();
+    assert_eq!((priority.dropped, bulk.dropped), (0, 0));
+}
+
+#[test]
+fn host_queue_sends_lone_terminator_when_cleared_mid_frame_and_nothing_follows() {
+    let mut queue = HostQueue::<1024, 4096>::new();
+    assert!(queue.push(&[7u8; 600], false));
+    assert_eq!(packet(&mut queue).len(), 512);
+    queue.clear();
+    assert_eq!(packet(&mut queue), [0x00]);
+    assert!(packet(&mut queue).is_empty());
+}

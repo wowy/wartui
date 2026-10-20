@@ -60,6 +60,12 @@ impl<const N: usize> Ring<N> {
         &front.buf[..usize::from(front.len)]
     }
 
+    /// Forget every frame.
+    pub(super) const fn clear(&mut self) {
+        self.head = 0;
+        self.len = 0;
+    }
+
     pub(super) fn pop(&mut self) {
         if self.len > 0 {
             self.head = (self.head + 1) % N;

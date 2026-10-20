@@ -44,9 +44,10 @@ so the cable must leave VBUS unconnected. A WIFI6 can instead be powered from th
 ## GPS
 
 The default build reads a u-blox receiver over I2C and passes its bytes to the host, as the
-T-Dongle-C5 does. Bytes read while no host holds DTR are dropped, so a host that attaches late
-gets live fixes rather than a backlog. So are the lines saying the receiver stopped or came back;
-the announcement carries the current fault instead. Wire it to the P4's header:
+T-Dongle-C5 does. Like every other frame, bytes read while no host holds DTR are dropped (see
+[Queue sizes](#queue-sizes)), so a host that attaches late gets live fixes rather than a backlog.
+So are the lines saying the receiver stopped or came back; the announcement carries the current
+fault instead. Wire it to the P4's header:
 
 | Receiver | P4 |
 | --- | --- |
@@ -65,6 +66,11 @@ without GPS: the bridge reports none and never touches the bus.
 Each is read at build time from an environment variable, so a bench run resizes one with a
 rebuild, for example `WARTUI_P4_HOST_BULK_BYTES=131072 cargo build --release`. `wartui status`
 reports each queue's high-water mark.
+
+The host queues fill only while a host holds DTR. Frames produced without one are dropped, and
+DTR rising clears both host queues before the new host reads anything, so the bulk ring absorbs
+congestion while a host reads and never holds a backlog for an absent one. Neither discard counts
+as a drop in `Status`.
 
 | Variable | Default | Holds |
 | --- | --- | --- |

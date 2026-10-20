@@ -109,3 +109,32 @@ fn frame_ring_slides_wrapped_frame_when_evicting_a_shorter_one_behind_it() {
     assert_eq!(read_all(&mut ring), b"yy");
     assert!(ring.is_empty());
 }
+
+#[test]
+fn frame_ring_reads_only_later_frames_when_cleared() {
+    let mut ring = FrameRing::<16>::new();
+    assert!(ring.push(b"11111"));
+    assert!(ring.push(b"22222"));
+    assert!(ring.push(b"33333"));
+    assert_eq!(ring.dropped(), 1);
+    ring.clear();
+    assert!(ring.is_empty());
+    assert_eq!(ring.len_bytes(), 0);
+    assert_eq!(ring.dropped(), 1);
+    assert!(read_all(&mut ring).is_empty());
+    assert!(ring.push(b"44"));
+    assert_eq!(read_all(&mut ring), b"44");
+}
+
+#[test]
+fn frame_ring_starts_next_frame_from_its_head_when_cleared_mid_frame() {
+    let mut ring = FrameRing::<16>::new();
+    assert!(ring.push(b"11111"));
+    let mut one = [0u8; 1];
+    assert_eq!(ring.read(&mut one), (1, false));
+    ring.clear();
+    assert!(!ring.mid_frame());
+    assert!(ring.push(b"222"));
+    assert_eq!(ring.read(&mut [0u8; 64][..]), (3, true));
+    assert_eq!(ring.dropped(), 0);
+}
