@@ -1975,7 +1975,6 @@ dependencies = [
  "esp-rtos",
  "mipidsi",
  "nb 1.1.0",
- "portable-atomic",
  "static_cell",
  "wartui-firmware",
  "wartui-proto",
