@@ -20,6 +20,10 @@
 //! queue holds minutes of them, so a backlog would land as minutes-old positions marked
 //! current. The reader keeps draining the receiver either way. Other frames still queue
 //! before a host attaches (#218).
+//!
+//! **GPS `Error` and `Log` lines follow the same rule.** The fault is tracked on every
+//! change, and `announce` repeats it on a host's `Identify`, so that host learns the current
+//! state once rather than a replay of stale changes followed by a duplicate.
 
 use core::future::pending;
 
@@ -96,8 +100,9 @@ fn start(pins: Pins, shared: &Shared) -> Option<Started> {
 /// changed about the receiver.
 ///
 /// Wakes on a batch or every [`ABSENT_PROBE_MS`], so a receiver that stops answering is
-/// reported within about a second even with no batch flowing. A change is said once: an
-/// `Error` when it stops, which `announce` then repeats, and a `Log` when it comes back.
+/// reported within about a second even with no batch flowing. A change is said once, and
+/// only to a host holding DTR: an `Error` when it stops, which `announce` then repeats, and
+/// a `Log` when it comes back.
 async fn forward(shared: &Shared, mut batches: Receiver<'static, NoopRawMutex, GpsBytes>) -> ! {
     let mut watch = Watch::new();
     loop {
@@ -109,21 +114,26 @@ async fn forward(shared: &Shared, mut batches: Receiver<'static, NoopRawMutex, G
             batches.receive_done();
         }
         let changes = watch.changes();
+        let attached = shared.dtr.get();
         match changes.answered {
             Some(true) => {
                 shared.gps_fault.set(None);
-                shared.push_log(
-                    LogLevel::Info,
-                    "the GPS receiver answered on the I2C bus (GPIO7/GPIO8)",
-                );
+                if attached {
+                    shared.push_log(
+                        LogLevel::Info,
+                        "the GPS receiver answered on the I2C bus (GPIO7/GPIO8)",
+                    );
+                }
             }
             Some(false) => {
                 shared.gps_fault.set(Some(NO_GPS_RECEIVER));
-                shared.push_error(NO_GPS_RECEIVER);
+                if attached {
+                    shared.push_error(NO_GPS_RECEIVER);
+                }
             }
             None => {}
         }
-        if changes.write_refused {
+        if changes.write_refused && attached {
             shared.push_error("the GPS receiver refused a write");
         }
     }

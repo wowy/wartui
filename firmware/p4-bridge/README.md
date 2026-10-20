@@ -45,7 +45,8 @@ so the cable must leave VBUS unconnected. A WIFI6 can instead be powered from th
 
 The default build reads a u-blox receiver over I2C and passes its bytes to the host, as the
 T-Dongle-C5 does. Bytes read while no host holds DTR are dropped, so a host that attaches late
-gets live fixes rather than a backlog. Wire it to the P4's header:
+gets live fixes rather than a backlog. So are the lines saying the receiver stopped or came back;
+the announcement carries the current fault instead. Wire it to the P4's header:
 
 | Receiver | P4 |
 | --- | --- |
