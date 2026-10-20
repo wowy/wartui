@@ -30,7 +30,7 @@ use embassy_sync::zerocopy_channel::{Channel, Receiver, Sender};
 use embassy_time::{Duration, Timer};
 use esp_hal::peripherals::{GPIO7, GPIO8, I2C0};
 use static_cell::{ConstStaticCell, StaticCell};
-use wartui_firmware::gps::{self, ABSENT_PROBE_MS, BATCH_SLOTS, Bus};
+use wartui_firmware::gps::{self, ABSENT_PROBE_MS, BATCH_SLOTS, Bus, Watch};
 use wartui_proto::link::{GpsBytes, GpsWriteBytes, LogLevel};
 
 use crate::Shared;
@@ -99,8 +99,7 @@ fn start(pins: Pins, shared: &Shared) -> Option<Started> {
 /// reported within about a second even with no batch flowing. A change is said once: an
 /// `Error` when it stops, which `announce` then repeats, and a `Log` when it comes back.
 async fn forward(shared: &Shared, mut batches: Receiver<'static, NoopRawMutex, GpsBytes>) -> ! {
-    // `gps::present` starts true, so the first failed probe is a change like any later one.
-    let mut answered = true;
+    let mut watch = Watch::new();
     loop {
         let probe = Timer::after(Duration::from_millis(ABSENT_PROBE_MS));
         if let Either::First(bytes) = select(batches.receive(), probe).await {
@@ -109,21 +108,22 @@ async fn forward(shared: &Shared, mut batches: Receiver<'static, NoopRawMutex, G
             }
             batches.receive_done();
         }
-        let present = gps::present();
-        if present != answered {
-            answered = present;
-            if present {
+        let changes = watch.changes();
+        match changes.answered {
+            Some(true) => {
                 shared.gps_fault.set(None);
                 shared.push_log(
                     LogLevel::Info,
                     "the GPS receiver answered on the I2C bus (GPIO7/GPIO8)",
                 );
-            } else {
+            }
+            Some(false) => {
                 shared.gps_fault.set(Some(NO_GPS_RECEIVER));
                 shared.push_error(NO_GPS_RECEIVER);
             }
+            None => {}
         }
-        if gps::take_write_refused() {
+        if changes.write_refused {
             shared.push_error("the GPS receiver refused a write");
         }
     }

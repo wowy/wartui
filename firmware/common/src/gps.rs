@@ -22,9 +22,9 @@
 //! - finished batches go up, [`BATCH_SLOTS`] deep;
 //! - a host write comes down one slot deep, and a write that finds it full is dropped,
 //!   since the host repeats its configuration ([`write`]);
-//! - whether the receiver answered, and whether a write was refused, are atomics the
-//!   firmware reads ([`present`], [`take_write_refused`]), so its `Error` and `Log` lines
-//!   stay its own.
+//! - whether the receiver answered, and whether a write was refused, are atomics a
+//!   [`Watch`] reads, and it hands the firmware only what changed, so the firmware's
+//!   `Error` and `Log` lines stay its own.
 //!
 //! [`run`] fills a slot in place and the firmware copies out of it, so no 512-byte batch
 //! is ever moved on a stack. The channels are generic over their lock, so a firmware that
@@ -92,14 +92,45 @@ static PRESENT: AtomicBool = AtomicBool::new(true);
 /// Set when the receiver refused a host write, and cleared by the read that reports it.
 static WRITE_REFUSED: AtomicBool = AtomicBool::new(false);
 
-/// Whether the receiver answered its last poll.
-pub fn present() -> bool {
-    PRESENT.load(Ordering::Relaxed)
+/// What changed about the receiver since a [`Watch`] last looked.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Changes {
+    /// `Some(false)` when the receiver stopped answering, `Some(true)` when it answered
+    /// again, and `None` when neither.
+    pub answered: Option<bool>,
+    /// Whether the receiver refused a host write. Independent of `answered`: one look can
+    /// see both.
+    pub write_refused: bool,
 }
 
-/// Whether the receiver refused a write since the last call.
-pub fn take_write_refused() -> bool {
-    WRITE_REFUSED.swap(false, Ordering::Relaxed)
+/// The firmware's view of what [`run`] learned about the receiver, so a change is said
+/// once rather than at every probe.
+pub struct Watch {
+    /// Whether the receiver answered when [`Watch::changes`] last looked.
+    answered: bool,
+}
+
+impl Watch {
+    /// Starts believing the receiver answers, as [`run`] does, so the first failed probe
+    /// is a change like any later one.
+    pub const fn new() -> Self {
+        Self { answered: true }
+    }
+
+    /// What changed since the last call.
+    pub fn changes(&mut self) -> Changes {
+        let present = PRESENT.load(Ordering::Relaxed);
+        let write_refused = WRITE_REFUSED.swap(false, Ordering::Relaxed);
+        let answered = (present != self.answered).then_some(present);
+        self.answered = present;
+        Changes { answered, write_refused }
+    }
+}
+
+impl Default for Watch {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Hand [`run`] the host's bytes through `writes`, the write channel's sending end.
@@ -142,16 +173,6 @@ impl<'a, M: RawMutex> Link<'a, M> {
         writes: Sender<'a, M, GpsWriteBytes>,
     ) -> Self {
         Self { batches, writes }
-    }
-
-    /// Whether the receiver answered its last poll.
-    pub fn present(&self) -> bool {
-        present()
-    }
-
-    /// Whether the receiver refused a write since the last call.
-    pub fn take_write_refused(&self) -> bool {
-        take_write_refused()
     }
 
     /// Hand [`run`] the host's bytes. Dropped when a write is already pending.

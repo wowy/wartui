@@ -50,6 +50,8 @@ type Lock = CriticalSectionRawMutex;
 /// `main`'s end of the task.
 pub type Link = gps::Link<'static, Lock>;
 
+pub use gps::Watch;
+
 static EXECUTOR: StaticCell<InterruptExecutor<1>> = StaticCell::new();
 static BATCH_BUF: StaticCell<[GpsBytes; BATCH_SLOTS]> = StaticCell::new();
 static BATCHES: StaticCell<Channel<'static, Lock, GpsBytes>> = StaticCell::new();
