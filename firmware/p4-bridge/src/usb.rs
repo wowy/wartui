@@ -9,6 +9,9 @@
 //! host opens the port wedges the endpoint. CDC-ACM over the OTG controller does not
 //! wedge, and the kernel raises DTR when a host opens the port, so DTR is the signal that
 //! someone is reading. The writer waits on the CDC class's control-change signal for it.
+//! A freshly enumerated tty raises DTR before the host sets raw mode, so it echoes what the
+//! P4 sends in that window back to it. The host leads each connection with a lone `0x00`,
+//! which ends that echo before its first frame.
 //!
 //! **Nothing queues without DTR, and a rising edge empties the queue.** A host never reads
 //! a backlog from before it attached; `Shared::push_host` has why.

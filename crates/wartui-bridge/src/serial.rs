@@ -689,6 +689,8 @@ async fn connect(
     // there, `wartui status` pointed at a node hung for half a minute after
     // printing its answer. One frame never reaches that.
     //
+    // The one packet is the `Identify` behind a lone `0x00` (`encode_for_wire`).
+    //
     // Once is also enough. A frame written to an enumerated board is delivered:
     // if its main loop has not started draining the link yet, our `Identify` waits
     // in that same FIFO and is read when it does. The patience below is for the
@@ -990,17 +992,19 @@ fn write_loop(
     commands: &std::sync::mpsc::Receiver<HostToBridge>,
     stop: &AtomicBool,
 ) {
-    let mut buf = [0u8; MAX_HOST_FRAME];
+    let mut buf = [0u8; MAX_HOST_FRAME + 1];
+    let mut first = true;
     while let Ok(cmd) = commands.recv() {
         if stop.load(Ordering::Relaxed) {
             return;
         }
-        let Ok(n) = encode_host_frame(&cmd, &mut buf) else {
+        let Ok(n) = encode_for_wire(&cmd, first, &mut buf) else {
             // Only reachable if a command outgrew MAX_HOST_FRAME, which the
             // const assertion in wartui-proto is there to prevent.
             tracing::error!("command did not fit in a frame; dropping it");
             continue;
         };
+        first = false;
         // Not `write_all`, which cannot be told to stop. Emptying the output queue
         // is what releases a write blocked against a device that is not reading,
         // and `write_all` would answer by writing the rest of the frame straight
@@ -1025,6 +1029,20 @@ fn write_loop(
             }
         }
     }
+}
+
+/// Encode `cmd` into `buf`, behind one `0x00` when `lead` is set, and return the length.
+///
+/// The writer leads a connection's first frame with that byte. Whatever reached the
+/// board before this connection ends there, so the first frame decodes: a fresh tty
+/// echoes what the bridge sent before raw mode was set, with no terminator in the echo,
+/// and another program may have left bytes of its own. The byte shares the frame's
+/// buffer, so the two stay one write and one packet (`connect`).
+fn encode_for_wire(cmd: &HostToBridge, lead: bool, buf: &mut [u8]) -> Result<usize, LinkError> {
+    let start = usize::from(lead);
+    let (head, rest) = buf.split_at_mut_checked(start).ok_or(LinkError::BufferTooSmall)?;
+    head.fill(0x00);
+    Ok(start + encode_host_frame(cmd, rest)?)
 }
 
 /// Whether this board's silence says it has stopped being the bridge.
@@ -1092,15 +1110,15 @@ mod tests {
 
     use tokio::sync::mpsc;
     use wartui_proto::link::{
-        BridgeToHost, Chip, EspNowPayload, LINK_PROTO_VERSION, LoopPhase, MAX_FRAME, ShortStr,
-        encode_frame,
+        BridgeToHost, Chip, EspNowPayload, HostToBridge, LINK_PROTO_VERSION, LoopPhase, MAX_FRAME,
+        MAX_HOST_FRAME, ShortStr, encode_frame, encode_host_frame,
     };
     use wartui_proto::mac;
     use wartui_proto::reset::ResetCause;
 
     use super::{
-        Attempt, PROBE_TICKS, REMEMBERED_TICKS, SETTLE_TICKS, is_a_new_life, patience, read_loop,
-        silence_disowns_it,
+        Attempt, PROBE_TICKS, REMEMBERED_TICKS, SETTLE_TICKS, encode_for_wire, is_a_new_life,
+        patience, read_loop, silence_disowns_it,
     };
     use crate::LinkEvent;
     use crate::remember::BridgeMemory;
@@ -1112,6 +1130,25 @@ mod tests {
 
     fn board(mac: &str) -> PortCandidate {
         candidate("/dev/ttyACM0", Some(ESPRESSIF_VID), Some(BRIDGE_PID), Some(mac))
+    }
+
+    #[test]
+    fn serial_link_leads_with_terminator_when_frame_is_first_on_connection() {
+        let mut expected = [0u8; MAX_HOST_FRAME];
+        let len = encode_host_frame(&HostToBridge::Identify, &mut expected).unwrap();
+        let mut buf = [0u8; MAX_HOST_FRAME + 1];
+        let n = encode_for_wire(&HostToBridge::Identify, true, &mut buf).unwrap();
+        assert_eq!(buf[0], 0x00);
+        assert_eq!(&buf[1..n], &expected[..len]);
+    }
+
+    #[test]
+    fn serial_link_writes_frame_alone_when_frame_is_not_first() {
+        let mut expected = [0u8; MAX_HOST_FRAME];
+        let len = encode_host_frame(&HostToBridge::Identify, &mut expected).unwrap();
+        let mut buf = [0u8; MAX_HOST_FRAME + 1];
+        let n = encode_for_wire(&HostToBridge::Identify, false, &mut buf).unwrap();
+        assert_eq!(&buf[..n], &expected[..len]);
     }
 
     #[test]
