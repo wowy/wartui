@@ -44,6 +44,12 @@
 //! off by up to the ring's 24 frames at each end, and saturates at 0 when a baseline taken
 //! mid-backlog shows the host reading more than the bridge passed on.
 //!
+//! Each status reply also carries the bridge's queues, one `bridge_queue` row each, and on the P4
+//! split bridge its SPI link's counters. A queue's `peak` is the largest `high_water` any row
+//! carried. That figure is since the bridge booted, so the peak can predate the capture. Its drops
+//! and the SPI counters are since-boot counts, rebased like the bridge's own: a restart between two
+//! rows is the reply's uptime falling at any row between them.
+//!
 //! On the host side, [`HostLoss`] breaks down what the host read and did not store, from the
 //! `host_status` rows. Their counts run from the engine's start and are read as the last row less
 //! the first, which is written as the capture starts. Peaks are per row, so it takes the largest,
@@ -56,9 +62,10 @@
 //! epoch check stands in for `beat`, so the two can disagree after a restart the epoch check
 //! misses.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use rusqlite::{Connection, Row};
+use wartui_proto::link::QueueId;
 use wartui_proto::mac::Mac;
 
 use crate::engine::{BEHIND_THE_AIR_US, advance_since_boot};
@@ -75,7 +82,7 @@ pub struct LossSummary {
 }
 
 /// What the bridge received and dropped during the capture. Exact but for `usb_lost`.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BridgeLoss {
     /// Frames the bridge received over the air.
     pub received: u64,
@@ -92,6 +99,62 @@ pub struct BridgeLoss {
     /// Frames the bridge dropped for being longer than any node sends: somebody else's
     /// traffic, and not in `received`.
     pub oversize: u64,
+    /// The bridge's queues, in the order it first reported them; empty when it reports none.
+    pub queues: Vec<QueueLoss>,
+    /// The SPI link's errors, or `None` when no reply carried them, as off the P4 split bridge.
+    pub spi: Option<SpiLoss>,
+}
+
+/// How full one of the bridge's queues got, and what it dropped during the capture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QueueLoss {
+    /// Which queue; [`QueueId::unit`] says whether the figures are bytes or entries.
+    pub queue: QueueId,
+    /// Its size, as the last reply gave it.
+    pub capacity: u64,
+    /// The most it held at once since the bridge booted, which can predate the capture.
+    pub peak: u64,
+    /// What it evicted or refused during the capture.
+    pub dropped: u64,
+}
+
+/// The P4–C6 SPI link's counters over the capture. Named as [`SpiStats`](wartui_proto::link::SpiStats) names them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SpiLoss {
+    /// Transfers completed.
+    pub transfers: u64,
+    /// C6→P4 transfers whose CRC failed.
+    pub crc_fail: u64,
+    /// C6→P4 transfers with the wrong magic.
+    pub bad_magic: u64,
+    /// C6→P4 transfers whose sequence number skipped.
+    pub seq_gap: u64,
+    /// Waits for the C6's READY line that timed out.
+    pub ready_timeouts: u64,
+    /// Timeouts after which the link recovered.
+    pub ready_recovered: u64,
+    /// P4→C6 transfers the C6 saw fail their CRC.
+    pub radio_crc_fail: u64,
+    /// P4→C6 transfers the C6 saw with the wrong magic.
+    pub radio_bad_magic: u64,
+    /// P4→C6 transfers the C6 saw skip a sequence number.
+    pub radio_seq_gap: u64,
+}
+
+impl SpiLoss {
+    fn from_counts(c: [u64; 9]) -> Self {
+        Self {
+            transfers: c[0],
+            crc_fail: c[1],
+            bad_magic: c[2],
+            seq_gap: c[3],
+            ready_timeouts: c[4],
+            ready_recovered: c[5],
+            radio_crc_fail: c[6],
+            radio_bad_magic: c[7],
+            radio_seq_gap: c[8],
+        }
+    }
 }
 
 /// What the host did with the frames it read, and how it held up, first `host_status` row to last.
@@ -190,20 +253,27 @@ fn count(value: i64) -> u64 {
 
 fn bridge(conn: &Connection) -> rusqlite::Result<Option<BridgeLoss>> {
     let mut stmt = conn.prepare(
-        "SELECT rx_count, dropped_tx, uptime_ms, host_frames, rx_oversize
+        "SELECT id, rx_count, dropped_tx, uptime_ms, host_frames, rx_oversize,
+                spi_transfers, spi_crc_fail, spi_bad_magic, spi_seq_gap, spi_ready_timeouts,
+                spi_ready_recovered, spi_radio_crc_fail, spi_radio_bad_magic, spi_radio_seq_gap
          FROM bridge_status ORDER BY id",
     )?;
     let mut rows = stmt.query([])?;
     let mut loss: Option<BridgeLoss> = None;
     // The previous row's figures. The first row is only a baseline.
     let mut prev: Option<(u64, u64, u64, u64, u64)> = None;
+    // Each row's count of restarts seen so far: two rows a restart apart differ.
+    let mut lives: HashMap<i64, u64> = HashMap::new();
+    // The SPI counters and life of the last row that carried them, and their sums since.
+    let mut prev_spi: Option<([u64; 9], u64)> = None;
+    let mut spi: Option<[u64; 9]> = None;
     while let Some(row) = rows.next()? {
         let (received, dropped, uptime, host_frames, oversize) = (
-            count(row.get(0)?),
             count(row.get(1)?),
             count(row.get(2)?),
             count(row.get(3)?),
             count(row.get(4)?),
+            count(row.get(5)?),
         );
         let loss = loss.get_or_insert_default();
         if let Some((prev_received, prev_dropped, prev_uptime, prev_host, prev_oversize)) = prev {
@@ -216,11 +286,65 @@ fn bridge(conn: &Connection) -> rusqlite::Result<Option<BridgeLoss>> {
             loss.host_read += host_frames.saturating_sub(prev_host);
         }
         prev = Some((received, dropped, uptime, host_frames, oversize));
+        lives.insert(row.get(0)?, loss.reboots);
+
+        let counts: Option<Vec<i64>> =
+            (6..15).map(|i| row.get::<_, Option<i64>>(i)).collect::<rusqlite::Result<_>>()?;
+        if let Some(counts) = counts {
+            let counts: [u64; 9] = std::array::from_fn(|i| count(counts[i]));
+            let sums = spi.get_or_insert_default();
+            if let Some((before, life)) = prev_spi {
+                let restarted = life != loss.reboots;
+                for ((sum, now), before) in sums.iter_mut().zip(counts).zip(before) {
+                    *sum += advance_since_boot(now, Some(before), restarted);
+                }
+            }
+            prev_spi = Some((counts, loss.reboots));
+        }
     }
-    if let Some(loss) = &mut loss {
-        loss.usb_lost = loss.received.saturating_sub(loss.dropped).saturating_sub(loss.host_read);
+    let Some(mut loss) = loss else { return Ok(None) };
+    loss.usb_lost = loss.received.saturating_sub(loss.dropped).saturating_sub(loss.host_read);
+    loss.spi = spi.map(SpiLoss::from_counts);
+    loss.queues = queues(conn, &lives)?;
+    Ok(Some(loss))
+}
+
+/// The bridge's queues from the `bridge_queue` rows, given each status row's count of restarts.
+fn queues(conn: &Connection, lives: &HashMap<i64, u64>) -> rusqlite::Result<Vec<QueueLoss>> {
+    let mut stmt = conn.prepare(
+        "SELECT status_id, queue, capacity, high_water, dropped
+         FROM bridge_queue ORDER BY status_id, rowid",
+    )?;
+    let mut rows = stmt.query([])?;
+    let mut queues: Vec<QueueLoss> = Vec::new();
+    // Beside each queue, its previous row's drops and the life they were counted in.
+    let mut prev: Vec<(u64, u64)> = Vec::new();
+    while let Some(row) = rows.next()? {
+        let status_id: i64 = row.get(0)?;
+        let name: String = row.get(1)?;
+        let queue = QueueId::from_name(&name).ok_or_else(|| {
+            rusqlite::Error::FromSqlConversionFailure(
+                1,
+                rusqlite::types::Type::Text,
+                format!("no queue is named {name:?}").into(),
+            )
+        })?;
+        let (capacity, high_water, dropped) =
+            (count(row.get(2)?), count(row.get(3)?), count(row.get(4)?));
+        let life = lives.get(&status_id).copied().unwrap_or_default();
+        let Some(index) = queues.iter().position(|q| q.queue == queue) else {
+            // The first row is only a baseline.
+            queues.push(QueueLoss { queue, capacity, peak: high_water, dropped: 0 });
+            prev.push((dropped, life));
+            continue;
+        };
+        let (q, (before, before_life)) = (&mut queues[index], &mut prev[index]);
+        q.capacity = capacity;
+        q.peak = q.peak.max(high_water);
+        q.dropped += advance_since_boot(dropped, Some(*before), life != *before_life);
+        (*before, *before_life) = (dropped, life);
     }
-    Ok(loss)
+    Ok(queues)
 }
 
 /// One `host_status` row, as [`host`] reads it.

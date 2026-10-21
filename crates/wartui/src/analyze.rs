@@ -8,7 +8,7 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, SecondsFormat, Utc};
 use clap::Args as ClapArgs;
-use wartui_core::analyze::{HostLoss, LossSummary, NodeLoss, losses};
+use wartui_core::analyze::{HostLoss, LossSummary, NodeLoss, SpiLoss, losses};
 use wartui_core::export::wigle_csv;
 use wartui_core::store::open_readonly;
 use wartui_proto::mac;
@@ -80,6 +80,21 @@ fn losses_text(loss: &LossSummary) -> String {
             let _ = write!(line, "  {} oversize (not a node's)", thousands(bridge.oversize));
         }
         let _ = writeln!(text, "{line}");
+        for queue in &bridge.queues {
+            let _ = writeln!(
+                text,
+                "  {:<11}{}  peak {}/{} {}  {} dropped",
+                "queue",
+                queue.queue.name(),
+                thousands(queue.peak),
+                thousands(queue.capacity),
+                queue.queue.unit(),
+                thousands(queue.dropped)
+            );
+        }
+        if let Some(spi) = &bridge.spi {
+            let _ = writeln!(text, "  {:<11}{}", "spi", spi_line(spi));
+        }
     }
     if let Some(host) = &loss.host {
         let _ = writeln!(text, "  {:<11}{}", "host", host_line(host));
@@ -189,6 +204,38 @@ fn utc_arrival(ms: i64) -> String {
     )
 }
 
+/// The SPI link's transfers, then only the error counters that moved.
+fn spi_line(spi: &SpiLoss) -> String {
+    use std::fmt::Write as _;
+
+    let mut line = format!("{} transfers", thousands(spi.transfers));
+    for (count, name) in
+        [(spi.crc_fail, "crc_fail"), (spi.bad_magic, "bad_magic"), (spi.seq_gap, "seq_gap")]
+    {
+        if count > 0 {
+            let _ = write!(line, "  {} {name}", thousands(count));
+        }
+    }
+    if spi.ready_timeouts > 0 {
+        let _ = write!(
+            line,
+            "  {} ready_timeouts ({} recovered)",
+            thousands(spi.ready_timeouts),
+            thousands(spi.ready_recovered)
+        );
+    }
+    for (count, name) in [
+        (spi.radio_crc_fail, "radio_crc_fail"),
+        (spi.radio_bad_magic, "radio_bad_magic"),
+        (spi.radio_seq_gap, "radio_seq_gap"),
+    ] {
+        if count > 0 {
+            let _ = write!(line, "  {} {name}", thousands(count));
+        }
+    }
+    line
+}
+
 /// The host's figures, each clause only when non-zero but `store dropped`, which is the
 /// answer even at 0.
 fn host_line(host: &HostLoss) -> String {
@@ -273,7 +320,10 @@ fn percent(part: u64, whole: u64) -> String {
 #[cfg(test)]
 mod tests {
     use clap::Parser;
-    use wartui_core::analyze::{BridgeLoss, HeartbeatWindow, HostLoss, LossSummary, NodeLoss};
+    use wartui_core::analyze::{
+        BridgeLoss, HeartbeatWindow, HostLoss, LossSummary, NodeLoss, QueueLoss, SpiLoss,
+    };
+    use wartui_proto::link::QueueId;
 
     use super::{heartbeat_windows_text, losses_text, utc_arrival};
 
@@ -287,6 +337,8 @@ mod tests {
                 host_read: 0,
                 usb_lost: 0,
                 oversize: 0,
+                queues: vec![],
+                spi: None,
             }),
             nodes: vec![
                 NodeLoss {
@@ -324,6 +376,8 @@ mod tests {
                 host_read: 31_821,
                 usb_lost: 0,
                 oversize: 0,
+                queues: vec![],
+                spi: None,
             }),
             nodes: Vec::new(),
             host: Some(HostLoss {
@@ -496,6 +550,8 @@ mod tests {
             host_read: 0,
             usb_lost: 0,
             oversize: 0,
+            queues: vec![],
+            spi: None,
         });
         let text = losses_text(&loss);
         assert!(text.starts_with("  bridge     10 frames received  0 dropped (0.0%)\n"), "{text}");
@@ -513,6 +569,8 @@ mod tests {
                 host_read,
                 usb_lost,
                 oversize: 0,
+                queues: vec![],
+                spi: None,
             }),
             ..Default::default()
         };
@@ -529,6 +587,8 @@ mod tests {
                 host_read: 990,
                 usb_lost: 0,
                 oversize: 42,
+                queues: vec![],
+                spi: None,
             }),
             ..Default::default()
         };
@@ -569,6 +629,73 @@ mod tests {
             text,
             "  bridge     1,000 frames received  10 dropped (1.0%)  host read 1,004\n"
         );
+    }
+
+    /// A P4 split bridge's line, two of its queues and its SPI link.
+    fn split_bridge(spi: Option<SpiLoss>) -> LossSummary {
+        LossSummary {
+            bridge: Some(BridgeLoss {
+                received: 1_000,
+                dropped: 0,
+                reboots: 0,
+                host_read: 1_000,
+                usb_lost: 0,
+                oversize: 0,
+                queues: vec![
+                    QueueLoss {
+                        queue: QueueId::HostBulk,
+                        capacity: 262_144,
+                        peak: 1_024,
+                        dropped: 0,
+                    },
+                    QueueLoss { queue: QueueId::RadioJobs, capacity: 32, peak: 20, dropped: 3 },
+                ],
+                spi,
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn analyze_report_prints_queue_lines_when_bridge_reports_queues() {
+        assert_eq!(
+            losses_text(&split_bridge(None)),
+            "  bridge     1,000 frames received  0 dropped (0.0%)  host read 1,000\n\
+             \x20 queue      host-bulk  peak 1,024/262,144 bytes  0 dropped\n\
+             \x20 queue      radio-jobs  peak 20/32 entries  3 dropped\n"
+        );
+    }
+
+    #[test]
+    fn analyze_report_prints_spi_errors_only_when_nonzero() {
+        let spi = SpiLoss {
+            transfers: 48_210,
+            crc_fail: 2,
+            ready_timeouts: 1,
+            ready_recovered: 1,
+            radio_seq_gap: 4,
+            ..Default::default()
+        };
+        let text = losses_text(&split_bridge(Some(spi)));
+        assert!(
+            text.ends_with(
+                "  spi        48,210 transfers  2 crc_fail  1 ready_timeouts (1 recovered)  \
+                 4 radio_seq_gap\n"
+            ),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn analyze_report_prints_spi_transfers_alone_when_link_is_clean() {
+        let text = losses_text(&split_bridge(Some(SpiLoss { transfers: 9, ..Default::default() })));
+        assert!(text.ends_with("  spi        9 transfers\n"), "{text}");
+    }
+
+    #[test]
+    fn analyze_report_omits_spi_line_when_bridge_has_no_spi_link() {
+        let text = losses_text(&split_bridge(None));
+        assert!(!text.contains("spi"), "{text}");
     }
 
     #[test]

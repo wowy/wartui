@@ -783,6 +783,91 @@ def bridge(db, ctx):
     if longest_flat[0] > 30_000:
         print(f"  bridge heard nothing over the air for {dur(longest_flat[0])} from "
               f"{rel(longest_flat[1])} (rx_count flat, bridge up)")
+    # Each status row's count of restarts so far: two rows a restart apart differ.
+    lives = {rows[0][0]: 0}
+    for prev, cur in zip(rows, rows[1:]):
+        lives[cur[0]] = lives[prev[0]] + (cur[5] < prev[5])
+    bridge_queues(db, lives)
+    bridge_spi(db, lives)
+
+
+# Mirrors QueueId::unit in crates/wartui-proto/src/link/mod.rs.
+QUEUE_UNITS = {
+    "radio-up": "bytes", "radio-send-jobs": "entries", "radio-down": "bytes",
+    "host-priority": "bytes", "host-bulk": "bytes", "radio-up-priority": "bytes",
+    "radio-jobs": "entries",
+}
+
+
+def bridge_queues(db, lives):
+    """Each queue's since-boot peak against its size, and what it dropped during the capture."""
+    rows = db.q("SELECT q.status_id, q.queue, q.capacity, q.high_water, q.dropped "
+                "FROM bridge_queue q JOIN bridge_status s ON s.id = q.status_id "
+                "ORDER BY s.id, q.rowid")
+    if not rows:
+        print("  no queues reported")
+        return
+    queues = {}  # name -> [capacity, peak, dropped, prev dropped, prev life]
+    for status_id, name, capacity, high_water, dropped in rows:
+        life = lives.get(status_id, 0)
+        q = queues.get(name)
+        if q is None:
+            queues[name] = [capacity, high_water, 0, dropped, life]
+            continue
+        q[0] = capacity
+        q[1] = max(q[1], high_water)
+        q[2] += since_boot_delta(dropped, q[3], life != q[4])
+        q[3], q[4] = dropped, life
+    for name, (capacity, peak, dropped, _, _) in queues.items():
+        unit = QUEUE_UNITS.get(name, "?")
+        print(f"  queue {name}  peak {peak}/{capacity} {unit} ({pct(peak, capacity)})  "
+              f"dropped {dropped}")
+        sql = ("SELECT s.id, s.rx_at, s.uptime_ms, q.capacity, q.high_water, q.dropped "
+               "FROM bridge_queue q JOIN bridge_status s ON s.id = q.status_id "
+               f"WHERE q.queue = '{name}' ORDER BY s.id")
+        if dropped:
+            flag("WARN", "bridge", f"bridge queue {name} dropped {dropped} during the capture", sql)
+        if capacity and peak >= 0.9 * capacity:
+            flag("WARN", "bridge",
+                 f"bridge queue {name} peaked at {pct(peak, capacity)} of its {capacity} {unit} "
+                 "since the bridge booted: near full, so its WARTUI_* size is the lever", sql)
+        elif unit == "bytes" and capacity and peak < 0.1 * capacity:
+            flag("INFO", "bridge",
+                 f"bridge queue {name} peaked at {pct(peak, capacity)} of its {capacity} bytes "
+                 "since the bridge booted: oversized for this run", sql)
+
+
+SPI_COUNTERS = ("transfers", "crc_fail", "bad_magic", "seq_gap", "ready_timeouts",
+                "ready_recovered", "radio_crc_fail", "radio_bad_magic", "radio_seq_gap")
+
+
+def bridge_spi(db, lives):
+    """The P4 split bridge's SPI link counters over the capture, rebased across restarts."""
+    cols = ", ".join(f"spi_{c}" for c in SPI_COUNTERS)
+    rows = db.q(f"SELECT id, {cols} FROM bridge_status WHERE spi_transfers IS NOT NULL "
+                "ORDER BY id")
+    if not rows:
+        return
+    sums = dict.fromkeys(SPI_COUNTERS, 0)
+    for prev, cur in zip(rows, rows[1:]):
+        restarted = lives.get(cur[0], 0) != lives.get(prev[0], 0)
+        for i, c in enumerate(SPI_COUNTERS, start=1):
+            sums[c] += since_boot_delta(cur[i], prev[i], restarted)
+    print("  spi " + "  ".join(f"{c} {sums[c]}" for c in SPI_COUNTERS))
+    sql = f"SELECT id, rx_at, uptime_ms, {cols} FROM bridge_status ORDER BY id"
+    errors = {c: sums[c] for c in SPI_COUNTERS
+              if c.endswith(("crc_fail", "bad_magic", "seq_gap")) and sums[c]}
+    if errors:
+        flag("WARN", "bridge",
+             "SPI link errors between P4 and C6: "
+             + ", ".join(f"{c} {n}" for c, n in errors.items()), sql)
+    unrecovered = sums["ready_timeouts"] - sums["ready_recovered"]
+    if unrecovered > 0:
+        flag("WARN", "bridge",
+             f"{unrecovered} SPI READY timeout(s) the link did not recover from", sql)
+    if sums["ready_recovered"]:
+        flag("INFO", "bridge",
+             f"{sums['ready_recovered']} SPI READY timeout(s) the link recovered from", sql)
 
 
 def host(db, ctx):

@@ -3,9 +3,10 @@
 use std::time::Duration;
 
 use rusqlite::Connection;
-use wartui_core::analyze::{BridgeLoss, HeartbeatWindow, HostLoss, losses};
+use wartui_core::analyze::{BridgeLoss, HeartbeatWindow, HostLoss, QueueLoss, SpiLoss, losses};
 use wartui_core::record::{BatchGap, BridgeStatusSeen, Heartbeat, HostStatus, Record};
 use wartui_core::store::{CaptureInfo, Store, StoreConfig, open_readonly};
+use wartui_proto::link::{QueueId, QueueStat, QueueStats, SpiStats};
 use wartui_proto::mac::Mac;
 use wartui_proto::plan::ChannelPool;
 use wartui_proto::reset::ResetCause;
@@ -43,7 +44,33 @@ fn read_status(at_s: i64, rx_count: u32, dropped_tx: u32, uptime_ms: u32, host: 
         uptime_ms,
         host_frames: host,
         rx_oversize: 0,
+        queues: QueueStats::new(),
+        spi: None,
     })
+}
+
+/// A status reply carrying one queue's figures.
+fn queue_status(uptime_ms: u32, queue: QueueId, high_water: u32, dropped: u32) -> Record {
+    let Record::BridgeStatus(seen) = status(0, 0, 0, uptime_ms) else { unreachable!() };
+    let queues = [QueueStat { queue, capacity: 1_000, high_water, dropped }].into_iter().collect();
+    Record::BridgeStatus(BridgeStatusSeen { queues, ..seen })
+}
+
+/// A status reply carrying SPI counters, each set to `n` but `transfers` to `transfers`.
+fn spi_status(uptime_ms: u32, transfers: u32, n: u32) -> Record {
+    let Record::BridgeStatus(seen) = status(0, 0, 0, uptime_ms) else { unreachable!() };
+    let spi = SpiStats {
+        transfers,
+        crc_fail: n,
+        bad_magic: n,
+        seq_gap: n,
+        ready_timeouts: n,
+        ready_recovered: n,
+        radio_crc_fail: n,
+        radio_bad_magic: n,
+        radio_seq_gap: n,
+    };
+    Record::BridgeStatus(BridgeStatusSeen { spi: Some(spi), ..seen })
 }
 
 /// A status reply carrying a count of oversize frames dropped.
@@ -123,7 +150,9 @@ fn analyze_counts_bridge_drops_from_first_row_when_capture_starts_with_drops() {
             reboots: 0,
             host_read: 0,
             usb_lost: 870,
-            oversize: 0
+            oversize: 0,
+            queues: vec![],
+            spi: None,
         })
     );
 }
@@ -146,7 +175,9 @@ fn analyze_adds_whole_value_when_bridge_drops_fall() {
             reboots: 1,
             host_read: 0,
             usb_lost: 673,
-            oversize: 0
+            oversize: 0,
+            queues: vec![],
+            spi: None,
         })
     );
 }
@@ -161,6 +192,73 @@ fn analyze_sums_oversize_from_first_row_when_bridge_restarts() {
     ]);
     let loss = losses(&conn).unwrap();
     assert_eq!(loss.bridge.map(|bridge| bridge.oversize), Some(11));
+}
+
+#[test]
+fn analyze_reports_queue_peak_when_rows_carry_queues() {
+    // The peak is the largest high-water any row carried, in the order first reported.
+    let (_dir, conn) = capture(vec![
+        queue_status(60_000, QueueId::HostBulk, 300, 0),
+        queue_status(65_000, QueueId::RadioJobs, 20, 0),
+        queue_status(70_000, QueueId::HostBulk, 700, 0),
+        queue_status(75_000, QueueId::HostBulk, 400, 0),
+    ]);
+    let queues = losses(&conn).unwrap().bridge.unwrap().queues;
+    assert_eq!(
+        queues,
+        [
+            QueueLoss { queue: QueueId::HostBulk, capacity: 1_000, peak: 700, dropped: 0 },
+            QueueLoss { queue: QueueId::RadioJobs, capacity: 1_000, peak: 20, dropped: 0 },
+        ]
+    );
+}
+
+#[test]
+fn analyze_rebases_queue_drops_when_bridge_restarts() {
+    // 5 before the capture are a baseline. The bridge restarts at a row that carries no
+    // queue, so the next row's 15 are all new though they read as a rise from 12.
+    let (_dir, conn) = capture(vec![
+        queue_status(60_000, QueueId::HostBulk, 10, 5),
+        queue_status(65_000, QueueId::HostBulk, 10, 12),
+        status(0, 0, 0, 1_000),
+        queue_status(4_000, QueueId::HostBulk, 10, 15),
+    ]);
+    let queues = losses(&conn).unwrap().bridge.unwrap().queues;
+    assert_eq!(queues[0].dropped, 7 + 15);
+}
+
+#[test]
+fn analyze_reports_spi_errors_when_rows_carry_spi() {
+    // A row without SPI between two with it changes nothing; the restart rebases.
+    let (_dir, conn) = capture(vec![
+        spi_status(60_000, 1_000, 2),
+        status(0, 0, 0, 62_000),
+        spi_status(65_000, 1_500, 5),
+        spi_status(4_000, 100, 1),
+    ]);
+    let spi = losses(&conn).unwrap().bridge.unwrap().spi;
+    let n = 3 + 1;
+    assert_eq!(
+        spi,
+        Some(SpiLoss {
+            transfers: 500 + 100,
+            crc_fail: n,
+            bad_magic: n,
+            seq_gap: n,
+            ready_timeouts: n,
+            ready_recovered: n,
+            radio_crc_fail: n,
+            radio_bad_magic: n,
+            radio_seq_gap: n,
+        })
+    );
+}
+
+#[test]
+fn analyze_reports_no_queues_when_bridge_has_none() {
+    let (_dir, conn) = capture(vec![status(0, 10, 0, 60_000), status(5, 20, 0, 65_000)]);
+    let bridge = losses(&conn).unwrap().bridge.unwrap();
+    assert_eq!((bridge.queues, bridge.spi), (vec![], None));
 }
 
 #[test]
@@ -591,7 +689,9 @@ fn analyze_sums_host_read_from_first_row_when_status_rows_carry_host_frames() {
             reboots: 1,
             host_read: 670,
             usb_lost: 30,
-            oversize: 0
+            oversize: 0,
+            queues: vec![],
+            spi: None,
         })
     );
 }

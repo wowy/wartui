@@ -23,6 +23,7 @@ use wartui_core::store::{
     is_simulated, open_readonly, open_readwrite, record_upload, set_upload_result,
 };
 use wartui_proto::air::RecordKind;
+use wartui_proto::link::{QueueId, QueueStat, SpiStats};
 use wartui_proto::mac::Mac;
 use wartui_proto::plan::ChannelPool;
 use wartui_proto::reset::ResetCause;
@@ -504,21 +505,48 @@ fn store_writes_every_node_column_when_node_recorded() {
     assert_insert_names_every_column(&conn, "node");
 }
 
+/// A status reply carrying `queues` and `spi`, the rest of it fixed.
+fn bridge_status(queues: &[QueueStat], spi: Option<SpiStats>) -> Record {
+    Record::BridgeStatus(BridgeStatusSeen {
+        rx_at_ms: EPOCH_MS + 5_000,
+        peer_count: 3,
+        rx_count: 4_000_000_000,
+        dropped_tx: 1305,
+        uptime_ms: 3_240_000,
+        host_frames: 3_999_999_000,
+        rx_oversize: 42,
+        queues: queues.iter().copied().collect(),
+        spi,
+    })
+}
+
+const SPI: SpiStats = SpiStats {
+    transfers: 4_000_000_001,
+    crc_fail: 1,
+    bad_magic: 2,
+    seq_gap: 3,
+    ready_timeouts: 4,
+    ready_recovered: 5,
+    radio_crc_fail: 6,
+    radio_bad_magic: 7,
+    radio_seq_gap: 8,
+};
+
+const QUEUES: [QueueStat; 2] = [
+    QueueStat {
+        queue: QueueId::HostBulk,
+        capacity: 262_144,
+        high_water: 4_000_000_002,
+        dropped: 9,
+    },
+    QueueStat { queue: QueueId::RadioJobs, capacity: 32, high_water: 20, dropped: 0 },
+];
+
 #[test]
 fn store_round_trips_every_column_when_bridge_status_written() {
     let dir = tempfile::tempdir().expect("temp dir");
-    let conn = write(
-        &dir,
-        vec![Record::BridgeStatus(BridgeStatusSeen {
-            rx_at_ms: EPOCH_MS + 5_000,
-            peer_count: 3,
-            rx_count: 4_000_000_000,
-            dropped_tx: 1305,
-            uptime_ms: 3_240_000,
-            host_frames: 3_999_999_000,
-            rx_oversize: 42,
-        })],
-    );
+    let conn = write(&dir, vec![bridge_status(&QUEUES, Some(SPI))]);
+    assert_insert_names_every_column(&conn, "bridge_status");
 
     let row: (i64, i64, i64, i64, i64, i64, i64) = conn
         .query_row(
@@ -529,6 +557,67 @@ fn store_round_trips_every_column_when_bridge_status_written() {
         )
         .unwrap();
     assert_eq!(row, (EPOCH_MS + 5_000, 3, 4_000_000_000, 1305, 3_240_000, 3_999_999_000, 42));
+
+    let spi: Vec<i64> = conn
+        .query_row(
+            "SELECT spi_transfers, spi_crc_fail, spi_bad_magic, spi_seq_gap, spi_ready_timeouts,
+                    spi_ready_recovered, spi_radio_crc_fail, spi_radio_bad_magic,
+                    spi_radio_seq_gap
+             FROM bridge_status",
+            [],
+            |r| (0..9).map(|i| r.get(i)).collect(),
+        )
+        .unwrap();
+    assert_eq!(spi, [4_000_000_001, 1, 2, 3, 4, 5, 6, 7, 8]);
+}
+
+#[test]
+fn store_writes_queue_rows_when_bridge_status_carries_queues() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let conn = write(&dir, vec![bridge_status(&[], None), bridge_status(&QUEUES, None)]);
+
+    let parent: i64 =
+        conn.query_row("SELECT MAX(id) FROM bridge_status", [], |r| r.get(0)).unwrap();
+    let rows: Vec<(i64, String, i64, i64, i64)> = conn
+        .prepare(
+            "SELECT status_id, queue, capacity, high_water, dropped FROM bridge_queue
+             ORDER BY rowid",
+        )
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    // Both rows hang off the second reply; the first carried none.
+    assert_eq!(
+        rows,
+        [
+            (parent, "host-bulk".to_owned(), 262_144, 4_000_000_002, 9),
+            (parent, "radio-jobs".to_owned(), 32, 20, 0),
+        ]
+    );
+}
+
+#[test]
+fn store_leaves_spi_columns_null_when_bridge_has_no_spi_link() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let conn = write(&dir, vec![bridge_status(&[], None)]);
+
+    let nulls: i64 = conn
+        .query_row(
+            "SELECT (spi_transfers IS NULL) + (spi_crc_fail IS NULL) + (spi_bad_magic IS NULL)
+                  + (spi_seq_gap IS NULL) + (spi_ready_timeouts IS NULL)
+                  + (spi_ready_recovered IS NULL) + (spi_radio_crc_fail IS NULL)
+                  + (spi_radio_bad_magic IS NULL) + (spi_radio_seq_gap IS NULL)
+             FROM bridge_status",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(nulls, 9);
+    let queues: i64 =
+        conn.query_row("SELECT COUNT(*) FROM bridge_queue", [], |r| r.get(0)).unwrap();
+    assert_eq!(queues, 0);
 }
 
 fn host_status(

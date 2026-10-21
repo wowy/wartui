@@ -610,17 +610,26 @@ fn round_trip(event: &BridgeToHost) -> BridgeToHost {
     decode_frame(&mut out[..n - 1]).expect("decodes")
 }
 
+const IDS: [QueueId; 7] = [
+    QueueId::RadioUp,
+    QueueId::RadioSendJobs,
+    QueueId::RadioDown,
+    QueueId::HostPriority,
+    QueueId::HostBulk,
+    QueueId::RadioUpPriority,
+    QueueId::RadioJobs,
+];
+
+#[test]
+fn queue_id_round_trips_name_when_every_id_named() {
+    for id in IDS {
+        assert_eq!(QueueId::from_name(id.name()), Some(id), "{id:?}");
+    }
+    assert_eq!(QueueId::from_name("host"), None);
+}
+
 #[test]
 fn link_round_trips_status_with_queues_and_spi() {
-    const IDS: [QueueId; 7] = [
-        QueueId::RadioUp,
-        QueueId::RadioSendJobs,
-        QueueId::RadioDown,
-        QueueId::HostPriority,
-        QueueId::HostBulk,
-        QueueId::RadioUpPriority,
-        QueueId::RadioJobs,
-    ];
     let mut queues = QueueStats::new();
     for (i, queue) in (1u32..).zip(IDS.into_iter().cycle().take(8)) {
         queues

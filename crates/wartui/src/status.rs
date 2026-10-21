@@ -19,9 +19,7 @@ use anyhow::{Context, Result, bail};
 use clap::Args as ClapArgs;
 use wartui_bridge::LinkEvent;
 use wartui_proto::air::CONTROL_CHANNEL;
-use wartui_proto::link::{
-    BridgeToHost, HostToBridge, QueueId, QueueStat, QueueStats, RadioInfo, SpiStats,
-};
+use wartui_proto::link::{BridgeToHost, HostToBridge, QueueStat, QueueStats, RadioInfo, SpiStats};
 use wartui_proto::mac;
 
 /// Generous enough for a bridge that is busy forwarding a fleet, short enough
@@ -162,18 +160,13 @@ fn diagnostic_lines(queues: &QueueStats, spi: Option<&SpiStats>) -> Vec<String> 
 }
 
 fn queue_line(stat: &QueueStat) -> String {
-    let (name, unit) = match stat.queue {
-        QueueId::RadioUp => ("radio-up", "bytes"),
-        QueueId::RadioSendJobs => ("radio-send-jobs", "entries"),
-        QueueId::RadioDown => ("radio-down", "bytes"),
-        QueueId::HostPriority => ("host-priority", "bytes"),
-        QueueId::HostBulk => ("host-bulk", "bytes"),
-        QueueId::RadioUpPriority => ("radio-up-priority", "bytes"),
-        QueueId::RadioJobs => ("radio-jobs", "entries"),
-    };
     format!(
-        "  queue {name}  {}/{} {unit}  dropped {}",
-        stat.high_water, stat.capacity, stat.dropped
+        "  queue {}  {}/{} {}  dropped {}",
+        stat.queue.name(),
+        stat.high_water,
+        stat.capacity,
+        stat.queue.unit(),
+        stat.dropped
     )
 }
 
