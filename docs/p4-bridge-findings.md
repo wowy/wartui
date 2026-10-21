@@ -157,7 +157,36 @@ attach after 7 minutes idle read no old frame ([`attach-backlog-findings.md`](at
 
 Twice, a `wartui status` sent about 10 seconds after the P4 powered up got no answer within
 5 s, and the next one, seconds later, answered at once. Once more, the first query answered at
-once. The cause is not known yet. A second query has always answered.
+once.
+
+The cause, measured on 2026-10-21 with the POE-ETH P4 and C6 `71:F4`:
+
+1. A freshly enumerated ttyACM opens with the kernel's default termios: ECHO, ICANON and
+   ECHOCTL on. `serialport` sets raw mode only after `open()` returns.
+2. `open()` raises DTR, and the P4 opens transmit on DTR. GPS batches (about 1 Hz) or other
+   frames it sends in that window reach the tty while echo is on.
+3. The line discipline echoes them back to the P4. With ECHOCTL, a `0x00` echoes as `^@`, so
+   the echo carries no terminator.
+4. The P4's `FrameAccumulator` resyncs only at `0x00`, so the host's `Identify` was glued to
+   the echo and failed to decode. No `Ready` came back.
+5. Termios persists across closes, so every later open was already raw and the retry worked.
+
+The single-chip bridge never showed it, because it writes nothing until a host frame decodes.
+
+| Before `wartui status` | Result |
+|---|---|
+| `printf x > <port>` | No answer in 5 s; the next `status` answered |
+| `stty -F <port> sane`, then the port held open 3 s (2,106 bytes of GPS frames read) | No answer |
+| `stty -F <port> sane` alone, four times | Answered every time; the window held no frame |
+
+After any `status`, `stty -a` read `-icanon -echo`.
+
+The fix: the host leads each connection's first frame with a lone `0x00`, which ends whatever
+reached the P4 before it.
+
+With the fix, both failing cases answered on the first query, three times each: after
+`printf x`, and after the port was held open with echo on (2,538 to 2,685 bytes of GPS frames
+read). After a replug, the first `status` answered.
 
 ### Queue high-water marks suggest smaller C6 queues
 

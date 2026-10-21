@@ -309,7 +309,7 @@ pub fn decode_frame<T: DeserializeOwned>(frame: &mut [u8]) -> Result<T, LinkErro
 /// from a reset banner, a half-written frame or an unplugged cable. The junk is
 /// discarded at the next terminator, and the stream carries on. Without a terminator of
 /// the sender's own, that is the next frame's, so the bridge writes one at boot (see
-/// [`crate::outbox`]).
+/// [`crate::outbox`]), and the host leads each connection's first frame with one.
 #[derive(Debug)]
 pub struct FrameAccumulator<const N: usize = MAX_FRAME> {
     buf: [u8; N],
