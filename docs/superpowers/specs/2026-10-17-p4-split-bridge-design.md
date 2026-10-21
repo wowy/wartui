@@ -63,7 +63,7 @@ Each step is usable and benchmarkable on its own.
    does (`firmware/bridge/src/gps.rs`, `HostToBridge::GpsWrite`, `BridgeToHost::Gps`).
 3. **Updates over one cable.** `wartui flash-bridge` updates both the P4 and its C6 through the
    high-speed USB link. The P4 receives its own image, and passes the C6's image down the SPI
-   link. This reuses the node's OTA machinery (`firmware/node/src/ota.rs`,
+   link. This reuses the node's OTA machinery (`firmware/common/src/ota.rs`,
    `wartui_proto::ota`). The first flash of each chip stays a wired flash.
 
 ## Hardware facts
@@ -172,14 +172,17 @@ user's.
   received frames upward.
 - **A small, versioned core of the SPI protocol is frozen from the first commit** (the user's
   decision). The core is "hello, which version are you" and "here is a new image", plus the
-  framing they need. It never changes, even before 1.0. Everything else on the link may change
-  freely between builds. Any P4 build can therefore always identify, and update, any C6 build,
-  so a change to the link never sends the user back to the header. A P4 that finds a C6 whose
-  non-frozen protocol differs from its own does not try to bridge with it. It reports the
-  mismatch and offers the update path only.
-  - **Future, not this project:** the P4 image bundles the C6's, and the P4 reflashes the C6 at
-    boot when their versions differ. It is the user's preferred long-term strategy. Tracked in
-    issue #215. Nothing here may block it.
+  framing they need: the hello with the running image's SHA-256 digest, and the update payload
+  (`Begin`, `Chunk`, `Commit`, `Install` down, `Status` up; `crates/wartui-proto/src/spi/`). It
+  never changes, even before 1.0. Everything else on the link may change freely between builds.
+  Any P4 build can therefore always identify, and update, any C6 build, so a change to the link
+  never sends the user back to the header. A P4 that finds a C6 whose non-frozen protocol
+  differs from its own does not try to bridge with it. It reports the mismatch and offers the
+  update path only.
+  - **The P4 image bundles the C6's, and the P4 reflashes the C6 at boot when their image
+    digests differ** (issue #215). The C6 boots the new image on the node's trial, and the P4's
+    hello confirms it. A C6 whose hello carries no digest predates the path and needs one wired
+    flash.
 - **The handshake recovers from a missed READY pulse,** as the spike's `ready_stale_recover` fix
   does. It also recovers from the other side restarting mid-stream, without the host having to
   intervene beyond the `Ready` described above.

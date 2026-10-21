@@ -1651,24 +1651,26 @@ checksum = "6a02e4885ed3bc0f2de90ea6dd45ebcbb66dacffe03547fadbb0eeae2770887d"
 name = "wartui-firmware"
 version = "0.1.0"
 dependencies = [
+ "embedded-storage",
+ "esp-bootloader-esp-idf",
  "esp-hal",
  "esp-radio",
+ "esp-storage",
  "portable-atomic",
+ "static_cell",
  "wartui-proto",
 ]
 
 [[package]]
 name = "wartui-node-fw"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
- "embedded-storage",
  "esp-alloc",
  "esp-bootloader-esp-idf",
  "esp-hal",
  "esp-println",
  "esp-radio",
  "esp-rtos",
- "esp-storage",
  "esp-sync",
  "esp-wifi-sys-esp32c5",
  "esp-wifi-sys-esp32c6",

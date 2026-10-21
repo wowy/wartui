@@ -177,8 +177,10 @@ The cargo runner, `wartui flash-fleet` and the release images all use this table
 
 ## Over-the-air updates
 
-`wartui_proto::ota::Receiver` decides what to write and checks the hash. `src/ota.rs` gives it the
-flash: the app slot that is not booted, found in the partition table at boot. `wartui ota` is the
+`wartui_proto::ota::Receiver` decides what to write and checks the hash. `wartui_firmware::ota`
+(`firmware/common/src/ota.rs`, shared with the P4 bridge's C6) gives it the flash: the app slot
+that is not booted, found in the partition table at boot. `src/ota.rs` hands it the air's update
+frames. `wartui ota` is the
 host's side (`crates/wartui/README.md` § "Updating over the air").
 
 **Update mode.** An update begin the receiver accepts puts the node in update mode:
@@ -359,6 +361,6 @@ nobody is draining it. So a node with no monitor attached drops diagnostics rath
 mid-sweep. That is the only property this firmware needs from it, and the reason it is allowed here.
 
 `esp-storage`, the flash driver under updates, is held at the version `esp-bootloader-esp-idf`
-resolves, with its `embedded-storage` feature on for the `NorFlash` traits `src/ota.rs` writes
-through. Its default `critical-section` feature stays on: it holds interrupts off across each flash
+resolves, with its `embedded-storage` feature on for the `NorFlash` traits
+`firmware/common/src/ota.rs` writes through. Its default `critical-section` feature stays on: it holds interrupts off across each flash
 operation, through the same `esp-sync`.

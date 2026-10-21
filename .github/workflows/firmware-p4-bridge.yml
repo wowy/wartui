@@ -1,8 +1,9 @@
 name: Firmware - P4 bridge
 
 # Path-filtered: this builds only when something the P4 bridge firmware compiles
-# changes — its own sources, `firmware/common` and `crates/wartui-proto` (the
-# path dependencies it compiles), `rustfmt.toml` (fmt resolves it from the repo
+# changes — its own sources, `firmware/p4-radio` (the C6 image its build script
+# builds and embeds), `firmware/common` and `crates/wartui-proto` (the path
+# dependencies both compile), `rustfmt.toml` (fmt resolves it from the repo
 # root), or this file. One workflow per firmware because GitHub's path filter is
 # workflow-wide, never per-job.
 
@@ -12,6 +13,8 @@ on:
     paths:
       - firmware/p4-bridge/**
       - '!firmware/p4-bridge/README.md'
+      - firmware/p4-radio/**
+      - '!firmware/p4-radio/README.md'
       - firmware/common/**
       - crates/wartui-proto/**
       - .github/workflows/firmware-p4-bridge.yml
@@ -20,6 +23,8 @@ on:
     paths:
       - firmware/p4-bridge/**
       - '!firmware/p4-bridge/README.md'
+      - firmware/p4-radio/**
+      - '!firmware/p4-radio/README.md'
       - firmware/common/**
       - crates/wartui-proto/**
       - .github/workflows/firmware-p4-bridge.yml
@@ -41,9 +46,17 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+      # The C6's target too: `build.rs` builds `firmware/p4-radio` and saves its
+      # image with espflash, for every build and clippy run below.
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: riscv32imafc-unknown-none-elf
+          targets: riscv32imafc-unknown-none-elf,riscv32imac-unknown-none-elf
+
+      # espflash links libudev for its serial ports.
+      - name: Install espflash
+        run: |
+          sudo apt-get update && sudo apt-get install -y libudev-dev
+          cargo install espflash --locked
 
       - name: Lint
         run: |

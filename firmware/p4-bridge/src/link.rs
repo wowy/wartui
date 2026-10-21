@@ -17,8 +17,16 @@
 //! that restarts under a running P4 as well as the first exchange. The pair hears the seq of
 //! every C6 transfer, since a hello whose seq falls below the last is a restart.
 //!
-//! Records flow only while the C6 speaks this P4's link revision: a C6 that encodes them
+//! Records flow only while the pair bridges (`Pair::bridges`): a C6 that encodes them
 //! differently is sent nothing but `Idle`, and its records are not read.
+//!
+//! While the pair is `Updating`, each transfer carries the next op from a
+//! [`Sender`] of the bundled image ([`crate::radio`]), and the C6's statuses come back as
+//! [`Kind::Update`] transfers. The sender's progress goes to the host as the pair's fault,
+//! every tenth of the image. A sender that fails leaves the pair `Stale` or `Mismatch`; one
+//! that installs leaves the pair waiting for the C6's next hello.
+
+use core::fmt::Write;
 
 use embassy_futures::join::join;
 use embassy_time::{Duration, Instant, with_timeout};
@@ -30,6 +38,7 @@ use wartui_firmware::phase::mark;
 use wartui_proto::link::{BridgeToHost, Chip, LogStr, LoopPhase, ShortStr};
 use wartui_proto::mac::Mac;
 use wartui_proto::reset::ResetCause;
+use wartui_proto::spi::update::{Failure, Op, Sender, Stage};
 use wartui_proto::spi::{
     HEADER_LEN, Held, Hello, Kind, LINK_REVISION, PAYLOAD_MAX, Packer, SeqCheck, SeqNote,
     TRANSFER_LEN, Up, VerifyError, decode_up, records, seal, verify,
@@ -37,6 +46,7 @@ use wartui_proto::spi::{
 use wartui_proto::split::{PairEvent, RadioState};
 
 use crate::Shared;
+use crate::radio::{RADIO_DIGEST, RADIO_IMAGE, RADIO_SHA256};
 
 /// How long one wait for READY lasts before checking whether its edge was missed.
 const READY_TIMEOUT: Duration = Duration::from_millis(100);
@@ -68,6 +78,13 @@ pub struct Link {
     /// A record from the down queue that did not fit the last transfer. Static, since it
     /// holds up to [`RECORD_MAX`](wartui_proto::spi::RECORD_MAX) bytes.
     held: &'static mut Held,
+    /// Sends the bundled image while the pair is updating. One per P4 life, as the pair
+    /// attempts one update per life.
+    sender: Sender<'static>,
+    /// The progress last told the host, in percent.
+    progress_said: u8,
+    /// The pair has heard of the install.
+    install_noted: bool,
 }
 
 impl Link {
@@ -89,6 +106,9 @@ impl Link {
             undecoded: 0,
             undecoded_said: 0,
             held,
+            sender: Sender::new(RADIO_IMAGE, RADIO_SHA256, &RADIO_DIGEST),
+            progress_said: 0,
+            install_noted: false,
         }
     }
 
@@ -103,6 +123,8 @@ impl Link {
             uptime_ms: self.boot.elapsed().as_millis() as u32,
             // No heap: nothing on the P4 allocates.
             heap_free: 0,
+            // The P4 takes no update over the link.
+            image: None,
         }
     }
 
@@ -144,7 +166,14 @@ impl Link {
                 }
             }
             Kind::Idle => self.past_hello(transfer.seq, shared),
-            Kind::Update => shared.pair.borrow_mut().note_seq(transfer.seq),
+            Kind::Update => {
+                self.past_hello(transfer.seq, shared);
+                if let Some(Op::Status(status)) = Op::decode(transfer.payload)
+                    && updating(shared)
+                {
+                    self.sender.on_status(&status);
+                }
+            }
         }
         // Once per change, so a C6 sending garbage costs one line per transfer at most.
         if self.undecoded != self.undecoded_said {
@@ -176,14 +205,24 @@ impl Link {
         }
     }
 
-    /// Fill a transfer to the C6: this end's hello while the C6 is sending its own, else
-    /// as many queued records as fit, or nothing.
+    /// Fill a transfer to the C6: this end's hello while the C6 is sending its own, the next
+    /// update op while updating, else as many queued records as fit, or nothing.
     fn prepare(&mut self, buf: &mut [u8; TRANSFER_LEN], shared: &Shared) {
         let seq = self.seq;
         self.seq = self.seq.wrapping_add(1);
         if self.owe_hello {
             let len = self.hello().encode(&mut buf[HEADER_LEN..]);
             seal(buf, Kind::Hello, seq, len);
+            return;
+        }
+        if updating(shared) {
+            let now = crate::now_ms();
+            let op = self.sender.next(now, &mut buf[HEADER_LEN..HEADER_LEN + PAYLOAD_MAX]);
+            self.follow_sender(now, shared);
+            match op {
+                Some(len) => seal(buf, Kind::Update, seq, len),
+                None => seal(buf, Kind::Idle, seq, 0),
+            }
             return;
         }
         if !radio_up(shared) {
@@ -197,11 +236,48 @@ impl Link {
         let len = packer.len();
         seal(buf, if len == 0 { Kind::Idle } else { Kind::Messages }, seq, len);
     }
+
+    /// Tell the pair, and the host, what the sender's last step changed.
+    #[inline(never)]
+    fn follow_sender(&mut self, now_ms: u64, shared: &Shared) {
+        match self.sender.stage() {
+            Stage::Sending => {
+                let percent = self.sender.percent();
+                if percent / 10 != self.progress_said / 10 {
+                    self.progress_said = percent;
+                    shared.pair.borrow_mut().note_update_progress(percent);
+                    shared.push_fault();
+                }
+            }
+            Stage::Installed if !self.install_noted => {
+                self.install_noted = true;
+                shared.pair.borrow_mut().note_installed(now_ms);
+            }
+            Stage::Installed => {}
+            Stage::Failed(failure) => {
+                let mut text = LogStr::new();
+                let _ = match failure {
+                    Failure::Refused(state) => {
+                        write!(text, "the radio refused the bundled image: {state:?}")
+                    }
+                    Failure::Silent => write!(text, "the radio stopped answering its update"),
+                };
+                shared.pair.borrow_mut().on_update_failed();
+                shared.push_host(&BridgeToHost::Error { message: text });
+                shared.push_fault();
+            }
+        }
+    }
 }
 
-/// Whether the C6 speaks this P4's link revision.
+/// Whether radio commands and records flow to and from the C6.
 fn radio_up(shared: &Shared) -> bool {
-    matches!(shared.pair.borrow().state(), RadioState::Up(_))
+    shared.pair.borrow().bridges()
+}
+
+/// Whether the P4 is sending the C6 its bundled image.
+fn updating(shared: &Shared) -> bool {
+    matches!(shared.pair.borrow().state(), RadioState::Updating(_))
 }
 
 /// Run the link forever: one transfer per READY edge, each verified and handled, and the

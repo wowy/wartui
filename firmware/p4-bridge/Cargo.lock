@@ -1863,6 +1863,7 @@ dependencies = [
  "esp-bootloader-esp-idf",
  "esp-hal",
  "esp-rtos",
+ "sha2",
  "static_cell",
  "wartui-firmware",
  "wartui-proto",
