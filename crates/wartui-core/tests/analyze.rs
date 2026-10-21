@@ -56,19 +56,20 @@ fn queue_status(uptime_ms: u32, queue: QueueId, high_water: u32, dropped: u32) -
     Record::BridgeStatus(BridgeStatusSeen { queues, ..seen })
 }
 
-/// A status reply carrying SPI counters, each set to `n` but `transfers` to `transfers`.
+/// A status reply carrying SPI counters: `transfers`, then `n`, `2n` … `8n` in field order, so
+/// no two counters match.
 fn spi_status(uptime_ms: u32, transfers: u32, n: u32) -> Record {
     let Record::BridgeStatus(seen) = status(0, 0, 0, uptime_ms) else { unreachable!() };
     let spi = SpiStats {
         transfers,
         crc_fail: n,
-        bad_magic: n,
-        seq_gap: n,
-        ready_timeouts: n,
-        ready_recovered: n,
-        radio_crc_fail: n,
-        radio_bad_magic: n,
-        radio_seq_gap: n,
+        bad_magic: 2 * n,
+        seq_gap: 3 * n,
+        ready_timeouts: 4 * n,
+        ready_recovered: 5 * n,
+        radio_crc_fail: 6 * n,
+        radio_bad_magic: 7 * n,
+        radio_seq_gap: 8 * n,
     };
     Record::BridgeStatus(BridgeStatusSeen { spi: Some(spi), ..seen })
 }
@@ -237,20 +238,43 @@ fn analyze_reports_spi_errors_when_rows_carry_spi() {
         spi_status(4_000, 100, 1),
     ]);
     let spi = losses(&conn).unwrap().bridge.unwrap().spi;
+    // Each counter is its multiple of n, which advances 3 before the restart and 1 after.
     let n = 3 + 1;
     assert_eq!(
         spi,
         Some(SpiLoss {
             transfers: 500 + 100,
             crc_fail: n,
-            bad_magic: n,
-            seq_gap: n,
-            ready_timeouts: n,
-            ready_recovered: n,
-            radio_crc_fail: n,
-            radio_bad_magic: n,
-            radio_seq_gap: n,
+            bad_magic: 2 * n,
+            seq_gap: 3 * n,
+            ready_timeouts: 4 * n,
+            ready_recovered: 5 * n,
+            radio_crc_fail: 6 * n,
+            radio_bad_magic: 7 * n,
+            radio_seq_gap: 8 * n,
         })
+    );
+}
+
+#[test]
+fn analyze_skips_queue_rows_when_name_unknown() {
+    let (dir, conn) = capture(vec![
+        queue_status(60_000, QueueId::HostBulk, 300, 5),
+        queue_status(65_000, QueueId::HostBulk, 700, 9),
+    ]);
+    // A name no `QueueId` gives, as a capture from another build could hold.
+    Connection::open(dir.path().join("wartui.db"))
+        .unwrap()
+        .execute(
+            "INSERT INTO bridge_queue (status_id, queue, capacity, high_water, dropped)
+             SELECT id, 'host-mystery', 64, 32, 1 FROM bridge_status",
+            [],
+        )
+        .unwrap();
+    let queues = losses(&conn).unwrap().bridge.unwrap().queues;
+    assert_eq!(
+        queues,
+        [QueueLoss { queue: QueueId::HostBulk, capacity: 1_000, peak: 700, dropped: 4 }]
     );
 }
 

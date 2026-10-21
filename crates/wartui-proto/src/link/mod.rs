@@ -413,6 +413,17 @@ pub enum QueueId {
 }
 
 impl QueueId {
+    /// Every queue, in declaration order.
+    pub const ALL: [Self; 7] = [
+        Self::RadioUp,
+        Self::RadioSendJobs,
+        Self::RadioDown,
+        Self::HostPriority,
+        Self::HostBulk,
+        Self::RadioUpPriority,
+        Self::RadioJobs,
+    ];
+
     /// The name `wartui status` and a capture's `bridge_queue` rows give this queue.
     pub fn name(self) -> &'static str {
         match self {
@@ -440,16 +451,7 @@ impl QueueId {
 
     /// The queue [`QueueId::name`] gives `name`, or `None` for a name it never gives.
     pub fn from_name(name: &str) -> Option<Self> {
-        Some(match name {
-            "radio-up" => Self::RadioUp,
-            "radio-send-jobs" => Self::RadioSendJobs,
-            "radio-down" => Self::RadioDown,
-            "host-priority" => Self::HostPriority,
-            "host-bulk" => Self::HostBulk,
-            "radio-up-priority" => Self::RadioUpPriority,
-            "radio-jobs" => Self::RadioJobs,
-            _ => return None,
-        })
+        Self::ALL.into_iter().find(|id| id.name() == name)
     }
 }
 

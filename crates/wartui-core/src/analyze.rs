@@ -62,7 +62,7 @@
 //! epoch check stands in for `beat`, so the two can disagree after a restart the epoch check
 //! misses.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use rusqlite::{Connection, Row};
 use wartui_proto::link::QueueId;
@@ -142,18 +142,58 @@ pub struct SpiLoss {
 }
 
 impl SpiLoss {
-    fn from_counts(c: [u64; 9]) -> Self {
-        Self {
-            transfers: c[0],
-            crc_fail: c[1],
-            bad_magic: c[2],
-            seq_gap: c[3],
-            ready_timeouts: c[4],
-            ready_recovered: c[5],
-            radio_crc_fail: c[6],
-            radio_bad_magic: c[7],
-            radio_seq_gap: c[8],
-        }
+    /// A status row's counters, or `None` when it carries none.
+    fn read(row: &Row<'_>) -> rusqlite::Result<Option<Self>> {
+        let get = |name: &str| row.get::<_, Option<i64>>(name).map(|v| v.map(count));
+        let (
+            Some(transfers),
+            Some(crc_fail),
+            Some(bad_magic),
+            Some(seq_gap),
+            Some(ready_timeouts),
+            Some(ready_recovered),
+            Some(radio_crc_fail),
+            Some(radio_bad_magic),
+            Some(radio_seq_gap),
+        ) = (
+            get("spi_transfers")?,
+            get("spi_crc_fail")?,
+            get("spi_bad_magic")?,
+            get("spi_seq_gap")?,
+            get("spi_ready_timeouts")?,
+            get("spi_ready_recovered")?,
+            get("spi_radio_crc_fail")?,
+            get("spi_radio_bad_magic")?,
+            get("spi_radio_seq_gap")?,
+        )
+        else {
+            return Ok(None);
+        };
+        Ok(Some(Self {
+            transfers,
+            crc_fail,
+            bad_magic,
+            seq_gap,
+            ready_timeouts,
+            ready_recovered,
+            radio_crc_fail,
+            radio_bad_magic,
+            radio_seq_gap,
+        }))
+    }
+
+    /// Adds what each counter advanced from `before` to `now`.
+    fn advance(&mut self, now: &Self, before: &Self, restarted: bool) {
+        let step = |now, before| advance_since_boot(now, Some(before), restarted);
+        self.transfers += step(now.transfers, before.transfers);
+        self.crc_fail += step(now.crc_fail, before.crc_fail);
+        self.bad_magic += step(now.bad_magic, before.bad_magic);
+        self.seq_gap += step(now.seq_gap, before.seq_gap);
+        self.ready_timeouts += step(now.ready_timeouts, before.ready_timeouts);
+        self.ready_recovered += step(now.ready_recovered, before.ready_recovered);
+        self.radio_crc_fail += step(now.radio_crc_fail, before.radio_crc_fail);
+        self.radio_bad_magic += step(now.radio_bad_magic, before.radio_bad_magic);
+        self.radio_seq_gap += step(now.radio_seq_gap, before.radio_seq_gap);
     }
 }
 
@@ -252,99 +292,83 @@ fn count(value: i64) -> u64 {
 }
 
 fn bridge(conn: &Connection) -> rusqlite::Result<Option<BridgeLoss>> {
+    // One row per queue a reply reported, or one with NULL queue columns for a reply with none.
     let mut stmt = conn.prepare(
-        "SELECT id, rx_count, dropped_tx, uptime_ms, host_frames, rx_oversize,
-                spi_transfers, spi_crc_fail, spi_bad_magic, spi_seq_gap, spi_ready_timeouts,
-                spi_ready_recovered, spi_radio_crc_fail, spi_radio_bad_magic, spi_radio_seq_gap
-         FROM bridge_status ORDER BY id",
+        "SELECT s.id, s.rx_count, s.dropped_tx, s.uptime_ms, s.host_frames, s.rx_oversize,
+                s.spi_transfers, s.spi_crc_fail, s.spi_bad_magic, s.spi_seq_gap,
+                s.spi_ready_timeouts, s.spi_ready_recovered, s.spi_radio_crc_fail,
+                s.spi_radio_bad_magic, s.spi_radio_seq_gap,
+                q.queue, q.capacity, q.high_water, q.dropped AS queue_dropped
+         FROM bridge_status s LEFT JOIN bridge_queue q ON q.status_id = s.id
+         ORDER BY s.id, q.rowid",
     )?;
     let mut rows = stmt.query([])?;
     let mut loss: Option<BridgeLoss> = None;
-    // The previous row's figures. The first row is only a baseline.
+    // The status row the walk is on: its own counters are read once, on its first joined row.
+    let mut status_id: Option<i64> = None;
+    // The previous status row's figures. The first row is only a baseline.
     let mut prev: Option<(u64, u64, u64, u64, u64)> = None;
-    // Each row's count of restarts seen so far: two rows a restart apart differ.
-    let mut lives: HashMap<i64, u64> = HashMap::new();
-    // The SPI counters and life of the last row that carried them, and their sums since.
-    let mut prev_spi: Option<([u64; 9], u64)> = None;
-    let mut spi: Option<[u64; 9]> = None;
+    // The SPI counters of the last status row that carried them, and the restarts seen by then.
+    let mut prev_spi: Option<(SpiLoss, u64)> = None;
+    // Beside each queue, its previous row's drops and the restarts seen by then.
+    let mut prev_queue: Vec<(u64, u64)> = Vec::new();
     while let Some(row) = rows.next()? {
-        let (received, dropped, uptime, host_frames, oversize) = (
-            count(row.get(1)?),
-            count(row.get(2)?),
-            count(row.get(3)?),
-            count(row.get(4)?),
-            count(row.get(5)?),
-        );
         let loss = loss.get_or_insert_default();
-        if let Some((prev_received, prev_dropped, prev_uptime, prev_host, prev_oversize)) = prev {
-            let restarted = uptime < prev_uptime;
-            loss.reboots += u64::from(restarted);
-            loss.received += advance_since_boot(received, Some(prev_received), restarted);
-            loss.dropped += advance_since_boot(dropped, Some(prev_dropped), restarted);
-            loss.oversize += advance_since_boot(oversize, Some(prev_oversize), restarted);
-            // The host's count runs from the engine's start, so it survives a bridge restart.
-            loss.host_read += host_frames.saturating_sub(prev_host);
-        }
-        prev = Some((received, dropped, uptime, host_frames, oversize));
-        lives.insert(row.get(0)?, loss.reboots);
-
-        let counts: Option<Vec<i64>> =
-            (6..15).map(|i| row.get::<_, Option<i64>>(i)).collect::<rusqlite::Result<_>>()?;
-        if let Some(counts) = counts {
-            let counts: [u64; 9] = std::array::from_fn(|i| count(counts[i]));
-            let sums = spi.get_or_insert_default();
-            if let Some((before, life)) = prev_spi {
-                let restarted = life != loss.reboots;
-                for ((sum, now), before) in sums.iter_mut().zip(counts).zip(before) {
-                    *sum += advance_since_boot(now, Some(before), restarted);
-                }
+        let id: i64 = row.get("id")?;
+        if status_id != Some(id) {
+            status_id = Some(id);
+            let (received, dropped, uptime, host_frames, oversize) = (
+                count(row.get("rx_count")?),
+                count(row.get("dropped_tx")?),
+                count(row.get("uptime_ms")?),
+                count(row.get("host_frames")?),
+                count(row.get("rx_oversize")?),
+            );
+            if let Some((prev_received, prev_dropped, prev_uptime, prev_host, prev_oversize)) = prev
+            {
+                let restarted = uptime < prev_uptime;
+                loss.reboots += u64::from(restarted);
+                loss.received += advance_since_boot(received, Some(prev_received), restarted);
+                loss.dropped += advance_since_boot(dropped, Some(prev_dropped), restarted);
+                loss.oversize += advance_since_boot(oversize, Some(prev_oversize), restarted);
+                // The host's count runs from the engine's start, so it survives a bridge restart.
+                loss.host_read += host_frames.saturating_sub(prev_host);
             }
-            prev_spi = Some((counts, loss.reboots));
-        }
-    }
-    let Some(mut loss) = loss else { return Ok(None) };
-    loss.usb_lost = loss.received.saturating_sub(loss.dropped).saturating_sub(loss.host_read);
-    loss.spi = spi.map(SpiLoss::from_counts);
-    loss.queues = queues(conn, &lives)?;
-    Ok(Some(loss))
-}
+            prev = Some((received, dropped, uptime, host_frames, oversize));
 
-/// The bridge's queues from the `bridge_queue` rows, given each status row's count of restarts.
-fn queues(conn: &Connection, lives: &HashMap<i64, u64>) -> rusqlite::Result<Vec<QueueLoss>> {
-    let mut stmt = conn.prepare(
-        "SELECT status_id, queue, capacity, high_water, dropped
-         FROM bridge_queue ORDER BY status_id, rowid",
-    )?;
-    let mut rows = stmt.query([])?;
-    let mut queues: Vec<QueueLoss> = Vec::new();
-    // Beside each queue, its previous row's drops and the life they were counted in.
-    let mut prev: Vec<(u64, u64)> = Vec::new();
-    while let Some(row) = rows.next()? {
-        let status_id: i64 = row.get(0)?;
-        let name: String = row.get(1)?;
-        let queue = QueueId::from_name(&name).ok_or_else(|| {
-            rusqlite::Error::FromSqlConversionFailure(
-                1,
-                rusqlite::types::Type::Text,
-                format!("no queue is named {name:?}").into(),
-            )
-        })?;
-        let (capacity, high_water, dropped) =
-            (count(row.get(2)?), count(row.get(3)?), count(row.get(4)?));
-        let life = lives.get(&status_id).copied().unwrap_or_default();
-        let Some(index) = queues.iter().position(|q| q.queue == queue) else {
+            if let Some(now) = SpiLoss::read(row)? {
+                let sums = loss.spi.get_or_insert_default();
+                if let Some((before, life)) = &prev_spi {
+                    sums.advance(&now, before, *life != loss.reboots);
+                }
+                prev_spi = Some((now, loss.reboots));
+            }
+        }
+
+        let Some(name) = row.get::<_, Option<String>>("queue")? else { continue };
+        // A name this build does not know is skipped, so the rest of the report survives it.
+        let Some(queue) = QueueId::from_name(&name) else { continue };
+        let (capacity, high_water, dropped) = (
+            count(row.get("capacity")?),
+            count(row.get("high_water")?),
+            count(row.get("queue_dropped")?),
+        );
+        let life = loss.reboots;
+        let Some(index) = loss.queues.iter().position(|q| q.queue == queue) else {
             // The first row is only a baseline.
-            queues.push(QueueLoss { queue, capacity, peak: high_water, dropped: 0 });
-            prev.push((dropped, life));
+            loss.queues.push(QueueLoss { queue, capacity, peak: high_water, dropped: 0 });
+            prev_queue.push((dropped, life));
             continue;
         };
-        let (q, (before, before_life)) = (&mut queues[index], &mut prev[index]);
+        let (q, (before, before_life)) = (&mut loss.queues[index], &mut prev_queue[index]);
         q.capacity = capacity;
         q.peak = q.peak.max(high_water);
         q.dropped += advance_since_boot(dropped, Some(*before), life != *before_life);
         (*before, *before_life) = (dropped, life);
     }
-    Ok(queues)
+    let Some(mut loss) = loss else { return Ok(None) };
+    loss.usb_lost = loss.received.saturating_sub(loss.dropped).saturating_sub(loss.host_read);
+    Ok(Some(loss))
 }
 
 /// One `host_status` row, as [`host`] reads it.

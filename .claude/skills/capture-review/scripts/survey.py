@@ -831,10 +831,6 @@ def bridge_queues(db, lives):
             flag("WARN", "bridge",
                  f"bridge queue {name} peaked at {pct(peak, capacity)} of its {capacity} {unit} "
                  "since the bridge booted: near full, so its WARTUI_* size is the lever", sql)
-        elif unit == "bytes" and capacity and peak < 0.1 * capacity:
-            flag("INFO", "bridge",
-                 f"bridge queue {name} peaked at {pct(peak, capacity)} of its {capacity} bytes "
-                 "since the bridge booted: oversized for this run", sql)
 
 
 SPI_COUNTERS = ("transfers", "crc_fail", "bad_magic", "seq_gap", "ready_timeouts",
