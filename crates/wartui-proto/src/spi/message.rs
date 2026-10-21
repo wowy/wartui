@@ -11,7 +11,8 @@
 //!
 //! A payload is records of `[len: u16 LE][postcard bytes]`, ending at a zero `len` or the
 //! payload's end. A record never spans transfers: the largest message fits one, so the
-//! packer refuses rather than splits.
+//! packer refuses rather than splits. A queued record that does not fit is [`Held`] and
+//! leads the next transfer.
 
 use heapless::Vec;
 use serde::{Deserialize, Serialize};
@@ -116,6 +117,51 @@ impl<'a> Packer<'a> {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len == 0
+    }
+}
+
+/// The longest record: a payload less its record's length prefix. A queue that holds none
+/// longer always fits its record into an empty transfer.
+pub const RECORD_MAX: usize = super::PAYLOAD_MAX - 2;
+
+/// A record taken from a queue that did not fit the last transfer, sent first in the next.
+#[derive(Debug)]
+pub struct Held {
+    buf: [u8; RECORD_MAX],
+    len: usize,
+}
+
+impl Held {
+    /// Nothing held. Const, so firmware builds it in a static.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { buf: [0; RECORD_MAX], len: 0 }
+    }
+
+    /// Packs the held record, then records from `next`, until one does not fit — it is then
+    /// held for the next transfer — or `next` has none.
+    ///
+    /// `next` copies one whole record into the buffer it is given and returns its length,
+    /// or 0 when nothing is queued.
+    pub fn pack(&mut self, packer: &mut Packer<'_>, mut next: impl FnMut(&mut [u8]) -> usize) {
+        loop {
+            if self.len == 0 {
+                self.len = next(&mut self.buf);
+                if self.len == 0 {
+                    break;
+                }
+            }
+            if !packer.push_encoded(&self.buf[..self.len]) {
+                break;
+            }
+            self.len = 0;
+        }
+    }
+}
+
+impl Default for Held {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

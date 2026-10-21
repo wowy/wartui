@@ -44,8 +44,8 @@ mod message;
 
 pub use hello::{HELLO_LEN, Hello};
 pub use message::{
-    Down, LINK_REVISION, Packer, RadioStatus, Up, decode_down, decode_up, encode_down, encode_up,
-    records,
+    Down, Held, LINK_REVISION, Packer, RECORD_MAX, RadioStatus, Up, decode_down, decode_up,
+    encode_down, encode_up, records,
 };
 
 /// Bytes in every transfer, each way.

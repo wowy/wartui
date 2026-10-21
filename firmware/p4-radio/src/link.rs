@@ -38,17 +38,12 @@ use wartui_proto::link::{
 use wartui_proto::mac::Mac;
 use wartui_proto::reset::ResetCause;
 use wartui_proto::spi::{
-    Down, HEADER_LEN, Hello, Kind, LINK_REVISION, PAYLOAD_MAX, Packer, RadioStatus, SeqCheck,
-    SeqNote, TRANSFER_LEN, Up, VerifyError, decode_down, encode_up, records, seal, verify,
+    Down, HEADER_LEN, Held, Hello, Kind, LINK_REVISION, PAYLOAD_MAX, Packer, RECORD_MAX,
+    RadioStatus, SeqCheck, SeqNote, TRANSFER_LEN, Up, VerifyError, decode_down, encode_up, records,
+    seal, verify,
 };
 
 use crate::config::{RADIO_JOBS, SEND_JOBS, UP_PRIORITY_BYTES, UP_QUEUE_BYTES};
-
-/// The longest encoded record: a payload less its record's length prefix.
-///
-/// The ring queues nothing longer, so one record always fits an empty transfer. No [`Up`]
-/// comes near it; the largest is a forwarded 1024-byte frame.
-pub const RECORD_MAX: usize = PAYLOAD_MAX - 2;
 
 /// How long one wait for the end of a transfer lasts before checking whether the edge
 /// was missed.
@@ -85,6 +80,7 @@ impl Shared {
     /// Out of line, with the encode buffer, to keep both out of the callers' frames.
     #[inline(never)]
     pub fn push(&self, msg: &Up) {
+        // No `Up` comes near `RECORD_MAX`; the largest is a forwarded 1024-byte frame.
         let mut record = [0; RECORD_MAX];
         // Only a record longer than any `Up` fails, and the ring counts its own drops.
         if let Ok(len) = encode_up(msg, &mut record) {
@@ -169,10 +165,9 @@ pub struct Link {
     radio_jobs_high_water: u32,
     /// Radio jobs refused because their queue was full.
     radio_jobs_dropped: u32,
-    /// A record read from the ring that did not fit the last transfer, sent first in the
-    /// next. Static, since it holds up to [`RECORD_MAX`] bytes.
-    held: &'static mut [u8; RECORD_MAX],
-    held_len: usize,
+    /// A record from the rings that did not fit the last transfer. Static, since it holds
+    /// up to [`RECORD_MAX`] bytes.
+    held: &'static mut Held,
 }
 
 impl Link {
@@ -181,7 +176,7 @@ impl Link {
         mac: Mac,
         cause: ResetCause,
         phase: LoopPhase,
-        held: &'static mut [u8; RECORD_MAX],
+        held: &'static mut Held,
     ) -> Self {
         Self {
             boot,
@@ -201,7 +196,6 @@ impl Link {
             radio_jobs_high_water: 0,
             radio_jobs_dropped: 0,
             held,
-            held_len: 0,
         }
     }
 
@@ -407,24 +401,11 @@ impl Link {
         let mut packer = Packer::new(&mut buf[HEADER_LEN..HEADER_LEN + PAYLOAD_MAX]);
         let mut up = shared.up.borrow_mut();
         let mut priority = shared.priority.borrow_mut();
-        loop {
-            if self.held_len == 0 {
-                // One read takes a whole record: `Shared::push` queues none longer than
-                // `held`. So the priority ring wins only between records.
-                let (len, _) = if !priority.is_empty() {
-                    priority.read(&mut self.held[..])
-                } else if !up.is_empty() {
-                    up.read(&mut self.held[..])
-                } else {
-                    break;
-                };
-                self.held_len = len;
-            }
-            if !packer.push_encoded(&self.held[..self.held_len]) {
-                break;
-            }
-            self.held_len = 0;
-        }
+        // One read takes a whole record: `Shared::push` queues none longer than
+        // `RECORD_MAX`. So the priority ring wins only between records.
+        self.held.pack(&mut packer, |out| {
+            if priority.is_empty() { up.read(out).0 } else { priority.read(out).0 }
+        });
         drop((up, priority));
         let len = packer.len();
         seal(buf, if len == 0 { Kind::Idle } else { Kind::Messages }, seq, len);
