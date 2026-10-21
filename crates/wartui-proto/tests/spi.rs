@@ -469,10 +469,7 @@ fn spi_held_holds_nothing_when_ring_empties_mid_transfer() {
     );
 
     // The ring ran dry with room to spare, so nothing is held over.
-    let mut payload = [0u8; PAYLOAD_MAX];
-    let mut packer = Packer::new(&mut payload);
-    held.pack(&mut packer, |out| ring.read(out).0);
-    assert!(packer.is_empty());
+    assert!(pack_transfer(&mut held, &mut ring).is_empty());
 
     assert!(ring.push(&[3; 5]));
     assert_eq!(pack_transfer(&mut held, &mut ring), [vec![3; 5]]);

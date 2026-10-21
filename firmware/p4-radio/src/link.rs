@@ -401,8 +401,7 @@ impl Link {
         let mut packer = Packer::new(&mut buf[HEADER_LEN..HEADER_LEN + PAYLOAD_MAX]);
         let mut up = shared.up.borrow_mut();
         let mut priority = shared.priority.borrow_mut();
-        // One read takes a whole record: `Shared::push` queues none longer than
-        // `RECORD_MAX`. So the priority ring wins only between records.
+        // The priority ring wins only between records.
         self.held.pack(&mut packer, |out| {
             if priority.is_empty() { up.read(out).0 } else { priority.read(out).0 }
         });

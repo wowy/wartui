@@ -96,13 +96,13 @@ impl<'a> Packer<'a> {
 
     /// Appends one record, or returns `false` and changes nothing when it does not fit.
     pub fn push_encoded(&mut self, record: &[u8]) -> bool {
-        let end = self.len + 2 + record.len();
+        let end = self.len + PREFIX + record.len();
         let Ok(record_len) = u16::try_from(record.len()) else { return false };
         if end > self.payload.len() {
             return false;
         }
-        self.payload[self.len..self.len + 2].copy_from_slice(&record_len.to_le_bytes());
-        self.payload[self.len + 2..end].copy_from_slice(record);
+        self.payload[self.len..self.len + PREFIX].copy_from_slice(&record_len.to_le_bytes());
+        self.payload[self.len + PREFIX..end].copy_from_slice(record);
         self.len = end;
         true
     }
@@ -122,7 +122,10 @@ impl<'a> Packer<'a> {
 
 /// The longest record: a payload less its record's length prefix. A queue that holds none
 /// longer always fits its record into an empty transfer.
-pub const RECORD_MAX: usize = super::PAYLOAD_MAX - 2;
+pub const RECORD_MAX: usize = super::PAYLOAD_MAX - PREFIX;
+
+/// Bytes of length prefix ahead of each record.
+const PREFIX: usize = 2;
 
 /// A record taken from a queue that did not fit the last transfer, sent first in the next.
 #[derive(Debug)]
@@ -142,7 +145,8 @@ impl Held {
     /// held for the next transfer — or `next` has none.
     ///
     /// `next` copies one whole record into the buffer it is given and returns its length,
-    /// or 0 when nothing is queued.
+    /// or 0 when nothing is queued. `next` must read from a queue holding no record longer
+    /// than [`RECORD_MAX`], so that one read is a whole record.
     pub fn pack(&mut self, packer: &mut Packer<'_>, mut next: impl FnMut(&mut [u8]) -> usize) {
         loop {
             if self.len == 0 {
@@ -170,7 +174,7 @@ impl Default for Held {
 pub fn records(payload: &[u8]) -> impl Iterator<Item = &[u8]> {
     let mut rest = payload;
     core::iter::from_fn(move || {
-        let (head, tail) = rest.split_first_chunk::<2>()?;
+        let (head, tail) = rest.split_first_chunk::<PREFIX>()?;
         let len = usize::from(u16::from_le_bytes(*head));
         if len == 0 || len > tail.len() {
             return None;

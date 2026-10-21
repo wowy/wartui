@@ -192,8 +192,6 @@ impl Link {
         }
         let mut packer = Packer::new(&mut buf[HEADER_LEN..HEADER_LEN + PAYLOAD_MAX]);
         let mut down = shared.down.borrow_mut();
-        // One read takes a whole record: `Shared::push_down` queues none longer than
-        // `RECORD_MAX`.
         self.held.pack(&mut packer, |out| down.read(out).0);
         drop(down);
         let len = packer.len();
