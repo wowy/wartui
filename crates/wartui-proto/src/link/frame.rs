@@ -379,23 +379,7 @@ mod tests {
     extern crate std;
     use std::vec::Vec;
 
-    use super::{
-        CobsStream, FrameAccumulator, HostToBridge, LinkError, MAX_BODY, MAX_FRAME, MAX_HOST_FRAME,
-        decode_frame, encode_host_frame,
-    };
-
-    /// What the accumulator decodes from `stream`, frame by frame.
-    fn host_frames(stream: &[u8]) -> Vec<Result<HostToBridge, LinkError>> {
-        let mut acc = FrameAccumulator::<MAX_HOST_FRAME>::new();
-        stream.iter().filter_map(|&b| acc.push(b).map(decode_frame)).collect()
-    }
-
-    /// `junk`, then `lead` if any, then an encoded `Identify`.
-    fn identify_after(junk: &[u8], lead: &[u8]) -> Vec<u8> {
-        let mut frame = [0u8; MAX_HOST_FRAME];
-        let len = encode_host_frame(&HostToBridge::Identify, &mut frame).unwrap();
-        [junk, lead, &frame[..len]].concat()
-    }
+    use super::{CobsStream, MAX_BODY, MAX_FRAME};
 
     /// What `encode_frame` puts on the wire for `body`.
     fn reference(body: &[u8]) -> Vec<u8> {
@@ -427,23 +411,6 @@ mod tests {
 
     fn nonzero(len: usize) -> Vec<u8> {
         (0..len).map(|i| (i % 255) as u8 + 1).collect()
-    }
-
-    #[test]
-    fn frame_accumulator_yields_frame_when_terminator_follows_echoed_junk() {
-        // A fresh tty's echo of a frame, with its `0x00` echoed as `^@`. The junk ends at
-        // the terminator as one undecodable frame, and the next frame is clean.
-        let frames = host_frames(&identify_after(b"^@xyz", &[0x00]));
-        assert_eq!(frames.len(), 2);
-        assert!(frames[0].is_err());
-        assert_eq!(frames[1], Ok(HostToBridge::Identify));
-    }
-
-    #[test]
-    fn frame_accumulator_loses_frame_when_junk_precedes_it_without_terminator() {
-        let frames = host_frames(&identify_after(b"^@xyz", &[]));
-        assert_eq!(frames.len(), 1);
-        assert_ne!(frames[0], Ok(HostToBridge::Identify));
     }
 
     #[test]

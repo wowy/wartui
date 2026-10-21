@@ -1040,9 +1040,10 @@ fn write_loop(
 /// buffer, so the two stay one write and one packet (`connect`).
 fn encode_for_wire(cmd: &HostToBridge, lead: bool, buf: &mut [u8]) -> Result<usize, LinkError> {
     let start = usize::from(lead);
-    let (head, rest) = buf.split_at_mut_checked(start).ok_or(LinkError::BufferTooSmall)?;
-    head.fill(0x00);
-    Ok(start + encode_host_frame(cmd, rest)?)
+    if lead {
+        *buf.first_mut().ok_or(LinkError::BufferTooSmall)? = 0x00;
+    }
+    Ok(start + encode_host_frame(cmd, &mut buf[start..])?)
 }
 
 /// Whether this board's silence says it has stopped being the bridge.
@@ -1136,7 +1137,7 @@ mod tests {
     fn serial_link_leads_with_terminator_when_frame_is_first_on_connection() {
         let mut expected = [0u8; MAX_HOST_FRAME];
         let len = encode_host_frame(&HostToBridge::Identify, &mut expected).unwrap();
-        let mut buf = [0u8; MAX_HOST_FRAME + 1];
+        let mut buf = [0xFF_u8; MAX_HOST_FRAME + 1];
         let n = encode_for_wire(&HostToBridge::Identify, true, &mut buf).unwrap();
         assert_eq!(buf[0], 0x00);
         assert_eq!(&buf[1..n], &expected[..len]);
@@ -1146,7 +1147,7 @@ mod tests {
     fn serial_link_writes_frame_alone_when_frame_is_not_first() {
         let mut expected = [0u8; MAX_HOST_FRAME];
         let len = encode_host_frame(&HostToBridge::Identify, &mut expected).unwrap();
-        let mut buf = [0u8; MAX_HOST_FRAME + 1];
+        let mut buf = [0xFF_u8; MAX_HOST_FRAME + 1];
         let n = encode_for_wire(&HostToBridge::Identify, false, &mut buf).unwrap();
         assert_eq!(&buf[..n], &expected[..len]);
     }
