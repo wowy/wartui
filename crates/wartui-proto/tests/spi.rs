@@ -1,15 +1,16 @@
 //! The P4–C6 SPI link: its framing, its frozen hello, and the messages it carries.
 
 use heapless::Vec;
+use wartui_proto::frame_ring::FrameRing;
 use wartui_proto::link::{
     BridgeToHost, Chip, HostToBridge, LogLevel, LoopPhase, MAX_ESPNOW_V2_PAYLOAD, MAX_NODE_PAYLOAD,
     QueueId, QueueStat, SendStatus, ShortStr, crc16,
 };
 use wartui_proto::reset::ResetCause;
 use wartui_proto::spi::{
-    CORE_VERSION, CRC_OFFSET, Down, HEADER_LEN, HELLO_LEN, Hello, Kind, MAGIC, PAYLOAD_MAX, Packer,
-    RadioStatus, SeqCheck, SeqNote, TRANSFER_LEN, Up, VerifyError, decode_down, decode_up,
-    encode_down, encode_up, records, seal, verify,
+    CORE_VERSION, CRC_OFFSET, Down, HEADER_LEN, HELLO_LEN, Held, Hello, Kind, MAGIC, PAYLOAD_MAX,
+    Packer, RECORD_MAX, RadioStatus, SeqCheck, SeqNote, TRANSFER_LEN, Up, VerifyError, decode_down,
+    decode_up, encode_down, encode_up, records, seal, verify,
 };
 
 fn log(text: &str) -> Up {
@@ -30,6 +31,18 @@ fn sealed_idle() -> [u8; TRANSFER_LEN] {
     let mut buf = [0u8; TRANSFER_LEN];
     seal(&mut buf, Kind::Idle, 7, 0);
     buf
+}
+
+/// Packs one transfer from `ring` through `held` and returns the records it carries.
+fn pack_transfer<const N: usize>(
+    held: &mut Held,
+    ring: &mut FrameRing<N>,
+) -> std::vec::Vec<std::vec::Vec<u8>> {
+    let mut payload = [0u8; PAYLOAD_MAX];
+    let mut packer = Packer::new(&mut payload);
+    held.pack(&mut packer, |out| ring.read(out).0);
+    let len = packer.len();
+    records(&payload[..len]).map(<[u8]>::to_vec).collect()
 }
 
 fn rewrite_crc(buf: &mut [u8; TRANSFER_LEN]) {
@@ -425,4 +438,58 @@ fn spi_seq_check_reports_gap_and_repeat() {
     let mut check = SeqCheck::new();
     check.note(u32::MAX);
     assert_eq!(check.note(0), SeqNote::InOrder);
+}
+
+#[test]
+fn spi_held_sends_record_whole_in_next_transfer_when_it_does_not_fit() {
+    let mut ring = FrameRing::<4096>::new();
+    let mut held = Held::new();
+    // Two 900-byte records take 1,804 of the payload's bytes; the third needs 302 more.
+    for (fill, len) in [(1, 900), (2, 900), (3, 300), (4, 100)] {
+        assert!(ring.push(&vec![fill; len]));
+    }
+    assert_eq!(pack_transfer(&mut held, &mut ring), [vec![1; 900], vec![2; 900]]);
+    assert_eq!(pack_transfer(&mut held, &mut ring), [vec![3; 300], vec![4; 100]]);
+}
+
+#[test]
+fn spi_held_holds_nothing_when_ring_empties_mid_transfer() {
+    let mut ring = FrameRing::<256>::new();
+    let mut held = Held::new();
+    assert!(ring.push(&[1; 10]));
+    assert!(ring.push(&[2; 20]));
+    let mut payload = [0u8; PAYLOAD_MAX];
+    let mut packer = Packer::new(&mut payload);
+    assert!(packer.push_encoded(&[0; 40]));
+    held.pack(&mut packer, |out| ring.read(out).0);
+    let len = packer.len();
+    assert_eq!(
+        records(&payload[..len]).collect::<std::vec::Vec<_>>(),
+        [&[0; 40][..], &[1; 10], &[2; 20]]
+    );
+
+    // The ring ran dry with room to spare, so nothing is held over.
+    assert!(pack_transfer(&mut held, &mut ring).is_empty());
+
+    assert!(ring.push(&[3; 5]));
+    assert_eq!(pack_transfer(&mut held, &mut ring), [vec![3; 5]]);
+}
+
+#[test]
+fn spi_held_fills_transfer_exactly_when_record_is_record_max() {
+    let mut ring = FrameRing::<4096>::new();
+    let mut held = Held::new();
+    assert!(ring.push(&[7; RECORD_MAX]));
+    let mut payload = [0u8; PAYLOAD_MAX];
+    let mut packer = Packer::new(&mut payload);
+    held.pack(&mut packer, |out| ring.read(out).0);
+    assert_eq!(packer.len(), PAYLOAD_MAX);
+    assert_eq!(records(&payload).collect::<std::vec::Vec<_>>(), [&[7; RECORD_MAX][..]]);
+
+    // Behind any other record a `RECORD_MAX` record cannot fit, so it waits for an empty
+    // transfer, where it always does.
+    assert!(ring.push(&[1; 10]));
+    assert!(ring.push(&[8; RECORD_MAX]));
+    assert_eq!(pack_transfer(&mut held, &mut ring), [vec![1; 10]]);
+    assert_eq!(pack_transfer(&mut held, &mut ring), [vec![8; RECORD_MAX]]);
 }

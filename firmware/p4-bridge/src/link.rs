@@ -31,18 +31,12 @@ use wartui_proto::link::{BridgeToHost, Chip, LogStr, LoopPhase, ShortStr};
 use wartui_proto::mac::Mac;
 use wartui_proto::reset::ResetCause;
 use wartui_proto::spi::{
-    HEADER_LEN, Hello, Kind, LINK_REVISION, PAYLOAD_MAX, Packer, SeqCheck, SeqNote, TRANSFER_LEN,
-    Up, VerifyError, decode_up, records, seal, verify,
+    HEADER_LEN, Held, Hello, Kind, LINK_REVISION, PAYLOAD_MAX, Packer, SeqCheck, SeqNote,
+    TRANSFER_LEN, Up, VerifyError, decode_up, records, seal, verify,
 };
 use wartui_proto::split::{PairEvent, RadioState};
 
 use crate::Shared;
-
-/// The longest encoded record: a payload less its record's length prefix.
-///
-/// The down queue holds nothing longer, so one record always fits an empty transfer. The
-/// largest `Down` is a relayed 1470-byte ESP-NOW send.
-pub const RECORD_MAX: usize = PAYLOAD_MAX - 2;
 
 /// How long one wait for READY lasts before checking whether its edge was missed.
 const READY_TIMEOUT: Duration = Duration::from_millis(100);
@@ -71,10 +65,9 @@ pub struct Link {
     /// C6 records that did not decode, and how many of them have been reported.
     undecoded: u32,
     undecoded_said: u32,
-    /// A record read from the down queue that did not fit the last transfer, sent first
-    /// in the next. Static, since it holds up to [`RECORD_MAX`] bytes.
-    held: &'static mut [u8; RECORD_MAX],
-    held_len: usize,
+    /// A record from the down queue that did not fit the last transfer. Static, since it
+    /// holds up to [`RECORD_MAX`](wartui_proto::spi::RECORD_MAX) bytes.
+    held: &'static mut Held,
 }
 
 impl Link {
@@ -83,7 +76,7 @@ impl Link {
         mac: Mac,
         cause: ResetCause,
         phase: LoopPhase,
-        held: &'static mut [u8; RECORD_MAX],
+        held: &'static mut Held,
     ) -> Self {
         Self {
             boot,
@@ -96,7 +89,6 @@ impl Link {
             undecoded: 0,
             undecoded_said: 0,
             held,
-            held_len: 0,
         }
     }
 
@@ -200,21 +192,7 @@ impl Link {
         }
         let mut packer = Packer::new(&mut buf[HEADER_LEN..HEADER_LEN + PAYLOAD_MAX]);
         let mut down = shared.down.borrow_mut();
-        loop {
-            if self.held_len == 0 {
-                if down.is_empty() {
-                    break;
-                }
-                // One read takes a whole record: `Shared::push_down` queues none longer
-                // than `held`.
-                let (len, _) = down.read(&mut self.held[..]);
-                self.held_len = len;
-            }
-            if !packer.push_encoded(&self.held[..self.held_len]) {
-                break;
-            }
-            self.held_len = 0;
-        }
+        self.held.pack(&mut packer, |out| down.read(out).0);
         drop(down);
         let len = packer.len();
         seal(buf, if len == 0 { Kind::Idle } else { Kind::Messages }, seq, len);

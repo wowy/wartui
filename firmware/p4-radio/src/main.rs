@@ -40,10 +40,10 @@ use wartui_firmware::radio::{self, Dones, Heard, Jobs, Payloads};
 use wartui_firmware::{phase, reboot, reset_cause};
 use wartui_proto::frame_ring::FrameRing;
 use wartui_proto::link::LoopPhase;
-use wartui_proto::spi::{TRANSFER_LEN, Up};
+use wartui_proto::spi::{Held, TRANSFER_LEN, Up};
 
 use crate::config::{RADIO_JOBS, SEND_JOBS};
-use crate::link::{Bus, Link, RECORD_MAX, Radio, Shared, UpPriority, UpQueue, link_loop};
+use crate::link::{Bus, Link, Radio, Shared, UpPriority, UpQueue, link_loop};
 
 // This creates the app descriptor the esp-idf bootloader expects.
 esp_bootloader_esp_idf::esp_app_desc!();
@@ -85,7 +85,7 @@ static UP_PRIORITY: ConstStaticCell<UpPriority> =
     ConstStaticCell::new(UpPriority::new(FrameRing::new()));
 
 /// The record that did not fit the last transfer.
-static HELD: ConstStaticCell<[u8; RECORD_MAX]> = ConstStaticCell::new([0; RECORD_MAX]);
+static HELD: ConstStaticCell<Held> = ConstStaticCell::new(Held::new());
 
 /// The radio jobs [`radio::run_jobs`] works through, in arrival order.
 static JOBS: ConstStaticCell<Jobs<RADIO_JOBS>> = ConstStaticCell::new(Jobs::new());

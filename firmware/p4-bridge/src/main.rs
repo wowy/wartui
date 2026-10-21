@@ -67,11 +67,11 @@ use wartui_proto::link::{
 };
 #[cfg(feature = "gps")]
 use wartui_proto::link::{GpsBytes, GpsWriteBytes, LogLevel, LogStr};
-use wartui_proto::spi::{Down, TRANSFER_LEN, encode_down};
+use wartui_proto::spi::{Down, Held, RECORD_MAX, TRANSFER_LEN, encode_down};
 use wartui_proto::split::{Pair, PairEvent, RADIO_WAIT_MS};
 
 use crate::config::{DOWN_QUEUE_BYTES, HOST_BULK_BYTES, HOST_PRIORITY_BYTES, SPI_KHZ};
-use crate::link::{Bus, Link, RECORD_MAX, run_link};
+use crate::link::{Bus, Link, run_link};
 
 // This creates the app descriptor the esp-idf bootloader expects.
 esp_bootloader_esp_idf::esp_app_desc!();
@@ -87,7 +87,7 @@ static HOST_QUEUE: ConstStaticCell<HostFrames> = ConstStaticCell::new(HostQueue:
 /// `Down` records waiting for the C6.
 static DOWN_QUEUE: ConstStaticCell<DownQueue> = ConstStaticCell::new(FrameRing::new());
 /// The record that did not fit the last transfer.
-static HELD: ConstStaticCell<[u8; RECORD_MAX]> = ConstStaticCell::new([0; RECORD_MAX]);
+static HELD: ConstStaticCell<Held> = ConstStaticCell::new(Held::new());
 
 /// A DMA buffer of one transfer, with its descriptors, in static internal RAM. Each use
 /// has its own statics.
@@ -212,6 +212,7 @@ impl Shared {
     /// say so, and an evicted send would never be answered.
     #[inline(never)]
     fn push_down(&self, down: &Down) -> bool {
+        // The largest `Down` is a relayed 1470-byte ESP-NOW send.
         let mut record = [0; RECORD_MAX];
         let mut ring = self.down.borrow_mut();
         // Each record sits behind the ring's two-byte length.
