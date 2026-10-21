@@ -231,7 +231,6 @@ fn radio_up(shared: &Shared) -> bool {
 pub async fn run_link(bus: Bus, link: &mut Link, shared: &Shared) -> ! {
     let Bus { mut spi, mut ready, mut rx, mut tx } = bus;
     link.prepare(tx_bytes(&mut tx), shared);
-    // Until READY first rises, the C6 is booting rather than missing an edge, so no wait counts.
     while with_timeout(READY_TIMEOUT, ready.wait_for_rising_edge()).await.is_err() && ready.is_low()
     {
     }

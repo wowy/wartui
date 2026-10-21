@@ -129,7 +129,7 @@ pub struct SpiLoss {
     pub bad_magic: u64,
     /// C6→P4 transfers whose sequence number skipped.
     pub seq_gap: u64,
-    /// Waits for the C6's READY line that timed out.
+    /// Waits for the C6's READY line that timed out after it first armed.
     pub ready_timeouts: u64,
     /// Timeouts after which the link recovered.
     pub ready_recovered: u64,
