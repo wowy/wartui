@@ -501,7 +501,7 @@ pub struct SpiStats {
     pub seq_gap: u32,
     /// Waits for the C6's READY line that timed out after it first armed.
     pub ready_timeouts: u32,
-    /// Timeouts after which the link recovered.
+    /// Of `ready_timeouts`, those whose transfer went ahead anyway.
     pub ready_recovered: u32,
     /// P4→C6 transfers the C6 saw fail their CRC, from its `RadioStatus`.
     pub radio_crc_fail: u32,
