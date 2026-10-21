@@ -187,6 +187,8 @@ CREATE TABLE IF NOT EXISTS observation (
 -- `rx_count` so the two pair closely but not exactly: between two rows, the `rx_count`
 -- difference less the `host_frames` difference is frames lost on USB plus the bridge's
 -- `dropped_tx`, give or take the frames queued behind the reply, which overtakes them.
+-- The `spi_*` columns are the P4 split bridge's SPI link counters since boot, named as
+-- `SpiStats` names them, and NULL for a bridge without that link.
 CREATE TABLE IF NOT EXISTS bridge_status (
   id INTEGER PRIMARY KEY,
   rx_at INTEGER NOT NULL,
@@ -195,7 +197,28 @@ CREATE TABLE IF NOT EXISTS bridge_status (
   dropped_tx INTEGER NOT NULL,
   uptime_ms INTEGER NOT NULL,
   host_frames INTEGER NOT NULL,
-  rx_oversize INTEGER NOT NULL
+  rx_oversize INTEGER NOT NULL,
+  spi_transfers INTEGER,
+  spi_crc_fail INTEGER,
+  spi_bad_magic INTEGER,
+  spi_seq_gap INTEGER,
+  spi_ready_timeouts INTEGER,
+  spi_ready_recovered INTEGER,
+  spi_radio_crc_fail INTEGER,
+  spi_radio_bad_magic INTEGER,
+  spi_radio_seq_gap INTEGER
+);
+
+-- One row per queue a bridge status reply reported, with the reply's since-boot figures:
+-- `high_water` is the most the queue has held since the bridge booted, `dropped` what it
+-- has evicted or refused. `queue` names it as `wartui status` does, and the name settles
+-- whether the counts are bytes or entries.
+CREATE TABLE IF NOT EXISTS bridge_queue (
+  status_id INTEGER NOT NULL REFERENCES bridge_status(id),
+  queue TEXT NOT NULL,
+  capacity INTEGER NOT NULL,
+  high_water INTEGER NOT NULL,
+  dropped INTEGER NOT NULL
 );
 
 -- One row at the start, every 5 s, and at shutdown: the host's own state, sampled on a timer of
@@ -1211,11 +1234,14 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
                 ])?;
             }
             Record::BridgeStatus(status) => {
+                let spi = status.spi;
                 tx.prepare_cached(
                     "INSERT INTO bridge_status
                        (rx_at, peer_count, rx_count, dropped_tx, uptime_ms, host_frames,
-                        rx_oversize)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                        rx_oversize, spi_transfers, spi_crc_fail, spi_bad_magic, spi_seq_gap,
+                        spi_ready_timeouts, spi_ready_recovered, spi_radio_crc_fail,
+                        spi_radio_bad_magic, spi_radio_seq_gap)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
                 )?
                 .execute(params![
                     status.rx_at_ms,
@@ -1225,7 +1251,30 @@ fn write_batch(conn: &mut Connection, pending: &[Record]) -> Result<Duration, ru
                     status.uptime_ms,
                     column(status.host_frames),
                     status.rx_oversize,
+                    spi.map(|s| s.transfers),
+                    spi.map(|s| s.crc_fail),
+                    spi.map(|s| s.bad_magic),
+                    spi.map(|s| s.seq_gap),
+                    spi.map(|s| s.ready_timeouts),
+                    spi.map(|s| s.ready_recovered),
+                    spi.map(|s| s.radio_crc_fail),
+                    spi.map(|s| s.radio_bad_magic),
+                    spi.map(|s| s.radio_seq_gap),
                 ])?;
+                let status_id = tx.last_insert_rowid();
+                let mut insert = tx.prepare_cached(
+                    "INSERT INTO bridge_queue (status_id, queue, capacity, high_water, dropped)
+                     VALUES (?1,?2,?3,?4,?5)",
+                )?;
+                for q in &status.queues {
+                    insert.execute(params![
+                        status_id,
+                        q.queue.name(),
+                        q.capacity,
+                        q.high_water,
+                        q.dropped
+                    ])?;
+                }
             }
             Record::HostStatus(host) => {
                 tx.prepare_cached(
@@ -1302,6 +1351,8 @@ mod tests {
             uptime_ms: 0,
             host_frames: 0,
             rx_oversize: 0,
+            queues: Default::default(),
+            spi: None,
         })
     }
 

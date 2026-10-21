@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use wartui_proto::air::RecordKind;
 use wartui_proto::beacon::visible_ssid;
+use wartui_proto::link::{QueueStats, SpiStats};
 use wartui_proto::mac::Mac;
 use wartui_proto::plan::{ChannelPool, ChannelSet};
 use wartui_proto::reset::ResetCause;
@@ -90,7 +91,7 @@ pub struct Heartbeat {
 
 /// One status reply from the bridge, as sent. Counters are the bridge's since boot, so a reboot
 /// shows as values falling. The engine's since-attach figure is not recorded.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BridgeStatusSeen {
     /// Unix milliseconds of receipt.
     pub rx_at_ms: i64,
@@ -108,6 +109,11 @@ pub struct BridgeStatusSeen {
     pub host_frames: u64,
     /// Frames too long to be a node's that it dropped since its boot. Not in `rx_count`.
     pub rx_oversize: u32,
+    /// Its queues' capacity, high-water mark and drops since its boot; empty when it reports
+    /// none.
+    pub queues: QueueStats,
+    /// Its SPI link's counters since its boot; `None` off the P4 split bridge.
+    pub spi: Option<SpiStats>,
 }
 
 /// The host's own state, sampled every few seconds and at shutdown.

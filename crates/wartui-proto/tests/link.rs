@@ -611,18 +611,34 @@ fn round_trip(event: &BridgeToHost) -> BridgeToHost {
 }
 
 #[test]
+fn queue_id_lists_every_variant_when_all_read() {
+    // The match is exhaustive, so a new variant fails to compile here until `ALL` lists it.
+    for (index, id) in QueueId::ALL.into_iter().enumerate() {
+        let declared = match id {
+            QueueId::RadioUp => 0,
+            QueueId::RadioSendJobs => 1,
+            QueueId::RadioDown => 2,
+            QueueId::HostPriority => 3,
+            QueueId::HostBulk => 4,
+            QueueId::RadioUpPriority => 5,
+            QueueId::RadioJobs => 6,
+        };
+        assert_eq!(index, declared, "{id:?}");
+    }
+}
+
+#[test]
+fn queue_id_round_trips_name_when_every_id_named() {
+    for id in QueueId::ALL {
+        assert_eq!(QueueId::from_name(id.name()), Some(id), "{id:?}");
+    }
+    assert_eq!(QueueId::from_name("host"), None);
+}
+
+#[test]
 fn link_round_trips_status_with_queues_and_spi() {
-    const IDS: [QueueId; 7] = [
-        QueueId::RadioUp,
-        QueueId::RadioSendJobs,
-        QueueId::RadioDown,
-        QueueId::HostPriority,
-        QueueId::HostBulk,
-        QueueId::RadioUpPriority,
-        QueueId::RadioJobs,
-    ];
     let mut queues = QueueStats::new();
-    for (i, queue) in (1u32..).zip(IDS.into_iter().cycle().take(8)) {
+    for (i, queue) in (1u32..).zip(QueueId::ALL.into_iter().cycle().take(8)) {
         queues
             .push(QueueStat {
                 queue,

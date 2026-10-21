@@ -130,6 +130,9 @@ export summary:
 
 ```
   bridge     1,203,551 frames received  1,300 dropped (0.1%)  1 reboot  host read 1,202,240  11 lost on USB
+  queue      host-bulk  peak 1,024/262,144 bytes  0 dropped
+  queue      radio-jobs  peak 20/32 entries  0 dropped
+  spi        48,210 transfers  2 crc_fail  1 ready_timeouts (1 recovered)
   host       147 not stored: 140 retries  7 incompatible  0 store dropped  behind ≥100 ms 31 times (worst 412 ms)  slowest commit 58 ms  queue peak 1,204
   health     under-voltage in 3 samples  throttled in 0  since boot: under-voltage  temp max 71.2 °C  battery min 3.62 V
   batches    212 lost between node and host
@@ -143,6 +146,8 @@ export summary:
 | Line          | What it counts                                                                  |
 |---------------|---------------------------------------------------------------------------------|
 | `bridge`      | Frames the bridge received, dropped as the host fell behind, and lost on USB    |
+| `queue`       | One of the bridge's queues: the most it held against its size, and its drops    |
+| `spi`         | The P4 split bridge's SPI transfers, and its link errors that are not zero      |
 | `host`        | Frames the host read but did not store, and how the host and its store held up  |
 | `health`      | Under-voltage and throttling the Pi firmware reported, temperature, battery     |
 | `batches`     | Sighting batches lost between node and host; the fleet table's `lost`           |
@@ -152,9 +157,12 @@ export summary:
 Counts follow the assumptions below; `lost on USB` is approximate. The capture's first bridge
 reply and first heartbeat per node are baselines, so what was dropped before the capture began
 is not counted. `batches` and `bridge` print zeros, since "0 lost" is the answer. So do
-`store dropped` and, on a Pi, the `health` counts. Left out:
+`store dropped`, `queue` drops and, on a Pi, the `health` counts. A `queue` peak is the most
+the queue held since the bridge booted, so it can predate the capture. Left out:
 
 - the `bridge` line, when the capture holds no status reply
+- `queue` lines, when the bridge reports no queues
+- the `spi` line, off the P4 split bridge
 - the `unsent` clause, total or per node, when it is zero
 - `buffer full` figures that are zero, and the `buffer full` line when all are
 - the reboot clause, when the bridge never restarted
@@ -886,7 +894,8 @@ The footer shows faults only once they happen, so a clean run has a clean footer
   host does not, so it appears only here.
 - **`bridge dropped`**: frames lost since this host attached. `wartui status` reports the total
   since the bridge booted, which is large and harmless on a dongle left powered with nothing
-  listening. Every status reply is kept as a `bridge_status` row, with its since-boot counts.
+  listening. Every status reply is kept as a `bridge_status` row, with its since-boot counts and
+  SPI link counters, and a `bridge_queue` row per queue it reported.
 - **`57:84 at 2 dBm, assigned 6 dBm`**: that node's radio reports a transmit power other than the
   assignment it holds. It refused the power and kept its previous one. `57:84 cannot read its
   transmit power` means it could not report one at all. Power-cycle that node; if it persists, it

@@ -412,6 +412,49 @@ pub enum QueueId {
     RadioJobs,
 }
 
+impl QueueId {
+    /// Every queue, in declaration order.
+    pub const ALL: [Self; 7] = [
+        Self::RadioUp,
+        Self::RadioSendJobs,
+        Self::RadioDown,
+        Self::HostPriority,
+        Self::HostBulk,
+        Self::RadioUpPriority,
+        Self::RadioJobs,
+    ];
+
+    /// The name `wartui status` and a capture's `bridge_queue` rows give this queue.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::RadioUp => "radio-up",
+            Self::RadioSendJobs => "radio-send-jobs",
+            Self::RadioDown => "radio-down",
+            Self::HostPriority => "host-priority",
+            Self::HostBulk => "host-bulk",
+            Self::RadioUpPriority => "radio-up-priority",
+            Self::RadioJobs => "radio-jobs",
+        }
+    }
+
+    /// What this queue's capacity, high-water mark and drops count: `"bytes"` or `"entries"`.
+    pub fn unit(self) -> &'static str {
+        match self {
+            Self::RadioSendJobs | Self::RadioJobs => "entries",
+            Self::RadioUp
+            | Self::RadioDown
+            | Self::HostPriority
+            | Self::HostBulk
+            | Self::RadioUpPriority => "bytes",
+        }
+    }
+
+    /// The queue [`QueueId::name`] gives `name`, or `None` for a name it never gives.
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|id| id.name() == name)
+    }
+}
+
 /// How full a queue has been, and what it has lost.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct QueueStat {
