@@ -252,6 +252,7 @@ impl Link {
             Stage::Installed if !self.install_noted => {
                 self.install_noted = true;
                 shared.pair.borrow_mut().note_installed(now_ms);
+                shared.deadline_set.signal(());
             }
             Stage::Installed => {}
             Stage::Failed(failure) => {

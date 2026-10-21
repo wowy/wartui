@@ -493,3 +493,38 @@ fn pair_resets_radio_trial_boots_times_then_gives_up_when_no_hello_follows_insta
     assert!(pair.fault().unwrap().contains("not answering"));
     assert_eq!(pair.on_tick(now + RADIO_WAIT_MS), PairEvent::None);
 }
+
+#[test]
+fn pair_deadline_is_boot_wait_when_waiting() {
+    assert_eq!(pair().next_deadline_ms(), Some(RADIO_WAIT_MS));
+}
+
+#[test]
+fn pair_deadline_is_none_when_up() {
+    assert_eq!(up_pair().next_deadline_ms(), None);
+}
+
+#[test]
+fn pair_deadline_is_install_wait_when_installed() {
+    let mut pair = updating_pair();
+    pair.note_installed(10_000);
+    assert_eq!(pair.next_deadline_ms(), Some(10_000 + RADIO_WAIT_MS));
+}
+
+#[test]
+fn pair_deadline_moves_forward_when_tick_resets_radio() {
+    let mut pair = updating_pair();
+    pair.note_installed(10_000);
+    let now = 10_000 + RADIO_WAIT_MS;
+    assert_eq!(pair.on_tick(now), PairEvent::ResetRadio);
+    assert_eq!(pair.next_deadline_ms(), Some(now + RADIO_WAIT_MS));
+}
+
+#[test]
+fn pair_deadline_is_none_when_hello_follows_install() {
+    let mut pair = updating_pair();
+    pair.note_seq(5_000);
+    pair.note_installed(10_000);
+    assert_eq!(pair.on_hello(hello(80), 0, 10_500), PairEvent::NewLife);
+    assert_eq!(pair.next_deadline_ms(), None);
+}

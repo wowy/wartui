@@ -11,9 +11,9 @@
 //!
 //! - **the SPI link** (`src/link.rs`) runs from boot, so the C6's hello arrives, and sends
 //!   the C6 the image this P4 carries (`src/radio.rs`) when it runs another;
-//! - **the radio clock** gives [`Pair`] the time every [`RADIO_TICK`], which is how it gives
-//!   up on a silent C6, and resets one silent since an update's install through its enable
-//!   pin;
+//! - **the radio clock** sleeps until [`Pair::next_deadline_ms`], or until the SPI link
+//!   notes an install, then gives [`Pair`] the time. That is how it gives up on a silent
+//!   C6, and resets one silent since an update's install through its enable pin;
 //! - **the USB device** (`src/usb.rs`) starts once the pair knows its serial number, and
 //!   runs the device, a reader, a writer and the `GetStatus` answer;
 //! - **the GPS reader** (`src/gps.rs`, with the default `gps` feature) polls a u-blox
@@ -46,6 +46,7 @@ use core::cell::{Cell, RefCell};
 #[cfg(feature = "gps")]
 use embassy_futures::join::join;
 use embassy_futures::join::join3;
+use embassy_futures::select::select;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::signal::Signal;
 #[cfg(feature = "gps")]
@@ -81,9 +82,6 @@ esp_bootloader_esp_idf::esp_app_desc!();
 
 /// How long the C6 is held in reset, at boot and when the pair asks.
 const C6_RESET_HOLD: Duration = Duration::from_millis(50);
-
-/// How often [`Pair`] is given the time.
-const RADIO_TICK: Duration = Duration::from_millis(100);
 
 type HostFrames = HostQueue<HOST_PRIORITY_BYTES, HOST_BULK_BYTES>;
 type DownQueue = FrameRing<DOWN_QUEUE_BYTES>;
@@ -145,6 +143,8 @@ pub struct Shared {
     status_asked: Signal<NoopRawMutex, ()>,
     /// The C6's counters arrived.
     radio_status: Signal<NoopRawMutex, ()>,
+    /// The pair gained a deadline, so the radio clock wakes to wait for it.
+    deadline_set: Signal<NoopRawMutex, ()>,
     /// Why no GPS receiver is being read. Sent with every announcement, because a host
     /// usually attaches after boot, and cleared when the receiver answers again.
     #[cfg(feature = "gps")]
@@ -177,6 +177,7 @@ impl Shared {
             paired: Signal::new(),
             status_asked: Signal::new(),
             radio_status: Signal::new(),
+            deadline_set: Signal::new(),
             #[cfg(feature = "gps")]
             gps_fault: Cell::new(None),
             #[cfg(feature = "gps")]
@@ -369,11 +370,17 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     match bridge.await {}
 }
 
-/// Give [`Pair`] the time every [`RADIO_TICK`]: announce the life it starts when the C6
+/// Give [`Pair`] the time at its next deadline: announce the life it starts when the C6
 /// stays silent, and reset the C6 through `c6_en` when it asks.
 async fn radio_clock(shared: &Shared, mut c6_en: Output<'static>) -> ! {
     loop {
-        Timer::after(RADIO_TICK).await;
+        let deadline = shared.pair.borrow().next_deadline_ms();
+        match deadline {
+            Some(ms) => {
+                select(Timer::at(Instant::from_millis(ms)), shared.deadline_set.wait()).await;
+            }
+            None => shared.deadline_set.wait().await,
+        }
         let event = shared.pair.borrow_mut().on_tick(now_ms());
         match event {
             PairEvent::None => {}

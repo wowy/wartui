@@ -268,6 +268,17 @@ impl Pair {
         PairEvent::None
     }
 
+    /// The earliest P4 time at which [`Pair::on_tick`] acts, or `None` while it has nothing
+    /// to wait for. A caller sleeps until then instead of polling.
+    pub fn next_deadline_ms(&self) -> Option<u64> {
+        let waiting = (self.state == RadioState::Waiting).then_some(self.boot_ms + RADIO_WAIT_MS);
+        let installed = self.installed_at.map(|at| at + RADIO_WAIT_MS);
+        match (waiting, installed) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    }
+
     /// The C6's current state.
     pub fn state(&self) -> &RadioState {
         &self.state
