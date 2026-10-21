@@ -994,7 +994,7 @@ Beyond the counters, `wartui status` prints what the bridge reports about its in
   other records for the P4: send results, lines and its status), `radio-down` (the P4's records for
   the C6), `host-priority` and `host-bulk` (its two queues of frames for the host).
 - **`spi  …`**, on a P4 bridge: the SPI link's transfers and its error counters at each end.
-  Errors other than a few `ready_timeouts` at boot mean the link is losing transfers.
+  Any error count means the link is losing transfers.
 - **`radio  …`**, on a P4 bridge: the C6's address, firmware, reset cause and last phase. After a
   C6 restart under a running P4, `last reset` names the C6's cause too.
 

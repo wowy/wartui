@@ -499,7 +499,7 @@ pub struct SpiStats {
     pub bad_magic: u32,
     /// C6→P4 transfers whose sequence number skipped.
     pub seq_gap: u32,
-    /// Waits for the C6's READY line that timed out.
+    /// Waits for the C6's READY line that timed out after it first armed.
     pub ready_timeouts: u32,
     /// Timeouts after which the link recovered.
     pub ready_recovered: u32,
