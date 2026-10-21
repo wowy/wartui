@@ -9,7 +9,8 @@
 //! received buffer and the next transfer's preparation all happen while that wait is
 //! listening. An edge that comes meanwhile is latched rather than missed. A wait that
 //! times out with READY high anyway is an armed C6 whose edge was missed, counted in
-//! `ready_recovered`, and the transfer starts.
+//! `ready_recovered`, and the transfer starts. A wait before the C6 first arms is not
+//! counted: the C6 is still booting, not missing an edge.
 //!
 //! The P4 sends its hello while the C6 is sending its own, and stops once the C6 sends
 //! anything else. The C6 sends its hello until it hears the P4's, so this covers a C6
@@ -230,8 +231,11 @@ fn radio_up(shared: &Shared) -> bool {
 pub async fn run_link(bus: Bus, link: &mut Link, shared: &Shared) -> ! {
     let Bus { mut spi, mut ready, mut rx, mut tx } = bus;
     link.prepare(tx_bytes(&mut tx), shared);
+    while with_timeout(READY_TIMEOUT, ready.wait_for_rising_edge()).await.is_err() && ready.is_low()
+    {
+    }
     // The C6 is armed: its READY rose, or was found high after a timeout.
-    let mut armed = false;
+    let mut armed = true;
     loop {
         if !armed {
             armed = with_timeout(READY_TIMEOUT, ready.wait_for_rising_edge()).await.is_ok()
