@@ -7,7 +7,7 @@ use wartui_proto::link::{
 use wartui_proto::ota::TRIAL_BOOTS;
 use wartui_proto::reset::ResetCause;
 use wartui_proto::spi::{Hello, LINK_REVISION, RadioStatus};
-use wartui_proto::split::{Pair, PairEvent, RADIO_WAIT_MS, RadioState, Route};
+use wartui_proto::split::{INSTALL_WAIT_MS, Pair, PairEvent, RADIO_WAIT_MS, RadioState, Route};
 
 const OWN_MAC: [u8; 6] = [1, 1, 1, 1, 1, 1];
 const C6_MAC: [u8; 6] = [6, 6, 6, 6, 6, 6];
@@ -411,6 +411,22 @@ fn pair_updates_and_refuses_commands_when_digest_differs() {
 }
 
 #[test]
+fn pair_reads_records_when_updating_on_matching_revision() {
+    assert!(updating_pair().reads_records());
+    assert!(up_pair().reads_records());
+}
+
+#[test]
+fn pair_reads_no_records_when_updating_on_other_revision() {
+    let mut pair = pair();
+    let mut other = hello_running(900, Some(OTHER));
+    other.link_rev = LINK_REVISION + 1;
+    pair.on_hello(other, 0, 1_000);
+    assert!(matches!(pair.state(), RadioState::Updating(_)));
+    assert!(!pair.reads_records());
+}
+
+#[test]
 fn pair_comes_up_with_new_life_when_hello_after_install_matches_bundle() {
     let mut pair = updating_pair();
     pair.note_seq(5_000);
@@ -421,7 +437,7 @@ fn pair_comes_up_with_new_life_when_hello_after_install_matches_bundle() {
     // The new life is the C6's, so the host sees its reset cause.
     assert_eq!(cause(pair.ready(9_500)), (ResetCause::Software, LoopPhase::Boot));
     // No reset follows a hello.
-    assert_eq!(pair.on_tick(9_000 + 10 * RADIO_WAIT_MS), PairEvent::None);
+    assert_eq!(pair.on_tick(9_000 + 10 * INSTALL_WAIT_MS), PairEvent::None);
 }
 
 #[test]
@@ -480,18 +496,18 @@ fn pair_updates_when_digest_is_zeros() {
 fn pair_resets_radio_trial_boots_times_then_gives_up_when_no_hello_follows_install() {
     let mut pair = updating_pair();
     pair.note_installed(10_000);
-    assert_eq!(pair.on_tick(10_000 + RADIO_WAIT_MS - 1), PairEvent::None);
+    assert_eq!(pair.on_tick(10_000 + INSTALL_WAIT_MS - 1), PairEvent::None);
     let mut now = 10_000;
     for _ in 0..TRIAL_BOOTS {
-        now += RADIO_WAIT_MS;
+        now += INSTALL_WAIT_MS;
         assert_eq!(pair.on_tick(now), PairEvent::ResetRadio);
         assert_eq!(pair.on_tick(now + 1), PairEvent::None);
     }
-    now += RADIO_WAIT_MS;
+    now += INSTALL_WAIT_MS;
     assert_eq!(pair.on_tick(now), PairEvent::NewLife);
     assert_eq!(pair.state(), &RadioState::Absent);
     assert!(pair.fault().unwrap().contains("not answering"));
-    assert_eq!(pair.on_tick(now + RADIO_WAIT_MS), PairEvent::None);
+    assert_eq!(pair.on_tick(now + INSTALL_WAIT_MS), PairEvent::None);
 }
 
 #[test]
@@ -508,16 +524,16 @@ fn pair_deadline_is_none_when_up() {
 fn pair_deadline_is_install_wait_when_installed() {
     let mut pair = updating_pair();
     pair.note_installed(10_000);
-    assert_eq!(pair.next_deadline_ms(), Some(10_000 + RADIO_WAIT_MS));
+    assert_eq!(pair.next_deadline_ms(), Some(10_000 + INSTALL_WAIT_MS));
 }
 
 #[test]
 fn pair_deadline_moves_forward_when_tick_resets_radio() {
     let mut pair = updating_pair();
     pair.note_installed(10_000);
-    let now = 10_000 + RADIO_WAIT_MS;
+    let now = 10_000 + INSTALL_WAIT_MS;
     assert_eq!(pair.on_tick(now), PairEvent::ResetRadio);
-    assert_eq!(pair.next_deadline_ms(), Some(now + RADIO_WAIT_MS));
+    assert_eq!(pair.next_deadline_ms(), Some(now + INSTALL_WAIT_MS));
 }
 
 #[test]

@@ -7,9 +7,9 @@
 //!
 //! The ESP-NOW half is [`wartui_firmware::radio`], the single-chip bridge's own, so the two
 //! bridges cannot drift. Updates arrive from the P4 over the link and boot on trial, through
-//! the node's flash code ([`wartui_firmware::ota`]). Three futures share one task: the radio's jobs, `hear_loop`
-//! draining the receive queue, and the link. Each waits on an interrupt rather than
-//! polling, but for the one call `src/link.rs` names.
+//! [`wartui_firmware::ota`], the flash code a node uses. Three futures share one task: the
+//! radio's jobs, `hear_loop` draining the receive queue, and the link. Each waits on an
+//! interrupt rather than polling, but for the one call `src/link.rs` names.
 //!
 //! `README.md` has the build command.
 #![no_std]

@@ -101,7 +101,11 @@ fn bundle_radio() {
     let elf = target_dir.join("riscv32imac-unknown-none-elf/release/wartui-p4-radio-fw");
     let bin = out.join("radio.bin");
     let mut save = Command::new("espflash");
-    save.args(["save-image", "--skip-update-check", "--chip", "esp32c6", "--partition-table"])
+    save.args(["save-image", "--skip-update-check", "--chip", "esp32c6"])
+        // As the wired flash's runner in `firmware/p4-radio/.cargo/config.toml` writes them:
+        // the header is under the digest, so a difference reflashes a C6 already on this build.
+        .args(["--flash-mode", "dio", "--flash-freq", "40mhz", "--flash-size", "4mb"])
+        .arg("--partition-table")
         .arg(radio.join("partitions.csv"))
         .arg(&elf)
         .arg(&bin);

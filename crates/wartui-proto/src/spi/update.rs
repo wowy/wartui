@@ -24,12 +24,18 @@
 //!   for that sector arrives. The C6's flash work holds its link loop, so a chunk sent during
 //!   a flush waits behind it anyway, and the window keeps the C6 from falling behind.
 //! - **The status's `next_offset` is where it resumes**, ahead or behind, so a chunk lost to
-//!   a bad CRC costs one rewind.
+//!   a bad CRC costs one rewind. Statuses trail the ops by a transfer or two, so the chunks
+//!   already in flight past a loss draw statuses naming the same offset. The sender ignores
+//!   those after rewinding to it; resending for each would send every chunk after it twice.
 //! - **Silence re-sends the last op that wanted an answer**, every [`REPLY_WAIT_MS`], and gives
 //!   up after [`TRIES`]. A re-sent chunk always draws a status: taken, it flushes its sector;
 //!   already held, it is a duplicate.
-//! - **`Install` is sent once and wants no answer.** A C6 that installs reboots, and the pair
-//!   learns the outcome from its next hello (`crate::split`).
+//! - **A C6 that reports no session is sent `Begin` again**, at most [`TRIES`] times.
+//! - **`Install` goes every [`REPLY_WAIT_MS`] until the link stops asking**, which it does
+//!   when the C6's next hello ends the update (`crate::split`). A lost `Install` would
+//!   leave the C6 on its old image. A repeat is harmless: a C6 that installed has rebooted
+//!   and holds no session, and one that did not answers with a status, which the sender
+//!   ignores.
 
 use crate::air::{OTA_CHUNK, OtaState, OtaStatusMsg};
 use crate::ota::SECTOR;
@@ -190,7 +196,7 @@ fn le_u32(b: &[u8]) -> u32 {
 pub enum Stage {
     /// Still sending, or waiting for a status.
     Sending,
-    /// `Install` went out. Nothing more is sent.
+    /// `Install` went out. Only `Install` is sent again.
     Installed,
     /// The C6 refused the image, or stopped answering.
     Failed(Failure),
@@ -204,6 +210,8 @@ pub enum Failure {
     Refused(OtaState),
     /// [`TRIES`] sends of one op went unanswered.
     Silent,
+    /// The C6 reported holding no session more than [`TRIES`] times.
+    LostSession,
 }
 
 /// The next op to send.
@@ -241,6 +249,10 @@ pub struct Sender<'a> {
     tries: u32,
     /// Restarts after the C6 reported no session.
     restarts: u32,
+    /// The offset of the last rewind, until a status reports the C6 past it.
+    rewound_to: Option<u32>,
+    /// When `Install` was last sent.
+    install_sent_ms: u64,
     stage: Stage,
 }
 
@@ -266,6 +278,8 @@ impl<'a> Sender<'a> {
             asked: None,
             tries: 0,
             restarts: 0,
+            rewound_to: None,
+            install_sent_ms: 0,
             stage: Stage::Sending,
         }
     }
@@ -276,8 +290,16 @@ impl<'a> Sender<'a> {
     /// # Panics
     /// If `out` is shorter than [`OP_MAX`].
     pub fn next(&mut self, now_ms: u64, out: &mut [u8]) -> Option<usize> {
-        if self.stage != Stage::Sending {
-            return None;
+        match self.stage {
+            Stage::Sending => {}
+            Stage::Installed => {
+                if now_ms.saturating_sub(self.install_sent_ms) < REPLY_WAIT_MS {
+                    return None;
+                }
+                self.install_sent_ms = now_ms;
+                return Some(Op::Install { session: self.session }.encode(out));
+            }
+            Stage::Failed(_) => return None,
         }
         if let Some((asked, at)) = self.asked {
             if now_ms.saturating_sub(at) < REPLY_WAIT_MS {
@@ -289,6 +311,9 @@ impl<'a> Sender<'a> {
             }
             self.tries += 1;
             self.asked = Some((asked, now_ms));
+            // The silence outlasted anything in flight, so this op's status is current, even
+            // one naming the last rewind's offset again.
+            self.rewound_to = None;
             return Some(self.encode_asked(asked, out));
         }
         let len = self.len();
@@ -311,6 +336,7 @@ impl<'a> Sender<'a> {
             Step::Commit => Some(self.ask(Asked::Commit, now_ms, out)),
             Step::Install => {
                 self.stage = Stage::Installed;
+                self.install_sent_ms = now_ms;
                 Some(Op::Install { session: self.session }.encode(out))
             }
         }
@@ -324,14 +350,20 @@ impl<'a> Sender<'a> {
         let len = self.len();
         match status.state {
             OtaState::Receiving => {
+                let next = status.next_offset.min(len);
+                // A chunk sent before the rewind to `next`, reporting the gap it fell in.
+                if self.rewound_to == Some(next) {
+                    return;
+                }
+                self.rewound_to = (next < self.offset).then_some(next);
                 self.asked = None;
                 self.tries = 0;
-                self.acked = self.acked.max(status.next_offset.min(len));
-                if status.next_offset >= len {
+                self.acked = self.acked.max(next);
+                if next >= len {
                     self.step = Step::Commit;
                 } else {
                     self.step = Step::Chunks;
-                    self.offset = status.next_offset;
+                    self.offset = next;
                 }
             }
             OtaState::Verified => {
@@ -339,12 +371,15 @@ impl<'a> Sender<'a> {
                 self.acked = len;
                 self.step = Step::Install;
             }
-            // The C6 holds no session: it lost it, so start again, at most `TRIES` times.
+            // The C6 holds no session: it lost it, so start again, at most `TRIES` times. Until
+            // `Begin` is answered, an op sent before it may still report the lost session.
+            OtaState::Idle if self.step == Step::Begin => {}
             OtaState::Idle => {
                 self.asked = None;
+                self.rewound_to = None;
                 self.restarts += 1;
                 if self.restarts > TRIES {
-                    self.stage = Stage::Failed(Failure::Silent);
+                    self.stage = Stage::Failed(Failure::LostSession);
                 }
                 self.step = Step::Begin;
                 self.offset = 0;

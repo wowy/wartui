@@ -194,7 +194,7 @@ fn spi_hello_round_trips_when_chip_is_p4() {
 }
 
 #[test]
-fn spi_hello_decodes_ignoring_bytes_appended_past_image() {
+fn spi_hello_ignores_appended_bytes_when_payload_runs_past_image() {
     // A later build may append fields; this build reads the frozen 83 bytes and no more.
     let hello = Hello {
         link_rev: 1,

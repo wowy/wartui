@@ -52,11 +52,9 @@ jobs:
         with:
           targets: riscv32imafc-unknown-none-elf,riscv32imac-unknown-none-elf
 
-      # espflash links libudev for its serial ports.
-      - name: Install espflash
-        run: |
-          sudo apt-get update && sudo apt-get install -y libudev-dev
-          cargo install espflash --locked
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: espflash@4.6.0
 
       - name: Lint
         run: |

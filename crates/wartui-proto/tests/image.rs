@@ -49,7 +49,7 @@ fn image_digest_finds_appended_digest_when_image_has_several_segments() {
 }
 
 #[test]
-fn image_digest_ignores_bytes_past_the_digest() {
+fn image_digest_finds_digest_when_slot_continues_past_image() {
     // A slot holds the image and whatever follows it on flash.
     let mut image = app_image(&[40, 2], true);
     let digest = image[image.len() - 32..].to_vec();

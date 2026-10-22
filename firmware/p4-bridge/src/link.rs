@@ -18,7 +18,10 @@
 //! every C6 transfer, since a hello whose seq falls below the last is a restart.
 //!
 //! Records flow only while the pair bridges (`Pair::bridges`): a C6 that encodes them
-//! differently is sent nothing but `Idle`, and its records are not read.
+//! differently is sent nothing but `Idle`, and its records are not read. A C6 updating on
+//! this P4's revision has its records read too (`Pair::reads_records`), so its lines about
+//! the update reach the host. Only its lines and status are relayed then; the frames it
+//! received meanwhile are dropped.
 //!
 //! While the pair is `Updating`, each transfer carries the next op from a
 //! [`Sender`] of the bundled image ([`crate::radio`]), and the C6's statuses come back as
@@ -159,9 +162,12 @@ impl Link {
             }
             Kind::Messages => {
                 self.past_hello(transfer.seq, shared);
-                if radio_up(shared) {
+                let pair = shared.pair.borrow();
+                let (read, bridging) = (pair.reads_records(), pair.bridges());
+                drop(pair);
+                if read {
                     for record in records(transfer.payload) {
-                        self.relay(record, shared);
+                        self.relay(record, bridging, shared);
                     }
                 }
             }
@@ -190,13 +196,19 @@ impl Link {
         shared.pair.borrow_mut().note_seq(seq);
     }
 
-    /// Act on one record from the C6.
+    /// Act on one record from the C6. Unless `bridging`, only its lines and status.
     ///
     /// Out of line: a decoded [`Up`] is over 1 KB.
     #[inline(never)]
-    fn relay(&mut self, record: &[u8], shared: &Shared) {
+    fn relay(&mut self, record: &[u8], bridging: bool, shared: &Shared) {
         match decode_up(record) {
-            Ok(Up::Message(msg)) => shared.push_host(&msg),
+            Ok(Up::Message(msg))
+                if bridging
+                    || matches!(msg, BridgeToHost::Log { .. } | BridgeToHost::Error { .. }) =>
+            {
+                shared.push_host(&msg);
+            }
+            Ok(Up::Message(_)) => {}
             Ok(Up::RadioStatus(status)) => {
                 shared.pair.borrow_mut().note_radio_status(status);
                 shared.radio_status.signal(());
@@ -262,6 +274,10 @@ impl Link {
                         write!(text, "the radio refused the bundled image: {state:?}")
                     }
                     Failure::Silent => write!(text, "the radio stopped answering its update"),
+                    Failure::LostSession => write!(
+                        text,
+                        "the radio kept dropping the update session; check its partition table"
+                    ),
                 };
                 shared.pair.borrow_mut().on_update_failed();
                 shared.push_host(&BridgeToHost::Error { message: text });

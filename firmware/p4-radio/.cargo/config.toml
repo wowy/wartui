@@ -10,5 +10,7 @@ rustflags = [
 # nothing may toggle a reset line: pass `--port <the USB-to-TTL adapter>`. The partition
 # table path is relative to where cargo runs, so `cargo run` works from this directory.
 # otadata is erased so the bootloader boots ota_0, where the app goes, whatever slot an
-# update from the P4 last selected.
-runner = "espflash flash --before no-reset --after no-reset --partition-table partitions.csv --erase-parts otadata"
+# update from the P4 last selected. The flash mode, frequency and size go into the image
+# header, which the image's digest covers, so they match the image `firmware/p4-bridge/build.rs`
+# bundles: left to detection, a C6 with other flash would get another digest and be reflashed.
+runner = "espflash flash --before no-reset --after no-reset --partition-table partitions.csv --erase-parts otadata --flash-mode dio --flash-freq 40mhz --flash-size 4mb"

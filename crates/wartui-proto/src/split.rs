@@ -44,9 +44,17 @@ use crate::ota::image::DIGEST_LEN;
 use crate::reset::ResetCause;
 use crate::spi::{Hello, LINK_REVISION, RadioStatus};
 
-/// How long the P4 waits for the C6's first hello before enumerating USB with its own MAC,
-/// and for its hello after an update's install before resetting it.
+/// How long the P4 waits for the C6's first hello before enumerating USB with its own MAC.
 pub const RADIO_WAIT_MS: u64 = 2_000;
+
+/// How long the P4 waits for the C6's hello after an update's install, or after resetting
+/// it since, before resetting it again.
+///
+/// Before the new image's first hello the C6 erases the trial sector, rewrites `otadata`,
+/// reboots, and writes the trial's boot count before Wi-Fi starts. Each reset counts a
+/// trial boot and the third rolls back, so a wait too short rolls back a good image that
+/// boots slowly.
+pub const INSTALL_WAIT_MS: u64 = 10_000;
 
 /// What the P4 knows of its C6.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -219,7 +227,7 @@ impl Pair {
     }
 
     /// The P4 sent the C6 `Install` at `now_ms`. Until a hello follows, [`Pair::on_tick`]
-    /// resets the C6 every [`RADIO_WAIT_MS`].
+    /// resets the C6 every [`INSTALL_WAIT_MS`].
     pub fn note_installed(&mut self, now_ms: u64) {
         if matches!(self.state, RadioState::Updating(_)) {
             self.installed_at = Some(now_ms);
@@ -254,7 +262,7 @@ impl Pair {
             return PairEvent::NewLife;
         }
         if let Some(at) = self.installed_at
-            && now_ms.saturating_sub(at) >= RADIO_WAIT_MS
+            && now_ms.saturating_sub(at) >= INSTALL_WAIT_MS
         {
             if self.resets < TRIAL_BOOTS {
                 self.resets += 1;
@@ -272,7 +280,7 @@ impl Pair {
     /// to wait for. A caller sleeps until then instead of polling.
     pub fn next_deadline_ms(&self) -> Option<u64> {
         let waiting = (self.state == RadioState::Waiting).then_some(self.boot_ms + RADIO_WAIT_MS);
-        let installed = self.installed_at.map(|at| at + RADIO_WAIT_MS);
+        let installed = self.installed_at.map(|at| at + INSTALL_WAIT_MS);
         match (waiting, installed) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
@@ -288,6 +296,15 @@ impl Pair {
     /// revision.
     pub fn bridges(&self) -> bool {
         matches!(self.state, RadioState::Up(_) | RadioState::Stale(_))
+    }
+
+    /// Whether the C6's records are read: while it bridges, and while it updates speaking this
+    /// P4's revision, so its lines about the update reach the host.
+    pub fn reads_records(&self) -> bool {
+        match &self.state {
+            RadioState::Updating(hello) => hello.link_rev == LINK_REVISION,
+            _ => self.bridges(),
+        }
     }
 
     fn radio_hello(&self) -> Option<&Hello> {

@@ -52,6 +52,9 @@ sector. The flash half is the node's too (`firmware/common/src/ota.rs`).
    install.
 
 The runner erases `otadata`, so a wired flash always boots `ota_0`, where it writes the app.
+It also names the flash mode, frequency and size (DIO, 40 MHz, 4 MB), as the P4's build does
+when it saves the bundled image. They sit in the header the digest covers, so a C6 flashed by
+wire from the same tree carries the bundled digest and is not reflashed.
 
 **The high-speed USB port always drives 5 V.** A cable from it to a PC must leave VBUS
 unconnected, or it back-feeds the PC whenever the Type-C is also connected; see

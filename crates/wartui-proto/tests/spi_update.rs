@@ -1,6 +1,8 @@
 //! The SPI link's update payload, and the P4's sender driven against a C6 built on the
 //! node's update receiver.
 
+use std::collections::VecDeque;
+
 use sha2::{Digest, Sha256};
 use wartui_proto::air::{
     Board, OTA_CHUNK, OtaBeginMsg, OtaChunkMsg, OtaCommitMsg, OtaState, OtaStatusMsg, Version,
@@ -111,28 +113,49 @@ fn sent(op: &Op<'_>) -> Sent {
 
 /// Runs the sender against `c6` one millisecond per transfer, answering at once, until it
 /// stops sending. `lose` drops an op on its way down. Returns what was sent.
-fn run(sender: &mut Sender<'_>, c6: &mut FakeC6, mut lose: impl FnMut(Sent) -> bool) -> Vec<Sent> {
+fn run(sender: &mut Sender<'_>, c6: &mut FakeC6, lose: impl FnMut(Sent) -> bool) -> Vec<Sent> {
+    run_late(sender, c6, 0, lose).0
+}
+
+/// [`run`], with each answer reaching the sender `lag` transfers late, as the link's
+/// double buffering delays it. Also returns the time the sender stopped.
+fn run_late(
+    sender: &mut Sender<'_>,
+    c6: &mut FakeC6,
+    lag: usize,
+    mut lose: impl FnMut(Sent) -> bool,
+) -> (Vec<Sent>, u64) {
     let mut buf = [0u8; OP_MAX];
     let mut log = Vec::new();
+    let mut answers = VecDeque::new();
     for now in 0..1_000_000 {
+        let mut answer = None;
         if let Some(len) = sender.next(now, &mut buf) {
             let op = Op::decode(&buf[..len]).expect("an op");
             log.push(sent(&op));
-            if !lose(sent(&op))
-                && let Some(status) = c6.take(&buf[..len])
-            {
-                sender.on_status(&status);
+            if !lose(sent(&op)) {
+                answer = c6.take(&buf[..len]);
             }
         }
+        answers.push_back(answer);
+        if answers.len() > lag
+            && let Some(status) = answers.pop_front().flatten()
+        {
+            sender.on_status(&status);
+        }
         if sender.stage() != Stage::Sending {
-            return log;
+            return (log, now);
         }
     }
     panic!("the sender never finished");
 }
 
+fn chunks(log: &[Sent]) -> usize {
+    log.iter().filter(|s| matches!(s, Sent::Chunk(_))).count()
+}
+
 #[test]
-fn spi_update_op_has_frozen_layout_for_each_op() {
+fn spi_update_op_encodes_frozen_layout_when_any_op() {
     let mut out = [0u8; OP_MAX];
     let mut sha256 = [0u8; 32];
     sha256[0] = 0xAA;
@@ -180,7 +203,7 @@ fn spi_update_op_fits_one_transfer_when_chunk_is_full() {
 }
 
 #[test]
-fn spi_update_decodes_none_when_op_unknown() {
+fn spi_update_op_decodes_none_when_op_unknown() {
     for op in [0u8, 6, 0xFF] {
         assert_eq!(Op::decode(&[op, 7, 0, 0, 0, 0, 0]), None);
     }
@@ -188,7 +211,7 @@ fn spi_update_decodes_none_when_op_unknown() {
 }
 
 #[test]
-fn spi_update_decodes_none_when_payload_short() {
+fn spi_update_op_decodes_none_when_payload_short() {
     let mut out = [0u8; OP_MAX];
     let ops = [
         Op::Begin { session: 7, len: 10, sha256: [1; 32] },
@@ -204,14 +227,14 @@ fn spi_update_decodes_none_when_payload_short() {
 }
 
 #[test]
-fn spi_update_decodes_none_when_chunk_longer_than_ota_chunk() {
+fn spi_update_op_decodes_none_when_chunk_longer_than_ota_chunk() {
     let mut payload = vec![2, 7, 0, 0, 0, 0];
     payload.extend_from_slice(&[0; OTA_CHUNK + 1]);
     assert_eq!(Op::decode(&payload), None);
 }
 
 #[test]
-fn sender_installs_image_when_c6_verifies_it() {
+fn spi_update_sender_installs_image_when_c6_verifies_it() {
     // A partial last sector, and a whole number of sectors.
     for len in [3 * SECTOR + 1_500, 4 * SECTOR] {
         let image = image(len);
@@ -224,13 +247,12 @@ fn sender_installs_image_when_c6_verifies_it() {
         assert_eq!(c6.slot.flash[..len], image[..]);
         assert_eq!(log.first(), Some(&Sent::Begin));
         assert_eq!(log[log.len() - 2..], [Sent::Commit, Sent::Install]);
-        let chunks = log.iter().filter(|s| matches!(s, Sent::Chunk(_))).count();
-        assert_eq!(chunks, len.div_ceil(OTA_CHUNK));
+        assert_eq!(chunks(&log), len.div_ceil(OTA_CHUNK));
     }
 }
 
 #[test]
-fn sender_rewinds_to_next_offset_when_status_names_a_gap() {
+fn spi_update_sender_rewinds_to_next_offset_when_status_names_a_gap() {
     let image = image(2 * SECTOR);
     let mut sender = Sender::new(&image, sha256(&image), &DIGEST);
     let mut c6 = FakeC6::new();
@@ -258,7 +280,7 @@ fn sender_rewinds_to_next_offset_when_status_names_a_gap() {
 }
 
 #[test]
-fn sender_waits_for_status_when_a_sector_is_sent() {
+fn spi_update_sender_waits_for_status_when_a_sector_is_sent() {
     let image = image(2 * SECTOR);
     let mut sender = Sender::new(&image, sha256(&image), &DIGEST);
     let mut c6 = FakeC6::new();
@@ -282,7 +304,7 @@ fn sender_waits_for_status_when_a_sector_is_sent() {
 }
 
 #[test]
-fn sender_fails_when_c6_reports_hash_mismatch() {
+fn spi_update_sender_fails_when_c6_reports_hash_mismatch() {
     let image = image(SECTOR + 100);
     let mut sender = Sender::new(&image, [0; 32], &DIGEST);
     let mut c6 = FakeC6::new();
@@ -293,7 +315,7 @@ fn sender_fails_when_c6_reports_hash_mismatch() {
 }
 
 #[test]
-fn sender_retries_then_fails_when_no_status_arrives() {
+fn spi_update_sender_retries_then_fails_when_no_status_arrives() {
     let image = image(SECTOR);
     let mut sender = Sender::new(&image, sha256(&image), &DIGEST);
     let mut buf = [0u8; OP_MAX];
@@ -309,7 +331,7 @@ fn sender_retries_then_fails_when_no_status_arrives() {
 }
 
 #[test]
-fn sender_ignores_status_when_session_differs() {
+fn spi_update_sender_ignores_status_when_session_differs() {
     let image = image(SECTOR);
     let mut sender = Sender::new(&image, sha256(&image), &DIGEST);
     let mut buf = [0u8; OP_MAX];
@@ -320,4 +342,75 @@ fn sender_ignores_status_when_session_differs() {
         next_offset: 0,
     });
     assert_eq!(sender.stage(), Stage::Sending);
+}
+
+#[test]
+fn spi_update_sender_resends_each_lost_chunk_once_when_statuses_arrive_late() {
+    let image = image(4 * SECTOR);
+    let total = image.len().div_ceil(OTA_CHUNK);
+    for lag in [1, 2] {
+        // The first chunk of a sector, so a resend of every chunk after it would show.
+        for lost_at in [SECTOR as u32, 0] {
+            let mut sender = Sender::new(&image, sha256(&image), &DIGEST);
+            let mut c6 = FakeC6::new();
+            let mut lost = false;
+            let (log, _) = run_late(&mut sender, &mut c6, lag, |sent| {
+                let lose = !lost && sent == Sent::Chunk(lost_at);
+                lost |= lose;
+                lose
+            });
+            assert_eq!(sender.stage(), Stage::Installed, "lag {lag}");
+            assert_eq!(c6.slot.flash[..image.len()], image[..]);
+            // The lost chunk, the next whose status names the gap, and the `lag` chunks sent
+            // before that status arrives.
+            assert!(chunks(&log) <= total + 2 + lag, "lag {lag}, lost at {lost_at}: {log:?}");
+        }
+    }
+}
+
+#[test]
+fn spi_update_sender_resends_install_when_no_hello_follows() {
+    let image = image(SECTOR);
+    let mut sender = Sender::new(&image, sha256(&image), &DIGEST);
+    let mut c6 = FakeC6::new();
+    let (log, at) = run_late(&mut sender, &mut c6, 0, |sent| sent == Sent::Install);
+    assert_eq!(log.last(), Some(&Sent::Install));
+    assert_eq!(c6.installed, None);
+    let mut buf = [0u8; OP_MAX];
+    assert_eq!(sender.next(at + REPLY_WAIT_MS - 1, &mut buf), None);
+    for n in 1..=3 {
+        let now = at + n * REPLY_WAIT_MS;
+        let len = sender.next(now, &mut buf).expect("Install again");
+        assert_eq!(c6.take(&buf[..len]), None);
+        assert_eq!(sender.next(now + 1, &mut buf), None);
+    }
+    assert_eq!(c6.installed, Some(SESSION));
+    assert_eq!(sender.stage(), Stage::Installed);
+}
+
+#[test]
+fn spi_update_sender_fails_with_lost_session_when_c6_keeps_dropping_it() {
+    let image = image(2 * SECTOR);
+    let mut sender = Sender::new(&image, sha256(&image), &DIGEST);
+    let mut c6 = FakeC6::new();
+    let mut buf = [0u8; OP_MAX];
+    let mut begins = 0;
+    for now in 0..100_000 {
+        let Some(len) = sender.next(now, &mut buf) else { continue };
+        let op = sent(&Op::decode(&buf[..len]).unwrap());
+        if op == Sent::Begin {
+            begins += 1;
+        } else {
+            // The C6 loses its session before every chunk.
+            c6.receiver.reset();
+        }
+        if let Some(status) = c6.take(&buf[..len]) {
+            sender.on_status(&status);
+        }
+        if sender.stage() != Stage::Sending {
+            break;
+        }
+    }
+    assert_eq!(sender.stage(), Stage::Failed(Failure::LostSession));
+    assert_eq!(begins, TRIES + 1);
 }

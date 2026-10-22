@@ -23,10 +23,11 @@
 //! host is a node's; `firmware/common/src/ota.rs` has the trial.
 //!
 //! **An update arrives as [`Kind::Update`] transfers** (`wartui_proto::spi::update`), which
-//! drive the node's receiver over the same flash code. Each status goes up in the next
-//! transfer, ahead of any records. A sector's flash work holds the loop, so the next READY
-//! waits for it; the P4 sends no radio records while it updates. `Install` on a verified
-//! session switches slots and reboots, and the P4 hears the new image's hello.
+//! drive [`wartui_proto::ota::Receiver`] over [`wartui_firmware::ota`], as a node's update
+//! frames do. Each status goes up in the next transfer, ahead of any records. A sector's
+//! flash work holds the loop, so the next READY waits for it; the P4 sends no radio records
+//! while it updates. `Install` on a verified session switches slots and reboots, and the P4
+//! hears the new image's hello.
 
 use core::cell::{Cell, RefCell};
 use core::fmt::{self, Write};
