@@ -4,10 +4,13 @@ name: Release
 # tree. `wartui flash-fleet` and `wartui flash-bridge` in a release binary fetch their images from
 # the release named by the tag baked into it (`WARTUI_RELEASE_TAG`), so the host, the fleet and the
 # bridge it flashes always share a tree. The asset names and feature sets below must match the
-# variant tables in `crates/wartui/src/flash/mod.rs`. Each image is merged — bootloader, partition
-# table and app, flashed at 0x0 — and `SHA256SUMS` is what the host checks a download against. A
-# node's is merged with `firmware/node/partitions.csv`, and each node variant is also published
-# app-only (`wartui-node-app-*.bin`): the image one app slot holds.
+# variant tables in `crates/wartui/src/flash/mod.rs`, except the P4 bridge's merged image, which
+# only a first flash by hand uses. Each image is merged — bootloader, partition table and app,
+# flashed at 0x0 — and `SHA256SUMS` is what the host checks a download against. A node's is
+# merged with `firmware/node/partitions.csv`, and each node variant is also published app-only
+# (`wartui-node-app-*.bin`): the image one app slot holds. The P4 bridge publishes both too, made
+# with `firmware/p4-bridge/partitions.csv`: the merged image for its first flash, and the app
+# image `flash-bridge` sends it over USB.
 
 on:
   push:
@@ -133,6 +136,64 @@ jobs:
           path: ${{matrix.app}}
           archive: false
 
+  p4-bridge:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+      # The C6's target too: `build.rs` builds `firmware/p4-radio` and saves its image with
+      # espflash, which is installed first for that reason.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: riscv32imafc-unknown-none-elf,riscv32imac-unknown-none-elf
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+
+      - name: Install espflash
+        run: cargo install espflash --locked
+
+      # The firmware job's check, for the crates the P4 links: it has no radio and no allocator.
+      - name: One copy of each pinned crate
+        run: |
+          pushd firmware/p4-bridge
+          resolved=$(cargo tree --locked -e normal --prefix none --format '{p}' \
+            | awk '{print $1, $2}' | sort -u)
+          for c in esp-hal esp-rtos esp-storage esp-sync; do
+            n=$(printf '%s\n' "$resolved" | grep -c "^$c " || true)
+            if [ "$n" != 1 ]; then
+              printf '%s\n' "$resolved" | grep "^$c " || true
+              echo "::error::$c resolves to $n versions, expected exactly 1"
+              exit 1
+            fi
+          done
+          popd
+
+      - name: Build
+        run: |
+          pushd firmware/p4-bridge
+          cargo build --release --locked
+          popd
+
+      - name: Save the merged and app images
+        run: |
+          elf=firmware/p4-bridge/target/riscv32imafc-unknown-none-elf/release/wartui-p4-bridge-fw
+          table=(--partition-table firmware/p4-bridge/partitions.csv)
+          espflash save-image --skip-update-check --chip esp32p4 --merge --skip-padding \
+            "${table[@]}" "$elf" wartui-p4-bridge-fw-esp32p4.bin
+          espflash save-image --skip-update-check --chip esp32p4 \
+            "${table[@]}" "$elf" wartui-p4-bridge-app-esp32p4.bin
+
+      - uses: actions/upload-artifact@v7
+        with:
+          path: wartui-p4-bridge-fw-esp32p4.bin
+          archive: false
+
+      - uses: actions/upload-artifact@v7
+        with:
+          path: wartui-p4-bridge-app-esp32p4.bin
+          archive: false
+
   host:
     strategy:
       matrix:
@@ -167,7 +228,7 @@ jobs:
           archive: false
 
   release:
-    needs: [firmware, host]
+    needs: [firmware, p4-bridge, host]
     runs-on: ubuntu-latest
     permissions:
       contents: write

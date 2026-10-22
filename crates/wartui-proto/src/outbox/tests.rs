@@ -125,6 +125,7 @@ fn ready() -> BridgeToHost {
         panel: None,
         gps: false,
         radio: None,
+        image: None,
     }
 }
 

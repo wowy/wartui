@@ -34,7 +34,8 @@ pub const fn is_priority(msg: &BridgeToHost) -> bool {
         BridgeToHost::Ready { .. }
         | BridgeToHost::SendResult { .. }
         | BridgeToHost::Status { .. }
-        | BridgeToHost::Error { .. } => true,
+        | BridgeToHost::Error { .. }
+        | BridgeToHost::Update(_) => true,
         BridgeToHost::Rx { .. } | BridgeToHost::Log { .. } | BridgeToHost::Gps { .. } => false,
     }
 }

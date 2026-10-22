@@ -44,7 +44,7 @@ use wartui_firmware::ota::{Note, Ota};
 use wartui_firmware::phase::mark;
 use wartui_firmware::radio::{self, Command, Done, Dones, Full, Jobs, Payloads, Said, SendDone};
 use wartui_firmware::reboot;
-use wartui_proto::air::{OtaBeginMsg, OtaChunkMsg, OtaCommitMsg, OtaState, OtaStatusMsg, Version};
+use wartui_proto::air::{OtaState, OtaStatusMsg};
 use wartui_proto::frame_ring::FrameRing;
 use wartui_proto::heapless::Vec;
 use wartui_proto::link::{
@@ -54,7 +54,7 @@ use wartui_proto::mac::Mac;
 use wartui_proto::ota::Receiver;
 use wartui_proto::ota::image::DIGEST_LEN;
 use wartui_proto::reset::ResetCause;
-use wartui_proto::spi::update::Op;
+use wartui_proto::spi::update::{Op, Received, receive};
 use wartui_proto::spi::{
     Down, HEADER_LEN, Held, Hello, Kind, LINK_REVISION, PAYLOAD_MAX, Packer, RECORD_MAX,
     RadioStatus, SeqCheck, SeqNote, TRANSFER_LEN, Up, VerifyError, decode_down, encode_up, records,
@@ -343,34 +343,15 @@ impl Link {
 
     /// Hand an update op to the receiver, keeping its status for the next transfer.
     ///
-    /// A `begin` is refused with [`OtaState::FlashError`] while this image is on trial, and
-    /// on a table without a `trial` sector or a second app slot, as a node refuses one.
+    /// A `begin` is refused while this image is on trial, and on a table without a `trial`
+    /// sector or a second app slot, as a node refuses one ([`receive`]).
     fn update(&mut self, op: Op<'_>, shared: &Shared) {
         let updates = &mut self.updates;
-        let receiver = &mut *updates.receiver;
-        let status = match op {
-            Op::Begin { session, len, sha256 } => {
-                // The link's `Begin` names no version, and the receiver checks none.
-                let version = Version::new(0, 0, 0);
-                let begin = OtaBeginMsg { session, len, sha256, version, board: receiver.board() };
-                match (updates.ota.slot(), updates.trial) {
-                    (Some(slot), false) => Some(receiver.begin(&begin, &slot)),
-                    _ => {
-                        Some(OtaStatusMsg { session, state: OtaState::FlashError, next_offset: 0 })
-                    }
-                }
-            }
-            Op::Chunk { session, offset, data } => match updates.ota.slot() {
-                Some(mut slot) => receiver.chunk(&OtaChunkMsg { session, offset, data }, &mut slot),
-                None => Some(OtaStatusMsg { session, state: OtaState::Idle, next_offset: 0 }),
-            },
-            Op::Commit { session } => match updates.ota.slot() {
-                Some(mut slot) => Some(receiver.commit(&OtaCommitMsg { session }, &mut slot)),
-                None => Some(OtaStatusMsg { session, state: OtaState::Idle, next_offset: 0 }),
-            },
-            Op::Install { session } => self.install(session, shared),
-            // Only the C6 sends a status.
-            Op::Status(_) => None,
+        let received =
+            receive(&mut *updates.receiver, op, updates.ota.slot().as_mut(), updates.trial);
+        let status = match received {
+            Received::Status(status) => status,
+            Received::Install(session) => self.install(session, shared),
         };
         if status.is_some() {
             self.updates.status = status;

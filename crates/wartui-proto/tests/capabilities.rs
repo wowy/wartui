@@ -32,7 +32,9 @@ fn round_trip(caps: Capabilities) -> Capabilities {
 
 #[test]
 fn capabilities_survives_heartbeat_round_trip_when_encoded_and_decoded() {
-    for board in [Board::Esp32c5, Board::Esp32c6, Board::Esp32c6Xiao, Board::Unknown(0x7F)] {
+    for board in
+        [Board::Esp32c5, Board::Esp32c6, Board::Esp32c6Xiao, Board::Esp32p4, Board::Unknown(0x7F)]
+    {
         let caps = Capabilities::here(board);
         assert_eq!(round_trip(caps), caps, "{caps}");
     }
@@ -70,6 +72,8 @@ fn board_maps_bytes_when_converting_to_and_from_wire() {
     assert_eq!(Board::Esp32c5.as_u8(), 1);
     assert_eq!(Board::Esp32c6.as_u8(), 2);
     assert_eq!(Board::Esp32c6Xiao.as_u8(), 3);
+    assert_eq!(Board::Esp32p4.as_u8(), 4);
+    assert_eq!(Board::from_u8(4), Board::Esp32p4);
     for byte in 0..=u8::MAX {
         assert_eq!(Board::from_u8(byte).as_u8(), byte);
     }

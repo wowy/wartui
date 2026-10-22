@@ -29,7 +29,9 @@ One image serves the Waveshare ESP32-P4-WIFI6-POE-ETH and the ESP32-P4-WIFI6.
 
 ## First flash
 
-The Type-C reaches the P4's UART0 through a CH343, so the runner needs `--port <that port>`.
+The Type-C reaches the P4's UART0 through a CH343, so the runner needs `--port <that port>`. It
+writes `partitions.csv`, the node's table with two app slots and a trial sector, and erases
+`otadata`, so the P4 boots the image just written.
 
 - **POE-ETH:** there is no auto-reset, because the CH343's RTS connects to nothing. Hold BOOT while
   plugging in the Type-C, run `cargo run --release` (or `espflash flash --chip esp32p4`), then
@@ -38,11 +40,31 @@ The Type-C reaches the P4's UART0 through a CH343, so the runner needs `--port <
   resets it normally.
 
 The C6 is flashed through its header once, and the P4 stays in download mode while it is: see
-[`firmware/p4-radio`](../p4-radio/README.md#first-flash). After that, flashing the P4 updates
+[`firmware/p4-radio`](../p4-radio/README.md#first-flash). After that, updating the P4 updates
 both chips.
 
-Updating the P4 itself over the one cable is step 3 of the design and is not built yet; until then
-the P4 is flashed by hand.
+A board on espflash's default table has no second app slot and refuses updates, saying so with
+every `Ready`. Flash it by hand once more, with this table.
+
+## Updates over USB
+
+After the first flash, `wartui flash-bridge` sends the P4 its app image over the high-speed link
+it bridges on (`crates/wartui/README.md` § "Updating a P4 bridge"). The P4 takes it through the
+update receiver the C6 and the nodes use (`src/update.rs`), switches slots and reboots into it on
+trial. The new image's bundled C6 image then reaches the C6 as below.
+
+**The first host frame confirms the image.** The host's `Identify` on reconnecting is that frame,
+so a P4 that comes back and hears `wartui` keeps its image.
+
+**A trial boot arms the RTC watchdog for 30 s.** Confirming disarms it. A hung image is reset by
+it, and the third unconfirmed boot rolls back to the image the P4 ran before. A trial P4 left
+powered with no host rolls back the same way, after two watchdog periods, about 60 s.
+
+A trial P4 whose C6 does not answer within 2 s enumerates under its own MAC, not the C6's, so
+`flash-bridge`, which looks for the C6's, never opens it to confirm it, and the image rolls back.
+
+The P4 sends the host a line for each boot step: the trial boot's count, a rollback, the confirm,
+and any step that failed.
 
 ## The bundled radio image
 
@@ -76,7 +98,7 @@ A refused or silent update also sends one line naming why: `the radio refused th
 
 The bridge enumerates as `1209:0001`, product `wartui p4 bridge`, with the bridge (C6) MAC as its
 serial number, or the P4's own MAC when the C6 never answered its hello. `wartui ports` lists it,
-`wartui flash-bridge` refuses it and `wartui flash-fleet` skips it.
+`wartui flash-bridge` updates it over this link and `wartui flash-fleet` skips it.
 
 **The high-speed port always drives 5 V.** It is the Type-A on the POE-ETH (a load switch with its
 enable tied high) and the 4-pin MX1.25 connector `P1` on the WIFI6 (pin 1 is the board's VCC_5V

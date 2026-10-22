@@ -76,7 +76,8 @@ const fn project_name(board: Board) -> Option<&'static str> {
         Board::Esp32c5 => Some("wartui-node-esp32c5"),
         Board::Esp32c6 => Some("wartui-node-esp32c6"),
         Board::Esp32c6Xiao => Some("wartui-node-esp32c6-xiao"),
-        Board::Unknown(_) => None,
+        // No node runs on a P4.
+        Board::Esp32p4 | Board::Unknown(_) => None,
     }
 }
 
@@ -86,7 +87,7 @@ const fn features(board: Board) -> Option<&'static [&'static str]> {
         Board::Esp32c5 => Some(&["esp32c5"]),
         Board::Esp32c6 => Some(&["esp32c6"]),
         Board::Esp32c6Xiao => Some(&["esp32c6", "xiao-external-antenna"]),
-        Board::Unknown(_) => None,
+        Board::Esp32p4 | Board::Unknown(_) => None,
     }
 }
 
@@ -94,7 +95,7 @@ const fn chip(board: Board) -> Option<Chip> {
     match board {
         Board::Esp32c5 => Some(Chip::Esp32c5),
         Board::Esp32c6 | Board::Esp32c6Xiao => Some(Chip::Esp32c6),
-        Board::Unknown(_) => None,
+        Board::Esp32p4 | Board::Unknown(_) => None,
     }
 }
 
@@ -105,6 +106,7 @@ pub fn board_name(board: Board) -> String {
         Board::Esp32c5 => "esp32c5".to_owned(),
         Board::Esp32c6 => "esp32c6".to_owned(),
         Board::Esp32c6Xiao => "esp32c6-xiao".to_owned(),
+        Board::Esp32p4 => "esp32p4".to_owned(),
         Board::Unknown(byte) => format!("unknown board {byte}"),
     }
 }
@@ -116,27 +118,13 @@ pub fn board_name(board: Board) -> String {
 /// project name no node board has, a version that is not `x.y.z`, a chip ID that is not the
 /// board's, or more than an app slot holds.
 pub fn parse(bytes: Vec<u8>) -> Result<AppImage> {
-    ensure!(bytes.len() >= HEADER_LEN + SEGMENT_HEADER_LEN, "too short to hold an image header");
-    ensure!(bytes[0] == IMAGE_MAGIC, "not an ESP image: no header at the start");
-    let desc_at = HEADER_LEN + SEGMENT_HEADER_LEN;
-    let first_segment = le_u32(&bytes, HEADER_LEN + 4) as usize;
-    let desc = bytes.get(desc_at..desc_at + DESC_PROJECT_AT + DESC_FIELD_LEN);
-    let Some(desc) = desc.filter(|desc| {
-        le_u32(desc, 0) == APP_DESC_MAGIC && first_segment >= DESC_PROJECT_AT + DESC_FIELD_LEN
-    }) else {
-        if bytes.get(PARTITION_TABLE_AT..PARTITION_TABLE_AT + 2) == Some(&PARTITION_MAGIC) {
-            bail!("a merged image (bootloader, partition table and app); use the app-only image");
-        }
-        bail!("no app descriptor at the start of the first segment");
-    };
-    let project = text(&desc[DESC_PROJECT_AT..DESC_PROJECT_AT + DESC_FIELD_LEN]);
+    let Descriptor { project, version } = descriptor(&bytes)?;
     let Some(board) = [Board::Esp32c5, Board::Esp32c6, Board::Esp32c6Xiao]
         .into_iter()
         .find(|board| project_name(*board) == Some(project.as_str()))
     else {
         bail!("built for project '{project}', which is no node board");
     };
-    let version = text(&desc[DESC_VERSION_AT..DESC_VERSION_AT + DESC_FIELD_LEN]);
     let Some(version) = parse_version(&version) else {
         bail!("its version '{version}' is not major.minor.patch");
     };
@@ -149,11 +137,48 @@ pub fn parse(bytes: Vec<u8>) -> Result<AppImage> {
     Ok(AppImage { bytes, sha256, version, board })
 }
 
+/// What an app image's descriptor says, as text.
+pub(super) struct Descriptor {
+    /// The project name, which says which firmware and board the image is for.
+    pub project: String,
+    /// The crate version.
+    pub version: String,
+}
+
+/// Read the app descriptor at the start of an app-only image's first segment.
+///
+/// # Errors
+/// When the bytes hold no ESP image header, or are a merged image, or the first segment holds
+/// no descriptor.
+pub(super) fn descriptor(bytes: &[u8]) -> Result<Descriptor> {
+    ensure!(bytes.len() >= HEADER_LEN + SEGMENT_HEADER_LEN, "too short to hold an image header");
+    ensure!(bytes[0] == IMAGE_MAGIC, "not an ESP image: no header at the start");
+    let desc_at = HEADER_LEN + SEGMENT_HEADER_LEN;
+    let first_segment = le_u32(bytes, HEADER_LEN + 4) as usize;
+    let desc = bytes.get(desc_at..desc_at + DESC_PROJECT_AT + DESC_FIELD_LEN);
+    let Some(desc) = desc.filter(|desc| {
+        le_u32(desc, 0) == APP_DESC_MAGIC && first_segment >= DESC_PROJECT_AT + DESC_FIELD_LEN
+    }) else {
+        if bytes.get(PARTITION_TABLE_AT..PARTITION_TABLE_AT + 2) == Some(&PARTITION_MAGIC) {
+            bail!("a merged image (bootloader, partition table and app); use the app-only image");
+        }
+        bail!("no app descriptor at the start of the first segment");
+    };
+    Ok(Descriptor {
+        project: text(&desc[DESC_PROJECT_AT..DESC_PROJECT_AT + DESC_FIELD_LEN]),
+        version: text(&desc[DESC_VERSION_AT..DESC_VERSION_AT + DESC_FIELD_LEN]),
+    })
+}
+
 /// Check the segment checksum and, when the header says one is appended, the SHA-256, as the
 /// bootloader will. The checksum is the XOR of every segment's data, seeded with
 /// [`CHECKSUM_SEED`], in the last byte of the padding that takes the segments to a 16-byte
 /// boundary. The SHA-256 covers every byte before it, checksum included.
-fn check_integrity(bytes: &[u8]) -> Result<()> {
+///
+/// # Errors
+/// When the image is truncated, or either check fails.
+pub(super) fn check_integrity(bytes: &[u8]) -> Result<()> {
+    ensure!(bytes.len() >= HEADER_LEN, "too short to hold an image header");
     let mut at = HEADER_LEN;
     let mut checksum = CHECKSUM_SEED;
     for segment in 0..bytes[SEGMENT_COUNT_AT] {
@@ -253,12 +278,26 @@ fn parse_version(text: &str) -> Option<Version> {
 /// the descriptor, then the checksum and the SHA-256.
 #[cfg(test)]
 pub fn fixture(board: Board, version: &str, len: usize) -> Vec<u8> {
-    let mut image = vec![0u8; HEADER_LEN];
-    image[0] = IMAGE_MAGIC;
+    let mut header = [0u8; HEADER_LEN];
+    header[0] = IMAGE_MAGIC;
+    let id = chip(board).map_or(0, Chip::image_id);
+    header[CHIP_ID_AT..CHIP_ID_AT + 2].copy_from_slice(&id.to_le_bytes());
+    let project = project_name(board).unwrap_or("not-a-node");
+    fixture_with(header, project, version, len)
+}
+
+/// A hand-built app-only image as [`fixture`] makes one, behind `header` and naming `project`.
+/// The header is set to one segment and an appended SHA-256.
+#[cfg(test)]
+pub(super) fn fixture_with(
+    header: [u8; HEADER_LEN],
+    project: &str,
+    version: &str,
+    len: usize,
+) -> Vec<u8> {
+    let mut image = header.to_vec();
     image[SEGMENT_COUNT_AT] = 1;
     image[HASH_APPENDED_AT] = 1;
-    let id = chip(board).map_or(0, Chip::image_id);
-    image[CHIP_ID_AT..CHIP_ID_AT + 2].copy_from_slice(&id.to_le_bytes());
     // Header, segment header, checksum padding and digest take 80 bytes.
     let segment = len.max(0x200) - 80;
     image.extend_from_slice(&0x4200_0020u32.to_le_bytes());
@@ -271,7 +310,7 @@ pub fn fixture(board: Board, version: &str, len: usize) -> Vec<u8> {
         image[desc + at..desc + at + value.len()].copy_from_slice(value.as_bytes());
     };
     put(&mut image, DESC_VERSION_AT, version);
-    put(&mut image, DESC_PROJECT_AT, project_name(board).unwrap_or("not-a-node"));
+    put(&mut image, DESC_PROJECT_AT, project);
     seal(&mut image);
     image
 }

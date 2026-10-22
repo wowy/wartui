@@ -6,5 +6,7 @@ rustflags = [
 ]
 
 [target.riscv32imafc-unknown-none-elf]
-# The board's Type-C reaches the P4's UART0 through a CH343: `--port <that port>`.
-runner = "espflash flash --monitor --chip esp32p4"
+# The board's Type-C reaches the P4's UART0 through a CH343: `--port <that port>`. The
+# node's partition table, with two app slots and a trial sector; erasing `otadata` boots the
+# image just written.
+runner = "espflash flash --monitor --chip esp32p4 --partition-table partitions.csv --erase-parts otadata"

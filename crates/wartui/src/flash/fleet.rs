@@ -126,7 +126,7 @@ pub fn run(args: Args) -> Result<()> {
         // A file named on the command line costs nothing to read, and a wrong one is worth
         // hearing about before the real run.
         if let Source::File(path) = &source {
-            check_image(&read(path)?, chip)?;
+            check_image(&read(path)?, chip, NODE.merged)?;
         }
         None
     } else {
@@ -422,12 +422,12 @@ mod tests {
     }
 
     #[test]
-    fn flash_fleet_skips_p4_bridge_with_readme_hint() {
+    fn flash_fleet_skips_board_when_it_is_a_p4_bridge() {
         let mut p4 = candidate("/dev/ttyACM3", Some(TEST_VID), Some(TEST_PID), None);
         p4.product = Some("wartui p4 bridge".to_owned());
         let verdicts = select(&[p4.clone()], &Spare::default(), &[]);
         assert_eq!(verdicts, [Verdict::Skip(p4, Skip::P4Bridge)]);
-        assert!(Skip::P4Bridge.to_string().contains("firmware/p4-bridge/README.md"));
+        assert!(Skip::P4Bridge.to_string().contains("wartui flash-bridge"));
     }
 
     #[test]

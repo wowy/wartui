@@ -10,9 +10,10 @@
 //! **The image is checked before any board is touched.** `write-bin` writes whatever bytes it is
 //! handed, so the chip ID in the bootloader's image header is compared with the chip the features
 //! name, and the image is fetched or built before the first reset. A merged image holds flash from
-//! address 0, so the bootloader sits where the chip boots from: 0x0 on a C6, 0x2000 on a C5, with
-//! erased flash (`0xFF`) ahead of it. A node's image is merged with `firmware/node/partitions.csv`
-//! and a bridge's with espflash's default table.
+//! address 0, so the bootloader sits where the chip boots from: 0x0 on a C6, 0x2000 on a C5 or a
+//! P4, with erased flash (`0xFF`) ahead of it. An app-only image starts with its own header. A
+//! node's and a P4 bridge's images are made with their `partitions.csv`, and a single-chip
+//! bridge's with espflash's default table.
 //!
 //! **A release pins its images by tag.** The host, the fleet and the bridge are flashed from one
 //! tree, and the crate version does not move before 1.0, so the version cannot name a tree and the
@@ -34,6 +35,7 @@ pub mod app;
 mod boot;
 pub mod bridge;
 pub mod fleet;
+mod p4;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -114,6 +116,18 @@ const NODE_APP: Firmware = Firmware {
     ..NODE
 };
 
+/// The P4 bridge's app-only image, which `flash-bridge` sends it over USB. Its merged image is
+/// for the first flash by hand over the CH343 (`firmware/p4-bridge/README.md`), so nothing here
+/// fetches it.
+const P4_BRIDGE_APP: Firmware = Firmware {
+    dir: concat!(env!("CARGO_MANIFEST_DIR"), "/../../firmware/p4-bridge"),
+    elf: "target/riscv32imafc-unknown-none-elf/release/wartui-p4-bridge-fw",
+    variants: &[(&[], "wartui-p4-bridge-app-esp32p4.bin")],
+    what: "P4 bridge",
+    partition_table: Some("partitions.csv"),
+    merged: false,
+};
+
 const BRIDGE: Firmware = Firmware {
     dir: concat!(env!("CARGO_MANIFEST_DIR"), "/../../firmware/bridge"),
     elf: "target/riscv32imac-unknown-none-elf/release/wartui-bridge-fw",
@@ -137,15 +151,20 @@ fn mac_arg(text: &str) -> Result<Mac, String> {
     mac::parse(text).ok_or_else(|| format!("'{text}' is not an address like 10:BD:A3:EC:44:C0"))
 }
 
-/// The chips either firmware is built for.
+/// The chips the firmwares are built for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Chip {
     Esp32c5,
     Esp32c6,
+    Esp32p4,
 }
 
 impl Chip {
-    const ALL: [Self; 2] = [Self::Esp32c5, Self::Esp32c6];
+    /// The chips `--features` names: a node's, or a single-chip bridge's.
+    const FEATURED: [Self; 2] = [Self::Esp32c5, Self::Esp32c6];
+
+    /// Every chip an image header here may name.
+    const ALL: [Self; 3] = [Self::Esp32c5, Self::Esp32c6, Self::Esp32p4];
 
     /// Spelled as the firmware's feature, espflash's `--chip` and `board-info`'s `Chip type:`
     /// all spell it.
@@ -153,6 +172,7 @@ impl Chip {
         match self {
             Self::Esp32c5 => "esp32c5",
             Self::Esp32c6 => "esp32c6",
+            Self::Esp32p4 => "esp32p4",
         }
     }
 
@@ -161,13 +181,14 @@ impl Chip {
         match self {
             Self::Esp32c5 => 23,
             Self::Esp32c6 => 13,
+            Self::Esp32p4 => 18,
         }
     }
 
     /// Where the bootloader sits in flash, and so in a merged image.
     const fn boot_offset(self) -> usize {
         match self {
-            Self::Esp32c5 => 0x2000,
+            Self::Esp32c5 | Self::Esp32p4 => 0x2000,
             Self::Esp32c6 => 0x0,
         }
     }
@@ -181,7 +202,7 @@ fn features(list: &str) -> Vec<&str> {
 /// The one chip the features name, as each firmware's `src/main.rs` demands.
 fn chip_of(firmware: &Firmware, features: &[&str]) -> Result<Chip> {
     let named: Vec<Chip> =
-        Chip::ALL.into_iter().filter(|chip| features.contains(&chip.name())).collect();
+        Chip::FEATURED.into_iter().filter(|chip| features.contains(&chip.name())).collect();
     match named.as_slice() {
         [chip] => Ok(*chip),
         [] => bail!("--features names no chip; add esp32c5 or esp32c6"),
@@ -233,10 +254,7 @@ impl fmt::Display for Skip {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Bridge => f.write_str("the bridge"),
-            Self::P4Bridge => f.write_str(
-                "a P4 bridge: flash it by hand until single-cable updates land, as \
-                 firmware/p4-bridge/README.md describes",
-            ),
+            Self::P4Bridge => f.write_str("a P4 bridge, which `wartui flash-bridge` updates"),
             Self::NotSerialJtag(Some(pid)) => {
                 write!(f, "not native USB Serial/JTAG (product {pid:04x})")
             }
@@ -460,7 +478,8 @@ fn release_asset(firmware: &Firmware, features: &[&str]) -> Option<&'static str>
     })
 }
 
-/// Get the merged image onto disk and check it is for `chip`.
+/// Get the image onto disk and check it is for `chip`, merged or app-only as `firmware` makes
+/// it.
 fn obtain(
     firmware: &Firmware,
     source: &Source,
@@ -469,7 +488,8 @@ fn obtain(
     chip: Chip,
 ) -> Result<PathBuf> {
     let path = fetch(firmware, source, features, no_default_features, chip)?;
-    check_image(&read(&path)?, chip).with_context(|| format!("checking {}", path.display()))?;
+    check_image(&read(&path)?, chip, firmware.merged)
+        .with_context(|| format!("checking {}", path.display()))?;
     Ok(path)
 }
 
@@ -516,8 +536,9 @@ fn read(path: &Path) -> Result<Vec<u8>> {
     std::fs::read(path).with_context(|| format!("reading {}", path.display()))
 }
 
-/// Refuse an image whose bootloader is not built for `chip`.
-fn check_image(image: &[u8], chip: Chip) -> Result<()> {
+/// Refuse an image not built for `chip`: a merged one by its bootloader's header, an app-only
+/// one by its own.
+fn check_image(image: &[u8], chip: Chip, merged: bool) -> Result<()> {
     // Erased flash ahead of the bootloader, when the chip boots from further in than 0x0.
     let at = image.iter().take_while(|byte| **byte == 0xFF).count();
     ensure!(
@@ -533,12 +554,16 @@ fn check_image(image: &[u8], chip: Chip) -> Result<()> {
             .map_or_else(|| format!("chip ID {id}"), |other| other.name().to_owned());
         bail!("the image is built for {built_for}, and --features names {}", chip.name());
     }
-    ensure!(
-        at == chip.boot_offset(),
-        "the image's bootloader is at {at:#x}, and an {} boots from {:#x}",
-        chip.name(),
-        chip.boot_offset()
-    );
+    if merged {
+        ensure!(
+            at == chip.boot_offset(),
+            "the image's bootloader is at {at:#x}, and an {} boots from {:#x}",
+            chip.name(),
+            chip.boot_offset()
+        );
+    } else {
+        ensure!(at == 0, "the image's header is at {at:#x}, and an app-only image starts with it");
+    }
     Ok(())
 }
 
@@ -553,7 +578,10 @@ fn build_image(
     chip: Chip,
 ) -> Result<PathBuf> {
     let mut cargo = Command::new("cargo");
-    cargo.current_dir(dir).args(["build", "--release", "--features", &features.join(",")]);
+    cargo.current_dir(dir).args(["build", "--release"]);
+    if !features.is_empty() {
+        cargo.args(["--features", &features.join(",")]);
+    }
     if no_default_features {
         cargo.arg("--no-default-features");
     }
@@ -717,6 +745,11 @@ mod testing {
         0xe9, 0x03, 0x02, 0x20, 0xaa, 0xbb, 0x84, 0x40, 0xee, 0x00, 0x00, 0x00, 0x17, 0x00, 0x00,
         0x64, 0x00, 0xc7, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
     ];
+    /// The first 24 bytes `espflash save-image` 4.6 wrote for the P4 bridge's app-only image.
+    pub(super) const P4_APP_HEADER: [u8; 24] = [
+        0xe9, 0x05, 0x02, 0x20, 0x76, 0x8a, 0x08, 0x40, 0xee, 0x00, 0x00, 0x00, 0x12, 0x00, 0x00,
+        0x2c, 0x01, 0x8f, 0x01, 0x00, 0x00, 0x00, 0x00, 0x01,
+    ];
 
     /// `espflash board-info` 4.6 against a C5, laid out as `print_board_info` writes it.
     pub(super) const BOARD_INFO: &str = "\
@@ -744,6 +777,12 @@ Chip ID: 23
     pub(super) fn c5_image() -> Vec<u8> {
         let mut image = vec![0xFF; 0x2000];
         image.extend_from_slice(&C5_HEADER);
+        image.extend_from_slice(&[0x13; 64]);
+        image
+    }
+
+    pub(super) fn p4_app_image() -> Vec<u8> {
+        let mut image = P4_APP_HEADER.to_vec();
         image.extend_from_slice(&[0x13; 64]);
         image
     }
@@ -899,19 +938,47 @@ mod tests {
         // IDF's `esp_chip_id_t`, which espflash's `Chip::id` also carries.
         assert_eq!(Chip::Esp32c6.image_id(), 13);
         assert_eq!(Chip::Esp32c5.image_id(), 23);
+        assert_eq!(Chip::Esp32p4.image_id(), 18);
+    }
+
+    #[test]
+    fn flash_accepts_app_image_when_header_names_the_p4() {
+        check_image(&p4_app_image(), Chip::Esp32p4, false).unwrap();
+    }
+
+    #[test]
+    fn flash_refuses_p4_app_image_when_header_names_another_chip() {
+        let error = check_image(&c6_image(), Chip::Esp32p4, false).unwrap_err().to_string();
+        assert!(error.contains("built for esp32c6"), "{error}");
+    }
+
+    #[test]
+    fn flash_refuses_app_image_when_given_a_merged_one() {
+        // A merged P4 image, its bootloader behind 0x2000 of erased flash.
+        let mut merged = vec![0xFF; 0x2000];
+        merged.extend_from_slice(&p4_app_image());
+        let error = check_image(&merged, Chip::Esp32p4, false).unwrap_err().to_string();
+        assert!(error.contains("app-only"), "{error}");
+        check_image(&merged, Chip::Esp32p4, true).unwrap();
+    }
+
+    #[test]
+    fn flash_finds_p4_release_assets_when_features_are_default() {
+        assert_eq!(release_asset(&P4_BRIDGE_APP, &[]), Some("wartui-p4-bridge-app-esp32p4.bin"));
+        assert_eq!(release_asset(&P4_BRIDGE_APP, &["gps"]), None);
     }
 
     #[test]
     fn flash_accepts_image_when_header_names_the_chip() {
-        check_image(&c5_image(), Chip::Esp32c5).unwrap();
-        check_image(&c6_image(), Chip::Esp32c6).unwrap();
+        check_image(&c5_image(), Chip::Esp32c5, true).unwrap();
+        check_image(&c6_image(), Chip::Esp32c6, true).unwrap();
     }
 
     #[test]
     fn flash_refuses_image_when_header_names_another_chip() {
-        let error = check_image(&c6_image(), Chip::Esp32c5).unwrap_err().to_string();
+        let error = check_image(&c6_image(), Chip::Esp32c5, true).unwrap_err().to_string();
         assert!(error.contains("built for esp32c6"), "{error}");
-        let error = check_image(&c5_image(), Chip::Esp32c6).unwrap_err().to_string();
+        let error = check_image(&c5_image(), Chip::Esp32c6, true).unwrap_err().to_string();
         assert!(error.contains("built for esp32c5"), "{error}");
     }
 
@@ -920,21 +987,21 @@ mod tests {
         // A C5 header at 0x0, where a C5 never boots from.
         let mut image = C5_HEADER.to_vec();
         image.extend_from_slice(&[0x13; 64]);
-        assert!(check_image(&image, Chip::Esp32c5).is_err());
+        assert!(check_image(&image, Chip::Esp32c5, true).is_err());
     }
 
     #[test]
     fn flash_refuses_image_when_file_is_short() {
-        assert!(check_image(&C5_HEADER[..16], Chip::Esp32c5).is_err());
-        assert!(check_image(&[], Chip::Esp32c5).is_err());
-        assert!(check_image(&c5_image()[..0x2000 + 8], Chip::Esp32c5).is_err());
+        assert!(check_image(&C5_HEADER[..16], Chip::Esp32c5, true).is_err());
+        assert!(check_image(&[], Chip::Esp32c5, true).is_err());
+        assert!(check_image(&c5_image()[..0x2000 + 8], Chip::Esp32c5, true).is_err());
     }
 
     #[test]
     fn flash_refuses_image_when_magic_is_missing() {
         let mut image = c6_image();
         image[0] = 0x7F;
-        assert!(check_image(&image, Chip::Esp32c6).is_err());
+        assert!(check_image(&image, Chip::Esp32c6, true).is_err());
     }
 
     #[test]

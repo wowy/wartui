@@ -9,15 +9,17 @@ use wartui_proto::air::{
     Board, Capabilities, DieTemp, HeartbeatMsg, RecordKind, Security, SightingBatchWriter,
     SightingMsg, Vdd,
 };
+use wartui_proto::air::{OtaState, OtaStatusMsg};
 use wartui_proto::link::{
     BROADCAST, BURST_BUDGET_US, BURST_GAP_US, BridgeToHost, Chip, EspNowPayload, FrameAccumulator,
     GPS_FRAME, GPS_WRITE_MAX, GpsBytes, GpsWriteBytes, HostToBridge, LINK_PROTO_VERSION, LinkBurst,
     LinkError, LogLevel, LoopPhase, MAX_ESPNOW_V2_PAYLOAD, MAX_FRAME, MAX_HOST_FRAME,
     MAX_NODE_PAYLOAD, PANEL_ROWS, Panel, PanelLine, PanelLines, QueueId, QueueStat, QueueStats,
-    RadioInfo, SendPayload, SendStatus, Severity, ShortStr, SpiStats, crc16, decode_frame,
-    encode_frame, encode_host_frame,
+    RadioInfo, SendPayload, SendStatus, Severity, ShortStr, SpiStats, UPDATE_STATUS_MAX, UpdateOp,
+    UpdateStatus, crc16, decode_frame, encode_frame, encode_host_frame,
 };
 use wartui_proto::reset::ResetCause;
+use wartui_proto::spi::update::{OP_MAX, Op};
 
 fn sample_commands() -> Vec<HostToBridge, 16> {
     let mut payload = Vec::new();
@@ -55,7 +57,30 @@ fn sample_commands() -> Vec<HostToBridge, 16> {
         bytes: GpsWriteBytes::from_slice(&[0xB5, 0x62, 0x06, 0x8A]).expect("fits"),
     })
     .expect("sample_commands has room");
+    v.push(HostToBridge::Update(encoded_op(&Op::Begin { session: 7, len: 1234, sha256: [9; 32] })))
+        .expect("sample_commands has room");
     v
+}
+
+/// `op` as a [`HostToBridge::Update`] carries it.
+fn encoded_op(op: &Op<'_>) -> UpdateOp {
+    let mut buf = [0u8; OP_MAX];
+    let len = op.encode(&mut buf);
+    UpdateOp::from_slice(&buf[..len]).expect("an op fits")
+}
+
+/// A status as a [`BridgeToHost::Update`] carries it.
+fn encoded_status(status: OtaStatusMsg) -> UpdateStatus {
+    let mut buf = [0u8; UPDATE_STATUS_MAX];
+    let len = Op::Status(status).encode(&mut buf);
+    UpdateStatus::from_slice(&buf[..len]).expect("a status fits")
+}
+
+/// The postcard bytes between a frame's version byte and its CRC.
+fn frame_body(frame: &[u8]) -> std::vec::Vec<u8> {
+    let mut decoded = frame.to_vec();
+    let len = cobs::decode_in_place(&mut decoded[..frame.len() - 1]).expect("valid cobs");
+    decoded[1..len - 2].to_vec()
 }
 
 /// Every row full, which is the worst case the const assert in `link/frame.rs` is checked against.
@@ -98,6 +123,7 @@ fn sample_events() -> Vec<BridgeToHost, 16> {
         panel: None,
         gps: false,
         radio: None,
+        image: None,
     })
     .expect("sample_events has room");
     // A second one, because `Option` and the enums the first case does not reach are the
@@ -114,6 +140,7 @@ fn sample_events() -> Vec<BridgeToHost, 16> {
         panel: Some(Panel { cols: 26, rows: 8 }),
         gps: true,
         radio: None,
+        image: Some([0xD1; 32]),
     })
     .expect("sample_events has room");
     v.push(BridgeToHost::Rx { src: [9; 6], dst: BROADCAST, rssi: -73, rx_us: 123_456, payload })
@@ -137,6 +164,12 @@ fn sample_events() -> Vec<BridgeToHost, 16> {
     .expect("sample_events has room");
     v.push(BridgeToHost::Gps { bytes: GpsBytes::from_slice(b"$GNGGA,").expect("fits") })
         .expect("sample_events has room");
+    v.push(BridgeToHost::Update(encoded_status(OtaStatusMsg {
+        session: 7,
+        state: OtaState::Receiving,
+        next_offset: 4096,
+    })))
+    .expect("sample_events has room");
     v
 }
 
@@ -435,7 +468,7 @@ fn host_command_asks_for_reply_only_when_bridge_answers() {
     let mut payload = Vec::new();
     payload.extend_from_slice(&[0; 8]).expect("8 fits a send");
     let mac = [1, 2, 3, 4, 5, 6];
-    let cases: [(HostToBridge, bool); 9] = [
+    let cases: [(HostToBridge, bool); 10] = [
         (HostToBridge::Identify, true),
         (HostToBridge::GetStatus, true),
         (HostToBridge::SendEspNow { id: 1, dst: mac, ensure_peer: false, payload }, true),
@@ -445,6 +478,7 @@ fn host_command_asks_for_reply_only_when_bridge_answers() {
         (HostToBridge::RemovePeer { mac }, false),
         (HostToBridge::Reset, false),
         (HostToBridge::GpsWrite { bytes: GpsWriteBytes::new() }, false),
+        (HostToBridge::Update(encoded_op(&Op::Commit { session: 1 })), false),
     ];
     for (command, asks) in cases {
         assert_eq!(command.asks_for_reply(), asks, "{command:?}");
@@ -691,6 +725,67 @@ fn link_round_trips_ready_with_radio() {
             last_phase: LoopPhase::Transmit,
             uptime_ms: u32::MAX,
         }),
+        image: Some([0xA5; 32]),
     };
     assert_eq!(round_trip(&ready), ready);
+}
+
+#[test]
+fn link_codec_pins_update_bytes_when_host_sends_an_op() {
+    // Postcard's variant index, then the op as a byte string: its length, then the
+    // `spi::update` layout. The index is `Update`'s place at the end of `HostToBridge`.
+    let cmd = HostToBridge::Update(encoded_op(&Op::Commit { session: 0x42 }));
+    let mut out = [0u8; MAX_HOST_FRAME];
+    let n = encode_host_frame(&cmd, &mut out).expect("encodes");
+    assert_eq!(frame_body(&out[..n]), [9, 2, 3, 0x42]);
+}
+
+#[test]
+fn link_codec_pins_update_bytes_when_bridge_sends_a_status() {
+    let status =
+        OtaStatusMsg { session: 0x42, state: OtaState::Verified, next_offset: 0x0001_2000 };
+    let event = BridgeToHost::Update(encoded_status(status));
+    let mut out = [0u8; MAX_FRAME];
+    let n = encode_frame(&event, &mut out).expect("encodes");
+    assert_eq!(frame_body(&out[..n]), [7, 7, 5, 0x42, 2, 0x00, 0x20, 0x01, 0x00]);
+}
+
+#[test]
+fn link_round_trips_update_when_op_is_a_full_chunk() {
+    let data = [0xFF; wartui_proto::air::OTA_CHUNK];
+    let cmd =
+        HostToBridge::Update(encoded_op(&Op::Chunk { session: 3, offset: 8192, data: &data }));
+    let mut out = [0u8; MAX_HOST_FRAME];
+    let n = encode_host_frame(&cmd, &mut out).expect("encodes");
+    // Through the accumulator the P4 uses, so an op that outgrew it would be dropped here
+    // rather than on the bench.
+    let mut acc = FrameAccumulator::<MAX_HOST_FRAME>::new();
+    let mut decoded = None;
+    for &byte in &out[..n] {
+        if let Some(frame) = acc.push(byte) {
+            decoded = Some(decode_frame::<HostToBridge>(frame).expect("decodes"));
+        }
+    }
+    assert_eq!(decoded, Some(cmd));
+}
+
+#[test]
+fn link_round_trips_ready_when_image_is_present_or_absent() {
+    for image in [None, Some([0x5A; 32])] {
+        let ready = BridgeToHost::Ready {
+            chip: Chip::Esp32P4,
+            mac: [0x10, 0x20, 0x30, 0x40, 0x50, 0x62],
+            fw_version: String::try_from("0.1.0").expect("short"),
+            proto_version: LINK_PROTO_VERSION,
+            reset_cause: ResetCause::Software,
+            last_phase: LoopPhase::Boot,
+            heap_free: 0,
+            uptime_ms: 3,
+            panel: None,
+            gps: true,
+            radio: None,
+            image,
+        };
+        assert_eq!(round_trip(&ready), ready);
+    }
 }

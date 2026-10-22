@@ -789,6 +789,7 @@ dependencies = [
  "esp-sync",
  "esp32c5 0.3.0",
  "esp32c6 0.24.0",
+ "esp32p4",
 ]
 
 [[package]]

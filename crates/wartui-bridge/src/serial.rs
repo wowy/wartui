@@ -889,6 +889,7 @@ fn read_frames<R: Read>(
                     panel,
                     gps,
                     radio,
+                    image,
                     ..
                 }) => {
                     state.announced.store(true, Ordering::Relaxed);
@@ -949,6 +950,7 @@ fn read_frames<R: Read>(
                         panel,
                         gps,
                         radio,
+                        image,
                     })
                 }
                 Ok(msg) => {
@@ -1284,6 +1286,7 @@ mod tests {
             panel: None,
             gps: false,
             radio: None,
+            image: None,
         };
         let mut bytes = frame(&rx(-10));
         bytes.extend(frame(&ready));

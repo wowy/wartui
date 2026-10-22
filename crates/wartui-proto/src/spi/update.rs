@@ -15,10 +15,14 @@
 //!
 //! The C6 drives [`crate::ota::Receiver`] with these, as a node does with the air's update
 //! frames, so the receiver's flow control applies: a status on each sector flush, and on each
-//! duplicate or gap. A fixed op reads its body and ignores anything after it, so a body can
-//! grow at its end.
+//! duplicate or gap. [`receive`] is that step, shared by the C6 and the P4, which takes the same
+//! ops for its own image; each switches slots on `Install` itself. A fixed op reads its body and
+//! ignores anything after it, so a body can grow at its end.
 //!
-//! [`Sender`] is the P4's half, a pure state machine so the host tests it.
+//! [`Sender`] is the P4's half, a pure state machine so the host tests it. The host drives one
+//! too, to update the P4 itself over USB: each op travels in a
+//! [`HostToBridge::Update`](crate::link::HostToBridge::Update), and each status in a
+//! [`BridgeToHost::Update`](crate::link::BridgeToHost::Update).
 //!
 //! - **Stop-and-wait per sector.** It sends a sector's chunks, then nothing until the status
 //!   for that sector arrives. The C6's flash work holds its link loop, so a chunk sent during
@@ -36,11 +40,14 @@
 //!   leave the C6 on its old image. A repeat is harmless: a C6 that installed has rebooted
 //!   and holds no session, and one that did not answers with a status. The sender ignores
 //!   those statuses, save a refusal for its session: the C6 could not switch images, so
-//!   waiting for its reboot is pointless.
+//!   waiting for its reboot is pointless. That refusal is [`Failure::SwitchFailed`], apart from
+//!   a [`Failure::Refused`] session, since the fix differs: the image arrived whole.
 
-use crate::air::{OTA_CHUNK, OtaState, OtaStatusMsg};
-use crate::ota::SECTOR;
+use crate::air::{
+    OTA_CHUNK, OtaBeginMsg, OtaChunkMsg, OtaCommitMsg, OtaState, OtaStatusMsg, Version,
+};
 use crate::ota::image::DIGEST_LEN;
+use crate::ota::{Receiver, SECTOR, SectorSink};
 
 /// How long the [`Sender`] waits for a status before sending again.
 ///
@@ -179,6 +186,55 @@ impl<'a> Op<'a> {
     }
 }
 
+/// What [`receive`] made of an op.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Received {
+    /// The status to send back, if there is one: a mid-sector chunk and a `Status` have none.
+    Status(Option<OtaStatusMsg>),
+    /// `Install` for this session. The firmware switches slots if the receiver is verified for
+    /// it, and otherwise answers with [`Receiver::status`].
+    Install(u8),
+}
+
+/// Hand `op` to `receiver`, writing into `slot`.
+///
+/// `slot` is `None` on a table without a second app slot or a `trial` sector. A `Begin` is then
+/// refused with [`OtaState::FlashError`], as it is while the booted image is on `trial`, and a
+/// `Chunk` or `Commit` is answered [`OtaState::Idle`].
+pub fn receive<S: SectorSink>(
+    receiver: &mut Receiver,
+    op: Op<'_>,
+    slot: Option<&mut S>,
+    trial: bool,
+) -> Received {
+    let status = match (op, slot) {
+        (Op::Install { session }, _) => return Received::Install(session),
+        (Op::Status(_), _) => None,
+        (Op::Begin { session, len, sha256 }, Some(slot)) if !trial => {
+            // The op names no version, and the receiver checks none.
+            let version = Version::new(0, 0, 0);
+            let begin = OtaBeginMsg { session, len, sha256, version, board: receiver.board() };
+            Some(receiver.begin(&begin, slot))
+        }
+        (Op::Begin { session, .. }, _) => Some(at_start(session, OtaState::FlashError)),
+        (Op::Chunk { session, offset, data }, Some(slot)) => {
+            receiver.chunk(&OtaChunkMsg { session, offset, data }, slot)
+        }
+        (Op::Commit { session }, Some(slot)) => {
+            Some(receiver.commit(&OtaCommitMsg { session }, slot))
+        }
+        (Op::Chunk { session, .. } | Op::Commit { session }, None) => {
+            Some(at_start(session, OtaState::Idle))
+        }
+    };
+    Received::Status(status)
+}
+
+/// A status for `session` in `state`, with no bytes held.
+const fn at_start(session: u8, state: OtaState) -> OtaStatusMsg {
+    OtaStatusMsg { session, state, next_offset: 0 }
+}
+
 /// `state` when it refuses the session.
 const fn refusal(state: OtaState) -> Option<OtaState> {
     match state {
@@ -222,6 +278,9 @@ pub enum Failure {
     /// The C6 reported this state: a hash mismatch, a flash error, another board or an image
     /// too large for its slot.
     Refused(OtaState),
+    /// The C6 verified the image, then refused `Install` with this state: it could not switch
+    /// to the new image.
+    SwitchFailed(OtaState),
     /// [`TRIES`] sends of one op went unanswered.
     Silent,
     /// The C6 reported holding no session more than [`TRIES`] times.
@@ -366,7 +425,7 @@ impl<'a> Sender<'a> {
             Stage::Sending => {}
             Stage::Installed => {
                 if let Some(state) = refusal(status.state) {
-                    self.stage = Stage::Failed(Failure::Refused(state));
+                    self.stage = Stage::Failed(Failure::SwitchFailed(state));
                 }
                 return;
             }

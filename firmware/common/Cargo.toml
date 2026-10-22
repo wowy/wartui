@@ -7,7 +7,7 @@
 
 [package]
 name = "wartui-firmware"
-description = "Chip-level code the wartui firmwares need: the reset funnel, the reset cause, the bridge's phase marker, radio half and GPS reader, the node's health readings, and over-the-air updates on flash."
+description = "Chip-level code the wartui firmwares need: the reset funnel, the reset cause, the bridge's phase marker, radio half and GPS reader, the node's health readings, and updates on flash."
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
@@ -28,9 +28,13 @@ esp32c6 = [
   "esp-bootloader-esp-idf?/esp32c6",
   "esp-storage?/esp32c6",
 ]
-# No radio of its own, and takes no update over the air; src/lib.rs refuses it with
-# `radio` and with `ota`.
-esp32p4 = ["esp-hal/esp32p4"]
+# No radio of its own; src/lib.rs refuses it with `radio`. It takes its own updates
+# over its USB link, through `ota`.
+esp32p4 = [
+  "esp-hal/esp32p4",
+  "esp-bootloader-esp-idf?/esp32p4",
+  "esp-storage?/esp32p4",
+]
 
 # The bridge's ESP-NOW half (`src/radio.rs`), for every firmware that owns a radio
 # and bridges it.
@@ -39,8 +43,8 @@ radio = ["dep:embassy-sync", "dep:esp-radio"]
 # A u-blox GPS receiver on I2C (`src/gps.rs`), for every bridge with one on its bus.
 gps = ["dep:embassy-futures", "dep:embassy-sync", "dep:embassy-time"]
 
-# Over-the-air updates on flash (`src/ota.rs`): the update slot, the switch and the trial,
-# for the node and the P4 bridge's C6.
+# Updates on flash (`src/ota.rs`): the update slot, the switch and the trial, for the node,
+# the P4 bridge's C6 and the P4 itself.
 ota = [
   "dep:embedded-storage",
   "dep:esp-bootloader-esp-idf",

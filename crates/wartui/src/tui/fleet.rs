@@ -213,6 +213,7 @@ fn node_label(node: &NodeView) -> String {
     let chip = match node.state.capabilities.map(|caps| caps.board) {
         Some(Board::Esp32c5) => "C5",
         Some(Board::Esp32c6 | Board::Esp32c6Xiao) => "C6",
+        Some(Board::Esp32p4) => "P4",
         Some(Board::Unknown(_)) => "??",
         None => "— ",
     };

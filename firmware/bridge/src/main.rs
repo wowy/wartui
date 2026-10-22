@@ -419,6 +419,8 @@ impl Bridge {
             gps: cfg!(feature = "t-dongle-c5-gps"),
             // The radio is this chip.
             radio: None,
+            // It takes no update over its link: `flash-bridge` flashes it with espflash.
+            image: None,
         });
         if let Some(why) = self.panel_fault {
             self.error(why);
@@ -1121,6 +1123,9 @@ fn handle(
         HostToBridge::ShowPanel { lines } => bridge.show_panel(lines),
 
         HostToBridge::GpsWrite { bytes } => bridge.write_gps(bytes),
+
+        // Only a P4 bridge updates over its link; the host asks this one by mistake.
+        HostToBridge::Update(_) => bridge.error("this bridge takes no update over its link"),
 
         HostToBridge::SetTxPower { .. }
         | HostToBridge::SendEspNow { .. }

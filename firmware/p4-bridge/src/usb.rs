@@ -16,6 +16,9 @@
 //! **Nothing queues without DTR, and a rising edge empties the queue.** A host never reads
 //! a backlog from before it attached; `Shared::push_host` has why.
 //!
+//! **The first host frame confirms the P4's image on trial**, and `HostToBridge::Update`
+//! frames carry its next one; `src/update.rs` has both.
+//!
 //! [`Pair::usb_serial_mac`]: wartui_proto::split::Pair::usb_serial_mac
 //! [`ResetCause::speaks_first`]: wartui_proto::reset::ResetCause::speaks_first
 
@@ -27,7 +30,7 @@ use embassy_futures::yield_now;
 use embassy_time::{Duration, with_timeout};
 use embassy_usb::Builder;
 use embassy_usb::class::cdc_acm::{CdcAcmClass, ControlChanged, Receiver, Sender, State};
-use embassy_usb::driver::Driver as UsbDriver;
+use embassy_usb::driver::{Driver as UsbDriver, EndpointError};
 use esp_hal::peripherals::USB_HS;
 use esp_hal::usb::otg::Usb;
 use esp_hal::usb::otg::embassy_usb_device::{Config as OtgConfig, Driver};
@@ -138,6 +141,7 @@ fn take_frame(frame: &mut [u8], shared: &Shared) {
     // Matched in place rather than moved out of the `Option`, which would copy it.
     let decoded = decode(frame);
     let Some(down @ Down::Command(cmd)) = &decoded else { return };
+    crate::update::note_host_frame(shared);
     let route = shared.pair.borrow().route(cmd);
     match route {
         Route::Local => local(cmd, shared),
@@ -166,6 +170,7 @@ fn local(cmd: &HostToBridge, shared: &Shared) {
         HostToBridge::GpsWrite { .. } => {}
         // No panel.
         HostToBridge::ShowPanel { .. } => {}
+        HostToBridge::Update(op) => crate::update::take(op, shared),
         // `Pair::route` sends nothing else here.
         _ => {}
     }
@@ -206,13 +211,19 @@ async fn write_host<'d, D: UsbDriver<'d>>(
                 continue;
             }
             mark(LoopPhase::Pump);
-            if tx.write_packet(&packet[..n]).await.is_err() {
-                break;
+            match tx.write_packet(&packet[..n]).await {
+                Ok(()) => {}
+                // The device left the bus, and the host with it.
+                Err(EndpointError::Disabled) => break,
+                // A packet never exceeds the endpoint's size. Were one lost, the host is still
+                // there, and its update session stands.
+                Err(EndpointError::BufferOverflow) => {}
             }
             // So the SPI link is polled at least once per packet.
             yield_now().await;
         }
         shared.dtr.set(false);
+        crate::update::host_gone(shared);
     }
 }
 

@@ -21,6 +21,7 @@ use wartui_proto::link::{
     BridgeToHost, Chip, HostToBridge, LinkError, LoopPhase, Panel, RadioInfo,
 };
 use wartui_proto::mac::Mac;
+use wartui_proto::ota::image::DIGEST_LEN;
 use wartui_proto::reset::ResetCause;
 
 /// Inbound event queue depth.
@@ -75,6 +76,10 @@ pub struct BridgeInfo {
     /// cause is the only record of a radio crash under a running bridge. `None` on a
     /// single-chip bridge.
     pub radio: Option<RadioInfo>,
+    /// The digest appended to the booted image, from a bridge that takes updates over the
+    /// link. `wartui flash-bridge` reads it to tell an installed image from a rollback.
+    /// `None` from a bridge that does not.
+    pub image: Option<[u8; DIGEST_LEN]>,
 }
 
 /// Something that happened on the link.
