@@ -39,7 +39,7 @@ use core::fmt::Write;
 
 use crate::link::{
     BridgeToHost, Chip, HostToBridge, LINK_PROTO_VERSION, LogStr, LoopPhase, QueueId, QueueStat,
-    QueueStats, RadioInfo, SendStatus, ShortStr, SpiStats,
+    QueueStats, RADIO_UPDATING, RadioInfo, SendStatus, ShortStr, SpiStats,
 };
 use crate::mac::Mac;
 use crate::ota::TRIAL_BOOTS;
@@ -409,11 +409,10 @@ impl Pair {
                 );
             }
             RadioState::Updating(_) if self.installed_at.is_some() => {
-                let _ = write!(text, "updating the radio: installing the bundled image");
+                let _ = write!(text, "{RADIO_UPDATING}: installing the bundled image");
             }
             RadioState::Updating(_) => {
-                let _ =
-                    write!(text, "updating the radio to the bundled image ({}%)", self.progress);
+                let _ = write!(text, "{RADIO_UPDATING} to the bundled image ({}%)", self.progress);
             }
             RadioState::Stale(_) => {
                 let _ = write!(text, "radio runs another build; the bundled image did not take");

@@ -116,20 +116,17 @@ const NODE_APP: Firmware = Firmware {
     ..NODE
 };
 
-/// The P4 bridge's merged image, for its first flash over the CH343
-/// (`firmware/p4-bridge/README.md`). `flash-bridge` sends it [`P4_BRIDGE_APP`] over its link.
-const P4_BRIDGE: Firmware = Firmware {
+/// The P4 bridge's app-only image, which `flash-bridge` sends it over USB. Its merged image is
+/// for the first flash by hand over the CH343 (`firmware/p4-bridge/README.md`), so nothing here
+/// fetches it.
+const P4_BRIDGE_APP: Firmware = Firmware {
     dir: concat!(env!("CARGO_MANIFEST_DIR"), "/../../firmware/p4-bridge"),
     elf: "target/riscv32imafc-unknown-none-elf/release/wartui-p4-bridge-fw",
-    variants: &[(&[], "wartui-p4-bridge-fw-esp32p4.bin")],
+    variants: &[(&[], "wartui-p4-bridge-app-esp32p4.bin")],
     what: "P4 bridge",
     partition_table: Some("partitions.csv"),
-    merged: true,
+    merged: false,
 };
-
-/// The P4 bridge's app-only image, which `flash-bridge` sends it over USB.
-const P4_BRIDGE_APP: Firmware =
-    Firmware { variants: &[(&[], "wartui-p4-bridge-app-esp32p4.bin")], merged: false, ..P4_BRIDGE };
 
 const BRIDGE: Firmware = Firmware {
     dir: concat!(env!("CARGO_MANIFEST_DIR"), "/../../firmware/bridge"),
@@ -967,7 +964,6 @@ mod tests {
 
     #[test]
     fn flash_finds_p4_release_assets_when_features_are_default() {
-        assert_eq!(release_asset(&P4_BRIDGE, &[]), Some("wartui-p4-bridge-fw-esp32p4.bin"));
         assert_eq!(release_asset(&P4_BRIDGE_APP, &[]), Some("wartui-p4-bridge-app-esp32p4.bin"));
         assert_eq!(release_asset(&P4_BRIDGE_APP, &["gps"]), None);
     }

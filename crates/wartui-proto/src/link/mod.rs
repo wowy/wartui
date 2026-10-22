@@ -112,6 +112,10 @@ pub const IMAGE_CONFIRMED: &str = "image confirmed by the host";
 /// error follows after a colon.
 pub const IMAGE_NOT_CONFIRMED: &str = "could not confirm the image";
 
+/// The start of the P4's [`BridgeToHost::Error`] while it updates its C6
+/// (`split::Pair::fault`). `wartui flash-bridge` follows the C6's update by it.
+pub const RADIO_UPDATING: &str = "updating the radio";
+
 /// Broadcast address. Nodes send heartbeats here in plaintext, so a bridge hears a node
 /// before either knows the other's address. Sighting batches unicast to the bridge.
 pub const BROADCAST: Mac = [0xFF; 6];

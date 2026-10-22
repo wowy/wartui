@@ -2,7 +2,8 @@
 
 use heapless::Vec;
 use wartui_proto::link::{
-    BridgeToHost, Chip, HostToBridge, LoopPhase, QueueId, QueueStat, SendStatus, SpiStats,
+    BridgeToHost, Chip, HostToBridge, LoopPhase, QueueId, QueueStat, RADIO_UPDATING, SendStatus,
+    SpiStats,
 };
 use wartui_proto::ota::TRIAL_BOOTS;
 use wartui_proto::reset::ResetCause;
@@ -449,6 +450,19 @@ fn pair_fault_says_installing_when_install_is_sent() {
     // Still installing while the P4 resets a C6 that has not said hello.
     assert_eq!(pair.on_tick(9_000 + INSTALL_WAIT_MS), PairEvent::ResetRadio);
     assert_eq!(pair.fault().unwrap(), "updating the radio: installing the bundled image");
+}
+
+#[test]
+fn pair_fault_starts_with_radio_updating_when_radio_is_updating() {
+    // `wartui flash-bridge` follows the C6's update by this prefix.
+    let mut updating = updating_pair();
+    assert!(updating.fault().unwrap().starts_with(RADIO_UPDATING));
+    updating.note_installed(9_000);
+    assert!(updating.fault().unwrap().starts_with(RADIO_UPDATING));
+    // A radio that is not updating says something else.
+    let mut absent = pair();
+    absent.on_tick(RADIO_WAIT_MS);
+    assert!(!absent.fault().unwrap().starts_with(RADIO_UPDATING));
 }
 
 #[test]

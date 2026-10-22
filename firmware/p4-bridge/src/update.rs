@@ -86,6 +86,8 @@ pub struct Updates {
     receiver: &'static mut Receiver,
     /// The booted image is on trial until a host frame confirms it.
     trial: bool,
+    /// A confirm failed for this host connection, so the next frames do not retry it.
+    confirm_failed: bool,
     /// Holds the RTC watchdog, armed while on trial.
     rtc: Rtc<'static>,
     /// Lines for the host's next announcement.
@@ -118,18 +120,16 @@ impl Updates {
             Some(err) => Some(text(format_args!(
                 "could not read the partition table: {err}; updates refused"
             ))),
-            None if !ota.has_trial() => {
-                Some(text(format_args!("no trial sector; updates refused")))
-            }
-            None => None,
+            None => ota.lacks().map(|lacks| text(format_args!("{lacks}; updates refused"))),
         };
-        Self { ota, receiver: RECEIVER.take(), trial, rtc, lines, fault }
+        Self { ota, receiver: RECEIVER.take(), trial, confirm_failed: false, rtc, lines, fault }
     }
 
     /// End this image's trial, if it is on one, and disarm the watchdog. A failure leaves it
-    /// on trial, and the next host frame tries again.
+    /// on trial and is said once; the next host connection tries again. Retrying on every frame
+    /// would repeat the flash write and fill [`Lines`] with the same error.
     fn confirm(&mut self) {
-        if !self.trial {
+        if !self.trial || self.confirm_failed {
             return;
         }
         let line = match self.ota.confirm() {
@@ -138,7 +138,10 @@ impl Updates {
                 self.rtc.rwdt.disable();
                 (Some(LogLevel::Info), text(format_args!("{IMAGE_CONFIRMED}")))
             }
-            Err(err) => (None, text(format_args!("{IMAGE_NOT_CONFIRMED}: {err}"))),
+            Err(err) => {
+                self.confirm_failed = true;
+                (None, text(format_args!("{IMAGE_NOT_CONFIRMED}: {err}")))
+            }
         };
         let _ = self.lines.push(line);
     }
@@ -177,10 +180,14 @@ impl Updates {
     }
 }
 
-/// A host frame decoded: confirm the image if it is on trial.
+/// A host frame decoded: confirm the image if it is on trial and this connection has not
+/// already failed to.
 pub fn note_host_frame(shared: &Shared) {
-    let trial = shared.updates.borrow().trial;
-    if trial {
+    let due = {
+        let updates = shared.updates.borrow();
+        updates.trial && !updates.confirm_failed
+    };
+    if due {
         shared.updates.borrow_mut().confirm();
     }
 }
@@ -223,9 +230,12 @@ pub fn say_lines(shared: &Shared) {
     }
 }
 
-/// The host let go of DTR: drop any session, so a transfer cut short leaves nothing behind.
+/// The host let go of DTR, or the device left the bus: drop any session, so a transfer cut
+/// short leaves nothing behind, and let the next host retry a confirm that failed.
 pub fn host_gone(shared: &Shared) {
-    shared.updates.borrow_mut().receiver.reset();
+    let mut updates = shared.updates.borrow_mut();
+    updates.receiver.reset();
+    updates.confirm_failed = false;
 }
 
 /// The lines held for the host, emptied.

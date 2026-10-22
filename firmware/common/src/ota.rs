@@ -245,6 +245,17 @@ impl Ota {
         self.layout.trial.is_some()
     }
 
+    /// What the table lacks that makes every update refused, if it lacks anything.
+    #[must_use]
+    pub fn lacks(&self) -> Option<&'static str> {
+        match (self.layout.target.is_some(), self.has_trial()) {
+            (true, true) => None,
+            (false, true) => Some("no second app slot"),
+            (true, false) => Some("no trial sector"),
+            (false, false) => Some("no second app slot or trial sector"),
+        }
+    }
+
     /// The slot to hand the receiver, or `None` when the table lacks a second app slot or a
     /// `trial` sector, and every update is refused.
     pub fn slot(&mut self) -> Option<Slot<'_>> {

@@ -30,7 +30,7 @@ use embassy_futures::yield_now;
 use embassy_time::{Duration, with_timeout};
 use embassy_usb::Builder;
 use embassy_usb::class::cdc_acm::{CdcAcmClass, ControlChanged, Receiver, Sender, State};
-use embassy_usb::driver::Driver as UsbDriver;
+use embassy_usb::driver::{Driver as UsbDriver, EndpointError};
 use esp_hal::peripherals::USB_HS;
 use esp_hal::usb::otg::Usb;
 use esp_hal::usb::otg::embassy_usb_device::{Config as OtgConfig, Driver};
@@ -211,8 +211,13 @@ async fn write_host<'d, D: UsbDriver<'d>>(
                 continue;
             }
             mark(LoopPhase::Pump);
-            if tx.write_packet(&packet[..n]).await.is_err() {
-                break;
+            match tx.write_packet(&packet[..n]).await {
+                Ok(()) => {}
+                // The device left the bus, and the host with it.
+                Err(EndpointError::Disabled) => break,
+                // A packet never exceeds the endpoint's size. Were one lost, the host is still
+                // there, and its update session stands.
+                Err(EndpointError::BufferOverflow) => {}
             }
             // So the SPI link is polled at least once per packet.
             yield_now().await;

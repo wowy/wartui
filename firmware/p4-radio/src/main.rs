@@ -173,8 +173,8 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     if let Some(err) = table_fault {
         shared
             .line(None, format_args!("could not read the partition table: {err}; updates refused"));
-    } else if !ota.has_trial() {
-        shared.line(None, format_args!("no trial sector; updates refused"));
+    } else if let Some(lacks) = ota.lacks() {
+        shared.line(None, format_args!("{lacks}; updates refused"));
     }
     for note in &booted.notes {
         shared.note(note);

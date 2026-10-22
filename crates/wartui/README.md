@@ -508,7 +508,9 @@ board until `run` connects to it. `--dry-run` resets it once, for `board-info`.
 A P4 bridge takes its app image over the USB link it bridges on, so after its first flash
 (`firmware/p4-bridge/README.md` § "First flash") neither the CH343 nor the BOOT button is needed.
 The image comes from the same three sources, with `firmware/p4-bridge` for `firmware/node`; a
-release publishes one, built with the default features. Its header must name the `esp32p4`.
+release publishes one, built with the default features. Nothing is sent unless the image is an
+app-only image whose header names the `esp32p4` and whose descriptor names `wartui-p4-bridge-fw`,
+its checksum and appended SHA-256 hold, and it fits the P4's 1920 KiB app slot.
 
 The run opens the bridge, checks it answers as a P4 with the chosen address, and sends the image.
 The P4 checks it, switches slots and reboots into it on trial; the run waits up to 120 s for it to
@@ -528,8 +530,9 @@ The run fails, and the P4 keeps the image it ran, when:
 
 - The P4 came back on its old image: the new one did not boot, and its trial watchdog rolled it
   back on its third boot.
-- The link dropped mid-transfer, or the P4 could not switch to the image it received. Run
-  `flash-bridge` again.
+- The link dropped mid-transfer, the P4 restarted into another image, or the P4 could not
+  switch to the image it received. Run `flash-bridge` again. A restart of the C6 alone does not
+  stop the transfer.
 - The P4 does not announce itself within 10 s: another program, such as a running `wartui run`,
   holds the port, or the bridge is still starting. Try again.
 - The P4 answers in a form this build cannot read, or does not answer the update: its firmware

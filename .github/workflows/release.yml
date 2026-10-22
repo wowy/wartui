@@ -4,12 +4,13 @@ name: Release
 # tree. `wartui flash-fleet` and `wartui flash-bridge` in a release binary fetch their images from
 # the release named by the tag baked into it (`WARTUI_RELEASE_TAG`), so the host, the fleet and the
 # bridge it flashes always share a tree. The asset names and feature sets below must match the
-# variant tables in `crates/wartui/src/flash/mod.rs`. Each image is merged — bootloader, partition
-# table and app, flashed at 0x0 — and `SHA256SUMS` is what the host checks a download against. A
-# node's is merged with `firmware/node/partitions.csv`, and each node variant is also published
-# app-only (`wartui-node-app-*.bin`): the image one app slot holds. The P4 bridge publishes both
-# too, made with `firmware/p4-bridge/partitions.csv`: the merged image for its first flash, and
-# the app image `flash-bridge` sends it over USB.
+# variant tables in `crates/wartui/src/flash/mod.rs`, except the P4 bridge's merged image, which
+# only a first flash by hand uses. Each image is merged — bootloader, partition table and app,
+# flashed at 0x0 — and `SHA256SUMS` is what the host checks a download against. A node's is
+# merged with `firmware/node/partitions.csv`, and each node variant is also published app-only
+# (`wartui-node-app-*.bin`): the image one app slot holds. The P4 bridge publishes both too, made
+# with `firmware/p4-bridge/partitions.csv`: the merged image for its first flash, and the app
+# image `flash-bridge` sends it over USB.
 
 on:
   push:

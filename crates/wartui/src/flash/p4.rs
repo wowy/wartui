@@ -6,6 +6,19 @@
 //! `HostToBridge::Update` ops: the `spi::update` layout it sends its own C6, driven by the same
 //! `Sender`, on a [`TICK`] and on each status.
 //!
+//! **The image is checked before it is sent**: the P4's chip, an app-only layout, the
+//! descriptor's project name ([`PROJECT`]), the segment checksum and appended SHA-256
+//! (`app::check_integrity`), and the size of the P4's app slot ([`SLOT_LEN`]). The P4's receiver
+//! checks only that the bytes arrived whole, so a wrong or damaged file would otherwise cost a
+//! transfer, a reboot and a rollback.
+//!
+//! **A `Ready` is not always the P4 rebooting.** The P4 announces a new life when only its C6
+//! restarts, since `Ready.uptime_ms` is the C6's. While sending, a `Ready` naming the image the
+//! P4 ran before is that, and the send goes on: a P4 that did reboot dropped the session, which
+//! the sender notices. One naming another image means the P4 is no longer running the image the
+//! send began against, so the send stops. After `Install`, only a `Ready` after the link drops is
+//! the new life ([`on_ready`]).
+//!
 //! **`Ready.image` names the outcome.** The P4 installs, reboots into the new image on trial,
 //! and the transport reconnects; its `Identify` is the first host frame, which confirms the
 //! image. A `Ready` carrying the new digest is installed. One carrying the old is a rollback: the
@@ -38,16 +51,24 @@ use wartui_bridge::serial::{BridgeSpec, SerialTransport};
 use wartui_bridge::{BridgeInfo, LinkEvent, LinkHandle};
 use wartui_proto::air::OtaState;
 use wartui_proto::link::{
-    BridgeToHost, Chip as LinkChip, HostToBridge, IMAGE_CONFIRMED, IMAGE_NOT_CONFIRMED, UpdateOp,
+    BridgeToHost, Chip as LinkChip, HostToBridge, IMAGE_CONFIRMED, IMAGE_NOT_CONFIRMED,
+    RADIO_UPDATING, UpdateOp,
 };
 use wartui_proto::ota::image::{DIGEST_LEN, appended_digest_of};
 use wartui_proto::spi::update::{Failure, OP_MAX, Op, Sender, Stage};
 
 use super::bridge::Args;
 use super::{
-    Chip, P4_BRIDGE_APP, RELEASE_TAG, Source, check_image, espflash_present, name, obtain, read,
-    source,
+    Chip, P4_BRIDGE_APP, RELEASE_TAG, Source, app, check_image, espflash_present, name, obtain,
+    read, source,
 };
+
+/// The project name the P4 bridge's app descriptor carries: its crate's name.
+const PROJECT: &str = "wartui-p4-bridge-fw";
+
+/// The largest image the P4's app slot holds: `ota_0` and `ota_1` in
+/// `firmware/p4-bridge/partitions.csv`.
+const SLOT_LEN: usize = 0x1E_0000;
 
 /// How often the sender is asked for its next op, besides on each status.
 const TICK: Duration = Duration::from_millis(50);
@@ -87,7 +108,7 @@ pub(super) async fn run(args: &Args, features: &[&str], board: &PortCandidate) -
     println!("image  {}", source.describe(args.dry_run));
     if args.dry_run {
         if let Source::File(path) = &source {
-            check_image(&read(path)?, Chip::Esp32p4, false)?;
+            check_app(&read(path)?).with_context(|| format!("checking {}", path.display()))?;
         }
         println!("{:<6} would update over its link", name(board));
         return Ok(());
@@ -98,6 +119,7 @@ pub(super) async fn run(args: &Args, features: &[&str], board: &PortCandidate) -
     }
     let path = obtain(&P4_BRIDGE_APP, &source, features, false, Chip::Esp32p4)?;
     let image = read(&path)?;
+    check_app(&image).with_context(|| format!("checking {}", path.display()))?;
     let sha256: [u8; DIGEST_LEN] = Sha256::digest(&image).into();
     let Some(digest) = appended_digest_of(&image) else {
         bail!("{} carries no appended digest, which names the image to the P4", path.display());
@@ -131,7 +153,7 @@ pub(super) async fn run(args: &Args, features: &[&str], board: &PortCandidate) -
     }
 
     let mut progress = ProgressLine::new(name(board));
-    let mut update = Update::new(&image, sha256, &digest, info.image.is_some());
+    let mut update = Update::new(&image, sha256, &digest, info.image);
     update.send(&mut link, &mut progress).await?;
     progress.say("installing; waiting for the bridge to come back");
     let back = update.come_back(&mut link, &mut progress).await?;
@@ -146,6 +168,21 @@ pub(super) async fn run(args: &Args, features: &[&str], board: &PortCandidate) -
         Err(text) => bail!("{} {text}", name(board)),
     }
     follow_radio(&mut link, &mut progress).await;
+    Ok(())
+}
+
+/// Refuse an image that is not the P4 bridge's app, or that is damaged or too large for its
+/// slot.
+fn check_app(image: &[u8]) -> Result<()> {
+    check_image(image, Chip::Esp32p4, false)?;
+    let project = app::descriptor(image)?.project;
+    ensure!(project == PROJECT, "built for project '{project}', and a P4 bridge runs {PROJECT}");
+    app::check_integrity(image)?;
+    ensure!(
+        image.len() <= SLOT_LEN,
+        "{} bytes, and the P4's app slot holds {SLOT_LEN}",
+        image.len()
+    );
     Ok(())
 }
 
@@ -193,12 +230,47 @@ fn no_ready_text(board: &str, path: &str, why: &str, garbled: bool) -> String {
     }
 }
 
+/// Where the update stands when a `Ready` arrives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    /// Sending the image.
+    Sending,
+    /// `Install` sent; `dropped` once the link has dropped since.
+    Installing { dropped: bool },
+}
+
+/// What a `Ready` means to the update.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OnReady {
+    /// The C6 restarted under the same P4 life; carry on.
+    Ignore,
+    /// The P4 runs another image than the send began against; stop.
+    Abort,
+    /// The life after the install.
+    Back,
+}
+
+/// Read a `Ready` naming `image` in `phase`, against the image the P4 named before the update.
+fn on_ready(
+    phase: Phase,
+    before: Option<[u8; DIGEST_LEN]>,
+    image: Option<[u8; DIGEST_LEN]>,
+) -> OnReady {
+    match phase {
+        Phase::Sending if image == before => OnReady::Ignore,
+        Phase::Sending => OnReady::Abort,
+        Phase::Installing { dropped: false } => OnReady::Ignore,
+        Phase::Installing { dropped: true } => OnReady::Back,
+    }
+}
+
 /// One image on its way to the P4.
 struct Update<'a> {
     sender: Sender<'a>,
     start: Instant,
-    /// The P4's `Ready` named its image, so its firmware takes updates.
-    image_known: bool,
+    /// The image the P4's `Ready` named before the update, if it named one. Naming one says
+    /// its firmware takes updates.
+    before: Option<[u8; DIGEST_LEN]>,
 }
 
 impl<'a> Update<'a> {
@@ -206,9 +278,14 @@ impl<'a> Update<'a> {
         image: &'a [u8],
         sha256: [u8; DIGEST_LEN],
         digest: &[u8; DIGEST_LEN],
-        image_known: bool,
+        before: Option<[u8; DIGEST_LEN]>,
     ) -> Self {
-        Self { sender: Sender::new(image, sha256, digest), start: Instant::now(), image_known }
+        Self { sender: Sender::new(image, sha256, digest), start: Instant::now(), before }
+    }
+
+    /// Why the update stopped, and what fixes it.
+    fn failed(&self, failure: Failure) -> String {
+        failure_text(failure, self.before.is_some())
     }
 
     /// Send the image until the P4 is told to install.
@@ -219,7 +296,7 @@ impl<'a> Update<'a> {
             match self.sender.stage() {
                 Stage::Sending => progress.show(self.sender.percent()),
                 Stage::Installed => return Ok(()),
-                Stage::Failed(failure) => bail!("{}", failure_text(failure, self.image_known)),
+                Stage::Failed(failure) => bail!("{}", self.failed(failure)),
             }
             tokio::select! {
                 _ = tick.tick() => {}
@@ -229,9 +306,14 @@ impl<'a> Update<'a> {
                         "the link dropped before the update finished ({reason}); the bridge \
                          keeps its image, and flash-bridge can be run again"
                     ),
-                    Some(LinkEvent::Connected(_)) => bail!(
-                        "the bridge restarted before the update finished; run flash-bridge again"
-                    ),
+                    Some(LinkEvent::Connected(info)) => {
+                        if on_ready(Phase::Sending, self.before, info.image) == OnReady::Abort {
+                            bail!(
+                                "the bridge restarted into another image before the update \
+                                 finished; run flash-bridge again"
+                            );
+                        }
+                    }
                     Some(LinkEvent::Garbled(_)) => {}
                     None => bail!("the link closed"),
                 },
@@ -240,7 +322,7 @@ impl<'a> Update<'a> {
     }
 
     /// Wait out the reboot: `Install` again until the link drops, then the new life's
-    /// `Ready`.
+    /// `Ready`. A `Ready` before the drop is the C6 restarting, and is passed over.
     async fn come_back(
         &mut self,
         link: &mut LinkHandle,
@@ -254,12 +336,17 @@ impl<'a> Update<'a> {
                     self.pump(link)?;
                 }
                 if let Stage::Failed(failure) = self.sender.stage() {
-                    bail!("{}", failure_text(failure, self.image_known));
+                    bail!("{}", self.failed(failure));
                 }
                 tokio::select! {
                     _ = tick.tick(), if !dropped => {}
                     event = link.recv() => match event {
-                        Some(LinkEvent::Connected(info)) => return Ok(info),
+                        Some(LinkEvent::Connected(info)) => {
+                            let phase = Phase::Installing { dropped };
+                            if on_ready(phase, self.before, info.image) == OnReady::Back {
+                                return Ok(info);
+                            }
+                        }
                         Some(LinkEvent::Message(message)) => self.take(message, progress),
                         Some(LinkEvent::Disconnected { .. }) => dropped = true,
                         Some(LinkEvent::Garbled(_)) => {}
@@ -333,7 +420,7 @@ async fn follow_radio(link: &mut LinkHandle, progress: &mut ProgressLine) {
 /// Whether `message` is the P4's line about updating its C6 (`wartui_proto::split`,
 /// `Pair::fault`).
 fn is_radio_update(message: &BridgeToHost) -> bool {
-    matches!(message, BridgeToHost::Error { message } if message.starts_with("updating the radio"))
+    matches!(message, BridgeToHost::Error { message } if message.starts_with(RADIO_UPDATING))
 }
 
 /// What the P4 said about confirming its new image.
@@ -503,7 +590,99 @@ impl ProgressLine {
 mod tests {
     use wartui_proto::link::{LogLevel, LogStr};
 
+    use super::super::testing::P4_APP_HEADER;
     use super::*;
+
+    /// A P4 bridge app image behind the header espflash wrote for one, `len` bytes long.
+    fn p4_app(project: &str, len: usize) -> Vec<u8> {
+        app::fixture_with(P4_APP_HEADER, project, "0.1.0", len)
+    }
+
+    #[test]
+    fn flash_p4_accepts_image_when_it_is_the_p4_bridge_app() {
+        check_app(&p4_app(PROJECT, 0x1000)).unwrap();
+        check_app(&p4_app(PROJECT, SLOT_LEN)).unwrap();
+    }
+
+    #[test]
+    fn flash_p4_refuses_image_when_project_is_not_the_p4_bridge() {
+        let error = check_app(&p4_app("wartui-node-esp32c6", 0x1000)).unwrap_err().to_string();
+        assert!(error.contains("'wartui-node-esp32c6'") && error.contains(PROJECT), "{error}");
+    }
+
+    #[test]
+    fn flash_p4_refuses_image_when_truncated() {
+        let image = p4_app(PROJECT, 0x1000);
+        let error = check_app(&image[..0x800]).unwrap_err().to_string();
+        assert!(error.contains("truncated"), "{error}");
+    }
+
+    #[test]
+    fn flash_p4_refuses_image_when_segment_byte_is_flipped() {
+        let mut image = p4_app(PROJECT, 0x1000);
+        image[0x800] ^= 0x01;
+        let error = check_app(&image).unwrap_err().to_string();
+        assert!(error.contains("corrupt"), "{error}");
+    }
+
+    #[test]
+    fn flash_p4_refuses_image_when_larger_than_its_slot() {
+        let error = check_app(&p4_app(PROJECT, SLOT_LEN + 16)).unwrap_err().to_string();
+        assert!(error.contains("app slot holds"), "{error}");
+    }
+
+    #[test]
+    fn flash_p4_refuses_image_when_built_for_another_chip() {
+        let image = app::fixture(wartui_proto::air::Board::Esp32c6, "0.1.0", 0x1000);
+        let error = check_app(&image).unwrap_err().to_string();
+        assert!(error.contains("built for esp32c6"), "{error}");
+    }
+
+    #[test]
+    fn flash_p4_matches_slot_size_when_reading_partition_table() {
+        let dir = std::path::Path::new(P4_BRIDGE_APP.dir);
+        let table = std::fs::read_to_string(dir.join("partitions.csv")).unwrap();
+        for slot in ["ota_0", "ota_1"] {
+            let row = table.lines().find(|line| line.starts_with(slot)).unwrap();
+            let size = row.split(',').map(str::trim).nth(4).unwrap();
+            let size = usize::from_str_radix(size.trim_start_matches("0x"), 16).unwrap();
+            assert_eq!(size, SLOT_LEN, "{slot}");
+        }
+    }
+
+    #[test]
+    fn flash_p4_keeps_sending_when_ready_names_the_old_image() {
+        // The C6 restarted, and the P4 announced its new life.
+        assert_eq!(on_ready(Phase::Sending, Some(OLD), Some(OLD)), OnReady::Ignore);
+        assert_eq!(on_ready(Phase::Sending, None, None), OnReady::Ignore);
+    }
+
+    #[test]
+    fn flash_p4_stops_sending_when_ready_names_another_image() {
+        assert_eq!(on_ready(Phase::Sending, Some(OLD), Some(NEW)), OnReady::Abort);
+        assert_eq!(on_ready(Phase::Sending, Some(OLD), None), OnReady::Abort);
+    }
+
+    #[test]
+    fn flash_p4_ignores_ready_when_link_has_not_dropped_since_install() {
+        let phase = Phase::Installing { dropped: false };
+        assert_eq!(on_ready(phase, Some(OLD), Some(OLD)), OnReady::Ignore);
+        assert_eq!(on_ready(phase, Some(OLD), Some(NEW)), OnReady::Ignore);
+    }
+
+    #[test]
+    fn flash_p4_takes_ready_as_new_life_when_link_dropped_after_install() {
+        let phase = Phase::Installing { dropped: true };
+        assert_eq!(on_ready(phase, Some(OLD), Some(NEW)), OnReady::Back);
+        assert_eq!(on_ready(phase, Some(OLD), Some(OLD)), OnReady::Back);
+    }
+
+    #[test]
+    fn flash_p4_reads_radio_update_when_line_starts_with_shared_text() {
+        assert!(is_radio_update(&error(&format!("{RADIO_UPDATING} to the bundled image (5%)"))));
+        assert!(!is_radio_update(&error("the radio coprocessor is not answering")));
+        assert!(!is_radio_update(&log(RADIO_UPDATING)));
+    }
 
     const NEW: [u8; DIGEST_LEN] = [0x11; DIGEST_LEN];
     const OLD: [u8; DIGEST_LEN] = [0x22; DIGEST_LEN];
