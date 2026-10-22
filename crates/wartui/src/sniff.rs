@@ -410,6 +410,9 @@ fn handle(event: LinkEvent, args: &Args, counts: &mut Counts) {
             }
         }
 
+        // Answers `flash-bridge`'s update ops, which `sniff` never sends.
+        BridgeToHost::Update(status) => println!("# update status {}", hex(status)),
+
         // Only reachable once transmit exists; harmless to print until then.
         BridgeToHost::SendResult { id, status, tx_us } => {
             println!("# send {id} -> {status:?} at {tx_us}us");

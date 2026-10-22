@@ -16,6 +16,9 @@
 //! **Nothing queues without DTR, and a rising edge empties the queue.** A host never reads
 //! a backlog from before it attached; `Shared::push_host` has why.
 //!
+//! **The first host frame confirms the P4's image on trial**, and `HostToBridge::Update`
+//! frames carry its next one; `src/update.rs` has both.
+//!
 //! [`Pair::usb_serial_mac`]: wartui_proto::split::Pair::usb_serial_mac
 //! [`ResetCause::speaks_first`]: wartui_proto::reset::ResetCause::speaks_first
 
@@ -138,6 +141,7 @@ fn take_frame(frame: &mut [u8], shared: &Shared) {
     // Matched in place rather than moved out of the `Option`, which would copy it.
     let decoded = decode(frame);
     let Some(down @ Down::Command(cmd)) = &decoded else { return };
+    crate::update::note_host_frame(shared);
     let route = shared.pair.borrow().route(cmd);
     match route {
         Route::Local => local(cmd, shared),
@@ -166,6 +170,7 @@ fn local(cmd: &HostToBridge, shared: &Shared) {
         HostToBridge::GpsWrite { .. } => {}
         // No panel.
         HostToBridge::ShowPanel { .. } => {}
+        HostToBridge::Update(op) => crate::update::take(op, shared),
         // `Pair::route` sends nothing else here.
         _ => {}
     }
@@ -213,6 +218,7 @@ async fn write_host<'d, D: UsbDriver<'d>>(
             yield_now().await;
         }
         shared.dtr.set(false);
+        crate::update::host_gone(shared);
     }
 }
 

@@ -42,6 +42,8 @@ jobs:
           # The P4 is a different target from the C-series chips.
           - features: esp32p4,gps
             target: --target riscv32imafc-unknown-none-elf
+          - features: esp32p4,ota
+            target: --target riscv32imafc-unknown-none-elf
 
     runs-on: ubuntu-latest
 

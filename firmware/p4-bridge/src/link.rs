@@ -124,7 +124,7 @@ impl Link {
             uptime_ms: self.boot.elapsed().as_millis() as u32,
             // No heap: nothing on the P4 allocates.
             heap_free: 0,
-            // The P4 takes no update over the link.
+            // The C6 never updates the P4; the host does, over USB (`src/update.rs`).
             image: None,
         }
     }

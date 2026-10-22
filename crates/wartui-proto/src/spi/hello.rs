@@ -66,7 +66,7 @@ pub struct Hello {
     pub heap_free: u32,
     /// The digest espflash appends to the running app image
     /// ([`crate::ota::image::appended_digest`]), which names the build. `None` from a sender
-    /// that takes no update over the link, the P4 among them.
+    /// that takes no update over this link, the P4 among them: its updates come over USB.
     pub image: Option<[u8; DIGEST_LEN]>,
 }
 

@@ -3,7 +3,10 @@ use serde::{Serialize, de::DeserializeOwned};
 use super::{
     BridgeToHost, GPS_FRAME, GPS_WRITE_MAX, HostToBridge, LINK_PROTO_VERSION,
     MAX_ESPNOW_V2_PAYLOAD, MAX_FRAME, MAX_HOST_FRAME, MAX_NODE_PAYLOAD, PANEL_ROWS,
+    UPDATE_STATUS_MAX,
 };
+use crate::ota::image::DIGEST_LEN;
+use crate::spi::update::OP_MAX;
 
 // A frame is a body (the version byte, the payload and the CRC) plus COBS overhead (one
 // byte per 254 and a leading marker, five for a body this size) and the terminator, so 8
@@ -19,6 +22,9 @@ const _: () = assert!(MAX_ESPNOW_V2_PAYLOAD + 32 < MAX_HOST_BODY);
 // The GPS byte pipe, both ways, so a larger batch is a build error too.
 const _: () = assert!(GPS_FRAME + 32 < MAX_BODY);
 const _: () = assert!(GPS_WRITE_MAX + 32 < MAX_HOST_BODY);
+// An update op for a P4's own image, a full chunk at most, and the status answering it.
+const _: () = assert!(OP_MAX + 32 < MAX_HOST_BODY);
+const _: () = assert!(UPDATE_STATUS_MAX + 32 < MAX_BODY);
 // The other frame worth checking. A panel push carries every row every time, so its
 // worst case is fixed: `PANEL_ROWS` lines of a full `ShortStr`, each with a severity
 // byte and a length prefix, plus the variant index and the vector's length. A panel that
@@ -37,13 +43,14 @@ const _: () = assert!(
     "a Status with every queue and SPI stats must fit one frame"
 );
 const _: () = assert!(
-    // Two `ShortStr`s behind their lengths and two MACs, the bridge's and the radio's.
-    // `8 * 5` bounds eight varint `u32`s, against three today: `heap_free`, `uptime_ms` and
-    // the radio's `uptime_ms`. `24` bounds the one-byte fields, against 13 today: the
-    // variant index, `chip`, `proto_version`, `reset_cause`, `last_phase`, `gps`, the
-    // panel's tag, `cols` and `rows`, and the radio's tag, `chip`, `reset_cause` and
-    // `last_phase`. The slack lets either grow a little without moving the sum.
-    2 * (32 + 1) + 2 * 6 + 8 * 5 + 24 < MAX_BODY,
+    // Two `ShortStr`s behind their lengths, two MACs, the bridge's and the radio's, and the
+    // image digest. `8 * 5` bounds eight varint `u32`s, against three today: `heap_free`,
+    // `uptime_ms` and the radio's `uptime_ms`. `24` bounds the one-byte fields, against 14
+    // today: the variant index, `chip`, `proto_version`, `reset_cause`, `last_phase`, `gps`,
+    // the panel's tag, `cols` and `rows`, the radio's tag, `chip`, `reset_cause` and
+    // `last_phase`, and the image's tag. The slack lets either grow a little without moving
+    // the sum.
+    2 * (32 + 1) + 2 * 6 + DIGEST_LEN + 8 * 5 + 24 < MAX_BODY,
     "a Ready with radio info must fit one frame"
 );
 

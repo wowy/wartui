@@ -18,7 +18,10 @@
 //! duplicate or gap. A fixed op reads its body and ignores anything after it, so a body can
 //! grow at its end.
 //!
-//! [`Sender`] is the P4's half, a pure state machine so the host tests it.
+//! [`Sender`] is the P4's half, a pure state machine so the host tests it. The host drives one
+//! too, to update the P4 itself over USB: each op travels in a
+//! [`HostToBridge::Update`](crate::link::HostToBridge::Update), and each status in a
+//! [`BridgeToHost::Update`](crate::link::BridgeToHost::Update).
 //!
 //! - **Stop-and-wait per sector.** It sends a sector's chunks, then nothing until the status
 //!   for that sector arrives. The C6's flash work holds its link loop, so a chunk sent during

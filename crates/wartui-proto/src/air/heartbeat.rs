@@ -31,6 +31,9 @@ pub enum Board {
     Esp32c6,
     /// A Seeed XIAO ESP32-C6 switched to its external antenna: byte 3.
     Esp32c6Xiao,
+    /// An ESP32-P4 bridge: byte 4. No node runs on one; its update receiver names it, so an
+    /// image for another board is refused.
+    Esp32p4,
     /// A byte this build does not name.
     Unknown(u8),
 }
@@ -43,6 +46,7 @@ impl Board {
             Self::Esp32c5 => 1,
             Self::Esp32c6 => 2,
             Self::Esp32c6Xiao => 3,
+            Self::Esp32p4 => 4,
             Self::Unknown(byte) => byte,
         }
     }
@@ -54,6 +58,7 @@ impl Board {
             1 => Self::Esp32c5,
             2 => Self::Esp32c6,
             3 => Self::Esp32c6Xiao,
+            4 => Self::Esp32p4,
             other => Self::Unknown(other),
         }
     }

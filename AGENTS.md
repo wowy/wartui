@@ -81,6 +81,7 @@ cd firmware/common                            # a firmware's clippy does not lin
 cargo fmt --all -- --check
 cargo clippy --release --features esp32c6,radio   # and esp32c5,radio,gps, and esp32c6,ota
 cargo clippy --release --features esp32p4,gps --target riscv32imafc-unknown-none-elf
+cargo clippy --release --features esp32p4,ota --target riscv32imafc-unknown-none-elf
 ```
 
 CI mirrors the workspace split: host crates on every push and PR; each firmware only
@@ -97,8 +98,8 @@ own.
   with them: `air` (the ESP-NOW frames), `beacon`, `hci`, `dedup`, `link`, `mac` (the `Mac`
   type and its text form), `outbox`, `stall`, `plan` (channel pools and the partitioning planner), `node` (a node's
   timings and sweep cursor), `tx_power`, `pending` (the buffers sightings wait in on a node),
-  `ota` (the update receiver a node and the P4 bridge's C6 share, `ota::trial`, the record of an
-  image on trial, and `ota::image`, the digest that names an image).
+  `ota` (the update receiver a node and both halves of the P4 bridge share, `ota::trial`, the
+  record of an image on trial, and `ota::image`, the digest that names an image).
   Compiled into *both* the host and the firmware by path dependency, which is the only thing
   keeping the ends in step — and the reason a node's parsers are testable with `cargo test`
   rather than a reflash.
@@ -283,9 +284,11 @@ is here rather than only in a `//!`.
   because power cycles are routine on these nodes and RTC memory does not survive them. With no
   watchdog, those power cycles are also what rolls back a hung image. Every step's flash writes
   are ordered so a power cut cannot leave an image running untrialed. The P4 bridge's C6 shares
-  the trial: the P4's hello confirms its image, and the P4's resets count its boots.
+  the trial: the P4's hello confirms its image, and the P4's resets count its boots. So does the
+  P4: the first host frame it decodes confirms its image, and a trial boot arms its RTC watchdog,
+  whose resets count its boots, so a hung P4 image or one no host hears rolls back after three.
   → `firmware/common/src/ota.rs` `//!`, `crates/wartui-proto/src/ota/trial.rs` (the sector's fixed
-  layout), `firmware/node/README.md` § "Over-the-air updates"
+  layout), `firmware/node/README.md` § "Over-the-air updates", `firmware/p4-bridge/src/update.rs`
 - **`clippy::all` is denied workspace-wide, in both firmwares too, and so is `unsafe_code`.** The
   host allows it on one function, the Raspberry Pi firmware mailbox ioctl
   (`crates/wartui-core/src/health.rs`, `mailbox_call`). The node allows one IDF call `esp-radio`

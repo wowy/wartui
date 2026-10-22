@@ -7,6 +7,10 @@ use sha2::{Digest, Sha256};
 use wartui_proto::air::{
     Board, OTA_CHUNK, OtaBeginMsg, OtaChunkMsg, OtaCommitMsg, OtaState, OtaStatusMsg, Version,
 };
+use wartui_proto::link::{
+    BridgeToHost, HostToBridge, MAX_FRAME, MAX_HOST_FRAME, UPDATE_STATUS_MAX, UpdateOp,
+    UpdateStatus, decode_frame, encode_frame, encode_host_frame,
+};
 use wartui_proto::ota::{Receiver, SECTOR, SectorSink};
 use wartui_proto::spi::PAYLOAD_MAX;
 use wartui_proto::spi::update::{Failure, OP_MAX, Op, REPLY_WAIT_MS, Sender, Stage, TRIES};
@@ -49,8 +53,13 @@ struct FakeC6 {
 
 impl FakeC6 {
     fn new() -> Self {
+        Self::on(Board::Esp32c6)
+    }
+
+    /// A receiver for `board`'s images, as the P4 holds one for its own.
+    fn on(board: Board) -> Self {
         Self {
-            receiver: Box::new(Receiver::new(Board::Esp32c6)),
+            receiver: Box::new(Receiver::new(board)),
             slot: Slot { flash: vec![0xFF; 64 * SECTOR] },
             installed: None,
         }
@@ -64,7 +73,7 @@ impl FakeC6 {
                     len,
                     sha256,
                     version: Version::new(0, 0, 0),
-                    board: Board::Esp32c6,
+                    board: self.receiver.board(),
                 };
                 Some(self.receiver.begin(&begin, &self.slot))
             }
@@ -451,4 +460,45 @@ fn spi_update_sender_stays_installed_when_status_after_install_is_no_refusal() {
         sender.on_status(&OtaStatusMsg { session, state, next_offset: 0 });
         assert_eq!(sender.stage(), Stage::Installed, "{session} {state:?}");
     }
+}
+
+#[test]
+fn spi_update_sender_installs_image_when_ops_cross_the_usb_link_to_a_p4() {
+    // The host drives the P4's own update with the same sender, each op and status inside a
+    // link frame rather than an SPI transfer.
+    let image = image(3 * SECTOR + 100);
+    let mut sender = Sender::new(&image, sha256(&image), &DIGEST);
+    let mut p4 = FakeC6::on(Board::Esp32p4);
+    let mut buf = [0u8; OP_MAX];
+    for now in 0..100_000 {
+        if sender.stage() == Stage::Installed {
+            break;
+        }
+        let Some(len) = sender.next(now, &mut buf) else { continue };
+        let cmd = HostToBridge::Update(UpdateOp::from_slice(&buf[..len]).expect("an op fits"));
+        let mut frame = [0u8; MAX_HOST_FRAME];
+        let n = encode_host_frame(&cmd, &mut frame).expect("encodes");
+        let Ok(HostToBridge::Update(op)) = decode_frame(&mut frame[..n - 1]) else {
+            panic!("not an update");
+        };
+        let Some(status) = p4.take(&op) else { continue };
+        let mut reply = [0u8; UPDATE_STATUS_MAX];
+        let len = Op::Status(status).encode(&mut reply);
+        let event = BridgeToHost::Update(UpdateStatus::from_slice(&reply[..len]).expect("fits"));
+        let mut frame = [0u8; MAX_FRAME];
+        let n = encode_frame(&event, &mut frame).expect("encodes");
+        let Ok(BridgeToHost::Update(bytes)) = decode_frame(&mut frame[..n - 1]) else {
+            panic!("not a status");
+        };
+        let Some(Op::Status(status)) = Op::decode(&bytes) else { panic!("not a status") };
+        sender.on_status(&status);
+    }
+    assert_eq!(sender.stage(), Stage::Installed);
+    assert!(p4.receiver.is_verified());
+    assert_eq!(&p4.slot.flash[..image.len()], &image[..]);
+    // The install op itself goes out with the stage change, so the P4 has not seen it yet.
+    let mut buf = [0u8; OP_MAX];
+    let len = sender.next(1_000_000, &mut buf).expect("install is resent");
+    p4.take(&buf[..len]);
+    assert_eq!(p4.installed, Some(SESSION));
 }

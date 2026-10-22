@@ -20,7 +20,9 @@
 //! of each of the bridge's outbox slots. See `docs/espnow-v2-findings.md`.
 
 use crate::mac::Mac;
+use crate::ota::image::DIGEST_LEN;
 use crate::reset::ResetCause;
+use crate::spi::update::OP_MAX;
 use heapless::{String, Vec};
 use serde::Serialize;
 
@@ -91,6 +93,16 @@ pub const GPS_WRITE_MAX: usize = 256;
 
 /// Bytes the host composed for the GPS receiver, in transit to the bridge.
 pub type GpsWriteBytes = Vec<u8, GPS_WRITE_MAX>;
+
+/// One encoded [`crate::spi::update::Op`] for a P4 bridge's own image, in transit to it.
+pub type UpdateOp = Vec<u8, OP_MAX>;
+
+/// The most bytes one [`BridgeToHost::Update`] carries: an encoded `Op::Status`, with room
+/// for its body to grow at the end.
+pub const UPDATE_STATUS_MAX: usize = 16;
+
+/// One encoded `Op::Status`, in transit to the host.
+pub type UpdateStatus = Vec<u8, UPDATE_STATUS_MAX>;
 
 /// Broadcast address. Nodes send heartbeats here in plaintext, so a bridge hears a node
 /// before either knows the other's address. Sighting batches unicast to the bridge.
@@ -248,6 +260,12 @@ pub enum HostToBridge {
         #[serde(with = "bytes")]
         bytes: GpsWriteBytes,
     },
+    /// One step of an update to a P4 bridge's own image: a `Begin`, `Chunk`, `Commit` or
+    /// `Install` in the [`crate::spi::update`] layout, which the P4 answers with a
+    /// [`BridgeToHost::Update`]. The P4 handles the same bytes its C6 does, so one codec
+    /// serves both links. A bridge that takes no update answers with an
+    /// [`BridgeToHost::Error`].
+    Update(#[serde(with = "bytes")] UpdateOp),
 }
 
 impl HostToBridge {
@@ -262,7 +280,7 @@ impl HostToBridge {
     #[must_use]
     pub const fn asks_for_reply(&self) -> bool {
         match self {
-            Self::Identify | Self::GetStatus | Self::SendEspNow { .. } => true,
+            Self::Identify | Self::GetStatus | Self::SendEspNow { .. } | Self::Update(_) => true,
             Self::AddPeer { .. }
             | Self::RemovePeer { .. }
             | Self::Reset
@@ -319,6 +337,10 @@ pub enum BridgeToHost {
         /// it. `None` for a bridge with its own radio, and for a split bridge whose C6
         /// has not answered yet.
         radio: Option<RadioInfo>,
+        /// The digest appended to the booted image ([`crate::ota::image`]), from a bridge
+        /// that takes updates over this link. `None` from one that does not. The host reads
+        /// it to tell an installed image from a rollback.
+        image: Option<[u8; DIGEST_LEN]>,
     },
     /// An ESP-NOW frame arrived.
     Rx {
@@ -389,6 +411,9 @@ pub enum BridgeToHost {
         #[serde(with = "bytes")]
         bytes: GpsBytes,
     },
+    /// Where an update to the bridge's own image stands: an `Op::Status` in the
+    /// [`crate::spi::update`] layout, answering a [`HostToBridge::Update`].
+    Update(#[serde(with = "bytes")] UpdateStatus),
 }
 
 /// A bounded queue whose depth the firmware reports.

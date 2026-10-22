@@ -38,8 +38,9 @@ embassy-time = "0.5.1"
 embassy-usb = { version = "0.6.0", default-features = false }
 static_cell = "2.1.1"
 # The reset funnel, the reset cause and the phase marker, shared with the other
-# bridges, and the GPS reader with `gps`. No `radio`: the P4 has none.
-wartui-firmware = { path = "../common", features = ["esp32p4"] }
+# bridges, the updates on flash the node and the C6 use, and the GPS reader with `gps`.
+# No `radio`: the P4 has none.
+wartui-firmware = { path = "../common", features = ["esp32p4", "ota"] }
 wartui-proto = { path = "../../crates/wartui-proto" }
 
 # `build.rs` builds the C6's image, then reads the digest appended to it and hashes it.

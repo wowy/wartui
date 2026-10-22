@@ -19,8 +19,13 @@
 //! often some other device, and must not disturb which bridge the main fleet's `run` and
 //! `flash-fleet` use. A save that fails leaves the flash a success, and says so.
 //!
+//! **A P4 bridge is updated over its own link** (`super::p4`), not flashed with espflash: its
+//! Type-C reaches a CH343 rather than the chip's USB, and the cable the host already holds is
+//! the one that carries the update. The board is chosen by the same rules.
+//!
 //! There is no `--skip`, `--jobs` or `--no-bridge`: there is one target. There is no
-//! `--no-default-features` either, because the bridge firmware has no default features.
+//! `--no-default-features` either: the single-chip bridge firmware has no default features, and
+//! a P4 release image is built with its own.
 
 use std::path::{Path, PathBuf};
 
@@ -32,16 +37,17 @@ use wartui_proto::mac::{self, Mac};
 
 use super::{
     BRIDGE, RELEASE_TAG, Skip, Source, canonical, check_image, chip_of, espflash, espflash_present,
-    features, flash_args, judge_probe, matches, name, obtain, probe_args, read, source,
+    features, flash_args, judge_probe, matches, name, obtain, p4, probe_args, read, source,
 };
 use crate::{config, spec};
 
 #[derive(ClapArgs, Debug)]
 pub struct Args {
-    /// The bridge firmware's features, comma-separated, as `cargo build` takes them. Exactly one
-    /// of `esp32c5` or `esp32c6`, which the board must be.
-    #[arg(long, value_name = "LIST", required = true)]
-    pub features: String,
+    /// The bridge firmware's features, comma-separated, as `cargo build` takes them. For a
+    /// single-chip bridge, exactly one of `esp32c5` or `esp32c6`, which the board must be. For a
+    /// P4 bridge, none for its release image, or its own features for a build.
+    #[arg(long, value_name = "LIST")]
+    pub features: Option<String>,
 
     /// Which board to flash, by path, by address or by the end of it (`00:08`), which must match
     /// one board. It must be attached, and is not remembered. Without it, the bridge remembered
@@ -55,8 +61,8 @@ pub struct Args {
     #[arg(long, value_name = "PATH")]
     pub config: Option<PathBuf>,
 
-    /// Flash this merged image, which holds flash from address 0, rather than building or
-    /// downloading one.
+    /// Flash this image rather than building or downloading one: a merged image, which holds
+    /// flash from address 0, for a single-chip bridge, or an app-only image for a P4 bridge.
     #[arg(long, value_name = "BIN", conflicts_with = "firmware_dir")]
     pub image: Option<PathBuf>,
 
@@ -70,10 +76,8 @@ pub struct Args {
     pub dry_run: bool,
 }
 
-pub fn run(args: Args) -> Result<()> {
-    let features = features(&args.features);
-    let chip = chip_of(&BRIDGE, &features)?;
-    espflash_present()?;
+pub async fn run(args: Args) -> Result<()> {
+    let features = features(args.features.as_deref().unwrap_or_default());
     let named = args.bridge.as_deref().map(|given| (given, canonical(spec(given))));
     let found = discover_ports().context("listing serial ports")?;
     let board = target(
@@ -82,6 +86,15 @@ pub fn run(args: Args) -> Result<()> {
         super::remembered_bridge(args.config.as_deref())?,
     )?;
     let expected = board.mac().expect("target refuses a board without an address");
+    if is_p4_bridge(&board) {
+        p4::run(&args, &features, &board).await?;
+        if !args.dry_run {
+            remember(&args, named.is_some(), &board, expected);
+        }
+        return Ok(());
+    }
+    let chip = chip_of(&BRIDGE, &features)?;
+    espflash_present()?;
 
     let source = source(
         &BRIDGE,
@@ -96,7 +109,7 @@ pub fn run(args: Args) -> Result<()> {
         // A file named on the command line costs nothing to read, and a wrong one is worth
         // hearing about before the real run.
         if let Source::File(path) = &source {
-            check_image(&read(path)?, chip)?;
+            check_image(&read(path)?, chip, BRIDGE.merged)?;
         }
         None
     } else {
@@ -119,18 +132,25 @@ pub fn run(args: Args) -> Result<()> {
         bail!("the bridge failed to flash");
     }
     println!("{:<6} flashed", name(&board));
-    if named.is_none() {
-        let saved = config::path(args.config.as_deref())
-            .ok_or_else(|| anyhow!("there is no default location for it; use --config"))
-            .and_then(|path| remember_flashed(&path, expected));
-        if let Err(why) = saved {
-            println!(
-                "{:<6} not remembered as the bridge, so flash-fleet will not spare it: {why:#}",
-                name(&board)
-            );
-        }
-    }
+    remember(&args, named.is_some(), &board, expected);
     Ok(())
+}
+
+/// Remember the flashed board as the bridge, unless `--bridge` named it, saying so when that
+/// fails.
+fn remember(args: &Args, named: bool, board: &PortCandidate, mac: Mac) {
+    if named {
+        return;
+    }
+    let saved = config::path(args.config.as_deref())
+        .ok_or_else(|| anyhow!("there is no default location for it; use --config"))
+        .and_then(|path| remember_flashed(&path, mac));
+    if let Err(why) = saved {
+        println!(
+            "{:<6} not remembered as the bridge, so flash-fleet will not spare it: {why:#}",
+            name(board)
+        );
+    }
 }
 
 /// Save `mac` as the bridge in the `wartui.toml` at `path`, keeping every other key. A missing
@@ -190,14 +210,15 @@ fn target(
             ),
         },
     };
-    if is_p4_bridge(chosen) {
-        bail!("{} is {}", chosen.path, Skip::P4Bridge);
-    }
-    if chosen.pid != Some(BRIDGE_PID) {
+    if !is_p4_bridge(chosen) && chosen.pid != Some(BRIDGE_PID) {
         bail!("{} is {}", chosen.path, Skip::NotSerialJtag(chosen.pid));
     }
     if chosen.mac().is_none() {
-        bail!("{} {}, so espflash's reading of it cannot be checked", chosen.path, Skip::NoAddress);
+        bail!(
+            "{} {}, so what the board reports cannot be checked against it",
+            chosen.path,
+            Skip::NoAddress
+        );
     }
     Ok(chosen.clone())
 }
@@ -306,13 +327,41 @@ mod tests {
         assert!(error.contains("reports no address"), "{error}");
     }
 
-    #[test]
-    fn flash_bridge_refuses_p4_bridge_with_readme_hint() {
-        let mut p4 = candidate("/dev/ttyACM0", Some(TEST_VID), Some(TEST_PID), None);
+    /// A P4 bridge as the OS lists it, its serial number the bridge's address.
+    fn p4(device: &str, address: &Mac) -> PortCandidate {
+        let serial = mac::full(address).to_string();
+        let mut p4 = candidate(device, Some(TEST_VID), Some(TEST_PID), Some(&serial));
         p4.product = Some("wartui p4 bridge".to_owned());
-        let error = target(&[p4], None, None).unwrap_err().to_string();
-        assert!(error.contains("is a P4 bridge"), "{error}");
-        assert!(error.contains("firmware/p4-bridge/README.md"), "{error}");
+        p4
+    }
+
+    #[test]
+    fn flash_bridge_targets_p4_bridge_when_named() {
+        let found = [board("/dev/ttyACM0", Some(&NODE_MAC)), p4("/dev/ttyACM1", &BRIDGE_MAC)];
+        let (given, spec) = named("44:c0");
+        let chosen = target(&found, Some((given, &spec)), Some(NODE_MAC)).unwrap();
+        assert_eq!(chosen, found[1]);
+        assert!(is_p4_bridge(&chosen));
+    }
+
+    #[test]
+    fn flash_bridge_targets_p4_bridge_when_remembered() {
+        let found = [board("/dev/ttyACM0", Some(&NODE_MAC)), p4("/dev/ttyACM1", &BRIDGE_MAC)];
+        assert_eq!(target(&found, None, Some(BRIDGE_MAC)).unwrap(), found[1]);
+    }
+
+    #[test]
+    fn flash_bridge_targets_p4_bridge_when_it_is_the_only_board() {
+        let found = [p4("/dev/ttyACM0", &BRIDGE_MAC)];
+        assert_eq!(target(&found, None, None).unwrap(), found[0]);
+    }
+
+    #[test]
+    fn flash_bridge_refuses_p4_bridge_when_it_reports_no_address() {
+        let mut bare = p4("/dev/ttyACM0", &BRIDGE_MAC);
+        bare.serial = None;
+        let error = target(&[bare], None, None).unwrap_err().to_string();
+        assert!(error.contains("reports no address"), "{error}");
     }
 
     #[test]

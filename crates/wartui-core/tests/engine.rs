@@ -272,6 +272,7 @@ fn connected_bridge(mac: Mac, gps: bool) -> Event {
         panel: None,
         gps,
         radio: None,
+        image: None,
     }))
 }
 

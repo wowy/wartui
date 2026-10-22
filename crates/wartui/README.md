@@ -20,7 +20,7 @@ This is the operator's manual. The root [`README.md`](../../README.md) is the sh
 | `reset`        | Reboot a bridge that has stopped answering                                          |
 | `ports`        | List the Espressif boards and P4 bridges attached, and the address of each          |
 | `flash-fleet`  | Flash node firmware onto every attached board of one chip; see "Flashing the fleet" |
-| `flash-bridge` | Flash bridge firmware onto the bridge; see "Flashing the bridge"                    |
+| `flash-bridge` | Flash or update the bridge's firmware; see "Flashing the bridge"                    |
 | `ota`          | Update node firmware through the bridge; see "Updating over the air"                |
 
 Nodes broadcast heartbeats but unicast sighting batches to the bridge that last sent them an admin
@@ -414,7 +414,7 @@ refused when:
 A board is flashed only when all five hold; otherwise it is skipped and listed with the reason:
 
 1. It is native USB Serial/JTAG (`303a:1001`) and reports its address as its serial number. A P4
-   bridge is skipped with its own reason: it is flashed by hand (`firmware/p4-bridge/README.md`).
+   bridge is skipped with its own reason: `flash-bridge` updates it.
 2. It is not the bridge, and not named with `--skip`.
 3. `espflash board-info` reads the chip `--features` names.
 4. `espflash board-info` reads the same address from the chip that the OS reported for the port.
@@ -451,22 +451,28 @@ candidate once, since `board-info` does.
 
 ### Flashing the bridge
 
-`flash-bridge` puts one bridge image on exactly one board, the bridge, through `espflash`.
+`flash-bridge` puts one bridge image on exactly one board, the bridge: through `espflash` on a
+single-chip bridge, and over its own link on a P4 bridge (see "Updating a P4 bridge").
 
 ```sh
 wartui flash-bridge --features esp32c6 --dry-run    # which board, and the image's source
 wartui flash-bridge --features esp32c5,t-dongle-c5
 wartui flash-bridge --features esp32c6 --bridge 10:BD:A3:EC:44:C0
+wartui flash-bridge --bridge 71:F4                  # a P4 bridge: no --features
 ```
 
-| Flag                 | Default        | What it is                                                            |
-|----------------------|----------------|-----------------------------------------------------------------------|
-| `--features LIST`    | —              | The bridge firmware's features; exactly one of `esp32c5` or `esp32c6` |
-| `--bridge PATH\|MAC` | see below      | The board to flash, which must be attached; `00:08` works too         |
-| `--config PATH`      | per-OS path    | Where to read and save the remembered bridge; see "Config file"       |
-| `--image BIN`        | —              | Flash this merged image rather than building or fetching one          |
-| `--firmware-dir DIR` | the checkout's | Build the image from the bridge firmware here                         |
-| `--dry-run`          | off            | Probe and report; build, fetch and flash nothing                      |
+| Flag                 | Default        | What it is                                                           |
+|----------------------|----------------|----------------------------------------------------------------------|
+| `--features LIST`    | —              | The bridge firmware's features; see below                            |
+| `--bridge PATH\|MAC` | see below      | The board to flash, which must be attached; `00:08` works too        |
+| `--config PATH`      | per-OS path    | Where to read and save the remembered bridge; see "Config file"      |
+| `--image BIN`        | —              | Use this image rather than building or fetching one                  |
+| `--firmware-dir DIR` | the checkout's | Build the image from the bridge firmware here                        |
+| `--dry-run`          | off            | Report the board and the image's source; build, fetch, flash nothing |
+
+A single-chip bridge needs `--features` naming exactly one of `esp32c5` or `esp32c6`, and `--image`
+is a merged image. A P4 bridge takes no chip feature: leave `--features` out for its release image,
+or pass its own features to a build. Its `--image` is an app-only image.
 
 **The board is chosen before anything is reset**, from the first that applies:
 
@@ -481,10 +487,8 @@ The run is refused when:
 - Several boards are attached and none is known. The refusal lists their addresses; pick one with
   `--bridge`.
 - No board is attached.
-- The board is a P4 bridge, which is flashed by hand until single-cable updates land
-  (`firmware/p4-bridge/README.md`).
 
-The chosen board must be native USB Serial/JTAG (`303a:1001`) reporting its address, and
+A single-chip bridge must be native USB Serial/JTAG (`303a:1001`) reporting its address, and
 `espflash board-info` must read the `--features` chip and that address, or nothing is flashed.
 
 The image comes from the same three sources as `flash-fleet`'s, with `firmware/bridge` for
@@ -498,6 +502,37 @@ full output. A board found without `--bridge` is then saved to `wartui.toml` as 
 named with `--bridge` is not saved, since one flashed by name is often some other device. When the
 save fails, the flash still succeeds and a line says why, since `flash-fleet` will not spare that
 board until `run` connects to it. `--dry-run` resets it once, for `board-info`.
+
+#### Updating a P4 bridge
+
+A P4 bridge takes its app image over the USB link it bridges on, so after its first flash
+(`firmware/p4-bridge/README.md` § "First flash") neither the CH343 nor the BOOT button is needed.
+The image comes from the same three sources, with `firmware/p4-bridge` for `firmware/node`; a
+release publishes one, built with the default features. Its header must name the `esp32p4`.
+
+The run opens the bridge, checks it answers as a P4 with the chosen address, and sends the image.
+The P4 checks it, switches slots and reboots into it on trial; the run waits up to 120 s for it to
+come back, and the connection's first frame confirms it. When the new image carries a new C6
+image, the P4 then updates its C6, and the run prints that progress for up to 30 s. A P4 already
+running the image is left alone. The board prints, by its last two octets:
+
+| Line                                              | Meaning                                                  |
+|---------------------------------------------------|----------------------------------------------------------|
+| `n%  sending`                                     | The image is on its way                                  |
+| `installing; waiting for the bridge to come back` | The P4 holds the whole image and is rebooting into it    |
+| `installed and confirmed`                         | The P4 came back on the new image                        |
+| `fault  …`, `Info  …`                             | A line the bridge sent, such as its C6's update progress |
+| `already runs this image`                         | Nothing was sent                                         |
+
+The run fails, and the P4 keeps the image it ran, when:
+
+- The P4 came back on its old image: the new one did not boot, and its trial watchdog rolled it
+  back after three tries.
+- The link dropped mid-transfer. Run `flash-bridge` again.
+- The P4 does not announce itself, or does not answer the update: its firmware predates link
+  updates. Flash it once by hand.
+- The P4 refuses the update: it has no second app slot, as on espflash's default partition table.
+  Flash it once by hand with its own table.
 
 ### Updating over the air
 

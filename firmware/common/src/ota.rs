@@ -1,6 +1,7 @@
-//! Over-the-air updates on flash: the slot under [`wartui_proto::ota::Receiver`], the switch
-//! to a new image, and the trial that image boots on. A node and the P4 bridge's C6 share it.
-//! Each feeds its receiver its own way, a node from the air and the C6 from the SPI link.
+//! Updates on flash: the slot under [`wartui_proto::ota::Receiver`], the switch to a new image,
+//! and the trial that image boots on. A node and both halves of the P4 bridge share it. Each
+//! feeds its receiver its own way: a node from the air, the C6 from the SPI link and the P4
+//! from its USB link.
 //!
 //! The receiver decides what to write; this module only says where. An image goes into the
 //! app slot that is not booted, through [`Slot`], at that slot's offset on flash.
@@ -37,9 +38,16 @@
 //! update.
 //!
 //! **Trial boots are counted in flash** because these boards lose power routinely, and RTC
-//! memory does not survive that. There is no watchdog, so a hung image is caught the same
-//! way: each power cycle counts a boot, given by the operator on a node and by the P4 on its
-//! C6.
+//! memory does not survive that. A node and the C6 have no watchdog, so a hung image is caught
+//! the same way: each power cycle counts a boot, given by the operator on a node and by the P4
+//! on its C6. The P4 arms its own RTC watchdog on a trial boot, and each reset it causes counts
+//! a boot too.
+//!
+//! **On the P4, every flash write parks core 1.** The P4 is dual-core, and esp-storage refuses
+//! a write while the other core runs, since that core may fetch code from the flash being
+//! written. `FlashStorage::multicore_auto_park` parks it for each erase and write and resumes
+//! it after, which is correct whether or not the firmware has started core 1. The C5 and C6
+//! have one core.
 //!
 //! **Nothing here logs.** Each step returns what happened, as [`Note`]s or a [`Fault`], and
 //! the caller says it its own way and reboots where a step says to: a node prints to its USB
@@ -212,7 +220,11 @@ impl Ota {
     /// # Panics
     /// If called twice: the table buffer is a static taken once.
     pub fn new(flash: FLASH<'static>) -> (Self, Option<Fault>) {
-        let mut flash = FlashStorage::new(flash);
+        let flash = FlashStorage::new(flash);
+        // The module documentation has why.
+        #[cfg(feature = "esp32p4")]
+        let flash = flash.multicore_auto_park();
+        let mut flash = flash;
         let table = TABLE.take();
         let (layout, fault) = match locate(&mut flash, table) {
             Ok(layout) => (layout, None),

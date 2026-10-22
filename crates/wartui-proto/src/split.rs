@@ -31,6 +31,9 @@
 //!   ran before (`firmware/common/src/ota.rs`).
 //! - **A C6 whose hello carries no digest predates the update path** and is not updated: it
 //!   cannot take the image, so it needs one wired flash.
+//! - **`Ready.image` is the P4's own image digest**, never the C6's: it is the image the host
+//!   updates over USB (`HostToBridge::Update`, which the P4 handles itself), and the bundle
+//!   decides the C6's.
 
 use core::fmt::Write;
 
@@ -119,6 +122,8 @@ pub struct Pair {
     gps: bool,
     /// The digest of the C6 image the P4 carries.
     bundled: [u8; DIGEST_LEN],
+    /// The digest of the P4's own booted image, for `Ready`.
+    own_image: Option<[u8; DIGEST_LEN]>,
     /// This P4 life has tried to update the C6.
     attempted: bool,
     /// How much of the image the C6 holds, in percent.
@@ -155,11 +160,20 @@ impl Pair {
             boot_ms,
             gps,
             bundled,
+            own_image: None,
             attempted: false,
             progress: 0,
             installed_at: None,
             resets: 0,
         }
+    }
+
+    /// The same pair, announcing `image` as the digest of the P4's booted image, which the
+    /// host reads to tell an installed P4 image from a rollback.
+    #[must_use]
+    pub fn with_own_image(mut self, image: Option<[u8; DIGEST_LEN]>) -> Self {
+        self.own_image = image;
+        self
     }
 
     /// The C6 sent a hello in its transfer `seq`, at P4 time `now_ms`.
@@ -373,6 +387,7 @@ impl Pair {
                 last_phase: hello.last_phase,
                 uptime_ms: hello.uptime_ms,
             }),
+            image: self.own_image,
         })
     }
 
@@ -418,7 +433,8 @@ impl Pair {
             | HostToBridge::GetStatus
             | HostToBridge::Reset
             | HostToBridge::ShowPanel { .. }
-            | HostToBridge::GpsWrite { .. } => Route::Local,
+            | HostToBridge::GpsWrite { .. }
+            | HostToBridge::Update(_) => Route::Local,
             // Listed rather than caught, so a new command is a compile error until it is
             // placed.
             HostToBridge::SendEspNow { .. }

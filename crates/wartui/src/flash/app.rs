@@ -76,7 +76,8 @@ const fn project_name(board: Board) -> Option<&'static str> {
         Board::Esp32c5 => Some("wartui-node-esp32c5"),
         Board::Esp32c6 => Some("wartui-node-esp32c6"),
         Board::Esp32c6Xiao => Some("wartui-node-esp32c6-xiao"),
-        Board::Unknown(_) => None,
+        // No node runs on a P4.
+        Board::Esp32p4 | Board::Unknown(_) => None,
     }
 }
 
@@ -86,7 +87,7 @@ const fn features(board: Board) -> Option<&'static [&'static str]> {
         Board::Esp32c5 => Some(&["esp32c5"]),
         Board::Esp32c6 => Some(&["esp32c6"]),
         Board::Esp32c6Xiao => Some(&["esp32c6", "xiao-external-antenna"]),
-        Board::Unknown(_) => None,
+        Board::Esp32p4 | Board::Unknown(_) => None,
     }
 }
 
@@ -94,7 +95,7 @@ const fn chip(board: Board) -> Option<Chip> {
     match board {
         Board::Esp32c5 => Some(Chip::Esp32c5),
         Board::Esp32c6 | Board::Esp32c6Xiao => Some(Chip::Esp32c6),
-        Board::Unknown(_) => None,
+        Board::Esp32p4 | Board::Unknown(_) => None,
     }
 }
 
@@ -105,6 +106,7 @@ pub fn board_name(board: Board) -> String {
         Board::Esp32c5 => "esp32c5".to_owned(),
         Board::Esp32c6 => "esp32c6".to_owned(),
         Board::Esp32c6Xiao => "esp32c6-xiao".to_owned(),
+        Board::Esp32p4 => "esp32p4".to_owned(),
         Board::Unknown(byte) => format!("unknown board {byte}"),
     }
 }

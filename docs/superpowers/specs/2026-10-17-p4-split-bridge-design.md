@@ -66,11 +66,13 @@ Each step is usable and benchmarkable on its own.
    - **The C6 half is built** (issue #215). At boot the P4 compares the C6's image digest with
      the bundled one, and reflashes the C6 over the SPI link when they differ; see "The SPI
      link" below.
-   - **The P4 half is not built yet.** `wartui flash-bridge` sends the P4 its image over the
-     high-speed USB link, and the P4 boots it on trial. The C6 follows on that boot. This needs
-     A/B slots and a trial sector on the P4, a receiver on the USB link, the host side of
-     `flash-bridge`, and a P4 image in the release. It reuses the OTA machinery the node and
-     the C6 share (`firmware/common/src/ota.rs`, `wartui_proto::ota`).
+   - **The P4 half is built** (issue #234). `wartui flash-bridge` sends the P4 its app image
+     over the high-speed USB link as `HostToBridge::Update` ops, the SPI update payload's
+     layout, and the P4 boots it on trial. The first host frame confirms it, and a trial boot
+     arms the RTC watchdog for 30 s, so a hung image rolls back after three. The C6 follows on
+     that boot. The P4 uses the node's partition table and the OTA machinery the node and the
+     C6 share (`firmware/common/src/ota.rs`, `wartui_proto::ota`), and the release publishes its
+     merged and app images.
 
    The first flash of each chip stays a wired flash.
 
@@ -247,6 +249,8 @@ user's.
   - A C6 image that hangs at boot is power-cycled until it rolls back, and the bridge comes up
     with the "did not take" fault.
 
+  The P4 half has not been on the bench yet.
+
 ### Settled after the builder check (designer's calls)
 
 - **The first wired flash of each chip stays manual.** The repo gets a README procedure, and
@@ -272,9 +276,6 @@ user's.
   keys) and the default values, chosen from bench high-water marks.
 - How the P4's executor is arranged. The spike's async SPI DMA, edge-wait READY and `join4`
   worked.
-- The P4's partition layout and the OTA transport over the USB link in step 3, reusing
-  `wartui_proto::ota` and `firmware/common/src/ota.rs` where they fit. The C6's are settled:
-  the node's table, and the frozen SPI update payload.
 - Whether the spare SDIO lines (GPIO16/17 ↔ IO22/23) get used for anything.
 
 ## Waiting: async over polling

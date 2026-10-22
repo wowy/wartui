@@ -410,11 +410,13 @@ impl FleetEngine {
                 }));
             }
             // `Ready` arrives as `LinkEvent::Connected`. Bridge diagnostics are the operator's, not
-            // the engine's. GPS bytes are the position chain's.
+            // the engine's. GPS bytes are the position chain's. An update status answers
+            // `flash-bridge`, which `run` never is.
             BridgeToHost::Ready { .. }
             | BridgeToHost::Log { .. }
             | BridgeToHost::Error { .. }
-            | BridgeToHost::Gps { .. } => {}
+            | BridgeToHost::Gps { .. }
+            | BridgeToHost::Update(_) => {}
         }
     }
 

@@ -15,10 +15,15 @@
 //!   notes an install, then gives [`Pair`] the time. That is how it gives up on a silent
 //!   C6, and resets one silent since an update's install through its enable pin;
 //! - **the USB device** (`src/usb.rs`) starts once the pair knows its serial number, and
-//!   runs the device, a reader, a writer and the `GetStatus` answer;
+//!   runs the device, a reader, a writer and the `GetStatus` answer. The reader also takes
+//!   the P4's own updates (`src/update.rs`);
 //! - **the GPS reader** (`src/gps.rs`, with the default `gps` feature) polls a u-blox
 //!   receiver on I2C0 and forwards its bytes. GPIO7 and GPIO8 are shared with the board's
 //!   ES8311 codec, which this firmware never addresses.
+//!
+//! Before anything else, the P4 checks whether its own image is on trial, and rolls it back
+//! when its trial boots are spent (`wartui_firmware::ota`). A trial boot arms the RTC
+//! watchdog, and the first host frame confirms the image (`src/update.rs`).
 //!
 //! The P4 resets the C6 through its enable pin at boot, so the pair always starts
 //! together. Every wait is a GPIO interrupt, a DMA completion, a USB event, a signal
@@ -39,6 +44,7 @@ mod config;
 mod gps;
 mod link;
 mod radio;
+mod update;
 mod usb;
 
 use core::cell::{Cell, RefCell};
@@ -66,16 +72,18 @@ use wartui_firmware::{phase, reboot, reset_cause};
 use wartui_proto::frame_ring::FrameRing;
 use wartui_proto::host_queue::{HostQueue, is_priority};
 use wartui_proto::link::{
-    BridgeToHost, LoopPhase, MAX_FRAME, QueueId, QueueStat, ShortStr, SpiStats, encode_frame,
+    BridgeToHost, LogLevel, LogStr, LoopPhase, MAX_FRAME, QueueId, QueueStat, ShortStr, SpiStats,
+    encode_frame,
 };
 #[cfg(feature = "gps")]
-use wartui_proto::link::{GpsBytes, GpsWriteBytes, LogLevel, LogStr};
+use wartui_proto::link::{GpsBytes, GpsWriteBytes};
 use wartui_proto::spi::{Down, Held, RECORD_MAX, TRANSFER_LEN, encode_down};
 use wartui_proto::split::{Pair, PairEvent};
 
 use crate::config::{DOWN_QUEUE_BYTES, HOST_BULK_BYTES, HOST_PRIORITY_BYTES, SPI_KHZ};
 use crate::link::{Bus, Link, run_link};
 use crate::radio::RADIO_DIGEST;
+use crate::update::Updates;
 
 // This creates the app descriptor the esp-idf bootloader expects.
 esp_bootloader_esp_idf::esp_app_desc!();
@@ -152,10 +160,17 @@ pub struct Shared {
     /// The GPS reader's write channel, once its bus is up.
     #[cfg(feature = "gps")]
     gps_writes: RefCell<Option<Sender<'static, NoopRawMutex, GpsWriteBytes>>>,
+    /// The P4's own image: its trial, and an update in progress.
+    updates: RefCell<&'static mut Updates>,
 }
 
 impl Shared {
-    fn new(pair: Pair, host: &'static mut HostFrames, down: &'static mut DownQueue) -> Self {
+    fn new(
+        pair: Pair,
+        host: &'static mut HostFrames,
+        down: &'static mut DownQueue,
+        updates: &'static mut Updates,
+    ) -> Self {
         Self {
             pair: RefCell::new(pair),
             host: RefCell::new(host),
@@ -182,6 +197,7 @@ impl Shared {
             gps_fault: Cell::new(None),
             #[cfg(feature = "gps")]
             gps_writes: RefCell::new(None),
+            updates: RefCell::new(updates),
         }
     }
 
@@ -234,14 +250,37 @@ impl Shared {
         queued
     }
 
-    /// Announce this bridge life: `Ready`, then the fault if the radio is not usable, and
-    /// the GPS fault if there is one.
+    /// Announce this bridge life: `Ready`, then the fault if the radio is not usable, the
+    /// GPS fault if there is one, and what the P4's own image has to say.
     fn announce(&self) {
         self.push_ready();
         self.push_fault();
         #[cfg(feature = "gps")]
         if let Some(why) = self.gps_fault.get() {
             self.push_error(why);
+        }
+        self.flush_update_lines();
+    }
+
+    /// Send the lines the P4's image held for the host, then why it refuses updates, if it
+    /// does. Only after a `Ready`, since the host drops what arrives on a connection before
+    /// one, and only to a host holding DTR, since the lines are said once.
+    fn flush_update_lines(&self) {
+        if !self.dtr.get() {
+            return;
+        }
+        update::say_lines(self);
+        if let Some(message) = update::fault(self) {
+            self.push_line(None, message);
+        }
+    }
+
+    /// A line for the host: an `Error` without a level, else a `Log`.
+    #[inline(never)]
+    fn push_line(&self, level: Option<LogLevel>, message: LogStr) {
+        match level {
+            Some(level) => self.push_host(&BridgeToHost::Log { level, message }),
+            None => self.push_host(&BridgeToHost::Error { message }),
         }
     }
 
@@ -319,6 +358,10 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     mark(LoopPhase::Boot);
     phase::claim();
 
+    // Before anything else, so an image that has run out of trial boots is rolled back before
+    // it does anything. What it says waits for a host.
+    let (updates, own_image) = update::boot(peripherals.FLASH, peripherals.RTC_TIMER);
+
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
     let boot = Instant::now();
@@ -352,8 +395,9 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     let fw_version = ShortStr::try_from(env!("CARGO_PKG_VERSION")).unwrap_or_default();
     let gps = cfg!(feature = "gps");
     let pair =
-        Pair::new(own_mac, fw_version, cause, last_phase, boot.as_millis(), gps, RADIO_DIGEST);
-    let shared = Shared::new(pair, HOST_QUEUE.take(), DOWN_QUEUE.take());
+        Pair::new(own_mac, fw_version, cause, last_phase, boot.as_millis(), gps, RADIO_DIGEST)
+            .with_own_image(own_image);
+    let shared = Shared::new(pair, HOST_QUEUE.take(), DOWN_QUEUE.take(), updates);
     let mut link = Link::new(boot, own_mac, cause, last_phase, HELD.take());
 
     // Joined rather than spawned: all borrow `shared`, and none ends.

@@ -333,6 +333,8 @@ async fn run_bridge(
         gps: false,
         // A single-chip bridge.
         radio: None,
+        // It takes no update over the link.
+        image: None,
     };
     if plumbing.events.send(LinkEvent::Connected(info)).await.is_err() {
         return;
@@ -376,6 +378,11 @@ async fn run_bridge(
             HostToBridge::Reset => Some(BridgeToHost::Log {
                 level: LogLevel::Info,
                 message: LogStr::try_from("simulated reset ignored").unwrap_or_default(),
+            }),
+            // As a single-chip bridge answers it.
+            HostToBridge::Update(_) => Some(BridgeToHost::Error {
+                message: LogStr::try_from("this bridge takes no update over its link")
+                    .unwrap_or_default(),
             }),
             HostToBridge::SendEspNow { id, dst, ensure_peer, payload } => {
                 if ensure_peer && !peers.contains(&dst) {

@@ -76,7 +76,7 @@ enum Command {
     Ports,
     /// Flash node firmware onto every attached board of one chip, sparing the bridge.
     FlashFleet(flash::fleet::Args),
-    /// Flash bridge firmware onto the bridge.
+    /// Flash bridge firmware onto the bridge, or update a P4 bridge over its link.
     FlashBridge(flash::bridge::Args),
     /// Update nodes' firmware over the air, through the bridge.
     Ota(ota::Args),
@@ -105,7 +105,7 @@ async fn main() -> Result<()> {
         Some(Command::Reset(args)) => reset::run(args).await,
         Some(Command::Ports) => ports(),
         Some(Command::FlashFleet(args)) => flash::fleet::run(args),
-        Some(Command::FlashBridge(args)) => flash::bridge::run(args),
+        Some(Command::FlashBridge(args)) => flash::bridge::run(args).await,
         Some(Command::Ota(args)) => ota::run(args).await,
         Some(Command::Bench(args)) => bench::run(args).await,
     }
@@ -589,10 +589,19 @@ mod tests {
         ])
         .unwrap();
         let Some(Command::FlashBridge(args)) = cli.command else { panic!("not flash-bridge") };
-        assert_eq!(args.features, "esp32c5,t-dongle-c5");
+        assert_eq!(args.features.as_deref(), Some("esp32c5,t-dongle-c5"));
         assert_eq!(args.image.as_deref(), Some(std::path::Path::new("fw.bin")));
         assert!(args.dry_run);
         assert_eq!(args.bridge, None);
+    }
+
+    #[test]
+    fn cli_parser_accepts_flash_bridge_when_features_are_omitted() {
+        // A P4 bridge's release image is built with its default features.
+        let cli = parse(["wartui", "flash-bridge", "--bridge", "71:F4"]).unwrap();
+        let Some(Command::FlashBridge(args)) = cli.command else { panic!("not flash-bridge") };
+        assert_eq!(args.features, None);
+        assert_eq!(args.bridge.as_deref(), Some("71:F4"));
     }
 
     #[test]

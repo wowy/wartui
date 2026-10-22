@@ -342,6 +342,28 @@ fn pair_routes_panel_and_gps_local() {
 }
 
 #[test]
+fn pair_routes_update_local_when_radio_is_in_any_state() {
+    // The P4's own image, which it takes whatever its C6 is doing.
+    for pair in [pair(), up_pair(), updating_pair()] {
+        assert_eq!(pair.route(&HostToBridge::Update(Vec::new())), Route::Local);
+    }
+}
+
+#[test]
+fn pair_ready_carries_own_image_when_given_one() {
+    let own = [0x4F; 32];
+    let mut pair = pair().with_own_image(Some(own));
+    assert_eq!(pair.on_hello(hello(900), 0, 1_000), PairEvent::NewLife);
+    match pair.ready(1_000) {
+        Some(BridgeToHost::Ready { image, .. }) => assert_eq!(image, Some(own)),
+        other => panic!("not a Ready: {other:?}"),
+    }
+    let mut bare = self::pair();
+    bare.on_hello(hello(900), 0, 1_000);
+    assert!(matches!(bare.ready(1_000), Some(BridgeToHost::Ready { image: None, .. })));
+}
+
+#[test]
 fn pair_refuses_peer_commands_silently_when_radio_not_up() {
     let mut absent = pair();
     absent.on_tick(RADIO_WAIT_MS);
