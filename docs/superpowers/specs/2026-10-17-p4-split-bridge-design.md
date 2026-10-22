@@ -249,7 +249,15 @@ user's.
   - A C6 image that hangs at boot is power-cycled until it rolls back, and the bridge comes up
     with the "did not take" fault.
 
-  The P4 half has not been on the bench yet.
+  The P4 half passes on the same pair, 2026-10-21:
+  - After one wired flash with the partition table, `flash-bridge` installs a P4 image over
+    USB, and the host's `Identify` confirms it. The image survives three power cycles.
+  - A P4 image with a changed C6 inside installs, and the P4 then updates its C6.
+    `flash-bridge` shows the C6's progress through to its restart, in 16 s in all.
+  - A P4 image that hangs at boot is reset by the trial watchdog until it rolls back, about
+    60 s after the install, and `flash-bridge` reports the rollback.
+  - A cable pulled mid-transfer leaves the P4 on its image, and the next `flash-bridge`
+    succeeds.
 
 ### Settled after the builder check (designer's calls)
 
