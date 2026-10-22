@@ -478,7 +478,7 @@ fn host_command_asks_for_reply_only_when_bridge_answers() {
         (HostToBridge::RemovePeer { mac }, false),
         (HostToBridge::Reset, false),
         (HostToBridge::GpsWrite { bytes: GpsWriteBytes::new() }, false),
-        (HostToBridge::Update(encoded_op(&Op::Commit { session: 1 })), true),
+        (HostToBridge::Update(encoded_op(&Op::Commit { session: 1 })), false),
     ];
     for (command, asks) in cases {
         assert_eq!(command.asks_for_reply(), asks, "{command:?}");

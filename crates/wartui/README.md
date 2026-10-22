@@ -520,19 +520,26 @@ running the image is left alone. The board prints, by its last two octets:
 |---------------------------------------------------|----------------------------------------------------------|
 | `n%  sending`                                     | The image is on its way                                  |
 | `installing; waiting for the bridge to come back` | The P4 holds the whole image and is rebooting into it    |
-| `installed and confirmed`                         | The P4 came back on the new image                        |
+| `installed and confirmed`                         | The P4 came back on the new image and confirmed it       |
 | `fault  …`, `Info  …`                             | A line the bridge sent, such as its C6's update progress |
 | `already runs this image`                         | Nothing was sent                                         |
 
 The run fails, and the P4 keeps the image it ran, when:
 
 - The P4 came back on its old image: the new one did not boot, and its trial watchdog rolled it
-  back after three tries.
-- The link dropped mid-transfer. Run `flash-bridge` again.
-- The P4 does not announce itself, or does not answer the update: its firmware predates link
-  updates. Flash it once by hand.
+  back on its third boot.
+- The link dropped mid-transfer, or the P4 could not switch to the image it received. Run
+  `flash-bridge` again.
+- The P4 does not announce itself within 10 s: another program, such as a running `wartui run`,
+  holds the port, or the bridge is still starting. Try again.
+- The P4 answers in a form this build cannot read, or does not answer the update: its firmware
+  predates link updates. Flash it once by hand.
 - The P4 refuses the update: it has no second app slot, as on espflash's default partition table.
   Flash it once by hand with its own table.
+
+The run also fails when the P4 came back on the new image but did not report it confirmed within
+3 s. The image is then still on trial and rolls back unless a host confirms it: run `flash-bridge`
+again, or any `wartui` command that opens the bridge.
 
 ### Updating over the air
 

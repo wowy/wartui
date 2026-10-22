@@ -275,6 +275,9 @@ impl Link {
                     Failure::Refused(state) => {
                         write!(text, "the radio refused the bundled image: {state:?}")
                     }
+                    Failure::SwitchFailed(state) => {
+                        write!(text, "the radio could not switch to the bundled image: {state:?}")
+                    }
                     Failure::Silent => write!(text, "the radio stopped answering its update"),
                     Failure::LostSession => write!(
                         text,

@@ -28,21 +28,23 @@ use esp_hal::time::Duration;
 use static_cell::{ConstStaticCell, StaticCell};
 use wartui_firmware::ota::{Fault, Note, Ota};
 use wartui_firmware::reboot;
-use wartui_proto::air::{
-    Board, OtaBeginMsg, OtaChunkMsg, OtaCommitMsg, OtaState, OtaStatusMsg, Version,
-};
+use wartui_proto::air::{Board, OtaState, OtaStatusMsg};
 use wartui_proto::heapless::Vec;
-use wartui_proto::link::{BridgeToHost, LogLevel, LogStr, UPDATE_STATUS_MAX, UpdateStatus};
+use wartui_proto::link::{
+    BridgeToHost, IMAGE_CONFIRMED, IMAGE_NOT_CONFIRMED, LogLevel, LogStr, UPDATE_STATUS_MAX,
+    UpdateStatus,
+};
 use wartui_proto::ota::Receiver;
 use wartui_proto::ota::image::DIGEST_LEN;
-use wartui_proto::spi::update::Op;
+use wartui_proto::spi::update::{Op, Received, receive};
 
 use crate::Shared;
 
 /// How long a trial boot runs before the watchdog resets it, unless a host confirms it.
 ///
 /// Long enough for the P4 to boot, hear its C6 and enumerate, and for the host to reopen the
-/// port and send `Identify`. Three of these, about 90 s, roll back an image no host confirms.
+/// port and send `Identify`. Two of these, about 60 s, roll back an image no host confirms: the
+/// third boot rolls back as it starts ([`Ota::boot`]).
 pub const TRIAL_WATCHDOG: Duration = Duration::from_secs(30);
 
 /// Lines for the host held until the next announcement, since nothing reaches the host
@@ -134,42 +136,22 @@ impl Updates {
             Ok(()) => {
                 self.trial = false;
                 self.rtc.rwdt.disable();
-                (Some(LogLevel::Info), text(format_args!("image confirmed by the host")))
+                (Some(LogLevel::Info), text(format_args!("{IMAGE_CONFIRMED}")))
             }
-            Err(err) => (None, text(format_args!("could not confirm the image: {err}"))),
+            Err(err) => (None, text(format_args!("{IMAGE_NOT_CONFIRMED}: {err}"))),
         };
         let _ = self.lines.push(line);
     }
 
     /// Hand an update op to the receiver, returning the status to send.
     ///
-    /// A `Begin` is refused with [`OtaState::FlashError`] while this image is on trial, and on
-    /// a table without a `trial` sector or a second app slot, as the C6 refuses one.
+    /// A `Begin` is refused while this image is on trial, and on a table without a `trial`
+    /// sector or a second app slot, as the C6 refuses one ([`receive`]).
     fn take(&mut self, op: Op<'_>) -> Option<OtaStatusMsg> {
-        let receiver = &mut *self.receiver;
-        match op {
-            Op::Begin { session, len, sha256 } => {
-                // The link's `Begin` names no version, and the receiver checks none.
-                let version = Version::new(0, 0, 0);
-                let begin = OtaBeginMsg { session, len, sha256, version, board: receiver.board() };
-                match (self.ota.slot(), self.trial) {
-                    (Some(slot), false) => Some(receiver.begin(&begin, &slot)),
-                    _ => {
-                        Some(OtaStatusMsg { session, state: OtaState::FlashError, next_offset: 0 })
-                    }
-                }
-            }
-            Op::Chunk { session, offset, data } => match self.ota.slot() {
-                Some(mut slot) => receiver.chunk(&OtaChunkMsg { session, offset, data }, &mut slot),
-                None => Some(OtaStatusMsg { session, state: OtaState::Idle, next_offset: 0 }),
-            },
-            Op::Commit { session } => match self.ota.slot() {
-                Some(mut slot) => Some(receiver.commit(&OtaCommitMsg { session }, &mut slot)),
-                None => Some(OtaStatusMsg { session, state: OtaState::Idle, next_offset: 0 }),
-            },
-            Op::Install { session } => self.install(session),
-            // Only the P4 sends a status.
-            Op::Status(_) => None,
+        let received = receive(&mut *self.receiver, op, self.ota.slot().as_mut(), self.trial);
+        match received {
+            Received::Status(status) => status,
+            Received::Install(session) => self.install(session),
         }
     }
 
@@ -216,8 +198,12 @@ pub fn take(bytes: &[u8], shared: &Shared) {
     if let Some(status) = status {
         answer(status, shared);
     }
-    // An install that failed has a line to say.
-    say_lines(shared);
+    // An install that failed has a line to say. Checked first, since taking the lines moves
+    // the whole buffer.
+    let lines = !shared.updates.borrow().lines.is_empty();
+    if lines {
+        say_lines(shared);
+    }
 }
 
 /// Send the host `status`. Out of line, as each message is, so the two never share a frame.

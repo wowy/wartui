@@ -50,3 +50,14 @@ pub fn appended_digest(mut read: impl FnMut(u32, &mut [u8]) -> bool) -> Option<[
     let mut digest = [0u8; DIGEST_LEN];
     read(digest_at, &mut digest).then_some(digest)
 }
+
+/// The digest appended to `image`, held whole in memory, as [`appended_digest`] reads it.
+#[must_use]
+pub fn appended_digest_of(image: &[u8]) -> Option<[u8; DIGEST_LEN]> {
+    appended_digest(|at, buf| {
+        let bytes = usize::try_from(at)
+            .ok()
+            .and_then(|start| image.get(start..start.checked_add(buf.len())?));
+        bytes.map(|bytes| buf.copy_from_slice(bytes)).is_some()
+    })
+}

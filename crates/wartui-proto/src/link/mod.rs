@@ -104,6 +104,14 @@ pub const UPDATE_STATUS_MAX: usize = 16;
 /// One encoded `Op::Status`, in transit to the host.
 pub type UpdateStatus = Vec<u8, UPDATE_STATUS_MAX>;
 
+/// The P4's `Info` [`BridgeToHost::Log`] after a host frame confirms its image on trial.
+/// `wartui flash-bridge` waits for it after an update, so both ends read the text from here.
+pub const IMAGE_CONFIRMED: &str = "image confirmed by the host";
+
+/// The start of the P4's [`BridgeToHost::Error`] when confirming its image fails; the flash
+/// error follows after a colon.
+pub const IMAGE_NOT_CONFIRMED: &str = "could not confirm the image";
+
 /// Broadcast address. Nodes send heartbeats here in plaintext, so a bridge hears a node
 /// before either knows the other's address. Sighting batches unicast to the bridge.
 pub const BROADCAST: Mac = [0xFF; 6];
@@ -276,17 +284,22 @@ impl HostToBridge {
     /// A command that may log or report an error does not ask: the host is not owed
     /// that answer.
     ///
+    /// [`Self::Update`] does not ask. The P4 answers a sector's last chunk and not the chunks
+    /// before it, and runs no stall watch; the single-chip bridge, which does, answers it only
+    /// with the error that it takes no update.
+    ///
     /// Exhaustive on purpose, so a new command has to say which it is.
     #[must_use]
     pub const fn asks_for_reply(&self) -> bool {
         match self {
-            Self::Identify | Self::GetStatus | Self::SendEspNow { .. } | Self::Update(_) => true,
+            Self::Identify | Self::GetStatus | Self::SendEspNow { .. } => true,
             Self::AddPeer { .. }
             | Self::RemovePeer { .. }
             | Self::Reset
             | Self::ShowPanel { .. }
             | Self::SetTxPower { .. }
-            | Self::GpsWrite { .. } => false,
+            | Self::GpsWrite { .. }
+            | Self::Update(_) => false,
         }
     }
 }

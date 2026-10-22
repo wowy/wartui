@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use sha2::{Digest, Sha256};
-use wartui_proto::ota::image::appended_digest;
+use wartui_proto::ota::image::appended_digest_of;
 
 fn main() {
     linker_be_nice();
@@ -128,7 +128,7 @@ fn bundle_radio() {
 
     let image = fs::read(&bin).expect("read the saved radio image");
     let sha256: [u8; 32] = Sha256::digest(&image).into();
-    let Some(digest) = appended_digest(|at, buf| read_at(&image, at, buf)) else {
+    let Some(digest) = appended_digest_of(&image) else {
         panic!(
             "the radio image {} carries no appended SHA-256 digest, which is how the P4 \
              tells whether its C6 runs it",
@@ -168,18 +168,6 @@ fn run(mut command: Command, why: &str, missing: &str, hints: &[(&str, &str)]) {
             }
         }
         panic!("{message}");
-    }
-}
-
-/// Fill `buf` from `image` at `at`, or return `false` past its end.
-fn read_at(image: &[u8], at: u32, buf: &mut [u8]) -> bool {
-    let start = at as usize;
-    match image.get(start..start + buf.len()) {
-        Some(bytes) => {
-            buf.copy_from_slice(bytes);
-            true
-        }
-        None => false,
     }
 }
 

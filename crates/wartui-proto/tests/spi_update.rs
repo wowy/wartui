@@ -4,16 +4,16 @@
 use std::collections::VecDeque;
 
 use sha2::{Digest, Sha256};
-use wartui_proto::air::{
-    Board, OTA_CHUNK, OtaBeginMsg, OtaChunkMsg, OtaCommitMsg, OtaState, OtaStatusMsg, Version,
-};
+use wartui_proto::air::{Board, OTA_CHUNK, OtaState, OtaStatusMsg};
 use wartui_proto::link::{
     BridgeToHost, HostToBridge, MAX_FRAME, MAX_HOST_FRAME, UPDATE_STATUS_MAX, UpdateOp,
     UpdateStatus, decode_frame, encode_frame, encode_host_frame,
 };
 use wartui_proto::ota::{Receiver, SECTOR, SectorSink};
 use wartui_proto::spi::PAYLOAD_MAX;
-use wartui_proto::spi::update::{Failure, OP_MAX, Op, REPLY_WAIT_MS, Sender, Stage, TRIES};
+use wartui_proto::spi::update::{
+    Failure, OP_MAX, Op, REPLY_WAIT_MS, Received, Sender, Stage, TRIES, receive,
+};
 
 const DIGEST: [u8; 32] = [0x42; 32];
 /// The session [`Sender`] names for [`DIGEST`].
@@ -66,29 +66,15 @@ impl FakeC6 {
     }
 
     fn take(&mut self, payload: &[u8]) -> Option<OtaStatusMsg> {
-        match Op::decode(payload).expect("an op") {
-            Op::Begin { session, len, sha256 } => {
-                let begin = OtaBeginMsg {
-                    session,
-                    len,
-                    sha256,
-                    version: Version::new(0, 0, 0),
-                    board: self.receiver.board(),
-                };
-                Some(self.receiver.begin(&begin, &self.slot))
-            }
-            Op::Chunk { session, offset, data } => {
-                self.receiver.chunk(&OtaChunkMsg { session, offset, data }, &mut self.slot)
-            }
-            Op::Commit { session } => {
-                Some(self.receiver.commit(&OtaCommitMsg { session }, &mut self.slot))
-            }
-            Op::Install { session } => {
+        let op = Op::decode(payload).expect("an op");
+        assert!(!matches!(op, Op::Status(_)), "a status sent down");
+        match receive(&mut self.receiver, op, Some(&mut self.slot), false) {
+            Received::Status(status) => status,
+            Received::Install(session) => {
                 assert!(self.receiver.is_verified(), "install before verified");
                 self.installed = Some(session);
                 None
             }
-            Op::Status(_) => panic!("a status sent down"),
         }
     }
 }
@@ -437,7 +423,7 @@ fn spi_update_sender_fails_when_c6_refuses_install() {
         state: OtaState::FlashError,
         next_offset: 0,
     });
-    assert_eq!(sender.stage(), Stage::Failed(Failure::Refused(OtaState::FlashError)));
+    assert_eq!(sender.stage(), Stage::Failed(Failure::SwitchFailed(OtaState::FlashError)));
     let mut buf = [0u8; OP_MAX];
     assert_eq!(sender.next(at + REPLY_WAIT_MS, &mut buf), None);
 }
@@ -501,4 +487,56 @@ fn spi_update_sender_installs_image_when_ops_cross_the_usb_link_to_a_p4() {
     let len = sender.next(1_000_000, &mut buf).expect("install is resent");
     p4.take(&buf[..len]);
     assert_eq!(p4.installed, Some(SESSION));
+}
+
+#[test]
+fn spi_update_receive_refuses_begin_when_image_is_on_trial() {
+    let image = image(100);
+    let begin = Op::Begin { session: SESSION, len: 100, sha256: sha256(&image) };
+    let mut c6 = FakeC6::new();
+    let refused = Received::Status(Some(OtaStatusMsg {
+        session: SESSION,
+        state: OtaState::FlashError,
+        next_offset: 0,
+    }));
+    assert_eq!(receive(&mut c6.receiver, begin, Some(&mut c6.slot), true), refused);
+    assert_eq!(
+        receive(&mut c6.receiver, begin, Some(&mut c6.slot), false),
+        Received::Status(Some(OtaStatusMsg {
+            session: SESSION,
+            state: OtaState::Receiving,
+            next_offset: 0,
+        }))
+    );
+}
+
+#[test]
+fn spi_update_receive_refuses_ops_when_table_has_no_update_slot() {
+    let image = image(100);
+    let mut receiver = Receiver::new(Board::Esp32c6);
+    let none: Option<&mut Slot> = None;
+    let begin = Op::Begin { session: SESSION, len: 100, sha256: sha256(&image) };
+    assert_eq!(
+        receive(&mut receiver, begin, none, false),
+        Received::Status(Some(OtaStatusMsg {
+            session: SESSION,
+            state: OtaState::FlashError,
+            next_offset: 0,
+        }))
+    );
+    let idle = Received::Status(Some(OtaStatusMsg {
+        session: SESSION,
+        state: OtaState::Idle,
+        next_offset: 0,
+    }));
+    let chunk = Op::Chunk { session: SESSION, offset: 0, data: &image };
+    assert_eq!(receive::<Slot>(&mut receiver, chunk, None, false), idle);
+    assert_eq!(receive::<Slot>(&mut receiver, Op::Commit { session: SESSION }, None, false), idle);
+}
+
+#[test]
+fn spi_update_receive_hands_install_back_when_op_is_install() {
+    let mut receiver = Receiver::new(Board::Esp32c6);
+    let install = Op::Install { session: SESSION };
+    assert_eq!(receive::<Slot>(&mut receiver, install, None, true), Received::Install(SESSION));
 }

@@ -43,8 +43,8 @@ The C6 is flashed through its header once, and the P4 stays in download mode whi
 [`firmware/p4-radio`](../p4-radio/README.md#first-flash). After that, updating the P4 updates
 both chips.
 
-A board flashed before this table, on espflash's default one, has no second app slot and refuses
-updates, saying so with every `Ready`. Flash it by hand once more.
+A board on espflash's default table has no second app slot and refuses updates, saying so with
+every `Ready`. Flash it by hand once more, with this table.
 
 ## Updates over USB
 
@@ -58,7 +58,10 @@ so a P4 that comes back and hears `wartui` keeps its image.
 
 **A trial boot arms the RTC watchdog for 30 s.** Confirming disarms it. A hung image is reset by
 it, and the third unconfirmed boot rolls back to the image the P4 ran before. A trial P4 left
-powered with no host rolls back the same way, after about 90 s.
+powered with no host rolls back the same way, after two watchdog periods, about 60 s.
+
+A trial P4 whose C6 does not answer within 2 s enumerates under its own MAC, not the C6's, so
+`flash-bridge`, which looks for the C6's, never opens it to confirm it, and the image rolls back.
 
 The P4 sends the host a line for each boot step: the trial boot's count, a rollback, the confirm,
 and any step that failed.

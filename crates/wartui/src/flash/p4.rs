@@ -9,8 +9,13 @@
 //! **`Ready.image` names the outcome.** The P4 installs, reboots into the new image on trial,
 //! and the transport reconnects; its `Identify` is the first host frame, which confirms the
 //! image. A `Ready` carrying the new digest is installed. One carrying the old is a rollback: the
-//! P4's trial watchdog resets a hung image, and the third reset returns it to the old one, which
-//! is why the wait is [`COME_BACK`].
+//! P4's trial watchdog resets a hung image twice, and the third boot returns it to the old one,
+//! which is why the wait is [`COME_BACK`].
+//!
+//! **The confirm is reported, not assumed.** The P4 says whether the `Identify` confirmed its
+//! image in a line after its `Ready`, in the text `wartui_proto::link` holds for both ends. Only
+//! that line is "confirmed": an image whose confirm failed, or whose line never came, is still on
+//! trial and rolls back unless a host confirms it.
 //!
 //! **Then the C6.** A new P4 image carries its C6's image, which the P4 sends the C6 at boot.
 //! Its progress arrives as error lines, printed until the C6's new life, or until [`QUIET`]
@@ -18,7 +23,9 @@
 //!
 //! **A P4 that cannot take an update names the fix.** One whose firmware predates link updates
 //! announces a `Ready` this build cannot decode, and one on espflash's default partition table
-//! refuses the `Begin`. Both need one last wired flash.
+//! refuses the `Begin`. Both need one last wired flash. A P4 that sends nothing at all is more
+//! likely held by another program, or still starting, so that advice is kept for a `Ready` that
+//! arrived garbled.
 
 use std::io::{IsTerminal, Write};
 use std::time::{Duration, Instant};
@@ -30,8 +37,10 @@ use wartui_bridge::remember::BridgeMemory;
 use wartui_bridge::serial::{BridgeSpec, SerialTransport};
 use wartui_bridge::{BridgeInfo, LinkEvent, LinkHandle};
 use wartui_proto::air::OtaState;
-use wartui_proto::link::{BridgeToHost, Chip as LinkChip, HostToBridge, UpdateOp};
-use wartui_proto::ota::image::{DIGEST_LEN, appended_digest};
+use wartui_proto::link::{
+    BridgeToHost, Chip as LinkChip, HostToBridge, IMAGE_CONFIRMED, IMAGE_NOT_CONFIRMED, UpdateOp,
+};
+use wartui_proto::ota::image::{DIGEST_LEN, appended_digest_of};
 use wartui_proto::spi::update::{Failure, OP_MAX, Op, Sender, Stage};
 
 use super::bridge::Args;
@@ -47,9 +56,13 @@ const TICK: Duration = Duration::from_millis(50);
 /// without, and the transport waits 6 s for a lone board.
 const READY_WAIT: Duration = Duration::from_secs(10);
 
-/// How long to wait for the P4 to come back after the install: three trial boots that the
-/// 30 s watchdog ends, with room for each boot.
+/// How long to wait for the P4 to come back after the install: two trial boots that the 30 s
+/// watchdog ends and the third that rolls back, with room for each boot.
 const COME_BACK: Duration = Duration::from_secs(120);
+
+/// How long after the new image's `Ready` to wait for the line saying whether the host's
+/// `Identify` confirmed it. The P4 sends it right behind the `Ready`.
+const CONFIRM_WAIT: Duration = Duration::from_secs(3);
 
 /// The longest the C6's update is followed after the P4 comes back.
 const FOLLOW: Duration = Duration::from_secs(30);
@@ -86,7 +99,7 @@ pub(super) async fn run(args: &Args, features: &[&str], board: &PortCandidate) -
     let path = obtain(&P4_BRIDGE_APP, &source, features, false, Chip::Esp32p4)?;
     let image = read(&path)?;
     let sha256: [u8; DIGEST_LEN] = Sha256::digest(&image).into();
-    let Some(digest) = appended_digest(|at, buf| read_at(&image, at, buf)) else {
+    let Some(digest) = appended_digest_of(&image) else {
         bail!("{} carries no appended digest, which names the image to the P4", path.display());
     };
 
@@ -95,18 +108,16 @@ pub(super) async fn run(args: &Args, features: &[&str], board: &PortCandidate) -
         .remember_in(BridgeMemory::none())
         .start()
         .context("opening the link")?;
-    let info = match tokio::time::timeout(READY_WAIT, wait_for_ready(&mut link)).await {
-        Ok(info) => info,
-        Err(_) => Err(anyhow::anyhow!("no answer in {} s", READY_WAIT.as_secs())),
-    }
-    .map_err(|why| {
-        anyhow::anyhow!(
-            "{} on {} did not announce itself: {why}. A P4 whose firmware predates link \
-             updates announces nothing this build reads; flash it once by hand, per {FIRST_FLASH}",
-            name(board),
-            board.path
-        )
-    })?;
+    let mut garbled = false;
+    let info = match tokio::time::timeout(READY_WAIT, wait_for_ready(&mut link, &mut garbled)).await
+    {
+        Ok(Ok(info)) => info,
+        Ok(Err(why)) => bail!("{}", no_ready_text(&name(board), &board.path, &why, garbled)),
+        Err(_) => {
+            let why = format!("no answer in {} s", READY_WAIT.as_secs());
+            bail!("{}", no_ready_text(&name(board), &board.path, &why, garbled))
+        }
+    };
     ensure!(
         info.chip == LinkChip::Esp32P4,
         "{} answered as {:?}, not a P4",
@@ -125,9 +136,14 @@ pub(super) async fn run(args: &Args, features: &[&str], board: &PortCandidate) -
     progress.say("installing; waiting for the bridge to come back");
     let back = update.come_back(&mut link, &mut progress).await?;
     match judge(&digest, info.image, back.image) {
-        Outcome::Installed => progress.say("installed and confirmed"),
+        Outcome::Installed => {}
         Outcome::RolledBack => bail!("{} did not boot the new image; rolled back", name(board)),
         Outcome::Other => bail!("{} came back running another image", name(board)),
+    }
+    let confirm = await_confirm(&mut link, &mut progress).await;
+    match confirm_text(&confirm) {
+        Ok(text) => progress.say(text),
+        Err(text) => bail!("{} {text}", name(board)),
     }
     follow_radio(&mut link, &mut progress).await;
     Ok(())
@@ -145,26 +161,35 @@ fn refuse_chip_features(features: &[&str]) -> Result<()> {
     Ok(())
 }
 
-/// Fill `buf` from `image` at `at`, or return `false` past its end.
-fn read_at(image: &[u8], at: u32, buf: &mut [u8]) -> bool {
-    let start = at as usize;
-    match image.get(start..start + buf.len()) {
-        Some(bytes) => {
-            buf.copy_from_slice(bytes);
-            true
-        }
-        None => false,
-    }
-}
-
-async fn wait_for_ready(link: &mut LinkHandle) -> Result<BridgeInfo> {
+/// Wait for the link's `Ready`, setting `garbled` when a frame arrives that does not decode.
+async fn wait_for_ready(link: &mut LinkHandle, garbled: &mut bool) -> Result<BridgeInfo, String> {
     loop {
         match link.recv().await {
             Some(LinkEvent::Connected(info)) => return Ok(info),
-            Some(LinkEvent::Disconnected { reason }) => bail!("{reason}"),
-            Some(_) => {}
-            None => bail!("the link closed"),
+            Some(LinkEvent::Disconnected { reason }) => return Err(reason),
+            Some(LinkEvent::Garbled(_)) => *garbled = true,
+            Some(LinkEvent::Message(_)) => {}
+            None => return Err("the link closed".to_owned()),
         }
+    }
+}
+
+/// Why no `Ready` arrived from `board` on `path`, and what to do. Frames that did not decode
+/// are a `Ready` from firmware that predates link updates; silence is a held port or a bridge
+/// still starting.
+fn no_ready_text(board: &str, path: &str, why: &str, garbled: bool) -> String {
+    if garbled {
+        format!(
+            "{board} on {path} answered in a form this build cannot read ({why}): its firmware \
+             predates link updates. Flash it once by hand, per {FIRST_FLASH}"
+        )
+    } else {
+        format!(
+            "{board} on {path} did not announce itself within {} s ({why}). Another program may \
+             hold the port, such as a running `wartui run`, or the bridge is still starting; \
+             try again",
+            READY_WAIT.as_secs()
+        )
     }
 }
 
@@ -311,6 +336,63 @@ fn is_radio_update(message: &BridgeToHost) -> bool {
     matches!(message, BridgeToHost::Error { message } if message.starts_with("updating the radio"))
 }
 
+/// What the P4 said about confirming its new image.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Confirm {
+    /// The host's `Identify` confirmed it.
+    Confirmed,
+    /// Confirming failed, for this reason.
+    Failed(String),
+    /// No line about it arrived within [`CONFIRM_WAIT`].
+    Unseen,
+}
+
+/// Wait up to [`CONFIRM_WAIT`] for the P4's line about confirming its image, printing any other
+/// line on the way.
+async fn await_confirm(link: &mut LinkHandle, progress: &mut ProgressLine) -> Confirm {
+    let deadline = tokio::time::Instant::now() + CONFIRM_WAIT;
+    loop {
+        let Ok(event) = tokio::time::timeout_at(deadline, link.recv()).await else {
+            return Confirm::Unseen;
+        };
+        match event {
+            Some(LinkEvent::Message(message)) => match confirm_of(&message) {
+                Some(confirm) => return confirm,
+                None => progress.line(&message),
+            },
+            Some(_) => {}
+            None => return Confirm::Unseen,
+        }
+    }
+}
+
+/// The P4's line about confirming its image, if `message` is one.
+fn confirm_of(message: &BridgeToHost) -> Option<Confirm> {
+    match message {
+        BridgeToHost::Log { message, .. } if message.as_str() == IMAGE_CONFIRMED => {
+            Some(Confirm::Confirmed)
+        }
+        BridgeToHost::Error { message } if message.starts_with(IMAGE_NOT_CONFIRMED) => {
+            Some(Confirm::Failed(message.as_str().to_owned()))
+        }
+        _ => None,
+    }
+}
+
+/// The line for a new image's confirm: `Ok` once confirmed, `Err` with what to do otherwise.
+fn confirm_text(confirm: &Confirm) -> Result<&'static str, String> {
+    const ROLLS_BACK: &str = "It rolls back to its old image unless a host confirms this one: \
+                              run flash-bridge again, or any wartui command that opens the bridge";
+    match confirm {
+        Confirm::Confirmed => Ok("installed and confirmed"),
+        Confirm::Failed(why) => Err(format!("installed the new image, but {why}. {ROLLS_BACK}")),
+        Confirm::Unseen => Err(format!(
+            "installed the new image, but no confirm was seen within {} s. {ROLLS_BACK}",
+            CONFIRM_WAIT.as_secs()
+        )),
+    }
+}
+
 /// What the P4 came back running.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Outcome {
@@ -356,6 +438,9 @@ fn failure_text(failure: Failure, image_known: bool) -> String {
             "the image is larger than the bridge's update slot".to_owned()
         }
         Failure::Refused(state) => format!("the bridge refused the update: {state:?}"),
+        Failure::SwitchFailed(_) => "the bridge received the image whole, but switching to it \
+                                     failed; run flash-bridge again"
+            .to_owned(),
         Failure::LostSession => {
             "the bridge kept dropping the update session; run flash-bridge again".to_owned()
         }
@@ -416,6 +501,8 @@ impl ProgressLine {
 
 #[cfg(test)]
 mod tests {
+    use wartui_proto::link::{LogLevel, LogStr};
+
     use super::*;
 
     const NEW: [u8; DIGEST_LEN] = [0x11; DIGEST_LEN];
@@ -459,5 +546,63 @@ mod tests {
     fn flash_p4_names_wired_flash_when_bridge_has_no_update_slot() {
         let text = failure_text(Failure::Refused(OtaState::FlashError), true);
         assert!(text.contains("partition table") && text.contains(FIRST_FLASH), "{text}");
+    }
+
+    #[test]
+    fn flash_p4_says_run_again_when_switch_to_image_fails() {
+        // A refusal after `Install`: the image arrived whole, so the table is not at fault.
+        let text = failure_text(Failure::SwitchFailed(OtaState::FlashError), true);
+        assert!(text.contains("switching") && text.contains("run flash-bridge again"), "{text}");
+        assert!(!text.contains("partition table") && !text.contains(FIRST_FLASH), "{text}");
+    }
+
+    #[test]
+    fn flash_p4_names_wired_flash_when_ready_arrived_garbled() {
+        let text = no_ready_text("71:F4", "/dev/ttyACM0", "no answer in 10 s", true);
+        assert!(text.contains("predates") && text.contains(FIRST_FLASH), "{text}");
+    }
+
+    #[test]
+    fn flash_p4_names_held_port_when_nothing_arrived() {
+        let text = no_ready_text("71:F4", "/dev/ttyACM0", "no answer in 10 s", false);
+        assert!(text.contains("wartui run") && text.contains("still starting"), "{text}");
+        assert!(!text.contains("predates") && !text.contains(FIRST_FLASH), "{text}");
+    }
+
+    fn log(text: &str) -> BridgeToHost {
+        BridgeToHost::Log { level: LogLevel::Info, message: LogStr::try_from(text).unwrap() }
+    }
+
+    fn error(text: &str) -> BridgeToHost {
+        BridgeToHost::Error { message: LogStr::try_from(text).unwrap() }
+    }
+
+    #[test]
+    fn flash_p4_reads_confirm_when_bridge_says_image_confirmed() {
+        assert_eq!(confirm_of(&log(IMAGE_CONFIRMED)), Some(Confirm::Confirmed));
+        assert_eq!(confirm_text(&Confirm::Confirmed), Ok("installed and confirmed"));
+    }
+
+    #[test]
+    fn flash_p4_reads_failed_confirm_when_bridge_reports_error() {
+        let line = format!("{IMAGE_NOT_CONFIRMED}: flash write failed");
+        let confirm = confirm_of(&error(&line)).unwrap();
+        assert_eq!(confirm, Confirm::Failed(line.clone()));
+        let text = confirm_text(&confirm).unwrap_err();
+        assert!(text.contains(&line) && text.contains("rolls back"), "{text}");
+    }
+
+    #[test]
+    fn flash_p4_ignores_line_when_it_is_not_about_the_confirm() {
+        assert_eq!(confirm_of(&log("trial boot 1 of 3")), None);
+        // The confirm's text as an error, or its failure as a log, is not the line.
+        assert_eq!(confirm_of(&error(IMAGE_CONFIRMED)), None);
+        assert_eq!(confirm_of(&log(IMAGE_NOT_CONFIRMED)), None);
+    }
+
+    #[test]
+    fn flash_p4_says_rolls_back_when_confirm_is_unseen() {
+        let text = confirm_text(&Confirm::Unseen).unwrap_err();
+        assert!(text.contains("no confirm was seen") && text.contains("rolls back"), "{text}");
     }
 }
