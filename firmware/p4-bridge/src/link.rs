@@ -85,8 +85,6 @@ pub struct Link {
     /// Sends the bundled image while the pair is updating. One per P4 life, as the pair
     /// attempts one update per life.
     sender: Sender<'static>,
-    /// The progress last told the host, in percent.
-    progress_said: u8,
     /// The pair has heard of the install.
     install_noted: bool,
 }
@@ -111,7 +109,6 @@ impl Link {
             undecoded_said: 0,
             held,
             sender: Sender::new(RADIO_IMAGE, RADIO_SHA256, &RADIO_DIGEST),
-            progress_said: 0,
             install_noted: false,
         }
     }
@@ -257,8 +254,8 @@ impl Link {
         // read in either stage, and 100% is said before installing is.
         if matches!(self.sender.stage(), Stage::Sending | Stage::Installed) {
             let percent = self.sender.percent();
-            if percent / 10 != self.progress_said / 10 {
-                self.progress_said = percent;
+            let said = shared.pair.borrow().update_progress();
+            if percent / 10 != said / 10 {
                 shared.pair.borrow_mut().note_update_progress(percent);
                 shared.push_fault();
             }

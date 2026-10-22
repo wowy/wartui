@@ -52,9 +52,11 @@ into it and boots it on trial, and the P4's hello confirms it. The host sees the
 new bridge life, with a fresh `Ready`.
 
 Meanwhile the bridge enumerates with the C6's MAC and refuses radio commands. The update adds
-several seconds to that boot, for a C6 image of about 550 KB; the bench has not timed it.
+several seconds to that boot, for a C6 image of about 550 KB; the bench has not timed it. A
+bundled image that will not take is tried again on every power-up, about 30 s without a radio
+each time, until a P4 with a fixed image is flashed.
 
-If no hello follows the install within 2 s, the P4 resets the C6 through its enable pin, up to
+If no hello follows the install within 10 s, the P4 resets the C6 through its enable pin, up to
 three times, so a hung trial image counts the boots it needs to roll back.
 
 Each state reaches the host as an error line, repeated with every `Ready`:

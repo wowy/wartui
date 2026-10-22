@@ -226,6 +226,11 @@ impl Pair {
         self.progress = percent;
     }
 
+    /// How much of the image the C6 holds, in percent, as last noted.
+    pub fn update_progress(&self) -> u8 {
+        self.progress
+    }
+
     /// The P4 sent the C6 `Install` at `now_ms`. Until a hello follows, [`Pair::on_tick`]
     /// resets the C6 every [`INSTALL_WAIT_MS`], and [`Pair::fault`] says it is installing.
     pub fn note_installed(&mut self, now_ms: u64) {
@@ -235,9 +240,11 @@ impl Pair {
         }
     }
 
-    /// The update failed before the install: the C6 refused the image or stopped answering.
-    /// It is [`RadioState::Stale`] if its revision matches, so it still bridges.
+    /// The update failed: the C6 refused the image or its install, or stopped answering. It is
+    /// [`RadioState::Stale`] if its revision matches, so it still bridges, and no reset
+    /// follows.
     pub fn on_update_failed(&mut self) {
+        self.installed_at = None;
         if let RadioState::Updating(hello) = &self.state {
             let hello = hello.clone();
             let revision = hello.link_rev == LINK_REVISION;

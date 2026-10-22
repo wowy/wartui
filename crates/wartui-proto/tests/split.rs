@@ -563,3 +563,23 @@ fn pair_deadline_is_none_when_hello_follows_install() {
     assert_eq!(pair.on_hello(hello(80), 0, 10_500), PairEvent::NewLife);
     assert_eq!(pair.next_deadline_ms(), None);
 }
+
+#[test]
+fn pair_goes_stale_without_reset_when_update_fails_after_install() {
+    // The C6 refused the install, so it never reboots and no reset should follow.
+    let mut pair = updating_pair();
+    pair.note_installed(10_000);
+    pair.on_update_failed();
+    assert!(matches!(pair.state(), RadioState::Stale(_)));
+    assert!(pair.fault().unwrap().contains("did not take"));
+    assert_eq!(pair.next_deadline_ms(), None);
+    assert_eq!(pair.on_tick(10_000 + INSTALL_WAIT_MS), PairEvent::None);
+}
+
+#[test]
+fn pair_update_progress_reads_last_noted_percent() {
+    let mut pair = updating_pair();
+    assert_eq!(pair.update_progress(), 0);
+    pair.note_update_progress(40);
+    assert_eq!(pair.update_progress(), 40);
+}

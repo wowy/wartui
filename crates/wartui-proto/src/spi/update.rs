@@ -34,11 +34,13 @@
 //! - **`Install` goes every [`REPLY_WAIT_MS`] until the link stops asking**, which it does
 //!   when the C6's next hello ends the update (`crate::split`). A lost `Install` would
 //!   leave the C6 on its old image. A repeat is harmless: a C6 that installed has rebooted
-//!   and holds no session, and one that did not answers with a status, which the sender
-//!   ignores.
+//!   and holds no session, and one that did not answers with a status. The sender ignores
+//!   those statuses, save a refusal for its session: the C6 could not switch images, so
+//!   waiting for its reboot is pointless.
 
 use crate::air::{OTA_CHUNK, OtaState, OtaStatusMsg};
 use crate::ota::SECTOR;
+use crate::ota::image::DIGEST_LEN;
 
 /// How long the [`Sender`] waits for a status before sending again.
 ///
@@ -54,7 +56,7 @@ pub const OP_MAX: usize = CHUNK_HEADER + OTA_CHUNK;
 
 const _: () = assert!(OP_MAX <= super::PAYLOAD_MAX);
 
-const BEGIN_LEN: usize = 1 + 1 + 4 + 32;
+const BEGIN_LEN: usize = 1 + 1 + 4 + DIGEST_LEN;
 const CHUNK_HEADER: usize = 1 + 1 + 4;
 const SESSION_LEN: usize = 1 + 1;
 const STATUS_LEN: usize = 1 + 1 + 1 + 4;
@@ -69,7 +71,7 @@ pub enum Op<'a> {
         /// Image length in bytes.
         len: u32,
         /// SHA-256 of the whole image, as [`crate::ota::Receiver`] checks it.
-        sha256: [u8; 32],
+        sha256: [u8; DIGEST_LEN],
     },
     /// Image bytes at `offset`.
     Chunk {
@@ -106,7 +108,7 @@ impl Op<'_> {
                 out[0] = op_code(self);
                 out[1] = session;
                 out[2..6].copy_from_slice(&len.to_le_bytes());
-                out[6..38].copy_from_slice(&sha256);
+                out[6..BEGIN_LEN].copy_from_slice(&sha256);
                 BEGIN_LEN
             }
             Op::Chunk { session, offset, data } => {
@@ -151,7 +153,7 @@ impl<'a> Op<'a> {
                 Some(Op::Begin {
                     session: b[0],
                     len: le_u32(&b[1..5]),
-                    sha256: *b[5..37].first_chunk()?,
+                    sha256: *b[5..].first_chunk()?,
                 })
             }
             2 => {
@@ -177,6 +179,18 @@ impl<'a> Op<'a> {
     }
 }
 
+/// `state` when it refuses the session.
+const fn refusal(state: OtaState) -> Option<OtaState> {
+    match state {
+        OtaState::HashMismatch
+        | OtaState::WrongBoard
+        | OtaState::TooLarge
+        | OtaState::FlashError
+        | OtaState::Unknown(_) => Some(state),
+        OtaState::Idle | OtaState::Receiving | OtaState::Verified => None,
+    }
+}
+
 const fn op_code(op: &Op<'_>) -> u8 {
     match op {
         Op::Begin { .. } => 1,
@@ -196,7 +210,7 @@ fn le_u32(b: &[u8]) -> u32 {
 pub enum Stage {
     /// Still sending, or waiting for a status.
     Sending,
-    /// `Install` went out. Only `Install` is sent again.
+    /// `Install` went out. Only `Install` is sent again, until the C6 refuses it.
     Installed,
     /// The C6 refused the image, or stopped answering.
     Failed(Failure),
@@ -236,7 +250,7 @@ enum Asked {
 #[derive(Debug, Clone)]
 pub struct Sender<'a> {
     image: &'a [u8],
-    sha256: [u8; 32],
+    sha256: [u8; DIGEST_LEN],
     session: u8,
     step: Step,
     /// The next chunk to send.
@@ -266,7 +280,7 @@ impl<'a> Sender<'a> {
     /// # Panics
     /// If `image` is longer than `u32::MAX` bytes.
     #[must_use]
-    pub fn new(image: &'a [u8], sha256: [u8; 32], digest: &[u8; 32]) -> Self {
+    pub fn new(image: &'a [u8], sha256: [u8; DIGEST_LEN], digest: &[u8; DIGEST_LEN]) -> Self {
         assert!(u32::try_from(image.len()).is_ok(), "image past u32::MAX bytes");
         Self {
             image,
@@ -342,10 +356,21 @@ impl<'a> Sender<'a> {
         }
     }
 
-    /// Take a status from the C6. One naming another session is ignored.
+    /// Take a status from the C6. One naming another session is ignored, and so is any but a
+    /// refusal once `Install` went out.
     pub fn on_status(&mut self, status: &OtaStatusMsg) {
-        if status.session != self.session || self.stage != Stage::Sending {
+        if status.session != self.session {
             return;
+        }
+        match self.stage {
+            Stage::Sending => {}
+            Stage::Installed => {
+                if let Some(state) = refusal(status.state) {
+                    self.stage = Stage::Failed(Failure::Refused(state));
+                }
+                return;
+            }
+            Stage::Failed(_) => return,
         }
         let len = self.len();
         match status.state {
@@ -384,11 +409,11 @@ impl<'a> Sender<'a> {
                 self.step = Step::Begin;
                 self.offset = 0;
             }
-            state @ (OtaState::HashMismatch
-            | OtaState::WrongBoard
-            | OtaState::TooLarge
-            | OtaState::FlashError
-            | OtaState::Unknown(_)) => self.stage = Stage::Failed(Failure::Refused(state)),
+            state => {
+                if let Some(state) = refusal(state) {
+                    self.stage = Stage::Failed(Failure::Refused(state));
+                }
+            }
         }
     }
 

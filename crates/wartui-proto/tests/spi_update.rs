@@ -414,3 +414,41 @@ fn spi_update_sender_fails_with_lost_session_when_c6_keeps_dropping_it() {
     assert_eq!(sender.stage(), Stage::Failed(Failure::LostSession));
     assert_eq!(begins, TRIES + 1);
 }
+
+#[test]
+fn spi_update_sender_fails_when_c6_refuses_install() {
+    let image = image(SECTOR);
+    let mut sender = Sender::new(&image, sha256(&image), &DIGEST);
+    let mut c6 = FakeC6::new();
+    let (_, at) = run_late(&mut sender, &mut c6, 0, |sent| sent == Sent::Install);
+    assert_eq!(sender.stage(), Stage::Installed);
+    // The C6 could not switch images, reset its receiver and refused the session.
+    sender.on_status(&OtaStatusMsg {
+        session: SESSION,
+        state: OtaState::FlashError,
+        next_offset: 0,
+    });
+    assert_eq!(sender.stage(), Stage::Failed(Failure::Refused(OtaState::FlashError)));
+    let mut buf = [0u8; OP_MAX];
+    assert_eq!(sender.next(at + REPLY_WAIT_MS, &mut buf), None);
+}
+
+#[test]
+fn spi_update_sender_stays_installed_when_status_after_install_is_no_refusal() {
+    let image = image(SECTOR);
+    let mut sender = Sender::new(&image, sha256(&image), &DIGEST);
+    let mut c6 = FakeC6::new();
+    run_late(&mut sender, &mut c6, 0, |sent| sent == Sent::Install);
+    // A C6 rebooted into the new image holds no session, statuses trail the ops, and a
+    // refusal for another session is not this one's.
+    for (session, state) in [
+        (0, OtaState::Idle),
+        (SESSION, OtaState::Idle),
+        (SESSION, OtaState::Receiving),
+        (SESSION, OtaState::Verified),
+        (SESSION + 1, OtaState::FlashError),
+    ] {
+        sender.on_status(&OtaStatusMsg { session, state, next_offset: 0 });
+        assert_eq!(sender.stage(), Stage::Installed, "{session} {state:?}");
+    }
+}

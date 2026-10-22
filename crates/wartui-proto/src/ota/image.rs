@@ -13,7 +13,7 @@
 //! - with `hash_appended` 1, the digest: SHA-256 of every byte before it, which the
 //!   bootloader checks at boot.
 
-/// Bytes in the digest.
+/// Bytes in a SHA-256 digest: the appended one, and the whole-file one an update checks.
 pub const DIGEST_LEN: usize = 32;
 
 const MAGIC: u8 = 0xE9;

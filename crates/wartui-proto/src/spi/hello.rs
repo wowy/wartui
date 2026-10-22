@@ -30,15 +30,14 @@
 
 use crate::link::{Chip, LoopPhase, ShortStr};
 use crate::mac::Mac;
+use crate::ota::image::DIGEST_LEN;
 use crate::reset::ResetCause;
 
 /// Bytes in an encoded [`Hello`] without [`Hello::image`].
 pub const HELLO_LEN: usize = 51;
 
 /// Bytes in an encoded [`Hello`] with [`Hello::image`].
-pub const HELLO_IMAGE_LEN: usize = HELLO_LEN + IMAGE_LEN;
-
-const IMAGE_LEN: usize = 32;
+pub const HELLO_IMAGE_LEN: usize = HELLO_LEN + DIGEST_LEN;
 
 const FW_VERSION: usize = 9;
 const FW_VERSION_LEN: usize = 32;
@@ -68,7 +67,7 @@ pub struct Hello {
     /// The digest espflash appends to the running app image
     /// ([`crate::ota::image::appended_digest`]), which names the build. `None` from a sender
     /// that takes no update over the link, the P4 among them.
-    pub image: Option<[u8; IMAGE_LEN]>,
+    pub image: Option<[u8; DIGEST_LEN]>,
 }
 
 impl Hello {
