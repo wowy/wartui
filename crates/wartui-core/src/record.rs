@@ -19,8 +19,8 @@ use crate::position::Fix;
 /// Raw SSID bytes as text, for showing to a person or writing into a column parsed as text.
 ///
 /// One rule for the view and the export. [`visible_ssid`] strips a cloaked access point's padding
-/// here as well as in the parser, so every path from bytes to text gets it. Any control character
-/// left, NUL included, becomes U+FFFD, as any byte `from_utf8_lossy` cannot represent does. A
+/// here as well as in the parser, so every path from bytes to text gets it. Each control character
+/// left, NUL included, becomes U+FFFD, the character `from_utf8_lossy` gives invalid bytes. A
 /// terminal and WiGLE's parser have no use for one, and an escape drives the terminal. The store
 /// keeps whatever arrived.
 #[must_use]
@@ -374,6 +374,11 @@ mod tests {
         assert_eq!(ssid_text(b"a\x1b[2Jb"), "a\u{FFFD}[2Jb");
         assert_eq!(ssid_text(b"a\nb\x7f"), "a\u{FFFD}b\u{FFFD}");
         assert_eq!(ssid_text(&[b'a', 0xC2, 0x9B, b'b']), "a\u{FFFD}b");
+    }
+
+    #[test]
+    fn ssid_text_keeps_text_when_printable() {
+        // Non-control Unicode passes through unchanged.
         assert_eq!(ssid_text("café ☕".as_bytes()), "café ☕");
     }
 }
