@@ -93,9 +93,19 @@ fn bundle_radio() {
     }
     run(
         build,
-        "building the radio image (firmware/p4-radio) failed; it needs the C6's target: \
-         `rustup target add riscv32imac-unknown-none-elf`",
+        "building the radio image (firmware/p4-radio) failed",
         "`cargo` is not on the PATH",
+        &[
+            (
+                "may not be installed",
+                "the C6's target is missing: `rustup target add riscv32imac-unknown-none-elf`",
+            ),
+            (
+                "--locked was passed",
+                "firmware/p4-radio/Cargo.lock is out of date: run `cargo update --workspace` \
+                 in firmware/p4-radio",
+            ),
+        ],
     );
 
     let elf = target_dir.join("riscv32imac-unknown-none-elf/release/wartui-p4-radio-fw");
@@ -113,6 +123,7 @@ fn bundle_radio() {
         save,
         "saving the radio image failed",
         "`espflash` is not installed; the P4 build needs it: `cargo install espflash --locked`",
+        &[],
     );
 
     let image = fs::read(&bin).expect("read the saved radio image");
@@ -136,19 +147,27 @@ fn bundle_radio() {
 }
 
 /// Run `command`, failing the build with `why` and its output if it fails, and with `missing`
-/// if the program is not there.
-fn run(mut command: Command, why: &str, missing: &str) {
+/// if the program is not there. Each `(pattern, hint)` whose pattern the stderr holds adds its
+/// hint after the output.
+fn run(mut command: Command, why: &str, missing: &str, hints: &[(&str, &str)]) {
     let output = match command.output() {
         Ok(output) => output,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => panic!("{missing}"),
         Err(err) => panic!("could not run {:?}: {err}", command.get_program()),
     };
     if !output.status.success() {
-        panic!(
-            "{why}\n--- stdout\n{}\n--- stderr\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let mut message = format!(
+            "{why}\n--- stdout\n{}\n--- stderr\n{stderr}",
+            String::from_utf8_lossy(&output.stdout)
         );
+        for (pattern, hint) in hints {
+            if stderr.contains(pattern) {
+                message.push_str("\nhint: ");
+                message.push_str(hint);
+            }
+        }
+        panic!("{message}");
     }
 }
 

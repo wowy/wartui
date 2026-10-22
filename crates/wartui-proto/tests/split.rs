@@ -411,6 +411,25 @@ fn pair_updates_and_refuses_commands_when_digest_differs() {
 }
 
 #[test]
+fn pair_fault_reads_full_progress_when_image_is_verified() {
+    let mut pair = updating_pair();
+    pair.note_update_progress(91);
+    pair.note_update_progress(100);
+    assert_eq!(pair.fault().unwrap(), "updating the radio to the bundled image (100%)");
+}
+
+#[test]
+fn pair_fault_says_installing_when_install_is_sent() {
+    let mut pair = updating_pair();
+    pair.note_update_progress(100);
+    pair.note_installed(9_000);
+    assert_eq!(pair.fault().unwrap(), "updating the radio: installing the bundled image");
+    // Still installing while the P4 resets a C6 that has not said hello.
+    assert_eq!(pair.on_tick(9_000 + INSTALL_WAIT_MS), PairEvent::ResetRadio);
+    assert_eq!(pair.fault().unwrap(), "updating the radio: installing the bundled image");
+}
+
+#[test]
 fn pair_reads_records_when_updating_on_matching_revision() {
     assert!(updating_pair().reads_records());
     assert!(up_pair().reads_records());

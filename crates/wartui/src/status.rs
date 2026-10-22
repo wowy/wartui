@@ -197,17 +197,42 @@ async fn wait_for_ready(link: &mut wartui_bridge::LinkHandle) -> Result<wartui_b
     }
 }
 
+/// Waits for the `Status` answer, printing each fault the bridge reports meanwhile.
+///
+/// A bridge announces a standing fault as an `Error` once a host connects, such as a P4
+/// updating its radio, and still answers the poll. The caller's timeout bounds the wait.
 async fn wait_for_status(link: &mut wartui_bridge::LinkHandle) -> Result<BridgeToHost> {
     loop {
-        match link.recv().await {
-            Some(LinkEvent::Message(status @ BridgeToHost::Status { .. })) => return Ok(status),
-            Some(LinkEvent::Message(BridgeToHost::Error { message })) => {
-                bail!("the bridge refused it: {message}")
-            }
-            Some(LinkEvent::Disconnected { reason }) => bail!("{reason}"),
-            Some(_) => {}
-            None => bail!("the link closed"),
+        match awaited(link.recv().await)? {
+            Awaited::Status(status) => return Ok(*status),
+            Awaited::Fault(line) => println!("{line}"),
+            Awaited::Other => {}
         }
+    }
+}
+
+/// What one link event means while waiting for the `Status` answer.
+#[derive(Debug, PartialEq)]
+enum Awaited {
+    /// The answer.
+    Status(Box<BridgeToHost>),
+    /// A fault the bridge reported, as the line to print.
+    Fault(String),
+    /// Nothing `status` prints.
+    Other,
+}
+
+fn awaited(event: Option<LinkEvent>) -> Result<Awaited> {
+    match event {
+        Some(LinkEvent::Message(status @ BridgeToHost::Status { .. })) => {
+            Ok(Awaited::Status(Box::new(status)))
+        }
+        Some(LinkEvent::Message(BridgeToHost::Error { message })) => {
+            Ok(Awaited::Fault(format!("fault      {message}")))
+        }
+        Some(LinkEvent::Disconnected { reason }) => bail!("{reason}"),
+        Some(_) => Ok(Awaited::Other),
+        None => bail!("the link closed"),
     }
 }
 
@@ -223,8 +248,11 @@ fn human_uptime(ms: u32) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{diagnostic_lines, human_uptime, radio_line, silence_note};
-    use wartui_proto::link::{Chip, LoopPhase, QueueId, QueueStat, QueueStats, RadioInfo};
+    use super::{Awaited, awaited, diagnostic_lines, human_uptime, radio_line, silence_note};
+    use wartui_bridge::LinkEvent;
+    use wartui_proto::link::{
+        BridgeToHost, Chip, LoopPhase, QueueId, QueueStat, QueueStats, RadioInfo,
+    };
     use wartui_proto::reset::ResetCause;
 
     #[test]
@@ -319,5 +347,35 @@ mod tests {
     #[test]
     fn status_cmd_omits_silence_note_when_a_node_frame_arrived() {
         assert_eq!(silence_note(1, 3), None);
+    }
+
+    #[test]
+    fn status_cmd_prints_fault_and_keeps_waiting_when_bridge_reports_error() {
+        let message = "updating the radio to the bundled image (40%)".try_into().expect("short");
+        let event = LinkEvent::Message(BridgeToHost::Error { message });
+        assert_eq!(
+            awaited(Some(event)).expect("not an error"),
+            Awaited::Fault("fault      updating the radio to the bundled image (40%)".into())
+        );
+    }
+
+    #[test]
+    fn status_cmd_returns_answer_when_status_arrives() {
+        let status = BridgeToHost::Status {
+            peer_count: 1,
+            rx_count: 2,
+            dropped_tx: 0,
+            uptime_ms: 3,
+            rx_oversize: 0,
+            queues: QueueStats::new(),
+            spi: None,
+        };
+        let event = LinkEvent::Message(status.clone());
+        assert_eq!(awaited(Some(event)).expect("not an error"), Awaited::Status(Box::new(status)));
+    }
+
+    #[test]
+    fn status_cmd_fails_when_link_closes_before_answer() {
+        assert!(awaited(None).is_err());
     }
 }

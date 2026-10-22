@@ -227,7 +227,7 @@ impl Pair {
     }
 
     /// The P4 sent the C6 `Install` at `now_ms`. Until a hello follows, [`Pair::on_tick`]
-    /// resets the C6 every [`INSTALL_WAIT_MS`].
+    /// resets the C6 every [`INSTALL_WAIT_MS`], and [`Pair::fault`] says it is installing.
     pub fn note_installed(&mut self, now_ms: u64) {
         if matches!(self.state, RadioState::Updating(_)) {
             self.installed_at = Some(now_ms);
@@ -385,6 +385,9 @@ impl Pair {
                     "radio speaks SPI link revision {}, this P4 speaks {}; update the radio",
                     hello.link_rev, LINK_REVISION
                 );
+            }
+            RadioState::Updating(_) if self.installed_at.is_some() => {
+                let _ = write!(text, "updating the radio: installing the bundled image");
             }
             RadioState::Updating(_) => {
                 let _ =

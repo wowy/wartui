@@ -26,8 +26,9 @@
 //! While the pair is `Updating`, each transfer carries the next op from a
 //! [`Sender`] of the bundled image ([`crate::radio`]), and the C6's statuses come back as
 //! [`Kind::Update`] transfers. The sender's progress goes to the host as the pair's fault,
-//! every tenth of the image. A sender that fails leaves the pair `Stale` or `Mismatch`; one
-//! that installs leaves the pair waiting for the C6's next hello.
+//! every tenth of the image and at 100%, then once more when the C6 is told to install. A
+//! sender that fails leaves the pair `Stale` or `Mismatch`; one that installs leaves the pair
+//! waiting for the C6's next hello.
 
 use core::fmt::Write;
 
@@ -252,19 +253,23 @@ impl Link {
     /// Tell the pair, and the host, what the sender's last step changed.
     #[inline(never)]
     fn follow_sender(&mut self, now_ms: u64, shared: &Shared) {
-        match self.sender.stage() {
-            Stage::Sending => {
-                let percent = self.sender.percent();
-                if percent / 10 != self.progress_said / 10 {
-                    self.progress_said = percent;
-                    shared.pair.borrow_mut().note_update_progress(percent);
-                    shared.push_fault();
-                }
+        // The C6's `Verified` and the `Install` that follows land in one step, so progress is
+        // read in either stage, and 100% is said before installing is.
+        if matches!(self.sender.stage(), Stage::Sending | Stage::Installed) {
+            let percent = self.sender.percent();
+            if percent / 10 != self.progress_said / 10 {
+                self.progress_said = percent;
+                shared.pair.borrow_mut().note_update_progress(percent);
+                shared.push_fault();
             }
+        }
+        match self.sender.stage() {
+            Stage::Sending => {}
             Stage::Installed if !self.install_noted => {
                 self.install_noted = true;
                 shared.pair.borrow_mut().note_installed(now_ms);
                 shared.deadline_set.signal(());
+                shared.push_fault();
             }
             Stage::Installed => {}
             Stage::Failed(failure) => {
