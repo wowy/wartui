@@ -61,10 +61,18 @@ Each step is usable and benchmarkable on its own.
    against the single-chip bridge.
 2. **GPS over I2C on the P4.** Bytes pass through in both directions, as the T-Dongle-C5's GPS
    does (`firmware/bridge/src/gps.rs`, `HostToBridge::GpsWrite`, `BridgeToHost::Gps`).
-3. **Updates over one cable.** `wartui flash-bridge` updates both the P4 and its C6 through the
-   high-speed USB link. The P4 receives its own image, and passes the C6's image down the SPI
-   link. This reuses the node's OTA machinery (`firmware/common/src/ota.rs`,
-   `wartui_proto::ota`). The first flash of each chip stays a wired flash.
+3. **Updates over one cable.** The P4 image carries the C6's, so one image updates both chips.
+   It has two halves:
+   - **The C6 half is built** (issue #215). At boot the P4 compares the C6's image digest with
+     the bundled one, and reflashes the C6 over the SPI link when they differ; see "The SPI
+     link" below.
+   - **The P4 half is not built yet.** `wartui flash-bridge` sends the P4 its image over the
+     high-speed USB link, and the P4 boots it on trial. The C6 follows on that boot. This needs
+     A/B slots and a trial sector on the P4, a receiver on the USB link, the host side of
+     `flash-bridge`, and a P4 image in the release. It reuses the OTA machinery the node and
+     the C6 share (`firmware/common/src/ota.rs`, `wartui_proto::ota`).
+
+   The first flash of each chip stays a wired flash.
 
 ## Hardware facts
 
@@ -180,9 +188,19 @@ user's.
   differs from its own does not try to bridge with it. It reports the mismatch and offers the
   update path only.
   - **The P4 image bundles the C6's, and the P4 reflashes the C6 at boot when their image
-    digests differ** (issue #215). The C6 boots the new image on the node's trial, and the P4's
-    hello confirms it. A C6 whose hello carries no digest predates the path and needs one wired
-    flash.
+    digests differ** (issue #215). The digest is the SHA-256 that espflash appends to every app
+    image, so any rebuild reaches the C6 without a version bump. `firmware/p4-bridge/build.rs`
+    builds the C6 image and embeds it. The wired flash and the bundle pass espflash the same
+    flash mode, frequency and size, so both write the same header and digest.
+  - **The C6 boots a new image on the node's trial.** It has the node's A/B partition table,
+    and the P4's hello confirms the image. A C6 that does not answer within 10 s of the install
+    is power-cycled through GPIO54, and each power cycle counts a trial boot. So a hung image
+    rolls back to the one it replaced.
+  - **One attempt per P4 life.** A C6 left on another build afterwards still bridges when its
+    link revision matches, with the fault "the bundled image did not take". A C6 whose hello
+    carries no digest predates the path and needs one wired flash.
+  - **The host sees the update as a fault line**, with its progress, and the C6's new life as a
+    bridge restart. An update of the 550 KB image takes about 2 s at boot.
 - **The handshake recovers from a missed READY pulse,** as the spike's `ready_stale_recover` fix
   does. It also recovers from the other side restarting mid-stream, without the host having to
   intervene beyond the `Ready` described above.
@@ -222,7 +240,12 @@ user's.
 - **Step 2:** fixes and the receiver's configuration round-trip through `wartui run`, as on the
   T-Dongle-C5.
 - **Step 3:** both chips update over the high-speed link with no other cable carrying data, and
-  a bad image rolls back as the node's does.
+  a bad image rolls back as the node's does. The C6 half passes on the bench (P4 `8A:A4`, C6
+  `71:F4`, 2026-10-21):
+  - A C6 wired-flashed from the same tree is left alone.
+  - A changed C6 image is installed and confirmed.
+  - A C6 image that hangs at boot is power-cycled until it rolls back, and the bridge comes up
+    with the "did not take" fault.
 
 ### Settled after the builder check (designer's calls)
 
@@ -249,8 +272,9 @@ user's.
   keys) and the default values, chosen from bench high-water marks.
 - How the P4's executor is arranged. The spike's async SPI DMA, edge-wait READY and `join4`
   worked.
-- The partition layouts and the OTA transport over the link and the SPI link in step 3, reusing
-  `wartui_proto::ota` where it fits.
+- The P4's partition layout and the OTA transport over the USB link in step 3, reusing
+  `wartui_proto::ota` and `firmware/common/src/ota.rs` where they fit. The C6's are settled:
+  the node's table, and the frozen SPI update payload.
 - Whether the spare SDIO lines (GPIO16/17 ↔ IO22/23) get used for anything.
 
 ## Waiting: async over polling
