@@ -8,9 +8,9 @@ use wartui_proto::link::{
 };
 use wartui_proto::reset::ResetCause;
 use wartui_proto::spi::{
-    CORE_VERSION, CRC_OFFSET, Down, HEADER_LEN, HELLO_LEN, Held, Hello, Kind, MAGIC, PAYLOAD_MAX,
-    Packer, RECORD_MAX, RadioStatus, SeqCheck, SeqNote, TRANSFER_LEN, Up, VerifyError, decode_down,
-    decode_up, encode_down, encode_up, records, seal, verify,
+    CORE_VERSION, CRC_OFFSET, Down, HEADER_LEN, HELLO_IMAGE_LEN, HELLO_LEN, Held, Hello, Kind,
+    MAGIC, PAYLOAD_MAX, Packer, RECORD_MAX, RadioStatus, SeqCheck, SeqNote, TRANSFER_LEN, Up,
+    VerifyError, decode_down, decode_up, encode_down, encode_up, records, seal, verify,
 };
 
 fn log(text: &str) -> Up {
@@ -142,6 +142,7 @@ fn spi_hello_has_frozen_layout() {
         last_phase: LoopPhase::Transmit,
         uptime_ms: 0x1122_3344,
         heap_free: 0x0005_6789,
+        image: None,
     };
     let mut out = [0xFFu8; 64];
     assert_eq!(hello.encode(&mut out), HELLO_LEN);
@@ -182,6 +183,7 @@ fn spi_hello_round_trips_when_chip_is_p4() {
         last_phase: LoopPhase::SpiTransfer,
         uptime_ms: 5,
         heap_free: 6,
+        image: None,
     };
     let mut out = [0u8; HELLO_LEN];
     hello.encode(&mut out);
@@ -192,8 +194,8 @@ fn spi_hello_round_trips_when_chip_is_p4() {
 }
 
 #[test]
-fn spi_hello_decodes_ignoring_bytes_appended_past_layout() {
-    // A later build may append fields; this build reads the frozen 51 bytes and no more.
+fn spi_hello_ignores_appended_bytes_when_payload_runs_past_image() {
+    // A later build may append fields; this build reads the frozen 83 bytes and no more.
     let hello = Hello {
         link_rev: 1,
         chip: Chip::Esp32C6,
@@ -203,10 +205,73 @@ fn spi_hello_decodes_ignoring_bytes_appended_past_layout() {
         last_phase: LoopPhase::Boot,
         uptime_ms: 72,
         heap_free: 6,
+        image: Some([0x5A; 32]),
     };
-    let mut out = [0xEEu8; HELLO_LEN + 32];
-    hello.encode(&mut out);
+    let mut out = [0xEEu8; HELLO_IMAGE_LEN + 32];
+    assert_eq!(hello.encode(&mut out), HELLO_IMAGE_LEN);
     assert_eq!(Hello::decode(&out), Some(hello));
+}
+
+/// The image digest is part of the frozen hello: bytes 51..83, appended to the layout
+/// `spi_hello_has_frozen_layout` pins.
+#[test]
+fn spi_hello_has_frozen_layout_when_image_present() {
+    let mut digest = [0u8; 32];
+    for (i, byte) in digest.iter_mut().enumerate() {
+        *byte = i as u8;
+    }
+    let hello = Hello {
+        link_rev: 0x0102,
+        chip: Chip::Esp32C6,
+        mac: [0xD8, 0x3B, 0xDA, 0x10, 0xD8, 0x1C],
+        fw_version: ShortStr::try_from("0.9.1").unwrap(),
+        reset_cause: ResetCause::Watchdog,
+        last_phase: LoopPhase::Transmit,
+        uptime_ms: 0x1122_3344,
+        heap_free: 0x0005_6789,
+        image: Some(digest),
+    };
+    let mut out = [0xFFu8; 96];
+    assert_eq!(hello.encode(&mut out), HELLO_IMAGE_LEN);
+    assert_eq!(HELLO_IMAGE_LEN, 83);
+    #[rustfmt::skip]
+    let expected: [u8; 83] = [
+        0x02, 0x01,
+        0x01,
+        0xD8, 0x3B, 0xDA, 0x10, 0xD8, 0x1C,
+        b'0', b'.', b'9', b'.', b'1', 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0,
+        0x02,
+        0x05,
+        0x44, 0x33, 0x22, 0x11,
+        0x89, 0x67, 0x05, 0x00,
+        // 51: image, 32 bytes in order
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+        0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F,
+        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+        0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F,
+    ];
+    assert_eq!(out[..HELLO_IMAGE_LEN], expected);
+    // Nothing written past the image.
+    assert_eq!(out[HELLO_IMAGE_LEN], 0xFF);
+    assert_eq!(Hello::decode(&expected), Some(hello));
+}
+
+#[test]
+fn spi_hello_decodes_image_none_when_payload_is_51_bytes() {
+    // A C6 that predates the update path sends the 51-byte hello.
+    let mut bytes = [0u8; HELLO_LEN];
+    bytes[2] = 1;
+    assert_eq!(Hello::decode(&bytes).unwrap().image, None);
+}
+
+#[test]
+fn spi_hello_decodes_image_none_when_digest_is_cut_short() {
+    let mut bytes = [0u8; HELLO_IMAGE_LEN - 1];
+    bytes[2] = 1;
+    assert_eq!(Hello::decode(&bytes).unwrap().image, None);
 }
 
 #[test]

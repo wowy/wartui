@@ -9,9 +9,11 @@
 //! The futures share one task through `join`, so they share [`Shared`] through `Cell` and
 //! `RefCell` with no locking and nothing borrowed across an `.await`:
 //!
-//! - **the SPI link** (`src/link.rs`) runs from boot, so the C6's hello arrives;
-//! - **the deadline** gives [`Pair`] the clock once, at [`RADIO_WAIT_MS`], which is how it
-//!   gives up on a silent C6;
+//! - **the SPI link** (`src/link.rs`) runs from boot, so the C6's hello arrives, and sends
+//!   the C6 the image this P4 carries (`src/radio.rs`) when it runs another;
+//! - **the radio clock** sleeps until [`Pair::next_deadline_ms`], or until the SPI link
+//!   notes an install, then gives [`Pair`] the time. That is how it gives up on a silent
+//!   C6, and resets one silent since an update's install through its enable pin;
 //! - **the USB device** (`src/usb.rs`) starts once the pair knows its serial number, and
 //!   runs the device, a reader, a writer and the `GetStatus` answer;
 //! - **the GPS reader** (`src/gps.rs`, with the default `gps` feature) polls a u-blox
@@ -36,14 +38,15 @@ mod config;
 #[cfg(feature = "gps")]
 mod gps;
 mod link;
+mod radio;
 mod usb;
 
 use core::cell::{Cell, RefCell};
-use core::future::pending;
 
 #[cfg(feature = "gps")]
 use embassy_futures::join::join;
 use embassy_futures::join::join3;
+use embassy_futures::select::select;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::signal::Signal;
 #[cfg(feature = "gps")]
@@ -68,15 +71,16 @@ use wartui_proto::link::{
 #[cfg(feature = "gps")]
 use wartui_proto::link::{GpsBytes, GpsWriteBytes, LogLevel, LogStr};
 use wartui_proto::spi::{Down, Held, RECORD_MAX, TRANSFER_LEN, encode_down};
-use wartui_proto::split::{Pair, PairEvent, RADIO_WAIT_MS};
+use wartui_proto::split::{Pair, PairEvent};
 
 use crate::config::{DOWN_QUEUE_BYTES, HOST_BULK_BYTES, HOST_PRIORITY_BYTES, SPI_KHZ};
 use crate::link::{Bus, Link, run_link};
+use crate::radio::RADIO_DIGEST;
 
 // This creates the app descriptor the esp-idf bootloader expects.
 esp_bootloader_esp_idf::esp_app_desc!();
 
-/// How long the C6 is held in reset at boot.
+/// How long the C6 is held in reset, at boot and when the pair asks.
 const C6_RESET_HOLD: Duration = Duration::from_millis(50);
 
 type HostFrames = HostQueue<HOST_PRIORITY_BYTES, HOST_BULK_BYTES>;
@@ -139,6 +143,8 @@ pub struct Shared {
     status_asked: Signal<NoopRawMutex, ()>,
     /// The C6's counters arrived.
     radio_status: Signal<NoopRawMutex, ()>,
+    /// The pair gained a deadline, so the radio clock wakes to wait for it.
+    deadline_set: Signal<NoopRawMutex, ()>,
     /// Why no GPS receiver is being read. Sent with every announcement, because a host
     /// usually attaches after boot, and cleared when the receiver answers again.
     #[cfg(feature = "gps")]
@@ -171,6 +177,7 @@ impl Shared {
             paired: Signal::new(),
             status_asked: Signal::new(),
             radio_status: Signal::new(),
+            deadline_set: Signal::new(),
             #[cfg(feature = "gps")]
             gps_fault: Cell::new(None),
             #[cfg(feature = "gps")]
@@ -343,15 +350,16 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     let bus = Bus { spi, ready, rx: dma_buf!(DmaRxBuf), tx: dma_buf!(DmaTxBuf) };
 
     let fw_version = ShortStr::try_from(env!("CARGO_PKG_VERSION")).unwrap_or_default();
+    let gps = cfg!(feature = "gps");
     let pair =
-        Pair::new(own_mac, fw_version, cause, last_phase, boot.as_millis(), cfg!(feature = "gps"));
+        Pair::new(own_mac, fw_version, cause, last_phase, boot.as_millis(), gps, RADIO_DIGEST);
     let shared = Shared::new(pair, HOST_QUEUE.take(), DOWN_QUEUE.take());
     let mut link = Link::new(boot, own_mac, cause, last_phase, HELD.take());
 
     // Joined rather than spawned: all borrow `shared`, and none ends.
     let bridge = join3(
         run_link(bus, &mut link, &shared),
-        radio_deadline(&shared, boot),
+        radio_clock(&shared, c6_en),
         usb::run(peripherals.USB_HS, &shared),
     );
     #[cfg(feature = "gps")]
@@ -362,13 +370,26 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     match bridge.await {}
 }
 
-/// Give [`Pair`] the clock at [`RADIO_WAIT_MS`], and announce the life it starts when the
-/// C6 stayed silent. Only `RadioState::Waiting` reads the clock, so nothing follows.
-async fn radio_deadline(shared: &Shared, boot: Instant) -> ! {
-    Timer::at(boot + Duration::from_millis(RADIO_WAIT_MS)).await;
-    let event = shared.pair.borrow_mut().on_tick(now_ms());
-    if event == PairEvent::NewLife {
-        shared.new_life();
+/// Give [`Pair`] the time at its next deadline: announce the life it starts when the C6
+/// stays silent, and reset the C6 through `c6_en` when it asks.
+async fn radio_clock(shared: &Shared, mut c6_en: Output<'static>) -> ! {
+    loop {
+        let deadline = shared.pair.borrow().next_deadline_ms();
+        match deadline {
+            Some(ms) => {
+                select(Timer::at(Instant::from_millis(ms)), shared.deadline_set.wait()).await;
+            }
+            None => shared.deadline_set.wait().await,
+        }
+        let event = shared.pair.borrow_mut().on_tick(now_ms());
+        match event {
+            PairEvent::None => {}
+            PairEvent::NewLife => shared.new_life(),
+            PairEvent::ResetRadio => {
+                c6_en.set_low();
+                Timer::after(C6_RESET_HOLD).await;
+                c6_en.set_high();
+            }
+        }
     }
-    pending().await
 }

@@ -4,7 +4,7 @@
 //! bootloader selects a slot by `otadata` sequence alone and reads no image state, so the
 //! node rolls back on its own, and the state it writes to `otadata` is never what it decides
 //! from. The sector is ordered against the `otadata` writes so a power cut cannot leave an
-//! image running untrialed; `firmware/node/src/ota.rs` has the order.
+//! image running untrialed; `firmware/common/src/ota.rs` has the order.
 //!
 //! **The layout is fixed, and does not change before 1.0.** It is on-flash state that one
 //! firmware writes and the next reads across an update, possibly between minor versions, as
@@ -17,8 +17,8 @@
 //! count is the number of clear bits. These nodes lose power routinely and RTC memory does not
 //! survive that; a power cut here loses at most the bit being written.
 //!
-//! How many boots a trial gets is the firmware's policy, not part of the layout: the image on
-//! trial applies its own.
+//! How many boots a trial gets is policy, not part of the layout: the image on trial applies
+//! its own, [`TRIAL_BOOTS`](super::TRIAL_BOOTS) in this build.
 
 use super::SECTOR;
 

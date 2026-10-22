@@ -6,9 +6,10 @@
 //! traces, with this chip as a 40 MHz SPI slave (`src/link.rs`).
 //!
 //! The ESP-NOW half is [`wartui_firmware::radio`], the single-chip bridge's own, so the two
-//! bridges cannot drift. Three futures share one task: the radio's jobs, `hear_loop`
-//! draining the receive queue, and the link. Each waits on an interrupt rather than
-//! polling, but for the one call `src/link.rs` names.
+//! bridges cannot drift. Updates arrive from the P4 over the link and boot on trial, through
+//! [`wartui_firmware::ota`], the flash code a node uses. Three futures share one task: the
+//! radio's jobs, `hear_loop` draining the receive queue, and the link. Each waits on an
+//! interrupt rather than polling, but for the one call `src/link.rs` names.
 //!
 //! `README.md` has the build command.
 #![no_std]
@@ -35,15 +36,18 @@ use esp_hal::timer::timg::TimerGroup;
 use esp_radio::esp_now::{EspNowReceiver, ReceivedData};
 use esp_radio::wifi::{ControllerConfig, Interface, WifiController};
 use static_cell::ConstStaticCell;
+use wartui_firmware::ota::Ota;
 use wartui_firmware::phase::{boot_phase, mark};
 use wartui_firmware::radio::{self, Dones, Heard, Jobs, Payloads};
 use wartui_firmware::{phase, reboot, reset_cause};
+use wartui_proto::air::Board;
 use wartui_proto::frame_ring::FrameRing;
 use wartui_proto::link::LoopPhase;
+use wartui_proto::ota::Receiver;
 use wartui_proto::spi::{Held, TRANSFER_LEN, Up};
 
 use crate::config::{RADIO_JOBS, SEND_JOBS};
-use crate::link::{Bus, Link, Radio, Shared, UpPriority, UpQueue, link_loop};
+use crate::link::{Bus, Link, Radio, Shared, UpPriority, UpQueue, Updates, link_loop};
 
 // This creates the app descriptor the esp-idf bootloader expects.
 esp_bootloader_esp_idf::esp_app_desc!();
@@ -96,6 +100,9 @@ static PAYLOADS: ConstStaticCell<Payloads<SEND_JOBS>> = ConstStaticCell::new(Pay
 /// What became of each job, waiting for the link.
 static DONES: ConstStaticCell<Dones<RADIO_JOBS>> = ConstStaticCell::new(Dones::new());
 
+/// The update receiver, with its sector of buffer.
+static RECEIVER: ConstStaticCell<Receiver> = ConstStaticCell::new(Receiver::new(Board::Esp32c6));
+
 #[esp_rtos::main]
 async fn main(_spawner: embassy_executor::Spawner) -> ! {
     let peripherals = esp_hal::init(esp_hal::Config::default().with_cpu_clock(CpuClock::max()));
@@ -106,6 +113,16 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     let last_phase = boot_phase(cause);
     mark(LoopPhase::Boot);
     phase::claim();
+
+    // Before the radio, so an image that has run out of trial boots is rolled back before
+    // it does anything else. What it says waits for the link.
+    let (mut ota, table_fault) = Ota::new(peripherals.FLASH);
+    let booted = ota.boot();
+    if booted.reboot {
+        reboot()
+    }
+    // Zeros name no image, so the P4 still sends its own.
+    let image = ota.booted_digest().unwrap_or([0; 32]);
 
     // The radio blobs allocate; nothing in wartui's own code does.
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 64 * 1024);
@@ -153,7 +170,18 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     for said in setup.said {
         shared.say(said);
     }
-    let mut link = Link::new(boot, mac, cause, last_phase, HELD.take());
+    if let Some(err) = table_fault {
+        shared
+            .line(None, format_args!("could not read the partition table: {err}; updates refused"));
+    } else if !ota.has_trial() {
+        shared.line(None, format_args!("no trial sector; updates refused"));
+    }
+    for note in &booted.notes {
+        shared.note(note);
+    }
+    let updates =
+        Updates { ota, receiver: RECEIVER.take(), trial: booted.trial, image, status: None };
+    let mut link = Link::new(boot, mac, cause, last_phase, HELD.take(), updates);
     let jobs = JOBS.take();
     let payloads = PAYLOADS.take();
     let dones = DONES.take();

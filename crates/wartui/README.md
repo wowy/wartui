@@ -999,6 +999,8 @@ Beyond the counters, `wartui status` prints what the bridge reports about its in
   transfers.
 - **`radio  …`**, on a P4 bridge: the C6's address, firmware, reset cause and last phase. After a
   C6 restart under a running P4, `last reset` names the C6's cause too.
+- **`fault  …`**: a fault the bridge reports while `status` waits for its counters, such as a P4
+  bridge updating its radio. One line per report, and the counters follow.
 
 `wartui reset` takes about thirty seconds to fail on a board that is not a bridge. The board it is
 for answers nothing, so it transmits before anything has identified itself. A board that is not

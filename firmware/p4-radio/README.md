@@ -16,22 +16,45 @@ One image serves the C6 on both the Waveshare ESP32-P4-WIFI6-POE-ETH and the ESP
 
 ## First flash
 
-The C6 has no USB. Flash it through the 4-pin header with a USB-to-TTL adapter: H7 on the
-POE-ETH, H4 on the WIFI6, carrying IO9, GND, RXD and TXD.
+The C6 has no USB, and is flashed through its header once. After that, every update reaches it
+through the P4: the P4 image carries this one (see [Updates](#updates)).
+
+Flash it through the 4-pin header with a USB-to-TTL adapter: H7 on the POE-ETH, H4 on the WIFI6,
+carrying IO9, GND, RXD and TXD.
 
 1. With the board unpowered, jumper IO9 to GND, so the C6 boots into its download mode.
 2. Hold the P4's BOOT button while powering the board, so the P4 stays in download mode and
    quiet.
 3. Run, with the adapter's port:
    `cargo run --release --features esp32c6 -- --port <adapter>`
-   (the runner is `espflash flash --before no-reset --after no-reset`; no reset line may toggle).
+   (the runner is `espflash flash --before no-reset --after no-reset --partition-table
+   partitions.csv --erase-parts otadata`; no reset line may toggle).
 4. Remove the jumper, then power-cycle the board so both chips run.
 
-This crate has no partition table of its own. The P4 firmware is flashed as in
-[`firmware/p4-bridge`](../p4-bridge/README.md#first-flash).
+The P4 firmware is flashed as in [`firmware/p4-bridge`](../p4-bridge/README.md#first-flash).
 
-No C6 build implements the update path yet, so a C6 flashed from this build needs one more wired
-flash when single-cable updates (step 3 of the design) land.
+A C6 flashed from a build older than the update path sends a hello without an image digest. The
+P4 cannot update it and reports "radio predates bundled updates; flash it through the header
+once". Flash it as above.
+
+## Updates
+
+`partitions.csv` is the node's table: two 1.9 MB app slots, `ota_0` and `ota_1`, and a `trial`
+sector. The flash half is the node's too (`firmware/common/src/ota.rs`).
+
+1. Every hello carries the SHA-256 digest espflash appends to the booted image.
+2. When it differs from the image the P4 carries, the P4 sends that image over the SPI link. The
+   C6 writes it into the slot it is not running, checks its hash, switches slots and reboots.
+3. The new image boots on trial. The P4's hello confirms it, as hearing the host confirms a
+   node's.
+4. A trial image that never hears the P4 is rolled back on its third boot. Without a watchdog, a
+   hung image counts boots through the P4, which resets the C6 when no hello follows the
+   install.
+
+The runner erases `otadata`, so a wired flash always boots `ota_0`, where it writes the app.
+It also names the flash mode, frequency and size (DIO, 40 MHz, 4 MB), as the P4's build does
+when it saves the bundled image. They sit in the header the digest covers, so a C6 flashed by
+wire from the same tree carries the bundled digest and is not reflashed.
 
 **The high-speed USB port always drives 5 V.** A cable from it to a PC must leave VBUS
 unconnected, or it back-feeds the PC whenever the Type-C is also connected; see

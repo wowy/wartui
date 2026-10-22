@@ -79,7 +79,7 @@ cargo clippy --release                        # and --no-default-features
 
 cd firmware/common                            # a firmware's clippy does not lint it
 cargo fmt --all -- --check
-cargo clippy --release --features esp32c6,radio   # and esp32c5,radio,gps
+cargo clippy --release --features esp32c6,radio   # and esp32c5,radio,gps, and esp32c6,ota
 cargo clippy --release --features esp32p4,gps --target riscv32imafc-unknown-none-elf
 ```
 
@@ -97,7 +97,8 @@ own.
   with them: `air` (the ESP-NOW frames), `beacon`, `hci`, `dedup`, `link`, `mac` (the `Mac`
   type and its text form), `outbox`, `stall`, `plan` (channel pools and the partitioning planner), `node` (a node's
   timings and sweep cursor), `tx_power`, `pending` (the buffers sightings wait in on a node),
-  `ota` (the node's update receiver, and `ota::trial`, the record of an image on trial).
+  `ota` (the update receiver a node and the P4 bridge's C6 share, `ota::trial`, the record of an
+  image on trial, and `ota::image`, the digest that names an image).
   Compiled into *both* the host and the firmware by path dependency, which is the only thing
   keeping the ends in step — and the reason a node's parsers are testable with `cargo test`
   rather than a reflash.
@@ -122,7 +123,8 @@ own.
   `esp-hal`, so it cannot live in `wartui-proto`: the reset funnel `reboot()` and `reset_cause()`,
   the bridge's reset-surviving phase marker (`phase`), the bridge's ESP-NOW half behind the `radio`
   feature (`radio`), the u-blox I2C GPS reader the T-Dongle-C5 and P4 bridges share behind the
-  `gps` feature (`gps`), and the supply and die readings a node's heartbeat carries (`health`).
+  `gps` feature (`gps`), the supply and die readings a node's heartbeat carries (`health`), and
+  updates on flash, the slot, the switch and the trial, behind the `ota` feature (`ota`).
   A path dependency of both, forwarding each firmware's chip feature, and its own workspace so
   its own clippy lints it; a firmware's clippy compiles it without linting it.
 
@@ -280,8 +282,9 @@ is here rather than only in a `//!`.
   records which slot is on trial and how many times it has booted, one cleared bit per boot,
   because power cycles are routine on these nodes and RTC memory does not survive them. With no
   watchdog, those power cycles are also what rolls back a hung image. Every step's flash writes
-  are ordered so a power cut cannot leave an image running untrialed.
-  → `firmware/node/src/ota.rs` `//!`, `crates/wartui-proto/src/ota/trial.rs` (the sector's fixed
+  are ordered so a power cut cannot leave an image running untrialed. The P4 bridge's C6 shares
+  the trial: the P4's hello confirms its image, and the P4's resets count its boots.
+  → `firmware/common/src/ota.rs` `//!`, `crates/wartui-proto/src/ota/trial.rs` (the sector's fixed
   layout), `firmware/node/README.md` § "Over-the-air updates"
 - **`clippy::all` is denied workspace-wide, in both firmwares too, and so is `unsafe_code`.** The
   host allows it on one function, the Raspberry Pi firmware mailbox ioctl

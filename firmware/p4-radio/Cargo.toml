@@ -45,8 +45,9 @@ embassy-futures = "0.1.2"
 embassy-time = "0.5.1"
 static_cell = "2.1.1"
 # The reset funnel, the reset cause, the phase marker and the radio half, shared with
-# the single-chip bridge.
-wartui-firmware = { path = "../common", features = ["radio"] }
+# the single-chip bridge, and the flash half of updates, shared with the node. `ota` brings
+# `esp-storage` at the version `firmware/common/Cargo.toml` holds.
+wartui-firmware = { path = "../common", features = ["ota", "radio"] }
 wartui-proto = { path = "../../crates/wartui-proto" }
 
 [lints.rust]

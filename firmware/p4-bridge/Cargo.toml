@@ -42,6 +42,11 @@ static_cell = "2.1.1"
 wartui-firmware = { path = "../common", features = ["esp32p4"] }
 wartui-proto = { path = "../../crates/wartui-proto" }
 
+# `build.rs` builds the C6's image, then reads the digest appended to it and hashes it.
+[build-dependencies]
+sha2 = { version = "0.11.1", default-features = false }
+wartui-proto = { path = "../../crates/wartui-proto" }
+
 [lints.rust]
 # AGENTS.md's project-wide rule; the root workspace excludes `firmware`, so it is
 # stated here too.

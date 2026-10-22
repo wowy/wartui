@@ -10,6 +10,19 @@ reporting `Esp32P4` and both chips' diagnostics. The queue sizes are in `src/con
 cargo build --release
 ```
 
+The build also builds the C6's image ([`firmware/p4-radio`](../p4-radio/README.md)) and embeds
+it, so it needs the C6's target and espflash:
+
+```sh
+rustup target add riscv32imac-unknown-none-elf
+cargo install espflash --locked
+```
+
+`build.rs` runs `cargo build --release --features esp32c6` in `firmware/p4-radio`, with that
+crate's own toolchain and config, then `espflash save-image` on the result. A build fails if the
+saved image carries no appended SHA-256 digest. `cargo clippy` runs the same build script, so it
+builds the C6's image too.
+
 ## Boards
 
 One image serves the Waveshare ESP32-P4-WIFI6-POE-ETH and the ESP32-P4-WIFI6.
@@ -24,11 +37,40 @@ The Type-C reaches the P4's UART0 through a CH343, so the runner needs `--port <
 - **WIFI6:** the CH343P's DTR and RTS drive EN and GPIO35 through a transistor pair, so espflash
   resets it normally.
 
-The C6 is flashed separately, and the P4 stays in download mode while it is: see
-[`firmware/p4-radio`](../p4-radio/README.md#first-flash).
+The C6 is flashed through its header once, and the P4 stays in download mode while it is: see
+[`firmware/p4-radio`](../p4-radio/README.md#first-flash). After that, flashing the P4 updates
+both chips.
 
-Updates over the one cable are step 3 of the design and are not built yet; until then both chips
-are flashed by hand.
+Updating the P4 itself over the one cable is step 3 of the design and is not built yet; until then
+the P4 is flashed by hand.
+
+## The bundled radio image
+
+At boot the P4 compares the image digest in the C6's hello with the image it carries. When they
+differ, it sends the C6 its image over the SPI link, once per boot. The C6 writes it, reboots
+into it and boots it on trial, and the P4's hello confirms it. The host sees the C6's reboot as a
+new bridge life, with a fresh `Ready`.
+
+Meanwhile the bridge enumerates with the C6's MAC and refuses radio commands. The update adds
+several seconds to that boot, for a C6 image of about 550 KB; the bench has not timed it. A
+bundled image that will not take is tried again on every power-up, about 30 s without a radio
+each time, until a P4 with a fixed image is flashed.
+
+If no hello follows the install within 10 s, the P4 resets the C6 through its enable pin, up to
+three times, so a hung trial image counts the boots it needs to roll back.
+
+Each state reaches the host as an error line, repeated with every `Ready`:
+
+| Line | Meaning |
+| --- | --- |
+| `updating the radio to the bundled image (n%)` | The update is under way; sent again every tenth of the image |
+| `radio runs another build; the bundled image did not take` | The C6 refused the image, stopped answering, or rolled back. The bridge still runs while the link revision matches |
+| `radio predates bundled updates; flash it through the header once` | The C6's hello has no digest. It cannot take an update; flash it by wire |
+| `radio speaks SPI link revision a, this P4 speaks b; update the radio` | A different link revision, and no update took. The bridge refuses radio commands |
+| `the radio coprocessor is not answering` | No hello at boot, or none after the resets that follow an install |
+
+A refused or silent update also sends one line naming why: `the radio refused the bundled image:
+…` or `the radio stopped answering its update`.
 
 ## USB
 

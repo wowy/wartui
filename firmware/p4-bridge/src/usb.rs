@@ -42,7 +42,7 @@ use wartui_proto::link::{
 };
 use wartui_proto::mac::{self, Mac};
 use wartui_proto::spi::Down;
-use wartui_proto::split::{RadioState, Route};
+use wartui_proto::split::Route;
 
 use crate::Shared;
 
@@ -221,7 +221,7 @@ async fn answer_status(shared: &Shared) -> ! {
     loop {
         shared.status_asked.wait().await;
         shared.radio_status.reset();
-        let up = matches!(shared.pair.borrow().state(), RadioState::Up(_));
+        let up = shared.pair.borrow().bridges();
         if up && shared.push_down(&Down::GetRadioStatus) {
             let _ = with_timeout(STATUS_WAIT, shared.radio_status.wait()).await;
         }

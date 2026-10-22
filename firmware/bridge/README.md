@@ -365,8 +365,9 @@ can start the task that owns the bus.
 
 `esp-alloc` is here because the firmware owns the heap and declares its regions.
 
-`esp-storage` is a direct dependency of the node alone, for over-the-air updates, and reaches the
-bridge through `esp-bootloader-esp-idf`. It is held at the version `esp-bootloader-esp-idf`
+`esp-storage` is a direct dependency of `firmware/common` alone, behind the `ota` feature the node
+and the P4 bridge's C6 turn on for over-the-air updates, and reaches the bridge through
+`esp-bootloader-esp-idf`. It is held at the version `esp-bootloader-esp-idf`
 resolves, and brings no crate the tree lacks: its `esp-sync` and `esp-rom-sys` are the copies
 `esp-hal` uses, and `esp-rom-sys` is `links`-keyed besides. Both firmwares' CI jobs count it with
 the rest, and Dependabot ignores its and `esp-bootloader-esp-idf`'s minor and major releases.

@@ -4,19 +4,32 @@ use heapless::Vec;
 use wartui_proto::link::{
     BridgeToHost, Chip, HostToBridge, LoopPhase, QueueId, QueueStat, SendStatus, SpiStats,
 };
+use wartui_proto::ota::TRIAL_BOOTS;
 use wartui_proto::reset::ResetCause;
 use wartui_proto::spi::{Hello, LINK_REVISION, RadioStatus};
-use wartui_proto::split::{Pair, PairEvent, RADIO_WAIT_MS, Route};
+use wartui_proto::split::{INSTALL_WAIT_MS, Pair, PairEvent, RADIO_WAIT_MS, RadioState, Route};
 
 const OWN_MAC: [u8; 6] = [1, 1, 1, 1, 1, 1];
 const C6_MAC: [u8; 6] = [6, 6, 6, 6, 6, 6];
+/// The digest of the C6 image the P4 carries.
+const BUNDLED: [u8; 32] = [0xB0; 32];
+/// The digest of some other C6 build.
+const OTHER: [u8; 32] = [0x0C; 32];
 
 fn pair() -> Pair {
     pair_with_gps(false)
 }
 
 fn pair_with_gps(gps: bool) -> Pair {
-    Pair::new(OWN_MAC, "p4-1".try_into().unwrap(), ResetCause::PowerOn, LoopPhase::Unknown, 0, gps)
+    Pair::new(
+        OWN_MAC,
+        "p4-1".try_into().unwrap(),
+        ResetCause::PowerOn,
+        LoopPhase::Unknown,
+        0,
+        gps,
+        BUNDLED,
+    )
 }
 
 fn hello(uptime_ms: u32) -> Hello {
@@ -29,7 +42,20 @@ fn hello(uptime_ms: u32) -> Hello {
         last_phase: LoopPhase::Boot,
         uptime_ms,
         heap_free: 123_456,
+        image: Some(BUNDLED),
     }
+}
+
+/// A hello from a C6 running `image`.
+fn hello_running(uptime_ms: u32, image: Option<[u8; 32]>) -> Hello {
+    Hello { image, ..hello(uptime_ms) }
+}
+
+/// A pair updating a C6 that runs [`OTHER`].
+fn updating_pair() -> Pair {
+    let mut pair = pair();
+    assert_eq!(pair.on_hello(hello_running(900, Some(OTHER)), 0, 1_000), PairEvent::NewLife);
+    pair
 }
 
 fn up_pair() -> Pair {
@@ -359,4 +385,201 @@ fn spi_zero() -> SpiStats {
         radio_bad_magic: 0,
         radio_seq_gap: 0,
     }
+}
+
+#[test]
+fn pair_comes_up_when_hello_carries_bundled_digest() {
+    let pair = up_pair();
+    assert!(matches!(pair.state(), RadioState::Up(_)));
+    assert!(pair.bridges());
+    assert_eq!(pair.fault(), None);
+}
+
+#[test]
+fn pair_updates_and_refuses_commands_when_digest_differs() {
+    let mut pair = updating_pair();
+    assert!(matches!(pair.state(), RadioState::Updating(_)));
+    assert!(!pair.bridges());
+    // The host still gets a Ready naming the C6, so it sees the fault.
+    assert_eq!(pair.usb_serial_mac(), Some(C6_MAC));
+    assert!(pair.ready(1_000).is_some());
+    assert!(matches!(pair.route(&send(7)), Route::Refuse(Some(_))));
+    assert_eq!(pair.route(&HostToBridge::AddPeer { mac: [2; 6] }), Route::Refuse(None));
+    assert_eq!(pair.fault().unwrap(), "updating the radio to the bundled image (0%)");
+    pair.note_update_progress(40);
+    assert_eq!(pair.fault().unwrap(), "updating the radio to the bundled image (40%)");
+}
+
+#[test]
+fn pair_fault_reads_full_progress_when_image_is_verified() {
+    let mut pair = updating_pair();
+    pair.note_update_progress(91);
+    pair.note_update_progress(100);
+    assert_eq!(pair.fault().unwrap(), "updating the radio to the bundled image (100%)");
+}
+
+#[test]
+fn pair_fault_says_installing_when_install_is_sent() {
+    let mut pair = updating_pair();
+    pair.note_update_progress(100);
+    pair.note_installed(9_000);
+    assert_eq!(pair.fault().unwrap(), "updating the radio: installing the bundled image");
+    // Still installing while the P4 resets a C6 that has not said hello.
+    assert_eq!(pair.on_tick(9_000 + INSTALL_WAIT_MS), PairEvent::ResetRadio);
+    assert_eq!(pair.fault().unwrap(), "updating the radio: installing the bundled image");
+}
+
+#[test]
+fn pair_reads_records_when_updating_on_matching_revision() {
+    assert!(updating_pair().reads_records());
+    assert!(up_pair().reads_records());
+}
+
+#[test]
+fn pair_reads_no_records_when_updating_on_other_revision() {
+    let mut pair = pair();
+    let mut other = hello_running(900, Some(OTHER));
+    other.link_rev = LINK_REVISION + 1;
+    pair.on_hello(other, 0, 1_000);
+    assert!(matches!(pair.state(), RadioState::Updating(_)));
+    assert!(!pair.reads_records());
+}
+
+#[test]
+fn pair_comes_up_with_new_life_when_hello_after_install_matches_bundle() {
+    let mut pair = updating_pair();
+    pair.note_seq(5_000);
+    pair.note_installed(9_000);
+    assert_eq!(pair.on_hello(hello(80), 0, 9_500), PairEvent::NewLife);
+    assert!(matches!(pair.state(), RadioState::Up(_)));
+    assert_eq!(pair.fault(), None);
+    // The new life is the C6's, so the host sees its reset cause.
+    assert_eq!(cause(pair.ready(9_500)), (ResetCause::Software, LoopPhase::Boot));
+    // No reset follows a hello.
+    assert_eq!(pair.on_tick(9_000 + 10 * INSTALL_WAIT_MS), PairEvent::None);
+}
+
+#[test]
+fn pair_bridges_stale_with_fault_when_digest_still_differs_after_attempt() {
+    let mut pair = updating_pair();
+    pair.note_seq(5_000);
+    pair.note_installed(9_000);
+    // Rolled back to the build it ran before.
+    assert_eq!(pair.on_hello(hello_running(80, Some(OTHER)), 0, 9_500), PairEvent::NewLife);
+    assert!(matches!(pair.state(), RadioState::Stale(_)));
+    assert!(pair.bridges());
+    assert_eq!(pair.route(&send(7)), Route::Forward);
+    assert_eq!(pair.fault().unwrap(), "radio runs another build; the bundled image did not take");
+}
+
+#[test]
+fn pair_refuses_stale_radio_when_link_revision_differs() {
+    let mut pair = updating_pair();
+    pair.note_seq(5_000);
+    let mut other = hello_running(80, Some(OTHER));
+    other.link_rev = LINK_REVISION + 1;
+    assert_eq!(pair.on_hello(other, 0, 9_500), PairEvent::NewLife);
+    assert!(matches!(pair.state(), RadioState::Mismatch(_)));
+    assert!(!pair.bridges());
+}
+
+#[test]
+fn pair_goes_stale_when_update_fails() {
+    let mut pair = updating_pair();
+    pair.on_update_failed();
+    assert!(matches!(pair.state(), RadioState::Stale(_)));
+    assert!(pair.fault().unwrap().contains("did not take"));
+}
+
+#[test]
+fn pair_reports_mismatch_with_header_fault_when_hello_has_no_digest() {
+    let mut pair = pair();
+    assert_eq!(pair.on_hello(hello_running(900, None), 0, 1_000), PairEvent::NewLife);
+    assert!(matches!(pair.state(), RadioState::Mismatch(_)));
+    assert!(!pair.bridges());
+    assert_eq!(
+        pair.fault().unwrap(),
+        "radio predates bundled updates; flash it through the header once"
+    );
+}
+
+#[test]
+fn pair_updates_when_digest_is_zeros() {
+    // A C6 that takes updates but could not read its own digest.
+    let mut pair = pair();
+    pair.on_hello(hello_running(900, Some([0; 32])), 0, 1_000);
+    assert!(matches!(pair.state(), RadioState::Updating(_)));
+}
+
+#[test]
+fn pair_resets_radio_trial_boots_times_then_gives_up_when_no_hello_follows_install() {
+    let mut pair = updating_pair();
+    pair.note_installed(10_000);
+    assert_eq!(pair.on_tick(10_000 + INSTALL_WAIT_MS - 1), PairEvent::None);
+    let mut now = 10_000;
+    for _ in 0..TRIAL_BOOTS {
+        now += INSTALL_WAIT_MS;
+        assert_eq!(pair.on_tick(now), PairEvent::ResetRadio);
+        assert_eq!(pair.on_tick(now + 1), PairEvent::None);
+    }
+    now += INSTALL_WAIT_MS;
+    assert_eq!(pair.on_tick(now), PairEvent::NewLife);
+    assert_eq!(pair.state(), &RadioState::Absent);
+    assert!(pair.fault().unwrap().contains("not answering"));
+    assert_eq!(pair.on_tick(now + INSTALL_WAIT_MS), PairEvent::None);
+}
+
+#[test]
+fn pair_deadline_is_boot_wait_when_waiting() {
+    assert_eq!(pair().next_deadline_ms(), Some(RADIO_WAIT_MS));
+}
+
+#[test]
+fn pair_deadline_is_none_when_up() {
+    assert_eq!(up_pair().next_deadline_ms(), None);
+}
+
+#[test]
+fn pair_deadline_is_install_wait_when_installed() {
+    let mut pair = updating_pair();
+    pair.note_installed(10_000);
+    assert_eq!(pair.next_deadline_ms(), Some(10_000 + INSTALL_WAIT_MS));
+}
+
+#[test]
+fn pair_deadline_moves_forward_when_tick_resets_radio() {
+    let mut pair = updating_pair();
+    pair.note_installed(10_000);
+    let now = 10_000 + INSTALL_WAIT_MS;
+    assert_eq!(pair.on_tick(now), PairEvent::ResetRadio);
+    assert_eq!(pair.next_deadline_ms(), Some(now + INSTALL_WAIT_MS));
+}
+
+#[test]
+fn pair_deadline_is_none_when_hello_follows_install() {
+    let mut pair = updating_pair();
+    pair.note_seq(5_000);
+    pair.note_installed(10_000);
+    assert_eq!(pair.on_hello(hello(80), 0, 10_500), PairEvent::NewLife);
+    assert_eq!(pair.next_deadline_ms(), None);
+}
+
+#[test]
+fn pair_goes_stale_without_reset_when_update_fails_after_install() {
+    // The C6 refused the install, so it never reboots and no reset should follow.
+    let mut pair = updating_pair();
+    pair.note_installed(10_000);
+    pair.on_update_failed();
+    assert!(matches!(pair.state(), RadioState::Stale(_)));
+    assert!(pair.fault().unwrap().contains("did not take"));
+    assert_eq!(pair.next_deadline_ms(), None);
+    assert_eq!(pair.on_tick(10_000 + INSTALL_WAIT_MS), PairEvent::None);
+}
+
+#[test]
+fn pair_update_progress_reads_last_noted_percent() {
+    let mut pair = updating_pair();
+    assert_eq!(pair.update_progress(), 0);
+    pair.note_update_progress(40);
+    assert_eq!(pair.update_progress(), 40);
 }

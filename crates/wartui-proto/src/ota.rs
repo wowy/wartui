@@ -31,7 +31,12 @@
 //! **The hash runs as bytes arrive**, in order, so `commit` costs one comparison. Reading a
 //! 1.9 MB slot back to hash it would cost seconds, and a chunk is only accepted at
 //! `next_offset`, so the running hash covers exactly the bytes written.
+//!
+//! The P4 bridge's C6 takes images through the same receiver, over the SPI link
+//! ([`crate::spi::update`]), and boots them on the same trial ([`TRIAL_BOOTS`]).
+//! [`image`] reads the digest that names an image.
 
+pub mod image;
 pub mod trial;
 
 use sha2::{Digest, Sha256};
@@ -43,6 +48,14 @@ use crate::air::{
 
 /// Bytes in one flash sector: the unit erased, and the unit [`Receiver`] buffers.
 pub const SECTOR: usize = 4096;
+
+/// Unconfirmed boots of a new image before it is rolled back, on a node or a P4 bridge's C6.
+///
+/// Three rather than one: a node runs on a USB-C PD supply, which can reset it once while it
+/// negotiates, so a single boot that never heard the host is not evidence of a bad image. A
+/// hung image reaches three too, since there is no watchdog and each power cycle counts: the
+/// operator's on a node, the P4's on its C6 (`crate::split`).
+pub const TRIAL_BOOTS: u32 = 3;
 
 const _: () = assert!(SECTOR.is_multiple_of(OTA_CHUNK));
 

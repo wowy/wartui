@@ -173,9 +173,10 @@ const SCAN_MS: u32 = 500;
 /// firmware's `SILENCE`.
 const UPDATE_SILENCE_MS: u64 = 30_000;
 
-/// Boots a trial image gets before the node rolls back, mirroring the firmware's
-/// `TRIAL_BOOTS`. A [`SimConfig::rejecting_node`] spends one idle beat on each.
-const TRIAL_BOOTS: u64 = 3;
+/// Boots a trial image gets before the node rolls back, the firmware's own
+/// [`wartui_proto::ota::TRIAL_BOOTS`]. A [`SimConfig::rejecting_node`] spends one idle beat on
+/// each.
+const TRIAL_BOOTS: u64 = wartui_proto::ota::TRIAL_BOOTS as u64;
 
 /// The bytes an update slot holds, as `firmware/node/partitions.csv` sizes it.
 const SLOT_CAPACITY: u32 = 0x1E_0000;
@@ -487,7 +488,7 @@ struct SimNode {
     boot: tokio::time::Instant,
     speed: f64,
     rng: Xorshift,
-    /// What follows is the update side, mirroring `firmware/node/src/ota.rs`.
+    /// What follows is the update side, mirroring `firmware/common/src/ota.rs`.
     ///
     /// The receiver the firmware links, boxed for its sector buffer.
     receiver: Box<Receiver>,

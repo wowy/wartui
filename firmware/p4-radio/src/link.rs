@@ -16,9 +16,21 @@
 //!
 //! The C6 sends its hello in every transfer until it hears the P4's. The P4 tells a repeat
 //! from a new life by the transfer seq, which starts at 0 on every boot
-//! (`wartui_proto::split`, `Pair::on_hello`).
+//! (`wartui_proto::split`, `Pair::on_hello`). The hello carries the booted image's digest,
+//! which is how the P4 decides to send its bundled image.
+//!
+//! **The P4's hello confirms an image on trial.** Hearing the P4 is the test, as hearing the
+//! host is a node's; `firmware/common/src/ota.rs` has the trial.
+//!
+//! **An update arrives as [`Kind::Update`] transfers** (`wartui_proto::spi::update`), which
+//! drive [`wartui_proto::ota::Receiver`] over [`wartui_firmware::ota`], as a node's update
+//! frames do. Each status goes up in the next transfer, ahead of any records. A sector's
+//! flash work holds the loop, so the next READY waits for it; the P4 sends no radio records
+//! while it updates. `Install` on a verified session switches slots and reboots, and the P4
+//! hears the new image's hello.
 
 use core::cell::{Cell, RefCell};
+use core::fmt::{self, Write};
 
 use embassy_futures::join::join;
 use embassy_time::{Duration, with_timeout};
@@ -28,15 +40,21 @@ use esp_hal::gpio::{Input, Output};
 use esp_hal::spi::slave::dma::SpiDma;
 use esp_hal::time::Instant;
 use esp_radio::esp_now::EspNowManager;
+use wartui_firmware::ota::{Note, Ota};
 use wartui_firmware::phase::mark;
 use wartui_firmware::radio::{self, Command, Done, Dones, Full, Jobs, Payloads, Said, SendDone};
+use wartui_firmware::reboot;
+use wartui_proto::air::{OtaBeginMsg, OtaChunkMsg, OtaCommitMsg, OtaState, OtaStatusMsg, Version};
 use wartui_proto::frame_ring::FrameRing;
 use wartui_proto::heapless::Vec;
 use wartui_proto::link::{
-    BridgeToHost, Chip, HostToBridge, LogStr, LoopPhase, QueueId, QueueStat, ShortStr,
+    BridgeToHost, Chip, HostToBridge, LogLevel, LogStr, LoopPhase, QueueId, QueueStat, ShortStr,
 };
 use wartui_proto::mac::Mac;
+use wartui_proto::ota::Receiver;
+use wartui_proto::ota::image::DIGEST_LEN;
 use wartui_proto::reset::ResetCause;
+use wartui_proto::spi::update::Op;
 use wartui_proto::spi::{
     Down, HEADER_LEN, Held, Hello, Kind, LINK_REVISION, PAYLOAD_MAX, Packer, RECORD_MAX,
     RadioStatus, SeqCheck, SeqNote, TRANSFER_LEN, Up, VerifyError, decode_down, encode_up, records,
@@ -115,6 +133,40 @@ impl Shared {
     pub fn note_oversize(&self) {
         self.rx_oversize.set(self.rx_oversize.get().wrapping_add(1));
     }
+
+    /// Send the P4 a line composed here: a `Log` at `level`, or an `Error` without one.
+    /// Text past a line's length is cut.
+    #[inline(never)]
+    pub fn line(&self, level: Option<LogLevel>, args: fmt::Arguments<'_>) {
+        let mut message = LogStr::new();
+        let _ = message.write_fmt(args);
+        let msg = match level {
+            Some(level) => BridgeToHost::Log { level, message },
+            None => BridgeToHost::Error { message },
+        };
+        self.push(&Up::Message(msg));
+    }
+
+    /// Pass on what an update step had to say: a failure as an `Error`, anything else as an
+    /// `Info` line.
+    pub fn note(&self, note: &Note) {
+        let level = if matches!(note, Note::Failed(..)) { None } else { Some(LogLevel::Info) };
+        self.line(level, format_args!("{note}"));
+    }
+}
+
+/// The update side: the flash, the receiver an image goes through, and where this image
+/// stands.
+pub struct Updates {
+    pub ota: Ota,
+    /// Static, since it holds a sector of buffer.
+    pub receiver: &'static mut Receiver,
+    /// The booted image is on trial until the P4's hello confirms it.
+    pub trial: bool,
+    /// The booted image's digest, for the hello, or zeros when it could not be read.
+    pub image: [u8; DIGEST_LEN],
+    /// The status to send the P4 in the next transfer.
+    pub status: Option<OtaStatusMsg>,
 }
 
 /// The SPI slave and its pins and buffers.
@@ -168,6 +220,7 @@ pub struct Link {
     /// A record from the rings that did not fit the last transfer. Static, since it holds
     /// up to [`RECORD_MAX`] bytes.
     held: &'static mut Held,
+    updates: Updates,
 }
 
 impl Link {
@@ -177,6 +230,7 @@ impl Link {
         cause: ResetCause,
         phase: LoopPhase,
         held: &'static mut Held,
+        updates: Updates,
     ) -> Self {
         Self {
             boot,
@@ -196,6 +250,7 @@ impl Link {
             radio_jobs_high_water: 0,
             radio_jobs_dropped: 0,
             held,
+            updates,
         }
     }
 
@@ -215,6 +270,7 @@ impl Link {
             last_phase: self.phase,
             uptime_ms: self.boot.elapsed().as_millis() as u32,
             heap_free: u32::try_from(esp_alloc::HEAP.free()).unwrap_or(u32::MAX),
+            image: Some(self.updates.image),
         }
     }
 
@@ -246,6 +302,7 @@ impl Link {
             Kind::Hello => {
                 if let Some(hello) = Hello::decode(transfer.payload) {
                     self.p4_link_rev = Some(hello.link_rev);
+                    self.confirm(shared);
                 }
             }
             Kind::Messages => {
@@ -254,12 +311,88 @@ impl Link {
                     self.act(record, shared, radio);
                 }
             }
-            Kind::Idle | Kind::Update => {}
+            Kind::Update => {
+                mark(LoopPhase::Command);
+                if let Some(op) = Op::decode(transfer.payload) {
+                    self.update(op, shared);
+                }
+            }
+            Kind::Idle => {}
         }
         // Once per change, so a P4 sending garbage costs one line per transfer at most.
         if self.undecoded != self.undecoded_said {
             self.undecoded_said = self.undecoded;
             shared.say(Said::Error("a P4 command did not decode"));
+        }
+    }
+
+    /// End this image's trial, if it is on one. A failure leaves it on trial, and the P4's
+    /// next hello tries again.
+    fn confirm(&mut self, shared: &Shared) {
+        if !self.updates.trial {
+            return;
+        }
+        match self.updates.ota.confirm() {
+            Ok(()) => {
+                self.updates.trial = false;
+                shared.line(Some(LogLevel::Info), format_args!("image confirmed by the P4"));
+            }
+            Err(err) => shared.line(None, format_args!("could not confirm the image: {err}")),
+        }
+    }
+
+    /// Hand an update op to the receiver, keeping its status for the next transfer.
+    ///
+    /// A `begin` is refused with [`OtaState::FlashError`] while this image is on trial, and
+    /// on a table without a `trial` sector or a second app slot, as a node refuses one.
+    fn update(&mut self, op: Op<'_>, shared: &Shared) {
+        let updates = &mut self.updates;
+        let receiver = &mut *updates.receiver;
+        let status = match op {
+            Op::Begin { session, len, sha256 } => {
+                // The link's `Begin` names no version, and the receiver checks none.
+                let version = Version::new(0, 0, 0);
+                let begin = OtaBeginMsg { session, len, sha256, version, board: receiver.board() };
+                match (updates.ota.slot(), updates.trial) {
+                    (Some(slot), false) => Some(receiver.begin(&begin, &slot)),
+                    _ => {
+                        Some(OtaStatusMsg { session, state: OtaState::FlashError, next_offset: 0 })
+                    }
+                }
+            }
+            Op::Chunk { session, offset, data } => match updates.ota.slot() {
+                Some(mut slot) => receiver.chunk(&OtaChunkMsg { session, offset, data }, &mut slot),
+                None => Some(OtaStatusMsg { session, state: OtaState::Idle, next_offset: 0 }),
+            },
+            Op::Commit { session } => match updates.ota.slot() {
+                Some(mut slot) => Some(receiver.commit(&OtaCommitMsg { session }, &mut slot)),
+                None => Some(OtaStatusMsg { session, state: OtaState::Idle, next_offset: 0 }),
+            },
+            Op::Install { session } => self.install(session, shared),
+            // Only the C6 sends a status.
+            Op::Status(_) => None,
+        };
+        if status.is_some() {
+            self.updates.status = status;
+        }
+    }
+
+    /// Switch to the verified image and reboot into it. Returns only when the session is
+    /// not verified, or the switch failed, with the status to send.
+    fn install(&mut self, session: u8, shared: &Shared) -> Option<OtaStatusMsg> {
+        let receiver = &mut *self.updates.receiver;
+        if !receiver.is_verified() || receiver.status().session != session {
+            return Some(receiver.status());
+        }
+        match self.updates.ota.install() {
+            // The notes cannot reach the P4 before the reboot; the new image's hello says
+            // the rest.
+            Ok(_) => reboot(),
+            Err(err) => {
+                shared.line(None, format_args!("could not switch to the new image: {err}"));
+                receiver.reset();
+                Some(OtaStatusMsg { session, state: OtaState::FlashError, next_offset: 0 })
+            }
         }
     }
 
@@ -396,6 +529,11 @@ impl Link {
         if self.p4_link_rev.is_none() {
             let len = self.hello().encode(&mut buf[HEADER_LEN..]);
             seal(buf, Kind::Hello, seq, len);
+            return;
+        }
+        if let Some(status) = self.updates.status.take() {
+            let len = Op::Status(status).encode(&mut buf[HEADER_LEN..]);
+            seal(buf, Kind::Update, seq, len);
             return;
         }
         let mut packer = Packer::new(&mut buf[HEADER_LEN..HEADER_LEN + PAYLOAD_MAX]);

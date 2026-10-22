@@ -22,16 +22,17 @@
 //! 4. The C6 drops READY once the transfer completes.
 //!
 //! **Frozen forever, even before 1.0: the READY handshake, [`TRANSFER_LEN`], the header
-//! above with [`MAGIC`], [`CORE_VERSION`] and the CRC, the [`Kind`] codes, and [`Hello`]'s
-//! layout.** A P4 build must always be able to identify and update any C6 build, so a link
-//! change never sends the user back to a wired flash. Everything else, the [`Up`] and
-//! [`Down`] messages a [`Kind::Messages`] transfer carries, changes freely between builds
-//! and is named by [`LINK_REVISION`]. A P4 whose hello exchange finds another revision does
-//! not bridge.
+//! above with [`MAGIC`], [`CORE_VERSION`] and the CRC, the [`Kind`] codes, [`Hello`]'s
+//! layout with its image digest, and the [`update`] payload.** A P4 build must always be
+//! able to identify and update any C6 build, so a link change never sends the user back to a
+//! wired flash. Everything else, the [`Up`] and [`Down`] messages a [`Kind::Messages`]
+//! transfer carries, changes freely between builds and is named by [`LINK_REVISION`]. A P4
+//! whose hello exchange finds another revision does not bridge.
 //!
-//! [`Kind::Update`] is frozen by number only, and no C6 build implements it yet, so a C6
-//! flashed from a build without single-cable updates needs one more wired flash when they
-//! land.
+//! The P4 image carries the C6's. At boot the P4 compares the digest in the C6's hello with
+//! the bundled image's, and sends the bundle over [`Kind::Update`] when they differ
+//! ([`crate::split`]). A C6 whose hello carries no digest predates the update path and needs
+//! one wired flash.
 //!
 //! [`TRANSFER_LEN`] is 2048 so one transfer carries the largest [`Down`], a 1,470-byte
 //! [`HostToBridge::SendEspNow`](crate::link::HostToBridge::SendEspNow), without
@@ -41,8 +42,9 @@ use crate::link::crc16;
 
 mod hello;
 mod message;
+pub mod update;
 
-pub use hello::{HELLO_LEN, Hello};
+pub use hello::{HELLO_IMAGE_LEN, HELLO_LEN, Hello};
 pub use message::{
     Down, Held, LINK_REVISION, Packer, RECORD_MAX, RadioStatus, Up, decode_down, decode_up,
     encode_down, encode_up, records,
@@ -71,7 +73,7 @@ pub enum Kind {
     Hello = 1,
     /// Records of [`Up`] or [`Down`] messages; see [`Packer`].
     Messages = 2,
-    /// Reserved for the C6 update path. Nothing sends it yet.
+    /// An [`update::Op`]: the P4 sending the C6 an image, or the C6's status.
     Update = 3,
 }
 
