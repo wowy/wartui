@@ -19,14 +19,18 @@ use crate::position::Fix;
 /// Raw SSID bytes as text, for showing to a person or writing into a column parsed as text.
 ///
 /// One rule for the view and the export. [`visible_ssid`] strips a cloaked access point's padding
-/// here as well as in the parser, so every path from bytes to text gets it. Any NUL left is
-/// interior, and gets what `from_utf8_lossy` gives any byte it cannot represent: a raw NUL is no
-/// more use to a terminal than to WiGLE's parser. The store keeps whatever arrived.
-/// is no more use to a terminal than to WiGLE's parser. The store keeps whatever arrived.
+/// here as well as in the parser, so every path from bytes to text gets it. Each control character
+/// left, NUL included, becomes U+FFFD, the character `from_utf8_lossy` gives invalid bytes. A
+/// terminal and WiGLE's parser have no use for one, and an escape drives the terminal. The store
+/// keeps whatever arrived.
 #[must_use]
 pub fn ssid_text(bytes: &[u8]) -> String {
     let text = String::from_utf8_lossy(visible_ssid(bytes));
-    if text.contains('\0') { text.replace('\0', "\u{FFFD}") } else { text.into_owned() }
+    if text.contains(char::is_control) {
+        text.chars().map(|c| if c.is_control() { '\u{FFFD}' } else { c }).collect()
+    } else {
+        text.into_owned()
+    }
 }
 
 /// A node was heard from, which is enough to keep its row current.
@@ -362,9 +366,19 @@ mod tests {
     }
 
     #[test]
-    fn ssid_text_replaces_nul_when_interior() {
-        // The trim leaves an interior NUL, so this is the last guard before a column WiGLE parses,
-        // or a terminal that would swallow it and show a shorter name.
+    fn ssid_text_replaces_control_characters_when_interior() {
+        // The trim leaves interior control characters, so this is the last guard before WiGLE's
+        // parser and the terminal.
         assert_eq!(ssid_text(b"a\0b"), "a\u{FFFD}b");
+        assert_eq!(ssid_text(&[0x04, 0x00, 0x01]), "\u{FFFD}\u{FFFD}\u{FFFD}");
+        assert_eq!(ssid_text(b"a\x1b[2Jb"), "a\u{FFFD}[2Jb");
+        assert_eq!(ssid_text(b"a\nb\x7f"), "a\u{FFFD}b\u{FFFD}");
+        assert_eq!(ssid_text(&[b'a', 0xC2, 0x9B, b'b']), "a\u{FFFD}b");
+    }
+
+    #[test]
+    fn ssid_text_keeps_text_when_printable() {
+        // Non-control Unicode passes through unchanged.
+        assert_eq!(ssid_text("café ☕".as_bytes()), "café ☕");
     }
 }

@@ -35,7 +35,8 @@
 //! WiGLE rejects files without two details: a zero-padded timestamp (`2026-05-01 13:34:37`, where
 //! the node firmware emits `2026-5-1 13:34:37`), and RFC-4180 quoting of the SSID, which may hold a
 //! comma or quote and need not be text. [`record::ssid_text`](crate::record::ssid_text) also strips
-//! a cloaked network's NUL padding on the way out, so no SSID reaches the file padded.
+//! a cloaked network's NUL padding on the way out and replaces control characters, so no SSID
+//! reaches the file padded or carrying one.
 //! Coordinates are rounded to seven decimals and `AccuracyMeters` to centimeters, because values
 //! derived from NMEA minutes and HDOP would otherwise print float noise.
 //!
