@@ -155,9 +155,9 @@ fingerprint, is refused rather than migrated.
 
 Positions resolve fresh per record through `PositionChain`: a host GPS pinned with `--gps` → the
 bridge's GPS (its bytes fed in by `runtime::drive`, never the engine) → a host GPS found by
-`discover` (NMEA on its own thread, standing down while the bridge's receiver has a fresh fix) →
-static `--lat`/`--lon` (test only: it marks the capture as test data, which is never uploaded) →
-nothing.
+`discover` (NMEA on its own thread, standing down while the bridge's receiver is sending
+sentences) → static `--lat`/`--lon` (test only: it marks the capture as test data, which is never
+uploaded) → nothing.
 Which tier answered is stored per row.
 
 ## Invariants that are easy to break
