@@ -146,10 +146,9 @@ pub struct Snapshot {
     /// Where the host believes it is, resolved as of this snapshot.
     pub position: crate::position::Fix,
     /// What the GPS is doing, when one is read: a host receiver pinned with `--gps`, else the
-    /// bridge's receiver while it is sending sentences, else the host's, else the bridge's while the
-    /// connected bridge has a GPS port. Separate from
-    /// [`Self::position`]: "no fix" and "no receiver" look identical in a row but are different
-    /// problems.
+    /// bridge's receiver while it is sending sentences, else the host's, else the bridge's while
+    /// the connected bridge has a GPS port. Separate from [`Self::position`]: "no fix" and "no
+    /// receiver" look identical in a row but are different problems.
     pub gps: Option<crate::gps::GpsView>,
     /// The nodes' Wi-Fi transmit power, in ESP-IDF quarter-dBm units, for the settings modal.
     pub tx_power: i8,

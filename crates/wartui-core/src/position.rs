@@ -7,8 +7,9 @@
 //!
 //! A named port goes first because `--gps PATH` is the operator's instruction. The bridge's
 //! receiver goes above a searched one because the host's search stands down while that receiver
-//! is sending sentences ([`Gps::set_suspended`]), and it is then the only receiver being read. Every receiver answers as [`PositionSource::Gps`]: a
-//! row records that a receiver placed it, not which one.
+//! is sending sentences ([`Gps::set_suspended`]), and it is then the only receiver being read.
+//! Every receiver answers as [`PositionSource::Gps`]: a row records that a receiver placed it, not
+//! which one.
 //!
 //! Tiers are tried per record, so the source is stored per row: one capture can start indoors on a
 //! typed-in position, gain satellites in the car park, and lose them in a tunnel.
