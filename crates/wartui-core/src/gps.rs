@@ -205,6 +205,8 @@ struct Inner {
     lines: Lines,
     /// Whether a fix has arrived since the stream last restarted ([`Gps::reset_stream`]).
     fix_in_stream: bool,
+    /// Whether a sentence has parsed since the stream last restarted ([`Gps::reset_stream`]).
+    heard_in_stream: bool,
     /// The receiver's last answer to its rate, so a repeated answer is logged once.
     valset: Option<ValsetReply>,
     /// Whether the receiver has said its transmit buffer is full, so that is logged once.
@@ -305,6 +307,7 @@ impl Inner {
         let parsed = self.nmea.parse(line);
         if parsed.is_ok() {
             self.heard_ms = Some(now_ms);
+            self.heard_in_stream = true;
         }
         match parsed {
             Ok(Report::Fix(new)) => {
@@ -386,6 +389,7 @@ impl Gps {
                 demux: Demux::new(),
                 lines: Lines::default(),
                 fix_in_stream: false,
+                heard_in_stream: false,
                 valset: None,
                 txbuf_full: false,
             })),
@@ -459,6 +463,15 @@ impl Gps {
             && inner.received_at_ms.is_some_and(|at_ms| is_fresh(at_ms, now_ms, inner.max_age))
     }
 
+    /// Whether a checksum-valid sentence arrived within the staleness limit of `now_ms`, and since
+    /// the stream last restarted ([`Self::reset_stream`]). A sentence without a fix counts.
+    #[must_use]
+    pub fn is_talking(&self, now_ms: i64) -> bool {
+        let inner = self.lock();
+        inner.heard_in_stream
+            && inner.heard_ms.is_some_and(|at_ms| is_fresh(at_ms, now_ms, inner.max_age))
+    }
+
     /// Whether the operator named this receiver's port with `--gps`.
     #[must_use]
     pub const fn is_pinned(&self) -> bool {
@@ -480,6 +493,7 @@ impl Gps {
         inner.demux = Demux::new();
         inner.lines = Lines::default();
         inner.fix_in_stream = false;
+        inner.heard_in_stream = false;
     }
 
     /// The last fix and the Unix milliseconds it arrived.
@@ -1365,6 +1379,38 @@ mod tests {
         let mut bytes = line.to_vec();
         bytes.extend_from_slice(b"\r\n");
         bytes
+    }
+
+    #[test]
+    fn gps_is_talking_when_no_fix_sentences_are_within_max_age() {
+        // A receiver with no sky still sends every epoch. That is the bridge's receiver at work.
+        let gps = Gps::bridged(DEFAULT_MAX_AGE);
+        assert!(!gps.is_talking(1_000), "nothing heard yet");
+        gps.feed_bytes(&streamed(GGA_NO_FIX), 1_000);
+        assert!(gps.is_talking(6_000));
+        assert!(!gps.is_talking(6_001));
+        gps.feed_bytes(b"$GPGSV,1,1,00*79\r\n", 6_001);
+        assert!(gps.is_talking(6_001));
+    }
+
+    #[test]
+    fn gps_is_not_talking_when_bytes_hold_no_valid_sentence() {
+        let gps = Gps::bridged(DEFAULT_MAX_AGE);
+        // GGA_NO_FIX with its checksum broken.
+        gps.feed_bytes(b"$GPGGA,123520.00,4807.038,N,01131.000,E,0,00,,,M,,M,,*00\r\n", 1_000);
+        gps.feed_bytes(&ACK_VALSET, 1_000);
+        assert!(!gps.is_talking(1_000));
+    }
+
+    #[test]
+    fn gps_is_not_talking_when_stream_resets_until_a_new_sentence_arrives() {
+        let gps = Gps::bridged(DEFAULT_MAX_AGE);
+        gps.feed_bytes(&streamed(GGA_NO_FIX), 1_000);
+        gps.reset_stream();
+        // Heard within the age limit, but before the reconnect.
+        assert!(!gps.is_talking(2_000));
+        gps.feed_bytes(&streamed(GGA_NO_FIX), 3_000);
+        assert!(gps.is_talking(3_000));
     }
 
     #[test]
