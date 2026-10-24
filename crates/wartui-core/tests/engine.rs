@@ -1595,17 +1595,6 @@ fn engine_snapshot_shows_bridge_receiver_when_it_sends_no_fix_sentences() {
     bridge.feed_bytes(GSV, clock.at(2).unix_ms);
     assert!(shows_bridge_gps(&engine, clock.at(2)));
     assert!(!shows_bridge_gps(&engine, clock.at(8)), "the last sentence is past the age limit");
-}
-
-#[test]
-fn engine_snapshot_shows_bridge_receiver_when_it_sends_sentences() {
-    let clock = Clock::new();
-    let (bridge, host) = (Gps::bridged(DEFAULT_MAX_AGE), Gps::detached());
-    let mut engine = engine(config_with_receivers(&bridge, &host), &clock);
-    engine.handle(connected_with_gps(), clock.at(1));
-    bridge.feed_bytes(&streamed_gga(), clock.at(2).unix_ms);
-    assert!(shows_bridge_gps(&engine, clock.at(2)));
-    assert!(!shows_bridge_gps(&engine, clock.at(8)), "the last sentence is past the age limit");
     engine.handle(
         Event::Link(LinkEvent::Disconnected { reason: "unplugged".to_owned() }),
         clock.at(3),
@@ -1616,7 +1605,7 @@ fn engine_snapshot_shows_bridge_receiver_when_it_sends_sentences() {
 }
 
 #[test]
-fn engine_snapshot_shows_pinned_host_receiver_when_bridge_fix_is_fresh() {
+fn engine_snapshot_shows_pinned_host_receiver_when_bridge_receiver_is_talking() {
     // `--gps PATH` positions the rows ahead of the bridge, so the view reports on it.
     let clock = Clock::new();
     let bridge = Gps::bridged(DEFAULT_MAX_AGE);

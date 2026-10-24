@@ -431,14 +431,6 @@ mod tests {
         assert!(!host.suspended(), "a GPS-built bridge whose receiver says nothing");
         bridge.feed_bytes(GGA_NO_FIX, 1_000);
         bridge.feed_bytes(GSV, 1_000);
-        stand_host_down(Some(&host), Some(&bridge), true, 1_000);
-        assert!(host.suspended());
-    }
-
-    #[test]
-    fn runtime_suspends_host_gps_when_bridge_sends_sentences() {
-        let (host, bridge) = (Gps::detached(), Gps::bridged(DEFAULT_MAX_AGE));
-        bridge.feed_bytes(GSV, 1_000);
         stand_host_down(Some(&host), Some(&bridge), false, 1_000);
         assert!(!host.suspended(), "sentences on a bridge without a GPS port");
         stand_host_down(Some(&host), Some(&bridge), true, 1_000);
