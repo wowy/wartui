@@ -7,9 +7,9 @@
 //!
 //! **The bridge's GPS bytes stop here.** They go to the bridge's receiver in the position chain
 //! ([`crate::gps::Gps::feed_bytes`]) and never reach the engine, which reads positions through the
-//! chain like any other. While the connected bridge's receiver has a fresh fix, the host's puck
-//! search stands down (`stand_host_down`); it resumes when that fix ages past the limit or the
-//! bridge disconnects. Whether the connected bridge has a GPS port is the engine's to say
+//! chain like any other. While the connected bridge's receiver is sending sentences, the host's
+//! puck search stands down (`stand_host_down`); it resumes when the last one ages past the limit
+//! or the bridge disconnects. Whether the connected bridge has a GPS port is the engine's to say
 //! ([`FleetEngine::bridge_has_gps`]), read after the engine has seen each link event. Each
 //! connection, and each disconnect, starts the bridge's stream over.
 
@@ -262,11 +262,11 @@ pub async fn drive(
     store.close()
 }
 
-/// Stand the host's receiver down while the connected bridge has a GPS port and its receiver a
-/// fresh fix ([`crate::gps::Gps::has_fresh_fix`]), and let it search otherwise.
+/// Stand the host's receiver down while the connected bridge has a GPS port and its receiver is
+/// sending sentences ([`crate::gps::Gps::is_talking`]), and let it search otherwise.
 ///
-/// Keyed on a fix, not on the port or on sentences: a GPS-built bridge whose receiver is unplugged,
-/// silent or under no sky must not cost a host puck that has a fix.
+/// Keyed on sentences, fix or not, so the operator can watch the bridge's receiver acquire. A
+/// GPS-built bridge whose receiver is unplugged or silent leaves the search running.
 /// [`crate::gps::Gps::set_suspended`] leaves a port named with `--gps` alone.
 fn stand_host_down(
     host: Option<&crate::gps::Gps>,
@@ -275,7 +275,7 @@ fn stand_host_down(
     now_ms: i64,
 ) {
     if let Some(host) = host {
-        host.set_suspended(bridge_has_gps && bridge.is_some_and(|gps| gps.has_fresh_fix(now_ms)));
+        host.set_suspended(bridge_has_gps && bridge.is_some_and(|gps| gps.is_talking(now_ms)));
     }
 }
 
@@ -421,35 +421,34 @@ mod tests {
     use crate::position::DEFAULT_MAX_AGE;
 
     const GSV: &[u8] = b"$GPGSV,1,1,00*79\r\n";
-    const GGA: &[u8] = b"$GPGGA,123519.00,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*69\r\n";
     const GGA_NO_FIX: &[u8] = b"$GPGGA,123520.00,4807.038,N,01131.000,E,0,00,,,M,,M,,*76\r\n";
 
     #[test]
-    fn runtime_keeps_host_gps_searching_when_bridge_receiver_sends_no_fix() {
-        // No sky: sentences every epoch, and no position among them.
+    fn runtime_suspends_host_gps_when_bridge_sends_no_fix_sentences() {
+        // No sky: sentences every epoch, and the operator watches the bridge's receiver acquire.
         let (host, bridge) = (Gps::detached(), Gps::bridged(DEFAULT_MAX_AGE));
         stand_host_down(Some(&host), Some(&bridge), true, 1_000);
         assert!(!host.suspended(), "a GPS-built bridge whose receiver says nothing");
         bridge.feed_bytes(GGA_NO_FIX, 1_000);
         bridge.feed_bytes(GSV, 1_000);
         stand_host_down(Some(&host), Some(&bridge), true, 1_000);
-        assert!(!host.suspended());
+        assert!(host.suspended());
     }
 
     #[test]
-    fn runtime_suspends_host_gps_when_bridge_fix_is_fresh() {
+    fn runtime_suspends_host_gps_when_bridge_sends_sentences() {
         let (host, bridge) = (Gps::detached(), Gps::bridged(DEFAULT_MAX_AGE));
-        bridge.feed_bytes(GGA, 1_000);
+        bridge.feed_bytes(GSV, 1_000);
         stand_host_down(Some(&host), Some(&bridge), false, 1_000);
-        assert!(!host.suspended(), "a fix on a bridge without a GPS port");
+        assert!(!host.suspended(), "sentences on a bridge without a GPS port");
         stand_host_down(Some(&host), Some(&bridge), true, 1_000);
         assert!(host.suspended());
     }
 
     #[test]
-    fn runtime_resumes_host_gps_when_bridge_fix_goes_stale() {
+    fn runtime_resumes_host_gps_when_bridge_sentences_go_stale() {
         let (host, bridge) = (Gps::detached(), Gps::bridged(DEFAULT_MAX_AGE));
-        bridge.feed_bytes(GGA, 1_000);
+        bridge.feed_bytes(GSV, 1_000);
         stand_host_down(Some(&host), Some(&bridge), true, 6_000);
         assert!(host.suspended());
         stand_host_down(Some(&host), Some(&bridge), true, 6_001);
@@ -457,14 +456,15 @@ mod tests {
     }
 
     #[test]
-    fn runtime_keeps_host_gps_searching_when_bridge_reconnects_until_a_new_fix() {
+    fn runtime_keeps_host_gps_searching_when_bridge_reconnects_until_a_new_sentence() {
         let (host, bridge) = (Gps::detached(), Gps::bridged(DEFAULT_MAX_AGE));
-        bridge.feed_bytes(GGA, 1_000);
-        // What `drive` does on `Connected`: the old fix is within the age limit, but from before.
+        bridge.feed_bytes(GSV, 1_000);
+        // What `drive` does on `Connected`: the old sentence is within the age limit, but from
+        // before.
         bridge.reset_stream();
         stand_host_down(Some(&host), Some(&bridge), true, 2_000);
         assert!(!host.suspended());
-        bridge.feed_bytes(GGA, 3_000);
+        bridge.feed_bytes(GSV, 3_000);
         stand_host_down(Some(&host), Some(&bridge), true, 3_000);
         assert!(host.suspended());
     }

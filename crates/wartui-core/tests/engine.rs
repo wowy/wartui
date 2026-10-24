@@ -1586,25 +1586,26 @@ fn engine_snapshot_shows_host_receiver_when_bridge_receiver_is_silent() {
 }
 
 #[test]
-fn engine_snapshot_shows_host_receiver_when_bridge_receiver_has_no_fix() {
-    // A receiver with no sky still talks every epoch; the host's search does not stand down for it.
+fn engine_snapshot_shows_bridge_receiver_when_it_sends_no_fix_sentences() {
+    // A receiver with no sky still talks every epoch, and the view follows it finding satellites.
     let clock = Clock::new();
     let (bridge, host) = (Gps::bridged(DEFAULT_MAX_AGE), Gps::detached());
     let mut engine = engine(config_with_receivers(&bridge, &host), &clock);
     engine.handle(connected_with_gps(), clock.at(1));
     bridge.feed_bytes(GSV, clock.at(2).unix_ms);
-    assert!(!shows_bridge_gps(&engine, clock.at(2)));
+    assert!(shows_bridge_gps(&engine, clock.at(2)));
+    assert!(!shows_bridge_gps(&engine, clock.at(8)), "the last sentence is past the age limit");
 }
 
 #[test]
-fn engine_snapshot_shows_bridge_receiver_when_its_fix_is_fresh() {
+fn engine_snapshot_shows_bridge_receiver_when_it_sends_sentences() {
     let clock = Clock::new();
     let (bridge, host) = (Gps::bridged(DEFAULT_MAX_AGE), Gps::detached());
     let mut engine = engine(config_with_receivers(&bridge, &host), &clock);
     engine.handle(connected_with_gps(), clock.at(1));
     bridge.feed_bytes(&streamed_gga(), clock.at(2).unix_ms);
     assert!(shows_bridge_gps(&engine, clock.at(2)));
-    assert!(!shows_bridge_gps(&engine, clock.at(8)), "the fix is past the age limit");
+    assert!(!shows_bridge_gps(&engine, clock.at(8)), "the last sentence is past the age limit");
     engine.handle(
         Event::Link(LinkEvent::Disconnected { reason: "unplugged".to_owned() }),
         clock.at(3),
