@@ -46,6 +46,7 @@ use wartui_proto::air::{
     AdminMsg, Board, CONTROL_CHANNEL, Capabilities, DecodeError, DieTemp, Frame, HeartbeatMsg,
     OtaState, SIGHTINGS_PER_BATCH_MAX, SightingBatchWriter, SightingMsg, Vdd,
 };
+use wartui_proto::dedup::{DEDUP_RSSI_GAIN_BLE_DB, DEDUP_RSSI_GAIN_WIFI_DB};
 use wartui_proto::link::BROADCAST;
 use wartui_proto::mac;
 use wartui_proto::node::{
@@ -760,7 +761,9 @@ fn report(sender: &mut EspNowSender, node: &mut Node, channel: u8) {
         let rssi = Some(sighting.rssi);
         // Taken and released per sighting, never across the transmit inside
         // `offer` — the callback's own rule for `sniff::SEEN`, kept here too.
-        if !sniff::SEEN.with(|seen| seen.is_due(&sighting.bssid, rssi, now)) {
+        if !sniff::SEEN
+            .with(|seen| seen.is_due(&sighting.bssid, rssi, DEDUP_RSSI_GAIN_WIFI_DB, now))
+        {
             continue;
         }
         sent += outgoing.offer(sender, node, &sighting.as_msg(), sighting.bssid, rssi, now);
@@ -794,7 +797,8 @@ fn report_ble(sender: &mut EspNowSender, node: &mut Node, scanner: &mut ble::Sca
     // transmit — the same shape the Wi-Fi sightings are drained in.
     while let Some(report) = ble::take() {
         let rssi = report.has_rssi().then_some(report.rssi);
-        if !sniff::SEEN.with(|seen| seen.is_due(&report.address, rssi, now)) {
+        if !sniff::SEEN.with(|seen| seen.is_due(&report.address, rssi, DEDUP_RSSI_GAIN_BLE_DB, now))
+        {
             continue;
         }
         lines +=

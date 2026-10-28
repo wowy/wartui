@@ -88,4 +88,4 @@ impl fmt::Display for Version {
 ///
 /// Mirrors `version` in `firmware/node/Cargo.toml`; `crates/wartui-proto/tests/version.rs`
 /// fails when the two differ, so every firmware bump edits both.
-pub const NODE_VERSION: Version = Version::new(0, 2, 1);
+pub const NODE_VERSION: Version = Version::new(0, 2, 2);

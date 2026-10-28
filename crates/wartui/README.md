@@ -906,8 +906,9 @@ whole fleet's topology.
 **An `alive` node gone quiet is usually fine.** A node reports each address once and holds it back,
 so a stationary node falls silent after reporting everything in range. That memory lives on the node
 and survives into your next session. A held address is reported again five minutes after it was last
-reported, or sooner if heard at least 10 dB louder. `r`/`R` clear it without a reboot, and a change
-of share or Bluetooth role empties it. `crates/wartui-proto/src/dedup.rs` explains why.
+reported, or sooner if heard at least 5 dB louder (10 dB for a Bluetooth device). `r`/`R` clear it
+without a reboot, and a change of share or Bluetooth role empties it.
+`crates/wartui-proto/src/dedup.rs` explains why.
 
 | Header says            | Meaning                                                                  |
 |------------------------|--------------------------------------------------------------------------|

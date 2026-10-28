@@ -35,7 +35,7 @@ use wartui_proto::air::{
     AdminMsg, Board, Capabilities, DieTemp, Frame, HeartbeatMsg, NODE_VERSION, OtaState,
     OtaStatusMsg, RecordKind, Security, SightingBatchWriter, SightingMsg, Vdd, Version,
 };
-use wartui_proto::dedup::{C5DedupRing, C6DedupRing};
+use wartui_proto::dedup::{C5DedupRing, C6DedupRing, DEDUP_RSSI_GAIN_WIFI_DB};
 use wartui_proto::link::{
     BROADCAST, BridgeToHost, Chip, EspNowPayload, HostToBridge, LogLevel, LogStr, LoopPhase, Panel,
     SendStatus,
@@ -701,7 +701,7 @@ impl SimNode {
     fn worth_reporting(&mut self, network: &Network) -> bool {
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let now_ms = (self.boot.elapsed().as_secs_f64() * 1000.0 * self.speed) as u64 as u32;
-        self.seen.offer(network.bssid, Some(network.rssi), now_ms)
+        self.seen.offer(network.bssid, Some(network.rssi), DEDUP_RSSI_GAIN_WIFI_DB, now_ms)
     }
 }
 
@@ -720,10 +720,10 @@ impl Seen {
         if five_ghz { Self::C5(Box::default()) } else { Self::C6(Box::default()) }
     }
 
-    fn offer(&mut self, mac: [u8; 6], rssi: Option<i8>, now_ms: u32) -> bool {
+    fn offer(&mut self, mac: [u8; 6], rssi: Option<i8>, gain_db: i8, now_ms: u32) -> bool {
         match self {
-            Self::C5(ring) => ring.offer(mac, rssi, now_ms),
-            Self::C6(ring) => ring.offer(mac, rssi, now_ms),
+            Self::C5(ring) => ring.offer(mac, rssi, gain_db, now_ms),
+            Self::C6(ring) => ring.offer(mac, rssi, gain_db, now_ms),
         }
     }
 

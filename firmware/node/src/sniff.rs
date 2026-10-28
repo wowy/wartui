@@ -43,6 +43,7 @@ use wartui_proto::beacon::{Sighting, is_report, parse_mgmt};
 use wartui_proto::dedup::C5DedupRing as ChipDedupRing;
 #[cfg(feature = "esp32c6")]
 use wartui_proto::dedup::C6DedupRing as ChipDedupRing;
+use wartui_proto::dedup::DEDUP_RSSI_GAIN_WIFI_DB;
 use wartui_proto::pending::WifiPending;
 
 /// The dedup ring: addresses already reported and not yet due again.
@@ -146,7 +147,7 @@ pub fn on_frame(pkt: PromiscuousPkt<'_>) {
         // already pending; see the module doc for why that order is safe.
         dwell.sightings.record(sighting, |s| {
             let now = now_ms();
-            SEEN.with(|seen| seen.is_due(&s.bssid, Some(rssi), now))
+            SEEN.with(|seen| seen.is_due(&s.bssid, Some(rssi), DEDUP_RSSI_GAIN_WIFI_DB, now))
         });
     });
 }
