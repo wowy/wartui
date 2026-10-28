@@ -15,12 +15,11 @@
 //! - **It is at least [`DEDUP_RSSI_GAIN_WIFI_DB`] stronger than anything reported for it,
 //!   or [`DEDUP_RSSI_GAIN_BLE_DB`] for a Bluetooth device.** The export writes the
 //!   strongest sighting's position, so a node driving towards an access point it first
-//!   heard at the edge of range has a better fix to offer. The margin is wider than
-//!   ordinary jitter between sightings, and the baseline only rises. An address is
-//!   re-reported for getting closer, never for wobbling. The Wi-Fi margin matches the
-//!   Biscuit Manager default of 5 dB; Bluetooth keeps 10 dB. A node runs one job at a time
-//!   and the ring is cleared when it changes, so the caller passes the margin rather than
-//!   each entry storing it.
+//!   heard at the edge of range has a better fix to offer. The baseline only rises, so an
+//!   address is re-reported for getting closer. The Wi-Fi margin matches the Biscuit
+//!   Manager default of 5 dB; Bluetooth keeps 10 dB. A node runs one job at a time and the
+//!   ring is cleared when it changes, so the caller passes the margin rather than each
+//!   entry storing it.
 //!
 //! [`MacRing::clear`] empties the ring outright, for two further reasons:
 //!
