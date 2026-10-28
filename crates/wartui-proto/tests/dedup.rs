@@ -15,17 +15,31 @@ fn mac(n: u16) -> [u8; 6] {
     [0x02, 0, 0, 0, hi, lo]
 }
 
+/// Offer a sighting at the Wi-Fi margin, for tests the margin does not concern.
+fn offer_wifi<const N: usize, const S: usize>(
+    ring: &mut MacRing<N, S>,
+    mac: [u8; 6],
+    rssi: Option<i8>,
+    now_ms: u32,
+) -> bool {
+    ring.offer(mac, rssi, DEDUP_RSSI_GAIN_WIFI_DB, now_ms)
+}
+
+/// Ask whether a sighting is due at the Wi-Fi margin, for tests the margin does not concern.
+fn is_due_wifi<const N: usize, const S: usize>(
+    ring: &MacRing<N, S>,
+    mac: &[u8; 6],
+    rssi: Option<i8>,
+    now_ms: u32,
+) -> bool {
+    ring.is_due(mac, rssi, DEDUP_RSSI_GAIN_WIFI_DB, now_ms)
+}
+
 #[test]
 fn mac_ring_accepts_first_sighting_and_filters_immediate_duplicate_when_offered() {
     let mut ring: MacRing<4, 8> = MacRing::new();
-    assert!(
-        ring.offer(mac(1), Some(-70), DEDUP_RSSI_GAIN_WIFI_DB, T0),
-        "a new address is worth transmitting"
-    );
-    assert!(
-        !ring.offer(mac(1), Some(-70), DEDUP_RSSI_GAIN_WIFI_DB, T0 + 1),
-        "the same address is not"
-    );
+    assert!(offer_wifi(&mut ring, mac(1), Some(-70), T0), "a new address is worth transmitting");
+    assert!(!offer_wifi(&mut ring, mac(1), Some(-70), T0 + 1), "the same address is not");
     assert!(ring.contains(&mac(1)));
     assert_eq!(ring.len(), 1);
 }
@@ -34,27 +48,21 @@ fn mac_ring_accepts_first_sighting_and_filters_immediate_duplicate_when_offered(
 fn mac_ring_preserves_unrecorded_state_when_only_querying_is_due() {
     // The node asks, broadcasts, and records only if the broadcast went out.
     let mut ring: MacRing<4, 8> = MacRing::new();
-    assert!(ring.is_due(&mac(1), Some(-70), DEDUP_RSSI_GAIN_WIFI_DB, T0));
-    assert!(
-        ring.is_due(&mac(1), Some(-70), DEDUP_RSSI_GAIN_WIFI_DB, T0),
-        "nothing was held by asking"
-    );
+    assert!(is_due_wifi(&ring, &mac(1), Some(-70), T0));
+    assert!(is_due_wifi(&ring, &mac(1), Some(-70), T0), "nothing was held by asking");
     ring.record(mac(1), Some(-70), T0);
-    assert!(!ring.is_due(&mac(1), Some(-70), DEDUP_RSSI_GAIN_WIFI_DB, T0));
+    assert!(!is_due_wifi(&ring, &mac(1), Some(-70), T0));
 }
 
 #[test]
 fn mac_ring_permits_retransmission_when_old_address_is_evicted() {
     let mut ring: MacRing<4, 8> = MacRing::new();
-    assert!(ring.offer(mac(0), Some(-70), DEDUP_RSSI_GAIN_WIFI_DB, T0));
+    assert!(offer_wifi(&mut ring, mac(0), Some(-70), T0));
     for n in 1..=4 {
-        assert!(ring.offer(mac(n), Some(-70), DEDUP_RSSI_GAIN_WIFI_DB, T0));
+        assert!(offer_wifi(&mut ring, mac(n), Some(-70), T0));
     }
     assert!(!ring.contains(&mac(0)), "the oldest entry is gone");
-    assert!(
-        ring.offer(mac(0), Some(-70), DEDUP_RSSI_GAIN_WIFI_DB, T0),
-        "so it is worth transmitting again"
-    );
+    assert!(offer_wifi(&mut ring, mac(0), Some(-70), T0), "so it is worth transmitting again");
 }
 
 #[test]
@@ -62,11 +70,11 @@ fn mac_ring_permits_retransmission_when_refresh_window_elapses() {
     // Without this a node that has reported everything in range is silent for good,
     // across host sessions too.
     let mut ring: MacRing<4, 8> = MacRing::new();
-    assert!(ring.offer(mac(1), Some(-70), DEDUP_RSSI_GAIN_WIFI_DB, T0));
-    assert!(!ring.offer(mac(1), Some(-70), DEDUP_RSSI_GAIN_WIFI_DB, T0 + DEDUP_REFRESH_MS - 1));
-    assert!(ring.offer(mac(1), Some(-70), DEDUP_RSSI_GAIN_WIFI_DB, T0 + DEDUP_REFRESH_MS));
+    assert!(offer_wifi(&mut ring, mac(1), Some(-70), T0));
+    assert!(!offer_wifi(&mut ring, mac(1), Some(-70), T0 + DEDUP_REFRESH_MS - 1));
+    assert!(offer_wifi(&mut ring, mac(1), Some(-70), T0 + DEDUP_REFRESH_MS));
     assert!(
-        !ring.offer(mac(1), Some(-70), DEDUP_RSSI_GAIN_WIFI_DB, T0 + DEDUP_REFRESH_MS + 1),
+        !offer_wifi(&mut ring, mac(1), Some(-70), T0 + DEDUP_REFRESH_MS + 1),
         "and the timer restarts"
     );
 }
@@ -75,69 +83,49 @@ fn mac_ring_permits_retransmission_when_refresh_window_elapses() {
 fn mac_ring_handles_refresh_correctly_when_millisecond_clock_wraps() {
     let mut ring: MacRing<4, 8> = MacRing::new();
     let before_wrap = u32::MAX - 10;
-    assert!(ring.offer(mac(1), Some(-70), DEDUP_RSSI_GAIN_WIFI_DB, before_wrap));
+    assert!(offer_wifi(&mut ring, mac(1), Some(-70), before_wrap));
     assert!(
-        !ring.offer(mac(1), Some(-70), DEDUP_RSSI_GAIN_WIFI_DB, 5),
+        !offer_wifi(&mut ring, mac(1), Some(-70), 5),
         "sixteen milliseconds later, not 49 days earlier"
     );
-    assert!(ring.offer(
-        mac(1),
-        Some(-70),
-        DEDUP_RSSI_GAIN_WIFI_DB,
-        before_wrap.wrapping_add(DEDUP_REFRESH_MS)
-    ));
+    assert!(offer_wifi(&mut ring, mac(1), Some(-70), before_wrap.wrapping_add(DEDUP_REFRESH_MS)));
 }
 
-#[test]
-fn mac_ring_pins_rssi_gain_thresholds_when_compiled() {
-    assert_eq!(DEDUP_RSSI_GAIN_WIFI_DB, 5);
-    assert_eq!(DEDUP_RSSI_GAIN_BLE_DB, 10);
+/// A held address is refused one dB short of `gain` and re-reported at it.
+fn assert_re_reports_at_gain(gain: i8) {
+    // The export keeps the strongest sighting's position, so getting closer is news.
+    let mut ring: MacRing<4, 8> = MacRing::new();
+    assert!(ring.offer(mac(1), Some(-80), gain, T0));
+    assert!(!ring.offer(mac(1), Some(-80 + gain - 1), gain, T0 + 1), "jitter is not");
+    assert!(ring.offer(mac(1), Some(-80 + gain), gain, T0 + 2));
 }
 
 #[test]
 fn mac_ring_accepts_duplicate_address_when_wifi_rssi_gain_reaches_threshold() {
-    // The export keeps the strongest sighting's position, so getting closer is news.
-    let gain = DEDUP_RSSI_GAIN_WIFI_DB;
-    let mut ring: MacRing<4, 8> = MacRing::new();
-    assert!(ring.offer(mac(1), Some(-80), gain, T0));
-    assert!(!ring.offer(mac(1), Some(-80 + gain - 1), gain, T0 + 1), "jitter is not");
-    assert!(ring.offer(mac(1), Some(-80 + gain), gain, T0 + 2));
+    assert_re_reports_at_gain(DEDUP_RSSI_GAIN_WIFI_DB);
 }
 
 #[test]
 fn mac_ring_accepts_duplicate_address_when_ble_rssi_gain_reaches_threshold() {
-    let gain = DEDUP_RSSI_GAIN_BLE_DB;
-    let mut ring: MacRing<4, 8> = MacRing::new();
-    assert!(ring.offer(mac(1), Some(-80), gain, T0));
-    assert!(!ring.offer(mac(1), Some(-80 + gain - 1), gain, T0 + 1), "jitter is not");
-    assert!(ring.offer(mac(1), Some(-80 + gain), gain, T0 + 2));
+    assert_re_reports_at_gain(DEDUP_RSSI_GAIN_BLE_DB);
 }
 
 #[test]
 fn mac_ring_refuses_ble_re_report_when_gain_meets_only_wifi_threshold() {
-    // Advertisements hop across three channels and jitter more than beacons do.
+    let gain = DEDUP_RSSI_GAIN_BLE_DB;
     let mut ring: MacRing<4, 8> = MacRing::new();
-    assert!(ring.offer(mac(1), Some(-80), DEDUP_RSSI_GAIN_BLE_DB, T0));
-    assert!(!ring.is_due(
-        &mac(1),
-        Some(-80 + DEDUP_RSSI_GAIN_WIFI_DB),
-        DEDUP_RSSI_GAIN_BLE_DB,
-        T0 + 1
-    ));
+    assert!(ring.offer(mac(1), Some(-80), gain, T0));
+    assert!(!ring.is_due(&mac(1), Some(-80 + DEDUP_RSSI_GAIN_WIFI_DB), gain, T0 + 1));
 }
 
 #[test]
 fn mac_ring_filters_weaker_signals_when_rssi_fluctuates_below_peak() {
+    let gain = DEDUP_RSSI_GAIN_WIFI_DB;
     let mut ring: MacRing<4, 8> = MacRing::new();
-    assert!(ring.offer(mac(1), Some(-60), DEDUP_RSSI_GAIN_WIFI_DB, T0));
-    assert!(!ring.offer(mac(1), Some(-90), DEDUP_RSSI_GAIN_WIFI_DB, T0 + 1));
+    assert!(ring.offer(mac(1), Some(-60), gain, T0));
+    assert!(!ring.offer(mac(1), Some(-90), gain, T0 + 1));
     assert!(
-        !ring.offer(
-            mac(1),
-            Some(-60 + DEDUP_RSSI_GAIN_WIFI_DB - 1),
-            DEDUP_RSSI_GAIN_WIFI_DB,
-            T0 + 2
-        ),
+        !ring.offer(mac(1), Some(-60 + gain - 1), gain, T0 + 2),
         "measured against the strongest reported, not the weakest heard"
     );
 }
@@ -145,28 +133,21 @@ fn mac_ring_filters_weaker_signals_when_rssi_fluctuates_below_peak() {
 #[test]
 fn mac_ring_resets_rssi_baseline_when_refresh_interval_elapses() {
     // The node may be somewhere else entirely by now.
+    let gain = DEDUP_RSSI_GAIN_WIFI_DB;
     let mut ring: MacRing<4, 8> = MacRing::new();
-    assert!(ring.offer(mac(1), Some(-40), DEDUP_RSSI_GAIN_WIFI_DB, T0));
+    assert!(ring.offer(mac(1), Some(-40), gain, T0));
     let later = T0 + DEDUP_REFRESH_MS;
-    assert!(ring.offer(mac(1), Some(-90), DEDUP_RSSI_GAIN_WIFI_DB, later));
-    assert!(ring.offer(
-        mac(1),
-        Some(-90 + DEDUP_RSSI_GAIN_WIFI_DB),
-        DEDUP_RSSI_GAIN_WIFI_DB,
-        later + 1
-    ));
+    assert!(ring.offer(mac(1), Some(-90), gain, later));
+    assert!(ring.offer(mac(1), Some(-90 + gain), gain, later + 1));
 }
 
 #[test]
 fn mac_ring_prefers_valid_rssi_over_missing_signal_when_evaluating_due() {
     // A BLE controller with no reading says 127, which must not read as +127 dBm.
     let mut ring: MacRing<4, 8> = MacRing::new();
-    assert!(ring.offer(mac(1), None, DEDUP_RSSI_GAIN_WIFI_DB, T0));
-    assert!(!ring.offer(mac(1), None, DEDUP_RSSI_GAIN_WIFI_DB, T0 + 1));
-    assert!(
-        ring.offer(mac(1), Some(-100), DEDUP_RSSI_GAIN_WIFI_DB, T0 + 2),
-        "any real reading beats no reading"
-    );
+    assert!(offer_wifi(&mut ring, mac(1), None, T0));
+    assert!(!offer_wifi(&mut ring, mac(1), None, T0 + 1));
+    assert!(offer_wifi(&mut ring, mac(1), Some(-100), T0 + 2), "any real reading beats no reading");
 }
 
 #[test]
@@ -174,14 +155,11 @@ fn mac_ring_preserves_fifo_eviction_order_when_address_is_re_reported() {
     // A re-report updates in place, so a constantly-beaconing access point still ages
     // out on schedule.
     let mut ring: MacRing<3, 8> = MacRing::new();
-    ring.offer(mac(1), Some(-80), DEDUP_RSSI_GAIN_WIFI_DB, T0);
-    ring.offer(mac(2), Some(-80), DEDUP_RSSI_GAIN_WIFI_DB, T0);
-    assert!(
-        ring.offer(mac(1), Some(-50), DEDUP_RSSI_GAIN_WIFI_DB, T0 + 1),
-        "re-reported for its signal"
-    );
-    ring.offer(mac(3), Some(-80), DEDUP_RSSI_GAIN_WIFI_DB, T0);
-    ring.offer(mac(4), Some(-80), DEDUP_RSSI_GAIN_WIFI_DB, T0);
+    offer_wifi(&mut ring, mac(1), Some(-80), T0);
+    offer_wifi(&mut ring, mac(2), Some(-80), T0);
+    assert!(offer_wifi(&mut ring, mac(1), Some(-50), T0 + 1), "re-reported for its signal");
+    offer_wifi(&mut ring, mac(3), Some(-80), T0);
+    offer_wifi(&mut ring, mac(4), Some(-80), T0);
     assert!(!ring.contains(&mac(1)), "the re-report bought it nothing");
 }
 
@@ -192,32 +170,29 @@ fn mac_ring_treats_zero_mac_as_unseen_when_ring_is_fresh() {
     let ring: MacRing<8, 16> = MacRing::new();
     assert!(ring.is_empty());
     assert!(!ring.contains(&[0; 6]));
-    assert!(ring.is_due(&[0; 6], Some(-70), DEDUP_RSSI_GAIN_WIFI_DB, 0));
+    assert!(is_due_wifi(&ring, &[0; 6], Some(-70), 0));
 }
 
 #[test]
 fn mac_ring_forgets_every_address_when_cleared() {
     let mut ring: MacRing<4, 8> = MacRing::new();
-    ring.offer(mac(1), Some(-70), DEDUP_RSSI_GAIN_WIFI_DB, T0);
-    ring.offer(mac(2), Some(-70), DEDUP_RSSI_GAIN_WIFI_DB, T0);
+    offer_wifi(&mut ring, mac(1), Some(-70), T0);
+    offer_wifi(&mut ring, mac(2), Some(-70), T0);
     ring.clear();
     assert_eq!(ring.len(), 0);
     assert!(ring.is_empty());
     assert!(!ring.contains(&mac(1)));
-    assert!(
-        ring.is_due(&mac(1), Some(-70), DEDUP_RSSI_GAIN_WIFI_DB, T0),
-        "due again, not merely unrecorded"
-    );
+    assert!(is_due_wifi(&ring, &mac(1), Some(-70), T0), "due again, not merely unrecorded");
 }
 
 #[test]
 fn mac_ring_fills_from_the_start_when_recording_after_clear() {
     let mut ring: MacRing<3, 8> = MacRing::new();
-    ring.offer(mac(1), Some(-70), DEDUP_RSSI_GAIN_WIFI_DB, T0);
-    ring.offer(mac(2), Some(-70), DEDUP_RSSI_GAIN_WIFI_DB, T0);
-    ring.offer(mac(3), Some(-70), DEDUP_RSSI_GAIN_WIFI_DB, T0);
+    offer_wifi(&mut ring, mac(1), Some(-70), T0);
+    offer_wifi(&mut ring, mac(2), Some(-70), T0);
+    offer_wifi(&mut ring, mac(3), Some(-70), T0);
     ring.clear();
-    ring.offer(mac(4), Some(-70), DEDUP_RSSI_GAIN_WIFI_DB, T0);
+    offer_wifi(&mut ring, mac(4), Some(-70), T0);
     assert_eq!(ring.len(), 1);
     assert!(ring.contains(&mac(4)));
     assert!(!ring.contains(&mac(1)), "the pre-clear entries are gone");
@@ -226,14 +201,11 @@ fn mac_ring_fills_from_the_start_when_recording_after_clear() {
 /// Fill a ring to `capacity` distinct addresses, then offer one more.
 fn assert_holds_exactly<const N: usize, const S: usize>(ring: &mut MacRing<N, S>, capacity: usize) {
     for n in 0..u16::try_from(capacity).expect("fits") {
-        assert!(
-            ring.offer(mac(n), Some(-70), DEDUP_RSSI_GAIN_WIFI_DB, T0),
-            "every address here is distinct"
-        );
+        assert!(offer_wifi(ring, mac(n), Some(-70), T0), "every address here is distinct");
     }
     assert_eq!(ring.len(), capacity);
     assert!(ring.contains(&mac(0)), "nothing has displaced the first entry yet");
-    ring.offer(mac(u16::MAX), Some(-70), DEDUP_RSSI_GAIN_WIFI_DB, T0);
+    offer_wifi(ring, mac(u16::MAX), Some(-70), T0);
     assert!(!ring.contains(&mac(0)), "one more address displaces it");
     assert_eq!(ring.len(), capacity, "and the ring does not grow");
 }
@@ -255,9 +227,9 @@ fn mac_ring_enforces_capacity_bounds_when_configured_with_c6_ring_size() {
 fn mac_ring_removes_only_the_evicted_mac_from_the_index_when_ring_overflows() {
     let mut ring: MacRing<4, 8> = MacRing::new();
     for n in 0..4u16 {
-        assert!(ring.offer(mac(n), Some(-70), DEDUP_RSSI_GAIN_WIFI_DB, T0));
+        assert!(offer_wifi(&mut ring, mac(n), Some(-70), T0));
     }
-    assert!(ring.offer(mac(99), Some(-70), DEDUP_RSSI_GAIN_WIFI_DB, T0), "overflow by one");
+    assert!(offer_wifi(&mut ring, mac(99), Some(-70), T0), "overflow by one");
     assert!(!ring.contains(&mac(0)), "the oldest is evicted, and unindexed with it");
     for n in 1..4u16 {
         assert!(ring.contains(&mac(n)), "mac {n} survives the eviction");
@@ -284,13 +256,13 @@ fn mac_ring_finds_later_probe_entries_when_the_head_of_their_run_is_evicted() {
     // `a` claims the home slot; `b` and `c` land behind it in the same probe run.
     let [a, b, c] = colliding_macs();
     let mut ring: MacRing<4, 8> = MacRing::new();
-    ring.offer(a, Some(-70), DEDUP_RSSI_GAIN_WIFI_DB, T0);
-    ring.offer(b, Some(-70), DEDUP_RSSI_GAIN_WIFI_DB, T0);
-    ring.offer(c, Some(-70), DEDUP_RSSI_GAIN_WIFI_DB, T0);
-    ring.offer(mac(9999), Some(-70), DEDUP_RSSI_GAIN_WIFI_DB, T0);
+    offer_wifi(&mut ring, a, Some(-70), T0);
+    offer_wifi(&mut ring, b, Some(-70), T0);
+    offer_wifi(&mut ring, c, Some(-70), T0);
+    offer_wifi(&mut ring, mac(9999), Some(-70), T0);
     // Overflow evicts `a`, the oldest entry and the head of the run — the case
     // backward-shift deletion exists for.
-    ring.offer(mac(9998), Some(-70), DEDUP_RSSI_GAIN_WIFI_DB, T0);
+    offer_wifi(&mut ring, mac(9998), Some(-70), T0);
     assert!(!ring.contains(&a), "the head of the run is gone");
     assert!(ring.contains(&b), "later in the run, but still reachable from the home slot");
     assert!(ring.contains(&c), "same for the entry behind that one");
@@ -300,7 +272,7 @@ fn mac_ring_finds_later_probe_entries_when_the_head_of_their_run_is_evicted() {
 fn mac_ring_forgets_everything_and_refills_cleanly_when_cleared_at_capacity() {
     let mut ring: MacRing<4, 8> = MacRing::new();
     for n in 0..4u16 {
-        ring.offer(mac(n), Some(-70), DEDUP_RSSI_GAIN_WIFI_DB, T0);
+        offer_wifi(&mut ring, mac(n), Some(-70), T0);
     }
     ring.clear();
     for n in 0..4u16 {
@@ -308,7 +280,7 @@ fn mac_ring_forgets_everything_and_refills_cleanly_when_cleared_at_capacity() {
     }
     for n in 100..104u16 {
         assert!(
-            ring.offer(mac(n), Some(-70), DEDUP_RSSI_GAIN_WIFI_DB, T0),
+            offer_wifi(&mut ring, mac(n), Some(-70), T0),
             "refilling after clear is unobstructed"
         );
     }

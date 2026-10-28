@@ -17,11 +17,10 @@
 //!   strongest sighting's position, so a node driving towards an access point it first
 //!   heard at the edge of range has a better fix to offer. The margin is wider than
 //!   ordinary jitter between sightings, and the baseline only rises. An address is
-//!   re-reported for getting closer, never for wobbling. Wi-Fi beacons arrive on the one
-//!   channel the node dwells on and jitter less than BLE advertisements, which hop across
-//!   advertising channels 37, 38 and 39. So 5 dB clears Wi-Fi jitter, and Bluetooth keeps
-//!   the wider margin. A node runs one job at a time and the ring is cleared when it
-//!   changes, so the caller passes the margin rather than each entry storing it.
+//!   re-reported for getting closer, never for wobbling. The Wi-Fi margin matches the
+//!   Biscuit Manager default of 5 dB; Bluetooth keeps 10 dB. A node runs one job at a time
+//!   and the ring is cleared when it changes, so the caller passes the margin rather than
+//!   each entry storing it.
 //!
 //! [`MacRing::clear`] empties the ring outright, for two further reasons:
 //!
