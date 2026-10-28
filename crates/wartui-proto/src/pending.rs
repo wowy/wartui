@@ -56,19 +56,25 @@ mod entry {
             true
         }
 
-        /// Fold a repeat hearing of the same address into the held entry. Nothing by
-        /// default: the first hearing is kept as it is.
-        fn merge(&mut self, _repeat: &Self) {}
+        /// Fold a repeat hearing of the same address into the held entry.
+        fn merge(&mut self, repeat: &Self);
     }
 }
 
-/// An access point beacons about ten times a dwell, and only its first sighting is kept.
-/// A beacon carries the whole record, so nothing is merged from the repeats.
+/// An access point beacons about ten times a dwell, so a repeat merges into the held
+/// sighting.
 impl Entry for Sighting {
     const BLANK: Self = Sighting::BLANK;
 
     fn address(&self) -> [u8; 6] {
         self.bssid
+    }
+
+    /// The strongest reading wins. Every other field stays from the first sighting: a
+    /// whole later record could swap a probe response's SSID for a hidden network's empty
+    /// beacon SSID, and only the reading gets better.
+    fn merge(&mut self, repeat: &Self) {
+        self.rssi = self.rssi.max(repeat.rssi);
     }
 }
 
@@ -95,8 +101,8 @@ impl Entry for AdvReport {
     }
 }
 
-/// One dwell's access points, one per BSSID. The first sighting of a BSSID is kept whole,
-/// and repeats are ignored.
+/// One dwell's access points, one per BSSID. A repeat merges into the held sighting,
+/// keeping the strongest RSSI and every other field from the first.
 pub type WifiPending<const N: usize, const S: usize> = Pending<Sighting, N, S>;
 
 /// One scan's advertisers, one per address. A repeat merges into the held report, keeping
