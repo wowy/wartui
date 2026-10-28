@@ -31,6 +31,7 @@ use esp_radio::ble::Config;
 use esp_radio::ble::controller::BleConnector;
 use esp_rtos::CurrentThreadHandle;
 use esp_sync::NonReentrantMutex;
+use wartui_proto::dedup::DEDUP_RSSI_GAIN_BLE_DB;
 use wartui_proto::hci::{
     AdvReport, PACKET_MAX, RESET, SCAN_UNIT_US, SET_EVENT_MASK, adv_reports, set_scan_enable,
     set_scan_parameters,
@@ -184,7 +185,14 @@ impl<'d> Scanner<'d> {
                     for report in adv_reports(&self.packet[..read]) {
                         PENDING.with(|pending| {
                             pending.record(report, |r| {
-                                sniff::SEEN.with(|seen| seen.is_due(&r.address, Some(r.rssi), now))
+                                sniff::SEEN.with(|seen| {
+                                    seen.is_due(
+                                        &r.address,
+                                        Some(r.rssi),
+                                        DEDUP_RSSI_GAIN_BLE_DB,
+                                        now,
+                                    )
+                                })
                             });
                         });
                     }

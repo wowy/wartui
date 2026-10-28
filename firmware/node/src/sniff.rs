@@ -16,8 +16,9 @@
 //! check it takes a [`PENDING`] slot, and a dense channel fills that buffer with
 //! addresses `report` would go on to discard anyway — starving the access points not
 //! yet seen this dwell. `SEEN` is asked only for a BSSID not already pending, which
-//! spares the lookup on every repeat beacon and changes nothing: a pending BSSID is
-//! ignored whatever `SEEN` would say. It is asked from inside [`DWELL`]'s lock,
+//! spares the lookup on every repeat beacon and changes nothing: a repeat only raises the
+//! pending sighting's RSSI, so a BSSID due when it was taken stays due. It is asked from
+//! inside [`DWELL`]'s lock,
 //! which is the one place the two nest, and `ble::Scanner::sweep` nests it the same way
 //! inside `ble::PENDING`; every other caller takes `SEEN` on its own, per sighting, and
 //! never across a transmit.
@@ -43,6 +44,7 @@ use wartui_proto::beacon::{Sighting, is_report, parse_mgmt};
 use wartui_proto::dedup::C5DedupRing as ChipDedupRing;
 #[cfg(feature = "esp32c6")]
 use wartui_proto::dedup::C6DedupRing as ChipDedupRing;
+use wartui_proto::dedup::DEDUP_RSSI_GAIN_WIFI_DB;
 use wartui_proto::pending::WifiPending;
 
 /// The dedup ring: addresses already reported and not yet due again.
@@ -146,7 +148,7 @@ pub fn on_frame(pkt: PromiscuousPkt<'_>) {
         // already pending; see the module doc for why that order is safe.
         dwell.sightings.record(sighting, |s| {
             let now = now_ms();
-            SEEN.with(|seen| seen.is_due(&s.bssid, Some(rssi), now))
+            SEEN.with(|seen| seen.is_due(&s.bssid, Some(rssi), DEDUP_RSSI_GAIN_WIFI_DB, now))
         });
     });
 }

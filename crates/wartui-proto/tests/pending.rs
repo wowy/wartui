@@ -106,7 +106,8 @@ mod wifi_pending {
         sighting(bssid(n), &[b'a', n], rssi)
     }
 
-    /// The first sighting of a BSSID is kept whole.
+    /// A repeat raises the held RSSI to the strongest; every other field stays from the
+    /// first sighting.
     impl Model for Sighting {
         fn address(&self) -> [u8; 6] {
             self.bssid
@@ -116,19 +117,34 @@ mod wifi_pending {
             true
         }
 
-        fn merge(&mut self, _repeat: &Self) {}
+        fn merge(&mut self, repeat: &Self) {
+            self.rssi = self.rssi.max(repeat.rssi);
+        }
     }
 
     #[test]
-    fn wifi_pending_keeps_first_sighting_when_bssid_repeats() {
+    fn wifi_pending_keeps_strongest_rssi_when_bssid_repeats() {
         let mut pending = WifiPending::<4, 8>::new();
         pending.record(sighting(bssid(1), b"first", -80), due);
         pending.record(sighting(bssid(1), b"second", -40), due);
+        pending.record(sighting(bssid(1), b"third", -90), due);
 
         let held = drain(|| pending.take());
         assert_eq!(held.len(), 1);
         assert_eq!(held[0].ssid(), b"first");
-        assert_eq!(held[0].rssi, -80);
+        assert_eq!(held[0].rssi, -40, "a weaker repeat does not lower it");
+    }
+
+    #[test]
+    fn wifi_pending_keeps_first_ssid_when_louder_repeat_is_hidden() {
+        // A probe response names the network; its beacons may not.
+        let mut pending = WifiPending::<4, 8>::new();
+        pending.record(sighting(bssid(1), b"named", -80), due);
+        pending.record(sighting(bssid(1), b"", -40), due);
+
+        let held = drain(|| pending.take());
+        assert_eq!(held[0].ssid(), b"named");
+        assert_eq!(held[0].rssi, -40);
     }
 
     #[test]
@@ -218,7 +234,8 @@ mod wifi_pending {
         for &n in colliding.iter().rev() {
             pending.record(ap(n, -40), |_| panic!("{n} is held"));
         }
-        let expected: Vec<Sighting> = colliding.iter().map(|&n| ap(n, -80)).collect();
+        // Each repeat merges into its own entry and nobody else's.
+        let expected: Vec<Sighting> = colliding.iter().map(|&n| ap(n, -40)).collect();
         assert_eq!(drain(|| pending.take()), expected);
     }
 

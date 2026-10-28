@@ -12,11 +12,14 @@
 //!   sessions, because the ring outlives them (`docs/phase-4-findings.md`). A stationary
 //!   node's quiet table then reads as a fault, and a second capture from the same spot is
 //!   empty.
-//! - **It is at least [`DEDUP_RSSI_GAIN_DB`] stronger than anything reported for it.**
-//!   The export writes the strongest sighting's position, so a node driving towards an
-//!   access point it first heard at the edge of range has a better fix to offer. The
-//!   margin is wider than ordinary jitter between beacons, and the baseline only rises.
-//!   An access point is re-reported for getting closer, never for wobbling.
+//! - **It is at least [`DEDUP_RSSI_GAIN_WIFI_DB`] stronger than anything reported for it,
+//!   or [`DEDUP_RSSI_GAIN_BLE_DB`] for a Bluetooth device.** The export writes the
+//!   strongest sighting's position, so a node driving towards an access point it first
+//!   heard at the edge of range has a better fix to offer. The baseline only rises, so an
+//!   address is re-reported for getting closer. The Wi-Fi margin matches the Biscuit
+//!   Manager default of 5 dB; Bluetooth keeps 10 dB. A node runs one job at a time and the
+//!   ring is cleared when it changes, so the caller passes the margin rather than each
+//!   entry storing it.
 //!
 //! [`MacRing::clear`] empties the ring outright, for two further reasons:
 //!
@@ -70,9 +73,14 @@ pub const DEDUP_INDEX_C6: usize = 2 * DEDUP_RING_C6;
 /// minute, and a fresh host session hears it without a reboot.
 pub const DEDUP_REFRESH_MS: u32 = 5 * 60 * 1000;
 
-/// How much stronger a sighting must be than any reported for its address to be
+/// How much stronger a Wi-Fi sighting must be than any reported for its address to be
+/// reported again before the refresh. [`crate::dedup`] says why it differs from
+/// [`DEDUP_RSSI_GAIN_BLE_DB`].
+pub const DEDUP_RSSI_GAIN_WIFI_DB: i8 = 5;
+
+/// How much stronger a Bluetooth sighting must be than any reported for its address to be
 /// reported again before the refresh.
-pub const DEDUP_RSSI_GAIN_DB: i8 = 10;
+pub const DEDUP_RSSI_GAIN_BLE_DB: i8 = 10;
 
 #[derive(Debug, Clone, Copy)]
 struct Entry {
@@ -130,14 +138,13 @@ impl<const N: usize, const S: usize> MacRing<N, S> {
     /// Whether a sighting of `mac` at `rssi` is worth transmitting at `now_ms`.
     ///
     /// Pass `None` for a reading with no signal strength (a BLE report's `127`), which
-    /// can never count as stronger.
+    /// can never count as stronger. `gain_db` is how much stronger than the best reported
+    /// a sighting must be to count: [`DEDUP_RSSI_GAIN_WIFI_DB`] or [`DEDUP_RSSI_GAIN_BLE_DB`].
     #[must_use]
-    pub fn is_due(&self, mac: &[u8; 6], rssi: Option<i8>, now_ms: u32) -> bool {
+    pub fn is_due(&self, mac: &[u8; 6], rssi: Option<i8>, gain_db: i8, now_ms: u32) -> bool {
         let Some(entry) = self.find(mac).map(|i| &self.entries[i]) else { return true };
         now_ms.wrapping_sub(entry.at_ms) >= DEDUP_REFRESH_MS
-            || rssi.is_some_and(|r| {
-                i16::from(r) >= i16::from(entry.best_rssi) + i16::from(DEDUP_RSSI_GAIN_DB)
-            })
+            || rssi.is_some_and(|r| i16::from(r) >= i16::from(entry.best_rssi) + i16::from(gain_db))
     }
 
     /// Record that `mac` was reported at `now_ms`.
@@ -171,9 +178,9 @@ impl<const N: usize, const S: usize> MacRing<N, S> {
     }
 
     /// [`Self::is_due`] and [`Self::record`] together, for a caller whose transmission
-    /// cannot fail.
-    pub fn offer(&mut self, mac: [u8; 6], rssi: Option<i8>, now_ms: u32) -> bool {
-        let due = self.is_due(&mac, rssi, now_ms);
+    /// cannot fail. `gain_db` is as for [`Self::is_due`].
+    pub fn offer(&mut self, mac: [u8; 6], rssi: Option<i8>, gain_db: i8, now_ms: u32) -> bool {
+        let due = self.is_due(&mac, rssi, gain_db, now_ms);
         if due {
             self.record(mac, rssi, now_ms);
         }
