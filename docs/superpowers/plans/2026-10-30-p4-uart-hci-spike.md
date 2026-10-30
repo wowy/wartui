@@ -92,9 +92,8 @@ to it. Drives in denser areas may still revise it.
 
 **Boards:**
 
-- **The Waveshare ESP32-P4-WIFI6 is the primary board.** It carries 32 MB of PSRAM.
-- **The ESP32-P4-WIFI6-POE-ETH** is checked once the WIFI6 passes. The design doc records the
-  P4 ↔ C6 wiring as the same on both.
+- **The Waveshare ESP32-P4-WIFI6 is the only board for this spike.** It carries 32 MB of PSRAM.
+  The ESP32-P4-WIFI6-POE-ETH is not tested, because it does not fit the wired node bus plans.
 - The C6 is flashed through its header as today (`firmware/p4-radio/README.md` § "First flash").
 
 **UART on the SDIO traces:**
