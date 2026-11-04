@@ -126,7 +126,7 @@ inquiry produces, and the nodes never transmit while scanning.
 `analyze` prints what `export` would report for a capture, then how fast sightings arrived, then
 what it lost on the way in. It takes `--db`, `--recapture` and `--config` as `export` does. Reports
 go to standard output and quality warnings to standard error; no output file is written. The tail
-of its output, which follows the export summary's `span` line:
+of its output, after the export summary:
 
 ```
   peak       1,842 sightings/s  41,210/min
@@ -168,8 +168,8 @@ They are half-open: a sighting and one exactly a second earlier share no one-sec
 steady 1 Hz source reads `1/s`. Every stored sighting counts, including those an export leaves out,
 since the figure is what came over the link. Time is the host's arrival time, so a backlog the
 bridge replays after a reconnect counts as the burst it was on the link. Where the wall clock steps
-back, every window restarts and the `peak` line ends `wall clock reversed N times`; a peak around
-the step is a lower bound.
+back, every window restarts and the `peak` line says how many times `wall clock reversed`; a peak
+around the step is a lower bound.
 
 Counts follow the assumptions below; `lost on USB` is approximate. The capture's first bridge
 reply and first heartbeat per node are baselines, so what was dropped before the capture began

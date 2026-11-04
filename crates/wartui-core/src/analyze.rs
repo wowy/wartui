@@ -332,9 +332,8 @@ pub fn losses(conn: &Connection) -> rusqlite::Result<LossSummary> {
     Ok(LossSummary { bridge, nodes: nodes.into_values().collect(), host: host(conn)? })
 }
 
-/// The most sightings that came over the link in any one second and any one minute.
-/// Every `observation` row counts, before any export filter, since the figure is what the
-/// host had to carry. Windows slide on arrival time and are half-open, `(t - span, t]`.
+/// The most sightings that came over the link in any one second and any one minute, from every
+/// `observation` row. The module doc says how the windows are counted.
 pub fn peaks(conn: &Connection) -> rusqlite::Result<PeakSummary> {
     let mut stmt = conn.prepare("SELECT rx_at, node_mac, kind FROM observation ORDER BY id")?;
     let mut rows = stmt.query([])?;
@@ -386,10 +385,9 @@ impl Rate {
         self.minute.push(at_ms);
     }
 
-    /// Empties both windows, keeping their peaks.
     fn clear(&mut self) {
-        self.second.buf.clear();
-        self.minute.buf.clear();
+        self.second.clear();
+        self.minute.clear();
     }
 
     fn peak(&self) -> Peak {
@@ -416,6 +414,11 @@ impl Sliding {
         }
         self.buf.push_back(at_ms);
         self.peak = self.peak.max(self.buf.len() as u64);
+    }
+
+    /// Empties the window, keeping its peak.
+    fn clear(&mut self) {
+        self.buf.clear();
     }
 }
 
