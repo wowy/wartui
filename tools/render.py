@@ -39,6 +39,13 @@ read a second later reads as pending when it is merely early.
 The capture goes to a temporary database that is deleted on the way out, since `run`
 otherwise leaves a `wartui-<date>.db` wherever it was started. `--db` keeps it instead,
 which is worth having on hardware: what the fleet heard is not reproducible.
+
+The settings go to a temporary `wartui.toml` that starts empty and is deleted the same way,
+since `run` saves `b`, the settings modal and a `--bridge` that answers to whichever config
+it was given, and the operator's own is not a render's to change. Nor is it read, so a render
+depends on nothing about the machine. `--config` passed through `-- ARGS` is used instead.
+A bare `--bridge` therefore has no remembered bridge and finds the board by sweeping, so
+naming the bridge is the way to avoid opening other boards.
 """
 
 import argparse
@@ -232,20 +239,27 @@ def main(args):
         args.settle = BRIDGE_SETTLE if bridge else SIM_SETTLE
 
     binary = args.bin or build()
-    if args.db:
-        return render(args, binary, args.db, lat, lon)
-    # The capture is a temporary file from here on, so every way out of this
-    # function goes through the removal rather than just the expected one.
+    # The config is a temporary file from here on, and so is the capture unless `--db`
+    # keeps it, so every way out of this function goes through the removal rather than
+    # just the expected one.
     scratch = tempfile.mkdtemp(prefix="wartui-render-")
     try:
-        return render(args, binary, os.path.join(scratch, "render.db"), lat, lon)
+        db = args.db or os.path.join(scratch, "render.db")
+        # Created here because `run` refuses a `--config` file that does not exist. Empty
+        # is a valid config: every setting at its default.
+        config = os.path.join(scratch, "wartui.toml")
+        open(config, "x").close()
+        return render(args, binary, db, config, lat, lon)
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
 
 
-def command_for(args, binary, db, lat, lon):
+def command_for(args, binary, db, config, lat, lon):
     """The `wartui run` this render is of: the simulator, or the boards attached."""
     command = [binary, "run", "--db", db]
+    # A `--config` passed through means the caller has chosen, and clap refuses a second.
+    if not any(arg == "--config" or arg.startswith("--config=") for arg in args.rest):
+        command += ["--config", config]
     if args.bridge is None:
         command += ["--sim", str(DEFAULT_SIM_NODES if args.sim is None else args.sim)]
     else:
@@ -267,8 +281,8 @@ def command_for(args, binary, db, lat, lon):
     return command + args.rest
 
 
-def render(args, binary, db, lat, lon):
-    command = command_for(args, binary, db, lat, lon)
+def render(args, binary, db, config, lat, lon):
+    command = command_for(args, binary, db, config, lat, lon)
 
     screen = pyte.Screen(args.cols, args.rows)
     stream = pyte.Stream(screen)

@@ -227,7 +227,9 @@ python3 tools/render.py --bridge --keys b       # the attached fleet instead of 
 
 The output is text, so it diffs, greps, and is readable by a coding agent without an image.
 `--keys` presses keys before the screen is read. The capture goes to a temporary database, deleted
-on exit, unless `--db` names one to keep.
+on exit, unless `--db` names one to keep. Settings go to an empty temporary `wartui.toml` the same
+way, so a render never touches your own, and a bare `--bridge` sweeps for the board because it has
+none remembered; name the bridge to avoid opening other boards.
 
 `--bridge` renders the attached boards instead of the simulator, optionally naming which one is
 the bridge. Real nodes take an assignment in the window after a heartbeat and confirm it on the next, so
