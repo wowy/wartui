@@ -193,7 +193,7 @@ fn features(list: &str) -> Vec<&str> {
     list.split([',', ' ']).map(str::trim).filter(|f| !f.is_empty()).collect()
 }
 
-/// The one chip the features name, as each firmware's `src/main.rs` demands, if the firmware
+/// The one chip the features name, as each firmware's build demands, if the firmware
 /// runs on it.
 fn chip_of(firmware: &Firmware, features: &[&str]) -> Result<Chip> {
     let named: Vec<Chip> =

@@ -77,9 +77,6 @@ esp_bootloader_esp_idf::esp_app_desc!(
 
 extern crate alloc;
 
-#[cfg(not(feature = "esp32c5"))]
-compile_error!("--no-default-features drops the chip: add it back with --features esp32c5");
-
 /// Say something on the USB endpoint, if this build has anywhere to say it.
 ///
 /// The bridge is forbidden from printing — its link protocol runs over the same
