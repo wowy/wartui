@@ -82,6 +82,8 @@ struct Firmware {
     /// The feature sets a release publishes an image for, and the asset each is published as.
     /// Each is built with the firmware's default features. Must match `release.yml`.
     variants: &'static [(&'static [&'static str], &'static str)],
+    /// The chips it runs on.
+    chips: &'static [Chip],
     /// What the firmware runs on, for messages.
     what: &'static str,
     /// The partition table its images are made with, relative to `dir`, or `None` for
@@ -95,26 +97,16 @@ struct Firmware {
 const NODE: Firmware = Firmware {
     dir: concat!(env!("CARGO_MANIFEST_DIR"), "/../../firmware/node"),
     elf: "target/riscv32imac-unknown-none-elf/release/wartui-node-fw",
-    variants: &[
-        (&["esp32c5"], "wartui-node-fw-esp32c5.bin"),
-        (&["esp32c6"], "wartui-node-fw-esp32c6.bin"),
-        (&["esp32c6", "xiao-external-antenna"], "wartui-node-fw-esp32c6-xiao.bin"),
-    ],
+    variants: &[(&["esp32c5"], "wartui-node-fw-esp32c5.bin")],
+    chips: &[Chip::Esp32c5],
     what: "node",
     partition_table: Some("partitions.csv"),
     merged: true,
 };
 
 /// The node firmware's app-only images, which an over-the-air update carries.
-const NODE_APP: Firmware = Firmware {
-    variants: &[
-        (&["esp32c5"], "wartui-node-app-esp32c5.bin"),
-        (&["esp32c6"], "wartui-node-app-esp32c6.bin"),
-        (&["esp32c6", "xiao-external-antenna"], "wartui-node-app-esp32c6-xiao.bin"),
-    ],
-    merged: false,
-    ..NODE
-};
+const NODE_APP: Firmware =
+    Firmware { variants: &[(&["esp32c5"], "wartui-node-app-esp32c5.bin")], merged: false, ..NODE };
 
 /// The P4 bridge's app-only image, which `flash-bridge` sends it over USB. Its merged image is
 /// for the first flash by hand over the CH343 (`firmware/p4-bridge/README.md`), so nothing here
@@ -123,6 +115,7 @@ const P4_BRIDGE_APP: Firmware = Firmware {
     dir: concat!(env!("CARGO_MANIFEST_DIR"), "/../../firmware/p4-bridge"),
     elf: "target/riscv32imafc-unknown-none-elf/release/wartui-p4-bridge-fw",
     variants: &[(&[], "wartui-p4-bridge-app-esp32p4.bin")],
+    chips: &[Chip::Esp32p4],
     what: "P4 bridge",
     partition_table: Some("partitions.csv"),
     merged: false,
@@ -142,6 +135,7 @@ const BRIDGE: Firmware = Firmware {
         (&["esp32c6"], "wartui-bridge-fw-esp32c6.bin"),
         (&["esp32c6", "xiao-external-antenna"], "wartui-bridge-fw-esp32c6-xiao.bin"),
     ],
+    chips: &[Chip::Esp32c5, Chip::Esp32c6],
     what: "bridge",
     partition_table: None,
     merged: true,
@@ -199,13 +193,16 @@ fn features(list: &str) -> Vec<&str> {
     list.split([',', ' ']).map(str::trim).filter(|f| !f.is_empty()).collect()
 }
 
-/// The one chip the features name, as each firmware's `src/main.rs` demands.
+/// The one chip the features name, as each firmware's `src/main.rs` demands, if the firmware
+/// runs on it.
 fn chip_of(firmware: &Firmware, features: &[&str]) -> Result<Chip> {
     let named: Vec<Chip> =
         Chip::FEATURED.into_iter().filter(|chip| features.contains(&chip.name())).collect();
+    let runs_on = || firmware.chips.iter().map(|chip| chip.name()).collect::<Vec<_>>().join(" or ");
     match named.as_slice() {
-        [chip] => Ok(*chip),
-        [] => bail!("--features names no chip; add esp32c5 or esp32c6"),
+        [chip] if firmware.chips.contains(chip) => Ok(*chip),
+        [chip] => bail!("a {} runs on {}, not {}", firmware.what, runs_on(), chip.name()),
+        [] => bail!("--features names no chip; add {}", runs_on()),
         _ => {
             bail!("--features names both esp32c5 and esp32c6; a {} is built for one", firmware.what)
         }
@@ -824,17 +821,31 @@ mod tests {
 
     #[test]
     fn flash_refuses_features_when_no_chip_or_both_chips_are_named() {
-        assert!(chip_of(&NODE, &features("xiao-external-antenna")).is_err());
+        assert!(chip_of(&NODE, &features("log")).is_err());
         assert!(chip_of(&NODE, &features("")).is_err());
         let error = chip_of(&BRIDGE, &features("esp32c5,esp32c6")).unwrap_err().to_string();
         assert!(error.contains("a bridge is built for one"), "{error}");
     }
 
     #[test]
+    fn flash_refuses_single_chip_bridge_when_features_are_omitted() {
+        // A bridge can be either chip, so it has no default to fall back on.
+        let error = chip_of(&BRIDGE, &features("")).unwrap_err().to_string();
+        assert!(error.contains("add esp32c5 or esp32c6"), "{error}");
+    }
+
+    #[test]
+    fn chip_of_refuses_chip_when_firmware_does_not_run_on_it() {
+        let error = chip_of(&NODE, &features("esp32c6")).unwrap_err().to_string();
+        assert_eq!(error, "a node runs on esp32c5, not esp32c6");
+        assert_eq!(chip_of(&BRIDGE, &features("esp32c6")).unwrap(), Chip::Esp32c6);
+    }
+
+    #[test]
     fn flash_resolves_chip_when_features_carry_extras() {
-        let chip = chip_of(&NODE, &features("esp32c5,xiao-external-antenna")).unwrap();
-        assert_eq!(chip, Chip::Esp32c5);
-        assert_eq!(chip_of(&NODE, &features(" esp32c6 , log")).unwrap(), Chip::Esp32c6);
+        assert_eq!(chip_of(&NODE, &features(" esp32c5 , log")).unwrap(), Chip::Esp32c5);
+        let chip = chip_of(&BRIDGE, &features("esp32c6,xiao-external-antenna")).unwrap();
+        assert_eq!(chip, Chip::Esp32c6);
     }
 
     #[test]
@@ -921,15 +932,15 @@ mod tests {
         let row = table.lines().find(|line| line.starts_with("otadata")).unwrap();
         let cells: Vec<&str> = row.split(',').map(str::trim).collect();
         assert_eq!((cells[3], cells[4]), OTADATA);
-        let args = erase_otadata_args("/dev/ttyACM1", Chip::Esp32c6);
-        assert_eq!(&args[..5], ["erase-region", "--port", "/dev/ttyACM1", "--chip", "esp32c6"]);
+        let args = erase_otadata_args("/dev/ttyACM1", Chip::Esp32c5);
+        assert_eq!(&args[..5], ["erase-region", "--port", "/dev/ttyACM1", "--chip", "esp32c5"]);
         assert_eq!(&args[args.len() - 2..], ["0xd000", "0x2000"]);
     }
 
     #[test]
     fn flash_resets_board_when_reboot_is_not_seen() {
-        let args = reset_args("/dev/ttyACM1", Chip::Esp32c6);
-        assert_eq!(&args[..5], ["reset", "--port", "/dev/ttyACM1", "--chip", "esp32c6"]);
+        let args = reset_args("/dev/ttyACM1", Chip::Esp32c5);
+        assert_eq!(&args[..5], ["reset", "--port", "/dev/ttyACM1", "--chip", "esp32c5"]);
         assert!(args.contains(&"--non-interactive"));
     }
 

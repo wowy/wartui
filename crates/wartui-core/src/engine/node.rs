@@ -153,11 +153,11 @@ pub struct Assignment {
     pub counter: u64,
 }
 
-/// The C5's and C6's minimum recommended supply, in millivolts. Their brown-out detector resets
-/// the chip at 2.7 V by default, and nothing here changes that, so a rail below this is close.
+/// The C5's minimum recommended supply, in millivolts. Its brown-out detector resets the chip at
+/// 2.7 V by default, and nothing here changes that, so a rail below this is close.
 const LOW_VDD_MV: u16 = 3000;
-/// A warning short of 85 °C, the XIAO C6's rated ambient limit. The die runs above ambient,
-/// so on the die this warns well before the board's limit.
+/// A warning on the die, which runs above ambient, so it comes well before the board around it
+/// reaches this temperature.
 const HOT_DIE_C: i16 = 70;
 
 impl NodeState {

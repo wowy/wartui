@@ -18,19 +18,18 @@ pub const CAP_FLAG_5G: u8 = 1 << 0;
 /// [`Capabilities`] flags bit 1: the node is running an image on trial, not yet confirmed.
 pub const CAP_FLAG_TRIAL: u8 = 1 << 1;
 
-/// The board a node firmware was built for, from its cargo features.
+/// The board a firmware image was built for.
 ///
-/// Each byte is fixed once assigned, since the heartbeat prefix that carries it is frozen.
-/// 0 is never sent. A byte this build has no name for decodes to [`Board::Unknown`]: a node
-/// on a board added later is still a node.
+/// Each byte is fixed once assigned, since the heartbeat prefix that carries it is frozen. 0 is
+/// never sent, and 3 stays unassigned. A byte this build has no name for decodes to
+/// [`Board::Unknown`]: a node on a board added later is still a node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Board {
     /// An ESP32-C5 board: byte 1.
     Esp32c5,
-    /// An ESP32-C6 board on its PCB antenna: byte 2.
+    /// The ESP32-C6 that runs a P4 bridge's radio: byte 2. No node runs on one; its update
+    /// receiver names it.
     Esp32c6,
-    /// A Seeed XIAO ESP32-C6 switched to its external antenna: byte 3.
-    Esp32c6Xiao,
     /// An ESP32-P4 bridge: byte 4. No node runs on one; its update receiver names it. The P4
     /// fills a link update's `Begin` with its receiver's board, so the receiver's board check
     /// passes every image: `wartui flash-bridge` checks the image is the P4's before sending it.
@@ -46,7 +45,6 @@ impl Board {
         match self {
             Self::Esp32c5 => 1,
             Self::Esp32c6 => 2,
-            Self::Esp32c6Xiao => 3,
             Self::Esp32p4 => 4,
             Self::Unknown(byte) => byte,
         }
@@ -58,7 +56,6 @@ impl Board {
         match byte {
             1 => Self::Esp32c5,
             2 => Self::Esp32c6,
-            3 => Self::Esp32c6Xiao,
             4 => Self::Esp32p4,
             other => Self::Unknown(other),
         }
@@ -67,11 +64,10 @@ impl Board {
 
 /// What a node says it is, in every heartbeat it sends: the frozen prefix.
 ///
-/// `five_ghz` is a refusal, not a request. A node without it is never dealt a 5 GHz
-/// index, because a share it cannot tune is a share nobody scans. It travels as its own
-/// flag rather than being read off `board`, so a board this build does not name still
-/// says what its radio reaches. Bluetooth is not a capability: every node can scan it,
-/// and [`ADMIN_FLAG_BLE`] is the operator's decision.
+/// `five_ghz` is shown to the operator, and the planner does not read it: every node that speaks
+/// this build's version is a C5. It travels as its own flag rather than being read off `board`, so
+/// a board this build does not name still says what its radio reaches. Bluetooth is not a
+/// capability: every node can scan it, and [`ADMIN_FLAG_BLE`] is the operator's decision.
 ///
 /// The prefix is the first [`HEARTBEAT_PREFIX_LEN`] bytes of the body and never changes
 /// before 1.0 ([`Capabilities::decode_prefix`]).

@@ -44,8 +44,8 @@ const HEARTBEAT: &[u8] = &[
 const HEARTBEAT_NO_EPOCH: &[u8] = &[
     0x57, 0x54, 0x55, 0x49, 0x01, 0x01, // header
     0x00, 0x01, 0x00, // version 0.1.0
-    0x03, // board: XIAO ESP32-C6, external antenna
-    0x02, // flags: trial, 2.4 GHz only
+    0x01, // board: ESP32-C5
+    0x02, // flags: trial, 5 GHz clear
     0x78, 0x56, 0x34, 0x12, // counter 0x1234_5678, little-endian
     0x00, // epoch: none held
     0x00, 0x00, // wifi_refused 0
@@ -305,7 +305,7 @@ fn heartbeat_msg_serializes_epoch_zero_when_node_holds_no_assignment() {
         epoch: 0,
         capabilities: Capabilities {
             version: Version::new(0, 1, 0),
-            board: Board::Esp32c6Xiao,
+            board: Board::Esp32c5,
             five_ghz: false,
             trial: true,
         },

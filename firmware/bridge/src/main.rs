@@ -524,9 +524,17 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
 
-    // A XIAO ESP32-C6's RF switch, powered, given 100 ms, then set to the U.FL
-    // connector before the radio starts and held for the life of `main`.
-    // `firmware/node/src/main.rs` has why.
+    // A XIAO ESP32-C6 routes the chip's one RF pin through a switch between an
+    // onboard ceramic antenna and a U.FL connector, and nothing in the radio stack
+    // knows it is there. Left undriven the switch stays on the ceramic antenna, so
+    // an antenna on the connector is decoration and the board reads as one with a
+    // weak radio rather than a wrong setting. GPIO3 low powers the switch; GPIO14
+    // high selects the connector, 100 ms later, as Seeed's own firmware does — the
+    // bench worked without the wait, but a switch still powering up when it is told
+    // which way to point is not a failure this board could report. Set before the
+    // radio starts, so its first frame leaves by the antenna the build asked for,
+    // and bound for the life of `main`, which never returns, so the pins are never
+    // handed back.
     #[cfg(feature = "xiao-external-antenna")]
     let _antenna = {
         let power = Output::new(peripherals.GPIO3, Level::Low, OutputConfig::default());

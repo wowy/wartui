@@ -1,6 +1,6 @@
 # wartui
 
-A terminal-based fleet controller for ESP32-C5 and ESP32-C6 wardriving nodes.
+A terminal-based fleet controller for ESP32-C5 wardriving nodes.
 
 Wartui runs on Linux and macOS, with the goal being good performance on something as low-powered as
 a Raspberry Pi 5 using a microSD card (like the [HackberryPi5](https://github.com/ZitaoTech/HackberryPi5)).
@@ -49,7 +49,6 @@ cargo run -p wartui -- --sim 3 --lat 37.7749 --lon -122.4194
 
 The simulated nodes behave like the firmware: they idle until assigned, ignore a repeated
 assignment, dedup what they see, and heartbeat every 5 seconds once assigned.
-`--sim-c6 N` makes the last N nodes C6s, for testing a mixed fleet without the hardware.
 
 ### On real hardware
 
@@ -102,10 +101,9 @@ The nodes talk [ESP-NOW](https://www.espressif.com/en/solutions/low-power-soluti
 most laptops can't. wartui uses a USB-attached ESP32 as a radio bridge. It tracks the nodes, assigns
 their channels, and stores everything they see.
 
-The nodes run `firmware/node` and the bridge runs `firmware/bridge`, both in this repository. Either
-can be a C5 or a C6, but only the C5 supports 5 GHz. The bridge stays on 2.4 GHz channel 6 for
-control messages, so it never needs 5 GHz. C6 support exists because I had both on hand, and the
-firmware toolchain is the same.
+The nodes run `firmware/node` and the bridge runs `firmware/bridge`, both in this repository. A node
+is a C5, for its 5 GHz radio. A bridge can be a C5 or a C6: it stays on 2.4 GHz channel 6 for
+control messages, so it never needs 5 GHz.
 
 Each firmware is its own Cargo workspace, with its own target, toolchain pin, and lockfile. Both
 depend on `crates/wartui-proto`, which keeps the two ends of the wire consistent. The library crates
@@ -175,7 +173,6 @@ Wi-Fi, and its `channels` column reads `bluetooth`.
 - **Maximum twenty nodes** (`plan::MAX_NODES`), the ESP-NOW peer limit.
 - **The Bluetooth node sniffs no Wi-Fi.** A one-node fleet scanning Bluetooth captures no Wi-Fi,
   and the footer says so.
-- **An ESP32-C6 is never assigned a 5 GHz channel.** Its radio is 2.4 GHz only.
 - **Channel 14 is never scanned**, because `esp-radio` can't tune it. It's Japan-only 802.11b, so
   this should rarely matter.
 - **ESP-NOW is plaintext** in both directions, with no pairing and no key.
@@ -197,7 +194,7 @@ cargo test -p wartui-core --test engine                     # one test binary
 cargo test -p wartui-core --test engine engine_ignores_     # tests by name prefix
 
 cd firmware/bridge && cargo clippy --release --features esp32c6   # and esp32c5
-cd firmware/node   && cargo clippy --release --features esp32c6   # and esp32c5
+cd firmware/node   && cargo clippy --release
 ```
 
 `wartui-proto` is `no_std` so both firmwares can use it. That's also why the node's beacon parser,

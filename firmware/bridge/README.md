@@ -72,7 +72,11 @@ Three board features layer over a chip feature:
 | `t-dongle-c5`           | LilyGO T-Dongle-C5 (`esp32c5,t-dongle-c5`)                  | Lights the ST7735 panel, makes the bridge announce it, and turns off the RGB LED        |
 | `t-dongle-c5-gps`       | LilyGO T-Dongle-C5 with a u-blox M10 on its Qwiic connector | Forwards the receiver's bytes, makes the bridge announce GPS, and turns off the RGB LED |
 
-[`../node/README.md`](../node/README.md) § "Building and flashing" has the rest on the XIAO antenna.
+The XIAO switches its one RF pin between its U.FL connector and an onboard ceramic antenna. Without
+`xiao-external-antenna` it stays on the ceramic one, so a plugged-in antenna does nothing and the
+bridge reads as weak. Build with it only when an antenna is fitted, since a radio pointed at an
+empty connector is close to deaf. A C5 build rejects it: the XIAO ESP32-C5 has a U.FL connector and
+no onboard antenna, so there is nothing to switch.
 
 Every board feature is inert without a chip feature. `xiao-external-antenna` excludes both
 T-Dongle-C5 features: it drives GPIO3 and GPIO14, which on a T-Dongle-C5 are `LCD_DC` and `USB_DP`.

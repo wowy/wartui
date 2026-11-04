@@ -37,7 +37,7 @@ esp32c6 = [
 
 # A Seeed XIAO ESP32-C6 with an antenna on its U.FL connector. The board's RF
 # switch otherwise stays on the onboard ceramic antenna and ignores anything
-# plugged in. C6 only; `firmware/node/src/main.rs` has why.
+# plugged in. C6 only; `src/main.rs` has why.
 xiao-external-antenna = []
 
 # A LilyGO T-Dongle-C5: the same C5 in a USB-A shell, with an ST7735 panel on

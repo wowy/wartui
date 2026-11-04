@@ -224,7 +224,7 @@ def main(args):
     lon = DEFAULT_LON if args.lon is None else args.lon
 
     bridge = args.bridge is not None
-    if bridge and (args.sim is not None or args.sim_c6):
+    if bridge and args.sim is not None:
         sys.exit("--bridge renders the fleet on the desk, and --sim a fake one; pick one")
     if args.after is None:
         args.after = BRIDGE_AFTER if bridge else SIM_AFTER
@@ -248,8 +248,6 @@ def command_for(args, binary, db, lat, lon):
     command = [binary, "run", "--db", db]
     if args.bridge is None:
         command += ["--sim", str(DEFAULT_SIM_NODES if args.sim is None else args.sim)]
-        if args.sim_c6:
-            command += ["--sim-c6", str(args.sim_c6)]
     else:
         if args.bridge is not DETECT:
             command += ["--bridge", args.bridge]
@@ -308,7 +306,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Render the running view as text.")
     parser.add_argument("--sim", type=int, metavar="NODES",
                         help=f"fake nodes to run; {DEFAULT_SIM_NODES} unless --bridge")
-    parser.add_argument("--sim-c6", type=int, default=0, metavar="NODES", help="of which C6s")
     parser.add_argument("--bridge", nargs="?", const=DETECT, metavar="PATH|MAC",
                         help="render the attached fleet instead, optionally naming the bridge")
     parser.add_argument("--cols", type=int, default=120, help="terminal width to lay out at")

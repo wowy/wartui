@@ -1,4 +1,4 @@
-# Both node chips are RISC-V, so stable is enough.
+# The node's chip is RISC-V, so stable is enough.
 [toolchain]
 channel = "stable"
 components = ["rust-src"]

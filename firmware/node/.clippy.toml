@@ -1,5 +1,4 @@
-# Each pending buffer is a few KB and lives in a `static`, so nothing moves it
-# by value. The Wi-Fi buffer, and the Bluetooth one on a C6, cross this
-# threshold, so a stack frame that copied either is flagged. The threshold
-# stays well under the main task's stack, which the linker sizes at 216KB.
+# Each pending buffer is a few KB and lives in a `static`, so nothing moves it by value. The Wi-Fi
+# buffer crosses this threshold, so a stack frame that copied it is flagged. The threshold stays
+# well under the main task's stack, which the linker sizes at 216KB.
 stack-size-threshold = 4096

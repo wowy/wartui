@@ -32,8 +32,6 @@
 #![deny(clippy::large_stack_frames)]
 
 use esp_hal::clock::CpuClock;
-#[cfg(feature = "xiao-external-antenna")]
-use esp_hal::gpio::{Level, Output, OutputConfig};
 use esp_hal::time::{Duration, Instant};
 use esp_hal::timer::timg::TimerGroup;
 use esp_radio::esp_now::{EspNowManager, EspNowReceiver, EspNowSender};
@@ -61,12 +59,7 @@ mod sniff;
 
 /// The project name in the app descriptor, naming the board as [`BOARD`] does, so an app
 /// image says which board it is for.
-#[cfg(feature = "esp32c5")]
 const PROJECT_NAME: &str = "wartui-node-esp32c5";
-#[cfg(all(feature = "esp32c6", not(feature = "xiao-external-antenna")))]
-const PROJECT_NAME: &str = "wartui-node-esp32c6";
-#[cfg(all(feature = "esp32c6", feature = "xiao-external-antenna"))]
-const PROJECT_NAME: &str = "wartui-node-esp32c6-xiao";
 
 // The app descriptor the esp-idf bootloader expects, carrying the board and the version
 // from `Cargo.toml`.
@@ -84,12 +77,8 @@ esp_bootloader_esp_idf::esp_app_desc!(
 
 extern crate alloc;
 
-#[cfg(not(any(feature = "esp32c5", feature = "esp32c6")))]
-compile_error!("select a chip: --features esp32c5 or --features esp32c6");
-#[cfg(all(feature = "esp32c5", feature = "esp32c6"))]
-compile_error!("select exactly one chip: esp32c5 and esp32c6 are mutually exclusive");
-#[cfg(all(feature = "xiao-external-antenna", not(feature = "esp32c6")))]
-compile_error!("xiao-external-antenna drives a XIAO ESP32-C6's RF switch; build it with esp32c6");
+#[cfg(not(feature = "esp32c5"))]
+compile_error!("--no-default-features drops the chip: add it back with --features esp32c5");
 
 /// Say something on the USB endpoint, if this build has anywhere to say it.
 ///
@@ -301,19 +290,13 @@ impl Node {
     }
 }
 
-/// The board this build is for, from its cargo features.
-#[cfg(feature = "esp32c5")]
+/// The board this build is for.
 const BOARD: Board = Board::Esp32c5;
-#[cfg(all(feature = "esp32c6", not(feature = "xiao-external-antenna")))]
-const BOARD: Board = Board::Esp32c6;
-#[cfg(all(feature = "esp32c6", feature = "xiao-external-antenna"))]
-const BOARD: Board = Board::Esp32c6Xiao;
 
 /// What this node is, as every heartbeat says it: `NODE_VERSION`, the board and its flags.
 ///
-/// `5g` is the chip, and is what keeps the planner from dealing a C6 a share
-/// nobody scans. Bluetooth is not a capability at all: every node can scan it,
-/// and the scan is the core's decision, off at every boot.
+/// Bluetooth is not a capability at all: every node can scan it, and the scan is the
+/// core's decision, off at every boot.
 const CAPABILITIES: Capabilities = Capabilities::here(BOARD);
 
 static NODE: ConstStaticCell<Node> = ConstStaticCell::new(Node::new());
@@ -339,24 +322,6 @@ fn main() -> ! {
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
 
-    // A XIAO ESP32-C6 routes the chip's one RF pin through a switch between an
-    // onboard ceramic antenna and a U.FL connector, and nothing in the radio stack
-    // knows it is there. Left undriven the switch stays on the ceramic antenna, so
-    // an antenna on the connector is decoration and the node reads as one with a
-    // weak radio rather than a wrong setting. GPIO3 low powers the switch; GPIO14
-    // high selects the connector, 100 ms later, as Seeed's own firmware does — the
-    // bench worked without the wait, but a switch still powering up when it is told
-    // which way to point is not a failure this node could report. Set before the
-    // radio starts, so its first frame leaves by the antenna the build asked for,
-    // and bound for the life of `main`, which never returns, so the pins are never
-    // handed back.
-    #[cfg(feature = "xiao-external-antenna")]
-    let _antenna = {
-        let power = Output::new(peripherals.GPIO3, Level::Low, OutputConfig::default());
-        CurrentThreadHandle::get().delay(Duration::from_millis(100));
-        (power, Output::new(peripherals.GPIO14, Level::High, OutputConfig::default()))
-    };
-
     // The controller is configured before `sniffer()` and `esp_now()` hand out their
     // handles, so the first frame either sees or sends is under the band and power set
     // here. The handles do not borrow the controller: each holds a reference that keeps
@@ -372,9 +337,7 @@ fn main() -> ! {
     )
     .expect("Wi-Fi controller");
 
-    // The C6 is 2.4 GHz only and has no `BandMode::Auto` to select. On the C5,
-    // without this, every 5 GHz channel in the pool is refused.
-    #[cfg(feature = "esp32c5")]
+    // Without this, every 5 GHz channel in the pool is refused.
     match controller.set_band_mode(esp_radio::wifi::BandMode::Auto) {
         Ok(()) => {}
         Err(err) => note!("could not enable dual band: {:?}", err),

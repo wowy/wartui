@@ -590,7 +590,7 @@ impl ProgressLine {
 mod tests {
     use wartui_proto::link::{LogLevel, LogStr};
 
-    use super::super::testing::P4_APP_HEADER;
+    use super::super::testing::{C6_HEADER, P4_APP_HEADER};
     use super::*;
 
     /// A P4 bridge app image behind the header espflash wrote for one, `len` bytes long.
@@ -633,7 +633,7 @@ mod tests {
 
     #[test]
     fn flash_p4_refuses_image_when_built_for_another_chip() {
-        let image = app::fixture(wartui_proto::air::Board::Esp32c6, "0.1.0", 0x1000);
+        let image = app::fixture_with(C6_HEADER, "wartui-p4-radio", "0.1.0", 0x1000);
         let error = check_app(&image).unwrap_err().to_string();
         assert!(error.contains("built for esp32c6"), "{error}");
     }

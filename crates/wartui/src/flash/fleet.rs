@@ -1,4 +1,4 @@
-//! `wartui flash-fleet` — one node image onto every attached board of one chip.
+//! `wartui flash-fleet` — one node image onto every attached ESP32-C5.
 //!
 //! **The bridge is spared before anything else happens, or nothing happens.** It is a C5 or C6
 //! with the same vendor and product ID as every node, so nothing on the bus tells it apart but its
@@ -52,9 +52,9 @@ use crate::spec;
 
 #[derive(ClapArgs, Debug)]
 pub struct Args {
-    /// The node firmware's features, comma-separated, as `cargo build` takes them. Exactly one
-    /// of `esp32c5` or `esp32c6`, and only boards of that chip are flashed.
-    #[arg(long, value_name = "LIST", required = true)]
+    /// The node firmware's features, comma-separated, as `cargo build` takes them. They must
+    /// name `esp32c5`, and only boards of that chip are flashed.
+    #[arg(long, value_name = "LIST", default_value = "esp32c5")]
     pub features: String,
 
     /// Build without the firmware's default features.
@@ -370,6 +370,7 @@ mod tests {
 
     use wartui_bridge::ports::{ESPRESSIF_VID, TEST_PID, TEST_VID, candidate};
 
+    use super::super::BRIDGE;
     use super::super::normalize;
     use super::super::release_asset;
     use super::super::testing::{BRIDGE_MAC, NODE_MAC, board, ran};
@@ -532,16 +533,21 @@ mod tests {
 
     #[test]
     fn flash_fleet_finds_release_asset_when_features_are_in_any_order() {
-        let asset = release_asset(&NODE, &["xiao-external-antenna", "esp32c6"]);
-        assert_eq!(asset, Some("wartui-node-fw-esp32c6-xiao.bin"));
         assert_eq!(release_asset(&NODE, &["esp32c5"]), Some("wartui-node-fw-esp32c5.bin"));
-        assert_eq!(release_asset(&NODE, &["esp32c6"]), Some("wartui-node-fw-esp32c6.bin"));
+        assert_eq!(
+            release_asset(&NODE, &["esp32c5", "esp32c5"]),
+            Some("wartui-node-fw-esp32c5.bin")
+        );
+        assert_eq!(
+            release_asset(&BRIDGE, &["xiao-external-antenna", "esp32c6"]),
+            Some("wartui-bridge-fw-esp32c6-xiao.bin")
+        );
     }
 
     #[test]
     fn flash_fleet_refuses_release_asset_when_features_are_outside_table() {
-        assert_eq!(release_asset(&NODE, &["esp32c5", "xiao-external-antenna"]), None);
-        assert_eq!(release_asset(&NODE, &["esp32c6", "log"]), None);
+        assert_eq!(release_asset(&NODE, &["esp32c5", "log"]), None);
+        assert_eq!(release_asset(&NODE, &["esp32c6"]), None);
         assert_eq!(release_asset(&NODE, &["esp32c5", "t-dongle-c5"]), None);
     }
 
