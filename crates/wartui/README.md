@@ -614,7 +614,8 @@ A1:B0    esp32c5    0.1.0     0.1.1     update
 | `refuse: no image for <board>`    | `--image` is for another board, or no node firmware is built for this one |
 
 Only the heartbeat's version, board and flags are read, so a node `run` shows as `needs update` is
-one `ota` reaches. Without `--yes`, `ota` asks `[y/N]` before sending anything.
+one `ota` reaches. `ota` and `flash-fleet` update only an ESP32-C5: `ota` refuses any other board,
+and `flash-fleet` skips it. Without `--yes`, `ota` asks `[y/N]` before sending anything.
 
 **Each node then gets a progress line**: how much of the image it holds, the rate, and the phase
 (`waiting for the node`, `sending`, `verifying`, `rebooting`, `confirming`). It ends `done 0.1.1
@@ -894,12 +895,12 @@ yellow too; any other state keeps its own color:
 | Die     | 70 °C or above | A warning; the die runs hotter than ambient                   |
 
 A `stale`, `refused`, `no heartbeat`, `needs update`, or `host behind` node is out of the plan:
-nothing sent would reach it, its band is unknown, or its frames are not this build's, so its share
-might be nobody's. `b` on one says which state it is, because the fix differs: wait for a
-heartbeat, find out why heartbeats stopped, update the node with `ota`, or update wartui. Heartbeats from a
-`needs update` or `host behind` node are not counted among the footer's frames from an older
-firmware. Once its heartbeat has named its version, its sighting batches are, since none of them
-is recorded.
+nothing sent would reach it, it has not yet said what it is, or its frames are not this build's, so
+its share might be nobody's. `b` on one says which state it is, because the fix differs: wait for a
+heartbeat, find out why heartbeats stopped, update the node with `ota`, or update wartui. Heartbeats
+from a `needs update` or `host behind` node are not counted among the footer's frames from an older
+firmware. Once its heartbeat has named its version, its sighting batches are, since none of them is
+recorded.
 
 `stale` and `no heartbeat` are deliberately distinct from silence and from each other. wartui keeps
 two clocks, so a node that streams observations but loses heartbeats doesn't age out and churn the

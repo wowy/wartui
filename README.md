@@ -222,14 +222,15 @@ sudo dnf install python3-pyte    # or pip install pyte
 python3 tools/render.py --cols 120 --rows 30    # wide layout: fleet beside the stream
 python3 tools/render.py --cols 80 --rows 24     # narrow layout: stacked
 python3 tools/render.py --keys jb --attrs       # press two keys first, then list what is drawn in color
-python3 tools/render.py --bridge --keys b       # the attached fleet instead of the simulator
+python3 tools/render.py --bridge 00:08 --keys b # the attached fleet, naming its bridge
 ```
 
-The output is text, so it diffs, greps, and is readable by a coding agent without an image.
-`--keys` presses keys before the screen is read. The capture goes to a temporary database, deleted
-on exit, unless `--db` names one to keep. Settings go to an empty temporary `wartui.toml` the same
-way, so a render never touches your own, and a bare `--bridge` sweeps for the board because it has
-none remembered; name the bridge to avoid opening other boards.
+The output is text, so it diffs, greps, and is readable by a coding agent without an image. `--keys`
+presses keys before the screen is read. The capture goes to a temporary database, deleted on exit,
+unless `--db` names one to keep. Settings go to an empty temporary `wartui.toml` the same way, so a
+render never touches your own, and a `--bridge` render runs the fleet on default settings. A bare
+`--bridge` sweeps for the board because it has none remembered; name the bridge to avoid opening
+other boards.
 
 `--bridge` renders the attached boards instead of the simulator, optionally naming which one is
 the bridge. Real nodes take an assignment in the window after a heartbeat and confirm it on the next, so

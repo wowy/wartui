@@ -835,7 +835,7 @@ mod tests {
     }
 
     #[test]
-    fn chip_of_refuses_chip_when_firmware_does_not_run_on_it() {
+    fn flash_refuses_chip_when_firmware_does_not_run_on_it() {
         let error = chip_of(&NODE, &features("esp32c6")).unwrap_err().to_string();
         assert_eq!(error, "a node runs on esp32c5, not esp32c6");
         assert_eq!(chip_of(&BRIDGE, &features("esp32c6")).unwrap(), Chip::Esp32c6);
