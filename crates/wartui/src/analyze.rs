@@ -1,14 +1,16 @@
-//! `wartui analyze` — what a capture holds, and what it lost on the way in.
+//! `wartui analyze` — what a capture holds, how fast it arrived, and what it lost on the way in.
 //!
-//! The first half is what `export` reports, from the same fold run into nothing, so the
-//! counts match what an export of the same selection would write. The second half is
-//! `wartui_core::analyze`, whose `//!` says how each figure is counted. Standard output,
-//! because nothing else is written there.
+//! The report has three parts. The first is what `export` reports, from the same fold run into
+//! nothing, so the counts match what an export of the same selection would write. The second is
+//! the peak arrival rates and the third the losses, both from `wartui_core::analyze`, whose `//!`
+//! says how each figure is counted. Standard output, because nothing else is written there.
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, SecondsFormat, Utc};
 use clap::Args as ClapArgs;
-use wartui_core::analyze::{HostLoss, LossSummary, NodeLoss, SpiLoss, losses};
+use wartui_core::analyze::{
+    HostLoss, LossSummary, NodeLoss, Peak, PeakSummary, SpiLoss, losses, peaks,
+};
 use wartui_core::export::wigle_csv;
 use wartui_core::store::open_readonly;
 use wartui_proto::mac;
@@ -33,11 +35,13 @@ pub fn run(args: Args) -> Result<()> {
     let conn = open_readonly(&db).with_context(|| format!("opening {}", db.display()))?;
     let filter = args.selection.filter(&config);
     let summary = wigle_csv(&conn, &filter, &mut std::io::sink(), env!("CARGO_PKG_VERSION"))?;
+    let peak = peaks(&conn).context("reading how fast sightings arrived")?;
     let loss = losses(&conn).context("reading what the capture lost")?;
     print!(
-        "{} rows to export\n{}{}",
+        "{} rows to export\n{}{}{}",
         thousands(summary.rows),
         details(&summary),
+        peaks_text(&peak),
         losses_text(&loss)
     );
     if args.heartbeat_windows {
@@ -48,6 +52,40 @@ pub fn run(args: Args) -> Result<()> {
     note_excluded(&summary);
     note_quality(&summary);
     Ok(())
+}
+
+/// The peak arrival rates, in the layout of [`details`], or nothing when no sighting was stored.
+fn peaks_text(peak: &PeakSummary) -> String {
+    use std::fmt::Write as _;
+
+    if peak.sightings == 0 {
+        return String::new();
+    }
+    let rate = |p: &Peak| format!("{}/s  {}/min", thousands(p.per_second), thousands(p.per_minute));
+    let mut text = String::new();
+    let _ = write!(
+        text,
+        "  {:<11}{} sightings/s  {}/min",
+        "peak",
+        thousands(peak.total.per_second),
+        thousands(peak.total.per_minute)
+    );
+    if peak.clock_reversals > 0 {
+        let plural = if peak.clock_reversals == 1 { "" } else { "s" };
+        let _ =
+            write!(text, "  wall clock reversed {} time{plural}", thousands(peak.clock_reversals));
+    }
+    text.push('\n');
+    for (label, kind) in [("peak wifi", &peak.wifi), ("peak ble", &peak.ble)] {
+        if kind.per_minute > 0 {
+            let _ = writeln!(text, "  {label:<11}{}", rate(kind));
+        }
+    }
+    let _ = writeln!(text, "  peak by node");
+    for node in &peak.nodes {
+        let _ = writeln!(text, "    {}  {}", mac::short(&node.mac), rate(&node.peak));
+    }
+    text
 }
 
 /// The loss lines, in the layout of [`details`]. Heartbeats follow the core's modulo assumptions;
@@ -321,11 +359,12 @@ fn percent(part: u64, whole: u64) -> String {
 mod tests {
     use clap::Parser;
     use wartui_core::analyze::{
-        BridgeLoss, HeartbeatWindow, HostLoss, LossSummary, NodeLoss, QueueLoss, SpiLoss,
+        BridgeLoss, HeartbeatWindow, HostLoss, LossSummary, NodeLoss, NodePeak, Peak, PeakSummary,
+        QueueLoss, SpiLoss,
     };
     use wartui_proto::link::QueueId;
 
-    use super::{heartbeat_windows_text, losses_text, utc_arrival};
+    use super::{heartbeat_windows_text, losses_text, peaks_text, utc_arrival};
 
     /// Two nodes over an evening, behind a bridge that restarted once.
     fn evening() -> LossSummary {
@@ -395,6 +434,60 @@ mod tests {
                 ..Default::default()
             }),
         }
+    }
+
+    /// The same evening's arrival rates.
+    fn rates() -> PeakSummary {
+        let peak = |per_second, per_minute| Peak { per_second, per_minute };
+        PeakSummary {
+            sightings: 1_203_551,
+            total: peak(1_842, 41_210),
+            wifi: peak(1_790, 39_880),
+            ble: peak(120, 2_310),
+            nodes: vec![
+                NodePeak { mac: [0x02, 0, 0x5E, 0x10, 0x1C, 0x5A], peak: peak(120, 2_310) },
+                NodePeak { mac: [0x02, 0, 0x5E, 0x10, 0x57, 0x84], peak: peak(1_790, 39_880) },
+            ],
+            clock_reversals: 0,
+        }
+    }
+
+    #[test]
+    fn analyze_report_prints_peak_lines_when_sightings_stored() {
+        assert_eq!(
+            peaks_text(&rates()),
+            "  peak       1,842 sightings/s  41,210/min\n\
+             \x20 peak wifi  1,790/s  39,880/min\n\
+             \x20 peak ble   120/s  2,310/min\n\
+             \x20 peak by node\n\
+             \x20   1C:5A  120/s  2,310/min\n\
+             \x20   57:84  1,790/s  39,880/min\n"
+        );
+    }
+
+    #[test]
+    fn analyze_report_omits_peak_lines_when_no_sightings_stored() {
+        assert_eq!(peaks_text(&PeakSummary::default()), "");
+    }
+
+    #[test]
+    fn analyze_report_omits_peak_ble_when_no_ble_sightings() {
+        let text = peaks_text(&PeakSummary { ble: Peak::default(), ..rates() });
+        assert!(!text.contains("peak ble"), "{text}");
+        assert!(text.contains("  peak wifi  "), "{text}");
+    }
+
+    #[test]
+    fn analyze_report_names_clock_reversals_when_wall_clock_steps_back() {
+        let text = peaks_text(&PeakSummary { clock_reversals: 1, ..rates() });
+        assert!(
+            text.starts_with(
+                "  peak       1,842 sightings/s  41,210/min  wall clock reversed 1 time\n"
+            ),
+            "{text}"
+        );
+        let text = peaks_text(&PeakSummary { clock_reversals: 2, ..rates() });
+        assert!(text.contains("41,210/min  wall clock reversed 2 times\n"), "{text}");
     }
 
     #[test]

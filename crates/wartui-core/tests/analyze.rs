@@ -1,11 +1,16 @@
-//! Loss figures read back from a capture the store wrote.
+//! Loss and arrival-rate figures read back from a capture the store wrote.
 
 use std::time::Duration;
 
 use rusqlite::Connection;
-use wartui_core::analyze::{BridgeLoss, HeartbeatWindow, HostLoss, QueueLoss, SpiLoss, losses};
-use wartui_core::record::{BatchGap, BridgeStatusSeen, Heartbeat, HostStatus, Record};
+use wartui_core::analyze::{
+    BridgeLoss, HeartbeatWindow, HostLoss, NodePeak, Peak, PeakSummary, QueueLoss, SpiLoss, losses,
+    peaks,
+};
+use wartui_core::position::Fix;
+use wartui_core::record::{BatchGap, BridgeStatusSeen, Heartbeat, HostStatus, Observation, Record};
 use wartui_core::store::{CaptureInfo, Store, StoreConfig, open_readonly};
+use wartui_proto::air::RecordKind;
 use wartui_proto::link::{QueueId, QueueStat, QueueStats, SpiStats};
 use wartui_proto::mac::Mac;
 use wartui_proto::plan::ChannelPool;
@@ -132,6 +137,161 @@ fn steady(node: Mac, from_s: i64, count: u32) -> Vec<Record> {
             beat(node, (from_s + i64::from(i) * 5) * 1000, i + 1, seq, 0, 0)
         })
         .collect()
+}
+
+/// A sighting `at_ms` after the capture's start, with no position.
+fn sighting(node: Mac, kind: RecordKind, at_ms: i64) -> Record {
+    Record::Observation(Observation {
+        node_mac: node,
+        rx_at_ms: EPOCH_MS + at_ms,
+        link_rssi: Some(-41),
+        bssid: [0xAA; 6],
+        ssid: b"example".to_vec(),
+        security: "[WPA2_PSK]".to_owned(),
+        channel: if kind == RecordKind::Wifi { 6 } else { 0 },
+        rssi: -60,
+        kind,
+        rcoi: None,
+        mfgr_id: None,
+        fix: Fix::none(),
+        raw_body: b"raw".to_vec(),
+    })
+}
+
+/// `count` sightings arriving together.
+fn burst(node: Mac, kind: RecordKind, at_ms: i64, count: usize) -> Vec<Record> {
+    (0..count).map(|_| sighting(node, kind, at_ms)).collect()
+}
+
+/// The total peaks of Wi-Fi sightings from `NODE` at each offset.
+fn total_peak(at_ms: &[i64]) -> Peak {
+    let (_dir, conn) =
+        capture(at_ms.iter().map(|&at| sighting(NODE, RecordKind::Wifi, at)).collect());
+    peaks(&conn).expect("reading peaks").total
+}
+
+#[test]
+fn analyze_restarts_peak_windows_when_clock_steps_back() {
+    let mut records = burst(NODE, RecordKind::Wifi, 0, 3);
+    records.extend(burst(NODE, RecordKind::Wifi, 5_000, 3));
+    records.extend(burst(NODE, RecordKind::Wifi, 4_800, 3));
+    let (_dir, conn) = capture(records);
+    let summary = peaks(&conn).expect("reading peaks");
+    // Sorted by `rx_at`, the step would merge into {6, 9}: a peak no link carried.
+    assert_eq!(summary.total, Peak { per_second: 3, per_minute: 6 });
+    assert_eq!(summary.clock_reversals, 1);
+    assert_eq!(summary.sightings, 9);
+}
+
+#[test]
+fn analyze_separates_peak_windows_when_sightings_are_exactly_one_span_apart() {
+    assert_eq!(total_peak(&[0, 1_000, 2_000]).per_second, 1);
+    assert_eq!(total_peak(&[0, 999]).per_second, 2);
+    assert_eq!(total_peak(&[0, 60_000]).per_minute, 1);
+    assert_eq!(total_peak(&[0, 59_999]).per_minute, 2);
+}
+
+#[test]
+fn analyze_reports_burst_as_peak_when_sightings_arrive_together() {
+    let mut records = burst(NODE, RecordKind::Wifi, 0, 5);
+    records.extend(burst(NODE, RecordKind::Wifi, 10_000, 2));
+    let (_dir, conn) = capture(records);
+    let summary = peaks(&conn).expect("reading peaks");
+    assert_eq!(summary.total, Peak { per_second: 5, per_minute: 7 });
+    assert_eq!(summary.sightings, 7);
+}
+
+#[test]
+fn analyze_joins_peak_burst_when_it_straddles_a_clock_second() {
+    let mut records = burst(NODE, RecordKind::Wifi, 900, 3);
+    records.extend(burst(NODE, RecordKind::Wifi, 1_100, 4));
+    let (_dir, conn) = capture(records);
+    assert_eq!(peaks(&conn).expect("reading peaks").total.per_second, 7);
+}
+
+#[test]
+fn analyze_reports_minute_peak_above_second_when_load_is_sustained() {
+    let records = (0..=7).flat_map(|i| burst(NODE, RecordKind::Wifi, i * 10_000, 2)).collect();
+    let (_dir, conn) = capture(records);
+    assert_eq!(peaks(&conn).expect("reading peaks").total, Peak { per_second: 2, per_minute: 12 });
+}
+
+#[test]
+fn analyze_reports_peak_per_node_when_nodes_interleave() {
+    let records = vec![
+        sighting(NODE, RecordKind::Wifi, 0),
+        sighting(OTHER, RecordKind::Wifi, 0),
+        sighting(NODE, RecordKind::Wifi, 0),
+        sighting(OTHER, RecordKind::Wifi, 0),
+        sighting(NODE, RecordKind::Wifi, 0),
+    ];
+    let (_dir, conn) = capture(records);
+    let summary = peaks(&conn).expect("reading peaks");
+    assert_eq!(summary.total, Peak { per_second: 5, per_minute: 5 });
+    assert_eq!(
+        summary.nodes,
+        vec![
+            NodePeak { mac: OTHER, peak: Peak { per_second: 2, per_minute: 2 } },
+            NodePeak { mac: NODE, peak: Peak { per_second: 3, per_minute: 3 } },
+        ]
+    );
+}
+
+#[test]
+fn analyze_reports_peak_per_kind_when_wifi_and_ble_arrive() {
+    let mut records = burst(NODE, RecordKind::Wifi, 0, 3);
+    records.extend(burst(NODE, RecordKind::Ble, 0, 2));
+    let (_dir, conn) = capture(records);
+    let summary = peaks(&conn).expect("reading peaks");
+    assert_eq!(summary.wifi, Peak { per_second: 3, per_minute: 3 });
+    assert_eq!(summary.ble, Peak { per_second: 2, per_minute: 2 });
+    assert_eq!(summary.total, Peak { per_second: 5, per_minute: 5 });
+}
+
+#[test]
+fn analyze_counts_peak_rows_when_export_leaves_them_out() {
+    // An all-zero BSSID is no address an export writes, but it still crossed the link.
+    let records = burst(NODE, RecordKind::Wifi, 0, 2)
+        .into_iter()
+        .map(|record| {
+            let Record::Observation(obs) = record else { unreachable!() };
+            Record::Observation(Observation { bssid: [0; 6], ..obs })
+        })
+        .collect();
+    let (_dir, conn) = capture(records);
+    assert_eq!(peaks(&conn).expect("reading peaks").total.per_second, 2);
+}
+
+#[test]
+fn analyze_counts_peak_in_total_and_node_only_when_kind_is_unknown() {
+    let (dir, conn) = capture(vec![sighting(NODE, RecordKind::Wifi, 0)]);
+    drop(conn);
+    // No build writes this kind, so only an edited file holds one.
+    let path = dir.path().join("wartui.db");
+    let rw = Connection::open(&path).expect("opening for writing");
+    rw.execute(
+        "INSERT INTO observation (node_mac, rx_at, link_rssi, bssid, ssid, security, channel, rssi,
+                                  kind, rcoi, mfgr_id, lat, lon, alt, accuracy, pos_source, pos_at,
+                                  raw_body)
+         SELECT node_mac, rx_at, link_rssi, bssid, ssid, security, channel, rssi, 'zigbee', rcoi,
+                mfgr_id, lat, lon, alt, accuracy, pos_source, pos_at, raw_body
+         FROM observation",
+        [],
+    )
+    .expect("inserting the foreign row");
+    drop(rw);
+    let conn = open_readonly(&path).expect("reopening read-only");
+    let summary = peaks(&conn).expect("reading peaks");
+    assert_eq!(summary.total, Peak { per_second: 2, per_minute: 2 });
+    assert_eq!(summary.wifi, Peak { per_second: 1, per_minute: 1 });
+    assert_eq!(summary.ble, Peak::default());
+    assert_eq!(summary.nodes, vec![NodePeak { mac: NODE, peak: summary.total }]);
+}
+
+#[test]
+fn analyze_reports_no_peaks_when_capture_holds_no_sightings() {
+    let (_dir, conn) = capture(vec![beat(NODE, 0, 1, 1, 0, 0)]);
+    assert_eq!(peaks(&conn).expect("reading peaks"), PeakSummary::default());
 }
 
 #[test]

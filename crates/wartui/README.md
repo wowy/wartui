@@ -123,12 +123,18 @@ inquiry produces, and the nodes never transmit while scanning.
 
 ### Analyzing a capture
 
-`analyze` prints what `export` would report for a capture, then what it lost on the way in. It
-takes `--db`, `--recapture` and `--config` as `export` does. Reports go to standard output and
-quality warnings to standard error; no output file is written. The tail of its output, after the
-export summary:
+`analyze` prints what `export` would report for a capture, then how fast sightings arrived, then
+what it lost on the way in. It takes `--db`, `--recapture` and `--config` as `export` does. Reports
+go to standard output and quality warnings to standard error; no output file is written. The tail
+of its output, after the export summary:
 
 ```
+  peak       1,842 sightings/s  41,210/min
+  peak wifi  1,790/s  39,880/min
+  peak ble   120/s  2,310/min
+  peak by node
+    1C:5A  120/s  2,310/min
+    57:84  1,790/s  39,880/min
   bridge     1,203,551 frames received  1,300 dropped (0.1%)  1 reboot  host read 1,202,240  11 lost on USB
   queue      host-bulk  peak 1,024/262,144 bytes  0 dropped
   queue      radio-jobs  peak 20/32 entries  0 dropped
@@ -143,16 +149,27 @@ export summary:
     57:84  batches 200  heartbeats 38/2,795 (1.4%)  12 unsent  buffer full wifi 18,220
 ```
 
-| Line          | What it counts                                                                  |
-|---------------|---------------------------------------------------------------------------------|
-| `bridge`      | Frames the bridge received, dropped as the host fell behind, and lost on USB    |
-| `queue`       | One of the bridge's queues: the most it held against its size, and its drops    |
-| `spi`         | The P4 split bridge's SPI transfers, and its link errors that are not zero      |
-| `host`        | Frames the host read but did not store, and how the host and its store held up  |
-| `health`      | Under-voltage and throttling the Pi firmware reported, temperature, battery     |
-| `batches`     | Sighting batches lost between node and host; the fleet table's `lost`           |
-| `heartbeats`  | Heartbeats lost between node and host, and how many of them were `unsent`       |
-| `buffer full` | Sightings a full pending buffer refused; most reappear in a later dwell or scan |
+| Line           | What it counts                                                                  |
+|----------------|---------------------------------------------------------------------------------|
+| `peak`         | The most sightings in any one second and any one minute, across the fleet       |
+| `peak wifi`    | The same for Wi-Fi sightings alone; `peak ble` for BLE                          |
+| `peak by node` | The same for each node, by address                                              |
+| `bridge`       | Frames the bridge received, dropped as the host fell behind, and lost on USB    |
+| `queue`        | One of the bridge's queues: the most it held against its size, and its drops    |
+| `spi`          | The P4 split bridge's SPI transfers, and its link errors that are not zero      |
+| `host`         | Frames the host read but did not store, and how the host and its store held up  |
+| `health`       | Under-voltage and throttling the Pi firmware reported, temperature, battery     |
+| `batches`      | Sighting batches lost between node and host; the fleet table's `lost`           |
+| `heartbeats`   | Heartbeats lost between node and host, and how many of them were `unsent`       |
+| `buffer full`  | Sightings a full pending buffer refused; most reappear in a later dwell or scan |
+
+Peak windows slide rather than fall on clock seconds, so a burst astride a second counts once.
+They are half-open: a sighting and one exactly a second earlier share no one-second window, so a
+steady 1 Hz source reads `1/s`. Every stored sighting counts, including those an export leaves out,
+since the figure is what came over the link. Time is the host's arrival time, so a backlog the
+bridge replays after a reconnect counts as the burst it was on the link. Where the wall clock steps
+back, every window restarts and the `peak` line says how many times `wall clock reversed`; a peak
+around the step is a lower bound.
 
 Counts follow the assumptions below; `lost on USB` is approximate. The capture's first bridge
 reply and first heartbeat per node are baselines, so what was dropped before the capture began
@@ -160,6 +177,8 @@ is not counted. `batches` and `bridge` print zeros, since "0 lost" is the answer
 `store dropped`, `queue` drops and, on a Pi, the `health` counts. A `queue` peak is the most
 the queue held since the bridge booted, so it can predate the capture. Left out:
 
+- the `peak` lines, when the capture holds no sighting
+- `peak wifi` or `peak ble`, when the capture holds no sighting of that kind
 - the `bridge` line, when the capture holds no status reply
 - `queue` lines, when the bridge reports no queues
 - the `spi` line, off the P4 split bridge
