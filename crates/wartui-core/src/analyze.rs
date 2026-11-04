@@ -1,4 +1,5 @@
-//! What a capture lost on the way in, read back from the tables the store already writes.
+//! What a capture lost on the way in, and how fast it arrived, read back from the tables the
+//! store already writes.
 //!
 //! Heartbeat loss comes from sequences. Every heartbeat carries `beat`, the node's since-boot count of
 //! heartbeats sent, so a gap between consecutive beats is heartbeats lost. A repeated beat, a radio
@@ -61,14 +62,23 @@
 //! capture's. Analyze infers restarts from `counter` and `beat`. Live, the engine's
 //! epoch check stands in for `beat`, so the two can disagree after a restart the epoch check
 //! misses.
+//!
+//! Arrival rate is [`peaks`]: the most sightings in any one second and any one minute. Windows
+//! slide rather than fall on clock boundaries, since a burst astride a second is one burst to the
+//! link. They are half-open, `(t - span, t]`, so a steady 1 Hz source reads 1 per second. Time is
+//! the host's `rx_at`, so a backlog replayed after a reconnect counts as the burst it was on the
+//! link. Rows are walked by `id`, like the heartbeats, and every window restarts where `rx_at`
+//! steps back: sorting would merge two real intervals into one and invent a peak.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 use rusqlite::{Connection, Row};
+use wartui_proto::air::RecordKind;
 use wartui_proto::link::QueueId;
 use wartui_proto::mac::Mac;
 
 use crate::engine::{BEHIND_THE_AIR_US, advance_since_boot};
+use crate::store::parse_kind;
 
 /// What a capture lost.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -276,6 +286,42 @@ pub struct HeartbeatWindow {
     pub restarted: bool,
 }
 
+/// How fast sightings arrived.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PeakSummary {
+    /// Rows walked: every sighting the host stored, including those an export leaves out.
+    pub sightings: u64,
+    /// Across every node and kind.
+    pub total: Peak,
+    /// Wi-Fi sightings alone.
+    pub wifi: Peak,
+    /// BLE sightings alone. A kind this build does not know counts in `total` and its node only.
+    pub ble: Peak,
+    /// One entry per node that stored a sighting, sorted by address.
+    pub nodes: Vec<NodePeak>,
+    /// Times `rx_at` fell between consecutive rows. Every window restarts there, so a peak
+    /// around a step is a lower bound.
+    pub clock_reversals: u64,
+}
+
+/// The most sightings in one sliding window of each span.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Peak {
+    /// In any one second: a sighting and one exactly 1,000 ms earlier share no window.
+    pub per_second: u64,
+    /// In any one minute, likewise half-open.
+    pub per_minute: u64,
+}
+
+/// One node's peak arrival rate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NodePeak {
+    /// The node's address.
+    pub mac: Mac,
+    /// Its sightings' peaks.
+    pub peak: Peak,
+}
+
 /// What the capture lost. Missed heartbeats follow the module's modulo assumptions;
 /// the bridge's `usb_lost` is approximate.
 pub fn losses(conn: &Connection) -> rusqlite::Result<LossSummary> {
@@ -284,6 +330,93 @@ pub fn losses(conn: &Connection) -> rusqlite::Result<LossSummary> {
     heartbeats(conn, &mut nodes)?;
     batches(conn, &mut nodes)?;
     Ok(LossSummary { bridge, nodes: nodes.into_values().collect(), host: host(conn)? })
+}
+
+/// The most sightings that came over the link in any one second and any one minute.
+/// Every `observation` row counts, before any export filter, since the figure is what the
+/// host had to carry. Windows slide on arrival time and are half-open, `(t - span, t]`.
+pub fn peaks(conn: &Connection) -> rusqlite::Result<PeakSummary> {
+    let mut stmt = conn.prepare("SELECT rx_at, node_mac, kind FROM observation ORDER BY id")?;
+    let mut rows = stmt.query([])?;
+    let mut summary = PeakSummary::default();
+    let (mut total, mut wifi, mut ble) = (Rate::new(), Rate::new(), Rate::new());
+    let mut nodes: BTreeMap<Mac, Rate> = BTreeMap::new();
+    let mut prev_at: Option<i64> = None;
+    while let Some(row) = rows.next()? {
+        let at_ms: i64 = row.get(0)?;
+        let mac: Mac = row.get(1)?;
+        let kind = parse_kind(row.get_ref(2)?.as_str()?);
+        summary.sightings += 1;
+        if prev_at.is_some_and(|prev| at_ms < prev) {
+            summary.clock_reversals += 1;
+            for rate in [&mut total, &mut wifi, &mut ble].into_iter().chain(nodes.values_mut()) {
+                rate.clear();
+            }
+        }
+        prev_at = Some(at_ms);
+        total.push(at_ms);
+        nodes.entry(mac).or_insert_with(Rate::new).push(at_ms);
+        match kind {
+            Some(RecordKind::Wifi) => wifi.push(at_ms),
+            Some(RecordKind::Ble) => ble.push(at_ms),
+            None => {}
+        }
+    }
+    summary.total = total.peak();
+    summary.wifi = wifi.peak();
+    summary.ble = ble.peak();
+    summary.nodes =
+        nodes.into_iter().map(|(mac, rate)| NodePeak { mac, peak: rate.peak() }).collect();
+    Ok(summary)
+}
+
+/// A one-second and a one-minute window over the same sightings.
+struct Rate {
+    second: Sliding,
+    minute: Sliding,
+}
+
+impl Rate {
+    fn new() -> Self {
+        Self { second: Sliding::new(1_000), minute: Sliding::new(60_000) }
+    }
+
+    fn push(&mut self, at_ms: i64) {
+        self.second.push(at_ms);
+        self.minute.push(at_ms);
+    }
+
+    /// Empties both windows, keeping their peaks.
+    fn clear(&mut self) {
+        self.second.buf.clear();
+        self.minute.buf.clear();
+    }
+
+    fn peak(&self) -> Peak {
+        Peak { per_second: self.second.peak, per_minute: self.minute.peak }
+    }
+}
+
+/// The arrivals within `span_ms` of the latest, and the most it has held.
+struct Sliding {
+    span_ms: i64,
+    buf: VecDeque<i64>,
+    peak: u64,
+}
+
+impl Sliding {
+    fn new(span_ms: i64) -> Self {
+        Self { span_ms, buf: VecDeque::new(), peak: 0 }
+    }
+
+    fn push(&mut self, at_ms: i64) {
+        // Half-open (at - span, at]: a sighting exactly one span earlier has left.
+        while self.buf.front().is_some_and(|&t| t <= at_ms - self.span_ms) {
+            self.buf.pop_front();
+        }
+        self.buf.push_back(at_ms);
+        self.peak = self.peak.max(self.buf.len() as u64);
+    }
 }
 
 /// An integer column as a count. Every count the store writes is unsigned.

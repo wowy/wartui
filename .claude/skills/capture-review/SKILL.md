@@ -31,7 +31,9 @@ cargo run --release -q -p wartui -- analyze --db <db> --heartbeat-windows
 ```
 
 The survey opens the file read-only and ends with a `FLAGS` list, each with the SQL that
-reproduces it. `wartui analyze` is the project's own loss accounting.
+reproduces it. `wartui analyze` is the project's own loss accounting. Its `peak` lines give the
+arrival rate: the most sightings in any one second and any one minute, in total, per kind and per
+node.
 
 The survey is a starting point, not the review. Its thresholds are blunt: read every section, not
 just the flags, and look for what it does not check (a node whose numbers are unlike its

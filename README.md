@@ -80,7 +80,7 @@ wartui ports      # list attached boards and their addresses
 wartui status     # check the link and count dropped frames
 wartui sniff      # decode every frame the fleet sends
 wartui reset      # reboot an unresponsive bridge
-wartui analyze    # summarize a capture and what it lost
+wartui analyze    # summarize a capture, how fast it arrived and what it lost
 wartui ota        # update node firmware over the air
 ```
 
