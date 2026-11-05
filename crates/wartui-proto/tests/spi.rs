@@ -139,7 +139,7 @@ fn spi_hello_has_frozen_layout() {
         mac: [0xD8, 0x3B, 0xDA, 0x10, 0xD8, 0x1C],
         fw_version: ShortStr::try_from("0.9.1").unwrap(),
         reset_cause: ResetCause::Watchdog,
-        last_phase: LoopPhase::Transmit,
+        last_phase: LoopPhase::Pump,
         uptime_ms: 0x1122_3344,
         heap_free: 0x0005_6789,
         image: None,
@@ -161,8 +161,8 @@ fn spi_hello_has_frozen_layout() {
         0, 0, 0, 0, 0, 0, 0, 0,
         // 41: reset_cause, Watchdog is index 2
         0x02,
-        // 42: last_phase, Transmit is index 5
-        0x05,
+        // 42: last_phase, Pump is frozen code 6, whatever its enum index
+        0x06,
         // 43: uptime_ms, u32 LE
         0x44, 0x33, 0x22, 0x11,
         // 47: heap_free, u32 LE
@@ -226,7 +226,7 @@ fn spi_hello_has_frozen_layout_when_image_present() {
         mac: [0xD8, 0x3B, 0xDA, 0x10, 0xD8, 0x1C],
         fw_version: ShortStr::try_from("0.9.1").unwrap(),
         reset_cause: ResetCause::Watchdog,
-        last_phase: LoopPhase::Transmit,
+        last_phase: LoopPhase::Pump,
         uptime_ms: 0x1122_3344,
         heap_free: 0x0005_6789,
         image: Some(digest),
@@ -244,7 +244,7 @@ fn spi_hello_has_frozen_layout_when_image_present() {
         0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0,
         0x02,
-        0x05,
+        0x06,
         0x44, 0x33, 0x22, 0x11,
         0x89, 0x67, 0x05, 0x00,
         // 51: image, 32 bytes in order
@@ -283,6 +283,19 @@ fn spi_hello_decodes_unknown_reset_cause_as_unknown() {
     let hello = Hello::decode(&bytes).unwrap();
     assert_eq!(hello.reset_cause, ResetCause::Unknown);
     assert_eq!(hello.last_phase, LoopPhase::Unknown);
+}
+
+#[test]
+fn spi_hello_decodes_unknown_phase_when_code_names_nothing() {
+    let mut bytes = [0u8; HELLO_LEN];
+    bytes[2] = 1;
+    for code in [5, 8, 9] {
+        bytes[42] = code;
+        assert_eq!(Hello::decode(&bytes).unwrap().last_phase, LoopPhase::Unknown, "code {code}");
+    }
+    // The frozen code, not the variant's enum index.
+    bytes[42] = 10;
+    assert_eq!(Hello::decode(&bytes).unwrap().last_phase, LoopPhase::SpiTransfer);
 }
 
 #[test]

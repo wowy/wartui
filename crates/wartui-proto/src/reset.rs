@@ -95,38 +95,6 @@ impl ResetCause {
             Self::Software | Self::Watchdog | Self::Lockup | Self::Brownout | Self::Unknown => true,
         }
     }
-
-    /// Whether a bridge writes to USB before any host has spoken.
-    ///
-    /// It does iff a host was present when the previous life ended
-    /// (`host_was_present`, kept in RTC memory). Never after a [`Self::PowerOn`], where
-    /// that memory is garbage.
-    ///
-    /// - **Why not always.** Writing to the USB Serial/JTAG endpoint with no host
-    ///   reading wedges it. A C6 replugged and left unread for two minutes was dead at
-    ///   first open in 3 of 3 trials. A build holding all
-    ///   transmit until a host frame decoded was healthy in 3 of 3, answering in 2 ms
-    ///   (`docs/phase-3-findings.md`). The ROM banner prints either way and is not the
-    ///   cause.
-    /// - **Why not never.** A host sends one `Identify` per connection. A connection
-    ///   that rides through the reset hears the new life only through the unprompted
-    ///   `Ready`.
-    /// - **Why not by cause.** The cause says who asked for the reset, not whether
-    ///   anybody was reading. A panic after the host left is
-    ///   [`Self::Software`] with nobody there. A watchdog or lockup reset can land while
-    ///   a host keeps the port open and never sends again.
-    #[must_use]
-    pub const fn speaks_first(self, host_was_present: bool) -> bool {
-        match self {
-            Self::PowerOn => false,
-            Self::Software
-            | Self::Watchdog
-            | Self::Lockup
-            | Self::Brownout
-            | Self::External
-            | Self::Unknown => host_was_present,
-        }
-    }
 }
 
 impl fmt::Display for ResetCause {

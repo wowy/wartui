@@ -104,7 +104,7 @@ fn sample_events() -> Vec<BridgeToHost, 16> {
         // Not the defaults: a round trip that only ever carried the zero
         // variant of an enum would pass just as well with the field dropped.
         reset_cause: ResetCause::Watchdog,
-        last_phase: LoopPhase::TxStalled,
+        last_phase: LoopPhase::Command,
         heap_free: 61_234,
         uptime_ms: 8_675_309,
         gps: false,
@@ -390,30 +390,25 @@ fn frame_accumulator_decodes_following_frame_when_truncated_frame_is_terminated(
 }
 
 #[test]
-fn frame_accumulator_reports_empty_when_frame_completes() {
+fn frame_accumulator_yields_frame_when_terminator_arrives() {
     let mut acc = FrameAccumulator::<MAX_FRAME>::new();
-    assert!(acc.is_empty());
     let mut out = [0u8; MAX_FRAME];
     let n = encode_host_frame(&HostToBridge::GetStatus, &mut out).expect("encodes");
     for &byte in &out[..n - 1] {
         assert!(acc.push(byte).is_none());
-        assert!(!acc.is_empty(), "a partial frame reads as empty");
     }
     assert!(acc.push(0).is_some());
-    assert!(acc.is_empty());
 }
 
 #[test]
-fn frame_accumulator_reports_not_empty_when_overflowing_frame_awaits_terminator() {
+fn frame_accumulator_yields_nothing_when_overflowing_frame_terminates() {
     // An overlong frame is still arriving until its terminator, whatever the
     // accumulator kept of it.
     let mut acc = FrameAccumulator::<64>::new();
     for _ in 0..200 {
         acc.push(0xAB);
     }
-    assert!(!acc.is_empty());
     assert!(acc.push(0).is_none());
-    assert!(acc.is_empty());
 }
 
 /// What the host recovers from a reset's banner, an optional lone `0x00`, then one
@@ -461,23 +456,6 @@ fn link_decoder_rejects_payload_when_frame_is_truncated() {
     assert!(decode_frame::<HostToBridge>(&mut empty).is_err());
     let mut tiny = [1u8, 2];
     assert!(decode_frame::<HostToBridge>(&mut tiny).is_err());
-}
-
-#[test]
-fn reset_cause_speaks_first_when_a_host_was_present_unless_power_on() {
-    for cause in [
-        ResetCause::PowerOn,
-        ResetCause::Software,
-        ResetCause::External,
-        ResetCause::Brownout,
-        ResetCause::Watchdog,
-        ResetCause::Lockup,
-        ResetCause::Unknown,
-    ] {
-        let after_host = !matches!(cause, ResetCause::PowerOn);
-        assert_eq!(cause.speaks_first(true), after_host, "{cause:?}");
-        assert!(!cause.speaks_first(false), "{cause:?}");
-    }
 }
 
 #[test]
@@ -644,7 +622,7 @@ fn link_round_trips_ready_with_radio() {
             mac: [0x10, 0x20, 0x30, 0x40, 0x50, 0x63],
             fw_version: String::try_from("0.1.1").expect("short"),
             reset_cause: ResetCause::Watchdog,
-            last_phase: LoopPhase::Transmit,
+            last_phase: LoopPhase::Command,
             uptime_ms: u32::MAX,
         }),
         image: Some([0xA5; 32]),

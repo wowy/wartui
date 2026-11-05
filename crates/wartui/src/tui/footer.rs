@@ -10,7 +10,6 @@ use ratatui::widgets::Paragraph;
 use wartui_bridge::BridgeInfo;
 use wartui_core::engine::{Counters, Snapshot};
 use wartui_core::gps::GpsStatus;
-use wartui_proto::link::LoopPhase;
 use wartui_proto::mac;
 use wartui_proto::reset::ResetCause;
 
@@ -234,10 +233,6 @@ fn dbm(quarter_dbm: i8) -> String {
 
 /// The fault-box line for a bridge restart, or `None` for a power-on.
 fn restart_fault(bridge: &BridgeInfo) -> Option<String> {
-    // Ahead of the cause, because it is more specific: the bridge reset itself.
-    if matches!(bridge.last_phase, LoopPhase::TxStalled) {
-        return Some("bridge rebooted itself: USB transmit had stalled".to_owned());
-    }
     let reason = match bridge.reset_cause {
         ResetCause::PowerOn => None,
         ResetCause::Software => Some("bridge rebooted (firmware reset)"),
@@ -329,6 +324,7 @@ mod tests {
     use ratatui::backend::TestBackend;
     use wartui_core::gps::GpsCounters;
     use wartui_core::position::PositionSource;
+    use wartui_proto::link::LoopPhase;
     use wartui_proto::plan::{ChannelPool, Job, plan_for};
 
     use super::*;
@@ -634,7 +630,7 @@ mod tests {
 
     #[test]
     fn view_reports_bridge_reboot_when_reset_cause_is_watchdog() {
-        let screen = rendered(&with_restart(ResetCause::Watchdog, LoopPhase::Transmit));
+        let screen = rendered(&with_restart(ResetCause::Watchdog, LoopPhase::SpiTransfer));
         assert!(screen.contains("watchdog"), "{screen}");
 
         // Every capture starts with a powered-on bridge. Matched on the full phrase,
@@ -695,12 +691,6 @@ mod tests {
         assert!(!screen.contains("transmit power"), "{screen}");
         assert!(!screen.contains("dBm, assigned"), "{screen}");
         assert!(!screen.contains("restarted:"), "{screen}");
-    }
-
-    #[test]
-    fn view_reports_usb_tx_stall_when_bridge_reboots_due_to_tx_stalled() {
-        let screen = rendered(&with_restart(ResetCause::Software, LoopPhase::TxStalled));
-        assert!(screen.contains("USB transmit had stalled"), "{screen}");
     }
 
     #[test]

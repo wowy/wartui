@@ -143,23 +143,12 @@ pub enum LoopPhase {
     DrainRadio,
     /// Reading and decoding host commands.
     DrainLink,
-    /// Carrying out a host command other than a transmit.
+    /// Carrying out a host command.
     Command,
-    /// Inside an ESP-NOW send, waiting on the transmit callback.
-    ///
-    /// No firmware in this tree marks it, since sends run beside the main loop. It stays for
-    /// older builds, whose phase marker or hello can still name it, and because removing it
-    /// would shift every later variant's index.
-    Transmit,
     /// Writing queued frames to the USB endpoint.
     Pump,
     /// Idle, with neither radio nor link asking for anything.
     Idle,
-    /// The transmit path stopped draining while the host was still talking, so the
-    /// bridge reset itself.
-    ///
-    /// No firmware in this tree marks it. It stays for the reason [`Self::Transmit`] does.
-    TxStalled,
     /// Waiting on a transfer over the P4–C6 SPI link.
     SpiTransfer,
 }
@@ -204,10 +193,9 @@ pub enum SendStatus {
 pub enum HostToBridge {
     /// Ask the bridge to announce itself with [`BridgeToHost::Ready`].
     ///
-    /// Sent the moment the host opens the port. A bridge that does not
-    /// [speak first](ResetCause::speaks_first) says nothing until a host frame decodes.
-    /// One that does announced at boot, possibly to a host long gone. Either way, a new
-    /// connection that did not ask would wait forever.
+    /// Sent the moment the host opens the port. The P4's transmit opens on DTR and nothing
+    /// queues before it (`firmware/p4-bridge/src/usb.rs`), so a new connection that did not
+    /// ask would wait forever.
     Identify,
     /// Register a peer so unicast frames can be addressed to it.
     AddPeer {
@@ -267,9 +255,9 @@ pub enum HostToBridge {
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub enum BridgeToHost {
-    /// Sent at startup when the life [speaks first](ResetCause::speaks_first), and in
-    /// answer to [`HostToBridge::Identify`]. The host checks `proto_version` and refuses
-    /// a bridge it does not understand.
+    /// Sent in answer to [`HostToBridge::Identify`], and when a new life begins while a host
+    /// holds DTR (`firmware/p4-bridge/src/usb.rs`). The host checks `proto_version` and
+    /// refuses a bridge it does not understand.
     Ready {
         /// Which chip this is.
         chip: Chip,

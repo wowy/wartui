@@ -16,12 +16,11 @@
 //! | 47 | 4 | `heap_free` |
 //! | 51 | 32 | `image`, when present: the SHA-256 digest of the running app image |
 //!
-//! The enums travel as their declaration-order index, the index postcard writes. Their
-//! codes are spelled out in `match` arms below rather than cast, so the hello's codes stay
-//! put whatever happens to the enums. The link enums only grow at the end, so a code never
-//! changes meaning. A cause or phase this build cannot name reads as `Unknown`, since they
-//! are diagnostics. A chip it cannot name fails the decode: the hello is then from no peer
-//! this build can talk to.
+//! The enums travel as codes spelled out in `match` arms below rather than cast, so the
+//! hello's codes stay put whatever happens to the enums, and a code never changes meaning. A
+//! cause or phase this build cannot name reads as `Unknown`, since they are diagnostics. A
+//! chip it cannot name fails the decode: the hello is then from no peer this build can talk
+//! to.
 //!
 //! Fields are appended, never inserted, so the frozen part never moves. Decoders read the
 //! fields they know and ignore the rest. A C6 that takes updates over the link appends
@@ -167,7 +166,8 @@ const fn reset_cause_from_code(code: u8) -> ResetCause {
     }
 }
 
-// Frozen with the hello. Code 9 names nothing.
+// Frozen with the hello, so these do not follow the enum's indices. Codes 5, 8 and 9 name
+// nothing and decode as `Unknown`.
 const fn loop_phase_code(phase: LoopPhase) -> u8 {
     match phase {
         LoopPhase::Unknown => 0,
@@ -175,10 +175,8 @@ const fn loop_phase_code(phase: LoopPhase) -> u8 {
         LoopPhase::DrainRadio => 2,
         LoopPhase::DrainLink => 3,
         LoopPhase::Command => 4,
-        LoopPhase::Transmit => 5,
         LoopPhase::Pump => 6,
         LoopPhase::Idle => 7,
-        LoopPhase::TxStalled => 8,
         LoopPhase::SpiTransfer => 10,
     }
 }
@@ -189,10 +187,8 @@ const fn loop_phase_from_code(code: u8) -> LoopPhase {
         2 => LoopPhase::DrainRadio,
         3 => LoopPhase::DrainLink,
         4 => LoopPhase::Command,
-        5 => LoopPhase::Transmit,
         6 => LoopPhase::Pump,
         7 => LoopPhase::Idle,
-        8 => LoopPhase::TxStalled,
         10 => LoopPhase::SpiTransfer,
         _ => LoopPhase::Unknown,
     }

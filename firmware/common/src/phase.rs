@@ -1,5 +1,5 @@
-//! Where a bridge's loop was when it last stopped making progress, and whether a host was
-//! present then, kept across a reset for the next life to report.
+//! Where a bridge's loop was when it last stopped making progress, kept across a reset for
+//! the next life to report.
 //!
 //! In RTC fast memory and marked persistent, so it survives the resets that matter — the
 //! panic handler's and the watchdog's — and is read back by
@@ -30,15 +30,6 @@ static PHASE_VALID: AtomicU32 = AtomicU32::new(0);
 /// Arbitrary, and only has to be unlikely. Reads as `war1` in a memory dump.
 const PHASE_MAGIC: u32 = 0x7761_7231;
 
-/// Whether a host frame had decoded within the last ten seconds at the last
-/// pass of the loop, kept for the next life to decide whether it speaks first
-/// ([`ResetCause::speaks_first`]).
-///
-/// Persistent RTC memory for the reason [`PHASE`] is, and only believed under the same
-/// conditions, see [`boot_speaks_first`].
-#[esp_hal::ram(unstable(rtc_fast, persistent))]
-static HOST_PRESENT: AtomicU8 = AtomicU8::new(0);
-
 /// Record where the loop is, for the next life to report.
 pub fn mark(phase: LoopPhase) {
     PHASE.store(phase as u8, Ordering::Relaxed);
@@ -46,30 +37,10 @@ pub fn mark(phase: LoopPhase) {
 
 /// Claim the marker for this build.
 ///
-/// Called only after [`boot_phase`] and [`boot_speaks_first`] have read the previous
-/// life's, so a reset between the two cannot make the next boot trust a phase nobody
-/// wrote.
+/// Called only after [`boot_phase`] has read the previous life's, so a reset between the
+/// two cannot make the next boot trust a phase nobody wrote.
 pub fn claim() {
     PHASE_VALID.store(PHASE_MAGIC, Ordering::Relaxed);
-}
-
-/// Record, every pass, whether a host is present, for the next life.
-pub fn note_host_present(present: bool) {
-    HOST_PRESENT.store(u8::from(present), Ordering::Relaxed);
-}
-
-/// Whether the previous life ended with a host present, and so whether this one
-/// speaks first.
-///
-/// Read before [`claim`], and trusted on the same terms as [`boot_phase`]. The flag is
-/// then cleared, so a life that never sees a host records "absent".
-#[must_use]
-pub fn boot_speaks_first(cause: ResetCause) -> bool {
-    let valid =
-        !matches!(cause, ResetCause::PowerOn) && PHASE_VALID.load(Ordering::Relaxed) == PHASE_MAGIC;
-    let was_present = valid && HOST_PRESENT.load(Ordering::Relaxed) == 1;
-    HOST_PRESENT.store(0, Ordering::Relaxed);
-    cause.speaks_first(was_present)
 }
 
 /// What the marker said, if this reset is one that preserved it.
@@ -86,11 +57,9 @@ pub fn boot_phase(cause: ResetCause) -> LoopPhase {
         2 => LoopPhase::DrainRadio,
         3 => LoopPhase::DrainLink,
         4 => LoopPhase::Command,
-        5 => LoopPhase::Transmit,
-        6 => LoopPhase::Pump,
-        7 => LoopPhase::Idle,
-        8 => LoopPhase::TxStalled,
-        9 => LoopPhase::SpiTransfer,
+        5 => LoopPhase::Pump,
+        6 => LoopPhase::Idle,
+        7 => LoopPhase::SpiTransfer,
         _ => LoopPhase::Unknown,
     }
 }

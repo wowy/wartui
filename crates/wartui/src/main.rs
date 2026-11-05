@@ -292,8 +292,6 @@ pub fn last_reset_line(info: &BridgeInfo) -> String {
     // visits most of them every millisecond, so naming one is worth doing only
     // where it points at a specific blocking call.
     let phase = match info.last_phase {
-        LoopPhase::TxStalled => Some("its transmit path had stopped draining"),
-        LoopPhase::Transmit => Some("it was inside an ESP-NOW send"),
         LoopPhase::Command => Some("it was carrying out a host command"),
         LoopPhase::DrainRadio => Some("it was draining the radio"),
         LoopPhase::DrainLink => Some("it was reading host commands"),
