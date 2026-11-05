@@ -1,8 +1,7 @@
 # The P4 split bridge: measured against the single-chip bridge
 
-These measurements back the P4 split bridge. The design is in
-[`docs/superpowers/specs/2026-10-17-p4-split-bridge-design.md`](superpowers/specs/2026-10-17-p4-split-bridge-design.md),
-and the SPI link spike is in [`p4-spi-link-findings.md`](p4-spi-link-findings.md).
+These measurements back the P4 split bridge. The SPI link spike is in
+[`p4-spi-link-findings.md`](p4-spi-link-findings.md).
 
 Every run uses the same load:
 - **Nodes:** two, both running the burst-test node build from local branch

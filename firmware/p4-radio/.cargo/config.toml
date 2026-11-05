@@ -6,7 +6,7 @@ rustflags = [
 ]
 
 [target.riscv32imac-unknown-none-elf]
-# Flashed through header H7 with IO9 jumpered to GND and the P4 parked in its ROM, so
+# Flashed through header H4 with IO9 jumpered to GND and the P4 parked in its ROM, so
 # nothing may toggle a reset line: pass `--port <the USB-to-TTL adapter>`. The partition
 # table path is relative to where cargo runs, so `cargo run` works from this directory.
 # otadata is erased so the bootloader boots ota_0, where the app goes, whatever slot an

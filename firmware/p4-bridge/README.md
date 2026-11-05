@@ -1,10 +1,10 @@
 # wartui P4 bridge firmware
 
-The host half of the P4 split bridge. On a Waveshare ESP32-P4 board, the P4 runs this firmware: it
+The host half of the P4 split bridge. On a Waveshare ESP32-P4-WIFI6, the P4 runs this firmware: it
 talks to the host over USB 2.0 high speed with wartui's link protocol, and to the on-board
-ESP32-C6 as a 40 MHz SPI master over the board's SDIO traces. The C6 runs the radio
-([`firmware/p4-radio`](../p4-radio/README.md)). The host sees one bridge, reporting `Esp32P4` and
-both chips' diagnostics. The queue sizes are in `src/config.rs`.
+ESP32-C6 over UART1, with DMA and hardware flow control, on the board's SDIO traces. The C6 runs
+the radio ([`firmware/p4-radio`](../p4-radio/README.md)). The host sees one bridge, reporting
+`Esp32P4` and both chips' diagnostics. The queue sizes are in `src/config.rs`.
 
 ```sh
 cargo build --release
@@ -25,7 +25,27 @@ builds the C6's image too.
 
 ## Boards
 
-One image serves the Waveshare ESP32-P4-WIFI6-POE-ETH and the ESP32-P4-WIFI6.
+This firmware runs on the Waveshare ESP32-P4-WIFI6.
+
+## The link to the C6
+
+UART1 on both chips: 4 Mbaud, 8N1, hardware RTS/CTS. UART0 stays the P4's console and the C6's
+flash port. `wartui_proto::radio_link` has the packets and the frozen core, and
+[`docs/p4-uart-link-findings.md`](../../docs/p4-uart-link-findings.md) what the link was measured
+to carry.
+
+| Signal | P4 GPIO | C6 GPIO |
+| --- | --- | --- |
+| P4 TX → C6 RX | 19 | 18 |
+| C6 TX → P4 RX | 14 | 20 |
+| P4 RTS → C6 CTS | 18 | 19 |
+| C6 RTS → P4 CTS | 15 | 21 |
+| C6 enable | 54 | CHIP_PU |
+| Spare | 6, input with pull-down | 2, not configured |
+| SDIO D2/D3 | 16, 17 inputs | 22, 23 inputs |
+
+The board pulls the four UART traces up (51 kΩ on its schematic). A C6 in reset therefore reads as
+CTS high, and the P4 waits rather than drops.
 
 ## First flash
 
@@ -33,9 +53,10 @@ The Type-C reaches the P4's UART0 through a CH343, so the runner needs `--port <
 writes `partitions.csv`, the node's table with two app slots and a trial sector, and erases
 `otadata`, so the P4 boots the image just written.
 
-espflash resets both boards through the CH343 and reboots them into the new image, so run
-`cargo run --release -- --port <that port>` with no button held. On the WIFI6, the CH343P's DTR and
-RTS drive EN and GPIO35 through a transistor pair.
+espflash resets the board through the CH343 and reboots it into the new image, so run
+`cargo run --release -- --port <that port>` with no button held. The CH343P's DTR and RTS drive
+EN and GPIO35 through a transistor pair. If a P4 shows `303a:0012` on USB and espflash cannot reach
+it, replug the board: one bench P4 in that state ignored CH343 resets until it was replugged.
 
 The C6 is flashed through its header once, and the P4 stays in download mode while it is: see
 [`firmware/p4-radio`](../p4-radio/README.md#first-flash). After that, updating the P4 updates
@@ -47,7 +68,7 @@ every `Ready`. Flash it by hand once more, with this table.
 ## Updates over USB
 
 After the first flash, `wartui flash-bridge` sends the P4 its app image over the high-speed link
-it bridges on (`crates/wartui/README.md` § "Updating a P4 bridge"). The P4 takes it through the
+it bridges on (`crates/wartui/README.md` § "Flashing the bridge"). The P4 takes it through the
 update receiver the C6 and the nodes use (`src/update.rs`), switches slots and reboots into it on
 trial. The new image's bundled C6 image then reaches the C6 as below.
 
@@ -67,13 +88,13 @@ and any step that failed.
 ## The bundled radio image
 
 At boot the P4 compares the image digest in the C6's hello with the image it carries. When they
-differ, it sends the C6 its image over the SPI link, once per boot. The C6 writes it, reboots
+differ, it sends the C6 its image over the UART link, once per boot. The C6 writes it, reboots
 into it and boots it on trial, and the P4's hello confirms it. The host sees the C6's reboot as a
 new bridge life, with a fresh `Ready`.
 
-Meanwhile the bridge enumerates with the C6's MAC and refuses radio commands. The update adds
-several seconds to that boot, for a C6 image of about 550 KB; the bench has not timed it. A
-bundled image that will not take is tried again on every power-up, about 30 s without a radio
+Meanwhile the bridge enumerates with the C6's MAC and refuses radio commands. With a C6 image of
+about 570 KB, `flash-bridge` updated both chips in 11 s and 17 s on the bench
+([`docs/p4-uart-link-findings.md`](../../docs/p4-uart-link-findings.md)). A bundled image that will not take is tried again on every power-up, about 30 s without a radio
 each time, until a P4 with a fixed image is flashed.
 
 If no hello follows the install within 10 s, the P4 resets the C6 through its enable pin, up to
@@ -86,7 +107,7 @@ Each state reaches the host as an error line, repeated with every `Ready`:
 | `updating the radio to the bundled image (n%)` | The update is under way; sent again every tenth of the image |
 | `radio runs another build; the bundled image did not take` | The C6 refused the image, stopped answering, or rolled back. The bridge still runs while the link revision matches |
 | `radio predates bundled updates; flash it through the header once` | The C6's hello has no digest. It cannot take an update; flash it by wire |
-| `radio speaks SPI link revision a, this P4 speaks b; update the radio` | A different link revision, and no update took. The bridge refuses radio commands |
+| `radio speaks link revision a, this P4 speaks b; update the radio` | A different link revision, and no update took. The bridge refuses radio commands |
 | `the radio coprocessor is not answering` | No hello at boot, or none after the resets that follow an install |
 
 A refused or silent update also sends one line naming why: `the radio refused the bundled image:
@@ -98,10 +119,10 @@ The bridge enumerates as `1209:0001`, product `wartui p4 bridge`, with the bridg
 serial number, or the P4's own MAC when the C6 never answered its hello. `wartui ports` lists it,
 `wartui flash-bridge` updates it over this link and `wartui flash-fleet` skips it.
 
-**The high-speed port always drives 5 V.** It is the Type-A on the POE-ETH (a load switch with its
-enable tied high) and the 4-pin MX1.25 connector `P1` on the WIFI6 (pin 1 is the board's VCC_5V
-rail). A cable to a PC that carries VBUS back-feeds the PC whenever the Type-C is also connected,
-so the cable must leave VBUS unconnected. A WIFI6 can instead be powered from that port alone.
+**The high-speed port always drives 5 V.** It is the 4-pin MX1.25 connector `P1`, and pin 1 is the
+board's VCC_5V rail. A cable to a PC that carries VBUS back-feeds the PC whenever the Type-C is
+also connected, so the cable must leave VBUS unconnected. The board can instead be powered from
+that port alone.
 
 ## GPS
 
@@ -140,6 +161,6 @@ as a drop in `Status`.
 | --- | --- | --- |
 | `WARTUI_P4_HOST_BULK_BYTES` | 262144 | frames for the host that may be evicted: received frames and logs |
 | `WARTUI_P4_HOST_PRIORITY_BYTES` | 16384 | frames that answer the host |
-| `WARTUI_P4_DOWN_QUEUE_BYTES` | 16384 | `Down` records waiting for a transfer to the C6 |
+| `WARTUI_P4_DOWN_QUEUE_BYTES` | 16384 | `Down` records waiting for a packet to the C6 |
 
-The SPI clock (40 MHz) is fixed.
+The link's baud rate (4 Mbaud) is fixed, as part of its frozen core.

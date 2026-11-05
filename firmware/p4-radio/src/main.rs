@@ -1,4 +1,4 @@
-//! The radio half of wartui's P4 split bridge, on the board's ESP32-C6.
+//! The radio half of wartui's P4 split bridge, on the ESP32-C6 of a Waveshare ESP32-P4-WIFI6.
 //!
 //! The P4 owns the USB link to the host. This chip owns the radio: it parks on the fleet's
 //! control channel, queues every wartui frame it hears for the P4, and carries out the

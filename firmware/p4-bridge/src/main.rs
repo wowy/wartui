@@ -1,4 +1,4 @@
-//! The host half of wartui's P4 split bridge, on a Waveshare ESP32-P4 board.
+//! The host half of wartui's P4 split bridge, on a Waveshare ESP32-P4-WIFI6.
 //!
 //! The P4 talks to the host over USB 2.0 high speed with wartui's link protocol, and to
 //! the board's ESP32-C6 over UART1 with hardware flow control, through UHCI's DMA. The C6 runs

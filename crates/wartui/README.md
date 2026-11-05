@@ -137,7 +137,7 @@ of its output, after the export summary:
   bridge     1,203,551 frames received  1,300 dropped (0.1%)  1 reboot  host read 1,202,240  11 lost on USB
   queue      host-bulk  peak 1,024/262,144 bytes  0 dropped
   queue      radio-jobs  peak 20/32 entries  0 dropped
-  spi        48,210 transfers  2 crc_fail  1 ready_timeouts (1 recovered)
+  radio link 48,210 packets  2 crc_fail  1 uart_errors  4 radio_seq_gap
   host       147 not stored: 140 retries  7 incompatible  0 store dropped  behind ≥100 ms 31 times (worst 412 ms)  slowest commit 58 ms  queue peak 1,204
   health     under-voltage in 3 samples  throttled in 0  since boot: under-voltage  temp max 71.2 °C  battery min 3.62 V
   batches    212 lost between node and host
@@ -155,7 +155,7 @@ of its output, after the export summary:
 | `peak by node` | The same for each node, by address                                              |
 | `bridge`       | Frames the bridge received, dropped as the host fell behind, and lost on USB    |
 | `queue`        | One of the bridge's queues: the most it held against its size, and its drops    |
-| `spi`          | The P4 split bridge's SPI transfers, and its link errors that are not zero      |
+| `radio link`   | The P4 split bridge's link packets, and its link errors that are not zero       |
 | `host`         | Frames the host read but did not store, and how the host and its store held up  |
 | `health`       | Under-voltage and throttling the Pi firmware reported, temperature, battery     |
 | `batches`      | Sighting batches lost between node and host; the fleet table's `lost`           |
@@ -180,7 +180,7 @@ the queue held since the bridge booted, so it can predate the capture. Left out:
 - `peak wifi` or `peak ble`, when the capture holds no sighting of that kind
 - the `bridge` line, when the capture holds no status reply
 - `queue` lines, when the bridge reports no queues
-- the `spi` line, off the P4 split bridge
+- the `radio link` line, off the P4 split bridge
 - the `unsent` clause, total or per node, when it is zero
 - `buffer full` figures that are zero, and the `buffer full` line when all are
 - the reboot clause, when the bridge never restarted
@@ -916,7 +916,7 @@ The footer shows faults only once they happen, so a clean run has a clean footer
 - **`bridge dropped`**: frames lost since this host attached. `wartui status` reports the total
   since the bridge booted, which is large and harmless on a dongle left powered with nothing
   listening. Every status reply is kept as a `bridge_status` row, with its since-boot counts and
-  SPI link counters, and a `bridge_queue` row per queue it reported.
+  radio link counters, and a `bridge_queue` row per queue it reported.
 - **`57:84 at 2 dBm, assigned 6 dBm`**: that node's radio reports a transmit power other than the
   assignment it holds. It refused the power and kept its previous one. `57:84 cannot read its
   transmit power` means it could not report one at all. Power-cycle that node; if it persists, it
@@ -970,10 +970,9 @@ Beyond the counters, `wartui status` prints what the bridge reports about its in
   C6's received frames for the P4), `radio-up-priority` (the C6's
   other records for the P4: send results, lines and its status), `radio-down` (the P4's records for
   the C6), `host-priority` and `host-bulk` (its two queues of frames for the host).
-- **`spi  …`**: the SPI link's transfers and its error counters at each end.
-  `ready_recovered` counts READY timeouts whose transfer went ahead anyway, so `ready_timeouts`
-  minus `ready_recovered` is the waits that lost a transfer. Every other error count is lost
-  transfers.
+- **`radio link  …`**: the UART link's packets from the C6 and its error counters at each end;
+  the `radio_` counters are the C6's. Every error count means corrupted or lost packets, and one
+  bad packet can move more than one count. A C6 restart reads as one `seq_gap`.
 - **`radio  …`**: the C6's address, firmware, reset cause and last phase. After a
   C6 restart under a running P4, `last reset` names the C6's cause too.
 - **`fault  …`**: a fault the bridge reports while `status` waits for its counters, such as the

@@ -5,7 +5,7 @@
 
 [package]
 name = "wartui-p4-radio-fw"
-description = "The radio half of the wartui P4 split bridge: ESP-NOW on the board's ESP32-C6, a UART link to the P4."
+description = "The radio half of the wartui P4 split bridge: ESP-NOW on the ESP32-P4-WIFI6's ESP32-C6, a UART link to the P4."
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
