@@ -940,9 +940,8 @@ mod tests {
     }
 
     #[test]
-    fn flash_finds_p4_release_assets_when_features_are_default() {
+    fn flash_finds_p4_release_asset_when_features_are_empty() {
         assert_eq!(release_asset(&P4_BRIDGE_APP, &[]), Some("wartui-p4-bridge-app-esp32p4.bin"));
-        assert_eq!(release_asset(&P4_BRIDGE_APP, &["gps"]), None);
     }
 
     #[test]

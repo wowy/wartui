@@ -107,18 +107,13 @@ const QUIET: Duration = Duration::from_secs(5);
 pub(crate) const FIRST_FLASH: &str = "firmware/p4-bridge/README.md § \"First flash\"";
 
 /// Update the P4 bridge on `board`, which answered as `expected`, over its link.
-pub(super) async fn run(
-    args: &Args,
-    features: &[&str],
-    board: &PortCandidate,
-    expected: Mac,
-) -> Result<()> {
+pub(super) async fn run(args: &Args, board: &PortCandidate, expected: Mac) -> Result<()> {
     let label = mac::short(&expected).to_string();
     let source = source(
         &P4_BRIDGE_APP,
         args.image.as_deref(),
         args.firmware_dir.as_deref(),
-        features,
+        &[],
         false,
         RELEASE_TAG,
     )?;
@@ -134,7 +129,7 @@ pub(super) async fn run(
         // It saves the built ELF as an image.
         espflash_present()?;
     }
-    let path = obtain(&P4_BRIDGE_APP, &source, features, false, Chip::Esp32p4)?;
+    let path = obtain(&P4_BRIDGE_APP, &source, &[], false, Chip::Esp32p4)?;
     let image = read(&path)?;
     check_app(&image).with_context(|| format!("checking {}", path.display()))?;
     let sha256: [u8; DIGEST_LEN] = Sha256::digest(&image).into();

@@ -473,7 +473,6 @@ wartui flash-bridge --bridge 71:F4
 
 | Flag                 | Default        | What it is                                                            |
 |----------------------|----------------|-----------------------------------------------------------------------|
-| `--features LIST`    | —              | The firmware's features, for a build; a release has the default set   |
 | `--bridge PATH\|MAC` | see below      | The P4 bridge to update, which must answer; `71:F4` works too         |
 | `--config PATH`      | per-OS path    | Where to read and save the remembered bridge; see "Config file"       |
 | `--image BIN`        | —              | Send this app-only image rather than building or fetching one         |
@@ -504,7 +503,7 @@ named with `--bridge` is not saved, since one flashed by name is often some othe
 save fails, the update still succeeds and a line says why.
 
 The image comes from the same three sources as `flash-fleet`'s, with `firmware/p4-bridge` for
-`firmware/node`; a release publishes one, built with the default features, under the same
+`firmware/node`; a release publishes one under the same
 `images/<tag>/`. Nothing is sent unless the image is an app-only image whose header names the
 `esp32p4` and whose descriptor names `wartui-p4-bridge-fw`, its checksum and appended SHA-256 hold,
 and it fits the P4's 1920 KiB app slot.
@@ -786,7 +785,7 @@ for lack of a position, but **WiGLE rejects rows without coordinates**: a captur
 nothing and says how many networks it left out.
 
 - **A bridge with a GPS receiver is the position source while it has a fix.** The P4 bridge reads a
-  u-blox receiver on its I2C (GPIO7/GPIO8) by default and forwards its bytes; see
+  u-blox receiver on its I2C (GPIO7/GPIO8) and forwards its bytes; see
   [`firmware/p4-bridge/README.md`](../../firmware/p4-bridge/README.md) § "GPS". The host's own search
   stands down while the bridge's receiver is sending sentences, with or without a fix, letting go
   of any port, so `g` shows it finding satellites. The search resumes once the last sentence is

@@ -23,8 +23,8 @@
 //! **A P4 bridge is updated over its own link** (`super::p4`): the cable the host already holds is
 //! the one that carries the update.
 //!
-//! There is no `--skip` or `--jobs`: there is one target. There is no `--no-default-features`
-//! either: a release image is built with the default features.
+//! There is no `--skip` or `--jobs`: there is one target. There is no `--features` either: the P4
+//! bridge firmware has none, so a build and a release image are the same.
 
 use std::path::{Path, PathBuf};
 
@@ -34,16 +34,11 @@ use wartui_bridge::ports::{PortCandidate, could_be_a_bridge};
 use wartui_bridge::serial::{BridgeSpec, Probed, discover_ports, probe_all};
 use wartui_proto::mac::{self, Mac};
 
-use super::{canonical, features, matches, p4};
+use super::{canonical, matches, p4};
 use crate::{config, spec};
 
 #[derive(ClapArgs, Debug)]
 pub struct Args {
-    /// The P4 bridge firmware's features, comma-separated, as `cargo build` takes them, for a
-    /// build from a firmware directory. A release publishes the default features only.
-    #[arg(long, value_name = "LIST")]
-    pub features: Option<String>,
-
     /// Which P4 bridge to flash, by path, by address or by the end of it (`71:F4`), which must
     /// match one P4 bridge that answers. It is not remembered. Without it, the bridge remembered
     /// in `wartui.toml`, which must answer; else, with none remembered, the only P4 bridge that
@@ -71,7 +66,6 @@ pub struct Args {
 }
 
 pub async fn run(args: Args) -> Result<()> {
-    let features = features(args.features.as_deref().unwrap_or_default());
     let named = args.bridge.as_deref().map(|given| (given, canonical(spec(given))));
     let found = discover_ports().context("listing serial ports")?;
     let ch343s: Vec<PortCandidate> =
@@ -83,7 +77,7 @@ pub async fn run(args: Args) -> Result<()> {
         named.as_ref().map(|(given, spec)| (*given, spec)),
         super::remembered_bridge(args.config.as_deref())?,
     )?;
-    p4::run(&args, &features, &board, expected).await?;
+    p4::run(&args, &board, expected).await?;
     if !args.dry_run {
         remember(&args, named.is_some(), &board, expected);
     }
@@ -429,11 +423,10 @@ mod tests {
     }
 
     #[test]
-    fn flash_bridge_finds_release_asset_when_features_are_default() {
+    fn flash_bridge_finds_release_asset_when_features_are_empty() {
         let asset = |features: &[&str]| release_asset(&P4_BRIDGE_APP, features);
         assert_eq!(asset(&[]), Some("wartui-p4-bridge-app-esp32p4.bin"));
         assert_eq!(asset(&["esp32c6"]), None);
-        assert_eq!(asset(&["gps"]), None);
     }
 
     #[test]

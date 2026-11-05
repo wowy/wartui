@@ -17,9 +17,9 @@
 //! - **the host link** (`src/host.rs`) runs a reader, a writer, the gate that tells whether a
 //!   host is present, and the `GetStatus` answer. The reader also takes the P4's own updates
 //!   (`src/update.rs`);
-//! - **the GPS reader** (`src/gps.rs`, with the default `gps` feature) polls a u-blox
-//!   receiver on I2C0 and forwards its bytes. GPIO7 and GPIO8 are shared with the board's
-//!   ES8311 codec, which this firmware never addresses.
+//! - **the GPS reader** (`src/gps.rs`) polls a u-blox receiver on I2C0 and forwards its
+//!   bytes. GPIO7 and GPIO8 are shared with the board's ES8311 codec, which this firmware
+//!   never addresses.
 //!
 //! Before anything else, the P4 checks whether its own image is on trial, and rolls it back
 //! when its trial boots are spent (`wartui_firmware::ota`). A trial boot arms the RTC
@@ -41,7 +41,6 @@
 #![deny(clippy::large_stack_frames)]
 
 mod config;
-#[cfg(feature = "gps")]
 mod gps;
 mod host;
 mod link;
@@ -50,13 +49,10 @@ mod update;
 
 use core::cell::{Cell, RefCell};
 
-#[cfg(feature = "gps")]
-use embassy_futures::join::join;
-use embassy_futures::join::join3;
+use embassy_futures::join::join4;
 use embassy_futures::select::select;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::signal::Signal;
-#[cfg(feature = "gps")]
 use embassy_sync::zerocopy_channel::Sender;
 use embassy_time::{Duration, Instant, Timer};
 use esp_hal::clock::CpuClock;
@@ -78,7 +74,6 @@ use wartui_proto::link::{
     BridgeToHost, HOST_BAUD, LogLevel, LogStr, LoopPhase, MAX_FRAME, QueueId, QueueStat,
     RadioLinkStats, ShortStr, encode_frame,
 };
-#[cfg(feature = "gps")]
 use wartui_proto::link::{GpsBytes, GpsWriteBytes};
 use wartui_proto::radio_link::{
     BAUD_RATE, BODY_MAX, Down, FIFO_FULL_THRESHOLD, Held, PacketReader, RECORD_MAX, RTS_THRESHOLD,
@@ -174,10 +169,8 @@ pub struct Shared {
     deadline_set: Signal<NoopRawMutex, ()>,
     /// Why no GPS receiver is being read. Sent with every announcement, because a host
     /// usually attaches after boot, and cleared when the receiver answers again.
-    #[cfg(feature = "gps")]
     gps_fault: Cell<Option<&'static str>>,
     /// The GPS reader's write channel, once its bus is up.
-    #[cfg(feature = "gps")]
     gps_writes: RefCell<Option<Sender<'static, NoopRawMutex, GpsWriteBytes>>>,
     /// The P4's own image: its trial, and an update in progress.
     updates: RefCell<&'static mut Updates>,
@@ -214,9 +207,7 @@ impl Shared {
             status_asked: Signal::new(),
             radio_status: Signal::new(),
             deadline_set: Signal::new(),
-            #[cfg(feature = "gps")]
             gps_fault: Cell::new(None),
-            #[cfg(feature = "gps")]
             gps_writes: RefCell::new(None),
             updates: RefCell::new(updates),
         }
@@ -284,7 +275,6 @@ impl Shared {
             return;
         }
         self.push_fault();
-        #[cfg(feature = "gps")]
         if let Some(why) = self.gps_fault.get() {
             self.push_error(why);
         }
@@ -332,14 +322,12 @@ impl Shared {
         }
     }
 
-    #[cfg(feature = "gps")]
     #[inline(never)]
     fn push_error(&self, message: &str) {
         let message = LogStr::try_from(message).unwrap_or_default();
         self.push_host(&BridgeToHost::Error { message });
     }
 
-    #[cfg(feature = "gps")]
     #[inline(never)]
     fn push_log(&self, level: LogLevel, message: &str) {
         let message = LogStr::try_from(message).unwrap_or_default();
@@ -348,7 +336,6 @@ impl Shared {
 
     /// Queue a batch from the GPS receiver, copied out of its slot here rather than in the
     /// reader's future.
-    #[cfg(feature = "gps")]
     #[inline(never)]
     fn push_gps(&self, bytes: &GpsBytes) {
         self.push_host(&BridgeToHost::Gps { bytes: bytes.clone() });
@@ -462,25 +449,22 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     };
 
     let fw_version = ShortStr::try_from(env!("CARGO_PKG_VERSION")).unwrap_or_default();
-    let gps = cfg!(feature = "gps");
+    let gps = true;
     let pair =
         Pair::new(own_mac, fw_version, cause, last_phase, boot.as_millis(), gps, RADIO_DIGEST)
             .with_own_image(own_image);
     let shared = Shared::new(pair, HOST_QUEUE.take(), DOWN_QUEUE.take(), updates);
     let link = RefCell::new(Link::new(boot, own_mac, cause, last_phase, HELD.take()));
+    let pins = gps::Pins { i2c: peripherals.I2C0, sda: peripherals.GPIO7, scl: peripherals.GPIO8 };
 
     // Joined rather than spawned: all borrow `shared`, and none ends.
-    let bridge = join3(
+    match join4(
         run_link(bus, &link, &shared),
         radio_clock(&shared, c6_en),
         host::run(host_bus, &shared),
-    );
-    #[cfg(feature = "gps")]
-    let pins = gps::Pins { i2c: peripherals.I2C0, sda: peripherals.GPIO7, scl: peripherals.GPIO8 };
-    #[cfg(feature = "gps")]
-    match join(bridge, gps::run(pins, &shared)).await {}
-    #[cfg(not(feature = "gps"))]
-    match bridge.await {}
+        gps::run(pins, &shared),
+    )
+    .await {}
 }
 
 /// Give [`Pair`] the time at its next deadline: announce the life it starts when the C6

@@ -162,9 +162,8 @@ fault instead. Wire it to the P4's header:
 | GND | GND |
 
 The receiver answers at `0x42`. The board has 2.2 kΩ pull-ups on both lines, and its ES8311 codec
-shares the bus at another address. Without a receiver, every announcement carries "no GPS receiver
-answered on the I2C bus (GPIO7/GPIO8)". `cargo build --release --no-default-features` builds
-without GPS: the bridge reports none and never touches the bus.
+shares the bus at another address. The bridge always reads the bus. Without a receiver, every
+announcement carries "no GPS receiver answered on the I2C bus (GPIO7/GPIO8)".
 
 ## Queue sizes
 

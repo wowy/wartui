@@ -68,15 +68,14 @@ cd firmware/p4-radio                          # the C6 half of the P4 split brid
 cargo fmt --all -- --check
 cargo clippy --release --features esp32c6
 
-cd firmware/p4-bridge                         # the P4 half; default feature gps, own target
+cd firmware/p4-bridge                         # the P4 half, own target
 cargo fmt --all -- --check
-cargo clippy --release                        # and --no-default-features
+cargo clippy --release
 
 cd firmware/common                            # a firmware's clippy does not lint it
 cargo fmt --all -- --check
 cargo clippy --release --features esp32c6,radio   # and esp32c6,ota
-cargo clippy --release --features esp32p4,gps --target riscv32imafc-unknown-none-elf
-cargo clippy --release --features esp32p4,ota --target riscv32imafc-unknown-none-elf
+cargo clippy --release --features esp32p4,gps,ota --target riscv32imafc-unknown-none-elf
 ```
 
 CI mirrors the workspace split: host crates on every push and PR; each firmware only
