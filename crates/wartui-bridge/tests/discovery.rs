@@ -285,11 +285,11 @@ fn serial_discovery_rejects_tail_when_no_attached_board_ends_with_it() {
 
 #[test]
 fn serial_discovery_refuses_tail_when_several_attached_boards_end_with_it() {
-    // The bridge and a node can share their last octet. Opening either on a guess is
-    // transmitting into a node, so nothing is selected, and the refusal says why
-    // rather than claiming the board is not attached.
+    // Two P4 bridges can share their last octets. Opening either on a guess is
+    // transmitting into another fleet's bridge, so nothing is selected, and the refusal
+    // says why rather than claiming the board is not attached.
     let twin = "38:44:BE:12:44:C0";
-    let boards = [esp("/dev/ttyACM0", BRIDGE_MAC), esp("/dev/ttyACM1", twin)];
+    let boards = [p4("/dev/ttyACM0", BRIDGE_MAC), p4("/dev/ttyACM1", twin)];
     let spec: BridgeSpec = "44:C0".parse().expect("parsing cannot fail");
     assert!(serial::select(&boards, Some(&spec), None).is_empty());
     let refused = serial::resolve_in(&boards, &spec).expect_err("ambiguous");
@@ -299,6 +299,25 @@ fn serial_discovery_refuses_tail_when_several_attached_boards_end_with_it() {
     // One more octet settles it.
     let spec: BridgeSpec = "EC:44:C0".parse().expect("parsing cannot fail");
     assert_eq!(serial::resolve_in(&boards, &spec).expect("that board"), "/dev/ttyACM0");
+}
+
+#[test]
+fn serial_discovery_refuses_tail_when_only_a_node_ends_with_it() {
+    // `wartui reset --bridge` opens what this resolves to and transmits at once, so
+    // answering with the node would reboot it.
+    let listed = vec![p4("/dev/ttyACM0", BRIDGE_MAC), esp("/dev/ttyACM1", NODE_MAC)];
+    let spec: BridgeSpec = "9D:24".parse().expect("parsing cannot fail");
+    let refused = serial::resolve_in(&serial::bridges_among(listed), &spec).expect_err("no bridge");
+    assert!(matches!(refused, TransportError::NoSuchBridge { .. }), "{refused}");
+}
+
+#[test]
+fn serial_discovery_resolves_tail_to_p4_bridge_when_a_node_shares_it() {
+    // The sweep cannot see the node, so neither can a name: not ambiguous, and not the node.
+    let listed = vec![esp("/dev/ttyACM0", "38:44:BE:12:44:C0"), p4("/dev/ttyACM1", BRIDGE_MAC)];
+    let spec: BridgeSpec = "44:C0".parse().expect("parsing cannot fail");
+    let found = serial::resolve_in(&serial::bridges_among(listed), &spec).expect("the P4 bridge");
+    assert_eq!(found, "/dev/ttyACM1");
 }
 
 #[test]

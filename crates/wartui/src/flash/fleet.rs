@@ -1,18 +1,9 @@
 //! `wartui flash-fleet` — one node image onto every attached ESP32-C5.
 //!
-//! **The bridge is spared before anything else happens, or nothing happens.** A P4 bridge is told
-//! apart by its USB IDs and is never probed. The run also spares whatever board the operator calls
-//! the bridge, by its address — `--bridge`, else the one `run` or `flash-bridge` saved in
-//! `wartui.toml` — and refuses without one unless `--no-bridge` says no bridge is attached. That
-//! flag only lifts the refusal: a remembered bridge is spared all the same, since sparing it costs
-//! nothing and a board known to be the bridge is never worth the risk.
-//!
-//! **Every bridge known is spared, and a named one must be attached.** A `--bridge` value and the
-//! remembered address are both spared, not one in place of the other. A path that matches nothing
-//! attached — a typo, a device node that moved on a replug, a macOS `/dev/tty.*` where only the
-//! `/dev/cu.*` is listed — would otherwise spare nothing, and the real bridge would pass its probe
-//! and be flashed. So a `--bridge` value that matches no attached board refuses the run. A
-//! remembered address that matches nothing is not an error: the bridge may simply be unplugged.
+//! **No bridge has to be known.** A P4 bridge is told apart by its USB IDs, skipped and never
+//! probed, so this command reads no `wartui.toml`. Every other attached Espressif native-USB
+//! ESP32-C5 gets node firmware, including any other C5 board on the host: `--skip` is what keeps
+//! one, and any other chip fails the cross-check below.
 //!
 //! **A board that fails the identity cross-check (`super`) is skipped**, neither flashed nor
 //! failed, and the rest of the fleet goes ahead. So is a board with under 4 MB of flash, or that
@@ -34,19 +25,18 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use clap::Args as ClapArgs;
-use wartui_bridge::ports::{BRIDGE_PID, PortCandidate, is_p4_bridge};
-use wartui_bridge::serial::{BridgeSpec, discover_ports};
+use wartui_bridge::ports::{PortCandidate, SERIAL_JTAG_PID, is_p4_bridge};
+use wartui_bridge::serial::discover_ports;
 use wartui_proto::mac::Mac;
 
 use super::boot::seen_booting;
 use super::{
-    Chip, NODE, RELEASE_TAG, Ran, Skip, Source, canonical, check_image, chip_of,
-    erase_otadata_args, espflash, espflash_present, features, flash_args, judge_node_flash,
-    judge_probe, mac_arg, matches, name, obtain, probe_args, read, reset_args, source,
+    Chip, NODE, RELEASE_TAG, Ran, Skip, Source, check_image, chip_of, erase_otadata_args, espflash,
+    espflash_present, features, flash_args, judge_node_flash, judge_probe, mac_arg, name, obtain,
+    probe_args, read, reset_args, source,
 };
-use crate::spec;
 
 #[derive(ClapArgs, Debug)]
 pub struct Args {
@@ -59,24 +49,7 @@ pub struct Args {
     #[arg(long)]
     pub no_default_features: bool,
 
-    /// Which board is the bridge, by path, by address or by the end of it (`00:08`), so that it is
-    /// never flashed. It must be attached, and the end of an address must match one board. The one
-    /// remembered in `wartui.toml` is spared as well, and is the only one by default.
-    #[arg(long, value_name = "PATH|MAC", conflicts_with = "no_bridge")]
-    pub bridge: Option<String>,
-
-    /// Read the remembered bridge from this file instead of the default `wartui.toml`. A file
-    /// that does not load refuses the run. Never written; see `crates/wartui/README.md`
-    /// § "Config file".
-    #[arg(long, value_name = "PATH")]
-    pub config: Option<PathBuf>,
-
-    /// No bridge is attached. Without a bridge's address the run is refused, because any board
-    /// could be it; this lifts that refusal. A remembered bridge is still spared.
-    #[arg(long)]
-    pub no_bridge: bool,
-
-    /// Leave this board alone as well. Repeatable.
+    /// Leave this board alone. Repeatable.
     #[arg(long = "skip", value_name = "MAC", value_parser = mac_arg)]
     pub skip: Vec<Mac>,
 
@@ -104,12 +77,6 @@ pub fn run(args: Args) -> Result<()> {
     let features = features(&args.features);
     let chip = chip_of(&NODE, &features)?;
     espflash_present()?;
-    let mut bridge = bridge_to_spare(
-        args.bridge.as_deref(),
-        super::remembered_bridge(args.config.as_deref())?,
-        args.no_bridge,
-    )?;
-    bridge.named = bridge.named.map(|(given, spec)| (given, canonical(spec)));
     let source = source(
         &NODE,
         args.image.as_deref(),
@@ -132,10 +99,9 @@ pub fn run(args: Args) -> Result<()> {
     };
 
     let found = discover_ports().context("listing serial ports")?;
-    named_bridge_attached(&found, &bridge)?;
     let mut probe = Vec::new();
     let mut report = Vec::new();
-    for verdict in select(&found, &bridge, &args.skip) {
+    for verdict in select(&found, &args.skip) {
         match verdict {
             Verdict::Probe(candidate) => probe.push(candidate),
             Verdict::Skip(candidate, why) => report.push((candidate, Outcome::Skipped(why))),
@@ -213,54 +179,6 @@ fn flash_node(candidate: &PortCandidate, chip: Chip, image: &Path) -> Outcome {
     if seen_booting(address, BOOT_WAIT) { Outcome::Flashed } else { Outcome::NotRebooted(reset) }
 }
 
-/// Every board known to be the bridge.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct Spare {
-    /// `--bridge`, as typed and as matched.
-    named: Option<(String, BridgeSpec)>,
-    /// The bridge remembered in `wartui.toml`.
-    remembered: Option<Mac>,
-}
-
-impl Spare {
-    fn specs(&self) -> impl Iterator<Item = BridgeSpec> + '_ {
-        let named = self.named.iter().map(|(_, spec)| spec.clone());
-        named.chain(self.remembered.map(BridgeSpec::Mac))
-    }
-}
-
-/// Which boards the bridge could be, refusing when none is known and `--no-bridge` is absent.
-fn bridge_to_spare(named: Option<&str>, remembered: Option<Mac>, no_bridge: bool) -> Result<Spare> {
-    let spare = Spare { named: named.map(|text| (text.to_owned(), spec(text))), remembered };
-    if spare.named.is_some() || spare.remembered.is_some() || no_bridge {
-        return Ok(spare);
-    }
-    bail!(
-        "no bridge is known, so any board attached could be it. Name it with --bridge \
-         (`wartui ports` lists each board's address), or pass --no-bridge if none is attached"
-    )
-}
-
-/// Refuse a `--bridge` that names no attached board, since sparing it would spare nothing, and one
-/// that several boards end with, since which of them is the bridge is the question it was asked to
-/// settle.
-fn named_bridge_attached(candidates: &[PortCandidate], spare: &Spare) -> Result<()> {
-    let Some((given, spec)) = &spare.named else { return Ok(()) };
-    let named: Vec<_> = candidates.iter().filter(|candidate| matches(spec, candidate)).collect();
-    ensure!(
-        !named.is_empty(),
-        "--bridge {given} matches no attached board, so the bridge could not be spared. \
-         `wartui ports` lists each board with its address; name the bridge by its address"
-    );
-    ensure!(
-        named.len() == 1,
-        "--bridge {given} matches {} attached boards: {}. Name the bridge by more of its address",
-        named.len(),
-        named.iter().map(|board| board.label()).collect::<Vec<_>>().join(", ")
-    );
-    Ok(())
-}
-
 /// What to do with one attached board.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Verdict {
@@ -269,16 +187,13 @@ enum Verdict {
 }
 
 /// Which attached boards are worth probing. Reads nothing and opens nothing.
-fn select(candidates: &[PortCandidate], bridge: &Spare, skips: &[Mac]) -> Vec<Verdict> {
+fn select(candidates: &[PortCandidate], skips: &[Mac]) -> Vec<Verdict> {
     candidates
         .iter()
         .map(|candidate| {
-            let is_bridge = bridge.specs().any(|spec| matches(&spec, candidate));
-            let skip = if is_bridge {
-                Some(Skip::Bridge)
-            } else if is_p4_bridge(candidate) {
+            let skip = if is_p4_bridge(candidate) {
                 Some(Skip::P4Bridge)
-            } else if candidate.pid != Some(BRIDGE_PID) {
+            } else if candidate.pid != Some(SERIAL_JTAG_PID) {
                 Some(Skip::NotSerialJtag(candidate.pid))
             } else if let Some(address) = candidate.mac() {
                 skips.contains(&address).then_some(Skip::Operator)
@@ -370,52 +285,27 @@ mod tests {
 
     use super::super::normalize;
     use super::super::release_asset;
-    use super::super::testing::{BRIDGE_MAC, NODE_MAC, board, ran};
+    use super::super::testing::{NODE_MAC, board, ran};
     use super::*;
-    use wartui_proto::mac;
-
-    fn remembered(address: Mac) -> Spare {
-        Spare { named: None, remembered: Some(address) }
-    }
-
-    #[test]
-    fn flash_fleet_skips_bridge_when_remembered_mac_matches() {
-        let found =
-            [board("/dev/ttyACM0", Some(&BRIDGE_MAC)), board("/dev/ttyACM1", Some(&NODE_MAC))];
-        let verdicts = select(&found, &remembered(BRIDGE_MAC), &[]);
-        assert_eq!(verdicts[0], Verdict::Skip(found[0].clone(), Skip::Bridge));
-        assert_eq!(verdicts[1], Verdict::Probe(found[1].clone()));
-    }
-
-    #[test]
-    fn flash_fleet_skips_bridge_when_named_by_path_or_device() {
-        let mut bridge = board("/dev/ttyACM0", Some(&BRIDGE_MAC));
-        bridge.path = "/dev/serial/by-id/usb-Espressif_10:BD:A3:EC:44:C0-if00".to_owned();
-        let found = [bridge.clone()];
-        for named in [bridge.path.as_str(), "/dev/ttyACM0"] {
-            let verdicts = select(&found, &bridge_to_spare(Some(named), None, false).unwrap(), &[]);
-            assert_eq!(verdicts, [Verdict::Skip(bridge.clone(), Skip::Bridge)], "{named}");
-        }
-    }
 
     #[test]
     fn flash_fleet_skips_board_when_no_mac_is_reported() {
         let found = [board("/dev/ttyACM0", None)];
-        let verdicts = select(&found, &Spare::default(), &[]);
+        let verdicts = select(&found, &[]);
         assert_eq!(verdicts, [Verdict::Skip(found[0].clone(), Skip::NoAddress)]);
     }
 
     #[test]
     fn flash_fleet_skips_board_when_named_with_skip() {
         let found = [board("/dev/ttyACM1", Some(&NODE_MAC))];
-        let verdicts = select(&found, &Spare::default(), &[NODE_MAC]);
+        let verdicts = select(&found, &[NODE_MAC]);
         assert_eq!(verdicts, [Verdict::Skip(found[0].clone(), Skip::Operator)]);
     }
 
     #[test]
     fn flash_fleet_skips_board_when_product_is_not_serial_jtag() {
         let found = [candidate("/dev/ttyACM1", Some(ESPRESSIF_VID), Some(0x0002), Some("x"))];
-        let verdicts = select(&found, &Spare::default(), &[]);
+        let verdicts = select(&found, &[]);
         assert_eq!(verdicts, [Verdict::Skip(found[0].clone(), Skip::NotSerialJtag(Some(2)))]);
     }
 
@@ -423,109 +313,19 @@ mod tests {
     fn flash_fleet_skips_board_when_it_is_a_p4_bridge() {
         let mut p4 = candidate("/dev/ttyACM3", Some(TEST_VID), Some(TEST_PID), None);
         p4.product = Some("wartui p4 bridge".to_owned());
-        let verdicts = select(&[p4.clone()], &Spare::default(), &[]);
+        let verdicts = select(&[p4.clone()], &[]);
         assert_eq!(verdicts, [Verdict::Skip(p4, Skip::P4Bridge)]);
         assert!(Skip::P4Bridge.to_string().contains("wartui flash-bridge"));
     }
 
     #[test]
-    fn flash_fleet_refuses_run_when_no_bridge_is_known() {
-        let error = bridge_to_spare(None, None, false).unwrap_err().to_string();
-        assert!(error.contains("--no-bridge"), "{error}");
-    }
-
-    #[test]
-    fn flash_fleet_spares_remembered_bridge_when_bridge_names_a_path() {
-        // A path that matches nothing must not leave the remembered bridge exposed.
-        let spare = bridge_to_spare(Some("/dev/ttyACM3"), Some(BRIDGE_MAC), false).unwrap();
-        let found =
-            [board("/dev/ttyACM0", Some(&BRIDGE_MAC)), board("/dev/ttyACM1", Some(&NODE_MAC))];
-        let verdicts = select(&found, &spare, &[]);
-        assert_eq!(verdicts[0], Verdict::Skip(found[0].clone(), Skip::Bridge));
-        assert_eq!(verdicts[1], Verdict::Probe(found[1].clone()));
-    }
-
-    #[test]
-    fn flash_fleet_spares_both_when_named_and_remembered_bridges_differ() {
-        let spare = bridge_to_spare(Some("/dev/ttyACM1"), Some(BRIDGE_MAC), false).unwrap();
-        let found =
-            [board("/dev/ttyACM0", Some(&BRIDGE_MAC)), board("/dev/ttyACM1", Some(&NODE_MAC))];
-        let verdicts = select(&found, &spare, &[]);
-        assert!(verdicts.iter().all(|v| matches!(v, Verdict::Skip(_, Skip::Bridge))));
-    }
-
-    #[test]
-    fn flash_fleet_refuses_run_when_bridge_path_matches_no_candidate() {
-        let spare =
-            bridge_to_spare(Some("/dev/tty.usbmodem2101"), Some(BRIDGE_MAC), false).unwrap();
-        let found = [board("/dev/cu.usbmodem2101", Some(&BRIDGE_MAC))];
-        let error = named_bridge_attached(&found, &spare).unwrap_err().to_string();
-        assert!(error.contains("--bridge /dev/tty.usbmodem2101"), "{error}");
-        assert!(error.contains("wartui ports"), "{error}");
-    }
-
-    #[test]
-    fn flash_fleet_refuses_run_when_bridge_mac_matches_no_candidate() {
-        let spare = bridge_to_spare(Some("10:BD:A3:EC:44:C0"), None, false).unwrap();
-        let found = [board("/dev/ttyACM1", Some(&NODE_MAC))];
-        let error = named_bridge_attached(&found, &spare).unwrap_err().to_string();
-        assert!(error.contains("--bridge 10:BD:A3:EC:44:C0"), "{error}");
-    }
-
-    #[test]
-    fn flash_fleet_accepts_run_when_named_bridge_is_attached() {
-        let found = [board("/dev/ttyACM0", Some(&BRIDGE_MAC))];
-        for named in ["/dev/ttyACM0", "10:bd:a3:ec:44:c0"] {
-            let spare = bridge_to_spare(Some(named), None, false).unwrap();
-            named_bridge_attached(&found, &spare).unwrap();
-        }
-    }
-
-    #[test]
-    fn flash_fleet_spares_only_that_board_when_bridge_is_named_by_its_last_octets() {
-        let found =
-            [board("/dev/ttyACM0", Some(&BRIDGE_MAC)), board("/dev/ttyACM1", Some(&NODE_MAC))];
-        let spare = bridge_to_spare(Some("44:c0"), None, false).unwrap();
-        named_bridge_attached(&found, &spare).unwrap();
-        let verdicts = select(&found, &spare, &[]);
-        assert_eq!(verdicts[0], Verdict::Skip(found[0].clone(), Skip::Bridge));
-        assert_eq!(verdicts[1], Verdict::Probe(found[1].clone()));
-    }
-
-    #[test]
-    fn flash_fleet_refuses_run_when_bridge_tail_matches_several_boards() {
-        // Sparing both would leave the fleet half-flashed on a guess; saying which is
-        // the bridge is what `--bridge` was for.
-        let twin = [0x3C, 0xDC, 0x75, 0x84, 0x44, 0xC0];
-        let found = [board("/dev/ttyACM0", Some(&BRIDGE_MAC)), board("/dev/ttyACM1", Some(&twin))];
-        let spare = bridge_to_spare(Some("44:C0"), None, false).unwrap();
-        let error = named_bridge_attached(&found, &spare).unwrap_err().to_string();
-        assert!(error.contains("--bridge 44:C0 matches 2 attached boards"), "{error}");
-        assert!(
-            error.contains(&mac::full(&BRIDGE_MAC).to_string())
-                && error.contains(&mac::full(&twin).to_string()),
-            "{error}"
-        );
-    }
-
-    #[test]
-    fn flash_fleet_accepts_run_when_remembered_bridge_is_not_attached() {
-        // An unplugged bridge is not a mistake; only a named one that is absent is.
-        let found = [board("/dev/ttyACM1", Some(&NODE_MAC))];
-        named_bridge_attached(&found, &remembered(BRIDGE_MAC)).unwrap();
-        let verdicts = select(&found, &remembered(BRIDGE_MAC), &[]);
-        assert_eq!(verdicts, [Verdict::Probe(found[0].clone())]);
-    }
-
-    #[test]
-    fn flash_fleet_spares_nothing_when_no_bridge_is_passed_and_none_is_remembered() {
-        assert_eq!(bridge_to_spare(None, None, true).unwrap(), Spare::default());
-    }
-
-    #[test]
-    fn flash_fleet_spares_remembered_bridge_when_no_bridge_is_given() {
-        // `--no-bridge` lifts the refusal; it never unprotects a board known to be the bridge.
-        assert_eq!(bridge_to_spare(None, Some(BRIDGE_MAC), true).unwrap(), remembered(BRIDGE_MAC));
+    fn flash_fleet_skips_p4_bridge_and_probes_node_when_no_bridge_is_known() {
+        let mut p4 =
+            candidate("/dev/ttyACM0", Some(TEST_VID), Some(TEST_PID), Some("10:BD:A3:EC:44:C0"));
+        p4.product = Some("wartui p4 bridge".to_owned());
+        let node = board("/dev/ttyACM1", Some(&NODE_MAC));
+        let verdicts = select(&[p4.clone(), node.clone()], &[]);
+        assert_eq!(verdicts, [Verdict::Skip(p4, Skip::P4Bridge), Verdict::Probe(node)]);
     }
 
     #[test]

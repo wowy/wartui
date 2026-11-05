@@ -51,7 +51,7 @@ pub async fn run(args: Args) -> Result<()> {
 
     // The bridge announces itself on connect, so waiting for that keeps a status
     // request from going into a port nobody is listening on. The timeout is itself an
-    // answer: it names the port and what to do about each of the three causes.
+    // answer: it names the port and what to do about each cause.
     let info = match tokio::time::timeout(REPLY_TIMEOUT, wait_for_ready(&mut link)).await {
         Ok(ready) => ready?,
         Err(_) => bail!("{}", super::no_bridge_notice(args.bridge.as_deref())),

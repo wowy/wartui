@@ -351,8 +351,8 @@ file and line. An out-of-range value, an unknown `pool`, a malformed `node` or `
 its table's `remember = false`, or an `excluded-ssids` entry that is empty, over 32 bytes, or listed
 twice is refused too, naming the file and key. `status`, `sniff`, `reset` and `ota` read only
 `[bridge] mac`, and treat a broken file as no bridge remembered, so it cannot stop them.
-`flash-fleet` and `flash-bridge` read only `[bridge] mac` too, but refuse a broken file, since it
-decides which board gets firmware. Settings (`c`) rewrites the whole file on save, `b` writes the
+`flash-bridge` reads only `[bridge] mac` too, but refuses a broken file, since it decides which
+board gets firmware. `flash-fleet` never reads the file. Settings (`c`) rewrites the whole file on save, `b` writes the
 Bluetooth node, and `run` writes `[bridge] mac` when the bridge it remembers changes; see "Keyboard
 commands" and "When nothing arrives". `flash-bridge` writes `[bridge] mac` for a board it found and
 flashed; see "Flashing the bridge". When the file is missing, `run` creates it holding only `wdgwars = ""`, except
@@ -372,7 +372,7 @@ bytes.
 | Linux and others | `$XDG_CONFIG_HOME/wartui/wartui.toml`, or `~/.config/wartui/wartui.toml` when that variable is unset or relative |
 
 `--config PATH` reads another file, for testing and debugging. Every command that reads the file
-takes it: `run`, `export`, `analyze`, `upload`, `status`, `sniff`, `reset`, `ota`, `flash-fleet` and
+takes it: `run`, `export`, `analyze`, `upload`, `status`, `sniff`, `reset`, `ota` and
 `flash-bridge`. A named file that is missing is refused; a missing default file silently means the
 built-in defaults.
 
@@ -402,38 +402,28 @@ It uses `espflash`, which must be on `PATH`.
 ```sh
 wartui flash-fleet --dry-run     # what would be flashed, and from where
 wartui flash-fleet
-wartui flash-fleet --bridge 10:BD:A3:EC:44:C0
+wartui flash-fleet --skip 10:BD:A3:EC:44:C0
 ```
 
 | Flag                    | Default        | What it is                                                                 |
 |-------------------------|----------------|----------------------------------------------------------------------------|
 | `--features LIST`       | `esp32c5`      | The node firmware's features, which must name `esp32c5`                    |
 | `--no-default-features` | off            | Build without the firmware's default features                              |
-| `--bridge PATH\|MAC`    | remembered     | The bridge, which must be attached and is never flashed; `00:08` works too |
-| `--no-bridge`           | off            | No bridge is attached; a remembered one is still spared                    |
-| `--config PATH`         | per-OS path    | Where to read the remembered bridge; see "Config file"                     |
-| `--skip MAC`            | —              | Leave this board alone too; repeatable                                     |
+| `--skip MAC`            | —              | Leave this board alone; repeatable                                         |
 | `--image BIN`           | —              | Flash this merged image rather than building or fetching one               |
 | `--firmware-dir DIR`    | the checkout's | Build the image from the node firmware here                                |
 | `--jobs N`              | `4`            | How many boards to probe or flash at once                                  |
 | `--dry-run`             | off            | Probe and report; build, fetch and flash nothing                           |
 
-**The bridge has to be known.** It shares the nodes' vendor, product, and often chip, so only its
-address tells it apart. The run spares the board `--bridge` names and the bridge remembered in
-`wartui.toml`, whichever are known; a remembered bridge that is not attached is unplugged, not an error. The run is
-refused when:
-
-- Neither is known, unless `--no-bridge` says none is attached.
-- `--bridge` matches no attached board, since sparing it would spare nothing. Typical causes: a
-  typo, a device node that moved on replug, or a macOS `/dev/tty.*` where `wartui ports` lists
-  `/dev/cu.*`. Naming the bridge by address avoids all three.
-- A short `--bridge` matches several boards.
+**No bridge has to be known.** A P4 bridge is told apart by its USB IDs and skipped, so the run
+reads no `wartui.toml`. Every attached Espressif native-USB ESP32-C5 that isn't named with `--skip` gets
+node firmware, including any other C5 board on the host.
 
 A board is flashed only when all five hold; otherwise it is skipped and listed with the reason:
 
 1. It is native USB Serial/JTAG (`303a:1001`) and reports its address as its serial number. A P4
    bridge is skipped with its own reason: `flash-bridge` updates it.
-2. It is not the bridge, and not named with `--skip`.
+2. It is not named with `--skip`.
 3. `espflash board-info` reads an ESP32-C5.
 4. `espflash board-info` reads the same address from the chip that the OS reported for the port.
 5. `espflash board-info` reads at least 4 MB of flash, which the node's two app slots need.
@@ -496,13 +486,14 @@ applies. A node beside the bridge changes nothing.
 The run is refused when:
 
 - The remembered bridge is not attached, because the board present is known not to be it.
+- The remembered bridge is attached but is not a P4 bridge. Name the P4 bridge with `--bridge`.
 - `--bridge` matches no attached P4 bridge, or several. Naming a node is the first of these.
 - Several P4 bridges are attached and none is known. The refusal lists their addresses; pick one
   with `--bridge`.
 - No P4 bridge is attached. A blank P4 shows up only as its CH343, and takes its first flash by hand.
 
-A board found without `--bridge` is saved to `wartui.toml` as the bridge once updated, so
-`flash-fleet` spares it from the next run on; with `remember bridge` off, nothing is saved. A board
+A board found without `--bridge` is saved to `wartui.toml` as the bridge once updated, so `run` and
+the next `flash-bridge` open it first; with `remember bridge` off, nothing is saved. A board
 named with `--bridge` is not saved, since one flashed by name is often some other device. When the
 save fails, the update still succeeds and a line says why.
 
@@ -941,8 +932,8 @@ The footer shows faults only once they happen, so a clean run has a clean footer
 and keeps the first that answers the link protocol. `run` saves that address to
 `wartui.toml` as `[bridge] mac`, so later runs open only that port. A capture given `--bridge` saves
 the named board once it answers, since naming it for a capture is choosing it. `flash-bridge` saves
-the board it found and flashed. `status`, `sniff`, `reset`, `ota` and `flash-fleet` read it and save
-nothing, so questioning a board or flashing nodes changes nothing later. An answering board is held for the run:
+the board it found and flashed. `status`, `sniff`, `reset` and `ota` read it and save nothing, so
+questioning a board changes nothing later, and `flash-fleet` never reads it. An answering board is held for the run:
 unplug the bridge to reflash a node, and wartui waits rather than transmit into it.
 
 Deleting the `mac` line is always safe, costs one slower start, and fixes wartui opening the wrong

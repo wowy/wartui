@@ -22,9 +22,10 @@
 //! share one cache directory per tag. A build without the tag is a checkout, and builds the
 //! firmware beside it.
 //!
-//! **The remembered bridge is read strictly.** Both commands decide which board gets firmware
-//! from `[bridge] mac`, so a `wartui.toml` that does not load stops them ([`remembered_bridge`]),
-//! where `status` and the like read it as no bridge remembered.
+//! **The remembered bridge is read strictly.** `flash-bridge` decides which board gets firmware
+//! from `[bridge] mac`, so a `wartui.toml` that does not load stops it ([`remembered_bridge`]),
+//! where `status` and the like read it as no bridge remembered. `flash-fleet` never reads the
+//! file: a P4 bridge's USB IDs tell it apart.
 //!
 //! **espflash flashes every node, and resets each one on purpose.** The one port opened here is a
 //! node's after `flash-fleet` flashes it, read to see it boot ([`boot`]), and it is opened without
@@ -35,6 +36,8 @@ mod boot;
 pub mod bridge;
 pub mod fleet;
 mod p4;
+
+pub(crate) use p4::FIRST_FLASH;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -213,7 +216,6 @@ fn canonical(spec: BridgeSpec) -> BridgeSpec {
 /// Why a board was left alone.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Skip {
-    Bridge,
     P4Bridge,
     NotSerialJtag(Option<u16>),
     NoAddress,
@@ -228,7 +230,6 @@ enum Skip {
 impl fmt::Display for Skip {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Bridge => f.write_str("the bridge"),
             Self::P4Bridge => f.write_str("a P4 bridge, which `wartui flash-bridge` updates"),
             Self::NotSerialJtag(Some(pid)) => {
                 write!(f, "not native USB Serial/JTAG (product {pid:04x})")
@@ -701,7 +702,7 @@ fn espflash<S: AsRef<std::ffi::OsStr>>(args: &[S]) -> Ran {
 /// Fixtures the tests of every flashing command share.
 #[cfg(test)]
 mod testing {
-    use wartui_bridge::ports::{BRIDGE_PID, ESPRESSIF_VID, PortCandidate, candidate};
+    use wartui_bridge::ports::{ESPRESSIF_VID, PortCandidate, SERIAL_JTAG_PID, candidate};
     use wartui_proto::mac::{self, Mac};
 
     use super::Ran;
@@ -744,7 +745,7 @@ Chip ID: 23
 
     pub(super) fn board(device: &str, address: Option<&Mac>) -> PortCandidate {
         let serial = address.map(|a| mac::full(a).to_string());
-        candidate(device, Some(ESPRESSIF_VID), Some(BRIDGE_PID), serial.as_deref())
+        candidate(device, Some(ESPRESSIF_VID), Some(SERIAL_JTAG_PID), serial.as_deref())
     }
 
     pub(super) fn c5_image() -> Vec<u8> {

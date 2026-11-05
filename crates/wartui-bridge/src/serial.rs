@@ -88,9 +88,14 @@ pub fn discover_ports() -> Result<Vec<PortCandidate>, TransportError> {
 /// # Errors
 /// [`TransportError::Enumerate`] if the ports cannot be listed.
 pub fn discover_bridges() -> Result<Vec<PortCandidate>, TransportError> {
-    let mut found = ports::list()?;
-    found.retain(ports::could_be_a_bridge);
-    Ok(found)
+    Ok(bridges_among(ports::list()?))
+}
+
+/// The P4 bridges out of everything the OS listed.
+#[must_use]
+pub fn bridges_among(mut listed: Vec<PortCandidate>) -> Vec<PortCandidate> {
+    listed.retain(ports::could_be_a_bridge);
+    listed
 }
 
 /// How a bridge was named on the command line.
@@ -104,10 +109,10 @@ pub fn discover_bridges() -> Result<Vec<PortCandidate>, TransportError> {
 pub enum BridgeSpec {
     /// A device path, opened as given and never traded for another.
     Path(String),
-    /// A board's address, matched against what the OS reports as its serial number.
+    /// A P4 bridge's address, matched against what the OS reports as its serial number.
     Mac(Mac),
-    /// The last one to five octets of a board's address, matched the same way. It
-    /// names a board only when exactly one attached board ends with them.
+    /// The last one to five octets of a P4 bridge's address, matched the same way. It
+    /// names a board only when exactly one attached P4 bridge ends with them.
     Tail(Vec<u8>),
 }
 
@@ -158,18 +163,22 @@ impl std::fmt::Display for BridgeSpec {
     }
 }
 
-/// The port a spec names, out of what is attached.
+/// The port a spec names, out of the P4 bridges attached.
+///
+/// An address is matched against the list the sweep uses, so one that only a node carries
+/// names nothing and a node sharing a P4 bridge's tail does not make it ambiguous. `wartui
+/// reset` opens what this returns and transmits at once, so a node here is a node rebooted.
 ///
 /// # Errors
 /// [`TransportError::Enumerate`] if the ports cannot be listed,
-/// [`TransportError::NoSuchBridge`] if nothing attached carries that address, or
-/// [`TransportError::AmbiguousName`] if several boards end with the octets given.
+/// [`TransportError::NoSuchBridge`] if no attached P4 bridge carries that address, or
+/// [`TransportError::AmbiguousName`] if several end with the octets given.
 pub fn resolve(spec: &BridgeSpec) -> Result<String, TransportError> {
     match spec {
         // A path is answered without enumerating: whether it exists is the
         // question the open asks, and the OS gives a better answer than a list.
         BridgeSpec::Path(path) => Ok(path.clone()),
-        BridgeSpec::Mac(_) | BridgeSpec::Tail(_) => resolve_in(&ports::list()?, spec),
+        BridgeSpec::Mac(_) | BridgeSpec::Tail(_) => resolve_in(&discover_bridges()?, spec),
     }
 }
 
@@ -179,8 +188,8 @@ pub fn resolve(spec: &BridgeSpec) -> Result<String, TransportError> {
 /// another: an operator who named a board meant that board, and quietly opening a
 /// different one is how a capture ends up attributed to the wrong fleet. A tail
 /// that several boards end with is refused for the same reason, before anything is
-/// opened: the bridge and a node can share their last octet, and guessing between
-/// them is transmitting into a node.
+/// opened: two P4 bridges can share their last octets, and guessing between them is
+/// transmitting into another fleet's bridge.
 ///
 /// # Errors
 /// [`TransportError::NoSuchBridge`] if nothing in `candidates` is that board, or
@@ -1077,13 +1086,13 @@ mod tests {
     use crate::LinkEvent;
     use crate::remember::BridgeMemory;
 
-    use crate::ports::{BRIDGE_PID, ESPRESSIF_VID, PortCandidate, candidate};
+    use crate::ports::{ESPRESSIF_VID, PortCandidate, SERIAL_JTAG_PID, candidate};
 
     const BRIDGE_MAC: &str = "10:BD:A3:EC:44:C0";
     const NODE_MAC: &str = "02:00:5E:10:9D:24";
 
     fn board(mac: &str) -> PortCandidate {
-        candidate("/dev/ttyACM0", Some(ESPRESSIF_VID), Some(BRIDGE_PID), Some(mac))
+        candidate("/dev/ttyACM0", Some(ESPRESSIF_VID), Some(SERIAL_JTAG_PID), Some(mac))
     }
 
     #[test]

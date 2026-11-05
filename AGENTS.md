@@ -300,8 +300,9 @@ edit stops; follow the pointer before changing the rule.
   `wartui reset` — which transmits before anything has identified itself — never sweeps at all. The
   GPS search is the other side: it opens everything but the fleet's boards (the P4 bridge and any
   Espressif vendor ID), and writes to none of them. `discover_ports` lists those boards for
-  `flash-fleet`, boot watching and `wartui ports`, and `discover_bridges` is what the sweep, `reset`
-  and `flash-bridge` read. → `crates/wartui-bridge/src/ports.rs` `//!`,
+  `flash-fleet`, `flash-bridge`, boot watching and `wartui ports`, and `discover_bridges` is what the
+  sweep and `reset` read, including `serial::resolve` for an address `--bridge` names.
+  → `crates/wartui-bridge/src/ports.rs` `//!`,
   `serial::select` / `serial::unambiguous_bridge`, `crates/wartui-core/src/discover.rs` `//!`
 - **A connection asks once and then only waits.** A path named with `--bridge` is opened whatever
   it reaches, and a board that is not reading its USB endpoint absorbs exactly one packet and NACKs

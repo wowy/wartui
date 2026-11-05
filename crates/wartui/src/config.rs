@@ -1,8 +1,8 @@
 //! `wartui.toml` — settings an operator wants to stop typing every run.
 //!
 //! **The operator's own decision**, so a mistake in it is refused rather than absorbed:
-//! an unknown key or an out-of-range value stops `run`, `export`, `analyze`, `upload`,
-//! `flash-fleet` and `flash-bridge` from starting, and names the file and the problem.
+//! an unknown key or an out-of-range value stops `run`, `export`, `analyze`, `upload`
+//! and `flash-bridge` from starting, and names the file and the problem.
 //! `--config` is one of each's own arguments. Within `run`, the file beats the built-in
 //! default. `export`, `analyze` and `upload` read the excluded SSIDs, `upload` the API key
 //! too, and none of them creates or saves the file.
@@ -10,17 +10,17 @@
 //! **The remembered bridge is the one value other commands read.** `status`, `sniff`,
 //! `reset` and `ota` take `[bridge] mac` through [`remembered_bridge`] to pick or order
 //! boards, and a missing or broken file is no bridge remembered there, so a bad
-//! `wartui.toml` cannot stop a command that checks the link. `flash-fleet` and
-//! `flash-bridge` take it through [`load`] and refuse a broken file: which board they
-//! write firmware over depends on it.
+//! `wartui.toml` cannot stop a command that checks the link. `flash-bridge` takes it
+//! through [`load`] and refuses a broken file: which board it writes firmware over
+//! depends on it. `flash-fleet` never reads the file.
 //!
 //! **Two commands write the bridge.** `run` creates the file once when it is absent,
 //! holding only the empty API key, so a first-time operator has a place to paste one. It
 //! never rewrites an existing file at startup. Its view does, through one save path: the
 //! settings modal, `b`, and a change to the bridge the transport remembers.
 //! `flash-bridge` saves the board it found and flashed as the bridge, unless remembering
-//! is off, so a `flash-fleet` after it spares the new bridge. A board named with
-//! `--bridge` is often some other device, and is not saved.
+//! is off, so `run` and the next `flash-bridge` open the new bridge first. A board named
+//! with `--bridge` is often some other device, and is not saved.
 //!
 //! This lives in `crates/wartui` rather than `wartui-core`: the core crate parses no
 //! arguments, and a config file is operator input just like a flag is.

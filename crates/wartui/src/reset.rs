@@ -71,7 +71,7 @@ pub async fn run(args: Args) -> Result<()> {
     // A sweep sends this command's `Reset` into every P4 bridge attached until one
     // answers, and with two attached that reboots another fleet's bridge. So this
     // command gets an unambiguous board or none, and says which it wanted. A board named by the end
-    // of its address is resolved here for the same reason: a tail several boards
+    // of its address is resolved here for the same reason: a tail several P4 bridges
     // share is refused before anything is opened, rather than left to a transport
     // that would wait out the whole timeout saying nothing.
     let remembered = crate::config::remembered_bridge(args.config.as_deref());
@@ -205,7 +205,7 @@ fn unreachable_notice(bridge: Option<&str>) -> String {
     let device = bridge.and_then(|named| super::named_device(named).ok());
     let where_ = match (bridge, device.as_deref()) {
         (Some(_), Some(path)) => format!("on {path}"),
-        (Some(name), None) => format!("named {name}, which no attached board answers to"),
+        (Some(name), None) => format!("named {name}, which no attached P4 bridge answers to"),
         (None, _) => "on the board that was detected".to_owned(),
     };
     [

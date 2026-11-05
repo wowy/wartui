@@ -99,13 +99,13 @@ pub enum LinkEvent {
 /// Why the link could not be established or used.
 #[derive(Debug, Error)]
 pub enum TransportError {
-    /// No serial port looked like an Espressif device.
+    /// No P4 bridge is attached.
     #[error("no bridge found; name one with --bridge")]
     NoBridgeFound,
-    /// A bridge was named and nothing attached answers to that name.
-    #[error("no board attached is {spec}")]
+    /// A bridge was named by its address, and no attached P4 bridge has it.
+    #[error("no attached P4 bridge is {spec}")]
     NoSuchBridge {
-        /// The path or address that was asked for.
+        /// The address that was asked for.
         spec: String,
     },
     /// Several boards are attached and nothing says which of them is the bridge.
@@ -117,12 +117,14 @@ pub enum TransportError {
         /// The boards that were found, by address where they report one.
         boards: String,
     },
-    /// A bridge was named by the end of its address, and several boards end that way.
-    #[error("several attached boards end with {spec} ({boards}); name one by more of its address")]
+    /// A bridge was named by the end of its address, and several P4 bridges end that way.
+    #[error(
+        "several attached P4 bridges end with {spec} ({boards}); name one by more of its address"
+    )]
     AmbiguousName {
         /// The octets that were asked for.
         spec: String,
-        /// The boards that end with them.
+        /// The P4 bridges that end with them.
         boards: String,
     },
     /// The OS refused the port.

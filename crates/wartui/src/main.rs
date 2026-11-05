@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use wartui_bridge::ports::PortCandidate;
 use wartui_bridge::remember::BridgeMemory;
 use wartui_bridge::serial::{self, BridgeSpec, SerialTransport, discover_ports};
 use wartui_bridge::sim::{SimConfig, SimTransport};
@@ -74,7 +75,7 @@ enum Command {
     Reset(reset::Args),
     /// List the Espressif boards and P4 bridges attached, and the address of each.
     Ports,
-    /// Flash node firmware onto every attached board of one chip, sparing the bridge.
+    /// Flash node firmware onto every attached ESP32-C5, skipping the P4 bridge.
     FlashFleet(flash::fleet::Args),
     /// Flash bridge firmware onto the bridge, or update a P4 bridge over its link.
     FlashBridge(flash::bridge::Args),
@@ -94,7 +95,8 @@ async fn main() -> Result<()> {
     let _log = logging(cli.log_file.as_deref())?;
     match cli.command {
         // Each command loads `wartui.toml` itself, if at all. `status`, `sniff`, `reset`
-        // and `ota` read a broken one as no bridge remembered, and `ports` never reads it.
+        // and `ota` read a broken one as no bridge remembered, and `ports` and `flash-fleet`
+        // never read it.
         None => run::run(cli.run).await,
         Some(Command::Run(args)) => run::run(args).await,
         Some(Command::Export(args)) => export::run(args),
@@ -182,12 +184,11 @@ fn logging(
 /// List the Espressif boards and P4 bridges attached, each named by the address it transmits
 /// from.
 ///
-/// The address is the point of the command. A node plugged in by USB is the same
-/// vendor and product as the bridge and sits on an adjacent device node, so a path
-/// says nothing about which board it reaches — while an ESP32's USB serial number
-/// *is* its MAC, so the OS has already answered, with nothing opened and no `esp`
-/// tool. The bridge is then the row whose address the fleet table shows as the
-/// bridge's, and a node the row `wartui sniff` attributes heartbeats to.
+/// The address is the point of the command. Every node reports one vendor and product
+/// and sits on an adjacent device node, so a path says nothing about which node it
+/// reaches — while an ESP32's USB serial number *is* its MAC, so the OS has already
+/// answered, with nothing opened and no `esp` tool. A P4 bridge is the row with its own
+/// vendor and product, and a node the row `wartui sniff` attributes heartbeats to.
 fn ports() -> Result<()> {
     let found = discover_ports().context("listing serial ports")?;
     if found.is_empty() {
@@ -291,14 +292,14 @@ pub fn last_reset_line(info: &BridgeInfo) -> String {
         ResetCause::Unknown => "reset for a reason it could not name",
     };
     // The phase is only ever a hint: the SPI link marks it on every transfer, so it says
-    // what ran last, not what stopped the bridge (`LoopPhase`). `Unknown` has nothing to
-    // name.
+    // what ran last, not what stopped the bridge (`LoopPhase`). `Boot` is the exception:
+    // nothing else has marked yet, so it is a fact. `Unknown` has nothing to name.
     let phase = match info.last_phase {
-        LoopPhase::Command => Some("it was carrying out a host command"),
-        LoopPhase::DrainLink => Some("it was reading host commands"),
-        LoopPhase::Pump => Some("it was writing to the USB endpoint"),
+        LoopPhase::Command => Some("it last ran a host command"),
+        LoopPhase::DrainLink => Some("it last read host commands"),
+        LoopPhase::Pump => Some("it last wrote to the USB endpoint"),
         LoopPhase::Boot => Some("it had not finished starting"),
-        LoopPhase::SpiTransfer => Some("it was waiting on its SPI link"),
+        LoopPhase::SpiTransfer => Some("it last ran its SPI link"),
         LoopPhase::Unknown => None,
     };
     match phase {
@@ -389,42 +390,74 @@ impl Default for Terminate {
 /// up is not accused of being wedged.
 pub const CONNECT_NOTICE_AFTER: Duration = Duration::from_secs(5);
 
-/// What to say when the port opened and nothing behind it answered.
-///
-/// The case that otherwise produces no output at all, spelled out because the three
-/// causes need three different actions and the symptom is identical. A failure to
-/// *open* the port is not this: that arrives as [`LinkEvent::Disconnected`] carrying
-/// the OS's own message. The wedged case is the hard one — the port opens, the writes
-/// succeed, and nothing comes back — and a reset is the only way to tell.
+/// What to say when no bridge has answered: [`silence_notice`] over the P4 bridges attached
+/// now. A listing that fails reads as none attached, and the transport names that failure.
 pub fn no_bridge_notice(bridge: Option<&str>) -> String {
+    silence_notice(bridge, &serial::discover_bridges().unwrap_or_default())
+}
+
+/// What to say about a silence, given the P4 bridges attached.
+///
+/// The case that otherwise produces no output at all, spelled out because each cause needs
+/// its own action and the symptom is identical. A failure to *open* the port is not this:
+/// that arrives as [`LinkEvent::Disconnected`] carrying the OS's own message. The wedged
+/// case is the hard one — the port opens, the writes succeed, and nothing comes back — and
+/// a reset is the only way to tell.
+///
+/// Only a path can reach a node: an address and a sweep match P4 bridges alone. So node
+/// firmware is a cause for a path and for nothing else.
+fn silence_notice(bridge: Option<&str>, bridges: &[PortCandidate]) -> String {
     let seconds = CONNECT_NOTICE_AFTER.as_secs();
-    let (where_, wartui_reset) = match bridge.map(|name| (name, named_device(name))) {
-        Some((name, Ok(path))) => (format!("on {path}"), format!("wartui reset --bridge {name}")),
-        // A board that is not attached needs none of what follows: there is no port
-        // to have been opened, so the three causes below are all about something
-        // else, and the one fact worth saying is already known. A tail several boards
-        // end with is the same: nothing was opened, and the reason is the ambiguity.
-        Some((name, Err(error))) => {
-            let why = match error {
-                TransportError::AmbiguousName { .. } => error.to_string(),
-                _ => format!("no attached board is {name}"),
-            };
+    let (where_, wartui_reset, any_board) = match bridge {
+        Some(name) => match serial::resolve_in(bridges, &spec(name)) {
+            Ok(path) => (
+                format!("on {path}"),
+                format!("wartui reset --bridge {name}"),
+                matches!(spec(name), BridgeSpec::Path(_)),
+            ),
+            // A board that is not attached needs none of what follows: there is no port
+            // to have been opened, so the causes below are all about something else, and
+            // the one fact worth saying is already known. A tail several boards end with
+            // is the same: nothing was opened, and the reason is the ambiguity.
+            Err(error) => {
+                let why = match error {
+                    TransportError::AmbiguousName { .. } => error.to_string(),
+                    _ => format!("no attached P4 bridge is {name}"),
+                };
+                return [
+                    format!("{why}, so nothing was opened."),
+                    "`wartui ports` lists what is attached, each board with its address."
+                        .to_owned(),
+                ]
+                .join("\n");
+            }
+        },
+        // Nothing to open, so nothing to reset: `wartui reset` would refuse too.
+        None if bridges.is_empty() => {
             return [
-                format!("{why}, so nothing was opened."),
+                "no P4 bridge is attached, so nothing was opened.".to_owned(),
                 "`wartui ports` lists what is attached, each board with its address.".to_owned(),
+                format!(
+                    "A P4 with no firmware shows up only as its CH343; see {}.",
+                    flash::FIRST_FLASH
+                ),
             ]
             .join("\n");
         }
-        None => ("on the board that was detected".to_owned(), "wartui reset".to_owned()),
+        None => ("on the board that was detected".to_owned(), "wartui reset".to_owned(), false),
     };
     // Assembled a line at a time: a continued literal puts the source's own
     // indentation inside the string.
-    [
+    let mut lines = vec![
         format!("nothing has identified itself as a bridge {where_} after {seconds}s."),
         "The port opened, so a device is there and it is not speaking the link protocol."
             .to_owned(),
         "Usually one of:".to_owned(),
-        "  - it is running node firmware rather than bridge firmware".to_owned(),
+    ];
+    if any_board {
+        lines.push("  - it is running node firmware rather than bridge firmware".to_owned());
+    }
+    lines.extend([
         format!("  - the bridge is wedged, which a reboot clears: {wartui_reset}"),
         "  - another program is holding the port".to_owned(),
         "`wartui ports` lists what is attached; `--log-file` records what the transport tried."
@@ -432,13 +465,24 @@ pub fn no_bridge_notice(bridge: Option<&str>) -> String {
         // The fallback rather than the first suggestion: a bridge that has stopped
         // answering may still read, and reboots on being asked.
         "If that goes unanswered too, power-cycle it.".to_owned(),
-    ]
-    .join("\n")
+    ]);
+    lines.join("\n")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{BridgeSpec, Command, no_bridge_notice, parse, spec};
+    use wartui_bridge::ports::{PortCandidate, TEST_PID, TEST_VID, candidate};
+
+    use super::{BridgeInfo, BridgeSpec, Command, last_reset_line, parse, silence_notice, spec};
+    use wartui_proto::link::{Chip, LoopPhase};
+    use wartui_proto::reset::ResetCause;
+
+    /// A P4 bridge as the OS lists it, at `10:BD:A3:EC:44:C0`.
+    fn p4_bridge(device: &str) -> PortCandidate {
+        let mut p4 = candidate(device, Some(TEST_VID), Some(TEST_PID), Some("10:BD:A3:EC:44:C0"));
+        p4.product = Some("wartui p4 bridge".to_owned());
+        p4
+    }
 
     #[test]
     fn cli_parser_rejects_global_bridge_flag_when_placed_before_subcommand() {
@@ -521,9 +565,15 @@ mod tests {
         for command in ["status", "sniff", "reset", "ota"] {
             assert!(parse(["wartui", command, "--config", "w.toml"]).is_ok(), "{command}");
         }
-        for command in ["flash-fleet", "flash-bridge"] {
-            let args = ["wartui", command, "--features", "esp32c5", "--config", "w.toml"];
-            assert!(parse(args).is_ok(), "{command}");
+        assert!(parse(["wartui", "flash-bridge", "--config", "w.toml"]).is_ok());
+    }
+
+    #[test]
+    fn cli_parser_rejects_bridge_and_config_flags_when_passed_to_flash_fleet() {
+        // It knows a P4 bridge by its USB IDs, so it has no use for either.
+        for flag in [["--bridge", "/dev/x"], ["--config", "w.toml"]] {
+            let args = ["wartui", "flash-fleet", flag[0], flag[1]];
+            assert!(parse(args).is_err(), "{args:?} should be refused");
         }
     }
 
@@ -561,7 +611,7 @@ mod tests {
 
     #[test]
     fn cli_parser_defaults_flash_fleet_features_to_esp32c5_when_flag_is_omitted() {
-        let cli = parse(["wartui", "flash-fleet", "--no-bridge"]).unwrap();
+        let cli = parse(["wartui", "flash-fleet"]).unwrap();
         let Some(Command::FlashFleet(args)) = cli.command else { panic!("not flash-fleet") };
         assert_eq!(args.features, "esp32c5");
     }
@@ -595,15 +645,8 @@ mod tests {
     }
 
     #[test]
-    fn cli_parser_rejects_flash_fleet_when_bridge_and_no_bridge_are_both_given() {
-        let args =
-            ["wartui", "flash-fleet", "--features", "esp32c5", "--no-bridge", "--bridge", "/dev/x"];
-        assert!(parse(args).is_err());
-    }
-
-    #[test]
     fn cli_diagnostics_formats_named_bridge_notice_when_bridge_is_specified() {
-        let notice = no_bridge_notice(Some("/dev/cu.usbmodem2101"));
+        let notice = silence_notice(Some("/dev/cu.usbmodem2101"), &[]);
         assert!(notice.contains("on /dev/cu.usbmodem2101 after 5s"), "{notice}");
         // The remedy has to be runnable as printed, which means carrying the
         // same board through rather than leaving the reader to fill it in.
@@ -611,19 +654,80 @@ mod tests {
     }
 
     #[test]
-    fn cli_diagnostics_formats_generic_bridge_notice_when_bridge_is_unspecified() {
-        let notice = no_bridge_notice(None);
+    fn cli_diagnostics_names_wedge_and_holder_when_detected_p4_bridge_is_silent() {
+        let notice = silence_notice(None, &[p4_bridge("/dev/ttyACM0")]);
         assert!(notice.contains("on the board that was detected"), "{notice}");
-        assert!(notice.contains("wartui reset"), "{notice}");
+        assert!(notice.contains("The port opened"), "{notice}");
+        assert!(notice.contains("wedged, which a reboot clears: wartui reset"), "{notice}");
+        assert!(notice.contains("another program"), "{notice}");
+        assert!(notice.contains("power-cycle"), "{notice}");
+        // A sweep opens only P4 bridges.
+        assert!(!notice.contains("node firmware"), "{notice}");
         // No dangling `--bridge` with nothing after it.
         assert!(!notice.contains("--bridge"), "{notice}");
+    }
+
+    #[test]
+    fn cli_diagnostics_says_nothing_opened_when_no_p4_bridge_is_attached() {
+        let notice = silence_notice(None, &[]);
+        assert!(notice.contains("no P4 bridge is attached, so nothing was opened"), "{notice}");
+        assert!(notice.contains("wartui ports"), "{notice}");
+        assert!(notice.contains("CH343"), "{notice}");
+        assert!(notice.contains("firmware/p4-bridge/README.md"), "{notice}");
+        // There is no port for any of these to be about.
+        for wrong in ["wartui reset", "The port opened", "power-cycle"] {
+            assert!(!notice.contains(wrong), "{wrong}: {notice}");
+        }
+    }
+
+    #[test]
+    fn cli_diagnostics_omits_node_firmware_when_address_names_silent_p4_bridge() {
+        let notice = silence_notice(Some("44:C0"), &[p4_bridge("/dev/ttyACM0")]);
+        assert!(notice.contains("on /dev/ttyACM0 after 5s"), "{notice}");
+        assert!(notice.contains("wartui reset --bridge 44:C0"), "{notice}");
+        assert!(!notice.contains("node firmware"), "{notice}");
+    }
+
+    #[test]
+    fn cli_diagnostics_says_nothing_opened_when_address_names_no_p4_bridge() {
+        let notice = silence_notice(Some("A1:B0"), &[p4_bridge("/dev/ttyACM0")]);
+        assert!(notice.contains("no attached P4 bridge is A1:B0, so nothing was"), "{notice}");
+        assert!(!notice.contains("wartui reset"), "{notice}");
+    }
+
+    #[test]
+    fn last_reset_line_says_what_ran_last_when_phase_is_only_a_hint() {
+        let line = |last_phase| {
+            last_reset_line(&BridgeInfo {
+                chip: Chip::Esp32P4,
+                mac: [0; 6],
+                fw_version: String::new(),
+                reset_cause: ResetCause::PowerOn,
+                last_phase,
+                heap_free: 0,
+                uptime_ms: 0,
+                gps: false,
+                radio: None,
+                image: None,
+            })
+        };
+        for (phase, said) in [
+            (LoopPhase::Command, "it last ran a host command"),
+            (LoopPhase::DrainLink, "it last read host commands"),
+            (LoopPhase::Pump, "it last wrote to the USB endpoint"),
+            (LoopPhase::SpiTransfer, "it last ran its SPI link"),
+            (LoopPhase::Boot, "it had not finished starting"),
+        ] {
+            assert_eq!(line(phase), format!("last reset  powered on; {said}"));
+        }
+        assert_eq!(line(LoopPhase::Unknown), "last reset  powered on");
     }
 
     #[test]
     fn cli_diagnostics_preserves_clean_formatting_when_generating_bridge_notice() {
         // A wrapped literal keeps the source's leading whitespace, which reads as
         // ragged gaps mid-sentence and is invisible here.
-        let notice = no_bridge_notice(Some("/dev/x"));
+        let notice = silence_notice(Some("/dev/x"), &[]);
         for line in notice.lines() {
             // The bullets' own two-space indent is deliberate; a gap after the
             // text has started is the symptom being guarded against.
@@ -635,15 +739,16 @@ mod tests {
 
     #[test]
     fn cli_formatter_formats_bullet_points_when_rendering_help_or_diagnostics() {
-        let notice = no_bridge_notice(Some("/dev/x"));
+        let notice = silence_notice(Some("/dev/x"), &[]);
         for line in notice.lines().filter(|l| l.starts_with(' ')) {
             assert!(line.starts_with("  - "), "unexpected indent: {line:?}");
         }
     }
 
     #[test]
-    fn cli_diagnostics_lists_all_failure_causes_when_generating_bridge_notice() {
-        let notice = no_bridge_notice(Some("/dev/x"));
+    fn cli_diagnostics_lists_node_firmware_when_bridge_is_named_by_path() {
+        // A path is opened as given, so it can reach a node.
+        let notice = silence_notice(Some("/dev/x"), &[]);
         for cause in ["node firmware", "wedged", "another program"] {
             assert!(notice.contains(cause), "missing {cause}: {notice}");
         }

@@ -36,8 +36,8 @@
 //!   Widening this set past the P4's exact pair would mean transmitting into whatever
 //!   else is plugged in. Exclusive opening is a backstop against two readers, not a
 //!   substitute for that.
-//! - [`is_wartui_board`] is the P4 bridge and every node: what `wartui ports` lists and
-//!   `flash-fleet` chooses from.
+//! - [`is_wartui_board`] is the P4 bridge and every node: what `wartui ports` lists, and
+//!   `flash-fleet` and `flash-bridge` choose from.
 //! - [`could_be_a_receiver`] is everything else, so the GPS search, which listens to
 //!   what it opens, never opens one of the fleet's boards.
 
@@ -51,12 +51,12 @@ use crate::TransportError;
 /// Espressif's USB vendor ID, which a node's native USB Serial/JTAG reports.
 pub const ESPRESSIF_VID: u16 = 0x303A;
 
-/// The product ID that native USB Serial/JTAG reports.
+/// The product ID every node reports: an ESP32's native USB Serial/JTAG.
 ///
-/// Every node is one. A board behind a USB-to-UART bridge chip carries the chip's vendor
-/// ID rather than Espressif's and is never listed at all, so an Espressif device that is
-/// *not* this is of some other kind, and `flash-fleet` leaves it alone.
-pub const BRIDGE_PID: u16 = 0x1001;
+/// A board behind a USB-to-UART bridge chip carries the chip's vendor ID rather than
+/// Espressif's and is never listed at all, so an Espressif device that is *not* this is of
+/// some other kind, and `flash-fleet` leaves it alone.
+pub const SERIAL_JTAG_PID: u16 = 0x1001;
 
 /// The pid.codes test vendor ID the P4 bridge enumerates under until Espressif grants it a PID.
 pub const TEST_VID: u16 = 0x1209;
@@ -360,10 +360,10 @@ mod tests {
             p4(Some("wartui p4 bridge")),
             p4(None),
             tty,
-            candidate("/dev/ttyACM0", Some(ESPRESSIF_VID), Some(BRIDGE_PID), None),
+            candidate("/dev/ttyACM0", Some(ESPRESSIF_VID), Some(SERIAL_JTAG_PID), None),
             candidate("/dev/ttyACM1", Some(0x1546), Some(0x01A7), None),
             candidate("/dev/ttyACM3", None, None, None),
-            candidate("/dev/tty.usbmodem2", Some(ESPRESSIF_VID), Some(BRIDGE_PID), None),
+            candidate("/dev/tty.usbmodem2", Some(ESPRESSIF_VID), Some(SERIAL_JTAG_PID), None),
         ];
         for c in &table {
             let usable = is_usable_path(&c.path);

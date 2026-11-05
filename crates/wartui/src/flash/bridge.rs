@@ -5,31 +5,34 @@
 //! be chosen. So the target is the P4 bridge `--bridge` names, which must be attached; else the
 //! bridge remembered in `wartui.toml`, which must be attached; else, with none remembered, the only
 //! P4 bridge there is. A remembered bridge that is not attached is a refusal even when one P4
-//! bridge is: that board is known not to be the bridge. Several and none known is a refusal that
-//! lists them, never a guess. A board with no address is refused too, since the update checks the
-//! address it answers with.
+//! bridge is: that board is known not to be the bridge. A remembered board that is attached and is
+//! not a P4 bridge is refused too, which is why the listing holds every fleet board: the refusal
+//! has to say which of the two it is. Several and none known is a refusal that lists them, never a
+//! guess. A board with no address is refused too, since the update checks the address it answers
+//! with.
 //!
 //! **No P4 bridge attached points at the first flash.** A blank P4 shows up only as its CH343, which
 //! nothing here may write to, so that flash is by hand ([`p4::FIRST_FLASH`]).
 //!
 //! **A board found here is remembered once flashed.** `flash-bridge` saves its address to
-//! `wartui.toml` as `[bridge] mac`, the way `run` does once it connects, so a `flash-fleet` right
-//! after spares it. Nothing is saved with remembering off, or for a board named with `--bridge`:
-//! one flashed by name is often some other device, and must not disturb which bridge the main
-//! fleet's `run` and `flash-fleet` use. A save that fails leaves the flash a success, and says so.
+//! `wartui.toml` as `[bridge] mac`, the way `run` does once it connects, so `run` and the next
+//! `flash-bridge` open that board first. Nothing is saved with remembering off, or for a board
+//! named with `--bridge`: one flashed by name is often some other device, and must not disturb
+//! which bridge the main fleet's `run` uses. A save that fails leaves the flash a success, and says
+//! so.
 //!
 //! **A P4 bridge is updated over its own link** (`super::p4`): its Type-C reaches a CH343 rather
 //! than the chip's USB, and the cable the host already holds is the one that carries the update.
 //!
-//! There is no `--skip`, `--jobs` or `--no-bridge`: there is one target. There is no
-//! `--no-default-features` either: a release image is built with the default features.
+//! There is no `--skip` or `--jobs`: there is one target. There is no `--no-default-features`
+//! either: a release image is built with the default features.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Args as ClapArgs;
 use wartui_bridge::ports::{PortCandidate, could_be_a_bridge};
-use wartui_bridge::serial::{BridgeSpec, discover_bridges};
+use wartui_bridge::serial::{BridgeSpec, discover_ports};
 use wartui_proto::mac::{self, Mac};
 
 use super::{Skip, canonical, features, matches, name, p4};
@@ -71,7 +74,7 @@ pub struct Args {
 pub async fn run(args: Args) -> Result<()> {
     let features = features(args.features.as_deref().unwrap_or_default());
     let named = args.bridge.as_deref().map(|given| (given, canonical(spec(given))));
-    let found = discover_bridges().context("listing serial ports")?;
+    let found = discover_ports().context("listing serial ports")?;
     let board = target(
         &found,
         named.as_ref().map(|(given, spec)| (*given, spec)),
@@ -96,7 +99,8 @@ fn remember(args: &Args, named: bool, board: &PortCandidate, mac: Mac) {
         .and_then(|path| remember_flashed(&path, mac));
     if let Err(why) = saved {
         println!(
-            "{:<6} not remembered as the bridge, so flash-fleet will not spare it: {why:#}",
+            "{:<6} not remembered as the bridge, so `run` and the next flash-bridge will not \
+             open it first: {why:#}",
             name(board)
         );
     }
@@ -122,7 +126,8 @@ fn target(
     named: Option<(&str, &BridgeSpec)>,
     remembered: Option<Mac>,
 ) -> Result<PortCandidate> {
-    // Asked here as well as of the listing: bridge firmware never goes anywhere else.
+    // The listing holds the nodes too, so a remembered board can be told from an absent one.
+    // Everything chosen below is chosen from this: bridge firmware never goes anywhere else.
     let bridges: Vec<&PortCandidate> =
         candidates.iter().filter(|candidate| could_be_a_bridge(candidate)).collect();
     let chosen = match named {
@@ -147,9 +152,14 @@ fn target(
             (Some(wanted), _) => {
                 bridges.iter().copied().find(|board| board.mac() == Some(wanted)).ok_or_else(
                     || {
+                        let state = if candidates.iter().any(|board| board.mac() == Some(wanted)) {
+                            "is attached but is not a P4 bridge"
+                        } else {
+                            "is not attached"
+                        };
                         anyhow!(
-                            "the remembered bridge {} is not attached. Name the P4 bridge to \
-                             flash with --bridge (`wartui ports` lists each board's address)",
+                            "the remembered bridge {} {state}. Name the P4 bridge to flash with \
+                             --bridge (`wartui ports` lists each board's address)",
                             mac::full(&wanted)
                         )
                     },
@@ -285,10 +295,28 @@ mod tests {
 
     #[test]
     fn flash_bridge_refuses_run_when_remembered_board_is_a_node() {
-        // Attached, and remembered, and still not a P4 bridge.
-        let found = [board("/dev/ttyACM0", Some(&NODE_MAC))];
+        // Attached, and remembered, and still not a P4 bridge. The P4 bridge beside it is not
+        // taken in its place.
+        let found = [board("/dev/ttyACM0", Some(&NODE_MAC)), bridge("/dev/ttyACM1", &BRIDGE_MAC)];
         let error = target(&found, None, Some(NODE_MAC)).unwrap_err().to_string();
+        assert!(error.contains("is attached but is not a P4 bridge"), "{error}");
+        assert!(error.contains(&mac::full(&NODE_MAC).to_string()), "{error}");
+        assert!(error.contains("--bridge"), "{error}");
+    }
+
+    #[test]
+    fn flash_bridge_says_not_attached_when_remembered_board_is_absent() {
+        let found = [board("/dev/ttyACM0", Some(&NODE_MAC)), bridge("/dev/ttyACM1", &BRIDGE_MAC)];
+        let absent = [0x3C, 0xDC, 0x75, 0x84, 0x00, 0x08];
+        let error = target(&found, None, Some(absent)).unwrap_err().to_string();
         assert!(error.contains("is not attached"), "{error}");
+        assert!(error.contains(&mac::full(&absent).to_string()), "{error}");
+    }
+
+    #[test]
+    fn flash_bridge_targets_remembered_board_when_nodes_are_beside_it() {
+        let found = [board("/dev/ttyACM0", Some(&NODE_MAC)), bridge("/dev/ttyACM1", &BRIDGE_MAC)];
+        assert_eq!(target(&found, None, Some(BRIDGE_MAC)).unwrap(), found[1]);
     }
 
     #[test]

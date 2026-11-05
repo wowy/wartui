@@ -92,7 +92,7 @@ const FOLLOW: Duration = Duration::from_secs(30);
 const QUIET: Duration = Duration::from_secs(5);
 
 /// The README section that covers a wired flash.
-pub(super) const FIRST_FLASH: &str = "firmware/p4-bridge/README.md § \"First flash\"";
+pub(crate) const FIRST_FLASH: &str = "firmware/p4-bridge/README.md § \"First flash\"";
 
 /// Update the P4 bridge `board` over its link.
 pub(super) async fn run(args: &Args, features: &[&str], board: &PortCandidate) -> Result<()> {
