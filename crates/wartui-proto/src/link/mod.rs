@@ -139,16 +139,12 @@ pub enum LoopPhase {
     Unknown,
     /// Still in `main` before the loop started.
     Boot,
-    /// Draining the radio's receive queue.
-    DrainRadio,
     /// Reading and decoding host commands.
     DrainLink,
     /// Carrying out a host command.
     Command,
     /// Writing queued frames to the USB endpoint.
     Pump,
-    /// Idle, with neither radio nor link asking for anything.
-    Idle,
     /// Waiting on a transfer over the P4–C6 SPI link.
     SpiTransfer,
 }

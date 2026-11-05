@@ -288,17 +288,16 @@ pub fn last_reset_line(info: &BridgeInfo) -> String {
         ResetCause::External => "reset over USB, by espflash or a replug",
         ResetCause::Unknown => "reset for a reason it could not name",
     };
-    // The phase is only ever a hint, and a misleading one on its own: the loop
-    // visits most of them every millisecond, so naming one is worth doing only
-    // where it points at a specific blocking call.
+    // The phase is only ever a hint, and a misleading one on its own: a working bridge
+    // passes through most of them constantly, so it says where the bridge last was, not
+    // what stopped it. `Unknown` has nothing to name.
     let phase = match info.last_phase {
         LoopPhase::Command => Some("it was carrying out a host command"),
-        LoopPhase::DrainRadio => Some("it was draining the radio"),
         LoopPhase::DrainLink => Some("it was reading host commands"),
         LoopPhase::Pump => Some("it was writing to the USB endpoint"),
         LoopPhase::Boot => Some("it had not reached its main loop"),
         LoopPhase::SpiTransfer => Some("it was waiting on its SPI link"),
-        LoopPhase::Idle | LoopPhase::Unknown => None,
+        LoopPhase::Unknown => None,
     };
     match phase {
         Some(phase) => format!("last reset  {cause}; {phase}"),

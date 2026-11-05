@@ -289,7 +289,7 @@ fn spi_hello_decodes_unknown_reset_cause_as_unknown() {
 fn spi_hello_decodes_unknown_phase_when_code_names_nothing() {
     let mut bytes = [0u8; HELLO_LEN];
     bytes[2] = 1;
-    for code in [5, 8, 9] {
+    for code in [2, 5, 7, 8, 9] {
         bytes[42] = code;
         assert_eq!(Hello::decode(&bytes).unwrap().last_phase, LoopPhase::Unknown, "code {code}");
     }

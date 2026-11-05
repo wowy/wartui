@@ -166,17 +166,15 @@ const fn reset_cause_from_code(code: u8) -> ResetCause {
     }
 }
 
-// Frozen with the hello, so these do not follow the enum's indices. Codes 5, 8 and 9 name
-// nothing and decode as `Unknown`.
+// Frozen with the hello, so these do not follow the enum's indices. Codes 2, 5, 7, 8 and 9
+// name nothing and decode as `Unknown`.
 const fn loop_phase_code(phase: LoopPhase) -> u8 {
     match phase {
         LoopPhase::Unknown => 0,
         LoopPhase::Boot => 1,
-        LoopPhase::DrainRadio => 2,
         LoopPhase::DrainLink => 3,
         LoopPhase::Command => 4,
         LoopPhase::Pump => 6,
-        LoopPhase::Idle => 7,
         LoopPhase::SpiTransfer => 10,
     }
 }
@@ -184,11 +182,9 @@ const fn loop_phase_code(phase: LoopPhase) -> u8 {
 const fn loop_phase_from_code(code: u8) -> LoopPhase {
     match code {
         1 => LoopPhase::Boot,
-        2 => LoopPhase::DrainRadio,
         3 => LoopPhase::DrainLink,
         4 => LoopPhase::Command,
         6 => LoopPhase::Pump,
-        7 => LoopPhase::Idle,
         10 => LoopPhase::SpiTransfer,
         _ => LoopPhase::Unknown,
     }

@@ -54,12 +54,10 @@ pub fn boot_phase(cause: ResetCause) -> LoopPhase {
     }
     match PHASE.load(Ordering::Relaxed) {
         1 => LoopPhase::Boot,
-        2 => LoopPhase::DrainRadio,
-        3 => LoopPhase::DrainLink,
-        4 => LoopPhase::Command,
-        5 => LoopPhase::Pump,
-        6 => LoopPhase::Idle,
-        7 => LoopPhase::SpiTransfer,
+        2 => LoopPhase::DrainLink,
+        3 => LoopPhase::Command,
+        4 => LoopPhase::Pump,
+        5 => LoopPhase::SpiTransfer,
         _ => LoopPhase::Unknown,
     }
 }
