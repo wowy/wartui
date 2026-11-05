@@ -71,7 +71,8 @@ pub async fn run(args: Args) -> Result<()> {
     // Resolved to one board here rather than left to the transport, which sweeps.
     // A sweep sends this command's `Reset` into every P4 bridge attached until one
     // answers, and with two attached that reboots another fleet's bridge. So this
-    // command gets an unambiguous board or none, and says which it wanted.
+    // command gets an unambiguous board or none, and says which it wanted. It opens that board
+    // by address, so the transport follows it to wherever the reboot re-enumerates it.
     let remembered = crate::config::remembered_bridge(args.config.as_deref());
     let board = board_to_reset(args.bridge.as_deref(), remembered, discover_bridges)?;
     let mut link = super::open(Some(&board), None, BridgeMemory::holding(remembered))?;
@@ -92,12 +93,17 @@ pub async fn run(args: Args) -> Result<()> {
     }
 }
 
-/// The one board to send `Reset` to, as the path to open.
+/// The one board to send `Reset` to, as the name to open it by.
 ///
-/// An address, whole or its end, is resolved here against the P4 bridges `list` reads. One no
+/// An address, whole or its end, is checked here against the P4 bridges `list` reads. One no
 /// attached P4 bridge carries, a node's included, or a tail several share is refused before
 /// anything is opened, rather than left to a transport that would wait out the whole timeout
-/// saying nothing. A path is opened as given, with nothing listed: whether it exists is the
+/// saying nothing.
+///
+/// The answer is the board's full address wherever it has one, because a P4's reset re-enumerates
+/// USB and can bring it back on another device node: a transport given an address follows the
+/// board, and one given a path waits on that path. A tail is not passed on, since it could later
+/// match another board. A path is opened as given, with nothing listed: whether it exists is the
 /// question the open asks.
 fn board_to_reset(
     named: Option<&str>,
@@ -106,8 +112,8 @@ fn board_to_reset(
 ) -> Result<String, TransportError> {
     match named.map(super::spec) {
         Some(BridgeSpec::Path(path)) => Ok(path),
-        Some(spec) => serial::resolve_in(&list()?, &spec),
-        None => serial::unambiguous_bridge(&list()?, remembered),
+        Some(spec) => serial::named_board(&list()?, &spec).map(PortCandidate::label),
+        None => serial::unambiguous_bridge(&list()?, remembered).map(PortCandidate::label),
     }
 }
 
@@ -204,11 +210,11 @@ fn report(info: Option<&BridgeInfo>, uptime_ms: u32) {
     }
 }
 
-/// What to say when even a reset frame goes unanswered, given the path it went to.
+/// What to say when even a reset frame goes unanswered, given the address or path it went to.
 fn unreachable_notice(board: &str) -> String {
     let seconds = RECOVERY_TIMEOUT.as_secs();
     [
-        format!("the bridge on {board} did not come back within {seconds}s."),
+        format!("the bridge {board} did not come back within {seconds}s."),
         "A reset frame reaches the bridge through its receive path, so this means that".to_owned(),
         "path is not running either — the firmware is hung, or this is not a bridge.".to_owned(),
         "Power-cycle it, which needs no firmware at all.".to_owned(),
@@ -222,25 +228,69 @@ fn unreachable_notice(board: &str) -> String {
 mod tests {
     use wartui_bridge::TransportError;
     use wartui_bridge::ports::{ESPRESSIF_VID, PortCandidate, TEST_PID, TEST_VID, candidate};
-    use wartui_bridge::serial::bridges_among;
+    use wartui_bridge::serial::{BridgeSpec, bridges_among};
+    use wartui_proto::mac;
 
     use super::{FRESH_UPTIME_MS, board_to_reset, rebooted, unreachable_notice};
 
     const BRIDGE_MAC: &str = "10:BD:A3:EC:44:C0";
+    const TWIN_MAC: &str = "38:44:BE:12:44:C0";
     const NODE_MAC: &str = "02:00:5E:10:9D:24";
+
+    fn p4(path: &str, serial: Option<&str>) -> PortCandidate {
+        let mut p4 = candidate(path, Some(TEST_VID), Some(TEST_PID), serial);
+        p4.product = Some("wartui p4 bridge".to_owned());
+        p4
+    }
 
     /// What `discover_bridges` reads with a P4 bridge and a node attached.
     fn attached() -> Result<Vec<PortCandidate>, TransportError> {
-        let mut p4 = candidate("/dev/ttyACM0", Some(TEST_VID), Some(TEST_PID), Some(BRIDGE_MAC));
-        p4.product = Some("wartui p4 bridge".to_owned());
         let node = candidate("/dev/ttyACM1", Some(ESPRESSIF_VID), Some(0x1001), Some(NODE_MAC));
-        Ok(bridges_among(vec![p4, node]))
+        Ok(bridges_among(vec![p4("/dev/ttyACM0", Some(BRIDGE_MAC)), node]))
+    }
+
+    /// What `discover_bridges` reads with two P4 bridges attached that share a tail.
+    fn twins() -> Result<Vec<PortCandidate>, TransportError> {
+        Ok(vec![p4("/dev/ttyACM0", Some(BRIDGE_MAC)), p4("/dev/ttyACM1", Some(TWIN_MAC))])
     }
 
     #[test]
-    fn reset_cmd_resolves_address_to_path_when_p4_bridge_is_named_in_full() {
+    fn reset_cmd_keeps_full_address_when_p4_bridge_is_named_in_full() {
         let board = board_to_reset(Some(BRIDGE_MAC), None, attached).expect("that bridge");
-        assert_eq!(board, "/dev/ttyACM0");
+        assert_eq!(board, BRIDGE_MAC);
+    }
+
+    #[test]
+    fn reset_cmd_resolves_tail_to_full_address_when_one_p4_bridge_ends_with_it() {
+        let board = board_to_reset(Some("44:c0"), None, attached).expect("that bridge");
+        assert_eq!(board, BRIDGE_MAC);
+        // `open` reads the answer back, and it has to come back as an address to be followed.
+        let address = mac::parse(BRIDGE_MAC).expect("an address");
+        assert_eq!(super::super::spec(&board), BridgeSpec::Mac(address));
+    }
+
+    #[test]
+    fn reset_cmd_refuses_tail_when_several_p4_bridges_end_with_it() {
+        let refused = board_to_reset(Some("44:C0"), None, twins).expect_err("ambiguous");
+        assert!(matches!(refused, TransportError::AmbiguousName { .. }), "{refused}");
+    }
+
+    #[test]
+    fn reset_cmd_picks_full_address_when_sole_p4_bridge_is_not_named() {
+        let board = board_to_reset(None, None, attached).expect("the only bridge");
+        assert_eq!(board, BRIDGE_MAC);
+    }
+
+    #[test]
+    fn reset_cmd_picks_full_address_when_remembered_p4_bridge_is_among_several() {
+        let board = board_to_reset(None, mac::parse(TWIN_MAC), twins).expect("the remembered one");
+        assert_eq!(board, TWIN_MAC);
+    }
+
+    #[test]
+    fn reset_cmd_falls_back_to_path_when_sole_p4_bridge_reports_no_address() {
+        let list = || Ok(vec![p4("/dev/ttyACM0", None)]);
+        assert_eq!(board_to_reset(None, None, list).expect("the only bridge"), "/dev/ttyACM0");
     }
 
     #[test]
@@ -283,9 +333,9 @@ mod tests {
     }
 
     #[test]
-    fn reset_cmd_formats_unreachable_notice_with_port_when_board_goes_silent() {
-        let notice = unreachable_notice("/dev/ttyACM0");
-        assert!(notice.contains("on /dev/ttyACM0 did not come back within 10s"), "{notice}");
+    fn reset_cmd_formats_unreachable_notice_with_board_when_board_goes_silent() {
+        let notice = unreachable_notice(BRIDGE_MAC);
+        assert!(notice.contains(&format!("{BRIDGE_MAC} did not come back within 10s")), "{notice}");
         assert!(notice.contains("Power-cycle"), "{notice}");
     }
 }

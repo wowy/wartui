@@ -988,7 +988,9 @@ reading takes one packet and queues the rest, and closing the port waits for the
 `wartui reset` never sweeps, because a `Reset` sent down the wrong port reboots the wrong board. It
 goes to the `--bridge` board, else the remembered one, else the only one attached. With
 several and none known, it asks for `--bridge` rather than guessing. An address no attached P4
-bridge carries is refused before anything is opened.
+bridge carries is refused before anything is opened. A board with an address is opened by it, so
+the command finds a P4 that comes back on another device node. One named by path is waited for on
+that path until it has announced itself.
 
 **`--log-file` is the only way to see the transport's own account of a run**: the view owns the
 terminal, so without it nothing is logged. It records which port was resolved, whether it opened,

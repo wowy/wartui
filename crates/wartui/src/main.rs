@@ -16,7 +16,7 @@ use wartui_bridge::ports::PortCandidate;
 use wartui_bridge::remember::BridgeMemory;
 use wartui_bridge::serial::{self, BridgeSpec, SerialTransport, discover_ports};
 use wartui_bridge::sim::{SimConfig, SimTransport};
-use wartui_bridge::{BridgeInfo, LinkEvent, LinkHandle, TransportError};
+use wartui_bridge::{BridgeInfo, LinkEvent, LinkHandle, NO_FIRMWARE_P4, TransportError};
 use wartui_proto::link::LoopPhase;
 use wartui_proto::mac;
 use wartui_proto::reset::ResetCause;
@@ -220,7 +220,7 @@ fn ports() -> Result<()> {
 fn no_boards_notice() -> String {
     [
         "No Espressif board or P4 bridge is attached.".to_owned(),
-        format!("A P4 with no firmware shows up only as its CH343; see {}.", flash::FIRST_FLASH),
+        NO_FIRMWARE_P4.to_owned(),
         "A bridge not listed here can be named only by its path: --bridge PATH.".to_owned(),
     ]
     .join("\n")
@@ -438,10 +438,7 @@ fn silence_notice(bridge: Option<&str>, bridges: &[PortCandidate]) -> String {
             return [
                 "no P4 bridge is attached, so nothing was opened.".to_owned(),
                 "`wartui ports` lists what is attached, each board with its address.".to_owned(),
-                format!(
-                    "A P4 with no firmware shows up only as its CH343; see {}.",
-                    flash::FIRST_FLASH
-                ),
+                NO_FIRMWARE_P4.to_owned(),
             ]
             .join("\n");
         }

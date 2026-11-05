@@ -96,11 +96,22 @@ pub enum LinkEvent {
     Garbled(LinkError),
 }
 
+/// What the host sees of a P4 with no firmware, and where its first flash is described.
+///
+/// Here rather than in `wartui` because [`TransportError::NoBridgeFound`] says it too, and this
+/// crate sits below that one.
+pub const NO_FIRMWARE_P4: &str = "A P4 with no firmware shows up only as its CH343; see \
+     firmware/p4-bridge/README.md § \"First flash\".";
+
 /// Why the link could not be established or used.
 #[derive(Debug, Error)]
 pub enum TransportError {
-    /// No P4 bridge is attached.
-    #[error("no bridge found; name one with --bridge")]
+    /// No P4 bridge is attached. A board not listed has no address to name it by.
+    #[error(
+        "no bridge found; one `wartui ports` does not list is reached only by its path: \
+         --bridge PATH. {}",
+        NO_FIRMWARE_P4
+    )]
     NoBridgeFound,
     /// A bridge was named by its address, and no attached P4 bridge has it.
     #[error("no attached P4 bridge is {spec}")]

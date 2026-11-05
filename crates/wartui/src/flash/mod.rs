@@ -37,8 +37,6 @@ pub mod bridge;
 pub mod fleet;
 mod p4;
 
-pub(crate) use p4::FIRST_FLASH;
-
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};

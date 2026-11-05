@@ -29,8 +29,10 @@ esp-hal = { version = "1.2.2", features = ["esp32p4", "unstable"] }
 # The executor and time driver `embassy-usb` runs on. No allocator: nothing here
 # spawns a thread or allocates.
 esp-rtos = { version = "0.4.0", features = ["embassy", "esp32p4"] }
-# Held at the versions esp-hal 1.2.2's OTG driver (`embassy-usb-driver` 0.2,
-# `embassy-sync` 0.8) and esp-rtos 0.4.0 (`embassy-executor` 0.10) build against.
+# `embassy-executor`, `embassy-futures`, `embassy-sync` and `embassy-time` stay at the minor
+# versions `esp-hal` and `esp-rtos` build against; Dependabot takes only their patch releases.
+# `firmware/p4-radio/README.md` § "Dependency versions" has the reasoning. `embassy-usb` is
+# outside that rule; its 0.6 shares `embassy-usb-driver` 0.2 with esp-hal's OTG driver.
 embassy-executor = "0.10.0"
 embassy-futures = "0.1.2"
 embassy-sync = "0.8.0"

@@ -167,7 +167,7 @@ impl std::fmt::Display for BridgeSpec {
 ///
 /// An address is matched against the list the sweep uses, so one that only a node carries
 /// names nothing and a node sharing a P4 bridge's tail does not make it ambiguous. `wartui
-/// reset` opens what this returns and transmits at once, so a node here is a node rebooted.
+/// reset` transmits at once to the board named, so a node here is a node rebooted.
 ///
 /// # Errors
 /// [`TransportError::Enumerate`] if the ports cannot be listed,
@@ -201,8 +201,22 @@ pub fn resolve_in(
     if let BridgeSpec::Path(path) = spec {
         return Ok(path.clone());
     }
+    named_board(candidates, spec).map(|board| board.path.clone())
+}
+
+/// The one board in `candidates` an address or tail names, for a caller that wants more of it
+/// than its path. A path names no board in a list, so it is refused like an address nothing
+/// carries.
+///
+/// # Errors
+/// [`TransportError::NoSuchBridge`] if nothing in `candidates` is that board, or
+/// [`TransportError::AmbiguousName`] if several are.
+pub fn named_board<'a>(
+    candidates: &'a [PortCandidate],
+    spec: &BridgeSpec,
+) -> Result<&'a PortCandidate, TransportError> {
     match named_in(candidates, spec).as_slice() {
-        [only] => Ok(only.path.clone()),
+        [only] => Ok(only),
         [] => Err(TransportError::NoSuchBridge { spec: spec.to_string() }),
         several => Err(TransportError::AmbiguousName {
             spec: spec.to_string(),
@@ -269,15 +283,15 @@ pub fn select(
 pub fn unambiguous_bridge(
     candidates: &[PortCandidate],
     remembered: Option<Mac>,
-) -> Result<String, TransportError> {
+) -> Result<&PortCandidate, TransportError> {
     if let Some(wanted) = remembered
         && let Some(known) = candidates.iter().find(|candidate| candidate.mac() == Some(wanted))
     {
-        return Ok(known.path.clone());
+        return Ok(known);
     }
     match candidates {
         [] => Err(TransportError::NoBridgeFound),
-        [only] => Ok(only.path.clone()),
+        [only] => Ok(only),
         several => Err(TransportError::AmbiguousBridge {
             boards: several
                 .iter()
@@ -786,8 +800,8 @@ impl Drop for Shutdown {
 /// The OS's reason a port would not open, with the remedy for the one that has one.
 ///
 /// Permission is the failure worth separating: on Linux a serial port belongs to
-/// `dialout`, and "no bridge found; name one with --bridge" is exactly the wrong
-/// advice for a board that was found and refused.
+/// `dialout`, and "no bridge found" is exactly the wrong thing to say about a board
+/// that was found and refused.
 fn open_failure(path: &str, error: &serialport::Error) -> String {
     if matches!(error.kind(), serialport::ErrorKind::Io(std::io::ErrorKind::PermissionDenied)) {
         return TransportError::Forbidden { port: path.to_owned() }.to_string();

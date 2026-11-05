@@ -129,8 +129,8 @@ The same dependency holds this firmware and the node at the same set, and the P4
 same `esp-hal` and `esp-rtos`. Keep that true: they share `wartui-proto` and `firmware/common`,
 which states the same `esp-hal` requirement.
 
-`embassy-executor`, `embassy-sync`, `embassy-time`, and `embedded-io-async` are held the same way,
-through `esp-rtos` and `esp-hal`.
+`embassy-executor`, `embassy-futures`, `embassy-sync`, `embassy-time`, and `embedded-io-async` are
+held the same way, through `esp-rtos` and `esp-hal`.
 
 Each chip's PAC resolves twice, and that is known: `esp-hal 1.2.2` builds against `esp32c5 0.3` and
 `esp32c6 0.24`, `esp-radio 1.0.0-beta.1` against `esp32c5 0.4` and `esp32c6 0.25`. Both build and
@@ -190,22 +190,26 @@ firmware's CI job counts it with the rest, and Dependabot ignores its and
 
 ### Embassy and `embedded-io-async`
 
-`embassy-executor`, `embassy-sync`, `embassy-time`, and `embedded-io-async` are held at the
-versions `esp-rtos` and `esp-hal` build against, and move with them. `embedded-io-async` stays at
-0.7, the newer of the two versions `esp-hal` 1.2 implements its async traits for. None can double
-quietly:
+`embassy-executor`, `embassy-futures`, `embassy-sync`, `embassy-time`, and `embedded-io-async` are
+held at the versions `esp-rtos` and `esp-hal` build against, and move with them. `embedded-io-async`
+stays at 0.7, the newer of the two versions `esp-hal` 1.2 implements its async traits for. Three
+cannot double quietly:
 
 - the executor's `Spawner` would not type-check against `esp-rtos`'s;
 - `embassy-time-driver` is `links`-keyed;
 - a second `embedded-io-async` would have no implementation on the USB half.
 
-So they are not in the check, and Dependabot ignores their minor and major releases.
+None of the five is in the check, and Dependabot ignores their minor and major releases.
 
 `embassy-sync` is the GPS build's alone, for the reader's channels, and held at 0.8, the copy
 `esp-hal` and `esp-rtos` use. 0.6 and 0.7 are in the lockfile too, both `esp-sync`'s, which depends
 on all three under aliases. A second 0.x would double rather than conflict, and harmlessly: the
 channels never pass through an `esp-hal` or `esp-rtos` API, and the crate keeps no global state. It
 is held so the tree adds no copy, not because one would break the build.
+
+`embassy-futures` is held at 0.1 because `esp-hal` 1.2.2 depends on `embassy-futures` 0.1 directly,
+so a higher minor is a second copy. Nothing suggests one would break the build or the board. It too
+is held so the tree adds no copy.
 
 `esp-generate` is a version behind this set. Its scaffolding (`build.rs`, `.cargo/config.toml`) is
 what was taken from it, not its dependency list.

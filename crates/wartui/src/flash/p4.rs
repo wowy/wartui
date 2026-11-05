@@ -73,8 +73,9 @@ const SLOT_LEN: usize = 0x1E_0000;
 /// How often the sender is asked for its next op, besides on each status.
 const TICK: Duration = Duration::from_millis(50);
 
-/// How long to wait for the P4's `Ready`. It enumerates once its C6 answers, or after 2 s
-/// without, and the transport waits 6 s for a lone board.
+/// The longest to wait for the P4's `Ready`. It enumerates once its C6 answers, or after 2 s
+/// without. The transport's first failure ends the wait sooner: a held port at once, and a silent
+/// lone board after the transport's 6 s.
 const READY_WAIT: Duration = Duration::from_secs(10);
 
 /// How long to wait for the P4 to come back after the install: two trial boots that the 30 s
@@ -209,10 +210,8 @@ fn no_ready_text(board: &str, path: &str, why: &str, garbled: bool) -> String {
         )
     } else {
         format!(
-            "{board} on {path} did not announce itself within {} s ({why}). Another program may \
-             hold the port, such as a running `wartui run`, or the bridge is still starting; \
-             try again",
-            READY_WAIT.as_secs()
+            "{board} on {path} did not announce itself ({why}). Another program may hold the \
+             port, such as a running `wartui run`, or the bridge is still starting; try again"
         )
     }
 }
@@ -723,6 +722,20 @@ mod tests {
         let text = no_ready_text("71:F4", "/dev/ttyACM0", "no answer in 10 s", false);
         assert!(text.contains("wartui run") && text.contains("still starting"), "{text}");
         assert!(!text.contains("predates") && !text.contains(FIRST_FLASH), "{text}");
+    }
+
+    #[test]
+    fn flash_p4_claims_no_wait_beyond_the_reason_when_port_fails_at_once() {
+        // A held port fails at about 0 s, so the text's only figure is the one in the reason.
+        let text = no_ready_text("71:F4", "/dev/ttyACM0", "could not open /dev/ttyACM0", false);
+        assert!(text.contains("(could not open /dev/ttyACM0)"), "{text}");
+        assert!(!text.contains(" s "), "{text}");
+    }
+
+    #[test]
+    fn flash_p4_names_same_section_when_bridge_crate_describes_no_firmware() {
+        // `wartui-bridge` sits below this crate, so it spells the section out.
+        assert!(wartui_bridge::NO_FIRMWARE_P4.contains(FIRST_FLASH));
     }
 
     fn log(text: &str) -> BridgeToHost {
