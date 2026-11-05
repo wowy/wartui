@@ -62,7 +62,7 @@ Each firmware, and `firmware/common` beside them, is a **separate workspace**
 ```sh
 cd firmware/node
 cargo fmt --all -- --check                    # its own workspace, so the root `cargo fmt` misses it
-cargo clippy --release                        # and --no-default-features --features esp32c5
+cargo clippy --release
 
 cd firmware/p4-radio                          # the C6 half of the P4 split bridge
 cargo fmt --all -- --check
@@ -73,8 +73,9 @@ cargo fmt --all -- --check
 cargo clippy --release
 
 cd firmware/common                            # a firmware's clippy does not lint it
-cargo fmt --all -- --check
-cargo clippy --release --features esp32c6,radio   # and esp32c6,ota
+cargo fmt --all -- --check                    # then each firmware's combination:
+cargo clippy --release --features esp32c5,ota       # node
+cargo clippy --release --features esp32c6,ota,radio # P4 bridge's radio
 cargo clippy --release --features esp32p4,gps,ota --target riscv32imafc-unknown-none-elf
 ```
 

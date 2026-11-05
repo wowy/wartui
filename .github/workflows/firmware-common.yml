@@ -32,17 +32,9 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # One job, a clippy step per firmware: each lints the feature combination that firmware
+  # builds, since a firmware's own clippy compiles this crate without linting it.
   common:
-    strategy:
-      matrix:
-        include:
-          - features: esp32c6,radio
-          - features: esp32c6,ota
-          # The P4 is a different target from the C-series chips.
-          # The one combination the P4 bridge builds.
-          - features: esp32p4,gps,ota
-            target: --target riscv32imafc-unknown-none-elf
-
     runs-on: ubuntu-latest
 
     steps:
@@ -58,8 +50,21 @@ jobs:
           cargo fmt --all -- --check
           popd
 
-      - name: Clippy
+      - name: Clippy (node, ESP32-C5)
         run: |
           pushd firmware/common
-          cargo clippy --release --features ${{matrix.features}} ${{matrix.target}} --locked -- -D warnings
+          cargo clippy --release --features esp32c5,ota --locked -- -D warnings
+          popd
+
+      - name: Clippy (P4 bridge's radio, ESP32-C6)
+        run: |
+          pushd firmware/common
+          cargo clippy --release --features esp32c6,ota,radio --locked -- -D warnings
+          popd
+
+      # The P4 is a different target from the C-series chips.
+      - name: Clippy (P4 bridge, ESP32-P4)
+        run: |
+          pushd firmware/common
+          cargo clippy --release --features esp32p4,gps,ota --target riscv32imafc-unknown-none-elf --locked -- -D warnings
           popd
