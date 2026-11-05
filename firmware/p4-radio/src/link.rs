@@ -12,6 +12,12 @@
 //! landing while the C6 works, and a flash erase holds the CPU but not the DMA. Only the moment
 //! between two reads leans on the 128-byte FIFO, with RTS behind it.
 //!
+//! **The writer polls the DMA on a timer and never calls `wait_for_done` or `wait`.** Both flush
+//! the UART, and the flush ends in a spin that does not yield until the transmitter is idle, so a
+//! P4 holding CTS as the FIFO empties would stop this task and the radio work joined to it. Nothing
+//! needs the FIFO drained between packets: the link never turns the line around, and the next
+//! write resets only the DMA channel. `firmware/p4-bridge/src/link.rs` has the rest.
+//!
 //! Records go up through [`Shared`]'s two byte rings. `hear_loop` in `main.rs` fills the
 //! bulk ring with received frames, and this link fills the priority ring with replies,
 //! lines and radio results. A full ring evicts its oldest record: the P4 wants the newest
@@ -62,17 +68,21 @@ use wartui_proto::ota::Receiver;
 use wartui_proto::ota::image::DIGEST_LEN;
 use wartui_proto::radio_link::update::{Op, Received, receive};
 use wartui_proto::radio_link::{
-    BODY_MAX, Down, HEADER_LEN, HELLO_EVERY_MS, Held, Hello, Kind, LINK_REVISION, PAYLOAD_MAX,
-    Packer, Packet, PacketReader, RECORD_MAX, RadioStatus, SeqCheck, SeqNote, Up, VerifyError,
-    decode_down, encode_packet, encode_up, records, seal,
+    BAUD_RATE, BODY_MAX, Down, HEADER_LEN, HELLO_EVERY_MS, Held, Hello, Kind, LINK_REVISION,
+    PAYLOAD_MAX, Packer, Packet, PacketReader, RECORD_MAX, RadioStatus, SeqCheck, SeqNote, Up,
+    VerifyError, decode_down, encode_packet, encode_up, records, seal,
 };
 use wartui_proto::reset::ResetCause;
 
 use crate::config::{RADIO_JOBS, SEND_JOBS, UP_PRIORITY_BYTES, UP_QUEUE_BYTES};
 
-/// How long a write waits before `wait_for_done`, so the DMA has put bytes in the TX FIFO;
-/// `firmware/p4-bridge/src/link.rs`, `FIFO_FILL`, has why.
-const FIFO_FILL: Duration = Duration::from_micros(20);
+/// How often a write looks for its end once its wire time has passed;
+/// `firmware/p4-bridge/src/link.rs`, `WRITE_POLL`, has why.
+const WRITE_POLL: Duration = Duration::from_micros(100);
+
+/// How often a write looks for its end once it has waited twice its wire time;
+/// `firmware/p4-bridge/src/link.rs`, `WRITE_POLL_HELD`, has why.
+const WRITE_POLL_HELD: Duration = Duration::from_millis(1);
 
 /// How often a C6 that has not heard the P4 looks again, with nothing else to wake it.
 const HELLO_EVERY: Duration = Duration::from_millis(HELLO_EVERY_MS);
@@ -556,12 +566,6 @@ impl Link {
         });
         (!packer.is_empty()).then(|| (Kind::Messages, packer.len()))
     }
-
-    /// Whether the writer must look again on a timer: its next hello is due with or without a
-    /// signal.
-    fn awaits_hello(&self) -> bool {
-        !self.heard_p4
-    }
 }
 
 /// Run the link forever: the reader, the writer, and the pump for the radio's results.
@@ -624,7 +628,8 @@ async fn write_packets(
     loop {
         let prepared = link.borrow_mut().prepare(body, shared);
         let Some(len) = prepared else {
-            if link.borrow().awaits_hello() {
+            // Its next hello is due with or without a signal.
+            if !link.borrow().heard_p4 {
                 select(shared.wake.wait(), Timer::after(HELLO_EVERY)).await;
             } else {
                 shared.wake.wait().await;
@@ -634,16 +639,18 @@ async fn write_packets(
         let wire = encode_packet(&body[..len], buf.as_mut_slice());
         buf.set_length(wire);
         mark(LoopPhase::RadioLink);
-        let mut write = tx.write(buf).map_err(|(err, ..)| err).expect("start a UART write");
-        Timer::after(FIFO_FILL).await;
-        write.wait_for_done().await;
-        let (result, tx_back, done) = write.wait();
-        tx = tx_back;
-        buf = done;
-        if result.is_err() {
-            let mut link = link.borrow_mut();
-            link.uart_errors = link.uart_errors.wrapping_add(1);
+        let write = tx.write(buf).map_err(|(err, ..)| err).expect("start a UART write");
+        // Ten bits a byte: 8N1.
+        let wire_time = Duration::from_micros(wire as u64 * 10 * 1_000_000 / BAUD_RATE as u64);
+        Timer::after(wire_time).await;
+        let mut waited = wire_time;
+        // Neither call reports a DMA error, so `uart_errors` holds only what a read finds.
+        while !write.is_done() {
+            let poll = if waited < wire_time * 2 { WRITE_POLL } else { WRITE_POLL_HELD };
+            Timer::after(poll).await;
+            waited += poll;
         }
+        (tx, buf) = write.cancel();
     }
 }
 

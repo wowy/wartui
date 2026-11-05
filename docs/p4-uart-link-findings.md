@@ -76,22 +76,57 @@ soak: 140 holds.
 - Each stop's RX FIFO stopped at 96 or 97 bytes, all at the RTS threshold.
 - No bytes were lost across a hold.
 - The longest P4 write took about 202 ms, as expected.
-- The longest single poll of `wait_for_done` was 22 µs, with zero polls above 2 ms.
+- The longest single poll of the first writer's `wait_for_done` was 22 µs, with zero polls above 2 ms.
 - The P4's stall meter peaked at 1.7 ms, with zero gaps above 2 ms.
 - The C6's peaked at 2.8 ms, with zero gaps above 10 ms.
 
-Why the writers wait `FIFO_FILL` before `wait_for_done` is in
-[`firmware/p4-bridge/src/link.rs`](../firmware/p4-bridge/src/link.rs).
-
 **The limits of this test:**
 
-- **The busy wait is unobserved, not ruled out.** `flush_last_byte`'s busy wait in esp-hal triggers
-  only if a hold begins in about one byte time after a packet's last byte leaves the FIFO. The
-  short-packet part of each hold raises the odds. A rough estimate is 3–8% per short-packet hold,
-  and that estimate is not measured. It never showed.
 - **The holds were stops of reading, not real flash erases**, which halt the CPU.
 - **Only the C6 stopped reading**, so its transmitter was never deliberately held.
 - **The harness reached each rate by a runtime switch.**
+- **These holds ran on the first writer**, which waited in `wait_for_done`. The next section covers
+  the one the firmware runs.
+
+## The writer stopped using the driver's flush
+
+esp-hal's `wait_for_done` ends in `flush_last_byte`, a busy wait that does not yield until the
+transmitter is idle. A CTS hold beginning in about one byte time after a packet's last byte leaves
+the FIFO would stop the whole task for the hold. The 140 holds above never showed it, but a code
+review pointed out that a hung C6 would freeze the P4 before it could reset the C6.
+
+The writers now poll `is_done` on a timer and call `cancel`, which stops only the DMA channel
+([`firmware/p4-bridge/src/link.rs`](../firmware/p4-bridge/src/link.rs) has the reasoning). The risk
+was losing the end of a packet, so the harness ran again, at 4 Mbaud only:
+
+| | 300 s load | 60 s holds |
+| --- | --- | --- |
+| C6→P4 packets | 127,120 | 0 |
+| C6→P4 bytes | 107,225,720 | 0 |
+| P4→C6 bytes | 107,833,380 | 14,665,282 |
+| CRC, magic, seq gap, UART and mismatch errors, both ends | 0 | 0 |
+| Packets lost | 0 | 0 |
+| Rate, C6→P4 and P4→C6 | 357 and 359 KB/s | 0 and 244 KB/s |
+| Longest P4 poll | 14 µs | 10 µs |
+| Longest C6 poll | 159 µs | 93 µs |
+| P4 stall meter peak | 1.6 ms | 1.2 ms |
+| C6 stall meter peak | 2.7 ms | 2.6 ms |
+| Holds, all stopping at the RTS threshold | — | 60 |
+
+- **Throughput did not change:** 358 KB/s on the first writer, 357 on this one.
+- **The busy wait is gone from the images:** `flush_last_byte` appears in neither production ELF.
+- **The cost:** a DMA descriptor error no longer reports through the write. It never sets
+  `is_done`, so that write would poll forever. The buffers are static and fixed, so nothing here
+  provokes one, and a C6 that stays silent raises the fault in
+  [`crates/wartui-proto/src/split.rs`](../crates/wartui-proto/src/split.rs).
+- **The bytes UHCI holds between the DMA and the UART FIFO are not documented.** This run is the
+  evidence that `cancel` keeps them. Only about 14 of each 60 holds' stops used short packets, so a
+  rare race there could slip through.
+- **An endless CTS hold was not tested.** The longest was about 200 ms. `RADIO_SILENT_MS` is the
+  answer to one, and it has unit tests but has not fired on hardware.
+
+After this change, `flash-bridge` took 13 s, and a 120 s capture with two nodes read 132 frames, 0
+dropped, 0 batches lost, 157 packets with zero link errors, and assignment latency of 2.06–2.95 ms.
 
 ## Updates
 
@@ -175,8 +210,9 @@ under bursts is thin.
 - UART1 on the SDIO traces, through UHCI on both chips, runs clean at 4 Mbaud: zero errors at
   either end over a 600 s soak.
 - 5 Mbaud does not stay clean under bidirectional load on this bench, and 4 Mbaud does.
-- RTS and CTS held the sender across all 140 read stops with no bytes lost. The stall meters
-  peaked at 1.7 ms on the P4 and 2.8 ms on the C6.
+- RTS and CTS held the sender across all 200 read stops, on both writers, with no bytes lost. The
+  stall meters peaked at 1.7 ms on the P4 and 2.8 ms on the C6.
+- The writer no longer depends on the driver's flush, at no cost in throughput.
 - The bundled C6 image crosses the link and is confirmed on trial, and node updates through the
   bridge work.
 - At desk load with two nodes, a real capture had zero link errors and zero frames dropped.
@@ -186,7 +222,8 @@ under bursts is thin.
 It does not settle:
 
 - **A full two-node overlap.** Not measured, and expected to overflow the queue (inferred).
-- **The busy wait in `flush_last_byte`.** Unobserved, not ruled out.
+- **A rare race losing a packet's tail through `cancel`.** Not seen in 300 s of load and 60 holds.
+- **The silent-radio fault on hardware.** Unit tested only.
 - **Real flash erases under transmit.** The holds stopped reading, and did not halt a CPU.
 - **The C6's transmitter under a hold.** Only the C6 stopped reading.
 - **A C6 restart during a capture.** Peer re-adds were not exercised on hardware.

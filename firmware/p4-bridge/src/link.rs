@@ -17,6 +17,16 @@
 //! clock stops too, so a C6 that hangs mid-update holding RTS stays `Updating`, and a host's poll
 //! going unanswered is what raises the fault (`Pair::fault`, the radio has stopped answering).
 //!
+//! **The writer polls the DMA on a timer and never calls `wait_for_done` or `wait`.** Both flush
+//! the UART, and the flush ends in a spin that does not yield until the transmitter is idle. A
+//! CTS hold that begins as the FIFO empties would stop this whole task for the hold, and a hung C6
+//! would stop it before the P4 could reset the C6. A write's `is_done` goes high once the DMA's
+//! FIFO has handed over the packet's last byte, and `cancel` stops only the DMA channel, which has
+//! finished. The UART and UHCI keep what they hold.
+//!
+//! **Nothing needs the FIFO drained between packets.** The link never turns the line around, and
+//! the next write resets only the DMA channel, so its bytes land behind those still in the FIFO.
+//!
 //! The P4 answers each hello from the C6 with one of its own, which covers a C6 that restarts
 //! under a running P4 as well as the first exchange. The pair hears the seq of every C6
 //! packet, since a hello whose seq is not past the last is a restart.
@@ -48,7 +58,7 @@ use wartui_proto::link::{BridgeToHost, Chip, LogStr, LoopPhase, ShortStr};
 use wartui_proto::mac::Mac;
 use wartui_proto::radio_link::update::{Failure, Op, Sender, Stage};
 use wartui_proto::radio_link::{
-    BODY_MAX, HEADER_LEN, Held, Hello, Kind, LINK_REVISION, PAYLOAD_MAX, Packer, Packet,
+    BAUD_RATE, BODY_MAX, HEADER_LEN, Held, Hello, Kind, LINK_REVISION, PAYLOAD_MAX, Packer, Packet,
     PacketReader, SENDER_POLL_MS, SeqCheck, SeqNote, Up, VerifyError, decode_up, encode_packet,
     records, seal,
 };
@@ -58,13 +68,13 @@ use wartui_proto::split::{PairEvent, RadioState};
 use crate::Shared;
 use crate::radio::{RADIO_DIGEST, RADIO_IMAGE, RADIO_SHA256};
 
-/// How long a write waits before `wait_for_done`, so the DMA has put bytes in the TX FIFO.
-///
-/// `wait_for_done` flushes the UART first. It awaits while the FIFO holds anything, but spins
-/// until the transmitter is idle once the FIFO reads empty. Reached before the DMA's first
-/// byte, that spin lasts the packet. Shorter than the fewest bytes a packet takes at any baud
-/// rate this link allows.
-const FIFO_FILL: Duration = Duration::from_micros(20);
+/// How often a write looks for its end once its wire time has passed. Short against the 320 µs
+/// the 128-byte FIFO takes to drain at [`BAUD_RATE`], so a brief hold costs the line little idle.
+const WRITE_POLL: Duration = Duration::from_micros(100);
+
+/// How often a write looks for its end once it has waited twice its wire time. CTS is holding it
+/// by then, and a long hold must not wake the executor 10,000 times a second.
+const WRITE_POLL_HELD: Duration = Duration::from_millis(1);
 
 /// How often an updating writer polls its [`Sender`] with no status to prompt it.
 const SENDER_POLL: Duration = Duration::from_millis(SENDER_POLL_MS);
@@ -380,14 +390,17 @@ async fn write_packets(
         let wire = encode_packet(&body[..len], buf.as_mut_slice());
         buf.set_length(wire);
         mark(LoopPhase::RadioLink);
-        let mut write = tx.write(buf).map_err(|(err, ..)| err).expect("start a UART write");
-        Timer::after(FIFO_FILL).await;
-        write.wait_for_done().await;
-        let (result, tx_back, done) = write.wait();
-        tx = tx_back;
-        buf = done;
-        if result.is_err() {
-            shared.count_link(|radio_link| &mut radio_link.uart_errors);
+        let write = tx.write(buf).map_err(|(err, ..)| err).expect("start a UART write");
+        // Ten bits a byte: 8N1.
+        let wire_time = Duration::from_micros(wire as u64 * 10 * 1_000_000 / BAUD_RATE as u64);
+        Timer::after(wire_time).await;
+        let mut waited = wire_time;
+        // Neither call reports a DMA error, so `uart_errors` holds only what a read finds.
+        while !write.is_done() {
+            let poll = if waited < wire_time * 2 { WRITE_POLL } else { WRITE_POLL_HELD };
+            Timer::after(poll).await;
+            waited += poll;
         }
+        (tx, buf) = write.cancel();
     }
 }
