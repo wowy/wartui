@@ -163,26 +163,11 @@ impl std::fmt::Display for BridgeSpec {
     }
 }
 
-/// The port a spec names, out of the P4 bridges attached.
+/// The port a spec names, out of `candidates`.
 ///
-/// An address is matched against the list the sweep uses, so one that only a node carries
-/// names nothing and a node sharing a P4 bridge's tail does not make it ambiguous. `wartui
-/// reset` transmits at once to the board named, so a node here is a node rebooted.
-///
-/// # Errors
-/// [`TransportError::Enumerate`] if the ports cannot be listed,
-/// [`TransportError::NoSuchBridge`] if no attached P4 bridge carries that address, or
-/// [`TransportError::AmbiguousName`] if several end with the octets given.
-pub fn resolve(spec: &BridgeSpec) -> Result<String, TransportError> {
-    match spec {
-        // A path is answered without enumerating: whether it exists is the
-        // question the open asks, and the OS gives a better answer than a list.
-        BridgeSpec::Path(path) => Ok(path.clone()),
-        BridgeSpec::Mac(_) | BridgeSpec::Tail(_) => resolve_in(&discover_bridges()?, spec),
-    }
-}
-
-/// The same choice, against a list rather than against what is plugged in.
+/// Callers pass [`discover_bridges`], the list the sweep uses, so an address that only a node
+/// carries names nothing and a node sharing a P4 bridge's tail does not make it ambiguous.
+/// `wartui reset` transmits at once to the board named, so a node here is a node rebooted.
 ///
 /// A spec that names a board not attached is refused rather than answered with
 /// another: an operator who named a board meant that board, and quietly opening a
