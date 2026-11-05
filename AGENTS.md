@@ -76,13 +76,13 @@ cd firmware/common                            # a firmware's clippy does not lin
 cargo fmt --all -- --check                    # then each firmware's combination:
 cargo clippy --release --features esp32c5,ota       # node
 cargo clippy --release --features esp32c6,ota,radio # P4 bridge's radio
-cargo clippy --release --features esp32p4,gps,ota --target riscv32imafc-unknown-none-elf
+cargo clippy --release --features esp32p4,gps,ota --target riscv32imafc-unknown-none-elf  # P4 bridge
 ```
 
 CI mirrors the workspace split: host crates on every push and PR; each firmware only
-when something it compiles changes, and `firmware/common` when it or `wartui-proto` does. It
-runs `fmt` and `clippy` in each firmware directory, so a `wartui-proto` change that reaches the
-firmware is checked there too.
+when something it compiles changes, and `firmware/common` when it, `wartui-proto` or a
+firmware's `Cargo.toml` does. It runs `fmt` and `clippy` in each firmware directory, so a
+`wartui-proto` change that reaches the firmware is checked there too.
 
 ## Architecture
 

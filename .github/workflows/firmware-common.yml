@@ -1,10 +1,11 @@
 name: Firmware - Common
 
-# `firmware/common` is a path dependency of both firmwares, and their clippy
+# `firmware/common` is a path dependency of all three firmwares, and their clippy
 # compiles it without linting it: it is outside their workspaces. So it is
-# linted here, from its own workspace, for each chip. Path-filtered like the
-# firmware workflows: its own sources, `crates/wartui-proto` (which it depends
-# on), `rustfmt.toml`, or this file.
+# linted here, from its own workspace, once per firmware, with the features that
+# firmware turns on. Path-filtered: its own sources, `crates/wartui-proto` (which
+# it depends on), each firmware's `Cargo.toml` (where those features are chosen),
+# `rustfmt.toml`, or this file.
 
 on:
   push:
@@ -12,12 +13,18 @@ on:
     paths:
       - firmware/common/**
       - crates/wartui-proto/**
+      - firmware/node/Cargo.toml
+      - firmware/p4-radio/Cargo.toml
+      - firmware/p4-bridge/Cargo.toml
       - .github/workflows/firmware-common.yml
       - rustfmt.toml
   pull_request:
     paths:
       - firmware/common/**
       - crates/wartui-proto/**
+      - firmware/node/Cargo.toml
+      - firmware/p4-radio/Cargo.toml
+      - firmware/p4-bridge/Cargo.toml
       - .github/workflows/firmware-common.yml
       - rustfmt.toml
 
@@ -32,8 +39,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # One job, a clippy step per firmware: each lints the feature combination that firmware
-  # builds, since a firmware's own clippy compiles this crate without linting it.
+  # One job rather than a matrix: linting is cheap next to a runner per combination. Each
+  # clippy step runs even when an earlier one failed, so one push reports every firmware.
   common:
     runs-on: ubuntu-latest
 
@@ -51,12 +58,14 @@ jobs:
           popd
 
       - name: Clippy (node, ESP32-C5)
+        if: success() || failure()
         run: |
           pushd firmware/common
           cargo clippy --release --features esp32c5,ota --locked -- -D warnings
           popd
 
       - name: Clippy (P4 bridge's radio, ESP32-C6)
+        if: success() || failure()
         run: |
           pushd firmware/common
           cargo clippy --release --features esp32c6,ota,radio --locked -- -D warnings
@@ -64,6 +73,7 @@ jobs:
 
       # The P4 is a different target from the C-series chips.
       - name: Clippy (P4 bridge, ESP32-P4)
+        if: success() || failure()
         run: |
           pushd firmware/common
           cargo clippy --release --features esp32p4,gps,ota --target riscv32imafc-unknown-none-elf --locked -- -D warnings
