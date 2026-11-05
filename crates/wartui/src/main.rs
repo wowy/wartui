@@ -282,7 +282,9 @@ pub fn last_reset_line(info: &BridgeInfo) -> String {
     let cause = match info.reset_cause {
         ResetCause::PowerOn => "powered on",
         ResetCause::Software => "reset by its own firmware, a panic or a reset command",
-        ResetCause::Watchdog => "reset by its watchdog, so its main loop had stopped",
+        ResetCause::Watchdog => {
+            "reset by its watchdog: a hung image, or one on trial that no host confirmed"
+        }
         ResetCause::Lockup => "reset by the chip after the CPU locked up",
         ResetCause::Brownout => "reset by a brownout, so check the cable and the hub",
         ResetCause::External => "reset over USB, by espflash or a replug",
@@ -295,7 +297,7 @@ pub fn last_reset_line(info: &BridgeInfo) -> String {
         LoopPhase::Command => Some("it was carrying out a host command"),
         LoopPhase::DrainLink => Some("it was reading host commands"),
         LoopPhase::Pump => Some("it was writing to the USB endpoint"),
-        LoopPhase::Boot => Some("it had not reached its main loop"),
+        LoopPhase::Boot => Some("it had not finished starting"),
         LoopPhase::SpiTransfer => Some("it was waiting on its SPI link"),
         LoopPhase::Unknown => None,
     };
