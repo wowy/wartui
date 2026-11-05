@@ -1,13 +1,11 @@
 //! `wartui flash-fleet` — one node image onto every attached ESP32-C5.
 //!
-//! **The bridge is spared before anything else happens, or nothing happens.** It is a C5 or C6
-//! with the same vendor and product ID as every node, so nothing on the bus tells it apart but its
-//! address, and a node image written over it takes the fleet's radio away until `flash-bridge`
-//! puts it back. The run therefore needs that address — `--bridge`, else the one `run` or
-//! `flash-bridge` saved in `wartui.toml` — and refuses without one unless `--no-bridge` says no bridge is attached. That
+//! **The bridge is spared before anything else happens, or nothing happens.** A P4 bridge is told
+//! apart by its USB IDs and is never probed. The run also spares whatever board the operator calls
+//! the bridge, by its address — `--bridge`, else the one `run` or `flash-bridge` saved in
+//! `wartui.toml` — and refuses without one unless `--no-bridge` says no bridge is attached. That
 //! flag only lifts the refusal: a remembered bridge is spared all the same, since sparing it costs
-//! nothing and a board known to be the bridge is never worth the risk. The chip cannot stand in
-//! for the address: the bridge is often the same part as the nodes.
+//! nothing and a board known to be the bridge is never worth the risk.
 //!
 //! **Every bridge known is spared, and a named one must be attached.** A `--bridge` value and the
 //! remembered address are both spared, not one in place of the other. A path that matches nothing
@@ -370,7 +368,6 @@ mod tests {
 
     use wartui_bridge::ports::{ESPRESSIF_VID, TEST_PID, TEST_VID, candidate};
 
-    use super::super::BRIDGE;
     use super::super::normalize;
     use super::super::release_asset;
     use super::super::testing::{BRIDGE_MAC, NODE_MAC, board, ran};
@@ -538,17 +535,13 @@ mod tests {
             release_asset(&NODE, &["esp32c5", "esp32c5"]),
             Some("wartui-node-fw-esp32c5.bin")
         );
-        assert_eq!(
-            release_asset(&BRIDGE, &["xiao-external-antenna", "esp32c6"]),
-            Some("wartui-bridge-fw-esp32c6-xiao.bin")
-        );
     }
 
     #[test]
     fn flash_fleet_refuses_release_asset_when_features_are_outside_table() {
         assert_eq!(release_asset(&NODE, &["esp32c5", "log"]), None);
         assert_eq!(release_asset(&NODE, &["esp32c6"]), None);
-        assert_eq!(release_asset(&NODE, &["esp32c5", "t-dongle-c5"]), None);
+        assert_eq!(release_asset(&NODE, &["esp32c5", "esp32c6"]), None);
     }
 
     #[test]

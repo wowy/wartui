@@ -36,7 +36,6 @@ jobs:
     strategy:
       matrix:
         include:
-          - features: esp32c5,radio,gps
           - features: esp32c6,radio
           - features: esp32c6,ota
           # The P4 is a different target from the C-series chips.

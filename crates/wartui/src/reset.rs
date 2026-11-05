@@ -1,13 +1,9 @@
 //! `wartui reset` — reboot the bridge without reaching for `espflash`.
 //!
-//! The failure this answers is transmit-only: the USB Serial/JTAG transmit endpoint
-//! can stop draining while the receive endpoint carries on, so the bridge goes on
-//! reading commands it has no way to answer. From the host that is
-//! indistinguishable from a dead board, but the receive path is never the problem —
-//! a single `Reset` frame down the same wire reboots a wedged board
-//! (`docs/phase-3-findings.md`). So this is the first thing to reach for, and
-//! `espflash`, which drives DTR/RTS and does not care whether the firmware is
-//! alive, is what is left when even this does not answer.
+//! A bridge that has stopped answering may still be reading: from the host, one with
+//! no way to answer is indistinguishable from a dead board, and a single `Reset` frame
+//! down the same wire reboots it. So this is the first thing to reach for, and a power
+//! cycle is what is left when even this does not answer.
 //!
 //! Transmitting before anything has identified itself is what makes this command
 //! work and what makes it the one command that must never be pointed at a guess.
@@ -15,8 +11,8 @@
 //! not reading its USB endpoint absorbs one: the rest sit in the tty's output queue
 //! until `close` gives up on them thirty seconds later, so `wartui reset` aimed at a
 //! node takes about that long to say it failed. That is the cost of asking a board
-//! that answers nothing, and the reason `run`'s sweep — which asks with one frame
-//! and may be pointed at anything — is not allowed to share this command's license.
+//! that answers nothing, and the reason `run`'s connection, which asks with one frame,
+//! does not share this command's license.
 //!
 //! Rebooting is confirmed by uptime and by uptime alone; [`rebooted`] is the rule.
 //! [`FRESH_UPTIME_MS`] covers the one case with no earlier figure to compare
@@ -27,7 +23,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use clap::Args as ClapArgs;
 use wartui_bridge::remember::BridgeMemory;
-use wartui_bridge::serial::{self, BridgeSpec, discover_ports};
+use wartui_bridge::serial::{self, BridgeSpec, discover_bridges};
 use wartui_bridge::{BridgeInfo, LinkEvent};
 use wartui_proto::link::{BridgeToHost, HostToBridge};
 use wartui_proto::mac;
@@ -72,11 +68,9 @@ pub struct Args {
 
 pub async fn run(args: Args) -> Result<()> {
     // Resolved to one board here rather than left to the transport, which sweeps.
-    // A sweep sends this command's `Reset` into every Espressif board attached
-    // until one answers, and a node that receives one reboots — losing the
-    // addresses it was holding back, which is a node's own memory and survives a
-    // session (`crates/wartui-proto/src/dedup.rs`). So this command gets an
-    // unambiguous board or none, and says which it wanted. A board named by the end
+    // A sweep sends this command's `Reset` into every P4 bridge attached until one
+    // answers, and with two attached that reboots another fleet's bridge. So this
+    // command gets an unambiguous board or none, and says which it wanted. A board named by the end
     // of its address is resolved here for the same reason: a tail several boards
     // share is refused before anything is opened, rather than left to a transport
     // that would wait out the whole timeout saying nothing.
@@ -87,7 +81,7 @@ pub async fn run(args: Args) -> Result<()> {
             _ => named.to_owned(),
         },
         None => serial::unambiguous_bridge(
-            &discover_ports().context("listing serial ports")?,
+            &discover_bridges().context("listing serial ports")?,
             remembered,
         )?,
     };
@@ -209,19 +203,16 @@ fn report(info: Option<&BridgeInfo>, uptime_ms: u32) {
 fn unreachable_notice(bridge: Option<&str>) -> String {
     let seconds = RECOVERY_TIMEOUT.as_secs();
     let device = bridge.and_then(|named| super::named_device(named).ok());
-    let (where_, espflash) = match (bridge, device.as_deref()) {
-        (Some(_), Some(path)) => (format!("on {path}"), format!("espflash reset --port {path}")),
-        (Some(name), None) => (
-            format!("named {name}, which no attached board answers to"),
-            "espflash reset".to_owned(),
-        ),
-        (None, _) => ("on the board that was detected".to_owned(), "espflash reset".to_owned()),
+    let where_ = match (bridge, device.as_deref()) {
+        (Some(_), Some(path)) => format!("on {path}"),
+        (Some(name), None) => format!("named {name}, which no attached board answers to"),
+        (None, _) => "on the board that was detected".to_owned(),
     };
     [
         format!("the bridge {where_} did not come back within {seconds}s."),
         "A reset frame reaches the bridge through its receive path, so this means that".to_owned(),
         "path is not running either — the firmware is hung, or this is not a bridge.".to_owned(),
-        format!("Reset it over USB instead, which needs no firmware at all: {espflash}"),
+        "Power-cycle it, which needs no firmware at all.".to_owned(),
         "`wartui ports` lists what is attached; `--log-file` records what the transport tried."
             .to_owned(),
     ]
@@ -254,14 +245,12 @@ mod tests {
     fn reset_cmd_formats_unreachable_notice_with_port_when_board_is_named() {
         let notice = unreachable_notice(Some("/dev/ttyACM0"));
         assert!(notice.contains("on /dev/ttyACM0 did not come back within 10s"), "{notice}");
-        assert!(notice.contains("espflash reset --port /dev/ttyACM0"), "{notice}");
+        assert!(notice.contains("Power-cycle"), "{notice}");
     }
 
     #[test]
     fn reset_cmd_formats_unreachable_notice_without_port_when_board_is_unnamed() {
         let notice = unreachable_notice(None);
         assert!(notice.contains("on the board that was detected"), "{notice}");
-        // No dangling `--port` with nothing after it.
-        assert!(!notice.contains("--port"), "{notice}");
     }
 }

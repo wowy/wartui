@@ -11,8 +11,8 @@
 //! (`wartui_bridge::ports` says why). A port another program holds fails to open and is passed
 //! over. That cost is why the search is kept to plausible receivers, not every device node.
 //!
-//! **It never opens an Espressif port.** [`wartui_bridge::ports::could_be_a_receiver`] is the
-//! complement of the bridge sweep's predicate, so the fleet's boards are never listed. The bridge
+//! **It never opens an Espressif port.** [`wartui_bridge::ports::could_be_a_receiver`] leaves out
+//! [`wartui_bridge::ports::is_wartui_board`], so the fleet's boards are never listed. The bridge
 //! sweep writes into whatever it opens, and the two must not meet on one port.
 
 use std::time::Duration;

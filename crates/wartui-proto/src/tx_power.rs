@@ -22,8 +22,8 @@ pub const MAX_TX_POWER_QUARTER_DBM: i8 = 80;
 ///
 /// Every power that reaches a radio goes through this, because a node's refusal is
 /// nearly invisible. The refusal is a `note!`, which compiles to nothing without the
-/// `log` feature. The node keeps its boot power, while the host's snapshot, the panel's
-/// RSSI threshold and the link budget in `set_peer_rate` all assume the configured
+/// `log` feature. The node keeps its boot power, while the host's snapshot and the link
+/// budget in `set_peer_rate` both assume the configured
 /// value. Clamping at the host keeps the fleet and its model from diverging silently.
 #[must_use]
 pub const fn clamp_tx_power(power: i8) -> i8 {

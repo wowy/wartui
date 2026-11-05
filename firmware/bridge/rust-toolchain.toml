@@ -1,6 +1,0 @@
-# Both bridge chips are RISC-V, and this pin is what keeps them building on
-# stable: a C5 or a C6 costs nobody a second toolchain.
-[toolchain]
-channel = "stable"
-components = ["rust-src"]
-targets = ["riscv32imac-unknown-none-elf"]

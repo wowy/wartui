@@ -149,14 +149,13 @@ pub(super) fn pending(last: u8) -> NodeView {
 pub(super) fn busy() -> Snapshot {
     Snapshot {
         bridge: Some(BridgeInfo {
-            chip: Chip::Esp32C6,
+            chip: Chip::Esp32P4,
             mac: [0x02, 0x00, 0x5E, 0x10, 0x9D, 0x24],
             fw_version: "0.1.0".to_owned(),
             reset_cause: ResetCause::PowerOn,
             last_phase: LoopPhase::Unknown,
             heap_free: 65_536,
             uptime_ms: 1_000,
-            panel: None,
             gps: false,
             radio: None,
             image: None,

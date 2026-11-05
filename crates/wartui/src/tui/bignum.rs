@@ -3,7 +3,7 @@
 //! The unique counts are the figures a driver reads at a glance, and a terminal has no
 //! larger font for one row. These glyphs need no font support and no dependency.
 
-/// The three rows of `text`, an [`approx`](wartui_core::panel::approx) figure, drawn big.
+/// The three rows of `text`, an [`approx`](super::stream) figure, drawn big.
 ///
 /// Digits are three columns wide in a seven-segment style. `.`, `k` and `M` are one
 /// column wide on the bottom row, like a subscript. Any other character is blank. One

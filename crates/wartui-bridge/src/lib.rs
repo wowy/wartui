@@ -17,9 +17,7 @@ pub mod sim;
 
 use thiserror::Error;
 use tokio::sync::mpsc;
-use wartui_proto::link::{
-    BridgeToHost, Chip, HostToBridge, LinkError, LoopPhase, Panel, RadioInfo,
-};
+use wartui_proto::link::{BridgeToHost, Chip, HostToBridge, LinkError, LoopPhase, RadioInfo};
 use wartui_proto::mac::Mac;
 use wartui_proto::ota::image::DIGEST_LEN;
 use wartui_proto::reset::ResetCause;
@@ -61,20 +59,13 @@ pub struct BridgeInfo {
     /// Small means this connection is talking to a bridge that has just restarted;
     /// see `serial::is_a_new_life`.
     pub uptime_ms: u32,
-    /// The screen this bridge has, if it has one.
-    ///
-    /// Carried up so the host formats to the geometry that is there and pushes
-    /// nothing at a bridge without a screen. `None` is the ordinary case: it is a
-    /// board fact, not a chip fact, and most boards have no panel.
-    pub panel: Option<Panel>,
     /// Whether this bridge was built with a GPS port.
     ///
-    /// A board fact, like `panel`: it says the bridge forwards a receiver's bytes, not
-    /// that a receiver answered.
+    /// A board fact: it says the bridge forwards a receiver's bytes, not that a receiver
+    /// answered.
     pub gps: bool,
-    /// The radio coprocessor behind a split bridge, as it described itself. Its reset
-    /// cause is the only record of a radio crash under a running bridge. `None` on a
-    /// single-chip bridge.
+    /// The C6 behind the P4, as it described itself. Its reset cause is the only record of
+    /// a radio crash under a running bridge. `None` until it answers.
     pub radio: Option<RadioInfo>,
     /// The digest appended to the booted image, from a bridge that takes updates over the
     /// link. `wartui flash-bridge` reads it to tell an installed image from a rollback.

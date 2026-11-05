@@ -13,8 +13,8 @@
 //! # The lone `0x00`
 //!
 //! A transfer that ends on a full packet is not complete to the host until a short packet
-//! follows. The same hold-back that `outbox` documents at 64 bytes happens at 512, so when
-//! a packet fills exactly and nothing follows, the next call returns a lone `0x00`: an
+//! follows (`docs/usb-boundary-findings.md`, measured at 64 bytes). The same hold-back happens
+//! at 512, so when a packet fills exactly and nothing follows, the next call returns a lone `0x00`: an
 //! empty frame every receiver already skips.
 //!
 //! # A new host

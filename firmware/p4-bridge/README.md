@@ -3,8 +3,8 @@
 The host half of the P4 split bridge. On a Waveshare ESP32-P4 board, the P4 runs this firmware: it
 talks to the host over USB 2.0 high speed with wartui's link protocol, and to the on-board
 ESP32-C6 as a 40 MHz SPI master over the board's SDIO traces. The C6 runs the radio
-([`firmware/p4-radio`](../p4-radio/README.md)). The host sees a bridge like the single-chip ones,
-reporting `Esp32P4` and both chips' diagnostics. The queue sizes are in `src/config.rs`.
+([`firmware/p4-radio`](../p4-radio/README.md)). The host sees one bridge, reporting `Esp32P4` and
+both chips' diagnostics. The queue sizes are in `src/config.rs`.
 
 ```sh
 cargo build --release
@@ -107,8 +107,10 @@ so the cable must leave VBUS unconnected. A WIFI6 can instead be powered from th
 
 ## GPS
 
-The default build reads a u-blox receiver over I2C and passes its bytes to the host, as the
-T-Dongle-C5 does. Like every other frame, bytes read while no host holds DTR are dropped (see
+The default build reads a u-blox receiver over I2C and passes its bytes to the host. It parses
+neither NMEA nor UBX: the host splits the two and composes the receiver's configuration, so a change
+to the rate or the sentences costs a `cargo run` rather than a reflash. `wartui sniff --verbose`
+prints each `Gps` frame's bytes as text, which is how to check the wiring. Like every other frame, bytes read while no host holds DTR are dropped (see
 [Queue sizes](#queue-sizes)), so a host that attaches late gets live fixes rather than a backlog.
 So are the lines saying the receiver stopped or came back; the announcement carries the current
 fault instead. Wire it to the P4's header:

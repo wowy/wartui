@@ -377,7 +377,6 @@ impl Pair {
             last_phase,
             heap_free: hello.map_or(0, |hello| hello.heap_free),
             uptime_ms: self.uptime_ms(now_ms),
-            panel: None,
             gps: self.gps,
             radio: hello.map(|hello| RadioInfo {
                 chip: hello.chip,
@@ -431,7 +430,6 @@ impl Pair {
             HostToBridge::Identify
             | HostToBridge::GetStatus
             | HostToBridge::Reset
-            | HostToBridge::ShowPanel { .. }
             | HostToBridge::GpsWrite { .. }
             | HostToBridge::Update(_) => Route::Local,
             // Listed rather than caught, so a new command is a compile error until it is
@@ -461,7 +459,7 @@ impl Pair {
     }
 
     /// The `Status` to answer a poll with. `host` and `down` are the P4's own queues;
-    /// `host_dropped` is what its outbox dropped.
+    /// `host_dropped` is what its host queue dropped.
     pub fn status(
         &self,
         now_ms: u64,

@@ -17,9 +17,8 @@ use wartui_proto::link::{
     MAX_HOST_FRAME, decode_frame, encode_host_frame,
 };
 use wartui_proto::mac::{self, Mac};
-use wartui_proto::stall::TX_STALL_TIMEOUT_MS;
 
-use crate::ports::{self, BRIDGE_PID, PortCandidate};
+use crate::ports::{self, PortCandidate};
 use crate::remember::BridgeMemory;
 use crate::{BridgeInfo, LinkEvent, LinkHandle, TransportError, link_pair};
 
@@ -31,54 +30,27 @@ const READ_TIMEOUT: Duration = Duration::from_millis(50);
 
 /// How long one tick of the patience below is. The first tick of a tokio interval
 /// fires immediately, which is when the single `Identify` goes out.
-const IDENTIFY_INTERVAL: Duration = Duration::from_millis(IDENTIFY_INTERVAL_MS);
-
-/// [`IDENTIFY_INTERVAL`] in milliseconds, for the const arithmetic on the patiences.
-const IDENTIFY_INTERVAL_MS: u64 = 500;
+const IDENTIFY_INTERVAL: Duration = Duration::from_millis(500);
 
 /// How long to wait for a board when there is no other to try, in ticks of
 /// [`IDENTIFY_INTERVAL`].
 ///
 /// The thirteenth tick gives up, at 6.0 s — a second past the CLI's five-second
 /// notice, so the operator reads the long form before the one-line reason. Long
-/// because a dongle still bringing its radio up is not a wedged one, and the
-/// remedy for the wedge (`wartui reset`) is worth being sure about.
+/// because a bridge still starting is not a hung one, and the remedy for a hung one
+/// (`wartui reset`) is worth being sure about.
 ///
-/// Patience is about how long a board is worth *before another is tried*. A board
-/// that answered last time gets [`REMEMBERED_TICKS`] when something else is
-/// attached, and any other board gets [`PROBE_TICKS`]: opening the others costs a
-/// second and a half each, and waiting the full six for a board that may not be the
-/// bridge would put the answer past the notice the CLI prints at five. A board
-/// passed over that way is tried again on the next pass, 750 ms later.
+/// Patience is about how long a board is worth *before another is tried*. With
+/// another attached, a board gets [`PROBE_TICKS`]: opening the others costs a second
+/// and a half each, and waiting the full six for a board that may not be the bridge
+/// would put the answer past the notice the CLI prints at five. A board passed over
+/// that way is tried again on the next pass, 750 ms later.
 const SETTLE_TICKS: u32 = 12;
 
-/// How long the remembered board gets when there is another to try, in the same
-/// ticks.
-///
-/// Long enough to outlast a wedged bridge's own recovery: its `StallWatch` reboots
-/// it [`TX_STALL_TIMEOUT_MS`] after the `Identify` this connection sends. The new
-/// life speaks first, because a host was present when the last one ended, so its `Ready`
-/// needs no second ask. Measured on a C6 left unread for two minutes, the reboot was heard 3.47 s after the
-/// `Identify`; the margin covers that and a slower board. 4.5 s still lands inside
-/// the CLI's five, which is the point: a one-shot command makes one sweep, so a
-/// probe that gave up first would leave no later pass to hear the `Ready`.
-///
-/// The cost is a replaced or reflashed remembered board holding the sweep for 4.5 s
-/// rather than 1.5 s before the others are tried, and only until another board
-/// answers and replaces the remembered address.
-const REMEMBERED_TICKS: u32 = ((TX_STALL_TIMEOUT_MS + 1_500) / IDENTIFY_INTERVAL_MS) as u32;
-
-const _: () = assert!(
-    REMEMBERED_TICKS as u64 * IDENTIFY_INTERVAL_MS > TX_STALL_TIMEOUT_MS + 470
-        && REMEMBERED_TICKS < SETTLE_TICKS,
-    "REMEMBERED_TICKS must outlast the stall reset and its reboot, and stay under SETTLE_TICKS",
-);
-
-/// How long any other board gets when there is another to try, in the same ticks.
+/// How long a board gets when there is another to try, in the same ticks.
 ///
 /// 1.5 s, because a healthy bridge answers in about two milliseconds
-/// (`docs/phase-3-findings.md`) and a sweep pays this for every board attached that
-/// is not the remembered one. Passing over the real bridge costs a retry rather than a
+/// (`docs/phase-3-findings.md`). Passing over the real bridge costs a retry rather than a
 /// failure, which is the trade [`SETTLE_TICKS`] explains.
 const PROBE_TICKS: u32 = 3;
 
@@ -99,11 +71,23 @@ const PROBE_GARBLE_LIMIT: u32 = 64;
 /// port is cheap, and it is the case where something is about to be plugged in.
 const MAX_SWEEP_DELAY: Duration = Duration::from_secs(5);
 
-/// The Espressif boards and P4 bridges attached, which are the bridge and any node on USB.
+/// Every board of the fleet attached: the P4 bridges and any node on USB.
 ///
 /// # Errors
 /// [`TransportError::Enumerate`] if the ports cannot be listed.
 pub fn discover_ports() -> Result<Vec<PortCandidate>, TransportError> {
+    let mut found = ports::list()?;
+    found.retain(|candidate| {
+        ports::is_wartui_board(candidate) && ports::is_usable_path(&candidate.path)
+    });
+    Ok(found)
+}
+
+/// The P4 bridges attached, the only ports worth writing to when looking for a bridge.
+///
+/// # Errors
+/// [`TransportError::Enumerate`] if the ports cannot be listed.
+pub fn discover_bridges() -> Result<Vec<PortCandidate>, TransportError> {
     let mut found = ports::list()?;
     found.retain(ports::could_be_a_bridge);
     Ok(found)
@@ -256,11 +240,7 @@ pub fn select(
         None => {
             let mut ordered = candidates.to_vec();
             ordered.sort_by_key(|candidate| {
-                (
-                    !is_remembered(candidate, remembered),
-                    !(candidate.pid == Some(BRIDGE_PID) || ports::is_p4_bridge(candidate)),
-                    candidate.path.clone(),
-                )
+                (!is_remembered(candidate, remembered), candidate.path.clone())
             });
             ordered
         }
@@ -271,8 +251,8 @@ pub fn select(
 ///
 /// `wartui reset` transmits before anything has identified itself — that is the
 /// point of it, since the board it is for answers nothing — so it can never be
-/// pointed at a sweep: a `Reset` sent to a node reboots the node and costs it the
-/// addresses it was holding back. It gets an unambiguous answer or none.
+/// pointed at a sweep: a `Reset` sent to the wrong bridge reboots another fleet's. It
+/// gets an unambiguous answer or none.
 ///
 /// # Errors
 /// [`TransportError::NoBridgeFound`] if nothing is attached, or
@@ -363,14 +343,14 @@ impl SerialTransport {
 
 /// Keep a link up: sweep for a bridge, pump it, report the failure, try again.
 ///
-/// The sweep is why this is a loop over a list rather than over one path. A node
-/// plugged in by USB is the same vendor and product as the bridge, so the board
-/// that sorts first is not reliably the one that answers — and opening it forever
-/// is a capture that never starts, with a log that says nothing but the same line.
+/// The sweep is why this is a loop over a list rather than over one path. Two P4 bridges
+/// can be attached, and one may be held by another program, so the board that sorts
+/// first is not reliably the one that answers — and opening it forever is a capture that
+/// never starts, with a log that says nothing but the same line.
 ///
-/// Once a board *has* answered, this stops sweeping and waits for that board.
-/// Reaching for another would mean transmitting into a node the moment the bridge
-/// is unplugged, which is exactly what an operator does mid-session to reflash one.
+/// Once a board *has* answered, this stops sweeping and waits for that board. Reaching
+/// for another would mean this run quietly driving another fleet the moment the bridge
+/// is unplugged.
 async fn supervise(transport: SerialTransport, mut plumbing: crate::LinkPlumbing) {
     // A link that keeps failing the same way is one event, not thousands. Only
     // a change of reason earns a line at `warn`: a capture left running against
@@ -462,13 +442,12 @@ async fn sweep(
     remembered: Option<Mac>,
     unreported: bool,
 ) -> Pass {
-    let attached = match discover_ports() {
+    let attached = match discover_bridges() {
         Ok(attached) => attached,
         Err(e) => return Pass::Failed { reason: e.to_string(), opened: 0 },
     };
     // A run that has found its bridge wants that board and no other, so the list
-    // narrows to it. Not finding it costs no open at all, which is what keeps a
-    // node plugged in mid-capture from being transmitted into.
+    // narrows to it. Not finding it costs no open at all.
     let candidates = match settled {
         Some(mac) => select(&attached, Some(&BridgeSpec::Mac(mac)), None),
         None => select(&attached, transport.spec.as_ref(), remembered),
@@ -507,7 +486,7 @@ async fn sweep(
         let state = Arc::new(Attempt::default());
         let attempt = connect(
             &candidate.path,
-            patience(alone, remembered, candidate),
+            patience(alone),
             alone,
             &state,
             &transport.memory,
@@ -543,8 +522,7 @@ async fn sweep(
 
     // A board remembered as the bridge, opened, heard out in full, and silent has
     // been reflashed or replaced. Kept, it would cost every later run that patience
-    // before the sweep it needed anyway — and it is the one entry that can come to
-    // point at a node, since a node is what a bridge becomes when it is reflashed.
+    // before the sweep it needed anyway.
     //
     // It is not the only way the memory is corrected, and not the common one: whatever
     // board does answer puts its own address in its place. This is for the case where
@@ -672,39 +650,27 @@ async fn connect(
         })
         .map_err(|e| format!("could not start writer thread: {e}"))?;
 
-    // A bridge is rarely being watched when it starts: unplugging the dongle is not
-    // part of restarting the TUI. One that restarted with a host attached speaks first,
-    // and every other holds its transmit until a host frame decodes
-    // (`ResetCause::speaks_first`). So we ask —
-    // **exactly once, and then only wait.**
+    // The P4 writes to its host only while DTR is up (`firmware/p4-bridge/src/usb.rs`), and
+    // queues nothing before, so a connection opening the port hears nothing unprompted.
+    // So we ask — **exactly once, and then only wait.**
     //
     // Once, because a board that is not reading its USB endpoint absorbs exactly
     // one packet: the ESP32's USB Serial/JTAG takes one into its OUT FIFO and NACKs
     // every one after it until firmware reads that FIFO, which node firmware never
-    // does. The second frame is therefore still in flight when the port is closed,
-    // and `close` waits for the tty's output queue — measured at 30 s against a
-    // node on this bench, which is the kernel's own timer giving up rather than the
-    // board relenting. Nothing can interrupt it: the thread stays alive in the
-    // kernel, and because a process cannot exit while one of its threads is in
-    // there, `wartui status` pointed at a node hung for half a minute after
-    // printing its answer. One frame never reaches that.
+    // does, and a path given to `--bridge` is opened whatever it reaches. The second
+    // frame is therefore still in flight when the port is closed, and `close` waits for
+    // the tty's output queue — measured at 30 s against a node on this bench, which is
+    // the kernel's own timer giving up rather than the board relenting. Nothing can
+    // interrupt it: the thread stays alive in the kernel, and because a process cannot
+    // exit while one of its threads is in there, `wartui status` pointed at a node hung
+    // for half a minute after printing its answer. One frame never reaches that.
     //
     // The one packet is the `Identify` behind a lone `0x00` (`encode_for_wire`).
     //
     // Once is also enough. A frame written to an enumerated board is delivered:
     // if its main loop has not started draining the link yet, our `Identify` waits
-    // in that same FIFO and is read when it does. The patience below is for the
-    // *answer* to take its time, not for the asking to be repeated.
-    //
-    // Once is enough for a bridge whose transmit endpoint has wedged, too: its
-    // `StallWatch` (`wartui_proto::stall`) reboots it 3 s after a host frame that
-    // nothing has answered, so this one `Identify` is what clears it. A host was present
-    // when that life ended, so the new one speaks first and its `Ready` reaches us
-    // unprompted, which is the only way this connection hears it. A board given
-    // [`SETTLE_TICKS`] or [`REMEMBERED_TICKS`] hears the `Ready` behind that reboot
-    // before it gives up. A plain probe gives up first, so the remembered board
-    // is never given one: a one-shot command makes a single sweep, and no later
-    // connection would hear it.
+    // for it. The patience below is for the *answer* to take its time, not for the
+    // asking to be repeated.
     let mut identify = tokio::time::interval(IDENTIFY_INTERVAL);
     let mut waited = 0_u32;
 
@@ -731,16 +697,15 @@ async fn connect(
                 // asks again.
                 if waited >= patience {
                     // Says what was observed, and stops short of concluding
-                    // "it is not a bridge", which is false in the case an
-                    // operator actually hits: it *is* the bridge, its transmit
-                    // endpoint has stopped draining, and it is still reading
-                    // every frame sent to it — which is why the remedy named
-                    // here is a command rather than a shrug.
+                    // "it is not a bridge", which may be false: a bridge that has
+                    // stopped answering may still read every frame sent to it,
+                    // which is why the remedy named here is a command rather than a
+                    // shrug.
                     let millis = IDENTIFY_INTERVAL.as_millis() * u128::from(patience);
                     // A board that was named or remembered is the one the advice is
-                    // for; one passed over in a sweep is very likely a node, and
-                    // telling an operator to reset it would be telling them to
-                    // reboot the wrong board.
+                    // for; one passed over in a sweep may be another fleet's bridge, and
+                    // telling an operator to reset it would be telling them to reboot
+                    // the wrong board.
                     break Err(if proven {
                         format!(
                             "nothing on {path} answered the link protocol in {}s; \
@@ -886,7 +851,6 @@ fn read_frames<R: Read>(
                     last_phase,
                     heap_free,
                     uptime_ms,
-                    panel,
                     gps,
                     radio,
                     image,
@@ -908,14 +872,13 @@ fn read_frames<R: Read>(
                     // different reasons, and the uptime is what separates them.
                     // One is a second answer to an `Identify` sent before the
                     // first came back: same life, and reporting it would look
-                    // like a reconnect that never happened. The other is a
-                    // bridge that rebooted underneath us — a software reset does
-                    // not re-enumerate the USB device, so this descriptor reads
-                    // straight through it — and that has to be reported, or the
-                    // engine keeps the dead life's `BridgeInfo` and goes on
-                    // believing in a peer table the reboot emptied. An uptime
-                    // that went backwards is the second case and cannot be the
-                    // first.
+                    // like a reconnect that never happened. The other is a C6
+                    // that restarted underneath a running P4 — the USB device does
+                    // not re-enumerate, so this descriptor reads straight through it,
+                    // and `Ready.uptime_ms` is the C6's — and that has to be reported,
+                    // or the engine keeps the dead life's `BridgeInfo` and goes on
+                    // believing in a peer table the restart emptied. An uptime that
+                    // went backwards is the second case and cannot be the first.
                     let fresh_life = is_a_new_life(uptime_ms, last_uptime);
                     if last_uptime.is_none() && *skipped > 0 {
                         tracing::debug!("skipped {skipped} frames from before this connection");
@@ -934,7 +897,6 @@ fn read_frames<R: Read>(
                         phase = ?last_phase,
                         heap_free,
                         uptime_ms,
-                        panel = ?panel,
                         gps,
                         radio = ?radio,
                         "the bridge announced itself"
@@ -947,7 +909,6 @@ fn read_frames<R: Read>(
                         last_phase,
                         heap_free,
                         uptime_ms,
-                        panel,
                         gps,
                         radio,
                         image,
@@ -957,7 +918,7 @@ fn read_frames<R: Read>(
                     // A bridge clears its queue when a host connects and queues `Ready`
                     // first, ahead of anything it hears afterwards. So whatever decodes
                     // before this connection's first `Ready` was written before the
-                    // connection, out of the endpoint's FIFO or the tty's buffer, and is
+                    // connection, out of the tty's buffer, and is
                     // stale: a heartbeat seconds old reads as a host behind the air. A
                     // rebooted bridge's `Ready` on a connection already announced changes
                     // nothing here.
@@ -1059,9 +1020,9 @@ fn encode_for_wire(cmd: &HostToBridge, lead: bool, buf: &mut [u8]) -> Result<usi
 ///   nothing was asked of it: ModemManager holds a fresh CDC-ACM device for a few
 ///   seconds on some distributions, and a missing `dialout` group holds it forever.
 /// - **There has to have been nothing else to try.** A board with another waiting
-///   gets [`REMEMBERED_TICKS`] at most, which is still not the full
-///   [`SETTLE_TICKS`], and a bridge still bringing its radio up can take longer.
-///   Concluding from less than a full settle is concluding from impatience.
+///   gets [`PROBE_TICKS`], which is not the full [`SETTLE_TICKS`], and a bridge still
+///   bringing its radio up can take longer. Concluding from less than a full settle is
+///   concluding from impatience.
 ///
 /// This is not the usual way the memory is corrected, and not the important one:
 /// whatever board does answer puts its own address in its place. This is for the case
@@ -1082,20 +1043,10 @@ fn is_remembered(candidate: &PortCandidate, remembered: Option<Mac>) -> bool {
     candidate.mac().is_some() && candidate.mac() == remembered
 }
 
-/// How many ticks of [`IDENTIFY_INTERVAL`] this candidate is worth.
-///
-/// A board with nowhere else to go is settled on. With company, the remembered board
-/// gets [`REMEMBERED_TICKS`], long enough for a wedged bridge to reset itself,
-/// and everything else gets a brief probe. A candidate with no address of its own
-/// (named by path) is never the remembered one.
-fn patience(alone: bool, remembered: Option<Mac>, candidate: &PortCandidate) -> u32 {
-    if alone {
-        SETTLE_TICKS
-    } else if is_remembered(candidate, remembered) {
-        REMEMBERED_TICKS
-    } else {
-        PROBE_TICKS
-    }
+/// How many ticks of [`IDENTIFY_INTERVAL`] a candidate is worth: a board with nowhere else
+/// to go is settled on, and one with company gets a brief probe.
+fn patience(alone: bool) -> u32 {
+    if alone { SETTLE_TICKS } else { PROBE_TICKS }
 }
 
 /// Whether a `Ready` came from a life that started after the last one seen.
@@ -1120,8 +1071,8 @@ mod tests {
     use wartui_proto::reset::ResetCause;
 
     use super::{
-        Attempt, PROBE_TICKS, REMEMBERED_TICKS, SETTLE_TICKS, encode_for_wire, is_a_new_life,
-        patience, read_loop, silence_disowns_it,
+        Attempt, PROBE_TICKS, SETTLE_TICKS, encode_for_wire, is_a_new_life, patience, read_loop,
+        silence_disowns_it,
     };
     use crate::LinkEvent;
     use crate::remember::BridgeMemory;
@@ -1208,24 +1159,13 @@ mod tests {
     }
 
     #[test]
-    fn serial_link_outlasts_stall_reset_when_remembered_bridge_has_company() {
-        let ticks = patience(false, mac::parse(BRIDGE_MAC), &board(BRIDGE_MAC));
-        assert_eq!(ticks, REMEMBERED_TICKS);
-        assert!(ticks > PROBE_TICKS);
-    }
-
-    #[test]
-    fn serial_link_probes_briefly_when_board_is_not_remembered() {
-        assert_eq!(patience(false, mac::parse(BRIDGE_MAC), &board(NODE_MAC)), PROBE_TICKS);
-        assert_eq!(patience(false, None, &board(BRIDGE_MAC)), PROBE_TICKS);
-        let named = candidate("/dev/ttyACM0", None, None, None);
-        assert_eq!(patience(false, None, &named), PROBE_TICKS, "no address is no match");
+    fn serial_link_probes_briefly_when_board_has_company() {
+        assert_eq!(patience(false), PROBE_TICKS);
     }
 
     #[test]
     fn serial_link_settles_when_board_is_alone() {
-        assert_eq!(patience(true, mac::parse(BRIDGE_MAC), &board(BRIDGE_MAC)), SETTLE_TICKS);
-        assert_eq!(patience(true, None, &board(NODE_MAC)), SETTLE_TICKS);
+        assert_eq!(patience(true), SETTLE_TICKS);
     }
 
     #[test]
@@ -1243,9 +1183,9 @@ mod tests {
 
     #[test]
     fn serial_link_reports_reboot_event_when_bridge_uptime_decreases() {
-        // What a software reset produces: no re-enumeration, so this arrives on
-        // the connection the old life was announced on.
-        assert!(is_a_new_life(180, Some(10_800_000)), "a stall reset after hours of service");
+        // What a C6 restart produces: no re-enumeration, so this arrives on the connection
+        // the old life was announced on.
+        assert!(is_a_new_life(180, Some(10_800_000)), "a restart after hours of service");
         assert!(is_a_new_life(0, Some(3_100)), "and one only seconds into a life");
     }
 
@@ -1275,7 +1215,7 @@ mod tests {
     #[test]
     fn serial_link_skips_frames_when_they_arrive_before_first_ready() {
         let ready = BridgeToHost::Ready {
-            chip: Chip::Esp32C6,
+            chip: Chip::Esp32P4,
             mac: [1, 2, 3, 4, 5, 6],
             fw_version: ShortStr::new(),
             proto_version: LINK_PROTO_VERSION,
@@ -1283,7 +1223,6 @@ mod tests {
             last_phase: LoopPhase::Unknown,
             heap_free: 0,
             uptime_ms: 0,
-            panel: None,
             gps: false,
             radio: None,
             image: None,

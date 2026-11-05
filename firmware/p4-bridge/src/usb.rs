@@ -4,11 +4,11 @@
 //! serial number, the C6's when it answers in time. The host finds a bridge by that
 //! serial, so enumerating early with another would name the wrong board.
 //!
-//! **Transmit opens on DTR.** The single-chip bridge writes nothing until a host has
-//! spoken ([`ResetCause::speaks_first`]), because a write into USB-Serial-JTAG before any
-//! host opens the port wedges the endpoint. CDC-ACM over the OTG controller does not
-//! wedge, and the kernel raises DTR when a host opens the port, so DTR is the signal that
-//! someone is reading. The writer waits on the CDC class's control-change signal for it.
+//! **Transmit opens on DTR.** CDC-ACM over the OTG controller does not wedge, unlike a
+//! write into USB-Serial-JTAG before any host opens the port
+//! (`docs/phase-3-findings.md`), and the kernel raises DTR when a host opens the port, so
+//! DTR is the signal that someone is reading. The writer waits on the CDC class's
+//! control-change signal for it.
 //! A freshly enumerated tty raises DTR before the host sets raw mode, so it echoes what the
 //! P4 sends in that window back to it. The host leads each connection with a lone `0x00`,
 //! which ends that echo before its first frame.
@@ -20,7 +20,6 @@
 //! frames carry its next one; `src/update.rs` has both.
 //!
 //! [`Pair::usb_serial_mac`]: wartui_proto::split::Pair::usb_serial_mac
-//! [`ResetCause::speaks_first`]: wartui_proto::reset::ResetCause::speaks_first
 
 use core::fmt::Write;
 
@@ -168,8 +167,6 @@ fn local(cmd: &HostToBridge, shared: &Shared) {
         // No GPS port in this build.
         #[cfg(not(feature = "gps"))]
         HostToBridge::GpsWrite { .. } => {}
-        // No panel.
-        HostToBridge::ShowPanel { .. } => {}
         HostToBridge::Update(op) => crate::update::take(op, shared),
         // `Pair::route` sends nothing else here.
         _ => {}

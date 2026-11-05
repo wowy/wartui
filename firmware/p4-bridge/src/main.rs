@@ -2,9 +2,8 @@
 //!
 //! The P4 talks to the host over USB 2.0 high speed with wartui's link protocol, and to
 //! the board's ESP32-C6 as a 40 MHz SPI master. The C6 runs the radio
-//! (`firmware/p4-radio`). The host cannot tell the pair from a single-chip bridge except
-//! by `Chip::Esp32P4` and the extra diagnostics; [`wartui_proto::split::Pair`] makes the
-//! decisions that keep it so.
+//! (`firmware/p4-radio`). The host sees one bridge, reporting `Chip::Esp32P4` and both chips'
+//! diagnostics; [`wartui_proto::split::Pair`] makes the decisions that keep it so.
 //!
 //! The futures share one task through `join`, so they share [`Shared`] through `Cell` and
 //! `RefCell` with no locking and nothing borrowed across an `.await`:

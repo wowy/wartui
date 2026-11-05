@@ -104,7 +104,7 @@ impl ResetCause {
     ///
     /// - **Why not always.** Writing to the USB Serial/JTAG endpoint with no host
     ///   reading wedges it. A C6 replugged and left unread for two minutes was dead at
-    ///   first open in 3 of 3 trials, until `StallWatch` rebooted it. A build holding all
+    ///   first open in 3 of 3 trials. A build holding all
     ///   transmit until a host frame decoded was healthy in 3 of 3, answering in 2 ms
     ///   (`docs/phase-3-findings.md`). The ROM banner prints either way and is not the
     ///   cause.
@@ -112,7 +112,7 @@ impl ResetCause {
     ///   that rides through the reset hears the new life only through the unprompted
     ///   `Ready`.
     /// - **Why not by cause.** The cause says who asked for the reset, not whether
-    ///   anybody was reading. A panic or `StallWatch` reset after the host left is
+    ///   anybody was reading. A panic after the host left is
     ///   [`Self::Software`] with nobody there. A watchdog or lockup reset can land while
     ///   a host keeps the port open and never sends again.
     #[must_use]

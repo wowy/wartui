@@ -62,9 +62,9 @@ pub fn reset_cause() -> ResetCause {
     };
     match reason {
         SocResetReason::ChipPowerOn => ResetCause::PowerOn,
-        // Every panic handler arrives here through `reboot`, and so do the bridge's
-        // `HostToBridge::Reset` and the reset its `StallWatch` asks for. Which of
-        // those it was is what the bridge's phase marker is for.
+        // Every panic handler arrives here through `reboot`, and so does the bridge's
+        // `HostToBridge::Reset`. Which of those it was is what the bridge's phase marker
+        // is for.
         SocResetReason::CoreSw | SocResetReason::Cpu0Sw => ResetCause::Software,
         SocResetReason::CoreMwdt0
         | SocResetReason::CoreMwdt1
@@ -95,14 +95,12 @@ pub fn reset_cause() -> ResetCause {
 
 /// Reset the chip: the one funnel every reset either firmware takes.
 ///
-/// Both panic handlers come here, and on the bridge its stall detector and
-/// `HostToBridge::Reset`. On the C5 a bare `software_reset()` reboots the board only
+/// Both panic handlers come here, and on the bridge `HostToBridge::Reset`. On the C5 a bare `software_reset()` reboots the board only
 /// once `esp_hal::init` has run. The part comes up with
 /// `PCR.RESET_EVENT_BYPASS.reset_event_bypass` set, which keeps a core reset from also
 /// resetting the system bus; the ROM's own MSPI core reset then leaves the AXI bus
 /// frozen. The banner prints, `SPI mode:` never does, and nothing recovers the board
-/// until it loses power — measured four ways (`docs/phase-3-findings.md`). On the bridge
-/// that is strictly worse than the wedge the stall detector exists to clear.
+/// until it loses power — measured four ways (`docs/phase-3-findings.md`).
 ///
 /// `esp-hal` clears the bit in its C5 `pre_init`, the first thing `esp_hal::init` does
 /// and before anything in it can panic (esp-rs/esp-hal#5703), as ESP-IDF's bootloader

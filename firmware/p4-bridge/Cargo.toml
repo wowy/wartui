@@ -1,4 +1,4 @@
-# Its own workspace, for the reasons `firmware/bridge` is one: a different target, a
+# Its own workspace, for the reasons `firmware/node` is one: a different target, a
 # different toolchain pin and a lockfile that must not be resolved together with the
 # host crates.
 [workspace]

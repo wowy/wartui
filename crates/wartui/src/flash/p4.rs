@@ -92,11 +92,10 @@ const FOLLOW: Duration = Duration::from_secs(30);
 const QUIET: Duration = Duration::from_secs(5);
 
 /// The README section that covers a wired flash.
-const FIRST_FLASH: &str = "firmware/p4-bridge/README.md § \"First flash\"";
+pub(super) const FIRST_FLASH: &str = "firmware/p4-bridge/README.md § \"First flash\"";
 
 /// Update the P4 bridge `board` over its link.
 pub(super) async fn run(args: &Args, features: &[&str], board: &PortCandidate) -> Result<()> {
-    refuse_chip_features(features)?;
     let source = source(
         &P4_BRIDGE_APP,
         args.image.as_deref(),
@@ -183,18 +182,6 @@ fn check_app(image: &[u8]) -> Result<()> {
         "{} bytes, and the P4's app slot holds {SLOT_LEN}",
         image.len()
     );
-    Ok(())
-}
-
-/// Refuse features that name a single-chip bridge's chip: they build another firmware.
-fn refuse_chip_features(features: &[&str]) -> Result<()> {
-    if let Some(chip) = Chip::FEATURED.into_iter().find(|chip| features.contains(&chip.name())) {
-        bail!(
-            "--features names {}, and a P4 bridge is built with its own; leave --features out \
-             for its release image",
-            chip.name()
-        );
-    }
     Ok(())
 }
 
@@ -702,16 +689,6 @@ mod tests {
         assert_eq!(judge(&NEW, Some(OLD), Some([0x33; DIGEST_LEN])), Outcome::Other);
         assert_eq!(judge(&NEW, Some(OLD), None), Outcome::Other);
         assert_eq!(judge(&NEW, None, None), Outcome::Other);
-    }
-
-    #[test]
-    fn flash_p4_refuses_features_when_they_name_a_single_chip_bridge() {
-        for chip in ["esp32c5", "esp32c6"] {
-            let error = refuse_chip_features(&["gps", chip]).unwrap_err().to_string();
-            assert!(error.contains(chip), "{error}");
-        }
-        refuse_chip_features(&[]).unwrap();
-        refuse_chip_features(&["gps"]).unwrap();
     }
 
     #[test]

@@ -59,7 +59,7 @@ jobs:
       # `__esp_radio_printf` and `lto = "fat"` refuses the build, while a second
       # `esp-alloc` is a second and empty heap that shows up only on a board.
       # Ahead of the build, so the duplicate is named rather than left to come
-      # back as a linker error. `firmware/bridge/README.md` § "Dependency
+      # back as a linker error. `firmware/p4-radio/README.md` § "Dependency
       # versions" has the reasoning; `.github/dependabot.yml` is what keeps the
       # bumps from arriving.
       - name: One copy of each esp-radio-pinned crate

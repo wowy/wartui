@@ -15,10 +15,9 @@ updates:
   # The same holds for the crates `esp-rtos` and `esp-hal` themselves build
   # against: `embassy-executor`, `embassy-sync`, `embassy-time`, `embedded-io-async`.
   # And for `esp-bootloader-esp-idf`, which fixes the `esp-storage` version.
-  # `firmware/bridge/README.md` § "Dependency versions" has the reasoning.
+  # `firmware/p4-radio/README.md` § "Dependency versions" has the reasoning.
   - package-ecosystem: "cargo"
     directories:
-      - "/firmware/bridge"
       - "/firmware/node"
       - "/firmware/common"
     schedule:

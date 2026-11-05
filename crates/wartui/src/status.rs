@@ -67,13 +67,6 @@ pub async fn run(args: Args) -> Result<()> {
     if let Some(radio) = &info.radio {
         println!("{}", radio_line(radio));
     }
-    // A board fact rather than a chip fact, and the one that decides whether `wartui
-    // run` pushes anything at a screen. Said either way, so an absent line never has
-    // to be interpreted.
-    match info.panel {
-        Some(panel) => println!("panel      {} x {} characters", panel.cols, panel.rows),
-        None => println!("panel      none"),
-    }
 
     link.send_bulk(HostToBridge::GetStatus).context("queueing the status request")?;
 

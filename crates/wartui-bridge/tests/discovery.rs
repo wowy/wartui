@@ -5,16 +5,22 @@ use wartui_bridge::ports::{
     self, ESPRESSIF_VID, PortCandidate, StableNames, TEST_PID, TEST_VID, candidate, is_usable_path,
     with_stable_paths,
 };
-use wartui_bridge::serial::{self, BridgeSpec, discover_ports};
+use wartui_bridge::serial::{self, BridgeSpec, discover_bridges, discover_ports};
 use wartui_proto::mac;
 
-/// The bridge on this bench, and a node beside it: same vendor, same product,
-/// adjacent device nodes, and nothing but the address to tell them apart.
+/// A board on this bench, and another beside it, on adjacent device nodes with nothing
+/// but the address to tell them apart.
 const BRIDGE_MAC: &str = "10:BD:A3:EC:44:C0";
 const NODE_MAC: &str = "02:00:5E:10:9D:24";
 
 fn esp(device: &str, serial: &str) -> PortCandidate {
     candidate(device, Some(ESPRESSIF_VID), Some(0x1001), Some(serial))
+}
+
+fn p4(device: &str, serial: &str) -> PortCandidate {
+    let mut p4 = candidate(device, Some(TEST_VID), Some(TEST_PID), Some(serial));
+    p4.product = Some("wartui p4 bridge".to_owned());
+    p4
 }
 
 fn link(device: &str, name: &str) -> (String, String) {
@@ -37,7 +43,14 @@ fn discovery_returns_empty_list_without_error_when_no_devices_are_attached() {
     let found = discover_ports().expect("listing ports should succeed");
     for port in found {
         assert!(is_usable_path(&port.path));
-        assert!(ports::could_be_a_bridge(&port), "{port:?}");
+        assert!(ports::is_wartui_board(&port), "{port:?}");
+    }
+}
+
+#[test]
+fn discovery_lists_only_p4_bridges_when_looking_for_a_bridge() {
+    for port in discover_bridges().expect("listing ports should succeed") {
+        assert!(ports::is_p4_bridge(&port), "{port:?}");
     }
 }
 
@@ -166,11 +179,14 @@ fn ports_scanner_keeps_distinct_by_id_paths_when_boards_have_unique_macs() {
 #[test]
 fn ports_scanner_strictly_separates_bridge_and_gps_devices_when_filtering() {
     // The partition the two detectors rest on: whoever looks for a bridge writes
-    // into what it opens, and a node's port must never be in the other's list.
-    let bridge = esp("/dev/ttyACM0", BRIDGE_MAC);
+    // into what it opens, and a node's port must be in neither list.
+    let bridge = p4("/dev/ttyACM0", BRIDGE_MAC);
+    let node = esp("/dev/ttyACM2", NODE_MAC);
     let puck = candidate("/dev/ttyACM1", Some(0x1546), Some(0x01A7), None);
     assert!(ports::could_be_a_bridge(&bridge));
     assert!(!ports::could_be_a_receiver(&bridge));
+    assert!(!ports::could_be_a_bridge(&node));
+    assert!(!ports::could_be_a_receiver(&node));
     assert!(ports::could_be_a_receiver(&puck));
     assert!(!ports::could_be_a_bridge(&puck));
 }
@@ -228,20 +244,6 @@ fn serial_discovery_maintains_deterministic_sweep_order_across_runs() {
     let again = serial::select(&boards, None, None);
     assert_eq!(first, again);
     assert_eq!(first[0].path, "/dev/ttyACM0", "and by path, having nothing better");
-}
-
-#[test]
-fn serial_discovery_sweeps_p4_bridge_with_bridges_when_ordering_probe_candidates() {
-    // The P4 bridge enumerates under the test pair rather than USB Serial/JTAG's, so
-    // it ranks with the single-chip bridges by name; ranking it behind the other
-    // Espressif devices would send Identify into every node attached first.
-    let mut p4 = candidate("/dev/ttyACM9", Some(TEST_VID), Some(TEST_PID), None);
-    p4.product = Some("wartui p4 bridge".to_owned());
-    let other = candidate("/dev/ttyACM0", Some(ESPRESSIF_VID), Some(0x0002), None);
-    let boards = [other, esp("/dev/ttyACM5", NODE_MAC), p4, esp("/dev/ttyACM7", BRIDGE_MAC)];
-    let order = serial::select(&boards, None, mac::parse(BRIDGE_MAC));
-    let paths: Vec<&str> = order.iter().map(|c| c.path.as_str()).collect();
-    assert_eq!(paths, ["/dev/ttyACM7", "/dev/ttyACM5", "/dev/ttyACM9", "/dev/ttyACM0"]);
 }
 
 #[test]

@@ -299,7 +299,6 @@ pub fn last_reset_line(info: &BridgeInfo) -> String {
         LoopPhase::DrainLink => Some("it was reading host commands"),
         LoopPhase::Pump => Some("it was writing to the USB endpoint"),
         LoopPhase::Boot => Some("it had not reached its main loop"),
-        LoopPhase::Render => Some("it was drawing its panel"),
         LoopPhase::SpiTransfer => Some("it was waiting on its SPI link"),
         LoopPhase::Idle | LoopPhase::Unknown => None,
     };
@@ -400,12 +399,8 @@ pub const CONNECT_NOTICE_AFTER: Duration = Duration::from_secs(5);
 /// succeed, and nothing comes back — and a reset is the only way to tell.
 pub fn no_bridge_notice(bridge: Option<&str>) -> String {
     let seconds = CONNECT_NOTICE_AFTER.as_secs();
-    let (where_, reset, wartui_reset) = match bridge.map(|name| (name, named_device(name))) {
-        Some((name, Ok(path))) => (
-            format!("on {path}"),
-            format!("espflash reset --port {path}"),
-            format!("wartui reset --bridge {name}"),
-        ),
+    let (where_, wartui_reset) = match bridge.map(|name| (name, named_device(name))) {
+        Some((name, Ok(path))) => (format!("on {path}"), format!("wartui reset --bridge {name}")),
         // A board that is not attached needs none of what follows: there is no port
         // to have been opened, so the three causes below are all about something
         // else, and the one fact worth saying is already known. A tail several boards
@@ -421,11 +416,7 @@ pub fn no_bridge_notice(bridge: Option<&str>) -> String {
             ]
             .join("\n");
         }
-        None => (
-            "on the board that was detected".to_owned(),
-            "espflash reset".to_owned(),
-            "wartui reset".to_owned(),
-        ),
+        None => ("on the board that was detected".to_owned(), "wartui reset".to_owned()),
     };
     // Assembled a line at a time: a continued literal puts the source's own
     // indentation inside the string.
@@ -439,10 +430,9 @@ pub fn no_bridge_notice(bridge: Option<&str>) -> String {
         "  - another program is holding the port".to_owned(),
         "`wartui ports` lists what is attached; `--log-file` records what the transport tried."
             .to_owned(),
-        // The fallback rather than the first suggestion: a wedged bridge reads its
-        // receive endpoint perfectly well and reboots on being asked, so `espflash`
-        // driving DTR/RTS is what is left when even the asking goes unanswered.
-        format!("If that goes unanswered too, reset it over USB instead: {reset}"),
+        // The fallback rather than the first suggestion: a bridge that has stopped
+        // answering may still read, and reboots on being asked.
+        "If that goes unanswered too, power-cycle it.".to_owned(),
     ]
     .join("\n")
 }
@@ -583,14 +573,14 @@ mod tests {
             "wartui",
             "flash-bridge",
             "--features",
-            "esp32c5,t-dongle-c5",
+            "gps",
             "--image",
             "fw.bin",
             "--dry-run",
         ])
         .unwrap();
         let Some(Command::FlashBridge(args)) = cli.command else { panic!("not flash-bridge") };
-        assert_eq!(args.features.as_deref(), Some("esp32c5,t-dongle-c5"));
+        assert_eq!(args.features.as_deref(), Some("gps"));
         assert_eq!(args.image.as_deref(), Some(std::path::Path::new("fw.bin")));
         assert!(args.dry_run);
         assert_eq!(args.bridge, None);
@@ -598,7 +588,7 @@ mod tests {
 
     #[test]
     fn cli_parser_accepts_flash_bridge_when_features_are_omitted() {
-        // A P4 bridge's release image is built with its default features.
+        // A release image is built with the default features.
         let cli = parse(["wartui", "flash-bridge", "--bridge", "71:F4"]).unwrap();
         let Some(Command::FlashBridge(args)) = cli.command else { panic!("not flash-bridge") };
         assert_eq!(args.features, None);
@@ -617,17 +607,17 @@ mod tests {
         let notice = no_bridge_notice(Some("/dev/cu.usbmodem2101"));
         assert!(notice.contains("on /dev/cu.usbmodem2101 after 5s"), "{notice}");
         // The remedy has to be runnable as printed, which means carrying the
-        // same port through rather than leaving the reader to fill it in.
-        assert!(notice.contains("espflash reset --port /dev/cu.usbmodem2101"), "{notice}");
+        // same board through rather than leaving the reader to fill it in.
+        assert!(notice.contains("wartui reset --bridge /dev/cu.usbmodem2101"), "{notice}");
     }
 
     #[test]
     fn cli_diagnostics_formats_generic_bridge_notice_when_bridge_is_unspecified() {
         let notice = no_bridge_notice(None);
         assert!(notice.contains("on the board that was detected"), "{notice}");
-        assert!(notice.contains("espflash reset"), "{notice}");
-        // No dangling `--port` with nothing after it.
-        assert!(!notice.contains("--port"), "{notice}");
+        assert!(notice.contains("wartui reset"), "{notice}");
+        // No dangling `--bridge` with nothing after it.
+        assert!(!notice.contains("--bridge"), "{notice}");
     }
 
     #[test]

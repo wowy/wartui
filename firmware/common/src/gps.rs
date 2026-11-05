@@ -1,9 +1,8 @@
 //! A u-blox GPS receiver on I2C: polled, batched, and passed through unread.
 //!
-//! One copy for every bridge with a receiver on its I2C bus. The T-Dongle-C5 reads one on
-//! its Qwiic port, and the P4 bridge on GPIO7 and GPIO8. Each firmware owns its pins, its
-//! channel buffers and how it runs [`run`], so this module holds only what the receiver and
-//! the host need from either.
+//! The P4 bridge reads one on GPIO7 and GPIO8. The firmware owns its pins, its channel
+//! buffers and how it runs [`run`], so this module holds only what the receiver and the host
+//! need from it.
 //!
 //! **The bridge does not parse what the receiver says.** It reads the receiver's byte stream
 //! and forwards it as [`BridgeToHost::Gps`](wartui_proto::link::BridgeToHost::Gps), and
@@ -37,9 +36,9 @@
 //! [`TRANSACTION_TIMEOUT_MS`]; one that overruns is dropped, and `esp-hal` resets the
 //! peripheral and clears the bus as it goes.
 //!
-//! **Reads are batched into frames.** Each `Gps` frame takes a whole slot of the
-//! outbox's bulk ring, the slots node sightings queue in, so a frame per read (30 to 40 a
-//! second at 5 Hz) would evict sightings whenever USB backs up. [`run`] appends reads
+//! **Reads are batched into frames.** `Gps` frames share the bulk ring node sightings queue
+//! in, so a frame per read (30 to 40 a second at 5 Hz) would evict sightings whenever USB
+//! backs up. [`run`] appends reads
 //! to one [`GpsBytes`] and hands it up when the receiver has drained, the end of an epoch's
 //! burst, or when another full read would not fit. That is about one frame per epoch, plus
 //! a few for the once-a-second GSA and GSV burst. Bytes are never held across a poll that

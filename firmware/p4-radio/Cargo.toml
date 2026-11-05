@@ -1,4 +1,4 @@
-# Its own workspace, for the reasons `firmware/bridge` is one: a different target, a
+# Its own workspace, for the reasons `firmware/node` is one: a different target, a
 # different toolchain pin and a lockfile that must not be resolved together with the
 # host crates.
 [workspace]
@@ -28,8 +28,8 @@ esp32c6 = [
 ]
 
 [dependencies]
-# Every `esp-*` crate and `embassy-*` crate is held at the version `firmware/bridge`
-# pins, for the reasons its README § "Dependency versions" gives.
+# Every `esp-*` crate and `embassy-*` crate is held at the version `esp-radio` resolves,
+# for the reasons `README.md` § "Dependency versions" gives.
 esp-alloc = "0.11.0"
 esp-bootloader-esp-idf = "0.6.0"
 esp-hal = { version = "1.2.2", features = ["unstable"] }
@@ -45,7 +45,7 @@ embassy-futures = "0.1.2"
 embassy-time = "0.5.1"
 static_cell = "2.1.1"
 # The reset funnel, the reset cause, the phase marker and the radio half, shared with
-# the single-chip bridge, and the flash half of updates, shared with the node. `ota` brings
+# the P4 where it applies, and the flash half of updates, shared with the node. `ota` brings
 # `esp-storage` at the version `firmware/common/Cargo.toml` holds.
 wartui-firmware = { path = "../common", features = ["ota", "radio"] }
 wartui-proto = { path = "../../crates/wartui-proto" }
@@ -71,8 +71,7 @@ debug = 2
 lto = "fat"
 opt-level = "s"
 
-# The crates that encode and check every record and transfer, built for speed as the
-# single-chip bridge builds them.
+# The crates that encode and check every record and transfer, built for speed.
 [profile.release.package.wartui-proto]
 opt-level = 3
 

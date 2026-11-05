@@ -5,8 +5,8 @@ Guidance for coding agents working in this repository.
 ## What this is
 
 A terminal fleet controller for ESP32-C5 wardriving nodes, speaking ESP-NOW through a
-USB-attached ESP32 dongle. `README.md` introduces it and says which chip goes
-where.
+USB-attached ESP32-P4 bridge whose on-board C6 runs the radio. `README.md` introduces it and says
+which chip goes where.
 
 Where the prose lives:
 
@@ -15,7 +15,7 @@ Where the prose lives:
   GPS, troubleshooting. Read it before changing view or CLI behavior, and **keep it true
   when that behavior changes.**
 - `firmware/*/README.md` — each firmware's own constraints, including the `esp-*` dependency
-  set (`firmware/bridge/README.md`).
+  set (`firmware/p4-radio/README.md`).
 - `docs/*-findings.md` — what each bench actually measured, and why several invariants
   below exist. `phase-N` are the fleet's, and the rest are named for what was measured.
 
@@ -60,13 +60,8 @@ Each firmware, and `firmware/common` beside them, is a **separate workspace**
 (`exclude = ["firmware"]`): different target, own toolchain pin, own lockfile. `cargo test --workspace` never touches them.
 
 ```sh
-cd firmware/bridge
-cargo fmt --all -- --check                    # its own workspace, so the root `cargo fmt` misses it
-cargo clippy --release --features esp32c6     # and --features esp32c5; exactly one is required
-cargo run --release --features esp32c6        # runner is `espflash flash --monitor`
-
 cd firmware/node
-cargo fmt --all -- --check
+cargo fmt --all -- --check                    # its own workspace, so the root `cargo fmt` misses it
 cargo clippy --release                        # and --no-default-features --features esp32c5
 
 cd firmware/p4-radio                          # the C6 half of the P4 split bridge
@@ -79,7 +74,7 @@ cargo clippy --release                        # and --no-default-features
 
 cd firmware/common                            # a firmware's clippy does not lint it
 cargo fmt --all -- --check
-cargo clippy --release --features esp32c6,radio   # and esp32c5,radio,gps, and esp32c6,ota
+cargo clippy --release --features esp32c6,radio   # and esp32c6,ota
 cargo clippy --release --features esp32p4,gps --target riscv32imafc-unknown-none-elf
 cargo clippy --release --features esp32p4,ota --target riscv32imafc-unknown-none-elf
 ```
@@ -96,7 +91,7 @@ own.
 
 - **`crates/wartui-proto`** — `no_std`, allocation-free wire formats and the parsing that goes
   with them: `air` (the ESP-NOW frames), `beacon`, `hci`, `dedup`, `link`, `mac` (the `Mac`
-  type and its text form), `outbox`, `stall`, `plan` (channel pools and the partitioning planner), `node` (a node's
+  type and its text form), `plan` (channel pools and the partitioning planner), `node` (a node's
   timings and sweep cursor), `tx_power`, `pending` (the buffers sightings wait in on a node),
   `ota` (the update receiver a node and both halves of the P4 bridge share, `ota::trial`, the
   record of an image on trial, and `ota::image`, the digest that names an image).
@@ -105,14 +100,16 @@ own.
   rather than a reflash.
 - **`crates/wartui-bridge`** — host side of the USB link. Everything above talks to a `LinkHandle`
   and cannot tell a real dongle (`serial`) from the fake fleet (`sim`). It also owns the host's
-  serial ports generally (`ports`): what is attached and what the OS says it is, with no judgment
-  about which of them is a bridge, so anything else that opens a device shares one enumeration.
+  serial ports generally (`ports`): what is attached and what the OS says it is, so anything else
+  that opens a device shares one enumeration.
 - **`crates/wartui-core`** — the headless half. Draws nothing, parses no arguments.
 - **`crates/wartui`** — clap CLI (`run`/`export`/`analyze`/`upload`/`sniff`/`status`/`reset`/
   `ports`/`flash-fleet`/`flash-bridge`/`ota`) and the ratatui view.
-- **`firmware/bridge`** — dumb radio bridge: COBS framing and `esp-radio` calls, no protocol
-  knowledge. Fixes there cost a reflash, so logic belongs on the host. A board with a screen
-  draws lines the host composed and hands it, which is the same rule seen from the other side.
+- **`firmware/p4-bridge`** — the host half of the bridge, on an ESP32-P4: COBS framing over USB and
+  an SPI master to its C6, no protocol knowledge. Fixes there cost a reflash, so logic belongs on
+  the host. Its image carries the C6's, and updates it.
+- **`firmware/p4-radio`** — the radio half of the bridge, on the board's C6: `esp-radio` calls behind
+  an SPI slave, equally without protocol knowledge.
 - **`firmware/node`** — the nodes. Sniffs rather than scans, so it never transmits while looking,
   owns the channel, and holds `sniffer()` and `esp_now()` together for the life of the program
   (`firmware/node/README.md` § "What it does differently"). Returns to the control channel after
@@ -123,10 +120,9 @@ own.
 - **`firmware/common`** (`wartui-firmware`) — chip-level code the firmwares need and that needs
   `esp-hal`, so it cannot live in `wartui-proto`: the reset funnel `reboot()` and `reset_cause()`,
   the bridge's reset-surviving phase marker (`phase`), the bridge's ESP-NOW half behind the `radio`
-  feature (`radio`), the u-blox I2C GPS reader the T-Dongle-C5 and P4 bridges share behind the
-  `gps` feature (`gps`), the supply and die readings a node's heartbeat carries (`health`), and
+  feature (`radio`), the P4's u-blox I2C GPS reader behind the `gps` feature (`gps`), the supply and die readings a node's heartbeat carries (`health`), and
   updates on flash, the slot, the switch and the trial, behind the `ota` feature (`ota`).
-  A path dependency of both, forwarding each firmware's chip feature, and its own workspace so
+  A path dependency of each, forwarding each firmware's chip feature, and its own workspace so
   its own clippy lints it; a firmware's clippy compiles it without linting it.
 
 ### The engine/runtime split is load-bearing
@@ -187,16 +183,6 @@ is here rather than only in a `//!`.
   assigned. Once its heartbeat has named that version, its sighting batches are counted
   `incompatible` and not recorded. The bridge reads only the magic, which is frozen, and does not
   need the reflash.
-- **The bridge displays what it is handed and never composes it.** A board with a panel is
-  sent finished lines with a severity on each, blits them, and owns nothing about them but the
-  three colors a `Severity` means and the fallback screen it draws when no host is talking —
-  link-local facts, which is why they cost the format-blind rule nothing. It reads no air
-  frame to find out what to say, so a change to what the panel says or how it is arranged
-  costs a `cargo run` rather than a reflash. The bridge advertising its own geometry in
-  `Ready` is what removes the operator flag: a board without a screen reports `None` and is
-  sent nothing at all.
-  → `crates/wartui-core/src/panel.rs`, `firmware/bridge/src/panel.rs`,
-  `crates/wartui-proto/src/link/mod.rs`, `HostToBridge::ShowPanel`
 - **`link::LINK_PROTO_VERSION` does not move before 1.0 either**, and for the reason
   `air::WIRE_VERSION` does not: there is no older peer for it to protect when the policy is to
   flash both ends from one tree. The cost is that a host and a bridge built from different
@@ -289,16 +275,13 @@ is here rather than only in a `//!`.
   whose resets count its boots, so a hung P4 image or one no host hears rolls back after three.
   → `firmware/common/src/ota.rs` `//!`, `crates/wartui-proto/src/ota/trial.rs` (the sector's fixed
   layout), `firmware/node/README.md` § "Over-the-air updates", `firmware/p4-bridge/src/update.rs`
-- **`clippy::all` is denied workspace-wide, in both firmwares too, and so is `unsafe_code`.** The
+- **`clippy::all` is denied workspace-wide, in every firmware too, and so is `unsafe_code`.** The
   host allows it on one function, the Raspberry Pi firmware mailbox ioctl
   (`crates/wartui-core/src/health.rs`, `mailbox_call`). The node allows one IDF call `esp-radio`
   does not wrap: the transmit-power read each heartbeat carries (`firmware/node/src/radio.rs`,
   `tx_power`). `firmware/common` allows two more for the node's heartbeat, both PHY blob reads:
-  the rail voltage (`health::vdd_mv`) and the die temperature (`health::die_temp_c`). The
-  bridge's GPS build allows one call that is not IDF's, `Spawner::for_current_executor`
-  (`firmware/bridge/src/gps.rs`, `current_spawner`): `esp-hal`'s async I2C driver is not `Send`, and
-  `InterruptExecutor::start` gives out only a `SendSpawner`, so nothing safe starts the GPS task on
-  its interrupt executor. Avoid `unsafe` wherever a safe route exists. Any further `unsafe` — a new
+  the rail voltage (`health::vdd_mv`) and the die temperature (`health::die_temp_c`). Avoid `unsafe`
+  wherever a safe route exists. Any further `unsafe` — a new
   `#[allow(unsafe_code)]`, or a new `unsafe` block inside a function already allowed — is the
   user's decision, made in review, never a convenience, and committing it needs their approval
   first. An uncommitted experiment, such as a throwaway build that measures what a raw register
@@ -312,18 +295,20 @@ edit stops; follow the pointer before changing the rule.
 
 - **Somebody else's ESP-NOW traffic is dropped, never reported or accommodated.**
   → `crates/wartui-proto/src/air/mod.rs` `//!`, `firmware/common/src/radio.rs` `hear`
-- **Finding the bridge means transmitting into what is opened**, so the sweep opens Espressif
-  vendor IDs and the P4 bridge's exact USB ID pair and nothing else, and `wartui reset` — which
-  transmits before anything has identified itself — never sweeps at all. The GPS search is the
-  complement: it opens everything *but* those, and writes to none of them. → `crates/wartui-bridge/src/ports.rs` `//!`,
+- **Finding the bridge means transmitting into what is opened**, so the sweep opens the P4 bridge's
+  exact USB ID pair and nothing else, which means finding a bridge never writes to a node, and
+  `wartui reset` — which transmits before anything has identified itself — never sweeps at all. The
+  GPS search is the other side: it opens everything but the fleet's boards (the P4 bridge and any
+  Espressif vendor ID), and writes to none of them. `discover_ports` lists those boards for
+  `flash-fleet`, boot watching and `wartui ports`, and `discover_bridges` is what the sweep, `reset`
+  and `flash-bridge` read. → `crates/wartui-bridge/src/ports.rs` `//!`,
   `serial::select` / `serial::unambiguous_bridge`, `crates/wartui-core/src/discover.rs` `//!`
-- **A connection asks once and then only waits.** A board that is not reading its USB endpoint
-  absorbs exactly one packet and NACKs the rest, and they sit in the tty's output queue through a
-  `close` that no signal can interrupt — 30 s measured against a node, during which the process
-  cannot exit. One `Identify` is also sufficient, because a board that is merely still booting
-  reads it out of that same FIFO when its loop starts, and a bridge whose transmit endpoint has
-  wedged reboots itself on that one unanswered frame. → `crates/wartui-bridge/src/serial.rs`,
-  `connect`'s `identify` arm; `crates/wartui-proto/src/stall.rs`
+- **A connection asks once and then only waits.** A path named with `--bridge` is opened whatever
+  it reaches, and a board that is not reading its USB endpoint absorbs exactly one packet and NACKs
+  the rest, and they sit in the tty's output queue through a `close` that no signal can interrupt —
+  30 s measured against a node, during which the process cannot exit. One `Identify` is also
+  sufficient, because a board that is merely still booting reads it when its loop starts.
+  → `crates/wartui-bridge/src/serial.rs`, `connect`'s `identify` arm
 - **Never set DTR or RTS on a serial port, or ask `serialport` to.** The kernel raises both
   together on open, which an ESP32's USB Serial/JTAG ignores; moving one without the other is its
   reset sequence, so `.dtr_on_open(false)` reboots the board it was being polite to.
@@ -353,38 +338,22 @@ edit stops; follow the pointer before changing the rule.
   drops what decodes ahead of a connection's first `Ready`.
   → `crates/wartui-core/src/engine/lag.rs`, `note_arrival` / `air_is_live` / `BEHIND_THE_AIR`;
   `crates/wartui-bridge/src/serial.rs`, `read_loop`
-- **The bridge's USB transmit endpoint can die on its own, and the bridge reboots when it does.**
-  `StallWatch` times the *contradiction*, and **every one of its four facts is load-bearing**:
-  delete any and a bridge reboots forever, or never. There is no watchdog behind the hang case.
-  → `crates/wartui-proto/src/stall.rs`, `StallWatch`; `docs/phase-3-findings.md`
 - **Every reset goes through `reboot()`.** On a C5, a bare `software_reset()` before
   `esp_hal::init` has cleared `reset_event_bypass` does not reboot the board, it stops it.
   `esp-hal`'s C5 `pre_init` clears it; both firmwares share the one funnel so every reset takes
   the benched path. → `firmware/common/src/lib.rs`, `reboot`
-- **A bridge reboot is invisible unless the host compares uptimes**, because a software reset does
-  not re-enumerate the USB device. → `crates/wartui-bridge/src/serial.rs`, the `Ready` arm
-- **Neither firmware may block on the USB endpoint.** The bridge's rings evict oldest-first and
-  resynchronize COBS behind a truncated frame. Its polling while a frame crosses the link stops
-  at `link::BURST_BUDGET_US`, though a host frame completed meanwhile adds the time it takes to
-  act on; neither is a wait on the host. A node loses a line rather than a sweep.
-  → `crates/wartui-proto/src/outbox/mod.rs` `//!`, `crates/wartui-proto/src/link/burst.rs`,
-  `firmware/node/src/main.rs`, `note!`
-- **The bridge writes nothing to USB until a host has spoken, unless a host was present when the
-  previous life ended** (an RTC flag, never trusted after a power-on). Writing before any host
-  opens the port wedges the endpoint, and a host that was present across the reset is already
-  reading. **Nor does it queue anything until then**, and a connecting host's `Identify` (the P4:
-  DTR rising) clears whatever is queued before it is served. The single-chip bridge cannot see a
-  host leave, since USB Serial/JTAG gives no DTR level, so after a quit up to a ring's worth
-  queues again until the next `Identify`. Bytes already past the queue still reach the port, and
-  the host drops every frame that decodes ahead of the connection's first `Ready`. → `crates/wartui-proto/src/reset.rs`, `ResetCause::speaks_first`;
-  `docs/phase-3-findings.md`; `firmware/bridge/src/main.rs`, `Bridge::send` /
-  `note_host_frame`; `firmware/p4-bridge/src/main.rs`, `Shared::push_host`, and
-  `src/usb.rs`, `write_host`
-- **Never link `esp-println` with `jtag-serial` in the *bridge*** — its link protocol shares that
-  endpoint, and diagnostics go out as `Log` frames instead. → `firmware/bridge/README.md`
+- **A C6 restart is invisible unless the host compares uptimes**, because it does not re-enumerate
+  the P4's USB device and `Ready.uptime_ms` is the C6's. → `crates/wartui-bridge/src/serial.rs`, the
+  `Ready` arm
+- **The P4 writes nothing to USB until a host holds DTR, and queues nothing until then.** The kernel
+  raises DTR when a host opens the port, so DTR is the signal that someone is reading. Frames
+  produced without one are dropped, and DTR rising clears whatever is queued before it is served, so
+  a host never reads a backlog from before it attached. Bytes already past the queue still reach the
+  port, and the host drops every frame that decodes ahead of the connection's first `Ready`.
+  → `firmware/p4-bridge/src/main.rs`, `Shared::push_host`, and `src/usb.rs`, `write_host`
 - **Both firmwares pass `US` for the regulatory domain, and that is not a preference**: `esp-radio`
   defaults to China, which silently costs a C5 channels 100–144 on every sweep.
-  → `firmware/bridge/src/main.rs`, `firmware/node/README.md`
+  → `firmware/node/src/main.rs`, `firmware/node/README.md`
 - **Every crate `esp-radio` also depends on is held at the version `esp-radio` resolves.**
   `esp-radio 1.0.0-beta.1` requires `esp-hal ~1.2.0`, which walls off `esp-hal` and `esp-rtos`
   outright. The others — `esp-alloc`, `esp-sync`, `esp-storage`, `esp-wifi-sys-*` — go higher
@@ -392,7 +361,7 @@ edit stops; follow the pointer before changing the rule.
   `__esp_radio_printf` that fat LTO refuses, or a second `esp-alloc` whose `HEAP` nothing fills,
   which builds and then panics on the first task the radio spawns. Dependabot ignores them and each
   firmware's CI job counts the versions; a new `esp-radio` moves all of them at once, by hand.
-  → `firmware/bridge/README.md` § "Dependency versions"
+  → `firmware/p4-radio/README.md` § "Dependency versions"
 - **Every bridge and node defaults to 2 dBm**, the lowest `set_max_tx_power` accepts, and the host
   is what decides otherwise: `fleet` and `bridge` under `[tx-power]` in `wartui.toml`, or the
   settings modal, set the nodes and the bridge, each independent of the other and falling back to
@@ -446,8 +415,8 @@ edit stops; follow the pointer before changing the rule.
 - Rustfmt is configured with `max_width = 100` and `use_small_heuristics = "Max"`.
 - Tests follow the Rust convention: unit tests live in a `#[cfg(test)]` module beside the code
   they test, and tests that exercise a crate through its public API live under
-  `crates/*/tests/`. Most of the suite is the latter; `nmea`, `position`, `export` and `outbox`
-  carry unit tests of their own.
+  `crates/*/tests/`. Most of the suite is the latter; `nmea`, `position` and `export` carry unit
+  tests of their own.
 - Test names follow the `component_action_when_condition` pattern
   (`engine_increments_reboot_counter_when_heartbeat_counter_decreases`):
   - `component` is the unit under test, named the same way across a file (`engine`, `store`,

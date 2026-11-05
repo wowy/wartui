@@ -167,6 +167,7 @@ const fn reset_cause_from_code(code: u8) -> ResetCause {
     }
 }
 
+// Frozen with the hello. Code 9 names nothing.
 const fn loop_phase_code(phase: LoopPhase) -> u8 {
     match phase {
         LoopPhase::Unknown => 0,
@@ -178,7 +179,6 @@ const fn loop_phase_code(phase: LoopPhase) -> u8 {
         LoopPhase::Pump => 6,
         LoopPhase::Idle => 7,
         LoopPhase::TxStalled => 8,
-        LoopPhase::Render => 9,
         LoopPhase::SpiTransfer => 10,
     }
 }
@@ -193,7 +193,6 @@ const fn loop_phase_from_code(code: u8) -> LoopPhase {
         6 => LoopPhase::Pump,
         7 => LoopPhase::Idle,
         8 => LoopPhase::TxStalled,
-        9 => LoopPhase::Render,
         10 => LoopPhase::SpiTransfer,
         _ => LoopPhase::Unknown,
     }

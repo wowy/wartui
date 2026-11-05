@@ -329,7 +329,7 @@ impl FleetEngine {
     ///
     /// The power rides every poll, not just the first. `bulk` drops rather than blocks, and nothing
     /// notices a dropped `SetTxPower`: the bridge would sit at its firmware fallback while the
-    /// snapshot, panel and link-budget reasoning read the configured value. Repeating with the poll
+    /// snapshot and link-budget reasoning read the configured value. Repeating with the poll
     /// recovers that. It stays off `urgent`, which is kept small for what races an admin window. A
     /// mid-run change also goes out at once ([`Self::update_bridge_tx_power`]).
     /// `esp_wifi_set_max_tx_power` is idempotent and the bridge logs only changes, so the repeat

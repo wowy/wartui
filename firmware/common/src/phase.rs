@@ -2,15 +2,13 @@
 //! present then, kept across a reset for the next life to report.
 //!
 //! In RTC fast memory and marked persistent, so it survives the resets that matter — the
-//! panic handler's, the watchdog's, and the one [`StallWatch`] asks for — and is read back by
+//! panic handler's and the watchdog's — and is read back by
 //! the next life. A power-on leaves it undefined, which is why [`boot_phase`] only believes
 //! it when the reset reason says the RTC domain was not reset.
 //!
 //! `AtomicU8`s because a `static mut` cannot be written without `unsafe`, which is denied
 //! here, and `portable-atomic`'s because those are the ones `esp-hal` marks persistable.
 //! Never contended: only a bridge's main task touches them.
-//!
-//! [`StallWatch`]: wartui_proto::stall::StallWatch
 
 use portable_atomic::{AtomicU8, AtomicU32, Ordering};
 use wartui_proto::link::LoopPhase;
@@ -32,8 +30,7 @@ static PHASE_VALID: AtomicU32 = AtomicU32::new(0);
 /// Arbitrary, and only has to be unlikely. Reads as `war1` in a memory dump.
 const PHASE_MAGIC: u32 = 0x7761_7231;
 
-/// Whether a host frame had decoded within
-/// [`HOST_PRESENT_WINDOW_MS`](wartui_proto::stall::HOST_PRESENT_WINDOW_MS) at the last
+/// Whether a host frame had decoded within the last ten seconds at the last
 /// pass of the loop, kept for the next life to decide whether it speaks first
 /// ([`ResetCause::speaks_first`]).
 ///
@@ -93,8 +90,7 @@ pub fn boot_phase(cause: ResetCause) -> LoopPhase {
         6 => LoopPhase::Pump,
         7 => LoopPhase::Idle,
         8 => LoopPhase::TxStalled,
-        9 => LoopPhase::Render,
-        10 => LoopPhase::SpiTransfer,
+        9 => LoopPhase::SpiTransfer,
         _ => LoopPhase::Unknown,
     }
 }

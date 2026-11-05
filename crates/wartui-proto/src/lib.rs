@@ -6,7 +6,7 @@
 //! interoperate with no other firmware.
 //!
 //! The crate is `no_std` and allocation-free so the firmware can use it. Logic the
-//! firmware runs lives here too, such as [`outbox`], [`stall`], [`pending`] and [`ota`],
+//! firmware runs lives here too, such as [`pending`] and [`ota`],
 //! because a `riscv32imac` binary cannot run a test and this crate can.
 //! [`config`] parses build-time buffer sizes, [`frame_ring`] holds whole frames in a bounded
 //! ring, and [`host_queue`] queues link frames for the P4's USB host port. [`spi`] is the
@@ -27,13 +27,11 @@ pub mod mac;
 mod mac_index;
 pub mod node;
 pub mod ota;
-pub mod outbox;
 pub mod pending;
 pub mod plan;
 pub mod reset;
 pub mod spi;
 pub mod split;
-pub mod stall;
 pub mod tx_power;
 
 /// Re-exported so consumers can build link payloads without depending on
@@ -48,6 +46,4 @@ pub use beacon::{Sighting, parse_mgmt};
 pub use dedup::MacRing;
 pub use hci::AdvReport;
 pub use link::{BridgeToHost, HostToBridge, LinkError, SendStatus};
-pub use outbox::{ByteSink, Outbox};
 pub use plan::{ChannelPool, SCAN_CHANNELS};
-pub use stall::StallWatch;

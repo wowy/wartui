@@ -468,66 +468,49 @@ candidate once, since `board-info` does.
 
 ### Flashing the bridge
 
-`flash-bridge` puts one bridge image on exactly one board, the bridge: through `espflash` on a
-single-chip bridge, and over its own link on a P4 bridge (see "Updating a P4 bridge").
+`flash-bridge` updates the P4 bridge over the USB link it bridges on, so after its first flash
+(`firmware/p4-bridge/README.md` § "First flash") neither the CH343 nor the BOOT button is needed.
 
 ```sh
-wartui flash-bridge --features esp32c6 --dry-run    # which board, and the image's source
-wartui flash-bridge --features esp32c5,t-dongle-c5
-wartui flash-bridge --features esp32c6 --bridge 10:BD:A3:EC:44:C0
-wartui flash-bridge --bridge 71:F4                  # a P4 bridge: no --features
+wartui flash-bridge --dry-run                       # which board, and the image's source
+wartui flash-bridge
+wartui flash-bridge --bridge 71:F4
 ```
 
-| Flag                 | Default        | What it is                                                           |
-|----------------------|----------------|----------------------------------------------------------------------|
-| `--features LIST`    | —              | The bridge firmware's features; see below                            |
-| `--bridge PATH\|MAC` | see below      | The board to flash, which must be attached; `00:08` works too        |
-| `--config PATH`      | per-OS path    | Where to read and save the remembered bridge; see "Config file"      |
-| `--image BIN`        | —              | Use this image rather than building or fetching one                  |
-| `--firmware-dir DIR` | the checkout's | Build the image from the bridge firmware here                        |
-| `--dry-run`          | off            | Report the board and the image's source; build, fetch, flash nothing |
+| Flag                 | Default        | What it is                                                            |
+|----------------------|----------------|-----------------------------------------------------------------------|
+| `--features LIST`    | —              | The firmware's features, for a build; a release has the default set   |
+| `--bridge PATH\|MAC` | see below      | The P4 bridge to update, which must be attached; `71:F4` works too    |
+| `--config PATH`      | per-OS path    | Where to read and save the remembered bridge; see "Config file"       |
+| `--image BIN`        | —              | Send this app-only image rather than building or fetching one         |
+| `--firmware-dir DIR` | the checkout's | Build the image from the P4 bridge firmware here                      |
+| `--dry-run`          | off            | Report the board and the image's source; build, fetch and send nothing |
 
-A single-chip bridge needs `--features` naming exactly one of `esp32c5` or `esp32c6`, and `--image`
-is a merged image. A P4 bridge takes no chip feature: leave `--features` out for its release image,
-or pass its own features to a build. Its `--image` is an app-only image.
-
-**The board is chosen before anything is reset**, from the first that applies:
+**The board is chosen before anything is sent**, among the attached P4 bridges, from the first that
+applies. A node beside the bridge changes nothing.
 
 1. The board `--bridge` names.
 2. The bridge remembered in `wartui.toml`, which must be attached.
-3. With none remembered, the only Espressif board or P4 bridge attached.
+3. With none remembered, the only P4 bridge attached.
 
 The run is refused when:
 
 - The remembered bridge is not attached, because the board present is known not to be it.
-- `--bridge` matches no attached board, or several.
-- Several boards are attached and none is known. The refusal lists their addresses; pick one with
-  `--bridge`.
-- No board is attached.
+- `--bridge` matches no attached P4 bridge, or several. Naming a node is the first of these.
+- Several P4 bridges are attached and none is known. The refusal lists their addresses; pick one
+  with `--bridge`.
+- No P4 bridge is attached. A blank P4 shows up only as its CH343, and takes its first flash by hand.
 
-A single-chip bridge must be native USB Serial/JTAG (`303a:1001`) reporting its address, and
-`espflash board-info` must read the `--features` chip and that address, or nothing is flashed.
-
-The image comes from the same three sources as `flash-fleet`'s, with `firmware/bridge` for
-`firmware/node`. A release publishes `esp32c5`, `esp32c5,t-dongle-c5`, `esp32c5,t-dongle-c5-gps`,
-`esp32c5,t-dongle-c5,t-dongle-c5-gps`, `esp32c6`, and `esp32c6,xiao-external-antenna`, under the
-same `images/<tag>/`.
-
-The board prints one line by its last two octets: would flash, flashed, or failed with espflash's
-full output. A board found without `--bridge` is then saved to `wartui.toml` as the bridge, so
+A board found without `--bridge` is saved to `wartui.toml` as the bridge once updated, so
 `flash-fleet` spares it from the next run on; with `remember bridge` off, nothing is saved. A board
 named with `--bridge` is not saved, since one flashed by name is often some other device. When the
-save fails, the flash still succeeds and a line says why, since `flash-fleet` will not spare that
-board until `run` connects to it. `--dry-run` resets it once, for `board-info`.
+save fails, the update still succeeds and a line says why.
 
-#### Updating a P4 bridge
-
-A P4 bridge takes its app image over the USB link it bridges on, so after its first flash
-(`firmware/p4-bridge/README.md` § "First flash") neither the CH343 nor the BOOT button is needed.
-The image comes from the same three sources, with `firmware/p4-bridge` for `firmware/node`; a
-release publishes one, built with the default features. Nothing is sent unless the image is an
-app-only image whose header names the `esp32p4` and whose descriptor names `wartui-p4-bridge-fw`,
-its checksum and appended SHA-256 hold, and it fits the P4's 1920 KiB app slot.
+The image comes from the same three sources as `flash-fleet`'s, with `firmware/p4-bridge` for
+`firmware/node`; a release publishes one, built with the default features, under the same
+`images/<tag>/`. Nothing is sent unless the image is an app-only image whose header names the
+`esp32p4` and whose descriptor names `wartui-p4-bridge-fw`, its checksum and appended SHA-256 hold,
+and it fits the P4's 1920 KiB app slot.
 
 The run opens the bridge, checks it answers as a P4 with the chosen address, and sends the image.
 The P4 checks it, switches slots and reboots into it on trial; the run waits up to 120 s for it to
@@ -803,10 +786,8 @@ record which tier answered, so a garage-to-road capture is honest about both. No
 for lack of a position, but **WiGLE rejects rows without coordinates**: a capture with none exports
 nothing and says how many networks it left out.
 
-- **A bridge with a GPS receiver is the position source while it has a fix.** A T-Dongle-C5
-  flashed with `t-dongle-c5-gps` reads a u-blox M10 on its Qwiic port and forwards its bytes; see
-  [`firmware/bridge/README.md`](../../firmware/bridge/README.md) § "The GPS". The P4 bridge reads
-  one on its I2C (GPIO7/GPIO8) by default; see
+- **A bridge with a GPS receiver is the position source while it has a fix.** The P4 bridge reads a
+  u-blox receiver on its I2C (GPIO7/GPIO8) by default and forwards its bytes; see
   [`firmware/p4-bridge/README.md`](../../firmware/p4-bridge/README.md) § "GPS". The host's own search
   stands down while the bridge's receiver is sending sentences, with or without a fix, letting go
   of any port, so `g` shows it finding satellites. The search resumes once the last sentence is
@@ -954,51 +935,10 @@ The footer shows faults only once they happen, so a clean run has a clean footer
   `watchdog` or `lockup` is the firmware; `unknown` is a cause this build cannot name. A power-on
   or a reset over USB is not shown.
 
-## The bridge panel
-
-A LilyGO T-Dongle-C5 has a screen, and a bridge flashed for it shows five lines of the capture. It
-needs no setup: the bridge reports a panel when it announces itself, `wartui status` prints that,
-and a bridge without one is sent nothing. A T-Dongle build turns the board's RGB LED off; a plain
-`esp32c5` build leaves it lit.
-
-| Line              | What it says                                                         |
-|-------------------|----------------------------------------------------------------------|
-| `gps ok, 9 sats`  | Where the position is coming from                                    |
-| `nodes 3`         | How many nodes are heartbeating, and how many of those can be driven |
-| `APs ~12.3k`      | Distinct Wi-Fi access points this session, estimated                 |
-| `BLE ~840`        | Distinct BLE addresses, estimated the same way                       |
-| `avg -55 min -72` | How strongly the *bridge* is hearing the fleet                       |
-
-The figures are the view's, from the same snapshot, about once a second. The screen is seventeen
-characters wide, hence the terse wording. `nodes 2 of 5` means 2 drivable of 5 alive. The RSSI line
-drops its label for two figures and reads `rssi -55` when average and weakest match. −100 dBm or
-worse prints `BAD`: it does not fit, and the exact figure means nothing well before that.
-
-**Each line is colored by its own state**, readable across a car: green fine, amber working but not
-ideal, red a fault.
-
-- **GPS is green only on a live, current fix**, stricter than the view. Connecting, scanning,
-  searching, or a stale fix is amber: attached and trying. No receiver, an unreadable port, or a
-  pinned `--lat`/`--lon` is red, however deliberate: none will produce a fix, and a constant
-  position is what most needs noticing from a distance.
-- **Nodes** are amber when something heartbeating cannot be driven (so both counts print), red when
-  nothing is alive or the link is down. Nodes on another major or minor are named instead,
-  `2 need update` or `1 host behind` (`3 undrivable` for a mix): red when nothing can be driven,
-  amber otherwise.
-- **RSSI** is amber when the average falls below −65 dBm or any node below −70, both above the
-  −74 dBm a 24 Mbps ESP-NOW link needs. So it warns while there is time to act: close a window, move
-  the dongle off the floor, walk a node back. `rssi: none heard` is red, for live nodes the bridge
-  has not measured; `rssi n/a` means nothing is alive.
-- **AP and BLE counts** have no bad state and stay green.
-
-With no host, and for about ten seconds after one leaves, the bridge shows its own chip, address,
-channel, and uptime in amber, since no host is exactly "working but not ideal". A capture takes the
-panel back within a second, with no replug or reflash.
-
 ## When nothing arrives
 
-**wartui finds the bridge by asking.** It opens each attached Espressif board and P4 bridge in turn
-(a USB-plugged node is an Espressif board too) and keeps the first that answers the link protocol. `run` saves that address to
+**wartui finds the bridge by asking.** It opens each attached P4 bridge in turn, and never a node,
+and keeps the first that answers the link protocol. `run` saves that address to
 `wartui.toml` as `[bridge] mac`, so later runs open only that port. A capture given `--bridge` saves
 the named board once it answers, since naming it for a capture is choosing it. `flash-bridge` saves
 the board it found and flashed. `status`, `sniff`, `reset`, `ota` and `flash-fleet` read it and save
@@ -1018,15 +958,11 @@ The header's `waiting for a bridge to announce itself` has three causes; the fau
   an IDE's serial monitor, or ModemManager holds it. ModemManager clears on its own: where it runs,
   it opens each new CDC-ACM device for a few seconds to ask whether it is a modem.
 - **No fault**: the port opened and the dongle is not answering.
-- **`swept N boards and none answered`**: no attached Espressif board or P4 bridge answered as a
-  bridge.
+- **`swept N boards and none answered`**: no attached P4 bridge answered.
 
-With no fault, the bridge is usually deaf in one direction: its USB transmit endpoint stopped
-draining while it keeps reading. The firmware notices within three seconds and reboots, showing
-`bridge rebooted itself: USB transmit had stalled`. Otherwise `wartui reset` reboots it, which works
-because the receive half still runs, and keeps the device path. `espflash reset --port …`
-re-enumerates and can move `ttyACM0` to `ttyACM1`; `--bridge 10:BD:A3:EC:44:C0` names the board
-either way. `espflash` is the fallback for a bridge that answers nothing; unplugging is last.
+With no fault, `wartui reset` reboots a bridge that still reads what it is sent. A reboot can move
+`ttyACM0` to `ttyACM1`; `--bridge 10:BD:A3:EC:44:C0` names the board either way. A power cycle is
+the fallback for a bridge that answers nothing.
 
 ```sh
 wartui status                          # exits in 5 s with the reason
@@ -1037,29 +973,28 @@ wartui --log-file wartui.log run
 Beyond the counters, `wartui status` prints what the bridge reports about its insides:
 
 - **`queue NAME  HIGH/CAPACITY UNIT  dropped N`**, one per queue: the high-water mark since boot
-  and what the queue threw away. Every bridge reports `radio-jobs` (sends and peer and power
-  commands waiting for the radio) and `radio-send-jobs` (the payloads of those sends). A P4 bridge
-  also reports `radio-up` (the C6's received frames for the P4), `radio-up-priority` (the C6's
+  and what the queue threw away. The bridge reports `radio-jobs` (sends and peer and power
+  commands waiting for the radio), `radio-send-jobs` (the payloads of those sends), `radio-up` (the
+  C6's received frames for the P4), `radio-up-priority` (the C6's
   other records for the P4: send results, lines and its status), `radio-down` (the P4's records for
   the C6), `host-priority` and `host-bulk` (its two queues of frames for the host).
-- **`spi  …`**, on a P4 bridge: the SPI link's transfers and its error counters at each end.
+- **`spi  …`**: the SPI link's transfers and its error counters at each end.
   `ready_recovered` counts READY timeouts whose transfer went ahead anyway, so `ready_timeouts`
   minus `ready_recovered` is the waits that lost a transfer. Every other error count is lost
   transfers.
-- **`radio  …`**, on a P4 bridge: the C6's address, firmware, reset cause and last phase. After a
+- **`radio  …`**: the C6's address, firmware, reset cause and last phase. After a
   C6 restart under a running P4, `last reset` names the C6's cause too.
-- **`fault  …`**: a fault the bridge reports while `status` waits for its counters, such as a P4
-  bridge updating its radio. One line per report, and the counters follow.
+- **`fault  …`**: a fault the bridge reports while `status` waits for its counters, such as the
+  P4 updating its radio. One line per report, and the counters follow.
 
 `wartui reset` takes about thirty seconds to fail on a board that is not a bridge. The board it is
 for answers nothing, so it transmits before anything has identified itself. A board that is not
 reading takes one packet and queues the rest, and closing the port waits for them.
 
-`run` never pays this cost. It asks with one frame, however long it then waits. That one frame is
-enough for a wedged bridge, which reboots three seconds after a frame it cannot answer.
+`run` never pays this cost. It asks with one frame, however long it then waits.
 
-`wartui reset` never sweeps, because a `Reset` reboots a node and costs it the addresses it held
-back. It goes to the `--bridge` board, else the remembered one, else the only one attached. With
+`wartui reset` never sweeps, because a `Reset` sent down the wrong port reboots the wrong board. It
+goes to the `--bridge` board, else the remembered one, else the only one attached. With
 several and none known, it asks for `--bridge` rather than guessing.
 
 **`--log-file` is the only way to see the transport's own account of a run**: the view owns the
@@ -1085,18 +1020,18 @@ commands.
 
 ### Telling the boards apart
 
-A USB-plugged node has the bridge's vendor and product ID and an adjacent device node, so a path
-says nothing about which board it reaches. `wartui ports` names them:
+USB-plugged nodes share a vendor and product ID and sit on adjacent device nodes, so a path says
+nothing about which board it reaches. `wartui ports` names them:
 
 ```
 $ wartui ports
-/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:EC:44:C0-if00
-  10:BD:A3:EC:44:C0     USB JTAG/serial debug unit  (303a:1001)
+/dev/serial/by-id/usb-wartui_wartui_p4_bridge_10:BD:A3:EC:44:C0-if00
+  10:BD:A3:EC:44:C0     wartui p4 bridge  (1209:0001)
 /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_02:00:5E:10:9D:24-if00
   02:00:5E:10:9D:24     USB JTAG/serial debug unit  (303a:1001)
 ```
 
-A P4 bridge enumerates as `1209:0001`, product `wartui p4 bridge`. Its serial number is its C6's
+The P4 bridge enumerates as `1209:0001`, product `wartui p4 bridge`. Its serial number is its C6's
 MAC, the address nodes see as the bridge, or the P4's own MAC when the C6 never answered.
 
 **An ESP32's USB serial number is its MAC**, so the OS already pairs each device node with its
@@ -1108,7 +1043,7 @@ is named by its socket.
 The bridge is the row with the address the fleet table shows for the bridge; a node is a row whose
 heartbeats `wartui sniff` attributes to its address. Across board generations the OUI differs too.
 Either name works as `--bridge`, as does an address's last one to five octets (two hex digits each)
-when exactly one board matches. `--bridge 44:C0` is how a board is read off the fleet table. Several
+when exactly one P4 bridge matches. An address names only a P4 bridge, and a path is opened as given. `--bridge 44:C0` is how a board is read off the fleet table. Several
 matches are refused with a list, never guessed. Keep the address: a device node moves when the board
 re-enumerates and a `by-path` name moves with the cable, but an address moves only with the board.
 

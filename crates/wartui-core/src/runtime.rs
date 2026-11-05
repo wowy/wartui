@@ -14,12 +14,12 @@
 //! connection, and each disconnect, starts the bridge's stream over.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tokio::sync::{mpsc, oneshot, watch};
 use wartui_bridge::{LinkEvent, LinkHandle};
 use wartui_proto::air::{Frame, OtaStatusMsg};
-use wartui_proto::link::{BridgeToHost, HostToBridge, PanelLines};
+use wartui_proto::link::{BridgeToHost, HostToBridge};
 use wartui_proto::mac;
 
 use crate::engine::{Command, Event, FleetEngine, HostSample, Now, Snapshot};
@@ -32,23 +32,6 @@ use crate::store::{Store, StoreReport};
 /// Four times a second: fast enough that a node going quiet is noticed while the
 /// operator is still looking, slow enough not to redraw per observation.
 pub const TICK: Duration = Duration::from_millis(250);
-
-/// How often the bridge's panel is repainted, when it has one.
-///
-/// One second, four ticks: fast enough to watch a node drop while standing over the dongle, slow
-/// enough that estimator counts do not flicker. A ceiling, not a cadence: an unchanged push is not
-/// sent, so a settled capture sends little.
-pub const PANEL_INTERVAL: Duration = Duration::from_millis(1_000);
-
-/// How long the panel may go without a push, however little has changed.
-///
-/// Suppressing unchanged pushes keeps a quiet capture off the wire, but makes the host's record of
-/// what the dongle shows load-bearing, and only a `Ready` corrects it. A bridge that reboots
-/// mid-session comes up on its fallback screen. If its `Ready` is lost, the lines never change,
-/// nothing is pushed, and the dongle says "no host" with a host attached. So the whole panel goes
-/// out on this interval regardless. Every frame is idempotent, so resynchronizing is sending one.
-/// The bridge redraws only rows that differ, so an unneeded repaint costs one frame and no SPI.
-pub const PANEL_REPAINT: Duration = Duration::from_secs(10);
 
 /// How often the host records its own state as a `host_status` row.
 ///
@@ -101,11 +84,6 @@ pub async fn drive(
     // Once the UI is gone this branch is disabled. A closed receiver is always ready, and would
     // spin the loop for the rest of the capture.
     let mut steerable = true;
-    // What the panel was last sent, and when. The interval keeps a busy fleet from repainting per
-    // command. Comparing lines keeps a quiet one from resending the same frame.
-    let mut panel_sent: Option<Instant> = None;
-    let mut panel_drawn: Option<Instant> = None;
-    let mut panel_lines: Option<PanelLines> = None;
     let bridge_gps = engine.position().bridge_gps().cloned();
     let host_gps = engine.position().gps().cloned();
 
@@ -173,10 +151,6 @@ pub async fn drive(
                         | wartui_bridge::LinkEvent::Disconnected { .. }
                 )
         );
-        // A bridge that just announced itself shows its no-host screen, and a reboot does not
-        // re-enumerate USB. Without this, the cached lines would suppress the push that takes the
-        // panel back.
-        let relinked = matches!(event, Event::Link(wartui_bridge::LinkEvent::Connected(_)));
 
         let now = now();
         let batch = engine.handle(event, now);
@@ -201,55 +175,11 @@ pub async fn drive(
             }
         }
 
-        if relinked {
-            panel_lines = None;
-        }
-
         if publish {
             let view = Arc::new(engine.snapshot(now, store.stats()));
             // Lossy on purpose: the UI wants the latest state, and one that stopped reading must
             // not slow the engine.
-            let _ = snapshot.send(Arc::clone(&view));
-
-            // Composed here, not in `engine::handle`: a screen is not a fleet decision, and the
-            // engine reads no clock. A bridge with no panel is sent nothing, which removes the
-            // operator flag.
-            if let Some(geometry) = view.bridge.as_ref().and_then(|bridge| bridge.panel) {
-                let due =
-                    panel_sent.is_none_or(|last| now.mono.duration_since(last) >= PANEL_INTERVAL);
-                let lines = due.then(|| crate::panel::render(&view, geometry));
-                // Interval first, so an unchanged panel costs a render, not a frame, and a changed
-                // one waits its turn.
-                if let Some(lines) = lines {
-                    panel_sent = Some(now.mono);
-                    // The lines moved, or the host should stop trusting its record of the glass
-                    // (`PANEL_REPAINT`).
-                    let stale = panel_drawn
-                        .is_none_or(|last| now.mono.duration_since(last) >= PANEL_REPAINT);
-                    if stale || panel_lines.as_ref() != Some(&lines) {
-                        // At debug, and only on a send, so a capture's log shows what the dongle
-                        // showed: one line per change or repaint.
-                        tracing::debug!(
-                            rows = lines.len(),
-                            "pushing the panel: {}",
-                            lines
-                                .iter()
-                                .map(|line| line.text.as_str())
-                                .collect::<Vec<_>>()
-                                .join(" | ")
-                        );
-                        match link.send_bulk(HostToBridge::ShowPanel { lines: lines.clone() }) {
-                            // Cached only once really sent. A dropped push that still updated the
-                            // cache would be suppressed forever by the comparison above.
-                            Ok(()) => {
-                                panel_lines = Some(lines);
-                                panel_drawn = Some(now.mono);
-                            }
-                            Err(e) => tracing::debug!("dropping a panel push: {e}"),
-                        }
-                    }
-                }
-            }
+            let _ = snapshot.send(view);
         }
     }
 
@@ -416,6 +346,8 @@ impl SettingsLog {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Instant;
+
     use super::*;
     use crate::gps::Gps;
     use crate::position::DEFAULT_MAX_AGE;

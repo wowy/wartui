@@ -44,8 +44,8 @@ The settings go to a temporary `wartui.toml` that starts empty and is deleted th
 `run` saves `b`, the settings modal and a `--bridge` that answers to whichever config it was given,
 and the operator's own is not a render's to change. Nor is it read, so a render depends on nothing
 about the machine. `--config` passed through `-- ARGS` is used instead. A bare `--bridge` therefore
-has no remembered bridge and finds the board by sweeping, so naming the bridge is the way to avoid
-opening other boards. A `--bridge` render also drives the real fleet on default settings: nodes are
+has no remembered bridge and finds the board by sweeping the attached P4 bridges, so naming the
+bridge is the way to avoid opening another one. A `--bridge` render also drives the real fleet on default settings: nodes are
 assigned the default pool and transmit power, and a remembered Bluetooth node is not applied, so the
 screen is not the operator's own setup.
 """

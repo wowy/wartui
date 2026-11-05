@@ -11,11 +11,10 @@ use wartui_proto::air::{
 };
 use wartui_proto::air::{OtaState, OtaStatusMsg};
 use wartui_proto::link::{
-    BROADCAST, BURST_BUDGET_US, BURST_GAP_US, BridgeToHost, Chip, EspNowPayload, FrameAccumulator,
-    GPS_FRAME, GPS_WRITE_MAX, GpsBytes, GpsWriteBytes, HostToBridge, LINK_PROTO_VERSION, LinkBurst,
-    LinkError, LogLevel, LoopPhase, MAX_ESPNOW_V2_PAYLOAD, MAX_FRAME, MAX_HOST_FRAME,
-    MAX_NODE_PAYLOAD, PANEL_ROWS, Panel, PanelLine, PanelLines, QueueId, QueueStat, QueueStats,
-    RadioInfo, SendPayload, SendStatus, Severity, ShortStr, SpiStats, UPDATE_STATUS_MAX, UpdateOp,
+    BROADCAST, BridgeToHost, Chip, EspNowPayload, FrameAccumulator, GPS_FRAME, GPS_WRITE_MAX,
+    GpsBytes, GpsWriteBytes, HostToBridge, LINK_PROTO_VERSION, LinkError, LogLevel, LoopPhase,
+    MAX_ESPNOW_V2_PAYLOAD, MAX_FRAME, MAX_HOST_FRAME, MAX_NODE_PAYLOAD, QueueId, QueueStat,
+    QueueStats, RadioInfo, SendPayload, SendStatus, SpiStats, UPDATE_STATUS_MAX, UpdateOp,
     UpdateStatus, crc16, decode_frame, encode_frame, encode_host_frame,
 };
 use wartui_proto::reset::ResetCause;
@@ -49,7 +48,6 @@ fn sample_commands() -> Vec<HostToBridge, 16> {
     v.push(HostToBridge::RemovePeer { mac: [1, 2, 3, 4, 5, 6] }).expect("sample_commands has room");
     v.push(HostToBridge::GetStatus).expect("sample_commands has room");
     v.push(HostToBridge::Reset).expect("sample_commands has room");
-    v.push(HostToBridge::ShowPanel { lines: full_panel() }).expect("sample_commands has room");
     v.push(HostToBridge::SetTxPower { power: 8 }).expect("sample_commands has room");
     v.push(HostToBridge::SendEspNow { id: 0xBEEF, dst: [0xAA; 6], ensure_peer: true, payload })
         .expect("sample_commands has room");
@@ -83,17 +81,6 @@ fn frame_body(frame: &[u8]) -> std::vec::Vec<u8> {
     decoded[1..len - 2].to_vec()
 }
 
-/// Every row full, which is the worst case the const assert in `link/frame.rs` is checked against.
-fn full_panel() -> PanelLines {
-    let levels = [Severity::Ok, Severity::Warn, Severity::Error];
-    let mut lines = PanelLines::new();
-    for row in 0..PANEL_ROWS {
-        let text = ShortStr::try_from("x".repeat(32).as_str()).expect("32 is the capacity");
-        lines.push(PanelLine { level: levels[row % levels.len()], text }).ok();
-    }
-    lines
-}
-
 fn sample_events() -> Vec<BridgeToHost, 16> {
     let mut writer = SightingBatchWriter::new(1);
     assert!(writer.push(&SightingMsg {
@@ -120,7 +107,6 @@ fn sample_events() -> Vec<BridgeToHost, 16> {
         last_phase: LoopPhase::TxStalled,
         heap_free: 61_234,
         uptime_ms: 8_675_309,
-        panel: None,
         gps: false,
         radio: None,
         image: None,
@@ -134,10 +120,9 @@ fn sample_events() -> Vec<BridgeToHost, 16> {
         fw_version: String::try_from("0.1.0").expect("short"),
         proto_version: LINK_PROTO_VERSION,
         reset_cause: ResetCause::Lockup,
-        last_phase: LoopPhase::Render,
+        last_phase: LoopPhase::Idle,
         heap_free: 60_000,
         uptime_ms: 1_000,
-        panel: Some(Panel { cols: 26, rows: 8 }),
         gps: true,
         radio: None,
         image: Some([0xD1; 32]),
@@ -230,16 +215,6 @@ fn link_codec_round_trips_all_bridge_events_when_encoded_and_decoded() {
         let decoded: BridgeToHost = decode_frame(&mut out[..n - 1]).expect("decodes");
         assert_eq!(decoded, event);
     }
-}
-
-#[test]
-fn link_codec_fits_full_panel_display_when_encoding_show_panel_command() {
-    // The const assert in `link/frame.rs` says this arithmetically; this says it through the
-    // encoder, which is the thing that would actually truncate.
-    let cmd = HostToBridge::ShowPanel { lines: full_panel() };
-    let mut out = [0u8; MAX_FRAME];
-    let n = encode_host_frame(&cmd, &mut out).expect("encodes");
-    assert!(n < MAX_FRAME, "a full panel used {n} of {MAX_FRAME} bytes");
 }
 
 #[test]
@@ -390,6 +365,31 @@ fn frame_accumulator_discards_oversized_frame_when_capacity_is_exceeded() {
 }
 
 #[test]
+fn frame_accumulator_decodes_following_frame_when_truncated_frame_is_terminated() {
+    // A frame cut short and closed with its own `0x00` fails alone. Without that terminator
+    // the fragment would run into the next frame and cost both.
+    let first = HostToBridge::AddPeer { mac: [1; 6] };
+    let second = HostToBridge::GetStatus;
+    let mut out = [0u8; MAX_FRAME];
+    let n = encode_host_frame(&first, &mut out).expect("encodes");
+    let mut stream = out[..n / 2].to_vec();
+    stream.push(0x00);
+    let n = encode_host_frame(&second, &mut out).expect("encodes");
+    stream.extend_from_slice(&out[..n]);
+
+    let mut acc = FrameAccumulator::<MAX_FRAME>::new();
+    let mut got = std::vec::Vec::new();
+    for byte in stream {
+        if let Some(frame) = acc.push(byte)
+            && let Ok(msg) = decode_frame::<HostToBridge>(frame)
+        {
+            got.push(msg);
+        }
+    }
+    assert_eq!(got, std::vec![second]);
+}
+
+#[test]
 fn frame_accumulator_reports_empty_when_frame_completes() {
     let mut acc = FrameAccumulator::<MAX_FRAME>::new();
     assert!(acc.is_empty());
@@ -461,28 +461,6 @@ fn link_decoder_rejects_payload_when_frame_is_truncated() {
     assert!(decode_frame::<HostToBridge>(&mut empty).is_err());
     let mut tiny = [1u8, 2];
     assert!(decode_frame::<HostToBridge>(&mut tiny).is_err());
-}
-
-#[test]
-fn host_command_asks_for_reply_only_when_bridge_answers() {
-    let mut payload = Vec::new();
-    payload.extend_from_slice(&[0; 8]).expect("8 fits a send");
-    let mac = [1, 2, 3, 4, 5, 6];
-    let cases: [(HostToBridge, bool); 10] = [
-        (HostToBridge::Identify, true),
-        (HostToBridge::GetStatus, true),
-        (HostToBridge::SendEspNow { id: 1, dst: mac, ensure_peer: false, payload }, true),
-        (HostToBridge::ShowPanel { lines: full_panel() }, false),
-        (HostToBridge::SetTxPower { power: 8 }, false),
-        (HostToBridge::AddPeer { mac }, false),
-        (HostToBridge::RemovePeer { mac }, false),
-        (HostToBridge::Reset, false),
-        (HostToBridge::GpsWrite { bytes: GpsWriteBytes::new() }, false),
-        (HostToBridge::Update(encoded_op(&Op::Commit { session: 1 })), false),
-    ];
-    for (command, asks) in cases {
-        assert_eq!(command.asks_for_reply(), asks, "{command:?}");
-    }
 }
 
 #[test]
@@ -583,61 +561,6 @@ fn link_round_trips_status_when_rx_oversize_is_set() {
     assert_eq!(decoded, status);
 }
 
-#[test]
-fn link_burst_stops_when_no_frame_is_mid_transfer() {
-    let mut burst = LinkBurst::start(0);
-    assert!(!burst.keep_going(1, true, false));
-}
-
-#[test]
-fn link_burst_continues_when_frame_is_mid_transfer_at_start() {
-    // The first poll has moved nothing yet, and starting counts as a move.
-    let mut burst = LinkBurst::start(0);
-    assert!(burst.keep_going(0, false, true));
-}
-
-#[test]
-fn link_burst_stops_when_nothing_moves_for_the_gap() {
-    // A host that stopped reading mid-frame: nothing moves after the start.
-    let mut burst = LinkBurst::start(0);
-    assert!(burst.keep_going(BURST_GAP_US - 1, false, true));
-    assert!(!burst.keep_going(BURST_GAP_US, false, true));
-}
-
-#[test]
-fn link_burst_continues_when_bytes_keep_moving() {
-    // A packet every 150 µs, polled every 10 µs in between: inside the gap, so the
-    // burst runs until the budget.
-    let mut burst = LinkBurst::start(0);
-    for now in (0..BURST_BUDGET_US).step_by(10) {
-        assert!(burst.keep_going(now, now % 150 == 0, true), "stopped {now} µs in");
-    }
-}
-
-#[test]
-fn link_burst_times_gap_from_last_move_when_bytes_moved_late() {
-    let mut burst = LinkBurst::start(0);
-    assert!(burst.keep_going(150, true, true));
-    assert!(burst.keep_going(150 + BURST_GAP_US - 1, false, true));
-    assert!(!burst.keep_going(150 + BURST_GAP_US, false, true));
-}
-
-#[test]
-fn link_burst_stops_when_budget_is_spent_despite_progress() {
-    // A host that never stops sending: the radio still gets the pass back.
-    let mut burst = LinkBurst::start(0);
-    assert!(burst.keep_going(BURST_BUDGET_US - 1, true, true));
-    assert!(!burst.keep_going(BURST_BUDGET_US, true, true));
-}
-
-#[test]
-fn link_burst_times_budget_from_start_when_clock_starts_late() {
-    let start = 5_000_000;
-    let mut burst = LinkBurst::start(start);
-    assert!(burst.keep_going(start + BURST_BUDGET_US - 1, true, true));
-    assert!(!burst.keep_going(start + BURST_BUDGET_US, true, true));
-}
-
 fn round_trip(event: &BridgeToHost) -> BridgeToHost {
     let mut out = [0u8; MAX_FRAME];
     let n = encode_frame(event, &mut out).expect("encodes");
@@ -715,7 +638,6 @@ fn link_round_trips_ready_with_radio() {
         last_phase: LoopPhase::SpiTransfer,
         heap_free: 1,
         uptime_ms: 2,
-        panel: None,
         gps: false,
         radio: Some(RadioInfo {
             chip: Chip::Esp32C6,
@@ -737,7 +659,7 @@ fn link_codec_pins_update_bytes_when_host_sends_an_op() {
     let cmd = HostToBridge::Update(encoded_op(&Op::Commit { session: 0x42 }));
     let mut out = [0u8; MAX_HOST_FRAME];
     let n = encode_host_frame(&cmd, &mut out).expect("encodes");
-    assert_eq!(frame_body(&out[..n]), [9, 2, 3, 0x42]);
+    assert_eq!(frame_body(&out[..n]), [8, 2, 3, 0x42]);
 }
 
 #[test]
@@ -781,7 +703,6 @@ fn link_round_trips_ready_when_image_is_present_or_absent() {
             last_phase: LoopPhase::Boot,
             heap_free: 0,
             uptime_ms: 3,
-            panel: None,
             gps: true,
             radio: None,
             image,
