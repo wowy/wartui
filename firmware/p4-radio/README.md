@@ -38,9 +38,8 @@ Flash it through the 4-pin header H4 with a USB-to-TTL adapter. H4 carries IO9, 
 
 The P4 firmware is flashed as in [`firmware/p4-bridge`](../p4-bridge/README.md#first-flash).
 
-A C6 flashed from a build older than the update path sends a hello without an image digest. The
-P4 cannot update it and reports "radio predates bundled updates; flash it through the header
-once". Flash it as above.
+A C6 whose hello has no image digest cannot take an update, so the P4 reports "radio predates
+bundled updates; flash it through the header once". Flash it as above.
 
 A C6 not running this link cannot hear the P4, which reports "the radio coprocessor is not
 answering". Flash it as above, and every update after that reaches it over the link.

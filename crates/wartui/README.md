@@ -135,7 +135,7 @@ of its output, after the export summary:
     1C:5A  120/s  2,310/min
     57:84  1,790/s  39,880/min
   bridge     1,203,551 frames received  1,300 dropped (0.1%)  1 reboot  host read 1,202,240  11 lost on USB
-  queue      host-bulk  peak 1,024/262,144 bytes  0 dropped
+  queue      host-bulk  peak 262,144/262,144 bytes  1,300 dropped
   queue      radio-jobs  peak 20/32 entries  0 dropped
   radio link 48,210 packets  2 crc_fail  1 uart_errors  4 radio_seq_gap
   host       147 not stored: 140 retries  7 incompatible  0 store dropped  behind ≥100 ms 31 times (worst 412 ms)  slowest commit 58 ms  queue peak 1,204
@@ -999,8 +999,9 @@ removed receivers on transitions, not every sentence or satellite-count change. 
 port does not count as recovery until a valid fix or no-fix report arrives. The log also records each
 time the host falls 100 ms or more behind the bridge and when it catches up, with both frames' bridge
 stamps. A reconnect while frames are arriving can log one spell of about 100 ms, because the lag after
-a connect starts from the 100 ms the engine assumes rather than from a measurement. Each node's
-membership changes are logged once each:
+a connect starts from the 100 ms the engine assumes rather than from a measurement. Every line the
+bridge sends is logged as `bridge: …`, faults at `warn`, such as `the radio has stopped answering`.
+Each node's membership changes are logged once each:
 
 | Message               | When                                              |
 | --------------------- | ------------------------------------------------- |

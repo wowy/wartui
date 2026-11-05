@@ -563,6 +563,12 @@ fn queue_id_lists_every_variant_when_all_read() {
 }
 
 #[test]
+fn queue_id_places_queue_on_p4_when_it_runs_there() {
+    let on_p4: std::vec::Vec<_> = QueueId::ALL.into_iter().filter(|id| id.on_p4()).collect();
+    assert_eq!(on_p4, [QueueId::RadioDown, QueueId::HostPriority, QueueId::HostBulk]);
+}
+
+#[test]
 fn queue_id_round_trips_name_when_every_id_named() {
     for id in QueueId::ALL {
         assert_eq!(QueueId::from_name(id.name()), Some(id), "{id:?}");

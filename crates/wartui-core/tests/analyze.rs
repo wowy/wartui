@@ -61,6 +61,17 @@ fn queue_status(uptime_ms: u32, queue: QueueId, high_water: u32, dropped: u32) -
     Record::BridgeStatus(BridgeStatusSeen { queues, ..seen })
 }
 
+/// A status reply carrying several queues' drops, with `dropped_tx` summed as the bridge sums it.
+fn queues_status(uptime_ms: u32, drops: &[(QueueId, u32)]) -> Record {
+    let dropped_tx = drops.iter().filter(|(q, _)| q.in_dropped_tx()).map(|(_, d)| d).sum();
+    let Record::BridgeStatus(seen) = status(0, 0, dropped_tx, uptime_ms) else { unreachable!() };
+    let queues = drops
+        .iter()
+        .map(|&(queue, dropped)| QueueStat { queue, capacity: 1_000, high_water: 10, dropped })
+        .collect();
+    Record::BridgeStatus(BridgeStatusSeen { queues, ..seen })
+}
+
 /// A status reply carrying link counters: `packets`, then `n`, `2n` … `8n` in field order, so
 /// no two counters match.
 fn radio_link_status(uptime_ms: u32, packets: u32, n: u32) -> Record {
@@ -380,17 +391,106 @@ fn analyze_reports_queue_peak_when_rows_carry_queues() {
 }
 
 #[test]
-fn analyze_rebases_queue_drops_when_bridge_restarts() {
-    // 5 before the capture are a baseline. The bridge restarts at a row that carries no
+fn analyze_rebases_c6_queue_drops_when_bridge_restarts() {
+    // 5 before the capture are a baseline. The C6 restarts at a row that carries no
     // queue, so the next row's 15 are all new though they read as a rise from 12.
     let (_dir, conn) = capture(vec![
-        queue_status(60_000, QueueId::HostBulk, 10, 5),
-        queue_status(65_000, QueueId::HostBulk, 10, 12),
+        queue_status(60_000, QueueId::RadioUp, 10, 5),
+        queue_status(65_000, QueueId::RadioUp, 10, 12),
         status(0, 0, 0, 1_000),
-        queue_status(4_000, QueueId::HostBulk, 10, 15),
+        queue_status(4_000, QueueId::RadioUp, 10, 15),
     ]);
     let queues = losses(&conn).unwrap().bridge.unwrap().queues;
     assert_eq!(queues[0].dropped, 7 + 15);
+}
+
+#[test]
+fn analyze_counts_each_queue_by_its_chip_when_c6_restarts() {
+    // The C6's queues restart with it and count whole. The P4's run on, so they count only their
+    // rise rather than their whole total again.
+    let (_dir, conn) = capture(vec![
+        queues_status(
+            60_000,
+            &[
+                (QueueId::RadioUp, 2),
+                (QueueId::RadioUpPriority, 1),
+                (QueueId::RadioSendJobs, 1),
+                (QueueId::RadioJobs, 1),
+                (QueueId::RadioDown, 4),
+                (QueueId::HostPriority, 3),
+                (QueueId::HostBulk, 500),
+            ],
+        ),
+        queues_status(
+            65_000,
+            &[
+                (QueueId::RadioUp, 6),
+                (QueueId::RadioUpPriority, 1),
+                (QueueId::RadioSendJobs, 2),
+                (QueueId::RadioJobs, 3),
+                (QueueId::RadioDown, 4),
+                (QueueId::HostPriority, 3),
+                (QueueId::HostBulk, 512),
+            ],
+        ),
+        queues_status(
+            4_000,
+            &[
+                (QueueId::RadioUp, 3),
+                (QueueId::RadioUpPriority, 0),
+                (QueueId::RadioSendJobs, 1),
+                (QueueId::RadioJobs, 2),
+                (QueueId::RadioDown, 6),
+                (QueueId::HostPriority, 4),
+                (QueueId::HostBulk, 515),
+            ],
+        ),
+    ]);
+    let bridge = losses(&conn).unwrap().bridge.unwrap();
+    assert_eq!(bridge.reboots, 1);
+    let dropped = |queue| bridge.queues.iter().find(|q| q.queue == queue).unwrap().dropped;
+    assert_eq!(dropped(QueueId::RadioUp), 4 + 3);
+    assert_eq!(dropped(QueueId::RadioUpPriority), 0);
+    assert_eq!(dropped(QueueId::RadioSendJobs), 1 + 1);
+    assert_eq!(dropped(QueueId::RadioJobs), 2 + 2);
+    assert_eq!(dropped(QueueId::RadioDown), 2);
+    assert_eq!(dropped(QueueId::HostPriority), 1);
+    assert_eq!(dropped(QueueId::HostBulk), 12 + 3);
+}
+
+#[test]
+fn analyze_totals_dropped_from_queues_when_c6_restarts() {
+    // `dropped_tx` reads 508, 522, 505, and rebasing that fall whole would count the P4's 502 again.
+    // The total is 12 + 2 before the restart, then 3 from the C6's new life and none from the P4.
+    // `radio-jobs` is not in `dropped_tx`.
+    let (_dir, conn) = capture(vec![
+        queues_status(
+            60_000,
+            &[(QueueId::RadioUp, 8), (QueueId::RadioJobs, 1), (QueueId::HostBulk, 500)],
+        ),
+        queues_status(
+            65_000,
+            &[(QueueId::RadioUp, 20), (QueueId::RadioJobs, 9), (QueueId::HostBulk, 502)],
+        ),
+        queues_status(
+            4_000,
+            &[(QueueId::RadioUp, 3), (QueueId::RadioJobs, 9), (QueueId::HostBulk, 502)],
+        ),
+    ]);
+    assert_eq!(losses(&conn).unwrap().bridge.unwrap().dropped, 12 + 2 + 3);
+}
+
+#[test]
+fn analyze_rebases_p4_queue_drops_when_count_falls() {
+    // A P4 reboot zeroes its queues, so the count falls and all of it is new.
+    let (_dir, conn) = capture(vec![
+        queues_status(60_000, &[(QueueId::HostBulk, 5)]),
+        queues_status(65_000, &[(QueueId::HostBulk, 12)]),
+        queues_status(4_000, &[(QueueId::HostBulk, 3)]),
+    ]);
+    let bridge = losses(&conn).unwrap().bridge.unwrap();
+    assert_eq!(bridge.queues[0].dropped, 7 + 3);
+    assert_eq!(bridge.dropped, 7 + 3);
 }
 
 #[test]

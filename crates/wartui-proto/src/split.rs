@@ -29,8 +29,8 @@
 //!   [`PairEvent::ResetRadio`], up to [`TRIAL_BOOTS`] times. A trial image that hangs gets no
 //!   watchdog, and each power cycle counts a trial boot, so the C6 rolls back to the image it
 //!   ran before (`firmware/common/src/ota.rs`).
-//! - **A C6 whose hello carries no digest predates the update path** and is not updated: it
-//!   cannot take the image, so it needs one wired flash.
+//! - **A C6 whose hello carries no digest is not updated**: it cannot take the image, so it needs
+//!   one wired flash.
 //! - **`Ready.image` is the P4's own image digest**, never the C6's: it is the image the host
 //!   updates over USB (`HostToBridge::Update`, which the P4 handles itself), and the bundle
 //!   decides the C6's.
@@ -44,8 +44,8 @@
 use core::fmt::Write;
 
 use crate::link::{
-    BridgeToHost, Chip, HostToBridge, LINK_PROTO_VERSION, LogStr, LoopPhase, QueueId, QueueStat,
-    QueueStats, RADIO_UPDATING, RadioInfo, RadioLinkStats, SendStatus, ShortStr,
+    BridgeToHost, Chip, HostToBridge, LINK_PROTO_VERSION, LogStr, LoopPhase, QueueStat, QueueStats,
+    RADIO_UPDATING, RadioInfo, RadioLinkStats, SendStatus, ShortStr,
 };
 use crate::mac::Mac;
 use crate::ota::TRIAL_BOOTS;
@@ -85,7 +85,7 @@ pub enum RadioState {
     /// The C6 runs another image after this P4 life's update, and speaks this P4's revision:
     /// bridged, with a fault.
     Stale(Hello),
-    /// The C6 answered speaking another revision, or predates the update path.
+    /// The C6 answered speaking another revision, or with no image digest.
     Mismatch(Hello),
     /// No hello arrived in time.
     Absent,
@@ -531,7 +531,7 @@ impl Pair {
         let mut radio_up_drops = 0u32;
         if let Some(status) = &self.status {
             for stat in &status.queues {
-                if matches!(stat.queue, QueueId::RadioUp | QueueId::RadioUpPriority) {
+                if stat.queue.in_dropped_tx() {
                     radio_up_drops = radio_up_drops.saturating_add(stat.dropped);
                 }
                 let _ = queues.push(*stat);

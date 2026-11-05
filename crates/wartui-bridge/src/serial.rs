@@ -13,8 +13,8 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 use wartui_proto::link::{
-    BridgeToHost, FrameAccumulator, HostToBridge, LINK_PROTO_VERSION, LinkError, MAX_FRAME,
-    MAX_HOST_FRAME, decode_frame, encode_host_frame,
+    BridgeToHost, FrameAccumulator, HostToBridge, LINK_PROTO_VERSION, LinkError, LogLevel,
+    MAX_FRAME, MAX_HOST_FRAME, decode_frame, encode_host_frame,
 };
 use wartui_proto::mac::{self, Mac};
 
@@ -794,6 +794,27 @@ fn open_failure(path: &str, error: &serialport::Error) -> String {
     TransportError::Open { port: path.to_owned(), source: error.clone() }.to_string()
 }
 
+/// Puts a line the bridge sent in the log, at its own level; an `Error` has none and reads as a
+/// warning. Here rather than in the engine, which does no I/O and drops these frames.
+fn log_bridge_line(msg: &BridgeToHost) {
+    match msg {
+        BridgeToHost::Error { message } => tracing::warn!("bridge: {message}"),
+        BridgeToHost::Log { level: LogLevel::Debug, message } => {
+            tracing::debug!("bridge: {message}");
+        }
+        BridgeToHost::Log { level: LogLevel::Info, message } => {
+            tracing::info!("bridge: {message}");
+        }
+        BridgeToHost::Log { level: LogLevel::Warn, message } => {
+            tracing::warn!("bridge: {message}");
+        }
+        BridgeToHost::Log { level: LogLevel::Error, message } => {
+            tracing::error!("bridge: {message}");
+        }
+        _ => {}
+    }
+}
+
 /// Blocking read loop. Returns the reason it stopped.
 ///
 /// Generic over the port only so a test can feed it bytes.
@@ -934,6 +955,7 @@ fn read_frames<R: Read>(
                         *skipped += 1;
                         continue;
                     }
+                    log_bridge_line(&msg);
                     LinkEvent::Message(msg)
                 }
                 // Reset banners and half-frames land here; the framing has already
@@ -1220,9 +1242,8 @@ mod tests {
         BridgeToHost::Rx { src: [1; 6], dst: [2; 6], rssi, rx_us: 0, payload }
     }
 
-    #[test]
-    fn serial_link_skips_frames_when_they_arrive_before_first_ready() {
-        let ready = BridgeToHost::Ready {
+    fn ready() -> BridgeToHost {
+        BridgeToHost::Ready {
             chip: Chip::Esp32P4,
             mac: [1, 2, 3, 4, 5, 6],
             fw_version: ShortStr::new(),
@@ -1234,9 +1255,13 @@ mod tests {
             gps: false,
             radio: None,
             image: None,
-        };
+        }
+    }
+
+    #[test]
+    fn serial_link_skips_frames_when_they_arrive_before_first_ready() {
         let mut bytes = frame(&rx(-10));
-        bytes.extend(frame(&ready));
+        bytes.extend(frame(&ready()));
         bytes.extend(frame(&rx(-20)));
 
         let (events, mut received) = mpsc::channel(8);
@@ -1250,6 +1275,22 @@ mod tests {
         ));
         assert!(received.try_recv().is_err());
         assert!(state.announced.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn serial_link_passes_bridge_error_on_when_logging_it() {
+        // `status`, `sniff` and `flash-bridge` print these from the event, so logging one must not
+        // consume it.
+        let message = "the radio has stopped answering".try_into().unwrap();
+        let mut bytes = frame(&ready());
+        bytes.extend(frame(&BridgeToHost::Error { message }));
+
+        let (events, mut received) = mpsc::channel(8);
+        let state = Attempt::default();
+        read_loop(Bytes(std::io::Cursor::new(bytes)), &events, &state, &BridgeMemory::none());
+
+        assert!(matches!(received.try_recv(), Ok(LinkEvent::Connected(_))));
+        assert!(matches!(received.try_recv(), Ok(LinkEvent::Message(BridgeToHost::Error { .. }))));
     }
 
     #[test]

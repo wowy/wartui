@@ -35,8 +35,8 @@
 //!
 //! The P4 image carries the C6's. At boot the P4 compares the digest in the C6's hello with
 //! the bundled image's, and sends the bundle over [`Kind::Update`] when they differ
-//! ([`crate::split`]). A C6 whose hello carries no digest predates the update path and needs
-//! one wired flash.
+//! ([`crate::split`]). A C6 whose hello carries no digest cannot take the bundle and needs one
+//! wired flash.
 //!
 //! [`PAYLOAD_MAX`] is 2034 so one packet carries the largest [`Down`], a 1,470-byte
 //! [`HostToBridge::SendEspNow`](crate::link::HostToBridge::SendEspNow), without fragmentation.

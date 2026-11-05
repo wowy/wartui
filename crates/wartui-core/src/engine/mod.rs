@@ -409,8 +409,8 @@ impl FleetEngine {
                     radio_link: *radio_link,
                 }));
             }
-            // `Ready` arrives as `LinkEvent::Connected`. Bridge diagnostics are the operator's, not
-            // the engine's. GPS bytes are the position chain's. An update status answers
+            // `Ready` arrives as `LinkEvent::Connected`. Bridge diagnostics are the transport's to
+            // log, not the engine's. GPS bytes are the position chain's. An update status answers
             // `flash-bridge`, which `run` never is.
             BridgeToHost::Ready { .. }
             | BridgeToHost::Log { .. }

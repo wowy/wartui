@@ -425,6 +425,24 @@ impl QueueId {
         }
     }
 
+    /// Whether this queue lives on the P4, whose counts run on through a C6 restart. The rest are
+    /// the C6's and restart with it.
+    pub fn on_p4(self) -> bool {
+        match self {
+            Self::RadioDown | Self::HostPriority | Self::HostBulk => true,
+            Self::RadioUp | Self::RadioSendJobs | Self::RadioUpPriority | Self::RadioJobs => false,
+        }
+    }
+
+    /// Whether this queue's drops are summed into [`BridgeToHost::Status`]'s `dropped_tx`: the
+    /// queues a frame bound for the host passes through.
+    pub fn in_dropped_tx(self) -> bool {
+        match self {
+            Self::RadioUp | Self::RadioUpPriority | Self::HostPriority | Self::HostBulk => true,
+            Self::RadioSendJobs | Self::RadioDown | Self::RadioJobs => false,
+        }
+    }
+
     /// The queue [`QueueId::name`] gives `name`, or `None` for a name it never gives.
     pub fn from_name(name: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|id| id.name() == name)

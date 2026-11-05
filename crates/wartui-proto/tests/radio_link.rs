@@ -430,7 +430,7 @@ fn radio_link_hello_has_frozen_layout_when_image_present() {
 
 #[test]
 fn radio_link_hello_decodes_image_none_when_payload_is_51_bytes() {
-    // A C6 that predates the update path sends the 51-byte hello.
+    // A C6 with no image digest to report sends the 51-byte hello.
     let mut bytes = [0u8; HELLO_LEN];
     bytes[2] = 1;
     assert_eq!(Hello::decode(&bytes).unwrap().image, None);

@@ -53,7 +53,11 @@
 //! The link's `packets`, `crc_fail`, `bad_magic`, `seq_gap` and `uart_errors` are the P4's and run on
 //! through a C6 restart, so they rebase only when they fall, and the `radio_*` counters follow the
 //! uptime. A P4 reboot whose counters regrow past the last row reads as no reboot, which is rare and
-//! only undercounts.
+//! only undercounts. Queues follow the same split, by [`QueueId::on_p4`].
+//!
+//! `dropped_tx` sums P4 and C6 queues into one number, so neither rule fits it: a C6 restart lowers
+//! it by only part of its total. A capture whose rows carry those queues takes `dropped` from their
+//! own deltas ([`QueueId::in_dropped_tx`]). Only rows without queues rebase `dropped_tx` itself.
 //!
 //! On the host side, [`HostLoss`] breaks down what the host read and did not store, from the
 //! `host_status` rows. Their counts run from the engine's start and are read as the last row less
@@ -100,7 +104,8 @@ pub struct LossSummary {
 pub struct BridgeLoss {
     /// Frames the bridge received over the air.
     pub received: u64,
-    /// Frames the bridge dropped because the host was not reading fast enough.
+    /// Frames the bridge dropped on their way to the host: its queues' drops when rows carry them,
+    /// else `dropped_tx`'s rise. The module documentation says why.
     pub dropped: u64,
     /// Times the bridge's uptime fell, which is a restart.
     pub reboots: u64,
@@ -508,10 +513,15 @@ fn bridge(conn: &Connection) -> rusqlite::Result<Option<BridgeLoss>> {
         let (q, (before, before_life)) = (&mut loss.queues[index], &mut prev_queue[index]);
         q.capacity = capacity;
         q.peak = q.peak.max(high_water);
-        q.dropped += advance_since_boot(dropped, Some(*before), life != *before_life);
+        let restarted = !queue.on_p4() && life != *before_life;
+        q.dropped += advance_since_boot(dropped, Some(*before), restarted);
         (*before, *before_life) = (dropped, life);
     }
     let Some(mut loss) = loss else { return Ok(None) };
+    let in_dropped_tx = loss.queues.iter().filter(|q| q.queue.in_dropped_tx());
+    if let Some(dropped) = in_dropped_tx.map(|q| q.dropped).reduce(|sum, dropped| sum + dropped) {
+        loss.dropped = dropped;
+    }
     loss.usb_lost = loss.received.saturating_sub(loss.dropped).saturating_sub(loss.host_read);
     Ok(Some(loss))
 }

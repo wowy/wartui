@@ -728,6 +728,11 @@ def bridge(db, ctx):
     reboots = []
     received = dropped = oversize = 0
     gaps = []
+    # Each status row's count of restarts so far: two rows a restart apart differ.
+    lives = {rows[0][0]: 0}
+    for prev, cur in zip(rows, rows[1:]):
+        lives[cur[0]] = lives[prev[0]] + (cur[5] < prev[5])
+    queues = bridge_queue_drops(db, lives)
     for prev, cur in zip(rows, rows[1:]):
         restarted = cur[5] < prev[5]
         if restarted:
@@ -736,6 +741,11 @@ def bridge(db, ctx):
         dropped += since_boot_delta(cur[4], prev[4], restarted)
         oversize += since_boot_delta(cur[7], prev[7], restarted)
         gaps.append(cur[1] - prev[1])
+    # dropped_tx sums queues on both chips, so neither restart rule fits it: as analyze does, take
+    # the total from the queues when rows carry them.
+    in_dropped_tx = [q[2] for name, q in queues.items() if name in DROPPED_TX_QUEUES]
+    if in_dropped_tx:
+        dropped = sum(in_dropped_tx)
     host_read = rows[-1][6] - rows[0][6]
     peers = Counter(r[2] for r in rows)
     print(f"  rows {len(rows)}  reboots {len(reboots)}  received {received}  dropped {dropped} "
@@ -783,11 +793,7 @@ def bridge(db, ctx):
     if longest_flat[0] > 30_000:
         print(f"  bridge heard nothing over the air for {dur(longest_flat[0])} from "
               f"{rel(longest_flat[1])} (rx_count flat, bridge up)")
-    # Each status row's count of restarts so far: two rows a restart apart differ.
-    lives = {rows[0][0]: 0}
-    for prev, cur in zip(rows, rows[1:]):
-        lives[cur[0]] = lives[prev[0]] + (cur[5] < prev[5])
-    bridge_queues(db, lives)
+    bridge_queues(queues)
     bridge_radio_link(db, lives)
 
 
@@ -799,14 +805,17 @@ QUEUE_UNITS = {
 }
 
 
-def bridge_queues(db, lives):
-    """Each queue's since-boot peak against its size, and what it dropped during the capture."""
+# Mirror QueueId::on_p4 and QueueId::in_dropped_tx.
+P4_QUEUES = {"radio-down", "host-priority", "host-bulk"}
+DROPPED_TX_QUEUES = {"radio-up", "radio-up-priority", "host-priority", "host-bulk"}
+
+
+def bridge_queue_drops(db, lives):
+    """Each queue's capacity, peak and drops over the capture, rebased as analyze does: the uptime
+    that dates a restart is the C6's, so the P4's queues rebase only when they fall."""
     rows = db.q("SELECT q.status_id, q.queue, q.capacity, q.high_water, q.dropped "
                 "FROM bridge_queue q JOIN bridge_status s ON s.id = q.status_id "
                 "ORDER BY s.id, q.rowid")
-    if not rows:
-        print("  no queues reported")
-        return
     queues = {}  # name -> [capacity, peak, dropped, prev dropped, prev life]
     for status_id, name, capacity, high_water, dropped in rows:
         life = lives.get(status_id, 0)
@@ -816,8 +825,16 @@ def bridge_queues(db, lives):
             continue
         q[0] = capacity
         q[1] = max(q[1], high_water)
-        q[2] += since_boot_delta(dropped, q[3], life != q[4])
+        q[2] += since_boot_delta(dropped, q[3], name not in P4_QUEUES and life != q[4])
         q[3], q[4] = dropped, life
+    return queues
+
+
+def bridge_queues(queues):
+    """Each queue's since-boot peak against its size, and what it dropped during the capture."""
+    if not queues:
+        print("  no queues reported")
+        return
     for name, (capacity, peak, dropped, _, _) in queues.items():
         unit = QUEUE_UNITS.get(name, "?")
         print(f"  queue {name}  peak {peak}/{capacity} {unit} ({pct(peak, capacity)})  "
@@ -1310,6 +1327,10 @@ def log(path, ctx):
         flag("WARN", "log", f"{errors} ERROR lines in the log")
     if warns:
         flag("INFO", "log", f"{warns} WARN lines in the log")
+    silent = sum(c for (_, _, tpl), c in templates.items()
+                 if "the radio has stopped answering" in tpl)
+    if silent:
+        flag("WARN", "log", f"the bridge said its radio stopped answering {silent} time(s)")
     moments = [(at, "bridge reboot") for at in ctx.get("bridge_reboots", [])]
     moments += [(r[0], f"{short(r[1])} restart") for r in ctx.get("restarts", [])[:6]]
     for at, what in moments:
