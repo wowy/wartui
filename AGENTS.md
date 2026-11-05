@@ -4,9 +4,9 @@ Guidance for coding agents working in this repository.
 
 ## What this is
 
-A terminal fleet controller for ESP32-C5 wardriving nodes, speaking ESP-NOW through a
-USB-attached ESP32-P4 bridge whose on-board C6 runs the radio. `README.md` introduces it and says
-which chip goes where.
+A terminal fleet controller for ESP32-C5 wardriving nodes, speaking ESP-NOW through an ESP32-P4
+bridge whose on-board C6 runs the radio, reached over USB through the board's CH343. `README.md`
+introduces it and says which chip goes where.
 
 Where the prose lives:
 
@@ -99,7 +99,7 @@ own.
   Compiled into *both* the host and the firmware by path dependency, which is the only thing
   keeping the ends in step — and the reason a node's parsers are testable with `cargo test`
   rather than a reflash.
-- **`crates/wartui-bridge`** — host side of the USB link. Everything above talks to a `LinkHandle`
+- **`crates/wartui-bridge`** — host side of the link. Everything above talks to a `LinkHandle`
   and cannot tell a real dongle (`serial`) from the fake fleet (`sim`). It also owns the host's
   serial ports generally (`ports`): what is attached and what the OS says it is, so anything else
   that opens a device shares one enumeration.
@@ -107,7 +107,8 @@ own.
 - **`crates/wartui`** — clap CLI (`run`/`export`/`analyze`/`upload`/`sniff`/`status`/`reset`/
   `ports`/`flash-fleet`/`flash-bridge`/`ota`) and the ratatui view.
 - **`firmware/p4-bridge`** — the host half of the bridge, on the P4 of a Waveshare ESP32-P4-WIFI6:
-  COBS framing over USB and a DMA UART to its C6, no protocol knowledge. Fixes there cost a
+  COBS framing over a DMA UART to the host, through the board's CH343, and a FIFO UART with
+  RTS/CTS to its C6, no protocol knowledge. Fixes there cost a
   reflash, so logic belongs on the host. Its image carries the C6's, and updates it.
 - **`firmware/p4-radio`** — the radio half of the bridge, on the board's C6: `esp-radio` calls behind
   a DMA UART, equally without protocol knowledge.
@@ -296,25 +297,32 @@ edit stops; follow the pointer before changing the rule.
 
 - **Somebody else's ESP-NOW traffic is dropped, never reported or accommodated.**
   → `crates/wartui-proto/src/air/mod.rs` `//!`, `firmware/common/src/radio.rs` `hear`
-- **Finding the bridge means transmitting into what is opened**, so the sweep opens the P4 bridge's
-  exact USB ID pair and nothing else, which means finding a bridge never writes to a node, and
-  `wartui reset` — which transmits before anything has identified itself — never sweeps at all. The
-  GPS search is the other side: it opens everything but the fleet's boards (the P4 bridge and any
+- **Finding the bridge means transmitting into what is opened**, so the sweep opens CH343s and
+  nothing else, which means finding a bridge never writes to a node, and `wartui reset` — which
+  transmits before anything has identified itself — never sweeps at all. A CH343 reports a serial
+  number of its own, so the bridge's address is learned only by asking: any CH343 gets one
+  `Identify` (`serial::probe`), for `wartui ports`, `flash-bridge` and an address `--bridge` names,
+  and the CH343's serial number is remembered beside the address so a run opens that port first.
+  The GPS search is the other side: it opens everything but the fleet's boards (any CH343 and any
   Espressif vendor ID), and writes to none of them. `discover_ports` lists those boards for
   `flash-fleet`, `flash-bridge`, boot watching and `wartui ports`, and `discover_bridges` is what the
-  sweep and `reset` read, including for an address `--bridge` names.
-  → `crates/wartui-bridge/src/ports.rs` `//!`,
+  sweep, the probe and `reset` read.
+  → `crates/wartui-bridge/src/ports.rs` `//!`, `serial::probe` /
   `serial::select` / `serial::unambiguous_bridge`, `crates/wartui-core/src/discover.rs` `//!`
-- **A connection asks once and then only waits.** A path named with `--bridge` is opened whatever
-  it reaches, and a board that is not reading its USB endpoint absorbs exactly one packet and NACKs
-  the rest, and they sit in the tty's output queue through a `close` that no signal can interrupt —
-  30 s measured against a node, during which the process cannot exit. One `Identify` is also
-  sufficient, because a board that is merely still booting reads it when its loop starts.
-  → `crates/wartui-bridge/src/serial.rs`, `connect`'s `identify` arm
+- **A connection asks once and then only waits, until a `Ready` proves the board.** A CH343 may
+  reach something that is not a bridge, and a path named with `--bridge` is opened whatever it
+  reaches: a node that is not reading its USB endpoint absorbs exactly one packet and NACKs the
+  rest, and they sit in the tty's output queue through a `close` that no signal can interrupt —
+  30 s measured against a node, during which the process cannot exit. A P4 still booting loses
+  the one `Identify`, and the next connection asks again. Once proven, a connection that has
+  written nothing for 5 s sends a `GetStatus`, since the P4 stops writing to a host it has not
+  heard from in 15 s. → `crates/wartui-bridge/src/serial.rs`, `connect`'s `identify` arm and
+  `KEEPALIVE`
 - **Never set DTR or RTS on a serial port, or ask `serialport` to.** The kernel raises both
-  together on open, which an ESP32's USB Serial/JTAG ignores; moving one without the other is its
-  reset sequence, so `.dtr_on_open(false)` reboots the board it was being polite to.
-  → `crates/wartui-bridge/src/ports.rs` `//!`
+  together on open, which a node's USB Serial/JTAG ignores and the P4 board's CH343 carries to a
+  real auto-reset circuit on the P4's EN and GPIO35, where both together are inert too. Moving one
+  without the other is the reset sequence, so `.dtr_on_open(false)` reboots the board it was being
+  polite to. → `crates/wartui-bridge/src/ports.rs` `//!`
 - **The planner deals only to a slot that is sniffing**, and what no slot can take comes back in
   `Plan::unreachable` rather than being dealt anyway. A `Job::Bluetooth` slot takes nothing, so a
   fleet of one that holds the scan reports the whole pool.
@@ -347,15 +355,16 @@ edit stops; follow the pointer before changing the rule.
 - **The radio link's core is frozen around the UART, even before 1.0**, so any P4 build can
   identify and update any C6 build and a link change never costs a wired flash.
   → `crates/wartui-proto/src/radio_link/mod.rs` `//!`
-- **A C6 restart is invisible unless the host compares uptimes**, because it does not re-enumerate
-  the P4's USB device and `Ready.uptime_ms` is the C6's. → `crates/wartui-bridge/src/serial.rs`, the
-  `Ready` arm
-- **The P4 writes nothing to USB until a host holds DTR, and queues nothing until then.** The kernel
-  raises DTR when a host opens the port, so DTR is the signal that someone is reading. Frames
-  produced without one are dropped, and DTR rising clears whatever is queued before it is served, so
-  a host never reads a backlog from before it attached. Bytes already past the queue still reach the
-  port, and the host drops every frame that decodes ahead of the connection's first `Ready`.
-  → `firmware/p4-bridge/src/main.rs`, `Shared::push_host`, and `src/usb.rs`, `write_host`
+- **A restart of either chip is invisible unless the host compares uptimes**, because the CH343
+  stays on the bus through it, so the connection holds, and `Ready.uptime_ms` is the C6's, which the
+  P4 resets at its own boot. → `crates/wartui-bridge/src/serial.rs`, the `Ready` arm
+- **The P4 writes nothing to the host until a host frame arrives, and queues nothing until then.**
+  It cannot see the CH343's DTR, so a decoded frame is the sign that someone is reading, and the
+  gate closes 15 s after the last one: three of the engine's 5 s status polls. Frames produced while
+  it is closed are dropped, and opening clears whatever is queued before it is served, so a host
+  never reads a backlog from before it attached. Bytes already past the queue still reach the port,
+  and the host drops every frame that decodes ahead of the connection's first `Ready`.
+  → `firmware/p4-bridge/src/host.rs` `//!`, and `src/main.rs`, `Shared::push_host`
 - **Both firmwares pass `US` for the regulatory domain, and that is not a preference**: `esp-radio`
   defaults to China, which silently costs a C5 channels 100–144 on every sweep.
   → `firmware/node/src/main.rs`, `firmware/node/README.md`

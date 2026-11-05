@@ -1,4 +1,4 @@
-//! The P4's own image: its trial, and the update `wartui flash-bridge` sends over USB.
+//! The P4's own image: its trial, and the update `wartui flash-bridge` sends over the host link.
 //!
 //! The host sends [`HostToBridge::Update`](wartui_proto::link::HostToBridge::Update) frames
 //! carrying the `wartui_proto::radio_link::update` ops the C6 takes over UART, and the P4 drives
@@ -6,9 +6,13 @@
 //! (`firmware/p4-radio/src/link.rs`). Each status goes back as a priority
 //! [`BridgeToHost::Update`]. `Install` on a verified session switches slots and reboots.
 //!
-//! **The first host frame confirms an image on trial**, as a node confirms on hearing the
-//! host. The transport sends `Identify` on connect, so that is normally the frame. A C6 bundle
-//! that does not take still shows its fault, and the P4 keeps its new image.
+//! **The first host frame after the C6's hello confirms an image on trial**, as a node confirms
+//! on hearing the host. The transport sends `Identify` on connect, so that is normally the frame.
+//! A host frame alone would confirm an image whose C6 never answers: the host finds the bridge by
+//! the C6's MAC in `Ready`, and a P4 announcing its own has not shown that the pair works. So a
+//! frame confirms only once the pair has heard a hello (state neither `Waiting` nor `Absent`),
+//! and a P4 whose C6 stays silent rolls back. A C6 bundle that does not take still shows its
+//! fault, and the P4 keeps its new image.
 //!
 //! **A trial boot arms the RTC watchdog**, which resets the system after [`TRIAL_WATCHDOG`]
 //! unless a host confirms first. The P4 has no operator power cycling it, so this is what counts
@@ -16,9 +20,10 @@
 //! host rolls back the same way. Confirming disarms it.
 //!
 //! **Flash work holds the executor.** Erasing and writing a sector takes tens of
-//! milliseconds, well inside the host's reply wait, and the UART link and USB writer wait behind
-//! it. The receiver is reset when DTR falls, so a cable pulled mid-transfer leaves no session
-//! for the next host to trip over.
+//! milliseconds, well inside the host's reply wait, and both UART links wait behind it. Host
+//! bytes that arrive meanwhile are lost (`src/host.rs`), which the sender's wait per sector
+//! absorbs. The receiver is reset when the host gate closes, so a cable pulled mid-transfer
+//! leaves no session for the next host to trip over.
 
 use core::fmt::{self, Write};
 
@@ -37,13 +42,14 @@ use wartui_proto::link::{
 use wartui_proto::ota::Receiver;
 use wartui_proto::ota::image::DIGEST_LEN;
 use wartui_proto::radio_link::update::{Op, Received, receive};
+use wartui_proto::split::RadioState;
 
 use crate::Shared;
 
 /// How long a trial boot runs before the watchdog resets it, unless a host confirms it.
 ///
-/// Long enough for the P4 to boot, hear its C6 and enumerate, and for the host to reopen the
-/// port and send `Identify`. Two of these, about 60 s, roll back an image no host confirms: the
+/// Long enough for the P4 to boot and hear its C6, and for the host to send it a frame. Two of
+/// these, about 60 s, roll back an image no host confirms: the
 /// third boot rolls back as it starts ([`Ota::boot`]).
 pub const TRIAL_WATCHDOG: Duration = Duration::from_secs(30);
 
@@ -180,16 +186,19 @@ impl Updates {
     }
 }
 
-/// A host frame decoded: confirm the image if it is on trial and this connection has not
-/// already failed to.
-pub fn note_host_frame(shared: &Shared) {
+/// A host frame decoded: confirm the image if it is on trial, the C6 has said hello, and this
+/// host has not already failed to. Returns whether it tried, which leaves a line to say.
+pub fn note_host_frame(shared: &Shared) -> bool {
     let due = {
         let updates = shared.updates.borrow();
         updates.trial && !updates.confirm_failed
     };
+    let heard = !matches!(shared.pair.borrow().state(), RadioState::Waiting | RadioState::Absent);
+    let due = due && heard;
     if due {
         shared.updates.borrow_mut().confirm();
     }
+    due
 }
 
 /// Carry out one `HostToBridge::Update` and answer it.
@@ -206,9 +215,10 @@ pub fn take(bytes: &[u8], shared: &Shared) {
         answer(status, shared);
     }
     // An install that failed has a line to say. Checked first, since taking the lines moves
-    // the whole buffer.
+    // the whole buffer. Held while the pair waits for its C6's hello, as `Shared::announce`
+    // holds them, since no `Ready` can lead them yet.
     let lines = !shared.updates.borrow().lines.is_empty();
-    if lines {
+    if lines && shared.pair.borrow().bridge_mac().is_some() {
         say_lines(shared);
     }
 }
@@ -230,8 +240,8 @@ pub fn say_lines(shared: &Shared) {
     }
 }
 
-/// The host let go of DTR, or the device left the bus: drop any session, so a transfer cut
-/// short leaves nothing behind, and let the next host retry a confirm that failed.
+/// The host gate closed: drop any session, so a transfer cut short leaves nothing behind, and
+/// let the next host retry a confirm that failed.
 pub fn host_gone(shared: &Shared) {
     let mut updates = shared.updates.borrow_mut();
     updates.receiver.reset();

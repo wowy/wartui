@@ -1,4 +1,5 @@
-//! The USB link between the host and the bridge dongle.
+//! The link between the host and the P4 bridge: USB to the board's CH343, then UART0 at
+//! [`HOST_BAUD`] to the P4.
 //!
 //! Unlike the air format, the link has a version byte, a checksum, and framing that
 //! resynchronizes from arbitrary junk.
@@ -8,9 +9,9 @@
 //! ```
 //!
 //! The version byte sits *outside* the postcard blob, so a mismatch is detectable without
-//! a deserialize that cannot be trusted. The CRC is not for line integrity: USB bulk
-//! transfers are checked and retried in hardware. It rejects half-written frames, and
-//! the ROM banner a reset prints down the same pipe.
+//! a deserialize that cannot be trusted. The CRC rejects what the UART leg corrupts, which
+//! nothing retries, half-written frames, and the bootloader's log a reset prints down the same
+//! pipe.
 //!
 //! The two directions carry different sizes. Both chips run ESP-NOW v2. Host to bridge, a
 //! [`HostToBridge::SendEspNow`] holds up to [`MAX_ESPNOW_V2_PAYLOAD`] (1470) bytes, so an
@@ -33,6 +34,12 @@ pub(crate) use frame::CobsStream;
 pub use frame::{
     FrameAccumulator, LinkError, crc16, decode_frame, encode_frame, encode_host_frame,
 };
+
+/// The host link's baud rate, 8N1, set at both ends.
+///
+/// The fastest rate the CH343 carries cleanly, and one the P4 divides exactly from its 40 MHz
+/// crystal; `docs/p4-host-uart-findings.md` has the sweep.
+pub const HOST_BAUD: u32 = 4_000_000;
 
 /// The revision of this protocol both ends must agree on.
 ///
@@ -145,7 +152,7 @@ pub enum LoopPhase {
     DrainLink,
     /// Carrying out a host command.
     Command,
-    /// Writing queued frames to the USB endpoint.
+    /// Writing queued frames to the host.
     Pump,
     /// Reading or writing a packet over the P4–C6 UART link.
     RadioLink,
@@ -191,9 +198,9 @@ pub enum SendStatus {
 pub enum HostToBridge {
     /// Ask the bridge to announce itself with [`BridgeToHost::Ready`].
     ///
-    /// Sent the moment the host opens the port. The P4's transmit opens on DTR and nothing
-    /// queues before it (`firmware/p4-bridge/src/usb.rs`), so a new connection that did not
-    /// ask would wait forever.
+    /// Sent the moment the host opens the port. The P4 writes nothing until a host frame
+    /// arrives (`firmware/p4-bridge/src/host.rs`), so a new connection that did not ask would
+    /// wait forever.
     Identify,
     /// Register a peer so unicast frames can be addressed to it.
     AddPeer {
@@ -253,9 +260,9 @@ pub enum HostToBridge {
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub enum BridgeToHost {
-    /// Sent in answer to [`HostToBridge::Identify`], and when a new life begins while a host
-    /// holds DTR (`firmware/p4-bridge/src/usb.rs`). The host checks `proto_version` and
-    /// refuses a bridge it does not understand.
+    /// Sent in answer to [`HostToBridge::Identify`], when a host's first frame arrives, and
+    /// when a new life begins while a host is present (`firmware/p4-bridge/src/host.rs`). The
+    /// host checks `proto_version` and refuses a bridge it does not understand.
     Ready {
         /// Which chip this is.
         chip: Chip,
@@ -276,9 +283,9 @@ pub enum BridgeToHost {
         /// Milliseconds since this life started, at the moment of announcing.
         ///
         /// Lets the host tell a *new* life from a second answer to an
-        /// [`HostToBridge::Identify`] sent twice. A software reset does not re-enumerate
-        /// the USB device, so both arrive on one connection, and nothing else in the
-        /// frame separates them. See `crates/wartui-bridge/src/serial.rs`.
+        /// [`HostToBridge::Identify`] sent twice. A reset of either chip leaves the CH343 on
+        /// the bus, so both arrive on one connection, and nothing else in the frame separates
+        /// them. See `crates/wartui-bridge/src/serial.rs`.
         uptime_ms: u32,
         /// Whether this board was built with a GPS port.
         ///
@@ -339,6 +346,10 @@ pub enum BridgeToHost {
         queues: QueueStats,
         /// The P4–C6 UART link's counters. `None` for a bridge without one.
         radio_link: Option<RadioLinkStats>,
+        /// Line errors on the P4's host UART since boot: FIFO overflows, framing, parity and
+        /// glitches. An overflow is host bytes lost, as when the P4 holds its interrupts off
+        /// for its own flash work.
+        host_uart_errors: u32,
     },
     /// Diagnostics, routed through the link rather than printed. `esp-println` would
     /// interleave into the same endpoint and corrupt the framing.

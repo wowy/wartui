@@ -1849,6 +1849,7 @@ fn engine_counts_bridge_drops_since_attach_when_status_arrives() {
             rx_oversize: 0,
             queues: Default::default(),
             radio_link: None,
+            host_uart_errors: 0,
         }))
     };
 
@@ -1899,6 +1900,7 @@ fn engine_records_bridge_status_when_reply_arrives() {
             rx_oversize: 17,
             queues: queues.clone(),
             radio_link,
+            host_uart_errors: 0,
         }))
     };
     let statuses = |batch: &ActionBatch| -> Vec<BridgeStatusSeen> {
@@ -1929,6 +1931,7 @@ fn engine_records_bridge_status_when_reply_arrives() {
             rx_oversize: 17,
             queues,
             radio_link: Some(radio_link),
+            host_uart_errors: 0,
         }]
     );
     assert_eq!(
@@ -1943,6 +1946,7 @@ fn engine_records_bridge_status_when_reply_arrives() {
             rx_oversize: 17,
             queues: QueueStats::new(),
             radio_link: None,
+            host_uart_errors: 0,
         }]
     );
 }
@@ -1965,6 +1969,7 @@ fn engine_records_host_frames_when_status_reply_arrives() {
             rx_oversize: 0,
             queues: Default::default(),
             radio_link: None,
+            host_uart_errors: 0,
         })),
         clock.at(4),
     );

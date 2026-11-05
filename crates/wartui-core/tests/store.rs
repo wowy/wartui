@@ -517,6 +517,7 @@ fn bridge_status(queues: &[QueueStat], radio_link: Option<RadioLinkStats>) -> Re
         rx_oversize: 42,
         queues: queues.iter().copied().collect(),
         radio_link,
+        host_uart_errors: 4_000_000_003,
     })
 }
 
@@ -570,6 +571,9 @@ fn store_round_trips_every_column_when_bridge_status_written() {
         )
         .unwrap();
     assert_eq!(radio_link, [4_000_000_001, 1, 2, 3, 4, 5, 6, 7, 8]);
+    let host_uart: i64 =
+        conn.query_row("SELECT host_uart_errors FROM bridge_status", [], |r| r.get(0)).unwrap();
+    assert_eq!(host_uart, 4_000_000_003);
 }
 
 #[test]

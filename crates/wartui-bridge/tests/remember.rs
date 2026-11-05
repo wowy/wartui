@@ -84,3 +84,32 @@ fn bridge_memory_recalls_again_when_reenabled_after_remember() {
     memory.remember(address());
     assert_eq!(memory.recall(), Some(address()));
 }
+
+#[test]
+fn bridge_memory_recalls_serial_when_remembered_on_a_port() {
+    let memory = BridgeMemory::none();
+    memory.remember_on(address(), Some("5CF7153520".to_owned()));
+    assert_eq!(memory.recall(), Some(address()));
+    assert_eq!(memory.recall_serial().as_deref(), Some("5CF7153520"));
+    let seeded = BridgeMemory::holding(Some(address())).on_port(Some("5CF7153520".to_owned()));
+    assert_eq!(seeded.recall_serial().as_deref(), Some("5CF7153520"));
+}
+
+#[test]
+fn bridge_memory_drops_serial_when_remembered_without_port() {
+    // A port held for another address would put the wrong board first.
+    let memory = BridgeMemory::none();
+    memory.remember_on(address(), Some("5CF7153520".to_owned()));
+    memory.remember(address());
+    assert_eq!(memory.recall_serial(), None);
+}
+
+#[test]
+fn bridge_memory_forgets_serial_when_disabled() {
+    let memory = BridgeMemory::none();
+    memory.remember_on(address(), Some("5CF7153520".to_owned()));
+    memory.set_enabled(false);
+    assert_eq!(memory.recall_serial(), None);
+    memory.set_enabled(true);
+    assert_eq!(memory.recall_serial(), None, "off cleared it");
+}

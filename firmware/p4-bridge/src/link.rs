@@ -2,30 +2,29 @@
 //! P4 does with what comes up.
 //!
 //! `wartui_proto::radio_link` has the framing. The link is two futures, and nothing ticks: the
-//! reader wakes when a DMA read ends, and the writer when [`Shared`]'s `wake_link` says there may
-//! be something to send. The writer loops until it has nothing left before it waits, so a record
-//! left held or queued never waits for a new signal. They share [`Link`] through a `RefCell`,
-//! with nothing borrowed across an `.await`.
+//! reader wakes when the UART's FIFO has bytes, and the writer when [`Shared`]'s `wake_link`
+//! says there may be something to send. The writer loops until it has nothing left before it
+//! waits, so a record left held or queued never waits for a new signal. They share [`Link`]
+//! through a `RefCell`, with nothing borrowed across an `.await`.
 //!
-//! **A read ends at `RX_BUF_LEN` bytes or when the line goes idle.** The next read is armed
-//! before this one's bytes are looked at, which is why there are two buffers: DMA keeps
-//! landing while the P4 works, and only the moment between two reads leans on the 128-byte
-//! FIFO, with RTS behind it. A packet may span two reads, and [`PacketReader`] absorbs that.
+//! **The link runs on UART1's FIFO, with interrupts and RTS/CTS, not DMA.** The P4 has one UHCI,
+//! and the host link (`src/host.rs`) needs it more: it has no flow control, so a late read there
+//! loses bytes, while a late read here raises RTS and the C6 waits. This link carries a fleet's
+//! ESP-NOW traffic now and is to carry BLE to the host; both fit a FIFO, and on a 10-minute burst
+//! load it took no error and no queue drop (`docs/p4-host-uart-findings.md`).
 //!
-//! **A write held by CTS waits without blocking**, so USB, the radio clock and the GPS reader
-//! run on while the C6 is in reset or busy in its flash. While a write is held the sender's
-//! clock stops too, so a C6 that hangs mid-update holding RTS stays `Updating`, and a host's poll
-//! going unanswered is what raises the fault (`Pair::fault`, the radio has stopped answering).
+//! **A read takes what the FIFO holds**, once it reaches `FIFO_FULL_THRESHOLD` or the line goes
+//! idle. RTS rises at `RTS_THRESHOLD`, so a P4 busy elsewhere holds the C6 back rather than drops
+//! its bytes. A packet may span two reads, and [`PacketReader`] absorbs that.
 //!
-//! **The writer polls the DMA on a timer and never calls `wait_for_done` or `wait`.** Both flush
-//! the UART, and the flush ends in a spin that does not yield until the transmitter is idle. A
-//! CTS hold that begins as the FIFO empties would stop this whole task for the hold, and a hung C6
-//! would stop it before the P4 could reset the C6. A write's `is_done` goes high once the DMA's
-//! FIFO has handed over the packet's last byte, and `cancel` stops only the DMA channel, which has
-//! finished. The UART and UHCI keep what they hold.
+//! **A write held by CTS waits without blocking**: each `write_async` fills the FIFO and awaits
+//! its empty interrupt, so the host link, the radio clock and the GPS reader run on while the C6
+//! is in reset or busy in its flash. While a write is held the sender's clock stops too, so a C6
+//! that hangs mid-update holding RTS stays `Updating`, and a host's poll going unanswered is what
+//! raises the fault (`Pair::fault`, the radio has stopped answering).
 //!
-//! **Nothing needs the FIFO drained between packets.** The link never turns the line around, and
-//! the next write resets only the DMA channel, so its bytes land behind those still in the FIFO.
+//! **Nothing needs the FIFO drained between packets.** The link never turns the line around, so
+//! the next packet's bytes land behind those still in the FIFO.
 //!
 //! The P4 answers each hello from the C6 with one of its own, which covers a C6 that restarts
 //! under a running P4 as well as the first exchange. The pair hears the seq of every C6
@@ -51,16 +50,15 @@ use embassy_futures::join::join;
 use embassy_futures::select::select;
 use embassy_time::{Duration, Instant, Timer};
 use esp_hal::Async;
-use esp_hal::dma::{DmaRxBuf, DmaTxBuf};
-use esp_hal::uart::uhci::{UhciRx, UhciTx};
+use esp_hal::uart::{UartRx, UartTx};
 use wartui_firmware::phase::mark;
 use wartui_proto::link::{BridgeToHost, Chip, LogStr, LoopPhase, ShortStr};
 use wartui_proto::mac::Mac;
 use wartui_proto::radio_link::update::{Failure, Op, Sender, Stage};
 use wartui_proto::radio_link::{
-    BAUD_RATE, BODY_MAX, HEADER_LEN, Held, Hello, Kind, LINK_REVISION, PAYLOAD_MAX, Packer, Packet,
-    PacketReader, SENDER_POLL_MS, SeqCheck, SeqNote, Up, VerifyError, decode_up, encode_packet,
-    records, seal,
+    BODY_MAX, HEADER_LEN, Held, Hello, Kind, LINK_REVISION, PAYLOAD_MAX, Packer, Packet,
+    PacketReader, SENDER_POLL_MS, SeqCheck, SeqNote, Up, VerifyError, WIRE_MAX, decode_up,
+    encode_packet, records, seal,
 };
 use wartui_proto::reset::ResetCause;
 use wartui_proto::split::{PairEvent, RadioState};
@@ -68,26 +66,21 @@ use wartui_proto::split::{PairEvent, RadioState};
 use crate::Shared;
 use crate::radio::{RADIO_DIGEST, RADIO_IMAGE, RADIO_SHA256};
 
-/// How often a write looks for its end once its wire time has passed. Short against the 320 µs
-/// the 128-byte FIFO takes to drain at [`BAUD_RATE`], so a brief hold costs the line little idle.
-const WRITE_POLL: Duration = Duration::from_micros(100);
-
-/// How often a write looks for its end once it has waited twice its wire time. CTS is holding it
-/// by then, and a long hold must not wake the executor 10,000 times a second.
-const WRITE_POLL_HELD: Duration = Duration::from_millis(1);
+/// The UART's FIFO size, the most one read takes.
+const FIFO_LEN: usize = 128;
 
 /// How often an updating writer polls its [`Sender`] with no status to prompt it.
 const SENDER_POLL: Duration = Duration::from_millis(SENDER_POLL_MS);
 
-/// UART1 through UHCI, and its buffers. All static: a packet is too large for a future's frame.
+/// UART1, and the link's buffers. All static: a packet is too large for a future's frame.
 pub struct Bus {
-    pub rx: UhciRx<'static, Async>,
-    pub tx: UhciTx<'static, Async>,
-    pub rx_bufs: [DmaRxBuf; 2],
-    pub tx_buf: DmaTxBuf,
+    pub rx: UartRx<'static, Async>,
+    pub tx: UartTx<'static, Async>,
     pub reader: &'static mut PacketReader,
-    /// Where a packet's body is built, before it is encoded into `tx_buf`.
+    /// Where a packet's body is built, before it is encoded into `wire`.
     pub body: &'static mut [u8; BODY_MAX],
+    /// The packet as it goes on the wire.
+    pub wire: &'static mut [u8; WIRE_MAX],
 }
 
 /// The link's state.
@@ -150,7 +143,7 @@ impl Link {
             uptime_ms: self.boot.elapsed().as_millis() as u32,
             // No heap: nothing on the P4 allocates.
             heap_free: 0,
-            // The C6 never updates the P4; the host does, over USB (`src/update.rs`).
+            // The C6 never updates the P4; the host does (`src/update.rs`).
             image: None,
         }
     }
@@ -330,50 +323,42 @@ fn updating(shared: &Shared) -> bool {
 
 /// Run the link forever: the reader and the writer, each on its own.
 pub async fn run_link(bus: Bus, link: &RefCell<Link>, shared: &Shared) -> ! {
-    let Bus { rx, tx, rx_bufs, tx_buf, reader, body } = bus;
-    join(
-        read_packets(rx, rx_bufs, reader, link, shared),
-        write_packets(tx, tx_buf, body, link, shared),
-    )
-    .await
-    .0
+    let Bus { rx, tx, reader, body, wire } = bus;
+    join(read_packets(rx, reader, link, shared), write_packets(tx, body, wire, link, shared))
+        .await
+        .0
 }
 
-/// Read forever: arm the next read, hand the last one's bytes to the link, wait for it to end.
+/// Read forever: hand what the FIFO holds to the link, a byte at a time.
 async fn read_packets(
-    mut rx: UhciRx<'static, Async>,
-    [mut armed, mut last]: [DmaRxBuf; 2],
+    mut rx: UartRx<'static, Async>,
     reader: &'static mut PacketReader,
     link: &RefCell<Link>,
     shared: &Shared,
 ) -> ! {
-    let mut last_len = 0;
+    let mut buf = [0u8; FIFO_LEN];
     loop {
-        let mut read = rx.read(armed).map_err(|(err, ..)| err).expect("arm a UART read");
-        mark(LoopPhase::RadioLink);
-        for &byte in &last.as_slice()[..last_len] {
-            if let Some(packet) = reader.push(byte) {
-                link.borrow_mut().take(packet, shared);
+        match rx.read_async(&mut buf).await {
+            Ok(n) => {
+                mark(LoopPhase::RadioLink);
+                for &byte in &buf[..n] {
+                    if let Some(packet) = reader.push(byte) {
+                        link.borrow_mut().take(packet, shared);
+                    }
+                }
             }
-        }
-        read.wait_for_done().await;
-        let (result, rx_back, done) = read.wait();
-        rx = rx_back;
-        armed = core::mem::replace(&mut last, done);
-        // Also what brings the received bytes through the P4's cache, so before `as_slice`.
-        last_len = last.number_of_received_bytes();
-        // The UART keeps line errors until they are read, so any since the last read are here.
-        if result.is_err() || rx.uart_rx.check_for_errors().is_err() {
-            shared.count_link(|radio_link| &mut radio_link.uart_errors);
+            // A line error, or an overflow, after which the driver empties the FIFO. The packet
+            // it fell in fails its CRC.
+            Err(_) => shared.count_link(|radio_link| &mut radio_link.uart_errors),
         }
     }
 }
 
 /// Write forever: every packet the link has to send, then wait for a reason to look again.
 async fn write_packets(
-    mut tx: UhciTx<'static, Async>,
-    mut buf: DmaTxBuf,
+    mut tx: UartTx<'static, Async>,
     body: &'static mut [u8; BODY_MAX],
+    wire: &'static mut [u8; WIRE_MAX],
     link: &RefCell<Link>,
     shared: &Shared,
 ) -> ! {
@@ -387,20 +372,19 @@ async fn write_packets(
             }
             continue;
         };
-        let wire = encode_packet(&body[..len], buf.as_mut_slice());
-        buf.set_length(wire);
+        let n = encode_packet(&body[..len], wire);
         mark(LoopPhase::RadioLink);
-        let write = tx.write(buf).map_err(|(err, ..)| err).expect("start a UART write");
-        // Ten bits a byte: 8N1.
-        let wire_time = Duration::from_micros(wire as u64 * 10 * 1_000_000 / BAUD_RATE as u64);
-        Timer::after(wire_time).await;
-        let mut waited = wire_time;
-        // Neither call reports a DMA error, so `uart_errors` holds only what a read finds.
-        while !write.is_done() {
-            let poll = if waited < wire_time * 2 { WRITE_POLL } else { WRITE_POLL_HELD };
-            Timer::after(poll).await;
-            waited += poll;
+        let mut sent = 0;
+        while sent < n {
+            match tx.write_async(&wire[sent..n]).await {
+                Ok(written) => sent += written,
+                // esp-hal has no transmit error yet. Were one added, the packet is dropped and
+                // the C6 counts the gap.
+                Err(_) => {
+                    shared.count_link(|radio_link| &mut radio_link.uart_errors);
+                    break;
+                }
+            }
         }
-        (tx, buf) = write.cancel();
     }
 }

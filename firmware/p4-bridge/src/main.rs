@@ -1,8 +1,8 @@
 //! The host half of wartui's P4 split bridge, on a Waveshare ESP32-P4-WIFI6.
 //!
-//! The P4 talks to the host over USB 2.0 high speed with wartui's link protocol, and to
-//! the board's ESP32-C6 over UART1 with hardware flow control, through UHCI's DMA. The C6 runs
-//! the radio (`firmware/p4-radio`). The host sees one bridge, reporting `Chip::Esp32P4` and both chips'
+//! The P4 talks to the host over UART0, which the board's CH343 carries to the Type-C, with
+//! wartui's link protocol, through UHCI's DMA. It talks to the board's ESP32-C6 over UART1 with
+//! hardware flow control, on the FIFO. The C6 runs the radio (`firmware/p4-radio`). The host sees one bridge, reporting `Chip::Esp32P4` and both chips'
 //! diagnostics; [`wartui_proto::split::Pair`] makes the decisions that keep it so.
 //!
 //! The futures share one task through `join`, so they share [`Shared`] through `Cell` and
@@ -14,20 +14,21 @@
 //!   deadline, then gives [`Pair`] the time. That is how it gives up on a silent C6, resets one
 //!   silent since an update's install through its enable pin, and reports one silent since a
 //!   host's poll;
-//! - **the USB device** (`src/usb.rs`) starts once the pair knows its serial number, and
-//!   runs the device, a reader, a writer and the `GetStatus` answer. The reader also takes
-//!   the P4's own updates (`src/update.rs`);
+//! - **the host link** (`src/host.rs`) runs a reader, a writer, the gate that tells whether a
+//!   host is present, and the `GetStatus` answer. The reader also takes the P4's own updates
+//!   (`src/update.rs`);
 //! - **the GPS reader** (`src/gps.rs`, with the default `gps` feature) polls a u-blox
 //!   receiver on I2C0 and forwards its bytes. GPIO7 and GPIO8 are shared with the board's
 //!   ES8311 codec, which this firmware never addresses.
 //!
 //! Before anything else, the P4 checks whether its own image is on trial, and rolls it back
 //! when its trial boots are spent (`wartui_firmware::ota`). A trial boot arms the RTC
-//! watchdog, and the first host frame confirms the image (`src/update.rs`).
+//! watchdog, and the first host frame once the C6 has said hello confirms the image
+//! (`src/update.rs`).
 //!
 //! The P4 resets the C6 through its enable pin at boot, so the pair always starts
-//! together. Every wait is a DMA completion, a UART event, a USB event, a signal between the
-//! futures or a timer.
+//! together. Every wait is a DMA completion, a UART event, a signal between the futures or a
+//! timer.
 //!
 //! `README.md` has the build command.
 #![no_std]
@@ -42,10 +43,10 @@
 mod config;
 #[cfg(feature = "gps")]
 mod gps;
+mod host;
 mod link;
 mod radio;
 mod update;
-mod usb;
 
 use core::cell::{Cell, RefCell};
 
@@ -72,20 +73,21 @@ use static_cell::ConstStaticCell;
 use wartui_firmware::phase::{boot_phase, mark};
 use wartui_firmware::{phase, reboot, reset_cause};
 use wartui_proto::frame_ring::FrameRing;
-use wartui_proto::host_queue::{HostQueue, is_priority};
+use wartui_proto::host_queue::{HOST_CHUNK, HostQueue, is_priority};
 use wartui_proto::link::{
-    BridgeToHost, LogLevel, LogStr, LoopPhase, MAX_FRAME, QueueId, QueueStat, RadioLinkStats,
-    ShortStr, encode_frame,
+    BridgeToHost, HOST_BAUD, LogLevel, LogStr, LoopPhase, MAX_FRAME, QueueId, QueueStat,
+    RadioLinkStats, ShortStr, encode_frame,
 };
 #[cfg(feature = "gps")]
 use wartui_proto::link::{GpsBytes, GpsWriteBytes};
 use wartui_proto::radio_link::{
     BAUD_RATE, BODY_MAX, Down, FIFO_FULL_THRESHOLD, Held, PacketReader, RECORD_MAX, RTS_THRESHOLD,
-    RX_BUF_LEN, WIRE_MAX, encode_down,
+    WIRE_MAX, encode_down,
 };
 use wartui_proto::split::{Pair, PairEvent};
 
 use crate::config::{DOWN_QUEUE_BYTES, HOST_BULK_BYTES, HOST_PRIORITY_BYTES};
+use crate::host::Presence;
 use crate::link::{Bus, Link, run_link};
 use crate::radio::RADIO_DIGEST;
 use crate::update::Updates;
@@ -109,6 +111,8 @@ static HELD: ConstStaticCell<Held> = ConstStaticCell::new(Held::new());
 static READER: ConstStaticCell<PacketReader> = ConstStaticCell::new(PacketReader::new());
 /// Where the writer builds a packet's body.
 static BODY: ConstStaticCell<[u8; BODY_MAX]> = ConstStaticCell::new([0; BODY_MAX]);
+/// Where the writer encodes the packet for the wire.
+static WIRE: ConstStaticCell<[u8; WIRE_MAX]> = ConstStaticCell::new([0; WIRE_MAX]);
 
 /// A DMA buffer of `$len` bytes, with its descriptors, in static internal RAM. Each use has
 /// its own statics.
@@ -156,10 +160,12 @@ pub struct Shared {
     /// Raised by whatever may have given the link's writer something to send, so a waiting
     /// writer looks again: a queued record, a hello owed, an update status, a change in the pair.
     wake_link: Signal<NoopRawMutex, ()>,
-    /// A host holds DTR, so it is reading.
-    dtr: Cell<bool>,
-    /// Raised on every new pair life, so the USB side learns its serial number.
-    paired: Signal<NoopRawMutex, ()>,
+    /// Whether a host is present, by the frames it sends (`src/host.rs`).
+    presence: Presence,
+    /// Raised when a host frame opens the gate.
+    host_arrived: Signal<NoopRawMutex, ()>,
+    /// Line errors on the host UART since boot.
+    host_uart_errors: Cell<u32>,
     /// The host asked for a `Status`.
     status_asked: Signal<NoopRawMutex, ()>,
     /// The C6's counters arrived.
@@ -202,8 +208,9 @@ impl Shared {
                 radio_uart_errors: 0,
             }),
             wake_link: Signal::new(),
-            dtr: Cell::new(false),
-            paired: Signal::new(),
+            presence: Presence::new(),
+            host_arrived: Signal::new(),
+            host_uart_errors: Cell::new(0),
             status_asked: Signal::new(),
             radio_status: Signal::new(),
             deadline_set: Signal::new(),
@@ -225,15 +232,15 @@ impl Shared {
 
     /// Queue `msg` for the host. A full ring evicts its oldest frame and counts the drop.
     ///
-    /// Dropped, and not counted, while no host holds DTR. A backlog held for an absent host
+    /// Dropped, and not counted, while no host is present. A backlog held for an absent host
     /// arrives late when one attaches, carries its current position onto old sightings and
     /// reads as missed admin windows. Faults worth keeping are repeated by
-    /// [`Shared::announce`], and the writer clears the queue when DTR rises (`src/usb.rs`).
+    /// [`Shared::announce`], and the queue is cleared when a host arrives (`src/host.rs`).
     ///
     /// Out of line, with the encode buffer, to keep both out of the callers' frames.
     #[inline(never)]
     fn push_host(&self, msg: &BridgeToHost) {
-        if !self.dtr.get() {
+        if !self.presence.is_open() {
             return;
         }
         let mut frame = [0; MAX_FRAME];
@@ -268,8 +275,14 @@ impl Shared {
 
     /// Announce this bridge life: `Ready`, then the fault if the radio is not usable, the
     /// GPS fault if there is one, and what the P4's own image has to say.
+    ///
+    /// Nothing while the pair is still waiting for the C6's first hello, since there is no
+    /// `Ready` to lead with yet and the host drops what arrives before one. The life that ends
+    /// the wait announces itself (`Shared::new_life`).
     fn announce(&self) {
-        self.push_ready();
+        if !self.push_ready() {
+            return;
+        }
         self.push_fault();
         #[cfg(feature = "gps")]
         if let Some(why) = self.gps_fault.get() {
@@ -280,9 +293,9 @@ impl Shared {
 
     /// Send the lines the P4's image held for the host, then why it refuses updates, if it
     /// does. Only after a `Ready`, since the host drops what arrives on a connection before
-    /// one, and only to a host holding DTR, since the lines are said once.
+    /// one, and only to a host that is present, since the lines are said once.
     fn flush_update_lines(&self) {
-        if !self.dtr.get() {
+        if !self.presence.is_open() {
             return;
         }
         update::say_lines(self);
@@ -300,13 +313,15 @@ impl Shared {
         }
     }
 
+    /// Queue `Ready`, returning whether the pair had one to give.
+    ///
     /// Out of line, as each message is, so the two never share a frame.
     #[inline(never)]
-    fn push_ready(&self) {
+    fn push_ready(&self) -> bool {
         let ready = self.pair.borrow().ready(now_ms());
-        if let Some(ready) = ready {
-            self.push_host(&ready);
-        }
+        let Some(ready) = ready else { return false };
+        self.push_host(&ready);
+        true
     }
 
     #[inline(never)]
@@ -339,10 +354,9 @@ impl Shared {
         self.push_host(&BridgeToHost::Gps { bytes: bytes.clone() });
     }
 
-    /// A new pair life began: tell the USB side, a host that is reading, and the link's writer,
-    /// since the pair may bridge now.
+    /// A new pair life began: tell a host that is present, and the link's writer, since the
+    /// pair may bridge now.
     fn new_life(&self) {
-        self.paired.signal(());
         self.wake_link.signal(());
         self.announce();
     }
@@ -361,8 +375,10 @@ impl Shared {
             }
         };
         let host_dropped = host[0].dropped.saturating_add(host[1].dropped);
+        let radio_link = self.radio_link.get();
+        let uart_errors = self.host_uart_errors.get();
         let status =
-            self.pair.borrow().status(now_ms(), host, down, self.radio_link.get(), host_dropped);
+            self.pair.borrow().status(now_ms(), host, down, radio_link, host_dropped, uart_errors);
         self.push_host(&status);
     }
 }
@@ -399,8 +415,8 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     Timer::after(C6_RESET_HOLD).await;
     c6_en.set_high();
 
-    // UART0 is the console. Refused rather than run slightly off, since the C6 is not.
-    let uart = Uart::new(
+    // The C6 link. Refused rather than run slightly off, since the C6 is not.
+    let c6_uart = Uart::new(
         peripherals.UART1,
         UartConfig::default()
             .with_baudrate(BAUD_RATE)
@@ -415,21 +431,34 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     .with_tx(peripherals.GPIO19)
     .with_rx(peripherals.GPIO14)
     .with_rts(peripherals.GPIO18)
-    .with_cts(peripherals.GPIO15);
-    let mut uhci = Uhci::new(uart, peripherals.UHCI0, peripherals.DMA_CH0);
-    uhci.apply_rx_config(&uhci::RxConfig::default().with_chunk_limit(RX_BUF_LEN as u16))
+    .with_cts(peripherals.GPIO15)
+    .into_async();
+    let (rx, tx) = c6_uart.split();
+    let bus = Bus { rx, tx, reader: READER.take(), body: BODY.take(), wire: WIRE.take() };
+
+    // The host link, on the CH343's pins. Exact, as the C6 link is: the P4 divides 4 Mbaud
+    // exactly from its crystal.
+    let host_uart = Uart::new(
+        peripherals.UART0,
+        UartConfig::default()
+            .with_baudrate(HOST_BAUD)
+            .with_baudrate_tolerance(BaudrateTolerance::Exact),
+    )
+    .expect("UART0")
+    .with_tx(peripherals.GPIO37)
+    .with_rx(peripherals.GPIO38);
+    let mut uhci = Uhci::new(host_uart, peripherals.UHCI0, peripherals.DMA_CH0);
+    uhci.apply_rx_config(&uhci::RxConfig::default().with_chunk_limit(host::RX_LEN as u16))
         .expect("UHCI read limit");
     // Despite its name, this config sets when a read ends: at the limit, or on an idle line.
     // `Uhci::new` clears both.
     uhci.apply_tx_config(&uhci::TxConfig::default()).expect("UHCI end of read");
     let (rx, tx) = uhci.into_async().split();
-    let bus = Bus {
+    let host_bus = host::Bus {
         rx,
         tx,
-        rx_bufs: [dma_buf!(DmaRxBuf, RX_BUF_LEN), dma_buf!(DmaRxBuf, RX_BUF_LEN)],
-        tx_buf: dma_buf!(DmaTxBuf, WIRE_MAX),
-        reader: READER.take(),
-        body: BODY.take(),
+        rx_bufs: [dma_buf!(DmaRxBuf, host::RX_LEN), dma_buf!(DmaRxBuf, host::RX_LEN)],
+        tx_buf: dma_buf!(DmaTxBuf, HOST_CHUNK),
     };
 
     let fw_version = ShortStr::try_from(env!("CARGO_PKG_VERSION")).unwrap_or_default();
@@ -444,7 +473,7 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     let bridge = join3(
         run_link(bus, &link, &shared),
         radio_clock(&shared, c6_en),
-        usb::run(peripherals.USB_HS, &shared),
+        host::run(host_bus, &shared),
     );
     #[cfg(feature = "gps")]
     let pins = gps::Pins { i2c: peripherals.I2C0, sda: peripherals.GPIO7, scl: peripherals.GPIO8 };

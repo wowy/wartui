@@ -91,7 +91,7 @@ wartui ota        # update node firmware over the air
 | `crates/wartui-core`                                     | Headless fleet engine, SQLite store, position, WiGLE export                                                   |
 | `crates/wartui-bridge`                                   | Host-side link to the bridge: transport, the host's serial ports, simulator                                   |
 | `crates/wartui-proto`                                    | `no_std` wire formats and parsers, shared with both firmwares                                                 |
-| [`firmware/p4-bridge`](firmware/p4-bridge/README.md)     | The bridge's host half, on an ESP32-P4: USB link and UART to the C6, no protocol knowledge                    |
+| [`firmware/p4-bridge`](firmware/p4-bridge/README.md)     | The bridge's host half, on an ESP32-P4: UARTs to the board's CH343 and its C6, no protocol knowledge          |
 | [`firmware/p4-radio`](firmware/p4-radio/README.md)       | The bridge's radio half, on the board's ESP32-C6: `esp-radio` calls, no protocol knowledge                    |
 | [`firmware/node`](firmware/node/README.md)               | The nodes: sniffs, reports, takes assignments                                                                 |
 | [`tools/espnow-sniffer`](tools/espnow-sniffer/README.md) | Passive Arduino sniffer for bring-up and frame capture                                                        |

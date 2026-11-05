@@ -469,7 +469,7 @@ fn save_outcome(modal: &ConfigModal, snapshot: &Snapshot, settings: &mut Setting
                 None
             },
         },
-        bridge: config::Bridge { remember: Some(modal.remember_bridge), mac: None },
+        bridge: config::Bridge { remember: Some(modal.remember_bridge), mac: None, serial: None },
         // Not on the modal, so kept as the file last had it.
         gps: settings.saved.gps.clone(),
         api_keys: config::ApiKeys { wdgwars: modal.wdgwars_key.trim().to_owned() },
@@ -505,8 +505,9 @@ fn save(settings: &mut Settings, mut written: config::Config) -> Result<PathBuf,
     let Some(path) = settings.config_path.clone() else {
         return Err("; nowhere to save it — use --config".to_owned());
     };
-    // Nothing while remembering is off, so the key drops out beside `remember = false`.
+    // Nothing while remembering is off, so the keys drop out beside `remember = false`.
     written.bridge.mac = settings.bridge_memory.recall();
+    written.bridge.serial = settings.bridge_memory.recall_serial();
     // The live switch, whatever an earlier failed save left in `saved`, so `remember` never
     // contradicts `mac`. An absent key stays absent while on, since absent means on.
     written.bridge.remember = match (settings.bridge_memory.is_enabled(), written.bridge.remember) {
@@ -1284,7 +1285,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let memory = BridgeMemory::none();
         let saved = config::Config {
-            bridge: config::Bridge { remember: Some(false), mac: None },
+            bridge: config::Bridge { remember: Some(false), mac: None, serial: None },
             ..config::Config::default()
         };
         let mut ui = Ui::new(Settings {
@@ -1308,7 +1309,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let memory = BridgeMemory::holding(Some(OTHER_BRIDGE));
         let saved = config::Config {
-            bridge: config::Bridge { remember: Some(true), mac: Some(OTHER_BRIDGE) },
+            bridge: config::Bridge { remember: Some(true), mac: Some(OTHER_BRIDGE), serial: None },
             ..config::Config::default()
         };
         let mut ui = Ui::new(Settings {

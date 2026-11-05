@@ -1,11 +1,11 @@
 //! The messages a [`Kind::Messages`](super::Kind::Messages) packet carries, and how
 //! several share one packet.
 //!
-//! Not frozen. Both firmwares are built from one tree, so these are postcard, like the USB
+//! Not frozen. Both firmwares are built from one tree, so these are postcard, like the host
 //! link, and change whenever the work needs. [`LINK_REVISION`] names the encoding, and the
 //! hello carries it so a P4 never bridges with a C6 that encodes them differently.
 //!
-//! The P4 relays the USB link's own messages whole, so the C6 runs the link's command
+//! The P4 relays the host link's own messages whole, so the C6 runs the link's command
 //! handling and nothing is translated in between. The only additions are
 //! the C6's own status, which the P4 folds into what it reports to the host.
 //!

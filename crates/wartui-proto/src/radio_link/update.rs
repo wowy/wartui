@@ -20,7 +20,7 @@
 //! ignores anything after it, so a body can grow at its end.
 //!
 //! [`Sender`] is the P4's half, a pure state machine so the host tests it. The host drives one
-//! too, to update the P4 itself over USB: each op travels in a
+//! too, to update the P4 itself over the host link: each op travels in a
 //! [`HostToBridge::Update`](crate::link::HostToBridge::Update), and each status in a
 //! [`BridgeToHost::Update`](crate::link::BridgeToHost::Update).
 //!

@@ -51,6 +51,7 @@ fn read_status(at_s: i64, rx_count: u32, dropped_tx: u32, uptime_ms: u32, host: 
         rx_oversize: 0,
         queues: QueueStats::new(),
         radio_link: None,
+        host_uart_errors: 0,
     })
 }
 
@@ -330,6 +331,7 @@ fn analyze_counts_bridge_drops_from_first_row_when_capture_starts_with_drops() {
             oversize: 0,
             queues: vec![],
             radio_link: None,
+            host_uart_errors: 0,
         })
     );
 }
@@ -355,6 +357,7 @@ fn analyze_adds_whole_value_when_bridge_drops_fall() {
             oversize: 0,
             queues: vec![],
             radio_link: None,
+            host_uart_errors: 0,
         })
     );
 }
@@ -520,6 +523,26 @@ fn analyze_reports_radio_link_errors_when_rows_carry_radio_link() {
             radio_uart_errors: 8 * n,
         })
     );
+}
+
+/// A status reply carrying the P4's host UART errors.
+fn host_uart_status(uptime_ms: u32, host_uart_errors: u32) -> Record {
+    let Record::BridgeStatus(seen) = status(0, 0, 0, uptime_ms) else { unreachable!() };
+    Record::BridgeStatus(BridgeStatusSeen { host_uart_errors, ..seen })
+}
+
+#[test]
+fn analyze_sums_host_uart_errors_when_c6_restarts_and_p4_reboots() {
+    // The second row is a C6 restart: the uptime falls, and the P4's count runs on. The third is
+    // a P4 reboot, where the count itself falls and rebases.
+    let (_dir, conn) = capture(vec![
+        host_uart_status(60_000, 3),
+        host_uart_status(1_000, 10),
+        host_uart_status(500, 2),
+        host_uart_status(5_500, 6),
+    ]);
+    let bridge = losses(&conn).unwrap().bridge.unwrap();
+    assert_eq!(bridge.host_uart_errors, 7 + 2 + 4);
 }
 
 #[test]
@@ -1011,6 +1034,7 @@ fn analyze_sums_host_read_from_first_row_when_status_rows_carry_host_frames() {
             oversize: 0,
             queues: vec![],
             radio_link: None,
+            host_uart_errors: 0,
         })
     );
 }

@@ -3,9 +3,10 @@
 //!
 //! The firmware consults [`Pair`] for these decisions so they are testable on the host.
 //!
-//! - **`Ready.mac` is the C6's**, because that is the address nodes see as the bridge. The
-//!   P4 therefore waits [`RADIO_WAIT_MS`] for the C6's first hello before enumerating USB.
-//!   Only if the C6 never answers does it announce its own MAC, with a fault.
+//! - **`Ready.mac` is the C6's**, because that is the address nodes see as the bridge and the
+//!   host finds the bridge by. The P4 therefore waits [`RADIO_WAIT_MS`] for the C6's first hello
+//!   before it announces anything. Only if the C6 never answers does it announce its own MAC,
+//!   with a fault.
 //! - **`Ready.uptime_ms` is the C6's uptime now.** The host detects a bridge restart by
 //!   that value going backwards (`is_a_new_life` in `crates/wartui-bridge/src/serial.rs`).
 //!   A C6 restart under a running P4 loses the peer table and transmit power, so it must
@@ -32,7 +33,7 @@
 //! - **A C6 whose hello carries no digest is not updated**: it cannot take the image, so it needs
 //!   one wired flash.
 //! - **`Ready.image` is the P4's own image digest**, never the C6's: it is the image the host
-//!   updates over USB (`HostToBridge::Update`, which the P4 handles itself), and the bundle
+//!   updates over the host link (`HostToBridge::Update`, which the P4 handles itself), and the bundle
 //!   decides the C6's.
 //! - **A C6 that stops answering polls is a fault.** One hung holding RTS parks the P4's writer,
 //!   while `Status` goes on answering with its last counters and an update stays
@@ -53,7 +54,7 @@ use crate::ota::image::DIGEST_LEN;
 use crate::radio_link::{Hello, LINK_REVISION, RadioStatus};
 use crate::reset::ResetCause;
 
-/// How long the P4 waits for the C6's first hello before enumerating USB with its own MAC.
+/// How long the P4 waits for the C6's first hello before announcing its own MAC.
 pub const RADIO_WAIT_MS: u64 = 2_000;
 
 /// How long the P4 waits for the C6's hello after an update's install, or after resetting
@@ -391,8 +392,8 @@ impl Pair {
         }
     }
 
-    /// The MAC for the USB serial number: `None` until the P4 knows which to use.
-    pub fn usb_serial_mac(&self) -> Option<Mac> {
+    /// The MAC `Ready` names the bridge by: `None` until the P4 knows which to use.
+    pub fn bridge_mac(&self) -> Option<Mac> {
         match &self.state {
             RadioState::Waiting => None,
             RadioState::Absent => Some(self.own_mac),
@@ -415,7 +416,7 @@ impl Pair {
 
     /// The `Ready` to announce, or `None` while the P4 is still waiting for the C6.
     pub fn ready(&self, now_ms: u64) -> Option<BridgeToHost> {
-        let mac = self.usb_serial_mac()?;
+        let mac = self.bridge_mac()?;
         let hello = self.radio_hello();
         let (reset_cause, last_phase) = match hello {
             Some(hello) if self.life_from_radio => (hello.reset_cause, hello.last_phase),
@@ -518,7 +519,8 @@ impl Pair {
     }
 
     /// The `Status` to answer a poll with. `host` and `down` are the P4's own queues;
-    /// `host_dropped` is what its host queue dropped.
+    /// `host_dropped` is what its host queue dropped, and `host_uart_errors` the line errors on
+    /// its host UART.
     pub fn status(
         &self,
         now_ms: u64,
@@ -526,6 +528,7 @@ impl Pair {
         down: QueueStat,
         mut radio_link: RadioLinkStats,
         host_dropped: u32,
+        host_uart_errors: u32,
     ) -> BridgeToHost {
         let mut queues = QueueStats::new();
         let mut radio_up_drops = 0u32;
@@ -555,6 +558,7 @@ impl Pair {
             rx_oversize: counters.map_or(0, |status| status.rx_oversize),
             queues,
             radio_link: Some(radio_link),
+            host_uart_errors,
         }
     }
 }

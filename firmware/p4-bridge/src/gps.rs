@@ -11,11 +11,11 @@
 //! since both ends live in the one task, and their buffers are statics, so no 512-byte
 //! batch is on a stack.
 //!
-//! **The write channel's sender sits in [`Shared`]**, where the USB reader hands it the
+//! **The write channel's sender sits in [`Shared`]**, where the host reader hands it the
 //! host's bytes; [`forward`] owns the batch receiver. Neither is borrowed across an
 //! `.await`.
 //!
-//! **The fault is tracked on every change**, whether or not a host holds DTR to hear it.
+//! **The fault is tracked on every change**, whether or not a host is present to hear it.
 //! `announce` repeats it on a host's `Identify`, so a host attached later still learns the
 //! current state.
 

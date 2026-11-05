@@ -1,4 +1,4 @@
-//! The host side of the link to the USB ESP-NOW bridge.
+//! The host side of the link to the ESP-NOW bridge.
 //!
 //! Everything above this crate talks to a [`LinkHandle`] and never learns
 //! whether the frames came from a real dongle or from [`sim`]. That is what
@@ -100,42 +100,41 @@ pub enum LinkEvent {
 ///
 /// Here rather than in `wartui` because [`TransportError::NoBridgeFound`] says it too, and this
 /// crate sits below that one.
-pub const NO_FIRMWARE_P4: &str = "A P4 with no firmware shows up only as its CH343; see \
+pub const NO_FIRMWARE_P4: &str = "A P4 with no firmware is a CH343 that does not answer; see \
      firmware/p4-bridge/README.md § \"First flash\".";
 
 /// Why the link could not be established or used.
 #[derive(Debug, Error)]
 pub enum TransportError {
-    /// No P4 bridge is attached. A board not listed has no address to name it by.
+    /// No CH343 is attached. A bridge on any other port is reached only by its path.
     #[error(
-        "no bridge found; one `wartui ports` does not list is reached only by its path: \
-         --bridge PATH. {}",
+        "no bridge found: no CH343 is attached, and a bridge on any other port is reached \
+         only by its path: --bridge PATH. {}",
         NO_FIRMWARE_P4
     )]
     NoBridgeFound,
-    /// A bridge was named by its address, and no attached P4 bridge has it.
-    #[error("no attached P4 bridge is {spec}")]
+    /// A bridge was named by its address, and no attached CH343 answered with it.
+    #[error("no attached bridge answered as {spec}")]
     NoSuchBridge {
         /// The address that was asked for.
         spec: String,
     },
-    /// Several P4 bridges are attached and nothing says which of them is the bridge.
+    /// Several CH343s are attached and nothing says which of them is the bridge.
     #[error(
-        "several P4 bridges are attached and none is known to be the bridge ({boards}); \
+        "several CH343s are attached and none is known to be the bridge ({boards}); \
              name one with --bridge"
     )]
     AmbiguousBridge {
-        /// The P4 bridges that were found, by address where they report one.
+        /// The CH343s that were found, by path.
         boards: String,
     },
-    /// A bridge was named by the end of its address, and several P4 bridges end that way.
-    #[error(
-        "several attached P4 bridges end with {spec} ({boards}); name one by more of its address"
-    )]
+    /// A bridge was named by the end of its address, and several bridges answered ending that
+    /// way.
+    #[error("several attached bridges end with {spec} ({boards}); name one by more of its address")]
     AmbiguousName {
         /// The octets that were asked for.
         spec: String,
-        /// The P4 bridges that end with them.
+        /// The bridges that end with them.
         boards: String,
     },
     /// The OS refused the port.

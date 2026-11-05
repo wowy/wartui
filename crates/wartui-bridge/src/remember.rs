@@ -1,10 +1,14 @@
-//! Which board answered the link protocol last time.
+//! Which board answered the link protocol last time, and on which port.
 //!
-//! **Held in memory, kept by the caller.** The transport reads the address to
-//! order its first sweep, writes it on every connection and clears it when the
+//! **Two values: the bridge's address and its CH343's serial number.** The address is the
+//! bridge's identity, which `Ready` carries. The serial number is how the port is found again
+//! without asking every CH343, since the OS reports it before anything is opened.
+//!
+//! **Held in memory, kept by the caller.** The transport reads the serial number to
+//! order its first sweep, writes both on every connection and clears them when the
 //! remembered board goes quiet, but it touches no file. Whoever seeds the handle
-//! decides whether the value outlives the process: `wartui run` keeps it in
-//! `wartui.toml` as `[bridge] mac`, and every other command lets it go at exit.
+//! decides whether the values outlive the process: `wartui run` keeps them in
+//! `wartui.toml` as `[bridge] mac` and `serial`, and every other command lets them go at exit.
 //! `wartui flash-bridge` writes that key too, for the board it flashed, but opens
 //! no link and holds no handle. One owner for the file within a process is what
 //! keeps two threads from racing on whole-file saves.
@@ -22,11 +26,11 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use wartui_proto::mac::Mac;
 
-/// The bridge's address, shared by every clone of one handle.
+/// The bridge's address and port, shared by every clone of one handle.
 #[derive(Debug, Clone)]
 pub struct BridgeMemory {
-    /// The address remembered, if any. Shared by every clone.
-    mac: Arc<Mutex<Option<Mac>>>,
+    /// What is remembered, if anything. Shared by every clone.
+    slot: Arc<Mutex<Slot>>,
     /// Whether the operator wants the address remembered. Shared by every clone.
     enabled: Arc<AtomicBool>,
 }
@@ -41,7 +45,15 @@ impl BridgeMemory {
     /// A handle holding `mac`, with remembering on.
     #[must_use]
     pub fn holding(mac: Option<Mac>) -> Self {
-        Self { mac: Arc::new(Mutex::new(mac)), enabled: Arc::new(AtomicBool::new(true)) }
+        let slot = Slot { mac, serial: None };
+        Self { slot: Arc::new(Mutex::new(slot)), enabled: Arc::new(AtomicBool::new(true)) }
+    }
+
+    /// The same handle, holding `serial` as the remembered bridge's CH343 serial number.
+    #[must_use]
+    pub fn on_port(self, serial: Option<String>) -> Self {
+        self.slot().serial = serial;
+        self
     }
 
     /// A handle holding nothing, with remembering on.
@@ -71,25 +83,47 @@ impl BridgeMemory {
         if !self.is_enabled() {
             return None;
         }
-        *self.slot()
+        self.slot().mac
     }
 
-    /// Hold `mac` in place of whatever was there. Nothing changes while
+    /// The CH343 serial number held. Nothing while remembering is off.
+    #[must_use]
+    pub fn recall_serial(&self) -> Option<String> {
+        if !self.is_enabled() {
+            return None;
+        }
+        self.slot().serial.clone()
+    }
+
+    /// Hold `mac`, with no port, in place of whatever was there. Nothing changes while
     /// remembering is off.
     pub fn remember(&self, mac: Mac) {
+        self.remember_on(mac, None);
+    }
+
+    /// Hold `mac`, answering on the CH343 with `serial`, in place of whatever was there.
+    /// Nothing changes while remembering is off.
+    pub fn remember_on(&self, mac: Mac, serial: Option<String>) {
         if self.is_enabled() {
-            *self.slot() = Some(mac);
+            *self.slot() = Slot { mac: Some(mac), serial };
         }
     }
 
     /// Forget whatever was there, so the next connection sweeps instead.
     pub fn forget(&self) {
-        *self.slot() = None;
+        *self.slot() = Slot::default();
     }
 
-    /// The slot, even after a panic elsewhere: an address is whole or absent, so a
+    /// The slot, even after a panic elsewhere: each value is written whole, so a
     /// poisoned lock holds nothing torn.
-    fn slot(&self) -> std::sync::MutexGuard<'_, Option<Mac>> {
-        self.mac.lock().unwrap_or_else(PoisonError::into_inner)
+    fn slot(&self) -> std::sync::MutexGuard<'_, Slot> {
+        self.slot.lock().unwrap_or_else(PoisonError::into_inner)
     }
+}
+
+/// What one handle and its clones remember.
+#[derive(Debug, Default)]
+struct Slot {
+    mac: Option<Mac>,
+    serial: Option<String>,
 }

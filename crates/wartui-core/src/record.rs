@@ -108,7 +108,7 @@ pub struct BridgeStatusSeen {
     /// Milliseconds since its boot.
     pub uptime_ms: u32,
     /// Frames of ours this host had read off the link when the reply arrived (`Counters::frames`). Between
-    /// two rows, the `rx_count` difference less this one's is USB loss plus `dropped_tx`, give or
+    /// two rows, the `rx_count` difference less this one's is link loss plus `dropped_tx`, give or
     /// take frames still queued in the bridge, which the reply overtakes.
     pub host_frames: u64,
     /// Frames too long to be a node's that it dropped since its boot. Not in `rx_count`.
@@ -118,6 +118,8 @@ pub struct BridgeStatusSeen {
     pub queues: QueueStats,
     /// Its radio link's counters since its boot; `None` off the P4 split bridge.
     pub radio_link: Option<RadioLinkStats>,
+    /// Line errors on the P4's host UART since its boot: bytes from this host lost or corrupted.
+    pub host_uart_errors: u32,
 }
 
 /// The host's own state, sampled every few seconds and at shutdown.

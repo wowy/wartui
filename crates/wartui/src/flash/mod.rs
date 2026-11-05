@@ -1,7 +1,7 @@
 //! Flashing firmware through `espflash`: what `flash-fleet` and `flash-bridge` share, and where
 //! `ota` finds the node's app-only images ([`app`]).
 //!
-//! **A board's identity is cross-checked, never assumed.** Its USB serial number is its MAC
+//! **A node's identity is cross-checked, never assumed.** Its USB serial number is its MAC
 //! (`ports.rs`), and `espflash board-info` reads the MAC out of the chip's eFuses. The two agreeing
 //! is what says the port espflash opened is the board selection judged, rather than a device node
 //! that re-enumeration handed to another board in between. A board whose chip or address does not
@@ -25,7 +25,7 @@
 //! **The remembered bridge is read strictly.** `flash-bridge` decides which board gets firmware
 //! from `[bridge] mac`, so a `wartui.toml` that does not load stops it ([`remembered_bridge`]),
 //! where `status` and the like read it as no bridge remembered. `flash-fleet` never reads the
-//! file: a P4 bridge's USB IDs tell it apart.
+//! file: a P4 bridge's CH343 is told apart by its USB IDs.
 //!
 //! **espflash flashes every node, and resets each one on purpose.** The one port opened here is a
 //! node's after `flash-fleet` flashes it, read to see it boot ([`boot`]), and it is opened without
@@ -107,9 +107,8 @@ const NODE: Firmware = Firmware {
 const NODE_APP: Firmware =
     Firmware { variants: &[(&["esp32c5"], "wartui-node-app-esp32c5.bin")], merged: false, ..NODE };
 
-/// The P4 bridge's app-only image, which `flash-bridge` sends it over USB. Its merged image is
-/// for the first flash by hand over the CH343 (`firmware/p4-bridge/README.md`), so nothing here
-/// fetches it.
+/// The P4 bridge's app-only image, which `flash-bridge` sends it over its link. Its merged image
+/// is for the first flash by hand (`firmware/p4-bridge/README.md`), so nothing here fetches it.
 const P4_BRIDGE_APP: Firmware = Firmware {
     dir: concat!(env!("CARGO_MANIFEST_DIR"), "/../../firmware/p4-bridge"),
     elf: "target/riscv32imafc-unknown-none-elf/release/wartui-p4-bridge-fw",
@@ -228,7 +227,9 @@ enum Skip {
 impl fmt::Display for Skip {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::P4Bridge => f.write_str("a P4 bridge, which `wartui flash-bridge` updates"),
+            Self::P4Bridge => {
+                f.write_str("a CH343, the P4 bridge's port, which `wartui flash-bridge` updates")
+            }
             Self::NotSerialJtag(Some(pid)) => {
                 write!(f, "not native USB Serial/JTAG (product {pid:04x})")
             }

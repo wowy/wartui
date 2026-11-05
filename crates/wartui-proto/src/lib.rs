@@ -9,7 +9,7 @@
 //! firmware runs lives here too, such as [`pending`] and [`ota`],
 //! because a `riscv32imac` binary cannot run a test and this crate can.
 //! [`config`] parses build-time buffer sizes, [`frame_ring`] holds whole frames in a bounded
-//! ring, and [`host_queue`] queues link frames for the P4's USB host port. [`radio_link`] is the
+//! ring, and [`host_queue`] queues link frames for the P4's host link. [`radio_link`] is the
 //! link between a P4 bridge and the C6 that runs its radio, and [`split`] holds the P4's
 //! decisions about that C6.
 
