@@ -60,9 +60,6 @@ use crate::link::{Bus, Link, Radio, Shared, UpPriority, UpQueue, Updates, link_l
 // This creates the app descriptor the esp-idf bootloader expects.
 esp_bootloader_esp_idf::esp_app_desc!();
 
-#[cfg(not(feature = "esp32c6"))]
-compile_error!("build with --features esp32c6: the P4 boards' radio is an ESP32-C6");
-
 /// A DMA buffer of `$len` bytes, with its descriptors, in static internal RAM. Each use has
 /// its own statics.
 macro_rules! dma_buf {

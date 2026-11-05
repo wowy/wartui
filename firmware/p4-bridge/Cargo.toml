@@ -33,7 +33,7 @@ static_cell = "2.1.1"
 # The reset funnel, the reset cause and the phase marker, shared with the other
 # bridges, the updates on flash the node and the C6 use, and the GPS reader for a u-blox
 # receiver on I2C0, GPIO7 (SDA) and GPIO8 (SCL). No `radio`: the P4 has none.
-wartui-firmware = { path = "../common", features = ["esp32p4", "gps", "ota"] }
+wartui-firmware = { path = "../common", features = ["esp32p4", "gps"] }
 wartui-proto = { path = "../../crates/wartui-proto" }
 
 # `build.rs` builds the C6's image, then reads the digest appended to it and hashes it.

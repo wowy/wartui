@@ -8,7 +8,7 @@
 [package]
 name = "wartui-node-fw"
 description = "Wardriving node firmware for wartui. Sniffs, reports, and takes channel assignments."
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/wowy/wartui"
@@ -17,29 +17,15 @@ repository = "https://github.com/wowy/wartui"
 name = "wartui-node-fw"
 path = "src/main.rs"
 
-[features]
-default = ["esp32c5"]
-
-# A feature because it forwards the chip to the `esp-*` crates.
-esp32c5 = [
-  "esp-alloc/esp32c5",
-  "esp-bootloader-esp-idf/esp32c5",
-  "esp-hal/esp32c5",
-  "esp-radio/esp32c5",
-  "esp-rtos/esp32c5",
-  "esp-println/esp32c5",
-  "dep:esp-wifi-sys-esp32c5",
-  "wartui-firmware/esp32c5",
-]
-
 [dependencies]
 # `esp-radio` and `esp-rtos` allocate their task stacks and the Wi-Fi driver's
 # queues through their own copy's `HEAP`, which nothing here fills, so a second
 # copy is a second and empty heap. Held at the version `esp-radio` resolves;
-# `firmware/p4-radio/README.md` § "Dependency versions".
-esp-alloc = "0.11.0"
-esp-bootloader-esp-idf = "0.6.0"
-esp-hal = { version = "1.2.2", features = ["unstable"] }
+# `firmware/p4-radio/README.md` § "Dependency versions". Each `esp-*` crate that takes a chip
+# feature names the only one, the ESP32-C5.
+esp-alloc = { version = "0.11.0", features = ["esp32c5"] }
+esp-bootloader-esp-idf = { version = "0.6.0", features = ["esp32c5"] }
+esp-hal = { version = "1.2.2", features = ["esp32c5", "unstable"] }
 # Diagnostics on the USB serial port. Unlike the bridge, a node has no link
 # protocol sharing that endpoint, so printing to it is free and is the only
 # window into a device with no display. `jtag-serial` rather than `auto`,
@@ -47,6 +33,7 @@ esp-hal = { version = "1.2.2", features = ["unstable"] }
 # line. `critical-section` is left off: nothing here prints from more than one
 # task.
 esp-println = { version = "0.18.0", default-features = false, features = [
+  "esp32c5",
   "jtag-serial",
 ] }
 esp-radio = { version = "1.0.0-beta.1", default-features = false, features = [
@@ -54,20 +41,21 @@ esp-radio = { version = "1.0.0-beta.1", default-features = false, features = [
   "coex",
   "esp-alloc",
   "esp-now",
+  "esp32c5",
   "sniffer",
   "unstable",
   "wifi",
 ] }
-esp-rtos = { version = "0.4.0", features = ["esp-alloc", "esp-radio"] }
+esp-rtos = { version = "0.4.0", features = ["esp-alloc", "esp-radio", "esp32c5"] }
 esp-sync = "0.3.0"
 # IDF's own bindings, for the transmit-power read in `radio::tx_power`, which
 # `esp-radio` does not wrap. Held at the version `esp-radio` links;
 # `firmware/p4-radio/README.md` § "Dependency versions".
-esp-wifi-sys-esp32c5 = { version = "0.3.0", optional = true }
+esp-wifi-sys-esp32c5 = "0.3.0"
 static_cell = "2.1.1"
 # The reset funnel, the reset cause, and the flash half of over-the-air updates, which
 # brings `esp-storage` at the version `firmware/common/Cargo.toml` holds.
-wartui-firmware = { path = "../common", features = ["ota"] }
+wartui-firmware = { path = "../common", features = ["esp32c5"] }
 wartui-proto = { path = "../../crates/wartui-proto" }
 
 [lints.rust]

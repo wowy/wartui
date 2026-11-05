@@ -83,7 +83,7 @@ fn bundle_radio() {
     let target_dir = radio.join("target");
 
     let mut build = Command::new("cargo");
-    build.current_dir(&radio).args(["build", "--release", "--features", "esp32c6", "--locked"]);
+    build.current_dir(&radio).args(["build", "--release", "--locked"]);
     build.arg("--target-dir").arg(&target_dir);
     for (key, _) in env::vars_os() {
         let Some(key) = key.to_str() else { continue };

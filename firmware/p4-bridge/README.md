@@ -19,10 +19,10 @@ rustup target add riscv32imac-unknown-none-elf
 cargo install espflash --locked
 ```
 
-`build.rs` runs `cargo build --release --features esp32c6` in `firmware/p4-radio`, with that
-crate's own toolchain and config, then `espflash save-image` on the result. A build fails if the
-saved image carries no appended SHA-256 digest. `cargo clippy` runs the same build script, so it
-builds the C6's image too.
+`build.rs` runs `cargo build --release` in `firmware/p4-radio`, with that crate's own toolchain
+and config, then `espflash save-image` on the result. A build fails if the saved image carries no
+appended SHA-256 digest. `cargo clippy` runs the same build script, so it builds the C6's image
+too.
 
 ## Boards
 

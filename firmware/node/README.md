@@ -111,8 +111,8 @@ To flash every attached ESP32-C5 at once, and never the bridge, run `wartui flas
 host. [`crates/wartui/README.md`](../../crates/wartui/README.md) § "Flashing the fleet" has how it
 picks boards.
 
-`esp32c5` is a default feature because it forwards the chip to the `esp-*` crates.
-The C5 is dual band and gets `BandMode::Auto`. It is RISC-V and builds on stable.
+Each `esp-*` dependency that takes a chip feature names the C5, the only chip. The C5 is dual
+band and gets `BandMode::Auto`. It is RISC-V and builds on stable.
 
 Diagnostics go out over USB serial-JTAG. The cargo runner is
 `espflash flash --monitor --partition-table partitions.csv --erase-parts otadata` with no `--chip`,

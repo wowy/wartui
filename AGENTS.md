@@ -66,7 +66,7 @@ cargo clippy --release
 
 cd firmware/p4-radio                          # the C6 half of the P4 split bridge
 cargo fmt --all -- --check
-cargo clippy --release --features esp32c6
+cargo clippy --release
 
 cd firmware/p4-bridge                         # the P4 half, own target
 cargo fmt --all -- --check
@@ -74,9 +74,9 @@ cargo clippy --release
 
 cd firmware/common                            # a firmware's clippy does not lint it
 cargo fmt --all -- --check                    # then each firmware's combination:
-cargo clippy --release --features esp32c5,ota       # node
-cargo clippy --release --features esp32c6,ota,radio # P4 bridge's radio
-cargo clippy --release --features esp32p4,gps,ota --target riscv32imafc-unknown-none-elf  # P4 bridge
+cargo clippy --release --features esp32c5         # node
+cargo clippy --release --features esp32c6,radio   # P4 bridge's radio
+cargo clippy --release --features esp32p4,gps --target riscv32imafc-unknown-none-elf  # P4 bridge
 ```
 
 CI mirrors the workspace split: host crates on every push and PR; each firmware only
@@ -123,9 +123,9 @@ own.
   `esp-hal`, so it cannot live in `wartui-proto`: the reset funnel `reboot()` and `reset_cause()`,
   the bridge's reset-surviving phase marker (`phase`), the bridge's ESP-NOW half behind the `radio`
   feature (`radio`), the P4's u-blox I2C GPS reader behind the `gps` feature (`gps`), the supply and die readings a node's heartbeat carries (`health`), and
-  updates on flash, the slot, the switch and the trial, behind the `ota` feature (`ota`).
-  A path dependency of each, forwarding each firmware's chip feature, and its own workspace so
-  its own clippy lints it; a firmware's clippy compiles it without linting it.
+  updates on flash, the slot, the switch and the trial (`ota`).
+  Each firmware depends on it by path and selects its chip feature in that dependency. It is its
+  own workspace so its own clippy lints it; a firmware's clippy compiles it without linting it.
 
 ### The engine/runtime split is load-bearing
 

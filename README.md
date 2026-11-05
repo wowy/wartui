@@ -196,7 +196,7 @@ cargo test -p wartui-core --test engine                     # one test binary
 cargo test -p wartui-core --test engine engine_ignores_     # tests by name prefix
 
 cd firmware/node      && cargo clippy --release
-cd firmware/p4-radio  && cargo clippy --release --features esp32c6
+cd firmware/p4-radio  && cargo clippy --release
 cd firmware/p4-bridge && cargo clippy --release
 ```
 

@@ -58,7 +58,7 @@ jobs:
       - name: One copy of each esp-radio-pinned crate
         run: |
           pushd firmware/p4-radio
-          resolved=$(cargo tree --locked --features esp32c6 -e normal \
+          resolved=$(cargo tree --locked -e normal \
             --prefix none --format '{p}' | awk '{print $1, $2}' | sort -u)
           for c in esp-alloc esp-hal esp-radio esp-rtos esp-storage esp-sync esp-wifi-sys-esp32c6; do
             n=$(printf '%s\n' "$resolved" | grep -c "^$c " || true)
@@ -73,11 +73,11 @@ jobs:
       - name: Build
         run: |
           pushd firmware/p4-radio
-          cargo build --release --features esp32c6 --locked --verbose
+          cargo build --release --locked --verbose
           popd
 
       - name: Clippy
         run: |
           pushd firmware/p4-radio
-          cargo clippy --release --features esp32c6 --locked -- -D warnings
+          cargo clippy --release --locked -- -D warnings
           popd
