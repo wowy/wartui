@@ -521,15 +521,15 @@ fn bridge_status(queues: &[QueueStat], spi: Option<SpiStats>) -> Record {
 }
 
 const SPI: SpiStats = SpiStats {
-    transfers: 4_000_000_001,
+    packets: 4_000_000_001,
     crc_fail: 1,
     bad_magic: 2,
     seq_gap: 3,
-    ready_timeouts: 4,
-    ready_recovered: 5,
-    radio_crc_fail: 6,
-    radio_bad_magic: 7,
-    radio_seq_gap: 8,
+    uart_errors: 4,
+    radio_crc_fail: 5,
+    radio_bad_magic: 6,
+    radio_seq_gap: 7,
+    radio_uart_errors: 8,
 };
 
 const QUEUES: [QueueStat; 2] = [
@@ -560,9 +560,9 @@ fn store_round_trips_every_column_when_bridge_status_written() {
 
     let spi: Vec<i64> = conn
         .query_row(
-            "SELECT spi_transfers, spi_crc_fail, spi_bad_magic, spi_seq_gap, spi_ready_timeouts,
-                    spi_ready_recovered, spi_radio_crc_fail, spi_radio_bad_magic,
-                    spi_radio_seq_gap
+            "SELECT spi_packets, spi_crc_fail, spi_bad_magic, spi_seq_gap, spi_uart_errors,
+                    spi_radio_crc_fail, spi_radio_bad_magic, spi_radio_seq_gap,
+                    spi_radio_uart_errors
              FROM bridge_status",
             [],
             |r| (0..9).map(|i| r.get(i)).collect(),
@@ -605,10 +605,10 @@ fn store_leaves_spi_columns_null_when_bridge_has_no_spi_link() {
 
     let nulls: i64 = conn
         .query_row(
-            "SELECT (spi_transfers IS NULL) + (spi_crc_fail IS NULL) + (spi_bad_magic IS NULL)
-                  + (spi_seq_gap IS NULL) + (spi_ready_timeouts IS NULL)
-                  + (spi_ready_recovered IS NULL) + (spi_radio_crc_fail IS NULL)
-                  + (spi_radio_bad_magic IS NULL) + (spi_radio_seq_gap IS NULL)
+            "SELECT (spi_packets IS NULL) + (spi_crc_fail IS NULL) + (spi_bad_magic IS NULL)
+                  + (spi_seq_gap IS NULL) + (spi_uart_errors IS NULL)
+                  + (spi_radio_crc_fail IS NULL) + (spi_radio_bad_magic IS NULL)
+                  + (spi_radio_seq_gap IS NULL) + (spi_radio_uart_errors IS NULL)
              FROM bridge_status",
             [],
             |r| r.get(0),

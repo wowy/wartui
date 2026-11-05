@@ -130,23 +130,22 @@ fn radio_line(radio: &RadioInfo) -> String {
     )
 }
 
-/// One line per reported queue, then the SPI link's counters when it has any.
+/// One line per reported queue, then the UART link's counters when it has any.
 fn diagnostic_lines(queues: &QueueStats, spi: Option<&SpiStats>) -> Vec<String> {
     let mut lines: Vec<String> = queues.iter().map(queue_line).collect();
     if let Some(s) = spi {
         lines.push(format!(
-            "  spi  transfers {}  crc_fail {}  bad_magic {}  seq_gap {}  \
-             ready_timeouts {}  ready_recovered {}  \
-             radio_crc_fail {}  radio_bad_magic {}  radio_seq_gap {}",
-            s.transfers,
+            "  spi  packets {}  crc_fail {}  bad_magic {}  seq_gap {}  uart_errors {}  \
+             radio_crc_fail {}  radio_bad_magic {}  radio_seq_gap {}  radio_uart_errors {}",
+            s.packets,
             s.crc_fail,
             s.bad_magic,
             s.seq_gap,
-            s.ready_timeouts,
-            s.ready_recovered,
+            s.uart_errors,
             s.radio_crc_fail,
             s.radio_bad_magic,
             s.radio_seq_gap,
+            s.radio_uart_errors,
         ));
     }
     lines

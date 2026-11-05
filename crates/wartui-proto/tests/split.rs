@@ -202,17 +202,18 @@ fn pair_status_sums_host_and_radio_drops() {
         crc_fail: 11,
         bad_magic: 12,
         seq_gap: 13,
+        uart_errors: 14,
     });
     let spi = SpiStats {
-        transfers: 100,
+        packets: 100,
         crc_fail: 1,
         bad_magic: 2,
         seq_gap: 3,
-        ready_timeouts: 4,
-        ready_recovered: 5,
+        uart_errors: 4,
         radio_crc_fail: 0,
         radio_bad_magic: 0,
         radio_seq_gap: 0,
+        radio_uart_errors: 0,
     };
     let host = [stat(QueueId::HostPriority, 0), stat(QueueId::HostBulk, 6)];
     let down = stat(QueueId::RadioDown, 1);
@@ -242,8 +243,9 @@ fn pair_status_sums_host_and_radio_drops() {
                     QueueId::HostBulk
                 ]
             );
-            assert_eq!((spi.crc_fail, spi.transfers), (1, 100));
+            assert_eq!((spi.crc_fail, spi.packets), (1, 100));
             assert_eq!((spi.radio_crc_fail, spi.radio_bad_magic, spi.radio_seq_gap), (11, 12, 13));
+            assert_eq!((spi.uart_errors, spi.radio_uart_errors), (4, 14));
         }
         other => panic!("not a Status: {other:?}"),
     }
@@ -257,7 +259,7 @@ fn pair_announces_new_life_when_first_hello_arrives() {
 
 #[test]
 fn pair_ignores_repeated_hellos_when_seq_rises() {
-    // A real C6's first hello lands about 72 ms into its life, then repeats per transfer.
+    // A real C6's first hello lands about 72 ms into its life, then repeats until the P4 answers.
     let mut pair = pair();
     assert_eq!(pair.on_hello(hello(72), 0, 1_000), PairEvent::NewLife);
     pair.note_radio_status(radio_status());
@@ -279,11 +281,30 @@ fn pair_ignores_repeated_hellos_when_seq_rises() {
 #[test]
 fn pair_announces_new_life_when_hello_seq_restarts_with_same_uptime() {
     // The restarted C6 booted to the same first hello at the same uptime; only the seq,
-    // back to 0 after transfers up to 40, tells the lives apart.
+    // back to 0 after packets up to 40, tells the lives apart.
     let mut pair = pair();
     assert_eq!(pair.on_hello(hello(72), 0, 1_000), PairEvent::NewLife);
     pair.note_seq(40);
     assert_eq!(pair.on_hello(hello(72), 0, 1_040), PairEvent::NewLife);
+}
+
+#[test]
+fn pair_announces_new_life_when_hello_seq_is_zero_after_last_seq_of_zero() {
+    // A C6 that sent only its first hello before restarting: the seqs are equal, and a sender
+    // never sends a packet twice, so this is a restart.
+    let mut pair = pair();
+    assert_eq!(pair.on_hello(hello(72), 0, 1_000), PairEvent::NewLife);
+    assert_eq!(pair.on_hello(hello(72), 0, 1_100), PairEvent::NewLife);
+}
+
+#[test]
+fn pair_keeps_life_when_hello_seq_is_past_last_seq() {
+    let mut pair = pair();
+    assert_eq!(pair.on_hello(hello(72), 0, 1_000), PairEvent::NewLife);
+    assert_eq!(pair.on_hello(hello(172), 1, 1_100), PairEvent::None);
+    pair.note_seq(5);
+    assert_eq!(pair.on_hello(hello(272), 6, 1_200), PairEvent::None);
+    assert_eq!(pair.on_hello(hello(72), 6, 1_300), PairEvent::NewLife);
 }
 
 #[test]
@@ -391,20 +412,21 @@ fn radio_status() -> RadioStatus {
         crc_fail: 0,
         bad_magic: 0,
         seq_gap: 0,
+        uart_errors: 0,
     }
 }
 
 fn spi_zero() -> SpiStats {
     SpiStats {
-        transfers: 0,
+        packets: 0,
         crc_fail: 0,
         bad_magic: 0,
         seq_gap: 0,
-        ready_timeouts: 0,
-        ready_recovered: 0,
+        uart_errors: 0,
         radio_crc_fail: 0,
         radio_bad_magic: 0,
         radio_seq_gap: 0,
+        radio_uart_errors: 0,
     }
 }
 

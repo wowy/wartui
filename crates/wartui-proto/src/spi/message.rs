@@ -1,5 +1,5 @@
-//! The messages a [`Kind::Messages`](super::Kind::Messages) transfer carries, and how
-//! several share one transfer.
+//! The messages a [`Kind::Messages`](super::Kind::Messages) packet carries, and how
+//! several share one packet.
 //!
 //! Not frozen. Both firmwares are built from one tree, so these are postcard, like the USB
 //! link, and change whenever the work needs. [`LINK_REVISION`] names the encoding, and the
@@ -10,9 +10,9 @@
 //! the C6's own status, which the P4 folds into what it reports to the host.
 //!
 //! A payload is records of `[len: u16 LE][postcard bytes]`, ending at a zero `len` or the
-//! payload's end. A record never spans transfers: the largest message fits one, so the
+//! payload's end. A record never spans packets: the largest message fits one, so the
 //! packer refuses rather than splits. A queued record that does not fit is [`Held`] and
-//! leads the next transfer.
+//! leads the next packet.
 
 use heapless::Vec;
 use serde::{Deserialize, Serialize};
@@ -24,7 +24,7 @@ use crate::link::{BridgeToHost, HostToBridge, QueueStat};
 ///
 /// Not frozen. Bump it whenever this module's types or the link enums they carry change
 /// shape; `spi_link_revision_golden_bytes` in `tests/spi.rs` fails until the bump.
-pub const LINK_REVISION: u16 = 3;
+pub const LINK_REVISION: u16 = 4;
 
 /// P4 to C6.
 // Unboxed for the reason `HostToBridge` gives.
@@ -73,15 +73,17 @@ pub struct RadioStatus {
     pub uptime_ms: u32,
     /// The C6's bounded queues.
     pub queues: Vec<QueueStat, 4>,
-    /// Transfers from the P4 that failed their CRC.
+    /// Packets from the P4 that failed their CRC.
     pub crc_fail: u32,
-    /// Transfers from the P4 without [`super::MAGIC`].
+    /// Packets from the P4 without [`super::MAGIC`].
     pub bad_magic: u32,
     /// Breaks in the P4's seq.
     pub seq_gap: u32,
+    /// Line errors on this end's UART: framing, parity, glitch or FIFO overflow.
+    pub uart_errors: u32,
 }
 
-/// Packs encoded records into a transfer's payload.
+/// Packs encoded records into a packet's payload.
 #[derive(Debug)]
 pub struct Packer<'a> {
     payload: &'a mut [u8],
@@ -107,7 +109,7 @@ impl<'a> Packer<'a> {
         true
     }
 
-    /// Bytes packed so far, the `len` to seal the transfer with.
+    /// Bytes packed so far, the `len` to seal the packet with.
     #[must_use]
     pub fn len(&self) -> usize {
         self.len
@@ -121,13 +123,13 @@ impl<'a> Packer<'a> {
 }
 
 /// The longest record: a payload less its record's length prefix. A queue that holds none
-/// longer always fits its record into an empty transfer.
+/// longer always fits its record into an empty packet.
 pub const RECORD_MAX: usize = super::PAYLOAD_MAX - PREFIX;
 
 /// Bytes of length prefix ahead of each record.
 const PREFIX: usize = 2;
 
-/// A record taken from a queue that did not fit the last transfer, sent first in the next.
+/// A record taken from a queue that did not fit the last packet, sent first in the next.
 #[derive(Debug)]
 pub struct Held {
     buf: [u8; RECORD_MAX],
@@ -142,7 +144,7 @@ impl Held {
     }
 
     /// Packs the held record, then records from `next`, until one does not fit — it is then
-    /// held for the next transfer — or `next` has none.
+    /// held for the next packet — or `next` has none.
     ///
     /// `next` copies one whole record into the buffer it is given and returns its length,
     /// or 0 when nothing is queued. `next` must read from a queue holding no record longer

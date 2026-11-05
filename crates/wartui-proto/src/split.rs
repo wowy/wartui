@@ -11,10 +11,10 @@
 //!   A C6 restart under a running P4 loses the peer table and transmit power, so it must
 //!   look like a bridge restart; a hello arriving after the link was up is
 //!   [`PairEvent::NewLife`], and the firmware answers with a fresh `Ready`.
-//! - **The C6 repeats its hello** in every transfer until it hears the P4's, so [`Pair`]
-//!   tells a new life from a repeat by the transfer seq; see [`Pair::on_hello`]. A
-//!   restarted C6 boots through the same code to the same first hello, often within a
-//!   millisecond of the last life's uptime, so equal uptimes prove nothing.
+//! - **The C6 repeats its hello** until it hears the P4's, so [`Pair`] tells a new life from a
+//!   repeat by the packet seq; see [`Pair::on_hello`]. A restarted C6 boots through the same
+//!   code to the same first hello, often within a millisecond of the last life's uptime, so
+//!   equal uptimes prove nothing.
 //! - **`Ready.reset_cause` is the C6's after a C6 restart**, since that restart is the
 //!   bridge restart the host sees. The P4's own boot reports the P4's cause.
 //! - **A link revision mismatch does not bridge.** The hello is frozen, so the P4 can
@@ -108,7 +108,7 @@ pub struct Pair {
     state: RadioState,
     /// The P4 clock when the current hello arrived.
     hello_at_ms: u64,
-    /// The seq of the last C6 transfer, of any kind.
+    /// The seq of the last C6 packet, of any kind.
     c6_seq: u32,
     /// The current life began with a C6 restart under a running P4.
     life_from_radio: bool,
@@ -176,23 +176,19 @@ impl Pair {
         self
     }
 
-    /// The C6 sent a hello in its transfer `seq`, at P4 time `now_ms`.
+    /// The C6 sent a hello in its packet `seq`, at P4 time `now_ms`.
     ///
-    /// The C6 repeats its hello in every transfer until it has heard the P4's, so most
-    /// calls are the same life again. A hello is a [`PairEvent::NewLife`] when any of these
-    /// holds:
+    /// The C6 repeats its hello until it has heard the P4's, so a hello may be the same life
+    /// again. A hello is a [`PairEvent::NewLife`] when any of these holds:
     ///
     /// - it is the first, or its MAC or link revision changed;
-    /// - its seq is lower than the last C6 transfer's ([`Pair::note_seq`]). The C6 counts
-    ///   transfers from 0 at every boot and only upwards within a life, so a lower seq is a
-    ///   restart, wherever in the last life it came.
-    ///
-    /// The seq is a `u32` and wraps after about 31 days at 1,600 transfers a second. A wrap
-    /// comes mid-life, on a transfer that is not a hello, since the C6 sends hellos only
-    /// until the P4 answers. So a hello's seq is lower than the last only after a restart.
+    /// - its seq is not past the last C6 packet's ([`Pair::note_seq`]). The C6 counts packets
+    ///   from 0 at every boot, sends each once, and counts only upwards within a life, so an
+    ///   equal or lower seq is a restart, wherever in the last life it came.
     ///
     /// Anything else leaves the anchor and counters alone, so `Ready.uptime_ms` never steps
-    /// back.
+    /// back. That misses one case: a C6 that restarts having sent only seq 0, and whose next
+    /// life's seq 0 is lost, reads as the same life.
     ///
     /// A new life's state follows from its image digest; see the module documentation.
     pub fn on_hello(&mut self, hello: Hello, seq: u32, now_ms: u64) -> PairEvent {
@@ -202,8 +198,7 @@ impl Pair {
             | RadioState::Updating(old)
             | RadioState::Stale(old)
             | RadioState::Mismatch(old) => {
-                let same =
-                    old.mac == hello.mac && old.link_rev == hello.link_rev && seq >= last_seq;
+                let same = old.mac == hello.mac && old.link_rev == hello.link_rev && seq > last_seq;
                 if same {
                     return PairEvent::None;
                 }
@@ -267,7 +262,7 @@ impl Pair {
         }
     }
 
-    /// The C6 sent a transfer other than a hello, numbered `seq`.
+    /// The C6 sent a packet other than a hello, numbered `seq`.
     pub fn note_seq(&mut self, seq: u32) {
         self.c6_seq = seq;
     }
@@ -480,6 +475,7 @@ impl Pair {
             spi.radio_crc_fail = status.crc_fail;
             spi.radio_bad_magic = status.bad_magic;
             spi.radio_seq_gap = status.seq_gap;
+            spi.radio_uart_errors = status.uart_errors;
         }
         // The C6's queues leave room for these: 4 + 3 fits in 8.
         let _ = queues.push(down);

@@ -833,14 +833,14 @@ def bridge_queues(db, lives):
                  "since the bridge booted: near full, so its WARTUI_* size is the lever", sql)
 
 
-SPI_COUNTERS = ("transfers", "crc_fail", "bad_magic", "seq_gap", "ready_timeouts",
-                "ready_recovered", "radio_crc_fail", "radio_bad_magic", "radio_seq_gap")
+SPI_COUNTERS = ("packets", "crc_fail", "bad_magic", "seq_gap", "uart_errors",
+                "radio_crc_fail", "radio_bad_magic", "radio_seq_gap", "radio_uart_errors")
 
 
 def bridge_spi(db, lives):
-    """The P4 split bridge's SPI link counters over the capture, rebased across restarts."""
+    """The P4 split bridge's UART link counters over the capture, rebased across restarts."""
     cols = ", ".join(f"spi_{c}" for c in SPI_COUNTERS)
-    rows = db.q(f"SELECT id, {cols} FROM bridge_status WHERE spi_transfers IS NOT NULL "
+    rows = db.q(f"SELECT id, {cols} FROM bridge_status WHERE spi_packets IS NOT NULL "
                 "ORDER BY id")
     if not rows:
         return
@@ -852,18 +852,11 @@ def bridge_spi(db, lives):
     print("  spi " + "  ".join(f"{c} {sums[c]}" for c in SPI_COUNTERS))
     sql = f"SELECT id, rx_at, uptime_ms, {cols} FROM bridge_status ORDER BY id"
     errors = {c: sums[c] for c in SPI_COUNTERS
-              if c.endswith(("crc_fail", "bad_magic", "seq_gap")) and sums[c]}
+              if c != "packets" and sums[c]}
     if errors:
         flag("WARN", "bridge",
-             "SPI link errors between P4 and C6: "
+             "UART link errors between P4 and C6: "
              + ", ".join(f"{c} {n}" for c, n in errors.items()), sql)
-    unrecovered = sums["ready_timeouts"] - sums["ready_recovered"]
-    if unrecovered > 0:
-        flag("WARN", "bridge",
-             f"{unrecovered} SPI READY timeout(s) the link did not recover from", sql)
-    if sums["ready_recovered"]:
-        flag("INFO", "bridge",
-             f"{sums['ready_recovered']} SPI READY timeout(s) the link recovered from", sql)
 
 
 def host(db, ctx):

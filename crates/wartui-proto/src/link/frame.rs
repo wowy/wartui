@@ -30,7 +30,7 @@ const _: () = assert!(
     // then the `Option` tag and nine `u32`s. Varint integers never exceed their fixed width
     // by more than a byte each.
     1 + 1 + 4 * 5 + 1 + 8 * (1 + 3 * 5) + 1 + 9 * 5 < MAX_BODY,
-    "a Status with every queue and SPI stats must fit one frame"
+    "a Status with every queue and link stats must fit one frame"
 );
 const _: () = assert!(
     // Two `ShortStr`s behind their lengths, two MACs, the bridge's and the radio's, and the
@@ -188,7 +188,7 @@ fn encode_body<T: Serialize>(msg: &T, out: &mut [u8]) -> Result<usize, LinkError
 ///
 /// It holds positions and never the body, which the caller passes on every call.
 #[derive(Debug)]
-struct CobsStream {
+pub(crate) struct CobsStream {
     /// The next body byte to read.
     at: usize,
     step: CobsStep,
@@ -212,7 +212,7 @@ const COBS_RUN: usize = 254;
 
 impl CobsStream {
     /// A stream at the start of a body.
-    const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self { at: 0, step: CobsStep::Code }
     }
 
@@ -221,7 +221,7 @@ impl CobsStream {
     /// writes nothing.
     ///
     /// `body` must be the same bytes on every call, and `out` must not be empty.
-    fn fill(&mut self, body: &[u8], out: &mut [u8]) -> usize {
+    pub(crate) fn fill(&mut self, body: &[u8], out: &mut [u8]) -> usize {
         debug_assert!(!out.is_empty(), "an empty `out` makes no progress");
         let mut n = 0;
         while n < out.len() {
@@ -270,7 +270,7 @@ impl CobsStream {
     }
 
     /// Whether the terminator has been written.
-    const fn is_done(&self) -> bool {
+    pub(crate) const fn is_done(&self) -> bool {
         matches!(self.step, CobsStep::Done)
     }
 }
@@ -328,6 +328,13 @@ impl<const N: usize> FrameAccumulator<N> {
     pub const fn reset(&mut self) {
         self.len = 0;
         self.overflowed = false;
+    }
+
+    /// Whether the frame being read has already overrun the buffer, so its terminator will
+    /// yield nothing.
+    #[must_use]
+    pub const fn overflowed(&self) -> bool {
+        self.overflowed
     }
 
     /// Feed one byte.

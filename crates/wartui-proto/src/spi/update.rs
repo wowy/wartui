@@ -1,4 +1,4 @@
-//! The payload of a [`Kind::Update`](super::Kind::Update) transfer, and the P4's side of an
+//! The payload of a [`Kind::Update`](super::Kind::Update) packet, and the P4's side of an
 //! update.
 //!
 //! **Frozen with the rest of the core**, so any P4 build can update any C6 build that takes
@@ -25,10 +25,13 @@
 //! [`BridgeToHost::Update`](crate::link::BridgeToHost::Update).
 //!
 //! - **Stop-and-wait per sector.** It sends a sector's chunks, then nothing until the status
-//!   for that sector arrives. The C6's flash work holds its link loop, so a chunk sent during
-//!   a flush waits behind it anyway, and the window keeps the C6 from falling behind.
+//!   for that sector arrives. The C6's flash work holds its link, so a chunk sent during a
+//!   flush waits behind it anyway, and the window keeps the C6 from falling behind.
+//! - **It sends only when polled.** The P4 polls [`Sender::next`] until it answers `None`, then
+//!   again on each status and on a timer ([`super::SENDER_POLL_MS`]), which is what its silence
+//!   and `Install` deadlines run on.
 //! - **The status's `next_offset` is where it resumes**, ahead or behind, so a chunk lost to
-//!   a bad CRC costs one rewind. Statuses trail the ops by a transfer or two, so the chunks
+//!   a bad CRC costs one rewind. Statuses trail the ops by a packet or two, so the chunks
 //!   already in flight past a loss draw statuses naming the same offset. The sender ignores
 //!   those after rewinding to it; resending for each would send every chunk after it twice.
 //! - **Silence re-sends the last op that wanted an answer**, every [`REPLY_WAIT_MS`], and gives
@@ -52,7 +55,7 @@ use crate::ota::{Receiver, SECTOR, SectorSink};
 /// How long the [`Sender`] waits for a status before sending again.
 ///
 /// A sector flush on the C6 erases and writes 4 KB, tens of milliseconds, and the status
-/// trails it by two transfers.
+/// follows it in the next packet up.
 pub const REPLY_WAIT_MS: u64 = 500;
 
 /// Sends of one op without an answer before the [`Sender`] gives up.
@@ -147,7 +150,7 @@ impl Op<'_> {
 }
 
 impl<'a> Op<'a> {
-    /// Reads an op from a transfer's payload.
+    /// Reads an op from a packet's payload.
     ///
     /// `None` for an op this build does not know, a payload shorter than its op, or a chunk
     /// longer than [`OTA_CHUNK`].

@@ -1,67 +1,83 @@
-//! The P4's end of the SPI link to the C6: what each transfer carries down, and what the
+//! The P4's end of the UART link to the C6: what each packet carries down, and what the
 //! P4 does with what comes up.
 //!
-//! The P4 is master and clocks one transfer per READY edge; `wartui_proto::spi` has the
-//! framing and the handshake. The C6 holds READY low for only a few microseconds between
-//! transfers: it drops READY when a transfer completes, re-arms at once and raises it
-//! again. So the wait for the next edge is armed before the current transfer starts, as
-//! the spike's was. `join` polls the edge wait first, and the transfer's completion, the
-//! received buffer and the next transfer's preparation all happen while that wait is
-//! listening. An edge that comes meanwhile is latched rather than missed. A wait that
-//! times out with READY high anyway is an armed C6 whose edge was missed, counted in
-//! `ready_recovered`, and the transfer starts. A wait before the C6 first arms is not
-//! counted: the C6 is still booting, not missing an edge.
+//! `wartui_proto::spi` has the framing. The link is two futures, and nothing ticks: the reader
+//! wakes when a DMA read ends, and the writer when [`Shared`]'s `wake_link` says there may be
+//! something to send. The writer loops until it has nothing left before it waits, so a record
+//! left held or queued never waits for a new signal. They share [`Link`] through a `RefCell`,
+//! with nothing borrowed across an `.await`.
 //!
-//! The P4 sends its hello while the C6 is sending its own, and stops once the C6 sends
-//! anything else. The C6 sends its hello until it hears the P4's, so this covers a C6
-//! that restarts under a running P4 as well as the first exchange. The pair hears the seq of
-//! every C6 transfer, since a hello whose seq falls below the last is a restart.
+//! **A read ends at `RX_BUF_LEN` bytes or when the line goes idle.** The next read is armed
+//! before this one's bytes are looked at, which is why there are two buffers: DMA keeps
+//! landing while the P4 works, and only the moment between two reads leans on the 128-byte
+//! FIFO, with RTS behind it. A packet may span two reads, and [`PacketReader`] absorbs that.
+//!
+//! **A write held by CTS waits without blocking**, so USB, the radio clock and the GPS reader
+//! run on while the C6 is in reset or busy in its flash. While a write is held the sender's
+//! clock stops too, so a C6 that hangs mid-update holding RTS stays `Updating` until it next
+//! answers.
+//!
+//! The P4 answers each hello from the C6 with one of its own, which covers a C6 that restarts
+//! under a running P4 as well as the first exchange. The pair hears the seq of every C6
+//! packet, since a hello whose seq is not past the last is a restart.
 //!
 //! Records flow only while the pair bridges (`Pair::bridges`): a C6 that encodes them
-//! differently is sent nothing but `Idle`, and its records are not read. A C6 updating on
-//! this P4's revision has its records read too (`Pair::reads_records`), so its lines about
-//! the update reach the host. Only its lines and status are relayed then; the frames it
-//! received meanwhile are dropped.
+//! differently is sent none, and its records are not read. A C6 updating on this P4's revision
+//! has its records read too (`Pair::reads_records`), so its lines about the update reach the
+//! host. Only its lines and status are relayed then; the frames it received meanwhile are
+//! dropped.
 //!
-//! While the pair is `Updating`, each transfer carries the next op from a
-//! [`Sender`] of the bundled image ([`crate::radio`]), and the C6's statuses come back as
-//! [`Kind::Update`] transfers. The sender's progress goes to the host as the pair's fault,
-//! every tenth of the image and at 100%, then once more when the C6 is told to install. A
-//! sender that fails leaves the pair `Stale` or `Mismatch`; one that installs leaves the pair
-//! waiting for the C6's next hello.
+//! While the pair is `Updating`, the writer sends the next op from a [`Sender`] of the bundled
+//! image ([`crate::radio`]), polling it on each status from the C6, which come back as
+//! [`Kind::Update`] packets, and every [`SENDER_POLL_MS`]. The sender's progress goes to the
+//! host as the pair's fault, every tenth of the image and at 100%, then once more when the C6
+//! is told to install. A sender that fails leaves the pair `Stale` or `Mismatch`; one that
+//! installs leaves the pair waiting for the C6's next hello.
 
+use core::cell::RefCell;
 use core::fmt::Write;
 
 use embassy_futures::join::join;
-use embassy_time::{Duration, Instant, with_timeout};
+use embassy_futures::select::select;
+use embassy_time::{Duration, Instant, Timer};
 use esp_hal::Async;
 use esp_hal::dma::{DmaRxBuf, DmaTxBuf};
-use esp_hal::gpio::Input;
-use esp_hal::spi::master::SpiDma;
+use esp_hal::uart::uhci::{UhciRx, UhciTx};
 use wartui_firmware::phase::mark;
 use wartui_proto::link::{BridgeToHost, Chip, LogStr, LoopPhase, ShortStr};
 use wartui_proto::mac::Mac;
 use wartui_proto::reset::ResetCause;
 use wartui_proto::spi::update::{Failure, Op, Sender, Stage};
 use wartui_proto::spi::{
-    HEADER_LEN, Held, Hello, Kind, LINK_REVISION, PAYLOAD_MAX, Packer, SeqCheck, SeqNote,
-    TRANSFER_LEN, Up, VerifyError, decode_up, records, seal, verify,
+    BODY_MAX, HEADER_LEN, Held, Hello, Kind, LINK_REVISION, PAYLOAD_MAX, Packer, Packet,
+    PacketReader, SENDER_POLL_MS, SeqCheck, SeqNote, Up, VerifyError, decode_up, encode_packet,
+    records, seal,
 };
 use wartui_proto::split::{PairEvent, RadioState};
 
 use crate::Shared;
 use crate::radio::{RADIO_DIGEST, RADIO_IMAGE, RADIO_SHA256};
 
-/// How long one wait for READY lasts before checking whether its edge was missed.
-const READY_TIMEOUT: Duration = Duration::from_millis(100);
+/// How long a write waits before `wait_for_done`, so the DMA has put bytes in the TX FIFO.
+///
+/// `wait_for_done` flushes the UART first. It awaits while the FIFO holds anything, but spins
+/// until the transmitter is idle once the FIFO reads empty. Reached before the DMA's first
+/// byte, that spin lasts the packet. Shorter than the fewest bytes a packet takes at any baud
+/// rate this link allows.
+const FIFO_FILL: Duration = Duration::from_micros(20);
 
-/// The SPI master and its READY pin and buffers.
+/// How often an updating writer polls its [`Sender`] with no status to prompt it.
+const SENDER_POLL: Duration = Duration::from_millis(SENDER_POLL_MS);
+
+/// UART1 through UHCI, and its buffers. All static: a packet is too large for a future's frame.
 pub struct Bus {
-    pub spi: SpiDma<'static, Async>,
-    /// Pulled down, so a C6 that is absent or in reset reads as not ready.
-    pub ready: Input<'static>,
-    pub rx: DmaRxBuf,
-    pub tx: DmaTxBuf,
+    pub rx: UhciRx<'static, Async>,
+    pub tx: UhciTx<'static, Async>,
+    pub rx_bufs: [DmaRxBuf; 2],
+    pub tx_buf: DmaTxBuf,
+    pub reader: &'static mut PacketReader,
+    /// Where a packet's body is built, before it is encoded into `tx_buf`.
+    pub body: &'static mut [u8; BODY_MAX],
 }
 
 /// The link's state.
@@ -71,15 +87,15 @@ pub struct Link {
     /// Why this life started, and where the last one stopped, for the hello.
     cause: ResetCause,
     phase: LoopPhase,
-    /// This end's seq, +1 per transfer prepared.
+    /// This end's seq, +1 per packet sent.
     seq: u32,
     c6_seq: SeqCheck,
-    /// The C6 is sending its hello, so it has not heard this end's.
-    owe_hello: bool,
+    /// A hello from the C6 waits for its answer.
+    hello_owed: bool,
     /// C6 records that did not decode, and how many of them have been reported.
     undecoded: u32,
     undecoded_said: u32,
-    /// A record from the down queue that did not fit the last transfer. Static, since it
+    /// A record from the down queue that did not fit the last packet. Static, since it
     /// holds up to [`RECORD_MAX`](wartui_proto::spi::RECORD_MAX) bytes.
     held: &'static mut Held,
     /// Sends the bundled image while the pair is updating. One per P4 life, as the pair
@@ -104,7 +120,7 @@ impl Link {
             phase,
             seq: 0,
             c6_seq: SeqCheck::new(),
-            owe_hello: true,
+            hello_owed: false,
             undecoded: 0,
             undecoded_said: 0,
             held,
@@ -129,10 +145,10 @@ impl Link {
         }
     }
 
-    /// Verify a transfer from the C6 and act on it.
-    fn take(&mut self, buf: &[u8; TRANSFER_LEN], shared: &Shared) {
-        let transfer = match verify(buf) {
-            Ok(transfer) => transfer,
+    /// Act on what the reader made of a packet from the C6.
+    fn take(&mut self, packet: Result<Packet<'_>, VerifyError>, shared: &Shared) {
+        let packet = match packet {
+            Ok(packet) => packet,
             Err(VerifyError::BadMagic) => return shared.count_spi(|spi| &mut spi.bad_magic),
             Err(VerifyError::BadCrc) => return shared.count_spi(|spi| &mut spi.crc_fail),
             // Another core, a bad `len` or an unknown kind, each under a good CRC: no C6
@@ -141,57 +157,50 @@ impl Link {
                 return;
             }
         };
-        match self.c6_seq.note(transfer.seq) {
-            // The C6 sent this transfer again; relaying it twice would deliver twice.
-            SeqNote::Repeat => return,
+        shared.count_spi(|spi| &mut spi.packets);
+        match self.c6_seq.note(packet.seq) {
             SeqNote::Gap => shared.count_spi(|spi| &mut spi.seq_gap),
             SeqNote::First | SeqNote::InOrder => {}
         }
-        match transfer.kind {
+        match packet.kind {
             Kind::Hello => {
-                self.owe_hello = true;
-                if let Some(hello) = Hello::decode(transfer.payload) {
+                self.hello_owed = true;
+                shared.wake_link.signal(());
+                if let Some(hello) = Hello::decode(packet.payload) {
                     let now = crate::now_ms();
-                    let event = shared.pair.borrow_mut().on_hello(hello, transfer.seq, now);
+                    let event = shared.pair.borrow_mut().on_hello(hello, packet.seq, now);
                     if event == PairEvent::NewLife {
                         shared.new_life();
                     }
                 }
             }
             Kind::Messages => {
-                self.past_hello(transfer.seq, shared);
+                shared.pair.borrow_mut().note_seq(packet.seq);
                 let pair = shared.pair.borrow();
                 let (read, bridging) = (pair.reads_records(), pair.bridges());
                 drop(pair);
                 if read {
-                    for record in records(transfer.payload) {
+                    for record in records(packet.payload) {
                         self.relay(record, bridging, shared);
                     }
                 }
             }
-            Kind::Idle => self.past_hello(transfer.seq, shared),
             Kind::Update => {
-                self.past_hello(transfer.seq, shared);
-                if let Some(Op::Status(status)) = Op::decode(transfer.payload)
+                shared.pair.borrow_mut().note_seq(packet.seq);
+                if let Some(Op::Status(status)) = Op::decode(packet.payload)
                     && updating(shared)
                 {
                     self.sender.on_status(&status);
+                    shared.wake_link.signal(());
                 }
             }
         }
-        // Once per change, so a C6 sending garbage costs one line per transfer at most.
+        // Once per change, so a C6 sending garbage costs one line per packet at most.
         if self.undecoded != self.undecoded_said {
             self.undecoded_said = self.undecoded;
             let message = LogStr::try_from("a radio record did not decode").unwrap_or_default();
             shared.push_host(&BridgeToHost::Error { message });
         }
-    }
-
-    /// The C6 sent something other than a hello, numbered `seq`, so it has heard this
-    /// end's.
-    fn past_hello(&mut self, seq: u32, shared: &Shared) {
-        self.owe_hello = false;
-        shared.pair.borrow_mut().note_seq(seq);
     }
 
     /// Act on one record from the C6. Unless `bridging`, only its lines and status.
@@ -215,36 +224,36 @@ impl Link {
         }
     }
 
-    /// Fill a transfer to the C6: this end's hello while the C6 is sending its own, the next
-    /// update op while updating, else as many queued records as fit, or nothing.
-    fn prepare(&mut self, buf: &mut [u8; TRANSFER_LEN], shared: &Shared) {
+    /// Build the next packet to the C6 in `body` and return its length, or `None` when there
+    /// is nothing to send.
+    fn prepare(&mut self, body: &mut [u8; BODY_MAX], shared: &Shared) -> Option<usize> {
+        let payload = &mut body[HEADER_LEN..HEADER_LEN + PAYLOAD_MAX];
+        let (kind, len) = self.fill(payload, shared)?;
         let seq = self.seq;
         self.seq = self.seq.wrapping_add(1);
-        if self.owe_hello {
-            let len = self.hello().encode(&mut buf[HEADER_LEN..]);
-            seal(buf, Kind::Hello, seq, len);
-            return;
+        Some(seal(body, kind, seq, len))
+    }
+
+    /// Fill a payload: a hello owed, the next update op while updating, else as many queued
+    /// records as fit.
+    fn fill(&mut self, payload: &mut [u8], shared: &Shared) -> Option<(Kind, usize)> {
+        if self.hello_owed {
+            self.hello_owed = false;
+            return Some((Kind::Hello, self.hello().encode(payload)));
         }
         if updating(shared) {
             let now = crate::now_ms();
-            let op = self.sender.next(now, &mut buf[HEADER_LEN..HEADER_LEN + PAYLOAD_MAX]);
+            let op = self.sender.next(now, payload);
             self.follow_sender(now, shared);
-            match op {
-                Some(len) => seal(buf, Kind::Update, seq, len),
-                None => seal(buf, Kind::Idle, seq, 0),
-            }
-            return;
+            return op.map(|len| (Kind::Update, len));
         }
         if !radio_up(shared) {
-            seal(buf, Kind::Idle, seq, 0);
-            return;
+            return None;
         }
-        let mut packer = Packer::new(&mut buf[HEADER_LEN..HEADER_LEN + PAYLOAD_MAX]);
+        let mut packer = Packer::new(payload);
         let mut down = shared.down.borrow_mut();
         self.held.pack(&mut packer, |out| down.read(out).0);
-        drop(down);
-        let len = packer.len();
-        seal(buf, if len == 0 { Kind::Idle } else { Kind::Messages }, seq, len);
+        (!packer.is_empty()).then(|| (Kind::Messages, packer.len()))
     }
 
     /// Tell the pair, and the host, what the sender's last step changed.
@@ -287,6 +296,8 @@ impl Link {
                 shared.pair.borrow_mut().on_update_failed();
                 shared.push_host(&BridgeToHost::Error { message: text });
                 shared.push_fault();
+                // A stale C6 bridges, so records queued meanwhile can go now.
+                shared.wake_link.signal(());
             }
         }
     }
@@ -302,59 +313,76 @@ fn updating(shared: &Shared) -> bool {
     matches!(shared.pair.borrow().state(), RadioState::Updating(_))
 }
 
-/// Run the link forever: one transfer per READY edge, each verified and handled, and the
-/// next prepared, while the wait for the following edge is already armed.
-pub async fn run_link(bus: Bus, link: &mut Link, shared: &Shared) -> ! {
-    let Bus { mut spi, mut ready, mut rx, mut tx } = bus;
-    link.prepare(tx_bytes(&mut tx), shared);
-    while with_timeout(READY_TIMEOUT, ready.wait_for_rising_edge()).await.is_err() && ready.is_low()
-    {
-    }
-    // The C6 is armed: its READY rose, or was found high after a timeout.
-    let mut armed = true;
+/// Run the link forever: the reader and the writer, each on its own.
+pub async fn run_link(bus: Bus, link: &RefCell<Link>, shared: &Shared) -> ! {
+    let Bus { rx, tx, rx_bufs, tx_buf, reader, body } = bus;
+    join(
+        read_packets(rx, rx_bufs, reader, link, shared),
+        write_packets(tx, tx_buf, body, link, shared),
+    )
+    .await
+    .0
+}
+
+/// Read forever: arm the next read, hand the last one's bytes to the link, wait for it to end.
+async fn read_packets(
+    mut rx: UhciRx<'static, Async>,
+    [mut armed, mut last]: [DmaRxBuf; 2],
+    reader: &'static mut PacketReader,
+    link: &RefCell<Link>,
+    shared: &Shared,
+) -> ! {
+    let mut last_len = 0;
     loop {
-        if !armed {
-            armed = with_timeout(READY_TIMEOUT, ready.wait_for_rising_edge()).await.is_ok()
-                || timed_out_high(&ready, shared);
-            continue;
-        }
+        let mut read = rx.read(armed).map_err(|(err, ..)| err).expect("arm a UART read");
         mark(LoopPhase::SpiTransfer);
-        // `join` polls the edge wait first, so it is listening before the transfer starts.
-        let (edge, back) = join(with_timeout(READY_TIMEOUT, ready.wait_for_rising_edge()), async {
-            match spi.transfer_buffers(TRANSFER_LEN, rx, TRANSFER_LEN, tx) {
-                Ok(mut transfer) => {
-                    transfer.wait_for_done().await;
-                    let (spi, (rx, mut tx)) = transfer.wait();
-                    shared.count_spi(|spi| &mut spi.transfers);
-                    link.take(rx_bytes(&rx), shared);
-                    link.prepare(tx_bytes(&mut tx), shared);
-                    (spi, rx, tx)
-                }
-                // Nothing was clocked, so `tx` still holds the transfer to send.
-                Err((_, spi, rx, tx)) => (spi, rx, tx),
+        for &byte in &last.as_slice()[..last_len] {
+            if let Some(packet) = reader.push(byte) {
+                link.borrow_mut().take(packet, shared);
             }
-        })
-        .await;
-        (spi, rx, tx) = back;
-        armed = edge.is_ok() || timed_out_high(&ready, shared);
+        }
+        read.wait_for_done().await;
+        let (result, rx_back, done) = read.wait();
+        rx = rx_back;
+        armed = core::mem::replace(&mut last, done);
+        // Also what brings the received bytes through the P4's cache, so before `as_slice`.
+        last_len = last.number_of_received_bytes();
+        // The UART keeps line errors until they are read, so any since the last read are here.
+        if result.is_err() || rx.uart_rx.check_for_errors().is_err() {
+            shared.count_spi(|spi| &mut spi.uart_errors);
+        }
     }
 }
 
-/// Counts a READY wait that timed out, and says whether READY is high anyway: an armed
-/// C6 whose edge was missed.
-fn timed_out_high(ready: &Input<'_>, shared: &Shared) -> bool {
-    shared.count_spi(|spi| &mut spi.ready_timeouts);
-    let high = ready.is_high();
-    if high {
-        shared.count_spi(|spi| &mut spi.ready_recovered);
+/// Write forever: every packet the link has to send, then wait for a reason to look again.
+async fn write_packets(
+    mut tx: UhciTx<'static, Async>,
+    mut buf: DmaTxBuf,
+    body: &'static mut [u8; BODY_MAX],
+    link: &RefCell<Link>,
+    shared: &Shared,
+) -> ! {
+    loop {
+        let prepared = link.borrow_mut().prepare(body, shared);
+        let Some(len) = prepared else {
+            if updating(shared) {
+                select(shared.wake_link.wait(), Timer::after(SENDER_POLL)).await;
+            } else {
+                shared.wake_link.wait().await;
+            }
+            continue;
+        };
+        let wire = encode_packet(&body[..len], buf.as_mut_slice());
+        buf.set_length(wire);
+        mark(LoopPhase::SpiTransfer);
+        let mut write = tx.write(buf).map_err(|(err, ..)| err).expect("start a UART write");
+        Timer::after(FIFO_FILL).await;
+        write.wait_for_done().await;
+        let (result, tx_back, done) = write.wait();
+        tx = tx_back;
+        buf = done;
+        if result.is_err() {
+            shared.count_spi(|spi| &mut spi.uart_errors);
+        }
     }
-    high
-}
-
-fn rx_bytes(buf: &DmaRxBuf) -> &[u8; TRANSFER_LEN] {
-    buf.as_slice().first_chunk().expect("a transfer-sized DMA buffer")
-}
-
-fn tx_bytes(buf: &mut DmaTxBuf) -> &mut [u8; TRANSFER_LEN] {
-    buf.as_mut_slice().first_chunk_mut().expect("a transfer-sized DMA buffer")
 }

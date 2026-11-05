@@ -61,20 +61,20 @@ fn queue_status(uptime_ms: u32, queue: QueueId, high_water: u32, dropped: u32) -
     Record::BridgeStatus(BridgeStatusSeen { queues, ..seen })
 }
 
-/// A status reply carrying SPI counters: `transfers`, then `n`, `2n` … `8n` in field order, so
+/// A status reply carrying link counters: `packets`, then `n`, `2n` … `8n` in field order, so
 /// no two counters match.
-fn spi_status(uptime_ms: u32, transfers: u32, n: u32) -> Record {
+fn spi_status(uptime_ms: u32, packets: u32, n: u32) -> Record {
     let Record::BridgeStatus(seen) = status(0, 0, 0, uptime_ms) else { unreachable!() };
     let spi = SpiStats {
-        transfers,
+        packets,
         crc_fail: n,
         bad_magic: 2 * n,
         seq_gap: 3 * n,
-        ready_timeouts: 4 * n,
-        ready_recovered: 5 * n,
-        radio_crc_fail: 6 * n,
-        radio_bad_magic: 7 * n,
-        radio_seq_gap: 8 * n,
+        uart_errors: 4 * n,
+        radio_crc_fail: 5 * n,
+        radio_bad_magic: 6 * n,
+        radio_seq_gap: 7 * n,
+        radio_uart_errors: 8 * n,
     };
     Record::BridgeStatus(BridgeStatusSeen { spi: Some(spi), ..seen })
 }
@@ -403,15 +403,15 @@ fn analyze_reports_spi_errors_when_rows_carry_spi() {
     assert_eq!(
         spi,
         Some(SpiLoss {
-            transfers: 500 + 100,
+            packets: 500 + 100,
             crc_fail: n,
             bad_magic: 2 * n,
             seq_gap: 3 * n,
-            ready_timeouts: 4 * n,
-            ready_recovered: 5 * n,
-            radio_crc_fail: 6 * n,
-            radio_bad_magic: 7 * n,
-            radio_seq_gap: 8 * n,
+            uart_errors: 4 * n,
+            radio_crc_fail: 5 * n,
+            radio_bad_magic: 6 * n,
+            radio_seq_gap: 7 * n,
+            radio_uart_errors: 8 * n,
         })
     );
 }

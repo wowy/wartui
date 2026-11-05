@@ -128,27 +128,27 @@ pub struct QueueLoss {
     pub dropped: u64,
 }
 
-/// The P4–C6 SPI link's counters over the capture. Named as [`SpiStats`](wartui_proto::link::SpiStats) names them.
+/// The P4–C6 UART link's counters over the capture. Named as [`SpiStats`](wartui_proto::link::SpiStats) names them.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SpiLoss {
-    /// Transfers completed.
-    pub transfers: u64,
-    /// C6→P4 transfers whose CRC failed.
+    /// Verified C6→P4 packets.
+    pub packets: u64,
+    /// C6→P4 packets whose CRC failed.
     pub crc_fail: u64,
-    /// C6→P4 transfers with the wrong magic.
+    /// C6→P4 packets with the wrong magic.
     pub bad_magic: u64,
-    /// C6→P4 transfers whose sequence number skipped.
+    /// C6→P4 packets whose sequence number skipped.
     pub seq_gap: u64,
-    /// Waits for the C6's READY line that timed out after it first armed.
-    pub ready_timeouts: u64,
-    /// Timeouts after which the link recovered.
-    pub ready_recovered: u64,
-    /// P4→C6 transfers the C6 saw fail their CRC.
+    /// Line errors on the P4's UART.
+    pub uart_errors: u64,
+    /// P4→C6 packets the C6 saw fail their CRC.
     pub radio_crc_fail: u64,
-    /// P4→C6 transfers the C6 saw with the wrong magic.
+    /// P4→C6 packets the C6 saw with the wrong magic.
     pub radio_bad_magic: u64,
-    /// P4→C6 transfers the C6 saw skip a sequence number.
+    /// P4→C6 packets the C6 saw skip a sequence number.
     pub radio_seq_gap: u64,
+    /// Line errors on the C6's UART.
+    pub radio_uart_errors: u64,
 }
 
 impl SpiLoss {
@@ -156,54 +156,54 @@ impl SpiLoss {
     fn read(row: &Row<'_>) -> rusqlite::Result<Option<Self>> {
         let get = |name: &str| row.get::<_, Option<i64>>(name).map(|v| v.map(count));
         let (
-            Some(transfers),
+            Some(packets),
             Some(crc_fail),
             Some(bad_magic),
             Some(seq_gap),
-            Some(ready_timeouts),
-            Some(ready_recovered),
+            Some(uart_errors),
             Some(radio_crc_fail),
             Some(radio_bad_magic),
             Some(radio_seq_gap),
+            Some(radio_uart_errors),
         ) = (
-            get("spi_transfers")?,
+            get("spi_packets")?,
             get("spi_crc_fail")?,
             get("spi_bad_magic")?,
             get("spi_seq_gap")?,
-            get("spi_ready_timeouts")?,
-            get("spi_ready_recovered")?,
+            get("spi_uart_errors")?,
             get("spi_radio_crc_fail")?,
             get("spi_radio_bad_magic")?,
             get("spi_radio_seq_gap")?,
+            get("spi_radio_uart_errors")?,
         )
         else {
             return Ok(None);
         };
         Ok(Some(Self {
-            transfers,
+            packets,
             crc_fail,
             bad_magic,
             seq_gap,
-            ready_timeouts,
-            ready_recovered,
+            uart_errors,
             radio_crc_fail,
             radio_bad_magic,
             radio_seq_gap,
+            radio_uart_errors,
         }))
     }
 
     /// Adds what each counter advanced from `before` to `now`.
     fn advance(&mut self, now: &Self, before: &Self, restarted: bool) {
         let step = |now, before| advance_since_boot(now, Some(before), restarted);
-        self.transfers += step(now.transfers, before.transfers);
+        self.packets += step(now.packets, before.packets);
         self.crc_fail += step(now.crc_fail, before.crc_fail);
         self.bad_magic += step(now.bad_magic, before.bad_magic);
         self.seq_gap += step(now.seq_gap, before.seq_gap);
-        self.ready_timeouts += step(now.ready_timeouts, before.ready_timeouts);
-        self.ready_recovered += step(now.ready_recovered, before.ready_recovered);
+        self.uart_errors += step(now.uart_errors, before.uart_errors);
         self.radio_crc_fail += step(now.radio_crc_fail, before.radio_crc_fail);
         self.radio_bad_magic += step(now.radio_bad_magic, before.radio_bad_magic);
         self.radio_seq_gap += step(now.radio_seq_gap, before.radio_seq_gap);
+        self.radio_uart_errors += step(now.radio_uart_errors, before.radio_uart_errors);
     }
 }
 
@@ -431,9 +431,9 @@ fn bridge(conn: &Connection) -> rusqlite::Result<Option<BridgeLoss>> {
     // One row per queue a reply reported, or one with NULL queue columns for a reply with none.
     let mut stmt = conn.prepare(
         "SELECT s.id, s.rx_count, s.dropped_tx, s.uptime_ms, s.host_frames, s.rx_oversize,
-                s.spi_transfers, s.spi_crc_fail, s.spi_bad_magic, s.spi_seq_gap,
-                s.spi_ready_timeouts, s.spi_ready_recovered, s.spi_radio_crc_fail,
-                s.spi_radio_bad_magic, s.spi_radio_seq_gap,
+                s.spi_packets, s.spi_crc_fail, s.spi_bad_magic, s.spi_seq_gap,
+                s.spi_uart_errors, s.spi_radio_crc_fail, s.spi_radio_bad_magic,
+                s.spi_radio_seq_gap, s.spi_radio_uart_errors,
                 q.queue, q.capacity, q.high_water, q.dropped AS queue_dropped
          FROM bridge_status s LEFT JOIN bridge_queue q ON q.status_id = s.id
          ORDER BY s.id, q.rowid",

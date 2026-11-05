@@ -106,13 +106,13 @@ fn sent(op: &Op<'_>) -> Sent {
     }
 }
 
-/// Runs the sender against `c6` one millisecond per transfer, answering at once, until it
+/// Runs the sender against `c6` one millisecond per packet, answering at once, until it
 /// stops sending. `lose` drops an op on its way down. Returns what was sent.
 fn run(sender: &mut Sender<'_>, c6: &mut FakeC6, lose: impl FnMut(Sent) -> bool) -> Vec<Sent> {
     run_late(sender, c6, 0, lose).0
 }
 
-/// [`run`], with each answer reaching the sender `lag` transfers late, as the link's
+/// [`run`], with each answer reaching the sender `lag` packets late, as the link's
 /// double buffering delays it. Also returns the time the sender stopped.
 fn run_late(
     sender: &mut Sender<'_>,
@@ -188,7 +188,7 @@ fn spi_update_op_encodes_frozen_layout_when_any_op() {
 }
 
 #[test]
-fn spi_update_op_fits_one_transfer_when_chunk_is_full() {
+fn spi_update_op_fits_one_packet_when_chunk_is_full() {
     const { assert!(OP_MAX <= PAYLOAD_MAX) };
     let data = [0x5A; OTA_CHUNK];
     let mut out = [0u8; OP_MAX];
@@ -451,7 +451,7 @@ fn spi_update_sender_stays_installed_when_status_after_install_is_no_refusal() {
 #[test]
 fn spi_update_sender_installs_image_when_ops_cross_the_usb_link_to_a_p4() {
     // The host drives the P4's own update with the same sender, each op and status inside a
-    // link frame rather than an SPI transfer.
+    // link frame rather than a UART packet.
     let image = image(3 * SECTOR + 100);
     let mut sender = Sender::new(&image, sha256(&image), &DIGEST);
     let mut p4 = FakeC6::on(Board::Esp32p4);

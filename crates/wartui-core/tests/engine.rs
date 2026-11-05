@@ -1880,15 +1880,15 @@ fn engine_records_bridge_status_when_reply_arrives() {
             .into_iter()
             .collect();
     let spi = SpiStats {
-        transfers: 48_210,
+        packets: 48_210,
         crc_fail: 2,
         bad_magic: 0,
         seq_gap: 0,
-        ready_timeouts: 1,
-        ready_recovered: 1,
+        uart_errors: 1,
         radio_crc_fail: 0,
         radio_bad_magic: 0,
         radio_seq_gap: 0,
+        radio_uart_errors: 0,
     };
     let status = |dropped_tx, uptime_ms, queues: &QueueStats, spi| {
         Event::Link(LinkEvent::Message(BridgeToHost::Status {

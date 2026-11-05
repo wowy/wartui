@@ -242,30 +242,20 @@ fn utc_arrival(ms: i64) -> String {
     )
 }
 
-/// The SPI link's transfers, then only the error counters that moved.
+/// The UART link's packets, then only the error counters that moved.
 fn spi_line(spi: &SpiLoss) -> String {
     use std::fmt::Write as _;
 
-    let mut line = format!("{} transfers", thousands(spi.transfers));
-    for (count, name) in
-        [(spi.crc_fail, "crc_fail"), (spi.bad_magic, "bad_magic"), (spi.seq_gap, "seq_gap")]
-    {
-        if count > 0 {
-            let _ = write!(line, "  {} {name}", thousands(count));
-        }
-    }
-    if spi.ready_timeouts > 0 {
-        let _ = write!(
-            line,
-            "  {} ready_timeouts ({} recovered)",
-            thousands(spi.ready_timeouts),
-            thousands(spi.ready_recovered)
-        );
-    }
+    let mut line = format!("{} packets", thousands(spi.packets));
     for (count, name) in [
+        (spi.crc_fail, "crc_fail"),
+        (spi.bad_magic, "bad_magic"),
+        (spi.seq_gap, "seq_gap"),
+        (spi.uart_errors, "uart_errors"),
         (spi.radio_crc_fail, "radio_crc_fail"),
         (spi.radio_bad_magic, "radio_bad_magic"),
         (spi.radio_seq_gap, "radio_seq_gap"),
+        (spi.radio_uart_errors, "radio_uart_errors"),
     ] {
         if count > 0 {
             let _ = write!(line, "  {} {name}", thousands(count));
@@ -762,27 +752,25 @@ mod tests {
     #[test]
     fn analyze_report_prints_spi_errors_only_when_nonzero() {
         let spi = SpiLoss {
-            transfers: 48_210,
+            packets: 48_210,
             crc_fail: 2,
-            ready_timeouts: 1,
-            ready_recovered: 1,
+            uart_errors: 1,
             radio_seq_gap: 4,
             ..Default::default()
         };
         let text = losses_text(&split_bridge(Some(spi)));
         assert!(
             text.ends_with(
-                "  spi        48,210 transfers  2 crc_fail  1 ready_timeouts (1 recovered)  \
-                 4 radio_seq_gap\n"
+                "  spi        48,210 packets  2 crc_fail  1 uart_errors  4 radio_seq_gap\n"
             ),
             "{text}"
         );
     }
 
     #[test]
-    fn analyze_report_prints_spi_transfers_alone_when_link_is_clean() {
-        let text = losses_text(&split_bridge(Some(SpiLoss { transfers: 9, ..Default::default() })));
-        assert!(text.ends_with("  spi        9 transfers\n"), "{text}");
+    fn analyze_report_prints_spi_packets_alone_when_link_is_clean() {
+        let text = losses_text(&split_bridge(Some(SpiLoss { packets: 9, ..Default::default() })));
+        assert!(text.ends_with("  spi        9 packets\n"), "{text}");
     }
 
     #[test]

@@ -591,15 +591,15 @@ fn link_round_trips_status_with_queues_and_spi() {
         rx_oversize: 0,
         queues,
         spi: Some(SpiStats {
-            transfers: u32::MAX,
+            packets: u32::MAX,
             crc_fail: 1,
             bad_magic: 2,
             seq_gap: 3,
-            ready_timeouts: 4,
-            ready_recovered: 5,
-            radio_crc_fail: 6,
-            radio_bad_magic: 7,
-            radio_seq_gap: 8,
+            uart_errors: 4,
+            radio_crc_fail: 5,
+            radio_bad_magic: 6,
+            radio_seq_gap: 7,
+            radio_uart_errors: 8,
         }),
     };
     assert_eq!(round_trip(&status), status);
