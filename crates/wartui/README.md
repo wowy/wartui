@@ -20,7 +20,7 @@ This is the operator's manual. The root [`README.md`](../../README.md) is the sh
 | `reset`        | Reboot a bridge that has stopped answering                                          |
 | `ports`        | List the Espressif boards and P4 bridges attached, and the address of each          |
 | `flash-fleet`  | Flash node firmware onto every attached board of one chip; see "Flashing the fleet" |
-| `flash-bridge` | Flash or update the bridge's firmware; see "Flashing the bridge"                    |
+| `flash-bridge` | Update the P4 bridge's firmware over its link; see "Flashing the bridge"            |
 | `ota`          | Update node firmware through the bridge; see "Updating over the air"                |
 
 Nodes broadcast heartbeats but unicast sighting batches to the bridge that last sent them an admin
@@ -948,7 +948,8 @@ The header's `waiting for a bridge to announce itself` has three causes; the fau
 - **`link down: could not open …`**: the port is not ours. Nearly always another `wartui`, `screen`,
   an IDE's serial monitor, or ModemManager holds it. ModemManager clears on its own: where it runs,
   it opens each new CDC-ACM device for a few seconds to ask whether it is a modem.
-- **No fault**: the port opened and the dongle is not answering.
+- **No fault**: the port opened and the dongle is not answering, or a program that took no lock on
+  the port, such as `cat`, is reading its answers.
 - **`swept N boards and none answered`**: no attached P4 bridge answered.
 
 With no fault, `wartui reset` reboots a bridge that still reads what it is sent. A reboot can move
@@ -986,7 +987,8 @@ reading takes one packet and queues the rest, and closing the port waits for the
 
 `wartui reset` never sweeps, because a `Reset` sent down the wrong port reboots the wrong board. It
 goes to the `--bridge` board, else the remembered one, else the only one attached. With
-several and none known, it asks for `--bridge` rather than guessing.
+several and none known, it asks for `--bridge` rather than guessing. An address no attached P4
+bridge carries is refused before anything is opened.
 
 **`--log-file` is the only way to see the transport's own account of a run**: the view owns the
 terminal, so without it nothing is logged. It records which port was resolved, whether it opened,

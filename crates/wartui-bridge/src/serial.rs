@@ -265,7 +265,7 @@ pub fn select(
 ///
 /// # Errors
 /// [`TransportError::NoBridgeFound`] if nothing is attached, or
-/// [`TransportError::AmbiguousBridge`] if several boards are and none is known.
+/// [`TransportError::AmbiguousBridge`] if several P4 bridges are and none is known.
 pub fn unambiguous_bridge(
     candidates: &[PortCandidate],
     remembered: Option<Mac>,

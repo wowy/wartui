@@ -62,6 +62,25 @@ jobs:
           cargo fmt --all -- --check
           popd
 
+      # The check `firmware-node.yml` makes, for the crates the P4 links: it has no radio and no
+      # allocator. Ahead of the build, so a duplicate is named rather than left to come back as a
+      # linker error or a panic on a board. `.github/dependabot.yml` is what keeps the bumps from
+      # arriving.
+      - name: One copy of each pinned crate
+        run: |
+          pushd firmware/p4-bridge
+          resolved=$(cargo tree --locked -e normal --prefix none --format '{p}' \
+            | awk '{print $1, $2}' | sort -u)
+          for c in esp-hal esp-rtos esp-storage esp-sync; do
+            n=$(printf '%s\n' "$resolved" | grep -c "^$c " || true)
+            if [ "$n" != 1 ]; then
+              printf '%s\n' "$resolved" | grep "^$c " || true
+              echo "::error::$c resolves to $n versions, expected exactly 1"
+              exit 1
+            fi
+          done
+          popd
+
       - name: Build
         run: |
           pushd firmware/p4-bridge

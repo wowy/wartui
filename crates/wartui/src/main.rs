@@ -77,7 +77,7 @@ enum Command {
     Ports,
     /// Flash node firmware onto every attached ESP32-C5, skipping the P4 bridge.
     FlashFleet(flash::fleet::Args),
-    /// Flash bridge firmware onto the bridge, or update a P4 bridge over its link.
+    /// Update the P4 bridge's firmware over its link.
     FlashBridge(flash::bridge::Args),
     /// Update nodes' firmware over the air, through the bridge.
     Ota(ota::Args),
@@ -192,8 +192,7 @@ fn logging(
 fn ports() -> Result<()> {
     let found = discover_ports().context("listing serial ports")?;
     if found.is_empty() {
-        println!("No Espressif board or P4 bridge is attached.");
-        println!("If the bridge is plugged in, name it with --bridge.");
+        println!("{}", no_boards_notice());
         return Ok(());
     }
     for candidate in found {
@@ -214,6 +213,17 @@ fn ports() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// What `wartui ports` says with no board to list. A board the list misses has no address to
+/// name it by, so only a path reaches it.
+fn no_boards_notice() -> String {
+    [
+        "No Espressif board or P4 bridge is attached.".to_owned(),
+        format!("A P4 with no firmware shows up only as its CH343; see {}.", flash::FIRST_FLASH),
+        "A bridge not listed here can be named only by its path: --bridge PATH.".to_owned(),
+    ]
+    .join("\n")
 }
 
 /// The bridge saved in `wartui.toml`, from `explicit` (`--config`) or the default file, for a
@@ -244,15 +254,6 @@ fn open(bridge: Option<&str>, sim: Option<u8>, memory: BridgeMemory) -> Result<L
 /// is a path, and whether that path exists is the transport's question.
 fn spec(bridge: &str) -> BridgeSpec {
     bridge.parse().unwrap_or_else(|never| match never {})
-}
-
-/// The device path a `--bridge` value names, when one is attached.
-///
-/// An address is the durable way to name a board and the useless way to name it to
-/// another program, so advice that quotes `espflash` resolves it first rather than
-/// printing a line that cannot be run.
-fn named_device(bridge: &str) -> Result<String, TransportError> {
-    serial::resolve(&spec(bridge))
 }
 
 /// Render a link-level event that is not a frame.
@@ -459,6 +460,8 @@ fn silence_notice(bridge: Option<&str>, bridges: &[PortCandidate]) -> String {
     }
     lines.extend([
         format!("  - the bridge is wedged, which a reboot clears: {wartui_reset}"),
+        // Reachable with the port open: the exclusive open is refused only by a holder that
+        // took `TIOCEXCL` or `flock`. One that took neither, such as `cat`, keeps reading from it.
         "  - another program is holding the port".to_owned(),
         "`wartui ports` lists what is attached; `--log-file` records what the transport tried."
             .to_owned(),
@@ -473,7 +476,10 @@ fn silence_notice(bridge: Option<&str>, bridges: &[PortCandidate]) -> String {
 mod tests {
     use wartui_bridge::ports::{PortCandidate, TEST_PID, TEST_VID, candidate};
 
-    use super::{BridgeInfo, BridgeSpec, Command, last_reset_line, parse, silence_notice, spec};
+    use super::{
+        BridgeInfo, BridgeSpec, Command, last_reset_line, no_boards_notice, parse, silence_notice,
+        spec,
+    };
     use wartui_proto::link::{Chip, LoopPhase};
     use wartui_proto::reset::ResetCause;
 
@@ -642,6 +648,14 @@ mod tests {
         let Some(Command::FlashBridge(args)) = cli.command else { panic!("not flash-bridge") };
         assert_eq!(args.features, None);
         assert_eq!(args.bridge.as_deref(), Some("71:F4"));
+    }
+
+    #[test]
+    fn cli_diagnostics_points_at_first_flash_and_path_when_no_board_is_attached() {
+        let notice = no_boards_notice();
+        assert!(notice.contains("CH343"), "{notice}");
+        assert!(notice.contains("firmware/p4-bridge/README.md"), "{notice}");
+        assert!(notice.contains("--bridge PATH"), "{notice}");
     }
 
     #[test]

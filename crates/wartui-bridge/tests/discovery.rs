@@ -334,13 +334,16 @@ fn serial_discovery_selects_remembered_bridge_when_resetting_among_multiple_boar
 }
 
 #[test]
-fn serial_discovery_refuses_reset_when_multiple_unremembered_boards_are_present() {
-    // A `Reset` sent to a node reboots the node and costs it the addresses it was
-    // holding back, so this command never sweeps.
-    let boards = [esp("/dev/ttyACM0", BRIDGE_MAC), esp("/dev/ttyACM1", NODE_MAC)];
+fn serial_discovery_refuses_reset_when_multiple_unremembered_bridges_are_present() {
+    // With two P4 bridges and neither remembered, a `Reset` could reboot another fleet's
+    // bridge, so this command never guesses.
+    let twin = "38:44:BE:12:44:C0";
+    let boards = [p4("/dev/ttyACM0", BRIDGE_MAC), p4("/dev/ttyACM1", twin)];
     let refused = serial::unambiguous_bridge(&boards, None).expect_err("no way to tell");
+    assert!(matches!(refused, TransportError::AmbiguousBridge { .. }), "{refused}");
     let message = refused.to_string();
-    assert!(message.contains(BRIDGE_MAC) && message.contains(NODE_MAC), "{message}");
+    assert!(message.contains("several P4 bridges"), "{message}");
+    assert!(message.contains(BRIDGE_MAC) && message.contains(twin), "{message}");
     assert!(message.contains("--bridge"), "{message}");
 }
 

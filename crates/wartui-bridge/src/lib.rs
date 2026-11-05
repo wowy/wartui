@@ -108,13 +108,13 @@ pub enum TransportError {
         /// The address that was asked for.
         spec: String,
     },
-    /// Several boards are attached and nothing says which of them is the bridge.
+    /// Several P4 bridges are attached and nothing says which of them is the bridge.
     #[error(
-        "several boards are attached and none is known to be the bridge ({boards}); \
+        "several P4 bridges are attached and none is known to be the bridge ({boards}); \
              name one with --bridge"
     )]
     AmbiguousBridge {
-        /// The boards that were found, by address where they report one.
+        /// The P4 bridges that were found, by address where they report one.
         boards: String,
     },
     /// A bridge was named by the end of its address, and several P4 bridges end that way.
