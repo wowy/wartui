@@ -6,19 +6,17 @@
 //! a host workspace member built with `--all-features`, which would select both chips'
 //! `esp-hal` features at once.
 //!
-//! Each firmware forwards its chip feature here, so one build selects one chip. Only the
+//! Each firmware names its chip feature here, so one build selects one chip. Only the
 //! node uses [`health`]. [`phase`] is a bridge's, whatever chip it runs on. [`radio`] is the
 //! ESP-NOW half of a bridge, behind the `radio` feature, so a firmware whose chip has a
 //! radio and bridges it carries the one copy; the P4 has no radio and cannot select it.
 //! [`gps`] reads a u-blox receiver on a bridge's I2C bus, behind the `gps` feature, on any
-//! of the three chips. [`ota`] is updates on flash, behind the `ota` feature, for the node and
-//! both halves of the P4 bridge.
+//! of the three chips. [`ota`] is updates on flash, which every firmware takes.
 #![no_std]
 
 #[cfg(feature = "gps")]
 pub mod gps;
 pub mod health;
-#[cfg(feature = "ota")]
 pub mod ota;
 pub mod phase;
 #[cfg(feature = "radio")]

@@ -61,14 +61,14 @@ jobs:
         if: success() || failure()
         run: |
           pushd firmware/common
-          cargo clippy --release --features esp32c5,ota --locked -- -D warnings
+          cargo clippy --release --features esp32c5 --locked -- -D warnings
           popd
 
       - name: Clippy (P4 bridge's radio, ESP32-C6)
         if: success() || failure()
         run: |
           pushd firmware/common
-          cargo clippy --release --features esp32c6,ota,radio --locked -- -D warnings
+          cargo clippy --release --features esp32c6,radio --locked -- -D warnings
           popd
 
       # The P4 is a different target from the C-series chips.
@@ -76,5 +76,5 @@ jobs:
         if: success() || failure()
         run: |
           pushd firmware/common
-          cargo clippy --release --features esp32p4,gps,ota --target riscv32imafc-unknown-none-elf --locked -- -D warnings
+          cargo clippy --release --features esp32p4,gps --target riscv32imafc-unknown-none-elf --locked -- -D warnings
           popd

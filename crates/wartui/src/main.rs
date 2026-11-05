@@ -604,7 +604,7 @@ mod tests {
 
     #[test]
     fn cli_parser_refuses_flash_fleet_when_given_features() {
-        // The node firmware builds for one chip, with its default features.
+        // The node firmware builds for one chip and has no features to choose.
         assert!(parse(["wartui", "flash-fleet", "--features", "esp32c5"]).is_err());
     }
 

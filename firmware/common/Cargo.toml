@@ -15,25 +15,25 @@ repository = "https://github.com/wowy/wartui"
 
 [features]
 # Exactly one chip must be selected; src/lib.rs enforces it with compile_error!.
-# Each firmware forwards its own chip feature here.
+# Each firmware names its own chip feature here.
 esp32c5 = [
   "esp-hal/esp32c5",
   "esp-radio?/esp32c5",
-  "esp-bootloader-esp-idf?/esp32c5",
-  "esp-storage?/esp32c5",
+  "esp-bootloader-esp-idf/esp32c5",
+  "esp-storage/esp32c5",
 ]
 esp32c6 = [
   "esp-hal/esp32c6",
   "esp-radio?/esp32c6",
-  "esp-bootloader-esp-idf?/esp32c6",
-  "esp-storage?/esp32c6",
+  "esp-bootloader-esp-idf/esp32c6",
+  "esp-storage/esp32c6",
 ]
 # No radio of its own; src/lib.rs refuses it with `radio`. It takes its own updates
-# over its USB link, through `ota`.
+# over its USB link.
 esp32p4 = [
   "esp-hal/esp32p4",
-  "esp-bootloader-esp-idf?/esp32p4",
-  "esp-storage?/esp32p4",
+  "esp-bootloader-esp-idf/esp32p4",
+  "esp-storage/esp32p4",
 ]
 
 # The bridge's ESP-NOW half (`src/radio.rs`), for every firmware that owns a radio
@@ -42,15 +42,6 @@ radio = ["dep:embassy-sync", "dep:esp-radio"]
 
 # A u-blox GPS receiver on I2C (`src/gps.rs`), which the P4 bridge always reads.
 gps = ["dep:embassy-futures", "dep:embassy-sync", "dep:embassy-time"]
-
-# Updates on flash (`src/ota.rs`): the update slot, the switch and the trial, for the node,
-# the P4 bridge's C6 and the P4 itself.
-ota = [
-  "dep:embedded-storage",
-  "dep:esp-bootloader-esp-idf",
-  "dep:esp-storage",
-  "dep:static_cell",
-]
 
 [dependencies]
 # The firmwares are held on esp-hal 1.2 by `esp-radio`'s `~1.2.0`; this crate
@@ -70,14 +61,15 @@ esp-radio = { version = "1.0.0-beta.1", default-features = false, optional = tru
   "unstable",
   "wifi",
 ] }
-# Behind `ota`, at the versions `firmware/node/Cargo.toml` pins. `esp-storage` is held at
-# the version `esp-bootloader-esp-idf` resolves; `firmware/p4-radio/README.md` § "Dependency
-# versions". `embedded-storage` turns on its `NorFlash` implementation, and its default
+# Updates on flash (`src/ota.rs`), which every firmware takes, at the versions
+# `firmware/node/Cargo.toml` pins. `esp-storage` is held at the version
+# `esp-bootloader-esp-idf` resolves; `firmware/p4-radio/README.md` § "Dependency versions".
+# `embedded-storage` turns on its `NorFlash` implementation, and its default
 # `critical-section` feature holds interrupts off across each flash operation.
-embedded-storage = { version = "0.3.2", optional = true }
-esp-bootloader-esp-idf = { version = "0.6.0", optional = true }
-esp-storage = { version = "0.10.0", features = ["embedded-storage"], optional = true }
-static_cell = { version = "2.1.1", optional = true }
+embedded-storage = "0.3.2"
+esp-bootloader-esp-idf = "0.6.0"
+esp-storage = { version = "0.10.0", features = ["embedded-storage"] }
+static_cell = "2.1.1"
 # The phase marker's atomics: `esp-hal` marks only `portable-atomic`'s as persistable.
 portable-atomic = { version = "1.15.0", default-features = false }
 wartui-proto = { path = "../../crates/wartui-proto" }

@@ -12,7 +12,7 @@ else. What an air frame is, what a heartbeat means, and how channels are assigne
 host. There they are unit-testable, and a fix costs a `cargo run` rather than a reflash.
 
 ```sh
-cargo build --release --features esp32c6
+cargo build --release
 ```
 
 ## Boards
@@ -31,7 +31,7 @@ Flash it through the 4-pin header H4 with a USB-to-TTL adapter. H4 carries IO9, 
 2. Hold the P4's BOOT button while powering the board, so the P4 stays in download mode and
    quiet.
 3. Run, with the adapter's port:
-   `cargo run --release --features esp32c6 -- --port <adapter>`
+   `cargo run --release -- --port <adapter>`
    (the runner is `espflash flash --before no-reset --after no-reset --partition-table
    partitions.csv --erase-parts otadata`; no reset line may toggle).
 4. Remove the jumper, then power-cycle the board so both chips run.
@@ -109,7 +109,7 @@ without a log line and counts it in `Status.rx_oversize`, not in `rx_count`.
 ## Queue sizes
 
 Each is read at build time from an environment variable, so a bench run resizes one with a
-rebuild, for example `WARTUI_RADIO_UP_QUEUE_BYTES=65536 cargo build --release --features esp32c6`.
+rebuild, for example `WARTUI_RADIO_UP_QUEUE_BYTES=65536 cargo build --release`.
 `wartui status` reports each queue's high-water mark.
 
 `WARTUI_RADIO_UP_QUEUE_BYTES` is what absorbs a burst above the link's rate
@@ -172,10 +172,10 @@ move when it does. Two things hold that without a board to test on:
 - `.github/dependabot.yml` ignores the incompatible bumps in each firmware directory;
 - each firmware's CI job counts the versions before it builds.
 
-By hand, from this directory or the node's (there, drop `--features esp32c6`):
+By hand, from this directory or the node's:
 
 ```sh
-cargo tree --locked --features esp32c6 -e normal --prefix none --format '{p}' \
+cargo tree --locked -e normal --prefix none --format '{p}' \
   | awk '{print $1, $2}' | sort -u \
   | grep -E '^esp-(alloc|hal|radio|rtos|storage|sync|wifi-sys-esp32c[56]) '
 ```
@@ -187,12 +187,11 @@ power through `WifiController::set_max_tx_power` and reaches the bindings only t
 
 `esp-alloc` is here because the firmware owns the heap and declares its regions.
 
-`esp-storage` is a direct dependency of `firmware/common` alone, behind the `ota` feature the node
-and this firmware turn on for over-the-air updates. It is held at the version
-`esp-bootloader-esp-idf` resolves, and brings no crate the tree lacks: its `esp-sync` and
-`esp-rom-sys` are the copies `esp-hal` uses, and `esp-rom-sys` is `links`-keyed besides. Each
-firmware's CI job counts it with the rest, and Dependabot ignores its and
-`esp-bootloader-esp-idf`'s minor and major releases.
+`esp-storage` is a direct dependency of `firmware/common` alone, for the over-the-air updates
+every firmware takes. It is held at the version `esp-bootloader-esp-idf` resolves, and brings no
+crate the tree lacks: its `esp-sync` and `esp-rom-sys` are the copies `esp-hal` uses, and
+`esp-rom-sys` is `links`-keyed besides. Each firmware's CI job counts it with the rest, and
+Dependabot ignores its and `esp-bootloader-esp-idf`'s minor and major releases.
 
 ### Embassy and `embedded-io-async`
 

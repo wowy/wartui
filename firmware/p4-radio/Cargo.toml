@@ -15,39 +15,29 @@ repository = "https://github.com/wowy/wartui"
 name = "wartui-p4-radio-fw"
 path = "src/main.rs"
 
-[features]
-# The only chip: the P4 boards carry an ESP32-C6. Stated as a feature, like the other
-# firmwares, so the build command reads the same.
-esp32c6 = [
-  "esp-alloc/esp32c6",
-  "esp-bootloader-esp-idf/esp32c6",
-  "esp-hal/esp32c6",
-  "esp-radio/esp32c6",
-  "esp-rtos/esp32c6",
-  "wartui-firmware/esp32c6",
-]
-
 [dependencies]
 # Every `esp-*` crate and `embassy-*` crate is held at the version `esp-radio` resolves,
-# for the reasons `README.md` § "Dependency versions" gives.
-esp-alloc = "0.11.0"
-esp-bootloader-esp-idf = "0.6.0"
-esp-hal = { version = "1.2.2", features = ["unstable"] }
+# for the reasons `README.md` § "Dependency versions" gives. Each names the only chip: the P4
+# boards carry an ESP32-C6.
+esp-alloc = { version = "0.11.0", features = ["esp32c6"] }
+esp-bootloader-esp-idf = { version = "0.6.0", features = ["esp32c6"] }
+esp-hal = { version = "1.2.2", features = ["esp32c6", "unstable"] }
 esp-radio = { version = "1.0.0-beta.1", default-features = false, features = [
   "esp-alloc",
   "esp-now",
+  "esp32c6",
   "unstable",
   "wifi",
 ] }
-esp-rtos = { version = "0.4.0", features = ["embassy", "esp-alloc", "esp-radio"] }
+esp-rtos = { version = "0.4.0", features = ["embassy", "esp-alloc", "esp-radio", "esp32c6"] }
 embassy-executor = "0.10.0"
 embassy-futures = "0.1.2"
 embassy-time = "0.5.1"
 static_cell = "2.1.1"
 # The reset funnel, the reset cause, the phase marker and the radio half, shared with
-# the P4 where it applies, and the flash half of updates, shared with the node. `ota` brings
+# the P4 where it applies, and the flash half of updates, shared with the node, which brings
 # `esp-storage` at the version `firmware/common/Cargo.toml` holds.
-wartui-firmware = { path = "../common", features = ["ota", "radio"] }
+wartui-firmware = { path = "../common", features = ["esp32c6", "radio"] }
 wartui-proto = { path = "../../crates/wartui-proto" }
 
 [lints.rust]
