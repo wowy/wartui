@@ -1,7 +1,7 @@
 use wartui_proto::air::wire_epoch;
 use wartui_proto::link::HostToBridge;
 use wartui_proto::mac::Mac;
-use wartui_proto::plan::{self, ChannelPool, Job, Plan, Radio};
+use wartui_proto::plan::{self, ChannelPool, Job, Plan};
 use wartui_proto::tx_power::clamp_tx_power;
 
 use super::{ActionBatch, Assignment, Command, FleetEngine, Now};
@@ -179,16 +179,10 @@ impl FleetEngine {
         let members: Vec<(Mac, Job)> = self
             .nodes
             .values()
-            // Taken, not defaulted: no node reaches the planner with a band it did not claim.
-            .filter_map(|node| {
-                node.capabilities.filter(|_| self.is_assignable(node, now)).map(|capabilities| {
-                    let job = if scanner == Some(node.mac) {
-                        Job::Bluetooth
-                    } else {
-                        Job::Wifi(Radio::from(capabilities))
-                    };
-                    (node.mac, job)
-                })
+            .filter(|node| self.is_assignable(node, now))
+            .map(|node| {
+                let job = if scanner == Some(node.mac) { Job::Bluetooth } else { Job::Wifi };
+                (node.mac, job)
             })
             .collect();
 
@@ -213,8 +207,7 @@ impl FleetEngine {
     /// re-cut an unchanged membership.
     fn cut(&mut self, members: &[(Mac, Job)]) {
         let jobs: Vec<Job> = members.iter().map(|(_, job)| *job).collect();
-        // `plan_for`, not `plan`: a 5 GHz share cut for an ESP32-C6 is one nobody scans, the
-        // failure the capability token prevents.
+        // `plan_for`, not `plan`: a Bluetooth slot is left out of the deal.
         let Some(plan) = plan::plan_for(self.config.pool, &jobs) else {
             // Nothing to cut for, or more than `plan_for` accepts. The fleet keeps what it has.
             self.plan = None;
@@ -232,55 +225,13 @@ impl FleetEngine {
         // One epoch per node that needs telling, via `next_epoch`. Held locally because the node is
         // borrowed from `self` while deciding.
         let mut counter = self.last_counter;
-        let pool = self.config.pool;
         for (index, (mac, job)) in members.iter().enumerate() {
             let index = u8::try_from(index).unwrap_or(u8::MAX);
             let Some(node) = self.nodes.get_mut(mac) else { continue };
-            // No share: more nodes than channels this fleet can reach, which can be as few as
-            // twelve nodes with no 5 GHz between them. No frame means "scan nothing", so the node
-            // keeps what it holds, duplicating a share rather than leaving a gap. The footer's
-            // unreachable line reports the shortfall.
-            //
-            // Except when it holds nothing to scan, or channels outside the pool. Nothing to scan
-            // means a former Bluetooth node: blind, still holding the antenna, and the scan could
-            // never be taken off it. Outside channels follow the operator narrowing the pool, and
-            // would scan what was just removed. Either way it gets everything its radio reaches in
-            // the pool: the surplus rule at its limit, never empty, since every pool and every
-            // radio has 2.4 GHz.
-            //
-            // An empty set from the plan is the Bluetooth node's, sent with its flag.
-            let held = node.desired.or(node.confirmed);
-            let channels = match plan.channels_for(index) {
-                Some(channels) => channels,
-                None if held.is_some_and(|assignment| {
-                    assignment.channels.is_empty()
-                        || assignment.channels.bits() & !pool.channels().bits() != 0
-                }) =>
-                {
-                    match job.radio() {
-                        Some(radio) => pool.reachable_by(radio),
-                        // Unreachable: a `Job::Bluetooth` slot is never `None` above.
-                        None => continue,
-                    }
-                }
-                // Plain surplus: the node keeps `held`, but a `SetTxPower` change must still reach
-                // it, since nothing else re-sends an assignment nobody re-cut. In an ordinary
-                // re-cut the power already matches, so this is a no-op.
-                None => {
-                    if let Some(assignment) = held
-                        && assignment.tx_power != self.config.tx_power
-                    {
-                        let counter = next_epoch(&mut counter, node.held_epoch);
-                        node.desired = Some(Assignment {
-                            tx_power: self.config.tx_power,
-                            counter,
-                            ..assignment
-                        });
-                        node.dirty = true;
-                    }
-                    continue;
-                }
-            };
+            // Every sniffing slot has a share, because no pool is smaller than `MAX_NODES`. An
+            // empty set is the Bluetooth node's, sent with its flag. `None` is a second Bluetooth
+            // slot, which `scanner` rules out.
+            let Some(channels) = plan.channels_for(index) else { continue };
             // `job` comes from `scanner`, so `channels.is_empty()` and `ble` agree.
             let ble = *job == Job::Bluetooth;
 

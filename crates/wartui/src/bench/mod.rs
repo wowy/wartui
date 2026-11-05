@@ -49,7 +49,7 @@ use wartui_core::runtime::{COMMAND_QUEUE, drive, now};
 use wartui_core::store::{
     CaptureInfo, Checkpoint, CheckpointPass, Store, StoreConfig, open_readonly,
 };
-use wartui_proto::dedup::DEDUP_RING_C5;
+use wartui_proto::dedup::DEDUP_RING;
 use wartui_proto::mac::Mac;
 use wartui_proto::plan::{ChannelPool, NUM_SCAN_CHANNELS};
 
@@ -579,12 +579,9 @@ pub async fn run(args: Args) -> Result<()> {
 /// Networks are scattered over the whole scan table but the plan deals only the pool,
 /// round-robin, so the node to size for is the one holding the fewest channels. Half as
 /// much again as the ring covers a thin draw of networks on that node's channels.
-///
-/// The ring is the C5's, because the benchmark fleet is all C5s: `run` leaves
-/// `SimConfig::c6_nodes` at its default of none.
 fn busy_networks(nodes: u8, pool: ChannelPool) -> u16 {
     let fewest = usize::from((pool.channel_count() / u16::from(nodes.max(1))).max(1));
-    let per_channel = (DEDUP_RING_C5 * 3 / 2).div_ceil(fewest);
+    let per_channel = (DEDUP_RING * 3 / 2).div_ceil(fewest);
     u16::try_from(per_channel * usize::from(NUM_SCAN_CHANNELS)).unwrap_or(u16::MAX)
 }
 
@@ -928,7 +925,7 @@ fn json_string(s: &str) -> String {
 mod tests {
     use std::time::Duration;
 
-    use wartui_proto::dedup::DEDUP_RING_C5;
+    use wartui_proto::dedup::DEDUP_RING;
     use wartui_proto::plan::{ChannelPool, MAX_NODES, NUM_SCAN_CHANNELS};
 
     use super::{Report, Value, busy_networks, percentile, table};
@@ -978,7 +975,7 @@ mod tests {
                 // Rounded down, as the dealer does to the node with the fewest.
                 let fewest = usize::from(pool.channel_count() / u16::from(nodes));
                 assert!(
-                    per_channel * fewest > DEDUP_RING_C5,
+                    per_channel * fewest > DEDUP_RING,
                     "{nodes} nodes on {pool:?}: {per_channel} a channel over {fewest} channels"
                 );
             }

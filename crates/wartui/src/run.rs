@@ -82,11 +82,6 @@ pub struct Args {
     #[arg(long, value_name = "NODES", num_args = 0..=1, default_missing_value = "3")]
     sim: Option<u8>,
 
-    /// Make this many of the simulated nodes ESP32-C6s, which have no 5 GHz
-    /// radio. Counted from the end of the fleet.
-    #[arg(long, value_name = "NODES", default_value_t = 0, requires = "sim")]
-    sim_c6: u8,
-
     /// Where to keep the capture. A new `wartui-YYYY-MM-DD-HH-MM.db` in the
     /// working directory, named for the minute this run started, by default.
     #[arg(long, value_name = "PATH")]
@@ -269,7 +264,7 @@ pub async fn run(args: Args) -> Result<()> {
     // simulator never changes it, so a simulated run leaves `[bridge] mac` as it found it.
     let memory = BridgeMemory::holding(config.bridge.mac);
     memory.set_enabled(config.bridge.remember.unwrap_or(true));
-    let link = crate::open(args.bridge.as_deref(), args.sim, args.sim_c6, memory.clone())?;
+    let link = crate::open(args.bridge.as_deref(), args.sim, memory.clone())?;
 
     let started = now();
     let info =

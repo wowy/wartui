@@ -93,34 +93,28 @@ byte, shown by the host as:
 0.1.0;5g
 ```
 
-That is the firmware version, then `5g` if the chip has the radio for it. A C5 does; a C6 doesn't.
-The board byte is 1 for an ESP32-C5, 2 for an ESP32-C6, and 3 for a XIAO ESP32-C6 built with
-`xiao-external-antenna`. Flag bit 1 marks an image on trial, shown as `;trial`.
+That is the firmware version, then `5g` for the C5's radio. The board byte is 1 for an ESP32-C5.
+Flag bit 1 marks an image on trial, shown as `;trial`.
 Bluetooth isn't a capability. Every node can scan it, and the core's `ADMIN_FLAG_BLE` decides
 whether one does, off at every boot.
 
 The host deals no channels to a node until it has heard this. Every heartbeat carries it, not only
 the first, because one sent once is lost to a dropped frame.
 
-The host acts on the bit rather than just recording it. A build without `5g` is dealt no 5 GHz
-channel, because it would adopt the share, acknowledge it, and scan only the part it could reach.
-This one byte is all the host has to go on, so getting it wrong is indistinguishable from lying.
-
 ## Building and flashing
 
 ```sh
-cargo run --release --features esp32c6            # or --features esp32c5
-cargo run --release --no-default-features --features esp32c6   # without diagnostics
-cargo run --release --features esp32c6,xiao-external-antenna  # XIAO C6, antenna on U.FL
+cargo run --release
+cargo run --release --no-default-features --features esp32c5   # without diagnostics
 ```
 
-To flash every attached board of one chip at once, and never the bridge, run `wartui flash-fleet
---features esp32c5` from the host. [`crates/wartui/README.md`](../../crates/wartui/README.md) §
-"Flashing the fleet" has how it picks boards.
+To flash every attached ESP32-C5 at once, and never the bridge, run `wartui flash-fleet` from the
+host. [`crates/wartui/README.md`](../../crates/wartui/README.md) § "Flashing the fleet" has how it
+picks boards.
 
-Exactly one chip feature is required; `src/main.rs` rejects zero or both at compile time. The C5 is
-dual band and gets `BandMode::Auto`. The C6 is 2.4 GHz only and has no band mode to set, so it
-refuses half the channel pool. Both parts are RISC-V and build on stable.
+`esp32c5` is a default feature because it forwards the chip to the `esp-*` crates. A build that
+turns the defaults off names it again, or it does not compile.
+The C5 is dual band and gets `BandMode::Auto`. It is RISC-V and builds on stable.
 
 Diagnostics are on by default and go out over USB serial-JTAG. Turning them off saves a few
 kilobytes and nothing else: a silent node is hard to tell from a broken one. The cargo runner is
@@ -130,13 +124,6 @@ the bridge's, this monitor is worth watching, because nothing but diagnostics go
 
 Every node can scan Bluetooth. It does so only if the core sets the flag, and a node that does scans
 nothing else.
-
-`xiao-external-antenna` is for a Seeed XIAO ESP32-C6 with an antenna on its U.FL connector. The
-board switches its one RF pin between that connector and an onboard ceramic antenna. Without the
-feature it stays on the ceramic one, so a plugged-in antenna does nothing and the node reads as
-weak. Build with it only when an antenna is fitted, since a radio pointed at an empty connector is
-close to deaf. A C5 build rejects it: the XIAO ESP32-C5 has a U.FL connector and no onboard
-antenna, so there is nothing to switch.
 
 ## Versioning
 
@@ -150,8 +137,7 @@ The frame header, the heartbeat's type byte and its five-byte prefix never chang
 are how a host finds a node a minor version behind, at whatever length that build's heartbeat is.
 The update frames are frozen too, so their layout is the same on every minor version.
 
-The app descriptor carries the version and a project name for the board: `wartui-node-esp32c5`,
-`wartui-node-esp32c6` or `wartui-node-esp32c6-xiao`.
+The app descriptor carries the version and a project name for the board: `wartui-node-esp32c5`.
 
 ## Flash layout
 
@@ -244,7 +230,7 @@ host can't tell that from a node whose radio didn't tune. So `src/main.rs` passe
 Otherwise, channel limits belong to the controller, not here. The node transmits only on the
 control channel, so where it dwells is a coverage decision rather than a legal one. This firmware
 gates nothing: it parks on whatever it is dealt and reports a refusal. In practice a C5 tunes 41 of
-the 42 channels in `SCAN_CHANNELS`, and a C6 tunes the 13 that are 2.4 GHz.
+the 42 channels in `SCAN_CHANNELS`.
 
 The one a C5 won't take is **channel 14**. `esp-radio` refuses it through a hardcoded `nchan: 13`
 that no exposed setting can reach. The refusal is the driver's, so the firmware still attempts the
@@ -353,7 +339,7 @@ Same set as the bridge, pinned by the same thing. See
 it pulls no `esp-sync` at all. Turning `critical-section` on would bring it in. Verify with:
 
 ```sh
-cargo tree -e normal --features esp32c6 -i esp-sync | grep esp-println   # prints nothing
+cargo tree -e normal -i esp-sync | grep esp-println   # prints nothing
 ```
 
 Its serial-JTAG writer tries the FIFO a bounded number of times, then sets a sticky flag saying

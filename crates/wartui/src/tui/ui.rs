@@ -306,7 +306,6 @@ impl Ui {
 #[cfg(test)]
 mod tests {
     use ratatui::crossterm::event::KeyModifiers;
-    use wartui_proto::plan::{ChannelPool, Job, Radio, plan_for};
 
     use super::*;
     use crate::run::PoolArg;
@@ -345,20 +344,18 @@ mod tests {
     }
 
     #[test]
-    fn ui_displays_next_heartbeat_notice_when_assigning_ble_to_surplus_node() {
-        // A node the planner dealt nothing is still in the plan. Giving it the scan
-        // deals it an empty share to carry the flag, which it hears on its next
-        // heartbeat.
-        let mut snapshot = busy();
-        snapshot.plan = plan_for(ChannelPool::Us, &[Job::Wifi(Radio::TwoPointFour); 12]);
-        let surplus = snapshot
+    fn ui_displays_next_heartbeat_notice_when_assigning_ble_to_node_holding_nothing() {
+        // A node with no share yet can still take the scan. It hears the flag on its next
+        // heartbeat, with an empty share to carry it.
+        let snapshot = busy();
+        let idle = snapshot
             .nodes
             .iter()
             .position(|n| n.assignable && n.state.desired.is_none() && n.state.confirmed.is_none())
             .expect("a node with no share of its own");
 
         let (tx, mut rx) = mpsc::channel(4);
-        let mut ui = Ui { selected: surplus, ..Default::default() };
+        let mut ui = Ui { selected: idle, ..Default::default() };
         ui.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE), &snapshot, &tx);
         assert!(rx.try_recv().is_ok(), "the command goes out either way");
         let notice = ui.notice(snapshot.now_ms).expect("a notice");

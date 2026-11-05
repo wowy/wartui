@@ -85,8 +85,8 @@ pub struct FleetEngine {
     /// The partition in force.
     plan: Option<Plan>,
     /// The members the plan was cut for, in slot order, each with its job. [`Self::replan`]
-    /// re-partitions when the live membership differs, job included: a node that changed band or
-    /// took the Bluetooth scan holds a share of the wrong shape.
+    /// re-partitions when the live membership differs, job included: a node that took the
+    /// Bluetooth scan holds a share of the wrong shape.
     plan_members: Vec<(Mac, Job)>,
     /// The one node asked to scan Bluetooth, if any.
     ///
@@ -429,8 +429,8 @@ impl FleetEngine {
 
     /// Whether a node can be given channels.
     ///
-    /// Alive is not enough. A node with no peer slot, that has not declared which band its radio
-    /// reaches, or whose firmware does not speak this build's layouts, heartbeats fine but never
+    /// Alive is not enough. A node with no peer slot, that has not said what it is, or whose
+    /// firmware does not speak this build's layouts, heartbeats fine but never
     /// scans its share. A share nobody scans is worse than one node fewer: the fleet covers less of
     /// the pool than without it.
     #[must_use]

@@ -225,15 +225,9 @@ fn memory(explicit: Option<&Path>) -> BridgeMemory {
 }
 
 /// Open whichever transport the arguments called for.
-fn open(
-    bridge: Option<&str>,
-    sim: Option<u8>,
-    sim_c6: u8,
-    memory: BridgeMemory,
-) -> Result<LinkHandle> {
+fn open(bridge: Option<&str>, sim: Option<u8>, memory: BridgeMemory) -> Result<LinkHandle> {
     if let Some(node_count) = sim {
-        let config =
-            SimConfig { node_count, c6_nodes: sim_c6.min(node_count), ..SimConfig::default() };
+        let config = SimConfig { node_count, ..SimConfig::default() };
         return SimTransport::new(config).start().context("starting the simulator");
     }
     match bridge.map(spec) {
@@ -539,7 +533,7 @@ mod tests {
             assert!(parse(["wartui", command, "--config", "w.toml"]).is_ok(), "{command}");
         }
         for command in ["flash-fleet", "flash-bridge"] {
-            let args = ["wartui", command, "--features", "esp32c6", "--config", "w.toml"];
+            let args = ["wartui", command, "--features", "esp32c5", "--config", "w.toml"];
             assert!(parse(args).is_ok(), "{command}");
         }
     }
@@ -574,6 +568,13 @@ mod tests {
         assert_eq!(args.image.as_deref(), Some(std::path::Path::new("fw.bin")));
         assert!(args.dry_run);
         assert_eq!(args.jobs, 4);
+    }
+
+    #[test]
+    fn cli_parser_defaults_flash_fleet_features_to_esp32c5_when_flag_is_omitted() {
+        let cli = parse(["wartui", "flash-fleet", "--no-bridge"]).unwrap();
+        let Some(Command::FlashFleet(args)) = cli.command else { panic!("not flash-fleet") };
+        assert_eq!(args.features, "esp32c5");
     }
 
     #[test]

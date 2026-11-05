@@ -12,7 +12,6 @@ use wartui_core::engine::{Counters, Snapshot};
 use wartui_core::gps::GpsStatus;
 use wartui_proto::link::LoopPhase;
 use wartui_proto::mac;
-use wartui_proto::plan;
 use wartui_proto::reset::ResetCause;
 
 use super::ui::Ui;
@@ -126,29 +125,17 @@ pub(super) fn faults(snapshot: &Snapshot) -> Vec<String> {
     if c.peer_table_full > 0 {
         faults.push("peer table full".to_owned());
     }
-    // Channels in no share, which nothing else reports. There are two causes. No
-    // sniffing radio can tune them: 5 GHz channels in a fleet of C6s. Or every node is
-    // scanning Bluetooth, so nothing sniffs at all. Every radio tunes 2.4 GHz, so a
-    // missing 2.4 GHz channel means the second.
+    // Channels in no share, which nothing else reports. Every node is scanning Bluetooth,
+    // so nothing sniffs at all.
     if let Some(plan) = snapshot.plan
         && !plan.unreachable().is_empty()
     {
-        let no_sniffer = plan.unreachable().indices().any(|idx| !plan::is_five_ghz(idx));
-        faults.push(if no_sniffer {
-            format!(
-                "every node in this fleet is scanning Bluetooth, so none of the {} channels of \
-                 the {} pool is being swept",
-                thousands(u64::from(plan.unreachable().len())),
-                snapshot.pool
-            )
-        } else {
-            format!(
-                "{} channels of the {} pool are 5 GHz and no node in this fleet is sniffing with \
-                 a 5 GHz radio, so they are not being scanned",
-                thousands(u64::from(plan.unreachable().len())),
-                snapshot.pool
-            )
-        });
+        faults.push(format!(
+            "every node in this fleet is scanning Bluetooth, so none of the {} channels of the \
+             {} pool is being swept",
+            thousands(u64::from(plan.unreachable().len())),
+            snapshot.pool
+        ));
     }
     if let Some(gps) = &snapshot.gps {
         if let GpsStatus::Failed(reason) = &gps.status {
@@ -342,7 +329,7 @@ mod tests {
     use ratatui::backend::TestBackend;
     use wartui_core::gps::GpsCounters;
     use wartui_core::position::PositionSource;
-    use wartui_proto::plan::{ChannelPool, Job, Radio, plan_for};
+    use wartui_proto::plan::{ChannelPool, Job, plan_for};
 
     use super::*;
     use crate::tui::draw;
@@ -714,19 +701,6 @@ mod tests {
     fn view_reports_usb_tx_stall_when_bridge_reboots_due_to_tx_stalled() {
         let screen = rendered(&with_restart(ResetCause::Software, LoopPhase::TxStalled));
         assert!(screen.contains("USB transmit had stalled"), "{screen}");
-    }
-
-    #[test]
-    fn view_warns_missing_five_ghz_coverage_when_fleet_has_no_five_ghz_radios() {
-        let mut snapshot = busy();
-        snapshot.plan = plan_for(ChannelPool::Us, &[Job::Wifi(Radio::TwoPointFour); 2]);
-        let mut terminal = Terminal::new(TestBackend::new(200, 40)).expect("test backend");
-        terminal.draw(|frame| draw(frame, &snapshot, &mut Ui::default())).expect("drawing");
-        let rendered = terminal.backend().to_string();
-        assert!(
-            rendered.contains("no node in this fleet is sniffing with a 5 GHz radio"),
-            "got {rendered}"
-        );
     }
 
     #[test]

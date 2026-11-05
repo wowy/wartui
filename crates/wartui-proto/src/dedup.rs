@@ -42,30 +42,21 @@
 //! The node checks the ring from its Wi-Fi receive callback, once for every beacon and
 //! probe response, inside a lock that holds interrupts off (`esp-sync`'s
 //! `NonReentrantMutex`). Timed on the ESP32-C5 and C6, a linear scan of a 256-entry ring
-//! there took 18-37 µs a frame. A hash lookup takes under 1 µs, the same at 512 entries
-//! as at 256. The ring is therefore sized for the neighborhood and the chip's RAM, not
-//! for the lookup. The index has twice the ring's entries in slots.
+//! there took 18-37 µs a frame. A hash lookup takes under 1 µs, the same at 512 entries as at
+//! 256. The ring is therefore sized for the neighborhood and the chip's RAM, not for the
+//! lookup. The index has twice the ring's entries in slots.
 //!
-//! So there are two sizes. [`C5DedupRing`] holds 512 addresses in 8 KB. [`C6DedupRing`]
-//! holds 4,096 in 64 KB. The C6 has 128 KB more SRAM and no 5 GHz radio, so in a mixed
-//! fleet it is the likely Bluetooth node. The RAM comes out of a main stack that has never
-//! used more than about 2 KB.
+//! [`DedupRing`] holds 512 addresses in 8 KB. The RAM comes out of a main stack that has
+//! never used more than about 2 KB.
 
 use crate::mac_index::MacIndex;
 
-/// How many recently-reported addresses an ESP32-C5 node holds. See [`crate::dedup`].
-pub const DEDUP_RING_C5: usize = 512;
+/// How many recently-reported addresses a node holds. See [`crate::dedup`].
+pub const DEDUP_RING: usize = 512;
 
-/// Hash slots behind [`DEDUP_RING_C5`]. A power of two at least twice the ring, so the
+/// Hash slots behind [`DEDUP_RING`]. A power of two at least twice the ring, so the
 /// index [`crate::dedup::MacRing`] builds over it is never more than half full.
-pub const DEDUP_INDEX_C5: usize = 2 * DEDUP_RING_C5;
-
-/// How many recently-reported addresses an ESP32-C6 node holds: eight times the C5's.
-/// [`crate::dedup`] says why.
-pub const DEDUP_RING_C6: usize = 4096;
-
-/// Hash slots behind [`DEDUP_RING_C6`], for the reason [`DEDUP_INDEX_C5`] gives.
-pub const DEDUP_INDEX_C6: usize = 2 * DEDUP_RING_C6;
+pub const DEDUP_INDEX: usize = 2 * DEDUP_RING;
 
 /// How long a node suppresses an address it has reported before reporting it again.
 ///
@@ -93,9 +84,9 @@ struct Entry {
 
 /// A fixed-capacity ring of recently reported addresses, oldest evicted first.
 ///
-/// `N` is the number of addresses held; [`C5DedupRing`] and [`C6DedupRing`] are the sizes
-/// the firmware uses. `S` is the number of hash slots behind it. It is a separate
-/// parameter because stable Rust cannot write `[u16; 2 * N]` for a generic `N`.
+/// `N` is the number of addresses held; [`DedupRing`] is the size the firmware uses. `S` is the
+/// number of hash slots behind it. It is a separate parameter because stable Rust cannot write
+/// `[u16; 2 * N]` for a generic `N`.
 #[derive(Debug, Clone)]
 pub struct MacRing<const N: usize, const S: usize> {
     entries: [Entry; N],
@@ -105,13 +96,9 @@ pub struct MacRing<const N: usize, const S: usize> {
     index: MacIndex<S>,
 }
 
-/// The ring an ESP32-C5 node and its simulation use: [`DEDUP_RING_C5`] addresses
-/// over [`DEDUP_INDEX_C5`] hash slots.
-pub type C5DedupRing = MacRing<DEDUP_RING_C5, DEDUP_INDEX_C5>;
-
-/// The ring an ESP32-C6 node and its simulation use: [`DEDUP_RING_C6`] addresses
-/// over [`DEDUP_INDEX_C6`] hash slots.
-pub type C6DedupRing = MacRing<DEDUP_RING_C6, DEDUP_INDEX_C6>;
+/// The ring a node and its simulation use: [`DEDUP_RING`] addresses over [`DEDUP_INDEX`]
+/// hash slots.
+pub type DedupRing = MacRing<DEDUP_RING, DEDUP_INDEX>;
 
 impl<const N: usize, const S: usize> MacRing<N, S> {
     /// An empty ring.
@@ -201,10 +188,10 @@ impl<const N: usize, const S: usize> MacRing<N, S> {
 
     /// Empty the ring outright, so every address held is due again.
     ///
-    /// The entries are left as they are, since a lookup never reaches one through a
-    /// cleared `index`. The index is reset, or a stale slot would go on pointing at an
-    /// entry this call means to forget. That writes `S` halfwords, 2 KB on a C5 and
-    /// 16 KB on a C6, and runs only on a share change or an operator clear.
+    /// The entries are left as they are, since a lookup never reaches one through a cleared
+    /// `index`. The index is reset, or a stale slot would go on pointing at an entry this call
+    /// means to forget. That writes `S` halfwords, 2 KB, and runs only on a share change or an
+    /// operator clear.
     pub fn clear(&mut self) {
         self.len = 0;
         self.cursor = 0;

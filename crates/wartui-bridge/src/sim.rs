@@ -17,8 +17,7 @@
 //!
 //! [`SimConfig::ble_coexistence_failure`] models a *failure* — what a stock node did
 //! on the bench, and the only way to exercise the host's `no admin ack` path without
-//! a second radio — and [`SimConfig::c6_nodes`] a mixed fleet. Both are off unless
-//! asked for.
+//! a second radio. It is off unless asked for.
 //!
 //! A node takes over-the-air updates with the receiver the firmware links, into a slot held
 //! in memory, and follows the firmware's rules around it: it listens continuously in update
@@ -35,9 +34,7 @@ use wartui_proto::air::{
     AdminMsg, Board, Capabilities, DieTemp, Frame, HeartbeatMsg, NODE_VERSION, OtaState,
     OtaStatusMsg, RecordKind, Security, SightingBatchWriter, SightingMsg, Vdd, Version,
 };
-use wartui_proto::dedup::{
-    C5DedupRing, C6DedupRing, DEDUP_RSSI_GAIN_BLE_DB, DEDUP_RSSI_GAIN_WIFI_DB,
-};
+use wartui_proto::dedup::{DEDUP_RSSI_GAIN_BLE_DB, DEDUP_RSSI_GAIN_WIFI_DB, DedupRing};
 use wartui_proto::link::{
     BROADCAST, BridgeToHost, Chip, EspNowPayload, HostToBridge, LogLevel, LogStr, LoopPhase, Panel,
     SendStatus,
@@ -86,14 +83,6 @@ pub struct SimConfig {
     /// on is acknowledged, because the node was not yet holding the antenna, and
     /// nothing after it is. The operator cannot take the assignment back.
     pub ble_coexistence_failure: bool,
-    /// How many of the fleet are ESP32-C6s, counting from the last index.
-    ///
-    /// Zero by default, so the simulator models a fleet of C5s. This is the only way
-    /// to see a mixed fleet without two kinds of board on the desk, and the failure
-    /// it guards against is invisible without one: dealt 5 GHz, a C6 acknowledges
-    /// and scans the part it can reach, so the plan looks healthy while a third of
-    /// the pool is uncovered.
-    pub c6_nodes: u8,
     /// Give a network a new address once it has been heard this many times, as a moving
     /// fleet leaves networks behind and meets new ones.
     ///
@@ -133,7 +122,6 @@ impl Default for SimConfig {
             wifi_networks: 120,
             ble_chance: 0.15,
             ble_coexistence_failure: false,
-            c6_nodes: 0,
             sightings_per_address: None,
             outdated_node: None,
             fleet_version: NODE_VERSION,
@@ -262,15 +250,12 @@ impl SimTransport {
                 holds_ble: Arc::clone(&holds_ble),
                 chunk_loss,
             });
-            // Counted from the end, so the nodes below the count keep their
-            // radios as the fleet grows.
-            let five_ghz = self.config.node_count - index > self.config.c6_nodes;
             let version = if self.config.outdated_node == Some(index) {
                 minor_behind(NODE_VERSION)
             } else {
                 self.config.fleet_version
             };
-            let mut node = SimNode::new(index, holds_ble, five_ghz, version);
+            let mut node = SimNode::new(index, holds_ble, version);
             node.rejecting = self.config.rejecting_node == Some(index);
             node.mute_verified = self.config.mute_verified_node == Some(index);
             fleet.push((node, admin_rx));
@@ -459,9 +444,6 @@ struct SimNode {
     /// Whether this node was asked to scan Bluetooth, mirrored where the
     /// bridge can read it.
     holds_ble: Arc<AtomicBool>,
-    /// Whether its radio reaches 5 GHz. Announced in every heartbeat, and the
-    /// planner's only reason to treat one node differently from another.
-    five_ghz: bool,
     /// The firmware version its heartbeats announce: [`NODE_VERSION`], unless
     /// [`SimConfig::outdated_node`] picked this node.
     version: Version,
@@ -492,7 +474,7 @@ struct SimNode {
     /// This node's next sighting batch counter, mirroring `Node::seq` on the
     /// firmware: it advances only once a batch actually goes out.
     seq: u16,
-    seen: Seen,
+    seen: Box<DedupRing>,
     /// When this node booted, on tokio's clock so a paused test controls it.
     boot: tokio::time::Instant,
     speed: f64,
@@ -518,10 +500,9 @@ struct SimNode {
 }
 
 impl SimNode {
-    fn new(index: u8, holds_ble: Arc<AtomicBool>, five_ghz: bool, version: Version) -> Self {
+    fn new(index: u8, holds_ble: Arc<AtomicBool>, version: Version) -> Self {
         Self {
             mac: SimTransport::node_mac(index),
-            five_ghz,
             version,
             epoch: 0,
             // Nothing until it is told. A wartui node parks on the control channel,
@@ -540,15 +521,11 @@ impl SimNode {
             die_temp: DieTemp::from_c(40 + i16::from(index % 8)),
             next_beat: None,
             seq: 0,
-            seen: Seen::new(five_ghz),
+            seen: Box::default(),
             boot: tokio::time::Instant::now(),
             speed: 1.0,
             rng: Xorshift::new(0xA5A5_0000 ^ u64::from(index).wrapping_mul(0x9E37_79B9)),
-            receiver: Box::new(Receiver::new(if five_ghz {
-                Board::Esp32c5
-            } else {
-                Board::Esp32c6
-            })),
+            receiver: Box::new(Receiver::new(Board::Esp32c5)),
             slot: SimSlot::default(),
             update_heard: tokio::time::Instant::now(),
             trial: false,
@@ -706,36 +683,6 @@ impl SimNode {
         let gain_db =
             if self.bluetooth_only() { DEDUP_RSSI_GAIN_BLE_DB } else { DEDUP_RSSI_GAIN_WIFI_DB };
         self.seen.offer(network.bssid, Some(network.rssi), gain_db, now_ms)
-    }
-}
-
-/// A node's dedup ring, sized for its chip as the firmware sizes it.
-///
-/// Boxed so a `SimNode`, and the future of the task that owns it, holds a pointer
-/// rather than the C6's 64 KB ring inline.
-#[derive(Debug)]
-enum Seen {
-    C5(Box<C5DedupRing>),
-    C6(Box<C6DedupRing>),
-}
-
-impl Seen {
-    fn new(five_ghz: bool) -> Self {
-        if five_ghz { Self::C5(Box::default()) } else { Self::C6(Box::default()) }
-    }
-
-    fn offer(&mut self, mac: [u8; 6], rssi: Option<i8>, gain_db: i8, now_ms: u32) -> bool {
-        match self {
-            Self::C5(ring) => ring.offer(mac, rssi, gain_db, now_ms),
-            Self::C6(ring) => ring.offer(mac, rssi, gain_db, now_ms),
-        }
-    }
-
-    fn clear(&mut self) {
-        match self {
-            Self::C5(ring) => ring.clear(),
-            Self::C6(ring) => ring.clear(),
-        }
     }
 }
 
@@ -982,17 +929,14 @@ async fn beat(
     started: tokio::time::Instant,
 ) -> Result<(), ()> {
     // Capabilities are what tell the host this is a node it can drive, so a fleet
-    // without them is a fleet the planner ignores. The band varies by node, because
-    // a fleet where everything reaches 5 GHz never makes the planner leave a node
-    // out of a channel.
-    let board = if node.five_ghz { Board::Esp32c5 } else { Board::Esp32c6 };
+    // without them is a fleet the planner ignores.
     let msg = HeartbeatMsg {
         counter: node.hb_counter,
         epoch: node.epoch,
         capabilities: Capabilities {
             version: node.version,
             trial: node.trial,
-            ..Capabilities::here(board)
+            ..Capabilities::here(Board::Esp32c5)
         },
         // A simulated node's pending buffers never fill.
         wifi_refused: 0,

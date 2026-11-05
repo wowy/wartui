@@ -50,13 +50,6 @@ pub(super) fn unannounced(last: u8) -> NodeView {
     view
 }
 
-/// A node whose token says 2.4 GHz only: an ESP32-C6.
-pub(super) fn narrowband(last: u8) -> NodeView {
-    let mut view = node(last, 0, true);
-    view.state.capabilities = Some(Capabilities::here(Board::Esp32c6));
-    view
-}
-
 /// Heartbeating from firmware a minor version behind this build's: known by its
 /// heartbeat prefix, never assignable, and never counted as alive.
 pub(super) fn outdated(last: u8) -> NodeView {

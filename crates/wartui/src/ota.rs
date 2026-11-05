@@ -57,11 +57,11 @@ pub struct Args {
     nodes: Vec<BridgeSpec>,
 
     /// Send this app-only image, to the nodes of the board it was built for, rather than
-    /// building or downloading one per board.
+    /// building or downloading one.
     #[arg(long, value_name = "BIN", conflicts_with = "firmware_dir")]
     image: Option<PathBuf>,
 
-    /// Build each board's image from the node firmware in this directory.
+    /// Build the image from the node firmware in this directory.
     #[arg(long, value_name = "DIR")]
     firmware_dir: Option<PathBuf>,
 
@@ -218,7 +218,7 @@ fn open(args: &Args) -> Result<LinkHandle> {
         return SimTransport::new(config).start().context("starting the simulator");
     }
     let bridge = args.bridge.as_deref();
-    super::open(bridge, None, 0, super::memory(args.config.as_deref()))
+    super::open(bridge, None, super::memory(args.config.as_deref()))
 }
 
 async fn connected(link: &mut LinkHandle) -> Result<wartui_bridge::BridgeInfo> {
@@ -294,12 +294,25 @@ struct Ready {
     ota: OtaImage,
 }
 
+/// The boards among `targets` a node image exists for, each once.
+///
+/// One with none is left out, so the table refuses that node and the run goes on. Asking for
+/// its image would stop the update for every other node too.
+fn boards_with_images(targets: &[(Mac, Capabilities)]) -> Vec<Board> {
+    let mut boards: Vec<Board> = targets
+        .iter()
+        .map(|(_, caps)| caps.board)
+        .filter(|board| app::has_node_image(*board))
+        .collect();
+    boards.sort_by_key(|board| board.as_u8());
+    boards.dedup();
+    boards
+}
+
 /// One image per board among `targets`: `--image` for its own board, else a build or a
 /// release download per board.
 async fn images(args: &Args, targets: &[(Mac, Capabilities)]) -> Result<HashMap<Board, Ready>> {
-    let mut boards: Vec<Board> = targets.iter().map(|(_, caps)| caps.board).collect();
-    boards.sort_by_key(|board| board.as_u8());
-    boards.dedup();
+    let boards = boards_with_images(targets);
     let image = args.image.clone();
     let firmware_dir = args.firmware_dir.clone();
     // Builds and downloads block, and the link's reader must keep running meanwhile.
@@ -316,9 +329,6 @@ async fn images(args: &Args, targets: &[(Mac, Capabilities)]) -> Result<HashMap<
         }
         let mut found = Vec::new();
         for board in boards {
-            if matches!(board, Board::Unknown(_)) {
-                continue;
-            }
             let source = app::source_for(board, firmware_dir.as_deref())?;
             println!("image   {}: {}", board_name(board), source.describe(false));
             let image = app::obtain(board, &source)?;
@@ -459,7 +469,7 @@ mod tests {
     const NEW: Version = Version::new(0, 1, 1);
 
     fn caps(version: Version, trial: bool) -> Capabilities {
-        Capabilities { version, trial, ..Capabilities::here(Board::Esp32c6) }
+        Capabilities { version, trial, ..Capabilities::here(Board::Esp32c5) }
     }
 
     #[test]
@@ -485,8 +495,21 @@ mod tests {
 
     #[test]
     fn ota_cmd_refuses_node_when_no_image_for_board() {
-        let action = decide(&caps(Version::new(0, 0, 9), false), None, true);
+        let node = Capabilities::here(Board::Esp32c6);
+        let action = decide(&node, None, true);
         assert_eq!(action.to_string(), "refuse: no image for esp32c6");
+    }
+
+    #[test]
+    fn ota_cmd_skips_board_when_it_has_no_node_image() {
+        // One leftover C6 must not stop the update for every C5 beside it.
+        let targets = [
+            ([0x02, 0, 0, 0, 0, 1], Capabilities::here(Board::Esp32c6)),
+            ([0x02, 0, 0, 0, 0, 2], Capabilities::here(Board::Esp32c5)),
+            ([0x02, 0, 0, 0, 0, 3], Capabilities::here(Board::Unknown(3))),
+            ([0x02, 0, 0, 0, 0, 4], Capabilities::here(Board::Esp32c5)),
+        ];
+        assert_eq!(boards_with_images(&targets), [Board::Esp32c5]);
     }
 
     #[test]

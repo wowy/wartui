@@ -590,7 +590,7 @@ dependencies = [
  "esp32c2",
  "esp32c3",
  "esp32c5 0.3.0",
- "esp32c6 0.24.0",
+ "esp32c6",
  "esp32c61",
  "esp32h2",
  "esp32p4",
@@ -648,9 +648,7 @@ dependencies = [
  "esp-metadata-generated",
  "esp-sync",
  "esp-wifi-sys-esp32c5",
- "esp-wifi-sys-esp32c6",
  "esp32c5 0.4.0",
- "esp32c6 0.25.0",
 ]
 
 [[package]]
@@ -694,9 +692,7 @@ dependencies = [
  "esp-rom-sys",
  "esp-sync",
  "esp-wifi-sys-esp32c5",
- "esp-wifi-sys-esp32c6",
  "esp32c5 0.4.0",
- "esp32c6 0.25.0",
  "heapless 0.9.3",
  "instability",
  "num-derive",
@@ -736,7 +732,6 @@ dependencies = [
  "document-features",
  "esp-metadata-generated",
  "esp32c5 0.3.0",
- "esp32c6 0.24.0",
 ]
 
 [[package]]
@@ -776,7 +771,6 @@ dependencies = [
  "esp-rom-sys",
  "esp-sync",
  "esp32c5 0.3.0",
- "esp32c6 0.24.0",
 ]
 
 [[package]]
@@ -799,12 +793,6 @@ name = "esp-wifi-sys-esp32c5"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e025f203485a3ed0f00b2cb79bc86c6073d5ca11832507b3b474f33ef45a6ffa"
-
-[[package]]
-name = "esp-wifi-sys-esp32c6"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5bb01c06a3dbd75121146f619513ee610505b2d80ce3c421ed0c840a19e12f67"
 
 [[package]]
 name = "esp32"
@@ -856,15 +844,6 @@ name = "esp32c6"
 version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a207a5d6886ca89b4f220606dcf3779ca869803df192508314939186ae8de1ee"
-dependencies = [
- "vcell",
-]
-
-[[package]]
-name = "esp32c6"
-version = "0.25.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f90472d3e6a752e5d20533796f649760103ea449319f14d2a26b2fdff95633bb"
 dependencies = [
  "vcell",
 ]
@@ -1663,7 +1642,7 @@ dependencies = [
 
 [[package]]
 name = "wartui-node-fw"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "esp-alloc",
  "esp-bootloader-esp-idf",
@@ -1673,7 +1652,6 @@ dependencies = [
  "esp-rtos",
  "esp-sync",
  "esp-wifi-sys-esp32c5",
- "esp-wifi-sys-esp32c6",
  "static_cell",
  "wartui-firmware",
  "wartui-proto",

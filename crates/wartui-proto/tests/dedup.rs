@@ -4,8 +4,8 @@ mod common;
 
 use common::{Lcg, hash_for_test};
 use wartui_proto::dedup::{
-    C5DedupRing, C6DedupRing, DEDUP_REFRESH_MS, DEDUP_RING_C5, DEDUP_RING_C6,
-    DEDUP_RSSI_GAIN_BLE_DB, DEDUP_RSSI_GAIN_WIFI_DB, MacRing,
+    DEDUP_REFRESH_MS, DEDUP_RING, DEDUP_RSSI_GAIN_BLE_DB, DEDUP_RSSI_GAIN_WIFI_DB, DedupRing,
+    MacRing,
 };
 
 const T0: u32 = 1_000;
@@ -211,16 +211,8 @@ fn assert_holds_exactly<const N: usize, const S: usize>(ring: &mut MacRing<N, S>
 }
 
 #[test]
-fn mac_ring_enforces_capacity_bounds_when_configured_with_c5_ring_size() {
-    assert_holds_exactly(&mut C5DedupRing::new(), DEDUP_RING_C5);
-}
-
-#[test]
-fn mac_ring_enforces_capacity_bounds_when_configured_with_c6_ring_size() {
-    // Boxed so the 64 KB ring does not stay in this frame for the whole test. A debug
-    // build may still construct it on the stack before the move, which a test thread's
-    // 2 MB stack has room for.
-    assert_holds_exactly(&mut *Box::<C6DedupRing>::default(), DEDUP_RING_C6);
+fn mac_ring_enforces_capacity_bounds_when_configured_with_node_ring_size() {
+    assert_holds_exactly(&mut DedupRing::new(), DEDUP_RING);
 }
 
 #[test]

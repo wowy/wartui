@@ -679,27 +679,6 @@ async fn sim_fleet_restricts_ble_reports_to_assigned_node_when_partitioned() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn sim_node_reports_two_point_four_capability_only_when_configured_as_c6() {
-    // The only way to put a mixed fleet in front of the planner without two kinds of
-    // board on the desk.
-    let config = SimConfig { node_count: 3, c6_nodes: 1, ble_chance: 0.0, ..SimConfig::default() };
-    let mut link = SimTransport::new(config).start().expect("starts");
-
-    let mut bands: HashMap<Mac, bool> = HashMap::new();
-    while bands.len() < 3 {
-        let (src, raw) = next_frame(&mut link).await;
-        let Some(heartbeat) = heartbeat_of(&raw) else { continue };
-        bands.insert(src, heartbeat.capabilities.five_ghz);
-    }
-
-    // Counted from the end, so the indices below the count keep their radios as
-    // the fleet grows.
-    assert!(bands[&SimTransport::node_mac(0)]);
-    assert!(bands[&SimTransport::node_mac(1)]);
-    assert!(!bands[&SimTransport::node_mac(2)], "the last one is the C6");
-}
-
-#[tokio::test(start_paused = true)]
 async fn sim_node_fails_to_ack_assignments_when_ble_coexistence_failure_is_simulated() {
     // Reproduced without hardware so the host's `no admin ack` path can be
     // exercised; see `SimConfig::ble_coexistence_failure`.

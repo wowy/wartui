@@ -40,24 +40,19 @@ use esp_hal::time::Instant;
 use esp_radio::wifi::sniffer::PromiscuousPkt;
 use esp_sync::NonReentrantMutex;
 use wartui_proto::beacon::{Sighting, is_report, parse_mgmt};
-#[cfg(feature = "esp32c5")]
-use wartui_proto::dedup::C5DedupRing as ChipDedupRing;
-#[cfg(feature = "esp32c6")]
-use wartui_proto::dedup::C6DedupRing as ChipDedupRing;
-use wartui_proto::dedup::DEDUP_RSSI_GAIN_WIFI_DB;
+use wartui_proto::dedup::{DEDUP_RSSI_GAIN_WIFI_DB, DedupRing};
 use wartui_proto::pending::WifiPending;
 
 /// The dedup ring: addresses already reported and not yet due again.
 ///
-/// Sized per chip: 512 addresses on a C5, 4,096 on a C6, which has the RAM and is
-/// the likely Bluetooth node (`wartui_proto::dedup`, "Why the ring is hashed").
+/// 512 addresses (`wartui_proto::dedup`, "Why the ring is hashed").
 ///
 /// A `static` rather than a field of `Node`, because the receive callback needs to
 /// reach it and cannot borrow anything (see the module doc). Nests inside
 /// [`DWELL`]'s lock in [`on_frame`] and inside `ble::PENDING`'s in
 /// `ble::Scanner::sweep`; every other caller in `main.rs` takes it on its own, per
 /// sighting, and that lock order must hold everywhere `SEEN` is used.
-pub static SEEN: NonReentrantMutex<ChipDedupRing> = NonReentrantMutex::new(ChipDedupRing::new());
+pub static SEEN: NonReentrantMutex<DedupRing> = NonReentrantMutex::new(DedupRing::new());
 
 /// Milliseconds since boot, as [`SEEN`] counts them. Truncation is the ring's own wrap.
 #[allow(clippy::cast_possible_truncation)]

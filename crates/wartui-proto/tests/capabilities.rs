@@ -32,9 +32,7 @@ fn round_trip(caps: Capabilities) -> Capabilities {
 
 #[test]
 fn capabilities_survives_heartbeat_round_trip_when_encoded_and_decoded() {
-    for board in
-        [Board::Esp32c5, Board::Esp32c6, Board::Esp32c6Xiao, Board::Esp32p4, Board::Unknown(0x7F)]
-    {
+    for board in [Board::Esp32c5, Board::Esp32c6, Board::Esp32p4, Board::Unknown(0x7F)] {
         let caps = Capabilities::here(board);
         assert_eq!(round_trip(caps), caps, "{caps}");
     }
@@ -49,7 +47,6 @@ fn capabilities_maps_feature_bits_when_converting_to_flags() {
     assert_eq!(CAP_FLAG_5G, 0b01);
     assert_eq!(CAP_FLAG_TRIAL, 0b10);
     assert_eq!(Capabilities::here(Board::Esp32c6).flags(), 0);
-    assert_eq!(Capabilities::here(Board::Esp32c6Xiao).flags(), 0);
     assert_eq!(Capabilities::here(Board::Esp32c5).flags(), CAP_FLAG_5G);
     let trial = Capabilities { trial: true, ..Capabilities::here(Board::Esp32c5) };
     assert_eq!(trial.flags(), CAP_FLAG_5G | CAP_FLAG_TRIAL);
@@ -71,7 +68,6 @@ fn board_maps_bytes_when_converting_to_and_from_wire() {
     // Wire values, frozen with the prefix that carries them.
     assert_eq!(Board::Esp32c5.as_u8(), 1);
     assert_eq!(Board::Esp32c6.as_u8(), 2);
-    assert_eq!(Board::Esp32c6Xiao.as_u8(), 3);
     assert_eq!(Board::Esp32p4.as_u8(), 4);
     assert_eq!(Board::from_u8(4), Board::Esp32p4);
     for byte in 0..=u8::MAX {
@@ -87,6 +83,13 @@ fn board_decodes_unknown_when_byte_unassigned() {
 }
 
 #[test]
+fn board_decodes_unknown_when_byte_is_three() {
+    // Assigned to no board, and a heartbeat carrying it is still a node.
+    assert_eq!(Board::from_u8(3), Board::Unknown(3));
+    assert_eq!(Board::Unknown(3).as_u8(), 3);
+}
+
+#[test]
 fn capabilities_carries_node_version_when_constructed() {
     let caps = Capabilities::here(Board::Esp32c5);
     assert_eq!(caps.version, NODE_VERSION);
@@ -97,7 +100,6 @@ fn capabilities_carries_node_version_when_constructed() {
 fn capabilities_reads_five_ghz_from_board_when_constructed() {
     assert!(Capabilities::here(Board::Esp32c5).five_ghz);
     assert!(!Capabilities::here(Board::Esp32c6).five_ghz);
-    assert!(!Capabilities::here(Board::Esp32c6Xiao).five_ghz);
 }
 
 #[test]

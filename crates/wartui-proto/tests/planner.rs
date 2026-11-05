@@ -8,8 +8,8 @@
 use std::collections::BTreeSet;
 
 use wartui_proto::plan::{
-    ChannelPool, ChannelSet, IndexRun, Job, MAX_NODES, NUM_SCAN_CHANNELS, Radio, SCAN_CHANNELS,
-    UNSUPPORTED_INDEX, is_five_ghz, plan, plan_for,
+    ChannelPool, ChannelSet, IndexRun, Job, MAX_NODES, NUM_SCAN_CHANNELS, SCAN_CHANNELS,
+    UNSUPPORTED_INDEX, plan, plan_for,
 };
 
 const POOLS: [ChannelPool; 3] = [ChannelPool::Us, ChannelPool::Eu, ChannelPool::All];
@@ -250,7 +250,7 @@ fn plan_encodes_fleet_metadata_into_admin_frame_when_generating_admin_msg() {
 fn planner_assigns_empty_channel_set_when_node_holds_ble_flag() {
     // Counted, because `Plan::node_count` reports the fleet's shape rather than
     // a census of who is sniffing.
-    let fleet = [Job::Bluetooth, Job::Wifi(Radio::DualBand), Job::Wifi(Radio::DualBand)];
+    let fleet = [Job::Bluetooth, Job::Wifi, Job::Wifi];
     let p = plan_for(ChannelPool::Us, &fleet).expect("a valid fleet");
 
     assert_eq!(p.node_count(), 3);
@@ -270,16 +270,12 @@ fn planner_partitions_pool_across_wifi_nodes_only_when_ble_node_present() {
     // Three nodes, one of them on Bluetooth, deals the same shares as two nodes —
     // the point of the change, and the reason moving the scan has to re-cut.
     let two = plan(ChannelPool::Us, 2).expect("valid");
-    let explicit = plan_for(ChannelPool::Us, &[Job::Wifi(Radio::DualBand); 2]).expect("valid");
+    let explicit = plan_for(ChannelPool::Us, &[Job::Wifi; 2]).expect("valid");
     assert_eq!(two, explicit, "the convenience route and the explicit one agree");
 
     let with_scanner = plan_for(
         ChannelPool::Us,
-        &[Job::Wifi(Radio::DualBand); 2]
-            .iter()
-            .copied()
-            .chain([Job::Bluetooth])
-            .collect::<Vec<_>>(),
+        &[Job::Wifi; 2].iter().copied().chain([Job::Bluetooth]).collect::<Vec<_>>(),
     )
     .expect("valid");
     assert_eq!(with_scanner.channels_for(0), two.channels_for(0));
@@ -295,21 +291,6 @@ fn planner_marks_entire_pool_unreachable_when_only_node_is_assigned_ble() {
     let p = plan_for(ChannelPool::Us, &[Job::Bluetooth]).expect("one node is a valid fleet");
     assert_eq!(p.channels_for(0), Some(ChannelSet::empty()));
     assert_eq!(p.unreachable(), ChannelPool::Us.channels());
-    // And a caller can tell this apart from a missing 5 GHz radio without asking,
-    // because every radio tunes 2.4 GHz: a 2.4 GHz channel is out of reach only
-    // when nothing is sniffing at all.
-    assert!(p.unreachable().indices().any(|idx| !is_five_ghz(idx)));
-}
-
-#[test]
-fn planner_marks_five_ghz_unreachable_when_only_dual_band_node_assigned_ble() {
-    // Not a mixed fleet: it is a one-radio fleet whose only dual-band node is
-    // doing something else, so the 5 GHz pass must not run at all.
-    let fleet = [Job::Bluetooth, Job::Wifi(Radio::TwoPointFour)];
-    let p = plan_for(ChannelPool::Us, &fleet).expect("a valid fleet");
-    assert!(p.unreachable().indices().all(is_five_ghz), "only 5 GHz is out of reach");
-    assert_eq!(p.unreachable().len(), 25, "every 5 GHz channel in the US pool");
-    assert_eq!(p.channels_for(1).expect("assigned").len(), 11, "the C6 takes all of 2.4");
 }
 
 #[test]
@@ -317,8 +298,7 @@ fn plan_refuses_empty_channel_set_when_node_lacks_ble_flag() {
     // The one frame that must never exist: an empty mask without the flag tells a
     // node to scan nothing, and a node sent one parks while the host goes on
     // believing it is sweeping.
-    let p = plan_for(ChannelPool::Us, &[Job::Bluetooth, Job::Wifi(Radio::DualBand)])
-        .expect("a valid fleet");
+    let p = plan_for(ChannelPool::Us, &[Job::Bluetooth, Job::Wifi]).expect("a valid fleet");
     assert!(
         p.admin_for(0, 1, wartui_proto::air::ADMIN_FLAG_BLE, 8)
             .is_some_and(|admin| admin.channels.is_empty())
@@ -326,107 +306,44 @@ fn plan_refuses_empty_channel_set_when_node_lacks_ble_flag() {
     assert!(p.admin_for(0, 1, 0, 8).is_none(), "an empty mask without the flag is refused");
     assert!(p.admin_for(1, 1, 0, 8).is_some(), "and a real share needs no flag");
 
-    // A surplus slot is `None` either way: there is nothing to say to it, and the
-    // flag does not invent something.
-    let crowd = [Job::Wifi(Radio::TwoPointFour); 14];
-    let p = plan_for(ChannelPool::Eu, &crowd).expect("a valid fleet");
-    assert!(p.channels_for(13).is_none(), "thirteen 2.4 GHz channels across fourteen nodes");
-    assert!(p.admin_for(13, 1, wartui_proto::air::ADMIN_FLAG_BLE, 8).is_none());
+    // A second Bluetooth slot is `None` either way: there is nothing to say to it, and
+    // the flag does not invent something.
+    let p = plan_for(ChannelPool::Us, &[Job::Bluetooth, Job::Bluetooth]).expect("a valid fleet");
+    assert!(p.channels_for(1).is_none());
+    assert!(p.admin_for(1, 1, wartui_proto::air::ADMIN_FLAG_BLE, 8).is_none());
+}
 
-    // Every pool has 2.4 GHz in it and every radio tunes 2.4 GHz, so the fallback
-    // the engine gives such a node is never itself empty.
-    for pool in POOLS {
-        for radio in [Radio::DualBand, Radio::TwoPointFour] {
-            assert!(!pool.reachable_by(radio).is_empty(), "{pool:?}/{radio:?}");
-            assert!(pool.reachable_by(radio).indices().all(|idx| radio.can_tune(idx)));
-        }
+#[test]
+fn planner_gives_every_wifi_slot_a_share_when_fleet_is_max_nodes_on_smallest_pool() {
+    // What `FleetEngine::deal` relies on to send every sniffing node a share: no pool is
+    // smaller than the largest fleet, so the deal never runs out of channels.
+    let smallest =
+        POOLS.into_iter().min_by_key(|pool| pool.channel_count()).expect("there are pools");
+    assert!(usize::from(smallest.channel_count()) >= MAX_NODES);
+
+    let p = plan_for(smallest, &[Job::Wifi; MAX_NODES]).expect("a valid fleet");
+    let nodes = u8::try_from(MAX_NODES).expect("fits");
+    for node in 0..nodes {
+        assert!(!p.channels_for(node).expect("assigned").is_empty(), "slot {node}");
+    }
+
+    let mut fleet = [Job::Wifi; MAX_NODES];
+    fleet[0] = Job::Bluetooth;
+    let p = plan_for(smallest, &fleet).expect("a valid fleet");
+    for node in 1..nodes {
+        assert!(!p.channels_for(node).expect("assigned").is_empty(), "slot {node}");
     }
 }
 
 #[test]
 fn planner_produces_identical_plan_when_using_convenience_or_explicit_api() {
-    // `plan` is `plan_for` with every radio dual-band, so the mixed-fleet machinery
-    // must be invisible to it. Every fleet on a bench today is one of these.
+    // `plan` is `plan_for` with every slot sniffing.
     for pool in POOLS {
         for nodes in FLEET_SIZES {
-            let fleet = vec![Job::Wifi(Radio::DualBand); usize::from(nodes)];
+            let fleet = vec![Job::Wifi; usize::from(nodes)];
             assert_eq!(plan(pool, nodes), plan_for(pool, &fleet), "{pool:?}/{nodes}");
         }
     }
-}
-
-#[test]
-fn planner_restricts_single_band_node_to_two_point_four_channels_when_dealing() {
-    // A C6 adopts a 5 GHz share, acknowledges it, and scans the part it can reach —
-    // leaving a hole in the fleet's coverage with an assignment on top of it.
-    for pool in POOLS {
-        for dual in 0..4u8 {
-            for narrow in 1..4u8 {
-                let radios: Vec<Radio> = core::iter::repeat_n(Radio::DualBand, usize::from(dual))
-                    .chain(core::iter::repeat_n(Radio::TwoPointFour, usize::from(narrow)))
-                    .collect();
-                let fleet: Vec<Job> = radios.iter().copied().map(Job::from).collect();
-                let p = plan_for(pool, &fleet).expect("a valid fleet");
-                for (node, radio) in radios.iter().enumerate() {
-                    let node = u8::try_from(node).expect("small fleet");
-                    let Some(set) = p.channels_for(node) else { continue };
-                    for idx in set.indices() {
-                        assert!(
-                            radio.can_tune(idx),
-                            "{pool:?}: node {node} ({radio:?}) was given index {idx}"
-                        );
-                    }
-                }
-            }
-        }
-    }
-}
-
-#[test]
-fn planner_reports_untunable_channels_as_unreachable_when_five_ghz_radios_absent() {
-    // A fleet of nothing but C6s covers eleven of the US pool's thirty-six. Not a
-    // fault the planner can fix, and not one it should hide.
-    let fleet = [Job::Wifi(Radio::TwoPointFour); 3];
-    let p = plan_for(ChannelPool::Us, &fleet).expect("a valid fleet");
-    let unreachable: BTreeSet<u8> = p.unreachable().indices().collect();
-    assert!(unreachable.iter().all(|idx| is_five_ghz(*idx)), "only 5 GHz is out of reach");
-    assert_eq!(unreachable.len(), 25, "every 5 GHz channel in the US pool");
-
-    let dealt: BTreeSet<u8> = covered(&p).into_iter().collect();
-    assert!(dealt.is_disjoint(&unreachable), "nothing unreachable was dealt anyway");
-    assert_eq!(dealt.len() + unreachable.len(), usize::from(ChannelPool::Us.channel_count()));
-
-    // And with one C5 among them there is no hole at all.
-    let mixed = [
-        Job::Wifi(Radio::DualBand),
-        Job::Wifi(Radio::TwoPointFour),
-        Job::Wifi(Radio::TwoPointFour),
-    ];
-    let p = plan_for(ChannelPool::Us, &mixed).expect("a valid fleet");
-    assert_eq!(p.unreachable(), wartui_proto::plan::ChannelSet::empty());
-}
-
-#[test]
-fn planner_optimizes_channel_shares_when_fleet_contains_mixed_radios() {
-    // Dealt in pool order, the C5 would take its half of 2.4 GHz and then all
-    // of 5 GHz on top: 31 channels against the C6's 5, which is the block split
-    // this planner was written to avoid. Dealing the constrained channels first
-    // costs nothing and gets the largest share down to 25.
-    let p =
-        plan_for(ChannelPool::Us, &[Job::Wifi(Radio::DualBand), Job::Wifi(Radio::TwoPointFour)])
-            .expect("valid");
-    let c5 = p.channels_for(0).expect("assigned").len();
-    let c6 = p.channels_for(1).expect("assigned").len();
-    assert_eq!((c5, c6), (25, 11), "the C5 takes 5 GHz and the C6 takes 2.4");
-    assert_eq!(c5 + c6, u32::from(ChannelPool::Us.channel_count()), "and between them, all of it");
-
-    // Two C5s and a C6: the twenty-five 5 GHz channels go 13/12 to the C5s,
-    // and the C6 is far enough behind to take the whole of 2.4 GHz.
-    let three =
-        [Job::Wifi(Radio::DualBand), Job::Wifi(Radio::DualBand), Job::Wifi(Radio::TwoPointFour)];
-    let p = plan_for(ChannelPool::Us, &three).expect("valid");
-    let sizes: Vec<u32> = (0..3).map(|n| p.channels_for(n).expect("assigned").len()).collect();
-    assert_eq!(sizes, vec![13, 12, 11]);
 }
 
 #[test]
@@ -434,7 +351,7 @@ fn planner_returns_none_when_fleet_size_is_zero_or_exceeds_max_nodes() {
     assert!(plan(ChannelPool::Us, 0).is_none());
     assert!(plan(ChannelPool::Us, u8::try_from(MAX_NODES).expect("fits") + 1).is_none());
     assert!(plan_for(ChannelPool::Us, &[]).is_none());
-    assert!(plan_for(ChannelPool::Us, &[Job::Wifi(Radio::DualBand); MAX_NODES + 1]).is_none());
+    assert!(plan_for(ChannelPool::Us, &[Job::Wifi; MAX_NODES + 1]).is_none());
 }
 
 #[test]

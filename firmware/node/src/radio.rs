@@ -68,10 +68,7 @@ pub fn set_peer_rate(manager: &EspNowManager, mac: &[u8; 6]) -> bool {
 /// that compiles and then fails on the board.
 #[allow(unsafe_code, reason = "esp-radio wraps no getter for the transmit power")]
 pub fn tx_power(_manager: &EspNowManager) -> i8 {
-    #[cfg(feature = "esp32c5")]
     use esp_wifi_sys_esp32c5::include as sys;
-    #[cfg(feature = "esp32c6")]
-    use esp_wifi_sys_esp32c6::include as sys;
 
     let mut power: i8 = 0;
     // SAFETY: Wi-Fi has started before the node enters its receive loop, and `power`

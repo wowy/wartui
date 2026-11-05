@@ -206,13 +206,12 @@ fn lost_cell(node: &NodeView) -> String {
 
 /// The node's chip and the last two octets of its address: `C5 57:84`.
 ///
-/// The chip comes from the board its heartbeats announce; a XIAO C6 is a `C6`. A node
-/// heard only through sightings shows `—` until its first heartbeat, and a board this
-/// build has no name for shows `??`.
+/// The chip comes from the board its heartbeats announce. A node heard only through sightings shows
+/// `—` until its first heartbeat, and a board this build has no name for shows `??`.
 fn node_label(node: &NodeView) -> String {
     let chip = match node.state.capabilities.map(|caps| caps.board) {
         Some(Board::Esp32c5) => "C5",
-        Some(Board::Esp32c6 | Board::Esp32c6Xiao) => "C6",
+        Some(Board::Esp32c6) => "C6",
         Some(Board::Esp32p4) => "P4",
         Some(Board::Unknown(_)) => "??",
         None => "— ",
@@ -386,7 +385,7 @@ mod tests {
     #[test]
     fn fleet_table_displays_chip_and_mac_suffix_when_rendering_nodes() {
         let snapshot = Snapshot {
-            nodes: vec![node(0x84, 0, true), narrowband(0x85), unannounced(0x86)],
+            nodes: vec![node(0x84, 0, true), unannounced(0x86)],
             tail: Vec::new(),
             ..busy()
         };
@@ -394,8 +393,7 @@ mod tests {
         terminal.draw(|frame| draw(frame, &snapshot, &mut Ui::default())).expect("drawing");
         let rendered = terminal.backend().to_string();
 
-        assert!(rendered.contains("C5 57:84"), "a dual-band radio is a C5");
-        assert!(rendered.contains("C6 57:85"), "a 2.4 GHz radio is a C6");
+        assert!(rendered.contains("C5 57:84"));
         assert!(rendered.contains("—  57:86"), "a node that has not heartbeated has no chip yet");
         assert!(!rendered.contains("02:00:5E:10:57"), "and no row spells out the whole address");
     }
@@ -731,10 +729,9 @@ mod tests {
     #[test]
     fn node_label_names_chip_from_board_when_node_has_heartbeated() {
         assert!(node_label(&node(0x84, 0, true)).starts_with("C5 "));
-        assert!(node_label(&narrowband(0x84)).starts_with("C6 "));
-        let mut xiao = node(0x84, 0, true);
-        xiao.state.capabilities = Some(Capabilities::here(Board::Esp32c6Xiao));
-        assert_eq!(node_label(&xiao), "C6 57:84", "a XIAO is a C6");
+        let mut c6 = node(0x84, 0, true);
+        c6.state.capabilities = Some(Capabilities::here(Board::Esp32c6));
+        assert_eq!(node_label(&c6), "C6 57:84");
         let mut unknown = node(0x84, 0, true);
         unknown.state.capabilities = Some(Capabilities::here(Board::Unknown(0x40)));
         assert_eq!(node_label(&unknown), "?? 57:84");

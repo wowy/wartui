@@ -8,7 +8,7 @@
 [package]
 name = "wartui-node-fw"
 description = "Wardriving node firmware for wartui. Sniffs, reports, and takes channel assignments."
-version = "0.2.2"
+version = "0.3.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/wowy/wartui"
@@ -18,9 +18,10 @@ name = "wartui-node-fw"
 path = "src/main.rs"
 
 [features]
-default = ["log"]
+default = ["esp32c5", "log"]
 
-# Exactly one chip must be selected; src/main.rs enforces it with compile_error!.
+# A feature because it forwards the chip to the `esp-*` crates. A build that turns the
+# defaults off names it again.
 esp32c5 = [
   "esp-alloc/esp32c5",
   "esp-bootloader-esp-idf/esp32c5",
@@ -31,26 +32,11 @@ esp32c5 = [
   "dep:esp-wifi-sys-esp32c5",
   "wartui-firmware/esp32c5",
 ]
-esp32c6 = [
-  "esp-alloc/esp32c6",
-  "esp-bootloader-esp-idf/esp32c6",
-  "esp-hal/esp32c6",
-  "esp-radio/esp32c6",
-  "esp-rtos/esp32c6",
-  "esp-println?/esp32c6",
-  "dep:esp-wifi-sys-esp32c6",
-  "wartui-firmware/esp32c6",
-]
 
 # Diagnostics on the USB serial port. Unlike the bridge, a node has no link
 # protocol sharing that endpoint, so printing to it is free and is the only
 # window into a device with no display.
 log = ["dep:esp-println"]
-
-# A Seeed XIAO ESP32-C6 with an antenna on its U.FL connector. The board's RF
-# switch otherwise stays on the onboard ceramic antenna and ignores anything
-# plugged in. C6 only; `src/main.rs` rejects it with the C5 and has why.
-xiao-external-antenna = []
 
 [dependencies]
 # `esp-radio` and `esp-rtos` allocate their task stacks and the Wi-Fi driver's
@@ -81,7 +67,6 @@ esp-sync = "0.3.0"
 # `esp-radio` does not wrap. Held at the version `esp-radio` links;
 # `firmware/bridge/README.md` § "Dependency versions".
 esp-wifi-sys-esp32c5 = { version = "0.3.0", optional = true }
-esp-wifi-sys-esp32c6 = { version = "0.3.0", optional = true }
 static_cell = "2.1.1"
 # The reset funnel, the reset cause, and the flash half of over-the-air updates, which
 # brings `esp-storage` at the version `firmware/common/Cargo.toml` holds.

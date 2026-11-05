@@ -1,4 +1,4 @@
-//! Wire formats for the wartui ESP32-C5/C6 wardriver mesh, the decision logic both
+//! Wire formats for the wartui ESP32-C5 wardriver mesh, the decision logic both
 //! firmwares run, and the text form of the addresses that cross the wire.
 //!
 //! The host, the bridge firmware and the node firmware all compile this crate. Defining

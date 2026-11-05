@@ -26,7 +26,7 @@ use wartui_proto::reset::ResetCause;
 const NODE: Mac = [0x02, 0, 0, 0, 0, 7];
 const OLD: Version = Version::new(0, 1, 0);
 const NEW: Version = Version::new(0, 1, 1);
-const BOARD: Board = Board::Esp32c6;
+const BOARD: Board = Board::Esp32c5;
 const SESSION: u8 = 0x5A;
 /// Five and a half sectors, so the last chunk is short and the last sector partial.
 const IMAGE_LEN: usize = 5 * SECTOR + 1500;

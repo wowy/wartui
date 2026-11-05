@@ -4,8 +4,8 @@ Guidance for coding agents working in this repository.
 
 ## What this is
 
-A terminal fleet controller for ESP32-C5 and ESP32-C6 wardriving nodes, speaking ESP-NOW
-through a USB-attached ESP32 dongle. `README.md` introduces it and says which chip goes
+A terminal fleet controller for ESP32-C5 wardriving nodes, speaking ESP-NOW through a
+USB-attached ESP32 dongle. `README.md` introduces it and says which chip goes
 where.
 
 Where the prose lives:
@@ -67,7 +67,7 @@ cargo run --release --features esp32c6        # runner is `espflash flash --moni
 
 cd firmware/node
 cargo fmt --all -- --check
-cargo clippy --release --features esp32c6     # and esp32c5
+cargo clippy --release                        # and --no-default-features --features esp32c5
 
 cd firmware/p4-radio                          # the C6 half of the P4 split bridge
 cargo fmt --all -- --check
@@ -250,12 +250,12 @@ is here rather than only in a `//!`.
   never opens an admin window. `stale`, `no heartbeat` and silence are deliberately distinct
   states, and `SCAN_CHANNELS` order is load-bearing: never sort or deduplicate it, because those
   indices *are* the wire format.
-- **A node is only in the plan once it has said what its radio is.** `FleetEngine::is_assignable`
+- **A node is only in the plan once it has said what it is.** `FleetEngine::is_assignable`
   refuses a node whose heartbeats carry no `air::Capabilities`, or whose version does not speak
   `air::NODE_VERSION` (another major or minor), alongside one the bridge has no peer slot for.
   `None` means only that nothing but a sighting has been heard from that address yet — an ordinary
-  few seconds in the life of a node about to be perfectly drivable. A share cut for a node whose
-  band nothing has confirmed is a share that may be nobody's.
+  few seconds in the life of a node about to be perfectly drivable. A share cut for a node nothing
+  has confirmed is a share that may be nobody's.
 - **Twenty nodes maximum** (`plan::MAX_NODES`), the ESP-NOW peer table. The host removes a node's
   peer after a minute without a heartbeat (`topology_timeout`). More than twenty heard within a
   minute is unsupported.
@@ -328,10 +328,9 @@ edit stops; follow the pointer before changing the rule.
   together on open, which an ESP32's USB Serial/JTAG ignores; moving one without the other is its
   reset sequence, so `.dtr_on_open(false)` reboots the board it was being polite to.
   → `crates/wartui-bridge/src/ports.rs` `//!`
-- **The planner deals only channels a node's own radio can tune**, and what no radio present can
-  reach comes back in `Plan::unreachable` rather than being dealt anyway. A `Job::Bluetooth` slot
-  can tune nothing, so a fleet whose only 5 GHz radio holds the scan reports 5 GHz unreachable, and
-  a fleet of one that holds it reports the whole pool.
+- **The planner deals only to a slot that is sniffing**, and what no slot can take comes back in
+  `Plan::unreachable` rather than being dealt anyway. A `Job::Bluetooth` slot takes nothing, so a
+  fleet of one that holds the scan reports the whole pool.
   → `crates/wartui-proto/src/plan/mod.rs`, `plan_for`; `crates/wartui/README.md` § "Channel pools"
 - **Channel 14 is in no pool and is never dealt**, and stays in the scan table because that table's
   indices are the wire format. → `crates/wartui-proto/src/plan/channels.rs`, `UNSUPPORTED_INDEX`

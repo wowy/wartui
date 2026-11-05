@@ -40,7 +40,6 @@ new address. The same bridge reconnecting or rebooting sends nothing; nodes alre
 | `--gps-baud N`          | detected    | Line rate of that receiver                             |
 | `--gps-max-age S`       | `5`         | How old a fix may be before falling back               |
 | `--sim N`               | —           | Run a fake fleet instead of hardware                   |
-| `--sim-c6 N`            | `0`         | Make that many of them C6s, from the end of the fleet  |
 | `--record-raw`          | off         | Also keep the undecoded bytes of every frame           |
 | `--notes TEXT`          | —           | A note about this run, stored with the capture         |
 | `--config PATH`         | per-OS path | See "Config file"                                      |
@@ -397,18 +396,18 @@ those out, and `--inline-checkpoint` puts SQLite's own back in the commit.
 
 ### Flashing the fleet
 
-`flash-fleet` puts one node image on every attached board of the chip `--features` names, several at
-once, never on the bridge. It uses `espflash`, which must be on `PATH`.
+`flash-fleet` puts one node image on every attached ESP32-C5, several at once, never on the bridge.
+It uses `espflash`, which must be on `PATH`.
 
 ```sh
-wartui flash-fleet --features esp32c5 --dry-run     # what would be flashed, and from where
-wartui flash-fleet --features esp32c5
-wartui flash-fleet --features esp32c6,xiao-external-antenna --bridge 10:BD:A3:EC:44:C0
+wartui flash-fleet --dry-run     # what would be flashed, and from where
+wartui flash-fleet
+wartui flash-fleet --bridge 10:BD:A3:EC:44:C0
 ```
 
 | Flag                    | Default        | What it is                                                                 |
 |-------------------------|----------------|----------------------------------------------------------------------------|
-| `--features LIST`       | —              | The node firmware's features; exactly one of `esp32c5` or `esp32c6`        |
+| `--features LIST`       | `esp32c5`      | The node firmware's features, which must name `esp32c5`                    |
 | `--no-default-features` | off            | Build without the firmware's default features                              |
 | `--bridge PATH\|MAC`    | remembered     | The bridge, which must be attached and is never flashed; `00:08` works too |
 | `--no-bridge`           | off            | No bridge is attached; a remembered one is still spared                    |
@@ -435,7 +434,7 @@ A board is flashed only when all five hold; otherwise it is skipped and listed w
 1. It is native USB Serial/JTAG (`303a:1001`) and reports its address as its serial number. A P4
    bridge is skipped with its own reason: `flash-bridge` updates it.
 2. It is not the bridge, and not named with `--skip`.
-3. `espflash board-info` reads the chip `--features` names.
+3. `espflash board-info` reads an ESP32-C5.
 4. `espflash board-info` reads the same address from the chip that the OS reported for the port.
 5. `espflash board-info` reads at least 4 MB of flash, which the node's two app slots need.
 
@@ -448,11 +447,10 @@ image comes from the first source that applies:
 - `--firmware-dir DIR`, or the checkout's `firmware/node` when this binary was built from one:
   `cargo build --release` there with the same features, merged with `espflash save-image`.
 - The release this binary was built for, checked against its `SHA256SUMS` and kept under the state
-  directory (`images/<tag>/`) so an offline host can reflash. A release publishes `esp32c5`,
-  `esp32c6`, and `esp32c6,xiao-external-antenna`, all with default features; anything else needs
-  `--image` or `--firmware-dir`.
+  directory (`images/<tag>/`) so an offline host can reflash. A release publishes `esp32c5` with
+  default features; anything else needs `--image` or `--firmware-dir`.
 
-The chip in the image's header must match `--features`, or nothing is touched. After flashing, each
+The chip in the image's header must be the C5, or nothing is touched. After flashing, each
 node's port is watched for up to 10 s for a line only a boot prints; a node not seen to boot is reset
 once more with `espflash reset` and watched again, since espflash's reset does not always take and
 the old image runs on until a power cycle. Each board prints a line by its last two octets:
@@ -580,7 +578,7 @@ wartui ota --image wartui-node-app-esp32c5.bin --yes
 | `--bridge PATH\|MAC` | detected         | The bridge, by path, address or `00:08`                        |
 | `--node MAC`         | every node heard | A node to update, by address or the end of one; repeatable     |
 | `--image BIN`        | —                | Send this app-only image, to the nodes of the board it is for  |
-| `--firmware-dir DIR` | the checkout's   | Build each board's image from the node firmware here           |
+| `--firmware-dir DIR` | the checkout's   | Build the image from the node firmware here                    |
 | `--listen SECS`      | `6`              | How long to gather heartbeats before choosing                  |
 | `--force`            | off              | Also update a node on the image's version, or a newer one      |
 | `--yes`, `-y`        | off              | Update without asking                                          |
@@ -595,17 +593,16 @@ is sent. Each board gets its own image, from the first source that applies:
 
 - `--image BIN`, sent only to nodes of the board its descriptor names.
 - `--firmware-dir DIR`, or the checkout's `firmware/node` when this binary was built from one:
-  `cargo build --release` with that board's features, saved with `espflash save-image` without
-  `--merge`.
-- The release this binary was built for: `wartui-node-app-<variant>.bin`, checked against its
+  `cargo build --release`, saved with `espflash save-image` without `--merge`.
+- The release this binary was built for: `wartui-node-app-esp32c5.bin`, checked against its
   `SHA256SUMS` and kept under `images/<tag>/` like `flash-fleet`'s.
 
 **The table comes first.** Each node heard, or each one `--node` names, gets a line:
 
 ```
-node     board           version   image     action
-A1:B0    esp32c5         0.1.0     0.1.1     update
-57:84    esp32c6-xiao    0.1.1     0.1.1     skip: already 0.1.1
+node     board      version   image     action
+A1:B0    esp32c5    0.1.0     0.1.1     update
+57:84    esp32c5    0.1.1     0.1.1     skip: already 0.1.1
 ```
 
 | Action                            | Why                                                                       |
@@ -617,7 +614,8 @@ A1:B0    esp32c5         0.1.0     0.1.1     update
 | `refuse: no image for <board>`    | `--image` is for another board, or no node firmware is built for this one |
 
 Only the heartbeat's version, board and flags are read, so a node `run` shows as `needs update` is
-one `ota` reaches. Without `--yes`, `ota` asks `[y/N]` before sending anything.
+one `ota` reaches. `ota` and `flash-fleet` update only an ESP32-C5: `ota` refuses any other board,
+and `flash-fleet` skips it. Without `--yes`, `ota` asks `[y/N]` before sending anything.
 
 **Each node then gets a progress line**: how much of the image it holds, the rate, and the phase
 (`waiting for the node`, `sending`, `verifying`, `rebooting`, `confirming`). It ends `done 0.1.1
@@ -630,8 +628,8 @@ from the node and every phase change, as `key=value` fields.
 **How long it takes.** The first frame waits for the node's next heartbeat: up to 5 s on an
 assigned node, a second on a parked one. Each 1 KB chunk then costs about 3.5 ms on the link, and
 at each 4 KB sector boundary the host waits for the node to erase and write the sector: about
-29 ms on a C6 and 68 ms on a C5 when the slot holds an old image. An image of 850 to 880 KB takes
-about 10 s to transfer to a C6 and 18 s to a C5, and the reboot and confirmation add a few seconds
+68 ms when the slot holds an old image. An image of 850 to 880 KB takes about 18 s to transfer, and
+the reboot and confirmation add a few seconds
 more. A node's first update after a USB flash writes into a blank slot and runs about twice as
 fast ([`docs/ota-findings.md`](../../docs/ota-findings.md)).
 
@@ -782,33 +780,19 @@ An assignment's forty-two-bit mask can name any subset. The planner deals round-
 _k_ to node _k mod n_, so every node carries both bands. A block split would put one node on all of
 2.4 GHz, and losing it would blind the fleet to that band until the next re-cut landed.
 
-**An ESP32-C6 is never dealt a 5 GHz channel.** It has no 5 GHz radio and says so in every
-heartbeat. A mixed fleet is dealt 5 GHz first; in pool order the C5s would take 2.4 GHz and then all
-of 5 GHz, a block split by another route. Shares can then differ by more than one channel: a C6
-beside a C5 holding 5 GHz sweeps faster however the rest is dealt. The deal minimizes the _largest_
-share, which sets how stale the slowest node's observations get. A fleet of alike radios has no
-constrained channels. With no 5 GHz radio at all, 5 GHz is left out of every assignment, and the
-footer counts the unscanned channels.
-
 Every fleet change re-cuts the _whole_ fleet, and each node takes its share in its next admin
 window, so the fleet converges within one heartbeat interval. A node adopts only an epoch that
-differs from its own, so an unchanged fleet is left alone. Two consequences:
+differs from its own, so an unchanged fleet is left alone.
 
-- **A node can report a channel outside its share.** 2.4 GHz channels are interleaved (one node 1,
-  3, 5; the next 2, 4, 6), 5 MHz apart but 20 MHz wide, so a node on 2 hears 1 and 3. A strong
-  access point is heard well beyond its own channel, and an access point may send copies of its
-  beacon across its width. A node reports the channel the beacon names when it is a scan-table
-  channel the node could have heard: any 2.4 GHz channel when parked on 2.4 GHz, or one within
-  160 MHz on 5 GHz, so a 5 GHz node can report a nearby 5 GHz channel too. Otherwise it reports the
-  channel it was parked on, which covers vendor gear that names a number off the channel list.
-  About a quarter of access points reach more than one node. `export` keeps the strongest per
-  recapture window, so this costs only store rows.
-- **A fleet with no 5 GHz radio covers only 2.4 GHz**: 13 channels on `all` and `eu`, 11 on `us`.
-  From fourteen such nodes (twelve on `us`), nodes outnumber channels. Surplus nodes keep what they
-  last held and double up, because the only channel-less frame means "Bluetooth is the whole job",
-  not "stop". A node with nothing to keep, such as the former Bluetooth scanner, is handed every
-  channel its radio can reach, and its `channels` shows the whole pool once adopted. So is a surplus
-  node whose channels a newly chosen pool leaves out.
+**A node can report a channel outside its share.** 2.4 GHz channels are interleaved (one node 1, 3,
+5; the next 2, 4, 6), 5 MHz apart but 20 MHz wide, so a node on 2 hears 1 and 3. A strong access
+point is heard well beyond its own channel, and an access point may send copies of its beacon across
+its width. A node reports the channel the beacon names when it is a scan-table channel the node
+could have heard: any 2.4 GHz channel when parked on 2.4 GHz, or one within 160 MHz on 5 GHz, so a 5
+GHz node can report a nearby 5 GHz channel too. Otherwise it reports the channel it was parked on,
+which covers vendor gear that names a number off the channel list. About a quarter of access points
+reach more than one node. `export` keeps the strongest per recapture window, so this costs only
+store rows.
 
 ## Positions
 
@@ -869,9 +853,9 @@ nothing and says how many networks it left out.
 
 ## Reading the fleet table
 
-Rows name nodes by chip and last two address octets: `C5 57:84`, `C6 9D:24`. The chip comes from the
-board its heartbeats announce, so a node not yet heartbeating shows `—`, a XIAO C6 shows `C6`, and a
-board this build has no name for shows `??`.
+Rows name nodes by chip and last two address octets: `C5 57:84`. The chip comes from the board its
+heartbeats announce, so a node not yet heartbeating shows `—`, and a board this build has no name
+for shows `??`.
 
 | State          | Meaning                                                                                                                                     |
 |----------------|---------------------------------------------------------------------------------------------------------------------------------------------|
@@ -905,18 +889,18 @@ The voltage is the chip's 3.3 V rail, not the board's 5 V input, and the die run
 air around it. A reading out of range is yellow on that line, and turns an `alive` node's `state`
 yellow too; any other state keeps its own color:
 
-| Reading | Warns at       | Why                                                                                 |
-|---------|----------------|-------------------------------------------------------------------------------------|
-| Voltage | below 3.00 V   | The C5's and C6's minimum recommended supply; the chip resets at 2.7 V              |
-| Die     | 70 °C or above | Short of 85 °C, the XIAO C6's rated ambient limit; the die runs hotter than ambient |
+| Reading | Warns at       | Why                                                           |
+|---------|----------------|---------------------------------------------------------------|
+| Voltage | below 3.00 V   | The C5's minimum recommended supply; the chip resets at 2.7 V |
+| Die     | 70 °C or above | A warning; the die runs hotter than ambient                   |
 
 A `stale`, `refused`, `no heartbeat`, `needs update`, or `host behind` node is out of the plan:
-nothing sent would reach it, its band is unknown, or its frames are not this build's, so its share
-might be nobody's. `b` on one says which state it is, because the fix differs: wait for a
-heartbeat, find out why heartbeats stopped, update the node with `ota`, or update wartui. Heartbeats from a
-`needs update` or `host behind` node are not counted among the footer's frames from an older
-firmware. Once its heartbeat has named its version, its sighting batches are, since none of them
-is recorded.
+nothing sent would reach it, it has not yet said what it is, or its frames are not this build's, so
+its share might be nobody's. `b` on one says which state it is, because the fix differs: wait for a
+heartbeat, find out why heartbeats stopped, update the node with `ota`, or update wartui. Heartbeats
+from a `needs update` or `host behind` node are not counted among the footer's frames from an older
+firmware. Once its heartbeat has named its version, its sighting batches are, since none of them is
+recorded.
 
 `stale` and `no heartbeat` are deliberately distinct from silence and from each other. wartui keeps
 two clocks, so a node that streams observations but loses heartbeats doesn't age out and churn the

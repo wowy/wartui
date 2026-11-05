@@ -2,7 +2,7 @@
 //! for each board.
 //!
 //! **The image says what it is.** Every node image carries an `esp_app_desc_t` at the start
-//! of its first segment, holding the crate version and a project name per board
+//! of its first segment, holding the crate version and the board's project name
 //! (`firmware/node/src/main.rs`, `PROJECT_NAME`). The update takes both from there rather than
 //! from the file's name or a flag, so an image cannot be sent to a board it was not built for,
 //! nor announced as a version it is not. A merged image opens with a bootloader, whose first
@@ -15,9 +15,8 @@
 //! node holds the file it was handed, so a corrupt file would otherwise cost a full transfer and
 //! a reboot to find out.
 //!
-//! **Each board gets its own image**, from the sources `flash-fleet` uses: `--image`, a build
-//! of the checkout (with that board's features, saved without `--merge`), or this binary's
-//! release, checked against its `SHA256SUMS`.
+//! **The image comes from the sources `flash-fleet` uses**: `--image`, a build of the checkout
+//! (saved without `--merge`), or this binary's release, checked against its `SHA256SUMS`.
 
 use std::path::Path;
 
@@ -74,10 +73,8 @@ pub struct AppImage {
 const fn project_name(board: Board) -> Option<&'static str> {
     match board {
         Board::Esp32c5 => Some("wartui-node-esp32c5"),
-        Board::Esp32c6 => Some("wartui-node-esp32c6"),
-        Board::Esp32c6Xiao => Some("wartui-node-esp32c6-xiao"),
-        // No node runs on a P4.
-        Board::Esp32p4 | Board::Unknown(_) => None,
+        // No node runs on a C6 or a P4.
+        Board::Esp32c6 | Board::Esp32p4 | Board::Unknown(_) => None,
     }
 }
 
@@ -85,18 +82,21 @@ const fn project_name(board: Board) -> Option<&'static str> {
 const fn features(board: Board) -> Option<&'static [&'static str]> {
     match board {
         Board::Esp32c5 => Some(&["esp32c5"]),
-        Board::Esp32c6 => Some(&["esp32c6"]),
-        Board::Esp32c6Xiao => Some(&["esp32c6", "xiao-external-antenna"]),
-        Board::Esp32p4 | Board::Unknown(_) => None,
+        Board::Esp32c6 | Board::Esp32p4 | Board::Unknown(_) => None,
     }
 }
 
 const fn chip(board: Board) -> Option<Chip> {
     match board {
         Board::Esp32c5 => Some(Chip::Esp32c5),
-        Board::Esp32c6 | Board::Esp32c6Xiao => Some(Chip::Esp32c6),
-        Board::Esp32p4 | Board::Unknown(_) => None,
+        Board::Esp32c6 | Board::Esp32p4 | Board::Unknown(_) => None,
     }
+}
+
+/// Whether any node image is built for `board`.
+#[must_use]
+pub const fn has_node_image(board: Board) -> bool {
+    features(board).is_some()
 }
 
 /// A board as an operator reads it.
@@ -105,7 +105,6 @@ pub fn board_name(board: Board) -> String {
     match board {
         Board::Esp32c5 => "esp32c5".to_owned(),
         Board::Esp32c6 => "esp32c6".to_owned(),
-        Board::Esp32c6Xiao => "esp32c6-xiao".to_owned(),
         Board::Esp32p4 => "esp32p4".to_owned(),
         Board::Unknown(byte) => format!("unknown board {byte}"),
     }
@@ -119,12 +118,10 @@ pub fn board_name(board: Board) -> String {
 /// board's, or more than an app slot holds.
 pub fn parse(bytes: Vec<u8>) -> Result<AppImage> {
     let Descriptor { project, version } = descriptor(&bytes)?;
-    let Some(board) = [Board::Esp32c5, Board::Esp32c6, Board::Esp32c6Xiao]
-        .into_iter()
-        .find(|board| project_name(*board) == Some(project.as_str()))
-    else {
+    let board = Board::Esp32c5;
+    if project_name(board) != Some(project.as_str()) {
         bail!("built for project '{project}', which is no node board");
-    };
+    }
     let Some(version) = parse_version(&version) else {
         bail!("its version '{version}' is not major.minor.patch");
     };
@@ -339,11 +336,9 @@ mod tests {
 
     #[test]
     fn app_image_reads_board_and_version_when_descriptor_is_present() {
-        for board in [Board::Esp32c5, Board::Esp32c6, Board::Esp32c6Xiao] {
-            let image = parse(fixture(board, "0.1.1", 0x1000)).unwrap();
-            assert_eq!((image.board, image.version), (board, Version::new(0, 1, 1)));
-            assert_eq!(image.sha256, <[u8; 32]>::from(Sha256::digest(&image.bytes)));
-        }
+        let image = parse(fixture(Board::Esp32c5, "0.1.1", 0x1000)).unwrap();
+        assert_eq!((image.board, image.version), (Board::Esp32c5, Version::new(0, 1, 1)));
+        assert_eq!(image.sha256, <[u8; 32]>::from(Sha256::digest(&image.bytes)));
     }
 
     #[test]
@@ -381,7 +376,7 @@ mod tests {
 
     #[test]
     fn app_image_refuses_image_when_descriptor_is_missing() {
-        let mut bytes = fixture(Board::Esp32c6, "0.1.1", 0x1000);
+        let mut bytes = fixture(Board::Esp32c5, "0.1.1", 0x1000);
         bytes[HEADER_LEN + SEGMENT_HEADER_LEN] ^= 0xFF;
         assert!(parse(bytes).unwrap_err().to_string().contains("no app descriptor"));
     }
@@ -425,21 +420,17 @@ mod tests {
 
     #[test]
     fn app_image_names_release_asset_when_board_is_known() {
-        for (board, asset) in [
-            (Board::Esp32c5, "wartui-node-app-esp32c5.bin"),
-            (Board::Esp32c6, "wartui-node-app-esp32c6.bin"),
-            (Board::Esp32c6Xiao, "wartui-node-app-esp32c6-xiao.bin"),
-        ] {
-            let found = source(&NODE_APP, None, None, features(board).unwrap(), false, Some("v1"));
-            let expected = Source::Release { tag: "v1".to_owned(), asset };
-            assert_eq!(found.unwrap(), expected);
-        }
+        let features = features(Board::Esp32c5).unwrap();
+        let found = source(&NODE_APP, None, None, features, false, Some("v1"));
+        let asset = "wartui-node-app-esp32c5.bin";
+        assert_eq!(found.unwrap(), Source::Release { tag: "v1".to_owned(), asset });
         assert!(source_for(Board::Unknown(7), None).is_err());
+        assert!(source_for(Board::Esp32c6, None).is_err());
     }
 
     #[test]
     fn app_image_refuses_image_when_segment_byte_is_flipped() {
-        let mut bytes = fixture(Board::Esp32c6, "0.1.1", 0x1000);
+        let mut bytes = fixture(Board::Esp32c5, "0.1.1", 0x1000);
         bytes[0x800] ^= 0x01;
         let error = parse(bytes).unwrap_err().to_string();
         assert!(error.contains("corrupt") && error.contains("checksum"), "{error}");
@@ -447,7 +438,7 @@ mod tests {
 
     #[test]
     fn app_image_refuses_image_when_appended_hash_byte_is_flipped() {
-        let mut bytes = fixture(Board::Esp32c6, "0.1.1", 0x1000);
+        let mut bytes = fixture(Board::Esp32c5, "0.1.1", 0x1000);
         let last = bytes.len() - 1;
         bytes[last] ^= 0x01;
         let error = parse(bytes).unwrap_err().to_string();
@@ -456,7 +447,7 @@ mod tests {
 
     #[test]
     fn app_image_refuses_image_when_truncated() {
-        let bytes = fixture(Board::Esp32c6, "0.1.1", 0x1000);
+        let bytes = fixture(Board::Esp32c5, "0.1.1", 0x1000);
         let error = parse(bytes[..0x800].to_vec()).unwrap_err().to_string();
         assert!(error.contains("truncated"), "{error}");
     }

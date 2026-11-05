@@ -1,5 +1,3 @@
-use super::Radio;
-
 /// The node's scan order.
 ///
 /// Indices 0..=13 are the 2.4 GHz channels 1..=14; 14..=41 are 5 GHz. Every bit of the
@@ -232,7 +230,7 @@ const _: () = assert!(
     "UNSUPPORTED_INDEX must still be channel 14"
 );
 
-/// The first [`SCAN_CHANNELS`] entry that needs a 5 GHz radio.
+/// The first 5 GHz entry of [`SCAN_CHANNELS`].
 ///
 /// The table is 2.4 GHz then 5 GHz, so band membership is a comparison rather than a
 /// lookup. The assert below checks the value against the table.
@@ -244,7 +242,7 @@ const _: () = assert!(
     "SCAN_CHANNELS is no longer 2.4 GHz followed by 5 GHz"
 );
 
-/// Whether tuning `idx` needs a 5 GHz radio.
+/// Whether `idx` is a 5 GHz channel.
 #[must_use]
 pub const fn is_five_ghz(idx: u8) -> bool {
     idx >= FIRST_FIVE_GHZ_INDEX
@@ -265,9 +263,9 @@ const fn index_of(channel: u8) -> Option<u8> {
 /// The band a channel of [`SCAN_CHANNELS`] lies in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Band {
-    /// 2.4 GHz: channels 1 to 14, the band every [`Radio`] reaches.
+    /// 2.4 GHz: channels 1 to 14.
     Ghz2_4,
-    /// 5 GHz: channels 36 to 177, the band only a [`Radio::DualBand`] reaches.
+    /// 5 GHz: channels 36 to 177.
     Ghz5,
 }
 
@@ -277,7 +275,7 @@ pub struct ChannelInfo {
     /// Center frequency in MHz. Channel 14 is 2484, the one 2.4 GHz channel off the
     /// 5 MHz ladder.
     pub center_mhz: u16,
-    /// The band the channel lies in, and so the radio it needs.
+    /// The band the channel lies in.
     pub band: Band,
 }
 
@@ -368,22 +366,6 @@ impl ChannelPool {
         self.runs().iter().fold(ChannelSet::empty(), |set, run| {
             ChannelSet::from_bits(set.bits() | ChannelSet::from_run(*run).bits())
         })
-    }
-
-    /// Every channel of the pool that `radio` can tune.
-    ///
-    /// Never empty: every pool has 2.4 GHz in it, and every [`Radio`] reaches 2.4 GHz.
-    /// That makes it a usable share for a node the deal had nothing for (see
-    /// [`Plan::channels_for`]).
-    ///
-    /// [`Plan::channels_for`]: super::Plan::channels_for
-    #[must_use]
-    pub fn reachable_by(self, radio: Radio) -> ChannelSet {
-        let mut set = ChannelSet::empty();
-        for idx in self.channels().indices().filter(|idx| radio.can_tune(*idx)) {
-            set.insert(idx);
-        }
-        set
     }
 }
 

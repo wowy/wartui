@@ -39,6 +39,15 @@ read a second later reads as pending when it is merely early.
 The capture goes to a temporary database that is deleted on the way out, since `run`
 otherwise leaves a `wartui-<date>.db` wherever it was started. `--db` keeps it instead,
 which is worth having on hardware: what the fleet heard is not reproducible.
+
+The settings go to a temporary `wartui.toml` that starts empty and is deleted the same way, since
+`run` saves `b`, the settings modal and a `--bridge` that answers to whichever config it was given,
+and the operator's own is not a render's to change. Nor is it read, so a render depends on nothing
+about the machine. `--config` passed through `-- ARGS` is used instead. A bare `--bridge` therefore
+has no remembered bridge and finds the board by sweeping, so naming the bridge is the way to avoid
+opening other boards. A `--bridge` render also drives the real fleet on default settings: nodes are
+assigned the default pool and transmit power, and a remembered Bluetooth node is not applied, so the
+screen is not the operator's own setup.
 """
 
 import argparse
@@ -224,7 +233,7 @@ def main(args):
     lon = DEFAULT_LON if args.lon is None else args.lon
 
     bridge = args.bridge is not None
-    if bridge and (args.sim is not None or args.sim_c6):
+    if bridge and args.sim is not None:
         sys.exit("--bridge renders the fleet on the desk, and --sim a fake one; pick one")
     if args.after is None:
         args.after = BRIDGE_AFTER if bridge else SIM_AFTER
@@ -232,24 +241,29 @@ def main(args):
         args.settle = BRIDGE_SETTLE if bridge else SIM_SETTLE
 
     binary = args.bin or build()
-    if args.db:
-        return render(args, binary, args.db, lat, lon)
-    # The capture is a temporary file from here on, so every way out of this
-    # function goes through the removal rather than just the expected one.
+    # The config is a temporary file from here on, and so is the capture unless `--db`
+    # keeps it, so every way out of this function goes through the removal rather than
+    # just the expected one.
     scratch = tempfile.mkdtemp(prefix="wartui-render-")
     try:
-        return render(args, binary, os.path.join(scratch, "render.db"), lat, lon)
+        db = args.db or os.path.join(scratch, "render.db")
+        # Created here because `run` refuses a `--config` file that does not exist. Empty
+        # is a valid config: every setting at its default.
+        config = os.path.join(scratch, "wartui.toml")
+        open(config, "x").close()
+        return render(args, binary, db, config, lat, lon)
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
 
 
-def command_for(args, binary, db, lat, lon):
+def command_for(args, binary, db, config, lat, lon):
     """The `wartui run` this render is of: the simulator, or the boards attached."""
     command = [binary, "run", "--db", db]
+    # A `--config` passed through means the caller has chosen, and clap refuses a second.
+    if not any(arg == "--config" or arg.startswith("--config=") for arg in args.rest):
+        command += ["--config", config]
     if args.bridge is None:
         command += ["--sim", str(DEFAULT_SIM_NODES if args.sim is None else args.sim)]
-        if args.sim_c6:
-            command += ["--sim-c6", str(args.sim_c6)]
     else:
         if args.bridge is not DETECT:
             command += ["--bridge", args.bridge]
@@ -269,8 +283,8 @@ def command_for(args, binary, db, lat, lon):
     return command + args.rest
 
 
-def render(args, binary, db, lat, lon):
-    command = command_for(args, binary, db, lat, lon)
+def render(args, binary, db, config, lat, lon):
+    command = command_for(args, binary, db, config, lat, lon)
 
     screen = pyte.Screen(args.cols, args.rows)
     stream = pyte.Stream(screen)
@@ -308,7 +322,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Render the running view as text.")
     parser.add_argument("--sim", type=int, metavar="NODES",
                         help=f"fake nodes to run; {DEFAULT_SIM_NODES} unless --bridge")
-    parser.add_argument("--sim-c6", type=int, default=0, metavar="NODES", help="of which C6s")
     parser.add_argument("--bridge", nargs="?", const=DETECT, metavar="PATH|MAC",
                         help="render the attached fleet instead, optionally naming the bridge")
     parser.add_argument("--cols", type=int, default=120, help="terminal width to lay out at")
