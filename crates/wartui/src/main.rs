@@ -288,9 +288,9 @@ pub fn last_reset_line(info: &BridgeInfo) -> String {
         ResetCause::External => "reset over USB, by espflash or a replug",
         ResetCause::Unknown => "reset for a reason it could not name",
     };
-    // The phase is only ever a hint, and a misleading one on its own: a working bridge
-    // passes through most of them constantly, so it says where the bridge last was, not
-    // what stopped it. `Unknown` has nothing to name.
+    // The phase is only ever a hint: the SPI link marks it on every transfer, so it says
+    // what ran last, not what stopped the bridge (`LoopPhase`). `Unknown` has nothing to
+    // name.
     let phase = match info.last_phase {
         LoopPhase::Command => Some("it was carrying out a host command"),
         LoopPhase::DrainLink => Some("it was reading host commands"),

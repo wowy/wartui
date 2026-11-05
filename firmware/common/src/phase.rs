@@ -1,5 +1,5 @@
-//! Where a bridge's loop was when it last stopped making progress, kept across a reset for
-//! the next life to report.
+//! What a bridge chip's firmware last marked, kept across a reset for the next life to
+//! report. `LoopPhase` says how far to trust it.
 //!
 //! In RTC fast memory and marked persistent, so it survives the resets that matter — the
 //! panic handler's and the watchdog's — and is read back by
@@ -14,7 +14,7 @@ use portable_atomic::{AtomicU8, AtomicU32, Ordering};
 use wartui_proto::link::LoopPhase;
 use wartui_proto::reset::ResetCause;
 
-/// Where the loop was when it last stopped making progress.
+/// What the firmware last marked.
 #[esp_hal::ram(unstable(rtc_fast, persistent))]
 static PHASE: AtomicU8 = AtomicU8::new(0);
 
@@ -30,7 +30,7 @@ static PHASE_VALID: AtomicU32 = AtomicU32::new(0);
 /// Arbitrary, and only has to be unlikely. Reads as `war1` in a memory dump.
 const PHASE_MAGIC: u32 = 0x7761_7231;
 
-/// Record where the loop is, for the next life to report.
+/// Record what is running, for the next life to report.
 pub fn mark(phase: LoopPhase) {
     PHASE.store(phase as u8, Ordering::Relaxed);
 }

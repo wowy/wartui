@@ -126,18 +126,19 @@ pub enum Chip {
     Esp32P4,
 }
 
-/// Where the bridge's main loop was when it last stopped making progress.
+/// What a bridge chip's firmware last marked before it reset.
 ///
 /// Carried across a reset in RTC memory and reported in [`BridgeToHost::Ready`],
-/// because the interesting resets are the ones nobody was watching. Alone it is a hint:
-/// the loop visits most phases ten times a second. Paired with a
-/// [`ResetCause::Watchdog`] or [`ResetCause::Software`], it names the blocking call that
-/// did not come back.
+/// because the interesting resets are the ones nobody was watching. It is only a hint. Each
+/// chip's futures share one task and one marker, and the SPI link's marks it on every
+/// transfer, so it says what ran last, not what stopped the chip. A future parked on an
+/// `await` leaves the others running, so only a call that never yields holds the marker
+/// where it hung.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub enum LoopPhase {
     /// Nothing to report: a power-on, or a reset that did not preserve the marker.
     Unknown,
-    /// Still in `main` before the loop started.
+    /// Still in `main`, before its futures started.
     Boot,
     /// Reading and decoding host commands.
     DrainLink,
