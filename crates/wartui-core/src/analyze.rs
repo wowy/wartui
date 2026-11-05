@@ -49,7 +49,11 @@
 //! split bridge its radio link's counters. A queue's `peak` is the largest `high_water` any row
 //! carried. That figure is since the bridge booted, so the peak can predate the capture. Its drops
 //! and the radio link counters are since-boot counts, rebased like the bridge's own: a restart
-//! between two rows is the reply's uptime falling at any row between them.
+//! between two rows is the reply's uptime falling at any row between them. That uptime is the C6's.
+//! The link's `packets`, `crc_fail`, `bad_magic`, `seq_gap` and `uart_errors` are the P4's and run on
+//! through a C6 restart, so they rebase only when they fall, and the `radio_*` counters follow the
+//! uptime. A P4 reboot whose counters regrow past the last row reads as no reboot, which is rare and
+//! only undercounts.
 //!
 //! On the host side, [`HostLoss`] breaks down what the host read and did not store, from the
 //! `host_status` rows. Their counts run from the engine's start and are read as the last row less
@@ -193,18 +197,20 @@ impl RadioLinkLoss {
         }))
     }
 
-    /// Adds what each counter advanced from `before` to `now`.
+    /// Adds what each counter advanced from `before` to `now`. `restarted` is the C6's uptime
+    /// falling, which only the `radio_*` counters restart with; see the module documentation.
     fn advance(&mut self, now: &Self, before: &Self, restarted: bool) {
-        let step = |now, before| advance_since_boot(now, Some(before), restarted);
-        self.packets += step(now.packets, before.packets);
-        self.crc_fail += step(now.crc_fail, before.crc_fail);
-        self.bad_magic += step(now.bad_magic, before.bad_magic);
-        self.seq_gap += step(now.seq_gap, before.seq_gap);
-        self.uart_errors += step(now.uart_errors, before.uart_errors);
-        self.radio_crc_fail += step(now.radio_crc_fail, before.radio_crc_fail);
-        self.radio_bad_magic += step(now.radio_bad_magic, before.radio_bad_magic);
-        self.radio_seq_gap += step(now.radio_seq_gap, before.radio_seq_gap);
-        self.radio_uart_errors += step(now.radio_uart_errors, before.radio_uart_errors);
+        let p4 = |now, before| advance_since_boot(now, Some(before), false);
+        let c6 = |now, before| advance_since_boot(now, Some(before), restarted);
+        self.packets += p4(now.packets, before.packets);
+        self.crc_fail += p4(now.crc_fail, before.crc_fail);
+        self.bad_magic += p4(now.bad_magic, before.bad_magic);
+        self.seq_gap += p4(now.seq_gap, before.seq_gap);
+        self.uart_errors += p4(now.uart_errors, before.uart_errors);
+        self.radio_crc_fail += c6(now.radio_crc_fail, before.radio_crc_fail);
+        self.radio_bad_magic += c6(now.radio_bad_magic, before.radio_bad_magic);
+        self.radio_seq_gap += c6(now.radio_seq_gap, before.radio_seq_gap);
+        self.radio_uart_errors += c6(now.radio_uart_errors, before.radio_uart_errors);
     }
 }
 

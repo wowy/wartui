@@ -14,8 +14,8 @@
 //!
 //! **A write held by CTS waits without blocking**, so USB, the radio clock and the GPS reader
 //! run on while the C6 is in reset or busy in its flash. While a write is held the sender's
-//! clock stops too, so a C6 that hangs mid-update holding RTS stays `Updating` until it next
-//! answers.
+//! clock stops too, so a C6 that hangs mid-update holding RTS stays `Updating`, and a host's poll
+//! going unanswered is what raises the fault (`Pair::fault`, the radio has stopped answering).
 //!
 //! The P4 answers each hello from the C6 with one of its own, which covers a C6 that restarts
 //! under a running P4 as well as the first exchange. The pair hears the seq of every C6
@@ -162,6 +162,7 @@ impl Link {
             }
         };
         shared.count_link(|radio_link| &mut radio_link.packets);
+        shared.pair.borrow_mut().note_heard();
         match self.c6_seq.note(packet.seq) {
             SeqNote::Gap => shared.count_link(|radio_link| &mut radio_link.seq_gap),
             SeqNote::First | SeqNote::InOrder => {}

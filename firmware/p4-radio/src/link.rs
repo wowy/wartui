@@ -212,9 +212,8 @@ pub struct Link {
     /// restart from a repeated hello.
     seq: u32,
     p4_seq: SeqCheck,
-    /// The P4's link revision, once its hello has arrived. Until then this end sends only its
-    /// hello.
-    p4_link_rev: Option<u16>,
+    /// The P4's hello has arrived. Until then this end sends only its hello.
+    heard_p4: bool,
     /// When this end last sent its hello.
     hello_sent: Option<Instant>,
     /// P4 packets that failed their CRC.
@@ -258,7 +257,7 @@ impl Link {
             phase,
             seq: 0,
             p4_seq: SeqCheck::new(),
-            p4_link_rev: None,
+            heard_p4: false,
             hello_sent: None,
             crc_fail: 0,
             bad_magic: 0,
@@ -324,8 +323,8 @@ impl Link {
         }
         match packet.kind {
             Kind::Hello => {
-                if let Some(hello) = Hello::decode(packet.payload) {
-                    self.p4_link_rev = Some(hello.link_rev);
+                if Hello::decode(packet.payload).is_some() {
+                    self.heard_p4 = true;
                     // What queued behind the hello exchange can go now.
                     shared.wake.signal(());
                     self.confirm(shared);
@@ -536,7 +535,7 @@ impl Link {
     /// Fill a payload: the hello, when one is due and the P4's has not arrived, then the update
     /// status, then as many queued records as fit.
     fn fill(&mut self, payload: &mut [u8], shared: &Shared) -> Option<(Kind, usize)> {
-        if self.p4_link_rev.is_none() {
+        if !self.heard_p4 {
             let due =
                 self.hello_sent.is_none_or(|sent| sent.elapsed().as_millis() >= HELLO_EVERY_MS);
             if !due {
@@ -561,7 +560,7 @@ impl Link {
     /// Whether the writer must look again on a timer: its next hello is due with or without a
     /// signal.
     fn awaits_hello(&self) -> bool {
-        self.p4_link_rev.is_none()
+        !self.heard_p4
     }
 }
 

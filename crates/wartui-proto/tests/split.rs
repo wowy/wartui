@@ -8,7 +8,9 @@ use wartui_proto::link::{
 use wartui_proto::ota::TRIAL_BOOTS;
 use wartui_proto::radio_link::{Hello, LINK_REVISION, RadioStatus};
 use wartui_proto::reset::ResetCause;
-use wartui_proto::split::{INSTALL_WAIT_MS, Pair, PairEvent, RADIO_WAIT_MS, RadioState, Route};
+use wartui_proto::split::{
+    INSTALL_WAIT_MS, Pair, PairEvent, RADIO_SILENT_MS, RADIO_WAIT_MS, RadioState, Route,
+};
 
 const OWN_MAC: [u8; 6] = [1, 1, 1, 1, 1, 1];
 const C6_MAC: [u8; 6] = [6, 6, 6, 6, 6, 6];
@@ -621,6 +623,124 @@ fn pair_deadline_is_none_when_hello_follows_install() {
     pair.note_installed(10_000);
     assert_eq!(pair.on_hello(hello(80), 0, 10_500), PairEvent::NewLife);
     assert_eq!(pair.next_deadline_ms(), None);
+}
+
+const SILENT_FAULT: &str = "the radio has stopped answering; wartui reset restarts the bridge";
+
+#[test]
+fn pair_faults_once_when_radio_stays_silent_after_poll() {
+    let mut pair = up_pair();
+    pair.note_asked(5_000);
+    assert_eq!(pair.on_tick(5_000 + RADIO_SILENT_MS - 1), PairEvent::None);
+    assert_eq!(pair.fault(), None);
+    assert_eq!(pair.on_tick(5_000 + RADIO_SILENT_MS), PairEvent::RadioSilent);
+    assert_eq!(pair.fault().unwrap(), SILENT_FAULT);
+    // Said once, with no deadline left for the radio clock to spin on.
+    assert_eq!(pair.on_tick(5_000 + RADIO_SILENT_MS + 1), PairEvent::None);
+    assert_eq!(pair.next_deadline_ms(), None);
+}
+
+#[test]
+fn pair_faults_ahead_of_update_progress_when_updating_radio_stays_silent() {
+    let mut pair = updating_pair();
+    pair.note_asked(5_000);
+    assert_eq!(pair.on_tick(5_000 + RADIO_SILENT_MS), PairEvent::RadioSilent);
+    assert_eq!(pair.fault().unwrap(), SILENT_FAULT);
+}
+
+#[test]
+fn pair_does_not_fault_when_no_poll_asked() {
+    let mut pair = up_pair();
+    assert_eq!(pair.on_tick(1_000_000), PairEvent::None);
+    assert_eq!(pair.fault(), None);
+}
+
+#[test]
+fn pair_keeps_first_poll_time_when_polls_repeat() {
+    let mut pair = up_pair();
+    pair.note_asked(5_000);
+    pair.note_asked(6_000);
+    assert_eq!(pair.next_deadline_ms(), Some(5_000 + RADIO_SILENT_MS));
+}
+
+#[test]
+fn pair_clears_silent_fault_when_packet_heard() {
+    let mut pair = up_pair();
+    pair.note_asked(5_000);
+    assert_eq!(pair.on_tick(5_000 + RADIO_SILENT_MS), PairEvent::RadioSilent);
+    pair.note_heard();
+    assert_eq!(pair.fault(), None);
+    assert_eq!(pair.next_deadline_ms(), None);
+    // The next poll starts a fresh wait.
+    pair.note_asked(20_000);
+    assert_eq!(pair.next_deadline_ms(), Some(20_000 + RADIO_SILENT_MS));
+}
+
+#[test]
+fn pair_clears_silent_fault_when_radio_restarts() {
+    let mut pair = up_pair();
+    pair.note_asked(5_000);
+    assert_eq!(pair.on_tick(5_000 + RADIO_SILENT_MS), PairEvent::RadioSilent);
+    pair.note_seq(5_000);
+    assert_eq!(pair.on_hello(hello(80), 0, 20_000), PairEvent::NewLife);
+    assert_eq!(pair.fault(), None);
+    assert_eq!(pair.next_deadline_ms(), None);
+}
+
+#[test]
+fn pair_does_not_fault_when_silent_in_mismatch() {
+    let mut pair = pair();
+    pair.on_hello(hello_running(900, None), 0, 1_000);
+    assert!(matches!(pair.state(), RadioState::Mismatch(_)));
+    pair.note_asked(5_000);
+    assert_eq!(pair.next_deadline_ms(), None);
+    assert_eq!(pair.on_tick(5_000 + RADIO_SILENT_MS), PairEvent::None);
+    assert!(pair.fault().unwrap().contains("predates"));
+}
+
+#[test]
+fn pair_drops_silent_deadline_when_failed_update_leaves_mismatch() {
+    // Armed while updating, then a state that gets no records: a deadline left behind would
+    // have the radio clock wake forever.
+    let mut pair = pair();
+    pair.on_hello(
+        Hello { link_rev: LINK_REVISION + 1, ..hello_running(900, Some(OTHER)) },
+        0,
+        1_000,
+    );
+    pair.note_asked(5_000);
+    pair.on_update_failed();
+    assert!(matches!(pair.state(), RadioState::Mismatch(_)));
+    assert_eq!(pair.next_deadline_ms(), None);
+    assert_eq!(pair.on_tick(5_000 + RADIO_SILENT_MS), PairEvent::None);
+}
+
+#[test]
+fn pair_does_not_fault_when_silent_while_installing() {
+    let mut pair = updating_pair();
+    pair.note_asked(5_000);
+    pair.note_installed(6_000);
+    pair.note_asked(7_000);
+    assert_eq!(pair.next_deadline_ms(), Some(6_000 + INSTALL_WAIT_MS));
+    assert_ne!(pair.on_tick(7_000 + RADIO_SILENT_MS), PairEvent::RadioSilent);
+    assert!(pair.fault().unwrap().contains("installing"));
+}
+
+#[test]
+fn pair_does_not_arm_silence_when_waiting_or_absent() {
+    let mut pair = pair();
+    pair.note_asked(100);
+    assert_eq!(pair.next_deadline_ms(), Some(RADIO_WAIT_MS));
+    assert_eq!(pair.on_tick(RADIO_WAIT_MS), PairEvent::NewLife);
+    pair.note_asked(RADIO_WAIT_MS + 1);
+    assert_eq!(pair.next_deadline_ms(), None);
+}
+
+#[test]
+fn pair_deadline_is_silent_wait_when_poll_unanswered() {
+    let mut pair = up_pair();
+    pair.note_asked(5_000);
+    assert_eq!(pair.next_deadline_ms(), Some(5_000 + RADIO_SILENT_MS));
 }
 
 #[test]

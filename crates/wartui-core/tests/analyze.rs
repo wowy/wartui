@@ -64,17 +64,22 @@ fn queue_status(uptime_ms: u32, queue: QueueId, high_water: u32, dropped: u32) -
 /// A status reply carrying link counters: `packets`, then `n`, `2n` … `8n` in field order, so
 /// no two counters match.
 fn radio_link_status(uptime_ms: u32, packets: u32, n: u32) -> Record {
+    radio_link_status_split(uptime_ms, packets, n, n)
+}
+
+/// As [`radio_link_status`], with the P4's counters on `p4` and the C6's `radio_*` on `c6`.
+fn radio_link_status_split(uptime_ms: u32, packets: u32, p4: u32, c6: u32) -> Record {
     let Record::BridgeStatus(seen) = status(0, 0, 0, uptime_ms) else { unreachable!() };
     let radio_link = RadioLinkStats {
         packets,
-        crc_fail: n,
-        bad_magic: 2 * n,
-        seq_gap: 3 * n,
-        uart_errors: 4 * n,
-        radio_crc_fail: 5 * n,
-        radio_bad_magic: 6 * n,
-        radio_seq_gap: 7 * n,
-        radio_uart_errors: 8 * n,
+        crc_fail: p4,
+        bad_magic: 2 * p4,
+        seq_gap: 3 * p4,
+        uart_errors: 4 * p4,
+        radio_crc_fail: 5 * c6,
+        radio_bad_magic: 6 * c6,
+        radio_seq_gap: 7 * c6,
+        radio_uart_errors: 8 * c6,
     };
     Record::BridgeStatus(BridgeStatusSeen { radio_link: Some(radio_link), ..seen })
 }
@@ -390,7 +395,8 @@ fn analyze_rebases_queue_drops_when_bridge_restarts() {
 
 #[test]
 fn analyze_reports_radio_link_errors_when_rows_carry_radio_link() {
-    // A row without radio link counters between two with them changes nothing; the restart rebases.
+    // A row without radio link counters between two with them changes nothing. The last row is a
+    // P4 reboot, which takes the C6 with it, so every counter falls and rebases.
     let (_dir, conn) = capture(vec![
         radio_link_status(60_000, 1_000, 2),
         status(0, 0, 0, 62_000),
@@ -412,6 +418,35 @@ fn analyze_reports_radio_link_errors_when_rows_carry_radio_link() {
             radio_bad_magic: 6 * n,
             radio_seq_gap: 7 * n,
             radio_uart_errors: 8 * n,
+        })
+    );
+}
+
+#[test]
+fn analyze_rebases_only_radio_counters_when_c6_restarts() {
+    // The uptime falls, and the C6's counters with it. The P4's run on, so they count only their
+    // rise rather than their whole total again.
+    let (_dir, conn) = capture(vec![
+        radio_link_status_split(60_000, 1_000, 2, 2),
+        radio_link_status_split(65_000, 1_500, 5, 5),
+        radio_link_status_split(4_000, 1_600, 7, 1),
+    ]);
+    let bridge = losses(&conn).unwrap().bridge.unwrap();
+    assert_eq!(bridge.reboots, 1);
+    // The P4's multiple advances 3 then 2, the C6's 3 then 1 from its new life.
+    let (p4, c6) = (3 + 2, 3 + 1);
+    assert_eq!(
+        bridge.radio_link,
+        Some(RadioLinkLoss {
+            packets: 500 + 100,
+            crc_fail: p4,
+            bad_magic: 2 * p4,
+            seq_gap: 3 * p4,
+            uart_errors: 4 * p4,
+            radio_crc_fail: 5 * c6,
+            radio_bad_magic: 6 * c6,
+            radio_seq_gap: 7 * c6,
+            radio_uart_errors: 8 * c6,
         })
     );
 }

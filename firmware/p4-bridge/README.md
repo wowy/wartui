@@ -109,6 +109,7 @@ Each state reaches the host as an error line, repeated with every `Ready`:
 | `radio predates bundled updates; flash it through the header once` | The C6's hello has no digest. It cannot take an update; flash it by wire |
 | `radio speaks link revision a, this P4 speaks b; update the radio` | A different link revision, and no update took. The bridge refuses radio commands |
 | `the radio coprocessor is not answering` | No hello at boot, or none after the resets that follow an install |
+| `the radio has stopped answering; wartui reset restarts the bridge` | A host polled and no packet came from the C6 for 12 s, as when it hangs holding RTS. Ends when a packet arrives |
 
 A refused or silent update also sends one line naming why: `the radio refused the bundled image:
 …` or `the radio stopped answering its update`.

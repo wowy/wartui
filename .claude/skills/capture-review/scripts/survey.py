@@ -838,7 +838,12 @@ RADIO_LINK_COUNTERS = ("packets", "crc_fail", "bad_magic", "seq_gap", "uart_erro
 
 
 def bridge_radio_link(db, lives):
-    """The P4 split bridge's UART link counters over the capture, rebased across restarts."""
+    """The P4 split bridge's UART link counters over the capture, rebased across restarts.
+
+    The uptime that dates a restart is the C6's. The `radio_*` counters restart with it; the P4's
+    five run on, so they rebase only when they fall, as `RadioLinkLoss::advance` does. A P4 reboot
+    whose counters regrow past the last row reads as no reboot, which is rare and only undercounts.
+    """
     cols = ", ".join(f"radio_link_{c}" for c in RADIO_LINK_COUNTERS)
     rows = db.q(f"SELECT id, {cols} FROM bridge_status WHERE radio_link_packets IS NOT NULL "
                 "ORDER BY id")
@@ -848,15 +853,19 @@ def bridge_radio_link(db, lives):
     for prev, cur in zip(rows, rows[1:]):
         restarted = lives.get(cur[0], 0) != lives.get(prev[0], 0)
         for i, c in enumerate(RADIO_LINK_COUNTERS, start=1):
-            sums[c] += since_boot_delta(cur[i], prev[i], restarted)
+            sums[c] += since_boot_delta(cur[i], prev[i], restarted and c.startswith("radio_"))
     print("  radio link " + "  ".join(f"{c} {sums[c]}" for c in RADIO_LINK_COUNTERS))
     sql = f"SELECT id, rx_at, uptime_ms, {cols} FROM bridge_status ORDER BY id"
-    errors = {c: sums[c] for c in RADIO_LINK_COUNTERS
-              if c != "packets" and sums[c]}
+    # A C6 restart breaks the seq the P4 hears exactly once, which is expected.
+    restarts = lives.get(rows[-1][0], 0) - lives.get(rows[0][0], 0)
+    unexplained = {**sums, "seq_gap": max(sums["seq_gap"] - restarts, 0)}
+    errors = {c: unexplained[c] for c in RADIO_LINK_COUNTERS
+              if c != "packets" and unexplained[c]}
     if errors:
+        beyond = f" (seq_gap past {restarts} restart(s))" if restarts and "seq_gap" in errors else ""
         flag("WARN", "bridge",
              "UART link errors between P4 and C6: "
-             + ", ".join(f"{c} {n}" for c, n in errors.items()), sql)
+             + ", ".join(f"{c} {n}" for c, n in errors.items()) + beyond, sql)
 
 
 def host(db, ctx):

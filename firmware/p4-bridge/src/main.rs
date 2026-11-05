@@ -10,9 +10,10 @@
 //!
 //! - **the UART link** (`src/link.rs`) runs from boot, so the C6's hello arrives, and sends
 //!   the C6 the image this P4 carries (`src/radio.rs`) when it runs another;
-//! - **the radio clock** sleeps until [`Pair::next_deadline_ms`], or until the UART link
-//!   notes an install, then gives [`Pair`] the time. That is how it gives up on a silent
-//!   C6, and resets one silent since an update's install through its enable pin;
+//! - **the radio clock** sleeps until [`Pair::next_deadline_ms`], or until the pair gains a
+//!   deadline, then gives [`Pair`] the time. That is how it gives up on a silent C6, resets one
+//!   silent since an update's install through its enable pin, and reports one silent since a
+//!   host's poll;
 //! - **the USB device** (`src/usb.rs`) starts once the pair knows its serial number, and
 //!   runs the device, a reader, a writer and the `GetStatus` answer. The reader also takes
 //!   the P4's own updates (`src/update.rs`);
@@ -454,7 +455,8 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
 }
 
 /// Give [`Pair`] the time at its next deadline: announce the life it starts when the C6
-/// stays silent, and reset the C6 through `c6_en` when it asks.
+/// stays silent, reset the C6 through `c6_en` when it asks, and tell the host when a poll went
+/// unanswered.
 async fn radio_clock(shared: &Shared, mut c6_en: Output<'static>) -> ! {
     loop {
         let deadline = shared.pair.borrow().next_deadline_ms();
@@ -473,6 +475,7 @@ async fn radio_clock(shared: &Shared, mut c6_en: Output<'static>) -> ! {
                 Timer::after(C6_RESET_HOLD).await;
                 c6_en.set_high();
             }
+            PairEvent::RadioSilent => shared.push_fault(),
         }
     }
 }

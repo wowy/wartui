@@ -42,8 +42,8 @@ A C6 flashed from a build older than the update path sends a hello without an im
 P4 cannot update it and reports "radio predates bundled updates; flash it through the header
 once". Flash it as above.
 
-A C6 flashed from a build older than this frozen link cannot hear the P4, which reports "the radio
-coprocessor is not answering". Flash it as above. Later builds reach it over the link.
+A C6 not running this link cannot hear the P4, which reports "the radio coprocessor is not
+answering". Flash it as above, and every update after that reaches it over the link.
 
 ## Updates
 

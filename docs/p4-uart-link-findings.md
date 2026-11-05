@@ -153,6 +153,12 @@ build"), so zero loss here says little about the overlap case.
 700 batches/s, against a 358 KB/s drain. A single burst already peaks the queue above 90%. So a
 full overlap is expected to overflow the 96 KB queue and evict its oldest frames.
 
+- A backlog delays heartbeats, because they share the bulk ring with sightings. Inferred from the
+  arithmetic: above about 36 KB at the 358 KB/s drain, a heartbeat arrives more than 100 ms late
+  (`BEHIND_THE_AIR_US`), and the engine refuses it as an admin window. Measured: the host fell
+  behind by up to 268 ms in the burst runs, and `admin_windows_missed` read 0 in the two-node run.
+  It arises only under bursts.
+
 A burst load like this is a bench load. The agreed bar is real drive load, about 1.5 KB/s for
 20 nodes ([`batch-loss-findings.md`](batch-loss-findings.md) has the drive). The queue's margin
 under bursts is thin.

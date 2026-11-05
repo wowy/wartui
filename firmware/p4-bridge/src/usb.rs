@@ -228,6 +228,8 @@ async fn write_host<'d, D: UsbDriver<'d>>(
 async fn answer_status(shared: &Shared) -> ! {
     loop {
         shared.status_asked.wait().await;
+        shared.pair.borrow_mut().note_asked(crate::now_ms());
+        shared.deadline_set.signal(());
         shared.radio_status.reset();
         let up = shared.pair.borrow().bridges();
         if up && shared.push_down(&Down::GetRadioStatus) {

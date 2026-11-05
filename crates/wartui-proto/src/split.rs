@@ -34,6 +34,12 @@
 //! - **`Ready.image` is the P4's own image digest**, never the C6's: it is the image the host
 //!   updates over USB (`HostToBridge::Update`, which the P4 handles itself), and the bundle
 //!   decides the C6's.
+//! - **A C6 that stops answering polls is a fault.** One hung holding RTS parks the P4's writer,
+//!   while `Status` goes on answering with its last counters and an update stays
+//!   [`RadioState::Updating`]. A poll arms [`RADIO_SILENT_MS`] and any verified packet disarms it,
+//!   so only a C6 that is sending nothing faults ([`PairEvent::RadioSilent`]). A
+//!   [`RadioState::Mismatch`] gets no records, so its silence means nothing; `Waiting` and `Absent`
+//!   have their own faults, and an install has its resets.
 
 use core::fmt::Write;
 
@@ -58,6 +64,14 @@ pub const RADIO_WAIT_MS: u64 = 2_000;
 /// trial boot and the third rolls back, so a wait too short rolls back a good image that
 /// boots slowly.
 pub const INSTALL_WAIT_MS: u64 = 10_000;
+
+/// How long the P4 waits for any packet from the C6 after a host's poll before saying the radio
+/// has stopped answering.
+///
+/// It comfortably exceeds a sector's flash work and the update's
+/// [`REPLY_WAIT_MS`](crate::radio_link::update::REPLY_WAIT_MS), so a C6 busy updating never reads
+/// as hung.
+pub const RADIO_SILENT_MS: u64 = 12_000;
 
 /// What the P4 knows of its C6.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,6 +100,8 @@ pub enum PairEvent {
     NewLife,
     /// The C6 installed an update and has not said hello since: reset it.
     ResetRadio,
+    /// The C6 has not answered a poll within [`RADIO_SILENT_MS`]: tell the host.
+    RadioSilent,
 }
 
 /// Where a host command goes.
@@ -132,6 +148,10 @@ pub struct Pair {
     installed_at: Option<u64>,
     /// Resets since the install.
     resets: u32,
+    /// When a host's poll first went unanswered by any C6 packet.
+    asked_at: Option<u64>,
+    /// [`RADIO_SILENT_MS`] passed after `asked_at`, and no packet has arrived since.
+    silent: bool,
 }
 
 impl Pair {
@@ -165,6 +185,8 @@ impl Pair {
             progress: 0,
             installed_at: None,
             resets: 0,
+            asked_at: None,
+            silent: false,
         }
     }
 
@@ -208,6 +230,8 @@ impl Pair {
         };
         self.state = self.judge(hello);
         self.installed_at = None;
+        self.asked_at = None;
+        self.silent = false;
         self.hello_at_ms = now_ms;
         self.life_from_radio = running;
         // A new C6 life: counters from the last one no longer apply.
@@ -246,6 +270,8 @@ impl Pair {
         if matches!(self.state, RadioState::Updating(_)) {
             self.installed_at = Some(now_ms);
             self.resets = 0;
+            self.asked_at = None;
+            self.silent = false;
         }
     }
 
@@ -267,10 +293,41 @@ impl Pair {
         self.c6_seq = seq;
     }
 
+    /// The host polled at `now_ms`. Arms [`RADIO_SILENT_MS`], unless it is armed already or
+    /// the state answers for silence itself; see the module documentation.
+    pub fn note_asked(&mut self, now_ms: u64) {
+        if self.asked_at.is_none() && self.owes_answer() {
+            self.asked_at = Some(now_ms);
+        }
+    }
+
+    /// A verified packet arrived from the C6, of any kind.
+    pub fn note_heard(&mut self) {
+        self.asked_at = None;
+        self.silent = false;
+    }
+
+    /// Whether a poll going unanswered means the radio has stopped.
+    fn owes_answer(&self) -> bool {
+        self.installed_at.is_none()
+            && matches!(
+                self.state,
+                RadioState::Up(_) | RadioState::Stale(_) | RadioState::Updating(_)
+            )
+    }
+
+    /// When [`Pair::on_tick`] calls the radio silent, if it has not already.
+    fn silent_deadline_ms(&self) -> Option<u64> {
+        if self.silent || !self.owes_answer() {
+            return None;
+        }
+        self.asked_at.map(|at| at + RADIO_SILENT_MS)
+    }
+
     /// The P4 clock reached `now_ms`.
     ///
-    /// Gives up on a C6 silent since boot, and resets one silent since an install, at most
-    /// [`TRIAL_BOOTS`] times before giving up on it too.
+    /// Gives up on a C6 silent since boot, resets one silent since an install, at most
+    /// [`TRIAL_BOOTS`] times before giving up on it too, and reports one silent since a poll.
     pub fn on_tick(&mut self, now_ms: u64) -> PairEvent {
         if self.state == RadioState::Waiting && now_ms.saturating_sub(self.boot_ms) >= RADIO_WAIT_MS
         {
@@ -289,6 +346,10 @@ impl Pair {
             self.state = RadioState::Absent;
             return PairEvent::NewLife;
         }
+        if self.silent_deadline_ms().is_some_and(|at| now_ms >= at) {
+            self.silent = true;
+            return PairEvent::RadioSilent;
+        }
         PairEvent::None
     }
 
@@ -297,10 +358,7 @@ impl Pair {
     pub fn next_deadline_ms(&self) -> Option<u64> {
         let waiting = (self.state == RadioState::Waiting).then_some(self.boot_ms + RADIO_WAIT_MS);
         let installed = self.installed_at.map(|at| at + INSTALL_WAIT_MS);
-        match (waiting, installed) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        }
+        [waiting, installed, self.silent_deadline_ms()].into_iter().flatten().min()
     }
 
     /// The C6's current state.
@@ -389,6 +447,12 @@ impl Pair {
     pub fn fault(&self) -> Option<LogStr> {
         let mut text = LogStr::new();
         match &self.state {
+            RadioState::Up(_) | RadioState::Stale(_) | RadioState::Updating(_) if self.silent => {
+                let _ = write!(
+                    text,
+                    "the radio has stopped answering; wartui reset restarts the bridge"
+                );
+            }
             RadioState::Mismatch(hello) if hello.image.is_none() => {
                 let _ = write!(
                     text,
