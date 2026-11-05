@@ -8,7 +8,7 @@
 [package]
 name = "wartui-node-fw"
 description = "Wardriving node firmware for wartui. Sniffs, reports, and takes channel assignments."
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/wowy/wartui"
@@ -21,8 +21,8 @@ path = "src/main.rs"
 # `esp-radio` and `esp-rtos` allocate their task stacks and the Wi-Fi driver's
 # queues through their own copy's `HEAP`, which nothing here fills, so a second
 # copy is a second and empty heap. Held at the version `esp-radio` resolves;
-# `firmware/p4-radio/README.md` § "Dependency versions". Each `esp-*` crate names the only
-# chip, the ESP32-C5.
+# `firmware/p4-radio/README.md` § "Dependency versions". Each `esp-*` crate that takes a chip
+# feature names the only one, the ESP32-C5.
 esp-alloc = { version = "0.11.0", features = ["esp32c5"] }
 esp-bootloader-esp-idf = { version = "0.6.0", features = ["esp32c5"] }
 esp-hal = { version = "1.2.2", features = ["esp32c5", "unstable"] }

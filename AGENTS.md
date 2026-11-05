@@ -124,8 +124,8 @@ own.
   the bridge's reset-surviving phase marker (`phase`), the bridge's ESP-NOW half behind the `radio`
   feature (`radio`), the P4's u-blox I2C GPS reader behind the `gps` feature (`gps`), the supply and die readings a node's heartbeat carries (`health`), and
   updates on flash, the slot, the switch and the trial (`ota`).
-  A path dependency of each firmware, which names its chip feature there, and its own workspace
-  so its own clippy lints it; a firmware's clippy compiles it without linting it.
+  Each firmware depends on it by path and selects its chip feature in that dependency. It is its
+  own workspace so its own clippy lints it; a firmware's clippy compiles it without linting it.
 
 ### The engine/runtime split is load-bearing
 

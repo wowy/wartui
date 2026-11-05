@@ -17,8 +17,8 @@ path = "src/main.rs"
 
 [dependencies]
 # Every `esp-*` crate and `embassy-*` crate is held at the version `esp-radio` resolves,
-# for the reasons `README.md` § "Dependency versions" gives. Each names the only chip: the P4
-# boards carry an ESP32-C6.
+# for the reasons `README.md` § "Dependency versions" gives. Each that takes a chip feature
+# names the only one: the P4 boards carry an ESP32-C6.
 esp-alloc = { version = "0.11.0", features = ["esp32c6"] }
 esp-bootloader-esp-idf = { version = "0.6.0", features = ["esp32c6"] }
 esp-hal = { version = "1.2.2", features = ["esp32c6", "unstable"] }
