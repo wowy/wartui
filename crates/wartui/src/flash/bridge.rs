@@ -196,7 +196,6 @@ mod tests {
     use wartui_bridge::ports::{CH343_PID, CH343_VID, candidate, is_ch343};
 
     use super::super::testing::{BRIDGE_MAC, NODE_MAC, board};
-    use super::super::{P4_BRIDGE_APP, Source, normalize, release_asset, source};
     use super::*;
 
     fn named(given: &str) -> (&str, BridgeSpec) {
@@ -420,32 +419,5 @@ mod tests {
         remember_flashed(&path, BRIDGE_MAC, None).unwrap();
 
         assert_eq!(config::load(Some(&path)).unwrap().bridge.mac, Some(BRIDGE_MAC));
-    }
-
-    #[test]
-    fn flash_bridge_finds_release_asset_when_features_are_empty() {
-        let asset = |features: &[&str]| release_asset(&P4_BRIDGE_APP, features);
-        assert_eq!(asset(&[]), Some("wartui-p4-bridge-app-esp32p4.bin"));
-        assert_eq!(asset(&["esp32c6"]), None);
-    }
-
-    #[test]
-    fn flash_bridge_chooses_source_when_given_each_combination() {
-        let firmware = &P4_BRIDGE_APP;
-        let image = Path::new("fw.bin");
-        let dir = Path::new("fw");
-        let found = source(firmware, Some(image), None, &[], false, Some("v1")).unwrap();
-        assert_eq!(found, Source::File(image.to_owned()));
-        let found = source(firmware, None, Some(dir), &[], false, Some("v1")).unwrap();
-        assert_eq!(found, Source::Build(dir.to_owned()));
-        let found = source(firmware, None, None, &[], false, None).unwrap();
-        assert_eq!(found, Source::Build(normalize(Path::new(firmware.dir))));
-        let Source::Build(default) = found else { panic!("not a build") };
-        assert!(default.ends_with("firmware/p4-bridge"), "{}", default.display());
-        let found = source(firmware, None, None, &[], false, Some("v1")).unwrap();
-        let asset = "wartui-p4-bridge-app-esp32p4.bin";
-        assert_eq!(found, Source::Release { tag: "v1".to_owned(), asset });
-        let error = source(firmware, None, None, &["log"], false, Some("v1")).unwrap_err();
-        assert!(error.to_string().contains("no P4 bridge image"), "{error}");
     }
 }

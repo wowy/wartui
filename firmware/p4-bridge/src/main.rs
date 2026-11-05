@@ -449,10 +449,8 @@ async fn main(_spawner: embassy_executor::Spawner) -> ! {
     };
 
     let fw_version = ShortStr::try_from(env!("CARGO_PKG_VERSION")).unwrap_or_default();
-    let gps = true;
-    let pair =
-        Pair::new(own_mac, fw_version, cause, last_phase, boot.as_millis(), gps, RADIO_DIGEST)
-            .with_own_image(own_image);
+    let pair = Pair::new(own_mac, fw_version, cause, last_phase, boot.as_millis(), RADIO_DIGEST)
+        .with_own_image(own_image);
     let shared = Shared::new(pair, HOST_QUEUE.take(), DOWN_QUEUE.take(), updates);
     let link = RefCell::new(Link::new(boot, own_mac, cause, last_phase, HELD.take()));
     let pins = gps::Pins { i2c: peripherals.I2C0, sda: peripherals.GPIO7, scl: peripherals.GPIO8 };

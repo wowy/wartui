@@ -46,6 +46,7 @@
 //! arrived garbled.
 
 use std::io::{IsTerminal, Write};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
@@ -65,9 +66,22 @@ use wartui_proto::radio_link::update::{Failure, OP_MAX, Op, Sender, Stage};
 
 use super::bridge::Args;
 use super::{
-    Chip, P4_BRIDGE_APP, RELEASE_TAG, Source, app, check_image, espflash_present, obtain, read,
-    source,
+    Chip, Firmware, Local, RELEASE_TAG, Source, app, check_image, espflash_present, local_source,
+    obtain, read,
 };
+
+/// The P4 bridge's app-only image, which `flash-bridge` sends it over its link. Its merged image
+/// is for the first flash by hand (`firmware/p4-bridge/README.md`), so nothing here fetches it.
+const P4_BRIDGE_APP: Firmware = Firmware {
+    dir: concat!(env!("CARGO_MANIFEST_DIR"), "/../../firmware/p4-bridge"),
+    elf: "target/riscv32imafc-unknown-none-elf/release/wartui-p4-bridge-fw",
+    what: "P4 bridge",
+    partition_table: "partitions.csv",
+    merged: false,
+};
+
+/// The release asset of the P4 bridge's app image. Must match `release.yml`.
+const RELEASE_ASSET: &str = "wartui-p4-bridge-app-esp32p4.bin";
 
 /// The project name the P4 bridge's app descriptor carries: its crate's name.
 const PROJECT: &str = "wartui-p4-bridge-fw";
@@ -106,17 +120,19 @@ const QUIET: Duration = Duration::from_secs(5);
 /// The README section that covers a wired flash.
 pub(crate) const FIRST_FLASH: &str = "firmware/p4-bridge/README.md § \"First flash\"";
 
+/// Where the P4 bridge's image comes from: a file named, a build, or [`RELEASE_ASSET`] from the
+/// release tagged `tag`.
+fn source(image: Option<&Path>, firmware_dir: Option<&Path>, tag: Option<&str>) -> Source {
+    match local_source(&P4_BRIDGE_APP, image, firmware_dir, tag) {
+        Local::Chosen(found) => found,
+        Local::Release(tag) => Source::Release { tag: tag.to_owned(), asset: RELEASE_ASSET },
+    }
+}
+
 /// Update the P4 bridge on `board`, which answered as `expected`, over its link.
 pub(super) async fn run(args: &Args, board: &PortCandidate, expected: Mac) -> Result<()> {
     let label = mac::short(&expected).to_string();
-    let source = source(
-        &P4_BRIDGE_APP,
-        args.image.as_deref(),
-        args.firmware_dir.as_deref(),
-        &[],
-        false,
-        RELEASE_TAG,
-    )?;
+    let source = source(args.image.as_deref(), args.firmware_dir.as_deref(), RELEASE_TAG);
     println!("image  {}", source.describe(args.dry_run));
     if args.dry_run {
         if let Source::File(path) = &source {
@@ -129,7 +145,7 @@ pub(super) async fn run(args: &Args, board: &PortCandidate, expected: Mac) -> Re
         // It saves the built ELF as an image.
         espflash_present()?;
     }
-    let path = obtain(&P4_BRIDGE_APP, &source, &[], false, Chip::Esp32p4)?;
+    let path = obtain(&P4_BRIDGE_APP, &source, Chip::Esp32p4)?;
     let image = read(&path)?;
     check_app(&image).with_context(|| format!("checking {}", path.display()))?;
     let sha256: [u8; DIGEST_LEN] = Sha256::digest(&image).into();
@@ -608,12 +624,32 @@ impl ProgressLine {
 mod tests {
     use wartui_proto::link::{LogLevel, LogStr};
 
+    use super::super::normalize;
     use super::super::testing::{C6_HEADER, P4_APP_HEADER};
     use super::*;
 
     /// A P4 bridge app image behind the header espflash wrote for one, `len` bytes long.
     fn p4_app(project: &str, len: usize) -> Vec<u8> {
         app::fixture_with(P4_APP_HEADER, project, "0.1.0", len)
+    }
+
+    #[test]
+    fn flash_p4_chooses_source_when_given_each_combination() {
+        let image = Path::new("fw.bin");
+        let dir = Path::new("fw");
+        assert_eq!(source(Some(image), None, Some("v1")), Source::File(image.to_owned()));
+        assert_eq!(source(None, Some(dir), Some("v1")), Source::Build(dir.to_owned()));
+        let found = source(None, None, None);
+        assert_eq!(found, Source::Build(normalize(Path::new(P4_BRIDGE_APP.dir))));
+        let Source::Build(default) = found else { panic!("not a build") };
+        assert!(default.ends_with("firmware/p4-bridge"), "{}", default.display());
+    }
+
+    #[test]
+    fn flash_p4_fetches_release_asset_when_built_for_a_release() {
+        // The name `release.yml` publishes the P4 bridge's app image under.
+        let asset = "wartui-p4-bridge-app-esp32p4.bin";
+        assert_eq!(source(None, None, Some("v1")), Source::Release { tag: "v1".to_owned(), asset });
     }
 
     #[test]

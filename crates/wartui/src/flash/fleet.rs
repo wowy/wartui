@@ -34,8 +34,8 @@ use wartui_proto::mac::Mac;
 use super::boot::seen_booting;
 use super::{
     Chip, NODE, RELEASE_TAG, Ran, Skip, Source, check_image, chip_of, erase_otadata_args, espflash,
-    espflash_present, features, flash_args, judge_node_flash, judge_probe, mac_arg, name, obtain,
-    probe_args, read, reset_args, source,
+    espflash_present, feature_args, features, flash_args, judge_node_flash, judge_probe, mac_arg,
+    name, obtain_with, probe_args, read, reset_args, source,
 };
 
 #[derive(ClapArgs, Debug)]
@@ -91,11 +91,12 @@ pub fn run(args: Args) -> Result<()> {
         // A file named on the command line costs nothing to read, and a wrong one is worth
         // hearing about before the real run.
         if let Source::File(path) = &source {
-            check_image(&read(path)?, chip, NODE.merged)?;
+            check_image(&read(path)?, chip, NODE.firmware.merged)?;
         }
         None
     } else {
-        Some(obtain(&NODE, &source, &features, args.no_default_features, chip)?)
+        let cargo = feature_args(&features, args.no_default_features);
+        Some(obtain_with(&NODE.firmware, &source, chip, &cargo)?)
     };
 
     let found = discover_ports().context("listing serial ports")?;
@@ -351,9 +352,9 @@ mod tests {
         let found = source(&NODE, None, Some(dir), &c5, false, Some("v1")).unwrap();
         assert_eq!(found, Source::Build(dir.to_owned()));
         let found = source(&NODE, None, None, &c5, false, None).unwrap();
-        assert_eq!(found, Source::Build(normalize(Path::new(NODE.dir))));
+        assert_eq!(found, Source::Build(normalize(Path::new(NODE.firmware.dir))));
         let found = source(&NODE, None, None, &c5, false, Some("")).unwrap();
-        assert_eq!(found, Source::Build(normalize(Path::new(NODE.dir))));
+        assert_eq!(found, Source::Build(normalize(Path::new(NODE.firmware.dir))));
         let found = source(&NODE, None, None, &c5, false, Some("v1")).unwrap();
         let asset = "wartui-node-fw-esp32c5.bin";
         assert_eq!(found, Source::Release { tag: "v1".to_owned(), asset });

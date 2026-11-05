@@ -20,17 +20,12 @@ const BUNDLED: [u8; 32] = [0xB0; 32];
 const OTHER: [u8; 32] = [0x0C; 32];
 
 fn pair() -> Pair {
-    pair_with_gps(false)
-}
-
-fn pair_with_gps(gps: bool) -> Pair {
     Pair::new(
         OWN_MAC,
         "p4-1".try_into().unwrap(),
         ResetCause::PowerOn,
         LoopPhase::Unknown,
         0,
-        gps,
         BUNDLED,
     )
 }
@@ -350,14 +345,12 @@ fn pair_announces_radio_reset_cause_when_c6_restarts() {
 }
 
 #[test]
-fn pair_ready_reports_gps_when_built_with_it() {
-    for built in [true, false] {
-        let mut pair = pair_with_gps(built);
-        pair.on_hello(hello(900), 0, 1_000);
-        match pair.ready(1_000) {
-            Some(BridgeToHost::Ready { gps, .. }) => assert_eq!(gps, built),
-            other => panic!("not a Ready: {other:?}"),
-        }
+fn pair_ready_reports_gps_when_radio_is_up() {
+    let mut pair = pair();
+    pair.on_hello(hello(900), 0, 1_000);
+    match pair.ready(1_000) {
+        Some(BridgeToHost::Ready { gps, .. }) => assert!(gps),
+        other => panic!("not a Ready: {other:?}"),
     }
 }
 
