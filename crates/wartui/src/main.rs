@@ -621,30 +621,24 @@ mod tests {
 
     #[test]
     fn cli_parser_accepts_flash_bridge_when_given_image_and_dry_run() {
-        let cli = parse([
-            "wartui",
-            "flash-bridge",
-            "--features",
-            "gps",
-            "--image",
-            "fw.bin",
-            "--dry-run",
-        ])
-        .unwrap();
+        let cli = parse(["wartui", "flash-bridge", "--image", "fw.bin", "--dry-run"]).unwrap();
         let Some(Command::FlashBridge(args)) = cli.command else { panic!("not flash-bridge") };
-        assert_eq!(args.features.as_deref(), Some("gps"));
         assert_eq!(args.image.as_deref(), Some(std::path::Path::new("fw.bin")));
         assert!(args.dry_run);
         assert_eq!(args.bridge, None);
     }
 
     #[test]
-    fn cli_parser_accepts_flash_bridge_when_features_are_omitted() {
-        // A release image is built with the default features.
+    fn cli_parser_accepts_flash_bridge_when_given_bridge() {
         let cli = parse(["wartui", "flash-bridge", "--bridge", "71:F4"]).unwrap();
         let Some(Command::FlashBridge(args)) = cli.command else { panic!("not flash-bridge") };
-        assert_eq!(args.features, None);
         assert_eq!(args.bridge.as_deref(), Some("71:F4"));
+    }
+
+    #[test]
+    fn cli_parser_refuses_flash_bridge_when_given_features() {
+        // The P4 bridge firmware has no features to select.
+        assert!(parse(["wartui", "flash-bridge", "--features", "gps"]).is_err());
     }
 
     #[test]

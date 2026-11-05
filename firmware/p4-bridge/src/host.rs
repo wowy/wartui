@@ -192,11 +192,7 @@ fn local(cmd: &HostToBridge, shared: &Shared) {
         HostToBridge::Identify => shared.announce(),
         HostToBridge::GetStatus => shared.status_asked.signal(()),
         HostToBridge::Reset => reboot(),
-        #[cfg(feature = "gps")]
         HostToBridge::GpsWrite { bytes } => crate::gps::write(shared, bytes),
-        // No GPS port in this build.
-        #[cfg(not(feature = "gps"))]
-        HostToBridge::GpsWrite { .. } => {}
         HostToBridge::Update(op) => crate::update::take(op, shared),
         // `Pair::route` sends nothing else here.
         _ => {}

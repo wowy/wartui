@@ -23,8 +23,8 @@
 //! **A P4 bridge is updated over its own link** (`super::p4`): the cable the host already holds is
 //! the one that carries the update.
 //!
-//! There is no `--skip` or `--jobs`: there is one target. There is no `--no-default-features`
-//! either: a release image is built with the default features.
+//! There is no `--skip` or `--jobs`: there is one target. There is no `--features` either: the P4
+//! bridge firmware has none, so a build and a release image are the same.
 
 use std::path::{Path, PathBuf};
 
@@ -34,16 +34,11 @@ use wartui_bridge::ports::{PortCandidate, could_be_a_bridge};
 use wartui_bridge::serial::{BridgeSpec, Probed, discover_ports, probe_all};
 use wartui_proto::mac::{self, Mac};
 
-use super::{canonical, features, matches, p4};
+use super::{canonical, matches, p4};
 use crate::{config, spec};
 
 #[derive(ClapArgs, Debug)]
 pub struct Args {
-    /// The P4 bridge firmware's features, comma-separated, as `cargo build` takes them, for a
-    /// build from a firmware directory. A release publishes the default features only.
-    #[arg(long, value_name = "LIST")]
-    pub features: Option<String>,
-
     /// Which P4 bridge to flash, by path, by address or by the end of it (`71:F4`), which must
     /// match one P4 bridge that answers. It is not remembered. Without it, the bridge remembered
     /// in `wartui.toml`, which must answer; else, with none remembered, the only P4 bridge that
@@ -71,7 +66,6 @@ pub struct Args {
 }
 
 pub async fn run(args: Args) -> Result<()> {
-    let features = features(args.features.as_deref().unwrap_or_default());
     let named = args.bridge.as_deref().map(|given| (given, canonical(spec(given))));
     let found = discover_ports().context("listing serial ports")?;
     let ch343s: Vec<PortCandidate> =
@@ -83,7 +77,7 @@ pub async fn run(args: Args) -> Result<()> {
         named.as_ref().map(|(given, spec)| (*given, spec)),
         super::remembered_bridge(args.config.as_deref())?,
     )?;
-    p4::run(&args, &features, &board, expected).await?;
+    p4::run(&args, &board, expected).await?;
     if !args.dry_run {
         remember(&args, named.is_some(), &board, expected);
     }
@@ -202,7 +196,6 @@ mod tests {
     use wartui_bridge::ports::{CH343_PID, CH343_VID, candidate, is_ch343};
 
     use super::super::testing::{BRIDGE_MAC, NODE_MAC, board};
-    use super::super::{P4_BRIDGE_APP, Source, normalize, release_asset, source};
     use super::*;
 
     fn named(given: &str) -> (&str, BridgeSpec) {
@@ -426,33 +419,5 @@ mod tests {
         remember_flashed(&path, BRIDGE_MAC, None).unwrap();
 
         assert_eq!(config::load(Some(&path)).unwrap().bridge.mac, Some(BRIDGE_MAC));
-    }
-
-    #[test]
-    fn flash_bridge_finds_release_asset_when_features_are_default() {
-        let asset = |features: &[&str]| release_asset(&P4_BRIDGE_APP, features);
-        assert_eq!(asset(&[]), Some("wartui-p4-bridge-app-esp32p4.bin"));
-        assert_eq!(asset(&["esp32c6"]), None);
-        assert_eq!(asset(&["gps"]), None);
-    }
-
-    #[test]
-    fn flash_bridge_chooses_source_when_given_each_combination() {
-        let firmware = &P4_BRIDGE_APP;
-        let image = Path::new("fw.bin");
-        let dir = Path::new("fw");
-        let found = source(firmware, Some(image), None, &[], false, Some("v1")).unwrap();
-        assert_eq!(found, Source::File(image.to_owned()));
-        let found = source(firmware, None, Some(dir), &[], false, Some("v1")).unwrap();
-        assert_eq!(found, Source::Build(dir.to_owned()));
-        let found = source(firmware, None, None, &[], false, None).unwrap();
-        assert_eq!(found, Source::Build(normalize(Path::new(firmware.dir))));
-        let Source::Build(default) = found else { panic!("not a build") };
-        assert!(default.ends_with("firmware/p4-bridge"), "{}", default.display());
-        let found = source(firmware, None, None, &[], false, Some("v1")).unwrap();
-        let asset = "wartui-p4-bridge-app-esp32p4.bin";
-        assert_eq!(found, Source::Release { tag: "v1".to_owned(), asset });
-        let error = source(firmware, None, None, &["log"], false, Some("v1")).unwrap_err();
-        assert!(error.to_string().contains("no P4 bridge image"), "{error}");
     }
 }

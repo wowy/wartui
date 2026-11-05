@@ -135,8 +135,6 @@ pub struct Pair {
     own_cause: ResetCause,
     own_phase: LoopPhase,
     boot_ms: u64,
-    /// The P4 was built to read a GPS receiver.
-    gps: bool,
     /// The digest of the C6 image the P4 carries.
     bundled: [u8; DIGEST_LEN],
     /// The digest of the P4's own booted image, for `Ready`.
@@ -156,8 +154,7 @@ pub struct Pair {
 }
 
 impl Pair {
-    /// A pair that has heard nothing yet. `boot_ms` is the P4 clock at its start, `gps`
-    /// says whether the P4 was built to read a GPS receiver, which `Ready` reports, and
+    /// A pair that has heard nothing yet. `boot_ms` is the P4 clock at its start, and
     /// `bundled` is the digest of the C6 image the P4 carries.
     pub fn new(
         own_mac: Mac,
@@ -165,7 +162,6 @@ impl Pair {
         own_cause: ResetCause,
         own_phase: LoopPhase,
         boot_ms: u64,
-        gps: bool,
         bundled: [u8; DIGEST_LEN],
     ) -> Self {
         Self {
@@ -179,7 +175,6 @@ impl Pair {
             own_cause,
             own_phase,
             boot_ms,
-            gps,
             bundled,
             own_image: None,
             attempted: false,
@@ -431,7 +426,8 @@ impl Pair {
             last_phase,
             heap_free: hello.map_or(0, |hello| hello.heap_free),
             uptime_ms: self.uptime_ms(now_ms),
-            gps: self.gps,
+            // The P4 always reads its GPS receiver.
+            gps: true,
             radio: hello.map(|hello| RadioInfo {
                 chip: hello.chip,
                 mac: hello.mac,

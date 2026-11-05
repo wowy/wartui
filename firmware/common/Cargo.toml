@@ -40,7 +40,7 @@ esp32p4 = [
 # and bridges it.
 radio = ["dep:embassy-sync", "dep:esp-radio"]
 
-# A u-blox GPS receiver on I2C (`src/gps.rs`), for every bridge with one on its bus.
+# A u-blox GPS receiver on I2C (`src/gps.rs`), which the P4 bridge always reads.
 gps = ["dep:embassy-futures", "dep:embassy-sync", "dep:embassy-time"]
 
 # Updates on flash (`src/ota.rs`): the update slot, the switch and the trial, for the node,

@@ -17,12 +17,6 @@ path = "src/main.rs"
 test = false
 bench = false
 
-[features]
-default = ["gps"]
-# A u-blox receiver on I2C0, GPIO7 (SDA) and GPIO8 (SCL), passed through to the host. Off,
-# the bridge reports no GPS and never touches the bus.
-gps = ["wartui-firmware/gps"]
-
 [dependencies]
 esp-bootloader-esp-idf = { version = "0.6.0", features = ["esp32p4"] }
 esp-hal = { version = "1.2.2", features = ["esp32p4", "unstable"] }
@@ -37,9 +31,9 @@ embassy-sync = "0.8.0"
 embassy-time = "0.5.1"
 static_cell = "2.1.1"
 # The reset funnel, the reset cause and the phase marker, shared with the other
-# bridges, the updates on flash the node and the C6 use, and the GPS reader with `gps`.
-# No `radio`: the P4 has none.
-wartui-firmware = { path = "../common", features = ["esp32p4", "ota"] }
+# bridges, the updates on flash the node and the C6 use, and the GPS reader for a u-blox
+# receiver on I2C0, GPIO7 (SDA) and GPIO8 (SCL). No `radio`: the P4 has none.
+wartui-firmware = { path = "../common", features = ["esp32p4", "gps", "ota"] }
 wartui-proto = { path = "../../crates/wartui-proto" }
 
 # `build.rs` builds the C6's image, then reads the digest appended to it and hashes it.

@@ -25,7 +25,8 @@ use sha2::{Digest, Sha256};
 use wartui_proto::air::{Board, Version};
 
 use super::{
-    CHIP_ID_AT, Chip, HEADER_LEN, IMAGE_MAGIC, NODE_APP, RELEASE_TAG, Source, fetch, read, source,
+    CHIP_ID_AT, Chip, HEADER_LEN, IMAGE_MAGIC, NODE_APP, RELEASE_TAG, Source, feature_args, fetch,
+    read, source,
 };
 
 /// The largest image an app slot holds: `ota_0` and `ota_1` in `firmware/node/partitions.csv`.
@@ -240,7 +241,7 @@ pub fn obtain(board: Board, source: &Source) -> Result<AppImage> {
     let (Some(features), Some(chip)) = (features(board), chip(board)) else {
         bail!("no node firmware is built for {}", board_name(board));
     };
-    let image = load(&fetch(&NODE_APP, source, features, false, chip)?)?;
+    let image = load(&fetch(&NODE_APP.firmware, source, chip, &feature_args(features, false))?)?;
     ensure!(
         image.board == board,
         "the image built for {} says it is for {}",
